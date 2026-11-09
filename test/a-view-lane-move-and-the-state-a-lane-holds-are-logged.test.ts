@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
 import { pathToFileURL } from "node:url";
 import type { Clock } from "#src/lib/clock.js";
 import { createReadModelTicker, threadViews, type ReadModelView, type ReadModelWorkerMessage } from "#src/lib/read-model-worker.js";
-import { makeTempDir } from "#src/lib/tmp.js";
+import { onReadModelClose, readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";
 
 const proof = "test/a-view-lane-move-and-the-state-a-lane-holds-are-logged.test.ts";
 const intervalMs = 10 * 60_000;
@@ -18,8 +18,7 @@ async function until(done: () => boolean): Promise<void> {
 }
 
 test(`${proof}: the relay logs each move and counts units reclaimed at death and respawn`, async (t) => {
-  const dir = makeTempDir("lane-log-relay");
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const dir = readModelFixtureDir(t, "lane-log-relay").dir;
   const modulePath = join(dir, "worker.mjs");
   writeFileSync(modulePath, `import { parentPort, workerData } from "node:worker_threads";
 const lane = workerData.lane;
@@ -38,7 +37,7 @@ parentPort.on("message", (msg) => {
   const relayed: ReadModelWorkerMessage[] = [];
   const lanes = threadViews({ data: { stateDir: dir, instances: [], tickMs: 50, holder: "h" }, workerUrl: pathToFileURL(modulePath),
     log: (step, extra) => void logs.push({ step, extra }), relay: (msg) => void relayed.push(msg) });
-  t.after(() => lanes.close());
+  onReadModelClose(t, () => lanes.close());
   const rows = (step: string) => logs.filter((row) => row.step === step).map((row) => row.extra);
   const forwarded = () => relayed.flatMap((msg) => msg.type === "log" && msg.step === "fixture.lane" ? [msg.extra] : []);
   lanes.want("move", "");
@@ -69,8 +68,7 @@ parentPort.on("message", (msg) => {
 });
 
 test(`${proof}: held reports exclude owned and never-built units, age on cadence, and preserve state`, (t) => {
-  const dir = makeTempDir("lane-log-held");
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const dir = readModelFixtureDir(t, "lane-log-held").dir;
   mkdirSync(join(dir, "read-model"));
   writeFileSync(join(dir, "read-model", "switches.json"), JSON.stringify({ projector: "off", views: { measured: "shadow", unbuilt: "off", global: "shadow" } }));
   let ms = 0;
@@ -91,7 +89,7 @@ test(`${proof}: held reports exclude owned and never-built units, age on cadence
   const ticker = createReadModelTicker({ stateDir: dir, instances: ["core", "site"].map((name) => ({ name, ledgerDir: dir })), clock,
     views: [view, { ...view, name: "unbuilt" }, { name: "global", version: 1, materialize: () => [{ key: "", data: {}, sources: [] }] }],
     viewsOnly: true, lane: "fast", oracle: "off", post: (msg) => void posted.push(msg) });
-  t.after(() => void ticker.release());
+  onReadModelClose(t, () => void ticker.release());
   ticker.observe([]);
   const rows = () => posted.flatMap((msg) => msg.type === "log" && msg.step === "read_model.view_lane_held" ? [msg.extra] : []);
   ticker.tick();
@@ -133,8 +131,7 @@ test(`${proof}: held reports exclude owned and never-built units, age on cadence
 });
 
 test(`${proof}: the heavy lane reports a successful aggregate build after it moves back to fast`, (t) => {
-  const dir = makeTempDir("lane-log-heavy");
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const dir = readModelFixtureDir(t, "lane-log-heavy").dir;
   mkdirSync(join(dir, "read-model"));
   writeFileSync(join(dir, "read-model", "switches.json"), JSON.stringify({ views: { cheap: "shadow", empty: "shadow", broken: "shadow" } }));
   const posted: ReadModelWorkerMessage[] = [];
@@ -145,7 +142,7 @@ test(`${proof}: the heavy lane reports a successful aggregate build after it mov
       { name: "empty", version: 1, materialize: () => [] },
       { name: "broken", version: 1, materialize: () => { throw new Error("no build"); } },
     ], post: (msg) => void posted.push(msg) });
-  t.after(() => void ticker.release());
+  onReadModelClose(t, () => void ticker.release());
   ticker.observe([]);
   ticker.lane({ heavy: true, dueAt: 0 });
   ticker.tick();

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import fs, { appendFileSync, mkdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import fs, { appendFileSync, mkdirSync, utimesSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { setFlagsFromString } from "node:v8";
@@ -19,14 +19,13 @@ import { createTaskView, taskViewKey, type TaskViewData } from "#src/lib/task-vi
 import { swapThreadPlanParser, threadPlan } from "#src/lib/thread-plan.js";
 import { TASK_VIEW_NAME, createDemandBook } from "#src/lib/view-demand.js";
 import { acquireLease, type ReadModelDb } from "#src/lib/read-model-db.js";
-import { makeTempDir } from "#src/lib/tmp.js";
+import { onReadModelClose, readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";
 
 const T0 = Date.parse("2026-09-30T12:00:00.000Z");
 type TestCtx = { after: (fn: () => void) => void };
 
 function scratch(t: TestCtx): string {
-  const dir = makeTempDir("now-snapshot-once");
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const dir = readModelFixtureDir(t, "now-snapshot-once").dir;
   return dir;
 }
 
@@ -64,7 +63,7 @@ function store(t: TestCtx, home: string, name: string, clock: Clock): { name: st
   const ledgerDir = join(home, `ledger-${name}`);
   mkdirSync(ledgerDir, { recursive: true });
   const db = openProjectorReadModel(join(home, "read-model-home"), name, clock);
-  t.after(() => db.close());
+  onReadModelClose(t, () => db.close());
   const acquired = acquireLease(db, { clock, ttlMs: 1e12 });
   assert.ok(acquired.ok);
   const projector = createLedgerProjector({ ledgerDir, db, lease: acquired.lease, clock });
@@ -283,7 +282,7 @@ test("one parse of a plan file serves every caller until its stamp moves", (t) =
   const path = planFile(scratch(t), "first");
   let loads = 0;
   const prior = swapThreadPlanParser((p) => (loads++, loadPlanQuarantiningDuplicates(p)));
-  t.after(() => swapThreadPlanParser(prior));
+  onReadModelClose(t, () => swapThreadPlanParser(prior));
   const stamp = planStamp(path);
   const a = threadPlan(path);
   const b = threadPlan(path);
@@ -305,7 +304,7 @@ test("the now and task views read one shared parse of their plan", (t) => {
     read.plan.byId.get("W1-T1")!.title = "the shared parse";
     return read;
   });
-  t.after(() => swapThreadPlanParser(prior));
+  onReadModelClose(t, () => swapThreadPlanParser(prior));
   const marked = threadPlan(planPath);
   assert.equal(marked.byId.get("W1-T1")?.title, "the shared parse");
   const instance = { ...base.instances[0]!, planPath };

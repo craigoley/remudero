@@ -4,7 +4,6 @@ import { join } from "node:path";
 import type { AddressInfo } from "node:net";
 import { test } from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
-import { makeTempDir } from "../src/lib/tmp.js";
 import { createBoardSnapshotCache, createBoardSnapshotReader, boardObservationPath, boardSnapshotPath, boardOpenSnapshotPath } from "../src/lib/board-snapshot-cache.js";
 import { buildBatchedGithub } from "../src/lib/status.js";
 import { fixedClock } from "../src/lib/clock.js";
@@ -15,10 +14,10 @@ import { buildReadModelViewRoutes } from "../src/lib/views.js";
 import type { AnalyticsViewData } from "../src/lib/analytics-view.js";
 import { SPEC, violations } from "./helpers/openapi-strict.js";
 import { repairReceiptFields } from "../src/lib/repair-cost-evidence.js";
+import { onReadModelClose, readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";
 
 test("W1-T8684: default sources reach cached repository flow without request-time scans", async t => {
-  const root = makeTempDir("repository-flow-worker");
-  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const root = readModelFixtureDir(t, "repository-flow-worker").dir;
   const stateDir = join(root, "state");
   mkdirSync(join(stateDir, "read-model"), { recursive: true });
   const repository = "fixture/repo";
@@ -39,7 +38,7 @@ test("W1-T8684: default sources reach cached repository flow without request-tim
   writeFileSync(readModelSwitchesPath(stateDir), JSON.stringify({ views: { analytics: "serve" } }));
   const posted: ReadModelWorkerMessage[] = [];
   let onMessage: ((m: { type?: string }) => void) | undefined;
-  t.after(() => onMessage?.({ type: "stop" }));
+  onReadModelClose(t, () => onMessage?.({ type: "stop" }));
   runReadModelWorker({ on: (_event, run) => onMessage = run, postMessage: m => posted.push(m as ReadModelWorkerMessage), close() {} },
     { kind: "remudero-read-model", stateDir, instances: [{ name: "core", ledgerDir: stateDir, repo: repository }],
       tickMs: 20, signal: new SharedArrayBuffer(8), slowLane: { intervalMs: 60000 } });
@@ -63,7 +62,7 @@ test("W1-T8684: default sources reach cached repository flow without request-tim
   const server = createService({ tokens: { read: "r", write: "w" }, routes: buildReadModelViewRoutes({ legacy: [],
     readModelViews: ["analytics"], readModel: restarted }) });
   await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
-  t.after(() => { server.closeAllConnections(); server.close(); });
+  onReadModelClose(t, () => { server.closeAllConnections(); server.close(); });
   for (let i = 0; i < 2; i++) {
     const response = await fetch(`http://127.0.0.1:${(server.address() as AddressInfo).port}/v1/views/analytics`,
       { headers: { authorization: "Bearer r" } });
@@ -75,8 +74,7 @@ test("W1-T8684: default sources reach cached repository flow without request-tim
 });
 
 test("W1-T8912: default refresh persists PR observation for warm and cold cached reads", async t => {
-  const root = makeTempDir("repository-flow-observation");
-  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const root = readModelFixtureDir(t, "repository-flow-observation").dir;
   const stateDir = join(root, "state");
   mkdirSync(join(stateDir, "read-model"), { recursive: true });
   const repository = "fixture/observed";
@@ -120,7 +118,7 @@ test("W1-T8912: default refresh persists PR observation for warm and cold cached
   // Warm: the read-model worker's collector shares the reader that already held the stale clock.
   const posted: ReadModelWorkerMessage[] = [];
   let onMessage: ((m: { type?: string }) => void) | undefined;
-  t.after(() => onMessage?.({ type: "stop" }));
+  onReadModelClose(t, () => onMessage?.({ type: "stop" }));
   runReadModelWorker({ on: (_event, run) => onMessage = run, postMessage: m => posted.push(m as ReadModelWorkerMessage), close() {} },
     { kind: "remudero-read-model", stateDir, instances: [{ name: "core", ledgerDir: stateDir, repo: repository }],
       tickMs: 20, signal: new SharedArrayBuffer(8), slowLane: { intervalMs: 60000 } });
@@ -140,7 +138,7 @@ test("W1-T8912: default refresh persists PR observation for warm and cold cached
   const server = createService({ tokens: { read: "r", write: "w" }, routes: buildReadModelViewRoutes({ legacy: [],
     readModelViews: ["analytics"], readModel: restarted }) });
   await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
-  t.after(() => { server.closeAllConnections(); server.close(); });
+  onReadModelClose(t, () => { server.closeAllConnections(); server.close(); });
   const response = await fetch(`http://127.0.0.1:${(server.address() as AddressInfo).port}/v1/views/analytics`,
     { headers: { authorization: "Bearer r" } });
   assert.equal(response.status, 200);

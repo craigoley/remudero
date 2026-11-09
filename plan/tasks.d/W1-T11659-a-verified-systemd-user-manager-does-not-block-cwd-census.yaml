@@ -12,7 +12,7 @@
   plan_refs: [W1-T2952, W1-T10389, W1-T11623]
   files:
     - src/lib/process-cwd-census.ts
-    - test/ci/gates/a-verified-systemd-user-manager-does-not-block-cwd-census.test.ts
+    - test/ci/a-verified-systemd-user-manager-does-not-block-cwd-census.test.ts
   status: queued
   attempts: 0
   rationale: |
@@ -39,7 +39,9 @@
     Continue scanning every other PID after skipping the verified manager. A readable same-UID
     descendant whose cwd is under the owner path remains `occupied`; an inaccessible same-UID
     descendant remains `unknown` if its cwd cannot be attributed. Keep wall/entry bounds, foreign UID
-    handling, current unknown cases and occupied behavior unchanged. Add an auditable count for verified
+    handling, current unknown cases and occupied behavior unchanged.
+    A readable foreign-UID process keeps its existing skip behavior: an EACCES/EPERM cwd whose status Uid is readable and differs from the census owner is still counted in skippedForeign and the scan continues, unchanged by the manager classifier.
+    Add an auditable count for verified
     managers skipped, but never include command lines, cwd values or private paths in logs.
     The declared test folder is required by `rmd test-place`; mark the suite
     `@not-a-rule-suite: a process-cwd utility fixture, not a CI rule suite` because it does not test a CI
@@ -52,7 +54,7 @@
     `src/run-task.ts`, branch-claim policy, retry behavior, or PR #17229 directly.
   acceptance:
     - claim: "A verified per-user systemd manager is skipped, while a same-uid child under the owner path remains occupied and ambiguous near-matches remain unknown"
-      proof: "grep: the verified systemd user manager is skipped while same-uid children remain in the cwd census in test/ci/gates/a-verified-systemd-user-manager-does-not-block-cwd-census.test.ts"
+      proof: "unit test: test/ci/a-verified-systemd-user-manager-does-not-block-cwd-census.test.ts"
   falsifier: |
     Remove the exact manager identity classifier: the positive regression must again return unknown on
     the manager's EACCES/reached-init shape. Change any one of argv, PPID, cgroup, UID, or identity

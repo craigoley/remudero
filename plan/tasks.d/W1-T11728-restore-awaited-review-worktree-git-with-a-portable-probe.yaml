@@ -1,0 +1,90 @@
+- id: W1-T11728
+  title: Restore awaited review-worktree Git with a portable timer acknowledgment probe
+  repo: remudero
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 4.00
+  risk: high
+  band_meaning: span
+  origin: operator-approved S6 restoration after revert PR-17304, 2026-11-08
+  plan_refs: [W1-T11459, W1-T11341, W1-T11631, W1-T11727, W1-T100, W1-T147]
+  depends_on: [W1-T11727]
+  files: [src/lib/composition-root.ts, src/run-task.ts, src/lib/review-worktree-reclaim.ts, src/lib/sweep.ts, src/cli/commands/daemon.ts, src/lib/daemon.ts, src/cli/commands/review.ts, src/cli/commands/sweep.ts, test/daemon/a-fleet-store-on-an-exhausted-account-is-named-and-escalated.test.ts, test/daemon/the-daemon-review-worktree-git-runs-off-the-loop.test.ts, test/the-reviewer-reads-a-sha-it-has-not-fetched.test.ts, test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts, test/run-task-git-calls-into-a-worker-worktree-go-through-the-leaf.test.ts, test/every-host-git-spawn-into-a-worktree-uses-the-hardened-leaf.test.ts, test/run-task-s-widened-git-sites-are-classified-and-converted.test.ts, test/review-status-pending.test.ts]
+  priority: 4
+  status: queued
+  # backlog gardener: band=4 evidence=93cbca35bd597c2b
+  # backlog gardener: placed=2026-11-08T15:36:33.922Z
+  attempts: 0
+  rationale: |
+    S6 PR-17260 merged at b893e32d with 66 successful and 15 skipped checks.
+    PR-17304 subsequently reverted it at c5ab331b after the health monitor named
+    it during reviewer-regression-e04374dbe054. That attribution remains unproven:
+    the recorded reviewer has a concrete OAuth failure misclassified as success,
+    and the same semantic-incomplete reason recurs under revert-labelled code.
+    W1-T11727 isolates that independently evidenced classification defect first.
+    The original CPU evidence still names synchronous review materialization,
+    temporary-index Git and stranded-worktree removal inside loop holds.
+    The revert removes the runtime regression and async exports from main.
+    Private 8da164823d13 preserves an unpublished F-only timer-ack improvement;
+    production/script/package blobs match the original public implementation.
+    Its actual runtime selects the source module and three async exports; the
+    first measured Git child is config --list --show-scope --null --no-includes.
+    Qualification and all 138 original assertion lines are preserved as history,
+    not transferable current-head evidence. A controlled delayed-parent old-window
+    red/new-ack green pair proves a false-negative class, not the historical cause.
+    Evidence: Remudero-notes/sol/S6-final-merged-receipt.json,
+    S6-fleet-reconciled-runtime-provenance.json and S6-fleet-feature-candidate.patch.
+    W1-T100 owns the earlier general sweep wiring, not these measured Git holds;
+    W1-T147 is a separate operator chaos drill that this task neither builds nor runs.
+    Current main and eight open heads were subject-swept with positive controls.
+    The restored fixture's exact imports independently compute test/daemon (low).
+  design: |
+    Reintroduce the approved S6 async Git design against CURRENT main, preserving
+    every later independent change, including W1-T11631 GitHub admission and the
+    W1-T11727 error classification. Do not copy stale whole-file snapshots.
+    Share ordered steps between synchronous one-shot exports and async daemon
+    bindings using the maintained hardened async Git leaf. Await readiness before
+    consumers read a checkout; await removal before releasing its hold/reusing its
+    path. Thread results through daemon, sweep, plan/recovery and review adapters,
+    retaining owner guards, failure/catch behavior and disposal ordering.
+    Restore the 138 original fixture assertions, without weakened inputs, expected
+    values, timeouts, skips or exclusions. Include the private timer-ack fixture:
+    record actual module resolution, selected exports and each Git child; keep a
+    child live until its parent's actual timer acknowledgment and preserve real
+    Git arguments, output and exit result. Derive its watchdog from the existing
+    hardened leaf deadline, never a new product threshold. Expiry must fail.
+    Add a contained delayed-parent-timer case to the same fixture. An old fixed
+    shim window must fail that case while the acknowledgment version passes;
+    no live-process signals, production delay or provider call is part of it.
+    Preserve all census populations/positive controls and tighten exact counts
+    only for the removed synchronous sites; add no exclusion or raised ceiling.
+    The existing fleet-store test may only switch its type-only RunResult import
+    to the owning module; retain the Root export contract in the restored fixture.
+    Existing review ordering tests may only require awaited fetch/materialization
+    spelling while retaining every original order assertion and fixture.
+  acceptance:
+    - claim: Restored daemon materialization, temporary-index preservation and stranded removal yield during each measured Git child and preserve readiness, cleanup and hold ordering
+      proof: "grep: W1-T11728 criterion 1 in test/daemon/the-daemon-review-worktree-git-runs-off-the-loop.test.ts"
+    - claim: The Git loop probe waits for its actual deliberately delayed parent timer and fails with the old fixed-window shim
+      proof: "grep: W1-T11728 criterion 2 in test/daemon/the-daemon-review-worktree-git-runs-off-the-loop.test.ts"
+  note: |
+    Human approved the refreshed restoration scope and a NEW combined follow-up
+    cap of $6, split $2 W1-T11727 and $4 here, including Azure review/fix activity.
+    Do not relabel subscription notional usage as an invoice or available cash.
+    Filing merge and dependency merge precede source build. Refresh exact owner,
+    merged credit, scope history, full subject and runnable-selector evidence.
+    Keep exactly one builder and preserve active fleet repair rounds. Record each
+    decision in the PR body. Require new exact-tree semantic falsifiers, physical
+    caller/census suites, source-positive mapped coverage, default preflight,
+    ordinary first-push author invocation, complete hosted/native gates and a
+    separately observed runtime-adoption result. No manual merge/arm/approve,
+    cap reset, health-state edit, runtime install/restart, credential or deployment
+    mutation. Azure review is authorized; other runtime writes remain held.
+  falsifier: |
+    Replace each async daemon binding with its synchronous counterpart, or remove
+    await at readiness/removal adapters: the original per-child heartbeat and
+    ordering/hold assertions must fail. Replace only the acknowledgment shim with
+    the old fixed window: the deliberately delayed-timer test fails. Restore each
+    fix and obtain green without assertion changes. Missing exports/modules,
+    parser errors, fixture crashes, empty selections and timeouts are not enough.

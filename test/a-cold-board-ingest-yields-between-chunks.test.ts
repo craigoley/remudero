@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { appendFileSync, mkdirSync, rmSync } from "node:fs";
+import { appendFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { canonicalProjection, createBoardProjection, type BoardProjection } from "#src/lib/board-projection.js";
@@ -9,7 +9,7 @@ import { createNowView, type NowViewContext, type NowViewOptions } from "#src/li
 import type { Plan, Task } from "#src/lib/plan.js";
 import { acquireLease, type ReadModelDb, type ReadModelStatement } from "#src/lib/read-model-db.js";
 import type { GitHub } from "#src/lib/status.js";
-import { makeTempDir } from "#src/lib/tmp.js";
+import { onReadModelClose, readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";
 
 const T0 = Date.parse("2026-10-06T08:00:00.000Z");
 const IDS = ["W1-T1", "W1-T2", "W1-T3", "W1-T4", "W1-T5", "W1-T6"];
@@ -70,12 +70,11 @@ interface Store {
 
 /** A store whose fact table holds every row of {@link seedRows}; `reads` counts what each fact read returned. */
 function store(t: TestCtx): Store {
-  const dir = makeTempDir("cold-board");
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const dir = readModelFixtureDir(t, "cold-board").dir;
   const clock = handClock();
   clock.set(T0 + 30_000);
   const raw = openProjectorReadModel(join(dir, "home"), "core", clock);
-  t.after(() => raw.close());
+  onReadModelClose(t, () => raw.close());
   const got = acquireLease(raw, { clock, ttlMs: 1e12 });
   assert.ok(got.ok);
   const ledgerDir = join(dir, "core", "state");

@@ -1,0 +1,21 @@
+id: fb-1794159828278-e81fb6
+ts: 2026-11-08T17:43:48.279Z
+raw: "Observed at 2026-11-08: progress-watchdog returned
+  IDLE/openPrCount=0/openPrCountSource=full_pass while positive control PR
+  #17414 was open on head 42741f2c31842af1599206d823b9d70a46e91992 (all required
+  checks green; human plan gate still pending). This matches the documented
+  W1-T9702 limitation: a full-pass snapshot can be zero while a PR opens
+  afterward, and the watchdog text reports no current open PRs. Please triage a
+  bounded observation proposal for a live PR census or explicit stale/unknown
+  count state, with the PR API positive control, exact full-pass timestamp, and
+  fail-closed behavior when census is unavailable. Do not infer a fleet-wide
+  root cause or weaken any merge gate."
+attachments: []
+origin: cli
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

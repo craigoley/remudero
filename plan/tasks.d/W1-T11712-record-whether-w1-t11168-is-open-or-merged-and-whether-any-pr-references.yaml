@@ -5,7 +5,10 @@
   type: recon
   verify: auto
   risk: low
+  priority: 4
   status: queued
+  # backlog gardener: band=4 evidence=ae09ca9277b64410
+  # backlog gardener: placed=2026-11-08T12:50:02.124Z
   attempts: 0
   files:
     - plan/tasks.d/W1-T11169-a-dead-daemons-fix-seed-stays-settled-across-later-boots.yaml

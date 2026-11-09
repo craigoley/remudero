@@ -11,7 +11,7 @@ import { fixedClock } from "#src/lib/clock.js";
 import { dailyDateAt, dailyWindow, nextDailyDue, resolveDailyDate, shiftDailyDate } from "#src/lib/daily-progress-calendar.js";
 import { dailyProgressDayKey, dailyProgressStorePath, prepareDailyProgressPublication, readDailyProgressManifest, readDailyProgressRevision, type DailyProgressRecord } from "#src/lib/daily-progress-store.js";
 import { acquireLease, openReadModel } from "#src/lib/read-model-db.js";
-import { withTempDir } from "#src/lib/tmp.js";
+import { readModelFixtureDir, type ReadModelFixtureTestScope } from "#test/helpers/read-model-fixture-dir.js";
 import { boardClosedCollectionPath, boardClosedRowsDigest, createBoardSnapshotCache, readBoardClosedCollectionReceipt } from "#src/lib/board-snapshot-cache.js";
 import { buildBatchedGithub } from "#src/lib/status.js";
 import { collectDailyProgress, type DailyProgressCollectionConfig } from "#src/lib/daily-progress-collector.js";
@@ -20,6 +20,11 @@ import { admitStaticWork, readMemoryHeadroom, readVmStat, resolveTestSlotDir, TE
 import { SLOW_LANE_HEAP_MB } from "#src/lib/read-model-slow-lane.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 import { writeLedger } from "#test/helpers/ledger-fixture.js";
+
+/** W1-T11411: the root belongs to the test's read-model fixture, so its databases close and the diagnostic publisher flushes before it is removed. */
+async function withReadModelRoot<T>(t: ReadModelFixtureTestScope, kind: string, run: (root: string) => Promise<T>): Promise<T> {
+  return run(readModelFixtureDir(t, kind).dir);
+}
 
 function record(size = 205): DailyProgressRecord {
   const window = dailyWindow("2026-11-01");
@@ -66,8 +71,8 @@ test("daily progress uses calendar days across DST and midnight", () => {
   assert.throws(() => dailyWindow("2026-11-01", "Not/A_Zone"), RangeError);
 });
 
-test("daily progress retains complete history and immutable late corrections", async () => {
-  await withTempDir("daily-progress-history", async root => {
+test("daily progress retains complete history and immutable late corrections", async (t) => {
+  await withReadModelRoot(t, "daily-progress-history", async root => {
     let db = openReadModel({ stateDir: root, instance: "proof", schemaVersion: 1 });
     try {
       const clock = fixedClock(Date.parse("2026-11-02T06:00:00Z")), got = acquireLease(db, { holder: "first", clock });
@@ -128,8 +133,8 @@ test("daily progress retains complete history and immutable late corrections", a
   });
 });
 
-test("daily progress treats the first closing pass as completion rather than a late correction", async () => {
-  await withTempDir("daily-first-closing", async root => {
+test("daily progress treats the first closing pass as completion rather than a late correction", async (t) => {
+  await withReadModelRoot(t, "daily-first-closing", async root => {
     const db = openReadModel({ stateDir: root, instance: "proof", schemaVersion: 1 });
     try {
       const got = acquireLease(db); assert.ok(got.ok); if (!got.ok) return;
@@ -147,8 +152,8 @@ test("daily progress treats the first closing pass as completion rather than a l
   });
 });
 
-test("daily history refuses real filesystem failures and preserves corrupt evidence", async () => {
-  await withTempDir("daily-progress-failure", async root => {
+test("daily history refuses real filesystem failures and preserves corrupt evidence", async (t) => {
+  await withReadModelRoot(t, "daily-progress-failure", async root => {
     const db = openReadModel({ stateDir: root, instance: "proof", schemaVersion: 1 });
     try {
       const got = acquireLease(db); assert.ok(got.ok); if (!got.ok) return;
@@ -165,8 +170,8 @@ test("daily history refuses real filesystem failures and preserves corrupt evide
   });
 });
 
-test("daily first publication can abandon staged evidence without blocking its successor", async () => {
-  await withTempDir("daily-abandoned-stage", async root => {
+test("daily first publication can abandon staged evidence without blocking its successor", async (t) => {
+  await withReadModelRoot(t, "daily-abandoned-stage", async root => {
     const db = openReadModel({ stateDir: root, instance: "proof", schemaVersion: 1 });
     try {
       const abandoned = prepareDailyProgressPublication(root, [record(205)], []);
@@ -180,8 +185,8 @@ test("daily first publication can abandon staged evidence without blocking its s
   });
 });
 
-test("daily publication serializes independent projector databases and releases refused writers", async () => {
-  await withTempDir("daily-publication-serialization", async root => {
+test("daily publication serializes independent projector databases and releases refused writers", async (t) => {
+  await withReadModelRoot(t, "daily-publication-serialization", async root => {
     const first = openReadModel({ stateDir: root, instance: "first-generation", schemaVersion: 1 });
     const second = openReadModel({ stateDir: root, instance: "second-generation", schemaVersion: 1 });
     try {
@@ -200,8 +205,8 @@ test("daily publication serializes independent projector databases and releases 
   });
 });
 
-test("daily PR source records complete truncated and failed attempts separately from saved rows", async () => {
-  await withTempDir("daily-source-receipts", async root => {
+test("daily PR source records complete truncated and failed attempts separately from saved rows", async (t) => {
+  await withReadModelRoot(t, "daily-source-receipts", async root => {
     const cache = createBoardSnapshotCache(root, "acme", "app", { clock: fixedClock(Date.parse("2026-11-02T06:00:00Z")) });
     assert.ok(cache.recordClosedAttempt, "the production snapshot cache must expose collection receipts");
     const rows = [{ number: 1, url: "https://github.com/acme/app/pull/1", state: "MERGED", headRefName: "run-W1-T1-1234567890123", headRefOid: "a".repeat(40),
@@ -220,8 +225,8 @@ test("daily PR source records complete truncated and failed attempts separately 
   });
 });
 
-test("daily collection receipts are reached by the normal synchronous PR gateway", async () => {
-  await withTempDir("daily-gateway-receipts", async root => {
+test("daily collection receipts are reached by the normal synchronous PR gateway", async (t) => {
+  await withReadModelRoot(t, "daily-gateway-receipts", async root => {
     let now = Date.parse("2026-11-02T06:00:00Z"), failed = false;
     const clock = { now: () => now, iso: () => fixedClock(now).iso(), date: () => fixedClock(now).date() };
     const cache = createBoardSnapshotCache(root, "acme", "app", { clock });
@@ -243,8 +248,8 @@ test("daily collection receipts are reached by the normal synchronous PR gateway
   });
 });
 
-test("daily source receipt IO failures stay unavailable and preserve source data", async () => {
-  await withTempDir("daily-source-io", async root => {
+test("daily source receipt IO failures stay unavailable and preserve source data", async (t) => {
+  await withReadModelRoot(t, "daily-source-io", async root => {
     const missing = readBoardClosedCollectionReceipt(root, "acme", "app", []);
     assert.equal(missing.ok, false); if (!missing.ok) assert.match(missing.reason, /unavailable/);
     const logs: string[] = [];
@@ -258,8 +263,8 @@ test("daily source receipt IO failures stay unavailable and preserve source data
   });
 });
 
-test("daily source receipts follow the real background PR collector on success and transport failure", { timeout: 30_000 }, async () => {
-  await withTempDir("daily-background-receipts", async root => {
+test("daily source receipts follow the real background PR collector on success and transport failure", { timeout: 30_000 }, async (t) => {
+  await withReadModelRoot(t, "daily-background-receipts", async root => {
     let now = Date.parse("2026-11-02T06:00:00Z");
     const clock = { now: () => now, iso: () => fixedClock(now).iso(), date: () => fixedClock(now).date() };
     const ghBin = join(root, "fixture-gh"), failed = join(root, "offline");
@@ -290,10 +295,10 @@ test("daily source receipts follow the real background PR collector on success a
 });
 
 
-test("daily retained history refuses a named pipe without blocking its reader", async () => {
+test("daily retained history refuses a named pipe without blocking its reader", async (t) => {
   const { spawnSync } = await import("node:child_process"), { pathToFileURL } = await import("node:url");
   const { repoRoot } = await import("#test/helpers/repo-root.js");
-  await withTempDir("daily-history-pipe", async root => {
+  await withReadModelRoot(t, "daily-history-pipe", async root => {
     const path = join(dailyProgressStorePath(root), "manifest.json"); mkdirSync(dailyProgressStorePath(root), { recursive: true });
     const fifo = spawnSync("mkfifo", [path], { encoding: "utf8" }); assert.equal(fifo.status, 0, fifo.stderr);
     const moduleUrl = pathToFileURL(join(repoRoot(), "src", "lib", "daily-progress-store.ts")).href;
@@ -342,8 +347,8 @@ async function collectActivity(config: DailyProgressCollectionConfig) {
   return readDailyProgressRevision(config.stateDir, manifest.days[key]!);
 }
 
-test("daily activity preserves original fields and complete totals across ledger forms", async () => {
-  await withTempDir("daily-activity-population", async root => {
+test("daily activity preserves original fields and complete totals across ledger forms", async (t) => {
+  await withReadModelRoot(t, "daily-activity-population", async root => {
     const config = activityFixture(root), payload = "private payload".repeat(4096);
     const rows = [activityRow("gzip", payload), activityRow("plain", payload), activityRow("live", payload)];
     const populations = rows.map(row => [
@@ -385,8 +390,8 @@ function* activityVariants(count: number): Generator<string> {
   }
 }
 
-test("Daily progress activity preserves replay deduplication and source gaps: exact raw replay accounting preserves the pre-reconciliation cap and prior publication", async () => {
-  await withTempDir("daily-replay-cap", async root => {
+test("Daily progress activity preserves replay deduplication and source gaps: exact raw replay accounting preserves the pre-reconciliation cap and prior publication", async (t) => {
+  await withReadModelRoot(t, "daily-replay-cap", async root => {
     const config = activityFixture(root), isolated = improvementEffectNamespaceDir(config.stateDir, "acme/app", "core");
     mkdirSync(isolated, { recursive: true });
     // Stream exact raw variants: reserialization would obscure whitespace replay evidence.
@@ -415,8 +420,8 @@ test("Daily progress activity preserves replay deduplication and source gaps: ex
   });
 });
 
-test("Daily progress activity preserves replay deduplication and source gaps: activity source gaps preserve malformed replay audit and availability", async () => {
-  await withTempDir("daily-source-gaps", async root => {
+test("Daily progress activity preserves replay deduplication and source gaps: activity source gaps preserve malformed replay audit and availability", async (t) => {
+  await withReadModelRoot(t, "daily-source-gaps", async root => {
     const config = activityFixture(root), row = JSON.stringify(activityRow("positive")) + "\n";
     writeFileSync(join(config.stateDir, "ledger.2026-11-01.ndjson.gz"), gzipSync("bad archive\n" + row));
     writeFileSync(join(config.stateDir, "ledger.2026-11-02.ndjson.gz"), "corrupt gzip");
@@ -493,7 +498,7 @@ test("Daily heap proof supplies its Darwin reader and preserves admission refusa
 });
 
 test("Daily progress activity keeps full counts without retaining unrelated ledger rows; Daily progress activity preserves replay deduplication and source gaps; Daily progress collection stays inside the unchanged slow-lane heap", async t => {
-  await withTempDir("daily-heap-workload", async root => {
+  await withReadModelRoot(t, "daily-heap-workload", async root => {
     const config = activityFixture(root), payload = "x".repeat(64 * 1024), selected = 6_000, unrelated = 18_000;
     const expectedIds: string[] = [];
     // Reuse compressed fixture members; native decompression still reads every complete payload.

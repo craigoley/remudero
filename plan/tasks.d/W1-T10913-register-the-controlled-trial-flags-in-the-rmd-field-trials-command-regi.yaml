@@ -7,10 +7,10 @@
   verify: auto
   risk: high
   band_meaning: span
-  priority: 4
+  priority: 2
   status: queued
-  # backlog gardener: band=4 evidence=9098d34c6e61b6f7
-  # backlog gardener: placed=2026-10-28T13:56:49.080Z
+  # backlog gardener: band=2 evidence=b191abe3b8b8c371
+  # backlog gardener: placed=2026-11-08T22:31:49.721Z
   attempts: 0
   files:
     - src/run-task.ts

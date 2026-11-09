@@ -1,0 +1,51 @@
+- id: W1-T11606
+  title: A head whose required ci-gate has not registered yet reads pending, not green, so neither the sweep nor the review lane tries a direct merge GitHub refuses with HTTP 405 "ci-gate is expected"
+  repo: remudero
+  depends_on: []
+  priority: 0.5
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # tightens the shared checksState reading; a missing required context only ever moves green to pending
+  band_meaning: blast-radius
+  origin: operator-session#merge-latency-2026-11-07
+  plan_refs:
+    - W1-T103
+    - W1-T6595
+    - W1-T11163
+  files:
+    - src/lib/sweep.ts
+    - test/open-prs-rest.test.ts
+    - test/review/a-required-check-that-has-not-registered-is-not-green.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: checksStateFromRollup reads pending, never green, when branch protection's required list names a context other than remudero-review that has no entry on the head, and green once every such context has registered and passed
+      proof: "grep: W1-T11606 criterion 1 in test/review/a-required-check-that-has-not-registered-is-not-green.test.ts"
+    - claim: A registered failing required context still reads red ahead of a missing one, an absent remudero-review is still not required of checksState, and an unread required list keeps its every-reported-context reading
+      proof: "grep: W1-T11606 criterion 2 in test/review/a-required-check-that-has-not-registered-is-not-green.test.ts"
+    - claim: readChecksGreenReviewedAtHead (the review lane's fresh head read for a blocked plan PR) answers false for a head where remudero-review and security-merge-policy passed but ci-gate has no check run
+      proof: "grep: W1-T11606 criterion 3 in test/review/a-required-check-that-has-not-registered-is-not-green.test.ts"
+  rationale: |
+    OBSERVED in the ledger, 2026-11-04 to 2026-11-07:
+    - 416 rows carry GitHub's "Required status check" refusal. 211 say ci-gate "is expected", 18 "is in progress", 4 "is queued", 2 "is failing".
+    - Every arm row is automerge.arm_failed with outcome direct-merge-failed: 87 from the review lane and 74 from the sweep, plus 74 sweep.disposed rows. They span 95 PRs.
+    - #17168 at 9550100 is one example. The sweep read "checks green" at 11:24:30Z with a 361 ms snapshot. The review lane's direct merge got 405 "ci-gate is expected" at 11:25:35Z, and the sweep's got the same at 11:28:28Z. The exact-head arm reader said checksGreen false and mergeable_state blocked at 11:27 and 11:28. The PR merged at 11:35:29Z, once that reader said green.
+    OBSERVED in the code:
+    - checksStateFromRollup (src/lib/sweep.ts) judges only the required contexts that have an entry on the head. It reads pending only when none of them has one.
+    - Branch protection requires remudero-review, ci-gate and security-merge-policy. This is the W1-T11163 fixture, measured on 2026-11-02.
+    - security-merge-policy is a commit status that posts early. ci-gate is ci.yml's last job, `needs:` every shard, so it has no check run until CI ends.
+    - So an early green security-merge-policy reads the head green. The view's mergeable disposition then hands W1-T6595's checksGreenReviewed to the plan-PR direct path, and W1-T11163's readChecksGreenReviewedAtHead answers true. Both bypass GitHub's own blocked and spend a REST merge GitHub refuses.
+    - The sweep's exact-head arm reader (readArmFacts) requires every required context, and it agreed with GitHub.
+  design: |
+    In checksStateFromRollup, when the required list is known, a required context other than remudero-review with no entry in the deduped gate sets pending. A registered red still returns red first. Both consumers named above read this one function, so no other change is needed.
+    test/open-prs-rest.test.ts pinned the old present-only reading as a FALSE green when a required status is dropped. That case now reads pending, which still differs from the honest red.
+    NOT IN SCOPE:
+    - the check-runs request shape (filter=latest, one page of 100), which 36 test files pin;
+    - the "is in progress", "is queued" and "is failing" 405s, which this premise does not explain;
+    - arm-auto-merge.ts, review.ts and the 405 classification.
+  note: |
+    Proof that counts: no automerge.arm_failed with error "ci-gate\" is expected" on a head whose sweep.disposed read checks green, once this reaches the engine.
+    reservation hand-off: run-unfiled-1794071228916 -> run-unfiled-1794071228916
+    Reserved with rmd next-task-id (W1-T11606 on run-unfiled-1794071228916). From the operator session's 2026-11-07 merge-latency audit (cause 7, about 469 PR-min).

@@ -1,0 +1,33 @@
+- id: W1-T11742
+  title: "A planner run (rmd plan --mode=create) that ends with no recognized verdict retains evidence, an owner and a retry/fallback or follow-up route instead of ending with no actor"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 60.00
+  rationale: "REPORTED: two `rmd plan --mode=create` attempts from the authorized writable operator checkout produced
+    no recognized verdict and no PR; all reserved IDs were released, and nothing durable recorded who owns the
+    outcome. Reference: PR #17217 recovery report (operator-local). This triage did not independently reproduce it."
+  design: |
+    When the planner finishes without a recognized verdict line, write a durable record carrying the run's evidence
+    (transcript/log pointer, reserved ids and their release), a named owner, and a route: one bounded retry, a
+    fallback, or a filed follow-up (needs-human issue with options) — so no-verdict never terminates actor-less.
+    EXPLICITLY NOT IN SCOPE: changing verdict grammar, gates or policy; the broker child fix (W1-T11741).
+  acceptance:
+    - claim: "a no-verdict planner outcome records evidence, owner and a route"
+      proof: "unit test: no-verdict planner outcome records evidence, owner and a route"
+    - claim: "the retry or follow-up is bounded and does not loop"
+      proof: "unit test: no-verdict retry and follow-up routes are bounded"
+  risk: high
+  band_meaning: span
+  band_rationale: "one invariant: the no-verdict path in plan-architect and its routing test are the same falsifier (test/plan/planner-no-verdict-routes-to-an-owner.test.ts), unsatisfiable piecewise"
+  origin: feedback#fb-1794149944233-e4c97f
+  plan_refs: ["§7B"]
+  files: [src/lib/plan-architect.ts, test/plan/planner-no-verdict-routes-to-an-owner.test.ts]
+  priority: 4
+  status: queued
+  # backlog gardener: band=4 evidence=3b73bc8e0efab92c
+  # backlog gardener: placed=2026-11-08T22:31:49.721Z
+  attempts: 0
+  note: "Separate scope from W1-T11741 per the feedback."

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { rmSync, writeFileSync } from "node:fs";
+import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { pathToFileURL } from "node:url";
@@ -7,22 +7,21 @@ import { acquireLease, withWriteTransaction } from "#src/lib/read-model-db.js";
 import { openProjectorReadModel } from "#src/lib/ledger-projector.js";
 import { createReadModelWorker, readModelBodyKey, type ReadModelWorkerHandle } from "#src/lib/read-model-worker.js";
 import { readModelWarmProbe } from "#src/lib/serve-generation.js";
-import { makeTempDir } from "#src/lib/tmp.js";
 import { trackWorkerThreads } from "#src/lib/worker-heaps.js";
+import { onReadModelClose, readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";
 
 function fixture(t: TestContext) {
-  const dir = makeTempDir("retired-standby-body");
+  const dir = readModelFixtureDir(t, "retired-standby-body").dir;
   const db = openProjectorReadModel(dir, "core");
   db.exec("CREATE TABLE view_body(view TEXT NOT NULL, key TEXT NOT NULL, version INTEGER NOT NULL, generation INTEGER NOT NULL, etag TEXT NOT NULL, body TEXT NOT NULL, PRIMARY KEY(view,key)) WITHOUT ROWID");
   const got = acquireLease(db);
   assert.ok(got.ok);
   const handles: ReadModelWorkerHandle[] = [];
   const threads = trackWorkerThreads();
-  t.after(async () => {
+  onReadModelClose(t, async () => {
     for (const handle of handles) handle.stop();
     await threads.stop();
     db.close();
-    rmSync(dir, { recursive: true, force: true });
   });
   const entry = (key: string, etag = key) => ({ view: "fixture", key, version: 1, generation: 1, etag,
     body: { view: "fixture", version: 1, generatedAt: new Date().toISOString(), asOf: null, stale: false, sources: [], data: etag } });

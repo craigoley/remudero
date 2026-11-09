@@ -1,39 +1,82 @@
 - id: W1-T10667
-  title: "THE FLOW GARDENER'S COSTLIEST UNOWNED BLOCKER — plan-proof-unrunnable:plan-only PR is red on ci-shard (<n>/<n>), lint-plan, remudero-review cost 4.29 PR-hours"
+  title: "THE FLOW GARDENER'S COSTLIEST UNOWNED BLOCKER — plan-proof-unrunnable:plan-only PR is red on ci-shard (<n>/<n>), lint-plan, remudero-review cost 4.29 PR-hours; the projected ledger row still says owner NONE because blockerFields never adopted W1-T10266's blockerOwner"
   repo: remudero
   depends_on: []
   type: implement
   verify: auto
-  risk: low
+  risk: high
   priority: 1.27
   # refusal-amendment (W1-T10667, run W1-T10667-1793723377515, 2026-11-03T17:19:39.474Z): the worker refused criterion 1 [outside-declared-files] — proposed widen-files: widen `files:` to cover the paths the change needs, or narrow the criteria to the declared files
   #   worker evidence: Clearing the `verify:human` admission failure without a person needs a new plan-repair remedy in `src/lib/sweep.ts`. The only in-scope change, owner `operator`, removes the immediate escalation and breaks the `W1-T8267` stall tests plus existing owner assertions.
-  #   this task is held from dispatch until its record changes; an Architect must make the change above
+  #   ADDRESSED (PLAN-clarify-1794156482742): criteria narrowed to the owner projection (no auto-clear, no sweep.ts), and `files:` widened to the two existing test files whose NONE assertions the change must update.
   status: queued
   attempts: 0
   author_class: machine
   origin: "flow-blocker:plan-proof-unrunnable:plan-only PR is red on ci-shard (<n>/<n>), lint-plan, remudero-review"
   files:
     - src/lib/pr-blocker.ts
-    - test/github/flow-plan-proof-unrunnable-plan-only-pr-is-red-on-ci-shard-n-n-lint-plan-remudero-rev.test.ts
+    - test/every-open-pr-names-one-blocker-and-its-owner.test.ts
+    - test/a-stalled-pr-stage-is-named-by-the-reason-it-kept-repeating.test.ts
+  design: |
+    ROOT CAUSE (measured repeat). W1-T10266 (merged) added `blockerOwner(blocker, planRepairCapable)`, which returns
+    `operator` for plan-proof-unrunnable when planRepairCapable is false. Nothing in production calls it. The ledger
+    projection is `blockerFields` (src/lib/pr-blocker.ts), called from runSweep in src/lib/sweep.ts, and
+    `blockerFields` still computes `blocker_owner` inline as `"NONE"` for this exact case. W1-T10266's test only checks
+    blockerOwner, so the `sweep.disposed` rows kept saying NONE. The flow gardener prices NONE as unowned and filed
+    this class again (W1-T10667 after W1-T10266).
+    CHANGE (src/lib/pr-blocker.ts only):
+    1. `blockerFields` sets `blocker_owner: blockerOwner(blocker, planRepairCapable)`. That single owner decision
+       now covers both the helper and the projected row. Every other blocker keeps its PR_BLOCKER_OWNERS entry
+       unchanged.
+    2. No change to src/lib/sweep.ts, DEFAULT_SWEEP_POLICY.stageBackstops, dispositions, admission,
+       approval, CI, retry, strike or merge gates.
+    TESTS:
+    3. Extend the existing "the final write distinguishes plan and metadata waits from own and base reds" test
+       in test/every-open-pr-names-one-blocker-and-its-owner.test.ts. For a red plan-only PR it asserts that the
+       written `sweep.disposed` row has `blocker` plan-proof-unrunnable, with `blocker_owner` `operator` when no
+       plan-repair lane can act and `plan-repair` when one can. It also asserts that `blockerFields(...).blocker_owner`
+       equals `blockerOwner(...)` for both values of planRepairCapable. For the incapable caller it asserts that the
+       disposition is unchanged (still `blocked-ambiguous`, not cleared or merged). In an actionable pass the
+       operator still receives exactly one escalation, made by the disposition.
+    4. In test/every-open-pr-names-one-blocker-and-its-owner.test.ts, change each place that locks this case to `"NONE"`
+       (the split-cases table, the blockerFields(…, false) assertion, the plan/metadata final-write table and the
+       capped-green incapable branch), the expected value becomes `"operator"`. The `other` case stays NONE.
+    5. test/a-stalled-pr-stage-is-named-by-the-reason-it-kept-repeating.test.ts: W1-T8267's "stalled at once" rule
+       is for blockers no one owns. This case is now owned by the operator, and stageBackstops has no
+       plan-proof-unrunnable entry. Do NOT add one, because that lives in sweep.ts. Keep every W1-T8267 `test(` title
+       verbatim, so W1-T8267's grep proofs still match. Re-point each fixture that used plan-proof-unrunnable as its
+       ownerless example to a blocker whose table owner is still NONE (`escalated` via a dispatch hold, or `other`
+       via unreadable reviewer evidence). Those tests then still prove that ownerless stages stall at once.
+    NON-GOALS: this does not clear PR #14215 or W1-T10431. W1-T10431 is verify:human and stays a human decision,
+    and nothing here makes a verify:human task auto-runnable. The success condition is that the row names who must
+    act. It is not that the PR is cleared without a person.
   acceptance:
-    - claim: "plan-proof-unrunnable:plan-only PR is red on ci-shard (<n>/<n>), lint-plan, remudero-review is cleared by its owner without manual intervention"
-      proof: "grep: test(\"W1-T10667: flow-plan-proof-unrunnable-plan-only-pr-is-red-on-ci-shard-n-n-lint-plan-remudero-rev clears without a person\" in test/github/flow-plan-proof-unrunnable-plan-only-pr-is-red-on-ci-shard-n-n-lint-plan-remudero-rev.test.ts"
-  note: "Filed by flow at rung 1; measure the cause's share of PR-hours after the build merges."
+    - claim: "blockerFields and the runSweep ledger projection use the same owner decision: a plan-repair lane when capable and the operator when incapable, without changing disposition or clearing the PR"
+      proof: "unit test: the final write distinguishes plan and metadata waits from own and base reds"
+    - claim: "the blocker-owner census expects operator, not NONE, for an incapable plan-proof-unrunnable row and keeps every other owner"
+      proof: "unit test: W1-T5537: one disposition splits into the blocker each PR actually waits on"
+    - claim: "W1-T8267's ownerless-stalls-at-once behaviour still holds, proven on a blocker whose owner remains NONE"
+      proof: "unit test: W1-T8267: an ownerless blocker is stalled at once"
+  note: "Filed by flow at rung 1; narrowed by PLAN-clarify-1794156482742 to the owner projection. Measure the cause's share of PR-hours after the build merges; NONE-priced episodes of this class should stop."
   rationale: |
     plan-proof-unrunnable:plan-only PR is red on ci-shard (<n>/<n>), lint-plan, remudero-review cost 4.29 PR-hours; owner NONE
     Owner NONE is absent.
     Source owner: src/lib/pr-blocker.ts. Top five PRs by observed hours, with original blocker reasons:
     - PR #14215: 4.38 PR-hours — plan-only PR is red on ci-shard (2/8), lint-plan, remudero-review — the code-fix lane cannot stage outside a plan filing, so no fix is dispatched; the plan violation needs a plan repair — its log names: W1-T10431 [machine-filing-admission] task W1-T10431 is not selectable by runnableCandidates under the current releasedIds: task W1-T10431 is verify:human — not auto-runnable by the proto-runner
+    PR #14215's blocker is an explicit human decision (W1-T10431 is verify:human). The right projection names the
+    operator. It must not invent an automatic remedy.
     Effect compares this cause's share of total PR-hours in equal windows before and after its build merge; a debit reopens one rung up.
+    Settled by lookup: is this already filed or already decided? -> W1-T10266 (merged) decided the owner is `operator` when no plan-repair lane can act, but it wired only blockerOwner. No other task fixes blockerFields, so W1-T10667 carries the repair and no duplicate task is filed (plan/tasks.d/W1-T10266-*.yaml; grep of blockerOwner in plan/).
+    Settled by lookup: why did the class recur after W1-T10266? -> src/lib/pr-blocker.ts blockerFields still emits `"NONE"` inline when planRepairCapable is false. blockerOwner has no production caller (its only callers are pr-blocker.ts and test/github/flow-plan-proof-unrunnable-plan-only-pr-is-red-on-ci-shard-n-n-lint-plan.test.ts), and sweep.ts calls blockerFields at both projection sites.
+    Settled by lookup: do existing tests lock NONE in? -> yes. test/every-open-pr-names-one-blocker-and-its-owner.test.ts does in the split-cases table, the blockerFields(…, false) assertion, the final-write table and the capped-green branch. test/a-stalled-pr-stage-is-named-by-the-reason-it-kept-repeating.test.ts does in "an ownerless blocker is stalled at once" and "an ownerless stage reuses an escalation made by its disposition". Both files are now in `files:`, which answers the outside-declared-files refusal.
+    Settled by lookup: does naming `operator` lose the stall report? -> for this class, yes. sweep.ts reportStuckStage stalls at once only when blocker_owner is "NONE", and DEFAULT_SWEEP_POLICY.stageBackstops has no plan-proof-unrunnable entry. The PR is still not left unattended: blocked-ambiguous still escalates through the disposition in an actionable pass (W1-T8267 test "reuses an escalation made by its disposition"), and plan-proof-unrunnable stays in SLO_CLIMBING_BLOCKERS, so the SLO ladder climbs whatever the owner (src/lib/pr-blocker.ts). sweep.ts is out of scope, so W1-T8267's fixtures move to a still-ownerless blocker and its titles stay.
+    Settled by lookup: should this auto-clear verify:human? -> no. W1-T10431 is verify:human, and admission, approval and gates are out of scope. The earlier "cleared by its owner without manual intervention" acceptance was wrong and is replaced by "names the responsible owner".
   risk_ruling:
-    verdict: "low"
+    verdict: "operator"
     action: proceed
-    confidence: 0.7
+    confidence: 1
     reasons:
-      - "The declared files are src/lib/pr-blocker.ts and a new test file under test/github/. Nothing in the description or files list indicates a touch to secrets, credentials, auth, deploy, merge policy, or data deletion."
-      - "The plan record describes a flow-gardener blocker-classification fix for a plan-only PR (#14215). It doesn't show a request for an operator-only decision. The cited log (W1-T10431 being verify:human) points to a plan-repair issue, which fits the stated source owner."
-      - "The family track record is 11 merged, 4 declined, with a Beta mean of 0.91. That is a reasonably good history. The change is flagged as machine-authored, but the PR must still pass CI and review."
-      - "The evidence shows only one cited PR, and the test file doesn't exist yet, which is expected for an unbuilt implement task. The acceptance is a grep for a test name, which is weak but verifiable. No ACTUAL CHANGE view was supplied, so this verdict rests on the description and the declared file list alone."
-    judged_at: "2026-11-03T12:26:09.432Z"
-    pin: "6750ce2fb15fa0925fe5f00cb3c8df22a7ad22ca8eedffafb32cb1699e828d93"
+      - "released by the operator with rmd approve"
+    judged_at: "2026-11-08T21:51:55.470Z"
+    pin: "a3ab9a6703e50b20ee0b69c4ac7758028203939cf139d30ee8e422e230029d21"
+    operator_release_pin: "2b488c306b4dc7d08268e58d8edf1dff63754b7badd08e31751f6006cf7289c4"
