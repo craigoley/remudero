@@ -1,0 +1,35 @@
+- id: W1-T11860
+  title: A plan-reconcile landing that cannot open its pull request fails with a bounded message that keeps its cause, instead of a 94,000-character cadence failure whose reason is at the far end
+  repo: remudero
+  depends_on: []
+  priority: 2
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: low # one concern: the length of the error text planReconcileLanding throws; which landings fail, and when, is unchanged
+  origin: operator-session#reconcile-gap-2026-11-09
+  plan_refs:
+    - W1-T9695
+    - W1-T11859
+  files:
+    - src/lib/feedback-landing.ts
+    - test/plan/a-refused-plan-reconcile-landing-reports-its-cause-in-bounded-text.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: A refused landing's thrown message is at most 1,000 characters, keeps the start of the refusal and its last 600 characters, and says how many characters it dropped
+      proof: "unit test: test/plan/a-refused-plan-reconcile-landing-reports-its-cause-in-bounded-text.test.ts"
+    - claim: A refusal already within the limit is thrown unchanged, and a landing that reported no error text still throws the existing fallback sentence
+      proof: "grep: W1-T11860 criterion 2 in test/plan/a-refused-plan-reconcile-landing-reports-its-cause-in-bounded-text.test.ts"
+  rationale: |
+    OBSERVED 2026-11-09 (ledger union): the 12 `measurement_cadence.run_failed` rows from 2026-11-03 to 2026-11-09 each carry the whole `gh pr create` command line in their error, including the pull-request body (93,961 characters in the 2026-11-08 row). The cause, "GraphQL: Body is too long (maximum is 65536 characters)", is the last 80 characters. Anyone who reads only the start of the row sees "pushed to <branch> but `gh pr create` failed" and no reason; the cause needs the whole row.
+    - `planReconcileLanding` in src/lib/feedback-landing.ts throws `landing.error` unmodified from `requireLanded`.
+  design: |
+    - `requireLanded` bounds the message it throws: at most 1,000 characters, made of the first 300, a marker naming the number of characters dropped, and the last 600 (a command-line failure ends with its cause). A message within 1,000 characters is untouched.
+    - NOT IN SCOPE: what the landing bridge records, how the failure is escalated, and the batch bound (W1-T11859).
+  falsifier: |
+    Throw the landing error unbounded: criterion 1 must see a message over 1,000 characters. Truncate from the tail instead of keeping it: criterion 1 must lose the cause text. Restore it and require both.
+  note: |
+    reservation hand-off: run-unfiled-1794228339000 -> run-unfiled-1794228339000
+    Filed with W1-T11859 from the same investigation; independent of it.

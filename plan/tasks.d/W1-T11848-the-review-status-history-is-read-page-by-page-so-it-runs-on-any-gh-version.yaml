@@ -1,0 +1,42 @@
+- id: W1-T11848
+  title: The review's commit-status and review-body history is read page by page with a plain page parameter, never with --slurp or --paginate, so a host-run rmd review no longer withholds its verdict on an older gh
+  repo: remudero
+  depends_on: []
+  priority: 0.4
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the review's required-status read path; it still fails closed as unreadable on any bad page, and no verdict rule changes
+  band_meaning: span
+  origin: operator ruling 2026-11-09 "File it and I hand-build it"
+  plan_refs:
+    - W1-T11443
+    - W1-T1208
+  files:
+    - src/lib/review.ts
+    - test/review/a-review-status-history-reads-pages-without-slurp-or-paginate.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: The status history of a head is read as one plain list per page (per_page=100 with a page number, newest first), never with the --slurp or --paginate flags, and reading stops at the first page shorter than 100
+      proof: "grep: W1-T11848 criterion 1 in test/review/a-review-status-history-reads-pages-without-slurp-or-paginate.test.ts"
+    - claim: A history that is still full at the page cap is refused as unreadable, never returned truncated, and a non-list page or a row without its context and state is unreadable with the existing reason
+      proof: "grep: W1-T11848 criterion 2 in test/review/a-review-status-history-reads-pages-without-slurp-or-paginate.test.ts"
+    - claim: The same-PR review bodies are read the same way and only when a remudero-review failure exists in the status history, and the rows keep their order across pages
+      proof: "grep: W1-T11848 criterion 3 in test/review/a-review-status-history-reads-pages-without-slurp-or-paginate.test.ts"
+    - claim: The verdict derived from a multi-page history equals the verdict derived from the same rows in one page, so the failure revision and the reproduced failures do not change
+      proof: "grep: W1-T11848 criterion 4 in test/review/a-review-status-history-reads-pages-without-slurp-or-paginate.test.ts"
+  rationale: |
+    OBSERVED 2026-11-09 on the Azure host: rmd review run from the host posted remudero-review=pending (WITHHELD) on craigoley/wreckterra#6 and logged "GitHub remudero-review status history unreadable: Command failed: gh api --paginate --slurp .../commits/<sha>/statuses?per_page=100 ... unknown flag: --slurp". Two host runs did the same (12:07Z and 12:10Z).
+    - Cause: readReviewStatusHistory (src/lib/review.ts) reads the history with `gh api --paginate --slurp` at two call sites (commit statuses, then PR reviews). That arrived on 2026-11-08 in #17156 (W1-T11443). `--slurp` needs gh 2.51; this fleet's operator host runs gh 2.45.0, and src/lib/escalate.ts already documents the trap and dropped --slurp in August (#2522). The daemon container has a newer gh, so only host runs fail, and they fail closed over the existing status.
+    - W1-T1208 ("gh flags the operator's gh does not have") exists as a guard but did not catch it, because the flag is passed as an array element to ghJsonAsync.
+    - Why page-by-page and not reassembly: bare --paginate prints concatenated arrays that are not one JSON document (escalate.ts needs splitConcatenatedJsonPages for it), and importing escalate.ts into review.ts risks an import cycle. Plain pages are ordinary JSON arrays that every gh version and the read broker's cache handle, with fresh: true as today.
+  design: |
+    Add a module-private helper in review.ts that reads an endpoint page by page: for page 1 up to REVIEW_HISTORY_MAX_PAGES (a declared constant, 10, so 1,000 rows, declared as a BACKSTOP), call readJson with ["api", `${endpoint}?per_page=100&page=${n}`] and { fresh: true }; require each page to be an array; concatenate in order; stop at the first page with fewer than 100 rows; if the last permitted page is still full, throw (the existing catch makes it unreadable). readReviewStatusHistory uses it for the commit statuses and, only when a remudero-review failure exists, for the PR reviews, replacing both `--paginate --slurp` calls. Remove rowsFromPaginatedApi if nothing else uses it. Keep every validation, the failure revision and reproducedReviewFailuresFromHistory unchanged. Import nothing new into review.ts.
+    NOT IN SCOPE: the other --slurp callers (backlog-gardener, comment-compression, fix-lane-gardener, github-posture; they run in the container), upgrading the host gh, and a guard for flags passed as array elements (a possible follow-up).
+  falsifier: |
+    Put --slurp back and criterion 1 must fail; drop the page cap check and criterion 2 must fail (a full capped page returns a truncated history); read the PR reviews unconditionally and criterion 3 must fail; reorder rows across pages and criterion 4 must fail. Restore and require all four to pass.
+  note: |
+    reservation hand-off: run-unfiled-1794226914871 -> run-unfiled-1794226914871
+    Reserved with rmd next-task-id (W1-T11848 on run-unfiled-1794226914871). Hand-built by the operator's choice; check refs/rmd-dispatch/W1-T11848 and any run branch before building.
