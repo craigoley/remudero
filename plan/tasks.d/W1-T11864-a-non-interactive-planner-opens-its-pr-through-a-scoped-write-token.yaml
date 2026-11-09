@@ -1,0 +1,133 @@
+- id: W1-T11864
+  title: "rmd plan run from a non-interactive shell opens its pull request with a repo-scoped App token handed only to the one PR-create subprocess, after checking before any id is reserved that the token it can mint grants contents and pull_requests write. No GH_TOKEN or App variable enters the planner's or worker's environment, and planner reads stay on the broker"
+  repo: remudero
+  depends_on: [W1-T11851]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 20.00
+  risk: high  # Rule 19: one concern, which credential the plan lane's PR-create write presents. Getting it wrong either widens a token or leaves a pushed branch and reserved ids with no PR
+  band_meaning: blast-radius
+  priority: 1  # without it, a non-interactive plan run pushes its branch and holds reserved ids but opens no PR
+  origin: architect
+  plan_refs: [W1-T11851, W1-T2699, W1-T1202, W1-T4466, W1-T9488, W1-T11789]
+  files:
+    - src/lib/secret-boundary.ts
+    - src/lib/github-app.ts
+    - src/run-task.ts
+    - test/plan/a-non-interactive-planner-opens-its-pr-through-a-scoped-write-token.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    ORIGIN: end-to-end evidence from plan run PLAN-create-1794227143936. The git id reservation and the run-branch
+    push succeeded through a temporary askpass bridge, with no ambient GH_TOKEN. The same run then failed at the
+    separate PR-create write, because that subprocess had no credential. The run was left with a pushed branch and
+    reserved task ids but no PR. W1-T11851 deliberately excludes this write ("the gh PR-open write and any other gh
+    write"), so W1-T11851 alone does not complete the end-to-end flow.
+    READ in this worktree (symbols, not lines):
+    - planCommand (src/run-task.ts) runs gitPushRunBranchAsync(worktreePath), then
+      `runGhPrCreate(ghPrCreateFillCommand(...), branch, log, say)`.
+    - prCreateArgv builds `gh api --method POST repos/<o>/<r>/pulls`. runGhPrCreate runs it through its injectable
+      `exec` (default execFileSync) with options {cwd, encoding} and no `env`, so gh inherits process.env. With no
+      GH_TOKEN and no gh login there, gh has no credential.
+    - A git credential helper (W1-T11851's boundary) never reaches this subprocess. It is a different mechanism with
+      a different owner.
+    Settled by lookup: is this already filed or already decided? -> No. W1-T11851 (queued) names this write as out
+      of scope. W1-T1202 swapped the transport to REST, W1-T4466 adopts an existing PR on a 422, and W1-T903 covers a
+      pushed branch stranded by a crashed create. None of them decides which credential the create presents.
+      W1-T11789 covers the broker's own credential. A grep of plan/tasks.d for a planner or gh write credential found
+      no shard (W1-T10204 is fleet ownership, not a credential).
+    Settled by lookup: amend W1-T11851, or file a separate dependent task? -> A separate dependent task.
+      - W1-T11851 is risk high under Rule 19 with a single concern: the git credential-helper boundary for git pushes.
+      - The PR create is a gh REST subprocess whose credential comes from its env, not from git. It has its own owner
+        (runGhPrCreate's exec seam), its own failure (a pushed branch with no PR) and its own refusal (missing
+        pull_requests write).
+      - It reuses W1-T11851's resolver, so it depends on that task rather than duplicating it.
+    Settled by lookup: is there an existing host credential source and mint? -> Yes. W1-T11851's
+      plannerHostGitCredential resolves the App identity from /etc/remudero/daemon-instances.yaml. mintScopedToken
+      (src/lib/github-app.ts) already asks for `{repositories: [name], permissions: {contents: "write",
+      pull_requests: "write"}}` and reads `opts.env ?? process.env`, so a private env object works. No new App, key,
+      permission or token store is needed.
+    Settled by lookup: can write scope be proven before reservation? -> Yes. The installation-token response body
+      carries the granted `permissions` and `repositories`, and the docs say a token "cannot be granted permissions
+      that the app was not granted"
+      (https://docs.github.com/en/rest/apps/apps?apiVersion=2022-11-28#create-an-installation-access-token-for-an-app).
+      The docs do not say which status code an over-request gets. So the check must read the granted permissions from
+      a 201 response, not rely on a non-2xx status alone. mintScopedToken does not return `permissions` today.
+    Settled by lookup: do planner reads already use the broker? -> Yes. openPrMintTexts goes through ghJson and
+      src/lib/github-transport.ts brokerGhRead. This task leaves them unchanged.
+    Settled by lookup: does an open PR touch this? -> No. The selector sweep (files secret-boundary.ts, github-app.ts,
+      planCommand, runGhPrCreate, prCreateArgv) and the subject sweep (credential, GH_TOKEN, askpass, pr create,
+      W1-T11851) were run on 2026-11-09 over every open PR head:
+      - #17511 (60ad139): touches only plan/tasks.d/W1-T11841.
+      - #17505 (78460e6): check-proof, review, task-linter and redesign-gardener.
+      - #17494 (f38aea2): worker-home.
+      - #17485 (bd2cae1): ops-catalog-source, daemon, plan-revision-store and tick-read-worker. Its GH_TOKEN match is
+        an auth-error regex, not a credential source.
+      (https://api.github.com/repos/craigoley/remudero/pulls?state=open, then /pulls/<n>/files for each.)
+  design: |
+    OWNER: planCommand in src/run-task.ts owns the preflight and the one write call. src/lib/secret-boundary.ts owns
+    the write-token helper. src/lib/github-app.ts gains only a value-free `permissions`/`repositories` echo on
+    ScopedTokenResult. The broker, worktree-git.ts, task-id-reservation.ts, the daemon and the worker spawn env are
+    unchanged.
+    1. SCOPE ECHO. mintScopedToken returns the granted `permissions` and `repositories` names from the 201 body
+       alongside `token`. The request body is unchanged.
+    2. PREFLIGHT, BEFORE RESERVATION. When W1-T11851's plannerHostGitCredential returns {kind: "app"}, planCommand
+       calls an exported `plannerPrWriteToken(identity, ownerRepo, { mint? })` from secret-boundary.ts once, before
+       reserveTaskIdBlockRemote and before any spawn.
+       - It mints through mintScopedToken with a private env holding exactly GH_APP_ID, GH_APP_INSTALLATION_ID and
+         GH_APP_PRIVATE_KEY_PATH.
+       - It returns {ok: true, token} only when the granted permissions include contents "write" and pull_requests
+         "write" and the repositories are exactly [repo].
+       - Otherwise it returns {ok: false, reason, missing}.
+       - The preflight discards the token without using or storing it.
+       - A refusal is ledgered as plan.credential_refused {reason, missing, boundary: "pr_create"} (names only, no
+         values), and planCommand returns non-zero with zero reservation pushes and zero spawns.
+    3. MINT AT THE WRITE BOUNDARY. At PR open, planCommand calls plannerPrWriteToken again for a fresh token.
+       - It passes runGhPrCreate an `exec` that adds GH_TOKEN=<token> to the env of the single
+         `gh api --method POST .../pulls` child, and to nothing else.
+       - The token is a local variable that goes out of scope once runGhPrCreate returns.
+       - It is never assigned to process.env, the worker's spawn env, a file, a ledger row or console output.
+       - The W1-T4466 adoption lookup, a GET, keeps the default exec unchanged and carries no write token.
+    4. FAIL CLOSED AT WRITE TIME. A mint refusal after the push ledgers plan.pr_write_credential_failed {branch,
+       reason} and returns non-zero. The finally block keeps today's W1-T9488 release behaviour. No ambient fallback is
+       attempted.
+    5. AMBIENT UNCHANGED. For {kind: "ambient"} (no registry file), runGhPrCreate runs with today's default exec,
+       byte for byte.
+    TEST (test/plan/a-non-interactive-planner-opens-its-pr-through-a-scoped-write-token.test.ts), with injected
+    seams and no network:
+      - SCOPE: a fake fetch returning granted {contents: write, pull_requests: write} passes. Each of these refuses
+        and names what is missing: pull_requests read, pull_requests absent, contents read, or a repositories list
+        wider than [repo].
+      - REFUSAL PATH (literal tag "W1-T11864 refusal path"): with insufficient scope, planCommand makes zero calls to
+        the remote reserver, spawn and PR-create exec. It ledgers plan.credential_refused and returns non-zero.
+      - WRITE BOUNDARY: the PR-create exec seam sees GH_TOKEN equal to the fake token on the POST call only. The
+        adoption GET and every other exec see no GH_TOKEN. process.env has no GH_TOKEN or GH_APP_* before, during or
+        after the call. The spawn seam's env has none either.
+      - NO LEAK: the fake token string is absent from the ledger file and from captured stdout and stderr.
+      - READS: the open-PR read seam is called through its existing github-transport path. It never receives the
+        write token.
+      - AMBIENT: with a missing registry, the default exec is used and no mint is called.
+    LIMITS / NOT IN SCOPE:
+      - the review post (reviewCommand), the auto-merge arm (armAndLogOutcome), the grill issue (ghIssueGatewayAsync)
+        and `gh pr diff`. Once the PR exists, its ids are visible to the mint through openPrMintTexts, so a failure
+        there strands no id. If one is measured failing from a non-interactive shell, file it separately;
+      - the git pushes (W1-T11851);
+      - routing the W1-T4466 adoption GET through the broker;
+      - keychain, token files, App permissions, token TTL policy, and the broker's credential (W1-T11789).
+  acceptance:
+    - claim: "a non-interactive rmd plan opens its PR with a repo-scoped App token that only the PR-create subprocess receives, after a pre-reservation check that the mintable token grants contents and pull_requests write; no GH_TOKEN or App variable is in the planner or worker env, the token appears in no ledger row or output, and reads stay on the broker"
+      proof: "unit test: test/plan/a-non-interactive-planner-opens-its-pr-through-a-scoped-write-token.test.ts"
+    - claim: "planCommand obtains its PR-create credential from the planner write-token helper"
+      proof: "grep: plannerPrWriteToken( in src/run-task.ts"
+    - claim: "missing or insufficient write scope refuses before any id is reserved or any worker spawns"
+      proof: "grep: W1-T11864 refusal path in test/plan/a-non-interactive-planner-opens-its-pr-through-a-scoped-write-token.test.ts"
+  falsifier: |
+    At this tree, runGhPrCreate's exec inherits process.env. In a non-interactive planner with no GH_TOKEN, the
+    PR-create exec seam therefore sees no GH_TOKEN, so the WRITE BOUNDARY test fails.
+    The change is wrong in any of these cases:
+    - GH_TOKEN or GH_APP_* appears in process.env or the spawn env;
+    - the adoption GET or any read sees the write token;
+    - the token string appears in the ledger or output;
+    - a grant with pull_requests read still reaches the reserver or spawn;
+    - the ambient (no registry) path changes.
