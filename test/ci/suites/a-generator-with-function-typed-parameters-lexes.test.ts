@@ -1,3 +1,4 @@
+// @source-text-subject: the conservative lexer must scan the real src/run-task.ts end to end; its text is the lexer's input, asserted on only by whether lexing throws.
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
