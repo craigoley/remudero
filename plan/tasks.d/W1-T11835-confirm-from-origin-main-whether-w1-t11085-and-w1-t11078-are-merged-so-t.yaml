@@ -1,0 +1,24 @@
+- id: W1-T11835
+  title: Confirm from origin/main whether W1-T11085 and W1-T11078 are merged, so their queued records and the W1-T11195 note agree
+  repo: remudero
+  depends_on: []
+  type: recon
+  verify: auto
+  risk: low
+  status: queued
+  attempts: 0
+  files:
+    - plan/tasks.d/W1-T11085-served-product-plan-uses-the-owned-gateway.yaml
+    - plan/tasks.d/W1-T11078-product-plan-resolves-the-managed-target-checkout.yaml
+  acceptance:
+    - claim: The W1-T11085 shard records, as a comment citing a commit sha or PR on origin/main, whether its work is merged
+      proof: "grep: merge-verified in plan/tasks.d/W1-T11085-served-product-plan-uses-the-owned-gateway.yaml"
+    - claim: The W1-T11078 shard records, as a comment citing a commit sha or PR on origin/main, whether its work is merged
+      proof: "grep: merge-verified in plan/tasks.d/W1-T11078-product-plan-resolves-the-managed-target-checkout.yaml"
+  origin: followup:W1-T11195-1794171535104:2026-11-08T21:03:35.157Z:1
+  rationale: >-
+    From the 2026-11-08 follow-up on W1-T11195-1794171535104, ratified via rmd approve:
+  
+    follow-up harvest [research]: confirm whether W1-T11085 and W1-T11078 are merged on
+    `origin/main`, because their task records still say `queued` while the W1-T11195 note says
+    W1-T11085 merged. — from W1-T11195 (run W1-T11195-1794171535104)
