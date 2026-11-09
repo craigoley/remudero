@@ -1,16 +1,9 @@
 /**
- * The read-model worker: serve's one worker_thread that runs the ledger projector for every
- * registry instance and materializes view bodies (Phase 1 design D1, D5, §1.4, §1.7, §5; P1-03).
- *
- * Each instance (core, console, site) has its own ledger dir and its own DB file, all under core's
- * `state/read-model/`. The worker holds each DB's writer lease, renews it, and releases it when
- * serve stops. Serve's main thread never opens SQLite on a request: it receives finished bodies by
- * `postMessage` and keeps them in memory. At construction it reads the last committed bodies once,
- * so a restarted serve answers before the worker's first tick.
- *
- * THIS FILE IS LOADED TWICE, as console-projection-worker.ts is: `workerData.kind` gates the worker
- * branch. The branch body is {@link runReadModelWorker}, named so a test can run it in-process,
- * where coverage is recorded.
+ * Serve's ledger projector and view worker (Phase 1 D1, D5, §1.4, §1.7, §5; P1-03).
+ * Each instance has its own ledger and DB under core's `state/read-model/`; the worker renews
+ * writer leases until stop. Main serves posted bodies from memory, loading committed bodies
+ * once at construction for warm boot; requests never open SQLite.
+ * Loaded in both threads: `workerData.kind` gates {@link runReadModelWorker}, also testable in-process.
  */
 import type { ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -106,11 +99,7 @@ export const READ_MODEL_STOP_WAIT_MS = 2_000;
 export const READ_MODEL_SWITCHES_FILE = "switches.json";
 /** The share of worker time the oracle's slices may take: the next slice waits cost / share. */
 export const READ_MODEL_CHECK_SHARE = 0.02;
-/**
- * The share of one lease-renewal interval a pass over every instance may spend projecting. Each
- * instance's tick budget is this share split among them, so a backlog of any size is applied in
- * short ticks and every lease is renewed on schedule between them.
- */
+/** Share of a renewal interval split among instance tick budgets; backlogs cannot delay lease renewal. */
 export const READ_MODEL_PASS_SHARE = 0.5;
 /** BACKSTOP: the oracle's heap, thread or child; a slice that outgrows it kills that runner, never serve. */
 export const READ_MODEL_ORACLE_HEAP_MB = 1_024;
@@ -120,25 +109,20 @@ const READ_MODEL_ORACLE_CHILD_ARG = "--remudero-read-model-oracle-child";
 /** C5 (#13207): written as each oracle child exits: what it cost to start, and its peak resident size, all returned by its exit. */
 export const READ_MODEL_ORACLE_CHILD_STEP = "read_model.oracle_child_exited";
 /**
- * The share of each pass kept for view bodies, and of worker time they may take: a view that cost
- * `c` ms is not rebuilt for `c / share` ms. Measured on the host's core ledger as three instances,
- * `now` cost 0.6-1.4 s per instance whenever a generation moved and nav-badge ~130 ms even idle,
- * so unbudgeted bodies alone held ticks of 2-4 s beside a catch-up.
+ * Pass/time share for views: rebuild after cost / share. On core as three instances, `now` cost
+ * 0.6-1.4 s/instance per generation and nav-badge ~130 ms idle: unbudgeted ticks took 2-4 s.
  */
 export const READ_MODEL_VIEW_SHARE = 0.4;
 /**
- * A read-paced view ({@link ReadModelView.readPaced}) keeps its cost / share cadence while one of its
- * readers was served within this. Past it, each build finished with no read doubles the wait to the next,
- * and the next read puts the unit back on its unstretched schedule, so a stale unit is rebuilt on the next
- * tick. MEASURED 2026-10-06 20:25Z to 10-08 18:38Z: `now@core` was rebuilt 5,320 times for 25,605 s of CPU,
- * while `now`, `needs-you`, `nav-badge` and `/v1/status` were read in 20 of those 46 hours, and by the
- * console in 7. An open console reads `nav-badge` about every minute, inside this window.
+ * {@link ReadModelView.readPaced}: after this unread window, each finished build doubles the wait;
+ * a read restores cost / share cadence (stale units run next tick). MEASURED 2026-10-06 20:25Z to
+ * 10-08 18:38Z: `now@core` rebuilt 5,320 times, costing 25,605 CPU s; `now`, `needs-you`, `nav-badge`
+ * and `/v1/status` were read in 20/46 hours (console: 7). Open consoles read nav-badge about every minute.
  */
 export const READ_MODEL_READ_HOT_MS = 2 * 60_000;
 /**
- * BACKSTOP: the most an unread unit's interval stretches. `now@core` (cost ~4.8 s, interval ~12 s) is
- * then rebuilt about every 6.4 min, at ~1/32 of its read cost. Each tier is reached by one more unread
- * build, so a unit read now and then sits low on the ladder, and any read drops it back to the bottom.
+ * BACKSTOP: maximum unread interval multiplier, doubled per unread build and reset by any read.
+ * `now@core` (~4.8 s cost, ~12 s interval) then runs every ~6.4 min at ~1/32 of its read cost.
  */
 export const READ_MODEL_IDLE_STRETCH_MAX = 32;
 /** Main posts one read of a path to the worker at most this often: well inside {@link READ_MODEL_READ_HOT_MS}. */
@@ -150,9 +134,8 @@ const READ_MODEL_LEGACY_VIEW_READS: Readonly<Record<string, string>> = { "/v1/st
 /** Work outstanding without a commit for this long is stalled; serve watches silent workers too. */
 export const READ_MODEL_STALL_MS = 60_000;
 /**
- * A clean open is checked this long after it, then again at this cadence. The oracle compares rows
- * in recent windows only; quick_check reads every page, so it alone sees a damaged b-tree, freelist
- * or old page no query has touched yet.
+ * Check clean opens after this interval and repeat. Unlike the recent-row oracle, quick_check
+ * reads every page, detecting damaged b-trees, freelists and untouched old pages.
  */
 export const READ_MODEL_INTEGRITY_INTERVAL_MS = 24 * 3_600_000;
 const READ_MODEL_INTEGRITY_KIND = "remudero-read-model-integrity" as const;
@@ -199,17 +182,15 @@ export function readModelSwitchesPath(stateDir: string): string {
 }
 
 /**
- * Reads the kill-switch file. An absent file is the defaults, every view dark, with `absent` saying
- * so. A file that exists but does not parse is `{ ok: false }` with its reason: the worker keeps the
- * projector switch it last read, and serve's routes go dark, so a half-written "off" never reads as "on".
+ * Absent kill-switch file: defaults, views dark, `absent` explains why. Invalid file: `{ ok: false }`
+ * with reason; worker keeps its last projector switch, routes go dark. Half-written "off" cannot enable.
  */
 export function readReadModelSwitches(path: string): { ok: true; switches: ReadModelSwitches; mtimeMs: number; absent?: string } | { ok: false; reason: string } {
   let text: string;
   let mtimeMs: number;
   let fd: number | undefined;
   try {
-    // Open once, then inspect and read that same file descriptor. A stat(path) followed by
-    // readFile(path) lets a path/symlink swap redirect the read after the metadata check.
+    // Inspect/read one fd: separate path reads allow a path/symlink swap after the metadata check.
     fd = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
     const before = fstatSync(fd, { bigint: true });
     if (!before.isFile()) return { ok: false, reason: "switch file unreadable: not a regular file" };
@@ -640,10 +621,8 @@ export function inProcessOracle(dbFor: (request: OracleSliceRequest) => ReadMode
 }
 
 /**
- * Slices run on a thread of their own with their own connection, so however long one takes, the
- * projector's ticks go on. A slice cost 0.03-1.9 s on the fleet host, but one that healed held the
- * projector's thread 19.5 min on 2026-09-30, and every view went stale behind it. The thread is
- * spawned on first use and again after it dies; a slice in flight when it dies fails, never hangs.
+ * Own thread/connection keeps projection ticking. Fleet slices cost 0.03-1.9 s, but healing held
+ * projection 19.5 min on 2026-09-30, staling every view. Spawn lazily and after death; fail in-flight slices.
  */
 export function threadOracle(opts: { workerUrl?: URL; escalationRepository?: string; log: (step: string, extra: Record<string, unknown>) => void }): ReadModelOracle {
   let worker: Worker | undefined;
@@ -690,9 +669,8 @@ interface ReadModelOracleData {
 }
 
 /**
- * C5: the parent's execArgv with the oracle's own heap ceiling in place of any the parent carries, then `heapArgs`
- * (W1-T10290: the children's growth flag, which serve hands the worker thread in its data) in place of any growth
- * flag the parent carries. NODE_OPTIONS refuses `--heap-growing-percent`, so it goes on the child's own command line.
+ * C5: replace parent's heap ceiling and growth flag with oracle ceiling and `heapArgs` (W1-T10290).
+ * Serve passes growth flags in worker data; NODE_OPTIONS rejects `--heap-growing-percent`, so use child argv.
  */
 export function oracleChildExecArgv(inherited: readonly string[], heapArgs: readonly string[] = []): string[] {
   const kept = inherited.filter((flag) => !/^--max[-_]old[-_]space[-_]size=/.test(flag) && (heapArgs.length === 0 || !/^--heap[-_]growing[-_]percent=/.test(flag)));
@@ -702,10 +680,9 @@ export function oracleChildExecArgv(inherited: readonly string[], heapArgs: read
 type OracleChildMessage = { type?: string; id?: number; result?: OracleSliceResult; maxRssBytes?: number };
 
 /**
- * C5: each slice runs in a short-lived CHILD PROCESS that exits when it has answered, so what the slice read and
- * built returns to the OS, where a long-lived thread kept it between slices (serve.memory 10-19/20: the oracle
- * thread's heap 115 MiB p50, 604 MiB max, while a slice runs ~4% of the time). Results, deaths and close keep
- * {@link threadOracle}'s contract; each exit writes {@link READ_MODEL_ORACLE_CHILD_STEP} with what the slice cost.
+ * C5: one child per slice returns memory to the OS on exit (serve.memory 10-19/20: oracle thread
+ * heap 115 MiB p50, 604 MiB max, ~4% active). Keep {@link threadOracle}'s result/death/close contract;
+ * each exit records costs via {@link READ_MODEL_ORACLE_CHILD_STEP}.
  */
 export function childOracle(opts: {
   workerUrl?: URL;
@@ -778,9 +755,8 @@ export function childOracle(opts: {
 }
 
 /**
- * C5: this process's peak resident size since its exec, from VmHWM. Not getrusage's maxRSS: Linux carries a forked
- * child's maxRSS over from its parent at the fork, so serve's gigabytes would read as the child's. Undefined where
- * it cannot be read (no /proc), and the row then says null, never a guess.
+ * C5: VmHWM measures peak RSS since exec; getrusage's maxRSS inherits the parent's peak on Linux.
+ * Unreadable /proc means undefined (null in the row), never a guessed child peak.
  */
 export function residentPeakBytes(statusPath = "/proc/self/status"): number | undefined {
   try {
@@ -794,8 +770,7 @@ export function residentPeakBytes(statusPath = "/proc/self/status"): number | un
 }
 
 /**
- * C5: an oracle child's body: answer one slice, with the child's peak resident size, then exit. A parent that goes
- * away (its channel disconnects) wants no answer, so the child exits then too, never outliving its serve by a slice.
+ * C5: answer one slice with peak RSS, then exit; parent disconnect also exits, avoiding orphan slices.
  */
 export function runReadModelOracleChild(
   proc: {
@@ -930,10 +905,8 @@ interface Slot {
 }
 
 /**
- * `rmd read-model rebuild` projects into a new generation file beside the one the pointer names and
- * holds that file's lease; after the flip it holds the old one's for a TTL. So any other file of
- * this instance with a live lease names a rebuild in flight. An unreadable one counts only while it
- * is younger than a lease TTL (one being created); an older one is debris the reaper owns.
+ * Rebuild leases the new generation and, after pointer flip, the old one for a TTL. Another live
+ * lease means rebuild in flight; unreadable files count only below TTL age, else belong to the reaper.
  */
 function rebuildHolder(stateDir: string, instance: string, now: number): string | undefined {
   const current = currentReadModelPath(stateDir, instance, LEDGER_PROJECTOR_SCHEMA_VERSION);
@@ -1055,9 +1028,8 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
   }
 
   /**
-   * A views-only ticker's connection: the store the pointer names, attached without recovery and
-   * reattached after a rebuild swaps the file. It writes bodies under the projector's holder, so a
-   * write still fences on the lease, and only while the projector's last word on it is fresh.
+   * Views attach without recovery to the pointer's store, reattaching after rebuild swaps.
+   * Body writes fence on the projector's lease and require its last report to be fresh.
    */
   function attachViews(slot: Slot, now: number): void {
     const instance = slot.instance.name;
@@ -1083,8 +1055,7 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
 
   function ensureLease(slot: Slot, now: number): boolean {
     if (slot.db && fileIno(slot.db.path) !== slot.ino) {
-      // A rebuild swapped a new file in: this connection still reads the old inode, and a write
-      // through it could land in a WAL the new file now shares. Close it before opening the new one.
+      // Close the old inode before opening its rebuild replacement: writes could share the new file's WAL.
       log("read_model.reopened", { instance: slot.instance.name, reason: "the file was replaced" });
       closeSlot(slot);
     }
@@ -1180,8 +1151,8 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
   }
 
   /**
-   * A commit or no outstanding work is progress. No commit for {@link READ_MODEL_STALL_MS} reopens the store;
-   * same again without progress escalates through the oracle's path, once per episode.
+   * Commit or no pending work means progress; {@link READ_MODEL_STALL_MS} without it reopens,
+   * then another interval escalates via the oracle, once per episode.
    */
   function watchProgress(slot: Slot, now: number, outstanding: boolean): void {
     const generation = slot.state.generation;
@@ -1251,9 +1222,8 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
   }
 
   /**
-   * Starts one slice of the oracle's rolling cycle on the oracle runner: by the lease holder only,
-   * never beside a rebuild, and only below an ingest mark a settle period old. The projector keeps
-   * ticking while it runs; the next slice waits in proportion to what this one cost.
+   * Lease holder starts a slice below a settled ingest mark, never beside rebuild. Projection
+   * continues; the next slice waits in proportion to this one's cost.
    */
   function startCheck(slot: Slot, now: number): void {
     slot.checkPending = false;
@@ -1500,8 +1470,8 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
   }
 
   /**
-   * Evicts the demand keys unread for ten minutes. The first sweep after a start also drops the keys an
-   * earlier run persisted, only for units this lane owns. A transferred unit gets its own first sweep.
+   * Evict demand keys unread ten minutes; first sweep also drops earlier runs' persisted keys
+   * for owned units only. Transferred units get their own first sweep.
    */
   function sweepDemand(): void {
     const book = opts.demand;
@@ -1765,9 +1735,8 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
   const dueUnits = (now: number): ViewUnit[] => units.filter((unit) => owns(unit) && built(unit.view.name) && unit.dueAt <= now).sort((a, b) => a.dueAt - b.dueAt);
 
   /**
-   * Builds the due view units, oldest first, in what is left of the pass that began at `tickStart`.
-   * A unit starts only if its last cost fits what is left; one never measured starts only while this
-   * phase has spent nothing, so it overshoots by itself at most once and is measured from then on.
+   * Build oldest due units within the pass left since `tickStart`, fitting each by last cost.
+   * Unmeasured units start only before any phase spend: at most one isolated overshoot before measurement.
    */
   function materialize(now: number, tickStart: number, only?: ViewUnit): void {
     if (units.length === 0) return;
@@ -2054,9 +2023,8 @@ export type ReadModelViewsInput =
   | { type: "stop" };
 
 /**
- * The view thread's body: every view is built here, never on the projector's thread, so a build of
- * any length delays no projection and no heartbeat. On the fleet host one `now` build held the
- * projector's thread 352 s on 2026-10-01 and the silent-worker watchdog recycled it mid-build.
+ * Build views off the projector thread to preserve projection/heartbeats: a fleet `now` build
+ * held projection 352 s on 2026-10-01, triggering the silent-worker watchdog mid-build.
  */
 export function runReadModelViewWorker(
   port: { on(event: "message", run: (msg: ReadModelViewsInput) => void): unknown; postMessage(value: unknown): void; close(): void },
@@ -2175,9 +2143,9 @@ export interface ReadModelViewLane {
 }
 
 /**
- * Spawns the fast view thread, and a heavy one for units over the solo budget (W1-T5885), and relays what they post.
- * Its watchdog judges each lane by its own heartbeat and reports a build past {@link READ_MODEL_STALL_MS}: killing
- * it would restart the same build cold. A dead lane is respawned after a doubling delay; the other reclaims its units.
+ * Relay fast/heavy view threads (solo budget: W1-T5885). Watch each lane's heartbeat; report builds
+ * past {@link READ_MODEL_STALL_MS}, since killing restarts them cold. Respawn dead lanes with doubling
+ * delay; the surviving lane reclaims their units.
  */
 export function threadViews(opts: {
   data: Omit<ReadModelViewsData, "kind">;
@@ -2318,8 +2286,7 @@ export interface ReadModelWorkerData {
   signal: SharedArrayBuffer;
   /** `owner/name` the oracle's escalations are filed on; the worker builds its own issue gateway. */
   escalationRepository?: string;
-  /** W1-T10290: the node flags the oracle child starts with (the growth percent), computed on serve's main thread
-   *  because the policy lives in a module variable that this isolate's copy never set. */
+  /** W1-T10290: oracle growth flags computed on main; this isolate's module policy was never set. */
   childHeapArgs?: string[];
   /** The slow lane's units (read-model-slow-lane.ts); absent, no slow lane runs. */
   slowLane?: SlowLaneConfig;
@@ -2514,8 +2481,7 @@ export function loadCommittedViewBodies(stateDir: string, home: string, nowMs = 
 }
 
 /**
- * When each instance's lease holder last committed or renewed: every fenced write and every renewal
- * stamps `expires_ms` as that moment plus the TTL. A released or absent lease is no evidence at all.
+ * Last commit/renewal is `expires_ms` minus TTL; released or absent leases provide no evidence.
  */
 export function committedTickTimes(stateDir: string, instances: readonly ReadModelInstance[]): Map<string, number> {
   const times = new Map<string, number>();
@@ -2640,8 +2606,8 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
     posted.delete(key);
   };
   /**
-   * A complete current population retires every other cached Inbox page, including the pages an earlier
-   * producer posted and a replacement, finding them already gone from the store, has no drop for.
+   * Complete populations retire other cached Inbox pages, including old producers' pages already
+   * absent from the store, for which replacements cannot emit drops.
    */
   const convergeInbox = (generation: string, snapshotKey: string): boolean => {
     const own = [...bodies].filter(([, entry]) => entry.view === INBOX_VIEW_NAME);
@@ -2803,13 +2769,10 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
   };
 
   /**
-   * The silent-worker watchdog. A worker blocked in a call, or whose loop died without an exit,
-   * posts nothing, and every view goes stale while its last state still reads "held". A worker
-   * making progress is never silent: it posts a heartbeat per committed transaction and around
-   * each store open. Silence for {@link READ_MODEL_STALL_MS} is ledgered with the phase it was
-   * last in; silence for twice that, doubling with each recycle, terminates it (exit code 1) and
-   * the exit handler respawns it. A store open, one sync quick_check, is given twice the slowest
-   * open the worker has reported, since killing it only starts the same open again.
+   * Silent-worker watchdog: blocked/dead loops leave views stale despite last state "held".
+   * Commits and store opens heartbeat. Log silence at {@link READ_MODEL_STALL_MS} with last phase;
+   * at twice that (doubling per recycle), terminate with code 1 for respawn. Allow opens twice
+   * the slowest reported sync quick_check duration: killing would restart the same open.
    */
   const watchWorker = (): void => {
     const running = worker;
