@@ -6,13 +6,14 @@ import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { diffEmptyAgainstScope } from "#src/lib/review.js";
 import { triageDeclaredScope, triageEmptyScopeDisposition } from "#src/lib/triage.js";
-import { setFeedbackStatus } from "#src/lib/feedback.js";
 import { triageCommand } from "#src/run-task.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
 import type { WorkerResult } from "#src/lib/worker.js";
 
 import { repoRoot } from "#test/helpers/repo-root.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
 const REPO_ROOT = repoRoot();
 
 // ── W1-T963: THE EMPTY-DIFF-TRIAGE-MERGE INCIDENT ────────────────────────────────────────────────
@@ -22,9 +23,10 @@ const REPO_ROOT = repoRoot();
 // there is no diff to contradict, and nothing else downstream ever asks "is this PR's diff empty
 // against its own declared scope". `diffEmptyAgainstScope` + `triageEmptyScopeDisposition` are the
 // fix — a purely structural check with no report/prose involved, wired ahead of the ordinary
-// review/arm gate in run-task.ts's `triageCommandLocked` (right after CI goes green, against a
-// FRESH `git diff --name-only origin/main HEAD -- <scope>` read, never the PR's own frozen
-// `gh pr diff`).
+// review/arm gate in run-task.ts's triageCommandLocked. For no_task/grill empty scopes, the
+// live decision now runs after provenance checks and before CI, with an exact head/base re-read
+// immediately before close. The post-CI check remains to catch sibling landings during the wait;
+// both use a fresh git diff --name-only origin/main HEAD -- <scope>, never the PR's frozen gh pr diff.
 //
 // "A refusal test alone proves nothing… An implementation that refuses EVERY PR satisfies 'an
 // empty-diff PR is refused' perfectly." (design note (vi)) — so EVERY test below carries its own
@@ -88,22 +90,12 @@ test("W1-T963: an already-done triage PR is closed not merged", () => {
   assert.equal(genuinelyNew.comment, undefined, "a proceed disposition carries no close comment");
 });
 
-// ── END TO END: the race REPRODUCED, not merely described ──────────────────────────────────────
+// ── END TO END: the early no-task close precedes a red CI result ─────────────────────────────────
 //
-// #2075/#2077/#2078 merged and PASSED REVIEW despite changing nothing: a SIBLING triage PR for
-// the SAME feedback entry landed the identical fix on `origin/main` in the gap between this PR's
-// own branch forking (from the pre-flip state) and its CI going green, and nothing before this
-// task ever re-checked the LIVE default branch at that later point — `gh pr diff`/
-// `nonPlanFilesInDiff` compare against this branch's OWN (frozen, fork-point) merge-base and never
-// see it.
-//
-// Drives the REAL `triageCommand` end to end (the SAME harness shape as test/triage.test.ts's own
-// W1-T348 tests): a bare origin seeded at `status: new`, a SEPARATE sibling clone holding a
-// READY-TO-PUSH commit that flips the SAME entry to `status: rejected`, and a `gh` shim that
-// pushes the sibling's commit to the bare origin AT THE EXACT MOMENT `waitForCiGreen` polls —
-// reproducing the race rather than merely describing it. This run's OWN worktree still forks from
-// the pre-flip state (its own commit must be REAL work, or `git commit` below has nothing to
-// stage and throws before ever reaching the code this test proves).
+// Drives the real triage command through publication and live-scope classification. The mocked
+// CI response is red, but a no-task PR with an already-empty declared scope must close before the
+// command asks for that response. The sibling-landing-after-CI case remains covered by the
+// existing W1-T963 fixture in test/empty-diff-merge-gate.test.ts.
 
 const T963_GIT_ENV = {
   ...process.env,
@@ -137,12 +129,14 @@ function t963FakeWorker(text: string): WorkerResult {
 }
 
 test("W1-T963: an already-done triage PR is closed not merged — W1-T11781: a no-task empty scope resolves before a red CI wait", async () => {
-  const feedbackId = `fb-t963-${Date.now()}`;
+  const runTimestamp = Date.now();
+  const feedbackId = `fb-t963-${runTimestamp}`;
+  const headRef = `run-TRIAGE-${feedbackId}-${runTimestamp}`;
 
-  const bare = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}t11781-origin-`));
-  execFileSync("git", ["init", "--quiet", "--bare", "-b", "main", bare], { encoding: "utf8", env: T963_GIT_ENV });
-  const seed = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}t11781-seed-`));
-  execFileSync("git", ["init", "--quiet", "-b", "main", seed], { encoding: "utf8", env: T963_GIT_ENV });
+  const bareRepo = gitRepo({ bare: true, kind: "t11781-origin" });
+  const seedRepo = gitRepo({ seedCommit: false, kind: "t11781-seed" });
+  const bare = bareRepo.dir;
+  const seed = seedRepo.dir;
   mkdirSync(join(seed, "plan", "tasks.d"), { recursive: true });
   mkdirSync(join(seed, "plan", "feedback"), { recursive: true });
   // W1-T1089: applyPlanProposalCommit's `git add -A -- plan/ MASTER-PLAN.md` fails LOUD (fatal
@@ -170,30 +164,48 @@ test("W1-T963: an already-done triage PR is closed not merged — W1-T11781: a n
       "",
     ].join("\n"),
   );
-  execFileSync("git", ["-C", seed, "add", "-A"], { encoding: "utf8" });
-  execFileSync("git", ["-C", seed, "commit", "--quiet", "-m", "chore: seed plan"], { encoding: "utf8", env: T963_GIT_ENV });
-  execFileSync("git", ["-C", seed, "remote", "add", "origin", bare], { encoding: "utf8" });
-  execFileSync("git", ["-C", seed, "push", "--quiet", "origin", "main"], { encoding: "utf8", env: T963_GIT_ENV });
+  seedRepo.git("add", "-A");
+  seedRepo.git("commit", "--quiet", "-m", "chore: seed plan");
+  seedRepo.addRemote("origin", bare);
+  seedRepo.git("push", "--quiet", "origin", "main");
 
-  // THE SIBLING: a SEPARATE clone holding one commit, ready to push, that flips the SAME entry to
-  // `status: rejected` — withheld until the shim triggers it below. Written via the REAL
-  // `setFeedbackStatus` (never a hand-typed fixture): this run's OWN worktree writes its status
-  // flip the SAME way, and the empty-diff check this test proves is BYTE-level (`git diff`), so
-  // anything less than byte-identical serialization would manufacture a spurious non-empty diff
-  // that has nothing to do with the defect under test.
-  const siblingDir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}t11781-sibling-`));
-  execFileSync("git", ["clone", "--quiet", bare, siblingDir], { encoding: "utf8", env: T963_GIT_ENV });
-  setFeedbackStatus(siblingDir, feedbackId, "rejected");
-  execFileSync("git", ["-C", siblingDir, "commit", "-am", "chore(triage): sibling PR flips the feedback entry to rejected"], {
-    encoding: "utf8",
-    env: T963_GIT_ENV,
-  });
-  rmSync(seed, { recursive: true, force: true });
+  seedRepo.cleanup();
 
   const home = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}t11781-home-`));
   const configRoot = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}t11781-root-`));
-  const shimDir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}t11781-ghshim-`));
-  const argvLog = join(shimDir, "argv.txt");
+  const identityResponse = join(home, "pr-identity.json");
+  writeFileSync(identityResponse, JSON.stringify({
+    number: 998, state: "open", merged: false,
+    head: { sha: "" }, base: { ref: "main", sha: "" },
+  }));
+  const postReceive = [
+    "#!/bin/sh",
+    "while IFS=' ' read -r old_oid new_oid ref; do",
+    `  if [ "$ref" = "refs/heads/${headRef}" ]; then`,
+    `    head=$(git rev-parse "$ref") || exit 1`,
+    // Simulate a sibling landing the same deterministic no-task status commit before the
+    // triage PR is classified, so its declared feedback scope is empty against live main.
+    `    git update-ref refs/heads/main "$new_oid" || exit 1`,
+    "    base=$(git rev-parse refs/heads/main) || exit 1",
+    `    printf '{"number":998,"state":"open","merged":false,"head":{"sha":"%s"},"base":{"ref":"main","sha":"%s"}}\n' "$head" "$base" > ${JSON.stringify(identityResponse)}`,
+    "  fi",
+    "done",
+    "",
+  ].join("\n");
+  writeFileSync(join(bare, "hooks", "post-receive"), postReceive, { mode: 0o755 });
+  const shim = ghShim([
+    { when: "pr list", stdout: "[]" },
+    { when: "pulls?state=open", stdout: "[]" },
+    { when: "api --method POST", stdout: JSON.stringify({ html_url: "https://github.com/craigoley/remudero/pull/998", number: 998 }) },
+    { when: "--json headRefName", stdout: JSON.stringify({ headRefName: headRef }) },
+    { when: "--json body", stdout: JSON.stringify({ body: "" }) },
+    { when: "pr diff", stdout: "" },
+    { when: "/check-runs", stdout: JSON.stringify({ check_runs: [{ name: "ci", status: "completed", conclusion: "failure" }] }) },
+    { when: "/pulls/998", stdoutFile: identityResponse },
+    { when: "/commits/", stdout: JSON.stringify({ statuses: [] }) },
+    { when: "pr close", stdout: "" },
+  ], { kind: "t11781-gh" });
+  const shimDir = shim.dir;
   const savedHome = process.env.HOME;
   const savedPath = process.env.PATH;
   try {
@@ -209,35 +221,6 @@ test("W1-T963: an already-done triage PR is closed not merged — W1-T11781: a n
     execFileSync("git", ["-C", repoDir, "config", "user.name", "remudero-test"], { encoding: "utf8" });
     execFileSync("git", ["-C", repoDir, "config", "user.email", "test@remudero.invalid"], { encoding: "utf8" });
 
-    // W1-T2268: `waitForCiGreen` now reads REST (`gh api …`), never `gh pr view --json
-    // statusCheckRollup`. The single-PR read (`repos/…/pulls/…`) is `waitForCiGreen`'s OWN
-    // poll — the shim pushes the sibling's READY commit to the bare origin right THERE,
-    // reproducing the exact window the incident PRs raced in: this run's branch has already
-    // forked (pre-flip) and its own commit already pushed, but `origin/main` only advances to
-    // the SAME post-flip state while THIS run is waiting on CI.
-    writeFileSync(
-      join(shimDir, "gh"),
-      [
-        "#!/bin/sh",
-        `printf '%s\\n' "$*" >> ${JSON.stringify(argvLog)}`,
-        'case "$*" in',
-        '  *"pr list"*) echo "[]" ;;',
-        // W1-T1202: `pr create` (GraphQL) moved to `gh api --method POST repos/.../pulls`
-        // (REST) — the url now comes back as `html_url` in a JSON response.
-        '  *"api --method POST"*) echo \'{"html_url":"https://github.com/craigoley/remudero/pull/998","number":998}\' ;;',
-        `  *"--json headRefName"*) git -C ${JSON.stringify(bare)} for-each-ref --format='{"headRefName":"%(refname:short)"}' refs/heads/run-* | tail -1 ;;`,
-        "  *\"--json body\"*) echo '{\"body\":\"\"}' ;;",
-        `  *"pr diff"*) if [ ! -e ${JSON.stringify(join(shimDir, "sibling-pushed"))} ]; then git -C ${JSON.stringify(siblingDir)} push --quiet origin main; touch ${JSON.stringify(join(shimDir, "sibling-pushed"))}; fi; echo "" ;;`,
-        '  *"/check-runs"*) echo \'{"check_runs":[{"name":"ci","status":"completed","conclusion":"failure"}]}\' ;;',
-        '  *"/commits/"*"/status"*) echo \'{"statuses":[]}\' ;;',
-        `  *"api repos/"*"/pulls/998"*) head=$(git -C ${JSON.stringify(bare)} for-each-ref --format="%(objectname)" refs/heads/run-* | tail -1); base=$(git -C ${JSON.stringify(bare)} rev-parse refs/heads/main); printf '{"number":998,"state":"open","merged":false,"head":{"sha":"%s"},"base":{"ref":"main","sha":"%s"}}\n' "$head" "$base" ;;`,
-        '  *"pr close"*) exit 0 ;;',
-        "  *) exit 0 ;;",
-        "esac",
-        "",
-      ].join("\n"),
-      { mode: 0o755 },
-    );
     process.env.PATH = `${shimDir}:${savedPath}`;
 
     const workerOutputText = [
@@ -247,16 +230,22 @@ test("W1-T963: an already-done triage PR is closed not merged — W1-T11781: a n
 
     let resolved: number | undefined;
     let rejected: unknown;
-    await withLiveWritesAllowed(() =>
-      triageCommand([feedbackId], {
-        spawn: async () => t963FakeWorker(workerOutputText),
-      }),
-    ).then(
-      (code) => (resolved = code),
-      (e) => (rejected = e),
-    );
+    const originalDateNow = Date.now;
+    Date.now = () => runTimestamp;
+    try {
+      await withLiveWritesAllowed(() =>
+        triageCommand([feedbackId], {
+          spawn: async () => t963FakeWorker(workerOutputText),
+        }),
+      ).then(
+        (code) => (resolved = code),
+        (e) => (rejected = e),
+      );
+    } finally {
+      Date.now = originalDateNow;
+    }
 
-    const argv = readFileSync(argvLog, "utf8");
+    const argv = shim.calls().join("\n");
     assert.equal(rejected, undefined, `triageCommand must not throw (threw: ${String(rejected)}); argv log:\n${argv}`);
     assert.equal(resolved, 0, `an already-done triage PR must resolve success (0), not an error code; argv log:\n${argv}`);
     assert.match(
@@ -267,15 +256,23 @@ test("W1-T963: an already-done triage PR is closed not merged — W1-T11781: a n
     assert.match(argv, /a sibling triage PR already landed this/, "the close comment must name WHY (W1-T963)");
     assert.match(argv, new RegExp(`plan/feedback/${feedbackId}\\.yaml`), "the close comment must name the declared scope path");
 
-    // The sibling's update is visible before the early live-scope comparison. A closed no-op must
-    // terminalize before even one CI rollup request, and it must re-read exact PR identity before close.
+    // A closed no-op must terminalize before even one CI rollup request, and it must re-read exact
+    // PR identity before close.
     const rollupPolls = argv.split("\n").filter((l) => l.includes("/check-runs")).length;
     assert.equal(rollupPolls, 0, `empty-scope no_task must close before CI is polled; argv log:\n${argv}`);
     const identityReads = argv.split("\n").filter((l) => l.includes("api repos/") && l.includes("/pulls/998")).length;
     assert.ok(identityReads >= 2, `PR identity must be read before classification and immediately before close; argv log:\n${argv}`);
+    const finalIdentity = JSON.parse(readFileSync(identityResponse, "utf8")) as {
+      head: { sha: string };
+      base: { sha: string };
+    };
+    assert.equal(finalIdentity.head.sha, bareRepo.git("rev-parse", `refs/heads/${headRef}`));
+    assert.equal(finalIdentity.base.sha, bareRepo.git("rev-parse", "refs/heads/main"));
   } finally {
     process.env.HOME = savedHome;
     process.env.PATH = savedPath;
-    for (const d of [bare, siblingDir, home, configRoot, shimDir]) rmSync(d, { recursive: true, force: true });
+    for (const d of [home, configRoot, shimDir]) rmSync(d, { recursive: true, force: true });
+    bareRepo.cleanup();
+    seedRepo.cleanup();
   }
 });
