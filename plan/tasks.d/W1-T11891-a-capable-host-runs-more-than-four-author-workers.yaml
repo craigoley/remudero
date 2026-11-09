@@ -1,0 +1,113 @@
+- id: W1-T11891
+  title: "A CAPABLE HOST RUNS MORE THAN FOUR AUTHOR WORKERS — scripts/preflight-author.mjs caps every author run at `AUTHOR_MAX_WORKERS = 4` and scripts/lib/native-author-runtime.mjs refuses `workers > 4`, so a 16-core host with 64 GiB of headroom still runs four test files at a time. Drop the fixed ceiling. Each run's worker count comes only from measured CPU/load, measured memory headroom and the native FIFO slot grant. Admission stays fail-closed and the exact-head gates stay as they are"
+  repo: remudero
+  depends_on: []  # W1-T11583 (queued) is already in the code: AUTHOR_SLOT_CEILING is gone, line 585 passes maxConcurrency: AUTHOR_MAX_WORKERS, and its test file exists. This task edits the same hunks, and the shared files: entries make dispatch run the two one after the other
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 20.00
+  risk: high  # Rule 19: changes how much capacity the author gate admits (preflight-author + native runtime admission); the admission refusals and head gates themselves stay unchanged
+  band_meaning: blast-radius
+  origin: architect
+  plan_refs: [W1-T7809, W1-T9951, W1-T9952, W1-T9953, W1-T11583]
+  files:
+    - scripts/preflight-author.mjs
+    - scripts/lib/native-author-runtime.mjs
+    - test/ci/a-capable-host-runs-more-than-four-author-workers.test.ts
+    - test/ci/an-author-preflight-runs-the-workers-its-measured-slot-grants.test.ts
+    - test/author-deadline-capacity.test.ts
+    - test/preflight-author-sizes-its-selection-by-reach-and-host-capacity.test.ts
+  status: queued
+  priority: 2  # every author preflight on a host that measured room for more than four files still runs four at a time, and is priced at a four-worker budget
+  attempts: 0
+  rationale: |
+    READ in this worktree:
+    - scripts/preflight-author.mjs line 32 `export const AUTHOR_MAX_WORKERS = 4;`, with the doc comment "the cap
+      test-slot.ts has always applied here". test-slot.ts no longer applies it: testRunConcurrency (src/lib/test-slot.ts
+      line 232) returns min(share, usable - busy, cores - 1), and memoryTestConcurrency (line 154) returns
+      floor(headroom / perFileBytes). Neither has a fixed upper bound.
+    - line 63 hostBudget: `Math.min(AUTHOR_MAX_WORKERS, cpuWorkers, memoryWorkers ?? Infinity, slotConcurrency)`.
+    - line 76 deadlineHostBudget refuses `budget.workers > AUTHOR_MAX_WORKERS`.
+    - line 585 `enqueueTestSlot(..., maxConcurrency: AUTHOR_MAX_WORKERS)`. test-slot.ts documents maxConcurrency as an
+      explicit ceiling that "only lowers CPU/memory-derived capacity", so the native FIFO grant is clamped to 4.
+    - line 667 `executionWorkers = Math.min(AUTHOR_MAX_WORKERS, budget.workers)`, which testRunArgv then writes as `--test-concurrency=<n>`.
+    - scripts/lib/native-author-runtime.mjs line 195 runtimeDeadlineFit throws when `workers > 4`. That is a second
+      hard-coded copy of the same ceiling. wholeAuthorDeadlineFit (line 281) inherits it.
+    So on a 16-core idle host, hostBudget measures cpuWorkers ≈ 13 and memoryWorkers well above 4, and the run still
+    gets 4. The selection is also priced at budgetMs = 4 × wallMs, so capacityVerdict sends selections the host could
+    carry to the over-capacity / full-fallback arm.
+    Settled by lookup: is this already filed or already decided? -> no. W1-T11583 removed the one-worker
+      AUTHOR_SLOT_CEILING and deliberately KEPT the four-worker cap ("never more than 4", design step 1;
+      plan/tasks.d/W1-T11583-an-author-preflight-runs-the-workers-its-measured-slot-grants.yaml). No task, MASTER-PLAN
+      section, LEARNINGS, DECISIONS or plan/decisions.d entry names removing AUTHOR_MAX_WORKERS (grep for
+      AUTHOR_MAX_WORKERS / "four-worker" / "up to four").
+    Settled by lookup: is there another four-worker cap besides preflight-author.mjs? -> yes, exactly one:
+      `workers > 4` in runtimeDeadlineFit (scripts/lib/native-author-runtime.mjs:195). Nothing else under scripts/ matches.
+    Settled by lookup: do the measured CPU and memory readers already bound workers without a constant? -> yes
+      (testRunConcurrency, memoryTestConcurrency in src/lib/test-slot.ts). The FIFO slot sizes its own grant from
+      the same measurements (W1-T9952).
+    Settled by lookup: can memory headroom be unmeasured? -> yes. readMemoryHeadroom returns undefined on a host with
+      no /proc/meminfo, no cgroup v2 and no vm_stat reader passed in (src/lib/test-slot.ts:77). This is the default
+      readHostCapacityInputs path on macOS. Today `memoryWorkers ?? Infinity` is safe only because the 4 cap sits
+      behind it. Once the cap is gone, that fallback would let an unmeasured host widen without any memory
+      measurement, so the design closes it.
+    Settled by lookup: does an existing test already require a >4 refusal that conflicts? -> no.
+      test/author-deadline-capacity.test.ts line 37 expects `workers: 5` to throw on a squeezed (one-worker) budget.
+      The measured-inputs check below still refuses it there. test/whole-author-runtime-plan.test.ts uses workers:4,
+      which is still valid.
+    Settled by lookup: do the static stage's workers or the census step change? -> no.
+      `admitHost('static-preflight', { workers: 1 })`, admitStaticWork and the census `--test-concurrency=1`
+      (W1-T11099) are separate admissions and stay out of scope.
+  design: |
+    REPLACE A CONSTANT WITH THE MEASURED CEILING. Do not add a new constant.
+    1. Delete `AUTHOR_MAX_WORKERS`. Update the importer
+       test/ci/an-author-preflight-runs-the-workers-its-measured-slot-grants.test.ts so it asserts against the run's
+       own measured inputs (receipt.capacity.inputs) instead of the constant.
+    2. hostBudget: workers = max(1, min(cpuWorkers, memoryWorkers, slotConcurrency when granted)). FAIL-CLOSED ON AN
+       UNMEASURED INPUT: if memoryWorkers is undefined, memory contributes the slot's measured grant when a slot is
+       held, and 1 when none is held. It never contributes Infinity. Record which input bound the result in
+       budget.inputs (e.g. `boundBy: 'cpu' | 'memory' | 'slot' | 'unmeasured-memory'`) so the receipt shows why.
+    3. enqueueTestSlot (line 585): stop passing a fixed maxConcurrency. Pass the pre-admission
+       hostBudget(...).workers, the measured width this run is asking for, so the native FIFO grant is
+       min(its own measurement, ours) and never a constant.
+    4. executionWorkers (line 667) = budget.workers. hostBudget already folds in the slot grant, so there is no extra clamp.
+    5. deadlineHostBudget: replace `budget.workers > AUTHOR_MAX_WORKERS` with a refusal when budget.workers exceeds
+       the minimum of the measured inputs recorded in budget.inputs (cpuWorkers, memoryWorkers when present,
+       slotConcurrency when present). It must also refuse if those inputs are missing. A forged or stale budget is
+       still refused, and the refusal no longer depends on a number.
+    6. runtimeDeadlineFit / wholeAuthorDeadlineFit: replace `workers > 4` with a REQUIRED `admittedWorkers` option,
+       the caller's measured budget.workers. Refuse when it is missing or invalid, and when workers > admittedWorkers.
+       preflight-author passes it at both admitRuntime call sites.
+    UNCHANGED, AND THE TESTS PROVE IT: the shared FIFO queue, ticket order and cancel path; testSlotExecutionAllowed
+    refusals; owner-nonce / requireNativeContext binding; Mac pressure and disk-reserve admission
+    (admitHost / guardedAuthorEntry / MacAuthorCapacityRefusal); evaluateHeadIdentityGate and the exact-head
+    author and hosted gates; the one-worker static stage.
+    TESTS (new file test/ci/a-capable-host-runs-more-than-four-author-workers.test.ts). Drive `main` through its
+    existing seams (`host`, `testSlot` with a temp dir and injected load/memoryHeadroom, `admitHost`, `spawn`), the
+    same way the W1-T11583 file does:
+      (a) Use an injected host and slot pool whose measured grant is above four, e.g. 32 idle cores, 128 GiB headroom
+          and one slot. The affected-tests child gets `--test-concurrency=N` with N > 4, and N equals
+          receipt.executionWorkers, receipt.capacity.workers and receipt.testSlot.concurrency.
+      (b) Same cores, but load1 high enough that the CPU share drops below the idle width: N falls, and boundBy names cpu.
+      (c) Same cores, but headroom for exactly k files: N = k, and boundBy names memory.
+      (d) Memory headroom undefined and no slot held at pricing: the pre-admission budget is one worker.
+      (e) deadlineHostBudget and runtimeDeadlineFit refuse workers above the recorded measured inputs, and refuse a
+          missing admittedWorkers.
+      (f) A pressure / disk refusal from admitHost still ends the run over-capacity and never spawns affected tests,
+          even on the >4 host.
+  acceptance:
+    - claim: "on an injected capable host whose measured CPU, memory and slot grant all exceed four, the affected-tests child runs with --test-concurrency above four, and executionWorkers, capacity.workers and testSlot.concurrency agree"
+      proof: "unit test: test/ci/a-capable-host-runs-more-than-four-author-workers.test.ts"
+    - claim: "CPU load or memory headroom on the same host still lowers the worker count, and unmeasured memory with no slot held never widens past one worker"
+      proof: "unit test: test/ci/a-capable-host-runs-more-than-four-author-workers.test.ts"
+    - claim: "deadlineHostBudget and runtimeDeadlineFit refuse a worker count above the run's recorded measured inputs, including the existing workers-5-on-a-squeezed-budget case"
+      proof: "unit test: test/author-deadline-capacity.test.ts"
+    - claim: "the W1-T11583 multi-worker, capacity-cap and refusal cases still pass without the removed constant"
+      proof: "unit test: test/ci/an-author-preflight-runs-the-workers-its-measured-slot-grants.test.ts"
+    - claim: "the native runtime admission takes the measured admitted worker count instead of a literal four"
+      proof: "grep: admittedWorkers in scripts/lib/native-author-runtime.mjs"
+  falsifier: |
+    In this worktree, call main() with an injected host {cores: 32, load1: 0, headroomBytes: 128 GiB}, a temp slot dir
+    and testSlot {slots: 1, load, memoryHeadroom} matching it. The captured affected-tests argv carries
+    `--test-concurrency=4` and receipt.executionWorkers is 4, because line 63 / 585 / 667 clamp to AUTHOR_MAX_WORKERS.
+    If either is already above 4 before the change, this task is moot.
