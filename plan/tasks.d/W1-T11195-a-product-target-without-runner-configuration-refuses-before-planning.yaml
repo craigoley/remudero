@@ -21,6 +21,8 @@
     - packages/api-client/src/schema.d.ts
     - test/dispatch/product-plan-runner-config.test.ts
     - test/console-api/serve/product-routes.test.ts
+    - test/dispatch/product-plan-operation.test.ts
+    - test/plan/product-case-managed-checkout.test.ts
   status: queued
   attempts: 0
   rationale: >-
