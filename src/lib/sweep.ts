@@ -7715,7 +7715,9 @@ export async function watchFixSuperseded(w: {
  *  protection's OWN list, threaded in rather than hardcoded (rule 2). UNREADABLE PROTECTION FAILS
  *  CLOSED — every reported context counts, because an unreadable rule must never manufacture a false
  *  green. `remudero-review` IS EXCLUDED UNCONDITIONALLY (W1-T394), even in that fallback: counting
- *  it made a red review indistinguishable from red CI. Deduped before judging.
+ *  it made a red review indistinguishable from red CI. Deduped before judging. The review is
+ *  excluded from BOTH the rollup and the required set (W1-T11865): a set holding only it judges every
+ *  reported non-review check, as unreadable protection does.
  *  // Why: the #170 and #1441 incidents — docs/forensics/sweep.md. */
 export function checksStateFromRollup(
   rollup: RollupCheckEntry[] | undefined,
@@ -7750,7 +7752,9 @@ function requiredCheckGate(
   requiredContexts: Iterable<string> | undefined,
 ): { all: RollupCheckEntry[]; knownRequired: boolean; gate: RollupCheckEntry[]; missingRequired: boolean } {
   const all = (rollup ?? []).filter((c) => c.name !== REVIEW_CONTEXT && c.context !== REVIEW_CONTEXT);
-  const required = new Set(requiredContexts ?? []);
+  // The review is excluded from the required set as well as the rollup (W1-T11865): a set holding only
+  // it is no gate, so every reported non-review entry is judged instead of reading pending forever.
+  const required = new Set([...(requiredContexts ?? [])].filter((name) => name !== REVIEW_CONTEXT));
   const knownRequired = required.size > 0;
   // Dedupe to ONE entry per producer/name — the LATEST attempt — before judging. Dedup cannot change
   // whether `gate` is empty (grouping merges rows sharing a key, it never drops one), so the
