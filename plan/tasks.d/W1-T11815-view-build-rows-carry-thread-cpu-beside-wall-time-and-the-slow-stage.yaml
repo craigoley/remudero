@@ -31,7 +31,7 @@
     - Measured here: this is the biggest single line in serve's recorded cost, and the choice between the two fixes depends on this one number.
   design: |
     In the worker's build routine, read process.threadCpuUsage() before and after each build (the worker thread's own user plus system time; Node 24 provides it) and add the delta to the unit's tally as cpuMs, reported by reportViewBuilds beside ms and maxMs and copied onto read_model.slow_view. When the runtime has no per-thread reading, cpuMs is omitted. The build, its due time, its body and the lane choice read only ms, as today.
-    NOT IN SCOPE: changing any pacing or lane decision to use cpuMs (a later task, after the ratio is known), the board projection itself, and serve's other threads (W1-T11794).
+    NOT IN SCOPE: changing any pacing or lane decision to use cpuMs (a later task, after the ratio is known), the board projection itself, and serve's other threads (W1-T11816).
   falsifier: |
     Drop the CPU read and criterion 1 must fail; omit cpuMs from the slow row and criterion 2 must fail; make a missing reading throw or change a due time and criterion 3 must fail. Restore and require all three to pass.
   note: |

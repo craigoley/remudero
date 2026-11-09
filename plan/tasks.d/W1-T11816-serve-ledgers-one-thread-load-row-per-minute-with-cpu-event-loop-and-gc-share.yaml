@@ -38,7 +38,7 @@
   design: |
     The module exports startServeThreadLoad and serve.ts calls it.
     A new serve-thread-load.ts starts one unref'd interval at serve start (60 s, injectable for tests). Each tick reads the main thread's CPU and ELU, and for each worker the serve.memory registry already tracks, its Worker.cpuUsage and performance.eventLoopUtilization deltas since the last tick, plus a PerformanceObserver for gc entries summed to a share of the minute and process.memoryUsage heap figures. One serve.thread_load row is appended; a thread that ended or a reading that threw is listed with its error. serve.ts starts it beside the memory monitor and stops it at close.
-    NOT IN SCOPE: acting on the numbers (cutting heaps or threads is a later task), per-view attribution (W1-T11793), and demand (W1-T11792).
+    NOT IN SCOPE: acting on the numbers (cutting heaps or threads is a later task), per-view attribution (W1-T11815), and demand (W1-T11814).
   falsifier: |
     Skip the worker CPU reads and criterion 1 must fail; drop the gc share and criterion 2 must fail; let a dead worker's error fail the row and criterion 3 must fail; allocate per request or touch a limit and criterion 4 must fail. Restore and require all four to pass.
   note: |
