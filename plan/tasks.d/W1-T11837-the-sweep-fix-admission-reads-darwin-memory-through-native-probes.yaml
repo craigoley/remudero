@@ -13,13 +13,13 @@
   files:
     - src/lib/sweep.ts
     - src/run-task.ts
-    - test/the-sweep-fix-pressure-reads-darwin-memory.test.ts
+    - test/sweep/the-sweep-fix-pressure-reads-darwin-memory.test.ts
   status: queued
   priority: 2
   attempts: 0
   acceptance:
     - claim: "On darwin the sweep fix-admission probe takes its host reading from /usr/bin/vm_stat (free+inactive pages times the reported page size, in MiB, labelled approximate), /usr/sbin/sysctl kern.memorystatus_vm_pressure_level and vm.swapusage, and a statfs of the swap volume. With zero active workers on a healthy host (normal pressure, free+inactive at or above floor plus one fix unit, swap able to grow) it admits a bounded repair. It refuses on warning, critical or unknown pressure, on free+inactive below floor plus one unit, or when allocated swap free is below one fix unit and the swap volume cannot grow swap. A failed, timed-out or unparseable read gives availableMib 0 with a named darwin reason. On linux the /proc/meminfo reading is unchanged, byte for byte"
-      proof: "unit test: test/the-sweep-fix-pressure-reads-darwin-memory.test.ts"
+      proof: "unit test: test/sweep/the-sweep-fix-pressure-reads-darwin-memory.test.ts"
     - claim: "the darwin host reader is a named seam in the sweep module"
       proof: "grep: readDarwinFixHostPressure( in src/lib/sweep.ts"
     - claim: "the fix-admission call sites use the sweep fix probe that has the darwin branch, not the shared productionFixPressure"
@@ -102,7 +102,7 @@
        "darwin" (an injectable platform), and otherwise calls productionFixPressure unchanged. Only the three
        fix-admission readPressure defaults switch to it (sweep.ts full and light surfaces, and the run-task.ts
        fix-dispatch child). The queue governor, plan lane capacity and every other /proc consumer stay as they are.
-    4. Tests in test/the-sweep-fix-pressure-reads-darwin-memory.test.ts, over an injected runner, platform and statfs:
+    4. Tests in test/sweep/the-sweep-fix-pressure-reads-darwin-memory.test.ts, over an injected runner, platform and statfs:
        (a) zero active workers, normal pressure, 6144 MiB free+inactive, 1039 MiB swap free with room to grow:
            createSweepFixAdmissionController admits exactly one bounded fix;
        (b) the same host at 4096 MiB free+inactive refuses as host-short;
