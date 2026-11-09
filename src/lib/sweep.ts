@@ -97,6 +97,7 @@ import { clockFromMillisFn, systemClock, type Clock } from "./clock.js";
 import { isWorkerProviderId, type Config, type WorkerProviderId, fixStrikeCap, overflowFallbackRefusal } from "./config.js";
 import { defaultGitCaptureAsync, gitPushEmptyCommit, gitPushRunBranchAsync, worktreePushExec, worktreePushExecAsync, runStepsSync, runStepsAsync, step, type Steps } from "./git-push.js";
 import { ghExec, ghJson, ghJsonAsync, ghTextAsync, type GhJsonReadOptions } from "./github-transport.js";
+import { withdrawStaleConflictedJudgePr } from "./machine-filing-judge.js";
 import type { AdmissionObserver, AdmissionSettings, AdmissionRead } from "./contributor-admission.js";
 import { observeContributorAdmission } from "./arm-auto-merge.js";
 import { distanceRefreshCause, type BaseChangedFiles } from "./plan-pr-merge-safety.js";
@@ -2312,6 +2313,7 @@ export const SWEEP_EFFECT_SURFACE = [
   "conflictDependents",
   "repairPlanPr",
   "dispatchPlanGateRound",
+  "withdrawStaleJudgePr", // W1-T11388
   "strikeLadder",
   "readMergeQueueMembership",
   "escalateRearmExhausted",
@@ -2484,6 +2486,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   | "conflictDependents"
   | "repairPlanPr"
   | "dispatchPlanGateRound"
+  | "withdrawStaleJudgePr"
   | "readMergeQueueMembership"
   | "escalateRearmExhausted"
   | "readArmTimeline"
@@ -5489,6 +5492,18 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
       }
     },
     conflictDependents: (pr) => pr.taskId === undefined ? 0 : queuedTransitiveDependents(plan, pr.taskId),
+    withdrawStaleJudgePr: (pr) => withdrawStaleConflictedJudgePr({
+      stateDir: join(config.root, "state"), prUrl: pr.prUrl, log,
+      readMain: async (paths) => {
+        const at = (args: string[]) => hostWorktreeGitAsync(repoDir, args, { maxBuffer: 1 << 24 });
+        await at(["fetch", "--quiet", "origin", "main"]);
+        const target = (await at(["rev-parse", "origin/main"])).trim();
+        const present = new Set((await at(["ls-tree", "-r", "--name-only", target, "--", ...paths])).trim().split("\n"));
+        return new Map(await Promise.all(paths.filter((path) => present.has(path))
+          .map(async (path) => [path, await at(["show", `${target}:${path}`])] as const)));
+      },
+      closePr: async (prUrl, comment) => { await ghTextAsync(["pr", "close", prUrl, "--comment", comment]); },
+    }).then((r) => ({ withdrawn: r.withdrawn, ...(r.withdrawn ? { reason: r.stale.map((s) => s.id).join(", ") } : {}) })),
     readPlanRepairFacts: (pr) => {
       const pulls = `repos/${owner}/${repo}/pulls/${pr.prNumber}`;
       const row = ghJsonForBuild(["api", pulls]) as {
@@ -14540,6 +14555,9 @@ export interface SweepDeps {
     pr: OpenPrView,
     decision: Extract<PlanRepairDecision, { action: "renumber" | "retitle" }>,
   ) => PlanRepairOutcome | Promise<PlanRepairOutcome>;
+  /** W1-T11388: a conflicted machine-judge PR whose ruled record moved on main is withdrawn for a re-judge
+   *  (closed, the judge's pending state cleared), never sent to a plan-scoped round machine-author-verify must refuse. */
+  withdrawStaleJudgePr?: (pr: OpenPrView) => Promise<{ withdrawn: boolean; reason?: string }>;
   dispatchPlanGateRound?: (pr: OpenPrView) => Promise<{
     outcome: "pushed" | "refused" | "metadata-repaired";
     headSha?: string;
@@ -21215,6 +21233,20 @@ export async function runSweep(
         planConflictRound = isFleetAppAuthor(facts.authorLogin);
       } catch (error) {
         log("sweep.plan_conflict.read_failed", { pr_number: pr.prNumber, head_sha: pr.headSha, reason: String(error) });
+      }
+    }
+    // W1-T11388: a judge PR whose ruled record moved on main takes the judge's own withdraw, not a round that
+    // machine-author-verify refuses by construction. A PR with every ruling current keeps the round below.
+    if (planConflictRound && !deps.dryRun && deps.withdrawStaleJudgePr && /^machine-judge-garden-\d+$/.test(pr.headRefName ?? "")) {
+      try {
+        const withdrawn = await deps.withdrawStaleJudgePr(pr);
+        if (withdrawn.withdrawn) {
+          planConflictRound = false;
+          disposition = "wait";
+          reason = `merge conflict on a machine-judge PR whose ruled record changed on main — withdrawn for a re-judge (${withdrawn.reason ?? "stale pin"}); no plan-scoped round, no escalation`;
+        }
+      } catch (error) {
+        log("sweep.judge_withdraw.failed", { pr_number: pr.prNumber, head_sha: pr.headSha, reason: String(error) });
       }
     }
     // W1-T5543: fleet filings have their own plan surface; the code rung still never owns one.
