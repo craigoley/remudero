@@ -1,0 +1,43 @@
+- id: W1-T11819
+  title: Each rule suite has a recorded read set, and the author preflight reports in shadow which of the 136 rule suites a diff could skip, still running them all, so 11 minutes of repo-wide checks can later be scoped by what a change can reach
+  repo: remudero
+  depends_on: []
+  priority: 0.3
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # observation only: the preflight still runs every rule suite and hosted CI is unchanged; the recorder and the would-skip report decide nothing
+  band_meaning: span
+  origin: operator-session#preflight-efficiency-2026-11-09
+  plan_refs:
+    - W1-T9919
+    - W1-T7848
+  files:
+    - scripts/list-rule-suites.mjs
+    - scripts/record-rule-suite-reads.mjs
+    - src/lib/ci-parity.ts
+    - test/ci/parity/a-rule-suite-read-set-names-what-a-diff-could-skip.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: The recorder runs each rule suite once under a file-read tracer and writes, per suite, its sorted repo-relative read roots and the hash of the suite file into one committed record
+      proof: "grep: W1-T11819 criterion 1 in test/ci/parity/a-rule-suite-read-set-names-what-a-diff-could-skip.test.ts"
+    - claim: Given a changed-path list, the would-run selection keeps every suite with no record, a stale record hash, or a read root intersecting the diff, and names the rest as skippable
+      proof: "grep: W1-T11819 criterion 2 in test/ci/parity/a-rule-suite-read-set-names-what-a-diff-could-skip.test.ts"
+    - claim: In shadow the rule-checks step still runs all suites and prints one line naming how many a scoped run would have skipped and which; its exit status and failed-suite line are unchanged
+      proof: "grep: W1-T11819 criterion 3 in test/ci/parity/a-rule-suite-read-set-names-what-a-diff-could-skip.test.ts"
+    - claim: The wiring is real, as the rule-checks script calls recordRuleSuiteReads when asked to refresh the record
+      proof: "grep: recordRuleSuiteReads( in scripts/list-rule-suites.mjs"
+  rationale: |
+    OBSERVED 2026-11-09 (author preflight static summary, a 9-YAML plan-only diff): static-preflight took 910 s and one check, rule-checks (scripts/list-rule-suites.mjs --run), took 676 s (74%). It runs all 136 rule suites on every preflight whatever the diff, and hosted CI runs them again as the required gate. Only 7 of the 136 suites declare an `@census-reads` header, so the repo cannot say which a diff could affect, and 129 must always run.
+    - A diff that touches only plan/tasks.d cannot change a suite that reads only src, but nothing records what each suite reads.
+    - Shadow first: this task records and reports, and the operator rules on scoping from the would-skip numbers against hosted CI results (the same shadow-then-enforce path as the 8 GiB bound, W1-T11344).
+  design: |
+    A new scripts/record-rule-suite-reads.mjs exports recordRuleSuiteReads, which runs each rule suite once with a small --require tracer that wraps the sync and promise fs read entry points (readFile, readdir, stat, open, exists, opendir) and records each path's repo-relative first two segments, then writes the sorted roots and the suite file hash per suite to one committed JSON record. scripts/list-rule-suites.mjs calls recordRuleSuiteReads under a --refresh-reads flag, and under --scope <base> prints the suites a diff from that base could skip (a record exists, its hash matches the suite file, and none of its roots intersects the changed paths). With --run it still runs every suite and prints one summary line of the would-skip count. Nothing is skipped.
+    NOT IN SCOPE: skipping any suite (an operator ruling after the shadow rows), hosted CI, and the unit-suite affected selector.
+  falsifier: |
+    Record absolute paths or drop a root and criterion 1 must fail; skip a suite with no record or a stale hash and criterion 2 must fail; let the shadow line change the exit status or skip a run and criterion 3 must fail. Restore and require all four to pass.
+  note: |
+    reservation hand-off: run-unfiled-1794186053317 -> run-unfiled-1794186053317
+    Reserved with rmd next-task-id (W1-T11819 on run-unfiled-1794186053317). Proof that counts: the would-skip line on preflights after deploy, then the count of hosted rule-check failures a skipped suite would have hidden.
