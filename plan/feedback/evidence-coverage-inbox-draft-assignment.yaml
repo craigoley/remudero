@@ -4,7 +4,7 @@ raw: >-
   Evidence coverage gap (evidence-coverage-v1, over benchmark-quality-v1): lane
   `inbox-draft`, field `assignment`.
 
-  Coverage: 0/37 terminal worker results (joined to an assignment, or carrying
+  Coverage: 0/85 terminal worker results (joined to an assignment, or carrying
   no id or no match) (0.0%) in the trailing 7-day window; the field is absent:
   no row in the window records it.
 
@@ -24,3 +24,60 @@ summary: null
 expansion: null
 submission_key: null
 thread_id: null
+evidence_coverage_revision:
+  version: 1
+  mainSha: c223fe68126537e9df1d6b8d75a748414757d8c9
+  expectedRecord: >
+    id: evidence-coverage-inbox-draft-assignment
+
+    ts: 2026-11-08T08:20:39.061Z
+
+    raw: >-
+      Evidence coverage gap (evidence-coverage-v1, over benchmark-quality-v1): lane
+      `inbox-draft`, field `assignment`.
+
+      Coverage: 0/37 terminal worker results (joined to an assignment, or carrying
+      no id or no match) (0.0%) in the trailing 7-day window; the field is absent:
+      no row in the window records it.
+
+      First seen: 2026-11-08T08:19:24.384Z.
+
+
+      This follow-up never gates a PR or blocks work. Restore the field at the
+      lane's ledger write site (src/lib/benchmark-evidence.ts names what each field
+      reads), or record why this lane legitimately lacks it. The evidence-coverage
+      gardener updates this entry in place while the gap persists.
+    attachments: []
+
+    origin: cli
+
+    status: new
+
+    reply_to: null
+
+    proposal_pr: null
+
+    summary: null
+
+    expansion: null
+
+    submission_key: null
+
+    thread_id: null
+  expectedPlan:
+    plan/tasks.yaml: 4f7b11c7c694a482e077db0e692abc5874cf6611
+    plan/tasks.d: c61e5b2d8b470ca45b44dd3797e2e563d37b1ba8
+  measurement:
+    lane: inbox-draft
+    field: assignment
+    observed: 0
+    denominator: 85
+    floor: 0.8
+    at: 2026-11-09T02:20:22.244Z
+    since: 2026-11-02T02:20:22.244Z
+    line: "Coverage: 0/85 terminal worker results (joined to an assignment, or
+      carrying no id or no match) (0.0%) in the trailing 7-day window; the field
+      is absent: no row in the window records it."
+  closure:
+    eligible: false
+    reason: record is open
