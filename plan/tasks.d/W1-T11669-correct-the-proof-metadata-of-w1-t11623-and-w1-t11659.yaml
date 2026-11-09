@@ -14,6 +14,9 @@
     - plan/tasks.d/W1-T11623-the-failed-static-gate-fixture-runs-clear-of-an-inherited-slot-marker.yaml
     - plan/tasks.d/W1-T11659-a-verified-systemd-user-manager-does-not-block-cwd-census.yaml
     - plan/tasks.d/W1-T11669-correct-the-proof-metadata-of-w1-t11623-and-w1-t11659.yaml
+  # refusal-amendment (W1-T11669, run W1-T11669-1794187483620, 2026-11-09T08:49:35.396Z): the worker refused criterion 1 [proof-unexecutable-at-head] — proposed re-scope-criteria: repair the criterion's proof so it is executable at HEAD, or re-scope the criterion
+  #   worker evidence: W1-T11669: a filed proof already passes at the merge base, so branch run-W1-T11669-1794187483620 cannot open a PR
+  #   this task is held from dispatch until its record changes; an Architect must make the change above
   status: queued
   attempts: 0
   rationale: |

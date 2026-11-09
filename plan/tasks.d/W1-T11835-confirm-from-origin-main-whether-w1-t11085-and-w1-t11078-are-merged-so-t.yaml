@@ -5,7 +5,10 @@
   type: recon
   verify: auto
   risk: low
+  priority: 4
   status: queued
+  # backlog gardener: band=4 evidence=d6cda715b4d06c11
+  # backlog gardener: placed=2026-11-09T09:28:54.018Z
   attempts: 0
   files:
     - plan/tasks.d/W1-T11085-served-product-plan-uses-the-owned-gateway.yaml

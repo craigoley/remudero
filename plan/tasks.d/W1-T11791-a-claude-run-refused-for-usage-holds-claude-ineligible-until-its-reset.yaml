@@ -1,0 +1,44 @@
+- id: W1-T11791
+  title: A launched Claude subscription run that comes back as a usage-limit refusal holds Claude ineligible until the refusal's UTC reset, so the next selection skips it at once instead of launching into the same refusal
+  repo: remudero
+  depends_on:
+    - W1-T11692
+  priority: 1.2
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # changes provider eligibility after a refusal; it only removes a provider whose own run just said it is out of quota, and every other provider path is unchanged
+  band_meaning: span
+  origin: operator-session#claude-weekly-limit-2026-11-08
+  plan_refs:
+    - W1-T11692
+    - W1-T11665
+    - W1-T10383
+  files:
+    - src/lib/worker.ts
+    - src/lib/worker-provider.ts
+    - test/worker.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: A launched Claude subscription run whose result is a classified usage-limit refusal with a UTC reset writes one provider.refusal_hold ledger row naming the provider, the reset time and the source run
+      proof: "grep: W1-T11791 criterion 1 in test/worker.test.ts"
+    - claim: While an unexpired hold exists, Claude's eligibility reads ineligible with the reason refused-until-reset, distinct from below-reserve and unreadable, and the next selection does not launch it
+      proof: "grep: W1-T11791 criterion 2 in test/worker.test.ts"
+    - claim: At the reset time the hold lapses and Claude is eligible again on its readable capacity; a refusal with no parseable UTC reset holds for a bounded fallback window and records that the reset was unknown
+      proof: "grep: W1-T11791 criterion 3 in test/worker.test.ts"
+    - claim: A refusal on a cash or non-Claude provider, and a Claude failure that is not a classified usage refusal, write no hold
+      proof: "grep: W1-T11791 criterion 4 in test/worker.test.ts"
+  rationale: |
+    OBSERVED (the 2026-11-08 Sol/Luna inspection and ledger): a post-launch Claude quota refusal does NOT re-enter provider selection. It is classified at worker.ts (detectUsageLimitRefusal, usageRefusal), recorded as verdict usage_refused, and its two consumers deliberately stop (classify.ts fix-retry, run-task.ts inbox deferral). Receipt: 6 usage_refused rows on 2026-09-04 between 06:07Z and 06:21Z with reset 07:00Z (for example review.reviewer run DAEMON-1788499986482, W1-T2647). During that window the capacity probe still read headroom (92 to 98 percent on 11-08), so every later selection launched Claude into the same refusal.
+    - Related, not duplicate: W1-T11665 reauctions once to Codex but only for the TRIAGE lane; W1-T11692 only classifies the weekly-limit text and parses its reset.
+    - Mechanism: eligibility is read from the capacity probe alone (providerEligibility), which has no memory of a refusal the provider's own run just returned.
+  design: |
+    When worker.ts records a launched subscription Claude result as usage_refused with a parsed resetsAtMs, append a provider.refusal_hold row (provider, reset_at_ms, source_run_id, reset_known). resetsAtMs comes from detectUsageLimitRefusal and is only set for a UTC zone; with no reset the hold uses a declared bounded fallback window and sets reset_known false. providerEligibility consumers read the newest unexpired hold for the provider and return ineligible with reason refused-until-reset until reset_at_ms. Cash, Codex and every other provider are untouched. No reauction and no fallback routing change (W1-T11665 owns that).
+    NOT IN SCOPE: triage reauction, the Sol/Luna fallback route, the capacity probe itself.
+  falsifier: |
+    Remove the hold write and criterion 1 must fail; ignore the hold in eligibility and criterion 2 must fail; never expire it and criterion 3 must fail; write a hold for a cash refusal and criterion 4 must fail. Restore and require all four to pass.
+  note: |
+    reservation hand-off: run-unfiled-1794173043382 -> run-unfiled-1794173043382
+    Reserved with rmd next-task-id (W1-T11791 on run-unfiled-1794173043382). Build after W1-T11692 merges.

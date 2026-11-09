@@ -1,0 +1,120 @@
+- id: W1-T11837
+  title: "THE SWEEP FIX-ADMISSION PRESSURE PROBE READS DARWIN MEMORY THROUGH APPLE-SHIPPED PROBES AND STAYS FAIL-CLOSED. readFixHostPressure always reads /proc/meminfo, and on the Mac mini that read throws ENOENT. So every sweep.fix_capacity row reads fix_admissions_available=0 with active_workers=0, and the PR #17394 conflict fixer was refused from 15:14Z to 20:04Z on 2026-11-08"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: high  # Rule 19: one concern, the fix-admission memory gate. A false "fits" would admit a repair onto a swapping host
+  band_meaning: span
+  origin: architect
+  plan_refs: [W1-T7811, W1-T9498, W1-T9358, W1-T9952, W1-T10765, W1-T10926, W1-T11753, W1-T5689, W1-T9310]
+  files:
+    - src/lib/sweep.ts
+    - src/run-task.ts
+    - test/sweep/the-sweep-fix-pressure-reads-darwin-memory.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  acceptance:
+    - claim: "On darwin the sweep fix-admission probe takes its host reading from /usr/bin/vm_stat (free+inactive pages times the reported page size, in MiB, labelled approximate), /usr/sbin/sysctl kern.memorystatus_vm_pressure_level and vm.swapusage, and a statfs of the swap volume. With zero active workers on a healthy host (normal pressure, free+inactive at or above floor plus one fix unit, swap able to grow) it admits a bounded repair. It refuses on warning, critical or unknown pressure, on free+inactive below floor plus one unit, or when allocated swap free is below one fix unit and the swap volume cannot grow swap. A failed, timed-out or unparseable read gives availableMib 0 with a named darwin reason. On linux the /proc/meminfo reading is unchanged, byte for byte"
+      proof: "unit test: test/sweep/the-sweep-fix-pressure-reads-darwin-memory.test.ts"
+    - claim: "the darwin host reader is a named seam in the sweep module"
+      proof: "grep: readDarwinFixHostPressure( in src/lib/sweep.ts"
+    - claim: "the fix-admission call sites use the sweep fix probe that has the darwin branch, not the shared productionFixPressure"
+      proof: "grep: productionSweepFixPressure( in src/run-task.ts"
+  rationale: |
+    ORIGIN: the operator's 2026-11-09 request about the Mac PR-fixer admission failure on PR #17394.
+    MEASURED, from the operator-supplied Mac mini ledger receipts and host readings (restated, not re-read here,
+    since this worktree has no Bash and the Mac ledger is not in it):
+    - sweep.fix_capacity rows at 2026-11-08 15:14:52Z and 15:16:34Z carry host_worker_budget=8, active_workers=0,
+      review_reservations=0, fixes_admitted=0, fix_admissions_available=0 and
+      pressure_reason="host pressure unreadable: ENOENT /proc/meminfo". The conflict fixer was refused repeatedly
+      from 15:14Z through 20:04Z. The PR stayed conflicted until a later head change.
+    - On 2026-11-09 the Mac host reports 16 GiB physical RAM, kern.memorystatus_vm_pressure_level=1 (normal),
+      vm_stat free+inactive pages, and vm.swapusage with only 1039 MiB free of 8192 MiB allocated.
+    READ in this worktree:
+    - src/lib/sweep.ts readFixHostPressureOnce does read("/proc/meminfo") and returns
+      {availableMib: 0, reason: "host pressure unreadable: ..."} on any throw. pressureWorkers returns 0 whenever
+      reason is set. So on darwin no fix is admitted, whatever the host's real state. This is the exact string in
+      the receipts.
+    - The three fix-admission controllers take readPressure from productionFixPressure: sweep.ts full surface
+      (~19424), sweep.ts light surface (~25447), and the run-task.ts fix-dispatch child (~43636).
+      productionFixPressure is ALSO the queue governor's default (run-task.ts queueGovernorGateFor) and the plan
+      lane capacity reader (sweep.ts ~5018). Those consumers are out of scope, so the darwin branch goes in a new
+      productionSweepFixPressure that only the three fix-admission sites call.
+    - scripts/lib/mac-author-admission.mjs already reads these exact native sources for author jobs:
+      parseMacVmSample (vm_stat; its comment says free+inactive "is an explicitly approximate planning input, not
+      MemAvailable"), macPressureState (1/2/4 -> normal/warning/critical, anything else unknown), and
+      boundedMacRead (2000 ms timeout, 4096-byte maxBuffer). test/mac-author-admission.test.ts covers the parser.
+      src/lib/test-slot.ts parseVmStatHeadroom/readVmStat (W1-T9952) is a second precedent in src/. This task
+      reuses that parsing contract and does not import a scripts/ .mjs into src/.
+    - MAC_AUTHOR_OS_FLOOR_BYTES (10 GiB, W1-T10765) is the existing measured reserve that "leaves room for [swap]
+      to double". The swap-can-grow check reuses it, so no new floor is introduced.
+    PLATFORM FACTS (researched 2026-11-09):
+    - Apple's memory-pressure dispatch source is the supported pressure signal, with normal/warn/critical levels
+      (https://developer.apple.com/documentation/dispatch/dispatch_source_type_memorypressure). XNU's
+      sysctl_memorystatus_vm_pressure_level maps the kernel level to NOTE_MEMORYSTATUS_PRESSURE_NORMAL/WARN/CRITICAL.
+      Its default branch returns NORMAL, and the release build marks the OID CTLFLAG_MASKED
+      (https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/kern_memorystatus_notify.c). So "normal"
+      alone is not enough for admission. The vm_stat headroom must also pass, and an unparseable value is unknown,
+      which refuses.
+    - vm_stat reports free and inactive page counts with the page size in its header
+      (https://developer.apple.com/library/archive/documentation/Performance/Conceptual/ManagingMemory/Articles/VMPages.html).
+      Free+inactive is an approximation, not Linux MemAvailable, and the reading must say so in its source label.
+    - macOS swap is dynamic. dynamic_pager creates more /private/var/vm swapfiles on demand, so vm.swapusage
+      "free" is free space in the swap already allocated, not a hard ceiling
+      (https://www.safaribooksonline.com/library/view/mac-os-x/0596003560/re11.html). Low allocated-swap free is
+      unsafe only when the swap volume also lacks room to grow. That is why the rule pairs it with statfs.
+    Settled by lookup: is this already filed or already decided? -> No. W1-T7811 (merged) made the queue governor's
+      tests hermetic and explicitly left "on a host with no /proc/meminfo, the production gate defers ALL new
+      dispatch" as a separate item (plan/tasks.d/W1-T7811-*). W1-T11750, W1-T11751 and W1-T11752 cover the live PR
+      inventory and per-head recovery records and escalation, not a resource adapter. W1-T11753 is the darwin cwd
+      census (src/lib/process-cwd-census.ts), not memory. W1-T9952 and W1-T10926 read vm_stat for test slots and
+      author preflight only. A grep of plan/ for readFixHostPressure, swapusage and darwin fix admission finds no
+      other owner.
+    Settled by lookup: does this raise a memory floor or weaken the gate? -> No. policy.memoryFloorMib and the fix
+      unit (classEstimate("fix"), default 2048 MiB in DEFAULT_ESTIMATE_MIB) are unchanged. The only new admitting
+      path is a positive, fully read darwin measurement (src/lib/sweep.ts, src/lib/host-memory-ledger.ts).
+    Settled by lookup: is a sync spawn allowed on this path? -> Only if W1-T5689's census accepts it. The builder
+      runs test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts, and stops and reports if it refuses the new
+      spawn rather than raising SYNC_SPAWN_LOOP_BASELINE without operator sign-off
+      (plan/tasks.d/W1-T5689-*).
+    Settled by lookup: is #17393 touched? -> No. It is the needs-human grill from PR #17394 and stays untouched
+      (plan/tasks.d/W1-T11812-*).
+  design: |
+    0. BOUNDED PRECONDITION. On the Mac host, before writing the parser, capture the raw stdout of /usr/bin/vm_stat
+       and of `/usr/sbin/sysctl -n kern.memorystatus_vm_pressure_level vm.swapusage`, plus statfs of /private/var/vm,
+       and record all three in the PR body. If the two-name sysctl does not print one value per line, use two bounded
+       calls. If vm.swapusage does not print "total = <n>M  used = <n>M  free = <n>M", stop and report. Do not guess.
+    1. readDarwinFixHostPressure(floorMib, unitMib, deps) in src/lib/sweep.ts, with an injectable runner and statfs.
+       It uses absolute tool paths, a 2000 ms timeout, a small maxBuffer and LC_ALL=C. It returns a FixHostPressure
+       with availableMib = floor(free+inactive bytes / 1048576) and an optional source field such as
+       "darwin:vm_stat-free+inactive-approx". It also carries a darwin record: pressure state, pageBytes, swap
+       total/used/free MiB, and swap-volume free bytes. Linux readings never set these fields.
+    2. REFUSE (reason set, availableMib 0), in this order: any tool failure, timeout or parse defect gives
+       "host pressure unreadable: darwin <tool>: <cause>". Pressure that is not normal gives "darwin pressure
+       <warning|critical|unknown>". Swap free below unitMib AND swap-volume free below MAC_AUTHOR_OS_FLOOR_BYTES gives
+       "darwin swap cannot grow". Otherwise headroom below floorMib + unitMib gives tier "host-short". That tier
+       still goes through reclaimBeforeHold (W1-T9358), as the Linux host-short tier does.
+    3. productionSweepFixPressure(floorMib, ledgerPath, unitMib) uses the darwin reader when process.platform is
+       "darwin" (an injectable platform), and otherwise calls productionFixPressure unchanged. Only the three
+       fix-admission readPressure defaults switch to it (sweep.ts full and light surfaces, and the run-task.ts
+       fix-dispatch child). The queue governor, plan lane capacity and every other /proc consumer stay as they are.
+    4. Tests in test/sweep/the-sweep-fix-pressure-reads-darwin-memory.test.ts, over an injected runner, platform and statfs:
+       (a) zero active workers, normal pressure, 6144 MiB free+inactive, 1039 MiB swap free with room to grow:
+           createSweepFixAdmissionController admits exactly one bounded fix;
+       (b) the same host at 4096 MiB free+inactive refuses as host-short;
+       (c) 1039 MiB swap free with the swap volume below the OS floor refuses as swap cannot grow;
+       (d) pressure 2, 4 and "7" each refuse, named;
+       (e) vm_stat exit 1, a timeout, and a missing page-size header each give availableMib 0 with a reason;
+       (f) platform linux with an injected /proc/meminfo returns the same object it returns today (deepEqual against
+           readFixHostPressure);
+       (g) one real pass on darwin through the W1-T9310 host helper, skipped elsewhere: the reading has a darwin
+           source and never the ENOENT /proc/meminfo reason.
+  falsifier: |
+    At origin/main on a Mac, the real darwin pass (g) reads "host pressure unreadable: ... ENOENT ... /proc/meminfo",
+    and case (a) admits 0, as in the 2026-11-08 receipts. Drop the statfs half of the swap rule and case (a) refuses
+    on 1039 MiB swap free, failing it. Drop the swap rule entirely and case (c) admits. Map unknown pressure to
+    normal and case (d) "7" admits. Any of these regressions turns the suite red.
