@@ -1,0 +1,43 @@
+- id: W1-T11818
+  title: The fleet pre-open gate runs the light job set as its gate and the full set only on demand, so a gate that took a median 45 minutes and ended without a verdict two times in three finishes in about 5
+  repo: remudero
+  depends_on: []
+  priority: 0.2
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # changes which checks the pre-open gate runs; the skipped jobs stay required in hosted CI, a revert switch restores today's gate, and a unit the log never recorded still reads unreached, never pass
+  band_meaning: span
+  origin: operator ruling 2026-11-09 "Switch to the light gate" (the 2026-11-02 ruling was shadow first, then switch)
+  plan_refs:
+    - W1-T11105
+    - W1-T9556
+  files:
+    - src/lib/preopen-gate.ts
+    - src/lib/ci-parity.ts
+    - src/run-task.ts
+    - test/ci/gates/a-pre-open-gate-runs-the-light-job-set-and-the-full-set-only-on-demand.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "`rmd preflight --fast --light` plans every phase and fast job except the jobs in LIGHT_GATE_SKIPPED_JOBS (rule-checks and census-precheck suites), keeps the census counts, and its step log names the light mode and the skipped jobs"
+      proof: "grep: W1-T11818 criterion 1 in test/ci/gates/a-pre-open-gate-runs-the-light-job-set-and-the-full-set-only-on-demand.test.ts"
+    - claim: runPreopenGate launches the light mode by default; any failed light unit fails the gate, all passed units pass it, and the row names gate_mode light and the skipped jobs
+      proof: "grep: W1-T11818 criterion 2 in test/ci/gates/a-pre-open-gate-runs-the-light-job-set-and-the-full-set-only-on-demand.test.ts"
+    - claim: A unit the light step log never recorded, or an unreadable log, still reads unreached or unmeasured, never pass
+      proof: "grep: W1-T11818 criterion 3 in test/ci/gates/a-pre-open-gate-runs-the-light-job-set-and-the-full-set-only-on-demand.test.ts"
+    - claim: Setting RMD_PREOPEN_GATE to full restores the full gate exactly, with today's job set, backstop and row fields
+      proof: "grep: W1-T11818 criterion 4 in test/ci/gates/a-pre-open-gate-runs-the-light-job-set-and-the-full-set-only-on-demand.test.ts"
+  rationale: |
+    OBSERVED 2026-11-09 (ledger implement.preopen_gate, 29 rows, 2026-11-05 to 2026-11-09): the full gate cost 1,275 minutes (21.3 worker-hours), median 45 and maximum 71 minutes, and 19 of 29 (66%) ended "unmeasured" at their backstop with no verdict. The W1-T11105 shadow derived what a light gate (census counts plus every step but the census suites and rule-checks) would have said from the same run: it cost 174 minutes in total, agreed with the full gate on every comparable failure (3 of 3: typecheck; typecheck and census counts; claims and census counts), and gave a verdict on 13 of the 19 runs where the full gate gave none, 3 of them real failures the full gate never reported. light_miss was false on all 29.
+    - The operator's 2026-11-02 ruling was shadow first, then switch; the 2026-11-09 ruling approved the switch on these numbers.
+    - What the light gate skips (rule-checks and the census suites) still runs in hosted CI, which stays the required gate.
+  design: |
+    Add a light mode to the fast preflight: `preflight --fast --light` drops LIGHT_GATE_SKIPPED_JOBS from the planned fast jobs (keeping the census counts) and writes the mode and the skipped job names into the step log's plan record. runPreopenGate passes --light unless RMD_PREOPEN_GATE is full, derives its result from the light step log with the existing unit rules (a unit the log never recorded is unreached, an unreadable log unmeasured), and writes gate_mode and skipped_jobs on the implement.preopen_gate row. The backstop keeps its measured-p95 basis; the light population will measure its own. The shadow derivation stays for the full mode.
+    NOT IN SCOPE: changing what hosted CI requires, the author preflight (W1-T11819 and later), and the backstop's formula.
+  falsifier: |
+    Run the full job set in light mode and criterion 1 must fail; read a never-recorded unit as passed and criterion 3 must fail; ignore the revert switch and criterion 4 must fail; drop gate_mode from the row and criterion 2 must fail. Restore and require all four to pass.
+  note: |
+    reservation hand-off: run-unfiled-1794186053317 -> run-unfiled-1794173043382
+    Reserved with rmd next-task-id (W1-T11818 on run-unfiled-1794186053317). src/run-task.ts forces the full suite set (W1-T10740). Proof that counts: implement.preopen_gate rows with gate_mode light, their durations, and no rise in hosted rule-checks or census failures on fleet PRs.

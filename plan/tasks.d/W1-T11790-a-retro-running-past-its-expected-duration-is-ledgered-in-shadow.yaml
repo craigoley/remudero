@@ -1,0 +1,41 @@
+- id: W1-T11790
+  title: A detached retro that runs past a declared shadow duration is ledgered once as overrunning, and every retro ledgers its duration, so a hung retro stops silently holding recycles and reviews and the enforcing bound can be ruled from data
+  repo: remudero
+  depends_on: []
+  priority: 1.2
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # observation only: a ledger row, never a kill; the retro, its admission hold and every gate are unchanged
+  band_meaning: blast-radius
+  origin: operator-session#recycle-stall-2026-11-08
+  plan_refs:
+    - W1-T9119
+    - W1-T6597
+  files:
+    - src/lib/daemon.ts
+    - test/daemon.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: A detached retro still running after the declared shadow duration produces exactly one retro.overrun ledger row with its pid, age and the threshold, and the retro keeps running
+      proof: "grep: W1-T11790 criterion 1 in test/daemon.test.ts"
+    - claim: A retro that finishes within the threshold produces no overrun row
+      proof: "grep: W1-T11790 criterion 2 in test/daemon.test.ts"
+    - claim: Every retro that ends, in time or not, ledgers one retro.duration row with its age in milliseconds and its outcome
+      proof: "grep: W1-T11790 criterion 3 in test/daemon.test.ts"
+    - claim: The overrun and duration rows are observation only; no kill, no admission change and no new gate follows from them
+      proof: "grep: W1-T11790 criterion 4 in test/daemon.test.ts"
+  rationale: |
+    OBSERVED 2026-11-08: the daemon container's run-task.ts retro process (pid 143305) ran 5,211 s (about 87 min) holding no lane and writing no ledger row. recycle-container.sh counts a retro as a busy worker and waits for it (worker_lines), so a container recycle waited 41 minutes, aborted on a SIGTERM, a second recycle then waited 22 more, and dispatch and reviews were paused from about 19:22Z to 20:47Z, when the operator approved killing it. The progress watchdog read STALLED progressAgeMs=3088658.
+    - Population: the one hung retro is the only duration on record, because no retro duration is ledgered, so a bound cannot be set from data. Worker runs read 19.3 min median and 46.7 min p95; a retro is a different population.
+    - Doctrine: a bound that fires on a healthy condition is this repo's recurring defect, so this task observes first and the operator rules the enforcing value from the rows (the same shadow-then-enforce path as the 8 GiB bound, W1-T11344).
+  design: |
+    Where the daemon adopts a spawned retro (adoptChildWork with work kind retro), record its start time. On the in-flight tick, if a retro has run longer than RETRO_SHADOW_OVERRUN_MS (a declared constant, 60 minutes) and no overrun row was written for it, append one retro.overrun row (pid, age_ms, threshold_ms, detached_since). When the retro child exits, append one retro.duration row (age_ms, outcome). Nothing is killed, no hold or admission changes.
+    NOT IN SCOPE: enforcing a kill (a separate task after the operator reads the rows), recycle-container.sh's worker classification, the progress watchdog.
+  falsifier: |
+    Remove the overrun check and criterion 1 must fail; flag a within-threshold retro and criterion 2 must fail; drop the duration row and criterion 3 must fail; make the overrun stop the retro and criterion 4 must fail. Restore the code and require all four to pass.
+  note: |
+    reservation hand-off: run-unfiled-1794173043382 -> run-unfiled-1794173043382
+    Reserved with rmd next-task-id (W1-T11790 on run-unfiled-1794173043382). Proof that counts: retro.duration rows after deploy, and any retro.overrun row naming a retro that was later killed or finished.
