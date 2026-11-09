@@ -87,6 +87,7 @@ import { startMainEntryWatch } from "../../lib/main-entry.js";
 import { createLiveSetKeeper, createPlanCopyBook, daemonHolderSource, observedPlanSync, startDaemonMemoryCensus } from "../../lib/daemon-memory-census.js";
 import { terminalUnionScans } from "../../lib/sweep.js";
 import { createDaemonFootprint, daemonFootprintPath, installDaemonFootprint } from "../../lib/daemon-footprint.js";
+import { readHeapAdmissionHoldMode } from "../../lib/daemon-heap-admission-hold.js";
 import { applyDaemonMemoryPolicy, createDaemonMemoryGovernor, createDaemonSlackReclaimer, installDaemonSlackReclaimer, readDaemonMemoryPolicy } from "../../lib/daemon-memory-policy.js";
 import { workerThreads } from "../../lib/worker-heaps.js";
 import { readCiGateRequiredChecks } from "../../lib/ci-gate-required.js";
@@ -774,6 +775,7 @@ export async function daemonCommand(
   // the defaults and names itself on the daemon.memory_policy row below.
   const memoryPolicyRead = readDaemonMemoryPolicy(policyPath(deps.repoRoot ?? repoRoot));
   const memoryPolicyApplied = (deps.applyMemoryPolicy ?? applyDaemonMemoryPolicy)(memoryPolicyRead.policy);
+  const heapHoldMode = readHeapAdmissionHoldMode(policyPath(deps.repoRoot ?? repoRoot));
   // W1-T2697: mark THIS process as the daemon BEFORE anything below can append a ledger row —
   // every `appendLedger` call this process makes (in-process, e.g. a wired sweep tick) from here
   // on reports `actor: "daemon"` rather than the operator-shell default. See
@@ -2005,6 +2007,8 @@ export async function daemonCommand(
         // own doc for why UNREACHABLE reads as held, never as clear.
         checkPause,
         workerAdmissionHold: () => resolveFleetControlHold({ checkStop, checkPause }),
+        heapAdmissionHoldMode: heapHoldMode.mode,
+        ...(heapHoldMode.error ? { heapAdmissionHoldModeError: heapHoldMode.error } : {}),
         // CODE FRESHNESS — THE PRODUCER W1-T126 NEVER GOT. The consumer has read
         // `deps.checkFreshness` since 2026 and this object never supplied it, so the stale
         // self-restart had fired ZERO times in the Azure daemon's 6,838-row ledger. MEASURED
