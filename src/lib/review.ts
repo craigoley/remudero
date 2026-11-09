@@ -6756,7 +6756,7 @@ export type ReviewStatusHistory =
 
 export type ReviewStatusHistoryReader = (owner: string, repo: string, prUrl: string, headSha: string) => Promise<ReviewStatusHistory>;
 
-/** Tolerates the one-array-per-page shape many existing gh fixtures still answer with. */
+/** Flattens legacy slurped-page fixtures. */
 function rowsFromPaginatedApi(value: unknown): unknown[] {
   if (!Array.isArray(value)) throw new Error("GitHub returned a non-list response");
   if (value.every((row) => row === null || typeof row !== "object" || Array.isArray(row))) {
