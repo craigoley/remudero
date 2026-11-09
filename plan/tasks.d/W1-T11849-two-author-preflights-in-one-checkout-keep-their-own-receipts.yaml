@@ -1,0 +1,79 @@
+- id: W1-T11849
+  title: "Two author preflights in one checkout keep their own receipts: the static summary moves into each run's own diagnostics directory, and the shared default summary coverage/preflight-author.json is written atomically. Today both runs write the same two fixed paths, and the default summary is written by a plain truncating write"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: medium  # Rule 19: one concern, where an author run writes its receipts. One script; the receipt schema and the default path stay unchanged for their readers
+  band_meaning: blast-radius
+  priority: 2
+  origin: architect
+  plan_refs: [W1-T9951, W1-T11099, W1-T11101, W1-T3280, W1-T11850]
+  files:
+    - scripts/preflight-author.mjs
+    - test/ci/two-author-preflights-in-one-checkout-keep-their-own-receipts.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    ORIGIN: operator initiative from the PR #17348 recovery, gap A. It asks whether concurrent author runs collide on the
+    default summary path, and to isolate receipts. This task is that half. W1-T11850 (single-flight) depends on it,
+    because a follower's receipt has to land somewhere a concurrent leader cannot clobber.
+    READ in this worktree (scripts/preflight-author.mjs, symbols rather than line numbers):
+    - main() keeps per-run diagnostics in `mkdtempSync(join(root, 'coverage', 'rmd-author-'))` (ensureDiagnostics).
+      progress.json, the per-step logs and receipt.json (flag 'wx') are written there, so they are already isolated.
+    - The static stage passes `'--summary-file', join(root, 'coverage/preflight-author-static.json')`. That is one
+      fixed path per checkout, shared by every run in that root.
+    - The terminal receipt ends with `writeFileSync(join(root, 'coverage/preflight-author.json'), ...)`. That is a
+      truncate-then-write to one fixed path, not temp-then-rename. A reader racing a second run can see a torn or
+      foreign receipt.
+    Settled by lookup: is this already filed or already decided? -> No. W1-T9951, W1-T11099, W1-T11101 and W1-T11819
+      change admission, shadow telemetry, census reuse and suite-read reporting. None of them moves the summary paths.
+      W1-T3280 makes a summary name its tree, not its path. No shard names preflight-author-static.json as a
+      collision (grep of plan/).
+    Settled by lookup: who reads the default summary? -> src/lib/local-qualification-receipt.ts (boundedRead of
+      coverage/preflight-author.json), docs/author-gate-accounting.md (--author-receipt coverage/preflight-author.json),
+      scripts/lib/mac-author-admission.mjs, and about 20 test files. So the default path and schema must stay.
+    Settled by lookup: who reads coverage/preflight-author-static.json? -> No code. Only preflight-author.mjs
+      produces it. W1-T11101's rationale read it by hand once. Moving it breaks no reader.
+    Settled by lookup: is there an atomic-write primitive? -> Yes. writeAtomic in src/lib/fs-race-safe.ts.
+      preflight-author.mjs already imports src/lib TypeScript modules (ci-parity.ts, test-slot.ts).
+    Settled by lookup: does an open PR already touch this? -> No. The 3 open PRs on 2026-11-09 are #17505
+      (W1-T11376, +3/-8 against main, check-proof/review/task-linter), #17494 (W1-T11693, +3/-12, worker-home) and #17485
+      (W1-T11768, +12/-3, ops-catalog). None touches scripts/preflight-author.mjs
+      (https://api.github.com/repos/craigoley/remudero/pulls?state=open, compare main...head for each).
+  design: |
+    OWNER: scripts/preflight-author.mjs main(). No other file changes behaviour.
+    1. STATIC SUMMARY PER RUN. The static stage's `--summary-file` becomes `join(diagnosticsRoot, 'static-summary.json')`
+       (call ensureDiagnostics() first). The receipt records `staticSummaryPath`, relative to root.
+       coverage/preflight-author-static.json is no longer written.
+    2. DEFAULT SUMMARY ATOMIC. The terminal write of coverage/preflight-author.json goes through writeAtomic
+       (src/lib/fs-race-safe.ts): a temp file in the same directory, then rename. A reader therefore sees one whole
+       receipt from exactly one run. The receipt gains `diagnosticsDir` (relative to root), so a reader can find that
+       run's own receipt.json. The path, the schema and every existing field stay as they are. The last run to finish
+       owns the default path. The per-run receipt.json stays the durable record of each run.
+    3. FAILURE BEHAVIOUR. If the atomic write fails, the run exits non-zero and names the path. It never leaves a
+       partial file at the default path, and it never reports a pass it could not record. The per-run receipt.json
+       write ('wx') is unchanged.
+    TEST (test/ci/two-author-preflights-in-one-checkout-keep-their-own-receipts.test.ts). Use a fixture root with an
+    injected spawn seam, as test/author-preflight.test.ts does. Two runs in one root:
+      (a) each run's static `--summary-file` argument names a different path, inside that run's own diagnostics dir;
+      (b) coverage/preflight-author.json parses as one complete receipt. It deep-equals one of the two runs' own
+          receipt.json, and its diagnosticsDir names that run;
+      (c) a writeAtomic failure seam leaves no file at the default path, and the run exits non-zero.
+    Include a red control: with the old fixed --summary-file, assertion (a) must fail.
+    LIMITS / NOT IN SCOPE: single-flight or dedup of concurrent runs (W1-T11850); admission, census or suite selection;
+    the receipt schema beyond the two added fields; local-qualification-receipt.ts and the docs, which keep reading
+    the same path.
+  acceptance:
+    - claim: "two author runs in one checkout write their static summaries to different paths inside their own diagnostics directories, and the default summary is always one whole receipt from exactly one run"
+      proof: "unit test: test/ci/two-author-preflights-in-one-checkout-keep-their-own-receipts.test.ts"
+    - claim: "the static stage's summary file is named inside the run's diagnostics directory"
+      proof: "grep: static-summary.json in scripts/preflight-author.mjs"
+    - claim: "the default summary is written through the atomic-write primitive"
+      proof: "grep: writeAtomic( in scripts/preflight-author.mjs"
+  falsifier: |
+    At this tree, two runs in one root both pass `coverage/preflight-author-static.json` as --summary-file, so (a)
+    fails. If a reader of coverage/preflight-author.json (local-qualification-receipt.ts or any existing
+    author-preflight test) goes red, the path or schema was changed and the task is wrong.
