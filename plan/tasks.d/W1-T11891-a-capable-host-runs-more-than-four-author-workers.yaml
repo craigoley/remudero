@@ -1,7 +1,7 @@
 - id: W1-T11891
   title: A capable host runs more than four measured author workers without a fixed execution ceiling
   repo: remudero
-  depends_on: []  # W1-T11583 removed AUTHOR_SLOT_CEILING=1; this follow-up removes its retained four-worker maximum.
+  depends_on: [W1-T11909]  # W1-T11583 removed AUTHOR_SLOT_CEILING=1; this follow-up removes its retained four-worker maximum. Held behind W1-T11909: run W1-T11891-1794252506105 failed closed in isolation_probe (six /etc/profile.d/gawk.sh functions), so this task stays separate and blocked until a fresh native probe passes (operator, 2026-11-09).
   type: implement
   verify: auto
   principles: {tdd: strict}
@@ -32,6 +32,7 @@
     - With memory unmeasured before a slot is held, the author pre-admission estimate must remain one worker. Once an actual slot is acquired, its measured concurrency may supply the memory-side bound. Infinity is never an admissible substitute for missing memory evidence.
     - scripts/calibrate-author-runtime.mjs separately limits low-priority calibration samples with Math.min(4, slot.concurrency). That sample limit is not the author execution cap and stays explicitly out of scope.
     The W1-T11583 implementation merged in PR #17263 and its plan amendment merged in #17276. It removed AUTHOR_SLOT_CEILING=1 and added the measured-slot grant path while deliberately retaining AUTHOR_MAX_WORKERS=4. This task removes only that remaining author execution maximum. No other current task or decision authorizes it.
+    Settled by lookup: should the isolation_probe failure of native run W1-T11891-1794252506105 be fixed inside this task? -> no. The six gawk* functions come from the Azure /etc/profile.d/gawk.sh and reach the worker Bash snapshot. The fix belongs to W1-T11693 (worker login profile) and its snapshot-path proof to W1-T11908. This task waits on W1-T11909, which records a fresh native probe passing (operator ruling 2026-11-09). Its scope is unchanged.
   design: |
     Remove every fixed four-worker ceiling on actual author execution while keeping measured and fail-closed admission:
     1. Delete AUTHOR_MAX_WORKERS and replace every use in hostBudget, deadlineHostBudget, enqueueTestSlot and executionWorkers with the measured CPU, memory and acquired FIFO-slot bounds. Record boundBy and the contributing values in the receipt.

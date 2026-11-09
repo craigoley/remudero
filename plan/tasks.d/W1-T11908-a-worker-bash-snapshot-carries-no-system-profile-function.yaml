@@ -1,0 +1,94 @@
+- id: W1-T11908
+  title: "A Claude worker's Bash shell snapshot, generated the way Claude Code generates it, carries no /etc/profile.d function, while an alias or function from any other source still reaches the snapshot and makes the isolation probe refuse"
+  repo: remudero
+  depends_on: [W1-T11693]  # W1-T11693 owns the source fix (the worker login profile); this task proves it on the snapshot path
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 20.00
+  risk: medium  # worker shell isolation only; a wrong test either rigs a pass or hides a leak the probe would refuse
+  priority: 1  # governed native dispatch on the Azure host stops at isolation_probe until this boundary is proven
+  origin: architect
+  plan_refs: [W1-T17, W1-T18, W1-T11693, W1-T11891]
+  files:
+    - test/worker-bash-snapshot-isolation.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    DIRECT EVIDENCE (operator, 2026-11-09): native run W1-T11891-1794252506105 failed closed in isolation_probe with
+    0 aliases and six inherited functions: gawklibpath_append, gawklibpath_default, gawklibpath_prepend,
+    gawkpath_append, gawkpath_default, gawkpath_prepend. Luna traced them to the Azure host's /etc/profile.d/gawk.sh.
+    They were serialized into the Claude Bash shell snapshot even though the worker has a private HOME and an empty
+    .bashrc. This is the second governed run to fail this way. W1-T11687-1794122603696 was the first (see W1-T11693).
+    WHY A SEPARATE TASK: W1-T11693 owns the bounded source fix. Its generated ~/.bash_profile clears pre-profile
+    aliases and functions without a name list. Its regression test spawns `bash --login -c` and
+    `bash --noprofile --norc`. It never runs the invocation Claude Code uses to build the snapshot, and it never asserts
+    that state from a non-profile source still trips assessIsolation. This task adds both proofs at the snapshot
+    boundary, and adds no second cleanup mechanism.
+    Settled by lookup: is this already filed or already decided? -> the fix is filed, but this proof is not. W1-T11693
+      (queued, PR #17494 per W1-T11851) clears host-profile functions in the worker login profile and leaves the probe
+      untouched. No task tests the snapshot generator invocation or the still-refuses arm. plan/ (monolith and shards),
+      MASTER-PLAN.md, LEARNINGS.md and DECISIONS.md have no other entry for gawk, profile.d or the shell snapshot
+      boundary. LEARNINGS.md line 16 (PR #8) records only that the snapshot sources `$HOME/.<shell>rc`.
+    Settled by lookup: how does Claude Code build the Bash snapshot? -> it runs `execFile(binShell, ['-c', '-l',
+      snapshotScript])` with SHELL=binShell, GIT_EDITOR=true and CLAUDECODE=1 over the inherited env. The script runs
+      `source "$HOME/.bashrc" < /dev/null` when that file exists. It then serializes every `declare -F` name except
+      single-underscore ones, and writes `unalias -a` into the snapshot file. Later Bash calls source the snapshot and
+      drop `-l` (third-party source mirror utils/bash/ShellSnapshot.ts and utils/shell/bashProvider.ts,
+      https://tangled.org/oppi.li/claude-code/blob/main/utils/bash/ShellSnapshot.ts). This mirror is unofficial, so
+      the native probe in W1-T11909 is the authority for the shipped CLI.
+    Settled by lookup: does the snapshot shell read the worker login profile after /etc/profile? -> yes. `-l` makes it a
+      bash login shell, which reads /etc/profile, then the first readable one of ~/.bash_profile, ~/.bash_login and
+      ~/.profile (https://www.gnu.org/software/bash/manual/html_node/Bash-Startup-Files.html). /etc/profile sources
+      /etc/profile.d, where gawk.sh defines the six names
+      (https://www.gnu.org/software/gawk/manual/html_node/Shell-Startup-Files.html). So W1-T11693's fix point is the
+      one the snapshot shell reads. Its falsifier names this exact question.
+    Settled by lookup: where does worker shell state come from after the profile? -> the snapshot script sources the
+      worker HOME's ~/.bashrc. materializeWorkerHome truncates it to "" (src/lib/worker-home.ts, WORKER_HOME_RC_FILES).
+      buildWorkerEnv copies only ALLOWLIST keys from the parent and sets HOME and CLAUDE_CODE_SHELL (src/lib/env.ts).
+      So state planted in ~/.bashrc after materialization is the non-profile source this test uses to show the probe
+      still refuses.
+    Settled by lookup: does the probe change? -> no. assessIsolation refuses any non-zero count outside
+      CLAUDE_CODE_TOOL_WRAPPERS (src/lib/isolation.ts). The operator forbids loosening or bypassing it.
+  design: |
+    SCOPE: test/worker-bash-snapshot-isolation.test.ts (new) only. One concern: the snapshot-boundary falsifier. Do not
+    touch src/lib/worker-home.ts (W1-T11693 owns it), src/lib/isolation.ts, CLAUDE_CODE_TOOL_WRAPPERS, the probe prompt, src/lib/env.ts, /etc/profile, /etc/profile.d,
+    any host .bashrc, or W1-T11693's profile body. If this test shows the W1-T11693 body is insufficient, stop and
+    amend W1-T11693. Do not add a second cleanup here.
+    1. SNAPSHOT HARNESS (in the test file). Materialize a real worker home with materializeWorkerHome. Build the env
+       with buildWorkerEnv(..., { home, shell }), resolving the shell by name as the W1-T2850 note in
+       test/codex-worker-home-redirection.test.ts requires. Spawn `<CLAUDE_CODE_SHELL> -c -l '<script>'` with
+       SHELL=<shell>, GIT_EDITOR=true and CLAUDECODE=1 added, which is the generator invocation cited in the rationale.
+       The script follows the generator: if "$HOME/.bashrc" exists, source it with stdin from /dev/null, then print
+       `declare -F` names (single-underscore names dropped, as the generator drops them) and `alias` names. Cite the
+       mirror URL in a comment, marked unofficial.
+    2. SYSTEM-PROFILE INJECTION WITHOUT TOUCHING /etc. Put a non-gawk function into the spawn env as an exported bash
+       function (`export -f` in a parent `bash -c` that execs the harness). Bash imports it before /etc/profile, at
+       the same point where a profile.d function exists. On a host where /etc/profile.d/gawk.sh exists, also assert
+       that none of the six gawk* names reaches the report. Skip only that sub-assertion elsewhere, with a named skip.
+    3. RED CONTROL (same test): against a home whose ~/.bash_profile is zero bytes, which is the behaviour before
+       W1-T11693, the injected function IS reported. This proves the harness can observe the leak (W1-T2805 item 14).
+    4. GREEN: against the materialized home, the report has zero aliases and none of the injected function names.
+       Feed the report through assessIsolation in the probe's report shape. It must return isolated:true.
+    5. STILL REFUSES: plant `alias rmd_planted_alias=true` and a function `rmd_planted_fn` in the materialized
+       ~/.bashrc after materialization, then rerun the harness. Both names reach the report, and assessIsolation
+       returns isolated:false naming them. A wrapper-named function (find) stays excluded exactly as today.
+    Keep test/worker-home.test.ts, test/worker-home-per-run.test.ts and test/codex-worker-home-redirection.test.ts
+    green and unchanged.
+  acceptance:
+    - claim: "the snapshot-path suite proves a pre-profile function leaks into a blank-profile home, is absent from the materialized home, and that ~/.bashrc state still makes assessIsolation refuse"
+      proof: "unit test: test/worker-bash-snapshot-isolation.test.ts"
+  falsifier: |
+    Before W1-T11693 merges, the green case fails because the materialized ~/.bash_profile is zero bytes, which is why
+    this task depends on it. The proof is rigged or wrong if any of these hold:
+    - the red control does not report the injected function;
+    - the harness spawns anything other than `-c -l` with the env from buildWorkerEnv;
+    - the green case passes because the harness skipped /etc/profile, for example through --noprofile;
+    - a ~/.bashrc-planted alias or function is cleared, or assessIsolation passes it;
+    - src/lib/isolation.ts or CLAUDE_CODE_TOOL_WRAPPERS changes.
+    If W1-T11909's fresh native probe on Azure still reports the gawk* names after this merges, the shipped CLI does
+    not build its snapshot the way the mirror shows, and this harness models the wrong path.
+  note: "verify:auto. The whole-file proof runs a real bash login shell against a materialized home, with a red
+    control. Live proof on the real CLI is W1-T11909's job. Rule 19 (relint): the src/lib/worker-home.ts doc-comment
+    step was dropped so the task spans one concern, the snapshot-boundary falsifier; W1-T11693 owns worker-home.ts.
+    budget 20: one new test file."
