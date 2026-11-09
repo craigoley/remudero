@@ -24,9 +24,9 @@
     - claim: An unbundled spawn through hostWorktreeGit still records the calling function as caller and hostWorktreeGit as leaf through the existing worktree-git path matcher
       proof: "unit test: W1-T11795 criterion 2"
     - claim: SYNC_SPAWN_LEAF_FRAME_NAMES names hostWorktreeGit as a shared spawn leaf
-      proof: 'grep: "hostWorktreeGit" in src/lib/read-plane.ts'
+      proof: 'grep: hostWorktreeGit in src/lib/read-plane.ts'
     - claim: SYNC_SPAWN_LEAF_FRAME_NAMES names vetPinnedConfig as a shared spawn leaf
-      proof: 'grep: "vetPinnedConfig" in src/lib/read-plane.ts'
+      proof: 'grep: vetPinnedConfig in src/lib/read-plane.ts'
   rationale: |
     OBSERVED on the live daemon at 2026-11-08T20:36:23.463Z: daemon.loop_stall_profile reports
     sync_spawn_ms=34284, with 55 calls charged to hostWorktreeGit (24691 ms) and 55 charged to
