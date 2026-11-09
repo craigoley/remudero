@@ -65,7 +65,8 @@ class Refusal extends RmdError {
   constructor(outcome: OpsCatalogOutcome) { super("github", 1, outcome); this.outcome = outcome; }
 }
 
-const AUTH_TEXT = /auth login|GH_TOKEN|GITHUB_TOKEN|HTTP 401|authentication/i;
+const AUTH_DIAGNOSTIC = /^(?:gh: )?(?:To get started with GitHub CLI, please run:|To use GitHub CLI in a GitHub Actions workflow, set the GH_TOKEN environment variable\.)/m;
+const HTTP_DIAGNOSTIC = /^(?:HTTP (\d{3})(?:[ \t:]|$)|gh: [^\r\n]*?\(HTTP (\d{3})\))/m;
 const execFileAsync = promisify(execFile);
 const snapshotStore = createPlanRevisionStore({ strict: true });
 
@@ -94,9 +95,12 @@ export function defaultOpsCatalogApi(
       else pacer.wait();
       return await ghJsonAsync(["api", path], exec, undefined, { fresh: true });
     } catch (error) {
-      // gh's message carries URLs and bodies: classify it here and let it go.
-      const text = error instanceof Error ? `${error.message}\n${String((error as { stderr?: unknown }).stderr ?? "")}` : "";
-      throw AUTH_TEXT.test(text) ? new OpsCatalogAuthMissingError() : new Refusal("unreadable");
+      // Match CLI diagnostics, not auth words in echoed request paths or response bodies.
+      const stderr = error instanceof Error ? (error as Error & { stderr?: unknown }).stderr : undefined;
+      const diagnostic = typeof stderr === "string" && stderr ? stderr : error instanceof Error ? error.message : "";
+      const status = HTTP_DIAGNOSTIC.exec(diagnostic);
+      const authMissing = status ? (status[1] ?? status[2]) === "401" : AUTH_DIAGNOSTIC.test(diagnostic);
+      throw authMissing ? new OpsCatalogAuthMissingError() : new Refusal("unreadable");
     }
   };
 }

@@ -94,6 +94,55 @@ test("W1-T11768 criterion 2: 403, 404 and transport failures are all unreadable"
   refused("unreadable", await readOpsCatalogSnapshotAsync({ repository: "../escape" }, throwsNonError));
 });
 
+test("W1-T11768 criterion 2: default transport failures stay unreadable for auth-like repository names", async () => {
+  const shim = ghShim([]);
+  const previousPath = process.env.PATH;
+  try {
+    process.env.PATH = `${shim.dir}:${previousPath ?? ""}`;
+    const api = defaultOpsCatalogApi({ pacer: { wait() {}, recordResult() {} } });
+    for (const repository of ["acme/catalog", "acme/authentication-catalog", "GH_TOKEN/GITHUB_TOKEN-catalog"]) {
+      for (const status of [403, 404, 500]) {
+        const path = `repos/${repository}`;
+        shim.addRoute({ when: path, stderr: `gh: request failed (HTTP ${status}) (https://api.github.com/${path})`, exit: 1 });
+        refused("unreadable", await readOpsCatalogSnapshotAsync({ repository }, api));
+      }
+      shim.addRoute({ when: `repos/${repository}`, stderr: "connection reset by peer", exit: 1 });
+      refused("unreadable", await readOpsCatalogSnapshotAsync({ repository }, api));
+    }
+    shim.addRoute({ when: "repos/acme/catalog", stderr: "gh: authentication required (HTTP 403)", exit: 1 });
+    refused("unreadable", await readOpsCatalogSnapshotAsync({ repository: "acme/catalog" }, api));
+    assert.equal(shim.calls().length, 13, "every refusal came through the real default child transport");
+    assert.ok(shim.calls().every((call) => call.startsWith("api repos/")));
+  } finally {
+    if (previousPath === undefined) delete process.env.PATH;
+    else process.env.PATH = previousPath;
+    fs.rmSync(shim.dir, { recursive: true, force: true });
+  }
+});
+
+test("W1-T11768 criterion 2: default transport recognizes missing identity from cli diagnostics", async () => {
+  const shim = ghShim([]);
+  const previousPath = process.env.PATH;
+  try {
+    process.env.PATH = `${shim.dir}:${previousPath ?? ""}`;
+    const api = defaultOpsCatalogApi({ pacer: { wait() {}, recordResult() {} } });
+    for (const stderr of [
+      "gh: Bad credentials (HTTP 401) (https://api.github.com/repos/acme/catalog)",
+      "HTTP 401: Bad credentials",
+      "To use GitHub CLI in a GitHub Actions workflow, set the GH_TOKEN environment variable.",
+      "gh: To use GitHub CLI in a GitHub Actions workflow, set the GH_TOKEN environment variable.",
+    ]) {
+      shim.addRoute({ when: "repos/acme/catalog", stderr, exit: 1 });
+      refused("auth_missing", await readOpsCatalogSnapshotAsync({ repository: "acme/catalog" }, api));
+    }
+    assert.equal(shim.calls().length, 4, "positive controls exercise the default child transport too");
+  } finally {
+    if (previousPath === undefined) delete process.env.PATH;
+    else process.env.PATH = previousPath;
+    fs.rmSync(shim.dir, { recursive: true, force: true });
+  }
+});
+
 test("W1-T11768 criterion 2: a readable repo with no plan is source_absent, never an empty catalog", async () => {
   refused("source_absent", await run(fixture({ noPlanDir: true })));
   refused("source_absent", await run(fixture({})));
