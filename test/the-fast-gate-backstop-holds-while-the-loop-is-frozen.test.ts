@@ -230,7 +230,7 @@ test("W1-T9556: coreutils timeout is found by a spawn-free PATH walk, and the ro
   chmodSync(join(harness, "bin", "rmd"), 0o755);
   const rows: Array<{ step: string; extra?: Record<string, unknown> }> = [];
   const log = (step: string, extra?: Record<string, unknown>) => void rows.push({ step, extra });
-  const result = await runPreopenGate(work, { runGate: (cwd) => defaultRunGate(cwd, undefined, log, {}, { contain: passThroughSandbox(harness), harnessRoot: harness }) });
+  const result = await runPreopenGate(work, { runGate: (cwd) => defaultRunGate(cwd, undefined, log, {}, { parentEnv: { ...process.env, RMD_PREOPEN_GATE: "full" }, contain: passThroughSandbox(harness), harnessRoot: harness }) });
   assert.equal(result.kind, "pass", JSON.stringify(result));
   const spawned = rows.filter((r) => r.step === CHILD_ENTRY_SPAWNED_STEP);
   assert.equal(spawned.length, 1);
