@@ -6,7 +6,10 @@
   type: implement
   verify: auto
   risk: medium
+  priority: 4
   status: queued
+  # backlog gardener: band=4 evidence=1341515cfa48934b
+  # backlog gardener: placed=2026-11-08T22:31:49.721Z
   attempts: 0
   files:
     - src/lib/triage.ts

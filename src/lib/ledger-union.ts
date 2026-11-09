@@ -914,21 +914,10 @@ function rawLineCollector(opts: LedgerUnionRawReadOptions): { rawLines: string[]
   const stepFilter = rawLineStepFilter(opts.step);
   const seen = new Set<string>();
   const rawLines: string[] = [];
-  // W1-T3335 — SCANNED, NOT SPLIT. This decoded each corpus file into one JS string and then
-  // `split("\n")` it into an array of every line in that file. MEASURED on the live corpus
-  // (919 files, 3.84 GB decompressed), one call each through resolveLedgerUnion:
-  //
-  //   sweep uncreditable-head   +585 MB    323 matches
-  //   followup harvest        +3,804 MB  6,485 matches
-  //   credit timestamps       +3,846 MB 24,611 matches
-  //   authority table         +5,470 MB  9,115 matches
-  //
-  // Four callers, ~13.7 GB against an 8 GB heap cap — the daemon's abort. The first row is the
-  // tell: 323 retained lines still cost 585 MB, so the driver is the per-file whole-string plus
-  // split array, NOT what is kept. Scanning holds one file's decompressed buffer at a time.
-  //
-  // `buf.toString("utf8", start, end)` already yields an OWNED string, so the round-trip through
-  // `Buffer.from(line)` that used to sever slice-retention here is no longer needed.
+  // W1-T3335 — SCANNED, NOT SPLIT. Decoding each file to one string and `split("\n")` it cost +585 MB to keep 323
+  // lines and +5,470 MB for the authority table (919 files, 3.84 GB; ~13.7 GB over four callers against an 8 GB
+  // heap cap: the daemon's abort). The driver is the per-file string plus array, not what is kept; scanning holds
+  // one decompressed buffer at a time. `buf.toString("utf8", start, end)` already yields an owned string.
   const scan = (buf: Buffer, start = 0, maxLines = Number.POSITIVE_INFINITY): number => {
     let lines = 0;
     while (start < buf.length && lines < maxLines) {
@@ -1735,18 +1724,7 @@ export function readLedgerUnionRecordsSync(
     if (typeof row.step === "string") stepsSeen.add(row.step);
   };
 
-  // W1-T3335 — SCANNED, NOT SPLIT. This decoded each corpus file into one JS string and then
-  // `split("\n")` it into an array of every line in that file. MEASURED on the live corpus
-  // (919 files, 3.84 GB decompressed), one call each through resolveLedgerUnion:
-  //
-  //   sweep uncreditable-head   +585 MB    323 matches
-  //   followup harvest        +3,804 MB  6,485 matches
-  //   credit timestamps       +3,846 MB 24,611 matches
-  //   authority table         +5,470 MB  9,115 matches
-  //
-  // Four callers, ~13.7 GB against an 8 GB heap cap — the daemon's abort. The first row is the
-  // tell: 323 retained lines still cost 585 MB, so the driver is the per-file whole-string plus
-  // split array, NOT what is kept. Scanning holds one file's decompressed buffer at a time.
+  // W1-T3335: scanned, not split (see rawLineCollector): one file's buffer at a time, never a line array.
   // W1-T4820: a replayed archive line is skipped BEFORE its parse, so dedupe makes the union cheaper, not dearer.
   const skipSeen = opts.dedupe === false ? undefined : (line: string): boolean => seen.has(line);
   // W1-T9981: `keep` was typed but never applied here. It filters the lines this reader scans; a memo's rows,

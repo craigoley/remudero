@@ -73,6 +73,9 @@ function fixture(): { root: string; env: NodeJS.ProcessEnv } {
       // Serve's hard limit is pinned by the operator override: unset, the shared budget sizes it too.
       RMD_SERVE_MEMORY_LIMIT_MIB: "7680",
       RMD_INSTANCE_REGISTRY: "", // set but empty: records come from this one state root only
+      // W1-T11553: the policy records each fleet container's LIVE memory.peak through the host's docker
+      // and /sys/fs/cgroup; on a host running those containers that overwrote the fixture's peaks.
+      RMD_CGROUP_ROOT: join(root, "cgroup"), // an empty tree: no container has a readable memory.peak
     },
   };
 }

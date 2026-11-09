@@ -6,7 +6,10 @@
   type: recon
   verify: auto
   risk: low
+  priority: 4
   status: queued
+  # backlog gardener: band=4 evidence=db4711e0e8295f9d
+  # backlog gardener: placed=2026-11-08T22:31:49.721Z
   attempts: 0
   files:
     - plan/tasks.d/W1-T11411-a-read-model-fixture-flushes-its-diagnostics-before-removing-its-state.yaml

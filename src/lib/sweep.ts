@@ -2318,6 +2318,7 @@ export const SWEEP_EFFECT_SURFACE = [
   "readArmTimeline",
   "readActionsStatusSummary", // W1-T5939
   "rerunFailedChecks",
+  "readFailedRunBase",
   // remudero-console #2035: the task contract an escalated fix-progress latch stands on.
   "readTaskContractRevision",
   "readTaskSemanticRevision",
@@ -2452,6 +2453,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   | "withdrawStackAutoMerge"
   | "requeueCheck"
   | "rerunFailedChecks"
+  | "readFailedRunBase"
   | "escalateCancelledCheck"
   | "escalateInfrastructureCheck"
   | "readCiGateRollup"
@@ -2763,6 +2765,23 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   const readMainRepair = async (): Promise<MainRepairEvidence | undefined> => {
     const main = await readMainCommit();
     return main?.sha && main.committedAt ? { sha: main.sha, committedAt: main.committedAt } : undefined;
+  };
+  const readFailedRuns = async (pr: OpenPrView) => {
+    type Run = { id?: number; head_sha?: string; status?: string; conclusion?: string;
+      pull_requests?: Array<{ number?: number; base?: { sha?: unknown } }> };
+    const runs = new Map<number, Run>();
+    for (let page = 1; ; page++) {
+      const body = await readJsonImpl(["api", `repos/${owner}/${repo}/actions/runs?head_sha=${pr.headSha}&per_page=100&page=${page}`]) as
+        { total_count?: number; workflow_runs?: Run[] } | undefined;
+      if (!body || !Array.isArray(body.workflow_runs)) throw new Error("failed workflow runs could not be read");
+      for (const run of body.workflow_runs) {
+        if (run.head_sha === pr.headSha && run.status === "completed" && run.conclusion === "failure" && typeof run.id === "number") {
+          runs.set(run.id, run);
+        }
+      }
+      if (body.workflow_runs.length < 100 || (body.total_count !== undefined && page * 100 >= body.total_count)) break;
+    }
+    return runs;
   };
 
   /**
@@ -3458,25 +3477,21 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
       }
     },
 
+    readFailedRunBase: async (pr) => {
+      for (const run of (await readFailedRuns(pr)).values()) {
+        const base = run.pull_requests?.find(pull => pull.number === pr.prNumber)?.base?.sha;
+        if (typeof base === "string" && base.length > 0) return base;
+      }
+      return undefined;
+    },
     rerunFailedChecks: async (pr) => {
       const live = await readJsonImpl(["api", `repos/${owner}/${repo}/pulls/${pr.prNumber}`]) as
         { state?: string; head?: { sha?: string } } | undefined;
       if (live?.state !== "open" || live.head?.sha !== pr.headSha) {
         return { outcome: "head-moved", runIds: [], reason: "the PR is no longer open at the attempted head" };
       }
-      const runIds = new Set<number>();
-      for (let page = 1; ; page++) {
-        const body = await readJsonImpl(["api", `repos/${owner}/${repo}/actions/runs?head_sha=${pr.headSha}&per_page=100&page=${page}`]) as
-          { total_count?: number; workflow_runs?: Array<{ id?: number; head_sha?: string; status?: string; conclusion?: string }> } | undefined;
-        if (!body || !Array.isArray(body.workflow_runs)) throw new Error("failed workflow runs could not be read");
-        for (const run of body.workflow_runs) {
-          if (run.head_sha === pr.headSha && run.status === "completed" && run.conclusion === "failure" && typeof run.id === "number") {
-            runIds.add(run.id);
-          }
-        }
-        if (body.workflow_runs.length < 100 || (body.total_count !== undefined && page * 100 >= body.total_count)) break;
-      }
-      if (runIds.size === 0) return { outcome: "unavailable", runIds: [], reason: "no completed failed workflow run at this head" };
+      const runIds = [...(await readFailedRuns(pr)).keys()];
+      if (runIds.length === 0) return { outcome: "unavailable", runIds: [], reason: "no completed failed workflow run at this head" };
       for (const id of runIds) ghRunImpl("gh", ["api", "-X", "POST", `repos/${owner}/${repo}/actions/runs/${id}/rerun-failed-jobs`]);
       return { outcome: "rerun", runIds: [...runIds] };
     },
@@ -14581,6 +14596,8 @@ export interface SweepDeps {
     pr: OpenPrView,
     check: CancelledRequiredCheck | CiFailure,
   ) => boolean | void | JobRequeueOutcome | Promise<boolean | void | JobRequeueOutcome>;
+  /** W1-T11294: base recorded on a completed failed workflow run for this PR and head. */
+  readFailedRunBase?: (pr: OpenPrView) => Promise<string | undefined>;
   /** W1-T6353: retry failed jobs after a successful ci-log round left the head unchanged. */
   rerunFailedChecks?: (pr: OpenPrView) => Promise<{
     outcome: "rerun" | "head-moved" | "unavailable"; runIds: number[]; reason?: string;
@@ -20621,7 +20638,8 @@ export async function runSweep(
       const rerunReceipt = ledgerLines.findLast(row => row.step === "sweep.disposed" &&
         row.pr_number === pr.prNumber && row.head_sha === pr.headSha && row.no_commit_rerun_attempted === true);
       const rerunMemory = rerunReceipt === undefined ? {} : Object.fromEntries(
-        Object.entries(rerunReceipt).filter(([key]) => key.startsWith("no_commit_rerun_")));
+        Object.entries(rerunReceipt).filter(([key]) => key.startsWith("no_commit_") ||
+          (rerunReceipt.no_commit_refresh_attempted === true && (key === "run_base_sha" || key === "main_sha"))));
       const disposedLine = {
         run_id: deps.runId,
         task_id: pr.taskId ?? "SWEEP",
@@ -22532,13 +22550,25 @@ export async function runSweep(
               if (noCommitRound !== undefined && !rerunAttempted && !pendingDeferral &&
                   flakeClaimsForHead(ledgerLines, pr.taskId, pr.headSha, pr.prNumber).length === 0) {
                 acted = false;
-                if (!deps.rerunFailedChecks) {
+                let runBaseSha: string | undefined;
+                try {
+                  if (mainTipSha) runBaseSha = await deps.readFailedRunBase?.(pr);
+                } catch (error) {
+                  log("sweep.no_commit_run_base.error", { pr_number: pr.prNumber, error: String(error) });
+                }
+                const refresh = runBaseSha !== undefined && mainTipSha !== undefined && runBaseSha !== mainTipSha;
+                if (refresh && !deps.updateBranch) {
+                  standDownReason = "no-commit CI fix awaits a branch-update gateway for the moved main";
+                  break;
+                }
+                if (!refresh && !deps.rerunFailedChecks) {
                   standDownReason = "no-commit CI fix awaits a failed-job rerun gateway";
                   break;
                 }
                 // Claim before the write: a crash or partial rerun must never retry this head.
                 const receipt = { run_id: deps.runId, task_id: pr.taskId!, step: "sweep.disposed",
                   pr_number: pr.prNumber, head_sha: pr.headSha, disposition: "wait", acted: true,
+                  ...(refresh ? { no_commit_refresh_attempted: true, run_base_sha: runBaseSha, main_sha: mainTipSha } : {}),
                   no_commit_rerun_attempted: true, no_commit_rerun_round_id: noCommitRound, snapshot_age_ms: snapshotAgeMs(prIndex) };
                 if (readLedger(deps.ledgerPath).some(row => row.step === "sweep.disposed" &&
                     row.pr_number === pr.prNumber && row.head_sha === pr.headSha && row.no_commit_rerun_attempted === true)) {
@@ -22548,9 +22578,20 @@ export async function runSweep(
                 appendLine(deps.ledgerPath, receipt);
                 acted = true;
                 spent = false;
+                if (refresh) {
+                  let result: { outcome: string; reason?: string };
+                  try { result = { outcome: await deps.updateBranch!(pr) }; }
+                  catch (error) { result = { outcome: "failed", reason: String(error) }; }
+                  extraDisposedFields = { ...extraDisposedFields,
+                    no_commit_rerun_attempted: true, no_commit_rerun_round_id: noCommitRound,
+                    no_commit_refresh_attempted: true, run_base_sha: runBaseSha, main_sha: mainTipSha,
+                    no_commit_refresh_outcome: result.outcome, no_commit_refresh_reason: result.reason };
+                  standDownReason = `no-commit CI fix: branch refresh ${result.outcome}` + (result.reason ? ` — ${result.reason}` : "");
+                  break;
+                }
                 let result: { outcome: string; runIds: number[]; reason?: string };
                 try {
-                  result = await deps.rerunFailedChecks(pr);
+                  result = await deps.rerunFailedChecks!(pr);
                 } catch (error) {
                   result = { outcome: "failed", runIds: [], reason: String(error) };
                 }

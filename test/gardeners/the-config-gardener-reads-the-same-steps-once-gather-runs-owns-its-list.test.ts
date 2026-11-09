@@ -5,7 +5,7 @@ import { GATHER_RUNS_LEDGER_STEPS } from "#src/lib/retro.js";
 
 // The steps `gatherRuns` reads moved out of CONFIG_GARDEN_LEDGER_STEPS into GATHER_RUNS_LEDGER_STEPS (retro.ts),
 // beside the function that reads them, so a second reader (`rmd procedures`) spreads the same list. The config
-// gardener must read EXACTLY the step set it read before the move: this is that list, copied from it verbatim.
+// gardener retains that historical set, plus W1-T11756's explicitly approved history-guard receipt.
 const CONFIG_GARDEN_STEPS_BEFORE_THE_MOVE = [
   // gatherRuns, by name.
   "run.start", "verdict", "verdict.merged", "recon.done", "implement.done", "implement.resumed", "implement.continued", "implement.preopen_continued", "pr.opened", "correction.provenance",
@@ -24,7 +24,7 @@ const CONFIG_GARDEN_STEPS_BEFORE_THE_MOVE = [
 ];
 
 test("the config gardener reads the same step set after GATHER_RUNS_LEDGER_STEPS moved to retro.ts", () => {
-  assert.deepEqual(new Set(CONFIG_GARDEN_LEDGER_STEPS), new Set(CONFIG_GARDEN_STEPS_BEFORE_THE_MOVE));
+  assert.deepEqual(new Set(CONFIG_GARDEN_LEDGER_STEPS), new Set([...CONFIG_GARDEN_STEPS_BEFORE_THE_MOVE, "review.history_guarded"]));
   assert.equal(CONFIG_GARDEN_LEDGER_STEPS.length, new Set(CONFIG_GARDEN_LEDGER_STEPS).size, "no step is listed twice");
 });
 
