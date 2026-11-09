@@ -1,0 +1,46 @@
+- id: W1-T11816
+  title: Serve ledgers one thread-load row per minute giving each thread's CPU share, event-loop utilization and the process's garbage-collection share, so serve's cores and its 60-percent GC burn are attributed instead of guessed
+  repo: remudero
+  depends_on:
+    - W1-T11814
+  priority: 0.3
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # a periodic read of runtime counters inside serve; it only reads and appends one row a minute, and no answer, schedule or limit changes
+  band_meaning: blast-radius
+  origin: operator-session#serve-lightweight-2026-11-08
+  plan_refs:
+    - W1-T9370
+    - W1-T9508
+  files:
+    - src/lib/serve-thread-load.ts
+    - src/lib/serve.ts
+    - test/console-api/serve/serve-ledgers-one-thread-load-row-a-minute-with-cpu-loop-and-gc-share.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: Once a minute serve appends one serve.thread_load row listing the main thread and each live worker thread by its serve.memory holder name, with the CPU milliseconds it used and its event-loop utilization over the minute
+      proof: "grep: W1-T11816 criterion 1 in test/console-api/serve/serve-ledgers-one-thread-load-row-a-minute-with-cpu-loop-and-gc-share.test.ts"
+    - claim: The same row carries the share of the minute the process spent in garbage collection, from the runtime's gc performance entries, and the heap used and limit it was under
+      proof: "grep: W1-T11816 criterion 2 in test/console-api/serve/serve-ledgers-one-thread-load-row-a-minute-with-cpu-loop-and-gc-share.test.ts"
+    - claim: A worker that ended or whose reading threw is listed with its error and never fails the row; a runtime without per-thread CPU writes the row without those fields
+      proof: "grep: W1-T11816 criterion 3 in test/console-api/serve/serve-ledgers-one-thread-load-row-a-minute-with-cpu-loop-and-gc-share.test.ts"
+    - claim: The sampler allocates a fixed number of counters, appends one row per minute, and changes no response, thread, limit or schedule
+      proof: "grep: W1-T11816 criterion 4 in test/console-api/serve/serve-ledgers-one-thread-load-row-a-minute-with-cpu-loop-and-gc-share.test.ts"
+    - claim: The wiring is real, as serve starts the thread-load sampler through startServeThreadLoad, called from serve.ts
+      proof: "grep: startServeThreadLoad( in src/lib/serve.ts"
+  rationale: |
+    OBSERVED 2026-11-08 23:45Z on the Azure host (top -H on the serve process, two 8 s samples): serve used about 2.1 cores, split as three worker threads near 37 percent each, the main thread at 30 percent, and four V8 garbage-collection threads at about 15 percent each (60 percent of a core in GC), under a 4.0 GB resident heap pressed against a 5.5 GiB memory.high. Its serve.memory row lists the heaps (heavy views 1.2 GB, slow lane 575 MB, board worker 347 MB, main 1.26 GB) but no CPU, so memory is attributed and the cores are not.
+    - Without a per-thread CPU and GC share on the ledger, deciding between fewer builds, smaller heaps or fewer threads is a guess, and the answer changes the redesign.
+    - Node 24 gives process.threadCpuUsage, Worker.cpuUsage and performance.eventLoopUtilization; no code in the repo reads them for serve.
+  design: |
+    The module exports startServeThreadLoad and serve.ts calls it.
+    A new serve-thread-load.ts starts one unref'd interval at serve start (60 s, injectable for tests). Each tick reads the main thread's CPU and ELU, and for each worker the serve.memory registry already tracks, its Worker.cpuUsage and performance.eventLoopUtilization deltas since the last tick, plus a PerformanceObserver for gc entries summed to a share of the minute and process.memoryUsage heap figures. One serve.thread_load row is appended; a thread that ended or a reading that threw is listed with its error. serve.ts starts it beside the memory monitor and stops it at close.
+    NOT IN SCOPE: acting on the numbers (cutting heaps or threads is a later task), per-view attribution (W1-T11793), and demand (W1-T11792).
+  falsifier: |
+    Skip the worker CPU reads and criterion 1 must fail; drop the gc share and criterion 2 must fail; let a dead worker's error fail the row and criterion 3 must fail; allocate per request or touch a limit and criterion 4 must fail. Restore and require all four to pass.
+  note: |
+    reservation hand-off: run-unfiled-1794173043382 -> run-unfiled-1794173043382
+    Reserved with rmd next-task-id (W1-T11816 on run-unfiled-1794173043382). Build after W1-T11814 (same file, serve.ts). Proof that counts: serve.thread_load rows after deploy and the gc share beside the heap.

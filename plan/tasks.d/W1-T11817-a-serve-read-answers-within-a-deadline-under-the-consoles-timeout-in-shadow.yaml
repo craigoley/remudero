@@ -1,0 +1,46 @@
+- id: W1-T11817
+  title: A serve read that cannot answer within a declared deadline under the console's own timeout is ledgered as late in shadow, and in enforce mode answers from the last committed body or a fast retry-after, never held until the client cancels
+  repo: remudero
+  depends_on:
+    - W1-T11814
+  priority: 0.3
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # changes how a slow read is answered once the operator enables it; shadow is the default and records only, and a read that answers inside the deadline is untouched
+  band_meaning: blast-radius
+  origin: operator-session#serve-lightweight-2026-11-08
+  plan_refs:
+    - W1-T9094
+    - W1-T10279
+  files:
+    - src/lib/serve-read-deadline.ts
+    - src/lib/serve.ts
+    - test/console-api/serve/a-serve-read-past-its-deadline-is-ledgered-late-and-answered-stale-in-enforce.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: In shadow mode, the default, a read that takes longer than the deadline is still answered exactly as before and is counted late in the route family's window, with no change to its response
+      proof: "grep: W1-T11817 criterion 1 in test/console-api/serve/a-serve-read-past-its-deadline-is-ledgered-late-and-answered-stale-in-enforce.test.ts"
+    - claim: In enforce mode a read past the deadline that has a committed body for its view is answered from that body with its age in a response header, marked stale, and is counted stale
+      proof: "grep: W1-T11817 criterion 2 in test/console-api/serve/a-serve-read-past-its-deadline-is-ledgered-late-and-answered-stale-in-enforce.test.ts"
+    - claim: In enforce mode a read past the deadline with no committed body is answered at once with a 503 and a retry-after, not held, and is counted as deferred
+      proof: "grep: W1-T11817 criterion 3 in test/console-api/serve/a-serve-read-past-its-deadline-is-ledgered-late-and-answered-stale-in-enforce.test.ts"
+    - claim: The deadline defaults to 4000 ms, below the console's 5000 ms timeout, the mode defaults to shadow, only GET reads of views and legacy cached reads are covered, and writes and streams are never cut
+      proof: "grep: W1-T11817 criterion 4 in test/console-api/serve/a-serve-read-past-its-deadline-is-ledgered-late-and-answered-stale-in-enforce.test.ts"
+    - claim: The wiring is real, as serve wraps its view and cached reads through withReadDeadline, called from serve.ts
+      proof: "grep: withReadDeadline( in src/lib/serve.ts"
+  rationale: |
+    OBSERVED 2026-11-08 (host tunnel log and console repo): between 21:57Z and 22:31Z every console read reaching serve ended "context canceled" (inbox threads, inbox sections, views/instances, escalation threads, inbox thread reads). The console calls this gateway from its own server with REQUEST_TIMEOUT_MS 5000 and SUMMARY_REQUEST_TIMEOUT_MS 8000, and serve's view builds run tens to hundreds of seconds, so a request that meets a stale or cold view is abandoned before it is answered, and its work is wasted.
+    - Serve already keeps committed view bodies in memory (the view-bodies holder, about 16 MB) and a legacy cache for /v1/status with a 2 s TTL, so a stale answer is available for most reads at no build cost.
+    - Operator ruling pattern: shadow first, then enforce on the recorded rows (as the 8 GiB bound, W1-T11344). This task records, and enforces only when the operator turns the switch on.
+  design: |
+    The module exports withReadDeadline and serve.ts calls it.
+    A new serve-read-deadline.ts wraps the one place serve answers a GET read of a view or a legacy cached route with a race against a timer (RMD_SERVE_READ_DEADLINE_MS, default 4000). The mode comes from RMD_SERVE_READ_DEADLINE (shadow by default, enforce to act). On a late read, the family's window tally from W1-T11792 gains a late count; in enforce mode the wrapper answers from the committed body with an x-rmd-stale-ms header and marks it stale, or with 503 and retry-after 5 when none exists, and the abandoned build keeps running for the next reader. Writes, streams and SSE are never wrapped.
+    NOT IN SCOPE: enabling enforce (an operator decision after the rows), changing view builds or pacing, and any console change.
+  falsifier: |
+    Answer differently in shadow and criterion 1 must fail; ignore the committed body in enforce and criterion 2 must fail; hold a body-less read and criterion 3 must fail; wrap a write or stream and criterion 4 must fail. Restore and require all four to pass.
+  note: |
+    reservation hand-off: run-unfiled-1794173043382 -> run-unfiled-1794173043382
+    Reserved with rmd next-task-id (W1-T11817 on run-unfiled-1794173043382). Build after W1-T11814 (same file, serve.ts, and it adds to its window tally). Proof that counts: late and stale counts per route family in serve.demand rows, then an operator ruling on enforce.

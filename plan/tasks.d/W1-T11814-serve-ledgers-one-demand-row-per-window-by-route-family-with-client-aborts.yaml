@@ -1,0 +1,45 @@
+- id: W1-T11814
+  title: Serve ledgers one aggregate demand row per window, counting requests, status classes, latency and client aborts per route family, so the console's real load and its cancelled calls are measured before any serve redesign
+  repo: remudero
+  depends_on: []
+  priority: 0.3
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # a new observation row on every serve request path; it records counts only, never a request body, id, query string or token, and answers are unchanged
+  band_meaning: blast-radius
+  origin: operator-session#serve-lightweight-2026-11-08
+  plan_refs:
+    - W1-T9094
+    - W1-T9508
+  files:
+    - src/lib/serve-demand.ts
+    - src/lib/serve.ts
+    - test/console-api/serve/a-serve-window-counts-requests-latency-and-client-aborts-by-route-family.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: Every /v1 request ends in exactly one tally of its route family, status class and elapsed milliseconds, and a request whose client closed before the response finished is tallied as aborted, never as an error
+      proof: "grep: W1-T11814 criterion 1 in test/console-api/serve/a-serve-window-counts-requests-latency-and-client-aborts-by-route-family.test.ts"
+    - claim: A route family is the declared route pattern with instance and id segments replaced by placeholders, and never carries a query string, a token or an id; families past a fixed cap collapse into one other family
+      proof: "grep: W1-T11814 criterion 2 in test/console-api/serve/a-serve-window-counts-requests-latency-and-client-aborts-by-route-family.test.ts"
+    - claim: Each five-minute window writes one serve.demand ledger row carrying per-family counts, ok, error and aborted tallies, p50, p95 and max latency, and a window with no requests writes none
+      proof: "grep: W1-T11814 criterion 3 in test/console-api/serve/a-serve-window-counts-requests-latency-and-client-aborts-by-route-family.test.ts"
+    - claim: The tally is bounded memory and never changes a response, its status, its headers or its timing beyond reading a clock twice
+      proof: "grep: W1-T11814 criterion 4 in test/console-api/serve/a-serve-window-counts-requests-latency-and-client-aborts-by-route-family.test.ts"
+    - claim: The wiring is real, as a request that serve answers reaches the demand tally through recordServeRequest, called from serve.ts
+      proof: "grep: recordServeRequest( in src/lib/serve.ts"
+  rationale: |
+    OBSERVED 2026-11-08 (host tunnel log, ledger, console repo): remudero-serve holds 4 to 6 GB and 1.7 to 2.3 cores around the clock, yet the only demand evidence is cloudflared's error log: 267 failed requests in 24 hours, all to /v1 on the gateway hostname, every one "context canceled". Successful requests are logged nowhere, and serve ledgers no request row, so nobody can say how many reads the console makes, which routes, or how many it abandons.
+    - The console reads this gateway server-side and cancels any call at 5 to 8 seconds (REQUEST_TIMEOUT_MS 5000, SUMMARY_REQUEST_TIMEOUT_MS 8000 in remudero-console), while serve's view builds run tens to hundreds of seconds, so any cold or stale read is abandoned.
+    - Every later serve decision (read deadline, build pacing, what to cut) needs demand and abort counts first; without them a redesign sizes itself on a guess.
+  design: |
+    The module exports recordServeRequest and serve.ts calls it.
+    A new serve-demand.ts holds a fixed-size window tally keyed by route family. serve.ts calls it at the one place every /v1 request starts and at the response close or abort event: a family is the matched route pattern with instance, task and id segments replaced by placeholders (never the raw path or query), capped at 40 families with an other bucket. Latency goes into a small fixed histogram per family so p50, p95 and max need no stored samples. Every five minutes, a non-empty window appends one serve.demand row (window bounds, per-family n, ok, error, aborted, p50, p95, max) and resets. Nothing about a request is kept past its tally.
+    NOT IN SCOPE: changing any answer, a deadline (a later task), per-request rows, and the web tunnel's own logs.
+  falsifier: |
+    Count an aborted request as an error and criterion 1 must fail; let a query string or id into a family and criterion 2 must fail; emit a row for an empty window and criterion 3 must fail; let the tally grow past the cap or touch a response and criterion 4 must fail. Restore and require all four to pass.
+  note: |
+    reservation hand-off: run-unfiled-1794173043382 -> run-unfiled-1794173043382
+    Reserved with rmd next-task-id (W1-T11814 on run-unfiled-1794173043382). Build before W1-T11816 and W1-T11817, which edit serve.ts after it. Proof that counts: serve.demand rows after deploy, with aborted counts per route family.

@@ -1,0 +1,39 @@
+- id: W1-T11815
+  title: Each view build row and slow-view row carries the build thread's own CPU milliseconds beside its wall milliseconds, so a 639-second board stage can be told apart as work or as waiting for a busy host
+  repo: remudero
+  depends_on: []
+  priority: 0.3
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the read-model worker is serve's build engine; the change adds one number per build from a clock read and changes no build, schedule or body
+  band_meaning: blast-radius
+  origin: operator-session#serve-lightweight-2026-11-08
+  plan_refs:
+    - W1-T9604
+    - W1-T9716
+  files:
+    - src/lib/read-model-worker.ts
+    - test/console-api/read-model/a-view-build-row-carries-the-build-threads-cpu-beside-its-wall-time.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: A build records the executing thread's CPU milliseconds (process.threadCpuUsage user plus system) spent between its start and its end, and its read-model view_builds tally sums them as cpuMs beside ms and maxMs
+      proof: "grep: W1-T11815 criterion 1 in test/console-api/read-model/a-view-build-row-carries-the-build-threads-cpu-beside-its-wall-time.test.ts"
+    - claim: A read_model.slow_view row carries the same build's cpuMs beside its ms and its stages, so the wall to cpu ratio of a slow build is on the row
+      proof: "grep: W1-T11815 criterion 2 in test/console-api/read-model/a-view-build-row-carries-the-build-threads-cpu-beside-its-wall-time.test.ts"
+    - claim: A runtime without a thread CPU reading omits cpuMs and builds exactly as before; no build, schedule, due time or view body changes
+      proof: "grep: W1-T11815 criterion 3 in test/console-api/read-model/a-view-build-row-carries-the-build-threads-cpu-beside-its-wall-time.test.ts"
+  rationale: |
+    OBSERVED 2026-11-08 (core ledger, read_model.view_builds and slow_view, 21:47Z to 23:27Z): the now view of the core instance spent 1,858,467 ms in three heavy-lane calls (34% of all recorded build time) with one build at 639,090 ms, nearly all in its board stage (638,187 ms); other builds of the same view read 31 to 63 s (board 50,912 ms, snapshot 31,528 ms). read-model-worker.ts documents the same view at about 4.8 s in October. The host load average was 36 to 57 on 8 cores for the whole window, so wall milliseconds in a worker thread include time spent waiting for a core.
+    - The rows say wall time only. A 639 s build is either 639 s of computing, which is a regression to fix in the projection, or a few seconds of computing starved by host load, which is a capacity problem; the ledger cannot say which.
+    - Measured here: this is the biggest single line in serve's recorded cost, and the choice between the two fixes depends on this one number.
+  design: |
+    In the worker's build routine, read process.threadCpuUsage() before and after each build (the worker thread's own user plus system time; Node 24 provides it) and add the delta to the unit's tally as cpuMs, reported by reportViewBuilds beside ms and maxMs and copied onto read_model.slow_view. When the runtime has no per-thread reading, cpuMs is omitted. The build, its due time, its body and the lane choice read only ms, as today.
+    NOT IN SCOPE: changing any pacing or lane decision to use cpuMs (a later task, after the ratio is known), the board projection itself, and serve's other threads (W1-T11794).
+  falsifier: |
+    Drop the CPU read and criterion 1 must fail; omit cpuMs from the slow row and criterion 2 must fail; make a missing reading throw or change a due time and criterion 3 must fail. Restore and require all three to pass.
+  note: |
+    reservation hand-off: run-unfiled-1794173043382 -> run-unfiled-1794173043382
+    Reserved with rmd next-task-id (W1-T11815 on run-unfiled-1794173043382). Proof that counts: view_builds and slow_view rows with cpuMs after deploy, and the wall to cpu ratio of now at core.
