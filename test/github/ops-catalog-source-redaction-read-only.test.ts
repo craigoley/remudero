@@ -1,14 +1,13 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { test } from "node:test";
 // The daemon and the live analytics cache import each other and the cache reads a daemon constant at load,
 // so the cache loads first and the daemon (the module under test) finishes before the cache evaluates.
 import "#src/lib/live-analytics-snapshot-cache.js";
 import { runDaemon } from "#src/lib/daemon.js";
-import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
 import { mergePlanBlobs, type Plan } from "#src/lib/plan.js";
 import {
   OpsCatalogAuthMissingError, createOpsCatalogShadowSource, defaultOpsCatalogApi, readOpsCatalogSnapshotAsync, type OpsCatalogApi,
@@ -135,18 +134,16 @@ test("W1-T11768 criterion 3: the default api reads through gh api, paces, and re
 });
 
 test("W1-T11768 criterion 3: the real default api shells out to gh and its answer is refused when it is not a repository", async () => {
-  const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}ops-gh-`));
+  const shim = ghShim([{ when: "repos/", stdout: "{\"id\": 5}\n" }]);
   const priorPath = process.env.PATH;
   try {
-    writeFileSync(join(dir, "gh"), "#!/bin/sh\necho '{\"id\": 5}'\n", { mode: 0o755 });
-    process.env.PATH = `${dir}:${priorPath}`;
+    process.env.PATH = `${shim.dir}:${priorPath}`;
     const snap = await readOpsCatalogSnapshotAsync(target);
     assert.notEqual(snap.outcome, "ok");
     assert.equal(snap.plan, undefined);
     sweep("real default", snap);
   } finally {
     process.env.PATH = priorPath;
-    rmSync(dir, { recursive: true, force: true });
   }
 });
 

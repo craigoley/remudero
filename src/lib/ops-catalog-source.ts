@@ -6,7 +6,7 @@ import { freezeReadGeneration } from "./read-plane.js";
 
 /**
  * W1-T11768: a private ops task catalog read read-only at one pinned commit, or refused with a stable code.
- * The shape of `readSelectedRegistry` (W1-T9493) applied to `plan/tasks.yaml` plus `plan/tasks.d/`: bind the
+ * The shape of `readSelectedRegistry` (W1-T9493) applied to the plan monolith plus its shard directory: bind the
  * numeric repository id, branch ref, commit, exact-path trees and blob SHAs, verify git's blob SHA-1 over the
  * decoded bytes, re-read the ref afterwards. Private bytes stay in memory: no clone, worktree, mirror or file
  * write, and the injected api is GET-only. Nothing here is a selector; the caller feeds an `ok` Plan to the
