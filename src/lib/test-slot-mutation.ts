@@ -135,14 +135,22 @@ export function defaultGuardHolderProbe(guardPath: string, guard: Stats, platfor
 export const GUARD_WRITER_START_MARGIN_MS = 5_000;
 const USER_HZ = 100;
 
+/** A /proc file's text, or undefined when the process is gone or refuses the read; any other failure propagates to the caller's unknown. */
+function readProcText(path: string): string | undefined {
+  try { return readFileSync(path, "utf8"); }
+  catch (error) {
+    if (["ENOENT", "ESRCH", "EACCES", "EPERM"].includes((error as NodeJS.ErrnoException).code ?? "")) return undefined;
+    throw error;
+  }
+}
+
 /** Wall-clock start of `pid` from `stat` field 22 and `btime`; undefined when either is unreadable. */
 function processStartMs(procRoot: string, pid: string): number | undefined {
-  try {
-    const btime = /^btime (\d+)$/m.exec(readFileSync(join(procRoot, "stat"), "utf8"));
-    const stat = readFileSync(join(procRoot, pid, "stat"), "utf8");
-    const ticks = Number(stat.slice(stat.lastIndexOf(")") + 2).split(" ")[19]);
-    return btime && Number.isFinite(ticks) ? Number(btime[1]) * 1000 + (ticks / USER_HZ) * 1000 : undefined;
-  } catch { return undefined; }
+  const btime = /^btime (\d+)$/m.exec(readProcText(join(procRoot, "stat")) ?? "");
+  const stat = readProcText(join(procRoot, pid, "stat"));
+  if (!btime || stat === undefined) return undefined;
+  const ticks = Number(stat.slice(stat.lastIndexOf(")") + 2).split(" ")[19]);
+  return Number.isFinite(ticks) ? Number(btime[1]) * 1000 + (ticks / USER_HZ) * 1000 : undefined;
 }
 
 /**
@@ -151,9 +159,8 @@ function processStartMs(procRoot: string, pid: string): number | undefined {
  * later than the guard's birth. An unreadable name and start leave it a possible writer.
  */
 function cannotBeWriter(procRoot: string, pid: string, guard: Stats): boolean {
-  try {
-    if (!/^node(js)?$/.test(readFileSync(join(procRoot, pid, "comm"), "utf8").trim())) return true;
-  } catch { /* an unreadable name decides nothing */ }
+  const comm = readProcText(join(procRoot, pid, "comm"))?.trim();
+  if (comm !== undefined && !/^node(js)?$/.test(comm)) return true;
   const start = processStartMs(procRoot, pid);
   return start !== undefined && guard.birthtimeMs > 0 && start > guard.birthtimeMs + GUARD_WRITER_START_MARGIN_MS;
 }
