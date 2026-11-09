@@ -4,7 +4,9 @@ import { mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import "#src/run-task.js";
+// The daemon and the live analytics cache import each other and the cache reads a daemon constant at load,
+// so the cache loads first and the daemon (the module under test) finishes before the cache evaluates.
+import "#src/lib/live-analytics-snapshot-cache.js";
 import { runDaemon } from "#src/lib/daemon.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import { mergePlanBlobs, type Plan } from "#src/lib/plan.js";
