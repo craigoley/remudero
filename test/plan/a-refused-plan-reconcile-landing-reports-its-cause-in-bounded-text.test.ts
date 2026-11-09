@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { boundedLandingError, planReconcileLanding } from "../../src/lib/feedback-landing.js";
+import { boundedLandingError, planReconcileLanding } from "#src/lib/feedback-landing.js";
 
 /** What `gh pr create` throws on an oversized body: the command line, the body, then the cause. */
 const REFUSAL = `pushed to plan-reconcile-landing-x but \`gh pr create\` failed: Command failed: gh pr create --body ${"- plan/tasks.d/W1-T1.yaml is reconciled\n".repeat(2_500)} --repo o/r pull request create failed: GraphQL: Body is too long (maximum is 65536 characters) (createPullRequest)`;
