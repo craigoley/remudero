@@ -8,6 +8,7 @@ import { createScanner, SyntaxKind } from "typescript/unstable/ast";
 import { promisedFollowUps, unreportedFollowUps, followUpPlanRecords, parseHarvestableFollowUps, type HarvestableFollowUp, type PromisedFollowUp, type FollowUpPlanRecord } from "./promised-follow-ups.js";
 import { hostWorktreeGitAsync } from "./worktree-git.js";
 import { basenameResolutionNote, resolveTestPath, type TestPathResolution, type TestPathResolverGit } from "./test-path-resolver.js";
+import { classifyGrepZeroHit } from "./grep-zero-cause.js";
 // Re-exported so a script already importing the proof dialect from here reaches the resolver through one import.
 export { resolveTestPath };
 import { AsyncLocalStorage } from "node:async_hooks";
@@ -1707,6 +1708,48 @@ export function matchedLinesAreAllComments(
     });
   }
   return matchedLines.every(dialectGrepMatchedLineIsComment);
+}
+
+const COMMENT_OPENERS: Record<CommentGrammar, readonly string[]> = { js: ["//", "/*"], yaml: ["#"], none: [] };
+
+/** The `n:text` lines `pattern` matches, bisecting to stay cheap. */
+function grepMatchedLines(pattern: string, fileText: string): string[] {
+  const lines = fileText.split("\n").map((line) => line.replace(/\r$/, ""));
+  const out: string[] = [];
+  const walk = (from: number, to: number): void => {
+    if (classifyGrepZeroHit(pattern, lines.slice(from, to).join("\n")) !== "matched") return;
+    if (to - from === 1) {
+      out.push(`${from + 1}:${lines[from]}`);
+      return;
+    }
+    const mid = from + Math.floor((to - from) / 2);
+    walk(from, mid);
+    walk(mid, to);
+  };
+  if (lines.length > 0) walk(0, lines.length);
+  return out;
+}
+
+/** A grep proof that can only certify comments (review: `executed_stale`): its pattern opens with the
+ *  path's comment opener, or every line it matches in `fileText` is a comment. */
+export function grepProofCanOnlyCertifyComments(pattern: string, path: string, fileText?: string): boolean {
+  const literal = pattern.replace(/^[\s"'`]+/, "");
+  if (COMMENT_OPENERS[commentGrammarForPath(path)].some((opener) => literal.startsWith(opener))) return true;
+  if (fileText === undefined) return false;
+  return matchedLinesAreAllComments(grepMatchedLines(pattern, fileText), { pattern, fileText, path });
+}
+
+/** Why `proof` is comment-only, or undefined; without `readFile` only the opener arm runs. */
+export function commentOnlyGrepProofRefusal(proof: string, readFile?: (path: string) => string | undefined): string | undefined {
+  const whitelisted = parseWhitelistedProof(proof);
+  const path = whitelisted === null ? undefined : dialectGrepTargetPath(whitelisted);
+  if (whitelisted === null || path === undefined) return undefined;
+  const pattern = whitelisted.args[2]!;
+  const fileText = readFile?.(path);
+  if (!grepProofCanOnlyCertifyComments(pattern, path, fileText)) return undefined;
+  return `\`grep:\` pattern "${pattern.slice(0, 70)}" can only match comment text in ${path}, which review grades ` +
+    "executed_stale (every matching line is a comment), so the criterion can never pass. Use a `unit test:` proof " +
+    "or a grep on a code line the build adds.";
 }
 
 function matchedLineCommentContext(w: WhitelistedProof, cwd: string): MatchedLineCommentContext | undefined {
