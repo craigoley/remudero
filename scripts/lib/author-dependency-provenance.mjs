@@ -44,6 +44,20 @@ function compilerWrapperTools(path,dependencyRoot,lock) {
  return [['tsc-wrapper',hash(bytes)],['tsc-compiler',hash(compilerBytes)]];
 }
 
+// A readonly-links seed materialization is recognized by its own consumer marker and by a tool
+// resolving into the seed that marker records. Anything else gets no remedy, so no wrong one.
+function proofInstallRemedy(root) {
+ try{
+  const marker=JSON.parse(boundedRead(join(root,'node_modules','.rmd-dependency-seed.json')));
+  if(marker.method!=='readonly-links'||typeof marker.seed!=='string')return '';
+  const seed=realpathSync(marker.seed);
+  for(const name of ['tsx','tsc','commitlint']) {
+   if(realpathSync(join(root,'node_modules/.bin',name)).startsWith(seed+sep))return `; node_modules is a readonly-links seed install, not a proof install: run \`remudero-dependencies prime ${root} --proof\``;
+  }
+  return '';
+ }catch(error){return '';} // unreadable marker and foreign install both mean no recognized seed, so no remedy is named
+}
+
 /** Cheap metadata/tool precheck, NOT a byte attestation or authority to reuse tests.
  * Records the real dependency donor so disappearance through a symlink is visible.
  */
@@ -79,7 +93,10 @@ export function authorDependencyProvenance(root) {
   return {state:'present',assurance:'installed-metadata-and-tool-bytes-only',dependencyRoot,dev:identity.dev,ino:identity.ino,
    lockSha256:hash(lockBytes),metadataSha256:hash(JSON.stringify(rows)),toolsSha256:hash(JSON.stringify(tools)),
    installedPackages:rows.length,optionalAbsent};
- }catch(error){return {state:'unavailable',reason:error.message};}
+ }catch(error){
+  const escaped=error.message.startsWith('dependency tool escapes installed donor');
+  return {state:'unavailable',reason:escaped?error.message+proofInstallRemedy(root):error.message};
+ }
 }
 
 export function sameAuthorDependencyProvenance(first,next) {
