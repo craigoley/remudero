@@ -9,16 +9,15 @@ import { clockFromMillisFn } from "#src/lib/clock.js";
 import { startReadPlaneTelemetry } from "#src/lib/read-plane.js";
 import { makeTempDir } from "#src/lib/tmp.js";
 import { hostWorktreeGit } from "#src/lib/worktree-git.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 type Row = { caller: string; leaf?: string; calls: number };
 
 test("test/console-api/read-model/a-bundled-worktree-git-spawn-names-its-real-caller.test.ts — W1-T11795 criterion 1: bundled hostWorktreeGit keeps its caller and leaf", () => {
   const dir = makeTempDir("bundled-worktree-git-caller");
+  const repo = gitRepo({ seedCommit: false, kind: "bundled-worktree-git" }).dir;
   try {
-    const repo = join(dir, "repo");
-    mkdirSync(repo);
-    execFileSync("git", ["init", "-q", repo]);
     const outfile = join(dir, "run-task.mjs");
     buildSync({
       stdin: { contents: `
@@ -53,6 +52,7 @@ try {
     }
   } finally {
     rmSync(dir, { recursive: true, force: true });
+    rmSync(repo, { recursive: true, force: true });
   }
 });
 
