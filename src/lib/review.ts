@@ -6777,8 +6777,9 @@ async function readHistoryPages(
   const rows: unknown[] = [];
   for (let page = 1; page <= REVIEW_HISTORY_MAX_PAGES; page += 1) {
     const value = await readJson(["api", `${endpoint}?per_page=${REVIEW_HISTORY_PAGE_SIZE}&page=${page}`], { fresh: true });
-    rows.push(...rowsFromPaginatedApi(value));
-    if ((value as unknown[]).length < REVIEW_HISTORY_PAGE_SIZE) return rows;
+    const pageRows = rowsFromPaginatedApi(value);
+    rows.push(...pageRows);
+    if (pageRows.length < REVIEW_HISTORY_PAGE_SIZE) return rows;
   }
   throw new Error(`GitHub history still full after ${REVIEW_HISTORY_MAX_PAGES} pages`);
 }

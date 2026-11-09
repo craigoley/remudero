@@ -68,6 +68,22 @@ test("W1-T11848 criterion 1: a short first page is the only read", async () => {
   assert.equal(f.calls.length, 1);
 });
 
+test("W1-T11848 criterion 1: a wrapped full status page does not hide a later review failure", async () => {
+  const f = fake([], [review(FAIL_BODY)], (args) => {
+    const endpoint = args[1] as string;
+    if (endpoint.includes("/statuses") && endpoint.endsWith("page=1")) return [filler(1000, 100)];
+    if (endpoint.includes("/statuses") && endpoint.endsWith("page=2")) return [[status(5, "failure")]];
+    return undefined;
+  });
+  const result = await read(f.readJson);
+  assert.equal(result.kind, "readable");
+  assert.deepEqual(result.kind === "readable" ? result.failures.map((x) => x.criterion) : [], [1]);
+  assert.deepEqual(f.calls.filter((c) => (c.args[1] as string).includes("/statuses")).map((c) => c.args[1]), [
+    `repos/o/r/commits/${SHA}/statuses?per_page=100&page=1`,
+    `repos/o/r/commits/${SHA}/statuses?per_page=100&page=2`,
+  ]);
+});
+
 test("W1-T11848 criterion 2: a history still full at the page cap is unreadable, never truncated", async () => {
   const f = fake([], [], (args) => (args[1] as string).includes("/statuses") ? filler(1, 100) : undefined);
   const result = await read(f.readJson);
@@ -115,6 +131,24 @@ test("W1-T11848 criterion 3: review rows keep their order across pages", async (
   assert.deepEqual(result.kind === "readable" ? result.failures.map((x) => x.criterion) : [], [1, 2]);
   const pages = f.calls.filter((c) => (c.args[1] as string).includes("/reviews")).map((c) => c.args[1]);
   assert.deepEqual(pages, [
+    "repos/o/r/pulls/7/reviews?per_page=100&page=1",
+    "repos/o/r/pulls/7/reviews?per_page=100&page=2",
+  ]);
+});
+
+test("W1-T11848 criterion 3: a wrapped full review page does not hide the next failure", async () => {
+  const pad = Array.from({ length: 99 }, () => review("unrelated", "b".repeat(40)));
+  const f = fake([status(5, "failure")], [], (args) => {
+    const endpoint = args[1] as string;
+    if (!endpoint.includes("/reviews")) return undefined;
+    if (endpoint.endsWith("page=1")) return [[review(FAIL_BODY), ...pad]];
+    if (endpoint.endsWith("page=2")) return [[review(FAIL_BODY_TWO)]];
+    return [];
+  });
+  const result = await read(f.readJson);
+  assert.equal(result.kind, "readable");
+  assert.deepEqual(result.kind === "readable" ? result.failures.map((x) => x.criterion) : [], [1, 2]);
+  assert.deepEqual(f.calls.filter((c) => (c.args[1] as string).includes("/reviews")).map((c) => c.args[1]), [
     "repos/o/r/pulls/7/reviews?per_page=100&page=1",
     "repos/o/r/pulls/7/reviews?per_page=100&page=2",
   ]);
