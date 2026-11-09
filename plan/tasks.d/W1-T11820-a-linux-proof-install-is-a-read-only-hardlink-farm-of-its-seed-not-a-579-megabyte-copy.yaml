@@ -1,0 +1,42 @@
+- id: W1-T11820
+  title: On Linux a proof install is a hardlink farm of its seed with read-only files and real directories, so a worktree reaches a preflight-admissible install in seconds without 579 MB of new data
+  repo: remudero
+  depends_on: []
+  priority: 1.2
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # changes how a proof install is materialized on Linux; an in-place write must fail and never reach the seed, a failed link falls back to today's copy, and macOS is unchanged
+  band_meaning: blast-radius
+  origin: operator-session#preflight-efficiency-2026-11-09
+  plan_refs:
+    - W1-T10739
+    - W1-T10507
+  files:
+    - src/lib/dependency-seeds.ts
+    - test/dependency-seeds.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: On Linux with --proof the install links every regular file to the seed's inode and creates real directories, so the author dependency precheck's tool-escapes-donor test passes for tsx, and the method is recorded as hardlink-copy
+      proof: "grep: W1-T11820 criterion 1 in test/dependency-seeds.test.ts"
+    - claim: The linked files are read-only, so writing one in place fails and leaves the seed's bytes and mode unchanged, while creating a new file in a directory still works
+      proof: "grep: W1-T11820 criterion 2 in test/dependency-seeds.test.ts"
+    - claim: A link that fails (a different filesystem, a link limit) falls back to today's private copy for that install and records private-copy
+      proof: "grep: W1-T11820 criterion 3 in test/dependency-seeds.test.ts"
+    - claim: macOS still uses apfs-clone, a non-proof Linux install still uses readonly-links, and no existing method's result changes
+      proof: "grep: W1-T11820 criterion 4 in test/dependency-seeds.test.ts"
+  rationale: |
+    OBSERVED 2026-11-09 on the Azure host: every hand-built worktree that wants an author preflight needs `remudero-dependencies prime <wt> --proof`, which makes a private copy of node_modules of 579 MB (five such copies, 2.8 GB, in the operator's worktrees alone) and takes minutes under load. The seed store holds 16.3 GB across 32 seeds at about 520 MB each. A plan-only PR needs the copy only so the preflight will run.
+    - The refused alternative (readonly-links, 2 MB) fails the author precheck because tsx resolves its real path out of the donor; W1-T10739 deliberately keeps that integrity rule (tools must come from a proof install).
+    - The filesystem here has no reflink support (cp --reflink=always: Operation not supported), so the macOS clone method has no Linux equivalent today. A hardlink farm keeps every resolved path inside the worktree like a copy does, so the integrity rule holds, and shares the seed's bytes.
+    - The risk of shared inodes is an in-place write corrupting the seed; read-only files turn that into a loud EACCES.
+  design: |
+    In the Linux proof branch of the seed materializer, replace the recursive data copy with a walk that creates each directory as a real writable directory and hard-links each regular file from the seed, leaving files at the seed's read-only mode; symlinks inside the seed are recreated as the copy method does. On any link error for an install (EXDEV, EMLINK, EPERM), remove the partial stage and fall back to the existing copy, recording the method actually used. The SeedMethod type gains hardlink-copy. The proof method's readiness record, consumer marker and sweeper behaviour are unchanged.
+    NOT IN SCOPE: the non-proof install, macOS, and the dependency precheck's rules.
+  falsifier: |
+    Copy the data and criterion 1 must fail on inode identity; leave files writable and criterion 2 must fail; swallow a link error without the fallback and criterion 3 must fail; change a macOS or non-proof method and criterion 4 must fail. Restore and require all four to pass.
+  note: |
+    reservation hand-off: run-unfiled-1794186053317 -> run-unfiled-1794173043382
+    Reserved with rmd next-task-id (W1-T11820 on run-unfiled-1794186053317). Complements W1-T10739 (one named command): build either first. Proof that counts: a proof install's new disk bytes under 5 MB and its prime time in seconds.
