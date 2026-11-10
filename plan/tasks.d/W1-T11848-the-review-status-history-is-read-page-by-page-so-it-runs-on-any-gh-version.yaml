@@ -16,6 +16,9 @@
   files:
     - src/lib/review.ts
     - test/review/a-review-status-history-reads-pages-without-slurp-or-paginate.test.ts
+    - test/event-driven-semantic-review.test.ts
+    - test/ledger/a-reproduced-fail-is-not-overturned-on-the-same-head.test.ts
+    - test/retro-marker-atomic.test.ts
   status: queued
   attempts: 0
   acceptance:

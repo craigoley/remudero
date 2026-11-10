@@ -52,6 +52,8 @@ limits, not observations of seed links being replaced; rerun after staging in a 
 The explicit six-path census selection passed 32 of 33 suites; its only failure was SWC loading
 in `test/no-shallowing-of-the-canonical-checkout.test.ts`.
 
+Author preflight (`node --import tsx scripts/preflight-author.mjs`) refuses a seed-linked worktree, because its tools resolve into the seed rather than into `node_modules`. Run `remudero-dependencies prime <checkout> --proof` once: it replaces a link-only install it wrote itself with a private proof copy, and leaves any other `node_modules` untouched.
+
 Use `[ -L node_modules/typescript ]` to distinguish seed-linked packages from a real install;
 `[ -L node_modules ]` instead detects the older whole-directory symlink. A subsequent symlink command
 into an existing node_modules directory merely nests a link harmlessly. A clean install over seed

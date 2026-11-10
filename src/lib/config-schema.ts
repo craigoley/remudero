@@ -513,6 +513,7 @@ export const ENV_REGISTRY: readonly EnvRegistryEntry[] = [
   envEntry("RMD_OPENWEIGHT_API_KEY", "Supplies the Azure API key to the daemon-local open-weight adapter; it is never copied into a worker environment.", ["src/lib/worker-provider.ts"]),
   envEntry("RMD_OPERATOR_IDENTITY_PATH", "Names the read-only mounted file holding serve's operator identity when config.json has none.", ["src/lib/operator-identity-file.ts"]),
   envEntry("RMD_OPERATOR_MCP_URL", "Selects the existing control-server origin used by the operator MCP bridge.", ["src/lib/operator-mcp.ts"]),
+  envEntry("RMD_PREOPEN_GATE", "Set to full to restore the fleet pre-open gate's full fast tier; anything else or unset runs the light job set (rmd preflight --light), which skips rule-checks and the census suites that hosted CI still requires.", ["src/lib/preopen-gate.ts"]),
   envEntry("RMD_PREPUSH_GATES", "Disarms hooks/pre-push only when exactly \"0\"; the one daemon variable the host push gate's allowlisted env keeps.", ["src/lib/git-push.ts"]),
   envEntry("RMD_PROVIDER_AUTH_PROFILES", "Supplies the server-side JSON catalog of provider authentication profiles.", ["src/lib/provider-auth-sessions.ts"]),
   envEntry("RMD_READ_MODEL_DB_DIR", "Maps one state dir to the directory holding its read-model DB files as <stateDir>:<dir>; set by deploy/scratch-mounts.sh.", ["src/lib/read-model-db.ts"]),
