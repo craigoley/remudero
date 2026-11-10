@@ -20,7 +20,7 @@
     - packages/api-client/src/schema.d.ts
     - test/inbox/escalation-conversation.test.ts
     - test/inbox/escalation-conversation-serving.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     The operator's Now attention item opens GitHub issue 16183 instead of an internal conversation.

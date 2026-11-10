@@ -12,7 +12,7 @@
   origin: "console-followup:gardener-cutoff-race-20261027; feedback#console-gardener-cutoff-race-20261027; observation #14834"
   plan_refs: [W1-T9658, W1-T10287, W1-T10461]
   files: [src/lib/gardener-spend.ts, test/a-gardener-spend-read-requires-the-exact-parent-pass.test.ts, test/many-gardener-receipts-fit-a-bounded-cost-summary.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |
