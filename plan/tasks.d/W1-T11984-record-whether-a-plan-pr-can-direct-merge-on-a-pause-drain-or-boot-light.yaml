@@ -1,0 +1,29 @@
+- id: W1-T11984
+  title: "Record whether a plan PR can direct-merge on a pause, drain or boot light pass through selectLightPassPlanMerges and planMergeTurn"
+  repo: remudero
+  depends_on: []
+  type: recon
+  verify: auto
+  risk: high
+  band_meaning: span
+  status: queued
+  attempts: 0
+  design: |
+    Read-only investigation of src/lib/sweep.ts (selectLightPassPlanMerges, planMergeTurn). For each light-pass scope (pause, drain, boot), state from the code whether a ready plan PR can direct-merge, and name the guard or branch that decides it. Change no source. Report the finding in a new note.
+    CREATES: docs/recon/light-pass-plan-merge-turns.md
+  files:
+    - src/lib/sweep.ts
+    - docs/recon/light-pass-plan-merge-turns.md
+  acceptance:
+    - claim: "The note answers, for each of the pause, drain and boot light-pass scopes, whether a plan PR can direct-merge, citing the deciding code in selectLightPassPlanMerges or planMergeTurn"
+      proof: "grep: planMergeTurn in docs/recon/light-pass-plan-merge-turns.md"
+    - claim: "The note names selectLightPassPlanMerges and states its verdict per scope"
+      proof: "grep: selectLightPassPlanMerges in docs/recon/light-pass-plan-merge-turns.md"
+  origin: "followup:W1-T11510-1794277483209:2026-11-10T02:30:47.683Z:1"
+  rationale: >-
+    From the 2026-11-10 follow-up on W1-T11510-1794277483209, ratified via rmd approve:
+  
+    follow-up harvest [research]: Confirm whether `selectLightPassPlanMerges` / `planMergeTurn`
+    (`src/lib/sweep.ts` ~25129) lets a plan PR direct-merge on pause, drain or boot passes. The
+    task record asks for this to be reported in the PR body rather than fixed in this task. — from
+    W1-T11510 (run W1-T11510-1794277483209)
