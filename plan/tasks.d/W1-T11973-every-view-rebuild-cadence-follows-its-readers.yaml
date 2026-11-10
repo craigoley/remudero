@@ -15,6 +15,7 @@
     - W1-T11815
   files:
     - src/lib/read-model-worker.ts
+    - test/an-unread-view-backs-off-and-a-read-snaps-it-back.test.ts
     - test/console-api/read-model/an-unread-view-stretches-its-rebuild-cadence-whatever-view-it-is.test.ts
   status: queued
   attempts: 0
@@ -34,6 +35,7 @@
     - The host is CPU-starved: author preflights of unchanged code fail on load, and serve outranks the build container eight to one.
   design: |
     In readModelLaneViews, set readPaced on every factory that is not a demand view (nav-badge, repositories, analytics, instances, workstreams, actions, host, agent, incidents, operator-agent-rows; now already has it). The ticker's rule is unchanged: a unit is stretched only when its view or factory carries the flag, so existing pacing tests keep their unpaced control. lastReadOf already follows views built from a view. Add the unit's largest stretch to the view_builds tally.
+    test/an-unread-view-backs-off-and-a-read-snaps-it-back.test.ts pins today's rule in one case (the lane's now view is read-paced and no other built-in view is); that case is replaced by the factory-list census, and its other cases stay as they are.
     Before building, check each newly paced view for a consumer that is not a read: a build that writes a file or a ledger row another process waits on keeps its cadence and is named in the test as an exemption with its consumer.
     NOT IN SCOPE: the digest skip (the next two tasks), the versions poll, and any body or freshness-judgement change. Serve already judges every source at request time, so a body read before its rebuild says it is stale and the read restores the cadence.
   falsifier: |
