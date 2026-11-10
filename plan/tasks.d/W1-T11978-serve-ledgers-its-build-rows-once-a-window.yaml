@@ -18,6 +18,8 @@
     - src/lib/agent-view.ts
     - src/lib/workstreams-view.ts
     - test/console-api/read-model/serves-build-rows-are-one-row-a-window-not-one-a-build.test.ts
+    - test/workstreams-view.test.ts
+    - test/workstreams-projection-reuse.test.ts
   status: queued
   attempts: 0
   acceptance:
@@ -33,6 +35,7 @@
     - read_model.view_builds already gives builds per view per window.
   design: |
     Keep a tally per instance in each view and flush it on the same window the view_builds row uses (or every 10 minutes when that is not in reach), writing the first build immediately.
+    Two existing tests (test/workstreams-view.test.ts, test/workstreams-projection-reuse.test.ts) count builds through the workstreams.built row; they keep that by asking the view for a zero window, the one seam this adds.
     NOT IN SCOPE: view_builds itself and any reader of these rows; grep shows no reader that needs one row per build, and the test pins the fields the tally keeps.
   falsifier: |
     Write a row per build and criteria 1 and 2 must fail; write an empty window or hold back the first build and criterion 3 must fail. Restore and require all three to pass.
