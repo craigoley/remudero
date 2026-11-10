@@ -13,6 +13,7 @@
     - W1-T9950
     - W1-T9951
   files:
+    - scripts/preflight-author.mjs
     - src/lib/test-slot.ts
     - test/the-test-slot-admits-the-cheapest-waiter-first-and-ages-the-rest.test.ts
   status: queued
