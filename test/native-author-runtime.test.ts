@@ -19,7 +19,31 @@ test('native runtime deadline fit prices unknown files positively and distinguis
   assert.equal(runtime.runtimeDeadlineFit(files, manifest, profile, { ...options, deadline: options.now + fit.requiredMs - 1 }).fits, false);
   const beforeStatic = runtime.runtimeDeadlineFit(files, manifest, profile, { ...options, staticReserveMs: 900_000 });
   assert.equal(beforeStatic.requiredMs - fit.requiredMs, 900_000);
-  assert.ok(runtime.runtimeDeadlineFit(files, manifest, profile, { ...options, workers: 2 }).predictedMs < fit.predictedMs);
+  assert.ok(runtime.runtimeDeadlineFit(files, manifest, profile, { ...options, workers: 2, admittedWorkers: 2 }).predictedMs < fit.predictedMs);
+});
+
+test('runtime execution requires admitted width and planning remains estimate only', () => {
+  const files = ['test/a.test.ts', 'test/b.test.ts', 'test/unknown.test.ts'];
+  const options = { now: 1000, deadline: 1_000_000, staticReserveMs: 0 };
+  // Execution: a width above four is priced only within the admitted (acquired) grant.
+  const admitted = runtime.runtimeDeadlineFit(files, manifest, profile, { ...options, workers: 12, admittedWorkers: 12 });
+  assert.equal(admitted.workers, 12); assert.equal(admitted.admittedWorkers, 12);
+  assert.equal(admitted.authority, 'admitted-width');
+  for (const extra of [{}, { admittedWorkers: 8 }, { admittedWorkers: 0 }, { admittedWorkers: 12.5 }, { estimateOnly: 'yes' }]) {
+    assert.throws(() => runtime.runtimeDeadlineFit(files, manifest, profile, { ...options, workers: 12, ...extra }),
+      /invalid deadline, corpus or admitted workers/, JSON.stringify(extra));
+  }
+  // Planning: any requested width is priced, labelled an estimate, and carries no admitted grant.
+  const estimate = runtime.runtimeDeadlineFit(files, manifest, profile, { ...options, workers: 12, estimateOnly: true });
+  assert.equal(estimate.authority, 'estimate-only'); assert.equal(estimate.admittedWorkers, null);
+  assert.equal(estimate.predictedMs, admitted.predictedMs);
+  for (const workers of [0, 1.5, NaN]) assert.throws(() => runtime.runtimeDeadlineFit(files, manifest, profile,
+    { ...options, workers, estimateOnly: true }), /invalid/);
+  const head = 'a'.repeat(40);
+  const whole = runtime.wholeAuthorDeadlineFit(files, manifest, { ...profile, bindings: { head, inputTree: 'b'.repeat(40) } },
+    undefined, { ...options, workers: 12 });
+  assert.equal(whole.workers, 12); assert.equal(whole.authority, 'estimate-only');
+  assert.equal(whole.dispatchAllowed, false); assert.equal(whole.capacityGranted, false);
 });
 
 test('native runtime deadline fit refuses invalid pool bounds and an empty timing corpus', () => {
