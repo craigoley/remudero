@@ -21,7 +21,7 @@
     - test/daily-routing-review.test.ts
     - test/deploy/a-field-trials-refresh-step-failure-keeps-the-other-steps.test.ts
     - src/lib/producer-identity.ts
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: The operator requested durable plan custody of the remaining approved

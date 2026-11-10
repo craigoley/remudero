@@ -1,0 +1,42 @@
+- id: W1-T12025
+  title: "The flow and fix-lane gardeners read each ladder shard as a shard, so a superseded_by or depends_on naming a task in another shard no longer fails the pass; the flow-remedy gardener failed on W1-T11062 naming W1-T11172"
+  repo: remudero
+  depends_on: []
+  priority: 1.0
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: medium # one reader shared by two gardeners; the shard's own schema is still checked and an invalid shard is still reported by path
+  band_meaning: blast-radius
+  origin: operator-session#gardeners-2026-11-10
+  plan_refs:
+    - W1-T11062
+    - W1-T11172
+    - W1-T9729
+    - W1-T5538
+  files:
+    - src/lib/flow-remedy-gardener.ts
+    - test/gardeners/a-ladder-plan-read-resolves-no-reference-inside-one-shard.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "A ladder shard whose superseded_by or depends_on names a task in another shard is read into the ladder's tasks and is not reported unreadable"
+      proof: "grep: W1-T12025 criterion 1 in test/gardeners/a-ladder-plan-read-resolves-no-reference-inside-one-shard.test.ts"
+    - claim: "A shard that is not valid plan YAML or breaks the task schema is still reported unreadable with its path, and the other shards are still read"
+      proof: "grep: W1-T12025 criterion 2 in test/gardeners/a-ladder-plan-read-resolves-no-reference-inside-one-shard.test.ts"
+    - claim: "The fix-lane ladder reads through the same function and gets the same answer"
+      proof: "grep: W1-T12025 criterion 3 in test/gardeners/a-ladder-plan-read-resolves-no-reference-inside-one-shard.test.ts"
+  rationale: |
+    OBSERVED 2026-11-10T08:35:35Z on the core daemon: flow-remedy.gardener_failed with "flow plan shards unreadable: plan/tasks.d/W1-T11062-flow-conflict-merge-conflict-mergestate-dirty.yaml: PlanError: task W1-T11062: superseded_by unknown task 'W1-T11172'". The pass had queued 3,596 s and run 828 s before it failed.
+    - W1-T11172 is on main in its own shard. readLadderPlan (src/lib/flow-remedy-gardener.ts) passes each shard to loadPlanFromYaml, which resolves depends_on and superseded_by inside the one blob it is given.
+    - W1-T11062's retirement is exactly the W1-T9729 shape (a retirement naming its superseding task), so the gardener fails on the case that rule was written for, and it fails every pass until the shard changes.
+    - The fix-lane gardener reads through the same function.
+  design: |
+    Read each listed shard with parseTasksFromYaml, which checks the shard's own schema and leaves cross-task references to the whole-plan loader. Keep the unreadable list and its throw in the gardeners as they are.
+    NOT IN SCOPE: whether the superseding task has landed (retirementHoldsOrigin already decides that) and the gardeners' queue time.
+  falsifier: |
+    Restore loadPlanFromYaml and criteria 1 and 3 must fail; swallow a schema error and criterion 2 must fail. Restore and require all three to pass.
+  note: |
+    reservation hand-off: run-unfiled-1794301186975 -> run-unfiled-1794301186975
+    Reserved with rmd next-task-id (--count 3 on run-unfiled-1794301186975). Hand-built in the same session.

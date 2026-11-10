@@ -17,7 +17,7 @@
     - src/run-task.ts
     - src/lib/review.ts
     - test/ci/gates/the-preopen-gate-keeps-why-a-step-failed.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-10-28, read-only, host ledger union (380 gz archives named >= 2026-10-15 plus the live file;

@@ -1,0 +1,37 @@
+- id: W1-T12059
+  title: "A merge refused for unread mergeability is read again in the same pass"
+  repo: remudero
+  depends_on: []
+  priority: 1.1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the direct-merge path of plan pull requests; a wrong retry must never merge on stale facts
+  band_meaning: blast-radius
+  origin: operator-session#review-flow-2026-11-10
+  plan_refs:
+    - W1-T11259
+  files:
+    - src/lib/arm-auto-merge.ts
+    - test/a-merge-refused-for-unread-mergeability-is-read-again-in-the-same-pass.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "When the mergeability read returns unknown, the read is made again within the same pass, and the pull request merges when the second read is clean"
+      proof: "grep: W1-T12059 criterion 1 in test/a-merge-refused-for-unread-mergeability-is-read-again-in-the-same-pass.test.ts"
+    - claim: "Every safety check runs again on the second read: the head, the base distance and the plan-touch check use the fresh facts only"
+      proof: "grep: W1-T12059 criterion 2 in test/a-merge-refused-for-unread-mergeability-is-read-again-in-the-same-pass.test.ts"
+    - claim: "When the second read is still unknown the refusal is recorded as today, and the pull request waits for the next sweep"
+      proof: "grep: W1-T12059 criterion 3 in test/a-merge-refused-for-unread-mergeability-is-read-again-in-the-same-pass.test.ts"
+  rationale: |
+    CORRECTED 2026-11-10. This task first cited three refusals on that day as unknown mergeability. Their rows say otherwise.
+    - #17639 (12:36:17Z), #17618 (12:40:37Z) and #17622 (12:46:54Z) were refused with reason plan_merge_unread. Each row's plan_merge_unsafe says the merged tree was unreadable: git cat-file --batch could not read a plan blob.
+    - All three came from hand-run reviews on the Azure host (run ids review-PR17639-…, review-PR17618-…, review-PR17622-…). A hand-run review checks merge safety in a clone under its own config root, and that clone lacked the plan's blobs. That defect is a separate task.
+    - The daemon's own reviews merged at once that day: #17650 and #17652 within a minute of their verdict, #17654 in about three.
+    What this task is for: the direct-merge preflight reads mergeability once. GitHub answers "unknown" for a few seconds after a status changes, and the preflight then refuses. The plan path already re-reads up to PLAN_PR_UNKNOWN_MAX_REREADS times; the clean-status and rate-limit fallbacks for code pull requests do not.
+  design: |
+    In the direct-merge preflight in src/lib/arm-auto-merge.ts, when the only failed fact is an unknown mergeability, read the pull request again after the pacer's next turn, up to the number of reads the function already allows for a refresh (plan_pr_mergeability_unknown_bound). Then run the whole safety check on the new facts. Nothing is reused from the first read.
+    NOT IN SCOPE: the sweep's cadence, and any refusal other than unknown mergeability.
+  falsifier: |
+    Do not read again and criterion 1 must fail. Reuse a fact from the first read and criterion 2 must fail. Merge on a second unknown and criterion 3 must fail. Restore and require all three to pass.
