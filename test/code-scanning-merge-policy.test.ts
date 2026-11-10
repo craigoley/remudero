@@ -102,3 +102,70 @@ test('consistent sectioned CodeQL low medium and quality findings remain below t
  x.checks[0]!.output.summary=x.checks[0]!.output.summary.replace('Other Alerts:','Non-security Alerts:');assert.equal(classify(x).state,'safe');
  x.checks[0]!.output.summary=x.checks[0]!.output.summary.replace(' * 1 low\n',' * 1 high\n');assert.equal(classify(x).state,'blocked');
 });
+
+// ---- W1-T10976: the exact one-configuration-missing warning ----
+// @ts-expect-error — ESM metadata policy outside tsconfig source roots.
+import {missingConfigurationSummary,parseMissingConfigurationWarning,isMissingConfigurationCandidate,CODEQL_EXPECTED_CATEGORIES} from '#src/lib/code-scanning-merge-policy.mjs';
+const merge='c'.repeat(40);
+const recovered=(extra:any={})=>({...clean(),recovery:{state:'complete',mergeSha:merge,alertsComplete:true,newHighCritical:[],
+ categories:[...CODEQL_EXPECTED_CATEGORIES],...extra}});
+const withWarning=(x:any,patch:any={})=>{x.checks[0]={...x.checks[0],conclusion:'neutral',
+ output:{title:'1 configuration not found',summary:missingConfigurationSummary(11468,'/language:python')},...patch};return x;};
+
+test('only the exact one-configuration-missing warning with complete valid evidence reconciles to safe',()=>{
+ const ok=classify(withWarning(recovered()));
+ assert.deepEqual(ok,{state:'safe',mergeAllowed:true,reason:'trusted-missing-configuration-reconciled-by-complete-analyses'});
+ for(const category of CODEQL_EXPECTED_CATEGORIES)
+  assert.equal(classify(withWarning(recovered(),{output:{title:'1 configuration not found',summary:missingConfigurationSummary(11468,category)}})).state,'safe',category);
+ // Without the shared evidence the same warning never grants permission.
+ assert.equal(classify(withWarning(clean())).reason,'codeql-configuration-recovery-invalid-evidence');
+ assert.equal(classify(withWarning({...clean(),recovery:{state:'pending'}})).reason,'codeql-configuration-recovery-pending');
+});
+test('a new high or critical alert beside the missing-configuration warning stays blocked',()=>{
+ const r=classify(withWarning(recovered({newHighCritical:[5]})));
+ assert.deepEqual(r,{state:'blocked',mergeAllowed:false,reason:'new-high-or-critical-security-alert'});
+ const counted=withWarning(recovered(),{output:{title:'1 configuration not found',summary:missingConfigurationSummary(11468,'/language:python')+'\n * 1 high\n'}});
+ assert.equal(classify(counted).state,'blocked','a positive high-severity row in the summary still blocks');
+});
+test('every other neutral warning or failed shape stays UNKNOWN and never reconciles',()=>{
+ const summary=missingConfigurationSummary(11468,'/language:python');
+ const shapes:Array<[string,(x:any)=>void]>=[
+  ['synthetic summary',x=>x.checks[0].output.summary='unrecognized comparison state'],
+  ['other title',x=>x.checks[0].output.title='2 configurations not found'],
+  ['title only',x=>x.checks[0].output.summary=''],
+  ['title substring',x=>x.checks[0].output.title='1 configuration not found, 1 new alert'],
+  ['two missing configurations',x=>x.checks[0].output.summary=summary.replace('\n\n[View','\n * `'+'.github/workflows/codeql.yml:analyze/language:actions`\n\n[View')],
+  ['foreign analysis key',x=>x.checks[0].output.summary=summary.replace('codeql.yml:analyze','other.yml:analyze')],
+  ['unconfigured category',x=>x.checks[0].output.summary=summary.replace('python','ruby')],
+  ['another PR',x=>x.checks[0].output.summary=summary.replace('pr%3A11468','pr%3A11442')],
+  ['trailing text',x=>x.checks[0].output.summary=summary+'\nextra'],
+  ['failure conclusion',x=>x.checks[0].conclusion='failure'],
+  ['success conclusion with warning body',x=>x.checks[0].conclusion='success'],
+  ['cancelled',x=>x.checks[0].conclusion='cancelled'],
+  ['still running',x=>x.checks[0].status='in_progress']];
+ for(const [label,mutate] of shapes){
+  const x=withWarning(recovered());mutate(x);const r=classify(x);
+  assert.equal(r.mergeAllowed,false,label);assert.equal(r.state,'unknown',label);
+ }
+ const wrongEvidence:Array<[string,any]>=[
+  ['missing category',{categories:CODEQL_EXPECTED_CATEGORIES.slice(0,2)}],['extra category',{categories:[...CODEQL_EXPECTED_CATEGORIES,'/language:ruby']}],
+  ['no merge sha',{mergeSha:undefined}],['alerts incomplete',{alertsComplete:false}],['alerts not a list',{newHighCritical:undefined}],
+  ['invalid evidence',{state:'invalid'}]];
+ for(const [label,patch] of wrongEvidence){
+  const r=classify(withWarning(recovered(patch)));assert.equal(r.mergeAllowed,false,label);assert.equal(r.reason,'codeql-configuration-recovery-invalid-evidence',label);
+ }
+ const older=withWarning(recovered());older.checks.unshift({...clean().checks[0]!,id:0});
+ older.checks[0].id=7;older.checks[1].id=2;assert.equal(classify(older).state,'safe','the newest trusted generation decides — the older clean row is not consulted');
+ const newerFailed=withWarning(recovered());newerFailed.checks.push({...clean().checks[0]!,id:9,conclusion:'failure',output:{title:'x',summary:'y'}});
+ assert.equal(classify(newerFailed).state,'unknown','a newer failed generation is never masked by older rows');
+});
+test('missing-configuration candidates require the trusted identity and a strict warning',()=>{
+ const x=withWarning(clean());
+ assert.equal(isMissingConfigurationCandidate(x.checks,head,11468),true);
+ assert.equal(isMissingConfigurationCandidate(x.checks,other,11468),false);
+ assert.equal(isMissingConfigurationCandidate([{...x.checks[0],app:{...x.checks[0].app,id:1}}],head,11468),false);
+ assert.equal(isMissingConfigurationCandidate([x.checks[0],x.checks[0]],head,11468),false);
+ assert.equal(isMissingConfigurationCandidate('nope' as any,head,11468),false);
+ assert.equal(parseMissingConfigurationWarning(x.checks[0],NaN),undefined);
+ assert.equal(parseMissingConfigurationWarning(clean().checks[0],11468),undefined);
+});
