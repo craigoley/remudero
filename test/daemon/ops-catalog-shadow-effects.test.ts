@@ -1,10 +1,13 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import fs from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { test } from "node:test";
 // The daemon and the live analytics cache import each other and the cache reads a daemon constant at load,
 // so the cache loads first and the daemon (the module under test) finishes before the cache evaluates.
 import "#src/lib/live-analytics-snapshot-cache.js";
 import { compositeCatalogRevisionKey, runDaemon, type DaemonDeps } from "#src/lib/daemon.js";
+import { createDaemonMemoryGovernor } from "#src/lib/daemon-memory-policy.js";
 import { mergePlanBlobs, type Plan, type Task } from "#src/lib/plan.js";
 import { OPS_CATALOG_OUTCOMES, type OpsCatalogOutcome, type OpsCatalogShadowInput } from "#src/lib/ops-catalog-source.js";
 import { inspect } from "node:util";
@@ -34,6 +37,18 @@ const okSource = (plan: Plan, opsCommit = OPS_1): OpsCatalogShadowInput => ({ ou
 const digestOf = (publicCommit: string, opsCommit: string): string =>
   createHash("sha256").update(compositeCatalogRevisionKey(publicCommit, opsCommit)).digest("hex");
 
+/**
+ * Every host reading `runDaemon` takes on this path, fixed: the memory governor (process RSS, swap and the
+ * cgroup budget), V8 heap statistics, the wall clock and RMD_BOOT_CHECKOUT_BLOCKED. A case and its baseline
+ * get the same values, so a busy or memory-limited host cannot change either ledger.
+ */
+const hostPins = (): Partial<DaemonDeps> => ({
+  memoryGovernor: createDaemonMemoryGovernor({ read: () => ({ rss_bytes: 1 }), setFlags: () => {}, heapUsed: () => 1 }),
+  heapStatistics: () => ({ used_heap_size: 1, heap_size_limit: 1_000_000_000 }),
+  now: () => new Date(Date.UTC(2026, 0, 1)),
+  bootCheckoutBlocked: "",
+});
+
 type Row = Record<string, unknown>;
 interface Run { ran: string[]; merged: string[]; rows: Row[]; ledger: string }
 
@@ -57,16 +72,38 @@ async function drive(deps: Partial<DaemonDeps>, opts: { max?: number; plan?: Pla
       if (step === "dispatch.secondary_catalog_shadow") rows.push(extra);
       else other.push([step, extra]);
     },
+    ...hostPins(),
     ...deps,
   }, { max: opts.max ?? 3 });
-  return { ran, merged: summary.merged, rows, ledger: JSON.stringify(other.map(stableRow)) };
+  return { ran, merged: summary.merged, rows, ledger: JSON.stringify(other) };
 }
 
-/** Keep what a ledger row says about dispatch. Drop the wall-clock and memory readings that differ between any two runs. */
-function stableRow([step, extra]: [string, Row]): [string, Row] {
-  if (step === "daemon.memory_pressure" || step === "dispatch.refill_bound") return [step, {}];
-  return [step, Object.fromEntries(Object.entries(extra).filter(([key]) => !/(^|_)(ms|at)(_|$)/.test(key)))];
-}
+test("W1-T11769: a pressured host cannot change what these cases compare", async (t) => {
+  // The fake host has a one-megabyte memory budget and swap that doubles on every read.
+  // An unpinned daemon would tighten, then exit on memory pressure.
+  const reads: string[] = [];
+  const real = fs.readFileSync as (...args: unknown[]) => unknown;
+  let swapKb = 1_000_000;
+  t.mock.method(fs, "readFileSync", ((...args: unknown[]) => {
+    const path = String(args[0]);
+    if (!path.startsWith("/sys/fs/cgroup/") && path !== "/proc/self/status") return real(...args);
+    reads.push(path);
+    swapKb *= 2;
+    return path.endsWith("memory.max") ? "1048576\n" : path.endsWith("memory.high") ? "max\n" : `VmSwap:\t${swapKb} kB\n`;
+  }) as typeof fs.readFileSync);
+  syncBuiltinESMExports();
+  let pressured: Run;
+  try {
+    pressured = await drive({ secondaryCatalogShadowSource: () => okSource(planOf([opsTask("OPS-1")])), primaryPlanCommit: () => PUBLIC_1 });
+  } finally {
+    t.mock.restoreAll();
+    syncBuiltinESMExports();
+  }
+  const quiet = await drive({});
+  assert.deepEqual(pressured.ran, ["A", "B", "C"], "the pressured run dispatches all public work");
+  assertSameDispatch(pressured, quiet, "pressured host");
+  assert.deepEqual(reads, [], "no case reads the host's memory files");
+});
 
 /** The dispatch picks, worker spawns, merges and every other ledger row must equal a run with no seam. */
 function assertSameDispatch(run: Run, baseline: Run, label: string): void {
@@ -159,6 +196,7 @@ test("W1-T11769 criterion 3: a ledger that refuses the shadow row cannot change 
     primaryPlanCommit: () => PUBLIC_1,
     runOne: async (id) => { ran.push(id); merged.add(id); return { taskId: id, runId: `${id}-run`, merged: true, costUsd: 0, verdict: "merged" }; },
     sleep: async () => {},
+    ...hostPins(),
     log: (step) => { if (step === "dispatch.secondary_catalog_shadow") { refusedRows++; throw new Error("ledger unavailable"); } },
   }, { max: 3 });
   assert.equal(refusedRows, 1, "the refused row is not retried every tick");
