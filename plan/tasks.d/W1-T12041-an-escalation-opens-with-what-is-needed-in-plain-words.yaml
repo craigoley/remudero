@@ -1,0 +1,38 @@
+- id: W1-T12041
+  title: "An escalation opens with what happened and what is needed, and machine fields come last"
+  repo: remudero
+  depends_on: [W1-T12038]
+  priority: 1.2
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: medium # one function that builds the issue body; every field is still present and still parsed
+  band_meaning: blast-radius
+  origin: operator-session#plain-language-2026-11-10
+  plan_refs:
+    - W1-T2279
+  files:
+    - src/lib/escalate.ts
+    - test/an-escalation-opens-with-what-is-needed-in-plain-words.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "The issue body opens with the summary, then the options and the recommendation, and the machine fields (class, task, host, run, head, cause) follow under their own heading"
+      proof: "grep: W1-T12041 criterion 1 in test/an-escalation-opens-with-what-is-needed-in-plain-words.test.ts"
+    - claim: "Every machine field the reconciler and the answer reader parse today is still read from a body in the new order"
+      proof: "grep: W1-T12041 criterion 2 in test/an-escalation-opens-with-what-is-needed-in-plain-words.test.ts"
+    - claim: "A body in the old order, written before this change, is still read without loss"
+      proof: "grep: W1-T12041 criterion 3 in test/an-escalation-opens-with-what-is-needed-in-plain-words.test.ts"
+  rationale: |
+    OBSERVED 2026-11-10 on the six newest escalations (#17633 to #17638): every body opens with five to seven machine lines (Class, Task, Host, Run, Head, Cause) before the first plain sentence. None showed a decision summary in its first 600 characters.
+    - Example title: "[MANUAL] TRIAGE-incident-ba882173ff28a357: PR …/17617 needs a clarification — PR stage stalled: #17617 …/17617 — awaiting-review". It has a hash id, the same URL twice and no request.
+    - The body is built in src/lib/escalate.ts near lines 1120 to 1150. The operator reads it on GitHub, in the console inbox and in an iMessage.
+    - The escalation is the text that most often asks the operator to act, so it is the first text to fix.
+  design: |
+    Reorder the body builder: summary, options, recommendation, then a "Machine fields" heading with the fields unchanged. Readers of the body find a field by its label, so the order does not matter to them; criterion 2 and 3 prove it on both orders.
+    NOT IN SCOPE: the wording of any one escalation's summary or detail (about 95 call sites, later tasks), the title format, and how many escalations are opened.
+  falsifier: |
+    Put a machine field before the summary and criterion 1 must fail. Make a reader depend on the old position and criterion 2 must fail. Stop reading an old-order body and criterion 3 must fail. Restore and require all three to pass.
+  note: |
+    Open issues keep their old bodies; only new issues use the new order.

@@ -17,7 +17,7 @@
   files:
     - src/lib/service.ts
     - test/console-api/serve/an-origin-socket-idle-past-five-seconds-is-still-served.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED 2026-10-27 on the Azure host, after the console tunnel moved to cloudflared 2026.10.4 at 13:25Z.

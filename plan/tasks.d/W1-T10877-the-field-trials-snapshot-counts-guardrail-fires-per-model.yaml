@@ -22,7 +22,7 @@
     - "src/lib/risk-judge.ts"
     - src/lib/worker.ts
     - src/lib/worker-provider.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     The guardrails exist and fire, but no reader tallies them per model. READ 2026-10-27 at origin/main aa90fdc44:
