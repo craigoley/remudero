@@ -15,6 +15,11 @@
   files:
     - src/lib/test-slot.ts
     - test/the-test-slot-admits-the-cheapest-waiter-first-and-ages-the-rest.test.ts
+  # refusal-amendment (W1-T11915, run work-fix-dispatch-W1-T11915-1794345755992-f3eb@c1fe62f11dc56398b2fbb426d6fe16ed9b703d0d, 2026-11-10T22:17:29.040Z): the worker refused criterion 1 [outside-declared-files] — proposed widen-files: widen `files:` to cover the paths the change needs, or narrow the criteria to the declared files
+  #   worker evidence: The cost reaches production only through `scripts/preflight-author.mjs` and `src/lib/test-slot-queue.ts` (`setPrice`), neither in the declared files, and W1-T12061 already owns that wiring.
+  # refusal-amendment (W1-T11915, run work-fix-dispatch-W1-T11915-1794345755992-f3eb@c1fe62f11dc56398b2fbb426d6fe16ed9b703d0d, 2026-11-10T22:17:29.040Z): the worker refused criterion 2 [outside-declared-files] — proposed widen-files: widen `files:` to cover the paths the change needs, or narrow the criteria to the declared files
+  #   worker evidence: The aging of a costly waiter is reachable in production only once those callers pass the price; the formula and its test in `src/lib/test-slot.ts` are in scope and already pass.
+  #   this task is held from dispatch until its record changes; an Architect must make the change above
   status: queued
   attempts: 0
   acceptance:
