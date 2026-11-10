@@ -6,7 +6,7 @@
   verify: auto
   principles: {tdd: strict}
   budget_usd: 14.00
-  risk: high  # Rule 19: one concern (the decision and receipt schema); a new pure module, no caller; a false "recover" would release a live worker's PR
+  risk: high  # Rule 19: one concern (decision, receipt schema and read-only shadow diagnostic); a false "recover" would release a live worker's PR
   band_meaning: blast-radius
   origin: architect
   plan_refs: [W1-T4209, W1-T6362, W1-T2952, W1-T10389, W1-T11753, W1-T11751, W1-T8621]
