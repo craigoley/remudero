@@ -4,7 +4,7 @@ raw: >-
   Evidence coverage gap (evidence-coverage-v1, over benchmark-quality-v1): lane
   `inbox-draft`, field `assignment`.
 
-  Coverage: 0/96 terminal worker results (joined to an assignment, or carrying
+  Coverage: 0/100 terminal worker results (joined to an assignment, or carrying
   no id or no match) (0.0%) in the trailing 7-day window; the field is absent:
   no row in the window records it.
 
@@ -26,7 +26,7 @@ submission_key: null
 thread_id: null
 evidence_coverage_revision:
   version: 1
-  mainSha: 247f574101efed966c92c149c64bce1aef97f0de
+  mainSha: 9023ecc08515ab728e1437ac25e0644077280194
   expectedRecord: >
     id: evidence-coverage-inbox-draft-assignment
 
@@ -36,7 +36,7 @@ evidence_coverage_revision:
       Evidence coverage gap (evidence-coverage-v1, over benchmark-quality-v1): lane
       `inbox-draft`, field `assignment`.
 
-      Coverage: 0/89 terminal worker results (joined to an assignment, or carrying
+      Coverage: 0/96 terminal worker results (joined to an assignment, or carrying
       no id or no match) (0.0%) in the trailing 7-day window; the field is absent:
       no row in the window records it.
 
@@ -67,7 +67,7 @@ evidence_coverage_revision:
 
     evidence_coverage_revision:
       version: 1
-      mainSha: 7c87a20708cd5e5e9c3dade851edb4942725b080
+      mainSha: 247f574101efed966c92c149c64bce1aef97f0de
       expectedRecord: >
         id: evidence-coverage-inbox-draft-assignment
 
@@ -77,7 +77,7 @@ evidence_coverage_revision:
           Evidence coverage gap (evidence-coverage-v1, over benchmark-quality-v1): lane
           `inbox-draft`, field `assignment`.
 
-          Coverage: 0/85 terminal worker results (joined to an assignment, or carrying
+          Coverage: 0/89 terminal worker results (joined to an assignment, or carrying
           no id or no match) (0.0%) in the trailing 7-day window; the field is absent:
           no row in the window records it.
 
@@ -108,7 +108,7 @@ evidence_coverage_revision:
 
         evidence_coverage_revision:
           version: 1
-          mainSha: c223fe68126537e9df1d6b8d75a748414757d8c9
+          mainSha: 7c87a20708cd5e5e9c3dade851edb4942725b080
           expectedRecord: >
             id: evidence-coverage-inbox-draft-assignment
 
@@ -118,7 +118,7 @@ evidence_coverage_revision:
               Evidence coverage gap (evidence-coverage-v1, over benchmark-quality-v1): lane
               `inbox-draft`, field `assignment`.
 
-              Coverage: 0/37 terminal worker results (joined to an assignment, or carrying
+              Coverage: 0/85 terminal worker results (joined to an assignment, or carrying
               no id or no match) (0.0%) in the trailing 7-day window; the field is absent:
               no row in the window records it.
 
@@ -146,18 +146,76 @@ evidence_coverage_revision:
             submission_key: null
 
             thread_id: null
+
+            evidence_coverage_revision:
+              version: 1
+              mainSha: c223fe68126537e9df1d6b8d75a748414757d8c9
+              expectedRecord: >
+                id: evidence-coverage-inbox-draft-assignment
+
+                ts: 2026-11-08T08:20:39.061Z
+
+                raw: >-
+                  Evidence coverage gap (evidence-coverage-v1, over benchmark-quality-v1): lane
+                  `inbox-draft`, field `assignment`.
+
+                  Coverage: 0/37 terminal worker results (joined to an assignment, or carrying
+                  no id or no match) (0.0%) in the trailing 7-day window; the field is absent:
+                  no row in the window records it.
+
+                  First seen: 2026-11-08T08:19:24.384Z.
+
+
+                  This follow-up never gates a PR or blocks work. Restore the field at the
+                  lane's ledger write site (src/lib/benchmark-evidence.ts names what each field
+                  reads), or record why this lane legitimately lacks it. The evidence-coverage
+                  gardener updates this entry in place while the gap persists.
+                attachments: []
+
+                origin: cli
+
+                status: new
+
+                reply_to: null
+
+                proposal_pr: null
+
+                summary: null
+
+                expansion: null
+
+                submission_key: null
+
+                thread_id: null
+              expectedPlan:
+                plan/tasks.yaml: 4f7b11c7c694a482e077db0e692abc5874cf6611
+                plan/tasks.d: c61e5b2d8b470ca45b44dd3797e2e563d37b1ba8
+              measurement:
+                lane: inbox-draft
+                field: assignment
+                observed: 0
+                denominator: 85
+                floor: 0.8
+                at: 2026-11-09T02:20:22.244Z
+                since: 2026-11-02T02:20:22.244Z
+                line: "Coverage: 0/85 terminal worker results (joined to an assignment, or
+                  carrying no id or no match) (0.0%) in the trailing 7-day window; the field
+                  is absent: no row in the window records it."
+              closure:
+                eligible: false
+                reason: record is open
           expectedPlan:
             plan/tasks.yaml: 4f7b11c7c694a482e077db0e692abc5874cf6611
-            plan/tasks.d: c61e5b2d8b470ca45b44dd3797e2e563d37b1ba8
+            plan/tasks.d: 055cd0013370175d28ba95a3d85a052dbfa17c89
           measurement:
             lane: inbox-draft
             field: assignment
             observed: 0
-            denominator: 85
+            denominator: 89
             floor: 0.8
-            at: 2026-11-09T02:20:22.244Z
-            since: 2026-11-02T02:20:22.244Z
-            line: "Coverage: 0/85 terminal worker results (joined to an assignment, or
+            at: 2026-11-09T08:29:32.579Z
+            since: 2026-11-02T08:29:32.579Z
+            line: "Coverage: 0/89 terminal worker results (joined to an assignment, or
               carrying no id or no match) (0.0%) in the trailing 7-day window; the field
               is absent: no row in the window records it."
           closure:
@@ -165,16 +223,16 @@ evidence_coverage_revision:
             reason: record is open
       expectedPlan:
         plan/tasks.yaml: 4f7b11c7c694a482e077db0e692abc5874cf6611
-        plan/tasks.d: 055cd0013370175d28ba95a3d85a052dbfa17c89
+        plan/tasks.d: c854a340633f6a0ef92bfef44767dc27f3b11fcd
       measurement:
         lane: inbox-draft
         field: assignment
         observed: 0
-        denominator: 89
+        denominator: 96
         floor: 0.8
-        at: 2026-11-09T08:29:32.579Z
-        since: 2026-11-02T08:29:32.579Z
-        line: "Coverage: 0/89 terminal worker results (joined to an assignment, or
+        at: 2026-11-09T14:30:04.016Z
+        since: 2026-11-02T14:30:04.016Z
+        line: "Coverage: 0/96 terminal worker results (joined to an assignment, or
           carrying no id or no match) (0.0%) in the trailing 7-day window; the field
           is absent: no row in the window records it."
       closure:
@@ -182,16 +240,16 @@ evidence_coverage_revision:
         reason: record is open
   expectedPlan:
     plan/tasks.yaml: 4f7b11c7c694a482e077db0e692abc5874cf6611
-    plan/tasks.d: c854a340633f6a0ef92bfef44767dc27f3b11fcd
+    plan/tasks.d: 721aed91c1761612d2914a48ffc20918c5b9eb0a
   measurement:
     lane: inbox-draft
     field: assignment
     observed: 0
-    denominator: 96
+    denominator: 100
     floor: 0.8
-    at: 2026-11-09T14:30:04.016Z
-    since: 2026-11-02T14:30:04.016Z
-    line: "Coverage: 0/96 terminal worker results (joined to an assignment, or
+    at: 2026-11-09T20:41:48.053Z
+    since: 2026-11-02T20:41:48.053Z
+    line: "Coverage: 0/100 terminal worker results (joined to an assignment, or
       carrying no id or no match) (0.0%) in the trailing 7-day window; the field
       is absent: no row in the window records it."
   closure:

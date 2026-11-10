@@ -297,7 +297,7 @@ export const IDLE_LANE_SUMMARY_WINDOW_MS = 60 * MS_PER_MINUTE;
  */
 export function idleLaneCauseForStep(
   step: string,
-  fields?: { state?: unknown; detail?: unknown; reason?: unknown; held_by?: unknown },
+  fields?: { state?: unknown; detail?: unknown; reason?: unknown; held_by?: unknown; control?: unknown },
 ): IdleLaneCause | undefined {
   switch (step) {
     case "dispatch.new_build_held":
@@ -313,6 +313,8 @@ export function idleLaneCauseForStep(
     case "dispatch.lane_refill_held":
     case "dispatch.lane_parked":
       return idleLaneCauseForRefillReason(fields?.reason);
+    case "daemon.admission_held":
+      return fields?.control === "HEAP" ? "memory" : undefined;
     case "daemon.boot_gate.deferred":
       return "boot_gate";
     case "dispatch.value.refused":
@@ -344,6 +346,7 @@ export function idleLaneCauseForRefillReason(reason: unknown): IdleLaneCause | u
   if (/container recycle/.test(reason)) return "recycle_drain";
   if (/supervised serve restoration/.test(reason)) return "restart";
   if (/^pause/.test(reason) || /fleet PAUSE hold/.test(reason)) return "operator_pause";
+  if (/fleet HEAP hold/.test(reason)) return "memory";
   if (/^no disjoint runnable task/.test(reason)) return "selection_empty";
   if (/^governor: memory(?: |$)/.test(reason)) return "memory";
   if (/^governor: queue/.test(reason) || /^lane budget/.test(reason)) return "wip_limit";

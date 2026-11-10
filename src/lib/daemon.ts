@@ -155,7 +155,8 @@ import type { GithubPostureFinding } from "./github-posture.js";
 // convert them into a `Clock` at the read site instead of forcing every caller to change; the
 // headroom sampler is internal-only, so it is migrated onto `Clock` outright, no adapter needed.
 import { clockFromDateFn, clockFromIsoFn, fixedClock, loopAvailableDeadline, systemClock, type Clock } from "../lib/clock.js";
-import { createNearLimitHeapTelemetry, NEAR_HEAP_FILE, type NearLimitHeapTelemetry } from "./daemon-heap-near-limit.js";
+import { createNearLimitHeapTelemetry, NEAR_HEAP_FILE, type NearLimitHeapTelemetry, type NearLimitSample } from "./daemon-heap-near-limit.js";
+import { createHeapAdmissionHold, type HeapAdmissionHoldLatch, type HeapAdmissionHoldMode, type HeapHoldTrace } from "./daemon-heap-admission-hold.js";
 import { readLedgerUnionRecordsSync } from "./ledger-union.js";
 import { createGateObservationState, observeGate } from "./gate-observations.js";
 import { getHeapStatistics } from "node:v8";
@@ -1322,6 +1323,10 @@ export interface DaemonDeps {
   heapShadowSeams?: Pick<HeapShadowOptions, "snapshot" | "pid">;
   /** Report-only observer; null disables it. The state directory supplies the production store. */
   nearLimitHeapTelemetry?: NearLimitHeapTelemetry | null;
+  /** W1-T11383: `daemonMemory.heapAdmissionHold.mode`; absent, shadow. Only enforce with a READY verdict holds. */
+  heapAdmissionHoldMode?: HeapAdmissionHoldMode;
+  /** Why a present mode row was read as shadow; it rides each readiness row. */
+  heapAdmissionHoldModeError?: string;
   lastStepBeforeBlock?: () => string | undefined;
   /** Rebind daemon-owned sweep/projection closures when the live plan reloads. */
   onPlanReload?: (plan: Plan) => void;
@@ -1573,7 +1578,7 @@ export interface DaemonDeps {
   checkPauseHold?: () => PauseHoldGovernorInput | undefined;
   clearPauseHold?: () => void | Promise<void>;
   onPauseNeedsHuman?: (info: { holdId: string; owner: PauseHoldOwner; expiresAt: string | null }) => void | Promise<void>;
-  workerAdmissionHold?: () => FleetControlHold | undefined;
+  workerAdmissionHold?: () => WorkerAdmissionHold | undefined;
   /** Reads freshness between iterations and on the dispatch ticker's cadence. A restart-worthy advance
    *  closes admission; admitted lanes settle before the existing drain and stale exit (W1-T5308). A
    *  promise is awaited at the tick's own boundaries; a lane's sync refill reads the latest settled one (W1-T5282). */
@@ -1815,6 +1820,9 @@ export interface FleetControlHold {
   control: "STOP" | "PAUSE";
   detail: string;
 }
+
+/** W1-T11383: a worker-start hold; HEAP composes after the fleet controls and never inside them. */
+export type WorkerAdmissionHold = FleetControlHold | { control: "HEAP"; detail: string };
 
 export function resolveFleetControlHold(
   deps: Pick<DaemonDeps, "checkStop" | "checkPause">,
@@ -2283,9 +2291,9 @@ export interface LightPassScope {
 }
 
 /** W1-T9808: a latched restart's admission predicate. A call without `surface` is a probe: no hold row, no count. */
-export type RestartAdmission = (
+export type RestartAdmission = ((
   kind: "review" | "plan-review" | "fix-dispatch" | "dispatch-refill", surface?: "light" | "light-refill" | "full-sweep", lengthMs?: number,
-) => boolean;
+) => boolean) & { readonly heldBy?: string };
 
 /** W1-T9808: may this light pass open its fix lanes? Never on a review-only pass, nor when the latch refuses a fix. */
 export function lightPassFixAdmitted(scope?: LightPassScope): boolean {
@@ -2510,7 +2518,8 @@ export function startInterphaseReviewClock(
           const pass = (async () => {
             try {
               const named = { reviewOnly: true, scope: scope ?? "interphase-review" } as const;
-              await (reviewOnly ? deps.sweepLight!(admit ? { ...named, admit } : named) : deps.sweepLight!());
+              await (reviewOnly ? deps.sweepLight!(heapHeldLightPass(deps, log, admit ? { ...named, admit } : named))
+                : deps.sweepLight!(heapHeldLightPass(deps, log, undefined)));
               if (reviewOnly) log("daemon.review_clock.pass", { trigger, ...scopeTag, review_only: true });
               if (trigger === "github-event") log("daemon.review_clock.wake_consumed", { trigger, ...scopeTag });
             } catch (e) {
@@ -2759,10 +2768,44 @@ let inFlightTickerGenerations = 0;
  * Reuse the disk-headroom ticker; healthy fleets need no extra reads. Forensics: docs/forensics/daemon.md. */
 export const HEADROOM_SAMPLE_MAX_AGE_MS = 300_000;
 
-const nearLimitHeapObservers = new WeakMap<DaemonDeps, (surface: string) => void>();
+const nearLimitHeapObservers = new WeakMap<DaemonDeps, (surface: string) => NearLimitSample | undefined>();
 
-function recordNearLimitHeapSample(deps: DaemonDeps, surface: string): void {
-  nearLimitHeapObservers.get(deps)?.(surface);
+function recordNearLimitHeapSample(deps: DaemonDeps, surface: string): NearLimitSample | undefined {
+  return nearLimitHeapObservers.get(deps)?.(surface);
+}
+
+const heapAdmissionLatches = new WeakMap<DaemonDeps, HeapAdmissionHoldLatch>();
+
+function heapAdmissionHold(deps: DaemonDeps, surface: string, sample: NearLimitSample | undefined) {
+  return heapAdmissionLatches.get(deps)?.read(surface, sample);
+}
+
+/** W1-T11383: the heap arm, read only once no fleet control holds; a STOP or PAUSE read still wins here. One
+ *  `daemon.admission_held` row per surface per latch episode. */
+function heapWorkerAdmissionHold(
+  deps: DaemonDeps, surface: string, sample: NearLimitSample | undefined, log: (step: string, extra?: Record<string, unknown>) => void,
+): { control: "HEAP"; detail: string; reason: string } | undefined {
+  const heap = heapAdmissionHold(deps, surface, sample);
+  if (!heap || resolveFleetControlHold(deps)) return undefined;
+  const reason = `fleet HEAP hold: ${heap.detail}`;
+  if (heapAdmissionLatches.get(deps)?.firstHeld(surface)) log("daemon.admission_held", { surface, control: "HEAP", detail: heap.detail, reason, episode: heap.episode });
+  return { control: "HEAP", detail: heap.detail, reason };
+}
+
+/** W1-T11383: off the seam, a surface reads a fresh sample only while the latch is set, so a clear latch adds none. */
+function heapHoldWhileLatched(deps: DaemonDeps, surface: string, log: (step: string, extra?: Record<string, unknown>) => void) {
+  return heapAdmissionLatches.get(deps)?.latched()
+    ? heapWorkerAdmissionHold(deps, surface, recordNearLimitHeapSample(deps, `admission:${surface}`), log) : undefined;
+}
+
+/** W1-T11383: a light pass under a heap hold admits no review, refill or fix, and names the hold as its cause. */
+function heapHeldLightPass<S extends LightPassScope | undefined>(
+  deps: DaemonDeps, log: (step: string, extra?: Record<string, unknown>) => void, scope: S,
+): S | LightPassScope {
+  const hold = heapHoldWhileLatched(deps, "light-pass", log);
+  if (!hold) return scope;
+  const admit: RestartAdmission = Object.assign(() => false, { heldBy: hold.reason });
+  return { ...(scope ?? { reviewOnly: false }), admit };
 }
 
 function startInFlightTicker(
@@ -3039,7 +3082,7 @@ function startInFlightTicker(
             log("daemon.sweep_light.review_only", { phase: owner.phase, detail: lightHalt });
             const pass = (async () => {
               try {
-                await deps.sweepLight!(admit ? { reviewOnly: true, scope: "pause", admit } : { reviewOnly: true, scope: "pause" });
+                await deps.sweepLight!(heapHeldLightPass(deps, log, admit ? { reviewOnly: true, scope: "pause", admit } : { reviewOnly: true, scope: "pause" }));
               } catch (e) {
                 log("daemon.sweep_light.failed", { phase: owner.phase, review_only: true, error: String((e as Error)?.message ?? e) });
               }
@@ -3051,7 +3094,7 @@ function startInFlightTicker(
             continue;
           }
           try {
-            await (admit ? deps.sweepLight?.({ reviewOnly: false, admit }) : deps.sweepLight?.());
+            await deps.sweepLight?.(heapHeldLightPass(deps, log, admit ? { reviewOnly: false, admit } : undefined));
           } catch (e) {
             log("daemon.sweep_light.failed", { error: String((e as Error)?.message ?? e) });
           }
@@ -3148,10 +3191,13 @@ async function runGatedSweep(
     sweepBound.seededFrom = undefined;
     log("daemon.sweep.started", { bound_ms: bound.boundMs, bound_basis: bound.basis, samples: bound.samples });
     const continueReviewAdmissions = ((reviewClass: "review" | "plan-review" = "review") => deps.checkStop?.() === undefined &&
-      deps.checkPause?.() === undefined && latchedAdmission?.()?.(reviewClass, "full-sweep") !== false) as ReviewAdmissionGate;
+      deps.checkPause?.() === undefined && latchedAdmission?.()?.(reviewClass, "full-sweep") !== false &&
+      !heapHoldWhileLatched(deps, "full-sweep", log)) as ReviewAdmissionGate;
     const workerAdmissionHold = (kind?: "review"): string | undefined => {
-      recordNearLimitHeapSample(deps, "admission:full-sweep");
+      const sample = recordNearLimitHeapSample(deps, "admission:full-sweep");
       const hold = deps.workerAdmissionHold?.() ?? (recyclePause ? resolveFleetControlHold(deps) : undefined);
+      const heap = hold ? undefined : heapWorkerAdmissionHold(deps, "full-sweep", sample, log);
+      if (heap) return heap.reason;
       if (!hold) return kind === undefined && latchedAdmission?.()?.("fix-dispatch", "full-sweep") === false
         ? "restart latched: a fix round would outlast the time left in the restart's drain" : undefined;
       const reason = `fleet ${hold.control} hold: ${hold.detail}`;
@@ -4670,6 +4716,7 @@ export async function runDaemon(
       if (installedHeapShadow() === heapShadow) installHeapShadow(undefined);
     }
     nearLimitHeapObservers.delete(deps);
+    heapAdmissionLatches.delete(deps);
     try { nearLimitHeapTelemetry?.close(); } catch (error) { nearLimitFailure({ reason: error }); }
     const failures: unknown[] = [];
     try { if (pauseReview.clock) await stopPauseReviewClock(report); }
@@ -4758,8 +4805,13 @@ export async function runDaemon(
           in_flight_tasks: tasks, in_flight_reviews: reviews, detached_sweep_actions: detached,
         });
         if (sample !== undefined && sample !== lastSample) { sampledAttempts = attempted.length; lastSample = sample; }
-      } catch (error) { nearLimitFailure({ reason: error }); }
+        return sample;
+      } catch (error) { nearLimitFailure({ reason: error }); return undefined; }
     });
+    const trace = (nearLimitHeapTelemetry as { snapshot?: () => HeapHoldTrace }).snapshot;
+    heapAdmissionLatches.set(deps, createHeapAdmissionHold({ mode: deps.heapAdmissionHoldMode, clock: daemonClock, log,
+      modeError: deps.heapAdmissionHoldModeError,
+      readTrace: () => trace?.call(nearLimitHeapTelemetry) }));
   }
   const outOfProcess = (id: string): boolean => hasChildTask(id) || pendingChildren.has(id);
   const bootGateBoundMs = opts.bootCadenceGateBoundMs ?? BOOT_CADENCE_GATE_BOUND_MS;
@@ -5500,10 +5552,10 @@ export async function runDaemon(
 
   let activeRetroCrossingKey: string | undefined;
 
-  const holdWorkerAdmission = (surface: string): (FleetControlHold & { reason: string }) | undefined => {
-    recordNearLimitHeapSample(deps, `admission:${surface}`);
+  const holdWorkerAdmission = (surface: string): (WorkerAdmissionHold & { reason: string }) | undefined => {
+    const sample = recordNearLimitHeapSample(deps, `admission:${surface}`);
     const hold = deps.workerAdmissionHold?.();
-    if (!hold) return undefined;
+    if (!hold) return heapWorkerAdmissionHold(deps, surface, sample, log);
     const reason = `fleet ${hold.control} hold: ${hold.detail}`;
     log("daemon.admission_held", { surface, control: hold.control, detail: hold.detail, reason });
     return { ...hold, reason };
@@ -5871,7 +5923,7 @@ export async function runDaemon(
           const hold = holdWorkerAdmission("intake");
           if (hold) {
             log("intake_cadence.held", { rung: decision.rung, reason: hold.reason });
-            return true;
+            return hold.control !== "HEAP";
           }
           log("intake_cadence.fired", { rung: decision.rung, reason: decision.reason });
           if (decision.rung === "codeqlQuality" && (deps.opportunityOutcomes || deps.knowledgeGardener)) {
@@ -5919,7 +5971,7 @@ export async function runDaemon(
         const hold = holdWorkerAdmission("wipe-test");
         if (hold) {
           log("wipetest.cadence.held", { reason: hold.reason, seq: decision.seq, subject: decision.subject.id, ...wipeTestCadenceEvidenceFields(decision) });
-          return true;
+          return hold.control !== "HEAP";
         }
         log("wipetest.cadence.fired", {
           reason: decision.reason,
@@ -6108,7 +6160,7 @@ export async function runDaemon(
         const hold = holdWorkerAdmission("retro");
         if (hold) {
           log("daemon.retro_trigger.held", { reason: hold.reason });
-          return true;
+          return hold.control !== "HEAP";
         }
         const crossingKey = retroTriggerCrossingKey(decision);
         if (activeRetroCrossingKey === crossingKey) {
@@ -6214,7 +6266,8 @@ export async function runDaemon(
         const hold = holdWorkerAdmission("auto-triage");
         if (hold) {
           log("auto_triage.held", { feedback: decision.feedbackId, reason: hold.reason });
-          return true;
+          // W1-T11383: a heap hold skips the start but not the tick, so the dispatch gate's HEAP arm sleeps it.
+          return hold.control !== "HEAP";
         }
         if (deps.runAutoTriage) {
           const fired = decision;
@@ -6562,7 +6615,7 @@ export async function runDaemon(
       bootReviewInFlight = true;
       void (async () => {
         try {
-          await deps.sweepLight?.({ reviewOnly: true, scope: "boot" });
+          await deps.sweepLight?.(heapHeldLightPass(deps, log, { reviewOnly: true, scope: "boot" }));
         } catch (e) {
           log("daemon.sweep_light.failed", { phase: "boot", error: String((e as Error)?.message ?? e) });
         } finally {
@@ -6722,7 +6775,7 @@ export async function runDaemon(
           pushes_per_pr_hour: demand.pushesPerPrHour, poll_interval_ms: pollIntervalMs, pass: passes,
         });
         try {
-          await deps.sweepLight!({ reviewOnly: true, scope: "idle" });
+          await deps.sweepLight!(heapHeldLightPass(deps, log, { reviewOnly: true, scope: "idle" }));
         } catch (e) {
           log("daemon.sweep_light.failed", { phase: "idle", error: String((e as Error)?.message ?? e) });
         }
@@ -7607,6 +7660,16 @@ export async function runDaemon(
         recheck: true,
       });
       sampleIdleLane(0, false);
+      await sleepUntilSweepWake(pollIntervalMs);
+      continue;
+    }
+    // W1-T11383: a heap hold starts no batch and exits nothing; it is not a pause, so it writes no daemon.pause row.
+    if (workerHold?.control === "HEAP") {
+      await stopInterphaseReviewClock();
+      ticks++;
+      idleLaneTickCause = "memory";
+      idleLaneTickHold = { reason: workerHold.reason };
+      sampleIdleLane(0, false, dispatchSet.length);
       await sleepUntilSweepWake(pollIntervalMs);
       continue;
     }

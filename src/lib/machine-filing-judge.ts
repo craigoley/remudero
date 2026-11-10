@@ -609,7 +609,7 @@ export function renderRuledShard(
   return { contents };
 }
 
-interface RulingPins {
+export interface RulingPins {
   id: string;
   relPath: string;
   pin: string;
@@ -633,7 +633,8 @@ function mainRecords(root: string, paths: string[]): Map<string, string> {
   return new Map(paths.filter((path) => present.has(path)).map((path) => [path, git(["show", `${target}:${path}`])]));
 }
 
-function staleRulingPins(records: RulingPins[], main: Map<string, string>): { id: string; pin: string; main_pin: string | null }[] {
+/** The ruled records whose pin no longer matches origin/main's text for them; pure, shared by the judge's pass and the sweep. */
+export function staleRulingPins(records: RulingPins[], main: Map<string, string>): { id: string; pin: string; main_pin: string | null }[] {
   return records.flatMap((record) => {
     const text = main.get(record.relPath);
     const task = text === undefined ? undefined : parseTasksFromYaml(text, record.relPath).find((t) => t.id === record.id);
@@ -1210,6 +1211,43 @@ function decideMechanically(c: {
   return decisions;
 }
 
+export function staleRulingWithdrawalComment(stale: { id: string; pin: string; main_pin: string | null }[]): string {
+  return "Withdrawing stale machine-filing rulings after origin/main changed:\n" +
+    stale.map((r) => `${r.id}: ruling pin ${r.pin}; main pin ${r.main_pin ?? "removed"}`).join("\n");
+}
+
+/** W1-T11388: what the sweep gives the judge's withdraw for a CONFLICTED judge PR. */
+export interface ConflictedJudgePrPorts {
+  stateDir: string;
+  prUrl: string;
+  /** origin/main's text for each path (a path main no longer has is absent from the map). */
+  readMain: (paths: string[]) => Promise<Map<string, string>>;
+  closePr: (prUrl: string, comment: string) => Promise<void>;
+  log: (step: string, fields: Record<string, unknown>) => void;
+}
+
+/**
+ * W1-T11388: a conflicted judge PR whose ruled record moved on main can never pass a plan-scoped conflict round
+ * (machine-author-verify refuses any merge carrying the stale pin), so it takes the judge's own withdraw: the PR is
+ * closed with the stale-ruling comment, the pending entry and its rulings are cleared, and the judge re-rules on its
+ * next pass. No strike is spent and nothing escalates. A PR the judge state does not name as pending, or whose
+ * rulings all still match main, is `{ withdrawn: false }` and keeps the caller's round.
+ */
+export async function withdrawStaleConflictedJudgePr(ports: ConflictedJudgePrPorts): Promise<{ withdrawn: false } | { withdrawn: true; stale: { id: string; pin: string; main_pin: string | null }[] }> {
+  const statePath = join(ports.stateDir, MACHINE_JUDGE_STATE_FILE);
+  const state = readState(statePath);
+  const pending = state.pending;
+  if (pending === undefined || pending.prUrl !== ports.prUrl || pending.records === undefined || pending.records.length === 0) return { withdrawn: false };
+  const stale = staleRulingPins(pending.records, await ports.readMain(pending.records.map((r) => r.relPath).filter(Boolean)));
+  if (stale.length === 0) return { withdrawn: false };
+  await ports.closePr(pending.prUrl, staleRulingWithdrawalComment(stale));
+  ports.log("machine_judge.withdrawn", { pr_url: pending.prUrl, stale, reason: "conflict-stale-pin" });
+  for (const id of pending.ids) delete state.rulings?.[id];
+  state.pending = undefined;
+  writeAtomic(statePath, JSON.stringify(state) + "\n");
+  return { withdrawn: true, stale };
+}
+
 /** One pass: rule on every unjudged or stale machine record, then land or write the rewrites. */
 export async function runMachineFilingJudge(ports: MachineJudgePorts): Promise<MachineJudgeReport> {
   const statePath = join(ports.stateDir, MACHINE_JUDGE_STATE_FILE);
@@ -1228,8 +1266,7 @@ export async function runMachineFilingJudge(ports: MachineJudgePorts): Promise<M
       if (root === undefined) throw new Error("machine judge: pending PR has no merge-target checkout");
       const stale = staleRulingPins(records, mainRecords(root, records.map((r) => r.relPath).filter(Boolean)));
       if (stale.length > 0) {
-        const comment = "Withdrawing stale machine-filing rulings after origin/main changed:\n" +
-          stale.map((r) => `${r.id}: ruling pin ${r.pin}; main pin ${r.main_pin ?? "removed"}`).join("\n");
+        const comment = staleRulingWithdrawalComment(stale);
         ghExec(["pr", "close", state.pending.prUrl, "--comment", comment], { encoding: "utf8", stdio: "pipe" });
         ports.log("machine_judge.withdrawn", { pr_url: state.pending.prUrl, stale });
         for (const id of state.pending.ids) delete state.rulings?.[id];

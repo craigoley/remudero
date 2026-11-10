@@ -1,0 +1,62 @@
+- id: W1-T11891
+  title: A capable host runs more than four measured author workers without a fixed execution ceiling
+  repo: remudero
+  depends_on: [W1-T11909]  # W1-T11583 removed AUTHOR_SLOT_CEILING=1; this follow-up removes its retained four-worker maximum. Held behind W1-T11909: run W1-T11891-1794252506105 failed closed in isolation_probe (six /etc/profile.d/gawk.sh functions), so this task stays separate and blocked until a fresh native probe passes (operator, 2026-11-09).
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 20.00
+  risk: high  # Removes a fixed admission cap; measured CPU, memory, FIFO grants, and deadline checks remain authoritative.
+  band_meaning: blast-radius
+  origin: architect
+  plan_refs: [W1-T7809, W1-T9951, W1-T9952, W1-T9953, W1-T11583]
+  files:
+    - scripts/preflight-author.mjs
+    - scripts/lib/native-author-runtime.mjs
+    - scripts/plan-author-runtime.mjs
+    - test/ci/a-capable-host-runs-more-than-four-author-workers.test.ts
+    - test/ci/an-author-preflight-runs-the-workers-its-measured-slot-grants.test.ts
+    - test/author-deadline-capacity.test.ts
+    - test/native-author-runtime.test.ts
+    - test/whole-author-runtime-plan.test.ts
+    - test/preflight-author-sizes-its-selection-by-reach-and-host-capacity.test.ts
+  status: queued
+  priority: 2  # Capable hosts still run at most four author test files concurrently despite measured CPU, memory and slot room.
+  attempts: 0
+  rationale: |
+    READ at current origin/main:
+    - scripts/preflight-author.mjs declares AUTHOR_MAX_WORKERS = 4. hostBudget clamps min(cpuWorkers, memoryWorkers, slotConcurrency) to four; deadlineHostBudget refuses budgets above four; enqueueTestSlot passes maxConcurrency: AUTHOR_MAX_WORKERS; executionWorkers clamps to four.
+    - scripts/lib/native-author-runtime.mjs: runtimeDeadlineFit also rejects workers > 4. This is used by the real author path and the estimate-only scripts/plan-author-runtime.mjs caller, so the two contracts must be separated rather than granting estimates execution authority.
+    - src/lib/test-slot.ts already derives CPU capacity from testRunConcurrency and measured memory capacity from memoryTestConcurrency. The native FIFO slot grant further bounds each run. These measurements provide the dynamic ceiling; AUTHOR_MAX_WORKERS is the additional static maximum.
+    - On macOS, readHostCapacityInputs currently calls readMemoryHeadroom without its Darwin vm_stat reader. That returns unknown memory even though the slot reader can call vm_stat. Passing pre-admission width 1 as maxConcurrency then prevents the slot from granting more. The fix must reuse the existing readVmStat path for author pre-admission sizing and test both readable and unavailable readings.
+    - With memory unmeasured before a slot is held, the author pre-admission estimate must remain one worker. Once an actual slot is acquired, its measured concurrency may supply the memory-side bound. Infinity is never an admissible substitute for missing memory evidence.
+    - scripts/calibrate-author-runtime.mjs separately limits low-priority calibration samples with Math.min(4, slot.concurrency). That sample limit is not the author execution cap and stays explicitly out of scope.
+    The W1-T11583 implementation merged in PR #17263 and its plan amendment merged in #17276. It removed AUTHOR_SLOT_CEILING=1 and added the measured-slot grant path while deliberately retaining AUTHOR_MAX_WORKERS=4. This task removes only that remaining author execution maximum. No other current task or decision authorizes it.
+    Settled by lookup: should the isolation_probe failure of native run W1-T11891-1794252506105 be fixed inside this task? -> no. The six gawk* functions come from the Azure /etc/profile.d/gawk.sh and reach the worker Bash snapshot. The fix belongs to W1-T11693 (worker login profile) and its snapshot-path proof to W1-T11908. This task waits on W1-T11909, which records a fresh native probe passing (operator ruling 2026-11-09). Its scope is unchanged.
+  design: |
+    Remove every fixed four-worker ceiling on actual author execution while keeping measured and fail-closed admission:
+    1. Delete AUTHOR_MAX_WORKERS and replace every use in hostBudget, deadlineHostBudget, enqueueTestSlot and executionWorkers with the measured CPU, memory and acquired FIFO-slot bounds. Record boundBy and the contributing values in the receipt.
+    2. Extend readHostCapacityInputs to pass the existing readVmStat reader into readMemoryHeadroom on Darwin. Keep the reader injectable so tests prove a readable vm_stat grants a capable Mac more than four workers and an unavailable reading stays at one before slot admission.
+    3. For unmeasured memory before slot admission, hostBudget returns exactly one worker. After a real acquired slot, it may use that slot's measured concurrency as the memory-side bound. A refused, missing or inherited-without-proof slot never becomes execution capacity.
+    4. deadlineHostBudget validates safe positive integer fields and refuses workers above cpuWorkers, a numeric memoryWorkers bound, or a real slotConcurrency grant. With memoryWorkers null and no acquired slot, workers must equal one; with memoryWorkers null and an acquired slot, workers must not exceed that slot grant. Missing, malformed or stale bounds refuse.
+    5. Split actual runtime deadline admission from plan-author-runtime estimation. The execution path passes and validates the acquired measured worker bound; the estimate-only CLI may calculate a requested width above four but must label its output as an estimate and cannot authorize execution. Update wholeAuthorDeadlineFit callers and tests so post-slot admission is rechecked against the exact grant. Keep the fixed deadline shrink-only and preserve the remaining-time and shutdown-reserve checks.
+    6. Keep the calibration sample limit separate and document that it bounds low-priority sample work only, not production author tests.
+    UNCHANGED: FIFO ordering and cancellation, testSlotExecutionAllowed, owner nonce and requireNativeContext, Mac pressure and disk-reserve refusals, static/census one-worker stages, fixed-deadline semantics, exact-head identity, hosted checks, and review/merge gates.
+    Tests inject CPU/load, memory/vm_stat, slot grant and child spawn. The capable-host case must exercise both Linux/cgroup and Darwin/vm_stat reader seams; pressure, missing memory, stale budget and invalid runtime-bound controls must remain fail-closed.
+  acceptance:
+    - claim: The affected-tests child runs above four workers on capable Linux and Darwin hosts only when measured CPU, memory and FIFO grant all exceed four, and receipt capacity, slot grant and execution width agree.
+      proof: "unit test: capable Linux and Darwin author runs match the measured slot grant above four workers"
+    - claim: CPU load or measured memory headroom lowers the width; missing pre-slot memory stays at one, and an unavailable Darwin vm_stat cannot widen the slot request.
+      proof: "unit test: CPU memory and unavailable vm_stat inputs never exceed measured author bounds"
+    - claim: Author execution stays within the test-slot CPU grant after reserved-core, load, and active-slot accounting, while exceeding four only when that measured CPU grant permits it.
+      proof: "unit test: author execution preserves reserved core and measured CPU bounds above four"
+    - claim: deadlineHostBudget refuses invalid, missing, stale or exceeded measured bounds; unmeasured memory uses one before admission or a real slot grant after admission.
+      proof: "unit test: deadline capacity refuses widths outside the measured author bounds"
+    - claim: Actual runtime deadline checks require the admitted worker width and recheck it after slot acquisition, while the plan CLI remains estimate-only above four.
+      proof: "unit test: runtime execution requires admitted width and planning remains estimate only"
+    - claim: The W1-T11583 measured-slot, pressure and disk-refusal controls continue to pass without AUTHOR_MAX_WORKERS.
+      proof: "unit test: W1-T11583 criterion 1: an idle eight-core host uses more than one author test worker"
+    - claim: Runtime deadline admission accepts widths above four only up to the acquired measured grant, and refuses a missing or exceeded grant.
+      proof: "unit test: runtime deadline admission follows the acquired measured grant above four"
+  falsifier: |
+    With an injected idle 32-core Linux or Darwin host, 128 GiB measured headroom and a real FIFO slot grant above four, observe the captured affected-tests argv and receipt. If any reports four or less despite all three measured bounds exceeding four, the cap remains. Conversely, reduce CPU, memory, or slot grant and verify the child never exceeds the reduced bound. With memory unknown and no acquired slot, any width above one is a falsifier.
