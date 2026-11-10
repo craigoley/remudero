@@ -71,8 +71,7 @@
        authorization_id = sha256(tuple, actor, ts), the tuple, actor, reason, ts}. Before append, refuse if an unconsumed authorization already names the exact dispatch, or if any valid released receipt already matches it regardless of authorization_id. After a held attempt, reuse its still-unconsumed authorization.
     3. --apply --authorization <id>, in this order:
        a. Read the authorization. If it is missing, duplicated, unreadable, already consumed, or names a different tuple, hold. If one valid released receipt already matches this exact dispatch, return that receipt without writing; if release history conflicts, hold.
-       b. Acquire the fix branch claim with reclaim:false and a fresh unique recovery invocation run_id stored in the existing lock's run_id field. If the claim is already held, write a held receipt with
-          reason branch_claim_held and stop.
+       b. Acquire the fix branch claim with reclaim:false and a fresh unique recovery invocation run_id stored in the existing lock's run_id field. If acquisition fails, do not append a durable held receipt: return a transient branch_claim_held result without consuming authorization or changing the pr-owner projection, then re-read authorization and receipt history; if the matching release now exists, return that receipt. A waiter must never append a held row after a winner's release, because T12115 correctly treats a later/equal hold as unresolved.
        c. First read of all facts, read back the acquired claim and pass its exact stored run_id as recoveryInvocationRunId, then call decideStaleFixDispatchRecovery. The decision may accept only this exact claim run_id; every other held claim is a competitor. On hold, write a held receipt and stop.
        d. Preserve: run the existing preservation for the worktree (dirty, untracked, ahead or diverged) and
           publish create-only. If the tree is clean and its head is contained in the PR head, record
@@ -101,12 +100,14 @@
        - a head push, a newer fix.dispatch, a claim appearing and a pid becoming live between reads each hold;
        - a live, unknown and dead pid, and a live descendant;
        - a publish conflict holds;
-       - two applies racing on one claim release once;
+       - two applies racing on one claim produce exactly one released receipt; the loser appends no held row whether it observes contention before or after the winner releases, and returns the existing release if present;
        - a repeated apply is a no-op;
        - crash completion;
        - a plan-only PR fixture;
        - a recorded-argv check that no destructive git verb ran and no fix.done row was appended.
   falsifier: |
     Skip the second read (e): the "head pushed between reads" fixture releases and the test fails. Drop the fix
-    branch claim acquire: the two racing applies both release. Write held receipts to the receipt file: a held
-    attempt blocks the later valid release and the crash-completion case fails.
+    branch claim acquire: the two racing applies both release. Append a held receipt after a failed claim acquire:
+    the schedule where the loser observes the winner's claim, then appends after the winner's release makes
+    pr-owner OWNED and the race test fails. Write held receipts to the receipt file: a held attempt blocks the
+    later valid release and the crash-completion case fails.
