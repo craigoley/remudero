@@ -1,0 +1,41 @@
+- id: W1-T11940
+  title: The census precheck runs its counts-only pass first and skips the full suite measurement only when the diff touches no file a census suite declares it reads
+  repo: remudero
+  depends_on: []
+  priority: 0.6
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # scripts/census-precheck.mjs and the author preflight; a wrong skip would let a census regression reach hosted CI instead of the author
+  band_meaning: blast-radius
+  origin: "operator ruling 2026-11-10 go with it (efficiency batch, slim serve, lighten preflight, janitor)"
+  plan_refs:
+    - W1-T11098
+    - W1-T11099
+    - W1-T11102
+  files:
+    - scripts/census-precheck.mjs
+    - scripts/preflight-author.mjs
+    - test/ci/the-precheck-skips-the-full-pass-only-when-no-read-file-changed.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: The census suites that read repository files declare them with @census-reads, extended from the 7 of 136 that declare today to every suite the counts-only pass reports
+      proof: "grep: W1-T11940 criterion 1 in test/ci/the-precheck-skips-the-full-pass-only-when-no-read-file-changed.test.ts"
+    - claim: A diff touching a declared census-read file runs the full pass exactly as today
+      proof: "grep: W1-T11940 criterion 2 in test/ci/the-precheck-skips-the-full-pass-only-when-no-read-file-changed.test.ts"
+    - claim: A diff touching none skips the full pass and says so in the preflight output, naming the count it relied on
+      proof: "grep: W1-T11940 criterion 3 in test/ci/the-precheck-skips-the-full-pass-only-when-no-read-file-changed.test.ts"
+    - claim: A suite with no declaration is never skipped, and a counts-only failure runs the full pass
+      proof: "grep: W1-T11940 criterion 4 in test/ci/the-precheck-skips-the-full-pass-only-when-no-read-file-changed.test.ts"
+  rationale: |
+    OBSERVED 2026-11-10 (preflight research): the census precheck took 9 to 39 minutes, running about 70 suites twice each (calibration plus qualification); --counts-only takes 3 to 5 s and finds the same rows (11-02 data). On 11-09 it hit its 120 s bound at host load and printed NOT MEASURED. Only 7 of 136 suites declare @census-reads, so a skip cannot yet be proven safe.
+    - Effect: the biggest single wall-time item in an author preflight for diffs that cannot affect the census.
+  design: |
+    Extend the @census-reads declarations first, then gate the full pass on the diff intersecting those reads; unknown or undeclared always runs. Hosted CI still runs the full census. NOT IN SCOPE: a shadow result cache (a later task) and scoped rule suites (W1-T11819).
+  falsifier: |
+    Skip the full pass on every diff and criterion 2 must fail. Skip when a suite is undeclared and criterion 4 must fail. Restore and require all four to pass.
+  note: |
+    reservation hand-off: run-unfiled-1794269694199 -> run-unfiled-1794269694199
+    Reserved with rmd next-task-id (--count 9 and 1 on run-unfiled-1794269694199). Hand-built by the operator's choice (rulings 2026-11-10: slim serve, lighten preflight with no hard caps, janitor trims old worktrees). Check refs/rmd-dispatch/<id> and any run branch before building.
