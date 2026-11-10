@@ -1209,6 +1209,8 @@ export interface TestSlotQueueHold {
   /** 1-based place in line when the ticket was taken; undefined when no ticket was taken. */
   position?: number;
   note: string;
+  /** Price a ticket already in the line; a missing ticket or a settled hold is left alone. */
+  setPrice(costMs: number | undefined): void;
   /** Wait for a slot in this ticket's place; the ticket is gone once this returns. */
   admit(): TestSlotLease;
   /** Leave the line without ever touching a slot. */
@@ -1263,6 +1265,9 @@ export function enqueueTestSlot(label: string, opts: TestSlotOptions = {}): Test
   };
   return {
     ticketed: ticket !== undefined, position, note,
+    setPrice(costMs: number | undefined): void {
+      if (!settled) ticket?.setPrice(costMs);
+    },
     admit(): TestSlotLease {
       if (settled) throw new Error("test slot ticket already admitted or cancelled");
       settled = true;

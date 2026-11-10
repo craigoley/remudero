@@ -33,6 +33,8 @@ export interface TestSlotTicket {
   heartbeatAt: string;
   /** The poll interval this waiter really beats at; a foreign ticket's staleness bound is derived from it. */
   heartbeatIntervalMs: number;
+  /** The suite work this waiter was priced at, in ms; absent until its selection has a price. */
+  costMs?: number;
 }
 
 export interface QueuedTicket {
@@ -91,7 +93,8 @@ export function parseTestSlotTicket(raw: string): TestSlotTicket | null {
     if (!Number.isSafeInteger(t.pid) || typeof t.host !== "string" || typeof t.label !== "string" || typeof t.nonce !== "string" ||
         !Number.isFinite(Date.parse(t.arrivedAt)) || !Number.isFinite(Date.parse(t.heartbeatAt)) ||
         !Number.isSafeInteger(t.heartbeatIntervalMs) || t.heartbeatIntervalMs < 1) return null;
-    return t as TestSlotTicket;
+    const { costMs, ...ticket } = t;
+    return { ...ticket, ...(typeof costMs === "number" && Number.isFinite(costMs) && costMs > 0 ? { costMs } : {}) } as TestSlotTicket;
   } catch (error) {
     // A ticket is written whole, so unparseable bytes are garbage, not a write in progress: reapable.
     void error;
@@ -150,10 +153,11 @@ export function readTestSlotQueue(slotDir: string, judge: TicketJudge, log: (row
   return live;
 }
 
-/** This waiter's ticket: `beat` rewrites heartbeatAt (recreating it if a peer reaped it), `drop` removes it. */
+/** This waiter's ticket: `setPrice` updates the record `beat` rewrites, `beat` refreshes it, `drop` removes it. */
 export interface OwnTicket {
   name: string;
   path: string;
+  setPrice(costMs: number | undefined): void;
   beat(heartbeatAt: string): void;
   drop(): void;
 }
@@ -244,6 +248,16 @@ export function takeTestSlotTicket(slotDir: string, fields: Omit<TestSlotTicket,
   const detach = onExit(unlinkOwn);
   return {
     name, path,
+    setPrice(costMs: number | undefined): void {
+      if (dropped) return;
+      const { costMs: _oldPrice, ...unpriced } = current;
+      current = typeof costMs === "number" && Number.isFinite(costMs) && costMs > 0
+        ? { ...current, costMs } : unpriced;
+      inQueueDir(queueDir, () => {
+        writeWhole(temp, JSON.stringify(current));
+        renameSync(temp, path);
+      });
+    },
     beat(heartbeatAt: string): void {
       if (dropped) return;
       current = { ...current, heartbeatAt };
