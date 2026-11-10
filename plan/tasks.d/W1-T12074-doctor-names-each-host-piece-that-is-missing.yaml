@@ -1,0 +1,39 @@
+- id: W1-T12074
+  title: "rmd doctor names each host piece the fleet needs that is missing"
+  repo: remudero
+  depends_on: []
+  priority: 1.2
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # two concerns: the list of host pieces, and the doctor check that reads it
+  band_meaning: blast-radius
+  origin: operator-session#github-connections-2026-11-10
+  files:
+    - src/lib/host-pieces.ts
+    - src/lib/doctor.ts
+    - test/doctor-names-each-host-piece-that-is-missing.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "One list names each host piece with its path, what installs it and what fails without it: the dependency tool, the broker unit and launcher, the field-trials script, each scheduled job's script, and a GitHub login"
+      proof: "grep: W1-T12074 criterion 1 in test/doctor-names-each-host-piece-that-is-missing.test.ts"
+    - claim: "The doctor check reports FAIL and names every missing piece with the command that restores it, and reports PASS when all are present"
+      proof: "grep: W1-T12074 criterion 2 in test/doctor-names-each-host-piece-that-is-missing.test.ts"
+    - claim: "A piece that does not apply to this host, such as a Mac-only one on Linux, is not reported"
+      proof: "grep: W1-T12074 criterion 3 in test/doctor-names-each-host-piece-that-is-missing.test.ts"
+    - claim: "The doctor check reads the list, so the list is used and not only declared"
+      proof: "grep: hostPieces( in src/lib/doctor.ts"
+  rationale: |
+    OBSERVED 2026-11-10 on the Azure host: an accidental deletion at about 12:32Z removed ~/.ssh, ~/.local/bin (the dependency tool and the field-trials script), ~/.gh-token, the shell profile files, and the read broker's unit and launcher.
+    - Nothing reported what was missing. Each loss was found by a different failure over about 90 minutes: an SSH refusal at 12:35Z, a "command not found" at 13:06Z, and a broker in a restart loop found at 13:42Z.
+    - Two of the pieces had no installer in the repo, so nobody could say what "complete" looked like.
+    - `rmd doctor` already judges ledger freshness, disk, memory and dispatch (src/lib/doctor.ts). It has no check of the host's own installed pieces.
+  design: |
+    Add src/lib/host-pieces.ts: a typed list of pieces, each with the platforms it applies to, the path to test, the installer command, and one line on what fails without it. Add one doctor check that tests each path and prints the missing ones with their installer. The check reads paths only; it opens no credential file.
+    NOT IN SCOPE: installing anything, and SSH keys (they belong to the person, not the fleet).
+  falsifier: |
+    Drop a piece from the list and criterion 1 must fail. Report PASS with a piece missing, or omit its restore command, and criterion 2 must fail. Report a Mac-only piece on Linux and criterion 3 must fail. Restore and require all three to pass.
+  note: |
+    A later task can have the watchdog run this check and escalate once when a piece goes missing.

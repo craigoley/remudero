@@ -685,3 +685,169 @@ test("W1-T6012: a rewritten ledger cannot resurrect events from its previous rec
   assert.deepEqual(visible.map(entry => entry.taskId), ["SITE-T2"]);
   assert.equal(visible[0]?.ts, current.ts, "only the current source's event becomes visible");
 });
+
+
+// W1-T12126: private host fixtures exercise the shipped launcher, never a live Docker daemon.
+import { repoRoot as foreignReposRepoRoot } from "#test/helpers/repo-root.js";
+import { realpathSync as foreignReposRealpath } from "node:fs";
+import { ownedFixtureDir as ownGatewayFixture } from "#test/helpers/owned-fixture-dir.js";
+
+function foreignGatewayLauncher(t: { after: (fn: () => void) => void }, options: {
+  legacy?: boolean; scratch?: boolean; replace?: boolean;
+} = {}) {
+  const owned = ownGatewayFixture(t, "foreign-gateway");
+  const base = foreignReposRealpath(owned.dir);
+  const core = join(base, "core"), site = join(base, "site"), repos = join(base, "scratch-repos");
+  const alternate = join(base, "alternate-repos"), bin = join(base, "bin"), calls = join(base, "calls");
+  for (const dir of [join(core, "state"), join(site, "state"), repos, alternate, bin, join(base, "code")]) mkdirSync(dir, { recursive: true });
+  for (const [dir, title] of [[repos, "actual scratch plan"], [join(site, "repos"), "stale durable decoy"]]) {
+    mkdirSync(join(dir!, "remudero-site", "plan"), { recursive: true });
+    writeFileSync(join(dir!, "remudero-site", "plan", "tasks.yaml"), title!);
+  }
+  const mountsFile = join(base, "mounts.json"), configFile = join(base, "fixture.json");
+  const mount = (source: string, destination: string, type = "bind") => ({ Type: type, Source: source, Destination: destination });
+  const mounts = [mount(site, "/home/node/Remudero"), mount(repos, "/home/node/Remudero/repos")];
+  writeFileSync(mountsFile, JSON.stringify(mounts));
+  const config = { mountsFile, calls, inspect: "ok", replace: !!options.replace, alternate, changeOnPull: false, replaceDirectoryOnPull: false };
+  writeFileSync(configFile, JSON.stringify(config)); writeFileSync(calls, "");
+  const docker = join(bin, "docker");
+  writeFileSync(docker, [
+    "#!" + process.execPath,
+    'const fs = require("node:fs");',
+    "const configPath = " + JSON.stringify(configFile) + ";",
+    'const c = JSON.parse(fs.readFileSync(configPath, "utf8")), a = process.argv.slice(2);',
+    'fs.appendFileSync(c.calls, JSON.stringify(a) + "\\n");',
+    'if (a[0] === "network") process.exit(0);',
+    'if (a[0] === "inspect" && a.includes("declared-site-daemon") && a.includes("{{json .Mounts}}")) {',
+    '  if (c.inspect === "unreadable") process.exit(1);',
+    '  if (c.inspect === "malformed") { console.log("{torn"); process.exit(0); }',
+    '  process.stdout.write(fs.readFileSync(c.mountsFile)); process.exit(0);',
+    '}',
+    'if (a[0] === "inspect" && a[1] === "remudero-serve" && a.length === 2) process.exit(c.replace ? 0 : 1);',
+    'if (a[0] === "pull") {',
+    '  if (c.changeOnPull) { const m = JSON.parse(fs.readFileSync(c.mountsFile)); m[1].Source = c.alternate; fs.writeFileSync(c.mountsFile, JSON.stringify(m)); }',
+    '  if (c.replaceDirectoryOnPull) { const m = JSON.parse(fs.readFileSync(c.mountsFile)); fs.renameSync(m[1].Source, m[1].Source + ".old"); fs.mkdirSync(m[1].Source); }',
+    '  process.exit(0);',
+    '}',
+    'if (a[0] === "stop" || a[0] === "run") process.exit(42);',
+    'process.exit(1);', "",
+  ].join("\n"), { mode: 0o755 });
+  writeFileSync(join(bin, "az"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+  const registry = join(base, "registry.yaml");
+  writeFileSync(registry, [
+    "instances:", "  core:", "    state_dir: " + core, "  site:", "    state_dir: " + site,
+    ...(options.legacy ? [] : ["    container_name: declared-site-daemon"]),
+    "  absent:", "    state_dir: " + base + "/absent", "    container_name: absent-daemon",
+    "  retired:", "    state_dir: " + site, "    container_name: retired-daemon", "    retired: true", "",
+  ].join("\n"));
+  const root = foreignReposRepoRoot();
+  const script = legacyHostScript(base, join(root, "deploy", "serve-container.sh"), registry);
+  const env = Object.fromEntries(Object.entries(process.env).filter(([name]) => !/^(RMD_|GH_|GITHUB_)/.test(name)));
+  Object.assign(env, {
+    PATH: bin + ":" + (process.env.PATH ?? ""), HOME: base, GH_TOKEN: "fixture-only",
+    RMD_STATE_DIR: core, RMD_SERVE_REPO_DIR: join(base, "code"),
+    RMD_SERVE_DOCKER_NETWORK: "private-fixture-net", RMD_SERVE_DOCKERENV_PATH: join(base, "no-dockerenv"),
+    RMD_SERVE_SUPERVISOR: "off", RMD_SCRATCH: options.scratch ? "on" : "off",
+    RMD_SCRATCH_ROOT: join(base, "scratch"), RMD_SCRATCH_SWITCH: join(base, "no-switch"),
+    RMD_SCRATCH_CHECKOUTS: "off", RMD_SERVE_GENS_DIR: join(base, "generations"),
+  });
+  return {
+    base, site, repos, alternate, mounts, mount, mountsFile, config,
+    configure() { writeFileSync(configFile, JSON.stringify(config)); },
+    calls() { return readFileSync(calls, "utf8").trim().split("\n").filter(Boolean).map(s => JSON.parse(s) as string[]); },
+    run() {
+      const result = spawnSync("bash", [script, ...(options.replace ? ["--replace"] : ["--dry-run"])], { cwd: root, env, encoding: "utf8", timeout: 20_000 });
+      if (result.error || result.signal) owned.retain("launcher child closure is unproven after spawn error or signal");
+      assert.equal(result.error, undefined);
+      assert.equal(result.signal, null);
+      return result;
+    },
+  };
+}
+
+test("W1-T12126 criterion 1: the real launcher exposes only the actual managed repos read-only, ahead of a durable decoy", (t) => {
+  const f = foreignGatewayLauncher(t, { scratch: true });
+  const r = f.run(), out = String(r.stdout);
+  assert.equal(r.status, 0, out + r.stderr);
+  const dest = DEFAULT_INSTANCE_STATE_BASE + "/site";
+  assert.ok(out.includes("-v " + f.repos + ":" + dest + "/repos:ro"), out);
+  assert.ok(out.includes("-v " + f.site + ":" + dest + ":ro"), out);
+  assert.ok(out.includes("-v " + f.site + "/state:" + dest + "/state "), out);
+  const source = out.split(" -v ").map(s => s.split(" ")[0]).find(s => s?.endsWith(":" + dest + "/repos:ro"))!.split(":")[0]!;
+  assert.equal(readFileSync(join(source, "remudero-site/plan/tasks.yaml"), "utf8"), "actual scratch plan");
+  assert.equal(readFileSync(join(f.site, "repos/remudero-site/plan/tasks.yaml"), "utf8"), "stale durable decoy");
+  assert.ok(!out.includes(f.base + ":/home/node/rmd-instances"), "never expose a whole scratch/workspace root");
+  assert.ok(f.calls().some(a => a.includes("declared-site-daemon") && a.includes("{{json .Mounts}}")));
+  assert.ok(!f.calls().some(a => a.includes("absent-daemon") || a.includes("retired-daemon")));
+});
+
+test("W1-T12126 criterion 2: an unreadable declared daemon is explicitly unavailable without a durable fallback", (t) => {
+  const f = foreignGatewayLauncher(t); f.config.inspect = "unreadable"; f.configure();
+  const r = f.run(), out = String(r.stdout);
+  assert.equal(r.status, 0, out + r.stderr);
+  assert.match(String(r.stderr), /instance site.*repos.*unavailable/i);
+  assert.ok(!out.includes(DEFAULT_INSTANCE_STATE_BASE + "/site:"), out);
+  assert.ok(!f.calls().some(a => ["stop", "rm", "run", "pull"].includes(a[0]!)));
+});
+
+test("W1-T12126 criterion 2: malformed, ambiguous, non-bind, missing and shadowed placement refuse before replacement", async (t) => {
+  for (const kind of ["malformed", "duplicate", "volume", "missing", "wrong-root", "nested"] as const) await t.test(kind, (t) => {
+    const f = foreignGatewayLauncher(t, { replace: true });
+    if (kind === "malformed") { f.config.inspect = "malformed"; f.configure(); }
+    else {
+      const m = f.mounts.map(row => ({ ...row }));
+      if (kind === "duplicate") m.push(f.mount(f.alternate, "/home/node/Remudero/repos"));
+      if (kind === "volume") m[1]!.Type = "volume";
+      if (kind === "missing") m[1]!.Source = join(f.base, "does-not-exist");
+      if (kind === "wrong-root") m[0]!.Source = f.alternate;
+      if (kind === "nested") m.push(f.mount(f.alternate, "/home/node/Remudero/repos/remudero-site"));
+      writeFileSync(f.mountsFile, JSON.stringify(m));
+    }
+    const r = f.run();
+    assert.notEqual(r.status, 0, String(r.stdout) + r.stderr);
+    assert.match(String(r.stderr), /repos.*(unavailable|refus)|refus.*repos/i);
+    assert.ok(!f.calls().some(a => ["stop", "rm", "run", "pull"].includes(a[0]!)), JSON.stringify(f.calls()));
+  });
+});
+
+test("W1-T12126 criterion 2: a source changed during the image pull is refused before stopping the old gateway", (t) => {
+  const f = foreignGatewayLauncher(t, { replace: true });
+  f.config.changeOnPull = true; f.configure();
+  const r = f.run();
+  assert.notEqual(r.status, 0, String(r.stdout) + r.stderr);
+  assert.ok(f.calls().some(a => a[0] === "pull"), "the replacement reached its real image-pull boundary");
+  assert.match(String(r.stderr), /repos.*changed|changed.*repos/i);
+  assert.ok(!f.calls().some(a => ["stop", "rm", "run"].includes(a[0]!)), JSON.stringify(f.calls()));
+});
+
+test("W1-T12126 criterion 3: scratch-off legacy selection and durable-only daemon mounts preserve parent/state permissions", async (t) => {
+  for (const legacy of [true, false]) await t.test(legacy ? "legacy without a declared container" : "qualified durable parent", (t) => {
+    const f = foreignGatewayLauncher(t, { legacy });
+    if (!legacy) writeFileSync(f.mountsFile, JSON.stringify([f.mounts[0]]));
+    const r = f.run(), out = String(r.stdout), dest = DEFAULT_INSTANCE_STATE_BASE + "/site";
+    assert.equal(r.status, 0, out + r.stderr);
+    assert.ok(out.includes("-v " + f.site + ":" + dest + ":ro"), out);
+    assert.ok(out.includes("-v " + f.site + "/state:" + dest + "/state "), out);
+    assert.ok(!out.includes(dest + "/repos:"), out);
+    assert.ok(!out.includes(DEFAULT_INSTANCE_STATE_BASE + "/absent:"), out);
+    assert.ok(!out.includes(DEFAULT_INSTANCE_STATE_BASE + "/retired:"), out);
+  });
+});
+
+test("W1-T12126 criterion 2: replacing a repos directory at the same path is detected by identity before stop", (t) => {
+  const f = foreignGatewayLauncher(t, { replace: true });
+  f.config.replaceDirectoryOnPull = true; f.configure();
+  const r = f.run();
+  assert.notEqual(r.status, 0, String(r.stdout) + r.stderr);
+  assert.ok(f.calls().some(a => a[0] === "pull"));
+  assert.match(String(r.stderr), /repos.*changed|changed.*repos/i);
+  assert.ok(!f.calls().some(a => ["stop", "rm", "run"].includes(a[0]!)), JSON.stringify(f.calls()));
+});
+
+test("W1-T12126 criterion 3: scratch-on legacy placement without a declared daemon is unavailable instead of guessed", (t) => {
+  const f = foreignGatewayLauncher(t, { legacy: true, scratch: true });
+  const r = f.run();
+  assert.equal(r.status, 0, String(r.stdout) + r.stderr);
+  assert.match(String(r.stderr), /instance site.*repos.*unavailable/i);
+  assert.ok(!String(r.stdout).includes(DEFAULT_INSTANCE_STATE_BASE + "/site:"));
+});

@@ -1,4 +1,5 @@
 import { settledSpansByClass } from "./cost-anomaly.js";
+import { createHash } from "node:crypto";
 import { join } from "node:path";
 import type { LedgerRecord } from "./retro.js";
 import type { ReleaseEvidence } from "./operator-release.js";
@@ -140,7 +141,10 @@ import { resolveReleases, closedUnmergedRunBranchRefs, type DispatchFilterReason
 import type { StatusProjection } from "./status.js";
 import { ENVIRONMENTAL_BLOCK_COOLDOWN_MS, INDEPENDENT_BLOCK_RELEASED_STEP, isEnvironmentalBlock, PRE_RESTORE_RUN_VERDICT_STAGES, type IndependentBlockRelease } from "./status.js";
 import { explainDispatchScore, openDependentFanout, type DispatchValueContext } from "./dispatch-value.js";
-import { readOpsCatalogSnapshotAsync, type OpsCatalogApi, type OpsCatalogTarget } from "./ops-catalog-source.js";
+import {
+  OPS_CATALOG_OUTCOMES, readOpsCatalogSnapshotAsync, type OpsCatalogApi, type OpsCatalogOutcome, type OpsCatalogShadowInput,
+  type OpsCatalogTarget,
+} from "./ops-catalog-source.js";
 import { GhJsonUnreadableResponseError, takeGhPaceLoopWaits, takeGhReadCadenceTally, type GhReadCadenceTally } from "./github-transport.js";
 // Type-only: retro.ts owns this shape, so the two hooks below never re-declare it (W1-T160).
 import type { RetroTriggerDecision } from "./retro.js";
@@ -1291,6 +1295,11 @@ export interface DaemonDeps {
   opsCatalogTarget?: OpsCatalogTarget;
   /** The GET-only seam for {@link opsCatalogTarget}; omitted, the reader's paced default is used. */
   opsCatalogApi?: OpsCatalogApi;
+  /** W1-T11769: the daemon reads this source once per tick and never awaits it. It returns already-completed state.
+   *  When set, it replaces {@link secondaryPlanForShadow} and {@link opsCatalogTarget}. It feeds the shadow row only. */
+  secondaryCatalogShadowSource?: () => OpsCatalogShadowInput | undefined;
+  /** W1-T11769: the origin/main commit of the primary plan, read once per tick. `undefined` means the commit is unknown. */
+  primaryPlanCommit?: () => string | undefined;
   repositoryMaintenance?: (context: { activeLanes: number; disk: "healthy" | "low" | "unknown"; queueBusy: boolean }) => Promise<void>;
   /** Only a supervised dedicated daemon may exit into the shell's 30-minute zero-token probe. */
   idleStarvedSupervised?: boolean;
@@ -2059,7 +2068,8 @@ export function captureDispatchFrontier(plan: Plan, opts: NextRunnableOpts) {
 
 /** W1-T11600: the only data returned from a second-catalog comparison is aggregate evidence. */
 export interface SecondaryCatalogShadowResult {
-  outcome: "compared" | "unavailable" | "malformed" | "duplicate_task_id" | "comparison_deferred" | "comparison_failed";
+  outcome: "compared" | "unavailable" | "malformed" | "duplicate_task_id" | "invalid_cross_catalog_dependency"
+    | "comparison_deferred" | "comparison_failed";
   basis: "cached_projection";
   primary_candidate_count: number;
   combined_candidate_count: number | null;
@@ -2134,6 +2144,13 @@ export function compareSecondaryCatalogShadow(
     // An ID alone cannot prove a byte-identical move or select its canonical copy, so reject the
     // entire secondary snapshot rather than guessing which record should participate.
     if (secondary.tasks.some((task) => primaryIds.has(task.id))) return result("duplicate_task_id");
+    // W1-T11769: a primary task must not depend on a secondary task. A secondary dependency must name a task in
+    // one of the two catalogs. A secondary task may depend on a primary task. One bad edge refuses the snapshot.
+    const secondaryIds = new Set(secondary.tasks.map((task) => task.id));
+    if (primary.tasks.some((task) => task.depends_on.some((id) => secondaryIds.has(id))) ||
+      secondary.tasks.some((task) => task.depends_on.some((id) => !primaryIds.has(id) && !secondaryIds.has(id)))) {
+      return result("invalid_cross_catalog_dependency");
+    }
     // Precondition evaluation may spawn an rmd reader. Do not repeat or add that read in a shadow pass.
     if ([...primary.tasks, ...secondary.tasks].some((task) => task.precondition !== undefined)) return result("comparison_deferred");
     // Breaker-backed predicates can lazily read every open GitHub head when a catalog-only task is tripped.
@@ -2180,7 +2197,6 @@ export function compareSecondaryCatalogShadow(
       // hasPushedRunBranch is intentionally omitted: it can perform a lazy GitHub read and ledger log.
     };
     const selected = runnableCandidates(composed, isMerged, limit, shadowOpts);
-    const secondaryIds = new Set(secondary.tasks.map((task) => task.id));
     const primarySelected = new Set(primaryCandidates.map((task) => task.id));
     return result("compared", selected.length, selected.filter((task) => secondaryIds.has(task.id)).length,
       [...primarySelected].filter((id) => !selected.some((task) => task.id === id)).length);
@@ -2191,6 +2207,62 @@ export function compareSecondaryCatalogShadow(
       outcome: "comparison_failed", basis: "cached_projection", primary_candidate_count: primaryCandidates.length,
       combined_candidate_count: null, secondary_candidate_count: null, displaced_primary_count: null,
     };
+  }
+}
+
+/** W1-T11769: the shadow row of a per-tick source. It holds counts, one outcome code and the key's sha256 or null. */
+export interface OpsCatalogShadowRow extends Omit<SecondaryCatalogShadowResult, "outcome"> {
+  outcome: SecondaryCatalogShadowResult["outcome"] | Exclude<OpsCatalogOutcome, "ok"> | "primary_revision_unknown";
+  revision_key_digest: string | null;
+}
+
+const CATALOG_COMMIT = /^[0-9a-f]{40,64}$/;
+
+/** W1-T11769: one shadow comparison is keyed by the primary plan's commit plus the secondary catalog's commit.
+ *  The key holds the private commit, so the daemon never logs it. A row carries only the key's sha256 digest. */
+export function compositeCatalogRevisionKey(publicCommit: string, opsCommit: string): string {
+  return `remudero@${publicCommit}+ops@${opsCommit}`;
+}
+
+/** W1-T11769: build one shadow row from one read of the per-tick source. The row and its dedupe signature use
+ *  the key of the two commits read here, so a comparison is never reported under another key. A source with
+ *  no state yet gives no row. Every failure becomes a stable outcome code with null counts. */
+function opsCatalogShadowRow(
+  readSource: () => OpsCatalogShadowInput | undefined,
+  readPrimaryCommit: (() => string | undefined) | undefined,
+  primaryCandidateCount: number,
+  compare: (secondary: Plan) => SecondaryCatalogShadowResult | undefined,
+): { row: OpsCatalogShadowRow; signature: string } | undefined {
+  const keyed = (row: OpsCatalogShadowRow, key: string | null): { row: OpsCatalogShadowRow; signature: string } => ({
+    row,
+    // The signature names the key, so an equal count under a new commit pair is a new row.
+    signature: JSON.stringify([key, row.outcome, row.primary_candidate_count, row.combined_candidate_count,
+      row.secondary_candidate_count, row.displaced_primary_count]),
+  });
+  const refused = (outcome: OpsCatalogShadowRow["outcome"]): { row: OpsCatalogShadowRow; signature: string } => keyed({
+    outcome, basis: "cached_projection", primary_candidate_count: primaryCandidateCount,
+    combined_candidate_count: null, secondary_candidate_count: null, displaced_primary_count: null,
+    revision_key_digest: null,
+  }, null);
+  try {
+    const input = readSource();
+    if (input === undefined) return undefined;
+    const outcome = input.outcome;
+    // Only a code from the closed set passes through. Any other value could be private text.
+    if (!OPS_CATALOG_OUTCOMES.includes(outcome)) return refused("malformed");
+    if (outcome !== "ok") return refused(outcome);
+    const { plan, opsCommit } = input;
+    if (plan === undefined || typeof opsCommit !== "string" || !CATALOG_COMMIT.test(opsCommit)) return refused("malformed");
+    const publicCommit = readPrimaryCommit?.();
+    if (typeof publicCommit !== "string" || !CATALOG_COMMIT.test(publicCommit)) return refused("primary_revision_unknown");
+    const key = compositeCatalogRevisionKey(publicCommit, opsCommit);
+    const compared = compare(plan);
+    if (compared === undefined) return refused("comparison_failed");
+    return keyed({ ...compared, revision_key_digest: createHash("sha256").update(key).digest("hex") }, key);
+  } catch (error: unknown) {
+    // A thrown value may hold private task data, so the row keeps the code only.
+    void error;
+    return refused("comparison_failed");
   }
 }
 
@@ -7475,8 +7547,21 @@ export async function runDaemon(
         ...dispatchOpts, excludeIds: new Set([...(dispatchOpts.excludeIds ?? []), ...childTaskIds()]), inFlight: occupiedTasks,
       });
       const candidates = runnableCandidates(planForBatch, isMerged, budget, selection.opts);
-      let secondaryForShadow = deps.secondaryPlanForShadow;
-      if (secondaryForShadow === undefined && deps.opsCatalogTarget !== undefined && budget > 0) {
+      // W1-T11769: the per-tick source is read here, once per tick, after the dispatch candidates are fixed.
+      // Its row goes to the ledger only. No secondary task enters `candidates`, a claim, a review or a worker.
+      const shadowSource = deps.secondaryCatalogShadowSource;
+      if (shadowSource !== undefined && budget > 0) {
+        const sourceShadow = opsCatalogShadowRow(shadowSource, deps.primaryPlanCommit, candidates.length, (secondary) =>
+          compareSecondaryCatalogShadow(planForBatch, secondary, candidates, isMerged, budget, selection.opts,
+            runBranchStateThisTick.ids));
+        if (sourceShadow && sourceShadow.signature !== lastSecondaryCatalogShadowSignature) {
+          try { log("dispatch.secondary_catalog_shadow", { ...sourceShadow.row }); }
+          catch { /* shadow telemetry cannot interrupt or affect ordinary dispatch */ }
+          lastSecondaryCatalogShadowSignature = sourceShadow.signature;
+        }
+      }
+      let secondaryForShadow = shadowSource === undefined ? deps.secondaryPlanForShadow : undefined;
+      if (shadowSource === undefined && secondaryForShadow === undefined && deps.opsCatalogTarget !== undefined && budget > 0) {
         if (opsCatalogShadowPlan === undefined) {
           const snapshot = await readOpsCatalogSnapshotAsync(deps.opsCatalogTarget, deps.opsCatalogApi);
           opsCatalogShadowPlan = snapshot.outcome === "ok" && snapshot.plan ? snapshot.plan : null;
