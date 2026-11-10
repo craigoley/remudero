@@ -60,6 +60,7 @@
     3. EXPLICITLY NOT IN SCOPE: runnableCandidates or any eligibility predicate; the queue-head `limit` of 5;
        using doctor's verdict as a dispatch, capacity or admission gate; any network read.
     4. TESTS, in the new file, using a temp fixture repo:
+       Use these exact test titles for the acceptance proofs: (a) doctorCommand counts eligible queued work from the local plan through real CLI wiring; (b)-(d) doctorCommand reports unreadable plan UNKNOWN and readable empty plan zero.
        (a) THROUGH THE REAL CLI WIRING: call doctorCommand with exactly the deps run-task.ts passes, `{ repoRoot }`
            plus readers for unrelated I/O only (ledger, meminfo, ps, disk), and NO `loadPlan`. A fixture plan with
            one eligible queued task and a stale dispatch ledger yields a dispatch-stall line naming 1 eligible,
@@ -71,9 +72,9 @@
        (e) judgeDispatchStall with an unknownReason is WARN whatever the count, and is byte-identical on a repeat call.
   acceptance:
     - claim: "through the CLI's own deps (repoRoot only, no injected loadPlan) doctor counts the fixture plan's eligible task instead of reporting 0"
-      proof: "unit test: test/doctor-dispatch-stall-reads-the-local-plan.test.ts"
+      proof: "unit test: doctorCommand counts eligible queued work from the local plan through real CLI wiring"
     - claim: "an absent or malformed plan renders dispatch-stall as WARN eligible pool UNKNOWN with its reason, never OK 0 eligible, and a readable empty pool stays OK"
-      proof: "unit test: test/doctor-dispatch-stall-reads-the-local-plan.test.ts"
+      proof: "unit test: doctorCommand reports unreadable plan UNKNOWN and readable empty plan zero"
     - claim: "doctorCommand passes the plan-read reason into the doctor report"
       proof: "grep: candidatesUnknownReason in src/lib/report-commands.ts"
     - claim: "the dispatch-stall judge names an unknown pool distinctly from a measured zero"
