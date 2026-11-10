@@ -12,7 +12,7 @@ import {
 } from "#src/lib/gh-read-broker-client.js";
 import {
   classifyGhBrokerRead, defaultGhBrokerClass, defaultGhUpstreamExec, ghBrokerCommand, ghCommand, GhLimiterPacer, ghMaxAgeMs,
-  GhReadBroker, parseGhBrokerDuration, runGhDirect, serveGhReadBroker, summariseGhBrokerLog,
+  BROKER_BOOT_PARSE_BYTES, GhReadBroker, parseGhBrokerDuration, runGhDirect, serveGhReadBroker, summariseGhBrokerLog,
   type GhUpstreamExec, type GhUpstreamResult,
 } from "#src/lib/gh-read-broker.js";
 import { ghExec, ghJson, ghJsonAsync, ghLinesAsync, ghTextAsync } from "#src/lib/github-transport.js";
@@ -739,4 +739,67 @@ test("a refused broker socket bind leaves no heartbeat timer keeping its process
   assert.equal(observed.status, 0, observed.stderr);
   assert.match(observed.stdout, /broker-bind-refused/);
   assert.equal(existsSync(join(dir, "heartbeat")), false, "a broker that never listened cannot advertise liveness");
+});
+
+/** W1-T11787: a cache directory of `count` entries of `bytes` each, mtime i seconds after the epoch base. */
+function seedBootCache(dir: string, count: number, bytes: number): string[] {
+  const cache = join(dir, "cache");
+  mkdirSync(cache, { recursive: true });
+  const keys: string[] = [];
+  for (let i = 0; i < count; i += 1) {
+    const key = `k${String(i).padStart(3, "0")}`;
+    const entry = { key, kind: "api-rest", subjects: [{ repo: "o/r", number: i }], headers: "", body: "x".repeat(bytes), storedAtMs: 1 };
+    writeFileSync(join(cache, `${key}.json`), JSON.stringify(entry));
+    utimesSync(join(cache, `${key}.json`), 1_700_000_000 + i, 1_700_000_000 + i);
+    keys.push(key);
+  }
+  return keys;
+}
+const bootFiles = (dir: string): string[] => readdirSync(join(dir, "cache")).filter((n) => n.endsWith(".json")).sort();
+const bootBroker = (dir: string, free = 1e15) => new GhReadBroker(dir, async () => ok("octo\n"), clockFromMillisFn(() => 1_800_000_000_000), async () => {}, () => free, { sharedPaceRoot: null, account: "t" });
+
+test("W1-T11787 criterion 1: boot keeps the newest entries that fit the parse bound and evicts the rest, whatever the disk share says", (t) => {
+  const dir = tmp(t, "boot1");
+  const each = 5 * 1024 * 1024;
+  const keys = seedBootCache(dir, 8, each); // ~40 MiB, over the 24 MiB bound, far under a 1e15 free-disk share
+  bootBroker(dir);
+  const kept = bootFiles(dir);
+  assert.ok(kept.length * each <= BROKER_BOOT_PARSE_BYTES + kept.length * 64, `kept ${kept.length} entries`);
+  assert.ok(kept.length >= 1 && kept.length < keys.length);
+  assert.deepEqual(kept, keys.slice(keys.length - kept.length).map((k) => `${k}.json`), "the newest by mtime survive");
+});
+
+test("W1-T11787 criterion 2: a cache within its budget boots with every entry loaded", (t) => {
+  const dir = tmp(t, "boot2");
+  const keys = seedBootCache(dir, 5, 1024);
+  const broker = bootBroker(dir);
+  assert.deepEqual(bootFiles(dir), keys.map((k) => `${k}.json`).sort());
+  assert.equal((broker as unknown as { entries: Map<string, unknown> }).entries.size, 5);
+  assert.equal(existsSync(join(dir, "log")), false, "no eviction row");
+});
+
+test("W1-T11787 criterion 3: boot keeps only each entry's key, size and subjects, never its body", (t) => {
+  const dir = tmp(t, "boot3");
+  seedBootCache(dir, 3, 4096);
+  const broker = bootBroker(dir) as unknown as { memo: Map<string, unknown>; entries: Map<string, Record<string, unknown>> };
+  assert.equal(broker.memo.size, 0, "no parsed entry is retained");
+  for (const meta of broker.entries.values()) {
+    assert.deepEqual(Object.keys(meta).sort(), ["bytes", "subjects"]);
+    assert.ok((meta.bytes as number) > 4096);
+  }
+});
+
+test("W1-T11787 criterion 4: a boot that evicted writes one bounded log row naming the count and bytes", (t) => {
+  const dir = tmp(t, "boot4");
+  seedBootCache(dir, 8, 5 * 1024 * 1024);
+  bootBroker(dir);
+  const logs = readdirSync(join(dir, "log"));
+  assert.equal(logs.length, 1);
+  const rows = readFileSync(join(dir, "log", logs[0]!), "utf8").trim().split("\n").map((l) => JSON.parse(l) as Record<string, unknown>);
+  const evictRows = rows.filter((r) => r.event === "boot-evict");
+  assert.equal(evictRows.length, 1);
+  const kept = bootFiles(dir).length;
+  assert.equal(evictRows[0]!.entries, 8 - kept);
+  assert.ok((evictRows[0]!.bytes as number) >= (8 - kept) * 5 * 1024 * 1024);
+  assert.ok(JSON.stringify(evictRows[0]).length < 300);
 });
