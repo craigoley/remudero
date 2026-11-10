@@ -1,0 +1,68 @@
+- id: W1-T11997
+  title: "THE CI FRICTION GARDENER'S COSTLIEST OPEN CAUSE — check:test:test/preflight-author-sizes-its-selection-by-reach-and-host-capacity.test.ts cost 3.2 PR minute(s) across 2 round(s) on 2 pull request(s)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  priority: 1.4
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "ci-friction:check:test:test/preflight-author-sizes-its-selection-by-reach-and-host-capacity.test.ts"
+  files:
+    - src/lib/affected-suites.ts
+    - test/ci/suites/check-test-test-preflight-author-sizes-its-selection-by-reach-and-host-c.test.ts
+  acceptance:
+    - claim: "a recorded check:test:test/preflight-author-sizes-its-selection-by-reach-and-host-capacity.test.ts round, replayed through the real code path in src/lib/affected-suites.ts, is prevented or self-healed without dispatching a fix round"
+      proof: "unit test: W1-T11997: check:test:test/preflight-author-sizes-its-selection-by-reach-and-host-capacity.test.ts is prevented, not retried"
+  note: "Filed by the ci-friction gardener (W1-T4435) at rung 1. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. After its build merges, the gardener measures check:test:test/preflight-author-sizes-its-selection-by-reach-and-host-capacity.test.ts's share of all fix rounds in equal windows before and after; a share that does not fall reopens the cause at rung 2. The regression must replay one recorded round of this cause through the real owner path; the after-window measurement, not the regression, shows the cause's share fell."
+  rationale: |
+    MEASURED by the ci-friction gardener: check:test:test/preflight-author-sizes-its-selection-by-reach-and-host-capacity.test.ts cost 3.2 PR minute(s) (seven-day half-life) across 2 fix round(s) on 2 pull request(s).
+
+    WHERE IT COMES FROM:
+    - src/lib/affected-suites.ts: test/preflight-author-sizes-its-selection-by-reach-and-host-capacity.test.ts imports it
+    - test/preflight-author-sizes-its-selection-by-reach-and-host-capacity.test.ts: named by the failing check
+    - the rounds name a failing test: test/preflight-author-sizes-its-selection-by-reach-and-host-capacity.test.ts
+
+    RECENT ROUNDS (newest first):
+    - PR #17263 (https://github.com/craigoley/remudero/pull/17263) at 2026-11-08T03:06:05.211Z: ci-log round — test-slow-shard (2/3): test/preflight-author-sizes-its-selection-by-reach-and-host-capacity.test.ts; test-slow-shard (3/3): test/a-full-fallback-author-selection-is-never-run-whole.test
+        failing tests: W1-T7809: a plan-only selection that names no suite runs no tests and says plan lint is its check; W1-T9953: a full-fallback run says it is partial and is never green; a selection naming no suite cancels its ticket after static and plan lint pass; W1-T9951: a failed static stage cancels its suite ticket
+        log excerpt:
+          | not ok 1915 - W1-T7809: a plan-only selection that names no suite runs no tests and says plan lint is its check
+          |   ---
+          |   duration_ms: 571.9714
+          |   type: 'test'
+          |   location: '/home/runner/work/remudero/remudero/test/preflight-author-sizes-its-selection-by-reach-and-host-capacity.test.ts:1:7968'
+          |   failureType: 'testCodeFailure'
+          |   error: |-
+          |     Expected values to be strictly equal:
+          | 
+          |     1 !== 0
+          | 
+          |   code: 'ERR_ASSERTION'
+          |   name: 'AssertionError'
+    - PR #15368 (https://github.com/craigoley/remudero/pull/15368) at 2026-11-02T16:56:59.377Z: ci-log round — ci-shard (5/8): WN-TN: a time-bound census child does not refuse the author run; ci-shard (4/8): test/mac-author-admission.test.ts; ci-shard (2/8): test/deploy-run-freshness-exempt.test
+        failing tests: W1-T9919: a time-bound census child does not refuse the author run; Mac author phase refusals save OVER-CAPACITY, start no refused phase, and release the slot; ["Mac author phase refusals save OVER-CAPACITY, start no refused phase, and release the slot"]; test/deploy-run-freshness-exempt.test.ts; a validated fixed-deadline author runs its whole selection with the workers it priced, test/deploy-run-freshness-exempt.test.ts
+        log excerpt:
+          | author preflight REFUSED: slot is not defined
+          |     author verdict: refused; hosted full-suite/coverage remains REQUIRED, not proven by this run
+          | 
+          |     1 !== 0
+          | 
+          |   code: 'ERR_ASSERTION'
+          |   name: 'AssertionError'
+          |   expected: 0
+          |   actual: 1
+          |   operator: 'strictEqual'
+          |   stack: |-
+          |     TestContext.<anonymous> (/home/runner/work/remudero/remudero/test/a-suite-child-timeout-on-a-loaded-host-does-not-refuse-the-author-run.test.ts:157:10)
+          |     Test.runInAsyncScope (node:async_hooks:227:14)
+          |     Test.run (node:internal/test_runner/test:1402:25)
+
+    WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
+    without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
+    share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
+
+    The regression must replay one recorded round above through the real owner path (the code that decides whether a fix round is dispatched or the failure heals), not assert a label, prompt text or report wording.
+    It need not prove the cause never recurs: the after-window measurement decides that, and reopens the cause one rung up if its share does not fall.
