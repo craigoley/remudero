@@ -48,15 +48,19 @@
     `applyCuratedSelection`, `DEFAULT_SWEEP_POLICY`, or the daemon's kick path.
     VERIFY `runDrainLanes`, `nextCurated`, `runnableCandidates` and `NextRunnableOpts.excludeIds` FROM SOURCE before
     wiring (distrust this note's line-level description).
+    The new test file must use these exact test titles so each criterion has distinct, literal unit-test evidence:
+    - "multi-lane curated dispatch preserves selection order and excludes unselected tasks"
+    - "depth-one curation ignores naturally earlier runnable tasks"
+    - "two disjoint curated tasks run concurrently at the configured lane count"
     OUT OF SCOPE: W1-T11891 itself and its scope, the single-lane curated loop, the dry-run preview, and any
     change to the existing-run guard that refused W1-T11274.
   acceptance:
     - claim: "at laneCount 2, a curated drain over a plan whose natural order differs dispatches exactly the curated ids in curated order, and no unselected id ever reaches runOne or the summary's attempted list"
-      proof: "unit test: test/multi-lane-drain-honours-the-curated-selection.test.ts"
+      proof: "unit test: multi-lane curated dispatch preserves selection order and excludes unselected tasks"
     - claim: "the W1-T11891 shape — a depth-1 curated selection at laneCount 2 with other runnable tasks ahead of it in the DAG — dispatches only the one curated id"
-      proof: "unit test: test/multi-lane-drain-honours-the-curated-selection.test.ts"
+      proof: "unit test: depth-one curation ignores naturally earlier runnable tasks"
     - claim: "the lane count is preserved — a two-id curated selection at laneCount 2 with disjoint files is admitted as one concurrent pass, not serialised into two"
-      proof: "unit test: test/multi-lane-drain-honours-the-curated-selection.test.ts"
+      proof: "unit test: two disjoint curated tasks run concurrently at the configured lane count"
     - claim: "runDrainLanes selects curated work through the shared curated selector"
       proof: "grep: curatedCandidates( in src/lib/drain.ts"
   risk: medium
