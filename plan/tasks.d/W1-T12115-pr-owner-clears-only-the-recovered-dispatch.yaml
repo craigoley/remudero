@@ -1,7 +1,7 @@
 - id: W1-T12115
   title: "`rmd pr-owner` CLEARS A STALE FIX DISPATCH ONLY FOR A LATER RELEASED RECOVERY RECEIPT THAT NAMES THAT EXACT DISPATCH, PR, TASK AND HEAD — and stays OWNED, or answers UNKNOWN, for a newer dispatch, a mismatched or unreadable receipt, a live claim or an active sweep"
   repo: remudero
-  depends_on: [W1-T12113]
+  depends_on: [W1-T12114]
   type: implement
   verify: auto
   principles: {tdd: strict}
@@ -13,15 +13,15 @@
   files:
     - src/lib/pr-owner-ledger.ts
     - src/run-task.ts
-    - test/pr-owner-clears-only-the-recovered-dispatch.test.ts
+    - test/fix-lane/pr-owner-clears-only-the-recovered-dispatch.test.ts
   status: queued
   priority: 2
   attempts: 0
   acceptance:
     - claim: "pr-owner reports FREE, naming the recovery_id, only when the newest fix.dispatch for the PR is matched by a pr_owner.recovery_receipt with outcome released that is stamped later than it and names its run_id, round_id, task_id and head_sha and the same PR; no live fix branch claim and no active sweep disposition exist"
-      proof: "unit test: test/pr-owner-clears-only-the-recovered-dispatch.test.ts"
+      proof: "unit test: test/fix-lane/pr-owner-clears-only-the-recovered-dispatch.test.ts"
     - claim: "a fix.dispatch stamped after the receipt, a receipt for another run, round, task, head or PR, a held receipt, a receipt stamped at or before the dispatch, a future-stamped receipt, a duplicate receipt for one dispatch with different content, or an unparseable receipt row keeps the verdict OWNED or UNKNOWN; and a released receipt never hides a live branch claim or an active sweep disposition; the same holds on a plan-only PR fixture"
-      proof: "unit test: test/pr-owner-clears-only-the-recovered-dispatch.test.ts"
+      proof: "unit test: test/fix-lane/pr-owner-clears-only-the-recovered-dispatch.test.ts"
     - claim: "the ledger projection carries the matching receipt row into the verdict"
       proof: "grep: STALE_FIX_DISPATCH_RECEIPT_STEP in src/lib/pr-owner-ledger.ts"
   rationale: |
