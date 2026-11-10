@@ -684,17 +684,20 @@ const countPath = root + "/starts";
 const n = fs.existsSync(countPath) ? Number(fs.readFileSync(countPath, "utf8")) + 1 : 1;
 fs.writeFileSync(countPath, String(n));
 if (n === 1) {
-  fs.writeSync(2, fs.readFileSync(root + "/payload.bin"));
-  if (process.env.TEST_HELD === "1") {
-    const writer = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"],
-      { stdio: ["ignore", "ignore", "inherit"] });
-    fs.writeFileSync(root + "/writer.pid", String(writer.pid));
-    writer.unref();
-  }
-  process.exit(Number(process.env.TEST_CHILD_CODE));
+  process.stderr.write(fs.readFileSync(root + "/payload.bin"), (error) => {
+    if (error) throw error;
+    if (process.env.TEST_HELD === "1") {
+      const writer = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"],
+        { stdio: ["ignore", "ignore", "inherit"] });
+      fs.writeFileSync(root + "/writer.pid", String(writer.pid));
+      writer.unref();
+    }
+    process.exit(Number(process.env.TEST_CHILD_CODE));
+  });
+} else {
+  fs.writeFileSync(root + "/next-started", "started");
+  process.exit(0);
 }
-fs.writeFileSync(root + "/next-started", "started");
-process.exit(0);
 `);
   // @source-text-subject: this is the actual supervision section, not a substitute observer.
   const source = readFileSync(join(REPO_ROOT, "deploy/entrypoint.sh"), "utf8");
