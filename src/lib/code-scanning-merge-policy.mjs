@@ -9,6 +9,50 @@ const path = value => typeof value === 'string' && value.length > 0 && value.len
 // Matches the existing CodeQL workflow's ignored surface; rename predecessors are checked too.
 const ignored = value => value.endsWith('.md') || ['plan/', 'docs/', 'learnings/'].some(prefix => value.startsWith(prefix));
 const unknown = reason => ({state:'unknown',mergeAllowed:false,reason});
+
+/** W1-T10976 — the trusted codeql.yml job `analyze` configuration; NEVER inferred from returned rows. */
+export const CODEQL_ANALYSIS_KEY = '.github/workflows/codeql.yml:analyze';
+export const CODEQL_EXPECTED_CATEGORIES = Object.freeze(['/language:javascript-typescript', '/language:actions', '/language:python']);
+export const MISSING_CONFIGURATION_TITLE = '1 configuration not found';
+/** The distinct final dispositions a missing-configuration recovery can end in; the sweep owns these (never a fix round). */
+export const CODEQL_RECOVERY_PENDING_REASON = 'codeql-configuration-recovery-pending';
+export const CODEQL_RECOVERY_DISPOSITION_REASONS = Object.freeze(['codeql-configuration-recovery-exhausted',
+  'codeql-configuration-recovery-invalid-evidence', 'codeql-configuration-recovery-unrecognized-warning']);
+/** UNVERIFIED SHAPE: the verbatim trusted GitHub summary has not been captured (no live GitHub in the building run).
+ * This strict builder is the ONLY shape that can reconcile; real wording that differs stays UNKNOWN (fail-safe).
+ * Replace with the captured fixture before relying on recovery in production. */
+export const missingConfigurationSummary = (prNumber, category) =>
+  `Code scanning found no analysis of this pull request's merge commit for this configuration:\n\n * \`${CODEQL_ANALYSIS_KEY}${category}\`\n\n` +
+  `[View all branch alerts](/craigoley/remudero/security/code-scanning?query=pr%3A${prNumber}+tool%3ACodeQL+is%3Aopen).`;
+const MISSING_CONFIGURATION_SUMMARY = prNumber => new RegExp(String.raw`^Code scanning found no analysis of this pull request's merge commit for this configuration:\n\n \* \`(${
+  CODEQL_ANALYSIS_KEY.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})(/language:[a-z-]+)\`\n\n\[View all branch alerts\]\(/craigoley/remudero/security/code-scanning\?query=pr%3A${prNumber}\+tool%3ACodeQL\+is%3Aopen\)\.$`);
+/** The ONE missing configuration the exact warning names, bound to the expected key and a configured category. */
+export function parseMissingConfigurationWarning(check, prNumber) {
+  if (check?.status !== 'completed' || check.conclusion !== 'neutral' || check.output?.title !== MISSING_CONFIGURATION_TITLE ||
+      typeof check.output.summary !== 'string' || !Number.isSafeInteger(prNumber) || prNumber < 1) return undefined;
+  const match = MISSING_CONFIGURATION_SUMMARY(prNumber).exec(check.output.summary);
+  return match && CODEQL_EXPECTED_CATEGORIES.includes(match[2]) ? {analysisKey: match[1], category: match[2]} : undefined;
+}
+/** The newest trusted exact-head CodeQL check, only when it is the one-configuration-missing warning in its strict shape. */
+export function isMissingConfigurationCandidate(checks, headSha, prNumber) {
+  const trusted = (Array.isArray(checks) ? checks : []).filter(check => check?.name === 'CodeQL' && check.head_sha === headSha &&
+    check.app?.slug === 'github-advanced-security' && check.app?.id === 57789 && check.app?.owner?.login === 'github');
+  if (trusted.length === 0 || trusted.some(check => !Number.isSafeInteger(check.id) || check.id <= 0) ||
+      new Set(trusted.map(check => check.id)).size !== trusted.length) return false;
+  return parseMissingConfigurationWarning(trusted.reduce((a, b) => a.id > b.id ? a : b), prNumber) !== undefined;
+}
+/** Only the shared classifier grants safe: the warning, the adapter's complete same-merge evidence and zero new alerts. */
+function classifyMissingConfiguration(latest, input) {
+  if (!parseMissingConfigurationWarning(latest, input.prNumber)) return unknown('codeql-configuration-recovery-unrecognized-warning');
+  const evidence = input.recovery;
+  if (evidence?.state === 'pending') return unknown(CODEQL_RECOVERY_PENDING_REASON);
+  if (evidence?.state !== 'complete' || !sha(evidence.mergeSha) || evidence.alertsComplete !== true || !Array.isArray(evidence.newHighCritical) ||
+      !Array.isArray(evidence.categories) || evidence.categories.length !== CODEQL_EXPECTED_CATEGORIES.length ||
+      !CODEQL_EXPECTED_CATEGORIES.every(category => evidence.categories.includes(category)))
+    return unknown('codeql-configuration-recovery-invalid-evidence');
+  if (evidence.newHighCritical.length > 0) return {state:'blocked',mergeAllowed:false,reason:'new-high-or-critical-security-alert'};
+  return {state:'safe',mergeAllowed:true,reason:'trusted-missing-configuration-reconciled-by-complete-analyses'};
+}
 // GitHub's real wording: a plural level above 1, 'Other Alerts:', and one exact optional 'too large' paragraph.
 const HEAD = String.raw`^### New alerts in code changed by this pull request\n\n`, QUALITY_ROW = String.raw` \* [1-9][0-9]* (?:error|warning|note)s?\n`;
 const TOO_LARGE = String.raw`_Alerts not introduced by this pull request might have been detected because the code changes were too large\._\n\n`;
@@ -53,6 +97,7 @@ export function classifyCodeScanningMergePolicy(input) {
   if (typeof summary !== 'string') return unknown('security-result-shape-unavailable');
   const counts = [...summary.matchAll(/^\s*\* (\d+) (high|critical)\s*$/gm)];
   if (counts.some(match => Number(match[1]) > 0)) return {state:'blocked',mergeAllowed:false,reason:'new-high-or-critical-security-alert'};
+  if (latest.conclusion === 'neutral' && latest.output?.title === MISSING_CONFIGURATION_TITLE) return classifyMissingConfiguration(latest, input);
   // Actual GitHub producer stores the no-new-alert statement in TITLE, not SUMMARY.
   // The summary must bind that canonical statement to this PR, not another PR at the same SHA.
   const link = `[View all branch alerts](/craigoley/remudero/security/code-scanning?query=pr%3A${input.prNumber}+tool%3ACodeQL+is%3Aopen).`;

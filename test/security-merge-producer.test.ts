@@ -11,14 +11,18 @@ import {ghStubPath} from '#test/helpers/gh-stub.js';
 import {runSecurityMergeProducer,createSecurityMetadataReader} from '#scripts/security-merge-producer.mjs';
 const head='a'.repeat(40),base='b'.repeat(40);
 const repository={full_name:'craigoley/remudero'};
+// A verified repository-local CodeQL run: id, live attempt, trusted workflow path and non-fork head repository.
+const codeqlRun=(extra:object={})=>({id:7,name:'CodeQL',head_sha:head,run_attempt:1,path:'.github/workflows/codeql.yml',
+ status:'completed',conclusion:'success',repository,head_repository:repository,...extra});
 
 test('CodeQL workflow completion reobserves its asynchronous analysis without granting stale or unknown permission',async()=>{
  for(const outcome of ['safe','blocked','pending','drift','unreadable'] as const){
   let waits=0;const writes:any[]=[];
-  const event={repository,workflow_run:{name:'CodeQL',head_sha:head,status:'completed',conclusion:'success'}};
+  const event={repository,workflow_run:codeqlRun()};
   const api={
    wait:async(ms:number)=>{assert.equal(ms,60_000);waits++;},
    read:async(p:string)=>{
+    if(p.includes('/actions/runs/'))return codeqlRun();
     if(p.includes('/pulls?'))return [{number:1,state:'open',head:{sha:head}}];
     if(p.includes('/files?'))return [{filename:'src/security.ts'}];
     if(p.includes('/check-runs?')){
@@ -242,4 +246,123 @@ const child=spawnSync(${JSON.stringify(answer)},args,{encoding:'utf8'});process.
  const calls=readFileSync(log,'utf8').trim().split('\n').map(line=>JSON.parse(line));
  assert.deepEqual(calls[0],calls[1],'only the same association read is repeated');
  assert.equal(calls.filter(call=>call.includes('POST')).length,1,'status writes retain their single attempt');
+});
+
+// ---- W1-T10976: a missing CodeQL configuration recovers only from complete same-merge analyses ----
+const merge='c'.repeat(40);
+const KEY='.github/workflows/codeql.yml:analyze';
+const CATEGORIES=['/language:javascript-typescript','/language:actions','/language:python'];
+const analysis=(category:string,id:number,extra:object={})=>({id,ref:'refs/pull/1/merge',commit_sha:merge,analysis_key:KEY,category,
+ error:'',warning:'',results_count:0,created_at:'2026-11-09T03:29:00Z',tool:{name:'CodeQL'},...extra});
+type Knobs={arrived:(waits:number)=>any[];alerts?:any[];baseAlerts?:any[];run?:(waits:number)=>any;pr?:(waits:number)=>object;clock?:{t:number};waitCost?:number};
+async function recover(summaryFor:(c:string)=>string,knobs:Knobs,runExtra:object={}) {
+ let waits=0;const writes:any[]=[],paths:string[]=[],clock=knobs.clock??{t:0};
+ const warning={id:1,name:'CodeQL',head_sha:head,status:'completed',conclusion:'neutral',
+  app:{slug:'github-advanced-security',id:57789,owner:{login:'github'}},
+  output:{title:'1 configuration not found',summary:summaryFor('/language:python')}};
+ const api={now:()=>clock.t,wait:async(ms:number)=>{assert.equal(ms,60_000);waits++;clock.t+=knobs.waitCost??ms;},
+  status:async(s:any)=>writes.push(s),read:async(p:string)=>{
+   paths.push(p);
+   if(p.includes('/actions/runs/'))return knobs.run?.(waits)??codeqlRun();
+   if(p.includes('/pulls?'))return [{number:1,state:'open',head:{sha:head}}];
+   if(p.includes('/files?'))return [{filename:'src/security.ts'}];
+   if(p.includes('/check-runs?'))return {total_count:1,check_runs:[warning]};
+   if(p.includes('/git/ref/pull/1/merge'))return {object:{sha:merge}};
+   if(p.endsWith('/commits/'+merge))return {sha:merge,parents:[{sha:base},{sha:head}]};
+   if(p.includes('/code-scanning/analyses?'))return p.endsWith('page=1')?knobs.arrived(waits):[];
+   if(p.includes('/code-scanning/alerts?'))return p.includes('refs/heads/main')?knobs.baseAlerts??[]:knobs.alerts??[];
+   return {state:'open',head:{sha:head},base:{sha:base,ref:'main',repo:repository},changed_files:1,merge_commit_sha:merge,
+    ...knobs.pr?.(waits)};
+  }};
+ const [result]=await runSecurityMergeProducer('workflow_run',{repository,workflow_run:codeqlRun(runExtra)},api);
+ return {result,writes,paths,waits:()=>waits,clock};
+}
+// @ts-expect-error — trusted policy module is plain ESM outside tsconfig roots.
+import {missingConfigurationSummary} from '#src/lib/code-scanning-merge-policy.mjs';
+const all=()=>CATEGORIES.map((c,i)=>analysis(c,10+i));
+
+test('delayed category arrival recovers a missing configuration only after complete same-merge evidence',async()=>{
+ const r=await recover(c=>missingConfigurationSummary(1,c),{arrived:w=>w===0?all().slice(0,2):all()});
+ assert.equal(r.waits(),1);
+ assert.deepEqual(r.writes.map(s=>s.state),['error','success']);
+ assert.match(r.writes[0].description,/codeql-configuration-recovery-pending/);
+ assert.match(r.writes[1].description,/trusted-missing-configuration-reconciled-by-complete-analyses/);
+ assert.ok(r.writes.every(s=>s.sha===head));assert.equal(r.result.decision.mergeAllowed,true);
+ assert.deepEqual(r.result.observation.recovery.categories.sort(),[...CATEGORIES].sort());
+ assert.equal(r.paths.some(p=>p.includes('tool_name')),false,'no tool_name filter is requested');
+});
+test('a permanently missing category exhausts the shared window with a distinct UNKNOWN, never success',async()=>{
+ const r=await recover(c=>missingConfigurationSummary(1,c),{arrived:()=>all().slice(0,2)});
+ assert.equal(r.waits(),3);
+ assert.equal(r.writes.some(s=>s.state==='success'),false);
+ assert.equal(r.writes.at(-1).state,'error');assert.match(r.writes.at(-1).description,/^unknown: codeql-configuration-recovery-exhausted/);
+ assert.equal(r.result.recoveryAttempts,3);assert.equal(r.result.recoveryRun.verified,true);
+});
+test('the monotonic 240-second deadline never starts a wait that cannot fit and still publishes the final disposition',async()=>{
+ const r=await recover(c=>missingConfigurationSummary(1,c),{arrived:()=>all().slice(0,2),waitCost:100_000});
+ assert.equal(r.waits(),2,'a third wait would end at 300s, past the 240s budget');
+ assert.match(r.writes.at(-1).description,/recovery-exhausted/);
+ assert.equal(r.writes.some(s=>s.state==='success'),false);
+});
+test('failed, foreign, spoofed or superseded CodeQL workflow runs never enter the missing-configuration recovery',async()=>{
+ const cases:Array<[string,object,((w:number)=>any)?]>=[
+  ['wrong path',{path:'.github/workflows/evil.yml'}],['fork head',{head_repository:{full_name:'x/remudero'}}],
+  ['no attempt',{run_attempt:undefined}],['no id',{id:undefined}],
+  ['superseded attempt',{},()=>codeqlRun({run_attempt:2})],['live run failed',{},()=>codeqlRun({conclusion:'failure'})],
+  ['live run foreign head',{},()=>codeqlRun({head_sha:base})]];
+ for(const [label,extra,run] of cases){
+  const r=await recover(c=>missingConfigurationSummary(1,c),{arrived:()=>all().slice(0,2),run},extra);
+  assert.equal(r.waits(),0,label);assert.equal(r.writes.some(s=>s.state==='success'),false,label);
+ }
+});
+test('merge, head or base drift during recovery never posts a stale success',async()=>{
+ const drifts:Array<[string,(w:number)=>object]>=[
+  ['merge sha changes',w=>w===0?{}:{merge_commit_sha:'d'.repeat(40)}],
+  ['pr closed',w=>w===0?{}:{state:'closed'}],
+  ['base changes',w=>w===0?{}:{base:{sha:'e'.repeat(40),ref:'main',repo:repository}}]];
+ for(const [label,pr] of drifts){
+  const r=await recover(c=>missingConfigurationSummary(1,c),{arrived:w=>w===0?all().slice(0,2):all(),pr});
+  assert.equal(r.writes.some(s=>s.state==='success'),false,label);assert.ok(r.writes.every(s=>s.sha===head),label);
+ }
+});
+test('an unrecognized warning or a genuine new high alert is never reconciled to success',async()=>{
+ const odd=await recover(()=>'unrecognized comparison state',{arrived:()=>all()});
+ assert.equal(odd.waits(),0);assert.equal(odd.writes.length,1);assert.match(odd.writes[0].description,/unrecognized-warning/);
+ const alert={number:9,tool:{name:'CodeQL'},rule:{security_severity_level:'high'},most_recent_instance:{ref:'refs/pull/1/merge',
+  commit_sha:merge,analysis_key:KEY,category:'/language:python'}};
+ const blocked=await recover(c=>missingConfigurationSummary(1,c),{arrived:()=>all(),alerts:[alert]});
+ assert.equal(blocked.writes.at(-1).state,'failure');assert.deepEqual(blocked.result.observation.recovery.newHighCritical,[9]);
+ const inherited=await recover(c=>missingConfigurationSummary(1,c),{arrived:()=>all(),alerts:[alert],baseAlerts:[{number:9}]});
+ assert.equal(inherited.writes.at(-1).state,'success','an alert already open on main is not new in this PR');
+});
+test('security producer workflow grants only job-level security-events read for the recovery reads',()=>{
+ const flow=parse(readFileSync(new URL('../.github/workflows/security-merge-policy.yml',import.meta.url),'utf8'));
+ assert.equal(flow.jobs.metadata.permissions['security-events'],'read');
+ assert.equal(flow.permissions['security-events'],undefined);assert.equal(flow.jobs.metadata['timeout-minutes'],5);
+});
+test('security producer real CLI transport carries the recovery reads through the gh shim without a tool_name filter',t=>{
+ const dir=mkdtempSync(join(tmpdir(),'rmd-security-recovery-'));t.after(()=>rmSync(dir,{recursive:true,force:true}));
+ const eventPath=join(dir,'event.json');
+ writeFileSync(eventPath,JSON.stringify({repository,workflow_run:codeqlRun()}));
+ const warning={id:1,name:'CodeQL',head_sha:head,status:'completed',conclusion:'neutral',
+  app:{slug:'github-advanced-security',id:57789,owner:{login:'github'}},
+  output:{title:'1 configuration not found',summary:missingConfigurationSummary(1,'/language:python')}};
+ const shim=ghShim([{when:'POST',stdout:'{}'},
+  {when:'/commits/'+head+'/pulls?',stdout:JSON.stringify([{number:1,state:'open',head:{sha:head}}])},
+  {when:'/files?',stdout:JSON.stringify([{filename:'src/security.ts'}])},
+  {when:'/check-runs?',stdout:JSON.stringify({total_count:1,check_runs:[warning]})},
+  {when:'/actions/runs/',stdout:JSON.stringify(codeqlRun())},
+  {when:'/git/ref/pull/1/merge',stdout:JSON.stringify({object:{sha:merge}})},
+  {when:'/code-scanning/analyses?',stdout:JSON.stringify(all())},
+  {when:'/code-scanning/alerts?',stdout:'[]'},
+  {when:'/commits/'+merge,stdout:JSON.stringify({sha:merge,parents:[{sha:base},{sha:head}]})},
+  {when:'GET',stdout:JSON.stringify({state:'open',head:{sha:head},base:{sha:base,ref:'main',repo:repository},changed_files:1,merge_commit_sha:merge})}]);
+ t.after(()=>rmSync(shim.dir,{recursive:true,force:true}));
+ const child=spawnSync(process.execPath,[new URL('../scripts/security-merge-producer.mjs',import.meta.url).pathname],{encoding:'utf8',timeout:15000,
+  env:{...process.env,PATH:shim.dir+':'+process.env.PATH,GH_TOKEN:'',GITHUB_EVENT_PATH:eventPath,GITHUB_EVENT_NAME:'workflow_run',GITHUB_RUN_ID:'1'}});
+ assert.equal(child.status,0,child.stderr||child.stdout);
+ const result=JSON.parse(child.stdout).results[0];assert.equal(result.decision.mergeAllowed,true);
+ const calls=shim.calls();assert.ok(calls.some(c=>c.includes('/code-scanning/analyses?')));
+ assert.equal(calls.some(c=>c.includes('tool_name')),false);
+ assert.equal(calls.filter(c=>c.includes('/statuses/'+head)&&c.includes('state=success')).length,1);
 });
