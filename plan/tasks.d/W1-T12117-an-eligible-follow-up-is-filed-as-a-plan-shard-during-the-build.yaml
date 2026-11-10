@@ -1,0 +1,88 @@
+- id: W1-T12117
+  title: "AN ELIGIBLE task: OR research: FOLLOW-UP IS FILED AS A PLAN SHARD DURING THE BUILD, NOT LEFT AS A PROPOSAL WAITING FOR rmd approve — routeFollowupsToRegistry ends at an inbox proposal with evidenceAnchors [] and a one-line summary, and only an operator's approve turns it into a shard; file it through the existing batch ratifier with source task, PR, exact head SHA, run and the worker's own words as provenance, keep action: follow-ups human-owned, and refuse duplicates, empty files and over-scope drafts"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 18.00
+  risk: high  # Rule 19: one concern (the follow-up's path from routed proposal to filed shard); a new selector module, the harvest's head capture and one call site
+  band_meaning: span
+  priority: 1
+  origin: architect
+  plan_refs: [W1-T2458, W1-T2471, W1-T5541, W1-T2561, W1-T2563, W1-T2617, W1-T2613, W1-T2645, W1-T8779, W1-T2959, W1-T965]
+  files:
+    - src/lib/followup-filing.ts
+    - src/lib/retro.ts
+    - src/run-task.ts
+    - test/an-eligible-follow-up-is-filed-as-a-plan-shard-during-the-build.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "a routed task or research follow-up proposal is filed by one plan-only PR through the existing batch ratifier with no operator approve, and its shard carries origin followup#<entryId>, the source task id, PR URL, exact 40-hex head SHA, run id and the follow-up's verbatim text in its rationale; the PR carries no Remudero-Task trailer and merges only through the ordinary plan-PR gates"
+      proof: "unit test: test/an-eligible-follow-up-is-filed-as-a-plan-shard-during-the-build.test.ts"
+    - claim: "an action follow-up is never filed and stays on the human-owned route; a candidate already filed (a shard with the same followup# origin on origin/main or an open PR), already ratified in the ledger, or declined by any existing router arm files nothing, and a second pass over the same harvest files nothing new"
+      proof: "unit test: test/an-eligible-follow-up-is-filed-as-a-plan-shard-during-the-build.test.ts"
+    - claim: "a drafted shard with empty files, a proof outside the two lintable forms, a files list beyond the machine-filing risk band the source run declared, or an unreadable head SHA is refused with a named reason and left as a proposal for the operator; a pass files at most the existing draft-rung bound"
+      proof: "unit test: test/an-eligible-follow-up-is-filed-as-a-plan-shard-during-the-build.test.ts"
+    - claim: "the harvest calls the filing step after the registry write"
+      proof: "grep: fileEligibleFollowups( in src/run-task.ts"
+  rationale: |
+    THE ASK (operator brief, run PLAN-expand-1794323791989): follow-up tasks must be filed automatically during a
+    build. A task disposition in the registry is not a filed task.
+
+    OBSERVED on GitHub (https://github.com/craigoley/remudero/pull/17536, merged 2026-11-09). The build for
+    W1-T11848 found that its shard's files list needed more paths. That follow-up became filed work only after a
+    person opened scope amendment #17543 by hand. The fleet had the finding during the build and filed nothing.
+
+    READ in this worktree:
+    - src/lib/retro.ts routeFollowupsToRegistry (W1-T2458) routes `research` and `task` (FOLLOWUP_TYPE_ROUTES
+      "propose") and declines `action` as not plan-shaped. Its five refusal arms are title-dedup,
+      type-not-plan-shaped, settled-question, self-referential and dispatch-only. It writes
+      `followup:<entryId>` proposals with `evidenceAnchors: []` and a summary naming the task, run and PR URL.
+      FollowupCandidate carries entryId, type, text, runId, taskId and an optional prUrl. It has no head SHA.
+    - src/lib/inbox.ts already files proposals as shards: planRatificationBatch, approveBatch and
+      fileRatificationBatch (W1-T2471, one PR per batch), and relintRatificationFragment. W1-T5541 makes a
+      ratified follow-up carry its own words. isRatifiedInLedger and priorApproveRunBranch already make approval
+      idempotent. Every caller today is `rmd approve`, an operator verb.
+    - src/lib/plan-pr-emitter.ts emits plan filings without a Remudero-Task trailer.
+
+    Settled by lookup: is automatic filing permitted? -> Yes. MASTER-PLAN §12 rule 27 (operator ruling
+    2026-08-29, W1-T2456): the fleet may file, build, test and merge its own work.
+    Settled by lookup: is this already filed or already decided? -> No. W1-T2458 (merged) built the route to the
+    registry. W1-T2471 (merged) batches operator approval. W1-T5541 (merged) fixed what approval writes. W1-T2563
+    and W1-T2601 retire stale follow-up proposals. W1-T8779 (merged) makes a promised follow-up reach the harvest.
+    W1-T965 (blocked) would route candidates to plan/feedback for triage. None files a shard without an operator
+    (plan/tasks.d/W1-T2458-*, W1-T2471-*, W1-T5541-*, W1-T2563-*, W1-T8779-*, W1-T965-*).
+    Settled by lookup: what keeps the filed work honest? -> The ordinary gates. A filed shard is plan-only, so
+    lint-plan, task-id-existence, proof discrimination and review still judge it. Its later implementation
+    still needs its own CI, semantic review and merge gates, and `verify: human` on the drafted shard is kept.
+    Nothing here edits a merge gate.
+    Settled by lookup: is the volume bounded already? -> Yes. W1-T2561 (merged) bounds the draft rung, and this
+    task reuses that bound rather than adding a constant.
+  design: |
+    1. HEAD PROVENANCE. harvestFollowupsFromReport (src/run-task.ts) records the head SHA of the run's PR branch,
+       read with local git at harvest time, on the `report.followups` row. FollowupCandidate gains an optional
+       `headSha`, and routeFollowupsToRegistry's summary carries it. An unreadable head records nothing, and step 3
+       then refuses to file.
+    2. src/lib/followup-filing.ts (new). selectFileableFollowups(outcomes, { planOnMain, openPrOrigins,
+       ratifiedIds, bound }) picks routed `task`/`research` proposals that are not ratified and have no shard or
+       open PR with origin `followup#<entryId>`. It returns them ordered and capped at W1-T2561's bound. Declines
+       name their reason.
+    3. fileEligibleFollowups drafts and files through planRatificationBatch / fileRatificationBatch, unchanged.
+       Before publishing it refuses a drafted shard whose files list is empty, whose proofs fall outside the
+       `unit test:` / `grep: <pattern> in <path>` forms, whose machineShardRisk exceeds the source run's declared
+       risk, or whose rationale lacks the provenance line (task, PR URL, head SHA, run, verbatim text). A refused
+       draft stays a proposal for `rmd approve`.
+    4. The filing PR is plan-only and carries no Remudero-Task trailer. Its acceptance block reads "filed as a
+       well-formed plan shard". Auto-merge arms only through the existing plan-PR path.
+    5. Ledger: followup.filed {entry_id, task_id, pr_url, head_sha, run_id, filing_pr}, and
+       followup.file_refused {entry_id, reason}. Idempotent: the same entryId never files twice.
+    6. Tests: an injected ratifier and plan fixtures cover a task follow-up filed with full provenance; an action
+       entry untouched; a duplicate by origin, by ledger and by router arm; an empty-files draft; an unreadable
+       head; and a second pass that files nothing.
+  falsifier: |
+    At origin/main, publish a harvest holding one `task:` entry and run a full retro pass with no operator. The
+    registry gains `followup:<entryId>` and no shard, PR or approve row exists. If main already files it, close
+    this task. Mutation: drop the origin check in selectFileableFollowups, and the second-pass case files a
+    duplicate.

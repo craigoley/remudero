@@ -1,0 +1,89 @@
+- id: W1-T12116
+  title: "A FIX ROUND ON A PLAN-ONLY FILING NEVER COMMITS A Remudero-Task TRAILER FOR THE TASK THE FILING INTRODUCES, AND NEVER DELETES OR WEAKENS THAT SHARD'S DECLARED CRITERIA — #17646's fix commit b836c50 carried `Remudero-Task: W1-T12062` on a one-shard filing and turned acceptance-author-gate and squash-trailer-gate red; a later candidate dropped the trailer but repointed future behavior proofs at unrelated existing tests and dropped a named-function criterion"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 14.00
+  risk: high  # Rule 19: one concern (what a fix round may commit on a plan filing); a new pure guard plus its two call sites
+  band_meaning: span
+  priority: 1
+  origin: architect
+  plan_refs: [W1-T5118, W1-T5543, W1-T3149, W1-T3231, W1-T10667, W1-T6048, W1-T7155]
+  files:
+    - src/lib/plan-filing-fix-guard.ts
+    - src/cli/commands/fix.ts
+    - src/run-task.ts
+    - test/a-fix-round-keeps-a-plan-filing-uncredited-and-its-criteria-whole.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "planFilingFixRoundRefusal refuses a fix round on a plan-only filing when any commit the round adds carries a Remudero-Task trailer naming a task the filing introduces, whether the worker wrote it in COMMIT_MESSAGE or the harness appended it, and names the trailer, the commit and the plan-pr-emitter invariant; the same trailer on a round over an implementation baseline is unaffected"
+      proof: "unit test: test/a-fix-round-keeps-a-plan-filing-uncredited-and-its-criteria-whole.test.ts"
+    - claim: "for each shard the filing introduces, the guard refuses a round that lowers the criterion count, changes any claim text, drops a grep proof that names a symbol call such as someSymbol( without keeping that symbol in a proof, or repoints a unit test proof at a test file that already exists on origin/main and is outside the task's declared files; a round that only rewrites a proof into a lintable form for the same claim and declared test path passes"
+      proof: "unit test: test/a-fix-round-keeps-a-plan-filing-uncredited-and-its-criteria-whole.test.ts"
+    - claim: "the code fix lane consults the guard before it pushes a plan filing round"
+      proof: "grep: planFilingFixRoundRefusal( in src/cli/commands/fix.ts"
+    - claim: "the plan-scoped round consults the guard before it pushes"
+      proof: "grep: planFilingFixRoundRefusal( in src/run-task.ts"
+  rationale: |
+    OBSERVED on GitHub 2026-11-10 (https://github.com/craigoley/remudero/pull/17646). #17646 is the plan-only
+    filing of W1-T12062: one changed file, plan/tasks.d/W1-T12062-*.yaml. Commit 2b17e34 (the PLAN run's filing)
+    carries only a Remudero-Assignment trailer. The fix lane's commit b836c50 ("give each W1-T12062 criterion a
+    distinct test-title proof") carries `Remudero-Task: W1-T12062` and a Co-Authored-By line. acceptance-author-gate
+    refused head b836c504 because a plan-only commit credits a task that declares implementation files.
+    Issue #17660 lists ci-shard (1/8), ci-shard (7/8), lint-plan, rule-checks, squash-trailer-gate and
+    acceptance-author-gate as red. The operator brief for this run adds that a later local candidate removed the
+    trailer but replaced the meaningful future-behavior proofs with unrelated existing tests and dropped a
+    named-function criterion. That half is the operator's observation and is not re-derived here.
+
+    READ in this worktree:
+    - src/lib/plan-pr-emitter.ts's header states the invariant: a plan-FILING PR must never carry a
+      `Remudero-Task: <id>` trailer, because findMergedByTrailer would credit the task as built.
+    - The plan-scoped round (src/run-task.ts, W1-T5543) commits the worker's own COMMIT_MESSAGE verbatim. It checks
+      it only with checkCommitMessage (commitlint), so a trailer the worker writes into it survives. It checks
+      criterion edits with untouchedPlanCriterion only for shards that already exist on main (`existing.has(p)`).
+      A shard the filing itself introduces has no criterion guard in the round.
+    - fixRungTaskFor (src/lib/sweep.ts) returns the real plan task when pr.taskId resolves. For a filing whose
+      introduced task resolves after a plan reload, the code fix lane in src/cli/commands/fix.ts runs as a
+      non-synthetic task with that id. Its generator commit appends `Remudero-Task: ${opts.taskId}`.
+    - criterionFieldTampered / checkSatisfiedByGuard (src/lib/review.ts) flag criterion edits at review. They
+      exempt a plan-only, human-authored PR. They cannot say whether a rewrite kept a criterion's meaning, and
+      they run after the push, not before it.
+
+    Settled by lookup: is this already filed or already decided? -> No. W1-T5118 (merged) keeps a filing's
+    changed paths plan-scoped and never reads commit trailers or criterion content. W1-T5543 (merged) guards
+    existing-shard criteria and the body trailer, not commit trailers or introduced shards. W1-T3149 (merged) is
+    the author-time CI refusal that caught #17646, a detector rather than prevention. W1-T10667, W1-T6048 and
+    W1-T7155 are plan-proof-unrunnable flow remedies for specific PRs. W1-T12062 is #17646's own task and is not
+    touched here (plan/tasks.d/W1-T5118-*, W1-T5543-*, W1-T3149-*, W1-T10667-*, W1-T6048-*, W1-T7155-*).
+    Settled by lookup: may a fix worker edit criteria? -> Not to match a diff (§12 rule 15, criterionFieldTampered).
+    A proof repair that keeps the claim and its declared target stays allowed, which is what W1-T5543's plan
+    round exists for.
+    Settled by lookup: does the fix need GitHub or a model? -> No. The prior head, the new commits and origin/main
+    are all local git reads in the round's worktree.
+  design: |
+    1. src/lib/plan-filing-fix-guard.ts (new, pure). planFilingFixRoundRefusal({ baselineDiffFiles,
+       introducedTaskIds, newCommitMessages, priorShards, nextShards, mainTestPaths, declaredFilesByTask }) returns
+       undefined or a reason string. "Plan-only filing" reuses W1-T5118's baseline classification (every path
+       isInPlanScope, non-empty baseline). Absent or unreadable inputs return a refusal naming what was unreadable,
+       never a pass.
+    2. Trailer arm: any `Remudero-Task:` line in a new commit message whose id is in introducedTaskIds refuses.
+       In the plan round, strip nothing silently. Refuse, and let the existing W1-T5542 refusal path report it.
+    3. Criteria arm, per introduced shard, comparing the shard at the PR's prior head against the round's result:
+       the criterion count must not fall; each claim string must be byte-identical by index; a grep proof naming a
+       call pattern must keep that symbol in some proof of the same criterion; a `unit test:` path may change only
+       to a path absent from origin/main or listed in that task's own files. A rewrite into the lintable form for
+       the same target passes.
+    4. Wire it before push in the plan-scoped round (src/run-task.ts, next to untouchedPlanCriterion) and in the
+       code fix lane's push path for a plan-only baseline (src/cli/commands/fix.ts, beside the W1-T5118 scope
+       stand-down). A refusal is a stand-down with the guard's reason. No strike, no body edit, no close.
+    5. Tests: #17646's shape (one shard, a worker COMMIT_MESSAGE with the trailer); a harness-appended trailer; a
+       dropped criterion; a claim rewrite; a proof repointed at an existing unrelated test; and two controls (an
+       implementation baseline with its trailer, and a pure proof-form repair).
+  falsifier: |
+    Replay #17646's round at origin/main: a worker COMMIT_MESSAGE ending `Remudero-Task: W1-T12062` on a one-shard
+    filing is committed and pushed by the plan round, because only commitlint reads it. If main already refuses
+    that commit before push, close this task without implementation. Mutation: make the guard return undefined
+    for introduced shards, and the dropped-criterion case must fail.
