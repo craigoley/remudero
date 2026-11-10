@@ -49,8 +49,6 @@ function addedLineIsComment(path: string, line: string, lineNumber: number | und
   return matchedLinesAreAllComments([line], { pattern: line, fileText: "", path });
 }
 
-const HUNK_HEADER_RE = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/;
-
 /** The first ADDED line of a unified diff (`git diff` or `gh pr diff`) that yields a grep proof the reviewer can run
  *  and that cannot already match at the merge base. A line the same diff also REMOVES is a move, so it is skipped,
  *  and so is a line the reviewer would read as a comment (W1-T11291: such a grep grades `executed_stale`). */
@@ -61,6 +59,7 @@ export function diffAnchor(diffText: string | undefined, readFile?: DiffAnchorFi
   let file: string | undefined;
   let sawHeader = false;
   let newLine: number | undefined;
+  const hunkHeader = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/;
   for (const raw of diffText.split("\n").map((l) => l.replace(/\r$/, ""))) {
     if (raw.startsWith("diff --git ")) {
       file = undefined;
@@ -74,7 +73,7 @@ export function diffAnchor(diffText: string | undefined, readFile?: DiffAnchorFi
       continue;
     }
     if (raw.startsWith("--- ")) continue;
-    const hunk = HUNK_HEADER_RE.exec(raw);
+    const hunk = hunkHeader.exec(raw);
     if (hunk !== null) {
       newLine = Number(hunk[1]);
       continue;
