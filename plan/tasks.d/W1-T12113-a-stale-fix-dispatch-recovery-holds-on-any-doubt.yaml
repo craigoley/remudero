@@ -22,7 +22,7 @@
     - claim: "the receipt builder produces the same recovery_id for the exact prior dispatch and authorization regardless of attempt timestamp, outcome or liveness/preservation evidence; a held attempt followed by a valid release retains that recovery_id, and the receipt names the prior dispatch, PR, task, head, base, branch, authorization, liveness and preservation evidence, actor, timestamp, reason and outcome; a plan-only PR fixture decides and builds a receipt exactly like a code PR, and the receipt carries no credit, merge or fix.done field"
       proof: "unit test: test/fix-lane/a-stale-fix-dispatch-recovery-holds-on-any-doubt.test.ts"
     - claim: "the decision is a named export of the new module"
-      proof: "grep: export function decideStaleFixDispatchRecovery( in src/lib/stale-fix-dispatch-recovery.ts"
+      proof: "unit test: test/fix-lane/a-stale-fix-dispatch-recovery-holds-on-any-doubt.test.ts"
   rationale: |
     ORIGIN: architect create run PLAN-create-1794328578391 (2026-11-10): a governed operator recovery path for a
     stale PR fix dispatch whose recorded worker is gone while `rmd pr-owner` still reports OWNED.
