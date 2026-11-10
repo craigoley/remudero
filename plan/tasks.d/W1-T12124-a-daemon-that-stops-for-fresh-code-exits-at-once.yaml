@@ -1,0 +1,42 @@
+- id: W1-T12124
+  title: "A daemon that stops for fresh code exits at once"
+  repo: remudero
+  depends_on: []
+  priority: 0.9
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the daemon command's exit path; a wrong exit could cut off a write that had not finished
+  band_meaning: blast-radius
+  origin: operator-session#review-flow-2026-11-10b
+  plan_refs:
+    - W1-T9086
+    - W1-T3245
+  files:
+    - src/cli/commands/daemon.ts
+    - test/daemon/a-daemon-that-stops-for-fresh-code-exits-at-once.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "When the daemon run returns a stop for stale code, the command exits with the freshness exit code even while a handle still keeps the event loop alive"
+      proof: "grep: W1-T12124 criterion 1 in test/daemon/a-daemon-that-stops-for-fresh-code-exits-at-once.test.ts"
+    - claim: "Every ledger row and the summary written before the stop are on disk before the process exits, and each other stop reason keeps the exit code it has today"
+      proof: "grep: W1-T12124 criterion 2 in test/daemon/a-daemon-that-stops-for-fresh-code-exits-at-once.test.ts"
+    - claim: "The exit writes one row with the time from the summary to the exit and the kinds of handles that were still open, so the next slow exit can be explained"
+      proof: "grep: W1-T12124 criterion 3 in test/daemon/a-daemon-that-stops-for-fresh-code-exits-at-once.test.ts"
+  rationale: |
+    OBSERVED 2026-11-10 on the core daemon:
+    - 16:34:36Z daemon.freshness_decision: restart, old 7d1cba98d, new b1c920b66.
+    - 16:47:33Z daemon.freshness_exit (phases: pre_exit_pass 627813 ms, lanes 634527 ms, total 777394 ms; children_left_running: one run), then the summary "stopped: stale".
+    - 17:20:46Z the container's entrypoint logs "exited 75 (freshness)". The process stayed alive for 33 minutes after its summary.
+    - 17:20:51Z the entrypoint has fetched, checked out 92a701b88 and started the daemon again: five seconds.
+    - For those 33 minutes the core ledger has no sweep, review or merge row from the daemon. The host watchdog logged "remudero-daemon healthy" and its progress watchdog logged "STALLED action=capture-diagnostics".
+    - What kept the process alive is not known. One run child was left running on purpose (W1-T9086), and a handle on it is the likely cause.
+    Each refresh of this kind stops merges for about three quarters of an hour, drain included, and the daemon refreshes several times a day.
+  design: |
+    In src/cli/commands/daemon.ts, after the daemon run returns and the summary is printed, exit the process explicitly with the code the stop reason maps to. Before the exit, append one row with the milliseconds since the summary and the handle kinds from process.getActiveResourcesInfo(). The ledger append is synchronous, so the row and everything before it are on disk.
+    A run child that was left running must not be signalled: it is adopted by the next daemon (W1-T9086).
+    NOT IN SCOPE: the drain's length, the watchdog's health check, and the entrypoint.
+  falsifier: |
+    Wait for the event loop to empty and criterion 1 must fail. Exit before a pending ledger append, or change another stop reason's code, and criterion 2 must fail. Drop the row or its handle kinds and criterion 3 must fail. Restore and require all three to pass.
