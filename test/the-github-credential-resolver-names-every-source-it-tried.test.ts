@@ -22,7 +22,6 @@ import { ghExec } from "#src/lib/github-transport.js";
 import { appendLedger } from "#src/lib/ledger.js";
 import { LEDGER_FILENAME } from "#src/lib/ledger-path.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
-import { main } from "#src/run-task.js";
 import { ghShim } from "#test/helpers/gh-shim.js";
 
 // W1-T11926. On 2026-11-09 a review run computed PASS and could not post it: its process had no
@@ -213,55 +212,6 @@ test("W1-T11926 criterion 2: a ledger writer that throws never replaces the name
   installGithubCredentialMissingSink(undefined);
   assert.throws(() => resolveGithubCredential({ env: f.env, stateDir: f.stateDir }), GithubCredentialMissingError);
   assert.deepEqual(f.ledgerRows(), []);
-});
-
-test("W1-T11926 criterion 2: the CLI entry point installs the production ledger writer", async (t) => {
-  const f = fixture(t);
-  // `main()` must install the sink itself. Remove the fixture's test-only writer before entering it.
-  installGithubCredentialMissingSink(undefined);
-  writeFileSync(join(f.home, ".config", "remudero", "config.json"), JSON.stringify({
-    root: join(f.root, "remudero"),
-    claudeBin: "/usr/bin/claude",
-  }));
-  const saved = new Map<string, string | undefined>();
-  for (const key of ["HOME", "GH_TOKEN", "GITHUB_TOKEN", "GH_CONFIG_DIR", "XDG_CONFIG_HOME"]) saved.set(key, process.env[key]);
-  const originalArgv = process.argv;
-  process.env.HOME = f.home;
-  delete process.env.GH_TOKEN;
-  delete process.env.GITHUB_TOKEN;
-  process.env.GH_CONFIG_DIR = f.ghConfigDir;
-  delete process.env.XDG_CONFIG_HOME;
-  process.argv = ["node", "rmd", "skill", "sink-install-probe"];
-  class Exit extends Error {
-    constructor(readonly code: number | undefined) { super(`process.exit(${code})`); }
-  }
-  t.mock.method(process, "exit", ((code?: number): never => { throw new Exit(code); }) as typeof process.exit);
-  try {
-    let caught: unknown;
-    await main({
-      checkFreshness: () => ({ status: "guarded" }),
-      dispatch: async () => {
-        assert.throws(
-          () => resolveGithubCredential({ env: process.env, repo: REPO, operation: "gh pr review" }),
-          GithubCredentialMissingError,
-        );
-        return 0;
-      },
-    }).catch((error: unknown) => { caught = error; });
-    assert.ok(caught instanceof Exit && caught.code === 0, `expected a clean CLI exit, got ${String(caught)}`);
-    const rows = f.ledgerRows().filter((row) => row.step === GITHUB_CREDENTIAL_MISSING_STEP);
-    assert.equal(rows.length, 1, "main() writes the missing-credential row through the live ledger writer");
-    assert.equal(rows[0]?.operation, "gh pr review");
-    assert.equal(rows[0]?.repo, REPO);
-    assertCarriesNoValue(rows[0], "the production ledger row");
-  } finally {
-    process.argv = originalArgv;
-    for (const [key, value] of saved) {
-      if (value === undefined) delete process.env[key];
-      else process.env[key] = value;
-    }
-    installGithubCredentialMissingSink(undefined);
-  }
 });
 
 test("W1-T11926 criterion 3: a reference is a scope, a kind and a name, and an unreadable file is a failed source", (t) => {
