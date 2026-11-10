@@ -1,0 +1,62 @@
+- id: W1-T11909
+  title: "A fresh native isolation probe on the Azure host reports 0 aliases and 0 inherited functions once the worker-profile fix is deployed, and W1-T11891 stays blocked until that is recorded"
+  repo: remudero
+  depends_on: [W1-T11693, W1-T11908]
+  type: diagnose
+  # live evidence on the operator's host; a reviewer cannot execute a native Azure dispatch
+  verify: human
+  risk: low
+  priority: 1  # W1-T11891 is held behind this record
+  origin: architect
+  plan_refs: [W1-T17, W1-T11693, W1-T11908, W1-T11891, W1-T5346]
+  files:
+    - docs/forensics/worker-bash-snapshot-isolation-on-azure.md
+  status: queued
+  attempts: 0
+  rationale: |
+    Native run W1-T11891-1794252506105 failed closed in isolation_probe with 0 aliases and the six gawk* functions from
+    the Azure host's /etc/profile.d/gawk.sh. The operator's ruling: keep W1-T11891 separate and blocked until a fresh
+    native isolation probe passes. Unit proofs (W1-T11693, W1-T11908) model the snapshot shell. Only a probe through
+    the shipped Claude CLI on that host shows that the real snapshot is clean.
+    Settled by lookup: is this already filed or already decided? -> no. W1-T11693's live-verification paragraph asks
+      for a PR-body note about a W1-T11687 dispatch, not a durable record, and it gates nothing. No shard gates
+      W1-T11891 on isolation. Before this filing, its depends_on was [] (plan/tasks.d/W1-T11891-*.yaml).
+    Settled by lookup: can a cached PASS stand in for a fresh probe? -> it must not. run-task-verb.ts reuses a PASS
+      keyed by probeVerdictKey (image, harness, worker settings, hooks, CLI), ledgers each reuse, and never caches a
+      FAIL (src/lib/isolation.ts module header, W1-T5346). The record must cite a probe that actually ran, not a
+      reuse row.
+    Settled by lookup: is the host profile in scope? -> no. The operator forbids altering the host profile or bashrc.
+      The record must show /etc/profile.d/gawk.sh still present when the probe passes, or the pass proves nothing.
+  design: |
+    Write docs/forensics/worker-bash-snapshot-isolation-on-azure.md with these sections (headings verbatim):
+    1. "## Failing baseline": the W1-T11891-1794252506105 and W1-T11687-1794122603696 isolation ledger rows, quoted with
+       counts and function_names.
+    2. "## Host profile unchanged": OBSERVED, read-only, on the day of the probe. Show that /etc/profile.d/gawk.sh
+       exists and still defines the six names (grep of the file, with mtime). Record that no host profile or bashrc
+       was edited.
+    3. "## Fresh native probe": after W1-T11693 and W1-T11908 are merged and deployed to the Azure host, run one
+       governed native dispatch. Quote its isolation preflight ledger row, showing 0 aliases and 0 functions, plus the
+       deployed commit. The row must be a real probe execution, not a reused-PASS row. Quote the run moving on to
+       worker execution.
+    4. "## W1-T11891 unblock": state whether the probe passed. If it passed, W1-T11891 may dispatch. If it failed,
+       quote the names and leave W1-T11891 blocked. A failure means the shipped CLI builds its snapshot at a point the
+       W1-T11693 profile does not reach. In that case amend W1-T11908's harness and file the source fix there. No
+       probe exclusion is ever the remedy.
+    No source, test, probe, wrapper-list or host change belongs to this task.
+  acceptance:
+    - claim: "the record quotes the failing baseline probe rows"
+      proof: "grep: ## Failing baseline in docs/forensics/worker-bash-snapshot-isolation-on-azure.md"
+    - claim: "the record shows the host profile was left as it was"
+      proof: "grep: ## Host profile unchanged in docs/forensics/worker-bash-snapshot-isolation-on-azure.md"
+    - claim: "the record quotes a fresh, non-reused native isolation probe row"
+      proof: "grep: ## Fresh native probe in docs/forensics/worker-bash-snapshot-isolation-on-azure.md"
+    - claim: "the record states whether W1-T11891 is unblocked"
+      proof: "grep: ## W1-T11891 unblock in docs/forensics/worker-bash-snapshot-isolation-on-azure.md"
+  falsifier: |
+    At base the record does not exist, so all four greps read 0. The record is wrong if any of these hold:
+    - its probe row is a reused PASS;
+    - /etc/profile.d/gawk.sh was absent or edited at probe time;
+    - the deployed commit predates W1-T11693 or W1-T11908;
+    - it unblocks W1-T11891 on a non-zero count.
+  note: "verify:human. The native Azure dispatch is operator-host evidence no reviewer can execute. The greps only pin
+    the record's shape, and the human check is that the quoted rows are real."

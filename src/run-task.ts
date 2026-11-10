@@ -19400,7 +19400,7 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
  *  test/preflight-help-is-derived-not-retyped.test.ts) to gate directly: a flag added to one
  *  list and not the printed signature is now a test failure, not a reader's omission. */
 export const PREFLIGHT_VALUE_FLAGS = ["--from", "--to", "--summary-file", "--step-log"] as const;
-export const PREFLIGHT_BOOL_FLAGS = ["--ci-parity", "--fast", "--coverage", "--no-fast", "--proofs", "--sandbox-metrics"] as const;
+export const PREFLIGHT_BOOL_FLAGS = ["--ci-parity", "--fast", "--coverage", "--no-fast", "--proofs", "--sandbox-metrics", "--light"] as const;
 
 /** W1-T3738 — what {@link runPreflightProofs} needs, all injected so a test drives it without a
  *  base worktree, a real test run or a git call. */
@@ -19948,7 +19948,7 @@ export async function preflightCommand(rest: string[], deps: PreflightCommandDep
   const core = project.kind === "core";
   if (stepLog) {
     const planned = preflightStepLogPlan(rest, core);
-    stepLog.plan(planned.phases, planned.fastJobs);
+    stepLog.plan(planned.phases, planned.fastJobs, planned.lightSkipped);
   }
   const result = phase("default", () => core
     ? runPreflight(root, { ...deps, range, spawn, onPhase })
@@ -19959,7 +19959,7 @@ export async function preflightCommand(rest: string[], deps: PreflightCommandDep
   // comment-load shape, 12s green). `--fast` stays accepted and is now a no-op, so every existing
   // call site and worker prompt is byte-identical; `--no-fast` is the escape, because a bound with
   // no escape is a wall and an operator on a slow host must still be able to push.
-  const fast = !core || rest.includes("--no-fast") ? undefined : phase("fast", () => runPreflightFast(root, { spawn, ...(stepLog ? { stepLog } : {}) }));
+  const fast = !core || rest.includes("--no-fast") ? undefined : phase("fast", () => runPreflightFast(root, { spawn, ...(stepLog ? { stepLog } : {}), ...(rest.includes("--light") ? { light: true } : {}) }));
   // W1-T4108 — RIDE THE SAME `--no-fast` ESCAPE AS `fast` ABOVE. Both are further, GitHub-free
   // additions to the same default tier that #6677/#6687/#6690/#6693 (2026-09-23) show CI, not
   // preflight, was catching: console-parity/the two census suites cost seconds like every other
@@ -41780,7 +41780,7 @@ const COMMANDS: readonly CommandSpec[] = [
   },
   {
     name: "preflight",
-    syntax: "rmd preflight [--from <ref>] [--to <ref>] [--no-fast] [--fast] [--ci-parity] [--coverage] [--proofs] [--summary-file <path>] [--step-log <path>] [--sandbox-metrics]",
+    syntax: "rmd preflight [--from <ref>] [--to <ref>] [--no-fast] [--fast] [--ci-parity] [--coverage] [--proofs] [--summary-file <path>] [--step-log <path>] [--sandbox-metrics] [--light]",
     summary: "The HAND route's commit gate: commitlint, tsc --noEmit, commit-message checks.",
     detail:
       "W1-T221: the HAND route's commit gate — runs commitlint, `tsc --noEmit`, and lib/commit-message.ts's own header/body checks as three INDEPENDENT steps (each names its own pass/fail, never chained with &&) over the commit range not yet on origin/main; --from/--to override the default origin/main..HEAD range; --ci-parity (W1-T294) ADDS one or more named steps per .github/workflows/ci.yml job (lib/ci-parity.ts), computed against a freshly refreshed origin/main and CI's own coverage/diff-scoping flags, with a dedicated ci-parity:drift step that fails if a ci.yml job has no parity entry, but shells the FULL test:ci suite as part of its `ci` job mirror; --fast (W1-T373) ADDS every FAST_GATE_STEPS entry (lib/ci-parity.ts) — RENDERED here from that table, never retyped, so a later row changes this line with no edit to this string: " +
