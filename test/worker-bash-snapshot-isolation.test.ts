@@ -72,11 +72,11 @@ function makeHome(): Home {
 
 /** Run the snapshot generator invocation and return the report in the probe's evidence shape. */
 function snapshotReport(h: Home, extraEnv: Record<string, string> = {}): IsolationEvidence {
-  const env = { ...h.env, SHELL: h.shell, GIT_EDITOR: "true", CLAUDECODE: "1", ...extraEnv };
+  const env: Record<string, string> = { ...h.env, SHELL: h.shell, GIT_EDITOR: "true", CLAUDECODE: "1", ...extraEnv };
   // The parent is a plain `bash -c` that exports the injected function, then execs the harness.
   const out = execFileSync(
     "bash",
-    ["-c", `${INJECTED_FN}() { :; }; export -f ${INJECTED_FN}; exec "$0" -c -l "$1"`, env.CLAUDE_CODE_SHELL, SNAPSHOT_SCRIPT],
+    ["-c", `${INJECTED_FN}() { :; }; export -f ${INJECTED_FN}; exec "$0" -c -l "$1"`, h.env.CLAUDE_CODE_SHELL, SNAPSHOT_SCRIPT],
     { encoding: "utf8", env, stdio: ["ignore", "pipe", "ignore"] },
   );
   const lines = out.split("\n");
