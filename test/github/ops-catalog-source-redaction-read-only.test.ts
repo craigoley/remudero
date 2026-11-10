@@ -13,7 +13,7 @@ import "#src/lib/live-analytics-snapshot-cache.js";
 import { runDaemon } from "#src/lib/daemon.js";
 import { ghShim } from "#test/helpers/gh-shim.js";
 import { ghBrokerDir, ghBrokerRouteFor } from "#src/lib/gh-read-broker-client.js";
-import { mergePlanBlobs, type Plan } from "#src/lib/plan.js";
+import { mergePlanBlobs, parseTasksFromYaml, type Plan } from "#src/lib/plan.js";
 import {
   OpsCatalogAuthMissingError, createOpsCatalogShadowSource, defaultOpsCatalogApi, readOpsCatalogSnapshotAsync, type OpsCatalogApi,
 } from "#src/lib/ops-catalog-source.js";
@@ -89,12 +89,17 @@ test("W1-T11768 criterion 3: a transport error's message never reaches a result"
   sweep("shadow input", await createOpsCatalogShadowSource(target, async () => { throw leaks; }).refresh());
 });
 
-test("W1-T11768 criterion 3: YAML warnings stay off stderr while parse errors still refuse", async (t) => {
-  const stderr: string[] = [];
-  t.mock.method(process.stderr, "write", (chunk: string | Uint8Array) => {
-    stderr.push(String(chunk));
-    return true;
+test("W1-T11768 criterion 3: YAML warnings stay off logs while parse errors still refuse", async (t) => {
+  const warnings: unknown[] = [];
+  t.mock.method(process, "emitWarning", (warning: string | Error) => {
+    warnings.push(warning);
   });
+
+  // Positive control: this same parser input emits a warning without the catalog's safe log level.
+  parseTasksFromYaml(taskYaml("OPS-WARN", "!PRIVATE_TAG PRIVATE_TITLE_SENTINEL"), "recording fake");
+  assert.equal(warnings.length, 1);
+  assert.match(String(warnings[0]), /PRIVATE_TITLE_SENTINEL/);
+  warnings.length = 0;
 
   const warning = await readOpsCatalogSnapshotAsync(target, fixture({
     monolith: taskYaml("OPS-TAG", "!PRIVATE_TAG PRIVATE_TITLE_SENTINEL"),
@@ -105,7 +110,7 @@ test("W1-T11768 criterion 3: YAML warnings stay off stderr while parse errors st
     monolith: "- id: OPS-BAD\n  title: [PRIVATE_TITLE_SENTINEL\n",
   }).api);
   assert.equal(parseError.outcome, "malformed", "YAML parse errors still refuse the catalog");
-  assert.equal(stderr.join(""), "", "catalog parser diagnostics never reach stderr");
+  assert.deepEqual(warnings, [], "catalog parser diagnostics never reach process warning logs");
 });
 
 test("W1-T11768 criterion 3: every outcome's serialized result is clean of private content", async () => {
