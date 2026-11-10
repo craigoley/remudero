@@ -1,0 +1,51 @@
+- id: W1-T12192
+  title: "The coverage overlay under repos does not block a serve replace"
+  repo: remudero
+  depends_on: []
+  priority: 0.5
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the placement check runs at every launch of serve; a wrong rule refuses each replace of serve on the fleet host
+  band_meaning: blast-radius
+  origin: operator-session#serve-replace-refused-2026-11-10
+  plan_refs:
+    - W1-T12126
+    - W1-T9617
+  files:
+    - deploy/serve-container.sh
+    - deploy/scratch-mounts.sh
+    - test/one-gateway-serves-every-instance.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "With the mount table of the fleet host (state root, repos on scratch, the coverage overlay under repos), a dry run refuses nothing and plans the read-only repos bind of the other instance"
+      proof: "grep: W1-T12192 criterion 1 in test/one-gateway-serves-every-instance.test.ts"
+    - claim: "With that mount table, a serve replace passes the placement check before and after the image pull and goes on to stop the old container"
+      proof: "grep: W1-T12192 criterion 2 in test/one-gateway-serves-every-instance.test.ts"
+    - claim: "The launcher still refuses, before it stops the old container, a mount under repos that is not the coverage overlay, a coverage overlay that is not a bind and a coverage overlay that appears twice"
+      proof: "grep: W1-T12192 criterion 3 in test/one-gateway-serves-every-instance.test.ts"
+    - claim: "deploy/scratch-mounts.sh names the destination of the coverage overlay once. The scratch plan binds it there, and deploy/serve-container.sh does not type the path again"
+      proof: "grep: W1-T12192 criterion 4 in test/one-gateway-serves-every-instance.test.ts"
+  rationale: |
+    OBSERVED 2026-11-10 at about 22:20Z on the fleet host: `./deploy/serve-container.sh --replace` refused. The last line was "serve-container: REFUSING — foreign repos placement unavailable: ambiguous or unsupported repos placement".
+    - W1-T12126 (commit 872a344f4, pull request #17712, merged 2026-11-10 20:48Z) added the placement check `foreign_repos_snapshot` to deploy/serve-container.sh.
+    - The check refuses when a mount of the inspected daemon container has a destination below /home/node/Remudero/repos.
+    - `scratch_plan` in deploy/scratch-mounts.sh gives every daemon container two binds when scratch is on: the repos directory, and the coverage directory at /home/node/Remudero/repos/.remudero-coverage.
+    - All 3 daemon containers of the fleet host (remudero-daemon, remudero-site-daemon, remudero-console-daemon) have both binds. So the check refuses on every launch of serve on that host.
+    - The refusal comes before the launcher removes the old container, so serve kept running on 2026-11-10.
+    - No one can replace or create remudero-serve on that host now. The serve step of the deploy tick and deploy/edge-heal.sh run the same script and get the same refusal. If serve stops, automation cannot start it again.
+    - The tests of W1-T12126 put a repos bind in their mount table but no coverage overlay. That is why no test failed.
+  design: |
+    Give the destination of the coverage overlay one name in deploy/scratch-mounts.sh. `scratch_plan` binds the coverage directory at that name, and its plan does not change.
+    In `foreign_repos_snapshot`, accept a mount below repos only if its destination is that name. It must be a bind with a valid source, and at most one mount may have that destination.
+    Refuse every other mount below repos, with the same message as today.
+    The coverage overlay holds test coverage and no repository. Serve does not bind it. The read-only repos bind of the other instance stays as W1-T12126 made it.
+    If the launcher runs without deploy/scratch-mounts.sh, no overlay is known and each mount below repos refuses, as today.
+    Add the cases to test/one-gateway-serves-every-instance.test.ts with the launcher fixture of W1-T12126. Change no case that is there.
+    NOT IN SCOPE: the rest of the placement check, and the path that deploy/host-update.sh types for the host side of the same directory.
+  falsifier: |
+    Restore the clause that refuses every mount below repos and criteria 1 and 2 must fail. Accept every mount below repos and criterion 3 must fail. Type the path in deploy/serve-container.sh and criterion 4 must fail. Restore the change and require all 4 criteria and the cases of W1-T12126 to pass.
+  note: |
+    A search of deploy/ and src/ found no second copy of the clause. deploy/recycle-container.sh and deploy/host-update.sh do not run this check, and src/ has no TypeScript form of it.
