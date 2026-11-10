@@ -15,7 +15,7 @@
     - src/lib/sweep.ts
     - test/a-delivered-verdict-settles-a-pending-status-by-reposting-its-state.test.ts
     - test/console-api/board/a-status-regressed-to-pending-on-a-delivered-head-is-restored.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: When the ledger shows a verdict delivered for an input key and the head's remudero-review context reads pending, the sweep re-posts the delivered state under the same description and writes a review.settled row

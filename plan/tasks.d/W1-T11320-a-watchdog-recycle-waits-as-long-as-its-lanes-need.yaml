@@ -19,7 +19,7 @@
     - src/run-task.ts
     - deploy/install-host-units.sh
     - test/deploy/a-watchdog-recycle-waits-as-long-as-its-lanes-need.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: rmd progress-watchdog --json carries drainWaitS and drainWaitSource from deriveDrainWait over the in-flight lane locks and recorded implement durations, the rendered launcher passes that value to recycle-container.sh as RMD_RECYCLE_WAIT_S on a recycle verdict, and an RMD_RECYCLE_WAIT_S already in the environment still wins

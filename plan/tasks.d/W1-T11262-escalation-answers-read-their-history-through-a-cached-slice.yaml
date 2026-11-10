@@ -14,7 +14,7 @@
   files:
     - src/lib/escalation-answers.ts
     - test/inbox/escalation-answers-read-their-history-through-a-cached-slice.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: readEscalationAnswers gathers its escalation_answer.ignored, escalation_answer.refusal_alarm and panel.question_answered history through createEscalationTriageHistoryReader with a declared slice, returns the same rows the openLedgerUnion walk returns, keeps its unreadable-history alarm, and a second read over unchanged rotations reads no archive bytes

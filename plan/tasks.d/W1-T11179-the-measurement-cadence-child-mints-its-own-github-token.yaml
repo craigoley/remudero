@@ -21,7 +21,7 @@
   files:
     - src/measurement-cadence-child.ts
     - test/daemon/the-measurement-cadence-child-mints-its-own-github-token.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: When the GitHub App is configured in the child's env, the measurement cadence child starts its own installation-token refresh and awaits its first mint before the cadence's first step runs, as the automated retro and the run child already do; with no App configured it starts none and its GitHub reads use the inherited GH_TOKEN unchanged
