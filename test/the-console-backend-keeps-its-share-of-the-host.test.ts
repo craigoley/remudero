@@ -7,6 +7,7 @@ import type { Clock } from "../src/lib/clock.js";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { hostIndependentPolicyEnv } from "./helpers/host-independent-policy-env.js";
 import {
   buildDaemonHealthRoute,
   createEventLoopLagMonitor,
@@ -88,6 +89,7 @@ function recycle(hostMib: number | undefined): { args: string[]; output: string 
       encoding: "utf8",
       env: {
         ...process.env,
+        ...hostIndependentPolicyEnv(root),
         PATH: `${bin}:${process.env.PATH ?? ""}`,
         GH_TOKEN: "test-token",
         RMD_TEST_CALLS: calls,
@@ -122,6 +124,7 @@ function serveDryRun(env: Record<string, string> = {}): { status: number | null;
       encoding: "utf8",
       env: {
         ...process.env,
+        ...hostIndependentPolicyEnv(root),
         PATH: `${bin}:${process.env.PATH ?? ""}`,
         GH_TOKEN: "test-token",
         RMD_TEST_CALLS: join(root, "calls.tsv"),
