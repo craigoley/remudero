@@ -12,7 +12,7 @@
   origin: "console-followup: signed-in Console Inbox foreign-evidence observation console-inbox-foreign-evidence-20261027, captured once and still queued, not yet a landed feedback record"
   plan_refs: [W1-T8950, W1-T10431, W1-T5897, W1-T6012]
   files: [src/cli/commands/daemon.ts, src/lib/inbox-recommendation.ts, src/lib/panel-graph.ts, src/lib/inbox-view.ts, test/an-inbox-item-carries-a-recommended-decision.test.ts, test/daemon-command-retro-wiring.test.ts, test/every-inbox-page-shares-its-classification-snapshot.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

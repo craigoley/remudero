@@ -1,0 +1,42 @@
+- id: W1-T12024
+  title: "A review attempt that meets a GitHub pacing gap before any review phase waits the gap out and reviews the same head in the same pass; 39 heads were stood down for the 60 minute pending ceiling over a 25 ms gap"
+  repo: remudero
+  depends_on: []
+  priority: 0.9
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # sweep.ts runs every review admission; only a typed pacing refusal before the first phase is retried, bounded, and every other throw keeps today's key
+  band_meaning: blast-radius
+  origin: operator-session#review-lane-2026-11-10
+  plan_refs:
+    - W1-T11458
+    - W1-T11631
+    - W1-T11664
+    - W1-T2753
+  files:
+    - src/lib/sweep.ts
+    - test/github/a-review-attempt-waits-out-a-github-pacing-gap.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "A review attempt that throws GhPaceWouldBlockError before reporting any phase waits the named gap on a timer and runs again in the same pass, leaves no review.post_refused row, and writes one sweep.post_review.pacer_gap_waited row per wait naming the PR, the head, the gap and the calling site"
+      proof: "grep: W1-T12024 criterion 1 in test/github/a-review-attempt-waits-out-a-github-pacing-gap.test.ts"
+    - claim: "Any other throw, and a pacing refusal after a review phase has been reported, are attempted once and keep the existing bounded retry key"
+      proof: "grep: W1-T12024 criterion 2 in test/github/a-review-attempt-waits-out-a-github-pacing-gap.test.ts"
+    - claim: "The waits are bounded by a declared BACKSTOP constant, sleep exactly the gap the pacer named, and the attempt after the last wait throws to the caller"
+      proof: "grep: W1-T12024 criterion 3 in test/github/a-review-attempt-waits-out-a-github-pacing-gap.test.ts"
+  rationale: |
+    OBSERVED 2026-11-10 in the core ledger (current file, 2026-11-07 to 2026-11-10): 45 sweep.post_review.failed rows on 39 PR heads with "gh call pacer refused to sleep Nms on this thread", 36 of them for 25 ms. Each wrote a review.post_refused row with the retryable-throw prefix, which holds the head for the 60 minute pending ceiling.
+    - Of the 39 heads, one was reviewed again on the same head (74 minutes later) and five only after a new head arrived (17 minutes to 11 hours). Healthy reviews in the same window took a median of 4 to 8 minutes from admission.
+    - #17601 on 2026-11-10: opened 06:48Z, refused at 06:53:54Z over a 25 ms gap, marked stuck and escalated at 07:40Z, merged 08:07Z. 75 minutes, one incident and one escalation issue for a 25 ms wait.
+    - W1-T11458, W1-T11631 and W1-T11664 (all merged, shard status stale) moved named synchronous reads off the loop. The throws continued after them, five on the daemon started 2026-11-10T04:57Z, so at least one site remains and the rows do not say which.
+  design: |
+    In runSweep's review job, call postReview through a small wrapper: on GhPaceWouldBlockError with no phase yet reported, log the gap with the first stack frame outside the transport, await the gap on a timer and call again, at most REVIEW_PACER_GAP_RETRIES times. A throw after a phase, or past the bound, propagates to the existing catch unchanged. The site on the row is what lets the remaining synchronous reads be found and converted.
+    NOT IN SCOPE: converting the remaining synchronous reads (file each from the site rows), the pending ceiling, and the pacer itself.
+  falsifier: |
+    Remove the wait and criterion 1 must fail; retry another throw or a post-phase refusal and criterion 2 must fail; drop the bound or sleep a fixed time and criterion 3 must fail. Restore and require all three to pass.
+  note: |
+    reservation hand-off: run-unfiled-1794301186975 -> run-unfiled-1794301186975
+    Reserved with rmd next-task-id (--count 3 on run-unfiled-1794301186975). Hand-built in the same session. Proof that counts after deploy: sweep.post_review.pacer_gap_waited rows with a site, and no review.post_refused row carrying "pacer refused".

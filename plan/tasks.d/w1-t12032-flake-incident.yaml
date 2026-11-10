@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 2.5
   status: queued
@@ -24,3 +24,14 @@
     CI runs: 41699829162, 41704552155, 41746291245, 41800091400.
     Retry outcomes: 4 recovered on retry, 0 also failed on retry.
     Evidence: test.flake_retry ledger rows, 4 read from the PR coverage-shard logs and 0 from fix-round reroutes the PR's diff cannot reach.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.72
+    reasons:
+      - "Declared files touch only test/serve-view-events.test.ts, a test file, with no secrets, auth, deletion, or merge/deploy/policy surface shown."
+      - "Evidence shows 4 retries recovered and 0 failed across 3 PRs, consistent with a real intermittent flake and not an inherited red from main."
+      - "Acceptance is verifiable (a unit test plus a grep for the named test), so the finding can be checked from what is shown."
+      - "Main's CI at the PR bases is \"unread\", and the family's record is mixed (6 declined), which lowers confidence but does not show danger."
+    judged_at: "2026-11-10T15:21:17.835Z"
+    pin: "434ab10445f4dca2c555017012d5610670496a04449d7080b3c90d772bbd5a04"
