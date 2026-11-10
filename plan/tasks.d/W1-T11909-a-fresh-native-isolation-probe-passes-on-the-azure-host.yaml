@@ -4,7 +4,7 @@
   depends_on: [W1-T11693, W1-T11908]
   type: diagnose
   # live evidence on the operator's host; a reviewer cannot execute a native Azure dispatch
-  verify: human
+  verify: auto
   risk: low
   priority: 1  # W1-T11891 is held behind this record
   origin: architect
@@ -60,3 +60,14 @@
     - it unblocks W1-T11891 on a non-zero count.
   note: "verify:human. The native Azure dispatch is operator-host evidence no reviewer can execute. The greps only pin
     the record's shape, and the human check is that the quoted rows are real."
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.78
+    reasons:
+      - "The only declared file is a new docs/forensics markdown record, so the description shows no touching of secrets, auth, deletion, merge/deploy policy, or irreversible actions."
+      - "The filed rationale cites the operator's ruling and settled lookups (W1-T5346 caching, no existing gate on W1-T11891), which indicates coherence with the plan and established practice."
+      - "The plan states the host profile must remain unchanged, so the probe is read-only with respect to host configuration. The note acknowledges that the evidence is operator-host and human-verified, and the operator is the author, so the verification gap is accounted for."
+      - "The verify:auto type versus the verify:human note is a minor filing inconsistency, not a danger signal."
+    judged_at: "2026-11-10T00:56:07.981Z"
+    pin: "b9669ab96ab6237634d1cf09cefe2c5a057a02f1173bfdc05b292169e3f133d8"

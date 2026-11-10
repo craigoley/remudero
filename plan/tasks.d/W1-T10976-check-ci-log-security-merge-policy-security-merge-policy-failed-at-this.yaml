@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: high  # One security-gate recovery spanning producer, metadata adapter, classifier and unresolved-evidence disposition.
   band_meaning: span
   priority: 1.26
@@ -185,10 +185,11 @@
     A share that does not fall reopens the cause at rung 2 under existing human/security holds, using the per-PR
     dispositions to test the hypothesis rather than authorizing repeated blind fix rounds or a broader bypass.
   risk_ruling:
-    verdict: "high"
-    action: escalate
+    verdict: "operator"
+    action: proceed
     confidence: 1
     reasons:
-      - "deterministic backstop: it declares .github/workflows/security-merge-policy.yml, a secrets, auth, CI, deploy, merge-policy or ruling path — irreversible or privileged work goes to a person"
-    judged_at: "2026-11-08T15:02:14.748Z"
-    pin: "c75eee3e41189332690d76de691d51d0499ff038e0eb5a0dfa7b267617fc03eb"
+      - "released by the operator with rmd approve"
+    judged_at: "2026-11-10T00:55:31.261Z"
+    pin: "76a1878984d11fa79dd84e0e9d76a649de5e5b7aea32cb6c5e01591981d0e4fa"
+    operator_release_pin: "31296dc75233a5c5c777dba1f291d7e228638252174750e4da7efa07e826dcfb"
