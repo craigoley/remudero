@@ -1,0 +1,40 @@
+- id: W1-T11978
+  title: Serve ledgers its agent and workstreams builds as one row per window instead of one per build; the two were 2,072 of 7,781 ledger rows in 13 hours and each one moves the ledger every reader folds
+  repo: remudero
+  depends_on: []
+  priority: 1.4
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: medium # two log calls become window tallies; no body, build or schedule changes
+  band_meaning: blast-radius
+  origin: operator-session#serve-idle-2026-11-10
+  plan_refs:
+    - W1-T11127
+    - W1-T11815
+  files:
+    - src/lib/agent-view.ts
+    - src/lib/workstreams-view.ts
+    - test/console-api/read-model/serves-build-rows-are-one-row-a-window-not-one-a-build.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: agent-view writes one agent.built row per instance per window carrying the builds, the last seq and the last row count, instead of one row per build
+      proof: "grep: W1-T11978 criterion 1 in test/console-api/read-model/serves-build-rows-are-one-row-a-window-not-one-a-build.test.ts"
+    - claim: workstreams-view writes one workstreams.built row per window carrying the builds and the summed reused and derived counts, instead of one row per build
+      proof: "grep: W1-T11978 criterion 2 in test/console-api/read-model/serves-build-rows-are-one-row-a-window-not-one-a-build.test.ts"
+    - claim: A window with no build writes no row, and a view's first build after start is written at once so a cold start stays visible
+      proof: "grep: W1-T11978 criterion 3 in test/console-api/read-model/serves-build-rows-are-one-row-a-window-not-one-a-build.test.ts"
+  rationale: |
+    OBSERVED 2026-11-10 (core ledger, 2026-11-09T16:00Z to 2026-11-10T05:00Z): agent.built 1,043 rows and workstreams.built 1,029 rows, 27 percent of the 7,781 rows written by every actor in that window, all from serve's views thread.
+    - Each row is appended to the ledger every projector folds and every digest keys on, so serve's own bookkeeping is a steady source of the change that makes its views rebuild.
+    - read_model.view_builds already gives builds per view per window.
+  design: |
+    Keep a tally per instance in each view and flush it on the same window the view_builds row uses (or every 10 minutes when that is not in reach), writing the first build immediately.
+    NOT IN SCOPE: view_builds itself and any reader of these rows; grep shows no reader that needs one row per build, and the test pins the fields the tally keeps.
+  falsifier: |
+    Write a row per build and criteria 1 and 2 must fail; write an empty window or hold back the first build and criterion 3 must fail. Restore and require all three to pass.
+  note: |
+    reservation hand-off: run-unfiled-1794287307841 -> run-unfiled-1794287307841
+    Reserved with rmd next-task-id (W1-T11978 on run-unfiled-1794287307841). Check readers of agent.built and workstreams.built before building.

@@ -1,0 +1,42 @@
+- id: W1-T11973
+  title: Every read-model view's rebuild cadence follows its readers, so a serve nobody is reading stops rebuilding fourteen views at full rate; today only the now view stretches when unread
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the read-model worker is serve's build engine; the change widens an existing pacing rule from one view to all and changes no body
+  band_meaning: blast-radius
+  origin: operator-session#serve-idle-2026-11-10
+  plan_refs:
+    - W1-T11127
+    - W1-T11815
+  files:
+    - src/lib/read-model-worker.ts
+    - test/console-api/read-model/an-unread-view-stretches-its-rebuild-cadence-whatever-view-it-is.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: A lane view unread for READ_MODEL_READ_HOT_MS doubles its wait after each finished build up to READ_MODEL_IDLE_STRETCH_MAX whether or not its factory set readPaced, so the stretch no longer depends on a per-view flag
+      proof: "grep: W1-T11973 criterion 1 in test/console-api/read-model/an-unread-view-stretches-its-rebuild-cadence-whatever-view-it-is.test.ts"
+    - claim: A read of the view, or of a view built from it, restores the cost over share cadence and makes its stale unit due on the next tick, exactly as it does for now today
+      proof: "grep: W1-T11973 criterion 2 in test/console-api/read-model/an-unread-view-stretches-its-rebuild-cadence-whatever-view-it-is.test.ts"
+    - claim: A demand view keeps its demand book pacing and eviction unchanged, and the read-model status view keeps its current cadence
+      proof: "grep: W1-T11973 criterion 3 in test/console-api/read-model/an-unread-view-stretches-its-rebuild-cadence-whatever-view-it-is.test.ts"
+    - claim: Each read_model.view_builds row carries the largest stretch the unit reached in its window, so the saving is on the ledger
+      proof: "grep: W1-T11973 criterion 4 in test/console-api/read-model/an-unread-view-stretches-its-rebuild-cadence-whatever-view-it-is.test.ts"
+  rationale: |
+    OBSERVED 2026-11-10 on the Azure host (8 cores, CPU pressure some avg300 79 percent): serve used 1.0 to 2.8 cores in 20 to 30 s samples at cpu-shares 4096 against the daemon's 512, with 3.8 GB resident. route-reads.json shows the console's last read of any view at 01:12:34Z; from 01:33Z to 04:19Z, with no reader, read_model.view_builds summed 4,385 s of build time over 9,987 s.
+    - Only `now` sets readPaced (now-view.ts and the factory list in read-model-worker.ts). Every other lane view is paced by cost over share alone, so it rebuilds at full rate with no reader: instances 7,318 builds (467 s), read-model 4,091 (448 s), analytics 8,288 (180 s), agent 11,416 (67 s), workstreams 635 (431 s), repositories 1,030 (275 s), code-health 860 (307 s), daily-progress 1,022 (389 s) in 2 h 46 min.
+    - W1-T11127's unchanged-input skip fired for one view only (read-model, 2,894 of 6,985 calls); every other view had builds equal to calls.
+    - The host is CPU-starved: author preflights of unchanged code fail on load, and serve outranks the build container eight to one.
+  design: |
+    Make read pacing the rule for every non-demand lane view the ticker builds: in the due-time computation, apply the idle stretch unless the unit is a demand view or the read-model status view. Keep readPaced on the types so a view can still be named, but stop requiring it. lastReadOf already follows views built from a view (READ_MODEL_VIEW_READERS). Add the unit's largest stretch to the view_builds tally.
+    NOT IN SCOPE: the digest skip (the next two tasks), the versions poll, and any body or freshness-judgement change. Serve already judges every source at request time, so a body read before its rebuild says it is stale and the read restores the cadence.
+  falsifier: |
+    Leave a non-now view unstretched and criterion 1 must fail; ignore a read and criterion 2 must fail; stretch a demand view and criterion 3 must fail; drop the stretch from the row and criterion 4 must fail. Restore and require all four to pass.
+  note: |
+    reservation hand-off: run-unfiled-1794287307841 -> run-unfiled-1794287307841
+    Reserved with rmd next-task-id (W1-T11973 on run-unfiled-1794287307841). Proof that counts: view_builds totals with no console open, before and after deploy.

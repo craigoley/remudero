@@ -1,0 +1,38 @@
+- id: W1-T11983
+  title: A sweep-wake marker write that fails or is interrupted leaves no temp file behind, and a start removes this writer's temp files older than an hour; 51 of them sit in the state directory, the oldest from 2026-10-18
+  repo: remudero
+  depends_on: []
+  priority: 2.5
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: low # one writer's temp-file cleanup; the marker protocol and its rename are unchanged
+  band_meaning: blast-radius
+  origin: operator-session#serve-idle-2026-11-10
+  plan_refs:
+    - W1-T11127
+    - W1-T11815
+  files:
+    - src/lib/github-event-wake.ts
+    - test/a-wake-marker-write-leaves-no-temp-file-behind.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: A marker write whose write or rename throws removes its temp file before rethrowing
+      proof: "grep: W1-T11983 criterion 1 in test/a-wake-marker-write-leaves-no-temp-file-behind.test.ts"
+    - claim: On start the wake module removes SWEEP_WAKE_REQUESTED temp files in its state directory whose modification time is more than an hour old, and never the marker or a temp file younger than that
+      proof: "grep: W1-T11983 criterion 2 in test/a-wake-marker-write-leaves-no-temp-file-behind.test.ts"
+    - claim: The removal is counted on one github.wake.temp_swept row and a failure to remove is reported there, never thrown
+      proof: "grep: W1-T11983 criterion 3 in test/a-wake-marker-write-leaves-no-temp-file-behind.test.ts"
+  rationale: |
+    OBSERVED 2026-11-10 on the Azure host: the core state directory holds 103 files named <target>.tmp-<pid>-<uuid>: 51 for SWEEP_WAKE_REQUESTED (0 or 171 bytes, 2026-10-18 to 2026-11-07), 36 for gardener-runtime.json, 14 for github-webhook-deliveries.json. They come from processes killed between the temp write and the rename.
+    - Small today, but the directory is listed by every state scan, and no janitor owns it: the host temp sweep covers /tmp roots only.
+  design: |
+    Wrap the temp write and rename so a throw unlinks the temp file. At module start list the directory once, match this writer's own temp prefix, and unlink entries older than an hour, counting them on one row.
+    NOT IN SCOPE: the other writers (gardener-runtime.json, github-webhook-deliveries.json); file those if this one proves out.
+  falsifier: |
+    Leave the temp file on a throw and criterion 1 must fail; remove a young temp file or the marker and criterion 2 must fail; throw on a failed removal and criterion 3 must fail. Restore and require all three to pass.
+  note: |
+    reservation hand-off: run-unfiled-1794287307841 -> run-unfiled-1794287307841
+    Reserved with rmd next-task-id (W1-T11983 on run-unfiled-1794287307841). Low priority; the existing 103 files were left in place.

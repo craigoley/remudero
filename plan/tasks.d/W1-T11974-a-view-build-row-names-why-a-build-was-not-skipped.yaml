@@ -1,0 +1,39 @@
+- id: W1-T11974
+  title: Each view build row tallies why a due build was not skipped (no declaration, store generation moved, a snapshot moved, the plan moved, digest unreadable), so the unchanged-input skip's 1-in-15 reach is measured per cause
+  repo: remudero
+  depends_on: []
+  priority: 1.2
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the read-model worker is serve's build engine; the change compares digest parts it already computes and adds counters to one row
+  band_meaning: blast-radius
+  origin: operator-session#serve-idle-2026-11-10
+  plan_refs:
+    - W1-T11127
+    - W1-T11815
+  files:
+    - src/lib/read-model-worker.ts
+    - test/console-api/read-model/a-view-build-row-names-why-a-due-build-was-not-skipped.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: A build that ran because its view declares no ledger reads is counted under no_declaration in that unit's read_model.view_builds row
+      proof: "grep: W1-T11974 criterion 1 in test/console-api/read-model/a-view-build-row-names-why-a-due-build-was-not-skipped.test.ts"
+    - claim: A build that ran because one digest part differed from the last successful build is counted under the first differing part: ledger, plan, generation, state, snapshot, switches or shadow
+      proof: "grep: W1-T11974 criterion 2 in test/console-api/read-model/a-view-build-row-names-why-a-due-build-was-not-skipped.test.ts"
+    - claim: A build whose digest could not be computed is counted under unreadable, and a skipped build is counted only under skipped; no build, due time or body changes
+      proof: "grep: W1-T11974 criterion 3 in test/console-api/read-model/a-view-build-row-names-why-a-due-build-was-not-skipped.test.ts"
+  rationale: |
+    OBSERVED 2026-11-10 on the Azure host (8 cores, CPU pressure some avg300 79 percent): serve used 1.0 to 2.8 cores in 20 to 30 s samples at cpu-shares 4096 against the daemon's 512, with 3.8 GB resident. route-reads.json shows the console's last read of any view at 01:12:34Z; from 01:33Z to 04:19Z, with no reader, read_model.view_builds summed 4,385 s of build time over 9,987 s.
+    - inputDigest returns undefined when a view has no ledgerReads, and only read-model and instances declare one; for those two the digest also holds every store's generation and every source_snapshot as_of, which move with any ledger row of any instance.
+    - The view_builds row says skipped or not, never why, so which part defeats the skip for which view is inferred from code instead of read from the ledger.
+  design: |
+    Keep the digest as an ordered list of named parts instead of one JSON string (the comparison stays equal-or-not). When a due build is not skipped, find the first part that differs from the unit's last successful digest and increment that reason in the tally; a view with no declaration increments no_declaration; a thrown digest increments unreadable. Emit the non-zero reasons on the existing row.
+    NOT IN SCOPE: changing what is in the digest or which views declare reads.
+  falsifier: |
+    Count a no-declaration build under another reason and criterion 1 must fail; report a later differing part and criterion 2 must fail; count a skip as a build reason or change a due time and criterion 3 must fail. Restore and require all three to pass.
+  note: |
+    reservation hand-off: run-unfiled-1794287307841 -> run-unfiled-1794287307841
+    Reserved with rmd next-task-id (W1-T11974 on run-unfiled-1794287307841). Same file as the cadence task and W1-T11815; build one at a time.
