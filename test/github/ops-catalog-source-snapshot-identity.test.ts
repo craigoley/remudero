@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { test } from "node:test";
-import { readOpsCatalogSnapshotAsync, createOpsCatalogShadowSource, type OpsCatalogApi } from "#src/lib/ops-catalog-source.js";
+import {
+  OPS_CATALOG_MAX_BLOB_BYTES, readOpsCatalogSnapshotAsync, createOpsCatalogShadowSource, type OpsCatalogApi,
+} from "#src/lib/ops-catalog-source.js";
 
 const REPO = "acme-private/ops-secret-slug";
 const sha1 = (b: Buffer | string): string => createHash("sha1").update(b).digest("hex");
@@ -108,6 +110,23 @@ test("W1-T11768 criterion 1: bytes altered under the original blob sha are refus
   const snap = await readOpsCatalogSnapshotAsync({ repository: REPO }, fx.api);
   assert.equal(snap.outcome, "malformed");
   assert.equal(snap.plan, undefined);
+});
+
+test("W1-T11768 criterion 1: a max-size blob with GitHub-wrapped base64 remains readable", async () => {
+  const prefix = `${taskYaml("OPS-BOUNDARY")}# `;
+  const text = `${prefix}${"x".repeat(OPS_CATALOG_MAX_BLOB_BYTES - Buffer.byteLength(prefix) - 1)}\n`;
+  assert.equal(Buffer.byteLength(text), OPS_CATALOG_MAX_BLOB_BYTES);
+  const fx = fixture({ monolith: text });
+  const wrappedApi: OpsCatalogApi = async (path) => {
+    const response = await fx.api(path);
+    if (!path.includes("/git/blobs/")) return response;
+    const blob = response as { content: string };
+    return { ...blob, content: blob.content.match(/.{1,60}/g)!.join("\n") };
+  };
+  const snap = await readOpsCatalogSnapshotAsync({ repository: REPO }, wrappedApi);
+  assert.equal(snap.outcome, "ok");
+  assert.deepEqual(snap.plan?.tasks.map((t) => t.id), ["OPS-BOUNDARY"]);
+  assert.equal(snap.counts.bytes, OPS_CATALOG_MAX_BLOB_BYTES);
 });
 
 test("W1-T11768 criterion 1: the same catalog binds the same digest and a different one differs", async () => {

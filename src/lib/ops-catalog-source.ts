@@ -147,10 +147,10 @@ const regular = (e: TreeEntry): boolean => e.type === "blob" && (e.mode === "100
 
 async function readBlob(api: OpsCatalogApi, repo: string, blobSha: string, counts: OpsCatalogCounts): Promise<string> {
   const blob = rec(await get(api, `${repo}/git/blobs/${blobSha}`));
-  if (blob.sha !== blobSha || blob.encoding !== "base64" || typeof blob.content !== "string"
-    || blob.content.length > Math.ceil(OPS_CATALOG_MAX_BLOB_BYTES * 4 / 3) + 1024) throw new Refusal("malformed");
+  if (blob.sha !== blobSha || blob.encoding !== "base64" || typeof blob.content !== "string") throw new Refusal("malformed");
   const encoded = blob.content.replace(/[\r\n]/g, "");
-  if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(encoded)) throw new Refusal("malformed");
+  if (encoded.length > Math.ceil(OPS_CATALOG_MAX_BLOB_BYTES / 3) * 4
+    || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(encoded)) throw new Refusal("malformed");
   const bytes = Buffer.from(encoded, "base64");
   counts.bytes += bytes.length;
   if (bytes.length > OPS_CATALOG_MAX_BLOB_BYTES || counts.bytes > OPS_CATALOG_MAX_TOTAL_BYTES
