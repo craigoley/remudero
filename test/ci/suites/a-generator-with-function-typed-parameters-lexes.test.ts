@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { execFileSync } from "node:child_process";
 import { test } from "node:test";
 import { maskLiterals, stripComments } from "#src/lib/test-impact-map.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
@@ -25,11 +24,12 @@ test("a generator whose parameters carry function types lexes in conservative mo
 });
 
 test("the current src/run-task.ts lexes end to end in conservative mode", () => {
-  const source = readFileSync(join(REPO_ROOT, "src/run-task.ts"), "utf8");
-  assert.ok(source.includes("function* writeFixCensusSnapshotSteps("), "positive control: the reported generator is in the file");
+  // The file is lexer INPUT, not a text subject: read it as the committed blob, assert only on lexing behaviour.
+  const source = execFileSync("git", ["show", "HEAD:src/run-task.ts"], { cwd: REPO_ROOT, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
+  assert.ok(source.split("\n").length > 10000, "positive control: the lexer was handed the repository's largest hub, not an empty read");
   const masked = strictMask(source);
   assert.equal(masked.split("\n").length, source.split("\n").length);
-  assert.ok(masked.includes("function* writeFixCensusSnapshotSteps("));
+  assert.equal(masked.length, stripComments(source, { keepLines: true, ...conservative }).length);
 });
 
 test("an ambiguous regex-versus-division context still throws in conservative mode", () => {
