@@ -104,7 +104,7 @@ import { distanceRefreshCause, type BaseChangedFiles } from "./plan-pr-merge-saf
 import { armedBodyNeedsGuard, rememberCleanArmedBody, type ClosingReferenceGuardResult } from "./closing-reference-guard.js";
 import { observeAdmissionDisposition } from "./action-executor.js";
 import { runIsolatedLocalMergeRoute, localMergeRouteForCheck, type IsolatedMergeRouteResult } from "./ci-parity.js";
-import { acquireInflightLock, InflightLockError, inflightLockPath, parseInflightLockInfo, type InflightLockHandle } from "./inflight-lock.js";
+import { acquireInflightLock, InflightLockError, inflightLockPath, parseInflightLockInfo, readInflightLock, type InflightLockHandle } from "./inflight-lock.js";
 import { reclaimStaleLock } from "./fs-race-safe.js";
 import { DEFAULT_POLL_INTERVAL_MS } from "./poll-interval.js";
 import { appendLedger, isRealStrike, type LedgerLine } from "./ledger.js";
@@ -213,6 +213,7 @@ import {
   reviewTaskNarrative,
   UNFILED_RUN_SENTINEL,
   unknownReservationReads,
+  execGhPrComment,
 } from "./review.js";
 import { withTempDir } from "./tmp.js";
 import { fetchPrDiff, prDiffSourceAsync } from "./pr-diff.js";
@@ -1937,12 +1938,23 @@ export function rebaseDirtyFleetBranchViaGit(
   }
 }
 
-/** W1-T11167: "regenerable" resolves registry-only conflicts (W1-T9578); "clean-merge" commits git's own clean merge. */
-export type ConflictRegenerationMode = "regenerable" | "clean-merge";
+/** W1-T11167: "regenerable" resolves registry-only conflicts (W1-T9578); "clean-merge" commits git's own clean merge.
+ *  W1-T11170: "owned" is the deterministic tier on a fleet-owned or unheld operator-session head. */
+export type ConflictRegenerationMode = "regenerable" | "clean-merge" | "owned";
+
+/** W1-T11170: how one conflicted path was resolved by the deterministic tier. */
+export type OwnedConflictPathMode = "take-main" | "regenerate" | "deleted-on-main";
+
+/** W1-T11170: the head an "owned" round writes to, and for a session branch the ownership re-read run just before
+ *  its push (a refusal reason, or undefined when the branch is still unheld). */
+export interface OwnedConflictWrite {
+  kind: OwnedConflictHeadKind;
+  recheck?: () => string | undefined | Promise<string | undefined>;
+}
 
 export interface ConflictRegenerationOutcome {
   outcome: "pushed" | "fell-through" | "lease-mismatch" | "error";
-  paths: Array<{ path: string; action: string }>;
+  paths: Array<{ path: string; action: string; mode?: OwnedConflictPathMode }>;
   /** W1-T11167: the rename pairs between the merge base and main on paths the head changed. */
   renames?: Array<{ from: string; to: string }>;
   newHeadSha?: string;
@@ -2037,9 +2049,11 @@ export async function regenerateConflictViaGit(
   deps: Pick<BuildSweepEffectsDeps, "worktreeRemoveImpl"> & {
     git?: (cwd: string, args: readonly string[]) => string | Promise<string>;
     mode?: ConflictRegenerationMode;
+    owned?: OwnedConflictWrite;
   } = {},
 ): Promise<ConflictRegenerationOutcome> {
   const cleanMerge = deps.mode === "clean-merge";
+  const owned = deps.mode === "owned" ? deps.owned : undefined;
   const run = async (cwd: string, args: readonly string[]) => {
     if (deps.git) return deps.git(cwd, args);
     return hostWorktreeGitAsync(cwd, args, { maxBuffer: 1 << 24 });
@@ -2049,8 +2063,10 @@ export async function regenerateConflictViaGit(
   let created = false;
   const result = await (async (): Promise<ConflictRegenerationOutcome> => {
     try {
-      if (!pr.taskId || !fixHeadAcceptable(pr.headRefName, pr.taskId, false)) {
-        return { outcome: "fell-through", paths, reason: "head is not this task's run branch" };
+      if (deps.mode === "owned" ? owned === undefined || !pr.headRefName
+        : !pr.taskId || !fixHeadAcceptable(pr.headRefName, pr.taskId, false)) {
+        return { outcome: "fell-through", paths, reason: deps.mode === "owned"
+          ? "an owned round names no head kind" : "head is not this task's run branch" };
       }
       const ref = `refs/heads/${pr.headRefName}`;
       const remoteRef = `refs/remotes/origin/${pr.headRefName}`;
@@ -2105,12 +2121,36 @@ export async function regenerateConflictViaGit(
         return { outcome: "error", paths, reason: mergeError === undefined
           ? "probe conflict no longer has unmerged paths" : mergeError };
       }
-      const outside = unmerged.filter(path => !Object.hasOwn(REGENERABLE_ARTIFACT_GENERATORS, path));
+      if (owned) {
+        // W1-T11170: per path, main's deletion, then the path's generator, then main's blob where the PR's change is
+        // already on main byte for byte. Any other path aborts the whole merge for a worker round.
+        const base = (await run(worktreePath, ["merge-base", pr.headSha, mainSha])).trim();
+        const unresolved: string[] = [];
+        const planned: Array<{ path: string; mode: OwnedConflictPathMode }> = [];
+        for (const path of unmerged) {
+          const present = (await run(worktreePath, ["ls-tree", "-r", "--name-only", "-z", mainSha, "--", path])).length > 0;
+          if (!present) planned.push({ path, mode: "deleted-on-main" });
+          else if (Object.hasOwn(REGENERABLE_ARTIFACT_GENERATORS, path)) planned.push({ path, mode: "regenerate" });
+          else if (prChangeAlreadyOnMain(await run(worktreePath, ["diff", "--no-color", "--no-ext-diff", base, pr.headSha, "--", path]),
+            await run(worktreePath, ["show", `${mainSha}:${path}`]))) planned.push({ path, mode: "take-main" });
+          else unresolved.push(path);
+        }
+        if (unresolved.length > 0) {
+          await run(worktreePath, ["merge", "--abort"]);
+          return { outcome: "fell-through", paths, reason: `unmerged paths no deterministic tier resolves: ${unresolved.join(", ")}` };
+        }
+        for (const { path, mode } of planned) {
+          if (mode === "deleted-on-main") await run(worktreePath, ["rm", "--quiet", "--", path]);
+          else await run(worktreePath, ["checkout", mainSha, "--", path]);
+          paths.push({ path, action: mode === "regenerate" ? REGENERABLE_ARTIFACT_GENERATORS[path]! : mode, mode });
+        }
+      }
+      const outside = owned ? [] : unmerged.filter(path => !Object.hasOwn(REGENERABLE_ARTIFACT_GENERATORS, path));
       if (outside.length > 0) {
         await run(worktreePath, ["merge", "--abort"]);
         return { outcome: "fell-through", paths, reason: `unmerged paths outside the registry: ${outside.join(", ")}` };
       }
-      for (const path of unmerged) {
+      for (const path of owned ? [] : unmerged) {
         const present = (await run(worktreePath, ["ls-tree", "-r", "--name-only", "-z", mainSha, "--", path])).length > 0;
         if (!present) {
           await run(worktreePath, ["rm", "--", path]);
@@ -2120,7 +2160,7 @@ export async function regenerateConflictViaGit(
           paths.push({ path, action: REGENERABLE_ARTIFACT_GENERATORS[path]! });
         }
       }
-      const generated = paths.filter(({ action }) => action !== "deleted-on-main");
+      const generated = paths.filter(({ action, mode }) => owned ? mode === "regenerate" : action !== "deleted-on-main");
       if (generated.length > 0) {
         // The generator never touches this worktree or its Git dirs: it runs in a disposable copy with a
         // private repository, and only the registered paths' bytes come back, read here by the parent.
@@ -2169,9 +2209,11 @@ export async function regenerateConflictViaGit(
       if (unexpected.length > 0) {
         return { outcome: "error", paths, reason: `generator left unstaged edits: ${unexpected.join(", ")}` };
       }
-      await run(worktreePath, ["commit", "-m", cleanMerge
+      await run(worktreePath, ["commit", "-m", owned
+        ? `fix(sweep): resolve merge conflicts with main on ${pr.headRefName}`
+        : cleanMerge
         ? "fix(sweep): merge main where GitHub's merge reports a conflict git does not"
-        : "fix(sweep): regenerate merge-conflicted artifacts", "-m", `Remudero-Task: ${pr.taskId}`]);
+        : "fix(sweep): regenerate merge-conflicted artifacts", ...(pr.taskId ? ["-m", `Remudero-Task: ${pr.taskId}`] : [])]);
       const newHeadSha = (await run(worktreePath, ["rev-parse", "HEAD"])).trim();
       const observed = new Map((await run(worktreePath, ["ls-remote", "origin", ref, "refs/heads/main"]))
         .trim().split("\n").map(line => { const [sha, name] = line.split(/\s+/); return [name, sha]; }));
@@ -2180,6 +2222,26 @@ export async function regenerateConflictViaGit(
       }
       await run(worktreePath, ["merge-base", "--is-ancestor", pr.headSha, newHeadSha]);
       assertLiveWriteAllowed("git-push", `regenerating conflicts on ${pr.headRefName}`);
+      if (owned?.kind === "session") {
+        // W1-T11170: a session branch takes only this merge commit (first parent the PR head), by a plain push with no
+        // force flag of any kind, after one more ownership read: an owner who pushed in between wins.
+        const parents = (await run(worktreePath, ["rev-list", "--parents", "-n", "1", newHeadSha])).trim().split(/\s+/);
+        if (parents[1] !== pr.headSha || parents.length !== 3) {
+          return { outcome: "error", paths, reason: `the session write is not a merge commit on ${pr.headSha}` };
+        }
+        let held: string | undefined;
+        try { held = await owned.recheck?.(); }
+        catch (error) { held = `the ownership re-read failed: ${spawnFailureText(error)}`; }
+        if (held !== undefined) return { outcome: "lease-mismatch", paths, reason: `ownership re-read before the push: ${held}` };
+        try {
+          if (deps.git) await run(worktreePath, ["push", "origin", `HEAD:${ref}`]);
+          else await gitPushRunBranchAsync(worktreePath, { destination: pr.headRefName, expectedHeadSha: newHeadSha });
+        }
+        catch (error) { return { outcome: "lease-mismatch", paths, reason: spawnFailureText(error) }; }
+        const landed = (await run(worktreePath, ["ls-remote", "origin", ref])).trim().split(/\s+/)[0];
+        return landed === newHeadSha ? { outcome: "pushed", paths, newHeadSha }
+          : { outcome: "lease-mismatch", paths, reason: `remote head after push is ${landed}, expected ${newHeadSha}` };
+      }
       try {
         const lease = `--force-with-lease=${ref}:${pr.headSha}`;
         if (deps.git) await run(worktreePath, ["push", lease, "origin", `HEAD:${ref}`]);
@@ -2208,6 +2270,73 @@ export async function regenerateConflictViaGit(
     }
   }
   return followed === undefined ? result : { ...result, renames: followed };
+}
+
+/**
+ * W1-T11170: production's three ownership reads for an operator-session branch. (a) each refs/rmd-dispatch claim
+ * for a task id the PR names, its mint and `renewed` times read down the claim's commit chain; (b) the branch's fix
+ * claim lock and the task's inflight lock; (c) the committer times of the branch's own commits, with the trailing
+ * window's session branches for the operator's p90 gap. A failed read leaves its field absent, which reads ambiguous.
+ */
+export async function readSessionOwnershipViaGit(
+  repoDir: string,
+  pr: Pick<OpenPrView, "headRefName" | "taskId" | "body">,
+  opts: { nowMs: number; readLock: (key: string) => string | undefined; fixClaimKey: string;
+    git?: (cwd: string, args: readonly string[]) => string | Promise<string>; windowDays?: number },
+): Promise<SessionOwnershipEvidence> {
+  const run = async (args: readonly string[]) =>
+    opts.git ? opts.git(repoDir, args) : hostWorktreeGitAsync(repoDir, args, { maxBuffer: 1 << 24 });
+  const evidence: SessionOwnershipEvidence = { nowMs: opts.nowMs };
+  const ids = [...new Set([pr.taskId, ...[...(pr.body ?? "").matchAll(/^Remudero-Task:\s*(\S+)\s*$/gm)].map((m) => m[1])]
+    .filter((id): id is string => id !== undefined && TASK_ID_TRAILER_RE.test(id)))];
+  try {
+    const claims: NonNullable<SessionOwnershipEvidence["claims"]> = [];
+    for (const id of ids) {
+      const ref = `refs/rmd-dispatch/${id}`;
+      const holder = (await run(["ls-remote", "origin", ref])).trim().split(/\s+/)[0];
+      if (!holder) continue;
+      await run(["fetch", "--quiet", "--no-write-fetch-head", "origin", ref]);
+      const log = await run(["log", "--format=%B", holder]);
+      const times = [...log.matchAll(/^(?:rmd-dispatch claim \d+@\S+|renewed \d+@\S+) (\S+)$/gm)]
+        .map((m) => Date.parse(m[1]!)).filter(Number.isFinite);
+      claims.push({ ref, renewalsMs: times });
+    }
+    evidence.claims = claims;
+  } catch (error) {
+    // (a) stays absent, which sessionBranchUnheld reads as ambiguous, and the reason rides the evidence.
+    (evidence.unreadable ??= []).push(`claim: ${capStderrExcerpt(spawnFailureText(error), 200)}`);
+  }
+  try {
+    const lock = opts.readLock(opts.fixClaimKey);
+    const taskLock = pr.taskId ? opts.readLock(pr.taskId) : undefined;
+    const runId = [lock, taskLock].find((held) => held?.startsWith("OPERATOR-"));
+    evidence.session = { ...(taskLock ? { inflightLock: taskLock } : {}), ...(runId ? { operatorRunId: runId } : {}),
+      ...(lock ? { fixClaimKey: opts.fixClaimKey } : {}) };
+  } catch (error) {
+    (evidence.unreadable ??= []).push(`session: ${capStderrExcerpt(spawnFailureText(error), 200)}`);
+  }
+  try {
+    const branch = pr.headRefName!;
+    await run(["fetch", "--no-tags", "--quiet", "origin", "+refs/heads/main:refs/remotes/origin/main",
+      `+refs/heads/${branch}:refs/remotes/origin/${branch}`]);
+    const stamps = async (ref: string, extra: readonly string[] = []) =>
+      (await run(["log", "--format=%ct", "-n", "200", ...extra, ref, "--not", "refs/remotes/origin/main"]))
+        .split("\n").filter(Boolean).map((line) => Number(line) * 1000).filter(Number.isFinite);
+    evidence.pushesMs = await stamps(`refs/remotes/origin/${branch}`);
+    if (evidence.pushesMs.length < 3) {
+      const refs = (await run(["for-each-ref", "--format=%(refname)", "--count=40", "--sort=-committerdate",
+        "refs/remotes/origin/run-unfiled-*", "refs/remotes/origin/plan-file-*", "refs/remotes/origin/codex/"]))
+        .split("\n").filter(Boolean);
+      const gaps: number[] = [];
+      for (const ref of refs) gaps.push(...sortedGaps(await stamps(ref, [`--since=${opts.windowDays ?? 30}.days`])));
+      const p90 = quantile(gaps, 0.9);
+      if (p90 !== undefined) evidence.operatorP90GapMs = p90;
+    }
+  } catch (error) {
+    (evidence.unreadable ??= []).push(`pushes: ${capStderrExcerpt(spawnFailureText(error), 200)}`);
+    delete evidence.pushesMs;
+  }
+  return evidence;
 }
 
 /** W1-T2927: artifact ids already read; process-lifetime because effects are rebuilt every poll. */
@@ -2295,6 +2424,8 @@ export const SWEEP_EFFECT_SURFACE = [
   "repairMetadata",
   "rebaseDirtyFleetBranch",
   "regenerateConflict",
+  "readConflictOwnership", // W1-T11170
+  "postConflictComment", // W1-T11170
   // W1-T3618: the reviewer-code freshness reading, hoisted in FRONT of reviewCommand so a stale
   // daemon never pays for a review it cannot publish. It is an effect, not a plain value, because
   // buildSweepEffects caches the read once per sweep cycle rather than once per PR.
@@ -2478,6 +2609,8 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   | "releaseBaseCausedStandDown"
   | "rebaseDirtyFleetBranch"
   | "regenerateConflict"
+  | "readConflictOwnership"
+  | "postConflictComment"
   | "selectAdaptiveReviewWidth"
   | "repairRecordableRatchet"
   | "repairMissingTaskTrailer"
@@ -5123,9 +5256,18 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
             { worktreeRemoveImpl: worktreeRemoveForBuild },
           ),
 
-    regenerateConflict: (pr, mainSha, mode) => regenerateConflictViaGit(repoDir,
+    regenerateConflict: (pr, mainSha, mode, owned) => regenerateConflictViaGit(repoDir,
       join(worktreesDir(config), `conflict-regenerate-${pr.prNumber}-${nowMsImpl()}`), pr, mainSha,
-      { worktreeRemoveImpl: worktreeRemoveForBuild, ...(mode ? { mode } : {}) }),
+      { worktreeRemoveImpl: worktreeRemoveForBuild, ...(mode ? { mode } : {}), ...(owned ? { owned } : {}) }),
+    readConflictOwnership: (pr) => readSessionOwnershipViaGit(repoDir, pr, {
+      nowMs: nowMsImpl(),
+      readLock: (key) => { const held = readInflightLock(inflightDir, key); return held ? held.run_id : undefined; },
+      fixClaimKey: fixBranchClaimKey(owner, repo, pr.headRefName ?? ""),
+    }),
+    postConflictComment: (pr, body) => {
+      assertLiveWriteAllowed("gh-transport", `conflict round comment on PR #${pr.prNumber}`);
+      execGhPrComment(pr.prUrl, body);
+    },
 
     // W1-T905 — "repair the instance, FILE THE CLASS". `runSweep` calls this AT MOST ONCE per
     // due surface, best-effort — see `SweepDeps.captureRepairFeedback`'s own doc.
@@ -5507,9 +5649,14 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     readPlanRepairFacts: (pr) => {
       const pulls = `repos/${owner}/${repo}/pulls/${pr.prNumber}`;
       const row = ghJsonForBuild(["api", pulls]) as {
-        user?: { login?: string }; title?: string; head?: { sha?: string; ref?: string };
+        user?: { login?: string }; title?: string; head?: { sha?: string; ref?: string; repo?: { full_name?: string } | null };
       };
       const facts: PlanRepairFacts = { authorLogin: row?.user?.login, title: row?.title };
+      // W1-T11170: the session-branch ownership facts. A head repo GitHub no longer shows (a deleted fork) is a fork.
+      const headRepo = row?.head?.repo;
+      if (headRepo !== undefined) facts.headRepoFork = headRepo?.full_name?.toLowerCase() !== `${owner}/${repo}`.toLowerCase();
+      const login = row?.user?.login?.toLowerCase();
+      facts.operatorAuthor = login !== undefined && (config.operatorGithubLogins ?? []).some((l) => l.toLowerCase() === login);
       if (filedTaskPlanRepairCandidate(pr) && row?.head?.sha === pr.headSha && row.head.ref === pr.headRefName) {
         facts.filedTaskRepairReady = filedPlanTaskReady(plan.tasks.find(task => task.id === pr.taskId));
       }
@@ -10329,6 +10476,149 @@ export interface PlanRepairFacts {
   authorLogin?: string;
   title?: string;
   gardenRecordRefusal?: string;
+  /** W1-T11170: the author is one of the configured operator accounts. */
+  operatorAuthor?: boolean;
+  /** W1-T11170: the head lives in another repository (a fork). Unknown is never read as false. */
+  headRepoFork?: boolean;
+}
+
+/** W1-T11170: the head shapes an operator session pushes by hand. */
+export const OPERATOR_SESSION_HEAD_RE = /^(?:run-unfiled-\d+|plan-file-\d+|codex\/.+)$/;
+
+/** W1-T11170: whose dirty head a conflict round may write to, beside a PR task's own run branch. */
+export type OwnedConflictHeadKind = "fleet" | "session";
+
+/** W1-T11170: a machine-lane head the fleet App authored: a gardener, a landing, or a TRIAGE/APPROVE/RETRO run. */
+export function fleetOwnedConflictHead(pr: Pick<OpenPrView, "headRefName">,
+  facts: Pick<PlanRepairFacts, "authorLogin"> | undefined): boolean {
+  return isMachineLanePlanHead(pr.headRefName) && isFleetAppAuthor(facts?.authorLogin);
+}
+
+/**
+ * W1-T11170: an operator session's hand branch: a run-unfiled-*, plan-file-* or codex/* head, or any head the
+ * operator account authored. Never a fork, a fleet head, or another task's run- branch. Being one does not admit a
+ * round: {@link sessionBranchUnheld} must also show nobody holds it.
+ */
+export function operatorSessionHead(pr: Pick<OpenPrView, "headRefName">,
+  facts: Pick<PlanRepairFacts, "authorLogin" | "operatorAuthor" | "headRepoFork"> | undefined): boolean {
+  const head = pr.headRefName;
+  if (head === undefined || facts?.headRepoFork !== false || isMachineLanePlanHead(head) ||
+      isFleetAppAuthor(facts.authorLogin) || (/^run-/.test(head) && !/^run-unfiled-\d+$/.test(head))) return false;
+  return OPERATOR_SESSION_HEAD_RE.test(head) || facts.operatorAuthor === true;
+}
+
+/** W1-T11170: the three ownership reads for an operator-session branch. An absent field is an unreadable read. */
+export interface SessionOwnershipEvidence {
+  nowMs: number;
+  /** (a) every refs/rmd-dispatch claim for a task id the PR names, with its renewal times. */
+  claims?: Array<{ ref: string; renewalsMs: number[]; holderKindMedianGapMs?: number }>;
+  /** (b) a live inflight lock, an OPERATOR- run id, or an open fix claim key on the branch. */
+  session?: { inflightLock?: string; operatorRunId?: string; fixClaimKey?: string };
+  /** (c) the owner's push times on this branch. */
+  pushesMs?: number[];
+  /** (c) with fewer than 3 pushes: the operator account's p90 gap between pushes over its branches. */
+  operatorP90GapMs?: number;
+  /** Why a read is absent, when the reader knows. */
+  unreadable?: string[];
+}
+
+export interface SessionOwnershipReads { claim: string; session: string; pushes: string }
+
+export interface SessionOwnershipVerdict {
+  verdict: "unheld" | "held" | "ambiguous";
+  reason: string;
+  reads: SessionOwnershipReads;
+}
+
+function sortedGaps(times: readonly number[]): number[] {
+  const sorted = [...times].filter(Number.isFinite).sort((a, b) => a - b);
+  return sorted.slice(1).map((at, i) => at - sorted[i]!);
+}
+
+function quantile(values: readonly number[], q: number): number | undefined {
+  if (values.length === 0) return undefined;
+  const sorted = [...values].sort((a, b) => a - b);
+  return sorted[Math.min(sorted.length - 1, Math.max(0, Math.ceil(q * sorted.length) - 1))];
+}
+
+/** W1-T11170: the p90 gap between consecutive push times, nearest rank. Exported for the trailing-window fallback. */
+export function pushGapP90(times: readonly number[]): number | undefined {
+  return quantile(sortedGaps(times), 0.9);
+}
+
+/**
+ * W1-T11170: whether an operator-session branch is free to write, judged on its own cadence, never a fixed age.
+ * (a) a claim is held while its newest renewal is within its median renewal gap (one renewal: its holder kind's
+ * median); (b) any live lock, OPERATOR- run or fix claim holds it; (c) a push within the branch's p90 gap between
+ * pushes (fewer than 3: the operator's p90) holds it. Unreadable reads, or a stale claim beside a live read, are
+ * `ambiguous`; all clear is `unheld`; anything else is `held`.
+ */
+export function sessionBranchUnheld(evidence: SessionOwnershipEvidence): SessionOwnershipVerdict {
+  const now = evidence.nowMs;
+  type Read = "clear" | "held" | "stale" | "unreadable";
+  let claim: Read = "clear";
+  const claimNotes: string[] = [];
+  if (evidence.claims === undefined) claim = "unreadable";
+  else for (const held of evidence.claims) {
+    const newest = Math.max(...held.renewalsMs.filter(Number.isFinite));
+    const gaps = sortedGaps(held.renewalsMs);
+    const interval = gaps.length > 0 ? quantile(gaps, 0.5) : held.holderKindMedianGapMs;
+    const one: Read = !Number.isFinite(newest) || interval === undefined ? "unreadable" : now - newest <= interval ? "held" : "stale";
+    claimNotes.push(`${held.ref} ${one}${Number.isFinite(newest) ? ` (renewed ${now - newest} ms ago, interval ${interval ?? "unknown"} ms)` : ""}`);
+    const rank: Read[] = ["clear", "stale", "held", "unreadable"];
+    if (rank.indexOf(one) > rank.indexOf(claim)) claim = one;
+  }
+  const s = evidence.session;
+  const session: Read = s === undefined ? "unreadable" : s.inflightLock || s.operatorRunId || s.fixClaimKey ? "held" : "clear";
+  let pushes: Read = "unreadable";
+  let pushNote = "unreadable";
+  const times = (evidence.pushesMs ?? []).filter(Number.isFinite);
+  if (times.length > 0) {
+    const threshold = times.length >= 3 ? pushGapP90(times) : evidence.operatorP90GapMs;
+    const since = now - Math.max(...times);
+    pushes = threshold === undefined ? "unreadable" : since <= threshold ? "held" : "clear";
+    pushNote = `${pushes} (newest push ${since} ms ago, ${times.length >= 3 ? "branch" : "operator"} p90 gap ${threshold ?? "unknown"} ms)`;
+  }
+  const reads: SessionOwnershipReads = {
+    claim: claim === "clear" && claimNotes.length === 0 ? "clear (no dispatch claim)" : `${claim}: ${claimNotes.join("; ") || "unreadable"}`,
+    session: s === undefined ? "unreadable"
+      : session === "clear" ? "clear (no inflight lock, OPERATOR- run or fix claim)"
+      : `held: ${[s.inflightLock && `inflight lock ${s.inflightLock}`, s.operatorRunId && `run ${s.operatorRunId}`,
+        s.fixClaimKey && `fix claim ${s.fixClaimKey}`].filter(Boolean).join(", ")}`,
+    pushes: pushNote,
+  };
+  const all = [claim, session, pushes];
+  if (all.includes("unreadable")) {
+    return { verdict: "ambiguous", reason: `an ownership read is unreadable${evidence.unreadable?.length
+      ? ` (${evidence.unreadable.join("; ")})` : ""}`, reads };
+  }
+  if (claim === "stale" && (session === "held" || pushes === "held")) {
+    return { verdict: "ambiguous", reason: "a stale dispatch claim disagrees with a live session or a recent push", reads };
+  }
+  if (all.every((read) => read === "clear" || read === "stale")) return { verdict: "unheld", reason: "nobody holds the branch", reads };
+  return { verdict: "held", reason: "the branch is held", reads };
+}
+
+/**
+ * W1-T11170: the redundant re-fix comparison for one conflicted path, at hunk grain: every hunk of the PR's change
+ * (`git diff <merge-base> <head> -- <path>`) already appears on main byte for byte, its post-image (context and
+ * added lines) a verbatim run of main's blob. A binary or empty diff is never redundant.
+ */
+export function prChangeAlreadyOnMain(prDiff: string, mainText: string): boolean {
+  if (/^Binary files /m.test(prDiff) || /^GIT binary patch$/m.test(prDiff)) return false;
+  const hunks: string[][] = [];
+  let current: string[] | undefined;
+  let changed = false;
+  for (const line of prDiff.split("\n")) {
+    if (line.startsWith("@@")) { current = []; hunks.push(current); continue; }
+    if (current === undefined || line.startsWith("\\")) continue;
+    if (line.startsWith("+") || line.startsWith("-")) changed = true;
+    if (line.startsWith(" ") || line.startsWith("+")) current.push(line.slice(1));
+  }
+  if (!changed || hunks.length === 0) return false;
+  const noEol = /^\\ No newline at end of file$/m.test(prDiff);
+  return hunks.every((post) => post.length > 0 && (mainText.includes(`${post.join("\n")}\n`) ||
+    (noEol && mainText.endsWith(post.join("\n")))));
 }
 
 const GARDEN_PLAN_HEAD_RE = /^(?:knowledge|plan|backlog|gate|test|config|export|ci-friction|selector-shadow|hot-file|machine-judge|host-resource|flow|flow-remedy|fix-lane|scout|review-replay|queue-judge|redesign)-garden-\d+$/;
@@ -13445,6 +13735,9 @@ export interface FixDispatchEvidence {
   instrumentEntanglementPaths?: InstrumentEntanglementPaths;
   /** W1-T3306: the exact capped proofs that need a body-only discrimination repair. */
   proofDiscrimination?: ProofDiscriminationEvidence;
+  /** W1-T11170: a conflict round on a head that is not the PR task's own run branch. A session branch takes only a
+   *  merge commit, pushed with no force flag, after the ownership re-read. */
+  ownedConflictHead?: { kind: OwnedConflictHeadKind; push: "leased" | "merge-commit-no-force"; ownership?: SessionOwnershipReads };
 }
 
 /** The only proof grades that establish the capped-green repair has a mechanical body remedy —
@@ -14768,8 +15061,13 @@ export interface SweepDeps {
    *  through to the existing escalation, preserving human visibility and never clobbering a
    *  branch another writer advanced. */
   rebaseDirtyFleetBranch?: (pr: OpenPrView) => DirtyFleetRebaseOutcome | Promise<DirtyFleetRebaseOutcome>;
-  regenerateConflict?: (pr: OpenPrView, mainSha: string, mode?: ConflictRegenerationMode) =>
+  regenerateConflict?: (pr: OpenPrView, mainSha: string, mode?: ConflictRegenerationMode, owned?: OwnedConflictWrite) =>
     ConflictRegenerationOutcome | Promise<ConflictRegenerationOutcome>;
+  /** W1-T11170: the three ownership reads for a dirty operator-session branch ({@link sessionBranchUnheld}). Absent,
+   *  no session branch is admitted to a conflict round. A throw is an unreadable read. */
+  readConflictOwnership?: (pr: OpenPrView) => SessionOwnershipEvidence | Promise<SessionOwnershipEvidence>;
+  /** W1-T11170: the PR comment posted after each conflict-round write to a fleet or session head. */
+  postConflictComment?: (pr: OpenPrView, body: string) => void | Promise<void>;
   /** W1-T528: task ids with a LIVE in-flight run right now, consulted by
    *  {@link selectUpdateBranchTarget} to skip a head a live worker is still pushing to. Omitted
    *  means an empty set, exactly as if every PR's worker had already finished. */
