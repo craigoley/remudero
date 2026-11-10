@@ -14,6 +14,7 @@
   files:
     - src/lib/review.ts
     - test/a-computed-review-verdict-survives-a-failed-post-in-an-outbox.test.ts
+    - "src/cli/commands/review.ts"
   status: queued
   attempts: 0
   acceptance:
