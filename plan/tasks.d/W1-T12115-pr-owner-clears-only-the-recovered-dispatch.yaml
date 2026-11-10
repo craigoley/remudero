@@ -48,14 +48,16 @@
   design: |
     1. pr-owner-ledger.ts: also admit rows whose step is STALE_FIX_DISPATCH_RECEIPT_STEP (imported from
        src/lib/stale-fix-dispatch-recovery.ts) and whose pr_number is the target. Apply the same future-stamp
-       skip. Group all receipt rows for the exact latestFix tuple (PR, task, run, round, head, base and branch) regardless of authorization_id; require valid schema, authorization and actor identity, and non-future timestamps. A later released receipt may supersede held rows for that dispatch across all authorization_ids only when each held row is strictly older; a held row at or after the release keeps ownership held. Coalesce byte-identical released rows; if distinct released rows disagree, an ordering timestamp ties, or any identity/content conflicts, set receiptConflict. Expose latestReceiptForLatestFix only for the unique released receipt matching latestFix.
+       skip to receipt contents, but before skipping a future- or invalid-timestamp receipt with the target pr_number,
+       retain a per-target receiptUnknown marker; it makes this PR UNKNOWN even if an older release exists and does
+       not taint unrelated PRs. Group all receipt rows for the exact latestFix tuple (PR, task, run, round, head, base and branch) regardless of authorization_id; require valid schema, authorization and actor identity, and non-future timestamps. A later released receipt may supersede held rows for that dispatch across all authorization_ids only when each held row is strictly older; a held row at or after the release keeps ownership held. Coalesce byte-identical released rows; if distinct released rows disagree, an ordering timestamp ties, or any identity/content conflicts, set receiptConflict. Expose latestReceiptForLatestFix only for the unique released receipt matching latestFix.
     2. prOwnerVerdictFromFacts: if latestFix is defined and the unique matching released receipt wins the strict
        hold/release ordering above, and there is no live claim, no active sweep row and no receiptConflict, return FREE with the reason "fix.dispatch <run>
        released by recovery receipt <recovery_id>", and render the receipt's actor, ts and preservation ref. A
        receiptConflict or an unparseable receipt row for the PR returns UNKNOWN. Everything else is unchanged.
        Because the match is on latestFix, any later dispatch makes the PR OWNED again.
     3. derivePrOwnerVerdict runs the same matcher over its injected rows.
-    4. Tests: fixtures through both paths for each acceptance case, including held-only -> OWNED, older-held then later-released -> FREE, later-held -> OWNED, tied timestamps -> UNKNOWN, differing released duplicates across authorization_ids -> UNKNOWN, plus a plan-only PR fixture and a rotation-archived receipt (the row read from a .ndjson.gz archive).
+    4. Tests: fixtures through both paths for each acceptance case, including held-only -> OWNED, older-held then later-released -> FREE, later-held -> OWNED, future-held after an older release -> UNKNOWN, tied timestamps -> UNKNOWN, differing released duplicates across authorization_ids -> UNKNOWN, plus a plan-only PR fixture and a rotation-archived receipt (the row read from a .ndjson.gz archive).
   falsifier: |
     Match the receipt on PR alone: the "receipt for another run" fixture reports FREE and the test fails. Compare
     the receipt with any fix.dispatch rather than the latest: the "dispatch after receipt" fixture reports FREE.
