@@ -1,3 +1,4 @@
+// @source-text-subject: the conservative lexer's input IS source text — src/run-task.ts is the positive-control corpus it must lex.
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
