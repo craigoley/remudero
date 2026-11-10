@@ -53,7 +53,7 @@ function fixture(name: string) {
   const terminal = (post: PostReviewStatusGuardedOpts["post"]): PostReviewStatusGuardedOpts => ({
     owner: "o", repo: "r", sha: HEAD, state: "success", description: DESCRIPTION, verdict: VERDICT, taskId: TASK,
     evidence: "executed", ledgerPath, runId: "review-PR17494-1794264570958", prUrl: PR_URL, reviewInputDigest: INPUT,
-    reviewDecisionDigest: DECISION, outboxCommentBody: COMMENT,
+    reviewDecisionDigest: DECISION,
     readReviewStatusHistory: async () => ({ kind: "readable", failures: [] }),
     fetchLifecycle: () => lifecycle(HEAD), post,
   });
@@ -133,6 +133,48 @@ test("W1-T11928 criterion 2: the next pass for that input posts the outbox verdi
   }
 });
 
+test("W1-T11928 criterion 2: the entry builds its comment from the verdict the review passes, and the next pass posts that comment", async () => {
+  const f = fixture("outbox-comment");
+  try {
+    // The review passes its verdict and no comment text: it builds its own comment only after a post that succeeds.
+    const summary = "remudero-review: FAIL - 1 of 3 criteria unmet";
+    const failed: ReviewVerdict = {
+      ...VERDICT, state: "failure", summary,
+      criteria: VERDICT.criteria.map((c, i) => (i === 1
+        ? { ...c, met: false, reason: "the proof ran and failed", proof_exec: "executed_fail" as const, failureTail: "not ok 1 <drain>" }
+        : c)),
+    };
+    const result = await postReviewStatusGuarded({
+      ...f.terminal(() => { throw new Error("gh: no credential in this process"); }),
+      state: "failure", description: summary, verdict: failed,
+    });
+    assert.equal(result.posted, false);
+    const entry = JSON.parse(readFileSync(reviewOutboxEntryPath(f.ledgerPath, PR_URL, INPUT), "utf8")) as Record<string, unknown>;
+    const body = String(entry.comment_body);
+    assert.match(body, /^\*\*remudero-review=failure\*\* — the following acceptance criterion is unmet:/);
+    assert.match(body, /1\. criterion 2\n {3}- the proof ran and failed/);
+    assert.match(body, /<pre>not ok 1 &lt;drain&gt;<\/pre>/, "the proof output is escaped as the review escapes it");
+    assert.equal(body.includes("criterion 1") || body.includes("criterion 3"), false, "a met criterion is not listed");
+
+    const comments: Array<{ url: string; body: string }> = [];
+    const pending = await postReviewPending({
+      owner: "o", repo: "r", sha: HEAD, taskId: TASK, runId: "review-next-pass", ledgerPath: f.ledgerPath, prUrl: PR_URL,
+      reviewInputDigest: INPUT, fetchLifecycle: () => f.lifecycle(HEAD), post: f.record,
+      readReviewStatusHistory: async () => ({ kind: "readable", failures: [] }),
+      commentDeps: { fetchNewestReview: () => undefined, postReview: (url, text) => { comments.push({ url, body: text }); } },
+      fetchStatus: () => { throw new Error("a pass that posts the outbox verdict reads no pending claim"); },
+    });
+
+    assert.equal(pending.outbox, "posted");
+    assert.deepEqual(f.posts.map((post) => [post.sha, post.state]), [[HEAD, "failure"]]);
+    assert.deepEqual(comments, [{ url: PR_URL, body }], "the next pass posts the comment the entry carried");
+    assert.equal(f.steps("review.outbox_posted")[0]?.comment, "posted");
+    assert.deepEqual(f.entries(), []);
+  } finally {
+    rmSync(f.dir, { recursive: true, force: true });
+  }
+});
+
 test("W1-T11928 criterion 2: an outbox verdict whose head has moved is never posted and is discarded with a ledger row", async () => {
   const f = fixture("outbox-stale");
   try {
@@ -166,11 +208,10 @@ test("W1-T11928 criterion 3: a review whose post succeeds writes no outbox entry
     assert.equal(existsSync(reviewOutboxDir(f.ledgerPath)), false, "a successful post leaves no outbox behind");
     assert.equal(f.steps("review.post_failed").length, 0);
 
-    // The same review with no comment body supplied: the caller that predates the outbox.
-    const { outboxCommentBody: _unused, ...legacy } = f.terminal(f.record);
-    assert.equal((await postReviewStatusGuarded({ ...legacy, taskId: "W1-T17494-legacy" })).posted, true);
+    // The same review for a second task: the status carries the caller's fields and nothing from the outbox.
+    assert.equal((await postReviewStatusGuarded({ ...f.terminal(f.record), taskId: "W1-T17494-second" })).posted, true);
     const expected = { owner: "o", repo: "r", sha: HEAD, state: "success", description: DESCRIPTION };
-    assert.deepEqual(f.posts, [expected, expected], "the status posted is byte-identical with and without the outbox fields");
+    assert.deepEqual(f.posts, [expected, expected], "the status posted holds no outbox field");
 
     const comments: Array<{ url: string; body: string }> = [];
     const comment = postReviewCommentGuarded(PR_URL, COMMENT, {

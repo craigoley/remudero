@@ -12013,7 +12013,6 @@ export interface PostReviewStatusGuardedOpts {
    * material stale or unprovable code withholds the verdict; an allowed verdict names this SHA in
    * its commit-status description. Pending is progress, not a verdict, and remains publishable. */
   reviewerCodeFreshness?: ReviewerCodeFreshness;
-  outboxCommentBody?: string;
   /** Fresh lifecycle read for THIS attempt — real callers pass `() => fetchPrLifecycle(prUrl)`,
    * tests inject a fake. Called INSIDE the lock, never before (see the module doc above). */
   fetchLifecycle: () => PrLifecycleState | Promise<PrLifecycleState>;
@@ -12447,13 +12446,39 @@ export function reviewOutboxEntryPath(ledgerPath: string, prUrl: string, inputKe
 
 type ReviewOutboxWrite = { ok: true } | { ok: false; reason: string };
 
+function reviewOutboxCommentBody(verdict: PostReviewStatusGuardedOpts["verdict"]): string | undefined {
+  if (!verdict || !Array.isArray(verdict.criteria)) return undefined;
+  const unmet = visibleCriteria(unmetReviewCriteria(verdict.criteria));
+  const reasons = reviewLedgerReasons(verdict);
+  const parts: string[] = [];
+  if (verdict.state !== "success" && (unmet.length > 0 || verdict.testTheater)) {
+    parts.push(
+      `**remudero-review=failure** — the following acceptance ${unmet.length === 1 ? "criterion is" : "criteria are"} unmet:\n\n` +
+        unmet.map((c, i) => {
+          const tail = c.failureTail?.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
+          return `${i + 1}. ${c.claim}\n   - ${reasons[i]}` + (tail
+            ? `\n\n   <details>\n   <summary>Proof failure output</summary>\n\n   <pre>${tail}</pre>\n   </details>\n`
+            : "");
+        }).join("\n") +
+        (verdict.testTheater ? `\n\n_Also: test theater — added tests assert nothing._` : "") +
+        `\n\nAdd the missing work (or escalate). Do NOT edit the acceptance criteria to match the diff.`,
+    );
+  }
+  for (const section of [
+    scopeAdvisorySection(verdict.unwiredAdvisories), unwiredExportAdvisorySection(verdict.unwiredAdvisories),
+    inverseScopeAdvisorySection(verdict.unwiredAdvisories),
+  ]) if (section) parts.push(section);
+  if (parts.length === 0) parts.push(`**remudero-review=${verdict.state}** — ${verdict.summary}`);
+  return parts.join("\n\n---\n\n");
+}
+
 function writeReviewOutboxEntry(opts: PostReviewStatusGuardedOpts, description: string | undefined): ReviewOutboxWrite {
   if (opts.state === "pending" || opts.prUrl === undefined || opts.reviewInputDigest === undefined) {
     return { ok: false, reason: "not a terminal verdict keyed by its PR and review input" };
   }
   const entry: ReviewOutboxEntry = {
     version: REVIEW_OUTBOX_VERSION, input_key: opts.reviewInputDigest, head_sha: opts.sha, state: opts.state,
-    description, comment_body: opts.outboxCommentBody, owner: opts.owner, repo: opts.repo, task_id: opts.taskId,
+    description, comment_body: reviewOutboxCommentBody(opts.verdict), owner: opts.owner, repo: opts.repo, task_id: opts.taskId,
     pr_url: opts.prUrl, run_id: opts.runId, evidence: opts.evidence, review_decision_digest: opts.reviewDecisionDigest,
     review_engine_revision: opts.reviewEngineRevision, decision_verdict: opts.verdict,
     evaluator_provenance: opts.evaluatorProvenance,
@@ -12556,7 +12581,7 @@ export async function drainReviewOutbox(opts: DrainReviewOutboxOpts): Promise<Re
       reviewInputDigest: entry.input_key, reviewDecisionDigest: entry.review_decision_digest,
       verdict: entry.decision_verdict, presentedFailureIds: entry.presented_failure_ids,
       reviewEngineRevision: entry.review_engine_revision, evaluatorProvenance: entry.evaluator_provenance,
-      outboxCommentBody: entry.comment_body, readReviewStatusHistory: opts.readReviewStatusHistory,
+      readReviewStatusHistory: opts.readReviewStatusHistory,
       fetchLifecycle: opts.fetchLifecycle, lockOpts: opts.lockOpts,
       post: async (status) => {
         try {
