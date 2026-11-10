@@ -1997,19 +1997,9 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
   // W1-T11261: time every step before the first ledger row; a step that throws still records its elapsed time and error class.
   const commandStartedAt = systemClock.now();
   const startPhases: Record<string, unknown> = {};
-  const timedStart = <T>(name: string, run: () => T): T => {
-    const t0 = systemClock.now();
-    const done = (err?: unknown) => {
-      startPhases[`${name}_ms`] = systemClock.now() - t0;
-      if (err !== undefined) startPhases[`${name}_error`] = err instanceof Error ? err.constructor.name : typeof err;
-    };
-    let out: T;
-    try { out = run(); } catch (e) { done(e ?? "thrown"); throw e; }
-    if (out instanceof Promise) {
-      return out.then((v) => { done(); return v; }, (e: unknown) => { done(e ?? "thrown"); throw e; }) as T;
-    }
-    done();
-    return out;
+  const recordStartPhase = (name: string, startedAt: number, error?: unknown): void => {
+    startPhases[`${name}_ms`] = systemClock.now() - startedAt;
+    if (error !== undefined) startPhases[`${name}_error`] = error instanceof Error ? error.constructor.name : typeof error;
   };
   deps = { ...reviewOptionsFromFlags(host, rest), ...deps };
   const {
@@ -2091,9 +2081,25 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
   let body = view.body ?? "";
   const reportBody = body;
   const inputDigest = reviewInputDigest(view.headRefOid, body);
-  const config = timedStart("config_load", () => loadConfigDep());
+  const configLoadStartedAt = systemClock.now();
+  let config: Config;
+  try {
+    config = loadConfigDep();
+    recordStartPhase("config_load", configLoadStartedAt);
+  } catch (e) {
+    recordStartPhase("config_load", configLoadStartedAt, e ?? "thrown");
+    throw e;
+  }
   const ledgerPath = ledgerPathFor(config);
-  const reviewLedger = timedStart("ledger_read", () => readLedgerLines(ledgerPath));
+  const ledgerReadStartedAt = systemClock.now();
+  let reviewLedger: ReturnType<typeof readLedgerLines>;
+  try {
+    reviewLedger = readLedgerLines(ledgerPath);
+    recordStartPhase("ledger_read", ledgerReadStartedAt);
+  } catch (e) {
+    recordStartPhase("ledger_read", ledgerReadStartedAt, e ?? "thrown");
+    throw e;
+  }
 
   // Criteria: task trailer → tasks.yaml; else the PR body's Acceptance: block.
   let criteria: AcceptanceCriterion[] = [];
@@ -2196,9 +2202,12 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
   // returned: `materializeReviewWorktree` re-runs the same fetch below and reports a genuine
   // outage through its own `fetch-failure` class, which is the degradation path this command
   // already has. Failing here instead would invent a second one for the same condition.
+  const fetchHeadStartedAt = systemClock.now();
   try {
-    await timedStart("fetch_head", async () => fetchHead(subjectRepoDir, view.number, view.headRefOid));
+    await fetchHead(subjectRepoDir, view.number, view.headRefOid);
+    recordStartPhase("fetch_head", fetchHeadStartedAt);
   } catch (e) {
+    recordStartPhase("fetch_head", fetchHeadStartedAt, e ?? "thrown");
     void e;
     // Swallowed on purpose — see above. The materializer's own fetch names a real outage.
   }
@@ -2208,8 +2217,12 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
   // Give the existing exact-trailer criteria resolver only the recovered identity it needs;
   // `reportBody` still carries the real PR body unchanged to the fallback and reviewer below.
   if (taskId && !reviewTaskIdFromBody(body)) body = `Remudero-Task: ${taskId}`;
+  const headCriteriaStartedAt = systemClock.now();
   if (taskId) {
-    const resolved = await timedStart("head_criteria", () => resolvePlanCriteriaAtHeadAsync(body, subjectRepoDir, "plan/tasks.yaml", view.headRefOid));
+    const resolved = await resolvePlanCriteriaAtHeadAsync(body, subjectRepoDir, "plan/tasks.yaml", view.headRefOid).then(
+      result => { recordStartPhase("head_criteria", headCriteriaStartedAt); return result; },
+      error => { recordStartPhase("head_criteria", headCriteriaStartedAt, error ?? "thrown"); throw error; },
+    );
     criteria = resolved.criteria;
     if (resolved.source) source = resolved.source;
     taskDeclaredFiles = resolved.taskDeclaredFiles;
@@ -2222,7 +2235,11 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
     // origin/main HAS qualifies; one absent from both, or a TRIAGE-/main-repair/unfiled identity, keeps today's path.
     if (taskId !== UNFILED_RUN_SENTINEL && resolved.divergence === undefined && resolved.criteria.length === 0 &&
       resolved.taskRisk === undefined && resolved.taskBudgetUsd === undefined) {
-      const atMain = await timedStart("main_criteria", () => resolvePlanCriteriaAtHeadAsync(body, subjectRepoDir, "plan/tasks.yaml", "origin/main"));
+      const mainCriteriaStartedAt = systemClock.now();
+      const atMain = await resolvePlanCriteriaAtHeadAsync(body, subjectRepoDir, "plan/tasks.yaml", "origin/main").then(
+        result => { recordStartPhase("main_criteria", mainCriteriaStartedAt); return result; },
+        error => { recordStartPhase("main_criteria", mainCriteriaStartedAt, error ?? "thrown"); throw error; },
+      );
       ownTaskRecordMissing = headLacksOwnTaskRecord(resolved, atMain);
     }
   }
