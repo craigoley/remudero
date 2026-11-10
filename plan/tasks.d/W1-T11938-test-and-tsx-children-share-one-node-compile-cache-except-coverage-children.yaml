@@ -1,0 +1,40 @@
+- id: W1-T11938
+  title: Test and tsx child processes share one Node compile cache directory so repeated process starts skip V8 parse and compile, and coverage children keep it disabled
+  repo: remudero
+  depends_on: []
+  priority: 0.6
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # child environment builders for every test run; a wrong cache path can only cost speed, but coverage children must keep it off
+  band_meaning: blast-radius
+  origin: "operator ruling 2026-11-10 go with it (efficiency batch, slim serve, lighten preflight, janitor)"
+  plan_refs:
+    - W1-T11098
+    - W1-T11818
+  files:
+    - src/lib/test-slot.ts
+    - scripts/list-rule-suites.mjs
+    - test/ci/test-children-share-one-compile-cache.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: The child environment for test and rule-suite children sets NODE_COMPILE_CACHE to one declared directory on the scratch disk
+      proof: "grep: W1-T11938 criterion 1 in test/ci/test-children-share-one-compile-cache.test.ts"
+    - claim: Coverage children still disable the cache, as scripts/test-with-retry.mjs does today
+      proof: "grep: W1-T11938 criterion 2 in test/ci/test-children-share-one-compile-cache.test.ts"
+    - claim: A before and after measurement of a repeated child start on this host is recorded in the PR body
+      proof: "grep: W1-T11938 criterion 3 in test/ci/test-children-share-one-compile-cache.test.ts"
+    - claim: An unusable cache directory never fails a child, it runs uncached
+      proof: "grep: W1-T11938 criterion 4 in test/ci/test-children-share-one-compile-cache.test.ts"
+  rationale: |
+    OBSERVED 2026-11-10 (preflight research): Node's compile cache is enabled nowhere; NODE_COMPILE_CACHE appears only inside coverageChildEnvironment, which disables it (scripts/test-with-retry.mjs:309). Every preflight, rule suite and test child re-parses and compiles the same modules; about 9 preflights, 20 node --test and 35 run-task processes were live at once.
+    - Effect: avoidable CPU on every process start; estimate 10 to 20 percent of child startup, unmeasured.
+  design: |
+    Set NODE_COMPILE_CACHE for the non-coverage test and rule-suite child environments to one directory under the scratch disk, created on demand. NOT IN SCOPE: tsx's own transform cache and the node_modules link layout.
+  falsifier: |
+    Delete the variable and criterion 1 must fail. Set it for coverage children and criterion 2 must fail. Restore and require all four to pass.
+  note: |
+    reservation hand-off: run-unfiled-1794269694199 -> run-unfiled-1794269694199
+    Reserved with rmd next-task-id (--count 9 and 1 on run-unfiled-1794269694199). Hand-built by the operator's choice (rulings 2026-11-10: slim serve, lighten preflight with no hard caps, janitor trims old worktrees). Check refs/rmd-dispatch/<id> and any run branch before building.

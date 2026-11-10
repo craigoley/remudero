@@ -1,0 +1,38 @@
+- id: W1-T11922
+  title: The flow report times the stage from a PR head's CI turning green to the sweep first observing it review-eligible, per class, so the wait before the review queue's clock starts is measured and a regression of it is filed like any other stage
+  repo: remudero
+  depends_on: []
+  priority: 1.3
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: medium # one concern: one more measured stage in the daily flow report; the existing stages, the baselines and the filing path are unchanged
+  origin: operator-session#merge-latency-1109
+  plan_refs:
+    - W1-T5904
+  files:
+    - src/lib/flow-gardener.ts
+    - test/the-flow-report-times-ci-green-to-review-eligible-as-its-own-stage.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: For each merged PR with both a green ci-gate for its head and a sweep.review_eligible row for that head, the report carries the minutes between them under the stage ci_green_to_review_eligible, with p50, p90, count and the rolling baseline, per class
+      proof: "unit test: test/the-flow-report-times-ci-green-to-review-eligible-as-its-own-stage.test.ts"
+    - claim: A PR missing either instant, or whose eligible row precedes CI green, is left out of the stage and counted nowhere as zero
+      proof: "grep: W1-T11922 criterion 2 in test/the-flow-report-times-ci-green-to-review-eligible-as-its-own-stage.test.ts"
+    - claim: The new stage files a regression task through the existing machine-filing path under the same one-open-task rule, and every existing stage's numbers are identical with the change and without it
+      proof: "grep: W1-T11922 criterion 3 in test/the-flow-report-times-ci-green-to-review-eligible-as-its-own-stage.test.ts"
+  rationale: |
+    OBSERVED 2026-11-09: review_queue_wait (sweep.review_eligible to sweep.review_admitted) reads a median of 1 minute across 137 PRs, so reviews look fast. But the eligible row is the sweep's OBSERVATION ("not PR creation time or proof of the first-ever eligible instant", sweep.ts observeReviewEligibility), so the wait before the clock starts is not measured anywhere.
+    - Measured on the 12 most recent merged PRs that have both instants: CI green to the first review_eligible row has a median of 13.8 minutes, p90 34.7, max 58.5. One PR (#17480) sat 29 minutes, then 75 more before admission, then took a 4 minute review.
+    - The flow gardener already files one task per regressed stage, so adding the stage makes the fix automatic once it regresses, without guessing a cause now. Candidate causes are not decided here: sweep pass length on a loaded host, the webhook wake not firing for a check_run, or a disposition rule.
+  design: |
+    - The flow gardener already reads GitHub's CI run timings for ci_wall_clock; take the head's ci-gate completion from the same read and pair it with the earliest sweep.review_eligible row for that head at or after it.
+    - Emit the stage in the same table shape as the others and let the existing baseline and verdict code judge it.
+    - NOT IN SCOPE: the sweep's cadence, the wake, review admission order (already oldest-first), review capacity, and the review_queue_wait definition.
+  falsifier: |
+    Drop the stage: criterion 1 must fail. Count a missing instant as zero: criterion 2 must fail. Change an existing stage's p50 or skip the filing path: criterion 3 must fail. Restore and require all three.
+  note: |
+    reservation hand-off: run-unfiled-1794261715248
+    Success is the next flow report carrying the stage with a real count, after which the gardener files its own follow-up if the lag regresses. W1-T11923 was reserved on this branch and is intentionally unused.

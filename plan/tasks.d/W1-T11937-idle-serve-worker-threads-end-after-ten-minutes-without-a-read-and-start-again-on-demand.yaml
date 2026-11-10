@@ -1,0 +1,40 @@
+- id: W1-T11937
+  title: Serve heavy and slow-lane worker threads end after ten minutes without a read and start again on demand, returning their heap while the console is not in use
+  repo: remudero
+  depends_on: []
+  priority: 0.5
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # serve worker lifecycle; a thread that does not restart would leave a view empty
+  band_meaning: blast-radius
+  origin: "operator ruling 2026-11-10 go with it (efficiency batch, slim serve, lighten preflight, janitor)"
+  plan_refs:
+    - W1-T11933
+    - W1-T11934
+  files:
+    - src/lib/read-model-worker.ts
+    - src/lib/read-model-slow-lane.ts
+    - test/lib/idle-serve-workers-end-and-restart-on-demand.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: A worker thread with no read for the declared idle window ends and releases its heap
+      proof: "grep: W1-T11937 criterion 1 in test/lib/idle-serve-workers-end-and-restart-on-demand.test.ts"
+    - claim: The first read after the thread ended starts it again and is answered, with the first-paint latency of the restart recorded in a ledger row
+      proof: "grep: W1-T11937 criterion 2 in test/lib/idle-serve-workers-end-and-restart-on-demand.test.ts"
+    - claim: A thread running a build is never ended mid-build and the idle window is a declared constant with a BACKSTOP comment
+      proof: "grep: W1-T11937 criterion 3 in test/lib/idle-serve-workers-end-and-restart-on-demand.test.ts"
+    - claim: A thread that fails to restart reports the failure to the caller and the next read retries it
+      proof: "grep: W1-T11937 criterion 4 in test/lib/idle-serve-workers-end-and-restart-on-demand.test.ts"
+  rationale: |
+    OBSERVED 2026-11-10 (serve research): serve RSS is about 3.8 GB against a 0.6 GB main heap; worker heaps are views 858 MB, slow-lane 783 MB, board-worker 252 MB, read-model-worker 231 MB. Earlier evidence in the box CPU and memory plan says ending a worker returns about 90 percent of its heap and that bundling workers saved no RSS.
+    - Effect: about 2 GB held for a console nobody is using, on a 32 GB host at 18 GB used.
+  design: |
+    Add idle termination with respawn on demand for the heavy views and slow-lane threads after 10 minutes without a read (BACKSTOP constant). Cost to the operator: the first console paint after idle takes 0.3 to 5 s longer. NOT IN SCOPE: static snapshots (stage 2, operator ruling) and the board and read-model workers that serve live clients.
+  falsifier: |
+    Never end the thread and criterion 1 must fail. End a thread mid-build and criterion 3 must fail. Drop the respawn and criteria 2 and 4 must fail. Restore and require all four to pass.
+  note: |
+    reservation hand-off: run-unfiled-1794269694199 -> run-unfiled-1794269694199
+    Reserved with rmd next-task-id (--count 9 and 1 on run-unfiled-1794269694199). Hand-built by the operator's choice (rulings 2026-11-10: slim serve, lighten preflight with no hard caps, janitor trims old worktrees). Check refs/rmd-dispatch/<id> and any run branch before building.

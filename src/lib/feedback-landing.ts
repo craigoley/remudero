@@ -27,6 +27,7 @@ import { dirname, join, relative } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { assertLiveWriteAllowed } from "./live-write-guard.js";
 import { loadPlanFromYaml } from "./plan.js";
+import { planReconcilePrBody, planReconcileProofTemplate } from "./plan-reconcile-batch.js";
 import { resolveRepoLayout } from "./repo-layout.js";
 import { slug as kebabSlug } from "./feedback-docket.js";
 import { mergeFeedbackRecord, type FeedbackRecordMergeDecision } from "./feedback-record-merge.js";
@@ -1747,7 +1748,7 @@ function planReconcileLandingKindSteps(
     {
       family: "plan-reconcile",
       commitMessage: (files) => [PLAN_RECONCILE_LANDING_PR_TITLE, "", "Automated plan-status reconciliation from the measurement cadence.", "", ...files.map((file) => `- ${file}`)].join("\n"),
-      prBody: (files, content) => ["Reconciles credited task shards whose decorative status is still queued.", "", "The change is derived from the existing credit projection and staged through the scratch-index landing bridge.", "", "## Acceptance", ...files.map((file) => `- ${file} is reconciled without a daemon checkout write | ${landingProof(file, `grep: ^  status: merged$ in ${file}`, content)}`)].join("\n"),
+      prBody: (files, content) => planReconcilePrBody(files, (file) => landingProof(file, planReconcileProofTemplate(file), content)),
     },
     root,
     opts,

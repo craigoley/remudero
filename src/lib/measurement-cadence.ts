@@ -1,5 +1,6 @@
 import { stampMechanicalAsk } from "./inbox-retirement.js";
 import { reconcilePlan } from "./plan-reconcile.js";
+import { takePlanReconcileBatch } from "./plan-reconcile-batch.js";
 import { execFile, execFileSync, spawn } from "node:child_process";
 import { setPriority as osSetPriority } from "node:os";
 import { promisify } from "node:util";
@@ -1599,11 +1600,13 @@ export function buildPlanReconcileCadenceInput(deps: PlanReconcileCadenceInputOp
     threshold: deps.threshold ?? 10,
     land: (writes) => {
       const { landable, held } = planReconcileLintHold(deps.lint)(deps.checkoutRoot, records, writes);
-      const inputs = landable.map((write) => {
-        const path = byId.get(write.taskId);
-        if (path === undefined) throw new Error(`plan reconciliation could not resolve shard ${write.taskId}`);
-        return { relPath: relative(deps.checkoutRoot, path), content: write.text };
-      });
+      const relPathOf = (taskId: string): string => {
+        const path = byId.get(taskId);
+        if (path === undefined) throw new Error(`plan reconciliation could not resolve shard ${taskId}`);
+        return relative(deps.checkoutRoot, path);
+      };
+      // W1-T11859: one bounded batch per fire; the next fire reads the merged flips as no longer drifted and takes the next.
+      const inputs = takePlanReconcileBatch(landable, (write) => relPathOf(write.taskId)).map((write) => ({ relPath: relPathOf(write.taskId), content: write.text }));
       if (inputs.length > 0) deps.land(inputs);
       return { held, landed: inputs.length };
     },

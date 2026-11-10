@@ -1,0 +1,36 @@
+- id: W1-T11935
+  title: The serve board worker projects every 15 to 30 seconds while no status or event-stream client is connected and returns to its 3 second interval within one tick of a client connecting
+  repo: remudero
+  depends_on: []
+  priority: 0.6
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # board-worker.ts timing only; the board content and its ledger scan are unchanged, but it feeds the status stream
+  band_meaning: blast-radius
+  origin: "operator ruling 2026-11-10 go with it (efficiency batch, slim serve, lighten preflight, janitor)"
+  plan_refs:
+    - W1-T11817
+  files:
+    - src/lib/board-worker.ts
+    - test/lib/the-board-worker-backs-off-while-no-client-is-connected.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: With no connected client the board worker projects no more often than the declared idle interval
+      proof: "grep: W1-T11935 criterion 1 in test/lib/the-board-worker-backs-off-while-no-client-is-connected.test.ts"
+    - claim: A client connecting returns the interval to the active 3 seconds within one tick and the first snapshot it reads is current
+      proof: "grep: W1-T11935 criterion 2 in test/lib/the-board-worker-backs-off-while-no-client-is-connected.test.ts"
+    - claim: The idle interval is a declared constant with a BACKSTOP comment, and the board snapshot content is unchanged
+      proof: "grep: W1-T11935 criterion 3 in test/lib/the-board-worker-backs-off-while-no-client-is-connected.test.ts"
+  rationale: |
+    OBSERVED 2026-11-10 (serve research): the board worker runs setInterval at BOARD_PROJECTION_INTERVAL_MS 3000 (src/lib/board-worker.ts:13 and :111), a ledger stat plus snapshot, with no client connected.
+    - Effect: a steady background cost on the shared host; it feeds only the status stream and the console.
+  design: |
+    Tie the projection interval to client presence already tracked by serve (SSE and status connections): idle interval 15 to 30 s (BACKSTOP constant), active 3 s. A connect triggers an immediate projection if the snapshot is older than the active interval. NOT IN SCOPE: replacing the interval with ledger-offset triggers.
+  falsifier: |
+    Delete the backoff and criterion 1 must fail. Never restore the active interval on connect and criterion 2 must fail. Restore and require all three to pass.
+  note: |
+    reservation hand-off: run-unfiled-1794269694199 -> run-unfiled-1794269694199
+    Reserved with rmd next-task-id (--count 9 and 1 on run-unfiled-1794269694199). Hand-built by the operator's choice (rulings 2026-11-10: slim serve, lighten preflight with no hard caps, janitor trims old worktrees). Check refs/rmd-dispatch/<id> and any run branch before building.

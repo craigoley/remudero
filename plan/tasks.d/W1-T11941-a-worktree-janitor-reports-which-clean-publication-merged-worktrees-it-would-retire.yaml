@@ -1,0 +1,44 @@
+- id: W1-T11941
+  title: A worktree janitor lists every registered worktree that is clean, a day old and published, and writes a would-retire ledger row with its reason, deleting nothing
+  repo: remudero
+  depends_on: []
+  priority: 0.6
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # new daemon-tick code that reads every worktree root; shadow only, it writes ledger rows and never removes a path
+  band_meaning: blast-radius
+  origin: "operator ruling 2026-11-10 go with it (efficiency batch, slim serve, lighten preflight, janitor)"
+  plan_refs:
+    - W1-T3378
+    - W1-T5669
+    - W1-T7719
+  files:
+    - src/lib/worktree-retire.ts
+    - src/lib/daemon.ts
+    - test/daemon/a-worktree-janitor-reports-what-it-would-retire.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: The janitor takes its roots from the operator checkout worktree list, not a hard-coded list, and writes one would-retire ledger row per qualifying worktree naming the reason
+      proof: "grep: W1-T11941 criterion 1 in test/daemon/a-worktree-janitor-reports-what-it-would-retire.test.ts"
+    - claim: A dirty tree, one under 24 hours old, one with a refs/rmd-dispatch claim or an open run-<id>-* PR, and one with unpushed commits are each refused with a named reason and no would-retire row
+      proof: "grep: W1-T11941 criterion 2 in test/daemon/a-worktree-janitor-reports-what-it-would-retire.test.ts"
+    - claim: Replayed against the recorded candidate list it selects the 20 Tier A paths and none of the other paths, and it never selects a container /home/node registration
+      proof: "grep: W1-T11941 criterion 3 in test/daemon/a-worktree-janitor-reports-what-it-would-retire.test.ts"
+    - claim: It removes no path and runs no git worktree remove, branch delete or prune in this mode, and a registration whose path is missing is only reported
+      proof: "grep: W1-T11941 criterion 4 in test/daemon/a-worktree-janitor-reports-what-it-would-retire.test.ts"
+    - claim: The daemon tick calls the new module so it runs on every tick
+      proof: "grep: reportRetirableWorktrees( in src/lib/daemon.ts"
+  rationale: |
+    OBSERVED 2026-11-10 (janitor inventory): 97 registered worktrees across .claude/worktrees (38), rmd-mint (25), rmd-work (11), rmd-state2 (4), Remudero/worktrees (3), /mnt/scratch/hand (4); about 100 GiB of checkouts and scratch on a host whose root disk is 86 percent used. sweepReclaimableArtifacts (src/lib/disk-artifact-reclaim.ts, called from src/lib/daemon.ts) reclaims only coverage and node_modules inside config.root and never prunes worktrees; nothing retires the old checkouts, 39 days at the oldest. The operator ruled 2026-11-10: always trim old worktrees, the janitor should help.
+    - Mechanism: no retirement path covers the roots where old checkouts sit; git branch -r --merged reads not-merged for squash merges, so credit must come from the Remudero-Task trailer on origin/main.
+    - Effect: disk pressure and background find and git scans on every tick.
+  design: |
+    New src/lib/worktree-retire.ts wired beside sweepReclaimableArtifacts: enumerate worktrees from git worktree list, classify clean, at least 24 hours old, no claim ref, no open PR on a run-<id>-* head, no unpushed commits, and task credited by the Remudero-Task trailer on origin/main or its branch fully pushed; write would-retire rows with the reason. SHADOW ONLY in this task: the first live pass needs the operator's exact-path approval and a follow-up task. NOT IN SCOPE: deleting anything, container paths, scratch-clone directories outside git worktree list.
+  falsifier: |
+    Make it delete a path and criterion 4 must fail. Drop the unpushed-commit check and criterion 2 must fail. Hard-code the roots and criterion 1 must fail. Restore and require all four to pass.
+  note: |
+    reservation hand-off: run-unfiled-1794269694199 -> run-unfiled-1794269694199
+    Reserved with rmd next-task-id (--count 9 and 1 on run-unfiled-1794269694199). Hand-built by the operator's choice (rulings 2026-11-10: slim serve, lighten preflight with no hard caps, janitor trims old worktrees). Check refs/rmd-dispatch/<id> and any run branch before building.

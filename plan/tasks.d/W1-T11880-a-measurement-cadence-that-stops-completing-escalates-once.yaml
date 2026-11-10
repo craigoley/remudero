@@ -1,0 +1,52 @@
+- id: W1-T11880
+  title: A measurement cadence whose newest completed run is over 24 hours old escalates once per episode when it fails again, instead of failing silently for weeks
+  repo: remudero
+  depends_on: []
+  priority: 2
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # Rule 19: one concern, the stalled-cadence alarm; it spans the escalation and its dedup key, the daemon's failure handler that calls it, and the boot wiring that supplies its context
+  origin: operator-session#reconcile-gap-2026-11-09
+  plan_refs:
+    - W1-T1259
+    - W1-T11859
+    - W1-T11860
+  files:
+    - src/lib/escalation-catalogue.ts
+    - src/lib/ledger.ts
+    - src/lib/daemon.ts
+    - src/cli/commands/daemon.ts
+    - test/daemon/a-measurement-cadence-that-stops-completing-escalates-once.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: When a measurement-cadence run fails and the newest `measurement_cadence.ran` row is more than 24 hours old, one escalation issue is opened naming the newest completed run, the hours since it, and the failure text bounded to 1,000 characters (its start and its end)
+      proof: "unit test: test/daemon/a-measurement-cadence-that-stops-completing-escalates-once.test.ts"
+    - claim: A failure while the newest completed run is within 24 hours, or with no completed run on record, opens nothing
+      proof: "grep: W1-T11880 criterion 2 in test/daemon/a-measurement-cadence-that-stops-completing-escalates-once.test.ts"
+    - claim: One episode escalates once however many fires fail inside it, and a new completed run followed by a new stall opens one more
+      proof: "grep: W1-T11880 criterion 3 in test/daemon/a-measurement-cadence-that-stops-completing-escalates-once.test.ts"
+    - claim: An unreadable ledger or a throwing issue gateway never throws into the failure handler and never reads as a stall, and the dedup marker is written whether or not delivery succeeded
+      proof: "grep: W1-T11880 criterion 4 in test/daemon/a-measurement-cadence-that-stops-completing-escalates-once.test.ts"
+    - claim: The daemon boot supplies the escalation to the cadence failure handler
+      proof: "grep: escalateMeasurementCadenceStall( in src/cli/commands/daemon.ts"
+    - claim: Every place the daemon logs a cadence run failure reports it to that handler
+      proof: "grep: cadenceStallCheck in src/lib/daemon.ts"
+  rationale: |
+    OBSERVED 2026-11-09 (Azure host ledger union, scanned from 2026-10-20, and `gh`): no `measurement_cadence.ran` row exists after 2026-10-25, 15 days. `run_failed` rows fill the gap on most days (8 on 2026-10-31, 8 on 2026-11-02, 6 on 2026-11-03), and a title search for "measurement cadence" finds no escalation issue after 2026-09-10. Nobody was told.
+    - The causes changed while the silence held, so no cause-specific alarm would have caught it: 8 fires refused by the pre-push shard census (2026-10-27 to 2026-10-30), 12 refused for an oversized pull-request body (2026-11-03 to 2026-11-08, W1-T11859), and several children that exited without a result.
+    - A cadence reports `ran` only when every rung completes, and one failing rung (the plan-status landing) discards the rest of the report, so the absence of a `ran` row is the one signal that survives any cause.
+    - The escalation catalogue already has the shape: `escalateCrashLoop` and `escalatePostReviewStall` dedup on an episode key written to the ledger whether or not delivery succeeded, and a marker step the escalation reads back must be registered in DECISION_RELEVANT_LEDGER_STEPS or rotation erases it.
+  design: |
+    - `escalateMeasurementCadenceStall` in escalation-catalogue.ts, called with the failure's message. It reads the newest completed run through `latestMeasurementRows(stateDir, 1)` (already unreadable-aware: an unreadable ledger returns no verdict, never "never measured"). No row, an unreadable ledger, or a row within `MEASUREMENT_CADENCE_STALL_MS` (24 hours, four fires at the 360-minute policy floor) opens nothing.
+    - Past the bound it opens one BLOCKED escalation whose body names the newest completed run, the hours since, and the failure text cut to its first 300 and last 600 characters (a command-line failure ends with its cause).
+    - Dedup is an episode key: a `measurement_cadence.stalled.escalated` ledger row carrying `episode_last_ran` (the newest completed run's timestamp). A prior marker with the same value skips. A new completed run changes the value, so the next stall escalates again. The marker is written whether or not delivery succeeded, as `escalateCircuitBreak` explains. The step is added to DECISION_RELEVANT_LEDGER_STEPS in ledger.ts, because this function reads it back.
+    - daemon.ts: the four places that log `measurement_cadence.run_failed` call one helper, `cadenceStallCheck`, which invokes an optional `escalateCadenceStall` dependency inside a try/catch so a failing alarm can never break the failure handler. The check runs only on a failure, so the whole-union read happens at most once per fire, never per tick. cli/commands/daemon.ts supplies the dependency with the target repository, state directory, ledger path and run id.
+    - NOT IN SCOPE: why any single fire fails (W1-T11859, W1-T11860), the `ran` row's contents, the `escalate` policy flag, and the policy schema: the 24-hour bound is a named constant, not a new policy key.
+  falsifier: |
+    Drop the age check (escalate on every failure): criterion 2 must see an issue opened for a fresh cadence. Drop the dedup (open on every stalled failure): criterion 3 must see two issues in one episode. Key the dedup on the failure text instead of the newest completed run: criterion 3 must see a second issue after a recovery and a new stall, or a duplicate when the cause changes. Treat an unreadable ledger as a stall: criterion 4 must see an issue opened with no evidence. Restore each and require all four.
+  note: |
+    reservation hand-off: run-unfiled-1794237557000 -> run-unfiled-1794237557000
+    Filed from the plan-status reconcile investigation (W1-T11859, W1-T11860, #17516). Operator instruction 2026-11-09: "file the alarm task". The persistent-drift alarm proposed earlier is generalised here: the signal that survives every cause is a cadence that stopped completing, not a drift count.

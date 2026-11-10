@@ -339,6 +339,60 @@ function linkPackages(seedModules: string, dest: string): void {
   }
 }
 
+/** Positive identity of a link-only materialization this module wrote: its marker names this
+ * directory's owner and a ready generation, and every entry resolves into that generation (or is a
+ * lockfile-declared workspace link). Anything unrecognized answers false and is left untouched. */
+function ownLinkOnlyMaterialization(owner: string, modules: string, lockLinks: Set<string>): boolean {
+  try {
+    if (!lstatSync(modules).isDirectory()) return false;
+    const marker = JSON.parse(readFileSync(join(modules, CONSUMER_MARKER), "utf8")) as { version?: unknown; key?: unknown; checkout?: unknown; seed?: unknown; method?: unknown };
+    if (marker.version !== VERSION || marker.method !== "readonly-links" || marker.checkout !== owner || typeof marker.key !== "string" || typeof marker.seed !== "string" || !isAbsolute(marker.seed)) return false;
+    const ready = JSON.parse(readFileSync(join(marker.seed, "ready.json"), "utf8")) as SeedMetadata;
+    if (ready.version !== VERSION || ready.key !== marker.key) return false;
+    verifyImmutableGeneration(marker.seed, ready.files);
+    const seedModules = join(marker.seed, "node_modules") + sep;
+    const intoSeed = (path: string): boolean => realpathSync(path).startsWith(seedModules);
+    const linked = (path: string, name: string): boolean => lstatSync(path).isSymbolicLink() && (intoSeed(path) || lockLinks.has(name));
+    for (const name of readdirSync(modules)) {
+      const path = join(modules, name);
+      if (name === CONSUMER_MARKER || name === ".package-lock.json" || name === ".rmd-install-hash") { if (!lstatSync(path).isFile()) return false; continue; }
+      if (name === ".bin") {
+        if (!lstatSync(path).isDirectory() || readdirSync(path).some(bin => !linked(join(path, bin), ""))) return false;
+        continue;
+      }
+      if (name.startsWith("@") && lstatSync(path).isDirectory()) {
+        if (readdirSync(path).some(pkg => !linked(join(path, pkg), `${name}/${pkg}`))) return false;
+      } else if (!linked(path, name)) return false;
+    }
+    return true;
+  } catch {
+    // Deliberate skip: unreadable or foreign metadata is not ours, so the caller leaves it alone.
+    return false;
+  }
+}
+
+/** Proof priming replaces only link-only installs it can identify as its own, root and workspaces together. */
+function removeOwnLinkOnlyMaterialization(checkout: string, dest: string): boolean {
+  const lock = JSON.parse(readFileSync(join(checkout, "package-lock.json"), "utf8")) as { packages?: Record<string, { link?: boolean; resolved?: string }> };
+  const links = (workspace: string): Set<string> => {
+    const prefix = workspace ? `${workspace}/node_modules/` : "node_modules/";
+    return new Set(Object.entries(lock.packages ?? {}).filter(([name, pkg]) => pkg.link && name.startsWith(prefix)).map(([name]) => name.slice(prefix.length)));
+  };
+  const targets: Array<[string, string]> = [[checkout, dest]];
+  for (const name of Object.keys(lock.packages ?? {})) {
+    if (!name || name.split("/").includes("node_modules") || isAbsolute(name) || name.split("/").includes("..")) continue;
+    const modules = join(checkout, name, "node_modules");
+    if (lstatExists(modules)) targets.push([join(checkout, name), modules]);
+  }
+  if (!targets.every(([owner, modules]) => ownLinkOnlyMaterialization(owner, modules, links(relative(checkout, owner))))) return false;
+  for (const [, modules] of targets) { setWritable(modules, true); rmSync(modules, { recursive: true, force: true }); }
+  return true;
+}
+
+function lstatExists(path: string): boolean {
+  try { lstatSync(path); return true; } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return false; throw error; }
+}
+
 /** Existing installs, including dangling links, are never replaced. Publication fails if a concurrent installer wins. */
 export function materializeDependencySeed(checkout: string, opts: DependencySeedOptions = {}): DependencySeedResult {
   checkout = realpathSync(checkout);
@@ -347,6 +401,8 @@ export function materializeDependencySeed(checkout: string, opts: DependencySeed
   try { lstatSync(dest); occupied = true; } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
   // Keep the validation outside the ENOENT catch: an occupied dangling link must never fall
   // through to provisioning, which could otherwise publish through another owner's path.
+  // The one exception: a proof prime replaces a link-only install of its own, because a proof run must not borrow tools from a seed.
+  if (occupied && opts.proof && removeOwnLinkOnlyMaterialization(checkout, dest)) occupied = false;
   if (occupied) { verifyExistingDependencies(checkout, dest, opts); return { status: "present" }; }
   const root = opts.root ?? configuredDependencySeedRoot() ?? defaultDependencySeedRoot();
   makeStore(root);

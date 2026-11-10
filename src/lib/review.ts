@@ -6732,9 +6732,7 @@ export function applyVerdictStability(
       summary: passSummary(
         criteria.length,
         computed.keywordOnly,
-        // W1-T305: the suppressed rebuild carries the SAME partial-execution facts `computed`
-        // already measured (suppression only replaces `state`/`criteria`/`summary`, never
-        // re-executes anything), so a re-review's "PARTIAL" tag survives verdict stability too.
+        // W1-T305: the suppressed rebuild keeps `computed`'s partial-execution facts (nothing re-executes).
         computed.partiallyExecuted
           ? { executed: computed.executedProofCount ?? 0, executable: computed.executableProofCount ?? 0 }
           : undefined,
@@ -6758,12 +6756,32 @@ export type ReviewStatusHistory =
 
 export type ReviewStatusHistoryReader = (owner: string, repo: string, prUrl: string, headSha: string) => Promise<ReviewStatusHistory>;
 
+/** Flattens legacy slurped-page fixtures. */
 function rowsFromPaginatedApi(value: unknown): unknown[] {
   if (!Array.isArray(value)) throw new Error("GitHub returned a non-list response");
   if (value.every((row) => row === null || typeof row !== "object" || Array.isArray(row))) {
     return value.flatMap((row) => rowsFromPaginatedApi(row));
   }
   return value;
+}
+
+/** BACKSTOP: over 1,000 rows is unreadable, never truncated. */
+const REVIEW_HISTORY_MAX_PAGES = 10;
+const REVIEW_HISTORY_PAGE_SIZE = 100;
+
+/** Plain page reads: the slurp flag needs a newer host CLI. */
+async function readHistoryPages(
+  readJson: (args: string[], options: { fresh: true }) => unknown | Promise<unknown>,
+  endpoint: string,
+): Promise<unknown[]> {
+  const rows: unknown[] = [];
+  for (let page = 1; page <= REVIEW_HISTORY_MAX_PAGES; page += 1) {
+    const value = await readJson(["api", `${endpoint}?per_page=${REVIEW_HISTORY_PAGE_SIZE}&page=${page}`], { fresh: true });
+    const pageRows = rowsFromPaginatedApi(value);
+    rows.push(...pageRows);
+    if (pageRows.length < REVIEW_HISTORY_PAGE_SIZE) return rows;
+  }
+  throw new Error(`GitHub history still full after ${REVIEW_HISTORY_MAX_PAGES} pages`);
 }
 
 /** Read the shared status history and the same-PR review bodies that explain its failures. */
@@ -6778,9 +6796,7 @@ export async function readReviewStatusHistory(
   try {
     const number = /^https:\/\/github\.com\/[^/]+\/[^/]+\/pull\/([1-9]\d*)\/?$/.exec(prUrl)?.[1];
     if (number === undefined) throw new Error("PR number is unavailable from review URL");
-    const statuses = rowsFromPaginatedApi(await readJson([
-      "api", "--paginate", "--slurp", `repos/${owner}/${repo}/commits/${headSha}/statuses?per_page=100`,
-    ], { fresh: true }));
+    const statuses = await readHistoryPages(readJson, `repos/${owner}/${repo}/commits/${headSha}/statuses`);
     if (statuses.some((row) => typeof row !== "object" || row === null ||
         typeof (row as Record<string, unknown>).context !== "string" ||
         typeof (row as Record<string, unknown>).state !== "string" ||
@@ -6791,7 +6807,7 @@ export async function readReviewStatusHistory(
       (row as Record<string, unknown>).context === REVIEW_CONTEXT &&
       String((row as Record<string, unknown>).state).toLowerCase() === "failure");
     const reviews = hasFailure
-      ? rowsFromPaginatedApi(await readJson(["api", "--paginate", "--slurp", `repos/${owner}/${repo}/pulls/${number}/reviews?per_page=100`], { fresh: true }))
+      ? await readHistoryPages(readJson, `repos/${owner}/${repo}/pulls/${number}/reviews`)
       : [];
     if (reviews.some((row) => typeof row !== "object" || row === null ||
         typeof (row as Record<string, unknown>).commit_id !== "string" ||

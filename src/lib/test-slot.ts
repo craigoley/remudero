@@ -22,7 +22,7 @@
  */
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { chmodSync, closeSync, constants, existsSync, fchmodSync, fstatSync, ftruncateSync, futimesSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readlinkSync, readSync, realpathSync, renameSync, statSync, unlinkSync, writeSync, type Stats } from "node:fs";
+import { chmodSync, closeSync, constants, existsSync, fchmodSync, fstatSync, ftruncateSync, futimesSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readlinkSync, readSync, realpathSync, renameSync, statfsSync, statSync, unlinkSync, writeSync, type Stats } from "node:fs";
 import { availableParallelism, hostname, loadavg, tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as sleepAsync } from "node:timers/promises";
@@ -356,7 +356,7 @@ export interface TestSlotHolder {
   /** Sticky once work uses a marker: withdrawing a cadence must not restore parent-pid-only recovery. */
   workIdentity?: "reservation-marker-v1";
   /** Scope observed before publication (dedicated: only our group and our own ancestors); shared or unproven never ends. */
-  cgroupScope?: { path: string; dedicated: boolean; reason?: string };
+  cgroupScope?: { path: string; dedicated: boolean; reason?: string; dev?: number; ino?: number; cgroupNs?: string };
 }
 
 /** Identity a complete run monitor must name in its terminal evidence. */
@@ -415,6 +415,10 @@ export interface ReservedTreeProbeHost {
   list?: () => string[];
   read?: (path: string) => string;
   readCgroup?: (path: string) => string;
+  /** Test seam for the descriptor-pinned cgroup v2 directory read. The default opens it with O_NOFOLLOW. */
+  withCgroupDirectory?: <T>(path: string, use: (pinnedPath: string, identity: { dev: number; ino: number }) => T) => T;
+  cgroupNamespace?: string;
+  ownerUid?: number;
 }
 
 const goneProcess = (error: unknown): boolean => ["ENOENT", "ESRCH"].includes(String((error as NodeJS.ErrnoException)?.code));
@@ -422,6 +426,21 @@ const dedicatedScopePath = (path: unknown): path is string => typeof path === "s
   /^\/(?:[^/\0\n]+\/)*[^/\0\n]+\.scope$/.test(path) && !path.split("/").some(part => part === "." || part === "..");
 /** A systemd-logind login scope: sshd, the shell and the agent CLI are the owner's ancestors yet outlive it (W1-T10870). */
 const loginSessionScopePath = (path: string): boolean => /\/user-[0-9]+\.slice\/session-[A-Za-z0-9]+\.scope$/.test(path);
+
+/** Keep the directory descriptor open while its identity and cgroup.events are observed. */
+function withCgroupDirectory<T>(path: string, host: ReservedTreeProbeHost,
+  use: (pinnedPath: string, identity: { dev: number; ino: number }) => T): T {
+  if (host.withCgroupDirectory) return host.withCgroupDirectory(path, use);
+  const fullPath = "/sys/fs/cgroup" + path;
+  const fd = openSync(fullPath, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+  try {
+    const st = fstatSync(fd), pinnedPath = "/proc/self/fd/" + fd;
+    if (!st.isDirectory() || realpathSync(pinnedPath) !== fullPath || statfsSync(pinnedPath).type !== 0x63677270) {
+      throw new Error("cgroup directory identity/backend unavailable");
+    }
+    return use(pinnedPath, { dev: st.dev, ino: st.ino });
+  } finally { closeSync(fd); }
+}
 
 /**
  * Record our cgroup v2 membership. A scope is dedicated when every member is in our process group or is one of our
@@ -460,9 +479,48 @@ export function readTestSlotCgroup(host: ReservedTreeProbeHost = {}): TestSlotHo
       if (member !== undefined && (ancestors ??= ancestorsOfOwner()).has(pid)) continue;
       return { path, dedicated: false, reason: "scope contains another process group" };
     }
-    return { path, dedicated: true };
+    const scope = { path, dedicated: true } as NonNullable<TestSlotHolder["cgroupScope"]>;
+    // Existing membership fixtures model only /proc and cgroup.procs. Keep those as legacy records unless
+    // they explicitly provide the descriptor seam; production writers always take the verified default.
+    if ((host.read !== undefined || host.readCgroup !== undefined) && host.withCgroupDirectory === undefined) return scope;
+    const cgroupNs = host.cgroupNamespace ?? readCgroupNamespace();
+    if (!cgroupNs) return scope;
+    return withCgroupDirectory(path, host, (_pinned, identity) => ({ ...scope, ...identity, cgroupNs }));
   } catch (error) {
     return { path, dedicated: false, reason: `scope dedication unproven: ${String(error)}` };
+  }
+}
+
+/** Probe the exact cgroup v2 tree identity recorded by a dedicated owner. */
+export function probeCgroupIdentity(held: TestSlotHolder, host: ReservedTreeProbeHost = {}): ReservedTreeEvidence {
+  const unknown = (reason: string): ReservedTreeEvidence => ({ state: "unknown", coverage: "cgroup-identity", reason });
+  const scope = held.cgroupScope;
+  if ((host.platform ?? process.platform) !== "linux") return unknown("cgroup identity probe requires Linux cgroup v2");
+  if (!scope || scope.dedicated !== true || !dedicatedScopePath(scope.path) || loginSessionScopePath(scope.path) ||
+      !Number.isSafeInteger(scope.dev) || scope.dev! < 0 || !Number.isSafeInteger(scope.ino) || scope.ino! < 0 ||
+      typeof scope.cgroupNs !== "string" || scope.cgroupNs.length === 0) return unknown("complete dedicated cgroup identity is absent");
+  const uid = host.ownerUid ?? process.getuid?.();
+  if (!sameHost(held.host, (host.hostname ?? hostname)()) || held.ownerUid === undefined || uid === undefined || held.ownerUid !== uid) {
+    return unknown("host or owner uid differs");
+  }
+  const bootId = "bootId" in host ? host.bootId : readBootId();
+  if (!held.bootId || !bootId || held.bootId !== bootId) return unknown("boot identity differs or is unreadable");
+  const cgroupNs = host.cgroupNamespace ?? readCgroupNamespace();
+  if (!cgroupNs || cgroupNs !== scope.cgroupNs) return unknown("cgroup namespace differs or is unreadable");
+  const reservation = testSlotReservationIdentity(held);
+  if (reservation === undefined) return unknown("reservation identity is incomplete");
+  try {
+    return withCgroupDirectory(scope.path, host, (pinnedPath, identity) => {
+      if (identity.dev !== scope.dev || identity.ino !== scope.ino) return unknown("cgroup directory dev/ino changed");
+      const read = host.readCgroup ?? host.read ?? ((path: string) => readFileSync(path, "utf8"));
+      const events = read(pinnedPath + "/cgroup.events");
+      const populations = [...events.matchAll(/^populated ([01])$/gm)];
+      if (populations.length !== 1) return unknown("cgroup.events population is unreadable or unparsable");
+      if (populations[0]![1] === "1") return { state: "live", coverage: "cgroup-identity", reason: "pinned cgroup still reports populated 1" };
+      return { state: "ended", complete: true, coverage: "cgroup-identity", reason: "pinned cgroup reports populated 0", reservation };
+    });
+  } catch (error) {
+    return { state: "unknown", coverage: "cgroup-identity", reason: "pinned cgroup identity unavailable: " + String(error) };
   }
 }
 
@@ -751,14 +809,23 @@ function parentTestSlotClaim(raw: string, dir: string, requirePrivate: boolean, 
   }
 }
 
-/** This process's pid namespace, or undefined off Linux. A sandboxed worker (Codex's bwrap) gets its own. */
-export function readPidNamespace(path = "/proc/self/ns/pid"): string | undefined {
-  try {
-    return readlinkSync(path);
-  } catch {
-    // No /proc (macOS): every holder is judged by the pid probe, exactly as before this field existed.
+/** A namespace link is unavailable off Linux; callers treat absence as unproven, never as a release signal. */
+function readNamespace(path: string): string | undefined {
+  try { return readlinkSync(path); }
+  catch {
+    // Namespace absence is unproven; callers must never treat it as evidence that the owner ended.
     return undefined;
   }
+}
+
+/** This process's pid namespace, or undefined off Linux. A sandboxed worker (Codex's bwrap) gets its own. */
+export function readPidNamespace(path = "/proc/self/ns/pid"): string | undefined {
+  return readNamespace(path);
+}
+
+/** This process's cgroup namespace, or undefined where the kernel does not expose it. */
+export function readCgroupNamespace(path = "/proc/self/ns/cgroup"): string | undefined {
+  return readNamespace(path);
 }
 
 export function readBootId(path: string = BOOT_ID_PATH): string | undefined {
@@ -780,6 +847,10 @@ export function parseTestSlotHolder(raw: string): TestSlotHolder | null {
     const scope = h.cgroupScope;
     if (scope !== undefined && (typeof scope !== "object" || scope === null || typeof scope.path !== "string" || typeof scope.dedicated !== "boolean")) {
       delete h.cgroupScope; // Unproven scope evidence is no evidence: the holder stays live-by-default.
+    } else if (scope !== undefined && (scope.dev !== undefined || scope.ino !== undefined || scope.cgroupNs !== undefined) &&
+      (!Number.isSafeInteger(scope.dev) || scope.dev < 0 || !Number.isSafeInteger(scope.ino) || scope.ino < 0 ||
+        typeof scope.cgroupNs !== "string" || scope.cgroupNs.length === 0)) {
+      delete scope.dev; delete scope.ino; delete scope.cgroupNs; // Partial identity remains legacy scope metadata only.
     }
     return h as TestSlotHolder;
   } catch {
@@ -991,6 +1062,8 @@ export interface TestSlotOptions {
   vmStat?: () => string | undefined;
   /** Exact-tree evidence for a cadence-bearing holder whose owner pid is gone; default {@link probeReservedTree}. */
   treeProbe?: (held: TestSlotHolder) => ReservedTreeEvidence;
+  /** Exact pinned cgroup evidence for a complete foreign-pid-namespace owner identity. */
+  cgroupIdentityProbe?: (held: TestSlotHolder) => ReservedTreeEvidence;
   /** Whether any process holds a mutation guard open; default {@link defaultGuardHolderProbe}. */
   guardProbe?: (guardPath: string, guard: Stats) => GuardHolderEvidence;
 }
@@ -1220,6 +1293,9 @@ function* testSlotPolls(label: string, opts: TestSlotOptions, maximum: number,
     }
   };
   const treeProbe = opts.treeProbe ?? ((held: TestSlotHolder) => probeReservedTree(held, { platform: opts.platform, hostname: host, bootId: bootId(), pidNs: pidNamespace() }));
+  const cgroupIdentityProbe = opts.cgroupIdentityProbe ?? ((held: TestSlotHolder) => probeCgroupIdentity(held, {
+    platform: opts.platform, hostname: host, bootId: bootId(), pidNs: pidNamespace(), cgroupNamespace: readCgroupNamespace(), ownerUid: process.getuid?.(),
+  }));
   const observed = new Set<string>();
   /** One row per distinct observation: a bounded diagnostic, not one per poll. */
   const observeOnce = (key: string, row: Record<string, unknown>): void => {
@@ -1726,8 +1802,22 @@ function* testSlotPolls(label: string, opts: TestSlotOptions, maximum: number,
             parseHolder: parseTestSlotHolder,
             isStale: (held) => {
               quiescent = undefined;
+              const myNs = pidNamespace();
+              const foreignPidNamespace = sameHost(held.host, host()) && held.pidNs !== undefined && myNs !== undefined && held.pidNs !== myNs;
+              const scope = held.cgroupScope;
+              const completeCgroupIdentity = scope?.dedicated === true && dedicatedScopePath(scope.path) && !loginSessionScopePath(scope.path) &&
+                Number.isSafeInteger(scope.dev) && scope.dev! >= 0 && Number.isSafeInteger(scope.ino) && scope.ino! >= 0 &&
+                typeof scope.cgroupNs === "string" && scope.cgroupNs.length > 0;
+              if (foreignPidNamespace && completeCgroupIdentity) {
+                const evidence = observeReservedTree(held, cgroupIdentityProbe);
+                if (evidence.state === "ended") { quiescent = { held, evidence }; return true; }
+                observeOnce("cgroup-identity:" + i + ":" + held.ownerNonce + ":" + evidence.state + ":" + evidence.reason, { step: "test_slot.reclaim_withheld", label,
+                  slot: i, pid: held.pid, holder: held.label, ownerNonce: held.ownerNonce, processStart: held.processStart,
+                  evidence: evidence.state, coverage: evidence.coverage, reason: evidence.reason });
+                return false; // A complete identity never falls through to heartbeat age.
+              }
               const pidStale = testSlotHolderStale(held, clock.now(), { hostname: host, bootId, isPidAlive, pidNamespace });
-              const cadence = held.heartbeatIntervalMs, myNs = pidNamespace();
+              const cadence = held.heartbeatIntervalMs;
               const local = sameHost(held.host, host()) && !(held.pidNs !== undefined && myNs !== undefined && held.pidNs !== myNs);
               // A cadence-less or foreign record keeps today's judgment exactly (pid probe; boot id, then lease).
               const recordedCadence = cadence !== undefined && Number.isSafeInteger(cadence) && cadence > 0;
@@ -1758,6 +1848,8 @@ function* testSlotPolls(label: string, opts: TestSlotOptions, maximum: number,
               const { held, evidence } = quiescent;
               log(JSON.stringify({ step: "test_slot.reclaimed_quiescent", label, slot: i, pid: held.pid, holder: held.label,
                 ownerNonce: held.ownerNonce, processStart: held.processStart, bootId: held.bootId, pidNs: held.pidNs,
+                cgroupIdentity: held.cgroupScope?.dev !== undefined ? { path: held.cgroupScope.path, dev: held.cgroupScope.dev,
+                  ino: held.cgroupScope.ino, cgroupNs: held.cgroupScope.cgroupNs } : undefined,
                 reservation: testSlotReservationIdentity(held),
                 coverage: evidence.coverage, reason: evidence.reason, silentMs: clock.now() - Date.parse(held.heartbeatAt) }));
             },

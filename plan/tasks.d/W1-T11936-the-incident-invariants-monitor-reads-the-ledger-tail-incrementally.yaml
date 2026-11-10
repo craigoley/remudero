@@ -1,0 +1,38 @@
+- id: W1-T11936
+  title: The serve incident-invariants monitor reads only the ledger bytes appended since its last tick instead of re-tailing twice its longest window every minute
+  repo: remudero
+  depends_on: []
+  priority: 0.5
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # serve.ts incident monitor feeds alerts; an incremental reader that drops a row would hide an incident
+  band_meaning: blast-radius
+  origin: "operator ruling 2026-11-10 go with it (efficiency batch, slim serve, lighten preflight, janitor)"
+  plan_refs:
+    - W1-T11210
+  files:
+    - src/lib/serve.ts
+    - test/lib/the-incident-invariants-monitor-reads-the-ledger-incrementally.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: A tick reads only the bytes appended after the previous tick offset and evaluates exactly the invariants a full re-tail would
+      proof: "grep: W1-T11936 criterion 1 in test/lib/the-incident-invariants-monitor-reads-the-ledger-incrementally.test.ts"
+    - claim: A ledger rotation, truncation or an offset past the end falls back to a full bounded tail and never skips rows
+      proof: "grep: W1-T11936 criterion 2 in test/lib/the-incident-invariants-monitor-reads-the-ledger-incrementally.test.ts"
+    - claim: The incident verdicts over a recorded ledger are identical to the full re-tail verdicts, replayed in the test
+      proof: "grep: W1-T11936 criterion 3 in test/lib/the-incident-invariants-monitor-reads-the-ledger-incrementally.test.ts"
+    - claim: The tail window stays a declared bound with a BACKSTOP comment
+      proof: "grep: W1-T11936 criterion 4 in test/lib/the-incident-invariants-monitor-reads-the-ledger-incrementally.test.ts"
+  rationale: |
+    OBSERVED 2026-11-10 (serve research): the incident-invariants monitor runs every 60 s (src/lib/serve.ts around :3218), tails twice the longest invariant window of the ledger, writes event-loop-lag rows and runs a loop-stall profiler.
+    - Effect: a repeated large read and parse on every minute on the shared host. W1-T11210 addressed related ledger-read cost.
+  design: |
+    Keep the parsed tail window in memory and advance it by byte offset, with a full-tail fallback on rotation or truncation. The verdict function is unchanged. NOT IN SCOPE: the loop-stall profiler and any alert threshold.
+  falsifier: |
+    Make the incremental reader skip appended rows and criteria 1 and 3 must fail. Remove the rotation fallback and criterion 2 must fail. Restore and require all four to pass.
+  note: |
+    reservation hand-off: run-unfiled-1794269694199 -> run-unfiled-1794269694199
+    Reserved with rmd next-task-id (--count 9 and 1 on run-unfiled-1794269694199). Hand-built by the operator's choice (rulings 2026-11-10: slim serve, lighten preflight with no hard caps, janitor trims old worktrees). Check refs/rmd-dispatch/<id> and any run branch before building.

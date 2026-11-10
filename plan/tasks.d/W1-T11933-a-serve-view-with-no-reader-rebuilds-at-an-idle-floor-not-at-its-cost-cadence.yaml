@@ -1,0 +1,42 @@
+- id: W1-T11933
+  title: Every serve read-model view that is not held by a demand key is read-paced, so with no client connected it rebuilds at an idle floor of 30 to 60 seconds and a read restores its normal cadence within one tick
+  repo: remudero
+  depends_on: []
+  priority: 0.8
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # read-model-worker.ts feeds every console view; pacing only changes when a build runs, never what it computes, and the first read after idle still builds on demand
+  band_meaning: blast-radius
+  origin: "operator ruling 2026-11-10 go with it (efficiency batch, slim serve, lighten preflight, janitor)"
+  plan_refs:
+    - W1-T11814
+    - W1-T11815
+    - W1-T11816
+    - W1-T11817
+  files:
+    - src/lib/read-model-worker.ts
+    - test/lib/an-idle-serve-view-rebuilds-at-its-idle-floor.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: A view with no read for longer than the idle window rebuilds no more often than once per idle floor, so its build count over ten fake-clock minutes drops at least tenfold against today
+      proof: "grep: W1-T11933 criterion 1 in test/lib/an-idle-serve-view-rebuilds-at-its-idle-floor.test.ts"
+    - claim: A read of an idle view restores its normal cadence within one tick and the read itself is answered from a build on demand, never from a body older than the idle floor
+      proof: "grep: W1-T11933 criterion 2 in test/lib/an-idle-serve-view-rebuilds-at-its-idle-floor.test.ts"
+    - claim: The now view keeps its existing pacing and a view that declares demand keeps its demand rule, so no view loses a pacing it had
+      proof: "grep: W1-T11933 criterion 3 in test/lib/an-idle-serve-view-rebuilds-at-its-idle-floor.test.ts"
+    - claim: The idle floor is a declared constant with a BACKSTOP comment and a view build that throws still reports its failure instead of being paced into silence
+      proof: "grep: W1-T11933 criterion 4 in test/lib/an-idle-serve-view-rebuilds-at-its-idle-floor.test.ts"
+  rationale: |
+    OBSERVED 2026-11-10 (Azure host, serve research): remudero-serve held about 140 to 200 percent of a core and 3.8 GB with the operator not using the console. read_model.view_builds over 10 to 16 minutes: instances 3241 builds (about 3.4 per second), nav-badge 3272, analytics 3331, workstreams 698 (heavy lane 182 s of 600 s), repositories and host likewise. Read pacing (paced(), stretch max 32) applies only to the now view (src/lib/read-model-worker.ts around :1528 and :2114); the other views at :2103 to :2123 rebuild at cost divided by 0.4 forever, whether or not anyone reads them.
+    - Mechanism: the idle stretch exists but is wired to one view.
+    - Effect: about two thread-cores of rebuilds feeding a console nobody is looking at, on an 8-core host saturated at load 30 to 40.
+  design: |
+    Extend the existing readPaced and idle-stretch path to every view that is not held open by a demand key: with no read inside the idle window the next build waits for a declared idle floor (30 to 60 s, BACKSTOP constant); a read marks the view hot, serves a build on demand if the body is older than the floor, and restores the normal cadence within one tick. No view's computation changes. NOT IN SCOPE: the demand-view cadence bug (separate task), the board worker, worker idle-termination, and incremental caches.
+  falsifier: |
+    Delete the new pacing and criterion 1 must fail (idle build count back at today's level). Pace the now view twice or ignore the read signal and criteria 2 and 3 must fail. Restore and require all four to pass.
+  note: |
+    reservation hand-off: run-unfiled-1794269694199 -> run-unfiled-1794269694199
+    Reserved with rmd next-task-id (--count 9 and 1 on run-unfiled-1794269694199). Hand-built by the operator's choice (rulings 2026-11-10: slim serve, lighten preflight with no hard caps, janitor trims old worktrees). Check refs/rmd-dispatch/<id> and any run branch before building.

@@ -1,0 +1,39 @@
+- id: W1-T11915
+  title: The test-slot queue admits the cheapest waiting run first, ageing each waiter by its wait so none starves, instead of strict arrival order
+  repo: remudero
+  depends_on: []
+  priority: 1.4
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # Rule 19: one concern, the order the next waiter is admitted in; the slot count, the CPU and memory admission, the heartbeat and the reclaim rules are unchanged
+  origin: operator-session#gate-efficiency-1109
+  plan_refs:
+    - W1-T9950
+    - W1-T9951
+  files:
+    - src/lib/test-slot.ts
+    - test/the-test-slot-admits-the-cheapest-waiter-first-and-ages-the-rest.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: With two waiters queued, the one whose predicted suite cost is lower is admitted first, and a waiter with no prediction is ordered as the median
+      proof: "unit test: test/the-test-slot-admits-the-cheapest-waiter-first-and-ages-the-rest.test.ts"
+    - claim: A waiter's effective cost falls in proportion to its wait, so a costly waiter that has waited long enough is admitted ahead of a newly arrived cheap one, with no fixed wait ceiling
+      proof: "grep: W1-T11915 criterion 2 in test/the-test-slot-admits-the-cheapest-waiter-first-and-ages-the-rest.test.ts"
+    - claim: Dead-ticket reaping, the heartbeat rule and the admission of a waiter when a slot is open are identical with the change and without it
+      proof: "grep: W1-T11915 criterion 3 in test/the-test-slot-admits-the-cheapest-waiter-first-and-ages-the-rest.test.ts"
+  rationale: |
+    OBSERVED 2026-11-09: one author preflight of 74 minutes spent 24 minutes waiting for a test slot (measured admission granted one worker on an 8-core host whose own account was using about 990% CPU), and the capacity filing, a plan-only change that needs a few minutes of suites, was refused after a 45 minute wait behind heavier runs. The queue is strict arrival order (W1-T9950, W1-T9951).
+    - Shortest-expected-job-first minimises mean wait when one server is the bottleneck, and a small plan-only run behind a long one pays the long one's whole runtime for no benefit to anyone.
+    - Pure shortest-first starves a large job, which is why arrival order was chosen. Dividing a waiter's cost by its wait (or any equivalent ageing) keeps the order fair without a ceiling: every waiter's priority rises without bound while it waits.
+  design: |
+    - Each ticket already carries the label and the selection the run was priced from; add the predicted cost (the capacity verdict's costMs, when known) to the ticket.
+    - The next waiter admitted is the one with the lowest cost divided by one plus its waited time. Equal scores fall back to arrival order.
+    - NOT IN SCOPE: the number of slots, the measured pool, memory and CPU admission, the heartbeat and reclaim policy, and any wait bound.
+  falsifier: |
+    Keep arrival order: criterion 1 must fail. Order by cost alone: criterion 2 must fail (the long waiter never gets in). Change reaping or the open-slot admission: criterion 3 must fail. Restore and require all three.
+  note: |
+    reservation hand-off: run-unfiled-1794254218113
+    Success is the median queue wait of a small run falling while the longest wait stays bounded by the work ahead of it; compare test_slot.acquired waitedMs before and after.

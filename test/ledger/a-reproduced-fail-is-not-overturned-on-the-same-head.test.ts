@@ -59,7 +59,7 @@ test("W1-T11443 criterion 1: negative reproduction inputs preserve the observed 
   ]) {
     const body = `remudero-review=failure\n1. laneTarget's CPU bound is measured\n   - proof executed and PASSED on the PR head — NOTE: reviewer judged the proof non-responsive: ${observation}`;
     const result = await review.readReviewStatusHistory("acme", "remudero", "https://github.com/acme/remudero/pull/1", SHA,
-      async args => args.at(-1)?.includes("/statuses?") ? [history] : [[{ commit_id: SHA, body }]]);
+      async args => args.at(-1)?.includes("/statuses?") ? history : [{ commit_id: SHA, body }]);
     assert.equal(result.kind, "readable");
     assert.equal(result.failures.length, 1, observation);
     const guarded = review.applyReviewStatusHistoryGuard(computed as never, SHA, result, "REVIEW_VERDICT 1: PASS");
@@ -98,13 +98,13 @@ test("W1-T11443 criterion 1: the shared reader queries status history and joins 
   const result = await reviewCommand.readReviewStatusHistory("craigoley", "remudero", "https://github.com/craigoley/remudero/pull/16523", SHA,
     async (args) => {
       requests.push(args);
-      return args.at(-1)?.includes("/statuses?") ? [history] : [reviews];
+      return args.at(-1)?.includes("/statuses?") ? history : reviews;
     });
   assert.equal(result.kind, "readable");
   assert.equal(result.failures.length, 1);
   assert.match(result.failures[0].finding, /ReferenceError at daemon\.ts:4218/);
-  assert.equal(requests[0].at(-1), `repos/craigoley/remudero/commits/${SHA}/statuses?per_page=100`);
-  assert.equal(requests[1].at(-1), "repos/craigoley/remudero/pulls/16523/reviews?per_page=100");
+  assert.equal(requests[0].at(-1), `repos/craigoley/remudero/commits/${SHA}/statuses?per_page=100&page=1`);
+  assert.equal(requests[1].at(-1), "repos/craigoley/remudero/pulls/16523/reviews?per_page=100&page=1");
 });
 
 test("W1-T11443 criterion 1: an addressed marker needs a resolution clause on the affected criterion", () => {
@@ -235,8 +235,8 @@ test("W1-T11443 criteria 1/2: production publication guards shared history and p
         readReviewStatusHistory: async () => {
           reads++;
           if (scenario === "addressed") return reviewCommand.readReviewStatusHistory("acme", "remudero", prUrl, head,
-            async args => args.at(-1)?.includes("/statuses?") ? [sharedStatuses]
-              : [[{ commit_id: head, body: failureBody.replace("laneTarget's CPU bound is measured", "changed exists") }]]);
+            async args => args.at(-1)?.includes("/statuses?") ? sharedStatuses
+              : [{ commit_id: head, body: failureBody.replace("laneTarget's CPU bound is measured", "changed exists") }]);
           if (scenario === "unreadable" || (scenario === "history-lost" && reads > 1)) return { kind: "unreadable", reason: "history unavailable in fixture" };
           return { kind: "readable", failures: scenario === "unreproduced" || scenario === "history-lost" || (scenario === "late" && reads === 1) || (scenario === "replay" && !replayPhase) ? [] : failures, ...(scenario === "replay" && replayPhase ? { revision: historyRevision } : {}) };
         },

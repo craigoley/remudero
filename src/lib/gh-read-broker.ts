@@ -510,6 +510,8 @@ interface InFlight {
 export const GH_BROKER_INITIAL_FRESH_MS = 60_000; // GitHub's own `max-age=60` on authenticated REST reads
 export const GH_BROKER_CACHE_SHARE_OF_FREE = 0.01;
 export const GH_BROKER_LOG_RETENTION_DAYS = 7;
+/** BACKSTOP: boot parses at most this many cache bytes (a third of the ~75 MB that crash-looped a ~250 MB heap). */
+export const BROKER_BOOT_PARSE_BYTES = 24 * 1024 * 1024;
 
 export class GhReadBroker {
   readonly dir: string;
@@ -570,17 +572,51 @@ export class GhReadBroker {
       return fs.bavail * fs.bsize;
     });
     mkdirSync(join(dir, "cache"), { recursive: true, mode: 0o700 });
-    for (const name of readdirSync(join(dir, "cache"))) {
-      if (!name.endsWith(".json")) continue;
-      const entry = this.readEntry(name.slice(0, -".json".length));
-      if (entry) this.entries.set(entry.key, { bytes: statSync(this.entryPath(entry.key)).size + this.ghCacheBytes(entry.key), subjects: entry.subjects });
-    }
+    this.bootLoad();
     // Invalidations written before this broker started describe cache it never served stale.
     try {
       this.invalidationOffset = statSync(join(dir, GH_BROKER_INVALIDATIONS)).size;
     } catch {
       this.invalidationOffset = 0; // no invalidation file yet: nothing has been written
     }
+  }
+
+  /** Boot: stat only, keep the newest entries fitting BROKER_BOOT_PARSE_BYTES, evict the rest unparsed, then parse one at a time. */
+  private bootLoad(): void {
+    const cache = join(this.dir, "cache");
+    const names = readdirSync(cache);
+    const ghDirs = new Set(names.filter((n) => n.endsWith(".gh")));
+    const listed: { key: string; bytes: number; mtimeMs: number }[] = [];
+    for (const name of names) {
+      if (!name.endsWith(".json")) continue;
+      const key = name.slice(0, -".json".length);
+      try {
+        const st = statSync(join(cache, name));
+        listed.push({ key, bytes: st.size + (ghDirs.has(`${key}.gh`) ? directoryBytes(this.ghCachePath(key)) : 0), mtimeMs: st.mtimeMs });
+      } catch { /* gone since the listing: nothing to load */ }
+    }
+    listed.sort((a, b) => b.mtimeMs - a.mtimeMs);
+    let total = 0;
+    let evicted = 0;
+    let evictedBytes = 0;
+    const kept: typeof listed = [];
+    for (const item of listed) {
+      if (total + item.bytes <= BROKER_BOOT_PARSE_BYTES) {
+        total += item.bytes;
+        kept.push(item);
+      } else {
+        this.dropEntry(item.key);
+        evicted += 1;
+        evictedBytes += item.bytes;
+      }
+    }
+    for (const item of kept.reverse()) { // oldest first: the map's order is the LRU order
+      try {
+        const entry = JSON.parse(readFileSync(this.entryPath(item.key), "utf8")) as GhBrokerCacheEntry;
+        this.entries.set(entry.key, { bytes: item.bytes, subjects: entry.subjects });
+      } catch { /* unreadable is a miss, as readEntry treats it */ }
+    }
+    if (evicted > 0) this.log({ event: "boot-evict", entries: evicted, bytes: evictedBytes });
   }
 
   private now(): number {

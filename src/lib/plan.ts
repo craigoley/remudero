@@ -4,7 +4,7 @@ import { createHash } from "node:crypto";
 import { execFile, execFileSync, type ExecFileSyncOptionsWithStringEncoding } from "node:child_process";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { parse as parseYaml } from "yaml";
+import { parse as parseYaml, type DocumentOptions } from "yaml";
 import { RmdError } from "./errors.js";
 import { sameTestFile } from "./test-path-resolver.js";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
@@ -624,10 +624,15 @@ function detachStrings(node: unknown): unknown {
 
 /** Field-validate schema-v1 tasks without resolving dependencies outside this blob.
  *  W1-T110: inbox ratification drafts need partial validation; {@link loadPlanFromYaml} resolves ids. */
-export function parseTasksFromYaml(text: string, sourceLabel: string, onDuplicate?: (id: string) => void): Task[] {
+export function parseTasksFromYaml(
+  text: string,
+  sourceLabel: string,
+  onDuplicate?: (id: string) => void,
+  yamlOptions: Pick<DocumentOptions, "logLevel"> = {},
+): Task[] {
   let raw: unknown;
   try {
-    raw = parseYaml(text);
+    raw = parseYaml(text, yamlOptions);
   } catch (err) {
     throw new PlanError(`plan is not valid YAML (${sourceLabel}): ${String(err)}`);
   }
@@ -1247,8 +1252,13 @@ export function parseBlobBatch(raw: string, ref: string, relPaths: string[]): st
 }
 
 /** Merge already-read plan blobs into one {@link Plan} under {@link loadPlan}'s contract; `label` names each blob. */
-export function mergePlanBlobs(blobs: Array<{ label: string; text: string }>): Plan {
-  return validatedPlan(mergeBlobTasks(blobs));
+export function mergePlanBlobs(
+  blobs: Array<{ label: string; text: string }>,
+  yamlOptions: Pick<DocumentOptions, "logLevel"> = {},
+): Plan {
+  const parse = yamlOptions.logLevel === undefined ? parseTasksFromYaml
+    : (text: string, label: string, onDuplicate?: (id: string) => void) => parseTasksFromYaml(text, label, onDuplicate, yamlOptions);
+  return validatedPlan(mergeBlobTasks(blobs, undefined, undefined, parse));
 }
 
 function mergeBlobTasks(
