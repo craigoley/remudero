@@ -748,7 +748,8 @@ resolve_rmd_on_path() { :; }
     try { process.kill(Number(readFileSync(writerPath, "utf8")), 0); return true; } catch { return false; }
   };
   t.after(async () => {
-    if (writerAlive()) process.kill(Number(readFileSync(writerPath, "utf8")), "SIGTERM");
+    // The ledger fixture may already have removed its files; the private process group is ours.
+    try { process.kill(-child.pid!, "SIGTERM"); } catch { /* private group already ended */ }
     if (!closed && !await until(() => closed, 5_000)) {
       try { process.kill(-child.pid!, "SIGKILL"); } catch { /* private group already ended */ }
     }
