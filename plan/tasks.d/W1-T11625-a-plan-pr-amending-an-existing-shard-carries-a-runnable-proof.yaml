@@ -16,7 +16,7 @@
   files:
     - src/lib/plan-pr-emitter.ts
     - src/run-task.ts
-    - test/a-plan-pr-amending-an-existing-shard-carries-a-runnable-proof.test.ts
+    - test/plan/a-plan-pr-amending-an-existing-shard-carries-a-runnable-proof.test.ts
   rationale: |
     READ in this checkout. `rmd plan`'s propose branch (src/run-task.ts, the `buildPlanPrBody` call
     right after `applyPlanProposalCommit`) passes `filingAcceptanceCriteria(reservedIds, planPrFiles)`.
@@ -108,7 +108,7 @@
     them, proof-discrimination-gate, acceptance-author-gate, or branch protection.
   acceptance:
     - claim: "an amended-shard plan PR with no used reserved id emits a stored parser-valid and base-discriminating proof for an added line in that shard, a monolith-only (plan/tasks.yaml) rewire emits one for an added line in the monolith, new-filing and combined-filing behavior is preserved, and the run refuses without push or PR when no safe proof exists"
-      proof: "unit test: test/a-plan-pr-amending-an-existing-shard-carries-a-runnable-proof.test.ts"
+      proof: "unit test: test/plan/a-plan-pr-amending-an-existing-shard-carries-a-runnable-proof.test.ts"
     - claim: "the plan-run producer is a named export of the emitter"
       proof: "grep: export function planPrAcceptanceCriteria( in src/lib/plan-pr-emitter.ts"
     - claim: "the rmd plan propose site in run-task.ts calls the new producer, so the program actually reaches it"
