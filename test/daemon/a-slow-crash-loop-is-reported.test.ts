@@ -673,6 +673,8 @@ async function observedStderrSupervisor(t: import("node:test").TestContext, opti
   const nextPath = join(root, "next-started");
   const countPath = join(root, "starts");
   const syncPath = join(root, "syncs");
+  const waitErrorsPath = join(root, "wait-errors");
+  writeFileSync(waitErrorsPath, "");
   const scriptPath = join(root, "child.cjs");
   writeFileSync(scriptPath, String.raw`
 const fs = require("node:fs");
@@ -716,12 +718,13 @@ log() { :; }
 die() { printf '%s\n' "$*" >&2; exit 1; }
 sync_tree() { printf 'sync\n' >> "$TEST_SYNC_PATH"; }
 resolve_rmd_on_path() { :; }
+wait() { builtin wait "$@" 2>> "$TEST_WAIT_ERRORS"; }
 ` + source.slice(boundary);
   const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("RMD_")));
   const child = spawn("bash", ["-c", shell, "private-supervisor", process.execPath, scriptPath], {
     cwd: root, detached: true, stdio: ["ignore", "pipe", "pipe"],
     env: { ...env, TEST_CASE_ROOT: root, TEST_STATE_ROOT: stateRoot, TEST_REPO_ROOT: REPO_ROOT,
-      TEST_SYNC_PATH: syncPath, TEST_HELD: options.held ? "1" : "0",
+      TEST_SYNC_PATH: syncPath, TEST_WAIT_ERRORS: waitErrorsPath, TEST_HELD: options.held ? "1" : "0",
       TEST_FRESHNESS: options.freshness ? "1" : "0", TEST_CHILD_CODE: String(options.code) },
   });
   const stderr: Buffer[] = [];
@@ -756,7 +759,8 @@ resolve_rmd_on_path() { :; }
     await done;
   });
   return { ledgerPath, stateRoot, writerAlive, nextPath, countPath, syncPath, until,
-    exists: existsSync, done, output: () => Buffer.concat(stderr) };
+    exists: existsSync, done, output: () => Buffer.concat(stderr),
+    waitErrors: () => readFileSync(waitErrorsPath, "utf8") };
 }
 
 test("W1-T12031 criterion 1: real exit evidence precedes inherited-writer EOF", async (t) => {
@@ -784,6 +788,12 @@ test("W1-T12031 criterion 2: ordinary EOF forwards exact raw bytes and retains o
     const code = withHeap ? 139 : 137;
     const run = await observedStderrSupervisor(t, { held: false, code, payload });
     assert.deepEqual(await run.done, { code, signal: null });
+    const diagnostics = run.waitErrors();
+    if (process.platform === "darwin") {
+      for (const line of diagnostics.split("\n").filter(Boolean)) {
+        assert.match(line, /^(private-supervisor|environment): line \d+: wait: pid \d+ is not a child of this shell$/);
+      }
+    } else assert.equal(diagnostics, "", "the deployed shell waits on its actual observer child");
     assert.equal(Buffer.compare(run.output(), Buffer.concat([payload, Buffer.from("\n")])), 0,
       "all bytes, invalid UTF-8, NUL, CRLF and the supervisor's separator survive output backpressure; " +
       "actual=" + run.output().length + " expected=" + (payload.length + 1) +
