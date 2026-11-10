@@ -1,0 +1,51 @@
+- id: W1-T12057
+  title: "The gh pacer waits out a normal gap on the daemon loop"
+  repo: remudero
+  depends_on: []
+  priority: 0.8
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # every gh call the daemon makes on its loop goes through this wait; it changes a rule W1-T11458 set
+  band_meaning: blast-radius
+  origin: operator-session#review-flow-2026-11-10
+  plan_refs:
+    - W1-T12024
+    - W1-T11458
+    - W1-T6591
+  files:
+    - src/lib/github-transport.ts
+    - src/lib/daemon.ts
+    - test/github/a-daemon-sync-github-read-never-sleeps-on-its-loop.test.ts
+    - test/github/the-pacer-waits-out-a-normal-gap-on-the-daemon-loop.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "On the daemon loop, a pacer wait no longer than the pacer's normal gap is slept and the gh call is made"
+      proof: "grep: W1-T12057 criterion 1 in test/github/the-pacer-waits-out-a-normal-gap-on-the-daemon-loop.test.ts"
+    - claim: "Each such wait writes one row with the wait in milliseconds and the call site, so the calls that still block the loop can be found and moved"
+      proof: "grep: W1-T12057 criterion 2 in test/github/the-pacer-waits-out-a-normal-gap-on-the-daemon-loop.test.ts"
+    - claim: "On the daemon loop, the shared read cadence's lock wait is slept inside the total wait that cadence already allows, and the read is made"
+      proof: "grep: W1-T12057 criterion 4 in test/github/the-pacer-waits-out-a-normal-gap-on-the-daemon-loop.test.ts"
+    - claim: "The daemon appends each recorded loop wait to the ledger as a github.pace.loop_wait row and empties the buffer"
+      proof: "grep: W1-T12057 criterion 5 in test/github/the-pacer-waits-out-a-normal-gap-on-the-daemon-loop.test.ts"
+    - claim: "A wait longer than the normal gap, which only a rate-limit signal from GitHub causes, is still refused on the loop as today"
+      proof: "grep: W1-T12057 criterion 3 in test/github/the-pacer-waits-out-a-normal-gap-on-the-daemon-loop.test.ts"
+  rationale: |
+    MEASURED 2026-11-10 in the core daemon's ledger, 2026-11-03 to 2026-11-10, rotations included: about 545 actions failed with "gh call pacer refused to sleep Nms on this thread", where N was 8, 25 or 62. All are since commit 42e68c4f04 on 2026-11-07.
+    - By step: sweep.open_escalations.read_error 172, sweep.fold_debt_pull.error 149, sweep.action_failed 59, sweep.post_review.failed 49, sweep.plan_repair.read_error 45, review.pending_post.error 37, sweep.mutation_verdict_pull.error 34.
+    - In the same eight days GitHub applied no secondary rate limit to the fleet. The two rows that mention one are drafted inbox text.
+    - A review that fails this way holds its pull request until the 60-minute pending limit. #17601 waited 75 minutes and raised a stuck-PR escalation.
+    - By length, 2026-11-10 only: 125 refusals were for 25 ms, which is the shared read cadence's lock wait (GH_CADENCE_LOCK_WAIT_MS), and about 25 were for 585 to 1441 ms, which are pacer gaps under the 1500 ms normal gap. Both paths must wait for the failures to stop.
+    - The refusal protects nothing at these sizes: the synchronous gh call that follows the wait blocks the loop for longer than the wait itself.
+  design: |
+    In loopSafeGhSleep, sleep when the wait is at most the pacer's own normal gap (its minGapMs, which the pacer already holds), and append a github.pace.loop_wait row with wait_ms and the call site taken from the stack. Throw GhPaceWouldBlockError only for a longer wait. No new number is introduced: the bound is the pacer's existing gap.
+    The shared read cadence's lock wait gets the same treatment in applyGhReadCadence: on the loop it sleeps its lock wait, inside the total the cadence already allows (GH_CADENCE_LOCK_MAX_WAIT_MS), and records the same row. The daemon drains the recorded waits into the ledger beside its quota poll in src/lib/daemon.ts.
+    test/github/a-daemon-sync-github-read-never-sleeps-on-its-loop.test.ts (W1-T11458) asserts that every positive wait on the loop throws. That case changes to assert the new rule: a normal gap is slept, a rate-limit gap throws.
+    W1-T12024 stays useful: it retries a review after a refused long wait.
+    NOT IN SCOPE: moving the remaining synchronous gh calls off the loop (the new row names them; each is a later task), and the pacer's gap values.
+  falsifier: |
+    Throw on a short wait and criterion 1 must fail. Drop the row or its call site and criterion 2 must fail. Sleep through a rate-limit gap on the loop and criterion 3 must fail. Restore and require all three to pass.
+  note: |
+    The largest single cause of failed reviews found on 2026-11-10.

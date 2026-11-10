@@ -183,3 +183,105 @@ test("production now view consumes the feedback adapter and deduplicates evidenc
   assert.equal(unavailable.humanGates!.sources.find((s) => s.name === "feedback")!.state, "unavailable");
   assert.deepEqual(unavailable.humanGates!.count.inbox, { atLeast: 0 });
 });
+
+test("W1-T12023 criterion 1: a persisted scalar summary reaches both production question consumers", async (t) => {
+  const { listFeedback } = await import("#src/lib/feedback.js");
+  const { readFileSync } = await import("node:fs");
+  const root = readModelFixtureDir(t, "scalar-feedback-reader").dir;
+  const dir = join(root, "plan", "feedback");
+  mkdirSync(dir, { recursive: true });
+  const persisted = { ...entry("scalar-reader", "grilling", { raw: "Raw incident question" }), summary: "Keep this scalar incident context." };
+  const path = join(dir, `${persisted.id}.yaml`);
+  const bytes = JSON.stringify(persisted);
+  writeFileSync(path, bytes);
+  const loaded = listFeedback(root);
+  assert.equal(loaded.length, 1);
+  assert.equal(loaded[0]!.id, persisted.id);
+  assert.equal(loaded[0]!.summary, persisted.summary);
+  const expected = "Raw incident question\n\nKeep this scalar incident context.";
+  await t.test("the legacy grill decision retains the full question and reply identity", () => {
+    const decisions = grillDecisions("core", loaded);
+    assert.equal(decisions.length, 1);
+    assert.equal(decisions[0]!.id, "grill:scalar-reader");
+    assert.equal(decisions[0]!.prompt, expected);
+    assert.equal(decisions[0]!.answer.fields.replyTo, persisted.id);
+  });
+  await t.test("the feedback gate retains the full question and answer resolution", () => {
+    const source = projectFeedbackGates({ instance: "core", entries: loaded, now: Date.parse(THROUGH) });
+    assert.equal(source.gates.length, 1);
+    assert.equal(source.gates[0]!.subject, persisted.id);
+    assert.equal(source.gates[0]!.reason, expected);
+    assert.equal(source.gates[0]!.resolutionVerb, "answer");
+    assert.equal(source.age.state, "uncalibrated");
+    assert.equal(source.state, "partial");
+  });
+  assert.equal(readFileSync(path, "utf8"), bytes, "readers and projections leave the persisted incident unchanged");
+});
+
+test("W1-T12023 criterion 2: the real now view materializes a newly persisted scalar question", async (t) => {
+  const { readFileSync } = await import("node:fs");
+  const root = readModelFixtureDir(t, "scalar-feedback-now").dir;
+  const clock = fixedClock(Date.parse(THROUGH));
+  const db = openProjectorReadModel(root, "core", clock);
+  onReadModelClose(t, () => db.close());
+  const lease = acquireLease(db, { clock });
+  assert.ok(lease.ok);
+  const ledgerDir = join(root, "state");
+  const feedbackRoot = join(root, "checkout");
+  const feedbackPath = join(feedbackRoot, "plan", "feedback", "scalar-now.yaml");
+  mkdirSync(ledgerDir);
+  mkdirSync(join(feedbackRoot, "plan", "feedback"), { recursive: true });
+  writeFileSync(join(ledgerDir, "ledger.ndjson"), "");
+  const github = { readFailed: () => false, prByRef: () => null, findMergedByTrailer: () => null,
+    findMergedByHeadBranch: () => [], listMergedHeadBranches: () => [], listOpenHeadBranches: () => [],
+    listOpenPrs: () => [], headRefName: () => undefined, prBody: () => undefined,
+    issueByUrl: () => ({ state: "OPEN", title: "question" }) } as unknown as GitHub;
+  const view = createNowView({ instances: [{ name: "core", ledgerDir, feedbackRoot }], clock,
+    readPlan: (): Plan => ({ tasks: [], byId: new Map() }),
+    github: () => ({ github, generation: "known", source: { asOf: THROUGH, state: "fresh" } }),
+    planBehind: () => ({ commits: 0 }),
+    hostProbe: { readLive: () => [], diskFree: () => 1_000_000, rateLimit: () => 5000 } });
+  const ctx = { now: clock.now(), switches: { views: { now: "serve" as const } },
+    instances: [{ db, lease: lease.lease, state: { instance: "core", generation: 0, lease: "held" as const,
+      failures: 0, tickedAt: clock.now(), newestTs: null } }] };
+  const before = view.materialize(ctx)[0]!;
+  assert.equal(before.data.decisions.length, 0);
+  assert.equal(before.data.humanGates!.gates.length, 0);
+  const persisted = { ...entry("scalar-now", "grilling", { raw: "A new synthetic question" }), summary: "Preserve this scalar context." };
+  const bytes = JSON.stringify(persisted);
+  writeFileSync(feedbackPath, bytes);
+  const current = view.materialize({ ...ctx, now: ctx.now + 60_000 })[0];
+  assert.ok(current, "a new body is materialized after the scalar record arrives");
+  assert.equal(current.data.decisions.length, 1);
+  assert.equal(current.data.decisions[0]!.id, "grill:scalar-now");
+  assert.equal(current.data.decisions[0]!.prompt, "A new synthetic question\n\nPreserve this scalar context.");
+  assert.equal(current.data.decisions[0]!.answer.fields.replyTo, persisted.id);
+  const gates = current.data.humanGates!;
+  assert.deepEqual(gates.gates.map((g) => [g.key, g.resolutionVerb, g.reason]),
+    [["feedback_grill:core:scalar-now", "answer", "A new synthetic question\n\nPreserve this scalar context."]]);
+  const feedback = gates.sources.find((s) => s.name === "feedback")!;
+  assert.equal(feedback.state, "partial");
+  assert.match(feedback.reason!, /uncalibrated/);
+  assert.deepEqual(gates.count.inbox, { atLeast: 1 }, "unknown age evidence remains a floor, not a verified count");
+  assert.equal(readFileSync(feedbackPath, "utf8"), bytes);
+});
+
+test("W1-T12023 criterion 3: structured and absent context stay exact and unknown evidence stays partial", async () => {
+  const { feedbackQuestionContext } = await import("#src/lib/human-gate.js");
+  assert.equal(feedbackQuestionContext(entry("structured", "grilling", { raw: "Raw context", summary })),
+    "Raw context\n\nChoose a triage path\n\nTwo paths remain viable.\n\nChoose the next step.\n\nA: Proceed\n\nB: Wait");
+  assert.equal(feedbackQuestionContext(entry("absent", "grilling", { raw: "Raw context" })), "Raw context");
+  const empty = { ...entry("empty", "grilling", { raw: "Raw context" }), summary: "" } as unknown as FeedbackEntry;
+  assert.equal(feedbackQuestionContext(empty), "Raw context");
+  const malformed = { ...entry("malformed", "grilling"), summary: { headline: "Missing options" } } as unknown as FeedbackEntry;
+  assert.throws(() => feedbackQuestionContext(malformed), /map/, "malformed objects are not converted to successful empty summaries");
+  const unverified = { ...entry("unknown", "proposed", { raw: "Unverified question" }), unverified: true,
+    summary: "Legacy scalar context" } as unknown as FeedbackEntry;
+  const source = projectFeedbackGates({ instance: "core", entries: [unverified], now: Date.parse(THROUGH) });
+  assert.equal(source.state, "partial");
+  assert.equal(source.age.state, "uncalibrated");
+  assert.equal(source.age.observedMaxMs, null);
+  assert.match(source.reason!, /proposal resolution could not be verified/);
+  assert.equal(source.gates[0]!.reason, "Unverified question\n\nLegacy scalar context");
+  assert.deepEqual(projectHumanGates([source]).count.inbox, { atLeast: 1 });
+});

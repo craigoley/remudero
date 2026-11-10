@@ -17,7 +17,7 @@
     - src/lib/report-commands.ts
     - src/cli/commands/daemon.ts
     - test/dispatch/an-operator-verb-in-a-consumer-daemon-resolves-its-target-plan.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED 2026-10-28, read-only, at origin/main 170ef90ef.
