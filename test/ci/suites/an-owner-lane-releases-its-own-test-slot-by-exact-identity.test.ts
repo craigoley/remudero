@@ -27,7 +27,8 @@ function holder(pid: number, processStart: string): TestSlotHolder {
 function writeSlot(dir: string, held: TestSlotHolder): string {
   const path = join(dir, "slot-1.json");
   writeFileSync(path, JSON.stringify(held));
-  chmodSync(path, 0o644);
+  // A shared (group/other-readable) legacy record; the owner digit stays 7, so no permission denial is assumed.
+  chmodSync(path, 0o755);
   return path;
 }
 
