@@ -22183,6 +22183,13 @@ export async function runSweep(
                 break;
               }
               if (codeScanning.kind === "fix") {
+                // W1-T11510: a review-only pass that may arm keeps this fix route closed too. The ruling row
+                // stays, so the next ordinary pass reads it back as `priorFix` and takes the fix.
+                if (deps.lightPassScope !== undefined) {
+                  acted = false;
+                  standDownReason = reviewOnlyStandDownReason(deps.lightPassScope);
+                  break;
+                }
                 const fixTaskId = pr.taskId;
                 const unfixable = fixTaskId === undefined ||
                   !fixHeadAcceptable(pr.headRefName, fixTaskId, isSyntheticOrchestratorLaneId(fixTaskId))
@@ -24655,6 +24662,45 @@ export class LightPassPreReviewTiming {
   }
 }
 
+/** W1-T7214: the ready-overlap heads one light refresh chooses among, minus W1-T5921's spent (PR, head) keys. */
+function readyOverlapCandidates(
+  openPrs: readonly OpenPrView[],
+  ledgerLines: ReadonlyArray<Record<string, unknown>>,
+  deps: Pick<SweepDeps, "behindMainByPr" | "baseChangedFilesByPr" | "readPrFileSource">,
+  policy: SweepPolicy,
+): ArmedStalledPr[] {
+  const spentHeads = new Set<string>();
+  for (const l of ledgerLines) {
+    if (l.step === "sweep.update_branch.attempted" || l.step === "sweep.ci_timeout_refresh.attempted") {
+      spentHeads.add(`${String(l.pr_number)}@${String(l.head_sha)}`);
+    }
+  }
+  const facts: ReadyRefreshFacts = { spentHeads, readSource: deps.readPrFileSource };
+  return openPrsBehindMain(openPrs, deps.behindMainByPr ?? new Map<number, number>(), policy, new Set(),
+    deps.baseChangedFilesByPr, facts).filter((c) => c.updateReason === "ready-overlap");
+}
+
+/** W1-T9595: the `<pr>@<head>` keys the latest light-pass refresh admission left waiting for a refresh. */
+export function refreshAdmissionWaiters(lines: ReadonlyArray<Record<string, unknown>>): Set<string> {
+  const lastAdmission = lines.findLast((row) => row.step === "sweep.base_red.refresh_admission");
+  return new Set((Array.isArray(lastAdmission?.waiting) ? lastAdmission.waiting : [])
+    .flatMap((entry) => typeof entry?.pr_number === "number" && typeof entry.head_sha === "string"
+      ? [`${entry.pr_number}@${entry.head_sha}`] : []));
+}
+
+/** W1-T11510 — the select half of {@link runLightPassReadyRefresh}, for a pass that may arm but never refresh:
+ *  every head the ordinary pass's refresh could pick, and the refresh admission's waiters, from ONE ledger read.
+ *  It calls no update-branch. */
+export function selectLightPassReadyOverlap(
+  openPrs: readonly OpenPrView[],
+  deps: Pick<SweepDeps, "ledgerPath" | "readLedger" | "behindMainByPr" | "baseChangedFilesByPr" | "readPrFileSource">,
+  policy: SweepPolicy = DEFAULT_SWEEP_POLICY,
+): { selected: ArmedStalledPr[]; waiting: Set<string> } {
+  const lines = (deps.readLedger ?? readLiveLedgerRows)(deps.ledgerPath);
+  return { selected: deps.baseChangedFilesByPr === undefined ? [] : readyOverlapCandidates(openPrs, lines, deps, policy),
+    waiting: refreshAdmissionWaiters(lines) };
+}
+
 export async function runLightPassReadyRefresh( // W1-T7214: W1-T6022's ready-overlap refresh, once per light pass
   openPrs: readonly OpenPrView[],
   deps: Pick<SweepDeps, "ledgerPath" | "runId" | "updateBranch" | "mergeQueue" | "readActionsStatusSummary" |
@@ -24671,18 +24717,7 @@ export async function runLightPassReadyRefresh( // W1-T7214: W1-T6022's ready-ov
     const now = clockFromMillisFn(deps.now).now();
     const readLedger = () => (deps.readLedger ?? readLiveLedgerRows)(deps.ledgerPath);
     const ledgerLines = timing ? timing.sync("ready_ledger", readLedger) : readLedger();
-    const spentHeads = new Set<string>();
-    for (const l of ledgerLines) {
-      if (l.step === "sweep.update_branch.attempted" || l.step === "sweep.ci_timeout_refresh.attempted") {
-        spentHeads.add(`${String(l.pr_number)}@${String(l.head_sha)}`);
-      }
-    }
-    const behindMainByPr = deps.behindMainByPr ?? new Map<number, number>();
-    const select = (ready: ReadyRefreshFacts): ArmedStalledPr[] =>
-      openPrsBehindMain(openPrs, behindMainByPr, policy, new Set(), deps.baseChangedFilesByPr, ready)
-        .filter((c) => c.updateReason === "ready-overlap");
-    const facts: ReadyRefreshFacts = { spentHeads, readSource: deps.readPrFileSource };
-    let candidates = select(facts);
+    let candidates = readyOverlapCandidates(openPrs, ledgerLines, deps, policy);
     if (candidates.length === 0) return undefined;
     if (deps.readActionsStatusSummary !== undefined) {
       const readActions = () => Promise.resolve().then(() => deps.readActionsStatusSummary!())

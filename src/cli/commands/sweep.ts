@@ -15,7 +15,7 @@ import { liveInflightRuns } from "../../lib/report-commands.js";
 import { worktreeRemove, worktreeRemoveAsync, releaseReviewWorktree, runWorktreeReapRung, type WorktreeReapSummary } from "../../lib/worker.js";
 import { automaticBranchReapStateFileName, readAutomaticBranchReapState, writeAutomaticBranchReapState, type AutomaticBranchReapState } from "../../lib/branch-reaper.js";
 import { withMainHealthOnLightPass } from "../../lib/main-health-rung.js";
-import { lightPassFixAdmitted, type LightPassScope, type ReviewAdmissionGate, type SweepCycleOutcome } from "../../lib/daemon.js";
+import { lightPassArmAdmitted, lightPassFixAdmitted, type LightPassScope, type ReviewAdmissionGate, type SweepCycleOutcome } from "../../lib/daemon.js";
 import type { BoardSnapshotCache } from "../../lib/board-snapshot-cache.js";
 import type { PanelGraphDeps } from "../../lib/panel-graph.js";
 import { createPlanFilingFileCache, type GhCallPacer } from "../../lib/open-prs-rest.js";
@@ -30,7 +30,7 @@ import type { ComposedRealGraph } from "../../lib/composition-root.js";
 import type { EscalationAnswerGateway } from "../../lib/escalation-answers.js";
 import { readEscalationAnswers } from "../../lib/escalation-answers.js";
 import { buildBehindMainByPr, buildBehindMainByPrAsync, createDistanceProbeSequence, buildCreditCandidates, buildOpenPrViewsAsync, buildStaleGateWorkflowsByPr, fetchCiFailuresAsync, type TickReadFacts } from "../../lib/tick-read-worker.js";
-import { DEFAULT_SWEEP_POLICY, REVIEW_STATUS_RESTORED_STEP, restorableDeliveredVerdict, buildSweepEffects as buildSweepEffectsFromLib, dispatchFixCatchOutcome, fixRungTaskFor, discriminateReviewReuseAsync, projectMergedTaskCandidates, runSweep, runSweepLightPass, runCreditBackfill, renderSweepSummary, planOnlyRunBranchReceipts, withFullSweepRepairAdmission, createEscalationTriageHistoryReader, ESCALATION_TRIAGE_EVIDENCE_SLICE, createFullPreludeTimer, LightPassPreReviewTiming, observeLightPassReviewEligibility, runLightPassReadyRefresh, runLightPassRefreshAdmission, lightPassHeadContractRefresh, runArmedRatchetRejudge, isReviewLaneDisposition, deriveDisposition, orderPendingReviews, type BuildSweepEffectsDeps, type SweepDeps, type OpenPrView, type ReviewDispatchMode, type ReviewReuseInputs, type BaseChangedFiles, type Disposition } from "../../lib/sweep.js";
+import { DEFAULT_SWEEP_POLICY, REVIEW_STATUS_RESTORED_STEP, restorableDeliveredVerdict, buildSweepEffects as buildSweepEffectsFromLib, dispatchFixCatchOutcome, fixRungTaskFor, discriminateReviewReuseAsync, projectMergedTaskCandidates, runSweep, runSweepLightPass, runCreditBackfill, renderSweepSummary, planOnlyRunBranchReceipts, withFullSweepRepairAdmission, createEscalationTriageHistoryReader, ESCALATION_TRIAGE_EVIDENCE_SLICE, createFullPreludeTimer, LightPassPreReviewTiming, observeLightPassReviewEligibility, runLightPassReadyRefresh, selectLightPassReadyOverlap, refreshAdmissionWaiters, runLightPassRefreshAdmission, lightPassHeadContractRefresh, runArmedRatchetRejudge, isReviewLaneDisposition, deriveDisposition, orderPendingReviews, type BuildSweepEffectsDeps, type SweepDeps, type OpenPrView, type ReviewDispatchMode, type ReviewReuseInputs, type BaseChangedFiles, type Disposition } from "../../lib/sweep.js";
 import { missingReviewReuseFact, priorPostedReviewRow, reviewLedgerKeyFor, REVIEW_ENGINE_REVISION, REVIEW_CONTEXT, reviewEvidenceStrength, type ProofExecutor, type ReviewVerdict } from "../../lib/review.js";
 import { resolveReviewProviderProvenance, reviewProviderProvenanceLedgerFields } from "../../lib/review-provider-provenance.js";
 import { failureRecordingPoster, reviewCommand as reviewCommandFromModule, runReview as runReviewFromModule, type ReviewCommandDeps, type ReviewCommandHost } from "./review.js";
@@ -1154,6 +1154,11 @@ export function buildSweepHook(
       : undefined;
   };
 }
+/** W1-T11293: a ready head whose compare failed is never armed blind. */
+const READY_DISTANCE_UNREADABLE = "ready PR distance is unreadable — held until its compare succeeds";
+/** W1-T11510: a review-only pass cannot refresh, so a head the ordinary pass would refresh waits for it (W1-T7214). */
+const READY_REFRESH_HELD = "ready PR is due a refresh this review-only pass may not make — held for the ordinary pass's refresh, not armed";
+
 export function buildSweepLightHook(
   host: SweepCommandHost,
   owner: string,
@@ -1231,30 +1236,36 @@ export function buildSweepLightHook(
       // file uses, and the in-flight ids come from lock FILENAMES — no pid probe, no lock content.
       // W1-T9808: after a restart latched, a fix that would outlast the drain's time left closes the fix rung.
       const fixAdmitted = lightPassFixAdmitted(scope);
+      // W1-T11510: an interphase-review pass may arm through the ordinary pass's guarded path; no other review-only scope may.
+      const armAdmitted = lightPassArmAdmitted(scope);
       const fixRungAllowed = timing.run(() => fixAdmitted && fixRungAllowedBesideInFlight(
         readLedgerLines(ledgerPath),
         inFlightTaskIdsFrom(join(config.root, "state", "inflight")),
       ));
-      // W1-T7214: only ready heads wait for distance and the whole-snapshot refresh selection.
-      const readyPrs = reviewOnly ? [] : openPrs.filter((pr) =>
+      // W1-T7214: only ready heads wait for distance and the whole-snapshot refresh selection. W1-T11510: a pass
+      // that may arm forms them too, so its ready head takes the same compare read and the same held batches.
+      const readyPrs = !armAdmitted ? [] : openPrs.filter((pr) =>
         pr.isDraft !== true && pr.checksState === "green" && pr.reviewState === "success");
       // The one head-contract refresh selection is read after the whole-snapshot refresh decisions below,
       // and only the batches that wait for them (never the early review batch) carry it.
       let headContractRefresh: Awaited<ReturnType<typeof lightPassHeadContractRefresh>> = {};
-      const runBatches = async (passPrs: OpenPrView[], distanceKnown = true) => {
+      // `mergeHold`, when set, is the one reason a batch's ready heads stand down instead of arming.
+      const runBatches = async (passPrs: OpenPrView[], mergeHold?: string) => {
         const requeueOnlyPrs = reviewOnly ? [] : passPrs.filter((pr) => blockedFixableIsRequeueOnly(pr));
         const requeueNumbers = new Set(requeueOnlyPrs.map((pr) => pr.prNumber));
         const restPrs = passPrs.filter((pr) => !requeueNumbers.has(pr.prNumber));
         const common = { ...effects, ledgerPath, runId, log, reviewerCodeRecovery, updateBranch: undefined };
+        const scopeDeps = reviewOnlyLightPassDeps(scope);
         // W1-T528: branch updates belong to the whole-snapshot selection, never this per-PR fan-out.
         const passes: Array<Promise<unknown>> = [runSweepLightPass(restPrs, {
           ...common,
           restartAdmission: scope?.admit,
-          actionable: (d) => (distanceKnown || d !== "mergeable") &&
-            lightPassActionable(d, fixRungAllowed, false, !reviewOnly, fixAdmitted),
-          ...reviewOnlyLightPassDeps(scope),
-          ...(!distanceKnown ? { standDownReasonFor: (d: Disposition) => d === "mergeable"
-            ? "ready PR distance is unreadable — held until its compare succeeds" : undefined } : {}),
+          actionable: (d) => (mergeHold === undefined || d !== "mergeable") &&
+            lightPassActionable(d, fixRungAllowed, false, armAdmitted, fixAdmitted),
+          ...scopeDeps,
+          // W1-T11510: a held head that derives another disposition keeps its scope's own stand-down text.
+          ...(mergeHold !== undefined ? { standDownReasonFor: (d: Disposition) => d === "mergeable"
+            ? mergeHold : scopeDeps.standDownReasonFor?.(d) } : {}),
           readLiveStateAtAct: effects.readLiveState,
           // W1-T11153: a refill re-reads the open PRs. One tick's snapshot is split into batches, each with its
           // own light pass, so a batch refills only from its own PRs and PRs the tick's snapshot did not hold.
@@ -1289,10 +1300,7 @@ export function buildSweepLightHook(
         ordinaryPrs, { ...effects, ledgerPath, runId }, DEFAULT_SWEEP_POLICY)));
       // Review-lane heads cannot be selected by ready-overlap refresh. A head named in a
       // previous refresh admission, or already armed, stays in the later action batch.
-      const lastAdmission = observationLines.findLast((row) => row.step === "sweep.base_red.refresh_admission");
-      const admissionWaiters = new Set((Array.isArray(lastAdmission?.waiting) ? lastAdmission.waiting : [])
-        .flatMap((entry) => typeof entry?.pr_number === "number" && typeof entry.head_sha === "string"
-          ? [`${entry.pr_number}@${entry.head_sha}`] : []));
+      const admissionWaiters = refreshAdmissionWaiters(observationLines);
       const reviewCandidates = ordinaryPrs.filter((pr) => isReviewLaneDisposition(deriveDisposition(pr).disposition));
       const earlyCandidates = reviewCandidates.filter((pr) => !pr.autoMergeArmed &&
         !admissionWaiters.has(`${pr.prNumber}@${pr.headSha}`));
@@ -1310,6 +1318,8 @@ export function buildSweepLightHook(
       const refresh = timing.run(async () => {
         let readyRefreshed: number | undefined;
         let measuredReadyPrs = readyPrs;
+        // W1-T11510: heads a review-only pass may not refresh, so it holds them for the ordinary pass's refresh.
+        let refreshHeld = new Set<number>();
         if (readyPrs.length > 0) {
           const main = await timing.measure("main_tip", () => effects.readMainTip?.()).catch((error) => {
             log("sweep_light.main_tip_unreadable", { error: String(error) });
@@ -1318,10 +1328,17 @@ export function buildSweepLightHook(
           // An unread tip keeps the former symbolic compare, without caching an unidentified main.
           const facts = await compares.read(readyPrs, main, timing);
           measuredReadyPrs = readyPrs.filter((pr) => facts.behindMainByPr.has(pr.prNumber));
-          readyRefreshed = await runLightPassReadyRefresh(openPrs, {
-            ...effects, ledgerPath, runId, ...facts,
-            inFlightTaskIds: new Set(inFlightTaskIdsFrom(join(config.root, "state", "inflight"))),
-          }, DEFAULT_SWEEP_POLICY, timing);
+          if (reviewOnly) {
+            // The refresh admission's waiters are refreshed by the ordinary pass's admission, which this pass skips.
+            const { selected, waiting } = selectLightPassReadyOverlap(openPrs, { ...effects, ledgerPath, ...facts }, DEFAULT_SWEEP_POLICY);
+            refreshHeld = new Set([...selected.map((c) => c.prNumber),
+              ...readyPrs.filter((pr) => waiting.has(`${pr.prNumber}@${pr.headSha}`)).map((pr) => pr.prNumber)]);
+          } else {
+            readyRefreshed = await runLightPassReadyRefresh(openPrs, {
+              ...effects, ledgerPath, runId, ...facts,
+              inFlightTaskIds: new Set(inFlightTaskIdsFrom(join(config.root, "state", "inflight"))),
+            }, DEFAULT_SWEEP_POLICY, timing);
+          }
         }
         const admitted = reviewOnly ? [] : await timing.measure("refresh_admission", () =>
           runLightPassRefreshAdmission(openPrs, { ...effects, ledgerPath, runId }));
@@ -1331,14 +1348,16 @@ export function buildSweepLightHook(
         headContractRefresh = reviewOnly || !fixAdmitted ? {} : await lightPassHeadContractRefresh(openPrs, { ...effects, ledgerPath });
         return { prs: readyPrs.filter((pr) => pr.prNumber !== readyRefreshed &&
           !admitted.includes(pr.prNumber) && !ratchetRefreshed.includes(pr.prNumber)),
-          measured: new Set(measuredReadyPrs.map((pr) => pr.prNumber)) };
+          measured: new Set(measuredReadyPrs.map((pr) => pr.prNumber)), refreshHeld };
       });
-      const ready = refresh.then(({ prs, measured }) => {
-        const known = prs.filter((pr) => measured.has(pr.prNumber));
+      const ready = refresh.then(({ prs, measured, refreshHeld }) => {
         const unknown = prs.filter((pr) => !measured.has(pr.prNumber));
+        const held = prs.filter((pr) => measured.has(pr.prNumber) && refreshHeld.has(pr.prNumber));
+        const known = prs.filter((pr) => measured.has(pr.prNumber) && !refreshHeld.has(pr.prNumber));
         return Promise.all([
           known.length > 0 ? timing.run(() => runBatches(known)) : undefined,
-          unknown.length > 0 ? timing.run(() => runBatches(unknown, false)) : undefined,
+          unknown.length > 0 ? timing.run(() => runBatches(unknown, READY_DISTANCE_UNREADABLE)) : undefined,
+          held.length > 0 ? timing.run(() => runBatches(held, READY_REFRESH_HELD)) : undefined,
         ]);
       });
       const ordinary = refresh.then(() => laterOrdinaryPrs.length > 0 || readyPrs.length === 0
