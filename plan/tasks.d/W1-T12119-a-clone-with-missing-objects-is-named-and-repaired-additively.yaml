@@ -19,11 +19,11 @@
   attempts: 0
   acceptance:
     - claim: "cloneIntegrityPreflight runs a bounded connectivity-only, no-dangling, name-objects fsck and returns clean, missing (each missing object's id, type and the ref-relative name that reaches it, grouped by affected ref and by live worktree) or unreadable with git's own words; a fixture clone with a deleted loose blob reports that blob under the ref that reaches it"
-      proof: "unit test: test/a-clone-with-missing-objects-is-named-and-repaired-additively.test.ts"
+      proof: "unit test: cloneIntegrityPreflight names a deleted loose blob under the ref that reaches it"
     - claim: "the repair refetches only the affected remote-tracking refs with maintenance and auto gc disabled and no prune, never updates a local branch, a checked-out ref or a claimed worktree's ref, re-runs the preflight, and records before and after missing counts; an object still missing after refetch is reported, not repaired by any other means"
-      proof: "unit test: test/a-clone-with-missing-objects-is-named-and-repaired-additively.test.ts"
+      proof: "unit test: repairMissingObjects refetches only affected refs additively and reports the after-count"
     - claim: "no path in the module prunes, gcs, repacks with delete, removes alternates or refs, prunes worktrees, re-clones or replaces an object store; a store still missing objects escalates once per store path with the census of mounting instances, live worktrees and inflight claims, and replacement stays an operator action"
-      proof: "unit test: test/a-clone-with-missing-objects-is-named-and-repaired-additively.test.ts"
+      proof: "unit test: no clone-integrity path prunes or replaces a store and a still-missing store escalates once"
     - claim: "the managed-checkout refresh runs the preflight before a lane borrows the store"
       proof: "grep: cloneIntegrityPreflight( in src/cli/commands/run-task-verb.ts"
   rationale: |

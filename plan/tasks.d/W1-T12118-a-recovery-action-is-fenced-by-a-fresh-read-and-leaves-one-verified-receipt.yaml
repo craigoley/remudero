@@ -19,11 +19,11 @@
   attempts: 0
   acceptance:
     - claim: "before a recorded recovery's mutating action (fix dispatch, update-branch, rerun, escalation filing) the sweep re-reads the PR from GitHub and acts only when repo, number, head SHA and base SHA equal the record's evidence and that evidence was observed at that same pair; a moved head, moved base, closed or merged PR, or an unreadable read takes no action and writes a named stale or unobservable reason"
-      proof: "unit test: test/sweep/a-recovery-action-is-fenced-by-a-fresh-read-and-leaves-one-verified-receipt.test.ts"
+      proof: "unit test: a recovery action acts only when a fresh read matches the record"
     - claim: "each action writes one pr.recovery.operation receipt keyed by (record key, base SHA, action, transition id) before acting, so a replay or a second webhook-woken pass with the same key acts nothing; the record's terminal receipt is written only after a re-read observes the action's postcondition, and an unobserved postcondition stays pending for the next periodic pass"
-      proof: "unit test: test/sweep/a-recovery-action-is-fenced-by-a-fresh-read-and-leaves-one-verified-receipt.test.ts"
+      proof: "unit test: a recovery action writes one keyed receipt before acting and a replay acts nothing"
     - claim: "no recovery deadline, age or wake closes or rebuilds a PR; a close stays with W1-T11077's verify human route and its seven-day loop.decision shadow evidence"
-      proof: "unit test: test/sweep/a-recovery-action-is-fenced-by-a-fresh-read-and-leaves-one-verified-receipt.test.ts"
+      proof: "unit test: no recovery deadline, age or wake closes or rebuilds a PR"
     - claim: "the sweep takes a recorded recovery's action through one fenced entry point"
       proof: "grep: fencedRecoveryAction( in src/lib/sweep.ts"
   rationale: |

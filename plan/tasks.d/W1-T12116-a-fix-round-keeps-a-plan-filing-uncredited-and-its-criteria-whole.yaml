@@ -20,9 +20,9 @@
   attempts: 0
   acceptance:
     - claim: "planFilingFixRoundRefusal refuses a fix round on a plan-only filing when any commit the round adds carries a Remudero-Task trailer naming a task the filing introduces, whether the worker wrote it in COMMIT_MESSAGE or the harness appended it, and names the trailer, the commit and the plan-pr-emitter invariant; the same trailer on a round over an implementation baseline is unaffected"
-      proof: "unit test: test/a-fix-round-keeps-a-plan-filing-uncredited-and-its-criteria-whole.test.ts"
+      proof: "unit test: a plan-filing fix round that credits a filed task is refused"
     - claim: "for each shard the filing introduces, the guard refuses a round that lowers the criterion count, changes any claim text, drops a grep proof that names a symbol call such as someSymbol( without keeping that symbol in a proof, or repoints a unit test proof at a test file that already exists on origin/main and is outside the task's declared files; a round that only rewrites a proof into a lintable form for the same claim and declared test path passes"
-      proof: "unit test: test/a-fix-round-keeps-a-plan-filing-uncredited-and-its-criteria-whole.test.ts"
+      proof: "unit test: a plan-filing fix round that lowers or rewrites the filing's criteria is refused"
     - claim: "the code fix lane consults the guard before it pushes a plan filing round"
       proof: "grep: planFilingFixRoundRefusal( in src/cli/commands/fix.ts"
     - claim: "the plan-scoped round consults the guard before it pushes"

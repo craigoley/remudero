@@ -20,11 +20,11 @@
   attempts: 0
   acceptance:
     - claim: "a routed task or research follow-up proposal is filed by one plan-only PR through the existing batch ratifier with no operator approve, and its shard carries origin followup#<entryId>, the source task id, PR URL, exact 40-hex head SHA, run id and the follow-up's verbatim text in its rationale; the PR carries no Remudero-Task trailer and merges only through the ordinary plan-PR gates"
-      proof: "unit test: test/an-eligible-follow-up-is-filed-as-a-plan-shard-during-the-build.test.ts"
+      proof: "unit test: an eligible task or research follow-up is filed as one plan-only shard with its provenance"
     - claim: "an action follow-up is never filed and stays on the human-owned route; a candidate already filed (a shard with the same followup# origin on origin/main or an open PR), already ratified in the ledger, or declined by any existing router arm files nothing, and a second pass over the same harvest files nothing new"
-      proof: "unit test: test/an-eligible-follow-up-is-filed-as-a-plan-shard-during-the-build.test.ts"
+      proof: "unit test: an action or already-handled follow-up is never filed"
     - claim: "a drafted shard with empty files, a proof outside the two lintable forms, a files list beyond the machine-filing risk band the source run declared, or an unreadable head SHA is refused with a named reason and left as a proposal for the operator; a pass files at most the existing draft-rung bound"
-      proof: "unit test: test/an-eligible-follow-up-is-filed-as-a-plan-shard-during-the-build.test.ts"
+      proof: "unit test: an under-specified or over-band follow-up draft is refused with a named reason"
     - claim: "the harvest calls the filing step after the registry write"
       proof: "grep: fileEligibleFollowups( in src/run-task.ts"
   rationale: |
