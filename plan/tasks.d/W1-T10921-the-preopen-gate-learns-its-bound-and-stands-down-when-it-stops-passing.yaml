@@ -17,7 +17,7 @@
     - src/cli/commands/run-task-verb.ts
     - src/run-task.ts
     - test/ci/gates/the-preopen-gate-learns-its-bound-and-stands-down-when-unhealthy.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-10-28, read-only, host ledger union (380 gz archives named >= 2026-10-15 plus the live file;

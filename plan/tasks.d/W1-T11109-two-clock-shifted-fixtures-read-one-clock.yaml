@@ -16,7 +16,7 @@
   files:
     - test/a-dispatch-claim-holds-only-while-its-holder-renews-it.test.ts
     - test/the-daemons-heap-ceiling-is-learned-and-applied-at-boot.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: The live run-branch checkpoint commit in the W1-T9432 renewal case is dated from the test's own clock

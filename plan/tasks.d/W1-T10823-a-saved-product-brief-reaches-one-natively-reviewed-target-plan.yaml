@@ -35,7 +35,7 @@
     - src/lib/panel-graph.ts
     - test/plan/wreckterra-product-case.test.ts
     - test/infra/product-build.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: >
     Core18 C3 is the step from a saved product brief to a native target plan. This is a narrow
