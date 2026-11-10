@@ -1,67 +1,54 @@
 - id: W1-T11839
-  title: "A DUE EXACT-HEAD PR RECOVERY IS ROUTED TO SAME-PR REPAIR, LINKED REBUILD/SPLIT, OR AN OWNED HUMAN DECISION BEFORE IT BECOMES TERMINAL — the existing recovery record and escalation lanes do not yet dispatch a repair or require a linked replacement before a stuck source PR closes"
+  title: "A due exact-head PR recovery dispatches at most one same-PR repair and keeps a refused or red PR owned — durable recovery records are currently shadow-only"
   repo: remudero
-  depends_on: [W1-T11750, W1-T11752, W1-T11077]
+  depends_on: [W1-T11750, W1-T11752]
   type: implement
-  verify: human
+  verify: auto
   principles: {tdd: strict}
   budget_usd: 15.00
   risk: high
   band_meaning: span
-  origin: "operator direction 2026-11-08/09: PRs should flow, route same-PR fixes, file follow-ups, or close only with linked rebuild tasks; no stuck PRs"
+  origin: "operator direction 2026-11-08/09: PRs should flow, route exact-head fixes through workers, or remain owned with an actionable disposition; no silent terminal state"
   plan_refs: [W1-T11750, W1-T11751, W1-T11752, W1-T11168, W1-T11031, W1-T11076, W1-T11077, W1-T4458]
   files:
     - src/lib/pr-recovery-record.ts
     - src/lib/sweep.ts
-    - test/sweep/a-fix-is-not-dispatched-into-an-open-escalation.test.ts
-    - test/sweep/a-stood-down-repair-is-not-re-dispatched-on-the-same-head.test.ts
-    - test/sweep/a-looping-pr-is-routed-push-through-rebuild-or-split-in-shadow.test.ts
-    - test/sweep/one-stalled-pr-keeps-one-needs-human-question.test.ts
+    - test/sweep/a-due-pr-recovery-dispatches-once-on-exact-head.test.ts
   status: queued
   priority: 2
   attempts: 0
   acceptance:
-    - claim: "a due, current, repairable recovery dispatches at most one same-PR fix attempt through the existing fix worker, keyed by repo, PR, exact head and blocker class"
+    - claim: "the sweep calls the recovery-record consumer at the dispatch decision point"
       proof: "grep: dispatchDuePrRecovery( in src/lib/sweep.ts"
-    - claim: "the sweep re-reads the exact PR head and blocker immediately before a recovery effect; a moved head, cleared blocker, unreadable inventory or failed positive control produces no effect and does not erase ownership"
-      proof: "grep: W1-T11839 criterion 2: exact-head or inventory uncertainty holds the repair in test/sweep/a-fix-is-not-dispatched-into-an-open-escalation.test.ts"
-    - claim: "a refused, no-op or still-red fix attempt remains nonterminal with its owner and deadline, while a fresh exact-head observation records resolved only after the blocker clears or the PR merges"
-      proof: "grep: W1-T11839 criterion 3: refusal leaves the recovery owned in test/sweep/a-stood-down-repair-is-not-re-dispatched-on-the-same-head.test.ts"
-    - claim: "a rebuild or split disposition uses the existing gated decision path and cannot close the source PR before every replacement task is filed on origin/main and linked from that PR"
-      proof: "grep: W1-T11839 criterion 4: replacement link precedes source close in test/sweep/a-looping-pr-is-routed-push-through-rebuild-or-split-in-shadow.test.ts"
-    - claim: "unknown or human-required evidence remains open, owned and actionable; the controller cannot close a needs-human issue or bypass required acceptance, CI, review or security gates"
-      proof: "grep: W1-T11839 criterion 5: human question remains open in test/sweep/one-stalled-pr-keeps-one-needs-human-question.test.ts"
-    - claim: "the same observed recovery input replays idempotently and every terminal receipt names the exact head, chosen route, evidence and replacement task or PR identifiers when applicable"
-      proof: "grep: W1-T11839 criterion 6: replay emits one terminal receipt in test/sweep/a-looping-pr-is-routed-push-through-rebuild-or-split-in-shadow.test.ts"
-    - claim: "the existing open-escalation protection remains tested while the recovery consumer is wired"
+    - claim: "a due, current, repairable recovery dispatches at most one same-PR fix attempt through the existing fix worker, keyed by repo, PR, exact head and blocker class"
+      proof: "grep: W1-T11839 criterion 2: one same-PR repair per exact-head recovery key in test/sweep/a-due-pr-recovery-dispatches-once-on-exact-head.test.ts"
+    - claim: "the sweep re-reads the exact PR head and blocker immediately before dispatch; a moved head, cleared blocker, unreadable inventory or failed positive control produces no effect and preserves ownership"
+      proof: "grep: W1-T11839 criterion 3: moved head or unknown inventory holds without dispatch in test/sweep/a-due-pr-recovery-dispatches-once-on-exact-head.test.ts"
+    - claim: "a refused, no-op or still-red fix attempt remains nonterminal with its owner and deadline, while an unchanged exact-head failure is not re-dispatched"
+      proof: "grep: W1-T11839 criterion 4: refusal keeps the recovery owned and does not replay in test/sweep/a-due-pr-recovery-dispatches-once-on-exact-head.test.ts"
+    - claim: "fresh exact-head evidence records resolved only after the blocker clears or the PR merges, and identical recovery input replays without a duplicate effect or terminal receipt"
+      proof: "grep: W1-T11839 criterion 5: replay is idempotent and resolution requires fresh evidence in test/sweep/a-due-pr-recovery-dispatches-once-on-exact-head.test.ts"
+    - claim: "unknown or human-required evidence stays open and owned; the consumer neither closes needs-human issues nor bypasses acceptance, CI, review or security gates"
+      proof: "grep: W1-T11839 criterion 6: unknown evidence preserves the open human issue in test/sweep/a-due-pr-recovery-dispatches-once-on-exact-head.test.ts"
+    - claim: "the existing open-escalation and same-head stand-down guards remain intact, while W1-T11031 retains sole ownership of the one-question-per-stalled-PR policy"
       proof: "unit test: W1-T10343: an open escalation holds the dispatch"
       kind: guard
     - claim: "the existing same-head stand-down protection remains tested while the recovery consumer is wired"
       proof: "unit test: W1-T10339: a stood-down repair is not re-dispatched on unchanged inputs"
       kind: guard
-    - claim: "the existing loop-decision shadow route remains tested while the recovery consumer is wired"
-      proof: "unit test: the sweep records one shadow receipt across passes and heads without taking its route"
-      kind: guard
-    - claim: "the existing one-question-per-stalled-PR policy remains tested while the recovery consumer is wired"
-      proof: "unit test: different PRs at the same head and task keep separate stalled questions"
-      kind: guard
   rationale: |
-    ORIGIN: the operator's 2026-11-08 request after PR #17389/#17394: a PR must flow, receive an exact same-PR fix, gain a filed follow-up, or close only after a linked rebuild plan exists.
+    ORIGIN: the operator's 2026-11-08 request after PR #17389/#17394: PRs must flow, receive an exact same-PR fix, gain an owned follow-up, or use the existing gated rebuild path.
 
-    CURRENT EVIDENCE: PR #17389 and PR #17394 published conflicting semantic verdicts for the same feedback item. The read-only investigation in W1-T11812 and merged PR #17447 returned `unknown`: the positive-control row proves the ledger corpus was visible, but the two disputed runs lack claim/release and entry-point receipts. Do not infer that the triage claim was bypassed or released early, and do not change issue #17393; it remains an open `needs-human` question.
+    INCIDENT EVIDENCE: the corrected forensic report in docs/forensics/triage-incident-901cace1adefcf4b.md leaves the disputed triage attribution unknown. Do not claim a specific open-PR guard miss or duplicate-run cause, and do not change issue #17393; it remains an open needs-human question.
 
-    Settled by lookup against current origin/main: W1-T11751 writes durable per-(repo, PR, exact head, failure class) recovery records in shadow; W1-T11752 gates owned wake/escalation and deliberately adds no human-question close; W1-T11168 handles a distinct exact-head fix-dispatch hold. W1-T11076 chooses a loop disposition, and W1-T11077 is the separately human-gated rebuild/split path that requires child filing on origin/main before source closure. W1-T4458 through W1-T4462 repair conflict-worker mechanics and related same-head routing, but do not consume the new recovery record. These are components to join, not work to copy.
+    CURRENT ARCHITECTURE: W1-T11751 records recovery state, W1-T11750 supplies positive-controlled live PR inventory, W1-T11752 governs the owner/wake/escalation lifecycle, and W1-T11168 owns a distinct exact-head fix-dispatch hold. W1-T11031 owns the one-question-per-stalled-PR policy. W1-T11076/T11077 own loop disposition and the separately human-gated rebuild/split close path. This task consumes the recovery record only for same-PR repair; it does not duplicate the question or close/rebuild paths. The shared sweep file is integration wiring, not a second implementation of those owners.
 
-    W1-T11031 owns only the one-question-per-stalled-PR policy; W1-T11839 preserves that question and adds exact-head repair/rebuild routing from durable recovery records, it does not create another question family.
-
-    This task is the action consumer only. It adds no new blocker taxonomy, age threshold, duplicate-triage theory, direct plan-file mutation, or bypass of the existing worker, review, acceptance, CI, security or human-release gates. The dependency on T11077 is intentional: the existing seven-day observation and operator spot-check remain mandatory before the rebuild/split close path is released. `unknown` remains a named, owned state; it never becomes permission to close.
+    The consumer adds no new blocker taxonomy, age threshold, duplicate-triage theory, direct plan mutation, issue closure or bypass of the existing worker, review, acceptance, CI, security or human-release gates. A repair refusal or unresolved blocker remains open, owned and actionable.
   design: |
-    1. Add a pure disposition planner beside the T11751 recovery record. Its input is the durable record plus W1-T11750's positive-controlled live PR inventory plus the exact PR head, blocker class, required checks and any existing loop decision. Its outputs are a single idempotent action intent or a held/unknown result; it does not invent new classes or SLOs.
-    2. In the sweep, revalidate the PR number, repository, full head SHA, current blocker, and positive-control result immediately before executing an intent. A moved head supersedes the old recovery record; a cleared blocker resolves it; any unreadable/incomplete read holds it with the existing owner/deadline and makes no write.
-    3. For a repairable current blocker, route through the existing fix-worker dispatcher with the exact failure evidence and same PR/head. Key the action receipt on the T11751 recovery key so replay, overlapping sweeps and restart cannot create a duplicate attempt. Keep the current author/CI/review/security gates intact.
-    4. A worker refusal, no-op, commit refusal, missing files or still-red exact head is not `fixed` or terminal. Preserve the owner and deadline and feed the existing judge/rung path; an unchanged failure cannot silently reset its age or re-dispatch without a new policy-permitted action.
-    5. Route rebuild/split only through the existing T11076/T11077 decision path after its human release gate. Before close, verify every replacement is filed and visible on origin/main and the source PR durably links it. If filing/linking or that verification fails, keep the source PR open and owned.
-    6. Write one terminal receipt only after the exact postcondition is observed: `resolved`, `merged`, `superseded_by_head`, `closed_after_replacement`, or `escalated_to_human`, with head, action, evidence and linked replacement identifiers. Preserve all earlier transitions; identical input produces no new effect or receipt.
-    7. Keep issue/question disposition separate from PR disposition. A needs-human issue remains open until its existing authorized revalidation garden resolves it; this consumer may file/link an actionable question but never closes it.
+    1. Add a pure disposition planner beside the T11751 recovery record. It accepts the durable record, W1-T11750's positive-controlled inventory, and the exact PR head/blocker; it yields one repair intent or a held/unknown result.
+    2. In the sweep, revalidate repository, PR number, full head SHA, current blocker and positive-control result immediately before the effect. A moved head supersedes the old input; a cleared blocker resolves it; unreadable/incomplete evidence makes no write and preserves the owner/deadline.
+    3. Route only repairable current blockers through the existing fix-worker dispatcher with exact failure evidence and same PR/head. Key the receipt on the existing recovery key so overlapping sweeps and restart cannot create duplicate attempts.
+    4. Treat refusal, no-op, missing files and still-red exact head as nonterminal. Preserve owner/deadline and do not re-dispatch unchanged input outside the existing policy-permitted rung.
+    5. Record resolution only after a fresh exact-head observation proves the blocker cleared or the PR merged. Keep needs-human issues open; rebuild/split and source closure remain exclusively behind W1-T11076/T11077's existing human gate.
   falsifier: |
-    Replay the same due input twice; more than one fix attempt or terminal receipt falsifies idempotence. Move the PR to a different head after record creation; any old-head effect falsifies revalidation. Remove the on-main replacement or source-link check; the source-close test must fail. Make the inventory/control unreadable or preserve a needs-human question; any PR/issue close falsifies fail-closed ownership.
+    Replay one due input twice; more than one fix attempt or terminal receipt falsifies idempotence. Move the PR head or clear the blocker between planning and effect; any stale-head effect falsifies revalidation. Make the inventory/control unreadable or keep a needs-human issue open; any PR/issue close falsifies fail-closed ownership.
