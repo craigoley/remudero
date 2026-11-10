@@ -1,0 +1,99 @@
+- id: W1-T12179
+  title: Serve qualifies the ancillary coverage bind beside another instance's repositories
+  repo: remudero
+  depends_on: [W1-T12126]
+  priority: 0.8
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  budget_usd: 5
+  risk: high # the shared gateway qualifies foreign host sources before replacing Serve
+  band_meaning: span
+  origin: operator approval 2026-11-10 of two paths and an additional combined USD 10.10
+  plan_refs: [W1-T12126, W1-T4228, W1-T9617]
+  files:
+    - deploy/serve-container.sh
+    - test/one-gateway-serves-every-instance.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: The real launcher accepts the exact ancillary coverage bind used by Site and Console while exposing only each qualified product repositories source read-only
+      proof: "grep: W1-T12179 criterion 1 in test/one-gateway-serves-every-instance.test.ts"
+    - claim: Arbitrary product overlays and malformed, duplicate, volume-backed, unreadable or contradictory coverage placement still refuse rather than becoming a guessed healthy source
+      proof: "grep: W1-T12179 criterion 2 in test/one-gateway-serves-every-instance.test.ts"
+    - claim: Placement changes are rechecked before replacement while ordinary coverage writes and every existing gateway test retain their behavior
+      proof: "grep: W1-T12179 criterion 3 in test/one-gateway-serves-every-instance.test.ts"
+  rationale: |
+    OBSERVED 2026-11-10 after W1-T12126 source PR17712 merged:
+    the actual current launcher --replace --dry-run refuses before launch with
+    foreign repos placement unavailable: ambiguous or unsupported repos placement.
+    Both declared foreign daemon Mounts contain the legitimate bind destination
+    /home/node/Remudero/repos/.remudero-coverage. The new foreign_repos_snapshot
+    rejects every descendant mount under repos, so it also rejects that ancillary
+    coverage directory even though it does not replace a product repository.
+    Native exact-reader probes refuse both actual Site and Console inputs; private
+    copies omitting only that coverage entry qualify both effective repos sources.
+    These are causal input probes, not passing TAP or deployed acceptance.
+
+    Fresh main36825650 and every one of twelve open PR head trees were swept
+    against the subject, with 572 remote heads as the corpus control. All captured
+    refs matched the API heads; none added a covering subject or coverage-bind case.
+    Older generic recurrence notes and W1-T12126's merged implementation do not
+    supply this missing production-shaped qualification. Recheck before filing,
+    building and publication; preserve any owner that appears.
+  design: |
+    Limit the source change to the two approved paths. Recognize only the exact
+    existing /home/node/Remudero/repos/.remudero-coverage ancillary bind. Qualify
+    its bind shape, unique destination and readable real source directory using
+    only the declared daemon's Mounts and existing filesystem qualification.
+    Do not infer paths from code checkouts, guessed container names or Config.Env.
+
+    Keep arbitrary nested product-repository overlays refused. Preserve malformed,
+    duplicate, volume, unreadable, root-identity and contradictory-placement
+    refusals. Select the declared daemon's effective product repos directory as
+    before and expose only that directory read-only at the namespaced Serve repos
+    destination. Do not expose the separate coverage source, whole scratch root,
+    worker homes, worktrees or credentials. Preserve read-only roots and writable
+    state subdirectories and all ordinary cold, absent and legacy behavior.
+
+    Include relevant qualified placement identity in the existing recheck
+    mechanism. A coverage bind removal, substitution or source-directory identity
+    change must be detected before a replacement boundary. File writes within the
+    same qualified directory are not placement drift; do not gate on its mtime.
+    Add no dependency, environment transport, timeout, registry or runtime policy.
+
+    Append production-shaped Site and Console coverage-bind cases to the existing
+    gateway suite using its owned fixture lifecycle and real launcher/Docker
+    boundary. Append negative and placement-change controls. Preserve every byte
+    of the pre-existing tests, including inputs, expected values, assertions,
+    titles, timeouts and skips. In particular the existing nested product-overlay
+    refusal remains load-bearing. Use only private Docker/filesystem fixtures;
+    no real replacement, live mount edit or host coverage mutation.
+  falsifier: |
+    With identical appended test bytes, restore the pre-repair launcher and require
+    the legitimate Site and Console coverage-bind cases to fail as assertions.
+    Remove only the coverage-shape/placement refusal or its identity recheck and
+    require corresponding negative/change controls to fail. Restore the repair and
+    require the verified existing suite, new cases and joined census suites to pass.
+    Separate source/TAP, author, hosted, ordinary review, merge and runtime adoption.
+  note: |
+    Reserved from the Azure operator checkout on
+    codex/plan-coverage-bind-1794347633893. The walk advanced from W1-T12157 and
+    actually HELD W1-T12179; never reuse or delete contested reservations.
+    Authority is exactly deploy/serve-container.sh and appended tests in
+    test/one-gateway-serves-every-instance.test.ts, plus an additional combined
+    USD10.10: one build up to USD5, one ordinary review up to USD5 and a possible
+    USD0.10 shadow call. Four follow-up caps now total USD40.40. Do not reuse the
+    merged W1-T12126 budget, add a paid retry or weaken a gate.
+    Build only after normal plan merge and fresh subject, ownership, merge-credit,
+    scope-history and runnableCandidates checks. Keep ordinary author, hosted and
+    genuine review gates and daemon merge. No coordinator review, status, arm,
+    approval or merge. Record Decisions in each PR and luna/REPORTS.md.
+    No live Serve replacement, manual restart/recycle, flag activation, provider,
+    credential, egress or registry policy change is included. After normal source
+    merge, qualify the real read-only launcher dry-run before proposing any exact
+    runtime replacement exception. Engine-pruning STOP and other owners remain.
+    Prior observer and view-pilot exceptions remain consumed and cannot be retargeted.
+    Core stale Now and signed-in acceptance remain separate; this task claims
+    neither repaired. Stop for a concrete decision before expanding this boundary.
