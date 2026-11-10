@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: high  # One security-gate recovery spanning producer, metadata adapter, classifier and unresolved-evidence disposition.
   band_meaning: span
   priority: 1.26
@@ -197,5 +197,6 @@
     confidence: 1
     reasons:
       - "released by the operator with rmd approve"
-    judged_at: "2026-11-10T00:55:31.261Z"
-    pin: "76a1878984d11fa79dd84e0e9d76a649de5e5b7aea32cb6c5e01591981d0e4fa"
+    judged_at: "2026-11-10T15:20:18.220Z"
+    pin: "8a8221d3e75a10c85fde505783a45667d12126626175a93826aed41e8f688929"
+    operator_release_pin: "a51cd42dc05af517949a6e1ad222cbac92f67652441ea1d1aa5e6b7213a9458a"
