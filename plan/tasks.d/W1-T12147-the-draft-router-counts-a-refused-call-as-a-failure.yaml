@@ -1,0 +1,46 @@
+- id: W1-T12147
+  title: "The draft router counts a refused call as a failure, not a free call"
+  repo: remudero
+  depends_on: []
+  priority: 0.9
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # which deployment drafts every inbox reply; the draft contract and its checks do not change
+  band_meaning: blast-radius
+  origin: operator-session#model-choice-2026-11-10
+  plan_refs:
+    - W1-T4067
+    - W1-T11073
+  files:
+    - src/lib/draft-routing.ts
+    - src/lib/worker.ts
+    - test/routing/the-draft-router-counts-a-refused-call-as-a-failure.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "The cost of one attempt for a deployment comes only from attempts that reported a cost above zero. With no such attempt the router uses the estimate, and a refused call never lowers the cost"
+      proof: "grep: W1-T12147 criterion 1 in test/routing/the-draft-router-counts-a-refused-call-as-a-failure.test.ts"
+    - claim: "Each draft.routing.outcome row names how the call ended: clean, not clean, contract failed, refused or failed. A refused or failed call counts as an attempt that was not clean"
+      proof: "grep: W1-T12147 criterion 2 in test/routing/the-draft-router-counts-a-refused-call-as-a-failure.test.ts"
+    - claim: "The router skips a deployment for 60 minutes when its last 10 calls all ended refused or failed and another deployment is eligible. One row records the skip with the count"
+      proof: "grep: W1-T12147 criterion 3 in test/routing/the-draft-router-counts-a-refused-call-as-a-failure.test.ts"
+    - claim: "With one eligible deployment the router still picks it, as today"
+      proof: "grep: W1-T12147 criterion 4 in test/routing/the-draft-router-counts-a-refused-call-as-a-failure.test.ts"
+  rationale: |
+    MEASURED 2026-11-10 in the core instance's ledger, 2026-10-27 to 2026-11-10: the draft router chose the cash deployment haiku-5-5 in 79.7% of 824 choices.
+    - That deployment had 0 clean drafts in 601 outcomes. Its median cost was $0, because the calls were refused.
+    - `chooseDraftDeployment` in src/lib/draft-routing.ts ranks by sampled clean rate divided by cost for each attempt. It takes that cost as total dollars over all attempts.
+    - A refused call adds an attempt and no dollars. So refusals make the deployment look cheap, and a low price beats a low clean rate.
+    - Only one kind of refusal is left out today: the budget refusal with zero work (`not-invoked-budget-refusal`). Usage refusals and errors are not.
+    - Each wrong choice costs a refused call and then a second draft on the next deployment.
+  design: |
+    In `draftStatsFromRows`, keep a count of attempts that reported a cost and divide dollars by that count. In `chooseDraftDeployment`, use the estimate when the count is zero.
+    In src/lib/worker.ts, add the end class to the `draft.routing.outcome` row from the fields the call already returns (`isError`, `usageRefusal`, `budgetRefused`).
+    The skip reads the last 10 outcome rows of the deployment. It ends after 60 minutes, so a deployment that recovers is tried again.
+    NOT IN SCOPE: the floor on clean rate and the turn limit, which W1-T11073 files. That task skips a deployment that drafts badly. This task skips one that does not answer.
+  falsifier: |
+    Divide dollars by all attempts and criterion 1 must fail. Drop refused calls from the attempt count and criterion 2 must fail. Skip the only eligible deployment and criterion 4 must fail. Restore and require all to pass.
+  note: |
+    The two numbers, 10 calls and 60 minutes, are new. The builder may replace them with measured values and says so in the pull request.

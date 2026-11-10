@@ -1,0 +1,50 @@
+- id: W1-T12148
+  title: "Scarce quota goes to the pipeline where it is worth most"
+  repo: remudero
+  depends_on:
+    - W1-T12142
+  priority: 1.4
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the auction that picks a provider for every worker; this task records a second choice and must not change the first
+  band_meaning: blast-radius
+  origin: operator-session#model-choice-2026-11-10
+  plan_refs:
+    - W1-T5535
+    - W1-T4617
+  files:
+    - src/lib/worker-provider.ts
+    - src/lib/worker.ts
+    - test/routing/scarce-quota-goes-to-the-pipeline-where-it-is-worth-most.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "For an auction with two or more eligible providers, the assignment records a shadow choice. It is the provider the auction would pick with each weight multiplied by that provider's measured advantage for this pipeline"
+      proof: "grep: W1-T12148 criterion 1 in test/routing/scarce-quota-goes-to-the-pipeline-where-it-is-worth-most.test.ts"
+    - claim: "The advantage comes from the newest concluded routing.experiment.result row for that pipeline. With no concluded result the multiplier is 1 and the shadow choice equals the real one"
+      proof: "grep: W1-T12148 criterion 2 in test/routing/scarce-quota-goes-to-the-pipeline-where-it-is-worth-most.test.ts"
+    - claim: "The shadow record names the result row it used, both sets of probabilities and whether the two choices differ"
+      proof: "grep: W1-T12148 criterion 3 in test/routing/scarce-quota-goes-to-the-pipeline-where-it-is-worth-most.test.ts"
+    - claim: "The provider the auction selects, its draw and its recorded probabilities are the same as before this change"
+      proof: "grep: W1-T12148 criterion 4 in test/routing/scarce-quota-goes-to-the-pipeline-where-it-is-worth-most.test.ts"
+    - claim: "The worker's routing code calls the shadow selection"
+      proof: "grep: pipelineValueShadowSelection( in src/lib/worker.ts"
+  rationale: |
+    MEASURED 2026-11-10 in the core instance's ledger, 2026-10-27 to 2026-11-10, over 16,233 `worker.assignment` rows: Claude was below its reserve in 33.4% of assignments.
+    - One candidate was eligible in 43.7% of assignments. The draw had probability 1 in 57.8% of auction rows.
+    - `selectWorkerProvider` weights each provider by squared headroom. It gives the same weight to a review, a fix round and a build.
+    - The advantage is not the same in each pipeline. By assigned arm, the review FAIL rate was 26.5% for sonnet against 49.7% for sol61, a gap of 23 points.
+    - Fix rounds ended "fixed and pushed" in 72.3% against 66.5%, a gap of 6 points. Build runs merged in 68.6% against 49.1%.
+    - When Claude quota is short, a call spent where the gap is 6 points is a call not spent where the gap is 23.
+  design: |
+    Add `pipelineValueShadowSelection` to src/lib/worker-provider.ts. It takes the same capacities, reserve and draw as `selectWorkerProvider`, plus one multiplier for each provider, and returns the provider it would select.
+    The multiplier is the provider's rate on the pipeline's main measure, divided by the mean of the rates. Read it from the result row of W1-T12142, cached for the pass.
+    Call it from the auction path in src/lib/worker.ts and put its record under `routing` on the assignment.
+    This is the same mixing input the fix learner already uses (`ProviderMixing`), so a later task that turns the shadow on changes one argument.
+    NOT IN SCOPE: turning the shadow on. That needs a count of how often the choices differ and what the differing runs did.
+  falsifier: |
+    Use the multiplier in the real selection and criterion 4 must fail. Use a result that is still running and criterion 2 must fail. Restore and require all to pass.
+  note: |
+    A live experiment keeps its task-keyed draw. The shadow never changes an experiment's assigned arm.
