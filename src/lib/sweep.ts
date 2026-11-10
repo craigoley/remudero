@@ -10599,6 +10599,28 @@ export function sessionBranchUnheld(evidence: SessionOwnershipEvidence): Session
   return { verdict: "held", reason: "the branch is held", reads };
 }
 
+/** W1-T11170: the ledger row a worker conflict round on an owned head writes when it is dispatched. */
+export const OWNED_CONFLICT_ROUND_STEP = "sweep.owned_conflict.round";
+/** W1-T11170: the one escalation the fix progress judge may end an owned head's repair with, per PR and head. */
+export const OWNED_CONFLICT_ESCALATED_STEP = "sweep.owned_conflict.escalated";
+
+/** W1-T11170: what a conflict round on a fleet or session head tells the PR after it writes. */
+export function ownedConflictComment(c: {
+  kind: OwnedConflictHeadKind; round: "deterministic" | "worker"; mainSha: string; headSha: string; newHeadSha?: string;
+  paths: ReadonlyArray<{ path: string; resolution: string }>; ownership?: SessionOwnershipReads;
+}): string {
+  return [
+    `rmd conflict round (${c.round}) on this ${c.kind === "session" ? "operator-session" : "fleet-owned"} branch: merged ` +
+      `main ${c.mainSha} into ${c.headSha}${c.newHeadSha ? ` as ${c.newHeadSha}` : ""}` +
+      `${c.kind === "session" ? ", a merge commit whose first parent is the PR head, pushed with no force flag" : ""}.`,
+    "",
+    "Conflicted paths:",
+    ...(c.paths.length > 0 ? c.paths.map((p) => `- \`${p.path}\`: ${p.resolution}`) : ["- none captured"]),
+    ...(c.ownership ? ["", "Ownership evidence read before the write:", `- claim: ${c.ownership.claim}`,
+      `- session: ${c.ownership.session}`, `- pushes: ${c.ownership.pushes}`] : []),
+  ].join("\n");
+}
+
 /**
  * W1-T11170: the redundant re-fix comparison for one conflicted path, at hunk grain: every hunk of the PR's change
  * (`git diff <merge-base> <head> -- <path>`) already appears on main byte for byte, its post-image (context and
@@ -20064,6 +20086,9 @@ export async function runSweep(
   // W1-T5349 — the plan-repair rung's once-per-head record, folded once per pass.
   const planRepairHistory = planRepairHistoryFromLedger(ledgerLines);
   const planRoundFacts = new Map<number, PlanRepairFacts>();
+  // W1-T11170: this pass's conflict rounds on a fleet-owned or unheld operator-session head, by PR number.
+  const ownedConflictRounds = new Map<number, { kind: OwnedConflictHeadKind; ownership?: SessionOwnershipReads;
+    standDown?: string; wrote?: boolean }>();
   const gardenRecordRefusals = new Map<number, string>();
   const tryPlanRepair = async (pr: OpenPrView): Promise<{ repaired: boolean; reason: string }> => {
     const notRepaired = { repaired: false, reason: "" };
@@ -20493,7 +20518,9 @@ export async function runSweep(
   const applyDirtyFleetRebase = async (
     pr: OpenPrView,
   ): Promise<{ handled: true; standDownReason: string } | { handled: false }> => {
-    if (pr.mergeState !== "dirty" || !isDispatchedRunBranch(pr.headRefName) || !deps.rebaseDirtyFleetBranch) {
+    // W1-T11170: an operator session's run-unfiled-* branch takes only a merge commit, never a leased rebase.
+    if (pr.mergeState !== "dirty" || !isDispatchedRunBranch(pr.headRefName) || !deps.rebaseDirtyFleetBranch ||
+        OPERATOR_SESSION_HEAD_RE.test(pr.headRefName ?? "")) {
       return { handled: false };
     }
     const outcome = await deps.rebaseDirtyFleetBranch(pr);
@@ -21568,6 +21595,94 @@ export async function runSweep(
         disposition = "wait";
       }
     }
+    // W1-T11170: a dirty fleet-owned head, or an operator-session branch shown unheld, gets one bounded conflict round
+    // per head and main: the deterministic tier first, then the plan-scoped round or the merge-conflict fix mode.
+    // A contributor's or foreign head, or a session branch somebody holds, keeps today's row.
+    if (disposition === "blocked-ambiguous" && derived.blocker === "conflict" && pr.mergeState === "dirty" &&
+        deps.readPlanRepairFacts && !(pr.taskId !== undefined &&
+          fixHeadAcceptable(pr.headRefName, pr.taskId, isSyntheticOrchestratorLaneId(pr.taskId)))) {
+      let facts: PlanRepairFacts | undefined;
+      try {
+        facts = planRoundFacts.get(pr.prNumber) ?? await deps.readPlanRepairFacts(pr);
+        planRoundFacts.set(pr.prNumber, facts);
+      } catch (error) {
+        log("sweep.owned_conflict.read_failed", { pr_number: pr.prNumber, head_sha: pr.headSha, reason: String(error) });
+      }
+      const kind: OwnedConflictHeadKind | undefined = fleetOwnedConflictHead(pr, facts) ? "fleet"
+        : operatorSessionHead(pr, facts) ? "session" : undefined;
+      const probe = mainTipSha === undefined ? undefined : ledgerLines.findLast((row) => row.step === "sweep.merge_probe" &&
+        row.pr_number === pr.prNumber && row.head_sha === pr.headSha && row.main_sha === mainTipSha);
+      const evidenced = hasCapturedMergeConflictEvidence(pr.mergeConflict) || probe?.verdict === "conflict";
+      let ownership: SessionOwnershipVerdict | undefined;
+      if (kind === "session" && evidenced && deps.readConflictOwnership) {
+        let read: SessionOwnershipEvidence;
+        try { read = await deps.readConflictOwnership(pr); }
+        catch (error) { read = { nowMs: now, unreadable: [String((error as Error)?.message ?? error)] }; }
+        ownership = sessionBranchUnheld(read);
+      }
+      const ref = pr.headRefName ?? "(no head)";
+      if (ownership?.verdict === "ambiguous") {
+        // One escalation per PR and head, by the blocked-ambiguous arm's own head-keyed dedup; nothing is written.
+        reason = `merge conflict (mergeState dirty) — operator-session branch ${ref}: ownership is ambiguous ` +
+          `(${ownership.reason}; claim ${ownership.reads.claim}; session ${ownership.reads.session}; pushes ` +
+          `${ownership.reads.pushes}) — nothing written — escalating once for this head`;
+      } else if (evidenced && (kind === "fleet" || ownership?.verdict === "unheld")) {
+        const round: { kind: OwnedConflictHeadKind; ownership?: SessionOwnershipReads; standDown?: string; wrote?: boolean } =
+          { kind: kind!, ...(ownership ? { ownership: ownership.reads } : {}) };
+        ownedConflictRounds.set(pr.prNumber, round);
+        const fields = { head_kind: round.kind, ...(round.ownership ? { ownership: round.ownership } : {}) };
+        const isOwnedReceipt = (row: Record<string, unknown>) => row.step === "sweep.conflict_regenerated" &&
+          row.tier === "deterministic" && row.pr_number === pr.prNumber && row.head_sha === pr.headSha &&
+          row.main_sha === mainTipSha;
+        let receipt = mainTipSha === undefined ? undefined : readLedger(deps.ledgerPath).findLast(isOwnedReceipt);
+        if (receipt === undefined && mainTipSha !== undefined && deps.regenerateConflict && !deps.dryRun) {
+          const recheck = round.kind === "session" ? async () => {
+            const again = sessionBranchUnheld(await deps.readConflictOwnership!(pr));
+            return again.verdict === "unheld" ? undefined : `${again.verdict}: ${again.reason}`;
+          } : undefined;
+          let result: ConflictRegenerationOutcome;
+          try { result = await deps.regenerateConflict(pr, mainTipSha, "owned", { kind: round.kind, ...(recheck ? { recheck } : {}) }); }
+          catch (error) { result = { outcome: "error", paths: [], reason: spawnFailureText(error) }; }
+          const base: LedgerLine = { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", step: "sweep.conflict_regenerated",
+            pr_number: pr.prNumber, head_sha: pr.headSha, main_sha: mainTipSha, tier: "deterministic", ...fields,
+            new_head_sha: result.newHeadSha ?? null, paths: result.paths, outcome: result.outcome,
+            ...(result.reason ? { reason: result.reason } : {}), ...(result.cleanupError ? { cleanup_error: result.cleanupError } : {}) };
+          // One row per resolved path, its mode take-main, regenerate or deleted-on-main; one row for a round that fell through.
+          const rows: LedgerLine[] = result.outcome === "pushed" && result.paths.length > 0
+            ? result.paths.map((p) => ({ ...base, mode: p.mode ?? "regenerate", path: p.path })) : [{ ...base, mode: "owned" }];
+          for (const row of rows) appendLine(deps.ledgerPath, row);
+          receipt = rows[0];
+          if (result.outcome === "pushed" && deps.postConflictComment) {
+            try {
+              await deps.postConflictComment(pr, ownedConflictComment({ kind: round.kind, round: "deterministic",
+                mainSha: mainTipSha, headSha: pr.headSha, ...(result.newHeadSha ? { newHeadSha: result.newHeadSha } : {}),
+                paths: result.paths.map((p) => ({ path: p.path, resolution: p.mode === "regenerate" ? `regenerate (npm run ${p.action})` : p.mode ?? p.action })),
+                ...(round.ownership ? { ownership: round.ownership } : {}) }));
+            } catch (error) {
+              log("sweep.owned_conflict.comment_failed", { pr_number: pr.prNumber, head_sha: pr.headSha, reason: String(error) });
+            }
+          }
+          round.wrote = result.outcome === "pushed";
+        }
+        const tierNote = receipt === undefined ? "the deterministic tier is unavailable (no main tip or regenerator)"
+          : `the deterministic tier ${String(receipt.outcome)}${receipt.reason ? ` (${String(receipt.reason)})` : ""}`;
+        if (receipt?.outcome === "pushed" || receipt?.outcome === "lease-mismatch") {
+          disposition = "conflicted";
+          round.standDown = receipt.outcome === "pushed"
+            ? `deterministic conflict tier pushed ${String(receipt.new_head_sha)} on ${round.kind} head ${ref}; awaiting fresh review and CI`
+            : `deterministic conflict tier lease mismatch on ${ref}: ${String(receipt.reason)}; awaiting a fresh snapshot`;
+          reason = `merge conflict (mergeState dirty) — ${round.kind}-owned head ${ref} — deterministic tier: ${round.standDown}`;
+        } else if (round.kind === "fleet" && planConflictRoundCandidate(pr) && deps.dispatchPlanGateRound) {
+          // Plan-scope conflicts on a fleet plan filing: W1-T9289's plan-scoped round, below, with its own judge.
+          log("sweep.owned_conflict.plan_round", { pr_number: pr.prNumber, head_sha: pr.headSha, tier: tierNote });
+        } else {
+          disposition = "conflicted";
+          reason = `merge conflict (mergeState dirty) — ${round.kind}-owned head ${ref} — ${tierNote} — worker tier: ` +
+            `dispatching the bounded merge-conflict fix mode${round.kind === "session"
+              ? " (a merge commit only, pushed with no force flag)" : ""}; a fresh review and CI gate the new head`;
+        }
+      }
+    }
     // W1-T9289: a dirty fleet-App plan filing on a machine-lane head is owned by the same plan-scoped round.
     let planConflictRound = false;
     if (disposition === "blocked-ambiguous" && derived.blocker === "conflict" && deps.dispatchPlanGateRound &&
@@ -22435,9 +22550,10 @@ export async function runSweep(
     // (and that has not been attempted at this head and main), and only for that route.
     const conflictGated = disposition === "conflicted" && deps.actionable !== undefined && !deps.actionable(disposition);
     const conflictNoWorkerOnly = acted && conflictGated && mainTipSha !== undefined &&
+      (ownedConflictRounds.get(pr.prNumber)?.standDown !== undefined ||
       conflictNoWorkerMode(pr, ledgerLines, mainTipSha, deps.regenerateConflict !== undefined) !== undefined &&
       !ledgerLines.some((row) => row.step === "sweep.conflict_regenerated" && row.pr_number === pr.prNumber &&
-        row.head_sha === pr.headSha && row.main_sha === mainTipSha);
+        row.head_sha === pr.headSha && row.main_sha === mainTipSha));
     if (acted) {
       // W1-T254 — LIGHT-SWEEP RESTRICTION. `actionable` defaults to everything, so `rmd sweep` and
       // the full sweep are unchanged. The light ticker passes `d => d === "post-review"`, so every
@@ -23761,6 +23877,14 @@ export async function runSweep(
                 standDownReason = terminal;
                 break;
               }
+              // W1-T11170: an owned head's deterministic tier already ran in the disposition above.
+              const ownedRound = ownedConflictRounds.get(pr.prNumber);
+              if (ownedRound?.standDown !== undefined) {
+                acted = ownedRound.wrote === true;
+                spent = false;
+                standDownReason = ownedRound.standDown;
+                break;
+              }
               const noWorkerMode = conflictNoWorkerMode(pr, ledgerLines, mainTipSha, deps.regenerateConflict !== undefined);
               if (mainTipSha !== undefined && deps.regenerateConflict && pr.taskId !== undefined && noWorkerMode !== undefined) {
                 const cleanMerge = noWorkerMode === "clean-merge";
@@ -23815,8 +23939,54 @@ export async function runSweep(
               // dispatch carries merge-conflict evidence and never a mix. W1-T2231: the
               // "conflicted" analogue of the blocked-fixable capture above — both are
               // dispatch-based repair surfaces, so both feed `spent` the same way.
-              const conflictedEvidence = { unmetCriteria: [], mergeConflict: pr.mergeConflict,
-                ...(mainTipSha !== undefined ? { baseSha: mainTipSha } : {}) };
+              const conflictedEvidence: FixDispatchEvidence = { unmetCriteria: [], mergeConflict: pr.mergeConflict,
+                ...(mainTipSha !== undefined ? { baseSha: mainTipSha } : {}),
+                ...(ownedRound ? { ownedConflictHead: { kind: ownedRound.kind,
+                  push: ownedRound.kind === "session" ? "merge-commit-no-force" as const : "leased" as const,
+                  ...(ownedRound.ownership ? { ownership: ownedRound.ownership } : {}) } } : {}) };
+              // W1-T11170: a worker round on an owned head that ran at this head and left it dirty has failed. The fix
+              // progress judge, never a fixed count, decides whether another round, a change of approach, or one
+              // escalation follows.
+              if (ownedRound) {
+                const atHead = (row: Record<string, unknown>) => row.pr_number === pr.prNumber && row.head_sha === pr.headSha;
+                const freshRows = readLedger(deps.ledgerPath);
+                if (freshRows.some((row) => row.step === OWNED_CONFLICT_ESCALATED_STEP && atHead(row))) {
+                  acted = false;
+                  standDownReason = "the owned-head conflict round was escalated once for this head; awaiting an operator or a new head";
+                  break;
+                }
+                const history = freshRows.filter((row) => row.step === OWNED_CONFLICT_ROUND_STEP && atHead(row));
+                if (history.length > 0) {
+                  const input = await buildFixProgressInputWithHostedProofs({ taskId: pr.taskId, prNumber: pr.prNumber,
+                    headSha: pr.headSha, currentRed: ["merge-conflict"], ledger: ledgerLines,
+                    parkedReason: `owned-head conflict round left the head dirty; ${JSON.stringify(history)}` }, deps.readHostedProofResults);
+                  input.remedyHistory = history;
+                  const { decision: progress, receipt } = await resolveFixProgress(input, ledgerLines,
+                    { ...progressWitness(pr), judge: deps.fixProgressJudge });
+                  appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: escalationTaskIdFor(pr), pr_number: pr.prNumber,
+                    head_sha: pr.headSha, site: "owned-conflict-round", rounds: history.length, ...progress, ...receipt });
+                  if (progress.verdict === "unavailable") {
+                    acted = false;
+                    standDownReason = `owned-head conflict round awaits the fix progress judge: ${progress.reason}`;
+                    break;
+                  }
+                  if (progress.verdict === "escalate") {
+                    const why = `merge conflict on ${ownedRound.kind}-owned head ${pr.headRefName}: fix progress loop: ` +
+                      `${progress.loop} — ${progress.reason}`;
+                    appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: escalationTaskIdFor(pr),
+                      step: OWNED_CONFLICT_ESCALATED_STEP, pr_number: pr.prNumber, head_sha: pr.headSha, reason: why });
+                    await deps.escalate(pr, why, renderClarificationQuestion(pr, why, pr.strikeHistory ?? []));
+                    standDownReason = why;
+                    break;
+                  }
+                  pr.progressContinue = { reason: progress.reason };
+                  conflictedEvidence.progressDecision = progress;
+                  if (progress.verdict === "change-approach") {
+                    pr.pendingAnswer = { ...pr.pendingAnswer, constraint: progress.approach };
+                    conflictedEvidence.progressApproach = progress.approach;
+                  }
+                }
+              }
               // W1-T2752: the conflicted twin of the blocked-fixable terminal check above, same
               // reasoning — see `SweepDeps.terminalFixStandDown`'s own doc.
               const conflictedTerminalStandDown = deps.terminalFixStandDown?.(pr);
@@ -23847,7 +24017,7 @@ export async function runSweep(
                 standDownReason = conflictedDeclineHold.reason;
                 break;
               }
-              const conflictedFixClaim = claimFixDispatch(pr);
+              const conflictedFixClaim = claimFixDispatch(ownedRound ? { ...pr, taskId: escalationTaskIdFor(pr) } : pr);
               if (!conflictedFixClaim.ok) {
                 acted = false;
                 standDownReason = conflictedFixClaim.reason;
@@ -23863,12 +24033,33 @@ export async function runSweep(
                 standDownReason = conflictedAdmission.reason;
                 break;
               }
+              // W1-T11170: an owned head's worker round is recorded before it starts, and comments after it lands.
+              const ownedDispatch = (onPhase?: DetachedFixPhaseObserver, control?: DetachedFixControl) => async () => {
+                if (!ownedRound) return deps.dispatchFix(pr, conflictedEvidence, onPhase, control);
+                appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: escalationTaskIdFor(pr), step: OWNED_CONFLICT_ROUND_STEP,
+                  pr_number: pr.prNumber, head_sha: pr.headSha, main_sha: mainTipSha ?? null, round: "worker",
+                  head_kind: ownedRound.kind, push: conflictedEvidence.ownedConflictHead!.push,
+                  paths: (pr.mergeConflict?.files ?? []).map((f) => f.path),
+                  ...(ownedRound.ownership ? { ownership: ownedRound.ownership } : {}) });
+                const outcome = await deps.dispatchFix(pr, conflictedEvidence, onPhase, control);
+                if (dispatchFixSpent(outcome) && deps.postConflictComment && mainTipSha !== undefined) {
+                  try {
+                    await deps.postConflictComment(pr, ownedConflictComment({ kind: ownedRound.kind, round: "worker",
+                      mainSha: mainTipSha, headSha: pr.headSha,
+                      paths: (pr.mergeConflict?.files ?? []).map((f) => ({ path: f.path, resolution: "resolved by the merge-conflict fix mode worker" })),
+                      ...(ownedRound.ownership ? { ownership: ownedRound.ownership } : {}) }));
+                  } catch (error) {
+                    log("sweep.owned_conflict.comment_failed", { pr_number: pr.prNumber, head_sha: pr.headSha, reason: String(error) });
+                  }
+                }
+                return outcome;
+              };
               // W1-T2379: the conflicted twin of the blocked-fixable arm above, same reasoning.
               if (deps.detachFixWait) {
-                await detachFixDispatch(pr, (onPhase) => conflictedFixClaim.run(() => deps.dispatchFix(pr, conflictedEvidence, onPhase, conflictedFixClaim.control)), conflictedFixClaim, undefined, conflictedEvidence);
+                await detachFixDispatch(pr, (onPhase) => conflictedFixClaim.run(ownedDispatch(onPhase, conflictedFixClaim.control)), conflictedFixClaim, undefined, conflictedEvidence);
                 break;
               }
-              const conflictedDispatchOutcome = await conflictedFixClaim.run(() => deps.dispatchFix(pr, conflictedEvidence));
+              const conflictedDispatchOutcome = await conflictedFixClaim.run(ownedDispatch());
               if (conflictedDispatchOutcome !== undefined) spent = dispatchFixSpent(conflictedDispatchOutcome);
               const conflictedDeclinedReason = fixClaimDeclinedReason(conflictedDispatchOutcome);
               if (conflictedDeclinedReason) [acted, standDownReason] = [false, conflictedDeclinedReason];
