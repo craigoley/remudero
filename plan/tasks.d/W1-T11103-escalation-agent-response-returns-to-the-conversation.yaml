@@ -27,7 +27,7 @@
     - test/inbox/escalation-correspondence-serving.test.ts
     - test/triage-plan-deps-seam.test.ts
     - test/github/compress-src-lib-github-transport-ts.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     The operator clarified the email interaction on 2026-11-02: show the exact sent answer, clear

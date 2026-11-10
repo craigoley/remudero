@@ -51,7 +51,7 @@
     - src/lib/model-canary-paired-analysis.ts
     - src/lib/model-canary-report.ts
     - test/model-canary-paired-analysis.test.ts
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: The operator requested durable plan custody of the remaining approved

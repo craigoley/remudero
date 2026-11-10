@@ -9,7 +9,7 @@
   risk: high  # Rule 19: one concern, what snapshotState does when an engine tree vanishes or is regenerable; no reaper, cron, heartbeat or alarm change
   band_meaning: span
   priority: 1
-  status: queued
+  status: merged
   attempts: 0
   origin: "filing agent 2026-10-26: core's verified state backup failed 9 of the last 12 nights; read-only on the Azure host (reclaim.log, receipt, ledger rotations) and reproduced on origin/main 7b75a38f7"
   plan_refs: [W1-T10086, W1-T5545, W1-T5546, W1-T5681, W1-T234, W1-T9077, W1-T9738, W1-T10756]
