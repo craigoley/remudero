@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-16: agent F5, the 06:15:10Z and 05:32:39Z sweep.full_prelude rows, read-only on the host"
   plan_refs: [W1-T9564, W1-T4817, W1-T6275, W1-T9552, W1-T6248]
   files: [src/lib/sweep.ts, test/the-full-prelude-names-where-fleet-state-spends-its-time.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

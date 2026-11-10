@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-13: gardener loop audit (PR #10787 token dodge)"
   plan_refs: [W1-T6092, W1-T6087]
   files: [src/lib/ci-parity.ts, test/the-tree-walk-recognizer-admits-by-what-a-suite-executes.test.ts, "src/lib/rule-suites.ts", "test/every-shard-on-main-is-lintable.test.ts"]
-  status: queued
+  status: merged
   priority: 1.5
   attempts: 0
   rationale: |

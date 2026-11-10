@@ -33262,9 +33262,11 @@ export function lightPassActionable(
   // 3-line shape back, byte-identical (W1-T1211) — this is an ADDITIVE 3rd parameter, not a
   // change to `fixRungAllowed`'s own meaning.
   requeueLaneOnly: boolean = false,
-  // W1-T5922 — TRUE only on `buildSweepLightHook`'s ordinary pass. An arm is one GitHub call behind
-  // the full sweep's own guards (decideSweepArm, the W1-T5403 risk judge, holds, dedups); it spawns
-  // no worker. Default false, so every 2- and 3-argument caller keeps its original shape.
+  // W1-T5922 — TRUE on `buildSweepLightHook`'s ordinary pass and, since W1-T11510, on an interphase-review
+  // pass (`lightPassArmAdmitted`). An arm is one GitHub call behind the full sweep's own guards
+  // (decideSweepArm, the W1-T5403 risk judge, holds, dedups); `deps.arm` spawns no worker, and the
+  // mergeable lane's CodeQL fix route stands down on every review-only scope. Default false, so every
+  // 2- and 3-argument caller keeps its original shape.
   armAllowed: boolean = false,
   // W1-T8086: the ordinary pass's repair lanes use the existing per-claim fix-capacity admission.
   // 2026-10-14: `conflicted` too, so a merge-conflict round no longer waits for the next full sweep.

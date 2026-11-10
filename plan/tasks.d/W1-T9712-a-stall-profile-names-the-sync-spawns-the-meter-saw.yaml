@@ -14,7 +14,7 @@
     - src/lib/loop-stall-profiler.ts
     - src/lib/read-plane.ts
     - test/a-stall-profile-names-the-sync-spawns-the-meter-saw.test.ts
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

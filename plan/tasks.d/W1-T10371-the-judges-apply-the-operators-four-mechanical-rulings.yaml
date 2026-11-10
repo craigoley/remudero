@@ -9,7 +9,7 @@
   band_meaning: span
   budget_usd: 12.00
   priority: 1  # requested by the operator session 2026-10-21: 104 escalations cleared by hand, and 65 of them were mechanical
-  status: queued
+  status: merged
   attempts: 0
   origin: "operator session 2026-10-21: the 104 queued verify:human gardener tasks (~/Remudero-notes/verify-human-decisions-2026-10-21.json, rulings applied in #13418, #13406 and rmd approve)"
   plan_refs: [W1-T9043, W1-T9045, W1-T9268, W1-T9694, W1-T10348, W1-T10349, W1-T10350]

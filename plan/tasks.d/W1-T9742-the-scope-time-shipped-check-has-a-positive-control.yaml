@@ -14,7 +14,7 @@
     - scripts/task-shipped.mjs
     - doctrine/plan-and-task-hygiene/run-both-scope-checks.md
     - test/the-scope-time-shipped-check-has-a-positive-control.test.ts
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

@@ -1,0 +1,25 @@
+- id: W1-T11986
+  title: "The review lane's worker calls record servedModel in only 16.2% of joined calls (57/351, 7-day window) — restore it at the review ledger write site or record why the lane legitimately lacks it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  rationale: "evidence-coverage-v1 over benchmark-quality-v1 reports lane `review`, field `servedModel`: 57/351 joined worker calls (16.2%) for 2026-11-02 through 2026-11-09, first seen 2026-09-28T05:55:37Z, reopened with overrides rejected. This is the feedback's measurement, not a fresh ledger audit. src/lib/benchmark-evidence.ts observes servedModel only from a nonempty terminal.servedModel. Sibling gaps: W1-T8374 (daemon), W1-T8947 (isolation), W1-T11006 (ci-judge), W1-T10272 (inbox-response); W1-T9387 covers review cost only."
+  design: |
+    DIAGNOSE FIRST. Find which review worker calls (incl. the shadow judge spawn, failed and clock-bound attempts, non-Claude providers) land without terminal.servedModel, comparing terminal rows against the WorkerResult the reviewer path receives. State ledger source coverage honestly.
+    THEN EITHER restore: thread the worker's served model into the review terminal row; OR, where a provider legitimately cannot report it, retain the recognized named reason (see W1-T4650/W1-T4707) so the call is excused honestly. Never infer identity from the requested model.
+    Rule 19 merits test: one integration test must cross review spawn, ledger row and the benchmark evidence reader, including a failed or clock-bound attempt.
+    NOT IN SCOPE: lowering the 90% floor, editing the gardener, routing, billing, or other lanes. Coordinate edits to shared files with W1-T9387.
+  acceptance:
+    - claim: "a test drives the review lane's spawn path, including a failed or clock-bound attempt, into the benchmark evidence reader: a returned served model is retained and counted observed, while a legitimately unreportable call retains a named reason without fabricated identity"
+      proof: "unit test: test/review-lane-served-model.test.ts"
+  risk: high
+  band_meaning: span
+  origin: feedback#evidence-coverage-review-served-model
+  plan_refs: ["§7B", "W1-T4640", "W1-T8374", "W1-T8947", "W1-T9387"]
+  files: [src/run-task.ts, src/lib/worker.ts, src/lib/benchmark-evidence.ts, test/review-lane-served-model.test.ts]
+  priority: 4
+  status: queued
+  attempts: 0

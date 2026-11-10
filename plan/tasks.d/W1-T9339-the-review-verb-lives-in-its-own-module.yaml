@@ -42,7 +42,7 @@
     - test/scope-guard-overrun.test.ts
     - test/the-reviewer-reads-a-sha-it-has-not-fetched.test.ts
     - test/unwired-export-advisory-section.test.ts
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

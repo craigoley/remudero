@@ -16,7 +16,7 @@
   # refusal-amendment (W1-T10383, run W1-T10383-1792641636921, 2026-10-22T10:29:07.689Z): the worker refused criterion 1 [proof-unexecutable-at-head] — proposed re-scope-criteria: repair the criterion's proof so it is executable at HEAD, or re-scope the criterion
   #   worker evidence: W1-T10383: a filed proof already passes at the merge base, so branch run-W1-T10383-1792641636921 cannot open a PR
   #   this task is held from dispatch until its record changes; an Architect must make the change above
-  status: queued
+  status: merged
   # queue judge: priority=2 evidence=75a26f0628df550f
   priority: 2  # queue-judge-2026-10-27: Task has an open dependent and is low priority, causing unnecessary delay for its dependent task
   attempts: 0

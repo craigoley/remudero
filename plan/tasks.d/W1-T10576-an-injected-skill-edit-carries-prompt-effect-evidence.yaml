@@ -10,7 +10,7 @@
   dispatch_hold: true
   risk: high
   band_meaning: span
-  status: queued
+  status: merged
   attempts: 0
   author_class: machine
   origin: "feedback-skill-surface:issue-12567-source-qualified-successor-20261024"
