@@ -11,6 +11,7 @@
   band_meaning: blast-radius
   origin: operator-session#serve-idle-2026-11-10
   plan_refs:
+    - W1-T10942
     - W1-T11127
     - W1-T11815
     - W1-T11933
@@ -33,6 +34,7 @@
     OBSERVED 2026-11-10 (core ledger, 2026-11-09T16:00Z to 2026-11-10T05:00Z): agent.built 1,043 rows and workstreams.built 1,029 rows, 27 percent of the 7,781 rows written by every actor in that window, all from serve's views thread.
     - Each row is appended to the ledger every projector folds and every digest keys on, so serve's own bookkeeping is a steady source of the change that makes its views rebuild.
     - read_model.view_builds already gives builds per view per window.
+    - W1-T10942 shares src/lib/workstreams-view.ts and its test: it changes which archive rows a frozen comparison keeps before the activity cap, a change to the body. This task changes only how often the build row is written and touches no body.
   design: |
     Keep a tally per instance in each view and flush it on the same window the view_builds row uses (or every 10 minutes when that is not in reach), writing the first build immediately.
     Two existing tests (test/workstreams-view.test.ts, test/workstreams-projection-reuse.test.ts) count builds through the workstreams.built row; they keep that by asking the view for a zero window, the one seam this adds.
