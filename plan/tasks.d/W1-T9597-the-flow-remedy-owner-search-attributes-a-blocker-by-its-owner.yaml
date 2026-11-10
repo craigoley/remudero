@@ -14,7 +14,7 @@
     - src/lib/flow-remedy-gardener.ts
     - src/lib/pr-blocker.ts
     - test/the-flow-remedy-owner-search-attributes-a-blocker-by-its-owner.test.ts
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

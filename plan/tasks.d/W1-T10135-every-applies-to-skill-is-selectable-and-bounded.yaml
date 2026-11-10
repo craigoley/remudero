@@ -42,7 +42,7 @@
     - test/the-local-precheck-runs-the-git-leaf-suite-on-any-git-spawn.test.ts
     - test/the-precheck-asks-the-census-suites-a-test-or-priced-step-moves.test.ts
   priority: 4
-  status: queued
+  status: merged
   # backlog gardener: band=4 evidence=27ce200e0ea1f88a
   attempts: 0
   note: "verify:human — required cross-catalog registration; normal high-risk judgment and existing dispatch hold retained; discovery test over existing exports plus required catalog and real pre-push execution registration; no selection, scanning, limit or permission change."

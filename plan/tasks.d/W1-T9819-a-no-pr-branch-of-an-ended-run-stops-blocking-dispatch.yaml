@@ -17,7 +17,7 @@
     - src/run-task.ts
     - test/orphan-run-branch-release.test.ts
     - test/a-no-pr-branch-of-an-ended-run-stops-blocking-dispatch.test.ts
-  status: queued
+  status: merged
   priority: 2  # holds a task up to a day with no hand help needed to release it; W1-T9482 (P1) covers the observed requeue case
   attempts: 0
   rationale: |

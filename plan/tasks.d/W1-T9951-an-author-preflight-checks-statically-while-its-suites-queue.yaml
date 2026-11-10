@@ -15,7 +15,7 @@
     - src/lib/test-slot.ts
     - src/lib/commit-message.ts
     - test/an-author-preflight-checks-statically-while-its-suites-queue.test.ts
-  status: queued
+  status: merged
   priority: 1  # a plan-only or small diff must get its static verdict without queueing behind full suite runs
   attempts: 0
   rationale: |

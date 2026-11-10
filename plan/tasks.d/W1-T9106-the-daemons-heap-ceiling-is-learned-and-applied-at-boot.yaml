@@ -11,7 +11,7 @@
   origin: 'operator approval 2026-10-13 (verbatim: "Agree with all of this. Make sure that we are optimizing other parts of the daemon''s memory to account for this new pressure. Reduce parallelism if we need to. Think about how to ensure efficiency, but keep automated flow."): docs/adr/0007-build-runs-outlive-the-daemon.md'
   plan_refs: [W1-T8401, W1-T8883, W1-T9086]
   files: [bin/rmd, src/lib/daemon-memory-policy.ts, test/the-daemons-heap-ceiling-is-learned-and-applied-at-boot.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

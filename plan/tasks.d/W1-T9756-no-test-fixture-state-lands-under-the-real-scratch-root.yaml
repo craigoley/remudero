@@ -15,7 +15,7 @@
     - test/a-changed-serve-policy-reaches-the-running-console.test.ts
     - test/a-test-process-never-plans-a-bind-under-the-real-scratch-root.test.ts
     - test/no-test-fixture-state-lands-under-the-real-scratch-root.test.ts
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

@@ -14,7 +14,7 @@
     - src/lib/test-slot.ts
     - src/lib/test-slot-queue.ts
     - test/a-test-slot-waiter-queues-in-arrival-order.test.ts
-  status: queued
+  status: merged
   priority: 1  # an unfair, silent wait is why agents kill their own preflight and push with CI as the only check
   attempts: 0
   rationale: |

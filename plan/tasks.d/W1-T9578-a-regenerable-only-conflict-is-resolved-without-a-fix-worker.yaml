@@ -17,7 +17,7 @@
     - src/lib/worktree-sites.ts
     - test/worktree-creation-census.test.ts
     - src/lib/ledger.ts
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |
