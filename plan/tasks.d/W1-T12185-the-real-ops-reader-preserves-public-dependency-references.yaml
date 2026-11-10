@@ -13,7 +13,7 @@
   priority: 1
   status: queued
   attempts: 0
-  files: [src/lib/plan.ts, src/lib/plan-revision-store.ts, src/lib/ops-catalog-source.ts, test/plan/ops-catalog-source-cross-catalog-dependencies.test.ts, test/plan/ops-catalog-shadow-real-reader.test.ts]
+  files: [src/lib/plan.ts, src/lib/plan-revision-store.ts, src/lib/ops-catalog-source.ts, test/plan/ops-catalog-source-cross-catalog-dependencies.test.ts, test/plan/ops-catalog-shadow-real-reader.test.ts, test/plan/ops-catalog-shadow-invalid-edges.test.ts, test/plan/ops-catalog-source-strict-defaults.test.ts]
   rationale: |
     W1-T11768 shipped the real pinned reader in #17485. Its module-level snapshotStore uses
     createPlanRevisionStore({ strict: true }); adopt calls mergePlanBlobs, whose validatedPlan rejects
@@ -25,9 +25,11 @@
     This was verified on main 3682565000518ba0f9835c273a3761376567a467 on 2026-11-10.
     W1-T11769 is already merged and credited; its later scope amendment #17722 is not an implementation
     of this gap. W1-T11770's three-file scope cannot repair the reader, so it gains this prerequisite.
-    The operator approved these five paths, $10/high/span and four behavioral proofs. A tree sweep of
-    all 15 current open PR heads found the same three subject-bearing task records as main and no
-    added subject lines. There is no competing reader implementation in that window.
+    The source scope is unchanged; seven paths carry four distinct behavioral test-file proofs.
+    The initial 15-head tree sweep found three subject records per head and no added subject lines.
+    A refreshed 18-head sweep at 22:39Z found one related record in #17745: W1-T12163 isolates daemon
+    tests from host memory and does not change this reader. No head overlaps these seven paths or
+    files a competing reader implementation. Main e7eabfea has no intervening change in this scope.
   design: |
     1. Add an explicit opt-in parse/store mode that retains well-formed dependency identifiers not
        resolved within this catalog. Reuse parseTasksFromYaml's field validation. Scope the opt-in
@@ -49,11 +51,10 @@
        source modules by computedTestFolder and approved by the operator. Use #src imports and the
        existing recording GET-only fixture pattern. Pin daemon memory governor, heap statistics,
        clock and boot-checkout state if driving the real loop, as W1-T11769 does.
-       Write separate named tests for each criterion, with independent assertions and
-       deletion/restoration controls. Whole-file proofs are deliberately shared: the reader file
-       proves criteria 1 and 4 together; the integration file proves criteria 2 and 3 together.
-       Every removal control reruns the complete owning file, so its negative and healthy controls
-       must pass together after restoration. Retain malformed, duplicate, dangling and reverse-edge negatives
+       Put criterion 3 in test/plan/ops-catalog-shadow-invalid-edges.test.ts and criterion 4 in
+       test/plan/ops-catalog-source-strict-defaults.test.ts. Use one whole-file proof per criterion,
+       with independent assertions and deletion/restoration controls. Retain malformed, duplicate,
+       dangling and reverse-edge negatives
        plus healthy public/ops controls. No test may query a private live catalog.
     5. This is source-only and SHADOW-only. No CLI flag/default target, selector activation, task
        movement/deduplication rule, allocator, credential/config, launcher, image, deployment, recycle,
@@ -65,9 +66,9 @@
     - claim: "The actual reader output resolves an ops-to-public dependency through the public merged set and blocks until that dependency merges"
       proof: "unit test: test/plan/ops-catalog-shadow-real-reader.test.ts"
     - claim: "Reverse and dangling edges refuse atomically with dispatch, claims and worker effects unchanged"
-      proof: "unit test: test/plan/ops-catalog-shadow-real-reader.test.ts"
+      proof: "unit test: test/plan/ops-catalog-shadow-invalid-edges.test.ts"
     - claim: "Ordinary plan reads stay strict and malformed or duplicate ops records still refuse"
-      proof: "unit test: test/plan/ops-catalog-source-cross-catalog-dependencies.test.ts"
+      proof: "unit test: test/plan/ops-catalog-source-strict-defaults.test.ts"
   falsifier: |
     Remove the ops reader opt-in and criterion 1 becomes malformed and criterion 2 cannot compose.
     Apply permissive parsing to ordinary readers and criterion 4 must fail its unresolved-ID refusal.
