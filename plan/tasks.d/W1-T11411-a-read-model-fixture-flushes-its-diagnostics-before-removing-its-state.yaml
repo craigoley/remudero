@@ -103,7 +103,7 @@
     - test/workers-inherit-parent-heap-flags.test.ts
     - test/workstreams-projection-reuse.test.ts
     - test/workstreams-view.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: A shared read-model fixture helper removes its state dir only after its registered closers have run in reverse order and flushReadModelTransactions has settled, and a lifecycle case observes that order against real SQLite and the default publisher

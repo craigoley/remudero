@@ -11,7 +11,7 @@
   plan_refs: [W1-T2742, W1-T11158]
   files: [scripts/test-tier-manifest.mjs, scripts/preflight-author.mjs, src/lib/review.ts, src/lib/test-run-timeout.ts, test/ci/a-preflight-author-tests-have-a-duration-derived-timeout.test.ts]
   priority: 4
-  status: queued
+  status: merged
   # backlog gardener: band=4 evidence=6fa1235e64659cf1
   # backlog gardener: placed=2026-11-06T05:13:51.452Z
   attempts: 0
