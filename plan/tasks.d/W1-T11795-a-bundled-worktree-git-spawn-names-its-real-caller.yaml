@@ -16,6 +16,9 @@
   files:
     - src/lib/read-plane.ts
     - test/console-api/read-model/a-bundled-worktree-git-spawn-names-its-real-caller.test.ts
+  # refusal-amendment (W1-T11795, run W1-T11795-1794262265880, 2026-11-10T06:40:38.073Z): the worker refused criterion 1 [proof-unexecutable-at-head] — proposed re-scope-criteria: repair the criterion's proof so it is executable at HEAD, or re-scope the criterion
+  #   worker evidence: W1-T11795: a filed proof already passes at the merge base, so branch run-W1-T11795-1794262265880 cannot open a PR
+  #   this task is held from dispatch until its record changes; an Architect must make the change above
   status: queued
   attempts: 0
   acceptance:
