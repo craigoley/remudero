@@ -86,8 +86,10 @@ test("W1-T11729 criterion 2: a delivered verdict that is not a full success or f
   later.deliver();
   appendLedger(later.ledgerPath, { run_id: "later", task_id: "W1-T11596", step: "review.pending_posted", pr_url: URL, head_sha: HEAD, review_input_digest: DIGEST });
   const laterRow = await later.run();
-  assert.deepEqual(later.modes, []);
-  assert.match(String(laterRow.stand_down_reason), /already DELIVERED/);
+  // W1-T11929: a pending row after the delivered verdict is a takeover that posted no verdict. It no longer hides the
+  // verdict: the sweep restores it. On #17485 this case kept a pull request pending while the claim was deduplicated 18 times.
+  assert.deepEqual(later.modes.map(m => m.kind), ["restore"]);
+  assert.equal(laterRow.acted, true);
 
   const unread = sweepFixture(t, { reviewInputDigest: undefined });
   unread.deliver({ review_input_digest: undefined });

@@ -1205,6 +1205,7 @@ import {
   type PlanPrPreflightResult,
   ensureJudgeableBody,
   filingAcceptanceCriteria,
+  planPrAcceptanceCriteria,
   probeExistingPlanPr,
   ratifyPrCreateRestArgs,
   ratifyPrProbeRestArgs,
@@ -1424,7 +1425,6 @@ import type { DuplicateCorpusEntry } from "./lib/knowledge-dedup.js";
 import {
   addedExportsFromPatch,
   assertLintClean,
-  breMetacharsIn,
   changedTaskIds,
   rawChangedTaskIds,
   statusFlipOnlyTaskIds,
@@ -5680,7 +5680,6 @@ function addedTestCriterion(path: string): AcceptanceCriterion {
  */
 export const DIFF_ANCHOR_UNAVAILABLE_STEP = "acceptance.fallback.diff_anchor_unavailable";
 const DIFF_ANCHOR_CLAIM_SUFFIX = "; its proof greps a line this PR's own diff adds, not a fixed pre-existing symbol";
-
 /** W1-T4263's shared helper: a criterion whose proof greps the first safe line `diffText` adds, or `undefined`. */
 export function diffAnchoredAcceptanceCriterion(
   diffText: string,
@@ -35434,12 +35433,23 @@ export async function planCommand(
       .split("\n")
       .map((line) => line.trim())
       .filter(Boolean);
-    const planPrBody = buildPlanPrBody({
-      intro: `rmd plan --mode=${mode} proposed plan-only changes.\n\nOperator brief\n\n${brief || "(none — whole-plan scope)"}`,
-      criteria: filingAcceptanceCriteria(reservedIds, planPrFiles),
-      changedFiles: planPrFiles,
-      proofCwd: worktreePath,
-    });
+    // W1-T11625: an amendment of an EXISTING shard carries a proof of an added line, or no PR opens. Both the
+    // producer's "nothing derivable" throw and buildPlanPrBody's author-time refusal land BEFORE the push.
+    let planPrBody: string;
+    try {
+      planPrBody = buildPlanPrBody({
+        intro: `rmd plan --mode=${mode} proposed plan-only changes.\n\nOperator brief\n\n${brief || "(none — whole-plan scope)"}`,
+        criteria: planPrAcceptanceCriteria(reservedIds, planPrFiles, diffSinceMergeBase(worktreePath), worktreePath),
+        changedFiles: planPrFiles,
+        proofCwd: worktreePath,
+      });
+    } catch (err) {
+      const reason = String((err as Error)?.message ?? err);
+      log("plan.error", { error: reason, changed_files: planPrFiles });
+      say(`plan PR not opened — ${reason}`);
+      worktreeRemove(repoDir, worktreePath);
+      return 1;
+    }
     planPushed = "unknown"; // W1-T9488: a push that throws leaves the branch's ids unknowable
     await gitPushRunBranchAsync(worktreePath);
     planPushed = pushedBranchIds(worktreePath, log);

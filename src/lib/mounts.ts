@@ -70,6 +70,18 @@ export class MountsError extends Error {
   }
 }
 
+/**
+ * The mounts table is ABSENT: the read failed with a confirmed ENOENT. A target with no runner
+ * configuration is a named, recoverable state, never misreported as malformed YAML. Every other
+ * read or parse failure stays a plain {@link MountsError}, so each existing catch is unchanged.
+ */
+export class MountsMissingError extends MountsError {
+  constructor(readonly path: string) {
+    super(`runner configuration is missing: no mounts table at ${path}`);
+    this.name = "MountsMissingError";
+  }
+}
+
 /** The Tier Invariant (G-17) was violated. A subtype so callers/tests assert it. */
 export class TierInvariantError extends MountsError {
   constructor(message: string) {
@@ -698,6 +710,7 @@ export function loadMounts(path: string, opts: MountsOptions = {}): Mounts {
   try {
     raw = parseYaml(readFileSync(path, "utf8"));
   } catch (err) {
+    if ((err as NodeJS.ErrnoException | undefined)?.code === "ENOENT") throw new MountsMissingError(path);
     throw new MountsError(`mounts.yaml is not valid YAML (${path}): ${String(err)}`);
   }
   return validateMounts(raw, opts);

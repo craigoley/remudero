@@ -13,6 +13,7 @@ import { acquireInflightLock, InflightLockError } from "./inflight-lock.js";
 import { readLedgerUnionRecordsSync } from "./ledger-union.js";
 import { isHumanHoldCandidate, type GhApiFetcher } from "./open-prs-rest.js";
 import { ProductIntentStore } from "./product-intent-store.js";
+import { readTargetRunnerConfig, type TargetRunnerConfig } from "./product-target-config.js";
 import {
   productIdSchema, productRequestIdSchema, type ProductBrief, type ProductStoreCode, type StoredProduct,
 } from "./product-intent.js";
@@ -189,6 +190,7 @@ export interface ProductPlanObservation {
 export type ProductPlanOperationCode = ProductStoreCode
   | "repository_missing" | "repository_not_found" | "repository_conflict" | "provider_unreadable"
   | "target_not_enrolled" | "target_unreadable" | "runner_missing" | "bootstrap_unverified"
+  | "runner_config_missing" | "runner_config_invalid"
   | "envelope_missing" | "handoff_unavailable" | "task_stale";
 export type ProductPlanOperationResult =
   | { ok: true; value: { observation: ProductPlanObservation; replayed: boolean }; code?: never }
@@ -217,6 +219,8 @@ export interface ProductPlanOperationOptions {
   ledgerPath?: string;
   /** The verified managed checkout of the target repository, or `undefined` when it is not there. */
   checkout: (repository: PlanRepository, targetHead: string) => string | undefined | Promise<string | undefined>;
+  /** Reads the target's runner configuration at the frozen head; the committed-tree reader unless a test supplies one. */
+  runnerConfig?: (checkout: string, targetHead: string) => Promise<TargetRunnerConfig>;
   text?: GhText;
   clock?: Clock;
   isAlive?: (pid: number) => boolean;
@@ -272,6 +276,9 @@ export async function verifyProductPlanCheckout(checkout: string, repository: Pl
     throw Object.assign(new Fault("target_unreadable"), { cause: error });
   }
 }
+const runnerConfigRefusal = {
+  absent: "runner_config_missing", invalid: "runner_config_invalid", unreadable: "target_unreadable",
+} as const satisfies Record<Exclude<TargetRunnerConfig["state"], "present">, ProductPlanOperationCode>;
 const errno = (error: unknown, code: string) => (error as NodeJS.ErrnoException | undefined)?.code === code;
 const processAlive = (pid: number) => {
   try { process.kill(pid, 0); return true; } catch (error) {
@@ -386,6 +393,10 @@ export class ProductPlanOperationService {
         if (Object.keys(journal.operations).length >= PRODUCT_PLAN_OPERATION_LIMITS.operations) throw new Fault("capacity");
         const checkout = await this.options.checkout(subject, head);
         if (checkout === undefined || !isAbsolute(checkout)) throw new Fault("target_unreadable");
+        // A target with no valid runner configuration can only fail its native plan: refuse before anything is frozen.
+        const config = this.options.runnerConfig === undefined ? await readTargetRunnerConfig(checkout, head)
+          : await this.options.runnerConfig(checkout, head);
+        if (config.state !== "present") throw new Fault(runnerConfigRefusal[config.state]);
         const mode = await this.planMode(subject, head);
         const planEvidenceId = `pplan-${operationId.slice(0, 24)}`;
         const brief = this.briefArgument(product, planEvidenceId, operationId);

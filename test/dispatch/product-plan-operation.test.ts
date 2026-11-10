@@ -27,6 +27,9 @@ const brief = { idea: "private original mobile combat idea", name: "Wreckterra",
 const REQUESTED = "2026-10-26T01:00:00.000Z";
 const PR_URL = "https://github.com/craigoley/wreckterra/pull/42";
 
+/** The fake checkout carries no git tree: these suites assume a present table (W1-T11195 tests the reader itself). */
+const runnerConfig = async (_checkout: string, head: string) => ({ state: "present" as const, head, path: ".remudero/mounts.yaml", digest: "0".repeat(64) });
+
 class Target implements PlanTargetPort {
   inspection = { enrolled: true as boolean | undefined, head: HEAD as string | undefined, readmeOnly: false as boolean | undefined };
   runner = true;
@@ -72,7 +75,7 @@ function fixture(t: TestContext, over: { planned?: "clarify" | "create" | "unrea
   };
   const checkout = join(root, "repos", "wreckterra");
   const service = (options: { alive?: boolean; head?: string; gateway?: boolean; sync?: (fd: number) => void } = {}) => new ProductPlanOperationService({
-    root, store, provider, target, bootstrapConfirmed, ledgerPath, text, checkout: (repo: PlanRepository) => repo.name === "wreckterra" ? checkout : undefined,
+    root, store, provider, target, bootstrapConfirmed, ledgerPath, text, checkout: (repo: PlanRepository) => repo.name === "wreckterra" ? checkout : undefined, runnerConfig,
     clock: fixedClock(Date.parse(REQUESTED)), isAlive: () => options.alive ?? true,
     ...(options.gateway === false || over.gateway === false ? {} : { gateway }),
     ...(options.sync === undefined ? {} : { sync: options.sync }),
@@ -259,7 +262,7 @@ test("W1-T10823: a hand-off that reports refused, throws or rejects is recorded 
     const f = fixture(t, { gateway: false });
     let calls = 0;
     const service = new ProductPlanOperationService({
-      root: f.root, store: f.store, provider: f.provider, target: f.target, bootstrapConfirmed, ledgerPath: f.ledgerPath, checkout: () => f.checkout,
+      root: f.root, store: f.store, provider: f.provider, target: f.target, bootstrapConfirmed, ledgerPath: f.ledgerPath, checkout: () => f.checkout, runnerConfig,
       text: async () => JSON.stringify([]), clock: fixedClock(Date.parse(REQUESTED)),
       gateway: { productPlan() {
         calls += 1;
@@ -424,7 +427,7 @@ test("W1-T10823: the real CLI launcher correlates the native plan brief across d
   const gateway = ratifyCliGateway(cli, join(f.root, "logs"), { ledgerPath: f.ledgerPath,
     freshTree: async (action) => action({ path: cli, sha: "f".repeat(40) }) });
   const service = new ProductPlanOperationService({ root: f.root, store: f.store, provider: f.provider, target: f.target,
-    bootstrapConfirmed, ledgerPath: f.ledgerPath, text: async () => "[]", checkout: () => f.checkout, gateway });
+    bootstrapConfirmed, ledgerPath: f.ledgerPath, text: async () => "[]", checkout: () => f.checkout, runnerConfig, gateway });
   const first = await ok(service.execute(actor, f.command()));
   assert.equal(first.observation.state, "pending");
   // inFlight tracks the real detached child lifetime. No fixed sleep is a completion proof.
