@@ -17,7 +17,7 @@
     - test/run-task.test.ts
     - test/serve.test.ts
     - test/console-api/serve/product-routes.test.ts
-  status: queued
+  status: merged
   dispatch_hold: false
   attempts: 0
   rationale: >-

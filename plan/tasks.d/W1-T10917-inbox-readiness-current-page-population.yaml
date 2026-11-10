@@ -7,7 +7,7 @@
   priority: 3
   risk: high
   band_meaning: span
-  status: queued
+  status: merged
   attempts: 0
   author_class: machine
   budget_usd: 3

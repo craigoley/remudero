@@ -15,7 +15,7 @@
     - src/lib/field-trials-controlled-release.ts
     - src/lib/field-trials-flow.ts
     - test/routing/controlled-field-trials-release.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     VERIFIED 2026-10-27. Core's `buildFieldTrialsRelease` (src/lib/field-trials-flow.ts, origin/main 07dbdcc77) emits

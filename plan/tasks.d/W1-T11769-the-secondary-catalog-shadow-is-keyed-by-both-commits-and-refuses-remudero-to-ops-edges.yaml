@@ -13,7 +13,7 @@
   priority: 1
   status: queued
   attempts: 0
-  files: [src/lib/daemon.ts, test/daemon/ops-catalog-shadow-revision.test.ts, test/daemon/ops-catalog-shadow-dependencies.test.ts, test/daemon/ops-catalog-shadow-effects.test.ts]
+  files: [src/lib/daemon.ts, src/lib/ops-catalog-source.ts, test/daemon/ops-catalog-shadow-revision.test.ts, test/daemon/ops-catalog-shadow-dependencies.test.ts, test/daemon/ops-catalog-shadow-effects.test.ts]
   rationale: |
     W1-T11600 is merged and stays as it is. Its composer reads `DaemonDeps.secondaryPlanForShadow`, a value
     fixed for the life of `runDaemon`, so a new ops commit cannot be observed without a restart. Its signature

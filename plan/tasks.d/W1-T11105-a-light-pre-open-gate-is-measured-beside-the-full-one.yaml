@@ -21,7 +21,7 @@
     - scripts/census-precheck.mjs
     - src/lib/config-schema.ts
     - test/ci/gates/a-light-pre-open-gate-is-measured-beside-the-full-one.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: rmd preflight --step-log <path> appends a first line naming the phases and fast-gate jobs it will run, then one line per finished phase and per finished fast-gate job (name, ok, duration) as each finishes, and census-precheck appends its counts verdict the moment its counts are known; without the option nothing is written and every step runs as before

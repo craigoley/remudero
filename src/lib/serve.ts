@@ -3217,6 +3217,15 @@ interface ServeServerAssembly {
 
 export const INCIDENT_INVARIANTS_INTERVAL_MS = 60_000;
 
+/**
+ * W1-T11936: how far back the monitor's live ledger tail keeps parsed rows. Each tick reads only the bytes
+ * appended since the previous one (live-ledger-tail.ts) and re-reads from byte 0 only on a rotation, a
+ * truncation or a rewrite, so this bounds the memory the tail holds, not the bytes a tick reads.
+ * BACKSTOP: twice the longest rule window, so every window any rule evaluates is covered with a full window of
+ * slack; a row older than this can reach no verdict. Raise it with a longer rule, never drop it to unbounded.
+ */
+export const INCIDENT_INVARIANTS_TAIL_RETAIN_MS = 2 * INCIDENT_LONGEST_WINDOW_MS;
+
 /** The sampling resolution of serve's `runtime.loop_lag` histogram: the timer whose lateness it records, and so
  *  the cadence serve's loop is expected to turn at. W1-T10074: the loop-stall profiler's interval is this number. */
 export const SERVE_LOOP_LAG_RESOLUTION_MS = 20;
@@ -3244,7 +3253,7 @@ export function startIncidentInvariantsMonitor(
   deps: NonNullable<ServeDeps["incidentInvariants"]> & { log?: ServiceOptions["log"] } = {},
 ): (() => void) & { stallProfiler: LoopStallProfiler } {
   const readLedger = deps.readLedger;
-  const liveRows = readLedger ? () => readLedger(ledgerPath) : createLiveLedgerTail(ledgerPath, 2 * INCIDENT_LONGEST_WINDOW_MS);
+  const liveRows = readLedger ? () => readLedger(ledgerPath) : createLiveLedgerTail(ledgerPath, INCIDENT_INVARIANTS_TAIL_RETAIN_MS);
   const writeLedger = deps.writeLedger ?? appendLedger;
   const eventLoopLag = deps.eventLoopLag
     ?? createEventLoopLagMonitor(systemClock, () => monitorEventLoopDelay({ resolution: SERVE_LOOP_LAG_RESOLUTION_MS }));
