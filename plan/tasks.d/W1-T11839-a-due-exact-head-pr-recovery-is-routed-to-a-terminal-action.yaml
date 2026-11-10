@@ -39,7 +39,17 @@
   rationale: |
     ORIGIN: the operator's 2026-11-08 request after PR #17389/#17394: PRs must flow, receive an exact same-PR fix, gain an owned follow-up, or use the existing gated rebuild path.
 
-    INCIDENT EVIDENCE: the corrected forensic report in docs/forensics/triage-incident-901cace1adefcf4b.md leaves the disputed triage attribution unknown. Do not claim a specific open-PR guard miss or duplicate-run cause, and do not change issue #17393; it remains an open needs-human question.
+    INCIDENT EVIDENCE: the current report in docs/forensics/triage-incident-901cace1adefcf4b.md
+    predates its archive correction. Direct reads of /home/craigoleyagent/rmd-state2/state/
+    ledger.2026-11-08T14-55-52-853Z.ndjson.gz and ledger.2026-11-08T16-15-19-627Z.ndjson.gz
+    confirm run 1 released refs/rmd-triage/incident-901cace1adefcf4b at 14:46:25.881Z with
+    arm=holder and dropped=true while #17389 was open. Run 2 acquired that same ref at
+    14:59:46.934Z with proceed=true and stale_released=false, before #17389 merged at 15:05:05Z.
+    This proves premature holder release enabled the duplicate triage. The precise reason
+    auto-triage's open-PR guard did not prevent run 2 remains unproven. W1-T12018 owns the
+    evidence-cited report correction, and W1-T6117 already owns the crash-safe post-PR claim
+    lifecycle fix. This task addresses the separate missing consumer for durable stuck-PR
+    recovery records. Do not change issue #17393; it remains an open needs-human question.
 
     CURRENT ARCHITECTURE: W1-T11751 records recovery state, W1-T11750 supplies positive-controlled live PR inventory, W1-T11752 governs the owner/wake/escalation lifecycle, and W1-T11168 owns a distinct exact-head fix-dispatch hold. W1-T11031 owns the one-question-per-stalled-PR policy. W1-T11076/T11077 own loop disposition and the separately human-gated rebuild/split close path. This task consumes the recovery record only for same-PR repair; it does not duplicate the question or close/rebuild paths. The shared sweep file is integration wiring, not a second implementation of those owners.
 
