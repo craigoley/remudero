@@ -7,6 +7,9 @@
   risk: high  # One security-gate recovery spanning producer, metadata adapter, classifier and unresolved-evidence disposition.
   band_meaning: span
   priority: 1.26
+  # refusal-amendment (W1-T10976, run W1-T10976-1794272641237, 2026-11-10T08:29:16.562Z): the worker refused criterion 1 [proof-unexecutable-at-head] — proposed re-scope-criteria: repair the criterion's proof so it is executable at HEAD, or re-scope the criterion
+  #   worker evidence: W1-T10976: a filed proof already passes at the merge base, so branch run-W1-T10976-1794272641237 cannot open a PR
+  #   this task is held from dispatch until its record changes; an Architect must make the change above
   status: queued
   attempts: 0
   author_class: machine
