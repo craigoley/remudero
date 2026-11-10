@@ -13,12 +13,13 @@
     kill/ENOSPC/GitHub-outage chaos drill; this task supplies the deterministic PR-create handoff and duplicate-triage
     guard proofs that drill does not implement.
 
-    CORRELATED INCIDENT EVIDENCE (W1-T12018, 2026-11-08): #17389/#17394 records prove the first healthy holder
-    released the cross-host claim while #17389 was still open, and a second auto-triage lane reacquired it. The first
-    run also recorded `pr_attribution_failed`; the exact input and answer of the existing open-PR guard remain
-    unproven. This task adds the missing pre-verification `triage.pr_created` ledger candidate so that a refusal
-    before trusted `pr.opened` can still reach the guard's fresh live-state check. It does not claim to fix the
-    separately observed healthy-completion claim lifetime; that needs its own bounded, plan-approved follow-up."
+    CORRELATED INCIDENT EVIDENCE (W1-T12018, 2026-11-08): #17389/#17394 records prove run 1 released the cross-host
+    claim while #17389 was still open, then run 2 reacquired it. Run 1 ended `pr_attribution_failed` because the
+    claimed PR branch could not be resolved; it was not a healthy completion. The exact input and answer of the
+    existing open-PR guard remain unproven. This task adds the missing pre-verification `triage.pr_created` ledger
+    candidate so that the ownership refusal before trusted `pr.opened` can still reach the guard's fresh live-state
+    check. The incident does not establish a separate healthy-completion claim-lifetime defect, so this task does not
+    change the holder-release policy or file a speculative class-wide follow-up."
   # Rule 19 merits: one interruption/restart integration test requires both the run-task lock lifecycle and auto-triage PR handoff to preserve a single recovery transaction; neither subsystem can satisfy it alone.
   design: |
     1. WRITE-AHEAD HANDOFF. Persist a handoff record (run id, branch, feedback id) BEFORE the remote PR operation,
