@@ -15,7 +15,7 @@
     - src/run-task.ts
     - test/a-repair-worker-prompt-is-built-for-the-selected-provider.test.ts
     - test/a-codex-routed-repair-worker-commit-is-pushed-and-opened.test.ts
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

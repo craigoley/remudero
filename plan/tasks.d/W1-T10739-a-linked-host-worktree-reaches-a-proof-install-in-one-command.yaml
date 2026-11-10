@@ -19,7 +19,7 @@
     - src/lib/dependency-seeds.ts
     - doctrine/plan-and-task-hygiene/host-worktrees-arrive-linked.md
     - test/review/a-linked-host-worktree-reaches-a-proof-install-in-one-command.test.ts
-  status: queued
+  status: merged
   attempts: 0
   note: |
     reservation hand-off: run-W1-T10733-1793035320662 -> run-unfiled-1793035320662

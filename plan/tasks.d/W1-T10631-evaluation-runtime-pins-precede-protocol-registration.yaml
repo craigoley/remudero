@@ -10,7 +10,7 @@
   priority: 2.5
   dispatch_hold: true
   risk: low
-  status: queued
+  status: merged
   attempts: 0
   author_class: machine
   origin: "evaluation-registration-order:issue-7418-source-observation-20261025"

@@ -15,7 +15,7 @@
     - src/lib/daemon-memory-policy.ts
     - src/lib/serve.ts
     - test/console-api/read-model/the-oracle-child-starts-under-the-heap-growth-policy.test.ts
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

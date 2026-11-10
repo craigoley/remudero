@@ -11,7 +11,7 @@
   dispatch_hold: true
   risk: high
   band_meaning: span
-  status: queued
+  status: merged
   attempts: 0
   author_class: machine
   origin: "feedback-lifecycle:W1-T10625-head-bound-evidence-prerequisite-20261026"

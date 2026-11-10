@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-14 (Craig approved filing): was the 05:35:56Z progress-watchdog STALLED recycle a false positive"
   plan_refs: [W1-T5687, W1-T5688, W1-T6598, W1-T6597, W1-T9352, W1-T5718, W1-T7745]
   files: [src/lib/progress-watchdog.ts, test/a-daemon-whose-loop-resumed-is-not-recycled-as-stalled.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |
