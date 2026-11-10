@@ -14,7 +14,7 @@
     - src/lib/sweep.ts
     - src/run-task.ts
     - test/sweep/a-short-lived-run-child-reads-the-triage-evidence-slice-once.test.ts
-  status: queued
+  status: merged
   priority: 0.7 # operator 2026-11-03: efficiency and throughput first
   attempts: 0
   rationale: |

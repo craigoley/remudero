@@ -11,7 +11,7 @@
   origin: "fan-out 2026-10-16 agent E1: why TRIAGE-fb-1789601878740-3711ab started 16 times and never wrote a verdict (investigator S1 lead)"
   plan_refs: [W1-T9852, W1-T4203, W1-T4769, W1-T2986, W1-T469]
   files: [src/lib/auto-triage.ts, src/run-task.ts, test/a-failed-auto-triage-fire-yields-the-head-of-the-queue.test.ts]
-  status: queued
+  status: merged
   priority: 2  # W1-T9852 clears today's wedge; this stops the next entry that throws from wedging the rung again
   attempts: 0
   rationale: |

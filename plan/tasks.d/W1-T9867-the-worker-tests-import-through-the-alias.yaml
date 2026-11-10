@@ -16,7 +16,7 @@
     - test/a-balanced-squeeze-diverts-to-foundry-sonnet.test.ts
     - test/a-clock-sweep-runs-as-shards-and-merges-one-report.test.ts
     - test/a-dead-containers-claim-does-not-outlive-it.test.ts
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

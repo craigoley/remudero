@@ -29,7 +29,7 @@
   # refusal-amendment (W1-T9337, run DAEMON-1792797246750@7ecddddd77f973a141331e2d6bba6dc421d8994e, 2026-10-24T00:28:15.288Z): the worker refused criterion 4 [contradicts-another-criterion] — proposed re-scope-criteria: reconcile the contradicting criteria — re-scope one so both can hold at once
   #   worker evidence: Existing source-text tests require moved fix-rung statements in `src/run-task.ts`, while criteria 1 and 3 require those statements in `fix.ts` behind thin delegates.
   #   this task is held from dispatch until its record changes; an Architect must make the change above
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

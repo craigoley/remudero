@@ -13,7 +13,7 @@
   files:
     - deploy/recycle-container.sh
     - test/a-recycle-finds-a-holders-worktree-where-the-container-mounts-it.test.ts
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

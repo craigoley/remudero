@@ -15,7 +15,7 @@
     - src/lib/sweep.ts
     - src/run-task.ts
     - test/a-red-decided-below-mains-head-is-re-judged-at-the-head.test.ts
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |
