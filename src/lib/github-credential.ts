@@ -153,12 +153,14 @@ function loadReferences(path: string | undefined, stateDirFailure: string): Load
   try {
     text = readFileSync(path, "utf8");
   } catch (err) {
+    // The read failure goes to the caller as text that names the path and the error code.
     const code = errorCode(err);
     return { failure: code === "ENOENT" ? `no references file at ${path}` : `the references file ${path} is unreadable (${code})` };
   }
   try {
     return { references: parseGithubCredentialReferences(text) };
   } catch (err) {
+    // The parse failure goes to the caller as text; the parser's message names an entry by position only.
     return { failure: `${path} is not usable: ${(err as Error).message}` };
   }
 }
@@ -273,6 +275,7 @@ export function resolveGithubCredential(query: GithubCredentialQuery = {}): Gith
     try {
       stateDir = join(discoverLiveLedgerRoot(env), "state");
     } catch (err) {
+      // The failure is kept as a reason and reported with the sources that were tried.
       stateDirFailure = `the state directory could not be found (${errorCode(err)})`;
     }
   }
