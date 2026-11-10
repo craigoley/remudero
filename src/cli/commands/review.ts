@@ -1994,6 +1994,23 @@ export async function withMaterializedWorktree<T>(
 
 export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest: string[] = [], deps: ReviewCommandDeps = {}): Promise<number> {
   const { acceptedReviewAttemptId, materializeReviewWorktree, realDeps, reviewPostedDescription } = host;
+  // W1-T11261: time every step before the first ledger row; a step that throws still records its elapsed time and error class.
+  const commandStartedAt = systemClock.now();
+  const startPhases: Record<string, unknown> = {};
+  const timedStart = <T>(name: string, run: () => T): T => {
+    const t0 = systemClock.now();
+    const done = (err?: unknown) => {
+      startPhases[`${name}_ms`] = systemClock.now() - t0;
+      if (err !== undefined) startPhases[`${name}_error`] = err instanceof Error ? err.constructor.name : typeof err;
+    };
+    let out: T;
+    try { out = run(); } catch (e) { done(e ?? "thrown"); throw e; }
+    if (out instanceof Promise) {
+      return out.then((v) => { done(); return v; }, (e: unknown) => { done(e ?? "thrown"); throw e; }) as T;
+    }
+    done();
+    return out;
+  };
   deps = { ...reviewOptionsFromFlags(host, rest), ...deps };
   const {
     fetchView,
@@ -2074,9 +2091,9 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
   let body = view.body ?? "";
   const reportBody = body;
   const inputDigest = reviewInputDigest(view.headRefOid, body);
-  const config = loadConfigDep();
+  const config = timedStart("config_load", () => loadConfigDep());
   const ledgerPath = ledgerPathFor(config);
-  const reviewLedger = readLedgerLines(ledgerPath);
+  const reviewLedger = timedStart("ledger_read", () => readLedgerLines(ledgerPath));
 
   // Criteria: task trailer → tasks.yaml; else the PR body's Acceptance: block.
   let criteria: AcceptanceCriterion[] = [];
@@ -2180,7 +2197,7 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
   // outage through its own `fetch-failure` class, which is the degradation path this command
   // already has. Failing here instead would invent a second one for the same condition.
   try {
-    await fetchHead(subjectRepoDir, view.number, view.headRefOid);
+    await timedStart("fetch_head", async () => fetchHead(subjectRepoDir, view.number, view.headRefOid));
   } catch (e) {
     void e;
     // Swallowed on purpose — see above. The materializer's own fetch names a real outage.
@@ -2192,7 +2209,7 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
   // `reportBody` still carries the real PR body unchanged to the fallback and reviewer below.
   if (taskId && !reviewTaskIdFromBody(body)) body = `Remudero-Task: ${taskId}`;
   if (taskId) {
-    const resolved = await resolvePlanCriteriaAtHeadAsync(body, subjectRepoDir, "plan/tasks.yaml", view.headRefOid);
+    const resolved = await timedStart("head_criteria", () => resolvePlanCriteriaAtHeadAsync(body, subjectRepoDir, "plan/tasks.yaml", view.headRefOid));
     criteria = resolved.criteria;
     if (resolved.source) source = resolved.source;
     taskDeclaredFiles = resolved.taskDeclaredFiles;
@@ -2205,7 +2222,7 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
     // origin/main HAS qualifies; one absent from both, or a TRIAGE-/main-repair/unfiled identity, keeps today's path.
     if (taskId !== UNFILED_RUN_SENTINEL && resolved.divergence === undefined && resolved.criteria.length === 0 &&
       resolved.taskRisk === undefined && resolved.taskBudgetUsd === undefined) {
-      const atMain = await resolvePlanCriteriaAtHeadAsync(body, subjectRepoDir, "plan/tasks.yaml", "origin/main");
+      const atMain = await timedStart("main_criteria", () => resolvePlanCriteriaAtHeadAsync(body, subjectRepoDir, "plan/tasks.yaml", "origin/main"));
       ownTaskRecordMissing = headLacksOwnTaskRecord(resolved, atMain);
     }
   }
@@ -2217,6 +2234,7 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
     }
   }
 
+  log("review.start_phases", { head_sha: view.headRefOid, total_ms: systemClock.now() - commandStartedAt, ...startPhases });
   const provenanceKey = { taskId: reviewKey, prUrl: view.url, headSha: view.headRefOid };
   const provenance = resolveReviewProviderProvenance(reviewLedger, provenanceKey);
   log("review.provider_provenance", reviewProviderProvenanceLedgerFields(provenance, provenanceKey));
