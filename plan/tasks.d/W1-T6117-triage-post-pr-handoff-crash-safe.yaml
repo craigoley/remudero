@@ -29,7 +29,7 @@
        this candidate and perform a fresh live-state read. Keep `pr.opened` reserved for the later verified receipt.
   acceptance:
     - claim: "one process-interruption integration test spanning auto-triage and the run-task triage entry point proves that, after remote PR creation and holder death, two concurrent restarts yield exactly one local-lock recovery, record pr.opened and run.awaiting_external idempotently, open no second PR, and retain the remote claim while CI is pending"
-      proof: "unit test: two concurrent restarts after a holder died right after remote PR creation recover once, open no second PR, keep the claim"
+      proof: "unit test: post-create crash recovery retains the triage claim"
     - claim: "a PR-create receipt written before ownership verification is selected by the daemon's post-boot ledger fallback, keyed to the exact feedback id, and passed to the live-state check; the normal verified pr.opened receipt remains distinct"
       proof: "unit test: the daemon's open-PR fallback sees a just-created triage PR before ownership verification"
   risk: high
