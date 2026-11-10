@@ -1,0 +1,38 @@
+- id: W1-T12059
+  title: "A merge refused for unread mergeability is read again in the same pass"
+  repo: remudero
+  depends_on: []
+  priority: 1.1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the direct-merge path of plan pull requests; a wrong retry must never merge on stale facts
+  band_meaning: blast-radius
+  origin: operator-session#review-flow-2026-11-10
+  plan_refs:
+    - W1-T11259
+  files:
+    - src/lib/arm-auto-merge.ts
+    - test/a-merge-refused-for-unread-mergeability-is-read-again-in-the-same-pass.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "When the mergeability read returns unknown, the read is made again within the same pass, and the pull request merges when the second read is clean"
+      proof: "grep: W1-T12059 criterion 1 in test/a-merge-refused-for-unread-mergeability-is-read-again-in-the-same-pass.test.ts"
+    - claim: "Every safety check runs again on the second read: the head, the base distance and the plan-touch check use the fresh facts only"
+      proof: "grep: W1-T12059 criterion 2 in test/a-merge-refused-for-unread-mergeability-is-read-again-in-the-same-pass.test.ts"
+    - claim: "When the second read is still unknown the refusal is recorded as today, and the pull request waits for the next sweep"
+      proof: "grep: W1-T12059 criterion 3 in test/a-merge-refused-for-unread-mergeability-is-read-again-in-the-same-pass.test.ts"
+  rationale: |
+    OBSERVED 2026-11-10: three plan pull requests passed review and then waited a full sweep to merge.
+    - #17618: review posted at 12:40:37; automerge.direct_merge_preflight_refused plan_merge_unread at 12:40:37; merged at 12:53:50, 13 minutes later.
+    - #17622: review posted at 12:46:37; refused plan_merge_unread at 12:46:54; still waiting at 12:52.
+    - #17639: review posted at 12:35:43; refused plan_merge_unread at 12:36:17; reached mergeable at 12:53:51, 17 minutes later.
+    - The reason text is "fresh REST mergeability/base-distance facts were unreadable, unknown, conflicting, or inconsistent". GitHub computes mergeability in the background after a status changes and answers unknown until it has, usually for a few seconds.
+    - The sweep ran about every 15 minutes that day, so each of these waited a quarter of an hour for a fact that was ready in seconds.
+  design: |
+    In the direct-merge preflight in src/lib/arm-auto-merge.ts, when the only failed fact is an unknown mergeability, read the pull request again after the pacer's next turn, up to the number of reads the function already allows for a refresh (plan_pr_mergeability_unknown_bound). Then run the whole safety check on the new facts. Nothing is reused from the first read.
+    NOT IN SCOPE: the sweep's cadence, and any refusal other than unknown mergeability.
+  falsifier: |
+    Do not read again and criterion 1 must fail. Reuse a fact from the first read and criterion 2 must fail. Merge on a second unknown and criterion 3 must fail. Restore and require all three to pass.
