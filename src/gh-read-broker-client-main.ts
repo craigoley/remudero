@@ -12,10 +12,13 @@ import { spawn } from "node:child_process";
 // load) is REPORTED on stderr with its own prefix and a non-zero exit, never left as a bare stack trace a
 // caller reads as an ordinary failed read. It does not fall back to the direct path: a read that skipped
 // the broker would spend the shared slot the broker exists to protect.
-const client = await import("./lib/gh-read-broker-client.js").catch((err: unknown) => {
+// diff-cov: process-boundary — an import-startup failure can only be proven in a forked child; this tiny helper reports it and exits.
+function reportClientStartupFailure(err: unknown): never {
   process.stderr.write(`gh-broker: client failed to start (${String((err as Error)?.message ?? err)})\n`);
   process.exit(1);
-});
+}
+
+const client = await import("./lib/gh-read-broker-client.js").catch(reportClientStartupFailure);
 const { brokerGhRead, isGhBrokerClass } = client;
 
 const [socketPath, cls, ...args] = process.argv.slice(2);
