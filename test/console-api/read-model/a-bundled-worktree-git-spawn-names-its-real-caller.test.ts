@@ -9,14 +9,13 @@ import { clockFromMillisFn } from "#src/lib/clock.js";
 import { startReadPlaneTelemetry } from "#src/lib/read-plane.js";
 import { makeTempDir } from "#src/lib/tmp.js";
 import { hostWorktreeGit } from "#src/lib/worktree-git.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 test("W1-T11795 criterion 1: a bundled hostWorktreeGit call is charged to its real caller", () => {
   const dir = makeTempDir("bundled-worktree-git-caller");
   try {
-    const repo = join(dir, "repo");
-    mkdirSync(repo);
-    execFileSync("git", ["init", "-q", repo]);
+    const repo = gitRepo({ kind: "bundled-worktree-git" }).dir;
     const outfile = join(dir, "run-task.mjs");
     buildSync({
       stdin: { contents: `
