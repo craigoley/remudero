@@ -70,6 +70,49 @@
     exactly as filed. W1-T11196 and W1-T11197 stay dispatch-held. Settled by lookup: how is a hold
     released? -> by setting dispatch_hold false on the task record alone, as done for W1-T11078
     and W1-T11085 (plan/tasks.d).
+    Proof clarification (run PLAN-clarify-1794318571494, plan-only): the run W1-T11195-1794171535104
+    refusal (proof-unexecutable-at-head) came from the whole-file proof
+    test/dispatch/product-plan-runner-config.test.ts. That file is absent from main, yet the proof
+    read as passing at the merge base. Criterion 1 is split into six title proofs, and criterion 3
+    is re-proved by title. The scope (10 files), USD30 cap, risk, depends_on, design, dispatch
+    state, required behavior and the W1-T11196/W1-T11197 holds are unchanged. This records no
+    pass of any test or implementation.
+    Settled by lookup: which exact titles does the preserved test file carry? -> seven top-level
+    node:test titles, matching the seven behaviors verbatim
+    (https://raw.githubusercontent.com/craigoley/remudero/run-W1-T11195-1794171535104/test/dispatch/product-plan-runner-config.test.ts).
+    Settled by lookup: is a file::title proof legal? -> no. parseTestTarget refuses the separator;
+    the two forms are the whole file or a bare title (src/lib/review.ts explainUnitTestProofRefusal).
+    Settled by lookup: does a bare title discriminate at the merge base? -> yes. A completed
+    name-filtered run with zero real matches grades fail, never a silent pass (src/lib/review.ts,
+    the W1-T72 guard). Settled by lookup: can every full title be used as written? -> four can.
+    proofResolvabilityViolations blocks a bare title over 100 characters or with two or more
+    commas (src/lib/task-linter.ts SCENARIO_NARRATIVE_BOUNDS). Titles 1 and 6 run 112 and 116
+    characters, and title 5 has two commas. Each of those proofs uses a verbatim, contiguous piece
+    of its exact title. The runner passes it, regex-escaped, as --test-name-pattern, a substring
+    match, so it still selects that one whole test. Settled by lookup: does any fragment match a
+    test on main? -> no. None of the fragments occurs under test/ on main.
+    Proof clarification (run PLAN-clarify-1794342495387, plan-only): the last criterion's claim
+    "the served plan proposal returns the named refusal through authenticated route composition"
+    was proved by the whole file test/console-api/serve/product-routes.test.ts. That file already
+    exists and passes on main, so it cannot tell the base from the change. By operator instruction
+    the proof now names the newly added test "W1-T11195: a served plan proposal for a target
+    without valid runner configuration refuses a named 409 before any journal or handoff". The
+    claim wording, every other criterion and proof, the scope (10 files), the USD30 cap, depends_on,
+    risk, status, dispatch state, the refusal-amendment record and the W1-T11196/W1-T11197 holds
+    are unchanged. This records no pass of any test or implementation.
+    Settled by lookup: can that exact title stand as written? -> no. It runs 131 characters, and
+    proofResolvabilityViolations blocks a bare title over 100 characters
+    (src/lib/task-linter.ts SCENARIO_NARRATIVE_BOUNDS.maxBodyLength). The proof therefore uses the
+    verbatim, contiguous 90-character piece "a served plan proposal for a target without valid
+    runner configuration refuses a named 409". It has no comma or semicolon. The bare-title arm
+    passes it, regex-escaped, as --test-name-pattern across test/**/*.test.ts, a substring match,
+    so it selects that one whole test (src/lib/review.ts parseTestTarget). This follows the same
+    piece-of-title precedent used above for titles 1, 5 and 6.
+    Settled by lookup: does the piece match any test on main? -> no. Under test/ on main, "served
+    plan proposal" occurs only in the W1-T10823 title in
+    test/console-api/serve/product-routes.test.ts, and that title does not contain the piece. At
+    the merge base, a name-filtered run with zero real matches grades fail (src/lib/review.ts, the
+    W1-T72 guard), so the proof discriminates.
   design: |
     (1) Name absence truthfully. In src/lib/mounts.ts, add a MountsMissingError subclass of
     MountsError that loadMounts throws only when the read fails with a confirmed ENOENT. Its
@@ -109,16 +152,26 @@
     fallback, any change to the rmd plan verb's gates, hold releases, budgets, access and
     Console UI source.
   acceptance:
-    - claim: a target without runner configuration, or with an invalid or unreadable table, refuses with a distinct code before any journal record, product write or handoff, and a valid table reaches exactly one handoff
-      proof: "unit test: test/dispatch/product-plan-runner-config.test.ts"
+    - claim: a target without runner configuration refuses runner_config_missing before any journal record, product write or handoff
+      proof: "unit test: runner configuration refuses runner_config_missing before any journal, product write or handoff"
+    - claim: a dirty working-tree mounts table absent from the committed head is still treated as missing
+      proof: "unit test: a dirty working-tree mounts table absent from the committed head is still missing"
+    - claim: a malformed, Tier-Invariant-violating or symlinked mounts table refuses runner_config_invalid
+      proof: "unit test: a malformed, Tier-Invariant-violating or symlinked table refuses runner_config_invalid"
+    - claim: a failed git read refuses target_unreadable and is never collapsed into absence
+      proof: "unit test: a failed git read refuses target_unreadable and is never collapsed into absence"
+    - claim: the committed-tree reader refuses a retargeted head, a non-blob, an oversized blob and an unparseable listing
+      proof: "unit test: the committed-tree reader refuses a retargeted head, a non-blob"
+    - claim: a present valid table reaches exactly one handoff, and a retry after the configuration lands starts exactly one plan
+      proof: "unit test: reaches exactly one handoff, and a retry after the configuration lands starts exactly one plan"
     - claim: the plan operation consumes the bounded committed-tree reader
       proof: "grep: readTargetRunnerConfig( in src/lib/product-plan-operation.ts"
     - claim: an absent mounts table is named as missing runner configuration rather than invalid YAML
-      proof: "grep: MountsMissingError in src/lib/mounts.ts"
+      proof: "unit test: an absent mounts table is named as missing runner configuration rather than invalid YAML"
     - claim: the served contract declares the recoverable refusal
       proof: "grep: runner_config_missing in openapi/daemon.yaml"
     - claim: the served plan proposal returns the named refusal through authenticated route composition
-      proof: "unit test: test/console-api/serve/product-routes.test.ts"
+      proof: "unit test: a served plan proposal for a target without valid runner configuration refuses a named 409"
   falsifier: |
     Remove the preflight call. The absent-config fixture must then observe a journal record and
     a handoff, and fail. Collapse a failed git read into absent. The unreadable fixture must

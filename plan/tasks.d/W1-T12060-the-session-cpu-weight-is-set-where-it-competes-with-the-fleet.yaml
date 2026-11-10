@@ -1,0 +1,40 @@
+- id: W1-T12060
+  title: "The session CPU weight is set on the slice that competes with the fleet's containers"
+  repo: remudero
+  depends_on: []
+  priority: 1.0
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # host resource policy in two deploy scripts; it changes how the host shares its CPU
+  band_meaning: blast-radius
+  origin: operator-session#review-flow-2026-11-10
+  plan_refs:
+    - W1-T11130
+  files:
+    - deploy/resource-policy.sh
+    - deploy/install-host-units.sh
+    - test/deploy/the-session-cpu-weight-is-set-where-it-competes-with-the-fleet.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "The installer writes the session CPU weight for user.slice, the sibling of system.slice, and applies it at runtime when systemd is live"
+      proof: "grep: W1-T12060 criterion 1 in test/deploy/the-session-cpu-weight-is-set-where-it-competes-with-the-fleet.test.ts"
+    - claim: "The policy prints the weight and the slice it is set on, and the weight comes from RMD_SESSION_CPU_WEIGHT as today"
+      proof: "grep: W1-T12060 criterion 2 in test/deploy/the-session-cpu-weight-is-set-where-it-competes-with-the-fleet.test.ts"
+    - claim: "The memory limit of the session slice is written and applied exactly as before"
+      proof: "grep: W1-T12060 criterion 3 in test/deploy/the-session-cpu-weight-is-set-where-it-competes-with-the-fleet.test.ts"
+  rationale: |
+    MEASURED 2026-11-10 on the Azure host (8 cores, CPU pressure 93%), over 20 seconds: login sessions used 4.1 cores and every container together 3.9. The daemon, which reviews, arms and merges, had 1.1.
+    - deploy/resource-policy.sh sets CPUWeight 30 on user-1000.slice. That slice has no sibling: it is the only child of user.slice. A weight only divides CPU between siblings, so it had no effect.
+    - user.slice and system.slice both had weight 100, so hand-run work took half the host whenever it wanted it.
+    - The operator then ran `systemctl set-property --runtime user.slice CPUWeight=20`. Within a minute the daemon had 2.8 cores, sessions 2.2, and the 1-minute load fell from about 95 to 34. Reviewed pull requests began to merge.
+    - That setting is lost at the next reboot.
+  design: |
+    Write the CPU weight in a drop-in for user.slice and apply it at runtime the way the installer already does for the session memory limit. Keep the memory limit on user-<uid>.slice, where it works. Keep RMD_SESSION_CPU_WEIGHT as the one setting.
+    NOT IN SCOPE: the containers' own weights, and any CPU quota.
+  falsifier: |
+    Write the weight on user-<uid>.slice only and criterion 1 must fail. Hide the slice name from the policy's output and criterion 2 must fail. Change the memory limit's slice or value and criterion 3 must fail. Restore and require all three to pass.
+  note: |
+    Hand-run work with fixed timeouts runs slower under this setting when the fleet is busy. That is the intended order: the fleet first.

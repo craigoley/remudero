@@ -1,0 +1,37 @@
+- id: W1-T12042
+  title: "Each rule headline in CLAUDE.md is one plain command with the same meaning as before"
+  repo: remudero
+  depends_on: [W1-T12038]
+  priority: 1.4
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # every agent reads this file; a reworded rule that changes meaning changes behaviour across the fleet
+  band_meaning: blast-radius
+  origin: operator-session#plain-language-2026-11-10
+  files:
+    - CLAUDE.md
+    - AGENTS.md
+    - test/agent-rules-are-written-in-plain-language.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "Every rule headline is at most two sentences of 25 words or fewer, with no word of four or more letters in capitals other than a name the code uses"
+      proof: "grep: W1-T12042 criterion 1 in test/agent-rules-are-written-in-plain-language.test.ts"
+    - claim: "Every doctrine pointer, command, path and task id that the file had before is still in it, and AGENTS.md matches a fresh generation"
+      proof: "grep: W1-T12042 criterion 2 in test/agent-rules-are-written-in-plain-language.test.ts"
+    - claim: "The file is not larger than the byte limit its own ratchet sets"
+      proof: "grep: W1-T12042 criterion 3 in test/agent-rules-are-written-in-plain-language.test.ts"
+  rationale: |
+    MEASURED 2026-11-10 on main at 2c6e743199: CLAUDE.md has 1,867 words, 142 of them in capitals; 23% of its sentences are longer than 25 words. AGENTS.md is generated from it and has the same numbers.
+    - Example: "ZERO A `DA:` VALUE INSIDE THE TARGET's OWN `SF:` BLOCK — a whole-file replace hits another file's identical line number and returns a FALSE `OK`."
+    - Every Claude worker and session reads this file on every run, and Codex workers read AGENTS.md. Agents copy its style into task titles, comments and commit messages.
+    - The file says of itself that the headline is the whole rule, so the headline must be readable alone.
+  design: |
+    Rewrite each headline by the rules in docs/plain-language.md: a command, the condition first, normal capitals, one idea per sentence. Keep every rule, every pointer and every machine-read token. Regenerate AGENTS.md with `npm run agents-md`. The test compares the set of pointers, commands, paths and ids before and after from a list recorded in the test, and checks the headline shape.
+    NOT IN SCOPE: the doctrine bodies under doctrine/ (later tasks, one directory each), adding or removing a rule, and the byte limit itself.
+  falsifier: |
+    Leave one headline in capitals or over the length and criterion 1 must fail. Drop one pointer or one command and criterion 2 must fail. Grow the file past its limit and criterion 3 must fail. Restore and require all three to pass.
+  note: |
+    A reviewer must compare each old and new headline for meaning; the test can prove what was kept, not that the sense is the same. Tests that quote a headline word for word may need their quotation updated; the builder lists them.

@@ -1,0 +1,87 @@
+- id: W1-T12118
+  title: "A PR RECOVERY ACTION IS FENCED BY A FRESH GITHUB READ OF ITS EXACT (REPO, PR, BASE SHA, HEAD SHA) AND LEAVES ONE IDEMPOTENT OPERATION RECEIPT THAT IS TERMINAL ONLY AFTER ITS POSTCONDITION IS RE-OBSERVED — W1-T11751/W1-T11752 give each (PR, head, class) an owner, wake and deadline, but the action the owner takes still runs on the pass's snapshot, writes no receipt a replay can see, and calls itself done without reading back what it changed"
+  repo: remudero
+  depends_on: [W1-T11751, W1-T11752]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 14.00
+  risk: high  # Rule 19: one concern (how a recorded recovery's action is fenced, receipted and verified); the record module plus its sweep call site
+  band_meaning: span
+  priority: 2
+  origin: architect
+  plan_refs: [W1-T11751, W1-T11752, W1-T11611, W1-T11076, W1-T11077, W1-T8912, W1-T9125, W1-T5690, W1-T3387, W1-T5865]
+  files:
+    - src/lib/pr-recovery-record.ts
+    - src/lib/sweep.ts
+    - test/sweep/a-recovery-action-is-fenced-by-a-fresh-read-and-leaves-one-verified-receipt.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "before a recorded recovery's mutating action (fix dispatch, update-branch, rerun, escalation filing) the sweep re-reads the PR from GitHub and acts only when repo, number, head SHA and base SHA equal the record's evidence and that evidence was observed at that same pair; a moved head, moved base, closed or merged PR, or an unreadable read takes no action and writes a named stale or unobservable reason"
+      proof: "unit test: a recovery action acts only when a fresh read matches the record"
+    - claim: "each action writes one pr.recovery.operation receipt keyed by (record key, base SHA, action, transition id) before acting, so a replay or a second webhook-woken pass with the same key acts nothing; the record's terminal receipt is written only after a re-read observes the action's postcondition, and an unobserved postcondition stays pending for the next periodic pass"
+      proof: "unit test: a recovery action writes one keyed receipt before acting and a replay acts nothing"
+    - claim: "no recovery deadline, age or wake closes or rebuilds a PR; a close stays with W1-T11077's verify human route and its seven-day loop.decision shadow evidence"
+      proof: "unit test: no recovery deadline, age or wake closes or rebuilds a PR"
+    - claim: "the sweep takes a recorded recovery's action through one fenced entry point"
+      proof: "grep: fencedRecoveryAction( in src/lib/sweep.ts"
+  rationale: |
+    THE ASK (operator brief, run PLAN-expand-1794323791989): each PR gets a bounded exact-head recovery lifecycle
+    keyed by repo, number, base SHA and head SHA, with one route, owner, wake/deadline, evidence freshness, an
+    idempotent operation receipt and terminal verification. Webhooks may wake it. GitHub is re-read before an
+    action. A periodic reconciler stays. Nothing closes or rebuilds on age alone.
+
+    RESEARCH (https://docs.github.com/en/webhooks/using-webhooks/best-practices-for-using-webhooks): a missed
+    webhook must be redelivered, and a redelivery reuses the same X-GitHub-Delivery id. So a webhook is a wake, not
+    a source of truth. The periodic pass must still reconcile, and an action must be idempotent across a repeated
+    delivery.
+
+    READ in this worktree:
+    - src/lib/github-event-wake.ts already verifies signatures, dedups by delivery id
+      (createPersistentDeliveryDedupStore) and only writes a sweep wake marker. The sweep is the periodic
+      reconciler. WEBHOOK WAKE AND THE RECONCILER ALREADY EXIST, AND THIS TASK ADDS NEITHER.
+    - src/lib/pr-blocker.ts PR_BLOCKERS / PR_BLOCKER_OWNERS give each blocker exactly one owner (the route).
+    - W1-T11751 (queued) records (repo, PR, head SHA, failure class) with owner, action, wake_at, deadline_at and a
+      terminal receipt, in shadow. W1-T11752 (queued) lets the escalation site defer, wake or escalate on that
+      record. Neither fences the action on a fresh read, keys an operation receipt, or verifies a postcondition.
+    - src/lib/action-reconciliation.ts reconcileExternalEffect already models a postcondition-checked external
+      effect (applied/refused/pending/stale/unobservable). This task reuses it and adds no second effect model.
+    - W1-T11611 (queued) measured the race this fences in one place: applyStrikeLadder read the head, spent a
+      model call, then closed with no second read.
+
+    Settled by lookup: is this already filed or already decided? -> In part. Owner, route, wake and deadline are
+    W1-T11751/W1-T11752's, and the webhook wake and its dedup are github-event-wake.ts's. The rebuild close's own
+    fence is W1-T11611's. W1-T8912 (successful unchanged-PR observations survive restart) and W1-T9125 (review
+    status re-evaluation for stale body mismatches) cover observation and review freshness, not actions. The
+    fenced action, operation receipt and verified terminal are unfiled (plan/tasks.d/W1-T11751-*, W1-T11752-*,
+    W1-T11611-*, W1-T8912-*, W1-T9125-*).
+    Settled by lookup: does base SHA join the record key? -> No. W1-T11751 keys (repo, PR, head, class), and a
+    main advance would otherwise supersede ownership on every merge. Base SHA enters as evidence freshness and
+    as part of the operation receipt key, so a moved base stales the evidence without resetting the owner.
+    Settled by lookup: may a deadline close or rebuild a PR? -> No. W1-T11077 is verify: human and is released
+    only after seven days of W1-T11076 loop.decision rows and an operator spot-check (plan/tasks.d/W1-T11077-*).
+    Settled by lookup: must this auto-trigger the semantic review? -> No new trigger. The review lane already
+    spawns the semantic reviewer for tasked PRs (W1-T3387, merged), and the unfiled-PR gap is W1-T5865 (filed).
+    An awaiting-review blocker's owner is review-lane, so this task only fences that lane's action like any other.
+  design: |
+    1. fencedRecoveryAction(record, { readPr, act, readPostcondition, priorReceipts, nowMs }) in
+       src/lib/pr-recovery-record.ts. readPr returns {state, headSha, baseSha} from GitHub at call time. It refuses
+       unless state is open, the head and base equal the record's evidence pair, and the evidence observed_at
+       pair is the same pair.
+    2. Receipt: pr.recovery.operation {key, base_sha, action, transition_id, phase: pending|applied|refused|stale|
+       unobservable}. A pending or applied receipt for the same key short-circuits the call. The pending row is
+       appended before act().
+    3. Terminal verification goes through reconcileExternalEffect with the action's postcondition (for example, a
+       dispatch lands a fix.dispatch row at this head, an update-branch moves the head, or an escalation issue
+       exists). Only an applied result writes W1-T11751's terminal receipt. A pending result is left for the next
+       periodic pass.
+    4. The sweep routes the W1-T11752 `wake` arm's rung through fencedRecoveryAction. Close and rebuild are not
+       actions this entry point accepts.
+    5. The pr.recovery.operation step joins the rotation-retained set alongside W1-T11752's pr.recovery steps.
+    6. Tests: a matching fresh read acts once; a replay acts nothing; a moved head, a moved base and an unreadable
+       read each act nothing with a named reason; an unobserved postcondition stays pending, then goes terminal
+       on the pass that observes it; and a close request is refused.
+  falsifier: |
+    Remove the re-read: the moved-head fixture acts on the stale head and criterion 1 fails. Append the receipt
+    after act() instead of before: a crash between the two replays the action, and the replay case fails.

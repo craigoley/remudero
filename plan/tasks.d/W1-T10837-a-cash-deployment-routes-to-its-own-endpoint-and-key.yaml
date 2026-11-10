@@ -19,7 +19,7 @@
     - src/lib/cash-web-bridge.ts
     - docs/operator-guide.md
     - test/worker/spawn/a-cash-deployment-routes-to-its-own-endpoint.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     VERIFIED ON origin/main 07dbdcc77 (2026-10-27). The cash lane knows ONE Azure account. `openWeightEndpoint`

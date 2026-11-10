@@ -1,0 +1,42 @@
+- id: W1-T12027
+  title: "Three memory-policy suites pin their cgroup root and instance registry, so they answer the same on a host that runs the fleet's containers; on the Azure host they read the live containers and failed every full author preflight there"
+  repo: remudero
+  depends_on: []
+  priority: 1.3
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # sized high only for Rule 19: one helper and three suites that take it; no shipped code changes
+  band_meaning: blast-radius
+  origin: operator-session#preflight-load-2026-11-10
+  plan_refs:
+    - W1-T11553
+    - W1-T11130
+  files:
+    - test/the-instances-share-one-host-memory-budget.test.ts
+    - test/the-console-backend-keeps-its-share-of-the-host.test.ts
+    - test/a-squeezed-page-cache-grows-its-memory-high.test.ts
+    - test/helpers/host-independent-policy-env.ts
+    - test/deploy/the-memory-budget-suite-reads-no-running-containers-limit.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "Under the shared pins the policy read returns the fixture's floor while a fake docker, cgroup tree and registry describe a larger running fleet, and each of the three suites takes its pins from that one helper"
+      proof: "grep: W1-T12027 criterion 1 in test/deploy/the-memory-budget-suite-reads-no-running-containers-limit.test.ts"
+    - claim: "With either pin removed alone the same read returns the running container's larger memory.max or the peer root's recorded peak, so the first criterion is not passing for lack of a hostile host"
+      proof: "grep: W1-T12027 criterion 2 in test/deploy/the-memory-budget-suite-reads-no-running-containers-limit.test.ts"
+  rationale: |
+    OBSERVED 2026-11-10 on the Azure host: test/the-instances-share-one-host-memory-budget.test.ts fails alone, on current main and on run-W1-T11884, with "remudero-daemon: memory.max is the shared budget's share" expected 8589934592, actual 25921847296.
+    - 25921847296 bytes is the memory.max the running remudero-daemon container has on that host. The suite fakes a 15.6 GiB host, where the fleet is overcommitted, and deploy/resource-policy.sh then keeps the larger of the container's own peak and the limit its running container already has, read through docker and the cgroup tree.
+    - The suite's fixture passes the real PATH and sets no RMD_CGROUP_ROOT, so on a host that runs the fleet the read reaches the real container. W1-T11553 pinned this for the resource-policy suite; this suite was not covered.
+    - Two more suites fail alone on the same host and main: test/the-console-backend-keeps-its-share-of-the-host.test.ts (5 of 15 tests) and test/a-squeezed-page-cache-grows-its-memory-high.test.ts (1 of 37). They run the policy from the checkout, so it reads the checkout's instance registry and each live state root's recorded peak.
+    - With the two pins applied all three pass on that host: 3 of 3, 15 of 15 and 37 of 37.
+    - The cost: run-W1-T11884 failed its third three-hour author preflight on this one test, and every full (not over-capacity) author preflight on that host fails the same way. Workers inside the container and hosted CI have no docker and are not affected.
+  design: |
+    One helper, test/helpers/host-independent-policy-env.ts, returns RMD_CGROUP_ROOT and RMD_RESOURCE_POLICY_REGISTRY pointed at paths inside the fixture root that are never created. Each of the three suites spreads it into the environment it runs the policy under and asserts what it asserts today. The new test drives the real script under the helper's env beside a fake docker, a cgroup tree with a larger memory.max and a registry whose state root records a larger peak, then with each pin removed alone.
+    NOT IN SCOPE: deploy/resource-policy.sh, whose behaviour is right, and the seven other suites that run it, which pass on that host today.
+  falsifier: |
+    Remove either pin from the helper, or the helper from any of the three suites, and criterion 1 must fail; make the hostile tree's memory.max or the peer's peak no larger than the floor and criterion 2 must fail. Restore and require both to pass.
+  note: |
+    Reserved with rmd next-task-id on the load filing's branch. Found while triaging run-W1-T11884's third preflight failure; reproduced on a worktree of current main on the same host.

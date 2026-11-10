@@ -28,7 +28,7 @@
   band_rationale: "one cross-file invariant: the real child entry and the spawn selector in the client must work together, so a single real-child test needs all files and is unsatisfiable piecewise"
   origin: feedback#fb-1794149944233-e4c97f
   plan_refs: ["§7B"]
-  files: [src/gh-read-broker-client-main.ts, src/lib/gh-read-broker-client.ts, test/github/broker-child-entry-runs-without-a-loader.test.ts]
+  files: [src/gh-read-broker-client-main.ts, src/lib/gh-read-broker-client.ts, test/infra/broker-child-entry-runs-without-a-loader.test.ts]
   priority: 4
   status: queued
   # backlog gardener: band=4 evidence=5ce6fadd342dcfc2

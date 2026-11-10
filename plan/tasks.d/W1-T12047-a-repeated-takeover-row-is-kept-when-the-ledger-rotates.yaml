@@ -1,0 +1,35 @@
+- id: W1-T12047
+  title: "The row that counts repeated review takeovers is kept when the ledger rotates"
+  repo: remudero
+  depends_on: []
+  priority: 1.5
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: low # one step name added to the list the rotation keeps
+  band_meaning: blast-radius
+  origin: operator-session#plain-language-2026-11-10
+  plan_refs:
+    - W1-T11930
+  files:
+    - src/lib/ledger.ts
+    - test/ledger/a-repeated-takeover-row-is-kept-when-the-ledger-rotates.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "A review.claim_repeated row written before a rotation is still read from the live ledger after it"
+      proof: "grep: W1-T12047 criterion 1 in test/ledger/a-repeated-takeover-row-is-kept-when-the-ledger-rotates.test.ts"
+    - claim: "The rotation keeps no other new step, and the size it keeps for the steps it already kept is unchanged"
+      proof: "grep: W1-T12047 criterion 2 in test/ledger/a-repeated-takeover-row-is-kept-when-the-ledger-rotates.test.ts"
+  rationale: |
+    OBSERVED 2026-11-10 while building W1-T11930: that task writes a review.claim_repeated row each time a review claim is taken over again with no verdict between. src/lib/ledger.ts keeps a list of steps across a rotation (near line 820, where review.pending_posted is listed), and the new step is not in it.
+    - The core ledger has rotated 391 times, several times a day. A row that is not kept is gone from the live ledger within hours.
+    - The count is only useful if a later reader can still find it.
+  design: |
+    Add the step to the kept list. The test writes the row, rotates, and reads it back.
+    NOT IN SCOPE: showing the count in the flow report (it needs a reader first), and any change to what W1-T11930 writes.
+  falsifier: |
+    Leave the step out of the list and criterion 1 must fail. Keep another step as well and criterion 2 must fail. Restore and require both to pass.
+  note: |
+    Follows W1-T11930, whose file list did not include src/lib/ledger.ts.

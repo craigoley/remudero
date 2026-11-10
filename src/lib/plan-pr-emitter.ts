@@ -25,7 +25,8 @@ import { promisify } from "node:util";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve, sep } from "node:path";
 import { parse as parseYaml } from "yaml";
-import { acceptanceBlockDiagnostics, acceptanceHeaderLine, parseAcceptanceBlock, parseWhitelistedProof } from "./review.js";
+import { acceptanceBlockDiagnostics, acceptanceHeaderLine, parseAcceptanceBlock, parseWhitelistedProof, wrappedGrepPattern } from "./review.js";
+import { breMetacharsIn } from "./bre-metachars.js";
 import { emDashSeparatedProof, refuseNonDiscriminatingCriteria } from "./body-repair.js";
 import {
   checkCommitMessage,
@@ -218,6 +219,155 @@ export function filingAcceptanceCriteria(taskIds: string[], files: string[]): Ac
     ];
   }
   return criteria;
+}
+
+// ── 3b. The safety bar for a grep proof over a line a diff ADDS (W1-T4263, shared by W1-T11625) ─────
+
+const ANCHOR_MIN_LENGTH = 8;
+
+/** Escape a literal line into a BRE `grep` pattern the proof executor reads back as that literal. */
+export function escapeGrepLiteral(line: string): string {
+  let escaped = "";
+  for (const ch of line) {
+    if (ch === "\\") escaped += "\\\\";
+    else if (ch === "?") escaped += "[?]";
+    else if (".[]*^$".includes(ch)) escaped += `\\${ch}`;
+    else escaped += ch;
+  }
+  return escaped;
+}
+
+/** The lines a unified diff adds (with the path they land in) and removes. `sawHeader` is false for text that is
+ *  not a diff at all. */
+export function parseDiffLines(diffText: string): { sawHeader: boolean; added: Array<{ path: string; line: string }>; removed: Set<string> } {
+  const added: Array<{ path: string; line: string }> = [];
+  const removed = new Set<string>();
+  let file: string | undefined;
+  let sawHeader = false;
+  for (const raw of diffText.split("\n").map((l) => l.replace(/\r$/, ""))) {
+    if (raw.startsWith("diff --git ")) {
+      file = undefined;
+      continue;
+    }
+    if (raw.startsWith("+++ ")) {
+      sawHeader = true;
+      const path = raw.slice(4).replace(/^b\//, "").trim();
+      file = path === "/dev/null" ? undefined : path;
+      continue;
+    }
+    if (raw.startsWith("--- ")) continue;
+    if (raw.startsWith("-")) removed.add(raw.slice(1).trim());
+    else if (file && raw.startsWith("+")) added.push({ path: file, line: raw.slice(1).trim() });
+  }
+  return { sawHeader, added, removed };
+}
+
+/** The ONE safety bar: a `grep:` proof for `line` in `path`, or `undefined` when the line cannot be a runnable,
+ *  parser-valid proof that survives the Acceptance block verbatim. A line the diff also REMOVES is a move. */
+export function safeAddedLineProof(path: string, line: string, removed: ReadonlySet<string>): string | undefined {
+  if (line.length < ANCHOR_MIN_LENGTH || removed.has(line) || /\sin\s/i.test(line)) return undefined;
+  if (!/\.[^/]+$/.test(path) || /\s/.test(path) || path.includes("..")) return undefined;
+  const pattern = escapeGrepLiteral(line);
+  const proof = `grep: ${pattern} in ${path}`;
+  if (parseWhitelistedProof(proof) === null || breMetacharsIn(pattern).blocking.length > 0) return undefined;
+  if (wrappedGrepPattern(proof) !== undefined) return undefined;
+  const roundTrip = parseAcceptanceBlock(renderAcceptanceBlock([{ claim: "anchor", proof }]));
+  if (roundTrip.length !== 1 || roundTrip[0].proof !== proof) return undefined;
+  return proof;
+}
+
+/** A shard's task id from its own first `- id:` line, or `undefined`. */
+function shardOwnId(content: string): string | undefined {
+  return /^\s*-\s+id:\s*["']?([A-Za-z0-9._-]+)["']?\s*$/m.exec(content)?.[1];
+}
+
+function readShardAt(cwd: string, relPath: string): string | undefined {
+  try {
+    return readFileSync(join(cwd, relPath), "utf8");
+  } catch (e) {
+    void e; // an unreadable (deleted or absent) shard has no head content to prove against; the caller skips it
+    return undefined;
+  }
+}
+
+/**
+ * W1-T11625 — acceptance criteria for a PLAN PR (`rmd plan`) that may file new shards AND amend existing ones.
+ * A reserved id's shard keeps {@link filingAcceptanceCriteria}'s `grep: id:` proof (absent at base, so it
+ * discriminates). A changed shard no reserved id pairs with is an AMENDMENT of an existing task, whose `id:` line
+ * passes at the merge base too, so its proof greps a line the amendment adds to THAT shard, under the same
+ * safety bar as {@link safeAddedLineProof}, and only when that line occurs nowhere else in the head shard and in
+ * no removed line (so it cannot already match at base). NEVER prose: with no runnable proof it THROWS.
+ */
+export function planPrAcceptanceCriteria(
+  reservedIds: string[],
+  files: string[],
+  diffText: string | undefined,
+  cwd: string = process.cwd(),
+): AcceptanceCriterion[] {
+  const criteria: AcceptanceCriterion[] = [];
+  const shards = files.filter((f) => f.startsWith(PLAN_TASK_SHARD_PREFIX) && !f.slice(PLAN_TASK_SHARD_PREFIX.length).includes("/"));
+  const paired = new Set<string>();
+  for (const id of reservedIds) {
+    const shard = shards.find((f) => isTaskShardName(f.slice(PLAN_TASK_SHARD_PREFIX.length), id));
+    if (shard === undefined) continue;
+    paired.add(shard);
+    criteria.push({
+      claim: `${id} is filed as a well-formed plan task shard by this PR, not (yet) implemented`,
+      proof: `grep: id: ${id} in ${shard}`,
+    });
+  }
+  const parsed = diffText === undefined ? undefined : parseDiffLines(diffText);
+  for (const shard of shards) {
+    if (paired.has(shard) || parsed === undefined) continue;
+    const content = readShardAt(cwd, shard);
+    const id = content === undefined ? undefined : shardOwnId(content);
+    if (content === undefined || id === undefined || !isTaskShardName(shard.slice(PLAN_TASK_SHARD_PREFIX.length), id)) continue;
+    const headLines = content.split("\n");
+    for (const { path, line } of parsed.added) {
+      if (path !== shard) continue;
+      if (headLines.filter((l) => l.includes(line)).length !== 1) continue;
+      if ([...parsed.removed].some((r) => r.includes(line))) continue;
+      const proof = safeAddedLineProof(path, line, parsed.removed);
+      if (proof === undefined) continue;
+      criteria.push({
+        claim: `${id} is amended (not implemented) by this PR; its proof greps a line this PR adds to ${shard}`,
+        proof,
+      });
+      break;
+    }
+  }
+  if (criteria.length === 0 && parsed !== undefined) {
+    const otherPlanFiles = files
+      .filter((f) => f === "plan/tasks.yaml" || f === "MASTER-PLAN.md" || f.startsWith("plan/"))
+      .filter((f) => !shards.includes(f))
+      .sort((a, b) => {
+        const rank = (path: string): number => path === "plan/tasks.yaml" ? 0 : path === "MASTER-PLAN.md" ? 1 : 2;
+        return rank(a) - rank(b) || files.indexOf(a) - files.indexOf(b);
+      });
+    for (const path of otherPlanFiles) {
+      const content = readShardAt(cwd, path);
+      if (content === undefined) continue;
+      const headLines = content.split("\n");
+      for (const { path: addedPath, line } of parsed.added) {
+        if (addedPath !== path || headLines.filter((candidate) => candidate.includes(line)).length !== 1) continue;
+        if ([...parsed.removed].some((removedLine) => removedLine.includes(line))) continue;
+        const proof = safeAddedLineProof(path, line, parsed.removed);
+        if (proof === undefined) continue;
+        criteria.push({ claim: `${path} is amended by this PR; its proof greps a line this PR adds to ${path}`, proof });
+        break;
+      }
+      if (criteria.length > 0) break;
+    }
+  }
+  const runnable = criteria.filter((c) => {
+    if (parseWhitelistedProof(c.proof) === null) return false;
+    const roundTrip = parseAcceptanceBlock(renderAcceptanceBlock([c]));
+    return roundTrip.length === 1 && roundTrip[0].proof === c.proof;
+  });
+  if (runnable.length === 0) {
+    throw new Error(`plan PR refused: no runnable acceptance proof derivable from ${files.join(", ") || "(no files)"}`);
+  }
+  return runnable;
 }
 
 // ── 4. Gate-compliant commit-message assembly (the #387 body fix) ───────────────────────────

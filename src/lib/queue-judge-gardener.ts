@@ -289,27 +289,73 @@ export interface JudgeMove {
 const isStringList = (v: unknown): v is string[] => Array.isArray(v) && v.every((x) => typeof x === "string");
 
 /** Strict parse, as `parseFixProgressVerdict` reads its answer: anything malformed is undefined, never guessed. */
-export function parseQueueJudgeAnswer(text: string): JudgeMove[] | undefined {
-  const raw = text.trim().replace(/^```(?:json)?\s*|\s*```$/g, "");
-  let value: unknown;
-  try { value = JSON.parse(raw); }
-  catch { return undefined; /* a malformed answer writes nothing; the next pass asks again */ }
-  const list = Array.isArray(value) ? value : value && typeof value === "object" ? (value as Record<string, unknown>).moves : undefined;
-  if (!Array.isArray(list)) return undefined;
-  const moves: JudgeMove[] = [];
-  for (const m of list) {
-    if (!m || typeof m !== "object") return undefined;
-    const v = m as Record<string, unknown>;
-    const o = v.expected_outcome as Record<string, unknown> | undefined;
-    if (typeof v.id !== "string" || typeof v.priority !== "number" || !Number.isFinite(v.priority) || typeof v.reason !== "string" || !v.reason.trim() ||
-        !isStringList(v.evidence) || typeof v.expected_cost_of_delay !== "number" || !Number.isFinite(v.expected_cost_of_delay) || v.expected_cost_of_delay < 0 ||
-        !o || typeof o !== "object" || !isStringList(o.unblocks_tasks) || !isStringList(o.ends_incidents) ||
-        !Array.isArray(o.unsticks_prs) || !o.unsticks_prs.every((n) => Number.isSafeInteger(n)) ||
-        typeof o.starts_within !== "number" || !Number.isFinite(o.starts_within) || o.starts_within <= 0) return undefined;
-    moves.push({ id: v.id, priority: v.priority, reason: v.reason.replace(/\s+/g, " ").trim(), evidence: v.evidence, expected_cost_of_delay: v.expected_cost_of_delay,
-      expected_outcome: { unblocks_tasks: o.unblocks_tasks, ends_incidents: o.ends_incidents, unsticks_prs: o.unsticks_prs as number[], starts_within: o.starts_within } });
+/** Why an answer could not be read at all. The ledger carries this and the answer's length, never its text. */
+export type QueueJudgeAnswerShape = "not-json" | "no-moves-list";
+export interface QueueJudgeAnswerReading {
+  moves: JudgeMove[];
+  /** Rows the judge wrote that are not a move: refused one by one, the rest of the answer still stands (W1-T12028). */
+  malformedRows: Array<{ index: number; id: string | undefined; field: string }>;
+  shape?: QueueJudgeAnswerShape;
+}
+
+/** The JSON value in a judge's answer: the whole text, else a fenced block, else the outermost object or array span. */
+function judgeAnswerJson(text: string): { value: unknown } | undefined {
+  const trimmed = text.trim();
+  const candidates = [trimmed.replace(/^```(?:json)?\s*|\s*```$/g, "")];
+  const fenced = /```(?:json)?\s*\n([\s\S]*?)\n\s*```/.exec(trimmed);
+  if (fenced) candidates.push(fenced[1]!);
+  const spans = ([["{", "}"], ["[", "]"]] as const)
+    .map(([open, close]) => ({ from: trimmed.indexOf(open), to: trimmed.lastIndexOf(close) }))
+    .filter((x) => x.from >= 0 && x.to > x.from)
+    .sort((x, y) => x.from - y.from);
+  for (const x of spans) candidates.push(trimmed.slice(x.from, x.to + 1));
+  for (const candidate of candidates) {
+    try { return { value: JSON.parse(candidate) }; }
+    catch { /* the next candidate */ }
   }
-  return moves;
+  return undefined;
+}
+
+/** The first field of a judged row that is not the shape the prompt asks for, or undefined when the row is a move. */
+function malformedMoveField(v: Record<string, unknown>): string | undefined {
+  const o = v.expected_outcome as Record<string, unknown> | undefined;
+  if (typeof v.id !== "string") return "id";
+  if (typeof v.priority !== "number" || !Number.isFinite(v.priority)) return "priority";
+  if (typeof v.reason !== "string" || !v.reason.trim()) return "reason";
+  if (!isStringList(v.evidence)) return "evidence";
+  if (typeof v.expected_cost_of_delay !== "number" || !Number.isFinite(v.expected_cost_of_delay) || v.expected_cost_of_delay < 0) return "expected_cost_of_delay";
+  if (!o || typeof o !== "object") return "expected_outcome";
+  if (!isStringList(o.unblocks_tasks)) return "expected_outcome.unblocks_tasks";
+  if (!isStringList(o.ends_incidents)) return "expected_outcome.ends_incidents";
+  if (!Array.isArray(o.unsticks_prs) || !o.unsticks_prs.every((n) => Number.isSafeInteger(n))) return "expected_outcome.unsticks_prs";
+  if (typeof o.starts_within !== "number" || !Number.isFinite(o.starts_within) || o.starts_within <= 0) return "expected_outcome.starts_within";
+  return undefined;
+}
+
+/**
+ * Reads a judge's answer (W1-T12028). OBSERVED 2026-11-06 to 11-10: 12 queue-judge passes failed on "malformed judge
+ * answer" beside 14 predictions, and the ledger held nothing about why. An answer with prose around its JSON is read,
+ * a row that is not a move is refused alone, and only an answer with no JSON or no moves list is unreadable.
+ */
+export function readQueueJudgeAnswer(text: string): QueueJudgeAnswerReading {
+  const parsed = judgeAnswerJson(text);
+  if (parsed === undefined) return { moves: [], malformedRows: [], shape: "not-json" };
+  const value = parsed.value;
+  const list = Array.isArray(value) ? value : value && typeof value === "object" ? (value as Record<string, unknown>).moves : undefined;
+  if (!Array.isArray(list)) return { moves: [], malformedRows: [], shape: "no-moves-list" };
+  const moves: JudgeMove[] = [];
+  const malformedRows: QueueJudgeAnswerReading["malformedRows"] = [];
+  list.forEach((m, index) => {
+    if (!m || typeof m !== "object" || Array.isArray(m)) { malformedRows.push({ index, id: undefined, field: "row" }); return; }
+    const v = m as Record<string, unknown>;
+    const field = malformedMoveField(v);
+    if (field !== undefined) { malformedRows.push({ index, id: typeof v.id === "string" ? v.id : undefined, field }); return; }
+    const o = v.expected_outcome as Record<string, unknown>;
+    moves.push({ id: v.id as string, priority: v.priority as number, reason: (v.reason as string).replace(/\s+/g, " ").trim(), evidence: v.evidence as string[],
+      expected_cost_of_delay: v.expected_cost_of_delay as number,
+      expected_outcome: { unblocks_tasks: o.unblocks_tasks as string[], ends_incidents: o.ends_incidents as string[], unsticks_prs: o.unsticks_prs as number[], starts_within: o.starts_within as number } });
+  });
+  return { moves, malformedRows };
 }
 
 export interface QueueJudgeAction extends GardenAction<QueueJudgeClass> {
@@ -718,15 +764,18 @@ export async function queueJudgeInventory(sources: QueueJudgeSources, deps: Pick
     deps.log(UNAVAILABLE_STEP, { reason: `judge spawn failed: ${String((e as Error)?.message ?? e)}` });
     throw new QueueJudgeUnavailableError(`judge spawn failed: ${String((e as Error)?.message ?? e)}`);
   }
-  const proposed = parseQueueJudgeAnswer(answer);
-  if (proposed === undefined) {
-    deps.log(UNAVAILABLE_STEP, { reason: "the judge's answer was not the strict JSON shape; nothing is written and it is asked again" });
+  const reading = readQueueJudgeAnswer(answer);
+  if (reading.shape !== undefined) {
+    deps.log(UNAVAILABLE_STEP, { reason: "the judge's answer was not the strict JSON shape; nothing is written and it is asked again", shape: reading.shape, answer_chars: answer.length });
     throw new QueueJudgeUnavailableError("malformed judge answer");
   }
+  const proposed = reading.moves;
+  const malformed = reading.malformedRows.map((r) => ({ id: r.id, reason: `malformed row ${r.index}: ${r.field}` }));
+  for (const r of malformed) deps.log("queue_judge.row_refused", { ...(r.id !== undefined ? { task_id: r.id } : {}), reason: r.reason });
   const checked = checkMoves(proposed, packs);
   for (const r of checked.refused) deps.log("queue_judge.row_refused", { task_id: r.id, reason: r.reason });
-  if (proposed.length > 0 && checked.accepted.length + checked.escalate.length === 0 && checked.refused.length === proposed.length) {
-    deps.log(UNAVAILABLE_STEP, { reason: `every proposed row was refused: ${checked.refused.map((r) => `${r.id}: ${r.reason}`).join("; ")}` });
+  if (proposed.length + malformed.length > 0 && checked.accepted.length + checked.escalate.length === 0 && checked.refused.length === proposed.length) {
+    deps.log(UNAVAILABLE_STEP, { reason: `every proposed row was refused: ${[...malformed.map((r) => `${r.id ?? "?"}: ${r.reason}`), ...checked.refused.map((r) => `${r.id}: ${r.reason}`)].join("; ")}` });
     throw new QueueJudgeUnavailableError("every proposed row was refused");
   }
 
