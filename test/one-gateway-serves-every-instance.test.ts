@@ -707,7 +707,7 @@ function foreignReposLauncher(t: { after: (fn: () => void) => void }, options: {
   const mount = (source: string, destination: string, type = "bind") => ({ Type: type, Source: source, Destination: destination });
   const mounts = [mount(site, "/home/node/Remudero"), mount(repos, "/home/node/Remudero/repos")];
   writeFileSync(mountsFile, JSON.stringify(mounts));
-  const config = { mountsFile, calls, inspect: "ok", replace: !!options.replace, alternate, changeOnPull: false };
+  const config = { mountsFile, calls, inspect: "ok", replace: !!options.replace, alternate, changeOnPull: false, replaceDirectoryOnPull: false };
   writeFileSync(configFile, JSON.stringify(config)); writeFileSync(calls, "");
   const docker = join(bin, "docker");
   writeFileSync(docker, [
@@ -725,6 +725,7 @@ function foreignReposLauncher(t: { after: (fn: () => void) => void }, options: {
     'if (a[0] === "inspect" && a[1] === "remudero-serve" && a.length === 2) process.exit(c.replace ? 0 : 1);',
     'if (a[0] === "pull") {',
     '  if (c.changeOnPull) { const m = JSON.parse(fs.readFileSync(c.mountsFile)); m[1].Source = c.alternate; fs.writeFileSync(c.mountsFile, JSON.stringify(m)); }',
+    '  if (c.replaceDirectoryOnPull) { const m = JSON.parse(fs.readFileSync(c.mountsFile)); fs.renameSync(m[1].Source, m[1].Source + ".old"); fs.mkdirSync(m[1].Source); }',
     '  process.exit(0);',
     '}',
     'if (a[0] === "stop" || a[0] === "run") process.exit(42);',
@@ -824,4 +825,22 @@ test("W1-T12126 criterion 3: scratch-off legacy selection and durable-only daemo
     assert.ok(!out.includes(DEFAULT_INSTANCE_STATE_BASE + "/absent:"), out);
     assert.ok(!out.includes(DEFAULT_INSTANCE_STATE_BASE + "/retired:"), out);
   });
+});
+
+test("W1-T12126 criterion 2: replacing a repos directory at the same path is detected by identity before stop", (t) => {
+  const f = foreignReposLauncher(t, { replace: true });
+  f.config.replaceDirectoryOnPull = true; f.configure();
+  const r = f.run();
+  assert.notEqual(r.status, 0, String(r.stdout) + r.stderr);
+  assert.ok(f.calls().some(a => a[0] === "pull"));
+  assert.match(String(r.stderr), /repos.*changed|changed.*repos/i);
+  assert.ok(!f.calls().some(a => ["stop", "rm", "run"].includes(a[0]!)), JSON.stringify(f.calls()));
+});
+
+test("W1-T12126 criterion 3: scratch-on legacy placement without a declared daemon is unavailable instead of guessed", (t) => {
+  const f = foreignReposLauncher(t, { legacy: true, scratch: true });
+  const r = f.run();
+  assert.equal(r.status, 0, String(r.stdout) + r.stderr);
+  assert.match(String(r.stderr), /instance site.*repos.*unavailable/i);
+  assert.ok(!String(r.stdout).includes(DEFAULT_INSTANCE_STATE_BASE + "/site:"));
 });

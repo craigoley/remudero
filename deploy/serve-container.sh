@@ -707,7 +707,7 @@ foreign_repos_snapshot() {
     fi
     return 0
   fi
-  case "$container" in ""|*[!A-Za-z0-9_.-]*)
+  case "$container" in ""|-*|*[!A-Za-z0-9_.-]*)
     echo "serve-container: REFUSING — foreign repos container name is unavailable or malformed." >&2
     return 1 ;;
   esac
@@ -738,7 +738,7 @@ try {
     return [canonical, st.dev + ":" + st.ino];
   };
   const registryRoot = directory(process.argv[2]), mountedRoot = directory(roots[0].Source);
-  if (registryRoot[0] !== mountedRoot[0]) throw Error("declared instance root disagrees with Mounts");
+  if (registryRoot[0] !== mountedRoot[0] || registryRoot[1] !== mountedRoot[1]) throw Error("declared instance root disagrees with Mounts");
   const selected = relevant.sort((a, b) => b.Destination.length - a.Destination.length)[0];
   if (!selected) throw Error("repos source is absent");
   const source = directory(selected.Source + repos.slice(selected.Destination.length));
