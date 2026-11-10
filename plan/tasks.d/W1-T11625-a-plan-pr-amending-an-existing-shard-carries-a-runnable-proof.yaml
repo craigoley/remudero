@@ -67,6 +67,13 @@
     test/plan-pr-emitter.test.ts plus test/a-ratification-pr-can-actually-land.test.ts pin that
     behaviour. This task adds a plan-run-scoped producer and leaves those callers unchanged, which keeps
     the change bounded. Retiring their prose fallback is a separate filing if it is ever observed to fire.
+    Settled by lookup: can a plan run's diff touch plan files that are not `plan/tasks.d/` shards? -> yes.
+    applyPlanProposalCommit (src/lib/plan-architect.ts) stages `-A -- plan/ MASTER-PLAN.md`, and the
+    clarify/rewire brief tells the architect to edit an existing task wherever it already lives, either
+    the plan/tasks.yaml monolith or that task's own shard. A monolith-only rewire pairs no reserved id
+    either, so today it gets the same prose fallback (same bug). Under the original design (3) it would
+    throw "no shard changed" and every monolith rewire would open no PR. That is a regression, not a
+    fix, so design (2b) anchors those files with the same path-scoped bar before (3) may throw.
   design: |
     ONE new exported, pure producer in src/lib/plan-pr-emitter.ts:
     `planPrAcceptanceCriteria(reservedIds: string[], files: string[], diffText: string | undefined): AcceptanceCriterion[]`.
@@ -80,9 +87,15 @@
         bar's pure core out of src/run-task.ts's `diffAnchor` into plan-pr-emitter.ts as a path-scoped
         helper and have `diffAnchor` delegate to it, so there is one bar and not two. The claim names
         the task id and says the shard is amended, not implemented.
+    (2b) OTHER PLAN FILES: when (1) and (2) together produce NO criterion, apply the same path-scoped
+        helper to each other changed plan-scope file (`plan/tasks.yaml` first, then `MASTER-PLAN.md`,
+        then any other `plan/**` file, in `files` order) and emit the first one that anchors, as
+        `grep: <literal> in <that file>`. Its claim names the file and says it is amended by this PR.
+        (Only when (1)/(2) are empty, so a shard filing never gets an extra criterion from a co-changed
+        monolith or index file, and the shard's own proof stays primary.)
     (3) NEVER PROSE: a criterion leaves this function only if `parseWhitelistedProof` accepts its proof
         and it survives renderAcceptanceBlock -> parseAcceptanceBlock verbatim. If no criterion
-        survives (no shard changed, a deletion-only amendment, or no added line clears the bar), THROW
+        survives ((1), (2) and (2b) all empty: a deletion-only amendment, or no added line in any changed plan file clears the bar), THROW
         a named error, `plan PR refused: no runnable acceptance proof derivable from <files>`. Never
         fall back to filingAcceptanceCriteria's prose.
     WIRE IT at the `rmd plan` propose site in src/run-task.ts: read the branch diff with the existing
@@ -94,7 +107,7 @@
     DO NOT TOUCH: filingAcceptanceCriteria, its callers in `rmd approve` and inbox, the tests pinning
     them, proof-discrimination-gate, acceptance-author-gate, or branch protection.
   acceptance:
-    - claim: "an amended-shard plan PR with no used reserved id emits a stored parser-valid and base-discriminating proof for an added line in that shard, preserves new-filing and combined-filing behavior, and refuses without push or PR when no safe proof exists"
+    - claim: "an amended-shard plan PR with no used reserved id emits a stored parser-valid and base-discriminating proof for an added line in that shard, a monolith-only (plan/tasks.yaml) rewire emits one for an added line in the monolith, new-filing and combined-filing behavior is preserved, and the run refuses without push or PR when no safe proof exists"
       proof: "unit test: test/a-plan-pr-amending-an-existing-shard-carries-a-runnable-proof.test.ts"
     - claim: "the plan-run producer is a named export of the emitter"
       proof: "grep: export function planPrAcceptanceCriteria( in src/lib/plan-pr-emitter.ts"
@@ -105,7 +118,9 @@
     amended-shard fixture then yields the prose criterion, which parseWhitelistedProof rejects, so the
     stored-body test fails. Make the amended shard emit `grep: id: <id> in <shard>` instead: the fake
     check-proof's base run matches, exits 5, and the discrimination case fails. Make the no-proof
-    branch return prose instead of throwing: the fail-closed case fails.
+    branch return prose instead of throwing: the fail-closed case fails. Restrict (2) to `plan/tasks.d/`
+    and drop (2b): the monolith-only rewire fixture throws instead of emitting a monolith-anchored
+    proof, and the monolith case fails.
   note: |
     risk: high, band_meaning: span (Rule 19 / #588 merits test: YES). The acceptance asserts ONE
     cross-file invariant, "an amending plan PR carries a runnable discriminating proof or opens no PR",
