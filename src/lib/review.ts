@@ -12475,7 +12475,7 @@ function writeReviewOutboxEntry(opts: PostReviewStatusGuardedOpts, description: 
     review_engine_revision: opts.reviewEngineRevision, decision_verdict: opts.verdict,
     evaluator_provenance: opts.evaluatorProvenance,
     ...(opts.presentedFailureIds !== undefined ? { presented_failure_ids: [...opts.presentedFailureIds] } : {}),
-    written_at: new Date(systemClock.now()).toISOString(),
+    written_at: systemClock.iso(),
   };
   try {
     return writeAtomic(reviewOutboxEntryPath(opts.ledgerPath, opts.prUrl, opts.reviewInputDigest), `${JSON.stringify(entry)}\n`);
