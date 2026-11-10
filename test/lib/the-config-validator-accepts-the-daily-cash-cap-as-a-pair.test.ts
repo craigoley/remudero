@@ -5,6 +5,7 @@ import { test } from "node:test";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 import { CONFIG_SCHEMA, ConfigShapeError, validateConfigShape, type Config } from "../../src/lib/config-schema.js";
 import { validateConfig } from "../../src/lib/config.js";
+import { CASH_TRIAL_ID, decideCashTrial } from "../../src/lib/cash-trial.js";
 
 const SOURCE = "daily-cap.json";
 
@@ -84,4 +85,45 @@ test("W1-T12186 criterion 5: the pair in the comment on the field passes both ch
   // The type text of the field names the pair, as the type of Config.dailyCapUsd does.
   const field = CONFIG_SCHEMA.find((candidate) => candidate.name === "dailyCapUsd");
   assert.equal(field?.type, "number | { normal: number; squeezed: number } | null");
+});
+
+test("W1-T12186 criterion 6: with a pair, the cash trial budgets from the normal figure", () => {
+  const today = "2026-11-10";
+  const trialConfig = (dailyCapUsd: unknown): Config => ({
+    ...withCap(dailyCapUsd),
+    workerProviders: { enabled: ["claude", "cash"], harnessCommitsImplement: true, cashTrial: { sharePercent: 100 } },
+  }) as unknown as Config;
+  // One cash run of the trial that opened a pull request and cost `usd` today.
+  const spent = (usd: number): Record<string, unknown>[] => [
+    { ts: `${today}T01:00:00Z`, run_id: "r1", step: "worker.assignment",
+      worker_assignment: { id: "a1", routing: { decision: { trial: CASH_TRIAL_ID, trialArm: "cash" } } } },
+    { ts: `${today}T01:30:00Z`, run_id: "r1", step: "implement.done", selection_assignment_id: "a1",
+      provider: "cash", billing_mode: "api", total_cost_usd: usd },
+    { ts: `${today}T02:00:00Z`, run_id: "r1", step: "verdict", verdict: "blocked_ci", pr_url: "https://example.test/pull/1" },
+  ];
+  const decide = (dailyCapUsd: unknown, rows: Record<string, unknown>[] = []) => decideCashTrial({
+    task: { id: "T-DOCS", type: "implement", risk: "low", files: ["docs/guide.md"] },
+    taskClass: "docs", config: trialConfig(dailyCapUsd), harnessCommits: true, stateDir: "/state", readRows: () => rows, today,
+  });
+  const pair = { normal: 10, squeezed: 50 };
+
+  const open = decide(pair);
+  assert.equal(open?.arm, "cash", `a pair is a cap that is set: ${open?.reason}`);
+
+  // The default share is 10%. That is $1 of the normal figure and $5 of the squeezed figure.
+  const overNormal = decide(pair, spent(2));
+  assert.equal(overNormal?.arm, "held");
+  assert.match(overNormal!.reason, /trial budget spent today \(\$2\.00 of \$1\.00\)/);
+  assert.equal(decide(pair, spent(0.5))?.arm, "cash", "spend below the share of the normal figure keeps the trial open");
+
+  // A plain number and an absent cap keep their answers.
+  assert.equal(decide(25, spent(2))?.arm, "cash");
+  assert.match(decide(undefined)!.reason, /dailyCapUsd is unset/);
+  assert.match(decide(null)!.reason, /dailyCapUsd is unset/);
+  assert.match(decide(-1)!.reason, /invalid/);
+
+  // A pair that the provider refuses holds the trial. Nothing is thrown.
+  const inverted = decide({ normal: 50, squeezed: 10 });
+  assert.equal(inverted?.arm, "held");
+  assert.match(inverted!.reason, /dailyCapUsd is invalid for a paid trial: .*squeezed/);
 });
