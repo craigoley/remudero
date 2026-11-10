@@ -540,3 +540,39 @@ test("W1-T11170 criterion 5: the production effects wire the ownership reader, t
   assert.equal(pushed.outcome, "pushed", String(pushed.reason));
   assert.deepEqual(s.origin.git("rev-list", "--parents", "-1", s.remoteHead()).split(" "), [s.remoteHead(), s.headSha, s.mainSha]);
 });
+
+test("W1-T11170 criterion 5: a throwing ownership re-read or a write that is not a merge commit pushes nothing, and a failed comment never stops the pass", async (t) => {
+  const s = conflictRepo(t, "run-unfiled-1793649420010", { [SHARD]: LINES }, { [SHARD]: redundantChange() });
+  const threw = await withLiveWritesAllowed(() => sweep.regenerateConflictViaGit(s.repo.dir, join(s.repo.dir, "..", `res-${process.pid}-g`),
+    { prNumber: 6, headRefName: s.branch, headSha: s.headSha }, s.mainSha,
+    { git: s.git, mode: "owned", owned: { kind: "session", recheck: () => { throw new Error("lock directory unreadable"); } } }));
+  assert.equal(threw.outcome, "lease-mismatch");
+  assert.match(String(threw.reason), /the ownership re-read failed: .*lock directory unreadable/);
+  // A write whose commit is not a two-parent merge on the PR head is refused before any ownership read or push.
+  let rechecked = false;
+  const single = await withLiveWritesAllowed(() => sweep.regenerateConflictViaGit(s.repo.dir, join(s.repo.dir, "..", `res-${process.pid}-h`),
+    { prNumber: 6, headRefName: s.branch, headSha: s.headSha }, s.mainSha, { mode: "owned",
+      git: (cwd, args) => args[0] === "rev-list" && args[1] === "--parents" ? `${"f".repeat(40)} ${s.headSha}\n` : s.git(cwd, args),
+      owned: { kind: "session", recheck: () => { rechecked = true; return undefined; } } }));
+  assert.equal(single.outcome, "error");
+  assert.match(String(single.reason), /not a merge commit/);
+  assert.equal(rechecked, false);
+  assert.deepEqual(s.pushes, []);
+  assert.equal(s.remoteHead(), s.headSha);
+
+  // A comment writer that throws is logged; the deterministic write and the worker round still stand.
+  const logged: string[] = [];
+  const d = conflictRepo(t, "backlog-garden-1793547598491", { [SHARD]: LINES, "src/x.ts": LINES }, { [SHARD]: redundantChange() });
+  const h = harness(d.mainSha, { facts: fleetFacts, repo: { dir: d.repo.dir, git: d.git } });
+  h.deps.postConflictComment = () => { throw new Error("gh refused"); };
+  h.deps.log = (step) => { logged.push(step); };
+  await h.run(view(16400, d.branch, d.headSha, [SHARD], { isPlanFiling: true }));
+  assert.equal(h.rows("sweep.conflict_regenerated")[0]?.outcome, "pushed");
+  const w = conflictRepo(t, "review-replay-garden-1793300871630", { "src/x.ts": LINES }, { "src/x.ts": genuineChange() });
+  const k = harness(w.mainSha, { facts: fleetFacts, repo: { dir: w.repo.dir, git: w.git } });
+  k.deps.postConflictComment = () => { throw new Error("gh refused"); };
+  k.deps.log = (step) => { logged.push(step); };
+  await k.run(view(16401, w.branch, w.headSha, ["src/x.ts"]));
+  assert.equal(k.calls.dispatch.length, 1);
+  assert.equal(logged.filter((step) => step === "sweep.owned_conflict.comment_failed").length, 2);
+});
