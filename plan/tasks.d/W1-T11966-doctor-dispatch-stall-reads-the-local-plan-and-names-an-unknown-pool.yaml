@@ -1,0 +1,89 @@
+- id: W1-T11966
+  title: "`rmd doctor`'s dispatch-stall reads a false zero — the production CLI never loads the plan, so deriveQueueHead returns rows=[] with unknownReason \"plan/tasks.yaml is unreadable\", doctor drops the reason and prints \"0 eligible candidate(s)\" OK; load the local plan with no network and render an unreadable or malformed plan as UNKNOWN, never as a measured zero"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19 merits test YES: one invariant (dispatch-stall reports the real pool or UNKNOWN) needs the doctorCommand plan read AND the doctor.ts judge's third state together; report-only
+  band_meaning: span
+  origin: architect
+  plan_refs: [W1-T1047, W1-T3628, W1-T1205]
+  files:
+    - src/lib/report-commands.ts
+    - src/lib/doctor.ts
+    - test/doctor-dispatch-stall-reads-the-local-plan.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ at this worktree's HEAD. src/run-task.ts registers the verb as
+    `["doctor", async (rest) => await doctorCommand(rest, { repoRoot })]`, with no `loadPlan`. In
+    src/lib/report-commands.ts `doctorCommand` does `const plan = deps.loadPlan ? deps.loadPlan() : undefined;`,
+    so the only way a plan reaches the stall check is the test-injection seam. `deriveQueueHead`
+    (src/lib/status-board.ts) bails on `!plan` and returns `{ rows: [], unknownReason: "plan/tasks.yaml is unreadable" }`.
+    doctorCommand passes only `candidateCount: head.rows.length` into buildDoctorReport and drops unknownReason.
+    `judgeDispatchStall(0, ...)` then returns OK "0 eligible candidate(s)". So on every production host the
+    dispatch-stall arm, the check W1-T1047 built to catch "eligible work, nothing dispatched", can only ever say
+    OK. This is the same class W1-T3628 fixed for lane-less-workers: the judge is correct and unit-tested, but the
+    one line feeding it is a constant. A pure-function test cannot reach that seam.
+    ORIGIN: found while diagnosing PR #17348 follow-ups. The operator asked to keep it separate from the four
+    existing follow-up tasks. The #17348-linked shards found by lookup (W1-T11849, W1-T11850, W1-T11851,
+    W1-T11781, W1-T11755) touch none of this task's files and none of them names doctor.
+    Settled by lookup: is this already filed? -> no. No plan shard or monolith task names doctor with loadPlan,
+      unknownReason, candidateCount or an unreadable plan. W1-T1047 (merged) built the arm. W1-T11810 (queued)
+      adds an unrelated test-slot-holds check in the same two files.
+    Settled by lookup: where is the local plan, and how do sibling verbs load it with no network? ->
+      `loadPlan(resolveRepoLayout(repoDir).planMonolith)`, the read `rmd case-file` already uses in
+      report-commands.ts. loadPlan merges plan/tasks.d shards beside the monolith (W1-T122, plan/claims.yaml).
+    Settled by lookup: may doctor touch the network? -> no. doctor.ts module header: "no network (every reader
+      touches the ledger, state/, plan/, /proc or ps, never gh)". So origin sync / syncPlanFromOrigin is out.
+    Settled by lookup: how should an unreadable input render? -> as a stated UNKNOWN WARN, never OK. Precedents:
+      judgeLockDivergence's unreadableReason, judgeLaneLessWorkers's "worker count UNKNOWN" (W1-T3628) and
+      judgeCheckoutDepth's "unreadable" arm, all in src/lib/doctor.ts.
+    Settled by lookup: may this change eligibility, or gate dispatch or capacity on doctor? -> no. Doctor is
+      report-only (W1-T1047 refusals; `--fix` refused). runnableCandidates' eligible set is W1-T1205's contract.
+      The operator's initiative explicitly excludes both.
+  design: |
+    1. LOAD THE LOCAL PLAN IN THE CLI PATH. When `deps.loadPlan` is not injected, doctorCommand reads
+       `loadPlan(resolveRepoLayout(repoDir).planMonolith)` from the checkout. No git fetch, no gh, no origin sync.
+       Wrap it in a try/catch that yields either a Plan or a stated reason: a missing file (ENOENT via
+       classifyReadFailure), a YAML parse error, or a loadPlan validation throw such as a duplicate id. A
+       malformed plan is a reason, never a crash and never an empty plan. The injected `loadPlan` seam keeps
+       working, and an injected `undefined` keeps meaning "unreadable".
+    2. CARRY THE UNKNOWN THROUGH. Add an optional `candidatesUnknownReason` to DoctorInputs. doctorCommand sets it
+       from the plan-read reason, or from `head.unknownReason` when deriveQueueHead reports one. judgeDispatchStall
+       gains a trailing optional `unknownReason` parameter. When it is set, the check is WARN with measured
+       "eligible pool UNKNOWN — <reason>" and a detail saying not to read this as an empty queue. A measured zero
+       stays OK "0 eligible candidate(s)", exactly as today.
+    3. EXPLICITLY NOT IN SCOPE: runnableCandidates or any eligibility predicate; the queue-head `limit` of 5;
+       using doctor's verdict as a dispatch, capacity or admission gate; any network read.
+    4. TESTS, in the new file, using a temp fixture repo:
+       (a) THROUGH THE REAL CLI WIRING: call doctorCommand with exactly the deps run-task.ts passes, `{ repoRoot }`
+           plus readers for unrelated I/O only (ledger, meminfo, ps, disk), and NO `loadPlan`. A fixture plan with
+           one eligible queued task and a stale dispatch ledger yields a dispatch-stall line naming 1 eligible,
+           not "0 eligible".
+       (b) an absent plan/tasks.yaml yields WARN "eligible pool UNKNOWN" and never OK "0 eligible";
+       (c) a malformed plan (unparseable YAML, or a duplicate id loadPlan refuses) yields the same UNKNOWN with its
+           reason, and the command still prints a full report and exits by worst verdict;
+       (d) a readable plan with zero eligible tasks still yields OK "0 eligible candidate(s)";
+       (e) judgeDispatchStall with an unknownReason is WARN whatever the count, and is byte-identical on a repeat call.
+  acceptance:
+    - claim: "through the CLI's own deps (repoRoot only, no injected loadPlan) doctor counts the fixture plan's eligible task instead of reporting 0"
+      proof: "unit test: test/doctor-dispatch-stall-reads-the-local-plan.test.ts"
+    - claim: "an absent or malformed plan renders dispatch-stall as WARN eligible pool UNKNOWN with its reason, never OK 0 eligible, and a readable empty pool stays OK"
+      proof: "unit test: test/doctor-dispatch-stall-reads-the-local-plan.test.ts"
+    - claim: "doctorCommand passes the plan-read reason into the doctor report"
+      proof: "grep: candidatesUnknownReason in src/lib/report-commands.ts"
+    - claim: "the dispatch-stall judge names an unknown pool distinctly from a measured zero"
+      proof: "grep: eligible pool UNKNOWN in src/lib/doctor.ts"
+  falsifier: |
+    At HEAD, test (a) fails: the CLI deps carry no loadPlan, so deriveQueueHead returns rows=[] and doctor prints
+    "0 eligible candidate(s)". Test (b) fails at HEAD because it reads OK. If a later change drops the default plan
+    read, (a) goes red. If it drops the reason, (b) and (c) go red and the candidatesUnknownReason grep misses.
+  note: "verify:auto. Every state is reachable from a temp fixture repo and an injected ledger, with no daemon and no
+    network. Budget is small because the logic is one guarded read plus a third judge state; most of the cost is
+    the fixture plan in test (a). Overlaps W1-T11810 on src/lib/doctor.ts and src/lib/report-commands.ts. That
+    serialises the two at dispatch, which is correct for two edits to the same doctorCommand gather. Neither
+    depends on the other."
