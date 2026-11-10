@@ -11521,6 +11521,29 @@ export function lastPendingReviewStatusFromLedger(
   return prior;
 }
 
+/** W1-T11930: #17494's remudero-review history held 8 stale-claim takeovers between 17:05Z and 22:08Z on 2026-11-09 and
+ *  no verdict from any of them; each posted a correct status and nothing counted them. A takeover's
+ *  `review.pending_posted` row names the run it replaced (`took_over_run_id`), so this returns the takeovers of one
+ *  input recorded since its last `review.posted` row. Rule: a verdict row for the input starts the count again, and a
+ *  row for another head, body or PR never counts. Without a PR url and input digest the input is the key and head. */
+function priorReviewClaimTakeovers(
+  lines: ReadonlyArray<Record<string, unknown>>,
+  input: { taskId: string; sha: string; prUrl?: string; reviewInputDigest?: string },
+): number {
+  const identified = input.prUrl !== undefined && input.reviewInputDigest !== undefined;
+  let takeovers = 0;
+  for (const line of lines) {
+    if (line.step !== "review.posted" && line.step !== "review.pending_posted") continue;
+    if (line.head_sha !== input.sha) continue;
+    if (identified
+      ? !reviewRowNamesPr(line, input.taskId, input.prUrl!) || line.review_input_digest !== input.reviewInputDigest
+      : line.task_id !== input.taskId) continue;
+    if (line.step === "review.posted") takeovers = 0;
+    else if (typeof line.took_over_run_id === "string") takeovers++;
+  }
+  return takeovers;
+}
+
 export type PendingReviewOwnerAssessment = "active" | "dead" | "unknown";
 
 export interface AssessPendingReviewOwnerOpts extends IsHolderStaleOpts {
@@ -12598,7 +12621,25 @@ export async function postReviewPending(opts: PostReviewPendingOpts): Promise<Po
       ...(opts.prUrl !== undefined ? { pr_url: opts.prUrl } : {}),
       ...(opts.reviewInputDigest !== undefined ? { review_input_digest: opts.reviewInputDigest } : {}),
       ...(opts.reviewEngineRevision !== undefined ? { review_engine_revision: opts.reviewEngineRevision } : {}),
+      // W1-T11930: the claim row of a takeover names the run it replaced; the next takeover of this input counts it.
+      ...(takenOverFrom ? { took_over_run_id: takenOverFrom.runId } : {}),
     });
+    // W1-T11930: COUNT ONLY. The status above is already posted and nothing here is read back to admit, hold or
+    // escalate a review. `lines` was read before this claim, so it holds the prior takeovers and not this one.
+    const takeovers = takenOverFrom ? priorReviewClaimTakeovers(lines, { ...opts }) + 1 : 0;
+    if (takenOverFrom && takeovers > 1) {
+      appendLedger(opts.ledgerPath, {
+        run_id: opts.runId,
+        task_id: opts.taskId,
+        step: "review.claim_repeated",
+        input_key: `${opts.prUrl ?? opts.taskId}@${opts.sha}${opts.reviewInputDigest !== undefined ? `#${opts.reviewInputDigest}` : ""}`,
+        head_sha: opts.sha,
+        takeovers,
+        took_over_run_id: takenOverFrom.runId,
+        // The PR is named by `input_key` alone: a row carrying its own PR-url field can be read as a run's first PR row.
+        ...(opts.reviewInputDigest !== undefined ? { review_input_digest: opts.reviewInputDigest } : {}),
+      });
+    }
   }
   return result;
 }
