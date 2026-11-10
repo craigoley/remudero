@@ -1205,12 +1205,15 @@ import {
   type PlanPrPreflightResult,
   ensureJudgeableBody,
   filingAcceptanceCriteria,
+  parseDiffLines,
+  planPrAcceptanceCriteria,
   probeExistingPlanPr,
   ratifyPrCreateRestArgs,
   ratifyPrProbeRestArgs,
   reconcileRetroChangesetClaim,
   renderAcceptanceBlock,
   replaceAcceptanceBlock,
+  safeAddedLineProof,
   type PlanPrBodyOpts,
 } from "./lib/plan-pr-emitter.js";
 import {
@@ -1424,7 +1427,6 @@ import type { DuplicateCorpusEntry } from "./lib/knowledge-dedup.js";
 import {
   addedExportsFromPatch,
   assertLintClean,
-  breMetacharsIn,
   changedTaskIds,
   rawChangedTaskIds,
   statusFlipOnlyTaskIds,
@@ -5678,55 +5680,17 @@ function addedTestCriterion(path: string): AcceptanceCriterion {
 export const DIFF_ANCHOR_UNAVAILABLE_STEP = "acceptance.fallback.diff_anchor_unavailable";
 export type DiffAnchorUnavailableReason = "no-diff" | "unparseable" | "no-safe-candidate";
 export type DiffAnchor = { kind: "anchored"; path: string; line: string; proof: string } | { kind: "unavailable"; reason: DiffAnchorUnavailableReason };
-const DIFF_ANCHOR_MIN_LENGTH = 8;
 const DIFF_ANCHOR_CLAIM_SUFFIX = "; its proof greps a line this PR's own diff adds, not a fixed pre-existing symbol";
-
-function escapeGrepLiteral(line: string): string {
-  let escaped = "";
-  for (const ch of line) {
-    if (ch === "\\") escaped += "\\\\";
-    else if (ch === "?") escaped += "[?]";
-    else if (".[]*^$".includes(ch)) escaped += `\\${ch}`;
-    else escaped += ch;
-  }
-  return escaped;
-}
 
 /** The first ADDED line of a unified diff (`git diff` or `gh pr diff`) that yields a grep proof the reviewer can run
  *  and that cannot already match at the merge base. A line the same diff also REMOVES is a move, so it is skipped. */
 export function diffAnchor(diffText: string | undefined): DiffAnchor {
   if (diffText === undefined || diffText.trim() === "") return { kind: "unavailable", reason: "no-diff" };
-  const added: Array<{ path: string; line: string }> = [];
-  const removed = new Set<string>();
-  let file: string | undefined;
-  let sawHeader = false;
-  for (const raw of diffText.split("\n").map((l) => l.replace(/\r$/, ""))) {
-    if (raw.startsWith("diff --git ")) {
-      file = undefined;
-      continue;
-    }
-    if (raw.startsWith("+++ ")) {
-      sawHeader = true;
-      const path = raw.slice(4).replace(/^b\//, "").trim();
-      file = path === "/dev/null" ? undefined : path;
-      continue;
-    }
-    if (raw.startsWith("--- ")) continue;
-    if (raw.startsWith("-")) removed.add(raw.slice(1).trim());
-    else if (file && raw.startsWith("+")) added.push({ path: file, line: raw.slice(1).trim() });
-  }
+  const { sawHeader, added, removed } = parseDiffLines(diffText);
   if (!sawHeader) return { kind: "unavailable", reason: "unparseable" };
   for (const { path, line } of added) {
-    if (line.length < DIFF_ANCHOR_MIN_LENGTH || removed.has(line) || /\sin\s/i.test(line)) continue;
-    if (!/\.[^/]+$/.test(path) || /\s/.test(path) || path.includes("..")) continue;
-    const pattern = escapeGrepLiteral(line);
-    const proof = `grep: ${pattern} in ${path}`;
-    if (parseWhitelistedProof(proof) === null || breMetacharsIn(pattern).blocking.length > 0) continue;
-    if (wrappedGrepPattern(proof) !== undefined) continue;
-    // The proof must survive the block it is written into, verbatim.
-    const roundTrip = parseAcceptanceBlock(renderAcceptanceBlock([{ claim: "anchor", proof }]));
-    if (roundTrip.length !== 1 || roundTrip[0].proof !== proof) continue;
-    return { kind: "anchored", path, line, proof };
+    const proof = safeAddedLineProof(path, line, removed);
+    if (proof !== undefined) return { kind: "anchored", path, line, proof };
   }
   return { kind: "unavailable", reason: "no-safe-candidate" };
 }
@@ -35482,12 +35446,23 @@ export async function planCommand(
       .split("\n")
       .map((line) => line.trim())
       .filter(Boolean);
-    const planPrBody = buildPlanPrBody({
-      intro: `rmd plan --mode=${mode} proposed plan-only changes.\n\nOperator brief\n\n${brief || "(none — whole-plan scope)"}`,
-      criteria: filingAcceptanceCriteria(reservedIds, planPrFiles),
-      changedFiles: planPrFiles,
-      proofCwd: worktreePath,
-    });
+    // W1-T11625: an amendment of an EXISTING shard carries a proof of an added line, or no PR opens. Both the
+    // producer's "nothing derivable" throw and buildPlanPrBody's author-time refusal land BEFORE the push.
+    let planPrBody: string;
+    try {
+      planPrBody = buildPlanPrBody({
+        intro: `rmd plan --mode=${mode} proposed plan-only changes.\n\nOperator brief\n\n${brief || "(none — whole-plan scope)"}`,
+        criteria: planPrAcceptanceCriteria(reservedIds, planPrFiles, diffSinceMergeBase(worktreePath), worktreePath),
+        changedFiles: planPrFiles,
+        proofCwd: worktreePath,
+      });
+    } catch (err) {
+      const reason = String((err as Error)?.message ?? err);
+      log("plan.error", { error: reason, changed_files: planPrFiles });
+      say(`plan PR not opened — ${reason}`);
+      worktreeRemove(repoDir, worktreePath);
+      return 1;
+    }
     planPushed = "unknown"; // W1-T9488: a push that throws leaves the branch's ids unknowable
     await gitPushRunBranchAsync(worktreePath);
     planPushed = pushedBranchIds(worktreePath, log);
