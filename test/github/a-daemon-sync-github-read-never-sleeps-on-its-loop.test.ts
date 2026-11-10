@@ -47,27 +47,34 @@ test("W1-T11458 criterion 1: a marked loop refuses a pending gap without sleepin
 test("W1-T11458 criterion 1: loop pacers constructed before boot refuse wait and refusal-backoff sleeps", async () => {
   let now = 0;
   const waits: number[] = [];
-  const pacer = transport.createGhCallPacer({ minGapMs: 100, now: () => now, sleepSync: (ms) => { waits.push(ms); now += ms; } });
+  const pacer = transport.createGhCallPacer({ minGapMs: 100, rateLimitGapMs: 300, now: () => now, sleepSync: (ms) => { waits.push(ms); now += ms; } });
   pacer.wait();
+  pacer.recordResult(true);
   await transport.withDaemonGhTransportFloor(() => {
     assert.throws(() => pacer.wait(), transport.GhPaceWouldBlockError, "pre-existing pacer must observe loop context at invocation");
     assert.throws(() => pacer.sleepSync!(100), transport.GhPaceWouldBlockError, "refusal backoff must not bypass the loop guard");
     assert.deepEqual(waits, []);
+    // W1-T12057: a wait at or under the pacer's normal gap is slept on the loop.
+    now = 200;
+    pacer.wait();
+    assert.deepEqual(waits, [100]);
   }, {});
+  pacer.recordResult(false);
   pacer.wait();
-  assert.deepEqual(waits, [100]);
+  assert.deepEqual(waits, [100, 100]);
 });
 
-test("W1-T11458 criterion 1: lock contention refusal propagates instead of failing open into a stamped read", async () => {
+// W1-T12057: a lock wait is now slept on the loop, inside the lock's own total bound.
+test("W1-T11458 criterion 1: a loop lock wait is slept until the holder releases, then the read is made", async () => {
   const c = cache();
   const lock = `${c.stamp}.lock`;
   mkdirSync(lock);
   try {
     const deps = { ...c.deps, env: { ...c.env, RMD_GH_SHARED_READ_GAP_MS: "0" }, sleepSync: (ms: number) => { c.waits.push(ms); rmSync(lock, { recursive: true }); } };
     await transport.withDaemonGhTransportFloor(() => {
-      assert.throws(() => transport.applyGhReadCadence(read, deps), transport.GhPaceWouldBlockError, "lock wait must not be swallowed by fail-open IO handling");
-      assert.deepEqual(c.waits, []);
-      assert.equal(existsSync(lock), true, "foreign lock remains owned by its holder");
+      assert.equal(transport.applyGhReadCadence(read, deps).allow, true, "the read is made once the holder releases");
+      assert.equal(c.waits.length, 1, "one lock wait is slept");
+      assert.equal(existsSync(lock), false, "the read releases the lock it took");
     }, c.env);
   } finally { rmSync(c.root, { recursive: true, force: true }); }
 });

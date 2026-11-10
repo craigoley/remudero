@@ -1,0 +1,104 @@
+- id: W1-T12080
+  title: "Measure why the root-helper codemod rule suite is slow — time each nested run of scripts/test-repo-root-codemod.mjs, count the tracked test files, and record wall and CPU time, host load, test-slot wait and hold, and exit or timeout. Do this once on unchanged main and once on a candidate head, and give each run one outcome: NOT_RUN, time-bound or source failure"
+  repo: remudero
+  depends_on: []
+  type: recon
+  verify: auto
+  budget_usd: 6.00
+  risk: medium  # runs the real suite on the shared host and takes one ordinary test slot per run; edits no source, test, script or gate
+  band_meaning: blast-radius
+  origin: architect
+  plan_refs: [W1-T9863, W1-T10242, W1-T11811]
+  files:
+    - docs/forensics/root-helper-codemod-suite-timing.md
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    test/every-test-finds-the-repo-root-through-one-helper.test.ts is the W1-T9863 guard. Most of its cost comes from
+    parsing every tracked test file with SWC, again and again:
+    - sourcesAtBase() runs once in each of two tests, and so does currentSources(). Both parse the whole tree through
+      analyzeSource().
+    - The CLI test spawns `node scripts/test-repo-root-codemod.mjs` three times, each with timeout: 120_000:
+      - two dry-runs, each of which re-parses every file returned by testFiles();
+      - one `--bogus` run, which should exit before it parses anything.
+    Fast-preflight reports name this suite under `rule-checks`. Those runs took 631 s, 761 s and 869 s:
+    docs/forensics/serve-non-heap-rss-growth.md, docs/forensics/a-declared-test-directory-and-the-fix-rung-scope-check.md
+    and docs/forensics/storage-permission-fixtures-on-the-azure-host.md. In each one the suite never measured anything,
+    because it failed while loading SWC (ERR_SWC_NATIVE_CACHE). That is the NOT_RUN case this task must keep separate
+    from a slow run or a real failure. Today nobody can tell, for a red or slow result here, whether:
+    - the suite did not run;
+    - it was cut off by a timeout or a slot wait;
+    - or the source under test is wrong.
+    Any remedy (fewer nested spawns, a shared parse, a different tier) would be a guess until this is measured.
+    Settled by lookup: is this already filed or decided? -> no. W1-T9863 (merged) built the suite and the codemod and
+    names no timing budget. W1-T10242 is the retired coverage-ratchet friction cause. It only cites uncovered codemod
+    lines, not suite time. No plan/tasks.d shard, MASTER-PLAN.md, LEARNINGS.md or DECISIONS.md entry covers suite timing
+    for this file (grep for test-repo-root-codemod and codemod).
+    Settled by lookup: how many nested executions does the suite make? -> three spawns of the codemod CLI in
+    "the codemod CLI reports a dry-run census of the real tree and refuses unknown arguments", plus in-process
+    full-tree parses in two other tests (test/every-test-finds-the-repo-root-through-one-helper.test.ts). The report
+    must re-derive this count from the file at the measured head and not copy it from here.
+    Settled by lookup: where do test-slot wait and hold come from? -> the `test_slot.acquired` row and
+    hold-history.ndjson `{label, heldMs, concurrency, endedAt}` (src/lib/test-slot.ts, src/lib/test-slot-queue.ts).
+    The slot is taken through scripts/test-run.mjs, which is the `npm test` entry (package.json).
+    Settled by lookup: where does the evidence go? -> docs/forensics/, the same as the W1-T11811 native-verification
+    report.
+  design: |
+    BOUNDED: exactly two suite runs, one control and one candidate, and each nested argv once directly. The whole
+    task has a 30-minute wall-clock cap. Edit nothing under src/, test/, scripts/, .github/ or plan/. Do not retry a run
+    to get a better number: a second attempt is reported as a second row, and never replaces the first.
+    Remove the scratch worktrees after the report is written.
+    1. HEADS.
+       - CONTROL: a detached scratch worktree at the current origin/main SHA, with no changes.
+       - CANDIDATE: the newest PR head whose preflight receipt or CI log names this suite slow, failing or timed out,
+         found from preflight receipts or the ledger.
+       - If no such head can be found, the candidate row is NOT_RUN and the report names every source that was
+         searched.
+       - Record both SHAs and the merge base.
+    2. POPULATION. For each head, record:
+       - the tracked test-file count from `git ls-files -- test`, filtered the way the suite filters it (`*.test.ts`,
+         excluding test/helpers, test/setup, test/lib and test/fixtures);
+       - testFiles(REPO_ROOT)'s count;
+       - the untracked count.
+       If the two counts differ, flag the head.
+    3. NESTED EXECUTIONS. Count the codemod spawns, and the in-process full-tree parses, in the suite's source at each
+       head. Then run each spawned argv (`[]`, `[]`, `["--bogus"]`) once directly, with the suite's cwd and its 120 s
+       timeout, under `/usr/bin/time -v` (or `process.resourceUsage()` when GNU time is missing, saying which). For
+       each one, record:
+       - wall time;
+       - user and system CPU time;
+       - max RSS;
+       - exit status or signal, and whether the 120 s timeout fired.
+    4. SUITE RUN. Run the suite file once per head through the normal slot-taking entry (scripts/test-run.mjs). Record:
+       - test-slot wait, from enqueue to `test_slot.acquired`;
+       - hold (`heldMs`) and the admission inputs from the acquired row;
+       - per-test duration_ms from the TAP output;
+       - total wall and CPU time;
+       - exit status.
+    5. HOST LOAD. Before and after every run in steps 3 and 4, record /proc/loadavg, nproc, MemAvailable and the number
+       of live test-slot holders.
+    6. CLASSIFY every row as exactly one of:
+       - NOT_RUN: the work never reached the code under test. Examples: no slot within the cap, a missing origin/main
+         ref, a refused SWC native binding (ERR_SWC_NATIVE_CACHE), or a host refusal. Give the reason verbatim.
+       - time-bound: a timer or the cap stopped the run (the 120 s spawn timeout, the runner's file timeout, or the
+         30-minute cap). Give the CPU/wall ratio and load, so a CPU-starved run can be told apart from a CPU-busy one.
+       - source failure: the run finished inside its bound and an assertion or exit code failed. Name the assertion,
+         and say whether the control reproduces it (inherited) or only the candidate does.
+       A row with no observation is NOT_RUN. It is never inferred to have passed.
+  acceptance:
+    - claim: "the report records the nested codemod executions and the tracked test-file count for each head"
+      proof: "grep: Nested codemod executions and tracked population in docs/forensics/root-helper-codemod-suite-timing.md"
+    - claim: "the report records per-invocation wall and CPU time, host load, test-slot wait and hold, and exit or timeout for the unchanged-main control"
+      proof: "grep: Control run on unchanged main in docs/forensics/root-helper-codemod-suite-timing.md"
+    - claim: "the report records the same measurements for one candidate head, or NOT_RUN with the sources searched"
+      proof: "grep: Candidate run in docs/forensics/root-helper-codemod-suite-timing.md"
+    - claim: "every run is classified as exactly one of NOT_RUN, time-bound or source failure"
+      proof: "grep: Outcome classification: NOT_RUN, time-bound or source failure in docs/forensics/root-helper-codemod-suite-timing.md"
+  falsifier: |
+    The slow hypothesis is wrong if, on the control, each codemod dry-run finishes far inside its 120 s timeout and the
+    suite's hold is a small share of the reported rule-checks wall time. The time then belongs to slot wait, host load
+    or other suites, not to this file.
+    The classification is unsound if a NOT_RUN row (for example ERR_SWC_NATIVE_CACHE) ends up labelled time-bound or
+    source failure, or if the control and candidate rows come from different hosts or load windows and are compared as
+    if they did not.

@@ -752,6 +752,12 @@
       "grepHint": "wipe-test.ts forensics"
     },
     {
+      "path": "docs/forensics/worker-bash-snapshot-isolation-on-azure.md",
+      "title": "Worker bash-snapshot isolation on the Azure host",
+      "summary": "Record for W1-T11909. It is read-only evidence: no source, test, probe, wrapper-list or host file was",
+      "grepHint": "Worker bash-snapshot isolation on the Azure host"
+    },
+    {
       "path": "docs/forensics/worker-branch-shape.md",
       "title": "worker-branch-shape.mjs comment forensics",
       "summary": "The measured incidents, design arguments and rejected alternatives that were removed from",

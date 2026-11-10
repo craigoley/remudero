@@ -24,7 +24,7 @@
     - src/lib/config-schema.ts
     - docs/dependency-seed-command-reuse.md
     - docs/docs-index.json
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: The operator requested durable plan custody of the remaining approved
