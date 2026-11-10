@@ -1,0 +1,41 @@
+- id: W1-T12167
+  title: "A census reader with a full history runs once under its history budget by default"
+  repo: remudero
+  depends_on: []
+  priority: 1.4
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: medium # one script; the fallback to today's two runs stays for every doubt
+  origin: operator-session#follow-ups-2026-11-10
+  plan_refs:
+    - W1-T11100
+    - W1-T10332
+  files:
+    - scripts/census-precheck.mjs
+    - test/ci/a-reader-with-a-full-history-runs-once-under-its-history-budget.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "With no setting, a reader whose history holds the full number of measurements runs once under its history budget"
+      proof: "grep: W1-T12167 criterion 1 in test/ci/a-reader-with-a-full-history-runs-once-under-its-history-budget.test.ts"
+    - claim: "A reader with a shorter history, or with none, calibrates and qualifies as today"
+      proof: "grep: W1-T12167 criterion 2 in test/ci/a-reader-with-a-full-history-runs-once-under-its-history-budget.test.ts"
+    - claim: "A run that passes its history budget falls back to the two runs of today, and the output names the reason"
+      proof: "grep: W1-T12167 criterion 3 in test/ci/a-reader-with-a-full-history-runs-once-under-its-history-budget.test.ts"
+    - claim: "The setting can still select the shadow mode, in which the history only reports what it would do"
+      proof: "grep: W1-T12167 criterion 4 in test/ci/a-reader-with-a-full-history-runs-once-under-its-history-budget.test.ts"
+  rationale: |
+    MEASURED 2026-11-10 from 35 preflight logs of the ship pipeline on the Mac agent account: the history shadow of W1-T11100 said "would fit" in 42 of 42 reports.
+    - The 42 reports cover 6 reader files. In total the history budget would have saved 148.5 seconds. The median saving is 1.7 seconds for each report.
+    - W1-T11100 shipped the history budget in shadow first. `CENSUS_READER_HISTORY_ENV` in scripts/census-precheck.mjs must be set to "act" before a reader uses it, and nothing sets it.
+    - The saving on a quiet Mac is small. On a busy host a reader's two runs take longer, and the census precheck can end as "not measured" at its time limit. That case was not measured for this filing.
+  design: |
+    In scripts/census-precheck.mjs, make "act" the default mode when the reader's history holds `CENSUS_READER_HISTORY_WINDOW` measurements, which is 9. Keep "shadow" as a value of the setting.
+    Change nothing in the fallback: an overrun, a failed assertion or changed inputs lead to the calibrate-then-qualify path, as the act mode does today.
+    NOT IN SCOPE: the 120 second limit for the census suite children, and the width at which they run (W1-T11220).
+  falsifier: |
+    Use the history budget with fewer than 9 measurements and criterion 2 must fail. Accept a run that passed its budget and criterion 3 must fail. Restore and require all four to pass.
+  note: |
+    The builder first collects the shadow reports from the Azure host and states the count that would fit. If any report says the history would not fit, the builder stops and reports it.

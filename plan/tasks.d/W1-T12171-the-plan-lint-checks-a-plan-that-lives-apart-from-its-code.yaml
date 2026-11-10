@@ -1,0 +1,51 @@
+- id: W1-T12171
+  title: "The plan lint checks a plan that lives in a different repository from its code"
+  repo: remudero
+  depends_on: []
+  priority: 1.2
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the lint that admits every task file; without the new option its result must not change
+  band_meaning: blast-radius
+  origin: operator-session#follow-ups-2026-11-10
+  plan_refs:
+    - W1-T11768
+    - W1-T11769
+    - W1-T11770
+  files:
+    - src/run-task.ts
+    - src/lib/task-linter.ts
+    - test/plan/the-plan-lint-checks-a-plan-that-lives-apart-from-its-code.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "With the option --code-root, the lint reads the plan from the plan repository and resolves the paths in files, in proofs and in call-site criteria in the code root"
+      proof: "grep: W1-T12171 criterion 1 in test/plan/the-plan-lint-checks-a-plan-that-lives-apart-from-its-code.test.ts"
+    - claim: "With the option, the base of the comparison is the union of the base plan in the plan repository and the plan in the code root. An id in either one is known, and a dependency on either one resolves"
+      proof: "grep: W1-T12171 criterion 2 in test/plan/the-plan-lint-checks-a-plan-that-lives-apart-from-its-code.test.ts"
+    - claim: "A task file whose bytes equal the file at the same path in the code root's plan is a moved task. The lint does not judge it as a new filing or as an amendment"
+      proof: "grep: W1-T12171 criterion 3 in test/plan/the-plan-lint-checks-a-plan-that-lives-apart-from-its-code.test.ts"
+    - claim: "A task file that differs by one byte from the file in the code root's plan is judged as an amendment and gets every check"
+      proof: "grep: W1-T12171 criterion 4 in test/plan/the-plan-lint-checks-a-plan-that-lives-apart-from-its-code.test.ts"
+    - claim: "An id that both plans hold with different bytes is refused, and the message names both paths"
+      proof: "grep: W1-T12171 criterion 5 in test/plan/the-plan-lint-checks-a-plan-that-lives-apart-from-its-code.test.ts"
+    - claim: "Without the option, the output and the exit code are the same as today"
+      proof: "grep: W1-T12171 criterion 6 in test/plan/the-plan-lint-checks-a-plan-that-lives-apart-from-its-code.test.ts"
+  rationale: |
+    OBSERVED 2026-11-10 in the work to move task files to the private ops repository: the check in that repository cannot run the full plan lint.
+    - `lintPlanCommand` in src/run-task.ts takes --plan, --base and --repo-root. It expects the plan and the code in one checkout.
+    - A task file names source files, test files and call sites. In the ops repository none of those paths exist, so each such check would fail or be skipped.
+    - A task that moves keeps its id. Against a base that holds only the ops plan, every moved file looks like a new filing, and the rules for a new filing apply to it.
+    - Measured by the first version of the ops check: 781 live task files would need a repair before a move if they were judged as new filings. 749 of them lack `priority`.
+    - The ops catalog has a fixed layout, plan/tasks.yaml and plan/tasks.d/ (W1-T11768). The reader of that catalog exists. The lint for it does not.
+  design: |
+    Add `--code-root <dir>` to the options of `lintPlanCommand`. Pass the directory to every reader that resolves a path of a task: `moduleExists`, the proof targets and the diff for added exports.
+    Build the base plan from both sources and key it by id. Compare a changed task file with the code root's file at the same path, byte for byte, before any rule runs.
+    The code root is a checkout at one commit that the caller chose. The lint reads it and never fetches.
+    NOT IN SCOPE: the check in the ops repository that calls this, the move itself, and the repair of the 781 files.
+  falsifier: |
+    Resolve a path in the plan repository and criterion 1 must fail. Judge a moved file as a new filing and criterion 3 must fail. Pass a file with one changed byte as moved and criterion 4 must fail. Change the output without the option and criterion 6 must fail. Restore and require all six to pass.
+  note: |
+    The offline entry, scripts/lint-plan-offline.mjs, passes its arguments to `lintPlanCommand`, so it gets the option with no change of its own.

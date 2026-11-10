@@ -1,0 +1,47 @@
+- id: W1-T12166
+  title: "A second author preflight reuses the stages that passed on the same commit"
+  repo: remudero
+  depends_on: []
+  priority: 1.2
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the receipt that says a branch may be pushed; a reused stage must be one that really passed on these inputs
+  band_meaning: blast-radius
+  origin: operator-session#follow-ups-2026-11-10
+  plan_refs:
+    - W1-T11914
+    - W1-T11101
+    - W1-T11850
+    - W1-T9602
+  files:
+    - scripts/preflight-author.mjs
+    - test/ci/a-second-author-preflight-reuses-the-stages-that-passed-on-the-same-commit.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "A preflight finds the last receipt of the same checkout. It does not run again a stage that passed there when the head, the base, the Node version, the dependency record and the selection are the same"
+      proof: "grep: W1-T12166 criterion 1 in test/ci/a-second-author-preflight-reuses-the-stages-that-passed-on-the-same-commit.test.ts"
+    - claim: "The new receipt marks each reused stage as reused and names the time of the run that measured it"
+      proof: "grep: W1-T12166 criterion 2 in test/ci/a-second-author-preflight-reuses-the-stages-that-passed-on-the-same-commit.test.ts"
+    - claim: "A stage that failed, did not run or was not measured is never reused. The test stage is reused only when every selected suite ran and passed"
+      proof: "grep: W1-T12166 criterion 3 in test/ci/a-second-author-preflight-reuses-the-stages-that-passed-on-the-same-commit.test.ts"
+    - claim: "When one key field differs, or the last receipt is absent or does not parse, every stage runs"
+      proof: "grep: W1-T12166 criterion 4 in test/ci/a-second-author-preflight-reuses-the-stages-that-passed-on-the-same-commit.test.ts"
+    - claim: "The answer to whether the run may push is the same as for a run that measured every stage itself"
+      proof: "grep: W1-T12166 criterion 5 in test/ci/a-second-author-preflight-reuses-the-stages-that-passed-on-the-same-commit.test.ts"
+  rationale: |
+    MEASURED 2026-11-10 in the ship pipeline on the Mac agent account: 4 of 25 branches needed a second preflight on the same commit.
+    - The pipeline runs a second preflight when it finds that the host caused the failure: the failed tests pass when they run alone.
+    - The second preflight starts from nothing. It repeats the census precheck (25 to 30 seconds in three receipts of that day) and the static stage (171 to 225 seconds), although both passed.
+    - The receipt at coverage/preflight-author.json already records the head, the base, the Node version, the dependency record, the selection and each stage with its result.
+    - Other tasks cover other cases: W1-T11850 lets a preflight follow one that is still running, and W1-T11101 passes the census answer to the static stage inside one run. Neither covers a second run after a failure.
+  design: |
+    At the start of scripts/preflight-author.mjs, read the last receipt of the checkout before the new one replaces it.
+    Build the key from the fields the receipt already has. For each stage in order, reuse it when the key matches and the old stage has `ok: true` with no "not measured" mark.
+    Stop reusing at the first stage that cannot be reused: every later stage runs.
+    `authorPushEligibility` reads a reused stage as it reads a measured one. The receipt keeps the mark, so a reader can tell the two apart.
+    NOT IN SCOPE: a store of receipts shared by checkouts or hosts, and reuse between different commits.
+  falsifier: |
+    Reuse a failed stage and criterion 3 must fail. Reuse a stage after the base moved and criterion 4 must fail. Drop the mark and criterion 2 must fail. Restore and require all five to pass.
