@@ -11,7 +11,7 @@
   origin: "operator ask 2026-10-26: \"Why do we need a full 20GB? This feels very inefficient. Improve the disk usage efficiency\""
   plan_refs: [W1-T9953]
   files: [scripts/lib/mac-author-admission.mjs, scripts/lib/coverage-disk-profile.mjs, scripts/preflight-author.mjs, test/infra/the-author-disk-reserve-is-sized-to-its-workload.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

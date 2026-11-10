@@ -23,7 +23,7 @@
     - test/ci/author-context-compatibility.test.ts
     - test/infra/author-step-resources.test.ts
     - test/author-step-capture.test.ts
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: The operator requested durable plan custody of the remaining approved

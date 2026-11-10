@@ -1,0 +1,37 @@
+- id: W1-T12039
+  title: "A new task title is one sentence of 15 words or fewer"
+  repo: remudero
+  depends_on: [W1-T12038]
+  priority: 1.3
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # two concerns in one task: what the Architect is asked for, and what the plan lint reports
+  band_meaning: blast-radius
+  origin: operator-session#plain-language-2026-11-10
+  files:
+    - src/lib/plan-architect.ts
+    - src/lib/task-linter.ts
+    - test/plan/a-new-task-title-is-one-short-sentence.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "The Architect's plan prompt asks for a title that is one sentence of 15 words or fewer, states what will be true when the task is done, and puts the evidence in the rationale"
+      proof: "grep: W1-T12039 criterion 1 in test/plan/a-new-task-title-is-one-short-sentence.test.ts"
+    - claim: "The plan lint reports a warning, never a failure, for a new or changed task whose title is longer than 15 words or has a word of four or more letters in capitals"
+      proof: "grep: W1-T12039 criterion 2 in test/plan/a-new-task-title-is-one-short-sentence.test.ts"
+    - claim: "A task that is unchanged from the base is never reported, so the 5,084 existing titles produce no warning"
+      proof: "grep: W1-T12039 criterion 3 in test/plan/a-new-task-title-is-one-short-sentence.test.ts"
+  rationale: |
+    MEASURED 2026-11-10 on main at 2c6e743199: task titles average 44 words (median 45, 90th percentile 69, longest 126). 72% are longer than 30 words and 90% are longer than 15.
+    - The titles share one shape: a headline in capitals, a dash, then a paragraph of evidence.
+    - A task title becomes the pull request title and the commit subject. 25% of the last 300 commit subjects are cut off with "…", often before the verb.
+    - src/lib/plan-architect.ts lines 111 to 300 tell the Architect how to write a task and say nothing about the title's length or wording. src/lib/task-linter.ts has no rule about titles.
+  design: |
+    Add the title rule to the Architect's plan prompt, with one good and one bad example, and name docs/plain-language.md. Add a lint warning for a new or changed task only. The warning uses the lint's existing warning channel, so it is reported and never refused.
+    NOT IN SCOPE: rewriting existing titles, the triage prompt (the same gap, a later task), and any limit that fails a filing.
+  falsifier: |
+    Remove the rule from the prompt and criterion 1 must fail. Make the report a failure, or drop it, and criterion 2 must fail. Report an unchanged task and criterion 3 must fail. Restore and require all three to pass.
+  note: |
+    The plan prompt may be on the prompt-surface gate's list. If it is, the builder supplies the evidence that gate asks for.
