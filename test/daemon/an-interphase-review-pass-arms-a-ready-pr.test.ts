@@ -25,8 +25,9 @@ import {
   type SweepDeps,
 } from "#src/lib/sweep.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
-import { buildSweepLightHook } from "#src/run-task.js";
 import { ghShim } from "#test/helpers/gh-shim.js";
+// The run-task test seam, not a direct `src/run-task.ts` import: the reach ratchet caps direct importers.
+import { buildSweepLightHook } from "#test/helpers/run-task-test.js";
 
 const INTERPHASE: LightPassScope = { reviewOnly: true, scope: "interphase-review" };
 const FILE = "src/subject.ts";
