@@ -644,7 +644,8 @@ export interface GhPaceLoopWaitRow {
 const ghPaceLoopWaits: GhPaceLoopWaitRow[] = [];
 
 /** W1-T12057: one row for each wait slept on the daemon loop since the previous call, then reset.
- *  This module cannot import the ledger, so the daemon drains these rows and appends them. */
+ *  This module cannot import the ledger, so the daemon drains these rows every tick and appends them.
+ *  Rows are kept only inside the daemon's loop scope, so a process that never drains never holds any. */
 export function takeGhPaceLoopWaits(): GhPaceLoopWaitRow[] {
   return ghPaceLoopWaits.splice(0);
 }
@@ -1756,12 +1757,16 @@ export function applyGhReadCadence(args: readonly string[], deps: GhReadCadenceD
     plan.stampAfterGap(stampPath);
     return decision;
   }
-  const sleepSync = loopSafeGhSleep(deps.sleepSync ?? defaultBlockingSleepSync);
+  const blockingSleep = deps.sleepSync ?? defaultBlockingSleepSync;
+  const sleepSync = loopSafeGhSleep(blockingSleep);
+  // W1-T12057: a lock wait may sleep on the daemon loop, because tryGhCadenceLock already bounds the total.
+  // While this process has an async read pending, that read needs the loop, so the wait is still refused.
+  const lockSleepSync = ghCadenceAsyncQueue.has(stampPath) ? sleepSync : loopSafeGhSleep(blockingSleep, GH_CADENCE_LOCK_MAX_WAIT_MS);
   let decision: GhReadCadenceDecision | undefined;
   try {
     let waitMs: number;
     do {
-      waitMs = withGhCadenceLock(stampPath, sleepSync, () => {
+      waitMs = withGhCadenceLock(stampPath, lockSleepSync, () => {
         decision ??= plan.evaluate();
         return ghReadCadenceTurn(plan, stampPath, sleepSync);
       });
