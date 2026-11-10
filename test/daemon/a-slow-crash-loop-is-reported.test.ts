@@ -785,7 +785,9 @@ test("W1-T12031 criterion 2: ordinary EOF forwards exact raw bytes and retains o
     const run = await observedStderrSupervisor(t, { held: false, code, payload });
     assert.deepEqual(await run.done, { code, signal: null });
     assert.equal(Buffer.compare(run.output(), Buffer.concat([payload, Buffer.from("\n")])), 0,
-      "all bytes, invalid UTF-8, NUL, CRLF and the supervisor's separator survive output backpressure");
+      "all bytes, invalid UTF-8, NUL, CRLF and the supervisor's separator survive output backpressure; " +
+      "actual=" + run.output().length + " expected=" + (payload.length + 1) +
+      " prefix=" + run.output().subarray(0, 100).toString("hex"));
     const exit = lines(run.ledgerPath).find((r) => r.step === "daemon.process.exit")!;
     assert.equal(exit.exit_code, code);
     assert.equal(exit.clean_exit, false);
