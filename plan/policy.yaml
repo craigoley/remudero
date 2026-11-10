@@ -663,9 +663,15 @@ sweep:
     telemetryCadenceMs: { value: 300000, origin: "net-new", min: 60000, max: 3600000 }
     # Operator ruling 2026-11-03: the recovery watermark is 15, not 5. Over 6 h on the Azure host, cpu
     # `full` avg10 read <=5 in 8 of 43 review.capacity samples, 5-20 in 24 and >=20 in 11, so a width
-    # shed to 1 held there for 182 of 357 min with up to 16 green PRs queued. 15 keeps 5 points of
-    # hysteresis under the 20 shed mark. Read once per process (REVIEW_POLICY in sweep.ts), so it
-    # reaches the daemon when its install carries this commit and the daemon next starts.
+    # shed to 1 held there for 182 of 357 min with up to 16 green PRs queued. Read once per process
+    # (REVIEW_POLICY in sweep.ts), so it reaches the daemon when its install carries this commit and the
+    # daemon next starts.
+    # W1-T11274: since W1-T11129 this row means two things at once. It is the calm line: a shed width returns to
+    # base when cpu `full` is at or below 15, which is the ruling and is unchanged. It is also the hysteresis
+    # band: a shed needs `full` above max(15, (1 - cpu.weight share) * `some`) + 15, so at share 1 the shed
+    # point is 30 and a lower share only raises it. The old fixed 20 shed mark is retired, and a 15-point band
+    # is the deliberate width now, not a silent reread of the ruling. Pinned over this row by
+    # test/review/the-review-cpu-band-keeps-the-ruled-recovery-point.test.ts.
     cpuPsiLowPct: { value: 15, origin: "net-new", min: 0, max: 50 }
     # W1-T11129: no cpuPsiHighPct. The CPU shed judges PSI full against the container's cpu.weight share and the lane
     # governor's learned CPU verdict, and an unread or stale share holds; cpuPsiLowPct is the calm line it sheds above.
