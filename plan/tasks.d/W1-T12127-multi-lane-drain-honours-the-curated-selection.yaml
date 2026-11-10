@@ -1,0 +1,79 @@
+- id: W1-T12127
+  title: "A multi-lane curated drain dispatches only the curated tasks, in curated order"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 60.00
+  rationale: "OBSERVED: a one-task curated drain for W1-T11891 (`--curated` {taskIds:[W1-T11891], depth:1})
+    attempted the unrelated W1-T11274; only that task's existing-run guard refused it, and the operator stopped the
+    drain before any unrelated task started. W1-T140's contract (plan/tasks.yaml, limb 2) is that a curated selection
+    makes dispatch honour EXACTLY that selection and order and that unselected tasks are never dispatched.
+    ROOT CAUSE, read from source: drainCommand (src/run-task.ts) builds baseOpts with
+    `laneCount: DEFAULT_SWEEP_POLICY.dispatchLanes` and folds the file through `applyCuratedSelection`, so
+    `opts.curated` and the capped `max` reach `runDrain`. `runDrain` (src/lib/drain.ts) then returns
+    `runDrainLanes(plan, deps, opts)` whenever `(opts.laneCount ?? 1) >= 2`, BEFORE its own single-lane loop where
+    the only `opts.curated ? nextCurated(...) : ...` branch lives. `runDrainLanes` builds its pass with
+    `runnableCandidates(plan, isMerged, passSize, skipOpts)` and has no reference to `opts.curated` or `nextCurated`
+    anywhere. The capped `max` still bounds the COUNT, which is why exactly one task was attempted — just the wrong one.
+    WHY EXISTING TESTS MISSED IT: test/heavy-new-build-admission.test.ts runs `laneCount: 2` with
+    `curated: [A, B]` over a fixture whose natural order is also A, B, so the natural scan and the curated
+    selection coincide and the defect is invisible.
+    Settled by lookup: is this already filed or already decided? -> no; no task in plan/tasks.yaml or plan/tasks.d
+    names curated selection on the lane path, and W1-T140 itself is `retirement: retired` (plan/tasks.yaml, W1-T140).
+    Settled by lookup: does the curated path already exist to reuse? -> yes, `nextCurated` in src/lib/drain.ts carries
+    the curated skip semantics (merged, blocked, precondition, indeterminate, circuit, open-PR live-state, pushed run
+    branch) (src/lib/drain.ts, nextCurated).
+    Settled by lookup: should the fix force curated drains to one lane? -> no; the operator asked to preserve the
+    normal lane count, and drainCommand reads it from `DEFAULT_SWEEP_POLICY.dispatchLanes` (src/run-task.ts,
+    drainCommand), the one threshold home W1-T172 named.
+    Settled by lookup: does the daemon's per-task kick share the defect? -> no; it calls
+    `applyCuratedSelection({ ...baseOpts, laneCount: 1, wipLimit: 1 }, ...)` and so takes the single-lane loop
+    (src/lib/daemon.ts)."
+  design: |
+    ONE SELECTOR CHANGE IN `runDrainLanes`, NOTHING ELSE. When `opts.curated` is set, the pass's candidate list
+    comes from a new exported helper `curatedCandidates(plan, curated, attempted, isMerged, limit, opts)` in
+    src/lib/drain.ts instead of `runnableCandidates`. It walks `curated` in the caller's order and returns at most
+    `limit` tasks, applying EXACTLY `nextCurated`'s per-id skip semantics — build it by calling `nextCurated`
+    repeatedly with a growing local exclusion, or by extracting `nextCurated`'s per-id body into a shared predicate
+    that both call; either way there must be ONE copy of the curated skip rules, never a second hand-written one.
+    It must also honour `skipOpts.excludeIds` (continuedIds), so a curated id this drain already continued past is
+    not re-offered on a later pass. With `opts.curated` unset, `runDrainLanes` is byte-for-byte unchanged.
+    EVERYTHING DOWNSTREAM STAYS: the returned list still goes through `partitionByFileOverlap` and the per-lane
+    `checkDispatchGovernors` admission loop. Admitted lanes must dispatch in curated order; a curated id deferred by
+    overlap or a lane governor is retried on a later pass, and an id NOT in `curated` must never be selected on
+    any pass. The empty-curated-pass case ends with the same `no_runnable` summary the natural path uses.
+    KEEP THE LANE COUNT. Do not force `laneCount: 1` for curated drains, do not change drainCommand,
+    `applyCuratedSelection`, `DEFAULT_SWEEP_POLICY`, or the daemon's kick path.
+    VERIFY `runDrainLanes`, `nextCurated`, `runnableCandidates` and `NextRunnableOpts.excludeIds` FROM SOURCE before
+    wiring (distrust this note's line-level description).
+    The new test file must use these exact test titles so each criterion has distinct, literal unit-test evidence:
+    - "multi-lane curated dispatch preserves selection order and excludes unselected tasks"
+    - "depth-one curation ignores naturally earlier runnable tasks"
+    - "two disjoint curated tasks run concurrently at the configured lane count"
+    OUT OF SCOPE: W1-T11891 itself and its scope, the single-lane curated loop, the dry-run preview, and any
+    change to the existing-run guard that refused W1-T11274.
+  acceptance:
+    - claim: "at laneCount 2, a curated drain over a plan whose natural order differs dispatches exactly the curated ids in curated order, and no unselected id ever reaches runOne or the summary's attempted list"
+      proof: "unit test: multi-lane curated dispatch preserves selection order and excludes unselected tasks"
+    - claim: "the W1-T11891 shape — a depth-1 curated selection at laneCount 2 with other runnable tasks ahead of it in the DAG — dispatches only the one curated id"
+      proof: "unit test: depth-one curation ignores naturally earlier runnable tasks"
+    - claim: "the lane count is preserved — a two-id curated selection at laneCount 2 with disjoint files is admitted as one concurrent pass, not serialised into two"
+      proof: "unit test: two disjoint curated tasks run concurrently at the configured lane count"
+    - claim: "runDrainLanes selects curated work through the shared curated selector"
+      proof: "grep: curatedCandidates( in src/lib/drain.ts"
+  risk: medium
+  origin: architect
+  plan_refs: ["§7B", "§7"]
+  files: [src/lib/drain.ts, test/multi-lane-drain-honours-the-curated-selection.test.ts]
+  status: queued
+  attempts: 0
+  note: "Regression of W1-T140 limb 2 on the lane path, which W1-T172 added after the curated branch was wired only
+    into runDrain's single-lane loop. verify:auto — the whole contract is assertable with an injected runOne recorder
+    over a fixture plan whose natural order is NOT the curated order (the falsifier the existing heavy-new-build test
+    lacks). risk:medium — dispatch selection, one function, one module; a wrong fix dispatches unselected work, which
+    is the failure being closed. NO depends_on. The test suite
+    test/multi-lane-drain-honours-the-curated-selection.test.ts is THIS task's own falsifier (new, written solely to
+    prove these acceptance criteria), so it is named after this shard's slug; the change is one subsystem (drain
+    selection in src/lib/drain.ts)."

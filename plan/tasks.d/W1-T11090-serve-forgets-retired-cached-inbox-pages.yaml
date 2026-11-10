@@ -16,7 +16,7 @@
     - test/read-model-worker.test.ts
     - test/serve-generation.test.ts
     - test/serve-standby.test.ts
-  status: queued
+  status: merged
   dispatch_hold: false
   attempts: 0
   rationale: >-
