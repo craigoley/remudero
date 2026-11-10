@@ -336,6 +336,29 @@ export function planPrAcceptanceCriteria(
       break;
     }
   }
+  if (criteria.length === 0 && parsed !== undefined) {
+    const otherPlanFiles = files
+      .filter((f) => f === "plan/tasks.yaml" || f === "MASTER-PLAN.md" || f.startsWith("plan/"))
+      .filter((f) => !shards.includes(f))
+      .sort((a, b) => {
+        const rank = (path: string): number => path === "plan/tasks.yaml" ? 0 : path === "MASTER-PLAN.md" ? 1 : 2;
+        return rank(a) - rank(b) || files.indexOf(a) - files.indexOf(b);
+      });
+    for (const path of otherPlanFiles) {
+      const content = readShardAt(cwd, path);
+      if (content === undefined) continue;
+      const headLines = content.split("\n");
+      for (const { path: addedPath, line } of parsed.added) {
+        if (addedPath !== path || headLines.filter((candidate) => candidate.includes(line)).length !== 1) continue;
+        if ([...parsed.removed].some((removedLine) => removedLine.includes(line))) continue;
+        const proof = safeAddedLineProof(path, line, parsed.removed);
+        if (proof === undefined) continue;
+        criteria.push({ claim: `${path} is amended by this PR; its proof greps a line this PR adds to ${path}`, proof });
+        break;
+      }
+      if (criteria.length > 0) break;
+    }
+  }
   const runnable = criteria.filter((c) => {
     if (parseWhitelistedProof(c.proof) === null) return false;
     const roundTrip = parseAcceptanceBlock(renderAcceptanceBlock([c]));

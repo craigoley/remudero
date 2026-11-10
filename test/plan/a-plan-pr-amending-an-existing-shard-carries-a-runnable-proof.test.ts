@@ -51,6 +51,25 @@ function fixture(opts: { amend: (shard: string) => string; extra?: boolean }): {
   return { dir, files, diff };
 }
 
+function monolithFixture(): { dir: string; files: string[]; diff: string } {
+  const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1-t11625-monolith-`));
+  scratch.push(dir);
+  git(dir, "init", "-q", "-b", "main");
+  mkdirSync(join(dir, "plan"), { recursive: true });
+  const base = "- id: W1-T9649\n  title: an existing task\n  status: queued\n";
+  writeFileSync(join(dir, "plan/tasks.yaml"), base);
+  git(dir, "add", "-A");
+  git(dir, "commit", "-q", "-m", "base");
+  git(dir, "update-ref", "refs/remotes/origin/main", "HEAD");
+  git(dir, "checkout", "-q", "-b", "work");
+  writeFileSync(join(dir, "plan/tasks.yaml"), `${base}  clarification: the operator ruled this applies to every lane\n`);
+  git(dir, "add", "-A");
+  git(dir, "commit", "-q", "-m", "work");
+  const files = git(dir, "diff", "--name-only", "origin/main", "HEAD").split("\n").filter(Boolean);
+  const diff = git(dir, "diff", "--no-color", "--no-ext-diff", "-U0", "origin/main...HEAD");
+  return { dir, files, diff };
+}
+
 const clarify = (s: string): string => `${s}  clarification: the operator ruled this applies to every lane\n`;
 
 test("an amended-shard plan PR with no used reserved id emits a stored parser-valid and base-discriminating proof", () => {
@@ -84,6 +103,17 @@ test("a new filing keeps its id proof and a combined filing-plus-amendment carri
   assert.equal(criteria.length, 2);
   assert.ok(criteria.some((c) => /clarification/.test(c.proof) && c.proof.endsWith(AMENDED)));
   assert.ok(criteria.every((c) => parseWhitelistedProof(c.proof) !== null));
+});
+
+test("a monolith-only rewire gets a runnable proof from the added line in plan/tasks.yaml", () => {
+  const { dir, files, diff } = monolithFixture();
+  const [criterion] = planPrAcceptanceCriteria([], files, diff, dir);
+  assert.equal(criterion.proof, "grep: clarification: the operator ruled this applies to every lane in plan/tasks.yaml");
+  assert.match(criterion.claim, /plan\/tasks\.yaml is amended by this PR/);
+  const body = buildPlanPrBody({ intro: "plan run", criteria: [criterion], changedFiles: files, proofCwd: dir });
+  const stored = parseAcceptanceBlock(body);
+  assert.equal(stored.length, 1);
+  assert.equal(stored[0].proof, criterion.proof);
 });
 
 test("a plan PR with no derivable proof is refused with no prose fallback", () => {
