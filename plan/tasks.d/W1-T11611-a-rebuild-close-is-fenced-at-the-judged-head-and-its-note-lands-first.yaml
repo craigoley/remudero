@@ -25,13 +25,13 @@
   attempts: 0
   acceptance:
     - claim: "When the fix-progress judge routes a PR to rebuild, the sweep closes only through deps.withRebuildCloseFence(pr, judgedHeadSha, writeNote, close). The fence takes the PR's per-branch fix claim (fixBranchClaimKey, reclaim false), reads the PR again after the judgment, and closes only if it is still open and unmerged at the judged head on the same branch. If the head moved, the claim is held, the read fails, or the fence is not wired, the sweep closes nothing, writes no note and no requeue row, and ledgers sweep.strike_ladder.held with judged_head_sha and the observed_head_sha it read"
-      proof: "unit test: test/sweep/a-rebuild-close-is-fenced-at-the-judged-head.test.ts"
+      proof: "unit test: W1-T11611: a moved head stands the judged rebuild down"
     - claim: "Inside the fence, a durable pending note for the PR's task is written before the close: author strike-ladder-pending, with the PR URL, judged head, failing checks, unmet claims and strike history. If that note cannot be written, the PR is not closed. If the close is not then confirmed CLOSED at the judged head, the sweep writes no counted strike-ladder note and no sweep.strike_ladder.requeued row, and ledgers sweep.strike_ladder.close_unconfirmed with task_id, pr_number, expected_head_sha and observed_head_sha"
-      proof: "unit test: test/sweep/a-rebuild-close-is-fenced-at-the-judged-head.test.ts"
+      proof: "unit test: W1-T11611: the rebuild note is written before the close"
     - claim: "The rebuild caps keep their current sources. The lifetime count is the task's notes with author exactly strike-ladder, and the per-UTC-day cap and the judge's rebuild history are the task's sweep.strike_ladder.requeued rows. Only a close confirmed at the judged head appends the counted strike-ladder note (today's content) and the requeued row. A refused, held or unconfirmed close leaves both counts unchanged, so the next pass sees the same rebuildsSoFar and the same per-day state"
-      proof: "unit test: test/sweep/a-rebuild-close-is-fenced-at-the-judged-head.test.ts"
+      proof: "unit test: W1-T11611: an unconfirmed close spends no rebuild cap"
     - claim: "A rebuild decided without a progress judge, the refresh and digest rungs, and the stale, stale-proof, empty-diff and dependency closes keep their current behaviour"
-      proof: "unit test: test/sweep/a-rebuild-close-is-fenced-at-the-judged-head.test.ts"
+      proof: "unit test: W1-T11611: an unjudged rebuild keeps its current behaviour"
     - claim: The production sweep effects wire the rebuild close fence as a recorded effect-surface member
       proof: "grep: withRebuildCloseFence in src/lib/sweep.ts"
   rationale: |
