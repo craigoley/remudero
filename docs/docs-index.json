@@ -782,6 +782,12 @@
       "grepHint": "Gate garden log"
     },
     {
+      "path": "docs/glossary.md",
+      "title": "The Remudero glossary",
+      "summary": "One word for one thing. This page is the domain language of Remudero. Every text a person reads",
+      "grepHint": "The Remudero glossary"
+    },
+    {
       "path": "docs/heavy-new-build-reservation.md",
       "title": "Bounded heavy READY reservations, v2",
       "summary": "This is an opt-in, host-local, single-account reader/producer foundation, not a",
@@ -828,6 +834,12 @@
       "title": "Operator Message Standard (W1-T2279)",
       "summary": "Status: NORMATIVE. Scope: `rmd status`'s rendered board, the console's rendered rows reading",
       "grepHint": "Operator Message Standard (W1-T2279)"
+    },
+    {
+      "path": "docs/plain-language.md",
+      "title": "The writing standard",
+      "summary": "How to write anything a person reads in this repo: rules for agents, task files, commit messages,",
+      "grepHint": "The writing standard"
     },
     {
       "path": "docs/plan-sync.md",

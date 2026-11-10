@@ -762,11 +762,44 @@ while :; do
     heap_line_path="$CONFIG_ROOT/state/.daemon-heap-line-$$"
     : > "$heap_line_path"
     stderr_end="RMD-STDERR-END-${REMUDERO_RUN_ID}-$$"
-    exec 19> >(awk -v evidence="$heap_line_path" -v stop="$stderr_end" '
-      $0 == stop { exit }
-      { if (tolower($0) ~ /heap limit/) { print substr($0, 1, 240) > evidence; close(evidence) }
-        print; fflush() }
-    ' >&2)
+    exec 19> >(node --input-type=commonjs -e '
+const fs = require("node:fs");
+const { once } = require("node:events");
+const [evidence, stop] = process.argv.slice(1);
+const marker = Buffer.from(stop);
+async function forwardLine(line) {
+  const content = line[line.length - 1] === 10 ? line.subarray(0, -1) : line;
+  if (content.equals(marker)) return false;
+  if (/heap limit/i.test(content.toString("latin1"))) {
+    fs.writeFileSync(evidence, Buffer.concat([content.subarray(0, 240), Buffer.from("\n")]));
+  }
+  if (!process.stdout.write(line)) await once(process.stdout, "drain");
+  return true;
+}
+(async () => {
+  let parts = [], size = 0;
+  for await (const chunk of process.stdin) {
+    let offset = 0, newline;
+    while ((newline = chunk.indexOf(10, offset)) !== -1) {
+      const piece = chunk.subarray(offset, newline + 1);
+      const line = parts.length ? Buffer.concat([...parts, piece], size + piece.length) : piece;
+      parts = [];
+      size = 0;
+      if (!await forwardLine(line)) return;
+      offset = newline + 1;
+    }
+    if (offset < chunk.length) {
+      const tail = chunk.subarray(offset);
+      parts.push(tail);
+      size += tail.length;
+    }
+  }
+  if (size) await forwardLine(Buffer.concat(parts, size));
+})().catch((error) => {
+  console.error(error);
+  process.exitCode = 1;
+});
+    ' "$heap_line_path" "$stderr_end" >&2)
     daemon_stderr_pid=$!
     "$@" 2>&19 &
   else
