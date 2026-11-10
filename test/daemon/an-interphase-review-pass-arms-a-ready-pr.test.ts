@@ -200,7 +200,7 @@ test("interphase arm refusals name head hold risk judge and in-flight reasons", 
   const gate = new Promise<void>((resolve) => { release = resolve; });
   const calls: number[] = [];
   const pr = readyPr(1151025);
-  const overlap = fixture([pr], { arm: async (p) => { calls.push(p.prNumber); await gate; return "armed"; } });
+  const overlap = fixture([pr], { arm: async (p) => { calls.push(p.prNumber); await gate; return "armed" as const; } });
   try {
     const first = overlap.hook(INTERPHASE);
     for (let i = 0; i < 200 && calls.length === 0; i++) await new Promise<void>((resolve) => setImmediate(resolve));

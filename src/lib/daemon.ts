@@ -2281,7 +2281,8 @@ export const INTERPHASE_REVIEW_CLOCK_STOP_BOUND_MS = 1_000;
 
 /** W1-T4053 — what one light pass may act on. The ordinary pass opens its fix rung whenever nothing is in
  * flight (W1-T1211), and a freshness drain has nothing in flight by construction, so a fix admitted there
- * would detach one more action into the very drain it runs beside. `reviewOnly` closes every lane but review. */
+ * would detach one more action into the very drain it runs beside. `reviewOnly` closes every lane but review;
+ * of the review-only scopes, an interphase-review pass may also arm ({@link lightPassArmAdmitted}, W1-T11510). */
 export interface LightPassScope {
   readonly reviewOnly: boolean;
   /** W1-T9569: WHY the pass is review-only, so its stand-downs name it; an ordinary pass passes none. */
