@@ -1,0 +1,49 @@
+- id: W1-T12154
+  title: "An implement run that ends before a worker is assigned records why"
+  repo: remudero
+  depends_on: []
+  priority: 1.1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the verdict row of every run, and the run counts the analytics views show
+  band_meaning: blast-radius
+  origin: operator-session#model-choice-2026-11-10
+  plan_refs:
+    - W1-T7742
+    - W1-T4644
+    - W1-T10209
+  files:
+    - src/run-task.ts
+    - src/lib/non-worker-verdict.ts
+    - src/lib/analytics-timeseries.ts
+    - test/dispatch/an-implement-run-that-ends-before-a-worker-is-assigned-records-why.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "The verdict row of a run that wrote no worker.assignment row records that no worker was assigned and names the last stage the run reached"
+      proof: "grep: W1-T12154 criterion 1 in test/dispatch/an-implement-run-that-ends-before-a-worker-is-assigned-records-why.test.ts"
+    - claim: "A run found orphaned with no assignment gets the same record when the fleet ends it"
+      proof: "grep: W1-T12154 criterion 2 in test/dispatch/an-implement-run-that-ends-before-a-worker-is-assigned-records-why.test.ts"
+    - claim: "The run counts in the analytics time series leave such a run out of completed runs and durations, and count it apart"
+      proof: "grep: W1-T12154 criterion 3 in test/dispatch/an-implement-run-that-ends-before-a-worker-is-assigned-records-why.test.ts"
+    - claim: "A run that assigned a worker is counted exactly as before"
+      proof: "grep: W1-T12154 criterion 4 in test/dispatch/an-implement-run-that-ends-before-a-worker-is-assigned-records-why.test.ts"
+    - claim: "The time series calls the shared test for such a run"
+      proof: "grep: endedBeforeWorkerAssignment( in src/lib/analytics-timeseries.ts"
+  rationale: |
+    MEASURED 2026-11-10 in the core instance's ledger, 2026-10-27 to 2026-11-10: 600 of 1,030 implement runs ended with no worker assignment.
+    - 525 of the 600 fell on 2026-11-05 to 2026-11-07.
+    - No row says why. The reason must be rebuilt from the rows around each run.
+    - These runs sit in every rate that counts runs. A merge rate over 1,030 runs is mostly a count of runs that never started a worker.
+    - src/lib/non-worker-verdict.ts already lists outcomes that no worker earned, by name. It has no test for "no worker was assigned".
+  design: |
+    `benchmarkRunLedgerLogger` in src/run-task.ts already keeps the set of assignment ids a run wrote. When it writes the `verdict` row with an empty set, add `worker_assigned: false` and the last `run.phase` or stage it saw.
+    Add `endedBeforeWorkerAssignment` to src/lib/non-worker-verdict.ts. It reads that field, and for older rows falls back to `infrastructureRefusal`.
+    In `createHistoricalSeriesAccumulator`, count such a run in its own field and not in `completedRuns`.
+    NOT IN SCOPE: the cause of the 525 runs, and the dispatch breaker's own exclusions.
+  falsifier: |
+    Write the field for a run that assigned a worker and criterion 4 must fail. Count a run with no worker as completed and criterion 3 must fail. Restore and require all to pass.
+  note: |
+    Once the reason is on the row, one query shows what ended the 525 runs.
