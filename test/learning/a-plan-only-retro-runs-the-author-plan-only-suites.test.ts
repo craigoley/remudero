@@ -20,7 +20,7 @@ const READING = "test/plan-only-a.test.ts\ntest/plan-only-b.test.ts\ntest/reader
 
 interface Row { step: string; extra: Record<string, unknown> }
 
-interface Fake { diffClass: string; planOnly?: ReturnType<typeof ok> }
+interface Fake { diffClass: string; planOnly?: ReturnType<typeof ok> & { cleanupError?: Error } }
 
 function fake({ diffClass, planOnly = ok(ONLY) }: Fake) {
   const calls: string[][] = [];
