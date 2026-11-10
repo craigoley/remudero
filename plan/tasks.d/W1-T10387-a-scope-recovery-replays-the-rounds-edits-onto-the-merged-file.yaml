@@ -13,7 +13,7 @@
     - src/lib/proof-amendment.ts
     - src/run-task.ts
     - test/fix-lane/a-scope-recovery-replays-the-rounds-edits-onto-the-merged-file.test.ts
-  status: queued
+  status: merged
   priority: 1.5  # the revert it caused also drove five base refreshes on #13324 (W1-T10388)
   attempts: 0
   rationale: |

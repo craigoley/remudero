@@ -4,8 +4,8 @@ raw: >-
   Evidence coverage gap (evidence-coverage-v1, over benchmark-quality-v1): lane
   `review`, field `servedModel`.
 
-  Coverage: 311/968 joined worker calls (32.1%) in the trailing 7-day window;
-  below the field's 90.0% floor — a chronic gap no baseline excuses.
+  Coverage: 57/468 joined worker calls (12.2%) in the trailing 7-day window;
+  trailing baseline 100.0% — below it by more than 10.0%.
 
   First seen: 2026-09-28T05:55:37.084Z.
 
@@ -14,13 +14,218 @@ raw: >-
   lane's ledger write site (src/lib/benchmark-evidence.ts names what each field
   reads), or record why this lane legitimately lacks it. The evidence-coverage
   gardener updates this entry in place while the gap persists.
+
+  Evidence coverage reopened 2026-11-09T08:29:32.579Z: 16.2% (57/351); window
+  2026-11-02T08:29:32.579Z through 2026-11-09T08:29:32.579Z; overrides rejected.
 attachments: []
 origin: cli
-status: rejected
+status: accepted
 reply_to: null
-proposal_pr: null
-summary: null
+proposal_pr: https://github.com/craigoley/remudero/pull/17605
+summary:
+  headline: Review lane is missing servedModel on most worker calls
+  what_happened: Only 16.2% of review-lane worker calls in the past week recorded
+    servedModel, against a 100% baseline. The gap reopened on 2026-11-09, and
+    the coverage gardener will keep updating this entry until it closes.
+  decision: Restore servedModel at the review lane's ledger write site, or record
+    why this lane legitimately lacks it.
+  options:
+    - label: Restore the field
+      consequence: Review-lane calls record servedModel again, and coverage should
+        climb back toward 100%.
+    - label: Record a legitimate exemption
+      consequence: The review lane is excluded from the servedModel coverage check,
+        with the reason documented.
+    - label: Defer
+      consequence: The gap stays open and this entry keeps reappearing until someone acts.
 expansion: null
 submission_key: null
 thread_id: null
 answered_by: null
+evidence_coverage_last_reopened: "16.2"
+evidence_coverage_revision:
+  version: 1
+  mainSha: 9023ecc08515ab728e1437ac25e0644077280194
+  expectedRecord: >
+    id: evidence-coverage-review-served-model
+
+    ts: 2026-10-08T23:04:41.800Z
+
+    raw: >-
+      Evidence coverage gap (evidence-coverage-v1, over benchmark-quality-v1): lane
+      `review`, field `servedModel`.
+
+      Coverage: 57/423 joined worker calls (13.5%) in the trailing 7-day window;
+      trailing baseline 100.0% — below it by more than 10.0%.
+
+      First seen: 2026-09-28T05:55:37.084Z.
+
+
+      This follow-up never gates a PR or blocks work. Restore the field at the
+      lane's ledger write site (src/lib/benchmark-evidence.ts names what each field
+      reads), or record why this lane legitimately lacks it. The evidence-coverage
+      gardener updates this entry in place while the gap persists.
+
+      Evidence coverage reopened 2026-11-09T08:29:32.579Z: 16.2% (57/351); window
+      2026-11-02T08:29:32.579Z through 2026-11-09T08:29:32.579Z; overrides rejected.
+    attachments: []
+
+    origin: cli
+
+    status: new
+
+    reply_to: null
+
+    proposal_pr: null
+
+    summary: null
+
+    expansion: null
+
+    submission_key: null
+
+    thread_id: null
+
+    answered_by: null
+
+    evidence_coverage_last_reopened: "16.2"
+
+    evidence_coverage_revision:
+      version: 1
+      mainSha: 247f574101efed966c92c149c64bce1aef97f0de
+      expectedRecord: >
+        id: evidence-coverage-review-served-model
+
+        ts: 2026-10-08T23:04:41.800Z
+
+        raw: >-
+          Evidence coverage gap (evidence-coverage-v1, over benchmark-quality-v1): lane
+          `review`, field `servedModel`.
+
+          Coverage: 57/351 joined worker calls (16.2%) in the trailing 7-day window;
+          trailing baseline 100.0% — below it by more than 10.0%.
+
+          First seen: 2026-09-28T05:55:37.084Z.
+
+
+          This follow-up never gates a PR or blocks work. Restore the field at the
+          lane's ledger write site (src/lib/benchmark-evidence.ts names what each field
+          reads), or record why this lane legitimately lacks it. The evidence-coverage
+          gardener updates this entry in place while the gap persists.
+
+          Evidence coverage reopened 2026-11-09T08:29:32.579Z: 16.2% (57/351); window
+          2026-11-02T08:29:32.579Z through 2026-11-09T08:29:32.579Z; overrides rejected.
+        attachments: []
+
+        origin: cli
+
+        status: new
+
+        reply_to: null
+
+        proposal_pr: null
+
+        summary: null
+
+        expansion: null
+
+        submission_key: null
+
+        thread_id: null
+
+        answered_by: null
+
+        evidence_coverage_last_reopened: "16.2"
+
+        evidence_coverage_revision:
+          version: 1
+          mainSha: 7c87a20708cd5e5e9c3dade851edb4942725b080
+          expectedRecord: >
+            id: evidence-coverage-review-served-model
+
+            ts: 2026-10-08T23:04:41.800Z
+
+            raw: >-
+              Evidence coverage gap (evidence-coverage-v1, over benchmark-quality-v1): lane
+              `review`, field `servedModel`.
+
+              Coverage: 311/968 joined worker calls (32.1%) in the trailing 7-day window;
+              below the field's 90.0% floor — a chronic gap no baseline excuses.
+
+              First seen: 2026-09-28T05:55:37.084Z.
+
+
+              This follow-up never gates a PR or blocks work. Restore the field at the
+              lane's ledger write site (src/lib/benchmark-evidence.ts names what each field
+              reads), or record why this lane legitimately lacks it. The evidence-coverage
+              gardener updates this entry in place while the gap persists.
+            attachments: []
+
+            origin: cli
+
+            status: rejected
+
+            reply_to: null
+
+            proposal_pr: null
+
+            summary: null
+
+            expansion: null
+
+            submission_key: null
+
+            thread_id: null
+
+            answered_by: null
+          expectedPlan:
+            plan/tasks.yaml: 4f7b11c7c694a482e077db0e692abc5874cf6611
+            plan/tasks.d: 055cd0013370175d28ba95a3d85a052dbfa17c89
+          measurement:
+            lane: review
+            field: servedModel
+            observed: 57
+            denominator: 351
+            floor: 0.9
+            baseline: 1
+            at: 2026-11-09T08:29:32.579Z
+            since: 2026-11-02T08:29:32.579Z
+            line: "Coverage: 57/351 joined worker calls (16.2%) in the trailing 7-day
+              window; trailing baseline 100.0% — below it by more than 10.0%."
+          closure:
+            eligible: true
+            reason: rejected with a measured gap
+      expectedPlan:
+        plan/tasks.yaml: 4f7b11c7c694a482e077db0e692abc5874cf6611
+        plan/tasks.d: c854a340633f6a0ef92bfef44767dc27f3b11fcd
+      measurement:
+        lane: review
+        field: servedModel
+        observed: 57
+        denominator: 423
+        floor: 0.9
+        baseline: 1
+        at: 2026-11-09T14:30:04.016Z
+        since: 2026-11-02T14:30:04.016Z
+        line: "Coverage: 57/423 joined worker calls (13.5%) in the trailing 7-day
+          window; trailing baseline 100.0% — below it by more than 10.0%."
+      closure:
+        eligible: false
+        reason: record is open
+  expectedPlan:
+    plan/tasks.yaml: 4f7b11c7c694a482e077db0e692abc5874cf6611
+    plan/tasks.d: 721aed91c1761612d2914a48ffc20918c5b9eb0a
+  measurement:
+    lane: review
+    field: servedModel
+    observed: 57
+    denominator: 468
+    floor: 0.9
+    baseline: 1
+    at: 2026-11-09T20:41:48.053Z
+    since: 2026-11-02T20:41:48.053Z
+    line: "Coverage: 57/468 joined worker calls (12.2%) in the trailing 7-day
+      window; trailing baseline 100.0% — below it by more than 10.0%."
+  closure:
+    eligible: false
+    reason: record is open

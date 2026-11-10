@@ -14,7 +14,7 @@
     - hooks/pre-push
     - scripts/open-pr-body-proof-precheck.mjs
     - test/a-push-that-falsifies-its-open-prs-own-proof-is-caught-at-pre-push.test.ts
-  status: queued
+  status: merged
   priority: 2  # each miss costs a CI cycle and a review round; the class is every follow-up push to a hand or filing PR
   attempts: 0
   rationale: |

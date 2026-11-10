@@ -1,0 +1,45 @@
+- id: W1-T11944
+  title: A GitHub read broker heartbeat that stays stale for more than twice its declared interval writes a ledger row and raises the existing alert, so a dead or crash-looping broker is reported instead of silently slowing every session
+  repo: remudero
+  depends_on: []
+  priority: 0.6
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # new daemon-tick check; it reads one heartbeat file and writes a ledger row, and raises the existing alert only after a shadow period
+  band_meaning: blast-radius
+  origin: "operator ruling 2026-11-10 go with it (efficiency batch, slim serve, lighten preflight, janitor)"
+  plan_refs:
+    - W1-T11787
+    - W1-T11913
+    - W1-T10279
+    - W1-T3275
+  files:
+    - src/lib/gh-read-broker-watch.ts
+    - src/lib/daemon.ts
+    - test/github/a-stale-read-broker-heartbeat-is-reported.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: A heartbeat file older than twice its declared interval writes one ledger row naming its age and interval, and a fresh heartbeat writes none
+      proof: "grep: W1-T11944 criterion 1 in test/github/a-stale-read-broker-heartbeat-is-reported.test.ts"
+    - claim: A heartbeat that stays stale writes one row per stale episode and not one per tick, and a later fresh heartbeat closes the episode with a recovered row
+      proof: "grep: W1-T11944 criterion 2 in test/github/a-stale-read-broker-heartbeat-is-reported.test.ts"
+    - claim: No heartbeat file at all on a host that runs the broker unit is reported as no broker serving, and a host that never ran one is not
+      proof: "grep: W1-T11944 criterion 3 in test/github/a-stale-read-broker-heartbeat-is-reported.test.ts"
+    - claim: The check never changes whether a read is allowed and an unreadable heartbeat is reported as unknown and fails open
+      proof: "grep: W1-T11944 criterion 4 in test/github/a-stale-read-broker-heartbeat-is-reported.test.ts"
+    - claim: The daemon tick calls the new module so it runs on every tick
+      proof: "grep: watchReadBrokerHeartbeat( in src/lib/daemon.ts"
+  rationale: |
+    OBSERVED 2026-11-09 (Azure host): the read broker crash-looped for about 85 minutes (restart counter 15,830, heap exhaustion at boot, fixed by W1-T11787); its heartbeat stopped at 18:24Z. With no live heartbeat deny-floor falls back to its 180 s cadence floor (W1-T3275) for every session, and nothing reported the outage; it burned about 16 CPU seconds per restart every 10 s until someone looked. W1-T11913 makes a floored refusal name the broker state to the session that hits it, but a broker that is down while nobody reads is still silent.
+    - Mechanism: the heartbeat's age is judged only by readers at read time; no process watches it.
+    - Effect: a dead broker is invisible until a session is slowed by it.
+  design: |
+    A small check on the daemon tick (new src/lib/gh-read-broker-watch.ts, wired in src/lib/daemon.ts) reads the heartbeat file's mtime and declared interval and writes a ledger row when the age exceeds twice the interval, once per stale episode, with a recovered row when it freshens. The first release is shadow (ledger rows only); raising the existing alert path is a follow-up switch once the rows have been audited, and no new alert channel is added in this task. NOT IN SCOPE: the broker's restart policy (host configuration, the operator's decision) and the deny-floor refusal text (W1-T11913).
+  falsifier: |
+    Write a row on a fresh heartbeat and criterion 1 must fail. Write a row every tick and criterion 2 must fail. Let an unreadable heartbeat refuse a call and criterion 4 must fail. Restore and require all four to pass.
+  note: |
+    reservation hand-off: run-unfiled-1794269694199 -> run-unfiled-1794269694199
+    Reserved with rmd next-task-id (--count 9 and 1 on run-unfiled-1794269694199). Hand-built by the operator's choice (rulings 2026-11-10: slim serve, lighten preflight with no hard caps, janitor trims old worktrees). Check refs/rmd-dispatch/<id> and any run branch before building.

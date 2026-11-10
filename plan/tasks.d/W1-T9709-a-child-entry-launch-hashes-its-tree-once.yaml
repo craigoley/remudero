@@ -15,7 +15,7 @@
     - src/lib/child-entry-store.ts
     - scripts/build-child-entries.mjs
     - test/a-child-entry-launch-hashes-its-tree-once.test.ts
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

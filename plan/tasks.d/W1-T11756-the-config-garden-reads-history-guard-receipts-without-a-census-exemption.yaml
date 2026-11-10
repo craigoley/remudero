@@ -1,0 +1,126 @@
+- id: W1-T11756
+  title: The config garden reads history-guard receipts without a census exemption
+  repo: remudero
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 5.00
+  risk: high
+  band_meaning: span
+  origin: operator-approved S1 three-deviation reconciliation, 2026-11-08
+  plan_refs: [W1-T11443, W1-T11432, W1-T5527, W1-T5474]
+  depends_on: [W1-T11443, W1-T11432]
+  files:
+    - src/lib/config-gardener.ts
+    - test/every-priced-ledger-step-is-in-the-config-garden-read.test.ts
+    - test/two-readers-cannot-disagree-about-one-sha.test.ts
+    - test/worker/spawn/a-review-re-admitted-after-an-unable-reviewer-avoids-that-provider.test.ts
+    - test/gardeners/the-config-gardener-reads-the-same-steps-once-gather-runs-owns-its-list.test.ts
+    - test/the-config-gardener-reads-only-the-ledger-steps-it-prices.test.ts
+  status: queued
+  # backlog gardener: band=4 evidence=cca96b7e366f2fae
+  # backlog gardener: placed=2026-11-08T22:31:49.721Z
+  attempts: 0
+  rationale: |
+    S1 PR-17156 merged head 8dbed01b3051b43ab407eebb96d3f704d3b13127 at
+    807a48cc63f1487fbba4207b950ba92f98655618. Its changed and declared sets both
+    contain 52 paths but differ by three. The priced-step census gained an
+    unapproved review.history_guarded AFTER_PR_OPENED exemption, the two-readers
+    test retained a history fake excluded by its conditional controls, and the
+    W1-T11432 provider-exclusion fixture gained an out-of-card history response.
+    The previously approved src/lib/config-gardener.ts catalog path was unchanged.
+    Inspection at main 2901e3eaf showed history is read only for success, while the
+    two-readers invocation is failure-only. The census rejects an exemption for
+    a listed step, so catalog addition and exemption removal must ship together.
+    Earlier three-case two-readers controls passed both with and without its fake;
+    do not claim that the adapter was necessary or conditionally authorized.
+    Exact patches and blob provenance are retained in Remudero-notes/sol/
+    S1-merged-outside-scope-patches.json and S1-three-deviations-static-control-provenance.json.
+    This new approval does not erase the original merged scope deviation.
+    W1-T10894 is retired; W1-T2793/W1-T11432/W1-T11443 are original subjects,
+    not this corrective follow-up. The concurrent Azure W11432/W11443 plan
+    reconciliation changes only status metadata and is left to its owner.
+  design: |
+    Include review.history_guarded in CONFIG_GARDEN_LEDGER_STEPS, using the
+    previously approved catalog solution. Remove only its unapproved EXEMPT
+    entry from the priced-step census. Keep the history-guard receipt itself.
+    Add a contained retention control inside the existing census test file:
+    invoke the actual config-garden bounded-reader adapter with a deterministic
+    reader, verify its requested step set retains the receipt, and retain all
+    existing census assertions. Run the whole existing census file as well.
+    Remove only the unsupported empty-history fake from the failure-only
+    two-readers invocation and run its full existing test file.
+    Accept the provider-exclusion fixture's existing empty-history response only
+    after paired controls establish: the original fixture passes on unchanged
+    pre-S1 main, current source with that response removed fails on the new
+    history request, and restored current source passes. Preserve exact base,
+    source and fixture blobs, physical file lists and terminal TAP summaries.
+    Use pre-S1 main parent 0fe464d92da75308ab7e014856f603d0cdbd775d as the
+    initial control candidate; verify its identity and fixture before execution.
+    Run those paired controls on the same Azure platform with normal test setup.
+    S6's Mac related run on private 573af23a observed a separate synthetic-keychain
+    failure in this file's overflow-fallback criterion 1; its owner is running the
+    unchanged-base control. That does not prove or disprove criterion 2's history
+    regression. Preserve it as a distinct environment/baseline observation, and do
+    not alter credentials, platform guards or skip a test to manufacture green.
+    The historical-step test-input exception is the gardener historical-step fixture:
+    preserve its historical baseline array, titles, duplicate and prefix assertions,
+    and extend only its first strict expected set by review.history_guarded. Same-
+    Azure unchanged-base controls at 1e8c43d452cc pass 2/2; the unchanged fixture
+    against the approved catalog addition fails 1/2 solely on that new step.
+    The inventory corpus exception appends exactly one call after every existing
+    corpus row: fallback(["review.history_guarded"], "pr_url", 400). Use the existing
+    PR-URL fallback helper, not a fabricated paid cost. Every old corpus row,
+    timestamp and token-call value stays unchanged; retain every assertion and
+    expected value, title, timeout and skip in the existing inventory test.
+    Preserve every other existing assertion, expected value, timeout, skip and
+    unrelated fake response in all files. If controls do not justify the adapter, restore
+    its prior fixture; never silently ratify it or weaken a check to force green.
+    A red or unreadable control requires an honest disposition and normal gates.
+    No new store, fixed threshold, exemption, allowance or scanner exclusion.
+  acceptance:
+    - claim: The config garden's bounded ledger read retains history-guard receipts and its priced-step census has no exemption for that listed step
+      proof: "grep: W1-T11756 criterion 1 in test/every-priced-ledger-step-is-in-the-config-garden-read.test.ts"
+  note: |
+    Original human reply approved four paths and a NEW $5/high/span
+    cap, including Azure build/review/fix, on 2026-11-08. Do not reuse or reset
+    the merged W1-T11443 budget. Approval: Remudero-notes/sol/
+    S1-three-deviations-human-approval.json; exact proposal retained alongside it.
+    W1-T11756 frozen-step expectation exception
+    A subsequent direct operator reply on 2026-11-08 approved the named fifth
+    test path and exactly the strict-expected-set/comment patch retained as
+    S1-frozen-garden-expected-set-proposed.patch, SHA256
+    536b741dc77aa4c5b206ac271f219c8bcd25b53c765d0696a542e2842913e13f.
+    Approval: Remudero-notes/sol/S1-fifth-path-human-approval.json. This amendment
+    must merge normally before that test correction is applied. All prior attempts
+    remain charged against the existing combined $5 ceiling; never reset it.
+    W1-T11756 inventory receipt fixture exception
+    A direct operator reply on 2026-11-08 approved the named sixth inventory test
+    path and only S1-inventory-receipt-sixth-path-proposed.patch, SHA256
+    d6e41e74493c84ce6f6bd0e6640018e45f8eaf0a7c7a3413a530c3f1bc179729.
+    Approval: Remudero-notes/sol/S1-sixth-path-human-approval.json. Apply only
+    after unchanged-main control confirms this receipt-only fixture regression
+    and this scope amendment merges normally. Same-Azure-host main8665 control
+    qualifies the inventory case PASS with identical fixture64f43493; the source
+    case fails only on the missing receipt. The separate heap-child timeout also
+    fails on unchanged main; retain that baseline disposition without a waiver.
+    The existing combined $5/high/span cap includes all prior source attempts
+    and Azure build/review/fix; never reset it or increase any timeout.
+    File and merge this plan normally before Source build. Use the Azure fleet,
+    one claimed builder and fresh merge-credit/dependency/history/selector checks.
+    Test paths already exist; no new file placement is proposed. Require a new
+    exact-head behavioral control, semantic removal/restoration, physical caller
+    and census suites, source-positive mapped coverage, default preflight, actual
+    first-push author invocation and all required hosted/native gates. Record
+    original deviations, conditional fixture evidence and corrective choices under
+    ## Decisions in both PRs and luna/REPORTS.md. No manual merge/arm/approve or
+    native-status write, budget reset, runtime activation, credentials, provider
+    pause, egress change, retry-cap override or bypass. S6 W1-T11728's active
+    owner and separate combined $6 budget remain untouched.
+  falsifier: |
+    Remove only review.history_guarded from the production reader's requested
+    step catalog: the new receipt-retention control and existing full census fail.
+    Restore it and pass both without changing any assertions. Restore the removed
+    exemption while keeping the catalog entry: the existing stale-exemption check
+    fails. Provider-fixture acceptance additionally requires the exact three-way
+    before/removed/restored control, not merely a comment or a green fake.

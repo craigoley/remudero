@@ -1,0 +1,36 @@
+- id: W1-T11914
+  title: The author preflight receipt states whether the run is eligible to push, true for an over-capacity run whose every stage that ran was green
+  repo: remudero
+  depends_on: []
+  priority: 1.3
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: medium # one concern: a derived eligibility field on the receipt; the verdict, the exit code, the selection and every check are unchanged
+  origin: operator-session#gate-efficiency-1109
+  plan_refs:
+    - W1-T7809
+  files:
+    - scripts/preflight-author.mjs
+    - test/ci/gates/the-author-receipt-states-whether-the-run-is-eligible-to-push.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: A receipt whose verdict is passed, or whose verdict is over-capacity with the census, static and affected-subset stages green, zero failing tests and no stage not run, carries pushEligible true and a one-line pushEligibleReason
+      proof: "unit test: test/ci/gates/the-author-receipt-states-whether-the-run-is-eligible-to-push.test.ts"
+    - claim: A receipt with a failing test, a failed or refused stage, a not-run stage, or a refused verdict carries pushEligible false and the reason names the stage
+      proof: "grep: W1-T11914 criterion 2 in test/ci/gates/the-author-receipt-states-whether-the-run-is-eligible-to-push.test.ts"
+    - claim: The verdict string and the exit code of every receipt are identical with the change and without it
+      proof: "grep: W1-T11914 criterion 3 in test/ci/gates/the-author-receipt-states-whether-the-run-is-eligible-to-push.test.ts"
+  rationale: |
+    OBSERVED 2026-11-09: a hand-built change that touches code 804 suites depend on ran 489 of them on a loaded host, with 4,379 tests passing, 0 failing and the census and static stages green, and the gate's verdict was over-capacity (exit 3). Every consumer that wants "may I push?" has to re-derive the answer from five log lines. The unattended pipeline here read the exit as a failure and retried for about two hours, each retry priced against the same host load, so no retry could change the answer.
+    - AGENTS.md asks for the preflight before the first push and leaves the hosted checks to gate the merge, so an over-capacity run with nothing red is a pushable run. The receipt should say so once, in one place, instead of each caller guessing.
+  design: |
+    - At the point the receipt's verdict is set, derive pushEligible and pushEligibleReason from the stages already recorded on the receipt. Add no new measurement.
+    - NOT IN SCOPE: the verdict values, OVER_CAPACITY_EXIT, the capacity pricing, the subset selection, and any change to what the pre-push hook requires.
+  falsifier: |
+    Mark an over-capacity run eligible while one test failed: criterion 2 must fail. Mark a green passed run ineligible: criterion 1 must fail. Change the verdict string or the exit code: criterion 3 must fail. Restore and require all three.
+  note: |
+    reservation hand-off: run-unfiled-1794254218113
+    Success is the unattended pipeline reading one field instead of five log lines, and no retry spent on an answer the host cannot change.

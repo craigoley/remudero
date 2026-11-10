@@ -15,7 +15,7 @@
     - test/no-daemon-loop-path-arms-a-wall-clock-child-timeout.test.ts
     - test/a-garden-filing-mints-its-task-id-off-the-daemon-loop.test.ts
     - test/a-garden-mint-is-bounded-by-loop-available-time.test.ts
-  status: queued
+  status: merged
   priority: 1  # operator-2026-10-15: the same false-timeout class W1-T9651 closed everywhere else
   attempts: 0
   rationale: |

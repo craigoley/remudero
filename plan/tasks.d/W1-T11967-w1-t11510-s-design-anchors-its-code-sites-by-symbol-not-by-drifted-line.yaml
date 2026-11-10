@@ -1,0 +1,21 @@
+- id: W1-T11967
+  title: W1-T11510's design anchors its code sites by symbol, not by drifted line number
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: low
+  status: queued
+  attempts: 0
+  files:
+    - plan/tasks.d/W1-T11510-an-interphase-review-pass-arms-a-ready-pr.yaml
+  acceptance:
+    - claim: The W1-T11510 shard states that its code sites were re-anchored to symbol names at the current origin/main, so a builder locates each site by name instead of by a stale line number
+      proof: "grep: RE-ANCHORED TO SYMBOLS in plan/tasks.d/W1-T11510-an-interphase-review-pass-arms-a-ready-pr.yaml"
+  origin: architect
+  rationale: >-
+    From the 2026-11-09 follow-up on W1-T11510-1794262172543, ratified via rmd approve:
+  
+    follow-up harvest [task]: re-anchor W1-T11510's design line references (`daemon.ts:2344`,
+    `sweep.ts:1174/1189/1191/1267`, `run-task.ts:33086`) when implementing. Why: they have
+    drifted, and the record cites stale lines. — from W1-T11510 (run W1-T11510-1794262172543)

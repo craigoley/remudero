@@ -1,0 +1,27 @@
+- id: W1-T11779
+  title: Record what the APPROVE-followup implementation for W1-T11169 already contains and which review fixes and PR steps remain
+  repo: remudero
+  depends_on:
+    - W1-T11169
+  type: recon
+  verify: auto
+  risk: low
+  priority: 4
+  status: queued
+  # backlog gardener: band=4 evidence=ae09ca9277b64410
+  # backlog gardener: placed=2026-11-09T02:11:50.610Z
+  attempts: 0
+  files:
+    - plan/tasks.d/W1-T11169-a-dead-daemons-fix-seed-stays-settled-across-later-boots.yaml
+  acceptance:
+    - claim: The W1-T11169 shard records, from reading the diff of origin/main against the APPROVE-followup branch 2f59eaea3, which parts of the dead-daemon fix-seed settlement are already implemented
+      proof: "grep: Implemented on 2f59eaea3 in plan/tasks.d/W1-T11169-a-dead-daemons-fix-seed-stays-settled-across-later-boots.yaml"
+    - claim: The shard names the review fixes still owed and whether a pull request is already open for the branch, so the build task does not redo existing work
+      proof: "grep: Remaining after 2f59eaea3 in plan/tasks.d/W1-T11169-a-dead-daemons-fix-seed-stays-settled-across-later-boots.yaml"
+  origin: followup:W1-T11169-1794134716186:2026-11-08T10:49:40.485Z:0
+  rationale: >-
+    From the 2026-11-08 follow-up on W1-T11169-1794134716186, ratified via rmd approve:
+  
+    follow-up harvest [research]: read `git diff origin/main HEAD` and the APPROVE-followup branch
+    `2f59eaea3` — the implementation already exists, and what remains (review fixes, PR open)
+    depends on that diff. — from W1-T11169 (run W1-T11169-1794134716186)

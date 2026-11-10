@@ -27,6 +27,7 @@ import { dirname, join, relative } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { assertLiveWriteAllowed } from "./live-write-guard.js";
 import { loadPlanFromYaml } from "./plan.js";
+import { planReconcilePrBody, planReconcileProofTemplate } from "./plan-reconcile-batch.js";
 import { resolveRepoLayout } from "./repo-layout.js";
 import { slug as kebabSlug } from "./feedback-docket.js";
 import { mergeFeedbackRecord, type FeedbackRecordMergeDecision } from "./feedback-record-merge.js";
@@ -1718,6 +1719,17 @@ export function landPlanReconcileShards(root: string, inputs: readonly LandConte
 
 export type PlanReconcileLand = (root: string, inputs: readonly LandContentInput[], opts: LandFeedbackAsyncOpts) => LandFeedbackResult | Promise<LandFeedbackResult>;
 
+/**
+ * W1-T11860: a refused landing's message, bounded. A failed `gh pr create` echoes its whole command line, pull-request body
+ * included (93,961 characters on 2026-11-08), and ends with its cause, so the start and the last 600 characters are kept.
+ */
+export function boundedLandingError(message: string, max = 1_000): string {
+  if (message.length <= max) return message;
+  const head = message.slice(0, 300);
+  const tail = message.slice(-600);
+  return `${head} ... [${message.length - head.length - tail.length} characters dropped] ... ${tail}`;
+}
+
 /** W1-T9695: the cadence's sync `land` seam over an awaited landing. `land` starts one; `settled` awaits all and throws on a refusal. */
 export function planReconcileLanding(
   root: string,
@@ -1726,7 +1738,7 @@ export function planReconcileLanding(
 ): { land: (inputs: readonly LandContentInput[]) => void; settled: () => Promise<void> } {
   const landings: Promise<LandFeedbackResult>[] = [];
   const requireLanded = (landing: LandFeedbackResult): void => {
-    if (!landing.landed || landing.error) throw new Error(landing.error ?? "plan reconciliation landing did not produce a PR");
+    if (!landing.landed || landing.error) throw new Error(boundedLandingError(landing.error ?? "plan reconciliation landing did not produce a PR"));
   };
   return {
     land: (inputs) => {
@@ -1747,7 +1759,7 @@ function planReconcileLandingKindSteps(
     {
       family: "plan-reconcile",
       commitMessage: (files) => [PLAN_RECONCILE_LANDING_PR_TITLE, "", "Automated plan-status reconciliation from the measurement cadence.", "", ...files.map((file) => `- ${file}`)].join("\n"),
-      prBody: (files, content) => ["Reconciles credited task shards whose decorative status is still queued.", "", "The change is derived from the existing credit projection and staged through the scratch-index landing bridge.", "", "## Acceptance", ...files.map((file) => `- ${file} is reconciled without a daemon checkout write | ${landingProof(file, `grep: ^  status: merged$ in ${file}`, content)}`)].join("\n"),
+      prBody: (files, content) => planReconcilePrBody(files, (file) => landingProof(file, planReconcileProofTemplate(file), content)),
     },
     root,
     opts,

@@ -15,7 +15,7 @@
     - src/run-task.ts
     - test/a-follow-up-restated-by-a-later-round-is-one-finding.test.ts
     - test/the-fleet-triages-its-own-findings.test.ts
-  status: queued
+  status: merged
   priority: 1.5  # operator ruling 2026-10-13: the task-id merge is now a visible loss — 40 distinct operator asks declined as merged
   attempts: 0
   rationale: |

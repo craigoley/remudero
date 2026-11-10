@@ -1,0 +1,132 @@
+- id: W1-T11850
+  title: "An author preflight with the same key as one already running follows it instead of repeating census. The key is repository, task, exact head, base, preflight profile and toolchain. Before census-precheck, a run joins a single-flight record outside every worktree. An exact-key follower consumes the leader's exact terminal receipt; a changed key runs on its own; takeover only once the leader is proven ended; any unproven state ends NOT_MEASURED, never pass"
+  repo: remudero
+  depends_on: [W1-T11849]  # a follower's receipt must not share the default summary path with a concurrent leader
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 20.00
+  risk: high  # Rule 19: one concern, when an author run may skip census because an identical run is in flight. A wrong key or takeover reports a verdict the tree never earned
+  band_meaning: blast-radius
+  priority: 2
+  origin: architect
+  plan_refs: [W1-T11099, W1-T11101, W1-T11100, W1-T9951, W1-T9602, W1-T11849]
+  files:
+    - scripts/preflight-author.mjs
+    - scripts/lib/author-single-flight.mjs
+    - test/ci/an-identical-author-preflight-follows-the-running-one.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    ORIGIN: operator initiative from the PR #17348 recovery, gap A (same-key author-preflight single-flight before census).
+    MEASURED (W1-T11099 and W1-T11100 rationales, 12 author receipts 2026-11-02): census-precheck alone took 536-2,336 s.
+    It took 2,336 s at load 34-47 on 8 cores, while three author preflights and the fleet ran at once. Identical
+    concurrent runs pay for the same census twice, and each run slows the others.
+    READ in this worktree (scripts/preflight-author.mjs main()): the run resolves receipt.headSha and receipt.baseSha
+    (40-hex), runs publication identity, coverage blanking and selection, and then calls
+    `runStep('census-precheck', [.../census-precheck.mjs, '--base', receipt.baseSha])`. Nothing records an in-flight
+    run anywhere another process can see it. A grep of scripts/ for leader, follower, single-flight and takeover finds
+    only author-step-capture.mjs's process-group "leader", which is a different thing.
+    Settled by lookup: is this already filed or already decided? -> No.
+      - W1-T11101 (queued) reuses one run's own census answer inside the same run's static stage (env
+        RMD_AUTHOR_CENSUS_ANSWERED). It works within one process, never across processes.
+      - W1-T11099 (queued) records host admission in shadow. It never dedups.
+      - W1-T11100 (queued) changes a census reader's budget source.
+      - W1-T9602 (merged) reuses a harness-observed push-gate pass per tree. It covers hooks/pre-push, not the author
+        preflight, and is trusted only because the harness observed it.
+      - W1-T9951 (queued) is static-before-suite-queue.
+      None of these stops two concurrent identical author runs from both running census.
+    Settled by lookup: is there a lock and liveness primitive to reuse? -> Yes, in src/lib/fs-race-safe.ts:
+      createOrReadExclusive, reclaimStaleLock (identity-plus-bytes reclaim) and isHolderStale (host first, then boot,
+      then pid with a start-time reuse check; an indeterminate start time is no evidence). preflight-author.mjs already
+      imports src/lib TypeScript modules.
+    Settled by lookup: where may the record live? -> Outside every worktree, and never the git common dir: W1-T9740
+      forbids census-precheck from writing it, and followers may run in sibling worktrees. W1-T9756 forbids fixture
+      state under the real scratch root, so the root is an injected main() option in tests.
+    Settled by lookup: does an open PR already touch this? -> No. The 3 open PRs on 2026-11-09 are #17505 (+3/-8
+      against main), #17494 (+3/-12) and #17485 (+12/-3). None touches scripts/preflight-author.mjs or census-precheck
+      (https://api.github.com/repos/craigoley/remudero/pulls?state=open, compare main...head for each).
+  design: |
+    OWNER: new scripts/lib/author-single-flight.mjs (exports joinAuthorFlight and finishAuthorFlight), called only by
+    scripts/preflight-author.mjs main(). census-precheck.mjs, ci-parity and the fleet pre-open gate are unchanged.
+    1. KEY. Compute it after head, base, publication identity and selection are known, and before census-precheck.
+       Fields:
+       - repository: `git remote get-url origin`, with any userinfo removed, the host lowercased and `.git` stripped.
+         With no origin, use the realpath of `git rev-parse --git-common-dir`.
+       - task: the W1-T id the --head-ref names, else the HEAD commit's `Task:` trailer, else the literal "none".
+       - head: receipt.headSha. base: receipt.baseSha.
+       - profile: --dry-run, --head-ref, --head-sha, and the sha256 of the --runtime-profile and --author-profile file
+         bytes (or "absent").
+       - toolchain: process.version, platform, arch, the sha256 of node_modules/.package-lock.json, and
+         node_modules/typescript/package.json's version.
+       keyDigest is the sha256 of the canonical JSON of those fields. If any field cannot be read, the run is
+       INDEPENDENT: it runs exactly as today and records singleFlight.role "independent" with reason
+       "key-unknown: <field>". It never shares on an uncertain identity. A --dry-run run is always independent.
+    2. RECORD. The root is an account-owned directory, mode 0700, by default under the account's own cache directory
+       (homedir), never in a worktree or the git common dir. Tests inject the root through a main() option. Each
+       keyDigest gets its own subdirectory, holding leader.json and terminal.json.
+    3. LEADER. createOrReadExclusive(leader.json) records {pid, host, startedAt, key, diagnosticsDir}. The winner runs
+       as today from census-precheck on. On EVERY terminal path (pass, fail, time-bound NOT_MEASURED, thrown), it
+       writes terminal.json through writeAtomic: {key, leader pid and startedAt, verdict, exitCode, censusNotMeasured,
+       receiptPath}. Then it removes its own leader.json. Single-flight dedups IN-FLIGHT runs only, and is not a cache.
+       A run that starts while no leader is live becomes a fresh leader, even when an older terminal.json exists.
+    4. FOLLOWER. If leader.json is held by a holder isHolderStale judges live, the run is a follower. It starts NO
+       census-precheck, static or suite child. It polls for a terminal.json whose leader pid and startedAt match the
+       holder it saw, at an existing beat interval from src/lib/test-slot.ts (no new fixed constant). It verifies that
+       the terminal key equals its own key byte for byte, then writes its own receipt:
+       - verdict and exitCode copied from the leader;
+       - singleFlight {role: "follower", keyDigest, leader, consumedReceipt: receiptPath, waitedMs};
+       - one step "single-flight-follow" whose ok is the leader's.
+       A failed leader stays failed and a NOT_MEASURED leader stays NOT_MEASURED for the follower. A follower never
+       upgrades a verdict.
+    5. TAKEOVER, ONLY ON PROOF. The follower may act only when isHolderStale proves the holder ended: same host, and
+       the pid is dead or its start time shows reuse. Even then, a matching terminal.json is consumed if one exists.
+       Without one, reclaimStaleLock and then createOrReadExclusive. The single winner becomes leader and records
+       takenOverFrom {pid, host, startedAt}. Losers follow the winner. Some holders can never be proven ended: a
+       foreign host, an indeterminate start time, or an unreadable or malformed leader.json. For those the follower
+       never takes over. It waits until its own --deadline minus AUTHOR_SHUTDOWN_RESERVE_MS, or until the leader's
+       terminal.json appears.
+    6. FAILURE STAYS UNKNOWN. Several states end the follower NOT_MEASURED, exit non-zero, with
+       singleFlight.reason naming the state and censusNotMeasured {reason: "single-flight", checkedBy: "CI"}:
+       - an unreadable, malformed or key-mismatched terminal.json;
+       - a leader that is still unproven at the follower's deadline;
+       - a record root it cannot create with mode 0700.
+       It is never a pass and never a silent re-run. The only path that re-runs census is the proven-ended takeover
+       in step 5. A follower with no --deadline waits only while the leader is provably live. The leader is bounded by
+       its own step limits.
+    TEST (test/ci/an-identical-author-preflight-follows-the-running-one.test.ts). Spawn two REAL preflight-author.mjs
+    processes against one fixture repo. The fixture's scripts/census-precheck.mjs is a stub that appends one line per
+    invocation to a counter file, then blocks until the test releases it. Inject the record root through an
+    env-free main() option, via a small fixture entry.
+      - POSITIVE CONTROL: two simultaneous identical requests give exactly one counter line. Both runs end with the
+        same verdict, and the follower's receipt names the leader's receipt as consumedReceipt.
+      - CHANGED IDENTITY: a new commit (head), or a different --author-profile content (profile), started while the
+        first run is blocked, gives two counter lines and two leader records.
+      - TAKEOVER: SIGKILL the leader while it is blocked in census. The follower takes over, the counter reaches
+        exactly 2 (one per proven leader), and the receipt names takenOverFrom.
+      - NO TAKEOVER: a leader.json naming a foreign host, or an unreadable start time, is never taken over. The
+        follower ends NOT_MEASURED at its deadline and never reports pass.
+      - FAILURE KEPT: a failing leader and a time-bound leader are consumed as failed and NOT_MEASURED. An unreadable
+        terminal.json reads NOT_MEASURED.
+    LIMITS / NOT IN SCOPE: caching across non-overlapping runs; the fleet pre-open gate and hooks/pre-push
+    (W1-T9602 owns push-gate reuse); census-precheck internals (W1-T11098, W1-T11100); host admission (W1-T11099,
+    W1-T9951); W1-T11101's within-run reuse. W1-T11099 and W1-T11101 also edit scripts/preflight-author.mjs, so
+    whichever lands second rebases. Do not run a real author preflight on the host to prove this; the fixture
+    processes are the proof.
+  acceptance:
+    - claim: "two simultaneous identical author preflight requests produce exactly one census-precheck execution, and the follower's receipt consumes the leader's exact terminal receipt and verdict"
+      proof: "unit test: test/ci/an-identical-author-preflight-follows-the-running-one.test.ts"
+    - claim: "a changed head or a changed preflight profile runs its own census independently while the first run is still in flight"
+      proof: "grep: W1-T11850 criterion 2 in test/ci/an-identical-author-preflight-follows-the-running-one.test.ts"
+    - claim: "a leader proven ended (dead pid or reused pid on this host) is taken over by exactly one follower; a leader that cannot be proven ended is never taken over and its follower ends NOT_MEASURED, never pass"
+      proof: "grep: W1-T11850 criterion 3 in test/ci/an-identical-author-preflight-follows-the-running-one.test.ts"
+    - claim: "a failed or time-bound leader is consumed as failed or NOT_MEASURED, and an unreadable terminal record reads NOT_MEASURED"
+      proof: "grep: W1-T11850 criterion 4 in test/ci/an-identical-author-preflight-follows-the-running-one.test.ts"
+    - claim: "the author preflight joins the single-flight record before census-precheck"
+      proof: "grep: joinAuthorFlight( in scripts/preflight-author.mjs"
+  falsifier: |
+    At this tree, two simultaneous identical runs against the stub census write two counter lines, so the positive
+    control fails. The design is wrong in any of these cases:
+    - a changed head or profile ever writes one line;
+    - a follower of a live, foreign-host or unprovable leader ever runs census or reports pass;
+    - two followers both take over one dead leader (three lines).

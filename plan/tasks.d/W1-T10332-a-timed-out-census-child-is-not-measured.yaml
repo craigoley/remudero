@@ -13,7 +13,7 @@
   files:
     - src/run-task.ts
     - test/ci/a-timed-out-fix-round-precheck-child-is-not-measured.test.ts
-  status: queued
+  status: merged
   priority: 1  # the operator ruled; a refusal on a timeout kept a resolved merge off a PR for ten hours
   attempts: 0
   rationale: |

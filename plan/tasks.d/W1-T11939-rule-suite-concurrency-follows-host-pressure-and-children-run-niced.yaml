@@ -1,0 +1,40 @@
+- id: W1-T11939
+  title: The rule-suite run sizes its concurrency from host pressure and runs its children niced, with no fixed cap, so concurrent preflights stop oversubscribing the cores
+  repo: remudero
+  depends_on: []
+  priority: 0.7
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # scripts/list-rule-suites.mjs gates every author preflight; the failed-suites line and the set of suites run are unchanged
+  band_meaning: blast-radius
+  origin: "operator ruling 2026-11-10 go with it (efficiency batch, slim serve, lighten preflight, janitor)"
+  plan_refs:
+    - W1-T11099
+    - W1-T11100
+  files:
+    - scripts/list-rule-suites.mjs
+    - src/lib/test-slot.ts
+    - test/ci/rule-suite-concurrency-follows-host-pressure.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: The concurrency of the rule-suite run is computed from pressure (PSI or load average) injected as a fake, rising when the host is idle and falling when it is busy
+      proof: "grep: W1-T11939 criterion 1 in test/ci/rule-suite-concurrency-follows-host-pressure.test.ts"
+    - claim: There is no fixed ceiling constant, and the minimum width is one so the run always progresses
+      proof: "grep: W1-T11939 criterion 2 in test/ci/rule-suite-concurrency-follows-host-pressure.test.ts"
+    - claim: Rule-suite children run niced and the failed-suites line and exit status are unchanged
+      proof: "grep: W1-T11939 criterion 3 in test/ci/rule-suite-concurrency-follows-host-pressure.test.ts"
+    - claim: An unreadable pressure source falls back to the current width, never to zero
+      proof: "grep: W1-T11939 criterion 4 in test/ci/rule-suite-concurrency-follows-host-pressure.test.ts"
+  rationale: |
+    OBSERVED 2026-11-10 (preflight research): the static phase's rule-checks took 676 s of 910 s (74 percent); scripts/list-rule-suites.mjs runRuleSuitesConcurrently (around :96) defaults concurrency to every core, so each of about nine concurrent preflights spawns 8 suites on an 8-core host. The load flapped time-bound suites on 11-09 (host load 40 to 55), producing refusals that were not defects in the change.
+    - Effect: thrash, longer wall time, and false failures; this saves no CPU by itself, it ends the contention.
+  design: |
+    Derive the width from host pressure at the start and between suites (width up when the host is idle, down when busy, never below one, no fixed cap), run children under nice, and leave the suite list, order and verdict lines alone. The operator rejected hard caps. NOT IN SCOPE: skipping suites (W1-T11819) and the test slot's own admission.
+  falsifier: |
+    Hard-code the width and criterion 1 must fail. Let it reach zero and criterion 2 must fail. Change the verdict line and criterion 3 must fail. Restore and require all four to pass.
+  note: |
+    reservation hand-off: run-unfiled-1794269694199 -> run-unfiled-1794269694199
+    Reserved with rmd next-task-id (--count 9 and 1 on run-unfiled-1794269694199). Hand-built by the operator's choice (rulings 2026-11-10: slim serve, lighten preflight with no hard caps, janitor trims old worktrees). Check refs/rmd-dispatch/<id> and any run branch before building.

@@ -48,7 +48,7 @@ import { fileTargetJobStore, nativeTargetAdmission, readTargetExecution, type Pr
 import { loadManagedRepos } from "../../lib/managed-repos.js";
 import type { RunResult } from "../../lib/run-result.js";
 import { runBoundedTargetJob, type BoundedTargetJobPorts, type BoundedTargetJobOutcome, daemonBoot, daemonExitCodeForSummary, resolveFleetControlHold, runDaemon, readRestartHistoryLines, type CrashLoopVerdict, type DaemonDeps, type DaemonKick, type DaemonOpts, type DaemonSummary, priorUnrecognisedResetStrings, daemonPushTokenSource, receivePackCredentialProbe } from "../../lib/daemon.js";
-import { sweepStrandedReviewWorktrees } from "../../lib/review-worktree-reclaim.js";
+import { sweepStrandedReviewWorktreesAsync } from "../../lib/review-worktree-reclaim.js";
 import { sweepReclaimableArtifacts } from "../../lib/disk-artifact-reclaim.js";
 import { readGhRateLimitBuckets } from "../../lib/daemon-health.js";
 import { defaultListCandidates, defaultReadMarkers, killProcessGroup, sweepOrphanWorkers, workerInstallationScope } from "../../lib/worker-containment.js";
@@ -58,7 +58,7 @@ import { daemonInstanceRegistryPath } from "../../lib/deployer.js";
 import { DEPENDABOT_REPAIR_SNAPSHOT_MAX_AGE_MS } from "../../lib/dep-review.js";
 import { withEscalationSpoolDrain } from "../../lib/host-escalation-spool.js";
 import { instanceMode, readInstanceRegistryText } from "../../lib/instance-mode.js";
-import { instanceRegistryRuntimePresent, selectedInstanceRegistryEnvPath, withInstanceRegistryRuntime } from "../../lib/instance-registry-selection.js";
+import { instanceRegistryRuntimePresent, ledgerSelectedRegistryReadTimeouts, selectedInstanceRegistryEnvPath, withInstanceRegistryRuntime } from "../../lib/instance-registry-selection.js";
 import { escalate, escalateWithJudge, realEscalationJudge, ghIssueGateway, ghIssueGatewayAsync, type Escalation, type EscalationJudgeVerdict } from "../../lib/escalate.js";
 import { createGhCallPacer } from "../../lib/open-prs-rest.js";
 import { buildMainHealthRung } from "../../lib/main-health-rung.js";
@@ -87,6 +87,7 @@ import { startMainEntryWatch } from "../../lib/main-entry.js";
 import { createLiveSetKeeper, createPlanCopyBook, daemonHolderSource, observedPlanSync, startDaemonMemoryCensus } from "../../lib/daemon-memory-census.js";
 import { terminalUnionScans } from "../../lib/sweep.js";
 import { createDaemonFootprint, daemonFootprintPath, installDaemonFootprint } from "../../lib/daemon-footprint.js";
+import { readHeapAdmissionHoldMode } from "../../lib/daemon-heap-admission-hold.js";
 import { applyDaemonMemoryPolicy, createDaemonMemoryGovernor, createDaemonSlackReclaimer, installDaemonSlackReclaimer, readDaemonMemoryPolicy } from "../../lib/daemon-memory-policy.js";
 import { workerThreads } from "../../lib/worker-heaps.js";
 import { readCiGateRequiredChecks } from "../../lib/ci-gate-required.js";
@@ -774,6 +775,7 @@ export async function daemonCommand(
   // the defaults and names itself on the daemon.memory_policy row below.
   const memoryPolicyRead = readDaemonMemoryPolicy(policyPath(deps.repoRoot ?? repoRoot));
   const memoryPolicyApplied = (deps.applyMemoryPolicy ?? applyDaemonMemoryPolicy)(memoryPolicyRead.policy);
+  const heapHoldMode = readHeapAdmissionHoldMode(policyPath(deps.repoRoot ?? repoRoot));
   // W1-T2697: mark THIS process as the daemon BEFORE anything below can append a ledger row —
   // every `appendLedger` call this process makes (in-process, e.g. a wired sweep tick) from here
   // on reports `actor: "daemon"` rather than the operator-shell default. See
@@ -885,6 +887,7 @@ export async function daemonCommand(
     appendLedger(ledgerPath, { run_id: runId, task_id: "DAEMON", step, lane: "daemon", ...extra });
     onMainEntryStep?.(step);
   };
+  ledgerSelectedRegistryReadTimeouts(log);
   // bundlemain: which entry this main started from (bin/rmd's choice), and a bundled main's first tick settles it.
   onMainEntryStep = startMainEntryWatch({ log, root: daemonModuleRepoDir });
   // W1-T9065: the lane's approve and the responder's reframe run from a tree at origin/main.
@@ -1972,7 +1975,7 @@ export async function daemonCommand(
         // W1-T3378: the daemon core owns the tick; this command owns the real filesystem/git
         // effect. Supplying the closure here makes the reviewed `review-PR*` reclaimer reachable
         // on every live daemon rather than leaving an optional DaemonDeps hook dead.
-        sweepStrandedReviewWorktrees: () => sweepStrandedReviewWorktrees(config, log),
+        sweepStrandedReviewWorktrees: async () => { await sweepStrandedReviewWorktreesAsync(config, log); },
         // W1-T3528: same reasoning, different unit — this one frees regenerable build output
         // inside checkouts that must be kept, which every whole-tree rung is right to refuse.
         sweepReclaimableArtifacts: () => sweepReclaimableArtifacts(config, log),
@@ -2005,6 +2008,8 @@ export async function daemonCommand(
         // own doc for why UNREACHABLE reads as held, never as clear.
         checkPause,
         workerAdmissionHold: () => resolveFleetControlHold({ checkStop, checkPause }),
+        heapAdmissionHoldMode: heapHoldMode.mode,
+        ...(heapHoldMode.error ? { heapAdmissionHoldModeError: heapHoldMode.error } : {}),
         // CODE FRESHNESS — THE PRODUCER W1-T126 NEVER GOT. The consumer has read
         // `deps.checkFreshness` since 2026 and this object never supplied it, so the stale
         // self-restart had fired ZERO times in the Azure daemon's 6,838-row ledger. MEASURED
