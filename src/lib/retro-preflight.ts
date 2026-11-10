@@ -144,7 +144,7 @@ export type RetroChangedFiles = { files: string[] } | { unreadable: string };
 
 /** Which suite set an attempt ran, and the broad count it would otherwise have run. */
 interface SuiteSelection {
-  mode: "changed-paths" | "broad";
+  mode: "changed-paths" | "plan-only" | "broad";
   reason: string;
   changedPathCount: number | null;
   broadSuiteCount: number | null;
@@ -498,7 +498,7 @@ const listArg = ["--import", "tsx", "scripts/diff-class.mjs"];
 /** W1-T10144: the arguments that narrow the listing the way ci.yml narrows a plan-only PR; broad otherwise. */
 async function changedPathScope(worktreePath: string, run: RetroPrepublishRunner,
   changedFiles: (worktreePath: string) => Promise<RetroChangedFiles>, tmpRoot: string,
-): Promise<{ args: string[]; selection: SuiteSelection; cleanup: () => void; failure?: RetroPrepublishCommandResult }> {
+): Promise<{ args: string[]; selection: SuiteSelection; cleanup: () => void; diffClass?: string; failure?: RetroPrepublishCommandResult }> {
   const broad = (reason: string, changedPathCount: number | null = null) => ({
     args: [], selection: { mode: "broad" as const, reason, changedPathCount, broadSuiteCount: null }, cleanup: () => {} });
   const changed = await changedFiles(worktreePath);
@@ -525,7 +525,7 @@ async function changedPathScope(worktreePath: string, run: RetroPrepublishRunner
     return broad(verdict.error ? "diff class unavailable (command error)"
       : `diff class ${diffClass || `unreadable (exit ${verdict.status})`}`, changed.files.length);
   }
-  return { args: ["--changed-files", list], cleanup,
+  return { args: ["--changed-files", list], cleanup, diffClass,
     selection: { mode: "changed-paths", reason: `diff class ${diffClass}`, changedPathCount: changed.files.length, broadSuiteCount: null } };
 }
 
@@ -539,17 +539,44 @@ async function enumerateSuites(worktreePath: string, run: RetroPrepublishRunner,
   const scope = await changedPathScope(worktreePath, run, changedFiles, tmpRoot);
   if (scope.failure) return { suites: [], result: scope.failure, selection: scope.selection };
   let result: RetroPrepublishCommandResult;
+  let planOnly: { suites: string[]; result: RetroPrepublishCommandResult; broadSuiteCount: number | null } | undefined;
+  let fallbackReason: string | undefined;
   try {
-    result = await run(process.execPath, [...listArg, "--list-plan-reading-suites", ...scope.args], commandOptions(worktreePath));
+    if (scope.diffClass === "PLAN_ONLY") {
+      // W1-T11337: the author lane's plan-only selection over the same list; hosted CI keeps the full set.
+      const narrowed = await run(process.execPath, [...listArg, "--list-plan-only-suites", ...scope.args], commandOptions(worktreePath));
+      const narrowedSuites = normalizedOutput(narrowed.stdout).split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+      if (narrowed.status === 0 && !narrowed.error && !narrowed.cleanupError && narrowedSuites.length > 0) {
+        const replaced = await run(process.execPath, [...listArg, "--list-plan-reading-suites", ...scope.args], commandOptions(worktreePath));
+        const replacedCount = Number(/selected_count=(\d+)/.exec(normalizedOutput(replaced.stderr))?.[1] ?? NaN);
+        planOnly = { suites: narrowedSuites, result: { ...narrowed, stdout: normalizedOutput(narrowed.stdout), stderr: normalizedOutput(narrowed.stderr) },
+          broadSuiteCount: replaced.status === 0 && !replaced.error && Number.isSafeInteger(replacedCount) ? replacedCount : null };
+      } else if (processCleanupFailed(narrowed)) {
+        return { suites: narrowedSuites, result: { ...narrowed, stdout: normalizedOutput(narrowed.stdout), stderr: normalizedOutput(narrowed.stderr) },
+          selection: scope.selection };
+      } else {
+        fallbackReason = narrowed.status !== 0 || narrowed.error
+          ? `plan-only listing failed (exit ${narrowed.status ?? "none"})` : "plan-only listing empty";
+      }
+    }
+    if (!planOnly) {
+      result = await run(process.execPath, [...listArg, "--list-plan-reading-suites", ...scope.args], commandOptions(worktreePath));
+    }
   } finally {
     scope.cleanup();
   }
-  const stdout = normalizedOutput(result.stdout);
-  const stderr = normalizedOutput(result.stderr);
+  if (planOnly) {
+    return { suites: planOnly.suites, result: planOnly.result,
+      selection: { ...scope.selection, mode: "plan-only", reason: "diff class PLAN_ONLY (author plan-only selection)",
+        broadSuiteCount: planOnly.broadSuiteCount } };
+  }
+  const stdout = normalizedOutput(result!.stdout);
+  const stderr = normalizedOutput(result!.stderr);
   const suites = stdout.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
   const broadSuiteCount = Number(/previous_count=(\d+)/.exec(stderr)?.[1] ?? NaN);
-  return { suites, result: { ...result, stdout, stderr },
-    selection: { ...scope.selection, broadSuiteCount: Number.isSafeInteger(broadSuiteCount) ? broadSuiteCount : null } };
+  const reason = fallbackReason ? `${scope.selection.reason} (${fallbackReason}; plan-reading fallback)` : scope.selection.reason;
+  return { suites, result: { ...result!, stdout, stderr },
+    selection: { ...scope.selection, reason, broadSuiteCount: Number.isSafeInteger(broadSuiteCount) ? broadSuiteCount : null } };
 }
 
 async function runAttempt(
