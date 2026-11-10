@@ -1,0 +1,38 @@
+- id: W1-T12073
+  title: "The read broker's memory stays level while it serves reads"
+  repo: remudero
+  depends_on: []
+  priority: 1.0
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the cache every host session's GitHub reads go through; a wrong eviction serves a stale read or loses a fresh one
+  band_meaning: blast-radius
+  origin: operator-session#github-connections-2026-11-10
+  plan_refs:
+    - W1-T10279
+  files:
+    - src/lib/gh-read-broker.ts
+    - test/github/the-read-brokers-memory-stays-level-while-it-serves-reads.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "After the broker serves many distinct reads, the entries and bytes it keeps in memory are no more than what its cache budget allows, and an entry past its freshness is dropped from memory"
+      proof: "grep: W1-T12073 criterion 1 in test/github/the-read-brokers-memory-stays-level-while-it-serves-reads.test.ts"
+    - claim: "A read still inside its freshness is served from memory with no upstream call, exactly as before"
+      proof: "grep: W1-T12073 criterion 2 in test/github/the-read-brokers-memory-stays-level-while-it-serves-reads.test.ts"
+    - claim: "The status output reports the entries and bytes held in memory beside the budget, so growth is visible before a crash"
+      proof: "grep: W1-T12073 criterion 3 in test/github/the-read-brokers-memory-stays-level-while-it-serves-reads.test.ts"
+  rationale: |
+    MEASURED 2026-11-10 from the broker's journal on the Azure host: 199 "JavaScript heap out of memory" crashes between 2026-11-09 and 2026-11-10. The last garbage collection before each crash shows about 250 MB in use.
+    - systemd restarts the broker after each crash, so the failure shows only as lost cache and a pause in reads.
+    - src/lib/gh-read-broker.ts keeps four maps that are never bounded together: memo (whole cached bodies), entries, lastServed and inflight. A comment at BROKER_BOOT_PARSE_BYTES records an earlier crash loop from the same cause at boot.
+    - Every session's GitHub reads on that host go through this process. Each crash throws away the cache that saves those reads.
+  design: |
+    Find which map grows: run the broker's own test harness over a long series of distinct reads and count each map. Bound what is kept in memory by the cache budget the broker already computes (cacheShareOfFree of free bytes), dropping the least recently served entry first, and drop an entry from memory when its freshness ends. The disk cache keeps its own rules. Report the in-memory counts in `rmd gh-broker status`.
+    NOT IN SCOPE: the pacing and coalescing rules, the disk cache format, and a fixed heap flag.
+  falsifier: |
+    Keep every body in memory and criterion 1 must fail. Evict an entry that is still fresh while under budget and criterion 2 must fail. Leave the counts out of status and criterion 3 must fail. Restore and require all three to pass.
+  note: |
+    The builder states in the pull request which map grew and by how much per read.
