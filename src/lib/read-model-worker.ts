@@ -127,6 +127,12 @@ export const READ_MODEL_READ_HOT_MS = 2 * 60_000;
 export const READ_MODEL_IDLE_STRETCH_MAX = 32;
 /** Main posts one read of a path to the worker at most this often: well inside {@link READ_MODEL_READ_HOT_MS}. */
 export const READ_MODEL_READ_NOTE_MS = 5_000;
+/**
+ * BACKSTOP (W1-T11937): the heavy view lane ends between builds after this long with no read or want,
+ * returning its heap (0.86 GB, serve research 2026-11-10); the next one restarts it. An open console
+ * reads every minute, so only a closed one reaches it. Costs the first paint 0.3-5 s after idle.
+ */
+export const READ_MODEL_HEAVY_IDLE_MS = 10 * 60_000;
 /** `GET /v1/views/versions` (view-events.ts's VIEW_VERSIONS_PATH): a console polling every view's version reads them all. */
 const READ_MODEL_EVERY_VIEW_PATHS: ReadonlySet<string> = new Set(["/v1/views/versions"]);
 /** A legacy read that serves a view's body inside its own answer: `/v1/status` carries `needs-you`'s human gates. */
@@ -2135,12 +2141,15 @@ export interface ReadModelViewLane {
   accept(built: SlowLaneBodies): void;
   snapshot(write: SourceSnapshotWrite): void;
   /** Main asked for a key of a demand view. */
-  want(view: string, key: string): void;
+  want(view: string, key: string): ReadModelLaneWake;
   /** Serve answered a read of `path`: both lanes, since either may own a unit it reads. */
-  read(path: string): void;
+  read(path: string): ReadModelLaneWake;
   holdsOf(threadId: number): ThreadHoldsSnapshot | undefined;
   close(): void;
 }
+
+/** What a read or want did to an idle-ended heavy lane: nothing to restart, a restart, or a failed one the next read retries. */
+export type ReadModelLaneWake = { woke: "none" } | { woke: "restarted" } | { woke: "failed"; error: string };
 
 /**
  * Relay fast/heavy view threads (solo budget: W1-T5885). Watch each lane's heartbeat; report builds
@@ -2158,12 +2167,19 @@ export function threadViews(opts: {
   const selectedRegistryIntent = copySelectedRegistryIntent(opts.data.selectedRegistryIntent);
   const clock = opts.clock ?? systemClock;
   let closed = false;
-  interface Lane { name: "fast" | "heavy"; worker?: Worker; deaths: number; respawn?: NodeJS.Timeout; building?: { view: string; instance?: string; since: number; reported: boolean }; holds?: ThreadHoldsSnapshot }
+  interface Lane { name: "fast" | "heavy"; worker?: Worker; deaths: number; respawn?: NodeJS.Timeout; building?: { view: string; instance?: string; since: number; reported: boolean }; holds?: ThreadHoldsSnapshot;
+    /** Ended for want of a read (W1-T11937): its units stay its own, unbuilt, until a read restarts it. */
+    idle?: boolean;
+    /** When a read restarted it, until its first paint. */
+    wokeAt?: number }
   const fast: Lane = { name: "fast", deaths: 0 };
   const heavy: Lane = { name: "heavy", deaths: 0 };
   const other = (lane: Lane): Lane => (lane === fast ? heavy : fast);
   const reset: ReadModelViewsInput = { type: "lane", heavy: false, dueAt: 0 };
   const heavyUnits = new Set<string>();
+  // Each thread between a unit's start and its end: one is never ended for idleness mid-build.
+  const busy = new WeakSet<Worker>();
+  let lastReadAt = clock.now();
   const reclaim = (lane: Lane, reason: "exit" | "respawn"): void => {
     const survivor = other(lane);
     const count = survivor.name === "fast" ? heavyUnits.size : 0;
@@ -2205,11 +2221,18 @@ export function threadViews(opts: {
           from: lane.name, to: msg.heavy ? "heavy" : "fast", costMs: msg.costMs,
           soloMs: READ_MODEL_LEASE_RENEW_MS * READ_MODEL_PASS_SHARE * READ_MODEL_VIEW_SHARE,
         });
-        if (!heavy.worker && !heavy.respawn && !closed) spawnLane(heavy);
+        if (!heavy.worker && !heavy.respawn && !heavy.idle && !closed) spawnLane(heavy);
         return other(lane).worker?.postMessage({ ...msg, type: "lane" } satisfies ReadModelViewsInput);
       }
       if (msg.type === "body" && lane === heavy) fast.worker?.postMessage({ type: "peer", entry: msg.entry } satisfies ReadModelViewsInput);
+      if (lane.wokeAt !== undefined && lane.worker === spawned && (msg.type === "body" || (msg.type === "view_unit" && msg.phase === "end"))) {
+        opts.log("read_model.view_lane_restarted", { lane: lane.name, firstPaintMs: clock.now() - lane.wokeAt, units: heavyUnits.size });
+        lane.wokeAt = undefined;
+      }
       if (msg.type !== "view_unit") return opts.relay(msg);
+      if (msg.phase === "start") busy.add(spawned);
+      else busy.delete(spawned);
+      if (lane.worker !== spawned) return;
       lane.deaths = 0;
       lane.building = msg.phase === "start" ? { view: msg.view, ...(msg.instance ? { instance: msg.instance } : {}), since: clock.now(), reported: false } : undefined;
     });
@@ -2217,6 +2240,12 @@ export function threadViews(opts: {
     spawned.on("exit", (code) => {
       if (lane.worker !== spawned || closed) return;
       lane.worker = undefined;
+      if (lane.wokeAt !== undefined) {
+        // A restart that died before its first paint is left idle: the next read retries it.
+        lane.wokeAt = undefined;
+        lane.idle = true;
+        return opts.log("read_model.view_lane_restart_failed", { lane: lane.name, code });
+      }
       lane.deaths++;
       reclaim(lane, "exit");
       const delayMs = Math.min(opts.data.tickMs * 2 ** lane.deaths, READ_MODEL_MAX_BACKOFF_MS);
@@ -2230,7 +2259,43 @@ export function threadViews(opts: {
       lane.respawn.unref();
     });
   };
+  const endIdle = (): void => {
+    const running = heavy.worker, idleMs = clock.now() - lastReadAt;
+    if (closed || !running || busy.has(running) || idleMs < READ_MODEL_HEAVY_IDLE_MS) return;
+    Object.assign(heavy, { worker: undefined, idle: true, building: undefined, holds: undefined, wokeAt: undefined });
+    let exited = false;
+    running.once("exit", () => void (exited = true));
+    running.postMessage({ type: "stop" } satisfies ReadModelViewsInput);
+    opts.log("read_model.view_lane_idle_ended", { lane: heavy.name, idleMs, units: heavyUnits.size });
+    // The stop ends it between builds; a thread that outlives it is terminated, but never mid-build.
+    const reap = (): void => {
+      if (exited) return;
+      if (busy.has(running)) return void setTimeout(reap, READ_MODEL_STOP_WAIT_MS).unref();
+      void running.terminate();
+    };
+    setTimeout(reap, READ_MODEL_STOP_WAIT_MS).unref();
+  };
+  const wake = (): ReadModelLaneWake => {
+    lastReadAt = clock.now();
+    if (!heavy.idle || closed) return { woke: "none" };
+    try {
+      spawnLane(heavy, false);
+    } catch (error) {
+      const message = String((error as Error)?.message ?? error);
+      opts.log("read_model.view_lane_restart_failed", { lane: heavy.name, error: message });
+      return { woke: "failed", error: message };
+    }
+    heavy.idle = false;
+    heavy.wokeAt = lastReadAt;
+    // Its units are handed straight back, due now, so the fast lane keeps its own pace.
+    for (const id of heavyUnits) {
+      const [view, instance] = JSON.parse(id) as [string, string | null];
+      heavy.worker?.postMessage({ type: "lane", view, ...(instance === null ? {} : { instance }), heavy: true, dueAt: 0 } satisfies ReadModelViewsInput);
+    }
+    return { woke: "restarted" };
+  };
   const stopWatch = (opts.every ?? everyUnref)(() => {
+    endIdle();
     for (const lane of [fast, heavy]) {
       const building = lane.building;
       if (!building || building.reported || clock.now() - building.since < READ_MODEL_STALL_MS) continue;
@@ -2253,8 +2318,16 @@ export function threadViews(opts: {
     },
     accept: (built) => send({ type: "bodies", built }, [fast]),
     snapshot: (write) => send({ type: "snapshot", snapshot: write }),
-    want: (view, key) => send({ type: "want", view, key }),
-    read: (path) => send({ type: "read", path }),
+    want: (view, key) => {
+      const woke = wake();
+      send({ type: "want", view, key });
+      return woke;
+    },
+    read: (path) => {
+      const woke = wake();
+      send({ type: "read", path });
+      return woke;
+    },
     holdsOf: (threadId) => [fast, heavy].find((lane) => lane.worker?.threadId === threadId)?.holds,
     close: () => {
       closed = true;
