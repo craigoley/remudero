@@ -16,6 +16,7 @@ import { defaultIsPidAlive } from "./drain-lock.js";
 import { RmdError } from "./errors.js";
 import { brokerGhRead, ghBrokerClientSpawn, ghBrokerRouteFor, type GhBrokerClass, type GhBrokerResult } from "./gh-read-broker-client.js";
 import { refreshInstallationToken } from "./github-app.js";
+import { ghArgvNeedsNoCredential, githubRepoOfGhArgv, resolveGithubCredential } from "./github-credential.js";
 import { sameHost } from "./host-identity.js";
 import { LIVE_WRITE_SENTINEL_TOKEN, LiveWriteBlockedError } from "./live-write-guard.js";
 
@@ -146,6 +147,30 @@ export function refuseSentinelGhToken(file: string, args: readonly string[], env
   );
 }
 
+/**
+ * W1-T11926: the environment for one `gh` child, with the credential the resolver picked. Every spawn
+ * of `gh` in this module calls this, so no call bypasses the resolver. It returns `env` itself when
+ * the ambient token or gh's stored login answers. A process that carries the test-runner token is
+ * left alone, and so is a file that is not `gh`. A call with no credential throws before it spawns,
+ * unless it needs none or `gh` is a test's own stub.
+ */
+function ghCredentialEnv(file: string, args: readonly string[], env: NodeJS.ProcessEnv | undefined): NodeJS.ProcessEnv | undefined {
+  const base = env ?? process.env;
+  if (basename(file) !== "gh" || base.GH_TOKEN === LIVE_WRITE_SENTINEL_TOKEN || base.GITHUB_TOKEN === LIVE_WRITE_SENTINEL_TOKEN) return env;
+  return resolveGithubCredential({
+    env: base,
+    repo: githubRepoOfGhArgv(args),
+    operation: `gh ${args.slice(0, 2).join(" ")}`,
+    mayRunWithout: () => ghArgvNeedsNoCredential(args) || resolvesToTmpdirStub(file, base),
+  }).childEnv(env);
+}
+
+/** `opts` with the child's credential environment. It is `opts` itself when nothing changes. */
+function withGhCredentialEnv<T extends { env?: NodeJS.ProcessEnv }>(file: string, args: readonly string[], opts: T): T {
+  const env = ghCredentialEnv(file, args, opts.env);
+  return env === opts.env ? opts : { ...opts, env };
+}
+
 // W1-T10279: a live Mac broker paces reads from GitHub headers instead of the 180 s floor.
 // Writes and budget probes stay direct; without a broker, reads retain the floor.
 
@@ -153,7 +178,14 @@ export function refuseSentinelGhToken(file: string, args: readonly string[], env
  * This module owns every `gh` spawn (gh-transport census). */
 export function ghRunForBroker(args: string[], opts: { cwd?: string; maxBuffer: number }): Promise<{ stdout: string; stderr: string; exitCode: number }> {
   return new Promise((resolve) => {
-    execFile("gh", args, { cwd: opts.cwd, encoding: "utf8", maxBuffer: opts.maxBuffer, timeout: DEFAULT_GH_CALL_TIMEOUT_MS }, (err, stdout, stderr) => {
+    let env: NodeJS.ProcessEnv | undefined;
+    try {
+      env = ghCredentialEnv("gh", args, undefined);
+    } catch (err) {
+      // W1-T11926: the broker's caller reads a failed call from stderr, so the named sources go there.
+      return resolve({ stdout: "", stderr: (err as Error).message, exitCode: 1 });
+    }
+    execFile("gh", args, { cwd: opts.cwd, encoding: "utf8", maxBuffer: opts.maxBuffer, timeout: DEFAULT_GH_CALL_TIMEOUT_MS, env }, (err, stdout, stderr) => {
       const code = (err as { code?: unknown } | null)?.code;
       resolve({ stdout: String(stdout ?? ""), stderr: String(stderr ?? ""), exitCode: err ? (typeof code === "number" ? code : 1) : 0 });
     });
@@ -212,7 +244,7 @@ export function ghExecFile(file: string, args: string[], opts: ExecFileSyncOptio
 export function ghExecFile(file: string, args: string[], opts?: ExecFileSyncOptions): Buffer;
 export function ghExecFile(file: string, args: string[], opts: ExecFileSyncOptions = {}): string | Buffer {
   refuseSentinelGhToken(file, args, opts.env);
-  return execFileSync(file, args, ghOptionsWithDefaultTimeout(opts)) as string | Buffer;
+  return execFileSync(file, args, ghOptionsWithDefaultTimeout(withGhCredentialEnv(file, args, opts))) as string | Buffer;
 }
 
 export function ghJson(
@@ -221,7 +253,7 @@ export function ghJson(
   exec: (
     file: string,
     execArgs: string[],
-    opts: { encoding: "utf8"; maxBuffer: number; timeout: number; killSignal?: NodeJS.Signals | number },
+    opts: { encoding: "utf8"; maxBuffer: number; timeout: number; killSignal?: NodeJS.Signals | number; env?: NodeJS.ProcessEnv },
   ) => string = execFileSync,
 ): unknown {
   // W1-T3297: injected exec reaches no network and must not spend a shared window.
@@ -234,12 +266,10 @@ export function ghJson(
     if (socket === undefined) applyGhReadCadence(args);
     else spawned = ghBrokerClientSpawn(socket, execArgs, ghBrokerClassOf(undefined));
   }
-  const out = exec(spawned.file, spawned.args, {
-    encoding: "utf8",
-    maxBuffer: DEFAULT_GH_MAX_BUFFER,
-    timeout: DEFAULT_GH_CALL_TIMEOUT_MS,
-    killSignal: DEFAULT_GH_SYNC_KILL_SIGNAL,
-  });
+  const execOpts: { encoding: "utf8"; maxBuffer: number; timeout: number; killSignal: NodeJS.Signals; env?: NodeJS.ProcessEnv } =
+    { encoding: "utf8", maxBuffer: DEFAULT_GH_MAX_BUFFER, timeout: DEFAULT_GH_CALL_TIMEOUT_MS, killSignal: DEFAULT_GH_SYNC_KILL_SIGNAL };
+  // W1-T11926: only the real spawn takes a credential. An injected exec reaches no network.
+  const out = exec(spawned.file, spawned.args, exec === execFileSync ? withGhCredentialEnv(spawned.file, spawned.args, execOpts) : execOpts);
   if (!isApiCall) return parseGhJsonBody(args, out);
   const { headers, body } = splitGhHeaderBlock(out, args.includes("--slurp"));
   if (onRateLimit) onRateLimit(parseGhRateLimitHeaders(headers));
@@ -252,7 +282,7 @@ const execFileAsync = (
   file: string,
   args: readonly string[],
   opts: { encoding: BufferEncoding; maxBuffer: number; timeout: number; env?: NodeJS.ProcessEnv },
-): Promise<{ stdout: string; stderr: string }> => execFileLoopBounded(file, args, opts);
+): Promise<{ stdout: string; stderr: string }> => execFileLoopBounded(file, args, withGhCredentialEnv(file, args, opts));
 
 export type GhAsyncExecutor = typeof execFileAsync;
 
@@ -460,7 +490,7 @@ export async function ghLinesAsync(
     return;
   }
   await applyGhReadCadenceAsync(args);
-  const child = spawn("gh", args, { stdio: ["ignore", "pipe", "pipe"] });
+  const child = spawn("gh", args, { stdio: ["ignore", "pipe", "pipe"], env: ghCredentialEnv("gh", args, undefined) });
   // Not spawn's own `timeout`: a child that never started never exits, and that timer then holds the process open.
   // W1-T9651: bounded by loop-available time, so a held loop never kills a log that already finished.
   const bound = boundChildByLoopTime(child, timeout);
