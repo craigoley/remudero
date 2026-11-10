@@ -8,7 +8,7 @@
   priority: 2.5
   risk: high
   band_meaning: span
-  status: queued
+  status: merged
   attempts: 0
   author_class: machine
   origin: "feedback#console-operator-guidance-generation-store-20261026"

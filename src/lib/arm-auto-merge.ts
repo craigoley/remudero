@@ -1748,11 +1748,20 @@ function* attemptArmSteps(
   }
 }
 
+/** W1-T11259 — the 405 GitHub returns when the base moved between its mergeability read and the merge. */
+export function mergeDirectRefusalIsBaseModified(stderrText: string): boolean {
+  return /Base branch was modified/.test(stderrText);
+}
+
+/** W1-T11259 — the refusal GitHub returns while a required check has not yet reported on the head. */
+export function mergeDirectRefusalIsCheckExpected(stderrText: string): boolean {
+  return /Required status check ".*" is expected/.test(stderrText);
+}
+
 /** The REST merge once {@link directMergePreflight} has let it through. */
 function* mergeDirectAfterPreflightSteps(
   prUrl: string,
-  deps: Pick<ArmDeps<true>, "mergeDirect" | "isMerged" | "say" | "contributorAdmission"> &
-    Partial<Pick<ArmDeps<true>, "ledgerLines">>,
+  deps: Pick<ArmDeps<true>, "mergeDirect" | "isMerged" | "say" | "contributorAdmission"> & DirectMergePreflightDeps,
   evidence: DirectMergePreflightEvidence | undefined,
 ): Steps<ArmAttemptResult> {
   try {
@@ -1764,15 +1773,70 @@ function* mergeDirectAfterPreflightSteps(
     return { outcome: "direct-merged", directMergePreflight: evidence };
   } catch (e2) {
     if (e2 instanceof OperatorMergeHoldWriteRefused) return { outcome: "hold-refused" };
-    const msg2 = String((e2 as { stderr?: unknown })?.stderr ?? (e2 as Error)?.message ?? e2);
+    let msg2 = String((e2 as { stderr?: unknown })?.stderr ?? (e2 as Error)?.message ?? e2);
     // W1-T1050: a merge that landed must never be reported as a failed one.
     if (yield* step(() => deps.isMerged?.(prUrl))) {
       deps.say(`automerge.clean_status_direct_merge (merge landed; a post-merge step failed: ${msg2}): ${prUrl}`);
       return { outcome: "direct-merged", directMergePreflight: evidence };
     }
+    let finalEvidence = evidence;
+    // W1-T11259: GitHub refused an already-clean PR because the base moved under it. That is W1-T1280's
+    // unsettled refusal, so it gets W1-T1280's bounded loop: re-read, re-run the preflight on MERGEABLE,
+    // and retry the write once. `readMergeFacts` is optional — absent, this block is skipped.
+    if (deps.readMergeFacts && mergeDirectRefusalIsBaseModified(msg2)) {
+      for (let read = 1; read <= REST_MERGE_UNSETTLED_MAX_READS; read++) {
+        const facts = yield* step(() => deps.readMergeFacts!(prUrl));
+        if (facts.mergeable === "CONFLICTING") {
+          deps.say(
+            `automerge.clean_status_direct_merge_conflict (W1-T11259): settled CONFLICTING on read ` +
+              `${read}/${REST_MERGE_UNSETTLED_MAX_READS} — ${prUrl}`,
+          );
+          break;
+        }
+        if (facts.mergeable === "MERGEABLE") {
+          deps.say(
+            `automerge.clean_status_direct_merge_retry (W1-T11259): base branch was modified; settled MERGEABLE ` +
+              `on read ${read}/${REST_MERGE_UNSETTLED_MAX_READS} — retrying: ${prUrl}`,
+          );
+          const retryPreflight = yield* directMergePreflightSteps(prUrl, deps, evidence?.priorHeadSha, { error: msg2 });
+          if (!retryPreflight.proceed) return retryPreflight.result;
+          finalEvidence = retryPreflight.evidence;
+          try {
+            yield* step(() => deps.contributorAdmission?.(prUrl, evidence?.priorHeadSha));
+            const heldBeforeRetry = operatorHoldRefusal(prUrl, deps);
+            if (heldBeforeRetry) return heldBeforeRetry;
+            yield* step(() => deps.mergeDirect(prUrl));
+            deps.say(`automerge.clean_status_direct_merge (W1-T11259; merged on retry ${read}): ${prUrl}`);
+            return { outcome: "direct-merged", directMergePreflight: finalEvidence };
+          } catch (e4) {
+            if (e4 instanceof OperatorMergeHoldWriteRefused) return { outcome: "hold-refused" };
+            msg2 = String((e4 as { stderr?: unknown })?.stderr ?? (e4 as Error)?.message ?? e4);
+            if (yield* step(() => deps.isMerged?.(prUrl))) {
+              deps.say(`automerge.clean_status_direct_merge (merge landed; a post-merge step failed: ${msg2}): ${prUrl}`);
+              return { outcome: "direct-merged", directMergePreflight: finalEvidence };
+            }
+          }
+          break; // ONE retry once settled MERGEABLE, as W1-T1280 — never a second.
+        }
+        if (read < REST_MERGE_UNSETTLED_MAX_READS) {
+          yield* step(() => (deps.sleep ?? deps.sleepSync)?.(REST_MERGE_UNSETTLED_RETRY_INTERVAL_MS));
+        }
+      }
+    }
+    // W1-T11259: "ci-gate is expected" means a required check has not reported on this head yet — not
+    // a failed merge. Hold it (retry-later, mergeable_state blocked) so W1-T9212's checks-green
+    // re-evaluation merges it on the next light pass once the check reports.
+    if (mergeDirectRefusalIsCheckExpected(msg2)) {
+      deps.say(`automerge.clean_status_direct_merge_held (W1-T11259): ${msg2} — held for the next checks-green pass: ${prUrl}`);
+      return {
+        outcome: "plan-pr-held",
+        error: msg2,
+        directMergePreflight: { ...finalEvidence, remedy: "retry-later", mergeableState: "blocked" },
+      };
+    }
     deps.say(`automerge.direct_merge_failed: ${msg2} — ${prUrl}`);
     // W1-T8620: GitHub's refusal text rides the result, so the ledger rows carry the reason.
-    return { outcome: "direct-merge-failed", error: msg2, directMergePreflight: evidence };
+    return { outcome: "direct-merge-failed", error: msg2, directMergePreflight: finalEvidence };
   }
 }
 

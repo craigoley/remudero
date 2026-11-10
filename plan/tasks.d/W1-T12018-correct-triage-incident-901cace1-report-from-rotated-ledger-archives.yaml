@@ -1,0 +1,101 @@
+- id: W1-T12018
+  title: "Correct docs/forensics/triage-incident-901cace1adefcf4b.md from the rotated ledger archives. The merged W1-T11812 report says verdict unknown and follow-up none because it searched only the live ledger, but the deciding claim rows exist in two 2026-11-08 archives. Add one evidence-cited correction section and nothing else"
+  repo: remudero
+  depends_on: []
+  type: recon
+  verify: auto
+  risk: low
+  status: queued
+  attempts: 0
+  origin: architect
+  plan_refs: ["§5B"]
+  files:
+    - docs/forensics/triage-incident-901cace1adefcf4b.md
+  rationale: >-
+    OBSERVED GAP. The merged W1-T11812 report (docs/forensics/triage-incident-901cace1adefcf4b.md) searched only the
+    live ledger state/ledger.ndjson, found no rotated archive beside it, and so recorded `investigation verdict:
+    unknown` and `follow-up: none`. Its stated minimum missing evidence was the triage.claim and triage.claim_released
+    rows of runs TRIAGE-incident-901cace1adefcf4b-1794148822712 and -1794149957761, plus run 2's entry-point rows.
+    The operator has since found those rows in two rotated archives under /home/craigoleyagent/rmd-state2/state:
+    ledger.2026-11-08T14-55-52-853Z.ndjson.gz and ledger.2026-11-08T16-15-19-627Z.ndjson.gz. Rows reported there:
+    run 1 triage.claim acquired 14:40:30.582Z; #17389 opened 14:46:16Z; run 1 verdict at 14:46:17.333Z was
+    pr_attribution_failed because the claimed PR head branch could not be resolved; run 1 released its holder claim
+    at 14:46:25.881Z. Run 2 auto_triage.fired 14:59:17.644Z, then acquired the claim at 14:59:46.934Z while #17389 was
+    still open; #17389 merged 15:05:05Z (https://github.com/craigoley/remudero/pull/17389). Run 2 opened #17394 at
+    15:12:10.829Z (https://github.com/craigoley/remudero/pull/17394), recorded run.awaiting_external at 15:12:25.501Z,
+    and released its claim at 15:13:47.849Z. A forensic report that still reads unknown/none after its own minimum
+    missing evidence turned up misleads every later reader. This task adds the correction. It files no fix.
+
+    Settled by lookup: is this already filed or decided? -> no. Only W1-T11812 lists the report in `files:`, and it
+    is the merged investigation. No shard names either archive or a correction of this report (grep of plan/tasks.d
+    for 901cace1adefcf4b and ledger.2026-11-08T1). Settled by lookup: may W1-T11812's shard be edited instead? -> no.
+    Its design says "Do not edit this shard: Rule 15 refuses criteria edits"
+    (plan/tasks.d/W1-T11812-record-whether-a-released-triage-claim-let-incident-901cace1-be-decided-twice.yaml).
+    Settled by lookup: does a fix task already exist for holder release while the PR is open? -> yes, W1-T6117. Its
+    design step 3 keeps remote claim ownership while the PR is awaiting CI and releases the remote claim only through
+    decideTriageClaimRelease once the outcome is observed
+    (plan/tasks.d/W1-T6117-triage-post-pr-handoff-crash-safe.yaml). So the correction links W1-T6117 and files no
+    new implement task. Settled by lookup: does docs/docs-index.json need an edit? -> no. Its entry keys on the H1
+    title "Triage of incident-901cace1adefcf4b was decided twice: investigation (W1-T11812)", which this task keeps
+    unchanged (docs/docs-index.json). Settled by lookup: who answers #17393? -> nobody in this task. It is the
+    needs-human grill #17394 opened, and only the operator answers it (W1-T11812 rationale,
+    https://github.com/craigoley/remudero/pull/17394).
+  design: |
+    READ-ONLY EXCEPT ONE FILE. The only write is a new correction section appended to
+    docs/forensics/triage-incident-901cace1adefcf4b.md. Do not modify triage, claims, refs/rmd-triage/*, the feedback
+    record, either PR, the ledger or its archives, or #17393. Do not answer, label, comment on or close #17393.
+    Do not edit the W1-T11812 shard or this shard. Add no code, no test and no implement task.
+
+    KEEP THE ORIGINAL TEXT. Leave the H1 title and the original labelled lines (corpus positive control:,
+    investigation timeline:, investigation verdict:, follow-up:) in place. W1-T11812's merged proofs grep them, and
+    they are the record of what the live-ledger-only search saw. Append a section headed
+    `## Correction (W1-T12018): rotated ledger archives` that supersedes them, and say so in its first line.
+
+    1. ARCHIVE COVERAGE. Line-leading label `archive coverage:`. Read both archives with a read-only decompressing
+       reader (zcat or the ledger union), never in place and never rewritten:
+       /home/craigoleyagent/rmd-state2/state/ledger.2026-11-08T14-55-52-853Z.ndjson.gz and
+       /home/craigoleyagent/rmd-state2/state/ledger.2026-11-08T16-15-19-627Z.ndjson.gz. Record for each: path, row
+       count, first and last row ts, and which of the two runs' rows it holds. Name one positive-control row from the
+       14:00Z-16:00Z window in each archive. Then state why W1-T11812 saw zero archives: a different state root, the
+       archives written or moved after its search, or unknown. Use only what the file metadata and paths show.
+    2. CORRECTED TIMELINE. Line-leading label `corrected timeline:`. One ordered table (ts UTC, source archive, event,
+       run, row fields quoted) holding at least: run 1 triage.claim 14:40:30.582Z; #17389 opened 14:46:16Z (GitHub);
+       run 1 verdict 14:46:17.333Z pr_attribution_failed, quoting the row's reason that the claimed PR head branch
+       could not be resolved; run 1 triage.claim_released 14:46:25.881Z, with the row's arm and dropped fields; run 2
+       auto_triage.fired 14:59:17.644Z; run 2 triage.claim 14:59:46.934Z, with proceed and stale_released quoted;
+       #17389 merged 15:05:05Z (GitHub); run 2 pr.opened #17394 15:12:10.829Z; run 2 run.awaiting_external
+       15:12:25.501Z; run 2 triage.claim_released 15:13:47.849Z. Every ledger row must be quoted from the archive. If a
+       row is not found at the stated ts, write that it was not found. Do not copy the ts from this shard.
+    3. CORRECTED VERDICT. Line-leading label `corrected verdict:`. Write the proven root cause narrowly: holder
+       completion released the cross-host triage claim at 14:46:25.881Z while #17389 was still open, which let a
+       second lane reacquire it at 14:59:46.934Z. Cite both rows. Then write on its own line, label `unproven:`,
+       that the exact reason the existing open-PR guard (isFeedbackOpenPr / readFeedbackLiveState in
+       src/lib/daemon.ts) did not block run 2's auto_triage.fire is still unproven. Name the receipt that would
+       decide it. Do not infer past the rows. Also record run 1's pr_attribution_failed as an observed fact. Do not
+       claim it caused the release unless a row says so.
+    4. CORRECTED FOLLOW-UP. Line-leading label `corrected follow-up:`. Name the existing task W1-T6117 and quote its
+       design step 3 (the remote claim is kept while the PR awaits CI). Say no new implement task is filed, because
+       W1-T6117 already holds that scope. Do not widen W1-T6117 and do not mint an id.
+    5. NEEDS-HUMAN. Line-leading label `needs-human preserved:`. State that #17393 stays needs-human, exactly as
+       #17394 opened it, and that this correction does not answer, relabel or close it.
+    6. LIMITATIONS. Line-leading label `limitations:`. List what the archives do not show: the open-PR guard's
+       input and answer for run 2, the host that wrote each archive, and any gap between the two archives' spans.
+       Also list whether the triage.claim rows carry a seq.
+  acceptance:
+    - claim: "The report gains a correction section that records both archive paths, their row counts and time spans, a positive-control row per archive, and why the original search saw no archive"
+      proof: "grep: archive coverage: in docs/forensics/triage-incident-901cace1adefcf4b.md"
+    - claim: "The correction carries one ordered timeline quoting both runs' claim, release, verdict, auto_triage.fired, pr.opened and run.awaiting_external rows from the archives, joined with #17389's open and merge times"
+      proof: "grep: corrected timeline: in docs/forensics/triage-incident-901cace1adefcf4b.md"
+    - claim: "The correction states the narrow proven root cause (holder release while #17389 was open, then a second-lane reacquire) and separately marks the open-PR guard's failure to block as unproven"
+      proof: "grep: corrected verdict: in docs/forensics/triage-incident-901cace1adefcf4b.md"
+    - claim: "The correction links the existing fix task W1-T6117 and files no new implement task"
+      proof: "grep: corrected follow-up: W1-T6117 in docs/forensics/triage-incident-901cace1adefcf4b.md"
+    - claim: "The correction states that #17393 stays needs-human, untouched"
+      proof: "grep: needs-human preserved: in docs/forensics/triage-incident-901cace1adefcf4b.md"
+    - claim: "The correction lists what the archives cannot show"
+      proof: "grep: limitations: in docs/forensics/triage-incident-901cace1adefcf4b.md"
+  note: "type:recon, verify:auto, risk:low. The only artifact is an appended section in one existing forensic report.
+    Every proof greps a line-leading label that the correction ADDS. None of these labels is in the report today,
+    so every proof fails until the correction is written. The original W1-T11812 labels stay in place, so its
+    merged proofs keep passing. Timestamps in this shard are the operator's reading of the archives. The worker must
+    quote each row from the archive, not from here. #17393 stays needs-human and untouched."

@@ -1,0 +1,102 @@
+- id: W1-T12113
+  title: "A STALE FIX-DISPATCH RECOVERY IS DECIDED BY ONE PURE, FAIL-CLOSED FUNCTION OVER THE EXACT IDENTITY, LIVENESS, CLAIM, NEWER-DISPATCH AND PRESERVATION EVIDENCE, AND ITS RECEIPT HAS ONE SCHEMA, IN SHADOW — `rmd pr-owner` reports OWNED for as long as any fix.dispatch row for the PR exists, and nothing in the code can say when that dispatch's worker is provably gone"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 14.00
+  risk: high  # Rule 19: one concern (decision, receipt schema and read-only shadow diagnostic); a false "recover" would release a live worker's PR
+  band_meaning: blast-radius
+  origin: architect
+  plan_refs: [W1-T4209, W1-T6362, W1-T2952, W1-T10389, W1-T11753, W1-T11751, W1-T8621]
+  files:
+    - src/lib/stale-fix-dispatch-recovery.ts
+    - src/run-task.ts
+    - test/fix-lane/a-stale-fix-dispatch-recovery-holds-on-any-doubt.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  acceptance:
+    - claim: "decideStaleFixDispatchRecovery returns recover only when the expected repo, PR, task, dispatch run_id and round_id, PR head and base, branch and authorization all equal the observed values, the recorded worker process is dead on this host, it has no live descendant and no process has a cwd at or below the worktree, no competing fix branch claim or dispatch claim is held; the exact O_EXCL fix branch claim acquired by this recovery invocation is permitted only when its claim run_id matches the expected recovery invocation run_id; if a pre-existing prior-dispatch lock was present, the expected tuple includes the prior lock's stored claim run_id derived by W1-T12114 from the fully anchored production `fixRoundClaimId` format and round history, and reclaim evidence must match that exact run_id plus dispatch run_id, same host, original dead pid (not live/reused), absent descendants, clear cwd census and compare-and-reclaim raw-byte identity; a same-recovery invocation lock must match its exact recovery_id; malformed, changed, foreign-host, reused, ambiguous or unknown locks hold; no fix.dispatch is newer than the named one, and preservation evidence names a published recovery ref (or proves a clean tree whose head the PR already contains); every other input, including a live, unknown, foreign-host or reused pid, a mismatched or changed head, base, branch, run or task, a newer dispatch, a competing claim, missing or unreadable evidence, and a failed preservation, returns hold with one named reason"
+      proof: "unit test: W1-T12113 identity mismatch holds"
+    - claim: "the receipt builder produces the same recovery_id for the exact prior dispatch and authorization regardless of attempt timestamp, outcome or liveness/preservation evidence; a held attempt followed by a valid release retains that recovery_id, and the receipt names the prior dispatch, PR, task, head, base, branch, authorization, liveness and preservation evidence, actor, timestamp, reason and outcome; a plan-only PR fixture decides and builds a receipt exactly like a code PR, and the receipt carries no credit, merge or fix.done field"
+      proof: "unit test: W1-T12113 recovery receipt is stable"
+    - claim: "the decision is a named export of the new module"
+      proof: "unit test: W1-T12113 decision export exists"
+    - claim: "the read-only pr-owner path returns a shadow hold when authorization is missing, leaves the owner verdict unchanged, and appends no receipt file or ledger row"
+      proof: "unit test: W1-T12113 pr-owner shadow preserves owner and receipts"
+    - claim: "the pr-owner read path invokes the decision function in shadow"
+      proof: "grep: decideStaleFixDispatchRecovery( in src/run-task.ts"
+  rationale: |
+    ORIGIN: architect create run PLAN-create-1794328578391 (2026-11-10): a governed operator recovery path for a
+    stale PR fix dispatch whose recorded worker is gone while `rmd pr-owner` still reports OWNED.
+    READ in this worktree:
+    - src/run-task.ts prOwnerVerdictFromFacts (~3893-3951) returns OWNED whenever `latestFix` is defined, that is,
+      whenever any fix.dispatch row for the PR exists in the ledger union. No row type ends that ownership, so a
+      dispatch whose worker died before writing fix.done holds the PR OWNED forever.
+    - src/lib/pr-owner-ledger.ts readPrOwnerLedgerProjection projects only fix.dispatch and sweep.disposed rows.
+    - The liveness and preservation parts already exist: isHolderStale (src/lib/fs-race-safe.ts: host, boot and
+      pid-reuse rungs), readInflightLock (src/lib/inflight-lock.ts: pid, run_id, host, startedAt),
+      readProcessCwdCensus (src/lib/process-cwd-census.ts), fixBranchClaimKey (src/run-task.ts ~31900),
+      dispatchClaimRef/decideDispatchClaim (src/lib/dispatch-claim.ts), decideRegisteredFixOwnerRecovery
+      (src/run-task.ts ~30331, which keeps on every unreadable probe) and the create-only refs/rmd-recovery
+      publisher (src/lib/recovery-refs.ts). This task composes their answers. It adds no new probe.
+    SIZING: split three ways, one concern each. This task owns the pure decision, canonical receipt schema, and a
+    read-only pr-owner shadow call that can only report HOLD; it never changes ownership or writes a receipt.
+    W1-T12114 is the operator verb that gathers live evidence, preserves work and writes the receipt.
+    W1-T12115 teaches pr-owner to honour a released receipt.
+    Settled by lookup: is this already filed or already decided? -> No. W1-T4209 (merged) added the live branch
+      claim to pr-owner and reports a dead-pid claim as stale, but a fix.dispatch row still means OWNED.
+      W1-T6362 (merged) preserves a dead fix owner's staged work and reclaims its checkout, and leaves ledger
+      ownership alone. W1-T11751 (queued) records per-head recovery in shadow and does not release ownership.
+      A grep of plan/tasks.d for stale fix dispatch, recovery receipt and pr-owner found no release path
+      (plan/tasks.d/W1-T4209-*, W1-T6362-*, W1-T11751-*).
+    Settled by lookup: does an "owner authorization" primitive already exist? -> No. Grep of src for
+      owner/operator authorization found nothing. The nearest precedent is the operator release receipt
+      (src/lib/operator-release.ts qualifyReleaseEvidence: only a matching operator receipt clears a human hold,
+      and unread history is a hold). W1-T12114 defines the authorization record on that model. This task only
+      requires that the expected and observed authorization ids are equal.
+    Settled by lookup: may unreadable evidence be read as absence? -> No. decideRegisteredFixOwnerRecovery keeps
+      on every *_unreadable state, and W1-T11753 records that the darwin cwd census answers unknown until it
+      lands. Here, unknown means hold.
+    Settled by lookup: is the recorded worker identity on the fix.dispatch row? -> Not as a pid. The row carries
+      run_id, round_id, head_sha and task_id (src/cli/commands/fix.ts ~4541). The pid, host and startedAt are on
+      the run's inflight lock and the fix branch claim (src/lib/inflight-lock.ts InflightLockInfo). Facts with no
+      recorded process identity therefore decide hold (liveness_unrecorded). They never decide recover.
+  design: |
+    1. src/lib/stale-fix-dispatch-recovery.ts (new, pure, no I/O).
+       StaleFixDispatchExpected = {repo, prNumber, taskId, dispatchRunId, dispatchRoundId, headSha, baseSha,
+       branch, authorizationId (nonempty for recovery; absent in shadow), recoveryInvocationRunId}, head and base
+       are full 40-hex. Missing authorization is an explicit hold, never an implied operator grant.
+       StaleFixDispatchFacts = the same identity fields as observed live; latestDispatch (the newest fix.dispatch
+       row for the PR); process: {state: "dead" | "alive" | "unknown" | "unrecorded" | "foreign_host", pid?, host?,
+       startedAt?}; descendants: {state: "none" | "present" | "unknown", pids?}; cwdCensus: {state: "clear" |
+       "occupied" | "unknown"}; fixBranchClaim: {state: "clear" | "held" | "unknown", holder?, holderRunId?, reclaimedPrior?: {run_id, dispatchRunId, claimMs, host, pid, startedAt, rawSha256, compareAndReclaim: "matched" | "mismatch"}}; expected additionally carries priorFixBranchClaimRunId when reclaiming a prior dispatch lock, reconstructed by W1-T12114 from the production helper after exact round-history validation; dispatchClaim: {state: "clear" | "held" | "unknown", holder?};
+       preservation: {state: "published", recoveryRef, sha} | {state: "nothing_to_preserve", headContained: true}
+       | {state: "failed" | "unknown", reason}; ledgerRead: {ok: boolean, unread?: string[]}.
+    2. decideStaleFixDispatchRecovery(expected, facts) -> {kind: "recover"} | {kind: "hold", reason}. It checks in
+       a fixed order and returns at the first failure. Reasons: ledger_unreadable, identity_mismatch:<field>
+       (repo, pr, task, run, round, head, base, branch, authorization), authorization_missing, newer_dispatch, process_alive,
+       process_unknown, liveness_unrecorded, process_foreign_host, descendants_present, descendants_unknown,
+       cwd_occupied, cwd_unknown, competing_branch_claim_held, branch_claim_unknown, stale_claim_identity_mismatch, stale_claim_liveness_unknown, dispatch_claim_held,
+       dispatch_claim_unknown, preservation_failed, preservation_unknown. An unknown or unexpected value always
+       holds.
+    3. staleFixDispatchRecoveryReceipt(expected, facts, {actor, nowIso, reason}) builds the receipt
+       {step: "pr_owner.recovery_receipt", recovery_id, repo, pr_number, task_id, prior_run_id, prior_round_id,
+       prior_dispatch_ts, head_sha, base_sha, branch, authorization_id, liveness, preservation, actor, ts, reason,
+       outcome: "released" | "held", hold_reason?}. recovery_id = sha256 over the identity fields and
+       authorization_id only, so a retry and a racing second invocation produce the same id. The receipt has no
+       fix.done, credit, merge or status field. For the decision, an absent fix branch claim is clear; a held claim is permitted only when its recorded holderRunId exactly equals expected.recoveryInvocationRunId. Reclaim evidence for the prior dispatch is valid only when reclaimedPrior.run_id exactly equals expected.priorFixBranchClaimRunId, reclaimedPrior.dispatchRunId equals expected.dispatchRunId, and `claimMs` is the safe-integer suffix reconstructed by production `fixRoundClaimId`; W1-T12114 validates the round interval against the exact production `round_id` shape and completed-round history. A same-recovery lock must match the exact invocation ID. Every other held claim returns competing_branch_claim_held. Export the step name as STALE_FIX_DISPATCH_RECEIPT_STEP.
+    4. In src/run-task.ts, the read-only pr-owner path calls the decision for the latest fix.dispatch in shadow.
+       It supplies absent operator authorization and unknown process, descendant, cwd and preservation evidence,
+       returns only a recoveryShadow HOLD diagnostic, and never feeds that result into the owner verdict or writes
+       a receipt file or ledger row. With no latest fix.dispatch it emits no shadow field.
+    5. Tests use fixtures only: one recover case, then one hold case per reason, including a live pid, a reused
+       pid, an unknown pid, a foreign host, a live descendant, a head moved by one commit, a base change, a newer
+       fix.dispatch with a different run_id, a held fix branch claim with a different run_id (hold), a dead same-host claim for the exact prior dispatch with compare-and-reclaim evidence (recover), a live/reused/foreign/malformed/changed lock (hold), an exact new claim owned by this invocation with the matching run_id (recover), a held refs/rmd-dispatch claim, an unreadable ledger, and a failed publish. Also: deterministic recovery_id across two builds; a plan-only PR
+       fixture (changed paths only under plan/) decides the same way and its receipt has no credit field.
+  falsifier: |
+    Drop the head comparison: the "head moved by one commit" fixture decides recover and the test fails. Map
+    process "unknown" to dead: the unknown-pid fixture decides recover and the test fails. Hash ts into
+    recovery_id: two builds differ and the idempotency case fails.
