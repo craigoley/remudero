@@ -8,7 +8,7 @@
   author_class: machine
   risk: high
   band_meaning: span
-  status: queued
+  status: merged
   attempts: 0
   origin: console-followup:queued-grill-continuation-20261027
   plan_refs:

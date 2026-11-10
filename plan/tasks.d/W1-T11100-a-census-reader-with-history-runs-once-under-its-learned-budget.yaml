@@ -15,7 +15,7 @@
   files:
     - scripts/census-precheck.mjs
     - test/ci/gates/a-census-reader-with-history-runs-once-under-its-learned-budget.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: After an accepted qualification, census-precheck appends the reader's measured runtime to an account-owned history keyed by its test file and the runtime fingerprint (node version, platform, arch, core count), never by the tree; the history is bounded to the newest measurements and an unreadable or corrupt history reads as empty
