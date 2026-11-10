@@ -53,7 +53,7 @@ function fixture(name: string) {
   const terminal = (post: PostReviewStatusGuardedOpts["post"]): PostReviewStatusGuardedOpts => ({
     owner: "o", repo: "r", sha: HEAD, state: "success", description: DESCRIPTION, verdict: VERDICT, taskId: TASK,
     evidence: "executed", ledgerPath, runId: "review-PR17494-1794264570958", prUrl: PR_URL, reviewInputDigest: INPUT,
-    reviewDecisionDigest: DECISION, commentBody: COMMENT,
+    reviewDecisionDigest: DECISION, outboxCommentBody: COMMENT,
     readReviewStatusHistory: async () => ({ kind: "readable", failures: [] }),
     fetchLifecycle: () => lifecycle(HEAD), post,
   });
@@ -167,7 +167,7 @@ test("W1-T11928 criterion 3: a review whose post succeeds writes no outbox entry
     assert.equal(f.steps("review.post_failed").length, 0);
 
     // The same review with no comment body supplied: the caller that predates the outbox.
-    const { commentBody: _unused, ...legacy } = f.terminal(f.record);
+    const { outboxCommentBody: _unused, ...legacy } = f.terminal(f.record);
     assert.equal((await postReviewStatusGuarded({ ...legacy, taskId: "W1-T17494-legacy" })).posted, true);
     const expected = { owner: "o", repo: "r", sha: HEAD, state: "success", description: DESCRIPTION };
     assert.deepEqual(f.posts, [expected, expected], "the status posted is byte-identical with and without the outbox fields");

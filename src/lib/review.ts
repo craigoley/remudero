@@ -12013,9 +12013,7 @@ export interface PostReviewStatusGuardedOpts {
    * material stale or unprovable code withholds the verdict; an allowed verdict names this SHA in
    * its commit-status description. Pending is progress, not a verdict, and remains publishable. */
   reviewerCodeFreshness?: ReviewerCodeFreshness;
-  /** W1-T11928: the PR review body that follows this verdict. Never posted here; kept beside the verdict in the outbox
-   *  when the post fails, so the pass that posts the verdict can post its comment too. */
-  commentBody?: string;
+  outboxCommentBody?: string;
   /** Fresh lifecycle read for THIS attempt — real callers pass `() => fetchPrLifecycle(prUrl)`,
    * tests inject a fake. Called INSIDE the lock, never before (see the module doc above). */
   fetchLifecycle: () => PrLifecycleState | Promise<PrLifecycleState>;
@@ -12355,9 +12353,8 @@ async function publishReviewStatusLocked(opts: PostReviewStatusGuardedOpts): Pro
       // W1-T135 exhaustion path: ledger-and-continue, never crash the run.
       const message = e instanceof Error ? e.message : String(e);
       if (planLintRetryIdentity !== undefined) appendPlanLintRetryRow(opts.ledgerPath, planLintRetryIdentity, "post_failed", message);
-      // W1-T11928: a lint retry and a reopened terminal settle through their own rows, so neither is replayed from here.
-      const outboxed = planLintRetryIdentity === undefined && opts.reopenedDegradedTerminal !== true &&
-        writeReviewOutboxEntry(opts, statusDescription);
+      const settlesThroughItsOwnRows = planLintRetryIdentity !== undefined || opts.reopenedDegradedTerminal === true;
+      const outboxed = !settlesThroughItsOwnRows && writeReviewOutboxEntry(opts, statusDescription).ok;
       appendLedger(opts.ledgerPath, {
         run_id: opts.runId,
         task_id: opts.taskId,
@@ -12413,32 +12410,19 @@ async function publishReviewStatusLocked(opts: PostReviewStatusGuardedOpts): Pro
     return { posted: true, ...(publisherEvidence ? { publisherEvidence } : {}) };
 }
 
-// ── W1-T11928: a computed verdict survives a failed post ─────────────────────
-// OBSERVED 2026-11-09 22:49Z: run review-PR17494-1794264570958 computed a PASS for head f38aea2263e8 and logged
-// `review.post_failed`, its process holding no GitHub credential. The verdict lived only in that process, so the next
-// pass would have paid a whole review (median 9 minutes, 17 at p90 on a loaded host) to learn it again. A verdict is
-// expensive and a post is one request, so a failed post keeps the verdict in a file under the state directory and the
-// next pass for the same input posts it. Why the post failed is not this section's concern.
-
-/** An entry of another version is discarded with a row, never read as this one. */
 const REVIEW_OUTBOX_VERSION = 1;
 
-/** One computed verdict whose post failed. A FIXED list of verdict fields: nothing is copied from the environment or
- *  from the thrown error, which is where a credential would come from. */
 export interface ReviewOutboxEntry {
   version: number;
-  /** The exact head and body the verdict judged ({@link reviewInputDigest}). */
   input_key: string;
   head_sha: string;
   state: "success" | "failure";
-  /** The status description as it would have been posted, code provenance suffix included. */
   description?: string;
   comment_body?: string;
   owner: string;
   repo: string;
   task_id: string;
   pr_url: string;
-  /** The run whose post failed last. */
   run_id: string;
   evidence: ReviewEvidenceStrength;
   review_decision_digest?: string;
@@ -12449,7 +12433,6 @@ export interface ReviewOutboxEntry {
   written_at: string;
 }
 
-/** Beside the ledger, where the status locks and the decision claims already live. */
 export function reviewOutboxDir(ledgerPath: string): string {
   return join(dirname(ledgerPath), "review-outbox");
 }
@@ -12458,19 +12441,19 @@ function reviewOutboxHash(text: string): string {
   return createHash("sha256").update(text, "utf8").digest("hex").slice(0, 24);
 }
 
-/** `<pr>.<input>.json`. The PR half lets a pass find every entry of its PR by name, a moved head's included; the URL is
- *  the PR's identity ({@link reviewRowNamesPr}), a task key being a label two classifications can disagree on. */
 export function reviewOutboxEntryPath(ledgerPath: string, prUrl: string, inputKey: string): string {
   return join(reviewOutboxDir(ledgerPath), `${reviewOutboxHash(prUrl)}.${reviewOutboxHash(inputKey)}.json`);
 }
 
-/** Staged and renamed, so a reader sees a whole entry or none. A pending status is no verdict, and a post that names
- *  neither its PR nor its input has no key. A write that fails costs the verdict, as before, and never the run. */
-function writeReviewOutboxEntry(opts: PostReviewStatusGuardedOpts, description: string | undefined): boolean {
-  if (opts.state === "pending" || opts.prUrl === undefined || opts.reviewInputDigest === undefined) return false;
+type ReviewOutboxWrite = { ok: true } | { ok: false; reason: string };
+
+function writeReviewOutboxEntry(opts: PostReviewStatusGuardedOpts, description: string | undefined): ReviewOutboxWrite {
+  if (opts.state === "pending" || opts.prUrl === undefined || opts.reviewInputDigest === undefined) {
+    return { ok: false, reason: "not a terminal verdict keyed by its PR and review input" };
+  }
   const entry: ReviewOutboxEntry = {
     version: REVIEW_OUTBOX_VERSION, input_key: opts.reviewInputDigest, head_sha: opts.sha, state: opts.state,
-    description, comment_body: opts.commentBody, owner: opts.owner, repo: opts.repo, task_id: opts.taskId,
+    description, comment_body: opts.outboxCommentBody, owner: opts.owner, repo: opts.repo, task_id: opts.taskId,
     pr_url: opts.prUrl, run_id: opts.runId, evidence: opts.evidence, review_decision_digest: opts.reviewDecisionDigest,
     review_engine_revision: opts.reviewEngineRevision, decision_verdict: opts.verdict,
     evaluator_provenance: opts.evaluatorProvenance,
@@ -12478,23 +12461,31 @@ function writeReviewOutboxEntry(opts: PostReviewStatusGuardedOpts, description: 
     written_at: systemClock.iso(),
   };
   try {
-    return writeAtomic(reviewOutboxEntryPath(opts.ledgerPath, opts.prUrl, opts.reviewInputDigest), `${JSON.stringify(entry)}\n`);
-  } catch {
-    return false;
+    const renamed = writeAtomic(reviewOutboxEntryPath(opts.ledgerPath, opts.prUrl, opts.reviewInputDigest), `${JSON.stringify(entry)}\n`);
+    return renamed ? { ok: true } : { ok: false, reason: "the staged entry was withdrawn before its rename" };
+  } catch (error) {
+    return { ok: false, reason: error instanceof Error ? error.message : String(error) };
   }
 }
 
-/** Every entry filed under `prUrl`; `entry` is absent when the file does not parse as this version's entry for this PR. */
-function readReviewOutbox(ledgerPath: string, prUrl: string): Array<{ path: string; entry?: ReviewOutboxEntry }> {
-  const dir = reviewOutboxDir(ledgerPath);
-  let names: string[];
+function reviewOutboxFileNames(dir: string): { ok: true; names: string[] } | { ok: false; reason: string } {
   try {
-    names = readdirSync(dir);
-  } catch {
-    return []; // no outbox: no post has failed under this state directory
+    return { ok: true, names: readdirSync(dir) };
+  } catch (error) {
+    return { ok: false, reason: error instanceof Error ? error.message : String(error) };
   }
+}
+
+type FiledReviewOutboxEntry =
+  | { path: string; unreadable: false; entry: ReviewOutboxEntry }
+  | { path: string; unreadable: true };
+
+function readReviewOutbox(ledgerPath: string, prUrl: string): FiledReviewOutboxEntry[] {
+  const dir = reviewOutboxDir(ledgerPath);
+  const listing = reviewOutboxFileNames(dir);
+  if (!listing.ok) return [];
   const prefix = `${reviewOutboxHash(prUrl)}.`;
-  return names.filter((name) => name.startsWith(prefix) && name.endsWith(".json")).sort().map((name) => {
+  return listing.names.filter((name) => name.startsWith(prefix) && name.endsWith(".json")).sort().map((name): FiledReviewOutboxEntry => {
     const path = join(dir, name);
     try {
       const entry = JSON.parse(readFileSync(path, "utf8")) as Partial<ReviewOutboxEntry> | null;
@@ -12502,9 +12493,9 @@ function readReviewOutbox(ledgerPath: string, prUrl: string): Array<{ path: stri
         typeof entry.head_sha === "string" && typeof entry.input_key === "string" &&
         (entry.state === "success" || entry.state === "failure") &&
         (entry.evidence === "executed" || entry.evidence === "no_evidence");
-      return readable ? { path, entry: entry as ReviewOutboxEntry } : { path };
+      return readable ? { path, unreadable: false, entry: entry as ReviewOutboxEntry } : { path, unreadable: true };
     } catch {
-      return { path };
+      return { path, unreadable: true };
     }
   });
 }
@@ -12512,7 +12503,6 @@ function readReviewOutbox(ledgerPath: string, prUrl: string): Array<{ path: stri
 export interface DrainReviewOutboxOpts {
   owner: string;
   repo: string;
-  /** The head this pass is about to review. An entry for any other head is stale. */
   sha: string;
   taskId: string;
   runId: string;
@@ -12526,29 +12516,21 @@ export interface DrainReviewOutboxOpts {
   lockOpts?: AcquireReviewStatusLockOpts;
 }
 
-/** `posted`: the stored verdict is now the head's status. `held`: its post threw again and the entry stays. `discarded`:
- *  only stale or refused entries were found. `none`: the PR has no entry. */
 export interface ReviewOutboxDrainResult {
   outcome: "none" | "posted" | "held" | "discarded";
   reason?: string;
 }
 
-/** Post this PR's outbox verdict in place of a review (W1-T11928). The entry for this exact head and input goes
- *  through {@link postReviewStatusGuarded}, so lifecycle, subject freshness, precedence and the history guard judge it
- *  as they would have judged the first post. Posted, it is followed by its comment, by the `review.posted` row that
- *  makes {@link claimReviewDecision} answer `replay` for its decision, and by the entry's removal, in that order: a
- *  crash in between leaves the entry, and a repeated post of one status is harmless. An entry for another head or
- *  input, an unreadable one and one the guard refuses are removed with a `review.outbox_discarded` row. */
 export async function drainReviewOutbox(opts: DrainReviewOutboxOpts): Promise<ReviewOutboxDrainResult> {
   let drained: ReviewOutboxDrainResult = { outcome: "none" };
-  // PR coordinates, as review.plan_lint_retry_not_requested carries them: a URL on these two rows would enter the
-  // config gardener's PR-credit fallback, and neither row is a run's own PR.
-  const pr = { owner: opts.owner, repo: opts.repo, pr_number: prLifecycleUrlTarget(opts.prUrl)?.number };
-  for (const { path, entry } of readReviewOutbox(opts.ledgerPath, opts.prUrl)) {
+  const prCoordinatesNotUrl = { owner: opts.owner, repo: opts.repo, pr_number: prLifecycleUrlTarget(opts.prUrl)?.number };
+  for (const filed of readReviewOutbox(opts.ledgerPath, opts.prUrl)) {
+    const { path } = filed;
+    const entry = filed.unreadable ? undefined : filed.entry;
     const discard = (reason: string): void => {
       rmSync(path, { force: true });
       appendLedger(opts.ledgerPath, {
-        run_id: opts.runId, task_id: opts.taskId, step: "review.outbox_discarded", ...pr,
+        run_id: opts.runId, task_id: opts.taskId, step: "review.outbox_discarded", ...prCoordinatesNotUrl,
         head_sha: entry?.head_sha ?? opts.sha, current_head_sha: opts.sha, reason,
         ...(entry ? { outbox_state: entry.state, outbox_input_key: entry.input_key, outbox_run_id: entry.run_id } : {}),
       });
@@ -12574,7 +12556,7 @@ export async function drainReviewOutbox(opts: DrainReviewOutboxOpts): Promise<Re
       reviewInputDigest: entry.input_key, reviewDecisionDigest: entry.review_decision_digest,
       verdict: entry.decision_verdict, presentedFailureIds: entry.presented_failure_ids,
       reviewEngineRevision: entry.review_engine_revision, evaluatorProvenance: entry.evaluator_provenance,
-      commentBody: entry.comment_body, readReviewStatusHistory: opts.readReviewStatusHistory,
+      outboxCommentBody: entry.comment_body, readReviewStatusHistory: opts.readReviewStatusHistory,
       fetchLifecycle: opts.fetchLifecycle, lockOpts: opts.lockOpts,
       post: async (status) => {
         try {
@@ -12601,8 +12583,6 @@ export async function drainReviewOutbox(opts: DrainReviewOutboxOpts): Promise<Re
       const verdict: ReviewVerdict = result.effectiveVerdict
         ? { ...stored, ...result.effectiveVerdict, state: result.effectiveState ?? result.effectiveVerdict.state }
         : { ...stored, state: entry.state };
-      // The fields the review command's own row derives from the verdict, through the same functions. The reviewer
-      // outcome, finding counts and floor state lived only in the run that computed the verdict and are absent.
       appendLedger(opts.ledgerPath, {
         run_id: opts.runId, task_id: opts.taskId, step: "review.posted", context: REVIEW_CONTEXT, state: verdict.state,
         head_sha: entry.head_sha, pr_url: opts.prUrl, review_input_digest: entry.input_key,
@@ -12621,7 +12601,7 @@ export async function drainReviewOutbox(opts: DrainReviewOutboxOpts): Promise<Re
       });
     }
     appendLedger(opts.ledgerPath, {
-      run_id: opts.runId, task_id: opts.taskId, step: "review.outbox_posted", ...pr,
+      run_id: opts.runId, task_id: opts.taskId, step: "review.outbox_posted", ...prCoordinatesNotUrl,
       head_sha: entry.head_sha, state: entry.state, review_input_digest: entry.input_key, outbox_run_id: entry.run_id,
       comment: comment === undefined ? "none" : comment.posted ? "posted" : comment.reason,
     });
@@ -12660,7 +12640,6 @@ export interface PostReviewPendingOpts {
   fetchStatus?: GhApiFetcher;
   /** Injected raw poster (tests) — forwarded to {@link postReviewStatusGuarded} unchanged. */
   post?: PostReviewStatusGuardedOpts["post"];
-  /** W1-T11928: the history read and comment seams {@link drainReviewOutbox} posts an outbox verdict through. */
   readReviewStatusHistory?: ReviewStatusHistoryReader;
   commentDeps?: PostReviewCommentDeps;
   lockOpts?: AcquireReviewStatusLockOpts;
@@ -12679,8 +12658,6 @@ export interface PostReviewPendingResult {
   posted: boolean;
   reason?: string;
   lifecycle?: "merged" | "closed";
-  /** W1-T11928: this input had a verdict in the outbox. `posted`: it is now the head's status and no pending was
-   *  posted over it. `held`: its post failed again and the entry stays for the next pass. */
   outbox?: "posted" | "held";
 }
 
@@ -12704,8 +12681,6 @@ export async function postReviewPending(opts: PostReviewPendingOpts): Promise<Po
     });
     return { posted: false, lifecycle: closed, reason: `PR is already ${closed}` };
   }
-  // W1-T11928: a verdict already computed for this input is posted in place of a pending claim. The `review.posted`
-  // row that follows it is what {@link claimReviewDecision} replays, so the pass admits no reviewer.
   if (opts.prUrl !== undefined && opts.reviewInputDigest !== undefined) {
     const drained = await drainReviewOutbox({
       owner: opts.owner, repo: opts.repo, sha: opts.sha, taskId: opts.taskId, runId: opts.runId,
