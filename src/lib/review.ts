@@ -11521,6 +11521,25 @@ export function lastPendingReviewStatusFromLedger(
   return prior;
 }
 
+function priorReviewClaimTakeovers(
+  lines: ReadonlyArray<Record<string, unknown>>,
+  input: { taskId: string; sha: string; prUrl?: string; reviewInputDigest?: string },
+): number {
+  const inputIsNamedByPrAndDigest = input.prUrl !== undefined && input.reviewInputDigest !== undefined;
+  let takeoversSinceTheLastVerdict = 0;
+  for (const line of lines) {
+    if (line.step !== "review.posted" && line.step !== "review.pending_posted") continue;
+    if (line.head_sha !== input.sha) continue;
+    const rowIsForAnotherInput = inputIsNamedByPrAndDigest
+      ? !reviewRowNamesPr(line, input.taskId, input.prUrl!) || line.review_input_digest !== input.reviewInputDigest
+      : line.task_id !== input.taskId;
+    if (rowIsForAnotherInput) continue;
+    if (line.step === "review.posted") takeoversSinceTheLastVerdict = 0;
+    else if (typeof line.took_over_run_id === "string") takeoversSinceTheLastVerdict++;
+  }
+  return takeoversSinceTheLastVerdict;
+}
+
 export type PendingReviewOwnerAssessment = "active" | "dead" | "unknown";
 
 export interface AssessPendingReviewOwnerOpts extends IsHolderStaleOpts {
@@ -12598,7 +12617,23 @@ export async function postReviewPending(opts: PostReviewPendingOpts): Promise<Po
       ...(opts.prUrl !== undefined ? { pr_url: opts.prUrl } : {}),
       ...(opts.reviewInputDigest !== undefined ? { review_input_digest: opts.reviewInputDigest } : {}),
       ...(opts.reviewEngineRevision !== undefined ? { review_engine_revision: opts.reviewEngineRevision } : {}),
+      ...(takenOverFrom ? { took_over_run_id: takenOverFrom.runId } : {}),
     });
+    const linesReadBeforeThisClaim = lines;
+    const takeoversCountedForTheLedgerOnly = takenOverFrom ? priorReviewClaimTakeovers(linesReadBeforeThisClaim, { ...opts }) + 1 : 0;
+    if (takenOverFrom && takeoversCountedForTheLedgerOnly > 1) {
+      const inputKeyNamingThePr = `${opts.prUrl ?? opts.taskId}@${opts.sha}${opts.reviewInputDigest !== undefined ? `#${opts.reviewInputDigest}` : ""}`;
+      appendLedger(opts.ledgerPath, {
+        run_id: opts.runId,
+        task_id: opts.taskId,
+        step: "review.claim_repeated",
+        input_key: inputKeyNamingThePr,
+        head_sha: opts.sha,
+        takeovers: takeoversCountedForTheLedgerOnly,
+        took_over_run_id: takenOverFrom.runId,
+        ...(opts.reviewInputDigest !== undefined ? { review_input_digest: opts.reviewInputDigest } : {}),
+      });
+    }
   }
   return result;
 }
