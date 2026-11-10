@@ -1,3 +1,4 @@
+import type { DocumentOptions } from "yaml";
 import { PlanBlobCache, mergePlanBlobs, mergePlanBlobsQuarantiningDuplicates, type Plan, type QuarantinedTask } from "./plan.js";
 import { freezeReadGeneration } from "./read-plane.js";
 
@@ -21,7 +22,9 @@ export interface PlanRevisionStore {
 
 /** A plan is frozen, so a reader that mutates it throws instead of changing every reader's plan, and held weakly, so
  *  one no reader holds is released; `retainLatest` keeps the newest for a reader holding nothing between requests. */
-export function createPlanRevisionStore(opts: { retainLatest?: boolean; strict?: boolean } = {}): PlanRevisionStore {
+export function createPlanRevisionStore(
+  opts: { retainLatest?: boolean; strict?: boolean; yamlLogLevel?: DocumentOptions["logLevel"] } = {},
+): PlanRevisionStore {
   const blobCache = new PlanBlobCache();
   const held = new Map<string, WeakRef<Plan>>();
   const meta = new WeakMap<Plan, { revision: PlanRevision; quarantined: QuarantinedTask[] }>();
@@ -47,7 +50,7 @@ export function createPlanRevisionStore(opts: { retainLatest?: boolean; strict?:
       const already = hit(revision.key);
       if (already) return already;
       const read = opts.strict
-        ? { plan: mergePlanBlobs(blobs), quarantined: [] }
+        ? { plan: mergePlanBlobs(blobs, opts.yamlLogLevel === undefined ? undefined : { logLevel: opts.yamlLogLevel }), quarantined: [] }
         : mergePlanBlobsQuarantiningDuplicates(blobs, blobCache);
       parsed++;
       freezeReadGeneration(read.plan);

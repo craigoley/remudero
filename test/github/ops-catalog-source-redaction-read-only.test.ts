@@ -89,6 +89,25 @@ test("W1-T11768 criterion 3: a transport error's message never reaches a result"
   sweep("shadow input", await createOpsCatalogShadowSource(target, async () => { throw leaks; }).refresh());
 });
 
+test("W1-T11768 criterion 3: YAML warnings stay off stderr while parse errors still refuse", async (t) => {
+  const stderr: string[] = [];
+  t.mock.method(process.stderr, "write", (chunk: string | Uint8Array) => {
+    stderr.push(String(chunk));
+    return true;
+  });
+
+  const warning = await readOpsCatalogSnapshotAsync(target, fixture({
+    monolith: taskYaml("OPS-TAG", "!PRIVATE_TAG PRIVATE_TITLE_SENTINEL"),
+  }).api);
+  assert.equal(warning.outcome, "ok", "recoverable YAML warnings preserve the existing parsed result");
+
+  const parseError = await readOpsCatalogSnapshotAsync(target, fixture({
+    monolith: "- id: OPS-BAD\n  title: [PRIVATE_TITLE_SENTINEL\n",
+  }).api);
+  assert.equal(parseError.outcome, "malformed", "YAML parse errors still refuse the catalog");
+  assert.equal(stderr.join(""), "", "catalog parser diagnostics never reach stderr");
+});
+
 test("W1-T11768 criterion 3: every outcome's serialized result is clean of private content", async () => {
   const mono = taskYaml("OPS-T1");
   const cases: Array<[string, OpsCatalogApi]> = [
