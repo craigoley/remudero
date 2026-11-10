@@ -2231,7 +2231,10 @@ export async function regenerateConflictViaGit(
         }
         let held: string | undefined;
         try { held = await owned.recheck?.(); }
-        catch (error) { held = `the ownership re-read failed: ${spawnFailureText(error)}`; }
+        catch (error) {
+          const reason = `the ownership re-read failed: ${spawnFailureText(error)}`;
+          held = reason;
+        }
         if (held !== undefined) return { outcome: "lease-mismatch", paths, reason: `ownership re-read before the push: ${held}` };
         try {
           if (deps.git) await run(worktreePath, ["push", "origin", `HEAD:${ref}`]);
@@ -2304,7 +2307,8 @@ export async function readSessionOwnershipViaGit(
     evidence.claims = claims;
   } catch (error) {
     // (a) stays absent, which sessionBranchUnheld reads as ambiguous, and the reason rides the evidence.
-    (evidence.unreadable ??= []).push(`claim: ${capStderrExcerpt(spawnFailureText(error), 200)}`);
+    const reason = `claim: ${capStderrExcerpt(spawnFailureText(error), 200)}`;
+    (evidence.unreadable ??= []).push(reason);
   }
   try {
     const lock = opts.readLock(opts.fixClaimKey);
@@ -2313,7 +2317,8 @@ export async function readSessionOwnershipViaGit(
     evidence.session = { ...(taskLock ? { inflightLock: taskLock } : {}), ...(runId ? { operatorRunId: runId } : {}),
       ...(lock ? { fixClaimKey: opts.fixClaimKey } : {}) };
   } catch (error) {
-    (evidence.unreadable ??= []).push(`session: ${capStderrExcerpt(spawnFailureText(error), 200)}`);
+    const reason = `session: ${capStderrExcerpt(spawnFailureText(error), 200)}`;
+    (evidence.unreadable ??= []).push(reason);
   }
   try {
     const branch = pr.headRefName!;
@@ -2333,7 +2338,8 @@ export async function readSessionOwnershipViaGit(
       if (p90 !== undefined) evidence.operatorP90GapMs = p90;
     }
   } catch (error) {
-    (evidence.unreadable ??= []).push(`pushes: ${capStderrExcerpt(spawnFailureText(error), 200)}`);
+    const reason = `pushes: ${capStderrExcerpt(spawnFailureText(error), 200)}`;
+    (evidence.unreadable ??= []).push(reason);
     delete evidence.pushesMs;
   }
   return evidence;

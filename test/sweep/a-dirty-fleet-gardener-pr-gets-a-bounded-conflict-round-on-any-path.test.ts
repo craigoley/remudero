@@ -193,6 +193,9 @@ test("W1-T11170 criterion 1: the ownership predicates admit fleet heads and sess
     assert.equal(sweep.operatorSessionHead({ headRefName: head }, { authorLogin: "anyone", headRepoFork: true }), false, `${head} on a fork`);
     assert.equal(sweep.operatorSessionHead({ headRefName: head }, { authorLogin: "anyone" }), false, `${head} with an unread fork`);
   }
+  assert.equal(sweep.OPERATOR_SESSION_HEAD_RE.test("run-unfiled-1793649420000"), true);
+  assert.equal(sweep.OPERATOR_SESSION_HEAD_RE.test("run-unfiled-tail"), false);
+  assert.equal(sweep.OPERATOR_SESSION_HEAD_RE.test("codex/"), false);
   assert.equal(sweep.operatorSessionHead({ headRefName: "hand-branch" }, operatorFacts), true, "any head the operator authored");
   assert.equal(sweep.operatorSessionHead({ headRefName: "hand-branch" }, { authorLogin: "someone", headRepoFork: false }), false);
   assert.equal(sweep.operatorSessionHead({ headRefName: "run-W1-T90001-1793666131000" }, operatorFacts), false, "another task's run- branch");
