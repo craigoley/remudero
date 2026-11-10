@@ -755,7 +755,7 @@ foreign_repos_recheck() {
   local i current=""
   [ -n "$FOREIGN_REPOS_REGISTRY_ROWS" ] || return 0
   if [ "$(list_registry_state_dirs "$INSTANCE_REGISTRY")" != "$FOREIGN_REPOS_REGISTRY_ROWS" ]; then
-    echo "serve-container: REFUSING — foreign repos registry placement changed; existing gateway left untouched." >&2
+    echo "serve-container: REFUSING — foreign repos registry placement changed; launch refused." >&2
     exit 1
   fi
   for ((i=0; i<${#FOREIGN_REPOS_NAMES[@]}; i++)); do
