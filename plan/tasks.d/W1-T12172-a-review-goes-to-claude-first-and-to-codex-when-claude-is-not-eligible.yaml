@@ -1,0 +1,55 @@
+- id: W1-T12172
+  title: "A review goes to Claude first, and to Codex when Claude is not eligible"
+  repo: remudero
+  depends_on: []
+  priority: 0.9
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # which provider reviews every pull request; the review contract and its checks do not change
+  band_meaning: blast-radius
+  origin: operator-session#follow-ups-2026-11-10
+  plan_refs:
+    - W1-T10843
+    - W1-T11432
+    - W1-T5535
+  files:
+    - .remudero/mounts.yaml
+    - src/lib/mounts.ts
+    - src/lib/provider-routing-policy.ts
+    - src/lib/worker.ts
+    - test/routing/a-review-goes-to-claude-first-and-to-codex-when-claude-is-not-eligible.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "The mounts file can name a preferred provider for a worker role. The committed file names Claude for the reviewer role"
+      proof: "grep: W1-T12172 criterion 1 in test/routing/a-review-goes-to-claude-first-and-to-codex-when-claude-is-not-eligible.test.ts"
+    - claim: "A reviewer goes to Claude whenever Claude is enabled, readable, above its reserve and not excluded for this review"
+      proof: "grep: W1-T12172 criterion 2 in test/routing/a-review-goes-to-claude-first-and-to-codex-when-claude-is-not-eligible.test.ts"
+    - claim: "When Claude is not eligible, the reviewer goes to Codex by the rules of today. An exclusion after a reviewer that was unable still holds"
+      proof: "grep: W1-T12172 criterion 3 in test/routing/a-review-goes-to-claude-first-and-to-codex-when-claude-is-not-eligible.test.ts"
+    - claim: "The assignment row still records the arm that the live experiment drew. It also records that the role preference chose the provider"
+      proof: "grep: W1-T12172 criterion 4 in test/routing/a-review-goes-to-claude-first-and-to-codex-when-claude-is-not-eligible.test.ts"
+    - claim: "A worker in any other role, and an operator's own preference in the console, are routed as today"
+      proof: "grep: W1-T12172 criterion 5 in test/routing/a-review-goes-to-claude-first-and-to-codex-when-claude-is-not-eligible.test.ts"
+  rationale: |
+    DECIDED by the operator on 2026-11-10: reviews go to Sonnet first, and the balanced Codex model is the backup.
+    MEASURED in the core instance's ledger, 2026-10-27 to 2026-11-10, in the randomised experiment sol61-vs-sonnet55 over 293 pull requests, by assigned reviewer:
+    - Failed review at least once: 42.4% (64 of 151) for gpt-6.1-sol and 21.1% (30 of 142) for sonnet-5-5.
+    - Cost for each merged pull request: $1.63 and 20.6 worker minutes for gpt-6.1-sol, $1.16 and 12.4 minutes for sonnet-5-5.
+    - Merged: 96.7% and 98.6%.
+    - A later fix commit that names the pull request: 7.1% (interval 3.9 to 12.6) and 2.9% (interval 1.1 to 7.2). Reverts: 0 and 0.
+    - Today the reviewer mount asks for the model `sonnet`, which is the balanced capability. `provider_preference` in .remudero/mounts.yaml names a provider only for the frontier capability, so a review is split between the providers by headroom and by the experiment's draw.
+    - A preference for the whole balanced capability would also move builds and fixes. The decision is about reviews only.
+  design: |
+    Add `role_preference` beside `provider_preference` under `capabilities` in .remudero/mounts.yaml, with `reviewer: claude`. src/lib/mounts.ts reads it with the checks it applies to `provider_preference`.
+    `policyForCapability` in src/lib/provider-routing-policy.ts takes the worker role and applies the role's provider before the capability's. `selectWorkerProviderForPolicy` already falls back when the preferred provider has no headroom.
+    src/lib/worker.ts passes `workerRole` at its one call of `policyForCapability`. The assignment row gets one field for the role preference.
+    The experiment's draw is still computed and recorded, so the rows show how many reviews the preference moved.
+    NOT IN SCOPE: the reviewer's model and effort, the experiment's definition, and the routing of builds and fixes.
+  falsifier: |
+    Ignore the role and criterion 2 must fail. Send a reviewer to Claude below its reserve and criterion 3 must fail. Apply the preference to an implementer and criterion 5 must fail. Drop the experiment's arm from the row and criterion 4 must fail. Restore and require all five to pass.
+  note: |
+    Revisit this choice when two tasks of the open filing on model choice report: W1-T12142 (a routing experiment ends with a recorded result) and W1-T12145 (the reviewer is scored against known answers).
+    The preference lowers the number of reviews that gpt-6.1-sol receives, so the experiment gathers that arm more slowly for the reviewer role.

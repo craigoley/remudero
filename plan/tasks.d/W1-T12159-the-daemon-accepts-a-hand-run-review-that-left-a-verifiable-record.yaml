@@ -1,0 +1,53 @@
+- id: W1-T12159
+  title: "The daemon accepts a hand-run review that left a verifiable record for the same input"
+  repo: remudero
+  depends_on: []
+  priority: 1.2
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # which evidence permits a merge; a record that does not match the exact input must never count
+  band_meaning: blast-radius
+  origin: operator-session#follow-ups-2026-11-10
+  plan_refs:
+    - W1-T2860
+    - W1-T5540
+    - W1-T11928
+  files:
+    - src/lib/review-evidence-record.ts
+    - src/cli/commands/review.ts
+    - src/lib/sweep.ts
+    - test/review/the-daemon-accepts-a-hand-run-review-that-left-a-verifiable-record.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "A review that posts a full verdict also writes one record on the pull request. The record holds the head, the input digest, the verdict on each criterion and the proof results of its review.posted row"
+      proof: "grep: W1-T12159 criterion 1 in test/review/the-daemon-accepts-a-hand-run-review-that-left-a-verifiable-record.test.ts"
+    - claim: "When GitHub shows a remudero-review status and the ledger has no completed review for that exact input, the sweep reads the record. If the head, the digest and the state match and the fleet's own GitHub identity wrote it, the sweep writes the review.posted row from it and starts no reviewer"
+      proof: "grep: W1-T12159 criterion 2 in test/review/the-daemon-accepts-a-hand-run-review-that-left-a-verifiable-record.test.ts"
+    - claim: "A record for another head or another digest, a record from another author, a record that does not parse and an absent record each leave the re-review of today in place"
+      proof: "grep: W1-T12159 criterion 3 in test/review/the-daemon-accepts-a-hand-run-review-that-left-a-verifiable-record.test.ts"
+    - claim: "The row written from a record names the record as its source, so a reader can tell it from a review this instance ran"
+      proof: "grep: W1-T12159 criterion 4 in test/review/the-daemon-accepts-a-hand-run-review-that-left-a-verifiable-record.test.ts"
+    - claim: "The review command writes the record where it logs the review.posted row"
+      proof: "grep: writeReviewEvidenceRecord( in src/cli/commands/review.ts"
+    - claim: "The sweep reads the record before it re-runs a review for a status with no ledger row"
+      proof: "grep: readReviewEvidenceRecord( in src/lib/sweep.ts"
+  rationale: |
+    OBSERVED 2026-11-10: pull requests #17632 and #17641 were reviewed by hand from another host. The daemon found no review.posted row for the input and reviewed each one again before it merged.
+    - The sweep does this by rule. Two disposition rows in src/lib/sweep.ts (W1-T2860 and its failure twin) re-run the reviewer when GitHub shows a status and the ledger has no completed review for the exact input.
+    - The rule exists because the status alone does not hold the proof results that the arm step needs.
+    - A review run by hand writes its row to the ledger of its own config root. Another host cannot read that ledger.
+    - Each such pull request pays for a second reviewer and waits for it.
+  design: |
+    New module src/lib/review-evidence-record.ts renders and parses the record: one pull request comment with a fixed marker line and a JSON body.
+    The body repeats the fields of the review.posted row that the arm step reads, plus a SHA-256 over them.
+    `writeReviewEvidenceRecord` runs in src/cli/commands/review.ts beside `log("review.posted", …)`, for every review. A failed write is logged and never changes the verdict.
+    `readReviewEvidenceRecord` runs in the sweep only where one of the two rows above would re-run the reviewer.
+    The record is trusted exactly as far as the status is: the same GitHub identity must have written both, for the same head.
+    NOT IN SCOPE: trust in a record from any other identity, a shared ledger between hosts, and the outbox of W1-T11928.
+  falsifier: |
+    Skip the head check or the digest check and criterion 3 must fail. Accept a record from another author and criterion 3 must fail. Start a reviewer although a valid record exists and criterion 2 must fail. Restore and require all to pass.
+  note: |
+    src/lib/review.ts is not in `files`. Its comment pin has 12 bytes of headroom (W1-T12164), so this task keeps its code out of that file.

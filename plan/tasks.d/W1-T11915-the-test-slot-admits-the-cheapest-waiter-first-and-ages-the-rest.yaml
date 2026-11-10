@@ -7,14 +7,24 @@
   verify: auto
   principles:
     tdd: strict
-  risk: high # Rule 19: one concern, the order the next waiter is admitted in; the slot count, the CPU and memory admission, the heartbeat and the reclaim rules are unchanged
+  risk: high # two concerns: the order the next waiter is admitted in, and the author preflight handing its price to the ticket it already holds; the slot count, the CPU and memory admission, the heartbeat cadence and the reclaim rules are unchanged
+  band_meaning: blast-radius
   origin: operator-session#gate-efficiency-1109
   plan_refs:
     - W1-T9950
     - W1-T9951
+    - W1-T12061
   files:
     - src/lib/test-slot.ts
+    - src/lib/test-slot-queue.ts
+    - scripts/preflight-author.mjs
+    - test/ci/the-author-preflight-gives-its-price-to-the-test-slot.test.ts
     - test/the-test-slot-admits-the-cheapest-waiter-first-and-ages-the-rest.test.ts
+  # refusal-amendment (W1-T11915, run work-fix-dispatch-W1-T11915-1794345755992-f3eb@c1fe62f11dc56398b2fbb426d6fe16ed9b703d0d, 2026-11-10T22:17:29.040Z): the worker refused criterion 1 [outside-declared-files] — proposed widen-files: widen `files:` to cover the paths the change needs, or narrow the criteria to the declared files
+  #   worker evidence: The cost reaches production only through `scripts/preflight-author.mjs` and `src/lib/test-slot-queue.ts` (`setPrice`), neither in the declared files, and W1-T12061 already owns that wiring.
+  # refusal-amendment (W1-T11915, run work-fix-dispatch-W1-T11915-1794345755992-f3eb@c1fe62f11dc56398b2fbb426d6fe16ed9b703d0d, 2026-11-10T22:17:29.040Z): the worker refused criterion 2 [outside-declared-files] — proposed widen-files: widen `files:` to cover the paths the change needs, or narrow the criteria to the declared files
+  #   worker evidence: The aging of a costly waiter is reachable in production only once those callers pass the price; the formula and its test in `src/lib/test-slot.ts` are in scope and already pass.
+  #   this task is held from dispatch until its record changes; an Architect must make the change above
   status: queued
   attempts: 0
   acceptance:
@@ -24,16 +34,44 @@
       proof: "grep: W1-T11915 criterion 2 in test/the-test-slot-admits-the-cheapest-waiter-first-and-ages-the-rest.test.ts"
     - claim: Dead-ticket reaping, the heartbeat rule and the admission of a waiter when a slot is open are identical with the change and without it
       proof: "grep: W1-T11915 criterion 3 in test/the-test-slot-admits-the-cheapest-waiter-first-and-ages-the-rest.test.ts"
+    - claim: On the production path, the author preflight takes its suite ticket first and then prices its selection. Its still-waiting ticket then carries the same costMs that its capacity verdict later records in receipt.capacity, and the next heartbeat keeps that costMs. The ticket's name and arrival time are unchanged, so its arrival position is kept. A ticket that is never priced is ordered as an unpriced waiter, as criterion 1 defines.
+      proof: "grep: W1-T11915 criterion 4 in test/ci/the-author-preflight-gives-its-price-to-the-test-slot.test.ts"
   rationale: |
     OBSERVED 2026-11-09: one author preflight of 74 minutes spent 24 minutes waiting for a test slot (measured admission granted one worker on an 8-core host whose own account was using about 990% CPU), and the capacity filing, a plan-only change that needs a few minutes of suites, was refused after a 45 minute wait behind heavier runs. The queue is strict arrival order (W1-T9950, W1-T9951).
     - Shortest-expected-job-first minimises mean wait when one server is the bottleneck, and a small plan-only run behind a long one pays the long one's whole runtime for no benefit to anyone.
     - Pure shortest-first starves a large job, which is why arrival order was chosen. Dividing a waiter's cost by its wait (or any equivalent ageing) keeps the order fair without a ceiling: every waiter's priority rises without bound while it waits.
+    - Shortest-job-next needs each job's run time, known or estimated, before the job runs (https://en.wikipedia.org/wiki/Shortest_job_next). The ordering is therefore inert unless the live producer, the author preflight, hands its price to the ticket while the ticket waits. That handoff is folded in from W1-T12061 (criterion 4).
+    - Settled by lookup: Is the handoff already filed? -> Yes, as W1-T12061. It is now withdrawn and superseded_by this task (plan/tasks.d/W1-T12061-the-author-preflight-gives-its-price-to-the-test-slot.yaml).
+    - Settled by lookup: Is the capacity verdict known before admission? -> No. Its costMs is priceSelection's and reads no budget, so the preflight prices right after enqueueTestSlot (scripts/preflight-author.mjs).
+    - Settled by lookup: Does a heartbeat keep a late field? -> Only through the closed-over record that beat() rewrites (src/lib/test-slot-queue.ts).
   design: |
     - Each ticket already carries the label and the selection the run was priced from; add the predicted cost (the capacity verdict's costMs, when known) to the ticket.
     - The next waiter admitted is the one with the lowest cost divided by one plus its waited time. Equal scores fall back to arrival order.
-    - NOT IN SCOPE: the number of slots, the measured pool, memory and CPU admission, the heartbeat and reclaim policy, and any wait bound.
+    - Price handoff (folded from W1-T12061):
+      - OwnTicket (src/lib/test-slot-queue.ts) gains setPrice(costMs). It updates the record that beat() rewrites and writes the ticket again at once, so the price survives every later heartbeat.
+      - TestSlotQueueHold (src/lib/test-slot.ts) gains setPrice too. It hands the price to its own ticket, and does nothing when no ticket was taken or the hold is already settled.
+      - parseTestSlotTicket reads an optional costMs. A missing or malformed costMs is read as unpriced and never makes a ticket reapable.
+    - The preflight keeps its order: it calls enqueueTestSlot first, then prices. Right after the enqueue it reads scripts/test-tier-manifest.json once and calls priceSelection(partial ? partial.suites : receipt.suites, manifest). It passes that costMs to queue.setPrice and only then starts the static stage.
+    - The capacity verdict after admission reuses the same manifest. capacityVerdict's costMs is priceSelection's costMs and does not depend on the budget, so receipt.capacity.costMs equals the price the ticket waited with.
+    - Do not wait for the post-admit capacityVerdict to set the price. It runs only after queue.admit() returns, when the ticket has already left the queue.
+    - NOT IN SCOPE: the number of slots, the measured pool, memory and CPU admission, the heartbeat and reclaim policy, any wait bound, and what the preflight runs.
   falsifier: |
-    Keep arrival order: criterion 1 must fail. Order by cost alone: criterion 2 must fail (the long waiter never gets in). Change reaping or the open-slot admission: criterion 3 must fail. Restore and require all three.
+    Keep arrival order: criterion 1 must fail. Order by cost alone: criterion 2 must fail (the long waiter never gets in). Change reaping or the open-slot admission: criterion 3 must fail. For criterion 4, each of these must make it fail:
+    - setting the price only after the post-admit capacity verdict;
+    - dropping costMs on the next beat;
+    - taking the ticket after pricing, or renaming the ticket when it is priced, either of which moves its arrival position.
+    Restore and require all four.
+  amendment: |
+    2026-11-10, PLAN-expand-1794349444421, at the operator's request: fold in the production price handoff so that one credited task makes cheapest-first ordering live.
+    - What changed: W1-T12061 is withdrawn and superseded_by this task. Criteria 1-3 and the ordering rule are unchanged.
+    - Criterion 4 adds a production-path test. It shows that the preflight's ticket is priced after its selection is priced, and that it keeps its arrival position.
+    - Shortest-job-next needs each job's run time, known or estimated, before the job runs (https://en.wikipedia.org/wiki/Shortest_job_next). Without the handoff, every live ticket is unpriced and is ordered as the median, so the queue still runs in arrival order.
+    Settled by lookup:
+    - Is the handoff already filed? -> Yes, as W1-T12061 (plan/tasks.d/W1-T12061-*.yaml). It is folded here and withdrawn so that one task is credited.
+    - Does the capacity verdict exist while the ticket waits? -> No. scripts/preflight-author.mjs calls admitSuites() (queue.admit()) before it builds the budget from slot.concurrency and calls capacityVerdict. W1-T12061's design ("call it after capacityVerdict prices the selection") would therefore price a ticket that has already left the queue.
+    - Does the price depend on the slot? -> No. capacityVerdict's costMs is priceSelection(suites, manifest).costMs, and priceSelection reads no budget (scripts/preflight-author.mjs). So the same cost can be computed right after enqueueTestSlot.
+    - Does a heartbeat keep fields added later? -> Only through the closed-over record. takeTestSlotTicket's beat() rewrites { ...current, heartbeatAt } (src/lib/test-slot-queue.ts), so setPrice must update `current`.
+    - Is the work claimed or in flight? -> No. There are no plan/claims.yaml rows for W1-T11915 or W1-T12061, and no test file for this task exists yet.
   note: |
     reservation hand-off: run-unfiled-1794254218113
     Success is the median queue wait of a small run falling while the longest wait stays bounded by the work ahead of it; compare test_slot.acquired waitedMs before and after.
