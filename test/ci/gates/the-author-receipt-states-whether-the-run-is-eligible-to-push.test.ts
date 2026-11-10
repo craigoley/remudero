@@ -1,14 +1,14 @@
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { after, test } from "node:test";
-import { fileURLToPath } from "node:url";
 
 // @ts-ignore the executable .mjs module has no declaration file.
 import * as authorModule from "#scripts/preflight-author.mjs";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
+import { REPO_ROOT as ROOT } from "#test/helpers/repo-root.js";
 
 type Step = { name: string; ok: boolean; notMeasured?: string; testSummary?: Record<string, number> | null };
 type Receipt = { verdict?: string | undefined; steps: Step[]; suites?: string[]; tiered?: { ran: string[] }; error?: string;
@@ -20,7 +20,6 @@ const author = authorModule as unknown as {
   OVER_CAPACITY_EXIT: number;
 };
 
-const ROOT = join(dirname(fileURLToPath(import.meta.url)), "../../..");
 
 // The fixtures' suite slot lives in owned scratch, so a busy host's real queue never decides these outcomes.
 const slotDir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}push-eligible-slots-`));
