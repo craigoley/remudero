@@ -24,11 +24,11 @@
     4. TEST a process interruption immediately after remote PR creation (kill/throw between PR create and ledger write).
   acceptance:
     - claim: "one process-interruption integration test spanning auto-triage and the run-task triage entry point proves that, after remote PR creation and holder death, two concurrent restarts yield exactly one local-lock recovery, record pr.opened and run.awaiting_external idempotently, open no second PR, and retain the remote claim while CI is pending"
-      proof: "unit test: test/triage-post-pr-handoff-crash-safe.test.ts"
+      proof: "unit test: test/triage/triage-post-pr-handoff-crash-safe.test.ts"
   risk: high
   origin: feedback#fb-1789365327024-d9c74b
   plan_refs: ["§7B"]
-  files: [src/run-task.ts, src/lib/auto-triage.ts, test/triage-post-pr-handoff-crash-safe.test.ts]
+  files: [src/run-task.ts, src/lib/auto-triage.ts, test/triage/triage-post-pr-handoff-crash-safe.test.ts]
   priority: 2
   status: queued
   # backlog gardener: band=2 evidence=b8b7c82b8972c321
