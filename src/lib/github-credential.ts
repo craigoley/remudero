@@ -246,7 +246,7 @@ function recordMissing(operation: string, repo: string | undefined, tried: reado
   try {
     missingSink({
       run_id: "github-credential",
-      task_id: "GITHUB-CREDENTIAL",
+      task_id: "OPS",
       step: GITHUB_CREDENTIAL_MISSING_STEP,
       operation,
       ...(repo === undefined ? {} : { repo }),
