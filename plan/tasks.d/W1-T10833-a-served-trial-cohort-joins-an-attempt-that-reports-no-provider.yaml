@@ -9,7 +9,7 @@
   risk: high  # Rule 19: one concern, the assignment-to-attempt identity check in one function; a too-loose join would merge unrelated attempts into a cohort
   band_meaning: span
   priority: 1  # the field note (W1-T10831) reports served-model coverage per model x task class from this join; with it broken every row reads zero served
-  status: queued
+  status: merged
   attempts: 0
   origin: "filing agent F20, 2026-10-27, on Craig's 2026-10-27 field-trials ask; verified read-only on the Azure host 13:20-13:45Z at origin/main 07dbdcc77"
   plan_refs: [W1-T4574, W1-T100001, W1-T10315, W1-T10318, W1-T9109]
