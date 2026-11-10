@@ -1,0 +1,64 @@
+- id: W1-T12115
+  title: "`rmd pr-owner` CLEARS A STALE FIX DISPATCH ONLY FOR A LATER RELEASED RECOVERY RECEIPT THAT NAMES THAT EXACT DISPATCH, PR, TASK AND HEAD — and stays OWNED, or answers UNKNOWN, for a newer dispatch, a mismatched or unreadable receipt, a live claim or an active sweep"
+  repo: remudero
+  depends_on: [W1-T12113]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high  # Rule 19 #588 merits test: ONE cross-file invariant (pr-owner reports FREE only for a later released receipt matching latestFix) that is unsatisfiable piecewise; the projection (pr-owner-ledger.ts) and the verdict (run-task.ts) must change together or one test cannot pass
+  band_meaning: span
+  origin: architect
+  plan_refs: [W1-T12113, W1-T12114, W1-T4209, W1-T11323, W1-T11424]
+  files:
+    - src/lib/pr-owner-ledger.ts
+    - src/run-task.ts
+    - test/pr-owner-clears-only-the-recovered-dispatch.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  acceptance:
+    - claim: "pr-owner reports FREE, naming the recovery_id, only when the newest fix.dispatch for the PR is matched by a pr_owner.recovery_receipt with outcome released that is stamped later than it and names its run_id, round_id, task_id and head_sha and the same PR; no live fix branch claim and no active sweep disposition exist"
+      proof: "unit test: test/pr-owner-clears-only-the-recovered-dispatch.test.ts"
+    - claim: "a fix.dispatch stamped after the receipt, a receipt for another run, round, task, head or PR, a held receipt, a receipt stamped at or before the dispatch, a future-stamped receipt, a duplicate receipt for one dispatch with different content, or an unparseable receipt row keeps the verdict OWNED or UNKNOWN; and a released receipt never hides a live branch claim or an active sweep disposition; the same holds on a plan-only PR fixture"
+      proof: "unit test: test/pr-owner-clears-only-the-recovered-dispatch.test.ts"
+    - claim: "the ledger projection carries the matching receipt row into the verdict"
+      proof: "grep: STALE_FIX_DISPATCH_RECEIPT_STEP in src/lib/pr-owner-ledger.ts"
+  rationale: |
+    ORIGIN: architect create run PLAN-create-1794328578391 (2026-11-10). This is the reader half of the
+    stale-fix-dispatch recovery. The decision and receipt schema are in W1-T12113, the writer is W1-T12114.
+    READ in this worktree:
+    - prOwnerVerdictFromFacts (src/run-task.ts ~3893-3951) returns OWNED when latestFix, a live claim or an active
+      sweep row exists. It returns UNKNOWN when the ledger union is incomplete or no compressed rotation opened.
+    - readPrOwnerLedgerProjection (src/lib/pr-owner-ledger.ts) keeps only fix.dispatch and this PR's
+      sweep.disposed rows in its scratch sqlite evidence table. It skips future-stamped rows (W1-T11323). The
+      receipt rows must enter the same table under the same future-stamp rule, so no second corpus read is added.
+    - derivePrOwnerVerdict (the synchronous injected-corpus path, ~3866) must apply the identical rule, or the two
+      paths disagree.
+    SIZING (Rule 19, #588 merits test): kept whole at risk:high, band_meaning: span. The acceptance is ONE
+      cross-file invariant: the verdict in src/run-task.ts can only honour a receipt the projection in
+      src/lib/pr-owner-ledger.ts carries, and the projection change has no observable effect without the verdict.
+      Split in two, neither half's test can pass alone.
+    Settled by lookup: is this already filed or already decided? -> No. W1-T4209 (merged) made a live claim OWNED
+      and a dead-pid claim ignorable. Nothing reads a release of fix.dispatch ownership (grep of
+      plan/tasks.d and src for pr-owner, recovery receipt).
+    Settled by lookup: should the fix lane's dispatch decisions also read the receipt? -> Not in this initiative. The
+      initiative scopes the clear to pr-owner. Sweep dispatch keys on the O_EXCL fix branch claim (W1-T2609), which
+      W1-T12114 leaves free after release. No sweep change is filed.
+  design: |
+    1. pr-owner-ledger.ts: also admit rows whose step is STALE_FIX_DISPATCH_RECEIPT_STEP (imported from
+       src/lib/stale-fix-dispatch-recovery.ts) and whose pr_number is the target. Apply the same future-stamp
+       skip. Expose latestReceiptForLatestFix on the projection: the released receipt whose prior_run_id,
+       prior_round_id, task_id, head_sha and pr_number equal latestFix's and whose ts is strictly later. If two
+       such receipts disagree, set receiptConflict.
+    2. prOwnerVerdictFromFacts: if latestFix is defined and a matching released receipt exists, and there is no
+       live claim, no active sweep row and no receiptConflict, return FREE with the reason "fix.dispatch <run>
+       released by recovery receipt <recovery_id>", and render the receipt's actor, ts and preservation ref. A
+       receiptConflict or an unparseable receipt row for the PR returns UNKNOWN. Everything else is unchanged.
+       Because the match is on latestFix, any later dispatch makes the PR OWNED again.
+    3. derivePrOwnerVerdict runs the same matcher over its injected rows.
+    4. Tests: fixtures through both paths for each acceptance case, plus a plan-only PR fixture and a
+       rotation-archived receipt (the row read from a .ndjson.gz archive).
+  falsifier: |
+    Match the receipt on PR alone: the "receipt for another run" fixture reports FREE and the test fails. Compare
+    the receipt with any fix.dispatch rather than the latest: the "dispatch after receipt" fixture reports FREE.

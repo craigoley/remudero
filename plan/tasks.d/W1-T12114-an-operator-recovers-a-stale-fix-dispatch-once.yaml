@@ -1,0 +1,104 @@
+- id: W1-T12114
+  title: "AN OPERATOR RECOVERS A STALE FIX DISPATCH ONCE, THROUGH `rmd pr-owner-recover`, ONLY AFTER A RECORDED AUTHORIZATION FOR THE EXACT PR, TASK, RUN, HEAD, BASE AND BRANCH, A LIVE RE-READ UNDER THE PR'S FIX BRANCH CLAIM, AND A CREATE-ONLY PRESERVATION OF THE BRANCH, WORKTREE AND PATCH — today the only way past a dead worker's OWNED PR is a hand edit nobody records"
+  repo: remudero
+  depends_on: [W1-T12113]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 18.00
+  risk: high  # Rule 19: one concern (the operator verb's effect sequence); writes ownership evidence and takes a fix branch claim; a false release hands a live PR to a second worker
+  band_meaning: blast-radius
+  origin: architect
+  plan_refs: [W1-T12113, W1-T12115, W1-T4209, W1-T6362, W1-T2609, W1-T8621, W1-T10348]
+  files:
+    - src/lib/stale-fix-dispatch-recovery-apply.ts
+    - src/run-task.ts
+    - src/lib/ledger.ts
+    - test/fix-lane/an-operator-recovers-a-stale-fix-dispatch-once.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  acceptance:
+    - claim: "`rmd pr-owner-recover <pr> --authorize` with --repo, --task, --run, --round, --head, --base, --branch and --reason records one pr_owner.recovery_authorized row naming that tuple, the operator actor and an authorization_id, and refuses a fleet-automation actor; `--apply --authorization <id>` refuses unless exactly one unconsumed authorization with that id names the same tuple"
+      proof: "unit test: test/fix-lane/an-operator-recovers-a-stale-fix-dispatch-once.test.ts"
+    - claim: "apply takes the PR's fix branch claim (O_EXCL) before any change, reads live evidence, preserves any dirty or unpublished work through the existing create-only refs/rmd-recovery path, re-reads the PR head, base, branch, claims, newest dispatch and process liveness after preservation, and writes a released receipt only when W1-T12113 decides recover on that second read; a head pushed, a newer dispatch, a claim or a live pid or descendant appearing between the two reads leaves ownership held with a held receipt naming the reason"
+      proof: "unit test: test/fix-lane/an-operator-recovers-a-stale-fix-dispatch-once.test.ts"
+    - claim: "two concurrent applies of the same authorization produce exactly one released receipt, a repeated apply writes nothing new, and a crash after the receipt file is created but before its ledger row is written is completed by the next apply without a second receipt"
+      proof: "unit test: test/fix-lane/an-operator-recovers-a-stale-fix-dispatch-once.test.ts"
+    - claim: "apply never deletes or moves a ref, never removes the worktree, never pushes to the PR branch, never writes fix.done, a credit or a plan or source file, on a code PR and on a plan-only PR alike; the recorded git argv contains no update-ref -d, push --delete, branch -D or worktree remove"
+      proof: "unit test: test/fix-lane/an-operator-recovers-a-stale-fix-dispatch-once.test.ts"
+    - claim: "the receipt and authorization steps survive ledger rotation"
+      proof: "grep: pr_owner.recovery_receipt in src/lib/ledger.ts"
+  rationale: |
+    ORIGIN: architect create run PLAN-create-1794328578391 (2026-11-10). This is the effect half of the
+    stale-fix-dispatch recovery: W1-T12113 decides, this verb gathers, preserves and records, W1-T12115 reads.
+    READ in this worktree:
+    - `pr-owner` is a read-only verb: it is in READ_ONLY_FRESHNESS_EXEMPT_VERBS (src/run-task.ts ~42860) and is an
+      allowed precondition read (src/lib/plan.ts ~253). A verb that writes must not inherit either exemption, so
+      recovery is a separate verb, `pr-owner-recover`, registered beside it (~42330 and ~43252).
+    - The fix branch claim is an O_EXCL inflight lock keyed by fixBranchClaimKey (src/run-task.ts ~31900; W1-T2609
+      closed the concurrent-dispatch race with it). Holding that claim for the length of the verb means no fix
+      round can start on the PR mid-recovery, and a second apply loses the same race a second dispatch would.
+    - Preservation already exists: preserveTrackedDirtyPatch and the fix-owner recovery arms (W1-T6362, W1-T7719)
+      write immutable refs/rmd-recovery commits, and publishRecoveryRefs (src/lib/recovery-refs.ts) pushes them
+      create-only. A name origin holds at another sha is a conflict, never an overwrite. That conflict is
+      preservation_failed here.
+    - Decision-relevant steps must be in DECISION_RELEVANT_LEDGER_STEPS (src/lib/ledger.ts ~549; W1-T8621) or a
+      rotation can drop the receipt and make the PR OWNED again.
+    Settled by lookup: is this already filed or already decided? -> No. No verb, step or shard releases fix.dispatch
+      ownership (grep of src for pr-owner and of plan/tasks.d for recovery receipt; W1-T4209, W1-T6362, W1-T11751
+      read in W1-T12113's rationale).
+    Settled by lookup: what may clear a human-held state? -> Only a matching operator receipt; a machine cannot
+      reapprove, and unreadable history is a hold (src/lib/operator-release.ts qualifyReleaseEvidence). The
+      authorization record follows that rule. Its actor must not satisfy isFleetAutomationActor
+      (src/lib/operator-interventions.ts).
+    Settled by lookup: does the darwin host have a cwd census? -> Not yet. It answers unknown until W1-T11753 lands,
+      so on the Mac host apply holds with cwd_unknown. That is the intended fail-closed result. No dependency is
+      added.
+  design: |
+    1. src/lib/stale-fix-dispatch-recovery-apply.ts (new). All I/O goes through injected ports: ledger read
+       (readPrOwnerLedgerProjection plus the run's rows), PR read (head, base, branch, repo through the existing gh
+       broker read), inflight lock read, isHolderStale, a descendant census over the recorded pid (the /proc ppid
+       walk readProcessCwdCensus already performs), readProcessCwdCensus on the run's worktree, the
+       refs/rmd-dispatch claim read, fix branch claim acquire and release, the preservation arm and recovery ref
+       publisher, a create-only file writer, and the ledger append.
+    2. --authorize: validate every flag (full-hex head and base; the PR number must be the one in the newest
+       fix.dispatch row's pr_url, or that row's task's sweep join). Append pr_owner.recovery_authorized {
+       authorization_id = sha256(tuple, actor, ts), the tuple, actor, reason, ts}. Change nothing else.
+    3. --apply --authorization <id>, in this order:
+       a. Read the authorization. If it is missing, duplicated, unreadable, already consumed by a released receipt,
+          or names a different tuple, hold.
+       b. Acquire the fix branch claim with reclaim:false. If the claim is already held, write a held receipt with
+          reason branch_claim_held and stop.
+       c. First read of all facts, then decideStaleFixDispatchRecovery. On hold, write a held receipt and stop.
+       d. Preserve: run the existing preservation for the worktree (dirty, untracked, ahead or diverged) and
+          publish create-only. If the tree is clean and its head is contained in the PR head, record
+          nothing_to_preserve. Never reset, remove or prune.
+       e. Second read of all facts with the preservation result, then decide again. Any change from (c), or a hold,
+          writes a held receipt.
+       f. Recover: create <stateDir>/pr-owner-recoveries/<recovery_id>.json with flag "wx" and mode 0600 (the
+          commit point), then append the pr_owner.recovery_receipt row with outcome released. If the file already
+          exists with identical content and no ledger row exists, append the row (crash completion). If the file
+          exists with different content, hold with receipt_conflict.
+       g. Release the fix branch claim in finally.
+       Held receipts are ledger rows only (pr_owner.recovery_receipt, outcome held). They never create the file, so
+       they cannot block a later valid release.
+    4. Add pr_owner.recovery_authorized and pr_owner.recovery_receipt to DECISION_RELEVANT_LEDGER_STEPS.
+    5. Register `pr-owner-recover` in the command table and USAGE. Do not add it to
+       READ_ONLY_FRESHNESS_EXEMPT_VERBS or to the plan precondition allow-list.
+    6. Tests use injected ports and temp dirs, and remove them in finally:
+       - authorize then apply releases;
+       - a fleet actor is refused;
+       - a mismatched flag per identity field holds;
+       - a head push, a newer fix.dispatch, a claim appearing and a pid becoming live between reads each hold;
+       - a live, unknown and dead pid, and a live descendant;
+       - a publish conflict holds;
+       - two applies racing on one claim release once;
+       - a repeated apply is a no-op;
+       - crash completion;
+       - a plan-only PR fixture;
+       - a recorded-argv check that no destructive git verb ran and no fix.done row was appended.
+  falsifier: |
+    Skip the second read (e): the "head pushed between reads" fixture releases and the test fails. Drop the fix
+    branch claim acquire: the two racing applies both release. Write held receipts to the receipt file: a held
+    attempt blocks the later valid release and the crash-completion case fails.
