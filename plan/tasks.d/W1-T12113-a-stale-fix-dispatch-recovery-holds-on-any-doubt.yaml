@@ -17,7 +17,7 @@
   priority: 2
   attempts: 0
   acceptance:
-    - claim: "decideStaleFixDispatchRecovery returns recover only when the expected repo, PR, task, dispatch run_id and round_id, PR head and base, branch and authorization all equal the observed values, the recorded worker process is dead on this host, it has no live descendant and no process has a cwd at or below the worktree, no competing fix branch claim or dispatch claim is held; the exact O_EXCL fix branch claim acquired by this recovery invocation is permitted only when its recovery nonce matches the expected invocation nonce, no fix.dispatch is newer than the named one, and preservation evidence names a published recovery ref (or proves a clean tree whose head the PR already contains); every other input, including a live, unknown, foreign-host or reused pid, a mismatched or changed head, base, branch, run or task, a newer dispatch, a competing claim, missing or unreadable evidence, and a failed preservation, returns hold with one named reason"
+    - claim: "decideStaleFixDispatchRecovery returns recover only when the expected repo, PR, task, dispatch run_id and round_id, PR head and base, branch and authorization all equal the observed values, the recorded worker process is dead on this host, it has no live descendant and no process has a cwd at or below the worktree, no competing fix branch claim or dispatch claim is held; the exact O_EXCL fix branch claim acquired by this recovery invocation is permitted only when its claim run_id matches the expected recovery invocation run_id, no fix.dispatch is newer than the named one, and preservation evidence names a published recovery ref (or proves a clean tree whose head the PR already contains); every other input, including a live, unknown, foreign-host or reused pid, a mismatched or changed head, base, branch, run or task, a newer dispatch, a competing claim, missing or unreadable evidence, and a failed preservation, returns hold with one named reason"
       proof: "unit test: test/fix-lane/a-stale-fix-dispatch-recovery-holds-on-any-doubt.test.ts"
     - claim: "the receipt builder produces the same recovery_id for the same prior dispatch, authorization and evidence, and the receipt names the prior dispatch, PR, task, head, base, branch, authorization, liveness and preservation evidence, actor, timestamp, reason and outcome; a plan-only PR fixture decides and builds a receipt exactly like a code PR, and the receipt carries no credit, merge or fix.done field"
       proof: "unit test: test/fix-lane/a-stale-fix-dispatch-recovery-holds-on-any-doubt.test.ts"
@@ -61,11 +61,11 @@
   design: |
     1. src/lib/stale-fix-dispatch-recovery.ts (new, pure, no I/O).
        StaleFixDispatchExpected = {repo, prNumber, taskId, dispatchRunId, dispatchRoundId, headSha, baseSha,
-       branch, authorizationId, recoveryInvocationNonce}, all required, head and base as full 40-hex.
+       branch, authorizationId, recoveryInvocationRunId}, all required, head and base as full 40-hex.
        StaleFixDispatchFacts = the same identity fields as observed live; latestDispatch (the newest fix.dispatch
        row for the PR); process: {state: "dead" | "alive" | "unknown" | "unrecorded" | "foreign_host", pid?, host?,
        startedAt?}; descendants: {state: "none" | "present" | "unknown", pids?}; cwdCensus: {state: "clear" |
-       "occupied" | "unknown"}; fixBranchClaim: {state: "clear" | "held" | "unknown", holder?, recoveryNonce?}; dispatchClaim: {state: "clear" | "held" | "unknown", holder?};
+       "occupied" | "unknown"}; fixBranchClaim: {state: "clear" | "held" | "unknown", holder?, holderRunId?}; dispatchClaim: {state: "clear" | "held" | "unknown", holder?};
        preservation: {state: "published", recoveryRef, sha} | {state: "nothing_to_preserve", headContained: true}
        | {state: "failed" | "unknown", reason}; ledgerRead: {ok: boolean, unread?: string[]}.
     2. decideStaleFixDispatchRecovery(expected, facts) -> {kind: "recover"} | {kind: "hold", reason}. It checks in
@@ -80,10 +80,10 @@
        prior_dispatch_ts, head_sha, base_sha, branch, authorization_id, liveness, preservation, actor, ts, reason,
        outcome: "released" | "held", hold_reason?}. recovery_id = sha256 over the identity fields and
        authorization_id only, so a retry and a racing second invocation produce the same id. The receipt has no
-       fix.done, credit, merge or status field. For the decision, an absent fix branch claim is clear; a held claim is permitted only when its recorded recoveryNonce exactly equals expected.recoveryInvocationNonce, and every other held claim returns competing_branch_claim_held. Export the step name as STALE_FIX_DISPATCH_RECEIPT_STEP.
+       fix.done, credit, merge or status field. For the decision, an absent fix branch claim is clear; a held claim is permitted only when its recorded holderRunId exactly equals expected.recoveryInvocationRunId, and every other held claim returns competing_branch_claim_held. Export the step name as STALE_FIX_DISPATCH_RECEIPT_STEP.
     4. Tests use fixtures only: one recover case, then one hold case per reason, including a live pid, a reused
        pid, an unknown pid, a foreign host, a live descendant, a head moved by one commit, a base change, a newer
-       fix.dispatch with a different run_id, a held fix branch claim with a different nonce (hold), an exact claim owned by this invocation with the matching nonce (recover), a held refs/rmd-dispatch claim, an unreadable ledger, and a failed publish. Also: deterministic recovery_id across two builds; a plan-only PR
+       fix.dispatch with a different run_id, a held fix branch claim with a different run_id (hold), an exact claim owned by this invocation with the matching run_id (recover), a held refs/rmd-dispatch claim, an unreadable ledger, and a failed publish. Also: deterministic recovery_id across two builds; a plan-only PR
        fixture (changed paths only under plan/) decides the same way and its receipt has no credit field.
   falsifier: |
     Drop the head comparison: the "head moved by one commit" fixture decides recover and the test fails. Map
