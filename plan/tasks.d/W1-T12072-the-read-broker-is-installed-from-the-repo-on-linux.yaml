@@ -1,0 +1,38 @@
+- id: W1-T12072
+  title: "The GitHub read broker is installed from the repo on a Linux host"
+  repo: remudero
+  depends_on: []
+  priority: 1.1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: medium # one new installer script; it writes two files under the account's own config and starts one user service
+  band_meaning: blast-radius
+  origin: operator-session#github-connections-2026-11-10
+  plan_refs:
+    - W1-T10279
+  files:
+    - deploy/install-gh-read-broker.sh
+    - test/deploy/the-read-broker-is-installed-from-the-repo-on-linux.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "With --install the script writes the systemd user unit and its launcher under the account's config directory, from a checkout path given as an absolute path, and a second run changes nothing"
+      proof: "grep: W1-T12072 criterion 1 in test/deploy/the-read-broker-is-installed-from-the-repo-on-linux.test.ts"
+    - claim: "With --check the script exits non-zero and names each missing or changed file, and exits 0 when both match what it would write"
+      proof: "grep: W1-T12072 criterion 2 in test/deploy/the-read-broker-is-installed-from-the-repo-on-linux.test.ts"
+    - claim: "The launcher and the unit hold no credential: neither file contains a token, and the launcher sets none"
+      proof: "grep: W1-T12072 criterion 3 in test/deploy/the-read-broker-is-installed-from-the-repo-on-linux.test.ts"
+  rationale: |
+    OBSERVED 2026-11-10 on the Azure host: the read broker's unit sat in auto-restart with status 203/EXEC. Its launcher, ~/.config/remudero/gh-broker-start.sh, and its unit file, ~/.config/systemd/user/remudero-gh-read-broker.service, had both been deleted by accident at about 12:32Z.
+    - Neither file is in the repo. The only installer, deploy/mac/install-gh-read-broker.sh, is for launchd on the Mac. The Azure broker was set up by hand.
+    - The files could not be restored from source. They were rebuilt from what systemd still held in memory: the launcher's path, the working directory and the restart policy. Anything else the launcher set is lost.
+    - The broker stayed down from 13:31Z until the operator ran a hand-written restore script.
+  design: |
+    Add deploy/install-gh-read-broker.sh for Linux, in the shape of deploy/install-field-trials-refresh.sh: --check and --install, a launcher that changes to the given checkout and runs `./bin/rmd gh-broker serve`, a unit with Restart=on-failure, then daemon-reload, enable and start. The test runs the script against a temp HOME with a fake systemctl on PATH.
+    NOT IN SCOPE: the Mac installer, the broker's code, and any credential.
+  falsifier: |
+    Write a different file on the second run and criterion 1 must fail. Report clean while a file is missing and criterion 2 must fail. Put a token in either file and criterion 3 must fail. Restore and require all three to pass.
+  note: |
+    The hand-written restore script from 2026-11-10 is the starting point; it set a 512 MB heap, a value chosen that day, which W1-T12073 should make unnecessary.
