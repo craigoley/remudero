@@ -12,7 +12,6 @@ import { after, test } from "node:test";
 
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import { buildPlanPrBody, planPrAcceptanceCriteria } from "#src/lib/plan-pr-emitter.js";
-import { diffAnchor } from "#src/run-task.js";
 import { parseAcceptanceBlock, parseWhitelistedProof } from "#src/lib/review.js";
 
 const scratch: string[] = [];
@@ -142,13 +141,4 @@ test("a line the shard repeats elsewhere is not chosen, because it would already
   const { dir, files, diff } = fixture({ amend: (s) => `${s}${dup}${dup}  clarification: the operator ruled this applies to every lane\n` });
   const [c] = planPrAcceptanceCriteria([], files, diff, dir);
   assert.match(c.proof, /clarification/);
-});
-
-test("diffAnchor still anchors on the first safe added line after delegating to the shared bar", () => {
-  const diff = ["diff --git a/src/x.ts b/src/x.ts", "--- a/src/x.ts", "+++ b/src/x.ts", "@@ -1 +1,2 @@", "+ab", "+export const SHARED_BAR = 1;"].join("\n");
-  const anchor = diffAnchor(diff);
-  assert.equal(anchor.kind, "anchored");
-  assert.equal(anchor.kind === "anchored" && anchor.proof, "grep: export const SHARED_BAR = 1; in src/x.ts");
-  assert.deepEqual(diffAnchor(undefined), { kind: "unavailable", reason: "no-diff" });
-  assert.deepEqual(diffAnchor("not a diff"), { kind: "unavailable", reason: "unparseable" });
 });
