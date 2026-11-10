@@ -11635,9 +11635,9 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
   {
     // W1-T10976: an unresolved missing-CodeQL-configuration recovery is not a code defect. One escalation per head,
     // owned by the PR's task or the security-policy owner; no generic fix round and no strike (`blocked-ambiguous`
-    // never dispatches a fix, and `security-unknown-hold` is owned by `security-policy`).
+    // never dispatches a fix).
     disposition: "blocked-ambiguous",
-    blocker: "security-unknown-hold",
+    blocker: "escalated", // runSweep names it `security-unknown-hold` (owner security-policy) for this exact shape.
     when: (pr) => securityRecoveryDisposition(pr) !== undefined,
     reason: (pr) => {
       const recovery = securityRecoveryDisposition(pr)!;
@@ -20611,6 +20611,7 @@ export async function runSweep(
           : "");
     if (dispatchHold !== undefined) extraDisposedFields = { ...extraDisposedFields, dispatch_held: dispatchHold.fields.dispatch_held };
     const blocker: PrBlocker = incidentHeldPrs.has(pr.prNumber) ? "awaiting-ci" : infrastructureBlockerByPr.get(pr.prNumber) ??
+      (disposition === "blocked-ambiguous" && securityRecoveryDisposition(pr) !== undefined ? "security-unknown-hold" as const : undefined) ??
       finalBlocker(ruleBlockerByIndex.get(index)!, {
       baseRedStandDown: baseRedStandDownPrs.has(pr.prNumber),
       baseCaused: isBlockedCi(pr) && classifyRedCause(pr, openPrs) === "base-caused",
