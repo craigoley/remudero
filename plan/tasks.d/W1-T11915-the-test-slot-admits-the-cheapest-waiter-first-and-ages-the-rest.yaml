@@ -18,6 +18,7 @@
     - src/lib/test-slot.ts
     - src/lib/test-slot-queue.ts
     - scripts/preflight-author.mjs
+    - test/ci/the-author-preflight-gives-its-price-to-the-test-slot.test.ts
     - test/the-test-slot-admits-the-cheapest-waiter-first-and-ages-the-rest.test.ts
   status: queued
   attempts: 0
@@ -29,7 +30,7 @@
     - claim: Dead-ticket reaping, the heartbeat rule and the admission of a waiter when a slot is open are identical with the change and without it
       proof: "grep: W1-T11915 criterion 3 in test/the-test-slot-admits-the-cheapest-waiter-first-and-ages-the-rest.test.ts"
     - claim: On the production path, the author preflight takes its suite ticket first and then prices its selection. Its still-waiting ticket then carries the same costMs that its capacity verdict later records in receipt.capacity, and the next heartbeat keeps that costMs. The ticket's name and arrival time are unchanged, so its arrival position is kept. A ticket that is never priced is ordered as an unpriced waiter, as criterion 1 defines.
-      proof: "grep: W1-T11915 criterion 4 in test/the-test-slot-admits-the-cheapest-waiter-first-and-ages-the-rest.test.ts"
+      proof: "grep: W1-T11915 criterion 4 in test/ci/the-author-preflight-gives-its-price-to-the-test-slot.test.ts"
   rationale: |
     OBSERVED 2026-11-09: one author preflight of 74 minutes spent 24 minutes waiting for a test slot (measured admission granted one worker on an 8-core host whose own account was using about 990% CPU), and the capacity filing, a plan-only change that needs a few minutes of suites, was refused after a 45 minute wait behind heavier runs. The queue is strict arrival order (W1-T9950, W1-T9951).
     - Shortest-expected-job-first minimises mean wait when one server is the bottleneck, and a small plan-only run behind a long one pays the long one's whole runtime for no benefit to anyone.
