@@ -2131,7 +2131,7 @@ export async function regenerateConflictViaGit(
           const present = (await run(worktreePath, ["ls-tree", "-r", "--name-only", "-z", mainSha, "--", path])).length > 0;
           if (!present) planned.push({ path, mode: "deleted-on-main" });
           else if (Object.hasOwn(REGENERABLE_ARTIFACT_GENERATORS, path)) planned.push({ path, mode: "regenerate" });
-          else if (prChangeAlreadyOnMain(await run(worktreePath, ["diff", "--no-color", "--no-ext-diff", base, pr.headSha, "--", path]),
+          else if (prChangeAlreadyOnMain(await run(worktreePath, ["diff", "--no-color", "--no-ext-diff", "-U0", base, pr.headSha, "--", path]),
             await run(worktreePath, ["show", `${mainSha}:${path}`]))) planned.push({ path, mode: "take-main" });
           else unresolved.push(path);
         }
@@ -10601,6 +10601,8 @@ export function sessionBranchUnheld(evidence: SessionOwnershipEvidence): Session
 
 /** W1-T11170: the ledger row a worker conflict round on an owned head writes when it is dispatched. */
 export const OWNED_CONFLICT_ROUND_STEP = "sweep.owned_conflict.round";
+/** W1-T11170: the one escalation an ambiguous session-branch ownership read files, per PR and head. */
+export const OWNED_CONFLICT_OWNERSHIP_ESCALATED_STEP = "sweep.owned_conflict.ownership_escalated";
 /** W1-T11170: the one escalation the fix progress judge may end an owned head's repair with, per PR and head. */
 export const OWNED_CONFLICT_ESCALATED_STEP = "sweep.owned_conflict.escalated";
 
@@ -10622,25 +10624,28 @@ export function ownedConflictComment(c: {
 }
 
 /**
- * W1-T11170: the redundant re-fix comparison for one conflicted path, at hunk grain: every hunk of the PR's change
- * (`git diff <merge-base> <head> -- <path>`) already appears on main byte for byte, its post-image (context and
- * added lines) a verbatim run of main's blob. A binary or empty diff is never redundant.
+ * W1-T11170: the redundant re-fix comparison for one conflicted path, at hunk grain: the PR's change
+ * (`git diff -U0 <merge-base> <head> -- <path>`) is already on main byte for byte when every hunk's added lines are a
+ * verbatim run of whole lines in main's blob and its removed lines are no longer one. A binary or empty diff, or a
+ * hunk that only removes lines main still carries, is never redundant, so a doubtful path falls to a worker.
  */
 export function prChangeAlreadyOnMain(prDiff: string, mainText: string): boolean {
   if (/^Binary files /m.test(prDiff) || /^GIT binary patch$/m.test(prDiff)) return false;
-  const hunks: string[][] = [];
-  let current: string[] | undefined;
-  let changed = false;
+  const hunks: Array<{ add: string[]; del: string[] }> = [];
+  let current: { add: string[]; del: string[] } | undefined;
   for (const line of prDiff.split("\n")) {
-    if (line.startsWith("@@")) { current = []; hunks.push(current); continue; }
-    if (current === undefined || line.startsWith("\\")) continue;
-    if (line.startsWith("+") || line.startsWith("-")) changed = true;
-    if (line.startsWith(" ") || line.startsWith("+")) current.push(line.slice(1));
+    if (line.startsWith("@@")) { current = { add: [], del: [] }; hunks.push(current); continue; }
+    if (current === undefined) continue;
+    if (line.startsWith("+")) current.add.push(line.slice(1));
+    else if (line.startsWith("-")) current.del.push(line.slice(1));
   }
-  if (!changed || hunks.length === 0) return false;
-  const noEol = /^\\ No newline at end of file$/m.test(prDiff);
-  return hunks.every((post) => post.length > 0 && (mainText.includes(`${post.join("\n")}\n`) ||
-    (noEol && mainText.endsWith(post.join("\n")))));
+  const hay = `\n${mainText}`;
+  const carries = (run: readonly string[]) => {
+    const needle = `\n${run.join("\n")}`;
+    return hay.includes(`${needle}\n`) || hay.endsWith(needle);
+  };
+  return hunks.length > 0 && hunks.every(({ add, del }) => (add.length > 0 || del.length > 0) &&
+    (add.length === 0 || carries(add)) && (del.length === 0 || !carries(del)));
 }
 
 const GARDEN_PLAN_HEAD_RE = /^(?:knowledge|plan|backlog|gate|test|config|export|ci-friction|selector-shadow|hot-file|machine-judge|host-resource|flow|flow-remedy|fix-lane|scout|review-replay|queue-judge|redesign)-garden-\d+$/;
@@ -21622,10 +21627,19 @@ export async function runSweep(
       }
       const ref = pr.headRefName ?? "(no head)";
       if (ownership?.verdict === "ambiguous") {
-        // One escalation per PR and head, by the blocked-ambiguous arm's own head-keyed dedup; nothing is written.
-        reason = `merge conflict (mergeState dirty) — operator-session branch ${ref}: ownership is ambiguous ` +
+        // One escalation per PR and head, keyed by its own row, and nothing is written to the branch.
+        const why = `merge conflict (mergeState dirty) — operator-session branch ${ref}: ownership is ambiguous ` +
           `(${ownership.reason}; claim ${ownership.reads.claim}; session ${ownership.reads.session}; pushes ` +
-          `${ownership.reads.pushes}) — nothing written — escalating once for this head`;
+          `${ownership.reads.pushes}) — nothing written`;
+        const before = readLedger(deps.ledgerPath).some((row) => row.step === OWNED_CONFLICT_OWNERSHIP_ESCALATED_STEP &&
+          row.pr_number === pr.prNumber && row.head_sha === pr.headSha);
+        if (!before && !deps.dryRun) {
+          appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: escalationTaskIdFor(pr), step: OWNED_CONFLICT_OWNERSHIP_ESCALATED_STEP,
+            pr_number: pr.prNumber, head_sha: pr.headSha, ownership: ownership.reads, reason: ownership.reason });
+          await deps.escalate(pr, why, renderClarificationQuestion(pr, why, pr.strikeHistory ?? []));
+        }
+        disposition = "wait";
+        reason = `${why} — ${before ? "already escalated for this head" : deps.dryRun ? "escalation deferred: dry run" : "escalated once for this head"}`;
       } else if (evidenced && (kind === "fleet" || ownership?.verdict === "unheld")) {
         const round: { kind: OwnedConflictHeadKind; ownership?: SessionOwnershipReads; standDown?: string; wrote?: boolean } =
           { kind: kind!, ...(ownership ? { ownership: ownership.reads } : {}) };
