@@ -80,16 +80,7 @@
           and every matching held receipt regardless of authorization_id. If the clock is tied or behind, do not
           create a released file or row; retain the authorization and return receipt_time_not_after_prior_evidence
           so a later retry can succeed only after real time advances.
-       f. Recover: create <stateDir>/pr-owner-recoveries/<recovery_id>.json with flag "wx" and mode 0600 in an
-          owner-only mode 0700 directory (the commit point), then append the pr_owner.recovery_receipt row with
-          outcome released. If the file already exists and no ledger row exists, first validate its file type, owner/mode, canonical bytes and exact authorized identity. If it is a matching released receipt but current evidence is temporarily held or unknown, return transient receipt_replay_pending without appending any held row; later valid evidence replays the stored bytes verbatim. A malformed, mismatched, unreadable or permission-mismatched file remains UNKNOWN and is never overwritten. If an identical ledger receipt already exists,
-          file type/owner/mode, recovery_id recomputed from the exact authorized tuple, authorization, prior
-          dispatch, PR/head/base/branch, authenticated actor, released outcome, timestamp later than dispatch, and
-          successful liveness and preservation evidence. Require the second read still to decide recover. If all
-          checks pass, append the stored canonical receipt bytes verbatim even when this retry has a later nowIso;
-          never regenerate, overwrite, or append different content. A malformed, mismatched, unreadable or
-          permission-mismatched file holds with receipt_conflict. If an identical ledger receipt already exists,
-          return it without writing; any conflicting row holds.
+       f. Recover: inspect <stateDir>/pr-owner-recoveries/<recovery_id>.json before any durable hold or release write. If absent, after the second live read decides recover, create it with flag "wx" and mode 0600 in an owner-only mode 0700 directory, then append the released ledger row. If present, validate file type/owner/mode, canonical bytes and exact authorized identity. A matching released file with no ledger row is replayed byte-for-byte only when the second live read still decides recover; if current evidence is held or unknown, return transient receipt_replay_pending and append no held row. A malformed, mismatched, unreadable or permission-mismatched file returns UNKNOWN and is never overwritten. An identical ledger receipt is an idempotent no-op; conflicting rows hold.
        g. Release the fix branch claim in finally.
        Held receipts are ledger rows only (pr_owner.recovery_receipt, outcome held) and never create the file. A later fully matching released receipt may supersede older held rows only by strict timestamp order; T12115 keeps ownership held or unknown for a later/equal hold or any conflict.
     4. Add pr_owner.recovery_authorized and pr_owner.recovery_receipt to DECISION_RELEVANT_LEDGER_STEPS. W1-T12047 owns the same ledger file, so this task depends on it and cannot overlap its rotation-list edit.
@@ -101,14 +92,18 @@
        - a mismatched flag per identity field holds;
        - a head push, a newer fix.dispatch, a claim appearing and a pid becoming live between reads each hold;
        - a live, unknown and dead pid, and a live descendant;
+       - a stale matching fix.dispatch lock is compare-and-reclaimed only after same-host dead original pid, no descendant and clear cwd proof; live, reused, foreign-host, malformed, changed-run and unknown lock evidence holds;
+       - a stale prior recovery lock is reclaimed only for this recovery_id with same-host liveness and exact inode/raw-byte checks; unrelated stale claims hold;
        - a publish conflict holds;
-       - two applies racing on one claim produce exactly one released receipt; the loser appends no held row whether it observes contention before or after the winner releases, and returns the existing release if present;
-       - two --authorize calls race for one tuple: exactly one appends an unconsumed authorization, the other refuses; race --authorize against a release and prove no authorization row can append after release;
+       - two applies racing on one claim produce exactly one released receipt; the loser appends no held row before or after release and returns the existing release if present;
        - two --authorize calls race for one tuple: exactly one appends an unconsumed authorization and the other refuses; authorize racing with release cannot append an authorization after release;
+       - tied or backwards nowIso relative to the dispatch or any matching hold writes no released file or row, keeps authorization reusable, and succeeds only when a later real timestamp is observed;
+       - a canonical release file with no ledger row, an unknown retry, then a valid retry replays identical bytes and is not poisoned by a later held row;
        - a repeated apply is a no-op;
        - crash completion;
        - a plan-only PR fixture;
        - a recorded-argv check that no destructive git verb ran and no fix.done row was appended.
+
   falsifier: |
     Skip the second read (e): the "head pushed between reads" fixture releases and the test fails. Drop the fix
     branch claim acquire: two authorizations both append, or authorize appends after release. Allow a release at a
