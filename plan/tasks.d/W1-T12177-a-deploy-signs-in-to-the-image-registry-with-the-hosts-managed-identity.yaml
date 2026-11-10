@@ -1,0 +1,47 @@
+- id: W1-T12177
+  title: "A deploy signs in to the image registry with the host's managed identity first"
+  repo: remudero
+  depends_on: []
+  priority: 0.9
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the sign-in that every deploy and recycle on the Azure host needs; a person's login must keep working
+  band_meaning: blast-radius
+  origin: operator-session#follow-ups-2026-11-10
+  plan_refs:
+    - W1-T5319
+  files:
+    - deploy/acr-login.sh
+    - src/lib/deployer.ts
+    - test/deploy/a-deploy-signs-in-to-the-image-registry-with-the-hosts-managed-identity.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "The sign-in first tries the managed identity of the host. When that works, it signs in to the registry and no person's login is used"
+      proof: "grep: W1-T12177 criterion 1 in test/deploy/a-deploy-signs-in-to-the-image-registry-with-the-hosts-managed-identity.test.ts"
+    - claim: "When the host has no managed identity, the sign-in uses the login that is already on the host, as today"
+      proof: "grep: W1-T12177 criterion 2 in test/deploy/a-deploy-signs-in-to-the-image-registry-with-the-hosts-managed-identity.test.ts"
+    - claim: "The result file and the deploy.image_auth_refresh row name the method that worked: the managed identity or the stored login"
+      proof: "grep: W1-T12177 criterion 3 in test/deploy/a-deploy-signs-in-to-the-image-registry-with-the-hosts-managed-identity.test.ts"
+    - claim: "When the identity signs in to Azure and the registry refuses it, the failure names the AcrPull role as missing and names the registry"
+      proof: "grep: W1-T12177 criterion 4 in test/deploy/a-deploy-signs-in-to-the-image-registry-with-the-hosts-managed-identity.test.ts"
+    - claim: "When both methods fail, the failure gives the reason of each, and no token appears in the file, in the row or in the output"
+      proof: "grep: W1-T12177 criterion 5 in test/deploy/a-deploy-signs-in-to-the-image-registry-with-the-hosts-managed-identity.test.ts"
+  rationale: |
+    OBSERVED 2026-11-10 on the Azure host: `deploy.image_auth_refresh` failed until the operator ran `az login` with an authenticator app. The daemon stayed stuck for more than an hour.
+    - `rmd_acr_login` in deploy/acr-login.sh runs `az acr login -n <registry>`. That command needs a login that is already on the host.
+    - The login on the host belongs to a person, and it ends. Only that person can renew it, with a second factor.
+    - An Azure virtual machine can have a managed identity. `az login --identity` signs in with it and needs no person.
+    - Whether the host has a managed identity today, and whether it holds the AcrPull role on the registry, was not checked for this filing.
+  design: |
+    In `rmd_acr_login`, run `az login --identity` first, with a short time limit, and then `az acr login`. On any failure of that path, run `az acr login` with the stored login, as today.
+    Tell the two failures of the identity path apart by the output of `az`: no identity on the host, or an identity that the registry refuses. Only the second names AcrPull.
+    Add the method to the JSON line that `rmd_acr_refresh` writes to state/acr-login.json. src/lib/deployer.ts copies it to the row.
+    `az login --identity` changes the active account of the Azure command line on the host. Keep it inside its own config directory (`AZURE_CONFIG_DIR`), so a person's login on the host stays as it was.
+    NOT IN SCOPE: giving the host an identity or a role, which is an operator action in Azure, and the image pull itself.
+  falsifier: |
+    Skip the identity and criterion 1 must fail. Stop when the host has no identity and criterion 2 must fail. Report a refused identity without the role name and criterion 4 must fail. Restore and require all five to pass.
+  note: |
+    Before the build, the operator can check the host with two commands: `az login --identity` and `az acr login -n <registry>`. If the first fails, the host needs an identity. If the second fails, the identity needs the AcrPull role.
