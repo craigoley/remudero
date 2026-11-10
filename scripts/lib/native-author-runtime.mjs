@@ -128,7 +128,10 @@ export function readRuntimeProfile(root, path, expected, now = Date.now()) {
   if (observedTree !== observed.inputTree) throw new Error('runtime profile: source/runtime/corpus binding mismatch; observed inputs differ');
   const age = now - Date.parse(profile.at);
   if (!Number.isFinite(age) || age < 0 || age > RUNTIME_PROFILE_MAX_AGE_MS) throw new Error('runtime profile: stale or future observation');
-  if (!Number.isSafeInteger(profile.concurrency) || profile.concurrency < 1 || profile.concurrency > 4) {
+  // W1-T11891: the sample width is the admitted slot grant it recorded, never a fixed ceiling.
+  // No recorded grant, or a width the grant did not give, is not measured concurrency.
+  if (!Number.isSafeInteger(profile.concurrency) || profile.concurrency < 1 ||
+      profile.slot?.concurrency !== profile.concurrency) {
     throw new Error('runtime profile: invalid measured concurrency');
   }
   const artifacts = {};
@@ -189,10 +192,15 @@ const quantile = (values, fraction) => {
   return sorted[Math.ceil((sorted.length - 1) * fraction)];
 };
 
-/** An estimate, not a finish promise. Unknown files are never priced at zero. */
+/** An estimate, not a finish promise. Unknown files are never priced at zero.
+ *  W1-T11891: an EXECUTION check prices `workers` only within `admittedWorkers`, the measured bound
+ *  (the acquired slot grant once one is held); none named admits one worker. `estimateOnly` prices any
+ *  requested width for planning and carries no execution authority. */
 export function runtimeDeadlineFit(files, manifest, profile, { workers, deadline, now = Date.now(),
-  staticReserveMs = AUTHOR_STATIC_RESERVE_MS } = {}) {
-  if (!files.length || !Number.isSafeInteger(workers) || workers < 1 || workers > 4 ||
+  staticReserveMs = AUTHOR_STATIC_RESERVE_MS, admittedWorkers, estimateOnly = false } = {}) {
+  const bound = estimateOnly === true ? Infinity : admittedWorkers ?? 1;
+  if (!files.length || !Number.isSafeInteger(workers) || workers < 1 || workers > bound ||
+      (bound !== Infinity && (!Number.isSafeInteger(bound) || bound < 1)) ||
       !Number.isFinite(deadline) || !Number.isFinite(now) || !Number.isSafeInteger(staticReserveMs) || staticReserveMs < 0) {
     throw new Error('runtime admission: invalid deadline, corpus or admitted workers');
   }
@@ -209,6 +217,8 @@ export function runtimeDeadlineFit(files, manifest, profile, { workers, deadline
   const predictedMs = Math.ceil(predictMakespanMs(files, { ...manifest, files: costs }, workers) * AUTHOR_RUNTIME_SAFETY_FACTOR);
   const requiredMs = predictedMs + staticReserveMs + AUTHOR_SHUTDOWN_RESERVE_MS, availableMs = deadline - now;
   return { fits: requiredMs <= availableMs, kind: 'estimated-native-calibration', workers, deadline,
+    authority: estimateOnly === true ? 'estimate-only' : 'admitted-width',
+    admittedWorkers: estimateOnly === true ? null : bound,
     availableMs, requiredMs, predictedMs, staticReserveMs, shutdownReserveMs: AUTHOR_SHUTDOWN_RESERVE_MS,
     safetyFactor: AUTHOR_RUNTIME_SAFETY_FACTOR, scale, overheadMs, unknownMs,
     measuredFiles: files.filter((file) => measured.has(file)).length, totalFiles: files.length,
@@ -279,12 +289,13 @@ export function readWholeAuthorPhases(root, path, expected, now = Date.now()) {
 /** Shadow estimate for an entire future run, BEFORE census/static work starts.
  * It consumes no lease and cannot authorize workers, execution or test-result reuse. */
 export function wholeAuthorDeadlineFit(files, manifest, profile, phases, options = {}) {
-  const testEstimate = runtimeDeadlineFit(files, manifest, profile, { ...options, staticReserveMs: 0 });
+  // Planning prices a requested width; it never holds a grant, so it is estimate-only (W1-T11891).
+  const testEstimate = runtimeDeadlineFit(files, manifest, profile, { ...options, staticReserveMs: 0, estimateOnly: true });
   const binding = profile.timingCompatibility?.currentHead ?? profile.bindings?.head;
   const accounting = phases?.accounting;
   const availableMs = testEstimate.availableMs;
   const base = { kind: 'estimated-native-whole-author', availableMs,
-    deadline: testEstimate.deadline, workers: testEstimate.workers,
+    deadline: testEstimate.deadline, workers: testEstimate.workers, authority: testEstimate.authority,
     testPredictedMs: testEstimate.predictedMs, shutdownReserveMs: AUTHOR_SHUTDOWN_RESERVE_MS,
     dispatchAllowed: false, capacityGranted: false, authorPassReused: false, resourceFitQualified: false,
     limits: 'Shadow planning only; no capacity grant, deadline renewal, native resource qualification or finish promise.' };
