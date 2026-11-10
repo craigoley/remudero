@@ -17,7 +17,7 @@
     - src/lib/daemon.ts
     - test/a-wall-clock-bound-declares-itself.test.ts
     - test/daemon/one-hung-interphase-review-pass-cannot-park-the-tick.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "When the interphase review clock is stopped while one of its passes never settles, stop() returns after a bounded wait, ledgers the passes it left running with how long each had run, and the tick continues; a pass that settles within the bound is awaited as today"

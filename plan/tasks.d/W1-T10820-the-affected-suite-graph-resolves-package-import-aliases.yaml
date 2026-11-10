@@ -15,7 +15,7 @@
     - scripts/affected-reach-baseline.json
     - test/the-affected-suite-reach-ratchet.test.ts
     - test/ci/suites/the-affected-suite-graph-resolves-package-import-aliases.test.ts
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

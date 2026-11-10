@@ -10,7 +10,7 @@
   dispatch_hold: true
   risk: high
   band_meaning: blast-radius
-  status: queued
+  status: merged
   attempts: 0
   author_class: machine
   origin: "operator-approved task-id-existence quoted-feedback boundary, 2026-10-27"

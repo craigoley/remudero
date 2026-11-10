@@ -13,7 +13,7 @@ import { ghExec } from "./github-transport.js";
 import { PR_TERMINAL_STEP } from "./ledger-carry.js";
 import { ledgerRotationEntries, readLedgerUnionRecordsSync } from "./ledger-union.js";
 import { machineShardFilingRefusal, machineShardLandingGuard, renderMachineShard } from "./machine-filing.js";
-import { loadPlanFromYaml, newTestPath } from "./plan.js";
+import { loadPlanFromYaml, newTestPath, parseTasksFromYaml } from "./plan.js";
 import { blockerOwnerModule, PR_BLOCKERS, type PrBlocker } from "./pr-blocker.js";
 import { resolveRepoLayout } from "./repo-layout.js";
 import type { LedgerRecord } from "./retro.js";
@@ -215,7 +215,10 @@ export function readLadderPlan(repoRoot: string, kind: LadderKind): CiFrictionPl
   const unreadable: string[] = [];
   for (const path of listed.trim().split("\n").filter(Boolean).map(p => p.replace("origin/main:", ""))) {
     try {
-      for (const task of loadPlanFromYaml(git(["show", `origin/main:${path}`]), path).tasks) {
+      // W1-T12025: one shard is not a plan. `loadPlanFromYaml` resolves depends_on and superseded_by inside the blob
+      // it is given, so a ladder shard naming a task in another shard read as unreadable and failed the pass
+      // (W1-T11062 superseded_by W1-T11172, 2026-11-10). The shard's own schema is still checked here.
+      for (const task of parseTasksFromYaml(git(["show", `origin/main:${path}`]), path)) {
         if (!task.origin || !parseOrigin(kind, task.origin)) continue;
         tasks.push({ id: task.id, origin: task.origin, status: task.status, retired: task.retirement !== undefined,
           files: [...(task.files ?? [])], path });
