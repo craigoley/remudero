@@ -96,7 +96,7 @@ import {
 import { clockFromMillisFn, systemClock, type Clock } from "./clock.js";
 import { isWorkerProviderId, type Config, type WorkerProviderId, fixStrikeCap, overflowFallbackRefusal } from "./config.js";
 import { defaultGitCaptureAsync, gitPushEmptyCommit, gitPushRunBranchAsync, worktreePushExec, worktreePushExecAsync, runStepsSync, runStepsAsync, step, type Steps } from "./git-push.js";
-import { ghExec, ghJson, ghJsonAsync, ghTextAsync, type GhJsonReadOptions } from "./github-transport.js";
+import { ghExec, ghJson, ghJsonAsync, ghTextAsync, GhPaceWouldBlockError, type GhJsonReadOptions } from "./github-transport.js";
 import { withdrawStaleConflictedJudgePr } from "./machine-filing-judge.js";
 import type { AdmissionObserver, AdmissionSettings, AdmissionRead } from "./contributor-admission.js";
 import { observeContributorAdmission } from "./arm-auto-merge.js";
@@ -15119,6 +15119,44 @@ function isReopenedClosedLifecycleRefusal(reason: unknown): boolean {
   return typeof reason === "string" && reason.startsWith("PR is already closed — refusing to post remudero-review");
 }
 
+/** BACKSTOP: how many pacing gaps one review attempt waits out before its throw is ledgered like any other. */
+export const REVIEW_PACER_GAP_RETRIES = 3;
+
+/** The first frame of a pacing refusal outside the transport: the synchronous read still on the daemon's loop. */
+function pacerGapSite(e: Error): string | undefined {
+  return e.stack?.split("\n").slice(1).map((frame) => frame.trim().replace(/^at /, ""))
+    .find((frame) => !frame.includes("github-transport") && !frame.startsWith("node:") && !frame.includes("(node:"));
+}
+
+/**
+ * W1-T12024: a `GhPaceWouldBlockError` says a synchronous GitHub read met the pacing gap on the daemon's loop (25 ms
+ * in 36 of 45 observed throws). It says nothing about the PR, yet its throw stood the head down for the 60 minute
+ * pending ceiling: of 39 such heads from 2026-11-07 to 2026-11-10, one was reviewed again on the same head.
+ * While no review phase has run the attempt has published nothing, so it waits the gap out on a timer and starts
+ * again. After a phase, or past {@link REVIEW_PACER_GAP_RETRIES}, the throw goes to the existing bounded retry key.
+ */
+export async function postReviewPastPacerGaps(
+  post: (onPhase: (phase: string) => void) => void | Promise<void>,
+  opts: { onPhase?: (phase: string) => void; sleep?: (ms: number) => Promise<unknown>; onGap?: (gap: { waitMs: number; attempt: number; site?: string }) => void } = {},
+): Promise<void> {
+  let phaseSeen = false;
+  const notePhase = (phase: string): void => {
+    phaseSeen = true;
+    opts.onPhase?.(phase);
+  };
+  for (let waited = 0; ; waited += 1) {
+    try {
+      await post(notePhase);
+      return;
+    } catch (e) {
+      if (!(e instanceof GhPaceWouldBlockError) || phaseSeen || waited >= REVIEW_PACER_GAP_RETRIES) throw e;
+      const site = pacerGapSite(e);
+      opts.onGap?.({ waitMs: e.waitMs, attempt: waited + 1, ...(site === undefined ? {} : { site }) });
+      await (opts.sleep ?? delay)(e.waitMs);
+    }
+  }
+}
+
 const RETRYABLE_REVIEW_THROW_PREFIX = "post-review attempt threw — standing down rather than retrying this head unbounded:";
 
 export function isRetryableReviewThrow(reason: unknown): boolean {
@@ -24198,7 +24236,13 @@ export async function runSweep(
         if (postReview) {
           try {
           const reviewStartedAtMs = performance.now();
-          await postReview(job.pr, reviewMode, reviewAttemptId, onPhase);
+          await postReviewPastPacerGaps((phase) => postReview(job.pr, reviewMode, reviewAttemptId, phase), {
+            ...(onPhase === undefined ? {} : { onPhase }),
+            onGap: (gap) => log("sweep.post_review.pacer_gap_waited", {
+              pr_number: job.pr.prNumber, head_sha: job.pr.headSha, review_attempt_id: reviewAttemptId,
+              wait_ms: gap.waitMs, attempt: gap.attempt, ...(gap.site === undefined ? {} : { site: gap.site }),
+            }),
+          });
           noteReviewDuration(performance.now() - reviewStartedAtMs);
           // W1-T11929: the restore row is written only after the status post succeeded, so it alone earns the settled row.
           if (reviewMode.kind === "restore") {
