@@ -7,13 +7,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { inspect } from "node:util";
 import { test } from "node:test";
+import { parse as parseYaml } from "yaml";
 // The daemon and the live analytics cache import each other and the cache reads a daemon constant at load,
 // so the cache loads first and the daemon (the module under test) finishes before the cache evaluates.
 import "#src/lib/live-analytics-snapshot-cache.js";
 import { runDaemon } from "#src/lib/daemon.js";
 import { ghShim } from "#test/helpers/gh-shim.js";
 import { ghBrokerDir, ghBrokerRouteFor } from "#src/lib/gh-read-broker-client.js";
-import { mergePlanBlobs, parseTasksFromYaml, type Plan } from "#src/lib/plan.js";
+import { mergePlanBlobs, type Plan } from "#src/lib/plan.js";
 import {
   OpsCatalogAuthMissingError, createOpsCatalogShadowSource, defaultOpsCatalogApi, readOpsCatalogSnapshotAsync, type OpsCatalogApi,
 } from "#src/lib/ops-catalog-source.js";
@@ -89,17 +90,20 @@ test("W1-T11768 criterion 3: a transport error's message never reaches a result"
   sweep("shadow input", await createOpsCatalogShadowSource(target, async () => { throw leaks; }).refresh());
 });
 
-test("W1-T11768 criterion 3: YAML warnings stay off logs while parse errors still refuse", async (t) => {
-  const warnings: unknown[] = [];
-  t.mock.method(process, "emitWarning", (warning: string | Error) => {
-    warnings.push(warning);
+test("W1-T11768 criterion 3: YAML warnings stay off stderr while parse errors still refuse", async (t) => {
+  const stderr: string[] = [];
+  t.mock.method(process.stderr, "write", (chunk: string | Uint8Array) => {
+    stderr.push(String(chunk));
+    return true;
   });
 
-  // Positive control: this same parser input emits a warning without the catalog's safe log level.
-  parseTasksFromYaml(taskYaml("OPS-WARN", "!PRIVATE_TAG PRIVATE_TITLE_SENTINEL"), "recording fake");
-  assert.equal(warnings.length, 1);
-  assert.match(String(warnings[0]), /PRIVATE_TITLE_SENTINEL/);
-  warnings.length = 0;
+  const flushWarnings = () => new Promise<void>((resolve) => setImmediate(resolve));
+  const warningText = `- id: OPS-WARN\n  title: !PRIVATE_TAG PRIVATE_TITLE_SENTINEL\n`;
+  // Positive control: the same input with yaml's default log level prints its private source line.
+  parseYaml(warningText);
+  await flushWarnings();
+  assert.match(stderr.join(""), /PRIVATE_TITLE_SENTINEL/);
+  stderr.length = 0;
 
   const warning = await readOpsCatalogSnapshotAsync(target, fixture({
     monolith: taskYaml("OPS-TAG", "!PRIVATE_TAG PRIVATE_TITLE_SENTINEL"),
@@ -110,7 +114,8 @@ test("W1-T11768 criterion 3: YAML warnings stay off logs while parse errors stil
     monolith: "- id: OPS-BAD\n  title: [PRIVATE_TITLE_SENTINEL\n",
   }).api);
   assert.equal(parseError.outcome, "malformed", "YAML parse errors still refuse the catalog");
-  assert.deepEqual(warnings, [], "catalog parser diagnostics never reach process warning logs");
+  await flushWarnings();
+  assert.equal(stderr.join(""), "", "catalog parser diagnostics never reach stderr");
 });
 
 test("W1-T11768 criterion 3: every outcome's serialized result is clean of private content", async () => {
