@@ -1,5 +1,5 @@
 - id: W1-T11983
-  title: A sweep-wake marker write that fails or is interrupted leaves no temp file behind, and a start removes this writer's temp files older than an hour; 51 of them sit in the state directory, the oldest from 2026-10-18
+  title: "A sweep-wake marker write that fails or is interrupted leaves no temp file behind, and a start removes this writer's temp files older than an hour; 51 of them sit in the state directory, the oldest from 2026-10-18"
   repo: remudero
   depends_on: []
   priority: 2.5
@@ -19,11 +19,11 @@
   status: queued
   attempts: 0
   acceptance:
-    - claim: A marker write whose write or rename throws removes its temp file before rethrowing
+    - claim: "A marker write whose write or rename throws removes its temp file before rethrowing"
       proof: "grep: W1-T11983 criterion 1 in test/a-wake-marker-write-leaves-no-temp-file-behind.test.ts"
-    - claim: On start the wake module removes SWEEP_WAKE_REQUESTED temp files in its state directory whose modification time is more than an hour old, and never the marker or a temp file younger than that
+    - claim: "On start the wake module removes SWEEP_WAKE_REQUESTED temp files in its state directory whose modification time is more than an hour old, and never the marker or a temp file younger than that"
       proof: "grep: W1-T11983 criterion 2 in test/a-wake-marker-write-leaves-no-temp-file-behind.test.ts"
-    - claim: The removal is counted on one github.wake.temp_swept row and a failure to remove is reported there, never thrown
+    - claim: "The removal is counted on one github.wake.temp_swept row and a failure to remove is reported there, never thrown"
       proof: "grep: W1-T11983 criterion 3 in test/a-wake-marker-write-leaves-no-temp-file-behind.test.ts"
   rationale: |
     OBSERVED 2026-11-10 on the Azure host: the core state directory holds 103 files named <target>.tmp-<pid>-<uuid>: 51 for SWEEP_WAKE_REQUESTED (0 or 171 bytes, 2026-10-18 to 2026-11-07), 36 for gardener-runtime.json, 14 for github-webhook-deliveries.json. They come from processes killed between the temp write and the rename.

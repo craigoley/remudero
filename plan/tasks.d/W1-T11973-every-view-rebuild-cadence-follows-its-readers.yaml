@@ -1,5 +1,5 @@
 - id: W1-T11973
-  title: Every read-model view's rebuild cadence follows its readers, so a serve nobody is reading stops rebuilding fourteen views at full rate; today only the now view stretches when unread
+  title: "Every read-model view's rebuild cadence follows its readers, so a serve nobody is reading stops rebuilding fourteen views at full rate; today only the now view stretches when unread"
   repo: remudero
   depends_on: []
   priority: 1
@@ -19,13 +19,13 @@
   status: queued
   attempts: 0
   acceptance:
-    - claim: Every non-demand view factory readModelLaneViews returns is read-paced, so a lane view unread for READ_MODEL_READ_HOT_MS doubles its wait after each finished build up to READ_MODEL_IDLE_STRETCH_MAX; the test reads the factory list, so a lane view added later without the flag fails it
+    - claim: "Every non-demand view factory readModelLaneViews returns is read-paced, so a lane view unread for READ_MODEL_READ_HOT_MS doubles its wait after each finished build up to READ_MODEL_IDLE_STRETCH_MAX; the test reads the factory list, so a lane view added later without the flag fails it"
       proof: "grep: W1-T11973 criterion 1 in test/console-api/read-model/an-unread-view-stretches-its-rebuild-cadence-whatever-view-it-is.test.ts"
-    - claim: A read of the view, or of a view built from it, restores the cost over share cadence and makes its stale unit due on the next tick, exactly as it does for now today
+    - claim: "A read of the view, or of a view built from it, restores the cost over share cadence and makes its stale unit due on the next tick, exactly as it does for now today"
       proof: "grep: W1-T11973 criterion 2 in test/console-api/read-model/an-unread-view-stretches-its-rebuild-cadence-whatever-view-it-is.test.ts"
-    - claim: A demand view keeps its demand book pacing and eviction unchanged, and the ticker still leaves a view without the flag unstretched
+    - claim: "A demand view keeps its demand book pacing and eviction unchanged, and the ticker still leaves a view without the flag unstretched"
       proof: "grep: W1-T11973 criterion 3 in test/console-api/read-model/an-unread-view-stretches-its-rebuild-cadence-whatever-view-it-is.test.ts"
-    - claim: Each read_model.view_builds row carries the largest stretch the unit reached in its window, so the saving is on the ledger
+    - claim: "Each read_model.view_builds row carries the largest stretch the unit reached in its window, so the saving is on the ledger"
       proof: "grep: W1-T11973 criterion 4 in test/console-api/read-model/an-unread-view-stretches-its-rebuild-cadence-whatever-view-it-is.test.ts"
   rationale: |
     OBSERVED 2026-11-10 on the Azure host (8 cores, CPU pressure some avg300 79 percent): serve used 1.0 to 2.8 cores in 20 to 30 s samples at cpu-shares 4096 against the daemon's 512, with 3.8 GB resident. route-reads.json shows the console's last read of any view at 01:12:34Z; from 01:33Z to 04:19Z, with no reader, read_model.view_builds summed 4,385 s of build time over 9,987 s.

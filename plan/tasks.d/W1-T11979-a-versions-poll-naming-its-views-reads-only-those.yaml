@@ -1,5 +1,5 @@
 - id: W1-T11979
-  title: A versions poll that names the views its page shows counts as a read of only those views, so an open console tab no longer keeps every view on its hot cadence
+  title: "A versions poll that names the views its page shows counts as a read of only those views, so an open console tab no longer keeps every view on its hot cadence"
   repo: remudero
   depends_on:
     - W1-T11973
@@ -21,11 +21,11 @@
   status: queued
   attempts: 0
   acceptance:
-    - claim: GET /v1/views/versions with a views parameter answers the same body as without it and is counted by viewsReadBy as a read of only the named views and the views they are built from
+    - claim: "GET /v1/views/versions with a views parameter answers the same body as without it and is counted by viewsReadBy as a read of only the named views and the views they are built from"
       proof: "grep: W1-T11979 criterion 1 in test/console-api/serve/a-versions-poll-naming-its-views-reads-only-those.test.ts"
-    - claim: A poll without the parameter is counted as a read of every view, as today, and an unknown name in the parameter is ignored
+    - claim: "A poll without the parameter is counted as a read of every view, as today, and an unknown name in the parameter is ignored"
       proof: "grep: W1-T11979 criterion 2 in test/console-api/serve/a-versions-poll-naming-its-views-reads-only-those.test.ts"
-    - claim: The same holds for the per-instance copy of the path
+    - claim: "The same holds for the per-instance copy of the path"
       proof: "grep: W1-T11979 criterion 3 in test/console-api/serve/a-versions-poll-naming-its-views-reads-only-those.test.ts"
   rationale: |
     OBSERVED in code: READ_MODEL_EVERY_VIEW_PATHS holds /v1/views/versions, and viewsReadBy returns every view name for it. route-reads.json counts 3,903 reads of that path.

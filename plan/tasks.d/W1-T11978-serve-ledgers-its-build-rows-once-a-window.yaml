@@ -1,5 +1,5 @@
 - id: W1-T11978
-  title: Serve ledgers its agent and workstreams builds as one row per window instead of one per build; the two were 2,072 of 7,781 ledger rows in 13 hours and each one moves the ledger every reader folds
+  title: "Serve ledgers its agent and workstreams builds as one row per window instead of one per build; the two were 2,072 of 7,781 ledger rows in 13 hours and each one moves the ledger every reader folds"
   repo: remudero
   depends_on: []
   priority: 1.4
@@ -20,11 +20,11 @@
   status: queued
   attempts: 0
   acceptance:
-    - claim: agent-view writes one agent.built row per instance per window carrying the builds, the last seq and the last row count, instead of one row per build
+    - claim: "agent-view writes one agent.built row per instance per window carrying the builds, the last seq and the last row count, instead of one row per build"
       proof: "grep: W1-T11978 criterion 1 in test/console-api/read-model/serves-build-rows-are-one-row-a-window-not-one-a-build.test.ts"
-    - claim: workstreams-view writes one workstreams.built row per window carrying the builds and the summed reused and derived counts, instead of one row per build
+    - claim: "workstreams-view writes one workstreams.built row per window carrying the builds and the summed reused and derived counts, instead of one row per build"
       proof: "grep: W1-T11978 criterion 2 in test/console-api/read-model/serves-build-rows-are-one-row-a-window-not-one-a-build.test.ts"
-    - claim: A window with no build writes no row, and a view's first build after start is written at once so a cold start stays visible
+    - claim: "A window with no build writes no row, and a view's first build after start is written at once so a cold start stays visible"
       proof: "grep: W1-T11978 criterion 3 in test/console-api/read-model/serves-build-rows-are-one-row-a-window-not-one-a-build.test.ts"
   rationale: |
     OBSERVED 2026-11-10 (core ledger, 2026-11-09T16:00Z to 2026-11-10T05:00Z): agent.built 1,043 rows and workstreams.built 1,029 rows, 27 percent of the 7,781 rows written by every actor in that window, all from serve's views thread.
