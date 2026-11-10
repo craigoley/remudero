@@ -1,0 +1,40 @@
+- id: W1-T12044
+  title: "A gardener files a task to rewrite the text that is hardest to read"
+  repo: remudero
+  depends_on: [W1-T12038, W1-T12043]
+  priority: 1.5
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # a new gardener that files tasks; a wrong ranking wastes builds, so its record decides how much it may file
+  band_meaning: blast-radius
+  origin: operator-session#plain-language-2026-11-10
+  plan_refs:
+    - W1-T2279
+  files:
+    - src/lib/plain-language-gardener.ts
+    - src/lib/garden-registry.ts
+    - test/gardeners/the-plain-language-gardener-files-a-rewrite-of-the-hardest-text.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "Each pass ranks files by how hard they are to read times how often they are read, and files one rewrite task for the first file that has no open rewrite task"
+      proof: "grep: W1-T12044 criterion 1 in test/gardeners/the-plain-language-gardener-files-a-rewrite-of-the-hardest-text.test.ts"
+    - claim: "A filed task names the file, its measurements, the rules it breaks most, and requires that the rewrite keeps every rule, number and machine-read token"
+      proof: "grep: W1-T12044 criterion 2 in test/gardeners/the-plain-language-gardener-files-a-rewrite-of-the-hardest-text.test.ts"
+    - claim: "After a rewrite merges, the gardener records the file's measurements before and after, and a file that did not improve is not filed again for the same measurements"
+      proof: "grep: W1-T12044 criterion 3 in test/gardeners/the-plain-language-gardener-files-a-rewrite-of-the-hardest-text.test.ts"
+    - claim: "The garden registry builds the gardener, so the daemon runs it"
+      proof: "grep: plainLanguageGardenSpec( in src/lib/garden-registry.ts"
+  rationale: |
+    MEASURED 2026-11-10 on main at 2c6e743199: 262,837 words of comments in the ten largest files of src/lib, 29,327 words in docs/operator-guide.md, 5,084 task titles and about 300 escalation detail strings. No person will rewrite that by hand, and no agent is asked to.
+    - The fleet already improves itself this way for other things: the gate gardener files compression tasks for comments, and the ci-friction gardener files a remedy for the costliest CI cause.
+    - The operator asked for automated flow and self-improvement, and for nothing to wait on them.
+  design: |
+    A gardener in the shape of the others (src/lib/gardener.ts): its inventory is the JSON line of `npm run prose-load`; "how often it is read" is 1 for a document, and the count of sessions that load it for agent rules and for source files (from the ledger's existing rows, with the file's size as the fallback). It files through the machine-filing path, so the existing admission and review apply, and it scores its own filings by the measured change.
+    NOT IN SCOPE: rewriting text itself, any gate, and text in the console repository.
+  falsifier: |
+    File for a file that already has an open rewrite task, or ignore how often a file is read, and criterion 1 must fail. Leave the keep-the-meaning requirement out of the task and criterion 2 must fail. File the same file again for the same measurements and criterion 3 must fail. Restore and require all three to pass.
+  note: |
+    Named in the glossary's sense: a gardener improves something the fleet owns, then measures whether it helped.
