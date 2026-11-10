@@ -1,0 +1,41 @@
+- id: W1-T12004
+  title: "A static preflight stage that is not the only one running waits while the host's CPU pressure is in the shed tier, under the wait bound it already has; five were admitted together by memory alone at a 1-minute load of 100 on 8 cores"
+  repo: remudero
+  depends_on: []
+  priority: 1.4
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # test-slot.ts admits every author preflight; the added wait is bounded by the existing wait bound and never applies to the only holder
+  band_meaning: blast-radius
+  origin: operator-session#preflight-load-2026-11-10
+  plan_refs:
+    - W1-T11939
+    - W1-T11762
+    - W1-T11884
+  files:
+    - src/lib/test-slot.ts
+    - test/a-static-preflight-stage-waits-on-cpu-pressure-as-well-as-memory.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "With memory headroom to spare and another static holder live, a stage waits while the host CPU reading is in the shed tier and is admitted on the first poll after it leaves that tier"
+      proof: "grep: W1-T12004 criterion 1 in test/a-static-preflight-stage-waits-on-cpu-pressure-as-well-as-memory.test.ts"
+    - claim: "A stage with no other live holder is admitted at once whatever the CPU reading, and a stage that has waited the existing wait bound runs anyway and its note names the CPU reading"
+      proof: "grep: W1-T12004 criterion 2 in test/a-static-preflight-stage-waits-on-cpu-pressure-as-well-as-memory.test.ts"
+    - claim: "A host with no CPU pressure reading is judged on memory alone as today, and the waiting row names which of memory and CPU held the stage"
+      proof: "grep: W1-T12004 criterion 3 in test/a-static-preflight-stage-waits-on-cpu-pressure-as-well-as-memory.test.ts"
+  rationale: |
+    OBSERVED 2026-11-10 on the Azure host: test_slot.static_waiting rows name only headroomMiB and needMiB, and admitStaticWork in src/lib/test-slot.ts admits on memory alone. Five static stages ran together (each named at 3,328 MiB) while the 1-minute load was 77 to 113 on 8 cores and CPU pressure some avg300 was 79 to 94 percent.
+    - Each author preflight then took about three hours, and suites with fixed child timeouts failed (see W1-T12003).
+    - Operator sessions on the host run the same preflights outside the fleet's lane budget (user.slice held 11.8 GB resident and 7.2 GB of swap), so this admission is the one place that sees all of them.
+    - src/lib/review-capacity.ts already reads /proc/pressure/cpu and names calm, hold and shed tiers for the review lane; the static stage can use the same reading.
+  design: |
+    Read the same CPU observation review-capacity uses. When another static holder is live and the tier is shed, wait and poll as the memory wait does, under the same wait bound, and name the cause on the test_slot.static_waiting row. The only holder is always admitted, so one preflight always runs; the wait bound still ends in "ran anyway".
+    NOT IN SCOPE: any count of holders, the slot queue for test suites, and the rule-suite concurrency (W1-T11939).
+  falsifier: |
+    Ignore the CPU reading and criterion 1 must fail; hold the only holder, or wait past the bound, and criterion 2 must fail; refuse a host with no reading and criterion 3 must fail. Restore and require all three to pass.
+  note: |
+    reservation hand-off: run-unfiled-1794297527315 -> run-unfiled-1794297527315
+    Reserved with rmd next-task-id (--count 2 on run-unfiled-1794297527315). No holder count is added; pressure, not a number of stages, is the condition.
