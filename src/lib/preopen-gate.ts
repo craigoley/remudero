@@ -135,7 +135,7 @@ export type PreopenGateResult = (
   | ({ kind: "fail"; failedSteps: string[]; durationMs: number; containment?: GateContainmentMode; pushGate?: PreopenPushGate } & GateStepDetail)
   | ({ kind: "unmeasured"; reason: string; durationMs: number; deadlineEnforcedBy?: GateDeadlineEnforcer; containment?: GateContainmentMode } & GateStepDetail)
   | { kind: "skipped"; reason: "gate-unhealthy"; durationMs: number }
-) & { sandboxMetrics?: GateSandboxMeasurement; containment?: GateContainmentMode; backstopMs?: number; backstopBasis?: PreopenGateHealth["backstopBasis"]; canary?: boolean; light?: LightGateShadow };
+) & { sandboxMetrics?: GateSandboxMeasurement; containment?: GateContainmentMode; backstopMs?: number; backstopBasis?: PreopenGateHealth["backstopBasis"]; canary?: boolean; light?: LightGateShadow; gateMode?: "light" };
 
 /**
  * W1-T9556 — who ended a gate at its backstop: coreutils `timeout` (needs no node loop), the deadline runner
@@ -156,7 +156,12 @@ export interface GateRun {
   /** W1-T11105: the step log the child appended as it went, read on every exit, a backstop kill included. */
   stepLog?: PreflightStepRecord[] | { unreadable: string };
   sandboxMetrics?: GateSandboxMeasurement;
+  /** W1-T11818: set by the default runner when it launched the light job set; absent means the full gate. */
+  gateMode?: "light";
 }
+
+/** W1-T11818: the variable that restores the full gate; anything else, or unset, runs the light job set. */
+export const PREOPEN_GATE_MODE_ENV = "RMD_PREOPEN_GATE";
 
 /**
  * W1-T10920: what a gate summary's failed steps said. `failedDetail` is each failed step's own `detail`, tail-bounded
@@ -590,6 +595,30 @@ export function deriveLightGate(
   return { result, failed, unreached, durationMs, miss, ...(saves ? { wouldSaveMs: Math.max(0, full.durationMs - durationMs) } : {}) };
 }
 
+/**
+ * W1-T11818: the gate's verdict when the child ran the light job set. The child's exit decides a failure or a
+ * backstop kill exactly as before; a clean exit passes only if every light unit is recorded green in the step log.
+ * A unit the log never recorded, or an unreadable log, is unmeasured, never a pass; a failed unit the exit missed fails.
+ */
+export function lightGateVerdict(
+  fast: Exclude<PreopenGateResult, { kind: "skipped" }>,
+  light: LightGateShadow | undefined,
+): Exclude<PreopenGateResult, { kind: "skipped" }> {
+  if (fast.kind !== "pass") return fast;
+  const kept = { durationMs: fast.durationMs, ...(fast.containment ? { containment: fast.containment } : {}), ...(fast.sandboxMetrics ? { sandboxMetrics: fast.sandboxMetrics } : {}) };
+  if (light === undefined) return { kind: "unmeasured", reason: "light gate: the child wrote no step log", ...kept };
+  if ("unmeasured" in light) return { kind: "unmeasured", reason: `light gate: ${light.unmeasured}`, ...kept };
+  if (light.result === "fail") return { kind: "fail", failedSteps: light.failed, ...kept };
+  if (light.result === "unreached") return { kind: "unmeasured", reason: `light gate: no record of ${light.unreached.join(", ")}`, ...kept };
+  return fast;
+}
+
+/** W1-T11818: in light mode there is no full run to compare with, so a saving or a miss is never claimed. */
+function lightModeShadow(light: LightGateShadow | undefined): LightGateShadow | undefined {
+  if (light === undefined || "unmeasured" in light) return light;
+  return { result: light.result, failed: light.failed, unreached: light.unreached, durationMs: light.durationMs, miss: false };
+}
+
 /** W1-T11105: the light gate's shadow fields on the `implement.preopen_gate` row. */
 export function lightGateLedgerFields(light: LightGateShadow | undefined): Record<string, unknown> {
   if (light === undefined) return {};
@@ -630,7 +659,9 @@ export function defaultRunGate(
     const stepLogFile = join(home, GATE_STEP_LOG_NAME);
     // Only our maintained launcher promises the new options. A caller-selected legacy launcher
     // keeps its existing argv contract and reports missing measurements explicitly.
-    const extraArgs = ["--summary-file", summaryFile, ...(harnessRmd === undefined ? ["--sandbox-metrics", "--step-log", stepLogFile] : [])];
+    // W1-T11818: only our maintained launcher is asked for the light set, and RMD_PREOPEN_GATE=full restores today's gate.
+    const lightMode = harnessRmd === undefined && (containment.parentEnv ?? process.env)[PREOPEN_GATE_MODE_ENV] !== "full";
+    const extraArgs = ["--summary-file", summaryFile, ...(harnessRmd === undefined ? ["--sandbox-metrics", "--step-log", stepLogFile] : []), ...(lightMode ? ["--light"] : [])];
     const { file, args } = harnessRmd === undefined
       ? preopenGateLaunch(cwd, log, join(harnessRoot, "bin", "rmd"), harnessRoot, {
         deadline_enforced_by: armedEnforcers(timeoutBin), launcher: "harness", containment: "sandboxed", env_allowlist: PREOPEN_GATE_ENV_ALLOWLIST_NAME,
@@ -646,7 +677,7 @@ export function defaultRunGate(
       const sandboxMetrics = read.sandboxMetrics ?? { sandbox_unmeasured: "unreadable" in read ? read.unreadable : "the child wrote no sandbox measurement" };
       // W1-T11105: read on every exit, so a gate the backstop ended still says which units finished.
       const stepLog = harnessRmd === undefined ? readPreflightStepLog(stepLogFile, containment.readFile) : undefined;
-      return { ...exited, containment: "sandboxed" as const, sandboxMetrics, ...(summary ? { summary } : {}), ...(stepLog ? { stepLog } : {}) };
+      return { ...exited, containment: "sandboxed" as const, sandboxMetrics, ...(summary ? { summary } : {}), ...(stepLog ? { stepLog } : {}), ...(lightMode ? { gateMode: "light" as const } : {}) };
     });
   };
   let env: NodeJS.ProcessEnv = {};
@@ -747,10 +778,14 @@ export async function runPreopenGate(worktreePath: string, deps: PreopenGateOpti
 async function measurePreopenGate(worktreePath: string, deps: PreopenGateOptions, backstopMs: number, startedAt: number): Promise<PreopenGateResult> {
   const now = () => (deps.clock ?? systemClock).now();
   const run = await (deps.runGate ?? ((cwd) => defaultRunGate(cwd, undefined, deps.log, { backstopMs, clock: deps.clock }, { contain: deps.contain, readFile: deps.readFile })))(worktreePath);
-  const fast = classifyGateRun(run, now() - startedAt);
+  const classified = classifyGateRun(run, now() - startedAt);
   // W1-T11105: the light gate's shadow is judged against the fast gate alone, before procfs or the push gate add steps.
-  const light = run.stepLog === undefined ? undefined : deriveLightGate(run.stepLog, fast);
-  const shadow = <R extends PreopenGateResult>(result: R): R => (light === undefined ? result : { ...result, light });
+  const derived = run.stepLog === undefined ? undefined : deriveLightGate(run.stepLog, classified);
+  // W1-T11818: when the child ran the light job set, that run is the gate and the step log decides whether it passed.
+  const lightMode = run.gateMode === "light";
+  const fast = lightMode ? lightGateVerdict(classified, derived) : classified;
+  const light = lightMode ? lightModeShadow(derived) : derived;
+  const shadow = <R extends PreopenGateResult>(result: R): R => (light === undefined && !lightMode ? result : { ...result, ...(light === undefined ? {} : { light }), ...(lightMode ? { gateMode: "light" as const } : {}) });
   if (fast.kind === "unmeasured") return shadow(fast);
   // W1-T10267: a procfs write in a changed test blocks until timeout-minutes in CI; refuse it here, before a PR opens.
   const procfs = (deps.scanProcfsWrites ?? changedProcfsWriteOffences)(worktreePath);
@@ -821,6 +856,7 @@ export function preopenGateLedgerFields(result: PreopenGateResult): Record<strin
     ...containment,
     ...(result.sandboxMetrics ?? (result.containment === "sandboxed" ? { sandbox_unmeasured: "the child wrote no sandbox measurement" } : {})),
     ...lightGateLedgerFields(result.light),
+    ...(result.gateMode === "light" ? { gate_mode: "light", light_skipped_jobs: [...LIGHT_GATE_SKIPPED_JOBS] } : {}),
     ...(push ? {
       push_gate: push.outcome,
       push_gate_ms: push.durationMs,

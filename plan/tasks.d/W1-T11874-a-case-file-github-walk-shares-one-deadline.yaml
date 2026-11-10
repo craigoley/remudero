@@ -1,0 +1,99 @@
+- id: W1-T11874
+  title: "`rmd case-file` HAS NO OVERALL GITHUB DEADLINE — the board/projection read and each task's exact PR view are bounded at 60 s apiece but run in sequence, and a two-task read with the provisioned token printed nothing before a 100 s cap: give the whole GitHub walk one shared budget and degrade the remainder to a stated deadline unknown"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  rationale: "MEASURED on main 247f574. src/lib/report-commands.ts assembleCaseFile (:1110-1136) derives each task's
+    projection through the default buildBatchedGithub gateway (built at :1170-1171 with only a snapshotCache — no
+    exec, no pacer) and then reads the projected PR through default ghJson (:1127). Both inherit the per-call
+    DEFAULT_GH_CALL_TIMEOUT_MS = 60_000 (src/lib/github-transport.ts:23) and nothing else. caseFileCommand
+    (:1140-1176) maps every task through that walk sequentially and prints only after the last one, so N tasks
+    can park for roughly (board pages + N) x 60 s with zero output. A two-task case-file read with the
+    provisioned GitHub token produced no output and hit a 100-second cap.
+    THE FIX HAS A PRECEDENT IN THE SAME FILE. statusCommand (:835-982, W1-T4208) starts one external-read
+    deadline at entry, hands buildBatchedGithub an exec that clamps each gh child's timeout to the remaining
+    budget and a pacer whose sleepSync refuses a wait longer than the remainder, and surfaces exhausted reads as
+    status unavailable rather than zeroes. Case-file is the same shape and gets the same mechanism.
+    THE OUTPUT CONTRACT ALREADY HOLDS AN HONEST UNKNOWN. buildTaskCaseFile (src/lib/task-case-file.ts:298-323)
+    turns prRead.state unavailable into pr unknown(unavailable, <reason>) and review/acceptance/ci into
+    current-pr-head-unavailable. So exhaustion needs no new schema, only a distinct reason. It must never be the
+    no-pr-in-current-projection branch (:1129-1130), which reads as a run that ended without a PR.
+    Settled by lookup: is this already filed or already decided? -> no. No plan task names caseFileCommand or
+    assembleCaseFile with a deadline, timeout or budget (grep over plan/). W1-T4208
+    (plan/tasks.d/W1-T4208-status-json-deadline.yaml) bounds `rmd status --json` only. W1-T11280 and W1-T11325
+    also refine the status JSON deadline only. W1-T4607, W1-T4637 and W1-T4651 built the case file and its batch
+    form and ledger bound, not a GitHub wall-clock bound. LEARNINGS.md and DECISIONS.md record nothing on a
+    case-file deadline. MASTER-PLAN.md has no case-file section.
+    Settled by lookup: does the gateway already accept a bounded exec and pacer? -> yes. buildBatchedGithub opts
+    take exec and pacer (src/lib/status.ts:4828, used by statusCommand at report-commands.ts:964-981), and ghJson
+    takes an exec parameter (src/lib/github-transport.ts:218). No transport change is needed.
+    Settled by lookup: what shape must exhaustion take? -> prRead unavailable carrying a deadline reason, rendered
+    by the existing buildTaskCaseFile unknown path (src/lib/task-case-file.ts:306), never success-shaped. That
+    matches the status JSON convention from W1-T4208."
+  design: |
+    ONE DEADLINE PER INVOCATION, STARTED AT caseFileCommand ENTRY (before the ledger union, matching statusCommand's
+    convention so the budget is wall-clock for the whole command). Export a named constant CASE_FILE_GITHUB_DEADLINE_MS
+    and add an injectable `githubDeadlineMs?: number` to CaseFileCommandInput. Keep a finalize reserve below it so
+    JSON is always printed. Choose the value so the whole verb returns well inside the 100 s cap that was observed,
+    and state the chosen number and why in the PR body.
+    BOUND BOTH LEGS WITH THE SAME CLOCK:
+      (a) The default gateway built at :1170 gets the statusCommand-style exec, with each gh child's timeout =
+          min(remaining, GH_CALL_TIMEOUT_MS) and a throw once remaining <= 0, plus a pacer whose sleepSync throws
+          when the wait exceeds the remainder. Keep the existing snapshotCache.
+      (b) The default exact PR read (ghJson at :1127) gets an exec clamped by the same remainder.
+      (c) Before starting a task's GitHub leg, check the remainder. With no budget left, skip both reads for this
+          and every later task and record the deadline reason without issuing a gh call.
+    ON EXHAUSTION, NEVER A FALSE ABSENCE OR SUCCESS. A projection read that hit the deadline must not fall through
+    to `no-pr-in-current-projection`. Every affected task's prRead is
+    { state: "unavailable", reason: "github-deadline-exhausted" } (one stable, greppable token, with an optional
+    `:<leg>` suffix naming board or pr). Its review, acceptance, ci and mergedSource therefore read unavailable
+    through the existing buildTaskCaseFile path. Tasks whose reads finished before the deadline keep their
+    observed evidence. The command still prints the full JSON (array for --tasks, object for one task) and exits
+    0, because a degraded read is a stated result, not a usage error.
+    Tell a deadline apart from an ordinary gh failure. ETIMEDOUT, or a throw when the remainder is 0, maps to the
+    deadline reason. Other failures keep today's `github-read-failed:<name>`.
+    INJECTED deps.readProjection, deps.readPr, deps.readGhPr and deps.buildGithub stay honoured. The test seam is
+    an injectable clock plus an injected exec (or injected gateway and PR reader that advance the clock), so a
+    stall can be simulated without sleeping.
+    TESTS (test/deploy/a-case-file-github-walk-shares-one-deadline.test.ts):
+      1. HEALTHY MULTI-TASK READ — title `three case files retain observed PR evidence after a healthy three-task GitHub read`:
+         a --tasks batch of three tasks with injected GitHub reads that answer promptly prints three case files
+         with observed PR evidence. POSITIVE CONTROL: assert the injected board and PR readers were each called
+         (call counts > 0, one PR read per projected task), so a test that never reaches GitHub cannot pass.
+      2. STALLED PER-PR READ — title `deadline exhaustion stops later case-file GitHub reads and marks unread tasks unavailable`:
+         the first task's PR read consumes the budget (an injected clock advances past the
+         deadline). Assert that total simulated elapsed time stays within ONE CASE_FILE_GITHUB_DEADLINE_MS, not N x
+         60 s. Assert that later tasks issue no further gh calls, every unread task's pr.reason carries
+         github-deadline-exhausted, no task reads no-pr-in-current-projection, no task reads an observed or success
+         check, and the JSON still parses and the exit code is 0.
+      3. STALLED BOARD READ — title `board deadline exhaustion reports unknown instead of no-PR`:
+         the projection leg exhausting the budget yields the deadline reason, not no-PR.
+      4. CLAMP: the default exec path passes a per-child timeout <= the remainder (assert on the captured options).
+    EXPLICITLY NOT IN SCOPE: changing statusCommand's deadline, the ledger union bound (W1-T4651),
+    MAX_CASE_FILE_BATCH_TASKS, or the case-file JSON schema version.
+  acceptance:
+    - claim: "a healthy multi-task case-file read completes with observed PR evidence and the injected GitHub readers are provably exercised"
+      proof: "unit test: three case files retain observed PR evidence after a healthy three-task GitHub read"
+    - claim: "a stalled per-PR or board read cannot hold the case-file walk past one shared deadline, and unread tasks report the deadline reason, never no-PR or success"
+      proof: "unit test: deadline exhaustion stops later case-file GitHub reads and marks unread tasks unavailable"
+    - claim: "a stalled board read reports the deadline reason instead of no-PR"
+      proof: "unit test: board deadline exhaustion reports unknown instead of no-PR"
+    - claim: "the case-file shared GitHub deadline is a named export"
+      proof: "grep: CASE_FILE_GITHUB_DEADLINE_MS in src/lib/report-commands.ts"
+    - claim: "exhaustion is reported with one stable deadline reason token"
+      proof: "grep: github-deadline-exhausted in src/lib/report-commands.ts"
+  risk: low
+  origin: architect
+  files: [src/lib/report-commands.ts, test/deploy/a-case-file-github-walk-shares-one-deadline.test.ts]
+  status: queued
+  attempts: 0
+  note: "verify:auto. Every behaviour is assertable with an injected clock and injected GitHub readers, and no live
+    network is needed. risk:low. One read-only operator verb in one file, with no dispatch, spend or write path, and
+    the mechanism is copied from statusCommand's merged W1-T4208. budget_usd 40, because the mechanism exists and the
+    cost is the stall fixtures and the positive control. NO depends_on. Rule 19 own-falsifier: the test file
+    test/deploy/a-case-file-github-walk-shares-one-deadline.test.ts is new and is written only to prove THESE acceptance
+    criteria, so its name deliberately matches this shard's slug (W1-T2525 discount). The one real concern is
+    src/lib/report-commands.ts."

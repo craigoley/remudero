@@ -1,0 +1,41 @@
+- id: W1-T11821
+  title: A Linux seed store whose account directory no other account can enter is swept with the owner's own open-file scan, so seeds stop reading "administrator scan required" and idle ones are reclaimed
+  repo: remudero
+  depends_on: []
+  priority: 1.2
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # decides when a dependency seed may be deleted; a seed that any account could hold open, a referenced seed and a recently used seed are still kept, and the default stays keep
+  band_meaning: blast-radius
+  origin: operator-session#preflight-efficiency-2026-11-09
+  plan_refs:
+    - W1-T10507
+    - W1-T10739
+  files:
+    - scripts/dependency-seeds.mjs
+    - test/dependency-seeds-cli.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: On Linux, ownerOnlyHome-equivalent logic reports a seed owner-only when the account's store directory and every ancestor to the store root are owned by the uid, the account directory has no group or other access, and no ancestor is writable by group or other
+      proof: "grep: W1-T11821 criterion 1 in test/dependency-seeds-cli.test.ts"
+    - claim: For an owner-only seed, seedIsOpen runs the user-level open-file scan and returns its answer, and never throws the administrator-scan error
+      proof: "grep: W1-T11821 criterion 2 in test/dependency-seeds-cli.test.ts"
+    - claim: A store directory other accounts can enter (group or other bits set) still requires the attested root scan and is kept when none exists
+      proof: "grep: W1-T11821 criterion 3 in test/dependency-seeds-cli.test.ts"
+    - claim: The enable command creates the per-account store directory with mode 0700 on Linux and tightens an existing one owned by the uid, and a sweep then reports its idle, unreferenced seeds as removable without --apply
+      proof: "grep: W1-T11821 criterion 4 in test/dependency-seeds-cli.test.ts"
+  rationale: |
+    OBSERVED 2026-11-09 (remudero-dependencies sweep, dry run, on the Azure host): of 25 seeds, 14 were kept as "unverified: administrator open-file scan required", 8 as referenced by a checkout and 3 as locked. The seed store is 16.3 GB across 32 seeds, so about 7 GB is held only because the sweeper cannot prove no process has a seed open.
+    - Cause: seedIsOpen accepts a user-level lsof only when ownerOnlyHome is true, and ownerOnlyHome returns false unless the platform is darwin and the seed is under $HOME. On this host the store is /mnt/scratch/remudero-dependencies/craigoleyagent at mode 775 (group-writable), so the rule can never hold and nothing is reclaimed.
+    - The safety argument the macOS rule makes holds on Linux too: when no other account can enter the store directory, no other account can hold a seed file open, so the owner's own scan is complete.
+  design: |
+    Add a Linux owner-only test beside ownerOnlyHome: stat the account store directory and each ancestor up to the store root, require uid ownership, no group or other access on the account directory (mode & 0o077 is 0), and no group or other write on any ancestor below the store root. seedIsOpen takes the user-level lsof +D path when it holds. The enable command creates the account directory 0700 and tightens an existing one it owns (idempotent). The sweeper's other keep reasons (referenced, locked, used within six hours, foreign namespace) are unchanged.
+    NOT IN SCOPE: the macOS attested scan, the six-hour idle rule, and deleting any seed without --apply.
+  falsifier: |
+    Accept a mode 775 directory and criterion 3 must fail; keep throwing for an owner-only directory and criterion 2 must fail; leave enable creating 775 and criterion 4 must fail. Restore and require all four to pass.
+  note: |
+    reservation hand-off: run-unfiled-1794186053317 -> run-unfiled-1794173043382
+    Reserved with rmd next-task-id (W1-T11821 on run-unfiled-1794186053317). Rollout: after it merges, the operator runs the enable command once so the existing 775 directory is tightened. Proof that counts: a dry-run sweep listing idle seeds as removable.
