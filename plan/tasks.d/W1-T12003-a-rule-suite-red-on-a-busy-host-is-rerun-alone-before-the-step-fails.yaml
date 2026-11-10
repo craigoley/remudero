@@ -1,0 +1,42 @@
+- id: W1-T12003
+  title: "A rule suite that fails in the concurrent rule-checks pass is rerun once alone before the step is failed, and the run names it; on a saturated host four of five author preflights failed on suites that pass alone"
+  repo: remudero
+  depends_on: []
+  priority: 1.3
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: medium # one runner script; a suite red alone still fails the step exactly as today, so no red is hidden
+  band_meaning: blast-radius
+  origin: operator-session#preflight-load-2026-11-10
+  plan_refs:
+    - W1-T11939
+    - W1-T10153
+    - W1-T11762
+  files:
+    - scripts/list-rule-suites.mjs
+    - test/ci/a-rule-suite-red-on-a-busy-host-is-rerun-alone-before-the-step-fails.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "A suite that fails in the concurrent pass is rerun once alone after the pass ends, and when it passes alone the step passes and prints one RERUN-GREEN line naming the suite"
+      proof: "grep: W1-T12003 criterion 1 in test/ci/a-rule-suite-red-on-a-busy-host-is-rerun-alone-before-the-step-fails.test.ts"
+    - claim: "A suite that is still red alone fails the step with both outputs printed, and a suite is never rerun more than once"
+      proof: "grep: W1-T12003 criterion 2 in test/ci/a-rule-suite-red-on-a-busy-host-is-rerun-alone-before-the-step-fails.test.ts"
+    - claim: "A run with no failing suite reruns nothing, and a run with concurrency 1 reruns nothing because every suite already ran alone"
+      proof: "grep: W1-T12003 criterion 3 in test/ci/a-rule-suite-red-on-a-busy-host-is-rerun-alone-before-the-step-fails.test.ts"
+  rationale: |
+    OBSERVED 2026-11-10 on the Azure host (8 cores, 1-minute load 44 to 113, CPU pressure some avg300 79 to 94 percent): five author preflight attempts across three branches failed their static step, and four of the five failed only on suites that pass alone.
+    - run-W1-T11860 attempt 2 (06:39Z): eight tests in six suites, among them test/architecture-fitness.test.ts, test/coverage-session-blanking.test.ts and test/rules/scout-config-gardener-failed.test.ts, with spawnSync npm ETIMEDOUT and spawnSync /usr/bin/node ETIMEDOUT in their errors.
+    - run-W1-T11884 attempt 2 (07:40Z) and a plan filing (02:53Z): test/ci/a-rejected-census-measurement-retains-its-complete-capture.test.ts alone, on one assertion about an error string.
+    - Each attempt took about three hours of wall time on that host, so one such failure costs a branch three more hours, and the retry adds to the load that caused it.
+    - These suites spawn children under fixed 90 to 120 second wall-clock timeouts. W1-T11939 sizes the pass from host pressure, which lowers how often this happens; this task is what the runner does when it still does.
+  design: |
+    In runRuleSuitesConcurrently collect the suites whose child exited non-zero, and after the pass rerun each once with nothing else running. Green alone: print RERUN-GREEN with the suite and both durations and count it as passed. Red alone: print both outputs and fail as today. Print a closing line with the rerun count so a suite that needs the rerun often is visible in the log.
+    NOT IN SCOPE: the fixed child timeouts inside the suites, the affected-tests stage, and any change to what CI runs; hosted CI still runs every suite once and is the gate.
+  falsifier: |
+    Skip the rerun and criterion 1 must fail; treat a suite red alone as passed, or rerun it twice, and criterion 2 must fail; rerun on a clean pass or at concurrency 1 and criterion 3 must fail. Restore and require all three to pass.
+  note: |
+    reservation hand-off: run-unfiled-1794297527315 -> run-unfiled-1794297527315
+    Reserved with rmd next-task-id (--count 2 on run-unfiled-1794297527315). The fake child runner the existing tests of this script use is enough to drive all three criteria without a busy host.
