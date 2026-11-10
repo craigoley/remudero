@@ -6008,10 +6008,16 @@ export function deliveredVerdictDedupsPostReview(pr: Pick<OpenPrView, "reviewSta
 /** W1-T11729 — the step a restored status is ledgered under, written only AFTER the status post succeeded. */
 export const REVIEW_STATUS_RESTORED_STEP = "review.status_restored";
 
+/** W1-T11929 — the sweep's own row that a delivered verdict settled a pending status, written only once the restore row proves the post. */
+export const REVIEW_SETTLED_STEP = "review.settled";
+
 /** W1-T11729 — a DELIVERED verdict dedups a re-post, but when GitHub's status has regressed to `pending` on the SAME head and
- *  input digest the delivery never reached (or no longer holds on) the status. The restorable verdict is the LATEST review row
- *  of that exact head and digest, and only when it is a full success/failure verdict. The regression is identified by the
- *  pending status's own stamp, so one restore is spent per observed regression and a new regression earns its own. */
+ *  input digest the delivery never reached (or no longer holds on) the status. The restorable verdict is the LATEST
+ *  `review.posted` row of that exact head and digest, and only when it is a full success/failure verdict. The regression is
+ *  identified by the pending status's own stamp, so one restore is spent per observed regression and a new regression earns its own.
+ *  W1-T11929 — OBSERVED 2026-11-09 on #17485: two stale-claim takeovers wrote pending over a delivered failure, and the claim
+ *  then deduped the re-run 18 times. A pending or refused row AFTER the verdict is that takeover, never a newer verdict, so
+ *  it no longer hides the delivered row: the key's membership in the delivered set is what the caller already checked. */
 export function restorableDeliveredVerdict(
   pr: Pick<OpenPrView, "prNumber" | "prUrl" | "headSha" | "taskId" | "reviewState" | "reviewPendingSince" | "reviewInputDigest">,
   lines: ReadonlyArray<Record<string, unknown>>,
@@ -6020,10 +6026,9 @@ export function restorableDeliveredVerdict(
   if (pr.reviewState !== "pending") return { refusal: "GitHub's status is not pending" };
   if (pr.reviewInputDigest === undefined) return { refusal: "the review input digest is unread" };
   const taskId = reviewOutcomeTaskIdFor(pr);
-  const row = lines.findLast(r => r.task_id === taskId && r.pr_url === pr.prUrl && r.head_sha === pr.headSha &&
-    r.review_input_digest === pr.reviewInputDigest &&
-    (r.step === "review.posted" || r.step === "review.pending_posted" || r.step === "review.post_refused"));
-  if (row?.step !== "review.posted") return { refusal: "the latest review row of this head and input is not a delivered verdict" };
+  const row = lines.findLast(r => r.step === "review.posted" && r.task_id === taskId && r.pr_url === pr.prUrl &&
+    r.head_sha === pr.headSha && r.review_input_digest === pr.reviewInputDigest);
+  if (row === undefined) return { refusal: "no delivered verdict of this head and input is on the ledger" };
   const verdict = row.decision_verdict as ReviewVerdict | undefined;
   if ((row.state !== "success" && row.state !== "failure") || verdict?.state !== row.state || verdict.cannotEvaluate === true) {
     return { refusal: "the delivered verdict is not a full success or failure" };
@@ -24195,6 +24200,18 @@ export async function runSweep(
           const reviewStartedAtMs = performance.now();
           await postReview(job.pr, reviewMode, reviewAttemptId, onPhase);
           noteReviewDuration(performance.now() - reviewStartedAtMs);
+          // W1-T11929: the restore row is written only after the status post succeeded, so it alone earns the settled row.
+          if (reviewMode.kind === "restore") {
+            const regressionKey = reviewMode.regressionKey;
+            const restored = readLedger(deps.ledgerPath).findLast(r => r.step === REVIEW_STATUS_RESTORED_STEP && r.regression_key === regressionKey);
+            if (restored !== undefined) appendLine(deps.ledgerPath, {
+              run_id: deps.runId, task_id: reviewOutcomeTaskIdFor(job.pr), step: REVIEW_SETTLED_STEP, context: REVIEW_CONTEXT,
+              pr_number: job.pr.prNumber, head_sha: job.pr.headSha, review_key: job.reviewKey,
+              review_input_digest: job.pr.reviewInputDigest, regression_key: regressionKey, old_state: job.pr.reviewState,
+              settled_state: restored.new_state ?? restored.delivered_state,
+              delivered_run_id: restored.delivered_run_id, delivered_at: restored.delivered_at,
+            });
+          }
           } catch (e) {
             acted = false;
             // W1-T529 — THE ONE THROW THAT MUST NOT LEAVE A DEDUP KEY. Design (v), the
