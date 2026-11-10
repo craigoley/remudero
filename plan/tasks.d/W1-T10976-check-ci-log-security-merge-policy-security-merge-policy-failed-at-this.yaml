@@ -7,6 +7,9 @@
   risk: high  # One security-gate recovery spanning producer, metadata adapter, classifier and unresolved-evidence disposition.
   band_meaning: span
   priority: 1.26
+  # refusal-amendment (W1-T10976, run W1-T10976-1794272641237, 2026-11-10T08:29:16.562Z): the worker refused criterion 1 [proof-unexecutable-at-head] — proposed re-scope-criteria: repair the criterion's proof so it is executable at HEAD, or re-scope the criterion
+  #   worker evidence: W1-T10976: a filed proof already passes at the merge base, so branch run-W1-T10976-1794272641237 cannot open a PR
+  #   this task is held from dispatch until its record changes; an Architect must make the change above
   status: queued
   attempts: 0
   author_class: machine
@@ -23,13 +26,13 @@
     - test/sweep/check-ci-log-security-merge-policy-security-merge-policy-failed-at-this.test.ts
   acceptance:
     - claim: "only trusted successful CodeQL workflow completion admits bounded reobservation; delayed category arrival can recover, while timeout, unrelated events and superseded runs cannot grant permission"
-      proof: "unit test: delayed category arrival recovers a missing configuration only after complete same-merge evidence"
+      proof: "unit test: W1-T10976: delayed trusted completion reconciles only after all same-merge CodeQL categories arrive"
     - claim: "complete paginated analyses and alert instances bind the same open PR head, base, merge SHA, analysis key and configured categories, including immediately before publication; drift, malformed pages, missing analyses and invalid tool.name stay UNKNOWN"
-      proof: "unit test: complete paginated same-merge analyses with a below-threshold alert corpus reconcile the missing"
+      proof: "unit test: W1-T10976: recovery refuses stale PR identity and incomplete CodeQL analysis pages"
     - claim: "only the exact one-configuration-missing warning with complete valid error-free category evidence can reconcile; high/critical alerts remain blocked and every other neutral, warning or failed shape stays UNKNOWN"
-      proof: "unit test: only the exact one-configuration-missing warning with complete valid evidence reconciles to safe"
+      proof: "unit test: W1-T10976: only the exact missing-configuration warning reconciles; high alerts stay blocked"
     - claim: "an exhausted or invalid recovery receives a durable owner/task disposition without repeated generic fix rounds, real alerts retain their repair route, and recovered safe heads retain the ordinary merge guards"
-      proof: "unit test: an exhausted missing-configuration recovery is escalated once to its owner with no generic fix round"
+      proof: "unit test: W1-T10976: exhausted recovery assigns an owner once and keeps genuine alert repair intact"
   note: |
     Existing rung-1 ci-friction origin is retained for before/after attribution. This clarification is plan-only;
     verify: human and the recorded high/escalate ruling remain holds. It grants no waiver, server-protection
@@ -196,4 +199,3 @@
       - "released by the operator with rmd approve"
     judged_at: "2026-11-10T00:55:31.261Z"
     pin: "76a1878984d11fa79dd84e0e9d76a649de5e5b7aea32cb6c5e01591981d0e4fa"
-    operator_release_pin: "a8719dddd4d06335240eb92f33ec30b3d8ca75e257461c36a00cdff6e67220d6"
