@@ -275,7 +275,7 @@ test("W1-T12023 criterion 3: structured and absent context stay exact and unknow
   assert.equal(feedbackQuestionContext(empty), "Raw context");
   const malformed = { ...entry("malformed", "grilling"), summary: { headline: "Missing options" } } as unknown as FeedbackEntry;
   assert.throws(() => feedbackQuestionContext(malformed), /map/, "malformed objects are not converted to successful empty summaries");
-  const unverified = { ...entry("unknown", "proposed", { raw: "Unverified question", unverified: true }),
+  const unverified = { ...entry("unknown", "proposed", { raw: "Unverified question" }), unverified: true,
     summary: "Legacy scalar context" } as unknown as FeedbackEntry;
   const source = projectFeedbackGates({ instance: "core", entries: [unverified], now: Date.parse(THROUGH) });
   assert.equal(source.state, "partial");
