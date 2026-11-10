@@ -13,6 +13,7 @@
   plan_refs:
     - W1-T11127
     - W1-T11815
+    - W1-T11933
   files:
     - src/lib/read-model-worker.ts
     - test/console-api/read-model/a-view-build-row-names-why-a-due-build-was-not-skipped.test.ts
@@ -36,4 +37,4 @@
     Count a no-declaration build under another reason and criterion 1 must fail; report a later differing part and criterion 2 must fail; count a skip as a build reason or change a due time and criterion 3 must fail. Restore and require all three to pass.
   note: |
     reservation hand-off: run-unfiled-1794287307841 -> run-unfiled-1794287307841
-    Reserved with rmd next-task-id (W1-T11974 on run-unfiled-1794287307841). Same file as the cadence task and W1-T11815; build one at a time.
+    Reserved with rmd next-task-id (W1-T11974 on run-unfiled-1794287307841). Same file as W1-T11933 and W1-T11815; build one at a time.

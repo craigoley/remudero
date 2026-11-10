@@ -14,6 +14,7 @@
   plan_refs:
     - W1-T11127
     - W1-T11815
+    - W1-T11933
   files:
     - src/lib/read-model-worker.ts
     - src/lib/instances-view.ts
@@ -34,7 +35,7 @@
       proof: "grep: W1-T11975 criterion 4 in test/console-api/read-model/a-view-that-declares-its-rows-is-skipped-when-only-other-rows-moved.test.ts"
   rationale: |
     OBSERVED 2026-11-10 on the Azure host (8 cores, CPU pressure some avg300 79 percent): serve used 1.0 to 2.8 cores in 20 to 30 s samples at cpu-shares 4096 against the daemon's 512, with 3.8 GB resident. route-reads.json shows the console's last read of any view at 01:12:34Z; from 01:33Z to 04:19Z, with no reader, read_model.view_builds summed 4,385 s of build time over 9,987 s.
-    - With a console open the idle stretch does not apply, so the skip is what bounds cost. It reached one view of fifteen: builds equalled calls for instances (7,318), analytics (8,288), agent (11,416) and nav-badge (2,553).
+    - With a console open the idle pacing (W1-T11933) does not apply, so the skip is what bounds cost. It reached one view of fifteen: builds equalled calls for instances (7,318), analytics (8,288), agent (11,416) and nav-badge (2,553).
     - The ledger gains about one row every 5 s, and serve's own agent.built and workstreams.built rows are 27 percent of them, so a digest keyed on the store-wide generation never repeats.
   design: |
     In inputDigest, when the view declares digestReads, build the digest from the per-instance fingerprint, plans, states without the generation, switches and shadow; keep today's digest for views without one. Give each of the four views a fingerprint that is cheap (an indexed max or count over the tables it reads, or the as_of of the snapshots it names) and add the equality test that pins it: fold a row, build with and without the skip, compare bodies.

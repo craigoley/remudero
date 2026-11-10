@@ -2,7 +2,7 @@
   title: "A versions poll that names the views its page shows counts as a read of only those views, so an open console tab no longer keeps every view on its hot cadence"
   repo: remudero
   depends_on:
-    - W1-T11973
+    - W1-T11933
   priority: 1.4
   type: implement
   verify: auto
@@ -14,6 +14,7 @@
   plan_refs:
     - W1-T11127
     - W1-T11815
+    - W1-T11933
   files:
     - src/lib/read-model-worker.ts
     - src/lib/view-events.ts
@@ -29,7 +30,7 @@
       proof: "grep: W1-T11979 criterion 3 in test/console-api/serve/a-versions-poll-naming-its-views-reads-only-those.test.ts"
   rationale: |
     OBSERVED in code: READ_MODEL_EVERY_VIEW_PATHS holds /v1/views/versions, and viewsReadBy returns every view name for it. route-reads.json counts 3,903 reads of that path.
-    - Once every view is read-paced (the cadence task), one open tab polling versions is enough to keep all fourteen views hot whatever page it shows.
+    - Once every view is read-paced (W1-T11933), one open tab polling versions is enough to keep all fourteen views hot whatever page it shows.
   design: |
     Parse an optional comma-separated views parameter in viewsReadBy for the versions path and pass only those names through the existing reader closure. The console change that sends the parameter is a console-repo task to file once this is merged; until then nothing changes for it.
     NOT IN SCOPE: the console, the events stream and the versions body.

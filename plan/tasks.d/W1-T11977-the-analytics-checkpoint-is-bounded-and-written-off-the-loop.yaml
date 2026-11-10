@@ -13,6 +13,7 @@
   plan_refs:
     - W1-T11127
     - W1-T11815
+    - W1-T11933
   files:
     - src/lib/analytics-route.ts
     - test/console-api/serve/the-analytics-checkpoint-is-measured-bounded-and-written-off-the-loop.test.ts
