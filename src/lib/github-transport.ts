@@ -8,8 +8,9 @@ import {
   writeFileSync,
 } from "node:fs";
 import { hostname, tmpdir } from "node:os";
-import { basename, dirname, isAbsolute, join, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, sep } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
+import { fileURLToPath } from "node:url";
 
 import { clockFromMillisFn, loopAvailableDeadline, systemClock } from "./clock.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
@@ -557,7 +558,10 @@ export function createGhCallPacer(
   const lowWaterFraction = opts.lowWaterFraction ?? DEFAULT_GH_PACE_LOW_WATER_FRACTION;
   const floorFraction = opts.floorFraction ?? DEFAULT_GH_PACE_FLOOR_FRACTION;
   const now = opts.now ?? systemClock.now;
-  const sleepSync = loopSafeGhSleep(opts.sleepSync ?? defaultBlockingSleepSync);
+  const blockingSleep = opts.sleepSync ?? defaultBlockingSleepSync;
+  const sleepSync = loopSafeGhSleep(blockingSleep);
+  // W1-T12057: only the gap wait may sleep on the daemon loop, and only up to this pacer's normal gap.
+  const gapSleepSync = loopSafeGhSleep(blockingSleep, minGapMs);
   const sleep = opts.sleep ?? defaultTimerSleep;
   let lastCallAt: number | undefined;
   let gapMs = minGapMs;
@@ -573,7 +577,7 @@ export function createGhCallPacer(
       takeStandDown();
       if (lastCallAt !== undefined) {
         const remaining = gapMs - (now() - lastCallAt);
-        if (remaining > 0) sleepSync(remaining);
+        if (remaining > 0) gapSleepSync(remaining);
       }
       lastCallAt = now();
     },
@@ -628,10 +632,47 @@ export function withSynchronousGhDelivery<T>(fn: () => T): T {
   return ghLoopHost.run(false, fn);
 }
 
-function loopSafeGhSleep(sleep: (ms: number) => void): (ms: number) => void {
+export const GH_PACE_LOOP_WAIT_STEP = "github.pace.loop_wait";
+
+export interface GhPaceLoopWaitRow {
+  step: typeof GH_PACE_LOOP_WAIT_STEP;
+  wait_ms: number;
+  /** The first stack frame outside this file, as `file:line` relative to the repository. */
+  call_site: string;
+}
+
+const ghPaceLoopWaits: GhPaceLoopWaitRow[] = [];
+
+/** W1-T12057: one row for each wait slept on the daemon loop since the previous call, then reset.
+ *  This module cannot import the ledger, so the daemon drains these rows and appends them. */
+export function takeGhPaceLoopWaits(): GhPaceLoopWaitRow[] {
+  return ghPaceLoopWaits.splice(0);
+}
+
+const GH_TRANSPORT_FILE = fileURLToPath(import.meta.url);
+
+function ghCallSiteOutsideTransport(): string {
+  const limit = Error.stackTraceLimit;
+  Error.stackTraceLimit = Infinity;
+  const stack = new Error().stack ?? "";
+  Error.stackTraceLimit = limit;
+  for (const line of stack.split("\n")) {
+    const frame = /((?:file:\/\/)?\/[^\s()]+):(\d+):\d+\)?$/.exec(line);
+    if (!frame) continue;
+    const file = frame[1].startsWith("file://") ? fileURLToPath(frame[1]) : frame[1];
+    if (file !== GH_TRANSPORT_FILE) return `${relative(join(dirname(GH_TRANSPORT_FILE), "..", ".."), file)}:${frame[2]}`;
+  }
+  return "unknown";
+}
+
+/** W1-T12057: on the daemon loop a wait of at most `normalGapMs` is slept and leaves one row, because
+ *  the gh call that follows blocks the loop for longer. A longer wait, or any wait with no gap given, throws. */
+function loopSafeGhSleep(sleep: (ms: number) => void, normalGapMs?: number): (ms: number) => void {
   return (ms) => {
-    if (ms > 0 && ghLoopHost.getStore() === true) throw new GhPaceWouldBlockError(ms);
+    const onLoop = ms > 0 && ghLoopHost.getStore() === true;
+    if (onLoop && (normalGapMs === undefined || ms > normalGapMs)) throw new GhPaceWouldBlockError(ms);
     sleep(ms);
+    if (onLoop) ghPaceLoopWaits.push({ step: GH_PACE_LOOP_WAIT_STEP, wait_ms: ms, call_site: ghCallSiteOutsideTransport() });
   };
 }
 
