@@ -1,0 +1,78 @@
+- id: W1-T12133
+  title: "A hand repair is routed under the fix-lane defect it is charged to: fixLaneInventoryOf counts an intervention against the newest fix-lane defect but writes its operator.intervention row under the later sweep wait, so one hand push becomes a false CI-wait incident (incident-1974896963111932)"
+  repo: remudero
+  depends_on: []  # shares src/lib/fix-lane-gardener.ts with queued W1-T10792; overlappingPaths serialises the two, and neither needs the other's change
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 1.2
+  risk: medium  # Rule 19: one concern. Only the cause label on new operator.intervention rows changes. Charging, dedupe identity and rows already in the ledger stay as they are.
+  origin: architect
+  plan_refs: [W1-T8264, W1-T11887, W1-T7650]
+  files:
+    - src/lib/fix-lane-gardener.ts
+    - test/gardeners/a-hand-repair-is-routed-under-the-fix-lane-defect-it-is-charged-to.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/gardeners/a-hand-repair-is-routed-under-the-fix-lane-defect-it-is-charged-to.test.ts"
+    - claim: "ROUTED CAUSE: if a ledgered fix-lane defect on the PR comes before the hand push, and a later sweep.disposed wait (awaiting-ci:ci:...) also comes before it, the fresh operator.intervention row's cause_class is that defect's key. It equals the byClass key the intervention is charged to and is not the sweep wait."
+      proof: "grep: W1-T12133 criterion 2 in test/gardeners/a-hand-repair-is-routed-under-the-fix-lane-defect-it-is-charged-to.test.ts"
+    - claim: "NO-DEFECT FALLBACK: if no fix-lane defect on the PR comes before the push, the fresh row and byClass both still carry prCauseClass (the newest sweep.disposed at or before the push, or undisposed:none)"
+      proof: "grep: W1-T12133 criterion 3 in test/gardeners/a-hand-repair-is-routed-under-the-fix-lane-defect-it-is-charged-to.test.ts"
+    - claim: "EXISTING ROWS UNCHANGED: an intervention already in the ledger under the old sweep-wait cause_class is not written again and not rewritten. interventionKey carries no cause, so the re-pass returns no fresh rows."
+      proof: "grep: W1-T12133 criterion 4 in test/gardeners/a-hand-repair-is-routed-under-the-fix-lane-defect-it-is-charged-to.test.ts"
+    - claim: "one helper picks each intervention's cause, and the charge and the written row both read from it"
+      proof: "grep: interventionCauseOf( in src/lib/fix-lane-gardener.ts"
+  rationale: |
+    ORIGINAL FEEDBACK (plan/feedback/incident-1974896963111932.yaml, status rejected). The feedback was 33 `intervention`
+    incident events in about 2 minutes, 2026-10-24T16:59:54Z to 17:01:55Z. All were classed
+    `awaiting-ci:ci:checks-pending-review-never-posted-runni`. The samples were hand pushes by cao825 to pr#10350
+    (b96cfc011, 1a0631ba2, 92d77da56). No suspect commits were found.
+    PRIOR RECEIPTS (as stated in the initiative; the architect has no gh access to re-read them): PR #17684, the
+    first rebuild, was parked as ambiguous. Two official fix attempts after it produced no PR.
+    CAUSE, READ FROM CODE (src/lib/fix-lane-gardener.ts, fixLaneInventoryOf):
+      - The charge loop (`const cause = [...events].reverse().find(e => e.pr === i.pr && i.pr > 0 && e.at <= at)`)
+        finds the newest fix-lane defect at or before the push. It adds OPERATOR_INTERVENTION_HOURS to that
+        defect's episode and counts the intervention under `byClass.set(cause.key, ...)`.
+      - The `fresh` rows (W1-T8264) ignore that cause. They set
+        `cause_class: prCauseClass(sweepRows, i.pr, Date.parse(i.at))`, which is the newest sweep.disposed at or
+        before the push. When the sweep has parked the PR on a CI wait after the defect, that wait is the class
+        written.
+      - fixLaneGardenSpec logs each fresh row as `operator.intervention`. src/lib/operator-interventions.ts then
+        builds the incident from `row.cause_class`: name, fingerprint, and the message
+        `cause=... — a hand action answered a fleet state no lane resolved`.
+      - So one hand repair is charged to the fix-lane defect but routed under the CI wait. The SRE lane files a
+        CI-wait incident that no CI fault explains, while the fix-lane defect it answered gets no routed signal.
+    Settled by lookup: is this already filed or already decided? -> No. No task or feedback row besides the incident names 1974896963111932, #17684, or this mismatch. W1-T8264 (merged) set up prCauseClass for interventions that have no defect before them. W1-T11887 (queued) dedupes routing in src/lib/sre-lane.ts and leaves the cause alone. W1-T7650 is withdrawn. (plan/tasks.d/W1-T8264-*.yaml, W1-T11887-*.yaml, W1-T7650-*.yaml)
+    Settled by lookup: which cause did W1-T8264 intend for a push that follows a fix-lane defect? -> Its design step 4 says "The fix-lane gardener uses the same class in place of `operator-intervention:<kind>`", and that replacement applies only to the no-defect fallback. A push after a defect was already charged to the defect, so the routed row disagreeing with the charge is a defect, not a decision. (plan/tasks.d/W1-T8264-every-hand-action-on-the-fleet-is-a-cause-classed-intervention.yaml)
+    Settled by lookup: does changing cause_class rewrite or re-emit rows already in the ledger? -> No. interventionKey is surface|action|target[|invocation]|at and carries no cause_class, so a recorded intervention stays deduped whatever cause it was written under. (src/lib/operator-interventions.ts interventionKey)
+    Settled by lookup: does the existing W1-T8264 push test pin the old behaviour after a defect? -> No. Its records hold only sweep.disposed rows, so defectEventsOf yields no events and every push in it takes the fallback branch. The new test is the only proof path, and no existing test file needs naming. (test/every-hand-action-on-the-fleet-is-a-cause-classed-intervention.test.ts, read only)
+    Settled by lookup: where do fixLaneInventoryOf unit tests live? -> test/gardeners/ (fix-lane-fixed-still-red.test.ts, fix-lane-disposition-disagrees-with-arm.test.ts). The new file goes there.
+  design: |
+    1. Add `interventionCauseOf(events, sweepRows, i)` in src/lib/fix-lane-gardener.ts. It returns
+       `{ cause?: DefectEvent, key: string }`, where `cause` is the newest event with `e.pr === i.pr && i.pr > 0 && e.at <= at`
+       (the current lookup, unchanged) and `key = cause?.key ?? prCauseClass(sweepRows, i.pr, at)`.
+    2. fixLaneInventoryOf calls it once per intervention. The charge loop (weight, byClass, standalone) and the
+       `fresh` row's `cause_class` both read from that one result, so the two cannot disagree.
+    3. Leave alone: the `recorded` dedupe set and interventionKey, OPERATOR_INTERVENTION_HOURS, standalone episode spans,
+       prCauseClass, everything in src/lib/operator-interventions.ts and src/lib/sre-lane.ts, and every row already
+       in the ledger. Do not backfill or rewrite existing operator.intervention rows.
+    4. The test calls fixLaneInventoryOf directly with fixed `now`, using pr#10350-shaped rows: a fix-lane defect row
+       (for example `fix.stood_down` with a non-handoff outcome), then `sweep.disposed` blocker awaiting-ci / owner
+       ci / reason checks pending review never posted running, then a hand push. Tag each case's test title with
+       `W1-T12133 criterion N`. Cases: (2) routed cause equals the charge key; (3) the fallback with no defect, and a
+       defect on a DIFFERENT PR must not capture it; (4) a re-pass over a ledger already holding the row under the
+       old awaiting-ci class gives `fresh` = [].
+    SCOPE: exactly the two files above. If the implementer finds it needs any other file, stop and refuse, and
+    do not widen into existing test files. If `rmd lint-plan` or a pre-push gate rejects this bounded scope,
+    report the exact refusal and do not bypass it.
+  falsifier: |
+    Revert step 2 so `fresh` uses `prCauseClass(...)` directly again. Criterion 2 must then fail, because the row
+    reads `awaiting-ci:ci:checks-pending-review-never-posted-running` while byClass reads the defect key. Make the
+    helper always return the defect key, or drop the prCauseClass fallback: criterion 3 must fail. Put cause_class
+    into interventionKey: criterion 4 must see the recorded row emitted again. Restore all three. After deploy,
+    success means a hand push on a PR whose newest fix-lane defect comes before a CI wait produces no `awaiting-ci:*`
+    intervention incident. If such incidents still appear in a window where every hand push followed a fix-lane
+    defect, the cause named here is wrong.
