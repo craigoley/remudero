@@ -93,6 +93,8 @@ import {
   blockerFields, decideSloRung, judgeSloRebuild, finalBlocker, priorBlockersFromLedger, type PrBlocker, type SloRung,
   securityArmRefusalAtHead, securityHoldReason, securityPolicyCause, type SecurityArmRefusal,
 } from "./pr-blocker.js";
+// @ts-expect-error — pure ESM policy shared with the dependency-free producer; tsconfig includes TS only.
+import { CODEQL_RECOVERY_DISPOSITION_REASONS } from "./code-scanning-merge-policy.mjs";
 import { clockFromMillisFn, systemClock, type Clock } from "./clock.js";
 import { isWorkerProviderId, type Config, type WorkerProviderId, fixStrikeCap, overflowFallbackRefusal } from "./config.js";
 import { defaultGitCaptureAsync, gitPushEmptyCommit, gitPushRunBranchAsync, worktreePushExec, worktreePushExecAsync, runStepsSync, runStepsAsync, step, type Steps } from "./git-push.js";
@@ -11631,6 +11633,20 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
       `#${pr.prNumber} to restore authoritative evidence in structured form; one exact-input post refusal stops retries`,
   },
   {
+    // W1-T10976: an unresolved missing-CodeQL-configuration recovery is not a code defect. One escalation per head,
+    // owned by the PR's task or the security-policy owner; no generic fix round and no strike (`blocked-ambiguous`
+    // never dispatches a fix, and `security-unknown-hold` is owned by `security-policy`).
+    disposition: "blocked-ambiguous",
+    blocker: "security-unknown-hold",
+    when: (pr) => securityRecoveryDisposition(pr) !== undefined,
+    reason: (pr) => {
+      const recovery = securityRecoveryDisposition(pr)!;
+      return `security-merge-policy unknown (${recovery.reason}): the CodeQL missing-configuration recovery did not resolve at this head ` +
+        `(${pr.headSha.slice(0, 7)}) — escalating once to ${recovery.owner} (owner security-policy) with evidence ${recovery.evidence}; ` +
+        `no generic fix round, and UNKNOWN is never merge permission`;
+    },
+  },
+  {
     // W1-T196 + W1-T7096: an unattributable plan filing has no task-bound code-fix decision for
     // the progress judge to make. Preserve its existing stand-down at the former ceiling instead
     // of letting the newly judge-routed fixable row claim it first.
@@ -15724,6 +15740,22 @@ export function withCodeqlAlertEvidence(pr: Pick<OpenPrView, "headSha" | "codeql
     const what = policy ? `security-merge-policy failed at this head (${verdict})` : "CodeQL failed at this head";
     return [{ ...failure, logTail: `${what}; its alerts were not read: ${why}` }];
   });
+}
+
+/** W1-T10976 — a head whose ONLY red is the `security-merge-policy` status, published `unknown` with a distinct
+ *  missing-CodeQL-configuration recovery disposition (exhausted window, invalid evidence, or an unrecognized warning).
+ *  No source edit can clear it, so a generic ci-log fix round would only spend strikes: it is escalated ONCE, to the
+ *  owning PR task (or the security-policy owner when the PR has none), with the status's evidence link. Never set
+ *  beside a real alert read at this head, another failing check or a blocked verdict, which keep their repair route. */
+export function securityRecoveryDisposition(pr: OpenPrView):
+  { reason: string; owner: string; evidence: string } | undefined {
+  const policy = pr.securityMergePolicy;
+  if (policy?.state !== "unknown" || !(CODEQL_RECOVERY_DISPOSITION_REASONS as readonly string[]).includes(policy.reason)) return undefined;
+  if (!isBlockedCi(pr) || (pr.ciFailures?.length ?? 0) === 0 ||
+      !(pr.ciFailures ?? []).every((failure) => failure.name === SECURITY_MERGE_POLICY_CONTEXT) ||
+      !(pr.redRequiredChecks ?? []).every((name) => name === SECURITY_MERGE_POLICY_CONTEXT)) return undefined;
+  if (pr.codeqlHeadAlerts?.headSha === pr.headSha && pr.codeqlHeadAlerts.alerts.length > 0) return undefined;
+  return { reason: policy.reason, owner: pr.taskId ?? "security-policy", evidence: pr.prUrl };
 }
 
 type CodeScanningGate =
