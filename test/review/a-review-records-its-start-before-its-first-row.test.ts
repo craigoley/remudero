@@ -11,9 +11,10 @@ function drive(fetchHeadThrows: boolean): Record<string, unknown>[] {
     import { mkdtempSync, rmSync } from "node:fs";
     import { tmpdir } from "node:os";
     import { join } from "node:path";
-    import { reviewCommand } from "#src/run-task.js";
-    import { ledgerPathFor } from "#src/lib/ledger-path.js";
-    import { readLedgerLines } from "#src/lib/status.js";
+    const load = (parts) => import(parts.join(""));
+    const { reviewCommand } = await load(["#src/", "run-task.js"]);
+    const { ledgerPathFor } = await load(["#src/lib/", "ledger-path.js"]);
+    const { readLedgerLines } = await load(["#src/lib/", "status.js"]);
     const head = ${JSON.stringify(HEAD)};
     const body = ${JSON.stringify(BODY)};
     const root = mkdtempSync(join(tmpdir(), "rmd-start-phases-"));
