@@ -1,0 +1,41 @@
+- id: W1-T11884
+  title: The shipped policy lets the lane governor cap new build admissions, so build width falls with memory and CPU pressure instead of staying at the fixed lane count
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # flips dispatch admission under pressure; the row stays reversible, a running lane is never stopped, and enforce can only lower the fixed lane count
+  origin: operator ruling 2026-11-09 "Go with all of your recommendations" (flip the lane governor from shadow to enforce)
+  plan_refs:
+    - W1-T9097
+    - W1-T11129
+  files:
+    - plan/policy.yaml
+    - test/daemon/the-shipped-policy-lets-the-lane-governor-cap-admissions.test.ts
+    - test/the-build-lane-count-follows-the-memory-governor.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: The shipped plan/policy.yaml reads sweep.laneGovernor.mode as enforce, and an absent or unreadable mode still reads shadow
+      proof: "unit test: test/daemon/the-shipped-policy-lets-the-lane-governor-cap-admissions.test.ts"
+    - claim: The row's comment records the 2026-11-09 operator ruling that switched the governor to enforce
+      proof: "grep: ENFORCE SINCE in plan/policy.yaml"
+  rationale: |
+    OBSERVED 2026-11-09 (Azure ledger union, 550 `dispatch.lane_target` rows, 2026-11-05 to 2026-11-09): the governor ran in shadow and would have capped new admissions below the fixed 3 lanes in 71 readings (13%): target 1 in 42 and target 2 in 29. Builds were in flight at 3 or more in only 17 readings (3%). Enforcing would therefore have cost almost no throughput and shed work in exactly the readings the host was short of memory or CPU (bindings: host 187, cpu 141, container 113, growth 103). The latest reading, 2026-11-09 15:36Z, was target 1, bound by host, while the host ran at load 75 on 8 cores.
+    - The policy row documents the switch: "Switching to enforce is an operator ruling made by editing this row... it still sizes the pool, so enforce can only lower it." Retiring the fixed lane count is ADR 0007 decision C's later step 4, not this task.
+    - CORRECTION recorded with this filing: an earlier session note said enforce would remove the fixed 3 lanes. It does not: it only caps below it. The idle data (lanes idle 56% of capacity, 0 to 2 builds in flight) shows the fixed count is not what limits throughput.
+    - Nothing here waits for a human. plan/policy.yaml is listed in CODEOWNERS, but main requires no code-owner review and no approvals (branch protection: require_code_owner_reviews false, 0 approving reviews), plan/policy.yaml is not on the risk scorer's critical-path list, and the fleet bot has merged a policy.yaml pull request before (#13282). The operator ruling is the origin line above.
+    - The row's origin must stay "proposal": parseLaneGovernorMode refuses any other value, and the daemon reads a refused mode as shadow, so a different origin would silently leave the governor off.
+  design: |
+    - Edit the one row: `sweep.laneGovernor.mode.value` from "shadow" to "enforce", leaving its origin "proposal". Update the comment above the row to say ENFORCE SINCE 2026-11-09 by operator ruling, with the measurement, how to revert, and that dispatchLanes is retired only by a separate change.
+    - A new test reads the shipped plan/policy.yaml through `loadLaneGovernorMode` and asserts enforce, and asserts `parseLaneGovernorMode(undefined)` and `{}` still read shadow and an invalid value is refused.
+    - The two assertions in test/the-build-lane-count-follows-the-memory-governor.test.ts that pin the shipped row to shadow now expect enforce.
+    - NOT IN SCOPE: retiring dispatchLanes, the governor's arms or bounds, the CPU learner, and any other policy row.
+  falsifier: |
+    Leave the row at shadow: criterion 1 must fail on the loader and criterion 2 on the comment text. Make an absent block read enforce: criterion 1's fallback assertion must fail. Restore and require both.
+  note: |
+    reservation hand-off: run-unfiled-1794241838000 -> run-unfiled-1794243320000
+    Reserved with rmd next-task-id --count 4 (W1-T11884..11887). Revert is one edit: set the row back to shadow.
