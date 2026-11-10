@@ -219,6 +219,7 @@ import { realFixRoundReapplyPorts, reapplyFixRoundOnMovedTip, type FixRoundReapp
 import { productionDispatchBreakJudge, productionFixProgressJudge, CHECK_REQUEUE_DEFERRED_STEP, CHECK_REQUEUE_STEP, jobRequeueOutcome, jobRerunRefusal, requeuedCheckKeysFromLedger, withheldReviewRefusalRow,
   type JobRequeueOutcome } from "./lib/sweep.js";
 import { DEFAULT_GH_CALL_TIMEOUT_MS, ghExec, ghJsonAsync, ghLinesAsync, ghTextAsync, setGhReadActorResolver, withDaemonGhTransportFloor, withGhTransportFloor, withGhTransportFloorMode, type GhAsyncExecutor } from "./lib/github-transport.js";
+import { installGithubCredentialMissingSink } from "./lib/github-credential.js";
 import { createHash, randomUUID } from "node:crypto";
 import { createScanner, SyntaxKind } from "typescript/unstable/ast";
 import { extractReviewFindings, recordReviewFindings, type FindingCapture } from "./lib/review-findings.js";
@@ -43323,6 +43324,7 @@ export async function main(
   // calls this repo's `callMain` tests make do not stack listeners.
   installUnhandledRejectionGuard();
   setGhReadActorResolver((env) => deriveLedgerActor(env));
+  installGithubCredentialMissingSink((row) => appendLedger(ledgerPathFor(loadConfig()), row));
   // W1-T3065 — THE HAND LANE REAPS TOO. Until this line the temp sweep had exactly two callers,
   // both daemon rungs, so a machine running `rmd` by hand and no daemon reclaimed NOTHING: the
   // operator's Mac reached 100% of a 228 GiB volume with 138 stale dirs and 11 GiB of debris, and
