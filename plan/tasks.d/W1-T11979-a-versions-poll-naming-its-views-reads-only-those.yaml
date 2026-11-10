@@ -8,7 +8,7 @@
   verify: auto
   principles:
     tdd: strict
-  risk: medium # an added optional query parameter; a poll without it behaves as today
+  risk: high # the read-model worker and the versions route; an added optional query parameter, and a poll without it behaves as today
   band_meaning: blast-radius
   origin: operator-session#serve-idle-2026-11-10
   plan_refs:

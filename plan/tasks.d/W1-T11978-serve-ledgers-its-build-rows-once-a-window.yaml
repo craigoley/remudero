@@ -7,7 +7,7 @@
   verify: auto
   principles:
     tdd: strict
-  risk: medium # two log calls become window tallies; no body, build or schedule changes
+  risk: high # two views and their shared test; two log calls become window tallies and no body, build or schedule changes
   band_meaning: blast-radius
   origin: operator-session#serve-idle-2026-11-10
   plan_refs:
