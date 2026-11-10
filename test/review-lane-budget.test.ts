@@ -21,7 +21,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { PolicyError } from "../src/lib/policy.js";
-import { DEFAULT_SWEEP_POLICY, runSweep, validateReviewLanesRow, type OpenPrView, type SweepDeps, type SweepPolicy } from "./helpers/sweep-test.js";
+import { DEFAULT_SWEEP_POLICY, deriveReviewLaneCeiling, runSweep, validateReviewLanesRow, type OpenPrView, type SweepDeps, type SweepPolicy } from "./helpers/sweep-test.js";
 
 function ledgerPath(): string {
   return join(mkdtempSync(join(tmpdir(), "rmd-review-lane-budget-")), "ledger.ndjson");
@@ -228,4 +228,22 @@ test("W1-T1049 — a well-formed 'sweep.reviewLanes' row returns its value, incl
 test("dispatch lanes are restored to three by the 2026-10-03 operator ruling", () => {
   // The ruling's precondition was the memory gate (W1-T5347); the restore condition read burn per run DOWN.
   assert.equal(DEFAULT_SWEEP_POLICY.dispatchLanes, 3, "plan/policy.yaml sweep.dispatchLanes");
+});
+
+test("W1-T11841: the loader refuses a base reviewLanes.value above hostWorkerBudget and names the derived bound", () => {
+  const capacity = { ...DEFAULT_SWEEP_POLICY.reviewCapacity, hostWorkerBudget: 3 };
+  assert.throws(
+    () => deriveReviewLaneCeiling(4, capacity),
+    (error: unknown) =>
+      error instanceof PolicyError && /hostWorkerBudget/.test(error.message) && /\(4\)/.test(error.message) && /\(3\)/.test(error.message),
+  );
+  assert.equal(deriveReviewLaneCeiling(4, DEFAULT_SWEEP_POLICY.reviewCapacity), 8, "the ceiling is the budget");
+  assert.equal(deriveReviewLaneCeiling(3, capacity), 3, "a value equal to the budget loads");
+  // every existing validateReviewLanesRow arm still fires, including a value above the row's own max
+  assert.throws(() => validateReviewLanesRow({ value: 6, origin: "net-new", min: 1, max: 5 }), /out of its declared bound/);
+  assert.throws(() => validateReviewLanesRow({ value: 0, origin: "net-new", min: 1, max: 5 }), /out of its declared bound/);
+  assert.throws(() => validateReviewLanesRow({ value: 4, min: 5, max: 1 }), /unsatisfiable/);
+  assert.throws(() => validateReviewLanesRow(null), /mapping/);
+  assert.throws(() => validateReviewLanesRow({ value: "4", min: 1, max: 5 }), /finite number/);
+  assert.throws(() => validateReviewLanesRow({ value: 4, min: 1 }), /numeric 'min' and 'max'/);
 });

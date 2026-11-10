@@ -22,6 +22,7 @@ import {
   type ReviewCapacityPolicy,
   type ReviewCapacityState,
 } from "#src/lib/review-capacity.js";
+import { DEFAULT_SWEEP_POLICY } from "#src/lib/sweep.js";
 
 const POLICY: ReviewCapacityPolicy = {
   hostWorkerBudget: 8,
@@ -167,4 +168,112 @@ test("claim: the decision row names whether a refusal is OBSERVED or ABSENT, re-
     classify(observedRefusal.decision.evidence),
     classify(absentRefusal.decision.evidence),
   );
+});
+
+// ── W1-T11841 — the SHIPPED bounds: the ceiling is hostWorkerBudget, not reviewLanes.max ─────────
+//
+// Driven with DEFAULT_SWEEP_POLICY's own reviewCapacity and {reviewLanes, reviewLaneMin,
+// reviewLaneMax}, so a regression of the ceiling to the policy row's max (5) reddens here.
+
+const SHIPPED = DEFAULT_SWEEP_POLICY.reviewCapacity;
+const SHIPPED_BOUNDS = {
+  baseWidth: DEFAULT_SWEEP_POLICY.reviewLanes,
+  minWidth: DEFAULT_SWEEP_POLICY.reviewLaneMin,
+  maxWidth: DEFAULT_SWEEP_POLICY.reviewLaneMax,
+};
+
+function shippedHealthy(nowMs: number, over: Partial<ReviewCapacityObservation> = {}): ReviewCapacityObservation {
+  return healthy(nowMs, { queueDepth: 50, ...over });
+}
+
+/** Drives `samples` cadence-spaced samples, returning every decision. */
+function drive(
+  start: ReviewCapacityState,
+  samples: number,
+  over: Partial<ReviewCapacityObservation> = {},
+  firstAtMs = 0,
+) {
+  let state = start;
+  const decisions = [];
+  for (let i = 0; i < samples; i += 1) {
+    const result = selectAdaptiveReviewWidth(
+      state,
+      SHIPPED,
+      shippedHealthy(firstAtMs + i * SHIPPED.sampleCadenceMs, over),
+      SHIPPED_BOUNDS,
+    );
+    decisions.push(result.decision);
+    state = result.state;
+  }
+  return { state, decisions };
+}
+
+test("claim: sustained healthy windows widen past 5, one lane per window, up to hostWorkerBudget and never past it", () => {
+  assert.ok(SHIPPED_BOUNDS.maxWidth > 5, "the shipped ceiling must exceed the policy row's max of 5");
+  assert.equal(SHIPPED_BOUNDS.maxWidth, SHIPPED.hostWorkerBudget);
+  const { decisions } = drive(
+    initialReviewCapacityState(SHIPPED_BOUNDS.baseWidth),
+    SHIPPED.healthyWindowSamples + (SHIPPED.hostWorkerBudget - SHIPPED_BOUNDS.baseWidth) + 4,
+  );
+  const widths = decisions.map((d) => d.effectiveWidth);
+  for (let i = 1; i < widths.length; i += 1) {
+    assert.ok(widths[i]! - widths[i - 1]! <= 1, `one lane per healthy window, got ${widths.join(",")}`);
+  }
+  assert.ok(widths.includes(6), `the width passes 5: ${widths.join(",")}`);
+  assert.equal(Math.max(...widths), SHIPPED.hostWorkerBudget, "the width reaches the budget");
+  assert.equal(widths[widths.length - 1], SHIPPED.hostWorkerBudget, "and never goes past it");
+});
+
+test("claim: with active workers present the width stops at the room they leave and records host-worker-budget", () => {
+  const activeWorkers = 3;
+  const { decisions } = drive(initialReviewCapacityState(SHIPPED_BOUNDS.baseWidth), 20, { activeWorkers });
+  const room = SHIPPED.hostWorkerBudget - activeWorkers;
+  const widths = decisions.map((d) => d.effectiveWidth);
+  assert.equal(Math.max(...widths), room, `width stops at the room: ${widths.join(",")}`);
+  assert.equal(decisions[decisions.length - 1]!.reason, "host-worker-budget");
+  for (const d of decisions) assert.ok(d.effectiveWidth + activeWorkers <= SHIPPED.hostWorkerBudget);
+});
+
+test("claim: every refusal still blocks a widen and never admits past the budget", () => {
+  // From width 6 with a full healthy window banked: the next healthy sample WOULD widen to 7.
+  const earned: ReviewCapacityState = {
+    effectiveWidth: 6,
+    healthySamples: SHIPPED.healthyWindowSamples,
+    lastHealthySampleAtMs: 0,
+  };
+  const at = 10 * SHIPPED.sampleCadenceMs;
+  const control = selectAdaptiveReviewWidth(earned, SHIPPED, shippedHealthy(at), SHIPPED_BOUNDS);
+  assert.equal(control.decision.reason, "healthy-window");
+  assert.equal(control.decision.effectiveWidth, 7, "control: the unrefused sample widens");
+
+  const latency = { baselineLatencyMs: 1000, recentLatencyMs: 5000, recentLatencySamples: 5, baselineLatencySamples: 6 };
+  const cases: ReadonlyArray<[string, Partial<ReviewCapacityObservation>]> = [
+    ["cpu-pressure", { cpuPsiFullAvg10Pct: 75.9 }],
+    ["memory-pressure", { memoryPsiSomeAvg10Pct: 50 }],
+    ["memory-reserve", { memAvailableMib: 100 }],
+    ["provider-refused", { provider: { fresh: true, readable: true, headroomPct: 80, reservePct: 5, refused: true } }],
+    ["provider-headroom", { provider: { fresh: true, readable: true, headroomPct: 6, reservePct: 5, ageMs: 1_000 } }],
+    ["review-unhealthy", { settlements: { successes: 2, failures: 2, timeouts: 0 } }],
+    ["review-latency-expanded", { memoryPsiSomeAvg10Pct: 10, settlements: { successes: 2, failures: 0, timeouts: 0, ...latency } }],
+    ["review-latency-uncorroborated", { settlements: { successes: 2, failures: 0, timeouts: 0, ...latency } }],
+    ["review-history-insufficient", { settlements: { successes: 0, failures: 0, timeouts: 0 } }],
+    ["telemetry-unavailable", { memAvailableMib: undefined }],
+    ["backlog-not-sustained", { queueDepth: 2 }],
+  ];
+  for (const [reason, over] of cases) {
+    for (const activeWorkers of [0, 1]) {
+      const result = selectAdaptiveReviewWidth(
+        earned,
+        SHIPPED,
+        shippedHealthy(at, { activeWorkers, ...over }),
+        SHIPPED_BOUNDS,
+      );
+      assert.equal(result.decision.reason, reason, `${reason} fires`);
+      assert.ok(result.decision.effectiveWidth <= 6, `${reason} must not widen, got ${result.decision.effectiveWidth}`);
+      assert.ok(
+        result.decision.effectiveWidth + activeWorkers <= SHIPPED.hostWorkerBudget,
+        `${reason} admits past the budget`,
+      );
+    }
+  }
 });

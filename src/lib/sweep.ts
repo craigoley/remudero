@@ -7093,20 +7093,35 @@ export function validateReviewCapacityPolicy(raw: unknown): ReviewCapacityPolicy
   return output;
 }
 
+/** W1-T11841 — the review admission ceiling is the live host-worker budget, so the base width must
+ *  fit under it. Refuses LOUD (rule 2) rather than clamping, naming the derived bound; returns the
+ *  ceiling the runtime widener may earn up to. */
+export function deriveReviewLaneCeiling(value: number, capacity: ReviewCapacityPolicy): number {
+  if (value > capacity.hostWorkerBudget) {
+    throw new PolicyError(
+      `policy.yaml: 'sweep.reviewLanes.value' (${value}) exceeds the derived review ceiling ` +
+        `'sweep.reviewCapacity.hostWorkerBudget' (${capacity.hostWorkerBudget}).`,
+    );
+  }
+  return capacity.hostWorkerBudget;
+}
+
 /** Reads the row {@link validateReviewLanesRow} validates. Split from it so every refusal arm above
  *  is reachable from a test without a temp policy file on disk. */
-function loadReviewPolicy(): { value: number; min: number; max: number; capacity: ReviewCapacityPolicy } {
+function loadReviewPolicy(): { value: number; min: number; max: number; capacity: ReviewCapacityPolicy; ceiling: number } {
   const path = installPolicyPath();
   const raw = parseYaml(readFileSync(path, "utf8")) as {
     sweep?: { reviewLanes?: unknown; reviewCapacity?: unknown };
   } | null;
   const value = validateReviewLanesRow(raw?.sweep?.reviewLanes);
   const row = raw?.sweep?.reviewLanes as Record<string, unknown>;
+  const capacity = validateReviewCapacityPolicy(raw?.sweep?.reviewCapacity);
   return {
     value,
     min: row.min as number,
     max: row.max as number,
-    capacity: validateReviewCapacityPolicy(raw?.sweep?.reviewCapacity),
+    capacity,
+    ceiling: deriveReviewLaneCeiling(value, capacity),
   };
 }
 const REVIEW_POLICY = loadReviewPolicy();
@@ -7131,7 +7146,9 @@ export const DEFAULT_SWEEP_POLICY: SweepPolicy = {
   dispatchLanes: POLICY_SWEEP.dispatchLanes,
   reviewLanes: REVIEW_POLICY.value,
   reviewLaneMin: REVIEW_POLICY.min,
-  reviewLaneMax: REVIEW_POLICY.max,
+  // W1-T11841: the runtime admission ceiling is sweep.reviewCapacity.hostWorkerBudget, not
+  // sweep.reviewLanes.max — that row's max only bounds the BASE value (reviewLanes), never admission.
+  reviewLaneMax: REVIEW_POLICY.ceiling,
   reviewCapacity: REVIEW_POLICY.capacity,
   dailyCostCeilingUsd: POLICY_SWEEP.dailyCostCeilingUsd,
   // W1-T1038: collected off plan/policy.yaml's own row (POLICY_SWEEP, above), the same relocation

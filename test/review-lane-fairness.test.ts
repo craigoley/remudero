@@ -200,3 +200,13 @@ test("operator ruling 2026-10-06: the review width ships at four with room to ea
     "plan/policy.yaml sweep.reviewLanes",
   );
 });
+
+test("W1-T11841: the runtime review ceiling is hostWorkerBudget, not the reviewLanes row's max", () => {
+  assert.equal(DEFAULT_SWEEP_POLICY.reviewLaneMax, DEFAULT_SWEEP_POLICY.reviewCapacity.hostWorkerBudget);
+  assert.equal(DEFAULT_SWEEP_POLICY.reviewLaneMax, 8, "the shipped budget");
+  assert.notEqual(DEFAULT_SWEEP_POLICY.reviewLaneMax, 5, "the row's max only bounds the base value");
+  assert.equal(DEFAULT_SWEEP_POLICY.reviewLanes, 4, "the base is still the row's value");
+  assert.equal(DEFAULT_SWEEP_POLICY.reviewLaneMin, 1, "the floor is still the row's min");
+  assert.equal(DEFAULT_SWEEP_POLICY.dispatchLanes, 3, "dispatchLanes is unchanged");
+  assert.equal(DEFAULT_SWEEP_POLICY.reviewCapacity.hostWorkerBudget, 8, "hostWorkerBudget is unchanged");
+});
