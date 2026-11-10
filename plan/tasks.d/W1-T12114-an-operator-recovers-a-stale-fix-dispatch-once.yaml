@@ -29,6 +29,8 @@
       proof: "unit test: W1-T12114 concurrent apply releases once"
     - claim: "apply never deletes or moves a ref, never removes the worktree, never pushes to the PR branch, never writes fix.done, a credit or a plan or source file, on a code PR and on a plan-only PR alike; the recorded git argv contains no update-ref -d, push --delete, branch -D or worktree remove"
       proof: "unit test: W1-T12114 recovery preserves all work"
+    - claim: "the registered command calls the recovery apply module from the existing CLI source"
+      proof: "grep: applyStaleFixDispatchRecovery( in src/run-task.ts"
     - claim: "the recovery receipt step survives ledger rotation"
       proof: "grep: pr_owner.recovery_receipt in src/lib/ledger.ts"
     - claim: "the authorization step survives ledger rotation"
@@ -60,7 +62,7 @@
       so on the Mac host apply holds with cwd_unknown. That is the intended fail-closed result. No dependency is
       added.
   design: |
-    1. src/lib/stale-fix-dispatch-recovery-apply.ts (new). All I/O goes through injected ports: ledger read
+    1. src/lib/stale-fix-dispatch-recovery-apply.ts (new) exports applyStaleFixDispatchRecovery. All I/O goes through injected ports: ledger read
        (readPrOwnerLedgerProjection plus the run's rows), PR read (head, base, branch, repo through the existing gh
        broker read), inflight lock read, isHolderStale, a descendant census over the recorded pid (the /proc ppid
        walk readProcessCwdCensus already performs), readProcessCwdCensus on the run's worktree, the
@@ -84,7 +86,8 @@
        g. Release the fix branch claim in finally.
        Held receipts are ledger rows only (pr_owner.recovery_receipt, outcome held) and never create the file. A later fully matching released receipt may supersede older held rows only by strict timestamp order; T12115 keeps ownership held or unknown for a later/equal hold or any conflict.
     4. Add pr_owner.recovery_authorized and pr_owner.recovery_receipt to DECISION_RELEVANT_LEDGER_STEPS. W1-T12047 owns the same ledger file, so this task depends on it and cannot overlap its rotation-list edit.
-    5. Register `pr-owner-recover` in the command table and USAGE. Do not add it to
+    5. Register `pr-owner-recover` in the command table and USAGE, and call applyStaleFixDispatchRecovery
+       from the existing src/run-task.ts command path (the call-site criterion proves this). Do not add it to
        READ_ONLY_FRESHNESS_EXEMPT_VERBS or to the plan precondition allow-list.
     6. Tests use injected ports and temp dirs, and remove them in finally:
        - authorize then apply releases;
