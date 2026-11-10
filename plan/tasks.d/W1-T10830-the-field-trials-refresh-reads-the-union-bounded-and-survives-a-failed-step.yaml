@@ -9,7 +9,7 @@
   risk: high  # Rule 19: one concern, the daily collector pass (bounded read, independent steps, its own outcome row); no routing, gate or publication change
   band_meaning: span
   priority: 1  # Craig 2026-10-27: field trials on the site; every downstream release task (W1-T10831, W1-T10832) reads this snapshot, and it has been frozen for 9 days
-  status: queued
+  status: merged
   attempts: 0
   origin: "filing agent F20, 2026-10-27, on Craig's 2026-10-27 ask ('When are we going to have those field trials live on our site? ... lean into automation and self improvement'); re-verified read-only on the Azure host 13:20-13:45Z at origin/main 07dbdcc77"
   plan_refs: [W1-T4574, W1-T100001, W1-T8885, W1-T10756, W1-T4710]

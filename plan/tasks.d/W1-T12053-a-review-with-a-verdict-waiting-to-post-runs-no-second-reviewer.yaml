@@ -1,0 +1,38 @@
+- id: W1-T12053
+  title: "A review that has a verdict waiting to post does not run a second reviewer"
+  repo: remudero
+  depends_on: []
+  priority: 1.3
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: medium # one command's control flow after two results the library already returns
+  band_meaning: blast-radius
+  origin: operator-session#plain-language-2026-11-10
+  plan_refs:
+    - W1-T11928
+  files:
+    - src/cli/commands/review.ts
+    - test/review/a-review-with-a-verdict-waiting-to-post-runs-no-second-reviewer.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "When the pending step reports that a kept verdict was posted, the review command ends without starting a reviewer"
+      proof: "grep: W1-T12053 criterion 1 in test/review/a-review-with-a-verdict-waiting-to-post-runs-no-second-reviewer.test.ts"
+    - claim: "When the pending step reports that a kept verdict is still held because its post failed again, the command ends without starting a reviewer and says why"
+      proof: "grep: W1-T12053 criterion 2 in test/review/a-review-with-a-verdict-waiting-to-post-runs-no-second-reviewer.test.ts"
+    - claim: "When a verdict's status post fails, the command hands the comment it would have posted to the outbox, so the later post carries it"
+      proof: "grep: W1-T12053 criterion 3 in test/review/a-review-with-a-verdict-waiting-to-post-runs-no-second-reviewer.test.ts"
+  rationale: |
+    OBSERVED 2026-11-10 while building W1-T11928: that task keeps a computed verdict in an outbox when its status post fails, and the next pass posts it. Two parts need the review command, which was outside that task's file list.
+    - The command builds its pull request comment after the status post and returns early when the post fails. So a kept verdict has no comment, and the later post carries the status alone.
+    - When the kept verdict's post fails a second time, the library returns outbox "held". The command ignores that field and runs a full reviewer again, which is the cost the outbox exists to avoid.
+    - The case is the one from 2026-11-09: a missing credential or an old gh fails every post until someone repairs the host.
+  design: |
+    In src/cli/commands/review.ts: build the comment before the status post and pass it as commentBody; after the pending step, end the command when outbox is "posted" or "held", with one line that says which.
+    NOT IN SCOPE: the outbox itself, the verdict, and removing entries for closed pull requests.
+  falsifier: |
+    Start a reviewer after a posted kept verdict and criterion 1 must fail. Start one while the verdict is held, or end without a reason, and criterion 2 must fail. Drop the comment from the outbox entry and criterion 3 must fail. Restore and require all three to pass.
+  note: |
+    Follows W1-T11928.

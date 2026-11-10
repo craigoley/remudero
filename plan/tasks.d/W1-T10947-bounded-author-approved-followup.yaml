@@ -21,7 +21,7 @@
     - scripts/preflight-author.mjs
     - test/mac-author-admission.test.ts
     - test/infra/the-author-disk-reserve-is-sized-to-its-workload.test.ts
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: The operator requested durable plan custody of the remaining approved

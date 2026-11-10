@@ -15,7 +15,7 @@
   files:
     - scripts/census-precheck.mjs
     - test/ci/gates/the-precheck-answers-its-cheap-counts-before-any-suite.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: census-precheck --counts-only runs the static counts (clock, comment load, fixture copy, house layout, deps interface, repo root, census parity) without starting the instrument child or any census suite, and exits 1 naming each caused row or 0 when clean

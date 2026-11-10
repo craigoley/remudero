@@ -17,7 +17,7 @@
   files:
     - src/lib/test-slot.ts
     - test/ci/suites/a-login-session-scope-never-holds-a-dead-owners-test-slot.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED 2026-10-27 on the Azure host, from an operator Claude session reached over SSH. Its shell's /proc/self/cgroup is `0::/user.slice/user-1000.slice/session-2646.scope`, which is a systemd-logind login scope.

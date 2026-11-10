@@ -28,7 +28,7 @@
     - test/the-trial-deployment-is-the-cheaper-compliant-one.test.ts
     - test/the-top-tier-is-not-claude-only.test.ts
     - "src/lib/model-availability.ts"
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     VERIFIED ON origin/main 07dbdcc77 (2026-10-27). Template: the Sol 6.1 switch, PR #8650 (17 files: mounts,
