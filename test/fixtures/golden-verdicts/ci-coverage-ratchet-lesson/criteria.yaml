@@ -1,2 +1,0 @@
-- claim: the coverage-ratchet refusal lesson is present in a matched learning
-  proof: "grep: ci-learning:6062:coverage-ratchet in learnings/ci.yaml"

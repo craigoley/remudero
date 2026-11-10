@@ -1,3 +1,0 @@
-{
-  "note": "valid JSON, but carries no `exemptions` array — loadBaseline must refuse this rather than treat it as an empty exemption list, which would silently disarm every recorded exception."
-}

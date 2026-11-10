@@ -1,4 +1,0 @@
-{
-  "about": "Every GET route that writes state, and why. A GET that writes makes that state depend on whether anyone read. This list only shrinks: arch Phase 4 design section 5 names each owner, and test/no-get-route-writes-state.test.ts refuses a new entry and a stale one.",
-  "entries": []
-}

@@ -1,5 +1,0 @@
-{
-  "_comment": "alpha's injectable line is 41 chars -- one over this RUNAWAY cliff, so the ratchet must BLOCK. W1-T3734 moved blocking from capChars (now an advisory curation target) to hardCapChars, so this fixture declares the cliff.",
-  "capChars": 40,
-  "hardCapChars": 40
-}

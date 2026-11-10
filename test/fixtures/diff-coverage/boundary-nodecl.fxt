@@ -1,4 +1,0 @@
-function real() {
-  return uncovered();
-}
-// diff-cov: process-boundary — dangling directive at end of file

@@ -1,1 +1,0 @@
-# empty shard -- parses to `undefined`, not a list; must be zero entries, not an error.

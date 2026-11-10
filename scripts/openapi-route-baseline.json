@@ -1,4 +1,0 @@
-{
-  "_comment": "W1-T4579 — served /v1 paths absent from openapi/daemon.yaml, measured over the ASSEMBLED route table (buildServeRoutes plus the status SSE route) by test/every-served-route-is-in-the-contract.test.ts. A set that may only SHRINK: declare a route in the spec and remove it here in the same PR; a newly served route must be declared, never added here. Parameters are normalised to {}.",
-  "undeclared": []
-}

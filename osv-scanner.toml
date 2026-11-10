@@ -1,6 +1,0 @@
-# osv-scanner configuration.
-#
-# An entry here SUPPRESSES a real advisory, so each one states what was checked and when it must be
-# re-checked. "We looked and it does not reach us" is a finding with a shelf life: it expires the
-# moment the dependency graph moves. Nothing is ignored because it is inconvenient.
-
