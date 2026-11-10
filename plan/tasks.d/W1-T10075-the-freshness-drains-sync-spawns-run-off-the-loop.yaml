@@ -18,7 +18,7 @@
     - src/lib/plan-architect.ts
     - src/run-task.ts
     - test/the-freshness-drains-sync-spawns-run-off-the-loop.test.ts
-  status: queued
+  status: merged
   priority: 1  # operator 2026-10-17: the drain's loop lag rides every freshness restart
   attempts: 0
   rationale: |

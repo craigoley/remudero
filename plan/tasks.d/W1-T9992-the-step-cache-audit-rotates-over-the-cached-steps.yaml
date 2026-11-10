@@ -13,7 +13,7 @@
   files:
     - src/lib/board-projection.ts
     - test/the-step-cache-audit-rotates-over-the-cached-steps.test.ts
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

@@ -14,7 +14,9 @@ import { GIT_FETCH_KILL_GRACE_MS } from "./git-fetch-retry.js";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { fileURLToPath } from "node:url";
 import { SHARE_ENV, Worker, workerData as threadData, type WorkerOptions } from "node:worker_threads";
-import { READ_PLANE_KIND, freezeReadGeneration, revisionedProducer, type RevisionedRequest } from "./read-plane.js";
+import { READ_PLANE_KIND, revisionedProducer, type RevisionedRequest } from "./read-plane.js";
+import { createPlanRevisionStore, type PlanRevision, type PlanRevisionStore, type RevisionLoad } from "./plan-revision-store.js";
+export { createPlanRevisionStore, type PlanRevision, type PlanRevisionStore, type RevisionLoad } from "./plan-revision-store.js";
 import { readPlaneWorkerInput, readPlaneWorkerLog, runReadPlaneWorker } from "./read-plane.worker.js";
 import { runsBundled, startWorker } from "./child-entry-argv.js";
 import { execFile, execFileSync, spawnSync } from "node:child_process";
@@ -35,7 +37,7 @@ import { appendLedger } from "./ledger.js";
 import { systemClock } from "./clock.js";
 import { createSizedMemo } from "./ledger-union.js";
 import { type BoardItem } from "./board-review.js";
-import { loadPlan, DEFAULT_RISK, PlanBlobCache, mergePlanBlobsQuarantiningDuplicates, readBlobsAtRefAsync, type QuarantinedTask, type MergedResolver, type Plan, type Task } from "./plan.js";
+import { loadPlan, DEFAULT_RISK, readBlobsAtRefAsync, type QuarantinedTask, type MergedResolver, type Plan, type Task } from "./plan.js";
 import { cappedOverrideFromLedger, postedArmFactsFromLedger, lastPendingReviewStatusFromLedger, assessPendingReviewOwner, priorReviewVerdictFromLedger, reviewLedgerKeyFor, reviewRowNamesPr, UNFILED_RUN_SENTINEL, enforcementDataInDiff, bodyReviewContractDigest, reviewContractDigest, reviewTaskNarrative, reviewInputDigest, isCriterionRefusal, type PendingReviewOwnerAssessment, type PendingReviewStatusRecord, type CriterionVerdict, type CriterionRefusal } from "./review.js";
 import { buildBatchedGithub, defaultCreditStorePath, loadCreditStore, buildCommitTrailerIndex, deriveStatus, isGhRateLimitError, projectPlan, readLedgerLines, type DeriveDeps, type GitHub, isBookkeepingOnlyChangeset, type PrRef, type StatusProjection, taskIdFromRunBranch, creditsByAnchoredTrailer, readMergeCreditedTaskIds, readRequiredStatusCheckContextsAsync, isPlanTextDeliverable, type RequiredContextsRead } from "./status.js";
 import { RUNNER_TIMEOUT_LINE, actionableGateFailuresFromReasons, cancelledRequiredCheckNames, withoutDownstreamGateFailure, earlyRedEvidenceRollup, checksStateFromRollup, checksPendingSinceFromRollup, dedupeRollupByLatestAttempt, fixLedgerRowsForHead, fixRoundTally, listRetirableEscalationIssues, listRetirableEscalationIssuesAsync, operatorVerdictEvidence, REQUIRED_CHECK_FAIL, closedPrFacts, type ClosedPrFact, redQualityGateNames, pendingQualityGateNames, usableInstrumentEntanglementPaths, type ActionableGateFailure, type CancelledRequiredCheck, type CiFailure, type CiLogUnavailableCause, MAX_CI_LOG_FAILURE_DETAIL, type CiTailSource, type CiAnnotationFallback, type CreditCandidate, type EscalationReconcileCandidate, type InstrumentEntanglementPaths, type OpenPrView, type StrikeAttempt, DEFAULT_FIX_CLASSES, checkJobId, corroboratedIneligibility, creditSubjectIsImplementation, isPostReviewDiffCeilingRefusal, isRetryableReviewThrow, codeScanningHeadSettled, reviewInputLoopFacts, type BaseChangedFiles } from "./sweep.js";
@@ -3284,65 +3286,6 @@ export function planSyncGitRunnerAsync(
       child.stdin?.end(stdin ?? "");
       const bound = boundChildByLoopTime(child, timeoutMs, { escalateAfterMs: opts.graceMs ?? GIT_FETCH_KILL_GRACE_MS });
     });
-}
-
-/** W1-T9763: `key` is `<tasks.yaml blob>:<tasks.d tree>`; `commit` is where a reader without it reads it again. */
-export interface PlanRevision {
-  key: string;
-  commit: string;
-  repoDir: string;
-  relPath: string;
-}
-
-export type RevisionLoad = { plan: Plan; quarantined: QuarantinedTask[] };
-
-/** One parsed {@link Plan} per {@link PlanRevision}; `adopt` reuses each unchanged blob's tasks. */
-export interface PlanRevisionStore {
-  get(key: string): RevisionLoad | undefined;
-  adopt(revision: PlanRevision, blobs: Array<{ label: string; text: string }>): RevisionLoad;
-  revisionOf(plan: Plan): PlanRevision | undefined;
-  counts(): { parsed: number; reused: number; held: number; retained: number };
-}
-
-/** A plan is frozen, so a reader that mutates it throws instead of changing every reader's plan, and held weakly, so
- *  one no reader holds is released; `retainLatest` keeps the newest for a reader holding nothing between requests. */
-export function createPlanRevisionStore(opts: { retainLatest?: boolean } = {}): PlanRevisionStore {
-  const blobCache = new PlanBlobCache();
-  const held = new Map<string, WeakRef<Plan>>();
-  const meta = new WeakMap<Plan, { revision: PlanRevision; quarantined: QuarantinedTask[] }>();
-  const released = new FinalizationRegistry<string>((key) => {
-    if (held.get(key)?.deref() === undefined) held.delete(key);
-  });
-  let latest: Plan | undefined;
-  let parsed = 0;
-  let reused = 0;
-  const lookup = (key: string): RevisionLoad | undefined => {
-    const plan = held.get(key)?.deref();
-    const known = plan && meta.get(plan);
-    return plan && known ? { plan, quarantined: known.quarantined } : undefined;
-  };
-  const hit = (key: string): RevisionLoad | undefined => {
-    const load = lookup(key);
-    if (load) reused++;
-    return load;
-  };
-  return {
-    get: hit,
-    adopt: (revision, blobs) => {
-      const already = hit(revision.key);
-      if (already) return already;
-      const read = mergePlanBlobsQuarantiningDuplicates(blobs, blobCache);
-      parsed++;
-      freezeReadGeneration(read.plan);
-      held.set(revision.key, new WeakRef(read.plan));
-      meta.set(read.plan, { revision, quarantined: read.quarantined });
-      released.register(read.plan, revision.key);
-      if (opts.retainLatest) latest = read.plan;
-      return { plan: read.plan, quarantined: read.quarantined };
-    },
-    revisionOf: (plan) => meta.get(plan)?.revision,
-    counts: () => ({ parsed, reused, held: held.size, retained: latest ? 1 : 0 }),
-  };
 }
 
 export async function planBlobsAtRevision(revision: PlanRevision, runGit: GitRunnerAsync): Promise<Array<{ label: string; text: string }>> {

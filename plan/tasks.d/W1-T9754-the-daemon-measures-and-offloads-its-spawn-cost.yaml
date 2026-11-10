@@ -19,7 +19,7 @@
     - "src/lib/gh-read-broker.ts"
     - "src/lib/merge-probe.ts"
     - "src/lib/worktree-git.ts"
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

@@ -13,7 +13,7 @@
   files:
     - src/lib/sweep.ts
     - test/a-full-pass-respects-a-memory-held-light-pass-head.test.ts
-  status: queued
+  status: merged
   priority: 2  # operator-2026-10-16: the same memory-admission holder W1-T9780 detached from the light pass still holds the full pass, and the full pass duplicates its spawn
   attempts: 0
   rationale: |

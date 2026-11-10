@@ -7,7 +7,7 @@
   priority: 2.5
   risk: high
   band_meaning: span
-  status: queued
+  status: merged
   attempts: 0
   author_class: machine
   # recon_read_from_origin_main: rationale and four criteria read at origin/main e7a6716ac39e3a334acd4b5524350a2170558816, remote https://github.com/craigoley/remudero.git

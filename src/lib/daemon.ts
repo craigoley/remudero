@@ -140,6 +140,7 @@ import { resolveReleases, closedUnmergedRunBranchRefs, type DispatchFilterReason
 import type { StatusProjection } from "./status.js";
 import { ENVIRONMENTAL_BLOCK_COOLDOWN_MS, INDEPENDENT_BLOCK_RELEASED_STEP, isEnvironmentalBlock, PRE_RESTORE_RUN_VERDICT_STAGES, type IndependentBlockRelease } from "./status.js";
 import { explainDispatchScore, openDependentFanout, type DispatchValueContext } from "./dispatch-value.js";
+import { readOpsCatalogSnapshotAsync, type OpsCatalogApi, type OpsCatalogTarget } from "./ops-catalog-source.js";
 import { GhJsonUnreadableResponseError, takeGhReadCadenceTally, type GhReadCadenceTally } from "./github-transport.js";
 // Type-only: retro.ts owns this shape, so the two hooks below never re-declare it (W1-T160).
 import type { RetroTriggerDecision } from "./retro.js";
@@ -1285,6 +1286,11 @@ export interface DaemonDeps {
    *  reader is installed here; absence preserves the single-plan path exactly, and this snapshot
    *  can never contribute work to the actual dispatch set. */
   secondaryPlanForShadow?: Plan | null;
+  /** W1-T11768: an optional internal ops target, absent by default. Only an explicitly injected target causes one
+   *  pinned snapshot read whose `ok` Plan feeds the same shadow comparison; no flag or config reaches it. */
+  opsCatalogTarget?: OpsCatalogTarget;
+  /** The GET-only seam for {@link opsCatalogTarget}; omitted, the reader's paced default is used. */
+  opsCatalogApi?: OpsCatalogApi;
   repositoryMaintenance?: (context: { activeLanes: number; disk: "healthy" | "low" | "unknown"; queueBusy: boolean }) => Promise<void>;
   /** Only a supervised dedicated daemon may exit into the shell's 30-minute zero-token probe. */
   idleStarvedSupervised?: boolean;
@@ -4890,6 +4896,8 @@ export async function runDaemon(
   // The last `dispatch.overlap_shadow` hold set, so an unchanged hold is ledgered once, not once per tick.
   let lastOverlapShadowSignature = "[]";
   let lastSecondaryCatalogShadowSignature: string | undefined;
+  // W1-T11768: the one snapshot of an injected ops target; `null` is any refusal (never a partial Plan).
+  let opsCatalogShadowPlan: Plan | null | undefined;
   let bootFirstDispatchWritten = false;
   const noteBootFirstDispatch = (outcome: { startedAtMs: number; admitted: number } | { heldReason: string }): void => {
     if (bootFirstDispatchWritten) return;
@@ -7458,9 +7466,17 @@ export async function runDaemon(
         ...dispatchOpts, excludeIds: new Set([...(dispatchOpts.excludeIds ?? []), ...childTaskIds()]), inFlight: occupiedTasks,
       });
       const candidates = runnableCandidates(planForBatch, isMerged, budget, selection.opts);
-      if (deps.secondaryPlanForShadow !== undefined && budget > 0) {
+      let secondaryForShadow = deps.secondaryPlanForShadow;
+      if (secondaryForShadow === undefined && deps.opsCatalogTarget !== undefined && budget > 0) {
+        if (opsCatalogShadowPlan === undefined) {
+          const snapshot = await readOpsCatalogSnapshotAsync(deps.opsCatalogTarget, deps.opsCatalogApi);
+          opsCatalogShadowPlan = snapshot.outcome === "ok" && snapshot.plan ? snapshot.plan : null;
+        }
+        secondaryForShadow = opsCatalogShadowPlan;
+      }
+      if (secondaryForShadow !== undefined && budget > 0) {
         const secondaryShadow = compareSecondaryCatalogShadow(
-          planForBatch, deps.secondaryPlanForShadow, candidates, isMerged, budget, selection.opts,
+          planForBatch, secondaryForShadow, candidates, isMerged, budget, selection.opts,
           runBranchStateThisTick.ids,
         );
         if (secondaryShadow) {

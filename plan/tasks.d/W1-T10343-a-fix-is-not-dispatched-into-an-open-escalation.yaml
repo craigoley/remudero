@@ -9,7 +9,7 @@
   band_meaning: span
   budget_usd: 10.00
   priority: 1  # requested by the operator session 2026-10-21, as the rung.strike half of the W1-T10339 measurement
-  status: queued
+  status: merged
   attempts: 0
   origin: "operator session 2026-10-21: PR-13218 stood down at rung.strike 28 times across five heads while each head's needs-human issue was open"
   plan_refs: [W1-T10339, W1-T10282, W1-T2799, W1-T3579, W1-T5908, W1-T4471, W1-T435, W1-T2752]

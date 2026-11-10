@@ -18,7 +18,7 @@
     - "AGENTS.md"
     - "doctrine/ci-and-merging/edit-relints-the-title.md"
     - "doctrine/merged-rules.json"
-  status: queued
+  status: merged
   priority: 2  # an unused suppression hides the next real hit on the same id, and the stale page tells every reader a retitle needs a re-run
   attempts: 0
   rationale: |
