@@ -28,7 +28,7 @@ type Change = { head?: string[] | null; main?: string[] | null };
  * A real origin and checkout. `base` seeds main; each path's `head` and `main` lines are the PR head's and main's own
  * edits (null deletes the path on that side). Both sides are pushed, so origin holds the dirty PR head and main.
  */
-function conflictRepo(t: TestContext, branch: string, base: Record<string, string[]>, changes: Record<string, Change>) {
+function dirtyPair(t: TestContext, branch: string, base: Record<string, string[]>, changes: Record<string, Change>) {
   const origin = gitRepo({ bare: true });
   const repo = gitRepo();
   t.after(() => { repo.cleanup(); origin.cleanup(); });
@@ -154,7 +154,7 @@ const unheld = (now = Date.now()): sweep.SessionOwnershipEvidence =>
 
 test("W1-T11170 criterion 1: a dirty review-replay-garden head on a fixture conflict gets one bounded round per head and main, and a contributor head stays blocked-ambiguous", async (t) => {
   const branch = "review-replay-garden-1793300871628";
-  const r = conflictRepo(t, branch, { [REPLAY_FIXTURE]: LINES }, { [REPLAY_FIXTURE]: redundantChange() });
+  const r = dirtyPair(t, branch, { [REPLAY_FIXTURE]: LINES }, { [REPLAY_FIXTURE]: redundantChange() });
   const h = harness(r.mainSha, { facts: fleetFacts, repo: { dir: r.repo.dir, git: r.git } });
   const pr = view(15551, branch, r.headSha, [REPLAY_FIXTURE]);
   await h.run(pr);
@@ -205,7 +205,7 @@ test("W1-T11170 criterion 1: the ownership predicates admit fleet heads and sess
 test("W1-T11170 criterion 2: the deterministic tier takes main's deletion and main's blob for a PR change already on main, pushes one merge commit and writes a row per path", async (t) => {
   const branch = "backlog-garden-1793547598484";
   const gone = "docs/retired-note.md";
-  const r = conflictRepo(t, branch, { [SHARD]: LINES, [gone]: LINES },
+  const r = dirtyPair(t, branch, { [SHARD]: LINES, [gone]: LINES },
     { [SHARD]: redundantChange(), [gone]: { head: LINES.map((l) => l === "l2" ? "l2-pr" : l), main: null } });
   const h = harness(r.mainSha, { facts: fleetFacts, repo: { dir: r.repo.dir, git: r.git } });
   await h.run(view(16044, branch, r.headSha, [SHARD, gone], { isPlanFiling: true }));
@@ -224,7 +224,7 @@ test("W1-T11170 criterion 2: the deterministic tier takes main's deletion and ma
 
 test("W1-T11170 criterion 2: a path no tier resolves aborts the whole merge and pushes nothing; a registry path is planned for its generator", async (t) => {
   const branch = "backlog-garden-1793547598485";
-  const r = conflictRepo(t, branch, { [SHARD]: LINES, "src/x.ts": LINES },
+  const r = dirtyPair(t, branch, { [SHARD]: LINES, "src/x.ts": LINES },
     { [SHARD]: redundantChange(), "src/x.ts": genuineChange() });
   const result = await withLiveWritesAllowed(() => sweep.regenerateConflictViaGit(r.repo.dir, join(r.repo.dir, "..", `res-${process.pid}-a`),
     { prNumber: 1, headRefName: branch, headSha: r.headSha }, r.mainSha, { git: r.git, mode: "owned", owned: { kind: "fleet" } }));
@@ -235,7 +235,7 @@ test("W1-T11170 criterion 2: a path no tier resolves aborts the whole merge and 
 
   // A REGENERABLE_ARTIFACT_GENERATORS path is planned for its generator (mode regenerate), whatever the host sandbox does.
   const artifact = Object.keys(sweep.REGENERABLE_ARTIFACT_GENERATORS)[0]!;
-  const g = conflictRepo(t, "backlog-garden-1793547598486", { [artifact]: LINES }, { [artifact]: genuineChange() });
+  const g = dirtyPair(t, "backlog-garden-1793547598486", { [artifact]: LINES }, { [artifact]: genuineChange() });
   const regenerated = await withLiveWritesAllowed(() => sweep.regenerateConflictViaGit(g.repo.dir, join(g.repo.dir, "..", `res-${process.pid}-b`),
     { prNumber: 2, headRefName: g.branch, headSha: g.headSha }, g.mainSha, { git: g.git, mode: "owned", owned: { kind: "fleet" } }));
   assert.deepEqual(regenerated.paths.map((p) => [p.path, p.mode, p.action]),
@@ -262,7 +262,7 @@ test("W1-T11170 criterion 2: prChangeAlreadyOnMain compares the PR's hunks to ma
 
 test("W1-T11170 criterion 3: an unresolved non-plan path goes to the merge-conflict fix mode, and after a failed round the judge decides, never a count", async (t) => {
   const branch = "review-replay-garden-1793300871629";
-  const r = conflictRepo(t, branch, { [REPLAY_FIXTURE]: LINES }, { [REPLAY_FIXTURE]: genuineChange() });
+  const r = dirtyPair(t, branch, { [REPLAY_FIXTURE]: LINES }, { [REPLAY_FIXTURE]: genuineChange() });
   const verdicts: Array<Awaited<ReturnType<NonNullable<sweep.SweepDeps["fixProgressJudge"]>>>> = [
     { verdict: "change-approach", approach: "union the fixture rows and re-sort", reason: "the first round kept one side" },
     { verdict: "continue", reason: "the round is converging" },
@@ -297,7 +297,7 @@ test("W1-T11170 criterion 3: an unresolved non-plan path goes to the merge-confl
 
 test("W1-T11170 criterion 3: an unresolved plan-scope path on a fleet plan filing goes to the plan-scoped round", async (t) => {
   const branch = "backlog-garden-1793547598490";
-  const r = conflictRepo(t, branch, { [SHARD]: LINES }, { [SHARD]: genuineChange() });
+  const r = dirtyPair(t, branch, { [SHARD]: LINES }, { [SHARD]: genuineChange() });
   const h = harness(r.mainSha, { facts: fleetFacts, repo: { dir: r.repo.dir, git: r.git } });
   await h.run(view(16045, branch, r.headSha, [SHARD], { isPlanFiling: true }));
   assert.equal(h.rows("sweep.conflict_regenerated")[0]?.outcome, "fell-through", "the deterministic tier ran first");
@@ -308,7 +308,7 @@ test("W1-T11170 criterion 3: an unresolved plan-scope path on a fleet plan filin
 
 test("W1-T11170 criterion 4: a run-unfiled branch nobody holds gets the round; a held one keeps today's row, judged on its own cadence", async (t) => {
   const branch = "run-unfiled-1793649420000";
-  const r = conflictRepo(t, branch, { [SHARD]: LINES }, { [SHARD]: redundantChange() });
+  const r = dirtyPair(t, branch, { [SHARD]: LINES }, { [SHARD]: redundantChange() });
   const now = Date.now();
   const h = harness(r.mainSha, { facts: operatorFacts, repo: { dir: r.repo.dir, git: r.git }, ownership: () => unheld(now) });
   await h.run(view(16236, branch, r.headSha, [SHARD], { isPlanFiling: true }));
@@ -339,7 +339,7 @@ test("W1-T11170 criterion 4: a run-unfiled branch nobody holds gets the round; a
 
 test("W1-T11170 criterion 4: an unreadable or contradictory ownership read escalates once per PR and head and writes nothing", async (t) => {
   const branch = "run-unfiled-1793649420001";
-  const r = conflictRepo(t, branch, { [SHARD]: LINES }, { [SHARD]: redundantChange() });
+  const r = dirtyPair(t, branch, { [SHARD]: LINES }, { [SHARD]: redundantChange() });
   const now = Date.now();
   const cases: Array<[string, () => sweep.SessionOwnershipEvidence]> = [
     ["pushes unreadable", () => ({ nowMs: now, claims: [], session: {} })],
@@ -388,7 +388,7 @@ test("W1-T11170 criterion 4: sessionBranchUnheld reads each claim on its own ren
 
 test("W1-T11170 criterion 5: a session branch takes only a merge commit on its head, pushed with no force flag, then one comment naming main, each path and the ownership reads", async (t) => {
   const branch = "run-unfiled-1793649420002";
-  const r = conflictRepo(t, branch, { [SHARD]: LINES }, { [SHARD]: redundantChange() });
+  const r = dirtyPair(t, branch, { [SHARD]: LINES }, { [SHARD]: redundantChange() });
   const now = Date.now();
   let reads = 0;
   const h = harness(r.mainSha, { facts: operatorFacts, repo: { dir: r.repo.dir, git: r.git },
@@ -413,7 +413,7 @@ test("W1-T11170 criterion 5: a session branch takes only a merge commit on its h
 
 test("W1-T11170 criterion 5: an owner who pushes before the session write wins, a re-read that finds the branch held stops the push, and a worker round lands as a merge commit", async (t) => {
   const branch = "run-unfiled-1793649420003";
-  const r = conflictRepo(t, branch, { [SHARD]: LINES }, { [SHARD]: redundantChange() });
+  const r = dirtyPair(t, branch, { [SHARD]: LINES }, { [SHARD]: redundantChange() });
   // The owner pushes between the ls-remote re-check and the push: the plain push is refused, never forced over.
   const ownerSha = await (async () => {
     const result = await withLiveWritesAllowed(() => sweep.regenerateConflictViaGit(r.repo.dir, join(r.repo.dir, "..", `res-${process.pid}-d`),
@@ -432,7 +432,7 @@ test("W1-T11170 criterion 5: an owner who pushes before the session write wins, 
   assert.equal(r.remoteHead(), ownerSha, "the owner's push stands");
   assert.ok(r.pushes.flat().every((arg) => !arg.startsWith("--force")));
 
-  const s = conflictRepo(t, "run-unfiled-1793649420004", { [SHARD]: LINES }, { [SHARD]: redundantChange() });
+  const s = dirtyPair(t, "run-unfiled-1793649420004", { [SHARD]: LINES }, { [SHARD]: redundantChange() });
   const stopped = await withLiveWritesAllowed(() => sweep.regenerateConflictViaGit(s.repo.dir, join(s.repo.dir, "..", `res-${process.pid}-e`),
     { prNumber: 4, headRefName: s.branch, headSha: s.headSha }, s.mainSha,
     { git: s.git, mode: "owned", owned: { kind: "session", recheck: () => "held: a push landed" } }));
@@ -442,7 +442,7 @@ test("W1-T11170 criterion 5: an owner who pushes before the session write wins, 
 
   // An unresolved path on a session branch goes to a worker round told to land a merge commit with no force flag,
   // and the round is followed by the comment.
-  const w = conflictRepo(t, "run-unfiled-1793649420005", { "src/x.ts": LINES }, { "src/x.ts": genuineChange() });
+  const w = dirtyPair(t, "run-unfiled-1793649420005", { "src/x.ts": LINES }, { "src/x.ts": genuineChange() });
   const now = Date.now();
   const h = harness(w.mainSha, { facts: operatorFacts, repo: { dir: w.repo.dir, git: w.git }, ownership: () => unheld(now) });
   await h.run(view(16238, w.branch, w.headSha, ["src/x.ts"]));
@@ -457,7 +457,7 @@ test("W1-T11170 criterion 5: an owner who pushes before the session write wins, 
 });
 
 test("W1-T11170 criterion 4: production's ownership reader reads the claim chain, the locks and the branch's push times from a real repo", async (t) => {
-  const r = conflictRepo(t, "run-unfiled-1793649420006", { [SHARD]: LINES }, { [SHARD]: redundantChange() });
+  const r = dirtyPair(t, "run-unfiled-1793649420006", { [SHARD]: LINES }, { [SHARD]: redundantChange() });
   const at = (iso: string) => ({ ...process.env, GIT_COMMITTER_DATE: iso, GIT_AUTHOR_DATE: iso,
     GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t", GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t" });
   const raw = (args: string[], iso = "2026-11-03T00:00:00Z") =>
@@ -506,7 +506,7 @@ test("W1-T11170 criterion 4: production's ownership reader reads the claim chain
   assert.match(sweep.sessionBranchUnheld(failed).reason, /ls-remote refused/);
 
   // With fewer than three pushes the operator's p90 gap over the trailing window's session branches is read.
-  const few = conflictRepo(t, "run-unfiled-1793649420007", { [SHARD]: LINES }, { [SHARD]: redundantChange() });
+  const few = dirtyPair(t, "run-unfiled-1793649420007", { [SHARD]: LINES }, { [SHARD]: redundantChange() });
   const sparse = await sweep.readSessionOwnershipViaGit(few.repo.dir, { headRefName: few.branch },
     { nowMs: Date.now(), fixClaimKey: "k", readLock: () => undefined });
   assert.deepEqual(sparse.claims, []);
@@ -534,7 +534,7 @@ test("W1-T11170 criterion 5: the production effects wire the ownership reader, t
   assert.throws(() => effects.postConflictComment!(pr, "body"), /live|write|guard/i, "a comment is a guarded live write");
 
   // The session write through the default push path (no injected git).
-  const s = conflictRepo(t, "run-unfiled-1793649420009", { [SHARD]: LINES }, { [SHARD]: redundantChange() });
+  const s = dirtyPair(t, "run-unfiled-1793649420009", { [SHARD]: LINES }, { [SHARD]: redundantChange() });
   const pushed = await withLiveWritesAllowed(() => sweep.regenerateConflictViaGit(s.repo.dir, join(s.repo.dir, "..", `res-${process.pid}-f`),
     { prNumber: 5, headRefName: s.branch, headSha: s.headSha }, s.mainSha, { mode: "owned", owned: { kind: "session" } }));
   assert.equal(pushed.outcome, "pushed", String(pushed.reason));
@@ -542,7 +542,7 @@ test("W1-T11170 criterion 5: the production effects wire the ownership reader, t
 });
 
 test("W1-T11170 criterion 5: a throwing ownership re-read or a write that is not a merge commit pushes nothing, and a failed comment never stops the pass", async (t) => {
-  const s = conflictRepo(t, "run-unfiled-1793649420010", { [SHARD]: LINES }, { [SHARD]: redundantChange() });
+  const s = dirtyPair(t, "run-unfiled-1793649420010", { [SHARD]: LINES }, { [SHARD]: redundantChange() });
   const threw = await withLiveWritesAllowed(() => sweep.regenerateConflictViaGit(s.repo.dir, join(s.repo.dir, "..", `res-${process.pid}-g`),
     { prNumber: 6, headRefName: s.branch, headSha: s.headSha }, s.mainSha,
     { git: s.git, mode: "owned", owned: { kind: "session", recheck: () => { throw new Error("lock directory unreadable"); } } }));
@@ -562,13 +562,13 @@ test("W1-T11170 criterion 5: a throwing ownership re-read or a write that is not
 
   // A comment writer that throws is logged; the deterministic write and the worker round still stand.
   const logged: string[] = [];
-  const d = conflictRepo(t, "backlog-garden-1793547598491", { [SHARD]: LINES, "src/x.ts": LINES }, { [SHARD]: redundantChange() });
+  const d = dirtyPair(t, "backlog-garden-1793547598491", { [SHARD]: LINES, "src/x.ts": LINES }, { [SHARD]: redundantChange() });
   const h = harness(d.mainSha, { facts: fleetFacts, repo: { dir: d.repo.dir, git: d.git } });
   h.deps.postConflictComment = () => { throw new Error("gh refused"); };
   h.deps.log = (step) => { logged.push(step); };
   await h.run(view(16400, d.branch, d.headSha, [SHARD], { isPlanFiling: true }));
   assert.equal(h.rows("sweep.conflict_regenerated")[0]?.outcome, "pushed");
-  const w = conflictRepo(t, "review-replay-garden-1793300871630", { "src/x.ts": LINES }, { "src/x.ts": genuineChange() });
+  const w = dirtyPair(t, "review-replay-garden-1793300871630", { "src/x.ts": LINES }, { "src/x.ts": genuineChange() });
   const k = harness(w.mainSha, { facts: fleetFacts, repo: { dir: w.repo.dir, git: w.git } });
   k.deps.postConflictComment = () => { throw new Error("gh refused"); };
   k.deps.log = (step) => { logged.push(step); };
