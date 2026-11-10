@@ -455,3 +455,88 @@ test("W1-T11170 criterion 5: an owner who pushes before the session write wins, 
   assert.match(h.calls.comments[0]!, /src\/x\.ts`: resolved by the merge-conflict fix mode worker/);
   assert.deepEqual(w.pushes, [], "the sweep itself pushed nothing for the worker round");
 });
+
+test("W1-T11170 criterion 4: production's ownership reader reads the claim chain, the locks and the branch's push times from a real repo", async (t) => {
+  const r = conflictRepo(t, "run-unfiled-1793649420006", { [SHARD]: LINES }, { [SHARD]: redundantChange() });
+  const at = (iso: string) => ({ ...process.env, GIT_COMMITTER_DATE: iso, GIT_AUTHOR_DATE: iso,
+    GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t", GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t" });
+  const raw = (args: string[], iso = "2026-11-03T00:00:00Z") =>
+    execFileSync("git", ["-C", r.repo.dir, ...args], { encoding: "utf8", env: at(iso) }).trim();
+  // A claim minted and renewed once, ten minutes apart, on refs/rmd-dispatch/W1-T90009.
+  const tree = raw(["hash-object", "-t", "tree", "/dev/null"]);
+  const anchor = raw(["commit-tree", tree, "-m", "rmd-dispatch claim 4242@host-a 2026-11-03T00:00:00.000Z"]);
+  const renewed = raw(["commit-tree", tree, "-p", anchor, "-m",
+    "rmd-dispatch claim 4242@host-a 2026-11-03T00:00:00.000Z\nrenewed 4242@host-a 2026-11-03T00:10:00.000Z"]);
+  raw(["push", "-q", "origin", `${renewed}:refs/rmd-dispatch/W1-T90009`]);
+  // Three more pushes an hour apart on the session branch.
+  raw(["checkout", "-q", r.branch]);
+  for (const [i, iso] of ["2026-11-03T01:00:00Z", "2026-11-03T02:00:00Z", "2026-11-03T03:00:00Z"].entries()) {
+    writeFileSync(join(r.repo.dir, `push-${i}.txt`), `${i}\n`);
+    raw(["add", `push-${i}.txt`], iso);
+    raw(["commit", "-qm", `chore(test): push ${i}`], iso);
+  }
+  raw(["push", "-q", "origin", `HEAD:refs/heads/${r.branch}`]);
+  const now = Date.now();
+  const evidence = await sweep.readSessionOwnershipViaGit(r.repo.dir,
+    { headRefName: r.branch, taskId: undefined, body: "hand work\n\nRemudero-Task: W1-T90009\n" },
+    { nowMs: now, fixClaimKey: "fix-branch--x", readLock: (key) => key === "fix-branch--x" ? "OPERATOR-W1-SOURCE1-1" : undefined });
+  assert.deepEqual(evidence.claims, [{ ref: "refs/rmd-dispatch/W1-T90009",
+    renewalsMs: [Date.parse("2026-11-03T00:00:00.000Z"), Date.parse("2026-11-03T00:10:00.000Z")] }]);
+  assert.deepEqual(evidence.session, { operatorRunId: "OPERATOR-W1-SOURCE1-1", fixClaimKey: "fix-branch--x" });
+  assert.equal(evidence.pushesMs?.length, 4, "the head commit and three hourly pushes");
+  for (const iso of ["2026-11-03T01:00:00Z", "2026-11-03T02:00:00Z", "2026-11-03T03:00:00Z"]) {
+    assert.ok(evidence.pushesMs!.includes(Date.parse(iso)), `the committer time ${iso} is a push time`);
+  }
+  assert.equal(evidence.unreadable, undefined);
+  const verdict = sweep.sessionBranchUnheld(evidence);
+  assert.equal(verdict.verdict, "ambiguous", "a stale claim beside a live OPERATOR- run");
+
+  // Each read that fails is absent, with its reason, and the verdict is ambiguous.
+  const failed = await sweep.readSessionOwnershipViaGit(r.repo.dir,
+    { headRefName: "run-unfiled-0000000000000", taskId: "W1-T90009" },
+    { nowMs: now, fixClaimKey: "k", readLock: () => { throw new Error("lock dir unreadable"); },
+      git: (_cwd, args) => {
+        if (args[0] === "ls-remote") throw new Error("ls-remote refused");
+        return execFileSync("git", ["-C", r.repo.dir, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+      } });
+  assert.equal(failed.claims, undefined);
+  assert.equal(failed.session, undefined);
+  assert.equal(failed.pushesMs, undefined, "a branch the remote does not have");
+  assert.deepEqual(failed.unreadable?.map((reason) => reason.split(":")[0]), ["claim", "session", "pushes"]);
+  assert.match(sweep.sessionBranchUnheld(failed).reason, /ls-remote refused/);
+
+  // With fewer than three pushes the operator's p90 gap over the trailing window's session branches is read.
+  const few = conflictRepo(t, "run-unfiled-1793649420007", { [SHARD]: LINES }, { [SHARD]: redundantChange() });
+  const sparse = await sweep.readSessionOwnershipViaGit(few.repo.dir, { headRefName: few.branch },
+    { nowMs: Date.now(), fixClaimKey: "k", readLock: () => undefined });
+  assert.deepEqual(sparse.claims, []);
+  assert.deepEqual(sparse.session, {});
+  assert.equal(sparse.pushesMs?.length, 1);
+});
+
+test("W1-T11170 criterion 5: the production effects wire the ownership reader, the session facts and the comment writer, and a session push needs no injected git", async (t) => {
+  const root = gitRepo({ seedCommit: false }).dir;
+  const effects = sweep.buildSweepEffects({
+    owner: "example", repo: "fixture", config: { root, operatorGithubLogins: [OPERATOR] } as never, repoRoot: root,
+    ledgerPath: join(root, "ledger.ndjson"), runId: "RUN-owned-effects", plan: { tasks: [], byId: new Map() } as never, log: () => {},
+    fixBranchClaimKeyImpl: (_owner: string, _repo: string, branch: string) => `fix-branch--${branch}`,
+    ghJsonImpl: () => ({ user: { login: "CAO825" }, title: "plan: hand filing", head: { sha: "a".repeat(40), ref: "run-unfiled-1",
+      repo: { full_name: "Example/Fixture" } } }),
+  } as never);
+  const pr = view(16300, "run-unfiled-1793649420008", "a".repeat(40), [SHARD]);
+  const facts = await effects.readPlanRepairFacts!(pr);
+  assert.equal(facts.operatorAuthor, true, "the configured operator login, case-folded");
+  assert.equal(facts.headRepoFork, false, "the head lives in this repository");
+  const evidence = await effects.readConflictOwnership!(pr);
+  assert.deepEqual(evidence.claims, [], "no task id names a claim");
+  assert.deepEqual(evidence.session, {}, "no lock in an empty inflight directory");
+  assert.equal(sweep.sessionBranchUnheld(evidence).verdict, "ambiguous", "the branch cannot be fetched from a checkout that is absent");
+  assert.throws(() => effects.postConflictComment!(pr, "body"), /live|write|guard/i, "a comment is a guarded live write");
+
+  // The session write through the default push path (no injected git).
+  const s = conflictRepo(t, "run-unfiled-1793649420009", { [SHARD]: LINES }, { [SHARD]: redundantChange() });
+  const pushed = await withLiveWritesAllowed(() => sweep.regenerateConflictViaGit(s.repo.dir, join(s.repo.dir, "..", `res-${process.pid}-f`),
+    { prNumber: 5, headRefName: s.branch, headSha: s.headSha }, s.mainSha, { mode: "owned", owned: { kind: "session" } }));
+  assert.equal(pushed.outcome, "pushed", String(pushed.reason));
+  assert.deepEqual(s.origin.git("rev-list", "--parents", "-1", s.remoteHead()).split(" "), [s.remoteHead(), s.headSha, s.mainSha]);
+});

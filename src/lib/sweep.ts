@@ -2300,8 +2300,9 @@ export async function readSessionOwnershipViaGit(
       if (!holder) continue;
       await run(["fetch", "--quiet", "--no-write-fetch-head", "origin", ref]);
       const log = await run(["log", "--format=%B", holder]);
-      const times = [...log.matchAll(/^(?:rmd-dispatch claim \d+@\S+|renewed \d+@\S+) (\S+)$/gm)]
-        .map((m) => Date.parse(m[1]!)).filter(Number.isFinite);
+      // Each renewal commit repeats the anchor's mint line above its own `renewed` line: one time per instant.
+      const times = [...new Set([...log.matchAll(/^(?:rmd-dispatch claim \d+@\S+|renewed \d+@\S+) (\S+)$/gm)]
+        .map((m) => Date.parse(m[1]!)).filter(Number.isFinite))].sort((a, b) => a - b);
       claims.push({ ref, renewalsMs: times });
     }
     evidence.claims = claims;
