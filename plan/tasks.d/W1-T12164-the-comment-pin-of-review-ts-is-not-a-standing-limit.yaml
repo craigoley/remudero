@@ -1,0 +1,48 @@
+- id: W1-T12164
+  title: "The comment pin of src/lib/review.ts limits only the pull request that added it"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: low # one test file; no production code changes
+  origin: operator-session#follow-ups-2026-11-10
+  plan_refs:
+    - W1-T10852
+    - W1-T10821
+    - W1-T11312
+  files:
+    - test/review/compress-src-lib-review-ts.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "On a pull request that does not add the pin, a change that adds comment lines and comment bytes to src/lib/review.ts passes the pin"
+      proof: "grep: W1-T12164 criterion 1 in test/review/compress-src-lib-review-ts.test.ts"
+    - claim: "On the pull request that adds the pin, the pin still requires fewer comment lines and fewer comment bytes than the base, and the same executable tokens"
+      proof: "grep: W1-T12164 criterion 2 in test/review/compress-src-lib-review-ts.test.ts"
+    - claim: "The checks that tell a comment from a string, a regular expression and a template stay in the pin"
+      proof: "grep: W1-T12164 criterion 3 in test/review/compress-src-lib-review-ts.test.ts"
+  rationale: |
+    MEASURED 2026-11-10 on main: src/lib/review.ts holds 319,710 comment bytes, and its pin fails at 319,723. The headroom is 12 bytes.
+    - test/review/compress-src-lib-review-ts.test.ts asserts `commentLines < 3222` and `commentBytes < 319723` on every run, outside the comparison with the pull request base.
+    - Any task that adds one comment line to that file fails the pin. W1-T11928 removed every comment it had added.
+    - The task that added the pin, W1-T10852, says in its rationale: "This is maintenance debt, never a merge ceiling" and "Do not invent a new hard comment ceiling". The test's own comment says the numbers are "comparison evidence for this edit, not a new comment-volume ceiling".
+    - test/helpers/compression-pin.ts states the intended shape: the pin compares with the base only on the pull request that adds it, and does nothing afterwards.
+    - 26 of the 38 compression pins already have that shape. This pin and 11 others keep a fixed number.
+  design: |
+    Move the two fixed assertions into the block that runs only when `compressionPinBase` returns a base, and compare bytes with the base as the lines are compared.
+    To prove criterion 1 and criterion 2 without git, put the comparison in a function that takes the current source and the base source. The new cases call it with small sources.
+    NOT IN SCOPE: a new compression of the file, and the 11 other pins with a fixed number. They are listed in the note.
+  falsifier: |
+    Restore a fixed number outside the base comparison and criterion 1 must fail. Remove the comparison with the base and criterion 2 must fail. Restore and require all three to pass.
+  note: |
+    The other pins with a fixed number of comment bytes, by grep at main 7fbfd3ae8:
+    test/infra/compress-src-lib-tick-read-worker-ts.test.ts, test/inbox/compress-src-lib-escalate-ts.test.ts,
+    test/memory/compress-src-lib-host-memory-shadow-ts.test.ts, test/plan/compress-src-lib-task-linter-ts.test.ts,
+    test/deploy/compress-src-lib-doctor-ts.test.ts, test/deploy/compress-src-lib-report-commands-ts.test.ts,
+    test/dispatch/compress-src-lib-drain-ts.test.ts, test/daemon/compress-src-lib-measurement-cadence-ts.test.ts,
+    test/console-api/compress-src-lib-panel-graph-ts.test.ts, test/console-api/serve/compress-src-lib-serve-ts.test.ts,
+    test/worker/spawn/compress-src-lib-worker-provider-ts.test.ts.
+    Their headroom was not measured. A comment gardener can still file a compression of any file; that is a task, not a limit on a merge.
