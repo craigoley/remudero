@@ -19,9 +19,9 @@
   attempts: 0
   acceptance:
     - claim: "pr-owner reports FREE, naming the recovery_id, only when the newest fix.dispatch for the PR has one distinct, fully matching released receipt stamped later than the dispatch; every held receipt for that exact dispatch, regardless of authorization_id, is strictly older than the release, and no later or equal held row, second distinct released receipt, live fix branch claim or active sweep disposition exists"
-      proof: "unit test: W1-T12115 criterion 1: pr-owner is free only after one later matching release"
+      proof: "unit test: W1-T12115 later matching release clears owner"
     - claim: "a fix.dispatch stamped after the release, a receipt for another run, round, task, head or PR, a held-only receipt, a held receipt stamped at or after the release, a receipt stamped at or before its dispatch, a future-stamped receipt, two distinct released receipts for one exact dispatch, even if their authorization_ids differ, an ambiguous same-timestamp hold/release, or an unparseable receipt row keeps the verdict OWNED or UNKNOWN; older held receipts for that dispatch, under any authorization_id, are superseded only by one later matching release. A released receipt never hides a live branch claim or an active sweep disposition; the same holds on a plan-only PR fixture"
-      proof: "unit test: W1-T12115 criterion 2: conflicting or ambiguous receipts keep ownership held or unknown"
+      proof: "unit test: W1-T12115 conflicting receipts hold owner"
     - claim: "the ledger projection carries the matching receipt row into the verdict"
       proof: "grep: STALE_FIX_DISPATCH_RECEIPT_STEP in src/lib/pr-owner-ledger.ts"
   rationale: |
