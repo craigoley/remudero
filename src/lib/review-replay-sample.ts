@@ -22,7 +22,9 @@ export interface ReviewReplayRow {
 }
 export interface ReviewReplaySample {
   header: { format: "review-replay-v1"; window: { from: string; through: string };
-    generator_revision: string; classes: ReviewOutcomeClass[]; digest: string; legacy_unattributed?: number };
+    generator_revision: string; classes: ReviewOutcomeClass[]; digest: string; legacy_unattributed?: number;
+    /** Recorded inputs whose reviewer code sha the recorder wrote as null: counted, never replayed. */
+    recorded_unattributed?: number };
   rows: ReviewReplayRow[];
 }
 const classes = (rows: readonly ReviewReplayRow[]): ReviewOutcomeClass[] => [...new Set(rows.map(r => r.recorded_class))].sort();
@@ -64,6 +66,10 @@ function validateSample(sample: ReviewReplaySample): void {
   if (sample.header.legacy_unattributed !== undefined &&
       (!Number.isSafeInteger(sample.header.legacy_unattributed) || sample.header.legacy_unattributed < 0)) {
     throw new Error("invalid unattributed legacy count");
+  }
+  if (sample.header.recorded_unattributed !== undefined &&
+      (!Number.isSafeInteger(sample.header.recorded_unattributed) || sample.header.recorded_unattributed < 0)) {
+    throw new Error("invalid unattributed recorded count");
   }
   if (sample.rows.length === 0) throw new Error("empty review replay sample");
   for (const row of sample.rows) checkedRow(row);
@@ -149,9 +155,19 @@ export function deriveReviewReplaySample(ledger: readonly Record<string, unknown
   const distinct = new Map<string, ReviewReplayRow>();
   const observed: ReviewReplayRow[] = [];
   let legacyUnattributed = 0;
+  let recordedUnattributed = 0;
   for (const raw of ledger) {
     let row: ReviewReplayRow | undefined;
-    if (raw.step === "review.replay_input") row = checkedRow(raw);
+    if (raw.step === "review.replay_input") {
+      // W1-T12026: the recorder writes an explicit null when it could not name the reviewer's code (review.ts
+      // recordSetupReplay). That is an honest "unknown", not a malformed row: one from 2026-11-03 failed every
+      // review-replay gardener pass. It is counted and left out; a row with the field absent still refuses.
+      if (raw.reviewer_code_sha === null) {
+        recordedUnattributed++;
+        continue;
+      }
+      row = checkedRow(raw);
+    }
     else if (typeof raw.run_id === "string" && !recordedRuns.has(raw.run_id)) {
       const legacy = legacyRow(raw, byRun.get(raw.run_id) ?? []);
       if (legacy && "unattributed" in legacy) {
@@ -176,7 +192,8 @@ export function deriveReviewReplaySample(ledger: readonly Record<string, unknown
   const sample: ReviewReplaySample = { header: { format: "review-replay-v1",
     window: { from: options.since ?? times[0]!, through: times.at(-1)! }, generator_revision: options.generatorRevision,
     classes: classes(observed), digest: digest(rows),
-    ...(legacyUnattributed > 0 ? { legacy_unattributed: legacyUnattributed } : {}) }, rows };
+    ...(legacyUnattributed > 0 ? { legacy_unattributed: legacyUnattributed } : {}),
+    ...(recordedUnattributed > 0 ? { recorded_unattributed: recordedUnattributed } : {}) }, rows };
   validateSample(sample);
   return sample;
 }
