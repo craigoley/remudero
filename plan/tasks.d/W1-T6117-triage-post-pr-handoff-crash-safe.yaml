@@ -31,7 +31,7 @@
     - claim: "one process-interruption integration test spanning auto-triage and the run-task triage entry point proves that, after remote PR creation and holder death, two concurrent restarts yield exactly one local-lock recovery, record pr.opened and run.awaiting_external idempotently, open no second PR, and retain the remote claim while CI is pending"
       proof: "unit test: post-create crash recovery retains the triage claim"
     - claim: "a PR-create receipt written before ownership verification is selected by the daemon's post-boot ledger fallback, keyed to the exact feedback id, and passed to the live-state check; the normal verified pr.opened receipt remains distinct"
-      proof: "unit test: the daemon's open-PR fallback sees a just-created triage PR before ownership verification"
+      proof: "unit test: post-create ledger candidates reach the daemon live-state check"
   risk: high
   origin: feedback#fb-1789365327024-d9c74b
   plan_refs: ["§7B", "W1-T147"]
