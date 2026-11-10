@@ -1,0 +1,39 @@
+- id: W1-T12043
+  title: "One command measures how hard each kind of text is to read"
+  repo: remudero
+  depends_on: [W1-T12038]
+  priority: 1.4
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # sized high only for the plan lint's sizing rule: one new script and its npm entry; it reads files, prints, and fails nothing
+  band_meaning: blast-radius
+  origin: operator-session#plain-language-2026-11-10
+  plan_refs:
+    - W1-T2279
+  files:
+    - scripts/prose-load.mjs
+    - package.json
+    - test/ci/prose-load-reports-each-kind-of-text.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "The command reports, for each kind of text, the share of sentences over 25 words, the words in capitals and the glossary words not to use, with the ten worst files"
+      proof: "grep: W1-T12043 criterion 1 in test/ci/prose-load-reports-each-kind-of-text.test.ts"
+    - claim: "The kinds are agent rules, documents, code comments, task titles, commit subjects, and the strings of escalations and command help; machine-read tokens are not counted as words"
+      proof: "grep: W1-T12043 criterion 2 in test/ci/prose-load-reports-each-kind-of-text.test.ts"
+    - claim: "The command exits 0 whatever it measures, and prints one JSON line a gardener can read"
+      proof: "grep: W1-T12043 criterion 3 in test/ci/prose-load-reports-each-kind-of-text.test.ts"
+  rationale: |
+    MEASURED 2026-11-10 on main at 2c6e743199, by a one-off script: 38% of sentences in docs/operator-guide.md are longer than 25 words; the comments of the ten largest files in src/lib hold 10,360 words in capitals; 72% of task titles are longer than 30 words.
+    - Nothing in the repo measures this today. `npm run comment-load` measures the volume of comments, not how they read.
+    - Without a repeatable measurement, nobody can tell whether the text is getting easier to read, and a gardener has nothing to rank.
+  design: |
+    scripts/prose-load.mjs reads the kinds of text from the working tree and from `git log`, splits sentences the way the one-off script did (a list item is one unit, inline code is one word), and reads the words not to use from docs/glossary.md. It prints a table for a person and one JSON line for a program. `npm run prose-load` runs it.
+    It is a measurement, never a gate: docs/operator-message-standard.md forbids a readability gate, and the operator ruled on 2026-10-24 that excess prose creates work and does not block a merge.
+    NOT IN SCOPE: a CI step, a ratchet, and any rewrite.
+  falsifier: |
+    Drop one of the three measurements and criterion 1 must fail. Count a task id or a file path as a word, or leave out one kind of text, and criterion 2 must fail. Exit non-zero on a bad score and criterion 3 must fail. Restore and require all three to pass.
+  note: |
+    The numbers in the writing standard were made with the one-off version of this script.

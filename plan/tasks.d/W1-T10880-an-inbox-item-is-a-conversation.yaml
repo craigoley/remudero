@@ -34,7 +34,7 @@
   plan_refs: ["§7B"]
   files: [src/lib/panel-graph.ts, test/an-inbox-item-is-a-conversation.test.ts]
   priority: 3
-  status: queued
+  status: merged
   # backlog gardener: band=3 evidence=04cb5fbfdf51f85b
   # backlog gardener: placed=2026-10-27T22:59:28.067Z
   attempts: 0

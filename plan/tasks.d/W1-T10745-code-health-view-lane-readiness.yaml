@@ -8,7 +8,7 @@
   risk: high
   band_meaning: span
   origin: "Approved cockpit delivery; authenticated runtime readiness and isolated production-lane reproduction 2026-10-26"
-  status: queued
+  status: merged
   attempts: 0
   priority: 2
   budget_usd: 16

@@ -26,6 +26,7 @@
     - test/console-api/console-feedback-intake.test.ts
     - test/fixtures/console-feedback-replays.json
     - test/feedback-docket.test.ts
+    - test/feedback-docket-union-corpus.test.ts
     - test/triage.test.ts
   status: queued
   attempts: 0
@@ -42,6 +43,8 @@
     console-read-model, with inbox-operator as runner-up), so new tests use that computed folder.
     Existing runtime integration suites already import run-task and prove weekly publication;
     extend those suites without adding a new direct run-task test importer.
+    Settled by lookup: does any open task already own test/feedback-docket-union-corpus.test.ts? -> no; its only owner W1-T1273 is merged (plan/tasks.d/W1-T1273-the-docket-rung-reads-a-sliver-once-a-week.yaml)
+    Settled by lookup: why must this census test change? -> its empty-window test deep-equals counts_by_source over exactly the five current DocketSource surfaces (test/feedback-docket-union-corpus.test.ts, src/lib/feedback-docket.ts DocketSource); the new console_correction source correctly adds a sixth zero-count surface, so update only that assertion to name all six (author preflight)
   design: |
     Add a closed, explicitly chosen wording-correction kind to the existing conversation feedback
     path, advertised only when this native contract is served. Verify repository, native issue,

@@ -9,7 +9,7 @@
   risk: high  # Rule 19: one concern, the state a restored boundary checkpoint leaves a run in (its base, its install, its abandonment and its kept head); no breaker bound, proof verdict, push path or receipt fold changes
   band_meaning: span
   priority: 1
-  status: queued
+  status: merged
   attempts: 0
   origin: "filing agent 2026-10-26: CONSOLE-T127-1793040579425 failed at pr_open.refused 74 min after the operator released its breaker, on a checkpoint restored onto its own 10-14 base"
   plan_refs: [W1-T7806, W1-T7747, W1-T7837, W1-T8503, W1-T8535, W1-T8676, W1-T9786, W1-T9815, W1-T10742, W1-T10749, W1-T9482, CONSOLE-T127]
