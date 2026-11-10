@@ -145,7 +145,7 @@ import {
   OPS_CATALOG_OUTCOMES, readOpsCatalogSnapshotAsync, type OpsCatalogApi, type OpsCatalogOutcome, type OpsCatalogShadowInput,
   type OpsCatalogTarget,
 } from "./ops-catalog-source.js";
-import { GhJsonUnreadableResponseError, takeGhReadCadenceTally, type GhReadCadenceTally } from "./github-transport.js";
+import { GhJsonUnreadableResponseError, takeGhPaceLoopWaits, takeGhReadCadenceTally, type GhReadCadenceTally } from "./github-transport.js";
 // Type-only: retro.ts owns this shape, so the two hooks below never re-declare it (W1-T160).
 import type { RetroTriggerDecision } from "./retro.js";
 // Type-only, keeping this module free of a runtime dependency on worker-containment.ts.
@@ -4154,6 +4154,12 @@ export function runLanePool<T extends { id: string }, R>(
   });
 }
 
+/** W1-T12057: appends one `github.pace.loop_wait` row for each wait the gh pacer or the read cadence
+ *  slept on this loop since the previous tick. The transport's buffer is empty afterwards. */
+export function drainGhPaceLoopWaits(log: (step: string, extra?: Record<string, unknown>) => void): void {
+  for (const { step, ...row } of takeGhPaceLoopWaits()) log(step, row);
+}
+
 export async function runDaemon(
   plan: Plan,
   deps: DaemonDeps,
@@ -7128,6 +7134,9 @@ export async function runDaemon(
         consecutiveUnreadable = 0;
       }
     }
+
+    // W1-T12057: every tick appends the waits slept on this loop, so the buffer never outlives a tick.
+    drainGhPaceLoopWaits(log);
 
     // Quota, beside the headroom block above on the same tick, never a new cadence. Both buckets are read
     // together and recorded independently every tick a read succeeds, so an exhaustion of either is

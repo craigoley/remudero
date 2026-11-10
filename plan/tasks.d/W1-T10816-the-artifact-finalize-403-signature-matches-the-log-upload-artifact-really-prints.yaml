@@ -9,7 +9,7 @@
   risk: high  # Rule 19: one concern, one anchor in one classifier entry. A too-wide anchor re-runs a real failure, so every fail-closed shape W1-T3194 and W1-T9932 pinned must still return undefined
   band_meaning: blast-radius
   priority: 1  # the shipped re-run for a proven artifact-service 403 is dead on both surfaces: a PR's red costs a fix round, and main health opens a manual incident (the W1-T3194 incident hit main's Scorecard run)
-  status: queued
+  status: merged
   attempts: 0
   origin: "investigator V62, 2026-10-27, re-verifying a 2026-10-17 lead from agent B50 (#12637 / W1-T9932) at origin/main ab1bf6914"
   plan_refs: [W1-T3194, W1-T9932, W1-T10379, W1-T8038]

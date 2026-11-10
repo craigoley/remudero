@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   dispatch_hold: true
   principles:
     tdd: strict
@@ -41,3 +41,16 @@
       proof: "unit test: the consumed stream uses the default durable observer"
   falsifier: Count a duplicate result twice, bridge an unknown gap, merge two streams, or treat successful repeated checks as an error loop; each isolated change must fail a deterministic fixture. Independently disclose a sentinel argument/output to prove the summary redaction test fails. Restore all source; no live stuck rate or savings is claimed.
   note: Operator requested research, plan updates and task filing, not immediate product execution or paid experiments. Normal risk judgment, native capacity, source ownership, proof, review and merge gates remain. No installed Omnigent dependency, new scheduler, automatic guard change, model promotion or live capability proof is authorized by this record. This record is planning custody, not evidence of implementation or benefit. Because this amendment changes pinned task fields, it is parked for human review without a risk ruling; the explicit dispatch hold remains until a fresh native machine-filing ruling lands and a separate reviewed plan edit removes it.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.68
+    reasons:
+      - "The filed record describes an observation-only change confined to one source file, `src/lib/worker-tool-lineage.ts`, plus four test files. The acceptance criteria say the shadow \"cannot stop or retry a worker\", so it adds no new kill bound and no enforcement."
+      - "The description shows no contact with secrets, credentials, auth, merge or deploy policy, and no deletion. Redaction and bounded summaries are acceptance criteria, and they are proved by unit tests."
+      - "The record says it adds one append-only closure row to the existing ledger sink and updates the wiring suite it would otherwise break. Every declared file exists at the base, and the proof is automatic unit tests, so the finding is verifiable."
+      - "The record says it is parked for human review, with an explicit dispatch hold until a fresh machine-filing ruling lands and a separate reviewed plan edit removes it. That hold is a process gate that sits outside this change and still applies. It is not a risk in the change itself."
+      - "The research family has only one operator-approved task and no merged ones (Beta mean 0.67). That is a mild caution, not a reason to escalate."
+      - "No bounded change view was supplied, so this judgment rests on the description and file list only. That limits my confidence."
+    judged_at: "2026-11-10T14:34:22.698Z"
+    pin: "c0a12a17a912852af49180fb4415edeb0fa7b27abd6589f70605803725742baa"

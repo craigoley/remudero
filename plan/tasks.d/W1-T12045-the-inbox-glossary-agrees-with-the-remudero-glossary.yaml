@@ -1,0 +1,36 @@
+- id: W1-T12045
+  title: "The inbox explains each house term with the glossary's meaning"
+  repo: remudero
+  depends_on: [W1-T12038]
+  priority: 1.6
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: low # six strings in one table, and a test that compares them with one document
+  band_meaning: blast-radius
+  origin: operator-session#plain-language-2026-11-10
+  plan_refs:
+    - W1-T4087
+  files:
+    - src/lib/inbox-plain.ts
+    - test/the-inbox-glossary-agrees-with-the-remudero-glossary.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "Every term in the inbox's HARNESS_GLOSSARY is a term in docs/glossary.md, and its inbox wording does not contradict the glossary's meaning"
+      proof: "grep: W1-T12045 criterion 1 in test/the-inbox-glossary-agrees-with-the-remudero-glossary.test.ts"
+    - claim: "The four terms that disagreed (ratchet, lane, gate, sweep) carry a wording taken from the glossary"
+      proof: "grep: W1-T12045 criterion 2 in test/the-inbox-glossary-agrees-with-the-remudero-glossary.test.ts"
+  rationale: |
+    OBSERVED 2026-11-10 in src/lib/inbox-plain.ts line 153: HARNESS_GLOSSARY explains six terms to the operator, and four disagree with what the code does.
+    - ratchet is given as "cost check"; it is a limit that may only move one way.
+    - lane is given as "work queue"; it is one position in which a build runs at the same time as others.
+    - gate is given as "review step"; it is any check that must pass before something may happen.
+    - sweep is given as "review pass"; the sweep also fixes, arms, closes and escalates.
+    The inbox is the best-written text the operator reads, and these four explanations teach the wrong meaning.
+  design: |
+    Replace the four wordings with a short form of the glossary's meaning, and keep the other two. The test reads docs/glossary.md and checks that each inbox term is defined there; for the four terms it checks the key words of the meaning.
+    NOT IN SCOPE: the inbox templates and the prompts of the inbox writers.
+  falsifier: |
+    Add an inbox term that the glossary does not define and criterion 1 must fail. Put back one old wording and criterion 2 must fail. Restore and require both to pass.

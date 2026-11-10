@@ -17,7 +17,7 @@
   files:
     - src/lib/read-model-worker.ts
     - test/console-api/read-model/a-read-model-view-whose-inputs-are-unchanged-is-not-rebuilt.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: A due view unit whose input digest (each ledger source's read-as-of row, the plan sha, each store's generation and the switches) equals the digest of its last successful build is not materialized again; its body is kept, its sources' asOf advances, and read_model.view_builds counts it as skipped, not built
