@@ -962,6 +962,10 @@ export async function statusCommand(rest: string[], deps: StatusDeps = {}): Prom
       // existing failure flag then turns timed-out reads into queue/inbox unknowns, never zeroes.
       github = jsonMode
         ? (deps.buildBatchedGithub ?? buildBatchedGithub)(owner, repo, {
+            // W1-T11280: the persisted snapshot seeds the closed/issue walks, as the task-case path does. It
+            // fails closed: an absent, truncated or unreadable file yields no seed, and a read that does not
+            // finish stays unavailable, never filled from the snapshot.
+            snapshotCache: createBoardSnapshotCache(config.root, owner, repo),
             // The gateway's rate-limit pacer and refusal backoff also sleep synchronously. Bound
             // those waits by the same clock; a per-child timeout alone cannot cap the whole walk.
             pacer: createGhCallPacer({ sleepSync: (ms) => {

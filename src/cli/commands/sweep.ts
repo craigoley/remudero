@@ -80,7 +80,8 @@ export interface SweepCommandHost {
   readonly runPlanScopedFixRound: HostFn;
   readonly materializePlanRoundWorktree: HostFn;
   pushSweepFixRound(deps: Pick<BuildSweepEffectsDeps, "log" | "repo">, wt: string, branch: string,
-    expectedHeadSha?: string, priorHeadSha?: string): Promise<unknown>;
+    expectedHeadSha?: string, priorHeadSha?: string,
+    guard?: { prHeadSha: string; verifyOwnership: () => Promise<string | undefined> }): Promise<unknown>;
   readonly buildFixRungDispatchArgs: HostFn;
   readonly openTaskIdsFromPlan: HostFn;
   readonly waitForCiGreen: HostFn;
@@ -608,8 +609,9 @@ export function buildSweepEffects(
     },
     runPlanScopedFixRoundImpl: runPlanScopedFixRound,
     materializePlanRoundWorktreeImpl: materializePlanRoundWorktree,
-    pushFixRoundImpl: (wt: string, branch: string, sha?: string, prior?: string) => // W1-T8833: the sweep rung pushes as the run loop's does
-      pushSweepFixRound(deps, wt, branch, sha, prior),
+    pushFixRoundImpl: (wt: string, branch: string, sha?: string, prior?: string,
+      guard?: { prHeadSha: string; verifyOwnership: () => Promise<string | undefined> }) => // W1-T8833: the sweep rung pushes as the run loop's does
+      pushSweepFixRound(deps, wt, branch, sha, prior, guard),
     buildFixRungDispatchArgsImpl: buildFixRungDispatchArgs,
     openTaskIdsFromPlanImpl: openTaskIdsFromPlan,
     waitForCiGreenImpl: waitForCiGreen,

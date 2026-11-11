@@ -113,6 +113,7 @@ import { automaticBranchReapStateFileName, orphanRunBranchEvidenceReader } from 
 import { repoRoot, resolveOwnerRepo, writeDaemonTargetRecord } from "../../lib/repo-location.js";
 import { resolveRepoLayout } from "../../lib/repo-layout.js";
 import { flagValue, unknownArgError } from "../../lib/cli-args.js";
+import { createOpsCatalogShadowSource, type OpsCatalogApi, type OpsCatalogShadowInput } from "../../lib/ops-catalog-source.js";
 import { liveInflightRuns, readCheckoutDepth } from "../../lib/report-commands.js";
 import { adoptRunChildren, createAdmittedPlanSlot, runChildModeIsOn, startRunChildProbe, tapPlanSnapshot, type AdoptedRunChild } from "../../lib/run-child.js";
 import { loadObservedOverlapMode, loadRunChildMode, type RunChildMode } from "../../lib/policy.js";
@@ -631,6 +632,31 @@ export async function daemonSreLaneEnabled(
   return sreLaneEnabled(sreLane);
 }
 
+/** W1-T11770: one GitHub `<owner>/<name>`: no path, URL, `.` or `..` segment. */
+function isOpsCatalogSlug(slug: string): boolean {
+  return /^[A-Za-z0-9][A-Za-z0-9-]{0,38}\/[A-Za-z0-9_.-]{1,100}$/.test(slug) && !/\/\.{1,2}$/.test(slug) && !slug.includes("..");
+}
+
+/**
+ * W1-T11770: the tick reads `current` synchronously and gets the last completed refresh. Each read starts at most one
+ * refresh behind it, the W1-T7744 filing-prefetch shape, so a slow or hung read never delays a tick.
+ */
+function opsCatalogShadowFeed(source: { refresh(): Promise<OpsCatalogShadowInput> }): { current: () => OpsCatalogShadowInput | undefined } {
+  let latest: OpsCatalogShadowInput | undefined;
+  let inFlight = false;
+  return {
+    current: () => {
+      if (!inFlight) {
+        inFlight = true;
+        // refresh() answers every failure as an outcome; a rejection anyway is read as `unreadable`.
+        void source.refresh().then((input) => { latest = input; }, (error: unknown) => { latest = { outcome: "unreadable" }; void error; })
+          .finally(() => { inFlight = false; });
+      }
+      return latest;
+    },
+  };
+}
+
 export async function daemonCommand(
   rest: string[],
   deps: {
@@ -719,6 +745,8 @@ export async function daemonCommand(
     /** The entry's GC tuning (daemon-memory-policy.ts). Production applies it to this process; a test
      *  injects a recorder so the call is observed without retuning the test runner's own V8. */
     applyMemoryPolicy?: typeof applyDaemonMemoryPolicy;
+    /** W1-T11770: the GET-only api behind `--shadow-ops-catalog`. Production omits it and gets the source's default. */
+    opsCatalogApi?: OpsCatalogApi;
   } = {},
   host: DaemonCommandHost,
 ): Promise<number> {
@@ -830,11 +858,16 @@ export async function daemonCommand(
   const badArg = unknownArgError(
     "daemon",
     rest,
-    ["--max", "--poll-ms", "--repo", "--plan"],
+    ["--max", "--poll-ms", "--repo", "--plan", "--shadow-ops-catalog"],
     ["--dry-run", "--allow-self-target", "--allow-stale"],
   );
   if (badArg) {
     writeSyncLine(2, badArg + "\n" + USAGE);
+    return 2;
+  }
+  const shadowOpsCatalog = rest.includes("--shadow-ops-catalog") ? flagValue(rest, "--shadow-ops-catalog") ?? "" : undefined;
+  if (shadowOpsCatalog !== undefined && !isOpsCatalogSlug(shadowOpsCatalog)) {
+    writeSyncLine(2, "rmd daemon: --shadow-ops-catalog takes <owner>/<name>\n" + USAGE);
     return 2;
   }
   const allowStale = rest.includes("--allow-stale");
@@ -1775,6 +1808,10 @@ export async function daemonCommand(
     try { await gardenerRuntime.flush(); } catch { log("garden.telemetry_failed", { reason: "runtime-inventory-write-failed" }); }
     // W1-T7744: the filing read is awaited here, before the loop, and behind each selection after — never on the loop.
     await dispatchFilingPrefetch.refresh(target.planPath);
+    // W1-T11770: absent the flag, nothing is built, read or passed. Present, the first read starts here, unawaited.
+    const opsShadow = shadowOpsCatalog === undefined ? undefined
+      : opsCatalogShadowFeed(createOpsCatalogShadowSource({ repository: shadowOpsCatalog }, deps.opsCatalogApi));
+    opsShadow?.current();
     const summary = await runDaemonFn(
       plan,
       {
@@ -1802,6 +1839,10 @@ export async function daemonCommand(
           activePlanRef.current = fresh;
           daemonPlanCopies.observe(fresh);
         },
+        ...(opsShadow ? {
+          secondaryCatalogShadowSource: opsShadow.current,
+          primaryPlanCommit: () => planReaders.revisions.revisionOf(activePlanRef.current)?.commit,
+        } : {}),
         // W1-T3412: daemon selection uses the same complete-union calibration as the bounded
         // drain. A refused calibration returns undefined, preserving historic ordering.
         buildDispatchValueContext: (dispatchPlan, merged) =>

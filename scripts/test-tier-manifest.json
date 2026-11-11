@@ -1390,7 +1390,7 @@
     "test/an-unprovable-reviewer-freshness-is-re-probed-not-waited-out.test.ts": 470,
     "test/an-unproven-containment-probe-is-asked-once-more.test.ts": 2,
     "test/an-unread-loose-count-is-unknown-not-zero.test.ts": 620,
-    "test/an-unread-view-backs-off-and-a-read-snaps-it-back.test.ts": 3400,
+    "test/an-unread-view-backs-off-and-a-read-snaps-it-back.test.ts": 5000,
     "test/an-unreadable-commit-range-is-not-an-empty-emitter-pass.test.ts": 300,
     "test/an-unreadable-memory-reading-is-tiered-by-how-long-it-lasts.test.ts": 3,
     "test/an-unreadable-merged-plan-names-gits-own-words.test.ts": 1100,

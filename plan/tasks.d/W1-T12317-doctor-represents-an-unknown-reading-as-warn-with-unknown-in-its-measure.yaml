@@ -1,0 +1,26 @@
+- id: W1-T12317
+  title: Doctor represents an unknown reading as WARN with UNKNOWN in its measured text, never as a fourth verdict
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: medium
+  status: queued
+  attempts: 0
+  files:
+    - src/lib/doctor.ts
+    - test/doctor.test.ts
+  acceptance:
+    - claim: The disk-headroom arm renders an unreadable disk reading as UNKNOWN text under a WARN verdict
+      proof: "unit test: disk-headroom renders an unreadable reading as UNKNOWN under WARN"
+    - claim: The memory arm renders an unreadable meminfo reading as UNKNOWN text under a WARN verdict
+      proof: "unit test: memory renders an unreadable reading as UNKNOWN under WARN"
+    - claim: The Verdict type stays the closed set OK, WARN and FAIL and the doctrine is stated at its declaration
+      proof: "grep: UNKNOWN is WARN with UNKNOWN in measured in src/lib/doctor.ts"
+  origin: architect
+  rationale: >-
+    From the 2026-11-11 follow-up on W1-T11810-1794400286528, ratified via rmd approve:
+  
+    follow-up harvest [research]: decide the UNKNOWN representation for doctor, either a new
+    Verdict or WARN with UNKNOWN text. The task says "UNKNOWN", but `Verdict` has only
+    OK/WARN/FAIL. — from W1-T11810 (run W1-T11810-1794400286528)

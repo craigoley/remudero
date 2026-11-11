@@ -20,6 +20,7 @@
     - W1-T12244
   files:
     - src/lib/deployer.ts
+    - src/lib/config-schema.ts
     - deploy/install-host-units.sh
     - test/deploy/a-recycle-that-cannot-finish-in-its-tick-never-pauses-the-fleet.test.ts
   status: queued
@@ -37,6 +38,8 @@
       proof: "grep: W1-T12247 criterion 5 in test/deploy/a-recycle-that-cannot-finish-in-its-tick-never-pauses-the-fleet.test.ts"
     - claim: "The launcher that `deploy/install-host-units.sh` renders gives the deploy step the moment at which the tick ends it. The test renders the launcher and reads the variable in the environment of a fake deploy step"
       proof: "grep: W1-T12247 criterion 6 in test/deploy/a-recycle-that-cannot-finish-in-its-tick-never-pauses-the-fleet.test.ts"
+    - claim: "With no run in flight, the deployer runs the recycle although the derived wait is longer than the time left. The row gives the number of runs in flight and a counted wait of 0"
+      proof: "grep: W1-T12247 criterion 7 in test/deploy/a-recycle-that-cannot-finish-in-its-tick-never-pauses-the-fleet.test.ts"
     - claim: "The deployer calls the fit check"
       proof: "grep: recycleWaitFits( in src/lib/deployer.ts"
     - claim: "The launcher exports the end of the deploy step"
@@ -68,9 +71,12 @@
     - `restS` is the time a recycle needs outside its wait. Take the largest value of the whole time minus `waited_s` over the `recycle.ended` rows with the outcome `replaced` that the ledger text holds; the deployer already reads that text for `readImplementDurationsMs`. In 7 days this was 22 to 759 s. With no such row, use a named constant and say so in the row.
     - After `deriveWaitFromState`, call `recycleWaitFits` and write `deploy.recycle_wait_fit`. If it does not fit, return the same result as a refused recycle, with a reason that names the wait and the time left, and do not call `runScript`.
     A wait from the environment (`RMD_RECYCLE_WAIT_S` set by the operator) is checked in the same way.
+    AMENDED 2026-11-11 by the hand build, two points.
+    - With no run in flight, the fit check counts a wait of 0 s. The script ends its wait when no worker is left. For an instance with no run in flight, `deriveDrainWait` gives the quantile of all observed runs: it reads no lane as one that dispatches now. On 2026-11-11T08:34:22Z on the core instance, a run 50 s old had a predicted remainder of 8,037 s, so the derived wait of the idle core instance is about 8,087 s. Without this rule no recycle of the core instance fits 3,600 s, idle or not, and a new image never arrives. The row gives `runs_in_flight` and `counted_wait_s` next to the derived wait. When the deployer cannot read the runs in flight, it counts the whole wait.
+    - The deployer reads `RMD_DEPLOY_STEP_ENDS_AT` from its environment. A name that a source file reads must have a row in `ENV_REGISTRY` in src/lib/config-schema.ts (test/env-var-registry.test.ts refuses a name with no row). That file is now in `files`.
     Do not shorten the wait to make it fit: a shorter wait pauses the fleet and is then refused at its time limit.
     NOT IN SCOPE: the value of `WATCHDOG_DEPLOY_DEADLINE_S`, the limit of the unit, the derivation of the wait, and the recycle script.
   falsifier: |
-    Run the script when the wait does not fit and criterion 2 must fail. Refuse when the limit is unknown and criterion 4 must fail. Drop the export from the launcher and criterion 6 must fail. Restore and require all eight to pass.
+    Run the script when the wait does not fit and criterion 2 must fail. Refuse when the limit is unknown and criterion 4 must fail. Drop the export from the launcher and criterion 6 must fail. Count a wait for an instance with no run in flight and criterion 7 must fail. Restore and require all nine to pass.
   note: |
     After the merge, a `recycle.ended` row with the outcome `aborted` and a TERM reason must have a `deploy.recycle_wait_fit` row with `fits: true` before it. If one has `fits: false`, the check is not on that path.
