@@ -870,8 +870,21 @@ interface ViewUnit {
   peakMs?: number;
   heavy?: boolean;
   lastBuiltAt?: number;
-  lastInputDigest?: string;
+  lastInputDigest?: InputDigest;
   builtKeys?: string[];
+}
+
+/** A unit's inputs as named parts, in the order a moved part is reported; two digests are equal when every part is. */
+type InputDigest = ReadonlyArray<readonly [part: string, value: string]>;
+
+/** Why a due build cannot be skipped, or undefined when no input moved since the unit's last successful build. */
+function notSkippedReason(unit: ViewUnit, declared: boolean, reusable: boolean, digest: InputDigest | undefined): string | undefined {
+  if (!declared) return "no_declaration";
+  if (unit.builtKeys !== undefined && !reusable) return "sources";
+  if (digest === undefined) return "unreadable";
+  const last = unit.lastInputDigest;
+  if (unit.builtKeys === undefined || last === undefined || last.length !== digest.length) return "no_previous";
+  return digest.find(([part, value], index) => last[index]![0] !== part || last[index]![1] !== value)?.[0];
 }
 
 class ReadModelViewFactoryMismatch extends RmdError {
@@ -1502,20 +1515,20 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
   }
 
   const unswitched = new Map<string, { builds: number; ms: number }>();
-  const viewBuilds = new Map<ViewUnit, { calls: number; builds: number; skipped: number; ms: number; maxMs: number }>();
+  const viewBuilds = new Map<ViewUnit, { calls: number; builds: number; skipped: number; notSkipped: Record<string, number>; ms: number; maxMs: number }>();
   let viewBuildsFrom = clock.now();
   function reportViewBuilds(): void {
     const now = clock.now();
     if (now - viewBuildsFrom < 10 * 60_000) return;
     for (const [unit, tally] of viewBuilds) {
       if (tally.calls === 0 && tally.ms === 0) continue;
-      const { skipped, ...counts } = tally;
+      const { skipped, notSkipped, ...counts } = tally;
       log("read_model.view_builds", {
         view: unit.view.name,
         ...(unit.slot ? { instance: unit.slot.instance.name } : {}),
         thread: viewsOnly ? "views" : "projector",
         ...(opts.lane ? { lane: opts.lane } : {}),
-        ...counts, ...(skipped > 0 ? { skipped } : {}), window: [viewBuildsFrom, now],
+        ...counts, ...(skipped > 0 ? { skipped } : {}), ...(Object.keys(notSkipped).length > 0 ? { not_skipped: notSkipped } : {}), window: [viewBuildsFrom, now],
       });
     }
     viewBuilds.clear();
@@ -1540,7 +1553,7 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
     return finished + waitMs * unit.stretch;
   }
 
-  function inputDigest(ctx: ReadModelViewContext, readAsOf: Map<string, string | null> | undefined): string | undefined {
+  function inputDigest(ctx: ReadModelViewContext, readAsOf: Map<string, string | null> | undefined): InputDigest | undefined {
     if (!readAsOf || readAsOf.size === 0 || !ctx.sourceStore) return undefined;
     const stores = [...new Set([ctx.sourceStore, ...ctx.instances.flatMap(({ db }) => db ? [db] : [])])];
     const generations = stores.map(db => [db.path, fileIno(db.path), db.meta("generation")]);
@@ -1558,7 +1571,8 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
     // Status reads these alongside generation. Quarantined diagnostics can leave generation unchanged.
     const states = ctx.instances.map(({ state, db }) => [state.instance, state.generation, state.lease, state.heldBy,
       Number(db!.prepare("SELECT count(*) AS n FROM quarantine").get()?.n ?? 0)]);
-    return JSON.stringify([Array.from(readAsOf), plans, generations, states, snapshots, ctx.switches, ctx.shadow]);
+    const parts = { ledger: Array.from(readAsOf), plan: plans, generation: generations, state: states, snapshot: snapshots, switches: ctx.switches, shadow: ctx.shadow };
+    return Object.entries(parts).map(([part, value]) => [part, JSON.stringify(value) ?? "null"] as const);
   }
 
   /** File-backed and other undeclared sources need their producer; a ledger declaration cannot verify them. */
@@ -1593,7 +1607,8 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
     let yielded = 0;
     let calls = 0;
     let skipped = false;
-    let digest: string | undefined;
+    let why: string | undefined;
+    let digest: InputDigest | undefined;
     const builtKeys: string[] = [];
     const scoped = unit.slot ? { ...ctx, instances: ctx.instances.filter(({ state }) => state === unit.slot!.state) } : ctx;
     const buildStartedMs = (unit.startedAt ??= started);
@@ -1613,7 +1628,8 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
           [`${LEDGER_SOURCE_PREFIX}${state.instance}`, db ? fingerprint(db) : null])) : readAsOf;
         try { if (unit.builtKeys === undefined || reusable) digest = inputDigest(scoped, digestAsOf); }
         catch (error) { log("read_model.view_digest_unreadable", { ...named, error: (error as Error).message }); }
-        if (digest !== undefined && digest === unit.lastInputDigest && reusable) {
+        why = notSkippedReason(unit, digestAsOf !== undefined, reusable, digest);
+        if (why === undefined) {
           restamp(unit, scoped, readAsOf);
           skipped = true;
         } else {
@@ -1638,10 +1654,11 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
     }
     const elapsedMs = finished - started;
     unit.costMs = skipped ? unit.costMs ?? elapsedMs : elapsedMs;
-    const counts = viewBuilds.get(unit) ?? { calls: 0, builds: 0, skipped: 0, ms: 0, maxMs: 0 };
+    const counts = viewBuilds.get(unit) ?? { calls: 0, builds: 0, skipped: 0, notSkipped: {}, ms: 0, maxMs: 0 };
     counts.calls += calls;
     counts.builds += yielded > 0 ? 1 : 0;
     counts.skipped += skipped ? 1 : 0;
+    if (why !== undefined) counts.notSkipped[why] = (counts.notSkipped[why] ?? 0) + 1;
     counts.ms += elapsedMs;
     counts.maxMs = Math.max(counts.maxMs, elapsedMs);
     viewBuilds.set(unit, counts);

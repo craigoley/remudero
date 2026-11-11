@@ -79,7 +79,7 @@ test(`${proofFile}: W1-T9781: fleet_state counts its main-commit GitHub reads`, 
     assert.equal(f.reads.length, 11, "four workflow observations plus the prior repair's covering head");
     assert.deepEqual(state.parts, {
       union_ms: 23, union_rotations: 2, commits_walked: 3,
-      commit_reads: f.reads.length, commit_read_ms: 77, deploy_ms: 60,
+      commit_reads: f.reads.length, commit_reads_kept: 0, commit_read_ms: 77, deploy_ms: 60,
     });
     assert.deepEqual(recorded, [], "all observed rows are healthy");
     assert.deepEqual(f.writes, [], "measurement does not dispatch workflows");
@@ -105,7 +105,7 @@ test("W1-T9781: sweep.full_prelude carries the completed fleet_state parts once"
     assert.equal(rows[0].walk_reached, true);
     assert.deepEqual(rows[0].fleet_state_parts, {
       union_ms: 23, union_rotations: 2, commits_walked: 3,
-      commit_reads: 11, commit_read_ms: 77, deploy_ms: 60,
+      commit_reads: 11, commit_reads_kept: 0, commit_read_ms: 77, deploy_ms: 60,
     });
     assert.equal((rows[0].stages as Record<string, number>).fleet_state, 160);
   } finally {
@@ -121,7 +121,7 @@ test("W1-T9781: failed reads retain their timing and the existing unreadable rea
       await reconcileFleetState(state.rows, state.history, () => {});
       assert.deepEqual(state.parts, {
         union_ms: 23, union_rotations: 2, commits_walked: failure === "ci" ? 0 : 3,
-        commit_reads: failure === "ci" ? 1 : 11,
+        commit_reads: failure === "ci" ? 1 : 11, commit_reads_kept: 0,
         commit_read_ms: failure === "ci" ? 7 : 77, deploy_ms: failure === "deploy" ? 11 : 60,
       });
       assert.ok(f.logs.some((row) => row.step === "reconcile.unreadable" && row.extra?.pipeline === failure &&
@@ -141,7 +141,7 @@ test("W1-T9781: failed deferred observations count as reads without authorizing 
     await reconcileFleetState(state.rows, state.history, (row) => recorded.push(row));
     assert.deepEqual(state.parts, {
       union_ms: 23, union_rotations: 2, commits_walked: 3,
-      commit_reads: 10, commit_read_ms: 70, deploy_ms: 60,
+      commit_reads: 10, commit_reads_kept: 0, commit_read_ms: 70, deploy_ms: 60,
     });
     assert.equal(recorded.length, 4);
     assert.ok(recorded.every((row) => row.step === "reconcile.unreadable" && row.reason === "workflow read unavailable"));
@@ -161,10 +161,12 @@ test("W1-T9781: each fleet-state read owns fresh counters", async () => {
     assert.notEqual(first.parts, second.parts);
     assert.deepEqual(first.parts, {
       union_ms: 23, union_rotations: 2, commits_walked: 3,
-      commit_reads: 11, commit_read_ms: 77, deploy_ms: 60,
+      commit_reads: 11, commit_reads_kept: 0, commit_read_ms: 77, deploy_ms: 60,
     });
-    assert.deepEqual(second.parts, { ...first.parts, union_ms: 0, commit_reads: 9, commit_read_ms: 63 });
-    assert.equal(f.reads.length, 20);
+    // W1-T12234: the commit store answers 9 reads of the second call: 3 run counts, 2 file lists and
+    // 4 workflow pairs. The call reads the listing and the one pair that had no run.
+    assert.deepEqual(second.parts, { ...first.parts, union_ms: 0, commit_reads: 2, commit_reads_kept: 9, commit_read_ms: 14 });
+    assert.equal(f.reads.length, 13);
   } finally {
     rmSync(f.root, { recursive: true, force: true });
   }

@@ -1,0 +1,58 @@
+- id: W1-T12260
+  title: "The host watchdog reads free disk on the root volume and the state volume"
+  repo: remudero
+  depends_on:
+    - W1-T12161
+  priority: 1.2
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the tick of the host timer that restarts or recycles a container; this task must add no such action
+  band_meaning: blast-radius
+  origin: operator-session#janitor-disk-waste-2026-11-11
+  plan_refs:
+    - W1-T6361
+    - W1-T12161
+    - W1-T5548
+    - W1-T2767
+  files:
+    - deploy/install-host-units.sh
+    - test/daemon/the-host-watchdog-reads-free-disk-on-the-root-and-state-volumes.test.ts
+    - test/the-watchdog-tick-skips-git-and-node-work-when-nothing-changed.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "Each tick reads the percent used and the free space of `/` and of the volume that holds the state directory, with one `df` call for each"
+      proof: "grep: W1-T12260 criterion 1 in test/daemon/the-host-watchdog-reads-free-disk-on-the-root-and-state-volumes.test.ts"
+    - claim: "When both volumes are inside their marks, the healthy line of the tick carries both readings"
+      proof: "grep: W1-T12260 criterion 2 in test/daemon/the-host-watchdog-reads-free-disk-on-the-root-and-state-volumes.test.ts"
+    - claim: "When a volume is past its mark, the tick does not print the word healthy. It prints the volume, the percent used, the free space and the mark"
+      proof: "grep: W1-T12260 criterion 3 in test/daemon/the-host-watchdog-reads-free-disk-on-the-root-and-state-volumes.test.ts"
+    - claim: "A reading that cannot be read is printed as `unreadable`. The tick then does not print the word healthy and prints no number for that volume"
+      proof: "grep: W1-T12260 criterion 4 in test/daemon/the-host-watchdog-reads-free-disk-on-the-root-and-state-volumes.test.ts"
+    - claim: "A disk reading starts no restart, no recycle and no deploy work. A tick with nothing changed still makes no git, docker or node call for the disk reading"
+      proof: "grep: W1-T12260 criterion 5 in test/daemon/the-host-watchdog-reads-free-disk-on-the-root-and-state-volumes.test.ts"
+  rationale: |
+    OBSERVED 2026-11-10 on the Azure host: the root disk went from 95% to 99% used, and the host watchdog printed healthy for the container on every tick.
+    - The janitor log of that day has `FAIL / is at 99% with 1G free (/dev/root), past its mark 85%`.
+    - The fix worker failed four times that day with "Failed to create bridge sockets". The cause is not proven. A full root disk is a likely one.
+    READ at origin/main 3c6e5e476.
+    - `watchdog_healthy` (deploy/install-host-units.sh:988) reads the progress state only: PROGRESSING or IDLE with no action.
+    - A tick with nothing changed prints `<container> unchanged and healthy -- skipping checkout and deploy work` (line 1040). It reads no disk.
+    - The marks exist in the janitor: 85% for `/` and 85% for `/mnt/rmd` (`HIGH_WATER` and `RMD_CLEANUP_WATCH_FS` in deploy/rmd-host-cleanup.sh).
+    CHECKED for overlap: W1-T12161 (queued) changes when the same tick prints healthy for a stopped daemon loop. This task depends on it, because both change the same lines. W1-T12254 raises the escalation. This task makes the line in the journal true.
+  design: |
+    In the tick that deploy/install-host-units.sh renders:
+    - Add one function that reads `df -Pk /` and `df -Pk "$STATE_DIR"`. When both are one device, read once.
+    - Compare each with its mark: 85% by default, from `HIGH_WATER` for `/` and from the `RMD_CLEANUP_WATCH_FS` entry of the state volume, the names the janitor reads.
+    - Call it where the tick prints a healthy line, in the unchanged branch and in the full branch. Inside the marks, add ` disk / <p>% <free> free, state <p>% <free> free` to the line.
+    - Past a mark or unreadable, print `rmd-relaunch: <container> progressing, disk low: <volume> <p>% used, <free> free, mark <m>%` in place of the healthy line.
+    - Do not change `watchdog_healthy`, `PROGRESS_ACTION`, the snapshot file or any action.
+    test/the-watchdog-tick-skips-git-and-node-work-when-nothing-changed.test.ts matches the healthy line. Change its match for the added readings only.
+    NOT IN SCOPE: an escalation, a pause of dispatch, the scratch volume, the Mac, and the progress watchdog in src/lib/progress-watchdog.ts.
+  falsifier: |
+    Print healthy past a mark and criterion 3 must fail. Print 0% for an unreadable reading and criterion 4 must fail. Start a recycle for a low disk and criterion 5 must fail. Restore and require all five to pass.
+  note: |
+    Host and account: the Azure host, in the systemd timer of each instance (core, console, site), which runs as root every five minutes.
+    The task removes nothing and starts nothing.
