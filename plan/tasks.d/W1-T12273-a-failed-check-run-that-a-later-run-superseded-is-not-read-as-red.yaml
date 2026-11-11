@@ -14,9 +14,9 @@
     - W1-T4908
     - W1-T9913
     - W1-T3652
+    - W1-T1275
   files:
     - src/lib/sweep.ts
-    - src/lib/open-prs-rest.ts
     - test/sweep/a-failed-check-run-that-a-later-run-superseded-is-not-read-as-red.test.ts
     - test/a-superseded-check-attempt-is-not-a-live-failure.test.ts
     - test/sweep-superseded-check-run.test.ts
@@ -26,31 +26,43 @@
   status: queued
   attempts: 0
   acceptance:
-    - claim: "With the check runs that GitHub recorded for the head of #17793 (a `ci-gate` run that failed, then a `ci-gate` run on the same head that passed after a body edit), the required checks read green"
+    - claim: "With the check runs and workflow runs that GitHub recorded for head 14b8062 of #17793, a full sweep pass re-runs CI's ci-gate job once (job 130260991771, through `reaggregateCiGate`), writes one `sweep.ci_gate_reaggregated` row, disposes the pull request as `wait` and files no escalation"
       proof: "grep: W1-T12273 criterion 1 in test/sweep/a-failed-check-run-that-a-later-run-superseded-is-not-read-as-red.test.ts"
-    - claim: "The sweep does not dispose that pull request as red on `ci-gate`, and files no escalation for it"
+    - claim: "A later pass on the same head and the same sibling transition re-runs nothing, disposes `wait` and files no escalation"
       proof: "grep: W1-T12273 criterion 2 in test/sweep/a-failed-check-run-that-a-later-run-superseded-is-not-read-as-red.test.ts"
-    - claim: "A failed run of a check that a different workflow produced stays red when a run of another workflow passes under the same name (#14160)"
+    - claim: "The two-workflow rollup of #17793 still reads red on ci-gate: a pass from workflow CI gate never clears a failure from workflow CI (#14160)"
       proof: "grep: W1-T12273 criterion 3 in test/sweep/a-failed-check-run-that-a-later-run-superseded-is-not-read-as-red.test.ts"
-    - claim: "A later run that is still in progress leaves the check pending, not green and not red"
+    - claim: "When the re-run of CI's ci-gate fails again, the sweep keeps the plan-only escalation (`refused-escalate`, \"plan-only PR is red on ci-gate\") and re-runs nothing more"
       proof: "grep: W1-T12273 criterion 4 in test/sweep/a-failed-check-run-that-a-later-run-superseded-is-not-read-as-red.test.ts"
+    - claim: "A light pass or a dry run re-runs nothing and does not escalate the stale gate; it waits for a full pass"
+      proof: "grep: W1-T12273 criterion 5 in test/sweep/a-failed-check-run-that-a-later-run-superseded-is-not-read-as-red.test.ts"
+    - claim: "A later ci-gate attempt that is still in progress leaves the check pending, not green and not red, and nothing is re-run"
+      proof: "grep: W1-T12273 criterion 6 in test/sweep/a-failed-check-run-that-a-later-run-superseded-is-not-read-as-red.test.ts"
   rationale: |
     OBSERVED 2026-11-11 on plan pull request #17793, head 14b8062.
     - `ci-gate` FAILURE at 01:50:03Z. A body edit ran the gate again on the same head: `ci-gate` SUCCESS at 01:53:04Z.
     - 02:06:53Z and 02:14:29Z on the core ledger: `sweep.disposed`, disposition `refused-escalate`, blocker `plan-proof-unrunnable`, reason "plan-only PR is red on ci-gate". The view of the first row was 7.6 seconds old, so it was read after the green run.
     - The pull request stayed held until a person ran the failed run again by hand.
-    READ at origin/main 0953736f0, src/lib/sweep.ts.
-    - Line 7594, `dedupeRollupByLatestAttempt`: it keeps the newest run for each producer and name. Line 7580, `rollupProducerKey`: the producer is the workflow id or name, with a separate class for an entry that a job posted.
-    - "Independent producers remain independently enforced; a later completion from another workflow cannot clear their failures (#14160)."
-    - So a later green run clears an earlier red one only when both have the same producer key. Which field differed between the two `ci-gate` runs of #17793 is not established.
-    CHECKED for overlap: W1-T4908, W1-T9913 and W1-T3652 (all merged) made the rule of today. No queued task covers a run that a body edit starts.
+    MEASURED 2026-11-11 through the REST reads the tick makes (check runs, workflow runs, jobs of each attempt).
+    - The failed `ci-gate` is check run 130260991771: the `ci-gate` job of workflow CI (`ci.yml`, workflow id 312964904), run 42938819109, attempt 1. It started 01:39:30Z and failed 01:50:03Z. It failed because `acceptance-author-gate` (run 42938818774, check run 130255414818) had failed at 01:25:58Z.
+    - The body edit ran `acceptance-author-gate` again (run 42942010284, check run 130265807114): SUCCESS, started 01:52:11Z.
+    - The passing `ci-gate` is check run 130265811120: the job of workflow CI gate (`ci-gate.yml`, workflow id 313901555), run 42942011505. That workflow runs only on `edited`.
+    - At 02:25 a person re-ran run 42938819109 (attempt 2). Its `ci-gate` passed and the pull request moved.
+    - Through `rollupFromRest`, the two `ci-gate` entries have the producer keys `["check","workflow:312964904","ci-gate"]` and `["check","workflow:313901555","ci-gate"]`. `dedupeRollupByLatestAttempt` keeps both, and `checksStateFromRollup` reads `red`.
+    READ at origin/main 78dbf66c3, src/lib/sweep.ts.
+    - The red reading is right. Two workflows produced the two runs, and the rule of #14160 (test/a-superseded-runs-rerun-never-overrides-the-newest-run.test.ts) pins this exact shape as red: GitHub still enforces CI's failure.
+    - The gap is in the action. The blocked-CI path of `runSweep` reads a fresh rollup, finds the stale gate with `staleCiGateTransition`, and re-runs the failed producer's own `ci-gate` job once through `reaggregateCiGate` (W1-T1275), bounded by `sweep.ci_gate_reaggregated` rows. The plan-only arm (the `isPlanFiling` branch before the disposition switch) never reaches that path. It sets `refused-escalate` at once with "plan-only PR is red on ci-gate".
+    CHECKED for overlap: W1-T4908, W1-T9913, W1-T3652 and W1-T1275 (all merged) made the rule of today. No queued task covers a run that a body edit starts.
   design: |
-    First read the check runs and the workflow runs of head 14b8062 of #17793 through the REST calls that the tick read makes. Record the two `ci-gate` entries as a fixture: name, workflow id, workflow run id, external id, start time, conclusion.
-    - If the two entries have different producer keys although one workflow produced both, correct `rollupProducerKey` so that the event that started a run is not part of the producer.
-    - If the entries have the same key and the fold of `dedupeRollupByLatestAttempt` kept the older one, correct the order.
-    - If the red came from another reader (the failed-job list of the workflow run, or the plan-only red check at src/lib/sweep.ts:21404), make that reader use `classifyRollupSupersession`.
-    Keep the rule of #14160: a run of another workflow never clears a failure.
-    If the cause is none of the three, stop and report what the fixture shows. Do not widen the rule to "the newest run of a name wins".
-    The five listed tests pin the rule of today. They must pass without a change, except where one pins the defect itself.
+    Keep the rule of #14160: a run of another workflow never clears a failure. `rollupProducerKey`, `dedupeRollupByLatestAttempt` and `classifyRollupSupersession` do not change.
+    In the plan-only arm of `runSweep` (src/lib/sweep.ts), before `tryPlanRepair`, read a fresh rollup through `deps.readCiGateRollup` and pass it to `staleCiGateTransition`. Skip this when a pending judgment or a plan conflict round decides the arm.
+    - When it finds a transition, treat it the way the blocked-CI path does: re-run the failed producer's `ci-gate` job once through `deps.reaggregateCiGate`, with the existing bound (`ciGateReaggregateKey`, `ciGateReaggregateDecision`, the `sweep.ci_gate_reaggregated` row written before the call). The disposition is `wait`, the reason names the stale verdict, and no escalation is filed. A pass that finds the row already written also waits.
+    - On a dry run or a pass where `blocked-fixable` is not actionable (the light pass), do not re-run. Wait with the reason "its re-run waits for a full sweep pass".
+    - When there is no transition, the arm runs as today. A re-run that fails again has a `ci-gate` attempt newer than the sibling's success, so `staleCiGateTransition` finds nothing and the current escalation stays.
+    Move the bounded re-run of the blocked-CI path into one module-private function that both sites call, so the two paths cannot drift. Add no export.
+    The five listed tests pin the rule of today. They must pass without a change.
   falsifier: |
-    Keep the rule of today and criteria 1 and 2 must fail. Let the newest run of a name win across workflows and criterion 3 must fail. Read an in-progress later run as green and criterion 4 must fail. Restore and require all four to pass.
+    Remove the stale-gate branch from the plan-only arm, and criteria 1, 2 and 5 must fail (the sweep escalates). Let the newest run of a name win across workflows, and criterion 3 must fail. Drop the ledgered bound, and criterion 2 must fail. Restore and require all six to pass.
+  note: |
+    OUT OF SCOPE: `ci-gate.yml` runs on `edited` and posts its own `ci-gate`, but it does not re-run the `ci-gate` job of `ci.yml`. So a body repair leaves CI's failed `ci-gate` in place until the sweep or a person re-runs it. A change to the workflow so that an edit re-runs CI's gate is a separate task.
+    AMENDED 2026-11-11: the first design asked for the two-workflow rollup to read green. The measured fixture shows that this would break the rule of #14160, so the task now re-runs CI's gate instead.
