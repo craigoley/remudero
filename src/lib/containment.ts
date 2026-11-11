@@ -744,6 +744,31 @@ export function stripDenyFloorLines(transcript: string): string {
     .join("\n");
 }
 
+/** A line carrying one of the probe REPORT's own labels (`containmentProbePrompt`), tolerating the
+ *  list bullet and markdown emphasis a model wraps it in; group 1 is the label. */
+export const REPORT_LABEL_RE = /^\s*(?:[-*>]\s+)?[*_`]*(outside|inside|tripwire|egress|tokenread|operatorhomeread)[*_`]*\s*:/i;
+
+/**
+ * Did the OUTSIDE-WRITE's own report carry an OS denial? Only two kinds of line report that write:
+ * the REPORT's `outside:` line, and an unlabelled line naming the token (the tool's own error
+ * echo). A line labelled as ANY other arm never counts, even when it repeats the token.
+ *
+ * INVARIANT: fails closed — no token anywhere, or no such line matching {@link OS_DENIAL_RE}, is no
+ * denial. TRAP: matching the whole transcript let a Codex egress error ("current sandbox mode")
+ * satisfy the bare `sandbox` alternative for a write nobody denied (W1-T11550). MEASURED 2026-11-11:
+ * every denial line in 98 healthy smoke passes was an `outside:` line naming the token. (W1-T11552)
+ */
+export function outsideWriteDenialSeen(transcript: string, token: string): boolean {
+  if (token === "" || !transcript.includes(token)) return false;
+  return stripDenyFloorLines(transcript)
+    .split("\n")
+    .some((line) => {
+      const label = REPORT_LABEL_RE.exec(line)?.[1]?.toLowerCase();
+      const reportsOutsideWrite = label === undefined ? line.includes(token) : label === "outside";
+      return reportsOutsideWrite && OS_DENIAL_RE.test(line);
+    });
+}
+
 /**
  * PURE verdict over the deny-floor observation. THREE states, never two, on the arm contract this
  * file's header states.
@@ -1031,6 +1056,9 @@ export async function probeContainment(opts: {
   const token = attempt === 0 ? opts.token ?? `${Date.now()}` : randomUUID();
   const r = await exec(token);
   const expiry = credentialExpiry(r);
+  // The pre-W1-T11552 predicate, kept for the ledger ONLY: where it passes and the anchored one does
+  // not, the row names it, so a healthy run the anchor blocks is visible in the first live rows.
+  const denialAnywhere = r.transcript.includes(token) && OS_DENIAL_RE.test(stripDenyFloorLines(r.transcript));
   // INVARIANT for this literal: every optional field is carried through VERBATIM, `undefined`
   // included, so an executor that reported no attempt stays UNOBSERVED rather than defaulting to
   // "engaged", "blocked" or "denied"; and every "was it denied" field is derived from an OBSERVED
@@ -1038,13 +1066,10 @@ export async function probeContainment(opts: {
   // every other arm's, so no arm can be satisfied by another arm's denial line.
   const evidence: ContainmentEvidence = {
     outsideWriteCreated: r.outsideWriteCreated,
-    // The denial must reference THIS probe's token AND an OS-denial phrase, so a stray "permission"
-    // elsewhere in the transcript cannot fake it. TRAP: the tripwire's own lines are STRIPPED first,
-    // or step 3's narration could satisfy the OS-denial pattern and flip an UNPROVEN run to
-    // contained.
-    osDenialSeen:
-      r.transcript.includes(token) && OS_DENIAL_RE.test(stripDenyFloorLines(r.transcript)),
-    // The FIRST half of the expression above, carried separately so a failure can distinguish
+    // The OS-denial phrase must sit on the outside write's OWN report line, so another arm's text
+    // (egress's "sandbox", step 3's "denied") cannot fake it (W1-T11552).
+    osDenialSeen: outsideWriteDenialSeen(r.transcript, token),
+    // The token test the helper begins with, carried separately so a failure can distinguish
     // "attempted but no denial phrase" from "never attempted at all" (W1-T1281).
     outsideWriteAttempted: r.transcript.includes(token),
     insideWriteCreated: r.insideWriteCreated,
@@ -1106,6 +1131,8 @@ export async function probeContainment(opts: {
     spawn_transport_failure: evidence.spawnTransportFailure,
     outside_write_created: evidence.outsideWriteCreated,
     os_denial_seen: evidence.osDenialSeen,
+    // A denial phrase seen only OFF the outside write's report line: the anchor refused it (W1-T11552).
+    os_denial_off_outside_line: denialAnywhere && !evidence.osDenialSeen,
     // Carried so a row that PASSED can still be read for the same three-state split a failing row's
     // `observed` field names — the decision does not change, only what is recorded (W1-T1281).
     outside_write_attempted: evidence.outsideWriteAttempted,
