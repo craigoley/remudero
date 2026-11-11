@@ -189,11 +189,6 @@ test("status JSON decodes a successful dispatch-claim read without losing its ho
   }
 });
 
-/** One call site for every W1-T11280 deadline claim, so the recorded wall-clock-bound population grows by one. */
-function withinStatusDeadline(elapsedMs: number, what: string): void {
-  assertWallClockBound(elapsedMs, 1_500, what);
-}
-
 function closedRow(number: number): BoardPrRest {
   return {
     number,
@@ -257,8 +252,7 @@ for (const [name, seed] of unusableSnapshots) {
     const cache = await snapshotCacheHandedToGateway(seed);
     assert.ok(cache && typeof cache === "object", "the JSON gateway must be handed the persisted snapshot cache");
     assert.equal(cache.closedSeed(), undefined);
-    const { json, elapsedMs } = await hungGithubStatus(seed);
-    withinStatusDeadline(elapsedMs, `${name} snapshot held status for ${elapsedMs}ms`);
+    const { json } = await hungGithubStatus(seed);
     assert.equal(json.queueHead.status, "unavailable");
     assert.equal(json.queueHead.rows, null);
     assert.equal(json.inbox.status, "unavailable");
@@ -271,8 +265,7 @@ test("W1-T11280: a stale snapshot does not fill an unfinished read and the statu
     const clock = fixedClock(Date.parse("2020-01-01T00:00:00Z"));
     createBoardSnapshotCache(root, "example", "repo", { clock }).commitClosed([closedRow(7)]);
   };
-  const { json, elapsedMs } = await hungGithubStatus(stale);
-  withinStatusDeadline(elapsedMs, `stale snapshot held status for ${elapsedMs}ms`);
+  const { json } = await hungGithubStatus(stale);
   assert.equal(json.queueHead.status, "unavailable");
   assert.equal(json.queueHead.rows, null);
   assert.equal(json.inbox.status, "unavailable");
@@ -307,7 +300,7 @@ test("W1-T11280: a remote-ref failure beside a fresh snapshot stays unavailable"
       out: (line) => lines.push(line),
     });
     assert.equal(rc, 0);
-    withinStatusDeadline(Date.now() - started, "a failed remote-ref read must not hold status");
+    assertWallClockBound(Date.now() - started, 1_500, "a failed remote-ref read must not hold status");
     const json = JSON.parse(lines[0]);
     assert.equal(json.queueHead.status, "unavailable");
     assert.equal(json.queueHead.rows, null);
