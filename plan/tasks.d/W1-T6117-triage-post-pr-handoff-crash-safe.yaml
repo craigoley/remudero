@@ -19,7 +19,27 @@
     existing open-PR guard remain unproven. This task adds the missing pre-verification `triage.pr_created` ledger
     candidate so that the ownership refusal before trusted `pr.opened` can still reach the guard's fresh live-state
     check. The incident does not establish a separate healthy-completion claim-lifetime defect, so this task does not
-    change the holder-release policy or file a speculative class-wide follow-up."
+    change the holder-release policy or file a speculative class-wide follow-up.
+
+    SCOPE CORRECTION (PLAN-clarify-1794374901223, from exact-head author-gate evidence). Only paths needed to
+    satisfy the existing acceptance under the existing gates are added. Acceptance, claim-recovery semantics,
+    the #17393 disposition and all security/review/CI gates are unchanged. This does not authorize a class-wide
+    open-PR guard fix, a merge or a deployment.
+    Settled by lookup: is this scope already filed or decided? -> no; no other task writes triage.pr_created, and the
+    W1-T11756 catalog-addition precedent is reused here (plan/tasks.d/W1-T11756-*.yaml).
+    Settled by lookup: must triage.pr_created be listed or exempted? -> listed. It is written with pr_url BEFORE
+    pr.opened, so it can be a run's first pr_url row, and the AFTER_PR_OPENED exemption does not apply. The
+    census rejects a step that is neither listed nor exempted (test/every-priced-ledger-step-is-in-the-config-garden-read.test.ts, CONFIG_GARDEN_LEDGER_STEPS in src/lib/config-gardener.ts).
+    Settled by lookup: does listing it move other suites? -> yes, two of them. The strict expected set in
+    test/gardeners/the-config-gardener-reads-the-same-steps-once-gather-runs-owns-its-list.test.ts must be
+    extended by exactly triage.pr_created. The every-step-changes-the-inventory check in
+    test/the-config-gardener-reads-only-the-ledger-steps-it-prices.test.ts needs one appended
+    fallback(['triage.pr_created'], 'pr_url', 500) fixture call, the same shape W1-T11756 used for
+    review.history_guarded (W1-T11756 design).
+    Settled by lookup: where does the run-task crash integration test live? -> test/triage/triage-relint-verdictless-repair.test.ts.
+    That file already reaches src/run-task.ts through #test/helpers/run-task-test.js and is not itself a counted importer.
+    scripts/affected-reach-baseline.json holds importerCount 1010 and may only shrink, so a new direct
+    importer would make it 1011 (scripts/affected-reach-baseline.json, W1-T10820)."
   # Rule 19 merits: one interruption/restart integration test requires both the run-task lock lifecycle and auto-triage PR handoff to preserve a single recovery transaction; neither subsystem can satisfy it alone.
   design: |
     1. WRITE-AHEAD HANDOFF. Persist a handoff record (run id, branch, feedback id) BEFORE the remote PR operation,
@@ -35,6 +55,17 @@
     5. Record a separate `triage.pr_created` ledger event immediately after create returns, before ownership verification.
        The daemon's once-per-boot open-PR cache is stale by construction for this PR; its ledger fallback must use
        this candidate and perform a fresh live-state read. Keep `pr.opened` reserved for the later verified receipt.
+    6. SCOPE PLACEMENT (no semantic change). Add `triage.pr_created` to CONFIG_GARDEN_LEDGER_STEPS in
+       src/lib/config-gardener.ts. Add no census exemption for it. Extend only the first strict expected set in
+       test/gardeners/the-config-gardener-reads-the-same-steps-once-gather-runs-owns-its-list.test.ts by that step.
+       In test/the-config-gardener-reads-only-the-ledger-steps-it-prices.test.ts, append exactly one
+       `fallback(["triage.pr_created"], "pr_url", 500)` after every existing corpus row. Keep every other row, assertion,
+       title, timeout and skip unchanged. Put the acceptance-1 interruption integration test
+       ("post-create crash recovery retains the triage claim") in test/triage/triage-relint-verdictless-repair.test.ts,
+       which reaches src/run-task.ts through the existing #test/helpers/run-task-test.js. Add no new direct importer of
+       src/run-task.ts, so the affected-reach importerCount stays at or below 1010. Do not edit
+       scripts/affected-reach-baseline.json. The acceptance-2 and acceptance-3 tests stay in
+       test/triage/triage-post-pr-handoff-crash-safe.test.ts, and that file must not import src/run-task.ts.
   acceptance:
     - claim: "one process-interruption integration test spanning auto-triage and the run-task triage entry point proves that, after remote PR creation and holder death, two concurrent restarts yield exactly one local-lock recovery, record pr.opened and run.awaiting_external idempotently, open no second PR, and retain the remote claim while CI is pending"
       proof: "unit test: post-create crash recovery retains the triage claim"
@@ -45,7 +76,7 @@
   risk: high
   origin: feedback#fb-1789365327024-d9c74b
   plan_refs: ["§7B", "W1-T147"]
-  files: [src/run-task.ts, src/lib/auto-triage.ts, src/lib/daemon.ts, test/triage/triage-post-pr-handoff-crash-safe.test.ts]
+  files: [src/run-task.ts, src/lib/auto-triage.ts, src/lib/daemon.ts, src/lib/config-gardener.ts, test/triage/triage-post-pr-handoff-crash-safe.test.ts, test/triage/triage-relint-verdictless-repair.test.ts, test/gardeners/the-config-gardener-reads-the-same-steps-once-gather-runs-owns-its-list.test.ts, test/the-config-gardener-reads-only-the-ledger-steps-it-prices.test.ts]
   priority: 2
   status: queued
   # backlog gardener: band=2 evidence=b8b7c82b8972c321
