@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { join } from "node:path";
 import { describe, test } from "node:test";
@@ -299,8 +299,12 @@ describe("test/ledger/pr-state-answers-from-the-ledger-before-github.test.ts", (
 
   test("the real broker client sends a single agent revalidation and writes no ledger rows", async t => {
     const fixture = writeLedger(evidence(1, 300_000), { scope: t });
-    const socket = join(fixture.dir, "broker.sock");
-    writeFileSync(join(fixture.dir, "heartbeat"), "60");
+    // AF_UNIX paths are short on macOS; writeLedger's TMPDIR path plus the broker suffix exceeds that limit.
+    const cacheRoot = mkdtempSync(join("/tmp", "rmd-gh-broker-"));
+    const brokerDir = join(cacheRoot, "remudero", "gh-broker");
+    mkdirSync(brokerDir, { recursive: true });
+    const socket = join(brokerDir, "broker.sock");
+    writeFileSync(join(brokerDir, "heartbeat"), "60");
     const requests: Row[] = [];
     const wireReply = { type: "result", stdout: JSON.stringify(response([1])), stderr: "", exitCode: 0, outcome: "upstream-200" };
     const server = createServer(connection => {
@@ -313,12 +317,12 @@ describe("test/ledger/pr-state-answers-from-the-ledger-before-github.test.ts", (
       });
     });
     await new Promise<void>(resolve => server.listen(socket, resolve));
-    t.after(() => new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())));
+    t.after(async () => {
+      await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+      rmSync(cacheRoot, { recursive: true, force: true });
+    });
     const before = readFileSync(fixture.path, "utf8");
-    const c = capture(fixture.dir, { readBroker: undefined, env: { ...process.env, XDG_CACHE_HOME: undefined, RMD_GH_CACHE_HOME: join(fixture.dir, "cache") } });
-    // The broker client resolves <cache>/remudero/gh-broker. Link only the owned fixture.
-    mkdirSync(join(fixture.dir, "cache", "remudero"), { recursive: true });
-    symlinkSync(fixture.dir, join(fixture.dir, "cache", "remudero", "gh-broker"));
+    const c = capture(fixture.dir, { readBroker: undefined, env: { ...process.env, XDG_CACHE_HOME: undefined, RMD_GH_CACHE_HOME: cacheRoot } });
     assert.equal(await prStateCommand(["1", "--max-age", "2m"], c.deps), 0);
     assert.equal(requests.length, 1);
     assert.equal(requests[0].class, "agent");

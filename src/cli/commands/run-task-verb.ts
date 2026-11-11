@@ -55,6 +55,7 @@ import { escalate, escalateAsync, ghIssueGateway, ghIssueGatewayAsync, tryEscala
 import { mapRestPr, prStateFromRest, singlePrRestArgs, type ReviewReuseFacts, type GhApiFetcher, type RestPullRow, type RestRollupEntry } from "../../lib/open-prs-rest.js";
 import { probeMerge, type MergedTypecheckPorts } from "../../lib/merge-probe.js";
 import { recordDecision, recordDecisionAsync, type LandFeedbackAsyncOpts } from "../../lib/feedback-landing.js";
+import { resolvePlanDestination } from "../../lib/plan-destination.js";
 import { preflightFailureNotice, preflightSummaryPath } from "../../lib/ci-parity.js";
 import { coverageNarrowSuites, type CoverageRun, type CoverageVerdict } from "../../lib/coverage-narrow.js";
 import { buildAffectedSuitesGraph, type AffectedSelection } from "../../lib/affected-suites.js";
@@ -311,6 +312,9 @@ export interface RunTaskCommandHost {
   readonly runFixRung: (opts: {
   
   guardRoundHead?: boolean;
+  /** W1-T11170, operator-approved scope widening: the actual fix-rung push must prove a session-branch merge
+   *  commit and re-read ownership after all push prechecks. This callback is process-local and never serialized. */
+  ownedConflictPushGuard?: { prHeadSha: string; verifyOwnership: () => Promise<string | undefined> };
   taskId: string;
   runId: string;
   
@@ -418,7 +422,8 @@ export interface RunTaskCommandHost {
     ) => PlanCriteriaAtHeadResult | undefined | Promise<PlanCriteriaAtHeadResult | undefined>;
     runReview: (args: Parameters<RunTaskCommandHost["runReview"]>[0]) => ReturnType<RunTaskCommandHost["runReview"]>;
     
-    push: (worktreePath: string, branch: string, expectedHeadSha?: string, priorHeadSha?: string) => unknown;
+    push: (worktreePath: string, branch: string, expectedHeadSha?: string, priorHeadSha?: string,
+      guard?: { prHeadSha: string; verifyOwnership: () => Promise<string | undefined> }) => unknown;
     
     readHeadShaForProvenance?: (prUrl: string) => string;
     issues: IssueGateway;
@@ -538,10 +543,10 @@ export interface RunTaskCommandHost {
   readonly readInheritedCensusContextAsync: (root: string, path: string) => Promise<InheritedCensusContext>;
   readonly checkFixCensusSnapshotAsync: (root: string, path: string | undefined, log: (step: string, extra?: Record<string, unknown>) => void, run?: CensusChildRunner<Promise<CensusChildResult>>) => Promise<{ refusal?: CensusPushRefusal; unmeasured?: string } | undefined>;
   readonly FixRoundPushError: new (pushCause: RunErrorCause, refusal: CensusPushRefusal | undefined, detail: string) => RmdError & { readonly pushCause: RunErrorCause; readonly refusal: CensusPushRefusal | undefined; readonly detail: string };
-  readonly pushFixRound: (wt: string, branch: string, expectedHeadSha?: string, priorHeadSha?: string, deps?: Pick<PushRunBranchAsyncOpts, "capture" | "exec"> & { mergedTypecheck?: MergedTypecheckPorts }) => Promise<FixRoundPushReceipt>;
+  readonly pushFixRound: (wt: string, branch: string, expectedHeadSha?: string, priorHeadSha?: string, deps?: Pick<PushRunBranchAsyncOpts, "capture" | "exec"> & { mergedTypecheck?: MergedTypecheckPorts; ownedSessionGuard?: { prHeadSha: string; verifyOwnership: () => Promise<string | undefined> } }) => Promise<FixRoundPushReceipt>;
   readonly coveragePrecheck: (wt: string, ports?: CoveragePrecheckPorts) => Promise<CoveragePrecheck>;
   readonly coveragePushRefusal: (result: CoveragePrecheck, log: (step: string, extra?: Record<string, unknown>) => void, site: string) => CensusPushRefusal | undefined;
-  readonly pushFixRoundPrechecked: (log: (step: string, extra?: Record<string, unknown>) => void, wt: string, branch: string, expectedHeadSha?: string, ports?: CoveragePrecheckPorts, push?: (wt: string, branch: string, expectedHeadSha?: string, priorHeadSha?: string) => unknown, priorHeadSha?: string, reapply?: { ports?: FixRoundReapplyPorts; attempted?: boolean }) => Promise<unknown>;
+  readonly pushFixRoundPrechecked: (log: (step: string, extra?: Record<string, unknown>) => void, wt: string, branch: string, expectedHeadSha?: string, ports?: CoveragePrecheckPorts, push?: (wt: string, branch: string, expectedHeadSha?: string, priorHeadSha?: string) => unknown, priorHeadSha?: string, reapply?: { ports?: FixRoundReapplyPorts; attempted?: boolean }, guard?: { prHeadSha: string; verifyOwnership: () => Promise<string | undefined> }) => Promise<unknown>;
   readonly repairRetroAcceptanceBlock: (prUrl: string, log: (step: string, extra?: Record<string, unknown>) => void, deps?: {
     fetchBody?: (url: string) => string;
     editBody?: (url: string, body: string) => void;
@@ -4667,8 +4672,8 @@ export async function runTask(
   const runReviewFn = opts.runReview ?? runReview;
   const fetchPrBodyFn = opts.fetchPrBody ?? fetchPrBodyViaGh;
   const recordDecisionFn = opts.recordDecision
-    ?? ((root: string, params: Parameters<typeof recordDecisionAsync>[1]) =>
-      recordDecisionAsync(root, params, opts.decisionLanding));
+    ?? ((root: string, params: Parameters<typeof recordDecisionAsync>[1], landing?: Pick<LandFeedbackAsyncOpts, "planDestination">) =>
+      recordDecisionAsync(root, params, { ...opts.decisionLanding, ...landing }));
   const planPath = opts.planPath ?? join(repoRoot, "plan", "tasks.yaml");
   const ledgerPath = ledgerPathFor(config);
   const owner = opts.owner ?? resolveOwner();
@@ -6902,6 +6907,10 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
       // filename pick stays ledger-only instead of burying real decisions.
       const recordVerdict = shouldRecordDecision(decision);
       let landed = false;
+      // W1-T12201: read the host switch on each decision. The public repository is this run's checkout.
+      const planDestination = recordVerdict.record
+        ? resolvePlanDestination("decision", join(config.root, "state"), { owner, repo: task.repo, checkoutDir: repoRoot })
+        : undefined;
       if (recordVerdict.record) {
         // W1-T191: one shard per resolution (`plan/decisions.d/<taskId>-<runId>.md`), never
         // the shared `DECISIONS.md` append this replaces — concurrent runs across different
@@ -6918,7 +6927,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
           band: recordVerdict.band,
           reason: recordVerdict.reason,
           ...(decision.falsifier ? { falsifier: decision.falsifier } : {}),
-        })).landed;
+        }, { planDestination })).landed;
       }
       log("decision.autochoose", {
         chosen,
@@ -6926,6 +6935,8 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
         risk_band: recordVerdict.band,
         landed,
         falsifier: decision.falsifier ?? null,
+        ...(planDestination === undefined || planDestination.outcome === "off" ? {} : { plan_destination: planDestination.outcome }),
+        ...(planDestination?.outcome === "unreadable" ? { plan_destination_reason: planDestination.reason } : {}),
       });
       say(
         `DECISION_REQUEST auto-chose: ${chosen} (${
