@@ -384,6 +384,35 @@ for (const [name, message, expected] of [
   });
 }
 
+test("W1-T12199: staging the same bytes twice is a no-op, other bytes for a waiting path are refused, and main's own bytes are refused", async () => {
+  const f = fixture();
+  const stageOnly = { ...f.landingOpts(), stageOnly: true };
+  const edit = (content: string) => [{ relPath: pathOf(A), content, claim: `${A} edit`, proof: "grep: staged edit in plan/tasks.d/W1-T90001-fixture.yaml" }];
+
+  const first = await withLiveWritesAllowed(() => landTaskFilesAsync(f.checkout.dir, edit(EDITED(A)), stageOnly));
+  assert.deepEqual([first.refused, first.waiting], [[], [pathOf(A)]], "the first edit is staged");
+  const callsAfterFirst = f.preflight.calls;
+
+  const same = await withLiveWritesAllowed(() => landTaskFilesAsync(f.checkout.dir, edit(EDITED(A)), stageOnly));
+  assert.deepEqual(same.refused, [], "the same bytes that wait already are not refused");
+  assert.deepEqual(same.waiting, [pathOf(A)]);
+  assert.equal(f.preflight.calls, callsAfterFirst, "the waiting file is not tested again");
+
+  const other = await withLiveWritesAllowed(() => landTaskFilesAsync(f.checkout.dir, edit(`${shard(A)}  note: another edit\n`), stageOnly));
+  assert.equal(other.refused.length, 1);
+  assert.equal(other.refused[0]!.path, pathOf(A));
+  assert.match(other.refused[0]!.reason, /another edit of .* waits for its landing/);
+  assert.equal(readFileSync(join(f.root, "state", "task-files-landing-pending", pathOf(A)), "utf8"), EDITED(A), "the waiting bytes are kept");
+
+  const g = fixture();
+  const held = await withLiveWritesAllowed(() => landTaskFilesAsync(g.checkout.dir, [
+    { relPath: pathOf(B), content: shard(B), claim: `${B} edit`, proof: "grep: W1-T90002 in plan/tasks.d/W1-T90002-fixture.yaml" },
+  ], { ...g.landingOpts(), stageOnly: true }));
+  assert.equal(held.refused.length, 1);
+  assert.match(held.refused[0]!.reason, /origin\/main already holds these bytes at plan\/tasks\.d\/W1-T90002-fixture\.yaml/);
+  assert.deepEqual([g.staged(), g.preflight.calls], [[], 0], "nothing is staged or tested for bytes main holds");
+});
+
 test("W1-T12199 criterion 12: the escalation triage accepts an amendment that waits and names the wait in its receipt", () => {
   assert.match(planAmendmentReceipt(A, { outcome: "waiting" }), /W1-T90001 waits for the next landing pull request of task files/);
   assert.match(planAmendmentReceipt(A, { outcome: "drafted", prUrl: "https://github.com/acme/remudero/pull/1" }), /pull\/1 proposes the proof amendment/);
