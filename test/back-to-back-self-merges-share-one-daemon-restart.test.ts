@@ -6,6 +6,7 @@ import { test } from "node:test";
 import { runDaemon, type DaemonFreshness } from "../src/lib/daemon.js";
 import * as judge from "../src/lib/deploy-judge.js";
 import { loadPlan } from "../src/lib/plan.js";
+import { trackInFlightReview } from "../src/lib/sweep.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 
 const PROOF = "test/back-to-back-self-merges-share-one-daemon-restart.test.ts";
@@ -86,8 +87,12 @@ async function daemonRun(options: {
   const path = join(dir, "tasks.yaml");
   writeFileSync(path, "- id: A\n  title: a\n  repo: remudero\n  type: implement\n  depends_on: []\n  status: queued\n");
   let nowMs = START;
-  let releaseSweep: (() => void) | undefined;
-  let passes = 0;
+  // W1-T10054: busy is work a restart would interrupt, so a busy run holds an in-flight review, not a running pass.
+  let releaseReview: (() => void) | undefined;
+  if (options.busy) {
+    const held = new Promise<void>((resolve) => { releaseReview = resolve; });
+    void trackInFlightReview(held, { taskId: "A", prNumber: 1 });
+  }
   const rows: Row[] = [];
   const summary = await runDaemon(loadPlan(path), {
     refreshMerged: () => () => true,
@@ -97,10 +102,7 @@ async function daemonRun(options: {
       nowMs += MINUTE;
       assert.ok(nowMs <= START + 61 * MINUTE, "fake-clock fixture must terminate");
     },
-    sweep: async () => {
-      if (passes++ === 0 && options.busy) await new Promise<void>((resolve) => { releaseSweep = resolve; });
-      return {};
-    },
+    sweep: async () => ({}),
     checkFreshness: (): DaemonFreshness => {
       const minute = (nowMs - START) / MINUTE;
       if (options.initiallyFresh && minute === 0) return { stale: false };
@@ -113,9 +115,9 @@ async function daemonRun(options: {
       : [],
     log: (step, extra = {}) => {
       rows.push({ step, atMs: nowMs, extra });
-      if (step === "daemon.freshness_decision" && extra.action === "restart") releaseSweep?.();
+      if (step === "daemon.freshness_decision" && extra.action === "restart") releaseReview?.();
     },
-  }, { freshnessMinLifetimeMs: 0, sweepWallClockBoundMs: 24 * 60 * MINUTE }).finally(() => releaseSweep?.());
+  }, { freshnessMinLifetimeMs: 0, sweepWallClockBoundMs: 24 * 60 * MINUTE }).finally(() => releaseReview?.());
   assert.equal(summary.stopReason, "stale");
   return rows;
 }
