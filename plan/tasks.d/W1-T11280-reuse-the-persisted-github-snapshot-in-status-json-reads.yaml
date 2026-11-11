@@ -14,7 +14,7 @@
     - W1-T11155
   files: [src/lib/report-commands.ts, test/status-json-deadline.test.ts]
   priority: 4
-  status: queued
+  status: merged
   # backlog gardener: band=4 evidence=f59d8828f1f28637
   # backlog gardener: placed=2026-11-04T03:16:35.154Z
   attempts: 0
@@ -40,6 +40,13 @@
       its unavailable-not-empty rule (plan/tasks.d/W1-T4208-status-json-deadline.yaml; src/lib/report-commands.ts ~829-~994).
     Settled by lookup: is W1-T11155 a prerequisite? -> no. It touches review/status/escalate and the bundle builder, not
       report-commands.ts (plan/tasks.d/W1-T11155-a-bundled-review-loads-the-modules-it-defers.yaml).
+    Settled by lookup: why do the criteria name test titles and not the whole file? -> test/status-json-deadline.test.ts
+      already exists and passes on main (W1-T4208), so a whole-file proof passes at base too and cannot discriminate this
+      change. A PR proof must name the title of a test the change ADDS (src/lib/proof-grammar.ts PR-body grammar,
+      W1-T8625, #11096). The title stems are pinned in design step 4 so the implementer writes them verbatim.
+    Settled by lookup: is a title-stem `unit test:` proof legal in a task shard? -> yes. It parses, and it draws no
+      non-title WARN when the body is at most 100 chars and has no " -> " or "; " (src/lib/task-linter.ts looksLikeNonTitleBody;
+      precedent plan/tasks.d/W1-T1065-pause-is-read-once-per-tick-and-admission-is-minutes-later.yaml).
     Scope is the operator-approved proposal
     (wreckterra-evidence-20261025/status-json-snapshot-cache-followup-proposal-20261103.json).
     CLARIFIED 2026-11-11 (PLAN-clarify-1794411460166): PR 17949 failed proof-discrimination. The whole-file proof
@@ -58,6 +65,24 @@
       only when the resolved file is ABSENT at base, and this suite exists (src/lib/task-linter.ts ~1587, ~1683, ~1737).
     Settled by lookup: does the whole-file suite claim need keeping? -> no. CI runs the whole suite on every PR, so the
       existing W1-T4208 tests stay guarded without a criterion that cannot discriminate.
+    CLARIFIED 2026-11-11 (PLAN-clarify, PR 17963 round 2): criterion 1 now names the fresh-snapshot regression by its
+    exact title, `W1-T11280: status JSON reuses a fresh persisted GitHub snapshot`, not the `W1-T11280 fresh snapshot`
+    stem. The colon is not a regex metacharacter, and the body is not a `<file>::<title>` form, so it stays a bare
+    literal-title filter. The other five stems are unchanged.
+    CLARIFIED 2026-11-11 (PLAN-clarify-1794429806728): the six `unit test:` proofs now carry the VERBATIM titles of their tests, either in full or as distinctive title
+    prefixes when the 100-character resolver bound requires it. Four use the full title; the two longer than the
+    title-body limit use a distinctive verbatim prefix ending at `the status read stays`. The tests are in
+    test/status-json-deadline.test.ts (~240-~290). The former criterion-1 body
+    `W1-T11280: status JSON reuses a fresh persisted GitHub snapshot` matched no real title. Claims, files, risk,
+    verify, metadata and gates are unchanged. Where design step 4's pinned title differs, the acceptance titles win.
+    Settled by lookup: is this already filed or already decided? -> no. No other shard amends these proofs
+      (grep W1-T11280 in plan/ finds only citations in W1-T11325, W1-T11874 and an incident feedback record).
+    Settled by lookup: what are the current titles? -> the six `test("W1-T11280 ...")` calls in
+      test/status-json-deadline.test.ts; each proof is a literal title or a distinctive verbatim prefix within the
+      100-character resolver bound.
+    Settled by lookup: does a body over 100 chars block lint-plan? -> proof-dialect emits a WARN, but
+      proof-resolvability blocks title-only bodies over its 100-character limit as scenario-shaped; the two long proofs
+      therefore use literal prefixes (src/lib/task-linter.ts ~708, ~747).
   design: |
     1. Change ONLY the JSON-mode `buildBatchedGithub` call in `statusCommand` so it also passes the persisted repository
        `BoardSnapshotCache` (`createBoardSnapshotCache(<state root>, owner, repo)`, with the root chosen the same way the
@@ -68,13 +93,14 @@
     3. Keep the 30-second status JSON read deadline, the selector rules and the admission rules exactly as they are.
        This task adds no new knobs.
     4. TDD, strictly: in test/status-json-deadline.test.ts, write the failing regressions before the change. (a) A fresh
-       persisted snapshot is used by the JSON status read without a full board re-fetch. (b) A missing, stale, truncated
-       or unreadable snapshot, and a remote-ref failure, each still yield explicit unavailable evidence within the deadline.
+       persisted snapshot is used by the JSON status read without a full board re-fetch. Give this test EXACTLY the title
+       `W1-T11280: status JSON reuses a fresh persisted GitHub snapshot`, because acceptance criterion 1 names it verbatim.
+       (b) A missing, stale, truncated or unreadable snapshot, and a remote-ref failure, each still yield explicit unavailable evidence within the deadline.
        Put `W1-T11280` in each new test title.
        EXACT TITLE STEMS (the acceptance proofs below match them as LITERAL substrings, so copy them verbatim). Write
        one test per case, and start each title with its stem. Plain words only, with no regex metacharacters:
-         - `W1-T11280 fresh snapshot` ... (a). This is the behavioural falsifier. It must FAIL until the gateway passes
-           the cache, so assert that no full board re-fetch happens (for example, count the injected exec's board-list
+         - `W1-T11280: status JSON reuses a fresh persisted GitHub snapshot` (a), the whole title, verbatim.
+           This is the behavioural falsifier. It must FAIL until the gateway passes the cache, so assert that no full board re-fetch happens (for example, count the injected exec's board-list
            calls). Asserting only that the output is right would pass on the uncached path.
          - `W1-T11280 missing snapshot` ...
          - `W1-T11280 stale snapshot` ...
@@ -87,17 +113,17 @@
     NOT IN SCOPE: any other file, any change to board-snapshot-cache.ts or status.ts, any new task.
   acceptance:
     - claim: "a fresh persisted snapshot is consumed by the JSON status read without a full board re-fetch"
-      proof: "unit test: W1-T11280 fresh snapshot"
+      proof: "unit test: W1-T11280 fresh snapshot: status JSON reuses a persisted GitHub snapshot"
     - claim: "a missing persisted snapshot yields explicit unavailable evidence within the deadline"
-      proof: "unit test: W1-T11280 missing snapshot"
+      proof: "unit test: W1-T11280 missing snapshot: the snapshot is never read as rows and the status read stays unavailable"
     - claim: "a stale persisted snapshot yields explicit unavailable evidence, never silently filled rows"
-      proof: "unit test: W1-T11280 stale snapshot"
+      proof: "unit test: W1-T11280 stale snapshot: it does not fill an unfinished read and the status read stays unavailable"
     - claim: "a truncated persisted snapshot yields explicit unavailable evidence, never silently filled rows"
-      proof: "unit test: W1-T11280 truncated snapshot"
+      proof: "unit test: W1-T11280 truncated snapshot: the snapshot is never read as rows and the status read stays"
     - claim: "an unreadable persisted snapshot yields explicit unavailable evidence within the deadline"
-      proof: "unit test: W1-T11280 unreadable snapshot"
+      proof: "unit test: W1-T11280 unreadable snapshot: the snapshot is never read as rows and the status read stays"
     - claim: "a remote-ref read failure yields explicit unavailable evidence within the deadline"
-      proof: "unit test: W1-T11280 remote-ref failure"
+      proof: "unit test: W1-T11280 remote-ref failure: a read failure beside a fresh snapshot stays unavailable"
     - claim: "the regressions for consuming a fresh persisted snapshot and for unusable or missing evidence staying unavailable are titled with this task id"
       proof: "grep: W1-T11280 in test/status-json-deadline.test.ts"
   note: |
@@ -108,5 +134,4 @@
     The new regressions in test/status-json-deadline.test.ts fail until the report-commands.ts gateway passes the cache,
     and the gateway change has no other falsifier. That suite already exists from W1-T4208, so it is not renamed to this
     shard's slug. The operator-approved scope is exactly this one task, so it is not split. The band reflects span only.
-    The change itself is still one read-only option on a status path that already fails closed.
     No depends_on: W1-T4208 is merged, and W1-T11155 is separate.

@@ -1,0 +1,122 @@
+- id: W1-T11847
+  title: A material reviewer-code advance queues exactly one fresh review per affected open PR and prevents old reviewer-code evidence from gating merge
+  repo: remudero
+  depends_on: [W1-T11729]
+  priority: 0.2
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # touches review scheduling, required status publication and merge-queue attestation; all paths must fail closed
+  band_meaning: blast-radius
+  budget_usd: 100.00
+  origin: operator-session#review-refresh-2026-11-09
+  plan_refs: [W1-T3691, W1-T9124, W1-T11729]
+  files:
+    - src/lib/sweep.ts
+    - src/lib/review.ts
+    - src/lib/self-sync.ts
+    - scripts/merge-queue-review-attest.mjs
+    - test/review/a-material-reviewer-code-advance-queues-one-fresh-review.test.ts
+    - test/merge-queue-review-attest.test.ts
+    - src/cli/commands/sweep.ts
+    - .github/workflows/merge-queue-review-attest.yml
+    - test/a-stale-gate-cannot-publish-a-verdict.test.ts
+    - test/a-delivered-verdict-settles-a-pending-status-by-reposting-its-state.test.ts
+    - test/a-computed-review-verdict-survives-a-failed-post-in-an-outbox.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED on 2026-11-08 on PR #17209, exact head 304b7207bb28febb2bf849a37023a30525fc6d23:
+    remudero-review failed at 13:18 UTC with a call-site lint violation involving
+    src/lib/client-request.ts in remudero-console. The narrow external-repository exception was
+    already merged in code-only PR #17289, commit f88262675ff78c178b0f0054629218dc5d42622e.
+    On the unchanged head, a pending status was posted at 13:39:47 UTC and a later review passed
+    at 13:48:06 UTC, naming reviewer code 4c549c5db670; #17209 merged at 13:49 UTC.
+
+    The failed status does not expose its reviewer-code SHA or run ID. Therefore this record does
+    not attribute the failure or the scheduling delay to stale reviewer code. It records the
+    observable gap: a terminal status stays visible on the same PR head/context until a new status
+    is posted, and no current sweep mechanism was found that enqueues a re-review specifically when
+    reviewer code materially advances. The pending status at 13:39 shows a new attempt was eventually
+    scheduled; the 21-minute interval before it is not explained by available evidence.
+
+    Current mechanism: review.posted rows written by `rmd review` carry the exact head_sha and full
+    reviewer_code_sha through reviewerHealthRowFields (src/cli/commands/review.ts log wrapper);
+    preserve and regression-test that invariant.
+    The GitHub-visible status description, however, exposes only the first 12 code-SHA characters
+    (src/lib/review.ts reviewDescriptionWithCodeProvenance, `codeSha.slice(0, 12)`).
+
+    AUDIT 2026-11-11 on main 80136d0c9ad0: three other paths write or re-post a terminal verdict
+    with no reviewer-code provenance. The sweep's verdict-reuse and proof-only-discrimination rows
+    (src/cli/commands/sweep.ts, the two `step: "review.posted"` appends) and the outbox drain row
+    (src/lib/review.ts, W1-T11928) carry no reviewer_code_sha. None of these three passes
+    reviewerCodeFreshness to postReviewStatusGuarded, so the stale-code refusal does not run. The
+    reuse and discrimination statuses have no code SHA in their description; the outbox re-posts
+    the description it stored when the first post failed. The W1-T11729 restore path (restorableDeliveredVerdict
+    in src/lib/sweep.ts, posted from src/cli/commands/sweep.ts) re-posts a delivered verdict when the
+    status regressed to pending, keyed by head and input digest only. Left as is, that path would
+    re-post the old stale-code verdict over the pending status this task posts.
+    sweep.reviewOutcomeKeyForPr keys by task, PR URL, exact head SHA and reviewInputDigest, not the
+    reviewer-code SHA; claimReview then deduplicates a delivered verdict without checking whether
+    its reviewer_code_sha remains materially current. The existing reviewAdvanceIsMaterial predicate
+    is used to reject a terminal verdict from stale reviewer code, but it does not itself admit a new
+    review for an already-delivered result after main advances. The merge-group attestor checks only
+    that remudero-review is success on the PR head; it does not validate the code SHA in the status.
+    These are the proven gaps. The 2026-11-08 failure's run identity and reviewer-code SHA remain
+    unavailable, so the delay before its next pending post is still unexplained.
+  design: |
+    1. Preserve the existing full head_sha and 40-character reviewer_code_sha on terminal
+       review.posted ledger rows. Include the full reviewer-code SHA in GitHub's status description
+       within its 140-character limit; the status API's commit SHA remains the exact PR head binding.
+       A missing, legacy or truncated visible code SHA is incomplete merge-gate evidence.
+    2. Detect material reviewer-code advances in the sweep using the existing
+       REVIEW_MATERIAL_ADVANCE_PATHS semantics. For each affected open PR, bind demand to the exact
+       PR URL, current head SHA and reviewer-code SHA. Post a pending remudero-review status on that
+       head before dispatching the existing review lane, so the earlier failure or success is
+       visibly stale while review is queued.
+    3. Make the demand durable and bounded. Deduplicate repeated sweep passes for the same identity;
+       a new head or materially newer reviewer code gets its own identity. Closed PRs, stale heads,
+       unreadable comparisons and incomplete ledger/status evidence never produce a success-shaped
+       result. Preserve existing retry/backoff and review admission limits so one code advance does
+       not create a retry storm.
+    4. Tighten merge-group attestation: require the exact current PR head and a successful terminal
+       review whose full reviewer-code SHA is still materially current relative to main under the
+       shared freshness predicate. Pending, missing, legacy, short-SHA, stale or unreadable evidence
+       refuses attestation. Do not weaken required checks or the native remudero-review status.
+       The attestor decides "materially current" with the same predicate the sweep uses
+       (reviewAdvanceIsMaterialAt in src/lib/self-sync.ts, with its run-task.ts review-path rule),
+       not a copied path list. A stricter attestor would eject PRs the sweep holds as current, and
+       a looser one would pass stale code. If the predicate needs full history or installed
+       dependencies in the job, change .github/workflows/merge-queue-review-attest.yml and keep its
+       merge_group-only trigger and no-`if:` invariant (test/merge-queue-review-attest.test.ts).
+    5. Amended 2026-11-11: every path that writes or re-posts a terminal verdict carries the
+       verdict's full reviewer-code SHA and passes the freshness check before it posts. This covers
+       verdict reuse and proof-only discrimination (the reused verdict keeps the code SHA that judged
+       it), the outbox drain, and the W1-T11729 restore. A restore or outbox entry whose code SHA is
+       missing or materially stale does not post a terminal status; the sweep admits one fresh
+       review for it instead. Update the existing tests of these paths
+       (test/a-stale-gate-cannot-publish-a-verdict.test.ts asserts the 12-character suffix,
+       test/a-delivered-verdict-settles-a-pending-status-by-reposting-its-state.test.ts and
+       test/a-computed-review-verdict-survives-a-failed-post-in-an-outbox.test.ts use rows and
+       descriptions with no code SHA) without removing any refusal they assert.
+  acceptance:
+    - claim: Every terminal review.posted row retains the exact head_sha and full reviewer_code_sha, and its GitHub-visible remudero-review status description contains that full code SHA
+      proof: 'grep: W1-T11847: terminal review provenance is full in the ledger and visible status in test/review/a-material-reviewer-code-advance-queues-one-fresh-review.test.ts'
+    - claim: One material reviewer-code advance posts pending on the exact current PR head before admitting one fresh review; repeated sweeps of the same PR URL, head SHA and code SHA do not enqueue duplicate work
+      proof: 'grep: W1-T11847: one reviewer-code advance posts pending and admits one review in test/review/a-material-reviewer-code-advance-queues-one-fresh-review.test.ts'
+    - claim: The failure-to-fresh-review transition leaves the old result visibly pending until a fresh result for the current reviewer code is posted, and a head move or closed PR cannot receive the old result
+      proof: 'grep: W1-T11847: failure becomes pending before the only fresh terminal review in test/review/a-material-reviewer-code-advance-queues-one-fresh-review.test.ts'
+    - claim: Merge-group attestation rejects stale, missing, short-SHA, pending or unreadable reviewer-code evidence and accepts only a success for the exact PR head whose code SHA is materially current
+      proof: 'grep: W1-T11847: stale or incomplete reviewer-code provenance cannot attest merge in test/review/a-material-reviewer-code-advance-queues-one-fresh-review.test.ts'
+    - claim: Unrelated main churn does not requeue reviews or invalidate a materially current reviewer-code result
+      proof: 'grep: W1-T11847: unrelated main churn leaves the reviewer-code result current in test/review/a-material-reviewer-code-advance-queues-one-fresh-review.test.ts'
+    - claim: A verdict reuse, a restore of a delivered verdict or an outbox repost never posts a terminal status whose reviewer-code SHA is missing or materially stale
+      proof: 'grep: W1-T11847: a reused, restored or outboxed verdict carries current reviewer code in test/review/a-material-reviewer-code-advance-queues-one-fresh-review.test.ts'
+  note: |
+    reservation hand-off: run-unfiled-1794226583836 -> run-unfiled-1794413364000
+
+    Keep code-only implementation separate from this plan filing. The normal hosted CI and native
+    remudero-review gates remain required. The 2026-11-08 incident's failed-run source and cause
+    remain unknown; this task fixes the proven status/scheduling/attestation gap without claiming
+    a historical root cause.
