@@ -37,7 +37,7 @@ import { observeSlotCapacity, publishSlotCapacity, retireOwnedSlotCapacity, Slot
 import { acquireSlotMutation, createGuardHolderProbe, slotMutationPending, type GuardHolderEvidence, type OrphanGuardRecovery } from "./test-slot-mutation.js";
 import { observeTestSlotParent } from "./test-slot-parent.js";
 import { describeQueuePosition, estimateQueueEta, readHoldHistory, readTestSlotQueue, recordTestSlotHold, takeTestSlotTicket, testSlotQueueDir,
-  type HoldRecord, type OwnTicket, type QueueEta, type QueueHolderView, type QueuedTicket, type TicketJudge } from "./test-slot-queue.js";
+  type HoldRecord, type OwnTicket, type QueueEta, type QueueHolderView, type QueuedTicket, type TestSlotTicket, type TicketJudge } from "./test-slot-queue.js";
 
 /** Names the slot directory every container and the host share (the scratch mount's bind). */
 export const TEST_SLOT_DIR_ENV = "RMD_TEST_SLOT_DIR";
@@ -1042,6 +1042,10 @@ export interface TestSlotOptions {
   queue?: boolean;
   /** A ticket {@link enqueueTestSlot} already took (W1-T9951): the acquisition waits in ITS place, never a new one. */
   ticket?: OwnTicket;
+  /** The suite work this run was priced at, in ms (the capacity verdict's `costMs`), written on the ticket it takes:
+   *  waiters are admitted cheapest first, each aged by its wait ({@link testSlotAdmissionOrder}). Unset, the run is
+   *  ordered as the median of the priced waiters. A ticket handed in through `ticket` keeps the price it was taken with. */
+  costMs?: number;
   /** The human line a queued waiter prints when where it stands changes; default stderr unless `log` is injected. */
   say?: (line: string) => void;
   /** Which priority binaries exist, for the caller's {@link lowPriorityCommand}. */
@@ -1167,12 +1171,46 @@ function darwinHeadroom(opts: TestSlotOptions): { active: boolean; opts: TestSlo
     opts: { ...opts, memoryHeadroom: () => readMemoryHeadroom(undefined, { platform, vmStat: () => report() }) } };
 }
 
-/** A suite ticket taken ahead of its admission (W1-T9951): it holds its arrival place while other work runs. */
+/** A ticket with the suite work its run was priced at; the queue module writes and reads back every field it is handed. */
+export type PricedTestSlotTicket = TestSlotTicket & { costMs?: number };
+
+/** The price a ticket carries: a finite positive number of ms, or nothing. An unpriced run is never handed a number here. */
+function ticketPrice(costMs: unknown): { costMs?: number } {
+  return typeof costMs === "number" && Number.isFinite(costMs) && costMs > 0 ? { costMs } : {};
+}
+
+/**
+ * The order the live waiters are admitted in, first to last (W1-T11915).
+ *
+ * OBSERVED 2026-11-09: one author preflight of 74 minutes waited 24 of them for a slot, and a plan-only change that
+ * needs a few minutes of suites was refused after 45 minutes behind heavier runs. The queue was strict arrival order,
+ * so a small run paid the whole runtime of every larger run that arrived before it.
+ *
+ * RULE: the lowest `costMs / (1 + waitedMs)` goes first. Cost is the suite work the run was priced at; the wait is this
+ * clock's `now` less the ticket's own `arrivedAt`, and the one is a millisecond of that same clock, there so a wait of
+ * zero divides. Shortest expected job first, each cost divided by its own wait: a run N times costlier than another
+ * goes ahead of it once it has waited N times as long, so a long wait is never passed over for good and no wait
+ * ceiling is involved. A ticket with no price is ordered as the median of the prices the live tickets carry; when none
+ * carries one every cost is the same whichever number stands for it, and the order is the waits alone, which is
+ * arrival order. Equal scores keep arrival order (the ticket names').
+ */
+export function testSlotAdmissionOrder(live: readonly QueuedTicket[], now: number): QueuedTicket[] {
+  const price = (t: QueuedTicket): number | undefined => ticketPrice((t.ticket as PricedTestSlotTicket).costMs).costMs;
+  const priced = live.map(price).filter((ms): ms is number => ms !== undefined).sort((a, b) => a - b);
+  const mid = priced.length >> 1;
+  const median = priced.length === 0 ? 1 : priced.length % 2 === 1 ? priced[mid]! : (priced[mid - 1]! + priced[mid]!) / 2;
+  return live.map(t => ({ t, score: (price(t) ?? median) / (1 + Math.max(0, now - Date.parse(t.ticket.arrivedAt))) }))
+    .sort((a, b) => a.score - b.score || (a.t.name < b.t.name ? -1 : a.t.name > b.t.name ? 1 : 0)).map(scored => scored.t);
+}
+
+/** A suite ticket taken ahead of its admission (W1-T9951): its wait counts from here while other work runs. */
 export interface TestSlotQueueHold {
   ticketed: boolean;
   /** 1-based place in line when the ticket was taken; undefined when no ticket was taken. */
   position?: number;
   note: string;
+  /** Price a ticket already in the line; a missing ticket or a settled hold is left alone. */
+  setPrice(costMs: number | undefined): void;
   /** Wait for a slot in this ticket's place; the ticket is gone once this returns. */
   admit(): TestSlotLease;
   /** Leave the line without ever touching a slot. */
@@ -1180,7 +1218,7 @@ export interface TestSlotQueueHold {
 }
 
 /**
- * Take a FIFO ticket now and admit later, so work that needs no slot runs while the ticket waits. No ticket
+ * Take a ticket now and admit later, so work that needs no slot runs while the ticket waits. No ticket
  * (queue off, a live inherited parent, or the queue unusable) leaves {@link TestSlotQueueHold.admit} as a plain
  * {@link acquireTestSlot}, and the note says which.
  */
@@ -1204,13 +1242,15 @@ export function enqueueTestSlot(label: string, opts: TestSlotOptions = {}): Test
     else {
       const arrivedAt = clock.iso();
       const own = takeTestSlotTicket(dir, { pid, host: host(), bootId: bootId(), pidNs: pidNamespace(), processStart: testSlotProcessFacts(pid)?.start,
-        label, arrivedAt, heartbeatAt: arrivedAt, heartbeatIntervalMs: opts.pollMs ?? TEST_SLOT_POLL_MS });
+        label, arrivedAt, heartbeatAt: arrivedAt, heartbeatIntervalMs: opts.pollMs ?? TEST_SLOT_POLL_MS, ...ticketPrice(opts.costMs) });
       ticket = own;
       const judge: TicketJudge = { now: () => clock.now(), hostname: host, bootId, pidNamespace, isPidAlive, silentBeats: TEST_SLOT_SILENT_BEATS };
-      const ahead = readTestSlotQueue(dir, judge, row => log(JSON.stringify({ ...row, by: label })), own.name).filter(t => t.name < own.name);
+      // W1-T11915: the place reported is the place admission will use, not the arrival place.
+      const order = testSlotAdmissionOrder(readTestSlotQueue(dir, judge, row => log(JSON.stringify({ ...row, by: label })), own.name), clock.now());
+      const ahead = order.slice(0, Math.max(0, order.findIndex(t => t.name === own.name)));
       position = ahead.length + 1;
       note = `ticket ${own.name} at position ${position}`;
-      log(JSON.stringify({ step: "test_slot.enqueued", label, ticket: own.name, position, ahead: ahead.map(t => ({ label: t.ticket.label, pid: t.ticket.pid })) }));
+      log(JSON.stringify({ step: "test_slot.enqueued", label, ticket: own.name, position, ...ticketPrice(opts.costMs), ahead: ahead.map(t => ({ label: t.ticket.label, pid: t.ticket.pid })) }));
     }
   } catch (error) {
     // Cannot queue collapses to today's unqueued polling at admit(); the note names why, never a refusal.
@@ -1225,6 +1265,9 @@ export function enqueueTestSlot(label: string, opts: TestSlotOptions = {}): Test
   };
   return {
     ticketed: ticket !== undefined, position, note,
+    setPrice(costMs: number | undefined): void {
+      if (!settled) ticket?.setPrice(costMs);
+    },
     admit(): TestSlotLease {
       if (settled) throw new Error("test slot ticket already admitted or cancelled");
       settled = true;
@@ -1480,7 +1523,8 @@ function* testSlotPolls(label: string, opts: TestSlotOptions, maximum: number,
     return `memory headroom ${mib(headroom)} MiB < ${mib(need)} MiB for this run and the live holders' peaks`;
   };
   let announced = false;
-  // W1-T9950: a FIFO ticket per waiter, so admission follows arrival. An explicit protected parent gets no new entry.
+  // W1-T9950: a ticket per waiter, so admission follows one shared order rather than whose poll lands first; W1-T11915
+  // makes that order cheapest first, aged by wait. An explicit protected parent gets no new entry.
   const queueEnabled = !parentPolicy && (opts.queue ?? (opts.ticket !== undefined || (opts.dir === undefined && scope !== "test-process")));
   let queueing = queueEnabled, ticket: OwnTicket | undefined = queueEnabled ? opts.ticket : undefined, lastQueued = "";
   const say = opts.say ?? (opts.log ? undefined : (line: string) => void process.stderr.write(`${line}\n`));
@@ -1501,22 +1545,24 @@ function* testSlotPolls(label: string, opts: TestSlotOptions, maximum: number,
     if (!queueing || ticket) return;
     try {
       ticket = takeTestSlotTicket(dir, { pid: opts.pid ?? process.pid, host: host(), bootId: bootId(), pidNs: pidNamespace(), processStart,
-        label, arrivedAt: startedIso, heartbeatAt: clock.iso(), heartbeatIntervalMs: pollMs });
+        label, arrivedAt: startedIso, heartbeatAt: clock.iso(), heartbeatIntervalMs: pollMs, ...ticketPrice(opts.costMs) });
     } catch (error) {
       // Collapses "cannot queue" into today's unqueued polling — never a refusal; queueFailed logs the reason.
       queueFailed(error);
     }
   };
-  /** The live tickets ahead of this waiter (dead ones reaped on the way); joins the line when anyone is in it. */
+  /** The live tickets admitted before this waiter, in {@link testSlotAdmissionOrder} (dead ones reaped on the way);
+   *  joins the line when anyone is in it. A waiter whose own ticket is not in the listing yields to every ticket in it. */
   const queueAhead = (): QueuedTicket[] => {
     if (!queueing) return [];
     try {
       ticket?.beat(clock.iso());
       const live = readTestSlotQueue(dir, judge, row => log(JSON.stringify({ ...row, by: label })), ticket?.name);
       if (!ticket && live.length > 0) joinQueue();
-      const own = ticket?.name;
-      behind = own === undefined ? 0 : live.filter(t => t.name > own).length;
-      return own === undefined ? live : live.filter(t => t.name < own);
+      const order = testSlotAdmissionOrder(live, clock.now()), own = ticket?.name;
+      const at = own === undefined ? -1 : order.findIndex(t => t.name === own);
+      behind = at === -1 ? 0 : order.length - at - 1;
+      return at === -1 ? order : order.slice(0, at);
     } catch (error) {
       // Nobody ahead is NOT claimed: queueFailed logs queue_unavailable and stops queueing for this waiter.
       queueFailed(error);
@@ -1587,6 +1633,7 @@ function* testSlotPolls(label: string, opts: TestSlotOptions, maximum: number,
     for (;;) {
       poll += 1;
       // W1-T9950: only the queue's head — or a waiter with fewer live tickets ahead than open slots — touches a slot.
+      // W1-T11915: "ahead" is the admission order (cheapest first, aged by wait); the open-slot rule is unchanged.
       const ahead = queueAhead();
       const view = ahead.length > 0 ? slotView(true) : undefined;
       const holders: string[] = [];
@@ -1594,7 +1641,7 @@ function* testSlotPolls(label: string, opts: TestSlotOptions, maximum: number,
         // Fail closed while yielding: what this poll saw only adds to what the last admitted poll derived.
         if (view.privateSeen) privateRequired = true;
         if (view.unproven) reservedWorkUnproven = true;
-        holders.push(`queued behind ${ahead.length} earlier waiter(s) with ${view.open} slot(s) open`);
+        holders.push(`queued behind ${ahead.length} waiter(s) admitted first with ${view.open} slot(s) open`);
       } else {
       privateRequired = basePrivate || cleanupIncomplete;
       reservedWorkUnproven = false;
@@ -1667,7 +1714,7 @@ function* testSlotPolls(label: string, opts: TestSlotOptions, maximum: number,
             writeRecord(body);
             removeCapacity = privateWriter ? publishSlotCapacity(path, fd, i, ownedRecord) : undefined;
             const waitedMs = clock.now() - startedAt;
-            if (announced || ticket) log(JSON.stringify({ step: "test_slot.acquired", label, slot: i, waitedMs, dir, ticketed: ticket !== undefined, aheadAtAcquire: ahead.length, concurrency, admission }));
+            if (announced || ticket) log(JSON.stringify({ step: "test_slot.acquired", label, slot: i, waitedMs, dir, ticketed: ticket !== undefined, aheadAtAcquire: ahead.length, ...ticketPrice(opts.costMs), concurrency, admission }));
             const acquiredAt = clock.now();
             let held = true;
             let closed = false;

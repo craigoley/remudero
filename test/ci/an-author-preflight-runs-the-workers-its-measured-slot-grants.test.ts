@@ -6,7 +6,7 @@ import { dirname, join } from "node:path";
 import { test, type TestContext } from "node:test";
 
 // @ts-expect-error This JavaScript CLI module has no declaration file; the test covers its runtime exports.
-import { main, AUTHOR_MAX_WORKERS } from "#scripts/preflight-author.mjs";
+import { main } from "#scripts/preflight-author.mjs";
 // @ts-expect-error This JavaScript CLI module has no declaration file; refusal behavior is asserted below.
 import { MacAuthorCapacityRefusal } from "#scripts/lib/mac-author-admission.mjs";
 import { testSlotQueueDir } from "#src/lib/test-slot-queue.js";
@@ -160,7 +160,10 @@ test("W1-T11583 criterion 1: an idle eight-core host uses more than one author t
   assert.equal(exitCode, 0);
   assert.equal(receipt.verdict, "passed");
   assert.ok(receipt.executionWorkers > 1, "the measured idle host should grant more than one worker");
-  assert.ok(receipt.executionWorkers <= AUTHOR_MAX_WORKERS);
+  // W1-T11891: no fixed maximum remains; the width IS the acquired slot's measured grant.
+  assert.equal(receipt.executionWorkers, receipt.testSlot.concurrency);
+  assert.equal(receipt.capacity.inputs.slotAcquired, true);
+  assert.equal(receipt.capacity.inputs.boundBy, "slot");
   const argv = affectedArgs.find(args => args.includes("test/leaf.test.ts"));
   assert.ok(argv, "the selected affected suite must run");
   assert.ok(argv.includes(`--test-concurrency=${receipt.executionWorkers}`));
@@ -175,7 +178,7 @@ test("W1-T11583 criterion 2: measured CPU and memory capacity still cap author t
   const idle = runAuthor(t, { cores: 8, load1: 0, headroomBytes: 32 * 1024 ** 3 });
   assert.equal(idle.exitCode, 0);
   assert.ok(idle.receipt.executionWorkers > 1, "the capacity path must use more than the removed fixed one-worker ceiling");
-  assert.ok(idle.receipt.executionWorkers <= AUTHOR_MAX_WORKERS);
+  assert.equal(idle.receipt.executionWorkers, idle.receipt.testSlot.concurrency);
 
   for (const [name, input] of [
     ["CPU", { cores: 3, load1: 0, headroomBytes: 32 * 1024 ** 3 }],
@@ -200,7 +203,7 @@ test("W1-T11583 criterion 3: pressure or disk refusal does not spawn affected te
   const idle = runAuthor(t, { cores: 8, load1: 0, headroomBytes: 32 * 1024 ** 3 });
   assert.equal(idle.exitCode, 0);
   assert.ok(idle.receipt.executionWorkers > 1, "the refusal path must coexist with measured multi-worker capacity");
-  assert.ok(idle.receipt.executionWorkers <= AUTHOR_MAX_WORKERS);
+  assert.equal(idle.receipt.executionWorkers, idle.receipt.testSlot.concurrency);
 
   for (const refusal of ["pressure", "disk"] as const) {
     await t.test(refusal, (t) => {
