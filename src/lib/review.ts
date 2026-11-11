@@ -5568,7 +5568,7 @@ export function reviewScopeContext(
   return {
     declaredFiles: [...(declaredFiles ?? [])],
     changedFiles: diffFiles,
-    widenedFiles: scopeViolationFiles(diffFiles, declaredFiles, placementAdmitted),
+    widenedFiles: scopeViolationFiles(diffFiles, declaredFiles).filter((f) => !placementAdmitted.has(f)),
   };
 }
 
