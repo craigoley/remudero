@@ -11,7 +11,7 @@
   plan_refs: [W1-T4471, W1-T4676, W1-T6407, W1-T8511, W1-T11262]
   files:
     - src/lib/escalation-answers.ts
-    - test/dispatch/escalation-answer-errors-name-the-failing-stage.test.ts
+    - test/inbox/escalation-answer-errors-name-the-failing-stage.test.ts
   status: queued
   attempts: 0
   rationale: |
@@ -54,7 +54,7 @@
        property of the thrown value: not its other message text, name, stack, code or cause. Do not attach
        the original as cause and add no message truncation, because no unowned text enters the message.
 
-    4. TESTS go in test/dispatch/escalation-answer-errors-name-the-failing-stage.test.ts and write first, red,
+    4. TESTS go in test/inbox/escalation-answer-errors-name-the-failing-stage.test.ts and write first, red,
        against the current reader. Each drives an injected fault with no network, using a temp root:
        Use five distinct top-level node:test cases with literal title prefixes W1-T11405 criterion 1 through
        W1-T11405 criterion 5, matching the five unit-test proofs below. Criterion 1 covers all seven stage
@@ -117,3 +117,9 @@
     passes the argument limit. That is an UNVERIFIED candidate only, not a finding: nothing here measured the row count,
     and the cause stays UNKNOWN. The split exists so the next row can rule it in or out, and this task must not
     change that line.
+
+    Placement correction 2026-11-11: the current maintained classifier over the actual diagnostic test
+    imports returns test/inbox (primary inbox-operator). The original test/dispatch finding above is
+    retained as historical evidence; the declared file and test design now use the computed inbox path.
+    This changes only the test location and its references; the source path, risk, authority, budget
+    and all seven acceptance claims/proof strings remain unchanged.

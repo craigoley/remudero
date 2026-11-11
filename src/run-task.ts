@@ -50,6 +50,7 @@ import {
   reviewSubjectFallbackAllowed as reviewSubjectFallbackAllowedFromModule,
   planTreeIsBehindMain as planTreeIsBehindMainFromModule,
   reviewCommand as reviewCommandFromModule,
+  REVIEW_EXIT_CAUSE_FLAG,
   whileWorkerRunLive as whileWorkerRunLiveFromModule,
   type ReviewCommandHost,
   type ReviewPostedRecheck,
@@ -1861,6 +1862,7 @@ export { classifyUpdateBranchFailure, detectReviewFalseBlock, detectCiLogVerdict
  * replacement. Extracted so a test can drive it against a counting fake, never a real `gh`/git call.
  */
 export type FreshTreeEntry = { kind: "bundle" | "tsx" | "unknown"; reason: string };
+export type FreshTreeExit = { cause: string; signal?: string; errorClass?: string };
 
 /** W1-T3723 — what {@link buildFreshTreeReviewRunner} needs, all injected so a test drives it
  *  without git, a worktree or a spawn. A `type` whose name does NOT end in `Deps`, deliberately:
@@ -1880,7 +1882,8 @@ export type FreshTreeReviewSeams = {
   /** Run `rmd review <pr> …` with `cwd` at the fresh worktree. Resolves to the exit code; on a
    *  non-zero exit it first hands `onFailure` the child's bounded stderr tail (W1-T4055). */
   spawnReview: (worktree: string, args: string[], onFailure?: (failure: string) => void,
-    parentEnv?: NodeJS.ProcessEnv, onEntry?: (entry: FreshTreeEntry) => void) => Promise<number>;
+    parentEnv?: NodeJS.ProcessEnv, onEntry?: (entry: FreshTreeEntry) => void,
+    store?: { storeRoot?: string }, onExit?: (exit: FreshTreeExit) => void) => Promise<number>;
   /** Tests may replace ownership; production holds the general reaper's real run-lock token. */
   withWorktreeLease?: <T>(worktree: string, action: () => Promise<T>) => Promise<T>;
   /**
@@ -1990,9 +1993,10 @@ export function buildFreshTreeReviewRunner(
   freshness: { originMainSha: string },
   onFailure?: (failure: string) => void,
   onEntry?: (entry: FreshTreeEntry) => void,
+  onExit?: (exit: FreshTreeExit) => void,
 ) => Promise<number | undefined> {
   const prepared = new Map<string, string>();
-  return async (prArg, rest, freshness, onFailure, onEntry) => {
+  return async (prArg, rest, freshness, onFailure, onEntry, onExit) => {
     const sha = freshness.originMainSha;
     try {
       let worktree = prepared.get(sha);
@@ -2011,7 +2015,7 @@ export function buildFreshTreeReviewRunner(
           prepared.delete(sha);
           throw new Error(`cached reviewer worktree at ${reviewerTree} is no longer an exact clean detached checkout of ${sha}`);
         }
-        return deps.spawnReview(reviewerTree, [prArg, ...rest], onFailure, undefined, onEntry);
+        return deps.spawnReview(reviewerTree, [prArg, ...rest], onFailure, undefined, onEntry, undefined, onExit);
       };
       return await (deps.withWorktreeLease ?? withReviewerWorktreeLease)(reviewerTree, run);
     } catch (err) {
@@ -2117,6 +2121,22 @@ export function freshTreeFailureText(text: string): string {
   return `…[${scrubbed.length - kept} earlier chars cut] ${scrubbed.slice(-kept)}`;
 }
 
+/** W1-T12225: the name that the review child wrote for its exit. The form is checked, not the list: the child runs newer code. */
+function readFreshTreeExit(exitFile: string, signal: NodeJS.Signals | null): FreshTreeExit {
+  if (signal) return { cause: "signal", signal };
+  if (!existsSync(exitFile)) return { cause: "not-reported" };
+  let line: string;
+  try {
+    line = readFileSync(exitFile, "utf8").slice(0, 256);
+  } catch (error) {
+    process.stderr.write(`spawnRmdReviewForFreshTree: exit cause unreadable: ${String(error)}\n`);
+    return { cause: "not-reported" };
+  }
+  const [cause = "", errorClass = ""] = line.trim().split("\t");
+  if (!/^[a-z][a-z0-9-]{0,47}$/.test(cause)) return { cause: "not-reported" };
+  return { cause, ...(/^[A-Za-z_$][A-Za-z0-9_$]{0,63}$/.test(errorClass) ? { errorClass } : {}) };
+}
+
 export function spawnRmdReviewForFreshTree(
   worktree: string,
   args: string[],
@@ -2124,14 +2144,17 @@ export function spawnRmdReviewForFreshTree(
   parentEnv: NodeJS.ProcessEnv = process.env,
   onEntry?: (entry: FreshTreeEntry) => void,
   store: { storeRoot?: string } = {},
+  onExit?: (exit: FreshTreeExit) => void,
 ): Promise<number> {
   return new Promise<number>((resolve, reject) => {
     const prepared = materializeMainEntryFromStore(worktree, store.storeRoot);
+    const exitDir = makeTempDir("review-exit");
+    const exitFile = join(exitDir, "cause");
     const sourceArgs = prepared.source ? ["--main-entry-source", JSON.stringify(prepared.source)] : [];
     // A daemon's installation token is copied at spawn and may expire during proof execution.
     // An App-backed child mints its own fresh token in main(); other callers keep their identity.
     const appConfigured = Boolean(parentEnv.GH_APP_ID && parentEnv.GH_APP_INSTALLATION_ID && parentEnv.GH_APP_PRIVATE_KEY_PATH);
-    const child = spawn(join(worktree, "bin", "rmd"), [...sourceArgs, "review", ...args], {
+    const child = spawn(join(worktree, "bin", "rmd"), [...sourceArgs, "review", ...args, REVIEW_EXIT_CAUSE_FLAG, exitFile], {
       cwd: worktree,
       // W1-T4055: stderr is piped only to be TEED — every byte still reaches this process's stderr.
       stdio: ["inherit", "inherit", "pipe", "pipe"],
@@ -2147,7 +2170,7 @@ export function spawnRmdReviewForFreshTree(
       process.stderr.write(chunk);
       held = (held + chunk.toString("utf8")).slice(-FRESH_TREE_STDERR_HOLD_CHARS);
     });
-    child.on("error", reject);
+    child.on("error", (error) => { rmSync(exitDir, { recursive: true, force: true }); reject(error); });
     // `close`, not `exit`: only `close` guarantees the piped stderr has been read to its end.
     child.on("close", (code: number | null, signal: NodeJS.Signals | null) => {
       const [kind, reason] = entryReport.trim().split("\t");
@@ -2157,6 +2180,8 @@ export function spawnRmdReviewForFreshTree(
         reason: `${reason || "launcher-did-not-report"}; ${storeReason}` });
       const exitCode = code ?? 1;
       if (exitCode !== 0) onFailure?.(signal && !held.trim() ? `killed by ${signal}` : freshTreeFailureText(held));
+      if (exitCode !== 0) onExit?.(readFreshTreeExit(exitFile, signal));
+      rmSync(exitDir, { recursive: true, force: true });
       resolve(exitCode);
     });
   });
@@ -2212,6 +2237,7 @@ export function buildReviewerCodeFreshnessGate(
     freshness: Extract<ReviewerCodeFreshness, { status: "stale" }>,
     onFailure?: (failure: string) => void,
     onEntry?: (entry: FreshTreeEntry) => void,
+    onExit?: (exit: FreshTreeExit) => void,
   ) => Promise<number | undefined>,
 ): {
   call: (prArg: string, rest: string[], deps: ReviewCommandDeps) => Promise<number>;
@@ -2239,10 +2265,15 @@ export function buildReviewerCodeFreshnessGate(
           // nothing but an exit code ledgered; the cause is what the next fix needs.
           let failure: string | undefined;
           let entry: FreshTreeEntry = { kind: "unknown", reason: "launcher-did-not-report" };
+          let exit: FreshTreeExit = { cause: "not-reported" };
           const childArgs = [...rest, ...reviewOptionFlags(reviewDeps), JUDGE_AT_OWN_START_FLAG];
-          return reviewFromFreshTree(prArg, childArgs, freshness, (why) => { failure = why; }, (choice) => { entry = choice; }).then((code) => {
+          return reviewFromFreshTree(prArg, childArgs, freshness, (why) => { failure = why; }, (choice) => { entry = choice; }, (ended) => { exit = ended; }).then((code) => {
             if (code !== undefined) {
-              const why = code === 0 ? {} : { failure: failure ?? "no failure reported" };
+              const why = code === 0 ? {} : {
+                failure: failure ?? "no failure reported", exit_cause: exit.cause,
+                ...(exit.signal === undefined ? {} : { exit_signal: exit.signal }),
+                ...(exit.errorClass === undefined ? {} : { exit_error_class: exit.errorClass }),
+              };
               log("review.ran_from_fresh_tree", { ...stale, exit_code: code, entry_kind: entry.kind, entry_reason: entry.reason, ...why });
               return code;
             }
@@ -42088,9 +42119,9 @@ const COMMANDS: readonly CommandSpec[] = [
   },
   {
     name: "daemon",
-    syntax: "rmd daemon --repo <name> [--plan <path>] [--max <n>] [--poll-ms <n>] [--dry-run] [--allow-self-target] [--allow-stale]",
+    syntax: "rmd daemon --repo <name> [--plan <path>] [--max <n>] [--poll-ms <n>] [--shadow-ops-catalog <owner>/<name>] [--dry-run] [--allow-self-target] [--allow-stale]",
     summary: "Persistent scheduler loop draining a named repo; refuses self-target unattended.",
-    detail: "persistent scheduler loop; --repo picks the repo to drain + its gateway (e.g. remudero-sandbox for W1-T12d). Refuses to drain its OWN source repo unattended without --allow-self-target. --dry-run previews the target + planned tasks, spawns nothing. Self-hosting reads the plan from origin/main (W1-T60); --allow-stale proceeds on the last-fetched refs if the fetch fails.",
+    detail: "persistent scheduler loop; --repo picks the repo to drain + its gateway (e.g. remudero-sandbox for W1-T12d). Refuses to drain its OWN source repo unattended without --allow-self-target. --dry-run previews the target + planned tasks, spawns nothing. Self-hosting reads the plan from origin/main (W1-T60); --allow-stale proceeds on the last-fetched refs if the fetch fails. --shadow-ops-catalog <owner>/<name> (W1-T11770, off by default) reads that repository's task catalog read-only off the loop and records only an aggregate dispatch.secondary_catalog_shadow row; it never adds work to dispatch.",
   },
   {
     name: "daemon-plist",

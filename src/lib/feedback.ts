@@ -10,7 +10,11 @@ import {
 } from "./contributor-admission.js";
 export type { FeedbackAdmissionContext } from "./contributor-admission.js";
 import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { basename, join, relative, resolve, sep } from "node:path";
+import { configPath } from "./config.js";
+import { readFileIfExists } from "./fs-race-safe.js";
+import { planDestinationRepository, type PlanDestinationRepositoryRead } from "./plan-destination.js";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import { landFeedback, landFeedbackStatusContent, queueFeedbackRecord, queuedFeedbackDir, readQueuedFeedbackRecords, type LandFeedbackOpts } from "./feedback-landing.js";
 import type { Mount, Mounts } from "./mounts.js";
@@ -512,15 +516,68 @@ function feedbackEntryRelPath(root: string, id: string): string {
   return relative(root, feedbackEntryPath(root, id)).split(sep).join("/");
 }
 
+/** W1-T12202: `<config root>/state` as loadConfig finds it, read without creating the config.
+ *  `undefined` when this host has no config file: the plan destination switch is off. */
+export function instanceStateDir(): string | undefined {
+  const raw = readFileIfExists(configPath());
+  if (raw === undefined) return undefined;
+  let root: unknown;
+  try {
+    root = (JSON.parse(raw) as { root?: unknown } | null)?.root;
+  } catch (error) {
+    void error; // A config that is not JSON: loadConfig's own default root, as defaultHeapCeilingLocation does.
+  }
+  return join(typeof root === "string" && root !== "" ? root : join(homedir(), "Remudero"), "state");
+}
+
+/**
+ * W1-T12202: the roots a feedback reader reads. The public root always; the destination checkout too
+ * while the host file names a repository. A switch file or a checkout that cannot be read is an error,
+ * never an empty second root.
+ */
+export function feedbackReadRoots(root: string, named: PlanDestinationRepositoryRead): string[] {
+  if (named.outcome === "off") return [root];
+  if (named.outcome === "unreadable") throw new FeedbackError(`the plan destination is unreadable: ${named.reason}`);
+  if (resolve(named.checkoutDir) === resolve(root)) return [root];
+  if (!existsSync(join(named.checkoutDir, ".git"))) {
+    throw new FeedbackError("the plan destination checkout is unreadable: it is not a git checkout");
+  }
+  return [root, named.checkoutDir];
+}
+
+function hostFeedbackRoots(root: string): string[] {
+  return feedbackReadRoots(root, planDestinationRepository(instanceStateDir()));
+}
+
+/** W1-T12202: one id in both roots is read once. Equal bytes keep the public copy; different bytes are refused. */
+export function assertOneFeedbackCopy(id: string, first: { path: string; text: string }, second: { path: string; text: string }): void {
+  if (first.text !== second.text) {
+    throw new FeedbackError(`feedback entry "${id}" is in both roots with different bytes: ${first.path} and ${second.path}`);
+  }
+}
+
 export function readLandedFeedbackEntry(root: string, id: string, git: UpstreamGitExec = defaultUpstreamGit(root)): FeedbackEntry | null {
+  const roots = hostFeedbackRoots(root);
+  const landed = landedFeedbackText(git, root, id);
+  if (roots.length === 1) return landed?.entry ?? null;
+  const destination = landedFeedbackText(defaultUpstreamGit(roots[1]), roots[1], id);
+  if (landed !== null && destination !== null) assertOneFeedbackCopy(id, landed, destination);
+  return landed?.entry ?? destination?.entry ?? null;
+}
+
+function landedFeedbackText(git: UpstreamGitExec, root: string, id: string): { path: string; text: string; entry: FeedbackEntry } | null {
+  const rel = feedbackEntryRelPath(root, id);
+  let text: string;
   let parsed: unknown;
   try {
-    parsed = parseYaml(git(["show", `origin/main:${feedbackEntryRelPath(root, id)}`]));
+    text = git(["show", `origin/main:${rel}`]);
+    parsed = parseYaml(text);
   } catch {
     return null; // W1-T9624: a lagging HEAD can lack origin/main's entry; a git failure is absent, never "exists"
   }
   const entry = parsed as Partial<FeedbackEntry> | null;
-  return entry !== null && typeof entry === "object" && entry.id === id && typeof entry.status === "string" ? (entry as FeedbackEntry) : null;
+  return entry !== null && typeof entry === "object" && entry.id === id && typeof entry.status === "string"
+    ? { path: `${root} origin/main:${rel}`, text, entry: entry as FeedbackEntry } : null;
 }
 
 /** ROOT-FREE repo-relative path of a feedback entry — `plan/feedback/<id>.yaml` — for callers
@@ -1007,19 +1064,29 @@ function feedbackEntryFrom(parsed: unknown, id: string): FeedbackEntry {
 }
 
 export function readFeedbackEntry(root: string, id: string): FeedbackEntry {
-  const p = feedbackEntryPath(root, id);
-  if (!existsSync(p)) throw new FeedbackError(`no feedback entry "${id}" (looked in ${p})`);
-  return feedbackEntryFrom(parseYaml(readFileSync(p, "utf8")), id);
+  const looked = hostFeedbackRoots(root).map((r) => feedbackEntryPath(r, id));
+  const held = looked.filter((p) => existsSync(p));
+  if (held.length === 0) throw new FeedbackError(`no feedback entry "${id}" (looked in ${looked.join(" and ")})`);
+  const text = readFileSync(held[0], "utf8");
+  if (held.length === 2) assertOneFeedbackCopy(id, { path: held[0], text }, { path: held[1], text: readFileSync(held[1], "utf8") });
+  return feedbackEntryFrom(parseYaml(text), id);
 }
 
-/** List every captured entry, oldest first (id is Date.now()-prefixed, so filename sort = capture order). */
+/** List every captured entry of both roots, oldest first (id is Date.now()-prefixed, so filename sort = capture order). */
 export function listFeedback(root: string, opts: { status?: FeedbackStatus } = {}): FeedbackEntry[] {
-  const dir = feedbackDir(root);
-  if (!existsSync(dir)) return [];
-  const entries = readdirSync(dir)
-    .filter((f) => f.endsWith(".yaml"))
-    .sort()
-    .map((f) => feedbackEntryFrom(parseYaml(readFileSync(join(dir, f), "utf8")), f.replace(/\.yaml$/, "")));
+  const files = new Map<string, { path: string; text: string }>();
+  for (const r of hostFeedbackRoots(root)) {
+    const dir = feedbackDir(r);
+    if (!existsSync(dir)) continue;
+    for (const f of readdirSync(dir).filter((name) => name.endsWith(".yaml"))) {
+      const copy = { path: join(dir, f), text: readFileSync(join(dir, f), "utf8") };
+      const held = files.get(f);
+      if (held === undefined) files.set(f, copy);
+      else assertOneFeedbackCopy(f.replace(/\.yaml$/, ""), held, copy);
+    }
+  }
+  const entries = [...files].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    .map(([f, copy]) => feedbackEntryFrom(parseYaml(copy.text), f.replace(/\.yaml$/, "")));
   return opts.status ? entries.filter((e) => e.status === opts.status) : entries;
 }
 
