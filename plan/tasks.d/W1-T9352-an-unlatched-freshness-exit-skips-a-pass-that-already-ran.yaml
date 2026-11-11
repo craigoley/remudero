@@ -14,7 +14,6 @@
     - src/lib/daemon.ts
     - test/an-unlatched-freshness-exit-skips-a-pass-that-already-ran.test.ts
     - test/a-latched-restart-exits-when-its-last-lane-settles.test.ts
-    - test/the-pre-exit-pass-runs-beside-the-restart-drain.test.ts
   status: queued
   priority: 1  # raised 2026-11-11 on the 7-day restart study (36 exits to 2026-11-11): W1-T9812 depends on it; was 2.5
   attempts: 0
@@ -77,17 +76,16 @@
        `last_pass_completed_ms` (the last full pass that completed before the exit began; null when none), so the
        arm that ran can be checked against its evidence. The row of every other exit keeps its three fields:
        test/a-latched-restart-exits-when-its-last-lane-settles.test.ts compares the whole row of a latched exit.
-    5. TWO EXISTING TESTS CHANGE, and both files are in `files`.
+    5. ONE EXISTING TEST CHANGES, and its file is in `files`.
        - test/a-latched-restart-exits-when-its-last-lane-settles.test.ts, "an idle freshness exit keeps its full
          pass without a dispatch latch", says "the boot pass cannot replace an idle exit's pass". Design 1 makes
          that false: a boot pass that completes after the advance replaces it. The fixture still runs 2 passes
          only because its fake clock does not move, so the boot pass completes at the instant of the advance and
          not after it. The test keeps its fixture and its count. Its title and message change to say that an idle
          exit keeps its full pass when no pass completed after the advance.
-       - test/the-pre-exit-pass-runs-beside-the-restart-drain.test.ts (W1-T9812), "an exit with no dispatch latch
-         keeps the pass before the drain", uses a tick-top exit after a boot pass. With design 1 that exit starts
-         no pass. The fixture's boot pass now fails, so the exit still runs its own pass and the test still shows
-         the order of pass and drain. Build this task after W1-T9812 has merged.
+       - Amended 2026-11-11: this task builds first. W1-T9812 depends on it and creates
+         test/the-pre-exit-pass-runs-beside-the-restart-drain.test.ts, so that file is not in `files`. The
+         W1-T9812 build writes its "exit with no dispatch latch" fixture for this design (its boot pass fails).
     Tests (new file, `test(` titles verbatim as in the proofs below) drive runDaemon with an injected sweep,
     checkFreshness and a fake clock, as test/a-latched-restart-exits-when-its-last-lane-settles.test.ts does.
   acceptance:

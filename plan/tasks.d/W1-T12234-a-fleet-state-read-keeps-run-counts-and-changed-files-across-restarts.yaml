@@ -21,7 +21,7 @@
     - test/sweep/a-fleet-state-read-keeps-run-counts-and-changed-files-across-restarts.test.ts
     - test/the-full-prelude-names-where-fleet-state-spends-its-time.test.ts
     - test/sweep/a-fleet-state-read-reuses-its-history-and-commits.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "When GitHub reports one run or more for a commit, the store keeps that answer. The next `readFleetState` call for the same commit makes no run-count read for it"
