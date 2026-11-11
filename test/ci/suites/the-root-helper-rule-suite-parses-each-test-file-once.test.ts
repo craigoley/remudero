@@ -77,6 +77,7 @@ type SuiteRun = { status: number | null; results: [string, boolean][]; output: s
 function runSuite(root: string, ...more: string[]): SuiteRun {
   const env: NodeJS.ProcessEnv = { ...process.env };
   delete env.NODE_TEST_CONTEXT; // without this the child would report to this test run, not print its own results
+  env.NODE_V8_COVERAGE = ""; // delete is a no-op under a coverage session; blank it so the child never enrols
   const run = spawnSync(process.execPath, ["--test", "--test-reporter=tap", "--import", "tsx", ...more, SUITE],
     { cwd: root, encoding: "utf8", env, timeout: 110_000 });
   const output = `${run.stdout}\n${run.stderr}`;
