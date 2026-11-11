@@ -25,7 +25,7 @@
   # refusal-amendment (W1-T11915, run work-fix-dispatch-W1-T11915-1794345755992-f3eb@c1fe62f11dc56398b2fbb426d6fe16ed9b703d0d, 2026-11-10T22:17:29.040Z): the worker refused criterion 2 [outside-declared-files] — proposed widen-files: widen `files:` to cover the paths the change needs, or narrow the criteria to the declared files
   #   worker evidence: The aging of a costly waiter is reachable in production only once those callers pass the price; the formula and its test in `src/lib/test-slot.ts` are in scope and already pass.
   #   this task is held from dispatch until its record changes; an Architect must make the change above
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: With two waiters queued, the one whose predicted suite cost is lower is admitted first, and a waiter with no prediction is ordered as the median
