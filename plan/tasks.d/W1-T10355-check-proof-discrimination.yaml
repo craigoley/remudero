@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: high
   band_meaning: blast-radius
   priority: 1.22
@@ -78,10 +78,11 @@
        `W1-T10355 criterion 3: ...`. Rewrite test/a-refused-pr-open-names-its-branch.test.ts:143-187 and the failing-proof cases in
        test/review/an-inconclusive-proof-at-pr-open-is-a-harness-outcome.test.ts:110-126 to assert the refusal, not the red open.
   risk_ruling:
-    verdict: "high"
-    action: escalate
+    verdict: "operator"
+    action: proceed
     confidence: 1
     reasons:
-      - "deterministic backstop: it declares .github/workflows/proof-discrimination-gate.yml, a secrets, auth, CI, deploy, merge-policy or ruling path — irreversible or privileged work goes to a person"
-    judged_at: "2026-10-22T03:29:10.227Z"
-    pin: "cd2c9466669ca9b4214dded150446e969f3e8e8a0411e54a2b0e5c5b3a3da307"
+      - "released by the operator with rmd approve"
+    judged_at: "2026-11-11T17:48:06.699Z"
+    pin: "fe89de986cb21806002e10ffbe3ace8cb93d5162f12ee759de261a8a6ee21aa8"
+    operator_release_pin: "1611e39194b88637008a9cbf1564920773c9be7dc4ef36192f626910c9574632"
