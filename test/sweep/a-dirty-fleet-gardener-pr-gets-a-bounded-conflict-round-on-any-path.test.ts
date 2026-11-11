@@ -481,7 +481,8 @@ test("W1-T11170 criterion 4: production's ownership reader reads the claim chain
     { headRefName: r.branch, taskId: undefined, body: "hand work\n\nRemudero-Task: W1-T90009\n" },
     { nowMs: now, fixClaimKey: "fix-branch--x", readLock: (key) => key === "fix-branch--x" ? "OPERATOR-W1-SOURCE1-1" : undefined });
   assert.deepEqual(evidence.claims, [{ ref: "refs/rmd-dispatch/W1-T90009",
-    renewalsMs: [Date.parse("2026-11-03T00:00:00.000Z"), Date.parse("2026-11-03T00:10:00.000Z")] }]);
+    renewalsMs: [Date.parse("2026-11-03T00:00:00.000Z"), Date.parse("2026-11-03T00:10:00.000Z")],
+    holderKind: "host-a", holderKindMedianGapMs: 10 * 60_000 }]);
   assert.deepEqual(evidence.session, { operatorRunId: "OPERATOR-W1-SOURCE1-1", fixClaimKey: "fix-branch--x" });
   assert.equal(evidence.pushesMs?.length, 4, "the head commit and three hourly pushes");
   for (const iso of ["2026-11-03T01:00:00Z", "2026-11-03T02:00:00Z", "2026-11-03T03:00:00Z"]) {
@@ -512,6 +513,58 @@ test("W1-T11170 criterion 4: production's ownership reader reads the claim chain
   assert.deepEqual(sparse.claims, []);
   assert.deepEqual(sparse.session, {});
   assert.equal(sparse.pushesMs?.length, 1);
+});
+
+test("W1-T11170 criterion 4: production emits the holder kind's median renewal gap, so a one-renewal claim is read on it and a claim with no cadence escalates", async (t) => {
+  const r = dirtyPair(t, "run-unfiled-1793649420011", { [SHARD]: LINES }, { [SHARD]: redundantChange() });
+  const now = Date.now();
+  const stamp = (agoMs: number) => new Date(now - agoMs).toISOString();
+  const raw = (args: string[]) => execFileSync("git", ["-C", r.repo.dir, ...args], { encoding: "utf8",
+    env: { ...process.env, GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t", GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t" } }).trim();
+  const tree = raw(["hash-object", "-t", "tree", "/dev/null"]);
+  // A claim minted by `host` at `mintedAgo`, renewed at each of `renewedAgo` (newest last).
+  const claim = (id: string, host: string, mintedAgo: number, renewedAgo: number[] = []) => {
+    const mint = `rmd-dispatch claim 4242@${host} ${stamp(mintedAgo)}`;
+    let tip = raw(["commit-tree", tree, "-m", mint]);
+    for (const ago of renewedAgo) tip = raw(["commit-tree", tree, "-p", tip, "-m", `${mint}\nrenewed 4242@${host} ${stamp(ago)}`]);
+    raw(["push", "-q", "origin", `${tip}:refs/rmd-dispatch/${id}`]);
+  };
+  // Two peers on host-b that each renewed once, an hour after their mint: the host-b median gap is one hour.
+  claim("W1-T90011", "host-b", 20 * HOUR, [19 * HOUR]);
+  claim("W1-T90012", "host-b", 10 * HOUR, [9 * HOUR]);
+  // The PR's claims were minted and never renewed: one on host-b long ago, one on host-b lately, one on a kind with no cadence.
+  claim("W1-T90010", "host-b", 2 * HOUR);
+  claim("W1-T90014", "host-b", 10 * 60_000);
+  claim("W1-T90013", "host-c", HOUR);
+  const read = (id: string) => sweep.readSessionOwnershipViaGit(r.repo.dir,
+    { headRefName: r.branch, taskId: undefined, body: `hand work\n\nRemudero-Task: ${id}\n` },
+    { nowMs: now, fixClaimKey: "k", readLock: () => undefined });
+
+  const old = await read("W1-T90010");
+  assert.equal(old.claims![0]!.renewalsMs.length, 1, "one renewal: the mint only");
+  assert.equal(old.claims![0]!.holderKindMedianGapMs, HOUR, "the host-b median, read from the other claims on the remote");
+  assert.match(sweep.sessionBranchUnheld(old).reads.claim, /^stale: .*interval 3600000 ms/, "two hours since its only renewal is past an hour");
+  const fresh = await read("W1-T90014");
+  assert.equal(fresh.claims![0]!.holderKindMedianGapMs, HOUR);
+  assert.match(sweep.sessionBranchUnheld(fresh).reads.claim, /^held: /, "ten minutes since its only renewal is within the hour");
+
+  const none = await read("W1-T90013");
+  assert.equal(none.claims![0]!.holderKind, "host-c");
+  assert.equal(none.claims![0]!.holderKindMedianGapMs, undefined, "no claim of that kind has a measurable cadence");
+  const verdict = sweep.sessionBranchUnheld(none);
+  assert.equal(verdict.verdict, "ambiguous");
+  assert.match(verdict.reads.claim, /^unreadable: /);
+
+  // A failed read of the fleet's claims leaves the median absent and says why, rather than guessing.
+  const flaky = await sweep.readSessionOwnershipViaGit(r.repo.dir,
+    { headRefName: r.branch, body: "Remudero-Task: W1-T90010\n" },
+    { nowMs: now, fixClaimKey: "k", readLock: () => undefined, git: (_cwd, args) => {
+      if (args[0] === "ls-remote" && args[2] === "refs/rmd-dispatch/*") throw new Error("listing refused");
+      return execFileSync("git", ["-C", r.repo.dir, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+    } });
+  assert.equal(flaky.claims![0]!.holderKindMedianGapMs, undefined);
+  assert.match(String(flaky.unreadable), /claim cadence: .*listing refused/);
+  assert.equal(sweep.sessionBranchUnheld(flaky).verdict, "ambiguous");
 });
 
 test("W1-T11170 criterion 5: the production effects wire the ownership reader, the session facts and the comment writer, and a session push needs no injected git", async (t) => {

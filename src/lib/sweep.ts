@@ -2277,6 +2277,15 @@ export async function regenerateConflictViaGit(
   return followed === undefined ? result : { ...result, renames: followed };
 }
 
+/** W1-T11170: a claim's renewal instants and minting host from its commit chain's messages. Each renewal commit
+ *  repeats the anchor's mint line above its own `renewed` line: one time per instant. */
+function readClaimChain(log: string): { times: number[]; host?: string } {
+  const times = [...new Set([...log.matchAll(/^(?:rmd-dispatch claim \d+@\S+|renewed \d+@\S+) (\S+)$/gm)]
+    .map((m) => Date.parse(m[1]!)).filter(Number.isFinite))].sort((a, b) => a - b);
+  const host = /^rmd-dispatch claim \d+@(\S+) \S+$/m.exec(log)?.[1];
+  return host === undefined ? { times } : { times, host };
+}
+
 /**
  * W1-T11170: production's three ownership reads for an operator-session branch. (a) each refs/rmd-dispatch claim
  * for a task id the PR names, its mint and `renewed` times read down the claim's commit chain; (b) the branch's fix
@@ -2301,13 +2310,38 @@ export async function readSessionOwnershipViaGit(
       const holder = (await run(["ls-remote", "origin", ref])).trim().split(/\s+/)[0];
       if (!holder) continue;
       await run(["fetch", "--quiet", "--no-write-fetch-head", "origin", ref]);
-      const log = await run(["log", "--format=%B", holder]);
-      // Each renewal commit repeats the anchor's mint line above its own `renewed` line: one time per instant.
-      const times = [...new Set([...log.matchAll(/^(?:rmd-dispatch claim \d+@\S+|renewed \d+@\S+) (\S+)$/gm)]
-        .map((m) => Date.parse(m[1]!)).filter(Number.isFinite))].sort((a, b) => a - b);
-      claims.push({ ref, renewalsMs: times });
+      const read = readClaimChain(await run(["log", "--format=%B", holder]));
+      claims.push({ ref, renewalsMs: read.times, ...(read.host ? { holderKind: read.host } : {}) });
     }
     evidence.claims = claims;
+    // The producer of the one-renewal fallback: the fleet's median renewal gap for claims of each holder kind (the
+    // minting host), pooled over every claim on the remote with at least two renewals. A claim whose kind has no
+    // measurable cadence keeps no median, so it still reads unreadable and escalates once.
+    if (claims.length > 0) {
+      try {
+        const own = new Set(claims.map((c) => c.ref));
+        const gapsByKind = new Map<string, number[]>();
+        const pool = (host: string | undefined, times: readonly number[]) => {
+          if (host === undefined) return;
+          gapsByKind.set(host, [...(gapsByKind.get(host) ?? []), ...sortedGaps(times)]);
+        };
+        for (const c of claims) pool(c.holderKind, c.renewalsMs);
+        const peers = (await run(["ls-remote", "origin", "refs/rmd-dispatch/*"])).trim().split("\n").filter(Boolean)
+          .map((line) => line.split(/\s+/)).filter(([sha, name]) => sha && name && !own.has(name)).slice(0, 100);
+        if (peers.length > 0) await run(["fetch", "--quiet", "--no-write-fetch-head", "origin", ...peers.map(([, name]) => name!)]);
+        for (const [sha] of peers) {
+          const peer = readClaimChain(await run(["log", "--format=%B", sha!]));
+          pool(peer.host, peer.times);
+        }
+        for (const c of claims) {
+          const median = c.holderKind === undefined ? undefined : quantile(gapsByKind.get(c.holderKind) ?? [], 0.5);
+          if (median !== undefined) c.holderKindMedianGapMs = median;
+        }
+      } catch (error) {
+        const reason = `claim cadence: ${capStderrExcerpt(spawnFailureText(error), 200)}`;
+        (evidence.unreadable ??= []).push(reason);
+      }
+    }
   } catch (error) {
     // (a) stays absent, which sessionBranchUnheld reads as ambiguous, and the reason rides the evidence.
     const reason = `claim: ${capStderrExcerpt(spawnFailureText(error), 200)}`;
@@ -5699,7 +5733,8 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
       const headRepo = row?.head?.repo;
       if (headRepo !== undefined) facts.headRepoFork = headRepo?.full_name?.toLowerCase() !== `${owner}/${repo}`.toLowerCase();
       const login = row?.user?.login?.toLowerCase();
-      facts.operatorAuthor = login !== undefined && (config.operatorGithubLogins ?? []).some((l) => l.toLowerCase() === login);
+      // Set only when true: an absent fact reads false, and the plan round's facts stay exactly author and title.
+      if (login !== undefined && (config.operatorGithubLogins ?? []).some((l) => l.toLowerCase() === login)) facts.operatorAuthor = true;
       if (filedTaskPlanRepairCandidate(pr) && row?.head?.sha === pr.headSha && row.head.ref === pr.headRefName) {
         facts.filedTaskRepairReady = filedPlanTaskReady(plan.tasks.find(task => task.id === pr.taskId));
       }
@@ -10559,7 +10594,7 @@ export function operatorSessionHead(pr: Pick<OpenPrView, "headRefName">,
 export interface SessionOwnershipEvidence {
   nowMs: number;
   /** (a) every refs/rmd-dispatch claim for a task id the PR names, with its renewal times. */
-  claims?: Array<{ ref: string; renewalsMs: number[]; holderKindMedianGapMs?: number }>;
+  claims?: Array<{ ref: string; renewalsMs: number[]; holderKind?: string; holderKindMedianGapMs?: number }>;
   /** (b) a live inflight lock, an OPERATOR- run id, or an open fix claim key on the branch. */
   session?: { inflightLock?: string; operatorRunId?: string; fixClaimKey?: string };
   /** (c) the owner's push times on this branch. */
