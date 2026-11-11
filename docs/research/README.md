@@ -65,3 +65,13 @@ recovered because it survived alongside the others, not because anything pointed
 The tracked files that reference these reports still name them under their original `state/` paths, so
 those citations remain broken even though the content now exists. Repointing them is a separate concern
 and is deliberately not done in the same change as the recovery.
+
+## Written in this repository, not recovered
+
+The files above are recovered artefacts. This one was written here, as a design, and is not part of
+the recovery:
+
+- `a-standby-daemon-for-a-freshness-restart.md` (W1-T12245, 2026-11-11) — how a standby daemon could
+  take over at a freshness restart: measured costs, the lock handoff, the adoption order, the two
+  checkouts, a recommendation, and the decisions that belong to the operator. Design only; nothing
+  under `src/` or `deploy/` changed.
