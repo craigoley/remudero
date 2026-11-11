@@ -5366,11 +5366,14 @@ export async function runDaemon(
 
   // One stale-exit path for both freshness boundaries. Both must preserve the same install, bounded pass, named
   // ledger and stale summary contract; duplicating that sequence would let them drift (W1-T2845).
-  type FreshnessPass = "skipped_ran_since_latch" | "awaited_in_flight" | "ran";
+  type FreshnessPass = "skipped_ran_since_latch" | "skipped_ran_since_stale" | "awaited_in_flight" | "ran";
   let preparedFreshnessExit: Promise<FreshnessPass> | undefined;
+  // W1-T9352: what an advance-anchored exit judged its pass skip on, for the restart row.
+  let advanceEvidence: { stale_since_ms: number; last_pass_completed_ms: number | null } | undefined;
   const prepareFreshnessExit = async (
     freshness: Extract<DaemonFreshness, { stale: true }>,
     dispatchLatchAtMs?: number,
+    advanceSinceMs?: number,
   ): Promise<FreshnessPass> => {
     // Install BEFORE the loop stops for restart, never after, so the relaunched process inherits deps
     // matching the new sha rather than the stale tree this process is still running (W1-T151).
@@ -5379,7 +5382,13 @@ export async function runDaemon(
     }
     // A pass completed during the dispatch latch already reached the full sweep (W1-T8170/W1-T1272).
     // A running pass is still awaited within its bound; other freshness exits keep their pass.
+    // W1-T9352: an unlatched exit is anchored on the advance it restarts for, so a full pass that completed after
+    // main advanced is not repeated either. No anchor, or no pass since it, runs the bounded pass as before.
     let preExitPass: FreshnessPass = "ran";
+    const lastPassCompletedAtMs = sweepLiveness.lastCompletedAtMs;
+    if (advanceSinceMs !== undefined) {
+      advanceEvidence = { stale_since_ms: advanceSinceMs, last_pass_completed_ms: lastPassCompletedAtMs ?? null };
+    }
     const passStartedAtMs = daemonClock.now();
     if (backgroundSweep) {
       preExitPass = "awaited_in_flight";
@@ -5387,6 +5396,9 @@ export async function runDaemon(
     } else if (dispatchLatchAtMs !== undefined && sweepLiveness.lastCompletedAtMs !== undefined &&
       sweepLiveness.lastCompletedAtMs > dispatchLatchAtMs) {
       preExitPass = "skipped_ran_since_latch";
+    } else if (dispatchLatchAtMs === undefined && advanceSinceMs !== undefined && lastPassCompletedAtMs !== undefined &&
+      lastPassCompletedAtMs > advanceSinceMs) {
+      preExitPass = "skipped_ran_since_stale";
     } else if (deps.sweep) {
       sweepRetriggerState.lastRunAtMs = daemonClock.now();
       await runGatedSweep(deps, pollIntervalMs, sweepBound, log, diskHeadroomLatch, headroomSampler, sweepLiveness, undefined, latchedAdmission);
@@ -5400,9 +5412,9 @@ export async function runDaemon(
     return preExitPass;
   };
   const stopForFreshness = async (
-    freshness: Extract<DaemonFreshness, { stale: true }>, dispatchLatchAtMs?: number,
+    freshness: Extract<DaemonFreshness, { stale: true }>, dispatchLatchAtMs?: number, advanceSinceMs?: number,
   ): Promise<DaemonSummary> => {
-    const preExitPass = await (preparedFreshnessExit ?? prepareFreshnessExit(freshness, dispatchLatchAtMs));
+    const preExitPass = await (preparedFreshnessExit ?? prepareFreshnessExit(freshness, dispatchLatchAtMs, advanceSinceMs));
     const requested = freshness.restartRequest;
     const detail = requested
       ? `restart in place requested by ${requested.origin} at ${requested.requestedAt}`
@@ -5415,7 +5427,8 @@ export async function runDaemon(
       // W1-T11327: the request-to-exit time; the next `daemon.boot` row closes the request-to-boot span.
       ...(requested ? { restart_request: { origin: requested.origin, requested_at: requested.requestedAt,
         request_to_exit_ms: Math.max(0, daemonClock.now() - Date.parse(requested.requestedAt)) } } : {}) });
-    log("daemon_selfrestart_for_freshness", { old_sha: freshness.oldSha, new_sha: freshness.newSha, pre_exit_pass: preExitPass });
+    log("daemon_selfrestart_for_freshness", { old_sha: freshness.oldSha, new_sha: freshness.newSha, pre_exit_pass: preExitPass,
+      ...(advanceSinceMs !== undefined && advanceEvidence ? advanceEvidence : {}) });
     return summary("stale", detail);
   };
   // W1-T11327: a RESTART_REQUESTED marker is a freshness decision with no advance, so it skips scoring, coalescing and
@@ -6647,7 +6660,8 @@ export async function runDaemon(
           phase: "pre_cycle",
         });
       } else if (decideFreshness(freshness) === "restart") {
-        return stopForFreshness(freshness);
+        // W1-T9352: decideFreshness just observed the advance, so `staleSinceMs` is set; it anchors the pass skip.
+        return stopForFreshness(freshness, undefined, staleSinceMs);
       }
     }
     cyclesEntered++;
