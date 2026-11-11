@@ -35,7 +35,7 @@ import { visibleCriteria, type AcceptanceCriterion, DEFAULT_RISK, type TaskRisk 
 import { loadMounts, mountsPath, resolveMount, type Mount } from "../../lib/mounts.js";
 import { resolveRiskJudgeMount } from "../../lib/risk-judge.js";
 import { runShadowJudge, SHADOW_JUDGE_MAX_BUDGET_USD } from "../../lib/shadow-judge.js";
-import { REVIEW_CONTEXT, REVIEW_ENGINE_REVISION, applyVerdictStability, applyReviewStatusHistoryGuard, readReviewStatusHistory, type ReviewStatusHistoryReader, buildReviewPrompt, reviewScopeContext, cappedAnnotation, cappedOverrideFromLedger, cappedWordingApplies, decideAutoMergeArm, fetchPrLifecycle, fetchPrLifecycleAsync, floorDegradedAnnotation, judgeRubric, rubricAdvisorySection, scopeAdvisorySection, inverseScopeAdvisorySection, unwiredExportAdvisorySection, keywordOnlyAnnotation, parseAcceptanceBlock, parseReviewerUnable, parseReviewerVerdictClauses, parseReviewerVerdicts, postReviewCommentGuarded, postReviewPending, postReviewStatus, postReviewStatusGuarded, readReviewStatusEntry, reviewStatusEntryFromCombined, priorReviewVerdictFromLedger, reviewLedgerKeyFor, UNFILED_RUN_SENTINEL, planOnlyDiff, reviewerOutcome, reviewerRerunDecision, reviewerVerdictContract, reviewEvidenceStrength, claimReviewDecision, reviewDecisionDigest, preparePromisedReviewDecision, reviewTaskIdEvidenceAsync, reviewContractDigest, reviewTaskNarrative, type ReviewTaskNarrativeInput, reviewInputDigest, reviewLedgerLegibilityFields, reviewLedgerReasons, unmetReviewCriteria, resolvePlanCriteriaAtHeadAsync, type PlanCriteriaAtHeadDivergence, type ReviewVerdict, type PlanLintOutcome, type ReviewEvaluatorProvenance, type ReviewStatusHistory, type PriorReproducedReviewFailure } from "../../lib/review.js";
+import { REVIEW_CONTEXT, REVIEW_ENGINE_REVISION, settleReviewOutboxEntry, applyVerdictStability, applyReviewStatusHistoryGuard, readReviewStatusHistory, type ReviewStatusHistoryReader, buildReviewPrompt, reviewScopeContext, cappedAnnotation, cappedOverrideFromLedger, cappedWordingApplies, decideAutoMergeArm, fetchPrLifecycle, fetchPrLifecycleAsync, floorDegradedAnnotation, judgeRubric, rubricAdvisorySection, scopeAdvisorySection, inverseScopeAdvisorySection, unwiredExportAdvisorySection, keywordOnlyAnnotation, parseAcceptanceBlock, parseReviewerUnable, parseReviewerVerdictClauses, parseReviewerVerdicts, postReviewCommentGuarded, postReviewPending, postReviewStatus, postReviewStatusGuarded, readReviewStatusEntry, reviewStatusEntryFromCombined, priorReviewVerdictFromLedger, reviewLedgerKeyFor, UNFILED_RUN_SENTINEL, planOnlyDiff, reviewerOutcome, reviewerRerunDecision, reviewerVerdictContract, reviewEvidenceStrength, claimReviewDecision, reviewDecisionDigest, preparePromisedReviewDecision, reviewTaskIdEvidenceAsync, reviewContractDigest, reviewTaskNarrative, type ReviewTaskNarrativeInput, reviewInputDigest, reviewLedgerLegibilityFields, reviewLedgerReasons, unmetReviewCriteria, resolvePlanCriteriaAtHeadAsync, type PlanCriteriaAtHeadDivergence, type ReviewVerdict, type PlanLintOutcome, type ReviewEvaluatorProvenance, type ReviewStatusHistory, type PriorReproducedReviewFailure } from "../../lib/review.js";
 import { resolveReviewProviderProvenance, reviewProviderProvenanceLedgerFields } from "../../lib/review-provider-provenance.js";
 import { validateWorkerSettingsFile } from "../../lib/settings.js";
 import { readLedgerLines, readRequiredStatusCheckContextsAsync } from "../../lib/status.js";
@@ -1346,6 +1346,7 @@ export async function runReview(host: ReviewCommandHost, args: {
   const publishingState = verdict.state;
   const posted = await postReviewStatusGuarded({
     post: poster.post,
+    outboxBeforePost: true,
     owner,
     repo,
     sha: headSha,
@@ -1533,6 +1534,7 @@ export async function runReview(host: ReviewCommandHost, args: {
     changeset_fence_unbalanced_at_eof: verdict.changesetFenceUnbalancedAtEof ?? null,
   };
   log("review.posted", reviewPostedRow);
+  if (inputDigest !== undefined) settleReviewOutboxEntry(args.ledgerPath, prUrl, inputDigest);
   recordReplay(replayDecision);
   // W1-T322 (SHIPS-UNWIRED advisory floor): ADVISORY ONLY — ledgered here, never consulted by the
   // verdict/arm decision above or below. One `review.unwired_advisory` line per reason code (see

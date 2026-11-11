@@ -22,7 +22,7 @@
     - src/lib/sweep.ts
     - src/cli/commands/daemon.ts
     - test/worker/run-task/the-lifetime-history-reads-each-rotated-ledger-file-once.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "A second call of `auditedLifetimeTalliesFromArchives` on the same state directory, as a restarted daemon makes, decompresses no rotated ledger file that the first call read"

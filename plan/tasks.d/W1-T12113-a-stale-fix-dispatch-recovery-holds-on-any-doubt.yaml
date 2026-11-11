@@ -14,7 +14,7 @@
     - src/lib/stale-fix-dispatch-recovery.ts
     - src/run-task.ts
     - test/fix-lane/a-stale-fix-dispatch-recovery-holds-on-any-doubt.test.ts
-  status: queued
+  status: merged
   priority: 0.05
   attempts: 0
   acceptance:
