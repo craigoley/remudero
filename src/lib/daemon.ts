@@ -5238,9 +5238,6 @@ export async function runDaemon(
   // The drain every restart takes before it returns: live fix workers and in-flight reviews finish (bounded),
   // best-effort cadences and CI waits are released to be re-derived after restart. Shared by the freshness exit
   // and the memory-pressure exit so neither restart can kill work the other would have waited for.
-  // W1-T9812 — THE PRE-EXIT PASS RUNS BESIDE THE RESTART DRAIN. 2026-10-15 20:08 a latched exit spent 3.6 min in its pass before
-  // its drain waited on anything. `beside` is that pass: the drain waits with it, then gives what the pass admitted the
-  // rest of its own time limit. `capMs` is the deadline of a drain that had nothing to wait on until the pass settled.
   type PassBesideDrain = { pass: FreshnessPass; settled: Promise<void>; settledAtMs?: number; overlapMs?: number; capMs?: number };
   const drainBeforeRestart = async (
     stepPrefix: "daemon.freshness_drain" | "daemon.memory_drain", latchAtMs?: number, beside?: PassBesideDrain,
@@ -5331,7 +5328,6 @@ export async function runDaemon(
           boundMs: Math.max(0, deadlineMs - daemonClock.now()), onWait: observation.watch, closeRefills: placements.review?.placement !== "child",
         });
       }
-      // W1-T9812: an action this drain gave up on is abandoned once, also when the wait after the pass finds it again.
       const gaveUp = new Set<Promise<void>>();
       let abandonedActions = 0;
       const abandonActions = async (actions: typeof abandoned): Promise<void> => {
@@ -5358,7 +5354,6 @@ export async function runDaemon(
         await beside.settled;
         passWaitMs = Math.max(0, daemonClock.now() - drainedAtMs);
         beside.overlapMs = Math.max(0, Math.min(drainedAtMs, beside.settledAtMs ?? drainedAtMs) - exitAtMs);
-        // What the pass admitted gets the rest of this drain's time limit, not a new one.
         const leftMs = Math.max(0, deadlineMs - daemonClock.now());
         const known = new Set(seen);
         watch(inFlightReviewRunsNow());
@@ -5411,7 +5406,6 @@ export async function runDaemon(
         } : {}),
       });
     } else if (beside && beside.capMs === undefined) {
-      // Nothing was in flight at the exit. What the pass admitted is waited on after it, until the deadline this drain had.
       await beside.settled;
       if (detachedSweepActionCount() > 0 || inFlightReviewCount() > 0) await drainBeforeRestart(stepPrefix, latchAtMs, { ...beside, overlapMs: 0,
         capMs: exitAtMs + (fromLatch ? Math.max(0, fromLatch.latchAtMs + sweepWallClockBoundMs - exitAtMs) : sweepWallClockBoundMs) });
@@ -5450,7 +5444,6 @@ export async function runDaemon(
       sweepRetriggerState.lastRunAtMs = daemonClock.now();
       pass = runGatedSweep(deps, pollIntervalMs, sweepBound, log, diskHeadroomLatch, headroomSampler, sweepLiveness, undefined, latchedAdmission);
     }
-    // W1-T9812: a latched exit starts its drain with the pass and waits for both. The other exits keep the pass first.
     const beside: PassBesideDrain | undefined = dispatchLatchAtMs === undefined ? undefined : { pass: preExitPass,
       settled: Promise.resolve(pass).then(() => undefined, () => undefined).then(() => { beside!.settledAtMs = daemonClock.now(); }) };
     const drained = beside ? drainBeforeRestart("daemon.freshness_drain", dispatchLatchAtMs, beside) : undefined;
