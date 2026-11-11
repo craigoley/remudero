@@ -6,8 +6,8 @@
  * row. The outbox of W1-T11928 kept a verdict only when the post threw, so the next boot found a status with no
  * row and ran the reviewer again.
  *
- * The fixtures end a real child process at that point with SIGKILL. `github.ndjson` in the fixture directory is
- * the status history that GitHub would hold.
+ * The fixtures end a real child process at that point with SIGKILL. Every status goes through the real `gh` call of
+ * the post path, to the shared `gh` shim on PATH. The calls that the shim records are the statuses that reached GitHub.
  */
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
@@ -24,13 +24,13 @@ import type { Config } from "#src/lib/config.js";
 import { appendLedger } from "#src/lib/ledger.js";
 import type { Mount } from "#src/lib/mounts.js";
 import {
-  REVIEW_CONTEXT, REVIEWER_TOKEN_ENV, claimReviewDecision, postReviewPending, postReviewStatusGuarded, reviewInputDigest,
+  REVIEW_CONTEXT, REVIEWER_TOKEN_ENV, claimReviewDecision, postReviewPending, postReviewStatus, postReviewStatusGuarded, reviewInputDigest,
   reviewOutboxDir, reviewOutboxEntryPath, type PostReviewStatusGuardedOpts, type PrLifecycleState, type ReviewVerdict,
 } from "#src/lib/review.js";
 import { readLedgerLines } from "#src/lib/status.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import type { WorkerResult } from "#src/lib/worker.js";
-import { ghShim } from "#test/helpers/gh-shim.js";
+import { ghShim, type GhShim } from "#test/helpers/gh-shim.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 const TASK = "W1-T17494";
@@ -54,7 +54,6 @@ const VERDICT: ReviewVerdict = {
   testTheater: false, summary: DESCRIPTION, floorDegraded: false, capped: false, keywordOnly: false, planOnly: false,
 };
 
-type Post = { owner: string; repo: string; sha: string; state: string; description?: string };
 const lifecycle = (sha: string): PrLifecycleState => ({ merged: false, closed: false, reviewInputDigest: reviewInputDigest(sha, BODY) });
 
 function terminal(ledgerPath: string, post: PostReviewStatusGuardedOpts["post"]): PostReviewStatusGuardedOpts {
@@ -67,35 +66,33 @@ function terminal(ledgerPath: string, post: PostReviewStatusGuardedOpts["post"])
   };
 }
 
-/** The status history of the fake GitHub: one line for each status that reached it. */
-function github(dir: string) {
-  const path = join(dir, "github.ndjson");
-  const read = (): Array<Post & { created_at: string }> => existsSync(path)
-    ? readFileSync(path, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line) as Post & { created_at: string }) : [];
-  return {
-    read,
-    post: (o: Post): void => { appendFileSync(path, `${JSON.stringify({ ...o, created_at: new Date().toISOString() })}\n`); },
-    /** The combined status that the next pass reads: the newest status of the review context. */
-    combined: () => {
-      const newest = read().at(-1);
-      return { statuses: newest ? [{ context: REVIEW_CONTEXT, state: newest.state, description: newest.description, created_at: newest.created_at }] : [] };
-    },
-  };
+/** The statuses that reached the shim, in order, read from the `gh` calls it recorded. */
+function statusesPosted(calls: readonly string[]): Array<{ sha: string; state: string; description: string }> {
+  return calls.flatMap((call) => {
+    const post = /-X POST repos\/o\/r\/statuses\/([0-9a-f]+) .*state=(\w+)(?: -f description=(.*))?$/s.exec(call);
+    return post ? [{ sha: post[1]!, state: post[2]!, description: post[3] ?? "" }] : [];
+  });
+}
+
+/** Writes the combined status that the next read gets: the newest status posted for `sha`. */
+function showCombinedStatus(path: string, calls: readonly string[], sha: string): void {
+  const newest = statusesPosted(calls).filter((status) => status.sha === sha).at(-1);
+  writeFileSync(path, JSON.stringify({ statuses: newest
+    ? [{ context: REVIEW_CONTEXT, state: newest.state, description: newest.description, created_at: new Date().toISOString() }] : [] }));
 }
 
 // ── the child process ─────────────────────────────────────────────────────────────────────────────
 // The review claims the input, then posts its verdict through the production post path. Its post step writes a
 // marker file and never returns, so the parent can end the process between the post and the row.
-async function reviewUntilThePost(dir: string, reachesGitHub: boolean): Promise<void> {
+async function reviewUntilThePost(dir: string, reachesTheHost: boolean): Promise<void> {
   const ledgerPath = join(dir, "ledger.ndjson");
-  const hub = github(dir);
   setInterval(() => {}, 1000);
   await postReviewPending({
     owner: "o", repo: "r", sha: HEAD, taskId: TASK, runId: CHILD_RUN, ledgerPath, prUrl: PR_URL, reviewInputDigest: INPUT,
-    fetchLifecycle: () => lifecycle(HEAD), post: hub.post, fetchStatus: () => hub.combined(),
+    fetchLifecycle: () => lifecycle(HEAD),
   });
   await postReviewStatusGuarded(terminal(ledgerPath, async (o) => {
-    if (reachesGitHub) hub.post(o);
+    if (reachesTheHost) await postReviewStatus(o);
     writeFileSync(join(dir, "in-the-post"), "");
     await new Promise<void>(() => {});
   }));
@@ -111,24 +108,32 @@ if (CHILD_DIR !== undefined) {
 function fixture(name: string) {
   const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}${name}-`));
   const ledgerPath = join(dir, "ledger.ndjson");
-  const hub = github(dir);
+  const combined = join(dir, "combined-status.json");
+  writeFileSync(combined, JSON.stringify({ statuses: [] }));
+  // The shared shim answers a status post with nothing and a combined-status read with the file above.
+  const shim: GhShim = ghShim([{ when: "-X POST" }, { when: "/status", stdoutFile: combined }]);
+  const oldPath = process.env.PATH;
+  process.env.PATH = `${shim.dir}:${oldPath}`;
   const comments: Array<{ url: string; body: string }> = [];
   const steps = (step: string) => readLedgerLines(ledgerPath).filter((line) => line.step === step);
   const entries = () => (existsSync(reviewOutboxDir(ledgerPath)) ? readdirSync(reviewOutboxDir(ledgerPath)) : []);
   const entry = () => JSON.parse(readFileSync(reviewOutboxEntryPath(ledgerPath, PR_URL, INPUT), "utf8")) as Record<string, unknown>;
-  /** The next pass for the pull request, as the review command starts it. */
-  const nextPass = (sha = HEAD, runId = "review-next-pass") => postReviewPending({
-    owner: "o", repo: "r", sha, taskId: TASK, runId, ledgerPath, prUrl: PR_URL,
-    reviewInputDigest: reviewInputDigest(sha, BODY), fetchLifecycle: () => lifecycle(sha), post: hub.post,
-    readReviewStatusHistory: async () => ({ kind: "readable", failures: [] }),
-    commentDeps: { fetchNewestReview: () => undefined, postReview: (url, body) => { comments.push({ url, body }); } },
-    fetchStatus: () => hub.combined(),
-  });
+  const posted = () => statusesPosted(shim.calls());
+  /** The next pass for the pull request, as the review command starts it. It posts and reads through `gh`. */
+  const nextPass = (sha = HEAD, runId = "review-next-pass") => {
+    showCombinedStatus(combined, shim.calls(), sha);
+    return postReviewPending({
+      owner: "o", repo: "r", sha, taskId: TASK, runId, ledgerPath, prUrl: PR_URL,
+      reviewInputDigest: reviewInputDigest(sha, BODY), fetchLifecycle: () => lifecycle(sha),
+      readReviewStatusHistory: async () => ({ kind: "readable", failures: [] }),
+      commentDeps: { fetchNewestReview: () => undefined, postReview: (url, body) => { comments.push({ url, body }); } },
+    });
+  };
   /** Runs a review in a child process and ends the process with SIGKILL while its post step is open. */
-  const cutAtThePost = async (reachesGitHub: boolean): Promise<void> => {
+  const cutAtThePost = async (reachesTheHost: boolean): Promise<void> => {
     const child = spawn(process.execPath, ["--import", "tsx", fileURLToPath(import.meta.url)], {
       cwd: REPO_ROOT, stdio: "ignore",
-      env: { ...process.env, RMD_T12251_CHILD_DIR: dir, RMD_T12251_REACHES: reachesGitHub ? "1" : "0" },
+      env: { ...process.env, RMD_T12251_CHILD_DIR: dir, RMD_T12251_REACHES: reachesTheHost ? "1" : "0" },
     });
     const ended = new Promise<NodeJS.Signals | null>((resolve) => child.once("exit", (_code, signal) => resolve(signal)));
     for (let waited = 0; waited < 60_000 && !existsSync(join(dir, "in-the-post")); waited += 20) await sleep(20);
@@ -136,7 +141,12 @@ function fixture(name: string) {
     child.kill("SIGKILL");
     assert.equal(await ended, "SIGKILL", "the process ended between the post and the row");
   };
-  return { dir, ledgerPath, hub, comments, steps, entries, entry, nextPass, cutAtThePost };
+  const close = (): void => {
+    process.env.PATH = oldPath;
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(shim.dir, { recursive: true, force: true });
+  };
+  return { dir, ledgerPath, comments, steps, entries, entry, posted, nextPass, cutAtThePost, close };
 }
 
 if (CHILD_DIR === undefined) {
@@ -147,9 +157,9 @@ if (CHILD_DIR === undefined) {
     process.env.GH_TOKEN = SECRET;
     try {
       let atPost: string | undefined;
-      const result = await postReviewStatusGuarded(terminal(f.ledgerPath, (o) => {
+      const result = await postReviewStatusGuarded(terminal(f.ledgerPath, async (o) => {
         atPost = readFileSync(reviewOutboxEntryPath(f.ledgerPath, PR_URL, INPUT), "utf8");
-        f.hub.post(o);
+        await postReviewStatus(o);
       }));
       assert.equal(result.posted, true);
       assert.ok(atPost !== undefined, "the entry is on disk when the post starts");
@@ -168,16 +178,16 @@ if (CHILD_DIR === undefined) {
       // A caller that does not ask for the entry gets none, as before.
       const plain = fixture("t12251-plain");
       try {
-        const { outboxBeforePost: _unused, ...withoutTheEntry } = terminal(plain.ledgerPath, plain.hub.post);
+        const { outboxBeforePost: _unused, ...withoutTheEntry } = terminal(plain.ledgerPath, undefined);
         assert.equal((await postReviewStatusGuarded(withoutTheEntry)).posted, true);
         assert.equal(existsSync(reviewOutboxDir(plain.ledgerPath)), false);
       } finally {
-        rmSync(plain.dir, { recursive: true, force: true });
+        plain.close();
       }
     } finally {
       if (saved.reviewer === undefined) delete process.env[REVIEWER_TOKEN_ENV]; else process.env[REVIEWER_TOKEN_ENV] = saved.reviewer;
       if (saved.gh === undefined) delete process.env.GH_TOKEN; else process.env.GH_TOKEN = saved.gh;
-      rmSync(f.dir, { recursive: true, force: true });
+      f.close();
     }
   });
 
@@ -259,13 +269,13 @@ if (CHILD_DIR === undefined) {
     const f = fixture("t12251-reached");
     try {
       await f.cutAtThePost(true);
-      assert.deepEqual(f.hub.read().map((status) => status.state), ["pending", "success"], "GitHub has the verdict");
+      assert.deepEqual(f.posted().map((status) => status.state), ["pending", "success"], "GitHub has the verdict");
       assert.equal(f.steps("review.posted").length, 0, "the ledger has no row for it");
       assert.equal(f.entry().posting, true, "the entry of the dead process is on disk");
 
       const pass = await f.nextPass();
       assert.equal(pass.outbox, "posted", "the next pass settles the entry and starts no review");
-      assert.deepEqual(f.hub.read().map((status) => status.state), ["pending", "success"], "no second status");
+      assert.deepEqual(f.posted().map((status) => status.state), ["pending", "success"], "no second status");
       const rows = f.steps("review.posted");
       assert.equal(rows.length, 1);
       assert.equal(rows[0]!.state, "success");
@@ -284,10 +294,10 @@ if (CHILD_DIR === undefined) {
       // A later pass changes nothing.
       await f.nextPass(HEAD, "review-later-pass");
       assert.equal(f.steps("review.posted").length, 1);
-      assert.equal(f.hub.read().length, 2);
+      assert.equal(f.posted().length, 2);
       assert.equal(f.comments.length, 1);
     } finally {
-      rmSync(f.dir, { recursive: true, force: true });
+      f.close();
     }
   });
 
@@ -295,12 +305,12 @@ if (CHILD_DIR === undefined) {
     const f = fixture("t12251-not-reached");
     try {
       await f.cutAtThePost(false);
-      assert.deepEqual(f.hub.read().map((status) => status.state), ["pending"], "GitHub has only the claim of the dead review");
+      assert.deepEqual(f.posted().map((status) => status.state), ["pending"], "GitHub has only the claim of the dead review");
       assert.equal(f.entry().posting, true);
 
       const pass = await f.nextPass();
       assert.equal(pass.outbox, "posted");
-      const statuses = f.hub.read();
+      const statuses = f.posted();
       assert.deepEqual(statuses.map((status) => status.state), ["pending", "success"], "the verdict is posted once, with no new claim");
       assert.equal(statuses[1]!.description, DESCRIPTION);
       assert.equal(f.steps("review.posted").length, 1);
@@ -308,10 +318,10 @@ if (CHILD_DIR === undefined) {
       assert.deepEqual(f.comments, [{ url: PR_URL, body: COMMENT }]);
       assert.deepEqual(f.entries(), []);
       await f.nextPass(HEAD, "review-later-pass");
-      assert.equal(f.hub.read().length, 2, "a later pass posts nothing more");
+      assert.equal(f.posted().length, 2, "a later pass posts nothing more");
       assert.equal(f.steps("review.posted").length, 1);
     } finally {
-      rmSync(f.dir, { recursive: true, force: true });
+      f.close();
     }
   });
 
@@ -319,7 +329,7 @@ if (CHILD_DIR === undefined) {
     const f = fixture("t12251-moved");
     try {
       await f.cutAtThePost(true);
-      const before = f.hub.read().length;
+      const before = f.posted().length;
       await f.nextPass(MOVED_HEAD);
       const discarded = f.steps("review.outbox_discarded");
       assert.equal(discarded.length, 1);
@@ -328,11 +338,11 @@ if (CHILD_DIR === undefined) {
       assert.equal(discarded[0]!.current_head_sha, MOVED_HEAD);
       assert.deepEqual(f.entries(), [], "the entry is removed");
       assert.equal(f.steps("review.posted").length, 0, "the verdict of the old head gets no row");
-      assert.ok(f.hub.read().slice(before).every((status) => status.state === "pending" && status.sha === MOVED_HEAD),
+      assert.ok(f.posted().slice(before).every((status) => status.state === "pending" && status.sha === MOVED_HEAD),
         "the old verdict is not posted for the new head");
       assert.equal(f.comments.length, 0);
     } finally {
-      rmSync(f.dir, { recursive: true, force: true });
+      f.close();
     }
   });
 
@@ -340,7 +350,7 @@ if (CHILD_DIR === undefined) {
     const f = fixture("t12251-rowed");
     try {
       // The process ended after it wrote the row and before it removed the entry.
-      assert.equal((await postReviewStatusGuarded(terminal(f.ledgerPath, f.hub.post))).posted, true);
+      assert.equal((await postReviewStatusGuarded(terminal(f.ledgerPath, undefined))).posted, true);
       appendFileSync(f.ledgerPath, `${JSON.stringify({ ts: new Date().toISOString(), run_id: CHILD_RUN, task_id: TASK,
         step: "review.posted", context: REVIEW_CONTEXT, state: "success", head_sha: HEAD, pr_url: PR_URL, review_input_digest: INPUT,
         review_decision_digest: DECISION, decision_verdict: VERDICT })}\n`);
@@ -350,10 +360,10 @@ if (CHILD_DIR === undefined) {
       assert.deepEqual(f.entries(), []);
       assert.match(String(f.steps("review.outbox_discarded")[0]?.reason), /already has its review\.posted row/);
       assert.equal(f.steps("review.posted").length, 1, "no second row");
-      assert.equal(f.hub.read().length, 1, "no second status");
+      assert.equal(f.posted().length, 1, "no second status");
       assert.equal(f.comments.length, 0);
     } finally {
-      rmSync(f.dir, { recursive: true, force: true });
+      f.close();
     }
   });
 }
