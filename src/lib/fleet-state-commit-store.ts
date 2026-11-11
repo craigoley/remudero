@@ -71,7 +71,9 @@ export function loadFleetStateCommitStore(stateDir: string): FleetStateCommitSto
   try {
     commits = parseStore(readFileSync(path, "utf8"));
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") unreadable = String((error as Error)?.message ?? error);
+    const reason = String((error as Error)?.message ?? error);
+    // A missing file is an empty store and not a failure. Each other failure keeps its reason.
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") unreadable = reason;
   }
   // An unreadable file is replaced at the first save, so one bad file is reported once.
   let dirty = unreadable !== undefined;
