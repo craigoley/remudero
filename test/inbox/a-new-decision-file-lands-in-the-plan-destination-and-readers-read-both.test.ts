@@ -22,7 +22,7 @@ import { planDestinationPath, resolvePlanDestination, type PlanDestinationReposi
 import { planPrPreflightAtCommit, planPrPreflightAtCommitAsync } from "#src/lib/plan-pr-emitter.js";
 import { makeTempDir } from "#src/lib/tmp.js";
 import type { WorkerResult } from "#src/lib/worker.js";
-import { gitRepo } from "#test/helpers/git-repo.js";
+import { originWithClone } from "#test/helpers/git-repo.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 import { runTask } from "#test/helpers/run-task-test.js";
 
@@ -48,22 +48,6 @@ function writeSwitch(stateDir: string, kinds: string[]): void {
   writeFileSync(planDestinationPath(stateDir), JSON.stringify({ repository: `${OPS.owner}/${OPS.repo}`, kinds }));
 }
 
-/** A bare origin with one commit on main, and a clone of it at `checkoutDir`. */
-function originAndClone(t: TestContext, checkoutDir: string, seed: Record<string, string> = {}): string {
-  const origin = gitRepo({ bare: true, scope: t });
-  const work = gitRepo({ scope: t });
-  for (const [rel, content] of Object.entries(seed)) {
-    mkdirSync(join(work.dir, rel, ".."), { recursive: true });
-    writeFileSync(join(work.dir, rel), content);
-  }
-  work.git("add", "-A");
-  work.git("commit", "--quiet", "--allow-empty", "-m", "chore: seed");
-  work.addRemote("origin", origin.dir);
-  work.git("push", "--quiet", "origin", "main");
-  execFileSync("git", ["clone", "--quiet", origin.dir, checkoutDir], { encoding: "utf8", env: GIT_ENV });
-  return origin.dir;
-}
-
 const branchesOf = (bare: string): string[] =>
   git(bare, "for-each-ref", "--format=%(refname:short)", "refs/heads").split("\n").filter(Boolean).sort();
 
@@ -82,19 +66,20 @@ function fakeGh() {
 
 const OPS_BRANCH = landingIdentity({ family: "decisions", targetRepository: OPS }).branch;
 
-/** The public checkout and the destination checkout of one instance, each with its own origin. */
-function twoRepositories(t: TestContext, kinds: string[]) {
+/** One instance with its two plan roots (public and destination, each a clone of its own origin)
+ *  and the switch set to `kinds`. */
+function planRootsAndSwitch(t: TestContext, kinds: string[]) {
   const { root, stateDir } = instance(t);
   const publicDir = join(root, "repos", "remudero");
-  const publicOrigin = originAndClone(t, publicDir, { "scripts/README": "harness\n" });
+  const publicOrigin = originWithClone(publicDir, { scope: t, seed: { "scripts/README": "harness\n" } }).origin.dir;
   const opsDir = join(root, "repos", OPS.repo);
-  const opsOrigin = originAndClone(t, opsDir);
+  const opsOrigin = originWithClone(opsDir, { scope: t }).origin.dir;
   writeSwitch(stateDir, kinds);
   return { root, stateDir, publicDir, publicOrigin, opsDir, opsOrigin };
 }
 
 test("W1-T12201 criterion 1: with decision in the kinds, the three writers commit, push and open the pull request in the destination", async (t) => {
-  const f = twoRepositories(t, ["decision"]);
+  const f = planRootsAndSwitch(t, ["decision"]);
   const destination = resolvePlanDestination("decision", f.stateDir, { ...OPS, owner: "public", checkoutDir: f.publicDir });
   assert.equal(destination.outcome, "destination");
   const gh = fakeGh();
@@ -202,7 +187,7 @@ test("W1-T12201 criterion 3: readStandingDecisions reads the public root and the
 test("W1-T12201 criterion 4: the preflight in a destination checkout with no scripts directory passes a change of decision files only", async (t) => {
   const { root } = instance(t);
   const opsDir = join(root, "repos", OPS.repo);
-  originAndClone(t, opsDir, { "plan/tasks.d/W1-T1-seed.yaml": "- id: W1-T1\n" });
+  originWithClone(opsDir, { scope: t, seed: { "plan/tasks.d/W1-T1-seed.yaml": "- id: W1-T1\n" } });
   git(opsDir, "checkout", "--quiet", "-b", "work");
   mkdirSync(join(opsDir, "plan", "decisions.d"), { recursive: true });
   writeFileSync(join(opsDir, "plan", "decisions.d", "x.md"), "decision\n");
@@ -272,7 +257,7 @@ async function runToDecision(root: string, decisionLanding: LandFeedbackAsyncOpt
 }
 
 test("W1-T12201: the run verb resolves the destination and lands its decision there (criteria 1 and 6)", async (t) => {
-  const f = twoRepositories(t, ["decision"]);
+  const f = planRootsAndSwitch(t, ["decision"]);
   const gh = fakeGh();
   const row = await runToDecision(f.root, { gh: gh.gh, ghAsync: gh.ghAsync });
   assert.equal(row?.landed, true);
@@ -284,7 +269,7 @@ test("W1-T12201: the run verb resolves the destination and lands its decision th
 });
 
 test("W1-T12201: on an unreadable host file the run verb's ledger row is the only record and names the cause (criterion 5)", async (t) => {
-  const f = twoRepositories(t, ["decision"]);
+  const f = planRootsAndSwitch(t, ["decision"]);
   writeFileSync(planDestinationPath(f.stateDir), "{ not json");
   const gh = fakeGh();
   const row = await runToDecision(f.root, { gh: gh.gh, ghAsync: gh.ghAsync });
