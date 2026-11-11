@@ -17,23 +17,23 @@
   files:
     - src/lib/sweep.ts
     - src/cli/commands/sweep.ts
-    - test/sweep/the-plan-merge-budget-is-measured-between-ticks-not-batches.test.ts
+    - test/daemon/the-plan-merge-budget-is-measured-between-ticks-not-batches.test.ts
     - test/ledger/light-pass-merge-budget-uses-measured-interval.test.ts
   status: queued
   attempts: 0
   acceptance:
     - claim: "Through `buildSweepLightHook`: one tick that starts several light passes writes the same `tick_id` on the `sweep.pass` row and the `sweep.summary` row of each of them"
-      proof: "grep: W1-T12267 criterion 1 in test/sweep/the-plan-merge-budget-is-measured-between-ticks-not-batches.test.ts"
+      proof: "grep: W1-T12267 criterion 1 in test/daemon/the-plan-merge-budget-is-measured-between-ticks-not-batches.test.ts"
     - claim: "The measured interval counts one start for each `tick_id`, the earliest. Three ticks 300 seconds apart, each with three passes a few milliseconds apart, give a budget of 300 seconds"
-      proof: "grep: W1-T12267 criterion 2 in test/sweep/the-plan-merge-budget-is-measured-between-ticks-not-batches.test.ts"
+      proof: "grep: W1-T12267 criterion 2 in test/daemon/the-plan-merge-budget-is-measured-between-ticks-not-batches.test.ts"
     - claim: "A `sweep.pass` row with no `tick_id` counts as its own tick, so rows written before this task give the same budget as today"
-      proof: "grep: W1-T12267 criterion 3 in test/sweep/the-plan-merge-budget-is-measured-between-ticks-not-batches.test.ts"
+      proof: "grep: W1-T12267 criterion 3 in test/daemon/the-plan-merge-budget-is-measured-between-ticks-not-batches.test.ts"
     - claim: "With that budget a light pass merges a second ready plan pull request when the first merge took less than the interval between ticks"
-      proof: "grep: W1-T12267 criterion 4 in test/sweep/the-plan-merge-budget-is-measured-between-ticks-not-batches.test.ts"
+      proof: "grep: W1-T12267 criterion 4 in test/daemon/the-plan-merge-budget-is-measured-between-ticks-not-batches.test.ts"
     - claim: "The budget is never above the policy row `sweepWallClockBoundMs`, whatever the measured interval is. An operator merge hold and a moved head still stop a merge, and each merge is one call of the merge function, which makes its own merge-safety read"
-      proof: "grep: W1-T12267 criterion 5 in test/sweep/the-plan-merge-budget-is-measured-between-ticks-not-batches.test.ts"
+      proof: "grep: W1-T12267 criterion 5 in test/daemon/the-plan-merge-budget-is-measured-between-ticks-not-batches.test.ts"
     - claim: "The `sweep.summary` row of a light pass that had plan merge turns names the budget, the time spent, the number of merge attempts, the number that merged and, when a turn was stopped, why"
-      proof: "grep: W1-T12267 criterion 6 in test/sweep/the-plan-merge-budget-is-measured-between-ticks-not-batches.test.ts"
+      proof: "grep: W1-T12267 criterion 6 in test/daemon/the-plan-merge-budget-is-measured-between-ticks-not-batches.test.ts"
   rationale: |
     W1-T11445 bounds the plan merges of one light pass by a measured interval: the median of the newest three start-to-start intervals of completed light passes of the same scope.
     OBSERVED 2026-11-11 on the core ledger: the budget named on `sweep.disposed` rows was 4,275 ms at 05:49Z, 154,382 ms at 05:53Z, 42,862 ms at 05:58Z and 289,537 ms at 06:04Z.
