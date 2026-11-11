@@ -162,8 +162,8 @@ export interface ComputedPlacementEvidence {
   proofs: readonly string[];
   /** Every test path in the BASE tree (before this change), never including the candidates. */
   baseTracked: readonly string[];
-  /** The candidate's contents when it is a regular file (never a symlink); undefined when it is not readable. */
-  read: (path: string) => string | undefined;
+  /** The candidate's contents when it is a regular file (never a symlink), else the reason it is not readable. */
+  read: (path: string) => string | { unreadable: string };
   /** The folder (`ci/suites`) the placement engine computes for the candidate; undefined or a throw is a refusal. */
   folderOf: (path: string) => string | undefined;
 }
@@ -175,7 +175,8 @@ export interface ComputedPlacementOutcome {
   refusals: Map<string, string>;
 }
 
-const GREP_PROOF_PATH_RE = /^(.*?)\s+in\s+(\S*[./*]\S*)$/i;
+/** A `grep:` proof body split into its pattern and an explicit path token (the shape review.ts's DIALECT_GREP_PATH_RE reads). */
+export const GREP_PROOF_PATH_RE = /^(.*?)\s+in\s+(\S*[./*]\S*)$/i;
 
 /** The markers a declared test's proofs require: each `grep: <pattern> in <declaredPath>` pattern, plus the titles of
  *  `unit test:` proofs when that declared test is the only eligible test the task declares. */
@@ -212,7 +213,7 @@ export function computedPlacementAdmission(candidates: readonly string[], ev: Co
     if (declared.some((d) => tracked.has(d))) { refuse("the declared test already exists in the base tree"); continue; }
     if (sameBasenameCount(name) !== 1) { refuse(`the basename ${name} is not unique in the base tree and this change`); continue; }
     const text = ev.read(candidate);
-    if (text === undefined) { refuse("the candidate is not a readable regular file"); continue; }
+    if (typeof text !== "string") { refuse(text.unreadable); continue; }
     const soleDeclaredTest = declaredTests.length === 1;
     const markers = declared.flatMap((d) => placementMarkersFor(d, ev.proofs, soleDeclaredTest));
     if (markers.length === 0) { refuse("no criterion marker ties the candidate to the declared test"); continue; }
@@ -222,7 +223,8 @@ export function computedPlacementAdmission(candidates: readonly string[], ev: Co
     try {
       folder = ev.folderOf(candidate);
     } catch (e) {
-      refuse(`placement could not be computed (${String((e as Error)?.message ?? e).split("\n")[0]})`);
+      const reason = `placement could not be computed (${String((e as Error)?.message ?? e).split("\n")[0]})`;
+      refuse(reason); // the reason is carried into the outcome's refusals, never erased
       continue;
     }
     if (folder === undefined) { refuse("placement could not be computed"); continue; }
@@ -274,10 +276,9 @@ export function observeComputedPlacement(opts: ObservedPlacementOptions): Comput
     read: (path) => {
       const abs = join(opts.root, path);
       try {
-        return lstatSync(abs).isFile() ? readFileSync(abs, "utf8") : undefined;
+        return lstatSync(abs).isFile() ? readFileSync(abs, "utf8") : { unreadable: "the candidate is not a readable regular file" };
       } catch (e) {
-        void e; // an unreadable candidate is a refusal; computedPlacementAdmission names it ("not a readable regular file")
-        return undefined;
+        return { unreadable: `the candidate is not a readable regular file (${String((e as Error)?.message ?? e).split("\n")[0]})` };
       }
     },
     folderOf: (path) => placePaths(opts.root, [path], treeSha)[0]?.placement.folder,

@@ -14,8 +14,8 @@ import { test } from "node:test";
 import { pushScopeOutOfScopeFiles } from "#src/cli/commands/run-task-verb.js";
 import { judgeReview, reviewPlacementAdmitted, reviewScopeContext } from "#src/lib/review.js";
 import { placePaths } from "#src/lib/test-placement.js";
-import { computedPlacementAdmission, observeComputedPlacement, resolveTestPath } from "#src/lib/test-path-resolver.js";
-import { commitWorkerEdits, fixRungScopeStandDownReason, scopeGuardOutOfScopeFiles } from "#src/run-task.js";
+import { computedPlacementAdmission, GREP_PROOF_PATH_RE, observeComputedPlacement, resolveTestPath } from "#src/lib/test-path-resolver.js";
+import { commitWorkerEdits, fixRungScopeStandDownReason, scopeGuardOutOfScopeFiles } from "#test/helpers/run-task-test.js";
 import { GIT_REPO_FIXTURE_IDENTITY, gitRepo, type GitRepo } from "#test/helpers/git-repo.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
@@ -115,6 +115,11 @@ test("W1-T11501 criterion 2: wrong folder, renamed basename, changed or missing 
   write(wt, home, body(MARKER));
   assert.match(observe([home], ["grep: other in src/lib/impl.ts"]).refusals.get(home)!, /no criterion marker/);
   assert.equal(observe([home]).admitted.size, 1, "control: the marker-bearing file in the computed folder admits");
+
+  // The proof split: a pattern with no path token yields no marker, and a pattern plus path yields both parts.
+  assert.equal(GREP_PROOF_PATH_RE.test("a pattern with no path token"), false);
+  assert.equal(GREP_PROOF_PATH_RE.test(`${MARKER} in ${DECLARED_TEST}`), true);
+  assert.deepEqual(GREP_PROOF_PATH_RE.exec(`${MARKER} in ${DECLARED_TEST}`)?.slice(1), [MARKER, DECLARED_TEST]);
 });
 
 test("W1-T11501 criterion 2: duplicate candidate, symlink, fixture, traversal and unreadable placement stay refused", () => {

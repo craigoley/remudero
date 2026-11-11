@@ -5516,10 +5516,6 @@ function admittedProofTests(diff: string, criteria: readonly AcceptanceCriterion
   return admitted;
 }
 
-/** W1-T11501: the new test files this diff adds that sit at the folder the placement engine computes for a declared,
- *  not-yet-created test — the SAME predicate (observeComputedPlacement) worker staging and the push/fix guards use. Needs
- *  the PR-head checkout for contents and placement; absent, nothing is admitted (the old exact-path advisory stands).
- *  The base tree is the head tree minus the files this diff ADDS, plus the files it DELETES. */
 export function reviewPlacementAdmitted(
   diff: string, checkoutDir: string | undefined, declaredFiles: readonly string[] | undefined,
   criteria: readonly AcceptanceCriterion[],
