@@ -8891,6 +8891,24 @@ export function reaggregatedCiGateKeysFromLedger(lines: Array<Record<string, unk
   return out;
 }
 
+/** W1-T1275/W1-T12273 — re-drive a stale ci-gate's own job at most once per (head, sibling transition).
+ *  The row is ledgered before the call, so a crash between them still bounds the next pass. */
+async function redriveStaleCiGate(deps: Pick<SweepDeps, "ledgerPath" | "runId" | "reaggregateCiGate" | "appendLine">,
+  pr: OpenPrView, transition: StaleCiGateTransition, keys: Set<string>): Promise<string> {
+  const key = ciGateReaggregateKey(pr.headSha, transition);
+  if (!ciGateReaggregateDecision(keys.has(key)).reaggregate) {
+    return `stale ci-gate verdict already re-driven for this transition — awaiting the fresh result`;
+  }
+  (deps.appendLine ?? appendLedger)(deps.ledgerPath, {
+    run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", step: CI_GATE_REAGGREGATE_STEP, pr_number: pr.prNumber,
+    pr_url: pr.prUrl, head_sha: pr.headSha, sibling_name: transition.siblingName, sibling_started_at: transition.siblingStartedAt,
+  });
+  keys.add(key);
+  if (deps.reaggregateCiGate) await deps.reaggregateCiGate(pr, transition);
+  return `stale ci-gate verdict — re-driving its job (required sibling "${transition.siblingName}" ` +
+    `reached success at ${transition.siblingStartedAt}, after the gate concluded)`;
+}
+
 const MS_PER_DAY = 86_400_000;
 
 /** The blocked_ci shape (W1-T100, broadened by W1-T138): a required check is red. The failing signal
@@ -21341,8 +21359,14 @@ export async function runSweep(
     // W1-T5543: fleet filings have their own plan surface; the code rung still never owns one.
     if (planConflictRound || (disposition === "blocked-fixable" && isBlockedCi(pr) && pr.isPlanFiling === true)) {
       const pendingJudgment = judgedUnavailable.get(pr.prNumber);
+      const staleGate = pendingJudgment || planConflictRound || !deps.readCiGateRollup ? undefined
+        : staleCiGateTransition(await deps.readCiGateRollup(pr));
       const repair = pendingJudgment ? { repaired: true, reason: pendingJudgment }
-        : planConflictRound ? { repaired: false, reason: "" } : await tryPlanRepair(pr);
+        : planConflictRound ? { repaired: false, reason: "" }
+        : staleGate ? { repaired: true, reason: deps.dryRun || !(deps.actionable?.("blocked-fixable") ?? true)
+          ? "stale ci-gate verdict — its re-run waits for a full sweep pass"
+          : await redriveStaleCiGate(deps, pr, staleGate, reaggregatedCiGateKeys) }
+        : await tryPlanRepair(pr);
       const facts = planRoundFacts.get(pr.prNumber);
       let planRoundExhausted = false;
       if (!repair.repaired && deps.dispatchPlanGateRound && isFleetAppAuthor(facts?.authorLogin) &&
@@ -23038,30 +23062,8 @@ export async function runSweep(
                 ? classifyCiTimeoutNoVerdict(pr.ciFailures ?? [], pr.redRequiredChecks ?? [], (pr.cancelledRequiredChecks ?? []).map((c) => c.name))
                 : undefined;
               if (staleTransition && (!timeoutShape || timeoutShape.notReady.includes(staleTransition.siblingName))) {
-                const key = ciGateReaggregateKey(pr.headSha, staleTransition);
-                const decision = ciGateReaggregateDecision(reaggregatedCiGateKeys.has(key));
-                if (decision.reaggregate) {
-                  // LEDGERED BEFORE THE CALL, the same ordering the re-queue uses below: a crash
-                  // between this write and the real GitHub call still bounds the NEXT pass toward
-                  // standing down rather than re-driving twice.
-                  appendLine(deps.ledgerPath, {
-                    run_id: deps.runId,
-                    task_id: pr.taskId ?? "SWEEP",
-                    step: CI_GATE_REAGGREGATE_STEP,
-                    pr_number: pr.prNumber,
-                    pr_url: pr.prUrl,
-                    head_sha: pr.headSha,
-                    sibling_name: staleTransition.siblingName,
-                    sibling_started_at: staleTransition.siblingStartedAt,
-                  });
-                  reaggregatedCiGateKeys.add(key);
-                  if (deps.reaggregateCiGate) await deps.reaggregateCiGate(pr, staleTransition);
-                }
                 acted = false;
-                standDownReason = decision.reaggregate
-                  ? `stale ci-gate verdict — re-driving its job (required sibling "${staleTransition.siblingName}" ` +
-                    `reached success at ${staleTransition.siblingStartedAt}, after the gate concluded)`
-                  : `stale ci-gate verdict already re-driven for this transition — awaiting the fresh result`;
+                standDownReason = await redriveStaleCiGate(deps, pr, staleTransition, reaggregatedCiGateKeys);
                 break;
               }
               let ciFailuresForFix = isBlockedCi(pr) ? pr.ciFailures ?? [] : [];
