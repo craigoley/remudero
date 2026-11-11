@@ -1,0 +1,56 @@
+- id: W1-T12273
+  title: "A failed check run that a later run of the same check on the same head superseded is not read as red"
+  repo: remudero
+  depends_on: []
+  priority: 0.9
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the rule that decides whether a required check is red; a wrong rule merges a red head or holds a green one
+  band_meaning: blast-radius
+  origin: operator-session#green-prs-merge-at-once-2026-11-11
+  plan_refs:
+    - W1-T4908
+    - W1-T9913
+    - W1-T3652
+  files:
+    - src/lib/sweep.ts
+    - src/lib/open-prs-rest.ts
+    - test/sweep/a-failed-check-run-that-a-later-run-superseded-is-not-read-as-red.test.ts
+    - test/a-superseded-check-attempt-is-not-a-live-failure.test.ts
+    - test/sweep-superseded-check-run.test.ts
+    - test/ci-gate-reads-a-superseded-attempt.test.ts
+    - test/a-superseded-runs-rerun-never-overrides-the-newest-run.test.ts
+    - test/superseded-reds-shared-reader.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "With the check runs that GitHub recorded for the head of #17793 (a `ci-gate` run that failed, then a `ci-gate` run on the same head that passed after a body edit), the required checks read green"
+      proof: "grep: W1-T12273 criterion 1 in test/sweep/a-failed-check-run-that-a-later-run-superseded-is-not-read-as-red.test.ts"
+    - claim: "The sweep does not dispose that pull request as red on `ci-gate`, and files no escalation for it"
+      proof: "grep: W1-T12273 criterion 2 in test/sweep/a-failed-check-run-that-a-later-run-superseded-is-not-read-as-red.test.ts"
+    - claim: "A failed run of a check that a different workflow produced stays red when a run of another workflow passes under the same name (#14160)"
+      proof: "grep: W1-T12273 criterion 3 in test/sweep/a-failed-check-run-that-a-later-run-superseded-is-not-read-as-red.test.ts"
+    - claim: "A later run that is still in progress leaves the check pending, not green and not red"
+      proof: "grep: W1-T12273 criterion 4 in test/sweep/a-failed-check-run-that-a-later-run-superseded-is-not-read-as-red.test.ts"
+  rationale: |
+    OBSERVED 2026-11-11 on plan pull request #17793, head 14b8062.
+    - `ci-gate` FAILURE at 01:50:03Z. A body edit ran the gate again on the same head: `ci-gate` SUCCESS at 01:53:04Z.
+    - 02:06:53Z and 02:14:29Z on the core ledger: `sweep.disposed`, disposition `refused-escalate`, blocker `plan-proof-unrunnable`, reason "plan-only PR is red on ci-gate". The view of the first row was 7.6 seconds old, so it was read after the green run.
+    - The pull request stayed held until a person ran the failed run again by hand.
+    READ at origin/main 0953736f0, src/lib/sweep.ts.
+    - Line 7594, `dedupeRollupByLatestAttempt`: it keeps the newest run for each producer and name. Line 7580, `rollupProducerKey`: the producer is the workflow id or name, with a separate class for an entry that a job posted.
+    - "Independent producers remain independently enforced; a later completion from another workflow cannot clear their failures (#14160)."
+    - So a later green run clears an earlier red one only when both have the same producer key. Which field differed between the two `ci-gate` runs of #17793 is not established.
+    CHECKED for overlap: W1-T4908, W1-T9913 and W1-T3652 (all merged) made the rule of today. No queued task covers a run that a body edit starts.
+  design: |
+    First read the check runs and the workflow runs of head 14b8062 of #17793 through the REST calls that the tick read makes. Record the two `ci-gate` entries as a fixture: name, workflow id, workflow run id, external id, start time, conclusion.
+    - If the two entries have different producer keys although one workflow produced both, correct `rollupProducerKey` so that the event that started a run is not part of the producer.
+    - If the entries have the same key and the fold of `dedupeRollupByLatestAttempt` kept the older one, correct the order.
+    - If the red came from another reader (the failed-job list of the workflow run, or the plan-only red check at src/lib/sweep.ts:21404), make that reader use `classifyRollupSupersession`.
+    Keep the rule of #14160: a run of another workflow never clears a failure.
+    If the cause is none of the three, stop and report what the fixture shows. Do not widen the rule to "the newest run of a name wins".
+    The five listed tests pin the rule of today. They must pass without a change, except where one pins the defect itself.
+  falsifier: |
+    Keep the rule of today and criteria 1 and 2 must fail. Let the newest run of a name win across workflows and criterion 3 must fail. Read an in-progress later run as green and criterion 4 must fail. Restore and require all four to pass.

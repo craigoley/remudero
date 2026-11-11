@@ -1,0 +1,69 @@
+- id: W1-T12268
+  title: "The installed copies of the Mac janitor refresh themselves when main changes"
+  repo: remudero
+  depends_on: []
+  priority: 1.1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # a scheduled job replaces the code of a deletion tool on every Mac account; it must take that code from main only
+  band_meaning: blast-radius
+  origin: operator-session#green-prs-merge-at-once-2026-11-11
+  plan_refs:
+    - W1-T10256
+    - W1-T12252
+    - W1-T12255
+  files:
+    - deploy/mac/install-janitor.sh
+    - deploy/mac/install-tmp-reclaim.sh
+    - deploy/mac/remudero-janitor.sh
+    - deploy/mac/tmp-reclaim.sh
+    - deploy/mac/JANITOR.md
+    - test/deploy/the-installed-mac-janitor-copies-refresh-themselves.test.ts
+    - test/the-shared-mac-janitor-never-enters-another-accounts-home.test.ts
+    - test/the-mac-reclaims-its-own-scratch.test.ts
+    - test/workspace-retirement-safety.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "Each installer writes a record beside the files it installs: the checkout it ran from and the layout it installed (`HOME/bin`, the shared root, or the Application Support folder)"
+      proof: "grep: W1-T12268 criterion 1 in test/deploy/the-installed-mac-janitor-copies-refresh-themselves.test.ts"
+    - claim: "A scheduled pass whose installed file differs from the same file at `origin/main` of the recorded checkout installs the files of `origin/main` after its own work, and prints the old and the new hash of each file it replaced"
+      proof: "grep: W1-T12268 criterion 2 in test/deploy/the-installed-mac-janitor-copies-refresh-themselves.test.ts"
+    - claim: "The refresh reads the files from the `origin/main` ref. It never copies a file from the working tree of the checkout, and it runs no `git fetch`"
+      proof: "grep: W1-T12268 criterion 3 in test/deploy/the-installed-mac-janitor-copies-refresh-themselves.test.ts"
+    - claim: "When the record, the checkout or the ref cannot be read, or the source set at `origin/main` is not complete, the pass keeps every installed file, prints one line with the cause and finishes its own work"
+      proof: "grep: W1-T12268 criterion 4 in test/deploy/the-installed-mac-janitor-copies-refresh-themselves.test.ts"
+    - claim: "A dry run prints which files would change and replaces nothing. A refresh changes no crontab line and no launchd job"
+      proof: "grep: W1-T12268 criterion 5 in test/deploy/the-installed-mac-janitor-copies-refresh-themselves.test.ts"
+    - claim: "The refresh works for the copy under the Application Support folder that the hourly temp cleaner runs, and for the copy under the shared root"
+      proof: "grep: W1-T12268 criterion 6 in test/deploy/the-installed-mac-janitor-copies-refresh-themselves.test.ts"
+  rationale: |
+    OBSERVED 2026-11-11 on the Mac agent account: the installed janitor code is older than main, and only a person refreshes it.
+    - `~/Library/Application Support/remudero/tmp-reclaim.sh` is dated 2026-11-07. The hourly job at minute 17 runs it. `remudero-janitor.sh` in the same folder is dated 2026-10-18, `retire-legacy-sweeper.py` 2026-10-17, `cache-reclaim.py` 2026-10-28.
+    - `/Users/Shared/remudero-mac/` holds `remudero-janitor.sh` of 2026-11-04 and `preserve-retire.py` of 2026-11-07.
+    - Both folders hold many `.pre-install-*` and `.pre-*` copies: each refresh was made by hand.
+    - A janitor fix that merges changes nothing on a Mac until someone runs an installer. W1-T12252 (the tsx cache, 7.4 GB) and W1-T12255 (finished worktrees) are such fixes.
+    READ at origin/main 0953736f0.
+    - deploy/mac/install-janitor.sh copies the guards, `tmp-reclaim.sh`, the three helpers and `remudero-janitor.sh` to `HOME/bin`, or with `--shared` to `/Users/Shared/remudero-mac`. It keeps the earlier `remudero-janitor.sh` as a `.pre-install-<time>` copy.
+    - deploy/mac/install-tmp-reclaim.sh copies `tmp-reclaim.sh`, `cache-reclaim.py` and `dependency-seed-guard.sh` to `~/Library/Application Support/remudero` and writes the crontab line.
+    - Neither installer records where it ran from. An installed script cannot find the repo.
+    - deploy/mac/JANITOR.md tells the owner of each account to run the installer after a merge. It says that the default layout alone leaves the scheduled copy unchanged.
+    CHECKED for overlap: the janitor filing of 2026-11-11 (W1-T12252 to W1-T12261) saw this and filed nothing for it. W1-T10256 (merged) and W1-T4770 (merged) changed what the janitor removes, not how it is installed.
+  design: |
+    - Each installer writes `install-source` in the destination folder: the absolute path of the checkout root and the name of the layout. It writes the file last, after every copy succeeded.
+    - At the end of an applied pass, `remudero-janitor.sh` and `tmp-reclaim.sh` call one shared shell function. Put it where both installed layouts have it.
+    - The function reads `install-source`. For each file of its layout it compares the installed file with `git -C <checkout> cat-file` of `origin/main:<path>`. It needs no network: it reads the ref as the checkout last fetched it.
+    - When a file differs, it writes the whole source set of `origin/main` to a new temp folder with `git archive` and runs the installer of its layout from that folder. The installer validates the complete set before it replaces a file, as today. The installer for the Application Support layout must then leave the crontab as it is: add a code-only mode.
+    - A pass finishes with the code it started with. The next pass runs the new code.
+    - Fail closed: any read that fails keeps every installed file. Print `janitor refresh: kept (<cause>)`, or `janitor refresh: installed <n> files from <commit>` with the hashes.
+    - Never install from a checkout whose `origin` is not the remudero repository. Compare the remote URL with the one that the record holds.
+    The three listed tests run the installers. Keep them passing; change an assertion only where the new record file appears in a listing.
+    NOT IN SCOPE: a fetch of the checkout, the schedules, the Azure host (its janitor runs from the image and the host units), and what the janitor removes.
+  falsifier: |
+    Copy from the working tree and criterion 3 must fail. Replace a file when the ref cannot be read and criterion 4 must fail. Replace a file in a dry run and criterion 5 must fail. Skip the Application Support layout and criterion 6 must fail. Restore and require all six to pass.
+  note: |
+    Host and account: every Mac account that schedules the janitor or the temp cleaner. A merge still starts nothing by itself on an account where no installer has run since this task: the owner runs the installer once, and that writes the record.
+    The checkout on the agent account is `~/Remudero/remudero`. The hand lane fetches it many times a day, so `origin/main` there is close to main.
+    Owner of the path: the account that runs the pass. The pass replaces only files in its own install folder.
