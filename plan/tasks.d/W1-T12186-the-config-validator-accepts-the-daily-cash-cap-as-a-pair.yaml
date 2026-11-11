@@ -18,7 +18,7 @@
     - src/lib/config-schema.ts
     - src/lib/cash-trial.ts
     - test/lib/the-config-validator-accepts-the-daily-cash-cap-as-a-pair.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "The shape check accepts a daily cash cap of { normal: 10, squeezed: 50 }. The full config check accepts the same config with the cash provider enabled"

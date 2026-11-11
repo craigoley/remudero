@@ -293,7 +293,7 @@ test("W1-T9097: the real reading is the shadow budget's projection for a zero-cl
 
     // The default ports really read this installation's policy, the host and the CPU count.
     const real = defaultLaneGovernorPorts(join(root, "state"));
-    assert.equal(real.mode(), "shadow");
+    assert.equal(real.mode(), "enforce");
     assert.ok(real.cpuCount() >= 1);
     const live = real.read();
     assert.equal(typeof live.perLaneMib, "number");
@@ -311,7 +311,7 @@ test("W1-T9097: sweep.laneGovernor.mode reads shadow or enforce and refuses anyt
   assert.throws(() => parseLaneGovernorMode({ laneGovernor: { mode: "enforce" } }), /must be a mapping with 'value'\/'origin'/);
   assert.throws(() => parseLaneGovernorMode({ laneGovernor: { mode: { value: "enforce", origin: "net-new" } } }), /must be "proposal"/);
   assert.throws(() => parseLaneGovernorMode({ laneGovernor: { mode: { value: "on", origin: "proposal" } } }), /accepts only "shadow", "enforce"/);
-  assert.equal(loadLaneGovernorMode(), "shadow", "the shipped row is shadow");
+  assert.equal(loadLaneGovernorMode(), "enforce", "the shipped row is enforce (W1-T11884, operator ruling 2026-11-09)");
   const dir = mkdtempSync(join(tmpdir(), "rmd-lane-policy-"));
   try {
     const bad = join(dir, "policy.yaml");

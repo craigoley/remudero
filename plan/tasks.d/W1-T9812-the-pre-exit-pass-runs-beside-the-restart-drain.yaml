@@ -14,7 +14,7 @@
     - src/lib/daemon.ts
     - test/the-pre-exit-pass-runs-beside-the-restart-drain.test.ts
   status: queued
-  priority: 2.5  # every lane is idle for the pass's length on each latched exit that takes the awaited or ran arm; full pass p50 18.7 min, p90 49.7 (F5, 10-16)
+  priority: 1  # raised 2026-11-11 on the 7-day restart study (36 exits to 2026-11-11): the pre-exit pass is the larger phase in 17 of 20 slow exits; decision to exit is 18 min median; was 2.5
   attempts: 0
   rationale: |
     EVIDENCE: B17 measured episode 2 on 2026-10-15 (core ledger): latch to drain 3.6 min at 20:08, spent in the
@@ -36,6 +36,9 @@
     Swept plan/tasks.d on origin/main and the open heads updated since 10-12 for prepareFreshnessExit, pre_exit_pass
     and "pre-exit"; only merged tasks' stale run branches touch them. Control: pre_exit_pass reads 2 shards on main
     (W1-T8170, W1-T9352).
+    BUILT AFTER W1-T9352 (amended 2026-11-11): W1-T9352 lets a tick-top exit skip its pass when a full pass
+    completed after main advanced. The test "an exit with no dispatch latch keeps the pass before the drain" uses
+    a tick-top exit after a boot pass, so its fixture's boot pass must fail; the exit then runs its own pass.
     DEPENDENCIES: W1-T9808 adds the latch admission predicate the pass runs under, and W1-T9352 edits the same
     function's pass arms. Serialized after both.
   design: |
@@ -59,11 +62,11 @@
        - work the pass admits is drained within the latch's remaining bound, not a fresh one.
   acceptance:
     - claim: "the restart drain waits on in-flight work while the pre-exit pass is still running"
-      proof: 'grep: test("W1-T9812: the restart drain starts before the pre-exit pass settles" in test/the-pre-exit-pass-runs-beside-the-restart-drain.test.ts'
+      proof: 'unit test: W1-T9812: the restart drain starts before the pre-exit pass settles'
     - claim: "the exit still returns only after the pre-exit pass settles"
-      proof: 'grep: test("W1-T9812: the restart still waits for the pre-exit pass to settle" in test/the-pre-exit-pass-runs-beside-the-restart-drain.test.ts'
+      proof: 'unit test: W1-T9812: the restart still waits for the pre-exit pass to settle'
     - claim: "work the pre-exit pass admits is drained within the latch's remaining bound"
-      proof: 'grep: test("W1-T9812: what the pre-exit pass admits keeps the latch bound" in test/the-pre-exit-pass-runs-beside-the-restart-drain.test.ts'
+      proof: 'unit test: W1-T9812: what the pre-exit pass admits keeps the latch bound'
   falsifier: |
     At origin/main, a latched exit with a background pass that settles 10 min after the last lane and a review in
     flight at the latch calls `drainInFlightReviews` only after the pass resolves, so the first test sees no drain

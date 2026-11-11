@@ -1,0 +1,85 @@
+- id: W1-T12266
+  title: "A ready plan pull request merges in the light pass that finds it"
+  repo: remudero
+  depends_on: []
+  priority: 0.6
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the turn rule of the direct-merge path that about 70% of merges to main take; no safety check may change
+  band_meaning: blast-radius
+  origin: operator-session#green-prs-merge-at-once-2026-11-11
+  plan_refs:
+    - W1-T11445
+    - W1-T9212
+    - W1-T5901
+    - W1-T5615
+    - W1-T5922
+    - W1-T12059
+  files:
+    - src/lib/sweep.ts
+    - test/sweep/a-ready-plan-pr-merges-in-the-light-pass-that-finds-it.test.ts
+    - test/ledger/light-pass-merge-budget-uses-measured-interval.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "Through the production light-pass entry `buildSweepLightHook`: a ready plan pull request merges in the pass that finds it when the plan pull request ahead of it makes no merge attempt in that pass"
+      proof: "grep: W1-T12266 criterion 1 in test/sweep/a-ready-plan-pr-merges-in-the-light-pass-that-finds-it.test.ts"
+    - claim: "A ready plan pull request under an operator merge hold does not merge, and the ready plan pull request behind it merges in the same pass"
+      proof: "grep: W1-T12266 criterion 2 in test/sweep/a-ready-plan-pr-merges-in-the-light-pass-that-finds-it.test.ts"
+    - claim: "A plan pull request whose head moved since the verdict does not merge, and the ready plan pull request behind it merges in the same pass"
+      proof: "grep: W1-T12266 criterion 3 in test/sweep/a-ready-plan-pr-merges-in-the-light-pass-that-finds-it.test.ts"
+    - claim: "The `sweep.disposed` row of a merge that a light pass made names the pass kind (`arm_surface: light`). For a plan pull request the row also holds the `pass_id` of that pass"
+      proof: "grep: W1-T12266 criterion 4 in test/sweep/a-ready-plan-pr-merges-in-the-light-pass-that-finds-it.test.ts"
+    - claim: "A merge attempt still spends the measured budget of the pass: when the first attempt takes longer than the budget, the next ready plan pull request waits and its row names the budget and the time spent. A turn with no attempt spends nothing"
+      proof: "grep: W1-T12266 criterion 5 in test/sweep/a-ready-plan-pr-merges-in-the-light-pass-that-finds-it.test.ts"
+  rationale: |
+    The operator's standing complaint: a pull request that is reviewed and green does not merge at once.
+    OBSERVED 2026-11-11 on the core ledger, plan pull request #17844 (review success, every required check green):
+    - 05:49:10Z, 05:53:59Z and 05:58:50Z: `sweep.disposed`, disposition `mergeable`, `acted: false`. The reason is "a plan PR is never armed (W1-T5615): merging directly".
+    - Each of the three rows has the same `stand_down_reason`: "measured interval budget <n>ms; prior plan-merge duration unavailable or invalid, stopped before another attempt".
+    - 06:03:00Z: a full pass merged it (`automerge.armed`, outcome `direct-merged`; `pr.terminal`, state `merged`). The view of that pass was 756 seconds old.
+    - Ready to merged: 14 minutes.
+    - The same three light passes stood down #17839, #17841 and #17846 with the same sentence. The full pass that started at 05:59:35Z merged all four, one each minute, from 06:00:42Z to 06:05:54Z.
+    - In every one of those light passes one plan pull request stood ahead of them: #17837. The review had held it at 05:16Z, so it was the plan pull request held longest. The risk judge escalated its head at 05:28Z. Its row reads "risk judge escalated this head, no operator override recorded", `deduped: true`. It made no merge attempt.
+    MEASURED 2026-11-09 01:38Z to 2026-11-11 06:19Z (40 rotated ledger files and the live file), `sweep.disposed` rows of plan pull requests with disposition `mergeable`:
+    - 120 rows. 28 acted (`direct-merged`): 22 in a light pass, 6 in a full pass.
+    - 26 rows on 7 pull requests carry "prior plan-merge duration unavailable or invalid". Three of those pull requests merged later in a full pass, 17 to 18 minutes after their first such row.
+    - 5 rows carry "spent <n>ms; stopped before the next plan merge". That is the budget at work, not this defect.
+    About 70% of merges to main are plan-only filings (118 of 163 in 48 hours on 2026-11-10). A plan pull request whose review posts while its checks still run is held by the review and merges through this path.
+    CAUSE, READ at origin/main 0953736f0. The light pass does merge. Its turn rule stops it.
+    - src/run-task.ts:33263: `lightPassActionable` lets the ordinary light pass act on `mergeable`. src/cli/commands/sweep.ts:1260 passes that to `runSweepLightPass`.
+    - src/lib/sweep.ts:25947: `selectLightPassPlanMerges` orders the ready plan pull requests of the pass. A held one comes first, the one held longest at the front (W1-T9212). They take their turns one after the other.
+    - src/lib/sweep.ts:25514: `planMergeStopReason` decides each turn (W1-T11445). Line 25516 always lets the first place go. A later place goes only when the duration of the earlier merge is known and the time spent is below the measured interval.
+    - src/lib/sweep.ts:25732: when the pull request in the first place ends its turn and `deps.arm` was never called, the pass sets `durationKnown` to false.
+    - The walk stands a pull request down before `deps.arm` for many reasons (src/lib/sweep.ts:21717 to 22370): an operator merge hold, a risk refusal, a head that moved, an arm already in flight, a capped verdict, a head that GitHub shows armed.
+    - So one plan pull request that makes no attempt, in the first place, stops every plan merge of the pass. A held pull request keeps the first place in every pass until a person acts. Only the full pass has no turn rule, and it ran a median of 19 minutes apart (measured 2026-10-14).
+    CHECKED, the other candidate causes:
+    - "The light pass classifies and takes no merge action": no. 22 of the 28 direct merges above were made by a light pass.
+    - "mergeability unread this pass ... not inherited (W1-T11166)": that text is added to the reason of the row (src/lib/sweep.ts:20620). It defers nothing. The merge preflight makes its own read.
+    - "The merge is queued behind other actions": no. The plan merges of one pass wait only for one another.
+    - W1-T12059 (queued) reads an unknown mergeability again inside the merge preflight. W1-T11503 (queued) keeps an admitted merge through a restart drain. Neither changes the turn rule.
+    CODE pull requests: the light pass calls the same `deps.arm` for a ready code pull request (W1-T5922). When GitHub refuses the arm because the pull request is already clean, that call merges it at once (src/lib/arm-auto-merge.ts:1653 and 1772). The turn rule does not apply to code pull requests. Criterion 4 pins that the row of such a merge names the light pass.
+  design: |
+    Change the turn rule in `runSweepLightPassCore` (src/lib/sweep.ts). Change nothing in the walk, in `selectLightPassPlanMerges` or in src/lib/arm-auto-merge.ts.
+    - The budget counts merge attempts. Add an attempt count to `planMergeBudget`. The wrapper around `deps.arm` adds one for each call, with the time the call took, as today.
+    - With a measured interval, a plan pull request in the sequence may attempt when no attempt was made yet in this pass. That replaces "the first place may attempt".
+    - After the first attempt the rule of W1-T11445 stays: stop when the duration of an attempt is not known, and stop when the time spent has reached the measured interval.
+    - A turn that ends with no call of `deps.arm` changes nothing in the budget. Remove the line that sets `durationKnown` to false for the first place.
+    - Decide each pull request's turn once, at its turn, and keep the answer for the rest of its walk. Its own attempt must not change the answer that it already acted on.
+    Keep every check that runs before a merge today. They are in the walk and in the merge call, and this task does not touch them:
+    - the operator merge hold, the risk refusal and its override, the live read of the head at the act, the verdict rule of `decideSweepArm`, the CodeQL gate;
+    - inside the merge call: the merge-safety read of the plan tree (W1-T5748), the fresh mergeability read, the required checks, the merge queue path (W1-T4405).
+    Keep the order of W1-T9212, one merge at a time, the claim that keeps an overlapping pass out, and the bound for a pass with fewer than three measured intervals.
+    The last block of criterion 4 in test/ledger/light-pass-merge-budget-uses-measured-interval.test.ts asserts today's rule: after a first pull request that GitHub shows armed, the second is stood down with "duration unavailable or invalid". Change that assertion to the new rule. Its other assertions stay.
+    The new test drives `buildSweepLightHook` through its io ports (`openPrViews`, `effects`, `readCompare`), as test/daemon/an-interphase-review-pass-arms-a-ready-pr.test.ts does. Nothing stands in for the turn rule.
+    NOT IN SCOPE:
+    - the measured interval itself. It is often a few seconds, because one tick starts several passes; W1-T12267 corrects it.
+    - the bound for a pass with fewer than three measured intervals (3 rows in the measured window).
+    - the full pass, the review's own merge attempt, and W1-T12059.
+  falsifier: |
+    Restore the line that sets `durationKnown` to false when the first place makes no attempt, and criteria 1, 2, 3 and 5 must fail. Let every place attempt without a budget, and criterion 5 must fail. Call `deps.arm` for a held or a moved head, and criterion 2 or 3 must fail. Restore and require all five to pass.
+  note: |
+    What still waits after this task: when several plan pull requests are ready in one pass, the second and later ones merge in that pass only while the time spent is below the measured interval. Each merge took 60 to 210 seconds on 2026-11-11. With the interval of W1-T12267 that is two to four merges in a pass.
+    Criterion 4 passes at origin/main: W1-T5922 and W1-T11445 added those fields. It is a guard, so that a later change cannot drop the pass kind from the row.

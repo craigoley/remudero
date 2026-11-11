@@ -170,9 +170,19 @@ export interface CapabilityLadder {
    * `automatic`. Absent means every capability is a pure headroom auction.
    */
   providerPreference?: Record<string, "claude" | "codex">;
+  /**
+   * W1-T12172: worker role -> the subscription provider that role PREFERS in the auction. It is applied before
+   * {@link providerPreference}, and under the same conditions: only while the operator's own policy is `automatic`,
+   * and only while the preferred provider has headroom. Absent means no role has a preference.
+   */
+  rolePreference?: Partial<Record<RoutingRole, "claude" | "codex">>;
   /** Capabilities that run ONLY on a subscription: never cash, never API-key billing. */
   subscriptionOnly?: string[];
 }
+
+/** W1-T12172: the worker roles the router can tell apart at a spawn. A role outside this list cannot hold a preference. */
+const ROUTING_ROLES = ["reviewer"] as const;
+export type RoutingRole = (typeof ROUTING_ROLES)[number];
 
 export function resolveClaudeModelAlias(model: string, capabilities: CapabilityLadder | undefined): string {
   if (model.includes("-") || !capabilities) return model;
@@ -558,6 +568,29 @@ function parseCapabilities(
     }
   }
 
+  let rolePreference: Partial<Record<RoutingRole, "claude" | "codex">> | undefined;
+  if (raw.role_preference !== undefined) {
+    if (!isObject(raw.role_preference)) {
+      throw new MountsError("'capabilities.role_preference' must be a mapping of worker role -> provider.");
+    }
+    rolePreference = {};
+    for (const [role, provider] of Object.entries(raw.role_preference)) {
+      const known = ROUTING_ROLES.find((candidate) => candidate === role);
+      if (known === undefined) {
+        throw new MountsError(
+          `'capabilities.role_preference.${role}' names a worker role the router cannot tell apart (${ROUTING_ROLES.join(", ")}).`,
+        );
+      }
+      // `cash` never enters the auction, so it cannot be preferred there.
+      if (provider !== "claude" && provider !== "codex") {
+        throw new MountsError(
+          `'capabilities.role_preference.${role}' must be "claude" or "codex", got ${JSON.stringify(provider)}.`,
+        );
+      }
+      rolePreference[known] = provider;
+    }
+  }
+
   let subscriptionOnly: string[] | undefined;
   if (raw.subscription_only !== undefined) {
     const listed = raw.subscription_only;
@@ -576,6 +609,7 @@ function parseCapabilities(
     codex,
     ...(cash ? { cash, openweight: cash } : {}),
     ...(providerPreference ? { providerPreference } : {}),
+    ...(rolePreference ? { rolePreference } : {}),
     ...(subscriptionOnly ? { subscriptionOnly } : {}),
   };
 }

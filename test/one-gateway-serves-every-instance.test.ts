@@ -851,3 +851,66 @@ test("W1-T12126 criterion 3: scratch-on legacy placement without a declared daem
   assert.match(String(r.stderr), /instance site.*repos.*unavailable/i);
   assert.ok(!String(r.stdout).includes(DEFAULT_INSTANCE_STATE_BASE + "/site:"));
 });
+
+// W1-T12192: the fleet host's daemons have the coverage overlay that scratch_plan binds under repos.
+const COVERAGE_OVERLAY_DEST = "/home/node/Remudero/repos/.remudero-coverage";
+
+/** The mount table of the fleet host: the state root, repos on scratch and the coverage overlay. */
+function fleetHostMounts(f: ReturnType<typeof foreignGatewayLauncher>) {
+  const coverage = join(f.base, "scratch-repos-coverage");
+  mkdirSync(coverage, { recursive: true });
+  const mounts = [...f.mounts.map(row => ({ ...row })), f.mount(coverage, COVERAGE_OVERLAY_DEST)];
+  writeFileSync(f.mountsFile, JSON.stringify(mounts));
+  return { coverage, mounts };
+}
+
+test("W1-T12192 criterion 1: the fleet host's mount table with the coverage overlay refuses nothing and plans the repos bind", (t) => {
+  const f = foreignGatewayLauncher(t, { scratch: true });
+  const { coverage } = fleetHostMounts(f);
+  const r = f.run(), out = String(r.stdout), dest = DEFAULT_INSTANCE_STATE_BASE + "/site";
+  assert.equal(r.status, 0, out + r.stderr);
+  assert.doesNotMatch(String(r.stderr), /REFUSING|repos placement unavailable/);
+  assert.ok(out.includes("-v " + f.repos + ":" + dest + "/repos:ro"), out);
+  assert.ok(out.includes("-v " + f.site + ":" + dest + ":ro"), out);
+  assert.ok(!out.includes(coverage + ":"), "serve does not bind the coverage overlay of another instance");
+});
+
+test("W1-T12192 criterion 2: a serve replace on the fleet host's mount table passes the placement check and stops the old container", (t) => {
+  const f = foreignGatewayLauncher(t, { replace: true });
+  fleetHostMounts(f);
+  const r = f.run(), err = String(r.stderr);
+  assert.doesNotMatch(err, /repos placement|repos.*changed/i, String(r.stdout) + err);
+  const steps = f.calls().map(a => a[0]);
+  assert.ok(steps.includes("pull"), "the replace reached the image pull: " + JSON.stringify(f.calls()));
+  assert.ok(steps.includes("stop"), "the replace reached the stop of the old container: " + JSON.stringify(f.calls()));
+  assert.ok(steps.indexOf("pull") < steps.indexOf("stop"), "the last placement check runs after the pull");
+});
+
+test("W1-T12192 criterion 3: a mount under repos that is not the one coverage bind still refuses before the stop", async (t) => {
+  for (const kind of ["unknown-beside-overlay", "overlay-volume", "overlay-twice", "below-overlay", "similar-name"] as const) await t.test(kind, (t) => {
+    const f = foreignGatewayLauncher(t, { replace: true });
+    const { mounts } = fleetHostMounts(f);
+    if (kind === "unknown-beside-overlay") mounts.push(f.mount(f.alternate, "/home/node/Remudero/repos/remudero-site"));
+    if (kind === "overlay-volume") mounts[2]!.Type = "volume";
+    if (kind === "overlay-twice") mounts.push(f.mount(f.alternate, COVERAGE_OVERLAY_DEST));
+    if (kind === "below-overlay") mounts.push(f.mount(f.alternate, COVERAGE_OVERLAY_DEST + "/tmp"));
+    if (kind === "similar-name") mounts[2]!.Destination = COVERAGE_OVERLAY_DEST + "-2";
+    writeFileSync(f.mountsFile, JSON.stringify(mounts));
+    const r = f.run();
+    assert.notEqual(r.status, 0, String(r.stdout) + r.stderr);
+    assert.match(String(r.stderr), /REFUSING — foreign repos placement unavailable: ambiguous or unsupported repos placement/);
+    assert.ok(!f.calls().some(a => ["stop", "rm", "run", "pull"].includes(a[0]!)), JSON.stringify(f.calls()));
+  });
+});
+
+test("W1-T12192 criterion 4: scratch-mounts.sh names the coverage overlay once and the launcher reads that name", () => {
+  const root = foreignReposRepoRoot(), lib = join(root, "deploy", "scratch-mounts.sh");
+  const named = spawnSync("bash", ["-c", '. "$1"; printf "%s" "$SCRATCH_REPOS_COVERAGE_DEST"', "name", lib], { encoding: "utf8" });
+  assert.equal(named.status, 0, named.stderr);
+  assert.equal(named.stdout, COVERAGE_OVERLAY_DEST);
+  const libText = readFileSync(lib, "utf8");
+  assert.ok(libText.includes("/repos-coverage\t${SCRATCH_REPOS_COVERAGE_DEST}\n"), "the scratch plan binds the coverage directory at the name");
+  const launcher = readFileSync(join(root, "deploy", "serve-container.sh"), "utf8");
+  assert.ok(launcher.includes("SCRATCH_REPOS_COVERAGE_DEST"), "the placement check reads the name");
+  assert.ok(!launcher.includes(".remudero-coverage"), "the launcher does not type the path again");
+});

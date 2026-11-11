@@ -17,7 +17,8 @@
   files:
     - src/lib/read-model-worker.ts
     - test/console-api/read-model/a-view-build-row-names-why-a-due-build-was-not-skipped.test.ts
-  status: queued
+    - test/every-view-build-is-counted.test.ts
+  status: merged
   attempts: 0
   acceptance:
     - claim: "A build that ran because its view declares no ledger reads is counted under no_declaration in that unit's read_model.view_builds row"
@@ -26,15 +27,27 @@
       proof: "grep: W1-T11974 criterion 2 in test/console-api/read-model/a-view-build-row-names-why-a-due-build-was-not-skipped.test.ts"
     - claim: "A build whose digest could not be computed is counted under unreadable, and a skipped build is counted only under skipped; no build, due time or body changes"
       proof: "grep: W1-T11974 criterion 3 in test/console-api/read-model/a-view-build-row-names-why-a-due-build-was-not-skipped.test.ts"
+    - claim: "A build whose last bodies carry a source the digest cannot certify is counted under sources, a build with no earlier successful digest is counted under no_previous, and in every row the not_skipped counts plus skipped equal calls"
+      proof: "grep: W1-T11974 criterion 4 in test/console-api/read-model/a-view-build-row-names-why-a-due-build-was-not-skipped.test.ts"
+    - claim: "The production read-model view, built through readModelLaneViews and createReadModelTicker with nothing injected in place of the tally, ledgers its reasons on its own row"
+      proof: "grep: W1-T11974 criterion 5 in test/console-api/read-model/a-view-build-row-names-why-a-due-build-was-not-skipped.test.ts"
   rationale: |
     OBSERVED 2026-11-10 on the Azure host (8 cores, CPU pressure some avg300 79 percent): serve used 1.0 to 2.8 cores in 20 to 30 s samples at cpu-shares 4096 against the daemon's 512, with 3.8 GB resident. route-reads.json shows the console's last read of any view at 01:12:34Z; from 01:33Z to 04:19Z, with no reader, read_model.view_builds summed 4,385 s of build time over 9,987 s.
     - inputDigest returns undefined when a view has no ledgerReads, and only read-model and instances declare one; for those two the digest also holds every store's generation and every source_snapshot as_of, which move with any ledger row of any instance.
     - The view_builds row says skipped or not, never why, so which part defeats the skip for which view is inferred from code instead of read from the ledger.
   design: |
-    Keep the digest as an ordered list of named parts instead of one JSON string (the comparison stays equal-or-not). When a due build is not skipped, find the first part that differs from the unit's last successful digest and increment that reason in the tally; a view with no declaration increments no_declaration; a thrown digest increments unreadable. Emit the non-zero reasons on the existing row.
+    Keep the digest as an ordered list of named parts instead of one JSON string (the comparison stays equal-or-not). When a due build is not skipped, name one reason, in the order the skip checks its conditions, and increment it in the tally:
+    - no_declaration: the view declares no ledger reads.
+    - sources: the unit has built bodies, and one of them carries a source that reusableSources cannot certify (not fresh, or not a ledger or plan source). The digest is not computed in this case.
+    - unreadable: the digest threw or could not be computed (no store, a store without a generation, a lease not held, a failed snapshot).
+    - no_previous: the unit has no earlier successful digest (a cold build, a build after a failure, a build after a demand reset).
+    - otherwise the first part that differs from the unit's last successful digest.
+    Emit the non-zero reasons on the existing row as one nested member, not_skipped. A skip adds to skipped only, so not_skipped plus skipped equals calls. Write through the worker's existing log sink; add no second writer.
+    test/every-view-build-is-counted.test.ts compares whole rows of views that declare nothing, so its rows gain not_skipped with no_declaration; change only those row literals.
     NOT IN SCOPE: changing what is in the digest or which views declare reads.
   falsifier: |
-    Count a no-declaration build under another reason and criterion 1 must fail; report a later differing part and criterion 2 must fail; count a skip as a build reason or change a due time and criterion 3 must fail. Restore and require all three to pass.
+    Count a no-declaration build under another reason and criterion 1 must fail; report a later differing part and criterion 2 must fail; count a skip as a build reason or change a due time and criterion 3 must fail; count a sources build under a digest part and criterion 4 must fail; drop the tally from the production path and criterion 5 must fail. Restore and require all five to pass.
   note: |
     reservation hand-off: run-unfiled-1794287307841 -> run-unfiled-1794287307841
     Reserved with rmd next-task-id (W1-T11974 on run-unfiled-1794287307841). Same file as W1-T11933 and W1-T11815; build one at a time.
+    Amended 2026-11-10 after a hand build stopped: criterion 1 changes rows that test/every-view-build-is-counted.test.ts compares whole, so that file joins files. The code has two causes the first design did not name (sources, no_previous); they are now named, with the rule that not_skipped plus skipped equals calls.

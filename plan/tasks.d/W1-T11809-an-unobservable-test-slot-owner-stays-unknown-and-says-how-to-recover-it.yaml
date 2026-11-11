@@ -13,6 +13,7 @@
   files:
     - src/lib/test-slot.ts
     - test/ci/suites/an-unobservable-test-slot-owner-stays-unknown-and-says-how-to-recover-it.test.ts
+    - test/a-test-run-takes-a-host-wide-slot-at-low-priority.test.ts  # its same-boot "lease lapsed" -> "acquired" case flips to held-UNKNOWN under design step 1
   status: queued
   priority: 1
   attempts: 0
@@ -33,6 +34,12 @@
       derived bound; the brief forbids unrelated queue changes.
     Settled by lookup: is there a supported recovery action to name? -> yes once W1-T11808 lands
       (scripts/test-slot-owner-release.mjs over `releaseTestSlotForOwner`).
+    Settled by lookup: does an existing test pin the retired lease rung? -> yes.
+      test/a-test-run-takes-a-host-wide-slot-at-low-priority.test.ts's reclaim table has "another cell whose lease
+      lapsed" (bootId "boot-1" = the waiter's, heartbeat past TEST_SLOT_LEASE_MS) expecting "acquired". Under design
+      step 1 that same-boot foreign record is held, so the implementer updates that one row to expect the hold
+      (the differing-boot "earlier kernel boot" row stays "acquired"). That file is therefore in `files:`; no other
+      plan task lists it (plan/ grep).
   design: |
     1. THE LEASE STOPS FREEING. In `testSlotHolderStale`, for a foreign-host or foreign-namespace record whose boot id
        equals the waiter's (same kernel), heartbeat age no longer returns stale. A differing boot id stays stale (a

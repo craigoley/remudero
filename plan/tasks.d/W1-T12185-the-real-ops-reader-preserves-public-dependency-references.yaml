@@ -11,7 +11,7 @@
   origin: architect
   plan_refs: [W1-T11768, W1-T11769, W1-T11770]
   priority: 1
-  status: queued
+  status: merged
   attempts: 0
   files: [src/lib/plan.ts, src/lib/plan-revision-store.ts, src/lib/ops-catalog-source.ts, test/plan/ops-catalog-source-cross-catalog-dependencies.test.ts, test/plan/ops-catalog-shadow-real-reader.test.ts, test/plan/ops-catalog-shadow-invalid-edges.test.ts, test/plan/ops-catalog-source-strict-defaults.test.ts]
   rationale: |

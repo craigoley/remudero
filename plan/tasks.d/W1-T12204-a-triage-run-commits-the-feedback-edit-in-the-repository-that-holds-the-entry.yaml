@@ -1,0 +1,52 @@
+- id: W1-T12204
+  title: "A triage run commits the feedback edit in the repository that holds the entry"
+  repo: remudero
+  depends_on: [W1-T12198, W1-T12203]
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # one triage run writes to two repositories, and the claim release reads public commit subjects
+  band_meaning: span
+  origin: operator-session#ops-cutover-2026-11-10
+  plan_refs:
+    - W1-T11768
+    - W1-T9054
+  files:
+    - src/run-task.ts
+    - src/lib/triage.ts
+    - src/lib/auto-triage.ts
+    - test/triage/a-triage-run-commits-the-feedback-edit-in-the-repository-that-holds-the-entry.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "For a feedback entry that the ops repository holds, the triage run lands the status edit in the ops repository. No byte of the feedback file enters the public worktree or a public pull request"
+      proof: "grep: W1-T12204 criterion 1 in test/triage/a-triage-run-commits-the-feedback-edit-in-the-repository-that-holds-the-entry.test.ts"
+    - claim: "A `propose` outcome for such an entry opens a pull request that adds only the task file, and the proof in its body is a search of the new task file"
+      proof: "grep: W1-T12204 criterion 2 in test/triage/a-triage-run-commits-the-feedback-edit-in-the-repository-that-holds-the-entry.test.ts"
+    - claim: "The check that a proposal cites its feedback reads the feedback id in the `origin` of the new task file"
+      proof: "grep: W1-T12204 criterion 3 in test/triage/a-triage-run-commits-the-feedback-edit-in-the-repository-that-holds-the-entry.test.ts"
+    - claim: "The release of the triage claim reads the status of the feedback file in the repository that holds it"
+      proof: "grep: W1-T12204 criterion 4 in test/triage/a-triage-run-commits-the-feedback-edit-in-the-repository-that-holds-the-entry.test.ts"
+    - claim: "If one of the two writes fails, the run reports which one. A later pass finishes that write and does not file a second task"
+      proof: "grep: W1-T12204 criterion 5 in test/triage/a-triage-run-commits-the-feedback-edit-in-the-repository-that-holds-the-entry.test.ts"
+    - claim: "For a feedback entry that the public repository holds, a `propose` outcome makes one commit with the feedback edit and the task file, as it does today"
+      proof: "grep: W1-T12204 criterion 6 in test/triage/a-triage-run-commits-the-feedback-edit-in-the-repository-that-holds-the-entry.test.ts"
+    - claim: "The test goes through the `rmd triage` command, the production caller"
+      proof: "grep: W1-T12204 criterion 7 in test/triage/a-triage-run-commits-the-feedback-edit-in-the-repository-that-holds-the-entry.test.ts"
+  rationale: |
+    OBSERVED 2026-11-10: a triage `propose` pull request edits the feedback file and adds a task file in one commit.
+    - Its proof is `grep: status: <status> in plan/feedback/<id>.yaml`, from `triageAcceptanceProof` in src/lib/triage.ts. That path does not exist in the public repository when the ops repository holds the entry.
+    - `diffCitesFeedback` in src/lib/triage.ts refuses a proposal whose diff does not cite the feedback.
+    - The claim release reads merged commit subjects of the public repository, and after the first interim task it reads the status on origin/main of the public repository.
+    - This is the last task of stage 1. After it, the operator may turn on `decision` and `feedback`.
+    - The switch is the host file `<state dir>/plan-destination.json`. If the file is absent, the switch is off and the behaviour is byte-identical to today. This task adds no kind. It makes the triage command correct when `feedback` is on.
+  design: |
+    In `triageCommandLocked`, find the repository that holds the entry before the worker starts.
+    For an entry in the ops repository, give the worker the text of the feedback in its prompt, as today, and keep the feedback file out of the lane worktree. Land the status through the landing of the earlier task.
+    Add a proof for a proposal that searches the new task file for its id. Keep `triageAcceptanceProof` for an entry in the public repository.
+    Order the two writes so that a failure leaves a state the next pass can read: land the task file first, then the status.
+    NOT IN SCOPE: the destination of the new task file. It stays public until the writer task for the Architect merges.
+  falsifier: |
+    Commit the feedback edit in the lane worktree for an ops entry and criterion 1 must fail. Keep the status proof for an ops entry and criterion 2 must fail. File again after a failed status write and criterion 5 must fail. Split the commit for a public entry and criterion 6 must fail. Restore and require all seven to pass.

@@ -17,7 +17,7 @@
     - src/lib/main-repair-acceptance.ts
     - src/run-task.ts
     - test/a-main-repair-proof-is-the-red-suite-never-a-comment-line.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: When the main-repair dispatcher rewrites an inert or empty worker body, the criterion it writes is a unit test proof naming each red test file the repair was dispatched for (the test_files of main.repair.located) that the pushed diff makes pass, ahead of any diff-anchored grep
