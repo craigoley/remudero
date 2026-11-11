@@ -1,0 +1,55 @@
+- id: W1-T12242
+  title: "A recycle runs its worker smoke after the pull and before the pause"
+  repo: remudero
+  depends_on: []
+  priority: 1.1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # changes the order of steps in the script that replaces a daemon container
+  band_meaning: span
+  origin: operator-session#restart-and-recycle-downtime-2026-11-10
+  plan_refs:
+    - W1-T5017
+    - W1-T2598
+    - W1-T5804
+    - W1-T12244
+  files:
+    - deploy/recycle-container.sh
+    - test/deploy/a-recycle-runs-its-worker-smoke-before-the-pause.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "With a fake `docker`, the recycle runs the worker smoke on the pulled image before it writes the pause file"
+      proof: "grep: W1-T12242 criterion 1 in test/deploy/a-recycle-runs-its-worker-smoke-before-the-pause.test.ts"
+    - claim: "When the smoke fails, the recycle is refused, no pause file is written, and the running container is not stopped"
+      proof: "grep: W1-T12242 criterion 2 in test/deploy/a-recycle-runs-its-worker-smoke-before-the-pause.test.ts"
+    - claim: "After the wait, the recycle starts the new container only from the image id that the smoke passed. If that image is gone after the wait, the recycle pulls it again and runs the smoke again before `docker stop`, as today"
+      proof: "grep: W1-T12242 criterion 3 in test/deploy/a-recycle-runs-its-worker-smoke-before-the-pause.test.ts"
+    - claim: "The check for a smoke container that an earlier recycle left runs before the smoke, as today"
+      proof: "grep: W1-T12242 criterion 4 in test/deploy/a-recycle-runs-its-worker-smoke-before-the-pause.test.ts"
+    - claim: "`recycle.ended` states when the smoke ran, `before_pause` or `after_wait`, and how many seconds it took"
+      proof: "grep: W1-T12242 criterion 5 in test/deploy/a-recycle-runs-its-worker-smoke-before-the-pause.test.ts"
+  rationale: |
+    OBSERVED 2026-11-10 in the journal of the Docker daemon on the Azure host, and read at origin/main 17745c6bf: the recycle tests the new image only after the wait, while the instance is paused.
+    - `deploy/recycle-container.sh` pulls the image in section 4, writes the pause and waits in section 5, runs one real worker query on the pulled image in section 5.5, and stops the old container in section 6.
+    - The smoke has a time limit of 300 s (`RMD_RECYCLE_SMOKE_TIMEOUT_S`).
+    - On 2026-11-10 the smoke container ran from 21:13:23 to 21:13:34, 11 s, after a wait of 2,970 s. The journal holds no other recycle; it starts at 2026-11-10T13:08Z.
+    - In 7 days of the core ledger no `recycle.ended` row names a failed smoke. The cost today is the smoke time under the pause. The cost of a bad image would be a whole paused wait before the refusal: the three long waits were 1,560 s to 2,970 s.
+    - On 2026-11-09 a recycle spent 759 s outside its wait. The ledger does not say where. W1-T12244 adds the rows.
+    WHY THE SMOKE IS WHERE IT IS: the comment of section 5.5 says that a smoke before `docker stop` makes the refusal the rollback, because the running container is not touched. That stays true before the pause. The comment gives no reason for a place after the wait.
+    NOT ESTABLISHED: how much memory the smoke worker needs beside the workers in flight. After the wait no worker runs; before the pause some do. The builder must read the peak memory of one smoke on the host and state it in the pull request.
+    CHECKED for overlap: W1-T5017 (merged) added the smoke. W1-T2598 (merged) sized the wait. Neither sets the order against the pause.
+  design: |
+    In `deploy/recycle-container.sh`:
+    - Move the smoke of section 5.5, with its check for a container that an earlier recycle left, to directly after the pull of section 4 and before the pause of section 5. The host recycle lock is held there, as it is today during the smoke.
+    - A smoke failure there exits before the pause exists. Remove the `clear_own_pause` calls that only that path needed, and keep the ones of the wait.
+    - Keep the check after the wait that the pulled image id still exists. If it is gone, pull again and run the smoke again before `docker stop`. That is the only case with a smoke after the wait.
+    - Add `smoke_at` and `smoke_s` to the `recycle.ended` row.
+    Test with the fake `docker` on the path that the tests in test/deploy use for this script.
+    NOT IN SCOPE: what the smoke checks, the wait, the lock (W1-T12243), and the serve container.
+  falsifier: |
+    Run the smoke after the pause and criterion 1 must fail. Leave a pause file after a failed smoke and criterion 2 must fail. Skip the second smoke after a new pull and criterion 3 must fail. Restore and require all five to pass.
+  note: |
+    A small saving for each recycle. The larger effect is that a bad image is refused in seconds, with no pause.
