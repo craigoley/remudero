@@ -73,6 +73,7 @@ import { sweepInflightLocksWithReceipts } from "../../lib/benchmark-run.js";
 import { ledgerMemoHolders } from "../../lib/ledger-union.js";
 import { childMeasurementCadenceSpawn, measurementCadenceChildRunner } from "../../lib/measurement-cadence.js";
 import { loadPlan, type Plan } from "../../lib/plan.js";
+import { PLAN_DESTINATION_KINDS, planDestinationRepository, resolvePlanDestination, type PlanDestinationRepository } from "../../lib/plan-destination.js";
 import { readOperatorReleaseRecords } from "../../lib/machine-filing-judge.js";
 import { readReleaseLedgerLines } from "../../lib/operator-release.js";
 import { runnerConfigDigest, terminalPreDispatchRefusalRevisions } from "../../lib/dispatch-repair.js";
@@ -249,6 +250,43 @@ export interface GardenBuildContext {
   targetRoot?: string;
   /** That target's plan file, the one its daemon reads (an explicit `--plan` included); absent, `targetRoot`'s layout. */
   planPath?: string;
+}
+
+/**
+ * W1-T12200: at boot, read the host switch for new plan files and make the checkout a writer needs.
+ * No host file: nothing happens. Otherwise one `daemon.plan_destination` row carries the outcome, the kinds
+ * that are on and the state of the checkout. The row never carries the repository name or a path under
+ * `repos/`, and the clone's output is not kept: the name is private (the W1-T11768 rule).
+ * A clone that fails is a row, not a refusal to boot. The next boot tries again.
+ */
+async function bootPlanDestination(
+  stateDir: string,
+  publicRepository: PlanDestinationRepository,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+): Promise<void> {
+  const named = planDestinationRepository(stateDir);
+  if (named.outcome === "off") return;
+  if (named.outcome === "unreadable") {
+    log("daemon.plan_destination", { outcome: "unreadable", kinds: [], reason: named.reason });
+    return;
+  }
+  const kinds = PLAN_DESTINATION_KINDS.filter((kind) => resolvePlanDestination(kind, stateDir, publicRepository).outcome === "destination");
+  if (existsSync(join(named.checkoutDir, ".git"))) {
+    log("daemon.plan_destination", { outcome: "named", kinds, checkout: "present" });
+    return;
+  }
+  try {
+    mkdirSync(dirname(named.checkoutDir), { recursive: true });
+    // The same awaited call as the clone of a target job's repository, so the clone does not block the event loop.
+    // The output of `gh` is not written to a row or to a log.
+    await ghTextAsync(["repo", "clone", `${named.owner}/${named.repo}`, named.checkoutDir], { timeout: 300_000 });
+    log("daemon.plan_destination", { outcome: "named", kinds, checkout: "cloned" });
+  } catch (e) {
+    // The message holds the command line, which names the repository. The row keeps the exit status or the error code only.
+    const { code } = e as { code?: unknown };
+    const cause = typeof code === "number" ? `exit ${code}` : typeof code === "string" ? code : "error";
+    log("daemon.plan_destination", { outcome: "named", kinds, checkout: "clone_failed", reason: `gh repo clone failed (${cause})` });
+  }
 }
 
 /** One production composition, using the boot's existing gateway and its in-flight ownership. */
@@ -1024,6 +1062,8 @@ export async function daemonCommand(
   const targetRecordWrite = writeDaemonTargetRecord(join(config.root, "state"),
     { owner: target.owner, repo: target.repo, isSelf: target.isSelf, checkoutRoot: targetCheckoutRoot });
   if (!targetRecordWrite.written) log("daemon.target_record_failed", { reason: targetRecordWrite.reason });
+  // W1-T12200: the host switch for new plan files. With no host file this writes no row and calls nothing.
+  await bootPlanDestination(join(config.root, "state"), { owner: self.owner, repo: self.repo, checkoutDir: effectiveRepoRoot }, log);
   const targetCommitTrailerIndex = () =>
     buildCommitTrailerIndex({ slug: `${target.owner}/${target.repo}`, cwd: targetCheckoutRoot })();
   const gatewayFor = createDaemonGatewayFactory(config.root, log, {
