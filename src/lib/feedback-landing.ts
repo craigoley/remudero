@@ -27,6 +27,7 @@ import { dirname, join, relative } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { assertLiveWriteAllowed } from "./live-write-guard.js";
 import { loadPlanFromYaml } from "./plan.js";
+import { planDestinationRepository, type PlanDestination } from "./plan-destination.js";
 import { planReconcilePrBody, planReconcileProofTemplate } from "./plan-reconcile-batch.js";
 import { resolveRepoLayout } from "./repo-layout.js";
 import { slug as kebabSlug } from "./feedback-docket.js";
@@ -156,6 +157,8 @@ export interface LandFeedbackOpts {
   planPrPreflight?: (commitSha: string, pr: { title: string; body: string }) => PlanPrPreflightResult;
   /** W1-T5460: daemon state root. Set, a status write QUEUES there and `landFeedback` lands nothing; {@link sweepFeedbackLanding} lands it. */
   stateRoot?: string;
+  /** W1-T12201: the answer of `resolvePlanDestination("decision", ...)`. Only the decision writers read it. */
+  planDestination?: PlanDestination;
 }
 
 export interface LandFeedbackResult {
@@ -1810,11 +1813,28 @@ export function recordDecision(
   opts: LandFeedbackOpts = {},
 ): LandFeedbackResult {
   const relPath = decisionRecordRelPath(params.taskId, params.runId);
-  const git = opts.git ?? defaultGit(root);
-  return landContent(root, landingKind(DECISIONS_LANDING_KIND, root, opts, git), [{ relPath, content: decisionRecordContent(params) }], {
-    ...opts,
+  const at = decisionLandingAt(root, relPath, opts);
+  if (!at.ok) return at.result;
+  const git = at.opts.git ?? defaultGit(at.root);
+  return landContent(at.root, landingKind(DECISIONS_LANDING_KIND, at.root, at.opts, git), [{ relPath, content: decisionRecordContent(params) }], {
+    ...at.opts,
     git,
   });
+}
+
+/**
+ * W1-T12201: where a decision writer lands. `destination`: that checkout and repository, unless the public
+ * checkout already holds the file (a file is edited where it is). `unreadable`: nowhere, and the result names
+ * the cause. Absent, `off` or `not_listed`: `root` and `opts` unchanged.
+ */
+function decisionLandingAt<O extends LandFeedbackOpts | LandFeedbackAsyncOpts>(root: string, relPath: string, opts: O):
+  { ok: true; root: string; opts: O } | { ok: false; result: LandFeedbackResult } {
+  const destination = opts.planDestination;
+  if (destination?.outcome === "unreadable") {
+    return { ok: false, result: { landed: false, files: [], error: `the decision landed in no repository: ${destination.reason}` } };
+  }
+  if (destination?.outcome !== "destination" || existsSync(join(root, relPath))) return { ok: true, root, opts };
+  return { ok: true, root: destination.checkoutDir, opts: { ...opts, targetRepository: { owner: destination.owner, repo: destination.repo } } };
 }
 
 export function recordDecisionAsync(
@@ -1822,9 +1842,51 @@ export function recordDecisionAsync(
   params: DecisionRecordParams,
   opts: LandFeedbackAsyncOpts = {},
 ): Promise<LandFeedbackResult> {
-  const { planPrPreflight: _preflight, ...kindOpts } = opts;
-  return landContentAsync(root, (net) => landingKindSteps(DECISIONS_LANDING_KIND, root, kindOpts, net),
-    [{ relPath: decisionRecordRelPath(params.taskId, params.runId), content: decisionRecordContent(params) }], opts);
+  const relPath = decisionRecordRelPath(params.taskId, params.runId);
+  const at = decisionLandingAt(root, relPath, opts);
+  if (!at.ok) return Promise.resolve(at.result);
+  const { planPrPreflight: _preflight, ...kindOpts } = at.opts;
+  return landContentAsync(at.root, (net) => landingKindSteps(DECISIONS_LANDING_KIND, at.root, kindOpts, net),
+    [{ relPath, content: decisionRecordContent(params) }], at.opts);
+}
+
+/** Everything the decision record currently says, as ONE string for the contradiction check:
+ *  `DECISIONS.md` plus every landed `plan/decisions.d/**` shard, since a record that landed
+ *  through the bridge but has not been folded into the root file is no less standing. An
+ *  unreadable path contributes nothing rather than throwing — and contributing nothing is the
+ *  SAFE direction here only because an unresolvable `supersedes` escalates anyway. */
+export function readStandingDecisions(root: string, stateDir?: string): string {
+  // W1-T12201: while the host file names a repository, its checkout is a second root, whatever the kinds.
+  const named = planDestinationRepository(stateDir);
+  const standing = decisionsUnder(root);
+  return named.outcome === "named" ? [standing, decisionsUnder(named.checkoutDir)].filter(Boolean).join("\n") : standing;
+}
+
+function decisionsUnder(root: string): string {
+  const parts: string[] = [];
+  try {
+    parts.push(readFileSync(join(root, "DECISIONS.md"), "utf8"));
+  } catch {
+    // no root decision file in this checkout — the shards below are still consulted
+  }
+  const dir = join(root, "plan", "decisions.d");
+  let entries: string[] = [];
+  try {
+    entries = readdirSync(dir);
+  } catch {
+    // no plan/decisions.d in this checkout — DECISIONS.md alone is the whole standing record here,
+    // which is a real state (a fresh clone before the first landing), not a read failure to report
+    return parts.join("\n");
+  }
+  for (const name of entries) {
+    if (!name.endsWith(".md")) continue;
+    try {
+      parts.push(readFileSync(join(dir, name), "utf8"));
+    } catch {
+      // one unreadable shard never hides the rest
+    }
+  }
+  return parts.join("\n");
 }
 
 /** Land one agent-authored RULING record (W1-T3212) via {@link landContent} — the governance
@@ -1837,8 +1899,10 @@ export function recordRuling(
   content: string,
   opts: LandFeedbackOpts = {},
 ): LandFeedbackResult {
-  const git = opts.git ?? defaultGit(root);
-  return landContent(root, landingKind(DECISIONS_LANDING_KIND, root, opts, git), [{ relPath, content }], { ...opts, git });
+  const at = decisionLandingAt(root, relPath, opts);
+  if (!at.ok) return at.result;
+  const git = at.opts.git ?? defaultGit(at.root);
+  return landContent(at.root, landingKind(DECISIONS_LANDING_KIND, at.root, at.opts, git), [{ relPath, content }], { ...at.opts, git });
 }
 
 /** Land one feedback entry's already-serialized YAML via {@link landContent} — the write-site-2 sibling of

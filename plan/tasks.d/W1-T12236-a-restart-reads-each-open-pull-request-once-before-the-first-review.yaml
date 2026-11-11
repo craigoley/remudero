@@ -20,6 +20,8 @@
     - src/cli/commands/sweep.ts
     - src/cli/commands/daemon.ts
     - src/lib/open-prs-rest.ts
+    - src/lib/tick-read-worker.ts
+    - src/run-task.ts
     - test/sweep/a-restart-reads-each-open-pull-request-once-before-the-first-review.test.ts
   status: queued
   attempts: 0
@@ -66,6 +68,12 @@
     - `buildSweepLightHook` and the tick read worker load the store in place of `createPlanFilingFileCache()`, and save it after a read that added an entry. Remove an entry when its pull request is not in the open set.
     - A load failure gives an empty store and one row that names the reason.
     The builder must list in the pull request every other part of `openPrViewSteps` that depends on the head only. Do not persist a part that changes with time, such as the check status, the merge state or the workflow runs.
+    Settled from the code (amendment):
+    - The start of the current tick is the time at which `refreshMergedAsync` starts the tick read. `daemonCommand` keeps that time. It serves the views when `publishedAtMs` of the published generation (the start of its read) is not before that time.
+    - `servedOpenPrViews` returns undefined, not a promise of undefined, when it serves nothing. It also serves nothing when the tick read holds `openPrError`. The refill read of a light sweep (`readOpenPrsForRefill`) passes no scope, so it always reads its own views.
+    - The tick read worker is `createTickReadProducer` in src/lib/tick-read-worker.ts. It and the light sweep hook load the store from `join(config.root, "state")`.
+    - `LightPassReadPorts` in src/run-task.ts types the `io` of the run-task wrapper of `buildSweepLightHook`. Its `openPrViews` takes the scope and can return undefined.
+    - A load failure writes `plan_filing_files.store_unreadable` with `reason`. A failed save writes `plan_filing_files.store_save_failed` with `reason`, and the views are still used.
     NOT IN SCOPE: the light sweeps with other scopes, the order of the starts (W1-T12239), and a change to the tick read itself.
   falsifier: |
     Give the views of the tick read to a light sweep with the scope `idle` and criterion 3 must fail. Give views that are older than the tick and criterion 2 must fail. Use a kept file list for a different head and criterion 6 must fail. Restore and require all nine to pass.
