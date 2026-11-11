@@ -60,13 +60,13 @@
        This task adds no new knobs.
     4. TDD, strictly: in test/status-json-deadline.test.ts, write the failing regressions before the change. (a) A fresh
        persisted snapshot is used by the JSON status read without a full board re-fetch. Title this test EXACTLY
-       `W1-T11280: status JSON reuses a fresh persisted snapshot without a full board re-fetch`, because acceptance
-       criterion 1 names that title verbatim. (b) A missing, stale, truncated or unreadable snapshot, and a remote-ref
-       failure, each still yield explicit unavailable evidence within the deadline. Put `W1-T11280` in each new test title.
+       `W1-T11280: status JSON reuses a fresh persisted GitHub snapshot`, because acceptance criterion 1 names that title verbatim.
+       (b) A missing, stale, truncated or unreadable snapshot, and a remote-ref failure, each still yield explicit unavailable evidence within the deadline.
+       Put `W1-T11280` in each new test title.
     NOT IN SCOPE: any other file, any change to board-snapshot-cache.ts or status.ts, any new task.
   acceptance:
     - claim: "the status JSON deadline suite, including the new snapshot-reuse and fail-closed regressions, passes"
-      proof: "unit test: W1-T11280: status JSON reuses a fresh persisted snapshot without a full board re-fetch"
+      proof: "unit test: W1-T11280: status JSON reuses a fresh persisted GitHub snapshot"
     - claim: "the regressions for consuming a fresh persisted snapshot and for unusable or missing evidence staying unavailable are titled with this task id"
       proof: "grep: W1-T11280 in test/status-json-deadline.test.ts"
   note: |
@@ -77,5 +77,4 @@
     The new regressions in test/status-json-deadline.test.ts fail until the report-commands.ts gateway passes the cache,
     and the gateway change has no other falsifier. That suite already exists from W1-T4208, so it is not renamed to this
     shard's slug. The operator-approved scope is exactly this one task, so it is not split. The band reflects span only.
-    The change itself is still one read-only option on a status path that already fails closed.
     No depends_on: W1-T4208 is merged, and W1-T11155 is separate.
