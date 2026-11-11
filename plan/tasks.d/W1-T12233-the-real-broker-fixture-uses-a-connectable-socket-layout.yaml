@@ -71,4 +71,3 @@
     and pass via the real private socket. Removing the shorter owned kind or restoring the
     redundant cache segment must reproduce the original failure under that same geometry.
     The acceptance grep must be absent on unchanged main and present only with the adapter.
-
