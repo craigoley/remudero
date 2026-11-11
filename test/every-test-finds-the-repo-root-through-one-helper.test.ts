@@ -1,6 +1,7 @@
 // @source-text-subject: the guarded property is a test's own-location path computation.
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -8,7 +9,7 @@ import { test } from "node:test";
 import { REPO_ROOT, repoRoot } from "#test/helpers/repo-root.js";
 import { assertInspected } from "#test/helpers/inspected-population.js";
 // @ts-expect-error the codemod is an executable JavaScript module
-import { SHAPES, analyzeSource, rewriteSource, testFiles } from "#scripts/test-repo-root-codemod.mjs";
+import { SHAPES, analyzeSource, analyzeSources, rewriteSource, testFiles } from "#scripts/test-repo-root-codemod.mjs";
 // @ts-expect-error the census precheck is an executable JavaScript module
 import { evaluateCensusPrecheck, PRECHECK_PARITY } from "#scripts/census-precheck.mjs";
 
@@ -44,6 +45,37 @@ function currentSources(): Map<string, string> {
   const untracked = new Set(git("ls-files", "--others", "--", "test").split("\n"));
   assertInspected("root guard tracked tests", files.filter((p) => !untracked.has(p)).length, tracked.length);
   return new Map(files.map((file) => [file, readFileSync(join(REPO_ROOT, file), "utf8")]));
+}
+
+type Tree = { files: Set<string>; rooted: Set<string> };
+
+/** Read one tree at most once in this process. `rooted` holds the files that derive the repo root from their own folder. */
+function analyzedOnce(read: () => Map<string, string>): () => Tree {
+  let tree: Tree | undefined;
+  return () => {
+    if (!tree) {
+      const entries = [...read()];
+      const results: { computations: unknown[] }[] = analyzeSources(entries);
+      tree = {
+        files: new Set(entries.map(([file]) => file)),
+        rooted: new Set(entries.filter((_, index) => results[index]!.computations.length > 0).map(([file]) => file)),
+      };
+    }
+    return tree;
+  };
+}
+
+const baseTree = analyzedOnce(sourcesAtBase);
+const currentTree = analyzedOnce(currentSources);
+
+/** One SHA-256 over the name, size and bytes of every test file. Any write, new file or removed file changes it. */
+function testTreeDigest(): string {
+  const hash = createHash("sha256");
+  for (const file of testFiles(REPO_ROOT) as string[]) {
+    const bytes = readFileSync(join(REPO_ROOT, file));
+    hash.update(`${file}\0${bytes.length}\0`).update(bytes);
+  }
+  return hash.digest("hex");
 }
 
 test("W1-T9863: census-precheck refuses new own-folder roots and net count growth", () => {
@@ -104,17 +136,15 @@ test("W1-T9863: a census pointed at the wrong root fails its inspected count", (
 });
 
 test("W1-T9863: no new test derives the repo root from its own folder", () => {
-  const base = sourcesAtBase();
-  const offenders = [...currentSources()].filter(([file, text]) =>
-    !base.has(file) && analyzeSource(text, file).computations.length > 0).map(([file]) => file);
+  const base = baseTree();
+  const current = currentTree();
+  const offenders = [...current.files].filter((file) => !base.files.has(file) && current.rooted.has(file));
   assert.deepEqual(offenders, [], `new tests must import helpers/repo-root.js: ${offenders.join(", ")}`);
 });
 
 test("W1-T9863: the own-folder root count never rises above the merge base", () => {
-  const count = (sources: Map<string, string>) => [...sources].filter(([file, text]) =>
-    analyzeSource(text, file).computations.length > 0).length;
-  const baseline = count(sourcesAtBase());
-  const current = count(currentSources());
+  const baseline = baseTree().rooted.size;
+  const current = currentTree().rooted.size;
   assert.ok(current <= baseline, `own-folder root files: head=${current}, merge base=${baseline}`);
 });
 
@@ -157,9 +187,11 @@ test("the codemod rewrites supported root shapes without changing quoted example
 
 test("the codemod CLI reports a dry-run census of the real tree and refuses unknown arguments", () => {
   const script = join(REPO_ROOT, "scripts", "test-repo-root-codemod.mjs");
+  const before = testTreeDigest();
   const stdout = execFileSync(process.execPath, [script], {
     cwd: REPO_ROOT, encoding: "utf8", maxBuffer: 64 << 20, timeout: 120_000,
   });
+  const after = testTreeDigest();
   const report = JSON.parse(stdout);
   const files: string[] = testFiles(REPO_ROOT);
   assert.equal(report.mode, "dry-run");
@@ -169,10 +201,8 @@ test("the codemod CLI reports a dry-run census of the real tree and refuses unkn
   assert.deepEqual(Object.keys(report.counts).sort(), [...SHAPES].sort());
   assert.ok(Object.values<number>(report.counts).some((n) => n > 0));
   assert.ok(Array.isArray(report.unsupported));
-  // A dry run must leave the tree untouched: the report's own re-run is identical.
-  assert.equal(execFileSync(process.execPath, [script], {
-    cwd: REPO_ROOT, encoding: "utf8", maxBuffer: 64 << 20, timeout: 120_000,
-  }), stdout);
+  // A dry run must leave the tree untouched: every test file has the same name and bytes after it.
+  assert.equal(after, before, "the dry run changed a test file: the digest of the test tree differs before and after");
   assert.throws(() => execFileSync(process.execPath, [script, "--bogus"], {
     cwd: REPO_ROOT, encoding: "utf8", stdio: "pipe", timeout: 120_000,
   }), (error: { status?: number; stderr?: string }) =>
