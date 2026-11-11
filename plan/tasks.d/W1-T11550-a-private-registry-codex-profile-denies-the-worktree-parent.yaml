@@ -16,7 +16,7 @@
   files:
     - src/lib/worker-provider.ts
     - test/deploy/a-private-registry-codex-profile-can-start-its-own-sandbox.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: For reader, writer and review intents, when no other grant lies beside the worktree, both surfaces of the private-registry Codex profile deny the worktree's parent, never grant it read, and keep the root deny

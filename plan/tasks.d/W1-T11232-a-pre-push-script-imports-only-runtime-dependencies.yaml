@@ -16,7 +16,7 @@
     - package.json
     - package-lock.json
     - test/dependency-declarations-match-use.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: acorn is listed in package.json dependencies at the version package-lock.json already resolves

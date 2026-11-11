@@ -20,7 +20,7 @@
     - src/cli/commands/sweep.ts
     - test/a-first-review-reads-only-archives-since-its-pr-opened.test.ts
     - test/a-stuck-in-process-review-is-aborted-and-readmitted.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: On a live-ledger miss, priorPostedReviewRow reads only the archives that rotated at or after the PR's created_at, using the rotationBeforeTime bound recoverPromisedFollowUpReports already uses, so a never-reviewed PR's first review gunzips no archive older than the PR; an unknown created_at keeps today's full union read

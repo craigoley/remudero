@@ -17,7 +17,7 @@
     - test/worker/spawn/a-review-re-admitted-after-an-unable-reviewer-avoids-that-provider.test.ts
     - test/gardeners/the-config-gardener-reads-the-same-steps-once-gather-runs-owns-its-list.test.ts
     - test/the-config-gardener-reads-only-the-ledger-steps-it-prices.test.ts
-  status: queued
+  status: merged
   # backlog gardener: band=4 evidence=cca96b7e366f2fae
   # backlog gardener: placed=2026-11-08T22:31:49.721Z
   attempts: 0

@@ -14,7 +14,7 @@
     - scripts/preflight-author.mjs
     - test/ci/an-author-preflight-runs-the-workers-its-measured-slot-grants.test.ts
     - test/a-full-fallback-author-selection-is-never-run-whole.test.ts
-  status: queued
+  status: merged
   priority: 2  # every author preflight runs its affected suites one file at a time on a host that measured room for up to four
   attempts: 0
   rationale: |

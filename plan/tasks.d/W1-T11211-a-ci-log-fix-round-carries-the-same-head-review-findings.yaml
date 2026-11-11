@@ -17,7 +17,7 @@
     - src/cli/commands/fix.ts
     - src/lib/prompt-render.ts
     - test/worker/a-ci-log-fix-round-carries-the-same-head-review-findings.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: When a fix round is in ci-log mode and a review.posted FAIL exists for the PR at the exact head the round targets, the round's evidence carries that review's unmet criteria and its verified findings for that head alongside the CI failures; a review at any other head is not carried

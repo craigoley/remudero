@@ -669,6 +669,8 @@ export interface GhPaceLoopWaitRow {
   wait_ms: number;
   /** The first stack frame outside this file, as `file:line` relative to the repository. */
   call_site: string;
+  /** W1-T12123: set when the read went ahead without the cadence lock, with the reason. */
+  lock?: "own-async-read";
 }
 
 const ghPaceLoopWaits: GhPaceLoopWaitRow[] = [];
@@ -1488,6 +1490,8 @@ function withGhCadenceLock<T>(stampPath: string, sleepSync: (ms: number) => void
  *  this in-process queue for its whole wait, so the process's reads keep their order, while it holds
  *  the cross-process FILE lock only for each short turn. */
 const ghCadenceAsyncQueue = new Map<string, Promise<void>>();
+/** W1-T12123: the stamps whose file lock this process's own async read holds right now. */
+const ghCadenceOwnAsyncLocks = new Set<string>();
 
 async function withGhCadenceQueueAsync<T>(stampPath: string, fn: () => Promise<T>): Promise<T> {
   const prior = ghCadenceAsyncQueue.get(stampPath) ?? Promise.resolve();
@@ -1516,6 +1520,7 @@ async function withGhCadenceLockAsync<T>(stampPath: string, sleep: (ms: number) 
       for (let step = tryGhCadenceLock(lockPath, startedAt); step !== "give-up"; step = tryGhCadenceLock(lockPath, startedAt)) {
         if (step === "locked") {
           locked = true;
+          ghCadenceOwnAsyncLocks.add(stampPath);
           break;
         }
         if (step === "wait") await sleep(GH_CADENCE_LOCK_WAIT_MS);
@@ -1525,6 +1530,7 @@ async function withGhCadenceLockAsync<T>(stampPath: string, sleep: (ms: number) 
     }
     return await fn();
   } finally {
+    if (locked) ghCadenceOwnAsyncLocks.delete(stampPath);
     releaseGhCadenceLock(lockPath, locked);
   }
 }
@@ -1548,6 +1554,8 @@ interface GhReadCadencePlan {
   /** `undefined`: writes, budget probes, and calls without a usable cache path need no shared
    *  coordination, so no lock, gap or stamp. */
   coordinatedStampPath: string | undefined;
+  /** The longest shared-gap wait this read can be given. */
+  sharedReadGapMs: number;
   sharedGapRemainingMs(stampPath: string): number;
   stampAfterGap(stampPath: string): void;
   /** Removes this read's ticket: an admitted, refused or interrupted waiter never holds the queue. */
@@ -1705,6 +1713,7 @@ function planGhReadCadence(args: readonly string[], deps: GhReadCadenceDeps): Gh
     floorWaitRemainingMs: () => (waiter ? floorRemainingAt(now()) : 0),
     mustWait: () => waiter,
     coordinatedStampPath: isWrite || isExempt ? undefined : stampPath,
+    sharedReadGapMs,
     sharedGapRemainingMs: (path) => {
       // The 180-second floor is intentionally advisory for daemon multi-read sweeps. A bounded
       // shared gap still protects the secondary limiter across sibling processes without making a
@@ -1788,20 +1797,27 @@ export function applyGhReadCadence(args: readonly string[], deps: GhReadCadenceD
     return decision;
   }
   const blockingSleep = deps.sleepSync ?? defaultBlockingSleepSync;
-  const sleepSync = loopSafeGhSleep(blockingSleep);
+  // W1-T12123: on the daemon loop a wait of at most the shared read gap is slept. A longer wait is refused.
+  const sleepSync = loopSafeGhSleep(blockingSleep, plan.sharedReadGapMs);
   // W1-T12057: a lock wait may sleep on the daemon loop, because tryGhCadenceLock already bounds the total.
-  // While this process has an async read pending, that read needs the loop, so the wait is still refused.
-  const lockSleepSync = ghCadenceAsyncQueue.has(stampPath) ? sleepSync : loopSafeGhSleep(blockingSleep, GH_CADENCE_LOCK_MAX_WAIT_MS);
+  const lockSleepSync = loopSafeGhSleep(blockingSleep, GH_CADENCE_LOCK_MAX_WAIT_MS);
+  // W1-T12123: this process's own async read holds the lock and needs the loop to release it.
+  // The loop read does not wait for that lock. It takes its turn without it, as a give-up does.
+  const ownAsyncLock = ghLoopHost.getStore() === true && ghCadenceOwnAsyncLocks.has(stampPath);
   let decision: GhReadCadenceDecision | undefined;
+  const turn = (): number => {
+    decision ??= plan.evaluate();
+    return ghReadCadenceTurn(plan, stampPath, sleepSync);
+  };
   try {
     let waitMs: number;
     do {
-      waitMs = withGhCadenceLock(stampPath, lockSleepSync, () => {
-        decision ??= plan.evaluate();
-        return ghReadCadenceTurn(plan, stampPath, sleepSync);
-      });
+      waitMs = ownAsyncLock ? turn() : withGhCadenceLock(stampPath, lockSleepSync, turn);
       if (waitMs > 0) sleepSync(waitMs);
     } while (waitMs > 0);
+    if (ownAsyncLock) {
+      ghPaceLoopWaits.push({ step: GH_PACE_LOOP_WAIT_STEP, wait_ms: 0, call_site: ghCallSiteOutsideTransport(), lock: "own-async-read" });
+    }
     return decision!;
   } finally {
     plan.leaveQueue();
