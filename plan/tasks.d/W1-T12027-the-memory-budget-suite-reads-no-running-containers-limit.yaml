@@ -19,7 +19,7 @@
     - test/a-squeezed-page-cache-grows-its-memory-high.test.ts
     - test/helpers/host-independent-policy-env.ts
     - test/deploy/the-memory-budget-suite-reads-no-running-containers-limit.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "Under the shared pins the policy read returns the fixture's floor while a fake docker, cgroup tree and registry describe a larger running fleet, and each of the three suites takes its pins from that one helper"
