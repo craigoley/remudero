@@ -130,7 +130,7 @@ test("W1-T11978 criterion 3: a window with no build writes no row, and a view's 
   assert.deepEqual(w.rows.map((row) => row.builds), [1], "the workstreams view's cold build is on the ledger at once");
   w.rows.splice(0);
   for (const windows of [1, 2, 3]) w.idle(NOW + windows * WORKSTREAMS_BUILT_ROW_WINDOW_MS + 1_000);
-  assert.deepEqual(w.rows, [], "three windows with no build write nothing");
+  assert.equal(w.rows.length, 0, "three windows with no build write nothing");
   w.insert(NOW + 4 * WORKSTREAMS_BUILT_ROW_WINDOW_MS);
   assert.deepEqual(w.rows.map((row) => row.builds), [1], "the next build after empty windows is counted alone");
 });
