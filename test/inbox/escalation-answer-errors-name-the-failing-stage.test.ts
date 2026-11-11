@@ -9,6 +9,7 @@ import type { EscalationAnswerGateway, EscalationIssueComment } from "#src/lib/e
 import type { LedgerUnionRecordRead } from "#src/lib/ledger-union.js";
 import { fixedClock } from "#src/lib/clock.js";
 import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
+import { withGhShim } from "#test/helpers/gh-shim.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 const { readEscalationAnswers } = answers;
@@ -136,51 +137,46 @@ test("W1-T11405 criterion 2: real recursion keeps the overflow phrase and the ac
   });
   await t.test("real sweep caller over a private fixture, never a real repository", async s => {
     const root = ownedFixtureDir(s, "escalation-stage-sweep").dir;
-    const child = String.raw`
-      process.argv = [process.execPath, "stage-sweep-fixture", "--repo-root", process.env.RMD_TEST_STAGE_SWEEP_ROOT];
-      await import("#src/lib/live-analytics-snapshot-cache.js");
-      const {buildSweepHook} = await import("#src/cli/commands/sweep.js");
-      const {repoRoot} = await import("#src/lib/repo-location.js");
-      const {ghShim} = await import("#test/helpers/gh-shim.js");
-      const {rmSync} = await import("node:fs");
-      const {join} = await import("node:path");
-      const root = process.env.RMD_TEST_STAGE_SWEEP_ROOT;
-      if (repoRoot !== root) throw Error("reader fixture root was not selected");
-      const shim = ghShim([{when:"",stdout:"[]"}],{kind:"stage-sweep-gh"});
-      process.env.PATH = shim.dir + ":" + process.env.PATH;
-      const {execFileSync} = await import("node:child_process");
-      if (execFileSync("gh", ["api", "fixture/control"], {encoding:"utf8"}).trim() !== "[]") throw Error("fake transport control failed");
-      const logs = [], gatewayCalls = []; let drafts = 0;
-      // The actual command-module caller is under test. Only unrelated sibling
-      // ports are fake; a deliberately unreadable PR snapshot contains the rest
-      // of this empty-board cycle after the real answer reader has completed.
-      const host = {buildInboxDraftHook:()=>async()=>{drafts++;},
-        createPlanFilingClassificationTelemetry:()=>()=>{},buildEscalationTriageRuntime:()=>({})};
-      function overflow(){ return overflow(); }
-      const comment = {id:71, authorLogin:"fixture-owner",authorAssociation:"OWNER",authorType:"User",get body(){return overflow();}};
-      const gateway = {listOpen:()=>{gatewayCalls.push("issues");return [{number:41,url:"fixture-issue",body:"**Task:** W1-T11405"}];},listComments:()=>{gatewayCalls.push("comments");return [comment];},reactPlusOne:()=>{throw Error("unexpected ack");}};
-      const board = {prByRef:()=>null,findMergedByTrailer:()=>null,headRefName:()=>undefined,prBody:()=>undefined,listOpenHeadBranches:()=>[]};
-      try {
+    await withGhShim([{ when: "", stdout: "[]" }], async shim => {
+      const child = String.raw`
+        process.argv = [process.execPath, "stage-sweep-fixture", "--repo-root", process.env.RMD_TEST_STAGE_SWEEP_ROOT];
+        await import("#src/lib/live-analytics-snapshot-cache.js");
+        const {buildSweepHook} = await import("#src/cli/commands/sweep.js");
+        const {repoRoot} = await import("#src/lib/repo-location.js");
+        const {join} = await import("node:path");
+        const root = process.env.RMD_TEST_STAGE_SWEEP_ROOT;
+        if (repoRoot !== root) throw Error("reader fixture root was not selected");
+        const {execFileSync} = await import("node:child_process");
+        if (execFileSync("gh", ["api", "fixture/control"], {encoding:"utf8"}).trim() !== "[]") throw Error("fake transport control failed");
+        const logs = [], gatewayCalls = []; let drafts = 0;
+        // Only unrelated sibling ports are fake. An unreadable PR snapshot
+        // contains the rest of this cycle after the actual reader has completed.
+        const host = {buildInboxDraftHook:()=>async()=>{drafts++;},
+          createPlanFilingClassificationTelemetry:()=>()=>{},buildEscalationTriageRuntime:()=>({})};
+        function overflow(){ return overflow(); }
+        const comment = {id:71, authorLogin:"fixture-owner",authorAssociation:"OWNER",authorType:"User",get body(){return overflow();}};
+        const gateway = {listOpen:()=>{gatewayCalls.push("issues");return [{number:41,url:"fixture-issue",body:"**Task:** W1-T11405"}];},listComments:()=>{gatewayCalls.push("comments");return [comment];},reactPlusOne:()=>{throw Error("unexpected ack");}};
+        const board = {prByRef:()=>null,findMergedByTrailer:()=>null,headRefName:()=>undefined,prBody:()=>undefined,listOpenHeadBranches:()=>[]};
         const hook = buildSweepHook(host,"fixture","repo",{root,claudeBin:"/bin/true"},join(root,"state","ledger.ndjson"),"W11405-SWEEP",
           {tasks:[],byId:new Map()},(step,extra={})=>logs.push({step,extra}),undefined,board,undefined,undefined,undefined,undefined,
           undefined,undefined,undefined,root,undefined,gateway,undefined,()=>({openPrError:"fixture-board-unreadable"}));
         await hook();
         process.stdout.write(JSON.stringify({repoRoot,errors:logs.filter(x=>x.step==="escalation_answers.error"),
-          unreadable:logs.filter(x=>x.step==="escalation_answers.unreadable"),otherErrors:logs.filter(x=>x.step==="sweep.error"),calls:shim.calls(),gatewayCalls,drafts})+"\n");
-      } finally { rmSync(shim.dir,{recursive:true,force:true}); }
-    `;
-    const r = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", child], {
-      cwd: REPO_ROOT, env: { ...process.env, RMD_TEST_STAGE_SWEEP_ROOT: root }, encoding: "utf8", timeout: 30_000, maxBuffer: 2 * 1024 * 1024,
-    });
-    assert.equal(r.error, undefined); assert.equal(r.status, 0, r.stderr);
-    const data = JSON.parse(r.stdout.trim().split("\n").at(-1)!) as {repoRoot:string; errors:Array<{extra:{error:string}}>; unreadable:unknown[]; otherErrors:Array<{extra:{error:string}}>; calls:string[]; gatewayCalls:string[]; drafts:number};
-    assert.equal(data.repoRoot, root); assert.equal(data.errors.length, 1);
-    assert.equal(data.errors[0].extra.error, expected("answer_parse", "Maximum call stack size exceeded"));
-    assert.deepEqual(data.unreadable, []);
-    assert.deepEqual(data.gatewayCalls, ["issues", "comments"], "the real reader executes through the injected gateway");
-    assert.deepEqual(data.calls, ["api fixture/control"], "positive-controlled fake transport records no unrelated live call");
-    assert.deepEqual(data.otherErrors.map(x => x.extra.error), ["fixture-board-unreadable"]);
-    assert.equal(data.drafts, 1, "the real hook contains its errors and finishes the cycle");
+          unreadable:logs.filter(x=>x.step==="escalation_answers.unreadable"),otherErrors:logs.filter(x=>x.step==="sweep.error"),gatewayCalls,drafts})+"\n");
+      `;
+      const r = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", child], {
+        cwd: REPO_ROOT, env: { ...process.env, RMD_TEST_STAGE_SWEEP_ROOT: root }, encoding: "utf8", timeout: 30_000, maxBuffer: 2 * 1024 * 1024,
+      });
+      assert.equal(r.error, undefined); assert.equal(r.status, 0, r.stderr);
+      const data = JSON.parse(r.stdout.trim().split("\n").at(-1)!) as {repoRoot:string; errors:Array<{extra:{error:string}}>; unreadable:unknown[]; otherErrors:Array<{extra:{error:string}}>; gatewayCalls:string[]; drafts:number};
+      assert.equal(data.repoRoot, root); assert.equal(data.errors.length, 1);
+      assert.equal(data.errors[0].extra.error, expected("answer_parse", "Maximum call stack size exceeded"));
+      assert.deepEqual(data.unreadable, []);
+      assert.deepEqual(data.gatewayCalls, ["issues", "comments"], "the real reader executes through the injected gateway");
+      assert.deepEqual(shim.calls(), ["api fixture/control"], "positive-controlled fake transport records no unrelated live call");
+      assert.deepEqual(data.otherErrors.map(x => x.extra.error), ["fixture-board-unreadable"]);
+      assert.equal(data.drafts, 1, "the real hook contains its errors and finishes the cycle");
+    }, { kind: "stage-sweep-gh" });
   });
 });
 
