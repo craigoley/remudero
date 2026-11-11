@@ -15,6 +15,9 @@
   files:
     - plan/policy.yaml
     - test/review/the-review-cpu-band-keeps-the-ruled-recovery-point.test.ts
+  # refusal-amendment (W1-T11274, run W1-T11274-1794334786521, 2026-11-11T02:00:49.539Z): the worker refused criterion 1 [proof-unexecutable-at-head] — proposed re-scope-criteria: repair the criterion's proof so it is executable at HEAD, or re-scope the criterion
+  #   worker evidence: W1-T11274: a filed proof already passes at the merge base, so branch run-W1-T11274-1794334786521 cannot open a PR
+  #   this task is held from dispatch until its record changes; an Architect must make the change above
   status: queued
   attempts: 0
   acceptance:

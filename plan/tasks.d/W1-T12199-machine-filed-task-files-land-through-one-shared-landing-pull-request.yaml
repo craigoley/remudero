@@ -1,5 +1,5 @@
 - id: W1-T12199
-  title: "Machine-filed task files land through one shared landing pull request that seals once open"
+  title: "Machine-filed edits of a task file land through one shared landing pull request that seals once open"
   repo: remudero
   depends_on: []
   priority: 0.9
@@ -7,54 +7,77 @@
   verify: auto
   principles:
     tdd: strict
-  risk: high # every gardener and the refusal amendment change the way they land a task file
+  risk: high # the refusal amendment changes the way it lands, and the sweep gains a landing that pushes
   band_meaning: span
   origin: operator-session#ops-cutover-2026-11-10
   plan_refs:
     - W1-T9054
     - W1-T5348
     - W1-T3559
+    - W1-T5531
   files:
     - src/lib/feedback-landing.ts
-    - src/run-task.ts
+    - src/lib/refusal-amendment.ts
     - src/lib/sweep.ts
+    - src/run-task.ts
+    - src/cli/commands/sweep.ts
     - test/inbox/machine-filed-task-files-land-through-one-shared-landing-pull-request.test.ts
+    - test/a-main-caused-red-refusal-amendment-is-retried-once-main-moves.test.ts
+    - test/a-worker-refusal-becomes-a-plan-amendment.test.ts
+    - test/the-sweeps-own-plan-prs-run-the-filer-preflight.test.ts
+    - test/the-sweeps-plan-pr-preflight-runs-off-the-daemon-loop.test.ts
+    - test/the-sweeps-own-pushes-and-the-risk-judges-disarm-are-awaited.test.ts
+    - test/live-write-guard-command-sites.test.ts
   status: queued
   attempts: 0
   acceptance:
-    - claim: "The landing has a family for task files, with one fixed branch and at most one open pull request"
+    - claim: "The landing has a family for task files with one fixed branch, and `isLandingRef` knows that branch"
       proof: "grep: W1-T12199 criterion 1 in test/inbox/machine-filed-task-files-land-through-one-shared-landing-pull-request.test.ts"
-    - claim: "A gardener whose changed paths are all under plan/tasks.d lands through that family. A gardener with any other path opens its own pull request, as it does today"
+    - claim: "A refusal amendment lands through the family. The sweep opens one landing pull request that carries the amended file, and the body holds one criterion for each file it carries"
       proof: "grep: W1-T12199 criterion 2 in test/inbox/machine-filed-task-files-land-through-one-shared-landing-pull-request.test.ts"
-    - claim: "A refusal amendment whose changed paths are all under plan/tasks.d lands through that family"
+    - claim: "While the landing pull request is open, the landing pushes nothing. A later file waits in the state directory, and the sweep records the outcome `waiting` for its source run"
       proof: "grep: W1-T12199 criterion 3 in test/inbox/machine-filed-task-files-land-through-one-shared-landing-pull-request.test.ts"
-    - claim: "After the landing pull request is open, the landing adds no file to its branch. A later file waits in the state directory and goes into the next landing pull request"
+    - claim: "If the list of open pull requests cannot be read, the landing waits and pushes nothing"
       proof: "grep: W1-T12199 criterion 4 in test/inbox/machine-filed-task-files-land-through-one-shared-landing-pull-request.test.ts"
-    - claim: "A file that the plan preflight refuses is left out of the batch and reported with its cause. The other files land"
+    - claim: "After the landing pull request merges, the next sweep pass lands each waiting file in a new landing pull request, with no new refusal from a worker"
       proof: "grep: W1-T12199 criterion 5 in test/inbox/machine-filed-task-files-land-through-one-shared-landing-pull-request.test.ts"
-    - claim: "A gardener does not file the same task twice while its file waits, and the refusal amendment finds a waiting or an open amendment for the same task id"
+    - claim: "A staged edit whose base moved on main is set aside with its cause and is not written over the copy on main. The other files land"
       proof: "grep: W1-T12199 criterion 6 in test/inbox/machine-filed-task-files-land-through-one-shared-landing-pull-request.test.ts"
-    - claim: "The body of the landing pull request holds one criterion for each task file it carries"
+    - claim: "A file that the plan preflight refuses is left out, set aside with its cause in one ledger row, and the same bytes are not staged again. The other files land"
       proof: "grep: W1-T12199 criterion 7 in test/inbox/machine-filed-task-files-land-through-one-shared-landing-pull-request.test.ts"
-    - claim: "The gardener land step calls the new landing function, and the test goes through `gardenCheckoutAsync`"
-      proof: "grep: landTaskFiles( in src/run-task.ts"
-    - claim: "The refusal amendment in the sweep calls the new landing function"
-      proof: "grep: landTaskFiles( in src/lib/sweep.ts"
+    - claim: "A refusal that main itself causes sets no file aside. The files wait until main moves"
+      proof: "grep: W1-T12199 criterion 8 in test/inbox/machine-filed-task-files-land-through-one-shared-landing-pull-request.test.ts"
+    - claim: "A second amendment for a task whose amendment waits or is in the open landing pull request is recorded as `deduped`, and no second file is staged"
+      proof: "grep: W1-T12199 criterion 9 in test/inbox/machine-filed-task-files-land-through-one-shared-landing-pull-request.test.ts"
+    - claim: "The landing refuses a path outside plan/tasks.d and a path that origin/main does not hold, and stages nothing for it"
+      proof: "grep: W1-T12199 criterion 10 in test/inbox/machine-filed-task-files-land-through-one-shared-landing-pull-request.test.ts"
+    - claim: "The refusal amendment in the sweep calls the new landing function, and the test goes through `runSweep` with the effects of `buildSweepEffects`"
+      proof: "grep: landTaskFilesAsync( in src/lib/sweep.ts"
+    - claim: "The escalation triage accepts an amendment that waits and names the wait in its receipt"
+      proof: "grep: W1-T12199 criterion 12 in test/inbox/machine-filed-task-files-land-through-one-shared-landing-pull-request.test.ts"
   rationale: |
     OBSERVED 2026-11-10 on the first-parent history of main, 48 hours, 165 merges: 36 merges (22%) were one-record pull requests from machines.
-    - 14 came from gardeners, 7 from the machine-filing judge, 6 from refusal amendments and 9 from triage outcomes. A sibling task in this filing covers the triage outcomes.
-    - Each gardener opens its own pull request on a branch named `<name>-garden-<time>`. `gardenLandSteps` in src/run-task.ts does the add, the commit, the preflight, the push and the create.
+    - 14 came from gardeners, 7 from the machine-filing judge, 6 from refusal amendments and 9 from triage outcomes. Sibling tasks in this filing cover the gardeners, the judge and the triage outcomes.
     - The refusal amendment opens a pull request on `refusal-amendment/<task id>` from `openAmendmentPr` in src/lib/sweep.ts.
-    - The landing in src/lib/feedback-landing.ts already puts many files in one pull request on one fixed branch. `LANDING_BASES` has four families. `landCiLearningShards` lands task files that way today.
-    - Inferred risks, not measured: each file added to an open landing pull request pushes its branch again and restarts CI and review. One refused file blocks the batch. The dedupe of the refusal amendment reads a branch name for each task.
+    - The landing in src/lib/feedback-landing.ts already puts many files in one pull request on one fixed branch. `LANDING_BASES` has four families.
+    OBSERVED 2026-11-10 in the code, by the first build attempt, which stopped:
+    - The four families push again for each added file (`finishLanding`, `stageBranchPending`). Each push restarts CI and review. A sealed family needs its own path.
+    - `findPendingLandingPrSteps` reads a failed listing as "no pull request". For a sealed branch that reading leads to a push over an open pull request.
+    - `landContentSteps` writes the bytes of an input over the copy on main. An edit that waits while main changes the same file would undo the change on main.
+    - `RefusalAmendmentIo.openAmendmentPr` in src/lib/refusal-amendment.ts must return `{ prUrl: string }`. An amendment that waits has no pull request.
+    - `plan_amendment_pr` in src/run-task.ts (the escalation triage) throws when the result has no `prUrl`.
+    - A gardener cannot use the family yet. `GardenCheckout.land` in src/lib/gardener.ts returns a URL or nothing, and "nothing" is a failed filing that releases the reserved id. The gate `task-id-existence` refuses a new id on a branch that is not its reservation holder (`evaluateReservationHolderConflicts` in scripts/task-id-existence-check.mjs). So this task takes only an edit of a file that origin/main holds. W1-T12221 and W1-T12222 add the gardeners.
+    - In a test, `repoDir` in `buildSweepEffects` is the real checkout unless `localRepoName` differs. A landing that runs real git there under `withLiveWritesAllowed` would push to the real origin. The landing must use the injected git and gh of the sweep when a test injects them.
   design: |
-    Add a family for task files to `LANDING_BASES`, with `plan/tasks.d` as the directory it owns. Export `landTaskFiles` and its async form.
-    Stage each file in the state directory first, as the feedback landing queue does. Build the branch from the staged files only when no landing pull request is open. That is the "seal once open" rule.
-    Run the plan preflight for each staged file before it joins the batch.
-    In `gardenLandSteps`, choose the family when every path is under plan/tasks.d. Return the landing pull request to the gardener, or a "waiting" result. A gardener that tracks one pending pull request must accept "waiting".
-    In `openAmendmentPr`, choose the family under the same condition, and replace the branch probe with a read of the staged files and of the open landing pull request.
-    NOT IN SCOPE: `rmd plan`, `rmd triage` with a `propose` outcome, `rmd approve`, and any file outside plan/tasks.d.
+    Add a family for task files to `LANDING_BASES` and its branch to `LEGACY_LANDING_REFS`. Export `landTaskFilesAsync` and a reader of the staged files.
+    Stage: for each input, read the blob of the path on origin/main (the base). Refuse a path outside plan/tasks.d, and a path with no base. Refuse an input when another edit of the same path waits, and when the same bytes were set aside before. Run the plan preflight on a commit of main plus this one file. If it is red, do not stage, and return the failures and whether main alone has the same red (the W1-T5531 rule stays with the sweep). If it is green, write the file and a record of its base, claim and proof under `<state root>/state/task-files-landing-pending`.
+    Land: if nothing is staged, make no call. Read the open pull requests of the branch. If the read fails, wait. If one is open, wait: that is the seal. Else fetch, drop each staged file whose bytes main holds, set aside each file whose base moved, and build one tree from main plus the staged files. Run the preflight on that tree unless the same tree passed at the stage. On a red, test each file alone: set aside the files that are red and that main does not cause, and land the others. Push with a lease on the branch tip that was read. A lost lease means wait. Open the pull request and write its URL into each record.
+    Set aside: move the file and its cause to `<state root>/state/task-files-landing-refused` and log one row. A file whose landing pull request was closed without a merge is set aside too.
+    In the sweep, `openAmendmentPr` stages through the family and needs no worktree. After the loop over the candidates the effect lands once, so that the amendments of one pass share one pull request. A new effect lands the waiting files on each full pass that drafted no amendment. The probe for an existing amendment reads the staged files and the open landing pull request, and still reads the old branch `refusal-amendment/<task id>`.
+    In src/lib/refusal-amendment.ts, `openAmendmentPr` may return no `prUrl`, and the outcome `waiting` is added. The ledger row for the source run settles it, as every other outcome does.
+    NOT IN SCOPE: gardeners, the machine-filing judge and the repair of a task file (W1-T12221), a new task id (W1-T12222), `rmd plan`, `rmd triage`, `rmd approve`, and any file outside plan/tasks.d.
   falsifier: |
-    Push a second file to an open landing pull request and criterion 4 must fail. Let one refused file stop the batch and criterion 5 must fail. Remove the read of staged files from the dedupe and criterion 6 must fail. Send a gardener with a docs path through the family and criterion 2 must fail. Restore and require all nine to pass.
+    Push a second file to an open landing pull request and criterion 3 must fail. Read a failed listing as "no pull request" and criterion 4 must fail. Write a staged edit over a moved base and criterion 6 must fail. Let one refused file stop the batch and criterion 7 must fail. Remove the read of staged files from the probe and criterion 9 must fail. Restore and require all twelve to pass.
   note: |
     W1-T9054 criterion 1 sets how long the machine-filing judge holds its rulings. It does not change with this task.
+    The first build attempt stopped on 2026-11-10 and reported the gaps that the rationale lists. This text replaces the first text of the task.

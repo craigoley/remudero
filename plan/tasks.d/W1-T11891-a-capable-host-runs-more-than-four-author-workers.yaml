@@ -22,6 +22,9 @@
     - test/native-author-runtime.test.ts
     - test/whole-author-runtime-plan.test.ts
     - test/preflight-author-sizes-its-selection-by-reach-and-host-capacity.test.ts
+  # refusal-amendment (W1-T11891, run W1-T11891-1794323876606, 2026-11-11T02:11:29.064Z): the worker refused criterion 1 [proof-unexecutable-at-head] — proposed re-scope-criteria: repair the criterion's proof so it is executable at HEAD, or re-scope the criterion
+  #   worker evidence: W1-T11891: a filed proof already passes at the merge base, so branch run-W1-T11891-1794323876606 cannot open a PR
+  #   this task is held from dispatch until its record changes; an Architect must make the change above
   status: queued
   priority: 2  # Capable hosts still run at most four author test files concurrently despite measured CPU, memory and slot room.
   attempts: 0

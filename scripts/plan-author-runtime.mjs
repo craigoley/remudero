@@ -12,6 +12,8 @@ export function planAuthorRuntime({root=process.cwd(),profilePath,authorReceipt,
   const manifest=JSON.parse(readFileSync(resolve(root,'scripts/test-tier-manifest.json'),'utf8'));
   const files=listTestFiles(root);
   return {head,...wholeAuthorDeadlineFit(files,manifest,profile,phases,{workers,deadline,now}),
+    // W1-T11891: any requested width may be priced here; the result never authorizes execution at it.
+    estimateOnly:true,executionAllowed:false,
     selection:'full-corpus',selectedFiles:files.length,calibratedSampleFiles:profile.samples.length,
     fullSelectionQualified:false,scope:'ESTIMATE_ONLY for the full physical corpus, sample-calibrated; no full-repository or author PASS claim'};
 }
@@ -20,7 +22,7 @@ if(isMainModule(import.meta.url)) {
   try {
     const {values,helpRequested}=parseArgv(process.argv.slice(2),{root:{type:'string'},'runtime-profile':{type:'string'},
       'author-receipt':{type:'string'},workers:{type:'string'},deadline:{type:'string'}},
-      {allowPositionals:false,helpText:'plan-author-runtime.mjs --runtime-profile <owned coverage file> --author-receipt <owned coverage file> --workers <observed count> --deadline <fixed ISO>: read-only whole-phase ESTIMATE, never execution authority'});
+      {allowPositionals:false,helpText:'plan-author-runtime.mjs --runtime-profile <owned coverage file> --author-receipt <owned coverage file> --workers <requested width> --deadline <fixed ISO>: read-only whole-phase ESTIMATE, never execution authority'});
     if(!helpRequested) {
       const result=planAuthorRuntime({root:values.root,profilePath:values['runtime-profile'],authorReceipt:values['author-receipt'],
         workers:Number(values.workers),deadline:Date.parse(values.deadline)});
