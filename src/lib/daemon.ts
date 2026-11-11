@@ -5192,7 +5192,7 @@ export async function runDaemon(
   // started at 19:02 inside the 18:59:45 drain and were abandoned at its bound. From the latch to the exit, every
   // surface that admits a review or a fix asks this, per admission: does the kind's measured length fit the time left?
   type RestartWindow = { deadlineMs: number; lengths: { review?: number; "plan-review"?: number; "fix-dispatch"?: number }; held: number;
-    latchAtMs: number; holdEnded?: true };
+    latchAtMs: number; holdEnded?: true; exitDrainBegun?: true };
   let restartWindow: RestartWindow | undefined;
   const restartAdmission: RestartAdmission = (kind, surface, candidateMs) => {
     const lengthMs = kind === "dispatch-refill" ? candidateMs : restartWindow?.lengths[kind];
@@ -5200,7 +5200,8 @@ export async function runDaemon(
     const leftMs = restartWindow.deadlineMs - daemonClock.now();
     if (leftMs > lengthMs) return true;
     // W1-T12160: past the drain deadline the hold protects no review. 2026-11-10 it held every green pull request for 21 min.
-    if (leftMs < 0 && kind !== "fix-dispatch" && kind !== "dispatch-refill") {
+    // Once the drain of the exit has begun, a review admitted past the deadline would get no time: the hold stays.
+    if (leftMs < 0 && !restartWindow.exitDrainBegun && kind !== "fix-dispatch" && kind !== "dispatch-refill") {
       if (!restartWindow.holdEnded) log("daemon.restart_hold_ended", { kind, ...(surface === undefined ? {} : { surface }),
         since_latch_ms: Math.max(0, daemonClock.now() - restartWindow.latchAtMs), past_deadline_ms: -leftMs,
         waits_for: restartDrainInventory().map(({ what, kind: work, phase }) => ({ what, kind: work, phase })) });
@@ -5251,6 +5252,7 @@ export async function runDaemon(
     const fromLatch = stepPrefix === "daemon.freshness_drain" && latchAtMs !== undefined &&
       latchDrain?.latchAtMs === latchAtMs && !latchDrain.done ? latchDrain : undefined;
     if (fromLatch) fromLatch.done = true;
+    if (stepPrefix === "daemon.freshness_drain" && restartWindow) restartWindow.exitDrainBegun = true;
     const exitAtMs = daemonClock.now();
     const observation = fromLatch?.observation ?? observeDrain(exitAtMs, latchAtMs);
     for (const item of restartDrainInventory()) observation.watch(item);
@@ -5295,7 +5297,7 @@ export async function runDaemon(
       // held 327 minutes with no review admitted. A review-only clock runs BESIDE the drain, never inside it
       // (W1-T2744), and its stop awaits a pass already posting, exactly as the drain awaits a detached fix.
       // Only a detached action earns that clock: a drain for reviews alone admits nothing new.
-      if (reviewLength) restartWindow = { latchAtMs: exitAtMs, ...restartWindow, deadlineMs, held: restartWindow?.held ?? 0, lengths: { review: reviewLength.codeMs ?? reviewLength.ms,
+      if (reviewLength) restartWindow = { latchAtMs: exitAtMs, ...restartWindow, exitDrainBegun: true, deadlineMs, held: restartWindow?.held ?? 0, lengths: { review: reviewLength.codeMs ?? reviewLength.ms,
         "plan-review": reviewLength.planMs ?? reviewLength.ms, "fix-dispatch": reviewLength.fixMs } };
       const drainReviewClock =
         detachedAtFreshness > 0 ? startInterphaseReviewClock(deps, pollIntervalMs, log, "drain", latchedAdmission()) : undefined;

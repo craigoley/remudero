@@ -18,7 +18,7 @@ import { test, type TestContext } from "node:test";
 import { runDaemon, type DaemonDeps, type LightPassScope, type ReviewAdmissionGate } from "#src/lib/daemon.js";
 import { loadPlan } from "#src/lib/plan.js";
 import {
-  currentReviewSignal, detachedSweepActionCount, drainDetachedSweepActions, drainInFlightReviews, inFlightReviewCount, trackInFlightReview,
+  currentReviewSignal, detachSweepAction, detachedSweepActionCount, drainDetachedSweepActions, drainInFlightReviews, inFlightReviewCount, trackInFlightReview,
 } from "#src/lib/sweep.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
@@ -338,6 +338,36 @@ test("W1-T12160: a review admitted after the deadline does not move the exit, an
     assert.deepEqual(aborted, [52]);
   } finally {
     for (const gate of gates) gate.resolve();
+    await h.cleanup();
+  }
+});
+
+test("W1-T12160 criterion 5: once the drain of the exit has begun, the latch holds a review past the deadline", async (t) => {
+  // One unit is 40 ms. A fix worker starts at 12 units, after the latch, and does not finish. The lane settles at
+  // 14 units, so the drain of the exit waits for the fix until 24 units and runs its review clock beside it.
+  const fix = deferred<void>();
+  const h = latchedLanes(t, (unit) => reviewHistory(5 * unit, unit), { unit: 40 });
+  try {
+    await h.latch(1);
+    h.at(12);
+    await h.tick();
+    assert.ok(h.lightAt(12).length >= 1 && h.lightAt(12).every((pass) => pass.review), "before the exit the latch admits a review again");
+    assert.equal(h.step("daemon.restart_hold_ended").length, 1);
+    detachSweepAction(fix.promise, { actionKind: "fix-dispatch", taskId: "W1-T12160-FIX" });
+    h.at(14);
+    h.exit();
+    await waitFor(() => h.lightAt(14).length >= 1, "the review clock of the drain did not run a pass");
+    assert.ok(h.lightAt(14).every((pass) => pass.review), "with 10 units left the drain admits a 5-unit review");
+    // The clock moves past the deadline of the drain while the drain still waits. A review admitted now gets no time.
+    h.at(30);
+    assert.equal((await h.daemon).stopReason, "stale");
+    assert.equal(h.lightAt(30).length, 0, "past its deadline the drain admitted no review");
+    const [completed] = h.step("daemon.freshness_drain.completed");
+    assert.ok(Number(completed?.review_passes_held) >= 1, "the review clock asked the latch, and the latch held the review");
+    assert.equal(completed?.exit_bound_ms, 10 * h.unit, "the exit kept its time limit");
+    assert.equal(h.step("daemon.restart_hold_ended").length, 1, "the hold ended once, before the exit");
+  } finally {
+    fix.resolve();
     await h.cleanup();
   }
 });
