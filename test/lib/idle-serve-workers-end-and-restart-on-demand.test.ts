@@ -135,7 +135,8 @@ test("W1-T11937 criterion 2: the first read after the lane ended restarts it, is
   assert.deepEqual(r.rows("read_model.view_lane_restarted"), [{ lane: "heavy", firstPaintMs: 250, units: 1 }]);
   assert.equal(r.said("fixture.started").filter((row) => row.lane === "heavy").length, started + 1, "a new heavy thread started");
   assert.equal(r.heavyThreads().length, 1);
-  assert.ok(r.said("fixture.lane").filter((row) => row.lane === "heavy").length >= 2, "the restarted lane is handed the units it held");
+  // The stand-in paints BEFORE it logs the unit it was handed, so the paint's row can be seen first.
+  await until(() => r.said("fixture.lane").filter((row) => row.lane === "heavy").length >= 2, "the restarted lane is handed the units it held");
   await until(() => r.said("fixture.read").some((row) => row.lane === "heavy" && row.path === "/v1/now"), "the restarted lane is sent the read");
   assert.deepEqual(r.lanes.read("/v1/now"), { woke: "none" }, "a read of a running lane restarts nothing");
 });
