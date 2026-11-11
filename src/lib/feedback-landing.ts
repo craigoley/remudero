@@ -1546,6 +1546,9 @@ async function sweepWithPlanDestination(
   const named = planDestinationRepository(stateDir);
   if (named.outcome === "off") return sweepFeedbackLandingAsync(root, opts);
   const queued = opts.stateRoot === undefined ? [] : queuedFeedbackLandings(opts.stateRoot);
+  // With `feedback` out of the kinds and nothing queued, the kind is off: the pass is today's pass, with no added row.
+  const kindOn = named.outcome === "named" && named.kinds.includes("feedback");
+  if (named.outcome === "named" && !kindOn && queued.length === 0) return sweepFeedbackLandingAsync(root, opts);
   if (named.outcome === "unreadable" || !existsSync(join(named.checkoutDir, ".git"))) {
     // A queued record has no known repository while the switch cannot be read: it waits in the queue.
     const reason = named.outcome === "unreadable" ? named.reason : "the plan destination checkout is not a git checkout";
@@ -1556,9 +1559,10 @@ async function sweepWithPlanDestination(
   }
   const toDestination = new Set<string>(), toPublic = new Set<string>();
   for (const rel of queued) {
-    ((await queuedRecordHome(root, named.checkoutDir, rel, named.kinds.includes("feedback"))) === "destination" ? toDestination : toPublic).add(rel);
+    ((await queuedRecordHome(root, named.checkoutDir, rel, kindOn)) === "destination" ? toDestination : toPublic).add(rel);
   }
   const result = await sweepFeedbackLandingAsync(root, { ...opts, queueScope: toPublic });
+  if (!kindOn && toDestination.size === 0) return result;
   const destination = planDestinationLandingOpts({ ...opts, servedRoot: named.checkoutDir, queueScope: toDestination }, named);
   const log = destination.log;
   await sweepFeedbackLandingAsync(named.checkoutDir, {
