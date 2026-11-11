@@ -1188,11 +1188,12 @@ function* directMergePreflightSteps(
   priorHeadSha?: string,
   context: Pick<ArmAttemptResult, "error" | "rateLimit"> = {},
   judged?: MergedRatchetJudgement,
+  rereads = 0,
 ): Steps<DirectMergePreflightDecision> {
   if (!deps.readMergeFacts || !deps.updateBranch) return { proceed: true };
 
   let observedHead = priorHeadSha;
-  if (observedHead === undefined && deps.headSha) {
+  if ((observedHead === undefined || rereads > 0) && deps.headSha) {
     try {
       observedHead = yield* step(() => deps.headSha!(prUrl));
     } catch (e) {
@@ -1208,6 +1209,14 @@ function* directMergePreflightSteps(
           ...context,
           directMergePreflight: { remedy: "retry-later", error: headRead.error },
         },
+      };
+    }
+    if (priorHeadSha !== undefined && observedHead !== priorHeadSha) {
+      const moved = `head moved from ${priorHeadSha} to ${String(observedHead)} before the re-read`;
+      deps.say(`automerge.direct_merge_preflight_refused (W1-T12059): ${moved} — left unmerged for a later pass: ${prUrl}`);
+      return {
+        proceed: false,
+        result: { outcome: "direct-merge-preflight-refused", ...context, directMergePreflight: { priorHeadSha, remedy: "retry-later", error: moved } },
       };
     }
   }
@@ -1228,6 +1237,13 @@ function* directMergePreflightSteps(
   const behindIsConsistent = Number.isInteger(facts.behindBy) && Number(facts.behindBy) >= 0;
 
   if (facts.mergeable !== "MERGEABLE" || !behindIsConsistent) {
+    // W1-T12059: GitHub reads UNKNOWN for seconds after a status change; read again, then judge only the new facts.
+    if (readError === undefined && facts.mergeable === "UNKNOWN" && behindIsConsistent && rereads < PLAN_PR_UNKNOWN_MAX_REREADS) {
+      deps.say(`automerge.direct_merge_preflight_reread (W1-T12059): mergeability=UNKNOWN; re-read ` +
+        `${rereads + 1}/${PLAN_PR_UNKNOWN_MAX_REREADS} in this pass: ${prUrl}`);
+      yield* step(() => (deps.sleep ?? deps.sleepSync)?.(REST_MERGE_UNSETTLED_RETRY_INTERVAL_MS));
+      return yield* directMergePreflightSteps(prUrl, deps, priorHeadSha, context, judged, rereads + 1);
+    }
     const directMergePreflight: DirectMergePreflightEvidence = {
       ...baseEvidence,
       remedy: "retry-later",
