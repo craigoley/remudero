@@ -12,17 +12,25 @@
   author_class: machine
   origin: "ci-friction:check:proof-discrimination"
   files:
-    - .github/workflows/proof-discrimination-gate.yml
-    - test/gardeners/check-proof-discrimination.test.ts
+    - src/cli/commands/run-task-verb.ts
+    - src/lib/pr-open.ts
+    - test/review/a-known-red-proof-never-opens-a-pr.test.ts
+    - test/a-refused-pr-open-names-its-branch.test.ts
+    - test/review/an-inconclusive-proof-at-pr-open-is-a-harness-outcome.test.ts
   acceptance:
-    - claim: "the harness no longer spends a fix round on check:proof-discrimination"
-      proof: "grep: test(\"W1-T10355: check:proof-discrimination is prevented, not retried\" in test/gardeners/check-proof-discrimination.test.ts"
-  note: "Filed by the ci-friction gardener (W1-T4435) at rung 1. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. After its build merges, the gardener measures check:proof-discrimination's share of all fix rounds in equal windows before and after; a share that does not fall reopens the cause at rung 2."
+    - claim: "A daemon build whose filed proof exits 1 (fails at head) or exits 5 (passes at the merge base too) at pre-open is never sent to the PR create; the run ledgers pr.open_refused naming the branch, head sha, the proof and its bounded check-proof output, keeps the branch on origin, and writes no pr.opened_with_failing_proof row"
+      proof: "unit test: test/review/a-known-red-proof-never-opens-a-pr.test.ts"
+    - claim: "A non-discriminating proof is corrected only when exactly one literal test title, unique across the head test corpus, sits in a test file the task declares and is absent at the merge base, and `rmd check-proof --base` passes on the replacement; the replacement goes only to the existing amend-proof route as its named proposal, never into the PR body or the build branch, and zero or several candidates propose nothing"
+      proof: "grep: W1-T10355 criterion 2 in test/review/a-known-red-proof-never-opens-a-pr.test.ts"
+    - claim: "A proof that reaches no verdict even after its re-run still opens its PR with the Pre-open proof inconclusive note, as W1-T10742 rules, while a conclusively failing proof does not"
+      proof: "grep: W1-T10355 criterion 3 in test/review/a-known-red-proof-never-opens-a-pr.test.ts"
+  note: "Filed by the ci-friction gardener (W1-T4435) at rung 1. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. After its build merges, the gardener measures check:proof-discrimination's share of all fix rounds in equal windows before and after; a share that does not fall reopens the cause at rung 2. Clarified 2026-11-11 (PLAN-clarify-1794411672916): the remedy is the pre-open PR create path, not the hosted workflow."
   rationale: |
     MEASURED by the ci-friction gardener: check:proof-discrimination cost 32.2 PR minute(s) (seven-day half-life) across 14 fix round(s) on 9 pull request(s).
 
     WHERE IT COMES FROM:
-    - .github/workflows/proof-discrimination-gate.yml: declares job proof-discrimination for proof-discrimination
+    - .github/workflows/proof-discrimination-gate.yml declares job proof-discrimination. That job is the detector, NOT the cause, and it
+      stays unchanged. The rounds come from the daemon publishing a PR its own pre-open check already knew was red.
 
     RECENT ROUNDS (newest first):
     - PR #13282 at 2026-10-21T03:49:19.364Z: proof-discrimination round
@@ -30,29 +38,45 @@
         failing tests: PROPERTY no tracked src/**/*.ts file's bare-catch count exceeds its baseline
     - PR #12575 (https://github.com/craigoley/remudero/pull/12575) at 2026-10-17T15:26:28.529Z: ci-log round — rule-checks: test/containment.test.ts; acceptance-author-gate; proof-discrimination; head-identity-gate
         failing tests: test/containment.test.ts; test/docs-claims.test.ts
-        log excerpt:
-          | ✖ failing tests:
-          | 
-          | test at test/containment.test.ts:1:1
-          | ✖ test/containment.test.ts (856.81369ms)
-          |   'test failed'
-          | 
-          |   [docs-ws-stage-not-ws0-spike] README.md does not claim the repo is still the WS-0 spike, or that run-task.ts becomes real in WS-1 -- WS-1 closed 2026-07-15 and run-task.ts is real, dispatched code today.
-          |   plan_section: README.md#whats-here-today
-          |   assertion:    node --test --import tsx --test-name-pattern "README.md does not claim the repo currently contains the WS-0 spike" test/docs-claims.test.ts
-          |   exit code:    1
-          |   stdout: node:internal/modules/esm/resolve:272
-          |     throw new ER
     - PR #10549 at 2026-10-10T03:19:27.060Z: ci-log round — proof-discrimination: proof-discrimination: FAIL — N proof(s) pass at both PR head and merge base (); they cannot establish this PR's work:
     - PR #10373 (https://github.com/craigoley/remudero/pull/10373) at 2026-10-09T14:58:39.181Z: ci-log round — ci-shard (1/8); proof-discrimination
         failing tests: test/the-prerequisite-split-contract-has-no-optional-seam.test.ts: a type check rejects omitted branch and reader arguments
 
     WHAT THE LAST RUNG TRIED: W1-T5126 (a docs-only record, which changed no code path; its advice is under ci-friction:check:proof-discrimination in docs/ci-friction-remedies.md).
-    Do something structurally different from it.
+    This rung is structurally different: it changes the code path that publishes the PR.
+
+    Settled by lookup: is this already filed or decided? -> No other task gates the pre-open create on a failing proof. W1-T11157 (plan_refs this task) reuses the hosted result inside review and owns the workflow edit. W1-T10742 decided inconclusive proofs open, and that ruling stands. W1-T10919 lists "an exit-1 proof still opens" as existing behaviour, not a ruling. This task supersedes only that one behaviour (plan/tasks.d/W1-T11157-*, W1-T10742-*, W1-T10919-*).
+    Settled by lookup: where does the PR open on a failing proof? -> The claim that openPullRequestCheckedAsync defaults openOnFailingProof=true is imprecise. ghPrCreateFillCommandAsync defaults it to false (src/cli/commands/run-task-verb.ts:1812). The daemon's only build-open call passes `true` (run-task-verb.ts:7581). On an exit-1 PrOpenRefusedError carrying failingProof, the catch at :1820-1831 builds the create with bodyWithFailingProofAtOpen. That catch is the defect.
+    Settled by lookup: does pre-open already parse the body and check discrimination? -> Yes. openPullRequestChecked (src/lib/pr-open.ts:441-514) refuses a malformed or diverged Acceptance block, adds the trailer and runs every filed proof through `rmd check-proof --base <merge-base>`. Exit 5 (passes at base) is already refused as stale-proof, and recordRefusedPrOpen escalates it as BLOCKED with amend-proof. Only an exit-1 failure is opened red. Nothing in the hosted workflow needs to change.
+    Settled by lookup: can a metadata-only correction be applied to the build PR itself? -> No. A trailered PR's criteria are read from the PLAN at its head, not the body (scripts/proof-discrimination-gate.mjs criteriaForReview; src/lib/proof-amendment.ts header). The pre-open body must equal the filed criteria (pr-open.ts sameCriteria). A criterion edit on the build branch is refused by Rule 15 (scripts/rule15-precheck.mjs, criterionFieldTampered). So a correction can only reach the plan through the existing parent-owned amend-proof route, and the PR is created only after the pre-open check passes again against a plan that carries it.
+    Settled by lookup: can a failing (exit-1) proof be corrected as metadata? -> No. A test that fails at head is a code defect. Narrowing the proof to a passing title would hide a red test, so exit 1 is never corrected and goes to the branch-gap path.
+    Settled by lookup: what stops a refused build from being stranded (#10551, the reason opening red was added)? -> recordRefusedPrOpen ledgers pr.open_refused with branch and head. branch-gap is released for re-dispatch by the orphan-branch grace (#8145; pr-open.ts:283-288), and stale-proof escalates. This task must keep both routes and add the proof and its output to the evidence.
+    Settled by lookup: does removing the workflow path change the risk band? -> No. risk: high, verify: human and the escalate ruling are preserved here. The ruling's pin drifts with this edit, so the machine-filing judge re-rules the record. verify: human still parks it for a person (task-linter.ts machineAuthorVerifyViolation).
 
     WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
     without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
     share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
+  design: |
+    SCOPE: the daemon's pre-open PR create path only. NOT IN SCOPE: .github/workflows/proof-discrimination-gate.yml and
+    scripts/proof-discrimination-gate.mjs (unchanged; W1-T11157 owns them), review, approval, author qualification, the merge gates,
+    and src/run-task.ts (keep ghPrCreateFillCommandAsync's exported signature, so its wrapper there is untouched).
+    1. run-task-verb.ts ghPrCreateFillCommandAsync: a PrOpenRefusedError carrying failingProof (check-proof exit 1) is rethrown even
+       under openOnFailingProof, so the create argv is never built. The flag keeps only W1-T10742's inconclusive open. Retire the
+       pr.opened_with_failing_proof step. bodyWithFailingProofAtOpen may stay exported, but this path must not call it.
+    2. The existing catch at run-task-verb.ts:7582-7621 then handles it: recordRefusedPrOpen, branch kept on origin, verdict failed with
+       stage pr_open.refused and cause base-proof-refused. Add the proof and its bounded check-proof output to the pr.open_refused row,
+       so the evidence is exact.
+    3. DETERMINISTIC CORRECTION, stale-proof (exit 5) only, harness-derived and never worker-proposed. Candidates are literal (non-template)
+       test titles in a test/ file the task's files: declares that exists at head. Each title must be unique across the head test corpus
+       and absent at the merge base. Exactly one candidate must give `rmd check-proof "unit test: <title>" --base <merge-base>` exit 0.
+       That candidate is named as the proposal in the existing BLOCKED amend-proof escalation, in the same way
+       pr.open_guard_proof_amendment names guard proofs. It is never written to the PR body or the build branch. No claim is
+       touched. Zero or several candidates, or a failing re-check, propose nothing, and the escalation stays as it is today.
+    4. No PR is created until openPullRequestChecked passes against the filed plan. A corrected proof opens its PR only on a later
+       run whose plan carries the amendment, through this same pre-open check.
+    5. Tests: test/review/a-known-red-proof-never-opens-a-pr.test.ts, with criteria 2 and 3 titled `W1-T10355 criterion 2: ...` and
+       `W1-T10355 criterion 3: ...`. Rewrite test/a-refused-pr-open-names-its-branch.test.ts:143-187 and the failing-proof cases in
+       test/review/an-inconclusive-proof-at-pr-open-is-a-harness-outcome.test.ts:110-126 to assert the refusal, not the red open.
   risk_ruling:
     verdict: "high"
     action: escalate
