@@ -1098,7 +1098,7 @@ import {
   writeFeedbackDocketMarker,
   type FeedbackDocket,
 } from "./lib/feedback-docket.js";
-import { parseUsage, usageSnapshotFromSdk, type SdkUsageReading, type UsageSnapshot } from "./lib/headroom.js";
+import { parseUsage, usageOutputShape, usageSnapshotFromSdk, type SdkUsageReading, type UsageSnapshot } from "./lib/headroom.js";
 import {
   aggregateCitationEvidence,
   assertArchitectAboveWorker,
@@ -23965,10 +23965,11 @@ export const defaultAsyncUsageProbeRunner: AsyncUsageProbeRunner = async (bin, a
  * those have three different fixes: an SDK upgrade renamed the method, the session refused, or
  * the credential legitimately has no plan limits.
  */
-export type UsageProbeFailureStage = "spawn" | "parse" | "grant" | "sdk";
+export type UsageProbeFailureStage = "spawn" | "parse" | "grant" | "sdk" | "weekly-only";
 
-/** Injected sink for that failure — the real caller gets {@link ledgerUsageProbeFailure}. */
-export type UsageProbeFailureSink = (stage: UsageProbeFailureStage, reason: string) => void;
+/** Injected sink for that failure — the real caller gets {@link ledgerUsageProbeFailure}.
+ *  `shape` is {@link usageOutputShape} of the CLI output, for the parse and weekly-only stages. */
+export type UsageProbeFailureSink = (stage: UsageProbeFailureStage, reason: string, shape?: string) => void;
 
 /**
  * How much of the failure message reaches the ledger. Generous enough for the whole of a real
@@ -23995,7 +23996,7 @@ const USAGE_PROBE_REASON_MAX = 400;
  * the reason a best-effort read becomes a crash — if the ledger is unwritable, the caller still
  * gets its `undefined` and the drain still continues.
  */
-export function ledgerUsageProbeFailure(config: Config, stage: UsageProbeFailureStage, reason: string): void {
+export function ledgerUsageProbeFailure(config: Config, stage: UsageProbeFailureStage, reason: string, shape?: string): void {
   try {
     appendLedger(ledgerPathFor(config), {
       run_id: "USAGE-PROBE",
@@ -24003,6 +24004,7 @@ export function ledgerUsageProbeFailure(config: Config, stage: UsageProbeFailure
       step: "usage.probe_failed",
       stage,
       reason: reason.slice(0, USAGE_PROBE_REASON_MAX),
+      ...(shape !== undefined ? { shape: shape.slice(0, USAGE_PROBE_REASON_MAX) } : {}),
     });
   } catch {
     // Diagnostics are never worth a throw on this path.
@@ -24145,7 +24147,7 @@ export async function readUsageSnapshotPreferSdk(
     viaCli?: (onUnreadable: UsageProbeFailureSink) => UsageSnapshot | undefined | Promise<UsageSnapshot | undefined>;
   } = {},
 ): Promise<UsageSnapshot | undefined> {
-  const sink: UsageProbeFailureSink = (stage, reason) => ledgerUsageProbeFailure(config, stage, reason);
+  const sink: UsageProbeFailureSink = (stage, reason, shape) => ledgerUsageProbeFailure(config, stage, reason, shape);
   const viaSdk = deps.viaSdk ?? ((s) => readUsageSnapshotViaSdk(undefined, s, { onCredentialSeed: usageCredentialSink(config) }));
   // W1-T5719: the CLI fallback is AWAITED off the loop, never an `execFileSync` on it.
   const viaCli = deps.viaCli ?? ((s) => readUsageSnapshotAsync(config, defaultAsyncUsageProbeRunner, s));
@@ -24203,7 +24205,7 @@ function prepareUsageProbeEnv(config: Config, onUnreadable: UsageProbeFailureSin
 export function readUsageSnapshot(
   config: Config,
   runUsageProbe: UsageProbeRunner = defaultUsageProbeRunner,
-  onUnreadable: UsageProbeFailureSink = (stage, reason) => ledgerUsageProbeFailure(config, stage, reason),
+  onUnreadable: UsageProbeFailureSink = (stage, reason, shape) => ledgerUsageProbeFailure(config, stage, reason, shape),
 ): UsageSnapshot | undefined {
   let out: string;
   // ── SPAWN. Its own try, ending at the probe call — see the two-try note below. ───────────
@@ -24239,12 +24241,18 @@ export function readUsageSnapshot(
 /** The PARSE half, in its own try so a successful read that cannot be understood is `"parse"`,
  *  never `"spawn"`. Shared by the sync and async readers so the two cannot drift. */
 function parseUsageReporting(out: string, onUnreadable: UsageProbeFailureSink): UsageSnapshot | undefined {
+  let snap: UsageSnapshot;
   try {
-    return parseUsage(out);
+    snap = parseUsage(out);
   } catch (e) {
-    onUnreadable("parse", String((e as Error)?.message ?? e));
+    onUnreadable("parse", String((e as Error)?.message ?? e), usageOutputShape(out));
     return undefined;
   }
+  // W1-T12153: a readable snapshot with no session window. The row names the case; the weekly windows bind.
+  if (!snap.session) {
+    onUnreadable("weekly-only", "no 'Current session:' line in /usage output; read the weekly windows only", usageOutputShape(out));
+  }
+  return snap;
 }
 
 /**
@@ -24256,7 +24264,7 @@ function parseUsageReporting(out: string, onUnreadable: UsageProbeFailureSink): 
 export async function readUsageSnapshotAsync(
   config: Config,
   runUsageProbe: AsyncUsageProbeRunner = defaultAsyncUsageProbeRunner,
-  onUnreadable: UsageProbeFailureSink = (stage, reason) => ledgerUsageProbeFailure(config, stage, reason),
+  onUnreadable: UsageProbeFailureSink = (stage, reason, shape) => ledgerUsageProbeFailure(config, stage, reason, shape),
   timeoutMs: number = USAGE_PROBE_TIMEOUT_MS,
 ): Promise<UsageSnapshot | undefined> {
   let out: string;
