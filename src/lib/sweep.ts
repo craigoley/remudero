@@ -213,7 +213,6 @@ import {
   reviewTaskNarrative,
   UNFILED_RUN_SENTINEL,
   unknownReservationReads,
-  execGhPrComment,
 } from "./review.js";
 import { withTempDir } from "./tmp.js";
 import { fetchPrDiff, prDiffSourceAsync } from "./pr-diff.js";
@@ -5271,9 +5270,9 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
       readLock: (key) => { const held = readInflightLock(inflightDir, key); return held ? held.run_id : undefined; },
       fixClaimKey: fixBranchClaimKey(owner, repo, pr.headRefName ?? ""),
     }),
-    postConflictComment: (pr, body) => {
+    postConflictComment: async (pr, body) => {
       assertLiveWriteAllowed("gh-transport", `conflict round comment on PR #${pr.prNumber}`);
-      execGhPrComment(pr.prUrl, body);
+      await ghTextAsync(["pr", "comment", pr.prUrl, "--body", body]);
     },
 
     // W1-T905 — "repair the instance, FILE THE CLASS". `runSweep` calls this AT MOST ONCE per

@@ -531,7 +531,7 @@ test("W1-T11170 criterion 5: the production effects wire the ownership reader, t
   assert.deepEqual(evidence.claims, [], "no task id names a claim");
   assert.deepEqual(evidence.session, {}, "no lock in an empty inflight directory");
   assert.equal(sweep.sessionBranchUnheld(evidence).verdict, "ambiguous", "the branch cannot be fetched from a checkout that is absent");
-  assert.throws(() => effects.postConflictComment!(pr, "body"), /live|write|guard/i, "a comment is a guarded live write");
+  await assert.rejects(async () => effects.postConflictComment!(pr, "body"), /live|write|guard/i, "a comment is a guarded live write");
 
   // The session write through the default push path (no injected git).
   const s = dirtyPair(t, "run-unfiled-1793649420009", { [SHARD]: LINES }, { [SHARD]: redundantChange() });
