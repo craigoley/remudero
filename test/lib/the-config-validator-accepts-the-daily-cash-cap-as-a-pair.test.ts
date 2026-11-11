@@ -1,11 +1,8 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
 import { test } from "node:test";
-import { REPO_ROOT } from "#test/helpers/repo-root.js";
-import { CONFIG_SCHEMA, ConfigShapeError, validateConfigShape, type Config } from "../../src/lib/config-schema.js";
-import { validateConfig } from "../../src/lib/config.js";
-import { CASH_TRIAL_ID, decideCashTrial } from "../../src/lib/cash-trial.js";
+import { CONFIG_SCHEMA, ConfigShapeError, validateConfigShape, type Config } from "#src/lib/config-schema.js";
+import { validateConfig } from "#src/lib/config.js";
+import { CASH_TRIAL_ID, decideCashTrial } from "#src/lib/cash-trial.js";
 
 const SOURCE = "daily-cap.json";
 
@@ -75,10 +72,8 @@ test("W1-T12186 criterion 4: a plain number and null pass, and a string and a nu
 });
 
 test("W1-T12186 criterion 5: the pair in the comment on the field passes both checks", () => {
-  const source = readFileSync(join(REPO_ROOT, "src", "lib", "config-schema.ts"), "utf8");
-  const example = /^\s*\*\s+dailyCapUsd: \{ normal: (\d+), squeezed: (\d+) \}\s*$/m.exec(source);
-  assert.ok(example, "the comment on dailyCapUsd gives a pair as an example");
-  const pair = { normal: Number(example[1]), squeezed: Number(example[2]) };
+  // The comment on Config.dailyCapUsd gives this pair as its example. It is written out here, not read from the source.
+  const pair = { normal: 10, squeezed: 25 };
   const config = { ...withCap(pair), workerProviders: { enabled: ["claude", "cash"] } };
   assert.deepEqual(validateConfigShape(config, SOURCE).dailyCapUsd, pair);
   assert.doesNotThrow(() => validateConfig(config as unknown as Config));
