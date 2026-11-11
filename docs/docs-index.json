@@ -944,6 +944,12 @@
       "grepHint": "Recovered research artefacts"
     },
     {
+      "path": "docs/research/a-standby-daemon-for-a-freshness-restart.md",
+      "title": "A standby daemon for a freshness restart",
+      "summary": "Design only. This document changes nothing under `src/` or `deploy/`. A build needs its own task,",
+      "grepHint": "A standby daemon for a freshness restart"
+    },
+    {
       "path": "docs/research/agent-automation-inspirations.md",
       "title": "Retained automation inspirations: current overlap and dispositions",
       "summary": "Public-source comparison for W1-T10959, reviewed 2026-10-28 UTC. All four dispositions are no-change.",

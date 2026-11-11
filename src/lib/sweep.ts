@@ -28038,7 +28038,12 @@ export function createEscalationTriageHistoryReader(
   io: { fs?: LedgerGrepFsDeps; readFile?: (path: string) => Promise<Buffer>; slice?: EscalationTriageSlice;
     /** Preserve unattributed torn rows when absence of an attempt authorizes a write. */
     parseAll?: boolean } = {},
-): EscalationTriageHistoryReader {
+): EscalationTriageHistoryReader & {
+  /** W1-T12235: each rotated file's kept rows, oldest first, with no read of the live file. Needs `sharedSnapshot`.
+   *  `ok` is false when a listed file has no kept rows; `held` counts the files that needed no load. */
+  rotations(stateDir: string): Promise<{ ok: boolean; unread: string[]; held: number;
+    rotations: Array<{ path: string; rows: ReadonlyArray<Record<string, unknown>> }> }>;
+} {
   const fsDeps = io.fs ?? realLedgerFs;
   const stat = fsDeps.statSync ?? realLedgerFs.statSync;
   const slice = io.slice ?? ESCALATION_TRIAGE_HISTORY_SLICE;
@@ -28139,7 +28144,7 @@ export function createEscalationTriageHistoryReader(
     }
     return union(stateDir, { step: steps, refuseIncomplete: true });
   };
-  return Object.assign(async (stateDir: string): Promise<LedgerUnionRecordRead> => {
+  const load = async (stateDir: string): Promise<{ entries: LedgerCorpusEntry[]; stats: Map<string, string>; fresh: number }> => {
     lastLoad = { rotations: 0, digestHits: 0, digestMisses: 0, bytesRead: 0, rotationsRead: 0, snapshotHit: false };
     seedSnapshot(stateDir);
     let names: string[] = [];
@@ -28150,7 +28155,8 @@ export function createEscalationTriageHistoryReader(
     }
     const stats = new Map<string, string>();
     const fresh: LedgerCorpusEntry[] = [];
-    for (const entry of ledgerRotationEntries(names, stateDir)) {
+    const entries = ledgerRotationEntries(names, stateDir);
+    for (const entry of entries) {
       let key: string;
       try {
         key = statKey(entry.path);
@@ -28205,10 +28211,27 @@ export function createEscalationTriageHistoryReader(
     loaded = stats;
     for (const path of strictUnread) loaded.delete(path);
     for (const path of kept.keys()) if (!stats.has(path)) kept.delete(path);
+    return { entries, stats, fresh: fresh.length };
+  };
+  return Object.assign(async (stateDir: string): Promise<LedgerUnionRecordRead> => {
+    const { stats } = await load(stateDir);
     const read = current(stateDir);
     if (read.ok) await writeSnapshot(stateDir, stats);
     return read;
-  }, { current, lastPass: union.lastPass, lastLoad: (): EscalationTriageHistoryLoad => ({ ...lastLoad }) });
+  }, { current, lastPass: union.lastPass, lastLoad: (): EscalationTriageHistoryLoad => ({ ...lastLoad }),
+    rotations: async (stateDir: string) => {
+      const { entries, stats, fresh } = await load(stateDir);
+      const rotations: Array<{ path: string; rows: ReadonlyArray<Record<string, unknown>> }> = [];
+      const unread: string[] = [];
+      for (const entry of entries) {
+        const hit = kept.get(entry.path);
+        if (hit !== undefined && hit.key === stats.get(entry.path)) rotations.push({ path: entry.path, rows: hit.read.rows });
+        else unread.push(entry.path);
+      }
+      // The snapshot is written again only when this call loaded a file or no snapshot answered.
+      if (unread.length === 0 && entries.length > 0 && (fresh > 0 || !lastLoad.snapshotHit)) await writeSnapshot(stateDir, stats);
+      return { ok: unread.length === 0, unread, held: stats.size - fresh, rotations };
+    } });
 }
 
 /** One walk of the rung's slice: each issue's NEWEST birth row, and every state key already rejudged. */
