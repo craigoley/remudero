@@ -1,6 +1,7 @@
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, unlinkSync, writeSync } from "node:fs";
 import { hostname } from "node:os";
 import { join } from "node:path";
+import { fixedClock } from "./clock.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
 import { isHolderStale, reclaimStaleLock } from "./fs-race-safe.js";
 import { sameHost } from "./host-identity.js";
@@ -269,4 +270,63 @@ export function sweepStaleInflightLocks(
     // "missing"/"lost" carry no holder to classify — counted in `kept` only, as before.
   }
   return result;
+}
+
+/** The step the daemon writes for a host-written lock whose run is silent past the measured bound (W1-T12316). */
+export const HOST_LOCK_SILENT_STEP = "daemon.inflight_host_lock_silent";
+
+/** W1-T12316: a lock a host process wrote. Its pid is in the host's pid table, which a container
+ *  cannot read, so only host-side code may test it. A container id is never one. */
+export function isHostWrittenLock(lock: Pick<InflightLockInfo, "host">, myHost: string = hostname()): boolean {
+  if (typeof lock.host !== "string" || sameHost(lock.host, myHost)) return false;
+  return !/^(?:[0-9a-f]{12}|[0-9a-f]{64})$/.test(lock.host);
+}
+
+export interface HostLockSilence {
+  /** The time of the newest row of the lock's run, or the lock's `startedAt` when the run wrote none. */
+  newestRowTs?: string;
+  silentMs: number;
+  /** The longest closed quiet gap in the rows; absent with no closed gap. */
+  boundMs?: number;
+  boundSource: "observed_quiet_gaps" | "no_history";
+  boundSamples: number;
+  /** True only when a measured bound exists and the run is silent past it. */
+  silent: boolean;
+}
+
+/** W1-T12316: how long the lock's run has been silent, against the longest closed quiet gap of any
+ *  run in `rows`. A statistic of the data, never a fixed time: with no closed gap nothing is silent. */
+export function hostLockSilence(lock: InflightLockInfo, rows: ReadonlyArray<Record<string, unknown>>, nowMs: number): HostLockSilence {
+  const byRun = new Map<string, number[]>();
+  for (const row of rows) {
+    if (row.step === HOST_LOCK_SILENT_STEP || typeof row.run_id !== "string" || typeof row.ts !== "string") continue;
+    const ms = Date.parse(row.ts);
+    if (!Number.isFinite(ms)) continue;
+    const list = byRun.get(row.run_id);
+    if (list) list.push(ms);
+    else byRun.set(row.run_id, [ms]);
+  }
+  let boundMs: number | undefined;
+  let boundSamples = 0;
+  for (const list of byRun.values()) {
+    list.sort((a, b) => a - b);
+    for (let i = 1; i < list.length; i++) {
+      const gap = list[i]! - list[i - 1]!;
+      boundSamples += 1;
+      if (boundMs === undefined || gap > boundMs) boundMs = gap;
+    }
+  }
+  const own = byRun.get(lock.run_id);
+  const started = Date.parse(lock.startedAt);
+  const newestMs = own && own.length > 0 ? own[own.length - 1]! : started;
+  const silentMs = Number.isFinite(newestMs) ? Math.max(0, nowMs - newestMs) : 0;
+  const newestRowTs = own && own.length > 0 ? fixedClock(newestMs).iso() : Number.isFinite(started) ? lock.startedAt : undefined;
+  return {
+    newestRowTs,
+    silentMs,
+    boundMs,
+    boundSource: boundMs === undefined ? "no_history" : "observed_quiet_gaps",
+    boundSamples,
+    silent: boundMs !== undefined && boundMs > 0 && newestRowTs !== undefined && silentMs > boundMs,
+  };
 }

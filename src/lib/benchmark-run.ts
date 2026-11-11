@@ -11,8 +11,9 @@ import { fileURLToPath } from "node:url";
 import { appendLedger } from "./ledger.js";
 import { ledgerPathFor } from "./ledger-path.js";
 import { isTestRunner } from "./live-write-guard.js";
-import { fixedClock } from "./clock.js";
-import { readInflightLock, sweepStaleInflightLocks, type InflightLockInfo, type InflightSweepResult } from "./inflight-lock.js";
+import { fixedClock, systemClock } from "./clock.js";
+import { HOST_LOCK_SILENT_STEP, hostLockSilence, isHostWrittenLock, readInflightLock, sweepStaleInflightLocks, type InflightLockInfo,
+  type InflightSweepResult } from "./inflight-lock.js";
 import { readLedgerUnionRecordsSync } from "./ledger-union.js";
 import type { Config } from "./config.js";
 import { workerClassOfLane } from "./host-memory-learning.js";
@@ -784,5 +785,40 @@ export function sweepInflightLocksWithReceipts(inflightDir: string, ledgerPath: 
     if (holder) receiptOrphanedAssignments({ runId: holder.run_id, taskId, startedAt: holder.startedAt,
       detectedBy: "inflight-lock-sweep" }, ledgerPath);
   }
+  const hostLocks = swept.unverifiableForeignHost.flatMap((taskId) => {
+    const holder = holders.get(taskId);
+    return holder && isHostWrittenLock(holder) && Number.isFinite(Date.parse(holder.startedAt)) ? [{ taskId, holder }] : [];
+  });
+  if (hostLocks.length > 0) reportSilentHostLocks(hostLocks, ledgerPath);
   return swept;
+}
+
+/** W1-T12316: report, never reclaim. A host-written lock's pid lives in the host's pid table, so the
+ *  daemon writes one row per bound of its run's silence and leaves the lock to host-side code. */
+function reportSilentHostLocks(locks: Array<{ taskId: string; holder: InflightLockInfo }>, ledgerPath: string): { written: number; reason?: string } {
+  let written = 0;
+  try {
+    const sinceTs = fixedClock(Math.min(...locks.map((l) => Date.parse(l.holder.startedAt)))).iso();
+    const read = readLedgerUnionRecordsSync(dirname(ledgerPath), { sinceTs });
+    if (!read.ok) return { written, reason: "ledger-window-incomplete" };
+    const nowMs = systemClock.now();
+    for (const { taskId, holder } of locks) {
+      const silence = hostLockSilence(holder, read.rows, nowMs);
+      if (!silence.silent || silence.boundMs === undefined) continue;
+      const reportedMs = read.rows
+        .filter((row) => row.step === HOST_LOCK_SILENT_STEP && row.run_id === holder.run_id && row.task_id === taskId)
+        .map((row) => Date.parse(String(row.ts)))
+        .filter(Number.isFinite);
+      if (reportedMs.length > 0 && nowMs - Math.max(...reportedMs) < silence.boundMs) continue;
+      appendLedger(ledgerPath, { run_id: holder.run_id, task_id: taskId, step: "daemon.inflight_host_lock_silent", lock_pid: holder.pid,
+        lock_host: holder.host, lock_started_at: holder.startedAt, newest_row_ts: silence.newestRowTs, silent_ms: silence.silentMs,
+        bound_ms: silence.boundMs, bound_source: silence.boundSource, bound_samples: silence.boundSamples,
+        action: "reported only: the lock stays; host-side code tests the pid" });
+      written += 1;
+    }
+    return { written };
+  } catch {
+    const reason = "host-lock-report-failed";
+    return { written, reason };
+  }
 }

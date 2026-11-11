@@ -68,7 +68,7 @@ import {
   stopFilePath,
   type SharedPauseRead,
 } from "./fleet-control.js";
-import { readInflightLock } from "./inflight-lock.js";
+import { hostLockSilence, isHostWrittenLock, readInflightLock } from "./inflight-lock.js";
 import { classifyGlobalArtifactRefusal } from "./learnings.js";
 import { DEFAULT_SUPERVISOR_INTERVAL_S } from "./launchd.js";
 import {
@@ -268,7 +268,16 @@ export interface RetiredBlocker {
   reason: string;
 }
 
-export type BlockerRow = CircuitBrokenBlocker | IndeterminateBlocker | BlockedPrBlocker | RetiredBlocker;
+/** W1-T12316: a lock a host process wrote, whose run is silent past the measured bound. Only host-side code can free it. */
+export interface HostLockSilentBlocker {
+  kind: "host_lock_silent";
+  taskId: string;
+  runId: string;
+  silentMs: number;
+  boundMs: number;
+}
+
+export type BlockerRow = CircuitBrokenBlocker | IndeterminateBlocker | BlockedPrBlocker | RetiredBlocker | HostLockSilentBlocker;
 
 /** `circuit_broken` and `indeterminate` are PURE ledger reads, always present in full. `blocked_pr` (W1-T306) is a
  *  claim about NOW, re-derived against live merge state every render, never replayed from `sweep.disposed`. Why:
@@ -1718,17 +1727,38 @@ export function deriveBlockedPrSections(
   return { blockedPrs, blockedPrsUnverifiedReason, mergeHeld: deriveMergeHeld(lines) };
 }
 
+function deriveHostLockSilentBlockers(inflightDir: string, lines: Array<Record<string, unknown>>, nowMs: number, myHost: string): HostLockSilentBlocker[] {
+  const out: HostLockSilentBlocker[] = [];
+  let entries: string[] = [];
+  try {
+    entries = fs.readdirSync(inflightDir);
+  } catch {
+    return out; // no state/inflight dir yet: no lock, no blocker
+  }
+  for (const entry of entries.filter((name) => name.endsWith(".lock")).sort()) {
+    const taskId = entry.slice(0, -".lock".length);
+    const lock = readInflightLock(inflightDir, taskId);
+    if (!lock || !isHostWrittenLock(lock, myHost)) continue;
+    const silence = hostLockSilence(lock, lines, nowMs);
+    if (silence.silent && silence.boundMs !== undefined) {
+      out.push({ kind: "host_lock_silent", taskId, runId: lock.run_id, silentMs: silence.silentMs, boundMs: silence.boundMs });
+    }
+  }
+  return out;
+}
+
 function deriveBlockers(
   plan: Plan | undefined,
   lines: Array<Record<string, unknown>>,
   projections: Map<string, StatusProjection> | undefined,
   { blockedPrs, blockedPrsUnverifiedReason }: BlockedPrSections,
   index: LedgerIndex,
+  hostLocks: HostLockSilentBlocker[],
 ): BlockersSection {
   const circuitBroken = deriveCircuitBrokenBlockers(lines, plan, projections, index);
   const indeterminate = deriveIndeterminateBlockers(lines, projections);
   const retired = deriveRetiredBlockers(plan);
-  const rows: BlockerRow[] = [...circuitBroken, ...indeterminate, ...blockedPrs, ...retired];
+  const rows: BlockerRow[] = [...circuitBroken, ...indeterminate, ...blockedPrs, ...retired, ...hostLocks];
   const section: BlockersSection = { rows, blockedPrsUnverifiedReason };
   section.nextAction = pickNextAction(BLOCKERS_NEXT_ACTIONS, section);
   return section;
@@ -2480,7 +2510,8 @@ export function buildStatusBoard(root: string, ledgerPath: string, deps: StatusB
   const queueHeadLimit = deps.queueHeadLimit ?? 5;
 
   const blockedPrSections = deriveBlockedPrSections(lines, deps.github, queueHeadLimit);
-  const blockers = deriveBlockers(plan, lines, projections, blockedPrSections, ledgerIndex);
+  const hostLocks = deriveHostLockSilentBlockers(join(root, "state", "inflight"), lines, nowMs, deps.localHost ?? hostname());
+  const blockers = deriveBlockers(plan, lines, projections, blockedPrSections, ledgerIndex, hostLocks);
   // W1-T1205: dispatcher-equivalent hasPushedRunBranch; ONE unbatched sweep per render.
   const readPushedRunBranches = deps.readPushedRunBranches ?? defaultReadPushedRunBranches;
   const pushedRunBranchIds = runBranchTaskIds(readPushedRunBranches(deps.repoDir));
@@ -2671,11 +2702,13 @@ function renderBlockersBlock(b: BlockersSection): string[] {
   const blockedPrs = b.rows.filter((r): r is BlockedPrBlocker => r.kind === "blocked_pr");
   const indeterminate = b.rows.filter((r): r is IndeterminateBlocker => r.kind === "indeterminate");
   const retired = b.rows.filter((r): r is RetiredBlocker => r.kind === "retired");
+  const hostLocks = b.rows.filter((r): r is HostLockSilentBlocker => r.kind === "host_lock_silent");
   if (
     circuitBroken.length === 0 &&
     blockedPrs.length === 0 &&
     indeterminate.length === 0 &&
     retired.length === 0 &&
+    hostLocks.length === 0 &&
     !b.blockedPrsUnverifiedReason
   ) {
     out.push("no blockers");
@@ -2684,6 +2717,10 @@ function renderBlockersBlock(b: BlockersSection): string[] {
   for (const r of blockedPrs) out.push(`blocked PR     : #${r.prNumber}${r.taskId ? ` (${r.taskId})` : ""} [${r.disposition}] — ${r.reason}`);
   for (const r of indeterminate) out.push(`indeterminate  : ${r.taskId} — ${r.ghWindowNote}`);
   for (const r of retired) out.push(`retired        : ${r.taskId} — ${r.reason}`);
+  for (const r of hostLocks) {
+    out.push(`host_lock_silent: ${r.taskId} run ${r.runId} — silent ${formatAgeMs(r.silentMs)}, past the bound ${formatAgeMs(r.boundMs)}; ` +
+      "a host process wrote this lock, so only the host janitor or a person on the host can free it");
+  }
   if (b.blockedPrsUnverifiedReason) out.push(`blocked PR     : unverified — ${b.blockedPrsUnverifiedReason}`);
   if (b.nextAction) out.push(`next action: ${b.nextAction}`);
   return out;
