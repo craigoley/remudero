@@ -1,0 +1,46 @@
+- id: W1-T12205
+  title: "The plan preflight passes the code root when the plan is in another repository"
+  repo: remudero
+  depends_on: [W1-T12171, W1-T12200]
+  priority: 1.1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the preflight decides whether a machine may push a plan change
+  band_meaning: blast-radius
+  origin: operator-session#ops-cutover-2026-11-10
+  plan_refs:
+    - W1-T12171
+    - W1-T5348
+    - W1-T5521
+  files:
+    - src/lib/plan-pr-emitter.ts
+    - test/plan/the-plan-preflight-passes-the-code-root-when-the-plan-is-in-another-repository.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "When the input names a code root, `planPrPreflight`, `planPrPreflightAsync` and the two forms that read a commit run the plan lint with the option --code-root"
+      proof: "grep: W1-T12205 criterion 1 in test/plan/the-plan-preflight-passes-the-code-root-when-the-plan-is-in-another-repository.test.ts"
+    - claim: "With a code root, the proof check resolves each path of a proof in the code root, and the check of task ids reads both plans"
+      proof: "grep: W1-T12205 criterion 2 in test/plan/the-plan-preflight-passes-the-code-root-when-the-plan-is-in-another-repository.test.ts"
+    - claim: "A task file in the plan checkout that names a source file of the code root passes the preflight, and the same file fails it when the source file is absent from the code root"
+      proof: "grep: W1-T12205 criterion 3 in test/plan/the-plan-preflight-passes-the-code-root-when-the-plan-is-in-another-repository.test.ts"
+    - claim: "With no code root in the input, each check runs with the same arguments and gives the same result as today"
+      proof: "grep: W1-T12205 criterion 4 in test/plan/the-plan-preflight-passes-the-code-root-when-the-plan-is-in-another-repository.test.ts"
+    - claim: "The preflight takes the code root from the resolver when the checkout it is given is the destination checkout, and the test goes through `planPrPreflightAsync` as a gardener calls it"
+      proof: "grep: resolvePlanDestination( in src/lib/plan-pr-emitter.ts"
+  rationale: |
+    OBSERVED 2026-11-10: every machine that files a task runs the plan preflight inside the checkout that it will push.
+    - `planPrPreflight`, `planPrPreflightAsync`, `planPrPreflightAtCommit` and `planPrPreflightAtCommitAsync` in src/lib/plan-pr-emitter.ts run the plan lint, the check of task ids, the proof check, the title lint and the check of every task file.
+    - A task file names source files, test files and call sites. The ops checkout holds none of them.
+    - W1-T12171 gives the plan lint the option --code-root. It does not change the callers of the preflight.
+    - Without this task, a machine that files a task in the ops repository is refused by its own preflight, or must skip it.
+    - The switch is the host file `<state dir>/plan-destination.json`. If the file is absent, the switch is off and the behaviour is byte-identical to today. This task adds no kind.
+  design: |
+    Add an optional `codeRoot` to the input of the four functions. When the caller gives none, ask the resolver whether `cwd` is the destination checkout, and take the public checkout as the code root in that case.
+    Pass the code root to each check that resolves a path of a task.
+    The code root is a checkout at one commit. The preflight reads it and never fetches it.
+    NOT IN SCOPE: the writers that call the preflight, and the check in the ops repository.
+  falsifier: |
+    Run the lint without the option and criterion 1 must fail. Resolve a proof path in the plan checkout and criterion 2 must fail. Change an argument when no code root is given and criterion 4 must fail. Restore and require all five to pass.

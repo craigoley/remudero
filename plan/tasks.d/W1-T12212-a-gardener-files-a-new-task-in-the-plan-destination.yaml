@@ -1,0 +1,48 @@
+- id: W1-T12212
+  title: "A gardener files a new task in the plan destination"
+  repo: remudero
+  depends_on: [W1-T12199, W1-T12205, W1-T12206, W1-T12207, W1-T12208, W1-T12209, W1-T12210]
+  priority: 1.1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # every gardener gets its checkout and its repository from one place
+  band_meaning: blast-radius
+  origin: operator-session#ops-cutover-2026-11-10
+  plan_refs:
+    - W1-T11768
+    - W1-T12171
+    - W1-T5348
+  files:
+    - src/run-task.ts
+    - test/gardeners/a-gardener-files-a-new-task-in-the-plan-destination.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "With `task` in the kinds of the host file, a gardener that adds a new task file gets a checkout of the destination repository, pushes there and opens its pull request there"
+      proof: "grep: W1-T12212 criterion 1 in test/gardeners/a-gardener-files-a-new-task-in-the-plan-destination.test.ts"
+    - claim: "A gardener that changes a task file edits it in the repository that holds it, also when the kind is on"
+      proof: "grep: W1-T12212 criterion 2 in test/gardeners/a-gardener-files-a-new-task-in-the-plan-destination.test.ts"
+    - claim: "A gardener whose change has any path outside plan/ uses the public repository, as it does today"
+      proof: "grep: W1-T12212 criterion 3 in test/gardeners/a-gardener-files-a-new-task-in-the-plan-destination.test.ts"
+    - claim: "The shared landing for task files lands a new task file in the destination repository"
+      proof: "grep: W1-T12212 criterion 4 in test/gardeners/a-gardener-files-a-new-task-in-the-plan-destination.test.ts"
+    - claim: "With no host file, each gardener gets the same checkout and makes the same calls as today"
+      proof: "grep: W1-T12212 criterion 5 in test/gardeners/a-gardener-files-a-new-task-in-the-plan-destination.test.ts"
+    - claim: "The test goes through `daemonGardenWorkspace`, the production caller that builds the checkout of each registered gardener"
+      proof: "grep: W1-T12212 criterion 6 in test/gardeners/a-gardener-files-a-new-task-in-the-plan-destination.test.ts"
+  rationale: |
+    OBSERVED 2026-11-10 on the first-parent history of main, 48 hours, 165 merges: 14 merges came from gardeners and 7 from the machine-filing judge.
+    - Each gardener gets a checkout from `gardenCheckout` or `gardenCheckoutAsync` in src/run-task.ts. All 8 call sites are in that file. `daemonGardenWorkspace` passes `repoDir`, `owner` and `repo` of the public repository.
+    - `gardenLandSteps` commits, runs the preflight, pushes to `origin` of that checkout and opens the pull request.
+    - Users: the machine-filing judge, the queue judge, and the gardeners for CI friction, config, host resources, flow, flake incidents, selector shadow and opportunity intake, and the repair of a task file.
+    - This is one of five writer tasks. Each one waits for the readers of both catalogs, so that no task goes where no reader sees it.
+    - The switch is the host file `<state dir>/plan-destination.json`. If the file is absent, the switch is off and the behaviour is byte-identical to today. Removing `task` from the kinds turns this kind off.
+  design: |
+    In `daemonGardenWorkspace` and the other call sites, call `resolvePlanDestination("task")` when the gardener files a new task, and pass its checkout, owner and name.
+    A gardener knows whether it adds or changes a file only when it lands. So choose the repository in the land step: all paths new and under plan/tasks.d go to the destination; a changed file goes to the repository that holds it; a mix is refused with a message.
+    The preflight takes the code root from the earlier task of this filing.
+    NOT IN SCOPE: the gardener modules themselves. Each one takes its checkout as an argument.
+  falsifier: |
+    Push a new task file to the public repository with the kind on and criterion 1 must fail. Move a changed task file to the destination and criterion 2 must fail. Send a docs change to the destination and criterion 3 must fail. Restore and require all six to pass.
