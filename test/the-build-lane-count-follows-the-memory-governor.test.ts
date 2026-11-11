@@ -194,19 +194,21 @@ test("W1-T9097: enforce caps refill and never stops a running lane", async () =>
   h.release.B.resolve(okResult("B"));
   await drainMicrotasks();
   assert.deepEqual(h.startedWhileARan, ["B"], "B's freed lane is not refilled while A alone fills the target");
-  const held = h.steps.filter((l) => l.step === "dispatch.lane_refill_held").map((l) => l.extra);
-  assert.deepEqual(held, [{ lane: 1, finished_task: "B", reason: "lane target" }]);
+  // W1-T12292: the lane parks, so a later reading decides it again; it is not held for the rest of the phase.
+  const parked = h.steps.filter((l) => l.step === "dispatch.lane_parked").map((l) => [l.extra?.lane, l.extra?.finished_task, l.extra?.reason]);
+  assert.deepEqual(parked, [[1, "B", "lane target"]]);
+  assert.equal(h.steps.some((l) => l.step === "dispatch.lane_refill_held" && l.extra?.reason === "lane target"), false);
   assert.deepEqual(laneTargetRows(h.steps).map((r) => [r.target, r.binding, r.in_flight]), [[2, "cpu", 0], [1, "pressure", 1]]);
 
-  // A ran on above the target and settled on its own; the next tick admits C within the one-lane target.
+  // A ran on above the target and settled on its own; A's own lane admits C within the one-lane target.
   h.settleA();
   const summary = await h.run;
   assert.equal(summary.stopReason, "max_reached");
   assert.deepEqual(h.started, ["A", "B", "C"]);
   const passes = h.steps.filter((l) => l.step === "dispatch.settled_set").map((l) => l.extra as { tasks: Array<{ id: string; status: string }> });
-  assert.deepEqual(passes.map((p) => p.tasks.map((t) => `${t.id}:${t.status}`)), [["A:fulfilled", "B:fulfilled"], ["C:fulfilled"]],
-    "A was never stopped: it settled fulfilled with its pass, and C ran alone in the next");
-  assert.equal(h.steps.some((l) => l.step === "dispatch.lane_refilled"), false);
+  assert.deepEqual(passes.map((p) => p.tasks.map((t) => `${t.id}:${t.status}`)), [["A:fulfilled", "B:fulfilled", "C:fulfilled"]],
+    "A was never stopped: it settled fulfilled, and C ran on its lane after A");
+  assert.deepEqual(h.steps.filter((l) => l.step === "dispatch.lane_refilled").map((l) => l.extra), [{ lane: 0, finished_task: "A", next_task: "C" }]);
 });
 
 test("W1-T9097: an unreadable reading holds the target and an unreadable mode never enforces", async () => {

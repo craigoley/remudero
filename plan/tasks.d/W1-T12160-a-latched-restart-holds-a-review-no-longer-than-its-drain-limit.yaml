@@ -17,7 +17,7 @@
   files:
     - src/lib/daemon.ts
     - test/daemon/a-latched-restart-holds-a-review-no-longer-than-its-drain-limit.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "While the time left before the drain deadline is longer than the measured length of a review, the latch admits the review, as today"
