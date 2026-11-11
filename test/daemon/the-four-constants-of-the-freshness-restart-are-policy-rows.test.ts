@@ -45,11 +45,10 @@ test("W1-T12228 criterion 1: the policy file has the block freshnessRestart with
   ];
   assert.match(POLICY_TEXT, /^freshnessRestart:$/m);
   const policy = committed();
-  const judgeSource = readFileSync(join(REPO_ROOT, "src", "lib", "deploy-judge.ts"), "utf8");
   for (const [key, value, constant, min, max] of rows) {
     const line = new RegExp(`^  ${key}: \\{ value: ${value}, origin: "lifted:src/lib/deploy-judge\\.ts \\(${constant}\\)", min: ${min}, max: ${max} \\}$`, "m");
     assert.match(POLICY_TEXT, line, `${key} is one flow-style line naming ${constant}`);
-    assert.match(judgeSource, new RegExp(`export const ${constant}\\b`), `${constant} still exists in deploy-judge.ts`);
+    assert.ok(constant in judge, `${constant} is still exported by deploy-judge.ts`);
     assert.equal(policy.values.freshnessRestart[key as keyof typeof DEFAULT_FRESHNESS_RESTART], value);
     assert.deepEqual(policy.bounds[`freshnessRestart.${key}`], { min, max });
     assert.equal(policy.origin[`freshnessRestart.${key}`]!.kind, "lifted");

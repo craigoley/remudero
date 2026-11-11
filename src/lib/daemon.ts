@@ -1127,10 +1127,6 @@ export interface DaemonOpts {
   /** How long a lifetime runs before a freshness restart may take it (default {@link FRESHNESS_MIN_LIFETIME_MS}, the
    *  operator ruling of 2026-10-17). A test of a different restart mechanic passes 0 to reach it at once. */
   freshnessMinLifetimeMs?: number;
-  /** W1-T12228: `plan/policy.yaml`'s `freshnessRestart` rows, threaded by the daemon command beside {@link sweepWallClockBoundMs}.
-   *  Each defaults to its constant in deploy-judge.ts. `scoreLimit` is the pressure a busy daemon restarts at,
-   *  `stalenessHorizonMs` the age at which staleness alone reaches it, `quietWindowMs` the coalesce window. The minimum
-   *  lifetime is {@link freshnessMinLifetimeMs}. */
   freshnessScoreLimit?: number;
   freshnessStalenessHorizonMs?: number;
   freshnessQuietWindowMs?: number;
@@ -4178,7 +4174,6 @@ export async function runDaemon(
   // by the real `rmd daemon` entry, defaulted here for a direct/test caller that omits it.
   const sweepWallClockBoundMs = opts.sweepWallClockBoundMs ?? DEFAULT_SWEEP_WALL_CLOCK_BOUND_MS;
   const freshnessMinLifetimeMs = opts.freshnessMinLifetimeMs ?? FRESHNESS_MIN_LIFETIME_MS;
-  // W1-T12228: the other three freshness rows, as the recorded shape the judge takes.
   const freshnessThreshold = opts.freshnessScoreLimit === undefined ? DEPLOY_RESTART_SCORE_THRESHOLD
     : { value: opts.freshnessScoreLimit, reason: "plan/policy.yaml freshnessRestart.scoreLimit" };
   const freshnessStalenessHorizonMs = opts.freshnessStalenessHorizonMs ?? DEPLOY_RESTART_RATE_CEILING_MS;
@@ -5157,7 +5152,6 @@ export async function runDaemon(
       new_sha: freshness.newSha,
       ...withheldEvidence,
       ...lifetimeEvidence,
-      // W1-T12228: the four freshness rows in force for this decision (min_lifetime_ms rides in lifetimeEvidence).
       score_limit: freshnessThreshold.value,
       staleness_horizon_ms: freshnessStalenessHorizonMs,
       quiet_window_ms: freshnessQuietWindow.value,
