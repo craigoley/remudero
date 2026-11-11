@@ -12,7 +12,7 @@
   plan_refs: [W1-T8170, W1-T1272, W1-T4998, W1-T5720, W1-T2965, W1-T8172, W1-T9114, W1-T7746]
   files: [src/lib/daemon.ts, test/an-unlatched-freshness-exit-skips-a-pass-that-already-ran.test.ts]
   status: queued
-  priority: 2.5  # measured 29 lane-min in one exit; 4 of 31 exits 2026-10-12..14 took this arm
+  priority: 1  # raised 2026-11-11 on the 7-day restart study (36 exits to 2026-11-11): W1-T9812 depends on it; was 2.5
   attempts: 0
   rationale: |
     MEASURED 2026-10-14 (core ledger union on the Azure host, read-only; daemon pid 1710758, boot head 08cbabc50).
