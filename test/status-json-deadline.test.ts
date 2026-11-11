@@ -245,28 +245,35 @@ test("W1-T11280 fresh snapshot: status JSON reuses a persisted GitHub snapshot",
   assert.deepEqual([...(cache.closedSeed()?.keys() ?? [])], [7]);
 });
 
-const unusableSnapshots: Array<[string, (root: string) => void]> = [
-  ["missing", () => {}],
-  ["truncated", (root) => {
+/** Shared assertions: an unusable snapshot is never read as rows and the status read stays unavailable. */
+async function assertUnusableSnapshotStaysUnavailable(seed: (root: string) => void): Promise<void> {
+  const cache = await snapshotCacheHandedToGateway(seed);
+  assert.ok(cache && typeof cache === "object", "the JSON gateway must be handed the persisted snapshot cache");
+  assert.equal(cache.closedSeed(), undefined);
+  const { json } = await hungGithubStatus(seed);
+  assert.equal(json.queueHead.status, "unavailable");
+  assert.equal(json.queueHead.rows, null);
+  assert.equal(json.inbox.status, "unavailable");
+  assert.equal(json.inbox.readyCount, null);
+}
+
+test("W1-T11280 missing snapshot: the snapshot is never read as rows and the status read stays unavailable", async () => {
+  await assertUnusableSnapshotStaysUnavailable(() => {});
+});
+
+test("W1-T11280 truncated snapshot: the snapshot is never read as rows and the status read stays unavailable", async () => {
+  await assertUnusableSnapshotStaysUnavailable((root) => {
     createBoardSnapshotCache(root, "example", "repo").commitClosed([closedRow(7), closedRow(8)]);
     const path = boardSnapshotPath(root, "example", "repo");
     writeFileSync(path, readFileSync(path, "utf8").slice(0, -20));
-  }],
-  ["unreadable", (root) => mkdirSync(boardSnapshotPath(root, "example", "repo"), { recursive: true })],
-];
-
-for (const [name, seed] of unusableSnapshots) {
-  test(`W1-T11280 ${name} snapshot: the snapshot is never read as rows and the status read stays unavailable`, async () => {
-    const cache = await snapshotCacheHandedToGateway(seed);
-    assert.ok(cache && typeof cache === "object", "the JSON gateway must be handed the persisted snapshot cache");
-    assert.equal(cache.closedSeed(), undefined);
-    const { json } = await hungGithubStatus(seed);
-    assert.equal(json.queueHead.status, "unavailable");
-    assert.equal(json.queueHead.rows, null);
-    assert.equal(json.inbox.status, "unavailable");
-    assert.equal(json.inbox.readyCount, null);
   });
-}
+});
+
+test("W1-T11280 unreadable snapshot: the snapshot is never read as rows and the status read stays unavailable", async () => {
+  await assertUnusableSnapshotStaysUnavailable((root) => {
+    mkdirSync(boardSnapshotPath(root, "example", "repo"), { recursive: true });
+  });
+});
 
 test("W1-T11280 stale snapshot: it does not fill an unfinished read and the status read stays unavailable", async () => {
   const stale = (root: string): void => {
