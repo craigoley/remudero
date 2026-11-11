@@ -5238,7 +5238,13 @@ export async function runDaemon(
   // The drain every restart takes before it returns: live fix workers and in-flight reviews finish (bounded),
   // best-effort cadences and CI waits are released to be re-derived after restart. Shared by the freshness exit
   // and the memory-pressure exit so neither restart can kill work the other would have waited for.
-  const drainBeforeRestart = async (stepPrefix: "daemon.freshness_drain" | "daemon.memory_drain", latchAtMs?: number): Promise<void> => {
+  // W1-T9812 — THE PRE-EXIT PASS RUNS BESIDE THE RESTART DRAIN. 2026-10-15 20:08 a latched exit spent 3.6 min in its pass before
+  // its drain waited on anything. `beside` is that pass: the drain waits with it, then gives what the pass admitted the
+  // rest of its own time limit. `capMs` is the deadline of a drain that had nothing to wait on until the pass settled.
+  type PassBesideDrain = { pass: FreshnessPass; settled: Promise<void>; settledAtMs?: number; overlapMs?: number; capMs?: number };
+  const drainBeforeRestart = async (
+    stepPrefix: "daemon.freshness_drain" | "daemon.memory_drain", latchAtMs?: number, beside?: PassBesideDrain,
+  ): Promise<void> => {
     const fromLatch = stepPrefix === "daemon.freshness_drain" && latchAtMs !== undefined &&
       latchDrain?.latchAtMs === latchAtMs && !latchDrain.done ? latchDrain : undefined;
     if (fromLatch) fromLatch.done = true;
@@ -5254,6 +5260,7 @@ export async function runDaemon(
     const reviewsAtExit = inFlightReviewRunsNow();
     const reviewsAtFreshness = reviewsAtExit.length;
     const latchStarted = fromLatch?.started === true ? fromLatch : undefined;
+    let passWaitMs = 0;
     if (detachedAtFreshness > 0 || reviewsAtFreshness > 0 || latchStarted || hasChildrenLeft) {
       const drainStartedAtMs = latchStarted ? latchStarted.latchAtMs : exitAtMs;
       const latchFields = fromLatch ? { started_at: fromLatch.started ? "latch" : "exit", latched_at: fixedClock(fromLatch.latchAtMs).iso() }
@@ -5265,7 +5272,8 @@ export async function runDaemon(
         waited_on: observation.snapshot(),
       });
       // Bounds: what the latch saw has had the wait since the latch; anything newer gets the exit's whole bound.
-      const latchLeftMs = fromLatch ? Math.max(0, fromLatch.latchAtMs + sweepWallClockBoundMs - exitAtMs) : sweepWallClockBoundMs;
+      const latchLeftMs = beside?.capMs !== undefined ? Math.max(0, beside.capMs - exitAtMs)
+        : fromLatch ? Math.max(0, fromLatch.latchAtMs + sweepWallClockBoundMs - exitAtMs) : sweepWallClockBoundMs;
       const seen = new Set(reviewsAtExit);
       const settled = new Set<Promise<void>>();
       const watch = (reviews: Iterable<Promise<void>>): void => {
@@ -5294,6 +5302,7 @@ export async function runDaemon(
       let abandonedReviews: number;
       let reviewPasses = 0;
       let reviewPassesHeld = 0;
+      const releaseRows = new Set<Promise<void>>();
       try {
         [abandoned, abandonedReviews] = await Promise.all([
           drainDetachedSweepActions({
@@ -5302,6 +5311,7 @@ export async function runDaemon(
             onWait: observation.watch,
             onRelease: (action, work) => {
               observation.release(work, action.phase);
+              releaseRows.add(work);
               log("daemon.detached_action_released", {
                 action_kind: action.actionKind, task_id: action.taskId,
                 age_ms: action.ageMs, phase: action.phase, reason: action.reason,
@@ -5321,15 +5331,56 @@ export async function runDaemon(
           boundMs: Math.max(0, deadlineMs - daemonClock.now()), onWait: observation.watch, closeRefills: placements.review?.placement !== "child",
         });
       }
-      for (const action of abandoned) {
-        const release = await abandonDetachedSweepAction(action);
-        log("daemon.detached_action_abandoned", {
-          ...release,
-          action_kind: action.actionKind,
-          task_id: action.taskId,
-          age_ms: action.ageMs,
-          bound_ms: sweepWallClockBoundMs,
-        });
+      // W1-T9812: an action this drain gave up on is abandoned once, also when the wait after the pass finds it again.
+      const gaveUp = new Set<Promise<void>>();
+      let abandonedActions = 0;
+      const abandonActions = async (actions: typeof abandoned): Promise<void> => {
+        for (const action of actions) {
+          const matches = restartDrainInventory().filter((item) => item.what === "detached" && item.kind === action.actionKind &&
+            item.task_id === action.taskId).map((item) => item.settled);
+          const work = matches.find((match) => !gaveUp.has(match));
+          if (matches.length > 0 && !work) continue;
+          if (work) gaveUp.add(work);
+          abandonedActions++;
+          const release = await abandonDetachedSweepAction(action);
+          log("daemon.detached_action_abandoned", {
+            ...release,
+            action_kind: action.actionKind,
+            task_id: action.taskId,
+            age_ms: action.ageMs,
+            bound_ms: sweepWallClockBoundMs,
+          });
+        }
+      };
+      await abandonActions(abandoned);
+      if (beside && beside.capMs === undefined) {
+        const drainedAtMs = daemonClock.now();
+        await beside.settled;
+        passWaitMs = Math.max(0, daemonClock.now() - drainedAtMs);
+        beside.overlapMs = Math.max(0, Math.min(drainedAtMs, beside.settledAtMs ?? drainedAtMs) - exitAtMs);
+        // What the pass admitted gets the rest of this drain's time limit, not a new one.
+        const leftMs = Math.max(0, deadlineMs - daemonClock.now());
+        const known = new Set(seen);
+        watch(inFlightReviewRunsNow());
+        const [late] = await Promise.all([
+          drainDetachedSweepActions({
+            boundMs: leftMs,
+            freshness: true,
+            onWait: observation.watch,
+            onRelease: (action, work) => {
+              observation.release(work, action.phase);
+              if (releaseRows.has(work)) return;
+              releaseRows.add(work);
+              log("daemon.detached_action_released", {
+                action_kind: action.actionKind, task_id: action.taskId,
+                age_ms: action.ageMs, phase: action.phase, reason: action.reason,
+              });
+            },
+          }),
+          drainInFlightReviews({ boundMs: leftMs, onWait: observation.watch, closeRefills: placements.review?.placement !== "child" }),
+        ]);
+        abandonedReviews += [...seen].filter((review) => !known.has(review) && !settled.has(review)).length;
+        await abandonActions(late);
       }
       const nowMs = daemonClock.now();
       log(`${stepPrefix}.completed`, {
@@ -5337,16 +5388,17 @@ export async function runDaemon(
         waited_on: observation.snapshot(true),
         detached_sweep_actions: latchStarted ? latchStarted.detached : detachedAtFreshness,
         remaining_detached_sweep_actions: detachedSweepActionCount(),
-        abandoned_detached_sweep_actions: abandoned.length,
+        abandoned_detached_sweep_actions: abandonedActions,
         in_flight_reviews: latchStarted ? latchStarted.reviews.size : reviewsAtFreshness,
         abandoned_in_flight_reviews: abandonedReviews,
         detached_children_left_running: childWorkLeftRunning(),
         detached_work_placement: Object.fromEntries(Object.entries(placements).map(([kind, p]) => [kind, p.placement])),
         review_passes: reviewPasses,
-        duration_ms: Math.max(0, nowMs - drainStartedAtMs),
+        duration_ms: Math.max(0, nowMs - drainStartedAtMs - passWaitMs),
+        ...(beside ? { pre_exit_pass: beside.pass, pass_overlap_ms: beside.overlapMs ?? 0 } : {}),
         ...(stepPrefix === "daemon.freshness_drain" ? {
           in_flight_reviews_at_exit: reviewsAtFreshness,
-          exit_wait_ms: Math.max(0, nowMs - exitAtMs),
+          exit_wait_ms: Math.max(0, nowMs - exitAtMs - passWaitMs),
           exit_bound_ms: Math.max(reviewBoundMs, detachedBoundMs),
           review_passes_held: reviewPassesHeld,
           review_length_ms: reviewLength?.ms ?? null,
@@ -5358,9 +5410,15 @@ export async function runDaemon(
           abandoned_admitted_after_latch: afterLatch().filter((review) => !settled.has(review)).length,
         } : {}),
       });
+    } else if (beside && beside.capMs === undefined) {
+      // Nothing was in flight at the exit. What the pass admitted is waited on after it, until the deadline this drain had.
+      await beside.settled;
+      if (detachedSweepActionCount() > 0 || inFlightReviewCount() > 0) await drainBeforeRestart(stepPrefix, latchAtMs, { ...beside, overlapMs: 0,
+        capMs: exitAtMs + (fromLatch ? Math.max(0, fromLatch.latchAtMs + sweepWallClockBoundMs - exitAtMs) : sweepWallClockBoundMs) });
+      passWaitMs = Math.max(0, daemonClock.now() - exitAtMs);
     }
     if (stepPrefix === "daemon.freshness_drain") {
-      freshnessPhases.drain = (freshnessPhases.drain ?? 0) + Math.max(0, daemonClock.now() - exitAtMs);
+      freshnessPhases.drain = (freshnessPhases.drain ?? 0) + Math.max(0, daemonClock.now() - exitAtMs - passWaitMs);
     }
   };
 
@@ -5381,22 +5439,28 @@ export async function runDaemon(
     // A running pass is still awaited within its bound; other freshness exits keep their pass.
     let preExitPass: FreshnessPass = "ran";
     const passStartedAtMs = daemonClock.now();
+    let pass: Promise<unknown> | undefined;
     if (backgroundSweep) {
       preExitPass = "awaited_in_flight";
-      await backgroundSweep;
+      pass = backgroundSweep;
     } else if (dispatchLatchAtMs !== undefined && sweepLiveness.lastCompletedAtMs !== undefined &&
       sweepLiveness.lastCompletedAtMs > dispatchLatchAtMs) {
       preExitPass = "skipped_ran_since_latch";
     } else if (deps.sweep) {
       sweepRetriggerState.lastRunAtMs = daemonClock.now();
-      await runGatedSweep(deps, pollIntervalMs, sweepBound, log, diskHeadroomLatch, headroomSampler, sweepLiveness, undefined, latchedAdmission);
+      pass = runGatedSweep(deps, pollIntervalMs, sweepBound, log, diskHeadroomLatch, headroomSampler, sweepLiveness, undefined, latchedAdmission);
     }
+    // W1-T9812: a latched exit starts its drain with the pass and waits for both. The other exits keep the pass first.
+    const beside: PassBesideDrain | undefined = dispatchLatchAtMs === undefined ? undefined : { pass: preExitPass,
+      settled: Promise.resolve(pass).then(() => undefined, () => undefined).then(() => { beside!.settledAtMs = daemonClock.now(); }) };
+    const drained = beside ? drainBeforeRestart("daemon.freshness_drain", dispatchLatchAtMs, beside) : undefined;
+    if (pass || drained) await Promise.all([pass, drained]);
     if (preExitPass === "awaited_in_flight" || (preExitPass === "ran" && deps.sweep)) {
-      freshnessPhases.pre_exit_pass = Math.max(0, daemonClock.now() - passStartedAtMs);
+      freshnessPhases.pre_exit_pass = Math.max(0, (beside?.settledAtMs ?? daemonClock.now()) - passStartedAtMs);
     }
     // W1-T5721: protect live fix workers; cadences and CI waits are re-derived after restart.
     // The caller stops its interphase clock before the final pass (W1-T2865).
-    await drainBeforeRestart("daemon.freshness_drain", dispatchLatchAtMs);
+    if (!beside) await drainBeforeRestart("daemon.freshness_drain", dispatchLatchAtMs);
     return preExitPass;
   };
   const stopForFreshness = async (
