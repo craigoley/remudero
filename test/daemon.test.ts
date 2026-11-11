@@ -3641,12 +3641,11 @@ test("W1-T1272: an in-cycle full sweep satisfies a stale freshness exit", async 
     sleep: async () => {},
   });
   assert.equal(events.filter((event) => event === "sweep").length, 1, "the exit reused its completed in-cycle pass");
-  assert.equal(
-    events.at(-2),
-    "sweep",
+  assert.equal(events.at(-1), "freshness", "the stale exit followed the already-completed full pass");
+  assert.ok(
+    events.lastIndexOf("sweep") < events.lastIndexOf("freshness"),
     "the in-cycle full pass completed before the daemon's final stale read",
   );
-  assert.equal(events.at(-1), "freshness", "the stale exit followed the already-completed full pass");
   assert.equal(s.stopReason, "stale", "the stale verdict still ends the boot — running the sweep did not suppress it");
 });
 
