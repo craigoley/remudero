@@ -14,7 +14,7 @@
   files:
     - src/lib/ci-parity.ts
     - test/ci/parity/the-author-precheck-answer-never-reaches-a-rule-check-test.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: With RMD_AUTHOR_CENSUS_ANSWERED set to the tree's HEAD, the fast gate's rule-checks children run without it, while the census step itself still reuses the answer

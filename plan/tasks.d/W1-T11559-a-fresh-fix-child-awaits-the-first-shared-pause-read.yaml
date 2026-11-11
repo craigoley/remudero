@@ -18,7 +18,7 @@
   files:
     - src/run-task.ts
     - test/reviews-and-detached-actions-run-as-run-children.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: A fresh detached fix child awaits the first asynchronous shared-PAUSE read before treating an absent ref as permission to continue; after absence it performs the live PR and task rechecks and reaches the normal dispatcher

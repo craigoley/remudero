@@ -18,7 +18,7 @@
     - src/lib/auto-triage.ts
     - src/run-task.ts
     - test/triage/auto-triage-sees-feedback-merged-after-the-daemon-booted.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: The daemon's auto-triage candidate list includes a status new feedback entry that reached origin/main after the boot checkout was taken, on the first pass after the fetch, without a restart

@@ -1,0 +1,43 @@
+- id: W1-T12123
+  title: "The shared read gap is waited out on the daemon loop"
+  repo: remudero
+  depends_on: []
+  priority: 0.8
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # every synchronous gh read the daemon makes on its loop passes this wait; it changes a rule W1-T11458 set
+  band_meaning: blast-radius
+  origin: operator-session#review-flow-2026-11-10b
+  plan_refs:
+    - W1-T12057
+    - W1-T11458
+  files:
+    - src/lib/github-transport.ts
+    - test/github/a-daemon-sync-github-read-never-sleeps-on-its-loop.test.ts
+    - test/github/the-shared-read-gap-is-waited-out-on-the-daemon-loop.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "On the daemon loop, a synchronous read that must wait for the shared read gap sleeps that gap and is made, and the wait is recorded as a github.pace.loop_wait row with its call site"
+      proof: "grep: W1-T12123 criterion 1 in test/github/the-shared-read-gap-is-waited-out-on-the-daemon-loop.test.ts"
+    - claim: "On the daemon loop, a synchronous read that finds the cadence lock held by this process's own pending async read does not fail: it is made, and the row records that it did not wait for the lock"
+      proof: "grep: W1-T12123 criterion 2 in test/github/the-shared-read-gap-is-waited-out-on-the-daemon-loop.test.ts"
+    - claim: "A wait longer than the shared read gap, and every wait on serve's non-blocking pacer, is still refused as today"
+      proof: "grep: W1-T12123 criterion 3 in test/github/the-shared-read-gap-is-waited-out-on-the-daemon-loop.test.ts"
+  rationale: |
+    MEASURED 2026-11-10 after W1-T12057 went live (daemon restarted at 17:20:51Z on main 92a701b88): in the next 13 minutes the core ledger shows four more refusals and no github.pace.loop_wait row.
+    - 17:31:47Z sweep.mutation_verdict_pull.error, "refused to sleep 993ms". 17:31:48Z sweep.fold_debt_pull.error, 1474 ms. 17:33:40Z review.pending_post.error, 72 ms. 17:33:45Z sweep.open_escalations.read_error, 25 ms.
+    - The 72 to 1474 ms waits are the shared read gap in applyGhReadCadence (src/lib/github-transport.ts, `if (waitMs > 0) sleepSync(waitMs)`), whose gap is DEFAULT_GH_SHARED_READ_GAP_MS, 1500 ms. W1-T12057 let the pacer's own gap and the cadence lock wait sleep, and left this wait refusing.
+    - The 25 ms wait is the cadence lock wait when this process's own async read is pending on the same stamp. W1-T12057 left that case refusing, because sleeping there blocks the loop the async read needs.
+    - These two cases are most of the measured failures: on 2026-11-10 before the fix, 125 refusals were for 25 ms and about 25 were for 585 to 1441 ms.
+    - Each refusal fails a daemon action. A failed review post holds its pull request for up to 60 minutes.
+  design: |
+    In applyGhReadCadence on the loop: sleep the shared-gap wait when it is at most the shared read gap the function already resolved, and record the row. When the lock is held by this process's own pending async read, do not wait and do not throw: make the read, as the lock loop already does when it gives up at its maximum, and record a row with wait_ms 0 and a field that names the reason. No new number is introduced.
+    The W1-T11458 cases in test/github/a-daemon-sync-github-read-never-sleeps-on-its-loop.test.ts that pin these two refusals change to assert the new rule.
+    NOT IN SCOPE: serve's non-blocking pacer, the gap's length, and moving synchronous reads off the loop (the rows name them).
+  falsifier: |
+    Throw on a shared-gap wait and criterion 1 must fail. Throw, or sleep the full lock bound, when the process's own async read holds the lock and criterion 2 must fail. Sleep a wait longer than the gap, or let serve's pacer sleep, and criterion 3 must fail. Restore and require all three to pass.
+  note: |
+    Follows W1-T12057. Success is no 'refused to sleep' row from the core daemon for a day.

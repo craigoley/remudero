@@ -8,8 +8,9 @@ import {
   writeFileSync,
 } from "node:fs";
 import { hostname, tmpdir } from "node:os";
-import { basename, dirname, isAbsolute, join, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, sep } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
+import { fileURLToPath } from "node:url";
 
 import { clockFromMillisFn, loopAvailableDeadline, systemClock } from "./clock.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
@@ -557,7 +558,10 @@ export function createGhCallPacer(
   const lowWaterFraction = opts.lowWaterFraction ?? DEFAULT_GH_PACE_LOW_WATER_FRACTION;
   const floorFraction = opts.floorFraction ?? DEFAULT_GH_PACE_FLOOR_FRACTION;
   const now = opts.now ?? systemClock.now;
-  const sleepSync = loopSafeGhSleep(opts.sleepSync ?? defaultBlockingSleepSync);
+  const blockingSleep = opts.sleepSync ?? defaultBlockingSleepSync;
+  const sleepSync = loopSafeGhSleep(blockingSleep);
+  // W1-T12057: only the gap wait may sleep on the daemon loop, and only up to this pacer's normal gap.
+  const gapSleepSync = loopSafeGhSleep(blockingSleep, minGapMs);
   const sleep = opts.sleep ?? defaultTimerSleep;
   let lastCallAt: number | undefined;
   let gapMs = minGapMs;
@@ -573,7 +577,7 @@ export function createGhCallPacer(
       takeStandDown();
       if (lastCallAt !== undefined) {
         const remaining = gapMs - (now() - lastCallAt);
-        if (remaining > 0) sleepSync(remaining);
+        if (remaining > 0) gapSleepSync(remaining);
       }
       lastCallAt = now();
     },
@@ -628,10 +632,50 @@ export function withSynchronousGhDelivery<T>(fn: () => T): T {
   return ghLoopHost.run(false, fn);
 }
 
-function loopSafeGhSleep(sleep: (ms: number) => void): (ms: number) => void {
+export const GH_PACE_LOOP_WAIT_STEP = "github.pace.loop_wait";
+
+export interface GhPaceLoopWaitRow {
+  step: typeof GH_PACE_LOOP_WAIT_STEP;
+  wait_ms: number;
+  /** The first stack frame outside this file, as `file:line` relative to the repository. */
+  call_site: string;
+  /** W1-T12123: set when the read went ahead without the cadence lock, with the reason. */
+  lock?: "own-async-read";
+}
+
+const ghPaceLoopWaits: GhPaceLoopWaitRow[] = [];
+
+/** W1-T12057: one row for each wait slept on the daemon loop since the previous call, then reset.
+ *  This module cannot import the ledger, so the daemon drains these rows every tick and appends them.
+ *  Rows are kept only inside the daemon's loop scope, so a process that never drains never holds any. */
+export function takeGhPaceLoopWaits(): GhPaceLoopWaitRow[] {
+  return ghPaceLoopWaits.splice(0);
+}
+
+const GH_TRANSPORT_FILE = fileURLToPath(import.meta.url);
+
+function ghCallSiteOutsideTransport(): string {
+  const limit = Error.stackTraceLimit;
+  Error.stackTraceLimit = Infinity;
+  const stack = new Error().stack ?? "";
+  Error.stackTraceLimit = limit;
+  for (const line of stack.split("\n")) {
+    const frame = /((?:file:\/\/)?\/[^\s()]+):(\d+):\d+\)?$/.exec(line);
+    if (!frame) continue;
+    const file = frame[1].startsWith("file://") ? fileURLToPath(frame[1]) : frame[1];
+    if (file !== GH_TRANSPORT_FILE) return `${relative(join(dirname(GH_TRANSPORT_FILE), "..", ".."), file)}:${frame[2]}`;
+  }
+  return "unknown";
+}
+
+/** W1-T12057: on the daemon loop a wait of at most `normalGapMs` is slept and leaves one row, because
+ *  the gh call that follows blocks the loop for longer. A longer wait, or any wait with no gap given, throws. */
+function loopSafeGhSleep(sleep: (ms: number) => void, normalGapMs?: number): (ms: number) => void {
   return (ms) => {
-    if (ms > 0 && ghLoopHost.getStore() === true) throw new GhPaceWouldBlockError(ms);
+    const onLoop = ms > 0 && ghLoopHost.getStore() === true;
+    if (onLoop && (normalGapMs === undefined || ms > normalGapMs)) throw new GhPaceWouldBlockError(ms);
     sleep(ms);
+    if (onLoop) ghPaceLoopWaits.push({ step: GH_PACE_LOOP_WAIT_STEP, wait_ms: ms, call_site: ghCallSiteOutsideTransport() });
   };
 }
 
@@ -1416,6 +1460,8 @@ function withGhCadenceLock<T>(stampPath: string, sleepSync: (ms: number) => void
  *  this in-process queue for its whole wait, so the process's reads keep their order, while it holds
  *  the cross-process FILE lock only for each short turn. */
 const ghCadenceAsyncQueue = new Map<string, Promise<void>>();
+/** W1-T12123: the stamps whose file lock this process's own async read holds right now. */
+const ghCadenceOwnAsyncLocks = new Set<string>();
 
 async function withGhCadenceQueueAsync<T>(stampPath: string, fn: () => Promise<T>): Promise<T> {
   const prior = ghCadenceAsyncQueue.get(stampPath) ?? Promise.resolve();
@@ -1444,6 +1490,7 @@ async function withGhCadenceLockAsync<T>(stampPath: string, sleep: (ms: number) 
       for (let step = tryGhCadenceLock(lockPath, startedAt); step !== "give-up"; step = tryGhCadenceLock(lockPath, startedAt)) {
         if (step === "locked") {
           locked = true;
+          ghCadenceOwnAsyncLocks.add(stampPath);
           break;
         }
         if (step === "wait") await sleep(GH_CADENCE_LOCK_WAIT_MS);
@@ -1453,6 +1500,7 @@ async function withGhCadenceLockAsync<T>(stampPath: string, sleep: (ms: number) 
     }
     return await fn();
   } finally {
+    if (locked) ghCadenceOwnAsyncLocks.delete(stampPath);
     releaseGhCadenceLock(lockPath, locked);
   }
 }
@@ -1476,6 +1524,8 @@ interface GhReadCadencePlan {
   /** `undefined`: writes, budget probes, and calls without a usable cache path need no shared
    *  coordination, so no lock, gap or stamp. */
   coordinatedStampPath: string | undefined;
+  /** The longest shared-gap wait this read can be given. */
+  sharedReadGapMs: number;
   sharedGapRemainingMs(stampPath: string): number;
   stampAfterGap(stampPath: string): void;
   /** Removes this read's ticket: an admitted, refused or interrupted waiter never holds the queue. */
@@ -1633,6 +1683,7 @@ function planGhReadCadence(args: readonly string[], deps: GhReadCadenceDeps): Gh
     floorWaitRemainingMs: () => (waiter ? floorRemainingAt(now()) : 0),
     mustWait: () => waiter,
     coordinatedStampPath: isWrite || isExempt ? undefined : stampPath,
+    sharedReadGapMs,
     sharedGapRemainingMs: (path) => {
       // The 180-second floor is intentionally advisory for daemon multi-read sweeps. A bounded
       // shared gap still protects the secondary limiter across sibling processes without making a
@@ -1715,17 +1766,28 @@ export function applyGhReadCadence(args: readonly string[], deps: GhReadCadenceD
     plan.stampAfterGap(stampPath);
     return decision;
   }
-  const sleepSync = loopSafeGhSleep(deps.sleepSync ?? defaultBlockingSleepSync);
+  const blockingSleep = deps.sleepSync ?? defaultBlockingSleepSync;
+  // W1-T12123: on the daemon loop a wait of at most the shared read gap is slept. A longer wait is refused.
+  const sleepSync = loopSafeGhSleep(blockingSleep, plan.sharedReadGapMs);
+  // W1-T12057: a lock wait may sleep on the daemon loop, because tryGhCadenceLock already bounds the total.
+  const lockSleepSync = loopSafeGhSleep(blockingSleep, GH_CADENCE_LOCK_MAX_WAIT_MS);
+  // W1-T12123: this process's own async read holds the lock and needs the loop to release it.
+  // The loop read does not wait for that lock. It takes its turn without it, as a give-up does.
+  const ownAsyncLock = ghLoopHost.getStore() === true && ghCadenceOwnAsyncLocks.has(stampPath);
   let decision: GhReadCadenceDecision | undefined;
+  const turn = (): number => {
+    decision ??= plan.evaluate();
+    return ghReadCadenceTurn(plan, stampPath, sleepSync);
+  };
   try {
     let waitMs: number;
     do {
-      waitMs = withGhCadenceLock(stampPath, sleepSync, () => {
-        decision ??= plan.evaluate();
-        return ghReadCadenceTurn(plan, stampPath, sleepSync);
-      });
+      waitMs = ownAsyncLock ? turn() : withGhCadenceLock(stampPath, lockSleepSync, turn);
       if (waitMs > 0) sleepSync(waitMs);
     } while (waitMs > 0);
+    if (ownAsyncLock) {
+      ghPaceLoopWaits.push({ step: GH_PACE_LOOP_WAIT_STEP, wait_ms: 0, call_site: ghCallSiteOutsideTransport(), lock: "own-async-read" });
+    }
     return decision!;
   } finally {
     plan.leaveQueue();

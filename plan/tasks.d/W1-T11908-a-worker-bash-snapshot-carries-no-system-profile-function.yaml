@@ -11,8 +11,8 @@
   origin: architect
   plan_refs: [W1-T17, W1-T18, W1-T11693, W1-T11891]
   files:
-    - test/worker-bash-snapshot-isolation.test.ts
-  status: queued
+    - test/worker/sandbox/worker-bash-snapshot-isolation.test.ts
+  status: merged
   attempts: 0
   rationale: |
     DIRECT EVIDENCE (operator, 2026-11-09): native run W1-T11891-1794252506105 failed closed in isolation_probe with
@@ -50,8 +50,15 @@
       still refuses.
     Settled by lookup: does the probe change? -> no. assessIsolation refuses any non-zero count outside
       CLAUDE_CODE_TOOL_WRAPPERS (src/lib/isolation.ts). The operator forbids loosening or bypassing it.
+    Settled by lookup: where does the new test file live? -> test/worker/sandbox/, not directly under test/. AGENTS.md
+      (line 60) puts a new test in the test/<folder>/ that `rmd test-place` computes from its imports. The test-restructure
+      map places test/isolation.test.ts and test/isolation-wiring.test.ts in worker/sandbox
+      (plan/seeds/test-restructure-2026-10-16/proposed-map.tsv), and test/worker/sandbox/ already exists. Only the path
+      changes. Test intent and every other criterion stay as filed.
   design: |
-    SCOPE: test/worker-bash-snapshot-isolation.test.ts (new) only. One concern: the snapshot-boundary falsifier. Do not
+    SCOPE: test/worker/sandbox/worker-bash-snapshot-isolation.test.ts (new) only. Import repository modules through
+    `#src/*` / `#test/*` and take the repo root from REPO_ROOT or repoRoot() in #test/helpers/repo-root.js, never a
+    location-relative path (AGENTS.md). One concern: the snapshot-boundary falsifier. Do not
     touch src/lib/worker-home.ts (W1-T11693 owns it), src/lib/isolation.ts, CLAUDE_CODE_TOOL_WRAPPERS, the probe prompt, src/lib/env.ts, /etc/profile, /etc/profile.d,
     any host .bashrc, or W1-T11693's profile body. If this test shows the W1-T11693 body is insufficient, stop and
     amend W1-T11693. Do not add a second cleanup here.
@@ -79,9 +86,9 @@
   acceptance:
     - claim: "the snapshot-path suite proves a pre-profile function leaks into a blank-profile home, is absent from the materialized home, and that ~/.bashrc state still makes assessIsolation refuse"
       kind: guard
-      proof: "unit test: test/worker-bash-snapshot-isolation.test.ts"
+      proof: "unit test: test/worker/sandbox/worker-bash-snapshot-isolation.test.ts"
     - claim: "the green snapshot case asserts a clean isolation verdict"
-      proof: "grep: assert.equal(assessIsolation(report).isolated, true); in test/worker-bash-snapshot-isolation.test.ts"
+      proof: "grep: assert.equal(assessIsolation(report).isolated, true); in test/worker/sandbox/worker-bash-snapshot-isolation.test.ts"
   falsifier: |
     Before W1-T11693 merges, the green case fails because the materialized ~/.bash_profile is zero bytes, which is why
     this task depends on it. The proof is rigged or wrong if any of these hold:

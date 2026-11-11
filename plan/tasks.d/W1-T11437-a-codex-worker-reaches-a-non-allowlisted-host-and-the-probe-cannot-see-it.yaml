@@ -29,7 +29,7 @@
     - test/worker/spawn/codex-native-cache.test.ts
     - test/a-codex-reviewer-scratch-directory-is-not-a-repository.test.ts
     - test/a-claude-worker-cannot-run-an-unsandboxed-command.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: The egress verdict proves egress OPEN when the blocked host answered at a non-local address different from the allowlisted control, and a refusal counted against that verdict must come from the blocked request's own curl outcome, never from the probe's own echo lines or the deny-floor tripwire's hook text elsewhere in the transcript

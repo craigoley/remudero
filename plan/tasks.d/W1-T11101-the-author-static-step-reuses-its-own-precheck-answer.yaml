@@ -17,7 +17,7 @@
     - src/lib/ci-parity.ts
     - src/lib/config-schema.ts
     - test/ci/parity/the-author-static-step-reuses-its-own-precheck-answer.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: When the author preflight's own census-precheck step answered for HEAD, its static stage records census-precheck as answered by that step (naming the head sha and the author step's outcome) without spawning census-precheck again
