@@ -24,7 +24,7 @@
   acceptance:
     - claim: "Through `buildSweepLightHook`: one tick that starts several light passes writes the same `tick_id` on the `sweep.pass` row and the `sweep.summary` row of each of them"
       proof: "grep: W1-T12267 criterion 1 in test/daemon/the-plan-merge-budget-is-measured-between-ticks-not-batches.test.ts"
-    - claim: "The measured interval counts one start for each `tick_id`, the earliest. Three ticks 300 seconds apart, each with three passes a few milliseconds apart, give a budget of 300 seconds"
+    - claim: "The measured interval counts one start for each `tick_id`, the earliest. Three ticks 300 seconds apart, each with three passes a few milliseconds apart, give a measured interval of 300 seconds"
       proof: "grep: W1-T12267 criterion 2 in test/daemon/the-plan-merge-budget-is-measured-between-ticks-not-batches.test.ts"
     - claim: "A `sweep.pass` row with no `tick_id` counts as its own tick, so rows written before this task give the same budget as today"
       proof: "grep: W1-T12267 criterion 3 in test/daemon/the-plan-merge-budget-is-measured-between-ticks-not-batches.test.ts"
