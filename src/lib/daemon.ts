@@ -5057,9 +5057,7 @@ export async function runDaemon(
     }
   };
 
-  // W1-T10054: busy is the work a restart would INTERRUPT: live dispatch lanes, in-flight reviews and detached worker or
-  // admission work. The daemon's own passes and the release-at-once actions are redone by the next process, so they are
-  // named on the row as `background` and never make the decision busy.
+  // W1-T10054: busy is only work a restart interrupts; passes and release-at-once actions are `background`.
   const scoreFreshness = (changes: readonly DeployWorthChange[] | undefined, nowMs: number, liveLanes = 0) => {
     const staleAtMs = staleSinceMs!;
     const reviews = inFlightReviewCount();

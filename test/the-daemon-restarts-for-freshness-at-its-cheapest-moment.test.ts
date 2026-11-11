@@ -13,6 +13,7 @@ import {
 } from "../src/lib/deploy-judge.js";
 import { loadPlan, type Plan } from "../src/lib/plan.js";
 import { checkServiceFreshness, daemonFreshnessFromService } from "../src/lib/self-sync.js";
+import { trackInFlightReview } from "../src/lib/sweep.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import type { RunResult } from "../src/run-task.js";
 
@@ -60,6 +61,14 @@ function within<T>(work: Promise<T>, ms: number): Promise<T | "timed-out"> {
 type Line = { step: string; extra: Record<string, unknown> };
 const decisions = (lines: Line[]) => lines.filter((l) => l.step === "daemon.freshness_decision").map((l) => l.extra);
 
+/** W1-T10054: busy is work a restart would interrupt, never the daemon's own pass; an in-flight review is that work. */
+function holdReview(): () => void {
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  void trackInFlightReview(held, { taskId: "A", prNumber: 1 });
+  return release;
+}
+
 test("W1-T4945: an idle daemon takes a material advance at once", async () => {
   const lines: Line[] = [];
   const summary = await within(
@@ -88,8 +97,7 @@ test("W1-T4945: an idle daemon takes a material advance at once", async () => {
 
 test("W1-T4945: a busy daemon defers a low-weight advance to the next idle moment", async () => {
   const lines: Line[] = [];
-  let releaseSweep: (() => void) | undefined;
-  let passes = 0;
+  const releaseReview = holdReview();
   let idleWaits = 0;
   const daemon = runDaemon(
     fixturePlan(),
@@ -98,21 +106,17 @@ test("W1-T4945: a busy daemon defers a low-weight advance to the next idle momen
       runOne: async (id) => okResult(id),
       sleep: async () => {
         idleWaits++;
-        // Two busy ticks first: the full pass started on the first tick is still running.
-        if (idleWaits === 3) releaseSweep?.();
+        // Two busy ticks first: the in-flight review a restart would interrupt is still running.
+        if (idleWaits === 3) releaseReview();
       },
       log: (step, extra = {}) => lines.push({ step, extra }),
-      sweep: async () => {
-        passes++;
-        if (passes === 1) await new Promise<void>((resolve) => (releaseSweep = resolve));
-        return {};
-      },
+      sweep: async () => ({}),
       checkFreshness: () => staleWith(["src/lib/inbox.ts"]),
     },
     { freshnessMinLifetimeMs: 0, sweepWallClockBoundMs: 60_000 },
   );
   const summary = await within(daemon, 5_000);
-  releaseSweep?.();
+  releaseReview();
   assert.notEqual(summary, "timed-out", "the busy daemon kept ticking instead of waiting on its pass to restart");
   const made = decisions(lines);
   assert.ok(made.length >= 2, `a deferral and then a restart (saw ${JSON.stringify(made)})`);
@@ -127,8 +131,7 @@ test("W1-T4945: a busy daemon defers a low-weight advance to the next idle momen
 
 test("W1-T4945: a change pressure at the threshold still drains and restarts while busy", async () => {
   const lines: Line[] = [];
-  let releaseSweep: (() => void) | undefined;
-  let passes = 0;
+  const releaseReview = holdReview();
   let nowMs = Date.now();
   const daemon = runDaemon(
     fixturePlan(),
@@ -139,14 +142,10 @@ test("W1-T4945: a change pressure at the threshold still drains and restarts whi
       sleep: async () => { nowMs += FRESHNESS_COALESCE_WINDOW_MS.value / 2; },
       log: (step, extra = {}) => {
         lines.push({ step, extra });
-        // The exit waits for the pass still running; let it finish once the decision is made.
-        if (step === "daemon.freshness_decision" && extra.action === "restart") setTimeout(() => releaseSweep?.(), 5);
+        // The exit drains the review still running; let it finish once the decision is made.
+        if (step === "daemon.freshness_decision" && extra.action === "restart") setTimeout(releaseReview, 5);
       },
-      sweep: async () => {
-        passes++;
-        if (passes === 1) await new Promise<void>((resolve) => (releaseSweep = resolve));
-        return {};
-      },
+      sweep: async () => ({}),
       // W1-T9089: the daemon's own code weighs the source floor of 1; the threshold's worth of source commits is the pressure.
       checkFreshness: () => ({
         stale: true as const, oldSha: OLD_SHA, newSha: NEW_SHA,
@@ -158,7 +157,7 @@ test("W1-T4945: a change pressure at the threshold still drains and restarts whi
     { freshnessMinLifetimeMs: 0, sweepWallClockBoundMs: 24 * 60 * 60_000 },
   );
   const summary = await within(daemon, 5_000);
-  releaseSweep?.();
+  releaseReview();
   assert.notEqual(summary, "timed-out");
   const made = decisions(lines);
   assert.deepEqual(made.map((row) => row.action), ["defer", "restart"]);
@@ -175,8 +174,7 @@ test("W1-T4945: a change pressure at the threshold still drains and restarts whi
 
 test("W1-T4945: a deferred advance cannot wait indefinitely", async () => {
   const lines: Line[] = [];
-  let releaseSweep: (() => void) | undefined;
-  let passes = 0;
+  const releaseReview = holdReview();
   let nowMs = Date.parse("2026-10-01T00:00:00.000Z");
   const tickMs = 10 * 60_000;
   const daemon = runDaemon(
@@ -190,20 +188,16 @@ test("W1-T4945: a deferred advance cannot wait indefinitely", async () => {
       },
       log: (step, extra = {}) => {
         lines.push({ step, extra });
-        if (step === "daemon.freshness_decision" && extra.action === "restart") setTimeout(() => releaseSweep?.(), 5);
+        if (step === "daemon.freshness_decision" && extra.action === "restart") setTimeout(releaseReview, 5);
       },
-      // The first pass never finishes on its own: the daemon stays busy for its whole life.
-      sweep: async () => {
-        passes++;
-        if (passes === 1) await new Promise<void>((resolve) => (releaseSweep = resolve));
-        return {};
-      },
+      // The review never finishes on its own: the daemon stays busy for its whole life.
+      sweep: async () => ({}),
       checkFreshness: () => staleWith(["src/lib/inbox.ts"]),
     },
     { freshnessMinLifetimeMs: 0, sweepWallClockBoundMs: 24 * 60 * 60_000 },
   );
   const summary = await within(daemon, 5_000);
-  releaseSweep?.();
+  releaseReview();
   assert.notEqual(summary, "timed-out", "a permanently busy daemon still took the advance");
   const made = decisions(lines);
   const deferred = made.filter((d) => d.action === "defer");
