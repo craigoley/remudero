@@ -16,7 +16,7 @@
     - plan/policy.yaml
     - test/daemon/the-shipped-policy-lets-the-lane-governor-cap-admissions.test.ts
     - test/the-build-lane-count-follows-the-memory-governor.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: The shipped plan/policy.yaml reads sweep.laneGovernor.mode as enforce, and an absent or unreadable mode still reads shadow

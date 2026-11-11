@@ -18,7 +18,7 @@
     - src/lib/read-model-worker.ts
     - test/console-api/read-model/a-view-build-row-names-why-a-due-build-was-not-skipped.test.ts
     - test/every-view-build-is-counted.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "A build that ran because its view declares no ledger reads is counted under no_declaration in that unit's read_model.view_builds row"

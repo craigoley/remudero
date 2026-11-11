@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 1.24
   status: queued
@@ -41,3 +41,14 @@
 
     The regression must replay one recorded round above through the real owner path (the code that decides whether a fix round is dispatched or the failure heals), not assert a label, prompt text or report wording.
     It need not prove the cause never recurs: the after-window measurement decides that, and reopens the cause one rung up if its share does not fall.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.6
+    reasons:
+      - "The declared files are only src/lib/sweep.ts and a new unit test; no workflow, policy, credential or permission file is listed."
+      - "The recorded failure state is \"unknown\", which reads as fail-closed. A remedy such as retrying or waiting for the CodeQL result is plausible, but the description does not say how the change self-heals."
+      - "The acceptance is a replay of a recorded round through the real owner path, and the PR still passes CI and review."
+      - "The security-merge-policy gate is adjacent to the change and no change view was supplied, so I cannot confirm the gate is not loosened; this lowers my confidence."
+    judged_at: "2026-11-11T08:17:25.554Z"
+    pin: "7563b36f8de089be93f07cfbe768d79d417aa8d2c6897037114c7de2ab07c4b1"
