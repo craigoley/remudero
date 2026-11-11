@@ -26049,7 +26049,7 @@ interface LightPassPlanMergeReport {
   attempts: number;
   merged: number;
   spentMs: number;
-  /** The budget in force: the measured interval between ticks, never above `sweepWallClockBoundMs`. */
+  /** The budget in force: the measured interval between ticks, never above half of `sweepWallClockBoundMs`. */
   budgetMs?: number;
   intervalMs?: number;
   /** The first stop sentence of the pass. */
@@ -26194,9 +26194,10 @@ async function runSweepLightPassCore(
   const measuredIntervalMs = lightPassIntervalBudgetFromLedger(
     selectionLedgerLines.filter((row) => row.pass_id !== passId), passScope);
   // W1-T12267 — BACKSTOP: a pass that spends its whole budget starts the next tick later, so an interval measured
-  // between ticks grows with the work. The budget never passes the bound of one sweep tick (`sweepWallClockBoundMs`).
+  // between ticks grows with the work. The budget never passes HALF of `sweepWallClockBoundMs`: the daemon loop awaits
+  // its light pass and the restart drain stops at that row, so a pass must end, with one merge still running, inside it.
   const passIntervalBudgetMs = measuredIntervalMs === undefined ? undefined
-    : Math.min(measuredIntervalMs, loadDefaultPolicy().values.sweepWallClockBoundMs);
+    : Math.min(measuredIntervalMs, Math.floor(loadDefaultPolicy().values.sweepWallClockBoundMs / 2));
   const availablePlanMerges = lightPassPlanMergeOwner !== undefined
     ? []
     : selectLightPassPlanMerges(openPrs, policy, now, selectionLedgerLines, passIntervalBudgetMs !== undefined);

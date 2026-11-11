@@ -154,7 +154,9 @@ test("W1-T12267 criterion 2: the interval counts one start for each tick, the ea
     await f.hook();
     assert.deepEqual(f.merged, [1226711]);
     assert.equal(f.planSummary()?.plan_merge_interval_ms, 300_000);
-    assert.equal(f.planSummary()?.plan_merge_budget_ms, 300_000);
+    // The budget is that interval unless the upper bound of criterion 5 is lower.
+    assert.equal(f.planSummary()?.plan_merge_budget_ms,
+      Math.min(300_000, Math.floor(loadDefaultPolicy().values.sweepWallClockBoundMs / 2)));
   } finally { f.cleanup(); }
 });
 
@@ -188,6 +190,7 @@ test("W1-T12267 criterion 4: with the intervals of 2026-11-11 a light pass merge
   try {
     await after.hook();
     assert.equal(after.planSummary()?.plan_merge_interval_ms, 2442);
+    assert.equal(after.planSummary()?.plan_merge_budget_ms, 2442, "the interval of that day is below the upper bound");
     assert.deepEqual(after.merged, [1226731, 1226732, 1226733, 1226734], "four plan merges fit before the interval is spent");
     for (const n of after.merged) assert.equal(after.disposed(n)?.reason, MERGEABLE_PLAN_PR_REASON);
     const waiting = after.disposed(1226735);
@@ -196,13 +199,15 @@ test("W1-T12267 criterion 4: with the intervals of 2026-11-11 a light pass merge
   } finally { after.cleanup(); }
 });
 
-test("W1-T12267 criterion 5: the budget never passes the sweep tick bound, and a hold or a moved head still stops a merge", async () => {
-  const bound = loadDefaultPolicy().values.sweepWallClockBoundMs;
+test("W1-T12267 criterion 5: the budget never passes half of the sweep tick bound, and a hold or a moved head still stops a merge", async () => {
+  // Half of the row: a light pass must end, with one merge still running, inside the stop bound of the restart drain.
+  const row = loadDefaultPolicy().values.sweepWallClockBoundMs;
+  const bound = Math.floor(row / 2);
   const held = planPr(1226741);
   const moved = planPr(1226742);
   const ready = planPr(1226743);
   const next = planPr(1226744);
-  // Ticks 20 minutes apart: longer than the bound of one sweep tick.
+  // Ticks 20 minutes apart: longer than the bound.
   const f = fixture([held, moved, ready, next], {
     prior: priorPasses([[0], [1_200_000], [2_400_000], [3_000_000 + 600_000]], true),
     seed: [{ ts: at(10 * 60_000), run_id: "R", task_id: held.taskId, step: "automerge.hold_engaged", pr_number: held.prNumber,
@@ -214,6 +219,7 @@ test("W1-T12267 criterion 5: the budget never passes the sweep tick bound, and a
     assert.equal(f.planSummary()?.plan_merge_interval_ms, 1_200_000);
     assert.ok(bound < 1_200_000, "precondition: the measured interval is above the bound");
     assert.equal(f.planSummary()?.plan_merge_budget_ms, bound, "the budget is the bound, not the interval");
+    assert.ok(bound * 2 <= row, "the bound is derived from the policy row, and is half of it");
     assert.deepEqual(f.merged, [ready.prNumber, next.prNumber], "one merge call for each merged PR, none for the held or the moved one");
     assert.match(String(f.disposed(held.prNumber)?.reason), /held by .*hold for a decision/);
     assert.match(String(f.disposed(moved.prNumber)?.stand_down_reason), /^head moved from head-122/);
