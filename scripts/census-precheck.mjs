@@ -1353,6 +1353,19 @@ export const PRECHECK_PATH_TRIGGERED_SUITES = [
     trigger: (input) => input.changed.some((path) => ["scripts/coverage-session-blanking-check.mjs",
       "test/coverage-session-blanking.test.ts"].includes(path)) || addsMatch(input, TEST_TS_SCOPE_RE, childCoverageFindings),
     remedy: "explicitly blank NODE_V8_COVERAGE on the child environment when stripping NODE_TEST_CONTEXT; deleting the coverage variable is ineffective" },
+  // W1-T11255: a script CI runs before (or without) the install loads no package at module scope. A push that edits
+  // one of those entry scripts or the shared leaves they import joins the closure walk; the census still runs in CI.
+  { testFile: "test/rules/a-script-ci-runs-before-npm-ci-imports-only-builtins.test.ts", gitFree: true,
+    trigger: ({ changed }) => changed.some((p) => [
+      "scripts/ci-shard-admission.mjs", "scripts/code-health-provenance.mjs", "scripts/coverage-floor.mjs",
+      "scripts/coverage-ratchet.mjs", "scripts/coverage-merge-ratchet.mjs", "scripts/diff-class.mjs",
+      "scripts/diff-coverage.mjs", "scripts/flake-retry-aggregate.mjs", "scripts/flake-screen.mjs",
+      "scripts/merge-queue-review-attest.mjs", "scripts/mutation-ratchet.mjs", "scripts/needs-human-issue.mjs",
+      "scripts/security-merge-producer.mjs", "scripts/semgrep-native-contract-ratchet.mjs",
+      "scripts/test-tier-manifest.mjs", "scripts/test-with-retry.mjs", "scripts/lib/argv.mjs", "scripts/lib/repo-root.mjs",
+      "test/rules/a-script-ci-runs-before-npm-ci-imports-only-builtins.test.ts",
+    ].includes(p)),
+    remedy: "load the package lazily inside the function that needs it (createRequire(import.meta.url)(pkg)), never at module scope of a script a pre-install CI step runs" },
   { testFile: "test/rules/the-root-scratch-ignore-stays-root-only.test.ts",
     trigger: ({ changed }) => changed.some((p) => [".gitignore", "scripts/census-precheck.mjs",
       "test/rules/the-root-scratch-ignore-stays-root-only.test.ts"].includes(p)),
