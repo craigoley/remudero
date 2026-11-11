@@ -71,6 +71,8 @@ import {
   realArmDepsAsync,
   readMergedRatchetsAsync,
   stackPrerequisiteFromRest,
+  directMergeOperationsInFlight,
+  type DirectMergeOperation,
   type ArmAttemptResult,
   type ArmReprobeFacts,
   type MergeQueueMembership,
@@ -17677,10 +17679,11 @@ export function currentReviewSignal(): AbortSignal | undefined {
 /** W1-T10057: a read-only view of the existing wait registries, not another owner of work.
  * `settled` is an internal identity/settlement handle; ledger writers must omit it. */
 export interface RestartDrainInventoryEntry {
-  what: "review" | "detached";
+  what: "review" | "detached" | "direct-merge";
   kind: string;
   task_id?: string;
   pr?: number;
+  head_sha?: string;
   phase: string;
   admitted_at_ms: number;
   settled: Promise<void>;
@@ -17695,10 +17698,18 @@ function reviewRestartItem(settled: Promise<void>, review: ReviewRegistration): 
     ...(review.prNumber === undefined ? {} : { pr: review.prNumber }),
     admitted_at_ms: review.admittedAtMs, settled };
 }
+/** W1-T11503: a direct merge in its own preflight or write — owned by itself, not by the sweep that started it. */
+export function directMergeRestartItem(operation: DirectMergeOperation): RestartDrainInventoryEntry {
+  return { what: "direct-merge", kind: "direct-merge", phase: operation.phase,
+    ...(operation.prNumber === undefined ? {} : { pr: operation.prNumber }),
+    ...(operation.headSha === undefined ? {} : { head_sha: operation.headSha }),
+    admitted_at_ms: operation.admittedAtMs, settled: operation.settled };
+}
 export function restartDrainInventory(): RestartDrainInventoryEntry[] {
   return [...inFlightReviewRuns].map(([work, review]) => reviewRestartItem(work, review)).concat(
     [...detachedSweepActions].filter(([, action]) => isRestartInterruptible(action))
-      .map(([work, action]) => detachedRestartItem(work, action)));
+      .map(([work, action]) => detachedRestartItem(work, action)),
+    directMergeOperationsInFlight().map(directMergeRestartItem));
 }
 
 /** Hand one review attempt to {@link inFlightReviewRuns}; returns `work` unchanged for the caller to await. */
