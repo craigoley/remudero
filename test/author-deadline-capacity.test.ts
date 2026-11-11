@@ -41,6 +41,43 @@ test("deadline capacity uses remaining fixed time without inventing CPU memory o
       { now: 0, deadline: 100_000 }), /invalid/);
 });
 
+test("deadline capacity refuses widths outside the measured author bounds", () => {
+  // W1-T11891: no fixed ceiling — a capable host's acquired grant above four is admitted.
+  const capable = { cores: 32, load1: 0, headroomBytes: 128 * 1024 ** 3 };
+  const wide = author.hostBudget(capable, { slotConcurrency: 12, slotAcquired: true });
+  assert.equal(wide.workers, 12); assert.equal(wide.inputs.boundBy, "slot");
+  assert.equal(wide.inputs.cpuWorkers, 30); assert.equal(wide.inputs.memoryWorkers, 256);
+  const at = { now: 0, deadline: 60 * 60_000 };
+  assert.equal(author.deadlineHostBudget(wide, { ...at, grant: 12 }).workers, 12);
+  const refuse = (budget: { workers: number; inputs: object }, why: RegExp, grant: number | null = 12) =>
+    assert.throws(() => author.deadlineHostBudget(budget, { ...at, grant }), why);
+  // Exceeded measured bounds: CPU, memory, and the real slot grant.
+  refuse({ ...wide, workers: 13 }, /exceed the slot grant/);
+  refuse({ ...wide, workers: 31, inputs: { ...wide.inputs, slotConcurrency: 40 } }, /exceed the measured CPU/, 40);
+  refuse({ ...wide, inputs: { ...wide.inputs, memoryWorkers: 11 } }, /exceed the measured memory/);
+  // Stale: priced against a grant other than the slot now held, or with none named.
+  refuse(wide, /stale slot grant/, 8);
+  refuse(wide, /stale slot grant/, null);
+  // Missing or malformed bounds refuse rather than defaulting.
+  for (const inputs of [{ cpuWorkers: undefined }, { cpuWorkers: 1.5 }, { cpuWorkers: 0 }, { memoryWorkers: -1 },
+    { slotAcquired: undefined }, { slotAcquired: true, slotConcurrency: null }, { slotConcurrency: 0 }]) {
+    refuse({ ...wide, inputs: { ...wide.inputs, ...inputs } }, /missing or malformed measured bound/);
+  }
+  // Unmeasured memory: exactly one worker before admission...
+  const blind = { cores: 32, load1: 0, headroomBytes: undefined };
+  const before = author.hostBudget(blind);
+  assert.equal(before.workers, 1); assert.equal(before.inputs.memoryBound, "unmeasured-one-worker");
+  assert.equal(author.deadlineHostBudget(before, at).workers, 1);
+  refuse({ ...before, workers: 2 }, /one worker before a slot/);
+  // ...an unacquired grant is never memory capacity...
+  assert.equal(author.hostBudget(blind, { slotConcurrency: 8 }).workers, 1);
+  // ...and after a real acquired slot, that grant is the memory-side bound.
+  const after = author.hostBudget(blind, { slotConcurrency: 8, slotAcquired: true });
+  assert.equal(after.workers, 8); assert.equal(after.inputs.memoryBound, "acquired-slot-grant");
+  assert.equal(author.deadlineHostBudget(after, { ...at, grant: 8 }).workers, 8);
+  refuse({ ...after, workers: 9 }, /exceed the slot grant/, 8);
+});
+
 test("a validated fixed-deadline author runs its whole selection with the workers it priced", (t) => {
   const f = makeRuntimeFixture(); t.after(() => f.cleanup());
   const suites = ["test/a.test.ts", "test/b.test.ts"];
