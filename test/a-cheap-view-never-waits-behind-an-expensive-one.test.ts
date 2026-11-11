@@ -236,7 +236,10 @@ setInterval(() => {}, 1000);
     data: { stateDir: "/nonexistent", instances: [], tickMs: 5, holder: "h" }, workerUrl, clock: hand.clock,
     relay: (m) => void relayed.push(m), log: (step, extra) => void logs.push({ step, extra }), every: (run) => ((watch = run), () => undefined),
   });
-  onReadModelClose(t, () => lanes.close());
+  onReadModelClose(t, async () => {
+    lanes.close();
+    await until(() => book.live().length === 0, "both view-lane workers exit before fixture cleanup");
+  });
   const got = (): string[] => (existsSync(inputs) ? readFileSync(inputs, "utf8").trim().split("\n") : []);
   await until(() => got().includes("heavy:lane:now:true"), "the fast lane's hand-off reached a heavy lane spawned for it");
   const kinds = book.live().map((w) => w.kind);

@@ -1,0 +1,49 @@
+- id: W1-T12210
+  title: "Merge credit and status reconcile cover both catalogs; a status write follows its task file"
+  repo: remudero
+  depends_on: [W1-T12207]
+  priority: 1.1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the status of a task decides whether the daemon builds it again
+  band_meaning: span
+  origin: operator-session#ops-cutover-2026-11-10
+  plan_refs:
+    - W1-T11768
+    - W1-T11860
+    - W1-T11175
+  files:
+    - src/lib/status.ts
+    - src/run-task.ts
+    - test/console-api/board/merge-credit-and-status-reconcile-cover-both-catalogs.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "A merged public pull request whose trailer names an ops task gives that task its merge credit"
+      proof: "grep: W1-T12210 criterion 1 in test/console-api/board/merge-credit-and-status-reconcile-cover-both-catalogs.test.ts"
+    - claim: "The status reconcile writes the status of an ops task to the ops repository, and the status of a public task to the public repository"
+      proof: "grep: W1-T12210 criterion 2 in test/console-api/board/merge-credit-and-status-reconcile-cover-both-catalogs.test.ts"
+    - claim: "A reconcile pass with changes in both catalogs opens one landing pull request in each repository, and a refusal in one does not stop the other"
+      proof: "grep: W1-T12210 criterion 3 in test/console-api/board/merge-credit-and-status-reconcile-cover-both-catalogs.test.ts"
+    - claim: "If the ops catalog is unreadable, the pass reconciles the public tasks, writes no status for an ops task and reports the outcome code"
+      proof: "grep: W1-T12210 criterion 4 in test/console-api/board/merge-credit-and-status-reconcile-cover-both-catalogs.test.ts"
+    - claim: "With no host file, the pass reads and writes the same repository with the same calls as today"
+      proof: "grep: W1-T12210 criterion 5 in test/console-api/board/merge-credit-and-status-reconcile-cover-both-catalogs.test.ts"
+    - claim: "The reconcile in the measurement cadence, the production caller, resolves the repository of each task, and the test goes through that caller"
+      proof: "grep: findTaskInCatalogs( in src/lib/status.ts"
+  rationale: |
+    OBSERVED 2026-11-10: the merge credit and the status reconcile read and write the public plan only.
+    - `deriveStatus` in src/lib/status.ts gives a task its status from the ledger and from merged pull requests.
+    - The reconcile lands through `planReconcileLanding` with `targetRepository: resolveOwnerRepo()` in src/run-task.ts. That is always the public repository.
+    - Without this task, an ops task that is built and merged keeps the status `queued`, and the daemon may dispatch it again.
+    - The rule for every writer applies: a file is edited in the repository that holds it.
+    - The switch is the host file `<state dir>/plan-destination.json`. If the file is absent, the switch is off and the behaviour is byte-identical to today. This task adds no kind. It must merge before `task` is turned on.
+  design: |
+    Give the reconcile the tasks of both catalogs through `findTaskInCatalogs`, and group its status changes by the catalog that holds each task.
+    Call `planReconcileLanding` once for each group, with the checkout and the repository of that group.
+    The status write in the ops repository changes a task file that is there already. The gate of the ops repository must accept that edit. That work is in the ops repository and is not filed here.
+    NOT IN SCOPE: the board, and the selector.
+  falsifier: |
+    Leave an ops task without credit and criterion 1 must fail. Write the status of an ops task to the public repository and criterion 2 must fail. Stop the public group when the ops group is refused and criterion 3 must fail. Restore and require all six to pass.
