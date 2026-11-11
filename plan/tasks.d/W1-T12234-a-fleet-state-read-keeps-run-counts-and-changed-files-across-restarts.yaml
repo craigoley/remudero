@@ -1,0 +1,71 @@
+- id: W1-T12234
+  title: "The fleet-state read keeps its run counts and changed files across sweeps and restarts"
+  repo: remudero
+  depends_on: []
+  priority: 0.8
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # a new store file that a sweep reads before it decides to dispatch a workflow
+  band_meaning: span
+  origin: operator-session#restart-and-recycle-downtime-2026-11-10
+  plan_refs:
+    - W1-T11267
+    - W1-T9781
+    - W1-T9552
+    - W1-T10887
+  files:
+    - src/lib/fleet-state-commit-store.ts
+    - src/lib/sweep.ts
+    - test/sweep/a-fleet-state-read-keeps-run-counts-and-changed-files-across-restarts.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "When GitHub reports one run or more for a commit, the store keeps that answer. The next `readFleetState` call for the same commit makes no run-count read for it"
+      proof: "grep: W1-T12234 criterion 1 in test/sweep/a-fleet-state-read-keeps-run-counts-and-changed-files-across-restarts.test.ts"
+    - claim: "When GitHub reports one run or more for a commit and a workflow, the store keeps that answer. The next call makes no read for that pair"
+      proof: "grep: W1-T12234 criterion 2 in test/sweep/a-fleet-state-read-keeps-run-counts-and-changed-files-across-restarts.test.ts"
+    - claim: "A count of 0 and an unreadable count are never kept. The next call reads GitHub again for them"
+      proof: "grep: W1-T12234 criterion 3 in test/sweep/a-fleet-state-read-keeps-run-counts-and-changed-files-across-restarts.test.ts"
+    - claim: "A second reader that starts on the same state directory, as a restarted daemon does, makes no read for a kept run count or for the changed files of a kept commit"
+      proof: "grep: W1-T12234 criterion 4 in test/sweep/a-fleet-state-read-keeps-run-counts-and-changed-files-across-restarts.test.ts"
+    - claim: "If the store file is unreadable, or has a different schema, the read makes every GitHub read that it makes today and returns the same rows. It writes one row that names the reason"
+      proof: "grep: W1-T12234 criterion 5 in test/sweep/a-fleet-state-read-keeps-run-counts-and-changed-files-across-restarts.test.ts"
+    - claim: "The store holds only the commits of the current look-back. A commit that left the look-back is removed at the next write"
+      proof: "grep: W1-T12234 criterion 6 in test/sweep/a-fleet-state-read-keeps-run-counts-and-changed-files-across-restarts.test.ts"
+    - claim: "The history of the fleet-state read survives a restart: a second reader on the same state directory decompresses no rotated ledger file that the first reader loaded"
+      proof: "grep: W1-T12234 criterion 7 in test/sweep/a-fleet-state-read-keeps-run-counts-and-changed-files-across-restarts.test.ts"
+    - claim: "The sweep calls the new module"
+      proof: "grep: loadFleetStateCommitStore( in src/lib/sweep.ts"
+  rationale: |
+    OBSERVED 2026-11-04T01:56Z to 2026-11-11T01:56Z in the ledger of the core instance: the `fleet_state` stage is the longest stage before a sweep visits its first pull request.
+    - `sweep.full_prelude` rows: 428. In the first sweep after a start (109 rows) the stage took a median of 293 s (p90 661 s). In a later sweep (278 rows) it took a median of 155 s (p90 384 s).
+    - Most of that time is `commit_read_ms`: a median of 231 s for 87 reads after a start, and 142 s for 73 reads later. One read takes 1.6 to 2.7 s.
+    - `union_ms`, the read of the history, took a median of 52 s in the first sweep after a start and 0.4 s later.
+    - The fleet ran 61 sweeps a day. At 155 s each, the stage costs about 2.6 hours of sweep time a day.
+    - The sweep before a freshness exit is the same sweep. Its median length was 714 s when the daemon waited for a running one (27 exits) and 828 s when it started a new one (10 exits).
+    READ at origin/main 17745c6bf.
+    - `readFleetState` (src/lib/sweep.ts, about line 5142) calls `mainWorkflowStateRows` (src/lib/state-reconciler.ts:64) over the newest 15 commits of main (`MAIN_RUN_GAP_LOOKBACK`, src/lib/main-run-gaps.ts:29).
+    - For each commit it reads `actions/runs?head_sha=<sha>&per_page=1` (`countRunsForSha`). For each commit and workflow it reads `actions/workflows/<workflow>/runs?head_sha=<sha>&per_page=1` (`countWorkflowRuns`). The reads run one after another.
+    - `mainWorkflowStateRows` uses a count in one way only: is it more than 0. A commit that has a run does not lose it.
+    - W1-T11267 (merged) keeps the changed files of a commit in `fleetStateChangedFiles` (src/lib/sweep.ts:2417). That map is in memory, so a restart loses it. It does not keep a run count.
+    - `FLEET_STATE_HISTORY_SLICE` (src/lib/sweep.ts:2412) does not set `sharedSnapshot`. The escalation triage slice does (src/lib/sweep.ts:27952), and its snapshot file under `state/cache/rotation-slices/` answers a restarted reader.
+    CHECKED for overlap: W1-T9781 (merged) added the timing fields that this evidence reads. W1-T9552 (merged) moved the deploy reader off the loop. W1-T10887 names a CodeQL run gap. None keeps a run count, and none keeps a read across a restart.
+  design: |
+    New module src/lib/fleet-state-commit-store.ts.
+    - `loadFleetStateCommitStore(stateDir)` returns a store with `changedFiles(sha)`, `hasRuns(sha)`, `hasWorkflowRuns(sha, workflow)`, a setter for each, `retain(shas)` and `save()`.
+    - The file is `state/cache/fleet-state-commits.json` with a `schema` number. Write it to a temporary file and rename it.
+    - The store keeps a positive answer only: "this commit has a run", "this commit has a run of this workflow", and the list of changed files. It never keeps 0 or an unreadable answer.
+    In `readFleetState`:
+    - Load the store once for each daemon lifetime, and keep `fleetStateChangedFiles` as the view in memory.
+    - `runCount` asks the store first. On a positive answer it returns 1 and makes no read, and `commit_reads` does not count it.
+    - After `mainWorkflowStateRows` returns, call `retain` with the commits of the look-back and `save()` if anything changed.
+    - A load failure gives an empty store and one `reconcile.commit_store_unreadable` row. The sweep then reads GitHub as today.
+    Set `sharedSnapshot: true` on `FLEET_STATE_HISTORY_SLICE`, so that a restarted reader takes its history from the snapshot file that `createEscalationTriageHistoryReader` writes.
+    Add `commit_reads_kept` to `fleet_state_parts`, so that the next study can see how many reads the store answered.
+    NOT IN SCOPE: reads in parallel, the deploy rows of the same stage, and the order of the stages before the first pull request.
+  falsifier: |
+    Keep a count of 0 and criterion 3 must fail. Keep the store in memory only and criterion 4 must fail. Throw on an unreadable file and criterion 5 must fail. Remove `sharedSnapshot` and criterion 7 must fail. Restore and require all eight to pass.
+  note: |
+    After the merge, compare `commit_reads` and the `fleet_state` time in `sweep.full_prelude` for 3 days against the 7 days above. The expected count is about 15 reads in a sweep, from 73.
