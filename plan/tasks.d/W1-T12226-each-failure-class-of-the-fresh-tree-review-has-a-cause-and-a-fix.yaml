@@ -1,0 +1,60 @@
+- id: W1-T12226
+  title: "Each failure class of the fresh-tree review has a known cause and a fix"
+  repo: remudero
+  depends_on:
+    - W1-T12225
+  priority: 0.8
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the cause is not known at filing, so the fix can be in the gate, in the child start or in the review command
+  band_meaning: span
+  origin: operator-session#freshness-restart-findings-2026-11-10
+  plan_refs:
+    - W1-T3723
+    - W1-T4055
+    - W1-T9727
+    - W1-T11152
+    - W1-T11155
+  files:
+    - src/run-task.ts
+    - src/cli/commands/review.ts
+    - test/review/each-failure-class-of-the-fresh-tree-review-has-a-cause-and-a-fix.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "The test file has one test for each value of `exit_cause` that the core ledger shows on two or more fresh-tree reviews in the 7 days before the build. Each test has the value in its title and drives `buildReviewerCodeFreshnessGate` and the real review command to that exit"
+      proof: "grep: W1-T12226 criterion 1 in test/review/each-failure-class-of-the-fresh-tree-review-has-a-cause-and-a-fix.test.ts"
+    - claim: "The row `review.ran_from_fresh_tree` carries the field `ended_as` with one of three values: `verdict` when the child posted a terminal verdict, `no_verdict` when the review correctly had nothing to post, and `defect` for every other exit. A row with `verdict` or `no_verdict` carries no `failure` field"
+      proof: "grep: W1-T12226 criterion 2 in test/review/each-failure-class-of-the-fresh-tree-review-has-a-cause-and-a-fix.test.ts"
+    - claim: "Each cause that the build classes as `defect` has its fix in the same pull request. The test of that cause fails when the fix is removed"
+      proof: "grep: W1-T12226 criterion 3 in test/review/each-failure-class-of-the-fresh-tree-review-has-a-cause-and-a-fix.test.ts"
+    - claim: "A child that exits with code 1 because the verdict is not `success` writes `ended_as: verdict`. The gate returns the code of the child, as today"
+      proof: "grep: W1-T12226 criterion 4 in test/review/each-failure-class-of-the-fresh-tree-review-has-a-cause-and-a-fix.test.ts"
+    - claim: "The gate writes the class on the row"
+      proof: "grep: ended_as in src/run-task.ts"
+  rationale: |
+    OBSERVED 2026-11-04T01:56Z to 2026-11-11T01:56Z in the ledger of the core instance: the child of the fresh-tree review exited with a code that is not 0 in 26 of 56 runs.
+    - Two failure classes exist: exit code 2 (16 runs) and exit code 1 (10 runs).
+    - The cause of each class is not established. The field `failure` holds stderr noise.
+    - This is why the task is separate from W1-T12225. The cause cannot be known before W1-T12225 records it, so this task depends on W1-T12225.
+    READ at origin/main 17745c6bf, as leads and not as causes:
+    - The review command returns 2 at seven places in src/cli/commands/review.ts. Some are correct ends, such as a pull request that closed before the review.
+    - The review command returns 1 when the verdict is not `success`. That exit is a review that did its work.
+    - A child reads the freshness of its own code at its start (W1-T9727). If main moved after the parent made its tree, the child can be stale again. Whether that happened in the 26 runs is not established.
+    - W1-T11155 (queued) fixes modules that the compiled review entry does not load. Whether it explains part of either class is not established.
+    W1-T12227 sends every review with stale reviewer code through this path. A path that fails in 26 of 56 runs must be fixed first.
+  design: |
+    1. Read the rows. Count `review.ran_from_fresh_tree` rows of the core instance by `exit_code` and `exit_cause` for the 7 days before the build. Put the table, with its window, in the `Why` part of the pull request.
+    2. If the ledger holds fewer than 10 rows with `exit_cause`, stop. Report that the evidence is not there yet. Do not guess a cause.
+    3. Class each cause: `verdict`, `no_verdict` or `defect`. A cause is `defect` when the review had a pull request to judge and judged nothing, or judged and could not post.
+    4. Write one test for each cause with two or more rows. Drive the gate and the real review command to that exit.
+    5. Fix each `defect` cause at its source. Do not turn a `defect` into `no_verdict` to make the count fall.
+    6. Add `ended_as` to the row in the gate, from the code and the cause.
+    If a cause needs a change outside the two source files, stop and propose an amendment that names the file.
+    NOT IN SCOPE: the choice of path at admission (W1-T12227) and the fixes of W1-T11155.
+  falsifier: |
+    Remove one fix and the test of its cause must fail (criterion 3). Write `failure` on a row with `ended_as: verdict` and criterion 2 must fail. Class an exit with code 1 and a posted verdict as `defect` and criterion 4 must fail. Restore and require all five to pass.
+  note: |
+    After the merge, read the rows for 7 days: the share of `ended_as: defect` among fresh-tree reviews is the measure. It was at most 26 of 56 before this task; the true share is not known, because some of the 26 exits can be correct ends.
