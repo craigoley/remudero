@@ -17,6 +17,7 @@ import { triageCommand } from "#src/run-task.js";
 import { claimTriage, type TriageClaimReserverAsync } from "#src/lib/auto-triage.js";
 import { readLandedFeedbackEntry } from "#src/lib/feedback.js";
 import { LANDING_BRANCH } from "#src/lib/feedback-landing.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
 import type { WorkerResult } from "#src/lib/worker.js";
 import { repoRoot } from "#test/helpers/repo-root.js";
@@ -53,9 +54,9 @@ const GRILL_VERDICT = [
 
 /** A bare origin with one plan task (W1-T4) and one `status: new` feedback entry. */
 function makeOrigin(feedbackId: string): string {
-  const bare = mkdtempSync(join(tmpdir(), "t12198-origin-"));
+  const bare = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}t12198-origin-`));
   execFileSync("git", ["init", "--quiet", "--bare", "-b", "main", bare], { encoding: "utf8", env: GIT_ENV });
-  const seed = mkdtempSync(join(tmpdir(), "t12198-seed-"));
+  const seed = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}t12198-seed-`));
   execFileSync("git", ["init", "--quiet", "-b", "main", seed], { encoding: "utf8", env: GIT_ENV });
   mkdirSync(join(seed, "plan", "tasks.d"), { recursive: true });
   mkdirSync(join(seed, "plan", "feedback"), { recursive: true });
@@ -94,9 +95,9 @@ interface Fixture {
 function fixture(): Fixture {
   const feedbackId = `fb-t12198-${Date.now()}-${Math.floor(process.hrtime()[1] / 1000)}`;
   const bare = makeOrigin(feedbackId);
-  const home = mkdtempSync(join(tmpdir(), "t12198-home-"));
-  const configRoot = mkdtempSync(join(tmpdir(), "t12198-root-"));
-  const shimDir = mkdtempSync(join(tmpdir(), "t12198-gh-"));
+  const home = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}t12198-home-`));
+  const configRoot = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}t12198-root-`));
+  const shimDir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}t12198-gh-`));
   const argvLog = join(shimDir, "argv.txt");
   writeFileSync(argvLog, "");
   mkdirSync(join(home, ".config", "remudero"), { recursive: true });
@@ -238,7 +239,7 @@ function heldElsewhere(): { reserver: TriageClaimReserverAsync; dropped: string[
 test("W1-T12198 criterion 3: the claim release takes a decided status on origin/main as evidence, with no merged subject that names the id", async () => {
   const feedbackId = `fb-t12198-c3-${Date.now()}`;
   const bare = makeOrigin(feedbackId);
-  const clone = mkdtempSync(join(tmpdir(), "t12198-clone-"));
+  const clone = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}t12198-clone-`));
   try {
     execFileSync("git", ["clone", "--quiet", bare, clone], { encoding: "utf8", env: GIT_ENV });
     const subjects = () => ["chore(feedback): land pending filings"];
