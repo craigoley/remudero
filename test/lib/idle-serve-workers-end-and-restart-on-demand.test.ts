@@ -27,17 +27,20 @@ const say = (step, extra = {}) => parentPort.postMessage({ type: "log", step, ex
 parentPort.on("message", (msg) => {
   if (msg.type === "stop") { ${onStop} }
   if (msg.type === "lane") {
-    say("fixture.lane", { view: msg.view, heavy: msg.heavy });
+    // The paint comes BEFORE the log: the parent reads a port in order, so once the log is seen the
+    // unit's start and end already are, and the thread is not mid-build in the parent's eyes.
     if (lane === "heavy" && msg.heavy) {
       parentPort.postMessage({ type: "view_unit", view: msg.view, phase: "start" });
       parentPort.postMessage({ type: "view_unit", view: msg.view, phase: "end" });
     }
+    say("fixture.lane", { view: msg.view, heavy: msg.heavy });
   }
   if (msg.type === "read") say("fixture.read", { path: msg.path });
   if (msg.type !== "want") return;
   if (msg.view === "move" && lane === "fast") parentPort.postMessage({ type: "view_lane", view: "now", heavy: true, dueAt: 0, costMs: 2000 });
   if (msg.view === "build" && lane === "heavy") parentPort.postMessage({ type: "view_unit", view: "now", phase: "start" });
   if (msg.view === "built" && lane === "heavy") parentPort.postMessage({ type: "view_unit", view: "now", phase: "end" });
+  say("fixture.want", { view: msg.view });
 });
 say("fixture.started");
 `;
@@ -144,7 +147,7 @@ test("W1-T11937 criterion 3: a heavy lane mid-build is never ended, and the idle
   await until(() => r.rows("read_model.view_lane_moved").length === 1, "control: the move was relayed");
   // Start a build: `want` is not a read of the lane's views, but it does count as demand, so age past it.
   r.lanes.want("build", "");
-  await sleep(50);
+  await until(() => r.said("fixture.want").some((row) => row.lane === "heavy" && row.view === "build"), "the heavy lane started its build");
   r.advance(READ_MODEL_HEAVY_IDLE_MS * 3);
   for (let i = 0; i < 3; i++) {
     r.check();
@@ -155,8 +158,8 @@ test("W1-T11937 criterion 3: a heavy lane mid-build is never ended, and the idle
   assert.ok(!r.said("fixture.stopped").some((row) => row.lane === "heavy"), "it was never even asked to stop");
 
   r.lanes.want("built", "");
+  await until(() => r.said("fixture.want").some((row) => row.lane === "heavy" && row.view === "built"), "the heavy lane finished its build");
   r.advance(READ_MODEL_HEAVY_IDLE_MS);
-  await sleep(50);
   r.check();
   assert.equal(r.rows("read_model.view_lane_idle_ended").length, 1, "once the build ends, the idle lane ends");
   await until(() => r.heavyThreads().length === 0, "the heavy thread exited after its build");
