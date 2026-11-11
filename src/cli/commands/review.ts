@@ -2001,6 +2001,10 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
     startPhases[`${name}_ms`] = systemClock.now() - startedAt;
     if (error !== undefined) startPhases[`${name}_error`] = error instanceof Error ? error.constructor.name : typeof error;
   };
+  const startPhaseHandlers = <T>(name: string, startedAt: number): [(value: T) => T, (error: unknown) => never] => [
+    value => { recordStartPhase(name, startedAt); return value; },
+    error => { recordStartPhase(name, startedAt, error ?? "thrown"); throw error; },
+  ];
   deps = { ...reviewOptionsFromFlags(host, rest), ...deps };
   const {
     fetchView,
@@ -2218,11 +2222,12 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
   // `reportBody` still carries the real PR body unchanged to the fallback and reviewer below.
   if (taskId && !reviewTaskIdFromBody(body)) body = `Remudero-Task: ${taskId}`;
   const headCriteriaStartedAt = systemClock.now();
+  const [recordHeadSuccess, recordHeadFailure] = startPhaseHandlers<Awaited<ReturnType<typeof resolvePlanCriteriaAtHeadAsync>>>(
+    "head_criteria", headCriteriaStartedAt,
+  );
   if (taskId) {
-    const resolved = await resolvePlanCriteriaAtHeadAsync(body, subjectRepoDir, "plan/tasks.yaml", view.headRefOid).then(
-      result => { recordStartPhase("head_criteria", headCriteriaStartedAt); return result; },
-      error => { recordStartPhase("head_criteria", headCriteriaStartedAt, error ?? "thrown"); throw error; },
-    );
+    const resolved = await resolvePlanCriteriaAtHeadAsync(body, subjectRepoDir, "plan/tasks.yaml", view.headRefOid)
+      .then(recordHeadSuccess, recordHeadFailure);
     criteria = resolved.criteria;
     if (resolved.source) source = resolved.source;
     taskDeclaredFiles = resolved.taskDeclaredFiles;
@@ -2236,10 +2241,11 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
     if (taskId !== UNFILED_RUN_SENTINEL && resolved.divergence === undefined && resolved.criteria.length === 0 &&
       resolved.taskRisk === undefined && resolved.taskBudgetUsd === undefined) {
       const mainCriteriaStartedAt = systemClock.now();
-      const atMain = await resolvePlanCriteriaAtHeadAsync(body, subjectRepoDir, "plan/tasks.yaml", "origin/main").then(
-        result => { recordStartPhase("main_criteria", mainCriteriaStartedAt); return result; },
-        error => { recordStartPhase("main_criteria", mainCriteriaStartedAt, error ?? "thrown"); throw error; },
+      const [recordMainSuccess, recordMainFailure] = startPhaseHandlers<Awaited<ReturnType<typeof resolvePlanCriteriaAtHeadAsync>>>(
+        "main_criteria", mainCriteriaStartedAt,
       );
+      const atMain = await resolvePlanCriteriaAtHeadAsync(body, subjectRepoDir, "plan/tasks.yaml", "origin/main")
+        .then(recordMainSuccess, recordMainFailure);
       ownTaskRecordMissing = headLacksOwnTaskRecord(resolved, atMain);
     }
   }
