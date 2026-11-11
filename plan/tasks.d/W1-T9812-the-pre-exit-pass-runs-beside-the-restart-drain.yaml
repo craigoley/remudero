@@ -36,6 +36,9 @@
     Swept plan/tasks.d on origin/main and the open heads updated since 10-12 for prepareFreshnessExit, pre_exit_pass
     and "pre-exit"; only merged tasks' stale run branches touch them. Control: pre_exit_pass reads 2 shards on main
     (W1-T8170, W1-T9352).
+    BUILT AFTER W1-T9352 (amended 2026-11-11): W1-T9352 lets a tick-top exit skip its pass when a full pass
+    completed after main advanced. The test "an exit with no dispatch latch keeps the pass before the drain" uses
+    a tick-top exit after a boot pass, so its fixture's boot pass must fail; the exit then runs its own pass.
     DEPENDENCIES: W1-T9808 adds the latch admission predicate the pass runs under, and W1-T9352 edits the same
     function's pass arms. Serialized after both.
   design: |
