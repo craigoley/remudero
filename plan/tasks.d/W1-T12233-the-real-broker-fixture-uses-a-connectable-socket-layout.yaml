@@ -1,0 +1,74 @@
+- id: W1-T12233
+  title: The real broker fixture uses a connectable owned socket layout
+  repo: remudero
+  depends_on: []
+  priority: 0.8
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 5
+  risk: low
+  band_meaning: span
+  origin: operator approval 2026-11-11 of one fixture path and reassigned unused combined USD 10.10
+  plan_refs: [W1-T10370]
+  files:
+    - test/ledger/pr-state-answers-from-the-ledger-before-github.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: The existing real-broker fixture allocates its ledger through the existing ownedFixtureDir helper with the approved short broker kind, retaining registered ownership and cleanup
+      proof: 'grep: ownedFixtureDir(t, "gh").dir in test/ledger/pr-state-answers-from-the-ledger-before-github.test.ts'
+    - claim: The existing real-broker fixture uses its owned directory directly as the cache root rather than adding the redundant cache segment, preserving its real transport and existing assertions
+      proof: 'grep: XDG_CACHE_HOME: undefined, RMD_GH_CACHE_HOME: fixture.dir in test/ledger/pr-state-answers-from-the-ledger-before-github.test.ts'
+  rationale: |
+    On 2026-11-11 the W1-T12192 author run at c3aeea580c6852b29373aa7db16b24246862a17c
+    completed 2933 tests with one failure: the real broker client sends a single agent
+    revalidation and writes no ledger rows. Its expected command result 0 was 1.
+    Independent unchanged controls reproduced the same single failure at source merge-base
+    2060175152b1781bdfce059a3f0aacd2cde8ff44, owner head c3aeea580c and freshly fetched main
+    17745c6bfb684709919437f870595eb4c8fa9953. Captures were complete and child groups closed.
+    The fixture, pr-state reader, ledger helper and dependency lock blobs match base and head.
+    A new local diagnostic using the actual brokerRequest and owned ledger fixture connected
+    successfully to the 94-byte socket path, while its 119-byte cache symlink alias returned
+    EINVAL on Darwin/Node24.22.2 despite naming the same inode. This isolates a socket-address
+    boundary, not a missing broker service or a coverage-mount production regression.
+    The source PR discloses the baseline failure and retains hosted CI as its normal gate;
+    this repair does not retroactively declare the failed author run successful.
+    A 15-of-15 open-head tree census at main17745 found the same fixture blob in every head
+    and no added matching broker/socket subject plan rows. Recheck before implementation.
+    Durable receipts and the unapplied approved adapter are in the operator's handoff notes,
+    runtime-continuation-20261110/W12192-broker-client-paired-controls.json,
+    W12192-broker-current-main-control.json, W12192-broker-socket-alias-diagnostic.json and
+    broker-client-socket-fixture-adapter-proposed.patch.
+  design: |
+    1. In this existing file only, import the existing ownedFixtureDir helper. Allocate only
+       the real-broker case's ledger with writeLedger(..., { dir: ownedFixtureDir(t, "gh").dir }).
+       Its registered ownership/cleanup remains active.
+    2. Use that owned directory directly for RMD_GH_CACHE_HOME. Create remudero/gh-broker
+       beneath it as the same owned symlink to the fixture. Remove only the redundant cache
+       segment. Keep the real server/client, responses, requests and ledger checks unchanged.
+    3. Preserve every existing assertion, expected value, title, timeout and skip. Do not
+       introduce a fake broker reader, live GitHub access, production source change, global
+       TMPDIR change, gate exclusion, allowance, registry edit or new shared helper.
+    4. Verify unchanged-main versus candidate on the observed Mac account temp geometry,
+       run the full existing fixture file and remove each adapter arm to establish its
+       load-bearing role. Azure may replay the measured path geometry in private scratch;
+       retain the native Mac consumer receipt as a separate platform control.
+  note: |
+    SPECIFIC INPUT AUTHORITY: the operator explicitly approved this one-file existing fixture
+    adapter, with all assertions/expectations/titles/timeouts/skips preserved.
+    COMBINED CAP: USD10.10, reassigned from this coordinator's unused W1-T12179 allocation:
+    one build up to USD5, one normal source review up to USD5 and possible USD0.10 shadow call.
+    No extra paid retry or increase to the coordinator's prior combined allocation is authorized.
+    W1-T12192 keeps its existing owner, three-file scope and independent budget; this is not
+    a transfer to that owner. The closed unimplemented W1-T12179 reservation remains held.
+    Normal filing merge, fresh ownership/merge-credit/selector checks, author/hosted/review
+    gates and daemon merge remain required. No coordinator status/arm/approval/merge exception.
+    No runtime restart, provider activation, view flag, credential or pacing-policy change.
+  falsifier: |
+    At unchanged main17745 the existing real-broker case returns 1 instead of 0 on the
+    observed Mac temp layout. With the approved adapter it must keep every old assertion
+    and pass via the real private socket. Removing the shorter owned kind or restoring the
+    redundant cache segment must reproduce the original failure under that same geometry.
+    The acceptance grep must be absent on unchanged main and present only with the adapter.
+
