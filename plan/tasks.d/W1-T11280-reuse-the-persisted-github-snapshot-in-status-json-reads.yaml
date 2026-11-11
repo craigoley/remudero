@@ -65,6 +65,10 @@
       only when the resolved file is ABSENT at base, and this suite exists (src/lib/task-linter.ts ~1587, ~1683, ~1737).
     Settled by lookup: does the whole-file suite claim need keeping? -> no. CI runs the whole suite on every PR, so the
       existing W1-T4208 tests stay guarded without a criterion that cannot discriminate.
+    CLARIFIED 2026-11-11 (PLAN-clarify, PR 17963 round 2): criterion 1 now names the fresh-snapshot regression by its
+    exact title, `W1-T11280: status JSON reuses a fresh persisted GitHub snapshot`, not the `W1-T11280 fresh snapshot`
+    stem. The colon is not a regex metacharacter, and the body is not a `<file>::<title>` form, so it stays a bare
+    literal-title filter. The other five stems are unchanged.
   design: |
     1. Change ONLY the JSON-mode `buildBatchedGithub` call in `statusCommand` so it also passes the persisted repository
        `BoardSnapshotCache` (`createBoardSnapshotCache(<state root>, owner, repo)`, with the root chosen the same way the
@@ -75,14 +79,14 @@
     3. Keep the 30-second status JSON read deadline, the selector rules and the admission rules exactly as they are.
        This task adds no new knobs.
     4. TDD, strictly: in test/status-json-deadline.test.ts, write the failing regressions before the change. (a) A fresh
-       persisted snapshot is used by the JSON status read without a full board re-fetch. Start this test's title with the
-       `W1-T11280 fresh snapshot` stem below, because acceptance criterion 1 names that stem verbatim.
+       persisted snapshot is used by the JSON status read without a full board re-fetch. Give this test EXACTLY the title
+       `W1-T11280: status JSON reuses a fresh persisted GitHub snapshot`, because acceptance criterion 1 names it verbatim.
        (b) A missing, stale, truncated or unreadable snapshot, and a remote-ref failure, each still yield explicit unavailable evidence within the deadline.
        Put `W1-T11280` in each new test title.
        EXACT TITLE STEMS (the acceptance proofs below match them as LITERAL substrings, so copy them verbatim). Write
        one test per case, and start each title with its stem. Plain words only, with no regex metacharacters:
-         - `W1-T11280 fresh snapshot` ... (a). This is the behavioural falsifier. It must FAIL until the gateway passes
-           the cache, so assert that no full board re-fetch happens (for example, count the injected exec's board-list
+         - `W1-T11280: status JSON reuses a fresh persisted GitHub snapshot` (a), the whole title, verbatim.
+           This is the behavioural falsifier. It must FAIL until the gateway passes the cache, so assert that no full board re-fetch happens (for example, count the injected exec's board-list
            calls). Asserting only that the output is right would pass on the uncached path.
          - `W1-T11280 missing snapshot` ...
          - `W1-T11280 stale snapshot` ...
@@ -95,7 +99,7 @@
     NOT IN SCOPE: any other file, any change to board-snapshot-cache.ts or status.ts, any new task.
   acceptance:
     - claim: "a fresh persisted snapshot is consumed by the JSON status read without a full board re-fetch"
-      proof: "unit test: W1-T11280 fresh snapshot"
+      proof: "unit test: W1-T11280: status JSON reuses a fresh persisted GitHub snapshot"
     - claim: "a missing persisted snapshot yields explicit unavailable evidence within the deadline"
       proof: "unit test: W1-T11280 missing snapshot"
     - claim: "a stale persisted snapshot yields explicit unavailable evidence, never silently filled rows"
