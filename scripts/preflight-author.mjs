@@ -628,6 +628,14 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
         // line while the static stage runs on its own memory admission; suites are admitted after it.
         const queue = enqueueTestSlot(AUTHOR_SUITE_LABEL, { ...testSlot, perFileBytes: TEST_FILE_PEAK_BYTES, maxConcurrency: AUTHOR_MAX_WORKERS });
         receipt.suiteQueue = { ticketed: queue.ticketed, positionAtEnqueue: queue.position ?? null, note: queue.note };
+        // W1-T11915 criterion 4: keep the ticket's arrival identity, then add the selection's known price before
+        // static work starts. This is the same price capacityVerdict records later; that verdict does not depend on
+        // the admitted budget. Reading the manifest here also lets every heartbeat retain the price while we wait.
+        let manifest = { files: {} };
+        try { manifest = JSON.parse(readFileSync(join(root, 'scripts/test-tier-manifest.json'), 'utf8')); }
+        catch (error) { receipt.manifestUnavailable = error.message; }
+        const priced = partial ? partial.suites : receipt.suites;
+        queue.setPrice(priceSelection(priced, manifest).costMs);
         let staticEndedAt;
         const admitSuites = () => {
           const waitStartedAt = Date.now();
@@ -699,9 +707,6 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
             if ((partial ? partial.suites : receipt.suites).length === 0) cancelSuites('the selection names no suite');
             else admitSuites();
             // W1-T7809: price the selection against what this host can carry NOW, before spending it.
-            let manifest = { files: {} };
-            try { manifest = JSON.parse(readFileSync(join(root, 'scripts/test-tier-manifest.json'), 'utf8')); }
-            catch (error) { receipt.manifestUnavailable = error.message; }
             const legacyBudget = hostBudget((host ?? readHostCapacityInputs)(), { slotConcurrency: slot?.concurrency });
             // A deadline without a validated native profile was refused before static work.
             // Never expand workers or restart the deadline to admit a larger selection.
@@ -710,7 +715,6 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
             const budget = partial && nativeBudget.budgetMs > legacyBudget.budgetMs ? legacyBudget : nativeBudget;
             const executionWorkers = Math.min(AUTHOR_MAX_WORKERS, budget.workers);
             receipt.executionWorkers = executionWorkers;
-            const priced = partial ? partial.suites : receipt.suites;
             reportManifestFallbacks(priced, manifest);
             const verdict = capacityVerdict(priced, manifest, budget);
             receipt.capacity = verdict;
