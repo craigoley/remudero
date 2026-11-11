@@ -764,7 +764,8 @@ export async function readEscalationAnswers(
     if (gateway.refusalIssues && historyReadable) {
       unreadable += await raiseRefusalAlarms(history, current, gateway.refusalIssues, deps, runId);
     }
-    return { accepted, ignored, unreadable };  } catch (error) {
+    return { accepted, ignored, unreadable };
+  } catch (error) {
     const kind = error instanceof RangeError
       ? (error.message === "Maximum call stack size exceeded" ? "Maximum call stack size exceeded" : "RangeError")
       : error instanceof TypeError ? "TypeError"
@@ -772,5 +773,4 @@ export async function readEscalationAnswers(
       : error instanceof Error ? "Error" : "non-Error";
     throw new Error(`escalation answers failed at stage ${stage}: ${kind}`);
   }
-
 }

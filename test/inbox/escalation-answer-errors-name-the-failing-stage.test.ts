@@ -102,6 +102,32 @@ test("W1-T11405 criterion 1: each unexpected throw names its exact finite stage"
     const f = fault(s, stage);
     await rejectsAt(f.run, stage, "Error");
   });
+  await t.test("parse resets after a comment lands", async s => {
+    const f = fixture(s); let reads = 0;
+    Object.defineProperty(f.comment, "body", { get() {
+      if (++reads === 3) throw new Error("fixture later parse");
+      return "continue with this constraint";
+    } });
+    await rejectsAt(f.run, "answer_parse");
+    assert.equal(reads, 3);
+    assert.equal(f.rows.filter(r => r.step === "panel.question_answered").length, 1);
+  });
+  await t.test("parse resets after feedback before the next issue", async s => {
+    const f = fixture(s); unreadableFeedback(f);
+    f.gateway.listOpen = async () => [f.issue, { number: 42, url: "fixture-next-issue", get body(): string { throw new Error("fixture next issue"); } }];
+    await rejectsAt(f.run, "answer_parse");
+    assert.ok(f.rows.some(r => r.step === "escalation_answer.feedback_unreadable"));
+  });
+  await t.test("parse resets after a reaction lands", async s => {
+    const f = fixture(s); f.issue.body += "\n## Recommendation\ncontinue with this constraint";
+    f.gateway.listComments = async () => [];
+    Object.assign(f.gateway, { ownerLogin: "fixture-owner", listReactions: async () => [
+      { id: 71, content: "+1", authorLogin: "fixture-owner", authorAssociation: "OWNER", authorType: "User" },
+      { id: 72, get content(): string { throw new Error("fixture later reaction"); }, authorLogin: "fixture-owner", authorAssociation: "OWNER", authorType: "User" },
+    ] });
+    await rejectsAt(f.run, "answer_parse");
+    assert.equal(f.rows.filter(r => r.step === "panel.question_answered").length, 1);
+  });
 });
 
 test("W1-T11405 criterion 2: real recursion keeps the overflow phrase and the actual sweep error row", async t => {
@@ -156,6 +182,11 @@ test("W1-T11405 criterion 3: unowned payloads and error properties never enter t
       throw e;
     });
     await rejectsAt(f.run, "refusal_history_read");
+  });
+  await t.test("a throwing RangeError message accessor cannot leak its own payload", async s => {
+    const error = new RangeError("fixture range accessor");
+    Object.defineProperty(error, "message", { get() { throw new Error("fixture private accessor payload"); } });
+    await rejectsAt(fault(s, "refusal_history_read", () => { throw error; }).run, "refusal_history_read", "RangeError");
   });
   for (const [label, error] of [["RangeError", new RangeError("fixture private range")], ["TypeError", new TypeError("fixture private type")],
     ["SyntaxError", new SyntaxError("fixture private syntax")], ["non-Error", { message: "fixture private object" }]] as const) {
