@@ -357,7 +357,8 @@ export function insertRefusalAmendment(shardText: string, taskId: string, commen
 /** Every seam {@link draftRefusalAmendment} touches, so the unit tests need no git, gh or disk. */
 export interface RefusalAmendmentIo {
   readonly readShard: (taskId: string) => { relPath: string; text: string } | undefined;
-  readonly probeExisting: (branch: string) => { prUrl: string } | undefined;
+  /** W1-T12199: an amendment that waits for its landing has no pull request yet. */
+  readonly probeExisting: (branch: string) => { prUrl?: string } | undefined;
   readonly openAmendmentPr: (input: {
     branch: string;
     shardRelPath: string;
@@ -367,12 +368,13 @@ export interface RefusalAmendmentIo {
     prIntro: string;
     claim: string;
     proof: string;
-  }) => { prUrl: string } | Promise<{ prUrl: string }>;
+  }) => { prUrl?: string } | Promise<{ prUrl?: string }>;
   readonly nowIso: () => string;
 }
 
 export type RefusalAmendmentOutcome =
   | "drafted"
+  | "waiting"
   | "deduped"
   | "no_shard"
   | "text_drift"
@@ -433,7 +435,7 @@ export async function draftRefusalAmendment(
       claim: `the shard records the worker's refusal of ${taskId} and the amendment it implies`,
       proof: `grep: refusal-amendment (${taskId} in ${shard.relPath}`,
     });
-    return { ...base, outcome: "drafted", prUrl: created.prUrl };
+    return created.prUrl ? { ...base, outcome: "drafted", prUrl: created.prUrl } : { ...base, outcome: "waiting" };
   } catch (e) {
     return { ...base, outcome: "error", error: String((e as Error)?.message ?? e) };
   }

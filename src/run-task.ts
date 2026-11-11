@@ -3100,8 +3100,7 @@ export function buildEscalationTriageRuntime(
               { run_id: deps.runId, task_id: e.taskId, step, ...extra }) });
           const [result] = await effects.draftRefusalAmendments!([{ taskId: e.taskId, runId: e.runId ?? deps.runId,
             reportExcerpt: e.detail, refusals: [{ criterion: 1, refusalClass: "proof-unexecutable-at-head", detail: e.summary }] }]);
-          if (result === undefined || !result.prUrl) throw new Error(`amendment not opened: ${result?.outcome ?? "unavailable"}`);
-          return `${result.prUrl} proposes the proof amendment; decline the PR to undo`;
+          return planAmendmentReceipt(e.taskId, result);
         },
         rekick_once: (e) => {
           if (io.kick) io.kick(e);
@@ -27425,6 +27424,15 @@ export async function runShardRepairPass(opts: {
 
 /** A garden branch whose PR create threw is deleted from origin, unless a PR does sit on it (the
  *  create succeeded server-side but returned nothing) or that cannot be read — then it is kept. */
+/** W1-T12199: what the escalation triage reports for a proof amendment: its PR, or that it waits for the next task-file landing. */
+export function planAmendmentReceipt(taskId: string, result: { outcome: string; prUrl?: string } | undefined): string {
+  if (result?.prUrl) return `${result.prUrl} proposes the proof amendment; decline the PR to undo`;
+  if (result?.outcome === "waiting") {
+    return `the proof amendment for ${taskId} waits for the next landing pull request of task files; remove its staged file to undo`;
+  }
+  throw new Error(`amendment not opened: ${result?.outcome ?? "unavailable"}`);
+}
+
 export function retractGardenBranch(o: {
   branch: string;
   git: (...args: string[]) => string;
