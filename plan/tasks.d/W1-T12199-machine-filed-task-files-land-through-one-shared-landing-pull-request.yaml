@@ -28,6 +28,7 @@
     - test/the-sweeps-plan-pr-preflight-runs-off-the-daemon-loop.test.ts
     - test/the-sweeps-own-pushes-and-the-risk-judges-disarm-are-awaited.test.ts
     - test/live-write-guard-command-sites.test.ts
+    - test/every-host-git-spawn-into-a-worktree-uses-the-hardened-leaf.test.ts
   status: queued
   attempts: 0
   acceptance:
@@ -80,4 +81,5 @@
     Push a second file to an open landing pull request and criterion 3 must fail. Read a failed listing as "no pull request" and criterion 4 must fail. Write a staged edit over a moved base and criterion 6 must fail. Let one refused file stop the batch and criterion 7 must fail. Remove the read of staged files from the probe and criterion 9 must fail. Restore and require all twelve to pass.
   note: |
     W1-T9054 criterion 1 sets how long the machine-filing judge holds its rulings. It does not change with this task.
+    The refusal amendment no longer runs git in a worktree of its own, so the count of raw git sites in src/lib/sweep.ts falls. The census in test/every-host-git-spawn-into-a-worktree-uses-the-hardened-leaf.test.ts requires its two exception counts for that file to fall with it.
     The first build attempt stopped on 2026-11-10 and reported the gaps that the rationale lists. This text replaces the first text of the task.
