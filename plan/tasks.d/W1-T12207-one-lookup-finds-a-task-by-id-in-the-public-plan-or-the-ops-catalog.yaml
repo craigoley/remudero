@@ -1,0 +1,61 @@
+- id: W1-T12207
+  title: "One lookup finds a task by id in the public plan or in the ops catalog"
+  repo: remudero
+  depends_on: [W1-T12200, W1-T12185, W1-T11770]
+  priority: 1.1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # review, fix, the scope gate and the claim all read a task through this lookup
+  band_meaning: span
+  origin: operator-session#ops-cutover-2026-11-10
+  plan_refs:
+    - W1-T11768
+    - W1-T11769
+    - W1-T10925
+    - W1-T9232
+  files:
+    - src/lib/task-lookup.ts
+    - src/cli/commands/review.ts
+    - src/cli/commands/fix.ts
+    - src/lib/sweep.ts
+    - src/run-task.ts
+    - test/review/one-lookup-finds-a-task-by-id-in-the-public-plan-or-the-ops-catalog.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "The lookup returns a task with the name of the catalog that holds it. It reads the public plan first, and the ops catalog only when the public plan lacks the id and the host file names a repository"
+      proof: "grep: W1-T12207 criterion 1 in test/review/one-lookup-finds-a-task-by-id-in-the-public-plan-or-the-ops-catalog.test.ts"
+    - claim: "For a pull request whose task the ops catalog holds, review gets the criteria, the declared files, the risk and the budget from the lookup, and not only the criteria of the pull request body"
+      proof: "grep: W1-T12207 criterion 2 in test/review/one-lookup-finds-a-task-by-id-in-the-public-plan-or-the-ops-catalog.test.ts"
+    - claim: "The fix command and the scope gate of the sweep read the declared files of an ops task from the lookup"
+      proof: "grep: W1-T12207 criterion 3 in test/review/one-lookup-finds-a-task-by-id-in-the-public-plan-or-the-ops-catalog.test.ts"
+    - claim: "`rmd claim` accepts an id that the ops catalog holds, and reserves the claim ref on the public repository, where the daemon reads it"
+      proof: "grep: W1-T12207 criterion 4 in test/review/one-lookup-finds-a-task-by-id-in-the-public-plan-or-the-ops-catalog.test.ts"
+    - claim: "If the ops catalog is unreadable, the lookup returns `unreadable` and each caller keeps its behaviour for an unreadable plan. No caller treats the task as absent"
+      proof: "grep: W1-T12207 criterion 5 in test/review/one-lookup-finds-a-task-by-id-in-the-public-plan-or-the-ops-catalog.test.ts"
+    - claim: "With no host file, each of the four callers makes the same reads and gives the same result as today"
+      proof: "grep: W1-T12207 criterion 6 in test/review/one-lookup-finds-a-task-by-id-in-the-public-plan-or-the-ops-catalog.test.ts"
+    - claim: "The review command calls the lookup, and the test goes through the review command"
+      proof: "grep: findTaskInCatalogs( in src/cli/commands/review.ts"
+    - claim: "The fix command calls the lookup"
+      proof: "grep: findTaskInCatalogs( in src/cli/commands/fix.ts"
+    - claim: "The claim command calls the lookup"
+      proof: "grep: findTaskInCatalogs( in src/run-task.ts"
+  rationale: |
+    OBSERVED 2026-11-10: no single function reads a task by id. `loadPlan(` has 36 call sites in src/run-task.ts and about 13 other files call it.
+    - Review reads the plan at the head of the pull request, then on origin/main, then the acceptance block of the body (`resolvePlanCriteriaAtHeadAsync`, called from src/cli/commands/review.ts). For an ops task it would have the body only, with no declared files, risk or budget.
+    - The fix command calls the same function twice in src/cli/commands/fix.ts.
+    - The scope gate is `changedPathsOutsideDeclaredFiles` in src/lib/sweep.ts.
+    - `rmd claim` refuses an id that is not on origin/main of the public repository (`claimPlanRoot` and `plannedOnOriginMain` in src/run-task.ts).
+    - W1-T12185 and W1-T11770 finish the shadow reader of the ops catalog. This task depends on both.
+    - The switch is the host file `<state dir>/plan-destination.json`. If the file is absent, the switch is off and the behaviour is byte-identical to today. This task adds no kind. It must merge before `task` is turned on.
+  design: |
+    New module src/lib/task-lookup.ts. Export `findTaskInCatalogs(taskId, deps)` with the result `{ outcome, task, catalog }`.
+    Read the ops catalog through the pinned reader of W1-T11768, `readOpsCatalogSnapshotAsync`. Do not add a second reader.
+    In review, call the lookup after the two reads of the public plan find nothing and before the body is used.
+    The lookup runs on the host. Its result is private. A caller that writes to a public surface may write the title and the acceptance criteria of an ops task and no other field (operator ruling, 2026-11-10).
+    NOT IN SCOPE: the daemon selector, the merge credit, the board, and the 36 other call sites of `loadPlan`.
+  falsifier: |
+    Read the ops catalog first and criterion 1 must fail. Fall back to the body for an ops task and criterion 2 must fail. Refuse the claim of an ops task and criterion 4 must fail. Return "absent" for an unreadable catalog and criterion 5 must fail. Restore and require all nine to pass.

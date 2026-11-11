@@ -1,0 +1,81 @@
+- id: W1-T12246
+  title: "The evidence-storage symlinked-root fixture creates its source directory with an explicit 0700 mode, so test/review/evidence-storage.test.ts passes under umask 0002 as well as 0022"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: low  # one fixture line in one test file plus a new guard test; no production guard, shared-git fixture, host or environment change
+  band_meaning: blast-radius
+  priority: 2  # the one remaining umask-dependent red that every author preflight on a 0002 host (W1-T11891's baseline) must disclose as pre-existing
+  origin: architect
+  plan_refs: [W1-T10265, W1-T11102, W1-T11891]
+  files:
+    - test/review/evidence-storage.test.ts
+    - test/infra/the-evidence-storage-fixture-passes-under-a-group-writable-umask.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED (initiative brief, W1-T11891 author-preflight baseline at origin/main 17745c6): test/review/evidence-storage.test.ts
+    passes 23/23 under umask 0022 and fails exactly one title under umask 0002, "evidence root refuses symlinked roots and
+    never recursively enters checkouts", with the same private HOME/TMPDIR setup.
+    READ at this checkout (symbols, not lines): in that test, `mkdirSync(source)` is called with no mode, so under umask 0002
+    `source` is 0775. scripts/lib/evidence-storage.mjs `privateParents` refuses a group-writable non-sticky directory as
+    `unsafe-parent`, and `compactEvidenceRoot(source)` checks `source` itself through `privateParents(join(root, 'candidate'))`.
+    The guard is right; the fixture depends on the runner's umask. The `fixture()` helper already roots each case under an
+    account-owned `mkdtemp` beneath HOME, so only `source` is exposed.
+    Settled by lookup: is this already filed or already decided? -> no. W1-T10265 (merged) is the diagnosis only; its record's
+      "## Remedy proposal" says the evidence `source` fixture repair is "the separate fixture repair" and its task note says
+      "the follow-up is filed from the record's cause" (plan/tasks.d/W1-T10265-storage-permission-fixtures-fail-on-the-azure-host.yaml,
+      docs/forensics/storage-permission-fixtures-on-the-azure-host.md). W1-T11102 (merged) repaired only
+      test/review/shared-git-storage.test.ts and the scratch-root suite; its files list excludes evidence-storage
+      (plan/tasks.d/W1-T11102-the-shared-storage-fixtures-pass-under-a-sticky-shared-tmpdir.yaml). A sweep of plan/tasks.d for
+      evidence-storage and umask finds no other fixture task for this file.
+    Settled by lookup: which hypothesis does the diagnosis support for this title? -> H1 (ambient umask turns the plain-mkdir
+      `source` from 0755 to 0775; the 0022 control passes every test on identical code and TMPDIR)
+      (docs/forensics/storage-permission-fixtures-on-the-azure-host.md, "## Cause").
+    Settled by lookup: does the shared-git half of the remedy proposal still need filing? -> no. W1-T11102 merged the
+      shared-git pool fixture repair, and the initiative excludes shared-git fixtures (W1-T11102 shard).
+    Settled by lookup: is there a precedent for proving a fixture under umask 0002? -> yes. The W1-T11102 guard test spawns the
+      suite through `bash -c 'umask 0002; exec "$0" "$@"'` with tmp-hygiene imported and asserts zero failures
+      (test/infra/the-shared-storage-fixtures-pass-under-a-sticky-shared-tmpdir.test.ts).
+    Settled by lookup: why a new guard test rather than citing the existing suite as the proof? -> CI runs under umask 0022,
+      where test/review/evidence-storage.test.ts already passes at the merge base, so a whole-file proof of it would read
+      stale and block the PR (the W1-T11891 refusal-amendment, plan/tasks.d/W1-T11891-a-capable-host-runs-more-than-four-author-workers.yaml).
+      The new file forces 0002 in its child and fails at base.
+  design: |
+    1. In test/review/evidence-storage.test.ts, in "evidence root refuses symlinked roots and never recursively enters
+       checkouts", replace `mkdirSync(source)` with exactly `mkdirSync(source, { mode: 0o700 })`. Change nothing else in that
+       test. `symlinkSync(source, link)`, the `/unverified-evidence-root/` refusal of `compactEvidenceRoot(link)`, the nested
+       `closed.log` setup, the zero-entries assertion and the "retained" read-back all stay as they are. Leave `nested`
+       alone: it sits below the root and is never walked as a parent, so its mode has no bearing on this guard.
+    2. Add test/infra/the-evidence-storage-fixture-passes-under-a-group-writable-umask.test.ts, modelled on the W1-T11102
+       guard test. It runs test/review/evidence-storage.test.ts twice in child processes with `--import tsx --import
+       ./test/setup/tmp-hygiene.ts --test --test-reporter=tap`, once under `umask 0022` and once under `umask 0002`. Both
+       runs get the same freshly created account-owned 0700 TMPDIR, so tmp-hygiene gives each child a private HOME beneath it.
+       For each run, assert from the TAP that fail is 0, skip and todo are 0, and the symlinked-root title is reported `ok`.
+       Positive control so a zero is not vacuous: in the same 0002 wrapper, a plain `mkdirSync` must produce mode 0775,
+       proving the child really ran under 0002. Source-text check: the symlinked-root test body still contains
+       `compactEvidenceRoot(link)` with `/unverified-evidence-root/` and the `'retained'` read-back, so the refusal and
+       non-recursion assertions cannot be removed silently. Clean up the TMPDIR in `t.after`.
+    UNCHANGED: scripts/lib/evidence-storage.mjs (privateParents, compactEvidenceRoot and every guard),
+    test/review/shared-git-storage.test.ts and its accountOwnedFixtureRoot helper, test/setup/tmp-hygiene.ts, host
+    permissions, the operator's umask, generated environments, and every other test in the file. No test is skipped or
+    marked todo.
+  acceptance:
+    - claim: "test/review/evidence-storage.test.ts passes with zero failures, skips or todos under both umask 0022 and umask 0002, with the same private TMPDIR/HOME setup. The symlinked-root title reports ok in both runs. A plain-mkdir control proves the 0002 child really ran group-writable. The symlink refusal and nested-checkout non-recursion assertions are still present in that test."
+      proof: "unit test: test/infra/the-evidence-storage-fixture-passes-under-a-group-writable-umask.test.ts"
+      kind: guard
+    - claim: "the symlinked-root fixture creates its source directory with an explicit 0700 mode"
+      proof: "grep: mkdirSync(source, { mode: 0o700 }) in test/review/evidence-storage.test.ts"
+  falsifier: |
+    At origin/main the fixture calls plain `mkdirSync(source)`. Under umask 0002 the new guard test's 0002 run then reports
+    `not ok` for "evidence root refuses symlinked roots and never recursively enters checkouts" with `unsafe-parent`, and the
+    grep reads 0. The repair is wrong if any of these holds after it lands: the 0002 run fails or skips any title; the
+    plain-mkdir control in the 0002 child is not 0775, so the run proves nothing; or `compactEvidenceRoot(link)` stops
+    throwing /unverified-evidence-root/, or the nested closed.log is compacted, removed or rewritten.
+  note: |
+    Fixture-only follow-up to the W1-T10265 diagnosis, filed for the W1-T11891 author-preflight baseline. A change to
+    scripts/lib/evidence-storage.mjs, the shared-git fixture, tmp-hygiene, host permissions or umask is out of scope and
+    refuses review.
