@@ -2368,6 +2368,22 @@ export interface LightPassScope {
   readonly scope?: LightPassScopeName;
   /** W1-T9808: present only while a restart is latched; the pass asks it before each review or fix it admits. */
   readonly admit?: RestartAdmission;
+  /** W1-T11502: told each PR's disposition and exact head as the pass reaches it (see `SweepDeps.observeRepairTurn`). */
+  readonly observeRepairTurn?: (observation: RepairTurnObservation) => void;
+}
+
+/** W1-T11502: what a light pass saw of one PR before acting on it. */
+export interface RepairTurnObservation {
+  readonly prNumber: number;
+  readonly headSha: string;
+  readonly disposition: string;
+  /** False when the head's action is already done (a dedup), so nothing is left to take a turn for. */
+  readonly due: boolean;
+}
+
+/** W1-T11502: the dispositions whose lane is a repair a review-only pass stands down. */
+export function isRepairTurnDisposition(disposition: string): boolean {
+  return disposition === "blocked-fixable" || disposition === "conflicted";
 }
 
 /** W1-T9808: a latched restart's admission predicate. A call without `surface` is a probe: no hold row, no count. */
@@ -2541,6 +2557,49 @@ export function startInterphaseReviewClock(
   const activePasses = new Map<Promise<void>, {
     pass: number; trigger: string; review_only: boolean; started_at_ms: number;
   }>();
+  // W1-T11502: a repair a review-only pass stood down is scheduling debt bound to its exact PR head. Overlapping
+  // review passes keep every later pass review-only, so the debt reserves the next serialized ordinary pass.
+  interface RepairDebt { prNumber: number; headSha: string; disposition: string; seenDue: boolean; heldReason?: string }
+  const repairDebt = new Map<number, RepairDebt>();
+  let repairHandoff = new Map<number, RepairDebt>();
+  const repairFields = (d: RepairDebt) => ({ pr_number: d.prNumber, head_sha: d.headSha, disposition: d.disposition });
+  const discardReason = (o: RepairTurnObservation) => isRepairTurnDisposition(o.disposition) ? "already_handled" : "settled";
+  const requestRepairTurn = (o: RepairTurnObservation) => {
+    const held = repairDebt.get(o.prNumber);
+    if (!isRepairTurnDisposition(o.disposition) || !o.due) {
+      if (held) {
+        repairDebt.delete(o.prNumber);
+        log("daemon.review_clock.repair_discarded", { ...repairFields(held), reason: discardReason(o), observed_disposition: o.disposition });
+      }
+      return;
+    }
+    const handedOff = repairHandoff.get(o.prNumber);
+    if (handedOff?.headSha === o.headSha) return;
+    if (held?.headSha === o.headSha) return;
+    if (held) log("daemon.review_clock.repair_discarded", { ...repairFields(held), reason: "head_changed", live_head_sha: o.headSha });
+    const debt = { prNumber: o.prNumber, headSha: o.headSha, disposition: o.disposition, seenDue: false };
+    repairDebt.set(o.prNumber, debt);
+    log("daemon.review_clock.repair_requested", { ...repairFields(debt), reason: "review-only pass stood the repair down" });
+  };
+  const observeHandoff = (o: RepairTurnObservation) => {
+    const debt = repairHandoff.get(o.prNumber);
+    if (!debt) return;
+    if (debt.headSha !== o.headSha) {
+      repairHandoff.delete(o.prNumber);
+      log("daemon.review_clock.repair_discarded", { ...repairFields(debt), reason: "head_changed", live_head_sha: o.headSha });
+    } else if (!isRepairTurnDisposition(o.disposition) || !o.due) {
+      repairHandoff.delete(o.prNumber);
+      log("daemon.review_clock.repair_discarded", { ...repairFields(debt), reason: discardReason(o), observed_disposition: o.disposition });
+    } else debt.seenDue = true;
+  };
+  /** A pending request is held, never lost; each distinct hold reason is recorded once per request. */
+  const holdRepairTurn = (reason: string, detail?: unknown) => {
+    for (const debt of repairDebt.values()) {
+      if (debt.heldReason === reason) continue;
+      debt.heldReason = reason;
+      log("daemon.review_clock.repair_held", { ...repairFields(debt), reason, ...(detail === undefined ? {} : { detail }) });
+    }
+  };
   const phase = scope === "drain" ? "freshness_drain" : scope === "pause" ? "pause" : "interphase";
   const scopeTag: Record<string, boolean> =
     scope === "drain" ? { during_drain: true } : scope === "pause" ? { during_pause: true } : {};
@@ -2576,19 +2635,26 @@ export function startInterphaseReviewClock(
             elapsedMs = Math.max(elapsedMs + quantumMs, interphaseClock.now() - lastPassAtMs);
           }
           if (!active) break;
-          if (!eventWakePending && elapsedMs < pollIntervalMs) continue;
+          // W1-T11502: a pending repair request makes a pass due, and it takes the NEXT serialized turn: no new
+          // overlapping review pass starts until the incumbents settle (the wake or time debt stays pending).
+          const repairTurnDue = scope === undefined && repairDebt.size > 0;
+          if (!eventWakePending && elapsedMs < pollIntervalMs && !repairTurnDue) continue;
           // W1-T4732: a long reviewer must not hold a newly green head out of the next
           // pass. Keep at most two passes alive; only the first may take the ordinary light
           // actions, and a follow-up may only review and arm (W1-T11510). When both slots are
           // occupied, retain the wake/time debt for a later tick.
           if (activePasses.size >= 2) continue;
+          if (repairTurnDue && activePasses.size > 0) continue;
 
           const halt = deps.checkStop?.() ?? (scope === "pause" ? undefined : deps.checkPause?.());
-          if (halt) continue;
+          if (halt) {
+            if (repairTurnDue) holdRepairTurn("stop_or_pause", halt);
+            continue;
+          }
           const paused = scope === "pause" ? deps.checkPause?.() : undefined;
 
-          const reviewOnly = scope !== undefined || activePasses.size > 0 || inFlightReviewCount() > 0;
-          const trigger = eventWakePending ? "github-event" : "interval";
+          const reviewOnly = scope !== undefined || (!repairTurnDue && (activePasses.size > 0 || inFlightReviewCount() > 0));
+          const trigger = eventWakePending ? "github-event" : repairTurnDue && elapsedMs < pollIntervalMs ? "repair-turn" : "interval";
           eventWakePending = false;
           elapsedMs = 0;
           lastPassAtMs = interphaseClock.now();
@@ -2599,19 +2665,39 @@ export function startInterphaseReviewClock(
           }
           if (admit && !admit("review") && !admit("plan-review")) {
             held += 1;
+            if (repairTurnDue) holdRepairTurn("restart_latch", admit.heldBy);
             continue;
+          }
+          const handoff = repairTurnDue ? new Map(repairDebt) : undefined;
+          if (handoff) {
+            repairDebt.clear();
+            repairHandoff = handoff;
+            for (const debt of handoff.values()) {
+              log("daemon.review_clock.repair_handoff", { ...repairFields(debt), trigger, review_only: false });
+            }
           }
           passes += 1;
           const startedAtMs = interphaseClock.now();
           const pass = (async () => {
             try {
-              const named = { reviewOnly: true, scope: scope ?? "interphase-review" } as const;
+              // W1-T11502: only the unscoped clock requests debt, so pause, drain and boot never reopen a repair lane.
+              const observe = scope !== undefined ? undefined : handoff ? observeHandoff : requestRepairTurn;
+              const named = { reviewOnly: true, scope: scope ?? "interphase-review",
+                ...(observe ? { observeRepairTurn: observe } : {}) } as const;
+              const ordinary: LightPassScope | undefined = handoff
+                ? { reviewOnly: false, ...(admit ? { admit } : {}), observeRepairTurn: observeHandoff } : undefined;
               await (reviewOnly ? deps.sweepLight!(heapHeldLightPass(deps, log, admit ? { ...named, admit } : named))
-                : deps.sweepLight!(heapHeldLightPass(deps, log, undefined)));
+                : deps.sweepLight!(heapHeldLightPass(deps, log, ordinary)));
               if (reviewOnly) log("daemon.review_clock.pass", { trigger, ...scopeTag, review_only: true });
               if (trigger === "github-event") log("daemon.review_clock.wake_consumed", { trigger, ...scopeTag });
             } catch (e) {
               log("daemon.sweep_light.failed", { phase, ...scopeTag, error: String((e as Error)?.message ?? e) });
+            } finally {
+              if (handoff) for (const debt of handoff.values()) {
+                if (repairHandoff.get(debt.prNumber) !== debt) continue;
+                repairHandoff.delete(debt.prNumber);
+                if (!debt.seenDue) log("daemon.review_clock.repair_discarded", { ...repairFields(debt), reason: "not_observed_due" });
+              }
             }
           })();
           activePasses.set(pass, { pass: passes, trigger, review_only: reviewOnly, started_at_ms: startedAtMs });

@@ -15173,6 +15173,10 @@ export interface SweepDeps {
   standDownReasonFor?: (d: Disposition) => string | undefined;
   /** W1-T9569: set only by a review-only light pass; every `sweep.disposed` row it writes carries it. */
   lightPassScope?: LightPassScopeName;
+  /** W1-T11502: told each PR's derived disposition and exact head just before the light pass acts on it, so an
+   *  interphase review pass can keep a repair its scope stood down as scheduling debt, and the pass that takes
+   *  the debt's turn can tell a still-due repair from a settled or moved one (`due`: nothing already done at this head). Observation only: it admits nothing. */
+  observeRepairTurn?: (observation: { prNumber: number; headSha: string; disposition: Disposition; due: boolean }) => void;
 
   /** W1-T2379/W1-T3202 — DO NOT AWAIT THE FIX RUNG'S CI WAIT. Set by the light pass and by the
    *  production full-sweep wrapper. The
@@ -22580,6 +22584,7 @@ export async function runSweep(
     }
 
     let acted = !alreadyDone && !deps.dryRun;
+    deps.observeRepairTurn?.({ prNumber: pr.prNumber, headSha: pr.headSha, disposition, due: acted });
     // The dep-review lane's decision for THIS pass (dep-review disposition only)
     // — ledgered so priorActionsFromLedger can tell terminal from hold.
     let depReviewOutcome: string | undefined;
