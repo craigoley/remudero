@@ -17181,6 +17181,21 @@ export function detachedSweepActionCount(): number {
   return detachedSweepActions.size;
 }
 
+/**
+ * W1-T10054: detached actions a restart would INTERRUPT — the worker and admission phases, the same set
+ * {@link restartDrainInventory} lists and the freshness drain awaits (one predicate, so busy and the drain cannot
+ * disagree about what a restart loses). Best-effort cadences and CI waits are released at once and lose nothing.
+ */
+function isRestartInterruptible(action: DetachedSweepActionRegistration): boolean {
+  return action.phase === "worker" || action.phase === "admission";
+}
+
+export function restartInterruptibleDetachedActionCount(): number {
+  let count = 0;
+  for (const action of detachedSweepActions.values()) if (isRestartInterruptible(action)) count++;
+  return count;
+}
+
 /** Reviews in flight in this process. A freshness exit used to wait only for detached actions, so a
  *  review started by a light pass the exit never awaits was killed mid-judgement (PR 6993, 2026-09-24). */
 interface ReviewRegistration { taskId?: string; prNumber?: number; admittedAtMs: number; kind?: string; laneId?: string }
@@ -17240,7 +17255,7 @@ function reviewRestartItem(settled: Promise<void>, review: ReviewRegistration): 
 }
 export function restartDrainInventory(): RestartDrainInventoryEntry[] {
   return [...inFlightReviewRuns].map(([work, review]) => reviewRestartItem(work, review)).concat(
-    [...detachedSweepActions].filter(([, action]) => action.phase === "worker" || action.phase === "admission")
+    [...detachedSweepActions].filter(([, action]) => isRestartInterruptible(action))
       .map(([work, action]) => detachedRestartItem(work, action)));
 }
 

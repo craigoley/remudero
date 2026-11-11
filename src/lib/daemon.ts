@@ -123,6 +123,7 @@ import {
   detachSweepAction,
   detachedActionInFlight,
   detachedSweepActionCount,
+  restartInterruptibleDetachedActionCount,
   drainDetachedSweepActions,
   abandonDetachedSweepAction,
   drainInFlightReviews,
@@ -5056,11 +5057,24 @@ export async function runDaemon(
     }
   };
 
-  const scoreFreshness = (changes: readonly DeployWorthChange[] | undefined, nowMs: number, siblingInFlight = false) => {
+  // W1-T10054: busy is the work a restart would INTERRUPT: live dispatch lanes, in-flight reviews and detached worker or
+  // admission work. The daemon's own passes and the release-at-once actions are redone by the next process, so they are
+  // named on the row as `background` and never make the decision busy.
+  const scoreFreshness = (changes: readonly DeployWorthChange[] | undefined, nowMs: number, liveLanes = 0) => {
     const staleAtMs = staleSinceMs!;
-    const busy =
-      siblingInFlight ||
-      backgroundSweep !== undefined || sweepLiveness.inFlight || detachedSweepActionCount() > 0 || inFlightReviewCount() > 0;
+    const reviews = inFlightReviewCount();
+    const interruptible = restartInterruptibleDetachedActionCount();
+    const busyReasons = [
+      ...(liveLanes > 0 ? ["lanes"] : []),
+      ...(reviews > 0 ? ["reviews"] : []),
+      ...(interruptible > 0 ? ["detached_work"] : []),
+    ];
+    const busy = busyReasons.length > 0;
+    const background = {
+      ...(backgroundSweep !== undefined ? { sweep_pass: true } : {}),
+      ...(sweepLiveness.inFlight ? { light_pass: true } : {}),
+      released_actions: Math.max(0, detachedSweepActionCount() - interruptible),
+    };
     // W1-T5476: a review withheld for stale reviewer code is the lag itself stalling the review lane. An
     // unreadable ledger is named on the row and leaves the count absent: unknown, never a zero.
     const withheld = deps.readLedgerLines ? withheldReviewsSince(deps.readLedgerLines, staleAtMs) : undefined;
@@ -5078,17 +5092,17 @@ export async function runDaemon(
             };
     const decision = decideFreshnessRestart({ changes, busy, staleSinceMs: staleAtMs, nowMs, state: freshnessPressure, withheldReviews });
     freshnessPressure = decision.state;
-    return { decision, busy, withheldEvidence };
+    return { decision, busy, busyReasons, background, withheldEvidence };
   };
 
   // W1-T4945/W1-T6093: score the advance, then coalesce change-driven restarts within bounded staleness.
   let freshnessDecidedAtMs: number | undefined;
   const freshnessPhases: { decision_to_latch?: number; lanes?: number; pre_exit_pass?: number; drain?: number } = {};
-  const decideFreshness = (freshness: Extract<DaemonFreshness, { stale: true }>, siblingInFlight = false): "restart" | "defer" => {
+  const decideFreshness = (freshness: Extract<DaemonFreshness, { stale: true }>, liveLanes = 0): "restart" | "defer" => {
     const nowMs = daemonClock.now();
     observeFreshnessAdvance(freshness.newSha, nowMs, freshness.staleSinceMs);
     const staleAtMs = staleSinceMs!;
-    const { decision, busy, withheldEvidence } = scoreFreshness(freshness.changes, nowMs, siblingInFlight);
+    const { decision, busy, busyReasons, background, withheldEvidence } = scoreFreshness(freshness.changes, nowMs, liveLanes);
     // OPERATOR RULING 2026-10-17: this lifetime began when the loop did (the boot gate's start); every release but the
     // fast paths waits until it is FRESHNESS_MIN_LIFETIME_MS old. Both rows carry it, so the hold is measurable.
     const coalesced = coalesceFreshnessRestart({
@@ -5120,6 +5134,8 @@ export async function runDaemon(
     log(FRESHNESS_DECISION_STEP, {
       action,
       busy,
+      busy_reasons: busyReasons,
+      background,
       weight: decision.weight,
       age_pressure: decision.agePressure,
       pressure: decision.pressure,
@@ -8038,10 +8054,10 @@ export async function runDaemon(
         : governed ? `governor: ${governed.kind}` : undefined;
       const stopped = deps.checkStop?.();
       const paused = deps.checkPause?.();
-      // W1-T5083: the same restart decision the top of tick asks; a sibling in flight makes it busy.
+      // W1-T5083: the same restart decision the top of tick asks; a sibling lane in flight makes it busy.
       const freshness = refillClosed || phaseBound ? undefined : freshnessReadsAsync ? settledFreshness : (checkFreshness?.() as DaemonFreshness | undefined);
       if (!freshnessReadsAsync) logNotStaleFreshness(freshness);
-      const freshnessAction = freshness?.stale ? decideFreshness(freshness, true) : undefined;
+      const freshnessAction = freshness?.stale ? decideFreshness(freshness, inFlightTasks.size) : undefined;
       // W1-T9089: a restart decided here holds only the refills that would not run as a child.
       if (freshnessAction === "restart" && freshness?.stale) decideRestart(freshness);
       let reason =
@@ -8175,7 +8191,7 @@ export async function runDaemon(
     const actOnDispatchFreshness = (freshness: DaemonFreshness): void => {
       settledFreshness = freshness;
       logNotStaleFreshness(freshness);
-      if (freshness.stale && decideFreshness(freshness, true) === "restart") decideRestart(freshness);
+      if (freshness.stale && decideFreshness(freshness, inFlightTasks.size) === "restart") decideRestart(freshness);
       wakeParkedLanes();
     };
     const onDispatchTick = checkFreshness || (deps.reloadPlan && deps.sweepLight) ? (): void | Promise<void> => {
