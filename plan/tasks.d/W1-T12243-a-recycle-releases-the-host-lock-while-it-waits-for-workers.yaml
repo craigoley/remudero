@@ -1,0 +1,63 @@
+- id: W1-T12243
+  title: "A recycle releases the host recycle lock while it waits for workers"
+  repo: remudero
+  depends_on:
+    - W1-T12242 # the smoke moves before the wait in the same script; this task splits the lock around the wait
+  priority: 1.2
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the lock keeps one instance from removing an image that another has pulled and not yet started
+  band_meaning: span
+  origin: operator-session#restart-and-recycle-downtime-2026-11-10
+  plan_refs:
+    - W1-T12242
+    - W1-T2556
+    - W1-T11320
+    - W1-T12244
+  files:
+    - deploy/recycle-container.sh
+    - deploy/host-recycle-lock.sh
+    - deploy/host-update.sh
+    - test/deploy/a-recycle-releases-the-host-lock-while-it-waits-for-workers.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "With a fake `docker`, a recycle of one instance does not hold the host recycle lock while it waits for its workers. A recycle of a second instance takes the lock in that time"
+      proof: "grep: W1-T12243 criterion 1 in test/deploy/a-recycle-releases-the-host-lock-while-it-waits-for-workers.test.ts"
+    - claim: "Before the first recycle releases the lock, it makes a stopped container from the pulled image. An image removal by the second recycle, or by the nightly host update, in that time does not remove the image"
+      proof: "grep: W1-T12243 criterion 2 in test/deploy/a-recycle-releases-the-host-lock-while-it-waits-for-workers.test.ts"
+    - claim: "After the wait, the first recycle takes the lock again before `docker stop`, and holds it to its end"
+      proof: "grep: W1-T12243 criterion 3 in test/deploy/a-recycle-releases-the-host-lock-while-it-waits-for-workers.test.ts"
+    - claim: "The stopped container that holds the image is removed on every exit of the recycle: success, refusal, error and signal"
+      proof: "grep: W1-T12243 criterion 4 in test/deploy/a-recycle-releases-the-host-lock-while-it-waits-for-workers.test.ts"
+    - claim: "If the recycle cannot make that container, it holds the lock for the whole wait, as today, and says so in `recycle.ended`"
+      proof: "grep: W1-T12243 criterion 5 in test/deploy/a-recycle-releases-the-host-lock-while-it-waits-for-workers.test.ts"
+    - claim: "The recycle script calls the release for the wait"
+      proof: "grep: rmd_release_host_recycle_lock_for_wait in deploy/recycle-container.sh"
+  rationale: |
+    READ at origin/main 17745c6bf, and OBSERVED 2026-11-10 on the Azure host: one recycle that waits for its workers stops every other instance on the host from starting a recycle.
+    - `deploy/recycle-container.sh` section 4.0 takes a lock for the whole host before the pull and holds it until the script exits. The wait for workers is inside that time.
+    - A second instance waits for the lock for up to 2,400 s (`RMD_RECYCLE_LOCK_WAIT_S`) and is then refused. It is not paused while it waits.
+    - The reason for the lock is in the same section. On 2026-10-10 the site instance ran `docker image prune -af` while the core instance waited, and removed the image that core had pulled and not yet started. `deploy/host-recycle-lock.sh` gives the nightly `deploy/host-update.sh` the same lock.
+    - On 2026-11-10 the core recycle held the lock for 3,150 s (20:21:19 to 21:13:49). The site daemon container was made at 21:55:22 and the console daemon container at 22:03:05, on the same image.
+    - The core waits of the last 7 days were up to 2,970 s. A wait longer than 2,400 s refuses the recycle of every other instance in that time.
+    NOT ESTABLISHED: how long the site and console recycles waited for the lock on 2026-11-10. Their ledgers were not read, and the recycle script writes no row for the lock. W1-T12244 adds it.
+    CHECKED for overlap: W1-T2556 (merged) is about a recycle that waits on a lock inside the daemon state, not this lock. W1-T11320 (merged) sets the length of the wait.
+  design: |
+    `docker image prune -a` removes an image that no container uses. A stopped container counts as a use.
+    In `deploy/recycle-container.sh`:
+    1. After the pull and the smoke, make a stopped container from the pulled image id: `docker create --name <container>-image-hold <image id> true`.
+    2. Call `rmd_release_host_recycle_lock_for_wait` (new, in deploy/host-recycle-lock.sh), then wait for the workers as today.
+    3. After the wait, take the lock again with the same wait limit. If it is refused there, remove the pause and exit, as a refused wait does today.
+    4. Run section 6 and the rest under the lock.
+    5. Remove the hold container in `recycle_cleanup_tmp`, so that every exit path removes it.
+    If `docker create` fails, do not release the lock.
+    In `deploy/host-update.sh`: no change to the lock call. Confirm in the test that its image removal leaves an image that a hold container uses.
+    Two instances that wait at the same time each hold their own pulled image. They pull the same tag, so in practice it is one image.
+    NOT IN SCOPE: the order of the instances, the pause, the wait itself, and the serve container.
+  falsifier: |
+    Hold the lock during the wait and criterion 1 must fail. Release the lock with no hold container and criterion 2 must fail. Run `docker stop` without the lock and criterion 3 must fail. Leave the hold container after a refusal and criterion 4 must fail. Restore and require all six to pass.
+  note: |
+    The saving is for the site and console instances: their recycle can start while the core instance waits.

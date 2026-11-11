@@ -1,0 +1,79 @@
+- id: W1-T12248
+  title: "The root-helper rule suite parses each test file once and finishes in a third of the time"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # a rule suite that every preflight and hosted rule-checks runs; a weaker suite lets a defect merge
+  band_meaning: span
+  origin: operator-session#restart-and-recycle-downtime-2026-11-10
+  plan_refs:
+    - W1-T12080
+    - W1-T9863
+    - W1-T12165
+    - W1-T12166
+    - W1-T10242
+  files:
+    - scripts/test-repo-root-codemod.mjs
+    - test/every-test-finds-the-repo-root-through-one-helper.test.ts
+    - scripts/test-tier-manifest.json
+    - test/ci/suites/the-root-helper-rule-suite-parses-each-test-file-once.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "In one run of the rule suite, `analyzeSource` parses each distinct file text at most once. The new test counts the parses over a fixture tree and over the texts of a base and a current tree that share most files"
+      proof: "grep: W1-T12248 criterion 1 in test/ci/suites/the-root-helper-rule-suite-parses-each-test-file-once.test.ts"
+    - claim: "The rule suite runs one dry run of the codemod command on the real tree. It proves that the dry run changed no file by a digest of every test file before and after, not by a second dry run"
+      proof: "grep: W1-T12248 criterion 2 in test/ci/suites/the-root-helper-rule-suite-parses-each-test-file-once.test.ts"
+    - claim: "A planted new test that derives the repo root from its own folder is found, with the same message as today"
+      proof: "grep: W1-T12248 criterion 3 in test/ci/suites/the-root-helper-rule-suite-parses-each-test-file-once.test.ts"
+    - claim: "A planted own-folder root in a file that exists at the merge base, which raises the count above the merge base, is found"
+      proof: "grep: W1-T12248 criterion 4 in test/ci/suites/the-root-helper-rule-suite-parses-each-test-file-once.test.ts"
+    - claim: "A dry run that writes to a planted file fails the digest check, and a dry-run report whose inspected count differs from `testFiles` fails as today"
+      proof: "grep: W1-T12248 criterion 5 in test/ci/suites/the-root-helper-rule-suite-parses-each-test-file-once.test.ts"
+    - claim: "Two file texts that differ in one character are parsed separately. A kept result is never used for a different text"
+      proof: "grep: W1-T12248 criterion 6 in test/ci/suites/the-root-helper-rule-suite-parses-each-test-file-once.test.ts"
+    - claim: "The seven tests of the rule suite keep their names and their assertions on the real tree"
+      proof: "grep: W1-T12248 criterion 7 in test/ci/suites/the-root-helper-rule-suite-parses-each-test-file-once.test.ts"
+    - claim: "The codemod script has one function that analyzes a set of files and keeps each result by its text"
+      proof: "grep: analyzeSources( in scripts/test-repo-root-codemod.mjs"
+    - claim: "The rule suite uses that function"
+      proof: "grep: analyzeSources( in test/every-test-finds-the-repo-root-through-one-helper.test.ts"
+  rationale: |
+    OBSERVED 2026-11-10 in docs/forensics/root-helper-codemod-suite-timing.md (W1-T12080, #17747), and 2026-11-11 in the author preflight: one rule suite sets the length of the rule-checks step for every change.
+    - `scripts/test-tier-manifest.json` gives `test/every-test-finds-the-repo-root-through-one-helper.test.ts` 150,000 ms. The next suite in that part of the list has 12,000 ms.
+    - The operator session of 2026-11-11 reports that the rule-checks step runs its suites ten at a time, and that its time was 184 to 215 s in four receipts on the Mac. With suites in parallel, the step is as long as its longest suite. This applies to a plan-only change and to a code change, in the author preflight and in the hosted `rule-checks` job. The builder must confirm the width of the step at the head it builds on.
+    - W1-T12080 measured the suite on the Azure host at a load average of 25 to 37 on 8 cores: 344.5 s of time and 131.8 s of processor time for 7 tests.
+    - Test 4, "the own-folder root count never rises above the merge base", took 181.5 s. Test 7, the command, took 136.9 s. Test 3 took 19.0 s. The other four took 2.3 s together.
+    - The tree had 4,497 test files.
+    WHY IT IS SLOW, read at origin/main 17745c6bf.
+    - `analyzeSource` (scripts/test-repo-root-codemod.mjs:30) parses one file text with `parseSync` of `@swc/core`.
+    - The suite parses the whole tree six times. `sourcesAtBase()` and `currentSources()` each run in test 3 and in test 4, and each result is analyzed file by file: four whole-tree parses in the process. Test 7 starts `node scripts/test-repo-root-codemod.mjs` three times; two of them are dry runs that parse every file again (60.8 s and 72.4 s), and the third exits at once on `--bogus`.
+    - Nothing is shared. The base tree and the current tree have the same text for nearly every file, and tests 3 and 4 ask the same question of the same two trees.
+    WHAT WOULD MAKE IT FAST WITHOUT A WEAKER RULE.
+    - Keep one result for each distinct file text for the life of the test process. Then the four whole-tree parses become about one.
+    - Run the dry run on the real tree once. Today a second dry run proves that the first changed nothing, by an equal report. A digest of every test file before and after the one dry run proves the same thing directly, and reads the files without a parse. The `--bogus` run takes 0.05 s and stays.
+    - That is two whole-tree parses in place of six. The processor time should fall to about one third.
+    - A store on disk, with the id of each git blob as the key, would remove the second parse too. It is not in this task: a store that outlives the run can hold a wrong result, and the rule must not depend on it.
+    CHECKED for overlap: W1-T12080 measured and proposed no change; its report says that a remedy would be a guess until the suite is measured, and it now is. W1-T9863 (merged) built the suite. W1-T10242 is a retired remedy about uncovered lines of the codemod. No task changes the suite.
+    W1-T12165 (withdrawn in this filing) wanted a shorter rule-checks step for a plan-only change. This suite must stay in that step, so this task is where that time is saved. W1-T12166 reuses the stages of a preflight that passed on the same commit.
+  design: |
+    In scripts/test-repo-root-codemod.mjs:
+    - Add `analyzeSources(entries)`: it takes pairs of file name and text and returns the result of `analyzeSource` for each. It keeps results in a map in the module, with the file name and a SHA-256 of the text as the key, and parses only on a miss.
+    - Export a counter of parses for the test.
+    - The command uses `analyzeSources` too, so that one code path serves the suite and the command.
+    In test/every-test-finds-the-repo-root-through-one-helper.test.ts:
+    - Read `sourcesAtBase()` and `currentSources()` once for the file, lazily, and analyze both through `analyzeSources`. Tests 3 and 4 read the kept results.
+    - In test 7, keep the first dry run on the real tree with its checks against `testFiles(REPO_ROOT)`, and keep the `--bogus` run. Replace the second dry run: take a SHA-256 over the name and text of every file of `testFiles(REPO_ROOT)` before and after the dry run and require them to be equal.
+    - Do not change a test name or remove an assertion on the real tree.
+    In scripts/test-tier-manifest.json: set the new measured time of the suite, by the script that writes that file.
+    The new test file plants each kind of violation in a fixture tree and requires the finding. It also requires that the suite file still has its seven test names.
+    In the pull request, state the time and the processor time of the suite before and after, each from one run on the same host in the same hour. The aim is one third of today's processor time or less. If the measured result is more than one half, report it and do not claim the aim.
+    NOT IN SCOPE: a store on disk, the width of the rule-checks step, the other rule suites, and the rule itself.
+  falsifier: |
+    Remove the map and criterion 1 must fail. Use the name alone as the key and criterion 6 must fail. Drop the digest check and criterion 5 must fail. Delete one of the seven tests and criterion 7 must fail. Restore and require all nine to pass.
+  note: |
+    After the merge, the rule-checks step of an author preflight on the Mac is the measure. It was 184 to 215 s in four receipts of 2026-11-11.
