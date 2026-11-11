@@ -11,6 +11,7 @@ import type { DeployWorthChange } from "../src/lib/deploy-judge.js";
 import { loadPlan, type Plan } from "../src/lib/plan.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import type { RunResult } from "../src/run-task.js";
+import { trackInFlightReview } from "../src/lib/sweep.js";
 
 /**
  * W1-T5476 — 2026-10-03 15:29Z: the daemon deferred a freshness restart ("busy, and pressure 2 (change 2 +
@@ -121,12 +122,16 @@ const stale = (): DaemonFreshness => ({ stale: true, oldSha: OLD_SHA, newSha: NE
 
 type Line = { step: string; extra: Record<string, unknown> };
 
-/** A daemon kept busy by a full pass that never finishes on its own, until a restart is decided. */
+/**
+ * A daemon kept busy by an in-flight review (work a restart would interrupt; W1-T10054: a running pass is not busy)
+ * that never finishes on its own, until a restart is decided or a few idle waits pass.
+ */
 async function busyDaemonDecisions(readLedgerLines: () => readonly string[]): Promise<Record<string, unknown>[]> {
   const lines: Line[] = [];
   let releaseSweep: (() => void) | undefined;
-  let passes = 0;
   let waits = 0;
+  const heldReview = new Promise<void>((resolve) => (releaseSweep = resolve));
+  void trackInFlightReview(heldReview, { taskId: "A", prNumber: 1 });
   const done = daemonModule.runDaemon(
     fixturePlan(),
     {
@@ -141,11 +146,7 @@ async function busyDaemonDecisions(readLedgerLines: () => readonly string[]): Pr
         lines.push({ step, extra });
         if (step === "daemon.freshness_decision" && extra.action === "restart") setTimeout(() => releaseSweep?.(), 5);
       },
-      sweep: async () => {
-        passes++;
-        if (passes === 1) await new Promise<void>((resolve) => (releaseSweep = resolve));
-        return {};
-      },
+      sweep: async () => ({}),
       checkFreshness: stale,
       readLedgerLines,
     },

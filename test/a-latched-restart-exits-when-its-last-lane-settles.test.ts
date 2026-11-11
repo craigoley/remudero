@@ -218,9 +218,9 @@ async function idleExit(t: TestContext, reviewerCodeStale = false) {
   return { calls, callsAtRestartRequest };
 }
 
-test("an idle freshness exit keeps its full pass without a dispatch latch", async (t) => {
+test("an idle freshness exit keeps its full pass when no pass completed after the advance", async (t) => {
   const { calls } = await idleExit(t);
-  assert.equal(calls, 2, "the boot pass cannot replace an idle exit's pass");
+  assert.equal(calls, 2, "the boot pass completed at the instant of the advance, not after it, so the exit runs its own");
 });
 
 test("a reviewer-idle freshness exit keeps its full pass without a dispatch latch", async (t) => {

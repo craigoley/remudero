@@ -20,6 +20,7 @@
     - src/run-task.ts
     - src/cli/commands/run-task-verb.ts
     - test/inbox/a-new-decision-file-lands-in-the-plan-destination-and-readers-read-both.test.ts
+    - test/helpers/git-repo.ts
   status: queued
   attempts: 0
   acceptance:
@@ -48,6 +49,7 @@
     A file is edited in the repository that holds it. Nothing moves a decision file that is in the public repository.
     For the preflight, run the checks that need scripts from the harness checkout against the destination tree, or leave out the checks that read only task files when no task file changed. The builder chooses and states the choice in the pull request.
     In `readStandingDecisions`, add the destination checkout as a second root through `planDestinationRepository`.
+    The test builds its bare origin and clone with a shared helper in test/helpers/git-repo.ts, so the fixture-copy census does not grow (amendment).
     NOT IN SCOPE: feedback files and task files.
   falsifier: |
     Push to the public repository with the kind on and criterion 1 must fail. Change a call with no host file and criterion 2 must fail. Read one root and criterion 3 must fail. Land in the public repository on `unreadable` and criterion 5 must fail. Restore and require all six to pass.
