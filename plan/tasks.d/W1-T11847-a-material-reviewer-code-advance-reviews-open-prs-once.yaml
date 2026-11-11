@@ -114,6 +114,8 @@
     - claim: A verdict reuse, a restore of a delivered verdict or an outbox repost never posts a terminal status whose reviewer-code SHA is missing or materially stale
       proof: 'grep: W1-T11847: a reused, restored or outboxed verdict carries current reviewer code in test/review/a-material-reviewer-code-advance-queues-one-fresh-review.test.ts'
   note: |
+    reservation hand-off: run-unfiled-1794226583836 -> run-unfiled-1794413364000
+
     Keep code-only implementation separate from this plan filing. The normal hosted CI and native
     remudero-review gates remain required. The 2026-11-08 incident's failed-run source and cause
     remain unknown; this task fixes the proven status/scheduling/attestation gap without claiming

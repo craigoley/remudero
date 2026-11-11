@@ -103,6 +103,8 @@
     check, and criterion 3 or 4 must fail. Drop the platform or boot id gate, and criterion 6 must fail. Restore and
     require all to pass.
   note: |
+    reservation hand-off: run-unfiled-1794402481000 -> run-unfiled-1794413364000
+
     Residual risk on a Mac: covered work that outlives its killed owner by more than 90 minutes can run beside the
     next holder. Today the same case keeps the slot for ever and stops every preflight on the host. A darwin probe
     that proves the tree ended without reading other processes' command lines would remove that risk; none exists.

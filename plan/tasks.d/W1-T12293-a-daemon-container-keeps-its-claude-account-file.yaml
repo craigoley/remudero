@@ -69,4 +69,6 @@
   falsifier: |
     Make the entrypoint copy over a file that holds `oauthAccount`, and criterion 7 must fail. Drop the `--expect` line in recycle-container.sh, and the refusal half of criterion 3 must fail. Mount the side file without `:ro`, and criterion 3 must fail. Derive the account file from `$HOME` in recycle-container.sh, and criterion 3 must fail (its fixture names the file only through `RMD_CLAUDE_DIR`). Restore and require all to pass.
   note: |
+    reservation hand-off: run-unfiled-1794398465000 -> run-unfiled-1794413364000
+
     The single-file bind mount keeps the inode the host file had when the container was created. When the host CLI replaces its file, the side file in the container shows the old content until the next recreate. That is acceptable: the side file is read only to seed a missing or thin file, and a recreate binds it again.

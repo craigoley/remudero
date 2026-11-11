@@ -85,4 +85,6 @@
   falsifier: |
     Send the deferral through `deps.alert` and criteria 1 and 3 must fail. Call `recordRefusal` for it and criterion 2 must fail. Reset `since_ms` on each deferral and criteria 5 and 7 must fail. Drop the bound and criterion 7 must fail. Give the bounded drain handoff the derived wait and criterion 7 must fail. Leave the record when a recycle is verified and criterion 9 must fail. Restore and require all ten to pass, with the W1-T12247 tests.
   note: |
+    reservation hand-off: run-unfiled-1794401934000 -> run-unfiled-1794413364000
+
     After the merge, on the core instance, a run of `deploy.recycle_deferred_fit` rows must end in a `deploy.ok` row or a `deploy.recycle_bounded_handoff` row. No `deploy.refusal_escalated` row may follow a `deploy.recycle_wait_fit` row with `fits: false` unless a `deploy.restart_refused` row from the script stands between them. Compare `waited_s` of each bounded drain handoff with its `wait_s`: that pair measures how early the yield ends a round.
