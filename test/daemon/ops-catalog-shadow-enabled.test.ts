@@ -123,6 +123,7 @@ test("W1-T11770 criterion 2: a changed ops revision is refreshed off the loop wi
     const baseline = await drive(plan), observed = await drive(plan, ports);
     assert.deepEqual(observed.workers, baseline.workers); assert.equal(observed.effects, baseline.effects);
     current = next;
+    ports.onPlanReload?.(plan);
     await ports.sleepUntilSweepWake!(0); await flush();
     const after = ports.secondaryCatalogShadowSource?.(); assert.equal(after?.outcome, "ok"); assert.equal(after?.opsCommit, next.commit);
     const changed = await drive(plan, ports); assert.notEqual(changed.rows[0]?.revision_key_digest, observed.rows[0]?.revision_key_digest);
