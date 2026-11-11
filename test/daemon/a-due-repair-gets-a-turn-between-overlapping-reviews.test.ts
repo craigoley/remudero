@@ -3,7 +3,10 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
-import { startInterphaseReviewClock, type DaemonDeps, type LightPassScope, type RestartAdmission } from "#src/lib/daemon.js";
+import {
+  lightPassArmAdmitted, lightPassFixAdmitted, startInterphaseReviewClock, type DaemonDeps, type LightPassScope,
+  type RestartAdmission,
+} from "#src/lib/daemon.js";
 import { readLedgerLines } from "#src/lib/status.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import {
@@ -11,7 +14,6 @@ import {
   type FixDispatchEvidence, type OpenPrView, type SweepDeps,
 } from "#src/lib/sweep.js";
 import { lightPassActionable, reviewOnlyLightPassDeps } from "#src/run-task.js";
-import { lightPassArmAdmitted, lightPassFixAdmitted } from "#src/lib/daemon.js";
 
 // W1-T11502 — A DUE REPAIR GETS A SERIALIZED TURN BETWEEN OVERLAPPING REVIEW PASSES. Consecutive review passes kept
 // the clock's "any active pass or in-flight review" condition true, so every pass was review-only and a due repair
@@ -78,7 +80,6 @@ function fixture(t: TestContext) {
   let blockNext = 0;
   const sweepLight = async (scope?: LightPassScope): Promise<void> => {
     scopes.push(scope);
-    const reviewOnly = scope?.reviewOnly === true;
     const fixAdmitted = lightPassFixAdmitted(scope);
     await runSweepLightPass(state.prs, {
       ...deps,
@@ -94,7 +95,6 @@ function fixture(t: TestContext) {
       passes.push({ scope, settleAt: release });
       await gate;
     }
-    void reviewOnly;
   };
   let waiter: ((result: "wake" | "timeout") => void) | undefined;
   const wake = (result: "wake" | "timeout" = "wake") => { const w = waiter; waiter = undefined; w?.(result); };
@@ -320,7 +320,6 @@ test("W1-T11502 criterion 3: pause, boot, drain, freshness, capacity and worker 
 
   // BOOT (and idle): a review-only scope that is not the interphase clock stands the repair down at the pass itself.
   const boot = fixture(t);
-  await boot.deps.arm; // no-op: the fixture's hooks stay unused
   await (async () => {
     const scope: LightPassScope = { reviewOnly: true, scope: "boot" };
     await runSweepLightPass([dirty()], {
