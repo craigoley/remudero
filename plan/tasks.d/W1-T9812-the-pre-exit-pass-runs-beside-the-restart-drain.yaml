@@ -62,11 +62,11 @@
        - work the pass admits is drained within the latch's remaining bound, not a fresh one.
   acceptance:
     - claim: "the restart drain waits on in-flight work while the pre-exit pass is still running"
-      proof: 'grep: test("W1-T9812: the restart drain starts before the pre-exit pass settles" in test/the-pre-exit-pass-runs-beside-the-restart-drain.test.ts'
+      proof: 'unit test: W1-T9812: the restart drain starts before the pre-exit pass settles'
     - claim: "the exit still returns only after the pre-exit pass settles"
-      proof: 'grep: test("W1-T9812: the restart still waits for the pre-exit pass to settle" in test/the-pre-exit-pass-runs-beside-the-restart-drain.test.ts'
+      proof: 'unit test: W1-T9812: the restart still waits for the pre-exit pass to settle'
     - claim: "work the pre-exit pass admits is drained within the latch's remaining bound"
-      proof: 'grep: test("W1-T9812: what the pre-exit pass admits keeps the latch bound" in test/the-pre-exit-pass-runs-beside-the-restart-drain.test.ts'
+      proof: 'unit test: W1-T9812: what the pre-exit pass admits keeps the latch bound'
   falsifier: |
     At origin/main, a latched exit with a background pass that settles 10 min after the last lane and a review in
     flight at the latch calls `drainInFlightReviews` only after the pass resolves, so the first test sees no drain
