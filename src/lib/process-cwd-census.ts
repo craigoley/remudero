@@ -13,6 +13,10 @@ export interface ProcessCwdCensusDeps {
    *  when the pids come from `/proc` too; a caller that supplies its own pids and no status reader gets an
    *  unreadable status, so a synthetic process table never reads the real one. */
   readStatus?: (pid: string) => string;
+  /** W1-T11659: a pid's `/proc/<pid>/cmdline` text (NUL-separated argv). Same default rule as `readStatus`. */
+  readCmdline?: (pid: string) => string;
+  /** W1-T11659: a pid's `/proc/<pid>/cgroup` text. Same default rule as `readStatus`. */
+  readCgroup?: (pid: string) => string;
   /** W1-T10389: the daemon's own real uid; defaults to `process.getuid()`. */
   ownUid?: number;
   /** W1-T10389: told why an unreadable cwd still answered `unknown`, so the decline row can name it. */
@@ -39,7 +43,7 @@ export type ProcessCwdCensus = (
   | { state: "clear"; scanned: number }
   | { state: "occupied"; scanned: number; pid: number; via?: number }
   | { state: "unknown"; scanned: number; reason: "proc_unavailable" | "cwd_unreadable" | "entry_bound" | "wall_bound" }
-) & { skippedForeign?: number; attributed?: number; attributedVia?: number[] };
+) & { skippedForeign?: number; skippedUserManagers?: number; attributed?: number; attributedVia?: number[] };
 
 const FIX_OWNER_PROC_ENTRY_BOUND = 4_096;
 const FIX_OWNER_PROC_WALL_MS = 100;
@@ -53,6 +57,29 @@ export function pathIsAtOrBelow(candidate: string, root: string): boolean {
 function statusField(status: string, field: "Uid" | "PPid"): number | null {
   const match = new RegExp(`^${field}:\\s+(\\d+)`, "m").exec(status);
   return match ? Number(match[1]) : null;
+}
+
+const USER_MANAGER_CMDLINE = "/usr/lib/systemd/systemd\0--user";
+
+/** W1-T11659: true only when every identity fact is readable and exact: argv is the per-user systemd manager
+ *  and cgroup v2 places it in that uid's `user@<uid>.service/init.scope`. A failed read is not verified. */
+function isVerifiedUserManager(
+  pid: string, uid: number, readCmdline: (pid: string) => string, readCgroup: (pid: string) => string,
+): boolean {
+  let cmdline: string;
+  let cgroup: string;
+  try {
+    cmdline = readCmdline(pid);
+    cgroup = readCgroup(pid);
+  } catch (identityError) {
+    // Unreadable identity is not identity: the caller keeps the fail-closed `unknown` path.
+    void identityError;
+    return false;
+  }
+  if (cmdline !== USER_MANAGER_CMDLINE && cmdline !== `${USER_MANAGER_CMDLINE}\0`) return false;
+  const unified = cgroup.split("\n").filter((line) => line.startsWith("0::"));
+  return unified.length === 1
+    && unified[0] === `0::/user.slice/user-${uid}.slice/user@${uid}.service/init.scope`;
 }
 
 function errnoOf(e: unknown): string {
@@ -87,15 +114,26 @@ export function readBoundedProcessCwdCensus(
       : () => {
         throw Object.assign(new Error("no status reader for a supplied process table"), { code: "ENOSYS" });
       });
+    const noReader = (what: string) => () => {
+      throw Object.assign(new Error(`no ${what} reader for a supplied process table`), { code: "ENOSYS" });
+    };
+    const readCmdline = deps.readCmdline ?? (pidsFromProc
+      ? (pid: string) => readFileSync(join("/proc", pid, "cmdline"), "utf8")
+      : noReader("cmdline"));
+    const readCgroup = deps.readCgroup ?? (pidsFromProc
+      ? (pid: string) => readFileSync(join("/proc", pid, "cgroup"), "utf8")
+      : noReader("cgroup"));
     const ownUid = deps.ownUid ?? (typeof process.getuid === "function" ? process.getuid() : undefined);
     let scanned = 0;
     // W1-T10389 design 6: ancestor reads count against the same entry bound as the pids they explain.
     let walked = 0;
     let skippedForeign = 0;
+    let skippedUserManagers = 0;
     const attributedVia: number[] = [];
     const finish = (result: ProcessCwdCensus): ProcessCwdCensus => ({
       ...result,
       ...(skippedForeign > 0 ? { skippedForeign } : {}),
+      ...(skippedUserManagers > 0 ? { skippedUserManagers } : {}),
       ...(attributedVia.length > 0 ? { attributed: attributedVia.length, attributedVia } : {}),
     });
     const unreadable = (detail: UnreadableCwdDetail): ProcessCwdCensus => {
@@ -137,6 +175,11 @@ export function readBoundedProcessCwdCensus(
         if (uid !== ownUid) {
           // A fleet worker runs as the daemon's own uid, so a foreign pid cannot be the owner.
           skippedForeign += 1;
+          continue;
+        }
+        // W1-T11659: the per-user systemd manager is infrastructure, not a worker; skip it only on exact identity.
+        if (statusField(status, "PPid") === 1 && isVerifiedUserManager(entry, uid, readCmdline, readCgroup)) {
+          skippedUserManagers += 1;
           continue;
         }
         // W1-T10389 design 6: a same-uid pid the census may not read is a sandbox in a child user namespace;
@@ -201,6 +244,7 @@ export function readBoundedProcessCwdCensus(
 export function describeProcessCwdProbe(census: ProcessCwdCensus, detail?: UnreadableCwdDetail): string | undefined {
   const counts = [
     ...(census.skippedForeign ? [`skipped_foreign=${census.skippedForeign}`] : []),
+    ...(census.skippedUserManagers ? [`skipped_user_manager=${census.skippedUserManagers}`] : []),
     ...(census.attributed ? [`attributed=${census.attributed}`] : []),
     ...(census.attributedVia?.length ? [`attributed_via=${census.attributedVia.join(",")}`] : []),
   ];
