@@ -951,6 +951,26 @@ function preflightTally() {
   };
 }
 const errorText = (e: unknown): string => String((e as Error)?.message ?? e);
+
+const DECISION_RECORD_PREFIX = "plan/decisions.d/";
+const CHANGED_PATHS_ARGS = ["diff", "--name-only", "origin/main...HEAD"];
+/**
+ * W1-T12201: a tree with no `scripts/` directory is a plan destination checkout. When its change holds only
+ * decision files, the awaited preflight runs the PR-title lint only: the plan lint, the task-id check, proof
+ * discrimination and the shard census read task files and run scripts that such a tree does not carry.
+ * The sync form keeps every check: one more sync spawn there would reach the daemon loop.
+ */
+const withoutScripts = (cwd: string): boolean => !existsSync(join(cwd, "scripts"));
+async function decisionFilesOnly(cwd: string): Promise<boolean> {
+  let paths: string[];
+  try {
+    paths = (await hostWorktreeGitAsync(cwd, CHANGED_PATHS_ARGS)).split("\n").map((l) => l.trim()).filter(Boolean);
+  } catch {
+    return false; // an unreadable diff runs every check, as before
+  }
+  return paths.length > 0 && paths.every((p) => p.startsWith(DECISION_RECORD_PREFIX));
+}
+
 function prTitleReading(title: string): PlanPrPreflightReading {
   const v = checkCommitMessage(title)[0];
   return v ? { status: 1, output: `${v.rule}: ${v.message}` } : { status: 0, output: "" };
@@ -1000,6 +1020,10 @@ export async function planPrPreflightAsync(
     }
     tally.record(check, reading);
   };
+  if (withoutScripts(input.cwd) && await decisionFilesOnly(input.cwd)) {
+    await read("pr-title", () => prTitleReading(input.title));
+    return tally.result();
+  }
   await read("lint-plan", () => d.lintPlan(input.cwd, budgetMs()));
   await read("task-id-existence", () => d.taskIdExistence(input.cwd, input.headRef, budgetMs()));
   await read("proof-discrimination", () => proofDiscriminationAsync(input.cwd, input.body, (cwd, proof) => d.checkProof(cwd, proof, budgetMs(), checks.log, checks.storeRoot)));
