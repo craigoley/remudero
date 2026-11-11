@@ -535,6 +535,8 @@ export interface WorkerSelectionAssignment {
     preferenceBypass?: { provider: WorkerProviderId; reason: string };
     /** Present when the requested capability's declared preference governed an automatic auction. */
     capabilityPreference?: { capability: string; provider: WorkerProviderId };
+    /** W1-T12172: present when the worker role's declared preference governed an automatic auction. */
+    rolePreference?: { role: string; provider: WorkerProviderId };
     /** WHY: the rule that fired, what it weighed, and each subscription's headroom at that moment. */
     decision?: RoutingDecision;
     propensity?: RoutingPropensity;
@@ -564,6 +566,7 @@ export type RoutingRule =
   | "mount-affinity"
   | "headroom-auction"
   | "capability-preference"
+  | "role-preference"
   | "operator-preference"
   | "preference-bypassed"
   | "cash-fallback"
@@ -1722,6 +1725,7 @@ export function workerSelectionAssignment(
     selection?: ProviderSelection;
     preferenceBypass?: { provider: WorkerProviderId; reason: string };
     capabilityPreference?: { capability: string; provider: WorkerProviderId };
+    rolePreference?: { role: string; provider: WorkerProviderId };
     /** Further models the provider's own ladder held in reserve (the cash walk's alternatives). */
     alternatives?: readonly string[];
     /** The capability tier the requested model resolves to; absent when no model was requested. */
@@ -1766,6 +1770,7 @@ export function workerSelectionAssignment(
         : {}),
       ...(input.preferenceBypass ? { preferenceBypass: input.preferenceBypass } : {}),
       ...(input.capabilityPreference ? { capabilityPreference: input.capabilityPreference } : {}),
+      ...(input.rolePreference ? { rolePreference: input.rolePreference } : {}),
       decision,
       propensity: selectionPropensity({
         selected: input.provider,
@@ -1791,6 +1796,7 @@ function routingRule(args: SpawnWorkerArgs, input: Parameters<typeof workerSelec
   if (input.mode !== "multi-provider") return input.mode;
   if (input.selection?.lane === "codex-credits") return "codex-credits";
   if (input.preferenceBypass) return "preference-bypassed";
+  if (input.rolePreference) return "role-preference";
   if (input.capabilityPreference) return "capability-preference";
   return input.policy.preference === "automatic" ? "headroom-auction" : "operator-preference";
 }
@@ -1821,7 +1827,9 @@ function routingDecision(args: SpawnWorkerArgs, input: Parameters<typeof workerS
   }
   const rule = routingRule(args, input);
   const learner = input.selection?.draw?.learned ? FIX_ROUTING_LEARNER : undefined;
-  const ab = rule === "headroom-auction" && learner === undefined && experimentTaskIdentity(args.taskId) !== undefined
+  // W1-T12172: a role preference serves the provider but the task keeps the arm it drew, so the row still joins the experiment.
+  const drawn = rule === "headroom-auction" || (input.rolePreference !== undefined && (rule === "role-preference" || rule === "preference-bypassed"));
+  const ab = drawn && learner === undefined && experimentTaskIdentity(args.taskId) !== undefined
     ? routingExperimentFor({ capability: input.capability, effort: args.effort, considered: experimentArms(considered) })
     : undefined;
   return {
@@ -2676,6 +2684,7 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
   let routedClaudeCapacities: ProviderCapacity[] | undefined;
   let routedClaudePreferenceBypass: { provider: WorkerProviderId; reason: string } | undefined;
   let routedCapabilityPreference: { capability: string; provider: WorkerProviderId } | undefined;
+  let routedRolePreference: { role: string; provider: WorkerProviderId } | undefined;
   if (providers.length === 1 && providers[0] === "claude" && claudeHealthRoute && !claudeHealthRoute.eligible) {
     const capacity = unavailableClaudeCapacity(claudeHealthRoute);
     try {
@@ -2755,8 +2764,11 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
         routingPolicy,
         requestedCapability,
         capabilities?.providerPreference,
+        // W1-T12172: the disposable review sandbox is the one spawn whose worker role the router can tell apart.
+        { role: args.sandboxIntent === "disposable-review" ? "reviewer" : undefined, preferences: capabilities?.rolePreference },
       );
       routedCapabilityPreference = auction.capabilityPreference;
+      routedRolePreference = auction.rolePreference;
       const initialCandidates = providerExclusionCandidates(
         capacities, auction.policy.reservePercent, args.excludeProviders, auction.policy.routableProviders,
       );
@@ -2946,6 +2958,7 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
         provider: selection.provider,
         preference: routingPolicy.preference,
         ...(routedCapabilityPreference ? { capability_preference: routedCapabilityPreference } : {}),
+        ...(routedRolePreference ? { role_preference: routedRolePreference } : {}),
         ...(preferenceBypass ? { preference_bypass: preferenceBypass } : {}),
         tightest_remaining_percent: selection.tightestRemainingPercent,
         ...(selection.allocationWeight !== undefined ? { allocation_weight: selection.allocationWeight } : {}),
@@ -2997,6 +3010,7 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
         selection,
         preferenceBypass,
         capabilityPreference: routedCapabilityPreference,
+        rolePreference: routedRolePreference,
         capability: requestedCapability,
         exclusion_unhonoured: assignmentExclusionUnhonoured,
       });
@@ -3522,6 +3536,7 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
       selection: routedClaudeSelection,
       preferenceBypass: routedClaudePreferenceBypass,
       capabilityPreference: routedCapabilityPreference,
+      rolePreference: routedRolePreference,
       capability: requestedCapability,
       exclusion_unhonoured: assignmentExclusionUnhonoured,
     });

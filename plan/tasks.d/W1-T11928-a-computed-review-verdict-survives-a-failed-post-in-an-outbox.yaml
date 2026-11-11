@@ -15,7 +15,7 @@
     - src/lib/review.ts
     - test/a-computed-review-verdict-survives-a-failed-post-in-an-outbox.test.ts
     - "src/cli/commands/review.ts"
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: When posting a computed verdict fails, the verdict (state, description, head sha and input key) is written to an outbox entry before the run ends, and the entry holds no credential
