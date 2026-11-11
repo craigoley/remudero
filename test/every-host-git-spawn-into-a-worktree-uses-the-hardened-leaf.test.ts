@@ -95,10 +95,10 @@ const RAW_SITE_EXCEPTIONS: Readonly<Record<string, { count: number; reason: stri
       "merge run the leaf's HOST_GIT_CONFIG, so no tracked or gitdir hook fires while the tree is cut (W1-T6147)",
   },
   "src/lib/sweep.ts": {
-    count: 7,
+    count: 3,
     reason:
-      "HARNESS (W1-T6122): the refusal-amendment 4 and plan-repair 3 commits run in trees worktreeAdd cut " +
-      "from origin/main that only the sweep writes; they keep main's own commit hooks",
+      "HARNESS (W1-T6122): the plan-repair 3 commits run in a tree worktreeAdd cut from origin/main that only " +
+      "the sweep writes; they keep main's own commit hooks (W1-T12199: the refusal amendment cuts no tree)",
   },
 };
 
@@ -225,9 +225,9 @@ export const WIDENED_SITE_EXCEPTIONS: Readonly<Record<string, { count: number; r
       "<root>/repos/<repo>; buildGitLogSupersessionSearch has no production caller",
   },
   "src/lib/sweep.ts": {
-    count: 6,
+    count: 5,
     reason:
-      "CHECKOUT (W1-T6133): buildSweepEffects's 4 address the managed checkout; renumberPlanPrIds's and " +
+      "CHECKOUT (W1-T6133): buildSweepEffects's 3 address the managed checkout; renumberPlanPrIds's and " +
       "rebaseDirtyFleetBranchViaGit's -C argv goes to their git seam, whose default prHeadTreeGit runs the " +
       "PR-head tree through the leaf and leaves only rebaseDirtyFleetBranchViaGit's repoDir steps raw",
   },
