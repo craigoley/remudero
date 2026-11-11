@@ -118,6 +118,7 @@ import { enrichWorkerStreamEvent } from "../../lib/worker-telemetry.js";
 import { toolStepSignature } from "../../lib/tool-step-signature.js";
 import { loadDefaultCostAnomalyPolicy, type CostAnomalyPolicy } from "../../lib/cost-anomaly.js";
 import { hostWorktreeGit, hostWorktreeGitAsync, type HostWorktreeGitOptions } from "../../lib/worktree-git.js";
+import { observeComputedPlacement } from "../../lib/test-path-resolver.js";
 import { gitPushRunBranch, gitPushRunBranchAsync, LanePushForeignHeadError, step, type PushRunBranchAsyncOpts } from "../../lib/git-push.js";
 import { sweepStaleWorkerHomes, sweepStaleWorkerHomesAsync } from "../../lib/worker-home.js";
 import { FIX_WORKER_TOOLS, FIX_WORKER_TOOLS_HARNESS_COMMITS } from "../../lib/fix-fence.js";
@@ -1120,6 +1121,24 @@ export interface RunTaskContext {
   workerStateSensor: WorkerStateSensor;
   /** Swaps the whole plan for one of this run's task after the body's last plan read, before the first agent wait. */
   releasePlan?: () => void;
+}
+
+/**
+ * W1-T11501: the push-time scope comparison, extracted so a test drives it. A declared test written at the folder the
+ * placement engine computes from its contents is the declared test, not an overrun — the SAME predicate
+ * (observeComputedPlacement) worker staging, the fix rung and the review scope advisory use. Everything else keeps
+ * scopeGuardOutOfScopeFiles's exact-path, fail-closed comparison.
+ */
+export function pushScopeOutOfScopeFiles(
+  worktreePath: string,
+  diffFiles: readonly string[],
+  task: Pick<Task, "files" | "acceptance">,
+  registrationChanges: Parameters<typeof scopeGuardOutOfScopeFiles>[2],
+): string[] {
+  return scopeGuardOutOfScopeFiles(diffFiles, task.files, registrationChanges, observeComputedPlacement({
+    root: worktreePath, declaredFiles: task.files, baseRev: "origin/main",
+    proofs: (task.acceptance ?? []).map((c) => c.proof), candidates: diffFiles,
+  }).admitted);
 }
 
 /** Persist a verified implementation credit in the repository state carried by this native run. */
@@ -7465,7 +7484,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
         );
         diffFiles = undefined;
       }
-      const outOfScope = diffFiles === undefined ? [] : scopeGuardOutOfScopeFiles(diffFiles, task.files,
+      const outOfScope = diffFiles === undefined ? [] : pushScopeOutOfScopeFiles(worktreePath, diffFiles, task,
         readRegistrationChanges(worktreePath, diffFiles, "origin/main"));
       if (outOfScope.length > 0) {
         // THE REASON IS THIS DECISION'S OWN (the #981 rule — a ledger line carries the reason from
