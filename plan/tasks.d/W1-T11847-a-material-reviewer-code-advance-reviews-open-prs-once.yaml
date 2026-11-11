@@ -19,6 +19,11 @@
     - scripts/merge-queue-review-attest.mjs
     - test/review/a-material-reviewer-code-advance-queues-one-fresh-review.test.ts
     - test/merge-queue-review-attest.test.ts
+    - src/cli/commands/sweep.ts
+    - .github/workflows/merge-queue-review-attest.yml
+    - test/a-stale-gate-cannot-publish-a-verdict.test.ts
+    - test/a-delivered-verdict-settles-a-pending-status-by-reposting-its-state.test.ts
+    - test/a-computed-review-verdict-survives-a-failed-post-in-an-outbox.test.ts
   status: queued
   attempts: 0
   rationale: |
@@ -36,9 +41,22 @@
     reviewer code materially advances. The pending status at 13:39 shows a new attempt was eventually
     scheduled; the 21-minute interval before it is not explained by available evidence.
 
-    Current mechanism: normal review.posted ledger rows already carry the exact head_sha and full
-    reviewer_code_sha through reviewerHealthRowFields; preserve and regression-test that invariant.
-    The GitHub-visible status description, however, exposes only the first 12 code-SHA characters.
+    Current mechanism: review.posted rows written by `rmd review` carry the exact head_sha and full
+    reviewer_code_sha through reviewerHealthRowFields (src/cli/commands/review.ts log wrapper);
+    preserve and regression-test that invariant.
+    The GitHub-visible status description, however, exposes only the first 12 code-SHA characters
+    (src/lib/review.ts reviewDescriptionWithCodeProvenance, `codeSha.slice(0, 12)`).
+
+    AUDIT 2026-11-11 on main 80136d0c9ad0: three other paths write or re-post a terminal verdict
+    with no reviewer-code provenance. The sweep's verdict-reuse and proof-only-discrimination rows
+    (src/cli/commands/sweep.ts, the two `step: "review.posted"` appends) and the outbox drain row
+    (src/lib/review.ts, W1-T11928) carry no reviewer_code_sha. None of these three passes
+    reviewerCodeFreshness to postReviewStatusGuarded, so the stale-code refusal does not run. The
+    reuse and discrimination statuses have no code SHA in their description; the outbox re-posts
+    the description it stored when the first post failed. The W1-T11729 restore path (restorableDeliveredVerdict
+    in src/lib/sweep.ts, posted from src/cli/commands/sweep.ts) re-posts a delivered verdict when the
+    status regressed to pending, keyed by head and input digest only. Left as is, that path would
+    re-post the old stale-code verdict over the pending status this task posts.
     sweep.reviewOutcomeKeyForPr keys by task, PR URL, exact head SHA and reviewInputDigest, not the
     reviewer-code SHA; claimReview then deduplicates a delivered verdict without checking whether
     its reviewer_code_sha remains materially current. The existing reviewAdvanceIsMaterial predicate
@@ -66,6 +84,22 @@
        review whose full reviewer-code SHA is still materially current relative to main under the
        shared freshness predicate. Pending, missing, legacy, short-SHA, stale or unreadable evidence
        refuses attestation. Do not weaken required checks or the native remudero-review status.
+       The attestor decides "materially current" with the same predicate the sweep uses
+       (reviewAdvanceIsMaterialAt in src/lib/self-sync.ts, with its run-task.ts review-path rule),
+       not a copied path list. A stricter attestor would eject PRs the sweep holds as current, and
+       a looser one would pass stale code. If the predicate needs full history or installed
+       dependencies in the job, change .github/workflows/merge-queue-review-attest.yml and keep its
+       merge_group-only trigger and no-`if:` invariant (test/merge-queue-review-attest.test.ts).
+    5. Amended 2026-11-11: every path that writes or re-posts a terminal verdict carries the
+       verdict's full reviewer-code SHA and passes the freshness check before it posts. This covers
+       verdict reuse and proof-only discrimination (the reused verdict keeps the code SHA that judged
+       it), the outbox drain, and the W1-T11729 restore. A restore or outbox entry whose code SHA is
+       missing or materially stale does not post a terminal status; the sweep admits one fresh
+       review for it instead. Update the existing tests of these paths
+       (test/a-stale-gate-cannot-publish-a-verdict.test.ts asserts the 12-character suffix,
+       test/a-delivered-verdict-settles-a-pending-status-by-reposting-its-state.test.ts and
+       test/a-computed-review-verdict-survives-a-failed-post-in-an-outbox.test.ts use rows and
+       descriptions with no code SHA) without removing any refusal they assert.
   acceptance:
     - claim: Every terminal review.posted row retains the exact head_sha and full reviewer_code_sha, and its GitHub-visible remudero-review status description contains that full code SHA
       proof: 'grep: W1-T11847: terminal review provenance is full in the ledger and visible status in test/review/a-material-reviewer-code-advance-queues-one-fresh-review.test.ts'
@@ -77,6 +111,8 @@
       proof: 'grep: W1-T11847: stale or incomplete reviewer-code provenance cannot attest merge in test/review/a-material-reviewer-code-advance-queues-one-fresh-review.test.ts'
     - claim: Unrelated main churn does not requeue reviews or invalidate a materially current reviewer-code result
       proof: 'grep: W1-T11847: unrelated main churn leaves the reviewer-code result current in test/review/a-material-reviewer-code-advance-queues-one-fresh-review.test.ts'
+    - claim: A verdict reuse, a restore of a delivered verdict or an outbox repost never posts a terminal status whose reviewer-code SHA is missing or materially stale
+      proof: 'grep: W1-T11847: a reused, restored or outboxed verdict carries current reviewer code in test/review/a-material-reviewer-code-advance-queues-one-fresh-review.test.ts'
   note: |
     Keep code-only implementation separate from this plan filing. The normal hosted CI and native
     remudero-review gates remain required. The 2026-11-08 incident's failed-run source and cause
