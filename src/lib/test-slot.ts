@@ -55,8 +55,9 @@ export const TEST_RUN_HEADROOM_CORES = 2;
  *  has run longer than a whole local coverage run (~20-40 min at the old concurrency), and then
  *  degrades to concurrency 1 rather than refusing or deadlocking. */
 export const TEST_SLOT_WAIT_BOUND_MS = 45 * 60_000;
-/** BACKSTOP — a holder in ANOTHER container/host cannot be pid-probed; it refreshes its record at
- *  every shard boundary, so a record this stale names a holder that died without releasing. */
+/** A holder in ANOTHER container/host/pid namespace cannot be pid-probed. On one kernel (equal boot ids) a record
+ *  this silent is only AGED — a diagnostic bound, never a release (W1-T11809); it still frees a record only where
+ *  a boot id is missing on either side (macOS), outside the Linux same-kernel seam. */
 export const TEST_SLOT_LEASE_MS = 90 * 60_000;
 const TEST_SLOT_POLL_MS = 5_000;
 /** Covered descendants inherit the existing parent claim, including the reservation nonce and process start. */
@@ -1068,6 +1069,8 @@ export interface TestSlotOptions {
   treeProbe?: (held: TestSlotHolder) => ReservedTreeEvidence;
   /** Exact pinned cgroup evidence for a complete foreign-pid-namespace owner identity. */
   cgroupIdentityProbe?: (held: TestSlotHolder) => ReservedTreeEvidence;
+  /** This waiter's cgroup namespace, named in an aged hold's diagnostic; default {@link readCgroupNamespace}. */
+  cgroupNamespace?: () => string | undefined;
   /** Whether any process holds a mutation guard open; default {@link defaultGuardHolderProbe}. */
   guardProbe?: (guardPath: string, guard: Stats) => GuardHolderEvidence;
 }
@@ -1100,8 +1103,8 @@ function sleepSync(ms: number): void {
 
 /**
  * Is `held` dead? Same host → the shared pid/start-time predicate. Another host or container →
- * its pid means nothing here, so: a different kernel boot id is dead by construction, and
- * otherwise a heartbeat older than {@link TEST_SLOT_LEASE_MS} is a holder that died unreleased.
+ * its pid means nothing here, so: a different kernel boot id is dead by construction; an EQUAL boot id
+ * (same kernel) is never dead by heartbeat age — a live owner blocked for hours stops beating too (W1-T11809).
  * TRAP: isHolderStale alone would call ANY container-id-shaped foreign host stale from inside a
  * container (it assumes an earlier boot of the same cell) — on a shared mount that is a live peer.
  */
@@ -1109,11 +1112,86 @@ function testSlotHolderStale(held: TestSlotHolder, now: number, opts: Required<P
   const myNs = opts.pidNamespace();
   const foreignNs = held.pidNs !== undefined && myNs !== undefined && held.pidNs !== myNs;
   // Same hostname but another pid namespace (two sandboxed workers in one container): the pid probe would read a
-  // live peer as dead, so it is aged like a foreign host's holder — boot id, then lease.
+  // live peer as dead, so it is judged like a foreign host's holder — by boot id.
   if (sameHost(held.host, opts.hostname()) && !foreignNs) return isHolderStale(held, { isPidAlive: opts.isPidAlive, hostname: opts.hostname });
   const mine = opts.bootId();
-  if (held.bootId !== undefined && mine !== undefined && held.bootId !== mine) return true;
+  if (held.bootId !== undefined && mine !== undefined) return held.bootId !== mine;
+  // No boot id on one side (macOS, or a legacy record): outside the Linux same-kernel seam, the lease still frees.
   return now - Date.parse(held.heartbeatAt) > TEST_SLOT_LEASE_MS;
+}
+
+/** What a waiter (or doctor) knows about itself and the slot it read, for {@link judgeTestSlotHoldAge}. */
+export interface TestSlotWaiterFacts {
+  hostname: string;
+  bootId?: string;
+  pidNs?: string;
+  cgroupNs?: string;
+  slotDir: string;
+  slot: number;
+  /** The W1-T11807 cgroup-identity probe's reason, when that probe ran and could not prove the tree ended. */
+  probeReason?: string;
+}
+
+/** A foreign hold this side cannot observe: AGED once silent past its bound. A diagnostic, never a release. */
+export interface TestSlotHoldAge {
+  aged: boolean;
+  slot: number;
+  holder: string;
+  host: string;
+  ownerUid: number | null;
+  pidNs: { record: string | null; waiter: string | null };
+  cgroupNs: { record: string | null; waiter: string | null };
+  bootIdMatch: boolean | null;
+  startedAt: string;
+  heartbeatAt: string;
+  ageMs: number;
+  silentMs: number;
+  boundMs: number;
+  missingEvidence: string[];
+  /** The W1-T11808 owner-lane command for exactly this reservation. */
+  recoveryCommand: string;
+  /** {@link recoveryCommand} plus where to run it, as one pasteable shell line. */
+  recovery: string;
+}
+
+const shellWord = (value: string): string => /^[A-Za-z0-9_./:@%+=,-]+$/.test(value) ? value : `'${value.replace(/'/g, `'\\''`)}'`;
+const ageText = (ms: number): string => {
+  const minutes = Math.max(0, Math.floor(ms / 60_000));
+  return minutes >= 60 ? `${Math.floor(minutes / 60)}h${minutes % 60}m` : `${minutes}m`;
+};
+
+/**
+ * Judge a hold whose owner this side cannot observe: undefined when the record is local (the pid probe judges it)
+ * or a different boot id proves it ended; otherwise its age, what evidence is missing and the owner-lane recovery.
+ * AGED is silence past {@link TEST_SLOT_SILENT_BEATS} recorded beats, or {@link TEST_SLOT_LEASE_MS} with no cadence.
+ */
+export function judgeTestSlotHoldAge(held: TestSlotHolder, waiter: TestSlotWaiterFacts, now: number): TestSlotHoldAge | undefined {
+  const foreignPidNs = held.pidNs !== undefined && waiter.pidNs !== undefined && held.pidNs !== waiter.pidNs;
+  const foreignHost = !sameHost(held.host, waiter.hostname);
+  if (!foreignHost && !foreignPidNs) return undefined;
+  const bootIdMatch = held.bootId !== undefined && waiter.bootId !== undefined ? held.bootId === waiter.bootId : null;
+  if (bootIdMatch === false) return undefined;
+  const cadence = held.heartbeatIntervalMs;
+  const boundMs = cadence !== undefined && Number.isSafeInteger(cadence) && cadence > 0 ? TEST_SLOT_SILENT_BEATS * cadence : TEST_SLOT_LEASE_MS;
+  const silentMs = now - Date.parse(held.heartbeatAt), ageMs = now - Date.parse(held.startedAt);
+  const scope = held.cgroupScope;
+  const missingEvidence: string[] = [];
+  if (foreignHost) missingEvidence.push("host differs: owner pid unprobeable from here");
+  if (foreignPidNs) missingEvidence.push("pid namespace differs: owner pid unprobeable from here");
+  if (bootIdMatch === null) missingEvidence.push("boot id unknown on one side: same kernel unproven");
+  if (scope?.dev === undefined || scope.ino === undefined || scope.cgroupNs === undefined) missingEvidence.push("no pinned cgroup identity recorded");
+  else if (waiter.cgroupNs !== undefined && scope.cgroupNs !== waiter.cgroupNs) missingEvidence.push("cgroup namespace differs");
+  if (waiter.probeReason !== undefined) missingEvidence.push(`cgroup identity probe: ${waiter.probeReason}`);
+  if (held.ownerUid === undefined) missingEvidence.push("no owner uid recorded");
+  const recoveryCommand = ["node", "--import", "tsx", "scripts/test-slot-owner-release.mjs", "--slot-dir", waiter.slotDir, "--slot", String(waiter.slot),
+    "--nonce", held.ownerNonce ?? "<unrecorded>", "--pid", String(held.pid), "--start", held.processStart ?? "<unrecorded>"].map(shellWord).join(" ");
+  const runAs = `run as uid ${held.ownerUid ?? "<unrecorded>"} inside pid namespace ${held.pidNs ?? "<unrecorded>"}${foreignHost ? ` on ${held.host}` : ""}`;
+  return {
+    aged: !(silentMs <= boundMs), slot: waiter.slot, holder: held.label, host: held.host, ownerUid: held.ownerUid ?? null,
+    pidNs: { record: held.pidNs ?? null, waiter: waiter.pidNs ?? null }, cgroupNs: { record: scope?.cgroupNs ?? null, waiter: waiter.cgroupNs ?? null },
+    bootIdMatch, startedAt: held.startedAt, heartbeatAt: held.heartbeatAt, ageMs, silentMs, boundMs, missingEvidence,
+    recoveryCommand, recovery: `${recoveryCommand} # ${runAs}`,
+  };
 }
 
 /**
@@ -1299,6 +1377,7 @@ function* testSlotPolls(label: string, opts: TestSlotOptions, maximum: number,
   const bootId = opts.bootId ?? (() => readBootId());
   const isPidAlive = opts.isPidAlive ?? defaultIsPidAlive;
   const pidNamespace = opts.pidNamespace ?? (() => readPidNamespace());
+  const cgroupNamespace = opts.cgroupNamespace ?? (() => readCgroupNamespace());
   const privateWriter = opts.ownershipProtocol === "private-capacity-v1";
   const parentPolicy = opts.privateParentPolicy === "require-entry-protection";
   const basePrivate = privateWriter || opts.privateCoordinationRequired === true || parentPolicy;
@@ -1337,7 +1416,7 @@ function* testSlotPolls(label: string, opts: TestSlotOptions, maximum: number,
   };
   const treeProbe = opts.treeProbe ?? ((held: TestSlotHolder) => probeReservedTree(held, { platform: opts.platform, hostname: host, bootId: bootId(), pidNs: pidNamespace() }));
   const cgroupIdentityProbe = opts.cgroupIdentityProbe ?? ((held: TestSlotHolder) => probeCgroupIdentity(held, {
-    platform: opts.platform, hostname: host, bootId: bootId(), pidNs: pidNamespace(), cgroupNamespace: readCgroupNamespace(), ownerUid: process.getuid?.(),
+    platform: opts.platform, hostname: host, bootId: bootId(), pidNs: pidNamespace(), cgroupNamespace: cgroupNamespace(), ownerUid: process.getuid?.(),
   }));
   const observed = new Set<string>();
   /** One row per distinct observation: a bounded diagnostic, not one per poll. */
@@ -1845,10 +1924,26 @@ function* testSlotPolls(label: string, opts: TestSlotOptions, maximum: number,
             break;
           }
           let quiescent: { held: TestSlotHolder; evidence: ReservedTreeEvidence } | undefined;
+          let agedHold: TestSlotHoldAge | undefined;
+          /** W1-T11809: a retained foreign hold aged past its bound is UNKNOWN — one row and one line, never a release. */
+          const retainUnknown = (held: TestSlotHolder, probeReason?: string): false => {
+            agedHold = judgeTestSlotHoldAge(held, { hostname: host(), bootId: bootId(), pidNs: pidNamespace(), cgroupNs: cgroupNamespace(),
+              slotDir: dir, slot: i, probeReason }, clock.now());
+            if (!agedHold?.aged) return false;
+            const key = `aged:${i}:${held.ownerNonce}`;
+            if (observed.has(key)) return false;
+            observeOnce(key, { step: "test_slot.owner_aged", label, ...agedHold,
+              decision: "retained: an aged foreign hold is UNKNOWN, never released by heartbeat age" });
+            (say ?? ((line: string) => void process.stderr.write(`${line}\n`)))(`test slot ${i}: ${agedHold.holder} (pid ${held.pid} on ${agedHold.host}) is UNKNOWN, ` +
+              `aged ${ageText(agedHold.ageMs)} with no beat for ${ageText(agedHold.silentMs)}; missing: ${agedHold.missingEvidence.join("; ")}; ` +
+              `the hold is kept. Recover it from the owner lane: ${agedHold.recovery}`);
+            return false;
+          };
           const reclaim = reclaimStaleLock(path, {
             parseHolder: parseTestSlotHolder,
             isStale: (held) => {
               quiescent = undefined;
+              agedHold = undefined;
               const myNs = pidNamespace();
               const foreignPidNamespace = sameHost(held.host, host()) && held.pidNs !== undefined && myNs !== undefined && held.pidNs !== myNs;
               const scope = held.cgroupScope;
@@ -1861,14 +1956,15 @@ function* testSlotPolls(label: string, opts: TestSlotOptions, maximum: number,
                 observeOnce("cgroup-identity:" + i + ":" + held.ownerNonce + ":" + evidence.state + ":" + evidence.reason, { step: "test_slot.reclaim_withheld", label,
                   slot: i, pid: held.pid, holder: held.label, ownerNonce: held.ownerNonce, processStart: held.processStart,
                   evidence: evidence.state, coverage: evidence.coverage, reason: evidence.reason });
-                return false; // A complete identity never falls through to heartbeat age.
+                return retainUnknown(held, evidence.reason); // A complete identity never falls through to heartbeat age.
               }
               const pidStale = testSlotHolderStale(held, clock.now(), { hostname: host, bootId, isPidAlive, pidNamespace });
               const cadence = held.heartbeatIntervalMs;
               const local = sameHost(held.host, host()) && !(held.pidNs !== undefined && myNs !== undefined && held.pidNs !== myNs);
-              // A cadence-less or foreign record keeps today's judgment exactly (pid probe; boot id, then lease).
+              // A cadence-less record keeps the pid probe; a foreign one its boot id (the lease only without one).
               const recordedCadence = cadence !== undefined && Number.isSafeInteger(cadence) && cadence > 0;
-              if ((!recordedCadence && held.workIdentity === undefined) || !local) return pidStale;
+              if (!local) return pidStale || retainUnknown(held);
+              if (!recordedCadence && held.workIdentity === undefined) return pidStale;
               reservedWorkUnproven = true;
               const silentMs = clock.now() - Date.parse(held.heartbeatAt);
               if (recordedCadence && silentMs > TEST_SLOT_SILENT_BEATS * cadence!) {
@@ -1909,7 +2005,8 @@ function* testSlotPolls(label: string, opts: TestSlotOptions, maximum: number,
             },
           });
           if (reclaim.outcome === "live") {
-            holders.push(`slot ${i}: pid ${reclaim.holder.pid} on ${reclaim.holder.host} (${reclaim.holder.label})`);
+            const unknown = agedHold?.aged ? ` UNKNOWN (aged ${ageText(agedHold.ageMs)})` : "";
+            holders.push(`slot ${i}: pid ${reclaim.holder.pid} on ${reclaim.holder.host} (${reclaim.holder.label})${unknown}`);
             break;
           }
           } finally {
