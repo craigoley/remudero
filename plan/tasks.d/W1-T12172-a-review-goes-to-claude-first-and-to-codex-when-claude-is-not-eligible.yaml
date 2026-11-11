@@ -20,7 +20,7 @@
     - src/lib/provider-routing-policy.ts
     - src/lib/worker.ts
     - test/routing/a-review-goes-to-claude-first-and-to-codex-when-claude-is-not-eligible.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "The mounts file can name a preferred provider for a worker role. The committed file names Claude for the reviewer role"

@@ -14,7 +14,7 @@
   files:
     - test/review/evidence-storage.test.ts
     - test/infra/the-evidence-storage-fixture-passes-under-a-group-writable-umask.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED (initiative brief, W1-T11891 author-preflight baseline at origin/main 17745c6): test/review/evidence-storage.test.ts

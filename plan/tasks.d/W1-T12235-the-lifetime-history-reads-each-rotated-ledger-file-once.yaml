@@ -20,8 +20,9 @@
   files:
     - src/run-task.ts
     - src/lib/sweep.ts
+    - src/cli/commands/daemon.ts
     - test/worker/run-task/the-lifetime-history-reads-each-rotated-ledger-file-once.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "A second call of `auditedLifetimeTalliesFromArchives` on the same state directory, as a restarted daemon makes, decompresses no rotated ledger file that the first call read"
@@ -68,6 +69,7 @@
     - an unreadable snapshot is not an error: the reader loads each file, as it does when no snapshot exists.
     Export from src/lib/sweep.ts what src/run-task.ts needs to build the reader, if it is not exported.
     Add `archives_read` and `archives_from_snapshot` to `dispatch.lifetime_history_loaded`.
+    AMENDED 2026-11-10 by the builder: two writers log that row. `drainCommand` is in src/run-task.ts. `daemonCommand` is in src/cli/commands/daemon.ts, which was not in `files`. The daemon is the start that this task shortens, so its row must hold the two fields. Both writers log the row that the call returns.
     The builder must confirm with the test of criterion 3 that the reader gives the accounting the same rows as `auditLedgerUnion` with `dedupeWindowPerStep`. If it cannot, stop and report the difference; do not change a tally.
     NOT IN SCOPE: when the history is built (W1-T5724), the lifetime limit itself, and the live overlay of `lifetimeHistory`.
   falsifier: |

@@ -1,0 +1,37 @@
+- id: W1-T12274
+  title: "The review lanes row in the policy says that the ceiling is derived from the host worker budget"
+  repo: remudero
+  depends_on:
+    - W1-T11841
+  priority: 2.5
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: low # text beside one policy row; no value, bound or origin changes
+  band_meaning: blast-radius
+  origin: operator-session#green-prs-merge-at-once-2026-11-11
+  plan_refs:
+    - W1-T11841
+    - W1-T11884
+  files:
+    - plan/policy.yaml
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "The `max` line of the `sweep.reviewLanes` row says that it bounds the value of the row only, and that the review width can grow to the host worker budget"
+      proof: "grep: max: 5 # bounds this row's value only; the width can earn each lane up to the host worker budget in plan/policy.yaml"
+  rationale: |
+    The comment above `sweep.reviewLanes` in plan/policy.yaml (lines 633 to 643 at origin/main 0953736f0) records the operator ruling of 2026-10-06: "width 4, max 5". It ends: "Lane five is never committed: it stays capacity the widener must earn".
+    W1-T11841 (queued, built on 2026-11-11) derives the ceiling of the review width from `reviewCapacity.hostWorkerBudget`, which is 8. After it merges the widener can earn lanes five to eight. The row keeps `max: 5`, which then bounds only the `value` field of the row.
+    A reader of the policy then sees two wrong statements: that five is the ceiling, and that lane five is the lane to earn.
+    The proof gate refuses a `grep:` proof that matches only comment lines (W1-T11884 lost a criterion to that rule on 2026-11-11). So the true statement goes on the `max` line itself, which is a data line with a comment at its end.
+    CHECKED for overlap: W1-T11841 does not edit plan/policy.yaml. W1-T11274 (queued, held) edits `reviewCapacity` rows only.
+  design: |
+    In plan/policy.yaml, in the `sweep.reviewLanes` row:
+    - change the comment at the end of the `max: 5` line to the text of the criterion. Keep the value 5;
+    - in the block comment above the row, replace the sentence about lane five with one sentence: since W1-T11841 the ceiling is the host worker budget, and each lane above the value is capacity that the widener must earn. Keep the measurements and the ruling of 2026-10-06.
+    Change no value, bound or origin. Run `test/policy.test.ts`.
+    If the proof gate does not accept the proof, do not add a criterion on a comment line. Report it, and fold this edit into the next task that changes the row.
+  falsifier: |
+    Leave the `max` line as it is and the criterion must fail. Change the value 5 and `test/policy.test.ts` must fail.

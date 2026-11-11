@@ -51,3 +51,9 @@
     Choose a host whose reading is unreadable and criterion 1 must fail. Push after a failure in the class caused by the change and criterion 4 must fail. Call a failure that is green on main "also failing on main" and criterion 3 must fail. Restore and require all to pass.
   note: |
     On a remote host the command runs the same preflight over ssh, in a worktree it brings there as a git bundle. The two scripts do this today.
+    Findings from the hand lane on the Mac agent account, added 2026-11-11. The command must keep each of them.
+    - One preflight at a time, in a fixed order. Three preflights at once starved the shared test slot: the static phase of each one counts as non-test load for the others. Observed: `wait_bound_exceeded` after 2,700 s with "non-test load 38 leave 0 of 8 usable core(s)".
+    - A static step that names its failure is a real failure of the branch. It is not a host fault, and the command does not run the preflight again for it.
+    - A branch that already has a pull request is updated. The command does not open a second pull request for it.
+    - The body of an amendment pull request needs an `Acceptance:` block. The hand lane's first amendment bodies had none and failed the gate.
+    - A launcher that the command starts must add to PATH. It must not replace PATH.

@@ -1,0 +1,69 @@
+- id: W1-T12259
+  title: "The Mac agent account publishes the heartbeat on a schedule"
+  repo: remudero
+  depends_on: []
+  priority: 0.9
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # an installer for a launchd job on an operator Mac that pushes a branch every five minutes
+  band_meaning: span
+  origin: operator-session#janitor-disk-waste-2026-11-11
+  plan_refs:
+    - W1-T2877
+    - W1-T4804
+    - W1-T10756
+    - W1-T12176
+  files:
+    - deploy/mac/install-heartbeat.sh
+    - deploy/mac/JANITOR.md
+    - test/deploy/the-mac-agent-account-publishes-the-beat-on-a-schedule.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "`deploy/mac/install-heartbeat.sh` writes one launchd property list for the account that runs it. The job starts scripts/fleet-heartbeat.sh of the named checkout every 300 seconds"
+      proof: "grep: W1-T12259 criterion 1 in test/deploy/the-mac-agent-account-publishes-the-beat-on-a-schedule.test.ts"
+    - claim: "The property list sets PATH, HOME, `RMD_ROOT` and `RMD_HEARTBEAT_BRANCH` and nothing else. It holds no token, and the test fails if any other variable is in it"
+      proof: "grep: W1-T12259 criterion 2 in test/deploy/the-mac-agent-account-publishes-the-beat-on-a-schedule.test.ts"
+    - claim: "The branch name is `heartbeat-<host>`, and the installer refuses a host name that is empty or that another heartbeat branch of the remote already uses"
+      proof: "grep: W1-T12259 criterion 3 in test/deploy/the-mac-agent-account-publishes-the-beat-on-a-schedule.test.ts"
+    - claim: "`--check` prints MISSING, DRIFTED or ok and changes nothing. `--dry-run` prints the property list and changes nothing"
+      proof: "grep: W1-T12259 criterion 4 in test/deploy/the-mac-agent-account-publishes-the-beat-on-a-schedule.test.ts"
+    - claim: "The installer never loads, unloads or changes another job, and never changes the crontab"
+      proof: "grep: W1-T12259 criterion 5 in test/deploy/the-mac-agent-account-publishes-the-beat-on-a-schedule.test.ts"
+    - claim: "With the environment of the property list and `RMD_HEARTBEAT_DRY_RUN=1`, the heartbeat script runs on macOS on a home with no daemon state. It prints `root_fs_free_kb` as a number and ends with status 0"
+      proof: "grep: W1-T12259 criterion 6 in test/deploy/the-mac-agent-account-publishes-the-beat-on-a-schedule.test.ts"
+    - claim: "The janitor guide tells the owner of an account how to run the installer"
+      proof: "grep: install-heartbeat[.]sh in deploy/mac/JANITOR.md"
+  rationale: |
+    OBSERVED 2026-11-11: the Mac agent account publishes no heartbeat, so no part of the fleet measures its free disk on a schedule.
+    - The last heartbeat of this account is the commit of the branch `heartbeat`, dated 2026-08-14T12:45-04:00. Its payload names `/Users/craigoleyagent/Remudero/remudero`.
+    - The Azure host publishes `heartbeat-azure` every five minutes. Its newest commit was 2026-11-11T03:40Z.
+    - The janitor of the account wrote `EMERGENCY: 8GiB free < 20GiB floor` at 2026-11-09T22:00 and `19GiB free` at 2026-11-10T20:00. The lines went to `~/Library/Logs/remudero/janitor.log`. Nothing reads that file.
+    - The author preflight refused twice on 2026-11-11 for free disk below 20 GiB. The hand lane tried again every five minutes and told nobody.
+    READ at origin/main 3c6e5e476.
+    - The host-resource gardener reads the refs `refs/remotes/origin/heartbeat-<host>` (`hostResourceInputStamp`, src/lib/host-resource-gardener.ts:71). A host with no such branch does not exist for it.
+    - The header of scripts/fleet-heartbeat.sh describes the schedule: a launchd job with `StartInterval` 300 that starts the script of the checkout. No file in the repo installs that job.
+    - `.github/workflows/fleet-heartbeat-watch.yml` reads a declared list of branches (`HEARTBEAT_BRANCHES`, line 306). A new branch raises no silence alarm until someone adds it to that list.
+    - The accounts of this Mac already have launchd jobs. W1-T12176 (queued) makes doctor read their state.
+    CHECKED for overlap: W1-T2877 (merged) installed the units of the Azure host. W1-T10756 (queued) is about which checkout the cron lines of the Azure host run. Neither installs a job on a Mac.
+  design: |
+    New script deploy/mac/install-heartbeat.sh, in the shape of deploy/mac/install-tmp-reclaim.sh.
+    - Options: `--checkout <path>` (default `~/Remudero/remudero`), `--host <name>`, `--check`, `--dry-run`, and `--agents-dir <path>` for the test.
+    - It writes `~/Library/LaunchAgents/com.remudero.heartbeat.plist` with `StartInterval` 300, the program path, and the four variables of criterion 2. It writes through a temporary file and a rename.
+    - It loads the job with `launchctl bootstrap gui/<uid>` only when it wrote a new or changed file. The test replaces `launchctl` with a recorder.
+    - It reads the heartbeat branches of the remote with `git ls-remote` for criterion 3.
+    The heartbeat pushes with the git credential of the account, as the header of the script describes. The installer handles no credential.
+    The heartbeat reports the commit of its checkout (`install_head_sha`), so a reader can see a checkout that is out of date.
+    deploy/mac/JANITOR.md gets one short section: what the job does, the command to install it, and the command to check it.
+    If criterion 6 shows that the script fails on a Mac with no daemon state, fix the probe that fails in the script and add scripts/fleet-heartbeat.sh to `files` by a scope amendment.
+    NOT IN SCOPE: the watch workflow, the Azure host, a janitor change, and the removal of the branch `heartbeat`.
+  falsifier: |
+    Write a token variable into the property list and criterion 2 must fail. Accept the host name `azure` and criterion 3 must fail. Write a file under `--check` and criterion 4 must fail. Unload another job and criterion 5 must fail. Restore and require all seven to pass.
+  note: |
+    Host and account: the Mac, for each account whose owner runs the installer. The first one is the agent account `craigoleyagent`.
+    The job removes nothing. It reads sizes and pushes one commit to its own branch.
+    After the merge the owner of the account runs the installer once. A merge alone starts no job.
+    This task has the most open questions of the filing: the script has not run on this account since August, and the push needs the git credential of the account under launchd.
+    Until this job runs, W1-T12254 cannot see the Mac.

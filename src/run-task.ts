@@ -1337,6 +1337,12 @@ import { captureSelectedRegistryIntent, qualifySelectedRegistryIntent, observeSe
 
 import { parseSelfForecast, SELF_FORECAST_REPORT_CONTRACT } from "./lib/self-forecast.js";
 import { readPrOwnerLedgerProjection, type PrOwnerLedgerProjection } from "./lib/pr-owner-ledger.js";
+import {
+  decideStaleFixDispatchRecovery,
+  staleFixDispatchShadowInputs,
+  withStaleFixDispatchShadow,
+  type StaleFixDispatchShadow,
+} from "./lib/stale-fix-dispatch-recovery.js";
 import { prStateCommand } from "./lib/pr-state.js";
 import { auditLedgerUnion, createIncrementalLedgerUnion, createSizedMemo, readLedgerUnionRawLinesAsync, readLedgerUnionRecordsSync, readValidatedRotationDigest, realLedgerFs, type LedgerUnionRecordRead } from "./lib/ledger-union.js";
 // meaningOfStep: only ledgerGrepCommand read it, and it moved to src/lib/report-commands.ts
@@ -3789,6 +3795,8 @@ interface PrOwnerVerdict {
   fix?: PrOwnerFixEvidence;
   sweep?: PrOwnerSweepEvidence;
   claim?: PrOwnerClaim;
+  /** W1-T12113: diagnostic only — never an input to `verdict`. */
+  recoveryShadow?: StaleFixDispatchShadow;
 }
 
 interface PrOwnerClaim {
@@ -3925,11 +3933,26 @@ export function derivePrOwnerVerdict(
   });
 }
 
+type PrOwnerFacts = Pick<PrOwnerLedgerProjection, "corpusNewestTs" | "latestFix" | "latestSweep" | "relatedClaimKeys">;
+
 function prOwnerVerdictFromFacts(
   prNumber: number,
   corpus: Omit<PrOwnerLedgerRead, "rows">,
   claimRead: PrOwnerClaimRead,
-  facts: Pick<PrOwnerLedgerProjection, "corpusNewestTs" | "latestFix" | "latestSweep" | "relatedClaimKeys">,
+  facts: PrOwnerFacts,
+): PrOwnerVerdict {
+  const verdict = prOwnerOwnershipVerdict(prNumber, corpus, claimRead, facts);
+  if (facts.latestFix === undefined) return verdict;
+  // W1-T12113: the recovery decision in SHADOW — computed after, and never fed into, the verdict.
+  const shadow = staleFixDispatchShadowInputs(prNumber, corpus, facts.latestFix);
+  return withStaleFixDispatchShadow(verdict, decideStaleFixDispatchRecovery(shadow.expected, shadow.facts));
+}
+
+function prOwnerOwnershipVerdict(
+  prNumber: number,
+  corpus: Omit<PrOwnerLedgerRead, "rows">,
+  claimRead: PrOwnerClaimRead,
+  facts: PrOwnerFacts,
 ): PrOwnerVerdict {
   const compressedArchiveCount = corpus.archiveFiles.filter((p) => p.endsWith(".ndjson.gz")).length;
   const corpusNewestTs = facts.corpusNewestTs;
@@ -4000,6 +4023,9 @@ function renderPrOwnerVerdict(v: PrOwnerVerdict): string {
     );
   }
   if (v.claim) lines.push(`  fix branch claim: ${v.claim.key}, pid=${v.claim.pid}, run=${v.claim.runId}`);
+  if (v.recoveryShadow) {
+    lines.push(`  recovery_shadow: HOLD reason=${v.recoveryShadow.reason} (shadow only; ownership unchanged, no receipt written)`);
+  }
   if (v.sweep) {
     lines.push(
       `  sweep.disposed: ts=${v.sweep.ts ?? "unknown"}, task=${v.sweep.taskId ?? "unknown"}, run=${v.sweep.runId ?? "unknown"}, ` +
@@ -24659,10 +24685,64 @@ function lifetimeHistory(
   };
 }
 
+const LIFETIME_HISTORY_STEPS = ["run.start", "daemon.spawn_infra_blocked", "verdict"];
+
+/**
+ * W1-T12235: the lifetime history's slice of each rotated ledger file. A rotated file does not change, so
+ * a start reads only the files that have no kept slice. A kept row holds its step and its whole ledger
+ * line: `replayedLifetimeLedgerLine` compares whole lines, and the live overlay shares that window.
+ */
+const LIFETIME_HISTORY_SLICE: EscalationTriageSlice = {
+  holder: "dispatch.lifetime-history",
+  steps: LIFETIME_HISTORY_STEPS,
+  sharedSnapshot: true,
+  project: (row) => typeof row.lifetime_line === "string" && Object.keys(row).length === 2
+    ? row
+    : { step: row.step, lifetime_line: JSON.stringify(row) },
+};
+
+interface LifetimeSliceRows {
+  rows: Array<{ step: string; raw: string; row: Record<string, unknown> }>;
+  archiveCount: number;
+  read: number;
+  fromSnapshot: number;
+  fromDigest: number;
+}
+
+/** The rows of every rotated file from the kept slices, oldest file first. Any doubt about a slice gives
+ * `fallback`, and the caller reads every rotated file as before W1-T12235. */
+async function lifetimeRowsFromSlices(stateDir: string): Promise<LifetimeSliceRows | { fallback: string }> {
+  try {
+    const reader = createEscalationTriageHistoryReader({ slice: LIFETIME_HISTORY_SLICE, parseAll: true });
+    const sliced = await reader.rotations(stateDir);
+    const load = reader.lastLoad();
+    if (sliced.rotations.length === 0 && sliced.unread.length === 0) return { fallback: "no_rotated_file" };
+    if (!sliced.ok) return { fallback: "rotated_file_not_kept" };
+    if (load.snapshotError !== undefined) return { fallback: `snapshot: ${load.snapshotError}`.slice(0, 200) };
+    const rows: LifetimeSliceRows["rows"] = [];
+    for (const rotation of sliced.rotations) {
+      for (const kept of rotation.rows) {
+        const { step, lifetime_line: raw } = kept;
+        if (typeof step !== "string" || typeof raw !== "string") return { fallback: "slice_row_malformed" };
+        const row: unknown = JSON.parse(raw);
+        if (row === null || typeof row !== "object" || Array.isArray(row) || (row as Record<string, unknown>).step !== step) {
+          return { fallback: "slice_row_malformed" };
+        }
+        rows.push({ step, raw, row: row as Record<string, unknown> });
+      }
+    }
+    return { rows, archiveCount: sliced.rotations.length, read: load.rotationsRead, fromSnapshot: sliced.held, fromDigest: load.digestHits };
+  } catch (error) {
+    const reason = (error instanceof Error ? error.message : String(error)).slice(0, 200);
+    return { fallback: reason };
+  }
+}
+
 /** Archive attribution retains per-task tallies and bounded start identities and pending verdict joins.
  * Per-run attribution is released at its terminal verdict; unknown starts remain charged.
- * `auditLedgerUnion` scans both rotation forms; if any archive is unreadable, this returns
- * `undefined` and the caller deliberately keeps the old live-only lifetime decision. */
+ * The rows come from the kept slices (W1-T12235). With no usable slice, `auditLedgerUnion` scans both
+ * rotation forms; if any archive is unreadable, this returns `undefined` and the caller deliberately
+ * keeps the old live-only lifetime decision. `loaded` is the `dispatch.lifetime_history_loaded` row. */
 export async function auditedLifetimeTalliesFromArchives(
   stateDir: string,
   ledgerPath: string = join(stateDir, LEDGER_FILENAME),
@@ -24674,20 +24754,33 @@ export async function auditedLifetimeTalliesFromArchives(
   archiveCount: number;
   unread: readonly string[];
   records: number;
+  loaded: Record<string, unknown>;
 }> {
   let handedOff = false;
   const accounting = lifetimeAccounting((failure) => { if (handedOff) onIndexUnavailable?.(failure); });
   const recentByStep = new Map<string, LifetimeReplayWindow>();
   try {
-  const scan = await auditLedgerUnion(stateDir, {
-    step: ["run.start", "daemon.spawn_infra_blocked", "verdict"],
-    dedupeWindowPerStep: MAX_RETAINED_LINES_PER_STEP,
-    onRecord: (row, raw) => {
-      const step = typeof row.step === "string" ? row.step : "";
-      if (replayedLifetimeLedgerLine(recentByStep, step, raw)) return;
+  const sliced = await lifetimeRowsFromSlices(stateDir);
+  let scan: { ok: boolean; archiveCount: number; unread: readonly string[]; records: number };
+  if ("rows" in sliced) {
+    let records = 0;
+    for (const { step, raw, row } of sliced.rows) {
+      if (replayedLifetimeLedgerLine(recentByStep, step, raw)) continue;
+      records += 1;
       accounting.record(row);
-    },
-  });
+    }
+    scan = { ok: true, archiveCount: sliced.archiveCount, unread: [], records };
+  } else {
+    scan = await auditLedgerUnion(stateDir, {
+      step: LIFETIME_HISTORY_STEPS,
+      dedupeWindowPerStep: MAX_RETAINED_LINES_PER_STEP,
+      onRecord: (row, raw) => {
+        const step = typeof row.step === "string" ? row.step : "";
+        if (replayedLifetimeLedgerLine(recentByStep, step, raw)) return;
+        accounting.record(row);
+      },
+    });
+  }
   const unavailableReason = !scan.ok ? "archive_unreadable" : accounting.unavailableReason();
   if (unavailableReason !== undefined) accounting.close();
   const history = unavailableReason === undefined ? lifetimeHistory(ledgerPath, accounting, recentByStep) : undefined;
@@ -24699,6 +24792,14 @@ export async function auditedLifetimeTalliesFromArchives(
     archiveCount: scan.archiveCount,
     unread: scan.unread,
     records: scan.records,
+    loaded: {
+      archive_count: scan.archiveCount,
+      records: scan.records,
+      archives_read: "rows" in sliced ? sliced.read : scan.archiveCount,
+      archives_from_snapshot: "rows" in sliced ? sliced.fromSnapshot : 0,
+      archives_from_digest: "rows" in sliced ? sliced.fromDigest : 0,
+      ..."rows" in sliced ? {} : { slice_fallback: sliced.fallback },
+    },
   };
   } finally {
     if (!handedOff) accounting.close();
@@ -25879,10 +25980,7 @@ async function drainCommand(
       ...(archivedLifetime.indexError === undefined ? {} : { detail: archivedLifetime.indexError }),
     });
   } else {
-    log("dispatch.lifetime_history_loaded", {
-      archive_count: archivedLifetime.archiveCount,
-      records: archivedLifetime.records,
-    });
+    log("dispatch.lifetime_history_loaded", archivedLifetime.loaded);
   }
   // W1-T206: see breakerGateFor's doc — ONE cache for this whole `rmd drain` invocation.
   const breakerGate = breakerGateFor(ledgerPath, openHeadBranchesForBreaker, archivedLifetime.history);

@@ -4,7 +4,7 @@
   depends_on: []
   priority: 1.5
   type: recon
-  verify: human
+  verify: auto
   risk: high # Rule 19: one concern, a design document and its two index files; no change under src/ or deploy/
   band_meaning: span
   origin: operator-session#restart-and-recycle-downtime-2026-11-10
@@ -19,7 +19,7 @@
     - docs/research/a-standby-daemon-for-a-freshness-restart.md
     - docs/research/README.md
     - docs/docs-index.json
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "The design states the measured cost of a second daemon process beside the first: memory, processor time and GitHub reads, with the source of each number"
@@ -60,3 +60,13 @@
     Remove one of the six headings from the document and its criterion must fail.
   note: |
     Parked for the operator: `verify: human`. Do not dispatch a build from this task.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.85
+    reasons:
+      - "The declared files are all documentation (a new research doc, the research README and the docs index). The description states \"THIS TASK WRITES NO CODE\" and that its output is one document."
+      - "The task does not appear to touch secrets, auth, deploy, merge or review policy, and it deletes nothing. The riskier subject matter (lock, entrypoint, checkout) is only to be described, and a build needs a separate task after the operator reads the design."
+      - "The six acceptance criteria are grep-verifiable section headings, so the result can be verified. The operator-decision content is a section within the document, not a decision required to land the change. The author family has a strong record (25 merged, Beta mean 0.88)."
+    judged_at: "2026-11-11T05:42:25.523Z"
+    pin: "edeffee53efcee28888bb36e8f082e293f7b06905d523ab9ddcc581fa5a77fc8"

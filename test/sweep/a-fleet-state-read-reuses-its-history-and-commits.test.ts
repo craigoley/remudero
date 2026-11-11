@@ -135,7 +135,8 @@ test(`${proof}: history and fleet rows match the whole union while unchanged arc
   const secondRows = await observed(second.rows);
   assert.equal(secondRows.find(row => row.pipeline === "ci")?.observed, true);
   assert.equal(f.reads.filter(path => path.includes("/commits/")).length, 1);
-  assert.equal(f.reads.filter(path => path.includes("/actions/runs?")).length, 4);
+  // W1-T12234: both commits have a run, so the second call reads no run count again.
+  assert.equal(f.reads.filter(path => path.includes("/actions/runs?")).length, 2);
   assert.equal(f.reads.filter(path => path.includes("/workflows/")).length, 3);
   fs.appendFileSync(f.ledgerPath, JSON.stringify({ step: "deploy.ok", ts: "2026-10-16T00:00:00Z" }) + "\n");
   const third = await f.effects().readFleetState!([]);
