@@ -1929,7 +1929,7 @@ function* testSlotPolls(label: string, opts: TestSlotOptions, maximum: number,
           const retainUnknown = (held: TestSlotHolder, probeReason?: string): false => {
             agedHold = judgeTestSlotHoldAge(held, { hostname: host(), bootId: bootId(), pidNs: pidNamespace(), cgroupNs: cgroupNamespace(),
               slotDir: dir, slot: i, probeReason }, clock.now());
-            if (!agedHold?.aged) return false;
+            if (agedHold === undefined || !agedHold.aged) return false; // Local, proven ended, or still within its bound.
             const key = `aged:${i}:${held.ownerNonce}`;
             if (observed.has(key)) return false;
             observeOnce(key, { step: "test_slot.owner_aged", label, ...agedHold,
@@ -1956,7 +1956,8 @@ function* testSlotPolls(label: string, opts: TestSlotOptions, maximum: number,
                 observeOnce("cgroup-identity:" + i + ":" + held.ownerNonce + ":" + evidence.state + ":" + evidence.reason, { step: "test_slot.reclaim_withheld", label,
                   slot: i, pid: held.pid, holder: held.label, ownerNonce: held.ownerNonce, processStart: held.processStart,
                   evidence: evidence.state, coverage: evidence.coverage, reason: evidence.reason });
-                return retainUnknown(held, evidence.reason); // A complete identity never falls through to heartbeat age.
+                // A complete identity never falls through to heartbeat age; only an unobservable tree is UNKNOWN.
+                return evidence.state === "unknown" && retainUnknown(held, evidence.reason);
               }
               const pidStale = testSlotHolderStale(held, clock.now(), { hostname: host, bootId, isPidAlive, pidNamespace });
               const cadence = held.heartbeatIntervalMs;

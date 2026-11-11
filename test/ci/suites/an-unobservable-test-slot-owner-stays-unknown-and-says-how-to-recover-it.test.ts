@@ -173,6 +173,13 @@ test("a namespace-mismatch record names that as missing evidence", t => {
     "a same-namespace record is judged by the local pid probe, not aged");
   assert.equal(judgeTestSlotHoldAge(held, { hostname: hostname(), bootId: "other", pidNs: "pid:[waiter]", slotDir: "/d", slot: 2 }, NOW), undefined,
     "a different boot id is proven ended, not UNKNOWN");
+  const legacy = judgeTestSlotHoldAge({ pid: 7, host: "another-mac", startedAt: held.startedAt, heartbeatAt: LEASE_PAST, label: "legacy" },
+    { hostname: hostname(), slotDir: "/scratch/my slots", slot: 1 }, NOW);
+  assert.equal(legacy?.aged, true);
+  assert.deepEqual(legacy?.missingEvidence, ["host differs: owner pid unprobeable from here", "boot id unknown on one side: same kernel unproven",
+    "no pinned cgroup identity recorded", "no owner uid recorded"]);
+  assert.equal(legacy?.recovery, "node --import tsx scripts/test-slot-owner-release.mjs --slot-dir '/scratch/my slots' --slot 1 " +
+    "--nonce '<unrecorded>' --pid 7 --start '<unrecorded>' # run as uid <unrecorded> inside pid namespace <unrecorded> on another-mac");
 });
 
 test("a later waiter behind an aged hold keeps its FIFO position", t => {
