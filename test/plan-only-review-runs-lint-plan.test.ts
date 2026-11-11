@@ -804,3 +804,22 @@ test("W1-T11390: without a request the terminal still replays", async (t) => {
   assert.equal(noCheckout.kind, "replay");
   assert.deepEqual(f.retryRows(), []);
 });
+
+test("a plan-only review whose lint cannot run withholds the pass", async () => {
+  const { repo } = consumerWithFiling(CLEAN_FILING);
+  const rows: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+  const log = (step: string, extra?: Record<string, unknown>): void => { rows.push({ step, extra }); };
+  const secret = "ghp_" + "a".repeat(36);
+  const dies = async () => ({ status: 1, signal: null, stdout: `token ${secret}\n`, stderr: "boom: cannot open store\n\n" });
+  const out = await lintPlanForReview(repo.dir, undefined, dies, { log });
+  assert.equal(out.ran, false);
+  assert.match(out.ran ? "" : out.reason, /^lint-plan exited 1 with no summary; it printed: boom: cannot open store$/);
+  const row = rows.find((r) => r.step === "review.plan_lint_unreadable");
+  assert.ok(row, "one unreadable row");
+  assert.equal(row.extra?.status, 1);
+  assert.match(String(row.extra?.tail), /boom: cannot open store/);
+  assert.ok(!JSON.stringify(rows).includes(secret), "secret never ledgered");
+  assert.ok(!(out.ran ? "" : out.reason).includes(secret));
+  const quiet = await lintPlanForReview(repo.dir, undefined, async () => ({ status: 1, signal: null, stdout: "", stderr: "" }));
+  assert.deepEqual(quiet, { ran: false, reason: "lint-plan exited 1 with no summary" });
+});

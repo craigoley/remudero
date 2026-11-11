@@ -1,4 +1,5 @@
 import { isImprovementBoundProposal, isReviewedImprovementDraft, runImprovementAction, type ImprovementPlanReceipt } from "./lib/improvement-thread.js";
+import { formatTail } from "./lib/proofExecutor.js";
 import { operatorReleaseContractChanged, operatorReleasePin, qualifyReleaseEvidence, readReleaseLedgerLines, releaseContractPins, type ReleaseEvidence } from "./lib/operator-release.js";
 import {
   buildSweepEffects as buildSweepEffectsFromModule,
@@ -18621,7 +18622,13 @@ export async function lintPlanForReview(
     if (result.signal) return { ran: false, reason: `lint-plan killed by ${result.signal}` };
     if (result.status === null) return { ran: false, reason: "lint-plan exited without a status" };
     const lines = `${result.stdout}\n${result.stderr}`.split(/\r?\n/);
-    return planLintOutcomeFromOutput(result.status, lines, mergeBase, existsSync(join(headCheckoutDir, "plan", "tasks.d")));
+    const outcome = planLintOutcomeFromOutput(result.status, lines, mergeBase, existsSync(join(headCheckoutDir, "plan", "tasks.d")));
+    if (outcome.ran) return outcome;
+    // The child ran and printed no summary: keep its own redacted, bounded tail so the cause is not discarded.
+    const tail = formatTail(result.stdout, result.stderr, 20, 2000);
+    options.log?.("review.plan_lint_unreadable", { status: result.status, signal: result.signal ?? null, tail });
+    const last = tail.split("\n").filter((l) => l.trim() !== "").pop();
+    return last ? { ran: false, reason: `${outcome.reason}; it printed: ${last.trim().slice(0, 160)}` } : outcome;
   } catch (e) {
     return { ran: false, reason: `lint-plan threw: ${String((e as Error).message).split("\n")[0]}` };
   }
