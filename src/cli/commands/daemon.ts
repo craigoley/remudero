@@ -1528,6 +1528,8 @@ export async function daemonCommand(
         requestReview: requestLandingReview,
         // W1-T5460: drain the console decisions `rmd serve` queued under the same state root.
         stateRoot: config.root,
+        // W1-T12203: each pass also lands in the plan destination checkout while the host file names one.
+        planDestinationStateDir: join(config.root, "state"),
       })
     : undefined;
   const sweepFeedbackLandingRung = feedbackLandingRungs?.perPoll;

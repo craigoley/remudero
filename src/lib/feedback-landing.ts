@@ -31,6 +31,7 @@ import { planReconcilePrBody, planReconcileProofTemplate } from "./plan-reconcil
 import { resolveRepoLayout } from "./repo-layout.js";
 import { slug as kebabSlug } from "./feedback-docket.js";
 import { mergeFeedbackRecord, type FeedbackRecordMergeDecision } from "./feedback-record-merge.js";
+import { planDestinationRepository, type PlanDestinationRepository } from "./plan-destination.js";
 import { evidenceRevisionOf, validateEvidenceRevision } from "./feedback-evidence-revision.js";
 import { feedbackPublicationSteps, type FeedbackPublicationContext } from "./contributor-admission.js";
 import {
@@ -156,6 +157,8 @@ export interface LandFeedbackOpts {
   planPrPreflight?: (commitSha: string, pr: { title: string; body: string }) => PlanPrPreflightResult;
   /** W1-T5460: daemon state root. Set, a status write QUEUES there and `landFeedback` lands nothing; {@link sweepFeedbackLanding} lands it. */
   stateRoot?: string;
+  /** W1-T12203: a landing into the plan destination leaves out each file its gate's leak scan refuses. */
+  screenForDestinationGate?: boolean;
 }
 
 export interface LandFeedbackResult {
@@ -857,6 +860,20 @@ function* hasFeedbackLineage(net: LandingNet, blob: string): Generator<LandingAs
   catch { /* Presence is not authority: unreadable bytes get an independent unknown publication receipt. */ return false; }
 }
 
+/** W1-T12203: the leak scan of the plan destination's gate, `LEAK_PATTERNS` in its scripts/ops-gate.rb. */
+const DESTINATION_GATE_LEAKS: ReadonlyArray<[string, RegExp]> = [
+  ["private key header", /-----BEGIN [A-Z ]*PRIVATE KEY-----/],
+  ["GitHub token-shaped string", /(?:ghp_|gho_|ghs_|github_pat_)\w{20,}/],
+  ["AWS access key id-shaped string", /AKIA[0-9A-Z]{16}/],
+  ["Slack token-shaped string", /xox[baprs]-[0-9]+-[0-9A-Za-z-]{6,}/],
+];
+
+function destinationGateRefusal(opts: LandFeedbackOpts, path: string, bytes: string): FeedbackRefusal | undefined {
+  if (!opts.screenForDestinationGate) return undefined;
+  const leak = DESTINATION_GATE_LEAKS.find(([, pattern]) => pattern.test(bytes));
+  return leak === undefined ? undefined : { path, reason: `the plan destination gate refuses this feedback file (${leak[0]})` };
+}
+
 /** W1-T9753: `own` maps each path the landing's own commits changed to its blob at their base (null: absent). */
 interface BranchPending {
   ok: true;
@@ -1298,6 +1315,8 @@ interface LandPendingOpts extends LandFeedbackOpts {
   /** W1-T5672: awaited forms of the network verbs, used only when an async driver runs the steps. */
   gitAsync?: GitExecAsync;
   ghAsync?: GhExecAsync;
+  /** W1-T12203: the queued records this pass may drain; absent, all of them. */
+  queueScope?: ReadonlySet<string>;
 }
 
 function landPending(root: string, kind: LandingKind, opts: LandPendingOpts): LandFeedbackResult {
@@ -1330,7 +1349,7 @@ function* landPendingSteps(root: string, landing: LandingKind | DeferredLandingK
     // stage or land, so the poll pays no network fetch. An unreadable scan is not "idle" — it takes the full path.
     let idle = false;
     try {
-      idle = (yield* listDirtyRelFiles(root, landing.ownedDir, net)).length === 0 && queuedFeedbackSources(queueRoot).length === 0;
+      idle = (yield* listDirtyRelFiles(root, landing.ownedDir, net)).length === 0 && queuedFeedbackSources(queueRoot, opts.queueScope).length === 0;
     } catch {
       idle = false; // deliberate: an unreadable scan is not "idle", so the full path below reports it
     }
@@ -1339,7 +1358,7 @@ function* landPendingSteps(root: string, landing: LandingKind | DeferredLandingK
 
     yield* net.git(["fetch", "origin", "--quiet"]);
     acknowledgement = yield* acknowledgeLandedQueueCopies(root, kind, net);
-    if (queueRoot) keptForCheckout = yield* acknowledgeLandedFeedbackQueue(opts.servedRoot ?? root, queueRoot, net);
+    if (queueRoot) keptForCheckout = yield* acknowledgeLandedFeedbackQueue(opts.servedRoot ?? root, queueRoot, net, opts.queueScope);
 
     // W1-T3561: new blobs stage, identical blobs skip; changed feedback records use the shared
     // §7B merge predicate and report backward-copy refusals. Other paths retain byte inequality.
@@ -1351,9 +1370,11 @@ function* landPendingSteps(root: string, landing: LandingKind | DeferredLandingK
       const refused: FeedbackRefusal[] = [];
       const candidates: Array<[string, string]> = [
         ...(yield* listDirtyRelFiles(root, kind.ownedDir, net)).map((rel): [string, string] => [rel, join(root, rel)]),
-        ...queuedFeedbackSources(queueRoot),
+        ...queuedFeedbackSources(queueRoot, opts.queueScope),
       ];
       for (const [rel, abs] of candidates) {
+        const gateRefusal = destinationGateRefusal(opts, rel, readFileSync(abs, "utf8"));
+        if (gateRefusal) { refused.push(gateRefusal); continue; }
         const localSha = (yield* net.git(["hash-object", abs])).trim();
         let mainSha: string | null = null;
         if (env) {
@@ -1469,16 +1490,87 @@ export function sweepFeedbackLanding(root: string, opts: SweepFeedbackLandingOpt
   return logLandingSweep(opts.log, driveLanding(sweepLandingSteps(root, opts), syncPreflightOf(root, opts), meter), meter);
 }
 
-/** The daemon's feedback-landing rungs (W1-T5620; the boot pass awaits since W1-T9695). */
+/** The daemon's feedback-landing rungs (W1-T5620; the boot pass awaits since W1-T9695). W1-T12203: given the state
+ *  directory, each pass reads the plan destination switch and also lands in the destination checkout. */
 export function feedbackLandingSweepRungs(
   root: string,
-  opts: Omit<SweepFeedbackLandingOpts, "planPrPreflight">,
+  opts: Omit<SweepFeedbackLandingOpts, "planPrPreflight"> & { planDestinationStateDir?: string },
 ): { atBoot: () => Promise<LandFeedbackResult>; perPoll: () => Promise<LandFeedbackResult> } {
-  return { atBoot: () => sweepFeedbackLandingAsync(root, opts), perPoll: () => sweepFeedbackLandingAsync(root, opts) };
+  const { planDestinationStateDir, ...sweepOpts } = opts;
+  const pass = (): Promise<LandFeedbackResult> => planDestinationStateDir === undefined
+    ? sweepFeedbackLandingAsync(root, sweepOpts) : sweepWithPlanDestination(root, sweepOpts, planDestinationStateDir);
+  return { atBoot: pass, perPoll: pass };
+}
+
+/**
+ * W1-T12203: the options of a landing into the plan destination checkout. The pull request opens in that
+ * repository, on the plain landing branch, with no review request of the public repository. Each row and
+ * receipt says "the plan destination" in place of its name and its checkout path (the W1-T11768 rule).
+ */
+export function planDestinationLandingOpts<O extends LandFeedbackOpts>(opts: O, destination: PlanDestinationRepository): O {
+  const target = { owner: destination.owner, repo: destination.repo };
+  const redact = (fields: Record<string, unknown> = {}): Record<string, unknown> => JSON.parse(JSON.stringify(fields)
+    .split(destination.checkoutDir).join("the plan destination checkout")
+    .split(repoKey(target)).join("the plan destination"));
+  const { requestReview: _review, landingOwner: _owner, git: _git, gitAsync: _gitAsync, ...rest } = opts as O & { gitAsync?: GitExecAsync };
+  const { log, publication } = opts;
+  return {
+    ...rest as O, targetRepository: target, sourceRepository: target, screenForDestinationGate: true,
+    ...(log === undefined ? {} : { log: (step: string, extra?: Record<string, unknown>) => log(step, redact(extra)) }),
+    ...(publication === undefined ? {} : { publication: { ...publication, record: (step: string, fields: Record<string, unknown>) => publication.record(step, redact(fields)) } }),
+  };
+}
+
+/** W1-T12203: a queued record lands where a checkout or its origin/main holds it. A new record follows the switch. */
+async function queuedRecordHome(root: string, checkoutDir: string, rel: string, kindOn: boolean): Promise<"public" | "destination"> {
+  const onMain = async (dir: string): Promise<boolean> => {
+    try {
+      await defaultGitAsync(dir)(["cat-file", "-e", `origin/main:${rel}`]);
+      return true;
+    } catch {
+      return false; // git exits 1 when origin/main has no such path: this checkout does not hold the record
+    }
+  };
+  if (existsSync(join(root, rel))) return "public";
+  if (existsSync(join(checkoutDir, rel))) return "destination";
+  if (await onMain(root)) return "public";
+  if (await onMain(checkoutDir)) return "destination";
+  return kindOn ? "destination" : "public";
+}
+
+async function sweepWithPlanDestination(
+  root: string,
+  opts: Omit<SweepFeedbackLandingAsyncOpts, "planPrPreflight">,
+  stateDir: string,
+): Promise<LandFeedbackResult> {
+  const named = planDestinationRepository(stateDir);
+  if (named.outcome === "off") return sweepFeedbackLandingAsync(root, opts);
+  const queued = opts.stateRoot === undefined ? [] : queuedFeedbackLandings(opts.stateRoot);
+  if (named.outcome === "unreadable" || !existsSync(join(named.checkoutDir, ".git"))) {
+    // A queued record has no known repository while the switch cannot be read: it waits in the queue.
+    const reason = named.outcome === "unreadable" ? named.reason : "the plan destination checkout is not a git checkout";
+    const log = opts.log;
+    return sweepFeedbackLandingAsync(root, { ...opts, queueScope: new Set(), ...(log === undefined ? {} : {
+      log: (step, extra) => log(step, { ...extra, plan_destination: "unreadable", plan_destination_reason: reason, queue_waiting: queued.length }),
+    }) });
+  }
+  const toDestination = new Set<string>(), toPublic = new Set<string>();
+  for (const rel of queued) {
+    ((await queuedRecordHome(root, named.checkoutDir, rel, named.kinds.includes("feedback"))) === "destination" ? toDestination : toPublic).add(rel);
+  }
+  const result = await sweepFeedbackLandingAsync(root, { ...opts, queueScope: toPublic });
+  const destination = planDestinationLandingOpts({ ...opts, servedRoot: named.checkoutDir, queueScope: toDestination }, named);
+  const log = destination.log;
+  await sweepFeedbackLandingAsync(named.checkoutDir, {
+    ...destination, ...(log === undefined ? {} : { log: (step, extra) => log(step, { ...extra, plan_destination: "destination" }) }),
+  });
+  return result;
 }
 
 export interface SweepFeedbackLandingAsyncOpts extends Omit<SweepFeedbackLandingOpts, "planPrPreflight"> {
   planPrPreflight?: PlanPrPreflightAsyncFn;
+  /** W1-T12203: set by the rungs only; the queued records this pass may drain. */
+  queueScope?: ReadonlySet<string>;
   /** W1-T5672: the awaited form of `git` for the network verbs (fetch, ls-remote, push); defaults to an injected `git`, else a real child process. */
   gitAsync?: GitExecAsync;
   /** W1-T5672: the awaited form of `gh`; defaults to an injected `gh`, else the paced async transport. */
@@ -1495,7 +1587,7 @@ export async function sweepFeedbackLandingAsync(root: string, opts: SweepFeedbac
 
 function sweepLandingSteps(
   root: string,
-  opts: Omit<SweepFeedbackLandingOpts, "planPrPreflight"> & { gitAsync?: GitExecAsync; ghAsync?: GhExecAsync },
+  opts: Omit<SweepFeedbackLandingOpts, "planPrPreflight"> & { gitAsync?: GitExecAsync; ghAsync?: GhExecAsync; queueScope?: ReadonlySet<string> },
 ): LandingSteps {
   const { log, ...landOpts } = { ...opts, planPrPreflight: undefined };
   const git = landOpts.git ?? defaultGit(root);
@@ -1639,6 +1731,8 @@ function* landContentSteps(
       const refused: FeedbackRefusal[] = [...(carried?.refused ?? [])];
       let i = 0;
       for (const { relPath, content: inputContent } of inputs) {
+        const gateRefusal = destinationGateRefusal(opts, relPath, inputContent);
+        if (gateRefusal) { refused.push(gateRefusal); continue; }
         let content = inputContent;
         // A scratch tmp file, never inside root — hash-object just needs a path to read from.
         const tmpFile = join(scratchDir as string, `content-${i++}`);
@@ -1940,14 +2034,17 @@ export function overlayQueuedFeedbackEntries<E extends { id: string; status: str
   return [...entries.map((entry) => overlayQueuedFeedback(entry, queued)), ...queueOnly];
 }
 
-function queuedFeedbackSources(stateRoot: string | undefined): Array<[string, string]> {
-  return stateRoot === undefined ? [] : queuedFeedbackLandings(stateRoot).map((rel) => [rel, join(feedbackPendingRoot(stateRoot), rel)]);
+function queuedFeedbackSources(stateRoot: string | undefined, scope?: ReadonlySet<string>): Array<[string, string]> {
+  return stateRoot === undefined ? [] : queuedFeedbackLandings(stateRoot)
+    .filter((rel) => scope === undefined || scope.has(rel)).map((rel) => [rel, join(feedbackPendingRoot(stateRoot), rel)]);
 }
 
 /** Drop a landed queued record only once the served checkout holds the upstream bytes. */
-function* acknowledgeLandedFeedbackQueue(root: string, stateRoot: string, net: LandingNet): Generator<LandingAsk, number, AskReply> {
+function* acknowledgeLandedFeedbackQueue(
+  root: string, stateRoot: string, net: LandingNet, scope: ReadonlySet<string> | undefined,
+): Generator<LandingAsk, number, AskReply> {
   let keptForCheckout = 0;
-  for (const [rel, abs] of queuedFeedbackSources(stateRoot)) {
+  for (const [rel, abs] of queuedFeedbackSources(stateRoot, scope)) {
     try {
       const remoteSha = (yield* net.git(["rev-parse", `origin/main:${rel}`])).trim();
       if ((yield* decideFeedbackStage(net, remoteSha, readFileSync(abs, "utf8"))).kind !== "keep-upstream") continue;
