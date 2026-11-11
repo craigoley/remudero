@@ -16,6 +16,9 @@
   files:
     - test/rules/a-script-ci-runs-before-npm-ci-imports-only-builtins.test.ts
     - scripts/census-precheck.mjs
+  # refusal-amendment (W1-T11255, run W1-T11255-1794388383398, 2026-11-11T15:56:43.639Z): the worker refused criterion 1 [proof-unexecutable-at-head] — proposed re-scope-criteria: repair the criterion's proof so it is executable at HEAD, or re-scope the criterion
+  #   worker evidence: W1-T11255: a filed proof already passes at the merge base, so branch run-W1-T11255-1794388383398 cannot open a PR
+  #   this task is held from dispatch until its record changes; an Architect must make the change above
   status: queued
   attempts: 0
   acceptance:

@@ -50,6 +50,7 @@ import {
   reviewSubjectFallbackAllowed as reviewSubjectFallbackAllowedFromModule,
   planTreeIsBehindMain as planTreeIsBehindMainFromModule,
   reviewCommand as reviewCommandFromModule,
+  REVIEW_EXIT_CAUSE_FLAG,
   whileWorkerRunLive as whileWorkerRunLiveFromModule,
   type ReviewCommandHost,
   type ReviewPostedRecheck,
@@ -1858,6 +1859,7 @@ export { classifyUpdateBranchFailure, detectReviewFalseBlock, detectCiLogVerdict
  * replacement. Extracted so a test can drive it against a counting fake, never a real `gh`/git call.
  */
 export type FreshTreeEntry = { kind: "bundle" | "tsx" | "unknown"; reason: string };
+export type FreshTreeExit = { cause: string; signal?: string; errorClass?: string };
 
 /** W1-T3723 — what {@link buildFreshTreeReviewRunner} needs, all injected so a test drives it
  *  without git, a worktree or a spawn. A `type` whose name does NOT end in `Deps`, deliberately:
@@ -1877,7 +1879,8 @@ export type FreshTreeReviewSeams = {
   /** Run `rmd review <pr> …` with `cwd` at the fresh worktree. Resolves to the exit code; on a
    *  non-zero exit it first hands `onFailure` the child's bounded stderr tail (W1-T4055). */
   spawnReview: (worktree: string, args: string[], onFailure?: (failure: string) => void,
-    parentEnv?: NodeJS.ProcessEnv, onEntry?: (entry: FreshTreeEntry) => void) => Promise<number>;
+    parentEnv?: NodeJS.ProcessEnv, onEntry?: (entry: FreshTreeEntry) => void,
+    store?: { storeRoot?: string }, onExit?: (exit: FreshTreeExit) => void) => Promise<number>;
   /** Tests may replace ownership; production holds the general reaper's real run-lock token. */
   withWorktreeLease?: <T>(worktree: string, action: () => Promise<T>) => Promise<T>;
   /**
@@ -1987,9 +1990,10 @@ export function buildFreshTreeReviewRunner(
   freshness: { originMainSha: string },
   onFailure?: (failure: string) => void,
   onEntry?: (entry: FreshTreeEntry) => void,
+  onExit?: (exit: FreshTreeExit) => void,
 ) => Promise<number | undefined> {
   const prepared = new Map<string, string>();
-  return async (prArg, rest, freshness, onFailure, onEntry) => {
+  return async (prArg, rest, freshness, onFailure, onEntry, onExit) => {
     const sha = freshness.originMainSha;
     try {
       let worktree = prepared.get(sha);
@@ -2008,7 +2012,7 @@ export function buildFreshTreeReviewRunner(
           prepared.delete(sha);
           throw new Error(`cached reviewer worktree at ${reviewerTree} is no longer an exact clean detached checkout of ${sha}`);
         }
-        return deps.spawnReview(reviewerTree, [prArg, ...rest], onFailure, undefined, onEntry);
+        return deps.spawnReview(reviewerTree, [prArg, ...rest], onFailure, undefined, onEntry, undefined, onExit);
       };
       return await (deps.withWorktreeLease ?? withReviewerWorktreeLease)(reviewerTree, run);
     } catch (err) {
@@ -2114,6 +2118,22 @@ export function freshTreeFailureText(text: string): string {
   return `…[${scrubbed.length - kept} earlier chars cut] ${scrubbed.slice(-kept)}`;
 }
 
+/** W1-T12225: the name that the review child wrote for its exit. The form is checked, not the list: the child runs newer code. */
+function readFreshTreeExit(exitFile: string, signal: NodeJS.Signals | null): FreshTreeExit {
+  if (signal) return { cause: "signal", signal };
+  if (!existsSync(exitFile)) return { cause: "not-reported" };
+  let line: string;
+  try {
+    line = readFileSync(exitFile, "utf8").slice(0, 256);
+  } catch (error) {
+    process.stderr.write(`spawnRmdReviewForFreshTree: exit cause unreadable: ${String(error)}\n`);
+    return { cause: "not-reported" };
+  }
+  const [cause = "", errorClass = ""] = line.trim().split("\t");
+  if (!/^[a-z][a-z0-9-]{0,47}$/.test(cause)) return { cause: "not-reported" };
+  return { cause, ...(/^[A-Za-z_$][A-Za-z0-9_$]{0,63}$/.test(errorClass) ? { errorClass } : {}) };
+}
+
 export function spawnRmdReviewForFreshTree(
   worktree: string,
   args: string[],
@@ -2121,14 +2141,17 @@ export function spawnRmdReviewForFreshTree(
   parentEnv: NodeJS.ProcessEnv = process.env,
   onEntry?: (entry: FreshTreeEntry) => void,
   store: { storeRoot?: string } = {},
+  onExit?: (exit: FreshTreeExit) => void,
 ): Promise<number> {
   return new Promise<number>((resolve, reject) => {
     const prepared = materializeMainEntryFromStore(worktree, store.storeRoot);
+    const exitDir = makeTempDir("review-exit");
+    const exitFile = join(exitDir, "cause");
     const sourceArgs = prepared.source ? ["--main-entry-source", JSON.stringify(prepared.source)] : [];
     // A daemon's installation token is copied at spawn and may expire during proof execution.
     // An App-backed child mints its own fresh token in main(); other callers keep their identity.
     const appConfigured = Boolean(parentEnv.GH_APP_ID && parentEnv.GH_APP_INSTALLATION_ID && parentEnv.GH_APP_PRIVATE_KEY_PATH);
-    const child = spawn(join(worktree, "bin", "rmd"), [...sourceArgs, "review", ...args], {
+    const child = spawn(join(worktree, "bin", "rmd"), [...sourceArgs, "review", ...args, REVIEW_EXIT_CAUSE_FLAG, exitFile], {
       cwd: worktree,
       // W1-T4055: stderr is piped only to be TEED — every byte still reaches this process's stderr.
       stdio: ["inherit", "inherit", "pipe", "pipe"],
@@ -2144,7 +2167,7 @@ export function spawnRmdReviewForFreshTree(
       process.stderr.write(chunk);
       held = (held + chunk.toString("utf8")).slice(-FRESH_TREE_STDERR_HOLD_CHARS);
     });
-    child.on("error", reject);
+    child.on("error", (error) => { rmSync(exitDir, { recursive: true, force: true }); reject(error); });
     // `close`, not `exit`: only `close` guarantees the piped stderr has been read to its end.
     child.on("close", (code: number | null, signal: NodeJS.Signals | null) => {
       const [kind, reason] = entryReport.trim().split("\t");
@@ -2154,6 +2177,8 @@ export function spawnRmdReviewForFreshTree(
         reason: `${reason || "launcher-did-not-report"}; ${storeReason}` });
       const exitCode = code ?? 1;
       if (exitCode !== 0) onFailure?.(signal && !held.trim() ? `killed by ${signal}` : freshTreeFailureText(held));
+      if (exitCode !== 0) onExit?.(readFreshTreeExit(exitFile, signal));
+      rmSync(exitDir, { recursive: true, force: true });
       resolve(exitCode);
     });
   });
@@ -2209,6 +2234,7 @@ export function buildReviewerCodeFreshnessGate(
     freshness: Extract<ReviewerCodeFreshness, { status: "stale" }>,
     onFailure?: (failure: string) => void,
     onEntry?: (entry: FreshTreeEntry) => void,
+    onExit?: (exit: FreshTreeExit) => void,
   ) => Promise<number | undefined>,
 ): {
   call: (prArg: string, rest: string[], deps: ReviewCommandDeps) => Promise<number>;
@@ -2236,10 +2262,15 @@ export function buildReviewerCodeFreshnessGate(
           // nothing but an exit code ledgered; the cause is what the next fix needs.
           let failure: string | undefined;
           let entry: FreshTreeEntry = { kind: "unknown", reason: "launcher-did-not-report" };
+          let exit: FreshTreeExit = { cause: "not-reported" };
           const childArgs = [...rest, ...reviewOptionFlags(reviewDeps), JUDGE_AT_OWN_START_FLAG];
-          return reviewFromFreshTree(prArg, childArgs, freshness, (why) => { failure = why; }, (choice) => { entry = choice; }).then((code) => {
+          return reviewFromFreshTree(prArg, childArgs, freshness, (why) => { failure = why; }, (choice) => { entry = choice; }, (ended) => { exit = ended; }).then((code) => {
             if (code !== undefined) {
-              const why = code === 0 ? {} : { failure: failure ?? "no failure reported" };
+              const why = code === 0 ? {} : {
+                failure: failure ?? "no failure reported", exit_cause: exit.cause,
+                ...(exit.signal === undefined ? {} : { exit_signal: exit.signal }),
+                ...(exit.errorClass === undefined ? {} : { exit_error_class: exit.errorClass }),
+              };
               log("review.ran_from_fresh_tree", { ...stale, exit_code: code, entry_kind: entry.kind, entry_reason: entry.reason, ...why });
               return code;
             }
@@ -10935,7 +10966,8 @@ export function fixRoundLandingFields(landing: FixRoundLanding | undefined, work
  *  child is awaited — the sweep and runTaskBody run fix rounds on the daemon's loop. */
 export async function pushFixRound(
   wt: string, branch: string, expectedHeadSha?: string, priorHeadSha?: string,
-  deps: Pick<PushRunBranchAsyncOpts, "capture" | "exec"> & { mergedTypecheck?: MergedTypecheckPorts } = {},
+  deps: Pick<PushRunBranchAsyncOpts, "capture" | "exec"> & { mergedTypecheck?: MergedTypecheckPorts;
+    ownedSessionGuard?: { prHeadSha: string; verifyOwnership: () => Promise<string | undefined> } } = {},
 ): Promise<FixRoundPushReceipt> {
   // W1-T5658: BOTH fix paths (the run loop's and the sweep's) push through here, so this is the one place a head
   // that compiles alone but not merged with main is refused before it leaves the worktree.
@@ -10947,11 +10979,53 @@ export async function pushFixRound(
   }
   const capture = deps.capture ?? worktreeGitCaptureAsync(wt);
   const push = deps.exec ?? worktreePushExecAsync(wt);
+  const ownedSessionGuard = deps.ownedSessionGuard;
+  let sessionGuardRefusal: string | undefined;
   try {
     if (priorHeadSha !== undefined && expectedHeadSha === undefined) throw new Error("refusing a leased fix push without the committed head sha");
+    if (ownedSessionGuard !== undefined && priorHeadSha !== undefined) {
+      sessionGuardRefusal = "refusing a force-with-lease push for an operator-session conflict round";
+      throw new FixRoundPushError("run-error", { text: sessionGuardRefusal, censuses: ["operator-session-push-guard"], offeredBaselines: [] }, sessionGuardRefusal);
+    }
+    if (ownedSessionGuard !== undefined) {
+      if (expectedHeadSha === undefined) {
+        sessionGuardRefusal = "refusing an operator-session conflict push without the committed merge head sha";
+        throw new FixRoundPushError("run-error", { text: sessionGuardRefusal, censuses: ["operator-session-push-guard"], offeredBaselines: [] }, sessionGuardRefusal);
+      }
+      const parents = (await hostWorktreeGitAsync(wt, ["rev-list", "--parents", "-n", "1", expectedHeadSha!])).trim().split(/\s+/);
+      if (parents.length !== 3 || parents[0] !== expectedHeadSha || parents[1] !== ownedSessionGuard.prHeadSha) {
+        sessionGuardRefusal = `operator-session conflict round must push a two-parent merge commit whose first parent is PR head ${ownedSessionGuard.prHeadSha}`;
+        throw new FixRoundPushError("run-error", { text: sessionGuardRefusal, censuses: ["operator-session-push-guard"], offeredBaselines: [] }, sessionGuardRefusal);
+      }
+      const remoteRefs = (await hostWorktreeGitAsync(wt, ["ls-remote", "origin", `refs/heads/${branch}`, "refs/heads/main"]))
+        .trim().split("\n").filter(Boolean).map((line) => line.trim().split(/\s+/));
+      const remote = new Map(remoteRefs.map(([sha, ref]) => [ref, sha]));
+      if (remote.get(`refs/heads/${branch}`) !== ownedSessionGuard.prHeadSha) {
+        sessionGuardRefusal = `operator-session branch moved from PR head ${ownedSessionGuard.prHeadSha} before the push`;
+        throw new FixRoundPushError("run-error", { text: sessionGuardRefusal, censuses: ["operator-session-push-guard"], offeredBaselines: [] }, sessionGuardRefusal);
+      }
+      const main = remote.get("refs/heads/main");
+      if (main === undefined) {
+        sessionGuardRefusal = "operator-session conflict push cannot read origin/main";
+        throw new FixRoundPushError("run-error", { text: sessionGuardRefusal, censuses: ["operator-session-push-guard"], offeredBaselines: [] }, sessionGuardRefusal);
+      }
+      try {
+        await hostWorktreeGitAsync(wt, ["merge-base", "--is-ancestor", main, expectedHeadSha]);
+      } catch {
+        sessionGuardRefusal = `operator-session conflict merge does not contain origin/main ${main}`;
+        throw new FixRoundPushError("run-error", { text: sessionGuardRefusal, censuses: ["operator-session-push-guard"], offeredBaselines: [] }, sessionGuardRefusal);
+      }
+    }
     await gitPushRunBranchAsync(wt, { expectedHeadSha, capture, exec: async (file, args) => {
       const pushArgs = priorHeadSha === undefined ? args : ["-C", wt, "push",
         `--force-with-lease=refs/heads/${branch}:${priorHeadSha}`, "origin", `${expectedHeadSha}:refs/heads/${branch}`];
+      if (ownedSessionGuard !== undefined) {
+        const ownershipFailure = await ownedSessionGuard.verifyOwnership();
+        if (ownershipFailure !== undefined) {
+          sessionGuardRefusal = `operator-session branch ownership changed before push: ${ownershipFailure}`;
+          throw new FixRoundPushError("run-error", { text: sessionGuardRefusal, censuses: ["operator-session-push-guard"], offeredBaselines: [] }, sessionGuardRefusal);
+        }
+      }
       await push(file, pushArgs, { stdio: "ignore" });
       if (priorHeadSha !== undefined) {
         const observed = (await capture("git", ["-C", wt, "ls-remote", "origin", `refs/heads/${branch}`])).split(/\s/)[0];
@@ -10960,6 +11034,9 @@ export async function pushFixRound(
     } });
     return { fixRoundPushedHead: expectedHeadSha };
   } catch (err) {
+    if (sessionGuardRefusal !== undefined) {
+      throw new FixRoundPushError("run-error", { text: sessionGuardRefusal, censuses: ["operator-session-push-guard"], offeredBaselines: [] }, sessionGuardRefusal);
+    }
     if (err instanceof LanePushForeignHeadError && priorHeadSha === undefined) throw err;
     // An unreadable remote simply is not the expected head, so its failure reads as no head at all.
     const remote = await hostWorktreeGitAsync(wt, ["ls-remote", "origin", `refs/heads/${branch}`])
@@ -11169,6 +11246,7 @@ export async function pushFixRoundPrechecked(
   push: (wt: string, branch: string, expectedHeadSha?: string, priorHeadSha?: string) => unknown = pushFixRound,
   priorHeadSha?: string,
   reapply: { ports?: FixRoundReapplyPorts; attempted?: boolean } = {},
+  guard?: { prHeadSha: string; verifyOwnership: () => Promise<string | undefined> },
 ): Promise<unknown> {
   // W1-T5227: a head carrying a conflict marker never leaves the worktree, whoever committed it.
   let markerFiles: string[] = [];
@@ -11187,7 +11265,9 @@ export async function pushFixRoundPrechecked(
   const refusal = coveragePushRefusal(await coveragePrecheck(wt, ports), log, "rung.fix_push");
   if (refusal) throw new FixRoundPushError("run-error", refusal, refusal.text);
   try {
-    return await push(wt, branch, expectedHeadSha, priorHeadSha);
+    return guard !== undefined && push === pushFixRound
+      ? await pushFixRound(wt, branch, expectedHeadSha, priorHeadSha, { ownedSessionGuard: guard })
+      : await push(wt, branch, expectedHeadSha, priorHeadSha);
   } catch (error) {
     // A census refusal is the round's own red; only a leased push the remote outran may be re-applied, once.
     if (!(error instanceof FixRoundPushError) || error.refusal !== undefined || reapply.attempted ||
@@ -11195,7 +11275,7 @@ export async function pushFixRoundPrechecked(
     const result = await reapplyFixRoundOnMovedTip({ wt, branch, leaseBaseSha: priorHeadSha, committedSha: expectedHeadSha },
       reapply.ports ?? realFixRoundReapplyPorts, log);
     if (!result.reapplied) throw error;
-    return await pushFixRoundPrechecked(log, wt, branch, result.mergedHeadSha, ports, push, result.remoteTip, { ...reapply, attempted: true });
+    return await pushFixRoundPrechecked(log, wt, branch, result.mergedHeadSha, ports, push, result.remoteTip, { ...reapply, attempted: true }, guard);
   }
 }
 
@@ -42112,9 +42192,9 @@ const COMMANDS: readonly CommandSpec[] = [
   },
   {
     name: "daemon",
-    syntax: "rmd daemon --repo <name> [--plan <path>] [--max <n>] [--poll-ms <n>] [--dry-run] [--allow-self-target] [--allow-stale]",
+    syntax: "rmd daemon --repo <name> [--plan <path>] [--max <n>] [--poll-ms <n>] [--shadow-ops-catalog <owner>/<name>] [--dry-run] [--allow-self-target] [--allow-stale]",
     summary: "Persistent scheduler loop draining a named repo; refuses self-target unattended.",
-    detail: "persistent scheduler loop; --repo picks the repo to drain + its gateway (e.g. remudero-sandbox for W1-T12d). Refuses to drain its OWN source repo unattended without --allow-self-target. --dry-run previews the target + planned tasks, spawns nothing. Self-hosting reads the plan from origin/main (W1-T60); --allow-stale proceeds on the last-fetched refs if the fetch fails.",
+    detail: "persistent scheduler loop; --repo picks the repo to drain + its gateway (e.g. remudero-sandbox for W1-T12d). Refuses to drain its OWN source repo unattended without --allow-self-target. --dry-run previews the target + planned tasks, spawns nothing. Self-hosting reads the plan from origin/main (W1-T60); --allow-stale proceeds on the last-fetched refs if the fetch fails. --shadow-ops-catalog <owner>/<name> (W1-T11770, off by default) reads that repository's task catalog read-only off the loop and records only an aggregate dispatch.secondary_catalog_shadow row; it never adds work to dispatch.",
   },
   {
     name: "daemon-plist",
@@ -44095,8 +44175,10 @@ function sweepCommandHost(ports: Pick<SweepCommandHost, "freshTreeGit" | "comman
     writeFixCensusSnapshotAsync,
     runPlanScopedFixRound,
     materializePlanRoundWorktree: materializePlanRoundWorktreeAsync,
-    pushSweepFixRound: (deps, wt, branch, sha, prior) =>
-      pushFixRoundPrechecked(deps.log, wt, branch, sha, { repo: deps.repo }, pushFixRound, prior),
+    pushSweepFixRound: (deps, wt, branch, sha, prior, guard) => {
+      if (guard !== undefined) return pushFixRoundPrechecked(deps.log, wt, branch, sha, { repo: deps.repo }, pushFixRound, prior, {}, guard);
+      return pushFixRoundPrechecked(deps.log, wt, branch, sha, { repo: deps.repo }, pushFixRound, prior);
+    },
     buildFixRungDispatchArgs,
     openTaskIdsFromPlan,
     waitForCiGreen,

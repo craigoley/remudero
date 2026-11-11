@@ -110,6 +110,39 @@ export function reviewOptionsFromFlags(host: ReviewCommandHost, rest: string[]):
   };
 }
 
+export const REVIEW_EXIT_CAUSE_FLAG = "--exit-cause-file";
+const REVIEW_EXIT_STEPS = ["view", "setup", "materialize", "review", "publish"] as const;
+export const REVIEW_EXIT_CAUSES = [
+  "repo-unresolvable", "closed-before-review", "subject-refused", "task-narrative-unavailable",
+  "task-metadata-unavailable", "semantic-setup-unavailable", "own-task-record-missing",
+  "shadow-verdict-withheld", "replayed-verdict-withheld", "verdict-not-posted",
+  "verdict-failure", "verdict-pending", "verdict-not-success",
+  ...REVIEW_EXIT_STEPS.map((step) => `threw-in-${step}` as const),
+] as const;
+export type ReviewExitCause = (typeof REVIEW_EXIT_CAUSES)[number];
+type ReviewExit = { step: (typeof REVIEW_EXIT_STEPS)[number]; as: (cause: ReviewExitCause) => void };
+
+function writeReviewExitCause(rest: string[], cause: ReviewExitCause, error?: unknown): void {
+  const path = flagValue(rest, REVIEW_EXIT_CAUSE_FLAG);
+  if (path === undefined) return;
+  const errorClass = error === undefined ? "" : `\t${error instanceof Error ? error.constructor.name : typeof error}`;
+  try {
+    writeFileSync(path, `${cause}${errorClass}\n`);
+  } catch (e) {
+    console.error(`rmd review: exit cause ${cause} was not written: ${String((e as Error)?.message ?? e)}`);
+  }
+}
+
+async function reportingReviewExit(rest: string[], run: (exit: ReviewExit) => Promise<number>): Promise<number> {
+  const exit: ReviewExit = { step: "view", as: (cause) => writeReviewExitCause(rest, cause) };
+  try {
+    return await run(exit);
+  } catch (error) {
+    writeReviewExitCause(rest, `threw-in-${exit.step}`, error);
+    throw error;
+  }
+}
+
 /**
  * JUDGE AT REVIEW START (operator ruling 2026-10-06). The publication guard (W1-T3337,
  * `reviewerCodePublicationRefusal`) used to re-read freshness just before posting, so a review-path
@@ -1997,7 +2030,8 @@ export async function withMaterializedWorktree<T>(
   }
 }
 
-export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest: string[] = [], deps: ReviewCommandDeps = {}): Promise<number> {
+export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest: string[] = [], deps: ReviewCommandDeps = {}, exit?: ReviewExit): Promise<number> {
+  if (exit === undefined) return reportingReviewExit(rest, (opened) => reviewCommand(host, prArg, rest, deps, opened));
   const { acceptedReviewAttemptId, materializeReviewWorktree, realDeps, reviewPostedDescription } = host;
   // W1-T11261: time every step before the first ledger row; a step that throws still records its elapsed time and error class.
   const commandStartedAt = systemClock.now();
@@ -2051,6 +2085,7 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
   }
   if (defaultsFailure && !(flagValue(rest, "--repo") ?? "").includes("/")) {
     console.error(`rmd review: ${defaultsFailure.message}`);
+    exit.as("repo-unresolvable");
     return 1;
   }
   const selfTarget = defaults ?? { owner: "", repo: "" };
@@ -2062,6 +2097,7 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
   // fields, so nothing downstream of `body` can tell which transport served it.
   const args = reviewViewArgs(owner, repo, prArg);
   const raw = await (deps.fetchView ?? ghJsonAsync)(args);
+  exit.step = "setup";
   // The sweep's open-PR snapshot can age while earlier reviews run. The numeric arm already
   // fetched the live REST row, so decline a closed PR before fetching its head or building a
   // worktree. The guarded poster still makes the final lifecycle check for an in-flight close.
@@ -2074,6 +2110,7 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
       head_sha: closed.head?.sha, merged: typeof closed.merged_at === "string",
     });
     console.log(`rmd review: PR #${prArg} closed before review; no verdict posted`);
+    exit.as("closed-before-review");
     return 2;
   }
   const view = (reviewPrNumber(prArg) !== undefined ? mapRestPr(raw as RestPullRow) : raw) as {
@@ -2178,6 +2215,7 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
       `rmd review: REFUSED — ${subjectCheckout.message}. No status was posted on the PR; ` +
         `run the review where ${owner}/${repo} is checked out (that repo's own daemon reviews it).`,
     );
+    exit.as("subject-refused");
     return 1;
   }
   const subjectRepoDir = subjectCheckout.repoDir;
@@ -2309,6 +2347,7 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
     recordSetupReplay(unavailableInput, classifyReviewOutcome(unavailableInput));
     log("review.reviewer.skipped", { reason: "head-task-narrative-unavailable", head_sha: view.headRefOid, pr_url: view.url });
     console.error("rmd review: head task design or amendment unavailable; no pending status, verdict or merge effect");
+    exit.as("task-narrative-unavailable");
     return 2;
   }
   const setupDecision = classifyReviewOutcome(replaySetupInput);
@@ -2335,6 +2374,7 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
         recordSetupReplay(replaySetupInput, setupDecision);
         log("review.semantic_setup_refused", { reason: "head-task-metadata-unavailable", head_sha: view.headRefOid, pr_url: view.url });
         console.error("rmd review: semantic review unavailable (head task metadata); no pending status, verdict or merge effect");
+        exit.as("task-metadata-unavailable");
         return 2;
       }
     } else {
@@ -2361,6 +2401,7 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
         // runReview can auto-arm. Refuse before either pending poster or materializer runs.
         log("review.semantic_setup_refused", { reason: "semantic-setup-unavailable", head_sha: view.headRefOid, pr_url: view.url });
         console.error("rmd review: semantic setup unavailable; no pending status, verdict or merge effect");
+        exit.as("semantic-setup-unavailable");
         return 2;
       }
     }
@@ -2431,6 +2472,7 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
       `rmd review PR #${view.number}: ${taskId} has no record at head ${view.headRefOid.slice(0, 7)} but origin/main has it ` +
         `(${OWN_TASK_RECORD_MISSING_CAUSE}) — pending; refresh the branch from main, then re-review`,
     );
+    exit.as("own-task-record-missing");
     return 2;
   }
 
@@ -2441,6 +2483,7 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
   // review falls back to keyword-only — EXPLICITLY marked (criterion 5),
   // never silently, and (W1-T233) the console line below now NAMES why,
   // instead of a bare "unavailable" with the real reason thrown away.
+  exit.step = "materialize";
   const materializeStartedMs = systemClock.now();
   const materialized = await materialize(config, subjectRepoDir, view.number, view.headRefOid);
   if (materialized.worktreePath === undefined) {
@@ -2468,6 +2511,7 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
   // head goes first and the base follows on every exit path too; a grep tree is
   // deleted there the same way, and a blob-only fallback dir is not a worktree and
   // is left to the boot sweep (src/lib/tmp.ts) exactly as before.
+  exit.step = "review";
   let verdict = await withMaterialized(
     baseProof?.baseIsCheckout || baseProof?.baseIsGrepTree ? baseProof.baseCheckoutDir : undefined,
     subjectRepoDir,
@@ -2530,6 +2574,8 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
     baseProof?.baseIsGrepTree ? (_repo, tree) => rmSync(tree, { recursive: true, force: true }) : undefined,
   );
   // W1-T10269: a shadow review ends at its verdict: no restore, no status, no comment, no arm.
+  exit.step = "publish";
+  if (shadow && verdict.verdictWithheld) exit.as("shadow-verdict-withheld");
   if (shadow) return verdict.verdictWithheld ? 2 : 0;
 
   // A final review decision is immutable, but GitHub's commit status is last-write-wins. A stale
@@ -2537,6 +2583,7 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
   // restore the already-judged terminal status instead of reporting a success that GitHub cannot see.
   let replayStatusAction: "restored" | "confirmed" | undefined;
   if (verdict.decisionDisposition === "replayed" && verdict.reviewDecisionDigest) {
+    if (verdict.verdictWithheld) exit.as("replayed-verdict-withheld");
     if (verdict.verdictWithheld) return 2;
     const restorePoster = failureRecordingPoster();
     const restoringState = verdict.state;
@@ -2599,6 +2646,7 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
       // degraded one, and saying "not certified" here contradicts the status posted seconds ago.
       (cappedWordingApplies(verdict) ? " — CAPPED: not certified (0 proofs executed)" : ""),
   );
+  if (verdict.verdictWithheld) exit.as("verdict-not-posted");
   if (verdict.verdictWithheld) return 2;
 
   if (verdict.criteria.some((criterion) => !criterion.met) && planTreeIsBehindMain(host, source, subjectRepoDir)) {
@@ -2646,6 +2694,7 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
     );
   }
 
+  if (verdict.state !== "success") exit.as(REVIEW_EXIT_CAUSES.find((cause) => cause === `verdict-${verdict.state}`) ?? "verdict-not-success");
   return verdict.state === "success" ? 0 : 1;
 }
 
