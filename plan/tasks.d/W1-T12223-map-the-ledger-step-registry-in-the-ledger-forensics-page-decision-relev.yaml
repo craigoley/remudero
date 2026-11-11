@@ -22,3 +22,16 @@
     follow-up harvest [research]: locate the ledger-step registry (grep a known step such as
     `review.provider_provenance` across `src/`), because the design says to register the new step
     wherever ledger steps are declared. — from W1-T11261 (run W1-T11261-1794331705830)
+  risk_ruling:
+    verdict: "low"
+    action: escalate
+    confidence: 0.85
+    reasons:
+      - "The description frames a documentation-only recon task, with acceptance criteria that call only for writing to docs/forensics/ledger.md."
+      - "Nothing in the description or files list touches secrets, auth, permissions, deletion, merge/deploy/review policy, or irreversible actions, and no operator-only decision is requested."
+      - "The findings can be verified by reading src/lib/ledger.ts, and both declared files exist at the base."
+      - "The gates state is clean: author class is operator, and the family track record is strong (25 merged, Beta mean 0.88)."
+      - "src/lib/ledger.ts is declared as touched despite the recon framing, and no actual change view was supplied, so I cannot confirm it is read-only. CI and review would still apply."
+      - "the judge said proceed, but W1-T12223: at verify: auto it fails lint (proof-dialect)"
+    judged_at: "2026-11-11T02:59:41.121Z"
+    pin: "1ac504a251de80c15a3787ec3a2234cd47fcef36df40ddd929ccef210f94a26f"
