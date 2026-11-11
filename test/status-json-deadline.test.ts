@@ -236,7 +236,7 @@ async function snapshotCacheHandedToGateway(seed: (root: string) => void) {
   return handed as ReturnType<typeof createBoardSnapshotCache> | undefined;
 }
 
-test("W1-T11280: status JSON reuses a fresh persisted GitHub snapshot", async () => {
+test("W1-T11280 fresh snapshot: status JSON reuses a persisted GitHub snapshot", async () => {
   const cache = await snapshotCacheHandedToGateway((root) => {
     assert.equal(createBoardSnapshotCache(root, "example", "repo").commitClosed([closedRow(7)]), true);
   });
@@ -255,7 +255,7 @@ const unusableSnapshots: Array<[string, (root: string) => void]> = [
 ];
 
 for (const [name, seed] of unusableSnapshots) {
-  test(`W1-T11280: the ${name} snapshot is never read as rows and the status read stays unavailable`, async () => {
+  test(`W1-T11280 ${name} snapshot: the snapshot is never read as rows and the status read stays unavailable`, async () => {
     const cache = await snapshotCacheHandedToGateway(seed);
     assert.ok(cache && typeof cache === "object", "the JSON gateway must be handed the persisted snapshot cache");
     assert.equal(cache.closedSeed(), undefined);
@@ -267,7 +267,7 @@ for (const [name, seed] of unusableSnapshots) {
   });
 }
 
-test("W1-T11280: a stale snapshot does not fill an unfinished read and the status read stays unavailable", async () => {
+test("W1-T11280 stale snapshot: it does not fill an unfinished read and the status read stays unavailable", async () => {
   const stale = (root: string): void => {
     const clock = fixedClock(Date.parse("2020-01-01T00:00:00Z"));
     createBoardSnapshotCache(root, "example", "repo", { clock }).commitClosed([closedRow(7)]);
@@ -279,7 +279,7 @@ test("W1-T11280: a stale snapshot does not fill an unfinished read and the statu
   assert.equal(json.inbox.readyCount, null);
 });
 
-test("W1-T11280: a remote-ref failure beside a fresh snapshot stays unavailable", async () => {
+test("W1-T11280 remote-ref failure: a read failure beside a fresh snapshot stays unavailable", async () => {
   const { json } = await hungGithubStatus((root) => {
     assert.equal(createBoardSnapshotCache(root, "example", "repo").commitClosed([closedRow(7)]), true);
   }, {}, { gitFailure: true });
