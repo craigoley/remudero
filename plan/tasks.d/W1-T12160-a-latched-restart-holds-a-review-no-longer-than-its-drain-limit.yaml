@@ -2,7 +2,7 @@
   title: "A latched restart holds a review no longer than the time limit of its drain"
   repo: remudero
   depends_on: []
-  priority: 1.1
+  priority: 0.9
   type: implement
   verify: auto
   principles:

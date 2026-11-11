@@ -1,0 +1,69 @@
+- id: W1-T12229
+  title: "One row for each restart cycle states what the restart cost"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # a new module that reads the ledger across two daemon lifetimes, and a write in the daemon tick
+  band_meaning: span
+  origin: operator-session#freshness-restart-findings-2026-11-10
+  plan_refs:
+    - W1-T11139
+    - W1-T9813
+    - W1-T4945
+    - W1-T8172
+    - W1-T5476
+    - W1-T298
+  files:
+    - src/lib/restart-cycle.ts
+    - src/lib/daemon.ts
+    - src/lib/ledger.ts
+    - test/daemon/one-row-for-each-restart-cycle-states-what-the-restart-cost.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "From the rows of a fixture, `restartCycleRow` returns the five times of one restart cycle: the first material change, the restart decision, the exit, the start and the first verdict after the start"
+      proof: "grep: W1-T12229 criterion 1 in test/daemon/one-row-for-each-restart-cycle-states-what-the-restart-cost.test.ts"
+    - claim: "The row counts what waited: the reviews that were not started for stale reviewer code, the reviews that were refused after they finished with their reviewer time, and the admissions that the restart held"
+      proof: "grep: W1-T12229 criterion 2 in test/daemon/one-row-for-each-restart-cycle-states-what-the-restart-cost.test.ts"
+    - claim: "The row counts what the drain gave up: the reviews and the fix rounds that were still in flight at its time limit, with the age of each"
+      proof: "grep: W1-T12229 criterion 3 in test/daemon/one-row-for-each-restart-cycle-states-what-the-restart-cost.test.ts"
+    - claim: "The row has the count of verdicts posted in the cycle and the time from the last verdict before the exit to the first verdict after the start"
+      proof: "grep: W1-T12229 criterion 4 in test/daemon/one-row-for-each-restart-cycle-states-what-the-restart-cost.test.ts"
+    - claim: "The row has two sums in milliseconds: `waiting_cost_ms` and `restart_cost_ms`. The design gives the parts of each. A part that the ledger cannot give is null and the row names it; it is never 0"
+      proof: "grep: W1-T12229 criterion 5 in test/daemon/one-row-for-each-restart-cycle-states-what-the-restart-cost.test.ts"
+    - claim: "A daemon that started after a freshness exit writes one `daemon.restart_cycle` row, on the first tick after the ledger shows a verdict posted after its start. It writes the row once. The test drives `runDaemon` with a ledger reader"
+      proof: "grep: W1-T12229 criterion 6 in test/daemon/one-row-for-each-restart-cycle-states-what-the-restart-cost.test.ts"
+    - claim: "If a lifetime ends before its first verdict, the next start writes the row of that cycle with `first_verdict_at` null. A start that follows no freshness exit writes no row"
+      proof: "grep: W1-T12229 criterion 7 in test/daemon/one-row-for-each-restart-cycle-states-what-the-restart-cost.test.ts"
+    - claim: "The daemon calls the new module"
+      proof: "grep: restartCycleRow( in src/lib/daemon.ts"
+  rationale: |
+    OBSERVED 2026-11-04T01:56Z to 2026-11-11T01:56Z in the ledger of the core instance: 36 freshness exits in 7 days, and the cost of each one was found only by hand.
+    - A restart cycle is one freshness restart, from the first material change to the first verdict after the start.
+    - Median times: 64.7 minutes from the first material change to the decision, 18.0 minutes from the decision to the exit (p90 100), and 12.5 minutes from the start to the first verdict.
+    - The time with no verdict was a median of 41 minutes for each cycle and 1,640 minutes in total. 801 of those minutes came from the stuck entrypoint that W1-T12031 fixed.
+    - The fleet posted 4.34 verdicts an hour in hours with a restart cycle and 5.97 in hours without one.
+    - At the start of the drain, over the 36 exits, 35 reviews and 71 detached actions were in flight. The drain gave up on 13 reviews and 20 fix rounds at its time limit, at a median age of 51 minutes.
+    - The restart refused 147 admissions with the reason "restart latched".
+    - 42 reviews ran in full and were then refused for stale reviewer code.
+    READ at origin/main 17745c6bf, src/lib/daemon.ts: the facts are in separate rows of two lifetimes. `daemon.freshness_decision`, `daemon.freshness_drain.completed`, `daemon.freshness_exit` and `daemon.admission_held` come from the old process. `daemon.boot` and `review.posted` come from the new one. No row joins them.
+    CHECKED for overlap: W1-T11139 (queued) charges idle lane time to the restart and shows the starts for each day on the status board. It does not write one row for each cycle, and it does not count reviews or verdicts. This task does not depend on it. W1-T9813 (queued) closes a drain row when a restart is dropped; this task reads the rows that exist.
+    W1-T298 (queued) shares the two files src/lib/daemon.ts and src/lib/ledger.ts and nothing more: it escalates an empty queue and writes no restart row.
+    W1-T12232 reads this row to propose a change to the score limit or to the staleness horizon.
+  design: |
+    New module src/lib/restart-cycle.ts with the pure function `restartCycleRow(rows, startAtMs)`. It finds the last freshness exit before the start and builds the row from the ledger rows of both lifetimes.
+    Fields: `first_material_change_at`, `decided_at`, `exit_at`, `started_at`, `first_verdict_at`, `trigger`, `old_sha`, `new_sha`, `phases_ms` (copied from `daemon.freshness_exit`), `reviews_not_started`, `reviews_refused_after_finish`, `refused_review_ms`, `admissions_held`, `gave_up` (reviews, fix rounds and their ages), `verdicts_posted`, `verdict_gap_ms`, `waiting_cost_ms`, `restart_cost_ms`.
+    `waiting_cost_ms` is the reviewer time of the reviews that were refused after they finished, plus the wait of each pull request from a review that stale reviewer code stopped to its next verdict.
+    `restart_cost_ms` is `verdict_gap_ms` plus the ages of the work that the drain gave up.
+    In `runDaemon`, once in a lifetime: on the first tick after the reader shows a `review.posted` row later than the start, call `restartCycleRow` and write `daemon.restart_cycle`. Read the ledger at most once in a tick, with the reader that the daemon has (`deps.readLedgerLines`), and stop when the row is written.
+    At a start, if the lifetime before wrote no row for its own cycle, write that row with `first_verdict_at` null.
+    The function reads rows of the lifetime before. src/lib/ledger.ts has the list of steps that a ledger rotation keeps. Add each step that the function reads and that the list lacks, and add the new step.
+    NOT IN SCOPE: a change to any decision, the status board (W1-T11139), and the gardener that reads the row (W1-T12232).
+  falsifier: |
+    Take the times from one lifetime only and criterion 1 must fail. Write 0 for a part that the ledger cannot give and criterion 5 must fail. Write the row on every tick and criterion 6 must fail. Write a row after a memory exit and criterion 7 must fail. Restore and require all eight to pass.
+  note: |
+    After the merge, each freshness restart of the core instance has one `daemon.restart_cycle` row. The sums of the two cost fields over 7 days replace the hand count of 2026-11-10.
