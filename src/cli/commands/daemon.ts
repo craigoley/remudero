@@ -1213,10 +1213,7 @@ export async function daemonCommand(
       ...(archivedLifetime.indexError === undefined ? {} : { detail: archivedLifetime.indexError }),
     });
   } else {
-    log("dispatch.lifetime_history_loaded", {
-      archive_count: archivedLifetime.archiveCount,
-      records: archivedLifetime.records,
-    });
+    log("dispatch.lifetime_history_loaded", archivedLifetime.loaded);
   }
   // W1-T206: see breakerGateFor's doc — ONE cache for this whole `rmd daemon` invocation.
   const breakerGate = breakerGateFor(ledgerPath, openHeadBranchesForBreaker, archivedLifetime.history);
