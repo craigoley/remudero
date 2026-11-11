@@ -2846,7 +2846,7 @@ export function handedOffHeadRiskJudge(
 import { readCiGateRequiredChecks } from "./lib/ci-gate-required.js";
 import { dropDerivativeAggregateCiFailure } from "./lib/derivative-ci-failure.js";
 import { applyCorrection } from "./lib/correct.js";
-import { DEFAULT_PRUNE_GRACE_MS, appendQuestion, ghJson, ghRateLimitRefusalUnknown, type GhRateLimitRefusal, parseDecisionRequest, parseFollowups, parseLearningsUsed, parseSkillsUsed, parseQuestion, parseReconReport, parseReport, pruneStaleRuns, reapStaleWorktrees, removeWorktreeBase, removeRunLock, renderWorkerSettings, resolveGenericRouteToolBound, harnessOwnsGitFor, IMPLEMENT_CASH_TOOLS, IMPLEMENT_CLAUDE_TOOLS, WORKER_RULE_TOOL_NAME, implementToolBound, resolveDispatchLaneToolBound, cashDivertSpawnFields, cashFallbackRefusal, runAdhocLaneReapRung, runWorktreeReapRung, spawnWorker, readClaudeProviderCapacity, activeWorkerCount, cacheTokenLedgerFields, capStderrExcerpt, REPORT_EXCERPT_CAP, STDERR_EXCERPT_CAP, noPrReportExcerpt, foreignTreeStandDownReason, listRegisteredWorktrees, readRunLock, runLockPath, workerLedgerFields, workerTranscript, withAssignmentTrailer, resolveCommitAssignment, uniqueRunBranch, excludeNodeModulesFromGit, linkWorktreeNodeModules, resolveNodeModulesSource, worktreeAdd, worktreeAddAsync, worktreeLockIsPidAlive, worktreeRemove, worktreeRemoveAsync, worktreesDir, writeRunLock, WorktreeBaseStaleError, WorktreeNodeModulesRefusedError, detectWorktreeBaseUncheckableStreak, WORKTREE_BASE_UNCHECKABLE_STREAK_BOUND, type RunLockInfo, type SpawnWorkerArgs, buildInboxDraftWorkerArgs, type ForeignTreeStandDown, type RegisteredWorktree, type WorkerResult, type WorktreeReapSummary, openUsageProbeSession, type UsageProbeQueryFn, WorkerStateTracker, DEFAULT_WORKER_QUIET_FLOOR_MS, type WorkerState, type WorkerStreamObserver, type WorkerStreamEvent, type WorkerSelectionAssignment, WorkerAbandonedError, SubscriptionOnlyRefusedError, deliverOperatorAnswerToRunningWorker, sharesHarnessCheckout, unwireCredentialHelperSocket, workerContinuation, workerExecutionForProvider } from "./lib/worker.js";
+import { DEFAULT_PRUNE_GRACE_MS, appendQuestion, ghJson, ghRateLimitRefusalUnknown, type GhRateLimitRefusal, parseDecisionRequest, parseFollowups, parseLearningsUsed, parseSkillsUsed, parseQuestion, parseReconReport, parseReport, pruneStaleRuns, reapStaleWorktrees, removeWorktreeBase, removeRunLock, renderWorkerSettings, resolveGenericRouteToolBound, harnessOwnsGitFor, IMPLEMENT_CASH_TOOLS, IMPLEMENT_CLAUDE_TOOLS, WORKER_RULE_TOOL_NAME, implementToolBound, resolveDispatchLaneToolBound, cashDivertSpawnFields, cashFallbackRefusal, runAdhocLaneReapRung, runWorktreeReapRung, spawnWorker, readClaudeProviderCapacity, activeWorkerCount, cacheTokenLedgerFields, capStderrExcerpt, REPORT_EXCERPT_CAP, STDERR_EXCERPT_CAP, noPrReportExcerpt, foreignTreeStandDownReason, listRegisteredWorktrees, readRunLock, runLockPath, workerLedgerFields, workerTranscript, withAssignmentTrailer, resolveCommitAssignment, uniqueRunBranch, excludeNodeModulesFromGit, linkWorktreeNodeModules, resolveNodeModulesSource, worktreeAdd, worktreeAddAsync, worktreeLockIsPidAlive, worktreeRemove, worktreeRemoveAsync, worktreesDir, writeRunLock, WorktreeBaseStaleError, WorktreeNodeModulesRefusedError, detectWorktreeBaseUncheckableStreak, WORKTREE_BASE_UNCHECKABLE_STREAK_BOUND, type RunLockInfo, type SpawnWorkerArgs, buildInboxDraftWorkerArgs, type ForeignTreeStandDown, type RegisteredWorktree, type WorkerResult, type WorktreeReapSummary, openUsageProbeSession, type UsageProbeQueryFn, WorkerStateTracker, DEFAULT_WORKER_QUIET_FLOOR_MS, type WorkerState, type WorkerStreamObserver, type WorkerStreamEvent, type WorkerSelectionAssignment, WorkerAbandonedError, SubscriptionOnlyRefusedError, deliverOperatorAnswerToRunningWorker, sharesHarnessCheckout, unwireCredentialHelperSocket, wireCredentialHelperSocket, workerContinuation, workerExecutionForProvider } from "./lib/worker.js";
 import {
   QuietRoundEndedError, createQuietBoundHistory, guardSpawnWithQuietWatchdog, productionQuietWorkerJudge, quietHistoryOptions,
   runQuietWorkerWatchdog, type QuietBoundHistory, type QuietWorkerJudge,
@@ -2942,6 +2942,7 @@ import {
 import { checkSharedPause, disposeSharedPauseRefresh, prepareSharedPause, requestKick, consumeStop, isQuietHours, requestFleetPause, requestPause, requestStop, restartInPlaceVerb, resumeFleet, resumeFleetWide, sharedPauseRef, stopDetail, type SharedPauseGitDeps } from "./lib/fleet-control.js";
 import { resolvePauseTarget, type PauseTarget } from "./lib/pause-target.js";
 import { parseInstanceRegistry } from "./lib/instance-registry.js";
+import { openPlannerGitCredential, plannerHostGitCredential } from "./lib/secret-boundary.js";
 import { hasThreadEvent, inboxThreadId, readThread, verifiedInboxInput, type InboxCausalScope, type InboxInputReference } from "./lib/inbox-thread.js";
 import { gatherActorEvidence } from "./lib/actor-evidence.js";
 import { readGithubWebhookSecret, resolveGithubWebhookSecretFilePath } from "./lib/github-event-wake.js";
@@ -35303,15 +35304,32 @@ export async function planCommand(
   }
   const pruned = pruneStaleRuns(repoDir, worktreesDir(config), { graceMs: DEFAULT_PRUNE_GRACE_MS });
   if (pruned.worktrees.length || pruned.branches.length || pruned.skipped.length) log("worktree.prune", { ...pruned });
-  const { branch, worktreePath } = await addLaneWorktree(repoDir, worktreesDir(config), runId, log); // W1-T2528
+  // W1-T11851: this lane's own pushes present the host App identity, minted per request at the git credential-helper
+  // boundary — never a ~/.bashrc token a non-interactive shell cannot see, and never an env var. An unusable source
+  // refuses HERE, before any id is claimed or any worker spawns; only a host with no registry keeps today's helpers.
+  const planCred = await openPlannerGitCredential(await plannerHostGitCredential(`${owner}/${repo}`), {
+    runDir: join(config.root, "tmp", `plan-cred-${runId}`), log, wire: wireCredentialHelperSocket, unwire: unwireCredentialHelperSocket,
+    shared: (cwd) => sharesHarnessCheckout(cwd, repoDir) || sharesHarnessCheckout(cwd, repoRoot),
+  });
+  if (!planCred.ok) { say(`plan refused — no usable git credential: ${planCred.reason}`); return 1; }
+  const credLane = planCred.lane;
+  const { branch, worktreePath } = await addLaneWorktree(repoDir, worktreesDir(config), runId, log).catch(async (err: unknown) => { await credLane.close(); throw err; }); // W1-T2528
 
   let planIdBlock: TaskIdReservationBlock | undefined;
   // W1-T9488: see the triage lane's twin — the remote ids held, what the pushed branch declares, how it ended.
   const planHeld: HeldTaskIdReservation[] = [];
   let planPushed: LanePushedIds;
   let planEnding = "ended before a verdict";
+  const releasePlanHeld = (cwd: string): void => releaseUnfiledReservations(planHeld, planPushed, {
+    run: gitRunAdapter((args) => hostWorktreeGitResult(cwd, args)), lane: "plan", log,
+    reason: laneReleaseReason("plan", planEnding, planPushed),
+  });
+  // The managed clone is never wired, so a wired lane gives its ids back from its own worktree BEFORE removing it.
+  const removePlanWorktree = (): void => { credLane.retire(worktreePath, releasePlanHeld); worktreeRemove(repoDir, worktreePath); };
 
   try {
+    const unwired = credLane.wire(worktreePath);
+    if (unwired !== undefined) { say(`plan refused — ${unwired}`); removePlanWorktree(); return 1; }
     // ID MINT + BLOCK RESERVATION (impl-DV), the SAME ordering triage uses at :10222-:10240: mint
     // from the FRESH worktree's plan, reserve BEFORE spawning, hand the worker ids it cannot
     // collide on. Until now this lane minted NOTHING — `planArchitectPrompt` received no id, so its
@@ -35449,7 +35467,7 @@ export async function planCommand(
         violations: loop.violations.map((v) => v.message),
       });
       say(reason);
-      worktreeRemove(repoDir, worktreePath);
+      removePlanWorktree();
       return 1;
     }
 
@@ -35470,14 +35488,14 @@ export async function planCommand(
     if (decision.action === "error") {
       log("plan.error", { error: decision.reason, changed_files: changedFiles, subtype: worker.subtype });
       say(`plan inconsistent — ${decision.reason}; leaving no PR`);
-      worktreeRemove(repoDir, worktreePath);
+      removePlanWorktree();
       return 1;
     }
 
     if (decision.action === "no_action") {
       log("plan.verdict", { action: "no_action", detail: decision.detail });
       say(formatPlanVerdictLine(mode, decision));
-      worktreeRemove(repoDir, worktreePath);
+      removePlanWorktree();
       return 0;
     }
 
@@ -35515,7 +35533,7 @@ export async function planCommand(
           error: String((err as Error)?.message ?? err),
         });
       }
-      worktreeRemove(repoDir, worktreePath);
+      removePlanWorktree();
       return 0;
     }
 
@@ -35546,7 +35564,7 @@ export async function planCommand(
       const reason = String((err as Error)?.message ?? err);
       log("plan.error", { error: reason, changed_files: planPrFiles });
       say(`plan PR not opened — ${reason}`);
-      worktreeRemove(repoDir, worktreePath);
+      removePlanWorktree();
       return 1;
     }
     planPushed = "unknown"; // W1-T9488: a push that throws leaves the branch's ids unknowable
@@ -35559,7 +35577,7 @@ export async function planCommand(
     const prUrl = runGhPrCreate(prCreate, branch, log, say).prUrl;
     if (!prUrl) {
       log("plan.error", { error: "no PR opened" });
-      worktreeRemove(repoDir, worktreePath);
+      removePlanWorktree();
       return 1;
     }
 
@@ -35569,7 +35587,7 @@ export async function planCommand(
     if (ownership) {
       log("verdict", ownership.ledger);
       say(`verdict: pr_attribution_failed — claimed PR ${prUrl} is not this plan run's own branch (${branch})`);
-      worktreeRemove(repoDir, worktreePath);
+      removePlanWorktree();
       return 1;
     }
     // DETERMINISTIC GUARDS: a plan PR is PLAN-ONLY (plan/** or MASTER-PLAN.md), and an EXPAND
@@ -35580,13 +35598,13 @@ export async function planCommand(
     if (strayFiles.length > 0) {
       log("plan.error", { error: "plan PR is NOT plan-only", stray_files: strayFiles });
       say(`plan PR touched file(s) outside plan scope (${strayFiles.join(", ")}) — leaving PR OPEN for inspection`);
-      worktreeRemove(repoDir, worktreePath);
+      removePlanWorktree();
       return 1;
     }
     if (mode === "expand" && !diffCitesResearchSource(diff)) {
       log("plan.error", { error: "expand diff missing a research-source citation" });
       say(`plan --mode=expand PROPOSED but the diff cites no research source (URL) — leaving PR OPEN for inspection`);
-      worktreeRemove(repoDir, worktreePath);
+      removePlanWorktree();
       return 1;
     }
     log("pr.opened", { pr_url: prUrl, plan_only: true, mode });
@@ -35597,7 +35615,7 @@ export async function planCommand(
     const ci = ciGateState(await waitForCiGreen(prUrl, (s, extra) => log(s, extra)));
     if (ci !== "green") {
       say(`ci ${ci} — PR left OPEN: ${prUrl}`);
-      worktreeRemove(repoDir, worktreePath);
+      removePlanWorktree();
       return 1;
     }
     const prNum = prUrl.match(/\/pull\/(\d+)/)?.[1] ?? prUrl;
@@ -35617,7 +35635,7 @@ export async function planCommand(
       /* best-effort — see the comment above */
     }
     const armOutcome = armAndLogOutcome(prUrl, taskId, log, undefined, undefined, armHeadSha);
-    worktreeRemove(repoDir, worktreePath);
+    removePlanWorktree();
     // W1-T968: the PR — not merely this call — is what the console line answers about; a
     // review-lane arm already ledgered moments earlier on this SAME head must still read as armed.
     const priorArm = priorArmOnHead(readLedgerLines(ledgerPath), prUrl, armHeadSha);
@@ -35627,7 +35645,7 @@ export async function planCommand(
     log("plan.error", { error: String((e as Error)?.message ?? e) });
     planEnding = `errored: ${String((e as Error)?.message ?? e).slice(0, 160)}`;
     try {
-      worktreeRemove(repoDir, worktreePath);
+      removePlanWorktree();
     } catch {
       /* best-effort */
     }
@@ -35635,14 +35653,14 @@ export async function planCommand(
   } finally {
     removeRunLock(worktreePath); // terminal ⇒ drop the liveness token
     // W1-T9488: the REMOTE half is given back too — every reserved id the pushed branch does not declare.
-    releaseUnfiledReservations(planHeld, planPushed, {
-      run: gitRunAdapter((args) => hostWorktreeGitResult(repoDir, args)), lane: "plan", log,
-      reason: laneReleaseReason("plan", planEnding, planPushed),
-    });
+    // W1-T11851 teardown order: release (it needs the credential), unwire, then close the socket.
+    credLane.retire(worktreePath, releasePlanHeld);
+    releasePlanHeld(repoDir); // empty once retired; the ambient path's release, unchanged
       // Release EVERY reserved id — the ones the worker filed AND the ones it declined. Once the
       // PR exists the mint sees those ids via openPrMintTexts, so holding them longer would only
       // punch holes in the id space (the phantom-id trap: W1-T199/224/247/263).
       planIdBlock?.releaseAll();
+    await credLane.close();
   }
 }
 
