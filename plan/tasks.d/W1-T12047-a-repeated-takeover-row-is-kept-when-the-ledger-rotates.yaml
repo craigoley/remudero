@@ -2,7 +2,7 @@
   title: "The row that counts repeated review takeovers is kept when the ledger rotates"
   repo: remudero
   depends_on: []
-  priority: 1.5
+  priority: 0.05
   type: implement
   verify: auto
   principles:

@@ -1,0 +1,52 @@
+- id: W1-T12216
+  title: "A hand filing follows the plan destination, and the doctrine says how"
+  repo: remudero
+  depends_on: [W1-T12205, W1-T12206, W1-T12207, W1-T12208, W1-T12209, W1-T12210]
+  priority: 1.1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the path that filed 37 of 165 merges; a command and two documents change
+  band_meaning: span
+  origin: operator-session#ops-cutover-2026-11-10
+  plan_refs:
+    - W1-T12169
+    - W1-T12171
+    - W1-T11768
+  files:
+    - src/run-task.ts
+    - doctrine/plan-and-task-hygiene/file-from-the-operator-checkout.md
+    - docs/operator-guide.md
+    - test/worker/run-task/a-hand-filing-follows-the-plan-destination.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "A command prints, for a kind, the repository and the checkout that take a new plan file on this host, and the outcome when the host file is unreadable"
+      proof: "grep: W1-T12216 criterion 1 in test/worker/run-task/a-hand-filing-follows-the-plan-destination.test.ts"
+    - claim: "`rmd next-task-id --branch` accepts a branch of the destination checkout and records that branch as the holder of the id reservation"
+      proof: "grep: W1-T12216 criterion 2 in test/worker/run-task/a-hand-filing-follows-the-plan-destination.test.ts"
+    - claim: "The fast plan lint, run in a destination checkout, takes the public checkout as its code root with no added argument"
+      proof: "grep: W1-T12216 criterion 3 in test/worker/run-task/a-hand-filing-follows-the-plan-destination.test.ts"
+    - claim: "With no host file, the command names the public repository, and the other two commands behave as they do today"
+      proof: "grep: W1-T12216 criterion 4 in test/worker/run-task/a-hand-filing-follows-the-plan-destination.test.ts"
+    - claim: "The command table holds the new command, and the test goes through the command table"
+      proof: "grep: planDestinationCommand( in src/run-task.ts"
+    - claim: "The doctrine for a hand filing names the command and the rule that a changed file stays in the repository that holds it"
+      proof: "grep: rmd plan-destination in doctrine/plan-and-task-hygiene/file-from-the-operator-checkout.md"
+    - claim: "The operator guide says how to turn each kind on and off, and what stays in the ops repository after a kind is turned off"
+      proof: "grep: rmd plan-destination in docs/operator-guide.md"
+  rationale: |
+    OBSERVED 2026-11-10 on the first-parent history of main, 48 hours, 165 merges: 37 merges were plan filings and amendments made by hand in operator sessions. It is the largest family.
+    - A hand filing follows doctrine/plan-and-task-hygiene/file-from-the-operator-checkout.md: a worktree of the public repository, `rmd next-task-id --branch`, the fast plan lint, a commit, and a pull request.
+    - No command tells a session where a new task file goes. A session that does not know of the switch files in the public repository.
+    - This is one of five writer tasks. Each one waits for the readers of both catalogs.
+    - The switch is the host file `<state dir>/plan-destination.json`. If the file is absent, the switch is off and the behaviour is byte-identical to today. Removing `task` from the kinds turns this kind off.
+  design: |
+    Add the command `rmd plan-destination <kind>` to the command table in src/run-task.ts. It prints the result of `resolvePlanDestination`.
+    Let the reservation of `rmd next-task-id` read the branch from the destination checkout when the working directory is there. The reservation ref stays on the public repository.
+    Let the fast plan lint find the code root through the resolver when it runs in the destination checkout.
+    Rewrite the doctrine page and the section of the operator guide in the writing standard, docs/plain-language.md.
+    NOT IN SCOPE: the ship scripts of the operator sessions, which are in no repository (W1-T12169).
+  falsifier: |
+    Print the public repository with `task` on and criterion 1 must fail. Refuse a branch of the destination checkout and criterion 2 must fail. Remove the command name from the doctrine page and its criterion must fail. Restore and require all seven to pass.

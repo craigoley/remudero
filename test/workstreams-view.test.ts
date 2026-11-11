@@ -145,7 +145,7 @@ test("W1-T5050: a ring insert re-materializes the workstreams view once inside t
   const f = fixture(t);
   const built: number[] = [];
   const clock = movingClock(NOW);
-  const view = createWorkstreamsView<ReadModelInstanceState>({ instances: f.instances, ledgerSource, log: (step) => step === "workstreams.built" && built.push(clock.now()) });
+  const view = createWorkstreamsView<ReadModelInstanceState>({ instances: f.instances, ledgerSource, builtRowWindowMs: 0, log: (step) => step === "workstreams.built" && built.push(clock.now()) });
   const posted: ReadModelWorkerMessage[] = [];
   switchViewsOn(f.stateDir, [WORKSTREAMS_VIEW_NAME]);
   const ticker = createReadModelTicker({ stateDir: f.stateDir, instances: f.instances, views: [view], clock, holder: "workstreams-test", oracle: "off", post: (m) => posted.push(m) });

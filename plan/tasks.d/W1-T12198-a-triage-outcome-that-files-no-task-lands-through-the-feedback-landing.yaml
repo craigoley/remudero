@@ -1,0 +1,52 @@
+- id: W1-T12198
+  title: "A triage outcome that files no task lands through the feedback landing pull request"
+  repo: remudero
+  depends_on: []
+  priority: 0.9
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the triage command and the release of its claim change together
+  band_meaning: span
+  origin: operator-session#ops-cutover-2026-11-10
+  plan_refs:
+    - W1-T9054
+    - W1-T191
+  files:
+    - src/run-task.ts
+    - src/lib/auto-triage.ts
+    - test/inbox/a-triage-outcome-that-files-no-task-lands-through-the-feedback-landing.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "A triage run whose outcome is `no_task` or `grill` lands the status change of the feedback file through the feedback landing, and opens no pull request of its own"
+      proof: "grep: W1-T12198 criterion 1 in test/inbox/a-triage-outcome-that-files-no-task-lands-through-the-feedback-landing.test.ts"
+    - claim: "A triage run whose outcome is `propose` opens its own pull request, as it does today"
+      proof: "grep: W1-T12198 criterion 2 in test/inbox/a-triage-outcome-that-files-no-task-lands-through-the-feedback-landing.test.ts"
+    - claim: "The release of a triage claim takes the status of the feedback file on origin/main as evidence of an outcome. It does not need a merged commit subject that names the feedback id"
+      proof: "grep: W1-T12198 criterion 3 in test/inbox/a-triage-outcome-that-files-no-task-lands-through-the-feedback-landing.test.ts"
+    - claim: "A `grill` outcome still opens its escalation, and the recorded outcome names the landing pull request when the landing returns one"
+      proof: "grep: W1-T12198 criterion 4 in test/inbox/a-triage-outcome-that-files-no-task-lands-through-the-feedback-landing.test.ts"
+    - claim: "If the landing is refused, the run writes an error row with the cause, and the feedback file keeps the status `new` so that a later pass triages it again"
+      proof: "grep: W1-T12198 criterion 5 in test/inbox/a-triage-outcome-that-files-no-task-lands-through-the-feedback-landing.test.ts"
+    - claim: "The test goes through the `rmd triage` command, the production caller, and not through the landing function alone"
+      proof: "grep: W1-T12198 criterion 6 in test/inbox/a-triage-outcome-that-files-no-task-lands-through-the-feedback-landing.test.ts"
+  rationale: |
+    OBSERVED 2026-11-10 on the first-parent history of main, 48 hours, 165 merges: 9 merges were triage outcomes that filed no task.
+    - Each one changes one line, the status of one feedback file. Each one is a pull request with a full CI run and a review.
+    - `triageCommandLocked` in src/run-task.ts makes a worktree, commits, pushes and opens a pull request for every outcome.
+    - The feedback landing already carries status changes in one pull request on one fixed branch. `landFeedbackStatusContent` in src/lib/feedback-landing.ts does it for the panel and for the evidence gardener.
+    - The landing merges as `chore(feedback): land pending filings`. That subject does not name a feedback id. `feedbackOutcomeObserved` in src/lib/auto-triage.ts releases a triage claim only when a merged subject names the id, so the release needs a second source.
+    - W1-T9054 (queued, priority 2) asks for the same result through a new triage-outcome pull request. This task uses the landing that exists. Criterion 2 of W1-T9054 is covered when this task merges.
+    - 72% of merges to the public repository in that window were plan paperwork. The operator asked to lower the count now, before new plan files move to the ops repository.
+  design: |
+    In `triageCommandLocked`, branch on the outcome after the decision. For `no_task` and `grill`, call `setFeedbackStatus` with its `land` option, which reaches `landFeedbackStatusContent`. Do not commit in the lane worktree and do not open a pull request.
+    Keep the `propose` path as it is: one pull request that edits the feedback file and adds the task file.
+    Give the claim release a second evidence source: `readLandedFeedbackEntry` on origin/main with a status that is not `new`.
+    Keep the checks that follow a triage pull request (`checkTriageLiveScope`) for `propose` only.
+    NOT IN SCOPE: the interval of the machine-filing judge (W1-T9054 criterion 1), and any change to the landing itself.
+  falsifier: |
+    Open a pull request for a `no_task` outcome and criterion 1 must fail. Route `propose` through the landing and criterion 2 must fail. Remove the status read from the claim release and criterion 3 must fail. Drop the escalation of a `grill` and criterion 4 must fail. Restore and require all six to pass.
+  note: |
+    W1-T9054 needs an amendment after this merges: remove its criterion 2. This filing adds new task files only and does not amend it.

@@ -8,7 +8,7 @@ import { affectedSelectionOrFull, buildAffectedSuitesGraph, changedSymbols, full
 import { callerReachableSuites } from '../src/lib/ci-parity.ts';
 import { authorTestRunnerArgs } from '../src/lib/test-run-timeout.ts';
 import { admitStaticWork, enqueueTestSlot, lowPriorityCommand, memoryTestConcurrency, readHostLoad, readMemoryHeadroom,
-  TEST_FILE_PEAK_BYTES, testRunArgv, testRunConcurrency, testSlotExecutionAllowed } from '../src/lib/test-slot.ts';
+  readVmStat, TEST_FILE_PEAK_BYTES, testRunArgv, testRunConcurrency, testSlotExecutionAllowed } from '../src/lib/test-slot.ts';
 import { TYPECHECK_COLD_PEAK_BYTES } from '../src/lib/typecheck-buildinfo.ts';
 import { boundedNodeTestArgs, listTestFiles, manifestEntryFor, medianMeasuredDurationMs, mergeDurations, reportManifestFallbacks, weightedDurationMs } from './test-tier-manifest.mjs';
 import { closeJudgedRun, judgedNodeTestArgs, prepareJudgedRun } from './pure-test-pool.mjs';
@@ -28,8 +28,6 @@ import { scanRepo as scanCoverageBlanking } from './coverage-session-blanking-ch
 
 /** The exit status of a run whose selection the host cannot carry: distinct from pass (0) and fail (1). */
 export const OVER_CAPACITY_EXIT = 3;
-/** The most test files an author run runs at once (the cap test-slot.ts has always applied here). */
-export const AUTHOR_MAX_WORKERS = 4;
 const AUTHOR_SUITE_LABEL = 'preflight-author:static-and-affected';
 const AUTHOR_STATIC_LABEL = 'preflight-author:static';
 /** BACKSTOP: a docs freshness failure must not wait through a heavy author phase. */
@@ -44,38 +42,65 @@ export const AUTHOR_WALL_SHARE = 1 / 16;
 /** A suite is never priced below this, so an unmeasured file in an empty manifest is not free. */
 export const AUTHOR_MIN_SUITE_COST_MS = 1000;
 
-/** The test-slot readers' view of this host right now. */
-export function readHostCapacityInputs() {
-  const { cores, load1 } = readHostLoad();
-  return { cores, load1, headroomBytes: readMemoryHeadroom() };
+/** The test-slot readers' view of this host right now. On darwin the memory reading is the same
+ *  vm_stat report test-slot admission reads (W1-T11891), so pre-admission sizing is never blind there. */
+export function readHostCapacityInputs({ platform = process.platform, vmStat = readVmStat, load = readHostLoad,
+  readFile = undefined } = {}) {
+  const { cores, load1 } = load();
+  return { cores, load1, headroomBytes: readMemoryHeadroom(readFile, { platform, vmStat }) };
 }
+
+const positiveInteger = (n) => Number.isSafeInteger(n) && n >= 1;
 
 /**
  * W1-T7809 — what this host can carry, derived from the measured cores and load (testRunConcurrency),
- * the memory headroom (memoryTestConcurrency) and the author step runtime. There is no fixed suite count:
- * a larger host grants more workers and so a larger budget; a smaller or busier one grants fewer.
- * `slotConcurrency`, when the acquired test slot grants fewer workers, caps them further.
+ * the memory headroom (memoryTestConcurrency) and the author step runtime. There is no fixed suite count
+ * and no fixed worker ceiling (W1-T11891): a larger host grants more workers, a smaller or busier one fewer.
+ * `slotConcurrency` caps them further. Unmeasured memory is ONE worker, unless `slotAcquired` says the
+ * slot's grant was measured at admission: only that real grant may stand in for the memory bound.
  */
 export function hostBudget({ cores, load1, headroomBytes }, { stepRuntimeMs = AUTHOR_STEP_RUNTIME_MS,
-  perFileBytes = TEST_FILE_PEAK_BYTES, slotConcurrency } = {}) {
+  perFileBytes = TEST_FILE_PEAK_BYTES, slotConcurrency, slotAcquired = false } = {}) {
   const cpuWorkers = testRunConcurrency({ cores, load1 }, 1);
-  const memoryWorkers = memoryTestConcurrency(headroomBytes, perFileBytes);
-  const workers = Math.max(1, Math.min(AUTHOR_MAX_WORKERS, cpuWorkers, memoryWorkers ?? Infinity,
-    Number.isSafeInteger(slotConcurrency) && slotConcurrency >= 1 ? slotConcurrency : Infinity));
+  const memoryWorkers = memoryTestConcurrency(headroomBytes, perFileBytes) ?? null;
+  const slot = positiveInteger(slotConcurrency) ? slotConcurrency : null;
+  const acquired = slotAcquired === true && slot !== null;
+  const memoryBound = memoryWorkers ?? (acquired ? slot : 1);
+  const bounds = [['cpu', cpuWorkers], ['memory', memoryBound], ['slot', slot ?? Infinity]];
+  const workers = Math.max(1, Math.min(...bounds.map(([, n]) => n)));
+  const boundBy = bounds.find(([, n]) => n === workers)?.[0] ?? 'cpu';
   const wallMs = Math.floor(stepRuntimeMs * AUTHOR_WALL_SHARE);
   return { workers, wallMs, budgetMs: workers * wallMs, wallShare: AUTHOR_WALL_SHARE,
     inputs: { cores, load1, headroomBytes: headroomBytes ?? null, perFileBytes, stepRuntimeMs,
-      cpuWorkers, memoryWorkers: memoryWorkers ?? null, slotConcurrency: slotConcurrency ?? null } };
+      cpuWorkers, memoryWorkers, slotConcurrency: slotConcurrency ?? null, slotAcquired: acquired, boundBy,
+      memoryBound: memoryWorkers !== null ? 'measured' : acquired ? 'acquired-slot-grant' : 'unmeasured-one-worker' } };
+}
+
+/** Why `budget`'s workers are outside its own measured bounds, or undefined (W1-T11891). `grant` is the
+ *  slot now held: a budget priced against another grant is stale. */
+function outsideMeasuredBounds(budget, grant) {
+  const { cpuWorkers, memoryWorkers, slotConcurrency, slotAcquired } = budget.inputs ?? {};
+  const workers = budget.workers;
+  if (!positiveInteger(workers) || !positiveInteger(cpuWorkers) || typeof slotAcquired !== 'boolean' ||
+      (memoryWorkers !== null && !positiveInteger(memoryWorkers)) ||
+      (slotConcurrency !== null && !positiveInteger(slotConcurrency)) ||
+      (slotAcquired && slotConcurrency === null)) return 'missing or malformed measured bound';
+  if (slotAcquired && grant !== slotConcurrency) return 'stale slot grant';
+  if (workers > cpuWorkers) return 'workers exceed the measured CPU bound';
+  if (memoryWorkers !== null && workers > memoryWorkers) return 'workers exceed the measured memory bound';
+  if (slotConcurrency !== null && workers > slotConcurrency) return 'workers exceed the slot grant';
+  if (memoryWorkers === null && !slotAcquired && workers !== 1) return 'unmeasured memory admits one worker before a slot';
+  return undefined;
 }
 
 /** A validated native-profile run may spend its fixed remaining deadline, not a second
  *  unrelated wall-share budget. This changes time only: CPU/memory/lease workers stay intact.
  *  The caller uses this only AFTER readRuntimeProfile has validated closed current-tree evidence. */
-export function deadlineHostBudget(budget, { deadline, now = Date.now() } = {}) {
-  if (!Number.isFinite(deadline) || !Number.isFinite(now) ||
-      !Number.isSafeInteger(budget.workers) || budget.workers < 1 || budget.workers > AUTHOR_MAX_WORKERS ||
+export function deadlineHostBudget(budget, { deadline, now = Date.now(), grant } = {}) {
+  const outside = outsideMeasuredBounds(budget, grant);
+  if (!Number.isFinite(deadline) || !Number.isFinite(now) || outside !== undefined ||
       !Number.isSafeInteger(budget.inputs?.stepRuntimeMs) || budget.inputs.stepRuntimeMs <= 0) {
-    throw new Error('deadline host budget: invalid fixed deadline or admitted capacity');
+    throw new Error(`deadline host budget: invalid fixed deadline or admitted capacity${outside ? ` (${outside})` : ''}`);
   }
   const wallMs = Math.max(0, Math.floor(Math.min(budget.inputs.stepRuntimeMs,
     deadline - now - AUTHOR_SHUTDOWN_RESERVE_MS)));
@@ -626,11 +651,14 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
         }
         // The cheap census runs first. W1-T9951: the suite ticket is taken NOW, so it holds its place in
         // line while the static stage runs on its own memory admission; suites are admitted after it.
-        const queue = enqueueTestSlot(AUTHOR_SUITE_LABEL, { ...testSlot, perFileBytes: TEST_FILE_PEAK_BYTES, maxConcurrency: AUTHOR_MAX_WORKERS });
-        receipt.suiteQueue = { ticketed: queue.ticketed, positionAtEnqueue: queue.position ?? null, note: queue.note };
-        // W1-T11915 criterion 4: keep the ticket's arrival identity, then add the selection's known price before
-        // static work starts. This is the same price capacityVerdict records later; that verdict does not depend on
-        // the admitted budget. Reading the manifest here also lets every heartbeat retain the price while we wait.
+        // W1-T11891: no fixed author ceiling. The slot request is the measured pre-admission width (CPU, and
+        // memory incl. darwin vm_stat): an unmeasured memory reading asks for one worker, never more.
+        const requested = hostBudget((host ?? readHostCapacityInputs)());
+        const queue = enqueueTestSlot(AUTHOR_SUITE_LABEL, { ...testSlot, perFileBytes: TEST_FILE_PEAK_BYTES, maxConcurrency: requested.workers });
+        receipt.suiteQueue = { ticketed: queue.ticketed, positionAtEnqueue: queue.position ?? null, note: queue.note,
+          requestedWorkers: requested.workers, requestedBoundBy: requested.inputs.boundBy };
+        // W1-T11915 criterion 4: retain the ticket's arrival identity and add the selection's known price
+        // before static work starts, so every heartbeat can report the same price used by capacityVerdict.
         let manifest = { files: {} };
         try { manifest = JSON.parse(readFileSync(join(root, 'scripts/test-tier-manifest.json'), 'utf8')); }
         catch (error) { receipt.manifestUnavailable = error.message; }
@@ -653,8 +681,10 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
         };
         try {
           let runtimeProfile, runtimeManifest;
+          // `admittedWorkers` is the measured bound the width must sit within: the pre-admission request
+          // before static, the exact acquired grant once a slot is held (rechecked, never assumed).
           const admitRuntime = (stage, staticReserveMs, files = receipt.suites,
-            workers = hostBudget((host ?? readHostCapacityInputs)()).workers) => {
+            workers = requested.workers, admittedWorkers = workers) => {
             if (deadline === undefined) return;
             // Before static the slot is not held yet; price suites at the capacity the measured host can grant.
             if (stage !== 'before-static' && !['acquired', 'inherited'].includes(slot?.outcome)) throw new Error('runtime admission requires a real slot; unslotted fallback is not deadline-fit capacity');
@@ -663,7 +693,7 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
             if (files.length === 0) return;
             runtimeManifest ??= JSON.parse(readFileSync(join(root, 'scripts/test-tier-manifest.json'), 'utf8'));
             const decision = runtimeSelectionFit(files, runtimeManifest, runtimeProfile, {
-              workers, deadline, ...(staticReserveMs === undefined ? {} : { staticReserveMs }),
+              workers, admittedWorkers, deadline, ...(staticReserveMs === undefined ? {} : { staticReserveMs }),
             });
             receipt.runtimeAdmission = { stage, profile: relative(root, resolve(root, values['runtime-profile'])), ...decision };
             progress({ name: 'runtime-admission', stage, fits: decision.fits });
@@ -707,13 +737,15 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
             if ((partial ? partial.suites : receipt.suites).length === 0) cancelSuites('the selection names no suite');
             else admitSuites();
             // W1-T7809: price the selection against what this host can carry NOW, before spending it.
-            const legacyBudget = hostBudget((host ?? readHostCapacityInputs)(), { slotConcurrency: slot?.concurrency });
+            // W1-T11891: only a real acquired grant is execution capacity; its width is the measured bound.
+            const slotAcquired = slot?.outcome === 'acquired' && testSlotExecutionAllowed(slot);
+            const legacyBudget = hostBudget((host ?? readHostCapacityInputs)(), { slotConcurrency: slot?.concurrency, slotAcquired });
             // A deadline without a validated native profile was refused before static work.
             // Never expand workers or restart the deadline to admit a larger selection.
-            const nativeBudget = runtimeProfile ? deadlineHostBudget(legacyBudget, { deadline }) : legacyBudget;
+            const nativeBudget = runtimeProfile ? deadlineHostBudget(legacyBudget, { deadline, grant: slot?.concurrency }) : legacyBudget;
             // W1-T9953: a full fallback is priced against the HOST, never the deadline; a deadline may only shrink it.
             const budget = partial && nativeBudget.budgetMs > legacyBudget.budgetMs ? legacyBudget : nativeBudget;
-            const executionWorkers = Math.min(AUTHOR_MAX_WORKERS, budget.workers);
+            const executionWorkers = budget.workers;
             receipt.executionWorkers = executionWorkers;
             reportManifestFallbacks(priced, manifest);
             const verdict = capacityVerdict(priced, manifest, budget);
@@ -762,7 +794,7 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
               console.log('affected-tests: NOT RUN — the plan-only selection named no suite; lint-plan-fast is the check');
             } else if (!notRun) {
             const testsName = receipt.tiered ? 'affected-tests-subset' : 'affected-tests';
-            admitRuntime('before-tests', 0, ranSuites, executionWorkers);
+            admitRuntime('before-tests', 0, ranSuites, executionWorkers, slot.concurrency);
             // An over-capacity subset is sized by the arm it was cut from: a narrow arm's subset is narrower still.
             // W1-T10947: an explicit bounded profile is priced against the context this slot was bound to.
             const testCapacity = admitHost('affected-tests', { selection: receipt.selectedArm ?? receipt.selection, workers: executionWorkers,
@@ -770,7 +802,7 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
                 context: boundContext ? observeContext() : undefined, bound: boundContext }) });
             if (testCapacity) (receipt.hostCapacity ??= []).push(testCapacity);
             // No whole-suite retry or instrumentation. A missing target/summary is a refusal, never green.
-            // The host-wide test slot, a load-derived concurrency (never above the old 4) and nice (test-slot.ts).
+            // The host-wide test slot, its measured CPU/memory grant (no fixed ceiling) and nice (test-slot.ts).
             slot.refresh();
             // The suites start only under the very context the slot was bound to; anything else is NOT_RUN.
             requireNativeContext('start');

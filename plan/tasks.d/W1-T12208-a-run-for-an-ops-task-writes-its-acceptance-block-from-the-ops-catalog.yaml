@@ -1,0 +1,47 @@
+- id: W1-T12208
+  title: "A run for an ops task publishes only the title and the criteria of the task"
+  repo: remudero
+  depends_on: [W1-T12207]
+  priority: 1.1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # text of a private task file goes into a public pull request body
+  band_meaning: blast-radius
+  origin: operator-session#ops-cutover-2026-11-10
+  plan_refs:
+    - W1-T11768
+    - W1-T11770
+  files:
+    - src/cli/commands/run-task-verb.ts
+    - test/infra/a-run-for-an-ops-task-writes-its-acceptance-block-from-the-ops-catalog.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "For a task that the ops catalog holds, the run writes the acceptance block of the public pull request body from the criteria of the ops task"
+      proof: "grep: W1-T12208 criterion 1 in test/infra/a-run-for-an-ops-task-writes-its-acceptance-block-from-the-ops-catalog.test.ts"
+    - claim: "The text that the harness writes into the public pull request holds the title and the acceptance criteria of the ops task, and no other field of it. The test puts a marker in the rationale, the design, the falsifier, the note and the origin, and finds none of them in the title or the body"
+      proof: "grep: W1-T12208 criterion 2 in test/infra/a-run-for-an-ops-task-writes-its-acceptance-block-from-the-ops-catalog.test.ts"
+    - claim: "The prompt of a run for an ops task tells the worker to copy no field other than the title and the acceptance criteria into a commit, a pull request or a comment"
+      proof: "grep: W1-T12208 criterion 3 in test/infra/a-run-for-an-ops-task-writes-its-acceptance-block-from-the-ops-catalog.test.ts"
+    - claim: "The public check of the acceptance block passes for that body with no read of the ops repository"
+      proof: "grep: W1-T12208 criterion 4 in test/infra/a-run-for-an-ops-task-writes-its-acceptance-block-from-the-ops-catalog.test.ts"
+    - claim: "For a task that the public plan holds, the body is written as it is today"
+      proof: "grep: W1-T12208 criterion 5 in test/infra/a-run-for-an-ops-task-writes-its-acceptance-block-from-the-ops-catalog.test.ts"
+    - claim: "The run verb, the production caller, takes the criteria from the lookup, and the test goes through the run verb"
+      proof: "grep: findTaskInCatalogs( in src/cli/commands/run-task-verb.ts"
+  rationale: |
+    OBSERVED 2026-11-10: the code for an ops task is built in the public repository, so its pull request is public.
+    - The operator ruled on 2026-11-10: a public pull request body and the public board may carry the title and the acceptance criteria of a task held in the private repository, and no other field of it. The rationale, the design notes, the evidence and every other field stay private.
+    - This narrows the rule of W1-T11768 for those two fields only. W1-T11768 and W1-T11770 keep every other byte of the ops catalog off public surfaces.
+    - `normalizeRunPrAcceptanceFromPlan` in src/cli/commands/run-task-verb.ts writes the acceptance block from `task.acceptance` of the public plan. The run verb calls it in two places.
+    - The public check `acceptance-author-gate` reads `declaredPlanTaskIds` in scripts/acceptance-author-gate.mjs. It cannot read a private repository, and it passes only with a well-formed acceptance block in the body.
+    - The switch is the host file `<state dir>/plan-destination.json`. If the file is absent, the switch is off and the behaviour is byte-identical to today. This task adds no kind. It must merge before `task` is turned on.
+  design: |
+    In the run verb, take the task from `findTaskInCatalogs`. When the catalog is the ops catalog, pass its criteria to `normalizeRunPrAcceptanceFromPlan` and its title to the pull request title.
+    Build the public text from an explicit list of two fields. Do not build it from the task object with fields removed, so that a new field of a task is private by default.
+    Add the instruction for the worker to the run prompt for an ops task.
+    NOT IN SCOPE: the selector that starts such a run, and the review of the pull request.
+  falsifier: |
+    Leave the body of an ops task without the block and criterion 1 must fail. Add the rationale to the body and criterion 2 must fail. Remove the instruction from the prompt and criterion 3 must fail. Restore and require all six to pass.
