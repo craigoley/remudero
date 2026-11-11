@@ -4,14 +4,15 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { daemonCommand } from "#src/run-task.js";
+import { daemonCommand } from "#test/helpers/run-task-daemon.js";
 import type { DaemonSummary } from "#src/lib/daemon.js";
 import {
   PLAN_DESTINATION_KINDS,
   planDestinationPath,
   planDestinationRepository,
   resolvePlanDestination,
-  type PlanDestinationDeps,
+  type PlanDestination,
+  type PlanDestinationKind,
 } from "#src/lib/plan-destination.js";
 import { withGhShim } from "#test/helpers/gh-shim.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
@@ -23,7 +24,7 @@ const PRIVATE_NAME = "zz-private-plan";
 const PRIVATE = `${PRIVATE_OWNER}/${PRIVATE_NAME}`;
 const PUBLIC = { owner: "public-owner", repo: "public-name", checkoutDir: join(REPO_ROOT, "fixture-public-checkout") };
 
-function fixtureRoot(): { home: string; root: string; stateDir: string; planPath: string; deps: PlanDestinationDeps } {
+function fixtureRoot(): { home: string; root: string; stateDir: string; planPath: string; resolve: (kind: PlanDestinationKind) => PlanDestination } {
   const home = mkdtempSync(join(tmpdir(), "rmd-plan-destination-"));
   const root = join(home, "Remudero");
   const stateDir = join(root, "state");
@@ -32,7 +33,7 @@ function fixtureRoot(): { home: string; root: string; stateDir: string; planPath
   writeFileSync(join(home, ".config", "remudero", "config.json"), JSON.stringify({ claudeBin: "/bin/true", root }));
   const planPath = join(home, "tasks.yaml");
   writeFileSync(planPath, "[]\n");
-  return { home, root, stateDir, planPath, deps: { stateDir: () => stateDir, publicRepository: () => ({ ...PUBLIC }) } };
+  return { home, root, stateDir, planPath, resolve: (kind) => resolvePlanDestination(kind, stateDir, { ...PUBLIC }) };
 }
 
 function writeSwitch(stateDir: string, value: unknown): void {
@@ -75,12 +76,12 @@ test("W1-T12200 criterion 1: with no host file the resolver returns the caller's
   const f = fixtureRoot();
   try {
     for (const kind of PLAN_DESTINATION_KINDS) {
-      assert.deepEqual(resolvePlanDestination(kind, f.deps), { outcome: "off", ...PUBLIC });
+      assert.deepEqual(f.resolve(kind), { outcome: "off", ...PUBLIC });
     }
-    assert.deepEqual(planDestinationRepository(f.deps), { outcome: "off" });
+    assert.deepEqual(planDestinationRepository(f.stateDir), { outcome: "off" });
     // A host with no instance config has no state directory. That is also off, and nothing is created.
-    const noInstance: PlanDestinationDeps = { stateDir: () => undefined, publicRepository: () => ({ ...PUBLIC }) };
-    assert.deepEqual(resolvePlanDestination("task", noInstance), { outcome: "off", ...PUBLIC });
+    assert.deepEqual(resolvePlanDestination("task", undefined, { ...PUBLIC }), { outcome: "off", ...PUBLIC });
+    assert.deepEqual(planDestinationRepository(undefined), { outcome: "off" });
     assert.equal(existsSync(join(f.root, "repos")), false, "the resolver makes no directory");
   } finally {
     rmSync(f.home, { recursive: true, force: true });
@@ -92,13 +93,13 @@ test("W1-T12200 criterion 2: a host file that names a repository and lists the k
   try {
     writeSwitch(f.stateDir, { repository: PRIVATE, kinds: ["decision", "task"] });
     const expected = { outcome: "destination", owner: PRIVATE_OWNER, repo: PRIVATE_NAME, checkoutDir: join(f.root, "repos", PRIVATE_NAME) };
-    assert.deepEqual(resolvePlanDestination("decision", f.deps), expected);
-    assert.deepEqual(resolvePlanDestination("task", f.deps), expected);
-    assert.deepEqual(planDestinationRepository(f.deps),
+    assert.deepEqual(f.resolve("decision"), expected);
+    assert.deepEqual(f.resolve("task"), expected);
+    assert.deepEqual(planDestinationRepository(f.stateDir),
       { outcome: "named", owner: PRIVATE_OWNER, repo: PRIVATE_NAME, checkoutDir: join(f.root, "repos", PRIVATE_NAME), kinds: ["decision", "task"] });
     // A field this task does not know (a later task adds one) does not make the file unreadable.
     writeSwitch(f.stateDir, { repository: PRIVATE, kinds: ["feedback"], dispatch_ops_tasks: true });
-    assert.equal(resolvePlanDestination("feedback", f.deps).outcome, "destination");
+    assert.equal(f.resolve("feedback").outcome, "destination");
   } finally {
     rmSync(f.home, { recursive: true, force: true });
   }
@@ -108,18 +109,18 @@ test("W1-T12200 criterion 3: a kind the file does not list is public, and the fi
   const f = fixtureRoot();
   try {
     writeSwitch(f.stateDir, { repository: PRIVATE, kinds: ["decision"] });
-    assert.deepEqual(resolvePlanDestination("feedback", f.deps), { outcome: "not_listed", ...PUBLIC });
-    assert.equal(resolvePlanDestination("decision", f.deps).outcome, "destination");
+    assert.deepEqual(f.resolve("feedback"), { outcome: "not_listed", ...PUBLIC });
+    assert.equal(f.resolve("decision").outcome, "destination");
     // The operator removes the kind. The same process sees it on the next call.
     writeSwitch(f.stateDir, { repository: PRIVATE, kinds: [] });
-    assert.deepEqual(resolvePlanDestination("decision", f.deps), { outcome: "not_listed", ...PUBLIC });
+    assert.deepEqual(f.resolve("decision"), { outcome: "not_listed", ...PUBLIC });
     // The readers of both roots still get the repository while the file names it.
-    assert.equal(planDestinationRepository(f.deps).outcome, "named");
+    assert.equal(planDestinationRepository(f.stateDir).outcome, "named");
     // The operator adds it back, then removes the file.
     writeSwitch(f.stateDir, { repository: PRIVATE, kinds: ["decision"] });
-    assert.equal(resolvePlanDestination("decision", f.deps).outcome, "destination");
+    assert.equal(f.resolve("decision").outcome, "destination");
     rmSync(planDestinationPath(f.stateDir));
-    assert.deepEqual(resolvePlanDestination("decision", f.deps), { outcome: "off", ...PUBLIC });
+    assert.deepEqual(f.resolve("decision"), { outcome: "off", ...PUBLIC });
   } finally {
     rmSync(f.home, { recursive: true, force: true });
   }
@@ -144,24 +145,21 @@ test("W1-T12200 criterion 4: a file that is malformed, unreadable, or holds an u
     for (const [label, value, reason] of bad) {
       writeSwitch(f.stateDir, value);
       for (const kind of PLAN_DESTINATION_KINDS) {
-        const got = resolvePlanDestination(kind, f.deps);
+        const got = f.resolve(kind);
         assert.equal(got.outcome, "unreadable", label);
         assert.deepEqual(Object.keys(got).sort(), ["outcome", "reason"], `${label}: no repository and no checkout`);
         assert.match(got.outcome === "unreadable" ? got.reason : "", reason, label);
         assert.ok(!JSON.stringify(got).includes(PRIVATE_NAME) && !JSON.stringify(got).includes(PRIVATE_OWNER),
           `${label}: the reason does not quote the file`);
       }
-      assert.equal(planDestinationRepository(f.deps).outcome, "unreadable", label);
+      assert.equal(planDestinationRepository(f.stateDir).outcome, "unreadable", label);
     }
     // A path that cannot be read as a file.
     rmSync(planDestinationPath(f.stateDir));
     mkdirSync(planDestinationPath(f.stateDir));
-    const unreadable = resolvePlanDestination("decision", f.deps);
+    const unreadable = f.resolve("decision");
     assert.equal(unreadable.outcome, "unreadable");
     assert.match(unreadable.outcome === "unreadable" ? unreadable.reason : "", /cannot read the file \(EISDIR\)$/);
-    // An instance config that cannot be loaded is unreadable too, not off.
-    const brokenConfig = resolvePlanDestination("decision", { ...f.deps, stateDir: () => { throw new Error("config.json: bad"); } });
-    assert.deepEqual(brokenConfig, { outcome: "unreadable", reason: "instance config: config.json: bad" });
   } finally {
     rmSync(f.home, { recursive: true, force: true });
   }

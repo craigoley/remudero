@@ -17,7 +17,8 @@
  * the reason may reach a ledger row (the W1-T11768 rule).
  *
  * This module does not import `repo-location.ts` (that file reads `process.argv` at import). The caller
- * passes its own public repository and checkout, so the `off` answer is exactly what the caller uses today.
+ * passes the state directory and its own public repository and checkout as plain values, so the `off`
+ * answer is exactly what the caller uses today, and there is no injection seam to count.
  */
 import { join } from "node:path";
 import { readFileIfExists } from "./fs-race-safe.js";
@@ -27,16 +28,6 @@ export type PlanDestinationKind = typeof PLAN_DESTINATION_KINDS[number];
 
 /** A repository and the checkout a writer commits in. */
 export interface PlanDestinationRepository { owner: string; repo: string; checkoutDir: string }
-
-export interface PlanDestinationRepositoryDeps {
-  /** `<config.root>/state`. `undefined` means this host has no instance config, so the switch is off. */
-  stateDir: () => string | undefined;
-}
-
-export interface PlanDestinationDeps extends PlanDestinationRepositoryDeps {
-  /** The repository and checkout the caller writes to today. Returned unchanged when the switch does not apply. */
-  publicRepository: () => PlanDestinationRepository;
-}
 
 export type PlanDestination =
   /** `off`: no host file. `not_listed`: the file does not list this kind. Both are the public repository. */
@@ -67,14 +58,9 @@ function isKind(value: unknown): value is PlanDestinationKind {
  * The repository the host file names, for a reader that reads both roots. It answers while the file names
  * a repository, also when `kinds` is empty: files that already went there stay there.
  * The checkout is `<config.root>/repos/<name>`, the sibling of the state directory.
+ * `stateDir` is `<config.root>/state`. `undefined` means this host has no instance config, so the switch is off.
  */
-export function planDestinationRepository(deps: PlanDestinationRepositoryDeps): PlanDestinationRepositoryRead {
-  let stateDir: string | undefined;
-  try {
-    stateDir = deps.stateDir();
-  } catch (e) {
-    return { outcome: "unreadable", reason: `instance config: ${(e as Error).message}` };
-  }
+export function planDestinationRepository(stateDir: string | undefined): PlanDestinationRepositoryRead {
   if (stateDir === undefined) return { outcome: "off" };
   const path = planDestinationPath(stateDir);
   let raw: string | undefined;
@@ -112,11 +98,19 @@ export function planDestinationRepository(deps: PlanDestinationRepositoryDeps): 
   };
 }
 
-/** Where a NEW plan file of this kind is filed on this host. Reads the host file on each call. */
-export function resolvePlanDestination(kind: PlanDestinationKind, deps: PlanDestinationDeps): PlanDestination {
-  const named = planDestinationRepository(deps);
+/**
+ * Where a NEW plan file of this kind is filed on this host. Reads the host file on each call.
+ * `publicRepository` is the repository and checkout the caller writes to today. It is returned unchanged
+ * when the switch does not apply.
+ */
+export function resolvePlanDestination(
+  kind: PlanDestinationKind,
+  stateDir: string | undefined,
+  publicRepository: PlanDestinationRepository,
+): PlanDestination {
+  const named = planDestinationRepository(stateDir);
   if (named.outcome === "unreadable") return named;
-  if (named.outcome === "off") return { outcome: "off", ...deps.publicRepository() };
-  if (!named.kinds.includes(kind)) return { outcome: "not_listed", ...deps.publicRepository() };
+  if (named.outcome === "off") return { outcome: "off", ...publicRepository };
+  if (!named.kinds.includes(kind)) return { outcome: "not_listed", ...publicRepository };
   return { outcome: "destination", owner: named.owner, repo: named.repo, checkoutDir: named.checkoutDir };
 }
