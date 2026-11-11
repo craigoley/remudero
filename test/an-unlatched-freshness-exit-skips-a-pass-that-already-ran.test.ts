@@ -53,11 +53,11 @@ test("W1-T9352: an idle daemon's tick-top exit does not repeat a pass since the 
   assert.equal(h.calls, 1, "the pass that completed after the advance was not repeated at exit");
 });
 
-test("W1-T9352: an exit with no pass since the advance still runs one", async (t) => {
+test("W1-T12237: an exit with no pass since the advance starts none", async (t) => {
   const h = await exitAfter(t, { idle: true, passStepMs: 0 });
   assert.equal(h.summary.stopReason, "stale");
-  assert.equal(h.restart?.pre_exit_pass, "ran");
-  assert.equal(h.calls, 2, "the exit ran its own bounded pass");
+  assert.equal(h.restart?.pre_exit_pass, "no_sweep_at_exit");
+  assert.equal(h.calls, 1, "the exit starts no pass of its own");
 });
 
 test("W1-T9352: the restart row names the advance skip and its evidence", async (t) => {
