@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
-  PR_BLOCKERS, PR_BLOCKER_OWNERS, blockerFields, finalBlocker, priorBlockersFromLedger,
+  PR_BLOCKERS, PR_BLOCKER_OWNERS, blockerFields, blockerOwner, finalBlocker, priorBlockersFromLedger,
 } from "#src/lib/pr-blocker.js";
 import {
   DEFAULT_SWEEP_POLICY, DISPOSITION_RULES, deriveDisposition, runSweep,
@@ -48,7 +48,7 @@ test("W1-T5537: every disposition row declares a blocker from the closed set", (
 test("W1-T5537: one disposition splits into the blocker each PR actually waits on", async () => {
   const cases: [Partial<OpenPrView>, string, string][] = [
     [{ checksState: "red", priorStrikes: DEFAULT_SWEEP_POLICY.strikeCap }, "strikes-exhausted", "strike-ladder"],
-    [{ checksState: "red", isPlanFiling: true, priorStrikes: DEFAULT_SWEEP_POLICY.strikeCap }, "plan-proof-unrunnable", "NONE"],
+    [{ checksState: "red", isPlanFiling: true, priorStrikes: DEFAULT_SWEEP_POLICY.strikeCap }, "plan-proof-unrunnable", "operator"],
     [{ mergeState: "dirty" }, "conflict", "conflict-rebase"],
     [{ autoMergeArmed: true }, "armed-idle", "armed-idle-merge"],
   ];
@@ -100,7 +100,11 @@ test("blocker refinement uses named facts and prioritizes base red and withheld 
   assert.equal(finalBlocker("escalated", { strikesExhausted: true }), "strikes-exhausted");
   assert.equal(finalBlocker("other", {}), "other");
   assert.equal(blockerFields("plan-proof-unrunnable", undefined, NOW, true).blocker_owner, "plan-repair");
-  assert.equal(blockerFields("plan-proof-unrunnable", undefined, NOW, false).blocker_owner, "NONE");
+  assert.equal(blockerFields("plan-proof-unrunnable", undefined, NOW, false).blocker_owner, "operator");
+  for (const capable of [false, true]) {
+    assert.equal(blockerFields("plan-proof-unrunnable", undefined, NOW, capable).blocker_owner,
+      blockerOwner("plan-proof-unrunnable", capable));
+  }
 });
 
 test("blocker history ignores unrelated rows and never recovers age from a malformed latest observation", () => {
@@ -187,8 +191,16 @@ test("the final write distinguishes plan and metadata waits from own and base re
   const d = deps({ repairMetadata: () => ({ repaired: false, reason: "unrepairable" }) });
   await runSweep(views, d);
   assert.deepEqual(disposed(d).map(row => [row.blocker, row.blocker_owner]), [
-    ["plan-proof-unrunnable", "NONE"], ["plan-proof-unrunnable", "plan-repair"], ["own-red", "fix-lane"],
+    ["plan-proof-unrunnable", "operator"], ["plan-proof-unrunnable", "plan-repair"], ["own-red", "fix-lane"],
   ]);
+  // the owner is a projection only: the incapable plan PR keeps its disposition ...
+  assert.ok(["blocked-ambiguous", "refused-escalate"].includes(String(disposed(d)[0].disposition)));
+  // ... and in an actionable pass the operator still receives exactly one escalation, made by the disposition
+  const escalated: number[] = [];
+  const live = deps({ repairMetadata: () => ({ repaired: false, reason: "unrepairable" }),
+    actionable: () => true, escalate: view => { escalated.push(view.prNumber); } });
+  await runSweep(views, live);
+  assert.equal(escalated.filter(n => n === 71).length, 1);
 });
 
 test("main-health stand-downs and common failing checks name base-red without spending a fix", async () => {
@@ -268,7 +280,7 @@ test("a capped-green exhausted body repair names a plan-proof wait and its avail
     await runSweep([view], d);
     const [row] = disposed(d);
     assert.equal(row.blocker, "plan-proof-unrunnable");
-    assert.equal(row.blocker_owner, capable ? "plan-repair" : "NONE");
+    assert.equal(row.blocker_owner, capable ? "plan-repair" : "operator");
     assert.equal(row.disposition, capable ? "blocked-fixable" : "blocked-ambiguous");
   }
 });

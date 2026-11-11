@@ -60,20 +60,30 @@ test("W1-T8267: a stalled stage names the reason it kept repeating", async () =>
   assert.equal(f.escalations.length, 1);
 });
 
+/** A red PR whose fix dispatch has failed the backstop count: blocker `escalated`, whose table owner is NONE. */
+function heldView() {
+  return pr(10842, { checksState: "red", reviewState: "pending",
+    ciFailures: [{ name: "ci", logTail: "test failed" }] });
+}
+function heldHistory(view: OpenPrView): Row[] {
+  return Array.from({ length: FIX_DISPATCH_FAILED_BACKSTOP }, () => ({
+    task_id: view.taskId, step: "sweep.fix.dispatch_failed", pr_number: view.prNumber,
+    head_sha: view.headSha, error: "worker launch failed",
+  }));
+}
+
 test("W1-T8267: an ownerless blocker is stalled at once", async () => {
-  const view = pr(10842, { isPlanFiling: true, checksState: "red", reviewState: "pending",
-    ciFailures: [{ name: "lint-plan", conclusion: "FAILURE", logTail: "plan proof cannot run" }] });
-  const f = fixture();
+  const view = heldView();
+  const f = fixture(heldHistory(view));
   await runSweep([view], f.deps);
   const disposed = f.rows("sweep.disposed").find(row => row.pr_number === view.prNumber);
-  assert.equal(disposed?.blocker, "plan-proof-unrunnable");
+  assert.equal(disposed?.blocker, "escalated");
   assert.equal(disposed.blocker_owner, "NONE");
   assert.equal(disposed.stage_stuck, true);
   assert.equal(f.rows("pr.stuck").length, 1);
   const stalled = f.rows("pr.stuck")[0];
   assert.equal(stalled.blocker_age_ms, 0);
   assert.equal(stalled.owner, "none");
-  assert.equal(stalled.diagnosis, "unknown signature");
   assert.equal(f.escalations.length, 1);
   assert.match(f.escalations[0].reason, /owner: none/);
   assert.equal(f.rows("incident.event").length, 1);
@@ -133,9 +143,8 @@ test("W1-T8267: an owned stage keeps its backstop and previews write nothing", a
 });
 
 test("W1-T8267: an ownerless stage reuses an escalation made by its disposition", async () => {
-  const view = pr(10842, { isPlanFiling: true, checksState: "red", reviewState: "pending",
-    ciFailures: [{ name: "lint-plan", conclusion: "FAILURE", logTail: "plan proof cannot run" }] });
-  const f = fixture([], { actionable: () => true });
+  const view = heldView();
+  const f = fixture(heldHistory(view), { actionable: () => true });
   await runSweep([view], f.deps);
   assert.equal(f.escalations.length, 1);
   assert.equal(f.rows("pr.stuck").length, 1);
@@ -178,8 +187,12 @@ test("W1-T8267: an ownerless stage preserves a repair judge's wait and recovery"
   assert.equal(held.actions[0].disposition, "wait");
   assert.equal(repairs, 0);
   assert.equal(f.escalations.length, 0);
-  assert.equal(f.rows("pr.stuck")[0].owner, "none");
-  assert.equal(f.rows("incident.event").length, 1);
+  // the exhausted plan repair is now owned by the operator (W1-T10667), so no ownerless stall is recorded
+  const waiting = f.rows("sweep.disposed").find(row => row.pr_number === view.prNumber);
+  assert.equal(waiting?.blocker, "plan-proof-unrunnable");
+  assert.equal(waiting.blocker_owner, "operator");
+  assert.equal(f.rows("pr.stuck").length, 0);
+  assert.equal(f.rows("incident.event").length, 0);
   recovered = true;
   await runSweep([view], f.deps);
   assert.equal(repairs, 1);

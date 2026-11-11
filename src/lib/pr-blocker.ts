@@ -173,7 +173,7 @@ export function blockerFields(blocker: PrBlocker, prior: PriorBlocker | undefine
   const source = continues ? prior.sinceSource : prior?.since === undefined ? "first-seen" : undefined;
   return {
     blocker,
-    blocker_owner: blocker === "plan-proof-unrunnable" && !planRepairCapable ? "NONE" : PR_BLOCKER_OWNERS[blocker],
+    blocker_owner: blockerOwner(blocker, planRepairCapable),
     blocker_since: since,
     blocker_age_ms: Math.max(0, now - Date.parse(since)),
     ...(source ? { blocker_since_source: source } : {}),
