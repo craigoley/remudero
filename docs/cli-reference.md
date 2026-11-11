@@ -70,7 +70,7 @@ usage:
   rmd check-acceptance <body-file>   # Report what the reviewer's own parser actually resolves from a PR body file.
   rmd retro [--dry-run]   # Sync the plan from the ledger (Architect retro).
   rmd drain [--until <id>] [--max <n>] [--repo <name>] [--curated <path>] [--dry-run] [--allow-stale]   # Drain the task DAG through run-task, dispatching from the plan blob.
-  rmd daemon --repo <name> [--plan <path>] [--max <n>] [--poll-ms <n>] [--dry-run] [--allow-self-target] [--allow-stale]   # Persistent scheduler loop draining a named repo; refuses self-target unattended.
+  rmd daemon --repo <name> [--plan <path>] [--max <n>] [--poll-ms <n>] [--shadow-ops-catalog <owner>/<name>] [--dry-run] [--allow-self-target] [--allow-stale]   # Persistent scheduler loop draining a named repo; refuses self-target unattended.
   rmd daemon-plist --repo <name> [--poll-ms <n>] [--allow-self-target] [--write]   # Generate the launchd unit for `rmd daemon`, baking in --repo.
   rmd deploy [--reason <text>]   # Operator trigger for the deploy supervisor: request a fast-forward + restart.
   rmd deploy-run [--dry-run]   # One deploy-supervisor cycle: fast-forward + kickstart the daemon when idle.
@@ -703,10 +703,10 @@ drain the DAG through run-task, dispatching from the origin/main plan blob (W1-T
 Persistent scheduler loop draining a named repo; refuses self-target unattended.
 
 ```
-rmd daemon --repo <name> [--plan <path>] [--max <n>] [--poll-ms <n>] [--dry-run] [--allow-self-target] [--allow-stale]
+rmd daemon --repo <name> [--plan <path>] [--max <n>] [--poll-ms <n>] [--shadow-ops-catalog <owner>/<name>] [--dry-run] [--allow-self-target] [--allow-stale]
 ```
 
-persistent scheduler loop; --repo picks the repo to drain + its gateway (e.g. remudero-sandbox for W1-T12d). Refuses to drain its OWN source repo unattended without --allow-self-target. --dry-run previews the target + planned tasks, spawns nothing. Self-hosting reads the plan from origin/main (W1-T60); --allow-stale proceeds on the last-fetched refs if the fetch fails.
+persistent scheduler loop; --repo picks the repo to drain + its gateway (e.g. remudero-sandbox for W1-T12d). Refuses to drain its OWN source repo unattended without --allow-self-target. --dry-run previews the target + planned tasks, spawns nothing. Self-hosting reads the plan from origin/main (W1-T60); --allow-stale proceeds on the last-fetched refs if the fetch fails. --shadow-ops-catalog <owner>/<name> (W1-T11770, off by default) reads that repository's task catalog read-only off the loop and records only an aggregate dispatch.secondary_catalog_shadow row; it never adds work to dispatch.
 
 ### `rmd daemon-plist`
 

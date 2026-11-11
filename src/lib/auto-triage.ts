@@ -10,6 +10,8 @@ import { hostWorktreeGit, hostWorktreeGitAsync } from "./worktree-git.js";
 import { parse as parseYaml } from "yaml";
 import { observeFeedbackAdmission } from "./authority.js";
 import type { FeedbackAdmissionContext } from "./contributor-admission.js";
+import { assertOneFeedbackCopy, feedbackReadRoots, instanceStateDir } from "./feedback.js";
+import { planDestinationRepository } from "./plan-destination.js";
 
 /**
  * The daemon's second work-generating rung (recon-DC #2): claims and fires at most one feedback
@@ -873,12 +875,31 @@ export function decideAutoTriage(i: AutoTriageInputs): AutoTriageDecision {
  * Why: docs/forensics/auto-triage.md#feedbackentriesoldestfirst.
  */
 function feedbackEntriesOldestFirst(root: string, admission?: FeedbackAdmissionContext): Array<{ id: string; ts: string }> {
+  // W1-T12202: the public root and, while the host file names one, the destination checkout. One id is read once.
+  const texts = new Map<string, { path: string; text: string }>();
+  for (const r of triageFeedbackRoots(root)) {
+    for (const [id, copy] of feedbackTextsOf(r)) {
+      const held = texts.get(id);
+      if (held === undefined) texts.set(id, copy);
+      else assertOneFeedbackCopy(id, held, copy);
+    }
+  }
   const out: Array<{ id: string; ts: string }> = [];
+  for (const [id, { text }] of texts) admitNewEntry(id, text, admission, out);
+  return sortOldestFirst(out);
+}
+
+function triageFeedbackRoots(root: string): string[] {
+  return feedbackReadRoots(root, planDestinationRepository(instanceStateDir()));
+}
+
+function feedbackTextsOf(root: string): Map<string, { path: string; text: string }> {
+  const out = new Map<string, { path: string; text: string }>();
   const view = currentMainFeedbackView(root);
   // W1-T11374: origin/main judges every entry it or the checkout's HEAD tracks; only a capture neither holds is read locally.
-  if (view !== undefined) for (const entry of view.entries) admitNewEntry(entry.id, entry.text, admission, out);
+  if (view !== undefined) for (const entry of view.entries) out.set(entry.id, { path: `${root} origin/main:plan/feedback/${entry.id}.yaml`, text: entry.text });
   const dir = join(root, "plan", "feedback");
-  if (!existsSync(dir)) return sortOldestFirst(out);
+  if (!existsSync(dir)) return out;
   for (const name of readdirSync(dir)) {
     if (!name.endsWith(".yaml")) continue;
     if (view !== undefined && (view.mainNames.has(name) || view.headNames.has(name))) continue;
@@ -888,9 +909,9 @@ function feedbackEntriesOldestFirst(root: string, admission?: FeedbackAdmissionC
     } catch {
       continue; // an unreadable entry is skipped, never a reason to refuse the whole sweep
     }
-    admitNewEntry(name.replace(/\.yaml$/, ""), text, admission, out);
+    out.set(name.replace(/\.yaml$/, ""), { path: join(dir, name), text });
   }
-  return sortOldestFirst(out);
+  return out;
 }
 
 function admitNewEntry(id: string, text: string, admission: FeedbackAdmissionContext | undefined, out: Array<{ id: string; ts: string }>): void {
@@ -936,6 +957,15 @@ export async function refreshFeedbackFromMain(
   root: string,
   log?: (step: string, extra: Record<string, unknown>) => void,
   git: MainFeedbackGit = hostWorktreeGitAsync,
+): Promise<void> {
+  // W1-T12202: each root keeps its own view, keyed by its own path and its own origin/main.
+  for (const r of triageFeedbackRoots(root)) await refreshOneFeedbackRoot(r, log, git);
+}
+
+async function refreshOneFeedbackRoot(
+  root: string,
+  log: ((step: string, extra: Record<string, unknown>) => void) | undefined,
+  git: MainFeedbackGit,
 ): Promise<void> {
   const dirs = gitDirsOf(root);
   if (dirs === undefined) return dropView(root, "not a git checkout", log);

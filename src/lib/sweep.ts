@@ -105,7 +105,7 @@ import { distanceRefreshCause, type BaseChangedFiles } from "./plan-pr-merge-saf
 import { armedBodyNeedsGuard, rememberCleanArmedBody, type ClosingReferenceGuardResult } from "./closing-reference-guard.js";
 import { observeAdmissionDisposition } from "./action-executor.js";
 import { runIsolatedLocalMergeRoute, localMergeRouteForCheck, type IsolatedMergeRouteResult } from "./ci-parity.js";
-import { acquireInflightLock, InflightLockError, inflightLockPath, parseInflightLockInfo, type InflightLockHandle } from "./inflight-lock.js";
+import { acquireInflightLock, InflightLockError, inflightLockPath, parseInflightLockInfo, readInflightLock, type InflightLockHandle } from "./inflight-lock.js";
 import { reclaimStaleLock } from "./fs-race-safe.js";
 import { DEFAULT_POLL_INTERVAL_MS } from "./poll-interval.js";
 import { appendLedger, isRealStrike, type LedgerLine } from "./ledger.js";
@@ -1940,12 +1940,23 @@ export function rebaseDirtyFleetBranchViaGit(
   }
 }
 
-/** W1-T11167: "regenerable" resolves registry-only conflicts (W1-T9578); "clean-merge" commits git's own clean merge. */
-export type ConflictRegenerationMode = "regenerable" | "clean-merge";
+/** W1-T11167: "regenerable" resolves registry-only conflicts (W1-T9578); "clean-merge" commits git's own clean merge.
+ *  W1-T11170: "owned" is the deterministic tier on a fleet-owned or unheld operator-session head. */
+export type ConflictRegenerationMode = "regenerable" | "clean-merge" | "owned";
+
+/** W1-T11170: how one conflicted path was resolved by the deterministic tier. */
+export type OwnedConflictPathMode = "take-main" | "regenerate" | "deleted-on-main";
+
+/** W1-T11170: the head an "owned" round writes to, and for a session branch the ownership re-read run just before
+ *  its push (a refusal reason, or undefined when the branch is still unheld). */
+export interface OwnedConflictWrite {
+  kind: OwnedConflictHeadKind;
+  recheck?: () => string | undefined | Promise<string | undefined>;
+}
 
 export interface ConflictRegenerationOutcome {
   outcome: "pushed" | "fell-through" | "lease-mismatch" | "error";
-  paths: Array<{ path: string; action: string }>;
+  paths: Array<{ path: string; action: string; mode?: OwnedConflictPathMode }>;
   /** W1-T11167: the rename pairs between the merge base and main on paths the head changed. */
   renames?: Array<{ from: string; to: string }>;
   newHeadSha?: string;
@@ -2040,9 +2051,11 @@ export async function regenerateConflictViaGit(
   deps: Pick<BuildSweepEffectsDeps, "worktreeRemoveImpl"> & {
     git?: (cwd: string, args: readonly string[]) => string | Promise<string>;
     mode?: ConflictRegenerationMode;
+    owned?: OwnedConflictWrite;
   } = {},
 ): Promise<ConflictRegenerationOutcome> {
   const cleanMerge = deps.mode === "clean-merge";
+  const owned = deps.mode === "owned" ? deps.owned : undefined;
   const run = async (cwd: string, args: readonly string[]) => {
     if (deps.git) return deps.git(cwd, args);
     return hostWorktreeGitAsync(cwd, args, { maxBuffer: 1 << 24 });
@@ -2052,8 +2065,10 @@ export async function regenerateConflictViaGit(
   let created = false;
   const result = await (async (): Promise<ConflictRegenerationOutcome> => {
     try {
-      if (!pr.taskId || !fixHeadAcceptable(pr.headRefName, pr.taskId, false)) {
-        return { outcome: "fell-through", paths, reason: "head is not this task's run branch" };
+      if (deps.mode === "owned" ? owned === undefined || !pr.headRefName
+        : !pr.taskId || !fixHeadAcceptable(pr.headRefName, pr.taskId, false)) {
+        return { outcome: "fell-through", paths, reason: deps.mode === "owned"
+          ? "an owned round names no head kind" : "head is not this task's run branch" };
       }
       const ref = `refs/heads/${pr.headRefName}`;
       const remoteRef = `refs/remotes/origin/${pr.headRefName}`;
@@ -2108,12 +2123,36 @@ export async function regenerateConflictViaGit(
         return { outcome: "error", paths, reason: mergeError === undefined
           ? "probe conflict no longer has unmerged paths" : mergeError };
       }
-      const outside = unmerged.filter(path => !Object.hasOwn(REGENERABLE_ARTIFACT_GENERATORS, path));
+      if (owned) {
+        // W1-T11170: per path, main's deletion, then the path's generator, then main's blob where the PR's change is
+        // already on main byte for byte. Any other path aborts the whole merge for a worker round.
+        const base = (await run(worktreePath, ["merge-base", pr.headSha, mainSha])).trim();
+        const unresolved: string[] = [];
+        const planned: Array<{ path: string; mode: OwnedConflictPathMode }> = [];
+        for (const path of unmerged) {
+          const present = (await run(worktreePath, ["ls-tree", "-r", "--name-only", "-z", mainSha, "--", path])).length > 0;
+          if (!present) planned.push({ path, mode: "deleted-on-main" });
+          else if (Object.hasOwn(REGENERABLE_ARTIFACT_GENERATORS, path)) planned.push({ path, mode: "regenerate" });
+          else if (prChangeAlreadyOnMain(await run(worktreePath, ["diff", "--no-color", "--no-ext-diff", "-U0", base, pr.headSha, "--", path]),
+            await run(worktreePath, ["show", `${mainSha}:${path}`]))) planned.push({ path, mode: "take-main" });
+          else unresolved.push(path);
+        }
+        if (unresolved.length > 0) {
+          await run(worktreePath, ["merge", "--abort"]);
+          return { outcome: "fell-through", paths, reason: `unmerged paths no deterministic tier resolves: ${unresolved.join(", ")}` };
+        }
+        for (const { path, mode } of planned) {
+          if (mode === "deleted-on-main") await run(worktreePath, ["rm", "--quiet", "--", path]);
+          else await run(worktreePath, ["checkout", mainSha, "--", path]);
+          paths.push({ path, action: mode === "regenerate" ? REGENERABLE_ARTIFACT_GENERATORS[path]! : mode, mode });
+        }
+      }
+      const outside = owned ? [] : unmerged.filter(path => !Object.hasOwn(REGENERABLE_ARTIFACT_GENERATORS, path));
       if (outside.length > 0) {
         await run(worktreePath, ["merge", "--abort"]);
         return { outcome: "fell-through", paths, reason: `unmerged paths outside the registry: ${outside.join(", ")}` };
       }
-      for (const path of unmerged) {
+      for (const path of owned ? [] : unmerged) {
         const present = (await run(worktreePath, ["ls-tree", "-r", "--name-only", "-z", mainSha, "--", path])).length > 0;
         if (!present) {
           await run(worktreePath, ["rm", "--", path]);
@@ -2123,7 +2162,7 @@ export async function regenerateConflictViaGit(
           paths.push({ path, action: REGENERABLE_ARTIFACT_GENERATORS[path]! });
         }
       }
-      const generated = paths.filter(({ action }) => action !== "deleted-on-main");
+      const generated = paths.filter(({ action, mode }) => owned ? mode === "regenerate" : action !== "deleted-on-main");
       if (generated.length > 0) {
         // The generator never touches this worktree or its Git dirs: it runs in a disposable copy with a
         // private repository, and only the registered paths' bytes come back, read here by the parent.
@@ -2172,9 +2211,11 @@ export async function regenerateConflictViaGit(
       if (unexpected.length > 0) {
         return { outcome: "error", paths, reason: `generator left unstaged edits: ${unexpected.join(", ")}` };
       }
-      await run(worktreePath, ["commit", "-m", cleanMerge
+      await run(worktreePath, ["commit", "-m", owned
+        ? `fix(sweep): resolve merge conflicts with main on ${pr.headRefName}`
+        : cleanMerge
         ? "fix(sweep): merge main where GitHub's merge reports a conflict git does not"
-        : "fix(sweep): regenerate merge-conflicted artifacts", "-m", `Remudero-Task: ${pr.taskId}`]);
+        : "fix(sweep): regenerate merge-conflicted artifacts", ...(pr.taskId ? ["-m", `Remudero-Task: ${pr.taskId}`] : [])]);
       const newHeadSha = (await run(worktreePath, ["rev-parse", "HEAD"])).trim();
       const observed = new Map((await run(worktreePath, ["ls-remote", "origin", ref, "refs/heads/main"]))
         .trim().split("\n").map(line => { const [sha, name] = line.split(/\s+/); return [name, sha]; }));
@@ -2183,6 +2224,29 @@ export async function regenerateConflictViaGit(
       }
       await run(worktreePath, ["merge-base", "--is-ancestor", pr.headSha, newHeadSha]);
       assertLiveWriteAllowed("git-push", `regenerating conflicts on ${pr.headRefName}`);
+      if (owned?.kind === "session") {
+        // W1-T11170: a session branch takes only this merge commit (first parent the PR head), by a plain push with no
+        // force flag of any kind, after one more ownership read: an owner who pushed in between wins.
+        const parents = (await run(worktreePath, ["rev-list", "--parents", "-n", "1", newHeadSha])).trim().split(/\s+/);
+        if (parents[1] !== pr.headSha || parents.length !== 3) {
+          return { outcome: "error", paths, reason: `the session write is not a merge commit on ${pr.headSha}` };
+        }
+        let held: string | undefined;
+        try { held = await owned.recheck?.(); }
+        catch (error) {
+          const reason = `the ownership re-read failed: ${spawnFailureText(error)}`;
+          held = reason;
+        }
+        if (held !== undefined) return { outcome: "lease-mismatch", paths, reason: `ownership re-read before the push: ${held}` };
+        try {
+          if (deps.git) await run(worktreePath, ["push", "origin", `HEAD:${ref}`]);
+          else await gitPushRunBranchAsync(worktreePath, { destination: pr.headRefName, expectedHeadSha: newHeadSha });
+        }
+        catch (error) { return { outcome: "lease-mismatch", paths, reason: spawnFailureText(error) }; }
+        const landed = (await run(worktreePath, ["ls-remote", "origin", ref])).trim().split(/\s+/)[0];
+        return landed === newHeadSha ? { outcome: "pushed", paths, newHeadSha }
+          : { outcome: "lease-mismatch", paths, reason: `remote head after push is ${landed}, expected ${newHeadSha}` };
+      }
       try {
         const lease = `--force-with-lease=${ref}:${pr.headSha}`;
         if (deps.git) await run(worktreePath, ["push", lease, "origin", `HEAD:${ref}`]);
@@ -2211,6 +2275,114 @@ export async function regenerateConflictViaGit(
     }
   }
   return followed === undefined ? result : { ...result, renames: followed };
+}
+
+/** W1-T11170: a claim's renewal instants and minting host from its commit chain's messages. Each renewal commit
+ *  repeats the anchor's mint line above its own `renewed` line: one time per instant. */
+function readClaimChain(log: string): { times: number[]; host?: string } {
+  const times = [...new Set([...log.matchAll(/^(?:rmd-dispatch claim \d+@\S+|renewed \d+@\S+) (\S+)$/gm)]
+    .map((m) => Date.parse(m[1]!)).filter(Number.isFinite))].sort((a, b) => a - b);
+  const host = /^rmd-dispatch claim \d+@(\S+) \S+$/m.exec(log)?.[1];
+  return host === undefined ? { times } : { times, host };
+}
+
+/**
+ * W1-T11170: production's three ownership reads for an operator-session branch. (a) each refs/rmd-dispatch claim
+ * for a task id the PR names, its mint and `renewed` times read down the claim's commit chain; (b) the branch's fix
+ * claim lock and the task's inflight lock; (c) the committer times of the branch's own commits, with the trailing
+ * window's session branches for the operator's p90 gap. A failed read leaves its field absent, which reads ambiguous.
+ */
+export async function readSessionOwnershipViaGit(
+  repoDir: string,
+  pr: Pick<OpenPrView, "headRefName" | "taskId" | "body">,
+  opts: { nowMs: number; readLock: (key: string) => string | undefined; fixClaimKey: string;
+    git?: (cwd: string, args: readonly string[]) => string | Promise<string>; windowDays?: number; ownedFixClaimRunId?: string },
+): Promise<SessionOwnershipEvidence> {
+  const run = async (args: readonly string[]) =>
+    opts.git ? opts.git(repoDir, args) : hostWorktreeGitAsync(repoDir, args, { maxBuffer: 1 << 24 });
+  const evidence: SessionOwnershipEvidence = { nowMs: opts.nowMs };
+  const ids = [...new Set([pr.taskId, ...[...(pr.body ?? "").matchAll(/^Remudero-Task:\s*(\S+)\s*$/gm)].map((m) => m[1])]
+    .filter((id): id is string => id !== undefined && TASK_ID_TRAILER_RE.test(id)))];
+  try {
+    const claims: NonNullable<SessionOwnershipEvidence["claims"]> = [];
+    for (const id of ids) {
+      const ref = `refs/rmd-dispatch/${id}`;
+      const holder = (await run(["ls-remote", "origin", ref])).trim().split(/\s+/)[0];
+      if (!holder) continue;
+      await run(["fetch", "--quiet", "--no-write-fetch-head", "origin", ref]);
+      const read = readClaimChain(await run(["log", "--format=%B", holder]));
+      claims.push({ ref, renewalsMs: read.times, ...(read.host ? { holderKind: read.host } : {}) });
+    }
+    evidence.claims = claims;
+    // The producer of the one-renewal fallback: the fleet's median renewal gap for claims of each holder kind (the
+    // minting host), pooled over every claim on the remote with at least two renewals. A claim whose kind has no
+    // measurable cadence keeps no median, so it still reads unreadable and escalates once.
+    if (claims.length > 0) {
+      try {
+        const own = new Set(claims.map((c) => c.ref));
+        const gapsByKind = new Map<string, number[]>();
+        const pool = (host: string | undefined, times: readonly number[]) => {
+          if (host === undefined) return;
+          gapsByKind.set(host, [...(gapsByKind.get(host) ?? []), ...sortedGaps(times)]);
+        };
+        for (const c of claims) pool(c.holderKind, c.renewalsMs);
+        const peers = (await run(["ls-remote", "origin", "refs/rmd-dispatch/*"])).trim().split("\n").filter(Boolean)
+          .map((line) => line.split(/\s+/)).filter(([sha, name]) => sha && name && !own.has(name)).slice(0, 100);
+        if (peers.length > 0) await run(["fetch", "--quiet", "--no-write-fetch-head", "origin", ...peers.map(([, name]) => name!)]);
+        for (const [sha] of peers) {
+          const peer = readClaimChain(await run(["log", "--format=%B", sha!]));
+          pool(peer.host, peer.times);
+        }
+        for (const c of claims) {
+          const median = c.holderKind === undefined ? undefined : quantile(gapsByKind.get(c.holderKind) ?? [], 0.5);
+          if (median !== undefined) c.holderKindMedianGapMs = median;
+        }
+      } catch (error) {
+        const reason = `claim cadence: ${capStderrExcerpt(spawnFailureText(error), 200)}`;
+        (evidence.unreadable ??= []).push(reason);
+      }
+    }
+  } catch (error) {
+    // (a) stays absent, which sessionBranchUnheld reads as ambiguous, and the reason rides the evidence.
+    const reason = `claim: ${capStderrExcerpt(spawnFailureText(error), 200)}`;
+    (evidence.unreadable ??= []).push(reason);
+  }
+  try {
+    const lock = opts.readLock(opts.fixClaimKey);
+    const taskLock = pr.taskId ? opts.readLock(pr.taskId) : undefined;
+    const runId = [lock, taskLock].find((held) => held !== opts.ownedFixClaimRunId && held?.startsWith("OPERATOR-"));
+    // The worker round owns this exact fix claim itself. It is the sole lock exempted at its final
+    // pre-push re-read; a replaced lock, task lock, or operator run remains visible as held.
+    const otherFixClaim = lock !== opts.ownedFixClaimRunId ? lock : undefined;
+    evidence.session = { ...(taskLock ? { inflightLock: taskLock } : {}), ...(runId ? { operatorRunId: runId } : {}),
+      ...(otherFixClaim ? { fixClaimKey: opts.fixClaimKey } : {}) };
+  } catch (error) {
+    const reason = `session: ${capStderrExcerpt(spawnFailureText(error), 200)}`;
+    (evidence.unreadable ??= []).push(reason);
+  }
+  try {
+    const branch = pr.headRefName!;
+    await run(["fetch", "--no-tags", "--quiet", "origin", "+refs/heads/main:refs/remotes/origin/main",
+      `+refs/heads/${branch}:refs/remotes/origin/${branch}`]);
+    const stamps = async (ref: string, extra: readonly string[] = []) =>
+      (await run(["log", "--format=%ct", "-n", "200", ...extra, ref, "--not", "refs/remotes/origin/main"]))
+        .split("\n").filter(Boolean).map((line) => Number(line) * 1000).filter(Number.isFinite);
+    evidence.pushesMs = await stamps(`refs/remotes/origin/${branch}`);
+    if (evidence.pushesMs.length < 3) {
+      const refs = (await run(["for-each-ref", "--format=%(refname)", "--count=40", "--sort=-committerdate",
+        "refs/remotes/origin/run-unfiled-*", "refs/remotes/origin/plan-file-*", "refs/remotes/origin/codex/"]))
+        .split("\n").filter(Boolean);
+      const gaps: number[] = [];
+      for (const ref of refs) gaps.push(...sortedGaps(await stamps(ref, [`--since=${opts.windowDays ?? 30}.days`])));
+      const p90 = quantile(gaps, 0.9);
+      if (p90 !== undefined) evidence.operatorP90GapMs = p90;
+    }
+  } catch (error) {
+    const reason = `pushes: ${capStderrExcerpt(spawnFailureText(error), 200)}`;
+    (evidence.unreadable ??= []).push(reason);
+    delete evidence.pushesMs;
+  }
+  return evidence;
 }
 
 /** W1-T2927: artifact ids already read; process-lifetime because effects are rebuilt every poll. */
@@ -2298,6 +2470,8 @@ export const SWEEP_EFFECT_SURFACE = [
   "repairMetadata",
   "rebaseDirtyFleetBranch",
   "regenerateConflict",
+  "readConflictOwnership", // W1-T11170
+  "postConflictComment", // W1-T11170
   // W1-T3618: the reviewer-code freshness reading, hoisted in FRONT of reviewCommand so a stale
   // daemon never pays for a review it cannot publish. It is an effect, not a plain value, because
   // buildSweepEffects caches the read once per sweep cycle rather than once per PR.
@@ -2483,6 +2657,8 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   | "releaseBaseCausedStandDown"
   | "rebaseDirtyFleetBranch"
   | "regenerateConflict"
+  | "readConflictOwnership"
+  | "postConflictComment"
   | "selectAdaptiveReviewWidth"
   | "repairRecordableRatchet"
   | "repairMissingTaskTrailer"
@@ -4680,6 +4856,29 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         const budgetUsd = task.budget_usd ?? defaultBudgetUsd;
 
         const fixWorktree = worktreePath;
+        // W1-T11170, operator-approved scope widening: the worker's real fix-rung push path must
+        // enforce the session-head rule itself. The serialized dispatch carries only the session
+        // classification; this process-local closure re-reads ownership against the live repo and
+        // exempts only the branch claim this exact fix round holds.
+        const ownedConflictPushGuard = evidence.ownedConflictHead?.kind === "session" ? {
+          prHeadSha: pr.headSha,
+          verifyOwnership: async (): Promise<string | undefined> => {
+            const ownClaimRunId = branchClaim?.id();
+            if (ownClaimRunId === undefined) return "the current fix branch claim identity is unreadable";
+            try {
+              const current = await readSessionOwnershipViaGit(repoDir, pr, {
+                nowMs: nowMsImpl(),
+                readLock: (key) => { const held = readInflightLock(inflightDir, key); return held?.run_id; },
+                fixClaimKey: claimKey,
+                ownedFixClaimRunId: ownClaimRunId,
+              });
+              const ownership = sessionBranchUnheld(current);
+              return ownership.verdict === "unheld" ? undefined : `${ownership.verdict}: ${ownership.reason}`;
+            } catch (error) {
+              return `ownership re-read failed: ${String((error as Error)?.message ?? error)}`;
+            }
+          },
+        } : undefined;
         // W1-T6434: a dead owner's staged work preserved at THIS head (W1-T6362) is offered to the round
         // as prior partial work. Best-effort: a ledger or ref that cannot be read leaves the prompt as before.
         let priorPartialWork: PriorPartialWork | undefined;
@@ -4699,6 +4898,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         }
         const rung = await runFixRung({
           guardRoundHead: true,
+          ...(ownedConflictPushGuard === undefined ? {} : { ownedConflictPushGuard }),
           ...(priorPartialWork ? { priorPartialWork } : {}),
           ...buildFixRungDispatchArgs({
             task,
@@ -4780,7 +4980,18 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
             runReview,
             fetchPrBody: fetchPrBodyViaGh,
             // W1-T4693: the run loop's own push (`pushFixRound`), so a refused round is named, never swallowed.
-            push: pushFixRound,
+            // W1-T11170: carry the process-local guard through the normal prechecked adapter. It validates the
+            // merged tree and coverage before pushFixRound re-reads ownership and performs the plain push.
+            push: async (wt: string, branchName: string, sha?: string, prior?: string,
+              guard?: { prHeadSha: string; verifyOwnership: () => Promise<string | undefined> }) => {
+              const landed = await pushFixRound(wt, branchName, sha, prior, guard);
+              if (guard !== undefined && landed && typeof landed === "object" &&
+                  typeof (landed as { fixRoundPushedHead?: unknown }).fixRoundPushedHead === "string") {
+                log(OWNED_SESSION_PUSH_STEP, { pr_number: pr.prNumber, head_sha: pr.headSha,
+                  new_head_sha: (landed as { fixRoundPushedHead: string }).fixRoundPushedHead });
+              }
+              return landed;
+            },
             readHeadShaForProvenance: readHeadShaRest,
             issues,
             ledgerPath,
@@ -5128,9 +5339,18 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
             { worktreeRemoveImpl: worktreeRemoveForBuild },
           ),
 
-    regenerateConflict: (pr, mainSha, mode) => regenerateConflictViaGit(repoDir,
+    regenerateConflict: (pr, mainSha, mode, owned) => regenerateConflictViaGit(repoDir,
       join(worktreesDir(config), `conflict-regenerate-${pr.prNumber}-${nowMsImpl()}`), pr, mainSha,
-      { worktreeRemoveImpl: worktreeRemoveForBuild, ...(mode ? { mode } : {}) }),
+      { worktreeRemoveImpl: worktreeRemoveForBuild, ...(mode ? { mode } : {}), ...(owned ? { owned } : {}) }),
+    readConflictOwnership: (pr) => readSessionOwnershipViaGit(repoDir, pr, {
+      nowMs: nowMsImpl(),
+      readLock: (key) => { const held = readInflightLock(inflightDir, key); return held ? held.run_id : undefined; },
+      fixClaimKey: fixBranchClaimKey(owner, repo, pr.headRefName ?? ""),
+    }),
+    postConflictComment: async (pr, body) => {
+      assertLiveWriteAllowed("gh-transport", `conflict round comment on PR #${pr.prNumber}`);
+      await ghTextAsync(["pr", "comment", pr.prUrl, "--body", body]);
+    },
 
     // W1-T905 — "repair the instance, FILE THE CLASS". `runSweep` calls this AT MOST ONCE per
     // due surface, best-effort — see `SweepDeps.captureRepairFeedback`'s own doc.
@@ -5544,9 +5764,15 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     readPlanRepairFacts: (pr) => {
       const pulls = `repos/${owner}/${repo}/pulls/${pr.prNumber}`;
       const row = ghJsonForBuild(["api", pulls]) as {
-        user?: { login?: string }; title?: string; head?: { sha?: string; ref?: string };
+        user?: { login?: string }; title?: string; head?: { sha?: string; ref?: string; repo?: { full_name?: string } | null };
       };
       const facts: PlanRepairFacts = { authorLogin: row?.user?.login, title: row?.title };
+      // W1-T11170: the session-branch ownership facts. A head repo GitHub no longer shows (a deleted fork) is a fork.
+      const headRepo = row?.head?.repo;
+      if (headRepo !== undefined) facts.headRepoFork = headRepo?.full_name?.toLowerCase() !== `${owner}/${repo}`.toLowerCase();
+      const login = row?.user?.login?.toLowerCase();
+      // Set only when true: an absent fact reads false, and the plan round's facts stay exactly author and title.
+      if (login !== undefined && (config.operatorGithubLogins ?? []).some((l) => l.toLowerCase() === login)) facts.operatorAuthor = true;
       if (filedTaskPlanRepairCandidate(pr) && row?.head?.sha === pr.headSha && row.head.ref === pr.headRefName) {
         facts.filedTaskRepairReady = filedPlanTaskReady(plan.tasks.find(task => task.id === pr.taskId));
       }
@@ -10371,6 +10597,178 @@ export interface PlanRepairFacts {
   authorLogin?: string;
   title?: string;
   gardenRecordRefusal?: string;
+  /** W1-T11170: the author is one of the configured operator accounts. */
+  operatorAuthor?: boolean;
+  /** W1-T11170: the head lives in another repository (a fork). Unknown is never read as false. */
+  headRepoFork?: boolean;
+}
+
+/** W1-T11170: the head shapes an operator session pushes by hand. */
+export const OPERATOR_SESSION_HEAD_RE = /^(?:run-unfiled-\d+|plan-file-\d+|codex\/.+)$/;
+
+/** W1-T11170: whose dirty head a conflict round may write to, beside a PR task's own run branch. */
+export type OwnedConflictHeadKind = "fleet" | "session";
+
+/** W1-T11170: a machine-lane head the fleet App authored: a gardener, a landing, or a TRIAGE/APPROVE/RETRO run. */
+export function fleetOwnedConflictHead(pr: Pick<OpenPrView, "headRefName">,
+  facts: Pick<PlanRepairFacts, "authorLogin"> | undefined): boolean {
+  return isMachineLanePlanHead(pr.headRefName) && isFleetAppAuthor(facts?.authorLogin);
+}
+
+/**
+ * W1-T11170: an operator session's hand branch: a run-unfiled-*, plan-file-* or codex/* head, or any head the
+ * operator account authored. Never a fork, a fleet head, or another task's run- branch. Being one does not admit a
+ * round: {@link sessionBranchUnheld} must also show nobody holds it.
+ */
+export function operatorSessionHead(pr: Pick<OpenPrView, "headRefName">,
+  facts: Pick<PlanRepairFacts, "authorLogin" | "operatorAuthor" | "headRepoFork"> | undefined): boolean {
+  const head = pr.headRefName;
+  if (head === undefined || facts?.headRepoFork !== false || isMachineLanePlanHead(head) ||
+      isFleetAppAuthor(facts.authorLogin) || (/^run-/.test(head) && !/^run-unfiled-\d+$/.test(head))) return false;
+  return OPERATOR_SESSION_HEAD_RE.test(head) || facts.operatorAuthor === true;
+}
+
+/** W1-T11170: the three ownership reads for an operator-session branch. An absent field is an unreadable read. */
+export interface SessionOwnershipEvidence {
+  nowMs: number;
+  /** (a) every refs/rmd-dispatch claim for a task id the PR names, with its renewal times. */
+  claims?: Array<{ ref: string; renewalsMs: number[]; holderKind?: string; holderKindMedianGapMs?: number }>;
+  /** (b) a live inflight lock, an OPERATOR- run id, or an open fix claim key on the branch. */
+  session?: { inflightLock?: string; operatorRunId?: string; fixClaimKey?: string };
+  /** (c) the owner's push times on this branch. */
+  pushesMs?: number[];
+  /** (c) with fewer than 3 pushes: the operator account's p90 gap between pushes over its branches. */
+  operatorP90GapMs?: number;
+  /** Why a read is absent, when the reader knows. */
+  unreadable?: string[];
+}
+
+export interface SessionOwnershipReads { claim: string; session: string; pushes: string }
+
+export interface SessionOwnershipVerdict {
+  verdict: "unheld" | "held" | "ambiguous";
+  reason: string;
+  reads: SessionOwnershipReads;
+}
+
+function sortedGaps(times: readonly number[]): number[] {
+  const sorted = [...times].filter(Number.isFinite).sort((a, b) => a - b);
+  return sorted.slice(1).map((at, i) => at - sorted[i]!);
+}
+
+function quantile(values: readonly number[], q: number): number | undefined {
+  if (values.length === 0) return undefined;
+  const sorted = [...values].sort((a, b) => a - b);
+  return sorted[Math.min(sorted.length - 1, Math.max(0, Math.ceil(q * sorted.length) - 1))];
+}
+
+/** W1-T11170: the p90 gap between consecutive push times, nearest rank. Exported for the trailing-window fallback. */
+export function pushGapP90(times: readonly number[]): number | undefined {
+  return quantile(sortedGaps(times), 0.9);
+}
+
+/**
+ * W1-T11170: whether an operator-session branch is free to write, judged on its own cadence, never a fixed age.
+ * (a) a claim is held while its newest renewal is within its median renewal gap (one renewal: its holder kind's
+ * median); (b) any live lock, OPERATOR- run or fix claim holds it; (c) a push within the branch's p90 gap between
+ * pushes (fewer than 3: the operator's p90) holds it. Unreadable reads, or a stale claim beside a live read, are
+ * `ambiguous`; all clear is `unheld`; anything else is `held`.
+ */
+export function sessionBranchUnheld(evidence: SessionOwnershipEvidence): SessionOwnershipVerdict {
+  const now = evidence.nowMs;
+  type Read = "clear" | "held" | "stale" | "unreadable";
+  let claim: Read = "clear";
+  const claimNotes: string[] = [];
+  if (evidence.claims === undefined) claim = "unreadable";
+  else for (const held of evidence.claims) {
+    const newest = Math.max(...held.renewalsMs.filter(Number.isFinite));
+    const gaps = sortedGaps(held.renewalsMs);
+    const interval = gaps.length > 0 ? quantile(gaps, 0.5) : held.holderKindMedianGapMs;
+    const one: Read = !Number.isFinite(newest) || interval === undefined ? "unreadable" : now - newest <= interval ? "held" : "stale";
+    claimNotes.push(`${held.ref} ${one}${Number.isFinite(newest) ? ` (renewed ${now - newest} ms ago, interval ${interval ?? "unknown"} ms)` : ""}`);
+    const rank: Read[] = ["clear", "stale", "held", "unreadable"];
+    if (rank.indexOf(one) > rank.indexOf(claim)) claim = one;
+  }
+  const s = evidence.session;
+  const session: Read = s === undefined ? "unreadable" : s.inflightLock || s.operatorRunId || s.fixClaimKey ? "held" : "clear";
+  let pushes: Read = "unreadable";
+  let pushNote = "unreadable";
+  const times = (evidence.pushesMs ?? []).filter(Number.isFinite);
+  if (times.length > 0) {
+    const threshold = times.length >= 3 ? pushGapP90(times) : evidence.operatorP90GapMs;
+    const since = now - Math.max(...times);
+    pushes = threshold === undefined ? "unreadable" : since <= threshold ? "held" : "clear";
+    pushNote = `${pushes} (newest push ${since} ms ago, ${times.length >= 3 ? "branch" : "operator"} p90 gap ${threshold ?? "unknown"} ms)`;
+  }
+  const reads: SessionOwnershipReads = {
+    claim: claim === "clear" && claimNotes.length === 0 ? "clear (no dispatch claim)" : `${claim}: ${claimNotes.join("; ") || "unreadable"}`,
+    session: s === undefined ? "unreadable"
+      : session === "clear" ? "clear (no inflight lock, OPERATOR- run or fix claim)"
+      : `held: ${[s.inflightLock && `inflight lock ${s.inflightLock}`, s.operatorRunId && `run ${s.operatorRunId}`,
+        s.fixClaimKey && `fix claim ${s.fixClaimKey}`].filter(Boolean).join(", ")}`,
+    pushes: pushNote,
+  };
+  const all = [claim, session, pushes];
+  if (all.includes("unreadable")) {
+    return { verdict: "ambiguous", reason: `an ownership read is unreadable${evidence.unreadable?.length
+      ? ` (${evidence.unreadable.join("; ")})` : ""}`, reads };
+  }
+  if (claim === "stale" && (session === "held" || pushes === "held")) {
+    return { verdict: "ambiguous", reason: "a stale dispatch claim disagrees with a live session or a recent push", reads };
+  }
+  if (all.every((read) => read === "clear" || read === "stale")) return { verdict: "unheld", reason: "nobody holds the branch", reads };
+  return { verdict: "held", reason: "the branch is held", reads };
+}
+
+/** W1-T11170: written when a worker round's merge commit landed on an operator-session branch. */
+export const OWNED_SESSION_PUSH_STEP = "sweep.owned_conflict.session_push";
+/** W1-T11170: the ledger row a worker conflict round on an owned head writes when it is dispatched. */
+export const OWNED_CONFLICT_ROUND_STEP = "sweep.owned_conflict.round";
+/** W1-T11170: the one escalation an ambiguous session-branch ownership read files, per PR and head. */
+export const OWNED_CONFLICT_OWNERSHIP_ESCALATED_STEP = "sweep.owned_conflict.ownership_escalated";
+/** W1-T11170: the one escalation the fix progress judge may end an owned head's repair with, per PR and head. */
+export const OWNED_CONFLICT_ESCALATED_STEP = "sweep.owned_conflict.escalated";
+
+/** W1-T11170: what a conflict round on a fleet or session head tells the PR after it writes. */
+export function ownedConflictComment(c: {
+  kind: OwnedConflictHeadKind; round: "deterministic" | "worker"; mainSha: string; headSha: string; newHeadSha?: string;
+  paths: ReadonlyArray<{ path: string; resolution: string }>; ownership?: SessionOwnershipReads;
+}): string {
+  return [
+    `rmd conflict round (${c.round}) on this ${c.kind === "session" ? "operator-session" : "fleet-owned"} branch: merged ` +
+      `main ${c.mainSha} into ${c.headSha}${c.newHeadSha ? ` as ${c.newHeadSha}` : ""}` +
+      `${c.kind === "session" ? ", a merge commit whose first parent is the PR head, pushed with no force flag" : ""}.`,
+    "",
+    "Conflicted paths:",
+    ...(c.paths.length > 0 ? c.paths.map((p) => `- \`${p.path}\`: ${p.resolution}`) : ["- none captured"]),
+    ...(c.ownership ? ["", "Ownership evidence read before the write:", `- claim: ${c.ownership.claim}`,
+      `- session: ${c.ownership.session}`, `- pushes: ${c.ownership.pushes}`] : []),
+  ].join("\n");
+}
+
+/**
+ * W1-T11170: the redundant re-fix comparison for one conflicted path, at hunk grain: the PR's change
+ * (`git diff -U0 <merge-base> <head> -- <path>`) is already on main byte for byte when every hunk's added lines are a
+ * verbatim run of whole lines in main's blob and its removed lines are no longer one. A binary or empty diff, or a
+ * hunk that only removes lines main still carries, is never redundant, so a doubtful path falls to a worker.
+ */
+export function prChangeAlreadyOnMain(prDiff: string, mainText: string): boolean {
+  if (/^Binary files /m.test(prDiff) || /^GIT binary patch$/m.test(prDiff)) return false;
+  const hunks: Array<{ add: string[]; del: string[] }> = [];
+  let current: { add: string[]; del: string[] } | undefined;
+  for (const line of prDiff.split("\n")) {
+    if (line.startsWith("@@")) { current = { add: [], del: [] }; hunks.push(current); continue; }
+    if (current === undefined) continue;
+    if (line.startsWith("+")) current.add.push(line.slice(1));
+    else if (line.startsWith("-")) current.del.push(line.slice(1));
+  }
+  const hay = `\n${mainText}`;
+  const carries = (run: readonly string[]) => {
+    const needle = `\n${run.join("\n")}`;
+    return hay.includes(`${needle}\n`) || hay.endsWith(needle);
+  };
+  return hunks.length > 0 && hunks.every(({ add, del }) => (add.length > 0 || del.length > 0) &&
+    (add.length === 0 || carries(add)) && (del.length === 0 || !carries(del)));
 }
 
 const GARDEN_PLAN_HEAD_RE = /^(?:knowledge|plan|backlog|gate|test|config|export|ci-friction|selector-shadow|hot-file|machine-judge|host-resource|flow|flow-remedy|fix-lane|scout|review-replay|queue-judge|redesign)-garden-\d+$/;
@@ -13487,6 +13885,9 @@ export interface FixDispatchEvidence {
   instrumentEntanglementPaths?: InstrumentEntanglementPaths;
   /** W1-T3306: the exact capped proofs that need a body-only discrimination repair. */
   proofDiscrimination?: ProofDiscriminationEvidence;
+  /** W1-T11170: a conflict round on a head that is not the PR task's own run branch. A session branch takes only a
+   *  merge commit, pushed with no force flag, after the ownership re-read. */
+  ownedConflictHead?: { kind: OwnedConflictHeadKind; push: "leased" | "merge-commit-no-force"; ownership?: SessionOwnershipReads };
 }
 
 /** The only proof grades that establish the capped-green repair has a mechanical body remedy —
@@ -14810,8 +15211,13 @@ export interface SweepDeps {
    *  through to the existing escalation, preserving human visibility and never clobbering a
    *  branch another writer advanced. */
   rebaseDirtyFleetBranch?: (pr: OpenPrView) => DirtyFleetRebaseOutcome | Promise<DirtyFleetRebaseOutcome>;
-  regenerateConflict?: (pr: OpenPrView, mainSha: string, mode?: ConflictRegenerationMode) =>
+  regenerateConflict?: (pr: OpenPrView, mainSha: string, mode?: ConflictRegenerationMode, owned?: OwnedConflictWrite) =>
     ConflictRegenerationOutcome | Promise<ConflictRegenerationOutcome>;
+  /** W1-T11170: the three ownership reads for a dirty operator-session branch ({@link sessionBranchUnheld}). Absent,
+   *  no session branch is admitted to a conflict round. A throw is an unreadable read. */
+  readConflictOwnership?: (pr: OpenPrView) => SessionOwnershipEvidence | Promise<SessionOwnershipEvidence>;
+  /** W1-T11170: the PR comment posted after each conflict-round write to a fleet or session head. */
+  postConflictComment?: (pr: OpenPrView, body: string) => void | Promise<void>;
   /** W1-T528: task ids with a LIVE in-flight run right now, consulted by
    *  {@link selectUpdateBranchTarget} to skip a head a live worker is still pushing to. Omitted
    *  means an empty set, exactly as if every PR's worker had already finished. */
@@ -19823,6 +20229,9 @@ export async function runSweep(
   // W1-T5349 — the plan-repair rung's once-per-head record, folded once per pass.
   const planRepairHistory = planRepairHistoryFromLedger(ledgerLines);
   const planRoundFacts = new Map<number, PlanRepairFacts>();
+  // W1-T11170: this pass's conflict rounds on a fleet-owned or unheld operator-session head, by PR number.
+  const ownedConflictRounds = new Map<number, { kind: OwnedConflictHeadKind; ownership?: SessionOwnershipReads;
+    standDown?: string; wrote?: boolean }>();
   const gardenRecordRefusals = new Map<number, string>();
   const tryPlanRepair = async (pr: OpenPrView): Promise<{ repaired: boolean; reason: string }> => {
     const notRepaired = { repaired: false, reason: "" };
@@ -20252,7 +20661,9 @@ export async function runSweep(
   const applyDirtyFleetRebase = async (
     pr: OpenPrView,
   ): Promise<{ handled: true; standDownReason: string } | { handled: false }> => {
-    if (pr.mergeState !== "dirty" || !isDispatchedRunBranch(pr.headRefName) || !deps.rebaseDirtyFleetBranch) {
+    // W1-T11170: an operator session's run-unfiled-* branch takes only a merge commit, never a leased rebase.
+    if (pr.mergeState !== "dirty" || !isDispatchedRunBranch(pr.headRefName) || !deps.rebaseDirtyFleetBranch ||
+        OPERATOR_SESSION_HEAD_RE.test(pr.headRefName ?? "")) {
       return { handled: false };
     }
     const outcome = await deps.rebaseDirtyFleetBranch(pr);
@@ -21327,6 +21738,103 @@ export async function runSweep(
         disposition = "wait";
       }
     }
+    // W1-T11170: a dirty fleet-owned head, or an operator-session branch shown unheld, gets one bounded conflict round
+    // per head and main: the deterministic tier first, then the plan-scoped round or the merge-conflict fix mode.
+    // A contributor's or foreign head, or a session branch somebody holds, keeps today's row.
+    if (disposition === "blocked-ambiguous" && derived.blocker === "conflict" && pr.mergeState === "dirty" &&
+        deps.readPlanRepairFacts && !(pr.taskId !== undefined &&
+          fixHeadAcceptable(pr.headRefName, pr.taskId, isSyntheticOrchestratorLaneId(pr.taskId)))) {
+      let facts: PlanRepairFacts | undefined;
+      try {
+        facts = planRoundFacts.get(pr.prNumber) ?? await deps.readPlanRepairFacts(pr);
+        planRoundFacts.set(pr.prNumber, facts);
+      } catch (error) {
+        log("sweep.owned_conflict.read_failed", { pr_number: pr.prNumber, head_sha: pr.headSha, reason: String(error) });
+      }
+      const kind: OwnedConflictHeadKind | undefined = fleetOwnedConflictHead(pr, facts) ? "fleet"
+        : operatorSessionHead(pr, facts) ? "session" : undefined;
+      const probe = mainTipSha === undefined ? undefined : ledgerLines.findLast((row) => row.step === "sweep.merge_probe" &&
+        row.pr_number === pr.prNumber && row.head_sha === pr.headSha && row.main_sha === mainTipSha);
+      const evidenced = hasCapturedMergeConflictEvidence(pr.mergeConflict) || probe?.verdict === "conflict";
+      let ownership: SessionOwnershipVerdict | undefined;
+      if (kind === "session" && evidenced && deps.readConflictOwnership) {
+        let read: SessionOwnershipEvidence;
+        try { read = await deps.readConflictOwnership(pr); }
+        catch (error) { read = { nowMs: now, unreadable: [String((error as Error)?.message ?? error)] }; }
+        ownership = sessionBranchUnheld(read);
+      }
+      const ref = pr.headRefName ?? "(no head)";
+      if (ownership?.verdict === "ambiguous") {
+        // One escalation per PR and head, keyed by its own row, and nothing is written to the branch.
+        const why = `merge conflict (mergeState dirty) — operator-session branch ${ref}: ownership is ambiguous ` +
+          `(${ownership.reason}; claim ${ownership.reads.claim}; session ${ownership.reads.session}; pushes ` +
+          `${ownership.reads.pushes}) — nothing written`;
+        const before = readLedger(deps.ledgerPath).some((row) => row.step === OWNED_CONFLICT_OWNERSHIP_ESCALATED_STEP &&
+          row.pr_number === pr.prNumber && row.head_sha === pr.headSha);
+        if (!before && !deps.dryRun) {
+          appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: escalationTaskIdFor(pr), step: OWNED_CONFLICT_OWNERSHIP_ESCALATED_STEP,
+            pr_number: pr.prNumber, head_sha: pr.headSha, ownership: ownership.reads, reason: ownership.reason });
+          await deps.escalate(pr, why, renderClarificationQuestion(pr, why, pr.strikeHistory ?? []));
+        }
+        disposition = "wait";
+        reason = `${why} — ${before ? "already escalated for this head" : deps.dryRun ? "escalation deferred: dry run" : "escalated once for this head"}`;
+      } else if (evidenced && (kind === "fleet" || ownership?.verdict === "unheld")) {
+        const round: { kind: OwnedConflictHeadKind; ownership?: SessionOwnershipReads; standDown?: string; wrote?: boolean } =
+          { kind: kind!, ...(ownership ? { ownership: ownership.reads } : {}) };
+        ownedConflictRounds.set(pr.prNumber, round);
+        const fields = { head_kind: round.kind, ...(round.ownership ? { ownership: round.ownership } : {}) };
+        const isOwnedReceipt = (row: Record<string, unknown>) => row.step === "sweep.conflict_regenerated" &&
+          row.tier === "deterministic" && row.pr_number === pr.prNumber && row.head_sha === pr.headSha &&
+          row.main_sha === mainTipSha;
+        let receipt = mainTipSha === undefined ? undefined : readLedger(deps.ledgerPath).findLast(isOwnedReceipt);
+        if (receipt === undefined && mainTipSha !== undefined && deps.regenerateConflict && !deps.dryRun) {
+          const recheck = round.kind === "session" ? async () => {
+            const again = sessionBranchUnheld(await deps.readConflictOwnership!(pr));
+            return again.verdict === "unheld" ? undefined : `${again.verdict}: ${again.reason}`;
+          } : undefined;
+          let result: ConflictRegenerationOutcome;
+          try { result = await deps.regenerateConflict(pr, mainTipSha, "owned", { kind: round.kind, ...(recheck ? { recheck } : {}) }); }
+          catch (error) { result = { outcome: "error", paths: [], reason: spawnFailureText(error) }; }
+          const base: LedgerLine = { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", step: "sweep.conflict_regenerated",
+            pr_number: pr.prNumber, head_sha: pr.headSha, main_sha: mainTipSha, tier: "deterministic", ...fields,
+            new_head_sha: result.newHeadSha ?? null, paths: result.paths, outcome: result.outcome,
+            ...(result.reason ? { reason: result.reason } : {}), ...(result.cleanupError ? { cleanup_error: result.cleanupError } : {}) };
+          // One row per resolved path, its mode take-main, regenerate or deleted-on-main; one row for a round that fell through.
+          const rows: LedgerLine[] = result.outcome === "pushed" && result.paths.length > 0
+            ? result.paths.map((p) => ({ ...base, mode: p.mode ?? "regenerate", path: p.path })) : [{ ...base, mode: "owned" }];
+          for (const row of rows) appendLine(deps.ledgerPath, row);
+          receipt = rows[0];
+          if (result.outcome === "pushed" && deps.postConflictComment) {
+            try {
+              await deps.postConflictComment(pr, ownedConflictComment({ kind: round.kind, round: "deterministic",
+                mainSha: mainTipSha, headSha: pr.headSha, ...(result.newHeadSha ? { newHeadSha: result.newHeadSha } : {}),
+                paths: result.paths.map((p) => ({ path: p.path, resolution: p.mode === "regenerate" ? `regenerate (npm run ${p.action})` : p.mode ?? p.action })),
+                ...(round.ownership ? { ownership: round.ownership } : {}) }));
+            } catch (error) {
+              log("sweep.owned_conflict.comment_failed", { pr_number: pr.prNumber, head_sha: pr.headSha, reason: String(error) });
+            }
+          }
+          round.wrote = result.outcome === "pushed";
+        }
+        const tierNote = receipt === undefined ? "the deterministic tier is unavailable (no main tip or regenerator)"
+          : `the deterministic tier ${String(receipt.outcome)}${receipt.reason ? ` (${String(receipt.reason)})` : ""}`;
+        if (receipt?.outcome === "pushed" || receipt?.outcome === "lease-mismatch") {
+          disposition = "conflicted";
+          round.standDown = receipt.outcome === "pushed"
+            ? `deterministic conflict tier pushed ${String(receipt.new_head_sha)} on ${round.kind} head ${ref}; awaiting fresh review and CI`
+            : `deterministic conflict tier lease mismatch on ${ref}: ${String(receipt.reason)}; awaiting a fresh snapshot`;
+          reason = `merge conflict (mergeState dirty) — ${round.kind}-owned head ${ref} — deterministic tier: ${round.standDown}`;
+        } else if (round.kind === "fleet" && planConflictRoundCandidate(pr) && deps.dispatchPlanGateRound) {
+          // Plan-scope conflicts on a fleet plan filing: W1-T9289's plan-scoped round, below, with its own judge.
+          log("sweep.owned_conflict.plan_round", { pr_number: pr.prNumber, head_sha: pr.headSha, tier: tierNote });
+        } else {
+          disposition = "conflicted";
+          reason = `merge conflict (mergeState dirty) — ${round.kind}-owned head ${ref} — ${tierNote} — worker tier: ` +
+            `dispatching the bounded merge-conflict fix mode${round.kind === "session"
+              ? " (a merge commit only, pushed with no force flag)" : ""}; a fresh review and CI gate the new head`;
+        }
+      }
+    }
     // W1-T9289: a dirty fleet-App plan filing on a machine-lane head is owned by the same plan-scoped round.
     let planConflictRound = false;
     if (disposition === "blocked-ambiguous" && derived.blocker === "conflict" && deps.dispatchPlanGateRound &&
@@ -22194,9 +22702,10 @@ export async function runSweep(
     // (and that has not been attempted at this head and main), and only for that route.
     const conflictGated = disposition === "conflicted" && deps.actionable !== undefined && !deps.actionable(disposition);
     const conflictNoWorkerOnly = acted && conflictGated && mainTipSha !== undefined &&
+      (ownedConflictRounds.get(pr.prNumber)?.standDown !== undefined ||
       conflictNoWorkerMode(pr, ledgerLines, mainTipSha, deps.regenerateConflict !== undefined) !== undefined &&
       !ledgerLines.some((row) => row.step === "sweep.conflict_regenerated" && row.pr_number === pr.prNumber &&
-        row.head_sha === pr.headSha && row.main_sha === mainTipSha);
+        row.head_sha === pr.headSha && row.main_sha === mainTipSha));
     if (acted) {
       // W1-T254 — LIGHT-SWEEP RESTRICTION. `actionable` defaults to everything, so `rmd sweep` and
       // the full sweep are unchanged. The light ticker passes `d => d === "post-review"`, so every
@@ -23520,6 +24029,14 @@ export async function runSweep(
                 standDownReason = terminal;
                 break;
               }
+              // W1-T11170: an owned head's deterministic tier already ran in the disposition above.
+              const ownedRound = ownedConflictRounds.get(pr.prNumber);
+              if (ownedRound?.standDown !== undefined) {
+                acted = ownedRound.wrote === true;
+                spent = false;
+                standDownReason = ownedRound.standDown;
+                break;
+              }
               const noWorkerMode = conflictNoWorkerMode(pr, ledgerLines, mainTipSha, deps.regenerateConflict !== undefined);
               if (mainTipSha !== undefined && deps.regenerateConflict && pr.taskId !== undefined && noWorkerMode !== undefined) {
                 const cleanMerge = noWorkerMode === "clean-merge";
@@ -23574,8 +24091,54 @@ export async function runSweep(
               // dispatch carries merge-conflict evidence and never a mix. W1-T2231: the
               // "conflicted" analogue of the blocked-fixable capture above — both are
               // dispatch-based repair surfaces, so both feed `spent` the same way.
-              const conflictedEvidence = { unmetCriteria: [], mergeConflict: pr.mergeConflict,
-                ...(mainTipSha !== undefined ? { baseSha: mainTipSha } : {}) };
+              const conflictedEvidence: FixDispatchEvidence = { unmetCriteria: [], mergeConflict: pr.mergeConflict,
+                ...(mainTipSha !== undefined ? { baseSha: mainTipSha } : {}),
+                ...(ownedRound ? { ownedConflictHead: { kind: ownedRound.kind,
+                  push: ownedRound.kind === "session" ? "merge-commit-no-force" as const : "leased" as const,
+                  ...(ownedRound.ownership ? { ownership: ownedRound.ownership } : {}) } } : {}) };
+              // W1-T11170: a worker round on an owned head that ran at this head and left it dirty has failed. The fix
+              // progress judge, never a fixed count, decides whether another round, a change of approach, or one
+              // escalation follows.
+              if (ownedRound) {
+                const atHead = (row: Record<string, unknown>) => row.pr_number === pr.prNumber && row.head_sha === pr.headSha;
+                const freshRows = readLedger(deps.ledgerPath);
+                if (freshRows.some((row) => row.step === OWNED_CONFLICT_ESCALATED_STEP && atHead(row))) {
+                  acted = false;
+                  standDownReason = "the owned-head conflict round was escalated once for this head; awaiting an operator or a new head";
+                  break;
+                }
+                const history = freshRows.filter((row) => row.step === OWNED_CONFLICT_ROUND_STEP && atHead(row));
+                if (history.length > 0) {
+                  const input = await buildFixProgressInputWithHostedProofs({ taskId: pr.taskId, prNumber: pr.prNumber,
+                    headSha: pr.headSha, currentRed: ["merge-conflict"], ledger: ledgerLines,
+                    parkedReason: `owned-head conflict round left the head dirty; ${JSON.stringify(history)}` }, deps.readHostedProofResults);
+                  input.remedyHistory = history;
+                  const { decision: progress, receipt } = await resolveFixProgress(input, ledgerLines,
+                    { ...progressWitness(pr), judge: deps.fixProgressJudge });
+                  appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: escalationTaskIdFor(pr), pr_number: pr.prNumber,
+                    head_sha: pr.headSha, site: "owned-conflict-round", rounds: history.length, ...progress, ...receipt });
+                  if (progress.verdict === "unavailable") {
+                    acted = false;
+                    standDownReason = `owned-head conflict round awaits the fix progress judge: ${progress.reason}`;
+                    break;
+                  }
+                  if (progress.verdict === "escalate") {
+                    const why = `merge conflict on ${ownedRound.kind}-owned head ${pr.headRefName}: fix progress loop: ` +
+                      `${progress.loop} — ${progress.reason}`;
+                    appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: escalationTaskIdFor(pr),
+                      step: OWNED_CONFLICT_ESCALATED_STEP, pr_number: pr.prNumber, head_sha: pr.headSha, reason: why });
+                    await deps.escalate(pr, why, renderClarificationQuestion(pr, why, pr.strikeHistory ?? []));
+                    standDownReason = why;
+                    break;
+                  }
+                  pr.progressContinue = { reason: progress.reason };
+                  conflictedEvidence.progressDecision = progress;
+                  if (progress.verdict === "change-approach") {
+                    pr.pendingAnswer = { ...pr.pendingAnswer, constraint: progress.approach };
+                    conflictedEvidence.progressApproach = progress.approach;
+                  }
+                }
+              }
               // W1-T2752: the conflicted twin of the blocked-fixable terminal check above, same
               // reasoning — see `SweepDeps.terminalFixStandDown`'s own doc.
               const conflictedTerminalStandDown = deps.terminalFixStandDown?.(pr);
@@ -23606,7 +24169,7 @@ export async function runSweep(
                 standDownReason = conflictedDeclineHold.reason;
                 break;
               }
-              const conflictedFixClaim = claimFixDispatch(pr);
+              const conflictedFixClaim = claimFixDispatch(ownedRound ? { ...pr, taskId: escalationTaskIdFor(pr) } : pr);
               if (!conflictedFixClaim.ok) {
                 acted = false;
                 standDownReason = conflictedFixClaim.reason;
@@ -23622,12 +24185,40 @@ export async function runSweep(
                 standDownReason = conflictedAdmission.reason;
                 break;
               }
+              // W1-T11170: an owned head's worker round is recorded before it starts, and comments after it lands.
+              const ownedDispatch = (onPhase?: DetachedFixPhaseObserver, control?: DetachedFixControl) => async () => {
+                if (!ownedRound) return deps.dispatchFix(pr, conflictedEvidence, onPhase, control);
+                appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: escalationTaskIdFor(pr), step: OWNED_CONFLICT_ROUND_STEP,
+                  pr_number: pr.prNumber, head_sha: pr.headSha, main_sha: mainTipSha ?? null, round: "worker",
+                  head_kind: ownedRound.kind, push: conflictedEvidence.ownedConflictHead!.push,
+                  paths: (pr.mergeConflict?.files ?? []).map((f) => f.path),
+                  ...(ownedRound.ownership ? { ownership: ownedRound.ownership } : {}) });
+                const outcome = await deps.dispatchFix(pr, conflictedEvidence, onPhase, control);
+                // A session branch is commented on only once the round's merge commit landed (the push's own row).
+                const landed = ownedRound.kind === "session"
+                  ? readLedger(deps.ledgerPath).findLast((row) => row.step === OWNED_SESSION_PUSH_STEP &&
+                    row.pr_number === pr.prNumber && row.head_sha === pr.headSha)
+                  : undefined;
+                if ((ownedRound.kind === "session" ? landed !== undefined : dispatchFixSpent(outcome)) &&
+                    deps.postConflictComment && mainTipSha !== undefined) {
+                  try {
+                    await deps.postConflictComment(pr, ownedConflictComment({ kind: ownedRound.kind, round: "worker",
+                      mainSha: mainTipSha, headSha: pr.headSha,
+                      ...(typeof landed?.new_head_sha === "string" ? { newHeadSha: landed.new_head_sha } : {}),
+                      paths: (pr.mergeConflict?.files ?? []).map((f) => ({ path: f.path, resolution: "resolved by the merge-conflict fix mode worker" })),
+                      ...(ownedRound.ownership ? { ownership: ownedRound.ownership } : {}) }));
+                  } catch (error) {
+                    log("sweep.owned_conflict.comment_failed", { pr_number: pr.prNumber, head_sha: pr.headSha, reason: String(error) });
+                  }
+                }
+                return outcome;
+              };
               // W1-T2379: the conflicted twin of the blocked-fixable arm above, same reasoning.
               if (deps.detachFixWait) {
-                await detachFixDispatch(pr, (onPhase) => conflictedFixClaim.run(() => deps.dispatchFix(pr, conflictedEvidence, onPhase, conflictedFixClaim.control)), conflictedFixClaim, undefined, conflictedEvidence);
+                await detachFixDispatch(pr, (onPhase) => conflictedFixClaim.run(ownedDispatch(onPhase, conflictedFixClaim.control)), conflictedFixClaim, undefined, conflictedEvidence);
                 break;
               }
-              const conflictedDispatchOutcome = await conflictedFixClaim.run(() => deps.dispatchFix(pr, conflictedEvidence));
+              const conflictedDispatchOutcome = await conflictedFixClaim.run(ownedDispatch());
               if (conflictedDispatchOutcome !== undefined) spent = dispatchFixSpent(conflictedDispatchOutcome);
               const conflictedDeclinedReason = fixClaimDeclinedReason(conflictedDispatchOutcome);
               if (conflictedDeclinedReason) [acted, standDownReason] = [false, conflictedDeclinedReason];
@@ -25564,13 +26155,14 @@ async function runSweepLightPassCore(
   // Without enough measured cadence, selection already admits at most the first never-held PR
   // while preserving every previously held PR and their oldest-held-first order (W1-T9212).
   const planMerges = availablePlanMerges;
-  const planMergeBudget = { spentMs: 0, durationKnown: true };
+  // W1-T12266: the budget counts merge attempts. A plan PR whose turn ends with no attempt spends nothing.
+  const planMergeBudget = { spentMs: 0, durationKnown: true, attempts: 0 };
   const unavailablePlanMergeReason = "one never-held plan PR direct-merges per light pass " +
     "(the one plan PR direct-merges per light pass bound remains; measured interval unavailable: " +
     "fewer than three valid same-scope intervals); held PRs keep their W1-T9212 re-evaluation";
   const planMergeStopReason = (index: number | undefined, held: boolean): string | undefined => {
     if (passIntervalBudgetMs === undefined) return index === 0 || held ? undefined : unavailablePlanMergeReason;
-    if (index === 0) return undefined;
+    if (index !== undefined && planMergeBudget.attempts === 0) return undefined;
     if (!planMergeBudget.durationKnown) {
       return `measured interval budget ${passIntervalBudgetMs}ms; prior plan-merge duration unavailable or invalid, stopped before another attempt`;
     }
@@ -25700,19 +26292,22 @@ async function runSweepLightPassCore(
                         needsPersonNote(pr, selectionLedgerLines))
                   : baseStandDownReasonFor?.(d),
             };
-      let planMergeDurationRecorded = false;
       const planMergeTurn = planMergeSequence.get(pr.prNumber);
       if (planMergeTurn !== undefined) {
         // W1-T5901: the plan-merge owner preserves one-at-a-time merge-queue/safety behavior; a measured
         // interval only admits another attempt after the prior attempt's real arm duration is known.
         const laneActionable = scopedDeps.actionable;
         const isHeldPlanPr = heldPlanPrFromLedger(selectionLedgerLines, pr) !== undefined;
+        // Decided once, at this PR's turn: its own attempt must not change the answer it already acted on.
+        let turnDecision: { stop: string | undefined } | undefined;
+        const turnStopReason = (): string | undefined =>
+          (turnDecision ??= { stop: planMergeStopReason(planMergeTurn.index, isHeldPlanPr) }).stop;
         scopedDeps.actionable = (d) => d === "mergeable"
-          ? planMergeStopReason(planMergeTurn.index, isHeldPlanPr) === undefined
+          ? turnStopReason() === undefined
           : (laneActionable ? laneActionable(d) : true);
         const laneReason = scopedDeps.standDownReasonFor;
         scopedDeps.standDownReasonFor = (d) => d === "mergeable"
-          ? planMergeStopReason(planMergeTurn.index, isHeldPlanPr) ?? laneReason?.(d) : laneReason?.(d);
+          ? turnStopReason() ?? laneReason?.(d) : laneReason?.(d);
 
         const arm = scopedDeps.arm;
         const append = scopedDeps.appendLine ?? appendLedger;
@@ -25730,11 +26325,9 @@ async function runSweepLightPassCore(
             const elapsed = performance.now() - mergeStartedAtMs;
             const elapsedMs = Number.isFinite(elapsed) && elapsed >= 0 ? elapsed : undefined;
             attempt = { outcome, ...(elapsedMs === undefined ? {} : { elapsedMs }) };
+            planMergeBudget.attempts++;
             if (elapsedMs === undefined) planMergeBudget.durationKnown = false;
-            else {
-              planMergeDurationRecorded = true;
-              planMergeBudget.spentMs += elapsedMs;
-            }
+            else planMergeBudget.spentMs += elapsedMs;
           }
         };
         scopedDeps.appendLine = (path, line) => {
@@ -25786,7 +26379,6 @@ async function runSweepLightPassCore(
         }
         return summary;
       }).finally(() => {
-        if (planMergeTurn?.index === 0 && !planMergeDurationRecorded) planMergeBudget.durationKnown = false;
         planMergeTurn?.finish();
         if (pr.prNumber === lastPlanMergeNumber) releasePlanMerge();
         if (!detachedNumbers.has(pr.prNumber)) releases.get(pr.prNumber)?.();
