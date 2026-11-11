@@ -1,9 +1,10 @@
 import "#src/lib/live-analytics-snapshot-cache.js";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import { setImmediate as flush } from "node:timers/promises";
+import { setImmediate as flush, setTimeout as delay } from "node:timers/promises";
+import { ghShim } from "#test/helpers/gh-shim.js";
 import { test, type TestContext } from "node:test";
 import { daemonCommand } from "#test/helpers/run-task-daemon.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
@@ -53,9 +54,9 @@ function commandFixture(t: TestContext) {
     reviewCommand: async (...args) => { effects.push(["review", args]); return 0; },
   };
   return { root, repo, commit, calls, effects, boots: () => boots,
-    run: (extra: string[], api: OpsCatalogApi | undefined, loop: (plan: Plan, ports: DaemonDeps) => Promise<DaemonSummary>, literal = false) =>
+    run: (extra: string[], api: OpsCatalogApi | undefined, loop: (plan: Plan, ports: DaemonDeps) => Promise<DaemonSummary>, literal = false, source?: Deps["opsCatalogSource"]) =>
       daemonCommand(["--repo", "remudero", "--allow-self-target", "--max", "0", ...(literal ? ["--plan", join(repo.dir, "plan", "tasks.yaml")] : []), ...extra],
-        { ...base, ...(api ? { opsCatalogApi: api } : {}), runDaemon: async (plan, ports) => loop(plan, ports) }),
+        { ...base, ...(api ? { opsCatalogApi: api } : {}), ...(source ? { opsCatalogSource: source } : {}), runDaemon: async (plan, ports) => loop(plan, ports) }),
   };
 }
 
@@ -134,13 +135,17 @@ test("W1-T11770 criterion 2: a changed ops revision is refreshed off the loop wi
 test("W1-T11770 criterion 2: a hung refresh cannot delay the first tick or add overlapping reads", async t => {
   const f = commandFixture(t); let reads = 0, visited = false;
   const api: OpsCatalogApi = () => { reads++; return new Promise(() => {}); };
-  assert.equal(await f.run(["--shadow-ops-catalog", REPOSITORY], api, async (plan, ports) => {
+  let deadline!: ReturnType<typeof setTimeout>;
+  const timeout = new Promise<never>((_resolve, reject) => { deadline = setTimeout(() => reject(Error("private refresh blocked public command")), 5000); });
+  try {
+  assert.equal(await Promise.race([f.run(["--shadow-ops-catalog", REPOSITORY], api, async (plan, ports) => {
     visited = true; assert.equal(typeof ports.secondaryCatalogShadowSource, "function");
     const result = await drive(plan, ports); assert.deepEqual(result.workers, ["PUBLIC-T1", "PUBLIC-T2"]);
     assert.notEqual(ports.secondaryCatalogShadowSource?.()?.outcome, "ok");
     const count = reads; await ports.sleepUntilSweepWake!(0); await flush(); assert.equal(reads, count, "only one selected-source refresh may be in flight");
     return stopped;
-  }), 0); assert.equal(visited, true);
+  }), timeout]), 0); assert.equal(visited, true);
+  } finally { clearTimeout(deadline); }
 });
 test("W1-T11770 criterion 2: a literal public plan keeps its revision UNKNOWN instead of inventing one", async t => {
   const f = commandFixture(t), fx = catalog(task("OPS-T1")); let visited = false;
@@ -149,4 +154,43 @@ test("W1-T11770 criterion 2: a literal public plan keeps its revision UNKNOWN in
     const result = await drive(plan, ports); assert.ok(result.rows.some(r => r.outcome === "primary_revision_unknown"));
     return stopped;
   }, true), 0); assert.equal(visited, true);
+});
+
+test("W1-T11770 criterion 2: the real default transport shells out read-only and reduces credential failure to a code", async t => {
+  const f = commandFixture(t);
+  const shim = ghShim([{ when: `repos/${REPOSITORY}`, stderr: "HTTP 401: Bad credentials", exit: 1 }]);
+  const previousPath = process.env.PATH;
+  process.env.PATH = `${shim.dir}:${previousPath ?? ""}`;
+  try {
+    assert.equal(await f.run(["--shadow-ops-catalog", REPOSITORY], undefined, async (_plan, ports) => {
+      for (let i = 0; i < 100 && ports.secondaryCatalogShadowSource?.() === undefined; i++) await delay(50);
+      assert.equal(ports.secondaryCatalogShadowSource?.()?.outcome, "auth_missing");
+      return stopped;
+    }), 0);
+    assert.ok(shim.calls().length > 0, "the actual default child reached the recording executable");
+    assert.ok(shim.calls().every(call => call.includes(`api repos/${REPOSITORY}`) && !/POST|PATCH|PUT|DELETE/.test(call)));
+  } finally {
+    if (previousPath === undefined) delete process.env.PATH; else process.env.PATH = previousPath;
+    rmSync(shim.dir, { recursive: true, force: true });
+  }
+});
+test("W1-T11770 criterion 2: an unexpected refresh rejection is redacted and never rejects the public command", async t => {
+  const f = commandFixture(t);
+  assert.equal(await f.run(["--shadow-ops-catalog", REPOSITORY], undefined, async (plan, ports) => {
+    await flush(); assert.deepEqual(ports.secondaryCatalogShadowSource?.(), { outcome: "unreadable" });
+    const result = await drive(plan, ports); assert.ok(result.rows.some(row => row.outcome === "unreadable"));
+    assert.doesNotMatch(JSON.stringify(result), /PRIVATE_TITLE_SENTINEL|fixture-private/); return stopped;
+  }, false, { refresh: async () => { throw Error("PRIVATE_TITLE_SENTINEL"); } }), 0);
+});
+test("W1-T11770 criterion 2: shutdown discards a late source result and prevents any later refresh", async t => {
+  const f = commandFixture(t); let reads = 0;
+  let finish!: (value: { outcome: "unreadable" }) => void;
+  let accessor!: NonNullable<DaemonDeps["secondaryCatalogShadowSource"]>;
+  let wake!: NonNullable<DaemonDeps["sleepUntilSweepWake"]>;
+  assert.equal(await f.run(["--shadow-ops-catalog", REPOSITORY], undefined, async (_plan, ports) => {
+    accessor = ports.secondaryCatalogShadowSource!; wake = ports.sleepUntilSweepWake!;
+    assert.equal(accessor(), undefined); return stopped;
+  }, false, { refresh: () => { reads++; return new Promise(resolve => { finish = resolve; }); } }), 0);
+  finish({ outcome: "unreadable" }); await flush();
+  assert.equal(accessor(), undefined); await wake(0); await flush(); assert.equal(reads, 1);
 });

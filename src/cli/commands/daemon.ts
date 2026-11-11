@@ -605,6 +605,8 @@ export async function daemonCommand(
     githubFactory?: (owner: string, repo: string) => GitHub;
     /** Fixture transport only; production keeps the existing identity and GET-only source. */
     opsCatalogApi?: OpsCatalogApi;
+    /** Terminal-failure/lifecycle fixture seam; normal operation constructs the real source below. */
+    opsCatalogSource?: ReturnType<typeof createOpsCatalogShadowSource>;
     /** Explicit fixture configuration; production keeps the existing config loader. */
     config?: Config;
     /** Injectable self-target repo root. Defaults to this module's real `repoRoot`. A
@@ -1750,7 +1752,7 @@ export async function daemonCommand(
     await dispatchFilingPrefetch.refresh(target.planPath);
     // This opt-in observer owns no timer, dispatch port or persistence. A tick reads only its cache.
     const opsShadow = shadowOpsRepository === undefined ? undefined : (() => {
-      const source = createOpsCatalogShadowSource({ repository: shadowOpsRepository }, deps.opsCatalogApi);
+      const source = deps.opsCatalogSource ?? createOpsCatalogShadowSource({ repository: shadowOpsRepository }, deps.opsCatalogApi);
       let current: OpsCatalogShadowInput | undefined;
       let flight: Promise<void> | undefined;
       let closed = false;
