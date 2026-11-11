@@ -1336,7 +1336,12 @@ import { captureSelectedRegistryIntent, qualifySelectedRegistryIntent, observeSe
 
 import { parseSelfForecast, SELF_FORECAST_REPORT_CONTRACT } from "./lib/self-forecast.js";
 import { readPrOwnerLedgerProjection, type PrOwnerLedgerProjection } from "./lib/pr-owner-ledger.js";
-import { decideStaleFixDispatchRecovery, type StaleFixDispatchHoldReason } from "./lib/stale-fix-dispatch-recovery.js";
+import {
+  decideStaleFixDispatchRecovery,
+  staleFixDispatchShadowInputs,
+  withStaleFixDispatchShadow,
+  type StaleFixDispatchShadow,
+} from "./lib/stale-fix-dispatch-recovery.js";
 import { prStateCommand } from "./lib/pr-state.js";
 import { auditLedgerUnion, createIncrementalLedgerUnion, createSizedMemo, readLedgerUnionRawLinesAsync, readLedgerUnionRecordsSync, readValidatedRotationDigest, realLedgerFs, type LedgerUnionRecordRead } from "./lib/ledger-union.js";
 // meaningOfStep: only ledgerGrepCommand read it, and it moved to src/lib/report-commands.ts
@@ -3760,7 +3765,7 @@ interface PrOwnerVerdict {
   sweep?: PrOwnerSweepEvidence;
   claim?: PrOwnerClaim;
   /** W1-T12113: diagnostic only — never an input to `verdict`. */
-  recoveryShadow?: { outcome: "hold"; reason: StaleFixDispatchHoldReason };
+  recoveryShadow?: StaleFixDispatchShadow;
 }
 
 interface PrOwnerClaim {
@@ -3899,39 +3904,6 @@ export function derivePrOwnerVerdict(
 
 type PrOwnerFacts = Pick<PrOwnerLedgerProjection, "corpusNewestTs" | "latestFix" | "latestSweep" | "relatedClaimKeys">;
 
-/** W1-T12113 — the stale-dispatch recovery decision, in SHADOW over the latest fix.dispatch. It
- *  supplies no operator authorization and unknown liveness, cwd, claim and preservation evidence,
- *  so it can only HOLD; it gathers nothing and writes no receipt or ledger row. */
-function prOwnerRecoveryShadow(
-  prNumber: number,
-  corpus: Omit<PrOwnerLedgerRead, "rows">,
-  latestFix: Record<string, unknown>,
-): PrOwnerVerdict["recoveryShadow"] {
-  const observed = {
-    repo: stringField(latestFix, "repo") ?? "",
-    prNumber,
-    taskId: stringField(latestFix, "task_id") ?? "",
-    dispatchRunId: stringField(latestFix, "run_id") ?? "",
-    dispatchRoundId: stringField(latestFix, "round_id") ?? "",
-    headSha: stringField(latestFix, "head_sha") ?? "",
-    baseSha: stringField(latestFix, "base_sha") ?? "",
-    branch: stringField(latestFix, "branch") ?? "",
-  };
-  const decision = decideStaleFixDispatchRecovery({ ...observed, recoveryInvocationRunId: "" }, {
-    observed,
-    latestDispatch: { runId: observed.dispatchRunId, ts: stringField(latestFix, "ts") },
-    process: { state: "unknown" },
-    descendants: { state: "unknown" },
-    cwdCensus: { state: "unknown" },
-    fixBranchClaim: { state: "unknown" },
-    dispatchClaim: { state: "unknown" },
-    preservation: { state: "unknown", reason: "shadow: preservation not gathered" },
-    ledgerRead: { ok: corpus.ok, unread: corpus.unread },
-  });
-  // Unreachable by construction (no authorization), but a shadow must never be able to say recover.
-  return { outcome: "hold", reason: decision.kind === "hold" ? decision.reason : "authorization_missing" };
-}
-
 function prOwnerVerdictFromFacts(
   prNumber: number,
   corpus: Omit<PrOwnerLedgerRead, "rows">,
@@ -3940,7 +3912,9 @@ function prOwnerVerdictFromFacts(
 ): PrOwnerVerdict {
   const verdict = prOwnerOwnershipVerdict(prNumber, corpus, claimRead, facts);
   if (facts.latestFix === undefined) return verdict;
-  return { ...verdict, recoveryShadow: prOwnerRecoveryShadow(prNumber, corpus, facts.latestFix) };
+  // W1-T12113: the recovery decision in SHADOW — computed after, and never fed into, the verdict.
+  const shadow = staleFixDispatchShadowInputs(prNumber, corpus, facts.latestFix);
+  return withStaleFixDispatchShadow(verdict, decideStaleFixDispatchRecovery(shadow.expected, shadow.facts));
 }
 
 function prOwnerOwnershipVerdict(

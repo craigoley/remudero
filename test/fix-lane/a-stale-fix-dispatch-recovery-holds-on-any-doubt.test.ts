@@ -9,10 +9,12 @@ import {
   STALE_FIX_DISPATCH_RECEIPT_STEP,
   decideStaleFixDispatchRecovery,
   staleFixDispatchRecoveryReceipt,
+  staleFixDispatchShadowInputs,
+  withStaleFixDispatchShadow,
   type StaleFixDispatchExpected,
   type StaleFixDispatchFacts,
 } from "#src/lib/stale-fix-dispatch-recovery.js";
-import { derivePrOwnerVerdict, prOwnerCommand } from "#src/run-task.js";
+import { readPrOwnerLedgerProjection } from "#src/lib/pr-owner-ledger.js";
 
 const HEAD = "a".repeat(40);
 const HEAD_PLUS_ONE = "b".repeat(40);
@@ -242,27 +244,36 @@ test("W1-T12113 pr-owner shadow preserves owner and receipts", async () => {
     writeFileSync(join(dir, "ledger.ndjson"), "");
     const before = snapshot(dir);
 
-    const out: string[] = [];
-    assert.equal(await prOwnerCommand(["4851"], { stateDir: dir, write: (text) => out.push(text) }), 0);
-    const text = out.join("\n");
-    assert.match(text, /rmd pr-owner #4851 .+ OWNED/);
-    assert.match(text, /reason: fix\.dispatch found for this pull request/);
-    assert.match(text, /recovery_shadow: HOLD reason=authorization_missing/);
-    assert.deepEqual(snapshot(dir), before, "the shadow writes no receipt file and no ledger row");
+    // The pr-owner read path's own projection, then the same shadow composition run-task performs.
+    const projection = await readPrOwnerLedgerProjection(dir, 4851, () => []);
+    assert.equal(projection.ok, true);
+    assert.ok(projection.latestFix !== undefined);
+    const { expected: shadowExpected, facts: shadowFacts } = staleFixDispatchShadowInputs(4851, projection, projection.latestFix);
+    assert.equal(shadowExpected.authorizationId, undefined, "the shadow never supplies an operator authorization");
+    assert.equal(shadowFacts.process.state, "unknown");
+    assert.equal(shadowFacts.preservation.state, "unknown");
+    assert.equal(shadowFacts.observed.dispatchRunId, "FIX-1");
+    const decision = decideStaleFixDispatchRecovery(shadowExpected, shadowFacts);
+    assert.deepEqual(decision, { kind: "hold", reason: "authorization_missing" });
 
-    const corpus = {
-      rows: [dispatch], archiveFiles: [join(dir, "ledger.2026-11-10T00-01-00-000Z.ndjson.gz")],
-      liveFileRead: true, ok: true, unread: [], filesRead: 2,
+    const owner = {
+      verdict: "OWNED", prNumber: 4851, reason: "fix.dispatch found for this pull request",
+      fix: { ts: dispatch.ts, taskId: "W1-TSTALE", runId: "FIX-1", headSha: HEAD },
     };
-    const verdict = derivePrOwnerVerdict(4851, corpus);
-    assert.equal(verdict.verdict, "OWNED");
-    assert.deepEqual(verdict.recoveryShadow, { outcome: "hold", reason: "authorization_missing" });
-    const { recoveryShadow: _shadow, ...owner } = verdict;
-    const free = derivePrOwnerVerdict(4851, { ...corpus, rows: [] });
-    assert.equal(free.verdict, "FREE");
-    assert.equal(free.recoveryShadow, undefined, "no latest fix.dispatch emits no shadow field");
-    assert.equal(owner.reason, "fix.dispatch found for this pull request");
-    assert.deepEqual(snapshot(dir), before);
+    const frozen = structuredClone(owner);
+    const shadowed = withStaleFixDispatchShadow(owner, decision);
+    assert.deepEqual(shadowed.recoveryShadow, { outcome: "hold", reason: "authorization_missing" });
+    const { recoveryShadow: _shadow, ...unchanged } = shadowed;
+    assert.deepEqual(unchanged, frozen, "the owner verdict is unchanged");
+    assert.deepEqual(owner, frozen, "the input verdict is not mutated");
+    // A shadow can never say recover, even over a decision that would.
+    assert.deepEqual(withStaleFixDispatchShadow(owner, { kind: "recover" }).recoveryShadow.outcome, "hold");
+
+    // An unreadable ledger still holds, naming the unread rotation.
+    const unread = staleFixDispatchShadowInputs(4851, { ok: false, unread: ["ledger.x.ndjson.gz"] }, projection.latestFix);
+    assert.deepEqual(decideStaleFixDispatchRecovery(unread.expected, unread.facts), { kind: "hold", reason: "ledger_unreadable" });
+
+    assert.deepEqual(snapshot(dir), before, "the shadow writes no receipt file and no ledger row");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

@@ -322,3 +322,56 @@ export function staleFixDispatchRecoveryReceipt(
     ...(decision.kind === "hold" ? { hold_reason: decision.reason } : {}),
   };
 }
+
+export interface StaleFixDispatchShadow {
+  outcome: "hold";
+  reason: StaleFixDispatchHoldReason;
+}
+
+function rowString(row: Record<string, unknown>, key: string): string {
+  return typeof row[key] === "string" ? row[key] : "";
+}
+
+/** The read-only `rmd pr-owner` shadow's inputs for its latest fix.dispatch row: no operator
+ *  authorization and unknown liveness, cwd, claim and preservation evidence. It gathers nothing,
+ *  so the decision over these inputs can only hold. */
+export function staleFixDispatchShadowInputs(
+  prNumber: number,
+  ledgerRead: { ok: boolean; unread: string[] },
+  latestFix: Record<string, unknown>,
+): { expected: StaleFixDispatchExpected; facts: StaleFixDispatchFacts } {
+  const observed: StaleFixDispatchIdentity = {
+    repo: rowString(latestFix, "repo"),
+    prNumber,
+    taskId: rowString(latestFix, "task_id"),
+    dispatchRunId: rowString(latestFix, "run_id"),
+    dispatchRoundId: rowString(latestFix, "round_id"),
+    headSha: rowString(latestFix, "head_sha"),
+    baseSha: rowString(latestFix, "base_sha"),
+    branch: rowString(latestFix, "branch"),
+  };
+  return {
+    expected: { ...observed, recoveryInvocationRunId: "" },
+    facts: {
+      observed,
+      latestDispatch: { runId: observed.dispatchRunId, ...(typeof latestFix.ts === "string" ? { ts: latestFix.ts } : {}) },
+      process: { state: "unknown" },
+      descendants: { state: "unknown" },
+      cwdCensus: { state: "unknown" },
+      fixBranchClaim: { state: "unknown" },
+      dispatchClaim: { state: "unknown" },
+      preservation: { state: "unknown", reason: "shadow: preservation not gathered" },
+      ledgerRead: { ok: ledgerRead.ok, unread: [...ledgerRead.unread] },
+    },
+  };
+}
+
+/** Attach the shadow diagnostic to an owner verdict without touching any of its fields. A shadow
+ *  can only report HOLD: a `recover` decision (unreachable without authorization) still reads hold. */
+export function withStaleFixDispatchShadow<V extends object>(
+  verdict: V,
+  decision: StaleFixDispatchDecision,
+): V & { recoveryShadow: StaleFixDispatchShadow } {
+  const reason: StaleFixDispatchHoldReason = decision.kind === "hold" ? decision.reason : "authorization_missing";
+  return { ...verdict, recoveryShadow: { outcome: "hold", reason } };
+}
