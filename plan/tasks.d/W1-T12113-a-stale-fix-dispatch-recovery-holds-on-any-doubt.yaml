@@ -15,7 +15,7 @@
     - src/run-task.ts
     - test/fix-lane/a-stale-fix-dispatch-recovery-holds-on-any-doubt.test.ts
   status: queued
-  priority: 2
+  priority: 0.05
   attempts: 0
   acceptance:
     - claim: "decideStaleFixDispatchRecovery returns recover only when the expected repo, PR, task, dispatch run_id and round_id, PR head and base, branch and authorization all equal the observed values, the recorded worker process is dead on this host, it has no live descendant and no process has a cwd at or below the worktree, no competing fix branch claim or dispatch claim is held; the exact O_EXCL fix branch claim acquired by this recovery invocation is permitted only when its claim run_id matches the expected recovery invocation run_id; if a pre-existing prior-dispatch lock was present, the expected tuple includes the prior lock's stored claim run_id derived by W1-T12114 from the fully anchored production `fixRoundClaimId` format and round history, and reclaim evidence must match that exact run_id plus dispatch run_id, same host, original dead pid (not live/reused), absent descendants, clear cwd census and compare-and-reclaim raw-byte identity; a same-recovery invocation lock must match its exact recovery_id; malformed, changed, foreign-host, reused, ambiguous or unknown locks hold; no fix.dispatch is newer than the named one, and preservation evidence names a published recovery ref (or proves a clean tree whose head the PR already contains); every other input, including a live, unknown, foreign-host or reused pid, a mismatched or changed head, base, branch, run or task, a newer dispatch, a competing claim, missing or unreadable evidence, and a failed preservation, returns hold with one named reason"

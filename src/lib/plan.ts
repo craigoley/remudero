@@ -629,6 +629,7 @@ export function parseTasksFromYaml(
   sourceLabel: string,
   onDuplicate?: (id: string) => void,
   yamlOptions: Pick<DocumentOptions, "logLevel"> = {},
+  dependencyMode: "strict" | "preserve-external" = "strict",
 ): Task[] {
   let raw: unknown;
   try {
@@ -670,6 +671,11 @@ export function parseTasksFromYaml(
     const bandMeaning = e.band_meaning as BandMeaning | undefined;
     if (bandMeaning !== undefined && !BAND_MEANINGS.includes(bandMeaning)) {
       throw new PlanError(`task ${id}: invalid band_meaning '${String(bandMeaning)}' (must be ${BAND_MEANINGS.join("|")})`);
+    }
+    // The ops reader defers edge resolution, so malformed dependency evidence must refuse here.
+    if (dependencyMode === "preserve-external" && e.depends_on !== undefined &&
+      (!Array.isArray(e.depends_on) || e.depends_on.some(dep => typeof dep !== "string" || !TASK_ID_SHAPE.test(dep)))) {
+      throw new PlanError(`task ${id}: depends_on must be an array of task identifiers`);
     }
     const type = req(e.type as string, "type", id);
     if (!TASK_TYPES.includes(type as TaskType)) {
@@ -1038,12 +1044,12 @@ function assertSupersededByResolves(t: Task, byId: ReadonlyMap<string, Task>): v
   }
 }
 
-function validatedPlan(tasks: Task[]): Plan {
+function validatedPlan(tasks: Task[], dependencyMode: "strict" | "preserve-external" = "strict"): Plan {
   const byId = new Map(tasks.map((t) => [t.id, t]));
-  // Every dependency must resolve within the merged view (monolith + shards).
+  // Ordinary plans resolve locally; only the explicit ops mode defers to cross-catalog composition.
   for (const t of tasks) {
     for (const dep of t.depends_on) {
-      if (!byId.has(dep)) throw new PlanError(`task ${t.id}: depends_on unknown task '${dep}'`);
+      if (dependencyMode !== "preserve-external" && !byId.has(dep)) throw new PlanError(`task ${t.id}: depends_on unknown task '${dep}'`);
     }    assertSupersededByResolves(t, byId);
   }
   return { tasks, byId };
@@ -1255,10 +1261,11 @@ export function parseBlobBatch(raw: string, ref: string, relPaths: string[]): st
 export function mergePlanBlobs(
   blobs: Array<{ label: string; text: string }>,
   yamlOptions: Pick<DocumentOptions, "logLevel"> = {},
+  opts: { dependencyMode?: "preserve-external" } = {},
 ): Plan {
-  const parse = yamlOptions.logLevel === undefined ? parseTasksFromYaml
-    : (text: string, label: string, onDuplicate?: (id: string) => void) => parseTasksFromYaml(text, label, onDuplicate, yamlOptions);
-  return validatedPlan(mergeBlobTasks(blobs, undefined, undefined, parse));
+  const parse = yamlOptions.logLevel === undefined && opts.dependencyMode === undefined ? parseTasksFromYaml
+    : (text: string, label: string, onDuplicate?: (id: string) => void) => parseTasksFromYaml(text, label, onDuplicate, yamlOptions, opts.dependencyMode);
+  return validatedPlan(mergeBlobTasks(blobs, undefined, undefined, parse), opts.dependencyMode);
 }
 
 function mergeBlobTasks(

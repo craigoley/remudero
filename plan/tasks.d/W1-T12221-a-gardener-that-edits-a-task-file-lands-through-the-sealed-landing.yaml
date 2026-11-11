@@ -1,0 +1,60 @@
+- id: W1-T12221
+  title: "A gardener that edits a task file lands through the sealed landing and accepts a waiting result"
+  repo: remudero
+  depends_on: [W1-T12199]
+  priority: 0.9
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the result of `land` changes for every gardener, the machine-filing judge and the repair of a task file
+  band_meaning: blast-radius
+  origin: operator-session#ops-cutover-2026-11-10
+  plan_refs:
+    - W1-T9054
+    - W1-T5348
+    - W1-T5618
+  files:
+    - src/lib/gardener.ts
+    - src/lib/machine-filing-judge.ts
+    - src/lib/feedback-landing.ts
+    - src/run-task.ts
+    - test/gardeners/a-gardener-that-edits-a-task-file-lands-through-the-sealed-landing.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "A gardener land whose paths are all edits of files under plan/tasks.d that origin/main holds goes through the sealed landing. A land with a new file, a deleted file or any other path opens its own pull request, as it does today"
+      proof: "grep: W1-T12221 criterion 1 in test/gardeners/a-gardener-that-edits-a-task-file-lands-through-the-sealed-landing.test.ts"
+    - claim: "`land` returns a waiting result when the file is staged behind an open landing pull request"
+      proof: "grep: W1-T12221 criterion 2 in test/gardeners/a-gardener-that-edits-a-task-file-lands-through-the-sealed-landing.test.ts"
+    - claim: "A waiting result is not a failed filing: the gardener pass adds no failure, raises no escalation and stores no refused draft"
+      proof: "grep: W1-T12221 criterion 3 in test/gardeners/a-gardener-that-edits-a-task-file-lands-through-the-sealed-landing.test.ts"
+    - claim: "A waiting result does not release a task id that the gardener reserved"
+      proof: "grep: W1-T12221 criterion 4 in test/gardeners/a-gardener-that-edits-a-task-file-lands-through-the-sealed-landing.test.ts"
+    - claim: "A gardener whose file waits plans no new action, and tracks the landing pull request that later carries its file"
+      proof: "grep: W1-T12221 criterion 5 in test/gardeners/a-gardener-that-edits-a-task-file-lands-through-the-sealed-landing.test.ts"
+    - claim: "The machine-filing judge holds its rulings while they wait and does not rule on the same tasks again"
+      proof: "grep: W1-T12221 criterion 6 in test/gardeners/a-gardener-that-edits-a-task-file-lands-through-the-sealed-landing.test.ts"
+    - claim: "The repair of a task file keeps its request while the repair waits, and opens no second repair for the same file"
+      proof: "grep: W1-T12221 criterion 7 in test/gardeners/a-gardener-that-edits-a-task-file-lands-through-the-sealed-landing.test.ts"
+    - claim: "The gardener land step calls the landing function, and the test goes through `gardenCheckoutAsync`"
+      proof: "grep: landTaskFilesAsync( in src/run-task.ts"
+  rationale: |
+    OBSERVED 2026-11-10 on the first-parent history of main, 48 hours, 165 merges: 14 merges came from gardeners and 7 from the machine-filing judge.
+    - Each gardener opens its own pull request on a branch named `<name>-garden-<time>`. `gardenLandSteps` in src/run-task.ts does the add, the commit, the preflight, the push and the create.
+    - W1-T12199 adds the sealed landing for an edit of a task file. A file can wait there with no pull request of its own.
+    OBSERVED 2026-11-10 in the code, by the first build attempt of W1-T12199, which stopped:
+    - `GardenCheckout.land` and `GardenCheckoutAsync.land` in src/lib/gardener.ts return a URL or nothing.
+    - `gardenPassBody` treats "nothing" as a failed filing: it throws `GardenLandingRefusedError`, grows the failure count, can escalate, and stores the draft as refused.
+    - `trackGardenIds` marks "nothing" as `not_opened`, and `releaseGardenTaskIds` then releases the reserved ids. A file that waits would keep an id that another filer can take.
+    - A gardener tracks one pending pull request in `state.pending.prUrl`. A class that a metric judges takes its baseline when that pull request merges. So `land` must not return the URL of a pull request that does not carry the file.
+    - Seven more callers read the result the same way: src/lib/machine-filing-judge.ts, selector-shadow-gardener.ts, config-gardener.ts, flow-gardener.ts, opportunity-intake.ts, host-resource-gardener.ts and flake-incident-gardener.ts. `runShardRepairPass` in src/run-task.ts does too, and it keys its record `opened.json` on the pull request.
+  design: |
+    Give `land` a third result, "waiting", in a form that the type checker makes each caller handle. Keep a URL for "opened" and nothing for "not landed".
+    In `gardenLandSteps`, choose the sealed landing when every path is an edit of a file under plan/tasks.d that origin/main holds. Pass the content of each path, the claim and the proof to the landing of W1-T12199. Return its pull request, or "waiting".
+    In `gardenPassBody` and `trackGardenIds`, treat "waiting" as a filing that is in flight: no failure, no escalation, no refused draft, no release of an id. Keep the pending state, and set its pull request when a later pass finds the file in a landing pull request (the reader of staged files from W1-T12199 gives it).
+    In the machine-filing judge, keep the rulings as pending while they wait. In the repair of a task file, keep the request and record the wait.
+    A caller that only edits its code to compile, with no change of behaviour, belongs here too. If a caller needs a file that this task does not list, stop and report it.
+    NOT IN SCOPE: a new task file with a new id (W1-T12222).
+  falsifier: |
+    Return nothing for a staged file and criteria 3 and 4 must fail. Send a land with a docs path through the landing and criterion 1 must fail. Let the judge rule again while its rulings wait and criterion 6 must fail. Restore and require all eight to pass.

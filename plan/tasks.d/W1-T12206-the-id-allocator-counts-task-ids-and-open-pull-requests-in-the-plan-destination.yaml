@@ -1,0 +1,49 @@
+- id: W1-T12206
+  title: "The id allocator counts task ids and open pull requests in the plan destination"
+  repo: remudero
+  depends_on: [W1-T12200]
+  priority: 1.1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # a task id that two repositories both file breaks every reader that looks a task up by id
+  band_meaning: blast-radius
+  origin: operator-session#ops-cutover-2026-11-10
+  plan_refs:
+    - W1-T6026
+    - W1-T11768
+  files:
+    - src/lib/task-id.ts
+    - src/run-task.ts
+    - test/plan/the-id-allocator-counts-task-ids-and-open-pull-requests-in-the-plan-destination.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "While the host file names a repository, a new id is higher than every task id in the plan of that repository and in its open pull requests"
+      proof: "grep: W1-T12206 criterion 1 in test/plan/the-id-allocator-counts-task-ids-and-open-pull-requests-in-the-plan-destination.test.ts"
+    - claim: "The id reservation stays in one place, the `refs/rmd-id/` refs of the public repository, for a task of either repository"
+      proof: "grep: W1-T12206 criterion 2 in test/plan/the-id-allocator-counts-task-ids-and-open-pull-requests-in-the-plan-destination.test.ts"
+    - claim: "The reservation audit treats an id that the ops repository holds as filed, and the reap does not remove its reservation"
+      proof: "grep: W1-T12206 criterion 3 in test/plan/the-id-allocator-counts-task-ids-and-open-pull-requests-in-the-plan-destination.test.ts"
+    - claim: "If the ops repository is unreadable, the command refuses to give an id and names the cause. It does not count the repository as empty"
+      proof: "grep: W1-T12206 criterion 4 in test/plan/the-id-allocator-counts-task-ids-and-open-pull-requests-in-the-plan-destination.test.ts"
+    - claim: "With no host file, the command reads the same sources and gives the same id as today"
+      proof: "grep: W1-T12206 criterion 5 in test/plan/the-id-allocator-counts-task-ids-and-open-pull-requests-in-the-plan-destination.test.ts"
+    - claim: "The command `rmd next-task-id`, the production caller, reads the destination, and the test goes through `nextTaskIdCommand`"
+      proof: "grep: planDestinationRepository( in src/run-task.ts"
+  rationale: |
+    OBSERVED 2026-11-10: `rmd next-task-id` reads three sources, and all three are in the public repository.
+    - The sources are the plan of the working checkout, the open pull requests and the `refs/rmd-id/*` refs. `nextTaskIdCommand` and `mintNextTaskIdWithHistory` are in src/run-task.ts, and `mintNextTaskId` is in src/lib/task-id.ts.
+    - A task that only the ops repository holds is invisible to all three after its reservation is reaped.
+    - `buildReservationAuditReport` and `applyReservationReap` in src/run-task.ts reap a reservation that no public task file holds. Inferred from the code, not observed: they would reap the id of an ops task.
+    - One id space for both repositories keeps W1-T11769's rule simple: an id names one task.
+    - The switch is the host file `<state dir>/plan-destination.json`. If the file is absent, the switch is off and the behaviour is byte-identical to today. This task adds no kind. It must merge before `task` is turned on.
+  design: |
+    Add the ops plan and the open pull requests of the ops repository as sources of `mintNextTaskIdWithHistory`. Read the ops plan from the destination checkout after a fetch.
+    Keep the reservation refs on the public repository. A second set of refs would need a second lease protocol.
+    In the audit, look an id up in both plans before it is called unfiled.
+    The task id of an ops task appears in a public ref name. The id is not a private field: a public pull request for the task carries it in its trailer.
+    NOT IN SCOPE: the other reservers (triage, plan, approve). Each one reaches the allocator through the same function.
+  falsifier: |
+    Leave the ops plan out of the sources and criterion 1 must fail. Reap the reservation of an ops task and criterion 3 must fail. Count an unreadable repository as empty and criterion 4 must fail. Restore and require all six to pass.

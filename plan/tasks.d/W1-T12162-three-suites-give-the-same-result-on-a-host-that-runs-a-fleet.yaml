@@ -1,0 +1,42 @@
+- id: W1-T12162
+  title: "Three suites give the same result on a host that runs a fleet"
+  repo: remudero
+  depends_on: []
+  priority: 1.2
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # three test files in three areas; no production code changes
+  band_meaning: span
+  origin: operator-session#follow-ups-2026-11-10
+  plan_refs:
+    - W1-T11432
+  files:
+    - test/a-quiet-worker-round-end-is-resumed-from-its-checkpoint.test.ts
+    - test/ledger/pr-state-answers-from-the-ledger-before-github.test.ts
+    - test/worker/spawn/a-review-re-admitted-after-an-unable-reviewer-avoids-that-provider.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "The suite for a resumed round end reads task claims only from its own fixture remote. A claim ref on the real origin does not change its result"
+      proof: "grep: W1-T12162 criterion 1 in test/a-quiet-worker-round-end-is-resumed-from-its-checkpoint.test.ts"
+    - claim: "The suite for pull request state talks only to its own fixture socket. A read broker that runs for the same account does not change its result"
+      proof: "grep: W1-T12162 criterion 2 in test/ledger/pr-state-answers-from-the-ledger-before-github.test.ts"
+    - claim: "The suite for a re-admitted review fixes every reading it takes from the host. Its overflow case gives the same result with and without provider logins on the host"
+      proof: "grep: W1-T12162 criterion 3 in test/worker/spawn/a-review-re-admitted-after-an-unable-reviewer-avoids-that-provider.test.ts"
+  rationale: |
+    OBSERVED 2026-11-10 on the Mac agent account, on unchanged main: three suites fail there and pass in hosted CI.
+    - test/a-quiet-worker-round-end-is-resumed-from-its-checkpoint.test.ts fails 2 of 6 cases. The assertion "the dead claim is dropped from origin" finds refs/rmd-dispatch/W1-T10838, a real claim ref.
+    - test/ledger/pr-state-answers-from-the-ledger-before-github.test.ts fails 1 of 17 cases: "the real broker client sends a single agent revalidation and writes no ledger rows". A read broker runs on that account.
+    - test/worker/spawn/a-review-re-admitted-after-an-unable-reviewer-avoids-that-provider.test.ts fails 1 of 10 cases: "W1-T11432 criterion 1: overflow fallback retains an excluded Claude mount and records the unhonoured exclusion". Which host reading it takes is not established.
+    - The ship pipeline on that account compares each failure with unchanged main, so these three do not block a push. They do cost a rerun on every preflight that selects them.
+  design: |
+    For each suite, first find the reading that leaves the fixture: run the failing case on the Mac agent account and record the command or the path in the pull request.
+    Then fix that reading in the test: a fixture remote, a fixture socket path, or injected provider capacity.
+    Add one case per suite that fails when the reading leaves the fixture. For example, point the real origin or the real cache directory at a path that fails on any read.
+    NOT IN SCOPE: production code. If a suite can be fixed only through a new injection point in src, stop and report it; that is a separate task.
+  falsifier: |
+    Restore the host reading in each suite and its new case must fail. Restore the fix and require all three to pass on the Mac agent account and in hosted CI.
+  note: |
+    The same class on the Azure host is already in an open filing for the memory budget suite. This task covers the Mac.

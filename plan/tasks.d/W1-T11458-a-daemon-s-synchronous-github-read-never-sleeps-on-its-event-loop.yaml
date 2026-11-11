@@ -11,7 +11,7 @@
   plan_refs: [W1-T4970, W1-T5770, W1-T10271, W1-T11128]
   files: [src/lib/github-transport.ts, src/lib/escalate.ts, src/lib/sweep.ts, test/github/a-daemon-sync-github-read-never-sleeps-on-its-loop.test.ts]
   priority: 2
-  status: queued
+  status: merged
   # backlog gardener: band=2 evidence=17578798eb92f2d4
   # backlog gardener: placed=2026-11-07T04:56:37.317Z
   attempts: 0

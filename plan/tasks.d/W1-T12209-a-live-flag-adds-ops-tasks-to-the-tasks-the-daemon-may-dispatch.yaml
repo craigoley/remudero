@@ -1,0 +1,55 @@
+- id: W1-T12209
+  title: "A live flag adds ops tasks to the tasks that the daemon may dispatch"
+  repo: remudero
+  depends_on: [W1-T12185, W1-T11770, W1-T12207, W1-T12208]
+  priority: 1.2
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the selector of the daemon; a mistake dispatches one task twice
+  band_meaning: blast-radius
+  origin: operator-session#ops-cutover-2026-11-10
+  plan_refs:
+    - W1-T11600
+    - W1-T11768
+    - W1-T11769
+    - W1-T11770
+  files:
+    - src/lib/daemon.ts
+    - src/cli/commands/daemon.ts
+    - test/daemon/a-live-flag-adds-ops-tasks-to-the-tasks-the-daemon-may-dispatch.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "With the live flag on and an ops catalog whose outcome is `ok`, a ready ops task is a candidate for dispatch in the same priority order as a public task"
+      proof: "grep: W1-T12209 criterion 1 in test/daemon/a-live-flag-adds-ops-tasks-to-the-tasks-the-daemon-may-dispatch.test.ts"
+    - claim: "An ops task that depends on a public task waits until that task is merged. A public task that depends on an ops task is refused, as W1-T11769 rules"
+      proof: "grep: W1-T12209 criterion 2 in test/daemon/a-live-flag-adds-ops-tasks-to-the-tasks-the-daemon-may-dispatch.test.ts"
+    - claim: "An id that both catalogs hold is dispatched at most once. The ops copy is not a candidate, and one row reports the id"
+      proof: "grep: W1-T12209 criterion 3 in test/daemon/a-live-flag-adds-ops-tasks-to-the-tasks-the-daemon-may-dispatch.test.ts"
+    - claim: "The task claim of an ops task is a ref on the public repository, so two instances do not dispatch the same ops task"
+      proof: "grep: W1-T12209 criterion 4 in test/daemon/a-live-flag-adds-ops-tasks-to-the-tasks-the-daemon-may-dispatch.test.ts"
+    - claim: "If the ops catalog has any outcome other than `ok`, no ops task is a candidate, the public candidates do not change, and one row names the outcome code"
+      proof: "grep: W1-T12209 criterion 5 in test/daemon/a-live-flag-adds-ops-tasks-to-the-tasks-the-daemon-may-dispatch.test.ts"
+    - claim: "With the live flag off, the candidates, the claims, the worker starts and the rows are the same as today, and the shadow comparison still runs"
+      proof: "grep: W1-T12209 criterion 6 in test/daemon/a-live-flag-adds-ops-tasks-to-the-tasks-the-daemon-may-dispatch.test.ts"
+    - claim: "The daemon command reads the live flag and passes it to the loop, and the test goes through the daemon command"
+      proof: "grep: dispatch_ops_tasks in src/cli/commands/daemon.ts"
+  rationale: |
+    OBSERVED 2026-11-10: a task that only the ops catalog holds is never a candidate for dispatch.
+    - The daemon selects with `runnableCandidates` (src/lib/drain.ts) from the public plan, in src/lib/daemon.ts. The ops catalog feeds only `compareSecondaryCatalogShadow`, which writes a row and changes nothing.
+    - W1-T11770 says that adding its flag to a running instance is a separate decision of the operator. The operator made it on 2026-11-10: each stage of this work may be turned on when it is merged and its checks pass.
+    - W1-T11770 also keeps every byte of the ops catalog out of a worker prompt. A worker cannot build a task that it cannot read, so this task gives the prompt of the run the ops task. The prompt stays on the host. The public surfaces keep the limit of the operator ruling of 2026-11-10: title and acceptance criteria only.
+    - This task has the highest risk of the filing. A wrong selection dispatches one task twice or dispatches a task whose dependency is not merged.
+    - The live flag is the field `dispatch_ops_tasks` of the host file `<state dir>/plan-destination.json`. If the file is absent, the flag is off and the behaviour is byte-identical to today. The flag is separate from the kinds: it must stay on while any ops task is not merged, also after `task` is removed from the kinds.
+  design: |
+    Compose the candidates from both catalogs with the composer of W1-T11769, and select from the composed plan. Keep its edge rule and its atomic refusal.
+    Read the flag in `daemonCommand` and pass it to `runDaemon`. Read the ops catalog only through the shadow source of W1-T11770, off the tick.
+    Keep the operator's stop and pause, the governor and every limit on dispatch as they are. An ops task counts against the same limits.
+    Take the claim and the run branch on the public repository, as for a public task.
+    NOT IN SCOPE: the merge credit of an ops task, the board, and the writers.
+  falsifier: |
+    Select an ops task with the flag off and criterion 6 must fail. Select an ops task whose public dependency is not merged and criterion 2 must fail. Keep both copies of a shared id and criterion 3 must fail. Select from a stale catalog and criterion 5 must fail. Restore and require all seven to pass.
+  note: |
+    Turn the flag on for one instance first, and watch the shadow rows of W1-T11769 for one day before that.

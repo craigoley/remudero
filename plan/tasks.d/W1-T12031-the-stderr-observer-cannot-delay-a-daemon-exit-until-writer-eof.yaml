@@ -16,7 +16,7 @@
   files:
     - deploy/entrypoint.sh
     - test/daemon/a-slow-crash-loop-is-reported.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: The real supervision section records the actual daemon exit before an inherited stderr writer closes, so that writer's open descriptor cannot hold the supervisor at the observer wait

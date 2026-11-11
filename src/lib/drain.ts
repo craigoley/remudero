@@ -1281,49 +1281,89 @@ function nextCurated(
     if (isMerged(id)) continue;
     const t = plan.byId.get(id);
     if (!t) continue;
-    if (opts.isIndependentFailureBlocked?.(id)) {
-      opts.onFiltered?.(t, "blocked");
-      continue;
-    }
-    if (!taskPreconditionHolds(t, opts)) continue;
-    // Same indeterminate-read semantics as the natural path (W1-T119): a curation-panel selection
-    // is still dispatch, and must not re-run work whose own GitHub read failed.
-    if (opts.isIndeterminate?.(id)) {
-      opts.onIndeterminate?.(t);
-      continue;
-    }
-    // Same circuit-breaker semantics as the natural path (P29(ii)): a curation-panel selection
-    // must not spin a tripped task any more than the DAG scan would.
-    if (opts.isCircuitTripped?.(id)) {
-      opts.onCircuitBreak?.(t);
-      continue;
-    }
-    const openPrNumber = opts.isOpenPr?.(id);
-    if (openPrNumber !== undefined) {
-      // W1-T177: curated dispatch has the same fresh terminal-state confirmation as the natural
-      // selector. Without this, a cached OPEN PR could hold a curated task after it closed.
-      const liveState = opts.readLiveState?.(id, openPrNumber);
-      if (liveState !== undefined && liveState !== "OPEN") {
-        opts.onStoodDown?.(t, openPrNumber, liveState);
-        if (liveState === "MERGED" && opts.isLiveMergeCredited?.(id, openPrNumber)) {
-          opts.onStaleCreditExcluded?.(t, openPrNumber, liveState);
-          continue;
-        }
-      } else {
-        opts.onSkip?.(t, openPrNumber);
-        continue; // IN-FLIGHT (or unreadable) — never a duplicate fresh build.
-      }
-    }
-    // W1-T534: curated selection must also close the stale-absent window. A run branch can appear
-    // after the projection snapshot, so the branch backstop is not optional here.
-    if (opts.hasPushedRunBranch?.(id)) {
-      opts.onSkipRunBranch?.(t);
-      opts.onFiltered?.(t, "run-branch-already-pushed");
-      continue;
-    }
-    return t;
+    if (curatedTaskSelectable(t, opts)) return t;
   }
   return undefined;
+}
+
+/** The ONE copy of the curated per-task skip rules (W1-T140), after the caller's own attempted /
+ *  merged / unknown-id checks: failure block, precondition, indeterminate read, circuit breaker,
+ *  open-PR in-flight guard and the pushed-run-branch backstop. Shared by {@link nextCurated}
+ *  (single lane) and {@link curatedCandidates} (lanes) so the two paths cannot drift. */
+function curatedTaskSelectable(t: Task, opts: NextRunnableOpts): boolean {
+  const id = t.id;
+  if (opts.isIndependentFailureBlocked?.(id)) {
+    opts.onFiltered?.(t, "blocked");
+    return false;
+  }
+  if (!taskPreconditionHolds(t, opts)) return false;
+  // Same indeterminate-read semantics as the natural path (W1-T119): a curation-panel selection
+  // is still dispatch, and must not re-run work whose own GitHub read failed.
+  if (opts.isIndeterminate?.(id)) {
+    opts.onIndeterminate?.(t);
+    return false;
+  }
+  // Same circuit-breaker semantics as the natural path (P29(ii)): a curation-panel selection
+  // must not spin a tripped task any more than the DAG scan would.
+  if (opts.isCircuitTripped?.(id)) {
+    opts.onCircuitBreak?.(t);
+    return false;
+  }
+  const openPrNumber = opts.isOpenPr?.(id);
+  if (openPrNumber !== undefined) {
+    // W1-T177: curated dispatch has the same fresh terminal-state confirmation as the natural
+    // selector. Without this, a cached OPEN PR could hold a curated task after it closed.
+    const liveState = opts.readLiveState?.(id, openPrNumber);
+    if (liveState !== undefined && liveState !== "OPEN") {
+      opts.onStoodDown?.(t, openPrNumber, liveState);
+      if (liveState === "MERGED" && opts.isLiveMergeCredited?.(id, openPrNumber)) {
+        opts.onStaleCreditExcluded?.(t, openPrNumber, liveState);
+        return false;
+      }
+    } else {
+      opts.onSkip?.(t, openPrNumber);
+      return false; // IN-FLIGHT (or unreadable) — never a duplicate fresh build.
+    }
+  }
+  // W1-T534: curated selection must also close the stale-absent window. A run branch can appear
+  // after the projection snapshot, so the branch backstop is not optional here.
+  if (opts.hasPushedRunBranch?.(id)) {
+    opts.onSkipRunBranch?.(t);
+    opts.onFiltered?.(t, "run-branch-already-pushed");
+    return false;
+  }
+  return true;
+}
+
+/** W1-T12127: up to `limit` CURATED tasks for one multi-lane pass, in the caller's exact order.
+ *  Same per-id skip rules as {@link nextCurated} (via {@link curatedTaskSelectable}), plus
+ *  `opts.excludeIds` (ids this drain already continued past). An id outside `curated` is never
+ *  returned: the natural DAG scan is not consulted at all. */
+export function curatedCandidates(
+  plan: Plan,
+  curated: readonly string[],
+  attempted: readonly string[],
+  isMerged: MergedSet,
+  limit: number,
+  opts: NextRunnableOpts = {},
+): Task[] {
+  if (limit <= 0) return [];
+  opts.beginSelectionPass?.();
+  const done = new Set(attempted);
+  const out: Task[] = [];
+  for (const id of curated) {
+    if (out.length >= limit) break;
+    if (done.has(id) || out.some((t) => t.id === id)) continue;
+    if (isMerged(id)) continue;
+    const t = plan.byId.get(id);
+    if (!t) continue;
+    if (opts.excludeIds?.has(id)) {
+      opts.onFiltered?.(t, "continued-this-pass");
+      continue;
+    }
+    if (curatedTaskSelectable(t, opts)) out.push(t);
+  }
+  return out;
 }
 
 /** W1-T5719 — a live-state reader may be synchronous (CLI callers, tests) or return a promise (the
@@ -2526,7 +2566,10 @@ async function runDrainLanes(plan: Plan, deps: DrainDeps, opts: DrainOpts): Prom
     // below, and the terminal's question is about the pass that actually GAVE UP, not a gateway
     // hiccup three passes ago that has since cleared.
     indeterminateDeclines = 0;
-    const candidates = runnableCandidates(plan, isMerged, passSize, skipOpts);
+    // W1-T12127: a curated selection overrides the natural scan on the lane path too.
+    const candidates = opts.curated
+      ? curatedCandidates(plan, opts.curated, attempted, isMerged, passSize, skipOpts)
+      : runnableCandidates(plan, isMerged, passSize, skipOpts);
     for (const task of candidates) passedOverStates.delete(task.id);
     for (const id of passedOverStates.keys()) if (!plan.byId.has(id)) passedOverStates.delete(id);
     if (candidates.length === 0) {

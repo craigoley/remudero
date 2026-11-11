@@ -9,7 +9,7 @@
   risk: high
   band_meaning: span
   priority: 1.5
-  status: queued
+  status: merged
   attempts: 0
   origin: architect
   plan_refs: [W1-T3383b, W1-T4263, W1-T10473, W1-T5348, W1-T5619, W1-T3362]

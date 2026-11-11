@@ -18,7 +18,7 @@
     - src/lib/sweep.ts
     - test/open-prs-rest.test.ts
     - test/review/a-required-check-that-has-not-registered-is-not-green.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: checksStateFromRollup reads pending, never green, when branch protection's required list names a context other than remudero-review that has no entry on the head, and green once every such context has registered and passed

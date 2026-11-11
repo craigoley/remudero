@@ -1,0 +1,59 @@
+- id: W1-T12222
+  title: "A gardener that files a new task reserves its id for the sealed landing and lands there"
+  repo: remudero
+  depends_on: [W1-T12221]
+  priority: 0.9
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # a wrong holder makes the required id gate refuse every new task from a gardener
+  band_meaning: blast-radius
+  origin: operator-session#ops-cutover-2026-11-10
+  plan_refs:
+    - W1-T3640
+    - W1-T5279
+    - W1-T6025
+  files:
+    - src/lib/gardener.ts
+    - src/lib/feedback-landing.ts
+    - src/run-task.ts
+    - test/gardeners/a-gardener-that-files-a-new-task-reserves-its-id-for-the-sealed-landing.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "A gardener checkout that declares it files only task files gives the branch of the sealed landing as the branch for the id reservation"
+      proof: "grep: W1-T12222 criterion 1 in test/gardeners/a-gardener-that-files-a-new-task-reserves-its-id-for-the-sealed-landing.test.ts"
+    - claim: "The sealed landing accepts a new file under plan/tasks.d from such a checkout, and the plan preflight with the landing branch as head accepts its id"
+      proof: "grep: W1-T12222 criterion 2 in test/gardeners/a-gardener-that-files-a-new-task-reserves-its-id-for-the-sealed-landing.test.ts"
+    - claim: "Such a checkout refuses a land with a path outside plan/tasks.d and opens no pull request for it"
+      proof: "grep: W1-T12222 criterion 3 in test/gardeners/a-gardener-that-files-a-new-task-reserves-its-id-for-the-sealed-landing.test.ts"
+    - claim: "While a new file waits behind an open landing pull request, `reservationHolderDrift` reads its reservation as held"
+      proof: "grep: W1-T12222 criterion 4 in test/gardeners/a-gardener-that-files-a-new-task-reserves-its-id-for-the-sealed-landing.test.ts"
+    - claim: "A new file that the landing sets aside releases its id, and a new file that waits does not"
+      proof: "grep: W1-T12222 criterion 5 in test/gardeners/a-gardener-that-files-a-new-task-reserves-its-id-for-the-sealed-landing.test.ts"
+    - claim: "A gardener does not file the same finding twice while its file waits"
+      proof: "grep: W1-T12222 criterion 6 in test/gardeners/a-gardener-that-files-a-new-task-reserves-its-id-for-the-sealed-landing.test.ts"
+    - claim: "A checkout that does not declare it opens its own pull request for a new task file, as it does today"
+      proof: "grep: W1-T12222 criterion 7 in test/gardeners/a-gardener-that-files-a-new-task-reserves-its-id-for-the-sealed-landing.test.ts"
+    - claim: "`daemonGardenWorkspace`, the production caller, declares the route for the gardeners that file only task files, and the test goes through it"
+      proof: "grep: W1-T12222 criterion 8 in test/gardeners/a-gardener-that-files-a-new-task-reserves-its-id-for-the-sealed-landing.test.ts"
+  rationale: |
+    OBSERVED 2026-11-10 in the code, by the first build attempt of W1-T12199, which stopped:
+    - A gardener reserves each new id against its own branch. `prepareGardenTaskIds` in src/lib/gardener.ts passes `ws.branch`, which is `<name>-garden-<time>`. Eleven gardeners call it.
+    - The required gate `task-id-existence` refuses a pull request that adds an id whose reservation holder is another branch (`evaluateReservationHolderConflicts` in scripts/task-id-existence-check.mjs). The plan preflight runs the same check with the head branch (src/lib/plan-pr-emitter.ts).
+    - So a new task file from a gardener is refused on the branch of the sealed landing. `landCiLearningShards` avoids this: it mints inside the landing, against the landing branch.
+    - `reservationHolderDrift` in src/lib/task-id-reservation.ts reads a reservation as reclaimable when its holder branch is absent from the remote and the reservation is older than `RESERVATION_PUSH_GRACE_MS` (2 hours).
+    - `recordFilingBranch` writes a new holder only from the reserver that won the id. The landing is another process, so it cannot write the holder of an id that a gardener won.
+    - A gardener reserves before it writes its files. At that time nobody knows the paths of the land.
+  design: |
+    Two ways were open. (1) The gardener reserves against the landing branch. (2) The landing writes itself as the holder when it pushes.
+    Choose (1). With (2) the holder stays the gardener branch while the file waits. That branch is never pushed, so the id is reclaimable after 2 hours, and a landing pull request can stay open for longer. With (1) the holder is the landing branch, and that branch is on the remote for as long as a landing pull request is open, which is the time a file waits. Also, (2) needs a new write path for a holder that the writer did not win.
+    A checkout must know its route before the gardener reserves. Add an option to `gardenCheckout` and `gardenCheckoutAsync` that declares "task files only". Such a checkout returns the landing branch as `branch`, sends every land through the sealed landing, and refuses any other path. `daemonGardenWorkspace` sets the option for each gardener whose lands are all under plan/tasks.d. List them from the code and name them in the test.
+    Lift the rule of W1-T12199 that a path must exist on origin/main, for a file from such a checkout only.
+    One gap stays: after a landing pull request merges, its branch is absent until the next push. The sweep lands the waiting files on its next full pass. State the longest time in the test for criterion 4.
+    When the landing sets a new file aside, release its id through the release path of the gardener.
+    A waiting file holds its finding: read the staged files when the gardener looks for a finding that is already filed.
+    NOT IN SCOPE: the gate script, and the grace period of a reservation.
+  falsifier: |
+    Reserve against the gardener branch and criterion 2 must fail. Let a land with a docs path through and criterion 3 must fail. Release the id of a waiting file and criterion 5 must fail. Restore and require all eight to pass.
