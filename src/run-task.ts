@@ -10967,7 +10967,8 @@ export function fixRoundLandingFields(landing: FixRoundLanding | undefined, work
  *  child is awaited — the sweep and runTaskBody run fix rounds on the daemon's loop. */
 export async function pushFixRound(
   wt: string, branch: string, expectedHeadSha?: string, priorHeadSha?: string,
-  deps: Pick<PushRunBranchAsyncOpts, "capture" | "exec"> & { mergedTypecheck?: MergedTypecheckPorts } = {},
+  deps: Pick<PushRunBranchAsyncOpts, "capture" | "exec"> & { mergedTypecheck?: MergedTypecheckPorts;
+    ownedSessionGuard?: { prHeadSha: string; verifyOwnership: () => Promise<string | undefined> } } = {},
 ): Promise<FixRoundPushReceipt> {
   // W1-T5658: BOTH fix paths (the run loop's and the sweep's) push through here, so this is the one place a head
   // that compiles alone but not merged with main is refused before it leaves the worktree.
@@ -10979,11 +10980,53 @@ export async function pushFixRound(
   }
   const capture = deps.capture ?? worktreeGitCaptureAsync(wt);
   const push = deps.exec ?? worktreePushExecAsync(wt);
+  const ownedSessionGuard = deps.ownedSessionGuard;
+  let sessionGuardRefusal: string | undefined;
   try {
     if (priorHeadSha !== undefined && expectedHeadSha === undefined) throw new Error("refusing a leased fix push without the committed head sha");
+    if (ownedSessionGuard !== undefined && priorHeadSha !== undefined) {
+      sessionGuardRefusal = "refusing a force-with-lease push for an operator-session conflict round";
+      throw new FixRoundPushError("run-error", { text: sessionGuardRefusal, censuses: ["operator-session-push-guard"], offeredBaselines: [] }, sessionGuardRefusal);
+    }
+    if (ownedSessionGuard !== undefined) {
+      if (expectedHeadSha === undefined) {
+        sessionGuardRefusal = "refusing an operator-session conflict push without the committed merge head sha";
+        throw new FixRoundPushError("run-error", { text: sessionGuardRefusal, censuses: ["operator-session-push-guard"], offeredBaselines: [] }, sessionGuardRefusal);
+      }
+      const parents = (await hostWorktreeGitAsync(wt, ["rev-list", "--parents", "-n", "1", expectedHeadSha!])).trim().split(/\s+/);
+      if (parents.length !== 3 || parents[0] !== expectedHeadSha || parents[1] !== ownedSessionGuard.prHeadSha) {
+        sessionGuardRefusal = `operator-session conflict round must push a two-parent merge commit whose first parent is PR head ${ownedSessionGuard.prHeadSha}`;
+        throw new FixRoundPushError("run-error", { text: sessionGuardRefusal, censuses: ["operator-session-push-guard"], offeredBaselines: [] }, sessionGuardRefusal);
+      }
+      const remoteRefs = (await hostWorktreeGitAsync(wt, ["ls-remote", "origin", `refs/heads/${branch}`, "refs/heads/main"]))
+        .trim().split("\n").filter(Boolean).map((line) => line.trim().split(/\s+/));
+      const remote = new Map(remoteRefs.map(([sha, ref]) => [ref, sha]));
+      if (remote.get(`refs/heads/${branch}`) !== ownedSessionGuard.prHeadSha) {
+        sessionGuardRefusal = `operator-session branch moved from PR head ${ownedSessionGuard.prHeadSha} before the push`;
+        throw new FixRoundPushError("run-error", { text: sessionGuardRefusal, censuses: ["operator-session-push-guard"], offeredBaselines: [] }, sessionGuardRefusal);
+      }
+      const main = remote.get("refs/heads/main");
+      if (main === undefined) {
+        sessionGuardRefusal = "operator-session conflict push cannot read origin/main";
+        throw new FixRoundPushError("run-error", { text: sessionGuardRefusal, censuses: ["operator-session-push-guard"], offeredBaselines: [] }, sessionGuardRefusal);
+      }
+      try {
+        await hostWorktreeGitAsync(wt, ["merge-base", "--is-ancestor", main, expectedHeadSha]);
+      } catch {
+        sessionGuardRefusal = `operator-session conflict merge does not contain origin/main ${main}`;
+        throw new FixRoundPushError("run-error", { text: sessionGuardRefusal, censuses: ["operator-session-push-guard"], offeredBaselines: [] }, sessionGuardRefusal);
+      }
+    }
     await gitPushRunBranchAsync(wt, { expectedHeadSha, capture, exec: async (file, args) => {
       const pushArgs = priorHeadSha === undefined ? args : ["-C", wt, "push",
         `--force-with-lease=refs/heads/${branch}:${priorHeadSha}`, "origin", `${expectedHeadSha}:refs/heads/${branch}`];
+      if (ownedSessionGuard !== undefined) {
+        const ownershipFailure = await ownedSessionGuard.verifyOwnership();
+        if (ownershipFailure !== undefined) {
+          sessionGuardRefusal = `operator-session branch ownership changed before push: ${ownershipFailure}`;
+          throw new FixRoundPushError("run-error", { text: sessionGuardRefusal, censuses: ["operator-session-push-guard"], offeredBaselines: [] }, sessionGuardRefusal);
+        }
+      }
       await push(file, pushArgs, { stdio: "ignore" });
       if (priorHeadSha !== undefined) {
         const observed = (await capture("git", ["-C", wt, "ls-remote", "origin", `refs/heads/${branch}`])).split(/\s/)[0];
@@ -10992,6 +11035,9 @@ export async function pushFixRound(
     } });
     return { fixRoundPushedHead: expectedHeadSha };
   } catch (err) {
+    if (sessionGuardRefusal !== undefined) {
+      throw new FixRoundPushError("run-error", { text: sessionGuardRefusal, censuses: ["operator-session-push-guard"], offeredBaselines: [] }, sessionGuardRefusal);
+    }
     if (err instanceof LanePushForeignHeadError && priorHeadSha === undefined) throw err;
     // An unreadable remote simply is not the expected head, so its failure reads as no head at all.
     const remote = await hostWorktreeGitAsync(wt, ["ls-remote", "origin", `refs/heads/${branch}`])
@@ -11201,6 +11247,7 @@ export async function pushFixRoundPrechecked(
   push: (wt: string, branch: string, expectedHeadSha?: string, priorHeadSha?: string) => unknown = pushFixRound,
   priorHeadSha?: string,
   reapply: { ports?: FixRoundReapplyPorts; attempted?: boolean } = {},
+  guard?: { prHeadSha: string; verifyOwnership: () => Promise<string | undefined> },
 ): Promise<unknown> {
   // W1-T5227: a head carrying a conflict marker never leaves the worktree, whoever committed it.
   let markerFiles: string[] = [];
@@ -11219,7 +11266,9 @@ export async function pushFixRoundPrechecked(
   const refusal = coveragePushRefusal(await coveragePrecheck(wt, ports), log, "rung.fix_push");
   if (refusal) throw new FixRoundPushError("run-error", refusal, refusal.text);
   try {
-    return await push(wt, branch, expectedHeadSha, priorHeadSha);
+    return guard !== undefined && push === pushFixRound
+      ? await pushFixRound(wt, branch, expectedHeadSha, priorHeadSha, { ownedSessionGuard: guard })
+      : await push(wt, branch, expectedHeadSha, priorHeadSha);
   } catch (error) {
     // A census refusal is the round's own red; only a leased push the remote outran may be re-applied, once.
     if (!(error instanceof FixRoundPushError) || error.refusal !== undefined || reapply.attempted ||
@@ -11227,7 +11276,7 @@ export async function pushFixRoundPrechecked(
     const result = await reapplyFixRoundOnMovedTip({ wt, branch, leaseBaseSha: priorHeadSha, committedSha: expectedHeadSha },
       reapply.ports ?? realFixRoundReapplyPorts, log);
     if (!result.reapplied) throw error;
-    return await pushFixRoundPrechecked(log, wt, branch, result.mergedHeadSha, ports, push, result.remoteTip, { ...reapply, attempted: true });
+    return await pushFixRoundPrechecked(log, wt, branch, result.mergedHeadSha, ports, push, result.remoteTip, { ...reapply, attempted: true }, guard);
   }
 }
 
@@ -44127,8 +44176,10 @@ function sweepCommandHost(ports: Pick<SweepCommandHost, "freshTreeGit" | "comman
     writeFixCensusSnapshotAsync,
     runPlanScopedFixRound,
     materializePlanRoundWorktree: materializePlanRoundWorktreeAsync,
-    pushSweepFixRound: (deps, wt, branch, sha, prior) =>
-      pushFixRoundPrechecked(deps.log, wt, branch, sha, { repo: deps.repo }, pushFixRound, prior),
+    pushSweepFixRound: (deps, wt, branch, sha, prior, guard) => {
+      if (guard !== undefined) return pushFixRoundPrechecked(deps.log, wt, branch, sha, { repo: deps.repo }, pushFixRound, prior, {}, guard);
+      return pushFixRoundPrechecked(deps.log, wt, branch, sha, { repo: deps.repo }, pushFixRound, prior);
+    },
     buildFixRungDispatchArgs,
     openTaskIdsFromPlan,
     waitForCiGreen,
