@@ -13,7 +13,7 @@
   priority: 1
   status: queued
   attempts: 0
-  files: [src/cli/commands/daemon.ts, test/daemon/ops-catalog-shadow-disabled.test.ts, test/daemon/ops-catalog-shadow-enabled.test.ts]
+  files: [src/cli/commands/daemon.ts, src/run-task.ts, test/daemon/ops-catalog-shadow-disabled.test.ts, test/daemon/ops-catalog-shadow-enabled.test.ts]
   rationale: |
     This is the last source stage before any live decision. It connects W1-T11768's source to W1-T11769's
     per-tick seam in `daemonCommand`, behind an explicit flag. It does not change launchers, config, images or
