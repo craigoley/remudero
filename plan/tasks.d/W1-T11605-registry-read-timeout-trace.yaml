@@ -16,7 +16,7 @@
     - src/lib/instance-registry-selection.ts
     - src/cli/commands/daemon.ts
     - test/deploy/a-timed-out-selected-registry-read-names-its-pending-hop.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: A selected-registry read whose open never settles still returns exactly unknown/timeout, and hands one trace to the process sink naming pending_hop open, hops_completed 1, a numeric lstat hop time, the budget, wall time, reads in flight and an active/idle split that fits inside the window; the trace carries no path or registry content

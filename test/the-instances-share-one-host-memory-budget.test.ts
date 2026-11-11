@@ -24,6 +24,7 @@ import {
 } from "../src/lib/deployer.js";
 import { readDaemonMemoryPolicy } from "../src/lib/daemon-memory-policy.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { hostIndependentPolicyEnv } from "./helpers/host-independent-policy-env.js";
 
 const REPO_ROOT = join(import.meta.dirname, "..");
 const MIB = 1024 * 1024;
@@ -54,7 +55,8 @@ function install(hostKb = HOST_KB): { root: string; env: NodeJS.ProcessEnv } {
   mkdirSync(join(root, "deploy"), { recursive: true });
   copyFileSync(join(REPO_ROOT, "deploy", "resource-policy.sh"), join(root, "deploy", "resource-policy.sh"));
   writeFileSync(join(root, "meminfo"), `MemTotal:       ${hostKb} kB\nMemFree:          100000 kB\n`);
-  return { root, env: { PATH: process.env.PATH, RMD_MEMINFO_PATH: join(root, "meminfo") } };
+  // W1-T12027: pinned, so a host that runs the fleet does not answer for the fixture.
+  return { root, env: { PATH: process.env.PATH, RMD_MEMINFO_PATH: join(root, "meminfo"), ...hostIndependentPolicyEnv(root) } };
 }
 
 /** Each instance's expected limits, read as drift against a bare container through the shipped reader. */

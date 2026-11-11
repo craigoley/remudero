@@ -1,0 +1,48 @@
+- id: W1-T12149
+  title: "An attempt ended by a container recycle is not counted against its model"
+  repo: remudero
+  depends_on: []
+  priority: 0.9
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the counts that the routing experiments and the fix learner take their rates from
+  band_meaning: blast-radius
+  origin: operator-session#model-choice-2026-11-10
+  plan_refs:
+    - W1-T4644
+    - W1-T10875
+    - W1-T6028
+  files:
+    - src/lib/routing-experiments.ts
+    - src/lib/fix-routing-learner.ts
+    - test/routing/an-attempt-ended-by-a-recycle-is-not-counted-against-its-model.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "The experiment report classifies each worker attempt with attributeAttemptOutcome and counts infrastructure attempts apart, for each experiment arm. They are in no success rate and no cost mean"
+      proof: "grep: W1-T12149 criterion 1 in test/routing/an-attempt-ended-by-a-recycle-is-not-counted-against-its-model.test.ts"
+    - claim: "A task whose every attempt in an arm was an infrastructure attempt is left out of that arm's task count and merge rate. The report counts such tasks"
+      proof: "grep: W1-T12149 criterion 2 in test/routing/an-attempt-ended-by-a-recycle-is-not-counted-against-its-model.test.ts"
+    - claim: "The fix learner leaves out a round whose worker attempt row names orphaned-by-process-exit, and counts it apart as it does a round ended by a signal"
+      proof: "grep: W1-T12149 criterion 3 in test/routing/an-attempt-ended-by-a-recycle-is-not-counted-against-its-model.test.ts"
+    - claim: "An attempt that failed with a reply from the provider is still counted against its model"
+      proof: "grep: W1-T12149 criterion 4 in test/routing/an-attempt-ended-by-a-recycle-is-not-counted-against-its-model.test.ts"
+  rationale: |
+    MEASURED 2026-11-10 in the core instance's ledger, 2026-10-27 to 2026-11-10: 71 of the 87 failed build attempts on gpt-6.1-sol at high effort are `orphaned-by-process-exit`.
+    - That value means the container was recycled and the worker ended with its process. The model did not fail.
+    - `attributeAttemptOutcome` in src/lib/attempt-outcome-attribution.ts already classes it as infrastructure (W1-T10875). Only the field trials read that classifier.
+    - `evaluateRoutingExperiment` reads `success` from the attempt row and does not ask why an attempt failed.
+    - The fix learner leaves out a round ended by a signal (W1-T6028). A round whose receipt was written later as orphaned has no such field, so it is not left out.
+    - With these attempts counted, gpt-6.1-sol at high effort shows 60.1% success on 218 attempts. Most of the gap to other arms is recycles.
+  design: |
+    In `evaluateRoutingExperiment`, pass each `worker.attempt` row through `attributeAttemptOutcome` and keep the class on the receipt. Add `infrastructureAttempts` and `infrastructureOnlyTasks` to `ExperimentArmReport`.
+    In `fixArmEvidence`, join `fix.done` to its attempt row by `selection_assignment_id`, and add `infrastructureExcluded` beside `signalExcluded`.
+    src/lib/attempt-outcome-attribution.ts imports worker.ts, and worker.ts imports routing-experiments.ts. Do not close that ring: take the classifier as an argument, with the caller passing `attributeAttemptOutcome`.
+    W1-T12142 builds its result on this report, so it takes the same exclusion.
+    NOT IN SCOPE: fewer recycles, and the classifier's rules.
+  falsifier: |
+    Count an orphaned attempt as a model failure and criterion 1 must fail. Leave out an attempt that failed with a provider reply and criterion 4 must fail. Restore and require all to pass.
+  note: |
+    The same recycles end runs before a worker is assigned. W1-T12154 covers that case.

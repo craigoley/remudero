@@ -9,10 +9,14 @@
   risk: high  # Rule 19: one concern — the unlatched stale exits do not repeat a full pass that completed after main advanced
   band_meaning: span
   origin: "fleet-stall diagnosis 2026-10-14 for the operator session (core lanes empty 00:13:50-00:52:08Z); standing direction: fix at the root, no hard fixed thresholds, automated flow"
-  plan_refs: [W1-T8170, W1-T1272, W1-T4998, W1-T5720, W1-T2965, W1-T8172, W1-T9114, W1-T7746]
-  files: [src/lib/daemon.ts, test/an-unlatched-freshness-exit-skips-a-pass-that-already-ran.test.ts]
+  plan_refs: [W1-T8170, W1-T1272, W1-T4998, W1-T5720, W1-T2965, W1-T8172, W1-T9114, W1-T7746, W1-T9812]
+  files:
+    - src/lib/daemon.ts
+    - test/an-unlatched-freshness-exit-skips-a-pass-that-already-ran.test.ts
+    - test/a-latched-restart-exits-when-its-last-lane-settles.test.ts
+    - test/the-pre-exit-pass-runs-beside-the-restart-drain.test.ts
   status: queued
-  priority: 2.5  # measured 29 lane-min in one exit; 4 of 31 exits 2026-10-12..14 took this arm
+  priority: 1  # raised 2026-11-11 on the 7-day restart study (36 exits to 2026-11-11): W1-T9812 depends on it; was 2.5
   attempts: 0
   rationale: |
     MEASURED 2026-10-14 (core ledger union on the Azure host, read-only; daemon pid 1710758, boot head 08cbabc50).
@@ -54,17 +58,36 @@
     held 4.3 GB of swap.
   design: |
     Operator rulings: no hard thresholds (no fixed wait, age or count below), lean into automation.
-    1. ANCHOR THE UNLATCHED EXITS ON THE ADVANCE. The tick-top exit and the pre-admission exit with an empty dispatch
-       set pass the daemon's `staleSinceMs` (the first observation of the advance this restart is for) to
-       `stopForFreshness`. The existing check then skips the fresh `runGatedSweep` when a full pass completed after
-       that moment. `pre_exit_pass` gains a fourth value, `"skipped_ran_since_stale"`, so a latch skip and an advance
-       skip can be told apart.
+    1. ANCHOR THE TICK-TOP EXIT ON THE ADVANCE. The tick-top exit passes the daemon's `staleSinceMs` (the first
+       observation of the advance this restart is for) to `stopForFreshness`. The exit then skips the fresh
+       `runGatedSweep` when a full pass completed after that moment. `pre_exit_pass` gains a fourth value,
+       `"skipped_ran_since_stale"`, so a latch skip and an advance skip can be told apart.
+       AMENDED 2026-11-10 (hand build, origin/main aa0902d33): the pre-admission exit with an empty dispatch set
+       is not anchored, because the code cannot reach it. Its condition in src/lib/daemon.ts is
+       `refetchedFreshness?.stale && dispatchSet.length === 0`. `dispatchSet` is assigned only before the idle
+       branch `if (dispatchSet.length === 0)`, and every path of that branch continues or returns. The comment
+       above the condition has said "always false" since 2026-09-16. An idle daemon (no task to dispatch) that
+       reads its own tree stale exits at the top of its next tick, so the tick-top exit is the exit it takes.
     2. W1-T1272'S GUARANTEE HOLDS. A background pass still running at exit is awaited, as today. With no full pass
        completed since the advance, or with `staleSinceMs` unset, the bounded pass runs, as today.
     3. The stale-reviewer idle exit keeps today's pass. Its staleness is the reviewer's code, not an observed advance
-       of main, so it has no anchor here. The latched exit is unchanged.
-    4. `daemon_selfrestart_for_freshness` also carries `stale_since_ms` and `last_pass_completed_ms` (null when no
-       pass completed), so the arm that ran can be checked against its evidence.
+       of main, so it has no anchor here. The exit for a requested restart keeps its pass too. The latched exit is
+       unchanged.
+    4. On an exit that passes the advance, `daemon_selfrestart_for_freshness` also carries `stale_since_ms` and
+       `last_pass_completed_ms` (the last full pass that completed before the exit began; null when none), so the
+       arm that ran can be checked against its evidence. The row of every other exit keeps its three fields:
+       test/a-latched-restart-exits-when-its-last-lane-settles.test.ts compares the whole row of a latched exit.
+    5. TWO EXISTING TESTS CHANGE, and both files are in `files`.
+       - test/a-latched-restart-exits-when-its-last-lane-settles.test.ts, "an idle freshness exit keeps its full
+         pass without a dispatch latch", says "the boot pass cannot replace an idle exit's pass". Design 1 makes
+         that false: a boot pass that completes after the advance replaces it. The fixture still runs 2 passes
+         only because its fake clock does not move, so the boot pass completes at the instant of the advance and
+         not after it. The test keeps its fixture and its count. Its title and message change to say that an idle
+         exit keeps its full pass when no pass completed after the advance.
+       - test/the-pre-exit-pass-runs-beside-the-restart-drain.test.ts (W1-T9812), "an exit with no dispatch latch
+         keeps the pass before the drain", uses a tick-top exit after a boot pass. With design 1 that exit starts
+         no pass. The fixture's boot pass now fails, so the exit still runs its own pass and the test still shows
+         the order of pass and drain. Build this task after W1-T9812 has merged.
     Tests (new file, `test(` titles verbatim as in the proofs below) drive runDaemon with an injected sweep,
     checkFreshness and a fake clock, as test/a-latched-restart-exits-when-its-last-lane-settles.test.ts does.
   acceptance:
@@ -72,8 +95,8 @@
       proof: "unit test: test/an-unlatched-freshness-exit-skips-a-pass-that-already-ran.test.ts"
     - claim: "a tick-top exit after a full pass completed since the advance starts no new full pass"
       proof: 'grep: test("W1-T9352: a tick-top exit does not repeat a pass since the advance" in test/an-unlatched-freshness-exit-skips-a-pass-that-already-ran.test.ts'
-    - claim: "an empty-dispatch pre-admission exit after such a pass starts no new full pass"
-      proof: 'grep: test("W1-T9352: an empty-dispatch exit does not repeat a pass since the advance" in test/an-unlatched-freshness-exit-skips-a-pass-that-already-ran.test.ts'
+    - claim: "the tick-top exit of an idle daemon (no task to dispatch) after such a pass starts no new full pass"
+      proof: 'grep: test("W1-T9352: an idle daemon''s tick-top exit does not repeat a pass since the advance" in test/an-unlatched-freshness-exit-skips-a-pass-that-already-ran.test.ts'
     - claim: "with no full pass completed since the advance, the unlatched exit still runs the bounded pass"
       proof: 'grep: test("W1-T9352: an exit with no pass since the advance still runs one" in test/an-unlatched-freshness-exit-skips-a-pass-that-already-ran.test.ts'
     - claim: "the restart row names the advance skip and its evidence"

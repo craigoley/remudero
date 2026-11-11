@@ -18,7 +18,7 @@
     - src/lib/sweep.ts
     - test/review/a-proof-that-fails-only-under-review-load-is-inconclusive.test.ts
     - "src/cli/commands/review.ts"
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: A unit-test proof whose review-sandbox run ended by a timeout, a signal or a sandbox exec_error, or that failed while the review's injected hosted-CI evidence says the same test file passed at the same head, is recorded as inconclusive_load with the host load at its start and end; it is never met, never an unmet criterion, and makes the verdict pending, never a FAIL or a fix-round trigger

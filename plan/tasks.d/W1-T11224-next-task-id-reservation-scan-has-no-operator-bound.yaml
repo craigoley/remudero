@@ -12,7 +12,7 @@
   files:
     - src/run-task.ts
     - test/plan/a-next-task-id-can-request-a-larger-bounded-range.test.ts
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   origin: "operator request 2026-11-03 after the official allocator exhausted its fixed scan"

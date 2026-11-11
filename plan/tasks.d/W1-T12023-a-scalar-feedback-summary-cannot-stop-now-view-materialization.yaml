@@ -16,7 +16,7 @@
   files:
     - src/lib/human-gate.ts
     - test/human-gate-feedback.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: A persisted scalar summary read by the real feedback reader reaches both grill decisions and feedback gates, retaining raw and scalar text, the subject identity and the answer resolution verb

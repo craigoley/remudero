@@ -1,0 +1,62 @@
+- id: W1-T12180
+  title: "The repository-maintenance rung tests read a disk reading they control, so a full host disk no longer fails them"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high
+  band_meaning: blast-radius
+  origin: architect
+  plan_refs:
+    - W1-T3116
+    - W1-T10750
+  files:
+    - src/run-task.ts
+    - test/each-daemon-reaps-its-own-managed-repos.test.ts
+    - test/repository-maintenance-controller.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "The console daemon fixture passes a controlled healthy disk reading to runRepositoryMaintenanceRung and proves full GC completes, removes gc.log, writes complete state for each store and then holds the next daily window"
+      proof: "unit test: a console daemon maintains its own managed repo and daemon checkout with independent state"
+    - claim: "The site daemon fixture passes a controlled healthy disk reading to runRepositoryMaintenanceRung and proves full GC completes, removes gc.log, writes complete state for its store and then holds the next daily window"
+      proof: "unit test: a site daemon maintains its managed store and handles absent repos without a phantom core store"
+    - claim: "A new integration test in the same file gives the same runner a low reading on a store with gc.log: it ledgers repository_maintenance.defer with reason 'disk verdict low', saves lastOutcome defer, emits no repository_maintenance.complete row, and leaves gc.log in place"
+      proof: "unit test: test/each-daemon-reaps-its-own-managed-repos.test.ts"
+    - claim: "The injected reader is an optional trailing parameter whose default is the real readDiskFreeBytes, and the rung still judges the reading with judgeDiskHeadroom"
+      proof: "grep: diskFreeBytes [?] readDiskFreeBytes in src/run-task.ts"
+    - claim: "The production-default rung test and the controller's low-disk decision still pass, with no injected reader in the production-default test"
+      proof: "unit test: test/repository-maintenance-controller.test.ts"
+  rationale: |
+    OBSERVED on the Azure host, origin/main 3682565000518ba0f9835c273a3761376567a467: both tests in test/each-daemon-reaps-its-own-managed-repos.test.ts fail. An earlier exact-base control reproduced both failures 2 of 2, and the source and test blobs are unchanged since then.
+    - The cause: runRepositoryMaintenanceRung (src/run-task.ts) ignores the context.disk it is given. Inside its per-store context closure it calls readDiskFreeBytes(config.root) and sets disk from judgeDiskHeadroom. The tests make config.root with mkdtempSync(tmpdir()), so the reading comes from the host root filesystem, which is 98% full there.
+    - decideRepositoryMaintenance (src/lib/object-reaper.ts) then defers correctly with "disk verdict low" before the gc.log arm. The tests plant gc.log and expect repository_maintenance.complete, so they fail. The product is right and the tests depend on the host.
+    Settled by lookup: is this already filed or decided? -> No. No shard or monolith task mentions each-daemon-reaps or an injected disk reader for this rung. W1-T3116 built the controller and W1-T10750 the escalation, and neither isolates the disk read (plan/tasks.d/W1-T3116-*.yaml, plan/tasks.d/W1-T10750-*.yaml). W1-T12027 is the same kind of fix for memory-policy suites and does not touch this rung.
+    Settled by lookup: does an open PR already change this? -> No. Of the 12 open PRs on craigoley/remudero (including #17695, which touches src/run-task.ts only for main repair, and #17726, which adds plan shards W1-T12142 to W1-T12156 about model routing), none touches these tests or the rung (https://github.com/craigoley/remudero/pulls).
+    Settled by lookup: who calls runRepositoryMaintenanceRung? -> One production caller, src/cli/commands/daemon.ts:2294 `repositoryMaintenance: (context) => runRepositoryMaintenanceRung(config, log, context, policy.values.objectReap)`, which passes no reader and so keeps the real default. Test callers: test/each-daemon-reaps-its-own-managed-repos.test.ts, test/repository-maintenance-controller.test.ts:410, test/the-object-reaper-rung-runs.test.ts and test/the-object-reaper-prunes-on-expiry-alone.test.ts.
+    Settled by lookup: is there a pattern to follow? -> Yes. The disk reader is already injected with a real default elsewhere: `(deps.readDiskFreeBytes ?? readDiskFreeBytes)(root)` in src/lib/report-commands.ts:670, `diskFree ?? readDiskFreeBytes` in src/lib/host-view.ts:171 and src/lib/now-view.ts:1496, and `opts.freeBytes` in src/lib/disk-artifact-reclaim.ts:181.
+    Settled by lookup: is repository-maintenance-controller.test.ts needed? -> Yes, but only to check it. Its test at line 400 is the one that proves the rung's default probes, and it is exposed to the same host disk. It is listed in files so the implementer can confirm the default path and the existing decide-level "disk verdict" deferral (line 79). It must not gain an injected reader.
+    Settled by lookup: risk and verify? -> Kept at high and human as the initiative asks. The rung decides when full GC runs on the fleet's real object stores, and a change to how its disk guard is wired is a deletion-guard change. Nothing in the repo supports a lower class.
+  design: |
+    1. src/run-task.ts: add one optional trailing parameter to runRepositoryMaintenanceRung, `diskFreeBytes?: (path: string) => number | undefined`, after `issues`, so no positional caller shifts. In the context closure, replace `readDiskFreeBytes(config.root)` with `(diskFreeBytes ?? readDiskFreeBytes)(config.root)`. Keep the rest exactly as it is: the undefined-means-unknown arm, `judgeDiskHeadroom(freeBytes).verdict === "OK"`, the activeLanes/inflight/activeWorkerCount guard, the repos/ and remudero discovery, the per-store state path and the policy default. Do not change daemon.ts. Its call keeps the real reader because it passes nothing. Keep run-task.ts growth to the signature line or less, because src/run-task.ts is held by scripts/source-size-baseline.json.
+    2. test/each-daemon-reaps-its-own-managed-repos.test.ts: the `rung` helper passes a reader that returns a healthy reading (a byte count judgeDiskHeadroom rates OK, ideally computed from the same floor and not hard-coded below it) and asserts everything the two tests assert today.
+    3. Add a third test to the same file: one store with gc.log, a reader that returns a reading judgeDiskHeadroom rates FAIL (for example 0). Assert a `repository_maintenance.defer` row with reason "disk verdict low" (emitted by `settle("defer", ...)` in src/lib/object-reaper.ts), the store's state lastOutcome "defer", no repository_maintenance.complete row, and gc.log still present. Its reading is the only difference from the success fixture, so it shows the guard is reached through the runner and not only through decideRepositoryMaintenance.
+    4. test/repository-maintenance-controller.test.ts: leave the production-default test (line 400) calling the rung without a reader. Change this file only if the default path or the low-disk decision would otherwise go untested.
+    NOT IN SCOPE: the disk threshold or judgeDiskHeadroom, decideRepositoryMaintenance, GC policy, cadence, backoff, escalation, the active-worker and inflight guards, shared-store discovery, daemon.ts, and any merge or security gate. Also out of scope: any host check, environment variable, skip, or test-only branch in production code. test/the-object-reaper-rung-runs.test.ts and test/the-object-reaper-prunes-on-expiry-alone.test.ts also call the rung with the real reader. They are not in this task. If either fails on a full disk, file it separately.
+  falsifier: |
+    Make the rung ignore the injected reader (go back to calling readDiskFreeBytes directly). On a host whose root filesystem is not OK by judgeDiskHeadroom, the two success tests must fail, and on any host the low-disk test must fail because the reader would not be the one supplied. Make the rung pass context.disk through, or stop judging with judgeDiskHeadroom, and the low-disk test must fail because it completes and removes gc.log. Restore, and all three must pass on the 98%-full Azure host and in CI.
+  note: |
+    Filed by the architect in --mode=create (run PLAN-create-1794347757565). verify:human and risk:high as the initiative asks. The product change is one optional parameter with the real reader as its default, and the rest is test isolation. A reviewer should confirm daemon.ts is untouched and that no threshold or guard moved.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.8
+    reasons:
+      - "The description states the product change is a single optional trailing parameter that defaults to the real readDiskFreeBytes, so production behavior is preserved, and the sole production caller passes no reader."
+      - "The rationale cites existing injection patterns (report-commands, host-view, now-view, disk-artifact-reclaim), so this is aligned with established practice."
+      - "The declared files are only src/run-task.ts and two test files. Nothing touches secrets, auth, merge or deploy policy, or data deletion, and no threshold or guard is stated to move."
+      - "Acceptance criteria are checkable by unit tests and a grep, and the gates state is clean (operator author, with a good track record)."
+    judged_at: "2026-11-11T02:59:18.847Z"
+    pin: "f1bc5a97105b803c400ea25f75c65bf56bf4f0d80c5dd82898b5cbfc67fcc261"

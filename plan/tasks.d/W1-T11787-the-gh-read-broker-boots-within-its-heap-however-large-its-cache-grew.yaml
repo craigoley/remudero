@@ -16,7 +16,7 @@
   files:
     - src/lib/gh-read-broker.ts
     - test/github/every-mac-session-reads-github-through-one-broker.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: When the cache directory holds more bytes than the declared boot parse bound, boot keeps the newest entries by modification time that fit the bound and evicts the rest, before parsing any entry, whatever the disk-share budget says

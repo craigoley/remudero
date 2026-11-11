@@ -1,0 +1,55 @@
+- id: W1-T12186
+  title: "The config validator accepts the daily cash cap as a normal and squeezed pair"
+  repo: remudero
+  depends_on: []
+  priority: 0.9
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the validator runs at every config load; a wrong rule refuses the config of every daemon at its start
+  band_meaning: blast-radius
+  origin: operator-session#cash-cap-2026-11-10
+  plan_refs:
+    - W1-T3692
+    - W1-T3575
+    - W1-T4632
+  files:
+    - src/lib/config-schema.ts
+    - src/lib/cash-trial.ts
+    - test/lib/the-config-validator-accepts-the-daily-cash-cap-as-a-pair.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "The shape check accepts a daily cash cap of { normal: 10, squeezed: 50 }. The full config check accepts the same config with the cash provider enabled"
+      proof: "grep: W1-T12186 criterion 1 in test/lib/the-config-validator-accepts-the-daily-cash-cap-as-a-pair.test.ts"
+    - claim: "The shape check refuses a pair whose squeezed figure is below its normal figure. The message names the field and both figures"
+      proof: "grep: W1-T12186 criterion 2 in test/lib/the-config-validator-accepts-the-daily-cash-cap-as-a-pair.test.ts"
+    - claim: "The shape check refuses a pair with a member that is missing, is not a finite number or is below zero, and a pair with a third member"
+      proof: "grep: W1-T12186 criterion 3 in test/lib/the-config-validator-accepts-the-daily-cash-cap-as-a-pair.test.ts"
+    - claim: "A plain number and null pass as before. A string and a number below zero are refused, and the message names both accepted forms"
+      proof: "grep: W1-T12186 criterion 4 in test/lib/the-config-validator-accepts-the-daily-cash-cap-as-a-pair.test.ts"
+    - claim: "The example of a pair in the comment on the field in src/lib/config-schema.ts passes the shape check and the full config check"
+      proof: "grep: W1-T12186 criterion 5 in test/lib/the-config-validator-accepts-the-daily-cash-cap-as-a-pair.test.ts"
+    - claim: "With a pair, the cash trial budgets from the normal figure and is not held as unbounded. A pair that the provider refuses holds the trial with that reason"
+      proof: "grep: W1-T12186 criterion 6 in test/lib/the-config-validator-accepts-the-daily-cash-cap-as-a-pair.test.ts"
+  rationale: |
+    OBSERVED 2026-11-10 on the fleet host: the operator asked for a daily cash cap of 10 dollars on a normal day and 50 dollars on a squeeze day. The validator refused the config file.
+    - The type of `dailyCapUsd` in src/lib/config-schema.ts (line 91 on main) is a number, a pair { normal, squeezed } or null. The comment above it gives the pair as an example.
+    - `effectiveCashCapUsd` in src/lib/worker-provider.ts reads the pair. It takes `squeezed` only for a request that reached cash because no subscription had headroom (W1-T3692). It refuses a pair whose squeezed figure is below its normal figure.
+    - The shape rule of the same field is `configField("dailyCapUsd", "number | null", ...)` with a nullable number. It answers a pair with "expected number or null".
+    - `loadConfig` and `validateConfig` both run the shape check first. So no config file can hold the pair, and the squeeze figure cannot be set.
+    - One reader assumes a number. `decideCashTrial` in src/lib/cash-trial.ts holds the cash trial with "dailyCapUsd is unset" when the cap is not a number. A host that sets a pair would stop its cash trial, with a wrong reason.
+    - Tests pass a pair to the provider as an object and do not load it from a file. That is why no test failed.
+  design: |
+    Add a shape for the cap to src/lib/config-schema.ts: null, a finite number, or an object with exactly the two members `normal` and `squeezed`, each a finite number.
+    Refuse a number below zero in each form. Zero stays valid, as today.
+    Refuse a pair whose `squeezed` is below its `normal` in the shape check, with the same reason that `effectiveCashCapUsd` gives. The operator then reads the refusal when the config loads, not at the first paid request.
+    Change the type text of the field to match the type of `Config.dailyCapUsd`.
+    Keep "expected number or null" at the start of the message for a wrong type, and add the pair to it. test/config-schema.test.ts reads that text.
+    In src/lib/cash-trial.ts, `decideCashTrial` reads the cap through `effectiveCashCapUsd` with `squeezed` unset, as the other readers do. The budget of the trial is its share of the normal figure. When `effectiveCashCapUsd` refuses the pair, the trial is held with that reason and nothing is thrown.
+    NOT IN SCOPE: `effectiveCashCapUsd` and the fleet cap in the shared allowance file.
+  falsifier: |
+    Restore the nullable number shape and criteria 1 and 5 must fail. Take out the order check and criterion 2 must fail. Accept a third member and criterion 3 must fail. Refuse a plain number and criterion 4 must fail. Restore the test for a number in `decideCashTrial` and criterion 6 must fail. Restore and require all six to pass.
+  note: |
+    The other readers need no change. `reserveOpenWeightBudget` and `priceRepairLadderRungs` read the cap through `effectiveCashCapUsd`. src/lib/config.ts and src/lib/worker.ts test only for a cap that is absent or null.

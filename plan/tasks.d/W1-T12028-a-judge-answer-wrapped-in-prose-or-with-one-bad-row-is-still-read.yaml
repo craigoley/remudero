@@ -15,7 +15,7 @@
   files:
     - src/lib/queue-judge-gardener.ts
     - test/gardeners/a-judge-answer-wrapped-in-prose-or-with-one-bad-row-is-still-read.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "An answer whose JSON is preceded or followed by prose, or sits in a fenced block inside prose, is read as the moves it holds and reaches the inventory"

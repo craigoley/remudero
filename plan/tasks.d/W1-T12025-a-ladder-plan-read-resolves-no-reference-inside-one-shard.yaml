@@ -18,7 +18,7 @@
   files:
     - src/lib/flow-remedy-gardener.ts
     - test/gardeners/a-ladder-plan-read-resolves-no-reference-inside-one-shard.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "A ladder shard whose superseded_by or depends_on names a task in another shard is read into the ladder's tasks and is not reported unreadable"

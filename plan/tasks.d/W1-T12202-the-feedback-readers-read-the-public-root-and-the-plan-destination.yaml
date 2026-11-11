@@ -1,0 +1,48 @@
+- id: W1-T12202
+  title: "The feedback readers read the public root and the plan destination"
+  repo: remudero
+  depends_on: [W1-T12200]
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # about 40 files read feedback through these loaders
+  band_meaning: span
+  origin: operator-session#ops-cutover-2026-11-10
+  plan_refs:
+    - W1-T11374
+    - W1-T11768
+  files:
+    - src/lib/feedback.ts
+    - src/lib/auto-triage.ts
+    - test/inbox/the-feedback-readers-read-the-public-root-and-the-plan-destination.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "While the host file names a repository, `listFeedback`, `readFeedbackEntry` and `readLandedFeedbackEntry` read the public root and the destination checkout"
+      proof: "grep: W1-T12202 criterion 1 in test/inbox/the-feedback-readers-read-the-public-root-and-the-plan-destination.test.ts"
+    - claim: "A feedback id that both roots hold with different bytes is refused, and the message names both paths"
+      proof: "grep: W1-T12202 criterion 2 in test/inbox/the-feedback-readers-read-the-public-root-and-the-plan-destination.test.ts"
+    - claim: "`refreshFeedbackFromMain` refreshes both roots, and `newFeedbackIdsOldestFirst` puts the ids of both roots in one order by age"
+      proof: "grep: W1-T12202 criterion 3 in test/inbox/the-feedback-readers-read-the-public-root-and-the-plan-destination.test.ts"
+    - claim: "A destination checkout that is unreadable is reported as unreadable. The readers do not report it as empty"
+      proof: "grep: W1-T12202 criterion 4 in test/inbox/the-feedback-readers-read-the-public-root-and-the-plan-destination.test.ts"
+    - claim: "With no host file, each reader returns the same entries with the same git calls as today"
+      proof: "grep: W1-T12202 criterion 5 in test/inbox/the-feedback-readers-read-the-public-root-and-the-plan-destination.test.ts"
+    - claim: "The two readers of auto-triage use the destination, and the test goes through them to a feedback file that only the destination checkout holds"
+      proof: "grep: planDestinationRepository( in src/lib/auto-triage.ts"
+  rationale: |
+    OBSERVED 2026-11-10: no build reads a feedback file, but about 40 source files read feedback through a few loaders.
+    - Loaders: `listFeedback`, `readFeedbackEntry` and `readLandedFeedbackEntry` in src/lib/feedback.ts.
+    - Auto-triage: `refreshFeedbackFromMain` and `newFeedbackIdsOldestFirst` in src/lib/auto-triage.ts.
+    - Other readers go through the loaders: the panel, serve, the docket, the backlog gardener and the issues intake.
+    - A reader must see a feedback file in the ops repository before any writer puts one there. So this task comes before the writer task.
+    - The switch is the host file `<state dir>/plan-destination.json`. If the file is absent, the switch is off and the behaviour is byte-identical to today. The readers read both roots while the file names a repository, also after `feedback` is removed from the kinds, because files that went to the ops repository stay there.
+  design: |
+    Change the loaders, not their 40 callers. Each loader takes the second root from `planDestinationRepository`.
+    List every caller that reads `plan/feedback` without a loader, and change it or name it in the pull request.
+    The readers run on the host and in the console, which are private surfaces. No reader in this task writes to a public pull request.
+    NOT IN SCOPE: the writers of feedback files and the triage command.
+  falsifier: |
+    Read one root and criteria 1 and 3 must fail. Let the destination copy win without a message and criterion 2 must fail. Return an empty list for an unreadable checkout and criterion 4 must fail. Add a git call with no host file and criterion 5 must fail. Restore and require all six to pass.

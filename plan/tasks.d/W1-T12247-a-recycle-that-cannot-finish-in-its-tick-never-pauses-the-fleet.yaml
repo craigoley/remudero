@@ -1,0 +1,76 @@
+- id: W1-T12247
+  title: "A recycle that cannot finish inside its watchdog tick never pauses the fleet"
+  repo: remudero
+  depends_on: []
+  priority: 0.9
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # decides whether the deployer starts a recycle; a wrong answer holds back a new image
+  band_meaning: span
+  origin: operator-session#restart-and-recycle-downtime-2026-11-10
+  plan_refs:
+    - W1-T9800
+    - W1-T11320
+    - W1-T2598
+    - W1-T6249
+    - W1-T9645
+    - W1-T12241
+    - W1-T12244
+  files:
+    - src/lib/deployer.ts
+    - deploy/install-host-units.sh
+    - test/deploy/a-recycle-that-cannot-finish-in-its-tick-never-pauses-the-fleet.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "Each time the deployer derives a recycle wait, it writes one `deploy.recycle_wait_fit` row with the derived wait, the time that the tick still allows the deploy step, the time that a recycle needs outside its wait, and whether the recycle fits"
+      proof: "grep: W1-T12247 criterion 1 in test/deploy/a-recycle-that-cannot-finish-in-its-tick-never-pauses-the-fleet.test.ts"
+    - claim: "When the derived wait plus the time outside the wait is longer than the time left, the deployer does not run the recycle script. No pause file is written. The test drives the deploy cycle with a fake script runner"
+      proof: "grep: W1-T12247 criterion 2 in test/deploy/a-recycle-that-cannot-finish-in-its-tick-never-pauses-the-fleet.test.ts"
+    - claim: "When it fits, the deployer runs the recycle script with the derived wait, as today"
+      proof: "grep: W1-T12247 criterion 3 in test/deploy/a-recycle-that-cannot-finish-in-its-tick-never-pauses-the-fleet.test.ts"
+    - claim: "When the tick gives no time limit, as in a run by hand, or the value is unreadable, the deployer runs the recycle as today and the row says that the limit is unknown"
+      proof: "grep: W1-T12247 criterion 4 in test/deploy/a-recycle-that-cannot-finish-in-its-tick-never-pauses-the-fleet.test.ts"
+    - claim: "A recycle that is not started for this reason is counted like a refused recycle, so the existing rows `deploy.refusal_persisting` and `deploy.refusal_escalated` report one that does not fit tick after tick"
+      proof: "grep: W1-T12247 criterion 5 in test/deploy/a-recycle-that-cannot-finish-in-its-tick-never-pauses-the-fleet.test.ts"
+    - claim: "The launcher that `deploy/install-host-units.sh` renders gives the deploy step the moment at which the tick ends it. The test renders the launcher and reads the variable in the environment of a fake deploy step"
+      proof: "grep: W1-T12247 criterion 6 in test/deploy/a-recycle-that-cannot-finish-in-its-tick-never-pauses-the-fleet.test.ts"
+    - claim: "The deployer calls the fit check"
+      proof: "grep: recycleWaitFits( in src/lib/deployer.ts"
+    - claim: "The launcher exports the end of the deploy step"
+      proof: "grep: RMD_DEPLOY_STEP_ENDS_AT in deploy/install-host-units.sh"
+  rationale: |
+    OBSERVED 2026-11-04T01:56Z to 2026-11-11T01:56Z in the ledger of the core instance: three recycles paused the instance for 41 to 49 minutes, were ended by a TERM signal, and replaced nothing.
+    - `recycle.invoked` 2026-11-08T19:22:45Z, `recycle.ended` 20:22:26Z, outcome `aborted`, waited 2,460 s of a derived wait of 3,816 s.
+    - `recycle.invoked` 2026-11-08T23:25:32Z, `recycle.ended` 2026-11-09T00:25:15Z, outcome `aborted`, waited 2,785 s of 5,750 s.
+    - `recycle.invoked` 2026-11-10T09:24:32Z, `recycle.ended` 10:24:13Z, outcome `aborted`, waited 2,940 s of 7,336 s.
+    - Each ended 3,581 to 3,583 s after it began, with the reason "ABORTED by SIGTERM before remudero-daemon was stopped".
+    - The watchdog tick ends its deploy step after 3,600 s: `WATCHDOG_DEPLOY_DEADLINE_S=3600` with `timeout -k 30` (`render_watchdog_deploy_deadline`, deploy/install-host-units.sh, W1-T9800). The unit has `TimeoutStartSec=75min`.
+    - The recycle of 2026-11-10T20:21:19Z finished in 3,150 s with a derived wait of 6,978 s. It had 7 minutes left.
+    - Two more recycles were refused at their own time limit after 3,000 s and 1,035 s of pause. With the three above, 204 minutes of pause replaced nothing.
+    THE CAUSE IS INFERRED FROM THE TIMING. The three ends are 17 to 19 s short of 3,600 s, and the signal is TERM. The row that the launcher writes for a step it killed (`watchdog-step-timeout` in the revival log) was not read. Criterion 1 writes the two numbers side by side, so the next case proves or disproves it.
+    READ at origin/main 17745c6bf.
+    - The deploy step derives the wait inside the step: `deriveWaitFromState` writes `deploy.recycle_wait_derived` and passes the wait to `deploy/recycle-container.sh` as `RMD_RECYCLE_WAIT_S` (src/lib/deployer.ts, about lines 2870 to 2937). `deriveDrainWait` (line 452) has no upper limit from the tick.
+    - W1-T9800 sized the 3,600 s against the longest tick it had measured, 3,158 s. W1-T11320 and W1-T2598 (merged) made the wait as long as the runs in flight need. The two rules do not know each other.
+    - On TERM before `docker stop`, the script removes its own pause (`recycle_on_signal`), so the pause ends with the recycle. The loss is the time under the pause.
+    WHICH RULE, AND WHY. Two rules were possible: do not start a recycle that does not fit, or make the limit of the tick follow the derived wait. This task takes the first.
+    - The launcher starts `timeout` before the deploy step runs, and the wait is derived inside the step. For the second rule the launcher would have to know the wait before it starts the step.
+    - The limit of the unit is fixed text in the unit file. A wait of 7,336 s would need a unit limit of more than 2 hours, and for that time the tick does none of its other work: it does not revive a daemon and it does not tune memory.
+    - The deployer has the wait in hand at the moment it decides. One environment variable gives it the end of the step.
+    RISK: with runs of 1 to 2 hours in flight, a recycle may not fit for many ticks, and a new image waits. Criterion 5 makes that visible through the rows that report a refused recycle today. W1-T12241 lowers the cost of a wait; this task removes the waits that cannot succeed.
+    CHECKED for overlap: W1-T6249 and W1-T9645 (merged) make a busy instance reach its recycle. W1-T12244 writes the phases of a recycle. None compares the wait with the limit of the tick.
+  design: |
+    In `deploy/install-host-units.sh`, in `watchdog_deploy_run`: before the command runs, export `RMD_DEPLOY_STEP_ENDS_AT` as the epoch second at which `timeout` will end the step (now plus `WATCHDOG_DEPLOY_DEADLINE_S`).
+    In src/lib/deployer.ts:
+    - A pure function `recycleWaitFits({ waitS, stepEndsAtS, nowS, restS })`. It returns `fits`, `step_left_s` and the inputs. With no `stepEndsAtS` it returns `fits: true` and `limit: unknown`.
+    - `restS` is the time a recycle needs outside its wait. Take the largest value of the whole time minus `waited_s` over the `recycle.ended` rows with the outcome `replaced` that the ledger text holds; the deployer already reads that text for `readImplementDurationsMs`. In 7 days this was 22 to 759 s. With no such row, use a named constant and say so in the row.
+    - After `deriveWaitFromState`, call `recycleWaitFits` and write `deploy.recycle_wait_fit`. If it does not fit, return the same result as a refused recycle, with a reason that names the wait and the time left, and do not call `runScript`.
+    A wait from the environment (`RMD_RECYCLE_WAIT_S` set by the operator) is checked in the same way.
+    Do not shorten the wait to make it fit: a shorter wait pauses the fleet and is then refused at its time limit.
+    NOT IN SCOPE: the value of `WATCHDOG_DEPLOY_DEADLINE_S`, the limit of the unit, the derivation of the wait, and the recycle script.
+  falsifier: |
+    Run the script when the wait does not fit and criterion 2 must fail. Refuse when the limit is unknown and criterion 4 must fail. Drop the export from the launcher and criterion 6 must fail. Restore and require all eight to pass.
+  note: |
+    After the merge, a `recycle.ended` row with the outcome `aborted` and a TERM reason must have a `deploy.recycle_wait_fit` row with `fits: true` before it. If one has `fits: false`, the check is not on that path.

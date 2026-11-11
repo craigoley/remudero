@@ -1,0 +1,47 @@
+- id: W1-T12151
+  title: "An attempt row names its served model, its steps and its uncached tokens"
+  repo: remudero
+  depends_on: []
+  priority: 1.2
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the receipt on every worker.attempt row for both providers; every cost and routing reader takes its fields
+  band_meaning: blast-radius
+  origin: operator-session#model-choice-2026-11-10
+  plan_refs:
+    - W1-T4650
+    - W1-T11074
+    - W1-T8374
+    - W1-T11985
+  files:
+    - src/lib/worker-provider.ts
+    - src/lib/benchmark-run.ts
+    - test/worker/an-attempt-row-names-its-served-model-its-steps-and-its-uncached-tokens.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "A Codex attempt records the model that served it when a source the Codex command writes names one, and names that source. When no source names one, the row keeps null and its reason"
+      proof: "grep: W1-T12151 criterion 1 in test/worker/an-attempt-row-names-its-served-model-its-steps-and-its-uncached-tokens.test.ts"
+    - claim: "Every worker.attempt row records the number of turns, and a Codex row also records the number of model steps inside its turns"
+      proof: "grep: W1-T12151 criterion 2 in test/worker/an-attempt-row-names-its-served-model-its-steps-and-its-uncached-tokens.test.ts"
+    - claim: "Every worker.attempt row records uncached input tokens and cached input tokens as two fields with one meaning for both providers"
+      proof: "grep: W1-T12151 criterion 3 in test/worker/an-attempt-row-names-its-served-model-its-steps-and-its-uncached-tokens.test.ts"
+    - claim: "A count the provider did not report is recorded as a named gap, never as 0"
+      proof: "grep: W1-T12151 criterion 4 in test/worker/an-attempt-row-names-its-served-model-its-steps-and-its-uncached-tokens.test.ts"
+  rationale: |
+    MEASURED 2026-11-10 in the core instance's ledger, 2026-10-27 to 2026-11-10: three fields that every comparison of models needs are absent or not comparable on attempt rows.
+    - `served_model` is absent on 100% of Codex attempts (8,410). `CODEX_SERVED_MODEL_REASON` says the `exec --json` events carry no model id.
+    - No attempt row carries a turn count. A Codex fix round reports 1, because one `exec` call is one turn however many steps it takes.
+    - Token counts cannot be compared. Codex reports input tokens with cached tokens inside. Claude reports them apart.
+    - So cost for each step, and tokens for each task, cannot be compared between the two providers.
+  design: |
+    Served model: read the session file the Codex command writes for the thread, or the app-server's thread read. Use whichever names a model. The request's `--model` is never copied into `served_model`.
+    Turns: add the turn count to `benchmarkWorkerAttemptResources`. For Codex, also count completed items that are model output or tool calls, from the parser that already reads `item.completed`.
+    Tokens: the Codex parser already reads `cached_input_tokens`. Report uncached input as input minus cached for Codex, and as input for Claude. Keep the existing `tokens` object unchanged for older readers.
+    NOT IN SCOPE: the served model on review rows (W1-T11985, W1-T11986) and on daemon rows (W1-T8374), the shadow turn limit of W1-T11074, and prices.
+  falsifier: |
+    Copy the requested model into `served_model` and criterion 1 must fail. Report Codex input with cached tokens inside as uncached and criterion 3 must fail. Write 0 for a count that was not reported and criterion 4 must fail. Restore and require all to pass.
+  note: |
+    If no Codex source names the served model, the builder says so in the pull request and criterion 1 holds through its second sentence.

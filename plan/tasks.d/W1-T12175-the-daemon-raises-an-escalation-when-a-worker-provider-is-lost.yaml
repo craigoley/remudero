@@ -1,0 +1,48 @@
+- id: W1-T12175
+  title: "The daemon raises an escalation when a worker provider is lost between two starts"
+  repo: remudero
+  depends_on: []
+  priority: 0.9
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the start of every daemon; the new read must never stop a start
+  band_meaning: blast-radius
+  origin: operator-session#follow-ups-2026-11-10
+  plan_refs:
+    - W1-T2592
+    - W1-T2857
+  files:
+    - src/lib/provider-routing-policy.ts
+    - src/cli/commands/daemon.ts
+    - test/daemon/the-daemon-raises-an-escalation-when-a-worker-provider-is-lost.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "At each start the daemon writes one row with the worker providers that its config enables and the cash deployments that it can reach"
+      proof: "grep: W1-T12175 criterion 1 in test/daemon/the-daemon-raises-an-escalation-when-a-worker-provider-is-lost.test.ts"
+    - claim: "When the set is smaller than the set in the row of the start before, the daemon raises one escalation. It names each lost provider, the config file and the time of the last start that had it"
+      proof: "grep: W1-T12175 criterion 2 in test/daemon/the-daemon-raises-an-escalation-when-a-worker-provider-is-lost.test.ts"
+    - claim: "The same loss raises one escalation, not one at every start"
+      proof: "grep: W1-T12175 criterion 3 in test/daemon/the-daemon-raises-an-escalation-when-a-worker-provider-is-lost.test.ts"
+    - claim: "A set that is equal or larger, and a first start with no earlier row, raise nothing"
+      proof: "grep: W1-T12175 criterion 4 in test/daemon/the-daemon-raises-an-escalation-when-a-worker-provider-is-lost.test.ts"
+    - claim: "When the earlier row cannot be read, the daemon starts, writes its own row and says that the comparison was not made"
+      proof: "grep: W1-T12175 criterion 5 in test/daemon/the-daemon-raises-an-escalation-when-a-worker-provider-is-lost.test.ts"
+    - claim: "The daemon command makes the comparison at its start"
+      proof: "grep: lostWorkerProviders( in src/cli/commands/daemon.ts"
+  rationale: |
+    OBSERVED 2026-11-10 on the Azure host: from 12:32Z every daemon ran with Claude only for more than eight hours, and nothing reported it.
+    - The container config file was reset to two fields. `workerProviders` was gone, so the default applied: Claude only.
+    - Codex and the cash deployments were off. The only trace was the text "mount provider 'cash' is not enabled by the committed host config" on judge rows.
+    - The daemon reads the enabled providers at its start: `resolveProviderRoutingPolicy` in src/cli/commands/daemon.ts gives `routableProviders`. It writes them to a status file and compares them with nothing.
+    - A recycle already proves that the new container has its provider mounts (W1-T2857). It does not look at the content of the config file.
+  design: |
+    Add `lostWorkerProviders(previous, current)` to src/lib/provider-routing-policy.ts. It returns the names that the earlier set has and the current set lacks.
+    In src/cli/commands/daemon.ts, after `resolveProviderRoutingPolicy`, write the row, read the newest earlier row of the same step from the ledger and call the function.
+    Raise the escalation through the gateway the command already builds for its other escalations. Key it by the lost names and the earlier set, so the same loss is raised once.
+    The daemon cannot tell an intended removal from a lost file. An intended removal costs the operator one escalation to close, and the text says so.
+    NOT IN SCOPE: a block on the start, a restore of the config file (W1-T12174 keeps the copy), and the provider capacity checks.
+  falsifier: |
+    Raise nothing when Codex leaves the set and criterion 2 must fail. Raise at each start and criterion 3 must fail. Stop the start on an unreadable row and criterion 5 must fail. Restore and require all to pass.

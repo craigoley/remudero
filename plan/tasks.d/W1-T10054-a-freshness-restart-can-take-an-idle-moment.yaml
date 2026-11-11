@@ -15,7 +15,7 @@
     - src/lib/sweep.ts
     - test/a-freshness-restart-can-take-an-idle-moment.test.ts
   status: queued
-  priority: 2  # every freshness restart pays a drain today; about 11 a day remain after the minimum lifetime lands
+  priority: 1.1  # raised 2026-11-11 on the 7-day restart study (36 exits to 2026-11-11): 1 of 913 decision rows read busy: false, so the idle arm never fires; was 2
   attempts: 0
   rationale: |
     OBSERVED (core ledger 2026-10-12T00:00Z..10-17T15:26Z, gz rotations plus live, extracted in
