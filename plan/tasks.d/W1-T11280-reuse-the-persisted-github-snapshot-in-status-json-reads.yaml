@@ -69,6 +69,16 @@
     exact title, `W1-T11280: status JSON reuses a fresh persisted GitHub snapshot`, not the `W1-T11280 fresh snapshot`
     stem. The colon is not a regex metacharacter, and the body is not a `<file>::<title>` form, so it stays a bare
     literal-title filter. The other five stems are unchanged.
+    CLARIFIED 2026-11-11 (PLAN-clarify-1794429806728): the six `unit test:` proofs now carry the VERBATIM titles of
+    the tests that test/status-json-deadline.test.ts holds at head (~240-~290). The former criterion-1 body
+    `W1-T11280: status JSON reuses a fresh persisted GitHub snapshot` matched no real title. Claims, files, risk,
+    verify, metadata and gates are unchanged. Where design step 4's pinned title differs, the acceptance titles win.
+    Settled by lookup: is this already filed or already decided? -> no. No other shard amends these proofs
+      (grep W1-T11280 in plan/ finds only citations in W1-T11325, W1-T11874 and an incident feedback record).
+    Settled by lookup: what are the current titles? -> the six `test("W1-T11280 ...")` calls in
+      test/status-json-deadline.test.ts, copied character for character.
+    Settled by lookup: does a body over 100 chars block lint-plan? -> no. looksLikeNonTitleBody draws only a WARN
+      (src/lib/task-linter.ts ~582, ~620), and these bodies are real titles, so they are not narrative.
   design: |
     1. Change ONLY the JSON-mode `buildBatchedGithub` call in `statusCommand` so it also passes the persisted repository
        `BoardSnapshotCache` (`createBoardSnapshotCache(<state root>, owner, repo)`, with the root chosen the same way the
@@ -99,17 +109,17 @@
     NOT IN SCOPE: any other file, any change to board-snapshot-cache.ts or status.ts, any new task.
   acceptance:
     - claim: "a fresh persisted snapshot is consumed by the JSON status read without a full board re-fetch"
-      proof: "unit test: W1-T11280: status JSON reuses a fresh persisted GitHub snapshot"
+      proof: "unit test: W1-T11280 fresh snapshot: status JSON reuses a persisted GitHub snapshot"
     - claim: "a missing persisted snapshot yields explicit unavailable evidence within the deadline"
-      proof: "unit test: W1-T11280 missing snapshot"
+      proof: "unit test: W1-T11280 missing snapshot: the snapshot is never read as rows and the status read stays unavailable"
     - claim: "a stale persisted snapshot yields explicit unavailable evidence, never silently filled rows"
-      proof: "unit test: W1-T11280 stale snapshot"
+      proof: "unit test: W1-T11280 stale snapshot: it does not fill an unfinished read and the status read stays unavailable"
     - claim: "a truncated persisted snapshot yields explicit unavailable evidence, never silently filled rows"
-      proof: "unit test: W1-T11280 truncated snapshot"
+      proof: "unit test: W1-T11280 truncated snapshot: the snapshot is never read as rows and the status read stays unavailable"
     - claim: "an unreadable persisted snapshot yields explicit unavailable evidence within the deadline"
-      proof: "unit test: W1-T11280 unreadable snapshot"
+      proof: "unit test: W1-T11280 unreadable snapshot: the snapshot is never read as rows and the status read stays unavailable"
     - claim: "a remote-ref read failure yields explicit unavailable evidence within the deadline"
-      proof: "unit test: W1-T11280 remote-ref failure"
+      proof: "unit test: W1-T11280 remote-ref failure: a read failure beside a fresh snapshot stays unavailable"
     - claim: "the regressions for consuming a fresh persisted snapshot and for unusable or missing evidence staying unavailable are titled with this task id"
       proof: "grep: W1-T11280 in test/status-json-deadline.test.ts"
   note: |
