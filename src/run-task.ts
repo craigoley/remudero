@@ -2942,7 +2942,7 @@ import {
 import { checkSharedPause, disposeSharedPauseRefresh, prepareSharedPause, requestKick, consumeStop, isQuietHours, requestFleetPause, requestPause, requestStop, restartInPlaceVerb, resumeFleet, resumeFleetWide, sharedPauseRef, stopDetail, type SharedPauseGitDeps } from "./lib/fleet-control.js";
 import { resolvePauseTarget, type PauseTarget } from "./lib/pause-target.js";
 import { parseInstanceRegistry } from "./lib/instance-registry.js";
-import { plannerHostGitCredential, startRunChildGitCredentialSocket, type CredentialHelperSocketHandle, type PlannerHostGitCredential } from "./lib/secret-boundary.js";
+import { openPlannerGitCredential, plannerHostGitCredential } from "./lib/secret-boundary.js";
 import { hasThreadEvent, inboxThreadId, readThread, verifiedInboxInput, type InboxCausalScope, type InboxInputReference } from "./lib/inbox-thread.js";
 import { gatherActorEvidence } from "./lib/actor-evidence.js";
 import { readGithubWebhookSecret, resolveGithubWebhookSecretFilePath } from "./lib/github-event-wake.js";
@@ -35260,23 +35260,9 @@ const PLAN_WORKER_TOOLS = ["Read", "Write", "Edit", "Grep", "Glob", "WebSearch",
  */
 export const PLAN_MAX_NEW_TASKS = 5;
 
-
 export async function planCommand(
   rest: string[],
-  opts: {
-    spawn?: typeof spawnWorker; config?: Config; overlap?: OverlapWarningDeps; lintPlanForReviewFn?: typeof lintPlanForReview;
-    /** W1-T11851: the lane's own git credential — resolver, socket, wiring, and the git its reservation runs. */
-    credential?: {
-      resolve?: (ownerRepo: string) => Promise<PlannerHostGitCredential>;
-      startSocket?: typeof startRunChildGitCredentialSocket;
-      wire?: (cwd: string, socketPath: string) => void;
-      unwire?: (cwd: string) => string[];
-      /** The git the remote reservation and its release run; default {@link hostWorktreeGitResult}. */
-      git?: (cwd: string, args: string[]) => { status: number | null; stdout: string; stderr: string };
-      /** The open-PR read the mint makes; default `openPrMintTexts`'s own (ghJson → github-transport). */
-      openPrFetch?: GhApiFetcher;
-    };
-  } = {},
+  opts: { spawn?: typeof spawnWorker; config?: Config; overlap?: OverlapWarningDeps; lintPlanForReviewFn?: typeof lintPlanForReview } = {},
 ): Promise<number> {
   const parsed = parsePlanArgs(rest);
   if ("error" in parsed) {
@@ -35304,19 +35290,6 @@ export async function planCommand(
   log("plan.start", { mode, brief, architect: arch, effort: mountsTable.architect.effort, worker: wrk });
   say(`plan ${runId} — mode=${mode} — architect ${arch} over worker ${wrk}`);
 
-  // W1-T11851: WHICH CREDENTIAL THIS LANE'S OWN PUSHES PRESENT, settled before any id is claimed or worker spawns.
-  // The host registry's App identity is minted per request at the git credential-helper boundary; nothing enters
-  // process.env. A present-but-unusable source refuses here; only a host with no registry keeps today's helpers.
-  const credential = await (opts.credential?.resolve ?? ((ownerRepo: string) => plannerHostGitCredential(ownerRepo)))(`${owner}/${repo}`);
-  const refuseCredential = (reason: string): number => {
-    log("plan.credential_refused", { reason, registry_path: credential.registryPath });
-    say(`plan refused — no usable git credential: ${reason}`);
-    return 1;
-  };
-  if (credential.kind === "refused") return refuseCredential(credential.reason);
-  const planGit = opts.credential?.git ?? hostWorktreeGitResult;
-  const unwire = opts.credential?.unwire ?? unwireCredentialHelperSocket;
-
   const settingsFile = renderWorkerSettings({
     templatePath: join(resolveInstallRoot(config), "settings", "worker.json"),
     hooksDir: join(resolveInstallRoot(config), "hooks"),
@@ -35331,29 +35304,16 @@ export async function planCommand(
   }
   const pruned = pruneStaleRuns(repoDir, worktreesDir(config), { graceMs: DEFAULT_PRUNE_GRACE_MS });
   if (pruned.worktrees.length || pruned.branches.length || pruned.skipped.length) log("worktree.prune", { ...pruned });
-  // A socket thread, so the synchronous reservation pushes are answered (W1-T5115); its directory is this run's alone.
-  const credDir = join(config.root, "tmp", `plan-cred-${runId}`);
-  let credSocket: CredentialHelperSocketHandle | undefined;
-  const closeCredSocket = async (): Promise<void> => {
-    const socket = credSocket;
-    credSocket = undefined;
-    try { await socket?.close(); } finally { rmSync(credDir, { recursive: true, force: true }); }
-  };
-  if (credential.kind === "app") {
-    try {
-      mkdirSync(credDir, { recursive: true, mode: 0o700 });
-      const { appId, installationId, keyPath } = credential;
-      credSocket = await (opts.credential?.startSocket ?? startRunChildGitCredentialSocket)({ runDir: credDir, log, identity: { appId, installationId, keyPath } });
-    } catch (err) {
-      const reason = `git credential socket did not start: ${String((err as Error)?.message ?? err)}`;
-      rmSync(credDir, { recursive: true, force: true });
-      return refuseCredential(reason);
-    }
-  }
-  const { branch, worktreePath } = await addLaneWorktree(repoDir, worktreesDir(config), runId, log).catch(async (err: unknown) => {
-    await closeCredSocket();
-    throw err;
-  }); // W1-T2528
+  // W1-T11851: this lane's own pushes present the host App identity, minted per request at the git credential-helper
+  // boundary — never a ~/.bashrc token a non-interactive shell cannot see, and never an env var. An unusable source
+  // refuses HERE, before any id is claimed or any worker spawns; only a host with no registry keeps today's helpers.
+  const planCred = await openPlannerGitCredential(await plannerHostGitCredential(`${owner}/${repo}`), {
+    runDir: join(config.root, "tmp", `plan-cred-${runId}`), log, wire: wireCredentialHelperSocket, unwire: unwireCredentialHelperSocket,
+    shared: (cwd) => sharesHarnessCheckout(cwd, repoDir) || sharesHarnessCheckout(cwd, repoRoot),
+  });
+  if (!planCred.ok) { say(`plan refused — no usable git credential: ${planCred.reason}`); return 1; }
+  const credLane = planCred.lane;
+  const { branch, worktreePath } = await addLaneWorktree(repoDir, worktreesDir(config), runId, log).catch(async (err: unknown) => { await credLane.close(); throw err; }); // W1-T2528
 
   let planIdBlock: TaskIdReservationBlock | undefined;
   // W1-T9488: see the triage lane's twin — the remote ids held, what the pushed branch declares, how it ended.
@@ -35361,31 +35321,15 @@ export async function planCommand(
   let planPushed: LanePushedIds;
   let planEnding = "ended before a verdict";
   const releasePlanHeld = (cwd: string): void => releaseUnfiledReservations(planHeld, planPushed, {
-    run: gitRunAdapter((args) => planGit(cwd, args)), lane: "plan", log,
+    run: gitRunAdapter((args) => hostWorktreeGitResult(cwd, args)), lane: "plan", log,
     reason: laneReleaseReason("plan", planEnding, planPushed),
   });
-  // W1-T11851: with the App socket, the unfiled ids go back from the WIRED worktree before it is removed — the
-  // managed clone is never wired, so a release from it would present no credential. Ambient: removal alone.
-  const removePlanWorktree = (): void => {
-    if (credSocket) {
-      releasePlanHeld(worktreePath);
-      unwire(worktreePath);
-    }
-    worktreeRemove(repoDir, worktreePath);
-  };
+  // The managed clone is never wired, so a wired lane gives its ids back from its own worktree BEFORE removing it.
+  const removePlanWorktree = (): void => { credLane.retire(worktreePath, releasePlanHeld); worktreeRemove(repoDir, worktreePath); };
 
   try {
-    if (credSocket) {
-      try {
-        // Only this lane's own worktree is wired — never the managed clone or the operator checkout.
-        if (sharesHarnessCheckout(worktreePath, repoDir) || sharesHarnessCheckout(worktreePath, repoRoot)) throw new Error(`${worktreePath} is a shared checkout`);
-        (opts.credential?.wire ?? wireCredentialHelperSocket)(worktreePath, credSocket.socketPath);
-      } catch (err) {
-        const reason = `git credential helper not wired: ${String((err as Error)?.message ?? err)}`;
-        removePlanWorktree();
-        return refuseCredential(reason);
-      }
-    }
+    const unwired = credLane.wire(worktreePath);
+    if (unwired !== undefined) { say(`plan refused — ${unwired}`); removePlanWorktree(); return 1; }
     // ID MINT + BLOCK RESERVATION (impl-DV), the SAME ordering triage uses at :10222-:10240: mint
     // from the FRESH worktree's plan, reserve BEFORE spawning, hand the worker ids it cannot
     // collide on. Until now this lane minted NOTHING — `planArchitectPrompt` received no id, so its
@@ -35398,7 +35342,7 @@ export async function planCommand(
     const mint = mintNextTaskIdWithHistory({
       planPath: join(worktreePath, "plan", "tasks.yaml"),
       repoRoot: worktreePath,
-      openPrTexts: () => openPrMintTexts(owner, repo, opts.credential?.openPrFetch),
+      openPrTexts: () => openPrMintTexts(owner, repo),
     });
     planIdBlock = reserveTaskIdBlock(mint.n, PLAN_MAX_NEW_TASKS, taskIdReservationsDir(config.root), {
       info: { purpose: `rmd plan --mode=${mode} (run ${runId})` },
@@ -35416,7 +35360,7 @@ export async function planCommand(
     // indistinguishable from an unreachable remote.
     const planRemoteReserver = gatedRemoteRefReserver({
       lane: "plan", log,
-      run: gitRunAdapter((args) => planGit(worktreePath, args)),
+      run: gitRunAdapter((args) => hostWorktreeGitResult(worktreePath, args)),
     });
     const planRemoteIdBlock: RemoteReservationBlock = withIdReservationLogging(log, "plan.id_reservation_failed", () =>
       reserveTaskIdBlockRemote(planReserveFrom, PLAN_MAX_NEW_TASKS, planRemoteReserver),
@@ -35709,17 +35653,14 @@ export async function planCommand(
   } finally {
     removeRunLock(worktreePath); // terminal ⇒ drop the liveness token
     // W1-T9488: the REMOTE half is given back too — every reserved id the pushed branch does not declare.
-    // Empty once `removePlanWorktree` released them; this covers a path that never reached it.
-    releasePlanHeld(existsSync(worktreePath) && credSocket ? worktreePath : repoDir);
+    // W1-T11851 teardown order: release (it needs the credential), unwire, then close the socket.
+    credLane.retire(worktreePath, releasePlanHeld);
+    releasePlanHeld(repoDir); // empty once retired; the ambient path's release, unchanged
       // Release EVERY reserved id — the ones the worker filed AND the ones it declined. Once the
       // PR exists the mint sees those ids via openPrMintTexts, so holding them longer would only
       // punch holes in the id space (the phantom-id trap: W1-T199/224/247/263).
       planIdBlock?.releaseAll();
-    // W1-T11851 teardown: release (above, it needs the credential), then unwire, then close the socket.
-    if (credSocket) {
-      if (existsSync(worktreePath)) unwire(worktreePath);
-      await closeCredSocket().catch((err: unknown) => log("plan.credential_close_failed", { error: String((err as Error)?.message ?? err) }));
-    }
+    await credLane.close();
   }
 }
 

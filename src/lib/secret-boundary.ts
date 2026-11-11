@@ -456,8 +456,7 @@ if (!isMainThread && (workerData as { kind?: unknown } | undefined)?.kind === SO
 /** On its OWN thread because the daemon's git is synchronous (`gitPushRunBranch` is an `execFileSync`): a socket on
  *  the blocked main thread never answers the helper that push spawns, and both wait forever (MEASURED, W1-T5115). */
 function startSocketThread(socketPath: string, log: DaemonLog, threadUrl: URL, identity?: HostAppIdentity): Promise<CredentialHelperSocketHandle> {
-  const data = { kind: SOCKET_THREAD_KIND, socketPath, ...(identity ? { identity } : {}) };
-  const worker = new Worker(threadUrl, { workerData: data, env: { ...process.env } });
+  const worker = new Worker(threadUrl, { workerData: { kind: SOCKET_THREAD_KIND, socketPath, ...(identity ? { identity } : {}) }, env: { ...process.env } });
   let closing = false;
   let onClosed: (() => void) | undefined;
   const close = (): Promise<void> =>
@@ -659,4 +658,90 @@ export async function plannerHostGitCredential(
     return { kind: "refused", registryPath, reason: `the ${ownerRepo} App key is not readable: ${(err as NodeJS.ErrnoException)?.code ?? String(err)}` };
   }
   return { kind: "app", registryPath, ...identity! };
+}
+
+/** W1-T11851: one `rmd plan` run's git credential, from the resolved source to teardown. */
+export interface PlannerGitCredentialLane {
+  /** Route `worktree`'s git to the scoped socket. A refusal reason (already ledgered) when it could not be;
+   *  undefined when wired, or when the credential is ambient and nothing is wired. Never throws. */
+  wire(worktree: string): string | undefined;
+  /** If wired: run `release` from `worktree` (it still presents the scoped token), then unwire. Once only. */
+  retire(worktree: string, release: (cwd: string) => void): void;
+  /** Close the socket and remove its directory; a close failure is ledgered, never thrown. */
+  close(): Promise<void>;
+}
+
+export interface OpenPlannerGitCredentialOpts {
+  /** This run's own socket directory, created 0700. */
+  runDir: string;
+  log: DaemonLog;
+  /** worker.ts's wireCredentialHelperSocket / unwireCredentialHelperSocket, injected: worker.ts imports this module. */
+  wire: (cwd: string, socketPath: string) => void;
+  unwire: (cwd: string) => unknown;
+  /** True for a checkout whose git config is never wired: the managed clone and the operator checkout. */
+  shared: (cwd: string) => boolean;
+  startSocket?: typeof startRunChildGitCredentialSocket;
+}
+
+/**
+ * W1-T11851: open the plan lane's credential. `refused`, or an App socket that does not start, ledgers
+ * `plan.credential_refused` {reason, registry_path} and returns `ok: false` — the caller stops before any id is
+ * claimed or any worker spawns. `ambient` wires nothing, so today's helpers apply unchanged. `app` mints on a socket
+ * thread (the reservation pushes are synchronous, W1-T5115) holding only the identity; no env var is written.
+ */
+export async function openPlannerGitCredential(
+  credential: PlannerHostGitCredential,
+  opts: OpenPlannerGitCredentialOpts,
+): Promise<{ ok: true; lane: PlannerGitCredentialLane } | { ok: false; reason: string }> {
+  const refuse = (reason: string) => {
+    opts.log("plan.credential_refused", { reason, registry_path: credential.registryPath });
+    return { ok: false as const, reason };
+  };
+  if (credential.kind === "refused") return refuse(credential.reason);
+  let socket: CredentialHelperSocketHandle | undefined;
+  if (credential.kind === "app") {
+    const { appId, installationId, keyPath } = credential;
+    try {
+      mkdirSync(opts.runDir, { recursive: true, mode: 0o700 });
+      socket = await (opts.startSocket ?? startRunChildGitCredentialSocket)({ runDir: opts.runDir, log: opts.log, identity: { appId, installationId, keyPath } });
+    } catch (err) {
+      const reason = `git credential socket did not start: ${String((err as Error)?.message ?? err)}`;
+      rmSync(opts.runDir, { recursive: true, force: true });
+      return refuse(reason);
+    }
+  }
+  let wired = false;
+  const lane: PlannerGitCredentialLane = {
+    wire(worktree) {
+      if (!socket) return undefined;
+      if (opts.shared(worktree)) return refuse(`${worktree} is a shared checkout; its git config is never wired`).reason;
+      try {
+        opts.wire(worktree, socket.socketPath);
+      } catch (err) {
+        const reason = `git credential helper not wired: ${String((err as Error)?.message ?? err)}`;
+        return refuse(reason).reason;
+      }
+      wired = true;
+      return undefined;
+    },
+    retire(worktree, release) {
+      if (!wired) return;
+      wired = false;
+      release(worktree);
+      opts.unwire(worktree);
+    },
+    async close() {
+      const open = socket;
+      socket = undefined;
+      if (!open) return;
+      try {
+        await open.close();
+      } catch (err) {
+        opts.log("plan.credential_close_failed", { error: String((err as Error)?.message ?? err) });
+      } finally {
+        rmSync(opts.runDir, { recursive: true, force: true });
+      }
+    },
+  };
+  return { ok: true, lane };
 }

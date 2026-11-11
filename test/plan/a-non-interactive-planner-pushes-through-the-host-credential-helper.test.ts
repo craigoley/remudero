@@ -1,38 +1,28 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
 import { generateKeyPairSync } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { test } from "node:test";
-import { hostWorktreeGitResult, planCommand } from "#src/run-task.js";
 import {
-  hostAppIdentityEnv, plannerHostGitCredential, realScopedMint, startRunChildGitCredentialSocket,
+  hostAppIdentityEnv, openPlannerGitCredential, plannerHostGitCredential, realScopedMint, startRunChildGitCredentialSocket,
   type HostAppIdentity, type PlannerHostGitCredential,
 } from "#src/lib/secret-boundary.js";
 import { hostWorktreeGitAsync } from "#src/lib/worktree-git.js";
-import { wireCredentialHelperSocket, type WorkerResult } from "#src/lib/worker.js";
-import { ghShim } from "#test/helpers/gh-shim.js";
+import { unwireCredentialHelperSocket, wireCredentialHelperSocket } from "#src/lib/worker.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
-import { REPO_ROOT } from "#test/helpers/repo-root.js";
-
-type PlanCredential = NonNullable<NonNullable<Parameters<typeof planCommand>[1]>["credential"]>;
 
 // W1-T11851: `rmd plan` launched from a non-interactive shell had no credential for its own pushes — the only
 // token was a ~/.bashrc export, which bash reads only for an interactive shell. Its pushes now present a
 // repo-scoped token minted from the host registry's App identity at the git credential-helper boundary.
 
-const GIT_ENV = { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" };
 const FAKE_TOKEN = "ghs_W1T11851fakescopedtoken";
 const DECOY_TOKEN = "ghp_W1T11851bashrcdecoy";
 const REQUEST = "protocol=https\nhost=github.com\npath=acme/widgets.git\n\n";
 
 function scratch(tag: string): string {
   return mkdtempSync(join(tmpdir(), `rmd-t11851-${tag}-`));
-}
-
-function git(dir: string, ...args: string[]): string {
-  return execFileSync("git", ["-C", dir, ...args], { encoding: "utf8", env: GIT_ENV });
 }
 
 function writeKey(path: string): void {
@@ -145,27 +135,34 @@ test("W1-T11851 criterion 3: a non-interactive child whose only token is a .bash
   const dir = scratch("helper");
   const rows: Array<{ step: string; fields: Record<string, unknown> }> = [];
   const seen: NodeJS.ProcessEnv[] = [];
+  const released: string[] = [];
   const cleanups: Array<() => void> = [];
+  const envBefore = JSON.stringify(process.env);
   try {
     const key = join(dir, "app.pem");
     writeKey(key);
-    const resolved = await plannerHostGitCredential("acme/widgets", {
+    const credential = await plannerHostGitCredential("acme/widgets", {
       registryPath: registry(dir, instance("core", { github_repo: "acme/widgets", gh_app_id: "11", gh_app_installation_id: "22", gh_app_private_key_host_path: key })),
     });
-    assert.equal(resolved.kind, "app");
-    const identity = resolved as HostAppIdentity;
+    assert.equal(credential.kind, "app");
     const { main, worktree, cleanup } = laneFixture(dir);
     cleanups.push(cleanup);
     const home = decoyHome(dir);
-    const runDir = join(dir, "run");
-    mkdirSync(runDir);
+    const runDir = join(dir, "plan-cred-run");
     const log = (step: string, fields: Record<string, unknown>) => rows.push({ step, fields });
-    const socket = await startRunChildGitCredentialSocket({ runDir, log, mint: realScopedMint(log, recordingMint(seen), identity) });
+    // The plan lane's own credential, as planCommand opens it — only the mint is a stand-in.
+    const opened = await openPlannerGitCredential(credential, {
+      runDir, log, wire: wireCredentialHelperSocket, unwire: unwireCredentialHelperSocket, shared: (cwd) => cwd === main,
+      startSocket: (opts) => startRunChildGitCredentialSocket({ ...opts, mint: realScopedMint(opts.log, recordingMint(seen), opts.identity) }),
+    });
+    assert.ok(opened.ok, "an App identity opens a socket");
+    const lane = opened.lane;
     try {
-      wireCredentialHelperSocket(worktree, socket.socketPath);
+      assert.equal(statSync(runDir).mode & 0o777, 0o700, "the socket directory is owner-only");
+      assert.equal(lane.wire(worktree), undefined, "the lane's own worktree is wired");
       const wired = await bashCredentialFill("-c", worktree, home);
       assert.equal(password(wired.stdout), FAKE_TOKEN, `the wired helper answers a non-interactive child: ${JSON.stringify(wired)}`);
-      assert.deepEqual(seen, [hostAppIdentityEnv(identity)], "the mint read exactly the registry identity, from a private env");
+      assert.deepEqual(seen, [hostAppIdentityEnv(credential as HostAppIdentity)], "the mint read exactly the registry identity, from a private env");
       assert.deepEqual(seen[0], { GH_APP_ID: "11", GH_APP_INSTALLATION_ID: "22", GH_APP_PRIVATE_KEY_PATH: key });
       // The harness git leaf every reservation and run-branch push takes carries the same helper.
       assert.equal(password(await hostWorktreeGitAsync(worktree, ["credential", "fill"], { input: REQUEST })), FAKE_TOKEN);
@@ -177,11 +174,24 @@ test("W1-T11851 criterion 3: a non-interactive child whose only token is a .bash
       const interactive = await bashCredentialFill("-ic", main, home);
       assert.equal(password(interactive.stdout), DECOY_TOKEN, "bash -ic does read the .bashrc decoy");
       assert.notEqual(password(interactive.stdout), FAKE_TOKEN, "an unwired worktree never gets the scoped token");
+      assert.match(lane.wire(main) ?? "", /shared checkout/, "the operator checkout is never wired");
+
+      // Teardown: the release still presents the scoped token, so it runs before the unwire.
+      lane.retire(worktree, (cwd) => {
+        released.push(cwd);
+        assert.match(execFileSync("git", ["-C", cwd, "config", "--worktree", "--get-all", "credential.helper"], { encoding: "utf8" }),
+          /git-credential-socket-helper/, "the release runs while the worktree is still wired");
+      });
+      assert.throws(() => execFileSync("git", ["-C", worktree, "config", "--worktree", "--get-all", "credential.helper"], { stdio: "ignore" }),
+        "then the worktree is unwired");
     } finally {
-      await socket.close();
+      await lane.close();
     }
+    assert.deepEqual(released, [worktree], "unfiled ids go back from the wired worktree");
+    assert.equal(existsSync(runDir), false, "the socket directory is removed");
     assert.ok(rows.some((r) => r.step === "boundary.request" && r.fields.status === "minted"), "the mint is ledgered value-free");
     assert.ok(!JSON.stringify(rows).includes(FAKE_TOKEN), "no ledger row carries the token");
+    assert.equal(JSON.stringify(process.env), envBefore, "no GH_TOKEN, App variable or token enters the planner's process.env");
   } finally {
     for (const cleanup of cleanups) cleanup();
     rmSync(dir, { recursive: true, force: true });
@@ -220,140 +230,61 @@ test("the identity reaches the real mint and the real socket thread, and a pathl
   }
 });
 
-// ── planCommand itself, on the offline fixture shape test/plan-lane-mint.test.ts uses ─────────────────────────
-
-function fakeWorker(text: string): WorkerResult {
-  return { sessionId: "T11851", costUsd: 0, numTurns: 1, text, blocks: [text], stderr: "", subtype: "success", isError: false,
-    apiError: false, model: "claude-opus-5", effort: "high", tokens: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 },
-    totalCostUsd: 0, billingMode: "subscription", verdict: "success", qualitySuspect: false, compactionEvents: [], childEnvKeys: [] } as unknown as WorkerResult;
-}
-
-async function withPlanHarness(body: (configRoot: string) => Promise<void>): Promise<Array<Record<string, unknown>>> {
-  const dir = scratch("plan");
-  const saved = { HOME: process.env.HOME, PATH: process.env.PATH };
-  const bare = gitRepo({ bare: true, kind: "t11851-origin" });
-  const seed = gitRepo({ seedCommit: false, kind: "t11851-seed" });
-  const shim = ghShim([{ when: "pr list", stdout: "[]" }], { kind: "t11851-gh" });
+test("an unusable credential source refuses the plan lane before any socket, wiring or release", async () => {
+  const dir = scratch("lane");
   try {
-    mkdirSync(join(seed.dir, "plan", "tasks.d"), { recursive: true });
-    writeFileSync(join(seed.dir, "plan", "tasks.yaml"), "- id: W1-T4\n  title: \"seed\"\n  repo: remudero\n  origin: architect\n  depends_on: []\n  type: implement\n  verify: auto\n  status: queued\n  attempts: 0\n");
-    writeFileSync(join(seed.dir, "MASTER-PLAN.md"), "# MASTER PLAN\n");
-    seed.git("add", "-A");
-    seed.git("commit", "-q", "-m", "chore: seed");
-    seed.git("push", "-q", bare.dir, "main");
-    const home = join(dir, "home");
-    const configRoot = join(dir, "root");
-    mkdirSync(join(home, ".config", "remudero"), { recursive: true });
-    writeFileSync(join(home, ".config", "remudero", "config.json"), JSON.stringify({ claudeBin: "/usr/bin/true", root: configRoot, installRoot: REPO_ROOT }));
-    const originUrl = git(REPO_ROOT, "config", "--get", "remote.origin.url").trim();
-    const repoDir = join(configRoot, "repos", /[/:]([^/:]+)\/([^/]+?)(?:\.git)?$/.exec(originUrl)![2]!);
-    mkdirSync(dirname(repoDir), { recursive: true });
-    execFileSync("git", ["clone", "-q", bare.dir, repoDir], { env: GIT_ENV });
-    git(repoDir, "config", "user.name", "remudero-test");
-    git(repoDir, "config", "user.email", "test@remudero.invalid");
-    process.env.HOME = home;
-    process.env.PATH = `${shim.dir}:${saved.PATH}`;
-    await body(configRoot);
-    const ledger = join(configRoot, "state", "ledger.ndjson");
-    return existsSync(ledger) ? readFileSync(ledger, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l) as Record<string, unknown>) : [];
+    const rows: Array<{ step: string; fields: Record<string, unknown> }> = [];
+    const calls: string[] = [];
+    const base = {
+      runDir: join(dir, "run"), log: (step: string, fields: Record<string, unknown>) => rows.push({ step, fields }),
+      wire: (cwd: string, socketPath: string) => { calls.push(`wire ${cwd} ${socketPath}`); },
+      unwire: (cwd: string) => { calls.push(`unwire ${cwd}`); return []; }, shared: (cwd: string) => cwd === "/operator",
+    };
+    const app = { kind: "app" as const, registryPath: "/r.yaml", appId: "11", installationId: "22", keyPath: "/k.pem" };
+
+    const refused = await openPlannerGitCredential({ kind: "refused", registryPath: "/etc/remudero/daemon-instances.yaml", reason: "no host instance names acme/widgets" },
+      { ...base, startSocket: async () => { calls.push("socket"); throw new Error("unreachable"); } });
+    assert.deepEqual(refused, { ok: false, reason: "no host instance names acme/widgets" });
+    assert.equal(calls.length, 0, "a refused source starts no socket");
+    assert.deepEqual(rows.at(-1), { step: "plan.credential_refused", fields: { reason: "no host instance names acme/widgets", registry_path: "/etc/remudero/daemon-instances.yaml" } });
+
+    const unbound = await openPlannerGitCredential(app, { ...base, startSocket: async () => { throw new Error("bind refused"); } });
+    assert.deepEqual(unbound, { ok: false, reason: "git credential socket did not start: bind refused" });
+    assert.equal(existsSync(base.runDir), false, "a socket that did not start leaves no directory");
+
+    const seenIdentity: unknown[] = [];
+    const opened = await openPlannerGitCredential(app, { ...base, startSocket: async (opts) => {
+      seenIdentity.push(opts.identity);
+      return { socketPath: "/run/git.sock", close: async () => { throw new Error("close refused"); } };
+    } });
+    assert.ok(opened.ok);
+    assert.deepEqual(seenIdentity, [{ appId: "11", installationId: "22", keyPath: "/k.pem" }], "the socket gets ids and the key path only");
+    const released: string[] = [];
+    opened.lane.retire("/lane", (cwd) => released.push(cwd));
+    assert.equal(released.length, 0, "an unwired lane releases nothing early");
+    assert.match(opened.lane.wire("/operator") ?? "", /shared checkout/);
+    assert.equal(opened.lane.wire("/lane"), undefined);
+    opened.lane.retire("/lane", (cwd) => { released.push(cwd); calls.push(`release ${cwd}`); });
+    opened.lane.retire("/lane", (cwd) => released.push(cwd));
+    assert.deepEqual(calls, ["wire /lane /run/git.sock", "release /lane", "unwire /lane"], "release, then unwire — once");
+    await opened.lane.close();
+    await opened.lane.close();
+    assert.equal(rows.filter((r) => r.step === "plan.credential_close_failed").length, 1, "a socket that will not close is ledgered once, never thrown");
+
+    const unwritable = await openPlannerGitCredential(app, { ...base, wire: () => { throw new Error("config write refused"); },
+      startSocket: async () => ({ socketPath: "/run/git.sock", close: async () => {} }) });
+    assert.ok(unwritable.ok);
+    assert.equal(unwritable.lane.wire("/lane"), "git credential helper not wired: config write refused");
+    assert.equal(rows.at(-1)?.step, "plan.credential_refused");
+    await unwritable.lane.close();
+
+    const ambient = await openPlannerGitCredential({ kind: "ambient", registryPath: "/absent.yaml" }, { ...base, startSocket: async () => { throw new Error("unreachable"); } });
+    assert.ok(ambient.ok);
+    assert.equal(ambient.lane.wire("/lane"), undefined, "ambient wires nothing: today's helpers apply unchanged");
+    ambient.lane.retire("/lane", (cwd) => released.push(cwd));
+    await ambient.lane.close();
+    assert.deepEqual(released, ["/lane"], "ambient releases from where it always did");
   } finally {
-    process.env.HOME = saved.HOME;
-    process.env.PATH = saved.PATH;
-    bare.cleanup();
-    seed.cleanup();
-    rmSync(shim.dir, { recursive: true, force: true });
     rmSync(dir, { recursive: true, force: true });
   }
-}
-
-const BRIEF = ["--mode=create", "a", "fixture", "brief"];
-
-test("an unusable host credential refuses rmd plan before any reservation push or worker spawn", async () => {
-  for (const credential of [
-    { resolve: async () => ({ kind: "refused", reason: "the acme/widgets App key is not readable: EACCES", registryPath: "/etc/remudero/daemon-instances.yaml" }) },
-    { resolve: async () => ({ kind: "app", appId: "11", installationId: "22", keyPath: "/k.pem", registryPath: "/r.yaml" }),
-      startSocket: async () => { throw new Error("bind refused"); } },
-    { resolve: async () => ({ kind: "app", appId: "11", installationId: "22", keyPath: "/k.pem", registryPath: "/r.yaml" }),
-      startSocket: async () => ({ socketPath: "/nonexistent/git.sock", close: async () => { throw new Error("close refused"); } }),
-      wire: () => { throw new Error("config write refused"); } },
-  ] satisfies PlanCredential[]) {
-    let spawns = 0;
-    const gitCalls: string[][] = [];
-    let reads = 0;
-    const ledger = await withPlanHarness(async () => {
-      const code = await planCommand(BRIEF, {
-        spawn: async () => { spawns++; return fakeWorker("CLEAR: unused"); },
-        credential: { ...credential, git: (_cwd, args) => { gitCalls.push(args); return { status: 0, stdout: "", stderr: "" }; },
-          openPrFetch: () => { reads++; return []; } },
-      });
-      assert.equal(code, 1, "a refused credential exits non-zero");
-    });
-    assert.equal(spawns, 0, "no paid worker starts");
-    assert.deepEqual(gitCalls, [], "the remote reserver never runs");
-    assert.equal(reads, 0, "nothing is minted, so nothing is read");
-    const refusal = ledger.find((r) => r.step === "plan.credential_refused");
-    assert.ok(refusal && typeof refusal.reason === "string" && typeof refusal.registry_path === "string", `ledgered: ${JSON.stringify(ledger)}`);
-    assert.ok(!ledger.some((r) => r.step === "plan.id_minted"), "no id is claimed");
-    if (credential.wire) {
-      assert.match(String(refusal.reason), /helper not wired: config write refused/);
-      assert.ok(ledger.some((r) => r.step === "plan.credential_close_failed" && /close refused/.test(String(r.error))),
-        "a socket that will not close is ledgered, never masks the refusal");
-    }
-  }
-});
-
-test("rmd plan with the host App identity pushes through its own wired worktree and holds no token in its environment", async () => {
-  const seen: NodeJS.ProcessEnv[] = [];
-  const gitCwds: string[] = [];
-  const reads: unknown[] = [];
-  const unwired: string[] = [];
-  const envBefore = JSON.stringify(process.env);
-  let atSpawn: { harness?: string; child?: string; cwd: string } | undefined;
-  let socketDir = "";
-  const ledger = await withPlanHarness(async (configRoot) => {
-    const credDir = join(configRoot, "tmp");
-    const code = await planCommand(BRIEF, {
-      credential: {
-        resolve: async () => ({ kind: "app", appId: "11", installationId: "22", keyPath: "/host/app.pem", registryPath: "/r.yaml" }),
-        startSocket: (opts) => {
-          socketDir = opts.runDir;
-          assert.ok(opts.runDir.startsWith(credDir), "the socket lives in this run's own directory");
-          return startRunChildGitCredentialSocket({ ...opts, mint: realScopedMint(opts.log, recordingMint(seen), opts.identity) });
-        },
-        unwire: (cwd) => { unwired.push(cwd); return []; },
-        git: (cwd, args) => {
-          gitCwds.push(cwd);
-          return hostWorktreeGitResult(cwd, args);
-        },
-        openPrFetch: (args) => { reads.push(args); return []; },
-      },
-      spawn: async (args: { cwd: string }) => {
-        const home = decoyHome(mkdtempSync(join(tmpdir(), "rmd-t11851-home-")));
-        try {
-          atSpawn = {
-            cwd: args.cwd,
-            harness: password(await hostWorktreeGitAsync(args.cwd, ["credential", "fill"], { input: REQUEST })),
-            child: password((await bashCredentialFill("-c", args.cwd, home)).stdout),
-          };
-        } finally {
-          rmSync(dirname(home), { recursive: true, force: true });
-        }
-        return fakeWorker("CLEAR: nothing to file for this fixture brief");
-      },
-    });
-    assert.equal(code, 0);
-  });
-  assert.ok(atSpawn, "the worker ran");
-  assert.equal(atSpawn.harness, FAKE_TOKEN, "the reservation/push git leaf presents the scoped token");
-  assert.equal(atSpawn.child, FAKE_TOKEN, "a non-interactive child in the plan worktree gets the scoped token");
-  assert.deepEqual(seen.at(-1), { GH_APP_ID: "11", GH_APP_INSTALLATION_ID: "22", GH_APP_PRIVATE_KEY_PATH: "/host/app.pem" });
-  assert.ok(gitCwds.length > 0 && gitCwds.every((cwd) => cwd === atSpawn!.cwd),
-    `the reservation pushes and their release ran from the wired worktree: ${JSON.stringify(gitCwds)}`);
-  assert.ok(ledger.some((r) => r.step === "plan.id_minted"), "ids were reserved");
-  assert.ok(ledger.some((r) => r.step === "task_id.reservation_released"), `the release ran: ${JSON.stringify(ledger.map((r) => r.step))}`);
-  assert.deepEqual(unwired, [atSpawn.cwd], "the worktree is unwired after the release");
-  assert.equal(existsSync(socketDir), false, "the socket directory is removed");
-  assert.equal(reads.length, 1, "the open-PR read is made once, through openPrMintTexts's own transport seam");
-  assert.equal(JSON.stringify(process.env), envBefore, "the planner's process.env is untouched");
-  assert.ok(!Object.values(process.env).some((v) => v === FAKE_TOKEN), "no token value enters process.env");
 });
