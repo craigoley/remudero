@@ -4,6 +4,7 @@
 // Every test here drives the production path: `runSweep` with the effects of `buildSweepEffects`, real
 // git against a bare origin, and fakes only for GitHub and for the plan preflight verdict.
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -328,6 +329,60 @@ test("W1-T12199 criterion 10: the landing refuses a path outside plan/tasks.d an
   assert.match(result.refused[1]!.reason, /origin\/main does not hold .* only an edit of a task file that exists/);
   assert.deepEqual([f.staged(), f.branch(), f.gh.creates.length, f.preflight.calls], [[], undefined, 0, 0], "nothing is staged, tested or pushed");
 });
+
+const EDITED = (id: string): string => `${shard(id)}  note: staged edit\n`;
+
+test("W1-T12199: a file whose landing pull request cannot be read waits, and one closed without a merge is set aside", async () => {
+  const f = fixture();
+  f.refuse(A, "RUN-A");
+  await f.sweep();
+  const url = f.gh.creates[0]!.url;
+  assert.deepEqual(stagedTaskFiles(f.root), [{ relPath: pathOf(A), prUrl: url }]);
+  f.gh.open = []; // the seal is lifted, but the pull request's own state decides the file
+
+  const base = f.landingOpts();
+  const unreadable = await withLiveWritesAllowed(() => landTaskFilesAsync(f.checkout.dir, [], {
+    ...base,
+    gh: (args) => {
+      if (args[0] === "pr" && args[1] === "view") throw new Error("gh: the pull request is unreachable");
+      return base.gh!(args);
+    },
+  }));
+  assert.deepEqual(unreadable.waiting, [pathOf(A)], "an unreadable pull request leaves the file waiting");
+  assert.deepEqual(f.rows("task_files_landing.set_aside"), [], "nothing is set aside on a failed read");
+  assert.equal(f.gh.creates.length, 1, "nothing new is opened");
+
+  f.gh.states.set(url, "CLOSED");
+  await withLiveWritesAllowed(() => landTaskFilesAsync(f.checkout.dir, [], f.landingOpts()));
+  const [aside] = f.rows("task_files_landing.set_aside");
+  assert.equal(aside!.path, pathOf(A));
+  assert.match(String(aside!.reason), /its landing pull request .*\/pull\/9001 was closed without a merge/);
+  assert.deepEqual(f.staged(), [], "the closed file leaves the queue");
+  assert.ok(existsSync(join(f.root, "state", "task-files-landing-refused", pathOf(A))), "the file is kept, with its cause, for a person");
+  assert.equal(f.gh.creates.length, 1, "a set-aside file is not landed again");
+});
+
+for (const [name, message, expected] of [
+  ["a lost lease", "! [rejected] task-files-landing (stale info)", /moved while this batch was built, so another writer has it and the landing waits/],
+  ["any other push failure", "fatal: unable to access the remote", /was not pushed, and no lease was lost, so nothing was re-derived: fatal: unable to access the remote/],
+] as const) {
+  test(`W1-T12199: ${name} on the push means wait, with the file still staged and no pull request`, async () => {
+    const f = fixture();
+    const base = f.landingOpts();
+    const git = (args: string[], o?: { env?: NodeJS.ProcessEnv }): string => {
+      if (args[0] === "push") throw new Error(message);
+      return execFileSync("git", ["-C", f.checkout.dir, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], env: o?.env ?? process.env });
+    };
+    await withLiveWritesAllowed(() => landTaskFilesAsync(f.checkout.dir, [
+      { relPath: pathOf(A), content: EDITED(A), claim: `${A} edit`, proof: "grep: staged edit in plan/tasks.d/W1-T90001-fixture.yaml" },
+    ], { ...base, stageOnly: true }));
+    const result = await withLiveWritesAllowed(() => landTaskFilesAsync(f.checkout.dir, [], { ...base, git }));
+    assert.match(String(result.error), expected);
+    assert.equal(result.pushed, false);
+    assert.deepEqual(result.waiting, [pathOf(A)]);
+    assert.deepEqual([f.branch(), f.gh.creates.length, f.staged()], [undefined, 0, [`${A}-fixture.yaml`]]);
+  });
+}
 
 test("W1-T12199 criterion 12: the escalation triage accepts an amendment that waits and names the wait in its receipt", () => {
   assert.match(planAmendmentReceipt(A, { outcome: "waiting" }), /W1-T90001 waits for the next landing pull request of task files/);
