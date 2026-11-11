@@ -42113,9 +42113,9 @@ const COMMANDS: readonly CommandSpec[] = [
   },
   {
     name: "daemon",
-    syntax: "rmd daemon --repo <name> [--plan <path>] [--max <n>] [--poll-ms <n>] [--dry-run] [--allow-self-target] [--allow-stale]",
+    syntax: "rmd daemon --repo <name> [--plan <path>] [--max <n>] [--poll-ms <n>] [--shadow-ops-catalog <owner>/<name>] [--dry-run] [--allow-self-target] [--allow-stale]",
     summary: "Persistent scheduler loop draining a named repo; refuses self-target unattended.",
-    detail: "persistent scheduler loop; --repo picks the repo to drain + its gateway (e.g. remudero-sandbox for W1-T12d). Refuses to drain its OWN source repo unattended without --allow-self-target. --dry-run previews the target + planned tasks, spawns nothing. Self-hosting reads the plan from origin/main (W1-T60); --allow-stale proceeds on the last-fetched refs if the fetch fails.",
+    detail: "persistent scheduler loop; --repo picks the repo to drain + its gateway (e.g. remudero-sandbox for W1-T12d). Refuses to drain its OWN source repo unattended without --allow-self-target. --dry-run previews the target + planned tasks, spawns nothing. Self-hosting reads the plan from origin/main (W1-T60); --allow-stale proceeds on the last-fetched refs if the fetch fails. --shadow-ops-catalog <owner>/<name> (W1-T11770, off by default) reads that repository's task catalog read-only off the loop and records only an aggregate dispatch.secondary_catalog_shadow row; it never adds work to dispatch.",
   },
   {
     name: "daemon-plist",
