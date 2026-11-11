@@ -31,8 +31,8 @@
     availableParallelism() follows allowed CPU affinity but does not account for cgroup quota. The reader considers every visible cgroup-v2 ancestor and labels any hidden or unreadable part UNKNOWN, never unlimited.
   design: |
     Add the reader and observation value in the existing src/lib/test-slot.ts module; do not add a new src module whose only importer would be its tests while a later task owns the caller.
-    Read allowed online CPUs and every visible cpu.max from the process's cgroup leaf through the visible mount root. Effective numeric capacity is min(allowed CPUs, every visible quota/period). A malformed, unreadable or hidden part is named in unknown[] and is never interpreted as max or zero.
-    Capture load1 and CPU PSI some avg10 when readable, with source and timestamp. Do not read system CPU PSI full. Preserve UNKNOWN fields.
+    Read allowed online CPUs and resolve every visible cgroup-v2 cpu.max from the process's cgroup leaf through the visible mount root. Return effectiveCores only when that chain is fully resolved and every quota is either a valid quota/period or max; it is min(allowed CPUs, every valid quota/period). If any required parent or file is hidden, malformed or unreadable, effectiveCores is UNKNOWN, capacityBasis is unknown, and known visible quotas are diagnostic only. Never infer unlimited capacity from a partial chain.
+    Capture load1 from os.loadavg()[0] and system CPU PSI some avg10 from /proc/pressure/cpu when readable, with source, scope and timestamp. Do not read system CPU PSI full. Preserve unsupported or unreadable inputs as UNKNOWN, not zero.
     Carry the observation on the acquired lease and through scripts/preflight-author.mjs into the existing author receipt's testSlot field. This task adds telemetry only; admission behavior and thresholds stay unchanged.
     Inject filesystem, affinity, load and pressure readers so tests are host-independent.
     NOT IN SCOPE: calibration (W1-T12302), applying a calibrated line (W1-T12303), static-stage admission (W1-T12004), or worker caps.
