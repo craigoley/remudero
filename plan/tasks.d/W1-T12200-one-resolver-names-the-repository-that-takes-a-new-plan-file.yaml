@@ -18,7 +18,7 @@
     - src/lib/plan-destination.ts
     - src/cli/commands/daemon.ts
     - test/plan/one-resolver-names-the-repository-that-takes-a-new-plan-file.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "With no host file, `resolvePlanDestination(kind)` returns the public repository and its checkout, the same owner, name and directory that the writers use today"

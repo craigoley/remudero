@@ -12006,6 +12006,7 @@ export interface PostReviewStatusGuardedOpts {
   repo: string;
   sha: string;
   state: PostableReviewState;
+  outboxBeforePost?: true;
   description?: string;
   /** The PR the lock/ledger key off — every real caller already keys its `review.posted` ledger lines by this same id
    * (the task id, or the `dep-review-PR<n>`/`PR-<n>` synthetic ids `run-task.ts` falls back to). */
@@ -12365,6 +12366,9 @@ async function publishReviewStatusLocked(opts: PostReviewStatusGuardedOpts): Pro
         ...(lifecycle.merged ? { lifecycle: "merged" as const } : lifecycle.closed ? { lifecycle: "closed" as const } : {}),
       };
     }
+    if (opts.outboxBeforePost === true && planLintRetryIdentity === undefined && opts.reopenedDegradedTerminal !== true) {
+      writeReviewOutboxEntry(opts, statusDescription, true);
+    }
     try {
       await post({ owner: opts.owner, repo: opts.repo, sha: opts.sha, state: opts.state, description: statusDescription });
     } catch (e) {
@@ -12449,6 +12453,7 @@ export interface ReviewOutboxEntry {
   evaluator_provenance?: ReviewEvaluatorProvenance;
   presented_failure_ids?: string[];
   written_at: string;
+  posting?: true;
 }
 
 export function reviewOutboxDir(ledgerPath: string): string {
@@ -12491,7 +12496,11 @@ function reviewOutboxCommentBody(verdict: PostReviewStatusGuardedOpts["verdict"]
   return parts.join("\n\n---\n\n");
 }
 
-function writeReviewOutboxEntry(opts: PostReviewStatusGuardedOpts, description: string | undefined): ReviewOutboxWrite {
+export function settleReviewOutboxEntry(ledgerPath: string, prUrl: string, inputKey: string): void {
+  rmSync(reviewOutboxEntryPath(ledgerPath, prUrl, inputKey), { force: true });
+}
+
+function writeReviewOutboxEntry(opts: PostReviewStatusGuardedOpts, description: string | undefined, posting = false): ReviewOutboxWrite {
   if (opts.state === "pending" || opts.prUrl === undefined || opts.reviewInputDigest === undefined) {
     return { ok: false, reason: "not a terminal verdict keyed by its PR and review input" };
   }
@@ -12503,6 +12512,7 @@ function writeReviewOutboxEntry(opts: PostReviewStatusGuardedOpts, description: 
     evaluator_provenance: opts.evaluatorProvenance,
     ...(opts.presentedFailureIds !== undefined ? { presented_failure_ids: [...opts.presentedFailureIds] } : {}),
     written_at: systemClock.iso(),
+    ...(posting ? { posting: true as const } : {}),
   };
   try {
     const renamed = writeAtomic(reviewOutboxEntryPath(opts.ledgerPath, opts.prUrl, opts.reviewInputDigest), `${JSON.stringify(entry)}\n`);
@@ -12558,6 +12568,7 @@ export interface DrainReviewOutboxOpts {
   readReviewStatusHistory?: ReviewStatusHistoryReader;
   commentDeps?: PostReviewCommentDeps;
   lockOpts?: AcquireReviewStatusLockOpts;
+  liveStatus?: { state?: string; description?: string };
 }
 
 export interface ReviewOutboxDrainResult {
@@ -12592,9 +12603,22 @@ export async function drainReviewOutbox(opts: DrainReviewOutboxOpts): Promise<Re
       discard("the review input changed on an unmoved head");
       continue;
     }
+    let onGitHub = false;
+    if (entry.posting === true) {
+      const rowed = readLiveLedgerRecords(opts.ledgerPath).some((line) => line.step === "review.posted" &&
+        line.pr_url === opts.prUrl && line.head_sha === entry.head_sha && line.review_input_digest === entry.input_key &&
+        (line.state === "success" || line.state === "failure"));
+      if (rowed) {
+        discard("the verdict already has its review.posted row");
+        continue;
+      }
+      if (opts.liveStatus === undefined) continue;
+      onGitHub = opts.liveStatus.state === entry.state &&
+        (opts.liveStatus.description ?? "") === (entry.description ?? "").slice(0, 140);
+    }
     const rawPost = opts.post ?? postReviewStatus;
     let threw = false;
-    const result = await postReviewStatusGuarded({
+    const result: PostReviewStatusGuardedResult = onGitHub ? { posted: true } : await postReviewStatusGuarded({
       owner: opts.owner, repo: opts.repo, sha: entry.head_sha, state: entry.state, description: entry.description,
       taskId: opts.taskId, evidence: entry.evidence, ledgerPath: opts.ledgerPath, runId: opts.runId, prUrl: opts.prUrl,
       reviewInputDigest: entry.input_key, reviewDecisionDigest: entry.review_decision_digest,
@@ -12648,11 +12672,12 @@ export async function drainReviewOutbox(opts: DrainReviewOutboxOpts): Promise<Re
       run_id: opts.runId, task_id: opts.taskId, step: "review.outbox_posted", ...prCoordinatesNotUrl,
       head_sha: entry.head_sha, state: entry.state, review_input_digest: entry.input_key, outbox_run_id: entry.run_id,
       comment: comment === undefined ? "none" : comment.posted ? "posted" : comment.reason,
+      ...(onGitHub ? { status: "already_on_github" } : {}),
     });
     rmSync(path, { force: true });
     drained = {
       outcome: "posted",
-      reason: `posted the ${entry.state} verdict run ${entry.run_id} computed for ${entry.head_sha.slice(0, 7)} — no review needed (W1-T11928)`,
+      reason: `${onGitHub ? "settled" : "posted"} the ${entry.state} verdict run ${entry.run_id} computed for ${entry.head_sha.slice(0, 7)} — no review needed (W1-T11928)`,
     };
   }
   return drained;
@@ -12770,6 +12795,7 @@ export async function postReviewPending(opts: PostReviewPendingOpts): Promise<Po
   // claim holds unless its owner is proven dead; an unreadable age always holds.
   let takenOverFrom: PendingReviewStatusRecord | undefined;
   let ownerProvenDead = false;
+  let liveStatus: { state?: string; description?: string } = {};
   const assessOwner = opts.assessPendingOwner ??
     ((record: PendingReviewStatusRecord) => assessPendingReviewOwner(record, { isPidAlive: defaultIsPidAlive }));
   if (priorPending && priorPending.headSha === opts.sha) {
@@ -12803,6 +12829,7 @@ export async function postReviewPending(opts: PostReviewPendingOpts): Promise<Po
     if (status && !["pending", "success", "failure", "error"].includes(status.state ?? "")) {
       throw new Error("unrecognized remudero-review state");
     }
+    if (status) liveStatus = { state: status.state === "error" ? "failure" : status.state, description: status.description };
     if (status?.state === "pending") {
       const foreignRun = /owned by run ([^\s)]+)\)/.exec(status.description ?? "")?.[1];
       if (!foreignRun) throw new Error("pending remudero-review owner is unreadable");
@@ -12825,6 +12852,17 @@ export async function postReviewPending(opts: PostReviewPendingOpts): Promise<Po
     }
   } catch (error) {
     return { posted: false, reason: `holding review: shared remudero-review status unreadable — ${String(error)}` };
+  }
+  if (opts.prUrl !== undefined && opts.reviewInputDigest !== undefined) {
+    const settled = await drainReviewOutbox({
+      owner: opts.owner, repo: opts.repo, sha: opts.sha, taskId: opts.taskId, runId: opts.runId,
+      ledgerPath: opts.ledgerPath, prUrl: opts.prUrl, reviewInputDigest: opts.reviewInputDigest,
+      fetchLifecycle: opts.fetchLifecycle, post: opts.post, readReviewStatusHistory: opts.readReviewStatusHistory,
+      commentDeps: opts.commentDeps, lockOpts: opts.lockOpts, liveStatus,
+    });
+    if (settled.outcome === "posted" || settled.outcome === "held") {
+      return { posted: false, outbox: settled.outcome, reason: settled.reason };
+    }
   }
   const description = (
     takenOverFrom && ownerProvenDead

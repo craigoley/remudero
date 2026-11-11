@@ -19,7 +19,7 @@
     - deploy/mac/JANITOR.md
     - test/deploy/the-mac-janitor-trims-a-tsx-cache-that-is-in-use.test.ts
     - test/the-mac-reclaims-its-own-scratch.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "When a process holds one file open inside a tsx cache, a pass removes every other cache file that has not changed for six hours"
