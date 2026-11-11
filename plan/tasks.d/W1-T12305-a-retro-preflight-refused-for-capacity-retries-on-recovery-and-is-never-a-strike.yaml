@@ -1,5 +1,5 @@
 - id: W1-T12305
-  title: "A retro prepublish preflight whose suite slot comes back over_capacity requests the slot again once the CPU reading recovers, and if it never does, run-task reports NOT_RUN OVER_CAPACITY and does not count a publication strike"
+  title: "A retro preflight at the suite-capacity wait bound records NOT_RUN without a publication strike or push, and the next scheduled trigger automatically retries after capacity recovers"
   repo: remudero
   depends_on: [W1-T12303]
   priority: 1.4
@@ -7,46 +7,39 @@
   verify: auto
   principles:
     tdd: strict
-  risk: high # Rule 19 merits test YES: one invariant, a capacity refusal is never a strike and never pushes, from the retro-preflight result through run-task's handling
+  risk: high
   band_meaning: span
   origin: architect
-  plan_refs:
-    - W1-T12303
-    - W1-T6111
-    - W1-T2803
-    - W1-T2988
+  plan_refs: [W1-T12303, W1-T6111, W1-T2803, W1-T2988]
   files:
     - src/lib/retro-preflight.ts
     - src/run-task.ts
-    - test/a-retro-preflight-refused-for-capacity-retries-on-recovery-and-is-never-a-strike.test.ts
+    - test/learning/a-retro-preflight-refused-for-capacity-retries-on-recovery-and-is-never-a-strike.test.ts
   status: queued
   attempts: 0
   acceptance:
-    - claim: "Automatic retry: a first over_capacity lease starts no suite and resumes no repair session. When the injected CPU reading next falls below its line, the slot is requested again once, and a green run then returns ok true with the over_capacity wait on its attempt row"
-      proof: "unit test: test/a-retro-preflight-refused-for-capacity-retries-on-recovery-and-is-never-a-strike.test.ts"
-    - claim: "If capacity never recovers within the existing wait bound, the result is ok false with overCapacity true. The ledger gets a retro.preflight_over_capacity row and no retro.preflight_failed row, so decideRetroPublicationEscalation counts no strike"
-      proof: "unit test: test/a-retro-preflight-refused-for-capacity-retries-on-recovery-and-is-never-a-strike.test.ts"
-    - claim: "On that result run-task does not push. It says prepublish validation NOT_RUN: OVER_CAPACITY with the readings, does not call escalateRetroPublicationFailure, and leaves the marker unchanged so the next fire retries"
-      proof: "unit test: test/a-retro-preflight-refused-for-capacity-retries-on-recovery-and-is-never-a-strike.test.ts"
-    - claim: "Any other NOT_RUN lease and every real suite failure keep today's path: a retro.preflight_failed row, a repair or stand-down, and an escalation at the strike cap"
-      proof: "unit test: test/a-retro-preflight-refused-for-capacity-retries-on-recovery-and-is-never-a-strike.test.ts"
-    - claim: "The capacity outcome has its own ledger step"
-      proof: "grep: retro.preflight_over_capacity in src/lib/retro-preflight.ts"
+    - claim: "When the slot returns over_capacity, retro-preflight starts no suite or repair and consumes no repair attempt"
+      proof: "unit test: W1-T12305 criterion 1: capacity outcome starts neither tests nor repair"
+    - claim: "The outcome writes retro.preflight_over_capacity and no retro.preflight_failed row, so escalation counts no publication strike"
+      proof: "unit test: W1-T12305 criterion 2: capacity refusal is a distinct non-strike ledger event"
+    - claim: "run-task reports NOT_RUN: OVER_CAPACITY with readings, skips push and escalation, and leaves the marker unchanged so the next scheduled trigger retries after recovery"
+      proof: "unit test: W1-T12305 criterion 3: scheduled retry after recovery does not publish or count a strike"
+    - claim: "Every other NOT_RUN and each real suite failure retain the existing repair, stand-down and strike-cap path"
+      proof: "unit test: W1-T12305 criterion 4: genuine failures retain the existing escalation path"
+    - claim: "The capacity event has a distinct ledger step"
+      proof: 'grep: retro\.preflight_over_capacity in src/lib/retro-preflight.ts'
   rationale: |
-    Initiative (operator, 2026-11-11): propagate the empty-pool OVER_CAPACITY outcome through preflight and run-task, and retry automatically when capacity recovers. The proof-executor suite that failed on unchanged origin/main under load is the case where a capacity failure was read as a branch failure.
-    Rule 19 (#588 merits test): YES, risk:high with band_meaning span. The overCapacity result shape that retro-preflight.ts returns is what run-task.ts branches on, and criteria 2 and 3 together assert "no strike, no push, marker unchanged". Either half alone leaves the other one booking a capacity refusal as a failed validation. All five reserved ids are already used, so this run could not decompose it.
-    Settled by lookup: what does a NOT_RUN lease do in the retro preflight today? -> runAttempt throws "retro preflight NOT_RUN (...)" (src/lib/retro-preflight.ts:631). That becomes a failed attempt, logged as retro.preflight_failed (src/lib/retro-preflight.ts:759).
-    Settled by lookup: what counts as a publication strike? -> only retro.preflight_failed rows in the episode (decideRetroPublicationEscalation, src/lib/retro.ts:5083). A distinct step is therefore not a strike, and the escalation logic needs no change.
-    Settled by lookup: where does run-task consume the result? -> src/run-task.ts:23641-23671. When preflight.ok is false it says "prepublish validation failed", calls escalateRetroPublicationFailure, and returns 1 with the marker unchanged.
-    Settled by lookup: is the retry already filed? -> no. W1-T2803 makes a bound failure stand down rather than repair, and adds no retry on capacity recovery. W1-T12303 leaves callers out of scope.
-    Settled by lookup: does the author preflight cover this caller? -> no. W1-T12304 covers scripts/preflight-author.mjs only.
+    A capacity-inconclusive run must never become a publication strike or a push. The existing next-trigger cadence provides the automatic retry after capacity recovers.
+    The suite-slot acquisition already waits in the shared FIFO for the existing bound. It then releases its ticket on OVER_CAPACITY. A second local wait or immediate reacquisition would double the bound and join the queue tail, undermining fairness.
+    Today runAttempt turns every NOT_RUN into retro.preflight_failed. That row feeds decideRetroPublicationEscalation, and run-task treats any preflight failure as a reason to escalate. A distinct capacity outcome and ledger event preserves remedies for actual suite failures while leaving the publication marker untouched for the next scheduled fire.
   design: |
-    In runAttempt, an over_capacity lease returns a capacity result. It does not throw and does not start the suite.
-    runRetroPrepublishPreflight then polls the same injected readings W1-T12303 uses, under TEST_SLOT_WAIT_BOUND_MS. Once the reading has recovered it requests the slot exactly once more and runs the attempt as normal. That attempt does not count toward the repair budget.
-    If capacity does not recover, or the second lease is also over_capacity, the result is { ok: false, overCapacity: true, readings }. It is logged as retro.preflight_over_capacity.
-    In run-task, a result with overCapacity says NOT_RUN: OVER_CAPACITY, skips escalateRetroPublicationFailure, and returns as the failed branch does today without pushing. The marker stays unchanged, so the next trigger is the outer retry.
-    NOT IN SCOPE: the admission rule (W1-T12303), the author preflight (W1-T12304), worker-provider's open-weight run-check (it already returns NOT_RUN on any refused lease), and the retro trigger cadence.
+    In runAttempt, an over_capacity lease returns a typed capacity result; it does not throw, start tests or repair, or consume repair budget.
+    runRetroPrepublishPreflight returns {ok:false, overCapacity:true, readings} after that one bounded FIFO wait. It does not poll outside the queue or immediately request another ticket. The existing next scheduled trigger retries through the shared FIFO after capacity recovers.
+    Log retro.preflight_over_capacity, never retro.preflight_failed, for this outcome. Strike counting reads only retro.preflight_failed, so its implementation does not change.
+    In run-task, report NOT_RUN: OVER_CAPACITY and skip push and escalateRetroPublicationFailure. Leave the marker unchanged for the normal next trigger.
+    Other NOT_RUN results and genuine suite failures keep today's path.
+    NOT IN SCOPE: admission (W1-T12303), author receipt mapping (W1-T12304), worker-provider's open-weight check or trigger cadence.
   falsifier: |
-    Never re-request after recovery and criterion 1 must fail. Log the capacity refusal as retro.preflight_failed and criterion 2 must fail. Escalate on it and criterion 3 must fail. Route a real suite failure down the capacity path and criterion 4 must fail. Restore and require all to pass.
+    Start repair or consume an attempt on over_capacity and criterion 1 must fail. Log capacity as retro.preflight_failed and criterion 2 must fail. Push or escalate on capacity and criterion 3 must fail. Route a genuine suite failure through capacity handling and criterion 4 must fail. Restore and require all criteria to pass.
   note: |
     Filed by PLAN-create-1794411017336 from the reserved ids, in order.

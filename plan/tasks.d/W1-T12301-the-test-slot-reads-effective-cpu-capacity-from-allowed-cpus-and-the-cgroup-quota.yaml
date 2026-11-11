@@ -1,5 +1,5 @@
 - id: W1-T12301
-  title: "One reader gives the effective CPU capacity a test-slot admission may count: the allowed online CPUs, capped by the cgroup v2 cpu.max quota when it can be read, and UNKNOWN parts named rather than guessed"
+  title: "The host-wide test-slot observation records allowed CPUs, visible cgroup-v2 quota, load and CPU PSI some as structured author-receipt evidence, with hidden or unreadable quota explicitly UNKNOWN"
   repo: remudero
   depends_on: []
   priority: 1.4
@@ -7,37 +7,36 @@
   verify: auto
   principles:
     tdd: strict
-  risk: low # a new pure reader with injected file reads; nothing consumes it until W1-T12303
-  band_meaning: blast-radius
+  risk: high
+  band_meaning: span
   origin: architect
-  plan_refs:
-    - W1-T9952
-    - W1-T12004
-    - W1-T12303
+  plan_refs: [W1-T9952, W1-T12004, W1-T12302]
   files:
-    - src/lib/effective-cpu-capacity.ts
-    - test/the-test-slot-reads-effective-cpu-capacity-from-allowed-cpus-and-the-cgroup-quota.test.ts
+    - src/lib/test-slot.ts
+    - scripts/preflight-author.mjs
+    - test/ci/suites/the-author-test-slot-receipt-records-effective-cpu-capacity-and-pressure.test.ts
   status: queued
   attempts: 0
   acceptance:
-    - claim: "With an affinity mask of 8 CPUs and cpu.max reading 400000 100000, the capacity is 4 cores with basis cgroup-quota; with cpu.max reading max it is 8 with basis allowed-cpus"
-      proof: "unit test: test/the-test-slot-reads-effective-cpu-capacity-from-allowed-cpus-and-the-cgroup-quota.test.ts"
-    - claim: "An unreadable or malformed cpu.max leaves the allowed-CPU count in force and names the quota as UNKNOWN; it is never read as unlimited and never as zero"
-      proof: "unit test: test/the-test-slot-reads-effective-cpu-capacity-from-allowed-cpus-and-the-cgroup-quota.test.ts"
-    - claim: "The reader is a named export the test slot can consume"
-      proof: "grep: readEffectiveCpuCapacity in src/lib/effective-cpu-capacity.ts"
+    - claim: "Visible cgroup-v2 cpu.max quotas from the leaf through every visible ancestor cap allowed CPUs; hidden parent quota remains UNKNOWN, never max or zero"
+      proof: "unit test: W1-T12301 criterion 1: visible ancestor quotas cap effective CPU capacity"
+    - claim: "The acquired lease and author receipt preserve structured load per effective core, CPU PSI some, capacity basis and UNKNOWN reasons"
+      proof: "unit test: W1-T12301 criterion 2: author receipt preserves structured CPU observations"
+    - claim: "The existing test-slot module provides the observation used by suite admission"
+      proof: "grep: effectiveCpuCapacity( in src/lib/test-slot.ts"
   rationale: |
-    Initiative (operator, 2026-11-11): empty-pool suite admission must judge capacity from the CPUs the run may actually use.
-    readHostLoad in src/lib/test-slot.ts uses availableParallelism(), which follows the affinity mask but ignores a cgroup CPU quota. A container capped at 4 cores on an 8-core host is then priced as 8.
-    Settled by lookup: is this already filed? -> no. W1-T9952 sizes the pool from cores and load1; W1-T12004 adds CPU pressure to static stages; neither reads a quota (plan/tasks.d/W1-T9952-*, plan/tasks.d/W1-T12004-*).
-    Settled by lookup: does any reader of cpu.max already exist? -> no. A grep of src/ for cpu.max finds nothing; review-capacity.ts reads only cpu.pressure, and lane-governor.ts reads only the cpu.weight share (src/lib/review-capacity.ts:712, src/lib/lane-governor.ts:394).
-    Settled by lookup: which online-CPU reading is in use? -> availableParallelism() from node:os, which follows sched_getaffinity (src/lib/test-slot.ts:185).
+    Initiative (operator, 2026-11-11): the pressure-aware admission work must calibrate from measurements present on the receipts it classifies.
+    OBSERVED on the 8-vCPU Azure host: load reached 75 to 85 and CPU PSI some avg10 later measured 84 percent while the shared suite-slot directory had no live holder. Nested bwrap tests timed out on a proof-executor suite that also failed on unchanged origin/main; these attempts are capacity-inconclusive, not branch failures.
+    Existing author receipts carry a test-slot note with cores, granted workers, non-test load and headroom, but not a durable structured CPU sample. This task makes the inputs durable before calibration consumes them.
+    availableParallelism() follows allowed CPU affinity but does not account for cgroup quota. The reader considers every visible cgroup-v2 ancestor and labels any hidden or unreadable part UNKNOWN, never unlimited.
   design: |
-    readEffectiveCpuCapacity(read?, allowed?) returns { cores, allowedCpus, quotaCores?: number, basis: "cgroup-quota" | "allowed-cpus", unknown: string[] }.
-    allowed defaults to availableParallelism(). The quota is the first cpu.max that can be read: /sys/fs/cgroup/cpu.max, which is the process's own cgroup in a cgroup namespace. "max" means no quota. A quota is quota/period, rounded down, at least 1. cores is the smaller of allowedCpus and quotaCores.
-    File reads are injected, so the tests need no host. No constant is added.
-    NOT IN SCOPE: changing readHostLoad or any admission rule (W1-T12303 wires this in), cgroup v1, and the cpu.weight share.
+    Add the reader and observation value in the existing src/lib/test-slot.ts module; do not add a new src module whose only importer would be its tests while a later task owns the caller.
+    Read allowed online CPUs and every visible cpu.max from the process's cgroup leaf through the visible mount root. Effective numeric capacity is min(allowed CPUs, every visible quota/period). A malformed, unreadable or hidden part is named in unknown[] and is never interpreted as max or zero.
+    Capture load1 and CPU PSI some avg10 when readable, with source and timestamp. Do not read system CPU PSI full. Preserve UNKNOWN fields.
+    Carry the observation on the acquired lease and through scripts/preflight-author.mjs into the existing author receipt's testSlot field. This task adds telemetry only; admission behavior and thresholds stay unchanged.
+    Inject filesystem, affinity, load and pressure readers so tests are host-independent.
+    NOT IN SCOPE: calibration (W1-T12302), applying a calibrated line (W1-T12303), static-stage admission (W1-T12004), or worker caps.
   falsifier: |
-    Ignore cpu.max and criterion 1 must fail. Read an unreadable cpu.max as max, or as 0, and criterion 2 must fail. Restore and require both to pass.
+    Ignore a visible ancestor quota and criterion 1 must fail. Drop structured telemetry before the receipt and criterion 2 must fail. Restore and require both to pass.
   note: |
     Filed by PLAN-create-1794411017336 from the reserved ids, in order.
