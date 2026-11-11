@@ -12,7 +12,7 @@
   plan_refs: [W1-T1069, W1-T11431, W1-T3596, W1-T10573]
   files: [deploy/recycle-container.sh, src/lib/deployer.ts, test/recycle-container.test.ts, test/deployer.test.ts, test/the-recycle-wait-is-sized-under-the-run-it-waits-on.test.ts]
   priority: 4
-  status: queued
+  status: merged
   # backlog gardener: band=4 evidence=40c37f860c011c75
   # backlog gardener: placed=2026-11-06T05:13:51.452Z
   attempts: 0

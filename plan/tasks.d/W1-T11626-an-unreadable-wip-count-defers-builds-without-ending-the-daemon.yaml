@@ -12,7 +12,7 @@
   depends_on: [W1-T11458]
   files: [src/lib/target-wip-ownership.ts, test/infra/a-refused-target-wip-read-never-ends-the-daemon.test.ts, test/parallel-dispatch.test.ts]
   priority: 4
-  status: queued
+  status: merged
   # backlog gardener: band=4 evidence=2044f0a47efc2d7f
   # backlog gardener: placed=2026-11-08T05:25:55.294Z
   attempts: 0

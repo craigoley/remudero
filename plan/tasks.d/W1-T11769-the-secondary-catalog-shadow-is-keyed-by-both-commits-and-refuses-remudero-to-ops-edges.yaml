@@ -11,7 +11,7 @@
   origin: architect
   plan_refs: [W1-T11600, W1-T11768, W1-T9763, W1-T9993]
   priority: 1
-  status: queued
+  status: merged
   attempts: 0
   files: [src/lib/daemon.ts, src/lib/ops-catalog-source.ts, test/daemon/ops-catalog-shadow-revision.test.ts, test/daemon/ops-catalog-shadow-dependencies.test.ts, test/daemon/ops-catalog-shadow-effects.test.ts]
   rationale: |

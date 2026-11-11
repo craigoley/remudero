@@ -21,7 +21,7 @@
     - src/cli/commands/review.ts
     - test/reviews-and-detached-actions-run-as-run-children.test.ts
     - test/review-skips-spawn-on-plan-only.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: The detached-work host's spawnReview answers undefined for a PR whose isPlanFiling is true in every mode, starts no probe and no run child for it, and ledgers review.placement with placement in-process and reason plan-only-filing; a code review's placement is unchanged

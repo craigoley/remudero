@@ -19,7 +19,7 @@
     - src/lib/measurement-cadence.ts
     - src/lib/feedback-landing.ts
     - test/plan/the-plan-reconcile-landing-is-one-bounded-batch.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: A reconcile drift larger than the batch limit hands the landing bridge only that many shards, lowest task number first, and reports that many as landed; a drift within the limit hands over every shard unchanged

@@ -15,7 +15,7 @@
   files:
     - src/cli/commands/review.ts
     - test/review/a-reviewer-clone-reads-the-real-origin-main.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: materializeReviewerSnapshot sets the disposable clone's refs/remotes/origin/main to the source repository's refs/remotes/origin/main, so in a real fixture whose local main lags its origin/main by several commits, the clone's origin/main and its `git merge-base origin/main HEAD` equal the source's; when the source has no origin/main the clone keeps no origin/main ref, so no review reads a stale base as if it were main

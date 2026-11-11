@@ -1,0 +1,53 @@
+- id: W1-T12169
+  title: "One command in the repo ships a hand-built branch from an operator session"
+  repo: remudero
+  depends_on: []
+  priority: 1.2
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # a new command that chooses a host, runs a preflight there and may push a branch
+  band_meaning: span
+  origin: operator-session#follow-ups-2026-11-10
+  plan_refs:
+    - W1-T5533
+    - W1-T221
+    - W1-T11914
+  files:
+    - src/lib/hand-ship.ts
+    - src/run-task.ts
+    - test/ci/one-command-ships-a-hand-built-branch-from-an-operator-session.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "The command chooses the host for the preflight from readings: the Mac when its memory pressure is normal, else the other configured host. It names the host and the reading. A host whose reading is unreadable is not chosen"
+      proof: "grep: W1-T12169 criterion 1 in test/ci/one-command-ships-a-hand-built-branch-from-an-operator-session.test.ts"
+    - claim: "On a Mac the command runs the preflight at low priority, so that a person's work on the same machine goes first"
+      proof: "grep: W1-T12169 criterion 2 in test/ci/one-command-ships-a-hand-built-branch-from-an-operator-session.test.ts"
+    - claim: "After a failed preflight the command runs the failed tests alone, then runs the same tests on unchanged main on the same host. It puts each failure in one class: caused by the change, caused by the host, or also failing on main"
+      proof: "grep: W1-T12169 criterion 3 in test/ci/one-command-ships-a-hand-built-branch-from-an-operator-session.test.ts"
+    - claim: "The command pushes only when the receipt says the run may push, or when every failure is in the class also failing on main and the output names each one. It never skips a check and never forces a push"
+      proof: "grep: W1-T12169 criterion 4 in test/ci/one-command-ships-a-hand-built-branch-from-an-operator-session.test.ts"
+    - claim: "One command ends a run by its id. No caller reads a process list to find it"
+      proof: "grep: W1-T12169 criterion 5 in test/ci/one-command-ships-a-hand-built-branch-from-an-operator-session.test.ts"
+    - claim: "The command table calls the new module"
+      proof: "grep: runHandShip( in src/run-task.ts"
+  rationale: |
+    OBSERVED 2026-11-10: operator sessions ship hand-built branches through two shell scripts that are in no repository.
+    - One is ~/rmd-hand/bin/ship.sh on the Mac agent account (179 lines). The other is ~/rmd-work/bin/ship.sh on the Azure host. They differ, and each was changed by hand during the day.
+    - Each does the same work: one preflight at a time, a rerun of the failed tests alone, a comparison with unchanged main, the push, the pull request and a check of the stored body.
+    - 25 branches went through the Mac script that day. Its limit is the memory of the Mac. When the Mac is under memory pressure, the session moves the work to Azure by hand.
+    - A Codex session and a Claude Code session each need this, and each writes its own copy.
+    - `rmd hand-worktree` (W1-T5533) already gives such a session its worktree with one command. Nothing does the same for the steps after the build.
+  design: |
+    New module src/lib/hand-ship.ts exports `runHandShip`. Every effect is injected: the readings, the spawn of the preflight, the test runs, git and the GitHub calls.
+    The hosts come from a file that the operator owns in the state directory. Each entry has a name, an ssh target or "local", and a kind. The repository holds no host name.
+    The classes of criterion 3 follow the Mac script: all green alone means the host; red alone and red on main means also failing on main; otherwise the change.
+    The command keeps its state in one directory for each run: status, history, logs and the process id.
+    `authorPushEligibility` in scripts/preflight-author.mjs stays the only judge of a receipt.
+    NOT IN SCOPE: the merge, any change to the author preflight, and the removal of the two shell scripts. The operator removes them after one week of use.
+  falsifier: |
+    Choose a host whose reading is unreadable and criterion 1 must fail. Push after a failure in the class caused by the change and criterion 4 must fail. Call a failure that is green on main "also failing on main" and criterion 3 must fail. Restore and require all to pass.
+  note: |
+    On a remote host the command runs the same preflight over ssh, in a worktree it brings there as a git bundle. The two scripts do this today.

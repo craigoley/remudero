@@ -21,7 +21,7 @@
     - src/lib/sweep.ts
     - src/lib/ledger.ts
     - test/github/a-pr-github-reads-dirty-that-git-merges-cleanly-gets-the-merge-without-a-worker.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: A PR on its own task's run branch that GitHub reads dirty, while the pass's sweep.merge_probe row for its exact head and the pass's main tip reads verdict clean, gets git's merge of main pushed to its branch as a two-parent merge commit carrying the PR's Remudero-Task trailer, under the same head and main leases, sandbox and fence regenerateConflictViaGit already holds, and no fix worker is dispatched or charged; the fixture is a main that renames a file the head edited, which git follows and a rename-blind merge does not

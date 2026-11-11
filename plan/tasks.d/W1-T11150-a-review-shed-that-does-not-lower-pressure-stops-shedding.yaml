@@ -16,7 +16,7 @@
   files:
     - src/lib/review-capacity.ts
     - test/review/a-review-shed-that-does-not-lower-pressure-stops-shedding.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: Each CPU shed records the pressure reading that triggered it and the width before it; once a review's measured CPU phase (the median setup-plus-proofs time from the ledger) has elapsed, a shed whose pressure did not fall by more than that reading's own sample-to-sample spread is judged ineffective, the width returns to what it was before the shed, and further CPU sheds on that pressure source are suspended until the source or the review lane's own CPU share changes
