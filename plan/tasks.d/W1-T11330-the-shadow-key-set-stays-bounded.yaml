@@ -15,7 +15,7 @@
     - src/lib/view-shadow.ts
     - src/lib/view-shadow-store.ts
     - test/console-api/read-model/the-shadow-key-set-stays-bounded.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: A streak's key membership retires a key that has not been sampled for a full day, so a stream of distinct one-off request keys (new snapshot cursors) keeps the stored membership bounded by the keys sampled in the last day; the cadence owed by keys still requested is unchanged, and a real diff still resets the set

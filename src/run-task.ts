@@ -1205,7 +1205,6 @@ import {
   type PlanPrPreflightResult,
   ensureJudgeableBody,
   filingAcceptanceCriteria,
-  parseDiffLines,
   planPrAcceptanceCriteria,
   probeExistingPlanPr,
   ratifyPrCreateRestArgs,
@@ -1213,7 +1212,6 @@ import {
   reconcileRetroChangesetClaim,
   renderAcceptanceBlock,
   replaceAcceptanceBlock,
-  safeAddedLineProof,
   type PlanPrBodyOpts,
 } from "./lib/plan-pr-emitter.js";
 import {
@@ -1726,6 +1724,9 @@ import { fixRungInputFields, prBodyDigest } from "./lib/sweep.js";
 import { diagnoseBodyDefects } from "./lib/body-repair.js";
 import { criterionFieldTampered, filingSelfCreditCheck, missingReviewReuseFact, priorPostedReviewRow, proofChildEnv, proofSandboxArgv, proofSandboxStatus, ProofSandboxUnavailableError } from "./lib/review.js";
 import { inertAcceptanceProofs, PR_BODY_ACCEPTANCE_GRAMMAR } from "./lib/proof-grammar.js";
+import { diffAnchor, mainRepairAcceptanceFor } from "./lib/main-repair-acceptance.js";
+export { diffAnchor };
+export type { DiffAnchor, DiffAnchorUnavailableReason } from "./lib/main-repair-acceptance.js";
 import { alertFixBodyDeps, judgeOpenedAlertFixBody, type AlertFixAcceptanceCheck, type AlertFixBodyRead } from "./lib/alert-fix-body.js";
 import { baseLacksPrAddedExports } from "./lib/proof-missing-export.js";
 import { planPrPreflightAtCommitAsync } from "./lib/plan-pr-emitter.js";
@@ -5678,23 +5679,7 @@ function addedTestCriterion(path: string): AcceptanceCriterion {
  * as {@link DIFF_ANCHOR_UNAVAILABLE_STEP} so it stays observable.
  */
 export const DIFF_ANCHOR_UNAVAILABLE_STEP = "acceptance.fallback.diff_anchor_unavailable";
-export type DiffAnchorUnavailableReason = "no-diff" | "unparseable" | "no-safe-candidate";
-export type DiffAnchor = { kind: "anchored"; path: string; line: string; proof: string } | { kind: "unavailable"; reason: DiffAnchorUnavailableReason };
 const DIFF_ANCHOR_CLAIM_SUFFIX = "; its proof greps a line this PR's own diff adds, not a fixed pre-existing symbol";
-
-/** The first ADDED line of a unified diff (`git diff` or `gh pr diff`) that yields a grep proof the reviewer can run
- *  and that cannot already match at the merge base. A line the same diff also REMOVES is a move, so it is skipped. */
-export function diffAnchor(diffText: string | undefined): DiffAnchor {
-  if (diffText === undefined || diffText.trim() === "") return { kind: "unavailable", reason: "no-diff" };
-  const { sawHeader, added, removed } = parseDiffLines(diffText);
-  if (!sawHeader) return { kind: "unavailable", reason: "unparseable" };
-  for (const { path, line } of added) {
-    const proof = safeAddedLineProof(path, line, removed);
-    if (proof !== undefined) return { kind: "anchored", path, line, proof };
-  }
-  return { kind: "unavailable", reason: "no-safe-candidate" };
-}
-
 /** W1-T4263's shared helper: a criterion whose proof greps the first safe line `diffText` adds, or `undefined`. */
 export function diffAnchoredAcceptanceCriterion(
   diffText: string,
@@ -39511,33 +39496,6 @@ function mainRepairBodyFile(config: Config, taskId: string): string {
 /** W1-T8572 — the one inert-proof row: what was inert, how many, and whether the body was rewritten or refused. */
 export const MAIN_REPAIR_ACCEPTANCE_DEFECT_STEP = "main-repair.acceptance_defect";
 
-/** W1-T8572 — a no-test-file worker body, checked BEFORE the dispatcher opens it. A body whose proofs all execute is
- *  returned as written. Otherwise its inert bullets ({@link inertAcceptanceProofs}: undialected, a demonstration, or
- *  unparseable — a prose proof naming a test path counts, though `parseWhitelistedProof` reads it) are dropped and one
- *  `grep:` of a line the pushed fix ADDS ({@link diffAnchor}) takes their place; with no such line the body is
- *  refused. Never trusts `acceptanceAuthorTimeCheck`: its trailer arm returns `ok` before it reads the block. */
-export function checkMainRepairWorkerBody(
-  body: string,
-  diffText: string | undefined,
-): { body: string } | { body: string; defect: "inert-proofs" | "no-proofs"; inert: string[]; resolution: "rewritten" } | { defect: "inert-proofs" | "no-proofs"; inert: string[]; resolution: "refused"; reason: DiffAnchorUnavailableReason } {
-  const criteria = parseAcceptanceBlock(body);
-  const inert = inertAcceptanceProofs(body);
-  if (criteria.length > 0 && inert.length === 0) return { body };
-  const defect = criteria.length === 0 ? "no-proofs" : "inert-proofs";
-  const anchor = diffAnchor(diffText);
-  if (anchor.kind === "unavailable") return { defect, inert, resolution: "refused", reason: anchor.reason };
-  const inertSet = new Set(inert);
-  const kept = criteria.filter((c) => !inertSet.has(c.proof ?? "")) as AcceptanceCriterion[];
-  const block = renderAcceptanceBlock([...kept, { claim: `the pushed repair adds this line to ${anchor.path}`, proof: anchor.proof }]);
-  const region = acceptanceBlockRegion(body);
-  const lines = body.split("\n");
-  const rewritten =
-    region === undefined
-      ? `${body.replace(/\s*$/, "")}\n\n${block}\n`
-      : [...lines.slice(0, region.headerLine), block, ...lines.slice(region.endLine)].join("\n");
-  return { body: rewritten, defect, inert, resolution: "rewritten" };
-}
-
 /** W1-T8572 — the defect row for a no-test-file worker that opened its own PR instead of leaving the open to the
  *  dispatcher: the body was never checked before it opened, so this records the breach and the body file's inert
  *  proofs (`body === undefined` when the worker removed that file). */
@@ -39552,7 +39510,7 @@ const REAL_MAIN_REPAIR_FIX_DEPS: AlertFixDispatchDeps = { ...REAL_ALERT_FIX_DISP
  * W1-T6403 — the priority fix PR for a red main: {@link dispatchAlertFixRun}'s fresh-branch path, one
  * worker on a branch off origin/main that commits and pushes. W1-T8572: the dispatcher writes the PR body first
  * ({@link mainRepairFixBody}). With failing test files known the worker opens the PR with that body; with none the
- * dispatcher checks the worker's bullets ({@link checkMainRepairWorkerBody}), ledgers any inert proof, and opens the
+ * dispatcher checks the worker's bullets ({@link mainRepairAcceptanceFor}), ledgers any inert proof, and opens the
  * PR over REST with the body it checked, so the opening payload carries it. Returns the PR url, or undefined when
  * none was opened.
  */
@@ -39646,7 +39604,7 @@ async function openCheckedMainRepairPr(
   const failing = request.testFiles.join(", ") || request.failingTestTitles.join("; ") || request.failingChecks.join(", ") || "(none named)";
   return openCheckedRepairPr(owner, repo, "main-repair", { branch, base: request.branch, worktreePath, bodyFile, pushedHead,
     prose: `Repairs \`${request.branch}\`, red since \`${request.offendingSha}\` (${pr}) on: ${failing}.`,
-    fallbackTitle: `fix(main): repair ${request.offendingSha.slice(0, 12)}` }, log, deps);
+    fallbackTitle: `fix(main): repair ${request.offendingSha.slice(0, 12)}`, redTestFiles: request.testFiles }, log, deps);
 }
 
 export function workerHarnessCommit(worker: WorkerResult): CodexHarnessCommit | undefined { // W1-T9667: off the result, not the mount
@@ -39703,7 +39661,7 @@ async function openCheckedRepairPr(
   owner: string,
   repo: string,
   lane: "main-repair" | "alert-fix",
-  pr: { branch: string; base: string; worktreePath: string; bodyFile: string; pushedHead?: string; prose: string; fallbackTitle: string },
+  pr: { branch: string; base: string; worktreePath: string; bodyFile: string; pushedHead?: string; prose: string; fallbackTitle: string; redTestFiles?: readonly string[] },
   log: (step: string, extra?: Record<string, unknown>) => void,
   deps: AlertFixDispatchDeps,
 ): Promise<string | undefined> {
@@ -39713,7 +39671,8 @@ async function openCheckedRepairPr(
     log(`${lane}.no_change`, { branch, reason: diffText === undefined ? "diff unreadable" : "the branch adds nothing to origin/main" });
     return undefined;
   }
-  const checked = checkMainRepairWorkerBody(readFileSync(pr.bodyFile, "utf8"), diffText);
+  const readAtHead = (path: string): string | undefined => { const full = join(worktreePath, path); return existsSync(full) ? readFileSync(full, "utf8") : undefined; };
+  const checked = mainRepairAcceptanceFor({ body: readFileSync(pr.bodyFile, "utf8"), diffText, redTestFiles: pr.redTestFiles ?? [], readFile: readAtHead });
   if ("defect" in checked) {
     log(`${lane}.acceptance_defect`, {
       defect: checked.defect,

@@ -1,0 +1,41 @@
+- id: W1-T12144
+  title: "Each randomised assignment carries a true allocation receipt"
+  repo: remudero
+  depends_on: []
+  priority: 0.9
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the receipt on every worker.assignment row; every cohort and trial reader takes its allocation from it
+  band_meaning: blast-radius
+  origin: operator-session#model-choice-2026-11-10
+  plan_refs:
+    - W1-T4617
+    - W1-T4575
+  files:
+    - src/lib/benchmark-run.ts
+    - test/routing/each-randomised-assignment-carries-a-true-allocation-receipt.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "An assignment that joined a routing experiment records an allocation with the method randomized. The allocation names the experiment id, the assigned arm, the served arm, the probability of the assigned arm and the unit task"
+      proof: "grep: W1-T12144 criterion 1 in test/routing/each-randomised-assignment-carries-a-true-allocation-receipt.test.ts"
+    - claim: "An assignment that joined no experiment records the observational allocation exactly as today"
+      proof: "grep: W1-T12144 criterion 2 in test/routing/each-randomised-assignment-carries-a-true-allocation-receipt.test.ts"
+    - claim: "The receipt takes these values from the intention-to-treat record on the assignment and computes no draw of its own"
+      proof: "grep: W1-T12144 criterion 3 in test/routing/each-randomised-assignment-carries-a-true-allocation-receipt.test.ts"
+  rationale: |
+    MEASURED 2026-11-10 in the core instance's ledger, 2026-10-27 to 2026-11-10: all 16,233 `worker.assignment` rows say `allocation: observational, no-random-allocation-receipt`.
+    - 1,158 of those assignments were randomised by the experiment `sol61-vs-sonnet55`. Each one carries `routing.experiment` with its assigned arm and probability.
+    - `benchmarkRunAssignmentReceipt` in src/lib/benchmark-run.ts writes the observational value as a constant. It never reads `routing.experiment`.
+    - The cohort and trial readers report "unavailable-no-randomized-allocation" for the experiment effect. They cannot tell a randomised row from the rest.
+    - `benchmark-paid-pilot.ts` already reads `allocation.method === "randomized"` with `experimentId` and `arm`. Use the same field names.
+  design: |
+    Widen `BenchmarkRunAssignmentInput` with the optional `routing.experiment` record that `experimentIntentionToTreat` builds. When it is present, write `{ method: "randomized", experimentId, arm, servedArm, probability, unit }`. When it is absent, keep the constant.
+    Both callers in src/run-task.ts already pass the whole assignment, so no caller changes.
+    NOT IN SCOPE: the readers that report the experiment effect, and the draw itself.
+  falsifier: |
+    Write the constant for a randomised assignment and criterion 1 must fail. Write a randomised receipt for an assignment with no experiment and criterion 2 must fail. Restore and require all to pass.
+  note: |
+    W1-T12142 reads the assigned arm from `routing.experiment` and does not wait for this task.

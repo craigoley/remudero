@@ -18,7 +18,7 @@
     - src/lib/model-canary-pilot-budget.ts
     - test/worker-provider.test.ts
     - test/routing/model-canary-pilot-budget.test.ts
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: >-

@@ -18,7 +18,7 @@
     - test/fix-lane/a-review-only-failure-that-passes-off-host-is-a-harness-signal.test.ts
     - "src/cli/commands/fix.ts"
     - "src/lib/sweep.ts"
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: When the same reviewer proof failure persists after rounds whose worker reported FIXED, and the evidence shows that proof passing off-host (the worker's own run of it passed, and hosted CI passed it at the head), the judge input carries an off-host-pass signal and the decision is a harness escalation naming the proof and both results, never another fix round

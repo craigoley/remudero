@@ -18,7 +18,7 @@
     - src/lib/sweep.ts
     - src/cli/commands/sweep.ts
     - test/console-api/board/a-status-regressed-to-pending-on-a-delivered-head-is-restored.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: When the latest review row of a PR's exact head and review input digest is a delivered full success or failure verdict and GitHub's remudero-review status is pending, the sweep's review claim restores that verdict's status instead of deduping it, runs no review, and posts only the delivered state

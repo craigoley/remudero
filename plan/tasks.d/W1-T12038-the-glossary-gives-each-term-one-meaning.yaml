@@ -18,7 +18,7 @@
     - docs/glossary.md
     - docs/docs-index.json
     - test/docs/the-glossary-gives-each-term-one-meaning.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "Every glossary table row has a term, a meaning, the words not to use and a source, and no term is defined twice"

@@ -608,6 +608,12 @@
       "grepHint": "risk-judge.ts forensics"
     },
     {
+      "path": "docs/forensics/root-helper-codemod-suite-timing.md",
+      "title": "Root-helper codemod rule suite: measured timing (W1-T12080)",
+      "summary": "Measured 2026-11-10 on one Azure host (8 cores, load average 25-37 throughout, MemAvailable 14-16 GB), inside a",
+      "grepHint": "Root-helper codemod rule suite: measured timing (W1-T12080)"
+    },
+    {
       "path": "docs/forensics/self-sync.md",
       "title": "self-sync.ts forensics",
       "summary": "Measured forensics, incidents and design arguments removed from `src/lib/self-sync.ts` when its",

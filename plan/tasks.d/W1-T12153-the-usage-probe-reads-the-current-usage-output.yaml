@@ -1,0 +1,47 @@
+- id: W1-T12153
+  title: "The usage probe reads the current `/usage` output"
+  repo: remudero
+  depends_on: []
+  priority: 0.9
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the reading that decides whether Claude is eligible for every worker; a wrong reading must never read as headroom
+  band_meaning: blast-radius
+  origin: operator-session#model-choice-2026-11-10
+  plan_refs:
+    - W1-T11072
+    - W1-T417
+  files:
+    - src/lib/headroom.ts
+    - src/run-task.ts
+    - test/routing/the-usage-probe-reads-the-current-usage-output.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "When the /usage output cannot be parsed, the usage.probe_failed row records the shape of the output. The shape is the number of lines and the label of each line, with digits masked and no account name"
+      proof: "grep: W1-T12153 criterion 1 in test/routing/the-usage-probe-reads-the-current-usage-output.test.ts"
+    - claim: "An output with readable weekly lines and no session line gives a readable snapshot from the weekly windows, and the row names that case"
+      proof: "grep: W1-T12153 criterion 2 in test/routing/the-usage-probe-reads-the-current-usage-output.test.ts"
+    - claim: "An output with no account panel at all is recorded under its own reason, apart from a panel that is present and garbled"
+      proof: "grep: W1-T12153 criterion 3 in test/routing/the-usage-probe-reads-the-current-usage-output.test.ts"
+    - claim: "A window with no readable percentage is still unreadable. No case reads as 0% used"
+      proof: "grep: W1-T12153 criterion 4 in test/routing/the-usage-probe-reads-the-current-usage-output.test.ts"
+  rationale: |
+    MEASURED 2026-11-10 in the core instance's ledger, 2026-10-27 to 2026-11-10: `usage.probe_failed` was written 2,258 times.
+    - 1,131 rows say "no usable rate-limit windows". 970 say "no 'Current session:' line in /usage output". 157 are timeouts.
+    - A candidate was excluded as unreadable in 10.3% of 16,233 assignments. An unreadable provider gets no work, whatever its real headroom.
+    - `parseUsage` in src/lib/headroom.ts throws when the session line is absent, even when the weekly lines are present.
+    - W1-T11072 fixed that case for the reading from the SDK. The reading from the command line still fails on it.
+    - The row keeps the reason and not the output. After 970 failures, nobody can say what the output looked like.
+  design: |
+    1. In `ledgerUsageProbeFailure`, accept an optional shape and write it. Build the shape in src/lib/headroom.ts: for each line, the text before the first colon, digits replaced, cut to a short length. Keep the 400-character limit on the row.
+    2. In `parseUsage`, when the session line is absent and at least one weekly line parses, return the weekly windows and mark the session as absent. Follow the rule W1-T11072 set for the SDK reading.
+    3. Before parsing, detect an output with no "Current" line at all and throw a parse error with its own reason.
+    The fail-closed rule in the header of src/lib/headroom.ts stays: a window without a percentage is an error.
+    NOT IN SCOPE: the SDK reading, the timeouts, and the Codex probe.
+  falsifier: |
+    Write the raw output into the row and criterion 1 must fail on the account name. Return 0% for an absent session and criterion 4 must fail. Throw on weekly lines without a session line and criterion 2 must fail. Restore and require all to pass.
+  note: |
+    If the shapes that criterion 1 records show a new layout, a later task adds it. This task makes that layout visible.

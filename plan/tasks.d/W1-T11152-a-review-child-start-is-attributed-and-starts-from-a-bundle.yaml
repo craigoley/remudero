@@ -23,7 +23,7 @@
     - test/worker/a-review-child-start-is-attributed-and-starts-from-a-bundle.test.ts
     - "bin/rmd"
     - "scripts/build-child-entries.mjs"
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: A review run child's launch ledgers each segment between admission and its first status heartbeat (engine resolution, entry decision with kind and reason, memory-admission wait, spawn to first heartbeat) with its milliseconds on one row, so the admission-to-start time is attributable from the ledger

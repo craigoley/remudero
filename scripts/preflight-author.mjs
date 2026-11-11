@@ -657,6 +657,13 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
         const queue = enqueueTestSlot(AUTHOR_SUITE_LABEL, { ...testSlot, perFileBytes: TEST_FILE_PEAK_BYTES, maxConcurrency: requested.workers });
         receipt.suiteQueue = { ticketed: queue.ticketed, positionAtEnqueue: queue.position ?? null, note: queue.note,
           requestedWorkers: requested.workers, requestedBoundBy: requested.inputs.boundBy };
+        // W1-T11915 criterion 4: retain the ticket's arrival identity and add the selection's known price
+        // before static work starts, so every heartbeat can report the same price used by capacityVerdict.
+        let manifest = { files: {} };
+        try { manifest = JSON.parse(readFileSync(join(root, 'scripts/test-tier-manifest.json'), 'utf8')); }
+        catch (error) { receipt.manifestUnavailable = error.message; }
+        const priced = partial ? partial.suites : receipt.suites;
+        queue.setPrice(priceSelection(priced, manifest).costMs);
         let staticEndedAt;
         const admitSuites = () => {
           const waitStartedAt = Date.now();
@@ -730,9 +737,6 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
             if ((partial ? partial.suites : receipt.suites).length === 0) cancelSuites('the selection names no suite');
             else admitSuites();
             // W1-T7809: price the selection against what this host can carry NOW, before spending it.
-            let manifest = { files: {} };
-            try { manifest = JSON.parse(readFileSync(join(root, 'scripts/test-tier-manifest.json'), 'utf8')); }
-            catch (error) { receipt.manifestUnavailable = error.message; }
             // W1-T11891: only a real acquired grant is execution capacity; its width is the measured bound.
             const slotAcquired = slot?.outcome === 'acquired' && testSlotExecutionAllowed(slot);
             const legacyBudget = hostBudget((host ?? readHostCapacityInputs)(), { slotConcurrency: slot?.concurrency, slotAcquired });
@@ -743,7 +747,6 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
             const budget = partial && nativeBudget.budgetMs > legacyBudget.budgetMs ? legacyBudget : nativeBudget;
             const executionWorkers = budget.workers;
             receipt.executionWorkers = executionWorkers;
-            const priced = partial ? partial.suites : receipt.suites;
             reportManifestFallbacks(priced, manifest);
             const verdict = capacityVerdict(priced, manifest, budget);
             receipt.capacity = verdict;
