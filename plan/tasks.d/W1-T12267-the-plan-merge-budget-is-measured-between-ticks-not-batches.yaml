@@ -30,6 +30,10 @@
       proof: "grep: W1-T12267 criterion 3 in test/sweep/the-plan-merge-budget-is-measured-between-ticks-not-batches.test.ts"
     - claim: "With that budget a light pass merges a second ready plan pull request when the first merge took less than the interval between ticks"
       proof: "grep: W1-T12267 criterion 4 in test/sweep/the-plan-merge-budget-is-measured-between-ticks-not-batches.test.ts"
+    - claim: "The budget is never above the policy row `sweepWallClockBoundMs`, whatever the measured interval is. An operator merge hold and a moved head still stop a merge, and each merge is one call of the merge function, which makes its own merge-safety read"
+      proof: "grep: W1-T12267 criterion 5 in test/sweep/the-plan-merge-budget-is-measured-between-ticks-not-batches.test.ts"
+    - claim: "The `sweep.summary` row of a light pass that had plan merge turns names the budget, the time spent, the number of merge attempts, the number that merged and, when a turn was stopped, why"
+      proof: "grep: W1-T12267 criterion 6 in test/sweep/the-plan-merge-budget-is-measured-between-ticks-not-batches.test.ts"
   rationale: |
     W1-T11445 bounds the plan merges of one light pass by a measured interval: the median of the newest three start-to-start intervals of completed light passes of the same scope.
     OBSERVED 2026-11-11 on the core ledger: the budget named on `sweep.disposed` rows was 4,275 ms at 05:49Z, 154,382 ms at 05:53Z, 42,862 ms at 05:58Z and 289,537 ms at 06:04Z.
@@ -46,7 +50,9 @@
     - `runSweepLightPass` writes it as `tick_id` on its `sweep.pass` row and on its `sweep.summary` row, beside `pass_id`.
     - `lightPassIntervalBudgetFromLedger` groups the valid starts of the scope by `tick_id` and keeps the earliest start of each group. A row with no `tick_id` is its own group.
     - Every other rule of W1-T11445 stays: completed pairs only, the same scope, the newest three intervals, the median, and no budget when a sample is malformed.
+    - Bound the budget. A pass that spends its whole budget starts the next tick later, so the measured interval grows with the work. The budget is the measured interval or the policy row `sweepWallClockBoundMs` (559,000 ms; the bound of one sweep tick), whichever is lower. A pass starts no plan merge after that time; one merge that is running may finish.
+    - `runSweepLightPass` adds to its `sweep.summary` row, when the pass had plan merge turns: `plan_merge_budget_ms`, `plan_merge_spent_ms`, `plan_merge_attempts`, `plan_merges` and `plan_merge_stop` (the first stop sentence of the pass).
     Before the build, grep `test/` for tests that assert a whole `sweep.pass` or `sweep.summary` row. If one is outside `files`, amend this task first.
     NOT IN SCOPE: the number of batches in a tick, the turn rule (W1-T12266), and the full pass.
   falsifier: |
-    Count each `sweep.pass` row as one start and criterion 2 must fail. Drop the `tick_id` from the summary row and criterion 1 must fail. Refuse a row with no `tick_id` and criterion 3 must fail. Restore and require all four to pass.
+    Count each `sweep.pass` row as one start and criterion 2 must fail. Drop the `tick_id` from the summary row and criterion 1 must fail. Refuse a row with no `tick_id` and criterion 3 must fail. Remove the upper bound and criterion 5 must fail. Drop the fields from the summary row and criterion 6 must fail. Restore and require all six to pass.
