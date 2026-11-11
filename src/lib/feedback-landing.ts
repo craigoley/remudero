@@ -2469,7 +2469,8 @@ function* taskFilesLandingSteps(
         const onBase = (yield { commitSha: yield* freshMain(), pr: { title: kind.prTitle, body: taskFilesPrBody([]) } }) as PlanPrPreflightResult;
         return { mainRed: taskFileRedIsMainCaused(failures, onBase.failures) };
       } catch (e) {
-        return { mainRed: false, mainRedProbeError: String((e as Error)?.message ?? e) };
+        const reason = String((e as Error)?.message ?? e);
+        return { mainRed: false, mainRedProbeError: reason };
       }
     };
     const refusalText = (failures: PlanPrPreflightResult["failures"]): string =>
@@ -2549,7 +2550,8 @@ function* taskFilesLandingSteps(
     try {
       open = JSON.parse(yield* net.gh(pendingLandingPrArgs(kind.prHead, landingRepoArgs(kind)))) as Array<{ url: string }>;
     } catch (e) {
-      return wait(`the open pull requests of ${kind.branch} cannot be read, so the landing waits: ${String((e as Error)?.message ?? e)}`);
+      const reason = `the open pull requests of ${kind.branch} cannot be read, so the landing waits: ${String((e as Error)?.message ?? e)}`;
+      return wait(reason);
     }
     if (open[0]) {
       result.prUrl = open[0].url;
@@ -2623,9 +2625,10 @@ function* taskFilesLandingSteps(
       try {
         yield* net.git(["push", `--force-with-lease=refs/heads/${kind.branch}:${tipSha ?? ""}`, "origin", `${commitSha}:refs/heads/${kind.branch}`]);
       } catch (e) {
-        return wait(lostLease(e)
+        const reason = lostLease(e)
           ? `${kind.branch} moved while this batch was built, so another writer has it and the landing waits`
-          : pushFailure(kind.branch, e));
+          : pushFailure(kind.branch, e);
+        return wait(reason);
       }
       result.pushed = true;
     }
