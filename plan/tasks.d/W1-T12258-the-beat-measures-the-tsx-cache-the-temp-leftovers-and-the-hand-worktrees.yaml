@@ -1,0 +1,59 @@
+- id: W1-T12258
+  title: "The heartbeat measures the tsx cache, the temp leftovers and the hand worktrees"
+  repo: remudero
+  depends_on:
+    - W1-T12253
+  priority: 1.1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the heartbeat script of every host; a slow walk here delays the heartbeat and loads the disk
+  band_meaning: blast-radius
+  origin: operator-session#janitor-disk-waste-2026-11-11
+  plan_refs:
+    - W1-T5710
+    - W1-T4804
+    - W1-T5711
+  files:
+    - scripts/fleet-heartbeat.sh
+    - test/gardeners/the-beat-measures-the-tsx-cache-the-temp-leftovers-and-the-hand-worktrees.test.ts
+    - test/the-heartbeat-measures-the-real-disk-consumers.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "A walked heartbeat carries `consumer_tsx_cache_kb`: the size of every `tsx-<uid>` folder directly under the temp folder of the account, under `/tmp` and under `/mnt/scratch/tmp`"
+      proof: "grep: W1-T12258 criterion 1 in test/gardeners/the-beat-measures-the-tsx-cache-the-temp-leftovers-and-the-hand-worktrees.test.ts"
+    - claim: "It carries `consumer_tmp_leftovers_kb`: the size of the direct children of those temp folders named `rmd-*` or `remudero-*`. It leaves out the `rmd-c-*` folders, which the `coverage` consumer counts"
+      proof: "grep: W1-T12258 criterion 2 in test/gardeners/the-beat-measures-the-tsx-cache-the-temp-leftovers-and-the-hand-worktrees.test.ts"
+    - claim: "It carries `consumer_hand_worktrees_kb`: the size of `~/rmd-hand` and of `~/rmd-work`, for each one that exists"
+      proof: "grep: W1-T12258 criterion 3 in test/gardeners/the-beat-measures-the-tsx-cache-the-temp-leftovers-and-the-hand-worktrees.test.ts"
+    - claim: "Each new consumer has its `_device` line, as the other consumers have. A path that does not exist adds nothing to the sum"
+      proof: "grep: W1-T12258 criterion 4 in test/gardeners/the-beat-measures-the-tsx-cache-the-temp-leftovers-and-the-hand-worktrees.test.ts"
+    - claim: "The new walks stay inside the time budget of the consumer walk. A walk that the budget ends is reported as it is today, and its consumer is never written as 0"
+      proof: "grep: W1-T12258 criterion 5 in test/gardeners/the-beat-measures-the-tsx-cache-the-temp-leftovers-and-the-hand-worktrees.test.ts"
+  rationale: |
+    OBSERVED 2026-11-10 and 2026-11-11: the three largest items that people removed by hand are items that the heartbeat does not measure.
+    - Hand worktrees: 20 GB in `~/rmd-work` on the Azure host (21 worktrees), and 34 worktrees of about 700 MB in `~/rmd-hand` on the Mac agent account.
+    - The tsx cache: 7.4 GB in the temp folder of the Mac agent account, and 1.3 GB in `/tmp/tsx-1000` on the Azure host.
+    - Temp leftovers: about 4,170 entries on the Mac. On the Azure host `/tmp` held 3.6 GB, with `rmd-census-exit-proof-*` and `rmd-proof-home-*` trees.
+    READ at origin/main 3c6e5e476.
+    - scripts/fleet-heartbeat.sh measures these consumers (lines 1691 to 1712): worktrees, state, docker, containerd, rmd_tmp, rmd, scratch, coverage, transcripts and npm_cache.
+    - The `worktrees` consumer is the worktree folder of the daemon. No consumer covers `~/rmd-work` or `~/rmd-hand`.
+    - The host-resource gardener names a consumer in an escalation only when the heartbeat measured it (`attributeGrowth`, src/lib/host-resource-gardener.ts:460).
+    - W1-T12254 lists the three largest consumers of a volume in its escalation. Without these three consumers, that list would have missed each item that filled a disk on these two days.
+    CHECKED for overlap: W1-T5710 (merged) made the heartbeat measure the real consumers of the state disk. W1-T5711 (merged) attributes growth by device. Neither adds these paths.
+  design: |
+    In the walked branch of scripts/fleet-heartbeat.sh, after `consumer_kb npm_cache`:
+    - `consumer_kb tsx_cache` with each `tsx-[0-9]*` directory under `$CONSUMER_TMP`, `/tmp` and `/mnt/scratch/tmp`. On macOS, `$CONSUMER_TMP` falls back to `getconf DARWIN_USER_TEMP_DIR` when TMPDIR is not set.
+    - `consumer_kb tmp_leftovers` with each `rmd-*` and `remudero-*` direct child of the same folders, without the `rmd-c-*` names.
+    - `consumer_kb hand_worktrees` with `${HOME}/rmd-hand` and `${HOME}/rmd-work`.
+    `consumer_kb` leaves out a pattern that matched nothing, counts a path once, and uses `du_idle`, which obeys `CONSUMER_WALK_DEADLINE`. Use it with no change.
+    The walk is adaptive: it runs only when the used space of the disks moved. Keep that.
+    NOT IN SCOPE: any removal, the schedule of the walk, and the reader of the consumers.
+  falsifier: |
+    Leave a consumer out and its criterion must fail. Count `rmd-c-*` in both consumers and criterion 2 must fail. Write 0 for a walk that the budget ended and criterion 5 must fail. Restore and require all five to pass.
+  note: |
+    Host and account: every host that publishes a heartbeat. Today that is the Azure host. W1-T12259 adds the Mac agent account.
+    It depends on W1-T12253 because both change scripts/fleet-heartbeat.sh.
+    The task removes nothing. It reads sizes with `du` at idle priority.
