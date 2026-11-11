@@ -5199,8 +5199,6 @@ export async function runDaemon(
     if (restartWindow === undefined || lengthMs === undefined) return true;
     const leftMs = restartWindow.deadlineMs - daemonClock.now();
     if (leftMs > lengthMs) return true;
-    // W1-T12160: past the drain deadline the hold protects no review. 2026-11-10 it held every green pull request for 21 min.
-    // Once the drain of the exit has begun, a review admitted past the deadline would get no time: the hold stays.
     if (leftMs < 0 && !restartWindow.exitDrainBegun && kind !== "fix-dispatch" && kind !== "dispatch-refill") {
       if (!restartWindow.holdEnded) log("daemon.restart_hold_ended", { kind, ...(surface === undefined ? {} : { surface }),
         since_latch_ms: Math.max(0, daemonClock.now() - restartWindow.latchAtMs), past_deadline_ms: -leftMs,
