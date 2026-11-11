@@ -31,6 +31,7 @@ import {
   deployStateRows, mainWorkflowStateRows, reconcileFleetState,
   type DeployStateReader, type FleetStateRow,
 } from "./state-reconciler.js";
+import { loadFleetStateCommitStore, type FleetStateCommitStore } from "./fleet-state-commit-store.js";
 import { CONVENTIONAL_LIMITS, fitConventionalTitle } from "./commit-message.js";
 import { mintNextTaskId } from "./task-id.js";
 import { gatedRemoteRefReserver, reserveTaskIdRemote, type RemoteReserveDeps } from "./task-id-reservation.js";
@@ -1552,6 +1553,8 @@ export interface FleetStateParts {
   union_rotations: number;
   commits_walked: number;
   commit_reads: number;
+  /** W1-T12234: the reads that the commit store answered. `commit_reads` does not count them. */
+  commit_reads_kept: number;
   commit_read_ms: number;
   deploy_ms: number;
 }
@@ -2411,10 +2414,12 @@ export function productionDispatchBreakJudge(opts: {
 // W1-T11267: retain the digest-backed reconciliation slice and immutable commit files across passes.
 const FLEET_STATE_HISTORY_SLICE: EscalationTriageSlice = {
   holder: "sweep.fleet-state-history",
+  sharedSnapshot: true,
   steps: ["reconcile.repaired", "reconcile.repair_failed", "reconcile.escalated", "main.run_gap.dispatched", "deploy.ok"],
 };
 let fleetStateHistoryReader: EscalationTriageHistoryReader | undefined;
-const fleetStateChangedFiles = new Map<string, readonly string[]>();
+// W1-T12234: one commit store for each state directory, loaded once in a daemon lifetime.
+const fleetStateCommitStores = new Map<string, FleetStateCommitStore>();
 
 export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   SweepDeps,
@@ -5141,7 +5146,22 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     // degrades to "no gap found this pass", never a guessed dispatch.
     readFleetState: async (live) => {
       const parts: FleetStateParts = {
-        union_ms: 0, union_rotations: 0, commits_walked: 0, commit_reads: 0, commit_read_ms: 0, deploy_ms: 0,
+        union_ms: 0, union_rotations: 0, commits_walked: 0, commit_reads: 0, commit_reads_kept: 0, commit_read_ms: 0, deploy_ms: 0,
+      };
+      let store = fleetStateCommitStores.get(dirname(ledgerPath));
+      if (!store) {
+        store = loadFleetStateCommitStore(dirname(ledgerPath));
+        fleetStateCommitStores.set(dirname(ledgerPath), store);
+        if (store.unreadable !== undefined) log("reconcile.commit_store_unreadable", { reason: store.unreadable });
+      }
+      const commitStore = store;
+      // The look-back of this pass. A row observes its workflows after this function returns, so a
+      // positive answer found then is saved at once.
+      const walked = new Set<string>();
+      let rowsBuilt = false;
+      const saveCommitStore = (): void => {
+        const saved = commitStore.save();
+        if (!saved.ok) log("reconcile.commit_store_unwritable", { reason: saved.reason });
       };
       const unionStarted = nowMsImpl();
       readdirSync(dirname(ledgerPath));
@@ -5164,10 +5184,22 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         }
       };
       const runCount = async (sha: string, workflow?: string): Promise<number | undefined> => {
+        // The callers ask one question of a count: is it more than 0. A kept answer is "yes".
+        if (workflow ? commitStore.hasWorkflowRuns(sha, workflow) : commitStore.hasRuns(sha)) {
+          parts.commit_reads_kept++;
+          return 1;
+        }
         const endpoint = workflow ? `actions/workflows/${workflow}/runs` : "actions/runs";
         const body = await readCommit(["api", `repos/${owner}/${repo}/${endpoint}?head_sha=${sha}&per_page=1`]) as
           { total_count?: unknown } | undefined;
-        return typeof body?.total_count === "number" ? body.total_count : undefined;
+        const count = typeof body?.total_count === "number" ? body.total_count : undefined;
+        // A count of 0 and an unreadable count are not kept: a run can still appear.
+        if (count !== undefined && count > 0 && walked.has(sha)) {
+          if (workflow) commitStore.setHasWorkflowRuns(sha, workflow);
+          else commitStore.setHasRuns(sha);
+          if (rowsBuilt) saveCommitStore();
+        }
+        return count;
       };
       try {
         rows.push(...await mainWorkflowStateRows({
@@ -5177,22 +5209,27 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
             if (!Array.isArray(body)) throw new Error("main commit listing is not an array");
             return body.filter((c) => typeof c?.sha === "string").map((c) => ({ sha: c.sha, parents: (c.parents ?? []).map((p) => p.sha) }));
           },
-          countRunsForSha: (sha) => { parts.commits_walked++; return runCount(sha); },
+          countRunsForSha: (sha) => { parts.commits_walked++; walked.add(sha); return runCount(sha); },
           countWorkflowRuns: runCount,
           changedFiles: async (sha) => {
-            const cached = fleetStateChangedFiles.get(sha);
-            if (cached !== undefined) return cached;
+            const cached = commitStore.changedFiles(sha);
+            if (cached !== undefined) { parts.commit_reads_kept++; return cached; }
             const body = await readCommit(["api", `repos/${owner}/${repo}/commits/${sha}`]) as
               { files?: Array<{ filename: string }> } | undefined;
             const files = body?.files?.map((f) => f.filename);
-            if (files !== undefined) fleetStateChangedFiles.set(sha, files);
+            if (files !== undefined) commitStore.setChangedFiles(sha, files);
             return files;
           },
           dispatch: (workflow) => ghRunImpl("gh", ["api", "-X", "POST", `repos/${owner}/${repo}/actions/workflows/${workflow}/dispatches`, "-f", "ref=main"]),
         }, readWorkflowPushTriggers(repoDir), history, MAIN_RUN_GAP_LOOKBACK));
+        // The walk reached every commit of the look-back, so a commit that left it is removed. An empty
+        // listing removes nothing.
+        if (walked.size > 0) commitStore.retain(walked);
       } catch (error) {
         log("reconcile.unreadable", { pipeline: "ci", reason: String((error as Error)?.message ?? error) });
       }
+      rowsBuilt = true;
+      saveCommitStore();
       const deployStarted = nowMsImpl();
       try {
         const failedAt = (): number | undefined => {
