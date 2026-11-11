@@ -1,0 +1,69 @@
+- id: W1-T12240
+  title: "The daemon container reads the second stage of its entrypoint from the checkout"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the entrypoint starts and restarts the daemon; an error here stops an instance
+  band_meaning: span
+  origin: operator-session#restart-and-recycle-downtime-2026-11-10
+  plan_refs:
+    - W1-T12031
+    - W1-T9645
+    - W1-T9631
+    - W1-T9623
+    - W1-T9094
+  files:
+    - deploy/entrypoint.sh
+    - deploy/entrypoint-supervise.sh
+    - deploy/Dockerfile
+    - docs/forensics/entrypoint.md
+    - test/infra/the-entrypoint-reads-its-second-stage-from-the-checkout.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "After the first checkout sync, the entrypoint runs the supervise script of the checkout, `deploy/entrypoint-supervise.sh`, when `bash -n` accepts it. The test runs the entrypoint against a fixture checkout"
+      proof: "grep: W1-T12240 criterion 1 in test/infra/the-entrypoint-reads-its-second-stage-from-the-checkout.test.ts"
+    - claim: "If the checkout has no supervise script, or `bash -n` refuses it, the entrypoint runs the copy in the image and writes one `entrypoint.supervise_fallback` row with the reason"
+      proof: "grep: W1-T12240 criterion 2 in test/infra/the-entrypoint-reads-its-second-stage-from-the-checkout.test.ts"
+    - claim: "After a freshness exit and the checkout sync, if the supervise script of the checkout differs from the one that runs, the running script replaces itself with the new one. The count of freshness restarts and the other counters keep their values"
+      proof: "grep: W1-T12240 criterion 3 in test/infra/the-entrypoint-reads-its-second-stage-from-the-checkout.test.ts"
+    - claim: "A supervise script from the checkout that exits with an error before it starts the daemon once does not end the container: the entrypoint runs the copy in the image and writes the fallback row"
+      proof: "grep: W1-T12240 criterion 4 in test/infra/the-entrypoint-reads-its-second-stage-from-the-checkout.test.ts"
+    - claim: "The exit codes 75, 76, 77 and 78, the forwarded TERM and INT signals, the `daemon.process.exit` row and `RMD_SKIP_BOOTSTRAP=1` behave as today"
+      proof: "grep: W1-T12240 criterion 5 in test/infra/the-entrypoint-reads-its-second-stage-from-the-checkout.test.ts"
+    - claim: "The entrypoint names the supervise script"
+      proof: 'grep: entrypoint-supervise\.sh in deploy/entrypoint.sh'
+    - claim: "The image holds a copy of the supervise script: the test reads `deploy/Dockerfile` and finds the copy to `/usr/local/lib/rmd/`"
+      proof: "grep: W1-T12240 criterion 6 in test/infra/the-entrypoint-reads-its-second-stage-from-the-checkout.test.ts"
+  rationale: |
+    OBSERVED 2026-10-28 to 2026-11-10 on main, and 2026-11-04 to 2026-11-11 in the ledger of the core instance: a fix to the entrypoint reaches the daemon only through a new image and a recycle.
+    - `deploy/entrypoint.sh` changed 2 times in 14 days: #16971 on 2026-11-06 and #17680 (W1-T12031) on 2026-11-10.
+    - Before the fix of W1-T12031, 17 freshness exits had a median of 40 minutes between `daemon.freshness_exit` and the `daemon.process.exit` row of the entrypoint. The progress watchdog recycled the container 13 times from 2026-11-08 to 2026-11-10, before the fix was in an image.
+    - The recycle that brought the fix took 3,150 s from `recycle.invoked` to `recycle.ended` on 2026-11-10. For 2,970 s of that the instance was under the recycle pause.
+    - A freshness restart happens about 5 times a day. A file that the entrypoint reads from the checkout is new at the next one.
+    READ at origin/main 17745c6bf.
+    - `deploy/Dockerfile` copies `deploy/entrypoint.sh` to `/usr/local/bin/rmd-entrypoint`. `BAKED_PATHS` (src/lib/image-drift.ts) and `IMAGE_BAKED_PATHS` (src/lib/deploy-judge.ts) list it, so a change needs an image.
+    - The script has two parts. Lines 1 to 507 set the git identity and the credential helper, check that the state is writable, and clone or sync the checkout (`sync_tree`). Lines 525 to 931 are the loop that starts the daemon, records its exit, and restarts it after the exit codes 75 to 78. Both changes of the last 14 days were in the second part.
+    - After a freshness exit the loop already runs `sync_tree`, so the checkout is new before the daemon starts again.
+    CHECKED for overlap: W1-T9645 (merged) makes a recycle happen sooner for a fix in an image path. W1-T9631 and W1-T9623 (merged) changed what the first part does when the checkout cannot advance. W1-T9094 (merged) limits the image paths of a daemon container. None reads a part of the entrypoint from the checkout.
+  design: |
+    Move the loop and the functions that only the loop uses to a new file, `deploy/entrypoint-supervise.sh`. `deploy/entrypoint.sh` keeps the first part and the functions that both parts use.
+    In `deploy/Dockerfile`, copy the new file to `/usr/local/lib/rmd/entrypoint-supervise.sh`. It is the fallback.
+    At the end of `deploy/entrypoint.sh`:
+    1. Choose the file: `$TREE/deploy/entrypoint-supervise.sh` if it exists and `bash -n` accepts it; else the copy in the image.
+    2. Run it with the functions and variables of the first part available to it.
+    3. If the file from the checkout fails before its first daemon start, run the copy in the image.
+    In the loop, after `sync_tree` for a freshness, blocked or environmental restart: compare the checksum of the file of the checkout with the checksum of the file that runs. If they differ and `bash -n` accepts the new file, pass the counters in environment variables and `exec` the entrypoint path again with a marker that skips the first sync.
+    Write `entrypoint.supervise_fallback` to the ledger with `printf`, as `entrypoint.stale_boot` is written today.
+    Do not add `deploy/entrypoint-supervise.sh` to `BAKED_PATHS` or `IMAGE_BAKED_PATHS`: the copy in the image is a fallback and may be older. Say so in docs/forensics/entrypoint.md.
+    The first part stays in the image. A change to it still needs a recycle. This change itself needs one recycle.
+    The checkout is the tree that the daemon already runs its own source from. `sync_tree` refuses a tree with changed tracked files, so the file that runs is a file of main.
+    NOT IN SCOPE: the serve container, the content of the loop, and the image lists.
+  falsifier: |
+    Skip the `bash -n` check and criterion 2 must fail. Run the old loop after a sync that changed the file and criterion 3 must fail. Let a failing file from the checkout end the container and criterion 4 must fail. Restore and require all seven to pass.
+  note: |
+    After the merge and one recycle, a change to `deploy/entrypoint-supervise.sh` is live after the next freshness restart. Confirm it once with a change that only adds a log line.

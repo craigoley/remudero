@@ -1,0 +1,67 @@
+- id: W1-T12239
+  title: "The first tick read starts right after the token mint and the plan load"
+  repo: remudero
+  depends_on:
+    - W1-T12236 # the boot review takes its views from this read
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # starts a worker thread and GitHub reads before the daemon holds its lock
+  band_meaning: span
+  origin: operator-session#restart-and-recycle-downtime-2026-11-10
+  plan_refs:
+    - W1-T12236
+    - W1-T12235
+    - W1-T12238
+    - W1-T5720
+    - W1-T9909
+  files:
+    - src/cli/commands/daemon.ts
+    - src/lib/daemon.ts
+    - test/daemon/the-first-tick-read-starts-right-after-the-token-mint.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "`daemonCommand` starts the tick read worker and asks it for the first tick read after the token mint and the plan load, and before the lifetime history, the daemon lock and the adoption of run children. The test holds those steps open and sees the read start"
+      proof: "grep: W1-T12239 criterion 1 in test/daemon/the-first-tick-read-starts-right-after-the-token-mint.test.ts"
+    - claim: "The first tick uses that read and asks for no second one. `refreshMergedAsync` returns it"
+      proof: "grep: W1-T12239 criterion 2 in test/daemon/the-first-tick-read-starts-right-after-the-token-mint.test.ts"
+    - claim: "If the plan changed between the early read and the first tick, the first tick asks for a new read, as a later tick does"
+      proof: "grep: W1-T12239 criterion 3 in test/daemon/the-first-tick-read-starts-right-after-the-token-mint.test.ts"
+    - claim: "If the early read fails, the first tick reads as today and the daemon starts"
+      proof: "grep: W1-T12239 criterion 4 in test/daemon/the-first-tick-read-starts-right-after-the-token-mint.test.ts"
+    - claim: "A daemon that is refused the lock, or that starts under STOP, closes the worker and makes no further read"
+      proof: "grep: W1-T12239 criterion 5 in test/daemon/the-first-tick-read-starts-right-after-the-token-mint.test.ts"
+    - claim: "A dry run starts no worker and makes no early read"
+      proof: "grep: W1-T12239 criterion 6 in test/daemon/the-first-tick-read-starts-right-after-the-token-mint.test.ts"
+    - claim: "The daemon command names the early read"
+      proof: "grep: firstTickRead in src/cli/commands/daemon.ts"
+  rationale: |
+    OBSERVED 2026-11-04T01:56Z to 2026-11-11T01:56Z in the ledger of the core instance: a start does its reads one after another, and the read that the first review needs is the last.
+    - 45 starts. Median times, in order: 87 s for the lifetime history, 18 s for the claim sweep, 22 s from `daemon.start` to `daemon.boot`, 49 s from `daemon.boot` to the first `daemon.tick`, and then 84 s from that tick to `daemon.sweep.started`.
+    - The 84 s are the first tick read. In the newest start it was 146 s: the worker thread started at 01:39:47, the board fetch ended at 01:40:27, and the sweep started at 01:42:04.
+    - The read needs the token and the plan. It does not need the lifetime history, the daemon lock, the adoption or the boot sweeps.
+    - The token mint took 0.1 s and the plan load a median of 4.5 s.
+    READ at origin/main 17745c6bf.
+    - `daemonCommand` builds the read plane after `daemonBoot`: `startTickReadWorker` and `planReaders.tickRead(readPlane.read)` (src/cli/commands/daemon.ts, lines 1690 to 1705).
+    - The first tick awaits `deps.refreshMergedAsync(planForBatch)` (src/lib/daemon.ts:6666) before it starts the boot review (line 6708) and the sweep.
+    - The token mint is awaited at src/cli/commands/daemon.ts:961 and the plan load at line 1003.
+    NOT ESTABLISHED: how much of the 84 s the overlap saves on a host with a load average of 20 to 30 on 8 cores. The reads compete for a processor. The estimate is 60 to 140 s for each start.
+    CHECKED for overlap: W1-T12236 gives the boot review the views of this read; this task depends on it. W1-T12235 and W1-T12238 shorten two of the steps that this read would run beside. W1-T9909 (merged) is about a daemon whose start fails: it must release what it started, and criterion 5 keeps that rule for the new worker.
+  design: |
+    In `daemonCommand`:
+    - After the plan load, and after the dry-run return, build the read plane and call its read once. Keep the promise as `firstTickRead`.
+    - Do not await it on the path to `daemon.start`.
+    - Register the worker in the cleanup list at once, so that a refused lock, a STOP and a failed start close it.
+    In `runDaemon`:
+    - The first call of `refreshMergedAsync` awaits `firstTickRead` and uses its result, if the plan binding is the one the read was made for. In every other case it reads as today.
+    - A rejected `firstTickRead` is not an error of the start: write one row and read as today.
+    The read publishes its time. W1-T12236 uses a read only when it was published after the tick started. For the first tick, count the early read as the read of that tick: it is the newest read that exists, and a review still checks the head before it posts.
+    Add `first_tick_read_ms` and `first_tick_read_overlap_ms` to the row that reports the first tick, so that the saving is measured.
+    NOT IN SCOPE: the content of the tick read, a second early read, and the git credential socket.
+  falsifier: |
+    Build the read plane after `daemonBoot` again and criterion 1 must fail. Let the first tick ask for a second read and criterion 2 must fail. Leave the worker open after a refused lock and criterion 5 must fail. Restore and require all seven to pass.
+  note: |
+    After the merge, the time from the first `daemon.tick` to `daemon.sweep.started` is the measure. The median was 84 s over 45 starts.

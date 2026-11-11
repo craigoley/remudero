@@ -1,0 +1,69 @@
+- id: W1-T12228
+  title: "The four constants of the freshness restart are policy rows with bounds"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the values that decide when the daemon restarts move from code to a reviewed policy file
+  band_meaning: span
+  origin: operator-session#freshness-restart-findings-2026-11-10
+  plan_refs:
+    - W1-T4945
+    - W1-T6093
+    - W1-T10055
+    - W1-T11139
+  files:
+    - plan/policy.yaml
+    - src/lib/policy.ts
+    - src/lib/deploy-judge.ts
+    - src/lib/daemon.ts
+    - src/lib/live-edit-ladder.ts
+    - src/cli/commands/daemon.ts
+    - test/daemon/the-four-constants-of-the-freshness-restart-are-policy-rows.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "The policy file has a block `freshnessRestart` with four rows: `scoreLimit` 18, `stalenessHorizonMs` 3600000, `quietWindowMs` 600000 and `minLifetimeMs` 5400000. Each row has `min`, `max` and an `origin` that names its constant in src/lib/deploy-judge.ts. Each row is on one line"
+      proof: "grep: W1-T12228 criterion 1 in test/daemon/the-four-constants-of-the-freshness-restart-are-policy-rows.test.ts"
+    - claim: "The policy loader refuses a value outside the bounds of its row. A policy file without the block loads with the four values of today"
+      proof: "grep: W1-T12228 criterion 2 in test/daemon/the-four-constants-of-the-freshness-restart-are-policy-rows.test.ts"
+    - claim: "The test loads a policy with `scoreLimit` 9 through `loadPolicy` and builds the daemon options the way the daemon command does. A busy daemon then restarts at pressure 9"
+      proof: "grep: W1-T12228 criterion 3 in test/daemon/the-four-constants-of-the-freshness-restart-are-policy-rows.test.ts"
+    - claim: "With the default rows, the freshness judge gives the same decision and the same reason as at the base commit, for each case of the test: defer, hold for the minimum lifetime, hold for the quiet window, and restart"
+      proof: "grep: W1-T12228 criterion 4 in test/daemon/the-four-constants-of-the-freshness-restart-are-policy-rows.test.ts"
+    - claim: "The row `daemon.freshness_decision` carries the four values in force"
+      proof: "grep: W1-T12228 criterion 5 in test/daemon/the-four-constants-of-the-freshness-restart-are-policy-rows.test.ts"
+    - claim: "The live-edit ladder computes its pressure with the same score limit and the same horizon as the daemon"
+      proof: "grep: W1-T12228 criterion 6 in test/daemon/the-four-constants-of-the-freshness-restart-are-policy-rows.test.ts"
+    - claim: "The daemon command reads the block"
+      proof: "grep: freshnessRestart in src/cli/commands/daemon.ts"
+  rationale: |
+    OBSERVED 2026-11-04T01:56Z to 2026-11-11T01:56Z in the ledger of the core instance: 36 freshness restarts in 7 days, 5.1 a day.
+    - The median time from the first material change to the restart decision was 64.7 minutes.
+    - Of 913 decision rows, 706 said "wait for an idle moment" and 101 were holds for the minimum lifetime. Exactly 1 row had `busy: false`.
+    - The 45 restart decisions had these triggers: 33 staleness plus change, 11 withheld reviews, 1 idle. So the judge is in practice a timer of 60 minutes.
+    - The daemon ran on materially stale code for 72.0 of 150.5 hours of lifetime (48%).
+    READ at origin/main 17745c6bf, src/lib/deploy-judge.ts:
+    - `DEPLOY_RESTART_SCORE_THRESHOLD` is 18. The pressure must reach it before a busy daemon restarts.
+    - `DEPLOY_RESTART_RATE_CEILING_MS` is 60 minutes. `decideFreshnessRestart` uses it as the staleness horizon: the time after which staleness alone reaches the score limit.
+    - `FRESHNESS_COALESCE_WINDOW_MS` is 10 minutes, the quiet window. `FRESHNESS_MIN_LIFETIME_MS` is 90 minutes (operator ruling 2026-10-17).
+    - All four are constants in code. A change to one is a source change with a full build, and plan review does not see it.
+    - src/lib/live-edit-ladder.ts calls `decideFreshnessRestart` with the same constants.
+    CHECKED for overlap: W1-T10055 measures what recycles the container and writes a memo. W1-T11139 charges the restart cost to the idle account and shows the starts for each day. Neither moves a constant to policy.
+    W1-T12232 lets a gardener propose a change to two of these rows. It needs the rows first.
+  design: |
+    1. Add the block `freshnessRestart` to plan/policy.yaml. Write each row on one line in flow style, so that a later edit of one line can name it. Give each row the origin `lifted:` with its constant.
+    2. Bounds: `scoreLimit` 6 to 54. `stalenessHorizonMs` 900000 to 14400000 (15 minutes to 4 hours). `quietWindowMs` 0 to 1800000. `minLifetimeMs` 0 to 21600000.
+    3. In src/lib/policy.ts, validate the block the way the loader validates the other rows. An absent block gives the four defaults.
+    4. In the daemon command, pass the four values to the daemon options beside `sweepWallClockBoundMs`. In `runDaemon`, pass them to `decideFreshnessRestart` and `coalesceFreshnessRestart`. Both functions take them as inputs already, or take `minLifetimeMs` already.
+    5. Keep the four constants in src/lib/deploy-judge.ts as the defaults. Add the values to the decision row.
+    6. Give the live-edit ladder the same two values.
+    A running daemon reads the policy at its start, so a changed row applies after the next restart.
+    NOT IN SCOPE: the recycle score of the deployer, which uses `DEPLOY_RESTART_SCORE_THRESHOLD` and `DEPLOY_RESTART_RATE_CEILING_MS` for its own decision. A change of a value. The rows that W1-T12230 and W1-T12231 add to this block.
+  falsifier: |
+    Leave the constant in `decideFreshness` and criterion 3 must fail. Accept `scoreLimit` 100 and criterion 2 must fail. Change a default and criterion 4 must fail. Restore and require all seven to pass.
+  note: |
+    The behaviour does not change at the merge. To change a value later, edit one row in a plan pull request; the bounds refuse a value that is out of range.

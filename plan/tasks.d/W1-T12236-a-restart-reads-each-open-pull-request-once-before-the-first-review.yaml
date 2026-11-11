@@ -1,0 +1,73 @@
+- id: W1-T12236
+  title: "A restart reads each open pull request once before the first review"
+  repo: remudero
+  depends_on: []
+  priority: 0.9
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the views decide which pull request head a review is admitted for
+  band_meaning: span
+  origin: operator-session#restart-and-recycle-downtime-2026-11-10
+  plan_refs:
+    - W1-T5720
+    - W1-T9225
+    - W1-T6247
+    - W1-T4773
+    - W1-T6591
+  files:
+    - src/cli/commands/sweep.ts
+    - src/cli/commands/daemon.ts
+    - src/lib/open-prs-rest.ts
+    - test/sweep/a-restart-reads-each-open-pull-request-once-before-the-first-review.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "When the tick read of the current tick holds open pull request views, the light sweep with the scope `boot` uses those views and makes no GitHub read of its own for them"
+      proof: "grep: W1-T12236 criterion 1 in test/sweep/a-restart-reads-each-open-pull-request-once-before-the-first-review.test.ts"
+    - claim: "When no tick read is available, or it is older than the start of the current tick, the light sweep reads its own views, as today"
+      proof: "grep: W1-T12236 criterion 2 in test/sweep/a-restart-reads-each-open-pull-request-once-before-the-first-review.test.ts"
+    - claim: "A light sweep with any other scope reads its own views, as today"
+      proof: "grep: W1-T12236 criterion 3 in test/sweep/a-restart-reads-each-open-pull-request-once-before-the-first-review.test.ts"
+    - claim: "A review that the boot light sweep admits from the views of the tick read is for the head in those views. If the head moved before the review posts, the review does not post, as today. The test drives the hook that the daemon builds"
+      proof: "grep: W1-T12236 criterion 4 in test/sweep/a-restart-reads-each-open-pull-request-once-before-the-first-review.test.ts"
+    - claim: "The complete file list of a plan filing, kept for an exact head, survives a restart: a second hook on the same state directory makes no file read for a head that the first hook read completely"
+      proof: "grep: W1-T12236 criterion 5 in test/sweep/a-restart-reads-each-open-pull-request-once-before-the-first-review.test.ts"
+    - claim: "A kept file list is used only for the same pull request number and the same head. If the head differs, or the store file is unreadable, the hook reads GitHub as today and never admits a review for the old head"
+      proof: "grep: W1-T12236 criterion 6 in test/sweep/a-restart-reads-each-open-pull-request-once-before-the-first-review.test.ts"
+    - claim: "`sweep_light.pre_review_timing` names the source of its views, `tick_read` or `own_read`"
+      proof: "grep: W1-T12236 criterion 7 in test/sweep/a-restart-reads-each-open-pull-request-once-before-the-first-review.test.ts"
+    - claim: "The daemon gives the light sweep hook the views of its tick read"
+      proof: "grep: servedOpenPrViews in src/cli/commands/daemon.ts"
+    - claim: "The light sweep hook loads the kept file lists"
+      proof: "grep: loadPlanFilingFileCache( in src/cli/commands/sweep.ts"
+  rationale: |
+    OBSERVED 2026-11-04T01:56Z to 2026-11-11T01:56Z in the ledger of the core instance: after a start, the first review waits for a second read of the open pull requests.
+    - 45 starts. The time from `daemon.boot` to the first `sweep.review_admitted` had a median of 400 s. For the 16 starts after a freshness exit that reached a review, the median was 419 s (p90 1,651 s).
+    - `sweep_light.pre_review_timing` has the field `phase_ms.open_pr_views`. In the first light sweep of a daemon lifetime (108 rows) it took a median of 223 s (p90 389 s, worst 696 s). In a later light sweep (1,467 rows) it took a median of 90 s.
+    - The first tick had read the same pull requests seconds before. The time from the first `daemon.tick` to `daemon.sweep.started` had a median of 84 s; that is the tick read. `sweep.full_prelude` shows `tick_read_source: served` in 108 of 109 first sweeps.
+    - The light sweep ran 21 s (median) of this read on the daemon loop (`sync_on_loop_ms`). `daemon.alive` showed single loop delays of 49 s and 68 s in the two newest starts.
+    READ at origin/main 17745c6bf.
+    - `runDaemon` starts the boot review as a light sweep with `{ reviewOnly: true, scope: "boot" }` (src/lib/daemon.ts:6708), after `refreshMergedAsync` returned the tick read (src/lib/daemon.ts:6666).
+    - The sweep takes its views from the tick read: `tickRead.openPrViews` (src/cli/commands/sweep.ts:993).
+    - The light sweep hook does not. `buildSweepLightHook` (src/cli/commands/sweep.ts:1162) calls `io.openPrViews?.() ?? buildOpenPrViewsAsync(...)` (line 1214). `daemonCommand` passes no `io` (src/cli/commands/daemon.ts:2268), so the hook reads GitHub again with `buildOpenPrViewsAsync` (src/lib/tick-read-worker.ts:2633).
+    - `openPrViewSteps` keeps the complete file list of a plan filing for an exact head in `PlanFilingFileCache` (src/lib/open-prs-rest.ts:1699). The comment calls it a store for the life of the process. A restart loses it.
+    NOT ESTABLISHED: which parts of the read make the first one 133 s longer than a later one. The timing row has one number for the whole read. Criterion 7 and W1-T12244 give the next study the parts.
+    CHECKED for overlap: W1-T5720 and W1-T9225 (merged) start the boot review before the gardeners and before dispatch. W1-T6247, W1-T4773 and W1-T6591 (merged) took the plan load and the GitHub reads of the views off the loop. None gives the light sweep the views of the tick read, and none keeps a read across a restart.
+  design: |
+    Share the read.
+    - In `daemonCommand`, pass `buildSweepLightHook` an `io.openPrViews` function named `servedOpenPrViews`. It returns a copy of the open pull request views of the tick read when all three are true: the scope of the light sweep is `boot`, a tick read exists, and it was published after the current tick started. In every other case it returns undefined and the hook reads its own views.
+    - The hook passes its scope to that function. Use `structuredClone`, as the sweep does at src/cli/commands/sweep.ts:993.
+    - Add `views_source` to `sweep_light.pre_review_timing`.
+    - Do not change what a review checks before it posts. A head that moved is refused there today (`sweep.head_moved`).
+    Keep the per-head read across a restart.
+    - In src/lib/open-prs-rest.ts add `loadPlanFilingFileCache(stateDir)` and a `save()` on the store. The file is `state/cache/plan-filing-files.json` with a `schema` number. It holds, for each pull request number, the head and the complete file list. An incomplete read is never kept.
+    - `buildSweepLightHook` and the tick read worker load the store in place of `createPlanFilingFileCache()`, and save it after a read that added an entry. Remove an entry when its pull request is not in the open set.
+    - A load failure gives an empty store and one row that names the reason.
+    The builder must list in the pull request every other part of `openPrViewSteps` that depends on the head only. Do not persist a part that changes with time, such as the check status, the merge state or the workflow runs.
+    NOT IN SCOPE: the light sweeps with other scopes, the order of the starts (W1-T12239), and a change to the tick read itself.
+  falsifier: |
+    Give the views of the tick read to a light sweep with the scope `idle` and criterion 3 must fail. Give views that are older than the tick and criterion 2 must fail. Use a kept file list for a different head and criterion 6 must fail. Restore and require all nine to pass.
+  note: |
+    After the merge, the measure is `phase_ms.open_pr_views` of the first light sweep after a start, and the time from `daemon.boot` to the first `sweep.review_admitted`. The medians were 223 s and 400 s.

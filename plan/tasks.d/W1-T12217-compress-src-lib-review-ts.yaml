@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 1
   status: queued
@@ -25,3 +25,15 @@
     Compare the token streams with assertSameTokens from #test/helpers/compression-pin.js, never assert.deepEqual: its failure diff over two whole token arrays grows quadratically (W1-T11342).
     Preserve every existing behavioral assertion and run the actual callers. Do not invent a new hard comment ceiling or claim success from a title-only proof.
     Preserve existing owners, stops and deployment holds. This maintenance task grants no service restart, release or publication override.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.9
+    reasons:
+      - "The description names a comment-only compression of src/lib/review.ts plus one new regression test. The declared files are just those two, and both exist at the base."
+      - "The acceptance criterion requires executable tokens to be preserved, checked by a unit test that compares token streams against the pre-compression source. That makes the claim verifiable from what is shown."
+      - "The plan record says it grants no restart, release or publication override. It does not touch secrets, auth, deletion of data or history, or merge, deploy or review policy, and it asks for no operator decision."
+      - "The family track record is 38 merged with 0 declined, so the pattern is well-trodden. No bounded change view was supplied, so this verdict rests on the description and gates state only."
+      - "The file is named review.ts, but the description gives no sign that it changes review policy. It only reduces comments, and CI and review still apply."
+    judged_at: "2026-11-11T02:59:27.744Z"
+    pin: "40c82991c2cecfd4d747cac85254b5ae23ddc4f81ff0a1184689aed19bb7dbfe"

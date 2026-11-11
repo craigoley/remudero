@@ -19,7 +19,8 @@
     - src/run-task.ts
     - scripts/preflight-author.mjs
     - test/ci/a-plan-only-author-preflight-runs-only-the-checks-that-read-the-plan.test.ts
-  status: queued
+  status: blocked
+  retirement: withdrawn
   attempts: 0
   acceptance:
     - claim: "For a plan-only diff the static stage skips each check that declares its inputs and declares none under the plan. The summary names each skipped check and the reason"
@@ -50,4 +51,9 @@
   falsifier: |
     Skip a check that declares no inputs and criterion 2 must fail. Skip a check for a diff that changes a source file and criterion 5 must fail. Run every rule suite for a plan-only diff and criterion 3 must fail. Restore and require all five to pass.
   note: |
+    Withdrawn on 2026-11-11. Measured at origin/main 17745c6bf: a plan-only fast path is sound only if it keeps every rule suite that a plan change can fail.
+    - Of the 136 rule suites, 112 to 128 must stay. They are 89 to 92% of the suite time, and they include the suite of 150 s.
+    - So the saving is about 10 to 40 s of a run of 707 to 958 s.
+    - The larger costs have their own tasks. The affected-tests stage takes 331 to 451 s; W1-T12166 reuses the stages that passed on the same commit. The suite of 150 s is W1-T12248.
+    - New plan files are moving to remudero-ops, where the gate takes 7 s (W1-T12198 to W1-T12222).
     The builder reports the stage times of one plan-only filing before and after, from its receipts.

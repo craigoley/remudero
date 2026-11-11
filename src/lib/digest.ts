@@ -449,11 +449,9 @@ export interface DigestSummary {
 }
 
 /**
- * W1-T2765 — ONE PART'S FIGURES OVER ONE WINDOW.
- *
- * `present` and `observed` are counted separately because they answer different questions: a part
- * absent from every run (operator notes nobody wrote) is a real fact about the dialect, and folding
- * it into a byte average would report a smaller prompt than the fleet actually sends.
+ * W1-T2765 — ONE PART'S FIGURES OVER ONE WINDOW. `present` and `observed` are counted separately:
+ * a part absent from every run is a real fact, and folding it into a byte average would report a
+ * smaller prompt than the fleet sends.
  */
 export interface PromptPartWindow {
   name: string;
@@ -482,21 +480,14 @@ export interface PromptPartsSummary {
 }
 
 /**
- * W1-T2765 — GIVE THE PROMPT MANIFEST A READER.
+ * W1-T2765 — GIVE THE PROMPT MANIFEST A READER: the `prompt.manifest` rows (W1-T2297) had a
+ * writer and no reader. BYTES, NOT TOKENS, ON PURPOSE — the manifest's own unit; no tokenizer.
  *
- * W1-T2297 fingerprints every prompt part by name, sha256 and byte count into a `prompt.manifest`
- * ledger row on every run. Nothing read one: across src/, scripts/ and docs/ the step name appeared
- * only in its writer, its unit test and `buildBundle`'s independent producer. The fleet's own
- * dialect had a meter with no dial, and a compaction decision taken without it is a guess.
- *
- * BYTES, NOT TOKENS, ON PURPOSE — the manifest's unit and the ratchets' unit. No tokenizer is
- * added here.
- *
- * A NOTE ON THE PRIOR WINDOW, because it is weaker than it looks. `readDigestWindow` filters rows
- * to the window BEFORE `summarize` sees them (a memory bound, not an optimisation — an earlier
- * draft OOMed). So on the production path `priorRows` is 0 and `grewMost` is absent: growth is
- * reported only when a caller passes lines reaching further back than `sinceIso`, which the tests
- * do and `rmd digest` does not. Widening that reader is a memory decision and is not taken here.
+ * THE PRIOR WINDOW IS WEAKER THAN IT LOOKS. `readDigestWindow` filters rows to the window BEFORE
+ * `summarize` sees them (a memory bound; an earlier draft OOMed), so on the production path
+ * `priorRows` is 0 and `grewMost` absent. Growth is reported only when a caller passes lines
+ * reaching further back than `sinceIso` (the tests do, `rmd digest` does not). Widening that
+ * reader is a memory decision, not taken here.
  */
 export function summarizePromptParts(lines: LedgerLine[], sinceIso: string): PromptPartsSummary | undefined {
   const partsOf = (l: LedgerLine): PromptManifestRow[] =>
@@ -855,20 +846,15 @@ export function renderDigest(s: DigestSummary, consoleBaseUrl?: string): string 
     `issues reviewed: ${s.issues ? renderIssuesSummary(s.issues) : "(no poll this window)"}`,
     // W1-T112: soft-composed, never a placeholder — see the `inbox` field's doc on DigestSummary.
     ...(s.inbox ? [`inbox: ${renderInboxPollSummary(s.inbox)}`] : []),
-    // Soft-composed exactly like `inbox` above — absent, never a placeholder, when the window
-    // carries no `board_review.ran`. See the `boardReview` field's doc on DigestSummary.
+    // Soft-composed like `inbox` above; see the `boardReview` field's doc.
     ...(s.boardReview ? [`board review: ${renderBoardReviewSnapshot(s.boardReview)}`] : []),
-    // Soft-composed exactly like `board review` above — absent, never a placeholder, when the
-    // window carries no trip. See the `repeatEscalations` field's doc on DigestSummary.
+    // Soft-composed like `board review` above; see the `repeatEscalations` field's doc.
     ...(s.repeatEscalations?.length ? [`stuck (repeat bound): ${renderRepeatEscalations(s.repeatEscalations)}`] : []),
-    // Soft-composed exactly like `stuck (repeat bound)` above — absent, never a placeholder, when
-    // the window carries no trip. See the `repairFilingsSuppressed` field's doc on DigestSummary.
+    // Soft-composed like `stuck (repeat bound)` above; see the `repairFilingsSuppressed` field's doc.
     ...(s.repairFilingsSuppressed?.length
       ? [`repair filings suppressed (prior rejection): ${renderRepairFilingsSuppressed(s.repairFilingsSuppressed)}`]
       : []),
-    // W1-T929: soft-composed — present only when the window carries usable cache-token data
-    // (see the `cacheHit` field's doc on DigestSummary), two lines (per-run, per-class), never
-    // a "(no data)" placeholder otherwise.
+    // W1-T929: soft-composed (see the `cacheHit` field's doc): two lines, per-run and per-class.
     ...(s.cacheHit ? [renderCacheHitLine("cache hit by run", s.cacheHit.byRun), renderCacheHitLine("cache hit by class", s.cacheHit.byClass)] : []),
     ...(s.learningUsefulness ? [renderLearningUsefulness(s.learningUsefulness)] : []),
     ...(s.learningOutcomes ? [renderLearningOutcomes(s.learningOutcomes)] : []),
@@ -878,9 +864,7 @@ export function renderDigest(s: DigestSummary, consoleBaseUrl?: string): string 
     ...(s.ledgerWriters?.length ? [renderLedgerWriters(s.ledgerWriters)] : []),
     `verdict downgrades suppressed: ${s.verdictDowngradesSuppressed}`,
     `notional cost: $${s.costUsd.toFixed(2)}`,
-    // W1-T2765: ALWAYS rendered, unlike the soft-composed lines above — "not observed" is the
-    // answer this section owes, and an absent line would read as a quiet window rather than an
-    // unread meter.
+    // W1-T2765: ALWAYS rendered — an absent line would read as a quiet window, not an unread meter.
     renderPromptParts(s.promptParts),
   ];
   return lines.join("\n");
@@ -997,10 +981,9 @@ export function readDigestWindow(
   const opened = ordered.slice(0, cap);
   const seen = new Set<string>();
   const lines: LedgerLine[] = [];
-  // Filtering before retaining is the memory bound (an unfiltered draft died with a heap OOM); the
-  // predicate is `collectSince`'s own, so its later call is a no-op. The live file is read first and
-  // each file newest line first, so a cap that bites keeps the NEWEST rows; `lines` is reversed back
-  // into time order at the end. Why: the OOM measurement — docs/forensics/digest.md
+  // Filter before retaining (the memory bound; the predicate is `collectSince`'s own). Live file
+  // first, each file newest line first, so a bitten cap keeps the NEWEST rows; `lines` is reversed
+  // back into time order at the end. Why: docs/forensics/digest.md
   const addText = (text: string): void => {
     const raws = text.split("\n");
     for (let i = raws.length - 1; i >= 0; i--) {
@@ -1299,10 +1282,8 @@ export function citeRetrosInWindow(lines: LedgerLine[], sinceIso: string): Retro
   return out;
 }
 
-// ── The delivery seam: the digest depends on NotifyChannel, never a concrete target. An inbox
-// adapter lives here (not in notify.ts) since notify.ts's only shipped adapter is Darwin-only
-// and this fleet runs on Linux; an adapter is an implementation of NotifyChannel, not a change
-// to it.
+// ── The delivery seam: the digest depends on NotifyChannel, never a concrete target. The inbox
+// adapter lives here since notify.ts's only shipped adapter is Darwin-only and this fleet runs Linux.
 
 /** The console inbox's digest feed. A plain JSON array of `{ts, text}`, newest last. */
 export function inboxDigestsPath(root: string): string {
@@ -1335,9 +1316,8 @@ export function inboxNotifyChannel(root: string): NotifyChannel {
       entries.push({ ts: new Date().toISOString(), text: message });
       writeFileSync(path, JSON.stringify(entries, null, 2));
     },
-    // No unavailable() at all — a file write is always available on every platform this fleet
-    // runs on, unlike osascript/Messages.app; omitting it (NotifyChannel's own optional field)
-    // means `notify()` always attempts the send, never reports a false "not delivered".
+    // No unavailable(): a file write is always available, so `notify()` always attempts the send
+    // and never reports a false "not delivered".
   };
 }
 
