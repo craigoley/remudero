@@ -14,7 +14,7 @@
     - src/lib/test-slot.ts
     - test/ci/suites/an-unobservable-test-slot-owner-stays-unknown-and-says-how-to-recover-it.test.ts
     - test/a-test-run-takes-a-host-wide-slot-at-low-priority.test.ts  # its same-boot "lease lapsed" -> "acquired" case flips to held-UNKNOWN under design step 1
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

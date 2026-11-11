@@ -20,7 +20,7 @@
   files:
     - src/lib/sweep.ts
     - test/sweep/a-dirty-fleet-gardener-pr-gets-a-bounded-conflict-round-on-any-path.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: A dirty PR whose head matches MACHINE_LANE_HEAD_RE and whose author isFleetAppAuthor gets one bounded conflict round per head and main tip, whatever paths its conflict names, instead of blocked-ambiguous "head is not this PR task's rmd-owned run branch"; a contributor's or a foreign head that is neither fleet-owned nor an operator-session branch stays blocked-ambiguous exactly as today

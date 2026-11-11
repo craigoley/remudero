@@ -11,7 +11,7 @@
   origin: architect
   plan_refs: [W1-T11600, W1-T11768, W1-T11769, W1-T7744, W1-T10573]
   priority: 1
-  status: queued
+  status: merged
   attempts: 0
   files: [src/cli/commands/daemon.ts, src/run-task.ts, test/daemon/ops-catalog-shadow-disabled.test.ts, test/daemon/ops-catalog-shadow-enabled.test.ts, docs/cli-reference.md]
   rationale: |
