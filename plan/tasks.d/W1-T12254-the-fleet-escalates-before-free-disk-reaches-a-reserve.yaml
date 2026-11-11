@@ -1,0 +1,68 @@
+- id: W1-T12254
+  title: "The fleet raises one escalation before free disk reaches a reserve"
+  repo: remudero
+  depends_on:
+    - W1-T12253
+  priority: 0.9
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # a new escalation from a gardener that reads every host; a wrong rule opens an issue on every pass
+  band_meaning: blast-radius
+  origin: operator-session#janitor-disk-waste-2026-11-11
+  plan_refs:
+    - W1-T4804
+    - W1-T2767
+    - W1-T5711
+  files:
+    - src/lib/host-resource-gardener.ts
+    - test/gardeners/the-fleet-escalates-before-free-disk-reaches-a-reserve.test.ts
+    - test/host-resource-gardener.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "When the newest sample of a host has less free disk on the root or the state volume than 1.5 times the reserve of that volume, `runHostResourcePassAsync` raises one escalation. Its summary names the host, the volume, the free amount and the reserve"
+      proof: "grep: W1-T12254 criterion 1 in test/gardeners/the-fleet-escalates-before-free-disk-reaches-a-reserve.test.ts"
+    - claim: "The escalation lists the three largest consumers that the sample measured on that volume, largest first, each with its size. When the sample measured none on that volume, the escalation says so"
+      proof: "grep: W1-T12254 criterion 2 in test/gardeners/the-fleet-escalates-before-free-disk-reaches-a-reserve.test.ts"
+    - claim: "While free disk stays below 1.5 times the reserve, later passes raise no second escalation for that host and volume, also after the gardener starts again on the same state directory"
+      proof: "grep: W1-T12254 criterion 3 in test/gardeners/the-fleet-escalates-before-free-disk-reaches-a-reserve.test.ts"
+    - claim: "When free disk is at or above 1.5 times the reserve again, the pass writes one `host_resource.recovered` row. A later fall raises a new escalation"
+      proof: "grep: W1-T12254 criterion 4 in test/gardeners/the-fleet-escalates-before-free-disk-reaches-a-reserve.test.ts"
+    - claim: "A sample with no reserve, a reserve of `unknown` or an unreadable free value raises nothing. The pass never reads a missing value as 0"
+      proof: "grep: W1-T12254 criterion 5 in test/gardeners/the-fleet-escalates-before-free-disk-reaches-a-reserve.test.ts"
+    - claim: "The rule needs no falling trend: a steady series below 1.5 times the reserve raises the escalation. The trend rule of today gives the same findings as before for the same samples"
+      proof: "grep: W1-T12254 criterion 6 in test/gardeners/the-fleet-escalates-before-free-disk-reaches-a-reserve.test.ts"
+    - claim: "The pass calls the new rule"
+      proof: "grep: evaluateReserve( in src/lib/host-resource-gardener.ts"
+  rationale: |
+    OBSERVED 2026-11-10 on the Azure host: the root disk went to 99% used with 1 GiB free, and the operator got no escalation.
+    - The janitor log has `FAIL / is at 95% with 3G free`, then 97%, then `99% with 1G free (/dev/root), past its mark 85%`, on passes one hour apart.
+    - `~/rmd-work` held 20 GB in 21 finished worktrees. A person removed them.
+    - The fix worker failed four times that day with "Failed to create bridge sockets". The cause is not proven. A full root disk is a likely one.
+    OBSERVED 2026-11-11 on the Mac agent account: free disk was under the 20 GiB reserve of the author preflight twice, at 01:03Z and 03:15Z. The hand lane tried again every five minutes. Nobody was told.
+    READ at origin/main 3c6e5e476.
+    - `evaluateHost` (src/lib/host-resource-gardener.ts:512) makes a finding only when free space falls: it leaves a series with a slope of 0 or more.
+    - `tierFor` escalates only when the projected time to full is inside one janitor pass. The header of the file says the response is "never a fixed free-GB floor".
+    - A hand lane fills a disk in steps. 21 worktrees of about 740 MB arrive in one day, and then the series is flat. A trend rule has little to read.
+    - `hostResourceEscalation` (line 891) is the existing shape for an escalation from this gardener. `state.episodes` already keeps one episode for each key across restarts.
+    - The daemon also escalates on low disk (`diskHeadroomLatch`, src/lib/daemon.ts:3098). That reading is the volume of `config.root`, at 2 GiB or 10% of the volume. It does not read `/`, and no daemon runs on the Mac agent account.
+    CHECKED for overlap: W1-T5711 (merged) blames growth on a consumer of the same disk. W1-T9474 (queued) is one filing of this gardener for one consumer. Neither compares free disk with a reserve.
+  design: |
+    In src/lib/host-resource-gardener.ts:
+    - `sampleFromPayload` reads `root_fs_reserve_kb` and `state_fs_reserve_kb` into the values of the sample, with the `digits` helper. `unknown` gives no value.
+    - New exported function `evaluateReserve(host, samples)`. It takes the newest sample of the host. For `root` and `state` it returns a finding when free is less than 1.5 times the reserve.
+    - The finding holds the host, the volume, free, the reserve, and the consumers of that sample whose device is the device of the volume, sorted by size. Use `consumerDevices`, as `attributeGrowth` does.
+    - The pass calls `evaluateReserve` for each host after the trend rule. The episode key is `<host>:<volume>:reserve`. Open the episode and raise the escalation once. Close it and write `host_resource.recovered` when free is at or above the line.
+    - The escalation follows the operator message standard. First line: "Free disk on <host> <volume> is <x> GiB. The reserve is <y> GiB." Then the three consumers. Then what happens if nobody acts: on the Mac the author preflight refuses, on Azure the janitor pass fails.
+    - Its `taskId` is `host-reserve-<host>-<volume>`, so that it does not join the trend escalation of the same volume.
+    - `state/HOST_RESOURCE_OFF` stops this rule as it stops the others.
+    NOT IN SCOPE: swap and inodes, the trend rule, the SRE hand-off, the filing of a consumer, and the janitors.
+  falsifier: |
+    Use the reserve and not 1.5 times the reserve and criterion 1 must fail. List consumers of another device and criterion 2 must fail. Keep the episode in memory only and criterion 3 must fail. Read a missing reserve as 0 and criterion 5 must fail. Require a negative slope and criterion 6 must fail. Restore and require all seven to pass.
+  note: |
+    Host and account: the gardener runs inside the daemon of the core instance, in its container on the Azure host. It reads the heartbeat of every host.
+    The factor 1.5 is new. With today's values the line is 30 GiB on the Mac and about 14 GiB on the root volume of the Azure host (61 GiB at an 85% mark).
+    The Mac agent account is often below 30 GiB. It then has one open escalation until someone frees space or changes the reserve. That is the intended result.
+    The task removes nothing.
