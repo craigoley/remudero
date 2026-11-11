@@ -1,7 +1,7 @@
 import "#src/lib/live-analytics-snapshot-cache.js";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import * as answers from "#src/lib/escalation-answers.js";
@@ -51,6 +51,15 @@ function refusalRows(): Record<string, unknown>[] {
     author_type: "User", reason: "not-owner", origin: `issue#41:comment:${id}`, pass_id: `pass-${id}` }));
 }
 
+function unreadableFeedback(f: ReturnType<typeof fixture>): void {
+  f.issue.body = "**Task:** TRIAGE-fb-11405";
+  const inboxRoot = join(f.root, "inbox");
+  const pendingPlan = join(inboxRoot, "state", "feedback-landing-pending", "plan");
+  mkdirSync(pendingPlan, { recursive: true });
+  writeFileSync(join(pendingPlan, "feedback"), "not a directory\n");
+  f.deps.feedback = { root: f.root, inboxRoot, feedbackLand: {} };
+}
+
 function fault(t: TestContext, stage: Stage, raise: () => never = () => { throw new Error("fixture private detail"); }) {
   const f = fixture(t);
   if (stage === "refusal_history_read") f.deps.history = history([], raise);
@@ -66,8 +75,7 @@ function fault(t: TestContext, stage: Stage, raise: () => never = () => { throw 
     f.rows.push(row);
   };
   if (stage === "feedback") {
-    f.issue.body = "**Task:** TRIAGE-fb-11405";
-    f.deps.feedback = { root: f.root, inboxRoot: join(f.root, "inbox"), feedbackLand: {} };
+    unreadableFeedback(f);
     f.deps.writeLedger = (_path, row) => { if (String(row.step).startsWith("escalation_answer.feedback_")) raise(); f.rows.push(row); };
   }
   if (stage === "refusal_alarm") {
@@ -162,7 +170,7 @@ test("W1-T11405 criterion 4: deliberate read failures retain counts and unreadab
   await t.test("issue list", async s => { const f=fixture(s); f.gateway.listOpen=async()=>{throw Error("fixture outage");}; assert.deepEqual(await f.run(),{accepted:0,ignored:0,unreadable:1}); });
   await t.test("comments", async s => { const f=fixture(s); f.gateway.listComments=async()=>{throw Error("fixture outage");}; assert.deepEqual(await f.run(),{accepted:0,ignored:0,unreadable:1}); });
   await t.test("reactions", async s => { const f=fixture(s); f.gateway.listComments=async()=>[]; Object.assign(f.gateway,{ownerLogin:"fixture-owner",listReactions:async()=>{throw Error("fixture outage");}}); assert.deepEqual(await f.run(),{accepted:0,ignored:0,unreadable:1}); });
-  await t.test("feedback unreadable", async s => { const f=fixture(s); f.issue.body="**Task:** TRIAGE-fb-11405"; f.deps.feedback={root:f.root,inboxRoot:join(f.root,"inbox"),feedbackLand:{}}; assert.equal((await f.run()).accepted,1); assert.ok(f.rows.some(r=>r.step==="escalation_answer.feedback_unreadable")); });
+  await t.test("feedback unreadable", async s => { const f=fixture(s); unreadableFeedback(f); assert.equal((await f.run()).accepted,1); assert.ok(f.rows.some(r=>r.step==="escalation_answer.feedback_unreadable")); });
   await t.test("refusal alarm unreadable", async s => { const f=fixture(s); f.gateway.listOpen=async()=>[]; f.deps.history=history(refusalRows()); f.gateway.refusalIssues!.listOpen=async()=>{throw Error("fixture outage");}; assert.deepEqual(await f.run(),{accepted:0,ignored:0,unreadable:1}); assert.ok(f.rows.some(r=>r.step==="escalation_answer.refusal_alarm_unreadable")); });
   await t.test("history unreadable", async s => { const f=fixture(s); const prior=f.deps.history!; f.deps.history=Object.assign(async (dir:string)=>({...await prior(dir),ok:false}),prior); assert.equal((await f.run()).unreadable,1); assert.ok(f.rows.some(r=>r.step==="escalation_answer.refusal_alarm_unreadable")); });
 });
