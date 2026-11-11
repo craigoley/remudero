@@ -1,0 +1,61 @@
+- id: W1-T12303
+  title: "An empty test-slot pool no longer admits a suite whatever the CPU: on a host past its calibrated saturation line the suite waits in the shared queue, and at the wait bound it is NOT_RUN OVER_CAPACITY instead of running UNSLOTTED"
+  repo: remudero
+  depends_on: [W1-T12004, W1-T12301, W1-T12302]
+  priority: 1.4
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # acquireTestSlot admits every suite run in the fleet; a wrong refusal stops every lane's tests, so a missing reading must never refuse
+  band_meaning: blast-radius
+  origin: architect
+  plan_refs:
+    - W1-T12004
+    - W1-T12301
+    - W1-T12302
+    - W1-T9952
+    - W1-T9950
+    - W1-T11915
+    - W1-T11891
+  files:
+    - src/lib/test-slot.ts
+    - test/an-empty-test-slot-pool-refuses-a-suite-on-a-saturated-host-after-a-bounded-wait.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "Healthy empty pool (positive control): with no other holder and readings below every calibrated line, a suite is admitted on the first poll, as today, and its acquired row names effective cores, the capacity basis and the CPU readings"
+      proof: "unit test: test/an-empty-test-slot-pool-refuses-a-suite-on-a-saturated-host-after-a-bounded-wait.test.ts"
+    - claim: "Saturated empty pool: with no other holder, cpuAdmission.left below 1 on the effective capacity and a reading above a calibrated line, the suite waits. At the existing wait bound it returns outcome over_capacity with executionAllowed false and a note that starts NOT_RUN: OVER_CAPACITY and names the readings. It never runs UNSLOTTED"
+      proof: "unit test: test/an-empty-test-slot-pool-refuses-a-suite-on-a-saturated-host-after-a-bounded-wait.test.ts"
+    - claim: "Missing metrics: with no PSI file, no cpu.max, or no calibration record, an empty pool admits as today and the note names each UNKNOWN reading. A missing reading never refuses and is never read as calm"
+      proof: "unit test: test/an-empty-test-slot-pool-refuses-a-suite-on-a-saturated-host-after-a-bounded-wait.test.ts"
+    - claim: "Queue fairness and FIFO resumption: two waiters held on an empty saturated pool keep their shared-queue order. When the reading drops below the line, the head waiter is admitted on the next poll and the second is admitted only after it, with no waiter jumping the queue"
+      proof: "unit test: test/an-empty-test-slot-pool-refuses-a-suite-on-a-saturated-host-after-a-bounded-wait.test.ts"
+    - claim: "Preserved contract: an empty pool with left of at least 1 is admitted whatever the PSI, and a wait held by other holders still ends at the bound as wait_bound_exceeded"
+      proof: "unit test: test/an-empty-test-slot-pool-refuses-a-suite-on-a-saturated-host-after-a-bounded-wait.test.ts"
+    - claim: "Preserved contract: the static-stage admission from W1-T12004 is unchanged. A static-stage acquire on an empty saturated pool takes the W1-T12004 path and never returns over_capacity"
+      proof: "unit test: test/an-empty-test-slot-pool-refuses-a-suite-on-a-saturated-host-after-a-bounded-wait.test.ts"
+    - claim: "Preserved contract: with the fixed four-worker cap removed, a capable host still runs more than four author workers"
+      proof: "unit test: test/ci/a-capable-host-runs-more-than-four-author-workers.test.ts"
+    - claim: "The empty-pool CPU judgement is a named function the suite admission calls"
+      proof: "grep: emptyPoolCpuShort( in src/lib/test-slot.ts"
+  rationale: |
+    Initiative (operator, 2026-11-11). OBSERVED on the 8-vCPU Azure host: load averaged 75 to 85, and later CPU PSI some avg10 was 84 percent, while the shared test-slot directory had no live slot holder. Every suite was admitted at once. The exact claims gate then failed in nested bwrap timeouts, and the same proof-executor suite failed on unchanged origin/main. Those attempts are capacity-inconclusive, not a branch regression.
+    Settled by lookup: is this already filed? -> no. W1-T12004 covers static stages only, keeps "the only holder is always admitted", and lists "the slot queue for test suites" as NOT IN SCOPE. This task depends on it, so the two do not edit test-slot.ts at the same time (plan/tasks.d/W1-T12004-*).
+    Settled by lookup: where is the gap? -> cpuShort in src/lib/test-slot.ts:1573 returns undefined when holders === 0, whatever cpu.left is. At the wait bound, src/lib/test-slot.ts:2027 returns unslotted("wait_bound_exceeded") and the run goes ahead UNSLOTTED at --test-concurrency=1.
+    Settled by lookup: is there an existing NOT_RUN lease shape to reuse? -> yes. executionAllowed false is already NOT_RUN and never a fallback (testSlotExecutionAllowed, src/lib/test-slot.ts:1081-1098). Every caller already refuses on it (scripts/preflight-author.mjs:673, src/lib/retro-preflight.ts:631, src/lib/worker-provider.ts:5215).
+    Settled by lookup: is the fixed four-worker cap settled? -> removed. W1-T11891 removes every fixed four-worker ceiling, and its suite test/ci/a-capable-host-runs-more-than-four-author-workers.test.ts must stay green. This task adds no holder count and no worker cap.
+    Settled by lookup: what orders waiters? -> the shared queue in src/lib/test-slot-queue.ts. W1-T9950 orders it by arrival and W1-T11915 by cheapest first, aged by wait. A waiter held here keeps its ticket and position.
+    Settled by lookup: is the wait bound a new constant? -> no. TEST_SLOT_WAIT_BOUND_MS (src/lib/test-slot.ts:57) is reused.
+  design: |
+    In the measured suite path, add emptyPoolCpuShort(slot). It runs only when the pool has no other holder. It returns a reason when two things are both true: cpuAdmission computed on W1-T12301's effective cores leaves fewer than 1 worker, and at least one reading (load per usable core, CPU PSI some or full avg10, read with readReviewHostObservation) is above its calibrated line from W1-T12302.
+    Any UNKNOWN reading or line counts as not above. cpuShort calls it in place of the holders === 0 early return. Every other branch is unchanged.
+    While it holds, the waiter stays in the shared queue and polls as today. The test_slot.waiting and test_slot.queued rows name the CPU cause.
+    At TEST_SLOT_WAIT_BOUND_MS a wait held only by emptyPoolCpuShort returns a lease with the new outcome over_capacity, executionAllowed false, and note "NOT_RUN: OVER_CAPACITY ..." naming the readings and lines. It writes a test_slot.over_capacity row and releases its ticket. It does not return wait_bound_exceeded and does not run unslotted. A wait held by other holders keeps today's wait_bound_exceeded behaviour.
+    Readings are injected through the existing load and clock seams, so no host is needed.
+    NOT IN SCOPE: the static stage (W1-T12004), how callers report over_capacity (W1-T12304, W1-T12305), any holder count or worker cap, and RMD_TEST_SLOTS fixed pools.
+  falsifier: |
+    Keep the holders === 0 early return and criterion 2 must fail. Refuse on a missing reading and criterion 3 must fail. Admit the second waiter first on recovery and criterion 4 must fail. Run UNSLOTTED at the bound and criterion 2 must fail. Restore and require all to pass.
+  note: |
+    Filed by PLAN-create-1794411017336 from the reserved ids, in order. Rebase onto W1-T12004 before starting: both edit src/lib/test-slot.ts.

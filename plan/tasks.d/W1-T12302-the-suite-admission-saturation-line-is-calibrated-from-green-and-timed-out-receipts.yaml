@@ -1,0 +1,53 @@
+- id: W1-T12302
+  title: "The CPU line past which an empty test-slot pool refuses a suite is calibrated from author receipts that passed and receipts that timed out, and stays UNKNOWN until the two sets separate"
+  repo: remudero
+  depends_on: [W1-T12301]
+  priority: 1.4
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # Rule 19 merits test YES: one round-trip invariant, the record the script writes is the record the reader reads; unsatisfiable piecewise
+  band_meaning: span
+  origin: architect
+  plan_refs:
+    - W1-T12301
+    - W1-T12303
+    - W1-T2985
+    - W1-T11129
+  files:
+    - src/lib/suite-admission-calibration.ts
+    - scripts/calibrate-suite-admission.mjs
+    - test/the-suite-admission-saturation-line-is-calibrated-from-green-and-timed-out-receipts.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "Given green receipts admitted at load-per-usable-core of at most 2 and timed-out receipts at 6 or more, the derived line for that measure is the highest green reading (2), and the record names the counts of each set"
+      proof: "unit test: test/the-suite-admission-saturation-line-is-calibrated-from-green-and-timed-out-receipts.test.ts"
+    - claim: "When the two sets overlap on a measure, or either set is empty, that measure is UNKNOWN in the record and the reader reports it as UNKNOWN, never as a number"
+      proof: "unit test: test/the-suite-admission-saturation-line-is-calibrated-from-green-and-timed-out-receipts.test.ts"
+    - claim: "A receipt that ran no suites (not-run, over-capacity or refused) is in neither set, and a missing, unreadable or wrong-schema record file reads as UNKNOWN for every measure"
+      proof: "unit test: test/the-suite-admission-saturation-line-is-calibrated-from-green-and-timed-out-receipts.test.ts"
+    - claim: "Round trip: scripts/calibrate-suite-admission.mjs run on fixture receipts writes an rmd-suite-admission-calibration/v1 record, and readSuiteAdmissionCalibration on that file returns the same lines and UNKNOWNs the derivation produced"
+      proof: "unit test: test/the-suite-admission-saturation-line-is-calibrated-from-green-and-timed-out-receipts.test.ts"
+    - claim: "The reader is a named export the test slot can consume"
+      proof: "grep: readSuiteAdmissionCalibration in src/lib/suite-admission-calibration.ts"
+  rationale: |
+    Initiative (operator, 2026-11-11): calibrate the empty-pool refusal from receipts that passed and receipts that timed out, and prefer that over new constants.
+    OBSERVED on the 8-vCPU Azure host: load 75 to 85 and later CPU PSI some avg10 84 percent while the shared test-slot directory had no live holder. The exact claims gate failed in nested bwrap timeouts, and the same proof-executor suite failed on unchanged origin/main. Those receipts are capacity-inconclusive, so this task counts them in the timed-out set only. They never count as a branch regression.
+    Settled by lookup: is this already filed? -> no. W1-T12004 reuses review-capacity's calm/hold/shed tier for static stages and adds no calibration. No other task derives an admission line from receipts (grep of plan/tasks.d for calibrat and receipt).
+    Settled by lookup: can cpuPressureTier be the line by itself? -> no, not outside the daemon container. It returns hold, never shed, when the cpu.weight share is unread (src/lib/review-capacity.ts:307). The share comes from the host tuner's cpu-weights.json (src/lib/lane-governor.ts:401-405), which an operator session or a hosted runner does not have.
+    Settled by lookup: is PSI some usable as a saturation signal? -> only together with something else. W1-T2985 measured some avg10=80.57 with full avg10=0.00 on a healthy host (src/lib/review-capacity.ts:686-690). So some is one calibrated measure next to load per usable core. It is never the only one.
+    Rule 19 (#588 merits test): YES, risk:high with band_meaning span. The script and the lib share one record schema, and the round-trip criterion needs both files together. Splitting would land a writer with no reader, or a reader of a record nothing writes. All five reserved ids are already used, so this run could not decompose it.
+    Settled by lookup: where do author receipts live and what do they carry? -> coverage/rmd-author-*/receipt.json (scripts/preflight-author.mjs:396,881). Each has verdict, testSlot {outcome, concurrency, waitedMs, note}, and the note names cores, headroom and non-test load (describeAdmission, src/lib/test-slot.ts:1583).
+  design: |
+    deriveSuiteAdmissionCalibration(receipts) reads the admission inputs each receipt records: load per usable core, plus CPU PSI some and full avg10 where W1-T12303 records them. Usable cores come from W1-T12301's effective capacity where recorded, else the cores the note names.
+    A receipt is green when its suites passed. It is timed-out when its failing tests name ETIMEDOUT or a test timeout. Every other receipt is excluded.
+    For each measure the line is the highest green reading, but only when every timed-out reading lies above it. Otherwise the measure is UNKNOWN. That rule adds no constant.
+    scripts/calibrate-suite-admission.mjs takes receipt paths and writes the record as rmd-suite-admission-calibration/v1 with counts, lines and derivedAt. Its default output is suite-admission-calibration.json in the shared test-slot directory, so every lane on the host reads one record.
+    readSuiteAdmissionCalibration(path) returns the lines, or UNKNOWN per measure.
+    NOT IN SCOPE: consuming the record (W1-T12303), editing scripts/calibrate-author-runtime.mjs (W1-T11891 owns it), and scheduling the script.
+  falsifier: |
+    Take the mean or a fixed percentile instead of the highest green reading and criterion 1 must fail. Emit a number when the sets overlap and criterion 2 must fail. Count a not-run receipt, or read a missing file as zero, and criterion 3 must fail. Restore and require all three to pass.
+  note: |
+    Filed by PLAN-create-1794411017336 from the reserved ids, in order.

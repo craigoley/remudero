@@ -1,0 +1,45 @@
+- id: W1-T12304
+  title: "An author preflight whose suite slot comes back over_capacity writes verdict over-capacity, exits OVER_CAPACITY_EXIT and names the readings; today any NOT_RUN lease is caught as refused and exits 1, as if the branch were broken"
+  repo: remudero
+  depends_on: [W1-T12303]
+  priority: 1.4
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: medium # one script's catch path; push eligibility is still derived only by authorPushEligibility, so a capacity refusal can never become push-eligible
+  band_meaning: blast-radius
+  origin: architect
+  plan_refs:
+    - W1-T12303
+    - W1-T11914
+    - W1-T9953
+  files:
+    - scripts/preflight-author.mjs
+    - test/an-author-preflight-refused-a-suite-slot-for-capacity-says-over-capacity-not-refused.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "A suite lease with outcome over_capacity ends the run with no suite started, verdict over-capacity, a hostCapacity entry for the suites stage naming the readings and lines, exit code OVER_CAPACITY_EXIT, and a console line that starts author preflight NOT_RUN: OVER_CAPACITY"
+      proof: "unit test: test/an-author-preflight-refused-a-suite-slot-for-capacity-says-over-capacity-not-refused.test.ts"
+    - claim: "That receipt is never push-eligible, its pushEligibleReason names OVER_CAPACITY, and it carries capacityInconclusive true so a reader does not take it for a branch regression"
+      proof: "unit test: test/an-author-preflight-refused-a-suite-slot-for-capacity-says-over-capacity-not-refused.test.ts"
+    - claim: "Any other NOT_RUN lease (private coordination, unproven covered work, a mutation guard) is still refused with exit 1, as today"
+      proof: "unit test: test/an-author-preflight-refused-a-suite-slot-for-capacity-says-over-capacity-not-refused.test.ts"
+    - claim: "The script names the capacity refusal by its own marker"
+      proof: "grep: capacityInconclusive in scripts/preflight-author.mjs"
+  rationale: |
+    Initiative (operator, 2026-11-11): an empty-pool capacity refusal must reach author preflight as an explicit NOT_RUN/OVER_CAPACITY. It must not show up as a failure.
+    Settled by lookup: how does a NOT_RUN lease reach the receipt today? -> admitSuites throws "author preflight NOT_RUN (...)" (scripts/preflight-author.mjs:673). The catch sets verdict over-capacity only for MacAuthorCapacityRefusal and refused for everything else (scripts/preflight-author.mjs:866), so the run exits 1 (scripts/preflight-author.mjs:898).
+    Settled by lookup: is there an existing capacity exit? -> yes. OVER_CAPACITY_EXIT = 3 (scripts/preflight-author.mjs:30), and W1-T9953 names it the over-capacity outcome.
+    Settled by lookup: who decides push eligibility? -> authorPushEligibility (W1-T11914, scripts/preflight-author.mjs:259-293). An over-capacity run is eligible only when its tests ran green, so a run with no suites stays ineligible. This task does not change that rule.
+    Settled by lookup: is this already filed? -> no. W1-T12303 defines the over_capacity lease and leaves its callers out of scope.
+  design: |
+    In admitSuites, when the lease outcome is over_capacity, throw a capacity refusal that carries stage "suites" and the lease's readings. MacAuthorCapacityRefusal may be extended to carry it, or a sibling class added.
+    The catch then records verdict over-capacity, pushes the stage onto hostCapacity, sets affectedTestsNotRunReason and capacityInconclusive true, and prints NOT_RUN: OVER_CAPACITY. Every other NOT_RUN keeps the refused path.
+    The receipt is still written once, by the existing writer.
+    NOT IN SCOPE: the admission rule (W1-T12303), the retro and run-task callers (W1-T12305), authorPushEligibility's rule, and the pre-push hook.
+  falsifier: |
+    Leave the catch as it is and criteria 1 and 2 must fail. Map every NOT_RUN to over-capacity and criterion 3 must fail. Restore and require all three to pass.
+  note: |
+    Filed by PLAN-create-1794411017336 from the reserved ids, in order.
