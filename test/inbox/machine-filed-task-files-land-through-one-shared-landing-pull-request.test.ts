@@ -15,8 +15,7 @@ import { appendLedger } from "#src/lib/ledger.js";
 import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
 import type { PlanPrPreflightResult } from "#src/lib/plan-pr-emitter.js";
 import type { Plan, Task } from "#src/lib/plan.js";
-import { REFUSAL_AMENDMENT_STEP } from "#src/lib/refusal-amendment.js";
-import { planAmendmentReceipt } from "#src/run-task.js";
+import { REFUSAL_AMENDMENT_STEP, planAmendmentReceipt } from "#src/lib/refusal-amendment.js";
 import { gitRepo, type GitRepo } from "#test/helpers/git-repo.js";
 import { buildSweepEffects, runSweep, type SweepDeps } from "#test/helpers/sweep-test.js";
 

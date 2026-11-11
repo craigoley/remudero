@@ -2949,7 +2949,7 @@ import { branchCitationPattern, branchNamesFingerprint, decideAutomaticBranchRea
 // were not exported before this move and stay that way, used here under their original names.
 import { repoRoot, resolveOwnerRepo, resolveRepoRoot } from "./lib/repo-location.js";
 import { resolveVerbPlanRoot, type VerbPlanRoot } from "./lib/repo-location.js";
-import { refusalExcerptFromFixReport, taskAwaitsAmendment } from "./lib/refusal-amendment.js";
+import { planAmendmentReceipt, refusalExcerptFromFixReport, taskAwaitsAmendment } from "./lib/refusal-amendment.js";
 import { fetchPrDiff, ghPrDiffAsync, prDiffSourceAsync } from "./lib/pr-diff.js";
 import { boundGitCall, fetchOriginRetryingRefLock, fetchOriginRetryingRefLockAsync, GATEWAY_FETCH_TIMEOUT_MS, GIT_FETCH_KILL_GRACE_MS, killAfterGrace, type AsyncGitRunner } from "./lib/git-fetch-retry.js";
 import { asOwnerRepoUnresolvable, resolveOwnerRepoAt, resolveOwnerRepoAtAsync } from "./lib/owner-repo.js";
@@ -27410,15 +27410,6 @@ export async function runShardRepairPass(opts: {
 
 /** A garden branch whose PR create threw is deleted from origin, unless a PR does sit on it (the
  *  create succeeded server-side but returned nothing) or that cannot be read — then it is kept. */
-/** W1-T12199: what the escalation triage reports for a proof amendment: its PR, or that it waits for the next task-file landing. */
-export function planAmendmentReceipt(taskId: string, result: { outcome: string; prUrl?: string } | undefined): string {
-  if (result?.prUrl) return `${result.prUrl} proposes the proof amendment; decline the PR to undo`;
-  if (result?.outcome === "waiting") {
-    return `the proof amendment for ${taskId} waits for the next landing pull request of task files; remove its staged file to undo`;
-  }
-  throw new Error(`amendment not opened: ${result?.outcome ?? "unavailable"}`);
-}
-
 export function retractGardenBranch(o: {
   branch: string;
   git: (...args: string[]) => string;

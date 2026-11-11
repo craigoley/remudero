@@ -441,6 +441,15 @@ export async function draftRefusalAmendment(
   }
 }
 
+/** W1-T12199: what the escalation triage reports for a proof amendment: its PR, or that it waits for the next task-file landing. */
+export function planAmendmentReceipt(taskId: string, result: { outcome: string; prUrl?: string } | undefined): string {
+  if (result?.prUrl) return `${result.prUrl} proposes the proof amendment; decline the PR to undo`;
+  if (result?.outcome === "waiting") {
+    return `the proof amendment for ${taskId} waits for the next landing pull request of task files; remove its staged file to undo`;
+  }
+  throw new Error(`amendment not opened: ${result?.outcome ?? "unavailable"}`);
+}
+
 /** Read the task's shard file (or the monolith) from `repoDir`, both located through
  *  resolveRepoLayout rather than an inline house path — the disk half of io.readShard. */
 export function readTaskShard(repoDir: string, taskId: string): { relPath: string; text: string } | undefined {
