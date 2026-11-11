@@ -42,6 +42,22 @@
       report-commands.ts (plan/tasks.d/W1-T11155-a-bundled-review-loads-the-modules-it-defers.yaml).
     Scope is the operator-approved proposal
     (wreckterra-evidence-20261025/status-json-snapshot-cache-followup-proposal-20261103.json).
+    CLARIFIED 2026-11-11 (PLAN-clarify-1794411460166): PR 17949 failed proof-discrimination. The whole-file proof
+    `unit test: test/status-json-deadline.test.ts` runs W1-T4208's existing suite, which also passes at the merge base.
+    The acceptance block now names one literal task-id title per regression.
+    Settled by lookup: is this already filed or already decided? -> no. No other shard amends W1-T11280's proofs.
+      W1-T11325 and W1-T11874 only cite it (grep W1-T11280 in plan/tasks.d).
+    Settled by lookup: does a title-scoped `unit test:` form exist? -> yes. A bare body that is not a path is
+      name-filtered (`--test-name-pattern`, escaped, so it matches a LITERAL substring) across TEST_GLOB
+      (parseTestTarget, src/lib/review.ts ~1800). Precedent: W1-T3412, W1-T12062.
+    Settled by lookup: does such a title discriminate at merge base? -> yes. A title absent at base completes with zero
+      real matches, and nameFilteredOutcome returns "no-match", not "pass". classifyBaseProofOutcome then grades
+      anything other than "pass" as "discriminates" (src/lib/review.ts ~4002, ~4294).
+    Settled by lookup: does lint-plan refuse a not-yet-written title? -> no. proof-unit-test-unresolvable is skipped on
+      a plan-only filing. proof-name-resolution warns only on metacharacter titles. proof-unit-test-base-wrapper fires
+      only when the resolved file is ABSENT at base, and this suite exists (src/lib/task-linter.ts ~1587, ~1683, ~1737).
+    Settled by lookup: does the whole-file suite claim need keeping? -> no. CI runs the whole suite on every PR, so the
+      existing W1-T4208 tests stay guarded without a criterion that cannot discriminate.
   design: |
     1. Change ONLY the JSON-mode `buildBatchedGithub` call in `statusCommand` so it also passes the persisted repository
        `BoardSnapshotCache` (`createBoardSnapshotCache(<state root>, owner, repo)`, with the root chosen the same way the
@@ -55,10 +71,33 @@
        persisted snapshot is used by the JSON status read without a full board re-fetch. (b) A missing, stale, truncated
        or unreadable snapshot, and a remote-ref failure, each still yield explicit unavailable evidence within the deadline.
        Put `W1-T11280` in each new test title.
+       EXACT TITLE STEMS (the acceptance proofs below match them as LITERAL substrings, so copy them verbatim). Write
+       one test per case, and start each title with its stem. Plain words only, with no regex metacharacters:
+         - `W1-T11280 fresh snapshot` ... (a). This is the behavioural falsifier. It must FAIL until the gateway passes
+           the cache, so assert that no full board re-fetch happens (for example, count the injected exec's board-list
+           calls). Asserting only that the output is right would pass on the uncached path.
+         - `W1-T11280 missing snapshot` ...
+         - `W1-T11280 stale snapshot` ...
+         - `W1-T11280 truncated snapshot` ...
+         - `W1-T11280 unreadable snapshot` ...
+         - `W1-T11280 remote-ref failure` ...
+       Each fail-closed case (b) seeds THAT one condition in the persisted cache, or in the injected exec for the
+       remote-ref case. It then asserts that the affected rows read `unavailable` with a reason, never empty or zero,
+       within the deadline. No title may contain two stems, and no pre-existing W1-T4208 test is renamed to carry one.
     NOT IN SCOPE: any other file, any change to board-snapshot-cache.ts or status.ts, any new task.
   acceptance:
-    - claim: "the status JSON deadline suite, including the new snapshot-reuse and fail-closed regressions, passes"
-      proof: "unit test: test/status-json-deadline.test.ts"
+    - claim: "a fresh persisted snapshot is consumed by the JSON status read without a full board re-fetch"
+      proof: "unit test: W1-T11280 fresh snapshot"
+    - claim: "a missing persisted snapshot yields explicit unavailable evidence within the deadline"
+      proof: "unit test: W1-T11280 missing snapshot"
+    - claim: "a stale persisted snapshot yields explicit unavailable evidence, never silently filled rows"
+      proof: "unit test: W1-T11280 stale snapshot"
+    - claim: "a truncated persisted snapshot yields explicit unavailable evidence, never silently filled rows"
+      proof: "unit test: W1-T11280 truncated snapshot"
+    - claim: "an unreadable persisted snapshot yields explicit unavailable evidence within the deadline"
+      proof: "unit test: W1-T11280 unreadable snapshot"
+    - claim: "a remote-ref read failure yields explicit unavailable evidence within the deadline"
+      proof: "unit test: W1-T11280 remote-ref failure"
     - claim: "the regressions for consuming a fresh persisted snapshot and for unusable or missing evidence staying unavailable are titled with this task id"
       proof: "grep: W1-T11280 in test/status-json-deadline.test.ts"
   note: |

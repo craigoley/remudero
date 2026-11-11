@@ -177,7 +177,9 @@ test("W1-T11445 criterion 4: invalid or sparse measurements keep the one-plan bo
   });
   await runSweepLightPass([planPr(1144531), planPr(1144532)], noDurationDeps, DEFAULT_SWEEP_POLICY);
   assert.deepEqual(noDurationArmed, [], "a fresh already-armed observation records no new merge duration");
+  // W1-T12266: a turn with no merge attempt spends no budget, so the next PR is judged on its own facts.
   const noDurationDeferred = rowsAt(noDurationLedger).find((row) =>
     row.step === "sweep.disposed" && row.pr_number === 1144532);
-  assert.match(String(noDurationDeferred?.stand_down_reason), /duration unavailable or invalid/);
+  assert.doesNotMatch(String(noDurationDeferred?.stand_down_reason), /duration unavailable or invalid/);
+  assert.match(String(noDurationDeferred?.stand_down_reason), /already armed \(fresh GitHub observation\)/);
 });
