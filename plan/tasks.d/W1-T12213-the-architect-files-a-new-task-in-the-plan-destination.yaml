@@ -1,0 +1,49 @@
+- id: W1-T12213
+  title: "The Architect files a new task in the plan destination from `rmd plan` and triage"
+  repo: remudero
+  depends_on: [W1-T12204, W1-T12205, W1-T12206, W1-T12207, W1-T12208, W1-T12209, W1-T12210]
+  priority: 1.1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the two commands that file most tasks start to work in a second repository
+  band_meaning: blast-radius
+  origin: operator-session#ops-cutover-2026-11-10
+  plan_refs:
+    - W1-T11768
+    - W1-T12171
+    - W1-T2528
+  files:
+    - src/run-task.ts
+    - test/worker/run-task/the-architect-files-a-new-task-in-the-plan-destination.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "With `task` in the kinds of the host file, `rmd plan` makes its lane worktree from the destination checkout, and opens the pull request for its new task files in the destination repository"
+      proof: "grep: W1-T12213 criterion 1 in test/worker/run-task/the-architect-files-a-new-task-in-the-plan-destination.test.ts"
+    - claim: "With the kind on, a triage `propose` outcome adds its new task file in the destination repository"
+      proof: "grep: W1-T12213 criterion 2 in test/worker/run-task/the-architect-files-a-new-task-in-the-plan-destination.test.ts"
+    - claim: "The Architect can read the source of the public repository while it writes a task in the destination worktree, and it cannot write to the public checkout"
+      proof: "grep: W1-T12213 criterion 3 in test/worker/run-task/the-architect-files-a-new-task-in-the-plan-destination.test.ts"
+    - claim: "A proposal that changes a task file of the public repository is committed in the public repository. A proposal that does both makes one pull request in each repository"
+      proof: "grep: W1-T12213 criterion 4 in test/worker/run-task/the-architect-files-a-new-task-in-the-plan-destination.test.ts"
+    - claim: "With no host file, both commands use the same worktree, branch and repository as today"
+      proof: "grep: W1-T12213 criterion 5 in test/worker/run-task/the-architect-files-a-new-task-in-the-plan-destination.test.ts"
+    - claim: "The test goes through the `rmd plan` command and the `rmd triage` command, the production callers"
+      proof: "grep: W1-T12213 criterion 6 in test/worker/run-task/the-architect-files-a-new-task-in-the-plan-destination.test.ts"
+  rationale: |
+    OBSERVED 2026-11-10 on the first-parent history of main, 48 hours, 165 merges: 34 merges were tasks added by the Architect, from `rmd plan` and from triage.
+    - `planCommand` and `triageCommandLocked` in src/run-task.ts follow one path: `addLaneWorktree`, a worker that edits plan/, `applyPlanProposalCommitAsync`, `gitPushRunBranchAsync`, `ghPrCreateFillCommand` and `runGhPrCreate`.
+    - The worker reads source files to write a task. The ops checkout holds no source.
+    - The triage task of stage 1 already separates the feedback edit from the task file. This task moves the task file.
+    - This is one of five writer tasks. Each one waits for the readers of both catalogs.
+    - The switch is the host file `<state dir>/plan-destination.json`. If the file is absent, the switch is off and the behaviour is byte-identical to today. Removing `task` from the kinds turns this kind off.
+  design: |
+    In both commands, call `resolvePlanDestination("task")` before `addLaneWorktree`, and make the lane worktree from the checkout it returns.
+    Give the worker the public checkout at one commit as a second directory that it may read and may not write.
+    After the worker ends, sort its changes: new task files stay in the destination worktree; a change to a public task file is applied in a public worktree.
+    The preflight takes the code root from the earlier task of this filing.
+    NOT IN SCOPE: `rmd approve`, the gardeners, and the hand path.
+  falsifier: |
+    Make the lane worktree from the public checkout with the kind on and criterion 1 must fail. Let the worker write to the public checkout and criterion 3 must fail. Commit a change of a public task file in the destination and criterion 4 must fail. Restore and require all six to pass.
