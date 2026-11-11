@@ -35260,21 +35260,23 @@ const PLAN_WORKER_TOOLS = ["Read", "Write", "Edit", "Grep", "Glob", "WebSearch",
  */
 export const PLAN_MAX_NEW_TASKS = 5;
 
-/** W1-T11851: the plan lane's own git credential — resolver, socket, wiring, and the git its pushes run. */
-export interface PlanCredentialDeps {
-  resolve?: (ownerRepo: string) => Promise<PlannerHostGitCredential>;
-  startSocket?: typeof startRunChildGitCredentialSocket;
-  wire?: (cwd: string, socketPath: string) => void;
-  unwire?: (cwd: string) => string[];
-  /** The git the remote reservation and its release run; default {@link hostWorktreeGitResult}. */
-  git?: (cwd: string, args: string[]) => { status: number | null; stdout: string; stderr: string };
-  /** The open-PR read the mint makes; default `openPrMintTexts`'s own (ghJson → github-transport). */
-  openPrFetch?: GhApiFetcher;
-}
 
 export async function planCommand(
   rest: string[],
-  opts: { spawn?: typeof spawnWorker; config?: Config; overlap?: OverlapWarningDeps; lintPlanForReviewFn?: typeof lintPlanForReview; credential?: PlanCredentialDeps } = {},
+  opts: {
+    spawn?: typeof spawnWorker; config?: Config; overlap?: OverlapWarningDeps; lintPlanForReviewFn?: typeof lintPlanForReview;
+    /** W1-T11851: the lane's own git credential — resolver, socket, wiring, and the git its reservation runs. */
+    credential?: {
+      resolve?: (ownerRepo: string) => Promise<PlannerHostGitCredential>;
+      startSocket?: typeof startRunChildGitCredentialSocket;
+      wire?: (cwd: string, socketPath: string) => void;
+      unwire?: (cwd: string) => string[];
+      /** The git the remote reservation and its release run; default {@link hostWorktreeGitResult}. */
+      git?: (cwd: string, args: string[]) => { status: number | null; stdout: string; stderr: string };
+      /** The open-PR read the mint makes; default `openPrMintTexts`'s own (ghJson → github-transport). */
+      openPrFetch?: GhApiFetcher;
+    };
+  } = {},
 ): Promise<number> {
   const parsed = parsePlanArgs(rest);
   if ("error" in parsed) {

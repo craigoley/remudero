@@ -5,14 +5,18 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
-import { hostWorktreeGitResult, planCommand, type PlanCredentialDeps } from "#src/run-task.js";
+import { hostWorktreeGitResult, planCommand } from "#src/run-task.js";
 import {
   hostAppIdentityEnv, plannerHostGitCredential, realScopedMint, startRunChildGitCredentialSocket,
   type HostAppIdentity, type PlannerHostGitCredential,
 } from "#src/lib/secret-boundary.js";
 import { hostWorktreeGitAsync } from "#src/lib/worktree-git.js";
 import { wireCredentialHelperSocket, type WorkerResult } from "#src/lib/worker.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
+
+type PlanCredential = NonNullable<NonNullable<Parameters<typeof planCommand>[1]>["credential"]>;
 
 // W1-T11851: `rmd plan` launched from a non-interactive shell had no credential for its own pushes — the only
 // token was a ~/.bashrc export, which bash reads only for an interactive shell. Its pushes now present a
@@ -46,15 +50,13 @@ function registry(dir: string, instances: string): string {
 const instance = (name: string, fields: Record<string, string>): string =>
   `  ${name}:\n${Object.entries(fields).map(([k, v]) => `    ${k}: ${v}\n`).join("")}`;
 
-/** A repo with a linked worktree carrying split worktree config, as a lane worktree has. */
-function repoWithWorktree(dir: string): { main: string; worktree: string } {
-  const main = join(dir, "main");
-  execFileSync("git", ["init", "-q", "-b", "main", main], { env: GIT_ENV });
-  git(main, "commit", "-q", "--allow-empty", "-m", "seed");
-  git(main, "config", "extensions.worktreeConfig", "true");
+/** A checkout and a linked worktree carrying split worktree config, as a lane worktree has. */
+function laneFixture(dir: string): { main: string; worktree: string; cleanup: () => void } {
+  const main = gitRepo({ kind: "t11851-main" });
+  main.git("config", "extensions.worktreeConfig", "true");
   const worktree = join(dir, "lane");
-  git(main, "worktree", "add", "-q", "-b", "lane", worktree);
-  return { main, worktree };
+  main.addWorktree(worktree, "lane");
+  return { main: main.dir, worktree, cleanup: () => main.cleanup() };
 }
 
 /** A HOME whose only token is an interactive-only .bashrc export, and whose global helper answers from $GH_TOKEN. */
@@ -143,6 +145,7 @@ test("W1-T11851 criterion 3: a non-interactive child whose only token is a .bash
   const dir = scratch("helper");
   const rows: Array<{ step: string; fields: Record<string, unknown> }> = [];
   const seen: NodeJS.ProcessEnv[] = [];
+  const cleanups: Array<() => void> = [];
   try {
     const key = join(dir, "app.pem");
     writeKey(key);
@@ -151,7 +154,8 @@ test("W1-T11851 criterion 3: a non-interactive child whose only token is a .bash
     });
     assert.equal(resolved.kind, "app");
     const identity = resolved as HostAppIdentity;
-    const { main, worktree } = repoWithWorktree(dir);
+    const { main, worktree, cleanup } = laneFixture(dir);
+    cleanups.push(cleanup);
     const home = decoyHome(dir);
     const runDir = join(dir, "run");
     mkdirSync(runDir);
@@ -179,6 +183,7 @@ test("W1-T11851 criterion 3: a non-interactive child whose only token is a .bash
     assert.ok(rows.some((r) => r.step === "boundary.request" && r.fields.status === "minted"), "the mint is ledgered value-free");
     assert.ok(!JSON.stringify(rows).includes(FAKE_TOKEN), "no ledger row carries the token");
   } finally {
+    for (const cleanup of cleanups) cleanup();
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -196,10 +201,14 @@ test("the identity reaches the real mint and the real socket thread, and a pathl
     const rows: Array<{ step: string; fields: Record<string, unknown> }> = [];
     const socket = await startRunChildGitCredentialSocket({ runDir: dir, log: (step, fields) => rows.push({ step, fields }), identity });
     try {
-      const { worktree } = repoWithWorktree(dir);
-      wireCredentialHelperSocket(worktree, socket.socketPath);
-      await assert.rejects(hostWorktreeGitAsync(worktree, ["credential", "fill"], { input: "protocol=https\nhost=github.com\n\n",
-        env: { GIT_TERMINAL_PROMPT: "0" } }), "a pathless request is answered with nothing");
+      const lane = laneFixture(dir);
+      try {
+        wireCredentialHelperSocket(lane.worktree, socket.socketPath);
+        await assert.rejects(hostWorktreeGitAsync(lane.worktree, ["credential", "fill"], { input: "protocol=https\nhost=github.com\n\n",
+          env: { GIT_TERMINAL_PROMPT: "0" } }), "a pathless request is answered with nothing");
+      } finally {
+        lane.cleanup();
+      }
     } finally {
       await socket.close();
     }
@@ -222,17 +231,16 @@ function fakeWorker(text: string): WorkerResult {
 async function withPlanHarness(body: (configRoot: string) => Promise<void>): Promise<Array<Record<string, unknown>>> {
   const dir = scratch("plan");
   const saved = { HOME: process.env.HOME, PATH: process.env.PATH };
+  const bare = gitRepo({ bare: true, kind: "t11851-origin" });
+  const seed = gitRepo({ seedCommit: false, kind: "t11851-seed" });
+  const shim = ghShim([{ when: "pr list", stdout: "[]" }], { kind: "t11851-gh" });
   try {
-    const bare = join(dir, "origin.git");
-    execFileSync("git", ["init", "-q", "--bare", "-b", "main", bare], { env: GIT_ENV });
-    const seed = join(dir, "seed");
-    execFileSync("git", ["init", "-q", "-b", "main", seed], { env: GIT_ENV });
-    mkdirSync(join(seed, "plan", "tasks.d"), { recursive: true });
-    writeFileSync(join(seed, "plan", "tasks.yaml"), "- id: W1-T4\n  title: \"seed\"\n  repo: remudero\n  origin: architect\n  depends_on: []\n  type: implement\n  verify: auto\n  status: queued\n  attempts: 0\n");
-    writeFileSync(join(seed, "MASTER-PLAN.md"), "# MASTER PLAN\n");
-    git(seed, "add", "-A");
-    git(seed, "commit", "-q", "-m", "chore: seed");
-    git(seed, "push", "-q", bare, "main");
+    mkdirSync(join(seed.dir, "plan", "tasks.d"), { recursive: true });
+    writeFileSync(join(seed.dir, "plan", "tasks.yaml"), "- id: W1-T4\n  title: \"seed\"\n  repo: remudero\n  origin: architect\n  depends_on: []\n  type: implement\n  verify: auto\n  status: queued\n  attempts: 0\n");
+    writeFileSync(join(seed.dir, "MASTER-PLAN.md"), "# MASTER PLAN\n");
+    seed.git("add", "-A");
+    seed.git("commit", "-q", "-m", "chore: seed");
+    seed.git("push", "-q", bare.dir, "main");
     const home = join(dir, "home");
     const configRoot = join(dir, "root");
     mkdirSync(join(home, ".config", "remudero"), { recursive: true });
@@ -240,20 +248,20 @@ async function withPlanHarness(body: (configRoot: string) => Promise<void>): Pro
     const originUrl = git(REPO_ROOT, "config", "--get", "remote.origin.url").trim();
     const repoDir = join(configRoot, "repos", /[/:]([^/:]+)\/([^/]+?)(?:\.git)?$/.exec(originUrl)![2]!);
     mkdirSync(dirname(repoDir), { recursive: true });
-    execFileSync("git", ["clone", "-q", bare, repoDir], { env: GIT_ENV });
+    execFileSync("git", ["clone", "-q", bare.dir, repoDir], { env: GIT_ENV });
     git(repoDir, "config", "user.name", "remudero-test");
     git(repoDir, "config", "user.email", "test@remudero.invalid");
-    const shim = join(dir, "shim");
-    mkdirSync(shim);
-    writeFileSync(join(shim, "gh"), "#!/bin/sh\ncase \"$*\" in *\"pr list\"*) echo \"[]\" ;; *) exit 0 ;; esac\n", { mode: 0o755 });
     process.env.HOME = home;
-    process.env.PATH = `${shim}:${saved.PATH}`;
+    process.env.PATH = `${shim.dir}:${saved.PATH}`;
     await body(configRoot);
     const ledger = join(configRoot, "state", "ledger.ndjson");
     return existsSync(ledger) ? readFileSync(ledger, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l) as Record<string, unknown>) : [];
   } finally {
     process.env.HOME = saved.HOME;
     process.env.PATH = saved.PATH;
+    bare.cleanup();
+    seed.cleanup();
+    rmSync(shim.dir, { recursive: true, force: true });
     rmSync(dir, { recursive: true, force: true });
   }
 }
@@ -268,7 +276,7 @@ test("an unusable host credential refuses rmd plan before any reservation push o
     { resolve: async () => ({ kind: "app", appId: "11", installationId: "22", keyPath: "/k.pem", registryPath: "/r.yaml" }),
       startSocket: async () => ({ socketPath: "/nonexistent/git.sock", close: async () => { throw new Error("close refused"); } }),
       wire: () => { throw new Error("config write refused"); } },
-  ] satisfies PlanCredentialDeps[]) {
+  ] satisfies PlanCredential[]) {
     let spawns = 0;
     const gitCalls: string[][] = [];
     let reads = 0;
