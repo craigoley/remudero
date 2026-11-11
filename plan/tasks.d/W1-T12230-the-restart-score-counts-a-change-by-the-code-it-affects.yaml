@@ -1,0 +1,72 @@
+- id: W1-T12230
+  title: "The restart score counts a change by the code that it affects"
+  repo: remudero
+  depends_on:
+    - W1-T12227
+    - W1-T12228
+  priority: 1.1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # when the daemon restarts for new code; a wrong class leaves the daemon loop on stale code for longer
+  band_meaning: blast-radius
+  origin: operator-session#freshness-restart-findings-2026-11-10
+  plan_refs:
+    - W1-T4945
+    - W1-T9092
+    - W1-T9089
+    - W1-T5476
+    - W1-T10059
+  files:
+    - plan/policy.yaml
+    - src/lib/policy.ts
+    - src/lib/self-sync.ts
+    - src/lib/deploy-judge.ts
+    - src/lib/daemon.ts
+    - test/daemon/the-restart-score-counts-a-change-by-the-code-it-affects.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "Each commit of an advance gets one class. `reviewer`: it changes a path that is material for a review. `loop`: it is not `reviewer` and it changes a file in the import closure of the daemon. `worker_only`: it changes `src/` or `scripts/` and neither of the two. A commit that cannot be classed is `loop`"
+      proof: "grep: W1-T12230 criterion 1 in test/daemon/the-restart-score-counts-a-change-by-the-code-it-affects.test.ts"
+    - claim: "A `worker_only` commit adds no change pressure. A `reviewer` commit and a `loop` commit add 1 each, as today"
+      proof: "grep: W1-T12230 criterion 2 in test/daemon/the-restart-score-counts-a-change-by-the-code-it-affects.test.ts"
+    - claim: "For an advance with `loop` commits and no `reviewer` commit, the staleness pressure reaches the score limit at the policy row `loopOnlyHorizonMs`, not at `stalenessHorizonMs`"
+      proof: "grep: W1-T12230 criterion 3 in test/daemon/the-restart-score-counts-a-change-by-the-code-it-affects.test.ts"
+    - claim: "For an advance with a `reviewer` commit, the staleness pressure reaches the score limit at `stalenessHorizonMs` after the daemon first read that commit, as today"
+      proof: "grep: W1-T12230 criterion 4 in test/daemon/the-restart-score-counts-a-change-by-the-code-it-affects.test.ts"
+    - claim: "The policy block `freshnessRestart` has the row `loopOnlyHorizonMs` with the value 10800000 and bounds. The loader refuses a value below `stalenessHorizonMs`"
+      proof: "grep: W1-T12230 criterion 5 in test/daemon/the-restart-score-counts-a-change-by-the-code-it-affects.test.ts"
+    - claim: "The row `daemon.freshness_decision` carries the count of commits in each class and the horizon that the decision used. The test drives `runDaemon` with a freshness reading that the real `daemonFreshnessFromService` made"
+      proof: "grep: W1-T12230 criterion 6 in test/daemon/the-restart-score-counts-a-change-by-the-code-it-affects.test.ts"
+    - claim: "An install input change, a withheld review and an unreadable advance release the restart as today"
+      proof: "grep: W1-T12230 criterion 7 in test/daemon/the-restart-score-counts-a-change-by-the-code-it-affects.test.ts"
+    - claim: "The decision row names the classes"
+      proof: "grep: change_classes in src/lib/daemon.ts"
+  rationale: |
+    OBSERVED 2026-11-04T01:56Z to 2026-11-11T01:56Z in the ledger of the core instance and on main: 16 of 36 freshness restarts changed no file on the reviewer path.
+    - Main had 153 commits that changed `src/` in the window, 21.9 a day. 48 of them changed a file on the reviewer path, 6.9 a day.
+    - The 45 restart decisions had these triggers: 33 staleness plus change, 11 withheld reviews, 1 idle. The judge is in practice a timer of 60 minutes.
+    - The median time with no verdict was 41 minutes for each restart cycle.
+    - The rule for an advance that is not material is correct: 124 of 124 advances that the judge did not count held only plan, docs, test or CI changes. This task does not change that rule.
+    READ at origin/main 17745c6bf:
+    - `sourceDeployWorth` in src/lib/deploy-judge.ts gives each commit that changes `src/` or `scripts/` the score 1. It does not ask which process loads the file.
+    - `decideFreshnessRestart` adds the staleness pressure `floor(18 × minutes stale / 60)` and 18 for a withheld review. One horizon serves every change.
+    - src/lib/self-sync.ts knows two of the three classes already. `REVIEW_MATERIAL_ADVANCE_PATHS` and `reviewAdvanceIsMaterial` name the reviewer paths. `behindIsMaterial` reads the import closure of the daemon (W1-T9092). Both judge the whole advance, not each commit.
+    - `scripts/` is read fresh for each call, and a worker gets a fresh worktree. So a change that only a worker loads needs no daemon restart.
+    Why this depends on W1-T12227: a longer wait on loop code is safe for reviews only when a review with stale reviewer code runs from the fresh tree and is never refused after it finishes.
+    Why this depends on W1-T12228: the new horizon is a row in the policy block that W1-T12228 adds.
+  design: |
+    1. In src/lib/self-sync.ts, class each commit of the advance with the two rules that exist. Use the closure reading for `loop`. If the closure is unreadable, class the commit `loop`: the judge fails toward a restart, as today.
+    2. Carry the class on each change that the freshness reading gives the daemon.
+    3. In `decideFreshnessRestart`, score a `worker_only` change 0. Compute the staleness pressure as the larger of two parts: the time since the first `reviewer` change against `stalenessHorizonMs`, and the time since the first `loop` change against `loopOnlyHorizonMs`.
+    4. Give `coalesceFreshnessRestart` the same horizon for its `upper_age` release.
+    5. Add `loopOnlyHorizonMs` to the block `freshnessRestart`: value 10800000 (180 minutes), bounds 3600000 to 43200000, on one line.
+    6. Add `change_classes` and `horizon_ms` to `daemon.freshness_decision`.
+    The fast releases stay first: install inputs, withheld reviews and an unreadable advance.
+    NOT IN SCOPE: the quiet window (W1-T10059), what makes the daemon busy (W1-T10054), and the image recycle.
+  falsifier: |
+    Score a `worker_only` commit 1 and criterion 2 must fail. Use one horizon for both classes and criterion 3 must fail. Class a commit that cannot be classed as `worker_only` and criterion 1 must fail. Restore and require all eight to pass.
+  note: |
+    The value 180 minutes is a starting value. 16 of 36 restarts had no reviewer change; with this task they wait up to 180 minutes of staleness, or go earlier at an idle moment. W1-T12232 can propose a change from the measured cost. After the merge, read `daemon.restart_cycle` rows: the count of restarts for each day was 5.1.
