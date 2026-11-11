@@ -15,7 +15,7 @@
   files:
     - src/lib/sweep.ts
     - test/a-no-commit-fix-on-a-moved-main-refreshes-instead-of-replaying-the-old-merge.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: Before the one-shot no-commit failed-job rerun, the sweep compares the base sha the failed run was created against with current main; when main has moved, it takes the branch-update path (deps.updateBranch, ledgered with the run's base and current main) instead of rerunFailedChecks, and when main has not moved the rerun is unchanged

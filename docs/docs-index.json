@@ -752,6 +752,12 @@
       "grepHint": "wipe-test.ts forensics"
     },
     {
+      "path": "docs/forensics/worker-bash-snapshot-isolation-on-azure.md",
+      "title": "Worker bash-snapshot isolation on the Azure host",
+      "summary": "Record for W1-T11909. It is read-only evidence: no source, test, probe, wrapper-list or host file was",
+      "grepHint": "Worker bash-snapshot isolation on the Azure host"
+    },
+    {
       "path": "docs/forensics/worker-branch-shape.md",
       "title": "worker-branch-shape.mjs comment forensics",
       "summary": "The measured incidents, design arguments and rejected alternatives that were removed from",
@@ -774,6 +780,12 @@
       "title": "Gate garden log",
       "summary": "Each section is one pass of the gate gardener (W1-T4116).",
       "grepHint": "Gate garden log"
+    },
+    {
+      "path": "docs/glossary.md",
+      "title": "The Remudero glossary",
+      "summary": "One word for one thing. This page is the domain language of Remudero. Every text a person reads",
+      "grepHint": "The Remudero glossary"
     },
     {
       "path": "docs/heavy-new-build-reservation.md",
@@ -822,6 +834,12 @@
       "title": "Operator Message Standard (W1-T2279)",
       "summary": "Status: NORMATIVE. Scope: `rmd status`'s rendered board, the console's rendered rows reading",
       "grepHint": "Operator Message Standard (W1-T2279)"
+    },
+    {
+      "path": "docs/plain-language.md",
+      "title": "The writing standard",
+      "summary": "How to write anything a person reads in this repo: rules for agents, task files, commit messages,",
+      "grepHint": "The writing standard"
     },
     {
       "path": "docs/plan-sync.md",

@@ -17,7 +17,7 @@
     - src/lib/review.ts
     - test/downgrade-names-the-remedy.test.ts
     - test/review/a-reviewers-fail-clause-reaches-the-fix-lane-whole.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: A FAIL clause within the reviewer budget reaches judgeCriterion's reason verbatim, with no ellipsis, so the reason the fix prompt and the progress judge read carries the reviewer's whole finding

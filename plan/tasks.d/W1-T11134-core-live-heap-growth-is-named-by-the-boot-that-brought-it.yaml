@@ -19,7 +19,7 @@
     - src/lib/daemon-memory-census.ts
     - test/memory/core-live-heap-growth-is-named-by-the-boot-that-brought-it.test.ts
     - "scripts/daemon-heap-census.mts"
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: From the census's own memory rows (DAEMON_MEMORY_STEP) grouped by boot_head_sha, the census names the first generation whose live set after GC, or one named holder, rose beyond the spread of the generations before it, with the two shas that bracket the rise; a generation with too few samples is unmeasured, never "no growth", and no fixed growth threshold is used

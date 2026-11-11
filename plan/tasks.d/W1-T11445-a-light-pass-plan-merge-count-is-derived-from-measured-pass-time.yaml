@@ -12,7 +12,7 @@
   plan_refs: [W1-T5901, W1-T9212, W1-T5748, W1-T5615, W1-T4405, W1-T11434]
   files: [src/lib/sweep.ts, src/lib/ledger.ts, src/lib/status.ts, test/ledger-rotation.test.ts, test/ledger-render-retention.test.ts, test/ledger/light-pass-merge-budget-uses-measured-interval.test.ts]
   priority: 3
-  status: queued
+  status: merged
   # backlog gardener: band=3 evidence=b9d53b979d20e381
   # backlog gardener: placed=2026-11-06T05:13:51.452Z
   attempts: 0

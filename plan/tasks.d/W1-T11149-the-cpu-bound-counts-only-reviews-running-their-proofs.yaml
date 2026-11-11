@@ -23,7 +23,7 @@
     - src/lib/review-capacity.ts
     - test/review/the-cpu-bound-counts-only-reviews-running-their-proofs.test.ts
     - src/lib/ledger.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: A review reports its phase as it runs (setup, proofs, judge, posting), in process and as a run child (the child writes it to its owned status.json through the existing onPhase seam, and the daemon's child registry reads it back), and reviewAdmissionBound counts against the CPU-shed width only the reviews in setup or proofs; a review whose phase is unread counts there, as every review does today

@@ -654,3 +654,173 @@ test("W1-T11421 criterion 3: a failed durable handoff keeps the incident open an
   assert.equal(lines(ledgerPath).filter((r) => r.step === "daemon.crashloop.cleared").length, 1);
   assert.deepEqual(await drainCloses(ledgerPath, issues), { delivered: 1, failed: 0 });
 });
+
+
+/** Execute the repository's supervisor with only private fixture children and writers. */
+async function observedStderrSupervisor(t: import("node:test").TestContext, options: {
+  held: boolean; freshness?: boolean; code: number; payload: Buffer;
+}) {
+  const { spawn } = await import("node:child_process");
+  const { existsSync } = await import("node:fs");
+  const fixture = writeLedger([], { scope: t });
+  const root = fixture.dir;
+  const stateRoot = join(root, "instance");
+  mkdirSync(join(stateRoot, "state"), { recursive: true });
+  const ledgerPath = join(stateRoot, "state", "ledger.ndjson");
+  writeFileSync(ledgerPath, "");
+  writeFileSync(join(root, "payload.bin"), options.payload);
+  const writerPath = join(root, "writer.pid");
+  const nextPath = join(root, "next-started");
+  const countPath = join(root, "starts");
+  const syncPath = join(root, "syncs");
+  const waitErrorsPath = join(root, "wait-errors");
+  writeFileSync(waitErrorsPath, "");
+  const scriptPath = join(root, "child.cjs");
+  writeFileSync(scriptPath, String.raw`
+const fs = require("node:fs");
+const { spawn } = require("node:child_process");
+const root = process.env.TEST_CASE_ROOT;
+const countPath = root + "/starts";
+const n = fs.existsSync(countPath) ? Number(fs.readFileSync(countPath, "utf8")) + 1 : 1;
+fs.writeFileSync(countPath, String(n));
+if (n === 1) {
+  process.stderr.write(fs.readFileSync(root + "/payload.bin"), (error) => {
+    if (error) throw error;
+    if (process.env.TEST_HELD === "1") {
+      const writer = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"],
+        { stdio: ["ignore", "ignore", "inherit"] });
+      fs.writeFileSync(root + "/writer.pid", String(writer.pid));
+      writer.unref();
+    }
+    process.exit(Number(process.env.TEST_CHILD_CODE));
+  });
+} else {
+  fs.writeFileSync(root + "/next-started", "started");
+  process.exit(0);
+}
+`);
+  // @source-text-subject: this is the actual supervision section, not a substitute observer.
+  const source = readFileSync(join(REPO_ROOT, "deploy/entrypoint.sh"), "utf8");
+  const boundary = source.indexOf("# ── Signal forwarding");
+  assert.ok(boundary > 0);
+  const shell = String.raw`set -euo pipefail
+CONFIG_ROOT="$TEST_STATE_ROOT"
+TREE="$TEST_REPO_ROOT"
+REF=fixture
+supervise_daemon=1
+RESTART_THROTTLE_S=0
+DAEMON_EXIT_STALE=75
+DAEMON_EXIT_BLOCKED=76
+DAEMON_EXIT_ENVIRONMENTAL=77
+DAEMON_EXIT_IDLE_STARVED=78
+FRESHNESS_RESTART_MAX="$TEST_FRESHNESS"
+FRESHNESS_RESTART_PAUSE_S=0
+BLOCKED_RESTART_MAX=0
+ENVIRONMENTAL_RESTART_MAX=0
+log() { :; }
+die() { printf '%s\n' "$*" >&2; exit 1; }
+sync_tree() { printf 'sync\n' >> "$TEST_SYNC_PATH"; }
+resolve_rmd_on_path() { :; }
+wait() { builtin wait "$@" 2>> "$TEST_WAIT_ERRORS"; }
+` + source.slice(boundary);
+  const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("RMD_")));
+  const child = spawn("bash", ["-c", shell, "private-supervisor", process.execPath, scriptPath], {
+    cwd: root, detached: true, stdio: ["ignore", "pipe", "pipe"],
+    env: { ...env, TEST_CASE_ROOT: root, TEST_STATE_ROOT: stateRoot, TEST_REPO_ROOT: REPO_ROOT,
+      TEST_SYNC_PATH: syncPath, TEST_WAIT_ERRORS: waitErrorsPath, TEST_HELD: options.held ? "1" : "0",
+      TEST_FRESHNESS: options.freshness ? "1" : "0", TEST_CHILD_CODE: String(options.code) },
+  });
+  const stderr: Buffer[] = [];
+  child.stderr.on("data", (chunk: Buffer) => stderr.push(chunk));
+  child.stdout.resume();
+  let closed = false;
+  const done = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve) => {
+    child.once("close", (code, signal) => { closed = true; resolve({ code, signal }); });
+  });
+  async function until(check: () => boolean, milliseconds = 10_000): Promise<boolean> {
+    return new Promise((resolve, reject) => {
+      const finish = (value: boolean, error?: unknown) => {
+        clearTimeout(timer); clearInterval(poll);
+        if (error) reject(error); else resolve(value);
+      };
+      const timer = setTimeout(() => finish(false), milliseconds);
+      const poll = setInterval(() => {
+        try { if (check()) finish(true); } catch (error) { finish(false, error); }
+      }, 20);
+    });
+  }
+  const writerAlive = () => {
+    if (!existsSync(writerPath)) return false;
+    try { process.kill(Number(readFileSync(writerPath, "utf8")), 0); return true; } catch { return false; }
+  };
+  t.after(async () => {
+    // The ledger fixture may already have removed its files; the private process group is ours.
+    try { process.kill(-child.pid!, "SIGTERM"); } catch { /* private group already ended */ }
+    if (!closed && !await until(() => closed, 5_000)) {
+      try { process.kill(-child.pid!, "SIGKILL"); } catch { /* private group already ended */ }
+    }
+    await done;
+  });
+  return { ledgerPath, stateRoot, writerAlive, nextPath, countPath, syncPath, until,
+    exists: existsSync, done, output: () => Buffer.concat(stderr),
+    waitErrors: () => readFileSync(waitErrorsPath, "utf8") };
+}
+
+test("W1-T12031 criterion 1: real exit evidence precedes inherited-writer EOF", async (t) => {
+  const heap = "FATAL ERROR: Reached heap limit private held-writer fixture";
+  const run = await observedStderrSupervisor(t, { held: true, code: 134, payload: Buffer.from(heap + "\n") });
+  assert.equal(await run.until(run.writerAlive), true, "positive control: a private writer retains stderr");
+  assert.equal(await run.until(() => lines(run.ledgerPath).some((r) => r.step === "daemon.process.exit")), true,
+    "actual child exit must be recorded while the writer is still open");
+  assert.equal(run.writerAlive(), true, "exit observation did not terminate the inherited writer");
+  const exit = lines(run.ledgerPath).find((r) => r.step === "daemon.process.exit")!;
+  assert.equal(exit.exit_code, 134);
+  assert.equal(exit.clean_exit, false);
+  assert.equal(exit.heap_limit_line, heap);
+  assert.deepEqual(await run.done, { code: 134, signal: null });
+});
+
+test("W1-T12031 criterion 2: ordinary EOF forwards exact raw bytes and retains only the last bounded heap line", async (t) => {
+  for (const withHeap of [true, false]) await t.test(withHeap ? "last bounded heap evidence" : "absent evidence stays absent", async (t) => {
+    const lastHeap = "FATAL heap limit " + "x".repeat(600);
+    const payload = Buffer.concat([
+      Buffer.from([0x61, 0xff, 0x00, 0x62, 0x0d, 0x0a]),
+      Buffer.alloc(512 * 1024, 0x7a), Buffer.from("\r\n"),
+      ...(withHeap ? [Buffer.from("first heap limit old line\n" + lastHeap + "\n")] : []),
+    ]);
+    const code = withHeap ? 139 : 137;
+    const run = await observedStderrSupervisor(t, { held: false, code, payload });
+    assert.deepEqual(await run.done, { code, signal: null });
+    const diagnostics = run.waitErrors();
+    if (process.platform === "darwin") {
+      for (const line of diagnostics.split("\n").filter(Boolean)) {
+        assert.match(line, /^(private-supervisor|environment): line \d+: wait: pid \d+ is not a child of this shell$/);
+      }
+    } else assert.equal(diagnostics, "", "the deployed shell waits on its actual observer child");
+    assert.equal(Buffer.compare(run.output(), Buffer.concat([payload, Buffer.from("\n")])), 0,
+      "all bytes, invalid UTF-8, NUL, CRLF and the supervisor's separator survive output backpressure; " +
+      "actual=" + run.output().length + " expected=" + (payload.length + 1) +
+      " prefix=" + run.output().subarray(0, 100).toString("hex") +
+      " suffix=" + run.output().subarray(-120).toString("hex"));
+    const exit = lines(run.ledgerPath).find((r) => r.step === "daemon.process.exit")!;
+    assert.equal(exit.exit_code, code);
+    assert.equal(exit.clean_exit, false);
+    assert.equal(exit.heap_limit_line, withHeap ? lastHeap.slice(0, 240) : null);
+    assert.equal(readdirSync(join(run.stateRoot, "state")).some((name) => name.startsWith(".daemon-heap-line-")), false);
+  });
+});
+
+test("W1-T12031 criterion 3: freshness resync and the next real child precede inherited-writer EOF", async (t) => {
+  const run = await observedStderrSupervisor(t, { held: true, freshness: true, code: 75,
+    payload: Buffer.from("freshness child stderr\r\n") });
+  assert.equal(await run.until(run.writerAlive), true, "positive control: the first child left its private writer open");
+  assert.equal(await run.until(() => run.exists(run.nextPath)), true,
+    "the existing freshness branch must resync and start its next child without writer EOF");
+  assert.equal(run.writerAlive(), true);
+  assert.deepEqual(await run.done, { code: 0, signal: null });
+  assert.equal(readFileSync(run.countPath, "utf8"), "2");
+  assert.equal(readFileSync(run.syncPath, "utf8"), "sync\n");
+  const exits = lines(run.ledgerPath).filter((r) => r.step === "daemon.process.exit");
+  assert.deepEqual(exits.map((r) => [r.exit_code, r.clean_exit, r.heap_limit_line]),
+    [[75, true, null], [0, true, null]]);
+});

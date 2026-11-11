@@ -40,7 +40,7 @@
   # refusal-amendment (W1-T11342, run DAEMON-1793897932969@581fddd769bdef248a383bcc74c07c4f9bd9a6ff, 2026-11-05T20:12:19.734Z): the worker refused criterion 8 [proof-unexecutable-at-head] — proposed re-scope-criteria: repair the criterion's proof so it is executable at HEAD, or re-scope the criterion
   #   worker evidence: The generated shard design cannot be inspected or checked.
   #   this task is held from dispatch until its record changes; an Architect must make the change above
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: assertSameTokens in test/helpers/compression-pin.ts returns on equal token arrays. On two 50,000-entry arrays that differ at one index, it throws an AssertionError naming that index, both lengths and at most 20 entries from each side, within 5 s and with a message under 4 KiB. Arrays that differ only in length name the first index past the shorter one.

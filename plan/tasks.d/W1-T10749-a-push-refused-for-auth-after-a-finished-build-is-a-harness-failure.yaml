@@ -9,7 +9,7 @@
   risk: high  # Rule 19: one concern, what the harness does when the remote refuses a finished build's push for auth or visibility; no other push refusal, breaker bound or credential path changes
   band_meaning: span
   priority: 2
-  status: queued
+  status: merged
   attempts: 0
   origin: "filing agent 2026-10-26: CONSOLE-T127 failed at run.error / git-push-failed 27 min after the operator released its breaker"
   plan_refs: [W1-T2699, W1-T5115, W1-T6148, W1-T4655, W1-T7742, W1-T8240, W1-T8676, W1-T9786, W1-T9680, W1-T9654, W1-T10742, W1-T147, CONSOLE-T127, CONSOLE-T134]

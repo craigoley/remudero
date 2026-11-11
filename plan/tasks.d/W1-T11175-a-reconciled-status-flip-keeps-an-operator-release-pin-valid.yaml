@@ -22,7 +22,7 @@
     - src/lib/measurement-cadence.ts
     - src/run-task.ts
     - test/plan/a-reconciled-status-flip-keeps-an-operator-release-pin-valid.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: For a task whose risk_ruling.operator_release_pin was computed while it read status queued, setting status to merged (or any other lifecycle status the control plane writes) leaves operatorReleaseContractChanged false, both for a pin written before this change and for one written after it, while any edit to its title, files, acceptance or design still reads changed (verify stays normalized to auto in the pin, as PR 13992 made it, so a verify edit reads unchanged as before); the fixtures are W1-T10431's and W1-T10970's real shards on main

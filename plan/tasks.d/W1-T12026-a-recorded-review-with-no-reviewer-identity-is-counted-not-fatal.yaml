@@ -1,0 +1,41 @@
+- id: W1-T12026
+  title: "The review-replay sample counts and leaves out a recorded input whose reviewer code sha the recorder wrote as null, so one such row no longer fails every review-replay gardener pass"
+  repo: remudero
+  depends_on: []
+  priority: 1.0
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # sized high only for the plan lint's sizing rule: one module and the one older test case that pinned the throw
+  band_meaning: blast-radius
+  origin: operator-session#gardeners-2026-11-10
+  plan_refs:
+    - W1-T10270
+    - W1-T11847
+  files:
+    - src/lib/review-replay-sample.ts
+    - test/review/a-recorded-review-with-no-reviewer-identity-is-counted-not-fatal.test.ts
+    - test/review/a-review-path-change-replays-recorded-reviews.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "A review.replay_input row whose reviewer_code_sha is an explicit null is counted on the sample header as recorded_unattributed and left out of the rows and the observed classes, and the sample still derives and replays"
+      proof: "grep: W1-T12026 criterion 1 in test/review/a-recorded-review-with-no-reviewer-identity-is-counted-not-fatal.test.ts"
+    - claim: "A row whose reviewer_code_sha is absent, empty or not a string still refuses, and a ledger holding only null-identity rows is still an empty sample"
+      proof: "grep: W1-T12026 criterion 2 in test/review/a-recorded-review-with-no-reviewer-identity-is-counted-not-fatal.test.ts"
+    - claim: "The count survives serialize and parse, and a negative or non-integer count refuses"
+      proof: "grep: W1-T12026 criterion 3 in test/review/a-recorded-review-with-no-reviewer-identity-is-counted-not-fatal.test.ts"
+  rationale: |
+    OBSERVED 2026-11-10T08:51:32Z on the core daemon: review-replay.gardener_failed with "invalid review replay row field: reviewer_code_sha", after 4,434 s queued and 458 s running.
+    - The row is in a rotated core ledger: 2026-11-03T16:04:38Z, review.replay_input, recorded_class withheld, reviewer_code_sha null.
+    - The recorder writes that null on purpose: recordSetupReplay in src/cli/commands/review.ts passes `typeof sha === "string" ? sha : null`, and reviewReplayLedgerFields types the field as string or null. The reader's checkedRow requires a non-empty string, so the two disagree and one row fails every pass that reads it.
+    - The gardener exists so a review-path change replays recorded reviews before it merges (W1-T10270); while it fails, that check has no fresh sample.
+  design: |
+    In deriveReviewReplaySample, skip a recorded row whose reviewer_code_sha is exactly null and count it; put the count on the header as recorded_unattributed and validate it like legacy_unattributed. Everything else about checkedRow is unchanged.
+    NOT IN SCOPE: making the recorder always know the reviewer's code, and the legacy attribution path.
+  falsifier: |
+    Throw on the null and criterion 1 must fail; accept an absent or empty field and criterion 2 must fail; drop the count from the header or its validation and criterion 3 must fail. Restore and require all three to pass.
+  note: |
+    reservation hand-off: run-unfiled-1794301186975 -> run-unfiled-1794301186975
+    Reserved with rmd next-task-id (--count 3 on run-unfiled-1794301186975). Hand-built in the same session.

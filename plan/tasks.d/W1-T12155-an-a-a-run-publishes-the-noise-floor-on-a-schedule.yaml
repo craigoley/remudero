@@ -1,0 +1,55 @@
+- id: W1-T12155
+  title: "An A/A run publishes the noise floor on a schedule"
+  repo: remudero
+  depends_on:
+    - W1-T12142
+  priority: 1.3
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # a new weekly pass on the measurement cadence, and a new condition on when an experiment may conclude
+  band_meaning: blast-radius
+  origin: operator-session#model-choice-2026-11-10
+  plan_refs:
+    - W1-T4575
+    - W1-T5341
+    - W1-T10842
+  files:
+    - src/lib/benchmark-aa.ts
+    - src/lib/routing-experiment-result.ts
+    - src/lib/ledger-steps.ts
+    - src/run-task.ts
+    - test/routing/an-a-a-run-publishes-the-noise-floor-on-a-schedule.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "Once a week the measurement cadence splits the tasks of one model and effort into two labels by a hash of the task. It compares the labels on the same measures the experiment results use"
+      proof: "grep: W1-T12155 criterion 1 in test/routing/an-a-a-run-publishes-the-noise-floor-on-a-schedule.test.ts"
+    - claim: "The pass writes one routing.aa.result row with the difference between the two labels for each measure, its interval and the number of tasks. That difference is the noise floor"
+      proof: "grep: W1-T12155 criterion 2 in test/routing/an-a-a-run-publishes-the-noise-floor-on-a-schedule.test.ts"
+    - claim: "Each routing.experiment.result row quotes the newest noise floor for its measure and names the row it came from"
+      proof: "grep: W1-T12155 criterion 3 in test/routing/an-a-a-run-publishes-the-noise-floor-on-a-schedule.test.ts"
+    - claim: "An experiment whose difference is inside the noise floor is not concluded with a winner. With no noise floor row yet, the result says so and the rule of W1-T12142 applies alone"
+      proof: "grep: W1-T12155 criterion 4 in test/routing/an-a-a-run-publishes-the-noise-floor-on-a-schedule.test.ts"
+    - claim: "The pass makes no model call"
+      proof: "grep: W1-T12155 criterion 5 in test/routing/an-a-a-run-publishes-the-noise-floor-on-a-schedule.test.ts"
+    - claim: "The measurement cadence in src/run-task.ts calls the pass"
+      proof: "grep: recordAaNoiseFloor( in src/run-task.ts"
+  rationale: |
+    OBSERVED 2026-11-10 in the code on main: the A/A report runs only when the operator types `rmd benchmark-aa`. No schedule runs it and no result reads it.
+    - An A/A run compares a model with itself. The difference it finds is the size of difference that chance and the pipeline produce.
+    - Without it, a difference between two models cannot be told apart from that noise.
+    - In the core instance's ledger, 2026-10-27 to 2026-11-10, 71 of 87 failed build attempts on one model were container recycles. That is the kind of noise an A/A run measures.
+    - The same ledger has 600 of 1,030 implement runs that ended with no worker assigned. They move a rate without any model difference.
+    - src/lib/benchmark-aa.ts already has the split (`aaArmFor`), the ledger read and the tests of proportion. It lacks a schedule and a row.
+  design: |
+    Add `recordAaNoiseFloor` to src/lib/benchmark-aa.ts. It reads the ledger for the same window the experiment results use and takes the model and effort with the most tasks. It applies `aaArmFor` with a trial id made from the week.
+    It uses the retrospective path only, so it starts no worker and spends nothing.
+    In src/lib/routing-experiment-result.ts, read the newest `routing.aa.result` row and add the noise floor to the result and to the decision.
+    Register the step in src/lib/ledger-steps.ts.
+    NOT IN SCOPE: the prospective A/A, which starts workers, and the public-claim checks of W1-T4575.
+  falsifier: |
+    Split by attempt and criterion 1 must fail. Conclude a winner inside the noise floor and criterion 4 must fail. Start a worker from the pass and criterion 5 must fail. Restore and require all to pass.
+  note: |
+    W1-T10842 needs a passing A/A before its experiment starts. This pass gives it a current one.
