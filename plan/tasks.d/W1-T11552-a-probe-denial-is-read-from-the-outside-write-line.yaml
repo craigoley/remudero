@@ -16,7 +16,7 @@
   files:
     - src/lib/containment.ts
     - test/containment/a-probe-denial-is-read-from-the-outside-write-line.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: A transcript that names the probe token and mentions a sandbox only in another arm's text is not contained, and a transcript whose outside-write report carries an OS denial still is

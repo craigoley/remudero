@@ -1,0 +1,24 @@
+- id: W1-T12287
+  title: Correct W1-T10054's stale depends-on note now that the 90-minute minimum lifetime is on main
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: low
+  status: queued
+  attempts: 0
+  files:
+    - plan/tasks.d/W1-T10054-a-freshness-restart-can-take-an-idle-moment.yaml
+  acceptance:
+    - claim: The shard states that FRESHNESS_MIN_LIFETIME_MS is already on main and that coalesceFreshnessRestart holds the idle release behind it
+      proof: "grep: FRESHNESS_MIN_LIFETIME_MS is on main in plan/tasks.d/W1-T10054-a-freshness-restart-can-take-an-idle-moment.yaml"
+    - claim: The shard no longer calls the hand-fix branch an unmerged prerequisite
+      proof: "grep: the minimum lifetime is not a dependency in plan/tasks.d/W1-T10054-a-freshness-restart-can-take-an-idle-moment.yaml"
+  origin: followup:W1-T10054-1794374926595:2026-11-11T05:34:10.115Z:0
+  rationale: >-
+    From the 2026-11-11 follow-up on W1-T10054-1794374926595, ratified via rmd approve:
+  
+    follow-up harvest [research]: confirm how the 90-minute minimum-lifetime floor landed on
+    `main` (`git log -S FRESHNESS_MIN_LIFETIME_MS`) and whether it covers the idle trigger,
+    because the shard's `depends_on` comment and the "must not merge before" rationale may be
+    stale. — from W1-T10054 (run W1-T10054-1794374926595)
