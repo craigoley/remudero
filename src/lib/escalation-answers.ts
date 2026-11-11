@@ -766,11 +766,18 @@ export async function readEscalationAnswers(
     }
     return { accepted, ignored, unreadable };
   } catch (error) {
-    const kind = error instanceof RangeError
-      ? (error.message === "Maximum call stack size exceeded" ? "Maximum call stack size exceeded" : "RangeError")
-      : error instanceof TypeError ? "TypeError"
-      : error instanceof SyntaxError ? "SyntaxError"
-      : error instanceof Error ? "Error" : "non-Error";
+    let kind = "non-Error";
+    try {
+      if (error instanceof RangeError) {
+        kind = "RangeError";
+        if (error.message === "Maximum call stack size exceeded") kind = "Maximum call stack size exceeded";
+      } else if (error instanceof TypeError) kind = "TypeError";
+      else if (error instanceof SyntaxError) kind = "SyntaxError";
+      else if (error instanceof Error) kind = "Error";
+    } catch {
+      // An unobservable class/message keeps the finite classification reached so far.
+      // The reader still rejects below; an accessor's own payload must never escape.
+    }
     throw new Error(`escalation answers failed at stage ${stage}: ${kind}`);
   }
 }
