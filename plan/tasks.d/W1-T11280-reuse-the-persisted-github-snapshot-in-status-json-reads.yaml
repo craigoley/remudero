@@ -40,6 +40,13 @@
       its unavailable-not-empty rule (plan/tasks.d/W1-T4208-status-json-deadline.yaml; src/lib/report-commands.ts ~829-~994).
     Settled by lookup: is W1-T11155 a prerequisite? -> no. It touches review/status/escalate and the bundle builder, not
       report-commands.ts (plan/tasks.d/W1-T11155-a-bundled-review-loads-the-modules-it-defers.yaml).
+    Settled by lookup: why does criterion 1 name a test title and not the whole file? -> test/status-json-deadline.test.ts
+      already exists and passes on main (W1-T4208), so a whole-file proof passes at base too and cannot discriminate this
+      change. A PR proof must name the exact title of a test the change ADDS (src/lib/proof-grammar.ts PR-body grammar,
+      W1-T8625, #11096). The title is pinned in design step 4(a) so the implementer writes it verbatim.
+    Settled by lookup: is an exact-title `unit test:` proof legal in a task shard? -> yes. It parses, and it draws no
+      non-title WARN when the body is at most 100 chars and has no " -> " or "; " (src/lib/task-linter.ts looksLikeNonTitleBody;
+      precedent plan/tasks.d/W1-T1065-pause-is-read-once-per-tick-and-admission-is-minutes-later.yaml).
     Scope is the operator-approved proposal
     (wreckterra-evidence-20261025/status-json-snapshot-cache-followup-proposal-20261103.json).
   design: |
@@ -52,13 +59,14 @@
     3. Keep the 30-second status JSON read deadline, the selector rules and the admission rules exactly as they are.
        This task adds no new knobs.
     4. TDD, strictly: in test/status-json-deadline.test.ts, write the failing regressions before the change. (a) A fresh
-       persisted snapshot is used by the JSON status read without a full board re-fetch. (b) A missing, stale, truncated
-       or unreadable snapshot, and a remote-ref failure, each still yield explicit unavailable evidence within the deadline.
-       Put `W1-T11280` in each new test title.
+       persisted snapshot is used by the JSON status read without a full board re-fetch. Title this test EXACTLY
+       `W1-T11280: status JSON reuses a fresh persisted snapshot without a full board re-fetch`, because acceptance
+       criterion 1 names that title verbatim. (b) A missing, stale, truncated or unreadable snapshot, and a remote-ref
+       failure, each still yield explicit unavailable evidence within the deadline. Put `W1-T11280` in each new test title.
     NOT IN SCOPE: any other file, any change to board-snapshot-cache.ts or status.ts, any new task.
   acceptance:
     - claim: "the status JSON deadline suite, including the new snapshot-reuse and fail-closed regressions, passes"
-      proof: "unit test: test/status-json-deadline.test.ts"
+      proof: "unit test: W1-T11280: status JSON reuses a fresh persisted snapshot without a full board re-fetch"
     - claim: "the regressions for consuming a fresh persisted snapshot and for unusable or missing evidence staying unavailable are titled with this task id"
       proof: "grep: W1-T11280 in test/status-json-deadline.test.ts"
   note: |
