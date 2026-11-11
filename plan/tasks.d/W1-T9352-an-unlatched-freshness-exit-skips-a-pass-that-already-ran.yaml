@@ -9,15 +9,20 @@
   risk: high  # Rule 19: one concern — the unlatched stale exits do not repeat a full pass that completed after main advanced
   band_meaning: span
   origin: "fleet-stall diagnosis 2026-10-14 for the operator session (core lanes empty 00:13:50-00:52:08Z); standing direction: fix at the root, no hard fixed thresholds, automated flow"
-  plan_refs: [W1-T8170, W1-T1272, W1-T4998, W1-T5720, W1-T2965, W1-T8172, W1-T9114, W1-T7746, W1-T9812]
+  plan_refs: [W1-T8170, W1-T1272, W1-T4998, W1-T5720, W1-T2965, W1-T8172, W1-T9114, W1-T7746, W1-T9812, W1-T11629, W1-T11790]
   files:
     - src/lib/daemon.ts
     - test/an-unlatched-freshness-exit-skips-a-pass-that-already-ran.test.ts
     - test/a-latched-restart-exits-when-its-last-lane-settles.test.ts
+    - test/daemon.test.ts
   status: queued
   priority: 1  # raised 2026-11-11 on the 7-day restart study (36 exits to 2026-11-11): W1-T9812 depends on it; was 2.5
   attempts: 0
   rationale: |
+    REFUSAL RESOLVED 2026-11-11: the W1-T9352 worker reported criterion 1 contradicted W1-T1272 because the
+      existing test required a new full sweep at exit even after a full pass completed since the advance. This
+      amendment changes that test to assert reuse of the completed in-cycle pass, while preserving the bounded
+      pass when none completed after the advance. The two criteria now agree, so the refusal hold is removed.
     MEASURED 2026-10-14 (core ledger union on the Azure host, read-only; daemon pid 1710758, boot head 08cbabc50).
       - The last build lane settled at 00:13:50 (`lane.idle_changed` idle_slots 3/3). The WIP governor then held
         refills host-short (`dispatch_deferred_wip` measured_bound 0 at 00:19:14, 00:23:20, 00:28:11), so no lane ran.
@@ -48,6 +53,11 @@
       - W1-T8170 design 4 kept these exits' pass because "they have no lane wait that already ran one". Since
         W1-T4998 a full pass runs in the background every tick, so an unlatched exit after the first cycle has had
         the same passes a latched one has.
+    OVERLAP RULING 2026-11-11: this task shares src/lib/daemon.ts with W1-T11629 and W1-T11790, and now shares
+    test/daemon.test.ts as well. W1-T11629 covers typed GitHub-read refusal handling at the daemon lane boundary;
+    W1-T11790 covers detached-retro duration and overrun telemetry. This task changes and tests only stale
+    freshness pre-exit sweep reuse. Those separate behaviors are neither changed nor asserted here. The file
+    overlap is retained because the freshness regression is exposed by the existing W1-T1272 fixture.
     NOT COVERED ELSEWHERE: swept plan/ on origin/main and the 6 open PR heads for pre_exit_pass, "pre-exit",
     "stale exit", "freshness exit", "tick-top exit", staleSinceMs and stopForFreshness. Control: pre_exit_pass reads
     1 shard (W1-T8170) on main and on every head. W1-T8172 starts the drain at a latch and W1-T9114 moves reviews and
@@ -67,8 +77,9 @@
        branch `if (dispatchSet.length === 0)`, and every path of that branch continues or returns. The comment
        above the condition has said "always false" since 2026-09-16. An idle daemon (no task to dispatch) that
        reads its own tree stale exits at the top of its next tick, so the tick-top exit is the exit it takes.
-    2. W1-T1272'S GUARANTEE HOLDS. A background pass still running at exit is awaited, as today. With no full pass
-       completed since the advance, or with `staleSinceMs` unset, the bounded pass runs, as today.
+    2. W1-T1272'S FULL-PASS GUARANTEE HOLDS. A background pass still running at exit is awaited, as today. With no
+       full pass completed since the advance, or with `staleSinceMs` unset, the bounded pass runs, as today. When a
+       full pass already completed since the advance, the exit reuses it and starts no duplicate pass.
     3. The stale-reviewer idle exit keeps today's pass. Its staleness is the reviewer's code, not an observed advance
        of main, so it has no anchor here. The exit for a requested restart keeps its pass too. The latched exit is
        unchanged.
@@ -76,13 +87,17 @@
        `last_pass_completed_ms` (the last full pass that completed before the exit began; null when none), so the
        arm that ran can be checked against its evidence. The row of every other exit keeps its three fields:
        test/a-latched-restart-exits-when-its-last-lane-settles.test.ts compares the whole row of a latched exit.
-    5. ONE EXISTING TEST CHANGES, and its file is in `files`.
+    5. TWO EXISTING TESTS CHANGE, and their files are in `files`.
        - test/a-latched-restart-exits-when-its-last-lane-settles.test.ts, "an idle freshness exit keeps its full
          pass without a dispatch latch", says "the boot pass cannot replace an idle exit's pass". Design 1 makes
          that false: a boot pass that completes after the advance replaces it. The fixture still runs 2 passes
          only because its fake clock does not move, so the boot pass completes at the instant of the advance and
          not after it. The test keeps its fixture and its count. Its title and message change to say that an idle
          exit keeps its full pass when no pass completed after the advance.
+       - test/daemon.test.ts, "W1-T1272: a stale freshness verdict still reaches the full sweep before it returns",
+         currently expects an exit sweep after the in-cycle sweep already completed since the advance. That duplicates
+         completed work and conflicts with design 1. Rename it to "W1-T1272: an in-cycle full sweep satisfies a stale
+         freshness exit" and assert that exactly one full sweep ran before the final stale read and stale stop.
        - Amended 2026-11-11: this task builds first. W1-T9812 depends on it and creates
          test/the-pre-exit-pass-runs-beside-the-restart-drain.test.ts, so that file is not in `files`. The
          W1-T9812 build writes its "exit with no dispatch latch" fixture for this design (its boot pass fails).
@@ -91,6 +106,8 @@
   acceptance:
     - claim: "the new test file passes"
       proof: "unit test: test/an-unlatched-freshness-exit-skips-a-pass-that-already-ran.test.ts"
+    - claim: "W1-T1272 reuses the in-cycle full sweep before its stale exit"
+      proof: 'grep: test("W1-T1272: an in-cycle full sweep satisfies a stale freshness exit" in test/daemon.test.ts'
     - claim: "a tick-top exit after a full pass completed since the advance starts no new full pass"
       proof: 'grep: test("W1-T9352: a tick-top exit does not repeat a pass since the advance" in test/an-unlatched-freshness-exit-skips-a-pass-that-already-ran.test.ts'
     - claim: "the tick-top exit of an idle daemon (no task to dispatch) after such a pass starts no new full pass"
