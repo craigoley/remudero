@@ -1,0 +1,74 @@
+- id: W1-T12244
+  title: "A recycle and a daemon start write the time of each of their phases to the ledger"
+  repo: remudero
+  depends_on: []
+  priority: 1.2
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # adds rows in two host scripts and on the start path of the daemon; no decision changes
+  band_meaning: span
+  origin: operator-session#restart-and-recycle-downtime-2026-11-10
+  plan_refs:
+    - W1-T9781
+    - W1-T10055
+    - W1-T5722
+    - W1-T12229
+    - W1-T298
+  files:
+    - deploy/recycle-container.sh
+    - deploy/serve-container.sh
+    - src/cli/commands/daemon.ts
+    - src/lib/daemon.ts
+    - src/lib/ledger.ts
+    - test/daemon/a-recycle-and-a-start-write-a-row-for-each-phase.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "With a fake `docker`, a daemon recycle writes one `recycle.phase` row at the end of each phase: lock wait, registry login, pull, smoke, pause written, wait for workers, stop, remove, start. Each row has the phase name and its seconds"
+      proof: "grep: W1-T12244 criterion 1 in test/daemon/a-recycle-and-a-start-write-a-row-for-each-phase.test.ts"
+    - claim: "The pull row states whether the image id changed. The stop row states whether Docker had to kill the container at its stop time limit"
+      proof: "grep: W1-T12244 criterion 2 in test/daemon/a-recycle-and-a-start-write-a-row-for-each-phase.test.ts"
+    - claim: "A recycle that is refused or ended by a signal has the rows of the phases that it completed, and `recycle.ended` names the phase that it was in"
+      proof: "grep: W1-T12244 criterion 3 in test/daemon/a-recycle-and-a-start-write-a-row-for-each-phase.test.ts"
+    - claim: "With a fake `docker`, a serve replace writes `recycle.phase` rows for pull, stop, remove and start, with the container name of serve"
+      proof: "grep: W1-T12244 criterion 4 in test/daemon/a-recycle-and-a-start-write-a-row-for-each-phase.test.ts"
+    - claim: "A daemon start writes one `daemon.boot_phases` row on its first tick. It has the milliseconds of each step from the process start to that tick: token mint, plan load, lifetime history, claim sweep, ledger read, adoption of run children, the boot sweeps, and the rest of the time before the first tick as its own named parts"
+      proof: "grep: W1-T12244 criterion 5 in test/daemon/a-recycle-and-a-start-write-a-row-for-each-phase.test.ts"
+    - claim: "The parts of `daemon.boot_phases` add up to the time from the process start to the first tick, with a part named `other_ms` for what no step claims. The test drives `daemonCommand` with a fake clock"
+      proof: "grep: W1-T12244 criterion 6 in test/daemon/a-recycle-and-a-start-write-a-row-for-each-phase.test.ts"
+    - claim: "A failure to write a phase row never stops a recycle or a start"
+      proof: "grep: W1-T12244 criterion 7 in test/daemon/a-recycle-and-a-start-write-a-row-for-each-phase.test.ts"
+    - claim: "The recycle script writes the phase row"
+      proof: 'grep: recycle\.phase in deploy/recycle-container.sh'
+    - claim: "The serve script writes the phase row"
+      proof: 'grep: recycle\.phase in deploy/serve-container.sh'
+    - claim: "The daemon command writes the start row"
+      proof: 'grep: daemon\.boot_phases in src/cli/commands/daemon.ts'
+  rationale: |
+    OBSERVED 2026-11-10 in a study of the core ledger from 2026-11-04T01:56Z to 2026-11-11T01:56Z: the ledger could not answer where a recycle and a start spend their time. The study needed container logs and the journal of the Docker daemon, and those are gone after a recycle or a few days.
+    What the ledger did not hold:
+    - A recycle writes `recycle.invoked` and `recycle.ended` only. The time of the pull, of the pause file, of the smoke and of the stop is in no row. The watchdog tick does not pass the output of the script to its journal.
+    - For one recycle (2026-11-10 20:21) the Docker journal gave the parts: 38 s to the pulled image, 11 s for the smoke, 10 s for a stop that ended in a kill, 4 s to the new container. That journal starts at 2026-11-10T13:08Z.
+    - For the recycle of 2026-11-09 14:28, 759 s of 3,304 s were outside the wait, and nothing says where.
+    - A serve replace writes `deploy.serve_policy_replace` and then `serve.supervisor_start`, a median of 50 s later (18 replaces, worst 102 s). The stop of the old container is in no row, so the time that the gateway was down is only known as at most that.
+    - No row splits the time from `daemon.boot` to the first `daemon.tick` (median 49 s over 45 starts, worst 126 s). `daemonBoot` takes about 5 s of it.
+    - The times before `daemon.start` were found only because three rows happen to lie between the steps.
+    READ at origin/main 17745c6bf: `deploy/recycle-container.sh` writes its two rows with `printf` to the ledger file (`record_recycle_invocation`, `record_recycle_ended`). `sweep.full_prelude` (W1-T9781, merged) is the model: one row with a time for each stage.
+    CHECKED for overlap: W1-T10055 (queued) classifies what caused each start. W1-T5722 (merged) sized the health window of a deploy from a measured start. W1-T12229 (filed, not merged) writes one row for each restart cycle with its cost. None writes the phases of a recycle or the parts of a start.
+    W1-T298 (queued) shares the two files src/lib/daemon.ts and src/lib/ledger.ts and nothing more: it escalates an empty queue.
+  design: |
+    In `deploy/recycle-container.sh`: a function `record_recycle_phase <phase> <seconds> [extra JSON fields]` that appends one `recycle.phase` row with the run id of the recycle, as `record_recycle_ended` does. Call it at the end of each phase. Use `|| true`: a failed write is not an error.
+    - For the stop, read whether the container exit was a kill from `docker inspect` (`.State.ExitCode` 137) before `docker rm`.
+    - For the pull, compare the image id before and after.
+    - Add `phase` to `recycle.ended`.
+    In `deploy/serve-container.sh`: the same function for pull, stop, remove and start.
+    In `daemonCommand` and `runDaemon`: a small recorder with `mark(name)` that takes the time between marks from the daemon clock. Mark after each step named in criterion 5 and after each larger step of the `runDaemon` preamble. Write `daemon.boot_phases` on the first tick. Put what is left in `other_ms`.
+    Add the two steps to the lists in src/lib/ledger.ts where a new step must be listed.
+    One test file drives both scripts with a fake `docker` and drives `daemonCommand` with injected deps.
+    NOT IN SCOPE: any change to an order, a wait or a decision; the cost row of a restart cycle (W1-T12229); and the rows of the first sweep.
+  falsifier: |
+    Remove the row of one phase and criterion 1 must fail. Fail the recycle when the write fails and criterion 7 must fail. Drop `other_ms` and criterion 6 must fail. Restore and require all ten to pass.
+  note: |
+    After the merge, the next study of a recycle or a start reads the ledger only.

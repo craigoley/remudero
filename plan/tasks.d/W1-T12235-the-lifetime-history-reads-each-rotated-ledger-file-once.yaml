@@ -1,0 +1,76 @@
+- id: W1-T12235
+  title: "The dispatch lifetime history reads each rotated ledger file once, not at every start"
+  repo: remudero
+  depends_on: []
+  priority: 0.8
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the history decides whether a task has used its lifetime limit of dispatches
+  band_meaning: span
+  origin: operator-session#restart-and-recycle-downtime-2026-11-10
+  plan_refs:
+    - W1-T5724
+    - W1-T3758
+    - W1-T10228
+    - W1-T11267
+    - W1-T6358
+    - W1-T100
+  files:
+    - src/run-task.ts
+    - src/lib/sweep.ts
+    - test/worker/run-task/the-lifetime-history-reads-each-rotated-ledger-file-once.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "A second call of `auditedLifetimeTalliesFromArchives` on the same state directory, as a restarted daemon makes, decompresses no rotated ledger file that the first call read"
+      proof: "grep: W1-T12235 criterion 1 in test/worker/run-task/the-lifetime-history-reads-each-rotated-ledger-file-once.test.ts"
+    - claim: "When one new rotated file exists at the second call, the call decompresses that file only"
+      proof: "grep: W1-T12235 criterion 2 in test/worker/run-task/the-lifetime-history-reads-each-rotated-ledger-file-once.test.ts"
+    - claim: "For a fixture of several rotated files with rows that a later file repeats, the tally of each task from the kept slices is equal to the tally from a read of every file"
+      proof: "grep: W1-T12235 criterion 3 in test/worker/run-task/the-lifetime-history-reads-each-rotated-ledger-file-once.test.ts"
+    - claim: "A kept slice whose file size or modification time differs from the rotated file is not used. The call reads that file again"
+      proof: "grep: W1-T12235 criterion 4 in test/worker/run-task/the-lifetime-history-reads-each-rotated-ledger-file-once.test.ts"
+    - claim: "If the snapshot of kept slices is unreadable, the call reads every rotated file as today and returns the same tallies. No lifetime limit changes"
+      proof: "grep: W1-T12235 criterion 5 in test/worker/run-task/the-lifetime-history-reads-each-rotated-ledger-file-once.test.ts"
+    - claim: "If one rotated file is unreadable, the call returns no history, as today. The caller keeps the decision that reads the live ledger only"
+      proof: "grep: W1-T12235 criterion 6 in test/worker/run-task/the-lifetime-history-reads-each-rotated-ledger-file-once.test.ts"
+    - claim: "`dispatch.lifetime_history_loaded` states how many rotated files the call read and how many the snapshot answered"
+      proof: "grep: W1-T12235 criterion 7 in test/worker/run-task/the-lifetime-history-reads-each-rotated-ledger-file-once.test.ts"
+    - claim: "The lifetime history names its own slice holder"
+      proof: 'grep: dispatch\.lifetime-history in src/run-task.ts'
+  rationale: |
+    OBSERVED 2026-11-04T01:56Z to 2026-11-11T01:56Z in the ledger of the core instance: every daemon start decompresses and reads every rotated ledger file before it writes `daemon.start`.
+    - 45 starts. The time from `board_snapshot.loaded` to `dispatch.lifetime_history_loaded` had a median of 87 s and a worst case of 201 s. For the 18 starts after a freshness exit the median was 96 s.
+    - The two starts after the entrypoint fix of W1-T12031 took 201 s and 172 s for 313 and 314 rotated files.
+    - The read found 9,006 rows of three steps in 314 files.
+    - The whole time from the launcher to `daemon.start` had a median of 143 s. This read is two thirds of it.
+    - The host had a load average of 20 to 30 on 8 cores, so each time includes a wait for a processor.
+    READ at origin/main 17745c6bf.
+    - `daemonCommand` awaits `auditedLifetimeTalliesFromArchives` (src/cli/commands/daemon.ts:1205) before it takes the daemon lock.
+    - `auditedLifetimeTalliesFromArchives` (src/run-task.ts:24635) calls `auditLedgerUnion` (src/lib/ledger-union.ts:782) for the steps `run.start`, `daemon.spawn_infra_blocked` and `verdict`. The comment on `auditLedgerUnion` says that the archive read happens once at each start.
+    - A rotated ledger file does not change after the rotation writes it.
+    - `createEscalationTriageHistoryReader` (src/lib/sweep.ts) keeps the rows of named steps for each rotated file. With `sharedSnapshot` it writes them to `state/cache/rotation-slices/<holder>.json`, and it accepts a kept file only if its name, size and modification time are equal. W1-T11267 (merged) uses this reader for the fleet-state history.
+    CHECKED for overlap:
+    - W1-T5724 (queued, priority 3) part (i) builds the history at the first dispatch selection that needs it. That takes the read off the path to `daemon.start`. It does not make the read shorter: the first dispatch then waits for it, and the read uses a processor while the first reviews start.
+    - Parts (ii) and (iii) of W1-T5724 are out of date. W1-T5720 (merged) holds the gardeners until the first sweep ends. W1-T7729 and W1-T8777 (merged) start the daemon from a bundle, so `tsx` does not compile it.
+    - This task does not depend on W1-T5724. It changes how the read gets its rows. W1-T5724 changes when the read runs. Either can merge first.
+    - W1-T3758 (merged) added the history. W1-T10228 (merged) reports a history that is unavailable.
+    - W1-T100 shares the two files src/run-task.ts and src/lib/sweep.ts and nothing more: it routes a pull request with a failed check to the fix path.
+  design: |
+    In src/run-task.ts, `auditedLifetimeTalliesFromArchives` takes its rows from a reader that `createEscalationTriageHistoryReader` builds for a new slice:
+    - holder `dispatch.lifetime-history`, the three steps above, `sharedSnapshot: true`;
+    - a `project` function that keeps only the fields that `lifetimeAccounting().record`, `lifetimeStartIdentity` and `streakRefusal` read, plus what `replayedLifetimeLedgerLine` needs to recognise a repeated row.
+    Feed the rows to the accounting in the order of the rotated files, oldest first, through the same `replayedLifetimeLedgerLine` check as today. The identity index of src/lib/lifetime-identity-index.ts does not change.
+    Keep today's answers for a failure:
+    - an unreadable rotated file gives `archive_unreadable` and no history;
+    - an unreadable snapshot is not an error: the reader loads each file, as it does when no snapshot exists.
+    Export from src/lib/sweep.ts what src/run-task.ts needs to build the reader, if it is not exported.
+    Add `archives_read` and `archives_from_snapshot` to `dispatch.lifetime_history_loaded`.
+    The builder must confirm with the test of criterion 3 that the reader gives the accounting the same rows as `auditLedgerUnion` with `dedupeWindowPerStep`. If it cannot, stop and report the difference; do not change a tally.
+    NOT IN SCOPE: when the history is built (W1-T5724), the lifetime limit itself, and the live overlay of `lifetimeHistory`.
+  falsifier: |
+    Build the reader without `sharedSnapshot` and criterion 1 must fail. Accept a kept slice without the size check and criterion 4 must fail. Return a history when one rotated file is unreadable and criterion 6 must fail. Restore and require all eight to pass.
+  note: |
+    After the merge, the time from `board_snapshot.loaded` to `dispatch.lifetime_history_loaded` on the core instance is the measure. The median was 87 s over 45 starts.

@@ -1,0 +1,76 @@
+- id: W1-T12241
+  title: "During a recycle wait the daemon admits a review that ends before the wait does"
+  repo: remudero
+  depends_on: []
+  priority: 1.1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # narrows two merged rules that keep new reviews out of a recycle wait
+  band_meaning: span
+  origin: operator-session#restart-and-recycle-downtime-2026-11-10
+  plan_refs:
+    - W1-T8136
+    - W1-T11321
+    - W1-T8172
+    - W1-T9808
+    - W1-T5804
+    - W1-T11320
+    - W1-T12160
+  files:
+    - src/lib/recycle-wait-admission.ts
+    - src/lib/daemon.ts
+    - src/lib/sweep.ts
+    - test/daemon/a-recycle-wait-admits-a-review-that-ends-before-the-wait-does.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "`recycleWaitAdmits` returns true for a review when the measured length of a review is shorter than the predicted time left of the build run or fix round that will end first among those the recycle waits for"
+      proof: "grep: W1-T12241 criterion 1 in test/daemon/a-recycle-wait-admits-a-review-that-ends-before-the-wait-does.test.ts"
+    - claim: "It returns false when the measured length is longer than that time, when no build run or fix round is in flight, when no review length is measured, and when a prediction is unreadable"
+      proof: "grep: W1-T12241 criterion 2 in test/daemon/a-recycle-wait-admits-a-review-that-ends-before-the-wait-does.test.ts"
+    - claim: "It returns false for a fix round and for a build dispatch, in every case"
+      proof: "grep: W1-T12241 criterion 3 in test/daemon/a-recycle-wait-admits-a-review-that-ends-before-the-wait-does.test.ts"
+    - claim: "Under a recycle pause, the review clock of the pause admits a review when the function returns true, and holds it when the function returns false. The test drives `runDaemon` with a pause detail of a recycle"
+      proof: "grep: W1-T12241 criterion 4 in test/daemon/a-recycle-wait-admits-a-review-that-ends-before-the-wait-does.test.ts"
+    - claim: "Under a recycle pause, the refill of a freed review place in a light sweep asks the same function"
+      proof: "grep: W1-T12241 criterion 5 in test/daemon/a-recycle-wait-admits-a-review-that-ends-before-the-wait-does.test.ts"
+    - claim: "Under a pause that is not a recycle pause, admission is as today"
+      proof: "grep: W1-T12241 criterion 6 in test/daemon/a-recycle-wait-admits-a-review-that-ends-before-the-wait-does.test.ts"
+    - claim: "Each review admitted under a recycle pause writes one row with the measured length and the predicted time left that allowed it"
+      proof: "grep: W1-T12241 criterion 7 in test/daemon/a-recycle-wait-admits-a-review-that-ends-before-the-wait-does.test.ts"
+    - claim: "The daemon calls the new module"
+      proof: "grep: recycleWaitAdmits( in src/lib/daemon.ts"
+  rationale: |
+    OBSERVED 2026-11-04T01:56Z to 2026-11-11T01:56Z in the ledger of the core instance: a recycle pauses the instance for the whole wait for its workers, and no review starts in that time.
+    - 31 recycles replaced the daemon container. In the three that waited longest the wait was 2,970 s, 2,545 s and 1,560 s, which is 82 to 94 % of the whole recycle.
+    - In the pause of 2026-11-09 (14:34 to 15:23, 49 minutes) the fleet posted 0 verdicts. In the pause of 2026-11-08 (16:42 to 17:04, 22 minutes) it posted 0 verdicts.
+    - 5 more recycles waited and then replaced nothing. Three were ended by a signal after 2,460 s, 2,785 s and 2,940 s. Two were refused at their time limit after 3,000 s and 1,035 s. That is 204 minutes of pause with no new container.
+    - Outside a pause, the time from the admission of a review to its verdict had a median of 232 s after a start. The sweep's own estimate for a code review was 407 to 466 s.
+    - The deployer predicts the wait for each run in flight: `deploy.recycle_wait_derived` has `lanes[].remaining_s`. On 2026-11-10 it predicted 2,790 s for the build run that ended last; the wait was 2,970 s.
+    READ at origin/main 17745c6bf.
+    - `deploy/recycle-container.sh` section 5 writes the pause and then waits until no worker is in flight.
+    - Under a recycle pause the tick starts no dispatch, and the sweep runs with review and fix admission closed (src/lib/daemon.ts:6590 to 6603, W1-T5804).
+    - The review clock of a pause holds every review under a recycle pause: `daemon.review_clock.held` with `reason: recycle_pause` (src/lib/daemon.ts:2594). That is W1-T8136.
+    - The refill of a light sweep holds too: `refillHeldForRecycle` (src/lib/sweep.ts, about line 25808). That is W1-T11321.
+    - A freshness restart has a rule for the same question. After the restart decision, `restartAdmission` admits a review only while the time left is longer than the measured length of a review (`measuredReviewLength`, src/lib/daemon.ts:5222; W1-T8172 and W1-T9808).
+    THIS TASK NARROWS W1-T8136 AND W1-T11321. Both are merged, and both hold every review under a recycle pause. Their evidence was a wait that grew: on 2026-10-11 the daemon admitted 8 reviews in 52 minutes of a wait, and one of them was counted as a blocker 16 s before the recycle was refused. Their rule had no clock. This task keeps their aim, that a review never makes the wait longer, and uses the clock of W1-T8172 to reach it: a review starts only if it is predicted to end before a build run or a fix round that the recycle waits for in any case.
+    WHY THE EVIDENCE SUPPORTS IT: 71 minutes of two pauses gave 0 verdicts, and 204 minutes of five more pauses gave no recycle. With a median of 232 s for a review, most of that time could have given verdicts with no longer wait.
+    NOT ESTABLISHED: how often a review runs longer than its measured length. When it does, the recycle waits for it. Criterion 7 writes the row that measures this.
+    CHECKED for overlap: W1-T11320 (merged) sets how long a watchdog recycle waits. W1-T12160 (queued) is about a freshness restart. Neither admits a review under a recycle pause.
+  design: |
+    New module src/lib/recycle-wait-admission.ts with the pure function `recycleWaitAdmits(kind, input)`.
+    - `input` has the measured length for the kind (from `measuredReviewLength`), and for each build run and fix round in flight its age and its predicted time left.
+    - Predict the time left as the deployer does: `deriveDrainWait` (src/lib/deployer.ts:452) over the run lengths that the ledger shows. Reuse that function; do not write a second prediction.
+    - Admit a review or a plan review only if its measured length is shorter than the smallest predicted time left among the runs and rounds in flight. Use the smallest, so that the review ends before the first of them is predicted to end.
+    - Refuse every other kind.
+    In `startInterphaseReviewClock` (src/lib/daemon.ts), in place of the `recycle_pause` hold: build an `admit` predicate from `recycleWaitAdmits` and give it to the light sweep, as the clock of a freshness drain gives `latchedAdmission`. A refusal keeps today's `daemon.review_clock.held` row.
+    In `refillHeldForRecycle` (src/lib/sweep.ts): ask the predicate that the pass carries; with none, hold as today.
+    Write `daemon.recycle_wait.review_admitted` with `review_length_ms`, `predicted_left_ms` and the run it was compared with.
+    The worker count of `deploy/recycle-container.sh` already counts a reviewer, so a review that runs long is waited for and not killed.
+    NOT IN SCOPE: fix rounds and build dispatch under a recycle pause, the recycle script, the time limit of the wait, and a pause that the operator wrote.
+  falsifier: |
+    Admit a review whose measured length is longer than the smallest time left and criterion 2 must fail. Compare with the largest time left and criterion 1 must fail. Admit a fix round and criterion 3 must fail. Admit under an operator pause and criterion 6 must fail. Restore and require all eight to pass.
+  note: |
+    After the merge, count the verdicts posted during each recycle pause, and compare the length of each wait with `deploy.recycle_wait_derived`. If a wait grows by more than the length of one review, raise it with the row of criterion 7.
