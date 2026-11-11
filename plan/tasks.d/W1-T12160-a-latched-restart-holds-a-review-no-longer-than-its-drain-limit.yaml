@@ -24,10 +24,12 @@
       proof: "grep: W1-T12160 criterion 1 in test/daemon/a-latched-restart-holds-a-review-no-longer-than-its-drain-limit.test.ts"
     - claim: "While the time left is shorter than the measured length and the deadline has not passed, the latch holds the review, as today"
       proof: "grep: W1-T12160 criterion 2 in test/daemon/a-latched-restart-holds-a-review-no-longer-than-its-drain-limit.test.ts"
-    - claim: "When the deadline has passed and the daemon still runs, the latch admits a review again. One row records that the hold ended, with the time since the latch and what the exit still waits for"
+    - claim: "When the deadline has passed, the daemon still runs and the drain of the exit has not begun, the latch admits a review again. One row records that the hold ended, with the time since the latch and what the exit still waits for"
       proof: "grep: W1-T12160 criterion 3 in test/daemon/a-latched-restart-holds-a-review-no-longer-than-its-drain-limit.test.ts"
     - claim: "A fix and a build refill stay held after the deadline, as today"
       proof: "grep: W1-T12160 criterion 4 in test/daemon/a-latched-restart-holds-a-review-no-longer-than-its-drain-limit.test.ts"
+    - claim: "Once the drain of the exit has begun, the latch holds a review when the deadline has passed, as before this task"
+      proof: "grep: W1-T12160 criterion 5 in test/daemon/a-latched-restart-holds-a-review-no-longer-than-its-drain-limit.test.ts"
   rationale: |
     OBSERVED 2026-11-10 in the core instance: from 12:37Z to 12:58Z the light pass admitted no review of a green pull request. Each row said "not admitted this pass: restart latched, and the review would outlast its drain".
     - That is 21 minutes. The drain deadline is the latch time plus `sweepWallClockBoundMs`, which is 559,000 ms by default, about 9 minutes.
@@ -38,8 +40,11 @@
     In `restartAdmission`, when `daemonClock.now()` is past `restartWindow.deadlineMs` and the kind is a review or a plan review, return true.
     Write one row the first time this happens for a latch, with the milliseconds since the latch and the phases of the work that `restartDrainInventory()` still lists.
     Keep the refusal for the kinds "fix-dispatch" and "dispatch-refill": that work is longer and costs more when the exit abandons it.
+    AMENDED 2026-11-10 (hand build): keep the refusal also once the drain of the exit has begun, that is, once `drainBeforeRestart` runs for a freshness exit.
+    A review admitted then gets no time: the drain gives up on it at once and tells it to stop, and the exit can cut it while it posts its verdict.
+    Before the drain of the exit begins, a review admitted past the deadline is work admitted after the latch, and the drain waits one time limit for it.
     NOT IN SCOPE: why an exit can pass its deadline, the drain itself, and the wording of the stand-down rows (W1-T11156).
   falsifier: |
-    Keep the refusal after the deadline and criterion 3 must fail. Admit a fix after the deadline and criterion 4 must fail. Admit a review that is longer than the time left before the deadline and criterion 2 must fail. Restore and require all four to pass.
+    Keep the refusal after the deadline and criterion 3 must fail. Admit a fix after the deadline and criterion 4 must fail. Admit a review that is longer than the time left before the deadline and criterion 2 must fail. Remove the check for the drain of the exit and criterion 5 must fail. Restore and require all five to pass.
   note: |
     A review admitted after the deadline may still be abandoned by a late exit. W1-T11928 keeps a computed verdict for the next pass, which lowers that cost.
