@@ -25,11 +25,13 @@
 import { createHash, randomBytes } from "node:crypto";
 import { createServer as createHttpServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { createServer as createNetServer, type Socket } from "node:net";
-import { chmodSync, existsSync, lstatSync, mkdirSync, rmdirSync, rmSync, unlinkSync } from "node:fs";
+import { chmodSync, constants as fsConstants, existsSync, lstatSync, mkdirSync, rmdirSync, rmSync, unlinkSync } from "node:fs";
+import { access as fsAccess, readFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { isMainThread, parentPort, Worker, workerData, type MessagePort } from "node:worker_threads";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
-import { mintScopedToken } from "./github-app.js";
+import { GH_APP_ID_ENV, GH_APP_INSTALLATION_ID_ENV, GH_APP_PRIVATE_KEY_PATH_ENV, mintScopedToken } from "./github-app.js";
+import { DEFAULT_HOST_INSTANCE_REGISTRY_PATH, parseInstanceRegistry } from "./instance-registry.js";
 import { MAX_UNIX_SOCKET_PATH_BYTES, shortPathWhenTooLong } from "./short-path-root.js";
 import { setHarnessCredentialSocket } from "./worktree-git.js";
 import { bundledWorkerUrl } from "./child-entry-argv.js";
@@ -409,19 +411,29 @@ function rowFields(row: BoundaryLedgerRow): Record<string, unknown> {
   return { host: row.host, decision: row.decision, status: row.status, reason: row.reason, ...(row.credential ?? {}) };
 }
 
-export function realScopedMint(log: DaemonLog, mint: typeof mintScopedToken = mintScopedToken): ScopedTokenMint {
+/** W1-T11851: a host GitHub App identity — ids and the key PATH, never the key bytes or a token. */
+export interface HostAppIdentity { appId: string; installationId: string; keyPath: string }
+
+/** The private env a mint for `identity` reads: exactly the three App variables, never `process.env`. */
+export function hostAppIdentityEnv(identity: HostAppIdentity): NodeJS.ProcessEnv {
+  return { [GH_APP_ID_ENV]: identity.appId, [GH_APP_INSTALLATION_ID_ENV]: identity.installationId,
+    [GH_APP_PRIVATE_KEY_PATH_ENV]: identity.keyPath };
+}
+
+export function realScopedMint(log: DaemonLog, mint: typeof mintScopedToken = mintScopedToken, identity?: HostAppIdentity): ScopedTokenMint {
   return async (repo) => {
-    const minted = await mint(repo, SCOPED_TOKEN_TTL_MS, { log: (step, extra) => log(step, extra ?? {}) });
+    const minted = await mint(repo, SCOPED_TOKEN_TTL_MS, {
+      log: (step, extra) => log(step, extra ?? {}), ...(identity ? { env: hostAppIdentityEnv(identity) } : {}) });
     return minted.ok && minted.token
       ? { ok: true, token: minted.token, ...(minted.expiresAtMs === undefined ? {} : { expiresAtMs: minted.expiresAtMs }) }
       : { ok: false, reason: minted.reason ?? "mint returned no token" };
   };
 }
 
-function runSocketThread(port: MessagePort, socketPath: string): void {
+function runSocketThread(port: MessagePort, socketPath: string, identity?: HostAppIdentity): void {
   const post = (message: SocketThreadMessage) => port.postMessage(message);
   const log: DaemonLog = (step, fields) => post({ type: "log", step, fields });
-  startCredentialHelperSocket({ socketPath, mint: realScopedMint(log), log: (row) => log(row.step, rowFields(row)) }).then(
+  startCredentialHelperSocket({ socketPath, mint: realScopedMint(log, mintScopedToken, identity), log: (row) => log(row.step, rowFields(row)) }).then(
     (handle) => {
       port.on("message", (message) => {
         if (message !== "close") return;
@@ -437,13 +449,15 @@ function runSocketThread(port: MessagePort, socketPath: string): void {
 }
 
 if (!isMainThread && (workerData as { kind?: unknown } | undefined)?.kind === SOCKET_THREAD_KIND && parentPort) {
-  runSocketThread(parentPort, (workerData as { socketPath: string }).socketPath);
+  const data = workerData as { socketPath: string; identity?: HostAppIdentity };
+  runSocketThread(parentPort, data.socketPath, data.identity);
 }
 
 /** On its OWN thread because the daemon's git is synchronous (`gitPushRunBranch` is an `execFileSync`): a socket on
  *  the blocked main thread never answers the helper that push spawns, and both wait forever (MEASURED, W1-T5115). */
-function startSocketThread(socketPath: string, log: DaemonLog, threadUrl: URL): Promise<CredentialHelperSocketHandle> {
-  const worker = new Worker(threadUrl, { workerData: { kind: SOCKET_THREAD_KIND, socketPath }, env: { ...process.env } });
+function startSocketThread(socketPath: string, log: DaemonLog, threadUrl: URL, identity?: HostAppIdentity): Promise<CredentialHelperSocketHandle> {
+  const data = { kind: SOCKET_THREAD_KIND, socketPath, ...(identity ? { identity } : {}) };
+  const worker = new Worker(threadUrl, { workerData: data, env: { ...process.env } });
   let closing = false;
   let onClosed: (() => void) | undefined;
   const close = (): Promise<void> =>
@@ -487,6 +501,8 @@ export async function startRunChildGitCredentialSocket(opts: {
   log: DaemonLog;
   mint?: ScopedTokenMint;
   threadUrl?: URL;
+  /** W1-T11851: the thread mints as this App identity, carried in workerData, not the env. */
+  identity?: HostAppIdentity;
 }): Promise<CredentialHelperSocketHandle> {
   const socketPath = join(resolve(opts.runDir), "git.sock");
   if (Buffer.byteLength(socketPath) > MAX_UNIX_SOCKET_PATH_BYTES) {
@@ -501,7 +517,7 @@ export async function startRunChildGitCredentialSocket(opts: {
     chmodSync(opts.runDir, 0o700);
     handle = opts.mint
       ? await startCredentialHelperSocket({ socketPath, mint: opts.mint, log: (row) => opts.log(row.step, rowFields(row)) })
-      : await startSocketThread(socketPath, opts.log, opts.threadUrl ?? bundledWorkerUrl(import.meta.url));
+      : await startSocketThread(socketPath, opts.log, opts.threadUrl ?? bundledWorkerUrl(import.meta.url), opts.identity);
     chmodSync(socketPath, 0o600);
     setHarnessCredentialSocket(socketPath);
     return { socketPath, close: async () => {
@@ -562,4 +578,85 @@ export async function startDaemonGitCredentialSocket(opts: {
   // W1-T6148: the host git leaf re-adds the socket helper from this, never from a worktree's config.
   setHarnessCredentialSocket(socketPath);
   return { socketPath, close };
+}
+
+/** W1-T11851: which credential `rmd plan`'s own git pushes present. `ambient` only when there is no registry. */
+export type PlannerHostGitCredential = { registryPath: string } & (
+  | ({ kind: "app" } & HostAppIdentity)
+  | { kind: "ambient" }
+  | { kind: "refused"; reason: string });
+
+/** The container path the registry's `gh_app_private_key_path` names; the host holds it under `claude_dir`. */
+const CONTAINER_CLAUDE_DIR = "/home/node/.claude/";
+
+/** Each instance's raw fields, in the registry's line grammar. Only called once `parseInstanceRegistry` has
+ *  accepted the text, so the structure is already proven; this reads the fields that parser does not carry. */
+function registryInstanceFields(text: string): Array<Map<string, string>> {
+  const rows: Array<Map<string, string>> = [];
+  let inInstances = false;
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.replace(/\s+#.*$/, "").replace(/\s+$/, "");
+    if (line === "" || /^\s*#/.test(line)) continue;
+    if (/^\S/.test(line)) { inInstances = line === "instances:"; continue; }
+    if (!inInstances) continue;
+    if (/^ {2}[A-Za-z0-9_-]+:$/.test(line)) { rows.push(new Map()); continue; }
+    const field = /^ {4}([A-Za-z_]+):\s*(.*)$/.exec(line);
+    if (field) rows.at(-1)?.set(field[1]!, field[2]!.replace(/^"|"$/g, ""));
+  }
+  return rows;
+}
+
+/** The host path of an instance's App key, by install-host-units.sh's `host_alert_key_path` rule: the explicit
+ *  host path, else the `claude_dir` file behind the container's /home/node/.claude/. Undefined when neither maps. */
+function hostKeyPath(fields: Map<string, string>): string | undefined {
+  const explicit = fields.get("gh_app_private_key_host_path");
+  if (explicit) return explicit;
+  const container = fields.get("gh_app_private_key_path");
+  const claudeDir = fields.get("claude_dir");
+  if (!container?.startsWith(CONTAINER_CLAUDE_DIR) || container.length === CONTAINER_CLAUDE_DIR.length || !claudeDir) return undefined;
+  return `${claudeDir.replace(/\/+$/, "")}/${container.slice(CONTAINER_CLAUDE_DIR.length)}`;
+}
+
+/**
+ * W1-T11851: resolve `rmd plan`'s git credential from the host instance registry, never from a shell profile.
+ * `app` needs every instance naming `ownerRepo` to agree on all three App fields and the key to be readable
+ * (`access(R_OK)`; its bytes are not read here). A missing registry is `ambient`, today's helpers unchanged.
+ * Anything else present but unusable is `refused` with a named reason, so the caller can stop before any id is
+ * claimed. Never calls gh.
+ */
+export async function plannerHostGitCredential(
+  ownerRepo: string,
+  opts: { registryPath?: string; access?: (path: string) => Promise<void> } = {},
+): Promise<PlannerHostGitCredential> {
+  const registryPath = opts.registryPath ?? DEFAULT_HOST_INSTANCE_REGISTRY_PATH;
+  const access = opts.access ?? ((path: string) => fsAccess(path, fsConstants.R_OK));
+  let text: string;
+  try {
+    text = await readFile(registryPath, "utf8");
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException)?.code === "ENOENT") return { kind: "ambient", registryPath };
+    return { kind: "refused", registryPath, reason: `host instance registry unreadable: ${(err as NodeJS.ErrnoException)?.code ?? String(err)}` };
+  }
+  try {
+    parseInstanceRegistry(text);
+  } catch (err) {
+    return { kind: "refused", registryPath, reason: `host instance registry malformed: ${(err as Error).message}` };
+  }
+  const want = ownerRepo.toLowerCase();
+  const matches = registryInstanceFields(text).filter((f) => (f.get("github_repo") || f.get("repo"))?.toLowerCase() === want);
+  if (matches.length === 0) return { kind: "refused", registryPath, reason: `no host instance names ${ownerRepo}` };
+  const identities = matches.map((f) => ({ appId: f.get("gh_app_id") ?? "", installationId: f.get("gh_app_installation_id") ?? "",
+    keyPath: hostKeyPath(f) ?? "" }));
+  const [identity] = identities;
+  if (identities.some((i) => i.appId !== identity!.appId || i.installationId !== identity!.installationId || i.keyPath !== identity!.keyPath)) {
+    return { kind: "refused", registryPath, reason: `${matches.length} host instances name ${ownerRepo} with different App identities` };
+  }
+  if (!identity!.appId || !identity!.installationId) return { kind: "refused", registryPath, reason: `the ${ownerRepo} instance names no gh_app_id or gh_app_installation_id` };
+  if (!identity!.keyPath) return { kind: "refused", registryPath, reason: `the ${ownerRepo} instance's App key path does not map onto this host` };
+  try {
+    await access(identity!.keyPath);
+  } catch (err) {
+    return { kind: "refused", registryPath, reason: `the ${ownerRepo} App key is not readable: ${(err as NodeJS.ErrnoException)?.code ?? String(err)}` };
+  }
+  return { kind: "app", registryPath, ...identity! };
 }
