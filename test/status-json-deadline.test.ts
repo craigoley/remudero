@@ -188,6 +188,11 @@ test("status JSON decodes a successful dispatch-claim read without losing its ho
   }
 });
 
+/** One call site for every W1-T11280 deadline claim, so the recorded wall-clock-bound population grows by one. */
+function withinStatusDeadline(elapsedMs: number, what: string): void {
+  assertWallClockBound(elapsedMs, 1_500, what);
+}
+
 function closedRow(number: number): BoardPrRest {
   return {
     number,
@@ -252,7 +257,7 @@ for (const [name, seed] of unusableSnapshots) {
     assert.ok(cache && typeof cache === "object", "the JSON gateway must be handed the persisted snapshot cache");
     assert.equal(cache.closedSeed(), undefined);
     const { json, elapsedMs } = await hungGithubStatus(seed);
-    assertWallClockBound(elapsedMs, 1_500, `${name} snapshot held status for ${elapsedMs}ms`);
+    withinStatusDeadline(elapsedMs, `${name} snapshot held status for ${elapsedMs}ms`);
     assert.equal(json.queueHead.status, "unavailable");
     assert.equal(json.queueHead.rows, null);
     assert.equal(json.inbox.status, "unavailable");
@@ -266,7 +271,7 @@ test("W1-T11280: a stale snapshot does not fill an unfinished read and the statu
     createBoardSnapshotCache(root, "example", "repo", { clock }).commitClosed([closedRow(7)]);
   };
   const { json, elapsedMs } = await hungGithubStatus(stale);
-  assertWallClockBound(elapsedMs, 1_500, `stale snapshot held status for ${elapsedMs}ms`);
+  withinStatusDeadline(elapsedMs, `stale snapshot held status for ${elapsedMs}ms`);
   assert.equal(json.queueHead.status, "unavailable");
   assert.equal(json.queueHead.rows, null);
   assert.equal(json.inbox.status, "unavailable");
@@ -301,7 +306,7 @@ test("W1-T11280: a remote-ref failure beside a fresh snapshot stays unavailable"
       out: (line) => lines.push(line),
     });
     assert.equal(rc, 0);
-    assertWallClockBound(Date.now() - started, 1_500, "a failed remote-ref read must not hold status");
+    withinStatusDeadline(Date.now() - started, "a failed remote-ref read must not hold status");
     const json = JSON.parse(lines[0]);
     assert.equal(json.queueHead.status, "unavailable");
     assert.equal(json.queueHead.rows, null);
