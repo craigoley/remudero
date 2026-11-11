@@ -311,6 +311,9 @@ export interface RunTaskCommandHost {
   readonly runFixRung: (opts: {
   
   guardRoundHead?: boolean;
+  /** W1-T11170, operator-approved scope widening: the actual fix-rung push must prove a session-branch merge
+   *  commit and re-read ownership after all push prechecks. This callback is process-local and never serialized. */
+  ownedConflictPushGuard?: { prHeadSha: string; verifyOwnership: () => Promise<string | undefined> };
   taskId: string;
   runId: string;
   
@@ -418,7 +421,8 @@ export interface RunTaskCommandHost {
     ) => PlanCriteriaAtHeadResult | undefined | Promise<PlanCriteriaAtHeadResult | undefined>;
     runReview: (args: Parameters<RunTaskCommandHost["runReview"]>[0]) => ReturnType<RunTaskCommandHost["runReview"]>;
     
-    push: (worktreePath: string, branch: string, expectedHeadSha?: string, priorHeadSha?: string) => unknown;
+    push: (worktreePath: string, branch: string, expectedHeadSha?: string, priorHeadSha?: string,
+      guard?: { prHeadSha: string; verifyOwnership: () => Promise<string | undefined> }) => unknown;
     
     readHeadShaForProvenance?: (prUrl: string) => string;
     issues: IssueGateway;
@@ -538,10 +542,10 @@ export interface RunTaskCommandHost {
   readonly readInheritedCensusContextAsync: (root: string, path: string) => Promise<InheritedCensusContext>;
   readonly checkFixCensusSnapshotAsync: (root: string, path: string | undefined, log: (step: string, extra?: Record<string, unknown>) => void, run?: CensusChildRunner<Promise<CensusChildResult>>) => Promise<{ refusal?: CensusPushRefusal; unmeasured?: string } | undefined>;
   readonly FixRoundPushError: new (pushCause: RunErrorCause, refusal: CensusPushRefusal | undefined, detail: string) => RmdError & { readonly pushCause: RunErrorCause; readonly refusal: CensusPushRefusal | undefined; readonly detail: string };
-  readonly pushFixRound: (wt: string, branch: string, expectedHeadSha?: string, priorHeadSha?: string, deps?: Pick<PushRunBranchAsyncOpts, "capture" | "exec"> & { mergedTypecheck?: MergedTypecheckPorts }) => Promise<FixRoundPushReceipt>;
+  readonly pushFixRound: (wt: string, branch: string, expectedHeadSha?: string, priorHeadSha?: string, deps?: Pick<PushRunBranchAsyncOpts, "capture" | "exec"> & { mergedTypecheck?: MergedTypecheckPorts; ownedSessionGuard?: { prHeadSha: string; verifyOwnership: () => Promise<string | undefined> } }) => Promise<FixRoundPushReceipt>;
   readonly coveragePrecheck: (wt: string, ports?: CoveragePrecheckPorts) => Promise<CoveragePrecheck>;
   readonly coveragePushRefusal: (result: CoveragePrecheck, log: (step: string, extra?: Record<string, unknown>) => void, site: string) => CensusPushRefusal | undefined;
-  readonly pushFixRoundPrechecked: (log: (step: string, extra?: Record<string, unknown>) => void, wt: string, branch: string, expectedHeadSha?: string, ports?: CoveragePrecheckPorts, push?: (wt: string, branch: string, expectedHeadSha?: string, priorHeadSha?: string) => unknown, priorHeadSha?: string, reapply?: { ports?: FixRoundReapplyPorts; attempted?: boolean }) => Promise<unknown>;
+  readonly pushFixRoundPrechecked: (log: (step: string, extra?: Record<string, unknown>) => void, wt: string, branch: string, expectedHeadSha?: string, ports?: CoveragePrecheckPorts, push?: (wt: string, branch: string, expectedHeadSha?: string, priorHeadSha?: string) => unknown, priorHeadSha?: string, reapply?: { ports?: FixRoundReapplyPorts; attempted?: boolean }, guard?: { prHeadSha: string; verifyOwnership: () => Promise<string | undefined> }) => Promise<unknown>;
   readonly repairRetroAcceptanceBlock: (prUrl: string, log: (step: string, extra?: Record<string, unknown>) => void, deps?: {
     fetchBody?: (url: string) => string;
     editBody?: (url: string, body: string) => void;

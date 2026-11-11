@@ -2497,6 +2497,19 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
   const offeredCensusBaselines = () => (censusRefusalIsCurrent() ? pushRefusal!.offeredBaselines : []);
   let roundPushFailure: Extract<FixRoundLanding, { landed: false }> | undefined;
   let roundPushReceipt: FixRoundPushReceipt | undefined;
+  // W1-T11170, operator-approved scope widening: a session-head worker round may push only its
+  // merge commit on the exact PR head, after validating this rung's branch claim and re-reading
+  // the session ownership evidence. The push adapter invokes this after its merged-tree and
+  // coverage checks, immediately before the plain git push.
+  const ownedSessionPushGuard = opts.ownedConflictPushGuard === undefined ? undefined : {
+    prHeadSha: opts.ownedConflictPushGuard.prHeadSha,
+    verifyOwnership: async (): Promise<string | undefined> => {
+      if (deps.branchClaim?.verify === undefined) return "the fix branch claim cannot be verified";
+      const branchClaimReason = deps.branchClaim.verify();
+      if (branchClaimReason !== undefined) return `fix branch claim changed: ${branchClaimReason}`;
+      return await opts.ownedConflictPushGuard!.verifyOwnership();
+    },
+  };
   const landRoundPush = async (push: () => unknown, headSha: string | undefined, site: string): Promise<FixRungOutcome | "refused" | undefined> => {
     roundPushFailure = undefined;
     roundPushReceipt = undefined;
@@ -3192,7 +3205,7 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
           runScript: runGeneratorScript,
           commit: (o) => commitGeneratorOutput(o),
           push: async (o) => {
-            generatorPush = await landRoundPush(() => deps.push(o.cwd, o.branch, o.expectedHeadSha), o.expectedHeadSha, "rung.generator_fix");
+            generatorPush = await landRoundPush(() => deps.push(o.cwd, o.branch, o.expectedHeadSha, undefined, ownedSessionPushGuard), o.expectedHeadSha, "rung.generator_fix");
           },
         },
       });
@@ -4879,7 +4892,8 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
       if (harnessCommitCount > 0) {
         let landing: FixRoundLanding | undefined;
         try {
-          const pushed = await landRoundPush(() => deps.push(opts.worktreePath, opts.branch, expectedHeadShaForPush, opts.guardRoundHead && fixHarnessOwnsGit ? roundPushBaseSha : undefined), expectedHeadShaForPush, "rung.strike");
+          const priorHeadSha = opts.guardRoundHead && fixHarnessOwnsGit && ownedSessionPushGuard === undefined ? roundPushBaseSha : undefined;
+          const pushed = await landRoundPush(() => deps.push(opts.worktreePath, opts.branch, expectedHeadShaForPush, priorHeadSha, ownedSessionPushGuard), expectedHeadShaForPush, "rung.strike");
           landing = await roundLanding(expectedHeadShaForPush);
           if (pushed && pushed !== "refused") return pushed;
         } catch (error) {
@@ -4950,7 +4964,8 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
     }
     let landing: FixRoundLanding = { landed: false, outcome: "failed", reason: "the push did not return" };
     try {
-      roundPush = await landRoundPush(() => deps.push(opts.worktreePath, opts.branch, expectedHeadShaForPush, opts.guardRoundHead && fixHarnessOwnsGit ? roundPushBaseSha : undefined), expectedHeadShaForPush, "rung.strike");
+      const priorHeadSha = opts.guardRoundHead && fixHarnessOwnsGit && ownedSessionPushGuard === undefined ? roundPushBaseSha : undefined;
+      roundPush = await landRoundPush(() => deps.push(opts.worktreePath, opts.branch, expectedHeadShaForPush, priorHeadSha, ownedSessionPushGuard), expectedHeadShaForPush, "rung.strike");
       landing = await roundLanding(expectedHeadShaForPush);
     } catch (error) {
       landing = pushThrew(error);
