@@ -18,7 +18,7 @@
     - test/daemon/an-interphase-review-pass-arms-a-ready-pr.test.ts
     - test/a-ready-pr-is-armed-and-its-review-admitted-on-the-next-light-pass.test.ts
   priority: 1
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OPERATOR RULING 2026-11-06: an interphase-review pass may arm a ready PR through the existing

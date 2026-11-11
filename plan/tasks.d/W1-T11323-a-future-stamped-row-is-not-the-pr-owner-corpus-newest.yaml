@@ -16,7 +16,7 @@
   files:
     - src/lib/pr-owner-ledger.ts
     - test/github/a-future-stamped-row-is-not-the-pr-owner-corpus-newest.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: readPrOwnerLedgerProjection, given a clock, ignores every row whose ts is more than LEDGER_FUTURE_STAMP_TOLERANCE_MS past it when choosing corpusNewestTs, latestFix and latestSweep, reports how many it skipped, and over a corpus with no future rows returns exactly what it returns today

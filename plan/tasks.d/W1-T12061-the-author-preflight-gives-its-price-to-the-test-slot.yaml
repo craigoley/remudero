@@ -9,6 +9,9 @@
     tdd: strict
   risk: high # two concerns: the preflight script and the ticket it already holds in the queue
   band_meaning: blast-radius
+  status: blocked
+  retirement: withdrawn
+  superseded_by: W1-T11915
   origin: operator-session#review-flow-2026-11-10
   plan_refs:
     - W1-T9951
@@ -16,7 +19,6 @@
     - scripts/preflight-author.mjs
     - src/lib/test-slot-queue.ts
     - test/ci/the-author-preflight-gives-its-price-to-the-test-slot.test.ts
-  status: queued
   attempts: 0
   acceptance:
     - claim: "After the preflight prices its selection, its waiting ticket carries that price, and the next heartbeat keeps it"
@@ -35,5 +37,12 @@
     NOT IN SCOPE: the ordering rule (W1-T11915) and what the preflight runs.
   falsifier: |
     Drop the price on the next heartbeat and criterion 1 must fail. Take the ticket after pricing and criterion 2 must fail. Treat a never-priced ticket as free or as costly and criterion 3 must fail. Restore and require all three to pass.
+  amendment: |
+    2026-11-10, PLAN-expand-1794349444421, at the operator's request: folded into W1-T11915 so that one task is credited for making cheapest-first ordering live.
+    - Withdrawn before any dispatch: there was no plan/claims.yaml row, and its test file did not exist.
+    - W1-T11915's criterion 4 carries this task's three claims on the production path.
+    - The fold also corrects this task's design. capacityVerdict runs only after queue.admit() returns (scripts/preflight-author.mjs), so a price set there reaches a ticket that has already left the queue. W1-T11915 prices with priceSelection right after enqueueTestSlot instead; that costMs is the same one the verdict records.
+    - Grounding: shortest-job-next needs each job's run time, known or estimated, before the job runs (https://en.wikipedia.org/wiki/Shortest_job_next).
+    - superseded_by names W1-T11915, so this retirement holds the origin until that task lands (W1-T9729).
   note: |
-    Follows W1-T11915, whose file list did not include these two files.
+    Follows W1-T11915, whose file list did not include these two files. Superseded: W1-T11915 now lists them.

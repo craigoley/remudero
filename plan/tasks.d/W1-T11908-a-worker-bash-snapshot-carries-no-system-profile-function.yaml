@@ -12,7 +12,7 @@
   plan_refs: [W1-T17, W1-T18, W1-T11693, W1-T11891]
   files:
     - test/worker/sandbox/worker-bash-snapshot-isolation.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     DIRECT EVIDENCE (operator, 2026-11-09): native run W1-T11891-1794252506105 failed closed in isolation_probe with

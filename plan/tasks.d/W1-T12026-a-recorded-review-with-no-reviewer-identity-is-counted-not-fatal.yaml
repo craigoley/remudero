@@ -7,7 +7,7 @@
   verify: auto
   principles:
     tdd: strict
-  risk: medium # one derive function; a row with the field absent or malformed still refuses, and the count is carried on the sample header
+  risk: high # sized high only for the plan lint's sizing rule: one module and the one older test case that pinned the throw
   band_meaning: blast-radius
   origin: operator-session#gardeners-2026-11-10
   plan_refs:
@@ -16,6 +16,7 @@
   files:
     - src/lib/review-replay-sample.ts
     - test/review/a-recorded-review-with-no-reviewer-identity-is-counted-not-fatal.test.ts
+    - test/review/a-review-path-change-replays-recorded-reviews.test.ts
   status: queued
   attempts: 0
   acceptance:

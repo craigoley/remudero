@@ -1,0 +1,57 @@
+- id: W1-T12142
+  title: "A routing experiment ends with a recorded result"
+  repo: remudero
+  depends_on: []
+  priority: 0.9
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # a new daily pass on the measurement cadence and a new row that later routing changes will read
+  band_meaning: blast-radius
+  origin: operator-session#model-choice-2026-11-10
+  plan_refs:
+    - W1-T4617
+    - W1-T9648
+  files:
+    - src/lib/routing-experiment-result.ts
+    - src/lib/routing-experiments.ts
+    - src/lib/ledger-steps.ts
+    - src/run-task.ts
+    - test/routing/a-routing-experiment-ends-with-a-recorded-result.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "For each live experiment the pass groups tasks by the experiment arm they were assigned. It reports each pipeline apart: build runs merged, fix rounds accepted, review verdicts that fail, median cost and median duration"
+      proof: "grep: W1-T12142 criterion 1 in test/routing/a-routing-experiment-ends-with-a-recorded-result.test.ts"
+    - claim: "Each difference between the two experiment arms carries an interval that treats the task as the cluster, so many attempts of one task count as one task"
+      proof: "grep: W1-T12142 criterion 2 in test/routing/a-routing-experiment-ends-with-a-recorded-result.test.ts"
+    - claim: "Each experiment states its decision rule: the smallest difference that matters, the power, the confidence level and a stop date. The pass computes the fewest tasks each arm needs from that rule"
+      proof: "grep: W1-T12142 criterion 3 in test/routing/a-routing-experiment-ends-with-a-recorded-result.test.ts"
+    - claim: "The result is running until the rule is met, then concluded with a winner or concluded with no difference. An experiment that reaches its stop date below the sample it needs is underpowered"
+      proof: "grep: W1-T12142 criterion 4 in test/routing/a-routing-experiment-ends-with-a-recorded-result.test.ts"
+    - claim: "The pass writes one routing.experiment.result row for each experiment each day, and a second pass on the same day writes no second row"
+      proof: "grep: W1-T12142 criterion 5 in test/routing/a-routing-experiment-ends-with-a-recorded-result.test.ts"
+    - claim: "The measurement cadence in src/run-task.ts calls the pass"
+      proof: "grep: recordRoutingExperimentResults( in src/run-task.ts"
+  rationale: |
+    MEASURED 2026-11-10 in the core instance's ledger, 2026-10-27 to 2026-11-10: the experiment `sol61-vs-sonnet55` has 1,158 assignments on 326 tasks. No row records a result or a decision.
+    - Joined by hand, by assigned arm: the review verdict was FAIL in 26.5% (59 of 223) for sonnet and 49.7% (148 of 298) for sol61.
+    - Fix rounds ended "fixed and pushed" in 72.3% for sonnet and 66.5% for sol61. Build runs merged in 68.6% (24 of 35) and 49.1% (26 of 53).
+    - 26.5% of assignments were served by the other arm, so only a comparison by assigned arm is fair.
+    - `evaluateRoutingExperiment` reports a merge rate for each arm and stops there. It has no interval, no rule and no end state.
+    - `minTasksPerArm` is 20. At 20 tasks for each arm, only a difference of about 44 points can be detected at 80% power.
+    - The daily review script writes a file that makes "no comparative claims". Nothing in the ledger says an experiment is finished.
+  design: |
+    Add src/lib/routing-experiment-result.ts. It is pure: ledger rows and one experiment in, one result out.
+    1. Group by the assigned arm that `experimentArmForTask` gives (intention to treat). Never group by the served arm.
+    2. Join each assignment to its outcome by `selection_assignment_id` and task: `verdict.merged` for build, `fix.done` for fix, `review.posted` for review.
+    3. Compute each interval with a bootstrap over tasks, seeded from the experiment id, so a rerun gives the same interval.
+    4. Add a `decision` field to `RoutingExperiment`: `minimumDifference`, `power`, `confidence` and `stopOn`. Compute the sample from these with the two-proportion formula. Keep `minTasksPerArm` as a floor.
+    5. Write the row from the measurement cadence (`buildMeasurementCadenceDaemonHooks`). Register the step in src/lib/ledger-steps.ts.
+    The row also carries the crossover share and the count of assignments with no outcome yet.
+    NOT IN SCOPE: any change to routing from a result (W1-T12143 and W1-T12148), and the daily review script.
+  falsifier: |
+    Group by served arm and criterion 1 must fail. Count each attempt as its own unit and criterion 2 must fail. Remove the stop date and criterion 4 must fail. Write a row on every pass and criterion 5 must fail. Restore and require all to pass.
+  note: |
+    W1-T12143, W1-T12148 and W1-T12155 read this row. W1-T9648 asks the same question of the skill evaluation: a pass with no measure of chance.

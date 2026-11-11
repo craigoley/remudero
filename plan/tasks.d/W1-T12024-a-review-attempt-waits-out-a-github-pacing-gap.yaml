@@ -18,7 +18,7 @@
   files:
     - src/lib/sweep.ts
     - test/github/a-review-attempt-waits-out-a-github-pacing-gap.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "A review attempt that throws GhPaceWouldBlockError before reporting any phase waits the named gap on a timer and runs again in the same pass, leaves no review.post_refused row, and writes one sweep.post_review.pacer_gap_waited row per wait naming the PR, the head, the gap and the calling site"
