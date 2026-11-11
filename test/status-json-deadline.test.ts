@@ -64,7 +64,8 @@ async function hungGithubStatus(
 }
 
 test("W1-T4208: status json returns within its deadline when a read hangs", async () => {
-  await hungGithubStatus();
+  const { elapsedMs } = await hungGithubStatus();
+  assertWallClockBound(elapsedMs, 1_500, "hung status held for " + elapsedMs + "ms");
 });
 
 test("W1-T4208: an unfinished read is reported as unavailable, not empty", async () => {
