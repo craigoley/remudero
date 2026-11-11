@@ -15,6 +15,9 @@
     - test/an-unlatched-freshness-exit-skips-a-pass-that-already-ran.test.ts
     - test/a-latched-restart-exits-when-its-last-lane-settles.test.ts
     - test/the-pre-exit-pass-runs-beside-the-restart-drain.test.ts
+  # refusal-amendment (W1-T9352, run work-fix-dispatch-W1-T9352-1794388491347-bf6e@a6d079f1f9a8d7e3f816f31aea95807c44e86e07, 2026-11-11T09:45:00.512Z): the worker refused criterion 5 [premise-rotted] — proposed close-unbuilt: the premise no longer holds at HEAD — close this task unbuilt, or restate the premise it should build on
+  #   worker evidence: The second amended test file, `test/the-pre-exit-pass-runs-beside-the-restart-drain.test.ts`, is created by W1-T9812, which is still queued, so it does not exist at this head and can't be amended.
+  #   this task is held from dispatch until its record changes; an Architect must make the change above
   status: queued
   priority: 1  # raised 2026-11-11 on the 7-day restart study (36 exits to 2026-11-11): W1-T9812 depends on it; was 2.5
   attempts: 0
