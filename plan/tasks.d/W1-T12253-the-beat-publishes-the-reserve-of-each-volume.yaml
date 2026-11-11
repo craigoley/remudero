@@ -1,0 +1,57 @@
+- id: W1-T12253
+  title: "The heartbeat publishes the disk reserve of each volume of its host"
+  repo: remudero
+  depends_on: []
+  priority: 0.9
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the heartbeat script of every host; a failure in it makes a healthy host look silent
+  band_meaning: blast-radius
+  origin: operator-session#janitor-disk-waste-2026-11-11
+  plan_refs:
+    - W1-T2767
+    - W1-T4804
+    - W1-T5548
+    - W1-T10765
+  files:
+    - scripts/fleet-heartbeat.sh
+    - test/gardeners/the-beat-publishes-the-reserve-of-each-volume.test.ts
+    - test/fleet-heartbeat.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "Each heartbeat carries `root_fs_reserve_kb`. When the state volume is another device, it also carries `state_fs_reserve_kb`"
+      proof: "grep: W1-T12253 criterion 1 in test/gardeners/the-beat-publishes-the-reserve-of-each-volume.test.ts"
+    - claim: "On macOS the reserve is the reserve of the author preflight. The test reads `MAC_AUTHOR_FREE_RESERVE_BYTES` from scripts/lib/mac-author-admission.mjs and requires the same amount in the heartbeat"
+      proof: "grep: W1-T12253 criterion 2 in test/gardeners/the-beat-publishes-the-reserve-of-each-volume.test.ts"
+    - claim: "On Linux the reserve of a volume comes from the mark of the host janitor for that volume: the part of the total size above the mark percent, or the free space of the mark when that is larger"
+      proof: "grep: W1-T12253 criterion 3 in test/gardeners/the-beat-publishes-the-reserve-of-each-volume.test.ts"
+    - claim: "The heartbeat and the host janitor have the same default marks. The test reads the defaults of `HIGH_WATER` and `RMD_CLEANUP_WATCH_FS` from deploy/rmd-host-cleanup.sh and requires the same values in the heartbeat"
+      proof: "grep: W1-T12253 criterion 4 in test/gardeners/the-beat-publishes-the-reserve-of-each-volume.test.ts"
+    - claim: "When the heartbeat cannot read the size of a volume, the reserve of that volume is `unknown`. It is never 0 and never a number from another volume"
+      proof: "grep: W1-T12253 criterion 5 in test/gardeners/the-beat-publishes-the-reserve-of-each-volume.test.ts"
+  rationale: |
+    OBSERVED 2026-11-10 and 2026-11-11: two hosts went below a disk reserve, each reserve was known to one script only, and no reader of the heartbeat could see it.
+    - Mac agent account: the author preflight refuses below 20 GiB of free disk (`MAC_AUTHOR_FREE_RESERVE_BYTES`, scripts/lib/mac-author-admission.mjs:10). It refused at 01:03Z and at 03:15Z on 2026-11-11. The hand lane tried again every five minutes and told nobody.
+    - Azure host: the janitor has a mark of 85% for `/` (`HIGH_WATER`, deploy/rmd-host-cleanup.sh:151). On 2026-11-10 its passes printed `FAIL / is at 95%`, `97%` and then `99% with 1G free (/dev/root), past its mark 85%`. Those lines went to `~/host-cleanup.log` only.
+    - The heartbeat of that host carried `root_fs_free_kb` and `janitor_last_before` for the whole day. It carries no reserve and no mark, so a reader cannot say whether a free value is low.
+    READ at origin/main 3c6e5e476.
+    - scripts/fleet-heartbeat.sh writes `root_fs_free_kb`, `root_fs_total_kb`, `state_fs_free_kb` and the device of each (lines 581 to 650 and 1555 to 1565).
+    - `judge_filesystems` in deploy/rmd-host-cleanup.sh reads the marks from `HIGH_WATER` and `RMD_CLEANUP_WATCH_FS`. The defaults are `/` at 85%, `/mnt/rmd` at 85% and `/mnt/scratch` at 90% with 40 GiB free.
+    - The host-resource gardener (src/lib/host-resource-gardener.ts, W1-T4804) reads each heartbeat. It judges a trend only, and it has no reserve to compare with.
+    CHECKED for overlap: W1-T2767 (merged) added a reading for each device. W1-T5548 (merged) made the janitor fail on every watched volume. Neither publishes the reserve.
+  design: |
+    In scripts/fleet-heartbeat.sh, after the readings of the devices:
+    - On macOS, set the reserve of the root volume to 20 GiB in KB, from one constant with a comment that names `MAC_AUTHOR_FREE_RESERVE_BYTES`.
+    - On Linux, read `HIGH_WATER` and `RMD_CLEANUP_WATCH_FS` with the same defaults as the janitor. For a volume, the reserve is `total * (100 - percent) / 100` in KB. When the mark also has a free space part, take the larger of the two.
+    - Write `root_fs_reserve_kb=<n>` and `state_fs_reserve_kb=<n>` next to the free values. Write the state line only when the state volume is another device, as the free value does.
+    - The script stays plain bash with no Node call. Its header gives the reason.
+    The two environment names are the names that the janitor reads today. This task adds no new setting.
+    NOT IN SCOPE: the scratch volume, any escalation (W1-T12254 reads these fields), and the workflow that watches the heartbeat.
+  falsifier: |
+    Leave the field out and criterion 1 must fail. Write 10 GiB on macOS and criterion 2 must fail. Ignore the free space part of a mark and criterion 3 must fail. Change one default mark in the heartbeat only and criterion 4 must fail. Write 0 for an unreadable size and criterion 5 must fail. Restore and require all five to pass.
+  note: |
+    Host and account: every host that publishes a heartbeat. Today that is the Azure host, from the crontab of its service user. W1-T12259 adds the Mac agent account.
+    The task removes nothing.
