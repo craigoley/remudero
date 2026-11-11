@@ -27,7 +27,7 @@
     - test/reviewer-code-freshness-recovery.test.ts
     - test/review-clock-new-green-backlog.test.ts
     - test/review-admission-dedup.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: A full pass admits plan-lane reviews through their own pool, which never reads reviewAdmissionBound, so a plan filing starts while every CPU-gated code slot is taken; a light pass already does this

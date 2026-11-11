@@ -1,7 +1,7 @@
 - id: W1-T11770
   title: "An explicit opt-in daemon flag feeds the pinned ops catalog to the shadow comparison off the tick loop, and absence is byte-identical"
   repo: remudero
-  depends_on: [W1-T11768, W1-T11769]
+  depends_on: [W1-T11768, W1-T11769, W1-T12185]
   type: implement
   verify: auto
   principles: {tdd: strict}

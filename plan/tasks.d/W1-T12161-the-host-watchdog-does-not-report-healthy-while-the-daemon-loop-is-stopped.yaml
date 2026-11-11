@@ -1,0 +1,48 @@
+- id: W1-T12161
+  title: "The host watchdog does not report healthy while the daemon loop is stopped"
+  repo: remudero
+  depends_on: []
+  priority: 0.9
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the host timer that restarts or recycles a daemon container; a wrong verdict stops running work
+  band_meaning: blast-radius
+  origin: operator-session#follow-ups-2026-11-10
+  plan_refs:
+    - W1-T5687
+    - W1-T5688
+    - W1-T12031
+  files:
+    - src/lib/progress-watchdog.ts
+    - deploy/install-host-units.sh
+    - test/deploy/the-host-watchdog-does-not-report-healthy-while-the-daemon-loop-is-stopped.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "The watchdog tick prints the word healthy only when the progress verdict is PROGRESSING or IDLE with the action none. For any other verdict the line names the state and the action"
+      proof: "grep: W1-T12161 criterion 1 in test/deploy/the-host-watchdog-does-not-report-healthy-while-the-daemon-loop-is-stopped.test.ts"
+    - claim: "When the newest row of the daemon is daemon.freshness_exit and no daemon.boot row follows within 5 minutes, the verdict says that the daemon stopped and did not start again, and its action is recycle"
+      proof: "grep: W1-T12161 criterion 2 in test/deploy/the-host-watchdog-does-not-report-healthy-while-the-daemon-loop-is-stopped.test.ts"
+    - claim: "When a daemon.boot row follows the exit row within 5 minutes, the verdict is the one of today"
+      proof: "grep: W1-T12161 criterion 3 in test/deploy/the-host-watchdog-does-not-report-healthy-while-the-daemon-loop-is-stopped.test.ts"
+    - claim: "A stop by the operator and a pause are never read as this state"
+      proof: "grep: W1-T12161 criterion 4 in test/deploy/the-host-watchdog-does-not-report-healthy-while-the-daemon-loop-is-stopped.test.ts"
+  rationale: |
+    OBSERVED 2026-11-10 on the Azure host: the core daemon stopped for a code refresh and did not start again for 33 minutes. The host watchdog reported the container as healthy for that whole time.
+    - The daemon printed its summary and "stopped: stale" at 16:47:33Z. The entrypoint logged "exited 75 (freshness)" at 17:20:46Z. Between the two there was no sweep, no review and no merge.
+    - The cause of the wait was in the entrypoint, and W1-T12031 fixed it (merged as 257fe3c45). That fix reaches a container only at its next recycle, because the entrypoint is part of the image.
+    - The progress verdict said STALLED and its action was to capture diagnostics. `STALL_RECYCLE_AFTER_MS` in src/lib/progress-watchdog.ts is 30 minutes, so no recycle came.
+    - After a verdict that leads to no restart, the tick in deploy/install-host-units.sh continues and prints "<container> healthy -- asking the supervisor whether a RECYCLE is due". `watchdog_healthy` is not asked first.
+    - The verdict does not read the exit row. A daemon that has itself recorded its stop needs no 30 minutes of doubt. Once the process exited on that day, the restart took 5 seconds.
+  design: |
+    In src/lib/progress-watchdog.ts, before the general rule for a stall, test for this state: the newest daemon row of the current boot is `daemon.freshness_exit`, and no `daemon.boot` row is newer.
+    When that state is older than 5 minutes, return the STALLED state with the action recycle and a sentence that names the exit time.
+    In the tick of deploy/install-host-units.sh, print the healthy line only when `watchdog_healthy` succeeds. Otherwise print the state, the action and the reason from the verdict.
+    NOT IN SCOPE: the entrypoint, the 15 and 30 minute limits for other stalls, and the recycle itself.
+  falsifier: |
+    Print healthy for a STALLED verdict and criterion 1 must fail. Ignore the exit row and criterion 2 must fail. Recycle although a boot row followed and criterion 3 must fail. Read a daemon.stop row as this state and criterion 4 must fail. Restore and require all four to pass.
+  note: |
+    The number 5 minutes is new. The builder may replace it with a measured value, such as a multiple of the longest restart in the ledger, and says so in the pull request.
+    The fleet already reports an image whose entrypoint is older than main: `checkImageDrift` in src/lib/image-drift.ts lists deploy/entrypoint.sh in `BAKED_PATHS`. No second check is filed for that.

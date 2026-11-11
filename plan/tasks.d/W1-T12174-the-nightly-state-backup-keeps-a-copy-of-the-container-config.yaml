@@ -1,0 +1,46 @@
+- id: W1-T12174
+  title: "The nightly state backup keeps a copy of the container config"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the nightly host job that owns the state backups; the copy may hold a secret and must stay private
+  band_meaning: blast-radius
+  origin: operator-session#follow-ups-2026-11-10
+  plan_refs:
+    - W1-T3677
+    - W1-T5545
+    - W1-T2592
+  files:
+    - deploy/host-update.sh
+    - test/deploy/the-nightly-state-backup-keeps-a-copy-of-the-container-config.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "The nightly snapshot copies each file of the container config directory into the backup of that night. The copy has mode 600 and its directory has mode 700"
+      proof: "grep: W1-T12174 criterion 1 in test/deploy/the-nightly-state-backup-keeps-a-copy-of-the-container-config.test.ts"
+    - claim: "The job prints the path of the copy and never a value from the file"
+      proof: "grep: W1-T12174 criterion 2 in test/deploy/the-nightly-state-backup-keeps-a-copy-of-the-container-config.test.ts"
+    - claim: "When the config directory is absent, or a file in it cannot be read, the snapshot of the state still runs and the job reports the failed copy as it reports a failed snapshot"
+      proof: "grep: W1-T12174 criterion 3 in test/deploy/the-nightly-state-backup-keeps-a-copy-of-the-container-config.test.ts"
+    - claim: "The rule that removes old state backups removes the config copies of the same nights and no other file"
+      proof: "grep: W1-T12174 criterion 4 in test/deploy/the-nightly-state-backup-keeps-a-copy-of-the-container-config.test.ts"
+  rationale: |
+    OBSERVED 2026-11-10 at 12:32Z on the Azure host: `~/.config/remudero-container/config.json` was reset to two fields, and no backup of it existed.
+    - `workerProviders` was gone from the file. Every daemon then ran with Claude only for more than eight hours. Codex and the cash deployments were off.
+    - The operator rebuilt the file by hand from memory and from the ledger.
+    - deploy/host-update.sh takes a snapshot of every live state root each night into `state-backups/state-backup.<time>` (W1-T3677, W1-T5545). The container config is in another directory, `CONTAINER_CONFIG_DIR`, and the snapshot does not read it.
+    - What reset the file is not established.
+  design: |
+    In the snapshot section of deploy/host-update.sh, after a state root's snapshot succeeds, copy the files of `CONTAINER_CONFIG_DIR` into a `container-config` directory inside that night's backup.
+    Use `umask 077` for the copy and set the modes explicitly. Copy regular files only, and never follow a symbolic link.
+    Report a failed copy through `state_snapshot_fail`, so the alarm that exists for a failed nightly backup also covers it.
+    The copy lives inside the backup directory, so the rule that keeps and removes backups needs no second list.
+    NOT IN SCOPE: the restore of the file, what reset it, and the alarm for a lost provider (W1-T12175).
+  falsifier: |
+    Leave the copy at mode 644 and criterion 1 must fail. Print a line of the file and criterion 2 must fail. Stop the state snapshot when the config directory is absent and criterion 3 must fail. Restore and require all four to pass.
+  note: |
+    The operator restores by hand: copy the file back and recycle the containers. The task does not add a restore command.

@@ -34,7 +34,7 @@
     - test/env-var-registry.test.ts
     - docs/instance-registry-selection-contract.md
   priority: 2
-  status: queued
+  status: merged
   # backlog gardener: band=2 evidence=92d23f3556e9ef27
   # backlog gardener: placed=2026-11-06T23:38:48.735Z
   attempts: 0

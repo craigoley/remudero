@@ -23,8 +23,11 @@ function cache() {
 }
 
 const read = ["api", "repos/fixture/loop/pulls/1"];
-test("W1-T11458 criterion 1: a marked loop refuses a pending gap without sleeping or stamping; CLI still waits", async () => {
+// W1-T12123: a wait of at most the shared read gap is now slept on the loop. A longer wait is still refused.
+test("W1-T11458 criterion 1: a marked loop refuses a wait past the shared gap without sleeping or stamping; CLI still waits", async () => {
   const c = cache();
+  c.env.RMD_GH_TRANSPORT_FLOOR = "wait";
+  transport.stampGhRead(c.stamp, "", c.deps.nowMs());
   try {
     const before = transport.readGhReadCadenceStampMs(c.stamp);
     await transport.withDaemonGhTransportFloor(async () => {
@@ -36,6 +39,7 @@ test("W1-T11458 criterion 1: a marked loop refuses a pending gap without sleepin
         assert.throws(() => transport.applyGhReadCadence(read, c.deps), transport.GhPaceWouldBlockError, "nested command still runs on the loop");
       }, c.env);
     }, c.env);
+    c.env.RMD_GH_TRANSPORT_FLOOR = "advisory";
     transport.applyGhReadCadence(read, c.deps);
     assert.deepEqual(c.waits, [100], "standalone CLI keeps its existing positive wait");
     await transport.withDaemonGhTransportFloor(() => {
@@ -251,14 +255,21 @@ test("loop scope survives asynchronous work while an independent CLI retains its
   const waiting = new Promise<void>((resolve) => { leave = resolve; });
   const loop = transport.withDaemonGhTransportFloor(async () => {
     enter(); await waiting;
+    // W1-T12123: the loop now sleeps a shared-gap wait. Only a wait slept on the loop writes a row.
     const fresh = cache();
-    try { assert.throws(() => transport.applyGhReadCadence(read, fresh.deps), transport.GhPaceWouldBlockError); }
-    finally { rmSync(fresh.root, { recursive: true, force: true }); }
+    try {
+      transport.takeGhPaceLoopWaits();
+      transport.applyGhReadCadence(read, fresh.deps);
+      assert.deepEqual(fresh.waits, [100]);
+      assert.deepEqual(transport.takeGhPaceLoopWaits().map((row) => row.wait_ms), [100], "the read is still on the loop after the await");
+    } finally { rmSync(fresh.root, { recursive: true, force: true }); }
   }, {});
   try {
     await entered;
+    transport.takeGhPaceLoopWaits();
     transport.applyGhReadCadence(read, c.deps);
     assert.deepEqual(c.waits, [100], "an independent caller must not inherit another asynchronous context");
+    assert.deepEqual(transport.takeGhPaceLoopWaits(), [], "a wait off the loop writes no row");
   } finally { leave(); await loop; rmSync(c.root, { recursive: true, force: true }); }
   let ticks = 0;
   const timer = setInterval(() => { ticks += 1; }, 1);
@@ -281,10 +292,11 @@ test("a loop sync read cannot use a pending async sibling to bypass its required
       const pending = transport.applyGhReadCadenceAsync(read, { ...c.deps, sleep: async () => { entered(); await gate; } });
       try {
         await sleeping;
-        const before = transport.readGhReadCadenceStampMs(c.stamp);
-        assert.throws(() => transport.applyGhReadCadence(read, c.deps), transport.GhPaceWouldBlockError);
-        assert.deepEqual(c.waits, []);
-        assert.equal(transport.readGhReadCadenceStampMs(c.stamp), before);
+        // W1-T12123: the read no longer fails behind its own async read, and it still sleeps its whole gap.
+        const before = transport.readGhReadCadenceStampMs(c.stamp)!;
+        assert.equal(transport.applyGhReadCadence(read, c.deps).allow, true);
+        assert.deepEqual(c.waits, [100], "the required gap is slept, not skipped");
+        assert.equal(transport.readGhReadCadenceStampMs(c.stamp), before + 100, "the read is stamped only after its gap");
       } finally { release(); await pending; }
     }, c.env);
   } finally { rmSync(c.root, { recursive: true, force: true }); }
