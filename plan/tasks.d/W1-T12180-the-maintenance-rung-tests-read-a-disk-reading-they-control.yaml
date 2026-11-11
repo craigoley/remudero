@@ -19,12 +19,14 @@
   status: queued
   attempts: 0
   acceptance:
-    - claim: "Both successful fixture tests pass a controlled healthy disk reading to runRepositoryMaintenanceRung and still prove full GC completes, removes gc.log, writes complete state for each store and then holds the next daily window"
-      proof: "unit test: test/each-daemon-reaps-its-own-managed-repos.test.ts"
+    - claim: "The console daemon fixture passes a controlled healthy disk reading to runRepositoryMaintenanceRung and proves full GC completes, removes gc.log, writes complete state for each store and then holds the next daily window"
+      proof: "unit test: a console daemon maintains its own managed repo and daemon checkout with independent state"
+    - claim: "The site daemon fixture passes a controlled healthy disk reading to runRepositoryMaintenanceRung and proves full GC completes, removes gc.log, writes complete state for its store and then holds the next daily window"
+      proof: "unit test: a site daemon maintains its managed store and handles absent repos without a phantom core store"
     - claim: "A new integration test in the same file gives the same runner a low reading on a store with gc.log: it ledgers repository_maintenance.defer with reason 'disk verdict low', saves lastOutcome defer, emits no repository_maintenance.complete row, and leaves gc.log in place"
       proof: "unit test: test/each-daemon-reaps-its-own-managed-repos.test.ts"
     - claim: "The injected reader is an optional trailing parameter whose default is the real readDiskFreeBytes, and the rung still judges the reading with judgeDiskHeadroom"
-      proof: "grep: diskFreeBytes ?? readDiskFreeBytes in src/run-task.ts"
+      proof: "grep: diskFreeBytes [?] readDiskFreeBytes in src/run-task.ts"
     - claim: "The production-default rung test and the controller's low-disk decision still pass, with no injected reader in the production-default test"
       proof: "unit test: test/repository-maintenance-controller.test.ts"
   rationale: |
