@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 1
   status: queued
@@ -25,3 +25,13 @@
     Compare the token streams with assertSameTokens from #test/helpers/compression-pin.js, never assert.deepEqual: its failure diff over two whole token arrays grows quadratically (W1-T11342).
     Preserve every existing behavioral assertion and run the actual callers. Do not invent a new hard comment ceiling or claim success from a title-only proof.
     Preserve existing owners, stops and deployment holds. This maintenance task grants no service restart, release or publication override.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.93
+    reasons:
+      - "The description and declared files (src/lib/task-linter.ts and one new test file) show a comment-only compression with a token-equivalence regression test, which is well-trodden and verifiable."
+      - "Nothing in the description touches secrets, auth, permissions, merge/deploy/infrastructure or review policy, and it deletes no data or history. It also states that it grants no restart, release or publication override."
+      - "The gates state is clean, with a family track record of 42 merged and 0 declined, and the filed evidence shows both declared files exist at the base."
+    judged_at: "2026-11-11T15:41:06.355Z"
+    pin: "137d2a6c405e6240b165f45b1f829dbaa1a92cfc0c779c393a5f48ab74dce3d1"
