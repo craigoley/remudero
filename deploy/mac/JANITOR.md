@@ -98,6 +98,27 @@ checks and creates no config, archive, stamp or checkout changes. Preserve-retir
 remains opt-in. Report rows use the `low-space-report` reason code; new successful
 cache and scratch removals use `removed`.
 
+## Refreshing the installed copies
+
+A merge changes the source only. The scheduled jobs run installed copies, and
+nothing refreshes those copies automatically. Until the owner of the account
+installs again, each job runs the old rules.
+
+The agent account has two installed copies of `tmp-reclaim.sh`. On 2026-11-11
+both were the same file, dated 2026-11-07, and both were older than main.
+
+| Installed copy | Job that runs it | Command that refreshes it |
+|---|---|---|
+| `~/Library/Application Support/remudero/tmp-reclaim.sh` | The temp cleaner, each hour at minute 17 | `REMUDERO_JANITOR_INSTALL_DIR="$HOME/Library/Application Support/remudero" bash deploy/mac/install-janitor.sh` |
+| `/Users/Shared/remudero-mac/tmp-reclaim.sh` | The shared janitor, at minutes 0 and 30, in cache-only mode | `bash deploy/mac/install-janitor.sh --shared` |
+
+Run each command from a checkout of main, as the account that owns the copy.
+Neither command changes a schedule. `bash deploy/mac/install-tmp-reclaim.sh` also
+refreshes the first copy, and it writes the cron line of minute 17 again.
+
+After the refresh, read the next pass in `~/Library/Logs/remudero/tmp-reclaim.log`
+to confirm that the installed copy applies the new rule.
+
 ## Preventing new validation growth
 
 The `scripts/preflight-author.mjs` CLI checks Mac workspace and TMPDIR capacity
@@ -177,7 +198,8 @@ directories. Both the regular temporary cleaner and this delegated mode
 discover nested numeric `tsx-<uid>` caches. Only recognized generated cache
 files are eligible in discovered caches; Git-owned, retained, seed or
 unrecognized contents stay protected. Each file needs six hours of both mtime
-and ctime inactivity, with fresh process/CWD/open-file checks before removal.
+and ctime inactivity. The pass reads the processes, the working directories and
+the open files again just before it removes anything.
 Cache roots and sibling fixtures/source/state stay in place. Delegated cache
 counts are logged separately from workspace-removal counts.
 
@@ -194,9 +216,34 @@ root elsewhere has no invented `/tmp/<basename>` alias, regardless of the main
 scan root. Unknown process or descriptor scans still retain the cache.
 Owned numeric `<pid>.pipe` Unix sockets are recognized as TSX IPC endpoints and
 retained, not deleted or treated as cache files. Their mere presence does not
-hide otherwise eligible old regular cache entries. The existing whole-cache
-live/open checks still hold a cache with a live endpoint. Foreign, linked,
+hide otherwise eligible old regular cache entries. Foreign, linked,
 non-socket `.pipe` entries and all other unknown data retain the whole cache.
+
+The pass decides for each file of a TSX cache (W1-T12252). A file that a process
+holds open stays. Every other file that has not changed for six hours is removed.
+One open file no longer holds the cache: a host that runs tsx all day always has
+one, and on 2026-11-11 that let the cache of the agent account reach 7.4 GB.
+tsx reads a missing cache file as a cache miss and compiles the file again.
+
+These conditions still hold the whole cache for the pass:
+
+- The process list cannot be read.
+- The `lsof` result cannot be read, or `lsof` is missing.
+- A process has its working directory inside the cache.
+- A process command names the cache.
+- `lsof` names an open path that is not under the cache.
+- The first read reports use, and the read of the names finds no open file to explain it.
+- The cache holds a symlink or any entry that is not a cache file or an owned `<pid>.pipe` socket.
+
+A file stays, and the cache is not held, when its name has a line break. While any
+file is open, a file also stays when its name has a backslash or a byte outside
+printable ASCII, because `lsof` escapes such a name and it cannot be compared.
+
+Each cache gets one line. An applied pass prints
+`pruned tsx cache files=<n> bytes=<b> kept-open=<k> (older than 360 min): <cache>`.
+A dry run prints `would prune tsx cache files=<n> bytes=<b> kept-open=<k> ...` and
+removes nothing. When every old file is held open, the line is
+`kept tsx cache files held open=<k> ...`. The bytes are measured before the delete.
 
 Codex runs also leave per-run copies of downloads deep inside evidence folders that
 stay active for weeks. The janitor removes each Playwright browser install (a
