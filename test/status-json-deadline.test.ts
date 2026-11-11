@@ -48,15 +48,16 @@ async function hungGithubStatus(
     });
     assert.equal(rc, 0);
     assert.equal(lines.length, 1);
-    return { elapsedMs: Date.now() - started, json: JSON.parse(lines[0]) };
+    const elapsedMs = Date.now() - started;
+    assertWallClockBound(elapsedMs, 1_500, `status JSON read held for ${elapsedMs}ms`);
+    return { elapsedMs, json: JSON.parse(lines[0]) };
   } finally {
     process.env.PATH = oldPath;
   }
 }
 
 test("W1-T4208: status json returns within its deadline when a read hangs", async () => {
-  const result = await hungGithubStatus();
-  assertWallClockBound(result.elapsedMs, 1_500, `hung gh held status for ${result.elapsedMs}ms`);
+  await hungGithubStatus();
 });
 
 test("W1-T4208: an unfinished read is reported as unavailable, not empty", async () => {
