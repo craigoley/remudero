@@ -68,13 +68,22 @@ was therefore neither reproduced nor refuted.
 
 ## Outcome classification: NOT_RUN, time-bound or source failure
 
-- Control, nested `[]` x2: none of the three. Both completed in 61 s and 72 s inside the 120 s timeout, exit 0.
-  (Neither timed out, so they are not time-bound; neither failed, so they are not source failures.)
-- Control, nested `--bogus`: none of the three; it exited 1 as the test asserts.
-- Control, suite file: passed, exit 0, 7 of 7. Not NOT_RUN, not time-bound, not a source failure. Slot wait and hold
-  were NOT_RUN observations (`slot_unavailable`), which does not invalidate the timings.
-- Candidate (both nested argv and the suite file): NOT_RUN. Reason verbatim: `Cannot find module '@swc/core'`
-  (no node_modules in the scratch worktree).
+Mapping rule: every row gets exactly one of the three classes, chosen by the first test that matches. (1) NOT_RUN if
+the run never reached the code under test. (2) Otherwise time-bound if a timer or the cap stopped it. (3) Otherwise
+the run finished inside its bound, so it is a source-failure-class row, and the exit code and assertions decide the
+verdict. A completed run whose exit code and assertions held is classed source failure with verdict "none observed".
+That label means the source-failure test was applied and found clear. It does not mean a failure happened. No row is
+left without a class, and none is inferred to have passed: each verdict below rests on an observed exit code.
+
+| row | class | verdict and evidence |
+|-----|-------|------|
+| Control, nested `[]` (first) | source failure (none observed) | Reached the code, finished in 60.79 s inside the 120 s timeout, exit 0. Not NOT_RUN, not time-bound. |
+| Control, nested `[]` (second) | source failure (none observed) | Reached the code, finished in 72.41 s inside the 120 s timeout, exit 0. Not NOT_RUN, not time-bound. |
+| Control, nested `--bogus` | source failure (none observed) | Reached the code, finished in 0.045 s, exit 1, which is the usage error the test asserts. Nothing failed. |
+| Control, suite file | source failure (none observed) | Reached the code, finished in 344.5 s with no timer firing, exit 0, `# pass 7`, `# fail 0`. Control has no assertion failure, so there is nothing to call inherited. |
+| Control, test-slot wait and hold | NOT_RUN | Reason verbatim: `/tmp/rmd-test-slots: ENOENT: no such file or directory, mkdir '/tmp/rmd-test-slots'` (`slot_unavailable`). This covers only the slot figures; the suite row above still ran, unslotted. |
+| Candidate, nested `[]` x2 and `--bogus` | NOT_RUN | Reason verbatim: `Error: Cannot find module '@swc/core'` (no node_modules in the scratch worktree). |
+| Candidate, suite file | NOT_RUN | Same reason: `Cannot find module '@swc/core'`. |
 
 ## Reading against the falsifier
 
