@@ -14,7 +14,7 @@
     - src/lib/daemon.ts
     - test/the-pre-exit-pass-runs-beside-the-restart-drain.test.ts
   status: queued
-  priority: 2.5  # every lane is idle for the pass's length on each latched exit that takes the awaited or ran arm; full pass p50 18.7 min, p90 49.7 (F5, 10-16)
+  priority: 1  # raised 2026-11-11 on the 7-day restart study (36 exits to 2026-11-11): the pre-exit pass is the larger phase in 17 of 20 slow exits; decision to exit is 18 min median; was 2.5
   attempts: 0
   rationale: |
     EVIDENCE: B17 measured episode 2 on 2026-10-15 (core ledger): latch to drain 3.6 min at 20:08, spent in the
