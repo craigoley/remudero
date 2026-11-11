@@ -39,7 +39,23 @@
     Settled by lookup: where does the run-task crash integration test live? -> test/triage/triage-relint-verdictless-repair.test.ts.
     That file already reaches src/run-task.ts through #test/helpers/run-task-test.js and is not itself a counted importer.
     scripts/affected-reach-baseline.json holds importerCount 1010 and may only shrink, so a new direct
-    importer would make it 1011 (scripts/affected-reach-baseline.json, W1-T10820)."
+    importer would make it 1011 (scripts/affected-reach-baseline.json, W1-T10820).
+
+    SECOND BOUNDED CLARIFICATION (PLAN-clarify-1794376441291). This corrects the first scope correction's test design.
+    It keeps the same eight declared files. It adds one acceptance item (acceptance-4, the async recovery transport)
+    and leaves acceptance 1-3 as written. The #17393 needs-human disposition, claim/lock semantics, same-PR
+    behavior, failure handling and every security, review, CI and author gate stay unchanged. It does not authorize
+    a class-wide open-PR guard fix, a merge or a deployment.
+    Settled by lookup: is this already filed or decided? -> no; the only filing is this task's first scope correction
+    above, which placed acceptance-1 but left the recovery transport and the handoff file's content unbounded.
+    Settled by lookup: does async gh transport exist for the recovery reads? -> yes. ghJsonAsync and ghTextAsync are
+    exported from src/lib/github-transport.ts. Synchronous ghExec is an execFileSync wrapper, and run-task.ts still
+    reads `gh pr diff` through it.
+    Settled by lookup: can a non-blocking assertion be behavioural rather than source-text? -> yes. ghShim routes
+    accept delaySeconds (test/helpers/gh-shim.ts), so a delayed shim lookup can show that another scheduled callback
+    runs while recovery is pending.
+    Settled by lookup: do the existing title-form proofs parse? -> yes. `unit test: <name>` is one of the two
+    whitelisted forms (DIALECT_TEST_RE, src/lib/review.ts)."
   # Rule 19 merits: one interruption/restart integration test requires both the run-task lock lifecycle and auto-triage PR handoff to preserve a single recovery transaction; neither subsystem can satisfy it alone.
   design: |
     1. WRITE-AHEAD HANDOFF. Persist a handoff record (run id, branch, feedback id) BEFORE the remote PR operation,
@@ -64,8 +80,22 @@
        ("post-create crash recovery retains the triage claim") in test/triage/triage-relint-verdictless-repair.test.ts,
        which reaches src/run-task.ts through the existing #test/helpers/run-task-test.js. Add no new direct importer of
        src/run-task.ts, so the affected-reach importerCount stays at or below 1010. Do not edit
-       scripts/affected-reach-baseline.json. The acceptance-2 and acceptance-3 tests stay in
-       test/triage/triage-post-pr-handoff-crash-safe.test.ts, and that file must not import src/run-task.ts.
+       scripts/affected-reach-baseline.json.
+    7. TEST PLACEMENT (second clarification, replaces the last sentence of step 6). Put both of these in
+       test/triage/triage-relint-verdictless-repair.test.ts, driven through the existing triageCommand helper:
+       the acceptance-1 test "post-create crash recovery retains the triage claim", and the acceptance-4 test
+       "post-create recovery reads GitHub without blocking the event loop". Acceptance-4 is a behaviour test. Delay
+       the ghShim PR-lookup route with delaySeconds, then show that a timer scheduled before recovery fires while that
+       lookup is still pending, and that recovery then finishes with the same single PR. It must not read source text.
+       test/triage/triage-post-pr-handoff-crash-safe.test.ts holds ONLY module-level handoff tests for
+       src/lib/auto-triage.ts and the daemon `triage.pr_created` ledger-fallback tests for src/lib/daemon.ts
+       (acceptance-2 and acceptance-3). It must not import src/run-task.ts or #test/helpers/run-task-test.js, and it
+       must not read any source file's text (no readFileSync of src/) to assert behaviour.
+    8. ASYNC RECOVERY TRANSPORT. In the production recovery path, the PR lookup by branch must await ghJsonAsync and
+       every PR diff read must await ghTextAsync (both from src/lib/github-transport.ts), not synchronous ghExec, so
+       recovery never blocks the daemon loop. Preserve the current failure handling: a lookup or diff failure takes the
+       same branch it takes today. Also keep claim/lock semantics (steps 2-3) and same-PR behavior (never open a
+       second PR). Do not convert ghExec call sites outside this recovery path.
   acceptance:
     - claim: "one process-interruption integration test spanning auto-triage and the run-task triage entry point proves that, after remote PR creation and holder death, two concurrent restarts yield exactly one local-lock recovery, record pr.opened and run.awaiting_external idempotently, open no second PR, and retain the remote claim while CI is pending"
       proof: "unit test: post-create crash recovery retains the triage claim"
@@ -73,6 +103,8 @@
       proof: "unit test: post-create ledger candidates reach the daemon live-state check"
     - claim: "the production triage path writes triage.pr_created before checkPrOwnership can refuse the PR"
       proof: "unit test: triage PR creation is ledgered before ownership verification"
+    - claim: "post-create recovery awaits ghJsonAsync for the PR lookup and ghTextAsync for diff reads, so a timer scheduled before recovery fires while a delayed gh lookup is pending, and recovery still resolves to the same single PR"
+      proof: "unit test: post-create recovery reads GitHub without blocking the event loop"
   risk: high
   origin: feedback#fb-1789365327024-d9c74b
   plan_refs: ["§7B", "W1-T147"]
