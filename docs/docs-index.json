@@ -332,6 +332,12 @@
       "grepHint": "Forensics: src/lib/containment.ts"
     },
     {
+      "path": "docs/forensics/coverage-merge-ratchet.md",
+      "title": "Forensics: scripts/coverage-merge-ratchet.mjs hand fixes",
+      "summary": "Scope: PRs #12820, #12796, #11834, #11602 and #9855, read as they touch",
+      "grepHint": "Forensics: scripts/coverage-merge-ratchet.mjs hand fixes"
+    },
+    {
       "path": "docs/forensics/coverage-session-blanking-check.md",
       "title": "coverage-session-blanking-check.mjs comment forensics",
       "summary": "The measured incidents, design arguments and rejected alternatives that were removed from",
