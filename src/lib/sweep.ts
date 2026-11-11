@@ -25507,13 +25507,14 @@ async function runSweepLightPassCore(
   // Without enough measured cadence, selection already admits at most the first never-held PR
   // while preserving every previously held PR and their oldest-held-first order (W1-T9212).
   const planMerges = availablePlanMerges;
-  const planMergeBudget = { spentMs: 0, durationKnown: true };
+  // W1-T12266: the budget counts merge attempts. A plan PR whose turn ends with no attempt spends nothing.
+  const planMergeBudget = { spentMs: 0, durationKnown: true, attempts: 0 };
   const unavailablePlanMergeReason = "one never-held plan PR direct-merges per light pass " +
     "(the one plan PR direct-merges per light pass bound remains; measured interval unavailable: " +
     "fewer than three valid same-scope intervals); held PRs keep their W1-T9212 re-evaluation";
   const planMergeStopReason = (index: number | undefined, held: boolean): string | undefined => {
     if (passIntervalBudgetMs === undefined) return index === 0 || held ? undefined : unavailablePlanMergeReason;
-    if (index === 0) return undefined;
+    if (index !== undefined && planMergeBudget.attempts === 0) return undefined;
     if (!planMergeBudget.durationKnown) {
       return `measured interval budget ${passIntervalBudgetMs}ms; prior plan-merge duration unavailable or invalid, stopped before another attempt`;
     }
@@ -25643,19 +25644,22 @@ async function runSweepLightPassCore(
                         needsPersonNote(pr, selectionLedgerLines))
                   : baseStandDownReasonFor?.(d),
             };
-      let planMergeDurationRecorded = false;
       const planMergeTurn = planMergeSequence.get(pr.prNumber);
       if (planMergeTurn !== undefined) {
         // W1-T5901: the plan-merge owner preserves one-at-a-time merge-queue/safety behavior; a measured
         // interval only admits another attempt after the prior attempt's real arm duration is known.
         const laneActionable = scopedDeps.actionable;
         const isHeldPlanPr = heldPlanPrFromLedger(selectionLedgerLines, pr) !== undefined;
+        // Decided once, at this PR's turn: its own attempt must not change the answer it already acted on.
+        let turnDecision: { stop: string | undefined } | undefined;
+        const turnStopReason = (): string | undefined =>
+          (turnDecision ??= { stop: planMergeStopReason(planMergeTurn.index, isHeldPlanPr) }).stop;
         scopedDeps.actionable = (d) => d === "mergeable"
-          ? planMergeStopReason(planMergeTurn.index, isHeldPlanPr) === undefined
+          ? turnStopReason() === undefined
           : (laneActionable ? laneActionable(d) : true);
         const laneReason = scopedDeps.standDownReasonFor;
         scopedDeps.standDownReasonFor = (d) => d === "mergeable"
-          ? planMergeStopReason(planMergeTurn.index, isHeldPlanPr) ?? laneReason?.(d) : laneReason?.(d);
+          ? turnStopReason() ?? laneReason?.(d) : laneReason?.(d);
 
         const arm = scopedDeps.arm;
         const append = scopedDeps.appendLine ?? appendLedger;
@@ -25673,11 +25677,9 @@ async function runSweepLightPassCore(
             const elapsed = performance.now() - mergeStartedAtMs;
             const elapsedMs = Number.isFinite(elapsed) && elapsed >= 0 ? elapsed : undefined;
             attempt = { outcome, ...(elapsedMs === undefined ? {} : { elapsedMs }) };
+            planMergeBudget.attempts++;
             if (elapsedMs === undefined) planMergeBudget.durationKnown = false;
-            else {
-              planMergeDurationRecorded = true;
-              planMergeBudget.spentMs += elapsedMs;
-            }
+            else planMergeBudget.spentMs += elapsedMs;
           }
         };
         scopedDeps.appendLine = (path, line) => {
@@ -25729,7 +25731,6 @@ async function runSweepLightPassCore(
         }
         return summary;
       }).finally(() => {
-        if (planMergeTurn?.index === 0 && !planMergeDurationRecorded) planMergeBudget.durationKnown = false;
         planMergeTurn?.finish();
         if (pr.prNumber === lastPlanMergeNumber) releasePlanMerge();
         if (!detachedNumbers.has(pr.prNumber)) releases.get(pr.prNumber)?.();
