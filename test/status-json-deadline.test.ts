@@ -1,15 +1,22 @@
 import assert from "node:assert/strict";
-import { chmodSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { test } from "node:test";
-import { statusCommand } from "../src/lib/report-commands.js";
+import { statusCommand, type StatusDeps } from "../src/lib/report-commands.js";
+import { boardSnapshotPath, createBoardSnapshotCache } from "#src/lib/board-snapshot-cache.js";
+import { fixedClock } from "#src/lib/clock.js";
+import type { BoardPrRest } from "#src/lib/open-prs-rest.js";
 import type { Config } from "../src/lib/config.js";
 import { ghShim } from "./helpers/gh-shim.js";
 import { assertWallClockBound } from "./helpers/wall-clock-bound.js";
 
-async function hungGithubStatus(): Promise<{ elapsedMs: number; json: Record<string, any> }> {
+async function hungGithubStatus(
+  seed?: (root: string) => void,
+  extra: Partial<StatusDeps> = {},
+): Promise<{ elapsedMs: number; json: Record<string, any> }> {
   const root = mkdtempSync(join(tmpdir(), "rmd-status-json-deadline-"));
+  seed?.(root);
   const shim = ghShim([{ when: "", delaySeconds: 5 }], { kind: "status-json-deadline" });
   const repo = join(root, "repo");
   mkdirSync(join(repo, "plan"), { recursive: true });
@@ -37,6 +44,7 @@ async function hungGithubStatus(): Promise<{ elapsedMs: number; json: Record<str
       resolveOwnerRepo: () => ({ owner: "example", repo: "repo" }),
       jsonDeadlineMs: 400,
       out: (line) => lines.push(line),
+      ...extra,
     });
     assert.equal(rc, 0);
     assert.equal(lines.length, 1);
@@ -175,6 +183,130 @@ test("status JSON decodes a successful dispatch-claim read without losing its ho
     assert.ok(json.latches.rows.some((row: { name: string; consequence: string }) =>
       row.name === "dispatch-claim:W1-T99" && row.consequence.includes("bbbbbbbb")));
     assert.deepEqual(json.externalReads, {});
+  } finally {
+    process.env.PATH = oldPath;
+  }
+});
+
+function closedRow(number: number): BoardPrRest {
+  return {
+    number,
+    url: `https://github.com/example/repo/pull/${number}`,
+    state: "MERGED",
+    headRefName: `run-W1-T${number}-1700000000000`,
+    headRefOid: `sha-${number}`,
+    body: `Remudero-Task: W1-T${number}`,
+    autoMergeRequest: null,
+    title: `merged ${number}`,
+    updatedAt: "2026-09-05T00:00:00Z",
+  };
+}
+
+/** Run the real JSON status with an injected gateway builder; return the cache it was handed. */
+async function snapshotCacheHandedToGateway(seed: (root: string) => void) {
+  const root = mkdtempSync(join(tmpdir(), "rmd-status-json-snapshot-"));
+  seed(root);
+  const repo = join(root, "repo");
+  mkdirSync(join(repo, "plan"), { recursive: true });
+  writeFileSync(join(repo, "plan", "tasks.yaml"), "[]\n");
+  let handed: unknown = "builder never called";
+  const lines: string[] = [];
+  await statusCommand(["--json"], {
+    loadConfig: () => ({ root } as Config),
+    queryService: () => ({ running: false, pid: null }),
+    ledgerPathFor: () => join(root, "absent.ndjson"),
+    readLedgerLines: () => [],
+    repoRoot: repo,
+    resolveOwnerRepo: () => ({ owner: "example", repo: "repo" }),
+    jsonDeadlineMs: 400,
+    buildBatchedGithub: ((_owner: string, _repo: string, opts?: { snapshotCache?: unknown }) => {
+      handed = opts?.snapshotCache;
+      throw new Error("stop after capturing the gateway options");
+    }) as unknown as StatusDeps["buildBatchedGithub"],
+    out: (line) => lines.push(line),
+  });
+  return handed as ReturnType<typeof createBoardSnapshotCache> | undefined;
+}
+
+test("W1-T11280: status JSON reuses a fresh persisted GitHub snapshot", async () => {
+  const cache = await snapshotCacheHandedToGateway((root) => {
+    assert.equal(createBoardSnapshotCache(root, "example", "repo").commitClosed([closedRow(7)]), true);
+  });
+  assert.ok(cache && typeof cache === "object", "the JSON gateway must be handed the persisted snapshot cache");
+  assert.deepEqual([...(cache.closedSeed()?.keys() ?? [])], [7]);
+});
+
+const unusableSnapshots: Array<[string, (root: string) => void]> = [
+  ["missing", () => {}],
+  ["truncated", (root) => {
+    createBoardSnapshotCache(root, "example", "repo").commitClosed([closedRow(7), closedRow(8)]);
+    const path = boardSnapshotPath(root, "example", "repo");
+    writeFileSync(path, readFileSync(path, "utf8").slice(0, -20));
+  }],
+  ["unreadable", (root) => mkdirSync(boardSnapshotPath(root, "example", "repo"), { recursive: true })],
+];
+
+for (const [name, seed] of unusableSnapshots) {
+  test(`W1-T11280: the ${name} snapshot is never read as rows and the status read stays unavailable`, async () => {
+    const cache = await snapshotCacheHandedToGateway(seed);
+    assert.ok(cache && typeof cache === "object", "the JSON gateway must be handed the persisted snapshot cache");
+    assert.equal(cache.closedSeed(), undefined);
+    const { json, elapsedMs } = await hungGithubStatus(seed);
+    assertWallClockBound(elapsedMs, 1_500, `${name} snapshot held status for ${elapsedMs}ms`);
+    assert.equal(json.queueHead.status, "unavailable");
+    assert.equal(json.queueHead.rows, null);
+    assert.equal(json.inbox.status, "unavailable");
+    assert.equal(json.inbox.readyCount, null);
+  });
+}
+
+test("W1-T11280: a stale snapshot does not fill an unfinished read and the status read stays unavailable", async () => {
+  const stale = (root: string): void => {
+    const clock = fixedClock(Date.parse("2020-01-01T00:00:00Z"));
+    createBoardSnapshotCache(root, "example", "repo", { clock }).commitClosed([closedRow(7)]);
+  };
+  const { json, elapsedMs } = await hungGithubStatus(stale);
+  assertWallClockBound(elapsedMs, 1_500, `stale snapshot held status for ${elapsedMs}ms`);
+  assert.equal(json.queueHead.status, "unavailable");
+  assert.equal(json.queueHead.rows, null);
+  assert.equal(json.inbox.status, "unavailable");
+  assert.equal(json.inbox.readyCount, null);
+});
+
+test("W1-T11280: a remote-ref failure beside a fresh snapshot stays unavailable", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-status-json-snapshot-ref-"));
+  createBoardSnapshotCache(root, "example", "repo").commitClosed([closedRow(7)]);
+  const bin = join(root, "bin");
+  const repo = join(root, "repo");
+  mkdirSync(bin);
+  mkdirSync(join(repo, ".git"), { recursive: true });
+  mkdirSync(join(repo, "plan"));
+  writeFileSync(join(repo, "plan", "tasks.yaml"), "[]\n");
+  writeFileSync(join(bin, "git"), "#!/bin/sh\nexit 1\n");
+  chmodSync(join(bin, "git"), 0o755);
+  const shim = ghShim([{ when: "", delaySeconds: 5 }], { kind: "status-json-snapshot-ref" });
+  const oldPath = process.env.PATH;
+  process.env.PATH = `${bin}:${shim.dir}:${oldPath ?? ""}`;
+  const lines: string[] = [];
+  const started = Date.now();
+  try {
+    const rc = await statusCommand(["--json"], {
+      loadConfig: () => ({ root } as Config),
+      queryService: () => ({ running: false, pid: null }),
+      ledgerPathFor: () => join(root, "absent.ndjson"),
+      readLedgerLines: () => [],
+      repoRoot: repo,
+      resolveOwnerRepo: () => ({ owner: "example", repo: "repo" }),
+      jsonDeadlineMs: 400,
+      out: (line) => lines.push(line),
+    });
+    assert.equal(rc, 0);
+    assertWallClockBound(Date.now() - started, 1_500, "a failed remote-ref read must not hold status");
+    const json = JSON.parse(lines[0]);
+    assert.equal(json.queueHead.status, "unavailable");
+    assert.equal(json.queueHead.rows, null);
+    assert.equal(json.externalReads.runBranches.status, "unavailable");
+    assert.ok(dirname(boardSnapshotPath(root, "example", "repo")).startsWith(root));
   } finally {
     process.env.PATH = oldPath;
   }
