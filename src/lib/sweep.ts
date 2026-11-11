@@ -1,4 +1,5 @@
 import { hasNonBotAuthor, namePathLanding, type DependencyMainIdentity } from "./dependency-main-identity.js";
+import { RmdError } from "./errors.js";
 import { decideLoopOutcome } from "./loop-decision.js";
 import { CI_REFRESH_GUARD_VERSION } from "./ci-refresh-prevention.js";
 import { createSelectedModeQualification, observeSelectedMode, readInstanceRegistryText } from "./instance-mode.js";
@@ -10702,9 +10703,9 @@ export function sessionBranchUnheld(evidence: SessionOwnershipEvidence): Session
 }
 
 /** W1-T11170: a worker round's session-branch push the sweep refused to make; nothing was pushed. */
-export class SessionPushRefusedError extends Error {
+export class SessionPushRefusedError extends RmdError {
   constructor(readonly detail: string) {
-    super(`session branch push refused: ${detail}`);
+    super("git", 1, `session branch push refused: ${detail}`, { detail });
     this.name = "SessionPushRefusedError";
   }
 }

@@ -677,7 +677,7 @@ test("W1-T11170 criterion 5: a worker round on a session branch lands as a merge
   let rechecks = 0;
   const exec = async (file: string, args: string[]) => { calls.push([file, ...args]); execFileSync(file, args, { stdio: "pipe" }); };
   const landed = await withLiveWritesAllowed(() => sweep.pushSessionMergeRound(r.repo.dir, r.branch, { headSha: r.headSha },
-    { exec, recheck: () => { rechecks++; return undefined; } }, merge));
+    { exec, recheck: async () => { rechecks++; return undefined; } }, merge));
   assert.deepEqual(landed, { fixRoundPushedHead: merge });
   assert.deepEqual(calls, [["git", "-C", r.repo.dir, "push", "origin", `HEAD:refs/heads/${r.branch}`]]);
   assert.ok(calls.flat().every((arg) => !arg.startsWith("--force") && arg !== "-f" && !arg.startsWith("+")), "no force or lease flag of any kind");
@@ -691,7 +691,7 @@ test("W1-T11170 criterion 5: a worker round that is not a merge on the PR head, 
   let rechecks = 0;
   const push = (x: ReturnType<typeof dirtyPair>, recheck: () => string | undefined | Promise<string | undefined>, sha?: string) =>
     withLiveWritesAllowed(() => sweep.pushSessionMergeRound(x.repo.dir, x.branch, { headSha: x.headSha },
-      { exec, recheck: () => { rechecks++; return recheck(); } }, sha));
+      { exec, recheck: async () => { rechecks++; return recheck(); } }, sha));
   const untouched = (x: ReturnType<typeof dirtyPair>, expected = x.headSha) => {
     assert.equal(x.remoteHead(), expected, "the remote branch is as the owner left it");
     assert.deepEqual(calls, [], "no push was attempted");
@@ -741,7 +741,7 @@ test("W1-T11170 criterion 5: a worker round that is not a merge on the PR head, 
   await refusedWith(push(f, () => "held: a push landed"), /ownership re-read before the push: held/);
   await refusedWith(push(f, () => { throw new Error("lock directory unreadable"); }), /the ownership re-read failed: .*lock directory unreadable/);
   assert.equal(rechecks, 2);
-  assert.deepEqual(calls, []);
+  assert.equal(calls.length, 0, "no push was attempted");
   assert.equal(f.remoteHead(), f.headSha);
 
   // The owner pushes after the re-read: the plain push is refused by git itself and never forced over.
