@@ -8,7 +8,7 @@ import { runDaemon, type DaemonDeps, type DaemonFreshness } from "#src/lib/daemo
 import { loadPlan } from "#src/lib/plan.js";
 import { detachSweepAction, inFlightReviewCount, restartInterruptibleDetachedActionCount, trackInFlightReview } from "#src/lib/sweep.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
-import type { RunResult } from "#src/run-task.js";
+import type { RunResult } from "#src/lib/run-result.js";
 
 /**
  * W1-T10054 — every one of 1,488 freshness decisions of 2026-10-12..17 read busy true, so W1-T4945's idle arm never fired
