@@ -71,7 +71,8 @@ test("W1-T12237 criterion 1: a restart with no sweep running starts no sweep and
   const h = await idleExit(t);
   assert.equal(h.summary.stopReason, "stale");
   assert.equal(h.calls(), 1, "only the first tick's pass ran; the exit started none");
-  assert.deepEqual(restartRow(h.rows), { old_sha: stale.oldSha, new_sha: stale.newSha, pre_exit_pass: "no_sweep_at_exit" });
+  assert.deepEqual(restartRow(h.rows), { old_sha: stale.oldSha, new_sha: stale.newSha, pre_exit_pass: "no_sweep_at_exit",
+    stale_since_ms: NOW, last_pass_completed_ms: NOW });
   const exit = h.rows.find(({ step }) => step === "daemon.freshness_exit")?.extra;
   assert.equal((exit?.phases_ms as Record<string, unknown>).pre_exit_pass, undefined, "no pass was timed at exit");
 });
@@ -90,7 +91,7 @@ test("W1-T12237 criterion 2: the stale reviewer exit and a requested restart sta
   const request = await idleExit(t, {
     checkFreshness: () => ({ stale: false }),
     consumeRestartRequest: () => {
-      if (requested) return undefined;
+      if (requested) return null;
       requested = true;
       return { origin: "console", requestedAt: new Date(NOW + 1).toISOString() };
     },
@@ -105,7 +106,7 @@ async function latched(t: TestContext) {
   const path = join(root, "tasks.yaml");
   writeFileSync(path, "- id: A\n  title: A\n  repo: remudero\n  type: implement\n  depends_on: []\n  status: queued\n  files: [src/A.ts]\n");
   const lane = deferred<RunResult>();
-  const sleeps: Array<ReturnType<typeof deferred>> = [];
+  const sleeps: Array<ReturnType<typeof deferred<void>>> = [];
   const rows: Row[] = [];
   const arms: number[] = [];
   const epoch = Date.now();
@@ -272,7 +273,7 @@ test("W1-T12237 criterion 7: a sweep that ended early writes one row and the res
     [{ reason: "restart_decided", stage: "walk", prs_not_visited: 1 }]);
   assert.equal(h.rows.find(({ step }) => step === "daemon.sweep.settled")?.extra?.ended_early, true);
   assert.deepEqual(restartRow(h.rows), { old_sha: stale.oldSha, new_sha: stale.newSha, pre_exit_pass: "awaited_in_flight",
-    sweep_ended_early: true });
+    stale_since_ms: NOW, last_pass_completed_ms: null, sweep_ended_early: true });
 });
 
 test("W1-T12237 criterion 6: the first tick of the next lifetime starts a whole sweep", async (t) => {
