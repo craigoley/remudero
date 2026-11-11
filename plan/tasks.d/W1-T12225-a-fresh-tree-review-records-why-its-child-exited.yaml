@@ -19,6 +19,7 @@
     - src/run-task.ts
     - src/cli/commands/review.ts
     - test/review/a-fresh-tree-review-records-why-its-child-exited.test.ts
+    - test/worker/a-review-child-start-is-attributed-and-starts-from-a-bundle.test.ts
   status: queued
   attempts: 0
   acceptance:
@@ -47,11 +48,15 @@
     - The child already reports its entry to the parent on file descriptor 3 (W1-T11152). The exit has no such report.
     W1-T12226 uses the new field to find the cause of each failure class and to fix it. W1-T12227 sends more reviews through this path, so the cause must be readable first.
   design: |
-    In the review command, give each `return 1` and each `return 2` a short name, for example `closed-before-review`, `verdict-not-posted` and `verdict-not-success`. Keep the names in one exported list.
-    Before the command returns, write one line with the name to file descriptor 3, if that descriptor is open. The child process inherits the descriptor from `bin/rmd`.
-    In `spawnRmdReviewForFreshTree`, read the exit line beside the entry line that it reads today. Raise the limit of 1,024 characters on that pipe only if the two lines need it.
+    In the review command, give each `return 1` and each `return 2` a short name, for example `closed-before-review`, `verdict-not-posted` and `verdict-failure`. Keep the names in one exported list.
+    The exit report uses a result file, not file descriptor 3. MEASURED 2026-11-10 on macOS with Node 24.22.2 and tsx 4.23.15: a child that `bin/rmd` starts through `tsx` does not get descriptor 3 of the launcher, and a write to descriptor 3 from that child failed with ENXIO. In that child, descriptor 3 belongs to Node. The launcher is a shell, so its entry line (W1-T11152) is not affected.
+    `spawnRmdReviewForFreshTree` makes the result file path in a temporary directory and gives it to the child with the flag `--exit-cause-file`. It reads the file at the `close` event and removes the directory.
+    Before the command returns a code that is not 0, it writes one line with the name to that file. A command that gets no flag writes nothing. A verdict that is not `success` has a name that holds the verdict state.
+    A command that throws writes `threw-in-<step>` and the class name of the error. The steps are a fixed list. The gate writes the class name as `exit_error_class`.
+    The parent accepts a name by its form: lower-case letters, digits and hyphens, at most 48 characters. The child runs newer code than the parent, so it can hold a name that the parent does not know. Any other content gives `not-reported`.
     Pass the name to the gate the way `onEntry` passes the entry. In the gate, add `exit_cause` to the row when the code is not 0.
-    A child that a signal ends gets `signal` and the signal name from the `close` event. A child that reports nothing gets `not-reported`.
+    A child that a signal ends gets `signal` from the `close` event, and the gate writes the signal name as `exit_signal`. A child that reports nothing gets `not-reported`.
+    The flag adds two arguments to the child. test/worker/a-review-child-start-is-attributed-and-starts-from-a-bundle.test.ts reads the whole argument list of the child, so it changes with this task.
     Do not change an exit code, the `failure` text or the fallback to `review.skipped_stale_reviewer_code`.
     NOT IN SCOPE: a fix for any cause (W1-T12226), and the choice of path at admission (W1-T12227).
   falsifier: |

@@ -1,0 +1,73 @@
+- id: W1-T12255
+  title: "The Mac janitor retires a finished worktree at its next pass"
+  repo: remudero
+  depends_on: []
+  priority: 1.0
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # a deletion rule for worktrees that hold hand-built work; a wrong answer removes work that is not on GitHub
+  band_meaning: span
+  origin: operator-session#janitor-disk-waste-2026-11-11
+  plan_refs:
+    - W1-T8863
+    - W1-T11941
+    - W1-T12169
+  files:
+    - deploy/workspace-retirement-guard.sh
+    - deploy/mac/remudero-janitor.sh
+    - test/deploy/the-mac-janitor-retires-a-finished-worktree-at-its-next-pass.test.ts
+    - test/the-mac-janitor-reclaims-regenerable-output-from-held-checkouts.test.ts
+    - test/workspace-retirement-safety.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "The retirement guard answers one question for a commit: is every pull request of this commit merged or closed. A commit with no pull request, a commit with an open pull request and an answer that cannot be read are each not finished"
+      proof: "grep: W1-T12255 criterion 1 in test/deploy/the-mac-janitor-retires-a-finished-worktree-at-its-next-pass.test.ts"
+    - claim: "A pass retires a linked worktree that is clean, whose HEAD commit GitHub holds, and whose pull requests are all merged or closed. It does so although a file in the worktree changed in the last six hours"
+      proof: "grep: W1-T12255 criterion 2 in test/deploy/the-mac-janitor-retires-a-finished-worktree-at-its-next-pass.test.ts"
+    - claim: "Such a worktree stays when it has uncommitted changes, when its HEAD commit is not on GitHub, when it is locked, or when it holds ignored data other than node_modules and coverage"
+      proof: "grep: W1-T12255 criterion 3 in test/deploy/the-mac-janitor-retires-a-finished-worktree-at-its-next-pass.test.ts"
+    - claim: "Such a worktree stays when a process uses it: a process command names it, a working directory is inside it, or a file in it is open. It also stays when the pass cannot read one of these"
+      proof: "grep: W1-T12255 criterion 4 in test/deploy/the-mac-janitor-retires-a-finished-worktree-at-its-next-pass.test.ts"
+    - claim: "A worktree with an open pull request, or with no pull request, keeps the six-hour rule of today"
+      proof: "grep: W1-T12255 criterion 5 in test/deploy/the-mac-janitor-retires-a-finished-worktree-at-its-next-pass.test.ts"
+    - claim: "The pass never removes a path outside its roots: a symlink in a root that points to a finished worktree outside every root leaves that worktree in place"
+      proof: "grep: W1-T12255 criterion 6 in test/deploy/the-mac-janitor-retires-a-finished-worktree-at-its-next-pass.test.ts"
+    - claim: "A dry run names each worktree that would go, with the reason `pull-request-finished`, and removes nothing. An applied pass writes one decision receipt row for each worktree with its path, the reason and the bytes freed"
+      proof: "grep: W1-T12255 criterion 7 in test/deploy/the-mac-janitor-retires-a-finished-worktree-at-its-next-pass.test.ts"
+    - claim: "The Mac janitor calls the new guard function"
+      proof: "grep: rmd_commit_pulls_finished in deploy/mac/remudero-janitor.sh"
+  rationale: |
+    OBSERVED 2026-11-10 and 2026-11-11 on the Mac agent account: `~/rmd-hand` held 34 worktrees at one time. A person removed 22 of them, each one clean and with a merged pull request.
+    - A hand worktree is about 700 MB. The janitor log has `REMOVED-WORKTREE 6h 700M`, `702M` and `703M` for `~/rmd-hand/wt-*`.
+    - 25 branches went through the Mac hand lane on 2026-11-10 (rationale of W1-T12169). 25 worktrees of 700 MB are 17.5 GB, on a volume where the author preflight needs 20 GiB free.
+    - The last 400 janitor decisions for `~/rmd-hand/wt-*` on 2026-11-10: 193 times `SKIP recent-file-activity` (0 to 5 hours), 161 times `SKIP live`, 5 times `SKIP cwd`, 3 times `not-proven-published`, and 4 times `REMOVED-WORKTREE`.
+    - So the janitor does retire a hand worktree, but only after six hours with no file change. A hand lane makes worktrees faster than that.
+    READ at origin/main 3c6e5e476.
+    - deploy/mac/remudero-janitor.sh:1154 compares the age of the newest file with `WORKTREE_AGE_HOURS` (6) and leaves the worktree before it reads anything about publication.
+    - `rmd_commit_on_github` (deploy/workspace-retirement-guard.sh:82) already asks GitHub `repos/<owner>/<repo>/commits/<sha>/pulls` and counts the answers. The same answer holds the state of each pull request and its merge time.
+    - The six hours protect work in progress. A clean worktree whose HEAD commit is in a merged or closed pull request has no work in progress to protect.
+    - The operator's rule for this filing, 2026-11-11: reap a finished worktree when it is clean and merged or closed, and never one with uncommitted or unpushed work.
+    CHECKED for overlap: W1-T11941 (queued) lists worktrees that are clean, a day old and published, from the daemon tick, and deletes nothing. This task changes the janitor that already deletes, on an account where no daemon runs.
+  design: |
+    deploy/workspace-retirement-guard.sh: add `rmd_commit_pulls_finished <repo> <commit>`.
+    - It makes the call that `rmd_commit_on_github` makes, with the same slug checks and the same 20 second limit. It reads `state` and `merged_at` of each pull request.
+    - It returns 0 only when there is one pull request or more and each one is closed. A merged pull request is closed. Any failure returns 1.
+    deploy/mac/remudero-janitor.sh, in the loop over worktrees:
+    - Before the `recent-file-activity` test, ask: is this a linked worktree, is `git status --porcelain` empty, does `rmd_workspace_published "$repo"` pass, and does `rmd_commit_pulls_finished` pass for HEAD.
+    - If all four hold, do not apply the six hours. Go on to every other test of today: owner, seed, live, cwd, open files, lock, ignored data, and the second publication check just before the removal.
+    - Remove through `git worktree remove`, as today. Write the receipt with the reason `pull-request-finished`.
+    - If one of the four does not hold, the code of today runs with no change.
+    A local commit that is not pushed changes HEAD to a commit that GitHub does not hold. `rmd_commit_on_github` then answers no, and the worktree stays.
+    test/the-mac-janitor-reclaims-regenerable-output-from-held-checkouts.test.ts asserts `recent-file-activity` for worktrees. Its fixtures have no pull request, so they keep the result of today. Check it, and change it only if a fixture has a finished pull request.
+    NOT IN SCOPE: standalone clones, bare repositories, the preserve-then-retire phase, the six hours for every other class, and the Azure janitor (W1-T12256).
+  falsifier: |
+    Answer finished for a commit with an open pull request and criterion 1 must fail. Keep the six hours for a finished worktree and criterion 2 must fail. Retire a worktree with an uncommitted change and criterion 3 must fail. Retire one with a working directory inside it and criterion 4 must fail. Follow the symlink and criterion 6 must fail. Restore and require all eight to pass.
+  note: |
+    Host and account: every Mac account that schedules the janitor. On the agent account it runs at minute 0 and minute 30 of each hour.
+    Owner of the paths: the account that runs the pass. Roots: `~/Remudero`, `~/rmd-work`, the temp roots, and the checkouts of Remudero that the walk of the home finds, such as `~/rmd-hand/wt-*`.
+    Never removed: a worktree with uncommitted or unpushed work, a locked worktree, a worktree in use, the operator checkout `~/Remudero/remudero`, and the branch of a removed worktree.
+    This narrows the operator's six-hour retention time of 2026-11-04 for one class. The pull request states that, so the operator can refuse it.
+    The pass makes one GitHub read for each clean, published worktree. It reads through `gh`, as the publication check does today.
