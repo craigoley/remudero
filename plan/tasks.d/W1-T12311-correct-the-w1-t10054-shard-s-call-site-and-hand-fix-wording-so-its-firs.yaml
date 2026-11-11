@@ -1,0 +1,28 @@
+- id: W1-T12311
+  title: Correct the W1-T10054 shard's call-site and hand-fix wording so its first test targets the right inputs
+  repo: remudero
+  depends_on:
+    - W1-T10054
+  type: implement
+  verify: auto
+  risk: low
+  status: queued
+  attempts: 0
+  files:
+    - plan/tasks.d/W1-T10054-a-freshness-restart-can-take-an-idle-moment.yaml
+  acceptance:
+    - claim: The W1-T10054 shard states that decideFreshness has three call sites in src/lib/daemon.ts, and that the top-of-tick site passes the default siblingInFlight false while the two lane-refill sites pass true
+      proof: "grep: three decideFreshness call sites in plan/tasks.d/W1-T10054-a-freshness-restart-can-take-an-idle-moment.yaml"
+    - claim: The W1-T10054 shard no longer says two of three call sites pass siblingInFlight true unconditionally, and its design tells the first test to drive the top-of-tick site with siblingInFlight left at its default false
+      proof: "grep: top-of-tick site passes the default false in plan/tasks.d/W1-T10054-a-freshness-restart-can-take-an-idle-moment.yaml"
+    - claim: The W1-T10054 shard states the minimum-lifetime hand-fix as a dated observation that it was unpushed at 16:47Z on 2026-10-17, and names re-checking whether it has landed as a step for the builder instead of asserting it is still unpushed
+      proof: "grep: re-check whether the minimum-lifetime hand-fix has landed in plan/tasks.d/W1-T10054-a-freshness-restart-can-take-an-idle-moment.yaml"
+  origin: followup:W1-T10054-1794374926595:2026-11-11T05:34:10.115Z:1
+  rationale: >-
+    From the 2026-11-11 follow-up on W1-T10054-1794374926595, ratified via rmd approve:
+  
+    follow-up harvest [task]: correct the shard's rationale text, which says the hand-fix is
+    unpushed and that two call sites pass `true`. At `HEAD` there are three call sites, and one
+    passes the default false. The wording about the top-of-tick site should be fixed so the
+    builder's first pinning test targets the right inputs. — from W1-T10054 (run
+    W1-T10054-1794374926595)
