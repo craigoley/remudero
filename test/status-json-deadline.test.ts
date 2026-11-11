@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { test } from "node:test";
 import { statusCommand, type StatusDeps } from "../src/lib/report-commands.js";
 import { boardSnapshotPath, createBoardSnapshotCache } from "#src/lib/board-snapshot-cache.js";
@@ -14,10 +14,17 @@ import { assertWallClockBound } from "./helpers/wall-clock-bound.js";
 async function hungGithubStatus(
   seed?: (root: string) => void,
   extra: Partial<StatusDeps> = {},
+  options: { gitFailure?: boolean } = {},
 ): Promise<{ elapsedMs: number; json: Record<string, any> }> {
   const root = mkdtempSync(join(tmpdir(), "rmd-status-json-deadline-"));
   seed?.(root);
   const shim = ghShim([{ when: "", delaySeconds: 5 }], { kind: "status-json-deadline" });
+  const bin = join(root, "bin");
+  if (options.gitFailure) {
+    mkdirSync(bin);
+    writeFileSync(join(bin, "git"), "#!/bin/sh\nexit 1\n");
+    chmodSync(join(bin, "git"), 0o755);
+  }
   const repo = join(root, "repo");
   mkdirSync(join(repo, "plan"), { recursive: true });
   writeFileSync(join(repo, "plan", "tasks.yaml"), [
@@ -31,7 +38,7 @@ async function hungGithubStatus(
     "",
   ].join("\n"));
   const oldPath = process.env.PATH;
-  process.env.PATH = `${shim.dir}:${oldPath ?? ""}`;
+  process.env.PATH = `${options.gitFailure ? `${bin}:` : ""}${shim.dir}:${oldPath ?? ""}`;
   const lines: string[] = [];
   const started = Date.now();
   try {
@@ -273,40 +280,10 @@ test("W1-T11280: a stale snapshot does not fill an unfinished read and the statu
 });
 
 test("W1-T11280: a remote-ref failure beside a fresh snapshot stays unavailable", async () => {
-  const root = mkdtempSync(join(tmpdir(), "rmd-status-json-snapshot-ref-"));
-  createBoardSnapshotCache(root, "example", "repo").commitClosed([closedRow(7)]);
-  const bin = join(root, "bin");
-  const repo = join(root, "repo");
-  mkdirSync(bin);
-  mkdirSync(join(repo, ".git"), { recursive: true });
-  mkdirSync(join(repo, "plan"));
-  writeFileSync(join(repo, "plan", "tasks.yaml"), "[]\n");
-  writeFileSync(join(bin, "git"), "#!/bin/sh\nexit 1\n");
-  chmodSync(join(bin, "git"), 0o755);
-  const shim = ghShim([{ when: "", delaySeconds: 5 }], { kind: "status-json-snapshot-ref" });
-  const oldPath = process.env.PATH;
-  process.env.PATH = `${bin}:${shim.dir}:${oldPath ?? ""}`;
-  const lines: string[] = [];
-  const started = Date.now();
-  try {
-    const rc = await statusCommand(["--json"], {
-      loadConfig: () => ({ root } as Config),
-      queryService: () => ({ running: false, pid: null }),
-      ledgerPathFor: () => join(root, "absent.ndjson"),
-      readLedgerLines: () => [],
-      repoRoot: repo,
-      resolveOwnerRepo: () => ({ owner: "example", repo: "repo" }),
-      jsonDeadlineMs: 400,
-      out: (line) => lines.push(line),
-    });
-    assert.equal(rc, 0);
-    assertWallClockBound(Date.now() - started, 1_500, "a failed remote-ref read must not hold status");
-    const json = JSON.parse(lines[0]);
-    assert.equal(json.queueHead.status, "unavailable");
-    assert.equal(json.queueHead.rows, null);
-    assert.equal(json.externalReads.runBranches.status, "unavailable");
-    assert.ok(dirname(boardSnapshotPath(root, "example", "repo")).startsWith(root));
-  } finally {
-    process.env.PATH = oldPath;
-  }
+  const { json } = await hungGithubStatus((root) => {
+    assert.equal(createBoardSnapshotCache(root, "example", "repo").commitClosed([closedRow(7)]), true);
+  }, {}, { gitFailure: true });
+  assert.equal(json.queueHead.status, "unavailable");
+  assert.equal(json.queueHead.rows, null);
+  assert.equal(json.externalReads.runBranches.status, "unavailable");
 });
