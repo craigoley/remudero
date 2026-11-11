@@ -21,7 +21,7 @@
     - test/console-api/read-model/serves-build-rows-are-one-row-a-window-not-one-a-build.test.ts
     - test/workstreams-view.test.ts
     - test/workstreams-projection-reuse.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "agent-view writes one agent.built row per instance per window carrying the builds, the last seq and the last row count, instead of one row per build"

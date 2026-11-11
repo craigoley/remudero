@@ -28,7 +28,8 @@ const HELPER_IMPORT = "helpers/wall-clock-bound.js";
 // W1-T9954 declares the stuck named-pipe discovery child's kill bound: one file, one site.
 // W1-T11071 declares the daemon review stop bound: one declaring file and one site.
 const RECORDED_DECLARED_WALL_CLOCK_BOUND_FILES = 42;
-const RECORDED_DECLARED_WALL_CLOCK_BOUND_SITES = 63;
+// W1-T11280 adds one shared site to the status JSON deadline suite, which already declares: no new file, one site.
+const RECORDED_DECLARED_WALL_CLOCK_BOUND_SITES = 64;
 const WALL_CLOCK_BOUND_FILE_FLOOR = 3;
 const WALL_CLOCK_BOUND_SITE_FLOOR = 4;
 

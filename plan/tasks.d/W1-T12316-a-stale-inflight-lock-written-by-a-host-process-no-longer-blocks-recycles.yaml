@@ -1,0 +1,113 @@
+- id: W1-T12316
+  title: "A stale inflight lock written by a host process no longer blocks recycles and dispatch"
+  repo: remudero
+  depends_on: []
+  priority: 0.9
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the recycle drain, the host janitor and the inflight lock decide whether a live run is cut; a wrong reclaim starts a second run of a task
+  band_meaning: blast-radius
+  origin: operator-session#host-lock-blocked-recycles-2026-11-11
+  plan_refs:
+    - W1-T2556
+    - W1-T3611
+    - W1-T6597
+    - W1-T396
+    - W1-T978
+    - W1-T461
+    - W1-T8138
+    - W1-T11279
+  files:
+    - deploy/recycle-container.sh
+    - deploy/rmd-host-cleanup.sh
+    - src/lib/inflight-lock.ts
+    - src/lib/benchmark-run.ts
+    - src/lib/status-board.ts
+    - src/lib/board-worker.ts
+    - src/lib/ledger-steps.ts
+    - test/a-stale-inflight-lock-written-by-a-host-process-no-longer-blocks-recycles.test.ts
+    - test/a-lock-whose-container-is-gone-is-reclaimed-not-waited-on.test.ts
+    - test/host-root-disk-janitor.test.ts
+    - test/host-maintenance-shell-portability.test.ts
+    - test/inflight-lock.test.ts
+    - test/inflight-sweep-rung.test.ts
+    - test/lock-holder-identity.test.ts
+    - test/stale-lock-host-ordering.test.ts
+    - test/status-board.test.ts
+    - test/console-api/board/compress-src-lib-status-board-ts.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "The recycle script finds a lock whose `host` is the host's own hostname and whose pid is dead. It moves the lock to `inflight/reclaimed/` with a `.reason` file, prints the slot, the run id and the evidence, and the recycle goes on"
+      proof: "grep: W1-T12316 criterion 1 in test/a-stale-inflight-lock-written-by-a-host-process-no-longer-blocks-recycles.test.ts"
+    - claim: "The recycle script finds a lock whose `host` is the host's own hostname and whose pid is alive but started after the lock's `startedAt` (the pid was used again). It reclaims the lock and names both start times in the reason"
+      proof: "grep: W1-T12316 criterion 2 in test/a-stale-inflight-lock-written-by-a-host-process-no-longer-blocks-recycles.test.ts"
+    - claim: "The recycle script finds a lock whose `host` is the host's own hostname and whose process is alive with the lock's start time. The lock stays in place, even when its `startedAt` is 30 days old, and the recycle waits and refuses as before"
+      proof: "grep: W1-T12316 criterion 3 in test/a-stale-inflight-lock-written-by-a-host-process-no-longer-blocks-recycles.test.ts"
+    - claim: "Each reclaim by the recycle script writes one `recycle.inflight_reclaimed` row with the task id, run id, pid, host and evidence"
+      proof: "grep: W1-T12316 criterion 4 in test/a-stale-inflight-lock-written-by-a-host-process-no-longer-blocks-recycles.test.ts"
+    - claim: "In a container, the daemon's lock sweep finds a host-written lock whose run wrote no ledger row for longer than the measured bound. It writes one `daemon.inflight_host_lock_silent` row with the task id, run id, the time of the run's newest row, the bound, its source and its sample count. The lock file stays in place, byte for byte, and nothing is written to `inflight/reclaimed/`"
+      proof: "grep: W1-T12316 criterion 5 in test/a-stale-inflight-lock-written-by-a-host-process-no-longer-blocks-recycles.test.ts"
+    - claim: "The daemon writes at most one `daemon.inflight_host_lock_silent` row for a lock in each bound of silence. A host-written lock whose run wrote a row inside the bound gets no row and is counted as `unverifiableForeignHost`, as today"
+      proof: "grep: W1-T12316 criterion 6 in test/a-stale-inflight-lock-written-by-a-host-process-no-longer-blocks-recycles.test.ts"
+    - claim: "With no closed quiet gap in the ledger window, the daemon writes no row and keeps every host-written lock. No fixed time takes the place of the measured bound"
+      proof: "grep: W1-T12316 criterion 7 in test/a-stale-inflight-lock-written-by-a-host-process-no-longer-blocks-recycles.test.ts"
+    - claim: "`rmd status` shows a host-written lock whose run is silent past the bound as a `host_lock_silent` blocker with its task id, run id and silent time"
+      proof: "grep: W1-T12316 criterion 8 in test/a-stale-inflight-lock-written-by-a-host-process-no-longer-blocks-recycles.test.ts"
+    - claim: "The host janitor `deploy/rmd-host-cleanup.sh`, in its six-hour pass and in its hourly temp-only pass, reclaims a lock of its own host whose pid is dead or was used again. It moves the lock to `inflight/reclaimed/` with a `.reason` file and writes one `host_cleanup.inflight_reclaimed` row"
+      proof: "grep: W1-T12316 criterion 9 in test/a-stale-inflight-lock-written-by-a-host-process-no-longer-blocks-recycles.test.ts"
+    - claim: "The host janitor keeps a lock of its own host whose process is alive with the lock's start time, whatever its age, and a lock of any other host. With DRY_RUN=1 it names the lock it would reclaim and moves nothing"
+      proof: "grep: W1-T12316 criterion 10 in test/a-stale-inflight-lock-written-by-a-host-process-no-longer-blocks-recycles.test.ts"
+    - claim: "The recycle script reclaims a same-host lock in its reclaim step"
+      proof: "grep: recycle\\.inflight_reclaimed in deploy/recycle-container.sh"
+    - claim: "The host janitor reclaims a same-host lock"
+      proof: "grep: host_cleanup\\.inflight_reclaimed in deploy/rmd-host-cleanup.sh"
+    - claim: "The daemon's lock sweep with receipts writes the report row"
+      proof: "grep: daemon\\.inflight_host_lock_silent in src/lib/benchmark-run.ts"
+    - claim: "The status board derives the new blocker"
+      proof: "grep: host_lock_silent in src/lib/status-board.ts"
+  rationale: |
+    MEASURED 2026-11-11 on the Azure host. One stale lock from a host process held the fleet paused for most of 15:33Z to 17:16Z.
+    - An operator started `rmd run-task W1-T12114` by hand on the host, not in a container, at 09:13:44Z. Its pid was 3861824 and its host name "Remudero". It wrote `~/rmd-state2/state/inflight/W1-T12114.lock` with `{pid, run_id, host: "Remudero", startedAt}`.
+    - Its last ledger row was `implement.preopen_gate` at 12:06:13Z. It had no child processes after that.
+    - The core daemon runs in the container `remudero-daemon`, host name c080a079ac18. `deploy/recycle-container.sh` counts every `inflight/*.lock` as a lane-holding worker.
+    - Each image recycle then waited its full drain wait. The watchdog killed two of them at 3,600 s (15:33Z to 16:33Z and 16:34Z to 17:16Z). Two more refused after their wait (17:17Z and 18:00Z, with RMD_RECYCLE_WAIT_S=600).
+    - At about 18:05Z the operator stopped the process. The lock file stayed. The pid was dead, but the next recycle still counted the lock. An operator moved it by hand to `inflight/reclaimed/` at about 18:13Z.
+    - The run was silent for 3 h 27 min when the first recycle started to wait, and for 5 h 59 min when it was stopped.
+    CONFIRMED in the code at origin/main:
+    - `reclaim_dead_inflight_locks` (deploy/recycle-container.sh) skips every lock whose `host` is not shaped like a container id (`INFLIGHT_CONTAINER_ID_RE`). "Remudero" is not, so the script never tested the pid, although the script runs on the same host as the process and can test it.
+    - `isHolderStale` (src/lib/fs-race-safe.ts), rung 1, returns "not stale" for a `host` that differs from this host and is not container-shaped. The daemon in its container cannot test a host pid: the container has its own pid table.
+    - `sweepStaleInflightLocks` (src/lib/inflight-lock.ts) puts such a lock in `unverifiableForeignHost` and keeps it on every poll. `acquireInflightLock` refuses a new run of the same task with `InflightLockError`. `deriveStatus` (src/lib/status.ts) reads the lock as a live holder, so `rmd status` showed W1-T12114 as running.
+    CHECKED for overlap: W1-T2556 reclaims a lock whose container is gone. W1-T3611 reclaims a dead pid inside the running target container. W1-T6597 reclaims what a frozen daemon holds. None of them tests a lock that a host process wrote.
+    SHARED FILES: W1-T11279 (queued) also edits src/lib/status-board.ts and test/status-board.test.ts. It changes how the board reads origin/main. This task adds one blocker kind. The two changes touch different functions.
+  design: |
+    1. Recycle script (deploy/recycle-container.sh), in `reclaim_dead_inflight_locks`, before the container-id check:
+       - Read the host's own name once per sweep with `hostname`. Compare it with the lock's `host` without case and without a trailing `.local`, as `sameHost` (src/lib/host-identity.ts) does.
+       - For a match, test the lock's pid on the host. No `/proc/<pid>`: the process is dead. A pid that is alive but whose start time (from `/proc/<pid>/stat` field 22 and the boot time, or `ps -o lstart=`) is more than 2 s after the lock's `startedAt`: the pid was used again. Either one is the verdict.
+       - Any other answer (alive with a matching start time, no readable pid, a probe that fails) leaves the lock in place. It still blocks, as today.
+       - A reclaim uses the existing path: print the lock in full, move it to `inflight/reclaimed/<name>.recycle-<pid>`, write the `.reason` file with the host, pid, start times and verdict. Print the task id (the slot), the run id and the evidence on stderr. Append one `recycle.inflight_reclaimed` row to the ledger, in the shape of the `recycle.hung_worker_passed` row.
+       - The test drives the real script with a stub `hostname` and a stub `docker`, as test/a-lock-whose-container-is-gone-is-reclaimed-not-waited-on.test.ts does, and a real child process for the live case.
+    2. Host janitor (deploy/rmd-host-cleanup.sh), so a dead host run is freed when no recycle runs:
+       - The janitor runs from cron every six hours, and hourly through deploy/rmd-tmp-sweep.sh with `RMD_CLEANUP_ONLY_TMP=1`. The lock step runs in both passes, before the temp-only pass returns.
+       - It reads the inflight dirs from `RMD_CLEANUP_INFLIGHT_DIRS`, default `$CLEAN_HOME/rmd-state2/state/inflight`. A dir that does not exist is skipped.
+       - It uses the same test as point 1: the lock's `host` is this host's own name, and its pid is dead or started more than 2 s after `startedAt`. Any other answer keeps the lock.
+       - A reclaim moves the lock to `inflight/reclaimed/<name>.host-cleanup-<pid>` with a `.reason` file that has the owner of the lock file, and writes one `host_cleanup.inflight_reclaimed` row to the ledger beside the state dir. With DRY_RUN=1 it prints the lock it would reclaim and moves nothing.
+       - The janitor is installed as a copy (deploy/install-host-units.sh), so it cannot source a file beside it. The probe is a small function in each script. The new test runs both scripts against the same lock fixtures, so the two cannot differ.
+    3. Daemon (src/lib/inflight-lock.ts, src/lib/benchmark-run.ts). The daemon only reports. It never moves, deletes or rewrites a host-written lock:
+       - A lock is host-written when this process is in a container, the lock's `host` is not shaped like a container id, and it is not this host. These are exactly the locks that `unverifiableForeignHost` holds today on the container daemon.
+       - New export `hostLockSilence(lock, rows)` in src/lib/inflight-lock.ts. It returns the time of the newest row of the lock's `run_id`, the bound, the bound's source and its sample count. The bound is the longest closed quiet gap in `rows`: the longest time between two consecutive rows of one run, for every run that wrote a later row. It is a statistic of the data, like `deriveQuietBound` (src/lib/quiet-worker-watchdog.ts), never a fixed constant. With no closed gap the source is `no_history` and the lock is never silent.
+       - `sweepInflightLocksWithReceipts` (src/lib/benchmark-run.ts) reads the ledger window only when the sweep kept at least one host-written lock, so a normal poll reads nothing more. For each host-written lock whose run is silent past the bound, it writes one `daemon.inflight_host_lock_silent` row with the evidence. It writes the next row for that lock only after one more bound of silence, so the row count grows with silence, not with polls. It reads the earlier row from the same ledger window, and holds no state in memory.
+       - `runInflightLockSweepRung` (src/run-task.ts) already calls `sweepInflightLocksWithReceipts` on each poll. It needs no change. The test drives `sweepInflightLocksWithReceipts`, not `#src/run-task.js` (the importer limit of `census:affected-reach`).
+    4. A lock whose process is alive is never reclaimed, by any reader, whatever its age. Only host-side code reclaims a host-written lock, and only after it tests the pid and its start time. A reader that cannot test the pid only reports.
+    5. Rows and status:
+       - Declare `recycle.inflight_reclaimed`, `host_cleanup.inflight_reclaimed` and `daemon.inflight_host_lock_silent` in src/lib/ledger-steps.ts.
+       - src/lib/status-board.ts gains the blocker kind `host_lock_silent` {taskId, runId, silentMs, boundMs}. `deriveBlockers` adds one for each host-written lock whose run is silent past the bound, through `hostLockSilence`. src/lib/board-worker.ts passes the inflight dir it already has. The BLOCKERS section renders it with its task id and run id, and says that the host janitor or a person on the host can free it.
+       - src/lib/status-board.ts has a comment cap: run test/console-api/board/compress-src-lib-status-board-ts.test.ts.
+    The existing tests in `files` must pass unchanged, including the janitor tests. A lock host that is not the host's own name (for example "prod-box-3") still refuses the recycle, and the sweep without a ledger window still keeps a foreign-host lock and writes no row.
+    NOT IN SCOPE: any reclaim by the daemon, `isHolderStale` itself, the drain lock, review-worker locks, and locks written on another machine.
+  falsifier: |
+    Remove the same-host branch of `reclaim_dead_inflight_locks` and criteria 1, 2 and 4 must fail. Skip the start-time comparison and criterion 2 must fail. Reclaim on a dead-or-old test instead of a dead-or-reused one and criteria 3 and 10 must fail. Let the daemon move a silent host lock and criterion 5 must fail. Write the row on every poll and criterion 6 must fail. Replace the measured bound with a fixed 30 minutes and criteria 6 and 7 must fail. Remove the blocker and criterion 8 must fail. Remove the janitor's lock step, or run it only in the six-hour pass, and criterion 9 must fail. Restore and require all ten to pass.
+  note: |
+    After the merge, count `recycle.inflight_reclaimed`, `host_cleanup.inflight_reclaimed` and `daemon.inflight_host_lock_silent` rows for 7 days, and the recycles that refused on a lock with a host that is not a container id. The last count should be 0.

@@ -428,6 +428,63 @@ test("W1-T2610: control — with no rewind, the same wiring pushes normally and 
 
 // ── claim 4 (structural) — BOTH literal call sites carry the wiring, not just one ───────────
 
+test("W1-T11170: the fix-rung pusher accepts only a current session merge on the PR head and plain-pushes it after ownership reread", async () => {
+  const branch = "run-W1-T11170-1788000000000";
+  const repo = seedFixRungRepo(branch);
+  try {
+    const mainSha = git(repo.wt, "rev-parse", "refs/remotes/origin/main").trim();
+    const tree = git(repo.wt, "rev-parse", `${repo.oldSha}^{tree}`).trim();
+    const merge = execFileSync("git", ["-C", repo.wt, "commit-tree", tree, "-p", repo.oldSha, "-p", mainSha,
+      "-m", "fix: resolve session conflict"], { encoding: "utf8", env: GIT_ENV }).trim();
+    git(repo.wt, "reset", "--hard", merge);
+    const calls: string[][] = [];
+    let ownershipReads = 0;
+    const receipt = await withLiveWritesAllowed(() => pushFixRound(repo.wt, branch, merge, undefined, {
+      exec: (file, args) => { calls.push([file, ...args]); execFileSync(file, args, { encoding: "utf8", env: GIT_ENV }); },
+      ownedSessionGuard: { prHeadSha: repo.oldSha, verifyOwnership: async () => {
+        ownershipReads++;
+        assert.equal(git(repo.wt, "rev-parse", "HEAD").trim(), merge);
+        return undefined;
+      } },
+    }));
+    assert.deepEqual(receipt, { fixRoundPushedHead: merge });
+    assert.equal(ownershipReads, 1, "ownership is reread at the push boundary");
+    assert.deepEqual(calls, [["git", "-C", repo.wt, "push", "origin", "HEAD"]]);
+    assert.ok(calls.flat().every((arg) => !arg.startsWith("--force") && arg !== "-f" && !arg.startsWith("+")));
+    assert.equal(git(repo.bare, "rev-parse", `refs/heads/${branch}`).trim(), merge);
+
+    const invalid = seedFixRungRepo("run-W1-T11170-1788000000001");
+    try {
+      git(invalid.wt, "commit", "--allow-empty", "--quiet", "-m", "single-parent worker result");
+      const single = git(invalid.wt, "rev-parse", "HEAD").trim();
+      let reads = 0;
+      await assert.rejects(() => withLiveWritesAllowed(() => pushFixRound(invalid.wt, "run-W1-T11170-1788000000001", single, undefined, {
+        ownedSessionGuard: { prHeadSha: invalid.oldSha, verifyOwnership: async () => { reads++; return undefined; } },
+      })), /two-parent merge commit whose first parent is PR head/);
+      assert.equal(reads, 0, "malformed worker output is refused before ownership is reread");
+      assert.equal(git(invalid.bare, "rev-parse", "refs/heads/run-W1-T11170-1788000000001").trim(), invalid.oldSha);
+    } finally { invalid.cleanup(); }
+
+    const movedMain = seedFixRungRepo("run-W1-T11170-1788000000002");
+    try {
+      const base = git(movedMain.wt, "rev-parse", "refs/remotes/origin/main").trim();
+      const headTree = git(movedMain.wt, "rev-parse", `${movedMain.oldSha}^{tree}`).trim();
+      const staleMerge = execFileSync("git", ["-C", movedMain.wt, "commit-tree", headTree, "-p", movedMain.oldSha, "-p", base,
+        "-m", "fix: merge old main"], { encoding: "utf8", env: GIT_ENV }).trim();
+      git(movedMain.wt, "reset", "--hard", staleMerge);
+      const advancedMain = execFileSync("git", ["-C", movedMain.wt, "commit-tree", `${base}^{tree}`, "-p", base,
+        "-m", "chore(test): advance main"], { encoding: "utf8", env: GIT_ENV }).trim();
+      git(movedMain.wt, "push", "--quiet", "origin", `${advancedMain}:refs/heads/main`);
+      let reads = 0;
+      await assert.rejects(() => withLiveWritesAllowed(() => pushFixRound(movedMain.wt, "run-W1-T11170-1788000000002", staleMerge, undefined, {
+        ownedSessionGuard: { prHeadSha: movedMain.oldSha, verifyOwnership: async () => { reads++; return undefined; } },
+      })), /does not contain origin\/main/);
+      assert.equal(reads, 0, "a merge missing the current main tip is refused before ownership approval");
+      assert.equal(git(movedMain.bare, "rev-parse", "refs/heads/run-W1-T11170-1788000000002").trim(), movedMain.oldSha);
+    } finally { movedMain.cleanup(); }
+  } finally { repo.cleanup(); }
+});
+
 test("W1-T2610: both fix-rung push deps pass expectedHeadSha through pushFixRound to gitPushRunBranch (grep-verifiable)", () => {
   const [entrypoint, runTask, sweep] = ["../src/run-task.ts", "../src/cli/commands/run-task-verb.ts", "../src/lib/sweep.ts"].map((p) => readFileSync(fileURLToPath(new URL(p, import.meta.url)), "utf8"));
   // W1-T4797 adds a coverage precheck to the run loop; its wrapper still delegates to the shared push helper.
@@ -435,7 +492,12 @@ test("W1-T2610: both fix-rung push deps pass expectedHeadSha through pushFixRoun
   const prechecked = entrypoint.split("export async function pushFixRoundPrechecked(")[1]?.split("export type CensusPushRungOutcome")[0] ?? "";
   assert.match(prechecked, /push: .* = pushFixRound,/, "the precheck defaults to the shared push helper");
   assert.match(prechecked, /await push\(wt, branch, expectedHeadSha, priorHeadSha\);/, "the precheck preserves the expected head and prior-head lease");
-  assert.equal((sweep.match(/^ {12}push: pushFixRound,$/gm) ?? []).length, 1, "the sweep's fix dispatch pushes through pushFixRound");
-  assert.match(entrypoint, /pushFixRoundPrechecked\(deps\.log, wt, branch, sha, \{ repo: deps\.repo \}, pushFixRound, prior\),/, "the sweep entrypoint injects the run loop's prechecked push over the same helper (W1-T8833)");
+  assert.match(sweep, /push: async \(wt: string, branchName: string, sha\?: string, prior\?: string,[\s\S]*?const landed = await pushFixRound\(wt, branchName, sha, prior, guard\)/,
+    "the sweep's worker dispatch carries the session guard through the shared push helper");
+  assert.match(sweep, /const ownedConflictPushGuard = evidence\.ownedConflictHead\?\.kind === "session"/,
+    "only a sweep session conflict round receives the owned-branch guard");
+  assert.match(entrypoint, /pushFixRoundPrechecked\(deps\.log, wt, branch, sha, \{ repo: deps\.repo \}, pushFixRound, prior\)/, "the sweep entrypoint injects the run loop's prechecked push over the same helper (W1-T8833)");
+  assert.match(entrypoint, /guard !== undefined\) return pushFixRoundPrechecked\(deps\.log, wt, branch, sha, \{ repo: deps\.repo \}, pushFixRound, prior, \{\}, guard\)/,
+    "the session guard reaches the shared push helper through the prechecked sweep adapter");
   assert.match(entrypoint, /await gitPushRunBranchAsync\(wt, \{ expectedHeadSha, capture, exec: /, "the helper threads expectedHeadSha to the leaf");
 });

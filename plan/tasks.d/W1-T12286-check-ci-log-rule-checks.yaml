@@ -1,0 +1,70 @@
+- id: W1-T12286
+  title: "THE CI FRICTION GARDENER'S COSTLIEST OPEN CAUSE — check:ci-log:rule-checks cost 2.9 PR minute(s) across 6 round(s) on 4 pull request(s)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: low
+  priority: 1.42
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "ci-friction:check:ci-log:rule-checks"
+  files:
+    - src/lib/ci-parity.ts
+    - test/ci/parity/check-ci-log-rule-checks.test.ts
+  acceptance:
+    - claim: "a recorded check:ci-log:rule-checks round, replayed through the real code path in src/lib/ci-parity.ts, is prevented or self-healed without dispatching a fix round"
+      proof: "unit test: W1-T12286: check:ci-log:rule-checks is prevented, not retried"
+  note: "Filed by the ci-friction gardener (W1-T4435) at rung 1. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. After its build merges, the gardener measures check:ci-log:rule-checks's share of all fix rounds in equal windows before and after; a share that does not fall reopens the cause at rung 2. The regression must replay one recorded round of this cause through the real owner path; the after-window measurement, not the regression, shows the cause's share fell."
+  rationale: |
+    MEASURED by the ci-friction gardener: check:ci-log:rule-checks cost 2.9 PR minute(s) (seven-day half-life) across 6 fix round(s) on 4 pull request(s).
+
+    WHERE IT COMES FROM:
+    - src/lib/ci-parity.ts: names "rule-checks" (10 line(s))
+    - src/lib/sweep.ts: names "rule-checks" (6 line(s))
+
+    RECENT ROUNDS (newest first):
+    - PR #17700 (https://github.com/craigoley/remudero/pull/17700) at 2026-11-10T20:08:29.951Z: ci-log round — coverage-shard (1/8): test/the-affected-suite-reach-ratchet.test.ts; coverage-shard (2/8): one fetchView call resolves and judges in the same tick"]; coverage-shard (3/8): WN-TN: a main
+        failing tests: unit test: test/the-affected-suite-reach-ratchet.test.ts; one fetchView call resolves and judges in the same tick"]; W1-T7746: a main-thread busy loop past the bound is profiled and its function is the top frame in the ledger row, CRITERION 2: the fetch that makes the head sha readable runs BEFORE criteria are resolved from it, CRITERION 5: a fetch failure is still named through the same degradation path it uses today; CRITERION 2: the fetch that makes the head sha readable runs BEFORE criteria are resolved from it; CRITERION 5: a fetch failure is still named through the same degradation path it uses today
+        log excerpt:
+          | not ok 4102 - unit test: test/the-affected-suite-reach-ratchet.test.ts
+          |   ---
+          |   duration_ms: 18150.42487
+          |   type: 'test'
+          |   location: '/home/runner/work/remudero/remudero/test/the-affected-suite-reach-ratchet.test.ts:145:1'
+          |   failureType: 'testCodeFailure'
+          |   error: |-
+          |     importerCount: 1011 > 1010; new importers: test/a-settled-run-child-never-pins-its-engine-or-plan-snapshot.test.ts, test/a-stage-stall-issue-closes-when-its-head-moves-or-a-newer-twin-holds-it.test.ts, test/a-stale-held-run-branch-is-named-for-archive-and-reap.test.ts, test/ci/a-timed-out-fix-round-precheck-child-is-not-measured
+    - PR #17646 (https://github.com/craigoley/remudero/pull/17646) at 2026-11-10T15:34:46.048Z: ci-log round — acceptance-author-gate; squash-trailer-gate; ci-shard (1/8): test/every-shard-on-main-is-lintable.test.ts; ci-shard (7/8): test/plan-proof-debt.test.ts; lint-plan; rule-checks
+        failing tests: W1-T3086: violating shard files cannot grow past the recorded baseline; reads only the plan and the merge-base diff, never the network","W1-T3086: violating shard files cannot grow past the recorded baseline"]; live plan: the open+unmerged, verify:auto population carries ZERO blocking proof-dialect/proof-resolvability violations; ["live plan: the open+unmerged, verify:auto population carries ZERO blocking proof-dialect/proof-resolvability violations"]
+        log excerpt:
+          | acceptance-author-gate: REFUSED (follow-up-implementation-trailer) — Commit b836c504071de50b9f59ad40ed3ed0017721b922 (chore(plan): give each W1-T12062 criterion a distinct test-title proof) carries Remudero-Task: W1-T12062, but this pull request changes only plan-scope path(s) and does not ship its non-plan file(s): src/lib/dependency-seeds.ts, test/dependency-seeds.test.ts. Remove the trailer from that commit or include the implementation changes.
+          | ##[error]Process completed with exit code 1.
+    - PR #17608 (https://github.com/craigoley/remudero/pull/17608) at 2026-11-10T08:34:18.686Z: ci-log round — coverage-shard (1/8): test/the-affected-suite-reach-ratchet.test.ts; coverage-shard (4/8): WN-TN: autonomous rmd plan captures committed files after regeneration before authoring its PR
+        failing tests: unit test: test/the-affected-suite-reach-ratchet.test.ts; W1-T2550: autonomous rmd plan captures committed files after regeneration before authoring its PR body
+        log excerpt:
+          | not ok 3972 - unit test: test/the-affected-suite-reach-ratchet.test.ts
+          |   ---
+          |   duration_ms: 36387.875515
+          |   type: 'test'
+          |   location: '/home/runner/work/remudero/remudero/test/the-affected-suite-reach-ratchet.test.ts:145:1'
+          |   failureType: 'testCodeFailure'
+          |   error: |-
+          |     importerCount: 1011 > 1010; new importers: test/a-plan-pr-amending-an-existing-shard-carries-a-runnable-proof.test.ts, test/a-settled-run-child-never-pins-its-engine-or-plan-snapshot.test.ts, test/a-stage-stall-issue-closes-when-its-head-moves-or-a-newer-twin-holds-it.test.ts, test/a-stale-held-run-branch-is-named-for-archive-a
+    - PR #10551 at 2026-10-10T05:29:09.255Z: ci-log round — coverage-shard (3/8): test/mutation-ratchet.test.ts; rule-checks; remudero-review
+
+    WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
+    without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
+    share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
+
+    The regression must replay one recorded round above through the real owner path (the code that decides whether a fix round is dispatched or the failure heals), not assert a label, prompt text or report wording.
+    It need not prove the cause never recurs: the after-window measurement decides that, and reopens the cause one rung up if its share does not fall.
+  risk_ruling:
+    verdict: "rule-3-low-privilege"
+    action: proceed
+    confidence: 1
+    reasons:
+      - "rule 3 (live and low-privilege): the symptom is live, 5 occurrence(s) across 7 day(s), last seen 2026-11-10T20:08:29.951Z, and the record declares no privileged path"
+    judged_at: "2026-11-11T11:41:14.515Z"
+    pin: "cf870592fad1bb2010e48f072e00582f394bed0277d7d9e929eb7c6716e4298a"

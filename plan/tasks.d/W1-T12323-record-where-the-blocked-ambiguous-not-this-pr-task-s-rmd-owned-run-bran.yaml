@@ -1,0 +1,25 @@
+- id: W1-T12323
+  title: Record where the blocked-ambiguous 'not this PR task's rmd-owned run branch' disposition and every fixHeadAcceptable call site sit in sweep.ts
+  repo: remudero
+  depends_on:
+    - W1-T11170
+  type: recon
+  verify: auto
+  risk: low
+  status: queued
+  attempts: 0
+  files:
+    - src/lib/sweep.ts
+    - docs/forensics/sweep.md
+  acceptance:
+    - claim: docs/forensics/sweep.md names the sweep.ts function that emits the blocked-ambiguous reason 'head is not this PR task's rmd-owned run branch' and what decides it
+      proof: "grep: rmd-owned run branch in docs/forensics/sweep.md"
+    - claim: docs/forensics/sweep.md lists each fixHeadAcceptable call site in sweep.ts by function name and says which of them the W1-T11170 ownership predicate must change
+      proof: "grep: fixHeadAcceptable in docs/forensics/sweep.md"
+  origin: follow-up harvest from W1-T11170 (run W1-T11170-1794351304063)
+  rationale: >-
+    From the 2026-11-10 follow-up on W1-T11170-1794351304063, ratified via rmd approve:
+  
+    follow-up harvest [research]: locate the blocked-ambiguous "not this PR task's rmd-owned run
+    branch" disposition and the `fixHeadAcceptable` call sites in `sweep.ts` — this is the gate
+    the new ownership predicate has to change. — from W1-T11170 (run W1-T11170-1794351304063)

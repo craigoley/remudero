@@ -17,7 +17,7 @@
     - deploy/serve-container.sh
     - deploy/scratch-mounts.sh
     - test/one-gateway-serves-every-instance.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "With the mount table of the fleet host (state root, repos on scratch, the coverage overlay under repos), a dry run refuses nothing and plans the read-only repos bind of the other instance"
