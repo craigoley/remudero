@@ -1,5 +1,4 @@
 import { hasNonBotAuthor, namePathLanding, type DependencyMainIdentity } from "./dependency-main-identity.js";
-import { RmdError } from "./errors.js";
 import { decideLoopOutcome } from "./loop-decision.js";
 import { CI_REFRESH_GUARD_VERSION } from "./ci-refresh-prevention.js";
 import { createSelectedModeQualification, observeSelectedMode, readInstanceRegistryText } from "./instance-mode.js";
@@ -10719,67 +10718,6 @@ export function sessionBranchUnheld(evidence: SessionOwnershipEvidence): Session
   }
   if (all.every((read) => read === "clear" || read === "stale")) return { verdict: "unheld", reason: "nobody holds the branch", reads };
   return { verdict: "held", reason: "the branch is held", reads };
-}
-
-/** W1-T11170: a worker round's session-branch push the sweep refused to make; nothing was pushed. */
-export class SessionPushRefusedError extends RmdError {
-  constructor(readonly detail: string) {
-    super("git", 1, `session branch push refused: ${detail}`, { detail });
-    this.name = "SessionPushRefusedError";
-  }
-}
-
-/**
- * W1-T11170: the ONE push a worker conflict round makes on an operator-session branch, in place of the leased fix
- * push. The round's result must be a merge commit whose first parent is the PR head and which contains main's tip;
- * the remote head must still be the PR head (an owner who pushed in between wins); the ownership reads (b) and (c)
- * are read once more; and the push is a plain `git push origin HEAD:<ref>` with no force or lease flag of any kind,
- * so a moved branch refuses it. Every refusal throws {@link SessionPushRefusedError} before anything is written.
- */
-export async function pushSessionMergeRound(
-  wt: string, branch: string, pr: Pick<OpenPrView, "headSha">,
-  opts: { recheck: () => Promise<string | undefined>;
-    git?: (cwd: string, args: readonly string[]) => string | Promise<string>;
-    exec?: (file: string, args: string[], o: { stdio: "ignore" }) => Promise<unknown> },
-  expectedHeadSha?: string,
-): Promise<{ fixRoundPushedHead: string }> {
-  const run = async (args: readonly string[]) =>
-    opts.git ? opts.git(wt, args) : hostWorktreeGitAsync(wt, args, { maxBuffer: 1 << 24 });
-  const ref = `refs/heads/${branch}`;
-  const head = (await run(["rev-parse", "HEAD"])).trim();
-  if (expectedHeadSha !== undefined && expectedHeadSha !== head) {
-    throw new SessionPushRefusedError(`the round's head is ${head}, not the committed ${expectedHeadSha}`);
-  }
-  const parents = (await run(["rev-list", "--parents", "-n", "1", head])).trim().split(/\s+/);
-  if (parents.length !== 3 || parents[1] !== pr.headSha) {
-    throw new SessionPushRefusedError(`${head} is not a merge commit whose first parent is the PR head ${pr.headSha}`);
-  }
-  const observed = new Map((await run(["ls-remote", "origin", ref, "refs/heads/main"]))
-    .trim().split("\n").filter(Boolean).map((line) => { const [sha, name] = line.split(/\s+/); return [name, sha]; }));
-  if (observed.get(ref) !== pr.headSha) {
-    throw new SessionPushRefusedError(`${ref} moved to ${observed.get(ref) ?? "<absent>"} since the PR head ${pr.headSha}`);
-  }
-  const main = observed.get("refs/heads/main");
-  try {
-    if (main === undefined) throw new Error("main unreadable");
-    await run(["merge-base", "--is-ancestor", main, head]);
-  } catch (error) {
-    throw new SessionPushRefusedError(`the merge does not contain main's tip ${main ?? "<unreadable>"}: ${spawnFailureText(error)}`);
-  }
-  let held: string | undefined;
-  try { held = await opts.recheck(); }
-  catch (error) { held = `the ownership re-read failed: ${spawnFailureText(error)}`; }
-  if (held !== undefined) throw new SessionPushRefusedError(`ownership re-read before the push: ${held}`);
-  try {
-    const exec = opts.exec; // a destination push: the pusher's plain fast-forward, which it refuses to force
-    await gitPushRunBranchAsync(wt, { destination: branch, stdio: "ignore",
-      ...(exec ? { exec: async (file: string, args: string[]) => { await exec(file, args, { stdio: "ignore" }); } } : {}) });
-  } catch (error) {
-    throw new SessionPushRefusedError(`the plain push was refused: ${capStderrExcerpt(spawnFailureText(error), 300)}`);
-  }
-  const landed = (await run(["ls-remote", "origin", ref])).trim().split(/\s+/)[0];
-  if (landed !== head) throw new SessionPushRefusedError(`remote head after push is ${landed || "<absent>"}, expected ${head}`);
-  return { fixRoundPushedHead: head };
 }
 
 /** W1-T11170: written when a worker round's merge commit landed on an operator-session branch. */

@@ -10954,35 +10954,35 @@ export async function pushFixRound(
     if (priorHeadSha !== undefined && expectedHeadSha === undefined) throw new Error("refusing a leased fix push without the committed head sha");
     if (ownedSessionGuard !== undefined && priorHeadSha !== undefined) {
       sessionGuardRefusal = "refusing a force-with-lease push for an operator-session conflict round";
-      throw new Error(sessionGuardRefusal);
+      throw new FixRoundPushError("run-error", { text: sessionGuardRefusal, censuses: ["operator-session-push-guard"], offeredBaselines: [] }, sessionGuardRefusal);
     }
     if (ownedSessionGuard !== undefined) {
       if (expectedHeadSha === undefined) {
         sessionGuardRefusal = "refusing an operator-session conflict push without the committed merge head sha";
-        throw new Error(sessionGuardRefusal);
+        throw new FixRoundPushError("run-error", { text: sessionGuardRefusal, censuses: ["operator-session-push-guard"], offeredBaselines: [] }, sessionGuardRefusal);
       }
-      const parents = (await capture("git", ["-C", wt, "rev-list", "--parents", "-n", "1", expectedHeadSha!])).trim().split(/\s+/);
+      const parents = (await hostWorktreeGitAsync(wt, ["rev-list", "--parents", "-n", "1", expectedHeadSha!])).trim().split(/\s+/);
       if (parents.length !== 3 || parents[0] !== expectedHeadSha || parents[1] !== ownedSessionGuard.prHeadSha) {
         sessionGuardRefusal = `operator-session conflict round must push a two-parent merge commit whose first parent is PR head ${ownedSessionGuard.prHeadSha}`;
-        throw new Error(sessionGuardRefusal);
+        throw new FixRoundPushError("run-error", { text: sessionGuardRefusal, censuses: ["operator-session-push-guard"], offeredBaselines: [] }, sessionGuardRefusal);
       }
-      const remoteRefs = (await capture("git", ["-C", wt, "ls-remote", "origin", `refs/heads/${branch}`, "refs/heads/main"]))
+      const remoteRefs = (await hostWorktreeGitAsync(wt, ["ls-remote", "origin", `refs/heads/${branch}`, "refs/heads/main"]))
         .trim().split("\n").filter(Boolean).map((line) => line.trim().split(/\s+/));
       const remote = new Map(remoteRefs.map(([sha, ref]) => [ref, sha]));
       if (remote.get(`refs/heads/${branch}`) !== ownedSessionGuard.prHeadSha) {
         sessionGuardRefusal = `operator-session branch moved from PR head ${ownedSessionGuard.prHeadSha} before the push`;
-        throw new Error(sessionGuardRefusal);
+        throw new FixRoundPushError("run-error", { text: sessionGuardRefusal, censuses: ["operator-session-push-guard"], offeredBaselines: [] }, sessionGuardRefusal);
       }
       const main = remote.get("refs/heads/main");
       if (main === undefined) {
         sessionGuardRefusal = "operator-session conflict push cannot read origin/main";
-        throw new Error(sessionGuardRefusal);
+        throw new FixRoundPushError("run-error", { text: sessionGuardRefusal, censuses: ["operator-session-push-guard"], offeredBaselines: [] }, sessionGuardRefusal);
       }
       try {
-        await capture("git", ["-C", wt, "merge-base", "--is-ancestor", main, expectedHeadSha]);
+        await hostWorktreeGitAsync(wt, ["merge-base", "--is-ancestor", main, expectedHeadSha]);
       } catch {
         sessionGuardRefusal = `operator-session conflict merge does not contain origin/main ${main}`;
-        throw new Error(sessionGuardRefusal);
+        throw new FixRoundPushError("run-error", { text: sessionGuardRefusal, censuses: ["operator-session-push-guard"], offeredBaselines: [] }, sessionGuardRefusal);
       }
     }
     await gitPushRunBranchAsync(wt, { expectedHeadSha, capture, exec: async (file, args) => {
@@ -10992,7 +10992,7 @@ export async function pushFixRound(
         const ownershipFailure = await ownedSessionGuard.verifyOwnership();
         if (ownershipFailure !== undefined) {
           sessionGuardRefusal = `operator-session branch ownership changed before push: ${ownershipFailure}`;
-          throw new Error(sessionGuardRefusal);
+          throw new FixRoundPushError("run-error", { text: sessionGuardRefusal, censuses: ["operator-session-push-guard"], offeredBaselines: [] }, sessionGuardRefusal);
         }
       }
       await push(file, pushArgs, { stdio: "ignore" });
