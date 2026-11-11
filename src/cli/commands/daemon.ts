@@ -112,6 +112,7 @@ import { automaticBranchReapStateFileName, orphanRunBranchEvidenceReader } from 
 import { repoRoot, resolveOwnerRepo, writeDaemonTargetRecord } from "../../lib/repo-location.js";
 import { resolveRepoLayout } from "../../lib/repo-layout.js";
 import { flagValue, unknownArgError } from "../../lib/cli-args.js";
+import { createOpsCatalogShadowSource, type OpsCatalogApi, type OpsCatalogShadowInput } from "../../lib/ops-catalog-source.js";
 import { liveInflightRuns, readCheckoutDepth } from "../../lib/report-commands.js";
 import { adoptRunChildren, createAdmittedPlanSlot, runChildModeIsOn, startRunChildProbe, tapPlanSnapshot, type AdoptedRunChild } from "../../lib/run-child.js";
 import { loadObservedOverlapMode, loadRunChildMode, type RunChildMode } from "../../lib/policy.js";
@@ -602,6 +603,8 @@ export async function daemonCommand(
      *  throttled. Mirrors {@link drainCommand}'s identical seam so a test can prove which
      *  gateway the daemon derives from without a network round-trip. */
     githubFactory?: (owner: string, repo: string) => GitHub;
+    /** Fixture transport only; production keeps the existing identity and GET-only source. */
+    opsCatalogApi?: OpsCatalogApi;
     /** Explicit fixture configuration; production keeps the existing config loader. */
     config?: Config;
     /** Injectable self-target repo root. Defaults to this module's real `repoRoot`. A
@@ -792,11 +795,18 @@ export async function daemonCommand(
   const badArg = unknownArgError(
     "daemon",
     rest,
-    ["--max", "--poll-ms", "--repo", "--plan"],
+    ["--max", "--poll-ms", "--repo", "--plan", "--shadow-ops-catalog"],
     ["--dry-run", "--allow-self-target", "--allow-stale"],
   );
   if (badArg) {
     writeSyncLine(2, badArg + "\n" + USAGE);
+    return 2;
+  }
+  const shadowOpsRepository = flagValue(rest, "--shadow-ops-catalog");
+  if (rest.includes("--shadow-ops-catalog") &&
+      (!shadowOpsRepository || !/^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?\/[A-Za-z0-9_.-]+$/.test(shadowOpsRepository) ||
+       shadowOpsRepository.includes("..") || shadowOpsRepository.endsWith("/."))) {
+    writeSyncLine(2, "rmd daemon: invalid --shadow-ops-catalog repository slug\n" + USAGE);
     return 2;
   }
   const allowStale = rest.includes("--allow-stale");
@@ -1738,9 +1748,30 @@ export async function daemonCommand(
     try { await gardenerRuntime.flush(); } catch { log("garden.telemetry_failed", { reason: "runtime-inventory-write-failed" }); }
     // W1-T7744: the filing read is awaited here, before the loop, and behind each selection after — never on the loop.
     await dispatchFilingPrefetch.refresh(target.planPath);
+    // This opt-in observer owns no timer, dispatch port or persistence. A tick reads only its cache.
+    const opsShadow = shadowOpsRepository === undefined ? undefined : (() => {
+      const source = createOpsCatalogShadowSource({ repository: shadowOpsRepository }, deps.opsCatalogApi);
+      let current: OpsCatalogShadowInput | undefined;
+      let flight: Promise<void> | undefined;
+      let closed = false;
+      const refresh = (): void => {
+        if (closed || flight) return;
+        flight = source.refresh().then(
+          value => { if (!closed) current = value; },
+          () => { if (!closed) current = { outcome: "unreadable" }; },
+        ).finally(() => { flight = undefined; });
+      };
+      cleanup.push({ resource: "ops_catalog_shadow", close: () => { closed = true; current = undefined; } });
+      refresh(); // Never await private I/O before allowing the public loop to start.
+      return { current: () => current, refresh };
+    })();
     const summary = await runDaemonFn(
       plan,
       {
+        ...(opsShadow ? {
+          secondaryCatalogShadowSource: opsShadow.current,
+          primaryPlanCommit: () => planReaders.revisions.revisionOf(activePlanRef.current)?.commit,
+        } : {}),
         refreshMerged,
         refreshMergedAsync: readTick ? buildDaemonReadRefresher({
           read: readTick, plan: () => activePlanRef.current, previous: () => lastProj,
@@ -1764,6 +1795,7 @@ export async function daemonCommand(
         onPlanReload: (fresh) => {
           activePlanRef.current = fresh;
           daemonPlanCopies.observe(fresh);
+          opsShadow?.refresh();
         },
         // W1-T3412: daemon selection uses the same complete-union calibration as the bounded
         // drain. A refused calibration returns undefined, preserving historic ordering.
@@ -1895,6 +1927,7 @@ export async function daemonCommand(
           refillRunsAsChild: () => runChildModeIsOn(childPolicy, childModeTracker.evidence).on && !flagValue(rest, "--plan"),
         } : {}),
         runOne: async (taskId, runOptions) => {
+          opsShadow?.refresh(); // Behind public selection, with at most one private read in flight.
           const childOptions = { planPath: target.planPath, owner: target.owner, allowStale, skipGitSync: !!flagValue(rest, "--plan"), handOffAtPrOpen: true, pairedTrialHost: "daemon" } as const;
           // W1-T9087: each dispatch asks the mode; under `auto` that is the evidence's current answer, ledgered when it changes.
           const dispatchPolicy = readRunChildPolicy(childPolicy);
@@ -2205,7 +2238,10 @@ export async function daemonCommand(
         // ONLY the top-level poll waits that return to the ordinary full-sweep gate. Sharing the
         // interruptible clock with a heartbeat ticker could consume a wake without reconciling.
         sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
-        sleepUntilSweepWake: githubEventWake.sleep,
+        sleepUntilSweepWake: opsShadow ? (ms) => {
+          opsShadow.refresh();
+          return githubEventWake.sleep(ms);
+        } : githubEventWake.sleep,
         acknowledgeSweepWake: githubEventWake.acknowledge,
         // The real wall clock backing the TIME-AWARE headroom ceiling (see
         // lib/daemon.ts's HeadroomPolicy) — resolves each window's own
