@@ -715,7 +715,9 @@ foreign_repos_snapshot() {
     printf '%s\n' unavailable
     return 0
   fi
-  node - "$state_dir" "$mounts" <<'NODE'
+  # W1-T12192: the scratch plan binds the coverage overlay below repos in every daemon container.
+  # That one bind is a known placement. Every other mount below repos still refuses.
+  node - "$state_dir" "$mounts" "${SCRATCH_REPOS_COVERAGE_DEST:-}" <<'NODE'
 const fs = require("node:fs");
 const path = require("node:path");
 try {
@@ -727,9 +729,12 @@ try {
     throw Error("malformed Mounts");
   const roots = mounts.filter(m => m.Destination === root);
   const relevant = mounts.filter(m => m.Destination === repos || repos.startsWith(m.Destination + "/"));
+  const below = mounts.filter(m => m.Destination.startsWith(repos + "/"));
+  const overlayDest = process.argv[4] || "";
+  const knownOverlay = m => m.Destination === overlayDest && m.Type === "bind" && validPath(m.Source);
   if (roots.length !== 1 || relevant.some(m => m.Type !== "bind" || !validPath(m.Source)) ||
       new Set(relevant.map(m => m.Destination)).size !== relevant.length ||
-      mounts.some(m => m.Destination.startsWith(repos + "/")))
+      below.length > 1 || !below.every(knownOverlay))
     throw Error("ambiguous or unsupported repos placement");
   const directory = p => {
     const canonical = fs.realpathSync(p), st = fs.statSync(canonical);

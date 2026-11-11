@@ -15,7 +15,7 @@
     - src/run-task.ts
     - test/fix-lane/pr-owner-clears-only-the-recovered-dispatch.test.ts
   status: queued
-  priority: 2
+  priority: 0.15
   attempts: 0
   acceptance:
     - claim: "pr-owner reports FREE, naming the recovery_id, only when the newest fix.dispatch for the PR has one distinct, fully matching released receipt stamped later than the dispatch; every held receipt for that exact dispatch, regardless of authorization_id, is strictly older than the release, and no later or equal held row, second distinct released receipt, live fix branch claim or active sweep disposition exists"

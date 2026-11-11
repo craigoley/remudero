@@ -1,0 +1,51 @@
+- id: W1-T12215
+  title: "A refusal amendment and a plan repair open in the repository that holds the task"
+  repo: remudero
+  depends_on: [W1-T12199, W1-T12205, W1-T12206, W1-T12207, W1-T12208, W1-T12209, W1-T12210]
+  priority: 1.1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the sweep changes a task file in one of two repositories
+  band_meaning: span
+  origin: operator-session#ops-cutover-2026-11-10
+  plan_refs:
+    - W1-T11768
+    - W1-T3390
+    - W1-T5348
+  files:
+    - src/lib/sweep.ts
+    - src/lib/refusal-amendment.ts
+    - test/fix-lane/a-refusal-amendment-and-a-plan-repair-open-in-the-repository-that-holds-the-task.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "A refusal amendment for a task that the ops catalog holds reads the task file from the ops checkout and opens its amendment in the ops repository"
+      proof: "grep: W1-T12215 criterion 1 in test/fix-lane/a-refusal-amendment-and-a-plan-repair-open-in-the-repository-that-holds-the-task.test.ts"
+    - claim: "A plan repair for a task that the ops catalog holds opens in the ops repository"
+      proof: "grep: W1-T12215 criterion 2 in test/fix-lane/a-refusal-amendment-and-a-plan-repair-open-in-the-repository-that-holds-the-task.test.ts"
+    - claim: "A refusal amendment and a plan repair for a task that the public plan holds open in the public repository, also when `task` is in the kinds"
+      proof: "grep: W1-T12215 criterion 3 in test/fix-lane/a-refusal-amendment-and-a-plan-repair-open-in-the-repository-that-holds-the-task.test.ts"
+    - claim: "The probe for an amendment that is already open reads the repository that holds the task"
+      proof: "grep: W1-T12215 criterion 4 in test/fix-lane/a-refusal-amendment-and-a-plan-repair-open-in-the-repository-that-holds-the-task.test.ts"
+    - claim: "If the lookup returns `unreadable`, the sweep opens no amendment and no repair, and reports the outcome code"
+      proof: "grep: W1-T12215 criterion 5 in test/fix-lane/a-refusal-amendment-and-a-plan-repair-open-in-the-repository-that-holds-the-task.test.ts"
+    - claim: "With no host file, both paths make the same calls on the same repository as today"
+      proof: "grep: W1-T12215 criterion 6 in test/fix-lane/a-refusal-amendment-and-a-plan-repair-open-in-the-repository-that-holds-the-task.test.ts"
+    - claim: "The sweep, the production caller, asks the lookup which repository holds the task, and the test goes through the sweep"
+      proof: "grep: findTaskInCatalogs( in src/lib/sweep.ts"
+  rationale: |
+    OBSERVED 2026-11-10 on the first-parent history of main, 48 hours, 165 merges: 6 merges were refusal amendments.
+    - `draftRefusalAmendment` in src/lib/refusal-amendment.ts drafts the amendment. The sweep gives it `readShard`, `probeExisting` and `openAmendmentPr` in src/lib/sweep.ts, all bound to the public checkout and the public repository.
+    - The plan repair opens its pull request with `createPlanPrRest` in the same file.
+    - Both paths change a task file that exists. So they do not follow the switch. They follow the task file.
+    - This is one of five writer tasks. Each one waits for the readers of both catalogs.
+    - The switch is the host file `<state dir>/plan-destination.json`. If the file is absent, the switch is off and the behaviour is byte-identical to today. This task reads no kind: it applies while the file names a repository, also after `task` is removed from the kinds.
+  design: |
+    Before each of the two paths, call `findTaskInCatalogs` for the task id. Bind the read of the task file, the probe, the worktree and the create call to the checkout and the repository of the catalog that holds the task.
+    The shared landing for task files, from the interim task of this filing, takes the repository as an argument.
+    An amendment in the ops repository edits a task file there. The gate of the ops repository must accept that edit. That work is in the ops repository and is not filed here.
+    NOT IN SCOPE: the cause of a refusal, and the text of an amendment.
+  falsifier: |
+    Open an amendment for an ops task in the public repository and criterion 1 must fail. Move the amendment of a public task to the destination and criterion 3 must fail. Open an amendment when the lookup is unreadable and criterion 5 must fail. Restore and require all seven to pass.

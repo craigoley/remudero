@@ -1,0 +1,49 @@
+- id: W1-T12211
+  title: "The board and serve show both catalogs, and only two fields of an ops task publicly"
+  repo: remudero
+  depends_on: [W1-T12207]
+  priority: 1.1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # text of a private task file goes onto the public board
+  band_meaning: blast-radius
+  origin: operator-session#ops-cutover-2026-11-10
+  plan_refs:
+    - W1-T11768
+    - W1-T11770
+  files:
+    - src/lib/status-board.ts
+    - src/lib/serve-plan-reload.ts
+    - src/lib/board.ts
+    - test/console-api/board/the-board-and-serve-show-tasks-from-both-catalogs.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "While the host file names a repository, the status board and the plan that serve reloads hold the tasks of both catalogs"
+      proof: "grep: W1-T12211 criterion 1 in test/console-api/board/the-board-and-serve-show-tasks-from-both-catalogs.test.ts"
+    - claim: "The public board shows the id, the status, the title and the acceptance criteria of an ops task, and no other field of it. The test puts a marker in the rationale, the design, the falsifier, the note, the origin and the files, and finds none of them in the public output"
+      proof: "grep: W1-T12211 criterion 2 in test/console-api/board/the-board-and-serve-show-tasks-from-both-catalogs.test.ts"
+    - claim: "Each row of an ops task names its catalog, so that a reader can tell where the task file is"
+      proof: "grep: W1-T12211 criterion 3 in test/console-api/board/the-board-and-serve-show-tasks-from-both-catalogs.test.ts"
+    - claim: "If the ops catalog is unreadable, the board says that it is unreadable and shows the public tasks. It does not show a count of zero ops tasks"
+      proof: "grep: W1-T12211 criterion 4 in test/console-api/board/the-board-and-serve-show-tasks-from-both-catalogs.test.ts"
+    - claim: "With no host file, the board and serve make the same reads and give the same output as today"
+      proof: "grep: W1-T12211 criterion 5 in test/console-api/board/the-board-and-serve-show-tasks-from-both-catalogs.test.ts"
+    - claim: "The plan reload of serve, the production caller, composes both catalogs, and the test goes through that reload"
+      proof: "grep: planDestinationRepository( in src/lib/serve-plan-reload.ts"
+  rationale: |
+    OBSERVED 2026-11-10: the board and serve read the public plan only, so an ops task would be invisible to the operator.
+    - Readers: src/lib/serve-plan-reload.ts, src/lib/status-board.ts (it calls `loadPlan` on the public checkout) and src/lib/board.ts.
+    - The operator ruled on 2026-11-10: a public pull request body and the public board may carry the title and the acceptance criteria of a task held in the private repository, and no other field of it. The rationale, the design notes, the evidence and every other field stay private.
+    - This narrows the rule of W1-T11768 for those two fields only. W1-T11770 kept every byte of the ops catalog off the status board and off the views of serve. This task changes that for the two fields and for nothing else.
+    - The id and the status of an ops task are already public: the id is in the trailer of its public pull request, and the status follows from the merge.
+    - The switch is the host file `<state dir>/plan-destination.json`. If the file is absent, the switch is off and the behaviour is byte-identical to today. This task adds no kind. It must merge before `task` is turned on.
+  design: |
+    Compose the plan in the plan reload of serve and in the status board. Mark each task with its catalog.
+    Build the public row of an ops task from an explicit list of fields. Do not build it from the task object with fields removed, so that a new field of a task is private by default.
+    The console at app.remudero.com needs a sign-in. The builder lists each surface that this task changes and says which ones are public. A surface that is not public may show more only if the operator says so.
+    NOT IN SCOPE: the selector, the merge credit, and a new console screen.
+  falsifier: |
+    Read one catalog and criterion 1 must fail. Add the rationale of an ops task to the public row and criterion 2 must fail. Show zero for an unreadable catalog and criterion 4 must fail. Restore and require all six to pass.

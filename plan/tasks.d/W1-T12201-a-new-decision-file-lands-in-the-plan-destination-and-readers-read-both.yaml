@@ -1,0 +1,53 @@
+- id: W1-T12201
+  title: "A new decision file lands in the plan destination, and the reader reads both roots"
+  repo: remudero
+  depends_on: [W1-T12200]
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the decision landing starts to push to a second repository
+  band_meaning: span
+  origin: operator-session#ops-cutover-2026-11-10
+  plan_refs:
+    - W1-T191
+    - W1-T3212
+    - W1-T11768
+  files:
+    - src/lib/feedback-landing.ts
+    - src/lib/plan-pr-emitter.ts
+    - src/run-task.ts
+    - src/cli/commands/run-task-verb.ts
+    - test/inbox/a-new-decision-file-lands-in-the-plan-destination-and-readers-read-both.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "With `decision` in the kinds of the host file, `recordDecision`, `recordDecisionAsync` and `recordRuling` commit the new file in the destination checkout, push to that repository and open the landing pull request there"
+      proof: "grep: W1-T12201 criterion 1 in test/inbox/a-new-decision-file-lands-in-the-plan-destination-and-readers-read-both.test.ts"
+    - claim: "With no host file, each of the three lands on the same branch of the same repository with the same calls as today"
+      proof: "grep: W1-T12201 criterion 2 in test/inbox/a-new-decision-file-lands-in-the-plan-destination-and-readers-read-both.test.ts"
+    - claim: "`readStandingDecisions` reads the public root and the destination checkout while the host file names a repository, also when `decision` is not in the kinds"
+      proof: "grep: W1-T12201 criterion 3 in test/inbox/a-new-decision-file-lands-in-the-plan-destination-and-readers-read-both.test.ts"
+    - claim: "The landing in a destination checkout that has no scripts directory passes its preflight for a change that holds only decision files"
+      proof: "grep: W1-T12201 criterion 4 in test/inbox/a-new-decision-file-lands-in-the-plan-destination-and-readers-read-both.test.ts"
+    - claim: "If the resolver gives `unreadable`, the decision lands in no repository. The ledger row of the decision stays as its only record, and the landing reports the cause"
+      proof: "grep: W1-T12201 criterion 5 in test/inbox/a-new-decision-file-lands-in-the-plan-destination-and-readers-read-both.test.ts"
+    - claim: "The run verb, the production caller of `recordDecisionAsync`, resolves the destination, and the test goes through that caller"
+      proof: "grep: resolvePlanDestination( in src/cli/commands/run-task-verb.ts"
+  rationale: |
+    OBSERVED 2026-11-10: decision files are the smallest family of plan files, with one reader and about 1 merge in 48 hours. They go first.
+    - Writers: `recordDecision`, `recordDecisionAsync` and `recordRuling` in src/lib/feedback-landing.ts. The run verb in src/cli/commands/run-task-verb.ts calls `recordDecisionAsync`. The ruling path in src/run-task.ts calls `recordRuling`.
+    - Reader: `readStandingDecisions(root)` in src/run-task.ts, which reads `DECISIONS.md` and `plan/decisions.d`.
+    - `LandingKind` already has a `targetRepository`, but the landing still pushes to `origin` of the root it is given.
+    - The plan preflight runs its checks inside the checkout that it is given. The ops checkout has no lint scripts, so the landing needs a preflight that works there.
+    - The switch is the host file `<state dir>/plan-destination.json`. If the file is absent, the switch is off and the behaviour is byte-identical to today. Removing `decision` from the kinds turns this kind off.
+    - Work in the ops repository comes first and is not filed here: the fleet App must be installed there, and its gate must accept a decision file (today it gives decision files a leak scan only).
+  design: |
+    In each writer, call `resolvePlanDestination("decision")` and pass its checkout as the landing root and its repository as `targetRepository`.
+    A file is edited in the repository that holds it. Nothing moves a decision file that is in the public repository.
+    For the preflight, run the checks that need scripts from the harness checkout against the destination tree, or leave out the checks that read only task files when no task file changed. The builder chooses and states the choice in the pull request.
+    In `readStandingDecisions`, add the destination checkout as a second root through `planDestinationRepository`.
+    NOT IN SCOPE: feedback files and task files.
+  falsifier: |
+    Push to the public repository with the kind on and criterion 1 must fail. Change a call with no host file and criterion 2 must fail. Read one root and criterion 3 must fail. Land in the public repository on `unreadable` and criterion 5 must fail. Restore and require all six to pass.
