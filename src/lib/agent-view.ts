@@ -45,6 +45,12 @@ export const AGENT_VIEW_VERSION = 1;
 export const AGENT_QUALIFICATION_GENERATION = "operator-agent-records-v1";
 /** A part's time-dependent states (expiry, staleness) are recomputed at least this often with no new fact. */
 export const AGENT_CLOCK_MS = 60_000;
+/**
+ * BACKSTOP: how long an instance's builds are tallied before one `agent.built` row is written. A row per build was
+ * 1,043 ledger rows in 13 hours (2026-11-10), each one moving the ledger every reader folds; `read_model.view_builds`
+ * reports on the same 10 minutes.
+ */
+export const AGENT_BUILT_ROW_WINDOW_MS = 10 * 60_000;
 
 /** Every part, and the route whose body it is (`proposals` is the engine the nav badge counts). */
 export const AGENT_VIEW_PARTS = {
@@ -180,6 +186,8 @@ export interface AgentViewOptions<S extends { instance: string; tickedAt?: numbe
   ledgerSource: (state: S, now: number) => ViewSource;
   folds?: AgentFolds;
   log?: (step: string, extra: Record<string, unknown>) => void;
+  /** How long builds are tallied into one `agent.built` row; 0 writes a row per build. */
+  builtRowWindowMs?: number;
 }
 
 /** What one instance's bodies were built from, so the shadow's legacy side reads that build's inputs. */
@@ -206,6 +214,24 @@ export function createAgentView<S extends { instance: string; tickedAt?: number 
   const folds = opts.folds ?? AGENT_FOLDS;
   const byName = new Map(opts.instances.map((instance) => [instance.name, instance]));
   const built = new Map<string, { memo: string; bodies: ReturnType<typeof agentPartBodies>; info: Built }>();
+  const builtRowWindowMs = opts.builtRowWindowMs ?? AGENT_BUILT_ROW_WINDOW_MS;
+  const tallies = new Map<string, { since: number; builds: number; seq: number; rows: number }>();
+  /** The first build after start is written at once so a cold start stays visible; later ones wait for the window. */
+  const noteBuilt = (instance: string, now: number, seq: number, rows: number): void => {
+    const tally = tallies.get(instance);
+    if (tally) Object.assign(tally, { builds: tally.builds + 1, seq, rows });
+    else {
+      tallies.set(instance, { since: now, builds: 0, seq, rows });
+      opts.log?.("agent.built", { instance, builds: 1, seq, rows });
+    }
+  };
+  /** Writes the window's row once it has run its length; a window with no build writes none. */
+  const flushBuilt = (instance: string, now: number): void => {
+    const tally = tallies.get(instance);
+    if (!tally || tally.builds === 0 || now - tally.since < builtRowWindowMs) return;
+    opts.log?.("agent.built", { instance, builds: tally.builds, seq: tally.seq, rows: tally.rows });
+    Object.assign(tally, { since: now, builds: 0 });
+  };
   const shown = new WeakMap<AgentViewData, Built>();
   const legacyMemos = new Map<string, LedgerRotationMemo>();
   const held = new WeakMap<ReadModelDb, Map<string, AgentAnalytics>>();
@@ -239,8 +265,9 @@ export function createAgentView<S extends { instance: string; tickedAt?: number 
           const input = { ledgerDir: instance.ledgerDir, instance: instance.name, ...(instance.repo ? { repository: instance.repo } : {}), now, rows: fold.rows, ...(committed.analytics ? { analytics: committed.analytics } : {}) };
           entry = { memo, bodies: agentPartBodies(input), info: { instance, builtMs: now, newestTsMs: fold.newestTsMs, ...(committed.analytics ? { analytics: committed.analytics } : {}) } };
           built.set(instance.name, entry);
-          opts.log?.("agent.built", { instance: instance.name, seq: fold.seq, rows: fold.rows.length });
+          noteBuilt(instance.name, now, fold.seq, fold.rows.length);
         }
+        flushBuilt(instance.name, now);
         const ledger = opts.ledgerSource(slot.state, now);
         const { bodies, info } = entry;
         return (Object.keys(AGENT_VIEW_PARTS) as AgentViewPart[]).map((part) => {

@@ -1,0 +1,28 @@
+- id: W1-T12249
+  title: "Record whether the overlapping retro preflight changes are already on main"
+  repo: remudero
+  depends_on: []
+  type: recon
+  verify: auto
+  risk: low
+  status: queued
+  attempts: 0
+  design: |
+    CREATES: docs/forensics/retro-preflight-overlap.md
+    Read origin/main for the two tasks that edit src/lib/retro-preflight.ts and write the finding to the new page. Cite the merged pull request or the open branch for each task, and say whether a rebase is needed.
+  files:
+    - docs/forensics/retro-preflight-overlap.md
+  acceptance:
+    - claim: "The page records the origin/main state of W1-T11335"
+      proof: "grep: W1-T11335 in docs/forensics/retro-preflight-overlap.md"
+    - claim: "The page records the origin/main state of W1-T11326"
+      proof: "grep: W1-T11326 in docs/forensics/retro-preflight-overlap.md"
+    - claim: "The page states whether a rebase of src/lib/retro-preflight.ts is needed"
+      proof: "grep: rebase in docs/forensics/retro-preflight-overlap.md"
+  origin: "followup:W1-T11337-1794354709463:2026-11-10T23:55:54.225Z:1"
+  rationale: >-
+    From the 2026-11-10 follow-up on W1-T11337-1794354709463, ratified via rmd approve:
+  
+    follow-up harvest [research]: Check whether W1-T11335 and W1-T11326 are merged or open. Both
+    edit `src/lib/retro-preflight.ts`, so this decides whether a rebase is needed. — from
+    W1-T11337 (run W1-T11337-1794354709463)

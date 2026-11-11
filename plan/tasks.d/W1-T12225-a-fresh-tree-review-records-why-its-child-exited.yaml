@@ -1,0 +1,65 @@
+- id: W1-T12225
+  title: "A fresh-tree review records why its child exited, in a field of its own"
+  repo: remudero
+  depends_on: []
+  priority: 0.8
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the review command names its exits and the gate records the name; two modules, one concern
+  band_meaning: span
+  origin: operator-session#freshness-restart-findings-2026-11-10
+  plan_refs:
+    - W1-T3723
+    - W1-T4055
+    - W1-T9727
+    - W1-T11152
+  files:
+    - src/run-task.ts
+    - src/cli/commands/review.ts
+    - test/review/a-fresh-tree-review-records-why-its-child-exited.test.ts
+    - test/worker/a-review-child-start-is-attributed-and-starts-from-a-bundle.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "When the child of a fresh-tree review exits with a code that is not 0, the row `review.ran_from_fresh_tree` carries the field `exit_cause`. The value is the name that the review command gave to the exit that it took. The test drives `buildReviewerCodeFreshnessGate` with a stale reading"
+      proof: "grep: W1-T12225 criterion 1 in test/review/a-fresh-tree-review-records-why-its-child-exited.test.ts"
+    - claim: "The review command gives a name to each exit that returns 1 or 2. The test drives the real command to three exits: the pull request closed before the review, a verdict that the command did not post, and a verdict that is not `success`. It reads three different names"
+      proof: "grep: W1-T12225 criterion 2 in test/review/a-fresh-tree-review-records-why-its-child-exited.test.ts"
+    - claim: "A child that a signal ends has the cause `signal` with the name of the signal. A child that exits with a code that is not 0 and reports no name has the cause `not-reported`. Such a row never lacks the field"
+      proof: "grep: W1-T12225 criterion 3 in test/review/a-fresh-tree-review-records-why-its-child-exited.test.ts"
+    - claim: "The row keeps the field `failure` with the stderr text, as today. A child that exits 0 writes no `exit_cause`"
+      proof: "grep: W1-T12225 criterion 4 in test/review/a-fresh-tree-review-records-why-its-child-exited.test.ts"
+    - claim: "The value of `exit_cause` is one short name from a fixed set. It never holds stderr text, a path or a credential"
+      proof: "grep: W1-T12225 criterion 5 in test/review/a-fresh-tree-review-records-why-its-child-exited.test.ts"
+    - claim: "The gate writes the field on the row"
+      proof: "grep: exit_cause in src/run-task.ts"
+  rationale: |
+    OBSERVED 2026-11-04T01:56Z to 2026-11-11T01:56Z in the ledger of the core instance: the fresh-tree review ran 56 times and its child exited with a code that is not 0 in 26 of them.
+    - The child exited with code 2 sixteen times and with code 1 ten times.
+    - The field `failure` of the row holds stderr noise. So the cause of the 26 exits is not established.
+    - 43 of the 56 runs used the slow `tsx` entry.
+    - A fresh-tree review is a review that a child process runs from a checkout of main, when the reviewer code of the daemon is stale (W1-T3723).
+    READ at origin/main 17745c6bf:
+    - `spawnRmdReviewForFreshTree` in src/run-task.ts gives the gate the last part of the stderr of the child. `buildReviewerCodeFreshnessGate` writes it as `failure` on `review.ran_from_fresh_tree` (W1-T4055).
+    - The review command in src/cli/commands/review.ts returns 2 at seven places. Examples: the pull request closed before the review, the task text at the head is unavailable, and the command did not post the verdict.
+    - The last return of the command is 1 when the verdict is not `success`. So an exit with code 1 can be a review that did its work. The row does not say which it was.
+    - The child already reports its entry to the parent on file descriptor 3 (W1-T11152). The exit has no such report.
+    W1-T12226 uses the new field to find the cause of each failure class and to fix it. W1-T12227 sends more reviews through this path, so the cause must be readable first.
+  design: |
+    In the review command, give each `return 1` and each `return 2` a short name, for example `closed-before-review`, `verdict-not-posted` and `verdict-failure`. Keep the names in one exported list.
+    The exit report uses a result file, not file descriptor 3. MEASURED 2026-11-10 on macOS with Node 24.22.2 and tsx 4.23.15: a child that `bin/rmd` starts through `tsx` does not get descriptor 3 of the launcher, and a write to descriptor 3 from that child failed with ENXIO. In that child, descriptor 3 belongs to Node. The launcher is a shell, so its entry line (W1-T11152) is not affected.
+    `spawnRmdReviewForFreshTree` makes the result file path in a temporary directory and gives it to the child with the flag `--exit-cause-file`. It reads the file at the `close` event and removes the directory.
+    Before the command returns a code that is not 0, it writes one line with the name to that file. A command that gets no flag writes nothing. A verdict that is not `success` has a name that holds the verdict state.
+    A command that throws writes `threw-in-<step>` and the class name of the error. The steps are a fixed list. The gate writes the class name as `exit_error_class`.
+    The parent accepts a name by its form: lower-case letters, digits and hyphens, at most 48 characters. The child runs newer code than the parent, so it can hold a name that the parent does not know. Any other content gives `not-reported`.
+    Pass the name to the gate the way `onEntry` passes the entry. In the gate, add `exit_cause` to the row when the code is not 0.
+    A child that a signal ends gets `signal` from the `close` event, and the gate writes the signal name as `exit_signal`. A child that reports nothing gets `not-reported`.
+    The flag adds two arguments to the child. test/worker/a-review-child-start-is-attributed-and-starts-from-a-bundle.test.ts reads the whole argument list of the child, so it changes with this task.
+    Do not change an exit code, the `failure` text or the fallback to `review.skipped_stale_reviewer_code`.
+    NOT IN SCOPE: a fix for any cause (W1-T12226), and the choice of path at admission (W1-T12227).
+  falsifier: |
+    Remove the write of the name in the review command and criteria 1 and 2 must fail. Give two exits the same name and criterion 2 must fail. Write no field for a child that a signal ends and criterion 3 must fail. Copy the stderr text into the field and criterion 5 must fail. Restore and require all six to pass.
+  note: |
+    After the merge, read the rows: `exit_cause` is present on each row with `exit_code` 1 or 2. The share of `not-reported` shows how many children ended before the command could report.

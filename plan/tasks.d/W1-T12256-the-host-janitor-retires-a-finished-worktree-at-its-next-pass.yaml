@@ -1,0 +1,67 @@
+- id: W1-T12256
+  title: "The Azure host janitor retires a finished worktree at its next pass"
+  repo: remudero
+  depends_on:
+    - W1-T12255
+  priority: 1.0
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # a deletion rule of the host janitor for worktrees under the home of the service user
+  band_meaning: blast-radius
+  origin: operator-session#janitor-disk-waste-2026-11-11
+  plan_refs:
+    - W1-T8863
+    - W1-T8861
+    - W1-T4770
+    - W1-T11941
+  files:
+    - deploy/rmd-host-cleanup.sh
+    - test/deploy/the-host-janitor-retires-a-finished-worktree-at-its-next-pass.test.ts
+    - test/host-root-disk-janitor.test.ts
+    - test/deploy/the-azure-janitor-preserves-then-retires-idle-checkouts.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "`sweep_worktree` retires a linked worktree that is clean, whose HEAD commit GitHub holds, and whose pull requests are all merged or closed. It does so although a file in the worktree was written inside the idle time"
+      proof: "grep: W1-T12256 criterion 1 in test/deploy/the-host-janitor-retires-a-finished-worktree-at-its-next-pass.test.ts"
+    - claim: "Such a worktree stays when it has uncommitted changes, when its HEAD commit is not on GitHub, when it is locked, or when it holds ignored data other than node_modules and coverage"
+      proof: "grep: W1-T12256 criterion 2 in test/deploy/the-host-janitor-retires-a-finished-worktree-at-its-next-pass.test.ts"
+    - claim: "Such a worktree stays when a process holds it open, when a running container mounts it, or when the pass cannot read the open files or the container mounts"
+      proof: "grep: W1-T12256 criterion 3 in test/deploy/the-host-janitor-retires-a-finished-worktree-at-its-next-pass.test.ts"
+    - claim: "A worktree with an open pull request, a worktree with no pull request and every standalone clone keep the idle rule of today"
+      proof: "grep: W1-T12256 criterion 4 in test/deploy/the-host-janitor-retires-a-finished-worktree-at-its-next-pass.test.ts"
+    - claim: "The pass never removes a path outside its worktree roots: a symlink in a root that points to a finished worktree outside every root leaves that worktree in place"
+      proof: "grep: W1-T12256 criterion 5 in test/deploy/the-host-janitor-retires-a-finished-worktree-at-its-next-pass.test.ts"
+    - claim: "With `DRY_RUN=1` the pass prints `REMOVE <path> (linked worktree, pull request finished)` and removes nothing. An applied pass adds the bytes to its `reclaim-total` line and writes its audit row"
+      proof: "grep: W1-T12256 criterion 6 in test/deploy/the-host-janitor-retires-a-finished-worktree-at-its-next-pass.test.ts"
+    - claim: "The host janitor calls the guard function of W1-T12255"
+      proof: "grep: rmd_commit_pulls_finished in deploy/rmd-host-cleanup.sh"
+  rationale: |
+    OBSERVED 2026-11-10 on the Azure host: `~/rmd-work` held 20 GB in 21 finished hand worktrees of about 740 MB each, and the root disk went to 99% used with 1 GiB free. A person removed the worktrees.
+    - The janitor log of that day has `FAIL / is at 99% with 1G free (/dev/root), past its mark 85%`.
+    - The crontab of the service user already names `~/rmd-work` as a worktree root (`RMD_CLEANUP_WORKTREE_ROOTS=/mnt/scratch/worktrees:/home/craigoleyagent/rmd-work`). The pass runs every six hours, at minute 7.
+    - The last 400 janitor decisions for `~/rmd-work/wt-*`, read on 2026-11-11: 66 times `written within <n> min`, 50 times `recent or unverified Git HEAD activity`, 50 times `Docker mount identity unreadable (fail closed)`, 153 times `Git metadata is unreadable or missing`, 31 times `REMOVE (archived orphan)` and 1 time `REMOVE (linked worktree)`.
+    - So the janitor reaches these worktrees. It keeps a finished one for six hours after its last write, and then until the next pass. A hand lane makes worktrees faster than that.
+    READ at origin/main 3c6e5e476.
+    - `sweep_worktree` (deploy/rmd-host-cleanup.sh:621) tests `git_head_idle` and `is_worktree_idle` before it reads anything about publication.
+    - deploy/install-host-units.sh installs the shared guard beside the janitor, and the janitor already calls `rmd_commit_published` from it.
+    - W1-T8863 (merged) set six hours as the retention time at every level of disk pressure. A clean worktree whose HEAD commit is in a merged or closed pull request has no work in progress to protect.
+    CHECKED for overlap: W1-T11941 (queued) lists such worktrees from the daemon tick and deletes nothing. W1-T12255 adds the guard function and the same rule on the Mac.
+  design: |
+    In `sweep_worktree`, for a linked worktree that is not orphaned and not locked:
+    - Before `git_head_idle` and `is_worktree_idle`, test: `worktree_clean`, `worktree_ignored_safe`, `worktree_saved`, and `rmd_commit_pulls_finished "$wt" "$head"` from the shared guard.
+    - If all hold, do not apply the two idle tests. Run every other test of today: `is_open`, the Docker mount tests, and the second check of each fact just before the removal. In that second check, leave out the two idle tests for this class only.
+    - Print `REMOVE $wt (linked worktree, pull request finished)`. Remove through `git worktree remove`, write the audit row and add the bytes to the tally, as the linked worktree branch does today.
+    - If one test does not hold, the code of today runs with no change.
+    The GitHub read needs a token under cron. The janitor already reads `RMD_CLEANUP_GH_TOKEN_FILE` for the publication check (2026-11-07). Use the same path.
+    NOT IN SCOPE: standalone clones, orphaned worktrees, scratch units, the six hours for every other class, the schedule of the pass, and the Docker mount probe.
+  falsifier: |
+    Keep the idle tests for a finished worktree and criterion 1 must fail. Retire a worktree with an uncommitted change and criterion 2 must fail. Retire one after an unreadable container mount and criterion 3 must fail. Retire a standalone clone by the new rule and criterion 4 must fail. Follow the symlink and criterion 5 must fail. Restore and require all seven to pass.
+  note: |
+    Host and account: the Azure host, in the six-hourly pass of the service user `craigoleyagent`, from its crontab.
+    Owner of the paths: the service user. Roots: `/mnt/scratch/worktrees` and `~/rmd-work`.
+    Never removed: a worktree with uncommitted or unpushed work, a locked worktree, a worktree in use or mounted in a container, the live checkouts `~/rmd-mint` and `~/rmd-op`, and anything outside the roots.
+    This narrows the six-hour retention time of W1-T8863 for one class, as W1-T12255 does on the Mac.
+    Seen and not filed: `Docker mount identity unreadable (fail closed)` appears 25,043 times in the janitor log, in 1,092 passes. It holds every candidate of a pass. No mount was unreadable when read by hand on 2026-11-11, so the cause is not known.
