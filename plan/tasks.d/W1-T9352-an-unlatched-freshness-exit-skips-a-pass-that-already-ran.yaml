@@ -14,6 +14,9 @@
     - src/lib/daemon.ts
     - test/an-unlatched-freshness-exit-skips-a-pass-that-already-ran.test.ts
     - test/a-latched-restart-exits-when-its-last-lane-settles.test.ts
+  # refusal-amendment (W1-T9352, run work-fix-dispatch-W1-T9352-1794408356923-3fb5@dc9f5193dff259255607c2b59af628e320502b97, 2026-11-11T15:16:56.309Z): the worker refused criterion 1 [contradicts-another-criterion] — proposed re-scope-criteria: reconcile the contradicting criteria — re-scope one so both can hold at once
+  #   worker evidence: Skipping the exit pass when a full pass completed since the advance contradicts the operator's rule that the stale path runs the full sweep last, which W1-T1272 enforces.
+  #   this task is held from dispatch until its record changes; an Architect must make the change above
   status: queued
   priority: 1  # raised 2026-11-11 on the 7-day restart study (36 exits to 2026-11-11): W1-T9812 depends on it; was 2.5
   attempts: 0
