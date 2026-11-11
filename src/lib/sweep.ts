@@ -31,6 +31,7 @@ import {
   deployStateRows, mainWorkflowStateRows, reconcileFleetState,
   type DeployStateReader, type FleetStateRow,
 } from "./state-reconciler.js";
+import { loadFleetStateCommitStore, type FleetStateCommitStore } from "./fleet-state-commit-store.js";
 import { CONVENTIONAL_LIMITS, fitConventionalTitle } from "./commit-message.js";
 import { mintNextTaskId } from "./task-id.js";
 import { gatedRemoteRefReserver, reserveTaskIdRemote, type RemoteReserveDeps } from "./task-id-reservation.js";
@@ -1552,6 +1553,8 @@ export interface FleetStateParts {
   union_rotations: number;
   commits_walked: number;
   commit_reads: number;
+  /** W1-T12234: the reads that the commit store answered. `commit_reads` does not count them. */
+  commit_reads_kept: number;
   commit_read_ms: number;
   deploy_ms: number;
 }
@@ -2411,10 +2414,12 @@ export function productionDispatchBreakJudge(opts: {
 // W1-T11267: retain the digest-backed reconciliation slice and immutable commit files across passes.
 const FLEET_STATE_HISTORY_SLICE: EscalationTriageSlice = {
   holder: "sweep.fleet-state-history",
+  sharedSnapshot: true,
   steps: ["reconcile.repaired", "reconcile.repair_failed", "reconcile.escalated", "main.run_gap.dispatched", "deploy.ok"],
 };
 let fleetStateHistoryReader: EscalationTriageHistoryReader | undefined;
-const fleetStateChangedFiles = new Map<string, readonly string[]>();
+// W1-T12234: one commit store for each state directory, loaded once in a daemon lifetime.
+const fleetStateCommitStores = new Map<string, FleetStateCommitStore>();
 
 export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   SweepDeps,
@@ -5135,7 +5140,22 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     // degrades to "no gap found this pass", never a guessed dispatch.
     readFleetState: async (live) => {
       const parts: FleetStateParts = {
-        union_ms: 0, union_rotations: 0, commits_walked: 0, commit_reads: 0, commit_read_ms: 0, deploy_ms: 0,
+        union_ms: 0, union_rotations: 0, commits_walked: 0, commit_reads: 0, commit_reads_kept: 0, commit_read_ms: 0, deploy_ms: 0,
+      };
+      let store = fleetStateCommitStores.get(dirname(ledgerPath));
+      if (!store) {
+        store = loadFleetStateCommitStore(dirname(ledgerPath));
+        fleetStateCommitStores.set(dirname(ledgerPath), store);
+        if (store.unreadable !== undefined) log("reconcile.commit_store_unreadable", { reason: store.unreadable });
+      }
+      const commitStore = store;
+      // The look-back of this pass. A row observes its workflows after this function returns, so a
+      // positive answer found then is saved at once.
+      const walked = new Set<string>();
+      let rowsBuilt = false;
+      const saveCommitStore = (): void => {
+        const saved = commitStore.save();
+        if (!saved.ok) log("reconcile.commit_store_unwritable", { reason: saved.reason });
       };
       const unionStarted = nowMsImpl();
       readdirSync(dirname(ledgerPath));
@@ -5158,10 +5178,22 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         }
       };
       const runCount = async (sha: string, workflow?: string): Promise<number | undefined> => {
+        // The callers ask one question of a count: is it more than 0. A kept answer is "yes".
+        if (workflow ? commitStore.hasWorkflowRuns(sha, workflow) : commitStore.hasRuns(sha)) {
+          parts.commit_reads_kept++;
+          return 1;
+        }
         const endpoint = workflow ? `actions/workflows/${workflow}/runs` : "actions/runs";
         const body = await readCommit(["api", `repos/${owner}/${repo}/${endpoint}?head_sha=${sha}&per_page=1`]) as
           { total_count?: unknown } | undefined;
-        return typeof body?.total_count === "number" ? body.total_count : undefined;
+        const count = typeof body?.total_count === "number" ? body.total_count : undefined;
+        // A count of 0 and an unreadable count are not kept: a run can still appear.
+        if (count !== undefined && count > 0 && walked.has(sha)) {
+          if (workflow) commitStore.setHasWorkflowRuns(sha, workflow);
+          else commitStore.setHasRuns(sha);
+          if (rowsBuilt) saveCommitStore();
+        }
+        return count;
       };
       try {
         rows.push(...await mainWorkflowStateRows({
@@ -5171,22 +5203,27 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
             if (!Array.isArray(body)) throw new Error("main commit listing is not an array");
             return body.filter((c) => typeof c?.sha === "string").map((c) => ({ sha: c.sha, parents: (c.parents ?? []).map((p) => p.sha) }));
           },
-          countRunsForSha: (sha) => { parts.commits_walked++; return runCount(sha); },
+          countRunsForSha: (sha) => { parts.commits_walked++; walked.add(sha); return runCount(sha); },
           countWorkflowRuns: runCount,
           changedFiles: async (sha) => {
-            const cached = fleetStateChangedFiles.get(sha);
-            if (cached !== undefined) return cached;
+            const cached = commitStore.changedFiles(sha);
+            if (cached !== undefined) { parts.commit_reads_kept++; return cached; }
             const body = await readCommit(["api", `repos/${owner}/${repo}/commits/${sha}`]) as
               { files?: Array<{ filename: string }> } | undefined;
             const files = body?.files?.map((f) => f.filename);
-            if (files !== undefined) fleetStateChangedFiles.set(sha, files);
+            if (files !== undefined) commitStore.setChangedFiles(sha, files);
             return files;
           },
           dispatch: (workflow) => ghRunImpl("gh", ["api", "-X", "POST", `repos/${owner}/${repo}/actions/workflows/${workflow}/dispatches`, "-f", "ref=main"]),
         }, readWorkflowPushTriggers(repoDir), history, MAIN_RUN_GAP_LOOKBACK));
+        // The walk reached every commit of the look-back, so a commit that left it is removed. An empty
+        // listing removes nothing.
+        if (walked.size > 0) commitStore.retain(walked);
       } catch (error) {
         log("reconcile.unreadable", { pipeline: "ci", reason: String((error as Error)?.message ?? error) });
       }
+      rowsBuilt = true;
+      saveCommitStore();
       const deployStarted = nowMsImpl();
       try {
         const failedAt = (): number | undefined => {
@@ -7092,23 +7129,26 @@ export function validateReviewCapacityPolicy(raw: unknown): ReviewCapacityPolicy
   return output;
 }
 
-/** Reads the row {@link validateReviewLanesRow} validates. Split from it so every refusal arm above
- *  is reachable from a test without a temp policy file on disk. */
-function loadReviewPolicy(): { value: number; min: number; max: number; capacity: ReviewCapacityPolicy } {
-  const path = installPolicyPath();
-  const raw = parseYaml(readFileSync(path, "utf8")) as {
-    sweep?: { reviewLanes?: unknown; reviewCapacity?: unknown };
-  } | null;
-  const value = validateReviewLanesRow(raw?.sweep?.reviewLanes);
-  const row = raw?.sweep?.reviewLanes as Record<string, unknown>;
-  return {
-    value,
-    min: row.min as number,
-    max: row.max as number,
-    capacity: validateReviewCapacityPolicy(raw?.sweep?.reviewCapacity),
-  };
+/** The review policy the two rows give. The runtime ceiling `laneMax` is the host worker budget: the
+ *  `reviewLanes` row's own `max` bounds only edits of the base value. A base value above the budget
+ *  is refused, never clamped (rule 2). Split from the file read so a test can reach the refusal. */
+export function reviewPolicyFromRows(
+  sweep: { reviewLanes?: unknown; reviewCapacity?: unknown } | undefined,
+): { value: number; min: number; laneMax: number; capacity: ReviewCapacityPolicy } {
+  const value = validateReviewLanesRow(sweep?.reviewLanes);
+  const capacity = validateReviewCapacityPolicy(sweep?.reviewCapacity);
+  if (value > capacity.hostWorkerBudget) {
+    throw new PolicyError(
+      `policy.yaml: 'sweep.reviewLanes.value' (${value}) is above the review ceiling derived from ` +
+        `'sweep.reviewCapacity.hostWorkerBudget.value' (${capacity.hostWorkerBudget}) (W1-T11841).`,
+    );
+  }
+  const row = sweep?.reviewLanes as Record<string, unknown>;
+  return { value, min: row.min as number, laneMax: capacity.hostWorkerBudget, capacity };
 }
-const REVIEW_POLICY = loadReviewPolicy();
+const REVIEW_POLICY = reviewPolicyFromRows(
+  (parseYaml(readFileSync(installPolicyPath(), "utf8")) as { sweep?: { reviewLanes?: unknown; reviewCapacity?: unknown } } | null)?.sweep,
+);
 
 export const DEFAULT_SWEEP_POLICY: SweepPolicy = {
   stageBackstops: {
@@ -7130,7 +7170,9 @@ export const DEFAULT_SWEEP_POLICY: SweepPolicy = {
   dispatchLanes: POLICY_SWEEP.dispatchLanes,
   reviewLanes: REVIEW_POLICY.value,
   reviewLaneMin: REVIEW_POLICY.min,
-  reviewLaneMax: REVIEW_POLICY.max,
+  // W1-T11841: the ceiling is the host worker budget. `sweep.reviewLanes.max` bounds only edits of
+  // the base value; it is not the runtime ceiling.
+  reviewLaneMax: REVIEW_POLICY.laneMax,
   reviewCapacity: REVIEW_POLICY.capacity,
   dailyCostCeilingUsd: POLICY_SWEEP.dailyCostCeilingUsd,
   // W1-T1038: collected off plan/policy.yaml's own row (POLICY_SWEEP, above), the same relocation
@@ -27996,7 +28038,12 @@ export function createEscalationTriageHistoryReader(
   io: { fs?: LedgerGrepFsDeps; readFile?: (path: string) => Promise<Buffer>; slice?: EscalationTriageSlice;
     /** Preserve unattributed torn rows when absence of an attempt authorizes a write. */
     parseAll?: boolean } = {},
-): EscalationTriageHistoryReader {
+): EscalationTriageHistoryReader & {
+  /** W1-T12235: each rotated file's kept rows, oldest first, with no read of the live file. Needs `sharedSnapshot`.
+   *  `ok` is false when a listed file has no kept rows; `held` counts the files that needed no load. */
+  rotations(stateDir: string): Promise<{ ok: boolean; unread: string[]; held: number;
+    rotations: Array<{ path: string; rows: ReadonlyArray<Record<string, unknown>> }> }>;
+} {
   const fsDeps = io.fs ?? realLedgerFs;
   const stat = fsDeps.statSync ?? realLedgerFs.statSync;
   const slice = io.slice ?? ESCALATION_TRIAGE_HISTORY_SLICE;
@@ -28097,7 +28144,7 @@ export function createEscalationTriageHistoryReader(
     }
     return union(stateDir, { step: steps, refuseIncomplete: true });
   };
-  return Object.assign(async (stateDir: string): Promise<LedgerUnionRecordRead> => {
+  const load = async (stateDir: string): Promise<{ entries: LedgerCorpusEntry[]; stats: Map<string, string>; fresh: number }> => {
     lastLoad = { rotations: 0, digestHits: 0, digestMisses: 0, bytesRead: 0, rotationsRead: 0, snapshotHit: false };
     seedSnapshot(stateDir);
     let names: string[] = [];
@@ -28108,7 +28155,8 @@ export function createEscalationTriageHistoryReader(
     }
     const stats = new Map<string, string>();
     const fresh: LedgerCorpusEntry[] = [];
-    for (const entry of ledgerRotationEntries(names, stateDir)) {
+    const entries = ledgerRotationEntries(names, stateDir);
+    for (const entry of entries) {
       let key: string;
       try {
         key = statKey(entry.path);
@@ -28163,10 +28211,27 @@ export function createEscalationTriageHistoryReader(
     loaded = stats;
     for (const path of strictUnread) loaded.delete(path);
     for (const path of kept.keys()) if (!stats.has(path)) kept.delete(path);
+    return { entries, stats, fresh: fresh.length };
+  };
+  return Object.assign(async (stateDir: string): Promise<LedgerUnionRecordRead> => {
+    const { stats } = await load(stateDir);
     const read = current(stateDir);
     if (read.ok) await writeSnapshot(stateDir, stats);
     return read;
-  }, { current, lastPass: union.lastPass, lastLoad: (): EscalationTriageHistoryLoad => ({ ...lastLoad }) });
+  }, { current, lastPass: union.lastPass, lastLoad: (): EscalationTriageHistoryLoad => ({ ...lastLoad }),
+    rotations: async (stateDir: string) => {
+      const { entries, stats, fresh } = await load(stateDir);
+      const rotations: Array<{ path: string; rows: ReadonlyArray<Record<string, unknown>> }> = [];
+      const unread: string[] = [];
+      for (const entry of entries) {
+        const hit = kept.get(entry.path);
+        if (hit !== undefined && hit.key === stats.get(entry.path)) rotations.push({ path: entry.path, rows: hit.read.rows });
+        else unread.push(entry.path);
+      }
+      // The snapshot is written again only when this call loaded a file or no snapshot answered.
+      if (unread.length === 0 && entries.length > 0 && (fresh > 0 || !lastLoad.snapshotHit)) await writeSnapshot(stateDir, stats);
+      return { ok: unread.length === 0, unread, held: stats.size - fresh, rotations };
+    } });
 }
 
 /** One walk of the rung's slice: each issue's NEWEST birth row, and every state key already rejudged. */
