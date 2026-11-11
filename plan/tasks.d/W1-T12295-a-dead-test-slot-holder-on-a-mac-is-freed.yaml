@@ -1,0 +1,110 @@
+- id: W1-T12295
+  title: "A dead test slot holder on a Mac is freed"
+  repo: remudero
+  depends_on: []
+  priority: 0.9
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # when a host-wide test slot is judged free; a too-eager judgment runs two test runs in one slot
+  band_meaning: blast-radius
+  origin: operator-session#mac-test-slot-2026-11-11
+  plan_refs:
+    - W1-T9928
+    - W1-T10251
+    - W1-T11809
+  files:
+    - src/lib/test-slot.ts
+    - test/a-dead-test-slot-holder-on-a-mac-is-freed.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "On darwin with no boot id, a same-host, same-uid reservation-marker holder whose pid is gone and whose last beat is older than TEST_SLOT_LEASE_MS is reclaimed. `acquireTestSlot` takes that slot, and one `test_slot.reclaimed_quiescent` row names the slot, the pid, the holder label, coverage `darwin-owner-pid` and the reason"
+      proof: "grep: W1-T12295 criterion 1 in test/a-dead-test-slot-holder-on-a-mac-is-freed.test.ts"
+    - claim: "A queued waiter counts such a slot as open. With two such records in a two-slot directory and two queued tickets, the second ticket is admitted while the first ticket is still live, and then the first is admitted too"
+      proof: "grep: W1-T12295 criterion 2 in test/a-dead-test-slot-holder-on-a-mac-is-freed.test.ts"
+    - claim: "A holder whose pid is alive with its recorded start is never reclaimed, even when its last beat is 13 hours old. The waiter is not admitted and the record is not changed"
+      proof: "grep: W1-T12295 criterion 3 in test/a-dead-test-slot-holder-on-a-mac-is-freed.test.ts"
+    - claim: "A holder whose pid now belongs to a process with a different start (`ps -p` names another start) is reclaimed, as when the pid is gone"
+      proof: "grep: W1-T12295 criterion 4 in test/a-dead-test-slot-holder-on-a-mac-is-freed.test.ts"
+    - claim: "A holder whose pid is gone but whose last beat is inside TEST_SLOT_LEASE_MS is kept. One `test_slot.reclaim_withheld` row names coverage `darwin-owner-pid`, and the lease is NOT_RUN"
+      proof: "grep: W1-T12295 criterion 5 in test/a-dead-test-slot-holder-on-a-mac-is-freed.test.ts"
+    - claim: "Nothing else changes. The same dead, silent record is kept when the waiter's platform is linux, when the record or the waiter has a boot id or a pid namespace, when the record names another uid or no uid, and when the record names another host and is inside its lease"
+      proof: "grep: W1-T12295 criterion 6 in test/a-dead-test-slot-holder-on-a-mac-is-freed.test.ts"
+  rationale: |
+    SEEN 2026-11-11 on the Mac agent account, by the operator:
+    - Every author preflight waited for a test slot from at least 11:45Z to 13:03Z.
+    - /tmp/rmd-test-slots/slot-1.json and slot-2.json named pids 59785 and 44013 (uid 502, host Mac-mini, label
+      `preflight-author:static-and-affected`, `workIdentity: "reservation-marker-v1"`, startedAt 23:17:47Z and
+      23:20:12Z on 2026-11-10, last beat 23:23:27Z). They had no `bootId` and no `pidNs`.
+    - `ps -p` found neither pid. Preflight jobs killed by signal at 23:23Z left the two records.
+    - The waiter logged `test_slot.queued` with both records as `holding`, `elapsedMs` about 49,000,000.
+    - At 13:03Z the operator moved the two files aside by hand. The next preflight took slot 1 at once.
+    WHY THE RECORDS WERE NEVER FREED (src/lib/test-slot.ts at c1315f693):
+    - `slotView` marks a holder with `workIdentity` or `heartbeatIntervalMs` as unproven, and never counts an
+      unproven slot as open, even when `testSlotHolderStale` calls the holder dead.
+    - In the reclaim path, a local marker holder whose pid is gone is freed only by exact-tree evidence. The
+      waiter asks for that evidence only when `testSlotReservationIdentity` is complete, and that needs `bootId` and
+      `pidNs`. A Mac has neither. `probeReservedTree` also returns `unknown` on every platform but linux.
+    - So on a Mac a dead marker holder is kept for ever. Every waiter ends at the wait bound as NOT_RUN.
+    WHY THE EXACT-TREE RULE EXISTS (W1-T9928): a dead owner pid does not prove its covered work ended. A test
+    run started by a preflight can outlive the preflight, and a detached child is reparented. On linux the cgroup
+    scope and the marker in /proc/<pid>/environ show that work. A Mac has no such probe without reading other
+    processes' command lines or environments, which the operator forbids. The first test in
+    test/a-test-slot-holder-whose-heartbeat-stopped-is-reclaimed.test.ts shows the case on the real platform: an
+    owner exits while its detached, marked child runs for 4 s, and the next waiter must not take the slot.
+    THE BOUND THE CODE ALREADY USES: `testSlotHolderStale` frees a holder on another host with no boot id once its
+    last beat is older than TEST_SLOT_LEASE_MS (90 minutes). test/ci/suites/an-unobservable-test-slot-owner-stays-unknown-and-says-how-to-recover-it.test.ts
+    ("a waiter with no boot id keeps the lease judgment outside the Linux seam") asserts it. A same-host holder on a
+    Mac has more evidence than that: its pid is gone.
+  design: |
+    1. One function in src/lib/test-slot.ts judges a reservation-marker holder on a host with no boot id. It
+       applies only when ALL of these hold: the waiter's platform (`opts.platform ?? process.platform`) is darwin;
+       the record and the waiter both have no boot id and no pid namespace; the record names this host
+       (`sameHost`); the record's `ownerUid`, the slot file's uid and this process's uid are equal; the record has
+       a `processStart` and no `ownershipProtocol`. Otherwise it returns nothing, and today's rules apply.
+    2. When it applies, the owner is gone when the zero-signal probe (`isPidAlive`) says so and `ps -p`
+       (`testSlotProcessFacts`) names no process with the recorded start, or when `ps -p` names a process with a
+       different start (the pid was reused). A process with the recorded start is alive: the holder is kept,
+       whatever its age.
+    3. A gone owner frees the slot only when its last beat is older than TEST_SLOT_LEASE_MS. The owner's event
+       loop beats the record, so its silence starts when the owner died. The lease gives covered work that
+       outlived the owner the same 90 minutes that a no-boot-id holder on another host gets today. Inside the
+       lease the holder is kept, with a `test_slot.reclaim_withheld` row.
+    4. `slotView` counts such a slot as open and not as unproven. The reclaim path in `testSlotPolls` frees it
+       through the existing quiescent branch: evidence `{ state: "ended", coverage: "darwin-owner-pid", reason }`,
+       the existing `test_slot.reclaimed_quiescent` row (slot, pid, holder label, coverage, reason, silentMs), and
+       the identity-checked `unlinkObservedTestSlot`. No new ledger step, no new export, no new option.
+    5. Linux, a record with a boot id or a pid namespace, and a record on another host take the same path as
+       before. `probeReservedTree` does not change.
+    6. Existing tests that assert the unproven or reclaim behaviour, all unchanged by this design:
+       - test/a-test-slot-holder-whose-heartbeat-stopped-is-reclaimed.test.ts: its first test runs on the real
+         platform. On darwin its waiter's clock moves 30 s past a fresh beat, inside the lease, so it is still
+         withheld with evidence `unknown`. The other tests there inject a boot id and a pid namespace.
+       - test/ci/suites/a-dead-test-slot-owner-is-proven-ended-by-its-scope.test.ts,
+         a-foreign-namespace-test-slot-owner-is-proven-ended-by-its-cgroup-identity.test.ts,
+         a-login-session-scope-never-holds-a-dead-owners-test-slot.test.ts and
+         an-owner-lane-releases-its-own-test-slot-by-exact-identity.test.ts: linux or a boot id.
+       - test/ci/suites/an-unobservable-test-slot-owner-stays-unknown-and-says-how-to-recover-it.test.ts: its
+         darwin case is a record on another host.
+       - test/learning/a-retro-preflight-beats-the-slot-it-holds.test.ts, test/a-test-slot-waiter-queues-in-arrival-order.test.ts,
+         test/the-test-slot-admits-the-cheapest-waiter-first-and-ages-the-rest.test.ts,
+         test/an-author-preflight-checks-statically-while-its-suites-queue.test.ts and
+         test/ci/the-author-preflight-gives-its-price-to-the-test-slot.test.ts: beating or live holders.
+       So `files` names no existing test.
+    7. Tests drive `acquireTestSlot` and `enqueueTestSlot` with a real temp slot directory and records shaped like
+       the two moved files. A dead pid is the pid of a child the test started and waited for. A live pid is a child
+       the test started and stops at the end. No test probes or signals any other process.
+    NOT IN SCOPE: a darwin process-tree probe; private-capacity-v1 records; the owner-lane release command.
+  falsifier: |
+    Remove the darwin rung from `slotView`, and criterion 2 must fail (the second ticket is queued). Remove it from
+    the reclaim path, and criterion 1 must fail. Drop the lease check, and criterion 5 must fail. Drop the start
+    check, and criterion 3 or 4 must fail. Drop the platform or boot id gate, and criterion 6 must fail. Restore and
+    require all to pass.
+  note: |
+    reservation hand-off: run-unfiled-1794402481000 -> run-unfiled-1794413364000
+
+    Residual risk on a Mac: covered work that outlives its killed owner by more than 90 minutes can run beside the
+    next holder. Today the same case keeps the slot for ever and stops every preflight on the host. A darwin probe
+    that proves the tree ended without reading other processes' command lines would remove that risk; none exists.
