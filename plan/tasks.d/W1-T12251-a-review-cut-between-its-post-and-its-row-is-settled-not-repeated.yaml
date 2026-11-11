@@ -1,0 +1,80 @@
+- id: W1-T12251
+  title: "A review cut between its post and its row is settled by the next boot, not repeated"
+  repo: remudero
+  depends_on: []
+  priority: 0.7
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the one path that posts a review verdict; a wrong settle writes a row for a verdict GitHub does not have
+  band_meaning: blast-radius
+  origin: operator-session#follow-ups-2026-11-10
+  plan_refs:
+    - W1-T11928
+    - W1-T12160
+    - W1-T9812
+    - W1-T8088
+  files:
+    - src/lib/review.ts
+    - src/cli/commands/review.ts
+    - test/review/a-review-cut-between-its-post-and-its-row-is-settled-not-repeated.test.ts
+    - test/a-computed-review-verdict-survives-a-failed-post-in-an-outbox.test.ts
+    - test/wiring-ordering-behaviour.test.ts
+    - test/arm-ordering.test.ts
+    - test/review-status-pending.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "A review writes its outbox entry before it posts its verdict. The entry holds the verdict fields only and no credential"
+      proof: "grep: W1-T12251 criterion 1 in test/review/a-review-cut-between-its-post-and-its-row-is-settled-not-repeated.test.ts"
+    - claim: "The review command keeps the entry while it posts and removes it after its `review.posted` row is written"
+      proof: "grep: W1-T12251 criterion 2 in test/review/a-review-cut-between-its-post-and-its-row-is-settled-not-repeated.test.ts"
+    - claim: "A review process ends after its post reached GitHub and before its row; the test ends a real child process at that point. The next pass recognises the status on GitHub, writes one `review.posted` row and one comment, posts no second status, removes the entry and starts no reviewer"
+      proof: "grep: W1-T12251 criterion 3 in test/review/a-review-cut-between-its-post-and-its-row-is-settled-not-repeated.test.ts"
+    - claim: "A review process ends before its post reached GitHub; the test ends a real child process at that point. The next pass posts the kept verdict once, writes one row, removes the entry and starts no reviewer"
+      proof: "grep: W1-T12251 criterion 4 in test/review/a-review-cut-between-its-post-and-its-row-is-settled-not-repeated.test.ts"
+    - claim: "An entry for a head that has moved is discarded with a `review.outbox_discarded` row. Its verdict is not posted and gets no row"
+      proof: "grep: W1-T12251 criterion 5 in test/review/a-review-cut-between-its-post-and-its-row-is-settled-not-repeated.test.ts"
+    - claim: "An entry whose `review.posted` row is already written is removed with a row. Nothing is posted and no second row is written"
+      proof: "grep: W1-T12251 criterion 6 in test/review/a-review-cut-between-its-post-and-its-row-is-settled-not-repeated.test.ts"
+    - claim: "The review command asks for the entry before its post"
+      proof: "grep: outboxBeforePost: true in src/cli/commands/review.ts"
+    - claim: "The review command removes the entry through the new function"
+      proof: "grep: settleReviewOutboxEntry( in src/cli/commands/review.ts"
+  rationale: |
+    FOUND 2026-11-10 by a read of the code at origin/main c4c35d5ab, during the hand build of W1-T12160 and W1-T9812. A review that the restart drain stops while it posts can leave a verdict on GitHub with no row in the ledger.
+    - `drainInFlightReviews` (src/lib/sweep.ts) aborts every review still running at the time limit of the drain. The exit does not wait for those reviews to settle.
+    - The review command (src/cli/commands/review.ts, `runReview`) posts the status through `postReviewStatusGuarded`, then writes the `review.posted` row, then posts the comment. A process that ends after the first step leaves a status with no row and no comment.
+    - `writeReviewOutboxEntry` (src/lib/review.ts) is called on one path only: after the post threw, beside the `review.post_failed` row (W1-T11928). A post that succeeded leaves no entry.
+    - `priorPostedReviewRow` reads only the ledger. With no row it finds no earlier verdict.
+    - The sweep then runs the reviewer again. Two rules of the disposition table in src/lib/sweep.ts match a head whose `remudero-review` status is success or failure while "the ledger has no matching completed review.posted evidence for this exact input", and both give the disposition `post-review`.
+    - A freshness restart happened 36 times in the 7 days to 2026-11-11, about 5 times a day. Each one can cut a review in its posting step.
+    TRACED, the two questions the first report left open.
+    - Does the next boot's `postReviewStatusGuarded` catch the duplicate status through its status-history read? No. It reads the history only when the new verdict is a success, and `applyReviewStatusHistoryGuard` uses only the earlier failures of the same head. The check for "a terminal verdict already exists for this review decision" reads `lastReviewDecisionTerminal` from the live ledger, which has no row. So the second review posts its status. The status is last-write-wins, so an equal verdict changes nothing on GitHub, and a different verdict replaces the first.
+    - Is the pull request comment de-duplicated? Only for equal bytes. `postReviewCommentGuarded` refuses a body that is byte-identical to the newest review comment on the pull request. In this case the first review posted no comment, because the comment comes after the row. A second review whose text differs from a standing comment posts a second comment.
+    COST: one full review for each cut (a median of 9 minutes, W1-T11928), a possible change of verdict on an unchanged input, and a green pull request that is not armed until the second review ends.
+    RELATED: the guard in W1-T12160 (`exitDrainBegun`) exists because of this defect: it refuses a review that would start with no time left. W1-T9812 starts the drain when the pre-exit pass starts, so with both merged no review is admitted past the deadline during that pass. Once this task merges, a later task can relax that guard, because a review that the exit cuts then costs one settle and no second review.
+    CHECKED for overlap: W1-T11928 (merged) keeps a verdict whose post threw. W1-T8088 (merged) lets a new review take over a claim whose owner is proven dead. Neither keeps a verdict whose post succeeded.
+  design: |
+    In src/lib/review.ts:
+    - `PostReviewStatusGuardedOpts` gains `outboxBeforePost`. When it is set and the status is a terminal verdict with a pull request and a review input, `publishReviewStatusLocked` writes the outbox entry just before it calls `post`. The entry has the fields of W1-T11928 and `posting: true`. A lint-plan retry and a reopened degraded terminal write no entry, as on the failed path.
+    - When the post throws, the failed path writes the entry again without `posting`, as today.
+    - `settleReviewOutboxEntry(ledgerPath, prUrl, inputKey)` removes the entry.
+    - `drainReviewOutbox` gains `liveStatus`, the state and description of the `remudero-review` status that GitHub has for the head. For an entry with `posting: true`:
+      - if the ledger has a terminal `review.posted` row for the same pull request, head and input, discard the entry with a `review.outbox_discarded` row;
+      - else, if `liveStatus` is not given, leave the entry;
+      - else, if the live state and description equal the entry's (the description cut to 140 characters, as the post cuts it), the status is on GitHub: do not post, write the `review.posted` row and the comment as for a posted entry, and write `review.outbox_posted` with `status: already_on_github`;
+      - else post the entry once through `postReviewStatusGuarded`, as for a failed entry.
+    - `postReviewPending` calls `drainReviewOutbox` a second time, with `liveStatus`, after its claim checks and before it posts its own pending status. It already reads the combined status there. So an entry of a review that is still alive is never settled by another review: the claim of the live review holds the pass (W1-T3647), and only a claim whose owner is proven dead or is older than the lock limit lets the pass through (W1-T8088).
+    - The first call in `postReviewPending` stays as it is. It settles failed entries and removes an entry that already has its row.
+    In src/cli/commands/review.ts, `runReview` passes `outboxBeforePost: true` and calls `settleReviewOutboxEntry` right after it writes its `review.posted` row.
+    The entry holds no credential: it is the fixed field list of W1-T11928 plus `posting`.
+    src/lib/review.ts gains no comment. It has a comment cap (test/review/compress-src-lib-review-ts.test.ts), and that test must pass.
+    The existing tests in `files` assert the outbox and the order of post, row and arm. They must pass unchanged: a caller that does not set `outboxBeforePost` writes no entry on a post that succeeds.
+    Tests: the new file ends a real child process with SIGKILL while its post step is open, once after the status reached GitHub and once before. No flag takes the place of the cut.
+    NOT IN SCOPE: the other callers of `postReviewStatusGuarded` in src/cli/commands/sweep.ts (each writes its own row at once), the comment of a review that is cut after its row, the abort of a review at the drain, and the guard of W1-T12160.
+  falsifier: |
+    Write the entry after the post and criterion 1 must fail. Do not remove the entry in the review command and criterion 2 must fail. Post the entry without the read of the live status and criterion 3 must fail. Treat a pending live status as the verdict and criterion 4 must fail. Restore and require all eight to pass.
+  note: |
+    After the merge, count `review.outbox_posted` rows with `status: already_on_github` for 7 days. Each one is a review that was not run again.
