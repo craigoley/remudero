@@ -23,6 +23,9 @@
     - test/the-build-lane-count-follows-the-memory-governor.test.ts
   status: queued
   attempts: 0
+  note: |
+    reservation hand-off: run-unfiled-1794398100000 -> run-unfiled-1794413364000
+
   acceptance:
     - claim: "Through `runDaemon`: when a lane finishes and the lane target reads at or below the lanes in flight, the lane parks. It writes `dispatch.lane_parked` with reason `lane target` and the lanes it waits on, and no `dispatch.lane_refill_held`"
       proof: 'grep: test("W1-T12292: a lane held by its lane target parks while a sibling runs" in test/daemon/a-lane-held-by-its-lane-target-is-decided-again.test.ts'
