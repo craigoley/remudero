@@ -14985,7 +14985,7 @@ export interface SweepDeps {
     activeWorkers?: number;
   }) => number;
   /** W1-T2584 — time-bounded gate for a next review admission; it never interrupts a running reviewer. */
-  continueReviewAdmissions?: (reviewClass?: ReviewLaneClass) => boolean;
+  continueReviewAdmissions?: ((reviewClass?: ReviewLaneClass) => boolean) & { restartDecided?: () => boolean };
   /** W1-T3491 — fleet hold checked before review or repair admission; direct CLI/test callers omit it. */
   workerAdmissionHold?: (kind?: "review") => string | undefined;
   restartAdmission?: ((kind: ReviewLaneClass, surface: "light" | "light-refill") => boolean) & { readonly heldBy?: string };
@@ -19305,6 +19305,15 @@ export async function runSweep(
   sweepDeps: SweepDeps,
   policy: SweepPolicy = DEFAULT_SWEEP_POLICY,
 ): Promise<SweepSummary> {
+  // W1-T12237: a decided restart ends the pass before any stage or pull request it has not begun.
+  const endsForRestart = (stage: string, notVisited = openPrs.length): boolean => {
+    if (sweepDeps.continueReviewAdmissions?.restartDecided?.() !== true) return false;
+    sweepDeps.log?.("sweep.ended_early", { reason: "restart_decided", stage, prs_not_visited: notVisited });
+    return true;
+  };
+  const endedEarly = (): SweepSummary => ({ total: openPrs.length, byDisposition: ZERO_COUNTS(), actionsTaken: 0,
+    actionsFailed: 0, actions: [], noneCount: 0 });
+  if (endsForRestart("start")) return endedEarly();
   if (!sweepDeps.dryRun && sweepDeps.repairAdmissionSurface !== "light") {
     await sweepDeps.reconcilePrimaryShadowAlert?.();
   }
@@ -19333,6 +19342,7 @@ export async function runSweep(
     },
   };
   sweepDeps.markPrelude?.("sweep_entry");
+  if (endsForRestart("sweep_entry")) return endedEarly();
   // Alias-bound call site (W1-T2393): the bare `readLedgerLines` regex cannot match a name-bound
   // call, so this marker is documentary only — the enforced corpus and the regex are unchanged.
   // ledger-read-intent: live — this fold reads the live file only, never rotations.
@@ -19377,6 +19387,7 @@ export async function runSweep(
     }
   }
   deps.markPrelude?.("reader_agreement");
+  if (endsForRestart("reader_agreement")) return endedEarly();
   if (deps.readyDraft && (deps.actionable?.("held-draft") ?? true)) {
     for (const pr of openPrs) if (pr.isDraft === true) await deps.readyDraft(pr);
   }
@@ -19408,6 +19419,7 @@ export async function runSweep(
   // byte-identical — the level-triggered idempotence mechanism. The SAME read feeds
   // {@link decideSweepArm}'s head-bound recovery, so arming parity costs no extra read.
   deps.markPrelude?.("armed_body_guard");
+  if (endsForRestart("armed_body_guard")) return endedEarly();
   // W1-T11260: the live tail's rows are shared and read-only; this pass appends its own receipts, so it copies them.
   const ledgerLines = [...readLedger(deps.ledgerPath)];
   const openEscalationHistory = new Map<string, ReadonlyArray<Record<string, unknown>>>();
@@ -20057,6 +20069,7 @@ export async function runSweep(
   // W1-T2620/W1-T3422 — ONE read per pass, never per PR. The SHA-only compatibility seam stays
   // available to direct callers; production's effects cache both fields from one REST response.
   deps.markPrelude?.("ledger_fold");
+  if (endsForRestart("ledger_fold")) return endedEarly();
   let mainRepair: MainRepairEvidence | undefined;
   try {
     mainRepair = deps.readMainRepair ? await deps.readMainRepair() : undefined;
@@ -20098,6 +20111,7 @@ export async function runSweep(
     }
   }
   deps.markPrelude?.("main_repair");
+  if (endsForRestart("main_repair")) return endedEarly();
   const reproductionHistory = [...ledgerLines];
   const reproductionCache = probeCacheFromLedger(ledgerLines);
   const formerlyFailingOnMain = mainTipSha === undefined ? new Set<string>() : mainFormerlyFailingTestFiles(ledgerLines, mainTipSha);
@@ -20342,6 +20356,7 @@ export async function runSweep(
   const repeatMeta = new Map<number, { streak: number; escalated: boolean }>();
 
   deps.markPrelude?.("stale_releases");
+  if (endsForRestart("stale_releases")) return endedEarly();
   // ── W1-T931 COST-ANOMALY SENTINEL ───────────────────────────────────────────────────────────
   // Hung off THIS pass rather than a new call site: `runSweep` already read the whole ledger and runs
   // on the daemon's cadence. Independent of `openPrs`, guarded by `!deps.dryRun`, and wrapped in the
@@ -20397,6 +20412,7 @@ export async function runSweep(
   }
 
   deps.markPrelude?.("anomaly_sentinels");
+  if (endsForRestart("anomaly_sentinels")) return endedEarly();
   // ── W1-T4817 MAIN COMMIT WITH NO WORKFLOW RUN ─────────────────────────────────────────────
   // Full passes only: a light pass fans this function out one PR at a time, and the reads below
   // are per-pass, not per-PR. The dedupe is the ledger fold handed to the effect, so a commit
@@ -20455,6 +20471,7 @@ export async function runSweep(
   }
 
   deps.markPrelude?.("fleet_state", false, fleetStateParts && { fleet_state_parts: fleetStateParts });
+  if (endsForRestart("fleet_state")) return endedEarly();
   // Full passes only: one paced list per pass, deduped on the ledger's own run_ids.
   if (deps.pullMutationVerdicts && deps.repairAdmissionSurface !== "light") {
     try {
@@ -20466,6 +20483,7 @@ export async function runSweep(
     }
   }
   deps.markPrelude?.("mutation_verdicts");
+  if (endsForRestart("mutation_verdicts")) return endedEarly();
   // W1-T7853: the same full passes, deduped on the workflow runs the ledger already settled.
   if (deps.pullFoldDebt && deps.repairAdmissionSurface !== "light") {
     try {
@@ -20478,6 +20496,7 @@ export async function runSweep(
   }
 
   deps.markPrelude?.("fold_debt");
+  if (endsForRestart("fold_debt")) return endedEarly();
   // ── W1-T4838 A WORKER'S CATEGORIZED REFUSAL IS AN AMENDMENT, NOT A FAILED ATTEMPT ─────────
   // Full passes only. Only a `no_pr` row whose excerpt `extractRefusal` parses is a candidate: an
   // uncategorized `no_pr` is skipped here and retries exactly as before. `error` outcomes write no
@@ -20514,6 +20533,7 @@ export async function runSweep(
   }
 
   deps.markPrelude?.("refusal_amendments");
+  if (endsForRestart("refusal_amendments")) return endedEarly();
   const byDisposition = ZERO_COUNTS();
   // Filled by INDEX, never pushed — post-review actions are finalized out of pass order, so
   // `actions[i]` is the only way to keep {@link SweepSummary.actions}'s "in input order" invariant
@@ -21320,8 +21340,13 @@ export async function runSweep(
   let lightConflictDeferred = 0;
   const rederivedPrs = new Set<number>();
   const admissionFinalizations: Array<() => Promise<void>> = [];
+  let walkEndedAt: number | undefined;
   for (let walkStep = 0; walkStep < walkOrder.length; walkStep++) {
     const prIndex = walkOrder[walkStep];
+    if (walkOrder[walkStep - 1] !== prIndex && endsForRestart("walk", walkOrder.length - walkStep)) {
+      walkEndedAt = walkStep;
+      break;
+    }
     // W1-T4470 — HYSTERESIS FIRST, before anything else reads `mergeState`: an `unknown` read
     // (mergeState undefined) inherits the last KNOWN mergeability this exact head proved on a
     // prior pass, so `pr` below is what EVERY downstream read sees — `deriveDisposition`, the
@@ -24779,7 +24804,8 @@ export async function runSweep(
   const reviewLanes = Math.max(0, (fullReviewLanes ?? effectiveReviewWidth(deps, policy, codeLane.jobs.length, now, ledgerLines)) -
     overtakenReviews.size);
   const postReview = deps.postReview;
-  let admissionStopReason: string | undefined;
+  const walkEndedEarly = walkEndedAt !== undefined;
+  let admissionStopReason: string | undefined = walkEndedEarly ? "restart decided — re-derived after the restart" : undefined;
 
   const closeAdmissions = (reason: string): void => {
     admissionStopReason ??= reason;
@@ -25126,8 +25152,8 @@ export async function runSweep(
   // W1-T528 — PRESS THE BUTTON. {@link selectUpdateBranchTarget} picks AT MOST ONE PR from the set
   // just reported and, when the dep is wired, requests GitHub update it. Never a loop, and a
   // conflict is REPORTED and skipped rather than retried this pass.
-  const ratchetRefreshed = new Set(await runArmedRatchetRejudge(openPrs, deps));
-  if (!deps.dryRun && deps.updateBranch) {
+  const ratchetRefreshed = new Set(walkEndedEarly ? [] : await runArmedRatchetRejudge(openPrs, deps));
+  if (!walkEndedEarly && !deps.dryRun && deps.updateBranch) {
     // An overlap judgment cannot override a clearance refusal for this same red head and main.
     // A different identity or a head whose checks are no longer red keeps its ordinary eligibility.
     const refreshPrs = openPrs.filter((pr) => pr.prNumber !== staleBaseAttemptedPrNumber && !refreshAdmission.has(pr.prNumber) && !ladderUpdatedPrs.has(pr.prNumber) && !gardenRecordRefusals.has(pr.prNumber) && !ratchetRefreshed.has(pr.prNumber))
@@ -25305,7 +25331,8 @@ export async function runSweep(
       }
     }
   }
-  settleRepairMemoryPass(repairDemandMark, deps.repairAdmissionSurface === "full" ? undefined : openPrs.map((pr) => pr.prNumber));
+  settleRepairMemoryPass(repairDemandMark, walkEndedAt !== undefined ? walkOrder.slice(0, walkEndedAt).map((index) => openPrs[index]!.prNumber)
+    : deps.repairAdmissionSurface === "full" ? undefined : openPrs.map((pr) => pr.prNumber));
   return summary;
 }
 

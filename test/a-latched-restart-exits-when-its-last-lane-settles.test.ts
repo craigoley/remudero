@@ -107,13 +107,13 @@ test("W1-T8170: a pass since the latch is not repeated at exit", async (t) => {
   assert.equal(h.restart()?.pre_exit_pass, "skipped_ran_since_latch");
 });
 
-test("W1-T8170: an exit with no pass since the latch still runs one", async (t) => {
+test("W1-T12237: an exit with no pass since the latch starts none", async (t) => {
   const h = await phase(t);
   await h.settle();
   assert.equal((await h.run).stopReason, "stale");
-  assert.equal(h.calls.length, 2, "a pass before the latch does not replace the exit pass");
-  assert.equal(h.calls[1].afterSettled, true);
-  assert.equal(h.restart()?.pre_exit_pass, "ran");
+  assert.equal(h.calls.length, 1, "the exit starts no pass of its own");
+  assert.equal(h.calls.some(({ afterSettled }) => afterSettled), false);
+  assert.equal(h.restart()?.pre_exit_pass, "no_sweep_at_exit");
 });
 
 test("W1-T8170: a running background pass is awaited at exit", async (t) => {
@@ -130,9 +130,9 @@ test("W1-T8170: a running background pass is awaited at exit", async (t) => {
 });
 
 test("W1-T8170: the restart row names its pre-exit pass", async (t) => {
-  for (const arm of ["ran", "skipped_ran_since_latch", "awaited_in_flight"]) {
+  for (const arm of ["no_sweep_at_exit", "skipped_ran_since_latch", "awaited_in_flight"]) {
     const h = await phase(t, arm === "awaited_in_flight" ? "running" : "completed");
-    if (arm !== "ran") await h.tick(2 * windowMs + 2);
+    if (arm !== "no_sweep_at_exit") await h.tick(2 * windowMs + 2);
     await h.settle();
     h.pass.resolve();
     await h.run;
@@ -140,15 +140,14 @@ test("W1-T8170: the restart row names its pre-exit pass", async (t) => {
   }
 });
 
-test("a failed background pass since the latch still requires the exit pass", async (t) => {
+test("W1-T12237: a failed background pass since the latch is not repeated at exit", async (t) => {
   const h = await phase(t, "failed");
   await h.tick(2 * windowMs + 2);
   assert.ok(h.rows.some(({ step, extra }) => step === "daemon.sweep.failed" && extra?.error === "fixture pass failed"));
   await h.settle();
   assert.equal((await h.run).stopReason, "stale");
-  assert.equal(h.calls.length, 3);
-  assert.equal(h.calls[2].afterSettled, true);
-  assert.equal(h.restart()?.pre_exit_pass, "ran");
+  assert.equal(h.calls.length, 2, "the exit starts no pass of its own");
+  assert.equal(h.restart()?.pre_exit_pass, "no_sweep_at_exit");
 });
 
 test("completion after the latch counts even when the full pass began before it", async (t) => {
@@ -214,17 +213,17 @@ async function idleExit(t: TestContext, reviewerCodeStale = false) {
     },
   }, { freshnessMinLifetimeMs: 0 });
   assert.equal(summary.stopReason, "stale");
-  assert.equal(rows.find(({ step }) => step === "daemon_selfrestart_for_freshness")?.extra?.pre_exit_pass, "ran");
+  assert.equal(rows.find(({ step }) => step === "daemon_selfrestart_for_freshness")?.extra?.pre_exit_pass, "no_sweep_at_exit");
   return { calls, callsAtRestartRequest };
 }
 
-test("an idle freshness exit keeps its full pass when no pass completed after the advance", async (t) => {
+test("W1-T12237: an idle freshness exit starts no pass without a dispatch latch", async (t) => {
   const { calls } = await idleExit(t);
-  assert.equal(calls, 2, "the boot pass completed at the instant of the advance, not after it, so the exit runs its own");
+  assert.equal(calls, 1, "only the first tick's pass ran");
 });
 
-test("a reviewer-idle freshness exit keeps its full pass without a dispatch latch", async (t) => {
+test("W1-T12237: a reviewer-idle freshness exit starts no pass without a dispatch latch", async (t) => {
   const { calls, callsAtRestartRequest } = await idleExit(t, true);
   assert.ok(callsAtRestartRequest !== undefined, "the full sweep requested the reviewer freshness restart");
-  assert.equal(calls, callsAtRestartRequest + 1, "the reviewer-idle exit still runs its own full pass");
+  assert.equal(calls, callsAtRestartRequest, "the reviewer-idle exit starts no pass of its own");
 });

@@ -1278,6 +1278,7 @@ export function decideAlertPoll(i: AlertPollInputs): AlertPollDecision {
 
 export type ReviewAdmissionGate = ((reviewClass?: "review" | "plan-review") => boolean) & {
   workerAdmissionHold?: (kind?: "review") => string | undefined;
+  restartDecided?: () => boolean;
 };
 
 /** One pending "run this task now" kick. `repo` is set for a repo-scoped marker (W1-T429) and absent for a
@@ -3138,7 +3139,7 @@ function startInFlightTicker(
                 });
                 // W1-T5366: started, never awaited, so a pass that overruns cannot hold this tick's light pass.
                 sweepRetrigger.slot.adopt(runGatedSweep(deps, pollIntervalMs, sweepRetrigger.sweepWallClockBoundMs, log, diskHeadroomLatch, undefined,
-                  sweepRetrigger.liveness, undefined, sweepRetrigger.latchedAdmission));
+                  sweepRetrigger.liveness, undefined, sweepRetrigger.latchedAdmission, sweepRetrigger.restartDecided));
                 eventWakePending = false;
               }
             }
@@ -3220,6 +3221,7 @@ interface SweepRetrigger {
   slot: { busy: () => boolean; adopt: (pass: Promise<SweepCycleOutcome | undefined>) => void };
   /** W1-T9808: the restart's admission predicate while one is latched, else undefined. */
   latchedAdmission?: () => RestartAdmission | undefined;
+  restartDecided?: () => boolean;
 }
 
 /** The gate itself, extracted so the bound and the light-pass ticker apply identically at every call
@@ -3259,6 +3261,7 @@ async function runGatedSweep(
   recyclePause?: true,
   // W1-T9808: a pass after a restart latched asks the predicate per review and per fix admission.
   latchedAdmission?: () => RestartAdmission | undefined,
+  restartDecided?: () => boolean,
 ): Promise<SweepCycleOutcome | undefined> {
   // Decline, do not duplicate. Checked before the ticker starts, so a declined pass costs nothing at
   // all. This one gate closes both routes into a concurrent pass, because all three call sites pass
@@ -3296,6 +3299,8 @@ async function runGatedSweep(
       return reason;
     };
     continueReviewAdmissions.workerAdmissionHold = workerAdmissionHold;
+    let endedEarly = false;
+    if (restartDecided) continueReviewAdmissions.restartDecided = () => (endedEarly ||= restartDecided());
     const startedAtMs = Date.now();
     const elapsedSinceStart = (): number => Date.now() - startedAtMs;
     let abandoned = false;
@@ -3307,11 +3312,12 @@ async function runGatedSweep(
     void sweepPromise.then(() => {
       if (liveness) {
         liveness.inFlight = false;
-        liveness.lastCompletedAtMs = clockFromDateFn(deps.now).now();
+        if (!endedEarly) liveness.lastCompletedAtMs = clockFromDateFn(deps.now).now();
       }
       const elapsedMs = elapsedSinceStart();
-      recordSettledSweep(sweepBound, elapsedMs); // W1-T9563: a pass past its bound is still a healthy sample
-      log("daemon.sweep.settled", { elapsed_ms: elapsedMs, abandoned, bound_ms: bound.boundMs, bound_basis: bound.basis });
+      if (!endedEarly) recordSettledSweep(sweepBound, elapsedMs); // W1-T9563: a pass past its bound is still a healthy sample
+      log("daemon.sweep.settled", { elapsed_ms: elapsedMs, abandoned, bound_ms: bound.boundMs, bound_basis: bound.basis,
+        ...(endedEarly ? { ended_early: true } : {}) });
     }, () => { if (liveness) liveness.inFlight = false; });
     let timer: ReturnType<typeof setTimeout> | undefined;
     const boundTimer = new Promise<"abandoned">((resolve) => {
@@ -4213,6 +4219,7 @@ export async function runDaemon(
     state: sweepRetriggerState,
     liveness: sweepLiveness,
     latchedAdmission: () => latchedAdmission(),
+    restartDecided: () => sweepStopsForRestart(),
     slot: {
       busy: () => backgroundSweep !== undefined || sweepLiveness.inFlight,
       adopt: (started) => {
@@ -5239,6 +5246,12 @@ export async function runDaemon(
     return false;
   };
   const latchedAdmission = (): RestartAdmission | undefined => restartWindow && restartAdmission;
+  let sweepEndedEarly = false;
+  const sweepStopsForRestart = (): boolean => {
+    const stop = restartWindow !== undefined || preparedFreshnessExit !== undefined;
+    sweepEndedEarly ||= stop;
+    return stop;
+  };
   const beginLatchDrain = (latchAtMs: number): void => {
     if (latchDrain?.latchAtMs === latchAtMs) return;
     const lengths = measuredReviewLength();
@@ -5402,7 +5415,7 @@ export async function runDaemon(
 
   // One stale-exit path for both freshness boundaries. Both must preserve the same install, bounded pass, named
   // ledger and stale summary contract; duplicating that sequence would let them drift (W1-T2845).
-  type FreshnessPass = "skipped_ran_since_latch" | "skipped_ran_since_stale" | "awaited_in_flight" | "ran";
+  type FreshnessPass = "skipped_ran_since_latch" | "skipped_ran_since_stale" | "awaited_in_flight" | "no_sweep_at_exit";
   let preparedFreshnessExit: Promise<FreshnessPass> | undefined;
   let advanceEvidence: { stale_since_ms: number; last_pass_completed_ms: number | null } | undefined;
   const prepareFreshnessExit = async (
@@ -5415,9 +5428,9 @@ export async function runDaemon(
     if (freshness.installNeeded) {
       deps.runInstall?.();
     }
-    // A pass completed since the dispatch latch (W1-T8170) or since the advance (W1-T9352) is not repeated;
-    // a running pass is still awaited within its bound (W1-T1272); other exits keep their pass.
-    let preExitPass: FreshnessPass = "ran";
+    // A pass completed since the dispatch latch (W1-T8170) or since the advance (W1-T9352) is not repeated.
+    // W1-T12237: the exit starts no pass; a running pass is awaited and ends between pull requests.
+    let preExitPass: FreshnessPass = "no_sweep_at_exit";
     const lastPassCompletedAtMs = sweepLiveness.lastCompletedAtMs;
     if (advanceSinceMs !== undefined) {
       advanceEvidence = { stale_since_ms: advanceSinceMs, last_pass_completed_ms: lastPassCompletedAtMs ?? null };
@@ -5432,11 +5445,8 @@ export async function runDaemon(
     } else if (dispatchLatchAtMs === undefined && advanceSinceMs !== undefined && lastPassCompletedAtMs !== undefined &&
       lastPassCompletedAtMs > advanceSinceMs) {
       preExitPass = "skipped_ran_since_stale";
-    } else if (deps.sweep) {
-      sweepRetriggerState.lastRunAtMs = daemonClock.now();
-      await runGatedSweep(deps, pollIntervalMs, sweepBound, log, diskHeadroomLatch, headroomSampler, sweepLiveness, undefined, latchedAdmission);
     }
-    if (preExitPass === "awaited_in_flight" || (preExitPass === "ran" && deps.sweep)) {
+    if (preExitPass === "awaited_in_flight") {
       freshnessPhases.pre_exit_pass = Math.max(0, daemonClock.now() - passStartedAtMs);
     }
     // W1-T5721: protect live fix workers; cadences and CI waits are re-derived after restart.
@@ -5447,7 +5457,7 @@ export async function runDaemon(
   const stopForFreshness = async (
     freshness: Extract<DaemonFreshness, { stale: true }>, dispatchLatchAtMs?: number, advanceSinceMs?: number,
   ): Promise<DaemonSummary> => {
-    const preExitPass = await (preparedFreshnessExit ?? prepareFreshnessExit(freshness, dispatchLatchAtMs, advanceSinceMs));
+    const preExitPass = await (preparedFreshnessExit ??= prepareFreshnessExit(freshness, dispatchLatchAtMs, advanceSinceMs));
     const requested = freshness.restartRequest;
     const detail = requested
       ? `restart in place requested by ${requested.origin} at ${requested.requestedAt}`
@@ -5461,7 +5471,8 @@ export async function runDaemon(
       ...(requested ? { restart_request: { origin: requested.origin, requested_at: requested.requestedAt,
         request_to_exit_ms: Math.max(0, daemonClock.now() - Date.parse(requested.requestedAt)) } } : {}) });
     log("daemon_selfrestart_for_freshness", { old_sha: freshness.oldSha, new_sha: freshness.newSha, pre_exit_pass: preExitPass,
-      ...(advanceSinceMs !== undefined && advanceEvidence ? advanceEvidence : {}) });
+      ...(advanceSinceMs !== undefined && advanceEvidence ? advanceEvidence : {}),
+      ...(sweepEndedEarly ? { sweep_ended_early: true } : {}) });
     return summary("stale", detail);
   };
   // W1-T11327: a RESTART_REQUESTED marker is a freshness decision with no advance, so it skips scoring, coalescing and
@@ -6642,7 +6653,8 @@ export async function runDaemon(
         if (deps.sweep && !backgroundSweep) {
           sweepRetriggerState.lastRunAtMs = daemonClock.now();
           sweepRetrigger.slot.adopt(
-            runGatedSweep(deps, pollIntervalMs, sweepBound, log, diskHeadroomLatch, headroomSampler, sweepLiveness, true),
+            runGatedSweep(deps, pollIntervalMs, sweepBound, log, diskHeadroomLatch, headroomSampler, sweepLiveness, true, undefined,
+              sweepStopsForRestart),
           );
         }
       }
@@ -6776,7 +6788,8 @@ export async function runDaemon(
     if (deps.sweep) await new Promise<void>((resolve) => setImmediate(resolve));
     if (deps.sweep && !backgroundSweep) {
       sweepRetriggerState.lastRunAtMs = daemonClock.now();
-      sweepRetrigger.slot.adopt(runGatedSweep(deps, pollIntervalMs, sweepBound, log, diskHeadroomLatch, headroomSampler, sweepLiveness));
+      sweepRetrigger.slot.adopt(runGatedSweep(deps, pollIntervalMs, sweepBound, log, diskHeadroomLatch, headroomSampler, sweepLiveness,
+        undefined, undefined, sweepStopsForRestart));
     }
     // One scheduler turn, so a pass that settles at once is read by the tick that started it.
     if (deps.sweep) await new Promise<void>((resolve) => setImmediate(resolve));

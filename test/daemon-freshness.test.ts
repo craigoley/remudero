@@ -497,7 +497,7 @@ test("W1-T2845/W1-T2960: main advancing during the awaited sweep admits the sele
   assert.deepEqual(s.attempted, ["A"], "the already-selected batch is admitted rather than abandoned");
   assert.equal(runOneCalls, 1, "and it actually runs — the tick's own merge must not starve its dispatch");
   assert.equal(installs, 1, "the shared stale-exit path performs the required install exactly once");
-  assert.equal(sweeps, 2, "the ordinary sweep ran, then the W1-T1272 stale-exit sweep ran once");
+  assert.equal(sweeps, 1, "W1-T12237: the ordinary sweep ran, and the stale exit started none");
   assert.equal(
     lines.filter((l) => l.step === "daemon_selfrestart_for_freshness").length,
     1,
@@ -676,7 +676,7 @@ test("W1-T2865: a zero-action freshness exit emits no drain telemetry", async ()
   assert.equal(lines.some((line) => line.step.startsWith("daemon.freshness_drain.")), false);
 });
 
-test("W1-T2865: an idle transition closes its review clock before the next freshness sweep", async () => {
+test("W1-T2865: an idle transition closes its review clock before the next freshness exit", async () => {
   const waiters: Array<(result: "wake" | "timeout") => void> = [];
   const sweepTickerWaiters: Array<() => void> = [];
   let releaseOrphan!: () => void;
@@ -739,18 +739,14 @@ test("W1-T2865: an idle transition closes its review clock before the next fresh
   waiters.shift()!("wake");
   await settle();
   while (waiters.length > 0) waiters.shift()!("timeout");
-  await waitFor(() => finalSweepStarted, "the final freshness sweep never started after the clock settled");
-  await waitFor(() => sweepTickerWaiters.length === 1, "the final full-sweep ticker never began waiting");
   releaseFinalSweep();
-  await settle();
-  sweepTickerWaiters.shift()!();
 
   const summary = await daemon;
   assert.equal(summary.stopReason, "stale");
   assert.equal(summary.ticks, 1, "one idle transition preceded the next tick's freshness exit");
   assert.equal(freshnessReads, 2, "the fixture saw initial freshness and next-tick staleness");
   assert.equal(bootReviewPasses, 1, "the restricted boot review is distinct from the interphase wake");
-  assert.equal(sweepCalls, 2, "the ordinary and final freshness sweeps each ran once");
+  assert.equal(sweepCalls, 1, "W1-T12237: the ordinary sweep ran once and the freshness exit started none");
   assert.equal(
     finalSweepStartedBeforeClockSettled,
     false,

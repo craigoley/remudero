@@ -138,9 +138,9 @@ test("W1-T10057: the exit row splits the restart into its phases", async t => {
     assert.equal(phases.decision_to_latch, 0);
     assert.equal(phases.lanes, 20, "W1-T9089: the in-process lane is awaited, never held out");
     assert.equal("holdouts" in phases, false);
-    assert.equal(phases.pre_exit_pass, 7);
+    assert.equal("pre_exit_pass" in phases, false, "W1-T12237: the exit starts no pass");
     assert.equal(phases.drain, 0);
-    assert.equal(phases.total, 27);
+    assert.equal(phases.total, 20);
   } finally { await h.finish(); }
 });
 
