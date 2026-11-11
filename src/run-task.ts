@@ -1205,6 +1205,7 @@ import {
   type PlanPrPreflightResult,
   ensureJudgeableBody,
   filingAcceptanceCriteria,
+  planPrAcceptanceCriteria,
   probeExistingPlanPr,
   ratifyPrCreateRestArgs,
   ratifyPrProbeRestArgs,
@@ -1424,7 +1425,6 @@ import type { DuplicateCorpusEntry } from "./lib/knowledge-dedup.js";
 import {
   addedExportsFromPatch,
   assertLintClean,
-  breMetacharsIn,
   changedTaskIds,
   rawChangedTaskIds,
   statusFlipOnlyTaskIds,
@@ -1724,6 +1724,9 @@ import { fixRungInputFields, prBodyDigest } from "./lib/sweep.js";
 import { diagnoseBodyDefects } from "./lib/body-repair.js";
 import { criterionFieldTampered, filingSelfCreditCheck, missingReviewReuseFact, priorPostedReviewRow, proofChildEnv, proofSandboxArgv, proofSandboxStatus, ProofSandboxUnavailableError } from "./lib/review.js";
 import { inertAcceptanceProofs, PR_BODY_ACCEPTANCE_GRAMMAR } from "./lib/proof-grammar.js";
+import { diffAnchor, mainRepairAcceptanceFor } from "./lib/main-repair-acceptance.js";
+export { diffAnchor };
+export type { DiffAnchor, DiffAnchorUnavailableReason } from "./lib/main-repair-acceptance.js";
 import { alertFixBodyDeps, judgeOpenedAlertFixBody, type AlertFixAcceptanceCheck, type AlertFixBodyRead } from "./lib/alert-fix-body.js";
 import { baseLacksPrAddedExports } from "./lib/proof-missing-export.js";
 import { planPrPreflightAtCommitAsync } from "./lib/plan-pr-emitter.js";
@@ -5676,61 +5679,7 @@ function addedTestCriterion(path: string): AcceptanceCriterion {
  * as {@link DIFF_ANCHOR_UNAVAILABLE_STEP} so it stays observable.
  */
 export const DIFF_ANCHOR_UNAVAILABLE_STEP = "acceptance.fallback.diff_anchor_unavailable";
-export type DiffAnchorUnavailableReason = "no-diff" | "unparseable" | "no-safe-candidate";
-export type DiffAnchor = { kind: "anchored"; path: string; line: string; proof: string } | { kind: "unavailable"; reason: DiffAnchorUnavailableReason };
-const DIFF_ANCHOR_MIN_LENGTH = 8;
 const DIFF_ANCHOR_CLAIM_SUFFIX = "; its proof greps a line this PR's own diff adds, not a fixed pre-existing symbol";
-
-function escapeGrepLiteral(line: string): string {
-  let escaped = "";
-  for (const ch of line) {
-    if (ch === "\\") escaped += "\\\\";
-    else if (ch === "?") escaped += "[?]";
-    else if (".[]*^$".includes(ch)) escaped += `\\${ch}`;
-    else escaped += ch;
-  }
-  return escaped;
-}
-
-/** The first ADDED line of a unified diff (`git diff` or `gh pr diff`) that yields a grep proof the reviewer can run
- *  and that cannot already match at the merge base. A line the same diff also REMOVES is a move, so it is skipped. */
-export function diffAnchor(diffText: string | undefined): DiffAnchor {
-  if (diffText === undefined || diffText.trim() === "") return { kind: "unavailable", reason: "no-diff" };
-  const added: Array<{ path: string; line: string }> = [];
-  const removed = new Set<string>();
-  let file: string | undefined;
-  let sawHeader = false;
-  for (const raw of diffText.split("\n").map((l) => l.replace(/\r$/, ""))) {
-    if (raw.startsWith("diff --git ")) {
-      file = undefined;
-      continue;
-    }
-    if (raw.startsWith("+++ ")) {
-      sawHeader = true;
-      const path = raw.slice(4).replace(/^b\//, "").trim();
-      file = path === "/dev/null" ? undefined : path;
-      continue;
-    }
-    if (raw.startsWith("--- ")) continue;
-    if (raw.startsWith("-")) removed.add(raw.slice(1).trim());
-    else if (file && raw.startsWith("+")) added.push({ path: file, line: raw.slice(1).trim() });
-  }
-  if (!sawHeader) return { kind: "unavailable", reason: "unparseable" };
-  for (const { path, line } of added) {
-    if (line.length < DIFF_ANCHOR_MIN_LENGTH || removed.has(line) || /\sin\s/i.test(line)) continue;
-    if (!/\.[^/]+$/.test(path) || /\s/.test(path) || path.includes("..")) continue;
-    const pattern = escapeGrepLiteral(line);
-    const proof = `grep: ${pattern} in ${path}`;
-    if (parseWhitelistedProof(proof) === null || breMetacharsIn(pattern).blocking.length > 0) continue;
-    if (wrappedGrepPattern(proof) !== undefined) continue;
-    // The proof must survive the block it is written into, verbatim.
-    const roundTrip = parseAcceptanceBlock(renderAcceptanceBlock([{ claim: "anchor", proof }]));
-    if (roundTrip.length !== 1 || roundTrip[0].proof !== proof) continue;
-    return { kind: "anchored", path, line, proof };
-  }
-  return { kind: "unavailable", reason: "no-safe-candidate" };
-}
-
 /** W1-T4263's shared helper: a criterion whose proof greps the first safe line `diffText` adds, or `undefined`. */
 export function diffAnchoredAcceptanceCriterion(
   diffText: string,
@@ -33298,9 +33247,11 @@ export function lightPassActionable(
   // 3-line shape back, byte-identical (W1-T1211) — this is an ADDITIVE 3rd parameter, not a
   // change to `fixRungAllowed`'s own meaning.
   requeueLaneOnly: boolean = false,
-  // W1-T5922 — TRUE only on `buildSweepLightHook`'s ordinary pass. An arm is one GitHub call behind
-  // the full sweep's own guards (decideSweepArm, the W1-T5403 risk judge, holds, dedups); it spawns
-  // no worker. Default false, so every 2- and 3-argument caller keeps its original shape.
+  // W1-T5922 — TRUE on `buildSweepLightHook`'s ordinary pass and, since W1-T11510, on an interphase-review
+  // pass (`lightPassArmAdmitted`). An arm is one GitHub call behind the full sweep's own guards
+  // (decideSweepArm, the W1-T5403 risk judge, holds, dedups); `deps.arm` spawns no worker, and the
+  // mergeable lane's CodeQL fix route stands down on every review-only scope. Default false, so every
+  // 2- and 3-argument caller keeps its original shape.
   armAllowed: boolean = false,
   // W1-T8086: the ordinary pass's repair lanes use the existing per-claim fix-capacity admission.
   // 2026-10-14: `conflicted` too, so a merge-conflict round no longer waits for the next full sweep.
@@ -35482,12 +35433,23 @@ export async function planCommand(
       .split("\n")
       .map((line) => line.trim())
       .filter(Boolean);
-    const planPrBody = buildPlanPrBody({
-      intro: `rmd plan --mode=${mode} proposed plan-only changes.\n\nOperator brief\n\n${brief || "(none — whole-plan scope)"}`,
-      criteria: filingAcceptanceCriteria(reservedIds, planPrFiles),
-      changedFiles: planPrFiles,
-      proofCwd: worktreePath,
-    });
+    // W1-T11625: an amendment of an EXISTING shard carries a proof of an added line, or no PR opens. Both the
+    // producer's "nothing derivable" throw and buildPlanPrBody's author-time refusal land BEFORE the push.
+    let planPrBody: string;
+    try {
+      planPrBody = buildPlanPrBody({
+        intro: `rmd plan --mode=${mode} proposed plan-only changes.\n\nOperator brief\n\n${brief || "(none — whole-plan scope)"}`,
+        criteria: planPrAcceptanceCriteria(reservedIds, planPrFiles, diffSinceMergeBase(worktreePath), worktreePath),
+        changedFiles: planPrFiles,
+        proofCwd: worktreePath,
+      });
+    } catch (err) {
+      const reason = String((err as Error)?.message ?? err);
+      log("plan.error", { error: reason, changed_files: planPrFiles });
+      say(`plan PR not opened — ${reason}`);
+      worktreeRemove(repoDir, worktreePath);
+      return 1;
+    }
     planPushed = "unknown"; // W1-T9488: a push that throws leaves the branch's ids unknowable
     await gitPushRunBranchAsync(worktreePath);
     planPushed = pushedBranchIds(worktreePath, log);
@@ -39534,33 +39496,6 @@ function mainRepairBodyFile(config: Config, taskId: string): string {
 /** W1-T8572 — the one inert-proof row: what was inert, how many, and whether the body was rewritten or refused. */
 export const MAIN_REPAIR_ACCEPTANCE_DEFECT_STEP = "main-repair.acceptance_defect";
 
-/** W1-T8572 — a no-test-file worker body, checked BEFORE the dispatcher opens it. A body whose proofs all execute is
- *  returned as written. Otherwise its inert bullets ({@link inertAcceptanceProofs}: undialected, a demonstration, or
- *  unparseable — a prose proof naming a test path counts, though `parseWhitelistedProof` reads it) are dropped and one
- *  `grep:` of a line the pushed fix ADDS ({@link diffAnchor}) takes their place; with no such line the body is
- *  refused. Never trusts `acceptanceAuthorTimeCheck`: its trailer arm returns `ok` before it reads the block. */
-export function checkMainRepairWorkerBody(
-  body: string,
-  diffText: string | undefined,
-): { body: string } | { body: string; defect: "inert-proofs" | "no-proofs"; inert: string[]; resolution: "rewritten" } | { defect: "inert-proofs" | "no-proofs"; inert: string[]; resolution: "refused"; reason: DiffAnchorUnavailableReason } {
-  const criteria = parseAcceptanceBlock(body);
-  const inert = inertAcceptanceProofs(body);
-  if (criteria.length > 0 && inert.length === 0) return { body };
-  const defect = criteria.length === 0 ? "no-proofs" : "inert-proofs";
-  const anchor = diffAnchor(diffText);
-  if (anchor.kind === "unavailable") return { defect, inert, resolution: "refused", reason: anchor.reason };
-  const inertSet = new Set(inert);
-  const kept = criteria.filter((c) => !inertSet.has(c.proof ?? "")) as AcceptanceCriterion[];
-  const block = renderAcceptanceBlock([...kept, { claim: `the pushed repair adds this line to ${anchor.path}`, proof: anchor.proof }]);
-  const region = acceptanceBlockRegion(body);
-  const lines = body.split("\n");
-  const rewritten =
-    region === undefined
-      ? `${body.replace(/\s*$/, "")}\n\n${block}\n`
-      : [...lines.slice(0, region.headerLine), block, ...lines.slice(region.endLine)].join("\n");
-  return { body: rewritten, defect, inert, resolution: "rewritten" };
-}
-
 /** W1-T8572 — the defect row for a no-test-file worker that opened its own PR instead of leaving the open to the
  *  dispatcher: the body was never checked before it opened, so this records the breach and the body file's inert
  *  proofs (`body === undefined` when the worker removed that file). */
@@ -39575,7 +39510,7 @@ const REAL_MAIN_REPAIR_FIX_DEPS: AlertFixDispatchDeps = { ...REAL_ALERT_FIX_DISP
  * W1-T6403 — the priority fix PR for a red main: {@link dispatchAlertFixRun}'s fresh-branch path, one
  * worker on a branch off origin/main that commits and pushes. W1-T8572: the dispatcher writes the PR body first
  * ({@link mainRepairFixBody}). With failing test files known the worker opens the PR with that body; with none the
- * dispatcher checks the worker's bullets ({@link checkMainRepairWorkerBody}), ledgers any inert proof, and opens the
+ * dispatcher checks the worker's bullets ({@link mainRepairAcceptanceFor}), ledgers any inert proof, and opens the
  * PR over REST with the body it checked, so the opening payload carries it. Returns the PR url, or undefined when
  * none was opened.
  */
@@ -39669,7 +39604,7 @@ async function openCheckedMainRepairPr(
   const failing = request.testFiles.join(", ") || request.failingTestTitles.join("; ") || request.failingChecks.join(", ") || "(none named)";
   return openCheckedRepairPr(owner, repo, "main-repair", { branch, base: request.branch, worktreePath, bodyFile, pushedHead,
     prose: `Repairs \`${request.branch}\`, red since \`${request.offendingSha}\` (${pr}) on: ${failing}.`,
-    fallbackTitle: `fix(main): repair ${request.offendingSha.slice(0, 12)}` }, log, deps);
+    fallbackTitle: `fix(main): repair ${request.offendingSha.slice(0, 12)}`, redTestFiles: request.testFiles }, log, deps);
 }
 
 export function workerHarnessCommit(worker: WorkerResult): CodexHarnessCommit | undefined { // W1-T9667: off the result, not the mount
@@ -39726,7 +39661,7 @@ async function openCheckedRepairPr(
   owner: string,
   repo: string,
   lane: "main-repair" | "alert-fix",
-  pr: { branch: string; base: string; worktreePath: string; bodyFile: string; pushedHead?: string; prose: string; fallbackTitle: string },
+  pr: { branch: string; base: string; worktreePath: string; bodyFile: string; pushedHead?: string; prose: string; fallbackTitle: string; redTestFiles?: readonly string[] },
   log: (step: string, extra?: Record<string, unknown>) => void,
   deps: AlertFixDispatchDeps,
 ): Promise<string | undefined> {
@@ -39736,7 +39671,8 @@ async function openCheckedRepairPr(
     log(`${lane}.no_change`, { branch, reason: diffText === undefined ? "diff unreadable" : "the branch adds nothing to origin/main" });
     return undefined;
   }
-  const checked = checkMainRepairWorkerBody(readFileSync(pr.bodyFile, "utf8"), diffText);
+  const readAtHead = (path: string): string | undefined => { const full = join(worktreePath, path); return existsSync(full) ? readFileSync(full, "utf8") : undefined; };
+  const checked = mainRepairAcceptanceFor({ body: readFileSync(pr.bodyFile, "utf8"), diffText, redTestFiles: pr.redTestFiles ?? [], readFile: readAtHead });
   if ("defect" in checked) {
     log(`${lane}.acceptance_defect`, {
       defect: checked.defect,

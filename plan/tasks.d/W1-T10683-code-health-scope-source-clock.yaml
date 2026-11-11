@@ -8,7 +8,7 @@
   risk: high
   band_meaning: span
   origin: "Operator-approved cockpit delivery; authenticated Code health readiness audit 2026-10-26"
-  status: queued
+  status: merged
   attempts: 0
   priority: 2
   budget_usd: 12

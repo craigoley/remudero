@@ -5,7 +5,7 @@
   type: recon
   verify: auto
   risk: low
-  status: queued
+  status: merged
   attempts: 0
   origin: architect
   plan_refs: ["§5B"]

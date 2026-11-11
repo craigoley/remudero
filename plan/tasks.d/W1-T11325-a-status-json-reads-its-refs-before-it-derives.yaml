@@ -15,7 +15,7 @@
   files:
     - src/lib/report-commands.ts
     - test/deploy/a-status-json-reads-its-refs-before-it-derives.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: In --json mode statusCommand resolves originMainSha, the pushed run branches, the shared pause state and the dispatch claims once at command entry, before buildBoard's local derivation, and buildBoard receives those memoized answers; with local derivation slower than the budget the four reads still report their real values, a failing read still records its own reason, and the non-JSON path is unchanged

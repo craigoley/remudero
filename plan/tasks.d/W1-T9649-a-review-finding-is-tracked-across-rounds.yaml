@@ -11,7 +11,7 @@
   origin: "operator ask 2026-10-15: review five agent and skill catalogs for innovation, leaning into automation and self-improvement (MASTER-PLAN §4G)"
   plan_refs: [W1-T4849]
   files: [src/lib/review-findings.ts, src/lib/review-finding-outcomes.ts, src/lib/field-trials-flow.ts, test/a-review-finding-is-tracked-across-rounds.test.ts, test/review-finding-outcomes.test.ts]
-  status: queued
+  status: merged
   priority: 3
   attempts: 0
   rationale: |

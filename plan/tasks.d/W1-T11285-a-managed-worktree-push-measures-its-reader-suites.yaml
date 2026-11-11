@@ -17,7 +17,7 @@
   files:
     - hooks/pre-push
     - test/github/a-managed-worktree-push-measures-its-reader-suites.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: In hooks/pre-push's managed-worktree arm (gate root is not the pushed tree), a census suite carrying a readerRuntimePolicy runs its calibration and qualification through createPrePushSandboxRunner's sandboxed child, and its pass or failure reaches census-precheck's verdict; a suite whose sandbox cannot start still reads "skipped, NOT passed (CI runs it)"

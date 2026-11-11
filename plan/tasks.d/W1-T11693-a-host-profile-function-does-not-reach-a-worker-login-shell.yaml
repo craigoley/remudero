@@ -13,7 +13,7 @@
   files:
     - src/lib/worker-home.ts
     - test/worker-home.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     DIRECT EVIDENCE (operator, 2026-11-08): Azure run W1-T11687-1794122603696 failed closed before worker execution.

@@ -225,6 +225,50 @@ export function completeTestResult(result) {
     /^# tests [1-9][0-9]*$/m.test(output) && /^# pass [1-9][0-9]*$/m.test(output) && /^# fail 0$/m.test(output);
 }
 
+/** The stages a run must have run before it may push, in the order the gate runs them. */
+const PUSH_STAGES = ['census-precheck', 'static-preflight', 'affected-tests'];
+
+/**
+ * W1-T11914 — "may I push?", derived once from the stages the receipt already records; nothing is measured here.
+ * OBSERVED 2026-11-09: 489 of 804 suites ran, 4,379 tests passed, 0 failed, census and static were green, and the
+ * verdict was over-capacity (exit 3); a pipeline read the exit as a failure and retried for about two hours.
+ * RULE: a passed run is eligible. An over-capacity run is eligible only when the census, the static gate and the
+ * subset that fits all ran and were measured green with zero failing tests. A failed step, a stage that did not
+ * run or was not measured, a refusal and a dry run are not, and the reason names the stage. This reads the
+ * verdict and never sets it: the verdict, the exit code and every check are what they were.
+ */
+export function authorPushEligibility(receipt) {
+  const steps = receipt.steps ?? [];
+  const answer = (pushEligible, reason) => ({ pushEligible,
+    pushEligibleReason: String(reason).replace(/\s+/g, ' ').trim().slice(0, 400) });
+  const stage = (name) => steps.find((step) => step.name === name || (name === 'affected-tests' && step.name === 'affected-tests-subset'));
+  const failed = steps.find((step) => step.ok !== true);
+  if (failed) {
+    return answer(false, `${failed.name} failed${failed.testSummary?.fail ? `: ${failed.testSummary.fail} failing test(s)` : ''}${
+      receipt.verdict === 'refused' ? `; refused: ${receipt.error ?? 'no cause recorded'}` : ''}`);
+  }
+  if (receipt.verdict === 'passed') return answer(true, `passed: every stage this run selected ran green (${steps.map((step) => step.name).join(', ')})`);
+  const notRun = PUSH_STAGES.find((name) => !stage(name));
+  if (receipt.verdict === 'refused') {
+    return answer(false, `refused ${notRun ? `before ${notRun} ran` : 'at the receipt, after its stages ran'}: ${receipt.error ?? 'no cause recorded'}`);
+  }
+  if (receipt.verdict !== 'over-capacity') {
+    return answer(false, notRun ? `${notRun} was not run (verdict ${receipt.verdict ?? 'running'})`
+      : `verdict ${receipt.verdict ?? 'running'} is not a pushable outcome and names no stage`);
+  }
+  if (notRun) return answer(false, `${notRun} was not run: ${receipt.affectedTestsNotRunReason ?? receipt.error ?? 'no cause recorded'}`);
+  const unmeasured = steps.find((step) => step.notMeasured);
+  if (unmeasured) return answer(false, `${unmeasured.name} was not measured (${unmeasured.notMeasured}); an over-capacity run needs it green`);
+  const tests = stage('affected-tests'), summary = tests.testSummary;
+  if (!summary || !(summary.pass > 0)) return answer(false, `${tests.name} recorded no passing test summary`);
+  if (summary.fail !== 0 || summary.cancelled !== 0) {
+    return answer(false, `${tests.name}: ${summary.fail} failing and ${summary.cancelled} cancelled test(s)`);
+  }
+  const ran = receipt.tiered?.ran?.length ?? 0, selected = receipt.suites?.length ?? 0;
+  return answer(true, `over-capacity with nothing red: census-precheck, static-preflight and ${tests.name} ran green (${summary.pass} test(s) passed, 0 failed, ${
+    ran} of ${selected} suite(s)); ${Math.max(0, selected - ran)} suite(s) are left to the hosted checks`);
+}
+
 export function testSummary(output) {
   const fields = ['tests', 'suites', 'pass', 'fail', 'cancelled', 'skipped', 'todo'];
   const summary = Object.fromEntries(fields.map((field) => {
@@ -584,6 +628,14 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
         // line while the static stage runs on its own memory admission; suites are admitted after it.
         const queue = enqueueTestSlot(AUTHOR_SUITE_LABEL, { ...testSlot, perFileBytes: TEST_FILE_PEAK_BYTES, maxConcurrency: AUTHOR_MAX_WORKERS });
         receipt.suiteQueue = { ticketed: queue.ticketed, positionAtEnqueue: queue.position ?? null, note: queue.note };
+        // W1-T11915 criterion 4: keep the ticket's arrival identity, then add the selection's known price before
+        // static work starts. This is the same price capacityVerdict records later; that verdict does not depend on
+        // the admitted budget. Reading the manifest here also lets every heartbeat retain the price while we wait.
+        let manifest = { files: {} };
+        try { manifest = JSON.parse(readFileSync(join(root, 'scripts/test-tier-manifest.json'), 'utf8')); }
+        catch (error) { receipt.manifestUnavailable = error.message; }
+        const priced = partial ? partial.suites : receipt.suites;
+        queue.setPrice(priceSelection(priced, manifest).costMs);
         let staticEndedAt;
         const admitSuites = () => {
           const waitStartedAt = Date.now();
@@ -655,9 +707,6 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
             if ((partial ? partial.suites : receipt.suites).length === 0) cancelSuites('the selection names no suite');
             else admitSuites();
             // W1-T7809: price the selection against what this host can carry NOW, before spending it.
-            let manifest = { files: {} };
-            try { manifest = JSON.parse(readFileSync(join(root, 'scripts/test-tier-manifest.json'), 'utf8')); }
-            catch (error) { receipt.manifestUnavailable = error.message; }
             const legacyBudget = hostBudget((host ?? readHostCapacityInputs)(), { slotConcurrency: slot?.concurrency });
             // A deadline without a validated native profile was refused before static work.
             // Never expand workers or restart the deadline to admit a larger selection.
@@ -666,7 +715,6 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
             const budget = partial && nativeBudget.budgetMs > legacyBudget.budgetMs ? legacyBudget : nativeBudget;
             const executionWorkers = Math.min(AUTHOR_MAX_WORKERS, budget.workers);
             receipt.executionWorkers = executionWorkers;
-            const priced = partial ? partial.suites : receipt.suites;
             reportManifestFallbacks(priced, manifest);
             const verdict = capacityVerdict(priced, manifest, budget);
             receipt.capacity = verdict;
@@ -791,6 +839,8 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
     receipt.error = error.message;
     console.error(`author preflight ${error instanceof MacAuthorCapacityRefusal ? 'NOT_RUN' : 'REFUSED'}: ${error.message}`);
   }
+  // W1-T11914: the one place a caller reads "may I push?"; derived from the verdict just set, never an input to it.
+  Object.assign(receipt, authorPushEligibility(receipt));
   receipt.durationMs = Date.now() - startedAt;
   receipt.phaseAccounting = accountAuthorPhases(receipt);
   try {
@@ -803,6 +853,7 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
   } catch (error) {
     receipt.verdict = 'refused';
     receipt.error = `author receipt could not be written: ${error.message}`;
+    Object.assign(receipt, authorPushEligibility(receipt));
     console.error(receipt.error);
     if (diagnosticsRoot) {
       try { progress(); }
@@ -811,6 +862,7 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
     return 1;
   }
   console.log(`author verdict: ${receipt.verdict}; hosted full-suite/coverage remains REQUIRED, not proven by this run`);
+  console.log(`author push-eligible: ${receipt.pushEligible}; ${receipt.pushEligibleReason}`);
   return ['passed', 'not-run'].includes(receipt.verdict) ? 0 : receipt.verdict === 'over-capacity' ? OVER_CAPACITY_EXIT : 1;
 }
 

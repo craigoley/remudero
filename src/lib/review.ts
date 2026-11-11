@@ -19,7 +19,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, isAbsolute, join, resolve, sep as pathSep } from "node:path";
 import { classifyFailure } from "./classify.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
-import { isHolderStale, reclaimStaleLock, type IsHolderStaleOpts } from "./fs-race-safe.js";
+import { isHolderStale, reclaimStaleLock, writeAtomic, type IsHolderStaleOpts } from "./fs-race-safe.js";
 import { observeProofFileInside, type ProofFileObservation } from "./proof-file-read.js";
 import { appendLedger } from "./ledger.js";
 import { systemClock, type Clock } from "./clock.js";
@@ -11521,6 +11521,25 @@ export function lastPendingReviewStatusFromLedger(
   return prior;
 }
 
+function priorReviewClaimTakeovers(
+  lines: ReadonlyArray<Record<string, unknown>>,
+  input: { taskId: string; sha: string; prUrl?: string; reviewInputDigest?: string },
+): number {
+  const inputIsNamedByPrAndDigest = input.prUrl !== undefined && input.reviewInputDigest !== undefined;
+  let takeoversSinceTheLastVerdict = 0;
+  for (const line of lines) {
+    if (line.step !== "review.posted" && line.step !== "review.pending_posted") continue;
+    if (line.head_sha !== input.sha) continue;
+    const rowIsForAnotherInput = inputIsNamedByPrAndDigest
+      ? !reviewRowNamesPr(line, input.taskId, input.prUrl!) || line.review_input_digest !== input.reviewInputDigest
+      : line.task_id !== input.taskId;
+    if (rowIsForAnotherInput) continue;
+    if (line.step === "review.posted") takeoversSinceTheLastVerdict = 0;
+    else if (typeof line.took_over_run_id === "string") takeoversSinceTheLastVerdict++;
+  }
+  return takeoversSinceTheLastVerdict;
+}
+
 export type PendingReviewOwnerAssessment = "active" | "dead" | "unknown";
 
 export interface AssessPendingReviewOwnerOpts extends IsHolderStaleOpts {
@@ -12167,7 +12186,7 @@ export async function postReviewStatusGuarded(
           failureIds: history.failures.filter(finding => finding.headSha === opts.sha).map(finding => finding.id).sort(),
           historyRevision: history.revision ?? null,
         })).digest("hex") : opts.reviewDecisionDigest;
-      opts = { ...opts, state: effectiveVerdict.state, reviewDecisionDigest: effectiveReviewDecisionDigest,
+      opts = { ...opts, state: effectiveVerdict.state, verdict: effectiveVerdict, reviewDecisionDigest: effectiveReviewDecisionDigest,
         description: effectiveVerdict.state === "failure" ? effectiveVerdict.summary : opts.description,
         evidence: effectiveVerdict.state === "failure" ? "executed" : opts.evidence };
       if (effectiveVerdict.state === "failure") appendLedger(opts.ledgerPath, {
@@ -12352,6 +12371,8 @@ async function publishReviewStatusLocked(opts: PostReviewStatusGuardedOpts): Pro
       // W1-T135 exhaustion path: ledger-and-continue, never crash the run.
       const message = e instanceof Error ? e.message : String(e);
       if (planLintRetryIdentity !== undefined) appendPlanLintRetryRow(opts.ledgerPath, planLintRetryIdentity, "post_failed", message);
+      const settlesThroughItsOwnRows = planLintRetryIdentity !== undefined || opts.reopenedDegradedTerminal === true;
+      const outboxed = !settlesThroughItsOwnRows && writeReviewOutboxEntry(opts, statusDescription).ok;
       appendLedger(opts.ledgerPath, {
         run_id: opts.runId,
         task_id: opts.taskId,
@@ -12361,6 +12382,7 @@ async function publishReviewStatusLocked(opts: PostReviewStatusGuardedOpts): Pro
         evidence: opts.evidence,
         description: statusDescription,
         error: message,
+        ...(outboxed ? { outboxed: true } : {}),
         ...(opts.prUrl !== undefined ? { pr_url: opts.prUrl } : {}),
         ...(opts.reviewInputDigest !== undefined ? { review_input_digest: opts.reviewInputDigest } : {}),
         ...(opts.reviewEngineRevision !== undefined ? { review_engine_revision: opts.reviewEngineRevision } : {}),
@@ -12406,6 +12428,236 @@ async function publishReviewStatusLocked(opts: PostReviewStatusGuardedOpts): Pro
     return { posted: true, ...(publisherEvidence ? { publisherEvidence } : {}) };
 }
 
+const REVIEW_OUTBOX_VERSION = 1;
+
+export interface ReviewOutboxEntry {
+  version: number;
+  input_key: string;
+  head_sha: string;
+  state: "success" | "failure";
+  description?: string;
+  comment_body?: string;
+  owner: string;
+  repo: string;
+  task_id: string;
+  pr_url: string;
+  run_id: string;
+  evidence: ReviewEvidenceStrength;
+  review_decision_digest?: string;
+  review_engine_revision?: string;
+  decision_verdict?: ReviewVerdict;
+  evaluator_provenance?: ReviewEvaluatorProvenance;
+  presented_failure_ids?: string[];
+  written_at: string;
+}
+
+export function reviewOutboxDir(ledgerPath: string): string {
+  return join(dirname(ledgerPath), "review-outbox");
+}
+
+function reviewOutboxHash(text: string): string {
+  return createHash("sha256").update(text, "utf8").digest("hex").slice(0, 24);
+}
+
+export function reviewOutboxEntryPath(ledgerPath: string, prUrl: string, inputKey: string): string {
+  return join(reviewOutboxDir(ledgerPath), `${reviewOutboxHash(prUrl)}.${reviewOutboxHash(inputKey)}.json`);
+}
+
+type ReviewOutboxWrite = { ok: true } | { ok: false; reason: string };
+
+function reviewOutboxCommentBody(verdict: PostReviewStatusGuardedOpts["verdict"]): string | undefined {
+  if (!verdict || !Array.isArray(verdict.criteria)) return undefined;
+  const unmet = visibleCriteria(unmetReviewCriteria(verdict.criteria));
+  const reasons = reviewLedgerReasons(verdict);
+  const parts: string[] = [];
+  if (verdict.state !== "success" && (unmet.length > 0 || verdict.testTheater)) {
+    parts.push(
+      `**remudero-review=failure** — the following acceptance ${unmet.length === 1 ? "criterion is" : "criteria are"} unmet:\n\n` +
+        unmet.map((c, i) => {
+          const tail = c.failureTail?.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
+          return `${i + 1}. ${c.claim}\n   - ${reasons[i]}` + (tail
+            ? `\n\n   <details>\n   <summary>Proof failure output</summary>\n\n   <pre>${tail}</pre>\n   </details>\n`
+            : "");
+        }).join("\n") +
+        (verdict.testTheater ? `\n\n_Also: test theater — added tests assert nothing._` : "") +
+        `\n\nAdd the missing work (or escalate). Do NOT edit the acceptance criteria to match the diff.`,
+    );
+  }
+  for (const section of [
+    scopeAdvisorySection(verdict.unwiredAdvisories), unwiredExportAdvisorySection(verdict.unwiredAdvisories),
+    inverseScopeAdvisorySection(verdict.unwiredAdvisories),
+  ]) if (section) parts.push(section);
+  if (parts.length === 0) parts.push(`**remudero-review=${verdict.state}** — ${verdict.summary}`);
+  return parts.join("\n\n---\n\n");
+}
+
+function writeReviewOutboxEntry(opts: PostReviewStatusGuardedOpts, description: string | undefined): ReviewOutboxWrite {
+  if (opts.state === "pending" || opts.prUrl === undefined || opts.reviewInputDigest === undefined) {
+    return { ok: false, reason: "not a terminal verdict keyed by its PR and review input" };
+  }
+  const entry: ReviewOutboxEntry = {
+    version: REVIEW_OUTBOX_VERSION, input_key: opts.reviewInputDigest, head_sha: opts.sha, state: opts.state,
+    description, comment_body: reviewOutboxCommentBody(opts.verdict), owner: opts.owner, repo: opts.repo, task_id: opts.taskId,
+    pr_url: opts.prUrl, run_id: opts.runId, evidence: opts.evidence, review_decision_digest: opts.reviewDecisionDigest,
+    review_engine_revision: opts.reviewEngineRevision, decision_verdict: opts.verdict,
+    evaluator_provenance: opts.evaluatorProvenance,
+    ...(opts.presentedFailureIds !== undefined ? { presented_failure_ids: [...opts.presentedFailureIds] } : {}),
+    written_at: systemClock.iso(),
+  };
+  try {
+    const renamed = writeAtomic(reviewOutboxEntryPath(opts.ledgerPath, opts.prUrl, opts.reviewInputDigest), `${JSON.stringify(entry)}\n`);
+    return renamed ? { ok: true } : { ok: false, reason: "the staged entry was withdrawn before its rename" };
+  } catch (error) {
+    return { ok: false, reason: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+function reviewOutboxFileNames(dir: string): { ok: true; names: string[] } | { ok: false; reason: string } {
+  try {
+    return { ok: true, names: readdirSync(dir) };
+  } catch (error) {
+    return { ok: false, reason: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+type FiledReviewOutboxEntry =
+  | { path: string; unreadable: false; entry: ReviewOutboxEntry }
+  | { path: string; unreadable: true };
+
+function readReviewOutbox(ledgerPath: string, prUrl: string): FiledReviewOutboxEntry[] {
+  const dir = reviewOutboxDir(ledgerPath);
+  const listing = reviewOutboxFileNames(dir);
+  if (!listing.ok) return [];
+  const prefix = `${reviewOutboxHash(prUrl)}.`;
+  return listing.names.filter((name) => name.startsWith(prefix) && name.endsWith(".json")).sort().map((name): FiledReviewOutboxEntry => {
+    const path = join(dir, name);
+    try {
+      const entry = JSON.parse(readFileSync(path, "utf8")) as Partial<ReviewOutboxEntry> | null;
+      const readable = entry?.version === REVIEW_OUTBOX_VERSION && entry.pr_url === prUrl &&
+        typeof entry.head_sha === "string" && typeof entry.input_key === "string" &&
+        (entry.state === "success" || entry.state === "failure") &&
+        (entry.evidence === "executed" || entry.evidence === "no_evidence");
+      return readable ? { path, unreadable: false, entry: entry as ReviewOutboxEntry } : { path, unreadable: true };
+    } catch {
+      return { path, unreadable: true };
+    }
+  });
+}
+
+export interface DrainReviewOutboxOpts {
+  owner: string;
+  repo: string;
+  sha: string;
+  taskId: string;
+  runId: string;
+  ledgerPath: string;
+  prUrl: string;
+  reviewInputDigest: string;
+  fetchLifecycle: PostReviewStatusGuardedOpts["fetchLifecycle"];
+  post?: PostReviewStatusGuardedOpts["post"];
+  readReviewStatusHistory?: ReviewStatusHistoryReader;
+  commentDeps?: PostReviewCommentDeps;
+  lockOpts?: AcquireReviewStatusLockOpts;
+}
+
+export interface ReviewOutboxDrainResult {
+  outcome: "none" | "posted" | "held" | "discarded";
+  reason?: string;
+}
+
+export async function drainReviewOutbox(opts: DrainReviewOutboxOpts): Promise<ReviewOutboxDrainResult> {
+  let drained: ReviewOutboxDrainResult = { outcome: "none" };
+  const prCoordinatesNotUrl = { owner: opts.owner, repo: opts.repo, pr_number: prLifecycleUrlTarget(opts.prUrl)?.number };
+  for (const filed of readReviewOutbox(opts.ledgerPath, opts.prUrl)) {
+    const { path } = filed;
+    const entry = filed.unreadable ? undefined : filed.entry;
+    const discard = (reason: string): void => {
+      rmSync(path, { force: true });
+      appendLedger(opts.ledgerPath, {
+        run_id: opts.runId, task_id: opts.taskId, step: "review.outbox_discarded", ...prCoordinatesNotUrl,
+        head_sha: entry?.head_sha ?? opts.sha, current_head_sha: opts.sha, reason,
+        ...(entry ? { outbox_state: entry.state, outbox_input_key: entry.input_key, outbox_run_id: entry.run_id } : {}),
+      });
+      if (drained.outcome === "none") drained = { outcome: "discarded", reason };
+    };
+    if (!entry) {
+      discard("the outbox entry is unreadable");
+      continue;
+    }
+    if (entry.head_sha !== opts.sha) {
+      discard(`the head moved from ${entry.head_sha.slice(0, 12)} to ${opts.sha.slice(0, 12)}`);
+      continue;
+    }
+    if (entry.input_key !== opts.reviewInputDigest) {
+      discard("the review input changed on an unmoved head");
+      continue;
+    }
+    const rawPost = opts.post ?? postReviewStatus;
+    let threw = false;
+    const result = await postReviewStatusGuarded({
+      owner: opts.owner, repo: opts.repo, sha: entry.head_sha, state: entry.state, description: entry.description,
+      taskId: opts.taskId, evidence: entry.evidence, ledgerPath: opts.ledgerPath, runId: opts.runId, prUrl: opts.prUrl,
+      reviewInputDigest: entry.input_key, reviewDecisionDigest: entry.review_decision_digest,
+      verdict: entry.decision_verdict, presentedFailureIds: entry.presented_failure_ids,
+      reviewEngineRevision: entry.review_engine_revision, evaluatorProvenance: entry.evaluator_provenance,
+      readReviewStatusHistory: opts.readReviewStatusHistory,
+      fetchLifecycle: opts.fetchLifecycle, lockOpts: opts.lockOpts,
+      post: async (status) => {
+        try {
+          await rawPost(status);
+        } catch (error) {
+          threw = true;
+          throw error;
+        }
+      },
+    });
+    if (result.conflict) {
+      discard(`the stored verdict contradicts a posted terminal: ${result.reason ?? "conflict"}`);
+      continue;
+    }
+    if (!result.posted) {
+      if (threw) drained = { outcome: "held", reason: `the outbox verdict's post failed again: ${result.reason ?? "post failed"}` };
+      else discard(`the stored verdict was not posted: ${result.reason ?? "refused"}`);
+      continue;
+    }
+    const comment = entry.comment_body === undefined ? undefined
+      : postReviewCommentGuarded(opts.prUrl, entry.comment_body, { commitSha: entry.head_sha, ...opts.commentDeps });
+    const stored = entry.decision_verdict;
+    if (stored && Array.isArray(stored.criteria) && entry.review_decision_digest !== undefined) {
+      const verdict: ReviewVerdict = result.effectiveVerdict
+        ? { ...stored, ...result.effectiveVerdict, state: result.effectiveState ?? result.effectiveVerdict.state }
+        : { ...stored, state: entry.state };
+      appendLedger(opts.ledgerPath, {
+        run_id: opts.runId, task_id: opts.taskId, step: "review.posted", context: REVIEW_CONTEXT, state: verdict.state,
+        head_sha: entry.head_sha, pr_url: opts.prUrl, review_input_digest: entry.input_key,
+        ...(entry.review_engine_revision !== undefined ? { review_engine_revision: entry.review_engine_revision } : {}),
+        review_decision_digest: result.effectiveReviewDecisionDigest ?? entry.review_decision_digest,
+        decision_verdict: verdict,
+        ...(entry.evaluator_provenance !== undefined ? { evaluator_provenance: entry.evaluator_provenance } : {}),
+        test_theater: verdict.testTheater,
+        unmet_criteria: visibleCriteria(unmetReviewCriteria(verdict.criteria)).map((c) => c.claim),
+        reasons: reviewLedgerReasons(verdict),
+        proof_exec: verdict.criteria.map((c) => c.proof_exec),
+        floor_degraded: verdict.floorDegraded,
+        ...reviewLedgerLegibilityFields(verdict),
+        reward_hacking_gap: verdict.rewardHackingGap,
+        outbox_run_id: entry.run_id,
+      });
+    }
+    appendLedger(opts.ledgerPath, {
+      run_id: opts.runId, task_id: opts.taskId, step: "review.outbox_posted", ...prCoordinatesNotUrl,
+      head_sha: entry.head_sha, state: entry.state, review_input_digest: entry.input_key, outbox_run_id: entry.run_id,
+      comment: comment === undefined ? "none" : comment.posted ? "posted" : comment.reason,
+    });
+    rmSync(path, { force: true });
+    drained = {
+      outcome: "posted",
+      reason: `posted the ${entry.state} verdict run ${entry.run_id} computed for ${entry.head_sha.slice(0, 7)} — no review needed (W1-T11928)`,
+    };
+  }
+  return drained;
+}
+
 // ── W1-T913: post remudero-review=pending at DETECTION, before judging ──────
 
 /** Reclaim pending claims after this TTL; see {@link postReviewPending}. #5672 observed a 23:42 claim still
@@ -12432,6 +12684,8 @@ export interface PostReviewPendingOpts {
   fetchStatus?: GhApiFetcher;
   /** Injected raw poster (tests) — forwarded to {@link postReviewStatusGuarded} unchanged. */
   post?: PostReviewStatusGuardedOpts["post"];
+  readReviewStatusHistory?: ReviewStatusHistoryReader;
+  commentDeps?: PostReviewCommentDeps;
   lockOpts?: AcquireReviewStatusLockOpts;
   /** Injectable only so the durable owner record is deterministic in tests. */
   ownerIdentity?: { pid: number; startedAt: string };
@@ -12448,6 +12702,7 @@ export interface PostReviewPendingResult {
   posted: boolean;
   reason?: string;
   lifecycle?: "merged" | "closed";
+  outbox?: "posted" | "held";
 }
 
 /** Single pending-post entry point (design (a)/(d)): `runReview`, `reviewCommand` and transitively sweep
@@ -12469,6 +12724,17 @@ export async function postReviewPending(opts: PostReviewPendingOpts): Promise<Po
       head_sha: opts.sha, pr_url: opts.prUrl, reason,
     });
     return { posted: false, lifecycle: closed, reason: `PR is already ${closed}` };
+  }
+  if (opts.prUrl !== undefined && opts.reviewInputDigest !== undefined) {
+    const drained = await drainReviewOutbox({
+      owner: opts.owner, repo: opts.repo, sha: opts.sha, taskId: opts.taskId, runId: opts.runId,
+      ledgerPath: opts.ledgerPath, prUrl: opts.prUrl, reviewInputDigest: opts.reviewInputDigest,
+      fetchLifecycle: opts.fetchLifecycle, post: opts.post, readReviewStatusHistory: opts.readReviewStatusHistory,
+      commentDeps: opts.commentDeps, lockOpts: opts.lockOpts,
+    });
+    if (drained.outcome === "posted" || drained.outcome === "held") {
+      return { posted: false, outbox: drained.outcome, reason: drained.reason };
+    }
   }
   const lines = readLiveLedgerRecords(opts.ledgerPath);
   const hasInputIdentity = opts.prUrl !== undefined && opts.reviewInputDigest !== undefined;
@@ -12598,7 +12864,23 @@ export async function postReviewPending(opts: PostReviewPendingOpts): Promise<Po
       ...(opts.prUrl !== undefined ? { pr_url: opts.prUrl } : {}),
       ...(opts.reviewInputDigest !== undefined ? { review_input_digest: opts.reviewInputDigest } : {}),
       ...(opts.reviewEngineRevision !== undefined ? { review_engine_revision: opts.reviewEngineRevision } : {}),
+      ...(takenOverFrom ? { took_over_run_id: takenOverFrom.runId } : {}),
     });
+    const linesReadBeforeThisClaim = lines;
+    const takeoversCountedForTheLedgerOnly = takenOverFrom ? priorReviewClaimTakeovers(linesReadBeforeThisClaim, { ...opts }) + 1 : 0;
+    if (takenOverFrom && takeoversCountedForTheLedgerOnly > 1) {
+      const inputKeyNamingThePr = `${opts.prUrl ?? opts.taskId}@${opts.sha}${opts.reviewInputDigest !== undefined ? `#${opts.reviewInputDigest}` : ""}`;
+      appendLedger(opts.ledgerPath, {
+        run_id: opts.runId,
+        task_id: opts.taskId,
+        step: "review.claim_repeated",
+        input_key: inputKeyNamingThePr,
+        head_sha: opts.sha,
+        takeovers: takeoversCountedForTheLedgerOnly,
+        took_over_run_id: takenOverFrom.runId,
+        ...(opts.reviewInputDigest !== undefined ? { review_input_digest: opts.reviewInputDigest } : {}),
+      });
+    }
   }
   return result;
 }

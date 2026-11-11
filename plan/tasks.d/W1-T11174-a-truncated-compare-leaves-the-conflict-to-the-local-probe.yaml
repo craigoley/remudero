@@ -21,7 +21,7 @@
     - src/lib/merge-probe.ts
     - test/ci/a-truncated-compare-leaves-the-conflict-to-the-local-probe.test.ts
     - test/a-dirty-pr-takes-its-conflict-evidence-from-the-local-merge-probe.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "Replaying #15520 (W1-T10842, head 8a8bdb3, merge base 2871269): when either compare side lists GitHub's full 300 files, hydrateMergeConflictEvidence records a gap naming the cap and no evidence, while a complete list still yields its intersection; applyMergeProbeEvidence gives a dirty PR whose compare evidence is empty the probe's files, and captured compare evidence still wins; and probeOpenPrMerges probes every dirty PR without captured files in one pass even when that exceeds its limit"

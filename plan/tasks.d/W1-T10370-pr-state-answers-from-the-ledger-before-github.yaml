@@ -19,7 +19,7 @@
     - scripts/console-parity-ratchet.mjs
     - scripts/console-parity-baseline.json
     - test/help-renders-a-summary-not-a-paragraph.test.ts
-  status: queued
+  status: merged
   priority: 1.5  # every operator and builder session asks these questions many times an hour
   attempts: 0
   rationale: |

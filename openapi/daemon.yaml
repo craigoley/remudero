@@ -1985,6 +1985,8 @@ components:
             - creation_denied
             - envelope_missing
             - handoff_unavailable
+            - runner_config_missing
+            - runner_config_invalid
             - binding_not_found
             - operator_required
             - deployment_not_qualified

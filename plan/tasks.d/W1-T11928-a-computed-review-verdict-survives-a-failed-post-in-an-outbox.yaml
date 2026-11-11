@@ -1,0 +1,38 @@
+- id: W1-T11928
+  title: A review that computed its verdict but could not post it keeps the verdict in an outbox keyed by its input and the next pass posts it without running the reviewer again
+  repo: remudero
+  depends_on: []
+  priority: 1.1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # Rule 19: one concern, what happens to a computed verdict whose post failed; the reviewer, its rubric, the status contexts and the dedupe keys are unchanged
+  origin: operator-session#github-access-1109
+  plan_refs:
+    - W1-T5866
+  files:
+    - src/lib/review.ts
+    - test/a-computed-review-verdict-survives-a-failed-post-in-an-outbox.test.ts
+    - "src/cli/commands/review.ts"
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: When posting a computed verdict fails, the verdict (state, description, head sha and input key) is written to an outbox entry before the run ends, and the entry holds no credential
+      proof: "unit test: test/a-computed-review-verdict-survives-a-failed-post-in-an-outbox.test.ts"
+    - claim: The next review pass for that input posts the outbox verdict without starting a reviewer, removes the entry on a successful post, and discards it with a ledger row when the head has moved
+      proof: "grep: W1-T11928 criterion 2 in test/a-computed-review-verdict-survives-a-failed-post-in-an-outbox.test.ts"
+    - claim: A review whose post succeeds writes no outbox entry, and the posted status and comment are identical with the change and without it
+      proof: "grep: W1-T11928 criterion 3 in test/a-computed-review-verdict-survives-a-failed-post-in-an-outbox.test.ts"
+  rationale: |
+    OBSERVED 2026-11-09 22:49Z: review run review-PR17494-1794264570958 computed "remudero-review: PASS - 3 criteria substantiated, no test theater" for head f38aea2263e8 and then logged review.post_failed (no GitHub credential in that process). The PASS existed only in the dead process; the PR's check stayed pending and the next attempt would have paid a full review, a median 9 minutes and up to 17 at p90 on a loaded host, to learn the same thing.
+    - A verdict is expensive and the post is cheap, so a failed post should never cost the verdict.
+  design: |
+    - On a failed post, write {input key, head sha, state, description, comment body} to a file under the state directory, atomically. Credentials and tokens are never written.
+    - The review pass checks the outbox before admitting a reviewer for an input. A present entry whose head matches is posted and removed; a stale one is dropped with a row.
+    - NOT IN SCOPE: why the post failed (the credential resolver is its own task), the dedupe keys, and the reviewer itself.
+  falsifier: |
+    Drop the outbox write: criterion 1 must fail. Run the reviewer anyway: criterion 2 must fail. Post a stale head: criterion 2 must fail. Write an entry on success or change the posted body: criterion 3 must fail. Restore and require all three.
+  note: |
+    reservation hand-off: run-unfiled-1794267225693
+    Success is review.post_failed rows followed by a posted verdict on the next pass with no second reviewer run.

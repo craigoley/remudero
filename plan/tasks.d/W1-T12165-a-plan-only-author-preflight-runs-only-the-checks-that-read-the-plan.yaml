@@ -1,0 +1,53 @@
+- id: W1-T12165
+  title: "A plan-only author preflight runs only the checks that read the plan"
+  repo: remudero
+  depends_on: []
+  priority: 1.1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # which checks an author run skips; a check skipped by mistake lets a defect reach hosted CI
+  band_meaning: blast-radius
+  origin: operator-session#follow-ups-2026-11-10
+  plan_refs:
+    - W1-T7809
+    - W1-T11101
+    - W1-T3702
+  files:
+    - src/lib/ci-parity.ts
+    - src/run-task.ts
+    - scripts/preflight-author.mjs
+    - test/ci/a-plan-only-author-preflight-runs-only-the-checks-that-read-the-plan.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "For a plan-only diff the static stage skips each check that declares its inputs and declares none under the plan. The summary names each skipped check and the reason"
+      proof: "grep: W1-T12165 criterion 1 in test/ci/a-plan-only-author-preflight-runs-only-the-checks-that-read-the-plan.test.ts"
+    - claim: "A check that declares no inputs runs for every diff"
+      proof: "grep: W1-T12165 criterion 2 in test/ci/a-plan-only-author-preflight-runs-only-the-checks-that-read-the-plan.test.ts"
+    - claim: "For a plan-only diff the rule-checks step runs only the rule suites that the plan-reading listing selects"
+      proof: "grep: W1-T12165 criterion 3 in test/ci/a-plan-only-author-preflight-runs-only-the-checks-that-read-the-plan.test.ts"
+    - claim: "A plan-only author preflight runs the plan lint once"
+      proof: "grep: W1-T12165 criterion 4 in test/ci/a-plan-only-author-preflight-runs-only-the-checks-that-read-the-plan.test.ts"
+    - claim: "A diff with one changed file outside the plan runs every check, as today. So does a plan-only diff whose listing is unreadable"
+      proof: "grep: W1-T12165 criterion 5 in test/ci/a-plan-only-author-preflight-runs-only-the-checks-that-read-the-plan.test.ts"
+  rationale: |
+    MEASURED 2026-11-10 from three receipts of plan-only filings on the Mac agent account (3, 4 and 7 changed task files): one preflight took 431 to 734 seconds.
+    - The static stage took 171 to 225 seconds and ran 28 checks. The affected tests took 228 to 477 seconds for 35 suites.
+    - The rule-checks step alone took 124 to 170 seconds. It runs every rule suite, whatever the diff.
+    - The static stage also runs the type check, the duplicate-code check, the dependency check, the API client check and the source size check. None of them reads a file under plan/.
+    - The plan lint runs twice: once as the `lint-plan` step of the static stage, and once as the `lint-plan-fast` step that scripts/preflight-author.mjs adds for a plan-only selection.
+    - On the Azure host, with the fleet at work, the same preflight was noted in the session at 17 minutes for the static stage and 19 minutes for the tests.
+    - The test selection is already narrow for a plan-only diff (W1-T7809). The static stage is not.
+  design: |
+    Add an optional field to `FastGateStep` in src/lib/ci-parity.ts that lists the path prefixes a check reads. Fill it only for a check whose inputs are certain.
+    `runPreflightFast` skips a step when the field is present, the diff is plan-only and no prefix is under the plan. It reports the skip as it reports `skipWhenAbsent` today.
+    For the rule-checks step, pass the plan-reading listing (`readPlanOnlyListing` in src/lib/affected-suites.ts) and run the rule suites that are in it.
+    `rmd preflight` in src/run-task.ts decides plan-only from its own diff with `isPlanOnlyDiff`; the author script does not tell it. Remove the second lint step from scripts/preflight-author.mjs.
+    Hosted CI stays required and runs every check. This task changes only what the author run repeats before the push.
+    NOT IN SCOPE: the test selection, hosted CI, and the census precheck.
+  falsifier: |
+    Skip a check that declares no inputs and criterion 2 must fail. Skip a check for a diff that changes a source file and criterion 5 must fail. Run every rule suite for a plan-only diff and criterion 3 must fail. Restore and require all five to pass.
+  note: |
+    The builder reports the stage times of one plan-only filing before and after, from its receipts.

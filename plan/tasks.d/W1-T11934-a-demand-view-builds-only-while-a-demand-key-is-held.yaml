@@ -1,0 +1,39 @@
+- id: W1-T11934
+  title: The daily-progress and code-health views declared demand-only build only while a demand key is held, so with none held they stop rebuilding about once per second
+  repo: remudero
+  depends_on: []
+  priority: 0.8
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # read-model-worker.ts view scheduling; the fix removes builds only when no demand key is held
+  band_meaning: blast-radius
+  origin: "operator ruling 2026-11-10 go with it (efficiency batch, slim serve, lighten preflight, janitor)"
+  plan_refs:
+    - W1-T11933
+  files:
+    - src/lib/read-model-worker.ts
+    - test/lib/a-demand-view-builds-only-while-a-demand-key-is-held.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: With no demand key held, a view declared demand builds zero times over a fake-clock window of ten minutes
+      proof: "grep: W1-T11934 criterion 1 in test/lib/a-demand-view-builds-only-while-a-demand-key-is-held.test.ts"
+    - claim: With a demand key held, the view builds at its declared cadence and stops within one tick of the key being released
+      proof: "grep: W1-T11934 criterion 2 in test/lib/a-demand-view-builds-only-while-a-demand-key-is-held.test.ts"
+    - claim: The measured cause is named in the test, whether a key is held open, a build re-arms demand, or demand views are not paced, and the fix addresses that cause rather than the symptom
+      proof: "grep: W1-T11934 criterion 3 in test/lib/a-demand-view-builds-only-while-a-demand-key-is-held.test.ts"
+    - claim: A view that is not declared demand is unchanged by this task
+      proof: "grep: W1-T11934 criterion 4 in test/lib/a-demand-view-builds-only-while-a-demand-key-is-held.test.ts"
+  rationale: |
+    OBSERVED 2026-11-10 (serve research): daily-progress (603 builds in 600 s, 137 s of heavy lane) and code-health (621 builds, 131 s) are declared demand:true at read-model-worker.ts around :2105 to :2109 yet build about once per second with no console open.
+    - Mechanism: not yet established. Candidates are a demand key held open by a poller or the slow lane, a build that re-arms its own demand, or demand views that are not paced. The first step is to measure which.
+    - Effect: about 45 percent of one thread on views no one asked for.
+  design: |
+    Establish the cause with a failing test first (TDD strict): build the view under a fake clock with no demand key and count builds. Then fix the cause at its origin, never by special-casing these two views. NOT IN SCOPE: pacing of non-demand views (W1-T11933).
+  falsifier: |
+    Revert the fix and criterion 1 must fail with the observed build count. Special-case the two view names and criterion 4 or a second declared demand view in the test must fail. Restore and require all four to pass.
+  note: |
+    reservation hand-off: run-unfiled-1794269694199 -> run-unfiled-1794269694199
+    Reserved with rmd next-task-id (--count 9 and 1 on run-unfiled-1794269694199). Hand-built by the operator's choice (rulings 2026-11-10: slim serve, lighten preflight with no hard caps, janitor trims old worktrees). Check refs/rmd-dispatch/<id> and any run branch before building.

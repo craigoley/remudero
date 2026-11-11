@@ -1,0 +1,46 @@
+- id: W1-T12038
+  title: "One writing standard and one glossary cover every text a person reads"
+  repo: remudero
+  depends_on: []
+  priority: 1.2
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # sized high only for the plan lint's sizing rule: two new documents, the docs index and one test; no code path changes
+  band_meaning: blast-radius
+  origin: operator-session#plain-language-2026-11-10
+  plan_refs:
+    - W1-T2279
+    - W1-T4087
+  files:
+    - docs/plain-language.md
+    - docs/glossary.md
+    - docs/docs-index.json
+    - test/docs/the-glossary-gives-each-term-one-meaning.test.ts
+  status: merged
+  attempts: 0
+  acceptance:
+    - claim: "Every glossary table row has a term, a meaning, the words not to use and a source, and no term is defined twice"
+      proof: "grep: W1-T12038 criterion 1 in test/docs/the-glossary-gives-each-term-one-meaning.test.ts"
+    - claim: "No word listed as not to use for one term is itself a glossary term, unless the row says for which meaning"
+      proof: "grep: W1-T12038 criterion 2 in test/docs/the-glossary-gives-each-term-one-meaning.test.ts"
+    - claim: "The writing standard links the glossary, the operator message standard and the comment standard, and each link resolves to a file"
+      proof: "grep: W1-T12038 criterion 3 in test/docs/the-glossary-gives-each-term-one-meaning.test.ts"
+  rationale: |
+    OBSERVED 2026-11-10: the operator said "Much of what I read today is hard to parse" and asked for plain language everywhere and one domain language.
+    MEASURED 2026-11-10 on main at 2c6e743199:
+    - Task titles average 44 words over 5,084 task files; 72% are longer than 30 words.
+    - 60% of the last 300 commit subjects are longer than 72 characters and 25% are cut off with "…".
+    - CLAUDE.md has 142 words in capitals, and 23% of its sentences are longer than 25 words.
+    - No prompt for a worker, the Architect, a reviewer or a judge has a rule about wording. Only the inbox prompts do.
+    - There is no glossary. docs/comment-standard.md tells writers to link "CLAUDE.md's glossary bullet", which does not exist. The only glossary in code, HARNESS_GLOSSARY in src/lib/inbox-plain.ts, disagrees with the code on four of its six terms.
+    - One thing has several names: hold, park, stand down, defer, skip and refuse; lane, slot and worker; row, line, record, entry and event.
+  design: |
+    Add docs/plain-language.md: the four tests of ISO 24495-1, twelve writing rules taken from ASD-STE100, the shape of each kind of text, and examples from this repo. Add docs/glossary.md: about 90 terms in tables of four cells (term, meaning, do not use, source). List both in docs/docs-index.json. The test reads the two documents and checks the three criteria.
+    The standard measures and reports; it adds no check that fails a pull request. This keeps the operator's ruling of 2026-10-24 on comments, and the ban in docs/operator-message-standard.md on readability gates.
+    NOT IN SCOPE: renaming a ledger step, a function or a file (DECISIONS 2026-08-15 keeps them as query keys), and rewriting any existing text. Each rewrite is its own task.
+  falsifier: |
+    Define a term twice, or drop a cell from a row, and criterion 1 must fail. List a defined term as a word not to use, with no meaning named, and criterion 2 must fail. Point a link at a missing file and criterion 3 must fail. Restore and require all three to pass.
+  note: |
+    Both documents are drafted. The glossary keeps the role names the operator likes: gardener, janitor, reaper, tuner, watchdog, overseer.
