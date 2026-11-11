@@ -14,7 +14,7 @@
   files:
     - src/lib/review.ts
     - test/a-repeated-review-claim-takeover-is-counted-per-input.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: A takeover of a stale review claim for an input whose previous claim was also taken over, with no verdict row between them, writes a review.claim_repeated row with the input key, head sha and the number of consecutive takeovers

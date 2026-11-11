@@ -11579,3 +11579,54 @@ Archived from `src/lib/sweep.ts` lines 6966-6970 at the merge base.
       // unmatched PR is never touched at all), so every strike a MATCHED PR
       // carried in was spent chasing that same infrastructure artifact.
 ```
+
+## review-failed stand-down: why the W1-T7091 remedy failed (W1-T11315)
+
+Original analysis, not an archived comment. Symbols and numbers read at this HEAD and from the
+merged diffs of W1-T7091 (c3b7d6480, #10370) and W1-T10653 (135080c1c, #16565).
+
+### review_failed_stand_down_path
+
+The `review-failed` blocker is a disposition-table row in `src/lib/sweep.ts`
+(`disposition: "blocked-fixable"`, `blocker: "review-failed"`, `when: pr.reviewState === "failure"`
+with a non-empty `unmetCriteria`). Steps the path takes, in order:
+
+1. The refusal row (`refused-escalate`, blocker `escalated`) wins first when
+   `onlyRefusedUnmetCriteria(pr.unmetCriteria)` holds and CI is not red.
+2. An unspent `pr.pendingAnswer` re-dispatches the fix rung (W1-T7096 row).
+3. Strike exhaustion (`isFixStrikeExhausted`, `fixCeilingInForce`) escalates, or routes to
+   fix-progress judgment (`isFixStrikeJudgedExhausted`).
+4. Otherwise the plain row yields `blocked-fixable` and the fix lane dispatches a strike.
+5. At dispatch, an already-open needs-human escalation for the same (task, PR, head, cause) stands
+   the fix down: `matchDuplicateEscalation` plus `openEscalationStandDownReason`. This is not a
+   hold, so it never reached the held-escalation SLO.
+6. Empty-diff failures take the supersession close (`emptyDiffReviewFailure`,
+   `emptyDiffSupersedes`), capped by `MAX_STALE_PROOF_CLOSES_PER_PASS` (2) per pass.
+7. `needsPersonToMerge` and `ownEscalationAtHead` decide whether the review lane may admit the PR.
+
+### review_failed_remedy_failure_cause
+
+W1-T7091 changed only step 6: `emptyDiffReviewFailure` PRs over the per-pass close cap are now
+deferred (`empty_diff_close_deferred`) instead of falling through to a strike. It touched one
+branch of `runSweep` and one test. PRs with a non-empty diff, the common case, never reach it.
+
+W1-T10653 measured the effect: the share of PR-hours was 1.3% (13.64 of 1086.02) in the 14 days
+before the merge and 1.8% (61.40 of 3345.45) in the 14 days after, so it did not fall. Of the
+cause's 4.96 PR-hours, 4.53 were PR #14195, stood down at step 5 on an open escalation
+(issue #14219) that no person answered. PR #10265 added 2.32. The cause was a mismatch of
+target: the remedy tuned an automatic branch while the hours accrued in a branch that waits for a
+person. W1-T10653 then aged that stand-down into the `HELD_ESCALATION_SLO_MS` (6 h) rebuild.
+
+### review_failed_structural_alternative
+
+Proposal: stop treating an unanswered stand-down as a state the fix lane merely waits in. Give
+every `needs-human` escalation that stands a `review-failed` PR down a deadline-owned
+reconciler: owner lane, escalation reconciler. When a stand-down on an open escalation is older
+than the SLO, it re-judges the escalation, then closes and requeues the PR with the findings as a
+note, or demotes the issue. W1-T10653 patched this inside the fix lane, but the age still
+resets when a hold row rotates.
+
+Measurement: re-run the W1-T10653 cost query, `review-failed:<n> unmet criterion` PR-hours by
+cause, over equal 14-day windows before and after the merge. It moved if the cause's share of
+total PR-hours falls below the 1.3% pre-T7091 baseline and the maximum single-PR open-escalation
+stand-down age stays under `HELD_ESCALATION_SLO_MS`.

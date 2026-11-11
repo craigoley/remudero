@@ -17,7 +17,7 @@
     - src/lib/review-replay-sample.ts
     - test/review/a-recorded-review-with-no-reviewer-identity-is-counted-not-fatal.test.ts
     - test/review/a-review-path-change-replays-recorded-reviews.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "A review.replay_input row whose reviewer_code_sha is an explicit null is counted on the sample header as recorded_unattributed and left out of the rows and the observed classes, and the sample still derives and replays"
