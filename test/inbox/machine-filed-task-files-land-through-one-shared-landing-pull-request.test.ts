@@ -163,51 +163,58 @@ test("W1-T12199 criterion 1: the landing has a family for task files with one fi
   assert.equal(isLandingRef(scoped.branch), true, "a scoped landing branch is a landing ref too");
 });
 
-test("W1-T12199 criteria 2, 3, 5 and 9: one sealed landing pull request; a later amendment waits, dedupes, then lands", async () => {
+// One story in four steps. Each step is its own subtest and builds on the step before it.
+test("W1-T12199: one sealed landing pull request; a later amendment waits, dedupes, then lands", async (t) => {
   const f = fixture();
+  let first: { url: string; body: string } = { url: "", body: "" };
+  let sealedSha: string | undefined;
 
-  // W1-T12199 criterion 2: the sweep lands the amendment through the family, in one pull request with one criterion.
-  f.refuse(A, "RUN-A");
-  await f.sweep();
-  assert.equal(f.gh.creates.length, 1, "one landing pull request opens");
-  const first = f.gh.creates[0]!;
-  assert.deepEqual(outcomes(f), [[A, "RUN-A", "drafted"]]);
-  assert.equal(f.rows(REFUSAL_AMENDMENT_STEP)[0]!.pr_url, first.url);
-  assert.match(f.origin.git("show", `refs/heads/${f.branch()}:${pathOf(A)}`), /refusal-amendment \(W1-T90001, run RUN-A,/);
-  assert.equal(criteria(first.body).length, 1, "one criterion for the one file");
-  assert.match(criteria(first.body)[0]!, /W1-T90001.*\| grep: refusal-amendment \(W1-T90001 in plan\/tasks\.d\/W1-T90001-fixture\.yaml/);
-  assert.equal(f.origin.git("for-each-ref", "refs/heads/refusal-amendment").trim(), "", "no per-task branch is pushed");
+  await t.test("W1-T12199 criterion 2: the sweep lands the amendment through the family, in one pull request with one criterion", async () => {
+    f.refuse(A, "RUN-A");
+    await f.sweep();
+    assert.equal(f.gh.creates.length, 1, "one landing pull request opens");
+    first = f.gh.creates[0]!;
+    assert.deepEqual(outcomes(f), [[A, "RUN-A", "drafted"]]);
+    assert.equal(f.rows(REFUSAL_AMENDMENT_STEP)[0]!.pr_url, first.url);
+    assert.match(f.origin.git("show", `refs/heads/${f.branch()}:${pathOf(A)}`), /refusal-amendment \(W1-T90001, run RUN-A,/);
+    assert.equal(criteria(first.body).length, 1, "one criterion for the one file");
+    assert.match(criteria(first.body)[0]!, /W1-T90001.*\| grep: refusal-amendment \(W1-T90001 in plan\/tasks\.d\/W1-T90001-fixture\.yaml/);
+    assert.equal(f.origin.git("for-each-ref", "refs/heads/refusal-amendment").trim(), "", "no per-task branch is pushed");
+  });
 
-  // W1-T12199 criterion 3: sealed. The open pull request takes no push; the later file waits in the state directory.
-  const sealedSha = f.branchSha();
-  f.refuse(B, "RUN-B");
-  await f.sweep();
-  assert.equal(f.branchSha(), sealedSha, "the landing never pushes to a branch whose pull request is open");
-  assert.equal(f.gh.creates.length, 1, "no second pull request while the first is open");
-  assert.deepEqual(outcomes(f).at(-1), [B, "RUN-B", "waiting"]);
-  assert.deepEqual(f.staged(), [`${A}-fixture.yaml`, `${B}-fixture.yaml`]);
+  await t.test("W1-T12199 criterion 3: the open pull request takes no push, and the later file waits in the state directory", async () => {
+    sealedSha = f.branchSha();
+    f.refuse(B, "RUN-B");
+    await f.sweep();
+    assert.equal(f.branchSha(), sealedSha, "the landing never pushes to a branch whose pull request is open");
+    assert.equal(f.gh.creates.length, 1, "no second pull request while the first is open");
+    assert.deepEqual(outcomes(f).at(-1), [B, "RUN-B", "waiting"]);
+    assert.deepEqual(f.staged(), [`${A}-fixture.yaml`, `${B}-fixture.yaml`]);
+  });
 
-  // W1-T12199 criterion 9: a second amendment for a task whose amendment waits, or is in the open pull request, dedupes.
-  f.refuse(B, "RUN-B2");
-  f.refuse(A, "RUN-A2");
-  await f.sweep();
-  const deduped = f.rows(REFUSAL_AMENDMENT_STEP).filter((r) => r.outcome === "deduped");
-  assert.deepEqual(deduped.map((r) => [r.task_id, r.source_run_id, r.pr_url]).sort(), [[A, "RUN-A2", first.url], [B, "RUN-B2", undefined]]);
-  assert.deepEqual(f.staged(), [`${A}-fixture.yaml`, `${B}-fixture.yaml`], "no second file is staged");
-  assert.equal(f.branchSha(), sealedSha);
-  assert.deepEqual(stagedTaskFiles(f.root), [{ relPath: pathOf(A), prUrl: first.url }, { relPath: pathOf(B) }]);
+  await t.test("W1-T12199 criterion 9: a second amendment for a task whose amendment waits, or is in the open pull request, dedupes", async () => {
+    f.refuse(B, "RUN-B2");
+    f.refuse(A, "RUN-A2");
+    await f.sweep();
+    const deduped = f.rows(REFUSAL_AMENDMENT_STEP).filter((r) => r.outcome === "deduped");
+    assert.deepEqual(deduped.map((r) => [r.task_id, r.source_run_id, r.pr_url]).sort(), [[A, "RUN-A2", first.url], [B, "RUN-B2", undefined]]);
+    assert.deepEqual(f.staged(), [`${A}-fixture.yaml`, `${B}-fixture.yaml`], "no second file is staged");
+    assert.equal(f.branchSha(), sealedSha);
+    assert.deepEqual(stagedTaskFiles(f.root), [{ relPath: pathOf(A), prUrl: first.url }, { relPath: pathOf(B) }]);
+  });
 
-  // W1-T12199 criterion 5: after the merge, the next pass lands the waiting file with no new refusal from a worker.
-  f.mergeLanding();
-  await f.sweep();
-  assert.equal(f.gh.creates.length, 2, "the next landing pull request opens");
-  const second = f.gh.creates[1]!;
-  assert.equal(criteria(second.body).length, 1);
-  assert.match(criteria(second.body)[0]!, /W1-T90002/);
-  assert.match(f.origin.git("show", `refs/heads/${f.branch()}:${pathOf(B)}`), /refusal-amendment \(W1-T90002, run RUN-B,/);
-  assert.deepEqual(f.staged(), [`${B}-fixture.yaml`], "the merged file leaves the queue");
-  const opened = f.rows("task_files_landing.opened");
-  assert.deepEqual(opened.map((r) => [r.pr_url, r.files]), [[first.url, [pathOf(A)]], [second.url, [pathOf(B)]]]);
+  await t.test("W1-T12199 criterion 5: after the merge, the next pass lands the waiting file with no new refusal from a worker", async () => {
+    f.mergeLanding();
+    await f.sweep();
+    assert.equal(f.gh.creates.length, 2, "the next landing pull request opens");
+    const second = f.gh.creates[1]!;
+    assert.equal(criteria(second.body).length, 1);
+    assert.match(criteria(second.body)[0]!, /W1-T90002/);
+    assert.match(f.origin.git("show", `refs/heads/${f.branch()}:${pathOf(B)}`), /refusal-amendment \(W1-T90002, run RUN-B,/);
+    assert.deepEqual(f.staged(), [`${B}-fixture.yaml`], "the merged file leaves the queue");
+    const opened = f.rows("task_files_landing.opened");
+    assert.deepEqual(opened.map((r) => [r.pr_url, r.files]), [[first.url, [pathOf(A)]], [second.url, [pathOf(B)]]]);
+  });
 });
 
 test("W1-T12199 criterion 4: an unreadable list of open pull requests means wait, and nothing is pushed", async () => {
