@@ -12,6 +12,7 @@
   plan_refs: [W1-T7744, W1-T4656, W1-T4693, W1-T9484, W1-T10253]
   files:
     - src/run-task.ts
+    - src/cli/commands/fix.ts
     - test/ci/a-timed-out-fix-round-precheck-child-is-not-measured.test.ts
   status: merged
   priority: 1  # the operator ruled; a refusal on a timeout kept a resolved merge off a PR for ten hours
@@ -44,17 +45,29 @@
     harness check. Swept origin/main plan/tasks.d and every open PR head's plan tree for fixCensusSnapshotSteps,
     census_check and the reach-suite path: no shard covers it.
   design: |
-    1. In `fixCensusSnapshotSteps`, a child killed by its 60 s bound (a `signal`, or the bound's timeout `error`) is a
+    1. In `fixCensusSnapshotSteps`, a child killed by its bound (a `signal`, or the bound's timeout `error`) is a
        TIMEOUT. It sets `unmeasured` to a line naming the child and its bound, for example
-       "census-precheck: not measured — scripts/census-precheck.mjs timed out at 60 s (SIGTERM); CI and pre-push still
-       measure". It never sets `refusal`.
+       "census-precheck: not measured — scripts/census-precheck.mjs timed out at <derived bound> s (SIGTERM); CI and pre-push still
+       measure". It never sets `refusal`. (The bound's value is the derived `controllerTimeBoundMs`, see item 6.)
     2. A precheck timeout does not stop the reach suite from running; the reach suite's own result is judged alone. A
        reach-suite timeout is reported the same way, naming the reach suite.
     3. A child that ran and failed keeps today's refusal, and its text names the child that failed (the precheck or the
        reach suite), never the other one.
     4. `fix.census_check` gains `timed_out_child` (the script or suite path) on a timeout, beside outcome
-       `partially-measured`. No new ledger step, env var or bound; the 60 s bounds are unchanged.
+       `partially-measured`. No new ledger step, env var or bound; the existing bounds are unchanged.
     5. src/run-task.ts sits at its comment-load ceiling (W1-T9332): add no comment lines beyond what the change removes.
+    6. AMENDED 2026-11-11 (W1-T11339) to the current controller, which replaces the fixed 60 s bound this design was
+       filed against. The precheck child is bounded by `controllerTimeBoundMs` in `fixCensusSnapshotSteps`, derived from
+       the controller's own `--snapshot-budget` stage inventory: (setup 1 + admission 1 + reach 2 + joinedGitFree 2 +
+       structuralGitFree) times the fixed 120 s `childTimeBoundMs`, which scripts/census-precheck.mjs pins as
+       CENSUS_SUITE_CHILD_TIME_BOUND_MS. The reach suite child is bounded by the fixed 120 s `childTimeBoundMs`. A budget
+       that is not that shape refuses as "controller budget UNKNOWN", never as a timeout.
+    8. The consumer is src/cli/commands/fix.ts: the fix rung's `censusCheck` (from `host.checkFixCensusSnapshotAsync`, about
+       line 4310) is the value the round's `harnessCommit` closure reads, and only its `refusal` stops the commit. A
+       timeout reaches that closure as `unmeasured` alone, so fix.ts needs no refusal logic change beyond keeping that
+       split; the declared file is here because the commit gate lives there.
+    7. Timeout treatment now: a timeout on either child is NOT MEASURED, not a refusal, per the OPERATOR RULING of
+       2026-10-21 (not measured, not grown). The fix prompt (src/lib/prompt-render.ts) says "NOT MEASURED is not a passing verdict; hosted CI remains required." That keeps a timeout off the refusal path while still leaving it a non-pass. Keeping this ruling or changing it is the operator's decision at review; this amendment records the current treatment and does not make that call.
   acceptance:
     - claim: "the new test file passes"
       proof: "unit test: test/ci/a-timed-out-fix-round-precheck-child-is-not-measured.test.ts"
@@ -64,7 +77,7 @@
       proof: "grep: W1-T10332: a reach suite that runs and fails still refuses in test/ci/a-timed-out-fix-round-precheck-child-is-not-measured.test.ts"
   falsifier: |
     Restore today's arm (any signal or error on either child builds the reach-suite refusal) and the #13121-shaped
-    fixture, a precheck child killed at 60 s, is refused with "grows 1 census count(s)" naming the reach suite again.
+    fixture, a precheck child killed at its derived controller bound, is refused with "grows 1 census count(s)" naming the reach suite again.
     Drop the refusal for a real reach-suite failure and the second test reds.
   note: |
     EFFECT, measured from the core ledger after merge: `fix.commit_refused` rows whose refusal text names SIGTERM or a

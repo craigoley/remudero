@@ -3611,13 +3611,11 @@ test("W1-T513: a third startInFlightTicker call site now exists (retro, dispatch
 // holds the loop for a long dispatch/retro re-fires the sweep on its own cadence, not only once
 // at the top of the iteration that started it).
 
-test("W1-T1272: a stale freshness verdict still reaches the full sweep before it returns", async () => {
+test("W1-T1272: an in-cycle full sweep satisfies a stale freshness exit", async () => {
   const plan = fixturePlan();
-  // ORDERING, not a total. The claim is "the stale exit reaches the full sweep BEFORE it returns",
-  // which is a statement about what happens last. The old fixture asserted `sweeps === 1` and
-  // inferred the rest from the loop exiting on its first read, before its own in-cycle sweep could
-  // run. W1-T2965 grants a starved lifetime one cycle first, so that inference no longer holds, and
-  // a bare count never said which call site produced it anyway. Recording the sequence says it.
+  // W1-T9352: the in-cycle pass completed since the main advance, so the stale exit reuses it
+  // instead of starting a duplicate. Preserve W1-T1272's full-pass guarantee by pinning both the
+  // single pass and its order before the final stale read and stop.
   const events: string[] = [];
   const s = await runDaemon(plan, {
     refreshMerged: () => NONE_MERGED,
@@ -3642,11 +3640,11 @@ test("W1-T1272: a stale freshness verdict still reaches the full sweep before it
     },
     sleep: async () => {},
   });
-  assert.equal(events.at(-1), "sweep", "the LAST thing the daemon did before returning was run the full sweep");
-  assert.equal(
-    events.at(-2),
-    "freshness",
-    "and it was reached straight off the stale read — the stale branch, not an in-cycle pass",
+  assert.equal(events.filter((event) => event === "sweep").length, 1, "the exit reused its completed in-cycle pass");
+  assert.equal(events.at(-1), "freshness", "the stale exit followed the already-completed full pass");
+  assert.ok(
+    events.lastIndexOf("sweep") < events.lastIndexOf("freshness"),
+    "the in-cycle full pass completed before the daemon's final stale read",
   );
   assert.equal(s.stopReason, "stale", "the stale verdict still ends the boot — running the sweep did not suppress it");
 });
