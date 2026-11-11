@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 2.5
   status: queued
@@ -24,3 +24,14 @@
     CI runs: 42163883019, 42578698161, 43021498580.
     Retry outcomes: 3 recovered on retry, 0 also failed on retry.
     Evidence: test.flake_retry ledger rows, 3 read from the PR coverage-shard logs and 0 from fix-round reroutes the PR's diff cannot reach.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.72
+    reasons:
+      - "The declared files list is a single test file (test/shadow-comparisons-follow-the-view-owner.test.ts), and the description shows no touch of secrets, auth, deletion, merge/deploy/review policy, or irreversible actions."
+      - "Retry outcomes in the gates state show 3 recovered and 0 failed on retry across 3 PRs, which is consistent with an intermittent flake rather than an inherited red."
+      - "Acceptance criteria are machine-verifiable (a named unit test and a grep for it), so the finding can be checked from what is shown, and the PR still passes CI and review."
+      - "Main's CI status at the PR bases is stated as unread, and the family track record is mixed (6 declined of 8), which lowers confidence slightly but does not indicate danger in the change itself."
+    judged_at: "2026-11-11T15:41:29.283Z"
+    pin: "3a8d0821908ab9bfe3a0356fb8f296858cb0ad1d22b5cd40af170b93a1bf7772"
