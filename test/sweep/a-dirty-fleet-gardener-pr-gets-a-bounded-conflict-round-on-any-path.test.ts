@@ -7,6 +7,7 @@ import { test, type TestContext } from "node:test";
 import * as sweep from "#src/lib/sweep.js";
 import type { Config } from "#src/lib/config.js";
 import { ghJsonAsync } from "#src/lib/github-transport.js";
+import { pushFixRound, pushFixRoundPrechecked } from "#src/run-task.js";
 import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import { ghShim } from "#test/helpers/gh-shim.js";
@@ -486,6 +487,68 @@ test("W1-T11170 criterion 5: an owner who pushes before the session write wins, 
   assert.deepEqual(refused.calls.comments, [], "no write, no comment");
 });
 
+test("W1-T11170 criterion 5: the production fix push enforces the session merge parent and re-reads ownership immediately before plain push", async (t) => {
+  const r = dirtyPair(t, "run-unfiled-1793649420011", { "src/x.ts": LINES }, { "src/x.ts": genuineChange() });
+  r.repo.git("checkout", "-q", r.branch);
+  const tree = r.repo.git("rev-parse", `${r.headSha}^{tree}`);
+  const merge = r.repo.git("commit-tree", tree, "-p", r.headSha, "-p", r.mainSha, "-m", "fix: resolve session conflict").trim();
+  r.repo.git("reset", "--hard", merge);
+  let ownershipReads = 0;
+  const guard = {
+    prHeadSha: r.headSha,
+    verifyOwnership: async () => {
+      ownershipReads++;
+      assert.equal(r.repo.git("rev-parse", "HEAD"), merge, "the worker result is committed before the final ownership read");
+      return undefined;
+    },
+  };
+  const pushed = await withLiveWritesAllowed(() => pushFixRoundPrechecked(() => {}, r.repo.dir, r.branch, merge,
+    { changedFiles: () => [], conflictMarkers: () => [] },
+    pushFixRound, undefined, {}, guard));
+  assert.deepEqual(pushed, { fixRoundPushedHead: merge });
+  assert.equal(ownershipReads, 1, "ownership is re-read once at the actual push boundary");
+  assert.equal(r.remoteHead(), merge);
+
+  const invalid = dirtyPair(t, "run-unfiled-1793649420012", { "src/x.ts": LINES }, { "src/x.ts": genuineChange() });
+  invalid.repo.git("checkout", "-q", invalid.branch);
+  const invalidHead = invalid.repo.git("rev-parse", "HEAD");
+  let invalidOwnershipReads = 0;
+  await assert.rejects(() => withLiveWritesAllowed(() => pushFixRound(invalid.repo.dir, invalid.branch, invalidHead, undefined, {
+    exec: (file, args) => { throw new Error(`unexpected push: ${file} ${args.join(" ")}`); },
+    capture: (file, args) => execFileSync(file, args, { encoding: "utf8" }),
+    ownedSessionGuard: { prHeadSha: invalid.headSha,
+      verifyOwnership: async () => { invalidOwnershipReads++; return undefined; } },
+  })), /two-parent merge commit whose first parent is PR head/);
+  assert.equal(invalidOwnershipReads, 0, "an invalid worker result is refused before ownership approval or push");
+  assert.equal(invalid.remoteHead(), invalid.headSha);
+
+  const moved = dirtyPair(t, "run-unfiled-1793649420013", { "src/x.ts": LINES }, { "src/x.ts": genuineChange() });
+  moved.repo.git("checkout", "-q", moved.branch);
+  const movedTree = moved.repo.git("rev-parse", `${moved.headSha}^{tree}`);
+  const movedMerge = moved.repo.git("commit-tree", movedTree, "-p", moved.headSha, "-p", moved.mainSha, "-m", "fix: merge session conflict").trim();
+  moved.repo.git("reset", "--hard", movedMerge);
+  const ownerTree = moved.repo.git("rev-parse", `${moved.headSha}^{tree}`);
+  const ownerCommit = moved.repo.git("commit-tree", ownerTree, "-p", moved.headSha, "-m", "owner: advance session branch").trim();
+  const movedPushArgs: string[][] = [];
+  let raced = 0;
+  await assert.rejects(() => withLiveWritesAllowed(() => pushFixRound(moved.repo.dir, moved.branch, movedMerge, undefined, {
+    capture: (file, args) => execFileSync(file, args, { encoding: "utf8" }),
+    exec: (file, args) => { movedPushArgs.push([...args]); execFileSync(file, args, { encoding: "utf8", stdio: "ignore" }); },
+    ownedSessionGuard: {
+      prHeadSha: moved.headSha,
+      verifyOwnership: async () => {
+        raced++;
+        moved.repo.git("push", "-q", "origin", `${ownerCommit}:refs/heads/${moved.branch}`);
+        return undefined;
+      },
+    },
+  })), /fix round push did not land/);
+  assert.equal(raced, 1);
+  assert.equal(moved.remoteHead(), ownerCommit, "the plain push leaves the owner's intervening commit intact");
+  assert.equal(movedPushArgs.length, 1);
+  assert.ok(movedPushArgs[0]!.every((arg) => !arg.startsWith("--force") && arg !== "-f" && !arg.startsWith("+")));
+});
+
 test("W1-T11170 criterion 4: production's ownership reader reads the claim chain, the locks and the branch's push times from a real repo", async (t) => {
   const r = dirtyPair(t, "run-unfiled-1793649420006", { [SHARD]: LINES }, { [SHARD]: redundantChange() });
   const at = (iso: string) => ({ ...process.env, GIT_COMMITTER_DATE: iso, GIT_AUTHOR_DATE: iso,
@@ -662,7 +725,8 @@ test("W1-T11170 criterion 5: a throwing ownership re-read or a write that is not
 
 /** A worker's merge of main into the PR head: the fixture checkout's detached HEAD, a two-parent commit on the head. */
 function workerMerge(r: ReturnType<typeof dirtyPair>): string {
-  r.repo.git("checkout", "-q", "--detach", r.headSha);
+  r.repo.git("checkout", "-q", r.branch);
+  r.repo.git("reset", "--hard", r.headSha);
   r.repo.git("merge", "-q", "-s", "ours", "-m", "chore(test): merge main", "main");
   return r.repo.git("rev-parse", "HEAD");
 }
@@ -751,7 +815,7 @@ test("W1-T11170 criterion 5: a worker round that is not a merge on the PR head, 
   await refusedWith(push(g, () => { g.origin.git("update-ref", `refs/heads/${g.branch}`, ownerLate); return undefined; }), /the plain push was refused/);
   assert.equal(g.remoteHead(), ownerLate, "the owner's late push stands");
   assert.equal(calls.length, 1);
-  assert.ok(calls.flat().every((arg) => !arg.startsWith("--force") && arg !== "-f" && !arg.startsWith("+")), "no force flag of any kind");
+  assert.ok((calls as string[][]).flat().every((arg) => !arg.startsWith("--force") && arg !== "-f" && !arg.startsWith("+")), "no force flag of any kind");
 });
 
 test("W1-T11170 criterion 5: the sweep's fix dispatch on a session conflict round gives the rung the merge-commit push, never the leased one, and re-reads ownership with production's reader before it", async (t) => {
@@ -765,7 +829,7 @@ test("W1-T11170 criterion 5: the sweep's fix dispatch on a session conflict roun
   const shim = ghShim([{ when: `pr view ${prUrl} --json headRefName,headRefOid,body,files`,
     stdout: JSON.stringify({ headRefName: branch, headRefOid: r.headSha, body: "", files: [{ path: SHARD }] }) }], { kind: "owned-conflict-dispatch-gh" });
   t.after(() => rmSync(shim.dir, { recursive: true, force: true }));
-  const seen: { refusal?: unknown; afterRefusal?: string; landed?: unknown; merge?: string } = {};
+  const seen: { refusal?: unknown; afterRefusal?: string; landed?: unknown; merge?: string; secondFailure?: unknown } = {};
   const { buildSweepEffects } = await import("#test/helpers/run-task-test.js");
   const effects = buildSweepEffects({
     owner: "example", repo: "fixture", repoRoot: process.cwd(), localRepoName: "local",
@@ -782,17 +846,24 @@ test("W1-T11170 criterion 5: the sweep's fix dispatch on a session conflict roun
     fixBranchClaimKeyImpl: () => "claim-key", createFixRungWorktreeImpl: () => undefined,
     captureWorktreeSnapshotImpl: () => ({ headSha: "birth123" }), buildFixRungDispatchArgsImpl: () => ({}),
     openTaskIdsFromPlanImpl: () => new Set<string>(),
-    runFixRungImpl: async (args: { deps: { push: (wt: string, br: string, sha?: string, prior?: string) => Promise<unknown> } }) => {
+    runFixRungImpl: async (args: { ownedConflictPushGuard?: { prHeadSha: string; verifyOwnership: () => Promise<string | undefined> };
+      deps: { push: (wt: string, br: string, sha?: string, prior?: string,
+        guard?: { prHeadSha: string; verifyOwnership: () => Promise<string | undefined> }) => Promise<unknown> } }) => {
       try {
         // The worker left a commit that is no merge: the push refuses it before anything leaves the checkout.
         r.repo.git("checkout", "-q", "--detach", r.headSha);
         r.repo.git("commit", "-q", "--allow-empty", "-m", "chore(test): not a merge");
         const single = r.repo.git("rev-parse", "HEAD");
-        seen.refusal = await args.deps.push(r.repo.dir, branch, single, r.headSha).then(() => undefined, (error: unknown) => error);
+        assert.ok(args.ownedConflictPushGuard, "the session conflict classification reaches the real run-task rung");
+        seen.refusal = await pushFixRound(r.repo.dir, branch, single, undefined,
+          { ownedSessionGuard: args.ownedConflictPushGuard }).then(() => undefined, (error: unknown) => error);
         seen.afterRefusal = r.remoteHead();
         // The worker's merge of main lands, with the rung's own lease argument ignored.
         seen.merge = workerMerge(r);
-        seen.landed = await args.deps.push(r.repo.dir, branch, seen.merge, r.headSha);
+        try {
+          seen.landed = await pushFixRound(r.repo.dir, branch, seen.merge, undefined,
+            { ownedSessionGuard: args.ownedConflictPushGuard });
+        } catch (error) { seen.secondFailure = error; }
       } catch (error) { seen.refusal ??= error; }
       return { outcome: "stood_down", strikes: 0, retriggers: 0, reason: "test" };
     },
@@ -808,9 +879,9 @@ test("W1-T11170 criterion 5: the sweep's fix dispatch on a session conflict roun
   } finally {
     process.env.PATH = oldPath;
   }
-  assert.ok(seen.refusal instanceof sweep.SessionPushRefusedError, `a non-merge worker commit is refused; got ${String(seen.refusal)}`);
-  assert.match(seen.refusal.message, /not a merge commit/);
+  assert.match(String(seen.refusal), /operator-session conflict round must push a two-parent merge commit whose first parent is PR head/,
+    `a non-merge worker commit is refused; got ${String(seen.refusal)}`);
   assert.equal(seen.afterRefusal, r.headSha, "nothing left the checkout for the refused commit");
-  assert.deepEqual(seen.landed, { fixRoundPushedHead: seen.merge }, "the merge landed through production's ownership re-read (nobody holds the aged branch)");
+  assert.deepEqual(seen.landed, { fixRoundPushedHead: seen.merge }, `the merge lands through production's ownership re-read (nobody holds the aged branch); failure: ${String(seen.secondFailure)}`);
   assert.deepEqual(r.origin.git("rev-list", "--parents", "-1", r.remoteHead()).split(" "), [seen.merge, r.headSha, r.mainSha]);
 });

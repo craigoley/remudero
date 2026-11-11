@@ -2297,7 +2297,7 @@ export async function readSessionOwnershipViaGit(
   repoDir: string,
   pr: Pick<OpenPrView, "headRefName" | "taskId" | "body">,
   opts: { nowMs: number; readLock: (key: string) => string | undefined; fixClaimKey: string;
-    git?: (cwd: string, args: readonly string[]) => string | Promise<string>; windowDays?: number },
+    git?: (cwd: string, args: readonly string[]) => string | Promise<string>; windowDays?: number; ownedFixClaimRunId?: string },
 ): Promise<SessionOwnershipEvidence> {
   const run = async (args: readonly string[]) =>
     opts.git ? opts.git(repoDir, args) : hostWorktreeGitAsync(repoDir, args, { maxBuffer: 1 << 24 });
@@ -2351,9 +2351,12 @@ export async function readSessionOwnershipViaGit(
   try {
     const lock = opts.readLock(opts.fixClaimKey);
     const taskLock = pr.taskId ? opts.readLock(pr.taskId) : undefined;
-    const runId = [lock, taskLock].find((held) => held?.startsWith("OPERATOR-"));
+    const runId = [lock, taskLock].find((held) => held !== opts.ownedFixClaimRunId && held?.startsWith("OPERATOR-"));
+    // The worker round owns this exact fix claim itself. It is the sole lock exempted at its final
+    // pre-push re-read; a replaced lock, task lock, or operator run remains visible as held.
+    const otherFixClaim = lock !== opts.ownedFixClaimRunId ? lock : undefined;
     evidence.session = { ...(taskLock ? { inflightLock: taskLock } : {}), ...(runId ? { operatorRunId: runId } : {}),
-      ...(lock ? { fixClaimKey: opts.fixClaimKey } : {}) };
+      ...(otherFixClaim ? { fixClaimKey: opts.fixClaimKey } : {}) };
   } catch (error) {
     const reason = `session: ${capStderrExcerpt(spawnFailureText(error), 200)}`;
     (evidence.unreadable ??= []).push(reason);
@@ -4854,6 +4857,29 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         const budgetUsd = task.budget_usd ?? defaultBudgetUsd;
 
         const fixWorktree = worktreePath;
+        // W1-T11170, operator-approved scope widening: the worker's real fix-rung push path must
+        // enforce the session-head rule itself. The serialized dispatch carries only the session
+        // classification; this process-local closure re-reads ownership against the live repo and
+        // exempts only the branch claim this exact fix round holds.
+        const ownedConflictPushGuard = evidence.ownedConflictHead?.kind === "session" ? {
+          prHeadSha: pr.headSha,
+          verifyOwnership: async (): Promise<string | undefined> => {
+            const ownClaimRunId = branchClaim?.id();
+            if (ownClaimRunId === undefined) return "the current fix branch claim identity is unreadable";
+            try {
+              const current = await readSessionOwnershipViaGit(repoDir, pr, {
+                nowMs: nowMsImpl(),
+                readLock: (key) => { const held = readInflightLock(inflightDir, key); return held?.run_id; },
+                fixClaimKey: claimKey,
+                ownedFixClaimRunId: ownClaimRunId,
+              });
+              const ownership = sessionBranchUnheld(current);
+              return ownership.verdict === "unheld" ? undefined : `${ownership.verdict}: ${ownership.reason}`;
+            } catch (error) {
+              return `ownership re-read failed: ${String((error as Error)?.message ?? error)}`;
+            }
+          },
+        } : undefined;
         // W1-T6434: a dead owner's staged work preserved at THIS head (W1-T6362) is offered to the round
         // as prior partial work. Best-effort: a ledger or ref that cannot be read leaves the prompt as before.
         let priorPartialWork: PriorPartialWork | undefined;
@@ -4873,6 +4899,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         }
         const rung = await runFixRung({
           guardRoundHead: true,
+          ...(ownedConflictPushGuard === undefined ? {} : { ownedConflictPushGuard }),
           ...(priorPartialWork ? { priorPartialWork } : {}),
           ...buildFixRungDispatchArgs({
             task,
@@ -4954,26 +4981,18 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
             runReview,
             fetchPrBody: fetchPrBodyViaGh,
             // W1-T4693: the run loop's own push (`pushFixRound`), so a refused round is named, never swallowed.
-            // W1-T11170: on an operator-session branch the worker's result lands only as a merge commit on the PR head,
-            // by a plain push with no force or lease flag, after the ownership re-read (this round's own claims excluded).
-            push: evidence.ownedConflictHead?.push === "merge-commit-no-force"
-              ? async (wt: string, branchName: string, sha?: string) => {
-                const landed = await pushSessionMergeRound(wt, branchName, pr, {
-                  recheck: async () => {
-                    const own = `${runId}:`;
-                    const again = sessionBranchUnheld(await readSessionOwnershipViaGit(repoDir, pr, {
-                      nowMs: nowMsImpl(),
-                      readLock: (key) => { const held = readInflightLock(inflightDir, key); return held && !held.run_id.startsWith(own) ? held.run_id : undefined; },
-                      fixClaimKey: fixBranchClaimKey(owner, repo, realBranch),
-                    }));
-                    return again.verdict === "unheld" ? undefined : `${again.verdict}: ${again.reason}`;
-                  },
-                }, sha);
-                // The one record that a worker round WROTE to the session branch; the PR comment is gated on it.
-                log(OWNED_SESSION_PUSH_STEP, { pr_number: pr.prNumber, head_sha: pr.headSha, new_head_sha: landed.fixRoundPushedHead });
-                return landed;
+            // W1-T11170: carry the process-local guard through the normal prechecked adapter. It validates the
+            // merged tree and coverage before pushFixRound re-reads ownership and performs the plain push.
+            push: async (wt: string, branchName: string, sha?: string, prior?: string,
+              guard?: { prHeadSha: string; verifyOwnership: () => Promise<string | undefined> }) => {
+              const landed = await pushFixRound(wt, branchName, sha, prior, guard);
+              if (guard !== undefined && landed && typeof landed === "object" &&
+                  typeof (landed as { fixRoundPushedHead?: unknown }).fixRoundPushedHead === "string") {
+                log(OWNED_SESSION_PUSH_STEP, { pr_number: pr.prNumber, head_sha: pr.headSha,
+                  new_head_sha: (landed as { fixRoundPushedHead: string }).fixRoundPushedHead });
               }
-              : pushFixRound,
+              return landed;
+            },
             readHeadShaForProvenance: readHeadShaRest,
             issues,
             ledgerPath,

@@ -435,7 +435,10 @@ test("W1-T2610: both fix-rung push deps pass expectedHeadSha through pushFixRoun
   const prechecked = entrypoint.split("export async function pushFixRoundPrechecked(")[1]?.split("export type CensusPushRungOutcome")[0] ?? "";
   assert.match(prechecked, /push: .* = pushFixRound,/, "the precheck defaults to the shared push helper");
   assert.match(prechecked, /await push\(wt, branch, expectedHeadSha, priorHeadSha\);/, "the precheck preserves the expected head and prior-head lease");
-  assert.equal((sweep.match(/^ {12}push: pushFixRound,$/gm) ?? []).length, 1, "the sweep's fix dispatch pushes through pushFixRound");
-  assert.match(entrypoint, /pushFixRoundPrechecked\(deps\.log, wt, branch, sha, \{ repo: deps\.repo \}, pushFixRound, prior\),/, "the sweep entrypoint injects the run loop's prechecked push over the same helper (W1-T8833)");
+  assert.match(sweep, /push: async \(wt: string, branchName: string, sha\?: string, prior\?: string,[\s\S]*?const landed = await pushFixRound\(wt, branchName, sha, prior, guard\)/,
+    "the sweep's worker dispatch carries the session guard through the shared push helper");
+  assert.match(entrypoint, /pushFixRoundPrechecked\(deps\.log, wt, branch, sha, \{ repo: deps\.repo \}, pushFixRound, prior\)/, "the sweep entrypoint injects the run loop's prechecked push over the same helper (W1-T8833)");
+  assert.match(entrypoint, /guard !== undefined\) return pushFixRoundPrechecked\(deps\.log, wt, branch, sha, \{ repo: deps\.repo \}, pushFixRound, prior, \{\}, guard\)/,
+    "the session guard reaches the shared push helper through the prechecked sweep adapter");
   assert.match(entrypoint, /await gitPushRunBranchAsync\(wt, \{ expectedHeadSha, capture, exec: /, "the helper threads expectedHeadSha to the leaf");
 });
