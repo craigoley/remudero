@@ -3,8 +3,8 @@ import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "node:test";
-import { main } from "../src/run-task.js";
+import { after, test } from "node:test";
+import { CLI_EXIT_UNHANDLED_REJECTION, installUnhandledRejectionGuard, main } from "../src/run-task.js";
 import { treeFfSafe } from "../src/lib/deployer.js";
 import { checkCliFreshness } from "../src/lib/self-sync.js";
 
@@ -25,6 +25,39 @@ import { checkCliFreshness } from "../src/lib/self-sync.js";
 // `treeFfSafe` (deployer.ts:102) refuses only when a locally-modified path is ALSO in the
 // incoming diff, and it sits directly in front of `pullFf()` (deployer.ts:236-251). The
 // blunt gate fired first, which is why the precise one had never run.
+
+// W1-T11337: `main()` installs the process-wide rejection guard on its FIRST call, and that guard
+// captures `process.exit` at install time -- inside a test that has mocked it. The retained mock
+// then throws from a later escaped rejection and hides the real failure. Install a stable,
+// test-local guard first (the production one is idempotent per target, so main()'s install is a
+// no-op), record what escapes, and fail file teardown if anything did.
+const escapedRejections: string[] = [];
+const escapedReasons: unknown[] = [];
+let escapedRejectionHandler: ((reason: unknown) => void) | undefined;
+installUnhandledRejectionGuard({
+  target: {
+    on: (_event, handler) => {
+      escapedRejectionHandler = (reason: unknown) => {
+        escapedReasons.push(reason);
+        handler(reason);
+      };
+      process.on("unhandledRejection", escapedRejectionHandler);
+    },
+  },
+  log: () => {},
+  error: () => {},
+  exit: (code) => {
+    escapedRejections.push(`exit ${code}`);
+  },
+});
+
+after(() => {
+  assert.deepEqual(
+    escapedReasons.map((r) => String((r as Error)?.stack ?? r)),
+    [],
+    "an unhandled rejection escaped from the in-process main() calls in this file",
+  );
+});
 
 class ProcessExitCalled extends Error {
   constructor(public code: number | undefined) {
@@ -302,4 +335,22 @@ test("W1-T1134: the existing deploy-run and sync carve-outs are unchanged", asyn
     assert.ok(r.exited, `\`rmd ${argv.join(" ")}\` still exits — through the verb, not the gate`);
     assert.equal(r.code, 2, "with the verb's own unknown-argument code, proving dispatch was reached");
   }
+});
+
+test("W1-T11337 criterion 3: freshness-exemption tests surface escaped rejections during teardown", (t) => {
+  // The guard is the file's own, installed before any mocked main() call: a mocked process.exit
+  // is never what an escaped rejection reaches.
+  assert.ok(escapedRejectionHandler, "a test-local unhandled-rejection guard is installed");
+  assert.ok(process.listeners("unhandledRejection").includes(escapedRejectionHandler!));
+  let mockedExitCalls = 0;
+  t.mock.method(process, "exit", ((): never => {
+    mockedExitCalls++;
+    throw new ProcessExitCalled(undefined);
+  }) as typeof process.exit);
+  const before = escapedReasons.length;
+  escapedRejectionHandler!(new Error("probe rejection"));
+  assert.equal(mockedExitCalls, 0, "the guard does not retain a per-test process.exit mock");
+  assert.equal(escapedReasons.length, before + 1, "the escaped reason is recorded for teardown");
+  assert.deepEqual(escapedRejections.splice(0), [`exit ${CLI_EXIT_UNHANDLED_REJECTION}`]);
+  escapedReasons.splice(before, 1);
 });
