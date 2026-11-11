@@ -5377,7 +5377,6 @@ export async function runDaemon(
   // ledger and stale summary contract; duplicating that sequence would let them drift (W1-T2845).
   type FreshnessPass = "skipped_ran_since_latch" | "skipped_ran_since_stale" | "awaited_in_flight" | "ran";
   let preparedFreshnessExit: Promise<FreshnessPass> | undefined;
-  // W1-T9352: what an advance-anchored exit judged its pass skip on, for the restart row.
   let advanceEvidence: { stale_since_ms: number; last_pass_completed_ms: number | null } | undefined;
   const prepareFreshnessExit = async (
     freshness: Extract<DaemonFreshness, { stale: true }>,
@@ -5389,10 +5388,8 @@ export async function runDaemon(
     if (freshness.installNeeded) {
       deps.runInstall?.();
     }
-    // A pass completed during the dispatch latch already reached the full sweep (W1-T8170/W1-T1272).
-    // A running pass is still awaited within its bound; other freshness exits keep their pass.
-    // W1-T9352: an unlatched exit is anchored on the advance it restarts for, so a full pass that completed after
-    // main advanced is not repeated either. No anchor, or no pass since it, runs the bounded pass as before.
+    // A pass completed since the dispatch latch (W1-T8170) or since the advance (W1-T9352) is not repeated;
+    // a running pass is still awaited within its bound (W1-T1272); other exits keep their pass.
     let preExitPass: FreshnessPass = "ran";
     const lastPassCompletedAtMs = sweepLiveness.lastCompletedAtMs;
     if (advanceSinceMs !== undefined) {
@@ -6669,7 +6666,6 @@ export async function runDaemon(
           phase: "pre_cycle",
         });
       } else if (decideFreshness(freshness) === "restart") {
-        // W1-T9352: decideFreshness just observed the advance, so `staleSinceMs` is set; it anchors the pass skip.
         return stopForFreshness(freshness, undefined, staleSinceMs);
       }
     }
