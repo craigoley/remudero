@@ -1,3 +1,5 @@
+// @source-text-subject: the lexer's positive control IS the text of src/run-task.ts — the file whose
+// lexing failure forced the full author run. It is fed to the lexer as input, never asserted on as prose.
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
