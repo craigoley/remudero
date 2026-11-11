@@ -5,6 +5,7 @@ import { type WorkerStateSensor, type ReviewRunResult, type MaterializationError
 import { buildBaseProofDirAsync, hostWorktreeGitAtTopLevel, type BaseProofDir } from "../../lib/check-proof.js";
 import { execFileSync, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { homedir } from "node:os";
 import { checksStateFromRollup, currentReviewSignal, reportReviewPhase, withheldReviewRefusalRow, readHostedFixProofResults, type HostedFixProofReader } from "../../lib/sweep.js";
 import { parseWhitelistedProof, resolveProofTestPath, resolveNameFilteredCandidatesAsync } from "../../lib/review.js";
 import { extractReviewFindings, recordReviewFindings, type FindingCapture } from "../../lib/review-findings.js";
@@ -1780,6 +1781,8 @@ export interface ReviewCommandDeps {
   planLintRetryHead?: string;
   /** Bounded admission identity, separate from the existing worker/run and ownership conventions. */
   reviewAttemptId?: string;
+  /** Test-only path for start-phase rows emitted before config is available or when its ledger is unreadable. */
+  startPhasesLedgerPath?: string;
   contributorAdmission?: AdmissionObserver;
   fetchView?: (args: string[]) => unknown;
   /** Shared status/review history reader, injectable so command tests stay offline. */
@@ -2001,10 +2004,6 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
     startPhases[`${name}_ms`] = systemClock.now() - startedAt;
     if (error !== undefined) startPhases[`${name}_error`] = error instanceof Error ? error.constructor.name : typeof error;
   };
-  const startPhaseHandlers = <T>(name: string, startedAt: number): [(value: T) => T, (error: unknown) => never] => [
-    value => { recordStartPhase(name, startedAt); return value; },
-    error => { recordStartPhase(name, startedAt, error ?? "thrown"); throw error; },
-  ];
   deps = { ...reviewOptionsFromFlags(host, rest), ...deps };
   const {
     fetchView,
@@ -2084,7 +2083,33 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
   };
   let body = view.body ?? "";
   const reportBody = body;
+  const runId = `review-PR${view.number}-${Date.now()}`;
+  const reviewAttemptId = acceptedReviewAttemptId(deps.reviewAttemptId, view.number);
+  const shadow = rest.includes(REVIEWER_SHADOW_FLAG);
+  const startPhasesStep = reviewerShadowStep("review.start_phases", shadow);
   const inputDigest = reviewInputDigest(view.headRefOid, body);
+  const fallbackStartPhasesLedgerPath = deps.startPhasesLedgerPath ?? ledgerPathFor({ root: join(homedir(), "Remudero") });
+  let startPhasesRowWritten = false;
+  const writeStartPhases = (path: string, taskId: string): void => {
+    if (startPhasesRowWritten) return;
+    const row = {
+      run_id: runId, task_id: taskId, step: startPhasesStep, lane: "review",
+      ...(reviewAttemptId === undefined ? {} : { review_attempt_id: reviewAttemptId, review_input_digest: inputDigest }),
+      head_sha: view.headRefOid, total_ms: systemClock.now() - commandStartedAt, ...startPhases,
+      ...reviewerHealthRowFields("review.start_phases", flagValue(rest, REVIEWER_INCIDENT_FLAG)),
+    };
+    try {
+      appendLedger(path, row);
+    } catch (error) {
+      if (path === fallbackStartPhasesLedgerPath) throw error;
+      appendLedger(fallbackStartPhasesLedgerPath, row);
+    }
+    startPhasesRowWritten = true;
+  };
+  const startPhaseHandlers = <T>(name: string, startedAt: number, path: string, taskId: string): [(value: T) => T, (error: unknown) => never] => [
+    value => { recordStartPhase(name, startedAt); return value; },
+    error => { recordStartPhase(name, startedAt, error ?? "thrown"); writeStartPhases(path, taskId); throw error; },
+  ];
   const configLoadStartedAt = systemClock.now();
   let config: Config;
   try {
@@ -2092,6 +2117,7 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
     recordStartPhase("config_load", configLoadStartedAt);
   } catch (e) {
     recordStartPhase("config_load", configLoadStartedAt, e ?? "thrown");
+    writeStartPhases(fallbackStartPhasesLedgerPath, `PR-${view.number}`);
     throw e;
   }
   const ledgerPath = ledgerPathFor(config);
@@ -2102,6 +2128,7 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
     recordStartPhase("ledger_read", ledgerReadStartedAt);
   } catch (e) {
     recordStartPhase("ledger_read", ledgerReadStartedAt, e ?? "thrown");
+    writeStartPhases(ledgerPath, `PR-${view.number}`);
     throw e;
   }
 
@@ -2114,10 +2141,7 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
     planOnlyFiling ?? isPlanOnlyFilingPr(reviewLedger, view.url),
   );
   const reviewKey = reviewLedgerKeyFor(taskId, view.number);
-  const runId = `review-PR${view.number}-${Date.now()}`;
-  const reviewAttemptId = acceptedReviewAttemptId(deps.reviewAttemptId, view.number);
   // W1-T10269: a shadow review publishes nothing and its rows are renamed; every terminal row names the judging code's sha.
-  const shadow = rest.includes(REVIEWER_SHADOW_FLAG);
   const log = (step: string, extra: Record<string, unknown> = {}) =>
     appendLedger(ledgerPath, { run_id: runId, task_id: reviewKey, step: reviewerShadowStep(step, shadow), lane: "review",
       ...(reviewAttemptId === undefined ? {} : { review_attempt_id: reviewAttemptId, review_input_digest: inputDigest }), ...extra,
@@ -2223,7 +2247,7 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
   if (taskId && !reviewTaskIdFromBody(body)) body = `Remudero-Task: ${taskId}`;
   const headCriteriaStartedAt = systemClock.now();
   const [recordHeadSuccess, recordHeadFailure] = startPhaseHandlers<Awaited<ReturnType<typeof resolvePlanCriteriaAtHeadAsync>>>(
-    "head_criteria", headCriteriaStartedAt,
+    "head_criteria", headCriteriaStartedAt, ledgerPath, reviewKey,
   );
   if (taskId) {
     const resolved = await resolvePlanCriteriaAtHeadAsync(body, subjectRepoDir, "plan/tasks.yaml", view.headRefOid)
@@ -2242,7 +2266,7 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
       resolved.taskRisk === undefined && resolved.taskBudgetUsd === undefined) {
       const mainCriteriaStartedAt = systemClock.now();
       const [recordMainSuccess, recordMainFailure] = startPhaseHandlers<Awaited<ReturnType<typeof resolvePlanCriteriaAtHeadAsync>>>(
-        "main_criteria", mainCriteriaStartedAt,
+        "main_criteria", mainCriteriaStartedAt, ledgerPath, reviewKey,
       );
       const atMain = await resolvePlanCriteriaAtHeadAsync(body, subjectRepoDir, "plan/tasks.yaml", "origin/main")
         .then(recordMainSuccess, recordMainFailure);
@@ -2257,7 +2281,7 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
     }
   }
 
-  log("review.start_phases", { head_sha: view.headRefOid, total_ms: systemClock.now() - commandStartedAt, ...startPhases });
+  writeStartPhases(ledgerPath, reviewKey);
   const provenanceKey = { taskId: reviewKey, prUrl: view.url, headSha: view.headRefOid };
   const provenance = resolveReviewProviderProvenance(reviewLedger, provenanceKey);
   log("review.provider_provenance", reviewProviderProvenanceLedgerFields(provenance, provenanceKey));
