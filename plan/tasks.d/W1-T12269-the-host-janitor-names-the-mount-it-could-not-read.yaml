@@ -1,0 +1,55 @@
+- id: W1-T12269
+  title: "The Azure host janitor names the mount and the read that failed when it holds every candidate"
+  repo: remudero
+  depends_on: []
+  priority: 1.1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the fail-closed check that keeps the host janitor from deleting under a container mount; the check must stay closed
+  band_meaning: blast-radius
+  origin: operator-session#green-prs-merge-at-once-2026-11-11
+  plan_refs:
+    - W1-T12256
+    - W1-T4770
+  files:
+    - deploy/rmd-host-cleanup.sh
+    - test/deploy/the-host-janitor-names-the-mount-it-could-not-read.test.ts
+    - test/deploy/the-janitor-keeps-mounted-files-through-housekeeping.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "When the janitor cannot read the identity of a path, its line names the path whose read failed, whether that path is a container mount source or the candidate or a parent of the candidate, the container when there is one, and the error text of the read"
+      proof: "grep: W1-T12269 criterion 1 in test/deploy/the-host-janitor-names-the-mount-it-could-not-read.test.ts"
+    - claim: "A pass prints that cause once, at its start. Each held candidate prints a short line that refers to it"
+      proof: "grep: W1-T12269 criterion 2 in test/deploy/the-host-janitor-names-the-mount-it-could-not-read.test.ts"
+    - claim: "A mount source that is gone because its container ended between the list and the read is read again once. The pass then uses the second list"
+      proof: "grep: W1-T12269 criterion 3 in test/deploy/the-host-janitor-names-the-mount-it-could-not-read.test.ts"
+    - claim: "A candidate that is a symlink to a missing target is held for that reason by name, and the other candidates of the pass are judged as usual"
+      proof: "grep: W1-T12269 criterion 4 in test/deploy/the-host-janitor-names-the-mount-it-could-not-read.test.ts"
+    - claim: "The check stays closed: when the second read also fails, every candidate under the unread mount view is held, as today"
+      proof: "grep: W1-T12269 criterion 5 in test/deploy/the-host-janitor-names-the-mount-it-could-not-read.test.ts"
+  rationale: |
+    OBSERVED 2026-11-11 on the Azure host: `~/host-cleanup.log` holds 24,511 lines "KEEP <path>: Docker mount identity unreadable (fail closed)" (25,043 lines in 1,092 passes when first counted on 2026-11-10). Each such pass held every candidate.
+    - The newest such line is for `/mnt/rmd/host-cleanup-worktree-archive/scratch`.
+    - Read by hand on 2026-11-11 as the service user: every mount source of the five running containers exists and can be read. So the cause is not in the mounts that are there now.
+    - The line names neither the mount nor the read. Nobody can tell which of two code paths wrote it.
+    READ at origin/main 0953736f0, deploy/rmd-host-cleanup.sh.
+    - Line 745, `snapshot_docker`: for each running container it lists the mount sources and reads the device and inode of each. One failed read sets `DOCKER_OK=0` with the reason "Docker mount identity unreadable", and returns. `keep_container_path` (line 765) then holds every candidate with that reason and " (fail closed)".
+    - Line 771, `is_docker_mount`: it walks from the candidate to the root and reads the identity of each path. Line 785 gives the same text when one read fails. `container_path_identity` (line 741) fails for a path that `[ -e ]` does not see, and a symlink to a missing target is such a path.
+    - Two causes fit and neither is confirmed: a container that ended between `docker ps` and the read of its mount source (a worker container lives for minutes), and a candidate or parent that is a dangling symlink.
+    CHECKED for overlap: the janitor filing of 2026-11-11 saw this and filed nothing, because the cause was not known. W1-T12256 (queued) retires finished worktrees on this host and depends on this check letting a pass through.
+  design: |
+    First make the line say what failed. Then remove the two causes that the code shows.
+    - `snapshot_docker` records the container id and name, the mount source and the stderr of the failed `stat`. `is_docker_mount` records the candidate, the path in the walk that failed and the stderr.
+    - Print the cause once for each pass: `HOLD ALL: Docker mount identity unreadable: container=<name> source=<path> read=<error>`. A held candidate prints `KEEP <path>: Docker mount identity unreadable (see HOLD ALL)`.
+    - When a mount source read fails, take the container list and the mounts again, once. A container that ended is then not in the list. Use the second result. If it fails too, hold everything as today.
+    - In the walk of `is_docker_mount`, a dangling symlink holds that candidate only, with the reason `dangling symlink <path>`. The candidate is not removed. The other candidates are judged as usual.
+    Do not open the check: an unread identity never counts as "not a mount".
+    NOT IN SCOPE: what the janitor removes, the root pass for the temp folders, and the Mac janitor.
+  falsifier: |
+    Print the old line with no path and criterion 1 must fail. Do not read again and criterion 3 must fail. Hold every candidate for one dangling symlink and criterion 4 must fail. Treat an unread identity as "not a mount" and criterion 5 must fail. Restore and require all five to pass.
+  note: |
+    Host and account: the Azure fleet host; the service user every six hours, and root every hour for the temp folders.
+    After the first pass with this change, read `~/host-cleanup.log` for the `HOLD ALL` line. If it names a third cause, file it.
