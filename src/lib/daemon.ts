@@ -5191,13 +5191,21 @@ export async function runDaemon(
   // W1-T9808 — A LATCHED RESTART ADMITS NO WORK ITS DRAIN WOULD ABANDON. 2026-10-15 fixes for W1-T9113 and W1-T7699
   // started at 19:02 inside the 18:59:45 drain and were abandoned at its bound. From the latch to the exit, every
   // surface that admits a review or a fix asks this, per admission: does the kind's measured length fit the time left?
-  type RestartWindow = { deadlineMs: number; lengths: { review?: number; "plan-review"?: number; "fix-dispatch"?: number }; held: number };
+  type RestartWindow = { deadlineMs: number; lengths: { review?: number; "plan-review"?: number; "fix-dispatch"?: number }; held: number;
+    latchAtMs: number; holdEnded?: true; exitDrainBegun?: true };
   let restartWindow: RestartWindow | undefined;
   const restartAdmission: RestartAdmission = (kind, surface, candidateMs) => {
     const lengthMs = kind === "dispatch-refill" ? candidateMs : restartWindow?.lengths[kind];
     if (restartWindow === undefined || lengthMs === undefined) return true;
     const leftMs = restartWindow.deadlineMs - daemonClock.now();
     if (leftMs > lengthMs) return true;
+    if (leftMs < 0 && !restartWindow.exitDrainBegun && kind !== "fix-dispatch" && kind !== "dispatch-refill") {
+      if (!restartWindow.holdEnded) log("daemon.restart_hold_ended", { kind, ...(surface === undefined ? {} : { surface }),
+        since_latch_ms: Math.max(0, daemonClock.now() - restartWindow.latchAtMs), past_deadline_ms: -leftMs,
+        waits_for: restartDrainInventory().map(({ what, kind: work, phase }) => ({ what, kind: work, phase })) });
+      restartWindow.holdEnded = true;
+      return true;
+    }
     if (surface === undefined) return false;
     restartWindow.held++;
     log("daemon.admission_held", { surface, kind, reason: "restart latched", time_left_ms: Math.max(0, leftMs), measured_length_ms: lengthMs });
@@ -5207,7 +5215,7 @@ export async function runDaemon(
   const beginLatchDrain = (latchAtMs: number): void => {
     if (latchDrain?.latchAtMs === latchAtMs) return;
     const lengths = measuredReviewLength();
-    restartWindow = { deadlineMs: latchAtMs + sweepWallClockBoundMs, held: 0,
+    restartWindow = { deadlineMs: latchAtMs + sweepWallClockBoundMs, held: 0, latchAtMs,
       lengths: { review: lengths.codeMs ?? lengths.ms, "plan-review": lengths.planMs ?? lengths.ms, "fix-dispatch": lengths.fixMs } };
     const reviews = new Set(inFlightReviewRunsNow());
     const detached = detachedSweepActionCount();
@@ -5242,6 +5250,7 @@ export async function runDaemon(
     const fromLatch = stepPrefix === "daemon.freshness_drain" && latchAtMs !== undefined &&
       latchDrain?.latchAtMs === latchAtMs && !latchDrain.done ? latchDrain : undefined;
     if (fromLatch) fromLatch.done = true;
+    if (stepPrefix === "daemon.freshness_drain" && restartWindow) restartWindow.exitDrainBegun = true;
     const exitAtMs = daemonClock.now();
     const observation = fromLatch?.observation ?? observeDrain(exitAtMs, latchAtMs);
     for (const item of restartDrainInventory()) observation.watch(item);
@@ -5286,7 +5295,7 @@ export async function runDaemon(
       // held 327 minutes with no review admitted. A review-only clock runs BESIDE the drain, never inside it
       // (W1-T2744), and its stop awaits a pass already posting, exactly as the drain awaits a detached fix.
       // Only a detached action earns that clock: a drain for reviews alone admits nothing new.
-      if (reviewLength) restartWindow = { deadlineMs, held: restartWindow?.held ?? 0, lengths: { review: reviewLength.codeMs ?? reviewLength.ms,
+      if (reviewLength) restartWindow = { latchAtMs: exitAtMs, ...restartWindow, exitDrainBegun: true, deadlineMs, held: restartWindow?.held ?? 0, lengths: { review: reviewLength.codeMs ?? reviewLength.ms,
         "plan-review": reviewLength.planMs ?? reviewLength.ms, "fix-dispatch": reviewLength.fixMs } };
       const drainReviewClock =
         detachedAtFreshness > 0 ? startInterphaseReviewClock(deps, pollIntervalMs, log, "drain", latchedAdmission()) : undefined;

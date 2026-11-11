@@ -1336,6 +1336,12 @@ import { captureSelectedRegistryIntent, qualifySelectedRegistryIntent, observeSe
 
 import { parseSelfForecast, SELF_FORECAST_REPORT_CONTRACT } from "./lib/self-forecast.js";
 import { readPrOwnerLedgerProjection, type PrOwnerLedgerProjection } from "./lib/pr-owner-ledger.js";
+import {
+  decideStaleFixDispatchRecovery,
+  staleFixDispatchShadowInputs,
+  withStaleFixDispatchShadow,
+  type StaleFixDispatchShadow,
+} from "./lib/stale-fix-dispatch-recovery.js";
 import { prStateCommand } from "./lib/pr-state.js";
 import { auditLedgerUnion, createIncrementalLedgerUnion, createSizedMemo, readLedgerUnionRawLinesAsync, readLedgerUnionRecordsSync, readValidatedRotationDigest, realLedgerFs, type LedgerUnionRecordRead } from "./lib/ledger-union.js";
 // meaningOfStep: only ledgerGrepCommand read it, and it moved to src/lib/report-commands.ts
@@ -3758,6 +3764,8 @@ interface PrOwnerVerdict {
   fix?: PrOwnerFixEvidence;
   sweep?: PrOwnerSweepEvidence;
   claim?: PrOwnerClaim;
+  /** W1-T12113: diagnostic only — never an input to `verdict`. */
+  recoveryShadow?: StaleFixDispatchShadow;
 }
 
 interface PrOwnerClaim {
@@ -3894,11 +3902,26 @@ export function derivePrOwnerVerdict(
   });
 }
 
+type PrOwnerFacts = Pick<PrOwnerLedgerProjection, "corpusNewestTs" | "latestFix" | "latestSweep" | "relatedClaimKeys">;
+
 function prOwnerVerdictFromFacts(
   prNumber: number,
   corpus: Omit<PrOwnerLedgerRead, "rows">,
   claimRead: PrOwnerClaimRead,
-  facts: Pick<PrOwnerLedgerProjection, "corpusNewestTs" | "latestFix" | "latestSweep" | "relatedClaimKeys">,
+  facts: PrOwnerFacts,
+): PrOwnerVerdict {
+  const verdict = prOwnerOwnershipVerdict(prNumber, corpus, claimRead, facts);
+  if (facts.latestFix === undefined) return verdict;
+  // W1-T12113: the recovery decision in SHADOW — computed after, and never fed into, the verdict.
+  const shadow = staleFixDispatchShadowInputs(prNumber, corpus, facts.latestFix);
+  return withStaleFixDispatchShadow(verdict, decideStaleFixDispatchRecovery(shadow.expected, shadow.facts));
+}
+
+function prOwnerOwnershipVerdict(
+  prNumber: number,
+  corpus: Omit<PrOwnerLedgerRead, "rows">,
+  claimRead: PrOwnerClaimRead,
+  facts: PrOwnerFacts,
 ): PrOwnerVerdict {
   const compressedArchiveCount = corpus.archiveFiles.filter((p) => p.endsWith(".ndjson.gz")).length;
   const corpusNewestTs = facts.corpusNewestTs;
@@ -3969,6 +3992,9 @@ function renderPrOwnerVerdict(v: PrOwnerVerdict): string {
     );
   }
   if (v.claim) lines.push(`  fix branch claim: ${v.claim.key}, pid=${v.claim.pid}, run=${v.claim.runId}`);
+  if (v.recoveryShadow) {
+    lines.push(`  recovery_shadow: HOLD reason=${v.recoveryShadow.reason} (shadow only; ownership unchanged, no receipt written)`);
+  }
   if (v.sweep) {
     lines.push(
       `  sweep.disposed: ts=${v.sweep.ts ?? "unknown"}, task=${v.sweep.taskId ?? "unknown"}, run=${v.sweep.runId ?? "unknown"}, ` +
