@@ -381,6 +381,7 @@ export function sweepStaleWakeMarkerTemps(
   try {
     names = existsSync(dirname(marker)) ? readdirSync(dirname(marker)).filter((name) => name.startsWith(prefix)) : [];
   } catch (error) {
+    // Counted, never thrown: an unreadable directory is one failure on the temp_swept row below.
     fail(error);
   }
   for (const name of names) {
@@ -390,6 +391,7 @@ export function sweepStaleWakeMarkerTemps(
       unlink(path);
       removed += 1;
     } catch (error) {
+      // Counted, never thrown: the file stays for the next start and its reason goes on the temp_swept row below.
       fail(error);
     }
   }
