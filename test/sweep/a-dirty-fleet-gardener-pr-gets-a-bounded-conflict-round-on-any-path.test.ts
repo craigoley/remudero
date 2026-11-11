@@ -1,10 +1,15 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test, type TestContext } from "node:test";
 import * as sweep from "#src/lib/sweep.js";
+import type { Config } from "#src/lib/config.js";
+import { ghJsonAsync } from "#src/lib/github-transport.js";
 import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
 import { gitRepo, GIT_REPO_FIXTURE_IDENTITY } from "#test/helpers/git-repo.js";
 
 /**
@@ -28,7 +33,7 @@ type Change = { head?: string[] | null; main?: string[] | null };
  * A real origin and checkout. `base` seeds main; each path's `head` and `main` lines are the PR head's and main's own
  * edits (null deletes the path on that side). Both sides are pushed, so origin holds the dirty PR head and main.
  */
-function dirtyPair(t: TestContext, branch: string, base: Record<string, string[]>, changes: Record<string, Change>) {
+function dirtyPair(t: TestContext, branch: string, base: Record<string, string[]>, changes: Record<string, Change>, aged = false) {
   const origin = gitRepo({ bare: true });
   const repo = gitRepo();
   t.after(() => { repo.cleanup(); origin.cleanup(); });
@@ -46,9 +51,21 @@ function dirtyPair(t: TestContext, branch: string, base: Record<string, string[]
   repo.git("commit", "-qm", "chore(test): seed");
   repo.git("push", "-q", "origin", "HEAD:refs/heads/main");
   repo.git("checkout", "-qb", branch);
+  // `aged`: the branch's pushes were an hour apart and the newest is eight hours old, so nobody holds it.
+  const commitAt = (args: string[], whenMs: number) => {
+    const iso = new Date(whenMs).toISOString();
+    execFileSync("git", ["-C", repo.dir, "commit", "-q", ...args], { env: { ...process.env, GIT_COMMITTER_DATE: iso, GIT_AUTHOR_DATE: iso,
+      GIT_COMMITTER_NAME: GIT_REPO_FIXTURE_IDENTITY.name, GIT_COMMITTER_EMAIL: GIT_REPO_FIXTURE_IDENTITY.email,
+      GIT_AUTHOR_NAME: GIT_REPO_FIXTURE_IDENTITY.name, GIT_AUTHOR_EMAIL: GIT_REPO_FIXTURE_IDENTITY.email } });
+  };
+  if (aged) {
+    commitAt(["--allow-empty", "-m", "chore(test): earlier push 1"], Date.now() - 10 * HOUR);
+    commitAt(["--allow-empty", "-m", "chore(test): earlier push 2"], Date.now() - 9 * HOUR);
+  }
   for (const [path, change] of Object.entries(changes)) if (change.head !== undefined) write(path, change.head);
   repo.git("add", "-A");
-  repo.git("commit", "-qm", "chore(test): edit head");
+  if (aged) commitAt(["-m", "chore(test): edit head"], Date.now() - 8 * HOUR);
+  else repo.git("commit", "-qm", "chore(test): edit head");
   const headSha = repo.git("rev-parse", "HEAD");
   repo.git("push", "-q", "origin", `HEAD:refs/heads/${branch}`);
   repo.git("checkout", "-q", "main");
@@ -94,6 +111,7 @@ function harness(mainSha: string, opts: {
   ownership?: () => sweep.SessionOwnershipEvidence;
   judge?: sweep.SweepDeps["fixProgressJudge"];
   rows?: Record<string, unknown>[];
+  sessionLands?: boolean;
 } = {}): Harness {
   const ledger: Record<string, unknown>[] = [...(opts.rows ?? [])];
   const calls: Harness["calls"] = { regenerate: [], dispatch: [], planRounds: 0, escalations: [], comments: [], judged: 0 };
@@ -108,6 +126,10 @@ function harness(mainSha: string, opts: {
       calls.dispatch.push(evidence);
       const row = { task_id: `PR-${pr.prNumber}`, pr_number: pr.prNumber, head_sha: pr.headSha };
       ledger.push({ ...row, step: "fix.dispatch", mode: "merge-conflict" }, { ...row, step: "fix.commit_refused", reason: "conflict left" });
+      // A session round the test lets "land" writes the row production's merge-commit push writes after it lands.
+      if (opts.sessionLands && evidence.ownedConflictHead?.push === "merge-commit-no-force") {
+        ledger.push({ step: sweep.OWNED_SESSION_PUSH_STEP, pr_number: pr.prNumber, head_sha: pr.headSha, new_head_sha: "c".repeat(40) });
+      }
     },
     claimFixAdmission: () => ({ admitted: true }),
     readActiveWorkerCount: () => 0, readFixPressure: () => ({ availableMib: 8192, floorMib: 1024 }),
@@ -444,7 +466,7 @@ test("W1-T11170 criterion 5: an owner who pushes before the session write wins, 
   // and the round is followed by the comment.
   const w = dirtyPair(t, "run-unfiled-1793649420005", { "src/x.ts": LINES }, { "src/x.ts": genuineChange() });
   const now = Date.now();
-  const h = harness(w.mainSha, { facts: operatorFacts, repo: { dir: w.repo.dir, git: w.git }, ownership: () => unheld(now) });
+  const h = harness(w.mainSha, { facts: operatorFacts, repo: { dir: w.repo.dir, git: w.git }, ownership: () => unheld(now), sessionLands: true });
   await h.run(view(16238, w.branch, w.headSha, ["src/x.ts"]));
   assert.equal(h.calls.dispatch.length, 1);
   assert.equal(h.calls.dispatch[0]!.ownedConflictHead?.kind, "session");
@@ -454,6 +476,14 @@ test("W1-T11170 criterion 5: an owner who pushes before the session write wins, 
   assert.match(h.calls.comments[0]!, /round \(worker\)/);
   assert.match(h.calls.comments[0]!, /src\/x\.ts`: resolved by the merge-conflict fix mode worker/);
   assert.deepEqual(w.pushes, [], "the sweep itself pushed nothing for the worker round");
+  assert.match(h.calls.comments[0]!, new RegExp(`as ${"c".repeat(40)}`), "the comment names the merge commit that landed");
+
+  // A session worker round whose push was refused wrote nothing, so the PR is not told it did.
+  const x = dirtyPair(t, "run-unfiled-1793649420011", { "src/x.ts": LINES }, { "src/x.ts": genuineChange() });
+  const refused = harness(x.mainSha, { facts: operatorFacts, repo: { dir: x.repo.dir, git: x.git }, ownership: () => unheld(now) });
+  await refused.run(view(16239, x.branch, x.headSha, ["src/x.ts"]));
+  assert.equal(refused.calls.dispatch.length, 1, "the worker round still ran");
+  assert.deepEqual(refused.calls.comments, [], "no write, no comment");
 });
 
 test("W1-T11170 criterion 4: production's ownership reader reads the claim chain, the locks and the branch's push times from a real repo", async (t) => {
@@ -628,4 +658,159 @@ test("W1-T11170 criterion 5: a throwing ownership re-read or a write that is not
   await k.run(view(16401, w.branch, w.headSha, ["src/x.ts"]));
   assert.equal(k.calls.dispatch.length, 1);
   assert.equal(logged.filter((step) => step === "sweep.owned_conflict.comment_failed").length, 2);
+});
+
+/** A worker's merge of main into the PR head: the fixture checkout's detached HEAD, a two-parent commit on the head. */
+function workerMerge(r: ReturnType<typeof dirtyPair>): string {
+  r.repo.git("checkout", "-q", "--detach", r.headSha);
+  r.repo.git("merge", "-q", "-s", "ours", "-m", "chore(test): merge main", "main");
+  return r.repo.git("rev-parse", "HEAD");
+}
+
+const refusedWith = (promise: Promise<unknown>, pattern: RegExp) =>
+  assert.rejects(promise, (error: unknown) => error instanceof sweep.SessionPushRefusedError && pattern.test(error.message));
+
+test("W1-T11170 criterion 5: a worker round on a session branch lands as a merge commit on the PR head, by a plain push with no force or lease flag, after the ownership re-read", async (t) => {
+  const r = dirtyPair(t, "run-unfiled-1793649420021", { [SHARD]: LINES }, { [SHARD]: redundantChange() });
+  const merge = workerMerge(r);
+  const calls: string[][] = [];
+  let rechecks = 0;
+  const exec = async (file: string, args: string[]) => { calls.push([file, ...args]); execFileSync(file, args, { stdio: "pipe" }); };
+  const landed = await withLiveWritesAllowed(() => sweep.pushSessionMergeRound(r.repo.dir, r.branch, { headSha: r.headSha },
+    { exec, recheck: () => { rechecks++; return undefined; } }, merge));
+  assert.deepEqual(landed, { fixRoundPushedHead: merge });
+  assert.deepEqual(calls, [["git", "-C", r.repo.dir, "push", "origin", `HEAD:refs/heads/${r.branch}`]]);
+  assert.ok(calls.flat().every((arg) => !arg.startsWith("--force") && arg !== "-f" && !arg.startsWith("+")), "no force or lease flag of any kind");
+  assert.equal(rechecks, 1, "the ownership is read once more right before the push");
+  assert.deepEqual(r.origin.git("rev-list", "--parents", "-1", r.remoteHead()).split(" "), [merge, r.headSha, r.mainSha]);
+});
+
+test("W1-T11170 criterion 5: a worker round that is not a merge on the PR head, a branch the owner moved, a main that moved, a held re-read, or a refused plain push writes nothing over the owner", async (t) => {
+  const calls: string[][] = [];
+  const exec = async (file: string, args: string[]) => { calls.push([file, ...args]); execFileSync(file, args, { stdio: "pipe" }); };
+  let rechecks = 0;
+  const push = (x: ReturnType<typeof dirtyPair>, recheck: () => string | undefined | Promise<string | undefined>, sha?: string) =>
+    withLiveWritesAllowed(() => sweep.pushSessionMergeRound(x.repo.dir, x.branch, { headSha: x.headSha },
+      { exec, recheck: () => { rechecks++; return recheck(); } }, sha));
+  const untouched = (x: ReturnType<typeof dirtyPair>, expected = x.headSha) => {
+    assert.equal(x.remoteHead(), expected, "the remote branch is as the owner left it");
+    assert.deepEqual(calls, [], "no push was attempted");
+    assert.equal(rechecks, 0, "refused before the ownership read");
+  };
+  const fresh = (n: number) => dirtyPair(t, `run-unfiled-17936494200${n}`, { [SHARD]: LINES }, { [SHARD]: redundantChange() });
+
+  // A single-parent commit is no merge.
+  const a = fresh(40);
+  a.repo.git("checkout", "-q", "--detach", a.headSha);
+  a.repo.git("commit", "-q", "--allow-empty", "-m", "chore(test): single parent");
+  await refusedWith(push(a, () => undefined), /not a merge commit/);
+  untouched(a);
+
+  // A merge whose first parent is main, not the PR head, is no merge on the head.
+  const b = fresh(41);
+  b.repo.git("checkout", "-q", "--detach", "main");
+  b.repo.git("merge", "-q", "-s", "ours", "-m", "chore(test): reversed merge", b.headSha);
+  await refusedWith(push(b, () => undefined), /first parent is the PR head/);
+  untouched(b);
+
+  // A head that differs from the committed sha is refused.
+  const c = fresh(42);
+  workerMerge(c);
+  await refusedWith(push(c, () => undefined, "0".repeat(40)), /not the committed/);
+  untouched(c);
+
+  // The owner pushed after the round started: their push wins and the ls-remote re-check refuses.
+  const d = fresh(43);
+  workerMerge(d);
+  const ownerSha = d.origin.git("commit-tree", `${d.headSha}^{tree}`, "-p", d.headSha, "-m", "chore(test): owner push");
+  d.origin.git("update-ref", `refs/heads/${d.branch}`, ownerSha);
+  await refusedWith(push(d, () => undefined), /moved to/);
+  untouched(d, ownerSha);
+
+  // Main moved past the merge.
+  const e = fresh(44);
+  workerMerge(e);
+  const moved = e.repo.git("commit-tree", `${e.mainSha}^{tree}`, "-p", e.mainSha, "-m", "chore(test): main moved");
+  e.repo.git("push", "-q", "origin", `${moved}:refs/heads/main`);
+  await refusedWith(push(e, () => undefined), /does not contain main's tip/);
+  untouched(e);
+
+  // A re-read that finds the branch held, or that throws, stops the push.
+  const f = fresh(45);
+  workerMerge(f);
+  await refusedWith(push(f, () => "held: a push landed"), /ownership re-read before the push: held/);
+  await refusedWith(push(f, () => { throw new Error("lock directory unreadable"); }), /the ownership re-read failed: .*lock directory unreadable/);
+  assert.equal(rechecks, 2);
+  assert.deepEqual(calls, []);
+  assert.equal(f.remoteHead(), f.headSha);
+
+  // The owner pushes after the re-read: the plain push is refused by git itself and never forced over.
+  const g = fresh(46);
+  workerMerge(g);
+  const ownerLate = g.origin.git("commit-tree", `${g.headSha}^{tree}`, "-p", g.headSha, "-m", "chore(test): late owner push");
+  await refusedWith(push(g, () => { g.origin.git("update-ref", `refs/heads/${g.branch}`, ownerLate); return undefined; }), /the plain push was refused/);
+  assert.equal(g.remoteHead(), ownerLate, "the owner's late push stands");
+  assert.equal(calls.length, 1);
+  assert.ok(calls.flat().every((arg) => !arg.startsWith("--force") && arg !== "-f" && !arg.startsWith("+")), "no force flag of any kind");
+});
+
+test("W1-T11170 criterion 5: the sweep's fix dispatch on a session conflict round gives the rung the merge-commit push, never the leased one, and re-reads ownership with production's reader before it", async (t) => {
+  const branch = "run-unfiled-1793649420050";
+  const r = dirtyPair(t, branch, { [SHARD]: LINES }, { [SHARD]: redundantChange() }, true);
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}owned-conflict-dispatch-`));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  for (const dir of ["state/inflight", "repos", "tmp", "worktrees"]) mkdirSync(join(root, dir), { recursive: true });
+  execFileSync("git", ["clone", "-q", r.origin.dir, join(root, "repos", "fixture")]);
+  const prUrl = "https://github.com/example/fixture/pull/16500";
+  const shim = ghShim([{ when: `pr view ${prUrl} --json headRefName,headRefOid,body,files`,
+    stdout: JSON.stringify({ headRefName: branch, headRefOid: r.headSha, body: "", files: [{ path: SHARD }] }) }], { kind: "owned-conflict-dispatch-gh" });
+  t.after(() => rmSync(shim.dir, { recursive: true, force: true }));
+  const seen: { refusal?: unknown; afterRefusal?: string; landed?: unknown; merge?: string } = {};
+  const { buildSweepEffects } = await import("#test/helpers/run-task-test.js");
+  const effects = buildSweepEffects({
+    owner: "example", repo: "fixture", repoRoot: process.cwd(), localRepoName: "local",
+    config: { root, claudeBin: "/bin/true" } as Config, ledgerPath: join(root, "state", "ledger.ndjson"), runId: "SWEEP-W1-T11170-OWNED",
+    plan: { tasks: [], byId: new Map() } as never, log: () => {}, policy: sweep.DEFAULT_SWEEP_POLICY,
+    reviewRunner: async () => 0, issuesImpl: { create: () => "https://github.com/example/fixture/issues/1" }, stallNotice: () => {},
+    armImpl: () => "armed", armSessionPrsOverride: false, captureRepairFeedbackImpl: () => {}, ghRunImpl: () => {},
+    spawnWallClockBoundMsOverride: 1, reclaimWorkerImpl: () => {}, disarmImpl: () => undefined,
+    readJsonImpl: async (args: string[]) => args[0] === "pr" ? ghJsonAsync(args) : {},
+    registeredWorktreeOwnerImpl: () => undefined,
+    registeredOwnerRecovery: { capture: () => { throw new Error("no registered owner"); }, publishAhead: () => {}, remove: () => {} },
+    decideRegisteredFixOwnerRecoveryImpl: () => ({ kind: "keep", reason: "unused" }),
+    dispatchFixPreflightStandDownImpl: async () => undefined, resolveTaskContractAtHeadImpl: () => ({ criteria: [] }),
+    fixBranchClaimKeyImpl: () => "claim-key", createFixRungWorktreeImpl: () => undefined,
+    captureWorktreeSnapshotImpl: () => ({ headSha: "birth123" }), buildFixRungDispatchArgsImpl: () => ({}),
+    openTaskIdsFromPlanImpl: () => new Set<string>(),
+    runFixRungImpl: async (args: { deps: { push: (wt: string, br: string, sha?: string, prior?: string) => Promise<unknown> } }) => {
+      try {
+        // The worker left a commit that is no merge: the push refuses it before anything leaves the checkout.
+        r.repo.git("checkout", "-q", "--detach", r.headSha);
+        r.repo.git("commit", "-q", "--allow-empty", "-m", "chore(test): not a merge");
+        const single = r.repo.git("rev-parse", "HEAD");
+        seen.refusal = await args.deps.push(r.repo.dir, branch, single, r.headSha).then(() => undefined, (error: unknown) => error);
+        seen.afterRefusal = r.remoteHead();
+        // The worker's merge of main lands, with the rung's own lease argument ignored.
+        seen.merge = workerMerge(r);
+        seen.landed = await args.deps.push(r.repo.dir, branch, seen.merge, r.headSha);
+      } catch (error) { seen.refusal ??= error; }
+      return { outcome: "stood_down", strikes: 0, retriggers: 0, reason: "test" };
+    },
+    spawnImpl: async () => ({ sessionId: "new-session" }) as never,
+  } as never);
+  const oldPath = process.env.PATH;
+  process.env.PATH = `${shim.dir}:${oldPath}`;
+  try {
+    await withLiveWritesAllowed(() => effects.dispatchFix!(
+      { prNumber: 16500, prUrl, headSha: r.headSha, headRefName: branch, priorStrikes: 0, mergeState: "dirty", checksState: "none" } as never,
+      { unmetCriteria: [], baseSha: r.mainSha, ownedConflictHead: { kind: "session", push: "merge-commit-no-force" } } as never,
+    ));
+  } finally {
+    process.env.PATH = oldPath;
+  }
+  assert.ok(seen.refusal instanceof sweep.SessionPushRefusedError, `a non-merge worker commit is refused; got ${String(seen.refusal)}`);
+  assert.match(seen.refusal.message, /not a merge commit/);
+  assert.equal(seen.afterRefusal, r.headSha, "nothing left the checkout for the refused commit");
+  assert.deepEqual(seen.landed, { fixRoundPushedHead: seen.merge }, "the merge landed through production's ownership re-read (nobody holds the aged branch)");
+  assert.deepEqual(r.origin.git("rev-list", "--parents", "-1", r.remoteHead()).split(" "), [seen.merge, r.headSha, r.mainSha]);
 });

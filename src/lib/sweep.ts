@@ -4953,7 +4953,26 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
             runReview,
             fetchPrBody: fetchPrBodyViaGh,
             // W1-T4693: the run loop's own push (`pushFixRound`), so a refused round is named, never swallowed.
-            push: pushFixRound,
+            // W1-T11170: on an operator-session branch the worker's result lands only as a merge commit on the PR head,
+            // by a plain push with no force or lease flag, after the ownership re-read (this round's own claims excluded).
+            push: evidence.ownedConflictHead?.push === "merge-commit-no-force"
+              ? async (wt: string, branchName: string, sha?: string) => {
+                const landed = await pushSessionMergeRound(wt, branchName, pr, {
+                  recheck: async () => {
+                    const own = `${runId}:`;
+                    const again = sessionBranchUnheld(await readSessionOwnershipViaGit(repoDir, pr, {
+                      nowMs: nowMsImpl(),
+                      readLock: (key) => { const held = readInflightLock(inflightDir, key); return held && !held.run_id.startsWith(own) ? held.run_id : undefined; },
+                      fixClaimKey: fixBranchClaimKey(owner, repo, realBranch),
+                    }));
+                    return again.verdict === "unheld" ? undefined : `${again.verdict}: ${again.reason}`;
+                  },
+                }, sha);
+                // The one record that a worker round WROTE to the session branch; the PR comment is gated on it.
+                log(OWNED_SESSION_PUSH_STEP, { pr_number: pr.prNumber, head_sha: pr.headSha, new_head_sha: landed.fixRoundPushedHead });
+                return landed;
+              }
+              : pushFixRound,
             readHeadShaForProvenance: readHeadShaRest,
             issues,
             ledgerPath,
@@ -10682,6 +10701,69 @@ export function sessionBranchUnheld(evidence: SessionOwnershipEvidence): Session
   return { verdict: "held", reason: "the branch is held", reads };
 }
 
+/** W1-T11170: a worker round's session-branch push the sweep refused to make; nothing was pushed. */
+export class SessionPushRefusedError extends Error {
+  constructor(readonly detail: string) {
+    super(`session branch push refused: ${detail}`);
+    this.name = "SessionPushRefusedError";
+  }
+}
+
+/**
+ * W1-T11170: the ONE push a worker conflict round makes on an operator-session branch, in place of the leased fix
+ * push. The round's result must be a merge commit whose first parent is the PR head and which contains main's tip;
+ * the remote head must still be the PR head (an owner who pushed in between wins); the ownership reads (b) and (c)
+ * are read once more; and the push is a plain `git push origin HEAD:<ref>` with no force or lease flag of any kind,
+ * so a moved branch refuses it. Every refusal throws {@link SessionPushRefusedError} before anything is written.
+ */
+export async function pushSessionMergeRound(
+  wt: string, branch: string, pr: Pick<OpenPrView, "headSha">,
+  opts: { recheck: () => Promise<string | undefined>;
+    git?: (cwd: string, args: readonly string[]) => string | Promise<string>;
+    exec?: (file: string, args: string[], o: { stdio: "ignore" }) => Promise<unknown> },
+  expectedHeadSha?: string,
+): Promise<{ fixRoundPushedHead: string }> {
+  const run = async (args: readonly string[]) =>
+    opts.git ? opts.git(wt, args) : hostWorktreeGitAsync(wt, args, { maxBuffer: 1 << 24 });
+  const ref = `refs/heads/${branch}`;
+  const head = (await run(["rev-parse", "HEAD"])).trim();
+  if (expectedHeadSha !== undefined && expectedHeadSha !== head) {
+    throw new SessionPushRefusedError(`the round's head is ${head}, not the committed ${expectedHeadSha}`);
+  }
+  const parents = (await run(["rev-list", "--parents", "-n", "1", head])).trim().split(/\s+/);
+  if (parents.length !== 3 || parents[1] !== pr.headSha) {
+    throw new SessionPushRefusedError(`${head} is not a merge commit whose first parent is the PR head ${pr.headSha}`);
+  }
+  const observed = new Map((await run(["ls-remote", "origin", ref, "refs/heads/main"]))
+    .trim().split("\n").filter(Boolean).map((line) => { const [sha, name] = line.split(/\s+/); return [name, sha]; }));
+  if (observed.get(ref) !== pr.headSha) {
+    throw new SessionPushRefusedError(`${ref} moved to ${observed.get(ref) ?? "<absent>"} since the PR head ${pr.headSha}`);
+  }
+  const main = observed.get("refs/heads/main");
+  try {
+    if (main === undefined) throw new Error("main unreadable");
+    await run(["merge-base", "--is-ancestor", main, head]);
+  } catch (error) {
+    throw new SessionPushRefusedError(`the merge does not contain main's tip ${main ?? "<unreadable>"}: ${spawnFailureText(error)}`);
+  }
+  let held: string | undefined;
+  try { held = await opts.recheck(); }
+  catch (error) { held = `the ownership re-read failed: ${spawnFailureText(error)}`; }
+  if (held !== undefined) throw new SessionPushRefusedError(`ownership re-read before the push: ${held}`);
+  try {
+    const exec = opts.exec; // a destination push: the pusher's plain fast-forward, which it refuses to force
+    await gitPushRunBranchAsync(wt, { destination: branch, stdio: "ignore",
+      ...(exec ? { exec: async (file: string, args: string[]) => { await exec(file, args, { stdio: "ignore" }); } } : {}) });
+  } catch (error) {
+    throw new SessionPushRefusedError(`the plain push was refused: ${capStderrExcerpt(spawnFailureText(error), 300)}`);
+  }
+  const landed = (await run(["ls-remote", "origin", ref])).trim().split(/\s+/)[0];
+  if (landed !== head) throw new SessionPushRefusedError(`remote head after push is ${landed || "<absent>"}, expected ${head}`);
+  return { fixRoundPushedHead: head };
+}
+
+/** W1-T11170: written when a worker round's merge commit landed on an operator-session branch. */
+export const OWNED_SESSION_PUSH_STEP = "sweep.owned_conflict.session_push";
 /** W1-T11170: the ledger row a worker conflict round on an owned head writes when it is dispatched. */
 export const OWNED_CONFLICT_ROUND_STEP = "sweep.owned_conflict.round";
 /** W1-T11170: the one escalation an ambiguous session-branch ownership read files, per PR and head. */
@@ -24139,10 +24221,17 @@ export async function runSweep(
                   paths: (pr.mergeConflict?.files ?? []).map((f) => f.path),
                   ...(ownedRound.ownership ? { ownership: ownedRound.ownership } : {}) });
                 const outcome = await deps.dispatchFix(pr, conflictedEvidence, onPhase, control);
-                if (dispatchFixSpent(outcome) && deps.postConflictComment && mainTipSha !== undefined) {
+                // A session branch is commented on only once the round's merge commit landed (the push's own row).
+                const landed = ownedRound.kind === "session"
+                  ? readLedger(deps.ledgerPath).findLast((row) => row.step === OWNED_SESSION_PUSH_STEP &&
+                    row.pr_number === pr.prNumber && row.head_sha === pr.headSha)
+                  : undefined;
+                if ((ownedRound.kind === "session" ? landed !== undefined : dispatchFixSpent(outcome)) &&
+                    deps.postConflictComment && mainTipSha !== undefined) {
                   try {
                     await deps.postConflictComment(pr, ownedConflictComment({ kind: ownedRound.kind, round: "worker",
                       mainSha: mainTipSha, headSha: pr.headSha,
+                      ...(typeof landed?.new_head_sha === "string" ? { newHeadSha: landed.new_head_sha } : {}),
                       paths: (pr.mergeConflict?.files ?? []).map((f) => ({ path: f.path, resolution: "resolved by the merge-conflict fix mode worker" })),
                       ...(ownedRound.ownership ? { ownership: ownedRound.ownership } : {}) }));
                   } catch (error) {
