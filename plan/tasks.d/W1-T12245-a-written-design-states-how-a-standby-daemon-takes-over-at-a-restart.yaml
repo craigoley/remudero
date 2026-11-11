@@ -19,7 +19,7 @@
     - docs/research/a-standby-daemon-for-a-freshness-restart.md
     - docs/research/README.md
     - docs/docs-index.json
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "The design states the measured cost of a second daemon process beside the first: memory, processor time and GitHub reads, with the source of each number"
