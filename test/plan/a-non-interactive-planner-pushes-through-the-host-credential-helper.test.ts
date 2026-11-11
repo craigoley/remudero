@@ -265,6 +265,9 @@ test("an unusable host credential refuses rmd plan before any reservation push o
     { resolve: async () => ({ kind: "refused", reason: "the acme/widgets App key is not readable: EACCES", registryPath: "/etc/remudero/daemon-instances.yaml" }) },
     { resolve: async () => ({ kind: "app", appId: "11", installationId: "22", keyPath: "/k.pem", registryPath: "/r.yaml" }),
       startSocket: async () => { throw new Error("bind refused"); } },
+    { resolve: async () => ({ kind: "app", appId: "11", installationId: "22", keyPath: "/k.pem", registryPath: "/r.yaml" }),
+      startSocket: async () => ({ socketPath: "/nonexistent/git.sock", close: async () => { throw new Error("close refused"); } }),
+      wire: () => { throw new Error("config write refused"); } },
   ] satisfies PlanCredentialDeps[]) {
     let spawns = 0;
     const gitCalls: string[][] = [];
@@ -283,6 +286,11 @@ test("an unusable host credential refuses rmd plan before any reservation push o
     const refusal = ledger.find((r) => r.step === "plan.credential_refused");
     assert.ok(refusal && typeof refusal.reason === "string" && typeof refusal.registry_path === "string", `ledgered: ${JSON.stringify(ledger)}`);
     assert.ok(!ledger.some((r) => r.step === "plan.id_minted"), "no id is claimed");
+    if (credential.wire) {
+      assert.match(String(refusal.reason), /helper not wired: config write refused/);
+      assert.ok(ledger.some((r) => r.step === "plan.credential_close_failed" && /close refused/.test(String(r.error))),
+        "a socket that will not close is ledgered, never masks the refusal");
+    }
   }
 });
 

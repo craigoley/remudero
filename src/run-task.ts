@@ -35343,8 +35343,9 @@ export async function planCommand(
       const { appId, installationId, keyPath } = credential;
       credSocket = await (opts.credential?.startSocket ?? startRunChildGitCredentialSocket)({ runDir: credDir, log, identity: { appId, installationId, keyPath } });
     } catch (err) {
+      const reason = `git credential socket did not start: ${String((err as Error)?.message ?? err)}`;
       rmSync(credDir, { recursive: true, force: true });
-      return refuseCredential(`git credential socket did not start: ${String((err as Error)?.message ?? err)}`);
+      return refuseCredential(reason);
     }
   }
   const { branch, worktreePath } = await addLaneWorktree(repoDir, worktreesDir(config), runId, log).catch(async (err: unknown) => {
@@ -35373,15 +35374,14 @@ export async function planCommand(
 
   try {
     if (credSocket) {
-      if (sharesHarnessCheckout(worktreePath, repoDir) || sharesHarnessCheckout(worktreePath, repoRoot)) {
-        removePlanWorktree();
-        return refuseCredential(`${worktreePath} is a shared checkout; its git config is never wired`);
-      }
       try {
+        // Only this lane's own worktree is wired — never the managed clone or the operator checkout.
+        if (sharesHarnessCheckout(worktreePath, repoDir) || sharesHarnessCheckout(worktreePath, repoRoot)) throw new Error(`${worktreePath} is a shared checkout`);
         (opts.credential?.wire ?? wireCredentialHelperSocket)(worktreePath, credSocket.socketPath);
       } catch (err) {
+        const reason = `git credential helper not wired: ${String((err as Error)?.message ?? err)}`;
         removePlanWorktree();
-        return refuseCredential(`git credential helper not wired: ${String((err as Error)?.message ?? err)}`);
+        return refuseCredential(reason);
       }
     }
     // ID MINT + BLOCK RESERVATION (impl-DV), the SAME ordering triage uses at :10222-:10240: mint

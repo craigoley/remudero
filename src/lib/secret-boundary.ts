@@ -613,7 +613,7 @@ function hostKeyPath(fields: Map<string, string>): string | undefined {
   if (explicit) return explicit;
   const container = fields.get("gh_app_private_key_path");
   const claudeDir = fields.get("claude_dir");
-  if (!container?.startsWith(CONTAINER_CLAUDE_DIR) || container.length === CONTAINER_CLAUDE_DIR.length || !claudeDir) return undefined;
+  if (container === undefined || !container.startsWith(CONTAINER_CLAUDE_DIR) || container.length === CONTAINER_CLAUDE_DIR.length || !claudeDir) return undefined;
   return `${claudeDir.replace(/\/+$/, "")}/${container.slice(CONTAINER_CLAUDE_DIR.length)}`;
 }
 
