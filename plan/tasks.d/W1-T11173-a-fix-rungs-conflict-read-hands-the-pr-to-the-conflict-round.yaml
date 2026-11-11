@@ -18,7 +18,7 @@
   files:
     - src/lib/sweep.ts
     - test/sweep/a-fix-rungs-conflict-read-hands-the-pr-to-the-conflict-round.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "Replaying #15638 (W1-T9795, head 35fa075): a fix.stood_down at rung.strike with CONFLICT_REPAIR_HANDOFF_REASON that follows the sweep's last clean row is read by lastKnownMergeStateFromLedger as this head's dirty observation, carrying the head's last recorded conflict files; a later sweep observation still supersedes it; an unread pass then disposes conflicted and dispatches the merge-conflict round with those files, where today it disposes refused-escalate; and a held conflict hand-off on a pass GitHub reads clean records the main it was held under and is released once main moves past it"

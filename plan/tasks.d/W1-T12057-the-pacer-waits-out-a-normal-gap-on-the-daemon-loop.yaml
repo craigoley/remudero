@@ -19,7 +19,7 @@
     - src/lib/daemon.ts
     - test/github/a-daemon-sync-github-read-never-sleeps-on-its-loop.test.ts
     - test/github/the-pacer-waits-out-a-normal-gap-on-the-daemon-loop.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "On the daemon loop, a pacer wait no longer than the pacer's normal gap is slept and the gh call is made"

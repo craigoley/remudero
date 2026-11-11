@@ -15,7 +15,7 @@
   files:
     - deploy/serve-container.sh
     - test/one-gateway-serves-every-instance.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: With another instance's managed repositories on scratch, the real launcher plans a qualified read-only repository bind and its actual plan is reachable rather than the stale or absent durable-root copy

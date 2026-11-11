@@ -19,7 +19,7 @@
     - src/lib/sweep.ts
     - test/sweep/a-dead-daemons-fix-seed-stays-settled-across-later-boots.test.ts
     - test/sweep/a-started-fix-seed-is-reconciled-after-a-clean-boot.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: A seed whose rung was written by an earlier daemon run reads orphaned once a boot after it has a readable adoption pass that adopted no child for THIS task, whatever that pass adopted for other tasks; the rows are #15532's shape (an acted conflicted seed, then only a fix.scope_amendment resumed row from the same dead run) and #15602's (an earlier run's seed, then a boot that adopted two other tasks' children), and both now dedup as orphaned rather than "fix already dispatched ... awaiting its outcome"

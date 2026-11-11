@@ -17,7 +17,7 @@
   files:
     - src/lib/sweep.ts
     - test/daemon/review-admission-is-ordered-by-measured-cost-and-value-in-shadow.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: A review-eligible PR that cannot merge without a person (a standing human CHANGES_REQUESTED review, or an open needs-human escalation for its head) is admitted only after every eligible PR that does not need one, in the light pass, its refills and the full pass, so it never takes the lane while a mergeable review waits; when nothing else is eligible it is admitted as today

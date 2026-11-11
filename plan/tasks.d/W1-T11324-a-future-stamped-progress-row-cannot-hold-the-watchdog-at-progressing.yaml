@@ -16,7 +16,7 @@
   files:
     - src/lib/progress-watchdog.ts
     - test/daemon/a-future-stamped-progress-row-cannot-hold-the-watchdog-at-progressing.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: decideProgressWatchdog ignores a PROGRESS_STEPS row whose ts is more than LEDGER_FUTURE_STAMP_TOLERANCE_MS past nowMs when computing newestProgressMs, so a corpus whose only recent progress row is future-stamped yields the verdict an absent row would; the verdict counts the skipped rows, and a corpus with no future rows yields today's verdict exactly
