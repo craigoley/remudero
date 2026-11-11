@@ -1,0 +1,26 @@
+- id: W1-T12264
+  title: "Record the gate reasons on PRs 15018, 14989, 13948, 13945 and 13880 from the ledger"
+  repo: remudero
+  depends_on:
+    - W1-T297
+  type: recon
+  verify: auto
+  risk: low
+  status: queued
+  attempts: 0
+  design: |
+    Read the gate reason for each of PRs #15018, #14989, #13948, #13945 and #13880 with `rmd ledger-grep`, and write one page naming each reason. Rung 1 already covered rule 15 and entanglement, so name only the remaining reasons. Propose no new unfixable-in-place class.
+    CREATES: docs/forensics/gate-reasons-pr-15018-14989-13948-13945-13880.md
+  files:
+    - docs/forensics/README.md
+  acceptance:
+    - claim: "A forensics page records the ledger-evidenced gate reason for each of the five named pull requests."
+      proof: "grep: gate-reasons-pr-15018-14989-13948-13945-13880 in docs/forensics/README.md"
+  origin: "follow-up:W1-T11043-1794363382121:2026-11-11T02:26:05.376Z:1"
+  rationale: >-
+    From the 2026-11-11 follow-up on W1-T11043-1794363382121, ratified via rmd approve:
+  
+    follow-up harvest [research]: read the gate reasons on PRs #15018, #14989, #13948, #13945 and
+    #13880 with `rmd ledger-grep`. Rung 1 covered rule 15 and entanglement, so the remaining
+    reasons need to be named before choosing a new "unfixable in place" class. — from W1-T11043
+    (run W1-T11043-1794363382121)

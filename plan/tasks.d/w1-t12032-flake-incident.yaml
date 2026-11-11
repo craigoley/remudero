@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: auto
+  verify: human
   risk: low
   priority: 2.5
   status: queued
@@ -25,13 +25,10 @@
     Retry outcomes: 4 recovered on retry, 0 also failed on retry.
     Evidence: test.flake_retry ledger rows, 4 read from the PR coverage-shard logs and 0 from fix-round reroutes the PR's diff cannot reach.
   risk_ruling:
-    verdict: "low"
-    action: proceed
-    confidence: 0.72
+    verdict: "high"
+    action: escalate
+    confidence: 0.55
     reasons:
-      - "Declared files touch only test/serve-view-events.test.ts, a test file, with no secrets, auth, deletion, or merge/deploy/policy surface shown."
-      - "Evidence shows 4 retries recovered and 0 failed across 3 PRs, consistent with a real intermittent flake and not an inherited red from main."
-      - "Acceptance is verifiable (a unit test plus a grep for the named test), so the finding can be checked from what is shown."
-      - "Main's CI at the PR bases is \"unread\", and the family's record is mixed (6 declined), which lowers confidence but does not show danger."
-    judged_at: "2026-11-10T15:21:17.835Z"
-    pin: "434ab10445f4dca2c555017012d5610670496a04449d7080b3c90d772bbd5a04"
+      - "high-risk verdict at confidence 0.55 — on the change's description/files alone, no diff was read — The filed rationale says 4 retries recovered, but the harness-computed evidence says 1 recovered over 3 PRs, so the filing and the harness disagree.; on the change's description/files alone, no diff was read — The task asserts a specific cause (\"the cause ... is fixed\") but names none, and the harness evidence shows main's CI did not fail the test at the bases, so the finding cannot be verified from what is shown.; on the change's description/files alone, no diff was read — The family track record shows 6 declined of 14 machine tasks (Beta mean 0.56), which calls for stricter judgment.; on the change's description/files alone, no diff was read — The declared scope is a single test file with no secrets, auth, deletion, or policy surface, which limits the blast radius. This is why confidence is only moderate."
+    judged_at: "2026-11-11T05:42:55.986Z"
+    pin: "0fa0fadee9d57af7093d384ad7f47ca7b41ffe1909e11a8c517500fcd202bae3"

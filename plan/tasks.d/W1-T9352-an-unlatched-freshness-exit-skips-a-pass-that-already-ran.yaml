@@ -16,7 +16,7 @@
     - test/a-latched-restart-exits-when-its-last-lane-settles.test.ts
     - test/the-pre-exit-pass-runs-beside-the-restart-drain.test.ts
   status: queued
-  priority: 2.5  # measured 29 lane-min in one exit; 4 of 31 exits 2026-10-12..14 took this arm
+  priority: 1  # raised 2026-11-11 on the 7-day restart study (36 exits to 2026-11-11): W1-T9812 depends on it; was 2.5
   attempts: 0
   rationale: |
     MEASURED 2026-10-14 (core ledger union on the Azure host, read-only; daemon pid 1710758, boot head 08cbabc50).

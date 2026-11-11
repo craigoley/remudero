@@ -1,0 +1,81 @@
+- id: W1-T12237
+  title: "A freshness exit starts no new sweep and ends a running sweep between pull requests"
+  repo: remudero
+  depends_on:
+    - W1-T9812 # both edit `prepareFreshnessExit`; W1-T9812 is in a hand build now
+  priority: 0.9
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # changes what the daemon does between the restart decision and the exit
+  band_meaning: span
+  origin: operator-session#restart-and-recycle-downtime-2026-11-10
+  plan_refs:
+    - W1-T9812
+    - W1-T9352
+    - W1-T12160
+    - W1-T1272
+    - W1-T2845
+    - W1-T8172
+    - W1-T9808
+  files:
+    - src/lib/daemon.ts
+    - src/lib/sweep.ts
+    - test/daemon/a-freshness-exit-starts-no-new-sweep-and-ends-a-running-one-early.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "When the daemon decides to restart and no sweep is running, `prepareFreshnessExit` starts no sweep. The restart row has `pre_exit_pass: no_sweep_at_exit`. The test drives `runDaemon` with an injected sweep"
+      proof: "grep: W1-T12237 criterion 1 in test/daemon/a-freshness-exit-starts-no-new-sweep-and-ends-a-running-one-early.test.ts"
+    - claim: "This holds for every freshness exit: the exit at the top of a tick, the exit before admission, the exit for stale reviewer code and the exit after a restart decision during dispatch"
+      proof: "grep: W1-T12237 criterion 2 in test/daemon/a-freshness-exit-starts-no-new-sweep-and-ends-a-running-one-early.test.ts"
+    - claim: "When a sweep is running at the restart decision, the callback that the sweep asks between pull requests answers stop. The sweep finishes the pull request in hand, visits no other, and settles"
+      proof: "grep: W1-T12237 criterion 3 in test/daemon/a-freshness-exit-starts-no-new-sweep-and-ends-a-running-one-early.test.ts"
+    - claim: "A sweep that has not visited its first pull request at the restart decision starts no stage that it has not begun, and settles"
+      proof: "grep: W1-T12237 criterion 4 in test/daemon/a-freshness-exit-starts-no-new-sweep-and-ends-a-running-one-early.test.ts"
+    - claim: "A merge, an arm or a fix dispatch that the sweep began for the pull request in hand completes before the sweep settles. The exit still waits for the sweep to settle and for the drain"
+      proof: "grep: W1-T12237 criterion 5 in test/daemon/a-freshness-exit-starts-no-new-sweep-and-ends-a-running-one-early.test.ts"
+    - claim: "The first tick of the next daemon lifetime starts a sweep, as today"
+      proof: "grep: W1-T12237 criterion 6 in test/daemon/a-freshness-exit-starts-no-new-sweep-and-ends-a-running-one-early.test.ts"
+    - claim: "A sweep that ended early writes one row with the count of pull requests that it did not visit, and the restart row says that the sweep ended early"
+      proof: "grep: W1-T12237 criterion 7 in test/daemon/a-freshness-exit-starts-no-new-sweep-and-ends-a-running-one-early.test.ts"
+    - claim: "The exit names the new arm"
+      proof: "grep: no_sweep_at_exit in src/lib/daemon.ts"
+  rationale: |
+    OBSERVED 2026-11-04T01:56Z to 2026-11-11T01:56Z in the ledger of the core instance: a freshness exit waits for a whole sweep, and in 10 of 37 exits it started that sweep itself.
+    - 37 `daemon.freshness_exit` rows with `phases_ms`. The median time from the restart decision to the exit was 18.0 minutes.
+    - `pre_exit_pass: awaited_in_flight`: 27 exits. The wait for the running sweep had a median of 714 s and a worst case of 7,162 s.
+    - `pre_exit_pass: ran`: 10 exits. The new sweep had a median of 828 s and a worst case of 1,489 s.
+    - `pre_exit_pass: skipped_ran_since_latch`: 0 exits.
+    - Before a sweep visits its first pull request it spends a median of 288 s (319 `sweep.full_prelude` rows of later sweeps): `fleet_state` 155 s, `tick_read` 64 s, `reader_agreement` 32 s, `main_health` 11 s.
+    - After the start, the first sweep begins a median of 138 s after `daemon.boot` (54 s to the first tick, 84 s for the tick read).
+    READ at origin/main 17745c6bf, `prepareFreshnessExit` (src/lib/daemon.ts:5371).
+    - If a sweep is running, it awaits `backgroundSweep`. Else, if a sweep completed since the restart decision, it skips. Else it calls `runGatedSweep` and awaits a whole new sweep. Then it calls `drainBeforeRestart`.
+    - The comment (W1-T2845) says that both stale-exit paths keep one sequence. The reason for the sweep is W1-T1272: when it was written, a daemon lifetime could end before it reached a sweep. Today the first sweep of a lifetime runs without condition (src/lib/daemon.ts:4176), and the boot review starts on the first tick (src/lib/daemon.ts:6708).
+    - `runGatedSweep` gives the sweep a callback that reads STOP and PAUSE between pull requests (comment at src/lib/daemon.ts:3224).
+    - The drain, not the sweep, protects the reviews and the fix workers in flight (`drainBeforeRestart`, src/lib/daemon.ts:5240).
+    WHAT THE EXIT LOSES: one round of arm, merge and fix admission before the exit. The sweep derives its actions from the state of each pull request, so the next lifetime does the same work, a median of 7 to 12 minutes later with today's start.
+    RELATION to the queued tasks, which this task does not replace:
+    - W1-T9812 runs the sweep beside the drain, so the exit costs the longer of the two. It keeps the rule that the exit waits for a whole sweep. This task depends on it and then makes that sweep shorter or absent.
+    - W1-T9352 skips a new sweep at an exit without a restart decision during dispatch, when a sweep completed since main advanced. This task makes that skip the rule for every exit. If W1-T9352 has merged, keep its value `skipped_ran_since_stale` for its case.
+    - W1-T12160 admits a review again when the exit is later than the time limit of its drain. A shorter wait for the sweep makes that case less frequent. It does not conflict.
+    - W1-T8172 and W1-T9808 (merged) decide what the daemon admits after the restart decision. They do not change.
+    This task ends the W1-T1272 rule for a freshness exit. The operator session of 2026-11-10 asked for it.
+  design: |
+    In `prepareFreshnessExit`:
+    - Remove the call of `runGatedSweep`. The third arm becomes `no_sweep_at_exit`.
+    - Keep the await of a running sweep. It is short because the sweep ends early.
+    In `runGatedSweep` and its callers:
+    - The callback that the sweep asks between pull requests also answers stop when a freshness restart is decided. Read the same state that `latchedAdmission` reads. Do not add a second flag.
+    In `runSweep` (src/lib/sweep.ts):
+    - Ask the callback before each stage that precedes the first pull request, and before each pull request. On stop, skip what has not begun, write `sweep.ended_early` with `reason: restart_decided`, the stage reached and the count of pull requests not visited, and return.
+    - Never stop inside the work for one pull request.
+    Add `sweep_ended_early: true` to `daemon_selfrestart_for_freshness` when it applies.
+    The memory exit and the STOP path do not change.
+    Rebase on W1-T9812 first: it moves the start of the drain in the same function.
+    NOT IN SCOPE: the time limit of the drain, the admission rule after the restart decision, and the stages of the sweep themselves (W1-T12234 shortens the longest one).
+  falsifier: |
+    Call `runGatedSweep` in the exit again and criterion 1 must fail. Stop the sweep in the middle of a pull request and criterion 5 must fail. Ignore the stop answer before the first pull request and criterion 4 must fail. Restore and require all eight to pass.
+  note: |
+    After the merge, `phases_ms.pre_exit_pass` in `daemon.freshness_exit` is the measure. The medians were 714 s and 828 s.

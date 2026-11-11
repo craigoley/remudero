@@ -1,0 +1,66 @@
+- id: W1-T12238
+  title: "The dispatch-claim sweep of a start delays the first dispatch only, not the first review"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the sweep ends runs that a restart orphaned; a dispatch must not start before it has judged them
+  band_meaning: span
+  origin: operator-session#restart-and-recycle-downtime-2026-11-10
+  plan_refs:
+    - W1-T10896
+    - W1-T8176
+    - W1-T8616
+    - W1-T9086
+    - W1-T9695
+  files:
+    - src/cli/commands/daemon.ts
+    - src/lib/daemon.ts
+    - src/lib/dispatch-claim.ts
+    - test/dispatch/the-start-claim-sweep-runs-before-the-first-dispatch-not-before-the-first-review.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "`daemonCommand` writes `daemon.start` before the claim sweep of the start has settled. The test holds the sweep open and drives the command"
+      proof: "grep: W1-T12238 criterion 1 in test/dispatch/the-start-claim-sweep-runs-before-the-first-dispatch-not-before-the-first-review.test.ts"
+    - claim: "The boot review and the first sweep start while the claim sweep is still open"
+      proof: "grep: W1-T12238 criterion 2 in test/dispatch/the-start-claim-sweep-runs-before-the-first-dispatch-not-before-the-first-review.test.ts"
+    - claim: "The first dispatch selection waits until the claim sweep has settled. No run starts before it"
+      proof: "grep: W1-T12238 criterion 3 in test/dispatch/the-start-claim-sweep-runs-before-the-first-dispatch-not-before-the-first-review.test.ts"
+    - claim: "The claim sweep judges the same claims with the same result as today, and writes the same `dispatch.claim_released` and `verdict` rows. A run child that the daemon adopted keeps its claim"
+      proof: "grep: W1-T12238 criterion 4 in test/dispatch/the-start-claim-sweep-runs-before-the-first-dispatch-not-before-the-first-review.test.ts"
+    - claim: "If the claim sweep fails, the daemon writes `dispatch.claim_sweep_failed` and dispatch goes on, as today"
+      proof: "grep: W1-T12238 criterion 5 in test/dispatch/the-start-claim-sweep-runs-before-the-first-dispatch-not-before-the-first-review.test.ts"
+    - claim: "The claim sweep does its git reads off the daemon loop"
+      proof: "grep: W1-T12238 criterion 6 in test/dispatch/the-start-claim-sweep-runs-before-the-first-dispatch-not-before-the-first-review.test.ts"
+    - claim: "The daemon loop waits for the claim sweep before it selects a task"
+      proof: "grep: claimSweepSettled in src/lib/daemon.ts"
+  rationale: |
+    OBSERVED 2026-11-04T01:56Z to 2026-11-11T01:56Z in the ledger of the core instance: each start runs the dispatch-claim sweep on the daemon loop before it writes `daemon.start`.
+    - 45 starts. The time from `dispatch.lifetime_history_loaded` to `daemon.start` had a median of 18 s. For the 18 starts after a freshness exit the median was 22 s and the worst case was 90 s.
+    - The two newest starts took 26 s and 48 s.
+    - Nothing else is between those two rows except the daemon lock and one small file write.
+    READ at origin/main 17745c6bf.
+    - `daemonCommand` calls `bootSweepDispatchClaims` (src/lib/dispatch-claim.ts:931) with the reserver of `dispatchClaimReserverFor`, without an await and before `log("daemon.start")` (src/cli/commands/daemon.ts, after `acquireDrainLock`).
+    - The sweep lists the claim refs on the remote and, for each claim of this host, reads the ledger for the row that made it (`findClaimMintRow`) and for the state of its run (`readRunLedgerState`). W1-T10896 (merged) added the judgement that ends a run which the restart orphaned.
+    - The tick already has an async form for the claims of merged tasks: `releaseLandedDispatchClaims` with `dispatchClaimReserverAsyncFor` (src/cli/commands/daemon.ts:1819).
+    - The claims guard dispatch: a claim stops a second run of one task.
+    NOT ESTABLISHED: whether any step between the start and the first dispatch selection reads a claim. The builder must check before the sweep moves; if one does, that step waits for the sweep too.
+    CHECKED for overlap: W1-T8176 and W1-T8616 (merged) release claims at other moments. W1-T9086 adopts run children at a start. W1-T9695 is about the preflight of the feedback landing at a start. None moves this sweep.
+  design: |
+    In `daemonCommand`:
+    - Start the claim sweep at the same place, after the daemon lock. Use the async reserver. Do not await it there.
+    - Pass its promise to `runDaemon` as `claimSweepSettled` in the daemon deps. The promise never rejects: a failure writes `dispatch.claim_sweep_failed` and resolves.
+    In src/lib/dispatch-claim.ts:
+    - Add an async form of `bootSweepDispatchClaims` that awaits the reserver and yields between claims. Keep one decision function for the sync and the async form, so that the two cannot differ.
+    In `runDaemon`:
+    - Before the first dispatch selection of the lifetime, await `claimSweepSettled`. The boot review and the first sweep start before that point and do not wait.
+    Order against the adoption of run children: today the sweep runs before `adoptRunChildren`. The sweep judges a claim of this host with `sameHostLivenessProbe`, so a live run child keeps its claim. The builder must prove with criterion 4 that an adopted child keeps its claim when the sweep runs after the adoption. If it cannot, stop and report.
+    NOT IN SCOPE: the claim rules, the tick sweep of merged claims, and the lifetime history (W1-T12235).
+  falsifier: |
+    Await the sweep before `daemon.start` and criterion 1 must fail. Select a task before the sweep has settled and criterion 3 must fail. Let a failure reject the promise and criterion 5 must fail. Restore and require all seven to pass.
+  note: |
+    After the merge, the time from `dispatch.lifetime_history_loaded` to `daemon.start` is the measure. The median was 18 s over 45 starts.
