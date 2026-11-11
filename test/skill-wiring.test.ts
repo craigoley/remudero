@@ -58,8 +58,6 @@ test("W1-T11926 criterion 2: the CLI entry point installs the production ledger 
     root: join(root, "remudero"),
     claudeBin: "/usr/bin/claude",
   }));
-  writeFileSync(join(ghConfigDir, "hosts.yml"), "github.com:\n    user: test-user\n");
-
   // Make sure main() installs its own sink instead of relying on a previously installed writer.
   installGithubCredentialMissingSink(undefined);
   const saved = new Map<string, string | undefined>();
