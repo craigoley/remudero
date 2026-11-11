@@ -114,13 +114,13 @@
       receipts at the tested SHA.
   acceptance:
     - claim: "an operator proceed ruling rendered onto a risk: high, verify: human machine record leaves its verify: line byte-identical, still lints clean, and the record dispatches only through its pin-matched operator release"
-      proof: "unit test: test/an-operator-release-preserves-the-verify-field.test.ts"
+      proof: "unit test: operator release preserves verify: human and dispatches via matching pin"
     - claim: "operatorReleasePin binds the record's actual verify value: changing verify in either direction invalidates the operator release pin and sends the id to reapproval, while a pure lifecycle status flip stays valid"
-      proof: "unit test: test/an-operator-release-preserves-the-verify-field.test.ts"
+      proof: "unit test: verify change invalidates release pin while status flip stays valid"
     - claim: "a non-operator judge proceed still renders verify: auto with its priority and pinned ruling, and an escalate still renders verify: human"
-      proof: "unit test: test/an-operator-release-preserves-the-verify-field.test.ts"
+      proof: "unit test: judge proceed keeps verify mapping and escalate remains human"
     - claim: "an operator ruling already landed at verify: human is settled and is not re-judged or re-rendered on the next judge pass"
-      proof: "unit test: test/an-operator-release-preserves-the-verify-field.test.ts"
+      proof: "unit test: settled operator ruling at verify: human is not re-rendered"
   falsifier: |
     CLOSE IF main already keeps verify on an operator ruling AND pins the real verify value. Both must hold:
     renderRuledShard no longer derives `verify` from `ruling.action` for `verdict: "operator"`, and
