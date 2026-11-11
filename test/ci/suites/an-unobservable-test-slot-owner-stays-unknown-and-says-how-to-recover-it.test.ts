@@ -9,6 +9,7 @@ import {
   acquireTestSlot, enqueueTestSlot, judgeTestSlotHoldAge, TEST_SLOT_LEASE_MS,
   type TestSlotHolder, type TestSlotOptions,
 } from "#src/lib/test-slot.js";
+// @ts-ignore the executable .mjs module has no declaration file.
 import { runOwnerRelease } from "#scripts/test-slot-owner-release.mjs";
 
 const NOW = Date.parse("2026-11-11T12:00:00.000Z");
@@ -177,7 +178,10 @@ test("a namespace-mismatch record names that as missing evidence", t => {
 test("a later waiter behind an aged hold keeps its FIFO position", t => {
   const dir = tempSlotDir(t, "fifo");
   const path = join(dir, "slot-1.json");
-  writeFileSync(path, JSON.stringify(holder()), { mode: 0o644 });
+  // This path reads the real clock, so the hold is aged past the lease against Date.now().
+  const real = Date.now();
+  writeFileSync(path, JSON.stringify(holder({ startedAt: new Date(real - 3 * 60 * 60_000).toISOString(),
+    heartbeatAt: new Date(real - TEST_SLOT_LEASE_MS - 60_000).toISOString() })), { mode: 0o644 });
   const before = readFileSync(path, "utf8");
   const rows: Record<string, unknown>[] = [];
   const common: TestSlotOptions = {
@@ -196,4 +200,6 @@ test("a later waiter behind an aged hold keeps its FIFO position", t => {
   t.after(() => tailLease.release());
   assert.notEqual(tailLease.outcome, "acquired", "the aged hold's capacity is never handed to the next waiter");
   assert.equal(readFileSync(path, "utf8"), before);
+  assert.equal(rows.find(row => row.step === "test_slot.acquired" && row.label === "head-ticket")?.slot, 2, "the head took the free slot beside the hold");
+  assert.equal(rows.filter(row => row.step === "test_slot.owner_aged" && row.label === "tail-ticket").length, 1);
 });
