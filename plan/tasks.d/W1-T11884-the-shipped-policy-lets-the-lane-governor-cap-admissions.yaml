@@ -21,6 +21,8 @@
   acceptance:
     - claim: The shipped plan/policy.yaml reads sweep.laneGovernor.mode as enforce, and an absent or unreadable mode still reads shadow
       proof: "unit test: test/daemon/the-shipped-policy-lets-the-lane-governor-cap-admissions.test.ts"
+    - claim: The shipped-policy test names the enforce reading of the lane governor in its title
+      proof: "grep: reads the lane governor as enforce in test/daemon/the-shipped-policy-lets-the-lane-governor-cap-admissions.test.ts"
   rationale: |
     Amended 2026-11-11: the second criterion asked for a marker in the row's comment. The proof gate reads a match that
     sits only in a comment as proving nothing, so the criterion could never pass. The comment still records the
