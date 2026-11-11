@@ -223,6 +223,17 @@ capabilities:
   # explicit console preference still wins over this row.
   provider_preference:
     frontier: claude
+  # A REVIEW GOES TO CLAUDE FIRST (W1-T12172). DECIDED by the operator on 2026-11-10: Sonnet reviews first and
+  # the balanced Codex model is the backup. MEASURED in the randomised experiment sol61-vs-sonnet55 over 293
+  # pull requests, 2026-10-27 to 2026-11-10, by assigned reviewer: 42.4% failed review at least once with
+  # gpt-6.1-sol and 21.1% with claude-sonnet-5-5; $1.63 and 20.6 worker minutes for each merged pull request
+  # against $1.16 and 12.4. The key is a worker role, not a capability: the reviewer shares the balanced
+  # capability with builds and fixes, and those stay in the headroom auction. The reviewer goes to Codex when
+  # Claude is below its reserve, unreadable, or excluded for that review. An operator's console preference
+  # still wins over this row. The experiment still records the arm each task drew, so the reviewer rows show
+  # how many reviews this row moved. Revisit when W1-T12142 and W1-T12145 report.
+  role_preference:
+    reviewer: claude
   # Frontier starts on Claude Opus or Codex Sol subscriptions. The loader still refuses a cash pin.
   # Operator amendment 2026-09-24: when BOTH subscriptions block, a bounded cash-tool frontier
   # task may divert to Foundry Opus 5.5 if its daemon key and endpoint are present. W1-T4785 adds
