@@ -17,7 +17,7 @@
   files:
     - src/lib/github-event-wake.ts
     - test/a-wake-marker-write-leaves-no-temp-file-behind.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "A marker write whose write or rename throws removes its temp file before rethrowing"

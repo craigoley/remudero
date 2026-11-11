@@ -1,0 +1,62 @@
+- id: W1-T12245
+  title: "A written design states how a standby daemon takes over at a freshness restart"
+  repo: remudero
+  depends_on: []
+  priority: 1.5
+  type: recon
+  verify: human
+  risk: high # Rule 19: one concern, a design document and its two index files; no change under src/ or deploy/
+  band_meaning: span
+  origin: operator-session#restart-and-recycle-downtime-2026-11-10
+  plan_refs:
+    - W1-T12235
+    - W1-T12236
+    - W1-T12239
+    - W1-T12237
+    - W1-T9086
+    - W1-T9812
+  files:
+    - docs/research/a-standby-daemon-for-a-freshness-restart.md
+    - docs/research/README.md
+    - docs/docs-index.json
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "The design states the measured cost of a second daemon process beside the first: memory, processor time and GitHub reads, with the source of each number"
+      proof: "grep: ## Measured costs in docs/research/a-standby-daemon-for-a-freshness-restart.md"
+    - claim: "The design states how the daemon lock passes from the old process to the standby, and what happens if either process dies during the pass"
+      proof: "grep: ## Lock handoff in docs/research/a-standby-daemon-for-a-freshness-restart.md"
+    - claim: "The design states the order in which the standby adopts the run children, the reviews and the fix rounds of the old process"
+      proof: "grep: ## Adoption order in docs/research/a-standby-daemon-for-a-freshness-restart.md"
+    - claim: "The design states which checkout each process runs from while both are alive"
+      proof: "grep: ## Two checkouts in docs/research/a-standby-daemon-for-a-freshness-restart.md"
+    - claim: "The design states what it saves after W1-T12235, W1-T12236, W1-T12237 and W1-T12239, and recommends to build it or not"
+      proof: "grep: ## Recommendation in docs/research/a-standby-daemon-for-a-freshness-restart.md"
+    - claim: "The design lists each decision that the operator must make"
+      proof: "grep: ## Operator decisions in docs/research/a-standby-daemon-for-a-freshness-restart.md"
+  rationale: |
+    OBSERVED 2026-11-04T01:56Z to 2026-11-11T01:56Z in the ledger of the core instance: a freshness restart does its drain and its start one after the other, and serve does not.
+    - 18 starts after a freshness exit. The median time from the launcher to `daemon.start` was 143 s, and from the launcher to the first admitted review 583 s. The time from `daemon.start` to the first verdict had a median of 725 s.
+    - Before the exit the old process waits a median of 18.0 minutes from the restart decision. In that time it starts no build run.
+    - The serve process takes new code with no time down. Its supervisor checks out main in a second directory, starts a standby, waits until it is ready and passes the socket: 160 `serve.handoff_done` rows in 7 days. The newest one took 9.5 s to prepare, 31.7 s to be ready and 1.8 s to drain, with a memory peak of 1.5 GB while both ran.
+    - The daemon has no standby. It has one checkout (`deploy/entrypoint.sh` moves it in `sync_tree` after the exit) and one lock (`acquireDrainLock`, src/cli/commands/daemon.ts).
+    WHY A DESIGN AND NOT A BUILD: the change touches the entrypoint, the lock, the adoption of run children and the checkout. An error stops the fleet. Four smaller tasks of the same filing (W1-T12235, W1-T12236, W1-T12237, W1-T12239) take most of the same time with less risk, and the design must state what is left after them.
+    THIS TASK WRITES NO CODE. Its output is one document. A build needs its own task, filed after the operator has read the design.
+  design: |
+    Write docs/research/a-standby-daemon-for-a-freshness-restart.md with the six headings of the acceptance criteria.
+    Measure, do not estimate:
+    - the memory of a daemon process at `daemon.start` and at its first tick (`daemon.memory` rows), against the memory limit of the container;
+    - the processor time of a start, on a host whose load average was 20 to 30 on 8 cores on 2026-11-10;
+    - the GitHub reads of a start, against the hourly quota in `daemon.quota` rows.
+    Read and cite:
+    - the serve supervisor (src/lib/serve-supervisor.ts, src/lib/serve-generation.ts, src/lib/serve-slots.ts) for the standby pattern that exists;
+    - `acquireDrainLock` and src/lib/drain-lock.ts for the lock;
+    - `adoptRunChildren` and W1-T9086 for the adoption;
+    - `deploy/entrypoint.sh` for the checkout and the restart loop.
+    State what the standby may do before it holds the lock (reads only) and what it must not do (any write to GitHub, to a claim or to a worktree).
+    Add the document to docs/research/README.md and to docs/docs-index.json.
+    NOT IN SCOPE: any change under src/ or deploy/.
+  falsifier: |
+    Remove one of the six headings from the document and its criterion must fail.
+  note: |
+    Parked for the operator: `verify: human`. Do not dispatch a build from this task.

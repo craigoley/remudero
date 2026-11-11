@@ -1,0 +1,138 @@
+- id: W1-T12224
+  title: "An operator one-task release authorizes DISPATCH only — it never rewrites `verify: human` to `verify: auto`, and its pin binds the record's actual `verify:` value so any verification-mode change needs fresh approval"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high  # Changes what an operator release authorizes; it only narrows that authority (fail-closed), and the PR rides ci-gate + remudero-review.
+  band_meaning: blast-radius
+  budget_usd: 30.00
+  origin: architect
+  plan_refs: ["W1-T3206", "W1-T10348", "W1-T11175", "W1-T5406", "W1-T5717", "W1-T10976"]
+  status: queued
+  priority: 1.2
+  attempts: 0
+  files:
+    - src/lib/machine-filing-judge.ts
+    - src/lib/operator-release.ts
+    - test/an-operator-release-preserves-the-verify-field.test.ts
+    - test/triage/operator-releases-pin-the-approved-contract.test.ts
+    - test/daemon/a-released-task-is-dispatched-by-the-daemon.test.ts
+    - test/an-operator-verdict-releases-a-parked-task.test.ts
+    - test/an-operator-release-the-linter-refuses-is-not-re-rendered.test.ts
+    - test/plan/a-reconciled-status-flip-keeps-an-operator-release-pin-valid.test.ts
+  rationale: |
+    W1-T3206's design (ii) says "A RELEASED TASK BECOMES DISPATCHABLE WITHOUT EDITING ITS `verify:` FIELD", and its
+    falsifier says "DO NOT satisfy this by flipping `verify:` to `auto` on release". The code that later made
+    `rmd approve` durable for machine records does exactly that flip.
+    EVIDENCE: W1-T10976 was approved as risk: high / verify: human, and its own note still says "verify: human and the
+    recorded high/escalate ruling remain holds". Merged PR #17662 landed a `verdict: "operator"` / `action: proceed`
+    ruling on it and rewrote it to `verify: auto` (plan/tasks.d/W1-T10976-...yaml: `verify: auto` next to that
+    risk_ruling). There are two causes, and both are in code on main:
+      - src/lib/machine-filing-judge.ts renderRuledShard: `const verify = ruling.action === "proceed" ? "auto" : "human";`
+        sets auto for EVERY proceed, including `verdict: "operator"`.
+      - src/lib/operator-release.ts operatorReleasePin hashes `{ ...contract, verify: "auto" }`. Its doc comment says
+        "The human-to-auto verification transition must not invalidate its own approval". So the release pin cannot
+        see the verification mode, and a human->auto flip leaves the approval looking current.
+    So an approval to DISPATCH one task also ends up deciding how that task is VERIFIED, which nobody approved.
+
+    Settled by lookup: is this already filed or already decided? -> no. W1-T3206 (merged) set the opposite invariant
+    and was then bypassed for machine records. W1-T10348 (dispatch of a released task), W1-T11175 (a status flip keeps
+    the pin valid), W1-T5406/W1-T5359 (the judge settles operator rulings) and W1-T5717 (refusedReleases) each assume
+    or pin the current flip, and none of them separates dispatch from verification mode. Grep for 17662 and
+    "human-to-auto" across plan/, MASTER-PLAN.md, LEARNINGS.md and DECISIONS.md finds no task for it
+    (plan/tasks.d; src/lib/operator-release.ts:16).
+    Settled by lookup: does keeping `verify: human` stop a released task from dispatching? -> no. Dispatch admits
+    verify:human through releasedIds (src/lib/drain.ts:664; src/lib/plan.ts:1356), and those ids come from the
+    pin-checked durable operator receipt (readOperatorReleases / qualifyReleaseEvidence). The verify field is not
+    the release.
+    Settled by lookup: does lint refuse a machine record at verify: human that carries an operator ruling? -> no.
+    machineAuthorVerifyViolation and rulingVerifyViolation both return undefined at verify: human
+    (src/lib/task-linter.ts:2534, :2560).
+    Settled by lookup: does the 2026-09-29 machine-judge ruling require a proceed to write verify: auto? -> only for
+    the JUDGE's own proceed ("`proceed` → `verify: auto`, dispatchable"). For `rmd approve`, the operator release
+    section says only that "the judge's next pass pins it on the record as an `operator` ruling. That pass asks no
+    model and runs no backstop, because the operator's bit is the decision". It says nothing about the verify field
+    (DECISIONS.md, 2026-09-29 entry). This task leaves the judge-driven proceed unchanged.
+    Settled by lookup: do existing pins on records already flipped to auto break? -> no. For a record already at
+    verify: auto, hashing the actual value gives the same bytes as the normalized hash. Only a durable release taken
+    while a record was verify: human and not yet rendered gets a different pin. It then fails closed into the
+    existing reapproval set, which is the intended behaviour, not a regression (src/lib/operator-release.ts:28, :45).
+    Settled by lookup: does existing coverage encode the flip? -> yes. test/triage/operator-releases-pin-the-approved-contract.test.ts
+    asserts `verify` becomes "auto" (lines 101, 270) and that the pin is unchanged with verify: "auto" (line 139).
+    test/daemon/a-released-task-is-dispatched-by-the-daemon.test.ts asserts `onMain().verify === "auto"` (line 357).
+    That is why they are in files: those assertions must change to the new invariant. They must not be deleted.
+    Settled by lookup: risk/verify for this task -> risk: high, verify: auto. That matches W1-T3206, which made the same
+    release-authority change at that tier. This change only narrows what a release authorizes, and the PR still rides
+    ci-gate + remudero-review (plan/tasks.d/W1-T3206-verify-human-is-a-one-way-park-with-no-release.yaml).
+  design: |
+    1. SEPARATE DISPATCH FROM VERIFICATION MODE IN renderRuledShard. For `ruling.verdict === "operator"`, write the
+       ruling block and leave the `verify:` line byte-identical, comment included. A record at verify: human stays at
+       verify: human. Every non-operator ruling keeps today's mapping (proceed -> auto, escalate -> human), along with
+       the UNPRICED_PRIORITY insertion, which already skips operator rulings. The judgedPin check, lint-promotion and
+       machine-filing-admission checks keep running on the record as rewritten. For an operator ruling that record
+       now keeps its original verify value, so "at verify: auto it fails lint" must not become the refusal reason
+       when nothing moved to auto.
+    2. BIND THE ACTUAL VERIFY VALUE IN operatorReleasePin. Hash the contract with its real `verify`, and drop the
+       `verify: "auto"` normalization and its comment. Keep the existing exclusions (sourcePath, attempts,
+       risk_ruling) and the W1-T11175 lifecycle-status tolerance in operatorReleaseContractChanged. Any later
+       human<->auto edit to a released record changes its pin. staleRulingPins, qualifyReleaseEvidence and
+       readOperatorReleases then stop treating the release as current, and the record needs a fresh `rmd approve`.
+       Do NOT add a verify exemption anywhere else to make this pass.
+    3. NO RE-RENDER LOOP. needsMachineJudgement returns true for an operator-released record while it is verify: human
+       (machine-filing-judge.ts:192). Once step 1 keeps it human, an already-landed operator ruling would be due again
+       on every pass. That is the W1-T5359 re-landing class (38 empty re-landings). A record whose risk_ruling is
+       `verdict: "operator"` with an operator_release_pin equal to operatorReleasePin(task) is settled and not due.
+       settledReleases, refusedReleases (W1-T5717) and the W1-T10348 masking keep working.
+    4. PRESERVE EVERY OTHER GUARD. Ruling-shaped records stay with the operator, exactly as today. Holds unchanged:
+       dispatch_hold, unmerged depends_on, current-pin escalate set-asides for machine releases, and unknown/
+       unreadable release history. The machine release arm still refuses risk: high
+       (verify-human-release.ts:78). Machine-authored ratify.approved rows never clear a human hold. All security and
+       merge guards, including the review gate and SHA-bound admission, are untouched.
+    5. OUT OF SCOPE, AND SAY SO IN THE PR. This task does not edit W1-T10976 or any other plan record (rule 15). Once
+       it merges, restoring W1-T10976 to verify: human is a separate reviewed plan change. Under the new pin that
+       edit invalidates its current operator_release_pin, so it needs the operator's fresh approval. That is the
+       intended consequence.
+    FALSIFIERS (all in test/an-operator-release-preserves-the-verify-field.test.ts, against real shard text through
+    renderRuledShard and the real pin functions; no hand-built expected strings):
+    - OPERATOR RELEASE PRESERVES verify: human. A machine record at `risk: high` / `verify: human` with an operator
+      ruling renders with `verify: human` byte-identical, carries the operator ruling and its operator_release_pin,
+      still lints clean, and is dispatch-eligible through releasedIds. The identical record with no release is still
+      refused under `verify-not-auto`.
+    - A CHANGED VERIFY INVALIDATES THE PIN. Take that released record and flip only `verify:` to auto, or the reverse:
+      operatorReleasePin differs, operatorReleaseContractChanged is true, staleRulingPins reports it, and
+      qualifyReleaseEvidence moves the id to reapproval with no operator author. A pure status flip stays valid
+      (W1-T11175 control).
+    - POSITIVE CONTROL, NON-OPERATOR PROCEED. The same machine record under a judge `proceed` (verdict low, not
+      operator) still renders `verify: auto` with its priority insertion and pinned ruling, and an `escalate` still
+      renders `verify: human`.
+    - SETTLED, NOT RE-RENDERED. A record whose operator ruling already landed at verify: human is not due on the next
+      pass, and nothing is re-rendered.
+    - LOAD-BEARING. Restore `verify = proceed ? "auto" : "human"` for operator rulings: the first case must fail.
+      Restore the `verify: "auto"` normalization: the second case must fail. Keep the '# fail N' / '# fail 0'
+      receipts at the tested SHA.
+  acceptance:
+    - claim: "an operator proceed ruling rendered onto a risk: high, verify: human machine record leaves its verify: line byte-identical, still lints clean, and the record dispatches only through its pin-matched operator release"
+      proof: "unit test: operator release preserves verify: human and dispatches via matching pin"
+    - claim: "operatorReleasePin binds the record's actual verify value: changing verify in either direction invalidates the operator release pin and sends the id to reapproval, while a pure lifecycle status flip stays valid"
+      proof: "unit test: verify change invalidates release pin while status flip stays valid"
+    - claim: "a non-operator judge proceed still renders verify: auto with its priority and pinned ruling, and an escalate still renders verify: human"
+      proof: "unit test: judge proceed keeps verify mapping and escalate remains human"
+    - claim: "an operator ruling already landed at verify: human is settled and is not re-judged or re-rendered on the next judge pass"
+      proof: "unit test: settled operator ruling at verify: human is not re-rendered"
+  falsifier: |
+    CLOSE IF main already keeps verify on an operator ruling AND pins the real verify value. Both must hold:
+    renderRuledShard no longer derives `verify` from `ruling.action` for `verdict: "operator"`, and
+    operatorReleasePin no longer spreads `verify: "auto"` (src/lib/machine-filing-judge.ts:556,
+    src/lib/operator-release.ts:28). MEASURED at this filing: both lines are present.
+    POSITIVE CONTROL for the evidence: W1-T10976's shard carries `verify: auto` next to `verdict: "operator"`, while
+    its note says verify: human remains a hold. MEASURED: it does.
+    DO NOT satisfy this by refusing operator releases of verify: human records. The release must still dispatch the
+    task, or W1-T3206's one-way park comes back.
+  note: |
+    DUPLICATE-SURFACE: shares src/lib/machine-filing-judge.ts with W1-T5406/W1-T5359/W1-T10348 and
+    src/lib/operator-release.ts with W1-T11175, all merged. Those tasks made the operator release durable, dispatchable
+    and stable across status flips. This one stops it from also changing the verification mode. The test files listed
+    are the existing suites that assert the old flip, and they must be updated to the new invariant rather than
+    deleted.

@@ -67,7 +67,7 @@
   origin: architect
   plan_refs: ["§7B", "§7"]
   files: [src/lib/drain.ts, test/multi-lane-drain-honours-the-curated-selection.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "Regression of W1-T140 limb 2 on the lane path, which W1-T172 added after the curated branch was wired only
     into runDrain's single-lane loop. verify:auto — the whole contract is assertable with an injected runOne recorder

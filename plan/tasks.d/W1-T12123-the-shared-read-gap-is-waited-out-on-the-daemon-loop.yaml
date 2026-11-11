@@ -17,7 +17,7 @@
     - src/lib/github-transport.ts
     - test/github/a-daemon-sync-github-read-never-sleeps-on-its-loop.test.ts
     - test/github/the-shared-read-gap-is-waited-out-on-the-daemon-loop.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "On the daemon loop, a synchronous read that must wait for the shared read gap sleeps that gap and is made, and the wait is recorded as a github.pace.loop_wait row with its call site"

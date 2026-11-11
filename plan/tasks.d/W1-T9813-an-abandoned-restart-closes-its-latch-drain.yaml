@@ -14,7 +14,7 @@
     - src/lib/daemon.ts
     - test/an-abandoned-restart-closes-its-latch-drain.test.ts
   status: queued
-  priority: 3  # observability: no reader pairs the rows today, but every drain-duration and abandoned-review measurement of a restart reads them
+  priority: 2  # raised 2026-11-11 on the 7-day restart study (36 exits to 2026-11-11): the restart cycle row of W1-T12229 reads these drain rows; was 3
   attempts: 0
   rationale: |
     READ at origin/main db88033a3 (2026-10-16), src/lib/daemon.ts:

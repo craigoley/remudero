@@ -1,0 +1,57 @@
+- id: W1-T12200
+  title: "One resolver names the repository that takes a new plan file, from one host switch"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # every later writer of a plan file asks this resolver where to write
+  band_meaning: span
+  origin: operator-session#ops-cutover-2026-11-10
+  plan_refs:
+    - W1-T11768
+    - W1-T10925
+    - W1-T12171
+  files:
+    - src/lib/plan-destination.ts
+    - src/cli/commands/daemon.ts
+    - test/plan/one-resolver-names-the-repository-that-takes-a-new-plan-file.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "With no host file, `resolvePlanDestination(kind)` returns the public repository and its checkout, the same owner, name and directory that the writers use today"
+      proof: "grep: W1-T12200 criterion 1 in test/plan/one-resolver-names-the-repository-that-takes-a-new-plan-file.test.ts"
+    - claim: "With a host file that names a repository and lists the kind, the resolver returns that repository and its checkout under the repos directory of the instance"
+      proof: "grep: W1-T12200 criterion 2 in test/plan/one-resolver-names-the-repository-that-takes-a-new-plan-file.test.ts"
+    - claim: "A kind that the file does not list resolves to the public repository. The resolver reads the file on each call, so a removed kind is off on the next call with no restart"
+      proof: "grep: W1-T12200 criterion 3 in test/plan/one-resolver-names-the-repository-that-takes-a-new-plan-file.test.ts"
+    - claim: "A file that is malformed or unreadable, or that holds an unknown kind or a repository that is not `<owner>/<name>`, gives the outcome `unreadable` with the reason and no repository"
+      proof: "grep: W1-T12200 criterion 4 in test/plan/one-resolver-names-the-repository-that-takes-a-new-plan-file.test.ts"
+    - claim: "At boot the daemon command calls the resolver. If the file names a repository with no checkout, the command makes the clone. It writes one row with the outcome and the kinds, and without the repository name. A clone that fails writes a row and does not stop the boot"
+      proof: "grep: W1-T12200 criterion 5 in test/plan/one-resolver-names-the-repository-that-takes-a-new-plan-file.test.ts"
+    - claim: "With no host file, the daemon command makes no clone and no added call to GitHub, and it writes the same rows as today"
+      proof: "grep: W1-T12200 criterion 6 in test/plan/one-resolver-names-the-repository-that-takes-a-new-plan-file.test.ts"
+    - claim: "The daemon command calls the resolver"
+      proof: "grep: resolvePlanDestination( in src/cli/commands/daemon.ts"
+  rationale: |
+    OBSERVED 2026-11-10 on the first-parent history of main, 48 hours, 165 merges: 72% were plan paperwork and 40 were code or other work.
+    - The operator's goal: new plan files go to the private repository craigoley/remudero-ops, where a green pull request merges in about one minute, behind one switch that is off by default.
+    - The operator authorised turning the switch on for a stage as soon as that stage is merged and its checks pass.
+    - Every writer of a plan file assumes the public repository today. Each one takes the owner and the name from `resolveOwnerRepo()` in src/lib/repo-location.ts and pushes to `origin` of the public checkout or of `<config.root>/repos/<repo>`.
+    - No function answers the question "which repository takes this new file". This task adds it. Each writer task in this filing calls it.
+    - The switch is the host file `<state dir>/plan-destination.json`, beside `daemon-target.json`. Example: `{"repository": "<owner>/<name>", "kinds": ["decision"]}`. If the file is absent, the switch is off and the behaviour is byte-identical to today. Removing a kind from the file turns that kind off.
+    - The kinds are `decision`, `feedback` and `task`. The rule for every writer: a file is edited in the repository that holds it. Only a new file follows the switch.
+    - Work in the ops repository comes first and is not filed here: the fleet App installation must include the repository, automatic merge must arm only when every changed path is under plan/, and a light review check must exist.
+  design: |
+    New module src/lib/plan-destination.ts. Export `resolvePlanDestination(kind, deps)` with the result `{ outcome, owner, repo, checkoutDir }`, and `planDestinationRepository(deps)`, which names the repository when the file names one, for the readers that read both roots.
+    Read the state directory the way `readDaemonTargetRecord` does. An absent file is the outcome `off`. Never guess from the listing of the repos directory.
+    In `daemonCommand`, call the resolver after the target record is written. Make the clone with the same `gh repo clone` call that the command uses for a target that is not itself.
+    The file is not a config key. Do not change config-schema.ts or the registry of environment variables, so this task starts no image build.
+    W1-T11768 reads the ops catalog in memory and writes nothing to disk. This task adds a checkout because a writer needs one to commit and push. The reader of W1-T11768 does not change.
+    NOT IN SCOPE: any writer and any reader. They are the other tasks of this filing.
+  falsifier: |
+    Return the ops repository with no file and criterion 1 must fail. Cache the file across calls and criterion 3 must fail. Return the public repository for a malformed file and criterion 4 must fail. Put the repository name in the row and criterion 5 must fail. Make the clone with no file and criterion 6 must fail. Restore and require all seven to pass.
+  note: |
+    Turn the switch on by writing the file on the host. Turn it off by removing a kind or the file. Files that already went to the ops repository stay there, and the readers of both roots keep reading them while the file names the repository.

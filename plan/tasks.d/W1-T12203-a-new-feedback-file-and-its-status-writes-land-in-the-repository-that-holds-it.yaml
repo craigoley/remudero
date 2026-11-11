@@ -1,0 +1,49 @@
+- id: W1-T12203
+  title: "A new feedback file lands in the plan destination; a status write follows its file"
+  repo: remudero
+  depends_on: [W1-T12202]
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # feedback capture and the landing pass start to push to a second repository
+  band_meaning: span
+  origin: operator-session#ops-cutover-2026-11-10
+  plan_refs:
+    - W1-T191
+    - W1-T5460
+    - W1-T11768
+  files:
+    - src/lib/feedback.ts
+    - src/lib/feedback-landing.ts
+    - src/cli/commands/daemon.ts
+    - test/inbox/a-new-feedback-file-and-its-status-writes-land-in-the-repository-that-holds-it.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "With `feedback` in the kinds of the host file, `captureFeedback` lands a new feedback file in the destination repository"
+      proof: "grep: W1-T12203 criterion 1 in test/inbox/a-new-feedback-file-and-its-status-writes-land-in-the-repository-that-holds-it.test.ts"
+    - claim: "The landing pass that the daemon command runs at boot and on each poll lands waiting feedback files in the destination repository"
+      proof: "grep: W1-T12203 criterion 2 in test/inbox/a-new-feedback-file-and-its-status-writes-land-in-the-repository-that-holds-it.test.ts"
+    - claim: "A status write lands in the repository that holds the feedback file. A file in the public repository is edited there, also when the kind is on"
+      proof: "grep: W1-T12203 criterion 3 in test/inbox/a-new-feedback-file-and-its-status-writes-land-in-the-repository-that-holds-it.test.ts"
+    - claim: "If the destination refuses one feedback file, the landing leaves that file out, reports the file and the cause, and lands the other files"
+      proof: "grep: W1-T12203 criterion 4 in test/inbox/a-new-feedback-file-and-its-status-writes-land-in-the-repository-that-holds-it.test.ts"
+    - claim: "With no host file, capture, the landing pass and a status write make the same calls on the same repository as today"
+      proof: "grep: W1-T12203 criterion 5 in test/inbox/a-new-feedback-file-and-its-status-writes-land-in-the-repository-that-holds-it.test.ts"
+    - claim: "Feedback capture, a production caller, resolves the destination, and the test goes through `captureFeedback`"
+      proof: "grep: resolvePlanDestination( in src/lib/feedback.ts"
+  rationale: |
+    OBSERVED 2026-11-10 on the first-parent history of main, 48 hours, 165 merges: 6 merges were feedback landings, and each triage outcome edits a feedback file.
+    - Writers: `captureFeedback` in src/lib/feedback.ts, the landing pass `sweepFeedbackLandingAsync` that src/cli/commands/daemon.ts wires, and `landFeedbackStatusContent`, which `setFeedbackStatus` calls.
+    - The gate of the ops repository scans a feedback file for leaks. Its pattern refuses text that quotes the prefix of a token. A refused file must not block the files beside it.
+    - The switch is the host file `<state dir>/plan-destination.json`. If the file is absent, the switch is off and the behaviour is byte-identical to today. Removing `feedback` from the kinds turns this kind off.
+    - Work in the ops repository comes first and is not filed here: the fleet App must be installed there, and its gate must accept a feedback file.
+  design: |
+    In `captureFeedback` and in the landing pass, call `resolvePlanDestination("feedback")` for a new file. Pass its checkout as the landing root and its repository as `targetRepository`.
+    For a status write, find the repository that holds the file with the readers of the earlier task, and land there.
+    Reuse the preflight change of the decision task for a checkout with no scripts directory.
+    NOT IN SCOPE: the triage command, which edits a feedback file in a lane worktree. The next task covers it.
+  falsifier: |
+    Land a new file in the public repository with the kind on and criterion 1 must fail. Land a status write for a public file in the destination and criterion 3 must fail. Let one refused file stop the batch and criterion 4 must fail. Restore and require all six to pass.

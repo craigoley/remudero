@@ -195,7 +195,9 @@ type ValueSchema =
   /** W1-T10837: an arbitrary-keyed map (`Record<string, V>`), unlike `"object"`'s fixed field list —
    *  every key is validated against the SAME `value` shape, so `cashDeploymentEndpoints`'s
    *  deployment ids need no closed enum. */
-  | { kind: "record"; value: ValueSchema };
+  | { kind: "record"; value: ValueSchema }
+  /** The daily cash cap: null, a number, or the pair { normal, squeezed } (W1-T12186). */
+  | { kind: "dailyCap" };
 
 export interface ConfigFieldSchema {
   name: string;
@@ -389,10 +391,15 @@ export const CONFIG_SCHEMA: readonly ConfigFieldSchema[] = [
     kind: "enum",
     values: ["none", "api_key"],
   }),
-  configField("dailyCapUsd", "number | null", true, undefined, "config.json", "Hard daily cap for API-mode billing.", {
-    kind: "nullable",
-    value: numberShape,
-  }),
+  configField(
+    "dailyCapUsd",
+    "number | { normal: number; squeezed: number } | null",
+    true,
+    undefined,
+    "config.json",
+    "Hard daily cap for cash and API-mode billing: one number, or a pair for a normal day and a squeeze day.",
+    { kind: "dailyCap" },
+  ),
   configField("fixStrikeCap", "number", true, 2, "config.json", "Blocked-review fix rung strike cap.", numberShape),
   configField("consoleUrl", "string", true, "http://localhost:4317", "config.json", "Control gateway base URL (rmd serve): the host signed answer links resolve against.", stringShape),
   configField("consoleAppUrl", "string", true, "https://app.remudero.com", "config.json", "Operator console (app.remudero.com) base URL for task deep links.", stringShape),
@@ -575,7 +582,41 @@ function describeExpected(schema: ValueSchema): string {
       return "object";
     case "record":
       return `map of string to ${describeExpected(schema.value)}`;
+    case "dailyCap":
+      return "number or null, or a pair { normal, squeezed } of numbers";
   }
+}
+
+/**
+ * Why the shape check refuses a daily cash cap, or undefined when it accepts the cap (W1-T12186).
+ *
+ * The rule: the cap is null, a finite number, or exactly the two finite numbers `normal` and
+ * `squeezed`. No figure is below zero, and `squeezed` is not below `normal`.
+ *
+ * `effectiveCashCapUsd` (src/lib/worker-provider.ts) refuses a pair in the wrong order at the first
+ * paid request. This check refuses it when the config loads, so the operator reads the cause then.
+ */
+function dailyCapIssue(value: unknown): string | undefined {
+  const expected = `expected ${describeExpected({ kind: "dailyCap" })}`;
+  if (value === null) return undefined;
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) return expected;
+    return value < 0 ? `${expected}; the cap is below zero (${value})` : undefined;
+  }
+  if (!isPlainRecord(value)) return expected;
+  const extra = Object.keys(value).filter((key) => key !== "normal" && key !== "squeezed");
+  if (extra.length > 0) return `${expected}; unexpected member ${extra.map((key) => JSON.stringify(key)).join(", ")}`;
+  for (const member of ["normal", "squeezed"] as const) {
+    const figure = value[member];
+    if (figure === undefined) return `${expected}; ${member} is missing`;
+    if (typeof figure !== "number" || !Number.isFinite(figure)) return `${expected}; ${member} is not a finite number`;
+    if (figure < 0) return `${expected}; ${member} is below zero (${figure})`;
+  }
+  const { normal, squeezed } = value as { normal: number; squeezed: number };
+  if (squeezed < normal) {
+    return `squeezed ($${squeezed}) is below normal ($${normal}): a squeeze day must not buy less than a normal day. If the two figures were swapped, swap them back`;
+  }
+  return undefined;
 }
 
 function validateValue(value: unknown, schema: ValueSchema, path: string, issues: ConfigShapeIssue[]): void {
@@ -626,6 +667,11 @@ function validateValue(value: unknown, schema: ValueSchema, path: string, issues
         validateValue(value[key], schema.value, `${path}.${key}`, issues);
       }
       return;
+    case "dailyCap": {
+      const issue = dailyCapIssue(value);
+      if (issue !== undefined) issues.push({ path, message: issue });
+      return;
+    }
   }
 }
 
