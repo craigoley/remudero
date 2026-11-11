@@ -1,0 +1,42 @@
+- id: W1-T11977
+  title: "The analytics checkpoint is measured, bounded and written without blocking serve's event loop; today it is 77 MB, keeps every assignment since the first ledger, and is stringified and fsynced on the main thread"
+  repo: remudero
+  depends_on: []
+  priority: 1.3
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the checkpoint is what a booting serve publishes; a wrong bound changes analytics numbers, so equality with a full rescan is the proof
+  band_meaning: blast-radius
+  origin: operator-session#serve-idle-2026-11-10
+  plan_refs:
+    - W1-T11127
+    - W1-T11815
+    - W1-T11933
+  files:
+    - src/lib/analytics-route.ts
+    - test/console-api/serve/the-analytics-checkpoint-is-measured-bounded-and-written-off-the-loop.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "Each checkpoint write ledgers one analytics.checkpoint_written row with its bytes, its milliseconds and the entry count of each collection it holds"
+      proof: "grep: W1-T11977 criterion 1 in test/console-api/serve/the-analytics-checkpoint-is-measured-bounded-and-written-off-the-loop.test.ts"
+    - claim: "The write serializes and syncs off serve's main thread or in bounded slices, so no single synchronous step of it exceeds the loop-stall bound in the test's measured run"
+      proof: "grep: W1-T11977 criterion 2 in test/console-api/serve/the-analytics-checkpoint-is-measured-bounded-and-written-off-the-loop.test.ts"
+    - claim: "The per-run and per-assignment collections keep only entries the snapshot can still need (inside the history window, or not yet terminal); older entries are folded into their day buckets or totals first"
+      proof: "grep: W1-T11977 criterion 3 in test/console-api/serve/the-analytics-checkpoint-is-measured-bounded-and-written-off-the-loop.test.ts"
+    - claim: "A snapshot built from a bounded checkpoint equals the snapshot of a full rescan of the same ledger for every field the snapshot publishes"
+      proof: "grep: W1-T11977 criterion 4 in test/console-api/serve/the-analytics-checkpoint-is-measured-bounded-and-written-off-the-loop.test.ts"
+  rationale: |
+    OBSERVED 2026-11-10 on the Azure host: state/.analytics-console-v1.checkpoint.json is 77,219,693 bytes. By key: routingTelemetry 31 MB (assignmentsById 53,889 entries, attemptsByAssignmentId 52,210), tail 19.8 MB (170,240 entries), workIntegrityFold 19 MB (assignments 53,889), judgeCalibrationFold 6 MB. It is rewritten by writeJsonAtomic (analytics-route.ts) with writeFileSync and fsync.
+    - In 224 runtime.loop_stall_profile rows over 13 h, writeJsonAtomic was the top named frame after the garbage collector (7.8 s self, with writeBuffer 5.9 s and writeFileSync 2.6 s); the garbage collector was 26.4 s.
+    - The file grows with every assignment ever made, so the stall grows with the fleet's age, not its load.
+  design: |
+    Measure first (the row), then move the serialize and write off the main thread or slice it, then bound the collections. For each collection state which later reads need an entry and drop or fold the rest; keep the day buckets as they are. The equality test runs one ledger through a full scan and through checkpoint, bound, resume.
+    NOT IN SCOPE: the analytics view's shape and the 15 minute refresh interval.
+  falsifier: |
+    Drop the row and criterion 1 must fail; write synchronously on the main thread and criterion 2 must fail; keep every entry and criterion 3 must fail; drop an entry the snapshot needs and criterion 4 must fail. Restore and require all four to pass.
+  note: |
+    reservation hand-off: run-unfiled-1794287307841 -> run-unfiled-1794287307841
+    Reserved with rmd next-task-id (W1-T11977 on run-unfiled-1794287307841). Proof that counts: analytics.checkpoint_written bytes and ms after deploy.

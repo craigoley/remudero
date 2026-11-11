@@ -12,7 +12,7 @@
   plan_refs: [W1-T9951, W1-T10300]
   files:
     - test/author-preflight.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED (initiative evidence, 2026-11-07): two complete author preflights on docs-only SHA
