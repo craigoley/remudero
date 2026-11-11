@@ -100,6 +100,16 @@ and `--coverage` remain available for full local reproduction; infrastructure, c
 and test-selector changes should use that full reproduction before their first push. The default
 static preflight's small scoped coverage check is also retained, not silently removed.
 
+Author test concurrency has no fixed ceiling (W1-T11891; the old four-worker maximum is gone).
+The affected-tests width and the runtime-calibration width both come only from the shared test
+slot grant: measured CPU after the reserved core and load, measured memory headroom (on macOS
+the same `vm_stat` reading slot admission uses) and the FIFO owner lease. Each width is rechecked
+against the run deadline at the exact acquired grant, and a calibration profile is refused unless
+its concurrency equals the grant it recorded. Unmeasured memory before a slot is held still means
+ONE worker; a refused, missing or unproven slot is never execution capacity, and the
+`plan-author-runtime` width is an estimate only. The separate 2026-10-23 low-footprint
+warning-admission ceiling below (at most four explicit files, one worker) is unchanged.
+
 ### Explicit low-footprint local checks
 
 Operator-approved 2026-10-17: the Mac may run an explicitly scoped check below the ordinary
