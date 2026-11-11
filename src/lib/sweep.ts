@@ -7098,23 +7098,26 @@ export function validateReviewCapacityPolicy(raw: unknown): ReviewCapacityPolicy
   return output;
 }
 
-/** Reads the row {@link validateReviewLanesRow} validates. Split from it so every refusal arm above
- *  is reachable from a test without a temp policy file on disk. */
-function loadReviewPolicy(): { value: number; min: number; max: number; capacity: ReviewCapacityPolicy } {
-  const path = installPolicyPath();
-  const raw = parseYaml(readFileSync(path, "utf8")) as {
-    sweep?: { reviewLanes?: unknown; reviewCapacity?: unknown };
-  } | null;
-  const value = validateReviewLanesRow(raw?.sweep?.reviewLanes);
-  const row = raw?.sweep?.reviewLanes as Record<string, unknown>;
-  return {
-    value,
-    min: row.min as number,
-    max: row.max as number,
-    capacity: validateReviewCapacityPolicy(raw?.sweep?.reviewCapacity),
-  };
+/** The review policy the two rows give. The runtime ceiling `laneMax` is the host worker budget: the
+ *  `reviewLanes` row's own `max` bounds only edits of the base value. A base value above the budget
+ *  is refused, never clamped (rule 2). Split from the file read so a test can reach the refusal. */
+export function reviewPolicyFromRows(
+  sweep: { reviewLanes?: unknown; reviewCapacity?: unknown } | undefined,
+): { value: number; min: number; laneMax: number; capacity: ReviewCapacityPolicy } {
+  const value = validateReviewLanesRow(sweep?.reviewLanes);
+  const capacity = validateReviewCapacityPolicy(sweep?.reviewCapacity);
+  if (value > capacity.hostWorkerBudget) {
+    throw new PolicyError(
+      `policy.yaml: 'sweep.reviewLanes.value' (${value}) is above the review ceiling derived from ` +
+        `'sweep.reviewCapacity.hostWorkerBudget.value' (${capacity.hostWorkerBudget}) (W1-T11841).`,
+    );
+  }
+  const row = sweep?.reviewLanes as Record<string, unknown>;
+  return { value, min: row.min as number, laneMax: capacity.hostWorkerBudget, capacity };
 }
-const REVIEW_POLICY = loadReviewPolicy();
+const REVIEW_POLICY = reviewPolicyFromRows(
+  (parseYaml(readFileSync(installPolicyPath(), "utf8")) as { sweep?: { reviewLanes?: unknown; reviewCapacity?: unknown } } | null)?.sweep,
+);
 
 export const DEFAULT_SWEEP_POLICY: SweepPolicy = {
   stageBackstops: {
@@ -7136,7 +7139,9 @@ export const DEFAULT_SWEEP_POLICY: SweepPolicy = {
   dispatchLanes: POLICY_SWEEP.dispatchLanes,
   reviewLanes: REVIEW_POLICY.value,
   reviewLaneMin: REVIEW_POLICY.min,
-  reviewLaneMax: REVIEW_POLICY.max,
+  // W1-T11841: the ceiling is the host worker budget. `sweep.reviewLanes.max` bounds only edits of
+  // the base value; it is not the runtime ceiling.
+  reviewLaneMax: REVIEW_POLICY.laneMax,
   reviewCapacity: REVIEW_POLICY.capacity,
   dailyCostCeilingUsd: POLICY_SWEEP.dailyCostCeilingUsd,
   // W1-T1038: collected off plan/policy.yaml's own row (POLICY_SWEEP, above), the same relocation
