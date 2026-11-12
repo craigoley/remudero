@@ -199,6 +199,19 @@ export interface InconclusiveProofAtOpen {
   attempts: number;
 }
 
+/** W1-T10355: the filed proof a refusal ran, with its exit and bounded check-proof output, for the ledger. */
+export interface RefusedProofAtOpen {
+  proof: string;
+  status: number | null;
+  /** The bounded tail of the run's output. */
+  detail: string;
+}
+
+/** The longest check-proof output tail a `pr.open_refused` row carries. */
+export const REFUSED_PROOF_DETAIL_MAX = 1500;
+
+const boundedTail = (detail: string, max: number): string => (detail.length > max ? `…${detail.slice(-max)}` : detail);
+
 export class PrOpenRefusedError extends RmdError {
   constructor(
     readonly refusalClass: PrOpenRefusalClass,
@@ -207,6 +220,8 @@ export class PrOpenRefusedError extends RmdError {
     readonly inconclusiveProof?: InconclusiveProofAtOpen,
     /** W1-T10919: for `proof-collected-nothing`, the {@link runnerConfigDigest} of the tree whose runner loaded nothing. */
     readonly runnerConfigDigest?: string,
+    /** W1-T10355: the proof that ran and did not pass, whatever its class. */
+    readonly refusedProof?: RefusedProofAtOpen,
   ) {
     super("plan", GENERIC_EXIT_CODE, `openPullRequestChecked: ${reason}`, { refusalClass });
     this.name = "PrOpenRefusedError";
@@ -219,8 +234,9 @@ function reject(
   failingProof?: FailingProofAtOpen,
   inconclusiveProof?: InconclusiveProofAtOpen,
   runnerDigest?: string,
+  refusedProof?: RefusedProofAtOpen,
 ): never {
-  throw new PrOpenRefusedError(refusalClass, reason, failingProof, inconclusiveProof, runnerDigest);
+  throw new PrOpenRefusedError(refusalClass, reason, failingProof, inconclusiveProof, runnerDigest, refusedProof);
 }
 
 /** `note` placed before the task trailer so the trailer stays the body's last paragraph. */
@@ -263,6 +279,8 @@ export interface RefusedPrOpenBranch {
   changedFiles?: readonly string[];
   /** The task's declared `files:`. A guard task declares only tests: the test IS its deliverable. */
   declaredFiles?: readonly string[];
+  /** W1-T10355: the harness-derived replacement for a stale proof, from {@link proposeStaleProofReplacement}. */
+  proofCorrection?: StaleProofCorrection;
 }
 
 /** A diff that changes something and only under `test/`: a build that found nothing to change in the code. */
@@ -297,7 +315,11 @@ export function recordRefusedPrOpen(
     head_sha: at.headSha,
     refusal_class: err.refusalClass,
     reason: err.message,
+    ...(err.refusedProof
+      ? { proof: err.refusedProof.proof, proof_status: err.refusedProof.status, proof_output: boundedTail(err.refusedProof.detail, REFUSED_PROOF_DETAIL_MAX) }
+      : {}),
     ...(err.runnerConfigDigest !== undefined ? { runner_config_digest: err.runnerConfigDigest } : {}),
+    ...(at.proofCorrection ? { proof_correction: at.proofCorrection.outcome } : {}),
   });
   if (err.refusalClass !== "stale-proof") return null;
   // A test-only build whose proof already passes at the merge base found nothing to change: main
@@ -316,6 +338,15 @@ export function recordRefusedPrOpen(
     });
     return null;
   }
+  const proposed = at.proofCorrection?.proposedProof;
+  const amendDetail = proposed === undefined
+    ? `amend ${at.taskId}'s proof in a plan-only PR so it fails at the merge base, then open a PR from ${at.branch}.`
+    : `amend ${at.taskId}'s proof \`${err.refusedProof?.proof ?? "(the stale proof)"}\` to \`${proposed}\` in a plan-only PR ` +
+      `(the one test title at head that passes \`rmd check-proof --base\`), then open a PR from ${at.branch}.`;
+  const proposalNote = proposed === undefined
+    ? ""
+    : `\n\nProposed proof, derived by the harness (W1-T10355): \`${proposed}\`. It is the only literal test title in ` +
+      `${at.taskId}'s declared test files that is unique at head, absent at the merge base, and passes \`rmd check-proof --base\`.`;
   const blocked: Escalation = {
     class: "BLOCKED",
     taskId: at.taskId,
@@ -325,12 +356,10 @@ export function recordRefusedPrOpen(
     summary: `${at.taskId}: a filed proof already passes at the merge base, so branch ${at.branch} cannot open a PR`,
     detail:
       `The run pushed branch \`${at.branch}\` (head ${at.headSha}), then the PR opener refused it:\n\n${err.message}\n\n` +
-      "The branch is kept on origin. The worker cannot edit its own task's proof (Rule 15), so a rebuild would be refused the same way.",
+      "The branch is kept on origin. The worker cannot edit its own task's proof (Rule 15), so a rebuild would be refused the same way." +
+      proposalNote,
     options: [
-      {
-        label: "amend-proof",
-        detail: `amend ${at.taskId}'s proof in a plan-only PR so it fails at the merge base, then open a PR from ${at.branch}.`,
-      },
+      { label: "amend-proof", detail: amendDetail },
       { label: "retire-task", detail: `retire ${at.taskId} if the proof shows the work is already on main.` },
     ],
     recommendation: "amend-proof",
@@ -345,12 +374,101 @@ export function recordRefusedPrOpen(
       : {}),
     consequence: `${at.branch} stays PR-less and ${at.taskId} is refused again on every rebuild.`,
   };
+  if (proposed !== undefined) {
+    log(PR_OPEN_STALE_PROOF_AMENDMENT_STEP, {
+      task_id: at.taskId,
+      branch: at.branch,
+      head_sha: at.headSha,
+      proof: err.refusedProof?.proof,
+      proposed_proof: proposed,
+    });
+  }
   if (newTests.length > 0) {
     log("pr.open_guard_proof_amendment", { task_id: at.taskId, branch: at.branch, head_sha: at.headSha, proposed_proofs: newTests.map(guardFileProof) });
   }
   const issueUrl = tryEscalate(blocked, escalation);
   log("pr.open_refused.escalated", { branch: at.branch, issue_url: issueUrl });
   return issueUrl;
+}
+
+/** W1-T10355: the step naming a harness-derived replacement for a stale proof, beside its BLOCKED amend-proof escalation. */
+export const PR_OPEN_STALE_PROOF_AMENDMENT_STEP = "pr.open_stale_proof_amendment";
+
+/** At most this many qualifying titles are re-checked, since each `rmd check-proof --base` runs its test at head and at
+ *  base; past it the correction proposes nothing and the escalation stays as it was before W1-T10355. */
+export const STALE_PROOF_CANDIDATE_LIMIT = 8;
+
+/** `proposed` only when exactly one qualifying title passed its re-check; every other outcome proposes nothing. */
+export type StaleProofCorrectionOutcome = "proposed" | "no-candidate" | "several-candidates" | "too-many-candidates" | "unreadable";
+
+export interface StaleProofCorrection {
+  outcome: StaleProofCorrectionOutcome;
+  proposedProof?: string;
+  /** The qualifying titles: literal, unique at head, absent at the merge base. */
+  candidates: readonly string[];
+}
+
+const TEST_FILE = /^test\/.+\.test\.[cm]?[jt]sx?$/;
+const LITERAL_TITLE = /\b(?:test|it)(?:\.only|\.skip|\.todo)?\(\s*(?:"((?:[^"\\\n])+)"|'((?:[^'\\\n])+)')\s*[,)]/g;
+
+/** The literal `test(`/`it(` titles in one test file's text: single- or double-quoted with no escape, never a template. PURE. */
+export function literalTestTitles(source: string): string[] {
+  const titles: string[] = [];
+  for (const match of source.matchAll(LITERAL_TITLE)) titles.push(match[1] ?? match[2]!);
+  return titles;
+}
+
+function gitAt(repoRoot: string, args: readonly string[]): { status: number | null; stdout: string } {
+  const result = spawnSync("git", ["-C", repoRoot, ...args], { encoding: "utf8", maxBuffer: PROOF_MAX_BUFFER });
+  return { status: result.error ? null : result.status, stdout: String(result.stdout ?? "") };
+}
+
+/** Lines under test/ holding `title` at `rev`, or null when git could not answer (exit 1 is a clean zero). */
+function titleLinesAt(repoRoot: string, rev: string, title: string): number | null {
+  const found = gitAt(repoRoot, ["grep", "-F", "-n", "-e", title, rev, "--", "test/"]);
+  if (found.status === 1) return 0;
+  return found.status === 0 ? found.stdout.split("\n").filter(Boolean).length : null;
+}
+
+/**
+ * W1-T10355: the DETERMINISTIC correction for a `stale-proof` refusal that escalates. A candidate is a literal test
+ * title in a `test/` file the task's `files:` declares and that exists at head, held on exactly one line of the head
+ * test corpus and on none at the merge base. Exactly one candidate whose `unit test: <title>` passes
+ * `rmd check-proof --base <merge-base>` is proposed; zero or several propose nothing. The proposal is returned for the
+ * amend-proof escalation only — it never reaches a PR body or the build branch, and no claim is touched.
+ * Undefined when the refusal is not one that escalates (another class, a guard task, a test-only build retired as
+ * satisfied by main), so no proof is run for it.
+ */
+export async function proposeStaleProofReplacement(
+  err: PrOpenRefusedError,
+  at: Pick<RefusedPrOpenBranch, "changedFiles" | "declaredFiles">,
+  repoRoot: string,
+  runProofAsync: AsyncOpenPullRequestProofRunner = defaultProofRunnerAsync,
+  baseRef = "origin/main",
+  target?: SuiteRegistryTarget,
+): Promise<StaleProofCorrection | undefined> {
+  if (err.refusalClass !== "stale-proof" || isTestOnlyDiff(at.declaredFiles) || isTestOnlyDiff(at.changedFiles)) return undefined;
+  const base = gitAt(repoRoot, ["merge-base", baseRef, "HEAD"]);
+  const mergeBase = base.status === 0 ? base.stdout.trim() : "";
+  if (!mergeBase) return { outcome: "unreadable", candidates: [] };
+  const titles = new Set<string>();
+  for (const file of (at.declaredFiles ?? []).filter((f) => TEST_FILE.test(f))) {
+    const blob = gitAt(repoRoot, ["show", `HEAD:${file}`]);
+    if (blob.status === 0) for (const title of literalTestTitles(blob.stdout)) titles.add(title);
+  }
+  const candidates = [...titles].filter((title) =>
+    runnableProof(`unit test: ${title}`, target) && titleLinesAt(repoRoot, "HEAD", title) === 1 && titleLinesAt(repoRoot, mergeBase, title) === 0);
+  if (candidates.length === 0) return { outcome: "no-candidate", candidates };
+  if (candidates.length > STALE_PROOF_CANDIDATE_LIMIT) return { outcome: "too-many-candidates", candidates };
+  const passing: string[] = [];
+  for (const title of candidates) {
+    const result = await runProofAsync(`unit test: ${title}`, mergeBase, repoRoot, target);
+    if (!proofFailed(result)) passing.push(title);
+    if (passing.length > 1) return { outcome: "several-candidates", candidates };
+  }
+  return passing.length === 1
+    ? { outcome: "proposed", proposedProof: `unit test: ${passing[0]}`, candidates }
+    : { outcome: "no-candidate", candidates };
 }
 
 function sameCriteria(
@@ -498,6 +616,7 @@ export function openPullRequestChecked(
           undefined,
           undefined,
           runnerConfigDigest(repoRoot, "HEAD"),
+          { proof, status: result.status, detail: boundedTail(detail, REFUSED_PROOF_DETAIL_MAX) },
         );
       }
       return reject(
@@ -507,6 +626,8 @@ export function openPullRequestChecked(
           ? undefined
           : { proof, detail, checkedBody },
         inconclusive,
+        undefined,
+        { proof, status: result.status, detail: boundedTail(detail, REFUSED_PROOF_DETAIL_MAX) },
       );
     }
   }
