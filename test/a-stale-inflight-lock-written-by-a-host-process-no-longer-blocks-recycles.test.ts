@@ -57,6 +57,10 @@ function dateShiftShim(): string {
   return dir;
 }
 
+function azureShim(): string {
+  return ghShim([{ when: "acr login", stdout: "Login Succeeded" }], { command: "az", kind: "t12316-az" }).dir;
+}
+
 function dockerShim(state: string, claude: string): string {
   const routes: GhShimRoute[] = [
     { when: "image inspect", stdout: "sha256:PULLEDID" },
@@ -86,7 +90,7 @@ function recycle(state: string, extraPath: string[] = []) {
   const scratch = mkdtempSync(join(tmpdir(), "rmd-t12316-run-"));
   const cashKeyPath = join(scratch, "openweight-api-key");
   writeFileSync(cashKeyPath, "fixture-cash-key\n", { mode: 0o600 });
-  const path = [...extraPath, hostnameShim(), dockerShim(state, claude), process.env.PATH ?? ""].join(":");
+  const path = [...extraPath, hostnameShim(), dockerShim(state, claude), azureShim(), process.env.PATH ?? ""].join(":");
   const r = spawnSync("bash", [SCRIPT], {
     encoding: "utf8",
     cwd: REPO_ROOT,
