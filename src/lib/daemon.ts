@@ -4606,7 +4606,6 @@ export async function runDaemon(
   // Quota exhaustion escalation dedup, kept per bucket rather than as one flag: each bucket is read and escalates
   // independently, so one exhaustion must never suppress the other in the same hour (W1-T372).
   const quotaExhaustedEscalated: Record<"core" | "graphql", boolean> = { core: false, graphql: false };
-  // W1-T11944: the read broker heartbeat's open stale episode, kept for this daemon's life.
   const readBrokerWatch: ReadBrokerWatchState = {};
   // Queue starvation escalation dedup — the same per-episode bound. The census is re-derived fresh
   // every idle tick, so without this the hook would fire on every poll for as long as the queue stays
@@ -7271,7 +7270,6 @@ export async function runDaemon(
 
     // W1-T12057: every tick appends the waits slept on this loop, so the buffer never outlives a tick.
     drainGhPaceLoopWaits(log);
-    // W1-T11944: one row per stale read broker episode (shadow: rows only); it never admits or refuses a read.
     watchReadBrokerHeartbeat(readBrokerWatch, log);
 
     // Quota, beside the headroom block above on the same tick, never a new cadence. Both buckets are read
