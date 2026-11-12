@@ -7257,13 +7257,15 @@ export interface SweepPolicy {
    *  rotation selects against the marker, so the bound re-arms, and the window is BYTE-DRIVEN.
    *  NEVER PRE-EMPTS {@link pendingCeilingMinutes}. */
   repeatDispositionBound: number;
+  /** W1-T12267: the sweep tick bound; a light pass's plan-merge budget never passes half of it. */
+  sweepWallClockBoundMs?: number;
 }
 
 /** The shipped default policy. A BOUNDED FAIL-SAFE (rule 2): an absent value falls back to a bounded
  *  default, never to unbounded spend, and the cost ceiling bounds RUNAWAY spend, not a budget.
  *  Several rows are COLLECTED from `plan/policy.yaml` rather than written as source literals, each a
  *  RELOCATION and never a retune. // Why: FROZEN AT IMPORT (W1-T331) — docs/forensics/sweep.md. */
-const POLICY_SWEEP = loadDefaultPolicy().values.sweep;
+const { sweep: POLICY_SWEEP, sweepWallClockBoundMs: POLICY_SWEEP_WALL_CLOCK_BOUND_MS } = loadDefaultPolicy().values;
 
 /** W1-T1049 — reads `plan/policy.yaml`'s `sweep.reviewLanes` row DIRECTLY, never through
  *  `policy.ts`'s schema, which is outside this task's declared files. Validated like every other
@@ -7435,6 +7437,7 @@ export const DEFAULT_SWEEP_POLICY: SweepPolicy = {
   // literal, 50, derived against the merge-time population measured 2026-08-26 (see the field's
   // own doc for the full derivation), never a round number picked because it looked safe.
   repeatDispositionBound: 50,
+  sweepWallClockBoundMs: POLICY_SWEEP_WALL_CLOCK_BOUND_MS,
 };
 
 /** W1-T923 — one GATE failure whose remedy is a SINGLE, unambiguous form, so the fix rung can act
@@ -15187,6 +15190,8 @@ export interface SweepDeps {
   standDownReasonFor?: (d: Disposition) => string | undefined;
   /** W1-T9569: set only by a review-only light pass; every `sweep.disposed` row it writes carries it. */
   lightPassScope?: LightPassScopeName;
+  /** W1-T12267: one id for every light pass that one tick starts. The plan-merge interval counts a tick once. */
+  lightTickId?: string;
 
   /** W1-T2379/W1-T3202 — DO NOT AWAIT THE FIX RUNG'S CI WAIT. Set by the light pass and by the
    *  production full-sweep wrapper. The
@@ -25916,7 +25921,9 @@ function lightPassIntervalBudgetFromLedger(
   type RowAt = { row: Readonly<Record<string, unknown>>; index: number };
   type PassRows = { starts: RowAt[]; summaries: RowAt[] };
   const byId = new Map<string, PassRows>();
-  const events: Array<{ index: number; valid: boolean; startedAtMs?: number }> = [];
+  let events: Array<{ index: number; valid: boolean; startedAtMs?: number; tickId?: string }> = [];
+  const tickOf = (row: Readonly<Record<string, unknown>>): { tickId?: string } =>
+    typeof row.tick_id === "string" && row.tick_id.length > 0 ? { tickId: row.tick_id } : {};
   const groupFor = (id: string): PassRows => {
     const current = byId.get(id);
     if (current) return current;
@@ -25929,7 +25936,7 @@ function lightPassIntervalBudgetFromLedger(
     if (row.step !== "sweep.pass" && row.step !== "sweep.summary") return;
     const hasId = typeof row.pass_id === "string" && row.pass_id.trim().length > 0;
     if (row.step === "sweep.pass" && row.light_pass_scope === scope && !hasId) {
-      events.push({ index, valid: false });
+      events.push({ index, valid: false, ...tickOf(row) });
       return;
     }
     if (!hasId) return;
@@ -25949,11 +25956,27 @@ function lightPassIntervalBudgetFromLedger(
         summary.index > start.index && Number.isFinite(startMs) &&
         typeof elapsed === "number" && Number.isFinite(elapsed) && elapsed >= 0;
       events.push({ index: start.index, valid,
-        ...(valid ? { startedAtMs: startMs } : {}) });
+        ...(valid ? { startedAtMs: startMs } : {}), ...tickOf(start.row) });
     }
   }
 
   events.sort((left, right) => left.index - right.index);
+  // W1-T12267: one tick starts several light passes a few milliseconds apart. The interval is between ticks,
+  // so the passes of one tick count as one start, the earliest. A row with no tick id is its own tick.
+  const ticks = new Map<string, (typeof events)[number]>();
+  const singles: typeof events = [];
+  for (const event of events) {
+    const tick = event.tickId === undefined ? undefined : ticks.get(event.tickId);
+    if (event.tickId === undefined) singles.push(event);
+    else if (tick === undefined) ticks.set(event.tickId, { ...event });
+    else {
+      tick.valid = tick.valid && event.valid;
+      if (event.startedAtMs !== undefined && (tick.startedAtMs === undefined || event.startedAtMs < tick.startedAtMs)) {
+        tick.startedAtMs = event.startedAtMs;
+      }
+    }
+  }
+  events = [...singles, ...ticks.values()].sort((left, right) => left.index - right.index);
   const intervals: number[] = [];
   let previousStartMs: number | undefined;
   for (const event of events) {
@@ -25982,9 +26005,11 @@ export async function runSweepLightPass(
 ): Promise<SweepSummary[]> {
   const passId = randomUUID();
   const passScope = deps.lightPassScope ?? "idle";
+  const planMergeReport: LightPassPlanMergeReport = { turns: 0, attempts: 0, merged: 0, spentMs: 0 };
   if (deps.dryRun || !deps.log) {
-    return runSweepLightPassCore(openPrs, deps, policy, passId, passScope);
+    return runSweepLightPassCore(openPrs, deps, policy, passId, passScope, planMergeReport);
   }
+  const tick = deps.lightTickId ? { tick_id: deps.lightTickId } : {};
 
   const startedAtMs = performance.now();
   const startedAt = clockFromMillisFn(deps.now ?? Date.now).iso();
@@ -25997,7 +26022,7 @@ export async function runSweepLightPass(
       if (step === "sweep.pass") {
         if (passRecorded) return;
         passRecorded = true;
-        log(step, { ...extra, ts: startedAt, pass_id: passId, light_pass_scope: passScope });
+        log(step, { ...extra, ts: startedAt, pass_id: passId, light_pass_scope: passScope, ...tick });
       } else if (step === "sweep.summary") {
         summaries.push(extra);
       } else {
@@ -26005,7 +26030,7 @@ export async function runSweepLightPass(
       }
     },
   };
-  const result = await runSweepLightPassCore(openPrs, measuredDeps, policy, passId, passScope);
+  const result = await runSweepLightPassCore(openPrs, measuredDeps, policy, passId, passScope, planMergeReport);
   const elapsedMs = performance.now() - startedAtMs;
   if (passRecorded && Number.isFinite(elapsedMs) && elapsedMs >= 0) {
     const aggregate: Record<string, unknown> = {};
@@ -26016,9 +26041,30 @@ export async function runSweepLightPass(
           : value;
       }
     }
-    log("sweep.summary", { ...aggregate, pass_id: passId, light_pass_scope: passScope, elapsed_ms: elapsedMs });
+    // W1-T12267: how many plan merges this pass made, against which budget, and why it stopped.
+    const planMerges = planMergeReport.turns === 0 ? {} : {
+      plan_merge_attempts: planMergeReport.attempts, plan_merges: planMergeReport.merged,
+      plan_merge_spent_ms: planMergeReport.spentMs,
+      ...(planMergeReport.budgetMs === undefined ? {} : { plan_merge_budget_ms: planMergeReport.budgetMs }),
+      ...(planMergeReport.intervalMs === undefined ? {} : { plan_merge_interval_ms: planMergeReport.intervalMs }),
+      ...(planMergeReport.stop === undefined ? {} : { plan_merge_stop: planMergeReport.stop }),
+    };
+    log("sweep.summary", { ...aggregate, ...planMerges, pass_id: passId, light_pass_scope: passScope, ...tick, elapsed_ms: elapsedMs });
   }
   return result;
+}
+
+/** W1-T12267: what one light pass did with its plan merge turns; it rides the pass's `sweep.summary` row. */
+interface LightPassPlanMergeReport {
+  turns: number;
+  attempts: number;
+  merged: number;
+  spentMs: number;
+  /** The budget in force: the measured interval between ticks, never above half of `sweepWallClockBoundMs`. */
+  budgetMs?: number;
+  intervalMs?: number;
+  /** The first stop sentence of the pass. */
+  stop?: string;
 }
 
 async function runSweepLightPassCore(
@@ -26027,11 +26073,12 @@ async function runSweepLightPassCore(
   policy: SweepPolicy,
   passId: string,
   passScope: LightPassScopeName,
+  planMergeReport: LightPassPlanMergeReport,
 ): Promise<SweepSummary[]> {
   const memoryHeld = openPrs.filter((pr) => lightPassMemoryWaits.has(lightPassHeadKey(pr)));
   if (memoryHeld.length > 0) {
     const held = memoryHeld.map((pr) => lightPassMemoryWaitSummary(pr, deps, lightPassMemoryWaits.get(lightPassHeadKey(pr))!.sinceMs));
-    return [...held, ...await runSweepLightPassCore(openPrs.filter((pr) => !memoryHeld.includes(pr)), deps, policy, passId, passScope)];
+    return [...held, ...await runSweepLightPassCore(openPrs.filter((pr) => !memoryHeld.includes(pr)), deps, policy, passId, passScope, planMergeReport)];
   }
   if (openPrs.length === 0) {
     noteIdleReviewDemand(0, 0, deps.now ? deps.now() : systemClock.now());
@@ -26155,8 +26202,13 @@ async function runSweepLightPassCore(
   const planMergeToken = Symbol("light-pass-plan-merge");
   // W1-T9212: the pass that owns the claim also re-evaluates every OTHER held plan PR it observes ready,
   // one at a time under that same claim, instead of leaving each for a later pass.
-  const passIntervalBudgetMs = lightPassIntervalBudgetFromLedger(
+  const measuredIntervalMs = lightPassIntervalBudgetFromLedger(
     selectionLedgerLines.filter((row) => row.pass_id !== passId), passScope);
+  // W1-T12267 — BACKSTOP: a pass that spends its whole budget starts the next tick later, so an interval measured
+  // between ticks grows with the work. The budget never passes HALF of `sweepWallClockBoundMs`: the daemon loop awaits
+  // its light pass and the restart drain stops at that row, so a pass must end, with one merge still running, inside it.
+  const passIntervalBudgetMs = measuredIntervalMs === undefined ? undefined
+    : Math.min(measuredIntervalMs, Math.floor((policy.sweepWallClockBoundMs ?? POLICY_SWEEP_WALL_CLOCK_BOUND_MS) / 2));
   const availablePlanMerges = lightPassPlanMergeOwner !== undefined
     ? []
     : selectLightPassPlanMerges(openPrs, policy, now, selectionLedgerLines, passIntervalBudgetMs !== undefined);
@@ -26169,6 +26221,11 @@ async function runSweepLightPassCore(
     "(the one plan PR direct-merges per light pass bound remains; measured interval unavailable: " +
     "fewer than three valid same-scope intervals); held PRs keep their W1-T9212 re-evaluation";
   const planMergeStopReason = (index: number | undefined, held: boolean): string | undefined => {
+    const stop = planMergeStopDecision(index, held);
+    if (stop !== undefined) planMergeReport.stop ??= stop;
+    return stop;
+  };
+  const planMergeStopDecision = (index: number | undefined, held: boolean): string | undefined => {
     if (passIntervalBudgetMs === undefined) return index === 0 || held ? undefined : unavailablePlanMergeReason;
     if (index !== undefined && planMergeBudget.attempts === 0) return undefined;
     if (!planMergeBudget.durationKnown) {
@@ -26184,6 +26241,11 @@ async function runSweepLightPassCore(
     return undefined;
   };
   const planMergeCandidate = planMerges[0];
+  if (planMerges.length > 0) {
+    planMergeReport.turns += planMerges.length;
+    if (passIntervalBudgetMs !== undefined) planMergeReport.budgetMs = passIntervalBudgetMs;
+    if (measuredIntervalMs !== undefined) planMergeReport.intervalMs = measuredIntervalMs;
+  }
   if (planMergeCandidate) lightPassPlanMergeOwner = planMergeToken;
   const releasePlanMerge = (): void => {
     if (lightPassPlanMergeOwner === planMergeToken) lightPassPlanMergeOwner = undefined;
@@ -26334,6 +26396,9 @@ async function runSweepLightPassCore(
             const elapsedMs = Number.isFinite(elapsed) && elapsed >= 0 ? elapsed : undefined;
             attempt = { outcome, ...(elapsedMs === undefined ? {} : { elapsedMs }) };
             planMergeBudget.attempts++;
+            planMergeReport.attempts++;
+            if (outcome === "direct-merged") planMergeReport.merged++;
+            if (elapsedMs !== undefined) planMergeReport.spentMs += elapsedMs;
             if (elapsedMs === undefined) planMergeBudget.durationKnown = false;
             else planMergeBudget.spentMs += elapsedMs;
           }

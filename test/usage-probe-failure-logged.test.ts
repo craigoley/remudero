@@ -81,7 +81,7 @@ test("a successful read reports no failure at all — the sink fires only on fai
 
   // The real capture — the one that used to blow the whole read up — now yields a usable snapshot.
   assert.equal(calls.length, 0, "no failure line on a good read; a diagnostic that fires always is noise");
-  assert.equal(snap?.session.percentUsed, 13);
+  assert.equal(snap?.session?.percentUsed, 13);
   assert.equal(snap?.weekly.length, 2);
   assert.equal(snap?.weekly.find((w) => w.label === "Fable")?.percentUsed, 0);
 });
