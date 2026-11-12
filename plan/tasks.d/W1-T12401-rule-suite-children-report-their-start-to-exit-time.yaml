@@ -1,0 +1,47 @@
+- id: W1-T12401
+  title: The rule-suite runner reports each child's start-to-exit time and has a measure mode for repeated starts, so W1-T11938's before and after compile-cache numbers come from one instrument
+  repo: remudero
+  depends_on: []
+  priority: 0.6
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the rule-suite runner every hosted light gate executes; the instrument may only add output, never change a suite verdict, the closing line or a child's environment
+  band_meaning: blast-radius
+  origin: architect
+  plan_refs:
+    - W1-T11938
+    - W1-T7848
+  files:
+    - scripts/list-rule-suites.mjs
+    - test/ci/rule-suite-children-report-their-start-to-exit-time.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: Under --run each rule-suite child prints one timing line naming the suite and its start-to-exit milliseconds
+      proof: "grep: timedSuiteRun( in scripts/list-rule-suites.mjs"
+    - claim: A measure mode starts the same suite child N times one after another and prints the median and the spread of their start-to-exit times
+      proof: "grep: measure-starts in scripts/list-rule-suites.mjs"
+    - claim: The timing output leaves every suite verdict, the exit code and the closing failed-suites line exactly as they are today
+      kind: guard
+      proof: "grep: rule-checks: failed suites: in scripts/list-rule-suites.mjs"
+    - claim: The instrument passes the child environment through untouched and sets no NODE_COMPILE_CACHE of its own, so it measures whatever environment the caller supplies
+      proof: "unit test: test/ci/rule-suite-children-report-their-start-to-exit-time.test.ts"
+  rationale: |
+    W1-T11938 mixed two concerns in one task: the measurement instrument (scripts/list-rule-suites.mjs) and the product behavior (the NODE_COMPILE_CACHE entry in the test-slot child environment, src/lib/test-slot.ts). Its criterion 3 asks for a before and after measurement of a repeated child start, but nothing on main measures a child start, so that number would be hand-rolled per PR. This task builds the instrument first; W1-T11938 then depends on it and uses it.
+    Settled by lookup: is this already filed or already decided? -> No. W1-T11938 (queued) is the product change; W1-T9739 measures the sandboxed pre-open gate's tmp and compile cache rows, not a rule-suite child's start time; W1-T12252 is the tsx cache janitor. The earlier local proposal W1-T12396 was refused before push and exists in no plan source (plan/tasks.d, plan/tasks.yaml).
+    Settled by lookup: where are rule-suite children spawned? -> scripts/list-rule-suites.mjs runRuleSuites (spawnSync) and spawnSuiteCaptured (spawn), both with cwd and stdio only, no env of their own, so they inherit the caller's environment (scripts/list-rule-suites.mjs lines 48 and 57).
+    Settled by lookup: what output must stay byte-stable? -> the `rule-checks: failed suites:` closing line, which the sweep's base-reproduction probe parses (W1-T7848, scripts/list-rule-suites.mjs finish()).
+    Settled by lookup: can each criterion carry a title-form `unit test:` proof here? -> no; because files: lists the new test file, a title that matches nothing yet is BLOCKED (src/lib/task-linter.ts proofUnitTestUnresolvableViolations). A title found only in a file that does not exist at base also reads pass at base (proofUnitTestBaseWrapperViolations). So each criterion gets its own proof, and no two are the same (sharedProofViolations): c1 greps the timing helper call the change adds, c2 greps the measure flag it adds, c3 is a kind: guard grep on the closing line that must stay as it is, and c4 runs the new test file by path. The path is c4's proof only and is not shared.
+    Settled by lookup: do the c1 and c2 grep patterns already match on main? -> no; `timedSuiteRun` and `measure-starts` appear nowhere in the tree today (scripts/list-rule-suites.mjs, repo-wide grep). The c3 closing line already matches on purpose, which is why it is kind: guard (scripts/list-rule-suites.mjs finish()).
+    The four test titles in the design do NOT resolve on main today. They are the exact literal titles the implementer must give the four tests in test/ci/rule-suite-children-report-their-start-to-exit-time.test.ts, which c4's whole-file proof runs.
+  design: |
+    In scripts/list-rule-suites.mjs, time each suite child from spawn to exit through one helper, `timedSuiteRun(...)`, called on both the serial and the concurrent paths, and print one line per suite (`rule-checks: <suite>: <ms> ms`). Add a measure mode, `--measure-starts <n> [suite]`, that runs one suite child n times in sequence with the caller's environment and prints the median and the min and max. Read only; it changes no verdict and no env.
+    The tests use an injected `run` and clock where the code already accepts one (runRuleSuites, runRuleSuitesConcurrently), so no real suite is spawned to prove the timing lines.
+    Tests go in test/ci/rule-suite-children-report-their-start-to-exit-time.test.ts with these exact titles: `W1-T12401 c1 each rule-suite child reports its wall time`, `W1-T12401 c2 measure mode prints the median of N starts`, `W1-T12401 c3 timing leaves the failed suites line unchanged`, `W1-T12401 c4 the instrument passes the child env untouched`.
+    NOT IN SCOPE: setting NODE_COMPILE_CACHE anywhere (W1-T11938), coverage children, test-slot admission, the tsx cache, and any hosted gate's steps or thresholds.
+  falsifier: |
+    Remove the timedSuiteRun call and c1's grep misses (and the test file's c1 test fails). Remove the measure mode and c2's grep misses (and its c2 test fails). Change the closing line's wording and c3's guard grep misses (and its c3 test fails). Make the instrument set NODE_COMPILE_CACHE on the child, or drop any of the four tests, and c4's whole-file run fails. Restore and all four pass.
+  note: |
+    Filed by the architect in clarify mode (run PLAN-clarify-1794468573955) with reserved id W1-T12401. Follow-up planning only: it does not close or modify PR #18071 or its branch, and it does not dispatch anything.
