@@ -3742,9 +3742,9 @@ export function doctrineCitationViolations(task: Task, opts: LintOpts = {}): Lin
 // map to exactly one acceptance claim `invariant:<slug>` carrying its own non-empty proof. This reads
 // only those structured markers — never arbitrary prose, never a keyword count — and only when the
 // changed-task pass sets {@link LintOpts.requireDesignInvariantDeclaration}.
-const INVARIANT_DECL_RE = /^[ \t]*INVARIANT[ \t]+([a-z0-9][a-z0-9-]*)[ \t]*:[ \t]*(\S.*)$/gm;
-const NO_INVARIANTS_RE = /^[ \t]*NO-INVARIANTS[ \t]*:[ \t]*([^<\s].*)$/gm;
-const INVARIANT_CLAIM_RE = /\binvariant:([a-z0-9][a-z0-9-]*)/g;
+export const INVARIANT_DECL_RE = /^[ \t]*INVARIANT[ \t]+([a-z0-9][a-z0-9-]*)[ \t]*:[ \t]*(\S.*)$/m;
+export const NO_INVARIANTS_RE = /^[ \t]*NO-INVARIANTS[ \t]*:[ \t]*([^<\s].*)$/m;
+export const INVARIANT_CLAIM_RE = /\binvariant:([a-z0-9][a-z0-9-]*)/;
 
 /** The `invariant:<slug>` and `INVARIANT <slug>:` templates in prose are not declarations: a slug is
  *  lower-case alphanumerics and hyphens, and a NO-INVARIANTS reason may not open with a `<` placeholder. */
@@ -3756,8 +3756,8 @@ export function invariantSlugViolations(task: Task, opts: LintOpts = {}): LintVi
   const block = (message: string): void => {
     out.push({ check: "design-invariant-proof", severity: "block", message: `task ${task.id}: ${message}` });
   };
-  const declared = [...design.matchAll(INVARIANT_DECL_RE)].map((m) => m[1]!);
-  const noInvariants = [...design.matchAll(NO_INVARIANTS_RE)];
+  const declared = [...design.matchAll(new RegExp(INVARIANT_DECL_RE.source, "gm"))].map((m) => m[1]!);
+  const noInvariants = [...design.matchAll(new RegExp(NO_INVARIANTS_RE.source, "gm"))];
   if (declared.length === 0 && noInvariants.length === 0) {
     block(
       "design declares neither `INVARIANT <slug>: <statement>` nor `NO-INVARIANTS: <reason>`; inventory the prior " +
@@ -3775,7 +3775,7 @@ export function invariantSlugViolations(task: Task, opts: LintOpts = {}): LintVi
   }
   const claimsBySlug = new Map<string, number[]>();
   (task.acceptance ?? []).forEach((criterion, index) => {
-    const slugs = [...new Set([...criterion.claim.matchAll(INVARIANT_CLAIM_RE)].map((m) => m[1]!))];
+    const slugs = [...new Set([...criterion.claim.matchAll(new RegExp(INVARIANT_CLAIM_RE.source, "g"))].map((m) => m[1]!))];
     if (slugs.length > 1) {
       block(`acceptance claim ${index + 1} maps more than one invariant (${slugs.join(", ")}); each slug needs its own claim`);
     }

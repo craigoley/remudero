@@ -12,7 +12,9 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { invariantSlugViolations, lintTask } from "#src/lib/task-linter.js";
+import {
+  INVARIANT_CLAIM_RE, INVARIANT_DECL_RE, NO_INVARIANTS_RE, invariantSlugViolations, lintTask,
+} from "#src/lib/task-linter.js";
 import type { Task } from "#src/lib/plan.js";
 import { lintPlanCommand } from "#src/run-task.js";
 import { gitRepo, type GitRepo } from "#test/helpers/git-repo.js";
@@ -158,4 +160,18 @@ test("unit test: the changed-task lint refuses an unmapped design and leaves an 
   commitPlan(repo, [record("ZZ-Old", "old"), record("ZZ-Edit", "after", "INVARIANT keep-a: a stays")], "declare it");
   const accepted = await lint(repo);
   assert.equal(accepted.code, 0, accepted.out.join("\n"));
+});
+
+test("unit test: the declaration grammars accept the structured forms and reject prose and placeholders", () => {
+  assert.equal(INVARIANT_DECL_RE.test("INVARIANT keep-a: legacy stays"), true);
+  assert.equal(INVARIANT_DECL_RE.test("  INVARIANT keep-a: legacy stays"), true);
+  assert.equal(INVARIANT_DECL_RE.test("INVARIANT <slug>: <statement>"), false);
+  assert.equal(INVARIANT_DECL_RE.test("see the INVARIANT keep-a: mid-line"), false);
+  assert.equal(INVARIANT_DECL_RE.test("INVARIANT Keep-A: upper-case slug"), false);
+  assert.equal(NO_INVARIANTS_RE.test("NO-INVARIANTS: brand-new surface"), true);
+  assert.equal(NO_INVARIANTS_RE.test("NO-INVARIANTS: <reason>"), false);
+  assert.equal(NO_INVARIANTS_RE.test("NO-INVARIANTS:"), false);
+  assert.equal(INVARIANT_CLAIM_RE.test("invariant:keep-a — it stays"), true);
+  assert.equal(INVARIANT_CLAIM_RE.test("an ordinary claim"), false);
+  assert.equal(INVARIANT_CLAIM_RE.test("invariant:<slug>"), false);
 });
