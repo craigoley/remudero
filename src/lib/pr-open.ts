@@ -207,7 +207,7 @@ export interface RefusedProofAtOpen {
   detail: string;
 }
 
-/** The longest check-proof output tail a `pr.open_refused` row carries. */
+/** BACKSTOP: the longest check-proof output tail a `pr.open_refused` row carries, so one row stays readable. */
 export const REFUSED_PROOF_DETAIL_MAX = 1500;
 
 const boundedTail = (detail: string, max: number): string => (detail.length > max ? `…${detail.slice(-max)}` : detail);
@@ -394,7 +394,7 @@ export function recordRefusedPrOpen(
 /** W1-T10355: the step naming a harness-derived replacement for a stale proof, beside its BLOCKED amend-proof escalation. */
 export const PR_OPEN_STALE_PROOF_AMENDMENT_STEP = "pr.open_stale_proof_amendment";
 
-/** At most this many qualifying titles are re-checked, since each `rmd check-proof --base` runs its test at head and at
+/** BACKSTOP: at most this many qualifying titles are re-checked, since each `rmd check-proof --base` runs its test at head and at
  *  base; past it the correction proposes nothing and the escalation stays as it was before W1-T10355. */
 export const STALE_PROOF_CANDIDATE_LIMIT = 8;
 
