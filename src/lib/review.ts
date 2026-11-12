@@ -33,6 +33,7 @@ import { loadDefaultPolicy, type ArmCalibrationBandRow } from "./policy.js";
 import { readLedgerUnionRawLinesAsync, readLedgerUnionRecordsSync, openLedgerUnion, ledgerLivePath, rotationBeforeTime, rotationStampIso, malformedRowCouldBelong, type LedgerUnionStreamIO } from "./ledger-union.js";
 import { LEDGER_FILENAME } from "./ledger-path.js";
 import { GIT_FETCH_KILL_GRACE_MS } from "./git-fetch-retry.js";
+import { isFullReviewerCodeSha, probeReviewerCodeFreshnessAsync } from "./self-sync.js";
 import { formatTail } from "./proofExecutor.js";
 import { playwrightCacheRoot } from "./worker-home.js";
 import { makeTempDir } from "./tmp.js";
@@ -252,6 +253,14 @@ function isReviewDecisionTerminalRow(line: Record<string, unknown>, taskId: stri
   return !!verdict && (verdict.state === "success" || verdict.state === "failure") && Array.isArray(verdict.criteria);
 }
 
+export const REVIEW_REQUEUED_STEP = "sweep.review_requeued";
+export const REVIEWER_CODE_ADVANCED = "reviewer-code-advanced";
+
+export function reviewerCodeAdvanceNames(line: Record<string, unknown>, prUrl: unknown, headSha: unknown): boolean {
+  return line.step === REVIEW_REQUEUED_STEP && line.reason === REVIEWER_CODE_ADVANCED &&
+    line.pr_url === prUrl && line.head_sha === headSha;
+}
+
 export function lastReviewDecisionTerminal(
   lines: ReadonlyArray<Record<string, unknown>>,
   taskId: string,
@@ -259,8 +268,11 @@ export function lastReviewDecisionTerminal(
   digest: string,
 ): ReviewDecisionTerminal | undefined {
   let terminal: ReviewDecisionTerminal | undefined;
+  let terminalHead: unknown;
   for (const line of lines) {
+    if (terminal && reviewerCodeAdvanceNames(line, prUrl, terminalHead)) terminal = undefined;
     if (!isReviewDecisionTerminalRow(line, taskId, prUrl, digest)) continue;
+    terminalHead = line.head_sha;
     const verdict = line.decision_verdict as ReviewVerdict;
     terminal = {
       state: verdict.state,
@@ -11460,6 +11472,7 @@ function lastPostedReviewStatusForInput(
 ): PostedReviewStatusRecord | undefined {
   let prior: PostedReviewStatusRecord | undefined;
   for (const line of lines) {
+    if (reviewerCodeAdvanceNames(line, prUrl, headSha)) prior = undefined;
     if (
       line.step !== "review.posted" ||
       !reviewRowNamesPr(line, taskId, prUrl) ||
@@ -12084,8 +12097,16 @@ export interface PostReviewStatusGuardedResult {
 
 /** The status description is the GitHub-visible verdict, so provenance must survive its hard cap. */
 export function reviewDescriptionWithCodeProvenance(description: string | undefined, codeSha: string): string {
-  const suffix = ` [review code ${codeSha.slice(0, 12)}]`;
-  return `${(description ?? "remudero-review verdict").slice(0, 140 - suffix.length)}${suffix}`;
+  const suffix = ` [review code ${codeSha}]`;
+  const text = (description ?? "remudero-review verdict").replace(REVIEW_CODE_SUFFIX, "");
+  return `${text.slice(0, 140 - suffix.length)}${suffix}`;
+}
+
+const REVIEW_CODE_SUFFIX = / \[review code ([0-9a-f]+)\]$/;
+
+export function reviewCodeShaFromDescription(description: unknown): string | undefined {
+  const sha = typeof description === "string" ? REVIEW_CODE_SUFFIX.exec(description)?.[1] : undefined;
+  return isFullReviewerCodeSha(sha) ? sha : undefined;
 }
 
 function reviewerCodePublicationRefusal(
@@ -12452,6 +12473,7 @@ export interface ReviewOutboxEntry {
   decision_verdict?: ReviewVerdict;
   evaluator_provenance?: ReviewEvaluatorProvenance;
   presented_failure_ids?: string[];
+  reviewer_code_sha?: string;
   written_at: string;
   posting?: true;
 }
@@ -12511,6 +12533,7 @@ function writeReviewOutboxEntry(opts: PostReviewStatusGuardedOpts, description: 
     review_engine_revision: opts.reviewEngineRevision, decision_verdict: opts.verdict,
     evaluator_provenance: opts.evaluatorProvenance,
     ...(opts.presentedFailureIds !== undefined ? { presented_failure_ids: [...opts.presentedFailureIds] } : {}),
+    ...(opts.reviewerCodeFreshness?.status === "fresh" ? { reviewer_code_sha: opts.reviewerCodeFreshness.codeSha } : {}),
     written_at: systemClock.iso(),
     ...(posting ? { posting: true as const } : {}),
   };
@@ -12569,6 +12592,7 @@ export interface DrainReviewOutboxOpts {
   commentDeps?: PostReviewCommentDeps;
   lockOpts?: AcquireReviewStatusLockOpts;
   liveStatus?: { state?: string; description?: string };
+  judgeReviewerCode?: (codeSha: unknown) => Promise<ReviewerCodeFreshness>;
 }
 
 export interface ReviewOutboxDrainResult {
@@ -12616,9 +12640,26 @@ export async function drainReviewOutbox(opts: DrainReviewOutboxOpts): Promise<Re
       onGitHub = opts.liveStatus.state === entry.state &&
         (opts.liveStatus.description ?? "") === (entry.description ?? "").slice(0, 140);
     }
+    let code: ReviewerCodeFreshness | undefined;
+    if (!onGitHub) {
+      if (!isFullReviewerCodeSha(entry.reviewer_code_sha)) {
+        discard("the outbox entry names no full reviewer-code sha");
+        continue;
+      }
+      code = await (opts.judgeReviewerCode ?? probeReviewerCodeFreshnessAsync)(entry.reviewer_code_sha);
+      if (code.status === "unreadable") {
+        drained = { outcome: "held", reason: `the outbox verdict's reviewer code is unprovable: ${code.reason}` };
+        continue;
+      }
+      if (code.status === "stale") {
+        discard(`reviewer code ${code.codeSha.slice(0, 12)} is materially behind origin/main`);
+        continue;
+      }
+    }
     const rawPost = opts.post ?? postReviewStatus;
     let threw = false;
     const result: PostReviewStatusGuardedResult = onGitHub ? { posted: true } : await postReviewStatusGuarded({
+      reviewerCodeFreshness: code,
       owner: opts.owner, repo: opts.repo, sha: entry.head_sha, state: entry.state, description: entry.description,
       taskId: opts.taskId, evidence: entry.evidence, ledgerPath: opts.ledgerPath, runId: opts.runId, prUrl: opts.prUrl,
       reviewInputDigest: entry.input_key, reviewDecisionDigest: entry.review_decision_digest,
@@ -12666,6 +12707,7 @@ export async function drainReviewOutbox(opts: DrainReviewOutboxOpts): Promise<Re
         ...reviewLedgerLegibilityFields(verdict),
         reward_hacking_gap: verdict.rewardHackingGap,
         outbox_run_id: entry.run_id,
+        ...(entry.reviewer_code_sha !== undefined ? { reviewer_code_sha: entry.reviewer_code_sha } : {}),
       });
     }
     appendLedger(opts.ledgerPath, {
@@ -12712,6 +12754,7 @@ export interface PostReviewPendingOpts {
   readReviewStatusHistory?: ReviewStatusHistoryReader;
   commentDeps?: PostReviewCommentDeps;
   lockOpts?: AcquireReviewStatusLockOpts;
+  judgeReviewerCode?: DrainReviewOutboxOpts["judgeReviewerCode"];
   /** Injectable only so the durable owner record is deterministic in tests. */
   ownerIdentity?: { pid: number; startedAt: string };
   /** Only proof of death overrides a readable young claim's TTL (W1-T8088). */
@@ -12755,7 +12798,7 @@ export async function postReviewPending(opts: PostReviewPendingOpts): Promise<Po
       owner: opts.owner, repo: opts.repo, sha: opts.sha, taskId: opts.taskId, runId: opts.runId,
       ledgerPath: opts.ledgerPath, prUrl: opts.prUrl, reviewInputDigest: opts.reviewInputDigest,
       fetchLifecycle: opts.fetchLifecycle, post: opts.post, readReviewStatusHistory: opts.readReviewStatusHistory,
-      commentDeps: opts.commentDeps, lockOpts: opts.lockOpts,
+      commentDeps: opts.commentDeps, lockOpts: opts.lockOpts, judgeReviewerCode: opts.judgeReviewerCode,
     });
     if (drained.outcome === "posted" || drained.outcome === "held") {
       return { posted: false, outbox: drained.outcome, reason: drained.reason };
@@ -12858,7 +12901,7 @@ export async function postReviewPending(opts: PostReviewPendingOpts): Promise<Po
       owner: opts.owner, repo: opts.repo, sha: opts.sha, taskId: opts.taskId, runId: opts.runId,
       ledgerPath: opts.ledgerPath, prUrl: opts.prUrl, reviewInputDigest: opts.reviewInputDigest,
       fetchLifecycle: opts.fetchLifecycle, post: opts.post, readReviewStatusHistory: opts.readReviewStatusHistory,
-      commentDeps: opts.commentDeps, lockOpts: opts.lockOpts, liveStatus,
+      commentDeps: opts.commentDeps, lockOpts: opts.lockOpts, liveStatus, judgeReviewerCode: opts.judgeReviewerCode,
     });
     if (settled.outcome === "posted" || settled.outcome === "held") {
       return { posted: false, outbox: settled.outcome, reason: settled.reason };

@@ -94,7 +94,8 @@ function sweepReuse() {
   const priorHead = "d00dfeedd00dfeedd00dfeedd00dfeedd00dfeed";
   const criterion = { claim: "W1-T3901 proof discrimination observes the current head", proof: "grep: W1-T3901 in src/review-reuse.ts" };
   const prior: ReviewVerdict = judgeReview([criterion], { diff: DIFF, report: "W1-T3901.", headCheckoutDir: "/head", execProof: () => "pass" });
-  appendLedger(ledgerPath, { run_id: "prior", task_id: taskId, step: "review.posted", state: prior.state, head_sha: priorHead, pr_url: URL, decision_verdict: prior });
+  appendLedger(ledgerPath, { run_id: "prior", task_id: taskId, step: "review.posted", state: prior.state, head_sha: priorHead, pr_url: URL, decision_verdict: prior,
+    reviewer_code_sha: "c".repeat(40) }); // W1-T11847: the code that judged it, current at origin/main below
   const effects = runTaskLib.buildSweepEffects({
     owner: "acme",
     repo: "scratch",
@@ -105,6 +106,7 @@ function sweepReuse() {
     plan: { tasks: [], byId: new Map([[taskId, { id: taskId, files: [] }]]) } as never,
     log: () => undefined,
     reviewRunner: async () => 0,
+    reviewerCodeFreshnessImpl: () => ({ status: "fresh", codeSha: "c".repeat(40), originMainSha: "c".repeat(40), advance: "none" }),
     materializeReviewWorktreeImpl: () => ({ worktreePath: "/head" }),
     buildBaseProofDirImpl: () => ({ baseCheckoutDir: "/base", baseUnreadablePaths: new Set<string>(), baseIsCheckout: true, addedTestFiles: new Set<string>() }),
     reviewReuseExecProofImpl: (_proof, cwd) => (cwd === "/head" ? "pass" : "fail"),
