@@ -9,7 +9,7 @@ import { isTrustRootPath, renderHiddenTextFinding, scanTrustRootText, trustRootF
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 // @source-text-subject: this census asserts over what the trust-root files say, character by character.
-// @census-reads: CLAUDE.md AGENTS.md MASTER-PLAN.md DECISIONS.md LEARNINGS.md doctrine/ learnings/ .claude/ hooks/ plan/ — every file that instructs an agent.
+// @census-reads: CLAUDE.md AGENTS.md MASTER-PLAN.md DECISIONS.md LEARNINGS.md doctrine/ learnings/ .claude/ hooks/ plan/ src/lib/trust-root-text.ts src/lib/repo-layout.ts test/rules/trust-root-hidden-text-census.test.ts — every file that instructs an agent.
 
 function trustRootFiles(): string[] {
   const root = trustRootFor(resolveRepoLayout(REPO_ROOT));

@@ -1,3 +1,4 @@
+// @census-reads: scripts/ src/ test/rules/private-improvement-worker-registration.test.ts — the console-parity baseline and ratchet, the worker routes, itself.
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";

@@ -1459,6 +1459,7 @@ export interface DaemonDeps {
    *  the evidence arm, each drop leased to the sha one `ls-remote` listed, a `--rerun` lane's claim left alone, a failed
    *  listing ledgered and never read as no claims). Started once per cycle, never awaited, never overlapped. Optional. */
   releaseLandedClaims?: (isMerged: (taskId: string) => boolean) => Promise<void>;
+  claimSweepSettled?: Promise<void>;
   /** True when status.ts derives a durable independent-failure block from the ledger. */
   isIndependentFailureBlocked?: NextRunnableOpts["isIndependentFailureBlocked"];
   /** W1-T8676: every latch release the status projection derives (`independentFailureLatch`), by task id. Each
@@ -6913,8 +6914,8 @@ export async function runDaemon(
     // W1-T8616: a merged task's dispatch claim is released here, from the cycle's own `isMerged`.
     if (deps.releaseLandedClaims && !landedClaimSweepInFlight) {
       landedClaimSweepInFlight = true;
-      void deps
-        .releaseLandedClaims(isMerged)
+      const releaseLanded = deps.releaseLandedClaims;
+      void (deps.claimSweepSettled ? deps.claimSweepSettled.then(() => releaseLanded(isMerged)) : releaseLanded(isMerged))
         .catch((e) => log("dispatch.claim_sweep_failed", { surface: "tick-sweep", error: String((e as Error)?.message ?? e).slice(0, 300) }))
         .finally(() => {
           landedClaimSweepInFlight = false;
@@ -7471,6 +7472,7 @@ export async function runDaemon(
     }
     if (wipeTestHeld) continue;
 
+    if (deps.claimSweepSettled) await deps.claimSweepSettled;
     // Console "run" kick: a queued-row Run dispatches that task by id this cycle, ahead of the ordinary
     // ordering but still through the normal gate. A kicked id that is unknown, already merged, or refused
     // by {@link assertRunnable} is cleared and its named reason ledgered, never silently dropped. The

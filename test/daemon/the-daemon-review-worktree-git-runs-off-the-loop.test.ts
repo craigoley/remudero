@@ -313,8 +313,9 @@ test("W1-T11459 criterion 2: command review reuse awaits readiness and teardown 
       const claim = "the private fixture proof is present", proof = "grep: private-fixture in src/fixture.ts";
       const prior = judgeReview([{ claim, proof }], { diff: "diff --git a/src/fixture.ts b/src/fixture.ts\n+private-fixture\n",
         report: claim, headCheckoutDir: tree, execProof: () => "pass" });
+      // W1-T11847: the prior verdict names the reviewer code that judged it, current at origin/main below.
       appendLedger(ledgerPath, { run_id: "prior", task_id: taskId, step: "review.posted",
-        state: prior.state, head_sha: priorHead, pr_url: url, decision_verdict: prior });
+        state: prior.state, head_sha: priorHead, pr_url: url, decision_verdict: prior, reviewer_code_sha: "c".repeat(40) });
       let entered!: () => void, ready!: (value: unknown) => void, removing!: () => void, finish!: () => void;
       const called = new Promise<void>(resolve => { entered = resolve; });
       const materialized = new Promise<unknown>(resolve => { ready = resolve; });
@@ -328,6 +329,7 @@ test("W1-T11459 criterion 2: command review reuse awaits readiness and teardown 
         owner: "fixture", repo: "loop", localRepoName: "not-loop", config: { root } as Config,
         ledgerPath, runId: "reuse-order", plan: { tasks: [], byId: new Map([[taskId, { id: taskId, files: [] }]]) } as never,
         log: () => {}, reviewRunner: async () => { events.push("fallback"); return 0; },
+        reviewerCodeFreshnessImpl: () => ({ status: "fresh", codeSha: "c".repeat(40), originMainSha: "c".repeat(40), advance: "none" }),
         materializeReviewWorktreeImpl: () => { events.push("materialize"); entered(); return materialized; },
         buildBaseProofDirImpl: (_criteria: unknown, path: string) => {
           assert.equal(path, tree); assert.equal(readFileSync(join(tree, "ready"), "utf8"), "ready");

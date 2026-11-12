@@ -1,3 +1,4 @@
+// @census-reads: scripts/ test/setup/ test/ci/gates/an-incomplete-census-capture-survives-its-producer-exit.test.ts — the census script, retained-fixture helpers, itself.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
