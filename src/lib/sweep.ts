@@ -15060,7 +15060,7 @@ export interface SweepDeps {
   continueReviewAdmissions?: (reviewClass?: ReviewLaneClass) => boolean;
   /** W1-T3491 — fleet hold checked before review or repair admission; direct CLI/test callers omit it. */
   workerAdmissionHold?: (kind?: "review") => string | undefined;
-  restartAdmission?: ((kind: ReviewLaneClass, surface: "light" | "light-refill") => boolean) & { readonly heldBy?: string };
+  restartAdmission?: ((kind: ReviewLaneClass, surface: "light" | "light-refill") => boolean) & { readonly heldBy?: string; readonly recycleWait?: true };
   /** W1-T11148: the head diff (reviewer's source) and the plan-lane bound's readings; absent: code lane, review-width bound. */
   readPrHeadDiff?: (pr: OpenPrView) => Promise<string>;
   readPlanLaneCapacity?: (policy: SweepPolicy) => PlanLaneCapacityReading;
@@ -26601,11 +26601,18 @@ async function runSweepLightPassCore(
     ).spawning);
   };
   let recycleRefillHeld = false;
-  const refillHeldForRecycle = (): boolean => {
-    // W1-T11321: a pass begun before the recycle PAUSE must not refill the drain with new reviews.
+  const recycleRefillDetail = (): string | undefined => {
     const detail = workerAdmissionHoldReason(deps, "review")?.replace(/^fleet PAUSE hold: /, "") ??
       recyclePauseDetail(dirname(dirname(deps.ledgerPath)));
-    if (!isRecyclePauseDetail(detail)) return false;
+    return isRecyclePauseDetail(detail) ? detail : undefined;
+  };
+  const refillHeldForRecycle = (admitting?: true): boolean => {
+    // W1-T11321: a pass begun before the recycle PAUSE must not refill the drain with new reviews.
+    // W1-T12241: a pass that carries the recycle wait's predicate asks it once, as it admits.
+    const detail = recycleRefillDetail();
+    if (detail === undefined) return false;
+    const recycleWait = deps.restartAdmission?.recycleWait === true ? deps.restartAdmission : undefined;
+    if (recycleWait && (admitting !== true || recycleWait("review", "light-refill"))) return false;
     if (!recycleRefillHeld && !deps.dryRun) {
       append(deps.ledgerPath, { run_id: deps.runId, task_id: "SWEEP", step: "sweep.review_refill_held",
         reason: "recycle_pause", detail });
@@ -26614,7 +26621,8 @@ async function runSweepLightPassCore(
     return true;
   };
   const admitOneRefill = async (): Promise<boolean> => {
-    if (providerFloorMet || deps.restartAdmission?.("review", "light-refill") === false) return false;
+    const askedAtAdmit = deps.restartAdmission?.recycleWait === true && recycleRefillDetail() !== undefined;
+    if (providerFloorMet || (!askedAtAdmit && deps.restartAdmission?.("review", "light-refill") === false)) return false;
     if (refillHeldForRecycle()) return false;
     // Read the queue only when a lane is actually free, so a refill that admits nothing reads nothing.
     const freeWidth = effectiveReviewWidth(deps, policy, Math.max(1, refillTail.length), deps.now ? deps.now() : systemClock.now(),
@@ -26668,7 +26676,7 @@ async function runSweepLightPassCore(
       return true;
     }
     try {
-      if (refillHeldForRecycle()) {
+      if (refillHeldForRecycle(true)) {
         unreserve();
         refilledHeads.delete(key);
         refillTail.unshift(next);
