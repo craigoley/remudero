@@ -1,0 +1,23 @@
+- id: W1-T12428
+  title: "THE SCOUT'S UNCOVERED RECURRING SYMPTOM — fleet_lane.sameness_unavailable landed 2363 ledger rows across the trailing window and no task cites it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  priority: 1.32
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "scout:fleet_lane.sameness_unavailable"
+  files:
+    - src/lib/fleet-lane.ts
+    - test/daemon/scout-fleet-lane-sameness-unavailable.test.ts
+  acceptance:
+    - claim: "fleet_lane.sameness_unavailable stops recurring: its cause is fixed rather than its rows hidden"
+      proof: "grep: test(\"W1-T12428: fleet_lane.sameness_unavailable no longer recurs\" in test/daemon/scout-fleet-lane-sameness-unavailable.test.ts"
+  note: "Filed by the scout gardener (W1-T5454). The scout measures this step again once the build merges and credits or debits its class by whether the rows stopped. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person."
+  rationale: |
+    The ledger step fleet_lane.sameness_unavailable carries a failure shape and landed rows in both halves of the trailing 7 days: 3 in the older half, 2360 in the newer.
+    No queued task and no task merged in that window cites this step, and no gardener scorecard prices it.
+    The rows name no file; tracked source literals locate this step in: src/lib/fleet-lane.ts. Start there.

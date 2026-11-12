@@ -24,7 +24,7 @@
   acceptance:
     - claim: "Each heartbeat carries `root_fs_reserve_kb`. When the state volume is another device, it also carries `state_fs_reserve_kb`"
       proof: "grep: W1-T12253 criterion 1 in test/gardeners/the-beat-publishes-the-reserve-of-each-volume.test.ts"
-    - claim: "On macOS the reserve is the reserve of the author preflight. The test reads `MAC_AUTHOR_FREE_RESERVE_BYTES` from scripts/lib/mac-author-admission.mjs and requires the same amount in the heartbeat"
+    - claim: "On macOS each reserve is `unknown`. No Mac account publishes a heartbeat, so the heartbeat holds no Mac reserve"
       proof: "grep: W1-T12253 criterion 2 in test/gardeners/the-beat-publishes-the-reserve-of-each-volume.test.ts"
     - claim: "On Linux the reserve of a volume comes from the mark of the host janitor for that volume: the part of the total size above the mark percent, or the free space of the mark when that is larger"
       proof: "grep: W1-T12253 criterion 3 in test/gardeners/the-beat-publishes-the-reserve-of-each-volume.test.ts"
@@ -44,14 +44,15 @@
     CHECKED for overlap: W1-T2767 (merged) added a reading for each device. W1-T5548 (merged) made the janitor fail on every watched volume. Neither publishes the reserve.
   design: |
     In scripts/fleet-heartbeat.sh, after the readings of the devices:
-    - On macOS, set the reserve of the root volume to 20 GiB in KB, from one constant with a comment that names `MAC_AUTHOR_FREE_RESERVE_BYTES`.
+    - On macOS, write `unknown` for each reserve. No Mac account publishes a heartbeat (operator ruling 2026-11-12, W1-T12259 retired), so the script holds no Mac reserve and no copy of `MAC_AUTHOR_FREE_RESERVE_BYTES`.
     - On Linux, read `HIGH_WATER` and `RMD_CLEANUP_WATCH_FS` with the same defaults as the janitor. For a volume, the reserve is `total * (100 - percent) / 100` in KB. When the mark also has a free space part, take the larger of the two.
     - Write `root_fs_reserve_kb=<n>` and `state_fs_reserve_kb=<n>` next to the free values. Write the state line only when the state volume is another device, as the free value does.
     - The script stays plain bash with no Node call. Its header gives the reason.
     The two environment names are the names that the janitor reads today. This task adds no new setting.
     NOT IN SCOPE: the scratch volume, any escalation (W1-T12254 reads these fields), and the workflow that watches the heartbeat.
   falsifier: |
-    Leave the field out and criterion 1 must fail. Write 10 GiB on macOS and criterion 2 must fail. Ignore the free space part of a mark and criterion 3 must fail. Change one default mark in the heartbeat only and criterion 4 must fail. Write 0 for an unreadable size and criterion 5 must fail. Restore and require all five to pass.
+    Leave the field out and criterion 1 must fail. Write a number for a reserve on macOS and criterion 2 must fail. Ignore the free space part of a mark and criterion 3 must fail. Change one default mark in the heartbeat only and criterion 4 must fail. Write 0 for an unreadable size and criterion 5 must fail. Restore and require all five to pass.
   note: |
-    Host and account: every host that publishes a heartbeat. Today that is the Azure host, from the crontab of its service user. W1-T12259 adds the Mac agent account.
+    Host and account: the Azure host, from the crontab of its service user. It is the only host that publishes a heartbeat.
+    Amended 2026-11-12: W1-T12259 is retired, so no Mac account publishes a heartbeat. Criterion 2 no longer copies the reserve of the Mac author preflight. On macOS each reserve is `unknown`.
     The task removes nothing.
