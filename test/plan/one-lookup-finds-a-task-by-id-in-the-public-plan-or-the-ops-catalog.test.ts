@@ -101,24 +101,27 @@ test("W1-T12207 criterion 4: the real claim CLI and default ops transport reserv
   writeFileSync(join(fixtureHome, ...FIXTURE_CONFIG_PATH_SEGMENTS), JSON.stringify({ root: fx.root, claudeBin: "/usr/bin/false" }));
   const routes = await Promise.all(fx.apiPaths.map(async path => ({ when: `api ${path}`, stdout: JSON.stringify(await fx.api(path)) })));
   const shim = ghShim([...routes.sort((a, b) => b.when.length - a.when.length), { when: "", stderr: "forbidden fixture GitHub route", exit: 97 }]);
+  t.after(() => rmSync(shim.dir, { recursive: true, force: true }));
   const env = { PATH: `${shim.dir}:${process.env.PATH}`, HOME: fixtureHome, TMPDIR: tmpdir(), LANG: "C", RMD_SELF_SYNC_DONE: "1",
     GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null", GIT_ALLOW_PROTOCOL: "file",
     ...(process.env.NODE_OPTIONS === undefined ? {} : { NODE_OPTIONS: process.env.NODE_OPTIONS }),
     ...(process.env.NODE_V8_COVERAGE === undefined ? {} : { NODE_V8_COVERAGE: process.env.NODE_V8_COVERAGE }) };
   assert.equal(git(["ls-remote", origin, `refs/rmd-dispatch/${ID}`]).trim(), "");
-  const output = execFileSync(join(REPO_ROOT, "bin", "rmd"), ["claim", ID], { cwd: publicRoot, env, encoding: "utf8", timeout: 30_000 });
+  // Enter the shipped CLI directly: the tsx executable adds an IPC server and a second Node process.
+  const claimArgs = ["--import", import.meta.resolve("tsx"), join(REPO_ROOT, "src", "run-task.ts"), "claim", ID];
+  const output = execFileSync(process.execPath, claimArgs, { cwd: publicRoot, env, encoding: "utf8", timeout: 30_000 });
   assert.ok(output.includes(`claimed refs/rmd-dispatch/${ID}`));
   const held = git(["ls-remote", origin, `refs/rmd-dispatch/${ID}`]).trim(); assert.match(held, new RegExp(`^[a-f0-9]{40}\\s+refs/rmd-dispatch/${ID}$`));
   assert.ok(shim.calls().length >= 6, "the default transport makes real pinned-reader child calls");
   assert.ok(shim.calls().every(call => call.startsWith(`api repos/${REPOSITORY}`)), "only declared read-only routes ran");
   const beforeUnreadablePublic = shim.calls().length;
   writeFileSync(join(publicRoot, "plan", "tasks.yaml"), "not: a plan\n"); git(["add", "plan/tasks.yaml"]); git(["commit", "-m", "fixture unreadable public plan"]); git(["push", "origin", "main"]);
-  assert.throws(() => execFileSync(join(REPO_ROOT, "bin", "rmd"), ["claim", ID], { cwd: publicRoot, env, encoding: "utf8", timeout: 30_000, stdio: ["ignore", "pipe", "pipe"] }), /public plan unreadable/);
+  assert.throws(() => execFileSync(process.execPath, claimArgs, { cwd: publicRoot, env, encoding: "utf8", timeout: 30_000, stdio: ["ignore", "pipe", "pipe"] }), /public plan unreadable/);
   assert.equal(shim.calls().length, beforeUnreadablePublic, "unreadable public evidence cannot open ops");
   assert.equal(git(["ls-remote", origin, `refs/rmd-dispatch/${ID}`]).trim(), held);
   writeFileSync(join(publicRoot, "plan", "tasks.yaml"), "[]\n"); git(["add", "plan/tasks.yaml"]); git(["commit", "-m", "fixture restored public plan"]); git(["push", "origin", "main"]);
   shim.addRoute({ when: `api repos/${REPOSITORY}`, stderr: "HTTP 503 temporary fixture outage", exit: 1 });
-  assert.throws(() => execFileSync(join(REPO_ROOT, "bin", "rmd"), ["claim", ID], { cwd: publicRoot, env, encoding: "utf8", timeout: 30_000, stdio: ["ignore", "pipe", "pipe"] }), /task catalog unreadable/);
+  assert.throws(() => execFileSync(process.execPath, claimArgs, { cwd: publicRoot, env, encoding: "utf8", timeout: 30_000, stdio: ["ignore", "pipe", "pipe"] }), /task catalog unreadable/);
   assert.equal(git(["ls-remote", origin, `refs/rmd-dispatch/${ID}`]).trim(), held, "an unknown ops source never changes the claim");
 });
 
