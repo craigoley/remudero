@@ -55,11 +55,13 @@ const deps={repoRoot:req.pub,runGit,openPrTexts:()=>[],destinationStateDir:()=>r
 if(req.defaultGit)delete deps.destinationGit;
 if(req.defaultPr)delete deps.destinationPrFetch;
 if(req.reserve)deps.reserver=reservations.gitRemoteRefReserver({run:mod.gitRunAdapter(runGit),filingBranch:'fixture-plan'});
-const code=await mod.nextTaskIdCommand(req.flags??['--no-reserve'],{},deps);
-process.stdout.write(JSON.stringify({code,out,err,calls})+'\n');
+const {existsSync}=await import('node:fs');let asyncTicks=0;
+const timer=req.observePrivateFetch?setInterval(()=>{if(existsSync(req.observePrivateFetch+'-start')&&!existsSync(req.observePrivateFetch+'-done'))asyncTicks++;},10):undefined;
+let code;try{code=await mod.nextTaskIdCommand(req.flags??['--no-reserve'],{},deps);}finally{if(timer)clearInterval(timer);}
+process.stdout.write(JSON.stringify({code,out,err,calls,asyncTicks})+'\n');
 `;
 interface FixturePull { body: string; head: { ref: string }; created_at: string; state: string; }
-interface CaseOptions { auditPulls?: FixturePull[]; flags?: string[]; reserve?: boolean; prTexts?: string[]; prPages?: string[][]; prFailure?: boolean; fetchFailure?: boolean; defaultGit?: boolean; defaultPr?: boolean; }
+interface CaseOptions { auditPulls?: FixturePull[]; flags?: string[]; reserve?: boolean; prTexts?: string[]; prPages?: string[][]; prFailure?: boolean; fetchFailure?: boolean; defaultGit?: boolean; defaultPr?: boolean; observePrivateFetch?: string; }
 function invoke(f: ReturnType<typeof fixture>, options: CaseOptions = {}) {
   const r = spawnSync(process.execPath, ["--enable-source-maps", "--import", import.meta.resolve("tsx"), "--input-type=module", "--eval", CHILD], {
     cwd: REPO_ROOT, encoding: "utf8", timeout: 60_000, maxBuffer: 4 * 1024 * 1024,
@@ -70,7 +72,7 @@ function invoke(f: ReturnType<typeof fixture>, options: CaseOptions = {}) {
   });
   assert.equal(r.error, undefined, "the command child terminates within its test bound");
   assert.equal(r.status, 0, r.stderr);
-  return JSON.parse(r.stdout.trim()) as { code: number; out: string[]; err: string[]; calls: Array<{ root: string; args: string[] }> };
+  return JSON.parse(r.stdout.trim()) as { code: number; out: string[]; err: string[]; calls: Array<{ root: string; args: string[] }>; asyncTicks: number };
 }
 
 test("W1-T12206 criterion 1: the library includes an explicitly supplied second plan and its open PRs", (t) => {
@@ -219,4 +221,19 @@ test("W1-T12206 criterion 4: duplicate private ids are refused, while public dep
   f.pub.git("-C", f.ops, "push", "--quiet", "origin", "HEAD:refs/heads/main");
   const r = invoke(f); assert.equal(r.code, 2, JSON.stringify(r)); assert.match(r.err.join("\n"), /destination.*plan/);
   assert.equal(r.out.some(s => /^W1-T/.test(s)), false);
+});
+
+
+test("W1-T12206 criterion 1: the real default private Git fetch yields the caller loop", t => {
+  const f = fixture(t); const marker = join(f.root, "private-fetch"); const hook = join(f.root, "upload-pack.mjs");
+  put(hook, `import {writeFileSync} from 'node:fs';import {spawn} from 'node:child_process';
+writeFileSync(${JSON.stringify(marker + "-start")},'started');
+setTimeout(()=>{const p=spawn('/usr/bin/git-upload-pack',process.argv.slice(2),{stdio:'inherit'});p.on('exit',code=>{writeFileSync(${JSON.stringify(marker + "-done")},'done');process.exit(code??1);});},300);`);
+  const quote = (value: string) => "'" + value.replace(/'/g, "'\\''") + "'";
+  f.pub.git("-C", f.ops, "config", "remote.origin.uploadpack", `${quote(process.execPath)} ${quote(hook)}`);
+  const r = invoke(f, { defaultGit: true, observePrivateFetch: marker });
+  assert.equal(r.code, 0, r.err.join("\n"));
+  assert.equal(readFileSync(marker + "-start", "utf8"), "started");
+  assert.equal(readFileSync(marker + "-done", "utf8"), "done");
+  assert.ok(r.asyncTicks > 0, "the caller timer must advance while the actual private fetch is pending");
 });
