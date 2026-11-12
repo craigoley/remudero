@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { createRequire } from "node:module";
 import { test, type TestContext } from "node:test";
 import { planPrPreflight, planPrPreflightAsync, planPrPreflightAtCommit, planPrPreflightAtCommitAsync } from "#src/lib/plan-pr-emitter.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
@@ -88,4 +89,40 @@ test("W1-T12205 criterion 5: async preflight derives its code root through the r
   const r = await planPrPreflightAsync({ cwd: selected, title: "chore(plan): fixture", body: BODY }, checks);
   assert.equal(r.ok, true, JSON.stringify(r)); assert.deepEqual(r.unreadable, []);
   const calls = traced(f.trace); assert.equal(calls.length, 1); assert.equal(calls[0]!.args[calls[0]!.args.indexOf("--code-root") + 1], f.code.dir);
+});
+
+
+test("W1-T12205 criterion 3: the actual configured plan lint accepts a code path and refuses it when absent", async t => {
+  const f = fixture(t); const loader = createRequire(import.meta.url).resolve("tsx");
+  put(join(f.code.dir, "package.json"), JSON.stringify({ scripts: { "lint-plan:fast":
+    `node --import ${loader} ${join(REPO_ROOT, "scripts/lint-plan-offline.mjs")} --base origin/main` } }));
+  const task = ["- id: W1-T900", '  title: "The held fixture has a focused test"', "  repo: remudero", "  depends_on: []",
+    "  priority: 1", "  type: implement", "  verify: auto", "  risk: low", "  status: queued", "  attempts: 0", "  budget_usd: 1",
+    '  origin: "test-fixture:plan-preflight-apart"', "  files: [src/lib/held.ts, test/plan/held.test.ts]", "  acceptance:",
+    '    - claim: "The held value is covered by its focused proof"', '      proof: "unit test: test/plan/held.test.ts"', ""].join("\n");
+  put(join(f.plan.dir, "plan/tasks.d/W1-T900-held.yaml"), task);
+  f.plan.git("add", "--all"); f.plan.git("commit", "-qm", "file the fixture task");
+  const input = { cwd: f.plan.dir, title: "chore(plan): fixture", body: BODY, codeRoot: f.code.dir };
+  const healthy = await planPrPreflightAsync(input, otherChecks);
+  assert.equal(healthy.ok, true, JSON.stringify(healthy)); assert.deepEqual(healthy.unreadable, []);
+  f.code.git("rm", "src/lib/held.ts");
+  const absent = await planPrPreflightAsync(input, otherChecks);
+  assert.equal(absent.ok, false, JSON.stringify(absent)); assert.ok(absent.failures.some(f => f.check === "lint-plan"));
+});
+
+test("W1-T12205 criterion 5: the selected async route defaults to the actual public engine root", async t => {
+  const f = fixture(t); const state = join(f.root, "state"); const selected = join(f.root, "repos", "fixture-ops");
+  f.plan.addWorktree(selected, "selected-default-engine-fixture");
+  put(join(state, "plan-destination.json"), JSON.stringify({ repository: "fixture-owner/fixture-ops", kinds: ["task"] }));
+  const seen: string[] = []; const checks = { ...otherChecks, lintPlan: GREEN, destinationStateDir: () => state,
+    checkProof: (cwd: string) => { seen.push(cwd); return 0; } };
+  const r = await planPrPreflightAsync({ cwd: selected, title: "chore(plan): fixture", body: BODY }, checks);
+  assert.equal(r.ok, true, JSON.stringify(r)); assert.deepEqual(seen, [REPO_ROOT]);
+});
+
+test("W1-T12205 criterion 5: an unreadable selected host file refuses without exposing its contents", async t => {
+  const f = fixture(t); const state = join(f.root, "state"); put(join(state, "plan-destination.json"), "private-marker:not-json");
+  const r = await planPrPreflightAsync({ cwd: f.plan.dir, title: "chore(plan): fixture", body: BODY }, { ...otherChecks,
+    destinationStateDir: () => state, publicCodeRoot: () => { throw Error("must not resolve private-marker"); } });
+  assert.equal(r.ok, false); assert.equal(r.unreadable.length, 1); assert.doesNotMatch(JSON.stringify(r), /private-marker/);
 });
