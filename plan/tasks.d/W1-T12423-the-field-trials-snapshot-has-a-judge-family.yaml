@@ -1,0 +1,69 @@
+- id: W1-T12423
+  title: "The field-trials snapshot has a judge family: agreement, Brier, abstention, latency and cost per decision, for each role, model and surface"
+  repo: remudero
+  depends_on:
+    - W1-T12414
+    - W1-T12420
+    - W1-T12421
+  priority: 1.8
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # a new private family across the field-trials snapshot, a new module and the evidence program document; the release, the field note and every gate are unchanged
+  band_meaning: span
+  origin: operator-session#field-trials-new-models-2026-11-12
+  plan_refs:
+    - W1-T100001
+    - W1-T4574
+    - W1-T10843
+    - W1-T10831
+    - W1-T12414
+    - W1-T12416
+    - W1-T12420
+    - W1-T12421
+  files:
+    - src/lib/field-trials-judges.ts
+    - src/lib/field-trials-flow.ts
+    - docs/research/model-evidence-program.md
+    - test/routing/the-field-trials-snapshot-has-a-judge-family.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "The snapshot reads decision.answered, shadow_judge.paired and judge_replay rows beside its present steps, and these rows enter only the judge family. The adoption, funnel, repair, flow, learning, guardrail and served-cohort figures are the same with or without them"
+      proof: "grep: W1-T12423 criterion 1 in test/routing/the-field-trials-snapshot-has-a-judge-family.test.ts"
+    - claim: "Each judge cell is keyed by source, ISO week, role, model id and model surface. It gives the answer count, the share that agree with the current judge, the abstention share, the rejection share, Brier and log-loss where a distribution has an outcome, the median and 90th-percentile latency, and the median settled dollars per decision. Two models or two surfaces never share a cell"
+      proof: "grep: W1-T12423 criterion 2 in test/routing/the-field-trials-snapshot-has-a-judge-family.test.ts"
+    - claim: "Live shadow answers and replay answers are in separate cells, by a basis of live or replay, and a replay cell names its corpus digest"
+      proof: "grep: W1-T12423 criterion 3 in test/routing/the-field-trials-snapshot-has-a-judge-family.test.ts"
+    - claim: "Agreement, Brier, log-loss and the abstention and rejection shares come from W1-T12414's scorer. A test that changes the scorer's figure for one input changes the judge cell by the same amount"
+      proof: "grep: W1-T12423 criterion 4 in test/routing/the-field-trials-snapshot-has-a-judge-family.test.ts"
+    - claim: "The judge family is private. No input digest or decision key enters a cell, those keys are added to privateKeys, and buildFieldTrialsRelease and the field-note candidate give byte-identical output with or without judge rows"
+      proof: "grep: W1-T12423 criterion 5 in test/routing/the-field-trials-snapshot-has-a-judge-family.test.ts"
+    - claim: "The judge partitions carry input hashes, so an unchanged week is reused from the prior snapshot and a late row rebuilds only its own week"
+      proof: "grep: W1-T12423 criterion 6 in test/routing/the-field-trials-snapshot-has-a-judge-family.test.ts"
+    - claim: "The snapshot builds the judge family"
+      proof: "grep: judgeTrialCells( in src/lib/field-trials-flow.ts"
+  rationale: |
+    WHY: the operator asked on 2026-11-12 for a decision-model judge trial in the field trials, with latency, cost per decision, agreement, Brier and abstention rate (backlog item FT2). The daily field-trials pass is where rmd keeps its private model evidence, so the judge figures belong there, next to the worker figures and apart from them.
+    WHY NOT A CONTROLLED TRIAL OR A FIELD NOTE (read 2026-11-12 at origin/main 920669542):
+    - src/lib/field-trials-controlled-release.ts:48-60 accepts one registered epoch of exactly two model arms, randomized per task, with merged-on-main as the primary outcome, for the site's fixed field-trials-v1 parser (:28-30, site commit eae03ec12). A judge shadow is paired on the same input, not randomized per task, and its outcome is an answer, not a merge. It does not fit that contract.
+    - src/lib/field-trials-field-note.ts:2-9 builds the site's model-field-note-v1 from the adoption cells, per selected model and task class. Judge rows there would sit under gpt-6-luna beside worker coverage, which W1-T12420 forbids.
+    - So this task adds a private family. Publishing it needs a site schema, which is the operator's decision and is not filed here.
+    READ 2026-11-12 at origin/main 920669542:
+    - src/lib/field-trials-flow.ts:72 FLOW_STEPS and :74 GUARDRAIL_STEPS name the steps the snapshot reads; no judge step is among them. :922 `buildFieldTrialsFlowSnapshot` derives the families, :1067-1068 reuses unchanged partitions by input hash, and :1270 `buildFieldTrialsRelease` builds the release from named families only.
+    - src/lib/field-trials-refresh.ts:7 REFRESH_STEPS runs the snapshot daily, so the new family needs no new flag or cadence.
+    - src/lib/shadow-judge.ts:76 writes shadow_judge.paired rows today (review, risk, verify-human), so the family has live rows before any decision model is called.
+    - docs/research/model-evidence-program.md:56 trial 4, "Escalation and judge policy", already names calibration and abstentions as the measures for a judge. The document says nothing about decision models or surfaces.
+  design: |
+    1. Add src/lib/field-trials-judges.ts with `judgeTrialCells(rows, periodOf)`. It maps decision.answered, shadow_judge.paired and judge_replay rows to W1-T12414's recorded answers (with W1-T12420's model surface), calls `scoreTypedAnswers` per cell, and adds latency and settled-dollar medians from the rows.
+    2. In src/lib/field-trials-flow.ts add the three steps to a JUDGE_STEPS set that only `judgeTrialCells` reads, and add a `judges` family with partition input hashes like the other families. Add input digests and decision keys to privateKeys. Do not add the family to `releaseCells` or to the field-note input.
+    3. In docs/research/model-evidence-program.md add a section "Judge family": what it reads, its key (role, model and surface), its basis (live or replay), its measures, and that it is private until a reviewed site schema exists. Add the per-model calibration rule: a calibration and a threshold belong to one model on one surface.
+    NOT IN SCOPE: any site schema or release of judge figures; any gate, route or gardener reading the family; a randomized judge trial.
+  falsifier: |
+    Let a decision.answered row reach the adoption family and criterion 1 must fail. Pool two surfaces in one cell and criterion 2 must fail. Merge live and replay answers and criterion 3 must fail. Compute agreement here in place of the scorer and criterion 4 must fail. Add the family to the release cells and criterion 5 must fail. Restore and require all to pass.
+  note: |
+    Ids reserved for run-unfiled-1794497247000 with ~/rmd-work/bin/reserve-id.sh. Filed with W1-T12420, W1-T12421, W1-T12422 and W1-T12424.
+    OVERLAP: W1-T10832, W1-T10878, W1-T11119, W1-T11424 and W1-T11682 (all queued) also edit src/lib/field-trials-flow.ts. This task adds one family and one step set and changes no existing family.
+    The backlog item DOC is split over this task (docs/research/model-evidence-program.md) and W1-T12420 (docs/model-routing.md).
+    The test folder came from `rmd test-place` on a draft (models-routing, high).

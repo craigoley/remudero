@@ -2140,6 +2140,9 @@ export async function daemonCommand(
         // W1-T3528: same reasoning, different unit — this one frees regenerable build output
         // inside checkouts that must be kept, which every whole-tree rung is right to refuse.
         sweepReclaimableArtifacts: () => sweepReclaimableArtifacts(config, log),
+        // W1-T11941: provide the live checkout so the shadow janitor can enumerate its registered
+        // worktrees on each daemon tick. The janitor only reports candidates; it has no removal port.
+        worktreeRetire: { operatorCheckout: effectiveRepoRoot },
         // W1-T7093: maintain the worker-tree ledger on the same recurring heartbeat the reader
         // consumes. This is report-only bookkeeping; a failure never alters dispatch or workers.
         sweepHostMemoryReservations: () => {
