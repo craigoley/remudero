@@ -2415,6 +2415,27 @@ export function stagedTaskFiles(stateRoot: string): Array<{ relPath: string; prU
   return readStagedTaskFiles(stateRoot).map(({ relPath, prUrl }) => ({ relPath, ...(prUrl ? { prUrl } : {}) }));
 }
 
+/**
+ * W1-T12222: the `origin:` each waiting task file records. A file that waits for the landing PR holds its
+ * finding though no plan holds it yet, so a gardener that looks for a finding already filed reads these too.
+ * A file with no origin line holds no finding and is left out.
+ */
+export function stagedTaskFileOrigins(stateRoot: string): Array<{ relPath: string; origin: string }> {
+  const held: Array<{ relPath: string; origin: string }> = [];
+  for (const file of readStagedTaskFiles(stateRoot)) {
+    if (!existsSync(file.abs)) continue;
+    const origin = taskFileOrigin(readFileSync(file.abs, "utf8"));
+    if (origin !== "") held.push({ relPath: file.relPath, origin });
+  }
+  return held;
+}
+
+/** W1-T12222: the `origin:` line of a task file's text, unquoted; empty when it has none. */
+export function taskFileOrigin(text: string): string {
+  const raw = /^\s*(?:-\s+)?origin:[ \t]*(.*?)[ \t]*$/m.exec(text)?.[1] ?? "";
+  return /^".*"$/.test(raw) ? raw.slice(1, -1).replace(/\\(["\\])/g, "$1") : /^'.*'$/.test(raw) ? raw.slice(1, -1) : raw;
+}
+
 function writeStagedTaskFile(stateRoot: string, relPath: string, content: string | undefined, meta: StagedTaskFileMeta): void {
   const abs = join(taskFilesPendingRoot(stateRoot), relPath);
   mkdirSync(dirname(abs), { recursive: true });

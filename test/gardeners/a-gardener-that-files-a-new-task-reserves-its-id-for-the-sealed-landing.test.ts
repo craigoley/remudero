@@ -10,9 +10,9 @@ import { pathToFileURL } from "node:url";
 import { test, type TestContext } from "node:test";
 
 import { clockFromMillisFn } from "#src/lib/clock.js";
-import { isLandingRef, landTaskFilesAsync, stagedTaskFiles, taskFilesLandingBranchAsync } from "#src/lib/feedback-landing.js";
+import { isLandingRef, landTaskFilesAsync, stagedTaskFileOrigins, stagedTaskFiles, taskFilesLandingBranchAsync } from "#src/lib/feedback-landing.js";
 import {
-  gardenStatePath, initialGardenState, isGardenLandWaiting, prepareGardenTaskIds, runGardenAsync,
+  gardenStatePath, GARDEN_WAITING_FILING_PREFIX, initialGardenState, isGardenLandWaiting, landedPrUrl, prepareGardenTaskIds, releaseGardenTaskIds, runGardenAsync,
   type GardenAction, type GardenCheckout, type GardenerDeps, type GardenSpec, type GardenTaskIdMinter,
 } from "#src/lib/gardener.js";
 import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
@@ -21,7 +21,7 @@ import {
   formatReservationHolderLine, parseReservationHolderLine, RESERVATION_PUSH_GRACE_MS, reservationHolderDrift,
 } from "#src/lib/task-id-reservation.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
-import { daemonGardenWorkspace, gardenCheckoutAsync, type GardenCheckoutOpts, type GardenName } from "#test/helpers/run-task-test.js";
+import { daemonGardenWorkspace, GARDEN_NAMES, gardenCheckoutAsync, type GardenCheckoutOpts, type GardenName } from "#test/helpers/run-task-test.js";
 import { GIT_REPO_FIXTURE_IDENTITY, gitRepo } from "#test/helpers/git-repo.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
@@ -36,7 +36,7 @@ const gate = (await import(pathToFileURL(join(REPO_ROOT, "scripts", "task-id-exi
 
 const T0 = Date.parse("2026-11-12T12:00:00.000Z");
 const pathOf = (id: string): string => `plan/tasks.d/${id}-fixture.yaml`;
-const shard = (id: string): string => [`- id: ${id}`, "  repo: remudero", "  status: queued", "  attempts: 0", ""].join("\n");
+const shard = (id: string, origin = `fixture:${id}`): string => [`- id: ${id}`, "  repo: remudero", "  status: queued", "  attempts: 0", `  origin: ${JSON.stringify(origin)}`, ""].join("\n");
 const fileBody = (id: string): string => `File one task.\n\n## Acceptance\n- claim: the task ${id} is filed\n  proof: grep: id: ${id} in ${pathOf(id)}`;
 const GREEN: PlanPrPreflightResult = { ok: true, failures: [], unreadable: [] };
 const PROOF_RED: PlanPrPreflightResult = { ok: false, failures: [{ check: "proof-discrimination", firstLine: "the proof does not discriminate" }], unreadable: [] };
@@ -136,9 +136,9 @@ function world(t: TestContext, files: Record<string, string> = { "plan/tasks.yam
 }
 
 /** Reserve one id through the checkout, write its new task file, and land it. */
-async function fileOne(ws: Awaited<ReturnType<typeof gardenCheckoutAsync>>, mint: GardenTaskIdMinter) {
+async function fileOne(ws: Awaited<ReturnType<typeof gardenCheckoutAsync>>, mint: GardenTaskIdMinter, origin?: string) {
   const [id] = await prepareGardenTaskIds(ws, 1, mint, true);
-  writeFileSync(join(ws.root, pathOf(id!)), shard(id!));
+  writeFileSync(join(ws.root, pathOf(id!)), shard(id!, origin));
   const result = await withLiveWritesAllowed(() => ws.land({ paths: [pathOf(id!)], title: "chore(plan): file one task", body: fileBody(id!) }));
   return { id: id!, result };
 }
@@ -295,6 +295,49 @@ test("W1-T12222 criterion 6: a gardener does not file the same finding twice whi
   assert.deepEqual(w.ids.minted.map((m) => m.id), ["W1-T95001"], "the finding is still filed once");
 });
 
+test("W1-T12222 criterion 6: a waiting file holds its finding for every gardener that files through a checkout of task files only", async (t) => {
+  const w = world(t);
+  w.seal();
+  const finding = "selector-shadow-cause:test/a.test.ts";
+  const first = await gardenCheckoutAsync(w.checkoutOpts("selector-shadow", true));
+  let firstId = "";
+  try {
+    const filed = await fileOne(first, w.ids.mint, finding);
+    firstId = filed.id;
+    assert.ok(isGardenLandWaiting(filed.result), "the file waits behind the open landing PR");
+    // The gardens that read a land through `landedPrUrl` (flow, selector-shadow, flake-incident, host-resource) record
+    // the filing as made, so they do not offer the finding again; the reference names the file that waits.
+    assert.equal(landedPrUrl(filed.result, "selector shadow"), `${GARDEN_WAITING_FILING_PREFIX}${pathOf(firstId)}`);
+  } finally {
+    await first.dispose();
+  }
+  assert.deepEqual(stagedTaskFileOrigins(w.root), [{ relPath: pathOf(firstId), origin: finding }], "a search for a filed finding reads the staged file's origin");
+
+  // The same finding, offered again by a gardener whose own memory does not hold it, is not staged twice.
+  const second = await gardenCheckoutAsync(w.checkoutOpts("flow", true));
+  try {
+    const again = await fileOne(second, w.ids.mint, finding);
+    assert.equal(again.result, undefined, "the second file of the same finding is not landed");
+    assert.deepEqual(w.staged(), [`${firstId}-fixture.yaml`], "no second file is staged");
+    const refused = w.steps("flow.garden_sealed_landing").map((r) => [r.outcome, JSON.stringify(r.refused)]);
+    assert.deepEqual(refused, [["refused", JSON.stringify([{ path: pathOf(again.id), reason: `the finding ${finding} already waits in ${pathOf(firstId)}` }])]]);
+    await releaseGardenTaskIds(second, "the finding already waits", true);
+    assert.deepEqual(w.ids.released, [again.id], "its id goes back through the gardener's release path");
+  } finally {
+    await second.dispose();
+  }
+
+  // Another finding still files and waits.
+  const third = await gardenCheckoutAsync(w.checkoutOpts("flow", true));
+  try {
+    const other = await fileOne(third, w.ids.mint, "flow-regression:other");
+    assert.ok(isGardenLandWaiting(other.result), "a different finding waits beside the first");
+    assert.deepEqual(w.staged(), [`${firstId}-fixture.yaml`, `${other.id}-fixture.yaml`].sort());
+  } finally {
+    await third.dispose();
+  }
+});
+
 test("W1-T12222 criterion 7: a checkout that does not declare it opens its own pull request for a new task file, as it does today", async (t) => {
   const w = world(t);
   const ws = await gardenCheckoutAsync(w.checkoutOpts("gate", false));
@@ -316,11 +359,15 @@ test("W1-T12222 criterion 8: `daemonGardenWorkspace` declares the route for the 
   const ctx = { config: { root: w.root } as Parameters<typeof daemonGardenWorkspace>[0]["config"], repoRoot: w.repo.dir, owner: "acme", repo: "remudero",
     log: (step: string, extra: Record<string, unknown> = {}) => void w.rows.push({ ...extra, step }) };
   const landingBranch = await taskFilesLandingBranchAsync({ owner: "acme", repo: "remudero" });
-  // Every land of these four is a task file, and their pass is `runGardenAsync`, which holds a wait.
-  const declared: GardenName[] = ["ci-friction", "hot-file", "flow-remedy", "scout"];
-  // The gate gardener also lands ci-gate.yml rows. flow, selector-shadow (with flake-incident) and host-resource read
-  // a land through `landedPrUrl`, which refuses a wait, so they keep their own PR. plan files no new task.
-  const own: GardenName[] = ["gate", "flow", "selector-shadow", "host-resource", "plan"];
+  // Listed from the code: every gardener that reserves a task id and whose every land is a new file under plan/tasks.d.
+  // ci-friction, hot-file, flow-remedy and scout hold a wait in their state (`runGardenAsync`); flow, selector-shadow and
+  // host-resource read a land through `landedPrUrl`, which returns the reference of a waiting filing. The flake-incident
+  // gardener files through the selector-shadow checkout.
+  const declared: GardenName[] = ["ci-friction", "hot-file", "flow-remedy", "scout", "flow", "selector-shadow", "host-resource"];
+  // Every other gardener keeps its own branch: gate also lands .github/workflows/ci-gate.yml, and the rest edit task files
+  // they do not file, reserve no id, or land other files (knowledge, test, config, export, plan, machine-judge ...).
+  const own = GARDEN_NAMES.filter((name) => !declared.includes(name));
+  assert.equal(declared.length + own.length, GARDEN_NAMES.length);
   for (const name of [...declared, ...own]) {
     const ws = await daemonGardenWorkspace(ctx, name)();
     try {
@@ -337,5 +384,6 @@ test("W1-T12222 criterion 8: `daemonGardenWorkspace` declares the route for the 
     }
   }
   assert.deepEqual(w.heads(), ["main"], "no refused land pushed anything");
-  assert.deepEqual(w.steps("scout.garden_sealed_landing").map((r) => r.outcome), ["refused"]);
+  for (const name of declared) assert.deepEqual(w.steps(`${name}.garden_sealed_landing`).map((r) => r.outcome), ["refused"], `${name} logged its refusal`);
+  for (const name of own) assert.deepEqual(w.steps(`${name}.garden_sealed_landing`), [], `${name} landed nothing through the sealed landing`);
 });

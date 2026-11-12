@@ -818,6 +818,8 @@ import {
   type LandingReviewRequest,
   landTaskFilesAsync,
   stagedTaskFiles,
+  stagedTaskFileOrigins,
+  taskFileOrigin,
   taskFilesLandingBranchAsync,
   type LandTaskFilesOpts,
   type TaskFileInput,
@@ -27835,6 +27837,20 @@ function* sealedTaskFileInputs(root: string, paths: readonly string[], body: str
 
 /** W1-T12221: the landing PR when it carries every path, a wait when each path waits, else nothing. */
 function* landSealedTaskFiles(opts: GardenCheckoutOpts, paths: readonly string[], inputs: TaskFileInput[], land: NonNullable<GardenLandIo["landTaskFiles"]>): Steps<GardenLandResult> {
+  // W1-T12222: a waiting file holds its finding. A new file whose origin a file in the queue already records is the
+  // same finding filed twice, so it is not staged; the id it reserved goes back, as for any land that opens nothing.
+  if (opts.taskFilesOnly === true) {
+    const held = stagedTaskFileOrigins(opts.taskFilesLanding!.stateRoot);
+    const twice = inputs.flatMap((i) => {
+      const origin = i.newFile === true ? taskFileOrigin(i.content) : "";
+      const first = origin === "" ? undefined : held.find((h) => h.origin === origin && h.relPath !== i.relPath);
+      return first === undefined ? [] : [{ path: i.relPath, reason: `the finding ${origin} already waits in ${first.relPath}` }];
+    });
+    if (twice.length > 0) {
+      opts.log(`${opts.name}.garden_sealed_landing`, { outcome: "refused", paths, pr_url: null, refused: twice });
+      return undefined;
+    }
+  }
   const result = yield* step(() => land(inputs));
   const carried = paths.every((p) => result.landed.includes(p));
   const queued = paths.every((p) => result.landed.includes(p) || result.waiting.includes(p));
@@ -27844,7 +27860,7 @@ function* landSealedTaskFiles(opts: GardenCheckoutOpts, paths: readonly string[]
   const refused = [...result.refused, ...result.setAside].filter((r) => paths.includes(r.path)).map((r) => ({ path: r.path, reason: r.reason }));
   opts.log(`${opts.name}.garden_sealed_landing`, { outcome, paths, pr_url: outcome === "opened" ? result.prUrl : null, ...(refused.length ? { refused } : {}), ...(result.error ? { error: result.error } : {}) });
   if (outcome === "opened") return result.prUrl;
-  if (outcome === "waiting") return { waiting: { paths: paths.filter((p) => result.landed.includes(p) || result.waiting.includes(p)), stateRoot: opts.taskFilesLanding!.stateRoot } };
+  if (outcome === "waiting") return { waiting: { paths: paths.filter((p) => result.landed.includes(p) || result.waiting.includes(p)), stateRoot: opts.taskFilesLanding!.stateRoot, ...(opts.taskFilesOnly === true ? { filed: true as const } : {}) } };
   return undefined;
 }
 
@@ -27929,9 +27945,13 @@ export function daemonGardenWorkspace(ctx: Pick<GardenBuildContext, "config" | "
     taskFilesLanding: { stateRoot: ctx.config.root }, ...(TASK_FILES_ONLY_GARDENS.has(name) ? { taskFilesOnly: true } : {}) });
 }
 
-/** W1-T12222: the gardens whose every land is a task file and whose pass holds a wait (`runGardenAsync`). The
- *  others that file tasks read a land through `landedPrUrl`, which refuses a wait, so they keep their own PR. */
-const TASK_FILES_ONLY_GARDENS: ReadonlySet<GardenName> = new Set(["ci-friction", "hot-file", "flow-remedy", "scout"]);
+/** W1-T12222: the gardens whose every land is a new task file under plan/tasks.d, read from the code. The first four
+ *  hold a wait in their state (`runGardenAsync`); the last three read a land through `landedPrUrl`, which returns the
+ *  reference of a waiting filing, and each keeps its own memory of what it filed. The flake-incident gardener runs on
+ *  the selector-shadow checkout. Not listed: `gate` (it also lands .github/workflows/ci-gate.yml), and the gardens that
+ *  edit task files they do not file, reserve no id, or land other files: plan, backlog, redesign, queue-judge, test,
+ *  config, export, knowledge, machine-judge, review-replay, fix-lane. */
+const TASK_FILES_ONLY_GARDENS: ReadonlySet<GardenName> = new Set(["ci-friction", "hot-file", "flow-remedy", "scout", "flow", "selector-shadow", "host-resource"]);
 
 /** One pass of one garden; it logs its own failure under the garden's own step name and never throws. */
 export type RegisteredGardenPass = (() => void | Promise<void>) & { due?: () => boolean | Promise<boolean> };
@@ -28275,7 +28295,8 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
       const sources: HotFileGardenSources = {
         ledgerRecords: () => readCiFrictionLedgerRecords(stateDir),
         mainHistory: (sinceIso) => readMainHistory(repoRoot, sinceIso),
-        planOrigins: () => loadPlan(resolveRepoLayout(repoRoot).planMonolith).tasks.map((t) => t.origin).filter((o): o is string => typeof o === "string"),
+        // W1-T12222: a file that waits for the landing holds its finding, so its origin counts as filed.
+        planOrigins: () => [...loadPlan(resolveRepoLayout(repoRoot).planMonolith).tasks.map((t) => t.origin).filter((o): o is string => typeof o === "string"), ...stagedTaskFileOrigins(config.root).map((s) => s.origin)],
         mintTaskId: ciLearningTaskIdMinter(repoRoot, log, undefined, mintOptions),
         fileExists: (file) => existsSync(join(repoRoot, file)),
       };
@@ -28310,7 +28331,7 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
         handoff: (h: { id: string; raw: string; origin: string }) => void stageFeedbackCapture(repoRoot, config.root, { id: h.id, raw: h.raw, origin: h.origin as FeedbackOrigin }),
         openIncidentOrigins: () => openIncidentFeedbackOrigins(repoRoot, config.root),
         escalate: raiseDuplicate,
-        planOrigins: () => loadPlan(resolveRepoLayout(repoRoot).planMonolith).tasks.map((t) => t.origin).filter((o): o is string => typeof o === "string"),
+        planOrigins: () => [...loadPlan(resolveRepoLayout(repoRoot).planMonolith).tasks.map((t) => t.origin).filter((o): o is string => typeof o === "string"), ...stagedTaskFileOrigins(config.root).map((s) => s.origin)],
         fileConsumer: fileConsumerVia(daemonGardenWorkspace(ctx, "host-resource"), mintTaskId, log),
       };
       const paced = lowYieldGardenPass(stateDir, "host-resource", () => runHostResourcePassAsync(ports).then(() => {}), {
