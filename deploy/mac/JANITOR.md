@@ -14,7 +14,9 @@ six-hour guards, per-account locks and schedules. Do not widen home-directory
 permissions to make a cross-account launcher work. `--shared-root PATH` installs
 the identical layout under an alternate absolute root for testing.
 
-Run `~/bin/remudero-janitor.sh --dry-run` before `--apply`.
+Run the installed janitor with `--dry-run` before `--apply`. On the agent account it is
+`"$HOME/Library/Application Support/remudero/remudero-janitor.sh" --dry-run` (installed as
+shown below); `~/bin/remudero-janitor.sh` exists only where the default layout was installed.
 
 The agent account's hourly `:17` job uses
 `/Users/craigoleyagent/Library/Application Support/remudero/tmp-reclaim.sh`.
@@ -32,6 +34,38 @@ This copies the maintained helper and its guards without changing schedules.
 `install-tmp-reclaim.sh` is the separate schedule installer. Source tests and a merge
 establish source behavior; installation convergence and live cache reclamation need
 separate observations from the installed helper.
+
+## The installed copies refresh themselves
+
+Each installer writes `install-source` last, in the folder it installed: the checkout
+it ran from (the main repository, also when it ran from a linked worktree), the layout
+(`home-bin`, `shared` or `application-support`) and the checkout's `origin` URL.
+
+At the end of each scheduled pass, `remudero-janitor.sh` and `tmp-reclaim.sh` compare
+every file of their layout with the same file at `origin/main` of that checkout. When a
+file differs, the pass writes the files of `origin/main` to a new temporary folder with
+`git archive` and runs the installer of the layout from there with `--code-only`. The
+log shows one line per replaced file with the old and the new Git blob hash, then
+`janitor refresh: installed <n> files from <commit>`. The pass finishes with the code it
+started with; the next pass runs the new code.
+
+The refresh never runs `git fetch` and never copies a file from the working tree. It
+uses `origin/main` as the checkout last fetched it, so the refresh is only as new as that
+fetch. `--code-only` changes no crontab line, no launchd job, no shared launcher and no
+`install-source` record. A dry run prints `janitor refresh: would replace ...` and changes
+nothing.
+
+The refresh keeps every installed file and prints `janitor refresh: kept (<cause>)` when
+the record is missing or incomplete, the folder or the checkout belongs to another account,
+the checkout's `origin` is not the recorded URL or not `craigoley/remudero`, `origin/main`
+cannot be read, a file of the layout is missing at `origin/main`, or the installer at
+`origin/main` has no `--code-only` mode. A shared folder therefore refreshes only in the
+passes of the account that owns it.
+
+A merge starts nothing on an account where no installer has run since this change: run
+the installer of each layout once, and that writes the record. Run it from the checkout
+that stays and is fetched (`~/Remudero/remudero`), not from a clone that you delete later:
+a record that names a deleted checkout keeps every file.
 
 The temporary cleaner appends `/usr/sbin:/sbin` to the caller's PATH so cron can
 find macOS `lsof`; it never changes caller precedence or adds user package bins.

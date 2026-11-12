@@ -271,6 +271,8 @@ test("W1-T9549: the awaited review arm keeps the sync gate order and rows", asyn
 
 
 const sharedFailureHead = "90be1a69eaea5510184cf6eec69f7c72afd13c39";
+// W1-T11847: a reused verdict posts only while the reviewer code that judged it is current at origin/main.
+const sharedReviewerCode = "c".repeat(40);
 const sharedFailureBody = `**remudero-review=failure**\n\n1. laneTarget's CPU bound is measured\n   - proof executed and PASSED on the PR head — NOTE: reviewer judged the proof non-responsive: an in-memory runDaemon replay adopting a review child in shadow mode throws ReferenceError at daemon.ts:4218. The proof omits review-child adoption.`;
 const sharedHistory = [{ context: "remudero-review", state: "failure" }, { context: "remudero-review", state: "success" }];
 const sharedComputed = {
@@ -314,11 +316,12 @@ test("W1-T11443 criteria 1/2: direct sweep and dependency publishers guard exact
           } else {
             const prior = { ...sharedComputed, criteria: [{ ...sharedComputed.criteria[0], proof: "grep: laneTarget in src/changed.ts" }] };
             ledger.append([{ run_id: "prior", task_id: "W1-T11443", step: "review.posted", state: "success",
-              head_sha: "older-head", pr_url: prUrl, decision_verdict: prior }]);
+              head_sha: "older-head", pr_url: prUrl, decision_verdict: prior, reviewer_code_sha: sharedReviewerCode }]);
             const effects = buildSweepEffects({ owner: "acme", repo: "remudero", localRepoName: "other",
               config: { root: ledger.dir } as never, ledgerPath: ledger.path, runId: "direct-history",
               plan: { tasks: [], byId: new Map() } as never, log: () => {},
               reviewRunner: async () => { assert.fail("direct publishing must not fall back to a full review"); },
+              reviewerCodeFreshnessImpl: () => ({ status: "fresh", codeSha: sharedReviewerCode, originMainSha: sharedReviewerCode, advance: "none" }),
               materializeReviewWorktreeImpl: () => ({ worktreePath: "/head" }),
               buildBaseProofDirImpl: () => ({ baseCheckoutDir: "/base", baseUnreadablePaths: new Set(), baseIsCheckout: true, addedTestFiles: new Set() }),
               reviewReuseExecProofImpl: (_proof, cwd) => cwd === "/head" ? "pass" : "fail",

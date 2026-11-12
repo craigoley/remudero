@@ -176,7 +176,18 @@ STATE_BACKUP_DIR="${RMD_STATE_BACKUP_DIR:-${STATE_DIR}/state-backups}"
 # and `assertWorkerCredentialFile`'s own comment names the assumption that breaks: "An EXPIRED token
 # is reported and allowed through: there is nothing to re-provision from on this platform, the CLI
 # maintains its own refresh." Mount the directory read-write and the refresh works.
-CRED_DIR="${RMD_CLAUDE_DIR:-${HOME:-/root}/.claude}"
+# W1-T12360: the same derivation recycle-container.sh and serve-container.sh source.
+CLAUDE_DIRECTORY_FILE="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd)/claude-directory.sh" || true
+[ -r "${CLAUDE_DIRECTORY_FILE}" ] || CLAUDE_DIRECTORY_FILE="${PWD}/deploy/claude-directory.sh"
+if [ ! -r "${CLAUDE_DIRECTORY_FILE}" ]; then
+  echo "host-update: REFUSING — no deploy/claude-directory.sh beside this script or under ${PWD}." >&2
+  exit 2
+fi
+# shellcheck source=./claude-directory.sh
+source "${CLAUDE_DIRECTORY_FILE}"
+CRED_DIR="$(claude_host_directory)"
+CLAUDE_ACCOUNT_FILE="$(claude_host_account_file)"
+CLAUDE_ACCOUNT_MOUNT_DEST="/home/node/.rmd-claude-account.json"
 # The container-side path the credential must land on: `config.root` derives from HOME (Dockerfile
 # REQ 10), so the worker home's `.claude` symlink grant resolves to exactly this.
 CRED_MOUNT_DEST="/home/node/.claude"
@@ -286,6 +297,12 @@ if [ "${PRINT_DAEMON_RUN}" -eq 1 ]; then
   else
     echo "host-update: NOTE — no Codex home at ${CODEX_DIR}; the printed daemon stays Claude-only." >&2
     echo "  Authenticate it first or set RMD_CODEX_DIR; no empty root-owned bind directory will be created." >&2
+  fi
+  CLAUDE_ACCOUNT_MOUNT_LINE=""
+  if [ -f "${CLAUDE_ACCOUNT_FILE}" ]; then
+    printf -v CLAUDE_ACCOUNT_MOUNT_LINE '    -v %s:%s:ro \\\n' "${CLAUDE_ACCOUNT_FILE}" "${CLAUDE_ACCOUNT_MOUNT_DEST}"
+  else
+    echo "host-update: NOTE — no Claude account file at ${CLAUDE_ACCOUNT_FILE}; printing the daemon without an account file mount" >&2
   fi
   CONTAINER_CONFIG_MOUNT_LINE=""
   if [ -d "${CONTAINER_CONFIG_DIR}" ]; then
@@ -522,7 +539,7 @@ ${SCRATCH_MKDIR_LINE}
     -e RMD_INSTANCE_REGISTRY_FILE_BINDING \\
 ${CODEX_MOUNT_LINE}${CODEX_SESSIONS_LINE}${CONTAINER_CONFIG_MOUNT_LINE}    -v ${STATE_DIR}:${STATE_MOUNT_DEST} \\
     -v ${CRED_DIR}:${CRED_MOUNT_DEST} \\
-${DAEMON_SCRATCH_LINES}    ${REF} \\
+${CLAUDE_ACCOUNT_MOUNT_LINE}${DAEMON_SCRATCH_LINES}    ${REF} \\
     ./bin/rmd daemon --repo ${DAEMON_REPO} --allow-self-target
 
   # THE CONSOLE, IF WANTED, IS A SEPARATE CONTAINER WITH A DIFFERENT POLICY. serve returns 0 on a
