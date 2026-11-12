@@ -1102,7 +1102,7 @@ import {
   writeFeedbackDocketMarker,
   type FeedbackDocket,
 } from "./lib/feedback-docket.js";
-import { parseUsage, usageSnapshotFromSdk, type SdkUsageReading, type UsageSnapshot } from "./lib/headroom.js";
+import { parseUsage, usageOutputShape, usageSnapshotFromSdk, type SdkUsageReading, type UsageSnapshot } from "./lib/headroom.js";
 import {
   aggregateCitationEvidence,
   assertArchitectAboveWorker,
@@ -2990,7 +2990,7 @@ import { branchCitationPattern, branchNamesFingerprint, decideAutomaticBranchRea
 // were not exported before this move and stay that way, used here under their original names.
 import { repoRoot, resolveOwnerRepo, resolveRepoRoot } from "./lib/repo-location.js";
 import { resolveVerbPlanRoot, type VerbPlanRoot } from "./lib/repo-location.js";
-import { refusalExcerptFromFixReport, taskAwaitsAmendment } from "./lib/refusal-amendment.js";
+import { planAmendmentReceipt, refusalExcerptFromFixReport, taskAwaitsAmendment } from "./lib/refusal-amendment.js";
 import { fetchPrDiff, ghPrDiffAsync, prDiffSourceAsync } from "./lib/pr-diff.js";
 import { boundGitCall, fetchOriginRetryingRefLock, fetchOriginRetryingRefLockAsync, GATEWAY_FETCH_TIMEOUT_MS, GIT_FETCH_KILL_GRACE_MS, killAfterGrace, type AsyncGitRunner } from "./lib/git-fetch-retry.js";
 import { asOwnerRepoUnresolvable, resolveOwnerRepoAt, resolveOwnerRepoAtAsync } from "./lib/owner-repo.js";
@@ -3143,8 +3143,7 @@ export function buildEscalationTriageRuntime(
               { run_id: deps.runId, task_id: e.taskId, step, ...extra }) });
           const [result] = await effects.draftRefusalAmendments!([{ taskId: e.taskId, runId: e.runId ?? deps.runId,
             reportExcerpt: e.detail, refusals: [{ criterion: 1, refusalClass: "proof-unexecutable-at-head", detail: e.summary }] }]);
-          if (result === undefined || !result.prUrl) throw new Error(`amendment not opened: ${result?.outcome ?? "unavailable"}`);
-          return `${result.prUrl} proposes the proof amendment; decline the PR to undo`;
+          return planAmendmentReceipt(e.taskId, result);
         },
         rekick_once: (e) => {
           if (io.kick) io.kick(e);
@@ -24049,10 +24048,11 @@ export const defaultAsyncUsageProbeRunner: AsyncUsageProbeRunner = async (bin, a
  * those have three different fixes: an SDK upgrade renamed the method, the session refused, or
  * the credential legitimately has no plan limits.
  */
-export type UsageProbeFailureStage = "spawn" | "parse" | "grant" | "sdk";
+export type UsageProbeFailureStage = "spawn" | "parse" | "grant" | "sdk" | "weekly-only";
 
-/** Injected sink for that failure — the real caller gets {@link ledgerUsageProbeFailure}. */
-export type UsageProbeFailureSink = (stage: UsageProbeFailureStage, reason: string) => void;
+/** Injected sink for that failure — the real caller gets {@link ledgerUsageProbeFailure}.
+ *  `shape` is {@link usageOutputShape} of the CLI output, for the parse and weekly-only stages. */
+export type UsageProbeFailureSink = (stage: UsageProbeFailureStage, reason: string, shape?: string) => void;
 
 /**
  * How much of the failure message reaches the ledger. Generous enough for the whole of a real
@@ -24079,7 +24079,7 @@ const USAGE_PROBE_REASON_MAX = 400;
  * the reason a best-effort read becomes a crash — if the ledger is unwritable, the caller still
  * gets its `undefined` and the drain still continues.
  */
-export function ledgerUsageProbeFailure(config: Config, stage: UsageProbeFailureStage, reason: string): void {
+export function ledgerUsageProbeFailure(config: Config, stage: UsageProbeFailureStage, reason: string, shape?: string): void {
   try {
     appendLedger(ledgerPathFor(config), {
       run_id: "USAGE-PROBE",
@@ -24087,6 +24087,7 @@ export function ledgerUsageProbeFailure(config: Config, stage: UsageProbeFailure
       step: "usage.probe_failed",
       stage,
       reason: reason.slice(0, USAGE_PROBE_REASON_MAX),
+      ...(shape !== undefined ? { shape: shape.slice(0, USAGE_PROBE_REASON_MAX) } : {}),
     });
   } catch {
     // Diagnostics are never worth a throw on this path.
@@ -24229,7 +24230,7 @@ export async function readUsageSnapshotPreferSdk(
     viaCli?: (onUnreadable: UsageProbeFailureSink) => UsageSnapshot | undefined | Promise<UsageSnapshot | undefined>;
   } = {},
 ): Promise<UsageSnapshot | undefined> {
-  const sink: UsageProbeFailureSink = (stage, reason) => ledgerUsageProbeFailure(config, stage, reason);
+  const sink: UsageProbeFailureSink = (stage, reason, shape) => ledgerUsageProbeFailure(config, stage, reason, shape);
   const viaSdk = deps.viaSdk ?? ((s) => readUsageSnapshotViaSdk(undefined, s, { onCredentialSeed: usageCredentialSink(config) }));
   // W1-T5719: the CLI fallback is AWAITED off the loop, never an `execFileSync` on it.
   const viaCli = deps.viaCli ?? ((s) => readUsageSnapshotAsync(config, defaultAsyncUsageProbeRunner, s));
@@ -24287,7 +24288,7 @@ function prepareUsageProbeEnv(config: Config, onUnreadable: UsageProbeFailureSin
 export function readUsageSnapshot(
   config: Config,
   runUsageProbe: UsageProbeRunner = defaultUsageProbeRunner,
-  onUnreadable: UsageProbeFailureSink = (stage, reason) => ledgerUsageProbeFailure(config, stage, reason),
+  onUnreadable: UsageProbeFailureSink = (stage, reason, shape) => ledgerUsageProbeFailure(config, stage, reason, shape),
 ): UsageSnapshot | undefined {
   let out: string;
   // ── SPAWN. Its own try, ending at the probe call — see the two-try note below. ───────────
@@ -24323,12 +24324,18 @@ export function readUsageSnapshot(
 /** The PARSE half, in its own try so a successful read that cannot be understood is `"parse"`,
  *  never `"spawn"`. Shared by the sync and async readers so the two cannot drift. */
 function parseUsageReporting(out: string, onUnreadable: UsageProbeFailureSink): UsageSnapshot | undefined {
+  let snap: UsageSnapshot;
   try {
-    return parseUsage(out);
+    snap = parseUsage(out);
   } catch (e) {
-    onUnreadable("parse", String((e as Error)?.message ?? e));
+    onUnreadable("parse", String((e as Error)?.message ?? e), usageOutputShape(out));
     return undefined;
   }
+  // W1-T12153: a readable snapshot with no session window. The row names the case; the weekly windows bind.
+  if (!snap.session) {
+    onUnreadable("weekly-only", "no 'Current session:' line in /usage output; read the weekly windows only", usageOutputShape(out));
+  }
+  return snap;
 }
 
 /**
@@ -24340,7 +24347,7 @@ function parseUsageReporting(out: string, onUnreadable: UsageProbeFailureSink): 
 export async function readUsageSnapshotAsync(
   config: Config,
   runUsageProbe: AsyncUsageProbeRunner = defaultAsyncUsageProbeRunner,
-  onUnreadable: UsageProbeFailureSink = (stage, reason) => ledgerUsageProbeFailure(config, stage, reason),
+  onUnreadable: UsageProbeFailureSink = (stage, reason, shape) => ledgerUsageProbeFailure(config, stage, reason, shape),
   timeoutMs: number = USAGE_PROBE_TIMEOUT_MS,
 ): Promise<UsageSnapshot | undefined> {
   let out: string;

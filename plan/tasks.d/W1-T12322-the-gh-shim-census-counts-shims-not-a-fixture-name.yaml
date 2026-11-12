@@ -1,0 +1,48 @@
+- id: W1-T12322
+  title: "The gh shim census counts shims, not a fixture directory named gh"
+  repo: remudero
+  depends_on: []
+  priority: 0.9
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: low # a census counter in a script and its own test; a wrong rule only changes one ratchet count
+  band_meaning: blast-radius
+  origin: operator-session#gh-shim-census-false-positive-2026-11-11
+  plan_refs:
+    - W1-T2903
+    - W1-T12233
+  files:
+    - scripts/fixture-copy-census.mjs
+    - test/fixture-copy-census.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "A test file whose only quoted `\"gh\"` is the fixture-directory name in `ownedFixtureDir(t, \"gh\")` is not counted in `ghPathShimFiles`, even when the file also calls `writeFileSync` and names `PATH`"
+      proof: 'grep: test("W1-T12322: a fixture directory named gh is not a gh shim in test/fixture-copy-census.test.ts'
+    - claim: "A test file that writes a `gh` script into a directory, makes it executable and puts that directory on `PATH` is still counted, also when the same file calls `ownedFixtureDir(t, \"gh\")`"
+      proof: 'grep: test("W1-T12322: a hand-built gh shim is still counted beside a fixture directory named gh in test/fixture-copy-census.test.ts'
+    - claim: "On the real `test/` tree the census counts the same files as before this change, and the baseline file `scripts/fixture-copy-baseline.json` is unchanged"
+      proof: 'grep: test("W1-T12322: the real tree counts the same gh shim files as before in test/fixture-copy-census.test.ts'
+    - claim: "The census rule removes a fixture-directory name before it looks for a quoted `\"gh\"`"
+      proof: "grep: ownedFixtureDir in scripts/fixture-copy-census.mjs"
+  rationale: |
+    MEASURED 2026-11-11 on the Azure host.
+    - `isGhPathShimFile` (scripts/fixture-copy-census.mjs, about line 53) counts a test file as a hand-built gh PATH shim when the file has three things anywhere: a quoted `"gh"`, a `chmod` or `writeFileSync`, and the text `PATH`. The three need not be related.
+    - The hand build of W1-T12233 (/mnt/scratch/rmd/hand/wt-T12233, commit aed6f1c3b) adds `ownedFixtureDir(t, "gh").dir` to test/ledger/pr-state-answers-from-the-ledger-before-github.test.ts. There `"gh"` is the name prefix of a temp directory. The file already uses the shared `ghShim` from test/helpers/gh-shim.ts, and it already had `writeFileSync` and `PATH`. It builds no shim.
+    - So `ghPathShimFiles` reads 92 against the baseline of 91, and the author preflight refuses the W1-T12233 branch.
+    - At origin/main fc2454b7d, `countFixtureCopies` gives `ghPathShimFiles` 91, which is the baseline. On the W1-T12233 tree it gives 92. The one added file is the test file above. No other file under `test/` calls `ownedFixtureDir` with `"gh"`.
+    - A trial rule that removes each `ownedFixtureDir(<scope>, "gh"` before it looks for a quoted `"gh"` counts the same 91 files at origin/main, and 91 on the W1-T12233 tree. Only the W1-T12233 test file drops out.
+    CHECKED, NOT CHOSEN: a rule that counts only shim-building shapes (`join(<dir>, "gh")`, a path that ends in `bin/gh`, `withShimmedPath("gh"`) changes three files at origin/main. It drops test/headroom-park-ceiling.test.ts (it names `execFileSync("gh"` and removes `PATH`) and test/onboard-recon.test.ts (it reads a fixture directory named gh). It adds test/the-azure-janitor-reclaims-agent-worktrees-codex-logs-and-scratch.test.ts (it writes `bin/gh`). Those may be right, but they change what the census counts today. This task changes only the fixture-directory case. A later task can take up the other three.
+  design: |
+    1. In `isGhPathShimFile` (scripts/fixture-copy-census.mjs), look for the quoted `"gh"` in the file text after each fixture-directory name is removed. A fixture-directory name is a quoted `"gh"` or `'gh'` that is the second argument of `ownedFixtureDir(`, for example `ownedFixtureDir(t, "gh")`. Keep the other two parts (`chmod` or `writeFileSync`, and `PATH`) as they are.
+    2. A file that also has a quoted `"gh"` anywhere else (a shim path such as `join(bin, "gh")`, or `execFileSync("gh"`) is counted as today. The rule only removes the fixture-directory name. It adds no new way to be counted.
+    3. Update the comment above `isGhPathShimFile` in plain language: what counts, and that a fixture-directory name does not.
+    4. In test/fixture-copy-census.test.ts, add three tests with the titles in the acceptance proofs, one per criterion. Drive `countFixtureCopies` on a synthetic tree (the `fixtureTree` helper in that file) for criteria 1 and 2. For criterion 3, run the rule over the real tree and compare the counted list with the list the old three-part rule gives. Expect no file that the old rule does not count. Every file that the old rule counts and the new rule drops must name `"gh"` only as a fixture-directory name: each quoted `"gh"` in it is the second argument of `ownedFixtureDir(`. At origin/main no file drops out. Do not pin the dropped list to empty: W1-T12233 adds one such file, and a test that pins an empty list would refuse that branch. Keep the existing test "isGhPathShimFile requires BOTH ..." unchanged.
+    5. Do not change scripts/fixture-copy-baseline.json. Do not change any other test file.
+    NOT IN SCOPE: the three files named in the rationale, other signatures of the census, and test/helpers/owned-fixture-dir.ts.
+  falsifier: |
+    Remove the fixture-directory step and criterion 1 must fail: the synthetic file with only `ownedFixtureDir(t, "gh")`, `writeFileSync` and `PATH` is counted again. Remove every quoted `"gh"` test instead (count on `chmod` or `writeFileSync` and `PATH` alone) and criterion 3 must fail. Make the rule drop any file that calls `ownedFixtureDir` and criterion 2 must fail. Restore and require all three tests to pass, and `ghPathShimFiles` to read 91 at origin/main and 91 with the W1-T12233 change.
+  note: |
+    W1-T12233 depends on this task: its author preflight refuses the branch until the census stops counting `ownedFixtureDir(t, "gh")` as a shim.
