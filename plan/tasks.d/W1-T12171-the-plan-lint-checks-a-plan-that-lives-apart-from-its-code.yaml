@@ -18,6 +18,9 @@
     - src/run-task.ts
     - src/lib/task-linter.ts
     - test/plan/the-plan-lint-checks-a-plan-that-lives-apart-from-its-code.test.ts
+  # refusal-amendment (W1-T12171, run work-fix-dispatch-W1-T12171-1794458069721-f730@b5a5cf6b9495ee598534c20add69b3667a7b6557, 2026-11-12T05:25:11.125Z): the worker refused criterion 1 [needs-operator-input] — proposed add-precondition: record the operator decision the worker needs as a precondition, then re-dispatch
+  #   worker evidence: The only remedy is a PR-body edit, which needs `gh` or REST access that this no-shell round doesn't have.
+  #   this task is held from dispatch until its record changes; an Architect must make the change above
   status: queued
   attempts: 0
   acceptance:

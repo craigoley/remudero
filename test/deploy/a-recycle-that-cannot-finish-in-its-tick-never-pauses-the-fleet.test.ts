@@ -158,12 +158,12 @@ test("W1-T12247 criterion 2: a forced recycle that does not fit runs no script a
   assert.equal(f.scripts.length, 0, "the script runner was never called");
   assert.equal(existsSync(f.pause), false, "no pause file exists");
   assert.equal(result.deployed, false);
-  assert.match(result.reason, /^restart-refused: recycle not started: it does not fit the deploy step/);
+  // W1-T12294: a recycle that does not fit is deferred to a later tick, not refused.
+  assert.match(result.reason, /^restart-deferred-fit: recycle not started: it does not fit the deploy step/);
   assert.match(result.reason, new RegExp(`wait is ${DERIVED_WAIT_S} s`));
   assert.match(result.reason, /step ends in \d+ s/);
-  const refused = f.rows.find((r) => r.step === "deploy.restart_refused");
-  assert.equal(refused?.data.backend, "recycle-container");
-  assert.equal(c.alerts.length, 1);
+  assert.equal(f.rows.some((r) => r.step === "deploy.restart_refused"), false);
+  assert.equal(c.alerts.length, 0);
 });
 
 test("W1-T12247 criterion 3: a recycle that fits runs the script with the derived wait", (t) => {
@@ -209,25 +209,19 @@ test("W1-T12247 criterion 4: with no limit from the tick, or an unreadable one, 
 });
 
 test("W1-T12247 criterion 5: a recycle that does not fit tick after tick is reported as persisting, then escalated", (t) => {
+  // W1-T12294 reverses this criterion: a recycle that does not fit is deferred, so it never counts toward the
+  // refusal streak and never escalates.
   const f = fixture(t);
   environment(t, { stepEndsAt: endsIn(2000) });
   const c = cycle(f);
-  c.run();
+  for (const left of [2000, 1234, 77]) {
+    process.env.RMD_DEPLOY_STEP_ENDS_AT = endsIn(left);
+    assert.match(c.run().reason, /^restart-deferred-fit:/);
+  }
   assert.equal(f.rows.some((r) => r.step === "deploy.refusal_persisting"), false);
-  assert.equal(c.streak()?.count, 1);
-  // The time left differs from tick to tick; the count must still read it as the same reason.
-  process.env.RMD_DEPLOY_STEP_ENDS_AT = endsIn(1234);
-  c.run();
-  const persisting = f.rows.filter((r) => r.step === "deploy.refusal_persisting");
-  assert.equal(persisting.length, 1);
-  assert.equal(persisting[0]!.data.count, 2);
-  assert.equal(persisting[0]!.data.instance, "core");
   assert.equal(f.rows.some((r) => r.step === "deploy.refusal_escalated"), false);
-  process.env.RMD_DEPLOY_STEP_ENDS_AT = endsIn(77);
-  c.run();
-  const escalated = f.rows.filter((r) => r.step === "deploy.refusal_escalated");
-  assert.equal(escalated.length, 1);
-  assert.deepEqual(escalated[0]!.data, { instance: "core", count: 3, issue: "https://example.invalid/issues/1" });
+  assert.equal(c.streak(), undefined);
+  assert.equal(c.alerts.length, 0);
   assert.equal(f.rows.filter((r) => r.step === STEP && r.data.fits === false).length, 3);
   assert.equal(f.scripts.length, 0);
   assert.equal(existsSync(f.pause), false);
