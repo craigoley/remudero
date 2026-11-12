@@ -17,6 +17,7 @@
   files:
     - src/cli/commands/sweep.ts
     - src/cli/commands/daemon.ts
+    - src/run-task.ts
     - test/daemon/the-light-pass-plan-merge-budget-takes-the-daemons-bound.test.ts
   status: queued
   attempts: 0
@@ -37,6 +38,7 @@
     1. In `buildSweepLightHook`, add `sweepWallClockBoundMs?: number` to the `io` argument. Build one policy for the hook: `DEFAULT_SWEEP_POLICY` when the field is absent, else `{ ...DEFAULT_SWEEP_POLICY, sweepWallClockBoundMs: io.sweepWallClockBoundMs }`. Pass that policy wherever the hook passes `DEFAULT_SWEEP_POLICY` today, also to `buildSweepEffects`.
     2. In `daemonCommand`, pass `{ sweepWallClockBoundMs: opts.sweepWallClockBoundMs }` as the `io` argument of the `buildSweepLightHook` call. If another task has already put an `io` object there (W1-T12236 adds `openPrViews`), add the field to that object.
     3. Add the test file named in `files`, one test per criterion with the exact titles in the proofs. For criterion 2, drive `daemonCommand` with a policy file whose bound differs from the default, give the light pass a measured interval longer than half of that bound, and read `plan_merge_budget_ms` on the pass's `sweep.summary` row (the field W1-T12267 writes). It must be half of the changed bound. Assert the row, not a source text.
+    4. In `src/run-task.ts`, add `sweepWallClockBoundMs?: number` to `LightPassReadPorts`, the `io` type of the run-task `buildSweepLightHook` wrapper the daemon calls, so the field is typed from the daemon to the hook.
     NOT IN SCOPE: the full sweep hook, the value in plan/policy.yaml, and how the budget is measured.
   falsifier: |
     Pass `DEFAULT_SWEEP_POLICY` again in the hook and criteria 1 and 2 must fail. Drop the field from the daemon's call and criterion 2 must fail. Make the hook require the field and criterion 3 must fail.
