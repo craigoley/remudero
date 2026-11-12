@@ -4075,7 +4075,7 @@ export async function sendCashRequest(config: Config, input: CashTransportOption
   if (resolved.protocol !== "https:" || resolved.origin !== base.origin || !resolved.pathname.startsWith(base.pathname))
     return failed("not-ready", "cash path must stay under the deployment endpoint");
   const endpoint = resolved.toString();
-  const azureOpenAi429Unbilled = unbilledAzureOpenAi429Policy(input.deployment, endpoint);
+  let azureOpenAi429Unbilled = false;
   const prefix = `${input.source}-${startedAt}-${randomUUID()}`;
   const requestBodyBytes = Buffer.byteLength(input.body, "utf8");
   const usageUsd = (envelope: unknown): number | undefined => {
@@ -4091,6 +4091,7 @@ export async function sendCashRequest(config: Config, input: CashTransportOption
   };
   let attempts = 0;
   try {
+    azureOpenAi429Unbilled = unbilledAzureOpenAi429Policy(input.deployment, endpoint);
     const { envelope } = await cashRequestJson<CashBudgetAttempt>({
       args: input, deployment: input.deployment, source: input.source, endpoint, body: input.body,
       outputTokenCeiling: input.outputTokenCeiling,
@@ -4133,6 +4134,7 @@ export async function sendCashRequest(config: Config, input: CashTransportOption
     if (absent) markOpenWeightDeploymentAbsent(input.deployment, clock.now());
     const detail = error instanceof Error ? error.message : String(error);
     if (pending) settle(pending, { ...(absent ? { actualUsd: 0, unbilled: true } : {}), reason: detail });
+    if (error instanceof OpenWeightUnpricedDeploymentError) return failed("not-ready", detail);
     if (error instanceof OpenWeightAllowanceExhaustedError) return failed("budget-refused", detail);
     if (absent) return failed("deployment-absent", detail, 404);
     if (error instanceof OpenWeightRequestTimeoutError) return failed("timeout", detail);

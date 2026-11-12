@@ -111,6 +111,24 @@ test("W1-T12413 criterion 1: absolute caller URLs and paths escaping the deploym
   }
 });
 
+test("W1-T12413 criterion 1: an unpriced deployment returns not-ready without sending or reserving", async (t) => {
+  const { dir, config } = fixture(t);
+  const deployment = "w1-t12413-unpriced-fixture";
+  assert.equal(Object.hasOwn(OPENWEIGHT_PRICES, deployment), false);
+  let calls = 0;
+  const outcome = await sendCashRequest(config, { deployment, path: "openai/v1/decisions", body: BODY,
+    source: "fixture", outputTokenCeiling: 16, env,
+    fetchImpl: async () => { calls++; return reply(); } });
+  assert.equal(outcome.ok, false);
+  if (outcome.ok) return;
+  assert.equal(outcome.reason, "not-ready");
+  assert.equal(outcome.reservedUsd, 0);
+  assert.equal(outcome.settledUsd, 0);
+  assert.equal(outcome.heldUsd, 0);
+  assert.equal(calls, 0);
+  assert.equal(existsSync(join(dir, "state", OPENWEIGHT_ALLOWANCE_FILENAME)), false);
+});
+
 test("W1-T12413 criterion 2: the reservation counts the declared output ceiling, and a worker reservation costs the same as before", (t) => {
   const { config } = fixture(t);
   const bytes = 500;
@@ -258,9 +276,10 @@ test("W1-T12413 criterion 7: with no fetch injected the global fetch sends it, a
   assert.equal(outcome.heldUsd, outcome.reservedUsd);
 });
 
-async function probe(home: string, args: string[]): Promise<{ code: number; stdout: string }> {
+async function probe(home: string, args: string[], preload?: string): Promise<{ code: number; stdout: string }> {
   try {
-    const { stdout } = await promisify(execFile)(process.execPath, ["--import", "tsx", join(REPO_ROOT, "scripts", "cash-request-probe.mjs"), ...args],
+    const { stdout } = await promisify(execFile)(process.execPath, ["--import", "tsx",
+      ...(preload ? ["--import", preload] : []), join(REPO_ROOT, "scripts", "cash-request-probe.mjs"), ...args],
       { cwd: REPO_ROOT, env: { ...process.env, HOME: home, ...env }, timeout: 60_000 });
     return { code: 0, stdout };
   } catch (error) {
@@ -285,15 +304,51 @@ test("W1-T12413 criterion 8: the probe script sends one request and prints the s
   const printed = JSON.parse(lines[0]!);
   assert.equal(printed.ok, false);
   assert.equal(printed.reason, "transport");
-  assert.equal(printed.deployment, DEPLOYMENT);
+  assert.deepEqual(Object.keys(printed).sort(), ["heldUsd", "latencyMs", "ok", "reason", "reservedUsd", "settledUsd"].sort());
   assert.equal(typeof printed.latencyMs, "number");
   assert.equal(printed.reservedUsd, openWeightReservationUsd(DEPLOYMENT, Buffer.byteLength(BODY, "utf8"), 0, 16));
   assert.equal(printed.heldUsd, printed.reservedUsd);
   assert.equal(Object.keys(allowance(dir).reservations).length, 1);
 
+  const unpriced = await probe(dir, ["--deployment", "w1-t12413-unpriced-fixture", "--path", "openai/v1/decisions",
+    "--body-file", bodyFile, "--output-tokens", "16"]);
+  assert.equal(unpriced.code, 1, unpriced.stdout);
+  assert.equal(unpriced.stdout.trim().split("\n").length, 1);
+  assert.equal(JSON.parse(unpriced.stdout).reason, "not-ready");
+  assert.equal(JSON.parse(unpriced.stdout).reservedUsd, 0);
+
   const usage = await probe(dir, ["--deployment", DEPLOYMENT]);
   assert.equal(usage.code, 2);
   assert.equal(JSON.parse(usage.stdout).reason, "usage");
+});
+
+test("W1-T12413 criterion 8: a successful probe omits echoed credentials and request body", async (t) => {
+  const { dir } = ownedFixtureDir(t, "cash-request-probe-success");
+  const preload = join(dir, "echo-reply.mjs");
+  writeFileSync(preload, `globalThis.fetch = async (_url, init) => new Response(JSON.stringify({
+    model: ${JSON.stringify(DEPLOYMENT)}, usage: ${JSON.stringify(USAGE)},
+    echo: { key: new Headers(init.headers).get("api-key"), body: init.body }
+  }), { status: 200, headers: { "content-type": "application/json" } });\n`);
+  mkdirSync(join(dir, ".config", "remudero"), { recursive: true });
+  writeFileSync(join(dir, ".config", "remudero", "config.json"), JSON.stringify({ claudeBin: process.execPath, root: dir,
+    dailyCapUsd: 25, workerProviders: { cashEndpoint: "https://cash.example.test/" } }));
+  const bodyFile = join(dir, "body.json");
+  writeFileSync(bodyFile, BODY);
+  const sent = await probe(dir, ["--deployment", DEPLOYMENT, "--path", "openai/v1/decisions",
+    "--body-file", bodyFile, "--output-tokens", "16"], preload);
+  assert.equal(sent.code, 0, sent.stdout);
+  assert.equal(sent.stdout.trim().split("\n").length, 1);
+  assert.ok(!sent.stdout.includes(KEY));
+  assert.ok(!sent.stdout.includes(BODY));
+  assert.ok(!sent.stdout.includes("one input"));
+  const printed = JSON.parse(sent.stdout);
+  assert.deepEqual(Object.keys(printed).sort(), ["heldUsd", "latencyMs", "ok", "reservedUsd", "servedModel", "settledUsd"].sort());
+  assert.equal(printed.ok, true);
+  assert.equal(printed.servedModel, DEPLOYMENT);
+  assert.equal(Object.keys(allowance(dir).reservations).length, 1);
+  assert.equal(printed.reservedUsd, openWeightReservationUsd(DEPLOYMENT, Buffer.byteLength(BODY, "utf8"), 0, 16));
+  assert.equal(printed.settledUsd, openWeightUsageUsd(DEPLOYMENT, 40, 0));
+  assert.equal(printed.heldUsd, 0);
 });
 
 test("W1-T12413 criterion 8: the probe parser rejects an unknown flag and a flag without a value", () => {

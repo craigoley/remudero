@@ -9,7 +9,7 @@
 //
 // The request reserves against the normal daily cash cap before it is sent and settles from the
 // usage in the reply. The line names the status, the reason, the latency, the served model and the
-// dollars, and the reply. It never names the key or the request body.
+// dollars. It never names the key, request body or response envelope.
 import { readFileSync } from "node:fs";
 
 import { isMainModule } from "./lib/argv.mjs";
@@ -48,9 +48,10 @@ async function runCashRequestProbe(argv) {
     deployment: parsed.deployment, path: parsed.path, body: readFileSync(parsed.bodyFile, "utf8"),
     source: "cash-request-probe", outputTokenCeiling: parsed.outputTokens,
   });
-  const { envelope, ...summary } = outcome;
-  write(JSON.stringify({ deployment: parsed.deployment, path: parsed.path, ...summary,
-    ...(outcome.ok ? { reply: envelope } : {}) }));
+  write(JSON.stringify({ ok: outcome.ok, ...(outcome.ok ? { servedModel: outcome.servedModel }
+    : { reason: outcome.reason, ...(outcome.status === undefined ? {} : { status: outcome.status }) }),
+    latencyMs: outcome.latencyMs, reservedUsd: outcome.reservedUsd,
+    settledUsd: outcome.settledUsd, heldUsd: outcome.heldUsd }));
   return outcome.ok ? 0 : 1;
 }
 
