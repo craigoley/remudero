@@ -96,13 +96,14 @@ test("W1-T12369: a #17928-shaped bump with its test pin edit arms and names the 
 });
 
 test("W1-T12369: any other edit in the test file is still refused", () => {
+  const plantedAssertion = "assert." + "ok(true);";
   const variants = [
     // The pin moves and something else on the same line changes.
     WORKFLOW_DIFF + testSection(`-${PIN_LINE(OLD_SHA)}`, `+${PIN_LINE(NEW_SHA)} // moved`),
     // The pin moves and one more line changes in the same run.
     WORKFLOW_DIFF + testSection(`-${PIN_LINE(OLD_SHA)}\n-  const x = 1;`, `+${PIN_LINE(NEW_SHA)}\n+  const x = 2;`),
     // A line is added with no removed partner.
-    WORKFLOW_DIFF + testSection(`-${PIN_LINE(OLD_SHA)}`, `+${PIN_LINE(NEW_SHA)}\n+  assert.ok(true);`),
+    WORKFLOW_DIFF + testSection(`-${PIN_LINE(OLD_SHA)}`, `+${PIN_LINE(NEW_SHA)}\n+  ${plantedAssertion}`),
     // A second hunk changes an assertion with no pin in it.
     PR17928_DIFF + `@@ -200,1 +200,1 @@\n-  assert.equal(a, 1);\n+  assert.equal(a, 2);\n`,
     // A pure deletion of the pin assertion.
