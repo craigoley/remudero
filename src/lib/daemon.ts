@@ -1565,9 +1565,6 @@ export interface DaemonDeps {
    *  a tree held by uncommitted work. Same zero-arg, best-effort contract as the sweep above.
    *  Optional — omitted, this tick performs no artifact sweep. */
   sweepReclaimableArtifacts?: () => void;
-  /** W1-T11941: the shadow worktree janitor's options — see {@link reportRetirableWorktrees}. Every tick
-   *  calls it; it reads the operator checkout's `git worktree list` at most once per its interval and
-   *  writes would-retire / kept rows, removing nothing. Optional — omitted, no janitor pass runs. */
   worktreeRetire?: WorktreeRetireOptions;
   /** W1-T7093: update this instance's shared host-memory reservation tree on every heartbeat.
    *  Bookkeeping only; a failure is logged and never delays or gates work. */
@@ -3152,9 +3149,6 @@ function startInFlightTicker(
               log("daemon.disk_artifact_sweep.error", { error: String((e as Error)?.message ?? e) });
             }
           }
-          // W1-T11941: report which registered worktrees a janitor would retire, deleting nothing. Not
-          // awaited: a pass reads ~100 trees, and the heartbeat must not wait on it; the module skips a
-          // tick while its own pass is in flight or not yet due.
           if (deps.worktreeRetire) {
             void reportRetirableWorktrees(deps.worktreeRetire, log).catch((e: unknown) => {
               log("daemon.worktree_retire_report.error", { error: String((e as Error)?.message ?? e) });

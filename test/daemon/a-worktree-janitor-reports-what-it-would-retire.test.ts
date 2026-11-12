@@ -19,7 +19,7 @@ import { runDaemon, type DaemonDeps } from "#src/lib/daemon.js";
 import { loadPlanFromYaml } from "#src/lib/plan.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import {
-  classifyRegisteredWorktrees, CONTAINER_HOME_PREFIX, defaultOpenPrHeads, parseTaskCredits, parseWorktreeList,
+  classifyRegisteredWorktrees, CONTAINER_HOME_PREFIX, defaultLastActivityMs, defaultOpenPrHeads, parseTaskCredits, parseWorktreeList,
   repoSlugOfRemoteUrl, reportRetirableWorktrees, taskIdOfRunBranch, WORKTREE_RETIRE_KEPT_STEP, WORKTREE_RETIRE_PASS_STEP,
   WORKTREE_RETIRE_WOULD_RETIRE_STEP, type WorktreeRegistration, type WorktreeRetirePorts,
 } from "#src/lib/worktree-retire.js";
@@ -132,6 +132,29 @@ describe("the real git ports over a fixture operator checkout", () => {
     const opts = { operatorCheckout: checkout, clock: systemClock, openPrHeads: async () => new Set<string>() };
     assert.ok(await reportRetirableWorktrees(opts, () => {}));
     assert.equal(await reportRetirableWorktrees(opts, () => {}), undefined);
+  });
+
+  it("the real ports fail closed when origin, its main or the GitHub repo cannot be read", async () => {
+    const broken = join(root, "broken", "remudero");
+    execFileSync("git", ["clone", "--quiet", join(root, "origin.git"), broken], { stdio: "ignore" });
+    const run = join(root, "broken-trees", "run-W1-T9100-1794000000100");
+    const hand = join(root, "broken-trees", "hand");
+    git(broken, ["worktree", "add", "--quiet", "-b", "run-W1-T9100-1794000000100", run, "origin/main"]);
+    git(broken, ["worktree", "add", "--quiet", "-b", "hand-x", hand, "origin/main"]);
+    git(broken, ["remote", "set-url", "origin", join(root, "no-such-origin.git")]);
+    git(broken, ["update-ref", "-d", "refs/remotes/origin/main"]);
+    const { rows, log } = recorder();
+    const summary = await reportRetirableWorktrees({
+      operatorCheckout: broken, clock: fixedClock(Date.now() + 2 * DAY), containerHomePrefix: "/no-container-home-in-this-fixture/",
+    }, log);
+    assert.deepEqual(summary!.kept.map((o) => [o.path, o.reason]), [
+      [broken, "main-worktree"], [hand, "pr-state-unreadable"], [run, "claims-unreadable"],
+    ]);
+    assert.deepEqual(rows.filter((r) => r.step === "worktree_retire.read_failed").map((r) => r.extra.what).sort(),
+      ["credits", "dispatch-claims", "open-prs"]);
+    writeFileSync(join(hand, ".git"), "gitdir: /nowhere\n");
+    assert.equal(defaultLastActivityMs(hand), undefined, "a refused .git pointer leaves the age unanswered");
+    assert.equal(defaultLastActivityMs(join(root, "absent")), undefined);
   });
 
   it("an unreadable worktree list writes one pass row naming it and classifies nothing", async () => {
