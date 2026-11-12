@@ -569,6 +569,8 @@ RECYCLE_OUTCOME=aborted
 RECYCLE_FINAL_REASON=""
 RECYCLE_BLOCKERS_JSON=""
 RECYCLE_WAITED_S=0
+RECYCLE_HOST_LOCK_WAIT_JSON=""
+RECYCLE_IMAGE_HOLD_ID=""
 recycle_reason() {
   RECYCLE_FINAL_REASON="$1"
   case "$1" in
@@ -594,13 +596,15 @@ record_recycle_ended() {
     *) wait_s="${wait_s#"${wait_s%%[!0]*}"}"; wait_s="${wait_s:-0}" ;;
   esac
   reason="${RECYCLE_FINAL_REASON:-recycle-container: exited with status $status}"
+  # W1-T12243: whether the host recycle lock was released for the wait, and why not.
+  blockers="${RECYCLE_HOST_LOCK_WAIT_JSON:+,${RECYCLE_HOST_LOCK_WAIT_JSON}}"
   # A post-start action can fail after the OK line; only a zero exit is replaced.
   if [ "$status" -ne 0 ] && [ "$RECYCLE_OUTCOME" = replaced ]; then
     RECYCLE_OUTCOME=aborted
     reason="recycle-container: exited with status $status after starting the replacement"
   fi
   if [ "$RECYCLE_OUTCOME" = refused ] && [ -n "$RECYCLE_BLOCKERS_JSON" ]; then
-    blockers=",\"blockers\":$RECYCLE_BLOCKERS_JSON"
+    blockers="${blockers},\"blockers\":$RECYCLE_BLOCKERS_JSON"
   fi
   # W1-T12242: where the last smoke ran (before_pause, after_wait) and its seconds; null if none ran.
   smoke_at=null smoke_s=null
@@ -1983,6 +1987,9 @@ recycle_cleanup_tmp() {
   fi
   [ -n "${PULL_LOG}" ] && rm -f "${PULL_LOG}"
   [ -n "${COMMISSION_PROBE_FILE}" ] && rm -f "${COMMISSION_PROBE_FILE}"
+  # W1-T12243: the stopped container that held the pulled image for the wait goes on every exit.
+  [ -z "${RECYCLE_IMAGE_HOLD_ID}" ] || docker container rm "${RECYCLE_IMAGE_HOLD_ID}" >/dev/null 2>&1 ||
+    echo "recycle-container: could not remove the image hold container ${RECYCLE_IMAGE_HOLD_ID}" >&2
   release_host_recycle_lock
   recycle_exit_receipts "${exit_status}"
   selected_registry_cleanup_diagnostics "${exit_status}"
@@ -2882,6 +2889,42 @@ evaluate_frozen_daemon_proof() {
   echo "  the frozen-daemon proof is re-checked on the drain wait's polls — next at or after epoch ${STALL_RECHECK_AT_S}" >&2
 }
 
+# ── W1-T12243: THE WAIT DOES NOT HOLD THE HOST RECYCLE LOCK ─────────────────────────────────────
+# Read 2026-11-10: a core recycle held the lock for 3,150 s, nearly all of it in this wait, and the
+# other instances could not start a recycle in that time. `docker image prune -a` keeps an image that
+# any container uses, a stopped one too. So a stopped container made from the pulled image keeps it
+# through another recycle's prune or host-update's, and the lock is released for the wait. It is
+# taken again after the wait, before anything is stopped. If the container cannot be made, the lock
+# is held for the whole wait, as before, and recycle.ended says why.
+RECYCLE_TARGET_ID=""
+if [ "${HOST_RECYCLE_LOCK_HELD}" = "1" ]; then
+  lock_hold_note=""
+  RECYCLE_TARGET_ID="$(docker inspect --format '{{.Id}}' "${CONTAINER_NAME}" 2>/dev/null | head -n 1 || true)"
+  if [ ! -f "${SCRIPT_DIR}/host-recycle-lock.sh" ]; then
+    lock_hold_note="${SCRIPT_DIR}/host-recycle-lock.sh is absent"
+  elif [ -z "${RECYCLE_TARGET_ID}" ]; then
+    lock_hold_note="the id of ${CONTAINER_NAME} could not be read"
+  elif ! lock_hold_out="$(docker create --name "${CONTAINER_NAME}-image-hold" "${PULLED_IMAGE_ID}" true 2>&1)"; then
+    lock_hold_note="docker create ${CONTAINER_NAME}-image-hold failed: $(printf '%s\n' "${lock_hold_out}" | head -n 1)"
+  else
+    RECYCLE_IMAGE_HOLD_ID="$(printf '%s\n' "${lock_hold_out}" | tail -n 1)"
+    # shellcheck source=./host-recycle-lock.sh
+    . "${SCRIPT_DIR}/host-recycle-lock.sh"
+    if rmd_release_host_recycle_lock_for_wait "${HOST_RECYCLE_LOCK}" "${RECYCLE_IMAGE_HOLD_ID}" "${PULLED_IMAGE_ID}"; then
+      HOST_RECYCLE_LOCK_HELD=0
+    else
+      lock_hold_note="the image hold container ${RECYCLE_IMAGE_HOLD_ID:-<no id>} does not use ${PULLED_IMAGE_ID}"
+    fi
+  fi
+  if [ "${HOST_RECYCLE_LOCK_HELD}" = "0" ]; then
+    RECYCLE_HOST_LOCK_WAIT_JSON='"host_lock_in_wait":"released"'
+    echo "recycle-container: host recycle lock released for the wait — ${CONTAINER_NAME}-image-hold keeps ${PULLED_IMAGE_ID}"
+  else
+    RECYCLE_HOST_LOCK_WAIT_JSON="\"host_lock_in_wait\":\"held\",\"host_lock_note\":$(recycle_json_string "${lock_hold_note}")"
+    echo "recycle-container: host recycle lock HELD for the whole wait — ${lock_hold_note}" >&2
+  fi
+fi
+
 evaluate_frozen_daemon_proof
 waited=0
 while :; do
@@ -2986,6 +3029,35 @@ WORKERS
   RECYCLE_WAITED_S="$waited"
   evaluate_frozen_daemon_proof
 done
+# W1-T12243: take the host recycle lock again, with the same wait limit, before anything below can
+# stop, start or prune, and hold it to the end. Another recycle may have run in the wait, so the
+# PAUSE that held dispatch and the target container must still be the ones this run waited on.
+if [ -n "${RECYCLE_TARGET_ID}" ] && [ "${HOST_RECYCLE_LOCK_HELD}" = "0" ]; then
+  if ! rmd_take_host_recycle_lock "${HOST_RECYCLE_LOCK}" "${INSTANCE_NAME:-unscoped}" "${HOST_RECYCLE_LOCK_WAIT_S}" "${HOST_RECYCLE_LOCK_POLL_S}"; then
+    recycle_reason "recycle-container: REFUSING — another image recycle (${RMD_HOST_RECYCLE_LOCK_HOLDER}) still holds the host recycle lock after the wait." >&2
+    echo "  ${CONTAINER_NAME} is untouched and still running; a later tick retries." >&2
+    clear_own_pause "recycle-container: pause removed — the refusal above must not leave the fleet paused" >&2
+    exit 1
+  fi
+  HOST_RECYCLE_LOCK_HELD=1
+  echo "recycle-container: host recycle lock taken again after the wait"
+  lock_recheck=""
+  if [ -n "${RECYCLE_PAUSE_BODY}" ]; then
+    [ "$(cat "${PAUSE_FILE}" 2>/dev/null || true)" = "${RECYCLE_PAUSE_BODY}" ] || lock_recheck="the PAUSE this recycle wrote is no longer on disk"
+  elif [ ! -e "${PAUSE_FILE}" ]; then
+    lock_recheck="the PAUSE that held dispatch for the wait is gone"
+  fi
+  lock_target_now="$(docker inspect --format '{{.Id}}' "${CONTAINER_NAME}" 2>/dev/null | head -n 1 || true)"
+  if [ "${lock_target_now}" != "${RECYCLE_TARGET_ID}" ]; then
+    lock_recheck="${lock_recheck:+${lock_recheck}; }${CONTAINER_NAME} is now ${lock_target_now:-gone}, not ${RECYCLE_TARGET_ID}"
+  fi
+  if [ -n "${lock_recheck}" ]; then
+    recycle_reason "recycle-container: REFUSING — after the wait, ${lock_recheck}." >&2
+    echo "  Another recycle or an operator changed it in the wait. Nothing was stopped; a later tick retries." >&2
+    clear_own_pause "recycle-container: pause removed — the refusal above must not leave the fleet paused" >&2
+    exit 1
+  fi
+fi
 
 # ── 5.5. THE SMOKED IMAGE MUST STILL EXIST AFTER THE WAIT ───────────────────────────────────────
 # READ 2026-10-10 04:27–04:44Z: core pulled, then drained 17 min for a worker; meanwhile the site
