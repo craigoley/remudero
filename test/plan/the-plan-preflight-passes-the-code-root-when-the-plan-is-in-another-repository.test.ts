@@ -17,7 +17,7 @@ function fixture(t: TestContext) {
   const code = gitRepo({ scope: t, kind: "preflight-code" });
   const plan = gitRepo({ scope: t, kind: "preflight-plan" });
   const trace = join(root, "lint-argv.ndjson");
-  const program = `import {appendFileSync} from 'node:fs';appendFileSync(${JSON.stringify(trace)},JSON.stringify({cwd:process.cwd(),args:process.argv.slice(2)})+'\\n');\n`;
+  const program = `import {appendFileSync} from 'node:fs';appendFileSync(${JSON.stringify(trace)},JSON.stringify({cwd:process.cwd(),args:process.argv.slice(2)})+String.fromCharCode(10));`;
   put(join(code.dir, "scripts/fixture-lint.mjs"), program);
   put(join(code.dir, "scripts/lint-plan-precheck.mjs"), program);
   put(join(code.dir, "package.json"), JSON.stringify({ scripts: { "lint-plan:fast": "node scripts/fixture-lint.mjs --base origin/main" } }));
