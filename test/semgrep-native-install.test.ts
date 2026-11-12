@@ -135,7 +135,7 @@ test("native Semgrep retains all four rule packs, PR-only baseline and SARIF upl
   assert.match(scan.run!, /--baseline-commit \$\{BASELINE_REF\}/);
   assert.match(scan.run!, /--sarif --output semgrep\.sarif/);
   const upload = step("Upload SARIF to code scanning");
-  assert.equal(upload.uses, "github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370");
+  assert.equal(upload.uses, "github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066");
   assert.equal(upload.if, "always()");
   assert.deepEqual(upload.with, { sarif_file: "semgrep.sarif", category: "semgrep" });
   assert.ok(fileURLToPath(root).endsWith("/"));
