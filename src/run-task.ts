@@ -34952,10 +34952,14 @@ async function finishPrivateTriagePublication(publication: PrivateTriagePublicat
     } else if (checkPrOwnership(publication.prUrl, branch, ghPrHeadGateway(), 0)) {
       throw new Error("recorded public task pull request changed ownership");
     }
+    if (readHeadShaRest(publication.prUrl) !== publication.commit) throw new Error("the recorded public task head changed or is unreadable");
   } catch (error) {
-    log("triage.write_pending", { write: "public_task", feedback_id: feedbackId });
+    log("triage.error", { error: "public task write failed or unknown", write: "public_task", feedback_id: feedbackId });
     throw new Error("public task write failed or is unknown; retained the original task for a later pass", { cause: error });
   }
+  // The public PR already exists even if the private write fails. Existing priced-run and
+  // in-flight consumers read pr.opened; a new unregistered failure step would hide that fact.
+  log("pr.opened", { pr_url: publication.prUrl, plan_only: true, action: "propose", feedback_status: "pending" });
   try {
     const stateRoot = join(config.root, "state");
     await proposeFeedbackWithSummary(worktreePath, feedbackId, summarizeDeps, { proposalPr: publication.prUrl, land: { stateRoot } });
@@ -34964,7 +34968,7 @@ async function finishPrivateTriagePublication(publication: PrivateTriagePublicat
     publication.stage = "feedback_landed";
     writeAtomic(receiptPath, JSON.stringify(publication), { mode: 0o600 });
   } catch (error) {
-    log("triage.write_pending", { write: "private_feedback_status", feedback_id: feedbackId, pr_url: publication.prUrl });
+    log("triage.error", { error: "private feedback status write failed", write: "private_feedback_status", feedback_id: feedbackId });
     throw new Error("private feedback status write failed; retained the existing public task pull request", { cause: error });
   }
   return publication.prUrl;
@@ -35598,7 +35602,7 @@ async function triageCommandLocked(
       worktreeRemove(repoDir, worktreePath);
       return 1;
     }
-    log("pr.opened", { pr_url: prUrl, plan_only: true, action: decision.action });
+    if (proposalTaskPath === undefined) log("pr.opened", { pr_url: prUrl, plan_only: true, action: decision.action });
     say(`triage PR (plan-only, ${decision.action}): ${prUrl}`);
     // Publication ownership, plan-only scope and feedback provenance were verified above.
     // Acknowledging intake ends the ask; it does not claim CI, merge or work completion.

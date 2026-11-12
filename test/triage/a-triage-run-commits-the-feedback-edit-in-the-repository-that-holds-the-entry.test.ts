@@ -1,11 +1,10 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { mkdirSync, readFileSync, writeFileSync, existsSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
-import { triageCommand } from "#src/run-task.js";
 import { diffCitesFeedback, triageCommitMessage } from "#src/lib/triage.js";
 import { feedbackStatusOnMain } from "#src/lib/auto-triage.js";
-import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
 import { LANDING_BRANCH } from "#src/lib/feedback-landing.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
 import { ghShim } from "#test/helpers/gh-shim.js";
@@ -54,11 +53,19 @@ function fixture(t: TestContext, privateEntry = true) {
   t.after(() => rmSync(shim.dir, { recursive: true, force: true }));
   const branchView = join(root, "branch-view.json");
   const publicDiff = join(root, "public-diff.txt");
+  const prInfo = join(root, "public-pr-info.json");
+  const quotedInfo = "'" + prInfo.replaceAll("'", "'\"'\"'") + "'";
+  // The API's SHA follows the real bare origin's received commit, including a later owner update.
+  writeFileSync(join(publicOrigin.dir, "hooks", "post-receive"), ["#!/bin/sh", "while read old new ref; do",
+    'case "$ref" in refs/heads/run-TRIAGE-*)',
+    `printf '{"number":99,"head":{"sha":"%s","ref":"%s"},"base":{"ref":"main"},"state":"open"}\\n' "$new" "\${ref#refs/heads/}" > ${quotedInfo} ;;`,
+    "esac", "done", ""].join("\n"), { mode: 0o700 });
+
   shim.addRoute({ when: "--json headRefName", stdoutFile: branchView });
   shim.addRoute({ when: "pr diff", stdoutFile: publicDiff });
   shim.addRoute({ when: "api --method POST repos/craigoley/remudero/pulls", stdout: JSON.stringify({ html_url: "https://github.com/craigoley/remudero/pull/99", number: 99 }) });
   // A real terminal-red CI response stops the command before any review/merge effect.
-  shim.addRoute({ when: "repos/craigoley/remudero/pulls/99", stdout: JSON.stringify({ number: 99, head: { sha: "a".repeat(40), ref: "fixture" }, base: { ref: "main" }, state: "open" }) });
+  shim.addRoute({ when: "repos/craigoley/remudero/pulls/99", stdoutFile: prInfo });
   shim.addRoute({ when: "/check-runs", stdout: JSON.stringify({ total_count: 1, check_runs: [{ id: 1, name: "ci-gate", status: "completed", conclusion: "failure" }] }) });
   shim.addRoute({ when: "/statuses", stdout: "[]" });
   shim.addRoute({ when: "/status", stdout: '{"statuses":[]}' });
@@ -67,36 +74,66 @@ function fixture(t: TestContext, privateEntry = true) {
   const saved = { home: process.env.HOME, path: process.env.PATH };
   process.env.HOME = home; process.env.PATH = `${shim.dir}:${saved.path}`;
   t.after(() => { if (saved.home === undefined) delete process.env.HOME; else process.env.HOME = saved.home; process.env.PATH = saved.path; });
-  let spawns = 0;
-  const run = async (propose = false) => {
+  const workerCalls = join(root, "worker-calls.txt");
+  const outcomePath = join(root, "command-outcome.json");
+  const loader = join(REPO_ROOT, "node_modules", "tsx", "dist", "loader.mjs");
+  assert.ok(existsSync(loader), "the real installed child loader is present");
+  // The command reads process-global HOME/config. Execute it in its own real Node context; the
+  // maintained command-test facade re-exports the production triage entry; every Git/default landing
+  // stays real. Its graph still reaches run-task through that facade. Only the paid worker and gh are fixtures.
+  const child = String.raw`
+    import assert from "node:assert/strict";
+    import {readFileSync,writeFileSync,appendFileSync,mkdirSync} from "node:fs";
+    import {join} from "node:path";
+    import {execFileSync} from "node:child_process";
+    import {triageCommand} from "#test/helpers/run-task-test.js";
+    import {withLiveWritesAllowed} from "#src/lib/live-write-guard.js";
+    const {root,REPO_ROOT,ID,PRIVATE,TASK_PATH,branchView,publicDiff,workerCalls,outcomePath,propose}=JSON.parse(process.env.TRIAGE_CASE_INPUT);
+    let outcome;
     try {
-      const code = await withLiveWritesAllowed(() => triageCommand([ID], {
-        config: { root, installRoot: REPO_ROOT, claudeBin: "/usr/bin/true" },
-        lintPlanForReviewFn: async () => ({ ran: true, label: "fixture", checked: 1, violations: [] }),
-        spawn: async (args) => {
-          let text = "ALREADY_DECIDED: W1-T4 already covers this request";
-          if ((args.tools ?? []).length === 0) text = "{}";
+      const code=await withLiveWritesAllowed(()=>triageCommand([ID],{
+        config:{root,installRoot:REPO_ROOT,claudeBin:"/usr/bin/true"},
+        lintPlanForReviewFn:async()=>({ran:true,label:"fixture",checked:1,violations:[]}),
+        spawn:async(args)=>{
+          let text="ALREADY_DECIDED: W1-T4 already covers this request";
+          if((args.tools??[]).length===0)text="{}";
           else {
-            spawns++;
-            assert.ok(args.prompt.includes(PRIVATE), "the original untrusted feedback reaches the worker prompt");
-            if (propose) {
-              const id = /USE EXACTLY `(W\d+-T\d+)`/.exec(args.prompt)?.[1];
-              assert.equal(id, "W1-T5");
-              mkdirSync(join(args.cwd, "plan", "tasks.d"), { recursive: true });
-              writeFileSync(join(args.cwd, TASK_PATH), `- id: ${id}\n  title: an explicit public task\n  repo: remudero\n  origin: feedback#${ID}\n  depends_on: []\n  type: implement\n  verify: auto\n  status: queued\n  attempts: 0\n  files: [src/lib/triage.ts]\n  acceptance:\n    - claim: the task is present\n      proof: "grep: triage in src/lib/triage.ts"\n`);
-              const branch = publicClone.git("-C", args.cwd, "branch", "--show-current").trim();
-              writeFileSync(branchView, JSON.stringify({ headRefName: branch }));
-              writeFileSync(publicDiff, `diff --git a/${TASK_PATH} b/${TASK_PATH}\nnew file mode 100644\n--- /dev/null\n+++ b/${TASK_PATH}\n@@ -0,0 +1,3 @@\n+- id: W1-T5\n+  origin: feedback#${ID}\n`);
-              text = "PROPOSED: file the explicit public task";
+            appendFileSync(workerCalls,"worker\n");
+            assert.ok(args.prompt.includes(PRIVATE),"the original untrusted feedback reaches the worker prompt");
+            if(propose){
+              const id=/USE EXACTLY \x60(W\d+-T\d+)\x60/.exec(args.prompt)?.[1];
+              assert.equal(id,"W1-T5");
+              mkdirSync(join(args.cwd,"plan","tasks.d"),{recursive:true});
+              writeFileSync(join(args.cwd,TASK_PATH),[
+                "- id: "+id,"  title: an explicit public task","  repo: remudero","  origin: feedback#"+ID,
+                "  depends_on: []","  type: implement","  verify: auto","  status: queued","  attempts: 0",
+                "  files: [src/lib/triage.ts]","  acceptance:","    - claim: the task is present",
+                '      proof: "grep: triage in src/lib/triage.ts"',""].join("\n"));
+              const branch=execFileSync("git",["branch","--show-current"],{cwd:args.cwd,encoding:"utf8"}).trim();
+              writeFileSync(branchView,JSON.stringify({headRefName:branch}));
+              writeFileSync(publicDiff,["diff --git a/"+TASK_PATH+" b/"+TASK_PATH,"new file mode 100644","--- /dev/null","+++ b/"+TASK_PATH,"@@ -0,0 +1,3 @@","+- id: W1-T5","+  origin: feedback#"+ID,""].join("\n"));
+              text="PROPOSED: file the explicit public task";
             }
           }
-          return { sessionId: "fixture", costUsd: 0, text, blocks: [], stderr: "", subtype: "success", isError: false, apiError: false, model: "fixture", effort: "high", tokens: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 }, totalCostUsd: 0, billingMode: "subscription", verdict: "success", qualitySuspect: false, compactionEvents: [], childEnvKeys: [] } as never;
-        },
-      }));
-      return { code, error: undefined };
-    } catch (error) { return { code: undefined, error }; }
+          return {sessionId:"fixture",costUsd:0,text,blocks:[],stderr:"",subtype:"success",isError:false,apiError:false,model:"fixture",effort:"high",tokens:{input:0,output:0,cacheRead:0,cacheCreation:0},totalCostUsd:0,billingMode:"subscription",verdict:"success",qualitySuspect:false,compactionEvents:[],childEnvKeys:[]};
+        }
+      }));outcome={code};
+    }catch(error){outcome={error:String(error)};}
+    writeFileSync(outcomePath,JSON.stringify(outcome));
+  `;
+  const run = async (propose = false): Promise<{ code?: number; error?: string }> => {
+    try {
+      execFileSync(process.execPath, ["--import", loader, "--input-type=module", "-e", child], {
+        cwd: REPO_ROOT, encoding: "utf8", timeout: 120000, maxBuffer: 16 * 1024 * 1024,
+        env: { ...process.env, HOME: home, PATH: `${shim.dir}:${saved.path}`, TRIAGE_CASE_INPUT: JSON.stringify({ root, REPO_ROOT, ID, PRIVATE, TASK_PATH, branchView, publicDiff, workerCalls, outcomePath, propose }) },
+      });
+      return JSON.parse(readFileSync(outcomePath, "utf8"));
+    } catch (error) { return { error: String(error) }; }
   };
-  return { root, publicOrigin, privateOrigin, privateClone, publicClone, run, spawns: () => spawns, calls: () => shim.calls() };
+  return { root, publicOrigin, privateOrigin, privateClone, publicClone, run,
+    spawns: () => existsSync(workerCalls) ? readFileSync(workerCalls, "utf8").trim().split("\n").length : 0,
+    calls: () => shim.calls() };
+
 }
 
 test("W1-T12204 criterion 1 and criterion 7: real rmd triage lands an ops status without a public feedback file", async (t) => {
@@ -162,6 +199,8 @@ test("W1-T12204 criterion 5: a failed private status write resumes without minti
   assert.ok(readFileSync(join(f.root, "state", "ledger.ndjson"), "utf8").includes('"write":"private_feedback_status"'));
   const before = f.publicOrigin.git("for-each-ref", "--format=%(refname) %(objectname)", "refs/heads/run-TRIAGE-*");
   assert.ok(before.trim());
+  const rows = readFileSync(join(f.root, "state", "ledger.ndjson"), "utf8").trim().split("\n").map(line => JSON.parse(line));
+  assert.ok(rows.some(row => row.step === "pr.opened" && row.pr_url === "https://github.com/craigoley/remudero/pull/99"), "the actual public PR is visible to existing priced-run consumers even while its private status write is pending");
   rmSync(hook);
   const next = await f.run(true);
   assert.equal(next.error, undefined);
@@ -197,5 +236,24 @@ test("W1-T12204 criterion 6 and criterion 7: real legacy PROPOSE commits its fee
   const first = f.publicOrigin.git("rev-list", "--reverse", `main..${branch}`).trim().split("\n")[0];
   assert.deepEqual(f.publicOrigin.git("diff-tree", "--no-commit-id", "--name-only", "-r", first).trim().split("\n").sort(), [REL, TASK_PATH].sort());
   assert.ok(f.publicOrigin.git("log", "-1", "--format=%B", first).includes(`grep: status: proposed in ${REL}`));
+  assert.equal(f.privateOrigin.git("for-each-ref", "--format=%(refname)", "refs/heads/feedback-landing*").trim(), "");
+});
+
+
+test("W1-T12204 criterion 5: recovery refuses a changed public task head without writing private status or filing again", async (t) => {
+  const f = fixture(t);
+  const hook = join(f.privateOrigin.dir, "hooks", "pre-receive");
+  writeFileSync(hook, "#!/bin/sh\nexit 1\n", { mode: 0o700 });
+  assert.match(String((await f.run(true)).error), /private feedback status write failed/);
+  rmSync(hook);
+  const branch = f.publicOrigin.git("for-each-ref", "--format=%(refname:short)", "refs/heads/run-TRIAGE-*").trim();
+  const update = gitRepo({ cloneFrom: f.publicOrigin.dir, scope: t });
+  update.git("checkout", "--quiet", branch);
+  writeFileSync(join(update.dir, TASK_PATH), readFileSync(join(update.dir, TASK_PATH), "utf8") + "  description: a later owner changed this proposal\n");
+  update.git("add", TASK_PATH); update.git("commit", "--quiet", "-m", "chore: advance existing public proposal"); update.git("push", "--quiet", "origin", branch);
+  const result = await f.run(true);
+  assert.match(String(result.error), /public task write failed or is unknown/);
+  assert.equal(f.spawns(), 1);
+  assert.equal(f.publicOrigin.git("for-each-ref", "--format=%(refname)", "refs/heads/run-TRIAGE-*").trim().split("\n").length, 1);
   assert.equal(f.privateOrigin.git("for-each-ref", "--format=%(refname)", "refs/heads/feedback-landing*").trim(), "");
 });
