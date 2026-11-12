@@ -14,6 +14,8 @@ import { FIXTURE_CONFIG_PATH_SEGMENTS } from "#src/lib/config.js";
 import type { FixCommandHost } from "#src/cli/commands/fix.js";
 import { reviewCommand, runReview, type ReviewCommandHost, type ReviewCommandDeps } from "#src/cli/commands/review.js";
 import { readLedgerLines } from "#src/lib/status.js";
+import { runFixRung } from "#test/helpers/run-task-test.js";
+import type { IssueGateway, OpenIssue } from "#src/lib/escalate.js";
 
 const ID = "W1-T900000", REPOSITORY = "fixture-private/ops";
 const yaml = (id = ID) => `- id: ${id}\n  title: Private lookup fixture\n  repo: remudero\n  depends_on: []\n  type: implement\n  priority: 0\n  risk: high\n  budget_usd: 0.5\n  files: [src/fixture.ts]\n  design: Private canonical design\n  acceptance:\n    - claim: canonical private criterion\n      proof: "grep: lookup-fixture in src/fixture.ts"\n`;
@@ -89,6 +91,51 @@ test("W1-T12207 criterion 3: fix and sweep scope checks use the private task fil
   const { fixCatalogTask } = await import("#src/cli/commands/fix.js");
   const found = await fixCatalogTask(ID, { tasks: [], byId: new Map() }, { stateDir: fx.stateDir, api: fx.api });
   assert.equal(found.outcome, "found"); assert.deepEqual(found.task?.files, ["src/fixture.ts"]);
+});
+
+test("W1-T12207 criterion 3: the real fix rung keeps private ops scope evidence out of its public escalation", async t => {
+  const fx = fixture(t), opsTask = { ...task(), catalog: "ops" as const };
+  const privatePath = "src/private-scope-sentinel.ts";
+  const issues: IssueGateway & { opened: Array<{ title: string; body: string }> } = {
+    opened: [],
+    create(title, body) { this.opened.push({ title, body }); return "https://github.com/fixture/ops/issues/99"; },
+    listOpen(): OpenIssue[] { return []; },
+  };
+  const baseDiff = ["src/fixture.ts"];
+  let diffRead = 0;
+  const failing = {
+    state: "failure", criteria: [{ claim: "canonical private criterion", proof: "grep: lookup-fixture in src/fixture.ts", met: false, reason: "fixture" }],
+    testTheater: false, summary: "fixture failure", floorDegraded: false, capped: false, keywordOnly: false,
+    planOnly: false, headSha: "head-before-fix", reviewerOutcome: "success",
+  };
+  const outcome = await runFixRung({
+    taskId: ID, runId: `${ID}-fix-regression`, task: opsTask,
+    prUrl: "https://github.com/fixture/remudero/pull/42", branch: `run-${ID}-fix-regression`,
+    worktreePath: fx.root, initialSessionId: "fixture-session", mount: { model: "sonnet", effort: "medium", maxTurns: 20, contextBudget: 120000 },
+    settingsFile: join(fx.root, "settings.json"), config: {} as never, budgetUsd: 1,
+    reviewBase: { owner: "fixture", repo: "remudero", headCheckoutDir: fx.root, reviewerMount: { model: "sonnet", effort: "medium", maxTurns: 20, contextBudget: 120000 } },
+    strikeCap: 2, initialReview: failing,
+    escalationJudge: async () => ({ decision: "deliver", reason: "fixture delivery" }),
+    deps: {
+      spawn: async () => ({ sessionId: "fix-session", costUsd: 0, numTurns: 1, text: "", blocks: [], stderr: "", subtype: "success", isError: false, apiError: false, permissionDenials: [], childEnvKeys: [], model: "default", effort: "default", tokens: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 }, modelUsage: {}, compactionEvents: [], qualitySuspect: false }),
+      waitForCiGreen: async () => "green",
+      runReview: async () => ({ ...failing, headSha: "head-after-fix" }),
+      push: () => {}, issues, ledgerPath: join(fx.root, "ledger.ndjson"),
+      log: () => {}, say: () => {}, account: (result: unknown) => result,
+      fetchPrBody: async () => "## Summary\nfixture",
+      fetchPrDiffFiles: async () => diffRead++ < 2 ? baseDiff : [...baseDiff, privatePath],
+    },
+  } as never);
+
+  assert.equal(outcome.outcome, "stood_down");
+  assert.match(outcome.standDownReason ?? "", new RegExp(privatePath.replaceAll(".", "\\.")), "the private diagnostic remains available to the host");
+  assert.equal(issues.opened.length, 1, "the actual fix rung publishes one escalation");
+  const published = `${issues.opened[0]!.title}\n${issues.opened[0]!.body}`;
+  assert.ok(published.includes(opsTask.title));
+  assert.ok(published.includes("canonical private criterion"));
+  assert.ok(!published.includes(privatePath), "public issue text omits the fix worker's private changed path");
+  assert.ok(!published.includes("src/fixture.ts"), "public issue text omits the ops task's declared files");
+  assert.ok(!published.includes("grep: lookup-fixture"), "public issue text omits acceptance proof details");
 });
 
 test("W1-T12207 criterion 4: the real claim CLI and default ops transport reserve only the public fixture origin", async t => {
