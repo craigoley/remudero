@@ -524,6 +524,8 @@ export const ENV_REGISTRY: readonly EnvRegistryEntry[] = [
   envEntry("RMD_PREPUSH_GATES", "Disarms hooks/pre-push only when exactly \"0\"; the one daemon variable the host push gate's allowlisted env keeps.", ["src/lib/git-push.ts"]),
   envEntry("RMD_PROVIDER_AUTH_PROFILES", "Supplies the server-side JSON catalog of provider authentication profiles.", ["src/lib/provider-auth-sessions.ts"]),
   envEntry("RMD_READ_MODEL_DB_DIR", "Maps one state dir to the directory holding its read-model DB files as <stateDir>:<dir>; set by deploy/scratch-mounts.sh.", ["src/lib/read-model-db.ts"]),
+  envEntry("RMD_DEPLOY_STEP_ENDS_AT", "Carries the epoch second at which the watchdog tick ends its deploy step; set by the launcher that deploy/install-host-units.sh renders.", ["src/lib/deployer.ts"]),
+  envEntry("RMD_RECYCLE_WAIT_S", "Sets the operator's own wait for runs in flight in a recycle; the deployer compares it with the time its deploy step has left.", ["src/lib/deployer.ts"]),
   envEntry("RMD_RESTART_THROTTLE_S", "Documents restart throttling excluded from proof environments.", ["src/lib/review.ts"]),
   envEntry("RMD_RESOURCE_POLICY_CONTAINER", "Selects the container checked for deployed resource policy and mount drift.", ["src/lib/deployer.ts"]),
   envEntry("RMD_RESOURCE_POLICY_ROLE", "Selects the serve or build resource policy for deployment checks.", ["src/lib/deployer.ts"]),

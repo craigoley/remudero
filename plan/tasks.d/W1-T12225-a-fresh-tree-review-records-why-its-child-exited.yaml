@@ -20,7 +20,7 @@
     - src/cli/commands/review.ts
     - test/review/a-fresh-tree-review-records-why-its-child-exited.test.ts
     - test/worker/a-review-child-start-is-attributed-and-starts-from-a-bundle.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "When the child of a fresh-tree review exits with a code that is not 0, the row `review.ran_from_fresh_tree` carries the field `exit_cause`. The value is the name that the review command gave to the exit that it took. The test drives `buildReviewerCodeFreshnessGate` with a stale reading"
