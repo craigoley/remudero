@@ -10,7 +10,7 @@
 import { after, before, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -23,7 +23,7 @@ import {
   repoSlugOfRemoteUrl, reportRetirableWorktrees, taskIdOfRunBranch, WORKTREE_RETIRE_KEPT_STEP, WORKTREE_RETIRE_PASS_STEP,
   WORKTREE_RETIRE_WOULD_RETIRE_STEP, type WorktreeRegistration, type WorktreeRetirePorts,
 } from "#src/lib/worktree-retire.js";
-import { GIT_REPO_FIXTURE_IDENTITY } from "#test/helpers/git-repo.js";
+import { gitRepo, GIT_REPO_FIXTURE_IDENTITY } from "#test/helpers/git-repo.js";
 
 const DAY = 24 * 60 * 60 * 1000;
 const ID = GIT_REPO_FIXTURE_IDENTITY;
@@ -46,16 +46,14 @@ function git(dir: string, args: string[], env: NodeJS.ProcessEnv = {}): string {
 describe("the real git ports over a fixture operator checkout", () => {
   let root: string;
   let checkout: string;
+  let origin: string;
   const wt: Record<string, string> = {};
   const threeDaysAgo = new Date(Date.now() - 3 * DAY).toISOString();
 
   before(() => {
     root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}t11941-janitor-`));
-    const origin = join(root, "origin.git");
-    checkout = join(root, "operator", "remudero");
-    mkdirSync(join(root, "operator"));
-    execFileSync("git", ["init", "--quiet", "--bare", "-b", "main", origin]);
-    execFileSync("git", ["clone", "--quiet", origin, checkout], { stdio: "ignore" });
+    origin = gitRepo({ bare: true, kind: "t11941-origin" }).dir;
+    checkout = gitRepo({ cloneFrom: origin, kind: "t11941-operator" }).dir;
     git(checkout, ["commit", "--quiet", "--allow-empty", "-m", "chore: seed"]);
     git(checkout, ["push", "--quiet", "origin", "main"]);
     const cut = (name: string, dir: string, branch: string, commit: boolean, push: boolean) => {
@@ -76,7 +74,9 @@ describe("the real git ports over a fixture operator checkout", () => {
     git(checkout, ["push", "--quiet", "origin", "main"]);
     rmSync(wt.missing!, { recursive: true, force: true });
   });
-  after(() => rmSync(root, { recursive: true, force: true }));
+  after(() => {
+    for (const dir of [root, origin, checkout]) rmSync(dir, { recursive: true, force: true });
+  });
 
   const pass = async () => {
     const { rows, log } = recorder();
@@ -135,8 +135,7 @@ describe("the real git ports over a fixture operator checkout", () => {
   });
 
   it("the real ports fail closed when origin, its main or the GitHub repo cannot be read", async () => {
-    const broken = join(root, "broken", "remudero");
-    execFileSync("git", ["clone", "--quiet", join(root, "origin.git"), broken], { stdio: "ignore" });
+    const broken = gitRepo({ cloneFrom: origin, kind: "t11941-broken" }).dir;
     const run = join(root, "broken-trees", "run-W1-T9100-1794000000100");
     const hand = join(root, "broken-trees", "hand");
     git(broken, ["worktree", "add", "--quiet", "-b", "run-W1-T9100-1794000000100", run, "origin/main"]);

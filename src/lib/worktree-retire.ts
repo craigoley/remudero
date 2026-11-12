@@ -357,7 +357,8 @@ export function defaultWorktreeRetirePorts(opts: WorktreeRetireOptions, log: Log
       return defaultOpenPrHeads(slug, log);
     },
     credits: async () => {
-      const since = new Date(clock.now() - (opts.creditWindowMs ?? DEFAULT_RETIRE_CREDIT_WINDOW_MS)).toISOString();
+      // git reads `@<epoch seconds>` as an absolute instant, so the window follows the injected clock.
+      const since = `@${Math.floor((clock.now() - (opts.creditWindowMs ?? DEFAULT_RETIRE_CREDIT_WINDOW_MS)) / 1000)}`;
       const out = await treeGit(checkout, ["log", "origin/main", `--since=${since}`, "--format=%H%x1f%ct%x1f%B%x1e"], log, "credits", GIT_LOG_MAX_BUFFER);
       return out === undefined ? undefined : parseTaskCredits(out);
     },
