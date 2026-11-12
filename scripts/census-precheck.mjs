@@ -1540,17 +1540,15 @@ function declaredWalk(token, roots) {
   return wildcard >= 0 ? cleaned.slice(0, wildcard) : cleaned;
 }
 
-/** W1-T11940: a suite's `@census-reads:` walks, or null when undeclared. A closure seed or an unresolvable
- *  declaration is unknown, so it reads as undeclared: an unknown read is never a skip. */
-export function censusReadsDeclaration(text, roots) {
-  if (typeof text !== "string" || text.includes(CENSUS_CLOSURE_MARKER)) return null;
+/** The walks one marker's comment lines name (leading path tokens only), or null when the text carries none. */
+function markerWalks(text, marker, roots) {
   let walks = null;
   let none = false;
   for (const line of text.split("\n")) {
     const comment = /^\s*(?:\/\/|\/?\*+)\s*(.*)$/.exec(line)?.[1];
-    if (comment === undefined || !comment.startsWith(CENSUS_READS_MARKER)) continue;
+    if (comment === undefined || !comment.startsWith(marker)) continue;
     walks ??= [];
-    for (const token of comment.slice(CENSUS_READS_MARKER.length).trim().split(/\s+/)) {
+    for (const token of comment.slice(marker.length).trim().split(/\s+/)) {
       const bare = token.replace(/[,;]$/, "");
       const walk = declaredWalk(bare, roots);
       if (bare === "none") none = true;
@@ -1558,7 +1556,37 @@ export function censusReadsDeclaration(text, roots) {
       else break;
     }
   }
-  return walks === null || (walks.length === 0 && !none) ? null : walks;
+  return walks === null ? null : { walks, none };
+}
+
+/** W1-T11940: a suite's `@census-reads:` walks, or null when undeclared. An unresolvable declaration is unknown,
+ *  so it reads as undeclared: an unknown read is never a skip. A suite that also seeds an import closure
+ *  (`@census-closure:`) is declared only when each seed sits under a DIRECTORY the declaration names, because the
+ *  closure it walks is then inside that directory; a seed the declaration does not contain widens past it. */
+export function censusReadsDeclaration(text, roots) {
+  if (typeof text !== "string") return null;
+  const reads = markerWalks(text, CENSUS_READS_MARKER, roots);
+  if (reads === null || (reads.walks.length === 0 && !reads.none)) return null;
+  const seeds = markerWalks(text, CENSUS_CLOSURE_MARKER, roots);
+  if (seeds === null && !text.includes(CENSUS_CLOSURE_MARKER)) return reads.walks;
+  const contained = seeds !== null && seeds.walks.length > 0 &&
+    seeds.walks.every((seed) => reads.walks.some((w) => w.endsWith("/") && seed.startsWith(w)));
+  return contained ? reads.walks : null;
+}
+
+/** True when a changed path falls under a declared walk. A bare root dotfile (`.gitignore`) parses as the walk
+ *  `.gitignore/`, as in src/lib/source-text-readers.ts, so the file itself is named by that walk's own name. */
+function walkReadsPath(walk, path) {
+  return path.startsWith(walk) || (walk.endsWith("/") && path === walk.slice(0, -1));
+}
+
+/** W1-T11940: a suite named in a trigger table joins a diff by its trigger alone. Declaring its reads
+ *  (`@census-reads:`) must not also start it on every diff that touches a path it reads, which would run the
+ *  slow whole-tree suites on every src/ or test/ diff; a declaration only says what the suite reads. */
+export function withoutTriggerJoinedSuites(members,
+  triggered = [...PRECHECK_TRIGGERED_SUITES, ...PRECHECK_PATH_TRIGGERED_SUITES]) {
+  const named = new Set(triggered.map((m) => m.testFile));
+  return members.filter((m) => !named.has(m.testFile));
 }
 
 /** The suites the full pass would run (evaluateAdmittedCensusSuites's join), each with its declaration.
@@ -1599,7 +1627,7 @@ export function censusFullPassDecision({ changed, countsOk, instrumentInScope = 
   if (undeclared.length > 0) {
     return run(`${undeclared.length} census suite(s) declare no @census-reads: ${undeclared.slice(0, 5).join(", ")}${undeclared.length > 5 ? ", ..." : ""}`);
   }
-  const touched = suites.filter((s) => changed.some((p) => s.declared.some((w) => p.startsWith(w)))).map((s) => s.testFile);
+  const touched = suites.filter((s) => changed.some((p) => s.declared.some((w) => walkReadsPath(w, p)))).map((s) => s.testFile);
   if (touched.length > 0) {
     return run(`the diff touches a file ${touched.length} census suite(s) declare they read: ${touched.slice(0, 5).join(", ")}${touched.length > 5 ? ", ..." : ""}`);
   }
@@ -2157,7 +2185,7 @@ export function main(argv, { measure = measureViaChild, admitted = listAdmittedC
     logCensusCounts(process.env.RMD_CENSUS_COUNTS_LOG, violations.length === 0, performance.now() - countsStartedAt);
     if (values["counts-only"]) return reportCensusCounts(violations, changed, values.base);
     let listedMembers;
-    const loadMembers = () => (listedMembers ??= admitted(root));
+    const loadMembers = () => (listedMembers ??= withoutTriggerJoinedSuites(admitted(root)));
     if (values["skip-when-unread"]) {
       const decision = decideCensusFullPass({ root, changed, snapshot, readers, loadMembers, countsOk: violations.length === 0 });
       if (decision.skip) {

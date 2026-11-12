@@ -17,7 +17,7 @@ import { REPO_ROOT } from "#test/helpers/repo-root.js";
 import { CENSUS_READS_MARKER, sourceTextReaderOf } from "#src/lib/source-text-readers.js";
 import {
   CENSUS_FULL_PASS_SKIPPED_LABEL, PRECHECK_PATH_TRIGGERED_SUITES, PRECHECK_TRIGGERED_SUITES,
-  censusFullPassDecision, censusFullPassSuites, censusReadsDeclaration, main,
+  censusFullPassDecision, censusFullPassSuites, censusReadsDeclaration, main, withoutTriggerJoinedSuites,
   // @ts-ignore the executable .mjs module has no declaration file.
 } from "#scripts/census-precheck.mjs";
 // @ts-ignore the executable .mjs module has no declaration file.
@@ -90,18 +90,45 @@ test("W1-T11940 criterion 1: the skip relies only on suites that declare @census
   assert.equal(censusReadsDeclaration(`// @census-reads: the ledger, somewhere\n${SUITE_STUB}`, ROOTS), null,
     "a declaration that resolves to no walk is unknown");
   assert.equal(censusReadsDeclaration(`// @census-reads: src/a.ts\n// @census-closure: src/a.ts\n${SUITE_STUB}`, ROOTS), null,
-    "a closure seed widens past the declaration, so it is unknown");
+    "a closure seed widens past a declared FILE, so it is unknown");
+  assert.equal(censusReadsDeclaration(`// @census-reads: test/\n// @census-closure: src/a.ts\n${SUITE_STUB}`, ROOTS), null,
+    "a closure seed outside every declared directory is unknown");
+  assert.equal(censusReadsDeclaration(`// @census-closure: src/a.ts\n${SUITE_STUB}`, ROOTS), null, "a seed with no declaration is unknown");
+  assert.deepEqual(censusReadsDeclaration(`// @census-closure: src/a.ts\n// @census-reads: src/ — the closure lies under src/\n${SUITE_STUB}`, ROOTS),
+    ["src/"], "a closure seed under a declared directory is declared by it");
 
-  // Over the REAL tree: join every triggered suite (each named as changed), and read each one's declaration from disk.
+  // Over the REAL tree: force EVERY suite of both trigger tables into the full pass, as a diff touching all of them would,
+  // and read each one's declaration from disk. No suite may be undeclared, and every declared path must exist.
   const triggered = [...PRECHECK_TRIGGERED_SUITES, ...PRECHECK_PATH_TRIGGERED_SUITES];
   const roots = new Set(readdirSync(REPO_ROOT).filter((name) => name !== ".git"));
   const readHead = (p: string) => (existsSync(join(REPO_ROOT, p)) ? readFileSync(join(REPO_ROOT, p), "utf8") : null);
-  const suites = censusFullPassSuites({ changed: triggered.map((m: { testFile: string }) => m.testFile), members: [],
-    readHead, readBase: readHead, roots }) as { testFile: string; declared: string[] | null }[];
-  const declared = suites.filter((s) => s.declared !== null);
-  // Positive control: the walk saw both populations, so neither assertion below holds vacuously.
-  assert.ok(declared.length > 0 && suites.length > declared.length, `declared ${declared.length} of ${suites.length}`);
-  for (const s of declared) assert.ok(declaredOnDisk(s.testFile), `${s.testFile} is relied on but declares no @census-reads`);
+  const forced = triggered.map(({ testFile }: { testFile: string }) => ({ testFile, trigger: () => true }));
+  const suites = censusFullPassSuites({ changed: ["docs/never-read.md"], members: [], readHead, readBase: readHead, roots,
+    triggered: forced }) as { testFile: string; declared: string[] | null }[];
+  const rowFiles = [...new Set(triggered.map(({ testFile }: { testFile: string }) => testFile))].sort();
+  assert.ok(rowFiles.length >= 39, `the tables list ${rowFiles.length} suites`);
+  assert.deepEqual(suites.map((s) => s.testFile).sort(), rowFiles, "every table suite joined the forced pass");
+  assert.deepEqual(suites.filter((s) => s.declared === null).map((s) => s.testFile), [], "no suite the counts-only pass reports is undeclared");
+  for (const s of suites) {
+    assert.ok(declaredOnDisk(s.testFile), `${s.testFile} is relied on but declares no @census-reads`);
+    assert.ok(s.declared!.length > 0, `${s.testFile} declares reads`);
+    for (const walk of s.declared!) {
+      const path = walk.endsWith("/") ? walk.slice(0, -1) : walk;
+      assert.ok(existsSync(join(REPO_ROOT, path)), `${s.testFile} declares ${walk}, which names nothing in the tree`);
+    }
+    // A diff touching the suite's own file or its first declared read can never skip.
+    for (const changed of [[s.testFile], [s.declared![0]!]]) {
+      assert.equal(censusFullPassDecision({ changed, countsOk: true, suites }).skip, false, `${s.testFile} is skipped over ${changed[0]}`);
+    }
+  }
+  // Control: the same forced suites DO skip a diff none of them reads, so the loop above is not a decision that never skips.
+  assert.equal(censusFullPassDecision({ changed: ["docs/never-read.md"], countsOk: true, suites }).skip, true);
+  const dotfile = suites.filter((s) => s.declared!.includes(".gitignore/")).map((s) => s.testFile);
+  assert.deepEqual(dotfile, ["test/rules/the-root-scratch-ignore-stays-root-only.test.ts"]);
+  assert.equal(censusFullPassDecision({ changed: [".gitignore"], countsOk: true, suites }).skip, false, "a root dotfile is read by its suite");
+  assert.equal(censusFullPassDecision({ changed: [".gitignore-notes"], countsOk: true, suites }).skip, true, "a sibling name is not the file");
+  assert.deepEqual(withoutTriggerJoinedSuites([{ testFile: READS_X }, { testFile: SKILL_CENSUS }, { testFile: dotfile[0] }]), [{ testFile: READS_X }],
+    "a suite a trigger table names joins by its trigger, never by the walk its declaration adds");
   // The restated parser agrees with src/lib/source-text-readers.ts on every declaring suite in the tree.
   const markers = execFileSync("git", ["grep", "-lF", "--", CENSUS_READS_MARKER, "test/"], { cwd: REPO_ROOT, encoding: "utf8" })
     .split("\n").filter(Boolean);
@@ -115,12 +142,26 @@ test("W1-T11940 criterion 1: the skip relies only on suites that declare @census
     for (const walk of local) assert.ok(real.includes(walk), `${file}: ${walk} is not a walk of ${real.join(" ")}`);
   }
   assert.ok(compared >= 50, `compared ${compared} declaring suites`);
-  const allDeclared = suites.map((s) => ({ ...s, declared: s.declared ?? ["never/"] }));
-  const decision = censusFullPassDecision({ changed: ["docs/never-read.md"], countsOk: true, suites: allDeclared });
+  const decision = censusFullPassDecision({ changed: ["docs/never-read.md"], countsOk: true, suites });
   assert.equal(decision.skip, true);
-  assert.deepEqual(decision.reliedOn, allDeclared.map((s) => s.testFile), "the skip names every suite it relied on");
-  // The mandatory skill census joins every nonempty diff; until it declares its reads, no real diff skips.
-  assert.equal(censusFullPassDecision({ changed: ["docs/never-read.md"], countsOk: true, suites }).skip, false);
+  assert.deepEqual(decision.reliedOn, suites.map((s) => s.testFile), "the skip names every suite it relied on");
+
+  // The REAL triggers over a docs-only diff: the always-joined skill census declares its reads, so the skip is reachable.
+  const real = censusFullPassSuites({ changed: ["docs/never-read.md"], members: [], readHead, readBase: readHead, roots }) as
+    { testFile: string; declared: string[] | null }[];
+  assert.ok(real.some((s) => s.testFile === SKILL_CENSUS), "the skill census joins every nonempty diff");
+  assert.deepEqual(real.filter((s) => s.declared === null), [], "no suite the real triggers join is undeclared");
+  const docsOnly = censusFullPassDecision({ changed: ["docs/never-read.md"], countsOk: true, suites: real });
+  assert.equal(docsOnly.skip, true, docsOnly.reason);
+  assert.ok(docsOnly.reliedOn.includes(SKILL_CENSUS));
+  // ...and a source diff reads what the skill census imports, so it never skips.
+  const source = censusFullPassSuites({ changed: ["src/lib/x.ts"], members: [], readHead, readBase: readHead, roots }) as
+    { testFile: string; declared: string[] | null }[];
+  const touched = censusFullPassDecision({ changed: ["src/lib/x.ts"], countsOk: true, suites: source });
+  assert.equal(touched.skip, false);
+  assert.match(touched.reason, /^the diff touches a file \d+ census suite\(s\) declare they read: /);
+  assert.ok(source.find((s) => s.testFile === SKILL_CENSUS)?.declared?.some((w) => "src/lib/x.ts".startsWith(w)),
+    "the skill census declares the src/ it imports");
 });
 
 test("W1-T11940 criterion 2: a diff touching a declared census-read file runs the full pass exactly as today", (t) => {
