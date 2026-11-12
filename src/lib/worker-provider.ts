@@ -4069,7 +4069,12 @@ export async function sendCashRequest(config: Config, input: CashTransportOption
   if (!target.ok) return failed("not-ready", target.reason === "no-endpoint" ? "no cash endpoint" : `${target.keyEnv} is not set`);
   const base = new URL(target.endpoint.endsWith("/") ? target.endpoint : `${target.endpoint}/`);
   if (base.protocol !== "https:") return failed("not-ready", "cash endpoint must use https");
-  const endpoint = new URL(input.path.replace(/^\/+/, ""), base).toString();
+  if (/^[a-z][a-z0-9+.-]*:/i.test(input.path) || /^[\/\\]/.test(input.path) || /[\u0000-\u0020\u007f\\]/.test(input.path))
+    return failed("not-ready", "cash path must be relative to the deployment endpoint");
+  const resolved = new URL(input.path, base);
+  if (resolved.protocol !== "https:" || resolved.origin !== base.origin || !resolved.pathname.startsWith(base.pathname))
+    return failed("not-ready", "cash path must stay under the deployment endpoint");
+  const endpoint = resolved.toString();
   const azureOpenAi429Unbilled = unbilledAzureOpenAi429Policy(input.deployment, endpoint);
   const prefix = `${input.source}-${startedAt}-${randomUUID()}`;
   const requestBodyBytes = Buffer.byteLength(input.body, "utf8");

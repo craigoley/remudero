@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
@@ -53,16 +53,19 @@ function reply(usage: Record<string, unknown> = USAGE, status = 200, headers: Re
 
 test("W1-T12413 criterion 1: one request goes to the deployment's endpoint and path with its key, reserves first and settles from the reply's usage", async (t) => {
   const { dir, config } = fixture(t);
+  config.workerProviders!.cashDeploymentEndpoints = {
+    [DEPLOYMENT]: { endpoint: "https://deployment.example.test/tenant/api", keyEnv: "DEPLOYMENT_CASH_KEY" },
+  };
   const seen: Array<{ url: string; key: string | null; reservedBefore: number }> = [];
   const outcome = await sendCashRequest(config, { deployment: DEPLOYMENT, path: "openai/v1/decisions", body: BODY,
-    source: "fixture", outputTokenCeiling: 16, env, fetchImpl: async (url, init) => {
+    source: "fixture", outputTokenCeiling: 16, env: { ...env, DEPLOYMENT_CASH_KEY: "deployment-specific-key" }, fetchImpl: async (url, init) => {
       seen.push({ url: String(url), key: new Headers(init?.headers).get("api-key"),
         reservedBefore: Object.keys(allowance(dir).reservations).length });
       return reply();
     } });
   assert.equal(seen.length, 1);
-  assert.equal(seen[0]!.url, "https://cash.example.test/openai/v1/decisions");
-  assert.equal(seen[0]!.key, KEY);
+  assert.equal(seen[0]!.url, "https://deployment.example.test/tenant/api/openai/v1/decisions");
+  assert.equal(seen[0]!.key, "deployment-specific-key");
   assert.equal(seen[0]!.reservedBefore, 1);
   assert.equal(outcome.ok, true);
   if (!outcome.ok) return;
@@ -73,6 +76,39 @@ test("W1-T12413 criterion 1: one request goes to the deployment's endpoint and p
   assert.equal(outcome.reservedUsd, openWeightReservationUsd(DEPLOYMENT, Buffer.byteLength(BODY, "utf8"), 0, 16));
   const [row] = Object.values(allowance(dir).reservations);
   assert.equal(row!.settledUsd, openWeightUsageUsd(DEPLOYMENT, 40, 0));
+});
+
+test("W1-T12413 criterion 1: absolute caller URLs and paths escaping the deployment endpoint are refused before reservation or transport", async (t) => {
+  for (const path of [
+    "http://outside.example.test/openai/v1/decisions",
+    "https://outside.example.test/openai/v1/decisions",
+    "https://cash.example.test/tenant/api/openai/v1/decisions",
+    "//outside.example.test/openai/v1/decisions",
+    "\\\\outside.example.test/openai/v1/decisions",
+    "/openai/v1/decisions",
+    " https://outside.example.test/openai/v1/decisions",
+    "ht\ntps://outside.example.test/openai/v1/decisions",
+    "../decisions",
+    "%2e%2e/decisions",
+    "../api-other/decisions",
+  ]) {
+    await t.test(JSON.stringify(path), async (t) => {
+      const { dir, config } = fixture(t);
+      config.workerProviders!.cashEndpoint = "https://cash.example.test/tenant/api";
+      let calls = 0;
+      const outcome = await sendCashRequest(config, { deployment: DEPLOYMENT, path, body: BODY,
+        source: "fixture", outputTokenCeiling: 16, env,
+        fetchImpl: async () => { calls++; return reply(); } });
+      assert.equal(calls, 0);
+      assert.equal(outcome.ok, false);
+      if (outcome.ok) return;
+      assert.equal(outcome.reason, "not-ready");
+      assert.equal(outcome.reservedUsd, 0);
+      assert.equal(outcome.settledUsd, 0);
+      assert.equal(outcome.heldUsd, 0);
+      assert.equal(existsSync(join(dir, "state", OPENWEIGHT_ALLOWANCE_FILENAME)), false);
+    });
+  }
 });
 
 test("W1-T12413 criterion 2: the reservation counts the declared output ceiling, and a worker reservation costs the same as before", (t) => {
