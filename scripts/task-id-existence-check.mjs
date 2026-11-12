@@ -886,7 +886,7 @@ export function main(argv) {
     planTasksDir: values["plan-tasks-dir"],
   });
   // The selected plan owns its declarations and PR collisions; the public checkout still owns
-  // the one reservation namespace. Never fetch or mutate either checkout here.
+  // the one reservation namespace. Never fetch or mutate the public code checkout here.
   const codeRoot = values["code-root"];
   let reservationRemote = values.remote;
   if (codeRoot !== undefined) {

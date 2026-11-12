@@ -660,7 +660,12 @@ function preflightCodeRoot(input: Pick<PlanPrPreflightInput, "cwd" | "codeRoot">
   const root = checks.publicCodeRoot ?? (() => (createRequire(import.meta.url)("../../scripts/lib/repo-root.mjs") as { REPO_ROOT: string }).REPO_ROOT);
   return realpathSync(root());
 }
-const unreadableCodeRoot = (): PlanPrPreflightResult => ({ ok: false, failures: [], unreadable: [{ check: "tree", firstLine: "the selected plan destination or its public code root is unreadable" }] });
+function codeRootFailureReason(error: unknown): string {
+  if (error instanceof Error && error.message === "plan destination is unreadable") return "host-selection-unreadable";
+  const code = (error as NodeJS.ErrnoException | null)?.code;
+  return ["ENOENT", "EACCES", "EPERM", "ENOTDIR", "ELOOP"].includes(code ?? "") ? `public-code-root-${code}` : "public-code-root-unreadable";
+}
+const unreadableCodeRoot = (reason: string): PlanPrPreflightResult => ({ ok: false, failures: [], unreadable: [{ check: "tree", firstLine: `the selected plan destination or its public code root is unreadable (${reason})` }] });
 
 export type PlanPrPreflightCheck = "tree" | "lint-plan" | "task-id-existence" | "proof-discrimination" | "pr-title" | "shard-census";
 export interface PlanPrPreflightFinding {
@@ -1046,7 +1051,10 @@ function prTitleReading(title: string): PlanPrPreflightReading {
  */
 export function planPrPreflight(input: PlanPrPreflightInput, checks: PlanPrPreflightChecks = {}): PlanPrPreflightResult {
   let codeRoot: string | undefined;
-  try { codeRoot = preflightCodeRoot(input, checks); } catch { return unreadableCodeRoot(); }
+  try { codeRoot = preflightCodeRoot(input, checks); } catch (error) {
+    const reason = codeRootFailureReason(error);
+    return unreadableCodeRoot(reason);
+  }
   const d = { ...defaultPreflightChecks, ...checks };
   const budgetMs = checks.budgetMs ?? (() => inTreeCheckBudgetMs());
   const tally = preflightTally();
@@ -1073,7 +1081,10 @@ export async function planPrPreflightAsync(
   checks: PlanPrPreflightAsyncChecks = {},
 ): Promise<PlanPrPreflightResult> {
   let codeRoot: string | undefined;
-  try { codeRoot = preflightCodeRoot(input, checks); } catch { return unreadableCodeRoot(); }
+  try { codeRoot = preflightCodeRoot(input, checks); } catch (error) {
+    const reason = codeRootFailureReason(error);
+    return unreadableCodeRoot(reason);
+  }
   const d = { ...defaultPreflightChecksAsync, ...checks };
   const budgetMs = checks.budgetMs ?? (() => inTreeCheckBudgetMs());
   const tally = preflightTally();
@@ -1158,7 +1169,10 @@ export function planPrPreflightAtCommit(
   checks: PlanPrPreflightChecks = {},
 ): PlanPrPreflightResult {
   let codeRoot: string | undefined;
-  try { codeRoot = preflightCodeRoot({ cwd: repoDir, ...pr }, checks); } catch { return unreadableCodeRoot(); }
+  try { codeRoot = preflightCodeRoot({ cwd: repoDir, ...pr }, checks); } catch (error) {
+    const reason = codeRootFailureReason(error);
+    return unreadableCodeRoot(reason);
+  }
   const parent = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}plan-pr-preflight-`));
   const tree = join(parent, "tree");
   const realTree = join(realpathSync(parent), "tree");
@@ -1194,7 +1208,10 @@ export async function planPrPreflightAtCommitAsync(
   checks: PlanPrPreflightAsyncChecks = {},
 ): Promise<PlanPrPreflightResult> {
   let codeRoot: string | undefined;
-  try { codeRoot = preflightCodeRoot({ cwd: repoDir, ...pr }, checks); } catch { return unreadableCodeRoot(); }
+  try { codeRoot = preflightCodeRoot({ cwd: repoDir, ...pr }, checks); } catch (error) {
+    const reason = codeRootFailureReason(error);
+    return unreadableCodeRoot(reason);
+  }
   const parent = await mkdtemp(join(tmpdir(), `${RMD_TMP_PREFIX}plan-pr-preflight-`));
   const tree = join(parent, "tree");
   const realTree = join(realpathSync(parent), "tree");
