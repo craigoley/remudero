@@ -166,6 +166,8 @@ function runHostUpdate(
       STUB_MODE: mode,
       RMD_STATE_DIR: state,
       RMD_RECYCLE_HOST_LOCK: join(state, "recycle-container.lock"),
+      // W1-T12409: the reclaim walks this empty tree, never the real ~/.codex or ~/.claude.
+      RMD_AGENT_HISTORY_DIRS: join(state, "no-agent-history"),
       ...extraEnv,
     },
   });

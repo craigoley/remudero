@@ -27,6 +27,9 @@
     - src/lib/producer-identity.ts
     - src/run-task.ts
     - docs/cli-reference.md
+    - scripts/console-parity-ratchet.mjs
+    - scripts/console-parity-baseline.json
+    - test/help-renders-a-summary-not-a-paragraph.test.ts
     - test/review/a-decision-model-answers-typed-questions-in-one-cash-request.test.ts
   status: queued
   attempts: 0

@@ -32,7 +32,7 @@ import { dirname, join, normalize } from "node:path/posix";
 import { censusWalksOf } from "./ci-parity.js";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { readFileIfExists, writeAtomic } from "./fs-race-safe.js";
-import { landedPrUrl, type GardenerDeps } from "./gardener.js";
+import { landedPrUrl, prepareGardenTaskIds, releaseGardenTaskIds, type GardenerDeps, type GardenTaskIdMinter } from "./gardener.js";
 import { ledgerRotationDigests, readLedgerUnionRecordsSync } from "./ledger-union.js";
 import { machineShardLandingGuard, renderMachineShard } from "./machine-filing.js";
 import { retirementHoldsOrigin, taskLandedOnMain } from "./plan.js";
@@ -574,9 +574,11 @@ async function fileIncident(
 ): Promise<string> {
   const { origin, file, title, evidence, prs } = incident;
   const workspace = await deps.openWorkspace();
+  let unfiled = "the filing ended before its PR opened";
   try {
     if (!workspace.branch) throw new Error("flake-incident: filing workspace has no branch for task-id reservation");
-    const taskId = await (sources.mintTaskId.async ?? sources.mintTaskId)(workspace.branch);
+    // W1-T12410: the shared reserve and release path, so a filing that opens nothing gives its id back.
+    const [taskId] = await prepareGardenTaskIds(workspace, 1, sources.mintTaskId as GardenTaskIdMinter, true) as [string];
     const subject = title === "" ? file : `'${title}' (${file})`;
     const runs = [...evidence.runs].sort((a, b) => a - b);
     const rendered = renderMachineShard({
@@ -624,7 +626,11 @@ async function fileIncident(
       recovered: evidence.recovered, also_failed: evidence.alsoFailed, also_failed_prs: evidence.alsoFailedPrs, base_shas: evidence.baseShas,
     });
     return taskId;
+  } catch (e) {
+    unfiled = String((e as Error)?.message ?? e);
+    throw e;
   } finally {
+    await releaseGardenTaskIds(workspace, `flake-incident gardener: ${unfiled}`, true);
     await workspace.dispose();
   }
 }
