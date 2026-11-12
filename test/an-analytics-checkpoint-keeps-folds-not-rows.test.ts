@@ -150,7 +150,8 @@ async function fold(rows: readonly Row[], split?: number): Promise<{ scratch: st
 
 // Re-pinned when judge calibration gained humanRates and method.rates: with those two fields
 // stripped, this corpus still digests to the prior golden e89b83ee…3ff8439, so nothing else moved.
-const GOLDEN = "ba139e8af0083474a68b047c609e518caaf92d2edf049464712b3b1c56ecc282";
+// Re-pinned for W1-T12414's typedAnswerScores: with it stripped, the digest is the prior ba139e8a…c56ecc282.
+const GOLDEN = "cd138dd025ba23211bec39513143219c7080bef04d34e07b9be17a2f02fa5351";
 
 test("unit test: work integrity, judge calibration and the operator-agent signals read byte-identically from the checkpoint's folds", async () => {
   const rows = corpus(600);
