@@ -1,0 +1,75 @@
+- id: W1-T12410
+  title: "A new task file that the landing sets aside releases its reserved id, and a refused flake-incident filing releases its id"
+  repo: remudero
+  depends_on: [W1-T12222]
+  priority: 0.8
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # a wrong release frees an id that a branch or a pull request still carries
+  band_meaning: blast-radius
+  origin: operator-session#w1-t12222-follow-up-2026-11-12
+  plan_refs:
+    - W1-T12199
+    - W1-T12222
+  files:
+    - src/lib/feedback-landing.ts
+    - src/lib/flake-incident-gardener.ts
+    - test/gardeners/a-task-file-the-landing-sets-aside-releases-its-reserved-id.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "A new task file that a later landing call sets aside, because its landing pull request closed without a merge or the plan preflight refused it, releases its id reservation when the landing branch holds it"
+      proof: "grep: W1-T12410 criterion 1 in test/gardeners/a-task-file-the-landing-sets-aside-releases-its-reserved-id.test.ts"
+    - claim: "In one land of a checkout that files only task files, where the landing keeps one new file and sets another aside, the id of the file set aside is released and the id of the file it keeps is not"
+      proof: "grep: W1-T12410 criterion 2 in test/gardeners/a-task-file-the-landing-sets-aside-releases-its-reserved-id.test.ts"
+    - claim: "The landing keeps a reservation whose holder is another branch, and keeps the id of a new file that it sets aside because origin/main now holds a file at its path"
+      proof: "grep: W1-T12410 criterion 3 in test/gardeners/a-task-file-the-landing-sets-aside-releases-its-reserved-id.test.ts"
+    - claim: "An edit of a task file that origin/main holds releases no reservation when the landing sets it aside"
+      proof: "grep: W1-T12410 criterion 4 in test/gardeners/a-task-file-the-landing-sets-aside-releases-its-reserved-id.test.ts"
+    - claim: "The flake-incident gardener reserves its id through `prepareGardenTaskIds` and releases it through `releaseGardenTaskIds` when its land is refused or opens no pull request; a filing that opens a pull request or waits keeps its id"
+      proof: "grep: W1-T12410 criterion 5 in test/gardeners/a-task-file-the-landing-sets-aside-releases-its-reserved-id.test.ts"
+  rationale: |
+    FROM THE CODE, origin/main 89f2792b4, 2026-11-12.
+    - W1-T12222 (#18133) lets a gardener file a new task file through the sealed landing of task files. The
+      gardener reserves the id with the landing branch as holder. Its PR body says what stays open: "A file
+      that waits and is set aside in a later pass, by another call, leaves its id as a hole: the pass that
+      reserved it is gone, and a garden has no release path outside its pass."
+    - `taskFilesLandingSteps` in src/lib/feedback-landing.ts sets a staged file aside in three cases: its
+      landing pull request was closed without a merge, origin/main changed its path, or the plan preflight
+      refused it in a batch. None of them releases the reservation of a new file.
+    - The holder of that reservation is the landing branch. The landing pushes that branch again for every
+      batch, so `reservationHolderDrift` reads the id as held for as long as the landing is in use. The id
+      is never filed and never freed.
+    - A second case: in a checkout that files only task files, a land where the landing keeps one file and
+      sets another aside returns a wait (W1-T12222). `releaseGardenTaskIds` then releases nothing, so the id of the
+      file set aside is also kept.
+    - The sweep calls `landTaskFilesAsync(repoDir, [], ...)` once per pass (src/lib/sweep.ts). That is the
+      call that sets aside a file staged by an earlier pass.
+    - The flake-incident gardener (src/lib/flake-incident-gardener.ts, `fileIncident`) mints its id with
+      `sources.mintTaskId` directly, not through `prepareGardenTaskIds`. When its land is refused (for
+      example by the W1-T12222 check that a finding already waits) or opens no pull request, it throws and
+      its id is never released. The selector-shadow gardener, on the same checkout, uses the shared
+      reserve and release path.
+  design: |
+    1. In `taskFilesLandingSteps`, when the landing sets aside a staged file whose base blob is null (a new
+       file) and origin/main holds nothing at its path, read the id from the file's `- id:` line. Read the
+       anchor of `refs/rmd-id/<id>` from origin (`readReservationAnchorsAsync`). When the anchor's holder
+       (`reservationHolderBranch`) is the landing branch, release it with `releaseTaskIdReservationAsync`,
+       leased on the sha that the listing gave. Use the landing's own git seam as the runner. Any other
+       holder, an absent ref, or an unreadable anchor keeps the ref.
+    2. Record the outcome on the `task_files_landing.set_aside` row of a new file: `reserved_id` and
+       `id_release` (released, already_absent, foreign, unreadable, failed, kept_other_holder,
+       kept_main_holds_path, no_id). An edit is not changed.
+    3. The release is idempotent. When the gardener's own pass also releases the id, its release finds the
+       ref absent and does nothing.
+    4. In `fileIncident`, reserve with `prepareGardenTaskIds(workspace, 1, sources.mintTaskId, true)` and,
+       in a `finally`, call `releaseGardenTaskIds(workspace, reason, true)`, as `land` in
+       src/lib/selector-shadow-gardener.ts does. The gardener's tracking keeps the id when the land opened a
+       pull request, waits or threw.
+    NOT IN SCOPE: the gate script, the grace period of a reservation, and the reaper of old reservations.
+  falsifier: |
+    Remove the release from the set-aside path and criteria 1 and 2 must fail. Release whatever the holder
+    is and criterion 3 must fail. Mint directly again in `fileIncident` and criterion 5 must fail. Restore
+    and require all five to pass.
