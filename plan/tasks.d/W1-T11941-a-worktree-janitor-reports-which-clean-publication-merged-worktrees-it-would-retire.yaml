@@ -19,7 +19,7 @@
     - src/lib/daemon.ts
     - test/daemon/a-worktree-janitor-reports-what-it-would-retire.test.ts
     - "src/cli/commands/daemon.ts"
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: The janitor takes its roots from the operator checkout worktree list, not a hard-coded list, and writes one would-retire ledger row per qualifying worktree naming the reason
