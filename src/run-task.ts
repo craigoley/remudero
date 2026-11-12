@@ -2939,6 +2939,7 @@ import { buildYieldsToRepair } from "./lib/repair-memory-demand.js";
 // `plan/policy.yaml`, so no new policy row is added here).
 import { loadDefaultCostAnomalyPolicy, type CostAnomalyPolicy } from "./lib/cost-anomaly.js";
 import { hostWorktreeGit, hostWorktreeGitAsync, WorktreePointerRefusedError, type HostWorktreeGitOptions } from "./lib/worktree-git.js";
+import { observeComputedPlacement } from "./lib/test-path-resolver.js";
 import {
   defaultGitCapture,
   defaultGitCaptureAsync,
@@ -6553,6 +6554,7 @@ export function fixRungScopeStandDownReason(
   reachableRemedyFiles: readonly ReachableRemedyFileInput[] = [],
   failingChecks: readonly Pick<CiFailure, "name" | "logTail">[] = [],
   registrationChanges: readonly RegistrationChange[] = [],
+  placement?: { root: string; proofs: readonly string[] },
 ):
   | {
       reason: string;
@@ -6561,7 +6563,7 @@ export function fixRungScopeStandDownReason(
       gateRemedyDeadlock?: FixRungGateRemedyScopeDeadlock;
     }
   | undefined {
-  return fixCommandHelpers(fixCommandHost()).fixRungScopeStandDownReason(currentDiffFiles, baselineDiffFiles, declaredFiles, reachableRemedyFiles, failingChecks, registrationChanges);
+  return fixCommandHelpers(fixCommandHost()).fixRungScopeStandDownReason(currentDiffFiles, baselineDiffFiles, declaredFiles, reachableRemedyFiles, failingChecks, registrationChanges, placement);
 }
 
 /**
@@ -31496,11 +31498,19 @@ export function commitWorkerEdits(
     declaresProofTitle(readFileSync(join(repoDir, path), "utf8"), titles),
   );
   const admittedTests = admittedFixTestPaths(changed, options.admitTests);
+  // W1-T11501: a declared-but-not-yet-created test written at its contents-computed folder is the declared test, not
+  // scope widening — the ONE shared predicate (lib/test-path-resolver.ts) also used by the push, fix and review guards.
+  const computedPlacementTests = observeComputedPlacement({
+    root: repoDir, declaredFiles: declaredPaths, proofs: acceptance.map((criterion) => criterion.proof),
+    candidates: changed.filter((path) => !pathIsUnderDeclaredSurface(path, declaredPaths)),
+    baseTracked: () => runGit(["ls-tree", "-r", "--name-only", "-z", "HEAD", "--", "test/"]).split("\0").filter(Boolean),
+  }).admitted;
   const registrationChanges = declaredPaths.every(isInPlanScope) ? [] :
     readRegistrationChanges(repoDir, changed.filter((path) => !pathIsUnderDeclaredSurface(path, declaredPaths)), undefined, runGit, options.priorHeadSha);
   const admittedRegistrations = registrationChanges.filter(isAdditiveRegistrationChange).map((change) => change.path);
   const declared = changed.filter((path) => pathIsUnderDeclaredSurface(path, declaredPaths) ||
-    regenerable.includes(path) || proofMatchedTests.includes(path) || admittedTests.includes(path) || admittedRegistrations.includes(path));
+    regenerable.includes(path) || proofMatchedTests.includes(path) || admittedTests.includes(path) || computedPlacementTests.has(path) ||
+    admittedRegistrations.includes(path));
   const undeclared = changed.filter((path) => !declared.includes(path));
   // A checkpoint stages the undeclared paths as well; git itself still forces the refusals below.
   const staged = options.checkpoint ? changed : declared;
