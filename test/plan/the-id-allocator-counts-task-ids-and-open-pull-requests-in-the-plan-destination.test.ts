@@ -49,7 +49,7 @@ const reservations=await import(req.source+'/src/lib/task-id-reservation.ts');
 const calls=[],out=[],err=[];console.log=(...a)=>out.push(a.join(' '));console.error=(...a)=>err.push(a.join(' '));
 const runGit=(args)=>{calls.push({root:req.pub,args});if(args[0]==='push'&&args.some(x=>x.startsWith(':refs/rmd-id/')))throw Error('forbidden reservation deletion');const r=spawnSync('git',['-C',req.pub,...args],{encoding:'utf8'});return{status:r.status,stdout:r.stdout??'',stderr:r.stderr??''};};
 const deps={repoRoot:req.pub,runGit,openPrTexts:()=>[],destinationStateDir:()=>req.state,
- destinationPrFetch:(args)=>{calls.push({root:'ops-gh',args});if(req.prFailure)throw Error('private response must not escape');const page=Number(/[?&]page=(\d+)/.exec(args[1])?.[1]??'1');return(req.prPages?.[page-1]??(page===1?req.prTexts??[]:[])).map((text,i)=>({number:(page-1)*100+i+1,title:text,body:'',state:'open',head:{ref:'ops-plan-'+((page-1)*100+i),sha:'a'.repeat(40)},created_at:'2026-11-01T00:00:00Z',updated_at:'2026-11-01T00:00:00Z'}));},
+ destinationPrFetch:(args)=>{calls.push({root:'ops-gh',args});if(req.prFailure)throw Error('private response must not escape');const page=Number(/[?&]page=(\d+)/.exec(args[1])?.[1]??'1');return(req.prPages?.[page-1]??(page===1?req.prTexts??[]:[])).map((text,i)=>({number:(page-1)*100+i+1,title:text,body:'',state:'open',head:{ref:'ops-plan-'+((page-1)*100+i),sha:'a'.repeat(40)},created_at:new Date().toISOString(),updated_at:new Date().toISOString()}));},
  destinationGit:(cwd,args,input)=>{calls.push({root:cwd,args});if(req.fetchFailure)throw Error('private fetch response must not escape');const r=spawnSync('git',['-C',cwd,...args],{encoding:'utf8',input});if(r.status!==0)throw Error('fixture destination git failed');return r.stdout;},
  auditHistoryIds:()=>[],auditPullRequests:()=>req.auditPulls??[],auditNowMs:()=>Date.now(),reapLedgerPath:req.root+'/reap-ledger.ndjson'};
 if(req.defaultGit)delete deps.destinationGit;
@@ -180,8 +180,9 @@ test("W1-T12206 criterion 1: default bounded Git reads the fetched commit rather
 
 test("W1-T12206 criterion 1: the default GitHub transport uses the actual selected repository", async (t) => {
   const f = fixture(t);
+  const observedAt = new Date().toISOString();
   const rows = [{ number: 1, title: "W1-T201", body: "", state: "open", head: { ref: "ops-filing", sha: "a".repeat(40) },
-    updated_at: "2026-11-01T00:00:00Z", created_at: "2026-11-01T00:00:00Z" }];
+    updated_at: observedAt, created_at: observedAt }];
   await withGhShim([{ when: "fixture/control", stdout: "controlled" },
     { when: "repos/fixture-owner/fixture-ops/pulls?", stdout: JSON.stringify(rows) }], shim => {
     // Exercise the same shipped transport as the default reader instead of a separate raw executable launch.
