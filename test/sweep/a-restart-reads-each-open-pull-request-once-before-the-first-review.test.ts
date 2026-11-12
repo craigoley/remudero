@@ -14,6 +14,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { setTimeout as sleep } from "node:timers/promises";
 import { test } from "node:test";
 import { servedOpenPrViews } from "#src/cli/commands/daemon.js";
 import type { LightPassScope } from "#src/lib/daemon.js";
@@ -123,7 +124,16 @@ function fixture() {
   const storePath = join(root, "state", "cache", "plan-filing-files.json");
   return { root, repo, logs, posted, rows, hook, timing, storePath, useShim,
     moveLiveHead: (headSha: string) => { liveDigest = `digest-${headSha}`; },
-    cleanup: () => {
+    cleanup: async () => {
+      // A posted review frees a lane, and the refill reads the open pull requests after the hook returns.
+      // Wait until every shim call has ended and none starts for 250 ms, so no read reaches the real `gh`.
+      for (let quiet = 0, rounds = 0; quiet < 5 && rounds < 200; rounds++) {
+        const before = shims.flatMap((gh) => gh.events());
+        await sleep(50);
+        const after = shims.flatMap((gh) => gh.events());
+        const open = after.filter((e) => e.phase === "start").length - after.filter((e) => e.phase === "end").length;
+        quiet = open === 0 && after.length === before.length ? quiet + 1 : 0;
+      }
       for (const [key, value] of oldEnv) {
         if (value === undefined) delete process.env[key]; else process.env[key] = value;
       }
@@ -142,7 +152,7 @@ test("W1-T12236 criterion 1: the boot light sweep uses the views of the current 
     assert.equal(listReads(gh, f.repo), 0, "no open pull request list read");
     assert.equal(fileReads(gh, f.repo), 0, "no file read");
     assert.deepEqual(f.posted, [{ prNumber: PR, headSha: "head-tick" }]);
-  } finally { f.cleanup(); }
+  } finally { await f.cleanup(); }
 });
 
 test("W1-T12236 criterion 2: with no tick read, or one older than the tick, the light sweep reads its own views", async () => {
@@ -155,7 +165,7 @@ test("W1-T12236 criterion 2: with no tick read, or one older than the tick, the 
       assert.ok(listReads(gh, f.repo) >= 1, "the hook read the open pull requests itself");
       assert.ok(f.posted.every((post) => post.headSha === "head-live"), JSON.stringify(f.posted));
       assert.equal(f.timing()[0]?.views_source, "own_read");
-    } finally { f.cleanup(); }
+    } finally { await f.cleanup(); }
   }
   const f = fixture();
   try {
@@ -163,7 +173,7 @@ test("W1-T12236 criterion 2: with no tick read, or one older than the tick, the 
     const served = servedOpenPrViews(() => generation(TICK_STARTED_AT_MS + 5, [view("head-tick")]), () => undefined);
     await f.hook(served)(BOOT);
     assert.ok(listReads(gh, f.repo) >= 1, "no known tick start: the hook read its own views");
-  } finally { f.cleanup(); }
+  } finally { await f.cleanup(); }
 });
 
 test("W1-T12236 criterion 3: a light sweep with any other scope reads its own views", async () => {
@@ -176,7 +186,7 @@ test("W1-T12236 criterion 3: a light sweep with any other scope reads its own vi
       assert.ok(listReads(gh, f.repo) >= 1, `scope ${scope?.scope ?? "ordinary"} read its own views`);
       assert.equal(f.posted.some((post) => post.headSha === "head-tick"), false);
       assert.equal(f.timing()[0]?.views_source, "own_read");
-    } finally { f.cleanup(); }
+    } finally { await f.cleanup(); }
   }
 });
 
@@ -197,7 +207,7 @@ test("W1-T12236 criterion 4: a boot review from the tick read is for its head, a
     const refused = f.rows.filter((row) => row.step === "review.post_refused");
     assert.equal(refused.length, 1);
     assert.equal(refused[0]!.head_sha, "head-tick");
-  } finally { f.cleanup(); }
+  } finally { await f.cleanup(); }
 });
 
 test("W1-T12236 criterion 5: a second hook on the same state directory makes no file read for a head read completely", async () => {
@@ -213,7 +223,7 @@ test("W1-T12236 criterion 5: a second hook on the same state directory makes no 
     assert.ok(listReads(second, f.repo) >= 1, "the second hook read its own views");
     assert.equal(fileReads(second, f.repo), 0, "the kept file list answered");
     assert.deepEqual(f.posted.map((post) => post.headSha), ["head-a", "head-a"]);
-  } finally { f.cleanup(); }
+  } finally { await f.cleanup(); }
 });
 
 test("W1-T12236 criterion 6: a kept file list for another head, or an unreadable store, gives a GitHub read", async () => {
@@ -236,7 +246,7 @@ test("W1-T12236 criterion 6: a kept file list for another head, or an unreadable
     assert.equal(f.logs.filter((row) => row.step === "plan_filing_files.store_unreadable").length, 1);
     assert.deepEqual(f.posted, [{ prNumber: PR, headSha: "head-b" }]);
     assert.equal((JSON.parse(readFileSync(f.storePath, "utf8")) as { schema: number }).schema, 1, "the save replaced the bad file");
-  } finally { f.cleanup(); }
+  } finally { await f.cleanup(); }
 });
 
 test("W1-T12236 criterion 7: sweep_light.pre_review_timing names the source of its views", async () => {
@@ -248,7 +258,7 @@ test("W1-T12236 criterion 7: sweep_light.pre_review_timing names the source of i
     await hook(BOOT);
     await hook(IDLE);
     assert.deepEqual(f.timing().map((row) => row.views_source), ["tick_read", "own_read"]);
-  } finally { f.cleanup(); }
+  } finally { await f.cleanup(); }
 });
 
 test("W1-T12236: a kept entry is used only for its own pull request number and head", () => {

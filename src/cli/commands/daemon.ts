@@ -1896,12 +1896,9 @@ export async function daemonCommand(
         claimSweepSettled,
         bootPhases,
         refreshMerged,
-        refreshMergedAsync: readTick ? ((refresh: NonNullable<DaemonDeps["refreshMergedAsync"]>) => (plan?: Plan) => {
-          tickReadStartedAtMs = systemClock.now();
-          return refresh(plan);
-        })(buildDaemonReadRefresher({
+        refreshMergedAsync: readTick ? buildDaemonReadRefresher({
           read: readTick, plan: () => activePlanRef.current, previous: () => lastProj,
-          invalidate: () => { tickReadGeneration = undefined; },
+          invalidate: () => { tickReadGeneration = undefined; tickReadStartedAtMs = systemClock.now(); },
           publish: (snapshot: ReadGeneration<TickReadFacts>) => {
             tickReadGeneration = snapshot;
             lastProj = new Map(snapshot.facts.projection);
@@ -1911,7 +1908,7 @@ export async function daemonCommand(
             boardOpenPrCount.observe(snapshot.facts.openBranches);
           },
           ledgerPath, statusPath, log,
-        })) : undefined,
+        }) : undefined,
         readLoopTelemetry: loopTelemetry.sample,
         readMemoryTelemetry: daemonMemoryTelemetryReader(daemonLoadedCodeSha, { generation: runId, footprint: daemonFootprint }),
         memoryGovernor: daemonMemoryGovernor,
