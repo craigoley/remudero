@@ -67,7 +67,7 @@ import { feedbackLandingSweepRungs, type LandingReviewRequest } from "../../lib/
 import { readAffectedSuitesInputAsync } from "../../lib/affected-suites.js";
 import { parseProposalRegistry } from "../../lib/inbox.js";
 import { appendLedger, markDaemonProcessActor } from "../../lib/ledger.js";
-import { clockFromMillisFn, fixedClock, systemClock } from "../../lib/clock.js";
+import { clockFromMillisFn, fixedClock, systemClock, type Clock } from "../../lib/clock.js";
 import { getHeapStatistics } from "node:v8";
 import { sweepInflightLocksWithReceipts } from "../../lib/benchmark-run.js";
 import { ledgerMemoHolders } from "../../lib/ledger-union.js";
@@ -672,6 +672,40 @@ export function freshnessRestartLadder(rows: FreshnessRestartValues): { scoreLim
   return { scoreLimit: rows.scoreLimit, stalenessHorizonMs: rows.stalenessHorizonMs };
 }
 
+/** W1-T12239: start the first tick's read now. The first call for the same plan takes it while it is fresh; a
+ *  changed plan, a failed or stale early read, and every later call read again. One `daemon.first_tick_read` row. */
+function firstTickReadOf<I extends { plan: Plan }, T>(
+  read: (input: I) => Promise<ReadGeneration<T>>, plan: Plan, log: (step: string, extra?: Record<string, unknown>) => void,
+  clock: Clock,
+): (input: I) => Promise<ReadGeneration<T>> {
+  const startedAtMs = clock.now();
+  let settledAtMs: number | undefined;
+  const early: Promise<{ generation?: ReadGeneration<T>; reason?: string }> = read({ plan } as I)
+    .then((generation) => ({ generation }))
+    .catch((error: unknown) => ({ reason: String((error as Error)?.message ?? error).slice(0, 300) }))
+    .finally(() => { settledAtMs = clock.now(); });
+  let taken = false;
+  return async (input) => {
+    if (taken) return read(input);
+    taken = true;
+    const askedAtMs = clock.now();
+    let source = "plan_changed";
+    let reason: string | undefined;
+    try {
+      if (input.plan !== plan) return await read(input);
+      const outcome = await early;
+      reason = outcome.reason;
+      const fresh = freshReadGeneration(outcome.generation, { consumer: "first_tick_read", clock, log });
+      source = fresh ? "early" : reason === undefined ? "early_stale" : "early_failed";
+      return fresh ?? await read(input);
+    } finally {
+      log("daemon.first_tick_read", { source, first_tick_read_ms: clock.now() - askedAtMs,
+        first_tick_read_overlap_ms: Math.max(0, Math.min(settledAtMs ?? askedAtMs, askedAtMs) - startedAtMs),
+        ...(reason === undefined ? {} : { reason }) });
+    }
+  };
+}
+
 export async function daemonCommand(
   rest: string[],
   deps: {
@@ -1264,6 +1298,22 @@ export async function daemonCommand(
     if (target.isSelf) writeSyncLine(2, "  ⚠️ SELF-HOSTING target — the daemon's own source repo.");
     return 0;
   }
+  // W1-T12239: the first tick's read needs only the token and the plan, so it starts here, before the lifetime
+  // history, the lock and the adoption. The outer finally stops a plane that the cleanup list never took.
+  const readOptions: TickReadOptions = { owner: target.owner, repo: target.repo, config, ledgerPath, checkoutRoot: targetCheckoutRoot };
+  let inlineProducer: ReturnType<typeof tickReadProducer> | undefined;
+  const readPlane = deps.githubFactory ? undefined : (deps.startReadPlane ?? startReadPlane)({
+    // W1-T9722: the worker starts from the narrow tick-read entry (a current bundle when one is vouched for).
+    workerUrl: tickReadWorkerUrl(), workerInput: readOptions, log, spawn: () => startTickReadWorker(readOptions),
+    inline: (input: TickReadRequest) => (inlineProducer ??= planReaders.inlineTickRead(readOptions, { log }))(input),
+  });
+  let readPlaneStopped: Promise<void> | undefined;
+  const stopReadPlane = (): Promise<void> => (readPlaneStopped ??= readPlane?.stop() ?? Promise.resolve());
+  const readTick = readPlane && planReaders.tickRead(readPlane.read);
+  const checkStop = deps.checkStop ?? (() => stopDetail(config.root));
+  // A loop that ends before its first read (max 0, or STOP at the start) gets no early read.
+  const firstTickRead = readTick && (opts.max === 0 || checkStop() ? readTick
+    : firstTickReadOf(readTick, plan, log, clockFromMillisFn(deps.now)));
 
   // W1-T414: ONE batched read for this whole `rmd daemon` invocation — see drainCommand's
   // identical wiring/doc just above. Resolved AFTER the `--dry-run` early return above (never
@@ -1293,7 +1343,8 @@ export async function daemonCommand(
   // W1-T3758: one bounded archive scan before the daemon starts dispatching. The live ledger is
   // still read at each gate consultation; unread history retains the old live-only behaviour.
   const archivedLifetime = await auditedLifetimeTalliesFromArchives(dirname(ledgerPath), undefined,
-    (failure: LifetimeIndexFailure) => log("dispatch.lifetime_history_unavailable", { ...failure, phase: "index" }));
+    (failure: LifetimeIndexFailure) => log("dispatch.lifetime_history_unavailable", { ...failure, phase: "index" }))
+    .catch(async (error: unknown) => { await stopReadPlane(); throw error; });
   try {
   if (archivedLifetime.history === undefined) {
     log("dispatch.lifetime_history_unavailable", {
@@ -1346,6 +1397,7 @@ export async function daemonCommand(
   const cleanup: Array<{ resource: string; close: () => void | Promise<void> }> = [
     { resource: "drain_lock", close: () => drainLock.release() },
     { resource: "stop_marker", close: () => { consumeStop(config.root); } },
+    ...(readPlane ? [{ resource: "read_plane", close: stopReadPlane }] : []),
   ];
   try {
   const bootClaimLock = fixedClock(clockFromMillisFn(deps.now).now());
@@ -1553,7 +1605,6 @@ export async function daemonCommand(
   // the launchd unit's own closed EnvironmentVariables allowlist (lib/launchd.ts).
   // Also runs the W1-T115 boot sweep of stale rmd-owned temp dirs (the
   // 26,711-dir ENOSPC incident's backstop) and logs the count via daemon.tmp_sweep.
-  const checkStop = deps.checkStop ?? (() => stopDetail(config.root));
   // `runDaemon` is a test-only loop seam. Its fixtures must not inherit the live shared hold a
   // production daemon is deliberately required to honour; injected `checkPause` still takes precedence.
   const checkPause = deps.checkPause ?? (deps.runDaemon ? () => pauseDetail(config.root) : () => checkSharedPause(config.root, realDeps().sharedPauseGit));
@@ -1781,15 +1832,6 @@ export async function daemonCommand(
     mint: deps.gitCredentialMint,
   });
   if (gitCredentialSocket) cleanup.push({ resource: "git_credential_socket", close: () => gitCredentialSocket.close() });
-  const readOptions: TickReadOptions = { owner: target.owner, repo: target.repo, config, ledgerPath, checkoutRoot: targetCheckoutRoot };
-  let inlineProducer: ReturnType<typeof tickReadProducer> | undefined;
-  const readPlane = deps.githubFactory ? undefined : (deps.startReadPlane ?? startReadPlane)({
-    // W1-T9722: the worker starts from the narrow tick-read entry (a current bundle when one is vouched for).
-    workerUrl: tickReadWorkerUrl(), workerInput: readOptions, log, spawn: () => startTickReadWorker(readOptions),
-    inline: (input: TickReadRequest) => (inlineProducer ??= planReaders.inlineTickRead(readOptions, { log }))(input),
-  });
-  if (readPlane) cleanup.push({ resource: "read_plane", close: () => readPlane.stop() });
-  const readTick = readPlane && planReaders.tickRead(readPlane.read);
   const loopTelemetry = (deps.startLoopTelemetry ?? startReadPlaneTelemetry)();
   cleanup.push({ resource: "loop_telemetry", close: () => loopTelemetry.stop() });
   // The daemon's rolling rss+swap samples, kept across rotations and restarts for the memory budget's daemon split.
@@ -1833,8 +1875,8 @@ export async function daemonCommand(
       plan,
       {
         refreshMerged,
-        refreshMergedAsync: readTick ? buildDaemonReadRefresher({
-          read: readTick, plan: () => activePlanRef.current, previous: () => lastProj,
+        refreshMergedAsync: firstTickRead ? buildDaemonReadRefresher({
+          read: firstTickRead, plan: () => activePlanRef.current, previous: () => lastProj,
           invalidate: () => { tickReadGeneration = undefined; },
           publish: (snapshot: ReadGeneration<TickReadFacts>) => {
             tickReadGeneration = snapshot;
@@ -2575,5 +2617,8 @@ export async function daemonCommand(
   }
   } finally {
     archivedLifetime.history?.close?.();
+    if (!readPlaneStopped) {
+      await stopReadPlane().catch((error: unknown) => log("daemon.cleanup_failed", { resource: "read_plane", error: String(error) }));
+    }
   }
 }
