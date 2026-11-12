@@ -19,7 +19,7 @@
 //
 // Usage: node scripts/task-id-existence-check.mjs [--dir <path>]... [--plan-tasks-file <path>]
 //   [--plan-tasks-dir <path>] [--baseline <path>] [--remote <name>] [--base <ref>] [--cwd <path>]
-//   [--owner <name>] [--repo <name>] [--head-ref <ref>] [--require-open-prs]. Defaults: src,deploy,plan; plan/tasks.yaml; plan/tasks.d; origin.
+//   [--code-root <path>] [--owner <name>] [--repo <name>] [--head-ref <ref>] [--require-open-prs]. Defaults: src,deploy,plan; plan/tasks.yaml; plan/tasks.d; origin.
 //
 // Exported pure pieces let the fixture test drive each surface independently; main is exported so
 // the CLI itself (spawn + exit code) can be proved too.
@@ -847,6 +847,7 @@ export function main(argv) {
     args: argv,
     options: {
       dir: { type: "string", multiple: true },
+      "code-root": { type: "string" },
       "plan-tasks-file": { type: "string", default: "plan/tasks.yaml" },
       "plan-tasks-dir": { type: "string", default: "plan/tasks.d" },
       baseline: { type: "string", default: "scripts/task-id-existence-baseline.json" },
@@ -884,7 +885,32 @@ export function main(argv) {
     planTasksFile: values["plan-tasks-file"],
     planTasksDir: values["plan-tasks-dir"],
   });
-  const reservation = resolveReservedIds(values.remote, cwd);
+  // The selected plan owns its declarations and PR collisions; the public checkout still owns
+  // the one reservation namespace. Never fetch or mutate the public code checkout here.
+  const codeRoot = values["code-root"];
+  let reservationRemote = values.remote;
+  if (codeRoot !== undefined) {
+    try {
+      readFileSync(join(codeRoot, "plan/tasks.yaml"), "utf8");
+      for (const id of scanDeclaredPlanIds(codeRoot)) declaredIds.add(id);
+    } catch {
+      console.error("task-id-existence: FAILED -- the public code root plan is unreadable");
+      process.exitCode = 1;
+      return;
+    }
+  }
+  if (codeRoot !== undefined) {
+    const origin = git(["remote", "get-url", values.remote], { cwd: codeRoot });
+    if (origin.error || origin.status !== 0 || !origin.stdout.trim()) {
+      console.error("task-id-existence: could not read the public reservation origin -- NOT reporting clean");
+      process.exitCode = 2;
+      return;
+    }
+    reservationRemote = origin.stdout.trim();
+  }
+  // Existing holder-chain reads may fetch anchor objects. Keep those writes in the plan
+  // workspace; the public code checkout and its pinned refs remain read-only.
+  const reservation = resolveReservedIds(reservationRemote, cwd);
 
   if (!reservation.reachable) {
     console.error(
@@ -945,7 +971,7 @@ export function main(argv) {
   }
 
   const holderReservation =
-    addedAtHead.ids.length === 0 ? reservation : resolveReservedIds(values.remote, cwd, { readHoldersFor: new Set(addedAtHead.ids) });
+    addedAtHead.ids.length === 0 ? reservation : resolveReservedIds(reservationRemote, cwd, { readHoldersFor: new Set(addedAtHead.ids) });
   const holderConflicts = evaluateReservationHolderConflicts(addedAtHead.ids, occurrencesById, holderReservation, ownHeadRef, cwd);
   if (holderConflicts.length > 0) {
     console.error("\ntask-id-existence: FAILED -- the following added id(s) are HELD by a different reservation holder:\n");
