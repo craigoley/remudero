@@ -43,9 +43,9 @@ test("the real resetless capture parses, yielding the session and all-models win
   // governor saw nothing at all; a test that only asserted "no throw" would still pass against a
   // parser that invented zeroes, which is the failure mode this parser exists to prevent.
   assert.equal(snap.billingMode, "subscription");
-  assert.equal(snap.session.percentUsed, 13);
-  assert.equal(snap.session.resetsAt, "Jul 31 at 4:50pm");
-  assert.equal(snap.session.tz, "America/New_York");
+  assert.equal(snap.session?.percentUsed, 13);
+  assert.equal(snap.session?.resetsAt, "Jul 31 at 4:50pm");
+  assert.equal(snap.session?.tz, "America/New_York");
 
   assert.equal(snap.weekly.length, 2, "both weekly lines survive — the resetless one does not discard its sibling");
   assert.equal(snap.weekly[0].label, "all models");

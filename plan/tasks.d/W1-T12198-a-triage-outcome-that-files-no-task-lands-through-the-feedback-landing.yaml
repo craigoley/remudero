@@ -22,6 +22,7 @@
     - test/triage-already-decided-citation-resolves.test.ts
     - test/triage-plan-deps-seam.test.ts
     - test/triage-remote-reservation-timing.test.ts
+    - "hooks/mkdtemp-allowlist.txt"
   status: queued
   attempts: 0
   acceptance:

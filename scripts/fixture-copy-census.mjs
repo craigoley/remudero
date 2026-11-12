@@ -45,13 +45,18 @@ function builderDeclarationRe(word) {
   );
 }
 
-/** A `gh` PATH shim: a file that writes something literally named `"gh"` (via `writeFileSync`
- *  or `chmod`), and separately mentions `PATH` — the two-part signature every hand-rolled shim
- *  in this suite shares (write the executable, then prepend its dir onto `PATH`). Neither half
- *  alone is enough: `writeFileSync` alone is any fixture writer, and `PATH` alone is any file
- *  that happens to mention an env var by that name. */
+/** A fixture-directory name: a quoted `"gh"` that is the second argument of `ownedFixtureDir(`,
+ *  as in `ownedFixtureDir(t, "gh")`. It names a temp directory, not a shim (W1-T12322). */
+const GH_FIXTURE_DIR_NAME_RE = /ownedFixtureDir\(\s*[^,()]+,\s*["']gh["']/g;
+
+/** A `gh` PATH shim: a file that has three things. It has a quoted `"gh"`, it calls `chmod` or
+ *  `writeFileSync`, and it names `PATH`. Every hand-built shim in this suite has all three: it
+ *  writes the script, then puts its directory on `PATH`. One part alone is not enough. A
+ *  fixture-directory name is removed before the rule looks for the quoted `"gh"`, so a file
+ *  whose only `"gh"` is `ownedFixtureDir(t, "gh")` is not counted. */
 function isGhPathShimFile(text) {
-  return /["']gh["']/.test(text) && /(chmod|writeFileSync)/.test(text) && /PATH/.test(text);
+  const withoutFixtureDirNames = text.replace(GH_FIXTURE_DIR_NAME_RE, "ownedFixtureDir(scope, name");
+  return /["']gh["']/.test(withoutFixtureDirNames) && /(chmod|writeFileSync)/.test(text) && /PATH/.test(text);
 }
 
 /** The one top-level directory under `test/` whose `*.test.ts` files are DATA, never suites: a

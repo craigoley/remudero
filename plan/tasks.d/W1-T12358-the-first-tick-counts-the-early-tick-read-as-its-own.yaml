@@ -1,0 +1,43 @@
+- id: W1-T12358
+  title: "The boot light pass reads GitHub again because the first tick does not count the early tick read"
+  repo: remudero
+  depends_on: [W1-T12239, W1-T12236]
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: medium # decides which read the boot light pass serves; a wrong answer serves views older than the age limit
+  band_meaning: blast-radius
+  origin: operator-session#hand-build-follow-ups-2026-11-11
+  plan_refs:
+    - W1-T12239
+    - W1-T12236
+    - W1-T5761
+  files:
+    - src/cli/commands/daemon.ts
+    - test/daemon/the-first-tick-counts-the-early-tick-read-as-its-own.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "When the first tick takes the early tick read (`daemon.first_tick_read` with `source: early`), the boot light pass is served the open pull request views of that read and does not read GitHub itself (`views_source: tick_read` on its `sweep_light.pre_review_timing` row)"
+      proof: 'grep: test("W1-T12358: the boot light pass is served the early tick read in test/daemon/the-first-tick-counts-the-early-tick-read-as-its-own.test.ts'
+    - claim: "When the early read is older than the tick read age limit (`TICK_READ_MAX_AGE_MS`, 5 minutes), failed, or was for another plan, the first tick reads again and the boot light pass takes only a read that started in this tick"
+      proof: 'grep: test("W1-T12358: a stale or failed early read is not served to the boot light pass in test/daemon/the-first-tick-counts-the-early-tick-read-as-its-own.test.ts'
+    - claim: "From the second tick on, the boot light pass and the tick read keep the W1-T12236 rule: only a read that started in the current tick is served"
+      proof: 'grep: test("W1-T12358: a later tick serves only a read from that tick in test/daemon/the-first-tick-counts-the-early-tick-read-as-its-own.test.ts'
+  rationale: |
+    FROM THE CODE OF TWO HAND BUILDS, 2026-11-11.
+    - W1-T12239 (amendment #18042 open; code in /mnt/scratch/rmd/hand/wt-T12239, commit 2d8927dbc) starts the first tick read right after the token mint. `firstTickReadOf` (src/cli/commands/daemon.ts) starts the read at boot and gives it to the first call of the tick read refresher if it is fresh (`freshReadGeneration`, 5-minute limit) and for the same plan.
+    - W1-T12236 (in the lane; code in /mnt/scratch/rmd/hand/wt-T12236) serves the boot light pass the open pull request views of the tick read (`servedOpenPrViews`). It sets `tickReadStartedAtMs` to `systemClock.now()` when the tick calls `refreshMergedAsync`, and it serves a generation only when `generation.publishedAtMs >= tickReadStartedAtMs`.
+    - With both on main, the early read starts at boot, before the tick. So the first tick sets `tickReadStartedAtMs` after the early read's `publishedAtMs`, `servedOpenPrViews` gives `undefined`, and the boot light pass reads every open pull request from GitHub again. That is the read W1-T12236 was filed to remove, and on the first tick, where it costs most.
+  design: |
+    1. When `firstTickReadOf` gives the early read to the first tick (source `early`), make that tick's start time for the served-views rule the time the early read started. Do this in daemon.ts only: for example, `firstTickReadOf` takes a callback that it calls with the early read's start time when it serves it, and the wrapper that sets `tickReadStartedAtMs` uses the earlier of that time and the tick's own start, for the first tick only.
+    2. Keep the age limit. The served views must still pass `freshReadGeneration` with `TICK_READ_MAX_AGE_MS` when the boot light pass asks for them. An early read older than 5 minutes is not served, as today.
+    3. When the first tick reads again (source `early_stale`, `early_failed` or `plan_changed`), keep the W1-T12236 rule: the tick's own start time.
+    4. Keep the `daemon.first_tick_read` row as W1-T12239 writes it. Write no new row.
+    5. Add the test file named in `files`, one test per criterion with the exact titles in the proofs. Drive `daemonCommand` with a fake read plane and a fake clock; assert the rows (`daemon.first_tick_read`, `sweep_light.pre_review_timing` with `views_source`) and the count of open pull request reads.
+    NOT IN SCOPE: when the early read starts, the age limit value, and the light pass's own read.
+    BUILD ORDER: build after W1-T12239 and W1-T12236 are both on main.
+  falsifier: |
+    Keep the tick's own start time for the first tick and criterion 1 must fail: the boot light pass reads its own views. Serve the early read with no age check and criterion 2 must fail. Use the early read's start time for every tick and criterion 3 must fail.

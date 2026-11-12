@@ -16,7 +16,7 @@
   files:
     - scripts/fixture-copy-census.mjs
     - test/fixture-copy-census.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "A test file whose only quoted `\"gh\"` is the fixture-directory name in `ownedFixtureDir(t, \"gh\")` is not counted in `ghPathShimFiles`, even when the file also calls `writeFileSync` and names `PATH`"
@@ -39,7 +39,7 @@
     1. In `isGhPathShimFile` (scripts/fixture-copy-census.mjs), look for the quoted `"gh"` in the file text after each fixture-directory name is removed. A fixture-directory name is a quoted `"gh"` or `'gh'` that is the second argument of `ownedFixtureDir(`, for example `ownedFixtureDir(t, "gh")`. Keep the other two parts (`chmod` or `writeFileSync`, and `PATH`) as they are.
     2. A file that also has a quoted `"gh"` anywhere else (a shim path such as `join(bin, "gh")`, or `execFileSync("gh"`) is counted as today. The rule only removes the fixture-directory name. It adds no new way to be counted.
     3. Update the comment above `isGhPathShimFile` in plain language: what counts, and that a fixture-directory name does not.
-    4. In test/fixture-copy-census.test.ts, add three tests with the titles in the acceptance proofs, one per criterion. Drive `countFixtureCopies` on a synthetic tree (the `fixtureTree` helper in that file) for criteria 1 and 2. For criterion 3, run the rule over the real tree and compare the counted list with the list the old three-part rule gives. Expect exactly the same files. Keep the existing test "isGhPathShimFile requires BOTH ..." unchanged.
+    4. In test/fixture-copy-census.test.ts, add three tests with the titles in the acceptance proofs, one per criterion. Drive `countFixtureCopies` on a synthetic tree (the `fixtureTree` helper in that file) for criteria 1 and 2. For criterion 3, run the rule over the real tree and compare the counted list with the list the old three-part rule gives. Expect no file that the old rule does not count. Every file that the old rule counts and the new rule drops must name `"gh"` only as a fixture-directory name: each quoted `"gh"` in it is the second argument of `ownedFixtureDir(`. At origin/main no file drops out. Do not pin the dropped list to empty: W1-T12233 adds one such file, and a test that pins an empty list would refuse that branch. Keep the existing test "isGhPathShimFile requires BOTH ..." unchanged.
     5. Do not change scripts/fixture-copy-baseline.json. Do not change any other test file.
     NOT IN SCOPE: the three files named in the rationale, other signatures of the census, and test/helpers/owned-fixture-dir.ts.
   falsifier: |

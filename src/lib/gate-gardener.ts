@@ -7,7 +7,7 @@ import { pathToFileURL } from "node:url";
 
 import { fixedClock, systemClock } from "./clock.js";
 import { checkoutHeadStamp } from "./checkout-head.js";
-import { prepareGardenTaskIds, type GardenTaskIdMinter, type GardenAction, type GardenCheckout, type GardenerDeps, type GardenSpec, type Outcome } from "./gardener.js";
+import { landedPrUrl, prepareGardenTaskIds, type GardenLandResult, type GardenTaskIdMinter, type GardenAction, type GardenCheckout, type GardenerDeps, type GardenSpec, type Outcome } from "./gardener.js";
 import { gateFireRatesPath, type GateFireRate, type GateFireRateReport } from "./gate-fire-rate.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import { resolveRepoLayout } from "./repo-layout.js";
@@ -810,8 +810,9 @@ function applyDefuseActions(ws: GardenCheckout, actions: GateGardenAction[], dep
     paths.push(relative(ws.root, path));
   }
   const land = ws.land.bind(ws);
-  ws.land = (opts) => {
-    const url = land(opts);
+  // W1-T12221: the daemon's checkout lands awaited, so the rows follow the PR url, never a promise or a wait.
+  const filed = (result: GardenLandResult): string | undefined => {
+    const url = landedPrUrl(result, "gate gardener");
     if (url) for (const a of actions) {
       if (a.edit.kind === "defuse") deps.log("gate_garden.defuse_filed", defuseEvidence(a.edit.finding, a.edit.leadDays));
       if (a.edit.kind === "false-positive") deps.log("gate.false_positive_filed", { gate: a.edit.rule.gate, recognizer: a.file, classification: a.edit.classification });
@@ -819,6 +820,10 @@ function applyDefuseActions(ws: GardenCheckout, actions: GateGardenAction[], dep
     }
     return url;
   };
+  ws.land = ((opts: Parameters<GardenCheckout["land"]>[0]) => {
+    const out = land(opts) as GardenLandResult | Promise<GardenLandResult>;
+    return out instanceof Promise ? out.then(filed) : filed(out);
+  }) as GardenCheckout["land"];
   const subject = actions[0]?.class === "false-positive" ? "gate recognizer" : actions[0]?.class === "compress" ? "comment compression" : "expiring fixture";
   return { paths, title: `chore(plan): file ${actions.length} ${subject} remedy task(s)`, body: [
     "The gate gardener files measured maintenance follow-ups through normal machine-filing admission.", "", "## Acceptance",

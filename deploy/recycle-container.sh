@@ -579,7 +579,7 @@ recycle_reason() {
   echo "$@"
 }
 record_recycle_ended() {
-  local status="$1" ledger wait_s wait_source reason blockers=""
+  local status="$1" ledger wait_s wait_source reason blockers="" smoke_at smoke_s
   [ "$RECYCLE_INVOCATION_RECORDED" = 1 ] && [ "$RECYCLE_ENDED_RECORDED" = 0 ] || return 0
   RECYCLE_ENDED_RECORDED=1
   ledger="${LEDGER_FILE:-$RECYCLE_LEDGER_FILE}"
@@ -602,9 +602,14 @@ record_recycle_ended() {
   if [ "$RECYCLE_OUTCOME" = refused ] && [ -n "$RECYCLE_BLOCKERS_JSON" ]; then
     blockers=",\"blockers\":$RECYCLE_BLOCKERS_JSON"
   fi
-  printf '{"ts":"%s","run_id":"RECYCLE-%s","task_id":"RECYCLE","step":"recycle.ended","lane":"deploy","outcome":"%s","rc":%s,"reason":%s,"wait_s":%s,"wait_source":%s,"waited_s":%s%s}\n' \
+  # W1-T12242: where the last smoke ran (before_pause, after_wait) and its seconds; null if none ran.
+  smoke_at=null smoke_s=null
+  case "${SMOKE_AT:-}" in before_pause|after_wait) smoke_at="\"${SMOKE_AT}\"" ;; esac
+  case "${SMOKE_S:-}" in ''|*[!0-9]*) ;; *) smoke_s="${SMOKE_S}" ;; esac
+  printf '{"ts":"%s","run_id":"RECYCLE-%s","task_id":"RECYCLE","step":"recycle.ended","lane":"deploy","outcome":"%s","rc":%s,"reason":%s,"wait_s":%s,"wait_source":%s,"waited_s":%s,"phase":%s,"smoke_at":%s,"smoke_s":%s%s}\n' \
     "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" "$$" "$RECYCLE_OUTCOME" "$status" \
-    "$(recycle_json_string "$reason")" "$wait_s" "$(recycle_json_string "$wait_source")" "$RECYCLE_WAITED_S" "$blockers" \
+    "$(recycle_json_string "$reason")" "$wait_s" "$(recycle_json_string "$wait_source")" "$RECYCLE_WAITED_S" \
+    "$(recycle_json_string "$RECYCLE_PHASE")" "$smoke_at" "$smoke_s" "$blockers" \
     >> "$ledger" 2>/dev/null || true
 }
 recycle_exit_receipts() {
@@ -612,6 +617,22 @@ recycle_exit_receipts() {
   record_recycle_invocation exit
   record_recycle_ended "$status"
   commission_on_exit
+}
+# W1-T12244: one recycle.phase row as each phase ends. A failed write never stops the recycle.
+RECYCLE_PHASE=preflight
+RECYCLE_PHASE_AT_S=0
+record_recycle_phase() {
+  local ledger="${LEDGER_FILE:-$RECYCLE_LEDGER_FILE}"
+  [ -n "$ledger" ] || return 0
+  printf '{"ts":"%s","run_id":"RECYCLE-%s","task_id":"RECYCLE","step":"recycle.phase","lane":"deploy","container":%s,"phase":"%s","seconds":%s%s}\n' \
+    "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" "$$" "$(recycle_json_string "$CONTAINER_NAME")" "$1" "$2" "${3:+,$3}" \
+    >> "$ledger" 2>/dev/null || true
+}
+# Ends the phase in progress with its row ($2: more JSON fields for that row) and starts phase $1.
+recycle_phase() {
+  [ "$RECYCLE_PHASE" = preflight ] || record_recycle_phase "$RECYCLE_PHASE" "$((SECONDS - RECYCLE_PHASE_AT_S))" "${2:-}"
+  RECYCLE_PHASE="$1"
+  RECYCLE_PHASE_AT_S="$SECONDS"
 }
 
 # ── W1-T6160: EXPLICIT GIT AUTHOR COMMISSIONING — ONE NAMED TARGET, VERIFIED, WITH A RECEIPT ──────
@@ -846,6 +867,16 @@ fi
 source "${CLAUDE_DIRECTORY_FILE}"
 CRED_DIR="$(claude_host_directory)"
 CRED_MOUNT_DEST="/home/node/.claude"
+# W1-T12293: the CLI replaces ~/.claude.json by rename, so the host file goes read-only to a side
+# path and deploy/entrypoint.sh copies it in when the container's own file is missing or thin.
+CLAUDE_ACCOUNT_FILE="$(claude_host_account_file)"
+CLAUDE_ACCOUNT_MOUNT_DEST="/home/node/.rmd-claude-account.json"
+CLAUDE_ACCOUNT_MOUNT_ARGS=()
+if [ -f "${CLAUDE_ACCOUNT_FILE}" ]; then
+  CLAUDE_ACCOUNT_MOUNT_ARGS=(-v "${CLAUDE_ACCOUNT_FILE}:${CLAUDE_ACCOUNT_MOUNT_DEST}:ro")
+else
+  echo "recycle-container: NOTE — no Claude account file at ${CLAUDE_ACCOUNT_FILE}; recycling without an account file mount"
+fi
 CODEX_DIR="${RMD_CODEX_DIR:-${HOME:-/root}/.codex}"
 CODEX_MOUNT_DEST="/home/node/.codex"
 CODEX_MOUNT_ARGS=()
@@ -896,6 +927,9 @@ if [ "${#CODEX_MOUNT_ARGS[@]}" -gt 0 ]; then
 fi
 if [ "${#CONTAINER_CONFIG_MOUNT_ARGS[@]}" -gt 0 ]; then
   RUNTIME_CONTRACT_EXPECT_ARGS+=(--expect "${CONTAINER_CONFIG_DIR}" "${CONTAINER_CONFIG_MOUNT_DEST}" rw)
+fi
+if [ "${#CLAUDE_ACCOUNT_MOUNT_ARGS[@]}" -gt 0 ]; then
+  RUNTIME_CONTRACT_EXPECT_ARGS+=(--expect "${CLAUDE_ACCOUNT_FILE}" "${CLAUDE_ACCOUNT_MOUNT_DEST}" ro)
 fi
 if [ "${SELECTED_REGISTRY_ACTIVE}" = 1 ]; then
   RUNTIME_CONTRACT_EXPECT_ARGS+=(--expect "${SELECTED_REGISTRY_HOST_FILE}" "${SELECTED_REGISTRY_CONTAINER_FILE}" ro)
@@ -1956,6 +1990,7 @@ recycle_cleanup_tmp() {
 }
 # W1-T6160: the cleanup also emits the commissioning receipt (a no-op unless --commission-git-author).
 trap recycle_cleanup_tmp EXIT
+recycle_phase lock_wait
 if [ -n "${HOST_RECYCLE_LOCK}" ]; then
   mkdir -p "$(dirname "${HOST_RECYCLE_LOCK}")"
   lock_waited_s=0
@@ -1988,6 +2023,7 @@ if [ -n "${HOST_RECYCLE_LOCK}" ]; then
     lock_waited_s=$((lock_waited_s + HOST_RECYCLE_LOCK_POLL_S))
   done
 fi
+recycle_phase registry_login
 
 if command -v az >/dev/null 2>&1; then
   echo "recycle-container: az acr login -n ${REGISTRY}"
@@ -2004,6 +2040,8 @@ else
   echo "  would go on to interrogate that one instead." >&2
   exit 1
 fi
+recycle_phase pull
+RECYCLE_IMAGE_BEFORE="$(docker image inspect --format '{{.Id}}' "${REF}" 2>/dev/null || true)"
 
 # ── THE PULL LOG IS PER-INVOCATION, FOR THE SAME REASON deploy/host-update.sh's IS ──────────────
 # This script wrote a FIXED path, `/tmp/recycle-container-pull.log`, and then GREPPED THAT SAME
@@ -2052,6 +2090,167 @@ if [ -z "${PULLED_IMAGE_ID}" ]; then
 fi
 echo "recycle-container: pulled image id ${PULLED_IMAGE_ID}"
 selected_registry_image "${PULLED_IMAGE_ID}"
+recycle_phase smoke "\"image_changed\":$([ "${RECYCLE_IMAGE_BEFORE}" = "${PULLED_IMAGE_ID}" ] && echo false || echo true)"
+
+COMMISSION_PHASE="smoke"
+
+# ── 4.5. SMOKE A REAL WORKER ON THE PULLED IMAGE BEFORE ACCEPTING IT (W1-T5017) ─────────────────
+# CI fakes the worker query seam and verify-image.sh compares binary VERSIONS, so an SDK/CLI change
+# can pass both and still die at the first task dispatch. This starts ONE throwaway container on the
+# pulled image, runs ONE real worker query with a trivial prompt (src/lib/containment.ts
+# workerSmokeMain: a containment verdict plus clean termination, bounded in turns and spend, result
+# ledgered) and accepts the image only on exit 0.
+#
+# IT RUNS HERE — AFTER THE PULL AND BEFORE THE PAUSE (W1-T12242) — SO THE ROLLBACK IS THE REFUSAL ITSELF.
+# The running container has not been touched and no pause exists yet: a failed smoke exits 1 and
+# leaves the fleet unpaused, on the image it was serving. Read 2026-11-10: the smoke ran 11 s after a
+# wait of 2,970 s, all of it under the pause. A smoke after section 6 would have to rebuild the old
+# container from a tag the pull just moved. The host recycle lock is held here, as in the wait.
+#
+# `docker container run`, not `docker run`: the same command, spelled so this probe is never mistaken
+# for the daemon's own launch below. The verdict is the EXIT CODE (workerSmokeMain exits 0 only on
+# PASS); the printed `WORKER-SMOKE <PASS|FAIL> <reason>` line is the explanation. A hang is a failure.
+SMOKE_NAME="${CONTAINER_NAME}-worker-smoke"
+cleanup_leftover_smoke() {
+  local phase="$1" smoke_id smoke_names smoke_state
+  local stale_smoke_rows
+  stale_smoke_rows="$(docker ps -a --filter "name=${SMOKE_NAME}" --format '{{.ID}} {{.Names}} {{.State}}' 2>/dev/null || true)"
+  while read -r smoke_id smoke_names smoke_state; do
+    [ -n "${smoke_id}" ] && [ "${smoke_names}" = "${SMOKE_NAME}" ] || continue
+    if [ -z "${smoke_state}" ] || [ "${smoke_state}" = "running" ]; then
+      if [ "${phase}" = "before the smoke" ]; then
+        recycle_reason "recycle-container: REFUSING — leftover ${SMOKE_NAME} (${smoke_state:-unknown}) blocks the smoke; it was not removed." >&2
+        echo "  Wait for that smoke to finish, then remove the leftover with docker rm ${SMOKE_NAME} and re-run." >&2
+        return 1
+      fi
+      continue
+    fi
+    if docker container rm "${smoke_id}" >/dev/null 2>&1; then
+      echo "recycle-container: removed leftover ${SMOKE_NAME} (${smoke_state}) ${phase}"
+    elif [ "${phase}" = "before the smoke" ]; then
+      recycle_reason "recycle-container: REFUSING — could not remove leftover ${SMOKE_NAME} (${smoke_state}) before the smoke." >&2
+      echo "  Resolve the removal failure with docker rm ${SMOKE_NAME} and re-run." >&2
+      return 1
+    else
+      echo "recycle-container: could not remove leftover ${SMOKE_NAME} (${smoke_state}) — its image stays pinned" >&2
+    fi
+  done <<EOF_SMOKE
+${stale_smoke_rows}
+EOF_SMOKE
+  return 0
+}
+
+# W1-T4102: a build daemon's share of the host — a low CPU weight, a memory ceiling that leaves the
+# console backend's reserve free, and THIS container's memory.high (a soft ceiling sized from one host
+# budget by weight, never below its working set). The same policy file
+# serve-container.sh reads. Absent (an isolated fixture copy), the daemon launches exactly as before
+# and the log says so. Evaluated BEFORE the smoke so the smoke container carries the same arguments:
+# a runtime that refuses one (the memory.high annotation) refuses the recycle while the running
+# container is still untouched, not after it was removed.
+RESOURCE_POLICY_BUILD_ARGS=()
+RESOURCE_POLICY_HIGH_MIB=""
+if [ -f "${SCRIPT_DIR:-}/resource-policy.sh" ]; then
+  # shellcheck source=./resource-policy.sh
+  . "${SCRIPT_DIR}/resource-policy.sh"
+  resource_policy_build_args "${CONTAINER_NAME}"
+  RESOURCE_POLICY_HIGH_MIB="${RP_HIGH:-}"
+  echo "recycle-container: resource policy — ${RESOURCE_POLICY_NOTE}"
+else
+  echo "recycle-container: resource policy NOT applied — ${SCRIPT_DIR:-<unknown>}/resource-policy.sh is absent"
+fi
+SMOKE_TIMEOUT_S="${RMD_RECYCLE_SMOKE_TIMEOUT_S:-300}"
+SMOKE_ARGS=(
+  --rm --name "${SMOKE_NAME}"
+  "${RESOURCE_POLICY_BUILD_ARGS[@]+"${RESOURCE_POLICY_BUILD_ARGS[@]}"}"
+  --cap-drop ALL
+  --security-opt seccomp=unconfined
+  --security-opt apparmor=unconfined
+  --security-opt systempaths=unconfined
+  --user 1000:1000
+  -e RMD_SKIP_BOOTSTRAP=1
+  "${RUN_ENV_ARGS[@]}"
+  -v "${STATE_DIR}:${STATE_MOUNT_DEST}"
+  -v "${CRED_DIR}:${CRED_MOUNT_DEST}"
+)
+if [ "${#CODEX_MOUNT_ARGS[@]}" -gt 0 ]; then
+  SMOKE_ARGS+=("${CODEX_MOUNT_ARGS[@]}")
+fi
+if [ "${#CONTAINER_CONFIG_MOUNT_ARGS[@]}" -gt 0 ]; then
+  SMOKE_ARGS+=("${CONTAINER_CONFIG_MOUNT_ARGS[@]}")
+fi
+if [ "${#APP_PRIVATE_KEY_ARGS[@]}" -gt 0 ]; then
+  SMOKE_ARGS+=("${APP_PRIVATE_KEY_ARGS[@]}")
+fi
+SMOKE_ENTRY='import("./src/lib/containment.ts").then((m) => m.workerSmokeMain()).then((c) => process.exit(c))'
+SMOKE_TIMEOUT_CMD=()
+if command -v timeout >/dev/null 2>&1; then
+  SMOKE_TIMEOUT_CMD=(timeout "${SMOKE_TIMEOUT_S}")
+fi
+SMOKE_AT=""
+SMOKE_S=""
+# One smoke on image $2. $1 is where it runs (before_pause, after_wait) for recycle.ended. Returns 1
+# after it prints the named refusal; the caller decides what the refusal must undo.
+run_worker_smoke() {
+  local at="$1" image="$2" smoke_started="${SECONDS}"
+  echo "recycle-container: worker smoke — one real worker query on ${image} (bounded ${SMOKE_TIMEOUT_S}s)"
+  set +e
+  SMOKE_OUTPUT="$("${SMOKE_TIMEOUT_CMD[@]+"${SMOKE_TIMEOUT_CMD[@]}"}" docker container run "${SMOKE_ARGS[@]}" \
+    -w /app "${image}" node --import tsx -e "${SMOKE_ENTRY}" 2>&1)"
+  SMOKE_RC=$?
+  set -e
+  SMOKE_AT="${at}"
+  SMOKE_S=$((SECONDS - smoke_started))
+  SMOKE_LINE="$(printf '%s\n' "${SMOKE_OUTPUT}" | grep -E '^WORKER-SMOKE ' | tail -1 || true)"
+  if [ "${SMOKE_RC}" -ne 0 ]; then
+    docker container rm -f "${SMOKE_NAME}" >/dev/null 2>&1 || true
+    recycle_reason "recycle-container: REFUSING — the real worker smoke FAILED (exit ${SMOKE_RC}) on ${image}." >&2
+    echo "  ${SMOKE_LINE:-no WORKER-SMOKE verdict line was printed (hang, crash or timeout)}" >&2
+    if [ -z "${SMOKE_OUTPUT}" ]; then
+      echo "  smoke-output| (the smoke printed nothing)" >&2
+    else
+      # W1-T6171: keep Docker's cause, bounded by lines and 8 KiB including an oversized last line.
+      printf '%s\n' "${SMOKE_OUTPUT}" | LC_ALL=C awk -v lines="${RMD_RECYCLE_SMOKE_TAIL_LINES:-20}" '
+        BEGIN {
+          if (lines !~ /^[0-9]+$/ || lines + 0 < 1) lines = 20
+          first = 1
+          cap = 8192
+        }
+        {
+          tail[NR] = $0
+          bytes += length($0) + 1
+          while (NR - first + 1 > lines || (bytes > cap && first < NR)) {
+            bytes -= length(tail[first]) + 1
+            delete tail[first]
+            delete clipped[first]
+            first++
+          }
+          if (bytes > cap) {
+            clipped[NR] = bytes - cap
+            tail[NR] = substr(tail[NR], clipped[NR] + 1)
+            bytes = cap
+          }
+        }
+        END {
+          if (first > 1) printf "  smoke-output| (%d earlier lines omitted)\n", first - 1
+          if (clipped[first]) printf "  smoke-output| (%d earlier bytes omitted)\n", clipped[first]
+          for (i = first; i <= NR; i++) print "  smoke-output| " tail[i]
+        }
+      ' >&2
+    fi
+    echo "  ${CONTAINER_NAME} is untouched and STILL RUNNING on its current image — the replacement was NOT accepted." >&2
+    return 1
+  fi
+  echo "recycle-container: worker smoke PASSED — ${SMOKE_LINE:-exit 0}"
+}
+if ! cleanup_leftover_smoke "before the smoke"; then
+  echo "  The fleet was not paused." >&2
+  exit 1
+fi
+if ! run_worker_smoke before_pause "${PULLED_IMAGE_ID}"; then
+  echo "  The fleet was not paused." >&2
+  exit 1
+fi
+recycle_phase pause
 
 COMMISSION_PHASE="drain"
 
@@ -2147,6 +2346,7 @@ else
   printf '%s\n' "${RECYCLE_PAUSE_BODY}" > "${PAUSE_FILE}"
   echo "recycle-container: PAUSE engaged — new dispatch halts, in-flight work is allowed to finish"
 fi
+recycle_phase wait_for_workers
 
 # THE LOCK COUNT ALONE IS BLIND TO A WHOLE LANE, IN BOTH DIRECTIONS (W1-T1046).
 #
@@ -2787,112 +2987,13 @@ WORKERS
   evaluate_frozen_daemon_proof
 done
 
-COMMISSION_PHASE="smoke"
-
-# ── 5.5. SMOKE A REAL WORKER ON THE PULLED IMAGE BEFORE ACCEPTING IT (W1-T5017) ─────────────────
-# CI fakes the worker query seam and verify-image.sh compares binary VERSIONS, so an SDK/CLI change
-# can pass both and still die at the first task dispatch. This starts ONE throwaway container on the
-# pulled image, runs ONE real worker query with a trivial prompt (src/lib/containment.ts
-# workerSmokeMain: a containment verdict plus clean termination, bounded in turns and spend, result
-# ledgered) and accepts the image only on exit 0.
-#
-# IT RUNS HERE — AFTER THE DRAIN WAIT AND BEFORE `docker stop` — SO THE ROLLBACK IS THE REFUSAL ITSELF.
-# The running container has not been touched; a failed smoke takes the pause off on the way out
-# exactly as section 5's refusal does and exits 1, leaving the fleet on the image it was serving. A
-# smoke run after section 6 would have to rebuild the old container from a tag the pull just moved.
-#
-# `docker container run`, not `docker run`: the same command, spelled so this probe is never mistaken
-# for the daemon's own launch below. The verdict is the EXIT CODE (workerSmokeMain exits 0 only on
-# PASS); the printed `WORKER-SMOKE <PASS|FAIL> <reason>` line is the explanation. A hang is a failure.
-SMOKE_NAME="${CONTAINER_NAME}-worker-smoke"
-cleanup_leftover_smoke() {
-  local phase="$1" smoke_id smoke_names smoke_state
-  local stale_smoke_rows
-  stale_smoke_rows="$(docker ps -a --filter "name=${SMOKE_NAME}" --format '{{.ID}} {{.Names}} {{.State}}' 2>/dev/null || true)"
-  while read -r smoke_id smoke_names smoke_state; do
-    [ -n "${smoke_id}" ] && [ "${smoke_names}" = "${SMOKE_NAME}" ] || continue
-    if [ -z "${smoke_state}" ] || [ "${smoke_state}" = "running" ]; then
-      if [ "${phase}" = "before the smoke" ]; then
-        recycle_reason "recycle-container: REFUSING — leftover ${SMOKE_NAME} (${smoke_state:-unknown}) blocks the smoke; it was not removed." >&2
-        echo "  Wait for that smoke to finish, then remove the leftover with docker rm ${SMOKE_NAME} and re-run." >&2
-        return 1
-      fi
-      continue
-    fi
-    if docker container rm "${smoke_id}" >/dev/null 2>&1; then
-      echo "recycle-container: removed leftover ${SMOKE_NAME} (${smoke_state}) ${phase}"
-    elif [ "${phase}" = "before the smoke" ]; then
-      recycle_reason "recycle-container: REFUSING — could not remove leftover ${SMOKE_NAME} (${smoke_state}) before the smoke." >&2
-      echo "  Resolve the removal failure with docker rm ${SMOKE_NAME} and re-run." >&2
-      return 1
-    else
-      echo "recycle-container: could not remove leftover ${SMOKE_NAME} (${smoke_state}) — its image stays pinned" >&2
-    fi
-  done <<EOF_SMOKE
-${stale_smoke_rows}
-EOF_SMOKE
-  return 0
-}
-
-# W1-T4102: a build daemon's share of the host — a low CPU weight, a memory ceiling that leaves the
-# console backend's reserve free, and THIS container's memory.high (a soft ceiling sized from one host
-# budget by weight, never below its working set). The same policy file
-# serve-container.sh reads. Absent (an isolated fixture copy), the daemon launches exactly as before
-# and the log says so. Evaluated BEFORE the smoke so the smoke container carries the same arguments:
-# a runtime that refuses one (the memory.high annotation) refuses the recycle while the running
-# container is still untouched, not after it was removed.
-RESOURCE_POLICY_BUILD_ARGS=()
-RESOURCE_POLICY_HIGH_MIB=""
-if [ -f "${SCRIPT_DIR:-}/resource-policy.sh" ]; then
-  # shellcheck source=./resource-policy.sh
-  . "${SCRIPT_DIR}/resource-policy.sh"
-  resource_policy_build_args "${CONTAINER_NAME}"
-  RESOURCE_POLICY_HIGH_MIB="${RP_HIGH:-}"
-  echo "recycle-container: resource policy — ${RESOURCE_POLICY_NOTE}"
-else
-  echo "recycle-container: resource policy NOT applied — ${SCRIPT_DIR:-<unknown>}/resource-policy.sh is absent"
-fi
-SMOKE_TIMEOUT_S="${RMD_RECYCLE_SMOKE_TIMEOUT_S:-300}"
-SMOKE_ARGS=(
-  --rm --name "${SMOKE_NAME}"
-  "${RESOURCE_POLICY_BUILD_ARGS[@]+"${RESOURCE_POLICY_BUILD_ARGS[@]}"}"
-  --cap-drop ALL
-  --security-opt seccomp=unconfined
-  --security-opt apparmor=unconfined
-  --security-opt systempaths=unconfined
-  --user 1000:1000
-  -e RMD_SKIP_BOOTSTRAP=1
-  "${RUN_ENV_ARGS[@]}"
-  -v "${STATE_DIR}:${STATE_MOUNT_DEST}"
-  -v "${CRED_DIR}:${CRED_MOUNT_DEST}"
-)
-if [ "${#CODEX_MOUNT_ARGS[@]}" -gt 0 ]; then
-  SMOKE_ARGS+=("${CODEX_MOUNT_ARGS[@]}")
-fi
-if [ "${#CONTAINER_CONFIG_MOUNT_ARGS[@]}" -gt 0 ]; then
-  SMOKE_ARGS+=("${CONTAINER_CONFIG_MOUNT_ARGS[@]}")
-fi
-if [ "${#APP_PRIVATE_KEY_ARGS[@]}" -gt 0 ]; then
-  SMOKE_ARGS+=("${APP_PRIVATE_KEY_ARGS[@]}")
-fi
-SMOKE_ARGS+=(
-  -w /app "${PULLED_IMAGE_ID}"
-  node --import tsx -e 'import("./src/lib/containment.ts").then((m) => m.workerSmokeMain()).then((c) => process.exit(c))'
-)
-SMOKE_TIMEOUT_CMD=()
-if command -v timeout >/dev/null 2>&1; then
-  SMOKE_TIMEOUT_CMD=(timeout "${SMOKE_TIMEOUT_S}")
-fi
-if ! cleanup_leftover_smoke "before the smoke"; then
-  clear_own_pause "recycle-container: pause removed — the refusal above must not leave the fleet paused" >&2
-  exit 1
-fi
+# ── 5.5. THE SMOKED IMAGE MUST STILL EXIST AFTER THE WAIT ───────────────────────────────────────
 # READ 2026-10-10 04:27–04:44Z: core pulled, then drained 17 min for a worker; meanwhile the site
 # instance recycled twice, moved the shared tag and ran section 8's `docker image prune -af`, which
 # removes EVERY image no container references. Core's pulled, now untagged image was reclaimed and
-# its smoke failed with docker's bare "No such image". So the pulled id is proven to still exist
-# before the smoke spends its timeout on a ghost: an image gone during the drain gets ONE re-pull
-# of the same ref (whatever it now resolves to), then a refusal that names the cause.
+# its smoke failed with docker's bare "No such image". So the smoked id is proven to still exist
+# after the wait: an image gone during the drain gets ONE re-pull of the same ref (whatever it now
+# resolves to) and a second smoke on that id before `docker stop`, or a refusal that names the cause.
 if ! docker image inspect "${PULLED_IMAGE_ID}" >/dev/null 2>&1; then
   echo "recycle-container: pulled image ${PULLED_IMAGE_ID} is gone after the wait; re-pulling ${REF} once" >&2
   REPULLED_IMAGE_ID=""
@@ -2906,61 +3007,18 @@ if ! docker image inspect "${PULLED_IMAGE_ID}" >/dev/null 2>&1; then
     clear_own_pause "recycle-container: pause removed — the refusal above must not leave the fleet paused" >&2
     exit 1
   fi
-  for i in "${!SMOKE_ARGS[@]}"; do
-    if [ "${SMOKE_ARGS[$i]}" = "${PULLED_IMAGE_ID}" ]; then SMOKE_ARGS[i]="${REPULLED_IMAGE_ID}"; fi
-  done
   PULLED_IMAGE_ID="${REPULLED_IMAGE_ID}"
   echo "recycle-container: re-pulled image id ${PULLED_IMAGE_ID}"
-fi
-echo "recycle-container: worker smoke — one real worker query on ${PULLED_IMAGE_ID} (bounded ${SMOKE_TIMEOUT_S}s)"
-set +e
-SMOKE_OUTPUT="$("${SMOKE_TIMEOUT_CMD[@]+"${SMOKE_TIMEOUT_CMD[@]}"}" docker container run "${SMOKE_ARGS[@]}" 2>&1)"
-SMOKE_RC=$?
-set -e
-SMOKE_LINE="$(printf '%s\n' "${SMOKE_OUTPUT}" | grep -E '^WORKER-SMOKE ' | tail -1 || true)"
-if [ "${SMOKE_RC}" -ne 0 ]; then
-  docker container rm -f "${SMOKE_NAME}" >/dev/null 2>&1 || true
-  recycle_reason "recycle-container: REFUSING — the real worker smoke FAILED (exit ${SMOKE_RC}) on ${PULLED_IMAGE_ID}." >&2
-  echo "  ${SMOKE_LINE:-no WORKER-SMOKE verdict line was printed (hang, crash or timeout)}" >&2
-  if [ -z "${SMOKE_OUTPUT}" ]; then
-    echo "  smoke-output| (the smoke printed nothing)" >&2
-  else
-    # W1-T6171: keep Docker's cause, bounded by lines and 8 KiB including an oversized last line.
-    printf '%s\n' "${SMOKE_OUTPUT}" | LC_ALL=C awk -v lines="${RMD_RECYCLE_SMOKE_TAIL_LINES:-20}" '
-      BEGIN {
-        if (lines !~ /^[0-9]+$/ || lines + 0 < 1) lines = 20
-        first = 1
-        cap = 8192
-      }
-      {
-        tail[NR] = $0
-        bytes += length($0) + 1
-        while (NR - first + 1 > lines || (bytes > cap && first < NR)) {
-          bytes -= length(tail[first]) + 1
-          delete tail[first]
-          delete clipped[first]
-          first++
-        }
-        if (bytes > cap) {
-          clipped[NR] = bytes - cap
-          tail[NR] = substr(tail[NR], clipped[NR] + 1)
-          bytes = cap
-        }
-      }
-      END {
-        if (first > 1) printf "  smoke-output| (%d earlier lines omitted)\n", first - 1
-        if (clipped[first]) printf "  smoke-output| (%d earlier bytes omitted)\n", clipped[first]
-        for (i = first; i <= NR; i++) print "  smoke-output| " tail[i]
-      }
-    ' >&2
+  COMMISSION_PHASE="smoke"
+  recycle_phase smoke
+  if ! cleanup_leftover_smoke "before the smoke" || ! run_worker_smoke after_wait "${PULLED_IMAGE_ID}"; then
+    clear_own_pause "recycle-container: pause removed — the refusal above must not leave the fleet paused" >&2
+    exit 1
   fi
-  echo "  ${CONTAINER_NAME} is untouched and STILL RUNNING on its current image — the replacement was NOT accepted." >&2
-  clear_own_pause "recycle-container: pause removed — the refusal above must not leave the fleet paused" >&2
-  exit 1
 fi
-echo "recycle-container: worker smoke PASSED — ${SMOKE_LINE:-exit 0}"
 
 COMMISSION_PHASE="replace"
+recycle_phase stop
 
 record_recycled_cadence_child() {
   local state run_id pid attempt status at
@@ -3020,11 +3078,18 @@ if [ "${CONTAINER_EXISTS}" -eq 1 ]; then
   registry_shadow_observe recycle "$INSTANCE_NAME" "${github_repo:-}" host "$STATE_DIR|$CONTAINER_NAME"
   record_recycled_cadence_child
   run_docker_control stop docker stop "${CONTAINER_NAME}"
+  # Exit code 137 is SIGKILL: the container did not stop in its time limit, so Docker killed it.
+  case "$(docker inspect --format '{{.State.ExitCode}}' "${CONTAINER_NAME}" 2>/dev/null || true)" in
+    137) recycle_phase remove '"killed":true' ;;
+    ''|*[!0-9]*) recycle_phase remove '"killed":null' ;;
+    *) recycle_phase remove '"killed":false' ;;
+  esac
   echo "recycle-container: docker rm ${CONTAINER_NAME}"
   run_docker_control rm docker rm "${CONTAINER_NAME}"
 else
   echo "recycle-container: no existing ${CONTAINER_NAME} to stop or remove"
 fi
+recycle_phase start
 
 clear_own_pause "recycle-container: pause cleared — the new container must not come up paused"
 
@@ -3080,6 +3145,9 @@ DOCKER_RUN_ARGS=(
   -v "${STATE_DIR}:${STATE_MOUNT_DEST}"
   -v "${CRED_DIR}:${CRED_MOUNT_DEST}"
 )
+if [ "${#CLAUDE_ACCOUNT_MOUNT_ARGS[@]}" -gt 0 ]; then
+  DOCKER_RUN_ARGS+=("${CLAUDE_ACCOUNT_MOUNT_ARGS[@]}")
+fi
 if [ "${#CODEX_MOUNT_ARGS[@]}" -gt 0 ]; then
   DOCKER_RUN_ARGS+=("${CODEX_MOUNT_ARGS[@]}")
 fi
@@ -3110,6 +3178,7 @@ selected_registry_mounts "${DOCKER_RUN_ARGS[@]}"
 { ! declare -F registry_shadow_mount_args >/dev/null 2>&1 || registry_shadow_mount_args "${DOCKER_RUN_ARGS[@]}"; }
 registry_shadow_observe recycle "$INSTANCE_NAME" "${github_repo:-}" host "$STATE_DIR|$CONTAINER_NAME"
 docker run "${DOCKER_RUN_ARGS[@]}" >/dev/null
+recycle_phase after_start
 
 # ── 7. PROVE IT — THE STARTED CONTAINER'S IMAGE MUST BE THE DIGEST JUST PULLED ──────────────────
 # `docker inspect --format '{{.Image}}'` against the id captured in section 4 is the only proof this

@@ -79,14 +79,30 @@ test("W1-T10511: the serve launcher binds only the fleet-auth directory the daem
   assert.equal(existsSync(absent), false);
   const shared = join(f.root, "shared-claude");
   mkdirSync(join(shared, "fleet-auth"), { recursive: true });
-  writeFileSync(join(f.install, "deploy", "claude-directory.sh"), `claude_host_directory() { printf '%s\\n' '${shared}'; }\n`);
+  writeFileSync(join(f.install, "deploy", "claude-directory.sh"),
+    `claude_host_directory() { printf '%s\\n' '${shared}'; }\nclaude_host_account_file() { printf '%s\\n' '${shared}.json'; }\n`);
   writeFileSync(f.mounts, "");
   assert.ok(f.launch().binds.includes(`${shared}/fleet-auth:${DEST}`), "serve uses the shared daemon directory resolver");
-  writeFileSync(join(f.install, "deploy", "claude-directory.sh"), "claude_host_directory() { return 17; }\n");
+  writeFileSync(join(f.install, "deploy", "claude-directory.sh"),
+    "claude_host_directory() { return 17; }\nclaude_host_account_file() { printf '%s\\n' /absent/account.json; }\n");
   const failed = spawnSync("bash", [join(f.install, "deploy", "serve-container.sh"), "--fleet-auth-plan"], {
     env: f.env, encoding: "utf8",
   });
   assert.equal(failed.status, 17, "a failed shared resolver cannot produce a fleet bind");
+});
+
+test("W1-T12293 criterion 2: serve mounts the account file the shared resolver names, read-only", (t) => {
+  const f = launcherFixture(t);
+  const homeAccount = join(f.home, ".claude.json");
+  writeFileSync(homeAccount, "{}\n");
+  assert.ok(f.launch().binds.includes(`${homeAccount}:/home/node/.claude.json:ro`), "the default is the file beside ~/.claude");
+  const named = join(f.root, "named-account.json");
+  writeFileSync(named, "{}\n");
+  writeFileSync(join(f.install, "deploy", "claude-directory.sh"),
+    `claude_host_directory() { printf '%s\\n' '${join(f.home, ".claude")}'; }\nclaude_host_account_file() { printf '%s\\n' '${named}'; }\n`);
+  const binds = f.launch().binds;
+  assert.ok(binds.includes(`${named}:/home/node/.claude.json:ro`), binds.join(" "));
+  assert.ok(!binds.some((bind) => bind.startsWith(`${homeAccount}:`)), "serve has no second derivation from HOME");
 });
 
 test("W1-T10511: a Claude login that cannot reach the fleet store answers unavailable and creates nothing", async (t) => {

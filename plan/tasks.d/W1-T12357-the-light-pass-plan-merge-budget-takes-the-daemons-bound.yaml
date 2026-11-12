@@ -1,0 +1,42 @@
+- id: W1-T12357
+  title: "The daemon cannot set the bound of the light pass plan-merge budget"
+  repo: remudero
+  depends_on: []
+  priority: 1.2
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # spans the daemon and the sweep command; changes the policy every light pass of the daemon reads
+  band_meaning: blast-radius
+  origin: operator-session#hand-build-follow-ups-2026-11-11
+  plan_refs:
+    - W1-T12267
+    - W1-T11445
+    - W1-T1044
+  files:
+    - src/cli/commands/sweep.ts
+    - src/cli/commands/daemon.ts
+    - test/daemon/the-light-pass-plan-merge-budget-takes-the-daemons-bound.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "`buildSweepLightHook` takes the sweep tick bound in its `io` argument (`sweepWallClockBoundMs`) and gives every light pass of the tick a policy with that bound"
+      proof: 'grep: test("W1-T12357: the light pass hook gives each pass the bound it was given in test/daemon/the-light-pass-plan-merge-budget-takes-the-daemons-bound.test.ts'
+    - claim: "`daemonCommand` passes `opts.sweepWallClockBoundMs` (the value of `sweepWallClockBoundMs` in the daemon's `plan/policy.yaml`) to `buildSweepLightHook`, so a changed bound changes the plan-merge budget cap of the light pass to half of it"
+      proof: 'grep: test("W1-T12357: a daemon with a changed sweep bound caps the plan-merge budget at half of it in test/daemon/the-light-pass-plan-merge-budget-takes-the-daemons-bound.test.ts'
+    - claim: "A hook built with no bound uses `DEFAULT_SWEEP_POLICY` as before"
+      proof: 'grep: test("W1-T12357: a hook with no bound keeps the default policy in test/daemon/the-light-pass-plan-merge-budget-takes-the-daemons-bound.test.ts'
+  rationale: |
+    FROM THE CODE, 2026-11-11, origin/main 401c10db9.
+    - W1-T12267 (merged as #18036) caps the plan-merge budget of a light pass at half of the sweep tick bound. `runSweepLightPassCore` (src/lib/sweep.ts) reads `policy.sweepWallClockBoundMs ?? POLICY_SWEEP_WALL_CLOCK_BOUND_MS`.
+    - `buildSweepLightHook` (src/cli/commands/sweep.ts) passes `DEFAULT_SWEEP_POLICY` to every `runSweepLightPass`, `observeLightPassReviewEligibility` and `selectLightPassReadyOverlap` call. `DEFAULT_SWEEP_POLICY.sweepWallClockBoundMs` is the value in the repository's default `plan/policy.yaml` (559,000 ms), read once when the module loads.
+    - The daemon reads its own bound: `daemonCommand` (src/cli/commands/daemon.ts) sets `opts.sweepWallClockBoundMs` from `loadPolicy(policyPath(repoRoot))`. That value bounds the sweep tick (`DaemonOpts.sweepWallClockBoundMs`), but it never reaches the light pass hook (`sweepLight: buildSweepLightHook(...)` in the same function).
+    - So when an operator changes the bound for a daemon, the sweep tick follows and the plan-merge budget of the light pass does not. The two can disagree, and the budget can pass half of the tick bound that W1-T12267 meant to cap it at.
+  design: |
+    1. In `buildSweepLightHook`, add `sweepWallClockBoundMs?: number` to the `io` argument. Build one policy for the hook: `DEFAULT_SWEEP_POLICY` when the field is absent, else `{ ...DEFAULT_SWEEP_POLICY, sweepWallClockBoundMs: io.sweepWallClockBoundMs }`. Pass that policy wherever the hook passes `DEFAULT_SWEEP_POLICY` today, also to `buildSweepEffects`.
+    2. In `daemonCommand`, pass `{ sweepWallClockBoundMs: opts.sweepWallClockBoundMs }` as the `io` argument of the `buildSweepLightHook` call. If another task has already put an `io` object there (W1-T12236 adds `openPrViews`), add the field to that object.
+    3. Add the test file named in `files`, one test per criterion with the exact titles in the proofs. For criterion 2, drive `daemonCommand` with a policy file whose bound differs from the default, give the light pass a measured interval longer than half of that bound, and read `plan_merge_budget_ms` on the pass's `sweep.summary` row (the field W1-T12267 writes). It must be half of the changed bound. Assert the row, not a source text.
+    NOT IN SCOPE: the full sweep hook, the value in plan/policy.yaml, and how the budget is measured.
+  falsifier: |
+    Pass `DEFAULT_SWEEP_POLICY` again in the hook and criteria 1 and 2 must fail. Drop the field from the daemon's call and criterion 2 must fail. Make the hook require the field and criterion 3 must fail.
