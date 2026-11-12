@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdtempSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -117,7 +117,9 @@ function emptyClaudeDir(): string {
 
 test("a find without -printf still reclaims old agent history and reports the bytes freed", () => {
   const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}bsd-find-codex-`));
-  const old = join(dir, "thread_history_1.sqlite");
+  // W1-T12409: in the Codex home the age sweep removes old files only under its history folders.
+  mkdirSync(join(dir, "sessions"));
+  const old = join(dir, "sessions", "rollout-old.jsonl");
   const fresh = join(dir, "state_5.sqlite");
   writeFileSync(old, "x".repeat(4096));
   writeFileSync(fresh, "y".repeat(2048));
@@ -141,9 +143,10 @@ test("a find without -printf still removes oldest first", () => {
   const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}bsd-find-order-`));
   const now = new Date();
   // Named so that readdir order disagrees with mtime order unless the script sorts explicitly.
-  const third = join(dir, "z-third.log");
-  const first = join(dir, "a-first.log");
-  const second = join(dir, "m-second.log");
+  mkdirSync(join(dir, "sessions"));
+  const third = join(dir, "sessions", "z-third.log");
+  const first = join(dir, "sessions", "a-first.log");
+  const second = join(dir, "sessions", "m-second.log");
   for (const [p, age] of [
     [third, 20],
     [first, 60],
@@ -169,7 +172,8 @@ test("a find without -printf still removes oldest first", () => {
 
 test("a find without -printf still reports a dry run without removing anything", () => {
   const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}bsd-find-dry-`));
-  const old = join(dir, "thread_history_1.sqlite");
+  mkdirSync(join(dir, "sessions"));
+  const old = join(dir, "sessions", "rollout-old.jsonl");
   writeFileSync(old, "x".repeat(4096));
   const now = new Date();
   utimesSync(old, new Date(now.getTime() - 60 * DAYS), new Date(now.getTime() - 60 * DAYS));
