@@ -38,6 +38,8 @@
     - test/ci/parity/a-ci-dependency-receipt-never-becomes-production-credit.test.ts
     - test/base-lint-attributes-pre-existing-violations.test.ts
     - test/run-task.test.ts
+    - "src/lib/gate-gardener.ts"
+    - "src/lib/machine-filing.ts"
   status: queued
   attempts: 0
   rationale: |
