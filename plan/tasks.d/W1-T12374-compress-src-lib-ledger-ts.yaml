@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 1
   status: queued
@@ -25,3 +25,13 @@
     Compare the token streams with assertSameTokens from #test/helpers/compression-pin.js, never assert.deepEqual: its failure diff over two whole token arrays grows quadratically (W1-T11342).
     Preserve every existing behavioral assertion and run the actual callers. Do not invent a new hard comment ceiling or claim success from a title-only proof.
     Preserve existing owners, stops and deployment holds. This maintenance task grants no service restart, release or publication override.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.9
+    reasons:
+      - "The description limits the change to comment compression in src/lib/ledger.ts plus one new test file. Neither touches secrets, auth, deploy, merge or review policy, and the plan states no deletion of data or history beyond comment text."
+      - "Acceptance is verifiable from the plan itself. A unit test compares executable tokens with the pre-compression source using named helpers and checks a real comment-count reduction, and existing behavioral assertions must be preserved."
+      - "The family track record shows 42 merged and 0 declined, and the rationale says the task grants no restart, release or publication override. No operator-only decision is requested."
+    judged_at: "2026-11-12T04:59:07.222Z"
+    pin: "bd704396a8800b3c792e9487b7e3527f70b5b5121b3371cd175db8f605262f37"

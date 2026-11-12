@@ -782,6 +782,8 @@ import {
   parseFeedbackAddArgs,
   proposeFeedbackWithSummary,
   readFeedbackEntry,
+  readLandedFeedbackEntry,
+  feedbackEntryRepoPath,
   realDecisionSummarizer,
   realFeedbackExpander,
   resolveDecisionSummaryMount,
@@ -948,12 +950,11 @@ import { assertProposedPlanLoads,
   commitTriageOrRecordRefusal,
   refusedTriageIds,
   triageCommitMessage,
-  triageDeclaredScope,
-  triageEmptyScopeDisposition,
   unresolvedCitationReferents,
   worktreeCitationEvidence,
   feedbackEntryBlock,
   triagePrompt,
+  type TriageDecision,
 } from "./lib/triage.js";
 import {
   declaredTaskIds,
@@ -1444,6 +1445,10 @@ import {
   changedTaskIds,
   rawChangedTaskIds,
   statusFlipOnlyTaskIds,
+  assertDependenciesKnown,
+  movedTaskIds,
+  planFromFiles,
+  planSourceConflicts,
   criteriaAdded,
   DUPLICATE_SLUG_SHINGLE_K,
   followUpCarriesCriteria,
@@ -1462,6 +1467,8 @@ import {
   type LintOpts,
   type LintViolation,
   type DuplicateSurfaceCorpusEntry,
+  type PlanFiles,
+  type PlanSourceConflict,
 } from "./lib/task-linter.js";
 import { readPriorRefusal, preDispatchContractRevision, writePriorRefusal, repairRefusedTask, type RefusalViolation } from "./lib/dispatch-repair.js";
 import { REPLAY_CORPUS_BOUND, ReplayDispatch, boundedCorpus, harnessRunnerOver, replayOptIn,
@@ -18790,8 +18797,19 @@ export function planLintOutcomeFromOutput(code: number, lines: string[], mergeBa
   };
 }
 
+/** W1-T12171: the plan monolith at `monolithRel` under `root` and its `tasks.d` shards, keyed by path under `root`. */
+function readPlanFiles(root: string, monolithRel: string): Map<string, string> {
+  const files = new Map([[monolithRel, readFileSync(join(root, monolithRel), "utf8")]]);
+  const shardRel = join(dirname(monolithRel), "tasks.d");
+  const names = existsSync(join(root, shardRel)) ? readdirSync(join(root, shardRel)) : [];
+  for (const name of names.filter((f) => f.endsWith(".yaml") || f.endsWith(".yml")).sort()) {
+    files.set(join(shardRel, name), readFileSync(join(root, shardRel, name), "utf8"));
+  }
+  return files;
+}
+
 export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps = {}): Promise<number> {
-  const badArg = unknownArgError("lint-plan", rest, ["--plan", "--base", "--repo-root"], ["--all", "--merge-base", "--offline"]);
+  const badArg = unknownArgError("lint-plan", rest, ["--plan", "--base", "--repo-root", "--code-root"], ["--all", "--merge-base", "--offline"]);
   if (badArg) {
     console.error(badArg + "\n" + USAGE);
     return 2;
@@ -18801,8 +18819,11 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
   const allFlag = rest.includes("--all");
   const offline = deps.offline === true || rest.includes("--offline");
   const checkoutRoot = deps.repoRoot ?? resolve(flagValue(rest, "--repo-root") ?? repoRoot);
+  // W1-T12171: the checkout that holds the code a task names. Without the option it is the plan's own checkout.
+  const codeRootArg = flagValue(rest, "--code-root");
+  const codeRoot = codeRootArg !== undefined ? resolve(codeRootArg) : checkoutRoot;
   let localRepoName: string | undefined;
-  try { localRepoName = resolveOwnerRepoAt(checkoutRoot).repo; } catch { /* no origin identity: preserve existing lint behavior */ }
+  try { localRepoName = resolveOwnerRepoAt(codeRoot).repo; } catch { /* no origin identity: preserve existing lint behavior */ }
   const planPathArg = flagValue(rest, "--plan");
   const planPath = planPathArg !== undefined ? resolve(planPathArg) : join(checkoutRoot, "plan", "tasks.yaml");
   // W1-T120: an explicit --plan OUTSIDE the root is refused here BY NAME, before --base/git-show
@@ -18822,13 +18843,29 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
   const baseLabel = scopeBase === baseRef ? baseRef : `${baseRef} at merge-base ${scopeBase!.slice(0, 12)}`;
   let plan: Plan;
   let planRaw: string;
+  const planRel = relative(checkoutRoot, planPath);
+  let planApart: { headFiles: PlanFiles; codeFiles: PlanFiles; codePlan: Plan } | undefined;
   try {
     planRaw = readFileSync(planPath, "utf8");
-    plan = loadPlan(planPath);
+    if (codeRootArg === undefined) {
+      plan = loadPlan(planPath);
+    } else {
+      const headFiles = readPlanFiles(checkoutRoot, planRel);
+      const codeFiles = readPlanFiles(codeRoot, planRel);
+      const codePlan = planFromFiles(codeFiles, (rel) => join(codeRoot, rel));
+      plan = planFromFiles(headFiles, (rel) => join(checkoutRoot, rel));
+      assertDependenciesKnown(plan.tasks, new Set([...plan.byId.keys(), ...codePlan.byId.keys()]));
+      planApart = { headFiles, codeFiles, codePlan };
+    }
   } catch (e) {
     console.error(`### rmd lint-plan: ${(e as Error).message}`);
     return 2;
   }
+  // The plan a dependency resolves in: with --code-root, a task the code root's plan holds also counts.
+  const dependencyPlan: Plan = planApart === undefined ? plan : (() => {
+    const tasks = [...plan.tasks, ...planApart.codePlan.tasks.filter((t) => !plan.byId.has(t.id))];
+    return { tasks, byId: new Map(tasks.map((t) => [t.id, t])) };
+  })();
 
   let scope: Set<string> | undefined;
   let oldById: Map<string, Task> | undefined;
@@ -18840,15 +18877,20 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
   // status flip to a closed state (queued -> merged, e.g. `plan-reconcile --write`'s own write) —
   // named here so the summary can report them, never silently drop them (design point (iv)).
   let statusFlipCarvedIds: string[] = [];
+  // W1-T12171: tasks moved unchanged from the code root's plan, and ids both plans hold with different bytes.
+  let movedIds: string[] = [];
+  let movedCandidates = new Set<string>();
+  let sourceConflicts: PlanSourceConflict[] = [];
   if (baseRef) {
-    const relPath = relative(checkoutRoot, planPath);
+    const relPath = planRel;
     const basePathCache = new Map<string, boolean>();
     pathExistsAtBase = (rel: string) => {
       const cached = basePathCache.get(rel);
       if (cached !== undefined) return cached;
       let exists = false;
       try {
-        hostWorktreeGit(checkoutRoot, ["cat-file", "-e", `${scopeBase}:${rel}`], { stdio: "ignore" });
+        // With --code-root, the code of a plan-only change is the code root's commit, unchanged.
+        hostWorktreeGit(codeRoot, ["cat-file", "-e", `${planApart === undefined ? scopeBase : "HEAD"}:${rel}`], { stdio: "ignore" });
         exists = true;
       } catch (e) {
         void e;
@@ -18881,8 +18923,15 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
       // guarded), while `rawChangedTaskIds` needs only the base's raw TEXT, so the changed-tasks
       // scope survives. A broken HEAD plan still fails loudly earlier, at `loadPlan(planPath)`.
       let oldPlan: Plan | undefined;
+      let basePlanFiles: PlanFiles | undefined;
       try {
-        oldPlan = loadPlan(tmpFile);
+        if (planApart === undefined) {
+          oldPlan = loadPlan(tmpFile);
+        } else {
+          const tmpFiles = readPlanFiles(tmpDir, "tasks.yaml");
+          basePlanFiles = new Map([...tmpFiles].map(([rel, text]) => [rel === "tasks.yaml" ? relPath : join(dirname(relPath), rel), text]));
+          oldPlan = planFromFiles(basePlanFiles, (rel) => `${scopeBase}:${rel}`);
+        }
       } catch (e) {
         console.error(
           `### rmd lint-plan: the base plan at ${baseRef} does not itself load ` +
@@ -18893,6 +18942,12 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
       scope = oldPlan ? changedTaskIds(oldPlan.tasks, plan.tasks) : new Set<string>();
       if (oldPlan) {
         oldById = new Map(oldPlan.tasks.map((t) => [t.id, t]));
+        if (planApart !== undefined && basePlanFiles !== undefined) {
+          // The base is the union of both plans; the plan repository's record wins for an id both hold.
+          for (const t of planApart.codePlan.tasks) if (!oldById.has(t.id)) oldById.set(t.id, t);
+          movedCandidates = movedTaskIds(plan.tasks, checkoutRoot, planApart.headFiles, planApart.codeFiles);
+          sourceConflicts = planSourceConflicts(basePlanFiles, planApart.codeFiles).filter((c) => !movedCandidates.has(c.id));
+        }
         // Tasks this PR introduces outright (absent at the base ref) — the only tasks that
         // can possibly BE a post-merge-amendment follow-up (W1-T180).
         newTaskIds = new Set(plan.tasks.filter((t) => !oldById!.has(t.id)).map((t) => t.id));
@@ -18937,6 +18992,7 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
       // it has left the population the open-task rules govern (design point (i)).
       const statusFlipCarve = statusFlipOnlyTaskIds(oldCorpusTexts, newCorpusTexts);
       for (const id of statusFlipCarve) scope.delete(id);
+      movedIds = [...movedCandidates].filter((id) => scope!.delete(id)).sort(); // neither a new filing nor an amendment
       statusFlipCarvedIds = [...statusFlipCarve].sort();
       const diffText = hostWorktreeGit(checkoutRoot, ["diff", "--no-ext-diff", "--unified=0", `${scopeBase}...HEAD`, "--", "src"], {
         maxBuffer: 64 * 1024 * 1024,
@@ -19000,10 +19056,10 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
       const github = (deps.ghGateway ?? ghGateway)(owner, repo);
       const evidenceIds = new Set(scope);
       const pending = [...scope];
-      while (pending.length > 0) for (const id of plan.byId.get(pending.pop()!)?.depends_on ?? []) {
+      while (pending.length > 0) for (const id of dependencyPlan.byId.get(pending.pop()!)?.depends_on ?? []) {
         if (!evidenceIds.has(id)) { evidenceIds.add(id); pending.push(id); }
       }
-      const tasks = plan.tasks.filter(t => evidenceIds.has(t.id));
+      const tasks = dependencyPlan.tasks.filter(t => evidenceIds.has(t.id));
       const scopedPlan: Plan = { tasks, byId: new Map(tasks.map(t => [t.id, t])) };
       dependencyStatusByTaskId = (deps.projectPlan ?? projectPlan)(scopedPlan, {
         ledgerPath: ledgerPathFor(config), github, writeCreditStore: SERVE_KEEPS_CREDITS_IN_MEMORY,
@@ -19100,7 +19156,7 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
       releasedIdsForAdmission = new Set<string>();
     }
   }
-  const knownRepos = knownPlanRepos(checkoutRoot); // W1-T4700: the repo rule's names, read once per pass
+  const knownRepos = knownPlanRepos(codeRoot); // W1-T4700: the repo rule's names, read once per pass
   for (const task of plan.tasks) {
     if (scope && !scope.has(task.id)) continue;
     if (wholePlanScope && !wholePlanScope.has(task.id)) continue;
@@ -19171,7 +19227,7 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
     }
     // impl-DO: the CALL-SITE check needs to know whether a module already exists, and the linter
     // is pure — so the predicate is supplied here, the one place holding a real checkout to ask.
-    opts.moduleExists = (rel: string) => existsSync(join(checkoutRoot, rel));
+    opts.moduleExists = (rel: string) => existsSync(join(codeRoot, rel));
     opts.localRepoName = localRepoName;
     opts.knownRepos = knownRepos;
     // W1-T9292: an unminted id BLOCKS only on a task this diff adds; one already on the base, every one in a whole-plan
@@ -19208,9 +19264,9 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
       }
       if (planOnlyFilingDiff !== undefined) opts.planOnlyFiling = planOnlyFilingDiff;
       // #12389: a changed shard's doctrine citations must resolve, or name a page its own files: creates. Read once.
-      doctrineCitations ??= doctrineCitationFactsAt(checkoutRoot);
+      doctrineCitations ??= doctrineCitationFactsAt(codeRoot);
       opts.doctrineCitations = doctrineCitations;
-      opts.resolveNameFilteredCandidates = (rawName: string) => resolveNameFilteredCandidates(checkoutRoot, rawName);
+      opts.resolveNameFilteredCandidates = (rawName: string) => resolveNameFilteredCandidates(codeRoot, rawName);
       // W1-T1225: a `grep:` proof's named file, read ONLY in --base mode (`scope` populated iff
       // `baseRef` was given) — the same changed-tasks scoping W1-T497's resolver above uses, and
       // for the identical reason: a changed task's own grep proofs name a handful of files, so
@@ -19218,7 +19274,7 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
       // 66.4s and this does not reopen it). Absent path (not written yet) ⇒ undefined, exactly
       // the "no predicate ⇒ no opinion" contract `opts.moduleExists` above already uses.
       opts.readGrepProofFile = (rel: string) => {
-        const abs = join(checkoutRoot, rel);
+        const abs = join(codeRoot, rel);
         if (!existsSync(abs)) return undefined;
         try {
           return readFileSync(abs, "utf8");
@@ -19236,7 +19292,7 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
       // file in head or base. This stays scoped: the whole-plan pass must not retroactively refuse
       // the standing population of older machine-authored records.
       opts.machineFilingAdmission = {
-        plan,
+        plan: dependencyPlan,
         releasedIds: releasedIdsForAdmission,
         isMerged: (candidate) => statusByTaskId?.get(candidate.id)?.merged ?? false,
         dependencyEvidence,
@@ -19320,6 +19376,11 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
   // pointed at a fixture tree with no policy.yaml of its own is a no-op here
   // (nothing to check), never a spurious failure over a file that was never
   // meant to exist at that path.
+  for (const c of sourceConflicts) {
+    failing++;
+    console.error(`✗ ${c.id}: the plan repository and the code root hold different bytes for this id: ` +
+      `${scopeBase}:${c.planPath} and ${join(codeRoot, c.codePath)}`);
+  }
   const policyFile = join(dirname(planPath), "policy.yaml");
   if (existsSync(policyFile)) {
     try {
@@ -19384,7 +19445,10 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
       statusFlipCarvedIds.length > 0
         ? ` (${statusFlipCarvedIds.length} status-flip-only, excluded from --base scope: ${statusFlipCarvedIds.join(", ")})`
         : "";
-    summary = `${checked} task(s) checked (${scope.size} new/changed vs ${baseLabel})${carvedNote} — ${failing} failing, ${warned} warning(s)`;
+    const movedNote = movedIds.length > 0
+      ? ` (${movedIds.length} moved unchanged from the code root, not judged: ${movedIds.join(", ")})`
+      : "";
+    summary = `${checked} task(s) checked (${scope.size} new/changed vs ${baseLabel})${carvedNote}${movedNote} — ${failing} failing, ${warned} warning(s)`;
   } else if (wholePlanScope) {
     summary =
       `${checked} task(s) checked (open tasks only) [scoped by ${wholePlanScopeKey}` +
@@ -21341,6 +21405,7 @@ async function triageClaimSweepForPass(
     }
   };
   let reserver = opts.claimReserver;
+  let landedStatus: ((id: string) => string | undefined) | undefined;
   if (reserver === undefined) {
     // The SAME clone the triage lane claims on (`repoDir`): a claim is only visible on its own origin.
     let repoDir: string;
@@ -21352,6 +21417,7 @@ async function triageClaimSweepForPass(
     }
     if (!existsSync(repoDir)) return undefined;
     reserver = triageClaimReserverAsyncFor(repoDir);
+    landedStatus = (id) => readLandedFeedbackEntry(repoDir, id)?.status;
   }
   const readRows =
     opts.readClaimLivenessRows ??
@@ -21359,7 +21425,7 @@ async function triageClaimSweepForPass(
       const read = readLedgerUnionRecordsSync(dirname(ledgerPath), { since: sinceIso, requireArchives: true, refuseIncomplete: true });
       return read.ok ? read.rows : undefined;
     });
-  const result = await sweepTriageClaims(candidates, reserver, { now, readRows, log });
+  const result = await sweepTriageClaims(candidates, reserver, { now, readRows, log, landedStatus });
   return result.held;
 }
 
@@ -34653,102 +34719,53 @@ export function triageLockRefusalMessage(pid: number, startedAt: string, lockPat
   );
 }
 
-export interface TriagePrLifecycleIdentity {
-  state: string;
-  headSha: string;
-  baseRef: string;
-  baseSha: string;
-}
-
-/** Read the PR fields needed to prove an empty-scope close still targets the classified PR. */
-async function readTriagePrLifecycleIdentity(prUrl: string, owner: string, repo: string): Promise<TriagePrLifecycleIdentity> {
-  const number = prUrl.match(/\/pull\/(\d+)/)?.[1];
-  if (!number) throw new Error(`triage PR identity: cannot resolve a pull number from ${JSON.stringify(prUrl)}`);
-  const row = await ghJsonAsync(["api", `repos/${owner}/${repo}/pulls/${number}`]) as {
-    state?: unknown;
-    head?: { sha?: unknown };
-    base?: { ref?: unknown; sha?: unknown };
-  };
-  const { state, head, base } = row;
-  if (typeof state !== "string" || typeof head?.sha !== "string" || !/^[0-9a-f]{40}$/i.test(head.sha) ||
-      typeof base?.ref !== "string" || !base.ref || typeof base.sha !== "string" || !/^[0-9a-f]{40}$/i.test(base.sha)) {
-    throw new Error(`triage PR identity: ${prUrl} returned incomplete state/head/base evidence`);
+/**
+ * W1-T12198: land a `no_task` or `grill` status change through the shared feedback landing.
+ * The status write reuses `setFeedbackStatus` in the lane worktree, which is never committed; the
+ * landing carries those bytes. A refused landing leaves origin/main at `status: new`, so a later
+ * pass triages the entry again.
+ */
+function landTriageStatusOutcome(i: {
+  worktreePath: string;
+  repoDir: string;
+  feedbackId: string;
+  entry: FeedbackEntry;
+  decision: Extract<TriageDecision, { action: "no_task" | "grill" }>;
+  grillIssueUrl: string | undefined;
+  repository: string;
+  threadStorePath: string;
+  log: (step: string, extra?: Record<string, unknown>) => void;
+  say: (msg: string) => void;
+}): number {
+  const { decision, feedbackId, log, say } = i;
+  setFeedbackStatus(i.worktreePath, feedbackId, decision.status);
+  const content = readFileSync(feedbackEntryPath(i.worktreePath, feedbackId), "utf8");
+  const landing = landFeedbackStatusContent(i.worktreePath, feedbackEntryRepoPath(feedbackId), content, { log });
+  if (!landing.landed) {
+    const cause = landing.error ?? (landing.refused?.length ? `refused: ${JSON.stringify(landing.refused)}` : "nothing was landed");
+    log("triage.error", { error: `feedback landing refused: ${cause}`, action: decision.action, landing_pr: landing.prUrl ?? null });
+    say(`triage ${decision.action}: the feedback landing refused the status change (${cause}); feedback#${feedbackId} stays new`);
+    worktreeRemove(i.repoDir, i.worktreePath);
+    return 1;
   }
-  return { state, headSha: head.sha, baseRef: base.ref, baseSha: base.sha };
-}
-
-/** Close an empty-scope triage PR through async GitHub transport so the daemon loop never blocks on gh. */
-async function closeTriagedEmptyScopePr(prUrl: string, comment: string): Promise<void> {
-  await ghTextAsync(["pr", "close", prUrl, "--comment", comment]);
-}
-
-export type TriageLiveScopeCheck =
-  | { kind: "empty"; comment: string }
-  | { kind: "nonempty" }
-  | { kind: "unknown"; reason: string };
-
-/** Pure safety decision shared by the live triage path and its admission tests. */
-export function triageLiveScopeDecision(input: {
-  action: string;
-  scopeFiles: readonly string[];
-  liveDiffFiles?: readonly string[];
-  complete: boolean;
-  expectedHeadSha?: string;
-  fetchedBaseSha?: string;
-  before?: TriagePrLifecycleIdentity;
-  after?: TriagePrLifecycleIdentity;
-}): TriageLiveScopeCheck {
-  if (input.action !== "no_task" && input.action !== "grill") return { kind: "nonempty" };
-  if (!input.complete || !input.liveDiffFiles || !input.before || !input.expectedHeadSha || !input.fetchedBaseSha ||
-      input.scopeFiles.length === 0) {
-    return { kind: "unknown", reason: "live scope or PR identity evidence is incomplete" };
-  }
-  const before = input.before;
-  if (before.state !== "open" || before.headSha !== input.expectedHeadSha || before.baseRef !== "main" ||
-      before.baseSha !== input.fetchedBaseSha) {
-    return { kind: "unknown", reason: "PR state, head, or base differs from the fetched classification snapshot" };
-  }
-  const disposition = triageEmptyScopeDisposition(input.liveDiffFiles, input.scopeFiles);
-  if (disposition.action !== "close" || !disposition.comment) return { kind: "nonempty" };
-  const after = input.after;
-  if (!after || after.state !== "open" || after.headSha !== before.headSha || after.baseRef !== before.baseRef ||
-      after.baseSha !== before.baseSha) {
-    return { kind: "unknown", reason: "PR identity changed after empty-scope classification" };
-  }
-  return { kind: "empty", comment: disposition.comment };
-}
-
-/** Classify a declared scope and re-read identity immediately before any empty-scope close. */
-async function checkTriageLiveScope(
-  worktreePath: string,
-  prUrl: string,
-  owner: string,
-  repo: string,
-  action: string,
-  scopeFiles: readonly string[],
-): Promise<TriageLiveScopeCheck> {
+  // `pr.opened` keyed to TRIAGE-<id>: the daemon's in-flight guard and the failed-fire backoff read it.
+  if (landing.prUrl) log("pr.opened", { pr_url: landing.prUrl, plan_only: true, action: decision.action, landing: true, landing_error: landing.error });
+  say(`triage ${decision.action}: status ${decision.status} landed through the feedback landing${landing.prUrl ? `: ${landing.prUrl}` : " (pull request pending)"}`);
   try {
-    await hostWorktreeGitAsync(worktreePath, ["fetch", "origin", "main"], { stdio: "inherit-stdout" });
-    const baseSha = (await hostWorktreeGitAsync(worktreePath, ["rev-parse", "origin/main"])).trim();
-    const headSha = (await hostWorktreeGitAsync(worktreePath, ["rev-parse", "HEAD"])).trim();
-    if (!/^[0-9a-f]{40}$/i.test(baseSha) || !/^[0-9a-f]{40}$/i.test(headSha)) {
-      return { kind: "unknown", reason: "live base/head revision is incomplete" };
-    }
-    const before = await readTriagePrLifecycleIdentity(prUrl, owner, repo);
-    const liveDiffFiles = (await hostWorktreeGitAsync(worktreePath, ["diff", "--name-only", "origin/main", "HEAD", "--", ...scopeFiles]))
-      .split("\n").map((line) => line.trim()).filter(Boolean);
-    const evidence = {
-      action, scopeFiles, liveDiffFiles, complete: true, expectedHeadSha: headSha,
-      fetchedBaseSha: baseSha, before,
-    };
-    if (triageEmptyScopeDisposition(liveDiffFiles, scopeFiles).action !== "close") {
-      return triageLiveScopeDecision(evidence);
-    }
-    const after = await readTriagePrLifecycleIdentity(prUrl, owner, repo);
-    return triageLiveScopeDecision({ ...evidence, after });
+    const prUrl = landing.prUrl;
+    const outcome = prUrl === undefined
+      ? { action: "error" as const, reason: "The landing returned no pull request." }
+      : decision.action === "grill"
+        ? i.grillIssueUrl ? { action: "grill" as const, publicationPr: prUrl, detail: decision.detail, questionIssueUrl: i.grillIssueUrl }
+          : { action: "error" as const, reason: "The intake question has no verified publication." }
+        : { action: decision.action, publicationPr: prUrl, detail: decision.detail };
+    const response = recordEscalationIntakeOutcome(i.entry, outcome, { threadStorePath: i.threadStorePath, repository: i.repository });
+    log("triage.escalation_response", { feedback_id: feedbackId, ...response, work: "pending" });
   } catch (error) {
-    return { kind: "unknown", reason: String((error as Error)?.message ?? error).slice(0, 240) };
+    log("triage.escalation_response", { feedback_id: feedbackId, state: "unknown", reason: String((error as Error)?.message ?? error) });
   }
+  worktreeRemove(i.repoDir, i.worktreePath);
+  return 0;
 }
 
 async function triageCommandLocked(
@@ -34886,7 +34903,8 @@ async function triageCommandLocked(
     claimReserver = triageClaimReserverAsyncFor(repoDir);
     // `mergedSubjects` is read LAZILY — only the LOSING lane ever needs it, so the winner pays
     // nothing for the evidence arm's input.
-    triageClaim = await claimTriageWithLogging(log, feedbackId, claimReserver, { mergedSubjects: () => mergedTriageSubjects(repoDir) });
+    triageClaim = await claimTriageWithLogging(log, feedbackId, claimReserver, { mergedSubjects: () => mergedTriageSubjects(repoDir),
+      landedStatus: (id) => readLandedFeedbackEntry(repoDir, id)?.status });
     if (!triageClaim.proceed) {
       say(`REFUSED — ${triageClaim.reason}`);
       worktreeRemove(repoDir, worktreePath);
@@ -35119,6 +35137,13 @@ async function triageCommandLocked(
       say(`grill opened (needs-human, ${decision.options.length} options + a recommendation): ${grillIssueUrl}`);
     }
 
+    // W1-T12198: an outcome that files no task changes one status line, so it rides the shared
+    // feedback landing pull request and opens no pull request of its own.
+    if (decision.action === "no_task" || decision.action === "grill") {
+      return landTriageStatusOutcome({ worktreePath, repoDir, feedbackId, entry, decision, grillIssueUrl,
+        repository: `${owner}/${repo}`, threadStorePath: inboxThreadStorePath(config.root), log, say });
+    }
+
     // ID-COLLISION GUARD (W1-T236 triple-mint, 2026-07-22): refuse a proposal whose merged plan
     // (monolith + tasks.d shards) does not load — e.g. a minted id a shard already owns — BEFORE
     // any push, with the duplicate named. See lib/triage.ts's assertProposedPlanLoads.
@@ -35265,65 +35290,18 @@ async function triageCommandLocked(
     // Publication ownership, plan-only scope and feedback provenance were verified above.
     // Acknowledging intake ends the ask; it does not claim CI, merge or work completion.
     try {
-      const outcome = decision.action === "grill"
-        ? grillIssueUrl ? { action: "grill" as const, publicationPr: prUrl, detail: decision.detail, questionIssueUrl: grillIssueUrl }
-          : { action: "error" as const, reason: "The intake question has no verified publication." }
-        : { action: decision.action, publicationPr: prUrl, detail: decision.detail };
-      const response = recordEscalationIntakeOutcome(entry, outcome,
+      const response = recordEscalationIntakeOutcome(entry, { action: decision.action, publicationPr: prUrl, detail: decision.detail },
         { threadStorePath: inboxThreadStorePath(config.root), repository: `${owner}/${repo}` });
       log("triage.escalation_response", { feedback_id: feedbackId, ...response, work: "pending" });
     } catch (error) {
       log("triage.escalation_response", { feedback_id: feedbackId, state: "unknown", reason: String((error as Error)?.message ?? error) });
     }
 
-    const declaredScope = decision.action === "no_task" || decision.action === "grill"
-      ? triageDeclaredScope(feedbackId)
-      : undefined;
-    if (declaredScope) {
-      const beforeCi = await checkTriageLiveScope(worktreePath, prUrl, owner, repo, decision.action, declaredScope);
-      if (beforeCi.kind === "empty") {
-        log("triage.already_done", { scope: declaredScope, before_ci: true });
-        say(`triage PR's declared scope (${declaredScope.join(", ")}) is EMPTY against the LIVE origin/main — ` +
-          `a sibling triage PR already landed this change; closing rather than merging: ${prUrl}`);
-        await closeTriagedEmptyScopePr(prUrl, beforeCi.comment);
-        worktreeRemove(repoDir, worktreePath);
-        return 0;
-      }
-      if (beforeCi.kind === "unknown") {
-        // Unknown evidence cannot authorize an early close. Keep the ordinary CI path, then let
-        // the post-CI identity/scope check refuse any later terminalization or merge.
-        log("triage.live_scope_unknown", { scope: declaredScope, phase: "before_ci", reason: beforeCi.reason });
-        say(`triage could not prove the declared scope is empty before CI (${beforeCi.reason}); ` +
-          `retaining the ordinary CI and review gates: ${prUrl}`);
-      }
-    }
-
-    // Confirmed no-op triage PRs terminalize above; every substantive scope still passes CI.
     const ci = ciGateState(await waitForCiGreen(prUrl, (s, extra) => log(s, extra)));
     if (ci !== "green") {
       say(`ci ${ci} — PR left OPEN: ${prUrl}`);
       worktreeRemove(repoDir, worktreePath);
       return 1;
-    }
-
-    // Keep the W1-T963 recheck after CI: a sibling may land the declared feedback update while
-    // checks are running. The same complete-evidence and exact-identity rule applies here.
-    if (declaredScope) {
-      const afterCi = await checkTriageLiveScope(worktreePath, prUrl, owner, repo, decision.action, declaredScope);
-      if (afterCi.kind === "empty") {
-        log("triage.already_done", { scope: declaredScope, after_ci: true });
-        say(`triage PR's declared scope (${declaredScope.join(", ")}) is EMPTY against the LIVE origin/main — ` +
-          `a sibling triage PR already landed this change; closing rather than merging: ${prUrl}`);
-        ghExec(["pr", "close", prUrl, "--comment", afterCi.comment], { stdio: "inherit" });
-        worktreeRemove(repoDir, worktreePath);
-        return 0;
-      }
-      if (afterCi.kind === "unknown") {
-        log("triage.live_scope_unknown", { scope: declaredScope, phase: "after_ci", reason: afterCi.reason });
-        say(`triage PR left OPEN — live empty-scope evidence is unavailable or changed (${afterCi.reason}): ${prUrl}`);
-        worktreeRemove(repoDir, worktreePath);
-        return 1;
-      }
     }
 
     const prNum = prUrl.match(/\/pull\/(\d+)/)?.[1] ?? prUrl;

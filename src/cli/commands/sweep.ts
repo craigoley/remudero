@@ -1304,6 +1304,7 @@ export function buildSweepLightHook(
           actionable: (d) => (mergeHold === undefined || d !== "mergeable") &&
             lightPassActionable(d, fixRungAllowed, false, armAdmitted, fixAdmitted),
           ...scopeDeps,
+          ...(scope?.observeRepairTurn ? { observeRepairTurn: scope.observeRepairTurn } : {}),
           // W1-T11510: a held head that derives another disposition keeps its scope's own stand-down text.
           ...(mergeHold !== undefined ? { standDownReasonFor: (d: Disposition) => d === "mergeable"
             ? mergeHold : scopeDeps.standDownReasonFor?.(d) } : {}),
