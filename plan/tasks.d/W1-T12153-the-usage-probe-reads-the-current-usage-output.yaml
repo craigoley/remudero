@@ -17,6 +17,14 @@
     - src/lib/headroom.ts
     - src/run-task.ts
     - test/routing/the-usage-probe-reads-the-current-usage-output.test.ts
+    - src/lib/daemon.ts
+    - src/lib/worker-provider.ts
+    - test/headroom.test.ts
+    - test/headroom-resetless.test.ts
+    - test/headroom-sdk-source.test.ts
+    - test/the-usage-fallback-and-dispatch-live-state-reads-run-off-the-loop.test.ts
+    - test/usage-probe-failure-logged.test.ts
+    - test/usage-probe-store.test.ts
   status: queued
   attempts: 0
   acceptance:
@@ -40,6 +48,14 @@
     2. In `parseUsage`, when the session line is absent and at least one weekly line parses, return the weekly windows and mark the session as absent. Follow the rule W1-T11072 set for the SDK reading.
     3. Before parsing, detect an output with no "Current" line at all and throw a parse error with its own reason.
     The fail-closed rule in the header of src/lib/headroom.ts stays: a window without a percentage is an error.
+    4. Amended 2026-11-11: the session window becomes optional on `UsageSnapshot`. Every reader of a
+       snapshot leaves out the session window when it is absent, and the weekly windows bind. An absent
+       window is never read as 0% used. The readers are `headroomExhausted` (src/lib/headroom.ts),
+       `resolveHeadroomWindows` (src/lib/daemon.ts, the governor) and `claudeCapacityFromUsage`
+       (src/lib/worker-provider.ts, which gives the same result as the SDK `weekly-only` case).
+       The six existing tests in `files` read `.session` of a parsed snapshot; they change only to
+       read it as optional. The weekly-only CLI reading writes a `usage.probe_failed` row with the
+       stage `weekly-only`, so that case is named in the ledger.
     NOT IN SCOPE: the SDK reading, the timeouts, and the Codex probe.
   falsifier: |
     Write the raw output into the row and criterion 1 must fail on the account name. Return 0% for an absent session and criterion 4 must fail. Throw on weekly lines without a session line and criterion 2 must fail. Restore and require all to pass.

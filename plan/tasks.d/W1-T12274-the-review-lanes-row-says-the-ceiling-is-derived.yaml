@@ -16,7 +16,7 @@
     - W1-T11884
   files:
     - plan/policy.yaml
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "The `max` line of the `sweep.reviewLanes` row says that it bounds the value of the row only, and that the review width can grow to the host worker budget"

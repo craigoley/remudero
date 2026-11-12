@@ -505,6 +505,54 @@ export function readImplementDurationsMs(ledgerText: string): number[] {
   return out;
 }
 
+/** W1-T12247: the seconds a recycle needs outside its wait when the ledger shows no recycle that replaced its
+ *  container. The largest value on the core instance in the 7 days to 2026-11-11 was 759 s. */
+const RECYCLE_REST_FALLBACK_S = 760;
+
+/** W1-T12247: the largest time, in seconds, that a recycle which replaced its container spent outside its wait:
+ *  from its `recycle.invoked` row to its `recycle.ended` row, less `waited_s`. `undefined` = no such recycle. */
+function readRecycleRestS(ledgerText: string): number | undefined {
+  const invokedMs = new Map<string, number>();
+  let rest: number | undefined;
+  for (const line of ledgerText.split("\n")) {
+    const invoked = line.includes('"step":"recycle.invoked"');
+    if (!invoked && !line.includes('"step":"recycle.ended"')) continue;
+    try {
+      const row = JSON.parse(line) as { ts?: unknown; run_id?: unknown; outcome?: unknown; waited_s?: unknown };
+      const atMs = Date.parse(String(row.ts));
+      if (typeof row.run_id !== "string" || !Number.isFinite(atMs)) continue;
+      if (invoked) {
+        invokedMs.set(row.run_id, atMs);
+        continue;
+      }
+      const beganMs = invokedMs.get(row.run_id);
+      if (row.outcome !== "replaced" || beganMs === undefined || typeof row.waited_s !== "number") continue;
+      const s = Math.ceil((atMs - beganMs) / 1000) - row.waited_s;
+      if (s >= 0 && (rest === undefined || s > rest)) rest = s;
+    } catch {
+      continue; // a torn or foreign line is not a sample
+    }
+  }
+  return rest;
+}
+
+/** W1-T12247: does a recycle fit the time that the watchdog tick still allows its deploy step? It fits when its
+ *  wait plus the time it needs outside the wait is no longer than the time left. With no end of the step (a run
+ *  by hand, an older launcher, an unreadable value) the limit is unknown and the recycle runs as before. */
+function recycleWaitFits(i: { waitS: number; stepEndsAtS: number | undefined; nowS: number; restS: number }): {
+  fits: boolean;
+  limit: "known" | "unknown";
+  counted_wait_s: number;
+  rest_s: number;
+  step_ends_at_s: number | null;
+  step_left_s: number | null;
+} {
+  const inputs = { counted_wait_s: i.waitS, rest_s: i.restS };
+  if (i.stepEndsAtS === undefined) return { fits: true, limit: "unknown", ...inputs, step_ends_at_s: null, step_left_s: null };
+  const left = i.stepEndsAtS - i.nowS;
+  return { fits: i.waitS + i.restS <= left, limit: "known", ...inputs, step_ends_at_s: i.stepEndsAtS, step_left_s: left };
+}
+
 /** W1-T8138: which runs the ledger shows as finished or yielded, and what the quiet-worker watchdog judged.
  *  Settled = a `verdict` row, a `run.freshness_handoff` row, or an acted `worker.recycle_yield` row.
  *  Judged `end_failed` = a `worker.recycle_yield` whose round end failed (and no settling row followed). */
@@ -2868,7 +2916,7 @@ export function realDeployDeps(o: RealDeployOpts, sensorExec?: DeploySensorExec)
     containerName: imageShaContainer, namespace: "host" as const });
   const readLedgerText = (): string => readFileSync(ledgerPath, "utf8");
   /** W1-T8138: derive the drain wait from the ledger and the in-flight locks, and ledger what it read. */
-  const deriveWaitFromState = (): DerivedDrainWait | undefined => {
+  const deriveWaitFromState = (): (DerivedDrainWait & { runsInFlight: number; restS: number | undefined }) | undefined => {
     try {
       const text = readLedgerText();
       const lanes = readDrainWaitLanes(join(o.stateRoot, "state"), text, clock);
@@ -2880,7 +2928,7 @@ export function realDeployDeps(o: RealDeployOpts, sensorExec?: DeploySensorExec)
         quantile: derived.quantile,
         lanes: derived.lanes,
       });
-      return derived;
+      return { ...derived, runsInFlight: lanes.filter((lane) => lane.judged !== "ended").length, restS: readRecycleRestS(text) };
     } catch (err) {
       log("deploy.recycle_wait_derive_failed", { error: err instanceof Error ? err.message : String(err) });
       return undefined; // unreadable ledger or lock dir: the script's labelled fallback applies
@@ -2931,7 +2979,33 @@ export function realDeployDeps(o: RealDeployOpts, sensorExec?: DeploySensorExec)
       // W1-T8138: the drain wait comes from the lanes in flight, not a constant. With no run history to read
       // (or an operator's own RMD_RECYCLE_WAIT_S) the script keeps its labelled fallback.
       const derived = deriveWaitFromState();
-      if (derived && derived.source !== "no_history_fallback") {
+      const useDerived = derived !== undefined && derived.source !== "no_history_fallback";
+      // W1-T12247: a recycle that cannot end before the tick ends its deploy step is not started, so it
+      // pauses nothing. With no run in flight the script waits for nothing, so no wait is counted.
+      const ownWait = process.env.RMD_RECYCLE_WAIT_S ?? "";
+      const stepEndsAt = process.env.RMD_DEPLOY_STEP_ENDS_AT ?? "";
+      const waitS = /^\d+$/.test(ownWait) ? Number(ownWait) : useDerived ? derived.waitS : DRAIN_WAIT_FALLBACK_S;
+      const fit = recycleWaitFits({
+        waitS: derived?.runsInFlight === 0 ? 0 : waitS,
+        stepEndsAtS: /^\d+$/.test(stepEndsAt) ? Number(stepEndsAt) : undefined,
+        nowS: Math.floor(clock() / 1000),
+        restS: derived?.restS ?? RECYCLE_REST_FALLBACK_S,
+      });
+      log("deploy.recycle_wait_fit", {
+        wait_s: waitS,
+        wait_source: /^\d+$/.test(ownWait) ? "environment" : useDerived ? "derived" : "script_fallback",
+        runs_in_flight: derived?.runsInFlight ?? null,
+        rest_source: derived?.restS === undefined ? "fallback" : "observed",
+        ...fit,
+      });
+      if (!fit.fits) {
+        throw new Error(
+          `recycle not started: it does not fit the deploy step. The wait is ${fit.counted_wait_s} s and a recycle needs ` +
+            `${fit.rest_s} s outside its wait, but the step ends in ${fit.step_left_s} s. No pause was written.\n` +
+            "Remedy: wait for the runs in flight to end, or run deploy/recycle-container.sh by hand, where no step limit applies.",
+        );
+      }
+      if (useDerived) {
         // The derived wait is a DEFAULT: a RMD_RECYCLE_WAIT_S already in the supervisor's environment (an
         // operator's explicit choice) wins, decided by the shell so this file reads no environment itself.
         runScript(["-c", 'export RMD_RECYCLE_WAIT_S="${RMD_RECYCLE_WAIT_S:-$1}"; shift; exec bash "$@"', "recycle-wait", String(derived.waitS), ...script]);

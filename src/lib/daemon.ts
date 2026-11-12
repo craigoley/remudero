@@ -1001,7 +1001,7 @@ function resolveHeadroomWindows(
   // `· resets …` clause at all. Carried through as possibly-absent rather than coerced here, so
   // the two distinct cases below stay distinguishable.
   const windows: Array<{ window: string; percentUsed: number; resetsAt?: string }> = [
-    { window: "session (5h)", percentUsed: snap.session.percentUsed, resetsAt: snap.session.resetsAt },
+    ...(snap.session ? [{ window: "session (5h)", percentUsed: snap.session.percentUsed, resetsAt: snap.session.resetsAt }] : []),
     ...snap.weekly.map((w) => ({ window: `weekly (${w.label})`, percentUsed: w.percentUsed, resetsAt: w.resetsAt })),
   ];
   return windows
@@ -4251,7 +4251,7 @@ export async function runDaemon(
     if (cause !== undefined) {
       idleLaneTickCause = cause;
       idleLaneTickHold = cause === "pause" || cause === "operator_pause" || cause === "recycle_drain"
-        ? pauseHoldRecord(fields) : cause === "memory" ? {
+        ? pauseHoldRecord(fields) : cause === "memory" || fields?.reason === "lane target" ? {
           reason: step === "daemon.queue_governor"
             ? `${fields?.pressure_tier} (${fields?.pressure_binding}): ${fields?.pressure_available_mib} MiB available, floor ${fields?.pressure_floor_mib} MiB`
             : String(fields?.reason),
@@ -8088,7 +8088,7 @@ export async function runDaemon(
         (enforcedLaneTarget(inFlightTasks.size, deps.readQueueAdmission?.()?.wipLimit) <= inFlightTasks.size ? "lane target" : undefined);
       // 2026-10-12 09:00: one container-short WIP reading held lane 2 for good while two siblings ran on past the hour.
       // A governor reading is re-taken each tick, so a lane it holds parks; one row per lane and reason, not per tick.
-      if (governed && reason !== undefined && reason === governorReason && inFlightTasks.size > 0) {
+      if (reason !== undefined && (reason === governorReason || reason === "lane target") && inFlightTasks.size > 0) {
         if (governorParked.get(lane) !== reason) log("dispatch.lane_parked", { lane, finished_task: finished.id, reason,
           phase_age_ms: phaseAgeMs, waiting_on: [...inFlightTasks].map((t) => t.id) });
         sampleLaneChange();
