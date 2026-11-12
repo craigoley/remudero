@@ -13151,7 +13151,7 @@ export async function taskIdDestinationSnapshot(
     if (destination.outcome === "unreadable") throw new Error("unreadable host switch");
     if (offline) { stage = "offline"; throw new Error("selected catalog requires a fresh read"); }
     const run = async (cwd: string, args: string[], input?: string): Promise<string> =>
-      checks.destinationGit ? await checks.destinationGit(cwd, args, input) : await hostWorktreeGitAsync(cwd, args, input === undefined ? {} : { input });
+      checks.destinationGit ? await checks.destinationGit(cwd, args, input) : await hostWorktreeGitAsync(cwd, args, { timeout: DEFAULT_GH_CALL_TIMEOUT_MS, ...(input === undefined ? {} : { input }) });
     stage = "fetch";
     await run(destination.checkoutDir, ["fetch", "--no-tags", "origin", "main"]);
     stage = "plan";
@@ -13175,6 +13175,12 @@ export async function taskIdDestinationSnapshot(
     // A selected source that did not answer must refuse, never become an empty catalog or an advisory floor.
     throw new Error(`plan destination is unreadable at ${stage}`);
   }
+}
+
+/** Only the snapshot reader's finite stage vocabulary may reach a public-facing failure. */
+function taskIdDestinationFailureReason(error: unknown): string {
+  return error instanceof Error && /^plan destination is unreadable at (switch|offline|fetch|plan|pulls)$/.test(error.message)
+    ? error.message : "plan destination is unreadable at an unknown stage";
 }
 
 /** Prepare private Git/API reads off the caller loop, then use the existing public mint fold. */
@@ -15464,6 +15470,20 @@ export function callerSweepCommand(
  *  `machineAuthorVerifyViolation` refuses at `verify: auto`. The command stages the linter-checked
  *  bytes outside its checkout and uses the same gated landing bridge as the scheduled rung, so a
  *  manual inspection cannot leave a daemon checkout unable to refresh. */
+/** The production CLI awaits its new source reads; the report/landing API stays synchronous. */
+export async function ciLearningCommandWithDestination(
+  rest: string[], checks: TaskIdDestinationChecks = {}, command: typeof ciLearningCommand = ciLearningCommand,
+): Promise<number> {
+  let destinationSnapshot: TaskIdDestinationSnapshot | null = null;
+  let destinationFailure: string | undefined;
+  try { destinationSnapshot = (await taskIdDestinationSnapshot(checks)) ?? null; }
+  catch (error) {
+    const reason = taskIdDestinationFailureReason(error);
+    destinationFailure = reason; // Report-only/deduplicated paths do not mint; a real mint refuses this cause.
+  }
+  return command(rest, { destinationSnapshot, destinationFailure });
+}
+
 export function ciLearningCommand(
   rest: string[],
   deps: CiFailuresCommandDeps & {
@@ -38287,7 +38307,10 @@ export async function approveCommand(
   let approveDestinationFailure: string | undefined;
   if (deps.gateway === undefined && classification.state === "ready" && classification.draft) {
     try { approveDestinationSnapshot = (await taskIdDestinationSnapshot()) ?? null; }
-    catch { approveDestinationFailure = "plan destination is unreadable before approval mint"; }
+    catch (error) {
+      const reason = taskIdDestinationFailureReason(error);
+      approveDestinationFailure = reason; // Deferred to the actual mint callback; adoption/skills keep their own flow.
+    }
   }
   const runId = `APPROVE-${proposalId}-${Date.now()}`;
   const log = (step: string, extra: Record<string, unknown> = {}) => appendLedger(ledgerPath, { run_id: runId, task_id: proposalId, step, lane: "approve", ...extra });
@@ -38895,7 +38918,10 @@ async function approveBatchCommand(
   let batchDestinationFailure: string | undefined;
   if (deps.batchGateway === undefined) {
     try { batchDestinationSnapshot = (await taskIdDestinationSnapshot()) ?? null; }
-    catch { batchDestinationFailure = "plan destination is unreadable before batch approval mint"; }
+    catch (error) {
+      const reason = taskIdDestinationFailureReason(error);
+      batchDestinationFailure = reason; // The batch reports this exact cause only if it needs a new id.
+    }
   }
   const runId = `APPROVE-BATCH-${Date.now()}`;
   const log = (step: string, extra: Record<string, unknown> = {}) =>
@@ -43403,14 +43429,7 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
     },
   ],
   ["caller-sweep", (rest) => callerSweepCommand(rest)],
-  ["ci-learning", async (rest) => {
-    let destinationSnapshot: TaskIdDestinationSnapshot | null = null;
-    let destinationFailure: string | undefined;
-    try { destinationSnapshot = (await taskIdDestinationSnapshot()) ?? null; }
-    catch { destinationFailure = "plan destination is unreadable before CI-learning mint"; }
-    // The report remains synchronous/best-effort; only this CLI owner prepares the new reads.
-    return ciLearningCommand(rest, { destinationSnapshot, destinationFailure });
-  }],
+  ["ci-learning", ciLearningCommandWithDestination],
   ["rule-efficacy", (rest) => ruleEfficacyCommand(rest)],
   ["coverage-improve", (rest) => coverageImproveCommand(rest)],
   ["verdict-calibration", (rest) => verdictCalibrationCommand(rest)],

@@ -4,7 +4,7 @@ import { mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { delimiter, dirname, join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { formatReservationAnchorMessage } from "#src/lib/task-id-reservation.js";
-import { mintNextTaskId } from "#src/lib/task-id.js";
+import { describeMint, mintNextTaskId } from "#src/lib/task-id.js";
 import { gitRepo, GIT_REPO_FIXTURE_IDENTITY } from "#test/helpers/git-repo.js";
 import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
 import { withGhShim } from "#test/helpers/gh-shim.js";
@@ -57,11 +57,11 @@ if(req.defaultPr)delete deps.destinationPrFetch;
 if(req.reserve)deps.reserver=reservations.gitRemoteRefReserver({run:mod.gitRunAdapter(runGit),filingBranch:'fixture-plan'});
 const {existsSync}=await import('node:fs');let asyncTicks=0;
 const timer=req.observePrivateFetch?setInterval(()=>{if(existsSync(req.observePrivateFetch+'-start')&&!existsSync(req.observePrivateFetch+'-done'))asyncTicks++;},10):undefined;
-let code;try{if(req.historyMode){const mint=await(req.historyMode==='async'?mod.mintNextTaskIdWithHistoryAsync:mod.mintNextTaskIdWithHistory)({planPath:req.pub+'/plan/tasks.yaml',repoRoot:req.pub,openPrTexts:()=>[],destination:deps});out.push(mint.id);code=0;}else code=await mod.nextTaskIdCommand(req.flags??['--no-reserve'],{},deps);}catch(error){err.push(error.message);code=2;}finally{if(timer)clearInterval(timer);}
+let code;try{if(req.learningMode){if(req.learningMode==='mint-refusal'){const mint=mod.ciLearningTaskIdMinter(req.pub,undefined,undefined,{destinationSnapshot:null,destinationFailure:'plan destination is unreadable at fetch'});mint('fixture');code=0;}else if(req.learningMode==='default-command'){code=await mod.ciLearningCommandWithDestination(['--days','0'],deps);}else{code=await mod.ciLearningCommandWithDestination([],deps,(_args,prepared)=>{out.push(JSON.stringify({ids:prepared.destinationSnapshot?.ids??null,failure:prepared.destinationFailure??null}));return 0;});}}else if(req.historyMode){const mint=await(req.historyMode==='async'?mod.mintNextTaskIdWithHistoryAsync:mod.mintNextTaskIdWithHistory)({planPath:req.pub+'/plan/tasks.yaml',repoRoot:req.pub,openPrTexts:()=>[],destination:deps});out.push(mint.id);code=0;}else code=await mod.nextTaskIdCommand(req.flags??['--no-reserve'],{},deps);}catch(error){err.push(error.message);code=2;}finally{if(timer)clearInterval(timer);}
 process.stdout.write(JSON.stringify({code,out,err,calls,asyncTicks})+'\n');
 `;
 interface FixturePull { body: string; head: { ref: string }; created_at: string; state: string; }
-interface CaseOptions { auditPulls?: FixturePull[]; flags?: string[]; reserve?: boolean; prTexts?: string[]; prPages?: string[][]; prFailure?: boolean; fetchFailure?: boolean; defaultGit?: boolean; defaultPr?: boolean; observePrivateFetch?: string; gitBin?: string; historyMode?: "async" | "sync"; }
+interface CaseOptions { auditPulls?: FixturePull[]; flags?: string[]; reserve?: boolean; prTexts?: string[]; prPages?: string[][]; prFailure?: boolean; fetchFailure?: boolean; defaultGit?: boolean; defaultPr?: boolean; observePrivateFetch?: string; gitBin?: string; historyMode?: "async" | "sync"; learningMode?: "observe" | "default-command" | "mint-refusal"; }
 function invoke(f: ReturnType<typeof fixture>, options: CaseOptions = {}) {
   const r = spawnSync(process.execPath, ["--enable-source-maps", "--import", import.meta.resolve("tsx"), "--input-type=module", "--eval", CHILD], {
     cwd: REPO_ROOT, encoding: "utf8", timeout: 60_000, maxBuffer: 4 * 1024 * 1024,
@@ -80,6 +80,7 @@ test("W1-T12206 criterion 1: the library includes an explicitly supplied second 
   const result = mintNextTaskId({ planPath: f.publicPlan,
     additionalPlanTexts: () => [readFileSync(f.opsPlan, "utf8")], additionalOpenPrTexts: () => ["W1-T201"] });
   assert.equal(result.id, "W1-T202");
+  assert.match(describeMint(result), /destination plan 200/);
 });
 
 test("W1-T12206 criterion 1: the real command fetches the named catalog and counts its open PRs even with no kinds enabled", (t) => {
@@ -253,4 +254,20 @@ test("W1-T12206 criterion 4: a synchronous writer cannot omit a named catalog's 
   const f = fixture(t); const r = invoke(f, { historyMode: "sync" });
   assert.equal(r.code, 2); assert.match(r.err.join("\n"), /destination needs an awaited snapshot/);
   assert.deepEqual(r.out, []); assert.deepEqual(r.calls, []);
+});
+
+
+test("W1-T12206 criterion 1: the production learning entry preserves its prepared population and failure stage", t => {
+  const f = fixture(t); const healthy = invoke(f, { learningMode: "observe" });
+  assert.equal(healthy.code, 0); assert.deepEqual(JSON.parse(healthy.out[0]!), { ids: ["W1-T200"], failure: null });
+  const unavailable = invoke(f, { learningMode: "observe", fetchFailure: true });
+  assert.equal(unavailable.code, 0); assert.deepEqual(JSON.parse(unavailable.out[0]!), { ids: null, failure: "plan destination is unreadable at fetch" });
+  const command = invoke(f, { learningMode: "default-command" });
+  assert.equal(command.code, 2); assert.match(command.err.join("\n"), /--days must be a positive number/);
+});
+
+test("W1-T12206 criterion 4: a learning report's deferred failure stops its minter before any reservation", t => {
+  const f = fixture(t); const r = invoke(f, { learningMode: "mint-refusal" });
+  assert.equal(r.code, 2); assert.match(r.err.join("\n"), /destination is unreadable at fetch/);
+  assert.deepEqual(r.calls, []); assert.deepEqual(r.out, []);
 });
