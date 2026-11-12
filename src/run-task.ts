@@ -803,6 +803,7 @@ import {
   landCiLearningShardsAsync,
   feedbackLandingSweepRungs,
   planReconcileLanding,
+  readStandingDecisions,
   recordDecision,
   recordRuling,
   type CiLearningFilingResult,
@@ -814,6 +815,8 @@ import {
   type LandFeedbackOpts,
   type LandingReviewRequest,
 } from "./lib/feedback-landing.js";
+export { readStandingDecisions };
+import { resolvePlanDestination } from "./lib/plan-destination.js";
 import {
   reconcileFeedbackLanding,
   type FeedbackReconcileRoot,
@@ -2987,7 +2990,7 @@ import { branchCitationPattern, branchNamesFingerprint, decideAutomaticBranchRea
 // were not exported before this move and stay that way, used here under their original names.
 import { repoRoot, resolveOwnerRepo, resolveRepoRoot } from "./lib/repo-location.js";
 import { resolveVerbPlanRoot, type VerbPlanRoot } from "./lib/repo-location.js";
-import { refusalExcerptFromFixReport, taskAwaitsAmendment } from "./lib/refusal-amendment.js";
+import { planAmendmentReceipt, refusalExcerptFromFixReport, taskAwaitsAmendment } from "./lib/refusal-amendment.js";
 import { fetchPrDiff, ghPrDiffAsync, prDiffSourceAsync } from "./lib/pr-diff.js";
 import { boundGitCall, fetchOriginRetryingRefLock, fetchOriginRetryingRefLockAsync, GATEWAY_FETCH_TIMEOUT_MS, GIT_FETCH_KILL_GRACE_MS, killAfterGrace, type AsyncGitRunner } from "./lib/git-fetch-retry.js";
 import { asOwnerRepoUnresolvable, resolveOwnerRepoAt, resolveOwnerRepoAtAsync } from "./lib/owner-repo.js";
@@ -3140,8 +3143,7 @@ export function buildEscalationTriageRuntime(
               { run_id: deps.runId, task_id: e.taskId, step, ...extra }) });
           const [result] = await effects.draftRefusalAmendments!([{ taskId: e.taskId, runId: e.runId ?? deps.runId,
             reportExcerpt: e.detail, refusals: [{ criterion: 1, refusalClass: "proof-unexecutable-at-head", detail: e.summary }] }]);
-          if (result === undefined || !result.prUrl) throw new Error(`amendment not opened: ${result?.outcome ?? "unavailable"}`);
-          return `${result.prUrl} proposes the proof amendment; decline the PR to undo`;
+          return planAmendmentReceipt(e.taskId, result);
         },
         rekick_once: (e) => {
           if (io.kick) io.kick(e);
@@ -37679,38 +37681,6 @@ export async function routeRuling(ruling: AgentRuling, deps: RouteRulingDeps): P
   return { decision: verdict.decision, reason: verdict.reason, proposalId: proposal.id };
 }
 
-/** Everything the decision record currently says, as ONE string for the contradiction check:
- *  `DECISIONS.md` plus every landed `plan/decisions.d/**` shard, since a record that landed
- *  through the bridge but has not been folded into the root file is no less standing. An
- *  unreadable path contributes nothing rather than throwing — and contributing nothing is the
- *  SAFE direction here only because an unresolvable `supersedes` escalates anyway. */
-export function readStandingDecisions(root: string): string {
-  const parts: string[] = [];
-  try {
-    parts.push(readFileSync(join(root, "DECISIONS.md"), "utf8"));
-  } catch {
-    // no root decision file in this checkout — the shards below are still consulted
-  }
-  const dir = join(root, "plan", "decisions.d");
-  let entries: string[] = [];
-  try {
-    entries = readdirSync(dir);
-  } catch {
-    // no plan/decisions.d in this checkout — DECISIONS.md alone is the whole standing record here,
-    // which is a real state (a fresh clone before the first landing), not a read failure to report
-    return parts.join("\n");
-  }
-  for (const name of entries) {
-    if (!name.endsWith(".md")) continue;
-    try {
-      parts.push(readFileSync(join(dir, name), "utf8"));
-    } catch {
-      // one unreadable shard never hides the rest
-    }
-  }
-  return parts.join("\n");
-}
-
 /**
  * `rmd rule` — an agent records a ruling, behind the judge (W1-T3212, operator ruling
  * 2026-09-08). The thin real-world glue around {@link routeRuling}, mirroring
@@ -37758,14 +37728,18 @@ export async function ruleCommand(
   const config = deps.config ?? loadConfig();
   const ledgerPath = ledgerPathFor(config);
   const registryPath = join(config.root, "state", "inbox-proposals.json");
+  const stateDir = join(config.root, "state");
   const result = await route(ruling, {
     judge: realRulingJudge({
       mounts: loadMounts(mountsPath(root)),
       cwd: root,
       settingsFile: join(root, "settings", "worker.json"),
     }),
-    standingDecisions: readStandingDecisions(root),
-    land: (relPath, content) => void recordRuling(root, relPath, content),
+    standingDecisions: readStandingDecisions(root, stateDir),
+    // W1-T12201: the landing reads `root`'s origin as before, so the public owner and name here are not read.
+    land: (relPath, content) => void recordRuling(root, relPath, content, {
+      planDestination: resolvePlanDestination("decision", stateDir, { owner: "", repo: "", checkoutDir: root }),
+    }),
     stageProposal: (proposal) =>
       void updateProposalRegistry(registryPath, (current) =>
         current.some((existing) => existing.id === proposal.id) ? null : [...current, proposal],
