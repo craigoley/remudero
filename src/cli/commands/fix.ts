@@ -5639,7 +5639,7 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
  * FAIL LOUD on junk args BEFORE any `gh` lookup/spawn (Standing rule).
  */
 export async function fixCatalogTask(taskId: string, plan: Plan, options: TaskLookupOptions = {}): Promise<TaskLookupResult> {
-  return findTaskInCatalogs(taskId, { ...options, readPublic: id => plan.byId.get(id) });
+  return findTaskInCatalogs(taskId, { ...options, byId: plan.byId });
 }
 
 export async function fixCommand(

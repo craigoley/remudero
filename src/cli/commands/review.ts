@@ -2320,7 +2320,7 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
   }
   if (taskId && publicTaskAbsent) {
     const found = await findTaskInCatalogs(taskId, {
-      ...deps.taskLookup, stateDir: join(config.root, "state"), readPublic: () => undefined,
+      ...deps.taskLookup, stateDir: join(config.root, "state"), byId: new Map(),
     });
     if (found.outcome === "unreadable") {
       log("review.catalog.unreadable", { reason: found.reason });

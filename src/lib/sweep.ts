@@ -1,5 +1,5 @@
 import { hasNonBotAuthor, namePathLanding, type DependencyMainIdentity } from "./dependency-main-identity.js";
-import { findTaskInCatalogs, type TaskLookupDeps, type TaskLookupResult } from "./task-lookup.js";
+import { findTaskInCatalogs, type TaskLookupOptions, type TaskLookupResult } from "./task-lookup.js";
 import { decideLoopOutcome } from "./loop-decision.js";
 import { CI_REFRESH_GUARD_VERSION } from "./ci-refresh-prevention.js";
 import { createSelectedModeQualification, observeSelectedMode, readInstanceRegistryText } from "./instance-mode.js";
@@ -4291,7 +4291,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         let { task, synthetic } = snapshotResolved;
         if (synthetic && pr.taskId) {
           const scoped = await catalogTaskScope(pr.taskId, changedPaths, {
-            stateDir: join(config.root, "state"), readPublic: () => undefined,
+            stateDir: join(config.root, "state"), byId: new Map(),
           });
           if (scoped.outcome === "unreadable") throw new Error(`task catalog unreadable: ${scoped.reason}`);
           if (scoped.outcome === "found") {
@@ -9391,7 +9391,7 @@ function declaredPathCovers(declared: string, changed: string): boolean {
 
 export type CatalogTaskScope = TaskLookupResult & { outside: string[] };
 
-export async function catalogTaskScope(taskId: string, changed: readonly string[] | undefined, deps: TaskLookupDeps): Promise<CatalogTaskScope> {
+export async function catalogTaskScope(taskId: string, changed: readonly string[] | undefined, deps: TaskLookupOptions & Pick<Plan, "byId">): Promise<CatalogTaskScope> {
   const found = await findTaskInCatalogs(taskId, deps);
   return { ...found, outside: found.outcome === "found" ? changedPathsOutsideDeclaredFiles(changed, found.task.files) : [] };
 }

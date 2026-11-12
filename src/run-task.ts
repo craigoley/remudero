@@ -12009,7 +12009,7 @@ export async function resolveFixRungTaskContractAtHeadAsync(
   }
   const resolved = await resolvePlanCriteriaAtHeadAsync(`Remudero-Task: ${taskId}`, repoDir, "plan/tasks.yaml", headSha);
   if (resolved.divergence || resolved.criteria.length > 0 || resolved.taskDeclaredFiles !== undefined) return resolved;
-  const found = await findTaskInCatalogs(taskId, { readPublic: () => undefined, stateDir: instanceStateDirIfConfigured() });
+  const found = await findTaskInCatalogs(taskId, { byId: new Map(), stateDir: instanceStateDirIfConfigured() });
   if (found.outcome === "unreadable") throw new Error(`task catalog unreadable: ${found.reason}`);
   return found.outcome === "found" ? catalogTaskContract(found) : resolved;
 }
@@ -41771,13 +41771,14 @@ async function claimCatalogPlanRoot(taskId: string, opts: ClaimVerbOpts): Promis
   if (destination.outcome !== "off") {
     const publicRoot = resolveVerbPlanRoot(undefined, { cwdRoot: repoRoot, stateDir });
     if (!publicRoot.ok) return undefined;
-    const publicContract = await resolvePlanCriteriaAtHeadAsync(`Remudero-Task: ${taskId}`, publicRoot.root, "plan/tasks.yaml", "origin/main");
-    if (publicContract.divergence) {
-      console.error("rmd claim: public plan unreadable — no private fallback");
+    let publicPlan: Plan;
+    try { publicPlan = await loadPlanAtRefAsync(publicRoot.root, "plan/tasks.yaml", "origin/main"); }
+    catch (error) {
+      // Membership needs a readable plan, not review criteria; keep an unreadable plan distinct from an absent id.
+      console.error(`rmd claim: public plan unreadable (${error instanceof Error ? "plan-error" : "plan-thrown"}) — no private fallback`);
       return undefined;
     }
-    if (publicContract.criteria.length > 0 || publicContract.taskDeclaredFiles !== undefined) return publicRoot.root;
-    const found = await findTaskInCatalogs(taskId, { ...opts.taskLookup, stateDir: stateDir(), readPublic: () => undefined });
+    const found = await findTaskInCatalogs(taskId, { ...opts.taskLookup, stateDir: stateDir(), byId: publicPlan.byId });
     if (found.outcome === "unreadable") {
       console.error(`rmd claim: task catalog unreadable (${found.reason}) — no claim`);
       return undefined;
