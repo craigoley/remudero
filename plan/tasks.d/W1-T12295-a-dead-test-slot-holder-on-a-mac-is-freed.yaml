@@ -17,7 +17,7 @@
   files:
     - src/lib/test-slot.ts
     - test/a-dead-test-slot-holder-on-a-mac-is-freed.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "On darwin with no boot id, a same-host, same-uid reservation-marker holder whose pid is gone and whose last beat is older than TEST_SLOT_LEASE_MS is reclaimed. `acquireTestSlot` takes that slot, and one `test_slot.reclaimed_quiescent` row names the slot, the pid, the holder label, coverage `darwin-owner-pid` and the reason"
