@@ -23,6 +23,7 @@
     - src/lib/daemon.ts
     - src/lib/ledger.ts
     - test/daemon/a-recycle-and-a-start-write-a-row-for-each-phase.test.ts
+    - test/a-recycle-names-the-cadence-child-it-kills.test.ts
   status: queued
   attempts: 0
   acceptance:
@@ -67,6 +68,7 @@
     In `daemonCommand` and `runDaemon`: a small recorder with `mark(name)` that takes the time between marks from the daemon clock. Mark after each step named in criterion 5 and after each larger step of the `runDaemon` preamble. Write `daemon.boot_phases` on the first tick. Put what is left in `other_ms`.
     Add the two steps to the lists in src/lib/ledger.ts where a new step must be listed.
     One test file drives both scripts with a fake `docker` and drives `daemonCommand` with injected deps.
+    The cadence-child test reads the ledger before `docker stop` and expects only `recycle.invoked`; it must leave out the new `recycle.phase` rows.
     NOT IN SCOPE: any change to an order, a wait or a decision; the cost row of a restart cycle (W1-T12229); and the rows of the first sweep.
   falsifier: |
     Remove the row of one phase and criterion 1 must fail. Fail the recycle when the write fails and criterion 7 must fail. Drop `other_ms` and criterion 6 must fail. Restore and require all ten to pass.
