@@ -22,7 +22,7 @@ import { tmpdir } from 'node:os';
 import { accountAuthorPhases } from './lib/author-phase-accounting.mjs';
 import { AUTHOR_WORKFLOW_CONTRACT_MAX_MS, AUTHOR_WORKFLOW_CONTRACT_SUITES, authorWorkflowContractInputs } from './lib/author-workflow-contract.mjs';
 import { evaluateHeadIdentityGate } from './head-identity-gate.mjs';
-import { guardedAuthorEntry, MacAuthorCapacityRefusal } from './lib/mac-author-admission.mjs';
+import { guardedAuthorEntry, MacAuthorCapacityRefusal, macAuthorRefusalReport } from './lib/mac-author-admission.mjs';
 import { readBoundedJsonFile } from './lib/coverage-disk-profile.mjs';
 import { scanRepo as scanCoverageBlanking } from './coverage-session-blanking-check.mjs';
 
@@ -882,12 +882,16 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
       : receipt.selection === 'over-capacity' ? 'over-capacity' : 'passed';
   } catch (error) {
     receipt.verdict = error instanceof MacAuthorCapacityRefusal ? 'over-capacity' : 'refused';
+    let refusalLines = [];
     if (error instanceof MacAuthorCapacityRefusal) {
-      (receipt.hostCapacity ??= []).push({stage: error.stage, ...error.admission});
+      const { summary, lines } = macAuthorRefusalReport(error.stage, error.admission);
+      (receipt.hostCapacity ??= []).push({stage: error.stage, ...error.admission, ...summary});
       receipt.affectedTestsNotRunReason = error.message;
+      refusalLines = lines;
     }
     receipt.error = error.message;
     console.error(`author preflight ${error instanceof MacAuthorCapacityRefusal ? 'NOT_RUN' : 'REFUSED'}: ${error.message}`);
+    for (const line of refusalLines) console.error(line);
   }
   // W1-T11914: the one place a caller reads "may I push?"; derived from the verdict just set, never an input to it.
   Object.assign(receipt, authorPushEligibility(receipt));

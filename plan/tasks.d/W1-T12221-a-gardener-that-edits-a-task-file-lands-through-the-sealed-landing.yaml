@@ -29,7 +29,7 @@
     - src/lib/flake-incident-gardener.ts
     - src/lib/gate-gardener.ts
     - test/gardeners/a-gardener-that-edits-a-task-file-lands-through-the-sealed-landing.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "A gardener land whose paths are all edits of files under plan/tasks.d that origin/main holds goes through the sealed landing. A land with a new file, a deleted file or any other path opens its own pull request, as it does today"
