@@ -2371,20 +2371,16 @@ export interface LightPassScope {
   readonly scope?: LightPassScopeName;
   /** W1-T9808: present only while a restart is latched; the pass asks it before each review or fix it admits. */
   readonly admit?: RestartAdmission;
-  /** W1-T11502: told each PR's disposition and exact head as the pass reaches it (see `SweepDeps.observeRepairTurn`). */
   readonly observeRepairTurn?: (observation: RepairTurnObservation) => void;
 }
 
-/** W1-T11502: what a light pass saw of one PR before acting on it. */
 export interface RepairTurnObservation {
   readonly prNumber: number;
   readonly headSha: string;
   readonly disposition: string;
-  /** False when the head's action is already done (a dedup), so nothing is left to take a turn for. */
   readonly due: boolean;
 }
 
-/** W1-T11502: the dispositions whose lane is a repair a review-only pass stands down. */
 export function isRepairTurnDisposition(disposition: string): boolean {
   return disposition === "blocked-fixable" || disposition === "conflicted";
 }
@@ -2560,8 +2556,6 @@ export function startInterphaseReviewClock(
   const activePasses = new Map<Promise<void>, {
     pass: number; trigger: string; review_only: boolean; started_at_ms: number;
   }>();
-  // W1-T11502: a repair a review-only pass stood down is scheduling debt bound to its exact PR head. Overlapping
-  // review passes keep every later pass review-only, so the debt reserves the next serialized ordinary pass.
   interface RepairDebt { prNumber: number; headSha: string; disposition: string; seenDue: boolean; heldReason?: string }
   const repairDebt = new Map<number, RepairDebt>();
   let repairHandoff = new Map<number, RepairDebt>();
@@ -2595,7 +2589,6 @@ export function startInterphaseReviewClock(
       log("daemon.review_clock.repair_discarded", { ...repairFields(debt), reason: discardReason(o), observed_disposition: o.disposition });
     } else debt.seenDue = true;
   };
-  /** A pending request is held, never lost; each distinct hold reason is recorded once per request. */
   const holdRepairTurn = (reason: string, detail?: unknown) => {
     for (const debt of repairDebt.values()) {
       if (debt.heldReason === reason) continue;
@@ -2638,8 +2631,6 @@ export function startInterphaseReviewClock(
             elapsedMs = Math.max(elapsedMs + quantumMs, interphaseClock.now() - lastPassAtMs);
           }
           if (!active) break;
-          // W1-T11502: a pending repair request makes a pass due, and it takes the NEXT serialized turn: no new
-          // overlapping review pass starts until the incumbents settle (the wake or time debt stays pending).
           const repairTurnDue = scope === undefined && repairDebt.size > 0;
           if (!eventWakePending && elapsedMs < pollIntervalMs && !repairTurnDue) continue;
           // W1-T4732: a long reviewer must not hold a newly green head out of the next
@@ -2683,7 +2674,6 @@ export function startInterphaseReviewClock(
           const startedAtMs = interphaseClock.now();
           const pass = (async () => {
             try {
-              // W1-T11502: only the unscoped clock requests debt, so pause, drain and boot never reopen a repair lane.
               const observe = scope !== undefined ? undefined : handoff ? observeHandoff : requestRepairTurn;
               const named = { reviewOnly: true, scope: scope ?? "interphase-review",
                 ...(observe ? { observeRepairTurn: observe } : {}) } as const;
