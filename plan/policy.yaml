@@ -1836,3 +1836,17 @@ pausePolicy:
   core:
     automationSetters: [daemon, host-recycle]
     origin: "operator ruling 2026-10-11: serve work never pauses core; only the daemon's drain and the host recycle do"
+
+# W1-T12228: the four constants of the daemon's freshness restart, as bounded rows. OPTIONAL: an absent block gives
+# today's four values (src/lib/policy.ts `DEFAULT_FRESHNESS_RESTART`). A running daemon reads them at its start, so an
+# edit applies after the next restart. One row per line, so a later edit of one line can name it. Each `origin` names
+# the constant in src/lib/deploy-judge.ts the row was lifted from. The deployer's recycle score is NOT these rows.
+#   scoreLimit: the pressure a busy daemon must reach before it restarts (the live-edit ladder judges against it too).
+#   stalenessHorizonMs: the time after which staleness alone reaches scoreLimit (min 15 minutes, max 4 hours).
+#   quietWindowMs: the quiet advance window a change-driven restart waits for.
+#   minLifetimeMs: how long a daemon lifetime runs before a freshness restart may take it (operator ruling 2026-10-17).
+freshnessRestart:
+  scoreLimit: { value: 18, origin: "lifted:src/lib/deploy-judge.ts (DEPLOY_RESTART_SCORE_THRESHOLD)", min: 6, max: 54 }
+  stalenessHorizonMs: { value: 3600000, origin: "lifted:src/lib/deploy-judge.ts (DEPLOY_RESTART_RATE_CEILING_MS)", min: 900000, max: 14400000 }
+  quietWindowMs: { value: 600000, origin: "lifted:src/lib/deploy-judge.ts (FRESHNESS_COALESCE_WINDOW_MS)", min: 0, max: 1800000 }
+  minLifetimeMs: { value: 5400000, origin: "lifted:src/lib/deploy-judge.ts (FRESHNESS_MIN_LIFETIME_MS)", min: 0, max: 21600000 }
