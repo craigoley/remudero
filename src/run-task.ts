@@ -15477,6 +15477,8 @@ export function ciLearningCommand(
     /** W1-T3542 — the isolated landing bridge. Injected so a test writes nothing; production
      *  stages outside the checkout and lands only through the dedicated gated PR. */
     landShards?: typeof landCiLearningShards;
+    destinationSnapshot?: TaskIdDestinationSnapshot | null;
+    destinationFailure?: string;
   } = {},
 ): number {
   const badArg = unknownArgError("ci-learning", rest, ["--days"], ["--force"]);
@@ -15603,7 +15605,8 @@ export function ciLearningCommand(
     // MEASURED: without this, an unreadable plan under the run's root took the whole verb out with
     // ENOENT, reddening three of W1-T2959's tests, which pass a tmp root with no plan in it.
     try {
-      const destinationSnapshot = (await taskIdDestinationSnapshot()) ?? null;
+      if (deps.destinationFailure) throw new Error(deps.destinationFailure);
+      const destinationSnapshot = deps.destinationSnapshot;
       const filing = land(result.drafts, checkoutRoot, {
         stateRoot: root,
         mintTaskId: ciLearningTaskIdMinter(checkoutRoot, (step, fields) =>
@@ -43386,7 +43389,14 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
     },
   ],
   ["caller-sweep", (rest) => callerSweepCommand(rest)],
-  ["ci-learning", (rest) => ciLearningCommand(rest)],
+  ["ci-learning", async (rest) => {
+    let destinationSnapshot: TaskIdDestinationSnapshot | null = null;
+    let destinationFailure: string | undefined;
+    try { destinationSnapshot = (await taskIdDestinationSnapshot()) ?? null; }
+    catch { destinationFailure = "plan destination is unreadable before CI-learning mint"; }
+    // The report remains synchronous/best-effort; only this CLI owner prepares the new reads.
+    return ciLearningCommand(rest, { destinationSnapshot, destinationFailure });
+  }],
   ["rule-efficacy", (rest) => ruleEfficacyCommand(rest)],
   ["coverage-improve", (rest) => coverageImproveCommand(rest)],
   ["verdict-calibration", (rest) => verdictCalibrationCommand(rest)],
