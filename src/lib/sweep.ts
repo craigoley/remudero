@@ -362,11 +362,11 @@ import {
   holdTaskForRefusal,
   noPrVerdictRowsFromLedger,
   readTaskShard,
-  refusalIsMainCaused,
   taskAwaitsAmendment,
   type RefusalAmendmentResult,
   type RefusalCandidate,
 } from "./refusal-amendment.js";
+import { landTaskFilesAsync, stagedTaskFiles, type LandTaskFilesOpts } from "./feedback-landing.js";
 
 /** W1-T6434: the bounded, already-scrubbed view of a preserved fix-owner patch. */
 export interface PriorPartialWork {
@@ -5244,7 +5244,21 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     // written FIRST (cheap, local, idempotent) so a slow or failed PR never lets the task re-dispatch.
     draftRefusalAmendments: async (candidates) => {
       const results: RefusalAmendmentResult[] = [];
-      const currentPlan = reloadPlanForFix() ?? plan;
+      // W1-T12199: amendments land through the sealed task-file landing. A test's injected git and gh
+      // carry the landing too, so it never runs a real child against the checkout the test runs in.
+      const landingOpts: LandTaskFilesOpts = {
+        stateRoot: config.root,
+        targetRepository: { owner, repo },
+        log,
+        planPrPreflight: (sha, pr) => planPrPreflightImpl(repoDir, sha, pr, { log }),
+        ...(deps.planRepairGitImpl ? { git: (args: string[]) => planRepairGit("git", ["-C", repoDir, ...args]) } : {}),
+        ...(deps.ghJsonImpl ? { gh: (args: string[]) => {
+          const out = ghJsonForBuild(args);
+          return typeof out === "string" ? out : JSON.stringify(out);
+        } } : {}),
+      };
+      const stagedFor = new Map<string, string>();
+      const currentPlan = candidates.length > 0 ? reloadPlanForFix() ?? plan : plan;
       for (const c of candidates) {
         const task = currentPlan.byId.get(c.taskId);
         const base = { taskId: c.taskId, sourceRunId: c.runId, classes: c.refusals.map((r) => r.refusalClass) };
@@ -5260,73 +5274,53 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         results.push(
           await draftRefusalAmendment(c, {
             readShard: (taskId) => readTaskShard(repoDir, taskId),
-            probeExisting: (branch) => probeExistingPlanPr(ghJsonForBuild, owner, repo, branch),
+            // W1-T12199: an amendment that waits, or that the open landing PR carries, is found by its staged
+            // file. The per-task branch is still read for an amendment opened before this landing.
+            probeExisting: (branch) => {
+              const relPath = readTaskShard(repoDir, c.taskId)?.relPath;
+              const waiting = relPath === undefined ? undefined : stagedTaskFiles(config.root).find((f) => f.relPath === relPath);
+              return waiting ? { ...(waiting.prUrl ? { prUrl: waiting.prUrl } : {}) } : probeExistingPlanPr(ghJsonForBuild, owner, repo, branch);
+            },
             nowIso: () => clockFromMillisFn(nowMsImpl).iso(),
             openAmendmentPr: async (input) => {
-              try {
-                planRepairGit("git", ["-C", repoDir, "fetch", "origin", "--quiet"]);
-              } catch {
-                /* best-effort — a stale local view still lets the PR open */
-              }
-              const worktreePath = join(worktreesDir(config), `refusal-amendment-${c.taskId}-${nowMsImpl()}`);
-              try {
-                try {
-                  planRepairGit("git", ["-C", repoDir, "branch", "-D", input.branch]);
-                } catch {
-                  /* no stale local branch to clear — the common case */
-                }
-                worktreeAddForBuild(repoDir, worktreePath, input.branch, "origin/main", { log });
-                writeFileSync(join(worktreePath, input.shardRelPath), input.amendedText);
-                planRepairGit("git", ["-C", worktreePath, "add", input.shardRelPath]);
-                planRepairGit("git", [
-                  "-C",
-                  worktreePath,
-                  "commit",
-                  "-m",
-                  buildPlanPrCommitMessage({ scope: "plan", subject: `propose an amendment for ${c.taskId}`, extraBody: input.commitBody }),
-                ]);
-                const headSha = planRepairGit("git", ["-C", worktreePath, "rev-parse", "HEAD"]).trim();
-                const body = buildPlanPrBodyImpl({
-                  intro: input.prIntro,
-                  criteria: [{ claim: input.claim, proof: input.proof }],
-                  changedFiles: [input.shardRelPath],
-                  proofCwd: worktreePath,
-                });
+              const landing = await landTaskFilesAsync(
+                repoDir,
+                [{ relPath: input.shardRelPath, content: input.amendedText, claim: input.claim, proof: input.proof }],
+                { ...landingOpts, stageOnly: true, lane: "refusal_amendment" },
+              );
+              const refusal = landing.refused[0];
+              // A check that ran out of its budget is no refusal: `plan_pr.preflight_timed_out` records it,
+              // and no amendment row settles this source run, so a later pass asks again.
+              if (refusal?.timedOut) throw new PlanPrPreflightTimedOutError("refusal_amendment", refusal.failures ?? []);
+              if (refusal?.failures) {
                 // W1-T5405: a red preflight is ledgered as this source run's outcome, so the next pass does not re-pay it.
-                const verdict = await planPrPreflightImpl(worktreePath, headSha, { title: input.title, body }, { log });
-                if (!planPrPreflightAllows(verdict, { lane: "refusal_amendment", branch: input.branch, log })) {
-                  // A check that ran out of its budget is no refusal: `plan_pr.preflight_timed_out` records it,
-                  // and no amendment row settles this source run, so a later pass asks again.
-                  if (verdict.ok) throw new PlanPrPreflightTimedOutError("refusal_amendment", verdict.timedOut ?? []);
-                  // W1-T5531: preflight the base alone, so a red main's refusal is retried once main moves.
-                  // A probe that cannot run records why and leaves the refusal final, as before W1-T5531.
-                  const base: { origin_main_sha?: string; main_red: boolean; main_red_probe_error?: string } = { main_red: false };
-                  try {
-                    base.origin_main_sha = planRepairGit("git", ["-C", worktreePath, "rev-parse", "HEAD^"]).trim();
-                    const onBase = await planPrPreflightImpl(repoDir, base.origin_main_sha, { title: input.title, body }, { log });
-                    base.main_red = refusalIsMainCaused(verdict.failures, onBase.failures);
-                  } catch (e) {
-                    const reason = String((e as Error)?.message ?? e);
-                    base.main_red_probe_error = reason;
-                  }
-                  log(REFUSAL_AMENDMENT_STEP, { task_id: c.taskId, source_run_id: c.runId, outcome: "preflight_refused", failures: verdict.failures, ...base });
-                  throw new PlanPrPreflightRefusedError("refusal_amendment", verdict.failures);
-                }
-                await gitPushRunBranchForBuild(worktreePath, { stdio: "ignore", expectedHeadSha: headSha });
-                assertLiveWriteAllowed("gh-pr-create", `opening the refusal-amendment PR for ${c.taskId}'s shard`);
-                return createPlanPrRest(ghJsonForBuild, owner, repo, { title: input.title, body, head: input.branch, base: "main" });
-              } finally {
-                try {
-                  worktreeRemoveForBuild(repoDir, worktreePath);
-                } catch {
-                  /* best-effort cleanup */
-                }
+                // W1-T5531: the landing tested the base alone, so a red main's refusal is retried once main moves.
+                log(REFUSAL_AMENDMENT_STEP, {
+                  task_id: c.taskId, source_run_id: c.runId, outcome: "preflight_refused", failures: refusal.failures,
+                  ...(refusal.mainSha !== undefined ? { origin_main_sha: refusal.mainSha } : {}),
+                  main_red: refusal.mainRed ?? false,
+                  ...(refusal.mainRedProbeError !== undefined ? { main_red_probe_error: refusal.mainRedProbeError } : {}),
+                });
+                throw new PlanPrPreflightRefusedError("refusal_amendment", refusal.failures);
               }
+              if (refusal) throw new Error(refusal.reason);
+              if (landing.error) throw new Error(landing.error);
+              stagedFor.set(c.taskId, input.shardRelPath);
+              return {};
             },
           }),
         );
       }
-      return results;
+      // One landing call per pass: the amendments of this pass share one pull request, and a file that
+      // waited behind a merged landing goes into the next one with no new refusal.
+      const landed = await landTaskFilesAsync(repoDir, [], landingOpts);
+      if (landed.error) log("sweep.task_files_landing.error", { error: landed.error, waiting: landed.waiting });
+      return results.map((r) => {
+        const relPath = r.outcome === "waiting" ? stagedFor.get(r.taskId) : undefined;
+        return relPath !== undefined && landed.prUrl !== undefined && landed.landed.includes(relPath)
+          ? { ...r, outcome: "drafted" as const, prUrl: landed.prUrl }
+          : r;
+      });
     },
 
     rebaseDirtyFleetBranch: (pr) =>
@@ -9115,6 +9109,24 @@ export function reaggregatedCiGateKeysFromLedger(lines: Array<Record<string, unk
     }
   }
   return out;
+}
+
+/** W1-T1275/W1-T12273 — re-drive a stale ci-gate's own job at most once per (head, sibling transition).
+ *  The row is ledgered before the call, so a crash between them still bounds the next pass. */
+async function redriveStaleCiGate(deps: Pick<SweepDeps, "ledgerPath" | "runId" | "reaggregateCiGate" | "appendLine">,
+  pr: OpenPrView, transition: StaleCiGateTransition, keys: Set<string>): Promise<string> {
+  const key = ciGateReaggregateKey(pr.headSha, transition);
+  if (!ciGateReaggregateDecision(keys.has(key)).reaggregate) {
+    return `stale ci-gate verdict already re-driven for this transition — awaiting the fresh result`;
+  }
+  (deps.appendLine ?? appendLedger)(deps.ledgerPath, {
+    run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", step: CI_GATE_REAGGREGATE_STEP, pr_number: pr.prNumber,
+    pr_url: pr.prUrl, head_sha: pr.headSha, sibling_name: transition.siblingName, sibling_started_at: transition.siblingStartedAt,
+  });
+  keys.add(key);
+  if (deps.reaggregateCiGate) await deps.reaggregateCiGate(pr, transition);
+  return `stale ci-gate verdict — re-driving its job (required sibling "${transition.siblingName}" ` +
+    `reached success at ${transition.siblingStartedAt}, after the gate concluded)`;
 }
 
 const MS_PER_DAY = 86_400_000;
@@ -20465,6 +20477,7 @@ export async function runSweep(
   // Full passes only. Only a `no_pr` row whose excerpt `extractRefusal` parses is a candidate: an
   // uncategorized `no_pr` is skipped here and retries exactly as before. `error` outcomes write no
   // ledger row, so the next pass retries; every other outcome is recorded once per source run.
+  // W1-T12199: the effect runs with no candidate too, so a task file that waits is landed on this pass.
   if (deps.draftRefusalAmendments && deps.repairAdmissionSurface !== "light") {
     try {
       const candidates: RefusalCandidate[] = [];
@@ -20472,7 +20485,7 @@ export async function runSweep(
         const refusals = extractRefusal(row.reportExcerpt);
         if (refusals.length > 0) candidates.push({ ...row, refusals });
       }
-      if (candidates.length > 0) {
+      {
         for (const r of await deps.draftRefusalAmendments(candidates)) {
           if (r.outcome === "error") {
             log("sweep.refusal_amendment.error", { task_id: r.taskId, error: r.error });
@@ -21864,8 +21877,14 @@ export async function runSweep(
     // W1-T5543: fleet filings have their own plan surface; the code rung still never owns one.
     if (planConflictRound || (disposition === "blocked-fixable" && isBlockedCi(pr) && pr.isPlanFiling === true)) {
       const pendingJudgment = judgedUnavailable.get(pr.prNumber);
+      const staleGate = pendingJudgment || planConflictRound || !deps.readCiGateRollup ? undefined
+        : staleCiGateTransition(await deps.readCiGateRollup(pr));
       const repair = pendingJudgment ? { repaired: true, reason: pendingJudgment }
-        : planConflictRound ? { repaired: false, reason: "" } : await tryPlanRepair(pr);
+        : planConflictRound ? { repaired: false, reason: "" }
+        : staleGate ? { repaired: true, reason: deps.dryRun || !(deps.actionable?.("blocked-fixable") ?? true)
+          ? "stale ci-gate verdict — its re-run waits for a full sweep pass"
+          : await redriveStaleCiGate(deps, pr, staleGate, reaggregatedCiGateKeys) }
+        : await tryPlanRepair(pr);
       const facts = planRoundFacts.get(pr.prNumber);
       let planRoundExhausted = false;
       if (!repair.repaired && deps.dispatchPlanGateRound && isFleetAppAuthor(facts?.authorLogin) &&
@@ -23562,30 +23581,8 @@ export async function runSweep(
                 ? classifyCiTimeoutNoVerdict(pr.ciFailures ?? [], pr.redRequiredChecks ?? [], (pr.cancelledRequiredChecks ?? []).map((c) => c.name))
                 : undefined;
               if (staleTransition && (!timeoutShape || timeoutShape.notReady.includes(staleTransition.siblingName))) {
-                const key = ciGateReaggregateKey(pr.headSha, staleTransition);
-                const decision = ciGateReaggregateDecision(reaggregatedCiGateKeys.has(key));
-                if (decision.reaggregate) {
-                  // LEDGERED BEFORE THE CALL, the same ordering the re-queue uses below: a crash
-                  // between this write and the real GitHub call still bounds the NEXT pass toward
-                  // standing down rather than re-driving twice.
-                  appendLine(deps.ledgerPath, {
-                    run_id: deps.runId,
-                    task_id: pr.taskId ?? "SWEEP",
-                    step: CI_GATE_REAGGREGATE_STEP,
-                    pr_number: pr.prNumber,
-                    pr_url: pr.prUrl,
-                    head_sha: pr.headSha,
-                    sibling_name: staleTransition.siblingName,
-                    sibling_started_at: staleTransition.siblingStartedAt,
-                  });
-                  reaggregatedCiGateKeys.add(key);
-                  if (deps.reaggregateCiGate) await deps.reaggregateCiGate(pr, staleTransition);
-                }
                 acted = false;
-                standDownReason = decision.reaggregate
-                  ? `stale ci-gate verdict — re-driving its job (required sibling "${staleTransition.siblingName}" ` +
-                    `reached success at ${staleTransition.siblingStartedAt}, after the gate concluded)`
-                  : `stale ci-gate verdict already re-driven for this transition — awaiting the fresh result`;
+                standDownReason = await redriveStaleCiGate(deps, pr, staleTransition, reaggregatedCiGateKeys);
                 break;
               }
               let ciFailuresForFix = isBlockedCi(pr) ? pr.ciFailures ?? [] : [];

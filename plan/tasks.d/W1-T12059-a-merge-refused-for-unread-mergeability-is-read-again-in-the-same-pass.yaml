@@ -15,7 +15,7 @@
   files:
     - src/lib/arm-auto-merge.ts
     - test/a-merge-refused-for-unread-mergeability-is-read-again-in-the-same-pass.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "When the mergeability read returns unknown, the read is made again within the same pass, and the pull request merges when the second read is clean"

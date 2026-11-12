@@ -1052,8 +1052,11 @@ WATCHDOG_DEPLOY_DEADLINE_S=3600
 watchdog_deploy_run() (
   local observer="" root="${BASHPID:-$$}"
   local tmo=()
+  # W1-T12247: the deploy step reads the second at which timeout ends it. No timeout, no limit to give.
+  unset RMD_DEPLOY_STEP_ENDS_AT
   if command -v timeout >/dev/null 2>&1; then
     tmo=(timeout -k 30 "$WATCHDOG_DEPLOY_DEADLINE_S")
+    export RMD_DEPLOY_STEP_ENDS_AT="$(($(date +%s) + WATCHDOG_DEPLOY_DEADLINE_S))"
     # Snapshot BEFORE timeout signals the process group, so a normally TERM-responsive child is
     # still visible. Only this owned observer/sleeper is stopped when the command returns early.
     (

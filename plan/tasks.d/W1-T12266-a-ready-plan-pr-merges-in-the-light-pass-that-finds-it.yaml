@@ -21,7 +21,7 @@
     - src/lib/sweep.ts
     - test/sweep/a-ready-plan-pr-merges-in-the-light-pass-that-finds-it.test.ts
     - test/ledger/light-pass-merge-budget-uses-measured-interval.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "Through the production light-pass entry `buildSweepLightHook`: a ready plan pull request merges in the pass that finds it when the plan pull request ahead of it makes no merge attempt in that pass"

@@ -83,6 +83,8 @@ function slowTree(checkMs = SLOW_CHECK_MS): { repo: GitRepo; marks: string } {
   );
   repo.git("add", "plan", "scripts");
   repo.git("commit", "--quiet", "-m", "seed the fixture shard and the slow check");
+  // W1-T12199: the refusal amendment lands through the sealed task-file landing, which reads origin/main.
+  repo.git("update-ref", "refs/remotes/origin/main", "HEAD");
   return { repo, marks };
 }
 
@@ -107,7 +109,8 @@ function rungFixture(over: Partial<BuildSweepEffectsDeps> = {}, checkMs = SLOW_C
       wt = repo.addWorktree(worktreePath, branch);
     },
     // fetch and the stale-branch clear have no remote to reach; add, commit and rev-parse run for real.
-    planRepairGitImpl: (_file, args) => (args[2] === "fetch" || args[2] === "branch" ? "" : `${wt!.git(...args.slice(2))}\n`),
+    // The plan repair works in its worktree; the refusal amendment (W1-T12199) builds its commit in the repo itself.
+    planRepairGitImpl: (_file, args) => (args[2] === "fetch" || args[2] === "branch" ? "" : `${(wt ?? repo).git(...args.slice(2))}\n`),
     gitPushRunBranchImpl: (dir, opts) => {
       pushes.push({ dir, sha: opts?.expectedHeadSha });
     },
