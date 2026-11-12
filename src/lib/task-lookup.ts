@@ -8,7 +8,7 @@ export interface TaskLookupOptions {
   api?: OpsCatalogApi;
 }
 export type TaskLookupResult =
-  | { outcome: "found"; task: Task; catalog: "public" | "ops"; commit?: string }
+  | { outcome: "found"; task: Task & { catalog?: "public" | "ops" }; catalog: "public" | "ops"; commit?: string }
   | { outcome: "absent"; task?: undefined; catalog?: undefined }
   | { outcome: "unreadable"; reason: string; task?: undefined; catalog?: undefined };
 
@@ -29,14 +29,16 @@ export async function findTaskInCatalogs(taskId: string, sources: TaskLookupOpti
     return { outcome: "unreadable", reason: `ops-${snapshot.outcome}` };
   }
   const task = snapshot.plan.byId.get(taskId);
-  return task === undefined ? { outcome: "absent" } : { outcome: "found", task, catalog: "ops", commit: snapshot.binding?.commit };
+  return task === undefined ? { outcome: "absent" } : { outcome: "found", task: { ...task, catalog: "ops" }, catalog: "ops", commit: snapshot.binding?.commit };
 }
 
+export type CatalogTaskContract = PlanCriteriaAtHeadResult & { taskCatalog?: "public" | "ops" };
+
 /** Private contract for review/fix, never a PR-body or status serializer. */
-export function catalogTaskContract(result: Extract<TaskLookupResult, { outcome: "found" }>): PlanCriteriaAtHeadResult {
+export function catalogTaskContract(result: Extract<TaskLookupResult, { outcome: "found" }>): CatalogTaskContract {
   const task = result.task;
   return {
-    taskId: task.id, criteria: task.acceptance ?? [], taskDeclaredFiles: task.files,
+    taskCatalog: result.catalog, taskId: task.id, criteria: task.acceptance ?? [], taskDeclaredFiles: task.files,
     taskRisk: task.risk, taskBudgetUsd: task.budget_usd,
     taskNarrative: {
       ...(task.design === undefined ? {} : { design: task.design }),

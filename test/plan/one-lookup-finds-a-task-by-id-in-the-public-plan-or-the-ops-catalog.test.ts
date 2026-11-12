@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
@@ -12,7 +12,8 @@ import { ghShim } from "#test/helpers/gh-shim.js";
 import { originWithClone, GIT_REPO_FIXTURE_IDENTITY } from "#test/helpers/git-repo.js";
 import { FIXTURE_CONFIG_PATH_SEGMENTS } from "#src/lib/config.js";
 import type { FixCommandHost } from "#src/cli/commands/fix.js";
-import type { ReviewCommandHost, ReviewCommandDeps } from "#src/cli/commands/review.js";
+import { reviewCommand, runReview, type ReviewCommandHost, type ReviewCommandDeps } from "#src/cli/commands/review.js";
+import { readLedgerLines } from "#src/lib/status.js";
 
 const ID = "W1-T900000", REPOSITORY = "fixture-private/ops";
 const yaml = (id = ID) => `- id: ${id}\n  title: Private lookup fixture\n  repo: remudero\n  depends_on: []\n  type: implement\n  priority: 0\n  risk: high\n  budget_usd: 0.5\n  files: [src/fixture.ts]\n  design: Private canonical design\n  acceptance:\n    - claim: canonical private criterion\n      proof: "grep: lookup-fixture in src/fixture.ts"\n`;
@@ -227,3 +228,116 @@ test("invalid fix input uses the existing refusal before a catalog read or effec
   const host = { USAGE: "fixture", commandSyntax: () => "rmd fix <pr>", workerBoundaryStack: { loadedModule: undefined } } as unknown as FixCommandHost;
   assert.equal(await fixCommand(["0"], undefined, host), 2);
 });
+
+const id = "W1-T900000", repository = "fixture-private/ops", privatePath = "private/untouched-ops-sentinel.ts";
+const design = "private canonical narrative sentinel", claim = "the canonical marker is present";
+const catalog = `- id: ${id}
+  title: Catalog fixture
+  repo: remudero
+  depends_on: []
+  type: implement
+  priority: 0
+  risk: high
+  budget_usd: 0.37
+  files: [src/marker.ts, ${privatePath}]
+  design: ${design}
+  acceptance:
+    - claim: ${claim}
+      proof: "grep: READY in src/marker.ts"
+`;
+
+function pinnedApi(): { api: OpsCatalogApi; reads: string[] } {
+  const hash = (text: string) => createHash("sha1").update(text).digest("hex");
+  const commit = hash(catalog), tree = hash("root"), plan = hash("plan");
+  const blob = hash(`blob ${Buffer.byteLength(catalog)}\0${catalog}`), reads: string[] = [];
+  const base = `repos/${repository}`;
+  const api: OpsCatalogApi = async path => {
+    reads.push(path);
+    if (path === base) return { id: 42, full_name: repository, default_branch: "main" };
+    if (path === `${base}/git/ref/heads/main`) return { object: { type: "commit", sha: commit } };
+    if (path === `${base}/git/commits/${commit}`) return { sha: commit, tree: { sha: tree } };
+    if (path === `${base}/git/trees/${tree}`) return { sha: tree, truncated: false, tree: [{ path: "plan", sha: plan, type: "tree", mode: "040000" }] };
+    if (path === `${base}/git/trees/${plan}`) return { sha: plan, truncated: false, tree: [{ path: "tasks.yaml", sha: blob, type: "blob", mode: "100644" }] };
+    assert.equal(path, `${base}/git/blobs/${blob}`);
+    return { sha: blob, encoding: "base64", size: Buffer.byteLength(catalog), content: Buffer.from(catalog).toString("base64") };
+  };
+  return { api, reads };
+}
+
+for (const mode of ["ops-pass", "ops-fail", "ops-fresh", "public-pass"] as const) {
+  test(`W1-T12207 criterion 2: ${mode} keeps host scope evidence and publishes only permitted ops fields`, async t => {
+    const root = mkdtempSync(join(tmpdir(), "rmd-task-lookup-publication-"));
+    t.after(() => rmSync(root, { recursive: true, force: true }));
+    mkdirSync(join(root, "repos"));
+    const subject = originWithClone(join(root, "repos", "subject"), { scope: t, seed: {
+      "plan/tasks.yaml": mode === "public-pass" ? catalog : "[]\n",
+      "src/marker.ts": mode === "ops-fail" ? "missing marker\n" : "READY\n",
+    } }).clone;
+    const head = subject.git("rev-parse", "HEAD"), prUrl = "https://github.com/fixture/subject/pull/42";
+    mkdirSync(join(root, "state"));
+    writeFileSync(join(root, "state", "plan-destination.json"), JSON.stringify({ repository, kinds: [] }));
+    const view = { number: 42, state: "open", merged: false, html_url: prUrl,
+      body: `Remudero-Task: ${id}\n\n## Acceptance\n- wrong body criterion | grep: WRONG in src/wrong.ts`,
+      head: { ref: `run-${id}-1`, sha: head }, updated_at: new Date().toISOString() };
+    const shim = ghShim([
+      { when: "/statuses?", stdout: "[[]]" },
+      { when: "pr diff", stdout: "diff --git a/src/marker.ts b/src/marker.ts\n--- /dev/null\n+++ b/src/marker.ts\n@@ -0,0 +1 @@\n+READY\n" },
+      { when: "pulls/42", stdout: JSON.stringify(view) },
+      { when: "api", stdout: "{}" },
+    ]);
+    const oldPath = process.env.PATH;
+    t.after(() => { process.env.PATH = oldPath; rmSync(shim.dir, { recursive: true, force: true }); });
+    process.env.PATH = `${shim.dir}:${oldPath ?? ""}`;
+    const fx = pinnedApi();
+    let reviewed = 0;
+    const host = {
+      GIT_UNTRACKED_FILES_ALL: "--untracked-files=all", JUDGE_AT_OWN_START_FLAG: "--judge-at-own-start",
+      reviewWorktreeAsync: { fetch: () => {} },
+      acceptedReviewAttemptId: () => undefined, liveWorkerRunIds: new Set<string>(),
+      reviewWorkerLockId: (runId: string) => runId,
+      reviewSubjectGit: (_dir: string, args: string[]) => args[0] === "config" ? "https://github.com/fixture/subject.git" : subject.git(...args),
+      readHeadShaRest: () => head,
+      reviewPostedDescription: () => design,
+    } as unknown as ReviewCommandHost;
+    const code = await reviewCommand(host, "42", ["--repo", "subject"], {
+      loadConfig: () => ({ root }) as never,
+      resolveOwnerRepo: () => ({ owner: "fixture", repo: "controller" }), fetchView: () => view,
+      fetchHead: () => {}, taskLookup: { api: fx.api },
+      materialize: () => ({ worktreePath: subject.dir }) as never,
+      withMaterialized: async (_path, _repo, body) => body(), buildBaseProof: async () => undefined as never,
+      reviewerCodeFreshness: () => ({ status: "unreadable", reason: "fixture has no deployment identity" }),
+      readReviewStatusHistory: async () => ({ kind: "readable", failures: [] }),
+      runReview: async args => {
+        reviewed++;
+        assert.deepEqual(args.task.files, ["src/marker.ts", privatePath]);
+        assert.equal(args.task.risk, "high"); assert.equal(args.task.budget_usd, 0.37);
+        assert.equal(args.task.design, design); assert.equal(args.task.acceptance?.[0]?.claim, claim);
+        return runReview(host, { ...args, reviewerCodeFreshness: mode === "ops-fresh" ? () => ({ status: "fresh", codeSha: "a".repeat(40), originMainSha: "a".repeat(40), advance: "none" }) : undefined, spawnReviewer: false,
+          readReviewReuseFacts: () => undefined, disarm: () => "not-armed", arm: () => "ledger-refused" });
+      },
+    });
+    assert.equal(reviewed, 1); assert.equal(code, mode === "ops-fail" ? 1 : 0);
+    assert.equal(fx.reads.length > 0, mode !== "public-pass");
+    const rows = readLedgerLines(join(root, "state", "ledger.ndjson"));
+    assert.ok(rows.some(row => row.step === "review.unwired_advisory" && row.reason_code === "inverse_scope" &&
+      (row.symbols as string[]).includes(privatePath)), "the real scope check retains the private untouched path on the host");
+    const calls = readFileSync(join(shim.dir, "calls.log"), "utf8");
+    const comments = [...calls.matchAll(/api -X POST [^\n]*\/reviews -f body=([\s\S]*?) -f event=COMMENT/g)]
+      .map(match => match[1]!);
+    const statuses = calls.split("\n").filter(call => call.includes("/statuses/") && call.includes("description="));
+    assert.equal(comments.length, 1, "the regression reaches the real public review writer");
+    assert.ok(statuses.length > 0, "the real status writer is exercised too");
+    if (mode === "public-pass") {
+      assert.ok(comments[0]!.includes(privatePath), "public tasks retain their existing scope advisory");
+      assert.ok(statuses.some(status => status.includes(design)), "public status descriptions remain intact");
+    } else {
+      const published = [...comments, ...statuses].join("\n");
+      for (const forbidden of [privatePath, design, repository, "high", "0.37", "budget_usd", "wrong body criterion"]) {
+        assert.ok(!published.includes(forbidden), `public output must not contain ${forbidden}`);
+      }
+      assert.ok(comments[0]!.includes(claim));
+      assert.ok(comments[0]!.includes(`remudero-review=${mode === "ops-fail" ? "failure" : "success"}`));
+      if (mode === "ops-fresh") assert.ok(statuses.some(status => status.includes(`[review code ${"a".repeat(40)}]`)));
+    }
+  });
+}

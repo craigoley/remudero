@@ -1,5 +1,5 @@
 /** The fix verb and its exclusive helpers, moved from the entrypoint (W1-T9337). */
-import { findTaskInCatalogs, type TaskLookupOptions, type TaskLookupResult } from "../../lib/task-lookup.js";
+import { findTaskInCatalogs, type TaskLookupOptions, type TaskLookupResult, type CatalogTaskContract } from "../../lib/task-lookup.js";
 import { planDestinationRepository } from "../../lib/plan-destination.js";
 import type { RunTaskCommandHost, GitRunner, CiGateOutcome, ReviewRunResult, FixRungOutcome, LiveHeadResult, WorktreeSnapshot, FixRebaseMergeFacts, FixRoundCommit, CensusPushRefusal, FixRoundPushReceipt } from "./run-task-verb.js";
 import { buildBaseProofDir, releaseBaseProofDir, type BaseProofDir } from "../../lib/check-proof.js";
@@ -44,7 +44,7 @@ import { loadMounts, mountsPath, type Mount } from "../../lib/mounts.js";
 import { fixArmEvidence, fixRoutingWeights, readFixRoutingRows, type FixLearnedArms } from "../../lib/fix-routing-learner.js";
 import { loadInjectableSkills, observeSkillSelection, renderSkillsPart, SKILL_FIX_TASK_TYPE, skillWithheldForRun } from "../../lib/skill-workshop.js";
 import { DEFAULT_KNOWLEDGE_BUDGET_CHARS } from "../../lib/learnings.js";
-import { recognizeChangesetClaims, acceptanceAuthorTimeCheck, extractTaskTrailerId, parseAcceptanceBlock, reviewLedgerKeyFor, UNFILED_RUN_SENTINEL, reviewInputDigest, reviewLedgerReasons, resolvePlanCriteriaAtHeadAsync, type PlanCriteriaAtHeadResult, type CriterionVerdict } from "../../lib/review.js";
+import { recognizeChangesetClaims, acceptanceAuthorTimeCheck, extractTaskTrailerId, parseAcceptanceBlock, reviewLedgerKeyFor, UNFILED_RUN_SENTINEL, reviewInputDigest, reviewLedgerReasons, resolvePlanCriteriaAtHeadAsync, type CriterionVerdict } from "../../lib/review.js";
 import { repairedProofsAreSafeToPush, diagnoseUnrunnableProofs, renderBodyDefects } from "../../lib/body-repair.js";
 import { recordHeadProviderAfterPush } from "../../lib/review-provider-provenance.js";
 import { ghRequiredStatusCheckContexts, readLedgerLines, taskIdFromRunBranch } from "../../lib/status.js";
@@ -5258,7 +5258,7 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
     // snapshot named in this task's rationale; `reviewTask` is what actually reaches the reviewer.
     let reviewTask = opts.task;
     if (deps.resolveTaskContractAtHead) {
-      let resolvedContract: PlanCriteriaAtHeadResult | undefined;
+      let resolvedContract: CatalogTaskContract | undefined;
       let resolveError: string | undefined;
       try {
         resolvedContract = await deps.resolveTaskContractAtHead(opts.prUrl, opts.taskId);
@@ -5278,11 +5278,11 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
         deps.say(`fix rung: standing down — ${reason}`);
         return { outcome: "stood_down", review, strikes, retriggers, reason, standDownReason: reason };
       }
-      reviewTask = {
-        ...opts.task,
+      reviewTask = Object.assign({}, opts.task, {
         acceptance: resolvedContract.criteria,
         files: resolvedContract.taskDeclaredFiles,
-      };
+        catalog: resolvedContract.taskCatalog,
+      });
       deps.log("fix.head_contract_refreshed", {
         strike: strikes,
         criteria_count: resolvedContract.criteria.length,
