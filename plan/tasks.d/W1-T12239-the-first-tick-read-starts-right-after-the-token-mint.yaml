@@ -21,6 +21,7 @@
     - src/cli/commands/daemon.ts
     - src/lib/daemon.ts
     - test/daemon/the-first-tick-read-starts-right-after-the-token-mint.test.ts
+    - test/a-daemon-whose-boot-fails-releases-its-watchers-and-exits.test.ts
   status: queued
   attempts: 0
   acceptance:
@@ -60,6 +61,11 @@
     - A rejected `firstTickRead` is not an error of the start: write one row and read as today.
     The read publishes its time. W1-T12236 uses a read only when it was published after the tick started. For the first tick, count the early read as the read of that tick: it is the newest read that exists, and a review still checks the head before it posts.
     Add `first_tick_read_ms` and `first_tick_read_overlap_ms` to the row that reports the first tick, so that the saving is measured.
+    The row that reports the first tick read is `daemon.first_tick_read`, written once for each start, after the first tick has its read. Its `source` is `early` (the early read was used), `plan_changed`, `early_failed` (with `reason`) or `early_stale`. `first_tick_read_ms` is the time the first tick waited for its read. `first_tick_read_overlap_ms` is the time the early read ran before the first tick asked for it.
+    An early read older than the tick read age bound (`freshReadGeneration`) is not used: a start held by PAUSE must not take a read from before the hold.
+    A loop that ends before its first read gets no early read: a start with `--max 0`, or a start under STOP. The read plane is still built and the cleanup still closes it. Most daemon command tests start with `--max 0` and a loop that never reads, so they start no worker and make no GitHub read, as before.
+    The cleanup list starts after the lock. So `daemonCommand` also stops the read plane in the finally that closes the lifetime history, and when the lifetime history read throws, unless the cleanup list already stopped it.
+    The read plane now starts before the daemon lock, the event wake and the git credential socket. So in `test/a-daemon-whose-boot-fails-releases-its-watchers-and-exits.test.ts` a start that fails in `startReadPlane` has acquired nothing yet, and a start that fails in `wireSweepWake` or `startGitCredentialSocket` releases the read plane too. That test changes its expected releases for those three cases and nothing else.
     NOT IN SCOPE: the content of the tick read, a second early read, and the git credential socket.
   falsifier: |
     Build the read plane after `daemonBoot` again and criterion 1 must fail. Let the first tick ask for a second read and criterion 2 must fail. Leave the worker open after a refused lock and criterion 5 must fail. Restore and require all seven to pass.
