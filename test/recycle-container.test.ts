@@ -2025,6 +2025,36 @@ test("a recycle with scratch off or an unmounted scratch root launches exactly a
   assert.match(unmounted.stdout, /scratch mounts NOT USED .* is not a mounted filesystem/);
 });
 
+// ── W1-T12293: the daemon container keeps its Claude account file ───────────────────────────────
+
+const ACCOUNT_SIDE = "/home/node/.rmd-claude-account.json";
+
+test("W1-T12293 criterion 3: a host account file is mounted read-only at the side path, and the runtime contract checks it", (t) => {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}recycle-account-`));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const claude = join(root, "claude");
+  mkdirSync(claude);
+  const account = `${claude}.json`;
+  writeFileSync(account, "{}\n");
+  const run = runRecycle("good", { extraEnv: { RMD_CLAUDE_DIR: claude, STUB_EXTRA_MOUNTS: `${account}\t${ACCOUNT_SIDE}\tfalse` } });
+  assert.equal(run.status, 0, run.stdout + run.stderr);
+  const argv = run.calls.find(isRun)?.argv ?? [];
+  assert.ok(argv.includes(`${account}:${ACCOUNT_SIDE}:ro`), argv.join(" "));
+  assert.ok(argv.includes(`${claude}:/home/node/.claude`), "the directory mount is unchanged");
+  const unbound = runRecycle("good", { extraEnv: { RMD_CLAUDE_DIR: claude } });
+  assert.notEqual(unbound.status, 0, "a container that came up without the account file mount fails the runtime contract");
+  assert.match(unbound.stdout + unbound.stderr, /FAILED RUNTIME CONTRACT/);
+  const writable = runRecycle("good", { extraEnv: { RMD_CLAUDE_DIR: claude, STUB_EXTRA_MOUNTS: `${account}\t${ACCOUNT_SIDE}\ttrue` } });
+  assert.notEqual(writable.status, 0, "a writable account file mount fails the runtime contract");
+});
+
+test("W1-T12293 criterion 4: a host with no account file recycles as before and prints a note", () => {
+  const run = runRecycle("good");
+  assert.equal(run.status, 0, run.stdout + run.stderr);
+  assert.ok(!(run.calls.find(isRun)?.argv ?? []).some((a) => a.includes(ACCOUNT_SIDE)), "no account file mount");
+  assert.match(run.stdout + run.stderr, /NOTE — no Claude account file at \S*claude\.json/);
+});
+
 // ── W1-T4197: a recycle never lifts a pause it did not write ────────────────────────────────────
 
 const OPERATOR_PAUSE = JSON.stringify({ reason: "operator hold: investigating deploy/recycle-container.sh", requestedAt: "2026-10-01T00:00:00.000Z", pid: 4242, host: "op-host" });

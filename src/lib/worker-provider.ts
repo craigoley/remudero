@@ -750,6 +750,9 @@ export function claudeCapacityFromUsage(
   accountLabel?: string,
 ): ProviderCapacity {
   if (!snapshot) return { provider: "claude", readable: false, windows: [], detail: "capacity unreadable" };
+  if (!snapshot.session) {
+    return claudeCapacityFromUsageCase({ kind: "weekly-only", weekly: snapshot.weekly, billingMode: snapshot.billingMode }, accountLabel);
+  }
   const weeklyWindows = claudeWeeklyWindows(snapshot.weekly);
   const validWeeklyWindows = weeklyWindows.filter(validCapacityWindow);
   return {

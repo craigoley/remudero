@@ -1,0 +1,50 @@
+- id: W1-T12356
+  title: "On macOS, a same-host claim minted before an in-place restart is not released at boot"
+  repo: remudero
+  depends_on: []
+  priority: 1.5
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: medium # decides when the boot sweep releases a dispatch claim; a wrong answer on macOS releases a live claim
+  band_meaning: blast-radius
+  origin: operator-session#hand-build-follow-ups-2026-11-11
+  plan_refs:
+    - W1-T10896
+    - W1-T2784
+  files:
+    - src/lib/dispatch-claim.ts
+    - test/dispatch/a-claim-minted-before-a-restart-is-released-at-boot-on-macos.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "On darwin, `readNamespaceBootMs` gives the kernel boot time (now minus `os.uptime()`), with no child process and no read of `/proc`"
+      proof: 'grep: test("W1-T12356: on darwin the namespace boot time is the kernel boot time in test/dispatch/a-claim-minted-before-a-restart-is-released-at-boot-on-macos.test.ts'
+    - claim: "On darwin, `pidIsPresent` asks the kernel with `process.kill(pid, 0)`: no error is present, `ESRCH` is absent, `EPERM` and every other error is present"
+      proof: 'grep: test("W1-T12356: on darwin a pid is present unless the kernel answers ESRCH in test/dispatch/a-claim-minted-before-a-restart-is-released-at-boot-on-macos.test.ts'
+    - claim: "On darwin, the boot sweep releases a same-host claim minted before the kernel boot whose pid is absent, and keeps a claim whose pid is present (the current process) and a claim minted after the boot"
+      proof: 'grep: test("W1-T12356: on darwin the boot sweep releases a dead same-host claim and keeps the live ones in test/dispatch/a-claim-minted-before-a-restart-is-released-at-boot-on-macos.test.ts'
+    - claim: "On linux, both functions read `/proc` exactly as before: the same inputs give the same answers, and neither calls `os.uptime()` or `process.kill`"
+      proof: 'grep: test("W1-T12356: on linux the namespace boot time and the pid check still read /proc in test/dispatch/a-claim-minted-before-a-restart-is-released-at-boot-on-macos.test.ts'
+    - claim: "On any other platform both functions keep their answer when the input cannot be read: no boot time (arm 3 declines) and pid present"
+      proof: 'grep: test("W1-T12356: on another platform the release still declines in test/dispatch/a-claim-minted-before-a-restart-is-released-at-boot-on-macos.test.ts'
+  rationale: |
+    MEASURED 2026-11-11 on the Mac agent account, on origin/main 1142cf5ed.
+    - test/dispatch/a-run-orphaned-by-its-daemons-restart-is-ended-and-resumed.test.ts passes 2 of 11 tests.
+    - "W1-T10896: a cross-host claim is still left to the operator at boot" expected `['W1-T3']` released and got `[]`. W1-T3 is a same-host claim with a dead pid, minted in the year 2000.
+    - The same file passes 11 of 11 on the Linux Azure host.
+    CAUSE, FROM THE CODE (src/lib/dispatch-claim.ts):
+    - The boot sweep releases a same-host claim (arm 3, "dead-claimant") only when `sameHostLivenessProbe` gives a probe. The probe needs `readNamespaceBootMs()`.
+    - `readNamespaceBootMs` reads `/proc/stat` (`btime`) and `/proc/1/stat`. macOS has no `/proc`, so the read throws and the function gives `undefined`. Then `sameHostLivenessProbe` gives `undefined`, and arm 3 declines for every claim. That is why no claim is released.
+    - `pidIsPresent` checks `existsSync("/proc/<pid>")`. On macOS that is false for every pid, also for a live one. The `undefined` probe hides this today. If only the boot time is fixed, a claim whose pid is alive (the control "W1-T2" in the first test, which uses `process.pid`) is released. So both functions must change together.
+    - The hostname and the pid namespace are not the cause: the test helper (test/helpers/restart-orphan.ts) takes `LOCAL` from `os.hostname()` for both the anchor and the sweep, and macOS has one pid space for the host.
+  design: |
+    1. In `readNamespaceBootMs`, take the platform as an input with `process.platform` as the default (`deps.platform`). On `darwin`, give `Math.round(now - os.uptime() * 1000)`. Take `uptimeSec` and `nowMs` as inputs too, with `os.uptime` and the module clock as defaults. macOS has no pid namespace, so the start of the kernel is the start of the pid space. Do not spawn `sysctl`: the boot sweep is on the daemon path, and a synchronous spawn there is refused (test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts). A non-finite or negative result gives `undefined`.
+    2. In `pidIsPresent`, take the platform the same way. On `darwin`, call `process.kill(pid, 0)` (take `kill` as an input with `process.kill` as the default). No error: present. An error with code `ESRCH`: absent. Every other error (`EPERM` and the rest): present, the same fail-closed direction as today.
+    3. On `linux`, keep the `/proc` reads byte for byte. On any other platform, keep today's behaviour: the `/proc` reads, which fail and decline arm 3.
+    4. Update the doc comments of the two functions in plain language: which platform reads what, and why the darwin answer is the kernel boot.
+    5. Add the test file named in `files`. Drive `readNamespaceBootMs` and `pidIsPresent` with the injected platform and readers for criteria 1, 2, 4 and 5. For criterion 3, drive `bootSweepDispatchClaims` through `sameHostLivenessProbe` with the platform set to `darwin` and the real `os.uptime` and `process.kill`, so the test passes on the Linux host and on a Mac. Use one test per criterion, with the exact titles in the proofs.
+    NOT IN SCOPE: the other arms of the boot sweep, the cross-host rule, and test/helpers/restart-orphan.ts.
+  falsifier: |
+    Remove the darwin branch of `readNamespaceBootMs` and criteria 1 and 3 must fail: no probe, so no claim is released. Keep that branch but remove the darwin branch of `pidIsPresent` and criteria 2 and 3 must fail: the claim of the current process is released. Make the darwin branch also run on linux and criterion 4 must fail. On the Mac agent account, test/dispatch/a-run-orphaned-by-its-daemons-restart-is-ended-and-resumed.test.ts must pass 11 of 11 after the change (2 of 11 before it).

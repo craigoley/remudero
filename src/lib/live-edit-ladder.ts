@@ -95,6 +95,10 @@ export interface LiveEditState {
 }
 
 export interface LiveEditRungInput {
+  /** W1-T12228: the daemon's own `freshnessRestart` score limit and staleness horizon (plan/policy.yaml), so the ladder
+   *  weighs pressure exactly as the daemon does. Absent uses the constants in deploy-judge.ts. */
+  scoreLimit?: number;
+  stalenessHorizonMs?: number;
   tree: LiveEditTree;
   repoDir: string;
   stateDir: string;
@@ -306,13 +310,14 @@ async function ladder(d: LiveEditRungInput): Promise<LiveEditLadderResult> {
   const behind = main && main !== head
     ? Number((await git(["rev-list", "--count", `${head}..${main}`])).trim()) || 0
     : 0;
-  const threshold = DEPLOY_RESTART_SCORE_THRESHOLD.value;
+  const threshold = d.scoreLimit ?? DEPLOY_RESTART_SCORE_THRESHOLD.value;
   let pressure = 0;
   if (behind > 0) {
     if (state.since === undefined || state.since > nowMs) writeState(statePath, { since: nowMs });
     state = readState(statePath);
     const changes = await git(["log", "--format=%x1e%H%x1f%s", "--name-only", `${head}..${main}`]).then(parseAdvanceCommits, () => undefined /* unreadable: decideFreshnessRestart weighs it as a full threshold */);
-    pressure = decideFreshnessRestart({ changes, busy: true, staleSinceMs: state.since!, nowMs, state: { total: 0, scoredShas: [] } }).pressure;
+    pressure = decideFreshnessRestart({ changes, busy: true, staleSinceMs: state.since!, nowMs, state: { total: 0, scoredShas: [] },
+      threshold: { value: threshold, reason: "plan/policy.yaml freshnessRestart.scoreLimit" }, ageHorizonMs: d.stalenessHorizonMs }).pressure;
   }
 
   const pathspecDir = mkdtempSync(join(tmpdir(), "rmd-live-edits-paths-"));
@@ -420,6 +425,9 @@ async function deliverNotice(d: LiveEditRungInput, state: LiveEditState, statePa
 }
 
 export interface LiveEditLadderWiring {
+  /** W1-T12228: see {@link LiveEditRungInput.scoreLimit}. */
+  scoreLimit?: number;
+  stalenessHorizonMs?: number;
   daemonRepoDir: string;
   installRepoDir?: string;
   stateDir: string;
@@ -444,7 +452,8 @@ export function withLiveEditLadders(read: () => Promise<DaemonFreshness>, w: Liv
     running = true;
     let restoredSince: number | undefined;
     try {
-      const shared = { stateDir: w.stateDir, host: w.host, escalate: w.escalate, comment: w.comment, git: w.git };
+      const shared = { stateDir: w.stateDir, host: w.host, escalate: w.escalate, comment: w.comment, git: w.git,
+        scoreLimit: w.scoreLimit, stalenessHorizonMs: w.stalenessHorizonMs };
       const own = await runLiveEditLadder({ ...shared, tree: "daemon-checkout", repoDir: w.daemonRepoDir, clock: w.clock });
       if (own.restored) restoredSince = own.since;
       await w.recovery?.(w.daemonRepoDir, "daemon-checkout");

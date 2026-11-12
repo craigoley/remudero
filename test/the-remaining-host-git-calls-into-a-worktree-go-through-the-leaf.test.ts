@@ -131,7 +131,7 @@ describe("W1-T6122: every raw git -C <worktree> left outside run-task.ts is a re
       }
     }
     assert.deepEqual(where, {
-      "src/lib/sweep.ts:buildSweepEffects": 7,
+      "src/lib/sweep.ts:buildSweepEffects": 3,
       "src/lib/worker.ts:worktreeAdd": 3,
       "src/lib/worker.ts:worktreeAddAsync": 6,
     });
@@ -139,7 +139,7 @@ describe("W1-T6122: every raw git -C <worktree> left outside run-task.ts is a re
 
   it("the census exception for each remaining file records its HARNESS class, and the converted files have none", () => {
     const census = readFileSync(join(REPO, "test/every-host-git-spawn-into-a-worktree-uses-the-hardened-leaf.test.ts"), "utf8");
-    for (const [file, count] of [["src/lib/sweep.ts", 7], ["src/lib/worker.ts", 9]] as const) {
+    for (const [file, count] of [["src/lib/sweep.ts", 3], ["src/lib/worker.ts", 9]] as const) {
       const entry = new RegExp(`"${file.replace(/[./]/g, "\\$&")}": \\{\\s*count: ${count},\\s*reason:\\s*"HARNESS \\(W1-T6122\\)`);
       assert.match(census, entry, `${file} carries count ${count} and a HARNESS reason`);
     }

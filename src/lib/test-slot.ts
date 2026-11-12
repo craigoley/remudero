@@ -1120,6 +1120,21 @@ function testSlotHolderStale(held: TestSlotHolder, now: number, opts: Required<P
   return now - Date.parse(held.heartbeatAt) > TEST_SLOT_LEASE_MS;
 }
 
+/**
+ * W1-T12295: a same-host, same-uid marker holder on darwin, where no boot id, pid namespace or tree probe exists.
+ * Undefined keeps today's rules. A gone or reused owner pid ends it only once its beat is past the lease.
+ */
+function darwinMarkerOwnerEvidence(held: TestSlotHolder, fileUid: number | undefined, pidStale: boolean, now: number,
+  waiter: { platform: NodeJS.Platform; hostname: string; bootId: string | undefined; pidNs: string | undefined }): ReservedTreeEvidence | undefined {
+  if (waiter.platform !== "darwin" || held.bootId !== undefined || waiter.bootId !== undefined || held.pidNs !== undefined ||
+      waiter.pidNs !== undefined || !sameHost(held.host, waiter.hostname) || held.ownerUid === undefined || held.ownerUid !== fileUid ||
+      held.ownerUid !== process.getuid?.() || !held.processStart || held.ownershipProtocol !== undefined) return undefined;
+  const kept = (reason: string): ReservedTreeEvidence => ({ state: "unknown", coverage: "darwin-owner-pid", reason });
+  if (!pidStale || testSlotProcessFacts(held.pid)?.start === held.processStart) return kept(`owner pid ${held.pid} is alive with its recorded start`);
+  if (!(now - Date.parse(held.heartbeatAt) > TEST_SLOT_LEASE_MS)) return kept(`owner pid ${held.pid} gone; last beat inside the lease, covered work may still run`);
+  return { state: "ended", complete: true, coverage: "darwin-owner-pid", reason: `owner pid ${held.pid} gone or reused; last beat past the lease` };
+}
+
 /** What a waiter (or doctor) knows about itself and the slot it read, for {@link judgeTestSlotHoldAge}. */
 export interface TestSlotWaiterFacts {
   hostname: string;
@@ -1414,6 +1429,7 @@ function* testSlotPolls(label: string, opts: TestSlotOptions, maximum: number,
       return false;
     }
   };
+  const darwinWaiter = () => ({ platform: opts.platform ?? process.platform, hostname: host(), bootId: bootId(), pidNs: pidNamespace() });
   const treeProbe = opts.treeProbe ?? ((held: TestSlotHolder) => probeReservedTree(held, { platform: opts.platform, hostname: host, bootId: bootId(), pidNs: pidNamespace() }));
   const cgroupIdentityProbe = opts.cgroupIdentityProbe ?? ((held: TestSlotHolder) => probeCgroupIdentity(held, {
     platform: opts.platform, hostname: host, bootId: bootId(), pidNs: pidNamespace(), cgroupNamespace: cgroupNamespace(), ownerUid: process.getuid?.(),
@@ -1658,10 +1674,13 @@ function* testSlotPolls(label: string, opts: TestSlotOptions, maximum: number,
         const st = lstatSync(path);
         if (st.isFile() && (st.mode & 0o077) === 0) { view.privateSeen = true; view.holders.push({ slot: i }); granted += 1; continue; }
         const held = st.isFile() ? readTestSlotHolder(path, st) : null;
-        if (held?.heartbeatIntervalMs !== undefined || held?.workIdentity !== undefined) view.unproven = true;
+        const marked = held?.heartbeatIntervalMs !== undefined || held?.workIdentity !== undefined;
+        const darwinEnded = judgeOpen && marked && darwinMarkerOwnerEvidence(held!, st.uid, testSlotHolderStale(held!, clock.now(),
+          { hostname: host, bootId, isPidAlive, pidNamespace }), clock.now(), darwinWaiter())?.state === "ended";
+        if (marked && !darwinEnded) view.unproven = true;
         view.holders.push({ slot: i, label: held?.label, pid: held?.pid, elapsedMs: held ? clock.now() - Date.parse(held.startedAt) : undefined });
         // Only a cadence-less dead holder counts as open here; anything needing exact-tree evidence waits for the head.
-        if (judgeOpen && held && !view.unproven && testSlotHolderStale(held, clock.now(), { hostname: host, bootId, isPidAlive, pidNamespace })) view.open += 1;
+        if (judgeOpen && held && (darwinEnded || (!view.unproven && testSlotHolderStale(held, clock.now(), { hostname: host, bootId, isPidAlive, pidNamespace })))) view.open += 1;
         else granted += grantedTo([held ?? {}]);
       } catch (error) {
         // Absent is open; any other failure is a holder we cannot read, reported by name and never counted open.
@@ -1973,11 +1992,12 @@ function* testSlotPolls(label: string, opts: TestSlotOptions, maximum: number,
                   heartbeatAt: held.heartbeatAt, heartbeatIntervalMs: cadence, silentMs, decision: "retained: a missed beat is diagnostic, never quiescence" });
               }
               if (!pidStale) return false;
-              // The owner pid is gone or reused: only exact-tree terminal evidence frees its capacity.
-              const evidence = held.ownerUid === currentStat?.uid && held.ownerUid === process.getuid?.() &&
+              // The owner pid is gone or reused: only exact-tree terminal evidence (darwin: pid and lease) frees its capacity.
+              const evidence = darwinMarkerOwnerEvidence(held, currentStat?.uid, true, clock.now(), darwinWaiter()) ??
+                (held.ownerUid === currentStat?.uid && held.ownerUid === process.getuid?.() &&
                 held.bootId === bootId() && held.pidNs === myNs && testSlotReservationIdentity(held) !== undefined
                 ? observeReservedTree(held, treeProbe)
-                : { state: "unknown" as const, coverage: "none", reason: "owner identity unknown or host/boot/namespace/uid differs" };
+                : { state: "unknown" as const, coverage: "none", reason: "owner identity unknown or host/boot/namespace/uid differs" });
               if (evidence.state === "ended") { quiescent = { held, evidence }; return true; }
               observeOnce(`withheld:${i}:${held.ownerNonce}:${evidence.state}:${evidence.reason}`, { step: "test_slot.reclaim_withheld", label, slot: i,
                 pid: held.pid, holder: held.label, ownerNonce: held.ownerNonce, processStart: held.processStart,

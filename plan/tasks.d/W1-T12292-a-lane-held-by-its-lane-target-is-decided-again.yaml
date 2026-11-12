@@ -1,0 +1,67 @@
+- id: W1-T12292
+  title: "A lane held by its lane target is decided again on a later poll"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the lane refill decision of every dispatch phase; the lane-target check itself must not change
+  band_meaning: blast-radius
+  origin: operator-session#lane-target-hold-2026-11-11
+  plan_refs:
+    - W1-T9097
+    - W1-T7697
+    - W1-T7806
+    - W1-T11885
+    - W1-T8235
+  files:
+    - src/lib/daemon.ts
+    - src/lib/idle-lane-accounting.ts
+    - test/daemon/a-lane-held-by-its-lane-target-is-decided-again.test.ts
+    - test/the-build-lane-count-follows-the-memory-governor.test.ts
+  status: merged
+  attempts: 0
+  note: |
+    reservation hand-off: run-unfiled-1794398100000 -> run-unfiled-1794413364000
+
+  acceptance:
+    - claim: "Through `runDaemon`: when a lane finishes and the lane target reads at or below the lanes in flight, the lane parks. It writes `dispatch.lane_parked` with reason `lane target` and the lanes it waits on, and no `dispatch.lane_refill_held`"
+      proof: 'grep: test("W1-T12292: a lane held by its lane target parks while a sibling runs" in test/daemon/a-lane-held-by-its-lane-target-is-decided-again.test.ts'
+    - claim: "When a later poll reads a lane target above the lanes in flight, the parked lane starts the next task while the long lane still runs"
+      proof: 'grep: test("W1-T12292: a parked lane starts a task when a later poll raises the lane target" in test/daemon/a-lane-held-by-its-lane-target-is-decided-again.test.ts'
+    - claim: "While the lane target still reads at or below the lanes in flight, a parked lane starts nothing on later polls, and it writes one park row, not one row per poll"
+      proof: 'grep: test("W1-T12292: a lane target that stays low starts nothing and writes one park row" in test/daemon/a-lane-held-by-its-lane-target-is-decided-again.test.ts'
+    - claim: "The idle sample of a lane parked by its lane target names the hold `lane target` and the cause `governor`, not `selection_empty`"
+      proof: 'grep: test("W1-T12292: the idle sample names the lane target hold" in test/daemon/a-lane-held-by-its-lane-target-is-decided-again.test.ts'
+  rationale: |
+    OBSERVED 2026-11-11 in the Azure daemon ledger. The daemon process booted at 10:32Z (actor_pid 446721).
+    - At 10:36:11Z it opened a dispatch phase with two lanes: W1-T11851 (adopted) and W1-T11809.
+    - The 10:39Z lane target read 3.
+    - W1-T11809 finished at 10:43:51Z. The two rows were:
+      `10:43:51.431Z dispatch.lane_target mode enforce target 1 fixed 3 binding host projection_mib 11750 onset_mib 21112 in_flight 1 pressed false`
+      `10:43:51.432Z dispatch.lane_refill_held lane 1 finished_task W1-T11809 reason "lane target"`
+    - After that, no `daemon.tick_phases`, no selection and no new claim occurred for more than 70 minutes. W1-T11851 still ran.
+    - `lane.idle_changed` recorded this time as `cause: selection_empty, hold: null`. That is wrong. The refill found W1-T11502, W1-T11935 and W1-T11938. The lane-target check rejected them.
+    CAUSE, READ at origin/main a83b1f3b7 (src/lib/daemon.ts):
+    - The main tick waits at `poolOutcome = await admittedWork;` (line 8372) for every lane of the phase.
+    - In `decideRefill` (lines 8031 to 8192), the reason `"lane target"` (line 8064) is the last reason in the chain.
+    - Only a governor reason parks the lane (lines 8067 to 8072). The lane goes into `parkedLanes`, and `onDispatchTick` calls `wakeParkedLanes` (line 7980) at each poll, which decides the lane again.
+    - A `"lane target"` reason falls through to `conclude()` (line 8123). It writes `dispatch.lane_refill_held` and ends that lane for the rest of the phase.
+    - So one short lane-target reading of 1 holds new builds until the slowest lane ends. The lane target is read again at most once per poll interval (`enforcedLaneTarget`, line 4748), but nothing asks again.
+    - `idleLaneCauseForRefillReason` (src/lib/idle-lane-accounting.ts) knows no `lane target` reason. The sample falls back to `selection_empty`, because selection ran, and `noteLog` (src/lib/daemon.ts:4248) records a hold only for a pause or a memory cause.
+    RELATED:
+    - W1-T9097 (merged) added the lane-target check to refill, with no park.
+    - W1-T7697 and W1-T7806 (merged) made the phase bound and a latched restart park a lane, so a freed lane is not idled by its slowest sibling.
+    - W1-T11885 (queued) counts the waiting tasks of a phase-bound hold. It does not change a hold.
+  design: |
+    1. In `decideRefill`, a `"lane target"` reason while `inFlightTasks.size > 0` parks the lane, as a governor reason does today. It writes `dispatch.lane_parked` with the reason, `phase_age_ms` and `waiting_on`, once per lane and reason (the `governorParked` map). It pushes the lane to `parkedLanes`. A later dispatch tick, a sibling's finish or a freshness read wakes it through `wakeParkedLanes`, and `decideRefill` decides it again with a new lane-target reading. The park does not need `governed`.
+    2. Keep the lane-target check unchanged. A target of 1 with 1 lane busy still starts nothing at that moment. Keep the check at the start of the run (`admitAtStart`) unchanged.
+    3. In `idleLaneCauseForRefillReason`, a reason that starts with `lane target` names the cause `governor`. In `noteLog`, a step whose reason is `lane target` records the hold `{ reason: "lane target" }`.
+    4. Check that `wakeParkedLanes` and `phaseBoundHolds()` let the parked lane wake while a slow lane runs. A parked lane wakes when no lane is in flight, so the phase cannot wait on a parked lane. The lane target reads at least 1, so a woken lane with no lane in flight does not park again.
+    5. test/the-build-lane-count-follows-the-memory-governor.test.ts, test "W1-T9097: enforce caps refill and never stops a running lane", asserts the old hold row and the old pass shape. Change it to the new rule: B's lane parks with reason `lane target`, and when A settles the woken lane starts C in the same pass. Its other assertions stay.
+    The new test drives `runDaemon` with the real lane governor (`laneGovernor` ports in enforce mode), a fake clock that the in-flight ticker's `sleep` advances, and `checkFreshness`, so the production dispatch tick wakes the parked lane. Nothing stands in for `decideRefill`, `wakeParkedLanes` or `laneTarget`. `laneTarget` grows by at most one lane per reading, so the reading after 1 is 2. That is enough to start one more task beside the long lane.
+    NOT IN SCOPE: how `laneTarget` reached 1 at 10:43Z with `pressed false`; the tick-level `dispatch.lane_target_held`; the count of W1-T11885; the phase bound.
+  falsifier: |
+    Remove the `"lane target"` park from `decideRefill`. Criteria 1, 2 and 3 must fail: the lane writes `dispatch.lane_refill_held` and C starts only after A ends. Remove the `lane target` cause and criterion 4 must fail on `selection_empty`. Park without the once-per-lane row and criterion 3 must fail on the row count. Restore and require all four to pass.

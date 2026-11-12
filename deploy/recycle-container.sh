@@ -602,9 +602,10 @@ record_recycle_ended() {
   if [ "$RECYCLE_OUTCOME" = refused ] && [ -n "$RECYCLE_BLOCKERS_JSON" ]; then
     blockers=",\"blockers\":$RECYCLE_BLOCKERS_JSON"
   fi
-  printf '{"ts":"%s","run_id":"RECYCLE-%s","task_id":"RECYCLE","step":"recycle.ended","lane":"deploy","outcome":"%s","rc":%s,"reason":%s,"wait_s":%s,"wait_source":%s,"waited_s":%s%s}\n' \
+  printf '{"ts":"%s","run_id":"RECYCLE-%s","task_id":"RECYCLE","step":"recycle.ended","lane":"deploy","outcome":"%s","rc":%s,"reason":%s,"wait_s":%s,"wait_source":%s,"waited_s":%s,"phase":%s%s}\n' \
     "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" "$$" "$RECYCLE_OUTCOME" "$status" \
-    "$(recycle_json_string "$reason")" "$wait_s" "$(recycle_json_string "$wait_source")" "$RECYCLE_WAITED_S" "$blockers" \
+    "$(recycle_json_string "$reason")" "$wait_s" "$(recycle_json_string "$wait_source")" "$RECYCLE_WAITED_S" \
+    "$(recycle_json_string "$RECYCLE_PHASE")" "$blockers" \
     >> "$ledger" 2>/dev/null || true
 }
 recycle_exit_receipts() {
@@ -612,6 +613,22 @@ recycle_exit_receipts() {
   record_recycle_invocation exit
   record_recycle_ended "$status"
   commission_on_exit
+}
+# W1-T12244: one recycle.phase row as each phase ends. A failed write never stops the recycle.
+RECYCLE_PHASE=preflight
+RECYCLE_PHASE_AT_S=0
+record_recycle_phase() {
+  local ledger="${LEDGER_FILE:-$RECYCLE_LEDGER_FILE}"
+  [ -n "$ledger" ] || return 0
+  printf '{"ts":"%s","run_id":"RECYCLE-%s","task_id":"RECYCLE","step":"recycle.phase","lane":"deploy","container":%s,"phase":"%s","seconds":%s%s}\n' \
+    "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" "$$" "$(recycle_json_string "$CONTAINER_NAME")" "$1" "$2" "${3:+,$3}" \
+    >> "$ledger" 2>/dev/null || true
+}
+# Ends the phase in progress with its row ($2: more JSON fields for that row) and starts phase $1.
+recycle_phase() {
+  [ "$RECYCLE_PHASE" = preflight ] || record_recycle_phase "$RECYCLE_PHASE" "$((SECONDS - RECYCLE_PHASE_AT_S))" "${2:-}"
+  RECYCLE_PHASE="$1"
+  RECYCLE_PHASE_AT_S="$SECONDS"
 }
 
 # ── W1-T6160: EXPLICIT GIT AUTHOR COMMISSIONING — ONE NAMED TARGET, VERIFIED, WITH A RECEIPT ──────
@@ -846,6 +863,16 @@ fi
 source "${CLAUDE_DIRECTORY_FILE}"
 CRED_DIR="$(claude_host_directory)"
 CRED_MOUNT_DEST="/home/node/.claude"
+# W1-T12293: the CLI replaces ~/.claude.json by rename, so the host file goes read-only to a side
+# path and deploy/entrypoint.sh copies it in when the container's own file is missing or thin.
+CLAUDE_ACCOUNT_FILE="$(claude_host_account_file)"
+CLAUDE_ACCOUNT_MOUNT_DEST="/home/node/.rmd-claude-account.json"
+CLAUDE_ACCOUNT_MOUNT_ARGS=()
+if [ -f "${CLAUDE_ACCOUNT_FILE}" ]; then
+  CLAUDE_ACCOUNT_MOUNT_ARGS=(-v "${CLAUDE_ACCOUNT_FILE}:${CLAUDE_ACCOUNT_MOUNT_DEST}:ro")
+else
+  echo "recycle-container: NOTE — no Claude account file at ${CLAUDE_ACCOUNT_FILE}; recycling without an account file mount"
+fi
 CODEX_DIR="${RMD_CODEX_DIR:-${HOME:-/root}/.codex}"
 CODEX_MOUNT_DEST="/home/node/.codex"
 CODEX_MOUNT_ARGS=()
@@ -896,6 +923,9 @@ if [ "${#CODEX_MOUNT_ARGS[@]}" -gt 0 ]; then
 fi
 if [ "${#CONTAINER_CONFIG_MOUNT_ARGS[@]}" -gt 0 ]; then
   RUNTIME_CONTRACT_EXPECT_ARGS+=(--expect "${CONTAINER_CONFIG_DIR}" "${CONTAINER_CONFIG_MOUNT_DEST}" rw)
+fi
+if [ "${#CLAUDE_ACCOUNT_MOUNT_ARGS[@]}" -gt 0 ]; then
+  RUNTIME_CONTRACT_EXPECT_ARGS+=(--expect "${CLAUDE_ACCOUNT_FILE}" "${CLAUDE_ACCOUNT_MOUNT_DEST}" ro)
 fi
 if [ "${SELECTED_REGISTRY_ACTIVE}" = 1 ]; then
   RUNTIME_CONTRACT_EXPECT_ARGS+=(--expect "${SELECTED_REGISTRY_HOST_FILE}" "${SELECTED_REGISTRY_CONTAINER_FILE}" ro)
@@ -1956,6 +1986,7 @@ recycle_cleanup_tmp() {
 }
 # W1-T6160: the cleanup also emits the commissioning receipt (a no-op unless --commission-git-author).
 trap recycle_cleanup_tmp EXIT
+recycle_phase lock_wait
 if [ -n "${HOST_RECYCLE_LOCK}" ]; then
   mkdir -p "$(dirname "${HOST_RECYCLE_LOCK}")"
   lock_waited_s=0
@@ -1988,6 +2019,7 @@ if [ -n "${HOST_RECYCLE_LOCK}" ]; then
     lock_waited_s=$((lock_waited_s + HOST_RECYCLE_LOCK_POLL_S))
   done
 fi
+recycle_phase registry_login
 
 if command -v az >/dev/null 2>&1; then
   echo "recycle-container: az acr login -n ${REGISTRY}"
@@ -2004,6 +2036,8 @@ else
   echo "  would go on to interrogate that one instead." >&2
   exit 1
 fi
+recycle_phase pull
+RECYCLE_IMAGE_BEFORE="$(docker image inspect --format '{{.Id}}' "${REF}" 2>/dev/null || true)"
 
 # ── THE PULL LOG IS PER-INVOCATION, FOR THE SAME REASON deploy/host-update.sh's IS ──────────────
 # This script wrote a FIXED path, `/tmp/recycle-container-pull.log`, and then GREPPED THAT SAME
@@ -2052,6 +2086,7 @@ if [ -z "${PULLED_IMAGE_ID}" ]; then
 fi
 echo "recycle-container: pulled image id ${PULLED_IMAGE_ID}"
 selected_registry_image "${PULLED_IMAGE_ID}"
+recycle_phase pause "\"image_changed\":$([ "${RECYCLE_IMAGE_BEFORE}" = "${PULLED_IMAGE_ID}" ] && echo false || echo true)"
 
 COMMISSION_PHASE="drain"
 
@@ -2147,6 +2182,7 @@ else
   printf '%s\n' "${RECYCLE_PAUSE_BODY}" > "${PAUSE_FILE}"
   echo "recycle-container: PAUSE engaged — new dispatch halts, in-flight work is allowed to finish"
 fi
+recycle_phase wait_for_workers
 
 # THE LOCK COUNT ALONE IS BLIND TO A WHOLE LANE, IN BOTH DIRECTIONS (W1-T1046).
 #
@@ -2788,6 +2824,7 @@ WORKERS
 done
 
 COMMISSION_PHASE="smoke"
+recycle_phase smoke
 
 # ── 5.5. SMOKE A REAL WORKER ON THE PULLED IMAGE BEFORE ACCEPTING IT (W1-T5017) ─────────────────
 # CI fakes the worker query seam and verify-image.sh compares binary VERSIONS, so an SDK/CLI change
@@ -2961,6 +2998,7 @@ fi
 echo "recycle-container: worker smoke PASSED — ${SMOKE_LINE:-exit 0}"
 
 COMMISSION_PHASE="replace"
+recycle_phase stop
 
 record_recycled_cadence_child() {
   local state run_id pid attempt status at
@@ -3020,11 +3058,18 @@ if [ "${CONTAINER_EXISTS}" -eq 1 ]; then
   registry_shadow_observe recycle "$INSTANCE_NAME" "${github_repo:-}" host "$STATE_DIR|$CONTAINER_NAME"
   record_recycled_cadence_child
   run_docker_control stop docker stop "${CONTAINER_NAME}"
+  # Exit code 137 is SIGKILL: the container did not stop in its time limit, so Docker killed it.
+  case "$(docker inspect --format '{{.State.ExitCode}}' "${CONTAINER_NAME}" 2>/dev/null || true)" in
+    137) recycle_phase remove '"killed":true' ;;
+    ''|*[!0-9]*) recycle_phase remove '"killed":null' ;;
+    *) recycle_phase remove '"killed":false' ;;
+  esac
   echo "recycle-container: docker rm ${CONTAINER_NAME}"
   run_docker_control rm docker rm "${CONTAINER_NAME}"
 else
   echo "recycle-container: no existing ${CONTAINER_NAME} to stop or remove"
 fi
+recycle_phase start
 
 clear_own_pause "recycle-container: pause cleared — the new container must not come up paused"
 
@@ -3080,6 +3125,9 @@ DOCKER_RUN_ARGS=(
   -v "${STATE_DIR}:${STATE_MOUNT_DEST}"
   -v "${CRED_DIR}:${CRED_MOUNT_DEST}"
 )
+if [ "${#CLAUDE_ACCOUNT_MOUNT_ARGS[@]}" -gt 0 ]; then
+  DOCKER_RUN_ARGS+=("${CLAUDE_ACCOUNT_MOUNT_ARGS[@]}")
+fi
 if [ "${#CODEX_MOUNT_ARGS[@]}" -gt 0 ]; then
   DOCKER_RUN_ARGS+=("${CODEX_MOUNT_ARGS[@]}")
 fi
@@ -3110,6 +3158,7 @@ selected_registry_mounts "${DOCKER_RUN_ARGS[@]}"
 { ! declare -F registry_shadow_mount_args >/dev/null 2>&1 || registry_shadow_mount_args "${DOCKER_RUN_ARGS[@]}"; }
 registry_shadow_observe recycle "$INSTANCE_NAME" "${github_repo:-}" host "$STATE_DIR|$CONTAINER_NAME"
 docker run "${DOCKER_RUN_ARGS[@]}" >/dev/null
+recycle_phase after_start
 
 # ── 7. PROVE IT — THE STARTED CONTAINER'S IMAGE MUST BE THE DIGEST JUST PULLED ──────────────────
 # `docker inspect --format '{{.Image}}'` against the id captured in section 4 is the only proof this
