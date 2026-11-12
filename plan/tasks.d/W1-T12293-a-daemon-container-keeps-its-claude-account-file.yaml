@@ -23,7 +23,7 @@
     - test/recycle-container.test.ts
     - test/account-identity-is-readable.test.ts
     - test/routing/the-console-claude-login-reaches-the-fleet-store.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "`claude_host_account_file` in deploy/claude-directory.sh prints the Claude directory path with `.json` added (`~/.claude` gives `~/.claude.json`). `RMD_CLAUDE_JSON_PATH` overrides it. It fails when the directory derivation fails"
