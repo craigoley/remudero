@@ -10,7 +10,7 @@
 import { after, before, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -53,9 +53,9 @@ describe("the real git ports over a fixture operator checkout", () => {
   const threeDaysAgo = new Date(Date.now() - 3 * DAY).toISOString();
 
   before(() => {
-    root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}t11941-janitor-`));
+    root = realpathSync(mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}t11941-janitor-`)));
     origin = gitRepo({ bare: true, kind: "t11941-origin" }).dir;
-    checkout = gitRepo({ cloneFrom: origin, kind: "t11941-operator" }).dir;
+    checkout = realpathSync(gitRepo({ cloneFrom: origin, kind: "t11941-operator" }).dir);
     git(checkout, ["commit", "--quiet", "--allow-empty", "-m", "chore: seed"]);
     git(checkout, ["push", "--quiet", "origin", "main"]);
     const cut = (name: string, dir: string, branch: string, commit: boolean, push: boolean) => {
@@ -137,7 +137,7 @@ describe("the real git ports over a fixture operator checkout", () => {
   });
 
   it("the real ports fail closed when origin, its main or the GitHub repo cannot be read", async () => {
-    const broken = gitRepo({ cloneFrom: origin, kind: "t11941-broken" }).dir;
+    const broken = realpathSync(gitRepo({ cloneFrom: origin, kind: "t11941-broken" }).dir);
     const run = join(root, "broken-trees", "run-W1-T9100-1794000000100");
     const hand = join(root, "broken-trees", "hand");
     git(broken, ["worktree", "add", "--quiet", "-b", "run-W1-T9100-1794000000100", run, "origin/main"]);
