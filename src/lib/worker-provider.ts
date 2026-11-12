@@ -4118,7 +4118,7 @@ export async function sendCashRequest(config: Config, input: CashTransportOption
         const requestId = `${prefix}-${++attempts}`;
         const identity: CashRequestIdentity = { requestId, attemptId: prefix, provider: "cash", deployment: input.deployment, endpoint: cashEndpointIdentity(endpoint) };
         const atIso = clock.iso();
-        const reservation = reserveOpenWeightBudget(config, { requestId, identity, deployment: input.deployment,
+        const reservation = reserveOpenWeightBudget({ ...config, dailyCapUsd: normalCapUsd }, { requestId, identity, deployment: input.deployment,
           requestBodyBytes, atIso, outputTokenCeiling: input.outputTokenCeiling });
         reservedUsd += reservation.reservedUsd;
         pending = { requestId, identity, atIso, reservation };

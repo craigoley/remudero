@@ -143,10 +143,16 @@ test("W1-T12413 criterion 2: the reservation counts the declared output ceiling,
 
 for (const normal of [0, 1e-9]) {
   test(`W1-T12413 criterion 3: a normal-cap refusal (${normal}) sends nothing, and the squeezed figure is never read`, async (t) => {
-    const { dir, config } = fixture(t, { normal, squeezed: 1000 });
+    let squeezedReads = 0;
+    const squeezed = 1000;
+    const { dir, config } = fixture(t, { normal, get squeezed() { squeezedReads++; return squeezed; } });
+    const reservationUsd = openWeightReservationUsd(DEPLOYMENT, Buffer.byteLength(BODY, "utf8"), 0, 16);
+    assert.ok(reservationUsd > normal);
+    assert.ok(reservationUsd < squeezed);
     let calls = 0;
     const outcome = await sendCashRequest(config, { deployment: DEPLOYMENT, path: "openai/v1/decisions", body: BODY,
       source: "fixture", outputTokenCeiling: 16, env, fetchImpl: async () => { calls++; return reply(); } });
+    assert.equal(squeezedReads, 0);
     assert.equal(calls, 0);
     assert.equal(outcome.ok, false);
     if (outcome.ok) return;
