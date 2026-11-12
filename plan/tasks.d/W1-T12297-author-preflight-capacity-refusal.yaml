@@ -1,0 +1,96 @@
+- id: W1-T12297
+  title: "author preflight capacity refusals report measured shortfall and guarded recovery guidance"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern, a capacity refusal says how short each disk is and names the guarded janitor; the JANITOR.md line is the path that guidance cites
+  origin: "operator 2026-11-11: make an author-preflight capacity refusal actionable without weakening the existing reserve or silently leaving the author blocked."
+  plan_refs: [W1-T10256, W1-T10765, W1-T7809, W1-T11914]
+  files:
+    - scripts/lib/mac-author-admission.mjs
+    - scripts/preflight-author.mjs
+    - deploy/mac/JANITOR.md
+    - test/ci/author-preflight-capacity-refusal.test.ts
+  status: queued
+  rationale: |
+    The Mac author preflight refuses on capacity on two paths, and neither tells the
+    operator how short the disk is or what to do next.
+
+    1. Entry refusal. `guardedAuthorEntry` reads the admission before any work and calls
+       `reportMacAuthorRefusal` (scripts/lib/mac-author-admission.mjs, about lines 228-236 at
+       origin/main 364ae0123). A local author preflight for PR #17209 went this way: NOT_RUN
+       with workspaceFreeBytes and scratchFreeBytes both 9,627,631,616 against
+       minimumFreeBytes 11,274,289,152, a shortfall of 1,646,657,536 bytes. The line it
+       printed said that no slot, static checks, tests, dependency installation, cleanup or
+       process termination started. #17209 later passed review on the same head and merged.
+    2. During-run refusal. After selection and the census precheck, `requireMacAuthorCapacity`
+       throws `MacAuthorCapacityRefusal` (about line 186) for the static-preflight or
+       affected-tests stage. `main` in scripts/preflight-author.mjs catches it (about lines
+       866-872), saves receipt verdict `over-capacity` and exits 3 (about line 898). It
+       prints only the raw admission JSON inside the error message.
+
+    The during-run path is the common one. The Mac lane's two real refusals in the last two
+    days were both during-run, before static-preflight, against the 20 GiB reserve
+    (21,474,836,480 bytes): ~/rmd-hand/ship/T12172/preflight.1.notrun.log (19,983,392,768
+    bytes free) and ~/rmd-hand/ship/T12201/preflight.1.notrun.log (18,938,732,544 bytes
+    free). Only #17209's case went through the entry path.
+
+    A free-space figure is a snapshot, so the operator must measure again before acting.
+    The guarded janitor is the only tool with ownership and activity evidence for what it
+    removes. On the refusing account it is installed at
+    `~/Library/Application Support/remudero/remudero-janitor.sh`, which supports
+    `--dry-run`. deploy/mac/JANITOR.md line 17 names `~/bin/remudero-janitor.sh`, which does
+    not exist on the agent account.
+
+    Keep the reserve, NOT_RUN and exit 3 unchanged. Delete nothing in preflight and list no
+    cleanup candidates.
+  design: |
+    1. In `readMacAuthorAdmission`, add `capacityChecks` to the darwin result: one row per
+       filesystem checked, in check order, `{filesystem, requiredFreeBytes,
+       observedFreeBytes, shortfallBytes}`. `filesystem` is the existing label
+       (`workspaceFreeBytes`, `scratchFreeBytes` or `allocation:<key>`). `shortfallBytes` is
+       `max(0, required - observed)`. When the read fails, `observedFreeBytes` and
+       `shortfallBytes` are null. Do not change `reasons`, `state` or any existing field.
+    2. Export `MAC_AUTHOR_JANITOR_DRY_RUN`, the command
+       `"$HOME/Library/Application Support/remudero/remudero-janitor.sh" --dry-run`, and
+       `macAuthorRefusalReport(stage, admission)`. It returns `{summary, lines}`. `summary` is
+       `{stage, authorWorkStarted, capacityChecks}` plus `recoveryGuidance` when a row is short
+       or unmeasured: `{action: 'measure-free-space-again', dryRunCommand, documentation:
+       'deploy/mac/JANITOR.md'}`. `authorWorkStarted` is false for `entry` and true for any
+       later stage (selection and the census precheck have run before static-preflight).
+       `lines` holds one `Capacity <filesystem>: required <n> bytes; observed <n> bytes;
+       shortfall <n> bytes.` line per row ("unknown" in place of an unmeasured value), one line
+       that names what ran and what did not for the stage, and, with guidance, one line that
+       says to measure again, review the janitor dry run and follow deploy/mac/JANITOR.md.
+       The entry stage keeps the existing "No slot, static checks, tests, ..." line.
+    3. `reportMacAuthorRefusal` prints the admission merged with `summary` on the existing
+       `author preflight NOT_RUN: ` line, then `lines`, then the existing receipt warning.
+    4. In `main`'s catch for `MacAuthorCapacityRefusal`, merge `summary` into the
+       `hostCapacity` row it already saves and print `lines` after the existing NOT_RUN line.
+    5. Fix deploy/mac/JANITOR.md line 17 to name the installed agent-account path.
+    6. A pressure-only refusal (every row has room) gets no `recoveryGuidance` and no janitor
+       line. The guidance never names `--apply`.
+  acceptance:
+    - claim: "an entry refusal reports exact required, observed and shortfall bytes per filesystem, stage entry, authorWorkStarted false, and the janitor dry run plus deploy/mac/JANITOR.md, keeps NOT_RUN and exit 3, and never calls the author"
+      proof: "grep: W1-T12297 criterion 1 in test/ci/author-preflight-capacity-refusal.test.ts"
+    - claim: "a during-run refusal before static-preflight saves over-capacity and exit 3, and its hostCapacity row and stderr carry stage static-preflight, authorWorkStarted true, the byte rows and the janitor dry run"
+      proof: "grep: W1-T12297 criterion 2 in test/ci/author-preflight-capacity-refusal.test.ts"
+    - claim: "an unmeasured filesystem row carries null bytes and prints unknown, and a pressure-only refusal gets no disk guidance"
+      proof: "grep: W1-T12297 criterion 3 in test/ci/author-preflight-capacity-refusal.test.ts"
+    - claim: "deploy/mac/JANITOR.md names the janitor installed on the agent account"
+      proof: "grep: Application Support/remudero/remudero-janitor.sh in deploy/mac/JANITOR.md"
+  falsifier: |
+    Feed each path known free space and prove the required, observed and shortfall bytes
+    exactly. Remove the report from main's catch and criterion 2 must fail. Report
+    authorWorkStarted false at every stage and criterion 2 must fail. Give guidance to a
+    pressure-only refusal and criterion 3 must fail. A passing verdict, a different exit,
+    cleanup in preflight or a lower reserve fails this task.
+  note: |
+    reservation hand-off: codex/plan-author-capacity-refusal-20261111 -> run-unfiled-1794451630000
+    The id was reserved by the Codex filing branch (its draft sits on branch
+    codex/plan-author-capacity-refusal-20261111-placement); this filing replaces that draft
+    (9b569cc84) and widens it to the during-run refusal path.
+    The test sits in test/ci/ because `rmd test-place` places it there (ci-parity, high).
