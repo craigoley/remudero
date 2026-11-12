@@ -6,7 +6,7 @@ import { CONSOLE_SHA_UNKNOWN } from "#src/lib/serve.js";
 import { DAEMON_EXIT_STALE } from "#src/lib/daemon.js";
 
 const REPO_ROOT = join(import.meta.dirname, "..");
-const ENTRYPOINT = () => readFileSync(join(REPO_ROOT, "deploy", "entrypoint.sh"), "utf8");
+const ENTRYPOINT = () => readFileSync(join(REPO_ROOT, "deploy", "entrypoint-supervise.sh"), "utf8");
 const SERVE_SRC = () => readFileSync(join(REPO_ROOT, "src", "lib", "serve.ts"), "utf8");
 
 // ── W1-T2562: rmd serve RUNS BOOT-TIME CODE WHILE THE CHECKOUT ADVANCES UNDER IT ─────────────
