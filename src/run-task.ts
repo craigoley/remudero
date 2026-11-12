@@ -748,7 +748,6 @@ import {
   PLAN_FILING_FILE_CACHE_MAX_ENTRIES,
   type RestPullRow,
   type RestRollupEntry,
-  fetchBoardPrsRest,
   fetchBoardPrsRestAsync,
 } from "./lib/open-prs-rest.js";
 import { mainCeilingLogReducer, mainRepairRecordsFromLedger, mainRepairMergesBrief, reviewerRegressionRevertText, withMainHealthOnLightPass, type MainCeilingLogVerdict, type MainRatchetRecordOutcome, type MainRatchetRecordRequest, type MainRepairFixRequest, type MainRepairLane, type MainRepairRevertOutcome, type MainRepairRevertRequest } from "./lib/main-health-rung.js";
@@ -1428,6 +1427,7 @@ import {
   parseTasksFromYaml,
   taskRecordPath,
   readBlobsAtRef,
+  readBlobsAtRefAsync,
   mergePlanBlobs,
   loadPlanAtRefAsync,
   TaskAdmissionError,
@@ -13131,8 +13131,8 @@ const REMOTE_PLAN_ID_DECL_PATTERN = '^[[:space:]]*(-[[:space:]]*)?id:[[:space:]]
 /** Host-only reads for the already selected catalog. No second reservation namespace is introduced. */
 export interface TaskIdDestinationChecks {
   destinationStateDir?: () => string | undefined;
-  destinationGit?: (cwd: string, args: string[], input?: string) => string;
-  destinationPrFetch?: GhApiFetcher;
+  destinationGit?: (cwd: string, args: string[], input?: string) => string | Promise<string>;
+  destinationPrFetch?: (args: string[]) => unknown | Promise<unknown>;
 }
 interface TaskIdDestinationSnapshot {
   planTexts: readonly string[];
@@ -13141,31 +13141,31 @@ interface TaskIdDestinationSnapshot {
 }
 
 /** A fetched, commit-pinned ID population. Dirty checkout bytes never replace the fetched plan. */
-function taskIdDestinationSnapshot(
+export async function taskIdDestinationSnapshot(
   checks: TaskIdDestinationChecks = {}, offline = false,
-): TaskIdDestinationSnapshot | undefined {
+): Promise<TaskIdDestinationSnapshot | undefined> {
   let stage: "switch" | "offline" | "fetch" | "plan" | "pulls" = "switch";
   try {
     const destination = planDestinationRepository((checks.destinationStateDir ?? instanceStateDir)());
     if (destination.outcome === "off") return undefined;
     if (destination.outcome === "unreadable") throw new Error("unreadable host switch");
     if (offline) { stage = "offline"; throw new Error("selected catalog requires a fresh read"); }
-    const run = checks.destinationGit ?? ((cwd: string, args: string[], input?: string) =>
-      hostWorktreeGit(cwd, args, input === undefined ? {} : { input }));
+    const run = async (cwd: string, args: string[], input?: string): Promise<string> =>
+      checks.destinationGit ? await checks.destinationGit(cwd, args, input) : await hostWorktreeGitAsync(cwd, args, input === undefined ? {} : { input });
     stage = "fetch";
-    run(destination.checkoutDir, ["fetch", "--no-tags", "origin", "main"]);
+    await run(destination.checkoutDir, ["fetch", "--no-tags", "origin", "main"]);
     stage = "plan";
-    const commit = run(destination.checkoutDir, ["rev-parse", "--verify", "origin/main^{commit}"]).trim();
+    const commit = (await run(destination.checkoutDir, ["rev-parse", "--verify", "origin/main^{commit}"])).trim();
     if (!/^[a-f0-9]{40}$/.test(commit)) throw new Error("invalid commit");
-    const paths = run(destination.checkoutDir, ["ls-tree", "-r", "--name-only", commit, "--", "plan/tasks.yaml", "plan/tasks.d/"])
+    const paths = (await run(destination.checkoutDir, ["ls-tree", "-r", "--name-only", commit, "--", "plan/tasks.yaml", "plan/tasks.d/"]))
       .split("\n").filter(path => path === "plan/tasks.yaml" || /^plan\/tasks\.d\/[^/]+\.ya?ml$/.test(path));
     if (!paths.includes("plan/tasks.yaml")) throw new Error("missing plan");
-    const texts = readBlobsAtRef((args, input) => run(destination.checkoutDir, args, input), commit, paths);
+    const texts = await readBlobsAtRefAsync((args, input) => run(destination.checkoutDir, args, input), commit, paths);
     const tasks = texts.flatMap(text => parseTasksFromYaml(text, "plan destination", undefined, {}, "preserve-external"));
     const ids = tasks.map(task => task.id);
     if (new Set(ids).size !== ids.length) throw new Error("duplicate task id");
     stage = "pulls";
-    const pulls = fetchBoardPrsRest(destination.owner, destination.repo, checks.destinationPrFetch ?? ghJson, undefined, "open");
+    const pulls = await fetchBoardPrsRestAsync(destination.owner, destination.repo, async args => checks.destinationPrFetch ? await checks.destinationPrFetch(args) : await ghJsonAsync(args), undefined, "open");
     if (pulls.truncated || pulls.rows.some(row => !Number.isSafeInteger(row.number) || row.number <= 0 ||
         row.state !== "OPEN" || row.headRefName === "")) throw new Error("incomplete open PR population");
     const openPrTexts = pulls.rows.map(row => [row.title, row.body, row.headRefName].join("\n"));
@@ -13177,6 +13177,12 @@ function taskIdDestinationSnapshot(
   }
 }
 
+/** Prepare private Git/API reads off the caller loop, then use the existing public mint fold. */
+export async function mintNextTaskIdWithHistoryAsync(opts: Parameters<typeof mintNextTaskIdWithHistory>[0]): Promise<MintedTaskIdWithHistory> {
+  const snapshot = opts.destinationSnapshot === undefined ? await taskIdDestinationSnapshot(opts.destination) : opts.destinationSnapshot;
+  return mintNextTaskIdWithHistory({ ...opts, destinationSnapshot: snapshot ?? null });
+}
+
 export function mintNextTaskIdWithHistory(opts: {
   planPath: string;
   repoRoot: string;
@@ -13185,8 +13191,12 @@ export function mintNextTaskIdWithHistory(opts: {
   destination?: TaskIdDestinationChecks;
   destinationSnapshot?: TaskIdDestinationSnapshot | null;
 }): MintedTaskIdWithHistory {
-  const destination = opts.destinationSnapshot === undefined
-    ? taskIdDestinationSnapshot(opts.destination) : opts.destinationSnapshot ?? undefined;
+  // This synchronous fold never adds network work to a daemon loop. A selected catalog
+  // requires the awaited snapshot supplied by the async entry or its owning command.
+  if (opts.destinationSnapshot === undefined && planDestinationRepository((opts.destination?.destinationStateDir ?? instanceStateDir)()).outcome !== "off") {
+    throw new Error("plan destination needs an awaited snapshot before minting");
+  }
+  const destination = opts.destinationSnapshot ?? undefined;
   const planRelPathForRemote = relative(opts.repoRoot, dirname(opts.planPath));
   // W1-T2710 — THE WIRING END, and the reason it lives here rather than in `task-id.ts`. That
   // module is deliberately free of child-process access (its three sources are file reads and an
@@ -15593,10 +15603,11 @@ export function ciLearningCommand(
     // MEASURED: without this, an unreadable plan under the run's root took the whole verb out with
     // ENOENT, reddening three of W1-T2959's tests, which pass a tmp root with no plan in it.
     try {
+      const destinationSnapshot = (await taskIdDestinationSnapshot()) ?? null;
       const filing = land(result.drafts, checkoutRoot, {
         stateRoot: root,
         mintTaskId: ciLearningTaskIdMinter(checkoutRoot, (step, fields) =>
-          appendLedger(join(root, "state", LEDGER_FILENAME), { run_id: `CI-LEARNING-${process.pid}`, task_id: "DAEMON", step, ...fields })),
+          appendLedger(join(root, "state", LEDGER_FILENAME), { run_id: `CI-LEARNING-${process.pid}`, task_id: "DAEMON", step, ...fields }), undefined, { destinationSnapshot }),
         planOrigins,
         renderShard: ciLearningShardYaml,
         recordVerdict: ciLearningRecordVerdict,
@@ -15642,7 +15653,7 @@ const gardenMintBudgets = new Map<string, GardenMintBudget>();
 export function ciLearningTaskIdMinter(root: string, log?: (step: string, fields: Record<string, unknown>) => void,
   executeAsync: (file: string, args: string[], options: { maxBuffer: number; timeout: number; killSignal: "SIGKILL" }) => Promise<{ stdout: string; stderr?: string }> = (file, args, options) => execFileLoopBounded(file, args, { ...options, encoding: "utf8" }),
   opts: { budget?: GardenMintBudget; clock?: Pick<Clock, "now">; pollIntervalMs?: () => number;
-    loadPolicy?: () => { values: Pick<Policy["values"], "pollIntervalMs"> } } = {}):
+    loadPolicy?: () => { values: Pick<Policy["values"], "pollIntervalMs"> }; destinationSnapshot?: TaskIdDestinationSnapshot | null } = {}):
   ((filingBranch?: string) => string) & { async: (filingBranch: string) => Promise<string>; heldSha: (taskId: string) => string | undefined } & GardenTaskIdRelease {
   let budget = opts.budget ?? gardenMintBudgets.get(root);
   if (!budget) {
@@ -15668,6 +15679,7 @@ export function ciLearningTaskIdMinter(root: string, log?: (step: string, fields
       return result;
     };
     const mint = mintNextTaskIdWithHistory({ planPath: join(root, "plan", "tasks.yaml"), repoRoot: root,
+      destinationSnapshot: opts.destinationSnapshot,
       gitRunner: (args) => {
         const result = runGit(args);
         if (result.status !== 0) throw new Error(result.stderr || String(result.error));
@@ -15714,11 +15726,11 @@ export function ciLearningTaskIdMinter(root: string, log?: (step: string, fields
           `import { format } from "node:util";
            const rows = [];
            console.log = (...args) => rows.push({ say: format(...args) });
-           const { ciLearningTaskIdMinter } = await import(${JSON.stringify(import.meta.url)});
+           const { ciLearningTaskIdMinter, taskIdDestinationSnapshot } = await import(${JSON.stringify(import.meta.url)});
            const { GardenMintBudget } = await import(${JSON.stringify(new URL("./lib/gardener.js", import.meta.url).href)});
            try {
              const minter = ciLearningTaskIdMinter(process.argv[1], (step, fields) => rows.push({ step, fields }), undefined,
-               { budget: new GardenMintBudget(() => ${JSON.stringify(bound)}) });
+               { budget: new GardenMintBudget(() => ${JSON.stringify(bound)}), destinationSnapshot: (await taskIdDestinationSnapshot()) ?? null });
              const id = minter(process.argv[2]);
              process.stdout.write(JSON.stringify({ id, sha: minter.heldSha(id), rows }));
            } catch (error) {
@@ -17614,7 +17626,7 @@ export async function nextTaskIdCommand(
   }
   let destinationSnapshot: TaskIdDestinationSnapshot | undefined;
   try {
-    destinationSnapshot = taskIdDestinationSnapshot(deps, offline);
+    destinationSnapshot = await taskIdDestinationSnapshot(deps, offline);
   } catch (error) {
     console.error(`### rmd next-task-id: ${(error as Error).message}`);
     return 2;
@@ -34995,7 +35007,7 @@ async function triageCommandLocked(
     // open plan PRs have already minted, and handed to the worker — which has no Bash tool
     // and so could never have run the grep the prompt used to describe. Ledgered with its
     // provenance so a degraded source is visible, never silent.
-    const mint = mintNextTaskIdWithHistory({
+    const mint = await mintNextTaskIdWithHistoryAsync({
       planPath: join(worktreePath, "plan", "tasks.yaml"),
       repoRoot: worktreePath,
       openPrTexts: () => openPrMintTexts(owner, repo),
@@ -35554,7 +35566,7 @@ export async function planCommand(
     // wording in every mode) and the count is unknowable until the worker has run. Reserving a
     // bounded block up front is the only ordering that both refuses cheaply on collision and leaves
     // no id stranded — every id, used or not, is released in the `finally` below.
-    const mint = mintNextTaskIdWithHistory({
+    const mint = await mintNextTaskIdWithHistoryAsync({
       planPath: join(worktreePath, "plan", "tasks.yaml"),
       repoRoot: worktreePath,
       openPrTexts: () => openPrMintTexts(owner, repo),
@@ -38358,6 +38370,7 @@ export async function approveCommand(
     // derivation rather than re-deriving ids locally here. A degraded mint source or a
     // reservation failure REFUSES (throws) before any write, so no partial union ever reaches
     // the worktree.
+    const approveDestinationSnapshot = (await taskIdDestinationSnapshot()) ?? null;
     const materialized = materializeDraftTaskIds(
       { fragmentYaml: payload.fragmentYaml, stampLine: payload.stampLine },
       {
@@ -38365,6 +38378,7 @@ export async function approveCommand(
           mintNextTaskIdWithHistory({
             planPath: join(worktreePath, "plan", "tasks.yaml"),
             repoRoot: worktreePath,
+            destinationSnapshot: approveDestinationSnapshot,
             openPrTexts: () => openPrMintTexts(owner, repo),
           }),
         reserveBlock: (startId, count) => {
@@ -38915,6 +38929,7 @@ async function approveBatchCommand(
       // fileRatificationBatch, so each member gets the single lane's refusal and written-paths list,
       // and every member's stamp folds over this worktree's own MASTER-PLAN.md in order (Q2).
       const batchWorktree = worktreePath;
+      const batchDestinationSnapshot = (await taskIdDestinationSnapshot()) ?? null;
       const filed = fileRatificationBatch(
         batchWorktree,
         payloads,
@@ -38926,6 +38941,7 @@ async function approveBatchCommand(
                 mintNextTaskIdWithHistory({
                   planPath: join(batchWorktree, "plan", "tasks.yaml"),
                   repoRoot: batchWorktree,
+                  destinationSnapshot: batchDestinationSnapshot,
                   openPrTexts: () => openPrMintTexts(owner, repo),
                 }),
               reserveBlock: (startId, count) => {
