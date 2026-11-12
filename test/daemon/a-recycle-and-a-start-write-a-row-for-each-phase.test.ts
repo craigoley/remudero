@@ -17,7 +17,7 @@ import { daemonCommand } from "#test/helpers/run-task-daemon.js";
 type Row = Record<string, unknown>;
 const RECYCLE = join(REPO_ROOT, "deploy/recycle-container.sh");
 const SERVE = join(REPO_ROOT, "deploy/serve-container.sh");
-const RECYCLE_PHASES = ["lock_wait", "registry_login", "pull", "pause", "wait_for_workers", "smoke", "stop", "remove", "start"];
+const RECYCLE_PHASES = ["lock_wait", "registry_login", "pull", "smoke", "pause", "wait_for_workers", "stop", "remove", "start"];
 
 const readRows = (path: string): Row[] => existsSync(path)
   ? readFileSync(path, "utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line) as Row) : [];
@@ -117,7 +117,7 @@ describe("a recycle writes one row for each phase", () => {
     const busy = recycleFixture(t, true);
     const refused = busy.run();
     assert.equal(refused.status, 1, refused.stdout + refused.stderr);
-    assertPhaseRows(busy.rows(), ["lock_wait", "registry_login", "pull", "pause"]);
+    assertPhaseRows(busy.rows(), ["lock_wait", "registry_login", "pull", "smoke", "pause"]);
     const ended = busy.rows().find((row) => row.step === "recycle.ended");
     assert.equal(ended?.outcome, "refused");
     assert.equal(ended?.phase, "wait_for_workers");
@@ -153,7 +153,7 @@ describe("a recycle writes one row for each phase", () => {
       child.on("exit", resolve);
     });
     assert.equal(status, 143, output);
-    assertPhaseRows(f.rows(), ["lock_wait", "registry_login", "pull", "pause"]);
+    assertPhaseRows(f.rows(), ["lock_wait", "registry_login", "pull", "smoke", "pause"]);
     const ended = f.rows().find((row) => row.step === "recycle.ended");
     assert.equal(ended?.outcome, "aborted");
     assert.equal(ended?.phase, "wait_for_workers");
