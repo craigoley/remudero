@@ -57,11 +57,11 @@ if(req.defaultPr)delete deps.destinationPrFetch;
 if(req.reserve)deps.reserver=reservations.gitRemoteRefReserver({run:mod.gitRunAdapter(runGit),filingBranch:'fixture-plan'});
 const {existsSync}=await import('node:fs');let asyncTicks=0;
 const timer=req.observePrivateFetch?setInterval(()=>{if(existsSync(req.observePrivateFetch+'-start')&&!existsSync(req.observePrivateFetch+'-done'))asyncTicks++;},10):undefined;
-let code;try{code=await mod.nextTaskIdCommand(req.flags??['--no-reserve'],{},deps);}finally{if(timer)clearInterval(timer);}
+let code;try{if(req.historyMode){const mint=await(req.historyMode==='async'?mod.mintNextTaskIdWithHistoryAsync:mod.mintNextTaskIdWithHistory)({planPath:req.pub+'/plan/tasks.yaml',repoRoot:req.pub,openPrTexts:()=>[],destination:deps});out.push(mint.id);code=0;}else code=await mod.nextTaskIdCommand(req.flags??['--no-reserve'],{},deps);}catch(error){err.push(error.message);code=2;}finally{if(timer)clearInterval(timer);}
 process.stdout.write(JSON.stringify({code,out,err,calls,asyncTicks})+'\n');
 `;
 interface FixturePull { body: string; head: { ref: string }; created_at: string; state: string; }
-interface CaseOptions { auditPulls?: FixturePull[]; flags?: string[]; reserve?: boolean; prTexts?: string[]; prPages?: string[][]; prFailure?: boolean; fetchFailure?: boolean; defaultGit?: boolean; defaultPr?: boolean; observePrivateFetch?: string; gitBin?: string; }
+interface CaseOptions { auditPulls?: FixturePull[]; flags?: string[]; reserve?: boolean; prTexts?: string[]; prPages?: string[][]; prFailure?: boolean; fetchFailure?: boolean; defaultGit?: boolean; defaultPr?: boolean; observePrivateFetch?: string; gitBin?: string; historyMode?: "async" | "sync"; }
 function invoke(f: ReturnType<typeof fixture>, options: CaseOptions = {}) {
   const r = spawnSync(process.execPath, ["--enable-source-maps", "--import", import.meta.resolve("tsx"), "--input-type=module", "--eval", CHILD], {
     cwd: REPO_ROOT, encoding: "utf8", timeout: 60_000, maxBuffer: 4 * 1024 * 1024,
@@ -238,4 +238,19 @@ if(fetching)setTimeout(launch,300);else launch();`;
   assert.equal(readFileSync(marker + "-start", "utf8"), "started");
   assert.equal(readFileSync(marker + "-done", "utf8"), "done");
   assert.ok(r.asyncTicks > 0, "the caller timer must advance while the actual private fetch is pending");
+});
+
+
+test("W1-T12206 criterion 1: the shared awaited minter includes the destination for every writer", t => {
+  const f = fixture(t); const healthy = invoke(f, { historyMode: "async", prTexts: ["W1-T201"] });
+  assert.equal(healthy.code, 0, healthy.err.join("\n")); assert.equal(healthy.out[0], "W1-T202");
+  const unavailable = invoke(f, { historyMode: "async", fetchFailure: true });
+  assert.equal(unavailable.code, 2); assert.match(unavailable.err.join("\n"), /destination.*fetch/);
+  assert.deepEqual(unavailable.out, []); assert.equal(unavailable.calls.some(c => c.args[0] === "push"), false);
+});
+
+test("W1-T12206 criterion 4: a synchronous writer cannot omit a named catalog's awaited population", t => {
+  const f = fixture(t); const r = invoke(f, { historyMode: "sync" });
+  assert.equal(r.code, 2); assert.match(r.err.join("\n"), /destination needs an awaited snapshot/);
+  assert.deepEqual(r.out, []); assert.deepEqual(r.calls, []);
 });
