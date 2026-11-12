@@ -37,6 +37,7 @@ import { feedbackPublicationSteps, type FeedbackPublicationContext } from "./con
 import {
   PlanPrPreflightRefusedError,
   planPrPreflightAtCommit,
+  planPrPreflightAllows,
   planPrPreflightAtCommitAsync,
   refuseRedPlanPr,
   type PlanPrPreflightResult,
@@ -96,6 +97,10 @@ const PLAN_RECONCILE_LANDING_BRANCH = "plan-reconcile-landing";
 const PLAN_RECONCILE_LANDING_PR_TITLE = "chore(plan): reconcile credited task statuses";
 const CI_LEARNING_PENDING_REL_DIR = "state/ci-learning-pending";
 const FEEDBACK_PENDING_REL_DIR = "state/feedback-landing-pending";
+const TASK_FILES_PENDING_REL_DIR = "state/task-files-landing-pending";
+const TASK_FILES_REFUSED_REL_DIR = "state/task-files-landing-refused";
+const TASK_FILES_LANDING_BRANCH = "task-files-landing";
+const TASK_FILES_LANDING_PR_TITLE = "chore(plan): land pending edits of task files";
 const CI_LEARNING_SLUG_MAX = 72;
 /** The one shared branch every automated CI-learning shard landing call force-pushes to. */
 export const CI_LEARNING_LANDING_BRANCH = "ci-learning-landing";
@@ -116,7 +121,7 @@ export interface LandingRepository {
   repo: string;
 }
 
-type LandingFamily = "feedback" | "decisions" | "ci-learning" | "plan-reconcile";
+type LandingFamily = "feedback" | "decisions" | "ci-learning" | "plan-reconcile" | "task-files";
 
 export interface LandingIdentityInput {
   family?: LandingFamily;
@@ -450,6 +455,7 @@ const LANDING_BASES: Record<LandingFamily, { branch: string; ownedDir: string; p
     ownedDir: "",
     prTitle: PLAN_RECONCILE_LANDING_PR_TITLE,
   },
+  "task-files": { branch: TASK_FILES_LANDING_BRANCH, ownedDir: "", prTitle: TASK_FILES_LANDING_PR_TITLE },
 };
 
 function repoKey(repo: LandingRepository): string {
@@ -494,9 +500,10 @@ const LEGACY_LANDING_REFS = new Set([
   DECISIONS_LANDING_BRANCH,
   CI_LEARNING_LANDING_BRANCH,
   PLAN_RECONCILE_LANDING_BRANCH,
+  TASK_FILES_LANDING_BRANCH,
 ]);
 const SCOPED_LANDING_REF =
-  /^(?:feedback-landing|decisions-landing|ci-learning-landing)-[a-z0-9](?:[a-z0-9-]*[a-z0-9])?-[0-9a-f]{12}$/;
+  /^(?:feedback-landing|decisions-landing|ci-learning-landing|task-files-landing)-[a-z0-9](?:[a-z0-9-]*[a-z0-9])?-[0-9a-f]{12}$/;
 
 export function isLandingRef(ref: string): boolean {
   return LEGACY_LANDING_REFS.has(ref) || SCOPED_LANDING_REF.test(ref);
@@ -2318,5 +2325,399 @@ function* findPendingLandingPrSteps(net: LandingNet, identity: LandingIdentity):
   } catch {
     // Deliberate, as in findPendingLandingPr: an unreadable listing reads as "no PR yet", and the caller opens one.
     return undefined;
+  }
+}
+
+/** W1-T12199: one machine-filed edit of a task file that origin/main holds, with the criterion its landing PR states. */
+export interface TaskFileInput {
+  relPath: string;
+  content: string;
+  claim: string;
+  proof: string;
+}
+
+export interface TaskFileRefusal {
+  path: string;
+  reason: string;
+  failures?: PlanPrPreflightResult["failures"];
+  /** Set with `failures`: the origin/main the file was tested on, and whether main alone has the same red. */
+  mainSha?: string;
+  mainRed?: boolean;
+  mainRedProbeError?: string;
+  timedOut?: true;
+}
+
+export interface TaskFilesLandingResult {
+  /** The open landing PR: the one this call opened, or the one that seals the branch. */
+  prUrl?: string;
+  /** Staged paths the open landing PR carries. */
+  landed: string[];
+  /** Staged paths no open PR carries; a later call lands them. */
+  waiting: string[];
+  /** Inputs this call did not stage. */
+  refused: TaskFileRefusal[];
+  /** Staged files this call moved out of the queue, each with its cause. */
+  setAside: TaskFileRefusal[];
+  pushed: boolean;
+  error?: string;
+}
+
+export interface LandTaskFilesOpts extends LandFeedbackAsyncOpts {
+  /** Daemon state root; files wait under `state/task-files-landing-pending`, never in the checkout. */
+  stateRoot: string;
+  /** Stage the inputs and stop, so one later call lands every staged file as one batch. */
+  stageOnly?: boolean;
+  /** The lane the preflight rows name; defaults to the landing's own. */
+  lane?: string;
+}
+
+interface StagedTaskFileMeta {
+  baseBlob: string;
+  claim: string;
+  proof: string;
+  prUrl?: string;
+}
+
+interface StagedTaskFile extends StagedTaskFileMeta {
+  relPath: string;
+  abs: string;
+}
+
+const TASK_FILE_META_SUFFIX = ".meta.json";
+const taskFilesPendingRoot = (stateRoot: string): string => join(stateRoot, TASK_FILES_PENDING_REL_DIR);
+const taskFilesRefusedRoot = (stateRoot: string): string => join(stateRoot, TASK_FILES_REFUSED_REL_DIR);
+
+function readStagedTaskFiles(stateRoot: string): StagedTaskFile[] {
+  const root = taskFilesPendingRoot(stateRoot);
+  const staged: StagedTaskFile[] = [];
+  for (const relPath of listRelFiles(root, ".").map((rel) => rel.slice(2)).sort()) {
+    if (relPath.endsWith(TASK_FILE_META_SUFFIX) || relPath.endsWith(".tmp")) continue;
+    const abs = join(root, relPath);
+    try {
+      staged.push({ ...(JSON.parse(readFileSync(`${abs}${TASK_FILE_META_SUFFIX}`, "utf8")) as StagedTaskFileMeta), relPath, abs });
+    } catch {
+      // A file with no readable record has no base to check, so it never joins a batch; it stays for a person to read.
+    }
+  }
+  return staged;
+}
+
+/** W1-T12199: every edit that waits under `stateRoot`, and the landing PR that carries it once one does. */
+export function stagedTaskFiles(stateRoot: string): Array<{ relPath: string; prUrl?: string }> {
+  return readStagedTaskFiles(stateRoot).map(({ relPath, prUrl }) => ({ relPath, ...(prUrl ? { prUrl } : {}) }));
+}
+
+function writeStagedTaskFile(stateRoot: string, relPath: string, content: string | undefined, meta: StagedTaskFileMeta): void {
+  const abs = join(taskFilesPendingRoot(stateRoot), relPath);
+  mkdirSync(dirname(abs), { recursive: true });
+  const put = (path: string, bytes: string): void => {
+    writeFileSync(`${path}.${process.pid}.tmp`, bytes, "utf8");
+    renameSync(`${path}.${process.pid}.tmp`, path);
+  };
+  put(`${abs}${TASK_FILE_META_SUFFIX}`, `${JSON.stringify(meta)}\n`);
+  if (content !== undefined) put(abs, content);
+}
+
+function taskFilesCommitMessage(paths: string[]): string {
+  return [
+    TASK_FILES_LANDING_PR_TITLE,
+    "",
+    "Plan-only: each file is a machine-filed edit of a task file that main already holds.",
+    "The branch takes no push while its pull request is open (W1-T12199).",
+    "",
+    ...paths.map((f) => `- ${f}`),
+  ].join("\n");
+}
+
+function taskFilesPrBody(files: ReadonlyArray<Pick<StagedTaskFile, "claim" | "proof">>): string {
+  return [
+    `Lands ${files.length} machine-filed edit(s) of task files in one pull request (W1-T12199).`,
+    "",
+    "This branch takes no push while this pull request is open. A later edit waits in the",
+    "state directory and goes into the next landing pull request.",
+    "",
+    "## Acceptance",
+    ...files.map((f) => `- ${f.claim} | ${f.proof}`),
+  ].join("\n");
+}
+
+/** As W1-T5531: a red is main's when every failing check reads the plan tree and fails on main alone too. */
+function taskFileRedIsMainCaused(failures: PlanPrPreflightResult["failures"], base: PlanPrPreflightResult["failures"]): boolean {
+  return failures.length > 0 && failures.every((f) => (f.check === "lint-plan" || f.check === "shard-census") && base.some((b) => b.check === f.check));
+}
+
+const greenTaskFileTrees = new Set<string>();
+
+/**
+ * W1-T12199: stage machine-filed edits of task files outside the checkout, then land every staged file
+ * through ONE pull request on one fixed branch. The branch is sealed while that pull request is open:
+ * this never pushes to it, so CI and review are not restarted by a later file. Never throws.
+ */
+export async function landTaskFilesAsync(root: string, inputs: readonly TaskFileInput[], opts: LandTaskFilesOpts): Promise<TaskFilesLandingResult> {
+  const { planPrPreflight, ...landOpts } = opts;
+  const preflight = planPrPreflight ?? ((sha, pr) => planPrPreflightAtCommitAsync(root, sha, pr, { log: opts.log }));
+  return driveLandingAsync(taskFilesLandingSteps(root, inputs, { ...landOpts, ...asyncSeamsOf(root, landOpts) }), preflight);
+}
+
+function* taskFilesLandingSteps(
+  root: string,
+  inputs: readonly TaskFileInput[],
+  opts: Omit<LandTaskFilesOpts, "planPrPreflight">,
+): PreflightSteps<TaskFilesLandingResult> {
+  const result: TaskFilesLandingResult = { landed: [], waiting: [], refused: [], setAside: [], pushed: false };
+  const { stateRoot } = opts;
+  let scratchDir: string | undefined;
+  try {
+    if (inputs.length === 0 && readStagedTaskFiles(stateRoot).length === 0) return result;
+    const net = landingNet(opts.git ?? defaultGit(root), opts.gh ?? defaultGh(), opts);
+    const shardDir = ciLearningShardRelDir(root);
+    const kind: LandingKind = {
+      family: "task-files",
+      ...(yield* landingIdentitySteps("task-files", opts, net)),
+      ownedDir: shardDir,
+      commitMessage: taskFilesCommitMessage,
+      prBody: () => "",
+    };
+    const lane = opts.lane ?? `${kind.family}-landing`;
+    scratchDir = mkdtempSync(join(tmpdir(), `rmd-${kind.branch}-`));
+    const scratch = scratchDir;
+    const env = { ...process.env, GIT_INDEX_FILE: join(scratch, "index") };
+
+    let mainSha: string | undefined;
+    const freshMain = function* (): Generator<LandingAsk, string, AskReply> {
+      if (mainSha === undefined) {
+        yield* net.git(["fetch", "origin", "--quiet"]);
+        mainSha = (yield* net.git(["rev-parse", "origin/main"])).trim();
+      }
+      return mainSha;
+    };
+    const mainBlobOf = function* (relPath: string): Generator<LandingAsk, string | null, AskReply> {
+      const main = yield* freshMain();
+      try {
+        return (yield* net.git(["rev-parse", `${main}:${relPath}`])).trim();
+      } catch {
+        return null; // main does not hold the path
+      }
+    };
+    const treeOf = function* (files: ReadonlyArray<{ relPath: string; blob: string }>): Generator<LandingAsk, string, AskReply> {
+      yield* net.git(["read-tree", yield* freshMain()], { env });
+      for (const f of files) yield* net.git(["update-index", "--add", "--cacheinfo", `100644,${f.blob},${f.relPath}`], { env });
+      return (yield* net.git(["write-tree"], { env })).trim();
+    };
+    const commitOf = function* (treeSha: string, paths: string[]): Generator<LandingAsk, string, AskReply> {
+      return (yield* net.git(
+        ["-c", `user.name=${LANDING_AUTHOR_NAME}`, "-c", `user.email=${LANDING_AUTHOR_EMAIL}`,
+          "commit-tree", treeSha, "-p", yield* freshMain(), "-m", taskFilesCommitMessage(paths)],
+        { env },
+      )).trim();
+    };
+    type Tested = { relPath: string; blob: string; claim: string; proof: string };
+    const verdictOf = function* (files: readonly Tested[]): Generator<LandingAsk, PlanPrPreflightResult, AskReply> {
+      const treeSha = yield* treeOf(files);
+      if (greenTaskFileTrees.has(treeSha)) return { ok: true, failures: [], unreadable: [] };
+      const known = refusedPlanPrTrees.get(treeSha);
+      if (known) return known;
+      const commitSha = yield* commitOf(treeSha, files.map((f) => f.relPath));
+      const verdict = (yield { commitSha, pr: { title: kind.prTitle, body: taskFilesPrBody(files) } }) as PlanPrPreflightResult;
+      planPrPreflightAllows(verdict, { lane, branch: kind.branch, log: opts.log });
+      if (!verdict.ok) refusedPlanPrTrees.set(treeSha, verdict);
+      else if (verdict.timedOut === undefined) {
+        if (greenTaskFileTrees.size > 256) greenTaskFileTrees.clear();
+        greenTaskFileTrees.add(treeSha);
+      }
+      return verdict;
+    };
+    /** Whether main alone has the same red. A probe that cannot run leaves the red the file's own, and says why. */
+    const mainRedOf = function* (failures: PlanPrPreflightResult["failures"]): Generator<LandingAsk, { mainRed: boolean; mainRedProbeError?: string }, AskReply> {
+      try {
+        const onBase = (yield { commitSha: yield* freshMain(), pr: { title: kind.prTitle, body: taskFilesPrBody([]) } }) as PlanPrPreflightResult;
+        return { mainRed: taskFileRedIsMainCaused(failures, onBase.failures) };
+      } catch (e) {
+        const reason = String((e as Error)?.message ?? e);
+        return { mainRed: false, mainRedProbeError: reason };
+      }
+    };
+    const refusalText = (failures: PlanPrPreflightResult["failures"]): string =>
+      `the plan preflight refused it: ${failures.map((f) => `[${f.check}] ${f.firstLine}`).join("; ")}`;
+    const setAside = (file: StagedTaskFile, refusal: Omit<TaskFileRefusal, "path">): void => {
+      const to = join(taskFilesRefusedRoot(stateRoot), file.relPath);
+      mkdirSync(dirname(to), { recursive: true });
+      renameSync(file.abs, to);
+      writeFileSync(`${to}${TASK_FILE_META_SUFFIX}`, `${JSON.stringify({ reason: refusal.reason })}\n`, "utf8");
+      rmSync(`${file.abs}${TASK_FILE_META_SUFFIX}`, { force: true });
+      result.setAside.push({ path: file.relPath, ...refusal });
+      opts.log?.("task_files_landing.set_aside", { path: file.relPath, reason: refusal.reason, ...(refusal.failures ? { failures: refusal.failures } : {}) });
+    };
+
+    // ── stage ──
+    let n = 0;
+    for (const input of inputs) {
+      const { relPath, content, claim, proof } = input;
+      const refuse = (reason: string, extra: Partial<TaskFileRefusal> = {}): void => void result.refused.push({ path: relPath, reason, ...extra });
+      if (!relPath.startsWith(`${shardDir}/`) || !/\.ya?ml$/.test(relPath) || relPath.includes("..")) {
+        refuse(`${relPath} is not a task file under ${shardDir}`);
+        continue;
+      }
+      const baseBlob = yield* mainBlobOf(relPath);
+      if (baseBlob === null) {
+        refuse(`origin/main does not hold ${relPath}; this landing takes only an edit of a task file that exists`);
+        continue;
+      }
+      const stagedAbs = join(taskFilesPendingRoot(stateRoot), relPath);
+      if (existsSync(stagedAbs)) {
+        if (readFileSync(stagedAbs, "utf8") !== content) refuse(`another edit of ${relPath} waits for its landing`);
+        continue; // the same bytes wait already
+      }
+      const refusedAbs = join(taskFilesRefusedRoot(stateRoot), relPath);
+      if (existsSync(refusedAbs) && readFileSync(refusedAbs, "utf8") === content) {
+        let why = "no cause was recorded";
+        try {
+          why = String((JSON.parse(readFileSync(`${refusedAbs}${TASK_FILE_META_SUFFIX}`, "utf8")) as { reason?: unknown }).reason);
+        } catch {
+          // The bytes alone prove the earlier refusal; only its cause is unreadable.
+        }
+        refuse(`the same bytes were set aside before: ${why}`);
+        continue;
+      }
+      const tmpFile = join(scratch, `input-${n++}`);
+      writeFileSync(tmpFile, content);
+      const blob = (yield* net.git(["hash-object", "-w", tmpFile], { env })).trim();
+      if (blob === baseBlob) {
+        refuse(`origin/main already holds these bytes at ${relPath}`);
+        continue;
+      }
+      const verdict = yield* verdictOf([{ relPath, blob, claim, proof }]);
+      if (!verdict.ok) {
+        refuse(refusalText(verdict.failures), { failures: verdict.failures, mainSha: yield* freshMain(), ...(yield* mainRedOf(verdict.failures)) });
+        continue;
+      }
+      if (verdict.timedOut !== undefined) {
+        refuse("the plan preflight ran out of its budget, so the file was not staged", { failures: verdict.timedOut, timedOut: true });
+        continue;
+      }
+      writeStagedTaskFile(stateRoot, relPath, content, { baseBlob, claim, proof });
+    }
+
+    const staged = readStagedTaskFiles(stateRoot);
+    const wait = (reason?: string): TaskFilesLandingResult => {
+      result.waiting = readStagedTaskFiles(stateRoot).map((f) => f.relPath).filter((p) => !result.landed.includes(p));
+      if (reason !== undefined) {
+        result.error = reason;
+        opts.log?.("task_files_landing.waiting", { branch: kind.branch, reason, files: result.waiting });
+      }
+      return result;
+    };
+    if (opts.stageOnly || staged.length === 0) return wait();
+
+    // ── the seal: an open pull request, or a listing that cannot be read, means no push ──
+    let open: Array<{ url: string }>;
+    try {
+      open = JSON.parse(yield* net.gh(pendingLandingPrArgs(kind.prHead, landingRepoArgs(kind)))) as Array<{ url: string }>;
+    } catch (e) {
+      const reason = `the open pull requests of ${kind.branch} cannot be read, so the landing waits: ${String((e as Error)?.message ?? e)}`;
+      return wait(reason);
+    }
+    if (open[0]) {
+      result.prUrl = open[0].url;
+      result.landed = staged.filter((f) => f.prUrl === open[0]!.url).map((f) => f.relPath);
+      return wait();
+    }
+
+    // ── build the batch ──
+    const batch: Array<StagedTaskFile & { blob: string }> = [];
+    for (const file of staged) {
+      const blob = (yield* net.git(["hash-object", "-w", file.abs], { env })).trim();
+      const mainBlob = yield* mainBlobOf(file.relPath);
+      if (mainBlob === blob) {
+        rmSync(file.abs, { force: true });
+        rmSync(`${file.abs}${TASK_FILE_META_SUFFIX}`, { force: true });
+        continue; // main holds the edit: it landed
+      }
+      if (file.prUrl) {
+        let state: string;
+        try {
+          state = (JSON.parse(yield* net.gh(["pr", "view", file.prUrl, "--json", "state"])) as { state: string }).state;
+        } catch {
+          continue; // its pull request cannot be read: the file waits, out of this batch
+        }
+        if (state === "CLOSED") {
+          setAside(file, { reason: `its landing pull request ${file.prUrl} was closed without a merge` });
+          continue;
+        }
+      }
+      if (mainBlob !== file.baseBlob) {
+        setAside(file, {
+          reason: `origin/main changed ${file.relPath} after this edit was staged (base ${file.baseBlob}, main ${mainBlob ?? "deleted"}); the copy on main stands`,
+        });
+        continue;
+      }
+      batch.push({ ...file, blob });
+    }
+    if (batch.length === 0) return wait();
+
+    let landing = batch;
+    let verdict = yield* verdictOf(landing);
+    if (!verdict.ok) {
+      const green: typeof batch = [];
+      let mainRed = false;
+      for (const file of batch) {
+        const alone = batch.length === 1 ? verdict : yield* verdictOf([file]);
+        if (alone.ok) {
+          if (alone.timedOut === undefined) green.push(file);
+          continue;
+        }
+        const probe = yield* mainRedOf(alone.failures);
+        if (probe.mainRed) mainRed = true;
+        else setAside(file, { reason: refusalText(alone.failures), failures: alone.failures, mainSha: yield* freshMain(), ...probe });
+      }
+      if (mainRed) return wait(`origin/main is red at ${yield* freshMain()}, so no file was set aside and the landing waits for main to move`);
+      if (green.length === 0) return wait();
+      if (green.length === batch.length) return wait(`each file passes the plan preflight alone and the batch fails: ${refusalText(verdict.failures)}`);
+      landing = green;
+      verdict = yield* verdictOf(landing);
+      if (!verdict.ok) return wait(`the files that pass alone fail together: ${refusalText(verdict.failures)}`);
+    }
+    if (verdict.timedOut !== undefined) return wait("the plan preflight ran out of its budget, so the landing waits");
+
+    // ── push once, then open the pull request ──
+    const paths = landing.map((f) => f.relPath);
+    const treeSha = yield* treeOf(landing);
+    const tipSha = (yield* refreshLandingRef(net, kind.branch)) ? (yield* net.git(["rev-parse", `origin/${kind.branch}`])).trim() : undefined;
+    if (tipSha === undefined || (yield* net.git(["rev-parse", `${tipSha}^{tree}`])).trim() !== treeSha) {
+      const commitSha = yield* commitOf(treeSha, paths);
+      assertLiveWriteAllowed("git-push", `pushing the ${kind.branch} branch`);
+      try {
+        yield* net.git(["push", `--force-with-lease=refs/heads/${kind.branch}:${tipSha ?? ""}`, "origin", `${commitSha}:refs/heads/${kind.branch}`]);
+      } catch (e) {
+        const reason = lostLease(e)
+          ? `${kind.branch} moved while this batch was built, so another writer has it and the landing waits`
+          : pushFailure(kind.branch, e);
+        return wait(reason);
+      }
+      result.pushed = true;
+    }
+    const { prUrl, error } = yield* ensurePrOpen(kind, net, taskFilesPrBody(landing), opts.requestReview);
+    if (!prUrl) return wait(`pushed to ${kind.branch} but ${error ?? "its pull request did not open"}`);
+    for (const file of landing) writeStagedTaskFile(stateRoot, file.relPath, undefined, { baseBlob: file.baseBlob, claim: file.claim, proof: file.proof, prUrl });
+    result.prUrl = prUrl;
+    result.landed = paths;
+    opts.log?.("task_files_landing.opened", { branch: kind.branch, pr_url: prUrl, files: paths, pushed: result.pushed });
+    return wait(error);
+  } catch (e) {
+    result.error = String((e as Error)?.message ?? e);
+    try {
+      result.waiting = readStagedTaskFiles(stateRoot).map((f) => f.relPath);
+    } catch {
+      // The queue is unreadable too; the error above already names the failed call.
+    }
+    return result;
+  } finally {
+    if (scratchDir) {
+      try {
+        rmSync(scratchDir, { recursive: true, force: true });
+      } catch {
+        // best-effort cleanup of a temp dir; never let this mask the result above
+      }
+    }
   }
 }

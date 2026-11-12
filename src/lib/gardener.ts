@@ -12,6 +12,7 @@ import type { Escalation } from "./escalate.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import { runStepsAsync, runStepsSync, step, type StepEffect, type Steps } from "./git-push.js";
 import { parseTasksFromYaml } from "./plan.js";
+import { stagedTaskFiles } from "./feedback-landing.js";
 import { hostWorktreeGit, hostWorktreeGitAsync } from "./worktree-git.js";
 import { sampleBeta, seededRandom } from "./knowledge-value.js";
 
@@ -64,6 +65,9 @@ export interface GardenState<C extends string> {
   filingFailures?: { count: number; lastAt: string; reason: string };
   /** The bytes of the last drafted change a guard or the plan-PR preflight refused: never landed again. */
   refusedLanding?: { digest: string; at: string };
+  /** W1-T12221: the last land's files wait for the shared landing PR of task files. No class acts while they
+   *  wait; the landing PR that later carries them becomes `pending`. */
+  waiting?: { paths: string[]; stateRoot: string; actionClass: C; baseline: Outcome; targets?: GardenTarget<C>[]; since: string };
   /** Ids of overseer effect verdicts already folded into `classes` (newest last), so a replay credits once. */
   foldedEffects?: string[];
   /** Legacy verdicts have no ordered watermark, so their receipts must not age out. */
@@ -210,19 +214,45 @@ export interface GardenPlan<C extends string, A extends GardenAction<C>> {
   acting: C[];
 }
 
+/** What a land takes. W1-T12221: `sealedLanding: false` keeps an edit of a task file on its own PR. */
+export interface GardenLandOpts {
+  paths: string[];
+  title: string;
+  body: string;
+  sealedLanding?: false;
+}
+
+/** W1-T12221: the files wait for the shared landing PR of task files; no PR carries them yet. */
+export interface GardenLandWaiting {
+  waiting: { paths: string[]; stateRoot: string };
+}
+
+/** A PR url for "opened", nothing for "not landed", or a wait. */
+export type GardenLandResult = string | undefined | GardenLandWaiting;
+
+export function isGardenLandWaiting(result: unknown): result is GardenLandWaiting {
+  return typeof result === "object" && result !== null && "waiting" in result;
+}
+
+/** W1-T12221: the PR url of a land of new files. Only an edit waits, so a wait here is a fault, never a url. */
+export function landedPrUrl(result: GardenLandResult, who: string): string | undefined {
+  if (isGardenLandWaiting(result)) throw new Error(`${who}: a land of new files waited for the task-file landing`);
+  return result;
+}
+
 /** A place to make a pass's changes and land them as one PR. */
 export interface GardenCheckout {
   root: string;
   /** Landing branch, when a garden reserves a task id before filing its PR. */
   branch?: string;
   /** Commit the paths and open the PR — always ready for review, never a draft. */
-  land: (opts: { paths: string[]; title: string; body: string }) => string | undefined;
+  land: (opts: GardenLandOpts) => string | undefined;
   dispose: () => void;
 }
 
 /** W1-T5740: the daemon's form of a checkout — the same tree, its landing and disposal awaited. */
 export type GardenCheckoutAsync<W extends GardenCheckout = GardenCheckout> = Omit<W, "land" | "dispose"> & {
-  land: (opts: { paths: string[]; title: string; body: string }) => Promise<string | undefined>;
+  land: (opts: GardenLandOpts) => Promise<GardenLandResult>;
   dispose: () => Promise<void>;
 };
 
@@ -541,7 +571,7 @@ export interface GardenTaskIdRelease {
 
 export type GardenTaskIdMinter = ((branch: string) => string) & { async?: (branch: string) => Promise<string> } & GardenTaskIdRelease;
 
-type GardenLandState = "unstarted" | "in_flight" | "not_opened" | "opened" | "threw";
+type GardenLandState = "unstarted" | "in_flight" | "not_opened" | "opened" | "waiting" | "threw";
 
 interface HeldGardenIds {
   mint: GardenTaskIdMinter;
@@ -549,7 +579,7 @@ interface HeldGardenIds {
   land: GardenLandState;
 }
 
-type GardenFilingWorkspace = Pick<GardenCheckout, "branch"> & { land?: (opts: { paths: string[]; title: string; body: string }) => unknown };
+type GardenFilingWorkspace = Pick<GardenCheckout, "branch"> & { land?: (opts: GardenLandOpts) => unknown };
 
 /** Ids a workspace's filing reserved, and how far its landing got: only a landing that never pushed may release them. */
 const gardenHeldIds = new WeakMap<object, HeldGardenIds>();
@@ -570,7 +600,7 @@ function trackGardenIds(ws: GardenFilingWorkspace, mint: GardenTaskIdMinter): He
         held.land = "threw";
         throw e;
       }
-      const settle = (url: unknown) => ((held.land = url ? "opened" : "not_opened"), url);
+      const settle = (url: unknown) => ((held.land = isGardenLandWaiting(url) ? "waiting" : url ? "opened" : "not_opened"), url);
       if (!isPromiseLike(out)) return settle(out);
       return Promise.resolve(out).then(settle, (e: unknown) => {
         held.land = "threw";
@@ -667,7 +697,7 @@ export interface GardenSpec<C extends string, I, A extends GardenAction<C>, W ex
   scorecard: (inventory: I, plan: GardenPlan<C, A>) => Record<string, unknown>;
   /** Reserve the plan's IDs before apply; actions that file nothing reserve nothing. */
   prepare?(workspace: W, plan: GardenPlan<C, A>, async: boolean): readonly string[] | Promise<readonly string[]>;
-  apply: (workspace: W, plan: GardenPlan<C, A>, scorecard: Record<string, unknown>, heldIds?: readonly string[]) => { paths: string[]; title: string; body: string } | undefined;
+  apply: (workspace: W, plan: GardenPlan<C, A>, scorecard: Record<string, unknown>, heldIds?: readonly string[]) => GardenLandOpts | undefined;
   /** A garden that files plan shards names lint-plan's verdict on its landing here, normally
    *  machine-filing.ts's `machineShardLandingRefusal`. A refusal is a recorded filing failure, so a
    *  draft lint-plan would refuse never opens as a red PR (#10446, #10457). */
@@ -722,6 +752,12 @@ function gardenStateFault(parsed: unknown): string | undefined {
     if (!isOutcome(pending.baseline) || (pending.atMerge !== undefined && !isOutcome(pending.atMerge))) return "`pending` has a malformed baseline";
     if (pending.mergeSeenAt !== undefined && typeof pending.mergeSeenAt !== "string") return "`pending.mergeSeenAt` is not a timestamp";
     if (pending.targets !== undefined && (!Array.isArray(pending.targets) || !pending.targets.every(isTarget))) return "`pending.targets` is not a list of targets";
+  }
+  const waiting = parsed.waiting;
+  if (waiting !== undefined) {
+    if (!isRecord(waiting) || !Array.isArray(waiting.paths) || waiting.paths.some((p) => typeof p !== "string") || typeof waiting.stateRoot !== "string") return "`waiting` has no paths and state root";
+    if (typeof waiting.actionClass !== "string" || !(waiting.actionClass in parsed.classes) || !isOutcome(waiting.baseline)) return "`waiting` names no class and baseline";
+    if (typeof waiting.since !== "string" || (waiting.targets !== undefined && (!Array.isArray(waiting.targets) || !waiting.targets.every(isTarget)))) return "`waiting` is malformed";
   }
   if (declinedTargets !== undefined && (!Array.isArray(declinedTargets) || !declinedTargets.every(isDeclined))) return "`declinedTargets` is not a list of declined targets";
   if (parsed.pendingRecordedAt !== undefined && (typeof parsed.pendingRecordedAt !== "string" || !Number.isFinite(Date.parse(parsed.pendingRecordedAt)))) return "`pendingRecordedAt` is not a timestamp";
@@ -1099,6 +1135,7 @@ export function gardenPassDue<C extends string>(
   if (existsSync(gardenEffectsPath(deps.stateDir, spec.name))) return true;
   if ((gardenFilingRetryAt(state.filingFailures) ?? 0) > (deps.clock ?? systemClock).now()) return false;
   if (state.pending && pendingPassDue(state, spec.name, deps, (deps.clock ?? systemClock).now())) return true;
+  if (state.waiting) return true;
   const cheap = spec.cheapFingerprint();
   if (inventoryFailureHolds(readGardenInventoryFailure(deps.stateDir, spec.name), cheap, (deps.clock ?? systemClock).now())) return false;
   return state.lastCheap !== cheap;
@@ -1199,6 +1236,11 @@ function* gardenPassBody<C extends string, I, A extends GardenAction<C>, W exten
   if ((gardenFilingRetryAt(state.filingFailures) ?? 0) > (deps.clock ?? systemClock).now()) return { ran: false };
   const cheap = spec.cheapFingerprint();
   const clock = deps.clock ?? systemClock;
+  if (state.waiting) {
+    const settled = settleGardenWaiting(spec, state, clock, deps.log);
+    if (settled !== state) writeAtomic(statePath, JSON.stringify(settled, null, 2) + "\n");
+    state = settled;
+  }
   const pendingBefore = state.pending;
   const prState = pendingBefore ? (yield* step(() => deps.prState?.(pendingBefore.prUrl) ?? "unknown")) : undefined;
   if (pendingBefore && judgedByDecision(spec, pendingBefore.actionClass) && prState === "open" && state.pendingRecordedAt === undefined) {
@@ -1274,13 +1316,13 @@ function* gardenPassBody<C extends string, I, A extends GardenAction<C>, W exten
       }
     }
   }
-  const trusted = state.pending !== undefined || state.lastPass?.landed !== undefined || !spec.unfinished?.(inventory);
+  const trusted = state.pending !== undefined || state.waiting !== undefined || state.lastPass?.landed !== undefined || !spec.unfinished?.(inventory);
   if (state.lastPass?.fingerprint === fingerprint && trusted) {
     writeAtomic(statePath, JSON.stringify({ ...state, lastCheap: cheap }, null, 2) + "\n");
     return { ran: false };
   }
   const rng = seededRandom(deps.seed ?? clock.now());
-  const plan: GardenPlan<C, A> = state.pending
+  const plan: GardenPlan<C, A> = state.pending || state.waiting
     ? { actions: [], acting: [] }
     : planGarden({
         classes: spec.classes,
@@ -1292,6 +1334,7 @@ function* gardenPassBody<C extends string, I, A extends GardenAction<C>, W exten
   const scorecard = spec.scorecard(inventory, plan);
   const acting = plan.acting[0];
   let prUrl: string | undefined;
+  let waiting: GardenLandWaiting["waiting"] | undefined;
   if (acting !== undefined && plan.actions.length > 0) {
     try {
       const ws = yield* step<W | GardenCheckoutAsync<W>>(() => deps.openWorkspace());
@@ -1322,8 +1365,11 @@ function* gardenPassBody<C extends string, I, A extends GardenAction<C>, W exten
             return { ran: true, plan, scorecard };
           }
           const why = spec.review?.[acting];
-          prUrl = yield* step(() => ws.land(why ? { ...landing, body: judgedByOutcomeNote(spec.name, acting, why) + landing.body } : landing));
-          if (prUrl === undefined) throw new GardenLandingRefusedError(digest!, "not_opened", `${spec.name} gardener: the landing's PR did not open (plan_pr.preflight_refused or _timed_out names why)`);
+          const landed: GardenLandResult = yield* step(() => ws.land(why ? { ...landing, body: judgedByOutcomeNote(spec.name, acting, why) + landing.body } : landing));
+          // W1-T12221: a wait is a filing in flight, not a failure: no streak, no refused draft, no id released.
+          if (isGardenLandWaiting(landed)) waiting = landed.waiting;
+          else prUrl = landed;
+          if (prUrl === undefined && waiting === undefined) throw new GardenLandingRefusedError(digest!, "not_opened", `${spec.name} gardener: the landing's PR did not open (plan_pr.preflight_refused or _timed_out names why)`);
         }
       } catch (e) {
         unfiled = String((e as Error)?.message ?? e);
@@ -1356,15 +1402,42 @@ function* gardenPassBody<C extends string, I, A extends GardenAction<C>, W exten
       return { ran: true, plan, scorecard };
     }
   }
-  deps.log(`${spec.name}.scorecard`, { ...scorecard, acting: plan.acting, actions: plan.actions.length, pr_url: prUrl ?? null, awaiting: state.pending?.prUrl ?? null });
+  deps.log(`${spec.name}.scorecard`, { ...scorecard, acting: plan.acting, actions: plan.actions.length, pr_url: prUrl ?? null, awaiting: state.pending?.prUrl ?? null, ...(waiting ? { waiting: waiting.paths } : {}) });
   // Only a class whose changes landed as a PR is judged, and only on its own metric from this moment.
   const baseline = (c: C): Outcome => (judgedByDecision(spec, c) ? { trials: 0, successes: 0 } : metricOf(spec, inventory, c));
-  const targets = prUrl ? spec.pendingTargets?.(plan) ?? [] : [];
+  const targets = prUrl || waiting ? spec.pendingTargets?.(plan) ?? [] : [];
+  const waitingNow = waiting && acting !== undefined
+    ? { ...waiting, actionClass: acting, baseline: baseline(acting), ...(targets.length ? { targets } : {}), since: clock.iso() }
+    : state.waiting;
   const pending = prUrl && acting !== undefined ? { prUrl, actionClass: acting, baseline: baseline(acting), ...(targets.length ? { targets } : {}) } : state.pending;
   const pendingRecordedAt = prUrl && acting !== undefined ? (judgedByDecision(spec, acting) ? clock.iso() : undefined) : state.pendingRecordedAt;
   const lastPass = prUrl ? { fingerprint, landed: prUrl } : { fingerprint };
-  writeAtomic(statePath, JSON.stringify({ ...state, pending, pendingRecordedAt, lastCheap: cheap, lastPass, filingFailures: undefined }, null, 2) + "\n");
+  writeAtomic(statePath, JSON.stringify({ ...state, pending, pendingRecordedAt, waiting: waitingNow, lastCheap: cheap, lastPass, filingFailures: undefined }, null, 2) + "\n");
   return { ran: true, plan, prUrl, scorecard };
+}
+
+/** W1-T12221: the landing PR that carries every waiting file becomes the pending PR, as if this garden had
+ *  opened it. Files that left the queue with no PR recorded (merged unseen, or set aside) free the lane. */
+function settleGardenWaiting<C extends string>(
+  spec: Pick<GardenSpec<C, unknown, GardenAction<C>, GardenCheckout>, "name" | "review" | "decision">,
+  state: GardenState<C>,
+  clock: Clock,
+  log: GardenerDeps["log"],
+): GardenState<C> {
+  const w = state.waiting!;
+  const staged = stagedTaskFiles(w.stateRoot).filter((f) => w.paths.includes(f.relPath));
+  if (staged.some((f) => f.prUrl === undefined)) return state;
+  const rest: GardenState<C> = { ...state };
+  delete rest.waiting;
+  const prUrl = staged[0]?.prUrl;
+  if (prUrl === undefined) {
+    log(`${spec.name}.garden_waiting_cleared`, { paths: w.paths, since: w.since, reason: "the files left the landing queue before a landing PR was seen" });
+    return rest;
+  }
+  log(`${spec.name}.garden_waiting_landed`, { pr_url: prUrl, paths: w.paths, since: w.since });
+  const pending = { prUrl, actionClass: w.actionClass, baseline: w.baseline, ...(w.targets ? { targets: w.targets } : {}) };
+  return { ...rest, pending, pendingRecordedAt: judgedByDecision(spec, w.actionClass) ? clock.iso() : undefined,
+    ...(rest.lastPass ? { lastPass: { ...rest.lastPass, landed: prUrl } } : {}) };
 }
 
 /** A drafted landing that was not landed: a guard refused it, its PR did not open, or it repeats refused bytes. */

@@ -19,6 +19,15 @@
     - src/lib/machine-filing-judge.ts
     - src/lib/feedback-landing.ts
     - src/run-task.ts
+    - src/lib/queue-judge-gardener.ts
+    - src/lib/backlog-gardener.ts
+    - src/lib/config-gardener.ts
+    - src/lib/flow-gardener.ts
+    - src/lib/host-resource-gardener.ts
+    - src/lib/opportunity-intake.ts
+    - src/lib/selector-shadow-gardener.ts
+    - src/lib/flake-incident-gardener.ts
+    - src/lib/gate-gardener.ts
     - test/gardeners/a-gardener-that-edits-a-task-file-lands-through-the-sealed-landing.test.ts
   status: queued
   attempts: 0
@@ -39,6 +48,8 @@
       proof: "grep: W1-T12221 criterion 7 in test/gardeners/a-gardener-that-edits-a-task-file-lands-through-the-sealed-landing.test.ts"
     - claim: "The gardener land step calls the landing function, and the test goes through `gardenCheckoutAsync`"
       proof: "grep: landTaskFilesAsync( in src/run-task.ts"
+    - claim: "The queue judge and the backlog gardener keep their own pull request: the queue judge still records `queue_judge.prediction` with the URL of a real pull request"
+      proof: "grep: W1-T12221 criterion 9 in test/gardeners/a-gardener-that-edits-a-task-file-lands-through-the-sealed-landing.test.ts"
   rationale: |
     OBSERVED 2026-11-10 on the first-parent history of main, 48 hours, 165 merges: 14 merges came from gardeners and 7 from the machine-filing judge.
     - Each gardener opens its own pull request on a branch named `<name>-garden-<time>`. `gardenLandSteps` in src/run-task.ts does the add, the commit, the preflight, the push and the create.
@@ -55,6 +66,13 @@
     In `gardenPassBody` and `trackGardenIds`, treat "waiting" as a filing that is in flight: no failure, no escalation, no refused draft, no release of an id. Keep the pending state, and set its pull request when a later pass finds the file in a landing pull request (the reader of staged files from W1-T12199 gives it).
     In the machine-filing judge, keep the rulings as pending while they wait. In the repair of a task file, keep the request and record the wait.
     A caller that only edits its code to compile, with no change of behaviour, belongs here too. If a caller needs a file that this task does not list, stop and report it.
+    SESSION RULING 2026-11-11 (amendment, after the first build attempt stopped):
+    - The queue judge and the backlog gardener keep landing through their own pull request. The queue judge matches `queue_judge.prediction` rows on `pr_url`, and it reads `backlog.scorecard` rows by `pr_url`. Their landing sets `sealedLanding: false`. No other caller sets it. Every other gardener that edits a task file moves to the sealed landing.
+    - A land that waits is not a failure. The repair of a task file keeps its request, and a wait does not count toward `SHARD_REPAIR_ATTEMPT_CAP`.
+    - A caller that only files a new file never treats a waiting result as a pull request URL: config, flow, host-resource, opportunity intake, selector-shadow, flake-incident and the gate gardener read the result through `landedPrUrl`, so the compiler proves it.
+    - The seal is on the async checkout only (`gardenCheckoutAsync`), because the landing of W1-T12199 is async. The synchronous checkout opens its own pull request, as today.
+    - The landing state root is `config.root`. `daemonGardenWorkspace`, the machine-filing judge and the repair of a task file pass it as `taskFilesLanding`.
+    - The claim and the proof of each file come from the `## Acceptance` block of the gardener's body: the pair whose proof names the path, or the only pair of a one-file land. A land with no such pair for each file opens its own pull request.
     NOT IN SCOPE: a new task file with a new id (W1-T12222).
   falsifier: |
-    Return nothing for a staged file and criteria 3 and 4 must fail. Send a land with a docs path through the landing and criterion 1 must fail. Let the judge rule again while its rulings wait and criterion 6 must fail. Restore and require all eight to pass.
+    Return nothing for a staged file and criteria 3 and 4 must fail. Send a land with a docs path through the landing and criterion 1 must fail. Let the judge rule again while its rulings wait and criterion 6 must fail. Set `sealedLanding: false` nowhere and criterion 9 must fail. Restore and require all nine to pass.
