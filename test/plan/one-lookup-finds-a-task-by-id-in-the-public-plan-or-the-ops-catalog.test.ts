@@ -8,7 +8,9 @@ import { test, type TestContext } from "node:test";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 import { mergePlanBlobs, type Task } from "#src/lib/plan.js";
 import type { OpsCatalogApi } from "#src/lib/ops-catalog-source.js";
-import type { ReviewCommandDeps } from "#src/cli/commands/review.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
+import { FIXTURE_CONFIG_PATH_SEGMENTS } from "#src/lib/config.js";
+import type { ReviewCommandHost, ReviewCommandDeps } from "#src/cli/commands/review.js";
 
 const ID = "W1-T900000", REPOSITORY = "fixture-private/ops";
 const yaml = (id = ID) => `- id: ${id}\n  title: Private lookup fixture\n  repo: remudero\n  depends_on: []\n  type: implement\n  priority: 0\n  risk: high\n  budget_usd: 0.5\n  files: [src/fixture.ts]\n  design: Private canonical design\n  acceptance:\n    - claim: canonical private criterion\n      proof: "grep: lookup-fixture in src/fixture.ts"\n`;
@@ -31,9 +33,21 @@ function fixture(t: TestContext, text = yaml()) {
     assert.equal(path, `${base}/git/blobs/${blob}`, "only pinned read-only fixture routes may run");
     return { sha: blob, encoding: "base64", size: Buffer.byteLength(text), content: Buffer.from(text).toString("base64") };
   };
-  return { root, stateDir, api, calls, rootTree: tree };
+  const apiPaths = [`repos/${REPOSITORY}`, `repos/${REPOSITORY}/git/ref/heads/main`,
+    `repos/${REPOSITORY}/git/commits/${commit}`, `repos/${REPOSITORY}/git/trees/${tree}`,
+    `repos/${REPOSITORY}/git/trees/${plan}`, `repos/${REPOSITORY}/git/blobs/${blob}`];
+  return { root, stateDir, api, calls, rootTree: tree, apiPaths };
 }
 async function lookup() { return import("#src/lib/task-lookup.js"); }
+const reviewHost = {
+  GIT_UNTRACKED_FILES_ALL: "--untracked-files=all", JUDGE_AT_OWN_START_FLAG: "--judge-at-own-start",
+  acceptedReviewAttemptId: () => undefined,
+  reviewWorktreeAsync: { fetch: () => {} },
+  materializeReviewWorktree: () => { throw Error("forbidden real materialization"); },
+  realDeps: () => { throw Error("forbidden default worker graph"); },
+  reviewPostedDescription: () => "fixture",
+  liveWorkerRunIds: new Set<string>(), reviewWorkerLockId: (id: string) => `fixture-${id}`,
+} as unknown as ReviewCommandHost;
 
 test("W1-T12207 criterion 1: public wins without a private read; a named empty-kind destination uses the real pinned ops reader", async t => {
   const fx = fixture(t), { findTaskInCatalogs } = await lookup();
@@ -46,7 +60,7 @@ test("W1-T12207 criterion 1: public wins without a private read; a named empty-k
 });
 
 test("W1-T12207 criterion 2: the real review command receives the private canonical criteria files risk budget and narrative before body fallback", async t => {
-  const fx = fixture(t); const { reviewCommand } = await import("#src/run-task.js");
+  const fx = fixture(t); const { reviewCommand } = await import("#src/cli/commands/review.js");
   const head = execFileSync("git", ["rev-parse", "HEAD"], { cwd: REPO_ROOT, encoding: "utf8" }).trim();
   let reviewed: Parameters<NonNullable<ReviewCommandDeps["runReview"]>>[0]["task"] | undefined;
   const deps: ReviewCommandDeps = {
@@ -60,7 +74,7 @@ test("W1-T12207 criterion 2: the real review command receives the private canoni
     runReview: (async (args: Parameters<NonNullable<ReviewCommandDeps["runReview"]>>[0]) => { reviewed = args.task; throw Error("fixture captured canonical task"); }) as never,
     postStatus: (() => { throw Error("forbidden public status"); }) as never,
   };
-  await assert.rejects(() => reviewCommand("42", [], deps), /fixture captured canonical task/);
+  await assert.rejects(() => reviewCommand(reviewHost, "42", [], deps), /fixture captured canonical task/);
   assert.equal(reviewed?.id, ID); assert.deepEqual(reviewed?.files, ["src/fixture.ts"]); assert.equal(reviewed?.risk, "high"); assert.equal(reviewed?.budget_usd, 0.5);
   assert.equal((reviewed?.acceptance as Array<{ claim: string }>)[0]?.claim, "canonical private criterion"); assert.equal(reviewed?.design, "Private canonical design");
 });
@@ -74,11 +88,34 @@ test("W1-T12207 criterion 3: fix and sweep scope checks use the private task fil
   assert.equal(found.outcome, "found"); assert.deepEqual(found.task?.files, ["src/fixture.ts"]);
 });
 
-test("W1-T12207 criterion 4: the claim command accepts a private task but passes only the public root to its ordinary reserver", async t => {
-  const fx = fixture(t); const { claimCommandWithCatalogs } = await import("#src/run-task.js");
-  const roots: string[] = [], attempted: string[] = [];
-  const result = await claimCommandWithCatalogs([ID], { stateDir: fx.stateDir, isPlanned: () => false, taskLookup: { api: fx.api }, reserverFor: root => { roots.push(root); return { mintAnchor: () => "a".repeat(40), attempt: id => { attempted.push(id); return "created"; }, holder: () => undefined, drop: () => false }; } });
-  assert.equal(result, 0); assert.deepEqual(attempted, [ID]); assert.deepEqual(roots, [REPO_ROOT]);
+test("W1-T12207 criterion 4: the real claim CLI and default ops transport reserve only the public fixture origin", async t => {
+  const fx = fixture(t), publicRoot = join(fx.root, "public"), origin = join(fx.root, "public-origin.git");
+  mkdirSync(join(publicRoot, "plan"), { recursive: true }); writeFileSync(join(publicRoot, "plan", "tasks.yaml"), "[]\n");
+  const git = (args: string[], cwd = publicRoot) => execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+  git(["init", "--bare", "--initial-branch=main", origin], fx.root); git(["init", "--initial-branch=main"]);
+  git(["config", "user.name", "fixture"]); git(["config", "user.email", "fixture@example.invalid"]);
+  git(["add", "plan/tasks.yaml"]); git(["commit", "-m", "fixture public plan"]); git(["remote", "add", "origin", origin]); git(["push", "--set-upstream", "origin", "main"]);
+  const fixtureHome = join(fx.root, "home"); mkdirSync(join(fixtureHome, ...FIXTURE_CONFIG_PATH_SEGMENTS.slice(0, -1)), { recursive: true });
+  writeFileSync(join(fixtureHome, ...FIXTURE_CONFIG_PATH_SEGMENTS), JSON.stringify({ root: fx.root, claudeBin: "/usr/bin/false" }));
+  const routes = await Promise.all(fx.apiPaths.map(async path => ({ when: `api ${path}`, stdout: JSON.stringify(await fx.api(path)) })));
+  const shim = ghShim([...routes.sort((a, b) => b.when.length - a.when.length), { when: "", stderr: "forbidden fixture GitHub route", exit: 97 }]);
+  const env = { PATH: `${shim.dir}:${process.env.PATH}`, HOME: fixtureHome, TMPDIR: tmpdir(), LANG: "C", RMD_SELF_SYNC_DONE: "1",
+    GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null", GIT_ALLOW_PROTOCOL: "file" };
+  assert.equal(git(["ls-remote", origin, `refs/rmd-dispatch/${ID}`]).trim(), "");
+  const output = execFileSync(join(REPO_ROOT, "bin", "rmd"), ["claim", ID], { cwd: publicRoot, env, encoding: "utf8", timeout: 30_000 });
+  assert.ok(output.includes(`claimed refs/rmd-dispatch/${ID}`));
+  const held = git(["ls-remote", origin, `refs/rmd-dispatch/${ID}`]).trim(); assert.match(held, new RegExp(`^[a-f0-9]{40}\\s+refs/rmd-dispatch/${ID}$`));
+  assert.ok(shim.calls().length >= 6, "the default transport makes real pinned-reader child calls");
+  assert.ok(shim.calls().every(call => call.startsWith(`api repos/${REPOSITORY}`)), "only declared read-only routes ran");
+  const beforeUnreadablePublic = shim.calls().length;
+  writeFileSync(join(publicRoot, "plan", "tasks.yaml"), "not: a plan\n"); git(["add", "plan/tasks.yaml"]); git(["commit", "-m", "fixture unreadable public plan"]); git(["push", "origin", "main"]);
+  assert.throws(() => execFileSync(join(REPO_ROOT, "bin", "rmd"), ["claim", ID], { cwd: publicRoot, env, encoding: "utf8", timeout: 30_000, stdio: ["ignore", "pipe", "pipe"] }), /public plan unreadable/);
+  assert.equal(shim.calls().length, beforeUnreadablePublic, "unreadable public evidence cannot open ops");
+  assert.equal(git(["ls-remote", origin, `refs/rmd-dispatch/${ID}`]).trim(), held);
+  writeFileSync(join(publicRoot, "plan", "tasks.yaml"), "[]\n"); git(["add", "plan/tasks.yaml"]); git(["commit", "-m", "fixture restored public plan"]); git(["push", "origin", "main"]);
+  shim.addRoute({ when: `api repos/${REPOSITORY}`, stderr: "HTTP 503 temporary fixture outage", exit: 1 });
+  assert.throws(() => execFileSync(join(REPO_ROOT, "bin", "rmd"), ["claim", ID], { cwd: publicRoot, env, encoding: "utf8", timeout: 30_000, stdio: ["ignore", "pipe", "pipe"] }), /task catalog unreadable/);
+  assert.equal(git(["ls-remote", origin, `refs/rmd-dispatch/${ID}`]).trim(), held, "an unknown ops source never changes the claim");
 });
 
 test("W1-T12207 criterion 5: unreadable public destination or ops evidence never becomes an absent task or a body fallback", async t => {
@@ -90,6 +127,9 @@ test("W1-T12207 criterion 5: unreadable public destination or ops evidence never
   assert.equal((await findTaskInCatalogs(ID, { byId, stateDir: fx.stateDir, api: fx.api })).outcome, "unreadable");
   const unreadable = new Map<string, Task>(); unreadable.get = () => { throw Error("public unreadable"); };
   assert.equal((await findTaskInCatalogs(ID, { byId: unreadable, stateDir: fx.stateDir, api: fx.api })).outcome, "unreadable");
+  unreadable.get = () => { throw "PRIVATE_PUBLIC_INDEX_FAILURE"; };
+  const nonError = await findTaskInCatalogs(ID, { byId: unreadable, stateDir: fx.stateDir, api: fx.api });
+  assert.equal(nonError.outcome, "unreadable"); assert.ok(!JSON.stringify(nonError).includes("PRIVATE_PUBLIC_INDEX_FAILURE"));
   assert.equal(fx.calls.length, 0);
 });
 
@@ -102,10 +142,10 @@ test("W1-T12207 criterion 6: an absent host file preserves public results and ne
 
 
 test("the real review refuses an unreadable ops catalog before body fallback or a status effect", async t => {
-  const fx = fixture(t); const { reviewCommand } = await import("#src/run-task.js");
+  const fx = fixture(t); const { reviewCommand } = await import("#src/cli/commands/review.js");
   const head = execFileSync("git", ["rev-parse", "HEAD"], { cwd: REPO_ROOT, encoding: "utf8" }).trim();
   let reviewed = 0, pending = 0;
-  const code = await reviewCommand("42", [], {
+  const code = await reviewCommand(reviewHost, "42", [], {
     loadConfig: () => ({ root: fx.root }) as never,
     resolveOwnerRepo: () => ({ owner: "fixture", repo: "remudero" }),
     fetchView: () => ({ body: `Remudero-Task: ${ID}\n\n## Acceptance\n- wrong fallback | grep: wrong in src/wrong.ts`, html_url: "https://github.com/fixture/remudero/pull/42", number: 42, head: { ref: `run-${ID}-1`, sha: head }, updated_at: new Date().toISOString() }),
@@ -123,4 +163,20 @@ test("a readable empty ops catalog is absent, while missing source metadata stay
     ? { sha: fx.rootTree, truncated: false, tree: [] } : fx.api(path);
   const result = await findTaskInCatalogs(ID, { byId: new Map(), stateDir: fx.stateDir, api: missing });
   assert.equal(result.outcome, "unreadable"); assert.equal(result.outcome === "unreadable" && result.reason, "ops-source_absent");
+});
+
+
+test("an empty ops contract never borrows acceptance from the public pull-request body", async t => {
+  const fx = fixture(t, yaml().split("  acceptance:")[0]!);
+  const { reviewCommand } = await import("#src/cli/commands/review.js");
+  const head = execFileSync("git", ["rev-parse", "HEAD"], { cwd: REPO_ROOT, encoding: "utf8" }).trim();
+  let reviewed = 0;
+  const code = await reviewCommand(reviewHost, "42", [], {
+    loadConfig: () => ({ root: fx.root }) as never, resolveOwnerRepo: () => ({ owner: "fixture", repo: "remudero" }),
+    fetchView: () => ({ body: `Remudero-Task: ${ID}\n\n## Acceptance\n- unrelated body | grep: wrong in src/wrong.ts`, html_url: "https://github.com/fixture/remudero/pull/42", number: 42, head: { ref: `run-${ID}-1`, sha: head }, updated_at: new Date().toISOString() }),
+    fetchHead: () => {}, taskLookup: { api: fx.api },
+    runReview: (async () => { reviewed++; throw Error("forbidden body fallback"); }) as never,
+    postReviewPending: async () => { throw Error("forbidden pending status"); },
+  });
+  assert.equal(code, 2); assert.equal(reviewed, 0);
 });

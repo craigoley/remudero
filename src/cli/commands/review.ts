@@ -2330,6 +2330,11 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
     }
     if (found.outcome === "found") {
       const contract = catalogTaskContract(found);
+      if (contract.criteria.length === 0) {
+        console.error("rmd review: catalog task has no acceptance criteria; no body fallback or review effect");
+        exit.as("task-metadata-unavailable");
+        return 2;
+      }
       criteria = contract.criteria;
       taskDeclaredFiles = contract.taskDeclaredFiles;
       taskRisk = contract.taskRisk;
