@@ -3926,7 +3926,7 @@ function cashAbortable<T>(signal: AbortSignal, run: () => Promise<T>, onLate?: (
 
 /** One unchanged-payload request, bounded across all paid attempts, body reads and server cooldowns. */
 async function cashRequestJson<T>(input: {
-  args: OpenWeightSpawnArgs; deployment: string; source: string; endpoint: string;
+  args: CashTransportOptions; deployment: string; source: string; endpoint: string; outputTokenCeiling?: number;
   body: string; headers: Record<string, string>; next: (checkActive: () => void) => T;
   canContinue: () => boolean; chargeFailure: (error: Error) => void;
   /** Usage belongs to this paid attempt even when fetch or body completion misses the deadline. */
@@ -3975,8 +3975,9 @@ async function cashRequestJson<T>(input: {
             checkActive();
             // AN OVERSIZED 429 IS NOT TRANSIENT: the same sum the fit gate uses, against the limit this response named.
             if (failure instanceof CashHttpFailure && failure.status === 429 && failure.limitTokens !== undefined) {
-              const need = openWeightEstimatedTokens(Buffer.byteLength(input.body, "utf8")) + OPENWEIGHT_MAX_COMPLETION_TOKENS;
-              if (need > failure.limitTokens) throw new CashCapacityShortfallFailure(input.source, need - OPENWEIGHT_MAX_COMPLETION_TOKENS, failure.limitTokens);
+              const output = input.outputTokenCeiling ?? OPENWEIGHT_MAX_COMPLETION_TOKENS;
+              const need = openWeightEstimatedTokens(Buffer.byteLength(input.body, "utf8")) + output;
+              if (need > failure.limitTokens) throw new CashCapacityShortfallFailure(input.source, need - output, failure.limitTokens);
             }
             throw failure;
           } finally {
@@ -4026,6 +4027,100 @@ export function openWeightDeploymentKnownAbsent(deployment: string, nowMs = syst
 
 export function clearOpenWeightAbsence(): void {
   openWeightAbsentUntil.clear();
+}
+
+/** The transport fields {@link cashRequestJson} reads; a worker passes its whole spawn args. */
+type CashTransportOptions = Pick<OpenWeightSpawnArgs, "requestTimeoutMs" | "clock" | "signal" | "fetchImpl" | "streamObserver">;
+
+export type CashRequestOutcome =
+  | { ok: true; envelope: unknown; servedModel: string | undefined; latencyMs: number;
+    reservedUsd: number; settledUsd: number; heldUsd: number }
+  | { ok: false; reason: "budget-refused" | "deployment-absent" | "not-ready" | "timeout" | "aborted" | "http" | "transport";
+    detail: string; latencyMs: number; reservedUsd: number; settledUsd: number; heldUsd: number; status?: number };
+
+/**
+ * W1-T12413: ONE paid cash request for a caller that is not a worker. The same core as a worker
+ * turn: reserve before transport (normal cap only), deadline and abort, 429 retry inside the
+ * deadline, 404 absent mark, instance-registry check, late-receipt settlement. A refusal or a
+ * failure is a result, never a throw.
+ */
+export async function sendCashRequest(config: Config, input: CashTransportOptions & {
+  deployment: string; path: string; body: string; source: string;
+  outputTokenCeiling: number; env?: NodeJS.ProcessEnv;
+}): Promise<CashRequestOutcome> {
+  const clock = input.clock ?? systemClock;
+  const startedAt = clock.now();
+  let reservedUsd = 0, settledUsd = 0, heldUsd = 0;
+  let pending: CashBudgetAttempt | undefined;
+  const failed = (reason: Extract<CashRequestOutcome, { ok: false }>["reason"], detail: string, status?: number): CashRequestOutcome =>
+    ({ ok: false, reason, detail, latencyMs: clock.now() - startedAt, reservedUsd, settledUsd, heldUsd, ...(status === undefined ? {} : { status }) });
+  if (isFoundryClaudeDeployment(input.deployment)) return failed("not-ready", "a Foundry Claude deployment has its own adapter");
+  if (openWeightDeploymentKnownAbsent(input.deployment, clock.now())) return failed("deployment-absent", `${input.deployment} answered 404 inside ${OPENWEIGHT_ABSENT_TTL_MS}ms`);
+  const target = cashDeploymentTarget(config, input.deployment, input.env ?? process.env);
+  if (!target.ok) return failed("not-ready", target.reason === "no-endpoint" ? "no cash endpoint" : `${target.keyEnv} is not set`);
+  const base = new URL(target.endpoint.endsWith("/") ? target.endpoint : `${target.endpoint}/`);
+  if (base.protocol !== "https:") return failed("not-ready", "cash endpoint must use https");
+  const endpoint = new URL(input.path.replace(/^\/+/, ""), base).toString();
+  const azureOpenAi429Unbilled = unbilledAzureOpenAi429Policy(input.deployment, endpoint);
+  const prefix = `${input.source}-${startedAt}-${randomUUID()}`;
+  const requestBodyBytes = Buffer.byteLength(input.body, "utf8");
+  const usageUsd = (envelope: unknown): number | undefined => {
+    const usage = (envelope as { usage?: { input_tokens?: unknown } } | null)?.usage;
+    const responses = usage !== undefined && usage !== null && Object.hasOwn(usage, "input_tokens");
+    return openWeightReceiptUsd(openWeightEnvelopeUsage(envelope, responses), input.deployment, responses);
+  };
+  const settle = (attempt: CashBudgetAttempt, evidence: Omit<CashAccountingEvidence, "identity">): void => {
+    const recorded = attempt.receipt ?? settleOpenWeightBudget(config, { requestId: attempt.requestId, identity: attempt.identity, atIso: attempt.atIso, ...evidence });
+    const charged = recorded?.settledUsd ?? attempt.reservation.reservedUsd;
+    settledUsd += charged;
+    if (recorded?.settledUsd == null) heldUsd += attempt.reservation.reservedUsd;
+  };
+  let attempts = 0;
+  try {
+    const { envelope } = await cashRequestJson<CashBudgetAttempt>({
+      args: input, deployment: input.deployment, source: input.source, endpoint, body: input.body,
+      outputTokenCeiling: input.outputTokenCeiling,
+      headers: { "content-type": "application/json", "api-key": target.key },
+      onEnvelope: (envelope, attempt) => {
+        const actualUsd = usageUsd(envelope);
+        if (actualUsd !== undefined && actualUsd <= attempt.reservation.reservedUsd && attempt.receipt === undefined)
+          attempt.receipt = settleOpenWeightBudget(config, { requestId: attempt.requestId, identity: attempt.identity, actualUsd, atIso: attempt.atIso });
+      },
+      canContinue: () => attempts < 2,
+      chargeFailure: (error) => {
+        settle(pending!, { ...(unbilledCashRefusal(error, azureOpenAi429Unbilled) ? { actualUsd: 0, unbilled: true } : {}), reason: error.message });
+        pending = undefined;
+      },
+      next: (checkActive) => {
+        checkActive();
+        const requestId = `${prefix}-${++attempts}`;
+        const identity: CashRequestIdentity = { requestId, attemptId: prefix, provider: "cash", deployment: input.deployment, endpoint: cashEndpointIdentity(endpoint) };
+        const atIso = clock.iso();
+        const reservation = reserveOpenWeightBudget(config, { requestId, identity, deployment: input.deployment,
+          requestBodyBytes, atIso, outputTokenCeiling: input.outputTokenCeiling });
+        reservedUsd += reservation.reservedUsd;
+        pending = { requestId, identity, atIso, reservation };
+        return pending;
+      },
+    });
+    const attempt = pending!;
+    pending = undefined;
+    settle(attempt, attempt.receipt ? {}
+      : { reason: usageUsd(envelope) === undefined ? "usage unavailable" : "usage exceeded its conservative reservation" });
+    return { ok: true, envelope, servedModel: cashResponseModel((envelope as { model?: unknown } | null)?.model),
+      latencyMs: clock.now() - startedAt, reservedUsd, settledUsd, heldUsd };
+  } catch (error) {
+    const absent = error instanceof OpenWeightDeploymentNotFoundError;
+    if (absent) markOpenWeightDeploymentAbsent(input.deployment, clock.now());
+    const detail = error instanceof Error ? error.message : String(error);
+    if (pending) settle(pending, { ...(absent ? { actualUsd: 0, unbilled: true } : {}), reason: detail });
+    if (error instanceof OpenWeightAllowanceExhaustedError) return failed("budget-refused", detail);
+    if (absent) return failed("deployment-absent", detail, 404);
+    if (error instanceof OpenWeightRequestTimeoutError) return failed("timeout", detail);
+    if (input.signal?.aborted) return failed("aborted", detail);
+    if (error instanceof CashHttpFailure) return failed("http", detail, error.status);
+    return failed("transport", detail);
+  }
 }
 
 /** READY = priced, shaped and context-sized, and not known absent. A successor can lead a ladder row
@@ -4158,6 +4253,7 @@ export function openWeightReservationUsd(
   deployment: string,
   requestBodyBytes: number,
   extraInputTokens = 0,
+  outputTokenCeiling = OPENWEIGHT_MAX_COMPLETION_TOKENS,
 ): number {
   const price = openWeightPriceFor(deployment);
   // `extraInputTokens` is input the request BODY does not contain, and it exists because the
@@ -4167,7 +4263,7 @@ export function openWeightReservationUsd(
   // reservation silently stops being an upper bound. W1-T3558.
   const inputTokenCeiling = requestBodyBytes + Math.max(0, extraInputTokens);
   const rate = price.longContext && inputTokenCeiling > price.longContext.thresholdInputTokens ? price.longContext : price;
-  return (inputTokenCeiling * (rate.reservationInputUsdPerMillion ?? price.reservationInputUsdPerMillion ?? rate.inputUsdPerMillion) + OPENWEIGHT_MAX_COMPLETION_TOKENS * rate.outputUsdPerMillion) / 1_000_000;
+  return (inputTokenCeiling * (rate.reservationInputUsdPerMillion ?? price.reservationInputUsdPerMillion ?? rate.inputUsdPerMillion) + outputTokenCeiling * rate.outputUsdPerMillion) / 1_000_000;
 }
 
 /** Raised INSTEAD of sending a paid request. It is thrown before the transport, never after, so a
@@ -4389,6 +4485,8 @@ export function reserveOpenWeightBudget(
     /** Input tokens this request may consume that its body does NOT carry — see
      *  {@link openWeightReservationUsd}. Omitted for an ordinary chat turn. */
     extraInputTokens?: number;
+    /** Output tokens this request may produce; omitted means OPENWEIGHT_MAX_COMPLETION_TOKENS. */
+    outputTokenCeiling?: number;
   },
 ): { reservedUsd: number; committedUsd: number; capUsd: number } {
   if (input.identity && (!validCashIdentity(input.identity) || input.identity.requestId !== input.requestId || input.identity.deployment !== input.deployment)) {
@@ -4401,7 +4499,8 @@ export function reserveOpenWeightBudget(
   const invocationNonce = randomUUID();
   const configuredCapUsd = configuredCashCap(config, input.squeezed);
   const utcDay = openWeightUtcDay(input.atIso);
-  const wantUsd = openWeightReservationUsd(input.deployment, input.requestBodyBytes, input.extraInputTokens ?? 0);
+  const wantUsd = openWeightReservationUsd(input.deployment, input.requestBodyBytes, input.extraInputTokens ?? 0,
+    input.outputTokenCeiling ?? OPENWEIGHT_MAX_COMPLETION_TOKENS);
   return mutateOpenWeightAllowance(openWeightAllowancePath(config), utcDay, (state) => {
     const limits = cashAllowanceLimits(state, configuredCapUsd, input.deployment, input.squeezed);
     const { capUsd, committedUsd } = limits[0]!;
