@@ -748,6 +748,7 @@ import {
   PLAN_FILING_FILE_CACHE_MAX_ENTRIES,
   type RestPullRow,
   type RestRollupEntry,
+  fetchBoardPrsRest,
   fetchBoardPrsRestAsync,
 } from "./lib/open-prs-rest.js";
 import { mainCeilingLogReducer, mainRepairRecordsFromLedger, mainRepairMergesBrief, reviewerRegressionRevertText, withMainHealthOnLightPass, type MainCeilingLogVerdict, type MainRatchetRecordOutcome, type MainRatchetRecordRequest, type MainRepairFixRequest, type MainRepairLane, type MainRepairRevertOutcome, type MainRepairRevertRequest } from "./lib/main-health-rung.js";
@@ -776,6 +777,7 @@ import { applyMergeProbeEvidence, mergedHeadTypechecks, probeMerge, probeOpenPrM
 import { surveyPullRequestBoard, type PullRequestBoard } from "./lib/pr-board.js";
 import {
   captureFeedback,
+  instanceStateDir,
   feedbackCaptured,
   feedbackEntryPath,
   listFeedback,
@@ -823,7 +825,7 @@ import {
   type TaskFilesLandingResult,
 } from "./lib/feedback-landing.js";
 export { readStandingDecisions };
-import { resolvePlanDestination } from "./lib/plan-destination.js";
+import { resolvePlanDestination, planDestinationRepository } from "./lib/plan-destination.js";
 import {
   reconcileFeedbackLanding,
   type FeedbackReconcileRoot,
@@ -958,6 +960,7 @@ import { assertProposedPlanLoads,
 } from "./lib/triage.js";
 import {
   declaredTaskIds,
+  mentionedTaskIds,
   isAllocatableTaskId,
   mintNextTaskId,
   UNTRUSTED_SOURCE_REASON_PREFIX,
@@ -13125,12 +13128,65 @@ export function remotePlanCeilingOnRef(
  *  silently instead of erroring, which would return a clean, wrong zero here. */
 const REMOTE_PLAN_ID_DECL_PATTERN = '^[[:space:]]*(-[[:space:]]*)?id:[[:space:]]*["\']?W1-T[0-9]+';
 
+/** Host-only reads for the already selected catalog. No second reservation namespace is introduced. */
+export interface TaskIdDestinationChecks {
+  destinationStateDir?: () => string | undefined;
+  destinationGit?: (cwd: string, args: string[], input?: string) => string;
+  destinationPrFetch?: GhApiFetcher;
+}
+interface TaskIdDestinationSnapshot {
+  planTexts: readonly string[];
+  ids: readonly string[];
+  openPrTexts: readonly string[];
+}
+
+/** A fetched, commit-pinned ID population. Dirty checkout bytes never replace the fetched plan. */
+function taskIdDestinationSnapshot(
+  checks: TaskIdDestinationChecks = {}, offline = false,
+): TaskIdDestinationSnapshot | undefined {
+  let stage: "switch" | "offline" | "fetch" | "plan" | "pulls" = "switch";
+  try {
+    const destination = planDestinationRepository((checks.destinationStateDir ?? instanceStateDir)());
+    if (destination.outcome === "off") return undefined;
+    if (destination.outcome === "unreadable") throw new Error("unreadable host switch");
+    if (offline) { stage = "offline"; throw new Error("selected catalog requires a fresh read"); }
+    const run = checks.destinationGit ?? ((cwd: string, args: string[], input?: string) =>
+      hostWorktreeGit(cwd, args, input === undefined ? {} : { input }));
+    stage = "fetch";
+    run(destination.checkoutDir, ["fetch", "--no-tags", "origin", "main"]);
+    stage = "plan";
+    const commit = run(destination.checkoutDir, ["rev-parse", "--verify", "origin/main^{commit}"]).trim();
+    if (!/^[a-f0-9]{40}$/.test(commit)) throw new Error("invalid commit");
+    const paths = run(destination.checkoutDir, ["ls-tree", "-r", "--name-only", commit, "--", "plan/tasks.yaml", "plan/tasks.d/"])
+      .split("\n").filter(path => path === "plan/tasks.yaml" || /^plan\/tasks\.d\/[^/]+\.ya?ml$/.test(path));
+    if (!paths.includes("plan/tasks.yaml")) throw new Error("missing plan");
+    const texts = readBlobsAtRef((args, input) => run(destination.checkoutDir, args, input), commit, paths);
+    const tasks = texts.flatMap(text => parseTasksFromYaml(text, "plan destination", undefined, {}, "preserve-external"));
+    const ids = tasks.map(task => task.id);
+    if (new Set(ids).size !== ids.length) throw new Error("duplicate task id");
+    stage = "pulls";
+    const pulls = fetchBoardPrsRest(destination.owner, destination.repo, checks.destinationPrFetch ?? ghJson, undefined, "open");
+    if (pulls.truncated || pulls.rows.some(row => !Number.isSafeInteger(row.number) || row.number <= 0 ||
+        row.state !== "OPEN" || row.headRefName === "")) throw new Error("incomplete open PR population");
+    const openPrTexts = pulls.rows.map(row => [row.title, row.body, row.headRefName].join("\n"));
+    return { planTexts: texts, ids, openPrTexts };
+  } catch {
+    // Upstream responses, private repository names and checkout paths are not a safe diagnostic vocabulary.
+    // A selected source that did not answer must refuse, never become an empty catalog or an advisory floor.
+    throw new Error(`plan destination is unreadable at ${stage}`);
+  }
+}
+
 export function mintNextTaskIdWithHistory(opts: {
   planPath: string;
   repoRoot: string;
   openPrTexts?: () => string[];
   gitRunner?: (args: string[]) => string;
+  destination?: TaskIdDestinationChecks;
+  destinationSnapshot?: TaskIdDestinationSnapshot | null;
 }): MintedTaskIdWithHistory {
+  const destination = opts.destinationSnapshot === undefined
+    ? taskIdDestinationSnapshot(opts.destination) : opts.destinationSnapshot ?? undefined;
   const planRelPathForRemote = relative(opts.repoRoot, dirname(opts.planPath));
   // W1-T2710 — THE WIRING END, and the reason it lives here rather than in `task-id.ts`. That
   // module is deliberately free of child-process access (its three sources are file reads and an
@@ -13150,6 +13206,7 @@ export function mintNextTaskIdWithHistory(opts: {
   const base = mintNextTaskId({
     planPath: opts.planPath,
     openPrTexts: opts.openPrTexts,
+    ...(destination ? { additionalPlanTexts: () => destination.planTexts, additionalOpenPrTexts: () => destination.openPrTexts } : {}),
     remotePlanCeiling:
       !isAbsolute(planRelPathForRemote) && !planRelPathForRemote.startsWith("..")
         ? () => remotePlanCeilingOnRef(opts.repoRoot, planRelPathForRemote === "" ? "." : planRelPathForRemote, opts.gitRunner)
@@ -16724,7 +16781,7 @@ export function mergedTriageSubjects(worktreePath: string, limit = 500): string[
 /** Injectable seams for `--reserve` (W1-T1055) — the reserver itself, the git runner behind the
  *  holder read, and the holder classifier. Real callers pass none of them; a test drives every arm
  *  (created / taken-then-created / unreachable) without a git remote. */
-export interface NextTaskIdReserveDeps {
+export interface NextTaskIdReserveDeps extends TaskIdDestinationChecks {
   repoRoot?: string;
   reserver?: RemoteRefReserver;
   runGit?: (args: string[]) => { status: number | null; stdout: string; stderr: string };
@@ -17037,6 +17094,7 @@ function buildReservationAuditReport(opts: {
   self: { owner: string; repo: string };
   deps: NextTaskIdReserveDeps;
   reap?: boolean;
+  destinationSnapshot?: TaskIdDestinationSnapshot;
 }): ReservationAuditReport | "unreadable-reservations" {
   const run = gitRunAdapter(opts.deps.runGit ?? ((args: string[]) => {
     const r = spawnSync("git", args, { cwd: opts.deps.repoRoot ?? repoRoot, encoding: "utf8", maxBuffer: 1 << 26 });
@@ -17047,6 +17105,7 @@ function buildReservationAuditReport(opts: {
   if (refs.status === "unknown") return "unreadable-reservations";
   const reservations = refs.refs.map((r) => ({ ...r, anchor: readReservationAuditAnchor(r.ref, run) }));
   const declaredIds = reservationAuditPlanIds(opts.planPath);
+  for (const id of opts.destinationSnapshot?.ids ?? []) declaredIds.add(id);
   const historicalIds = new Set(opts.deps.auditHistoryIds ? opts.deps.auditHistoryIds().map((n) => `W1-T${n}`) : [...reservationAuditHistoryIds(opts.planPath)]);
   const branches = openRunBranchesByTaskId(run);
   let openPrTrailerIds: Set<string> | "unknown" = "unknown";
@@ -17058,6 +17117,11 @@ function buildReservationAuditReport(opts: {
       openPrTrailerIds = idsFromOpenPrTrailers((opts.deps.openPrTexts ?? (() => openPrMintTexts(opts.self.owner, opts.self.repo)))());
     } catch (err) {
       degraded.push(`open PR read failed: ${String(err)}`);
+    }
+  }
+  if (openPrTrailerIds !== "unknown") {
+    for (const text of opts.destinationSnapshot?.openPrTexts ?? []) {
+      for (const id of mentionedTaskIds(text).filter(isAllocatableTaskId)) openPrTrailerIds.add(`W1-T${id}`);
     }
   }
   if (branches.status === "unknown") degraded.push(branches.reason);
@@ -17078,7 +17142,7 @@ function buildReservationAuditReport(opts: {
 }
 
 function buildReservationReapReport(
-  opts: { planPath: string; self: { owner: string; repo: string }; deps: NextTaskIdReserveDeps },
+  opts: { planPath: string; self: { owner: string; repo: string }; deps: NextTaskIdReserveDeps; destinationSnapshot?: TaskIdDestinationSnapshot },
   run: ReturnType<typeof gitRunAdapter>,
 ): ReservationAuditReport {
   const clock = clockFromMillisFn(opts.deps.auditNowMs);
@@ -17134,6 +17198,7 @@ function buildReservationReapReport(
     return rows;
   }, [] as ReservationAuditPull[]);
   const declaredIds = read("plan read", () => reservationAuditPlanIds(opts.planPath), new Set<string>());
+  for (const id of opts.destinationSnapshot?.ids ?? []) declaredIds.add(id);
   const namespace = `refs/rmd-reap/${randomUUID()}/`;
   let historicalIds = new Set<string>();
   try {
@@ -17164,6 +17229,9 @@ function buildReservationReapReport(
     }, undefined);
   }
   const openPrTrailerIds = idsFromOpenPrTrailers(pulls.filter(p => p.state === "open").map(p => p.body ?? ""));
+  for (const text of opts.destinationSnapshot?.openPrTexts ?? []) {
+    for (const id of mentionedTaskIds(text).filter(isAllocatableTaskId)) openPrTrailerIds.add(`W1-T${id}`);
+  }
   for (const pull of pulls.filter(p => p.state === "open")) {
     const match = RUN_BRANCH_TASK_REF_RE.exec(`refs/heads/${pull.head.ref}`);
     if (match) openPrTrailerIds.add(match[1]);
@@ -17544,8 +17612,15 @@ export async function nextTaskIdCommand(
       return 2;
     }
   }
+  let destinationSnapshot: TaskIdDestinationSnapshot | undefined;
+  try {
+    destinationSnapshot = taskIdDestinationSnapshot(deps, offline);
+  } catch (error) {
+    console.error(`### rmd next-task-id: ${(error as Error).message}`);
+    return 2;
+  }
   if (rest.includes("--audit")) {
-    const report = buildReservationAuditReport({ planPath, offline, thresholdDays: auditAgeDays, self, deps, reap });
+    const report = buildReservationAuditReport({ planPath, offline, thresholdDays: auditAgeDays, self, deps, reap, destinationSnapshot });
     if (report === "unreadable-reservations") {
       console.error("### rmd next-task-id --audit: cannot read origin refs/rmd-id/*");
       return 2;
@@ -17566,6 +17641,7 @@ export async function nextTaskIdCommand(
       planPath,
       repoRoot: mintRepoRoot,
       openPrTexts: offline ? undefined : (deps.openPrTexts ?? (() => openPrMintTexts(self.owner, self.repo))),
+      destinationSnapshot: destinationSnapshot ?? null,
     });
   } catch (e) {
     console.error(`### rmd next-task-id: ${(e as Error).message}`);
