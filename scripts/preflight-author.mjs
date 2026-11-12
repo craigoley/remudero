@@ -22,7 +22,7 @@ import { tmpdir } from 'node:os';
 import { accountAuthorPhases } from './lib/author-phase-accounting.mjs';
 import { AUTHOR_WORKFLOW_CONTRACT_MAX_MS, AUTHOR_WORKFLOW_CONTRACT_SUITES, authorWorkflowContractInputs } from './lib/author-workflow-contract.mjs';
 import { evaluateHeadIdentityGate } from './head-identity-gate.mjs';
-import { guardedAuthorEntry, MacAuthorCapacityRefusal } from './lib/mac-author-admission.mjs';
+import { guardedAuthorEntry, MacAuthorCapacityRefusal, macAuthorRefusalReport } from './lib/mac-author-admission.mjs';
 import { readBoundedJsonFile } from './lib/coverage-disk-profile.mjs';
 import { scanRepo as scanCoverageBlanking } from './coverage-session-blanking-check.mjs';
 
@@ -213,6 +213,22 @@ export function partialSentence(ran, total, setAside) {
 /** W1-T9919 — the line census-precheck prints when its suite child's time bound is the ONLY unmeasured cause
  *  (CENSUS_TIME_BOUND_LABEL in scripts/census-precheck.mjs). That backstop fires on a loaded, healthy host. */
 export const CENSUS_TIME_BOUND_LINE = 'census-precheck: census suites NOT MEASURED (time bound) - ';
+
+/** W1-T11940 — the line census-precheck prints when --skip-when-unread skips its full pass
+ *  (CENSUS_FULL_PASS_SKIPPED_LABEL in scripts/census-precheck.mjs). */
+export const CENSUS_FULL_PASS_SKIPPED_LINE = 'census-precheck: full pass SKIPPED (no census-read file changed) - ';
+
+/** The author's census step: counts first, and the full suite pass only when the diff touches a census read. */
+export function authorCensusPrecheckArgs(root, baseSha) {
+  return [join(root, 'scripts/census-precheck.mjs'), '--base', baseSha, '--skip-when-unread'];
+}
+
+/** Whether the census step skipped its full pass, and the counts it relied on, read from its own stdout line. */
+export function censusFullPassNote(result) {
+  const line = String(result?.stdout ?? '').split('\n').find((l) => l.startsWith(CENSUS_FULL_PASS_SKIPPED_LINE));
+  if (result?.status !== 0 || result.signal || result.error || line === undefined) return { skipped: false };
+  return { skipped: true, reliedOn: line.slice(CENSUS_FULL_PASS_SKIPPED_LINE.length).trim() };
+}
 
 /** Whether a census-precheck result is the one unmeasured census an author run goes on past, as pre-push does:
  *  a complete exit 2 whose stderr has that line and no other NOT MEASURED or could-not-measure line. */
@@ -599,7 +615,9 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
           tree: boundContext.source.tree, ownerNonce: boundContext.owner.ownerNonce,
           allocations: Object.keys(boundContext.allocations) };
       };
-      const census = runStep('census-precheck', [join(root, 'scripts/census-precheck.mjs'), '--base', receipt.baseSha]);
+      const census = runStep('census-precheck', authorCensusPrecheckArgs(root, receipt.baseSha));
+      receipt.censusFullPass = censusFullPassNote(census);
+      if (receipt.censusFullPass.skipped) console.log(`census full pass SKIPPED - ${receipt.censusFullPass.reliedOn}`);
       const censusTimeBound = censusTimeBoundOnly(census);
       const censusOk = (census.status === 0 || censusTimeBound) && !census.signal && !census.error;
       report('census-precheck', census, censusOk, censusTimeBound ? { notMeasured: 'time-bound' } : {});
@@ -864,12 +882,16 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
       : receipt.selection === 'over-capacity' ? 'over-capacity' : 'passed';
   } catch (error) {
     receipt.verdict = error instanceof MacAuthorCapacityRefusal ? 'over-capacity' : 'refused';
+    let refusalLines = [];
     if (error instanceof MacAuthorCapacityRefusal) {
-      (receipt.hostCapacity ??= []).push({stage: error.stage, ...error.admission});
+      const { summary, lines } = macAuthorRefusalReport(error.stage, error.admission);
+      (receipt.hostCapacity ??= []).push({stage: error.stage, ...error.admission, ...summary});
       receipt.affectedTestsNotRunReason = error.message;
+      refusalLines = lines;
     }
     receipt.error = error.message;
     console.error(`author preflight ${error instanceof MacAuthorCapacityRefusal ? 'NOT_RUN' : 'REFUSED'}: ${error.message}`);
+    for (const line of refusalLines) console.error(line);
   }
   // W1-T11914: the one place a caller reads "may I push?"; derived from the verdict just set, never an input to it.
   Object.assign(receipt, authorPushEligibility(receipt));

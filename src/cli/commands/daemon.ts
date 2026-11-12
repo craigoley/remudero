@@ -81,7 +81,7 @@ import { loadMounts, mountsPath } from "../../lib/mounts.js";
 import { loadPolicy, policyPath, type FreshnessRestartValues } from "../../lib/policy.js";
 import { refreshReviewPublisherToken as refreshInstallationToken } from "../../lib/review.js";
 import { feedbackStatusOnMain } from "../../lib/auto-triage.js";
-import { bootSweepDispatchClaims, dispatchClaimRef, releaseLandedDispatchClaims, claimMintedByRerun, type DispatchClaimReserver, type DispatchClaimReserverAsync } from "../../lib/dispatch-claim.js";
+import { bootSweepDispatchClaimsAsync, dispatchClaimRef, releaseLandedDispatchClaims, claimMintedByRerun, type DispatchClaimReserverAsync } from "../../lib/dispatch-claim.js";
 import { loadCreditStore, saveCreditStore, recordCredit, refusesAsPlanOnly, buildCommitTrailerIndex, projectPlan, independentBlockReleasesFrom, readLedgerLines, readLedgerSnapshot, buildLedgerIndex, createDispatchBreakerCache, evaluateDispatchBreakerCorroboratedDetailed, hasRepeatedTaskAttributableLifetimeDispatches, type LedgerLines, type LedgerSnapshot, type DispatchBreakerDetail, type GitHub, type PrRef, type StatusProjection, taskIdFromRunBranch } from "../../lib/status.js";
 import { DEFAULT_SWEEP_POLICY, productionFixPressure, readIdleLightCadence, readObservedReviewMedianMs } from "../../lib/sweep.js";
 import { startMainEntryWatch } from "../../lib/main-entry.js";
@@ -758,7 +758,7 @@ export async function daemonCommand(
     processKill?: (pid: number, signal: NodeJS.Signals) => boolean;
     /** Best-effort boot projection for provider routing; production writes one bounded state file. */
     writeProviderRoutingStatus?: (root: string, input: ProviderRoutingWriteInput) => void;
-    bootClaimReserver?: DispatchClaimReserver;
+    bootClaimReserver?: DispatchClaimReserverAsync;
     tickClaimReserver?: DispatchClaimReserverAsync;
     /** Opt-in NEW-build reservation reader; production uses the private-dir environment adapter. */
     checkHeavyNewBuild?: DispatchGovernorDeps["checkHeavyNewBuild"];
@@ -827,7 +827,6 @@ export async function daemonCommand(
     daemonPlanReaders,
     dailyCostCeilingReloader,
     dispatchClaimReserverAsyncFor,
-    dispatchClaimReserverFor,
     dispatchFilingCache,
     dispatchFilingPrefetch,
     dispatchValueContextForSelection,
@@ -1384,18 +1383,20 @@ export async function daemonCommand(
   bootPhases.mark("wiring");
   const bootClaimLock = fixedClock(clockFromMillisFn(deps.now).now());
   const landedClaimRerunReported = new Set<string>();
-  try {
-    // W1-T10896: the sweep also judges this host's own pre-restart claims and ends the runs they held.
-    bootSweepDispatchClaims(deps.bootClaimReserver ?? dispatchClaimReserverFor(join(config.root, "repos", target.repo)), {
+  // W1-T10896: the sweep also judges this host's own pre-restart claims and ends the runs they held.
+  // W1-T12238: the boot does not wait for it; the first dispatch selection and the lock release do.
+  const claimSweepSettled: Promise<void> = (async () => {
+    await bootSweepDispatchClaimsAsync(deps.bootClaimReserver ?? dispatchClaimReserverAsyncFor(join(config.root, "repos", target.repo)), {
       localHost: hostname(),
       lockHeldSinceMs: bootClaimLock.now(),
       lockHeldSinceIso: bootClaimLock.iso(),
       stateDir: dirname(ledgerPath),
       log,
     });
-  } catch (error) {
+  })().catch((error: unknown) => {
     log("dispatch.claim_sweep_failed", { surface: "boot-sweep", error: String((error as Error)?.message ?? error).slice(0, 300) });
-  }
+  });
+  cleanup.push({ resource: "claim_sweep", close: () => claimSweepSettled });
   bootPhases.mark("claim_sweep");
   // Publish only after this process owns the shared daemon/drain lock. Dry-run returned above,
   // and a refused second daemon returned from the catch, so neither can replace material state.
@@ -1583,6 +1584,8 @@ export async function daemonCommand(
         requestReview: requestLandingReview,
         // W1-T5460: drain the console decisions `rmd serve` queued under the same state root.
         stateRoot: config.root,
+        // W1-T12203: each pass also lands in the plan destination checkout while the host file names one.
+        planDestinationStateDir: join(config.root, "state"),
       })
     : undefined;
   const sweepFeedbackLandingRung = feedbackLandingRungs?.perPoll;
@@ -1874,6 +1877,7 @@ export async function daemonCommand(
     const summary = await runDaemonFn(
       plan,
       {
+        claimSweepSettled,
         bootPhases,
         refreshMerged,
         refreshMergedAsync: readTick ? buildDaemonReadRefresher({

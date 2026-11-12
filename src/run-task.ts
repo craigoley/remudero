@@ -818,6 +818,9 @@ import {
   type LandingReviewRequest,
   landTaskFilesAsync,
   stagedTaskFiles,
+  stagedTaskFileOrigins,
+  taskFileOrigin,
+  taskFilesLandingBranchAsync,
   type LandTaskFilesOpts,
   type TaskFileInput,
   type TaskFilesLandingResult,
@@ -1445,6 +1448,10 @@ import {
   changedTaskIds,
   rawChangedTaskIds,
   statusFlipOnlyTaskIds,
+  assertDependenciesKnown,
+  movedTaskIds,
+  planFromFiles,
+  planSourceConflicts,
   criteriaAdded,
   DUPLICATE_SLUG_SHINGLE_K,
   followUpCarriesCriteria,
@@ -1463,6 +1470,8 @@ import {
   type LintOpts,
   type LintViolation,
   type DuplicateSurfaceCorpusEntry,
+  type PlanFiles,
+  type PlanSourceConflict,
 } from "./lib/task-linter.js";
 import { readPriorRefusal, preDispatchContractRevision, writePriorRefusal, repairRefusedTask, type RefusalViolation } from "./lib/dispatch-repair.js";
 import { REPLAY_CORPUS_BOUND, ReplayDispatch, boundedCorpus, harnessRunnerOver, replayOptIn,
@@ -18791,8 +18800,19 @@ export function planLintOutcomeFromOutput(code: number, lines: string[], mergeBa
   };
 }
 
+/** W1-T12171: the plan monolith at `monolithRel` under `root` and its `tasks.d` shards, keyed by path under `root`. */
+function readPlanFiles(root: string, monolithRel: string): Map<string, string> {
+  const files = new Map([[monolithRel, readFileSync(join(root, monolithRel), "utf8")]]);
+  const shardRel = join(dirname(monolithRel), "tasks.d");
+  const names = existsSync(join(root, shardRel)) ? readdirSync(join(root, shardRel)) : [];
+  for (const name of names.filter((f) => f.endsWith(".yaml") || f.endsWith(".yml")).sort()) {
+    files.set(join(shardRel, name), readFileSync(join(root, shardRel, name), "utf8"));
+  }
+  return files;
+}
+
 export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps = {}): Promise<number> {
-  const badArg = unknownArgError("lint-plan", rest, ["--plan", "--base", "--repo-root"], ["--all", "--merge-base", "--offline"]);
+  const badArg = unknownArgError("lint-plan", rest, ["--plan", "--base", "--repo-root", "--code-root"], ["--all", "--merge-base", "--offline"]);
   if (badArg) {
     console.error(badArg + "\n" + USAGE);
     return 2;
@@ -18802,8 +18822,11 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
   const allFlag = rest.includes("--all");
   const offline = deps.offline === true || rest.includes("--offline");
   const checkoutRoot = deps.repoRoot ?? resolve(flagValue(rest, "--repo-root") ?? repoRoot);
+  // W1-T12171: the checkout that holds the code a task names. Without the option it is the plan's own checkout.
+  const codeRootArg = flagValue(rest, "--code-root");
+  const codeRoot = codeRootArg !== undefined ? resolve(codeRootArg) : checkoutRoot;
   let localRepoName: string | undefined;
-  try { localRepoName = resolveOwnerRepoAt(checkoutRoot).repo; } catch { /* no origin identity: preserve existing lint behavior */ }
+  try { localRepoName = resolveOwnerRepoAt(codeRoot).repo; } catch { /* no origin identity: preserve existing lint behavior */ }
   const planPathArg = flagValue(rest, "--plan");
   const planPath = planPathArg !== undefined ? resolve(planPathArg) : join(checkoutRoot, "plan", "tasks.yaml");
   // W1-T120: an explicit --plan OUTSIDE the root is refused here BY NAME, before --base/git-show
@@ -18823,13 +18846,29 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
   const baseLabel = scopeBase === baseRef ? baseRef : `${baseRef} at merge-base ${scopeBase!.slice(0, 12)}`;
   let plan: Plan;
   let planRaw: string;
+  const planRel = relative(checkoutRoot, planPath);
+  let planApart: { headFiles: PlanFiles; codeFiles: PlanFiles; codePlan: Plan } | undefined;
   try {
     planRaw = readFileSync(planPath, "utf8");
-    plan = loadPlan(planPath);
+    if (codeRootArg === undefined) {
+      plan = loadPlan(planPath);
+    } else {
+      const headFiles = readPlanFiles(checkoutRoot, planRel);
+      const codeFiles = readPlanFiles(codeRoot, planRel);
+      const codePlan = planFromFiles(codeFiles, (rel) => join(codeRoot, rel));
+      plan = planFromFiles(headFiles, (rel) => join(checkoutRoot, rel));
+      assertDependenciesKnown(plan.tasks, new Set([...plan.byId.keys(), ...codePlan.byId.keys()]));
+      planApart = { headFiles, codeFiles, codePlan };
+    }
   } catch (e) {
     console.error(`### rmd lint-plan: ${(e as Error).message}`);
     return 2;
   }
+  // The plan a dependency resolves in: with --code-root, a task the code root's plan holds also counts.
+  const dependencyPlan: Plan = planApart === undefined ? plan : (() => {
+    const tasks = [...plan.tasks, ...planApart.codePlan.tasks.filter((t) => !plan.byId.has(t.id))];
+    return { tasks, byId: new Map(tasks.map((t) => [t.id, t])) };
+  })();
 
   let scope: Set<string> | undefined;
   let oldById: Map<string, Task> | undefined;
@@ -18841,15 +18880,20 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
   // status flip to a closed state (queued -> merged, e.g. `plan-reconcile --write`'s own write) —
   // named here so the summary can report them, never silently drop them (design point (iv)).
   let statusFlipCarvedIds: string[] = [];
+  // W1-T12171: tasks moved unchanged from the code root's plan, and ids both plans hold with different bytes.
+  let movedIds: string[] = [];
+  let movedCandidates = new Set<string>();
+  let sourceConflicts: PlanSourceConflict[] = [];
   if (baseRef) {
-    const relPath = relative(checkoutRoot, planPath);
+    const relPath = planRel;
     const basePathCache = new Map<string, boolean>();
     pathExistsAtBase = (rel: string) => {
       const cached = basePathCache.get(rel);
       if (cached !== undefined) return cached;
       let exists = false;
       try {
-        hostWorktreeGit(checkoutRoot, ["cat-file", "-e", `${scopeBase}:${rel}`], { stdio: "ignore" });
+        // With --code-root, the code of a plan-only change is the code root's commit, unchanged.
+        hostWorktreeGit(codeRoot, ["cat-file", "-e", `${planApart === undefined ? scopeBase : "HEAD"}:${rel}`], { stdio: "ignore" });
         exists = true;
       } catch (e) {
         void e;
@@ -18882,8 +18926,15 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
       // guarded), while `rawChangedTaskIds` needs only the base's raw TEXT, so the changed-tasks
       // scope survives. A broken HEAD plan still fails loudly earlier, at `loadPlan(planPath)`.
       let oldPlan: Plan | undefined;
+      let basePlanFiles: PlanFiles | undefined;
       try {
-        oldPlan = loadPlan(tmpFile);
+        if (planApart === undefined) {
+          oldPlan = loadPlan(tmpFile);
+        } else {
+          const tmpFiles = readPlanFiles(tmpDir, "tasks.yaml");
+          basePlanFiles = new Map([...tmpFiles].map(([rel, text]) => [rel === "tasks.yaml" ? relPath : join(dirname(relPath), rel), text]));
+          oldPlan = planFromFiles(basePlanFiles, (rel) => `${scopeBase}:${rel}`);
+        }
       } catch (e) {
         console.error(
           `### rmd lint-plan: the base plan at ${baseRef} does not itself load ` +
@@ -18894,6 +18945,12 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
       scope = oldPlan ? changedTaskIds(oldPlan.tasks, plan.tasks) : new Set<string>();
       if (oldPlan) {
         oldById = new Map(oldPlan.tasks.map((t) => [t.id, t]));
+        if (planApart !== undefined && basePlanFiles !== undefined) {
+          // The base is the union of both plans; the plan repository's record wins for an id both hold.
+          for (const t of planApart.codePlan.tasks) if (!oldById.has(t.id)) oldById.set(t.id, t);
+          movedCandidates = movedTaskIds(plan.tasks, checkoutRoot, planApart.headFiles, planApart.codeFiles);
+          sourceConflicts = planSourceConflicts(basePlanFiles, planApart.codeFiles).filter((c) => !movedCandidates.has(c.id));
+        }
         // Tasks this PR introduces outright (absent at the base ref) — the only tasks that
         // can possibly BE a post-merge-amendment follow-up (W1-T180).
         newTaskIds = new Set(plan.tasks.filter((t) => !oldById!.has(t.id)).map((t) => t.id));
@@ -18938,6 +18995,7 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
       // it has left the population the open-task rules govern (design point (i)).
       const statusFlipCarve = statusFlipOnlyTaskIds(oldCorpusTexts, newCorpusTexts);
       for (const id of statusFlipCarve) scope.delete(id);
+      movedIds = [...movedCandidates].filter((id) => scope!.delete(id)).sort(); // neither a new filing nor an amendment
       statusFlipCarvedIds = [...statusFlipCarve].sort();
       const diffText = hostWorktreeGit(checkoutRoot, ["diff", "--no-ext-diff", "--unified=0", `${scopeBase}...HEAD`, "--", "src"], {
         maxBuffer: 64 * 1024 * 1024,
@@ -19001,10 +19059,10 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
       const github = (deps.ghGateway ?? ghGateway)(owner, repo);
       const evidenceIds = new Set(scope);
       const pending = [...scope];
-      while (pending.length > 0) for (const id of plan.byId.get(pending.pop()!)?.depends_on ?? []) {
+      while (pending.length > 0) for (const id of dependencyPlan.byId.get(pending.pop()!)?.depends_on ?? []) {
         if (!evidenceIds.has(id)) { evidenceIds.add(id); pending.push(id); }
       }
-      const tasks = plan.tasks.filter(t => evidenceIds.has(t.id));
+      const tasks = dependencyPlan.tasks.filter(t => evidenceIds.has(t.id));
       const scopedPlan: Plan = { tasks, byId: new Map(tasks.map(t => [t.id, t])) };
       dependencyStatusByTaskId = (deps.projectPlan ?? projectPlan)(scopedPlan, {
         ledgerPath: ledgerPathFor(config), github, writeCreditStore: SERVE_KEEPS_CREDITS_IN_MEMORY,
@@ -19101,7 +19159,7 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
       releasedIdsForAdmission = new Set<string>();
     }
   }
-  const knownRepos = knownPlanRepos(checkoutRoot); // W1-T4700: the repo rule's names, read once per pass
+  const knownRepos = knownPlanRepos(codeRoot); // W1-T4700: the repo rule's names, read once per pass
   for (const task of plan.tasks) {
     if (scope && !scope.has(task.id)) continue;
     if (wholePlanScope && !wholePlanScope.has(task.id)) continue;
@@ -19172,7 +19230,7 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
     }
     // impl-DO: the CALL-SITE check needs to know whether a module already exists, and the linter
     // is pure — so the predicate is supplied here, the one place holding a real checkout to ask.
-    opts.moduleExists = (rel: string) => existsSync(join(checkoutRoot, rel));
+    opts.moduleExists = (rel: string) => existsSync(join(codeRoot, rel));
     opts.localRepoName = localRepoName;
     opts.knownRepos = knownRepos;
     // W1-T9292: an unminted id BLOCKS only on a task this diff adds; one already on the base, every one in a whole-plan
@@ -19209,9 +19267,9 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
       }
       if (planOnlyFilingDiff !== undefined) opts.planOnlyFiling = planOnlyFilingDiff;
       // #12389: a changed shard's doctrine citations must resolve, or name a page its own files: creates. Read once.
-      doctrineCitations ??= doctrineCitationFactsAt(checkoutRoot);
+      doctrineCitations ??= doctrineCitationFactsAt(codeRoot);
       opts.doctrineCitations = doctrineCitations;
-      opts.resolveNameFilteredCandidates = (rawName: string) => resolveNameFilteredCandidates(checkoutRoot, rawName);
+      opts.resolveNameFilteredCandidates = (rawName: string) => resolveNameFilteredCandidates(codeRoot, rawName);
       // W1-T1225: a `grep:` proof's named file, read ONLY in --base mode (`scope` populated iff
       // `baseRef` was given) — the same changed-tasks scoping W1-T497's resolver above uses, and
       // for the identical reason: a changed task's own grep proofs name a handful of files, so
@@ -19219,7 +19277,7 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
       // 66.4s and this does not reopen it). Absent path (not written yet) ⇒ undefined, exactly
       // the "no predicate ⇒ no opinion" contract `opts.moduleExists` above already uses.
       opts.readGrepProofFile = (rel: string) => {
-        const abs = join(checkoutRoot, rel);
+        const abs = join(codeRoot, rel);
         if (!existsSync(abs)) return undefined;
         try {
           return readFileSync(abs, "utf8");
@@ -19237,7 +19295,7 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
       // file in head or base. This stays scoped: the whole-plan pass must not retroactively refuse
       // the standing population of older machine-authored records.
       opts.machineFilingAdmission = {
-        plan,
+        plan: dependencyPlan,
         releasedIds: releasedIdsForAdmission,
         isMerged: (candidate) => statusByTaskId?.get(candidate.id)?.merged ?? false,
         dependencyEvidence,
@@ -19321,6 +19379,11 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
   // pointed at a fixture tree with no policy.yaml of its own is a no-op here
   // (nothing to check), never a spurious failure over a file that was never
   // meant to exist at that path.
+  for (const c of sourceConflicts) {
+    failing++;
+    console.error(`✗ ${c.id}: the plan repository and the code root hold different bytes for this id: ` +
+      `${scopeBase}:${c.planPath} and ${join(codeRoot, c.codePath)}`);
+  }
   const policyFile = join(dirname(planPath), "policy.yaml");
   if (existsSync(policyFile)) {
     try {
@@ -19385,7 +19448,10 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
       statusFlipCarvedIds.length > 0
         ? ` (${statusFlipCarvedIds.length} status-flip-only, excluded from --base scope: ${statusFlipCarvedIds.join(", ")})`
         : "";
-    summary = `${checked} task(s) checked (${scope.size} new/changed vs ${baseLabel})${carvedNote} — ${failing} failing, ${warned} warning(s)`;
+    const movedNote = movedIds.length > 0
+      ? ` (${movedIds.length} moved unchanged from the code root, not judged: ${movedIds.join(", ")})`
+      : "";
+    summary = `${checked} task(s) checked (${scope.size} new/changed vs ${baseLabel})${carvedNote}${movedNote} — ${failing} failing, ${warned} warning(s)`;
   } else if (wholePlanScope) {
     summary =
       `${checked} task(s) checked (open tasks only) [scoped by ${wholePlanScopeKey}` +
@@ -27676,6 +27742,7 @@ function* retractGardenBranchSteps(
  *  garden PR opens READY FOR REVIEW — never a draft (operator ruling, 2026-09-24: a draft sits like a
  *  stuck PR) — so the sweep reviews and arms it like any other fleet PR (`GARDEN_BRANCH_RE`). */
 export function gardenCheckout(opts: GardenCheckoutOpts): GardenCheckout {
+  if (opts.taskFilesOnly) throw new Error(`${opts.name} garden: a checkout that files only task files lands through the async checkout`);
   const branch = `${opts.name}-garden-${(opts.clock ?? systemClock).now()}`;
   const root = join(opts.worktreesRoot, branch);
   worktreeAdd(opts.repoDir, root, branch, "origin/main", { log: opts.log });
@@ -27695,8 +27762,11 @@ export function gardenCheckout(opts: GardenCheckoutOpts): GardenCheckout {
 }
 
 export async function gardenCheckoutAsync(opts: GardenCheckoutOpts): Promise<GardenCheckoutAsync> {
+  if (opts.taskFilesOnly && !opts.taskFilesLanding) throw new Error(`${opts.name} garden: a checkout that files only task files needs the task-file landing`);
   const branch = `${opts.name}-garden-${(opts.clock ?? systemClock).now()}`;
   const root = join(opts.worktreesRoot, branch);
+  // W1-T12222: the id holder is the branch that files it, so such a checkout reserves on the landing branch.
+  const reservationBranch = opts.taskFilesOnly ? await taskFilesLandingBranchAsync({ owner: opts.owner, repo: opts.repo }) : branch;
   await worktreeAddAsync(opts.repoDir, root, branch, "origin/main", { log: opts.log });
   const io: GardenLandIo = {
     git: async (...args: string[]) => (await execFilePromise("git", ["-C", root, ...args], { encoding: "utf8" })).stdout,
@@ -27710,7 +27780,7 @@ export async function gardenCheckoutAsync(opts: GardenCheckoutOpts): Promise<Gar
   };
   return {
     root,
-    branch,
+    branch: reservationBranch,
     land: (landing) => runStepsAsync(gardenLandSteps(opts, root, branch, landing, io)),
     dispose: () => worktreeRemoveAsync(opts.repoDir, root),
   };
@@ -27730,6 +27800,9 @@ export interface GardenCheckoutOpts {
   /** W1-T12221: the shared landing of task files: its state root (`config.root`) and its seams. Absent,
    *  every land opens its own PR. */
   taskFilesLanding?: Pick<LandTaskFilesOpts, "stateRoot" | "gh" | "planPrPreflight">;
+  /** W1-T12222: every land is a task file, new or edited, through `taskFilesLanding`; `branch` is the landing
+   *  branch, and a land with any other path is refused. Async checkout only. */
+  taskFilesOnly?: true;
 }
 
 interface GardenLandIo {
@@ -27742,33 +27815,52 @@ interface GardenLandIo {
 
 /** W1-T12221: the landing inputs when every path is an edit of a task file main holds and the body's
  *  `## Acceptance` gives its criterion; otherwise nothing, and the land opens its own PR. */
-function* sealedTaskFileInputs(root: string, paths: readonly string[], body: string, git: GardenLandIo["git"]): Steps<TaskFileInput[] | undefined> {
+function* sealedTaskFileInputs(root: string, paths: readonly string[], body: string, git: GardenLandIo["git"], newFiles: boolean): Steps<TaskFileInput[] | undefined> {
   const shardDir = relative(root, join(resolveRepoLayout(root).planDir, "tasks.d"));
   const criteria = parseAcceptanceBlock(body).filter((c) => c.proof !== "");
   const inputs: TaskFileInput[] = [];
   for (const relPath of paths) {
     if (!relPath.startsWith(`${shardDir}/`) || !/\.ya?ml$/.test(relPath) || !existsSync(join(root, relPath))) return undefined;
+    let newFile = false;
     try {
       yield* step(() => git("cat-file", "-e", `HEAD:${relPath}`));
     } catch {
-      return undefined; // not an edit: main does not hold the path, so the land opens its own PR
+      if (!newFiles) return undefined; // not an edit: main does not hold the path, so the land opens its own PR
+      newFile = true;
     }
     const criterion = criteria.find((c) => c.proof.endsWith(` in ${relPath}`)) ?? (paths.length === 1 && criteria.length === 1 ? criteria[0] : undefined);
     if (criterion === undefined) return undefined;
-    inputs.push({ relPath, content: readFileSync(join(root, relPath), "utf8"), claim: criterion.claim, proof: criterion.proof });
+    inputs.push({ relPath, content: readFileSync(join(root, relPath), "utf8"), claim: criterion.claim, proof: criterion.proof, ...(newFile ? { newFile: true as const } : {}) });
   }
   return inputs.length > 0 ? inputs : undefined;
 }
 
 /** W1-T12221: the landing PR when it carries every path, a wait when each path waits, else nothing. */
 function* landSealedTaskFiles(opts: GardenCheckoutOpts, paths: readonly string[], inputs: TaskFileInput[], land: NonNullable<GardenLandIo["landTaskFiles"]>): Steps<GardenLandResult> {
+  // W1-T12222: a waiting file holds its finding. A new file whose origin a file in the queue already records is the
+  // same finding filed twice, so it is not staged; the id it reserved goes back, as for any land that opens nothing.
+  if (opts.taskFilesOnly === true) {
+    const held = stagedTaskFileOrigins(opts.taskFilesLanding!.stateRoot);
+    const twice = inputs.flatMap((i) => {
+      const origin = i.newFile === true ? taskFileOrigin(i.content) : "";
+      const first = origin === "" ? undefined : held.find((h) => h.origin === origin && h.relPath !== i.relPath);
+      return first === undefined ? [] : [{ path: i.relPath, reason: `the finding ${origin} already waits in ${first.relPath}` }];
+    });
+    if (twice.length > 0) {
+      opts.log(`${opts.name}.garden_sealed_landing`, { outcome: "refused", paths, pr_url: null, refused: twice });
+      return undefined;
+    }
+  }
   const result = yield* step(() => land(inputs));
   const carried = paths.every((p) => result.landed.includes(p));
-  const outcome = result.prUrl !== undefined && carried ? "opened" : paths.every((p) => result.landed.includes(p) || result.waiting.includes(p)) ? "waiting" : "not_landed";
+  const queued = paths.every((p) => result.landed.includes(p) || result.waiting.includes(p));
+  // W1-T12222: a file that is in the queue keeps the ids of its land, so a partly refused land of new files waits.
+  const partly = opts.taskFilesOnly === true && paths.some((p) => result.landed.includes(p) || result.waiting.includes(p));
+  const outcome = result.prUrl !== undefined && carried ? "opened" : queued || partly ? "waiting" : "not_landed";
   const refused = [...result.refused, ...result.setAside].filter((r) => paths.includes(r.path)).map((r) => ({ path: r.path, reason: r.reason }));
   opts.log(`${opts.name}.garden_sealed_landing`, { outcome, paths, pr_url: outcome === "opened" ? result.prUrl : null, ...(refused.length ? { refused } : {}), ...(result.error ? { error: result.error } : {}) });
   if (outcome === "opened") return result.prUrl;
-  if (outcome === "waiting") return { waiting: { paths: [...paths], stateRoot: opts.taskFilesLanding!.stateRoot } };
+  if (outcome === "waiting") return { waiting: { paths: paths.filter((p) => result.landed.includes(p) || result.waiting.includes(p)), stateRoot: opts.taskFilesLanding!.stateRoot, ...(opts.taskFilesOnly === true ? { filed: true as const } : {}) } };
   return undefined;
 }
 
@@ -27781,8 +27873,13 @@ function* gardenLandSteps(
 ): Steps<GardenLandResult> {
   const { paths, title, body } = landing;
   // W1-T12221: an edit of task files rides the shared landing PR, unless the caller keeps its own PR.
-  const sealed = landing.sealedLanding === false || io.landTaskFiles === undefined ? undefined : yield* sealedTaskFileInputs(root, paths, body, io.git);
+  const only = opts.taskFilesOnly === true && io.landTaskFiles !== undefined;
+  const sealed = !only && (landing.sealedLanding === false || io.landTaskFiles === undefined) ? undefined : yield* sealedTaskFileInputs(root, paths, body, io.git, only);
   if (sealed !== undefined) return yield* landSealedTaskFiles(opts, paths, sealed, io.landTaskFiles!);
+  if (only) {
+    opts.log(`${opts.name}.garden_sealed_landing`, { outcome: "refused", paths, pr_url: null, error: "a checkout that files only task files lands each path under plan/tasks.d with its criterion" });
+    return undefined;
+  }
   yield* step(() => io.git("add", "--", ...paths));
   // A garden log under docs/ changes what docs/docs-index.json must say, and docs-index-check
   // refuses a PR whose index is stale — regenerate it with the checkout's own generator.
@@ -27845,8 +27942,16 @@ export type { GardenBuildContext } from "./cli/commands/daemon.js";
 
 export function daemonGardenWorkspace(ctx: Pick<GardenBuildContext, "config" | "repoRoot" | "owner" | "repo" | "log">, name: GardenName): () => Promise<GardenCheckoutAsync> {
   return () => gardenCheckoutAsync({ name, repoDir: ctx.repoRoot, worktreesRoot: worktreesDir(ctx.config), owner: ctx.owner, repo: ctx.repo, log: ctx.log,
-    taskFilesLanding: { stateRoot: ctx.config.root } });
+    taskFilesLanding: { stateRoot: ctx.config.root }, ...(TASK_FILES_ONLY_GARDENS.has(name) ? { taskFilesOnly: true } : {}) });
 }
+
+/** W1-T12222: the gardens whose every land is a new task file under plan/tasks.d, read from the code. The first four
+ *  hold a wait in their state (`runGardenAsync`); the last three read a land through `landedPrUrl`, which returns the
+ *  reference of a waiting filing, and each keeps its own memory of what it filed. The flake-incident gardener runs on
+ *  the selector-shadow checkout. Not listed: `gate` (it also lands .github/workflows/ci-gate.yml), and the gardens that
+ *  edit task files they do not file, reserve no id, or land other files: plan, backlog, redesign, queue-judge, test,
+ *  config, export, knowledge, machine-judge, review-replay, fix-lane. */
+const TASK_FILES_ONLY_GARDENS: ReadonlySet<GardenName> = new Set(["ci-friction", "hot-file", "flow-remedy", "scout", "flow", "selector-shadow", "host-resource"]);
 
 /** One pass of one garden; it logs its own failure under the garden's own step name and never throws. */
 export type RegisteredGardenPass = (() => void | Promise<void>) & { due?: () => boolean | Promise<boolean> };
@@ -28190,7 +28295,8 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
       const sources: HotFileGardenSources = {
         ledgerRecords: () => readCiFrictionLedgerRecords(stateDir),
         mainHistory: (sinceIso) => readMainHistory(repoRoot, sinceIso),
-        planOrigins: () => loadPlan(resolveRepoLayout(repoRoot).planMonolith).tasks.map((t) => t.origin).filter((o): o is string => typeof o === "string"),
+        // W1-T12222: a file that waits for the landing holds its finding, so its origin counts as filed.
+        planOrigins: () => [...loadPlan(resolveRepoLayout(repoRoot).planMonolith).tasks.map((t) => t.origin).filter((o): o is string => typeof o === "string"), ...stagedTaskFileOrigins(config.root).map((s) => s.origin)],
         mintTaskId: ciLearningTaskIdMinter(repoRoot, log, undefined, mintOptions),
         fileExists: (file) => existsSync(join(repoRoot, file)),
       };
@@ -28225,7 +28331,7 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
         handoff: (h: { id: string; raw: string; origin: string }) => void stageFeedbackCapture(repoRoot, config.root, { id: h.id, raw: h.raw, origin: h.origin as FeedbackOrigin }),
         openIncidentOrigins: () => openIncidentFeedbackOrigins(repoRoot, config.root),
         escalate: raiseDuplicate,
-        planOrigins: () => loadPlan(resolveRepoLayout(repoRoot).planMonolith).tasks.map((t) => t.origin).filter((o): o is string => typeof o === "string"),
+        planOrigins: () => [...loadPlan(resolveRepoLayout(repoRoot).planMonolith).tasks.map((t) => t.origin).filter((o): o is string => typeof o === "string"), ...stagedTaskFileOrigins(config.root).map((s) => s.origin)],
         fileConsumer: fileConsumerVia(daemonGardenWorkspace(ctx, "host-resource"), mintTaskId, log),
       };
       const paced = lowYieldGardenPass(stateDir, "host-resource", () => runHostResourcePassAsync(ports).then(() => {}), {

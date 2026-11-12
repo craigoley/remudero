@@ -789,6 +789,42 @@ function reviewerGit(repoDir: string, deps: ReviewerCodeFreshnessOptions): GitRu
   return deps.git ?? ((args) => execFileSync("git", ["-C", repoDir, ...args], options));
 }
 
+/** W1-T11847: a full reviewer-code sha. A 12-character prefix, a blank or a missing value is incomplete evidence. */
+export function isFullReviewerCodeSha(value: unknown): value is string {
+  return typeof value === "string" && /^[a-f0-9]{40}(?:[a-f0-9]{24})?$/.test(value);
+}
+
+/** W1-T11847: whether a verdict's recorded reviewer code is still materially current at `originMainSha`, by the
+ *  same predicate the reviewer's own freshness gate uses. Incomplete evidence is unreadable, never fresh. */
+export function reviewerCodeFreshnessAt(codeSha: unknown, originMainSha: string, git: GitRunner): ReviewerCodeFreshness {
+  if (!isFullReviewerCodeSha(codeSha)) return { status: "unreadable", reason: "the verdict names no full reviewer code sha" };
+  if (!isFullReviewerCodeSha(originMainSha)) return { status: "unreadable", reason: "origin/main is unresolved" };
+  if (codeSha === originMainSha) return { status: "fresh", codeSha, originMainSha, advance: "none" };
+  return reviewerMainAdvance(git, codeSha, originMainSha);
+}
+
+/** W1-T11847: judges recorded reviewer-code shas against one main reading per judge, one result per sha. */
+export function reviewerCodeJudge(
+  readMain: () => ReviewerCodeFreshness | Promise<ReviewerCodeFreshness>,
+  repoDir: string,
+  deps: ReviewerCodeFreshnessOptions = {},
+): (codeSha: unknown) => Promise<ReviewerCodeFreshness> {
+  let main: Promise<ReviewerCodeFreshness> | undefined;
+  const judged = new Map<string, ReviewerCodeFreshness>();
+  return async (codeSha) => {
+    if (!isFullReviewerCodeSha(codeSha)) return reviewerCodeFreshnessAt(codeSha, "", reviewerGit(repoDir, deps));
+    main ??= Promise.resolve().then(readMain).catch((error: unknown): ReviewerCodeFreshness =>
+      ({ status: "unreadable", reason: `could not read origin/main: ${String(error)}` }));
+    const reading = await main;
+    if (reading.status === "unreadable") return reading;
+    const cached = judged.get(codeSha);
+    if (cached) return cached;
+    const result = reviewerCodeFreshnessAt(codeSha, reading.originMainSha, reviewerGit(repoDir, deps));
+    judged.set(codeSha, result);
+    return result;
+  };
+}
+
 /** Only the merge-base..main side can make loaded reviewer code stale. */
 function reviewerMainAdvance(
   git: GitRunner,

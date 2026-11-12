@@ -24,7 +24,7 @@
     - src/lib/deployer.ts
     - test/deploy/a-recycle-that-does-not-fit-waits-for-a-tick-it-fits.test.ts
     - test/deploy/a-recycle-that-cannot-finish-in-its-tick-never-pauses-the-fleet.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "A recycle that does not fit its deploy step is deferred, not refused. The deploy cycle writes no `DEPLOY_FAILED` marker and no `DEPLOY_LAST_FAILED` file, calls no `alert`, and writes no `deploy.restart_refused` row. Its result reason starts with `restart-deferred-fit:` and it keeps `pulledPendingRestart: true`"

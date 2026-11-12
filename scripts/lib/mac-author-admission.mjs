@@ -64,7 +64,7 @@ export function readMacAuthorAdmission(root, {platform = process.platform, scrat
     throw new Error('invalid bounded author allocation reserve');
   const result = {state: 'not-run', platform, minimumFreeBytes, ...(reserveBasis ? {reserveBasis} : {}),
     workspaceFreeBytes: null, scratchFreeBytes: null, ...(allocations ? {allocationFreeBytes: {}} : {}),
-    pressure: 'unknown', reasons: []};
+    capacityChecks: [], pressure: 'unknown', reasons: []};
   const below = allocations ? `below-${reserveBasis ?? 'bounded-profile'}-reserve`
     : minimumFreeBytes === MAC_AUTHOR_FREE_RESERVE_BYTES ? 'below-existing-20GiB-reserve'
     : reserveBasis ? `below-${reserveBasis}-reserve` : 'below-bounded-job-reserve';
@@ -72,14 +72,18 @@ export function readMacAuthorAdmission(root, {platform = process.platform, scrat
     : [['workspaceFreeBytes', root, minimumFreeBytes], ['scratchFreeBytes', scratch, minimumFreeBytes]];
   for (const [key, path, required] of targets) {
     const label = allocations ? `allocation:${key}` : key;
+    let observed = null;
     try {
       const fs = statfs(path), bytes = fs.bavail * fs.bsize;
       if (!Number.isSafeInteger(bytes) || bytes < 0) throw new Error('invalid filesystem capacity');
+      observed = bytes;
       if (allocations) result.allocationFreeBytes[key] = bytes; else result[key] = bytes;
       if (bytes < required) result.reasons.push(`${label}:${below}`);
     } catch (error) {
       result.reasons.push(`${label}:unavailable:${error.code ?? error.message}`);
     }
+    result.capacityChecks.push({filesystem: label, requiredFreeBytes: required, observedFreeBytes: observed,
+      shortfallBytes: observed === null ? null : Math.max(0, required - observed)});
   }
   try {
     const observed = spawn('/usr/sbin/sysctl', ['-n', 'kern.memorystatus_vm_pressure_level'],
@@ -230,9 +234,36 @@ export function guardedAuthorEntry(argv, {root, readAdmission = readMacAuthorAdm
 
 /** A refusal deliberately produces no author assurance. Never reuse an old PASS receipt. */
 function reportMacAuthorRefusal(root, admission) {
-  console.error(`author preflight NOT_RUN: ${JSON.stringify(admission)}`);
-  console.error('No slot, static checks, tests, dependency installation, cleanup or process termination started.');
+  const {summary, lines} = macAuthorRefusalReport('entry', admission);
+  console.error(`author preflight NOT_RUN: ${JSON.stringify({...admission, ...summary})}`);
+  for (const line of lines) console.error(line);
   console.error(`Any older ${root}/coverage/preflight-author.json is NOT evidence for this invocation.`);
+}
+
+// W1-T12297: the guarded janitor installed on the Mac agent account; only its dry run is ever named.
+export const MAC_AUTHOR_JANITOR_DRY_RUN = '"$HOME/Library/Application Support/remudero/remudero-janitor.sh" --dry-run';
+const REFUSAL_STAGE_WORK = {
+  entry: 'No slot, static checks, tests, dependency installation, cleanup or process termination started.',
+  'static-preflight': 'Author selection and the census precheck ran; static checks and tests did not start. ' +
+    'No cleanup or process termination started.',
+  'affected-tests': 'Author selection, the census precheck and static checks ran; tests did not start. ' +
+    'No cleanup or process termination started.',
+};
+
+/** W1-T12297: what a capacity refusal at `stage` tells the operator. Disk guidance only when a
+ * filesystem is short or unmeasured; a pressure-only refusal gets none. */
+export function macAuthorRefusalReport(stage, admission) {
+  const capacityChecks = Array.isArray(admission?.capacityChecks) ? admission.capacityChecks : [];
+  const diskShort = capacityChecks.some(row => row.observedFreeBytes === null || row.shortfallBytes > 0);
+  const summary = {stage, authorWorkStarted: stage !== 'entry', capacityChecks, ...(diskShort ? {recoveryGuidance:
+    {action: 'measure-free-space-again', dryRunCommand: MAC_AUTHOR_JANITOR_DRY_RUN, documentation: 'deploy/mac/JANITOR.md'}} : {})};
+  const bytes = value => value === null ? 'unknown' : `${value} bytes`;
+  const lines = capacityChecks.map(row => `Capacity ${row.filesystem}: required ${row.requiredFreeBytes} bytes; ` +
+    `observed ${bytes(row.observedFreeBytes)}; shortfall ${bytes(row.shortfallBytes)}.`);
+  lines.push(REFUSAL_STAGE_WORK[stage] ?? `Author work started before ${stage}; no cleanup or process termination started.`);
+  if (diskShort) lines.push(`Safe recovery: measure free space again, review ${MAC_AUTHOR_JANITOR_DRY_RUN}, ` +
+    'and follow deploy/mac/JANITOR.md. Preflight deletes nothing.');
+  return {summary, lines};
 }
 
 // POLICY ceilings for explicitly scoped tests, NOT a new full-author assurance class.

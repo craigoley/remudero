@@ -52,3 +52,18 @@ rmd_release_host_recycle_lock() {
   rmdir "$1" 2>/dev/null
   return 0
 }
+
+# rmd_release_host_recycle_lock_for_wait <lock> <hold container> <image id> (W1-T12243)
+# A recycle releases its lock for its worker wait only while a stopped container uses its pulled
+# image: `docker image prune -a` keeps an image that any container uses. Returns 0 once released.
+# Returns 1 and keeps the lock if this process is not the holder or the container does not use
+# <image id>.
+rmd_release_host_recycle_lock_for_wait() {
+  local lock="$1" hold="$2" image="$3" line used
+  [ -n "${hold}" ] && [ -n "${image}" ] || return 1
+  line="$(cat "${lock}/holder" 2>/dev/null || true)"
+  [ "${line%% *}" = "$$" ] || return 1
+  used="$(docker container inspect --format '{{.Image}}' "${hold}" 2>/dev/null || true)"
+  [ "${used}" = "${image}" ] || return 1
+  rmd_release_host_recycle_lock "${lock}"
+}
