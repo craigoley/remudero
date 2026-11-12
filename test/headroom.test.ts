@@ -66,9 +66,9 @@ test("parses session % + both weekly windows + reset timestamps", () => {
   const u = parseUsage(WS0_FIXTURE);
 
   // Field 1: session percent. Field 2: session reset timestamp (+ tz).
-  assert.equal(u.session.percentUsed, 42);
-  assert.equal(u.session.resetsAt, "Jul 14, 8:00pm");
-  assert.equal(u.session.tz, "America/New_York");
+  assert.equal(u.session?.percentUsed, 42);
+  assert.equal(u.session?.resetsAt, "Jul 14, 8:00pm");
+  assert.equal(u.session?.tz, "America/New_York");
 
   // Fields 3 & 4: the all-models weekly window (percent + reset).
   assert.equal(u.weekly.length, 2);
@@ -101,7 +101,7 @@ test("fractional percentages parse", () => {
   const u = parseUsage(
     "Current session: 7.5% used · resets soon\nCurrent week (all models): 0% used · resets later",
   );
-  assert.equal(u.session.percentUsed, 7.5);
+  assert.equal(u.session?.percentUsed, 7.5);
   assert.equal(u.weekly[0].percentUsed, 0);
 });
 
