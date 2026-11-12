@@ -8562,7 +8562,36 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
   /** W1-T10339: digest of the PR body a TASKLESS PR was dispatched on — an input every stand-down records. */
   prBodySha256?: string;
 }): ReturnType<RunTaskCommandHost["runFixRung"]> {
-  return runFixRungFromModule(asyncFixRungOptions(opts, hostWorktreeGitAsync), fixCommandHost());
+  return runFixRungFromModule(asyncFixRungOptions(noEditRecoveryOptions(opts), hostWorktreeGitAsync), fixCommandHost());
+}
+
+function noEditRecoveryOptions(opts: Parameters<RunTaskCommandHost["runFixRung"]>[0]) {
+  const original = opts.deps;
+  let pendingHead: string | undefined;
+  let recovered = false;
+  const deps: typeof original = {
+    ...original,
+    log: (step, fields) => {
+      if (step === "fix.commit_refused") {
+        pendingHead = fields?.reason === "the worker changed nothing" && fields.fix_outcome === "FIXED"
+          ? fields.head_sha as string | undefined : undefined;
+      }
+      original.log(step, fields);
+    },
+    spawn: async (args) => {
+      if (pendingHead === undefined || recovered) return original.spawn(args);
+      recovered = true;
+      original.log("fix.no_edit_recovery", { head_sha: pendingHead });
+      // The rung still owns admission, accounting, commit guards and push; only its next prompt changes.
+      return original.spawn({ ...args, prompt: `${args.prompt}\n\n` +
+        `NO_EDIT_RECOVERY: Your previous FIXED report at ${pendingHead} was refused: the worker changed nothing.\n` +
+        "This is the one recovery dispatch for that refusal. Reproduce the current failing proof or check, " +
+        "make a concrete repair within the permitted scope, and verify it. A FIXED report requires actual edits. " +
+        "If no safe repair is possible, report the observed blocker instead of claiming FIXED again. " +
+        "The harness will retry the same guarded commit; an unchanged head cannot be pushed.\n" });
+    },
+  };
+  return Object.assign(opts, { deps });
 }
 
 function asyncFixRungOptions(opts: Parameters<RunTaskCommandHost["runFixRung"]>[0], git: typeof hostWorktreeGitAsync) {
