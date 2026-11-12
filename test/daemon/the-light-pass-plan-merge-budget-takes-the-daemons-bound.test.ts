@@ -109,8 +109,10 @@ function lightPassPorts(prs: OpenPrView[], runId: string) {
 
 /** Builds the hook with the io ports and, when given, a bound, as the daemon's call does. */
 function hookWith(f: ReturnType<typeof lightPassPorts>, runId: string, bound?: number) {
-  // The bound rides in the same io object the daemon passes; the run-task entry forwards that object as is.
-  const io = bound === undefined ? f.io : { ...f.io, sweepWallClockBoundMs: bound };
+  // The bound rides in the same io object the daemon passes.
+  const io: LightPassReadPorts = bound === undefined ? f.io : {
+    openPrViews: f.io.openPrViews, effects: f.io.effects, readCompare: f.io.readCompare, sweepWallClockBoundMs: bound,
+  };
   return buildSweepLightHook("o", "r", { root: f.root } as never, join(f.root, "ledger.ndjson"), runId,
     { tasks: [], byId: new Map() } as never, f.log, undefined, undefined, undefined, undefined, undefined, io);
 }
