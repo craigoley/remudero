@@ -2,7 +2,7 @@ import { operatorReleaseContractChanged } from "./operator-release.js";
 import { createHash } from "node:crypto";
 import { relative, sep } from "node:path";
 import type { AcceptanceCriterion, MachineFilingAdmissionContext, Plan, Task, TaskStatus } from "./plan.js";
-import { RETIREMENT_REASONS, machineFilingAdmissionViolations, unmetDependencies } from "./plan.js";
+import { PlanError, RETIREMENT_REASONS, machineFilingAdmissionViolations, mergePlanBlobs, unmetDependencies } from "./plan.js";
 import { isInPlanScope } from "./plan-architect.js";
 import {
   isDemonstrationProof,
@@ -3967,3 +3967,56 @@ export function formatReadIdentity(absPath: string, raw: string): string {
 /** W1-T3099 — `lint-plan --base` reaches its rule-15 verdict through the SAME function
  *  `rmd preflight` calls. Re-exported, never re-implemented: two copies are two things to drift. */
 export { rule15SplitViolation, RULE_15_SPLIT_REMEDY, type Rule15SplitVerdict } from "./ci-parity.js";
+
+// ── A PLAN APART FROM ITS CODE (W1-T12171) ──────────────────────────────────
+// `lint-plan --code-root <dir>`: the plan lives in one checkout and the code it names in another.
+
+/** Plan files of one checkout: the path relative to the checkout, to the file's text. The monolith comes first. */
+export type PlanFiles = ReadonlyMap<string, string>;
+
+/** The plan in `files`, with `label(rel)` as each task's source path. A dependency may name a task in the
+ *  other plan, so {@link assertDependenciesKnown} judges dependencies against both plans. */
+export function planFromFiles(files: PlanFiles, label: (rel: string) => string): Plan {
+  const blobs = [...files].map(([rel, text]) => ({ label: label(rel), text }));
+  return mergePlanBlobs(blobs, {}, { dependencyMode: "preserve-external" });
+}
+
+/** Refuses a dependency that no plan in `known` holds, with the message `loadPlan` gives. */
+export function assertDependenciesKnown(tasks: readonly Task[], known: ReadonlySet<string>): void {
+  for (const task of tasks) {
+    for (const dep of task.depends_on) {
+      if (!known.has(dep)) throw new PlanError(`task ${task.id}: depends_on unknown task '${dep}'`);
+    }
+  }
+}
+
+/** The tasks whose file has the same bytes as the file at the same path in the code root's plan: moved tasks.
+ *  `root` is the plan checkout that `task.sourcePath` is under. */
+export function movedTaskIds(tasks: readonly Task[], root: string, planFiles: PlanFiles, codeFiles: PlanFiles): Set<string> {
+  const moved = new Set<string>();
+  for (const task of tasks) {
+    if (task.sourcePath === undefined) continue;
+    const rel = relative(root, task.sourcePath);
+    const text = planFiles.get(rel);
+    if (text !== undefined && codeFiles.get(rel) === text) moved.add(task.id);
+  }
+  return moved;
+}
+
+export interface PlanSourceConflict { id: string; planPath: string; codePath: string }
+
+/** The ids that both plans hold with different record bytes, with the path of each record, sorted by id. */
+export function planSourceConflicts(planFiles: PlanFiles, codeFiles: PlanFiles): PlanSourceConflict[] {
+  const records = (files: PlanFiles) => {
+    const byId = new Map<string, { path: string; block: string }>();
+    for (const [path, text] of files) for (const [id, block] of splitTaskRecordBlocks(text)) byId.set(id, { path, block });
+    return byId;
+  };
+  const code = records(codeFiles);
+  const conflicts: PlanSourceConflict[] = [];
+  for (const [id, held] of records(planFiles)) {
+    const other = code.get(id);
+    if (other !== undefined && other.block !== held.block) conflicts.push({ id, planPath: held.path, codePath: other.path });
+  }
+  return conflicts.sort((a, b) => a.id.localeCompare(b.id));
+}
