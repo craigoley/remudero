@@ -17,6 +17,11 @@
     - src/run-task.ts
     - src/lib/auto-triage.ts
     - test/inbox/a-triage-outcome-that-files-no-task-lands-through-the-feedback-landing.test.ts
+    - test/empty-diff-merge-gate.test.ts
+    - test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts
+    - test/triage-already-decided-citation-resolves.test.ts
+    - test/triage-plan-deps-seam.test.ts
+    - test/triage-remote-reservation-timing.test.ts
   status: queued
   attempts: 0
   acceptance:
@@ -45,6 +50,8 @@
     Keep the `propose` path as it is: one pull request that edits the feedback file and adds the task file.
     Give the claim release a second evidence source: `readLandedFeedbackEntry` on origin/main with a status that is not `new`.
     Keep the checks that follow a triage pull request (`checkTriageLiveScope`) for `propose` only.
+    AMENDED 2026-11-11 at build time: after the branch, a `no_task` or `grill` outcome never reaches the empty-scope close, and `checkTriageLiveScope` acts only on those two outcomes. Remove the two empty-scope blocks in `triageCommandLocked`, `checkTriageLiveScope`, `readTriagePrLifecycleIdentity`, `closeTriagedEmptyScopePr` and `triageLiveScopeDecision`. The landing compares the entry with origin/main itself, so a status that a sibling already landed opens no empty pull request.
+    AMENDED 2026-11-11: five existing tests drove the old pull request path for these two outcomes. Update them: drop the two end-to-end empty-scope tests and the `triageLiveScopeDecision` checks in test/empty-diff-merge-gate.test.ts; lower the `triageCommandLocked` row in test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts from 3 to 2 (the removed `gh pr close`); read the landing branch in test/triage-already-decided-citation-resolves.test.ts; answer the landing's `pr create` in test/triage-plan-deps-seam.test.ts; expect exit 0 and no review in test/triage-remote-reservation-timing.test.ts.
     NOT IN SCOPE: the interval of the machine-filing judge (W1-T9054 criterion 1), and any change to the landing itself.
   falsifier: |
     Open a pull request for a `no_task` outcome and criterion 1 must fail. Route `propose` through the landing and criterion 2 must fail. Remove the status read from the claim release and criterion 3 must fail. Drop the escalation of a `grill` and criterion 4 must fail. Restore and require all six to pass.

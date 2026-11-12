@@ -55,6 +55,7 @@ import { escalate, escalateAsync, ghIssueGateway, ghIssueGatewayAsync, tryEscala
 import { mapRestPr, prStateFromRest, singlePrRestArgs, type ReviewReuseFacts, type GhApiFetcher, type RestPullRow, type RestRollupEntry } from "../../lib/open-prs-rest.js";
 import { probeMerge, type MergedTypecheckPorts } from "../../lib/merge-probe.js";
 import { recordDecision, recordDecisionAsync, type LandFeedbackAsyncOpts } from "../../lib/feedback-landing.js";
+import { resolvePlanDestination } from "../../lib/plan-destination.js";
 import { preflightFailureNotice, preflightSummaryPath } from "../../lib/ci-parity.js";
 import { coverageNarrowSuites, type CoverageRun, type CoverageVerdict } from "../../lib/coverage-narrow.js";
 import { buildAffectedSuitesGraph, type AffectedSelection } from "../../lib/affected-suites.js";
@@ -4671,8 +4672,8 @@ export async function runTask(
   const runReviewFn = opts.runReview ?? runReview;
   const fetchPrBodyFn = opts.fetchPrBody ?? fetchPrBodyViaGh;
   const recordDecisionFn = opts.recordDecision
-    ?? ((root: string, params: Parameters<typeof recordDecisionAsync>[1]) =>
-      recordDecisionAsync(root, params, opts.decisionLanding));
+    ?? ((root: string, params: Parameters<typeof recordDecisionAsync>[1], landing?: Pick<LandFeedbackAsyncOpts, "planDestination">) =>
+      recordDecisionAsync(root, params, { ...opts.decisionLanding, ...landing }));
   const planPath = opts.planPath ?? join(repoRoot, "plan", "tasks.yaml");
   const ledgerPath = ledgerPathFor(config);
   const owner = opts.owner ?? resolveOwner();
@@ -6906,6 +6907,10 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
       // filename pick stays ledger-only instead of burying real decisions.
       const recordVerdict = shouldRecordDecision(decision);
       let landed = false;
+      // W1-T12201: read the host switch on each decision. The public repository is this run's checkout.
+      const planDestination = recordVerdict.record
+        ? resolvePlanDestination("decision", join(config.root, "state"), { owner, repo: task.repo, checkoutDir: repoRoot })
+        : undefined;
       if (recordVerdict.record) {
         // W1-T191: one shard per resolution (`plan/decisions.d/<taskId>-<runId>.md`), never
         // the shared `DECISIONS.md` append this replaces — concurrent runs across different
@@ -6922,7 +6927,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
           band: recordVerdict.band,
           reason: recordVerdict.reason,
           ...(decision.falsifier ? { falsifier: decision.falsifier } : {}),
-        })).landed;
+        }, { planDestination })).landed;
       }
       log("decision.autochoose", {
         chosen,
@@ -6930,6 +6935,8 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
         risk_band: recordVerdict.band,
         landed,
         falsifier: decision.falsifier ?? null,
+        ...(planDestination === undefined || planDestination.outcome === "off" ? {} : { plan_destination: planDestination.outcome }),
+        ...(planDestination?.outcome === "unreadable" ? { plan_destination_reason: planDestination.reason } : {}),
       });
       say(
         `DECISION_REQUEST auto-chose: ${chosen} (${

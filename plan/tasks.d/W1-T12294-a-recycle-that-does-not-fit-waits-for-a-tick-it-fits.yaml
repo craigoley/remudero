@@ -1,0 +1,90 @@
+- id: W1-T12294
+  title: "A recycle that does not fit its deploy step waits for a tick at which it fits, and never escalates"
+  repo: remudero
+  depends_on: [W1-T12247]
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # decides when the deployer starts a recycle; a wrong answer holds back a new image or pauses the fleet
+  band_meaning: span
+  origin: operator-session#restart-and-recycle-downtime-2026-11-11
+  plan_refs:
+    - W1-T12247
+    - W1-T8138
+    - W1-T6062
+    - W1-T6249
+    - W1-T5127
+    - W1-T7807
+    - W1-T9409
+    - W1-T12241
+    - W1-T12245
+  files:
+    - src/lib/deployer.ts
+    - test/deploy/a-recycle-that-does-not-fit-waits-for-a-tick-it-fits.test.ts
+    - test/deploy/a-recycle-that-cannot-finish-in-its-tick-never-pauses-the-fleet.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "A recycle that does not fit its deploy step is deferred, not refused. The deploy cycle writes no `DEPLOY_FAILED` marker and no `DEPLOY_LAST_FAILED` file, calls no `alert`, and writes no `deploy.restart_refused` row. Its result reason starts with `restart-deferred-fit:` and it keeps `pulledPendingRestart: true`"
+      proof: 'grep: test("W1-T12294: a recycle that does not fit is deferred and not refused" in test/deploy/a-recycle-that-does-not-fit-waits-for-a-tick-it-fits.test.ts'
+    - claim: "Deferrals tick after tick never count toward the refusal streak. Over five deferrals the deploy cycle writes no `deploy.refusal_persisting` row and no `deploy.refusal_escalated` row, calls no `escalateRefusal`, and leaves a refusal streak of another reason as it was"
+      proof: 'grep: test("W1-T12294: a deferral never counts toward the refusal streak" in test/deploy/a-recycle-that-does-not-fit-waits-for-a-tick-it-fits.test.ts'
+    - claim: "The next watchdog tick tries the recycle again, five minutes later, with no back-off of one hour. This holds for the default fleet (the automatic image recycle) and for an instance in `DEPLOY_AUTO` (core) on the same origin/main head"
+      proof: 'grep: test("W1-T12294: the next tick tries the recycle again with no back-off" in test/deploy/a-recycle-that-does-not-fit-waits-for-a-tick-it-fits.test.ts'
+    - claim: "The fit check runs on each tick, and the recycle starts on the first tick at which it fits: the runs in flight have ended, or their predicted remainder plus the time outside the wait fits the time left. The script then gets the derived wait, as in W1-T12247"
+      proof: 'grep: test("W1-T12294: the recycle starts on the first tick at which it fits" in test/deploy/a-recycle-that-does-not-fit-waits-for-a-tick-it-fits.test.ts'
+    - claim: "Each deferral writes one `deploy.recycle_deferred_fit` row with `kind: restart-deferred-fit`, `deferred_since` (the time of the first deferral, the same on each tick), `deferred_s`, `bound_s`, `bound_source`, `counted_wait_s`, `rest_s`, `step_left_s` and `runs_in_flight`"
+      proof: 'grep: test("W1-T12294: each deferral writes a row with deferred_since" in test/deploy/a-recycle-that-does-not-fit-waits-for-a-tick-it-fits.test.ts'
+    - claim: "The bound on the deferral is measured, not fixed: the longest `implement.done` run that the ledger holds plus the time a recycle needs outside its wait. With no run history it is the script fallback wait plus the time outside the wait, and the row says `bound_source: no_history_fallback`"
+      proof: 'grep: test("W1-T12294: the bound is the longest observed run plus the time outside the wait" in test/deploy/a-recycle-that-does-not-fit-waits-for-a-tick-it-fits.test.ts'
+    - claim: "When the deferral is older than its bound, the deployer runs the drain handoff: `deploy/recycle-container.sh` with `RMD_RECYCLE_WAIT_S` set to the time the step has left less the time outside the wait. The wait plus the time outside it is no longer than the time left. The row `deploy.recycle_bounded_handoff` gives the wait, the bound and `deferred_since`. When the step has no time left for a wait, the recycle is deferred again"
+      proof: 'grep: test("W1-T12294: past the bound the recycle takes a drain handoff with the wait the step allows" in test/deploy/a-recycle-that-does-not-fit-waits-for-a-tick-it-fits.test.ts'
+    - claim: "A refusal of the script on the bounded drain handoff takes the existing refusal path: `restart-refused`, the drain blockers of W1-T8138 and the refusal streak, as today. The deferral record stays, so the next attempt is again a bounded drain handoff"
+      proof: 'grep: test("W1-T12294: a refusal of the bounded handoff takes the existing refusal path" in test/deploy/a-recycle-that-does-not-fit-waits-for-a-tick-it-fits.test.ts'
+    - claim: "A verified recycle, or a skip that finds the daemon up to date, ends the deferral. The next deferral after that has a new `deferred_since`"
+      proof: 'grep: test("W1-T12294: a verified recycle ends the deferral" in test/deploy/a-recycle-that-does-not-fit-waits-for-a-tick-it-fits.test.ts'
+    - claim: "The deferral record lives in `state/DEPLOY_FIT_DEFERRAL` between ticks. The test drives `runDeployCycle` with `realDeployDeps` on a temporary state directory and a fake script runner, and reads the record back on a second cycle in a new deps object"
+      proof: 'grep: test("W1-T12294: the deferral record survives from one tick to the next" in test/deploy/a-recycle-that-does-not-fit-waits-for-a-tick-it-fits.test.ts'
+  rationale: |
+    W1-T12247 stops a recycle that cannot finish inside its watchdog tick. That is right: such a recycle paused the fleet for 41 to 49 minutes and was then ended by TERM. But it sends the stopped recycle down the refusal path, and on a busy core instance that path reaches the operator on most days. The operator's rule: nothing may wait on the operator, and a stuck item is the worst case. A recycle that does not fit is not a failure. It waits for a moment at which it fits.
+    MEASURED (from the W1-T12247 why-file, core instance, 2026-11-04 to 2026-11-11).
+    - The watchdog tick ends its deploy step after 3,600 s (`WATCHDOG_DEPLOY_DEADLINE_S`). The tick runs every 5 minutes (`OnUnitActiveSec=5min`, deploy/install-host-units.sh).
+    - Five recycles have a known derived wait: 3,816 s, 5,750 s, 7,336 s, 6,978 s and 8,037 s. Each is longer than 3,600 s before the time outside the wait (up to 760 s) is added. W1-T12247 refuses all five.
+    - On 2026-11-11 at 08:34:22Z four runs were in flight. The youngest was 50 s old and had a predicted remainder of 8,037 s. A run younger than about 4,500 s has a predicted remainder above 3,600 s. So with runs in flight, a recycle of the core instance almost never fits.
+    - The one known pair of predicted and real wait: 2026-11-10 20:21, derived 6,978 s, real 2,970 s, done in 3,150 s.
+    READ in src/lib/deployer.ts at the head of W1-T12247 (branch run-W1-T12247-1794386595000).
+    - `runDeployCycle` catches the throw of the backend and calls `deps.alert(..., "restart-refused")` and `recordRefusal`. `realDeployDeps.alert` writes `state/DEPLOY_FAILED` and `state/DEPLOY_LAST_FAILED`.
+    - `recordRefusal` counts consecutive refusals with the same `refusalReasonKey`. The key replaces each digit, so each not-fit message is the same reason. `REFUSAL_PERSISTING_AT` is 2 and `REFUSAL_ESCALATE_AT` is 3: the third refused tick opens a needs-human issue.
+    - For the default fleet, `failureHold` holds the automatic image recycle for one hour after a failure (`IMAGE_RECYCLE_FAILURE_BACKOFF_MS`). The not-fit message names no drain blockers, so the W1-T8138 release does not apply.
+    - Core runs `DEPLOY_AUTO` (the W1-T6282 comment in `decideDeployTrigger`). There, `alreadyFailed` is true when `DEPLOY_LAST_FAILED` equals origin/main, and the decision is "auto: origin/main already failed to deploy … not retried" until origin/main moves. So a not-fit refusal on core does not even retry on the next tick.
+    - W1-T12247 criterion 5 (test/deploy/a-recycle-that-cannot-finish-in-its-tick-never-pauses-the-fleet.test.ts) asserts the escalation. This task reverses that criterion, so that test changes.
+    WHICH PATH PAST THE BOUND, AND WHY. Two existing paths were possible.
+    - The in-process freshness restart (the daemon exits 75 and its entrypoint fetches the source again) is rejected. It loads the mounted source and not a new image: the comment in `decideDeployTrigger` says that mounted source goes live through the freshness restart, which is why the image path recycles at all. Resource-policy and mount-plan drift apply only when a container is created. After a freshness restart the image is still stale, and the next tick defers again.
+    - The drain handoff is chosen. The recycle writes its own PAUSE. Under that PAUSE each build in flight ends its round at its next checkpoint (`worker.recycle_yield`, W1-T7807), and a run that waits on CI hands the wait off (`run.freshness_handoff` with `trigger: recycle`, W1-T5127). The sweep resumes them after the restart. So the real wait is the time to the next checkpoint, not to the end of the run (6,978 s predicted, 2,970 s real). The wait is set to what the step allows, so the pause never outlives the step and TERM never ends it. If workers remain at the end of the wait, the script refuses and removes its own PAUSE (W1-T9409), and W1-T8138 retries when the named blockers settle.
+    - Neither path takes a new image with no pause at all. The drain handoff pauses dispatch for at most the time the step has left less the time outside the wait (about 47 minutes), and only after the deferral has outlived its bound. W1-T12245 (a standby daemon) is a design only. W1-T12241 lowers the cost of a wait.
+    - W1-T12247 says: do not shorten the wait to make it fit. This task does so only past the bound, because by then waiting for a fit has failed for one longest run, and the yield above ends rounds early.
+    WHY THIS BOUND. The longest observed run plus the time outside the wait. Within one longest run, each run that was in flight at the first deferral has ended. If no tick fitted by then, new runs keep arriving, and more waiting is not evidence that a fit will come. On the core instance the 0.95 quantile of runs older than 50 s was about 8,087 s, so the bound there is at least about 8,850 s. The bound follows the ledger; it is not a constant.
+  design: |
+    In src/lib/deployer.ts:
+    - A not-fit refusal gets its own kind, `restart-deferred-fit`. The backend `recycle-container` throws a local error class for it (not exported), with the fit fields. The text of the throw stays as in W1-T12247.
+    - In the catch of `runDeployCycle`, a throw of that class is a deferral. Do not call `deps.alert`, `recordRefusal` or `deps.setDrainRefusal`, and write no `deploy.restart_refused` row. So no `DEPLOY_FAILED` marker and no `DEPLOY_LAST_FAILED` file are written: neither `failureHold` nor the auto-mode `alreadyFailed` rule holds the next tick. Return `{ deployed: false, reason: "restart-deferred-fit: ...", pulledPendingRestart: true }`.
+    - A persisted deferral record, `state/DEPLOY_FIT_DEFERRAL`: `{ since_ms }`. Two optional members on `DeployDeps` read and write it (`fitDeferral`, `setFitDeferral`); `realDeployDeps` implements them with `writeAtomic`, as it does for `DEPLOY_FAILED`. Add no new `...Deps` interface. The first deferral sets `since_ms`; later deferrals keep it. A new origin/main head does not reset it: it measures how long the instance has waited for a recycle.
+    - Each deferral writes one `deploy.recycle_deferred_fit` row: `kind: "restart-deferred-fit"`, `deferred_since` (ISO, from `fixedClock(since_ms).iso()`), `deferred_s`, `bound_s`, `bound_source`, `counted_wait_s`, `rest_s`, `step_left_s`, `runs_in_flight`, `to`.
+    - The bound: `bound_s` = the longest `readImplementDurationsMs` value, in seconds, plus `rest_s` (from `readRecycleRestS`, else `RECYCLE_REST_FALLBACK_S`). With no run history, `DRAIN_WAIT_FALLBACK_S` plus `rest_s`, and `bound_source: no_history_fallback`; else `observed`. Compute it inside `deriveWaitFromState`, which already reads the ledger text.
+    - Past the bound: in `restart()` of the backend, when the record is older than `bound_s` and the recycle does not fit, run the script with `RMD_RECYCLE_WAIT_S` = `step_left_s - rest_s`, through the same `runScript` path as the derived wait. Write `deploy.recycle_bounded_handoff` with `wait_s`, `step_left_s`, `rest_s`, `bound_s`, `deferred_since`. When `step_left_s - rest_s` is less than `DRAIN_WAIT_GRANULARITY_S`, defer again. When the limit is unknown (no `RMD_DEPLOY_STEP_ENDS_AT`), the recycle runs as in W1-T12247 and there is no deferral.
+    - A throw of the script on the bounded drain handoff is a refusal, not a deferral, and takes today's path unchanged. The deferral record stays.
+    - `retractRefusal` (a verified recycle, or the up-to-date skip) also clears the deferral record. The `deploy.ok` path calls it already.
+    - The rollback after a failed health check calls the same `restart()`. Leave its handling as it is. With no run in flight just after a recycle, only `rest_s` counts there.
+    - The next tick tries again: no change to `decideDeployTrigger` is needed once no failure is recorded. The idle gate hands a busy recycle to the self-draining backend (`deploy.drain_handoff`), so `restart()`, and with it the fit check, runs on each tick.
+    In test/deploy/a-recycle-that-cannot-finish-in-its-tick-never-pauses-the-fleet.test.ts: W1-T12247 criterion 2 expects the reason `restart-refused:` and one alert, and criterion 5 expects the escalation. Change both to the deferral: reason `restart-deferred-fit:`, no alert, no `deploy.refusal_persisting` and no `deploy.refusal_escalated`. Keep their titles and markers.
+    Put the new tests in test/deploy/a-recycle-that-does-not-fit-waits-for-a-tick-it-fits.test.ts, one test per criterion, each title starting with its exact marker. Import by `#src/...` and `#test/...`. Drive `runDeployCycle` with `realDeployDeps` and a fake script runner, as the W1-T12247 test does; do not import `#src/run-task.js`.
+    src/lib/deployer.ts has a comment cap test only if `git ls-files "test/**/compress-src-lib-deployer-ts.test.ts"` lists one (none on origin/main at filing). Keep new comments few; put the reasons in the why-file.
+    NOT IN SCOPE: the value of `WATCHDOG_DEPLOY_DEADLINE_S`, the derivation of the wait, the recycle script, the refusal streak for other reasons, and the auto-mode `alreadyFailed` rule for real refusals.
+  falsifier: |
+    Send the deferral through `deps.alert` and criteria 1 and 3 must fail. Call `recordRefusal` for it and criterion 2 must fail. Reset `since_ms` on each deferral and criteria 5 and 7 must fail. Drop the bound and criterion 7 must fail. Give the bounded drain handoff the derived wait and criterion 7 must fail. Leave the record when a recycle is verified and criterion 9 must fail. Restore and require all ten to pass, with the W1-T12247 tests.
+  note: |
+    reservation hand-off: run-unfiled-1794401934000 -> run-unfiled-1794413364000
+
+    After the merge, on the core instance, a run of `deploy.recycle_deferred_fit` rows must end in a `deploy.ok` row or a `deploy.recycle_bounded_handoff` row. No `deploy.refusal_escalated` row may follow a `deploy.recycle_wait_fit` row with `fits: false` unless a `deploy.restart_refused` row from the script stands between them. Compare `waited_s` of each bounded drain handoff with its `wait_s`: that pair measures how early the yield ends a round.

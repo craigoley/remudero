@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 // Content-only migration; dry-run by default. Unsupported expressions are reported, never guessed.
+import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
 import { readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { dirname, join, posix, relative } from "node:path";
@@ -26,9 +27,16 @@ function children(node) {
     .filter((value) => value && typeof value === "object" && value !== node.span);
 }
 
+let parses = 0;
+/** How many file texts this process has parsed. */
+export function parseCount() {
+  return parses;
+}
+
 /** Parse executable expressions so comments and fixture strings cannot become edits. */
 export function analyzeSource(source, file) {
   const { parseSync } = require("@swc/core");
+  parses++;
   const tree = parseSync(source, { syntax: "typescript", target: "es2022" });
   const bytes = Buffer.from(source);
   const text = (node) => bytes.subarray(node.span.start - 1, node.span.end - 1).toString();
@@ -138,8 +146,28 @@ export function analyzeSource(source, file) {
   return { computations, unsupported, edits };
 }
 
+const kept = new Map();
+/**
+ * Analyze pairs of file name and text. One result is kept for each name and text for the life of the
+ * process, so a text is parsed once however many trees or callers hold it. The key holds a SHA-256
+ * of the whole text: two texts that differ in one character never share a result. The name is in the
+ * key because the result depends on the folder of the file. A kept result is frozen.
+ */
+export function analyzeSources(entries) {
+  return entries.map(([file, source]) => {
+    const key = `${file}\0${createHash("sha256").update(source).digest("hex")}`;
+    let result = kept.get(key);
+    if (!result) {
+      const { computations, unsupported, edits } = analyzeSource(source, file);
+      result = Object.freeze({ computations: Object.freeze(computations), unsupported: Object.freeze(unsupported), edits: Object.freeze(edits) });
+      kept.set(key, result);
+    }
+    return result;
+  });
+}
+
 export function rewriteSource(source, file) {
-  const result = analyzeSource(source, file);
+  const [result] = analyzeSources([[file, source]]);
   let bytes = Buffer.from(source);
   for (const edit of result.edits.toSorted((a, b) => b.start - a.start)) {
     bytes = Buffer.concat([bytes.subarray(0, edit.start), Buffer.from(edit.replacement), bytes.subarray(edit.end)]);
@@ -153,22 +181,28 @@ export function rewriteSource(source, file) {
   return { ...result, source };
 }
 
-if (isMainModule(import.meta.url)) {
-  const write = process.argv.includes("--write");
-  if (process.argv.slice(2).some((arg) => arg !== "--write")) throw new Error("usage: node scripts/test-repo-root-codemod.mjs [--write]");
+/** Run the codemod over every test file under `root`. It writes only when `write` is true. */
+export function runCodemod(root, write) {
   const counts = Object.fromEntries(SHAPES.map((shape) => [shape, 0]));
   const unsupported = [];
   let changed = 0;
-  const files = testFiles(REPO_ROOT);
+  const before = parseCount();
+  const files = testFiles(root);
   for (const file of files) {
-    const source = readFileSync(join(REPO_ROOT, file), "utf8");
+    const source = readFileSync(join(root, file), "utf8");
     const result = rewriteSource(source, file);
     for (const entry of result.computations) if (entry.shape in counts) counts[entry.shape]++;
     unsupported.push(...result.unsupported.map((entry) => ({ file, ...entry })));
     if (result.source !== source) {
       changed++;
-      if (write) writeFileSync(join(REPO_ROOT, file), result.source);
+      if (write) writeFileSync(join(root, file), result.source);
     }
   }
-  console.log(JSON.stringify({ mode: write ? "write" : "dry-run", inspected: files.length, changed, counts, unsupported }, null, 2));
+  return { mode: write ? "write" : "dry-run", inspected: files.length, parsed: parseCount() - before, changed, counts, unsupported };
+}
+
+if (isMainModule(import.meta.url)) {
+  const write = process.argv.includes("--write");
+  if (process.argv.slice(2).some((arg) => arg !== "--write")) throw new Error("usage: node scripts/test-repo-root-codemod.mjs [--write]");
+  console.log(JSON.stringify(runCodemod(REPO_ROOT, write), null, 2));
 }

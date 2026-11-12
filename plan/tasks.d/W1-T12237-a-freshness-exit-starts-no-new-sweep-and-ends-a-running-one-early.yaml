@@ -23,6 +23,11 @@
     - src/lib/daemon.ts
     - src/lib/sweep.ts
     - test/daemon/a-freshness-exit-starts-no-new-sweep-and-ends-a-running-one-early.test.ts
+    - test/a-latched-restart-exits-when-its-last-lane-settles.test.ts
+    - test/daemon-freshness.test.ts
+    - test/daemon.test.ts
+    - test/daemon/a-restart-drain-names-what-it-waits-on.test.ts
+    - test/an-unlatched-freshness-exit-skips-a-pass-that-already-ran.test.ts
   status: queued
   attempts: 0
   acceptance:
@@ -74,6 +79,28 @@
     Add `sweep_ended_early: true` to `daemon_selfrestart_for_freshness` when it applies.
     The memory exit and the STOP path do not change.
     Rebase on W1-T9812 first: it moves the start of the drain in the same function.
+    SETTLED FROM THE CODE (amendment):
+    - Four tests outside `files` assert the old rule that the exit runs a pass of its own: five tests in
+      test/a-latched-restart-exits-when-its-last-lane-settles.test.ts, two in test/daemon-freshness.test.ts,
+      the W1-T1272 ordering test in test/daemon.test.ts and the `pre_exit_pass` phase in
+      test/daemon/a-restart-drain-names-what-it-waits-on.test.ts. They change to the new rule.
+    - `latchedAdmission` reads `restartWindow`, which only the dispatch latch and the drain set. The exits at
+      the top of a tick and for stale reviewer code set no window before they wait for the running sweep. So
+      the callback answers stop when `restartWindow` is set or when the exit has begun: `stopForFreshness`
+      stores its `prepareFreshnessExit` promise in `preparedFreshnessExit`, which the dispatch latch already uses.
+    - The exit before admission (`refetchedFreshness` with an empty dispatch set) cannot be reached: its own
+      comment says that the idle branch above it always ends the tick. All exits go through
+      `prepareFreshnessExit`, so criterion 2 is proved on the three exits that can be reached and on a
+      requested restart.
+    - A walk that ends early starts no review and no refresh of a pull request that it did not visit: the
+      review lanes close with the reason, and the ratchet re-judgement and the branch refresh after the walk
+      do not run. The settle of the repair memory demand covers only the visited pull requests.
+    - A pass that ended early is not a completed pass: it does not set `lastCompletedAtMs` and it is not a
+      sample of the learned sweep bound. Its `daemon.sweep.settled` row has `ended_early: true`.
+    - W1-T9352 (merged) added test/an-unlatched-freshness-exit-skips-a-pass-that-already-ran.test.ts. Its third
+      test, "an exit with no pass since the advance still runs one", expects `pre_exit_pass: ran` and 2 sweeps.
+      W1-T12237 removes the exit sweep, so that test changes to expect `no_sweep_at_exit` and 1 sweep. The
+      `skipped_ran_since_stale` arm of W1-T9352 and its evidence fields stay as merged.
     NOT IN SCOPE: the time limit of the drain, the admission rule after the restart decision, and the stages of the sweep themselves (W1-T12234 shortens the longest one).
   falsifier: |
     Call `runGatedSweep` in the exit again and criterion 1 must fail. Stop the sweep in the middle of a pull request and criterion 5 must fail. Ignore the stop answer before the first pull request and criterion 4 must fail. Restore and require all eight to pass.
