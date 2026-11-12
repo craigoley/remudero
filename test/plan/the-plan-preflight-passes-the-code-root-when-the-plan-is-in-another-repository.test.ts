@@ -7,6 +7,7 @@ import { test, type TestContext } from "node:test";
 import { formatReservationAnchorMessage } from "#src/lib/task-id-reservation.js";
 import { planPrPreflight, planPrPreflightAsync, planPrPreflightAtCommit, planPrPreflightAtCommitAsync } from "#src/lib/plan-pr-emitter.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
+import { withGhShim } from "#test/helpers/gh-shim.js";
 import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
@@ -56,7 +57,7 @@ test("W1-T12205 criterion 2: sync and gardener-shaped async proof readers use th
   assert.deepEqual(seen, [f.code.dir, f.code.dir]);
 });
 
-test("W1-T12205 criterion 2: the actual task-ID CLI resolves declarations in both catalogs without a second namespace", t => {
+test("W1-T12205 criterion 2: the actual task-ID CLI resolves declarations in both catalogs without a second namespace", async t => {
   const f = fixture(t); const origin = gitRepo({ bare: true, scope: t }); const opsOrigin = gitRepo({ bare: true, scope: t });
   f.code.addRemote("origin", origin.dir); f.plan.addRemote("origin", opsOrigin.dir);
   put(join(f.code.dir, "plan/tasks.yaml"), "- id: W1-T800\n");
@@ -69,12 +70,18 @@ test("W1-T12205 criterion 2: the actual task-ID CLI resolves declarations in bot
   assert.equal(opsOrigin.git("for-each-ref", "--format=%(refname)", "refs/rmd-id/"), "");
   assert.equal(existsSync(join(f.code.dir, ".git/FETCH_HEAD")), false);
   const baseline = join(f.root, "baseline.json"); put(baseline, "[]\n");
-  const r = spawnSync(process.execPath, [join(REPO_ROOT, "scripts/task-id-existence-check.mjs"), "--cwd", f.plan.dir,
-    "--code-root", f.code.dir, "--dir", "plan", "--baseline", baseline, "--base", "origin/main", "--head-ref", "ops-filing"], { cwd: REPO_ROOT, encoding: "utf8", timeout: 30_000 });
-  assert.equal(r.error, undefined); assert.equal(r.status, 0, `${r.stdout}\n${r.stderr}`);
-  assert.doesNotMatch(r.stderr, /UNKNOWN|does not resolve/);
-  assert.equal(existsSync(join(f.code.dir, ".git/FETCH_HEAD")), false, "the code root is never fetched or changed");
-  assert.ok(readFileSync(join(f.plan.dir, ".git/FETCH_HEAD"), "utf8").startsWith(anchor), "the actual public reservation holder is read in the plan workspace");
+  await withGhShim([{ when: "fixture/control", stdout: "controlled" },
+    { when: "repos/fixture-owner/fixture-ops/pulls?", stdout: "[]" }], shim => {
+    const control = spawnSync("gh", ["api", "fixture/control"], { encoding: "utf8", timeout: 10_000 });
+    assert.equal(control.status, 0); assert.equal(control.stdout.trim(), "controlled");
+    const r = spawnSync(process.execPath, [join(REPO_ROOT, "scripts/task-id-existence-check.mjs"), "--cwd", f.plan.dir,
+      "--code-root", f.code.dir, "--dir", "plan", "--baseline", baseline, "--base", "origin/main", "--head-ref", "ops-filing", "--owner", "fixture-owner", "--repo", "fixture-ops", "--require-open-prs"], { cwd: REPO_ROOT, encoding: "utf8", timeout: 30_000 });
+    assert.equal(r.error, undefined); assert.equal(r.status, 0, `${r.stdout}\n${r.stderr}`);
+    assert.doesNotMatch(r.stderr, /UNKNOWN|does not resolve/);
+    assert.equal(existsSync(join(f.code.dir, ".git/FETCH_HEAD")), false, "the code root is never fetched or changed");
+    assert.ok(readFileSync(join(f.plan.dir, ".git/FETCH_HEAD"), "utf8").startsWith(anchor), "the actual public reservation holder is read in the plan workspace");
+    assert.ok(shim.calls().some(c => c.includes("repos/fixture-owner/fixture-ops/pulls?")));
+  });
 });
 
 test("W1-T12205 criterion 4: no code root preserves the existing lint argv and proof cwd", async t => {
