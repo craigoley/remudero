@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { spawn, spawnSync } from "node:child_process";
 import { availableParallelism } from "node:os";
+import { performance } from "node:perf_hooks";
 import { fileURLToPath } from "node:url";
 
 import { listRuleSuites } from "../src/lib/ci-parity.ts";
@@ -42,15 +43,29 @@ function finish(suites, failedSet) {
   return 1;
 }
 
+/** W1-T12401 — time one suite child from spawn to exit. `invoke` starts it and returns its result, or a
+ *  promise of one; the helper never touches the child's arguments or environment. */
+export function timedSuiteRun(invoke, now = () => performance.now()) {
+  const started = now();
+  const settle = (result) => ({ result, ms: Math.round(now() - started) });
+  const outcome = invoke();
+  return typeof outcome?.then === "function" ? outcome.then(settle) : settle(outcome);
+}
+
+/** The one timing line per suite: stdout, so the stderr verdict lines and the closing line keep their place. */
+const reportTime = (suite, ms) => console.log(`rule-checks: ${suite}: ${ms} ms`);
+
 /** Execute one file per child process, one at a time. Node's multi-file test runner may schedule files
  *  concurrently inside one runner; each suite here keeps a process of its own. */
-export function runRuleSuites(repoRoot = root, run = spawnSync) {
+export function runRuleSuites(repoRoot = root, run = spawnSync, now) {
   const suites = ruleSuites(repoRoot);
   const failed = new Set();
   for (const suite of suites) {
     console.log(`rule-checks: ${suite}`);
     const { file, args } = suiteCommand(suite, repoRoot);
-    if (reportSuite(suite, run(file, args, { cwd: repoRoot, stdio: "inherit" }))) failed.add(suite);
+    const { result, ms } = timedSuiteRun(() => run(file, args, { cwd: repoRoot, stdio: "inherit" }), now);
+    reportTime(suite, ms);
+    if (reportSuite(suite, result)) failed.add(suite);
   }
   return finish(suites, failed);
 }
@@ -85,17 +100,18 @@ function samplePressure(pressure) {
  *  block when it ends, and the closing line is the same as {@link runRuleSuites}'. Given a `pressure` sampler
  *  (W1-T11939), the width is re-derived from host pressure at the start and whenever a suite ends — up when the
  *  host is idle, down when it is busy, never below one; `concurrency` is only the width an unreadable sample keeps. */
-export async function runRuleSuitesConcurrently(repoRoot = root, { concurrency = 1, run = spawnSuiteCaptured, write = (text) => process.stdout.write(text), pressure } = {}) {
+export async function runRuleSuitesConcurrently(repoRoot = root, { concurrency = 1, run = spawnSuiteCaptured, write = (text) => process.stdout.write(text), pressure, now } = {}) {
   const suites = ruleSuites(repoRoot);
   const failed = new Set();
   let width = Math.max(1, concurrency);
   let next = 0;
   let inFlight = 0;
   await new Promise((resolve, reject) => {
-    const settle = (suite, result) => {
+    const settle = (suite, { result, ms }) => {
       inFlight--;
       console.log(`rule-checks: ${suite}`);
       if (result.output) write(result.output.endsWith("\n") ? result.output : `${result.output}\n`);
+      reportTime(suite, ms);
       if (reportSuite(suite, result)) failed.add(suite);
       launch();
     };
@@ -104,7 +120,7 @@ export async function runRuleSuitesConcurrently(repoRoot = root, { concurrency =
       while (next < suites.length && inFlight < width) {
         const suite = suites[next++];
         inFlight++;
-        Promise.resolve().then(() => run(suite, repoRoot)).then((result) => settle(suite, result)).catch(reject);
+        Promise.resolve().then(() => timedSuiteRun(() => run(suite, repoRoot), now)).then((timed) => settle(suite, timed)).catch(reject);
       }
       if (next >= suites.length && inFlight === 0) resolve();
     };
@@ -127,15 +143,49 @@ export function ruleSuitePressure(env = process.env) {
   return raw !== undefined && /^[1-9]\d*$/.test(raw) ? undefined : () => readHostPressure();
 }
 
-/** The CLI: `--list` (the default) prints the population, `--run` executes it at a width that follows host pressure,
- *  starting from {@link ruleSuiteConcurrency}, or one at a time through an injected `run`. */
+/** The middle of an ascending list; the mean of the two middles when its length is even. */
+function median(sorted) {
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 1 ? sorted[mid] : Math.round((sorted[mid - 1] + sorted[mid]) / 2);
+}
+
+/** W1-T12401 — `--measure-starts <n> [suite]`: start one suite child `n` times, one after another, in the
+ *  caller's environment (no `env` of its own, so a NODE_COMPILE_CACHE is measured only when the caller sets
+ *  one), and print each start, then the median and the min and max. Exits 1 when any start fails. */
+export function measureSuiteStarts(n, suite, { repoRoot = root, run = spawnSync, now } = {}) {
+  const times = [];
+  let failed = false;
+  for (let start = 1; start <= n; start += 1) {
+    const { result, ms } = timedSuiteRun(() => run(process.execPath, suiteArgs(suite, repoRoot), { cwd: repoRoot, stdio: "ignore" }), now);
+    console.log(`rule-checks: measure-starts: ${suite}: start ${start}/${n}: ${ms} ms`);
+    if (reportSuite(suite, result)) failed = true;
+    times.push(ms);
+  }
+  const sorted = [...times].sort((a, b) => a - b);
+  console.log(`rule-checks: measure-starts: ${suite}: n=${n} median ${median(sorted)} ms, min ${sorted[0]} ms, max ${sorted.at(-1)} ms`);
+  return failed ? 1 : 0;
+}
+
+const USAGE = "usage: node --import tsx scripts/list-rule-suites.mjs [--list|--run] | --measure-starts <n> [suite]";
+
+/** The CLI: `--list` (the default) prints the population, `--run` executes it at a width that follows host
+ *  pressure, starting from {@link ruleSuiteConcurrency}, or one at a time through an injected `run`, and
+ *  `--measure-starts <n> [suite]` times `n` starts of one suite (the population's first when none is named). */
 export function main(argv, run, concurrency = ruleSuiteConcurrency(), runConcurrently = runRuleSuitesConcurrently, pressure = ruleSuitePressure()) {
+  if (argv[0] === "--measure-starts") {
+    const [, count, suite = ruleSuites()[0], ...extra] = argv;
+    if (!/^[1-9]\d*$/.test(count ?? "") || extra.length > 0) {
+      console.error(USAGE);
+      return 2;
+    }
+    return measureSuiteStarts(Number(count), suite, { run: run ?? spawnSync });
+  }
   if (argv.includes("--run")) {
     if (run !== undefined || concurrency === 1) return runRuleSuites(root, run ?? spawnSync);
     return runConcurrently(root, { concurrency, pressure });
   }
   if (argv.length > 0 && !argv.includes("--list")) {
-    console.error("usage: node --import tsx scripts/list-rule-suites.mjs [--list|--run]");
+    console.error(USAGE);
     return 2;
   }
   for (const suite of ruleSuites()) console.log(suite);
