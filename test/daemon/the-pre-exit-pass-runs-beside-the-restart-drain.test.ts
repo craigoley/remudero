@@ -23,7 +23,7 @@ type Row = { step: string; extra: Record<string, unknown> };
 type Result = Awaited<ReturnType<DaemonDeps["runOne"]>>;
 const boundMs = 100;
 
-async function fixture(t: TestContext, background = false, unlatched = false) {
+async function fixture(t: TestContext, background = false, unlatched = false, childMode = false) {
   assert.equal(inFlightReviewCount(), 0);
   const dir = mkdtempSync(join(tmpdir(), "rmd-t9812-"));
   const path = join(dir, "tasks.yaml");
@@ -39,6 +39,7 @@ async function fixture(t: TestContext, background = false, unlatched = false) {
   const cleanups: Array<() => void> = [];
   let calls = 0, running = false, stale = false, exiting = false, finished = false;
   let onAdmit: (() => void) | undefined;
+  let enterChild: (() => void) | undefined;
   const material = { stale: true as const, oldSha: "a".repeat(40), newSha: "b".repeat(40),
     staleSinceMs: epoch - 7_200_000,
     changes: [{ sha: "b".repeat(40), subject: "fix: refresh worker", files: ["src/lib/worker.ts"] }] };
@@ -47,7 +48,11 @@ async function fixture(t: TestContext, background = false, unlatched = false) {
     refreshMerged: () => () => exiting,
     checkFreshness: () => stale ? material : { stale: false },
     checkStop: () => undefined,
-    runOne: () => { running = true; return lane.promise; },
+    runOne: (_id, options) => {
+      running = true;
+      enterChild = () => options?.onChildPending?.({ runId: "fixture", abort: async () => undefined as never });
+      return lane.promise;
+    },
     log: (step, extra = {}) => rows.push({ step, extra }),
     sleep: () => { const wait = deferred<void>(); sleeps.push(wait); return wait.promise; },
     sweep: async (gate?: ReviewAdmissionGate) => {
@@ -95,11 +100,12 @@ async function fixture(t: TestContext, background = false, unlatched = false) {
   };
   return {
     daemon, row, at, review, latch, finished: () => finished, calls: () => calls,
+    enterChild: () => { assert.ok(enterChild); enterChild(); },
     admit: async (work?: () => void) => { onAdmit = work; admit.resolve(); await pump(); },
     settlePass: async () => { pass.resolve(); await pump(); t.mock.timers.tick(0); await pump(); },
     exit: async () => {
       at(40); exiting = true; stale = true;
-      lane.resolve({ taskId: "A", runId: "fixture", merged: true, verdict: "merged", costUsd: 0 });
+      if (!childMode) lane.resolve({ taskId: "A", runId: "fixture", merged: true, verdict: "merged", costUsd: 0 });
       await wake(); assert.equal(calls, 2, "the exit runs or awaits its pass");
     },
     fix: () => {
@@ -161,6 +167,22 @@ test("W1-T9812: what the pre-exit pass admits keeps the latch bound", async (t) 
       if (review) assert.equal(review.aborted(), true);
     });
   }
+});
+
+test("W1-T9812: what the pre-exit pass admits keeps the latch bound in child mode", async (t) => {
+  const h = await fixture(t, false, false, true);
+  await h.latch(); h.enterChild(); await h.exit();
+  let review: ReturnType<typeof h.review> | undefined;
+  h.at(70); await h.admit(() => { review = h.review("AFTER"); });
+  h.at(90); await h.settlePass();
+  assert.equal(h.finished(), false, "the pass-admitted review still has the latch's remaining time");
+  h.at(109); t.mock.timers.tick(19); await pump();
+  assert.equal(h.finished(), false);
+  h.at(110); t.mock.timers.tick(1); await pump();
+  t.mock.timers.tick(0); await pump();
+  assert.equal(h.finished(), true, "the child release cannot grant a second whole drain bound");
+  assert.equal(review?.aborted(), true);
+  assert.equal((await h.daemon).stopReason, "stale");
 });
 
 test("an exit with no dispatch latch keeps the pass before the drain", async (t) => {

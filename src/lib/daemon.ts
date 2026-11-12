@@ -5458,6 +5458,7 @@ export async function runDaemon(
   type ExitPass = { kind: FreshnessPass; settled: Promise<void>; overlapped: boolean; overlapMs: number };
   const drainBeforeRestart = async (
     stepPrefix: "daemon.freshness_drain" | "daemon.memory_drain", latchAtMs?: number, pass?: ExitPass,
+    exitDeadlineAtMs?: number,
   ): Promise<void> => {
     const fromLatch = stepPrefix === "daemon.freshness_drain" && latchAtMs !== undefined &&
       latchDrain?.latchAtMs === latchAtMs && !latchDrain.done ? latchDrain : undefined;
@@ -5486,7 +5487,8 @@ export async function runDaemon(
         waited_on: observation.snapshot(),
       });
       // Work admitted by an overlapping pass shares the latch deadline, including work not yet in the inventory.
-      const latchLeftMs = fromLatch ? Math.max(0, fromLatch.latchAtMs + sweepWallClockBoundMs - exitAtMs) : sweepWallClockBoundMs;
+      const latchLeftMs = exitDeadlineAtMs !== undefined ? Math.max(0, exitDeadlineAtMs - exitAtMs)
+        : fromLatch ? Math.max(0, fromLatch.latchAtMs + sweepWallClockBoundMs - exitAtMs) : sweepWallClockBoundMs;
       const seen = new Set(reviewsAtExit);
       const settled = new Set<Promise<void>>();
       const watch = (reviews: Iterable<Promise<void>>): void => {
@@ -8544,7 +8546,7 @@ export async function runDaemon(
       preparedFreshnessExit ??= prepareFreshnessExit(restartDecided!, restartWait.decidedAtMs);
       childDrain ??= preparedFreshnessExit.then(async () => {
         await stopTicker();
-        await drainBeforeRestart("daemon.freshness_drain");
+        await drainBeforeRestart("daemon.freshness_drain", undefined, undefined, restartWait.decidedAtMs + sweepWallClockBoundMs);
         childDrainDone = true;
         poolControl.detach?.(outOfProcess);
       }).catch((reason: unknown) => {
