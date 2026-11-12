@@ -19,7 +19,7 @@ import { sendCashRequest } from "../src/lib/worker-provider.ts";
 const USAGE = "usage: cash-request-probe --deployment <name> --path <path> --body-file <file> --output-tokens <n>";
 
 /** Parse the four required flags. Returns `{ error }` for a missing or malformed one. */
-function parseCashProbeArgs(argv) {
+export function parseCashProbeArgs(argv) {
   const flags = {};
   for (let i = 0; i < argv.length; i += 2) {
     const name = argv[i];

@@ -22,6 +22,8 @@ import {
 } from "#src/lib/worker-provider.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
+// @ts-expect-error -- plain .mjs script has no type declarations
+import { parseCashProbeArgs } from "#scripts/cash-request-probe.mjs";
 
 // Any priced cash deployment with one flat rate and no Foundry Claude adapter will do.
 const DEPLOYMENT = Object.keys(OPENWEIGHT_PRICES).find((name) =>
@@ -256,4 +258,11 @@ test("W1-T12413 criterion 8: the probe script sends one request and prints the s
   const usage = await probe(dir, ["--deployment", DEPLOYMENT]);
   assert.equal(usage.code, 2);
   assert.equal(JSON.parse(usage.stdout).reason, "usage");
+});
+
+test("W1-T12413 criterion 8: the probe parser rejects an unknown flag and a flag without a value", () => {
+  const unknown = parseCashProbeArgs(["--bogus", "x"]);
+  assert.match(unknown.error, /bad argument "--bogus"/);
+  const missingValue = parseCashProbeArgs(["--deployment"]);
+  assert.match(missingValue.error, /bad argument "--deployment"/);
 });
