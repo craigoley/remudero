@@ -1,0 +1,94 @@
+- id: W1-T12369
+  title: A Dependabot bump whose only other edit is a test pin it changes is reviewed as confined
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 5
+  risk: medium
+  band_meaning: blast-radius
+  origin: operator request 2026-11-11 that Dependabot PRs such as #17928 move with no manual step
+  plan_refs: [W1-T54, W1-T3707]
+  files:
+    - src/lib/dep-review.ts
+    - test/dep-review.test.ts
+    - test/a-dependabot-test-pin-companion-is-reviewed-as-confined.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: A bump shaped like #17928, whose test file changes only the action SHA pin the workflow bump changes, arms, has no offending file, and names the accepted file and its pin
+      proof: 'grep: test("W1-T12369: a #17928-shaped bump with its test pin edit arms and names the pin in test/a-dependabot-test-pin-companion-is-reviewed-as-confined.test.ts'
+    - claim: Any other edit in that test file, beside the pin or on its own line, is still REFUSE and names the file
+      proof: 'grep: test("W1-T12369: any other edit in the test file is still refused in test/a-dependabot-test-pin-companion-is-reviewed-as-confined.test.ts'
+    - claim: A test line that moves a pin the bump does not change, or moves a pin to a value other than the new one, is still REFUSE
+      proof: 'grep: test("W1-T12369: a pin the bump does not change is still refused in test/a-dependabot-test-pin-companion-is-reviewed-as-confined.test.ts'
+    - claim: A pin-only edit outside test/, or a test file that is added, deleted, renamed or binary, is still REFUSE
+      proof: 'grep: test("W1-T12369: a pin edit outside test/ or a test file add or delete is still refused in test/a-dependabot-test-pin-companion-is-reviewed-as-confined.test.ts'
+    - claim: A major or an unparseable bump with the same test pin edit keeps its verdict from before this task (REFUSE)
+      proof: 'grep: test("W1-T12369: a major or unparseable bump with a test pin edit is still refused in test/a-dependabot-test-pin-companion-is-reviewed-as-confined.test.ts'
+    - claim: The production command (depReviewCommand) on the #17928 fixture posts success, arms, and writes the accepted file and pins into its dep-review.decided row
+      proof: 'grep: test("W1-T12369: depReviewCommand writes the accepted test pin file into its decision row in test/dep-review.test.ts'
+    - claim: The engine revision changes, so the terminal REFUSE the old engine wrote at #17928's head is decided again once
+      proof: 'grep: dep-review-test-pin-companion-v4 in src/lib/dep-review.ts'
+  rationale: |
+    Dependabot PR #17928 ("bump the actions-minor-and-patch group with 3 updates", head
+    4692356055ea748026d13c0f98fc12e3d6f75193) moves github/codeql-action init, analyze and
+    upload-sarif from 4.39.1 (SHA 9b3254085494b55a0f7c4c2b3d2d52cc712ce370) to 4.39.3
+    (SHA 33d7b85da1a04171e211befe2c739303b9a4c066) in three workflow files.
+    test/semgrep-native-install.test.ts asserts the exact upload-sarif SHA in semgrep.yml.
+    So the bump alone turns that test red. Dependabot did not edit the test. A Codex commit
+    (f8a781bf8, "test: track the updated CodeQL SARIF action", 2026-11-11T14:32Z) changed one
+    line in it, old SHA to new SHA. An empty commit 469235605 sits on top.
+    At 2026-11-11T16:29:45Z the dependency review lane (src/lib/dep-review.ts, W1-T54) decided
+    REFUSE: "diff touches file(s) outside the manifest/lockfile allowlist:
+    test/semgrep-native-install.test.ts". REFUSE posts nothing. The sweep then records the
+    head as a TERMINAL outcome under engine dep-review-docker-tag-semver-v3 and stands down on
+    every pass (sweep.disposed rows to 02:29Z on 2026-11-12, stage_stuck true, checks green).
+    The PR is frozen with green checks, and only a person can move it.
+    This shape will repeat. Any test that pins an action SHA or a package version makes every
+    bump of that dependency need a test edit, and that edit is always outside the allowlist.
+  design: |
+    Deterministic, no model call, as the lane header requires. All in src/lib/dep-review.ts.
+    1. Pin pairs. Build the set of pins the bump itself changes, as {dependency, from, to}:
+       (a) for each workflow file in the diff, each paired removed/added `uses:` line that
+       ACTION_SHA_PIN_CHANGE_RE matches with the same action gives the SHA pair (old SHA to
+       new SHA) and, when it differs, the release pair (old annotation to new, without a
+       leading v); (b) each parseDependabotBumpFacts fact gives its fromVersion to toVersion.
+    2. Test pin companion. A file that offendingFiles names is accepted only when all hold:
+       - the path starts with test/;
+       - its diff section has no new, deleted, rename, mode or binary lines;
+       - it has at least one changed line, and each run of changed lines has as many removed
+         lines as added lines;
+       - for each removed/added pair, replacing each whole occurrence of a pin's `from` with
+         its `to` in the removed line gives exactly the added line, and at least one pin was
+         replaced. A whole occurrence of a SHA is not next to another hex character. A whole
+         occurrence of a version is not next to a letter, digit, dot, plus, minus or
+         underscore (a leading v is kept). A version pin also needs the dependency name on
+         the same line; a 40-character SHA does not.
+       Any other edit to any non-manifest file keeps the file in offendingFiles, so REFUSE.
+    3. Scope. Step 2 runs only when the Dependabot author check passes and overallSemverLevel
+       is minor or patch. A major, an unknown level and a pin-only refresh keep their
+       verdicts from before this task.
+    4. Decision row. DepReviewResult gains acceptedPinFiles?: {file, pins}[] (present only
+       when not empty). run-task.ts already spreads the result into the dep-review.decided
+       row, so the row names each accepted file and its pins with no change to run-task.ts.
+       The arm reason adds "; test pin edit accepted: <file>".
+    5. Change DEP_REVIEW_ENGINE_REVISION to "dep-review-test-pin-companion-v4". The sweep
+       re-runs a terminal outcome that an older engine decided once at the same head, so
+       #17928's REFUSE is decided again.
+    6. Tests: the new test file drives decideDepReview with a fixture copied from #17928's
+       diff and body (trimmed release notes), and its variants. test/dep-review.test.ts drives
+       depReviewCommand through its existing driveMigrationDepReview helper, with nothing
+       injected in place of the new code, and reads the ledgered decision row.
+  note: |
+    The #17928 head also carries two Codex commits (f8a781bf8, 469235605). This task does not
+    change how the lane treats commits that are not by Dependabot; decideDepReview reads the
+    PR author only, as before. security-merge-policy was red at the 16:29Z decision and is
+    green since 16:32Z, so a second decision is expected to ARM, not HOLD.
+  falsifier: |
+    Remove the test pin companion step (step 2) and the #17928-shaped test must fail: the
+    decision is refuse and offendingFiles names test/semgrep-native-install.test.ts. Make
+    step 2 accept any balanced edit and the "any other edit" test must fail. The grep for
+    the new engine revision does not match on origin/main.
