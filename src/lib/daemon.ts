@@ -1001,7 +1001,7 @@ function resolveHeadroomWindows(
   // `· resets …` clause at all. Carried through as possibly-absent rather than coerced here, so
   // the two distinct cases below stay distinguishable.
   const windows: Array<{ window: string; percentUsed: number; resetsAt?: string }> = [
-    { window: "session (5h)", percentUsed: snap.session.percentUsed, resetsAt: snap.session.resetsAt },
+    ...(snap.session ? [{ window: "session (5h)", percentUsed: snap.session.percentUsed, resetsAt: snap.session.resetsAt }] : []),
     ...snap.weekly.map((w) => ({ window: `weekly (${w.label})`, percentUsed: w.percentUsed, resetsAt: w.resetsAt })),
   ];
   return windows

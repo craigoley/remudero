@@ -42,6 +42,8 @@
       proof: "grep: W1-T12241 criterion 7 in test/daemon/a-recycle-wait-admits-a-review-that-ends-before-the-wait-does.test.ts"
     - claim: "The daemon calls the new module"
       proof: "grep: recycleWaitAdmits( in src/lib/daemon.ts"
+    - claim: "Under a recycle pause, the review-only pass of the in-flight ticker of a dispatch phase asks the same function: it runs when the function returns true, and it is held with `daemon.sweep_light.held` and `reason: recycle_pause` when the function returns false"
+      proof: "grep: W1-T12241 criterion 9 in test/daemon/a-recycle-wait-admits-a-review-that-ends-before-the-wait-does.test.ts"
   rationale: |
     OBSERVED 2026-11-04T01:56Z to 2026-11-11T01:56Z in the ledger of the core instance: a recycle pauses the instance for the whole wait for its workers, and no review starts in that time.
     - 31 recycles replaced the daemon container. In the three that waited longest the wait was 2,970 s, 2,545 s and 1,560 s, which is 82 to 94 % of the whole recycle.
@@ -67,6 +69,7 @@
     - Refuse every other kind.
     In `startInterphaseReviewClock` (src/lib/daemon.ts), in place of the `recycle_pause` hold: build an `admit` predicate from `recycleWaitAdmits` and give it to the light sweep, as the clock of a freshness drain gives `latchedAdmission`. A refusal keeps today's `daemon.review_clock.held` row.
     In `refillHeldForRecycle` (src/lib/sweep.ts): ask the predicate that the pass carries; with none, hold as today.
+    AMENDED: the in-flight ticker of a dispatch phase holds its review-only pass under a recycle pause too (`daemon.sweep_light.held` with `reason: recycle_pause`, src/lib/daemon.ts about line 3150, also W1-T8136). While a build run is in flight the daemon stays in that phase, so the review clock of a pause does not run. A change to that clock alone admits no review beside a build run. In one host ledger (the rotation of 2026-11-02) the dispatch ticker held 29 times and the review clock 4 times. So the ticker asks the same predicate as the review clock, in the same way.
     Write `daemon.recycle_wait.review_admitted` with `review_length_ms`, `predicted_left_ms` and the run it was compared with.
     The worker count of `deploy/recycle-container.sh` already counts a reviewer, so a review that runs long is waited for and not killed.
     NOT IN SCOPE: fix rounds and build dispatch under a recycle pause, the recycle script, the time limit of the wait, and a pause that the operator wrote.
