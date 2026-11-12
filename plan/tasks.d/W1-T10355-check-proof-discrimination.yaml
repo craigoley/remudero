@@ -7,7 +7,7 @@
   risk: high
   band_meaning: blast-radius
   priority: 1.22
-  status: queued
+  status: merged
   attempts: 0
   author_class: machine
   origin: "ci-friction:check:proof-discrimination"

@@ -22,7 +22,7 @@
   "src/lib/clock.ts": 500,
   "src/lib/clone-reaper.ts": 298,
   "src/lib/commit-message.ts": 1000,
-  "src/lib/compaction.ts": 1000,
+  "src/lib/compaction.ts": 500,
   "src/lib/companion-paths.ts": 500,
   "src/lib/config-schema.ts": 500,
   "src/lib/config.ts": 500,

@@ -24,6 +24,7 @@
     - src/lib/judge-calibration.ts
     - src/lib/analytics-route.ts
     - test/review/recorded-typed-answers-are-scored-per-role-and-model.test.ts
+    - test/an-analytics-checkpoint-keeps-folds-not-rows.test.ts
   status: queued
   attempts: 0
   acceptance:
