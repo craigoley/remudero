@@ -93,6 +93,7 @@ import { consumeHumanGateCounts, unavailableHumanGateCounts, type HumanGateProje
 import { startRepositoriesSourcePublisher, type RepositoriesSources } from "./repositories-view.js";
 import { withViewShadow } from "./view-shadow.js";
 import { buildRecentRoute, buildStatusRoute, buildStatusStream, createBoardSnapshotCache, DEFAULT_POLL_MS, type BoardDeps, type BoardSnapshotSource } from "./board.js";
+import { BOARD_PROJECTION_IDLE_INTERVAL_MS } from "./board-worker.js";
 import { buildBatchedGithub, type GhFailureReason, type GitHub } from "./status.js";
 import { fleetRuntimeHealthTelemetry, readFleetRuntimeHealth, type FleetRuntimeHealth } from "./fleet-runtime-health.js";
 import { buildInstanceGatewayRoutes, CORE_INSTANCE, DEFAULT_INSTANCE_STATE_BASE, instanceStateRoot, livenessInstances, watchInstanceLiveness, type InstanceGatewayOptions } from "./instance-gateway.js";
@@ -370,7 +371,7 @@ export interface ServeDeps {
    */
   boardGithubRefreshMs?: number;
   /** Published off-thread board projection for the production status route; `pause`/`resume` shed its thread (W1-T9508). */
-  boardSnapshotSource?: BoardSnapshotSource & { pause?(): Promise<boolean>; resume?(): void };
+  boardSnapshotSource?: BoardSnapshotSource & { pause?(): Promise<boolean>; resume?(): void; setClientPresence?(present: boolean): void };
   /**
    * W1-T183: tunable anomaly thresholds (ms), keyed by {@link Phase} with a `default` fallback;
    * defaults to {@link DEFAULT_PHASE_ELAPSED_THRESHOLDS_MS}. {@link renderShellHtml} embeds them
@@ -1618,6 +1619,83 @@ export function stampReadWith(route: Route, stamp: (req: import("node:http").Inc
     handler: (req, res, ctx) => {
       stamp(req);
       return route.handler(req, res, ctx);
+    },
+  };
+}
+
+/** Keep the board projection at its active cadence only while the status surface has a reader. */
+function trackBoardProjectionClients(
+  source: { setClientPresence?(present: boolean): void } | undefined,
+  idleMs = BOARD_PROJECTION_IDLE_INTERVAL_MS,
+): { noteStatusRead(): void; wrap(route: SseRoute): SseRoute; stop(): void } {
+  let streamClients = 0;
+  let lastStatusReadAt: number | undefined;
+  let expiry: ReturnType<typeof setTimeout> | undefined;
+  let present = false;
+  const update = (): void => {
+    const next = streamClients > 0 || (lastStatusReadAt !== undefined && systemClock.now() - lastStatusReadAt < idleMs);
+    if (next === present) return;
+    present = next;
+    source?.setClientPresence?.(next);
+  };
+  const expireReadAttention = (): void => {
+    expiry = undefined;
+    if (lastStatusReadAt === undefined) return;
+    const remaining = idleMs - (systemClock.now() - lastStatusReadAt);
+    if (remaining > 0) {
+      expiry = setTimeout(expireReadAttention, remaining);
+      expiry.unref?.();
+      return;
+    }
+    lastStatusReadAt = undefined;
+    update();
+  };
+  const scheduleExpiry = (): void => {
+    if (expiry) clearTimeout(expiry);
+    expiry = setTimeout(expireReadAttention, idleMs);
+    expiry.unref?.();
+  };
+  source?.setClientPresence?.(false);
+  return {
+    noteStatusRead() {
+      lastStatusReadAt = systemClock.now();
+      scheduleExpiry();
+      update();
+    },
+    wrap(route) {
+      return {
+        ...route,
+        subscribe: (send, req) => {
+          streamClients++;
+          update();
+          let unsubscribe: () => void;
+          try {
+            unsubscribe = route.subscribe(send, req);
+          } catch (error) {
+            streamClients = Math.max(0, streamClients - 1);
+            update();
+            throw error;
+          }
+          let closed = false;
+          return () => {
+            if (closed) return;
+            closed = true;
+            try {
+              unsubscribe();
+            } finally {
+              streamClients = Math.max(0, streamClients - 1);
+              update();
+            }
+          };
+        },
+      };
+    },
+    stop() {
+      if (expiry) clearTimeout(expiry);
+      expiry = undefined;
+      lastStatusReadAt = undefined;
+      streamClients = 0;
+      update();
     },
   };
 }
@@ -3314,7 +3392,8 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
   const liveThreads = deps.serveMemory?.workers ?? workerThreads().live;
   const github = deps.board.github;
   github.serveOffLoop?.();
-  const statusStream = buildStatusStream(deps.board, deps.pollMs ?? DEFAULT_POLL_MS);
+  const boardPresence = trackBoardProjectionClients(deps.boardSnapshotSource);
+  const statusStream = boardPresence.wrap(buildStatusStream(deps.board, deps.pollMs ?? DEFAULT_POLL_MS));
   const refreshMs = deps.boardGithubRefreshMs ?? DEFAULT_BOARD_PREWARM_MS;
   const walk = { refresh: () => github.warm?.(), telemetry: () => github.warmTelemetry?.(), targetFreshnessMs: refreshMs, log: deps.log };
   const keepWarm = github.warmsOffLoop?.() ? createGithubKeepWarm(walk) : undefined;
@@ -3408,6 +3487,7 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
   const stampRead = (route: Route): Route =>
     stampReadWith(route, (req) => {
       lastReadAt = systemClock.now();
+      if (route.path === "/v1/status") boardPresence.noteStatusRead();
       prewarm.noteRead();
       readModel?.noteGithubRead?.();
       // A per-instance view's read names its instance, so only that instance's unit keeps its cadence.
@@ -3489,6 +3569,7 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
     })));
   }
   server.on("close", staleExit.stop);
+  server.on("close", boardPresence.stop);
   server.on("close", prewarm.stop);
   if (keepWarm) server.once("listening", keepWarm.start);
   server.on("close", stopWakeSummary);

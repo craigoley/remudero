@@ -553,6 +553,36 @@ function recycleWaitFits(i: { waitS: number; stepEndsAtS: number | undefined; no
   return { fits: i.waitS + i.restS <= left, limit: "known", ...inputs, step_ends_at_s: i.stepEndsAtS, step_left_s: left };
 }
 
+/** W1-T12294: how long a recycle may wait for a tick at which it fits: the longest observed run plus the time
+ *  outside the wait. With no run history, the script's fallback wait stands in for the longest run. */
+function fitDeferralBound(durationsMs: readonly number[], restS: number): {
+  bound_s: number;
+  bound_source: "observed" | "no_history_fallback";
+} {
+  if (durationsMs.length === 0) return { bound_s: DRAIN_WAIT_FALLBACK_S + restS, bound_source: "no_history_fallback" };
+  return { bound_s: Math.ceil(Math.max(...durationsMs) / 1000) + restS, bound_source: "observed" };
+}
+
+/** W1-T12294: a recycle that does not fit its deploy step waits for a tick at which it fits; it is not a refusal.
+ *  The throw is a plain Error; this map marks it, so only this file can make a deferral. */
+interface DeferredFit {
+  since_ms: number;
+  deferred_s: number;
+  bound_s: number;
+  bound_source: "observed" | "no_history_fallback";
+  counted_wait_s: number;
+  rest_s: number;
+  step_left_s: number | null;
+  runs_in_flight: number | null;
+}
+const deferredFits = new WeakMap<Error, DeferredFit>();
+
+function deferredFitError(message: string, fit: DeferredFit): Error {
+  const err = new Error(message);
+  deferredFits.set(err, fit);
+  return err;
+}
+
 /** W1-T8138: which runs the ledger shows as finished or yielded, and what the quiet-worker watchdog judged.
  *  Settled = a `verdict` row, a `run.freshness_handoff` row, or an acted `worker.recycle_yield` row.
  *  Judged `end_failed` = a `worker.recycle_yield` whose round end failed (and no settling row followed). */
@@ -1870,6 +1900,10 @@ export interface DeployDeps {
   drainRefusal?: () => DrainRefusalRecord | undefined;
   /** Store the drain refusal, or clear it with `undefined`. */
   setDrainRefusal?: (record: DrainRefusalRecord | undefined) => void;
+  /** W1-T12294: since when a recycle has waited for a tick at which it fits (state/DEPLOY_FIT_DEFERRAL). */
+  fitDeferral?: () => { since_ms: number } | undefined;
+  /** Store the fit deferral, or clear it with `undefined`. */
+  setFitDeferral?: (record: { since_ms: number } | undefined) => void;
   /** Has this blocker yielded or finished since the refusal? `undefined` = could not tell, which holds the retry. */
   blockerSettled?: (blocker: DrainBlocker, refusal: DrainRefusalRecord) => boolean | undefined;
   /** The streak of consecutive same-reason refusals, persisted because each cycle is a fresh process. */
@@ -2056,9 +2090,34 @@ function recordRefusal(deps: DeployDeps, refusal: { toHead: string; backend: str
   }
 }
 
+/** W1-T12294: a recycle that does not fit is deferred to a later tick. No failure, no refusal streak, no alert. */
+function deferRecycleForFit(deps: DeployDeps, f: DeferredFit, err: Error, fromHead: string, toHead: string): DeployResult {
+  if (deps.fitDeferral?.() === undefined) {
+    try {
+      deps.setFitDeferral?.({ since_ms: f.since_ms });
+    } catch (error) {
+      deps.log("deploy.fit_deferral_unwritable", { error: error instanceof Error ? error.message : String(error) });
+    }
+  }
+  deps.log("deploy.recycle_deferred_fit", {
+    kind: "restart-deferred-fit",
+    deferred_since: fixedClock(f.since_ms).iso(),
+    deferred_s: f.deferred_s,
+    bound_s: f.bound_s,
+    bound_source: f.bound_source,
+    counted_wait_s: f.counted_wait_s,
+    rest_s: f.rest_s,
+    step_left_s: f.step_left_s,
+    runs_in_flight: f.runs_in_flight,
+    to: short(toHead),
+  });
+  return { deployed: false, reason: `restart-deferred-fit: ${err.message}`, fromHead, toHead, pulledPendingRestart: true };
+}
+
 /** A verified healthy daemon ends the streak: close the issue it opened and forget the count. */
 function retractRefusal(deps: DeployDeps, toHead: string, failedHead?: string): void {
   deps.setDrainRefusal?.(undefined); // a verified recycle ends the drain refusal's blocker list too
+  deps.setFitDeferral?.(undefined);
   const prior = deps.refusalStreak?.();
   if (!prior) return;
   const instance = deps.refusalInstance?.() ?? "default";
@@ -2434,6 +2493,8 @@ export function runDeployCycle(deps: DeployDeps, opts: DeployOpts = {}): DeployR
   try {
     selection.backend.restart();
   } catch (err) {
+    const deferred = err instanceof Error ? deferredFits.get(err) : undefined;
+    if (deferred) return deferRecycleForFit(deps, deferred, err as Error, fromHead, toHead);
     // A BACKEND'S OWN REFUSAL IS AUTHORITATIVE AND NEVER SECOND-GUESSED (design (iii)) —
     // recycle-container.sh refusing on workers past its wait, a failed pull, or an image-id
     // mismatch throws exactly like this. Reported verbatim; never retried past, suppressed, or
@@ -2915,12 +2976,24 @@ export function realDeployDeps(o: RealDeployOpts, sensorExec?: DeploySensorExec)
   const lifecycleTarget = Object.freeze({ instanceName: recycleInstance, stateRoot: o.stateRoot,
     containerName: imageShaContainer, namespace: "host" as const });
   const readLedgerText = (): string => readFileSync(ledgerPath, "utf8");
+  const fitDeferralPath = join(o.stateRoot, "state", "DEPLOY_FIT_DEFERRAL");
+  const readFitDeferral = (): { since_ms: number } | undefined => {
+    try {
+      const r = JSON.parse(readFileSync(fitDeferralPath, "utf8")) as { since_ms?: unknown };
+      return typeof r.since_ms === "number" && Number.isFinite(r.since_ms) ? { since_ms: r.since_ms } : undefined;
+    } catch {
+      return undefined; // absent or unreadable: no deferral yet, so this tick starts one
+    }
+  };
   /** W1-T8138: derive the drain wait from the ledger and the in-flight locks, and ledger what it read. */
-  const deriveWaitFromState = (): (DerivedDrainWait & { runsInFlight: number; restS: number | undefined }) | undefined => {
+  const deriveWaitFromState = (): (DerivedDrainWait & { runsInFlight: number; restS: number | undefined;
+    bound: { bound_s: number; bound_source: "observed" | "no_history_fallback" } }) | undefined => {
     try {
       const text = readLedgerText();
       const lanes = readDrainWaitLanes(join(o.stateRoot, "state"), text, clock);
-      const derived = deriveDrainWait(readImplementDurationsMs(text), lanes);
+      const durationsMs = readImplementDurationsMs(text);
+      const derived = deriveDrainWait(durationsMs, lanes);
+      const restS = readRecycleRestS(text);
       log("deploy.recycle_wait_derived", {
         wait_s: derived.waitS,
         source: derived.source,
@@ -2928,7 +3001,12 @@ export function realDeployDeps(o: RealDeployOpts, sensorExec?: DeploySensorExec)
         quantile: derived.quantile,
         lanes: derived.lanes,
       });
-      return { ...derived, runsInFlight: lanes.filter((lane) => lane.judged !== "ended").length, restS: readRecycleRestS(text) };
+      return {
+        ...derived,
+        runsInFlight: lanes.filter((lane) => lane.judged !== "ended").length,
+        restS,
+        bound: fitDeferralBound(durationsMs, restS ?? RECYCLE_REST_FALLBACK_S),
+      };
     } catch (err) {
       log("deploy.recycle_wait_derive_failed", { error: err instanceof Error ? err.message : String(err) });
       return undefined; // unreadable ledger or lock dir: the script's labelled fallback applies
@@ -2999,10 +3077,35 @@ export function realDeployDeps(o: RealDeployOpts, sensorExec?: DeploySensorExec)
         ...fit,
       });
       if (!fit.fits) {
-        throw new Error(
+        const bound = derived?.bound ?? fitDeferralBound([], fit.rest_s);
+        const nowMs = clock();
+        const sinceMs = readFitDeferral()?.since_ms ?? nowMs;
+        const deferredS = Math.max(0, Math.floor((nowMs - sinceMs) / 1000));
+        const handoffWaitS = (fit.step_left_s ?? 0) - fit.rest_s;
+        if (deferredS > bound.bound_s && handoffWaitS >= DRAIN_WAIT_GRANULARITY_S) {
+          log("deploy.recycle_bounded_handoff", {
+            wait_s: handoffWaitS,
+            step_left_s: fit.step_left_s,
+            rest_s: fit.rest_s,
+            bound_s: bound.bound_s,
+            deferred_since: fixedClock(sinceMs).iso(),
+          });
+          runScript(["-c", 'export RMD_RECYCLE_WAIT_S="$1"; shift; exec bash "$@"', "recycle-wait", String(handoffWaitS), ...script]);
+          return;
+        }
+        throw deferredFitError(
           `recycle not started: it does not fit the deploy step. The wait is ${fit.counted_wait_s} s and a recycle needs ` +
             `${fit.rest_s} s outside its wait, but the step ends in ${fit.step_left_s} s. No pause was written.\n` +
             "Remedy: wait for the runs in flight to end, or run deploy/recycle-container.sh by hand, where no step limit applies.",
+          {
+            since_ms: sinceMs,
+            deferred_s: deferredS,
+            ...bound,
+            counted_wait_s: fit.counted_wait_s,
+            rest_s: fit.rest_s,
+            step_left_s: fit.step_left_s,
+            runs_in_flight: derived?.runsInFlight ?? null,
+          },
         );
       }
       if (useDerived) {
@@ -3434,6 +3537,20 @@ export function realDeployDeps(o: RealDeployOpts, sensorExec?: DeploySensorExec)
         return;
       }
       writeAtomic(deployDrainRefusalPath(o.stateRoot), JSON.stringify(record, null, 2));
+    },
+    fitDeferral: readFitDeferral,
+    setFitDeferral: (record) => {
+      if (record === undefined) {
+        try {
+          unlinkSync(fitDeferralPath);
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+            log("deploy.failure_retraction_failed", { marker: "DEPLOY_FIT_DEFERRAL", error: String(error) });
+          }
+        }
+        return;
+      }
+      writeAtomic(fitDeferralPath, JSON.stringify(record));
     },
     blockerSettled: (blocker) => {
       try {
