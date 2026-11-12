@@ -7261,13 +7261,15 @@ export interface SweepPolicy {
    *  rotation selects against the marker, so the bound re-arms, and the window is BYTE-DRIVEN.
    *  NEVER PRE-EMPTS {@link pendingCeilingMinutes}. */
   repeatDispositionBound: number;
+  /** W1-T12267: the sweep tick bound; a light pass's plan-merge budget never passes half of it. */
+  sweepWallClockBoundMs?: number;
 }
 
 /** The shipped default policy. A BOUNDED FAIL-SAFE (rule 2): an absent value falls back to a bounded
  *  default, never to unbounded spend, and the cost ceiling bounds RUNAWAY spend, not a budget.
  *  Several rows are COLLECTED from `plan/policy.yaml` rather than written as source literals, each a
  *  RELOCATION and never a retune. // Why: FROZEN AT IMPORT (W1-T331) — docs/forensics/sweep.md. */
-const POLICY_SWEEP = loadDefaultPolicy().values.sweep;
+const { sweep: POLICY_SWEEP, sweepWallClockBoundMs: POLICY_SWEEP_WALL_CLOCK_BOUND_MS } = loadDefaultPolicy().values;
 
 /** W1-T1049 — reads `plan/policy.yaml`'s `sweep.reviewLanes` row DIRECTLY, never through
  *  `policy.ts`'s schema, which is outside this task's declared files. Validated like every other
@@ -7439,6 +7441,7 @@ export const DEFAULT_SWEEP_POLICY: SweepPolicy = {
   // literal, 50, derived against the merge-time population measured 2026-08-26 (see the field's
   // own doc for the full derivation), never a round number picked because it looked safe.
   repeatDispositionBound: 50,
+  sweepWallClockBoundMs: POLICY_SWEEP_WALL_CLOCK_BOUND_MS,
 };
 
 /** W1-T923 — one GATE failure whose remedy is a SINGLE, unambiguous form, so the fix rung can act
@@ -26197,7 +26200,7 @@ async function runSweepLightPassCore(
   // between ticks grows with the work. The budget never passes HALF of `sweepWallClockBoundMs`: the daemon loop awaits
   // its light pass and the restart drain stops at that row, so a pass must end, with one merge still running, inside it.
   const passIntervalBudgetMs = measuredIntervalMs === undefined ? undefined
-    : Math.min(measuredIntervalMs, Math.floor(loadDefaultPolicy().values.sweepWallClockBoundMs / 2));
+    : Math.min(measuredIntervalMs, Math.floor((policy.sweepWallClockBoundMs ?? POLICY_SWEEP_WALL_CLOCK_BOUND_MS) / 2));
   const availablePlanMerges = lightPassPlanMergeOwner !== undefined
     ? []
     : selectLightPassPlanMerges(openPrs, policy, now, selectionLedgerLines, passIntervalBudgetMs !== undefined);
