@@ -1,0 +1,48 @@
+- id: W1-T12419
+  title: "Before a code review, a decision model answers triage questions about the pull request, shadow only"
+  repo: remudero
+  depends_on:
+    - W1-T12416
+    - W1-T12414
+  priority: 1.6
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # one paid request beside every code review; the review itself and every gate stay the same
+  band_meaning: span
+  origin: operator-session#decision-models-2026-11-12
+  plan_refs:
+    - W1-T12416
+    - W1-T12414
+    - W1-T11149
+    - W1-T12417
+  files:
+    - src/lib/review-triage.ts
+    - src/cli/commands/review.ts
+    - test/review/a-decision-model-triages-a-pull-request-before-review.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "Before a code review starts, one decision request about that one pull request asks: is it docs-only, is it test-only, does it touch high-risk paths, what is its size band, and does it need a human. Two pull requests never share a request"
+      proof: "grep: W1-T12419 criterion 1 in test/review/a-decision-model-triages-a-pull-request-before-review.test.ts"
+    - claim: "The answers are recorded in W1-T12416's decision.answered row with role code-review-triage, each with its distribution or abstention, the latency and the cost"
+      proof: "grep: W1-T12419 criterion 2 in test/review/a-decision-model-triages-a-pull-request-before-review.test.ts"
+    - claim: "The review does not wait for the triage and its verdict is the same with or without it. No gate, route or review step reads the answers. An unavailable or failed candidate writes one row with its reason and nothing else"
+      proof: "grep: W1-T12419 criterion 3 in test/review/a-decision-model-triages-a-pull-request-before-review.test.ts"
+    - claim: "The review path calls the triage"
+      proof: "grep: triagePullRequest( in src/cli/commands/review.ts"
+  rationale: |
+    WHY: the operator wants decision models applied throughout for efficiency (2026-11-12), and "efficiency and throughput first".
+    MEASURED by W1-T11149, 7 days to 2026-11-02: 732 code reviews, median 379 s each. The LLM review judge took 53.6 hours, 57% of review wall time, median 190 s, maximum 62 minutes. The median code pull request waited 189 minutes, p90 375 minutes.
+    OBSERVED 2026-11-12 by the operator session: a decision request answered three typed questions in 332 to 446 ms (East US Decisions deployment) and 232 ms warm (decision-1), at about $0.04 per 1,000 requests of 400 input tokens.
+    So a triage answer costs well under a second and a fraction of a cent. With W1-T12414's scores against later review outcomes, a clearly trivial pull request (docs-only or test-only, small, no high-risk path) can later be routed to a lighter review. This task only records; the routing is a later task once the record earns it.
+    READ 2026-11-12 at origin/main f93618eab: src/cli/commands/review.ts:1139 already runs `runShadowJudge` beside a review, so the review path has a shadow seam to sit beside.
+  design: |
+    Add src/lib/review-triage.ts with `triagePullRequest(config, pr)`. The input is one pull request's evidence: title, changed paths with line counts, and the high-risk path list the review already uses. It never includes the PR body's instructions as anything but evidence. The questions: docs-only (yes/no), test-only (yes/no), touches high-risk paths (yes/no), size band (score: tiny, small, medium, large), needs a human (yes/no). Each is asked of the first available candidate of the decision_models section through `askDecisionModel` with role `code-review-triage`.
+    Call it from src/cli/commands/review.ts before the review spawns, without awaiting it on the review's path.
+    NOT IN SCOPE: any change to the review, its gate or its routing; a lighter review lane (a later task, once W1-T12414's figures show the triage agrees with outcomes).
+  falsifier: |
+    Await the triage before the review and criterion 3 must fail. Put two pull requests in one request and criterion 1 must fail. Restore and require both to pass.
+  note: |
+    Ids reserved for run-unfiled-1794493022000 with ~/rmd-work/bin/reserve-id.sh. The test folder came from `rmd test-place` on a draft; the builder runs it again on the real test.

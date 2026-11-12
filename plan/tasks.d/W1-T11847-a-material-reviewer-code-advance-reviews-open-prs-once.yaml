@@ -32,7 +32,7 @@
     - test/worker/a-review-slot-is-released-when-its-verdict-posts.test.ts
     - test/daemon/the-daemon-review-worktree-git-runs-off-the-loop.test.ts
     - test/every-priced-ledger-step-is-in-the-config-garden-read.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED on 2026-11-08 on PR #17209, exact head 304b7207bb28febb2bf849a37023a30525fc6d23:
