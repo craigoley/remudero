@@ -21,7 +21,7 @@
     - test/every-test-finds-the-repo-root-through-one-helper.test.ts
     - scripts/test-tier-manifest.json
     - test/ci/suites/the-root-helper-rule-suite-parses-each-test-file-once.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "In one run of the rule suite, `analyzeSource` parses each distinct file text at most once. The new test counts the parses over a fixture tree and over the texts of a base and a current tree that share most files"
