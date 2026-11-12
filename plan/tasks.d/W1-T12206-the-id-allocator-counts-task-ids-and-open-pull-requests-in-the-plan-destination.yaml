@@ -17,7 +17,7 @@
     - src/lib/task-id.ts
     - src/run-task.ts
     - test/plan/the-id-allocator-counts-task-ids-and-open-pull-requests-in-the-plan-destination.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "While the host file names a repository, a new id is higher than every task id in the plan of that repository and in its open pull requests"
