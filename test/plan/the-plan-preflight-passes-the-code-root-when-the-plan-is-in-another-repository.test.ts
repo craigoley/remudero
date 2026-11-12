@@ -139,3 +139,35 @@ test("W1-T12205 criterion 5: an unreadable selected host file refuses without ex
     destinationStateDir: () => state, publicCodeRoot: () => { throw Error("must not resolve private-marker"); } });
   assert.equal(r.ok, false); assert.equal(r.unreadable.length, 1); assert.doesNotMatch(JSON.stringify(r), /private-marker/);
 });
+
+
+test("W1-T12205 criterion 2: preflight runs the default task-ID child from code while keeping code read-only", async t => {
+  const f = fixture(t); const origin = gitRepo({ bare: true, scope: t }); f.code.addRemote("origin", origin.dir);
+  f.plan.addRemote("origin", "https://github.com/fixture-owner/fixture-ops.git");
+  // Execute byte-identical shipped gate files, without an install or a dependency symlink.
+  for (const path of ["scripts/task-id-existence-check.mjs", "scripts/lib/git.mjs", "scripts/lib/argv.mjs",
+    "src/lib/reservation-chain.mjs", "scripts/task-id-existence-baseline.json"]) {
+    const bytes = readFileSync(join(REPO_ROOT, path), "utf8"); put(join(f.code.dir, path), bytes);
+    assert.equal(readFileSync(join(f.code.dir, path), "utf8"), bytes);
+  }
+  put(join(f.code.dir, "plan/tasks.yaml"), "- id: W1-T800\n");
+  put(join(f.plan.dir, "plan/tasks.yaml"), "- id: W1-T801\n  depends_on: [W1-T800]\n");
+  f.code.git("add", "--all"); f.code.git("commit", "-qm", "code gate and declaration");
+  f.plan.git("add", "--all"); f.plan.git("commit", "-qm", "private declaration");
+  const anchor = f.code.git("commit-tree", "HEAD^{tree}", "-m", formatReservationAnchorMessage({ branch: "ops-filing", startedAt: new Date().toISOString() }));
+  f.code.git("push", "--quiet", "origin", `${anchor}:refs/rmd-id/W1-T801`);
+  const checks = { lintPlan: GREEN, shardCensus: GREEN, checkProof: () => 0 };
+  const input = { cwd: f.plan.dir, codeRoot: f.code.dir, title: "chore(plan): fixture", body: BODY, headRef: "ops-filing" };
+  await withGhShim([{ when: "fixture/control", stdout: "controlled" },
+    { when: "repos/fixture-owner/fixture-ops/pulls?", stdout: "[]" }], async shim => {
+    const control = spawnSync("gh", ["api", "fixture/control"], { encoding: "utf8", timeout: 10_000 });
+    assert.equal(control.status, 0); assert.equal(control.stdout.trim(), "controlled");
+    const healthy = await planPrPreflightAsync(input, checks);
+    assert.equal(healthy.ok, true, JSON.stringify(healthy)); assert.deepEqual(healthy.unreadable, []);
+    assert.equal(existsSync(join(f.code.dir, ".git/FETCH_HEAD")), false);
+    assert.ok(shim.calls().some(c => c.includes("repos/fixture-owner/fixture-ops/pulls?")));
+    f.code.git("rm", "plan/tasks.yaml");
+    const missing = await planPrPreflightAsync(input, checks);
+    assert.equal(missing.ok, false); assert.ok(missing.failures.some(f => f.check === "task-id-existence"));
+  });
+});
