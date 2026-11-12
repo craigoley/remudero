@@ -17,7 +17,7 @@
     - src/lib/feedback.ts
     - src/lib/auto-triage.ts
     - test/inbox/the-feedback-readers-read-the-public-root-and-the-plan-destination.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "While the host file names a repository, `listFeedback`, `readFeedbackEntry` and `readLandedFeedbackEntry` read the public root and the destination checkout"

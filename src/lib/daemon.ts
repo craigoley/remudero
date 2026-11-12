@@ -47,7 +47,7 @@ import {
 import type { RunResult } from "./run-result.js";
 import { assertCleanBoot, type BootAssertion } from "./env.js";
 import { classifyFailure } from "./classify.js";
-import { changesInstallInputs, coalesceFreshnessRestart, decideFreshnessRestart, DEPLOY_RESTART_SCORE_THRESHOLD, FRESHNESS_COALESCE_WINDOW_MS, FRESHNESS_DECISION_STEP, FRESHNESS_MIN_LIFETIME_MS, INSTALL_INPUTS_RELEASE, MIN_LIFETIME_HOLD, type DeployRestartPressureState, type DeployWorthChange } from "./deploy-judge.js";
+import { changesInstallInputs, coalesceFreshnessRestart, decideFreshnessRestart, DEPLOY_RESTART_RATE_CEILING_MS, DEPLOY_RESTART_SCORE_THRESHOLD, FRESHNESS_COALESCE_WINDOW_MS, FRESHNESS_DECISION_STEP, FRESHNESS_MIN_LIFETIME_MS, INSTALL_INPUTS_RELEASE, MIN_LIFETIME_HOLD, type DeployRestartPressureState, type DeployWorthChange } from "./deploy-judge.js";
 import { INITIAL_RETRY_STATE, reasonAboutBlock, type RetryState } from "./block-reason.js";
 import {
   nextRunnable,
@@ -1001,7 +1001,7 @@ function resolveHeadroomWindows(
   // `· resets …` clause at all. Carried through as possibly-absent rather than coerced here, so
   // the two distinct cases below stay distinguishable.
   const windows: Array<{ window: string; percentUsed: number; resetsAt?: string }> = [
-    { window: "session (5h)", percentUsed: snap.session.percentUsed, resetsAt: snap.session.resetsAt },
+    ...(snap.session ? [{ window: "session (5h)", percentUsed: snap.session.percentUsed, resetsAt: snap.session.resetsAt }] : []),
     ...snap.weekly.map((w) => ({ window: `weekly (${w.label})`, percentUsed: w.percentUsed, resetsAt: w.resetsAt })),
   ];
   return windows
@@ -1127,6 +1127,9 @@ export interface DaemonOpts {
   /** How long a lifetime runs before a freshness restart may take it (default {@link FRESHNESS_MIN_LIFETIME_MS}, the
    *  operator ruling of 2026-10-17). A test of a different restart mechanic passes 0 to reach it at once. */
   freshnessMinLifetimeMs?: number;
+  freshnessScoreLimit?: number;
+  freshnessStalenessHorizonMs?: number;
+  freshnessQuietWindowMs?: number;
 }
 
 /** A non-stale freshness verdict must name the decision arm that produced it. `unassessed` deliberately retains the
@@ -4172,6 +4175,11 @@ export async function runDaemon(
   // by the real `rmd daemon` entry, defaulted here for a direct/test caller that omits it.
   const sweepWallClockBoundMs = opts.sweepWallClockBoundMs ?? DEFAULT_SWEEP_WALL_CLOCK_BOUND_MS;
   const freshnessMinLifetimeMs = opts.freshnessMinLifetimeMs ?? FRESHNESS_MIN_LIFETIME_MS;
+  const freshnessThreshold = opts.freshnessScoreLimit === undefined ? DEPLOY_RESTART_SCORE_THRESHOLD
+    : { value: opts.freshnessScoreLimit, reason: "plan/policy.yaml freshnessRestart.scoreLimit" };
+  const freshnessStalenessHorizonMs = opts.freshnessStalenessHorizonMs ?? DEPLOY_RESTART_RATE_CEILING_MS;
+  const freshnessQuietWindow = opts.freshnessQuietWindowMs === undefined ? FRESHNESS_COALESCE_WINDOW_MS
+    : { value: opts.freshnessQuietWindowMs, reason: "plan/policy.yaml freshnessRestart.quietWindowMs" };
   const sweepBound: SweepBoundLearner = { fallbackMs: sweepWallClockBoundMs, settledMs: [] }; // W1-T9563, seeded at boot
   // One mutable ref for when a full pass last actually ran, shared by every call site below — see {@link
   // SweepRetrigger} for why a shared reference, not a fresh object per site, is load-bearing. It starts undefined so
@@ -4252,7 +4260,7 @@ export async function runDaemon(
     if (cause !== undefined) {
       idleLaneTickCause = cause;
       idleLaneTickHold = cause === "pause" || cause === "operator_pause" || cause === "recycle_drain"
-        ? pauseHoldRecord(fields) : cause === "memory" ? {
+        ? pauseHoldRecord(fields) : cause === "memory" || fields?.reason === "lane target" ? {
           reason: step === "daemon.queue_governor"
             ? `${fields?.pressure_tier} (${fields?.pressure_binding}): ${fields?.pressure_available_mib} MiB available, floor ${fields?.pressure_floor_mib} MiB`
             : String(fields?.reason),
@@ -5026,7 +5034,7 @@ export async function runDaemon(
       const { decision, withheldEvidence } = scoreFreshness(outcome.changes, nowMs);
       pressureEvidence = { behind: true, stale_since_ms: staleSinceMs, weight: decision.weight,
         age_pressure: decision.agePressure, pressure: decision.pressure, ...withheldEvidence };
-      if (decision.pressure >= DEPLOY_RESTART_SCORE_THRESHOLD.value && !dirtyBlockedShas.has(outcome.newSha)) {
+      if (decision.pressure >= freshnessThreshold.value && !dirtyBlockedShas.has(outcome.newSha)) {
         dirtyBlockedShas.add(outcome.newSha);
         log("daemon.freshness_blocked_dirty", { old_sha: outcome.oldSha, new_sha: outcome.newSha,
           dirty_paths: outcome.dirty_paths, ...pressureEvidence });
@@ -5089,7 +5097,8 @@ export async function runDaemon(
               withheld_unreadable: withheld.unreadable,
               ...(withheld.unparseable > 0 ? { withheld_reviews_unparseable: withheld.unparseable } : {}),
             };
-    const decision = decideFreshnessRestart({ changes, busy, staleSinceMs: staleAtMs, nowMs, state: freshnessPressure, withheldReviews });
+    const decision = decideFreshnessRestart({ changes, busy, staleSinceMs: staleAtMs, nowMs, state: freshnessPressure, withheldReviews,
+      threshold: freshnessThreshold, ageHorizonMs: freshnessStalenessHorizonMs });
     freshnessPressure = decision.state;
     return { decision, busy, busyReasons, background, withheldEvidence };
   };
@@ -5106,7 +5115,8 @@ export async function runDaemon(
     // fast paths waits until it is FRESHNESS_MIN_LIFETIME_MS old. Both rows carry it, so the hold is measurable.
     const coalesced = coalesceFreshnessRestart({
       decision, newSha: freshness.newSha, lastAdvanceAtMs: lastAdvanceAtMs!,
-      staleSinceMs: staleAtMs, nowMs, window: FRESHNESS_COALESCE_WINDOW_MS, installInputsChanged: changesInstallInputs(freshness.changes),
+      staleSinceMs: staleAtMs, nowMs, window: freshnessQuietWindow, installInputsChanged: changesInstallInputs(freshness.changes),
+      threshold: freshnessThreshold, ageHorizonMs: freshnessStalenessHorizonMs,
       lifetimeStartedAtMs: bootGateStartedAtMs, minLifetimeMs: freshnessMinLifetimeMs,
     });
     const lifetimeEvidence = {
@@ -5122,8 +5132,8 @@ export async function runDaemon(
         new_sha: freshness.newSha,
         held_ms: Math.max(0, nowMs - staleAtMs),
         advances_coalesced: advancesCoalesced,
-        window_ms: FRESHNESS_COALESCE_WINDOW_MS.value,
-        window_reason: FRESHNESS_COALESCE_WINDOW_MS.reason,
+        window_ms: freshnessQuietWindow.value,
+        window_reason: freshnessQuietWindow.reason,
         window_ends_at_ms: coalesced.windowEndsAtMs,
         reason: coalesced.reason,
         ...lifetimeEvidence,
@@ -5143,6 +5153,9 @@ export async function runDaemon(
       new_sha: freshness.newSha,
       ...withheldEvidence,
       ...lifetimeEvidence,
+      score_limit: freshnessThreshold.value,
+      staleness_horizon_ms: freshnessStalenessHorizonMs,
+      quiet_window_ms: freshnessQuietWindow.value,
     });
     return action;
   };
@@ -8090,7 +8103,7 @@ export async function runDaemon(
         (enforcedLaneTarget(inFlightTasks.size, deps.readQueueAdmission?.()?.wipLimit) <= inFlightTasks.size ? "lane target" : undefined);
       // 2026-10-12 09:00: one container-short WIP reading held lane 2 for good while two siblings ran on past the hour.
       // A governor reading is re-taken each tick, so a lane it holds parks; one row per lane and reason, not per tick.
-      if (governed && reason !== undefined && reason === governorReason && inFlightTasks.size > 0) {
+      if (reason !== undefined && (reason === governorReason || reason === "lane target") && inFlightTasks.size > 0) {
         if (governorParked.get(lane) !== reason) log("dispatch.lane_parked", { lane, finished_task: finished.id, reason,
           phase_age_ms: phaseAgeMs, waiting_on: [...inFlightTasks].map((t) => t.id) });
         sampleLaneChange();

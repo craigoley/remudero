@@ -846,6 +846,16 @@ fi
 source "${CLAUDE_DIRECTORY_FILE}"
 CRED_DIR="$(claude_host_directory)"
 CRED_MOUNT_DEST="/home/node/.claude"
+# W1-T12293: the CLI replaces ~/.claude.json by rename, so the host file goes read-only to a side
+# path and deploy/entrypoint.sh copies it in when the container's own file is missing or thin.
+CLAUDE_ACCOUNT_FILE="$(claude_host_account_file)"
+CLAUDE_ACCOUNT_MOUNT_DEST="/home/node/.rmd-claude-account.json"
+CLAUDE_ACCOUNT_MOUNT_ARGS=()
+if [ -f "${CLAUDE_ACCOUNT_FILE}" ]; then
+  CLAUDE_ACCOUNT_MOUNT_ARGS=(-v "${CLAUDE_ACCOUNT_FILE}:${CLAUDE_ACCOUNT_MOUNT_DEST}:ro")
+else
+  echo "recycle-container: NOTE — no Claude account file at ${CLAUDE_ACCOUNT_FILE}; recycling without an account file mount"
+fi
 CODEX_DIR="${RMD_CODEX_DIR:-${HOME:-/root}/.codex}"
 CODEX_MOUNT_DEST="/home/node/.codex"
 CODEX_MOUNT_ARGS=()
@@ -896,6 +906,9 @@ if [ "${#CODEX_MOUNT_ARGS[@]}" -gt 0 ]; then
 fi
 if [ "${#CONTAINER_CONFIG_MOUNT_ARGS[@]}" -gt 0 ]; then
   RUNTIME_CONTRACT_EXPECT_ARGS+=(--expect "${CONTAINER_CONFIG_DIR}" "${CONTAINER_CONFIG_MOUNT_DEST}" rw)
+fi
+if [ "${#CLAUDE_ACCOUNT_MOUNT_ARGS[@]}" -gt 0 ]; then
+  RUNTIME_CONTRACT_EXPECT_ARGS+=(--expect "${CLAUDE_ACCOUNT_FILE}" "${CLAUDE_ACCOUNT_MOUNT_DEST}" ro)
 fi
 if [ "${SELECTED_REGISTRY_ACTIVE}" = 1 ]; then
   RUNTIME_CONTRACT_EXPECT_ARGS+=(--expect "${SELECTED_REGISTRY_HOST_FILE}" "${SELECTED_REGISTRY_CONTAINER_FILE}" ro)
@@ -3080,6 +3093,9 @@ DOCKER_RUN_ARGS=(
   -v "${STATE_DIR}:${STATE_MOUNT_DEST}"
   -v "${CRED_DIR}:${CRED_MOUNT_DEST}"
 )
+if [ "${#CLAUDE_ACCOUNT_MOUNT_ARGS[@]}" -gt 0 ]; then
+  DOCKER_RUN_ARGS+=("${CLAUDE_ACCOUNT_MOUNT_ARGS[@]}")
+fi
 if [ "${#CODEX_MOUNT_ARGS[@]}" -gt 0 ]; then
   DOCKER_RUN_ARGS+=("${CODEX_MOUNT_ARGS[@]}")
 fi

@@ -247,6 +247,17 @@ export interface PolicyValues {
   workerRuleHeadlines: {
     enabled: boolean;
   };
+  /** W1-T12228 — the four constants of the daemon's freshness restart (src/lib/deploy-judge.ts), as bounded rows.
+   *  Optional: an absent block gives {@link DEFAULT_FRESHNESS_RESTART}. A running daemon reads them at its start. */
+  freshnessRestart: FreshnessRestartValues;
+}
+
+/** The four freshness-restart values: the busy score limit, the staleness horizon, the quiet window, the minimum lifetime. */
+export interface FreshnessRestartValues {
+  scoreLimit: number;
+  stalenessHorizonMs: number;
+  quietWindowMs: number;
+  minLifetimeMs: number;
 }
 
 /** One field's provenance, as recorded on load — see this module's header. */
@@ -372,6 +383,10 @@ const EXPECTED_ORIGIN_KIND: Record<string, PolicyOriginKind> = {
   "githubEventWake.semanticCheckMode": "net-new",
   "githubEventWake.aggregateCheckNames": "net-new",
   "workerRuleHeadlines.enabled": "net-new",
+  "freshnessRestart.scoreLimit": "lifted",
+  "freshnessRestart.stalenessHorizonMs": "lifted",
+  "freshnessRestart.quietWindowMs": "lifted",
+  "freshnessRestart.minLifetimeMs": "lifted",
 };
 
 /**
@@ -685,6 +700,16 @@ function validateArmCalibrationBands(raw: unknown): ArmCalibrationBandRow[] {
  */
 const DEFAULT_SWEEP_WALL_CLOCK_BOUND_MS = 559_000;
 
+/** W1-T12228: the freshness restart's four values when `plan/policy.yaml` has no `freshnessRestart` block — today's
+ *  constants in src/lib/deploy-judge.ts (`DEPLOY_RESTART_SCORE_THRESHOLD`, `DEPLOY_RESTART_RATE_CEILING_MS`,
+ *  `FRESHNESS_COALESCE_WINDOW_MS`, `FRESHNESS_MIN_LIFETIME_MS`). Mirrored here, not imported, so this loader stays leaf. */
+export const DEFAULT_FRESHNESS_RESTART: FreshnessRestartValues = {
+  scoreLimit: 18,
+  stalenessHorizonMs: 3_600_000,
+  quietWindowMs: 600_000,
+  minLifetimeMs: 5_400_000,
+};
+
 /** See the shared doc above `DEFAULT_SWEEP_WALL_CLOCK_BOUND_MS`. Exported: `run-task.ts`'s
  *  `spawnFixWorkerBounded` needs it as its own fallback when a caller supplies no
  *  `deps.spawnWallClockBoundMs`. */
@@ -949,6 +974,18 @@ export function validatePolicy(raw: unknown): Policy {
     ? { enabled: booleanField("workerRuleHeadlines.enabled", workerRuleHeadlinesRaw.enabled, origin) }
     : { enabled: false };
 
+  // W1-T12228: optional block, absent means today's four constants; a present row is bounds-checked like any other.
+  const freshnessRestartRaw = raw.freshnessRestart as Record<string, unknown> | undefined;
+  const freshnessRow = (key: keyof FreshnessRestartValues): number => freshnessRestartRaw?.[key] !== undefined
+    ? numberField(`freshnessRestart.${key}`, freshnessRestartRaw[key], origin, bounds)
+    : DEFAULT_FRESHNESS_RESTART[key];
+  const freshnessRestart: FreshnessRestartValues = {
+    scoreLimit: freshnessRow("scoreLimit"),
+    stalenessHorizonMs: freshnessRow("stalenessHorizonMs"),
+    quietWindowMs: freshnessRow("quietWindowMs"),
+    minLifetimeMs: freshnessRow("minLifetimeMs"),
+  };
+
   return {
     values: {
       proofTimeoutMs,
@@ -1000,6 +1037,7 @@ export function validatePolicy(raw: unknown): Policy {
       },
       armCalibrationBands,
       workerRuleHeadlines,
+      freshnessRestart,
     },
     origin,
     bounds,

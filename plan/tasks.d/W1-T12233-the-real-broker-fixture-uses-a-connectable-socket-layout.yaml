@@ -1,7 +1,7 @@
 - id: W1-T12233
   title: The real broker fixture uses a connectable owned socket layout
   repo: remudero
-  depends_on: []
+  depends_on: [W1-T12322]
   priority: 0.8
   type: implement
   verify: auto
@@ -55,6 +55,7 @@
        load-bearing role. Azure may replay the measured path geometry in private scratch;
        retain the native Mac consumer receipt as a separate platform control.
   note: |
+    DEPENDS ON W1-T12322 (amended 2026-11-11): the gh shim census counts ownedFixtureDir(t, "gh") as a shim, so the preflight refuses this build until W1-T12322 merges.
     SPECIFIC INPUT AUTHORITY: the operator explicitly approved this one-file existing fixture
     adapter, with all assertions/expectations/titles/timeouts/skips preserved.
     COMBINED CAP: USD10.10, reassigned from this coordinator's unused W1-T12179 allocation:
