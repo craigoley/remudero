@@ -1527,6 +1527,86 @@ export function evaluateAdmittedCensusSuites({ changed, loadMembers, runSuites, 
   return { violations, unmeasured: unmeasured.length === 0 ? null : unmeasured.join("; ") };
 }
 
+// src/lib/source-text-readers.ts's markers and walk rule, restated: the hook copies this script's import closure.
+const CENSUS_READS_MARKER = "@census-reads:";
+const CENSUS_CLOSURE_MARKER = "@census-closure:";
+
+function declaredWalk(token, roots) {
+  const cleaned = token.replaceAll("\\", "/").replace(/^(?:\.{1,2}\/)+/, "").replace(/^\/+/, "").replace(/\/+/g, "/");
+  const first = cleaned.split("/")[0];
+  if (!first || !roots.has(first)) return undefined;
+  if (cleaned === first) return /^[^.].*\.[A-Za-z0-9]+$/.test(first) ? first : `${first}/`;
+  const wildcard = cleaned.search(/[*?[]/);
+  return wildcard >= 0 ? cleaned.slice(0, wildcard) : cleaned;
+}
+
+/** W1-T11940: a suite's `@census-reads:` walks, or null when undeclared. A closure seed or an unresolvable
+ *  declaration is unknown, so it reads as undeclared: an unknown read is never a skip. */
+export function censusReadsDeclaration(text, roots) {
+  if (typeof text !== "string" || text.includes(CENSUS_CLOSURE_MARKER)) return null;
+  let walks = null;
+  let none = false;
+  for (const line of text.split("\n")) {
+    const comment = /^\s*(?:\/\/|\/?\*+)\s*(.*)$/.exec(line)?.[1];
+    if (comment === undefined || !comment.startsWith(CENSUS_READS_MARKER)) continue;
+    walks ??= [];
+    for (const token of comment.slice(CENSUS_READS_MARKER.length).trim().split(/\s+/)) {
+      const bare = token.replace(/[,;]$/, "");
+      const walk = declaredWalk(bare, roots);
+      if (bare === "none") none = true;
+      else if (walk) walks.push(walk);
+      else break;
+    }
+  }
+  return walks === null || (walks.length === 0 && !none) ? null : walks;
+}
+
+/** The suites the full pass would run (evaluateAdmittedCensusSuites's join), each with its declaration.
+ *  A walk-joined member keeps its walks, so it always reads a changed file; a throwing trigger is unknown. */
+export function censusFullPassSuites({ changed, members, readHead, readBase, roots,
+  triggered = [...PRECHECK_TRIGGERED_SUITES, ...PRECHECK_PATH_TRIGGERED_SUITES] }) {
+  const byFile = new Map();
+  const join = (testFile, walks, unknown = null) => {
+    const prior = byFile.get(testFile) ?? { testFile, walks: [], unknown: null };
+    byFile.set(testFile, { testFile, walks: [...prior.walks, ...walks], unknown: prior.unknown ?? unknown });
+  };
+  for (const m of members) if (changed.some((p) => m.walks.some((w) => p.startsWith(w)))) join(m.testFile, m.walks);
+  for (const m of triggered) {
+    let fired;
+    try {
+      fired = m.trigger({ changed, readHead, readBase });
+    } catch (e) {
+      join(m.testFile, [], `its trigger could not be evaluated: ${String(e?.message ?? e)}`);
+      continue;
+    }
+    if (fired) join(m.testFile, []);
+  }
+  return [...byFile.values()].map(({ testFile, walks, unknown }) => {
+    if (unknown !== null) return { testFile, declared: null, unknown };
+    const declared = censusReadsDeclaration(readHead(testFile), roots);
+    return { testFile, declared: declared === null ? null : [...new Set([...declared, ...walks])].sort() };
+  });
+}
+
+/** PURE: the full pass is skipped only when the counts pass, the instrument census is out of scope, and
+ *  every suite it would run declares `@census-reads:` with none of those reads changed. */
+export function censusFullPassDecision({ changed, countsOk, instrumentInScope = false, suites, unlisted }) {
+  const run = (reason) => ({ skip: false, reason, reliedOn: [] });
+  if (!countsOk) return run("the counts-only pass refused this branch");
+  if (suites === null) return run(`the census suites could not be listed: ${unlisted ?? "no reason given"}`);
+  if (instrumentInScope) return run("the diff touches a path the instrument-surface census reads");
+  const undeclared = suites.filter((s) => s.declared === null).map((s) => s.testFile);
+  if (undeclared.length > 0) {
+    return run(`${undeclared.length} census suite(s) declare no @census-reads: ${undeclared.slice(0, 5).join(", ")}${undeclared.length > 5 ? ", ..." : ""}`);
+  }
+  const touched = suites.filter((s) => changed.some((p) => s.declared.some((w) => p.startsWith(w)))).map((s) => s.testFile);
+  if (touched.length > 0) {
+    return run(`the diff touches a file ${touched.length} census suite(s) declare they read: ${touched.slice(0, 5).join(", ")}${touched.length > 5 ? ", ..." : ""}`);
+  }
+  return { skip: true, reason: `none of the ${suites.length} census suite(s) the full pass would run reads a changed file`,
+    reliedOn: suites.map((s) => s.testFile) };
+}
+
 export const PRECHECK_PARITY_BASELINE = "scripts/census-precheck-parity-baseline.json";
 
 /** Explicit pre-push proof runs that are rostered but are not admitted census populations. */
@@ -2003,13 +2083,32 @@ function reportCensusCounts(violations, changed, base) {
   return 0;
 }
 
+/** W1-T11940: the line census-precheck prints when --skip-when-unread skips the full pass. */
+export const CENSUS_FULL_PASS_SKIPPED_LABEL = "census-precheck: full pass SKIPPED (no census-read file changed)";
+
+function decideCensusFullPass({ root, changed, snapshot, readers, loadMembers, countsOk }) {
+  let suites = null;
+  let unlisted;
+  if (snapshot) unlisted = "a git-free snapshot run is never skipped";
+  else if (countsOk) {
+    try {
+      const roots = new Set(readdirSync(root).filter((name) => name !== ".git"));
+      suites = censusFullPassSuites({ changed, members: loadMembers(), ...readers, roots });
+    } catch (e) {
+      unlisted = String(e?.message ?? e);
+    }
+  }
+  return censusFullPassDecision({ changed, countsOk, suites, unlisted,
+    instrumentInScope: changed.some((p) => INSTRUMENT_SCOPE_RE.test(p)) });
+}
+
 export function main(argv, { measure = measureViaChild, admitted = listAdmittedCensusMembers, runSuites = runCensusSuitesViaChild } = {}) {
   let values;
   try {
     ({ values } = parseArgs({
       args: argv,
       options: { root: { type: "string", default: "." }, base: { type: "string", default: "origin/main" }, "snapshot-budget": { type: "boolean", default: false },
-        "counts-only": { type: "boolean", default: false } },
+        "counts-only": { type: "boolean", default: false }, "skip-when-unread": { type: "boolean", default: false } },
     }));
   } catch (e) {
     console.error(`census-precheck: could not measure — ${String(e.message ?? e)}`);
@@ -2057,6 +2156,17 @@ export function main(argv, { measure = measureViaChild, admitted = listAdmittedC
     }
     logCensusCounts(process.env.RMD_CENSUS_COUNTS_LOG, violations.length === 0, performance.now() - countsStartedAt);
     if (values["counts-only"]) return reportCensusCounts(violations, changed, values.base);
+    let listedMembers;
+    const loadMembers = () => (listedMembers ??= admitted(root));
+    if (values["skip-when-unread"]) {
+      const decision = decideCensusFullPass({ root, changed, snapshot, readers, loadMembers, countsOk: violations.length === 0 });
+      if (decision.skip) {
+        console.log(`${CENSUS_FULL_PASS_SKIPPED_LABEL} - relied on counts OK over ${changed.length} changed file(s) against ${values.base} ` +
+          `and ${decision.reliedOn.length} census suite(s) declaring @census-reads; ${decision.reason}; CI runs the full census`);
+        return 0;
+      }
+      console.log(`census-precheck: full pass runs - ${decision.reason}`);
+    }
     const countsRefuse = violations.length > 0;
     const instrument = evaluateInstrumentSurface({
       changed,
@@ -2083,7 +2193,7 @@ export function main(argv, { measure = measureViaChild, admitted = listAdmittedC
     const suites = countsRefuse ? { violations: [], unmeasured: null } : evaluateAdmittedCensusSuites({
       changed,
       ...readers,
-      loadMembers: () => admitted(root),
+      loadMembers,
       runSuites: (files, options = {}) => {
         if (!snapshot) {
           try {
