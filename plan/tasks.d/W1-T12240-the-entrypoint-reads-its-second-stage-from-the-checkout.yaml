@@ -22,6 +22,12 @@
     - deploy/Dockerfile
     - docs/forensics/entrypoint.md
     - test/infra/the-entrypoint-reads-its-second-stage-from-the-checkout.test.ts
+    - test/entrypoint-boot.test.ts
+    - test/a-rate-limit-refusal-spends-the-crash-restart-budget.test.ts
+    - test/an-operator-stop-is-undone-by-the-restart-policy.test.ts
+    - test/daemon/a-slow-crash-loop-is-reported.test.ts
+    - test/serve-freshness-restart.test.ts
+    - test/run-task-benchmark-cohort-wiring.test.ts
   status: queued
   attempts: 0
   acceptance:
@@ -63,6 +69,7 @@
     The first part stays in the image. A change to it still needs a recycle. This change itself needs one recycle.
     The checkout is the tree that the daemon already runs its own source from. `sync_tree` refuses a tree with changed tracked files, so the file that runs is a file of main.
     NOT IN SCOPE: the serve container, the content of the loop, and the image lists.
+    AMENDED 2026-11-12: six existing tests read the loop as text from `deploy/entrypoint.sh` (the exit-code constants, the blocked and environmental arms, the idle wait, the section from "Signal forwarding", and one mutant). After the move they read `deploy/entrypoint-supervise.sh` instead; they assert the same things. They are in `files` for that reason only.
   falsifier: |
     Skip the `bash -n` check and criterion 2 must fail. Run the old loop after a sync that changed the file and criterion 3 must fail. Let a failing file from the checkout end the container and criterion 4 must fail. Restore and require all seven to pass.
   note: |

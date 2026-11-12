@@ -19,7 +19,7 @@
     - src/cli/commands/sweep.ts
     - test/daemon/the-plan-merge-budget-is-measured-between-ticks-not-batches.test.ts
     - test/ledger/light-pass-merge-budget-uses-measured-interval.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "Through `buildSweepLightHook`: one tick that starts several light passes writes the same `tick_id` on the `sweep.pass` row and the `sweep.summary` row of each of them"

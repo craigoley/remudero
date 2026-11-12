@@ -30,7 +30,7 @@
     - test/live-write-guard-command-sites.test.ts
     - test/every-host-git-spawn-into-a-worktree-uses-the-hardened-leaf.test.ts
     - test/the-remaining-host-git-calls-into-a-worktree-go-through-the-leaf.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "The landing has a family for task files with one fixed branch, and `isLandingRef` knows that branch"

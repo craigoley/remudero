@@ -47,7 +47,7 @@ import {
 import type { RunResult } from "./run-result.js";
 import { assertCleanBoot, type BootAssertion } from "./env.js";
 import { classifyFailure } from "./classify.js";
-import { changesInstallInputs, coalesceFreshnessRestart, decideFreshnessRestart, DEPLOY_RESTART_SCORE_THRESHOLD, FRESHNESS_COALESCE_WINDOW_MS, FRESHNESS_DECISION_STEP, FRESHNESS_MIN_LIFETIME_MS, INSTALL_INPUTS_RELEASE, MIN_LIFETIME_HOLD, type DeployRestartPressureState, type DeployWorthChange } from "./deploy-judge.js";
+import { changesInstallInputs, coalesceFreshnessRestart, decideFreshnessRestart, DEPLOY_RESTART_RATE_CEILING_MS, DEPLOY_RESTART_SCORE_THRESHOLD, FRESHNESS_COALESCE_WINDOW_MS, FRESHNESS_DECISION_STEP, FRESHNESS_MIN_LIFETIME_MS, INSTALL_INPUTS_RELEASE, MIN_LIFETIME_HOLD, type DeployRestartPressureState, type DeployWorthChange } from "./deploy-judge.js";
 import { INITIAL_RETRY_STATE, reasonAboutBlock, type RetryState } from "./block-reason.js";
 import {
   nextRunnable,
@@ -1127,6 +1127,9 @@ export interface DaemonOpts {
   /** How long a lifetime runs before a freshness restart may take it (default {@link FRESHNESS_MIN_LIFETIME_MS}, the
    *  operator ruling of 2026-10-17). A test of a different restart mechanic passes 0 to reach it at once. */
   freshnessMinLifetimeMs?: number;
+  freshnessScoreLimit?: number;
+  freshnessStalenessHorizonMs?: number;
+  freshnessQuietWindowMs?: number;
 }
 
 /** A non-stale freshness verdict must name the decision arm that produced it. `unassessed` deliberately retains the
@@ -1286,6 +1289,11 @@ function kickRepoField(kick: DaemonKick): { repo?: string } {
   return kick.repo === undefined ? {} : { repo: kick.repo };
 }
 
+export interface BootPhases {
+  mark(name: string): void;
+  firstTick(log: (step: string, extra?: Record<string, unknown>) => void): void;
+}
+
 export interface DaemonDeps {
   /** W1-T11600: an optional, already-parsed second catalog used only for shadow comparison. No source
    *  reader is installed here; absence preserves the single-plan path exactly, and this snapshot
@@ -1317,6 +1325,7 @@ export interface DaemonDeps {
   readDurableReleases?: () => ReleaseEvidence;
   /** Complete archive union for the boot-time restart estimates and sweep-bound seed (W1-T9632); unreadable disables holdouts. */
   readRestartHistory?: () => readonly string[];
+  bootPhases?: BootPhases;
   /** Re-read the plan from the same source the boot used, returning the fresh plan or `null` when
    *  nothing changed; omitted means the plan stays frozen at boot. The dep owns change detection
    *  because the cheap signal is caller-specific: a plan tree sha costs ~8ms, the parse ~60ms (impl-FZ). */
@@ -4171,6 +4180,11 @@ export async function runDaemon(
   // by the real `rmd daemon` entry, defaulted here for a direct/test caller that omits it.
   const sweepWallClockBoundMs = opts.sweepWallClockBoundMs ?? DEFAULT_SWEEP_WALL_CLOCK_BOUND_MS;
   const freshnessMinLifetimeMs = opts.freshnessMinLifetimeMs ?? FRESHNESS_MIN_LIFETIME_MS;
+  const freshnessThreshold = opts.freshnessScoreLimit === undefined ? DEPLOY_RESTART_SCORE_THRESHOLD
+    : { value: opts.freshnessScoreLimit, reason: "plan/policy.yaml freshnessRestart.scoreLimit" };
+  const freshnessStalenessHorizonMs = opts.freshnessStalenessHorizonMs ?? DEPLOY_RESTART_RATE_CEILING_MS;
+  const freshnessQuietWindow = opts.freshnessQuietWindowMs === undefined ? FRESHNESS_COALESCE_WINDOW_MS
+    : { value: opts.freshnessQuietWindowMs, reason: "plan/policy.yaml freshnessRestart.quietWindowMs" };
   const sweepBound: SweepBoundLearner = { fallbackMs: sweepWallClockBoundMs, settledMs: [] }; // W1-T9563, seeded at boot
   // One mutable ref for when a full pass last actually ran, shared by every call site below — see {@link
   // SweepRetrigger} for why a shared reference, not a fresh object per site, is load-bearing. It starts undefined so
@@ -4524,6 +4538,7 @@ export async function runDaemon(
   // survives the very process replacement it caused (design v); updated once per tick below from
   // that tick's own `sweepCycleOutcome.reviewerCodeStale` reading.
   const bootLedgerLines = deps.readLedgerLines?.() ?? [];
+  deps.bootPhases?.mark("loop_ledger_read");
   const measuredRuns: MeasuredRun[] = [];
   const runLengths = dispatchRunHistory(bootLedgerLines, measuredRuns);
   // W1-T8514: the measured run lengths behind a priority reservation's backfill release. The lane clock is the
@@ -4565,6 +4580,7 @@ export async function runDaemon(
     sweepSeedSource = "live_ledger";
     log("daemon.restart_history_unreadable", { error: String((error as Error)?.message ?? error) });
   }
+  deps.bootPhases?.mark("restart_history");
   // W1-T9632: the union holds the live file too, so ONE source seeds the learner and no live row counts twice.
   for (const ms of settledSweepDurations(sweepSeedSource === "ledger_union" ? restartHistoryLines : bootLedgerLines)) recordSettledSweep(sweepBound, ms);
   sweepBound.seededFrom = sweepSeedSource;
@@ -5025,7 +5041,7 @@ export async function runDaemon(
       const { decision, withheldEvidence } = scoreFreshness(outcome.changes, nowMs);
       pressureEvidence = { behind: true, stale_since_ms: staleSinceMs, weight: decision.weight,
         age_pressure: decision.agePressure, pressure: decision.pressure, ...withheldEvidence };
-      if (decision.pressure >= DEPLOY_RESTART_SCORE_THRESHOLD.value && !dirtyBlockedShas.has(outcome.newSha)) {
+      if (decision.pressure >= freshnessThreshold.value && !dirtyBlockedShas.has(outcome.newSha)) {
         dirtyBlockedShas.add(outcome.newSha);
         log("daemon.freshness_blocked_dirty", { old_sha: outcome.oldSha, new_sha: outcome.newSha,
           dirty_paths: outcome.dirty_paths, ...pressureEvidence });
@@ -5088,7 +5104,8 @@ export async function runDaemon(
               withheld_unreadable: withheld.unreadable,
               ...(withheld.unparseable > 0 ? { withheld_reviews_unparseable: withheld.unparseable } : {}),
             };
-    const decision = decideFreshnessRestart({ changes, busy, staleSinceMs: staleAtMs, nowMs, state: freshnessPressure, withheldReviews });
+    const decision = decideFreshnessRestart({ changes, busy, staleSinceMs: staleAtMs, nowMs, state: freshnessPressure, withheldReviews,
+      threshold: freshnessThreshold, ageHorizonMs: freshnessStalenessHorizonMs });
     freshnessPressure = decision.state;
     return { decision, busy, busyReasons, background, withheldEvidence };
   };
@@ -5105,7 +5122,8 @@ export async function runDaemon(
     // fast paths waits until it is FRESHNESS_MIN_LIFETIME_MS old. Both rows carry it, so the hold is measurable.
     const coalesced = coalesceFreshnessRestart({
       decision, newSha: freshness.newSha, lastAdvanceAtMs: lastAdvanceAtMs!,
-      staleSinceMs: staleAtMs, nowMs, window: FRESHNESS_COALESCE_WINDOW_MS, installInputsChanged: changesInstallInputs(freshness.changes),
+      staleSinceMs: staleAtMs, nowMs, window: freshnessQuietWindow, installInputsChanged: changesInstallInputs(freshness.changes),
+      threshold: freshnessThreshold, ageHorizonMs: freshnessStalenessHorizonMs,
       lifetimeStartedAtMs: bootGateStartedAtMs, minLifetimeMs: freshnessMinLifetimeMs,
     });
     const lifetimeEvidence = {
@@ -5121,8 +5139,8 @@ export async function runDaemon(
         new_sha: freshness.newSha,
         held_ms: Math.max(0, nowMs - staleAtMs),
         advances_coalesced: advancesCoalesced,
-        window_ms: FRESHNESS_COALESCE_WINDOW_MS.value,
-        window_reason: FRESHNESS_COALESCE_WINDOW_MS.reason,
+        window_ms: freshnessQuietWindow.value,
+        window_reason: freshnessQuietWindow.reason,
         window_ends_at_ms: coalesced.windowEndsAtMs,
         reason: coalesced.reason,
         ...lifetimeEvidence,
@@ -5142,6 +5160,9 @@ export async function runDaemon(
       new_sha: freshness.newSha,
       ...withheldEvidence,
       ...lifetimeEvidence,
+      score_limit: freshnessThreshold.value,
+      staleness_horizon_ms: freshnessStalenessHorizonMs,
+      quiet_window_ms: freshnessQuietWindow.value,
     });
     return action;
   };
@@ -6494,6 +6515,7 @@ export async function runDaemon(
     // of the loop body so no branch below can skip it (W1-T1274). W1-T7126: it carries the memory sample when
     // no row has within one poll interval; a throwing sampler rides it as mem_telemetry, never escapes it.
     log("daemon.tick", { poll_interval_ms: pollIntervalMs, ...tickMemorySample(deps, daemonClock.now(), pollIntervalMs, tickMemory) });
+    deps.bootPhases?.firstTick(log);
     recordNearLimitHeapSample(deps, "tick");
     if (tickMemory.sampled) startMemoryReadAfterRow(deps, log);
     const tickStartedAtMs = daemonClock.now();
