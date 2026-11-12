@@ -26,6 +26,8 @@ import { tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { assertLiveWriteAllowed } from "./live-write-guard.js";
+import { releaseTaskIdReservationAsync, type ReservationReleaseOutcome } from "./task-id-release.js";
+import { reservationHolderBranch, taskIdReservationRef } from "./task-id-reservation.js";
 import { loadPlanFromYaml } from "./plan.js";
 import { planDestinationRepository, type PlanDestination, type PlanDestinationRepository } from "./plan-destination.js";
 import { planReconcilePrBody, planReconcileProofTemplate } from "./plan-reconcile-batch.js";
@@ -207,7 +209,7 @@ const ACKNOWLEDGEMENT_PATH_LIMIT = 50;
 
 const refusedPlanPrTrees = new Map<string, PlanPrPreflightResult>();
 
-type PlanPrPreflightAsk = { commitSha: string; pr: { title: string; body: string } };
+type PlanPrPreflightAsk = { commitSha: string; pr: { title: string; body: string; headRef?: string } };
 type PlanPrPreflightFn = (commitSha: string, pr: PlanPrPreflightAsk["pr"]) => PlanPrPreflightResult;
 type PlanPrPreflightAsyncFn = (commitSha: string, pr: PlanPrPreflightAsk["pr"]) => PlanPrPreflightResult | Promise<PlanPrPreflightResult>;
 /** W1-T5672: a child-process ask; the sync driver runs `run`, the async one awaits `runAsync` so the loop turns meanwhile. */
@@ -2434,6 +2436,8 @@ export interface TaskFileInput {
   content: string;
   claim: string;
   proof: string;
+  /** W1-T12222: a new task file from a checkout that files only task files; main need not hold the path. */
+  newFile?: true;
 }
 
 export interface TaskFileRefusal {
@@ -2472,7 +2476,8 @@ export interface LandTaskFilesOpts extends LandFeedbackAsyncOpts {
 }
 
 interface StagedTaskFileMeta {
-  baseBlob: string;
+  /** Null for a new file: main held no blob at the path when it was staged. */
+  baseBlob: string | null;
   claim: string;
   proof: string;
   prUrl?: string;
@@ -2502,9 +2507,35 @@ function readStagedTaskFiles(stateRoot: string): StagedTaskFile[] {
   return staged;
 }
 
+/** W1-T12222: the branch {@link landTaskFilesAsync} pushes for this target, the holder of an id a new task file takes. */
+export async function taskFilesLandingBranchAsync(targetRepository: LandingRepository): Promise<string> {
+  return landingIdentity({ family: "task-files", targetRepository, sourceRepository: await sourceRepositoryFromCwdAsync() }).branch;
+}
+
 /** W1-T12199: every edit that waits under `stateRoot`, and the landing PR that carries it once one does. */
 export function stagedTaskFiles(stateRoot: string): Array<{ relPath: string; prUrl?: string }> {
   return readStagedTaskFiles(stateRoot).map(({ relPath, prUrl }) => ({ relPath, ...(prUrl ? { prUrl } : {}) }));
+}
+
+/**
+ * W1-T12222: the `origin:` each waiting task file records. A file that waits for the landing PR holds its
+ * finding though no plan holds it yet, so a gardener that looks for a finding already filed reads these too.
+ * A file with no origin line holds no finding and is left out.
+ */
+export function stagedTaskFileOrigins(stateRoot: string): Array<{ relPath: string; origin: string }> {
+  const held: Array<{ relPath: string; origin: string }> = [];
+  for (const file of readStagedTaskFiles(stateRoot)) {
+    if (!existsSync(file.abs)) continue;
+    const origin = taskFileOrigin(readFileSync(file.abs, "utf8"));
+    if (origin !== "") held.push({ relPath: file.relPath, origin });
+  }
+  return held;
+}
+
+/** W1-T12222: the `origin:` line of a task file's text, unquoted; empty when it has none. */
+export function taskFileOrigin(text: string): string {
+  const raw = /^\s*(?:-\s+)?origin:[ \t]*(.*?)[ \t]*$/m.exec(text)?.[1] ?? "";
+  return /^".*"$/.test(raw) ? raw.slice(1, -1).replace(/\\(["\\])/g, "$1") : /^'.*'$/.test(raw) ? raw.slice(1, -1) : raw;
 }
 
 function writeStagedTaskFile(stateRoot: string, relPath: string, content: string | undefined, meta: StagedTaskFileMeta): void {
@@ -2547,6 +2578,35 @@ function taskFileRedIsMainCaused(failures: PlanPrPreflightResult["failures"], ba
 }
 
 const greenTaskFileTrees = new Set<string>();
+
+type SetAsideIdRelease = { reserved_id?: string; id_release: ReservationReleaseOutcome | "kept_other_holder" | "kept_main_holds_path" | "no_id" };
+
+/** W1-T12410: free the id of a new task file the landing sets aside. Only a reservation the landing branch holds goes. */
+async function releaseSetAsideTaskIdAsync(
+  gitAsync: GitExecAsync, text: string, landingBranch: string, reason: string, lane: string, log: LandTaskFilesOpts["log"],
+): Promise<SetAsideIdRelease> {
+  const taskId = /^\s*(?:-\s+)?id:\s*["']?(W1-T\d+)["']?\s*$/m.exec(text)?.[1];
+  if (taskId === undefined) return { id_release: "no_id" };
+  const run = async (args: string[]) => {
+    try {
+      return { status: 0, stdout: await gitAsync(args), stderr: "" };
+    } catch (e) {
+      const err = e as { code?: unknown; stdout?: unknown; stderr?: unknown; message?: unknown };
+      return { status: typeof err.code === "number" ? err.code : 1, stdout: String(err.stdout ?? ""), stderr: String(err.stderr || err.message || e) };
+    }
+  };
+  const ref = taskIdReservationRef(taskId);
+  const listed = await run(["ls-remote", "origin", ref]);
+  const sha = listed.stdout.split("\n").map((l) => l.trim().split(/\s+/)).find(([, name]) => name === ref)?.[0];
+  if (listed.status !== 0) return { reserved_id: taskId, id_release: "unreadable" };
+  if (sha === undefined) return { reserved_id: taskId, id_release: "already_absent" };
+  const fetched = await run(["fetch", "--quiet", "--no-tags", "origin", ref]);
+  const message = fetched.status === 0 ? await run(["log", "-1", "--format=%B", sha]) : fetched;
+  if (message.status !== 0) return { reserved_id: taskId, id_release: "unreadable" };
+  if (reservationHolderBranch(message.stdout) !== landingBranch) return { reserved_id: taskId, id_release: "kept_other_holder" };
+  const outcome = await releaseTaskIdReservationAsync(run, { taskId, sha }, { reason, lane, ...(log ? { log: (step, fields) => log(step, fields) } : {}) });
+  return { reserved_id: taskId, id_release: outcome };
+}
 
 /**
  * W1-T12199: stage machine-filed edits of task files outside the checkout, then land every staged file
@@ -2618,7 +2678,7 @@ function* taskFilesLandingSteps(
       const known = refusedPlanPrTrees.get(treeSha);
       if (known) return known;
       const commitSha = yield* commitOf(treeSha, files.map((f) => f.relPath));
-      const verdict = (yield { commitSha, pr: { title: kind.prTitle, body: taskFilesPrBody(files) } }) as PlanPrPreflightResult;
+      const verdict = (yield { commitSha, pr: { title: kind.prTitle, body: taskFilesPrBody(files), headRef: kind.branch } }) as PlanPrPreflightResult;
       planPrPreflightAllows(verdict, { lane, branch: kind.branch, log: opts.log });
       if (!verdict.ok) refusedPlanPrTrees.set(treeSha, verdict);
       else if (verdict.timedOut === undefined) {
@@ -2639,14 +2699,22 @@ function* taskFilesLandingSteps(
     };
     const refusalText = (failures: PlanPrPreflightResult["failures"]): string =>
       `the plan preflight refused it: ${failures.map((f) => `[${f.check}] ${f.firstLine}`).join("; ")}`;
-    const setAside = (file: StagedTaskFile, refusal: Omit<TaskFileRefusal, "path">): void => {
+    const setAside = function* (file: StagedTaskFile, refusal: Omit<TaskFileRefusal, "path">, mainBlob: string | null): Generator<LandingAsk, void, AskReply> {
+      let idRelease: SetAsideIdRelease | undefined;
+      if (file.baseBlob === null) {
+        const text = readFileSync(file.abs, "utf8");
+        idRelease = mainBlob !== null ? { id_release: "kept_main_holds_path" } : JSON.parse((yield {
+          run: () => { throw new Error("the task-file landing releases an id only under the async driver"); },
+          runAsync: async () => JSON.stringify(await releaseSetAsideTaskIdAsync(opts.gitAsync!, text, kind.branch, refusal.reason, lane, opts.log)),
+        }) as string) as SetAsideIdRelease;
+      }
       const to = join(taskFilesRefusedRoot(stateRoot), file.relPath);
       mkdirSync(dirname(to), { recursive: true });
       renameSync(file.abs, to);
       writeFileSync(`${to}${TASK_FILE_META_SUFFIX}`, `${JSON.stringify({ reason: refusal.reason })}\n`, "utf8");
       rmSync(`${file.abs}${TASK_FILE_META_SUFFIX}`, { force: true });
       result.setAside.push({ path: file.relPath, ...refusal });
-      opts.log?.("task_files_landing.set_aside", { path: file.relPath, reason: refusal.reason, ...(refusal.failures ? { failures: refusal.failures } : {}) });
+      opts.log?.("task_files_landing.set_aside", { path: file.relPath, reason: refusal.reason, ...(refusal.failures ? { failures: refusal.failures } : {}), ...idRelease });
     };
 
     // ── stage ──
@@ -2659,7 +2727,7 @@ function* taskFilesLandingSteps(
         continue;
       }
       const baseBlob = yield* mainBlobOf(relPath);
-      if (baseBlob === null) {
+      if (baseBlob === null && !input.newFile) {
         refuse(`origin/main does not hold ${relPath}; this landing takes only an edit of a task file that exists`);
         continue;
       }
@@ -2741,14 +2809,14 @@ function* taskFilesLandingSteps(
           continue; // its pull request cannot be read: the file waits, out of this batch
         }
         if (state === "CLOSED") {
-          setAside(file, { reason: `its landing pull request ${file.prUrl} was closed without a merge` });
+          yield* setAside(file, { reason: `its landing pull request ${file.prUrl} was closed without a merge` }, mainBlob);
           continue;
         }
       }
       if (mainBlob !== file.baseBlob) {
-        setAside(file, {
+        yield* setAside(file, {
           reason: `origin/main changed ${file.relPath} after this edit was staged (base ${file.baseBlob}, main ${mainBlob ?? "deleted"}); the copy on main stands`,
-        });
+        }, mainBlob);
         continue;
       }
       batch.push({ ...file, blob });
@@ -2768,7 +2836,7 @@ function* taskFilesLandingSteps(
         }
         const probe = yield* mainRedOf(alone.failures);
         if (probe.mainRed) mainRed = true;
-        else setAside(file, { reason: refusalText(alone.failures), failures: alone.failures, mainSha: yield* freshMain(), ...probe });
+        else yield* setAside(file, { reason: refusalText(alone.failures), failures: alone.failures, mainSha: yield* freshMain(), ...probe }, file.baseBlob);
       }
       if (mainRed) return wait(`origin/main is red at ${yield* freshMain()}, so no file was set aside and the landing waits for main to move`);
       if (green.length === 0) return wait();

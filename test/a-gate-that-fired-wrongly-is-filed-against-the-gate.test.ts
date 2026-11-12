@@ -1,3 +1,4 @@
+// @census-reads: src/ scripts/ test/ — the gate gardener's probes over the tracked gate recognizers and census suites.
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";

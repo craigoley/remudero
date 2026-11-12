@@ -53,6 +53,7 @@ import { readCiGateRequiredChecks } from "../../lib/ci-gate-required.js";
 import { dropDerivativeAggregateCiFailure } from "../../lib/derivative-ci-failure.js";
 import { ghJson, parseReport, foreignTreeStandDownReason, workerTranscript, worktreeAdd, worktreeRemove, type SpawnWorkerArgs, type ForeignTreeStandDown, type RegisteredWorktree, type WorkerResult, workerContinuation } from "../../lib/worker.js";
 import { hostWorktreeGit, hostWorktreeGitAsync } from "../../lib/worktree-git.js";
+import { observeComputedPlacement } from "../../lib/test-path-resolver.js";
 import { recordInstrumentGrantShadow } from "../../lib/instrument-grant.js";
 import type { MergeConflictEvidence } from "../../lib/merge-state.js";
 import { runStepsAsync, runStepsSync, step } from "../../lib/git-push.js";
@@ -539,6 +540,7 @@ function fixRungScopeStandDownReason(
   reachableRemedyFiles: readonly ReachableRemedyFileInput[] = [],
   failingChecks: readonly Pick<CiFailure, "name" | "logTail">[] = [],
   registrationChanges: readonly RegistrationChange[] = [],
+  placement?: { root: string; proofs: readonly string[] },
 ):
   | {
       reason: string;
@@ -561,8 +563,14 @@ function fixRungScopeStandDownReason(
     : reachableRemedyPaths.length > 0
     ? [...declaredFiles, ...reachableRemedyPaths]
     : declaredFiles;
-  const alreadyOutOfScope = new Set(outOfDeclaredScopeFiles(baselineDiffFiles, effectiveDeclaredFiles, [], regime));
-  const newOutOfScopePaths = outOfDeclaredScopeFiles(currentDiffFiles, effectiveDeclaredFiles, registrationChanges, regime).filter(
+  // W1-T11501: the shared computed-folder predicate over BOTH diffs, so a declared test at its computed folder is
+  // never "new out-of-scope" and the baseline/current comparison keeps one answer for it.
+  const placementAdmitted = placement === undefined ? new Set<string>() : observeComputedPlacement({
+    root: placement.root, declaredFiles, baseRev: "origin/main", proofs: placement.proofs,
+    candidates: [...baselineDiffFiles, ...currentDiffFiles],
+  }).admitted;
+  const alreadyOutOfScope = new Set(outOfDeclaredScopeFiles(baselineDiffFiles, effectiveDeclaredFiles, [], regime, placementAdmitted));
+  const newOutOfScopePaths = outOfDeclaredScopeFiles(currentDiffFiles, effectiveDeclaredFiles, registrationChanges, regime, placementAdmitted).filter(
     (f) => !alreadyOutOfScope.has(f),
   );
   if (newOutOfScopePaths.length === 0) return undefined;
@@ -3341,6 +3349,7 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
               reachableRemedyFiles,
               currentCiFailures ?? [],
               host.readRegistrationChanges(opts.worktreePath, currentDiffFiles, "origin/main", undefined, currentPinnedSha),
+              { root: opts.worktreePath, proofs: (opts.task.acceptance ?? []).map((c) => c.proof) },
             )
           : undefined;
       if (scopeStandDown) {

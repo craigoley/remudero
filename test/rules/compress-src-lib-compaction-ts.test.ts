@@ -1,5 +1,5 @@
 // @source-text-subject: compaction.ts comment compression preserves executable tokens and syntax.
-// @census-reads: src/lib/compaction.ts
+// @census-reads: src/lib/compaction.ts test/rules/compress-src-lib-compaction-ts.test.ts
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";

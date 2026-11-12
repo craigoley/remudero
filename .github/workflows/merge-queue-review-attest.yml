@@ -3,7 +3,10 @@ name: merge-queue-review-attest
 # Reports the required `remudero-review` context on a merge queue's group commit. The orchestrator
 # posts that status on PR heads only, so a queue would otherwise wait for it and eject every PR.
 # The job passes only when every PR in the group already has a `success` remudero-review status on
-# its own head sha (scripts/merge-queue-review-attest.mjs).
+# its own head sha, naming a full reviewer-code sha still materially current at origin/main
+# (scripts/merge-queue-review-attest.mjs, W1-T11847). The full history is fetched so that judgement
+# can read the reviewer code's ancestry, and the dependencies are installed so it runs the sweep's
+# own predicate from src/lib/self-sync.ts rather than a copy.
 #
 # INVARIANT: `merge_group` is the ONLY trigger and the job has no `if:`. A check run named
 # `remudero-review` on a PR head — run OR skipped, since a skipped required check counts as passing —
@@ -26,11 +29,14 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: .nvmrc
           cache: npm
+      - run: npm ci
       - name: Attest every PR in the group has a successful remudero-review status
         env:
           GH_TOKEN: ${{ github.token }}
-        run: node scripts/merge-queue-review-attest.mjs
+        run: node --import tsx scripts/merge-queue-review-attest.mjs

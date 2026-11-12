@@ -74,6 +74,9 @@ function deps(postReview: NonNullable<SweepDeps["postReview"]>): SweepDeps {
   };
 }
 
+// W1-T11847: a reused verdict posts only while the reviewer code that judged it is current at origin/main.
+const REVIEWER_CODE = "c".repeat(40);
+
 describe("test/worker/a-review-slot-is-released-when-its-verdict-posts.test.ts", () => {
   for (const kind of ["reuse", "discriminate-only"] as const) {
     for (const publication of ["posted", "refused", "failed", "fallback", "command-fallback"] as const) {
@@ -87,7 +90,7 @@ describe("test/worker/a-review-slot-is-released-when-its-verdict-posts.test.ts",
           diff, report: "verdict ready", headCheckoutDir: "/head", execProof: () => "pass",
         });
         appendLedger(ledgerPath, { run_id: "prior", task_id: subject.taskId!, step: "review.posted",
-          head_sha: "prior-head", pr_url: subject.prUrl,
+          head_sha: "prior-head", pr_url: subject.prUrl, reviewer_code_sha: REVIEWER_CODE,
           decision_verdict: publication.endsWith("fallback") ? { ...prior, state: "pending" } : prior });
         const shim = ghShim([
           // W1-T11443: a SUCCESS reads the head's status history first; this head has no prior FAILURE.
@@ -125,6 +128,7 @@ describe("test/worker/a-review-slot-is-released-when-its-verdict-posts.test.ts",
           owner: "o", repo: "r", localRepoName: "r", config: { root } as Config,
           ledgerPath, runId: "W1-T11151", plan: { tasks: [], byId: new Map() },
           instanceRegistryTextImpl: () => undefined,
+          reviewerCodeFreshnessImpl: () => ({ status: "fresh", codeSha: REVIEWER_CODE, originMainSha: REVIEWER_CODE, advance: "none" }),
           log: (step, extra) => rows.push({ step, ...extra }),
           materializeReviewWorktreeImpl: () => ({ worktreePath: "/head" }),
           buildBaseProofDirImpl: () => ({ baseCheckoutDir: "/base", baseUnreadablePaths: new Set(),

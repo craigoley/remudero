@@ -94,7 +94,9 @@ function runHostUpdate(args: string[], extraEnv: NodeJS.ProcessEnv = {}): Run {
     encoding: "utf8",
     cwd: REPO_ROOT,
     // The reclaim proof must not snapshot the real host's state when run on an Azure worker.
-    env: { ...process.env, RMD_STATE_DIR: stateRoot, PATH: `${bin}:${process.env.PATH ?? ""}`, ...extraEnv },
+    // W1-T12409: and the agent history reclaim walks an empty tree, never the real home.
+    env: { ...process.env, RMD_STATE_DIR: stateRoot, RMD_AGENT_HISTORY_DIRS: join(stateRoot, "no-agent-history"),
+      PATH: `${bin}:${process.env.PATH ?? ""}`, ...extraEnv },
   });
   return { status: r.status ?? -1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
 }

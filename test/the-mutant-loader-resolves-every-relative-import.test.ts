@@ -1,3 +1,4 @@
+// @census-reads: scripts/ src/ test/ — the satisfied-task census it copies, the mutant helper, every tracked test's import rewrites.
 import { strict as assert } from "node:assert";
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";

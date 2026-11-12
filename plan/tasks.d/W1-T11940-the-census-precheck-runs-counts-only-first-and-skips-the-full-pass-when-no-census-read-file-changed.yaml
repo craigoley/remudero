@@ -18,7 +18,7 @@
     - scripts/census-precheck.mjs
     - scripts/preflight-author.mjs
     - test/ci/the-precheck-skips-the-full-pass-only-when-no-read-file-changed.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: The census suites that read repository files declare them with @census-reads, extended from the 7 of 136 that declare today to every suite the counts-only pass reports

@@ -58,8 +58,8 @@ export function isDependabotAuthor(author: DepReviewAuthor): boolean {
 export type SemverLevel = "major" | "minor" | "patch" | "unknown";
 
 /** Bumped when this lane's decision contract changes, independently of task-review semantics.
- *  v3 (PR 15539): a Docker tag bump such as 24.21.0-bookworm-slim parses its semver level. */
-export const DEP_REVIEW_ENGINE_REVISION = "dep-review-docker-tag-semver-v3";
+ *  v4 (W1-T12369): a test file that only moves a pin the bump changes is accepted. */
+export const DEP_REVIEW_ENGINE_REVISION = "dep-review-test-pin-companion-v4";
 /** The revision a sweep row written before rows carried one was decided under. */
 export const DEP_REVIEW_LEGACY_ENGINE_REVISION = "dep-review-selected-attempts-v2";
 
@@ -496,6 +496,8 @@ export function changedFilesInDiff(diff: string): string[] {
   for (const m of diff.matchAll(/^\+\+\+ b\/(\S+)/gm)) files.add(m[1]);
   for (const m of diff.matchAll(/^--- a\/(\S+)/gm)) files.add(m[1]);
   for (const m of diff.matchAll(/^rename (?:from|to) (\S+)/gm)) files.add(m[1]);
+  // W1-T12369: a binary or mode-only change carries only its `diff --git` header.
+  for (const m of diff.matchAll(/^diff --git a\/(\S+) b\/(\S+)$/gm)) files.add(m[1]).add(m[2]);
   return [...files];
 }
 
@@ -652,6 +654,113 @@ export function offendingFiles(
   readRootManifest: () => string = () => readFileSync("package.json", "utf8"),
 ): string[] {
   return changedFilesInDiff(diff).filter((f) => !isDependencyDeclarationPath(f, readRootManifest));
+}
+
+/** W1-T12369 — a version or SHA the bump itself moves, old value to new value. */
+export interface DepReviewPinPair { dependency: string; from: string; to: string }
+/** W1-T12369 — a test file whose every changed line moves only {@link DepReviewPinPair}s. */
+export interface DepReviewAcceptedPinFile { file: string; pins: DepReviewPinPair[] }
+
+const isFullSha = (text: string) => /^[a-f0-9]{40}$/i.test(text);
+const escapeRegExp = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+function diffSections(diff: string): string[] {
+  return diff.split(/^(?=diff --git )/m).filter((section) => section.startsWith("diff --git "));
+}
+
+function changedRuns(section: string): { runs: string[][]; plain: boolean } {
+  const runs: string[][] = [];
+  let run: string[] = [], plain = true, inHunk = false;
+  const flush = () => { if (run.length > 0) runs.push(run); run = []; };
+  for (const line of section.split("\n")) {
+    if (line.startsWith("@@")) { flush(); inHunk = true; continue; }
+    if (!inHunk) {
+      if (!(line === "" || /^(diff --git |index |--- a\/|\+\+\+ b\/)/.test(line))) plain = false;
+      continue;
+    }
+    if (line.startsWith("\\ No newline at end of file")) continue;
+    if (line.startsWith("+") || line.startsWith("-")) run.push(line);
+    else flush();
+  }
+  flush();
+  return { runs, plain };
+}
+
+function bumpPinPairs(title: string, body: string, diff: string): DepReviewPinPair[] {
+  const pairs = new Map<string, DepReviewPinPair>();
+  const add = (dependency: string, from: string, to: string) => {
+    if (from && to && from !== to) pairs.set(`${dependency}\0${from}\0${to}`, { dependency, from, to });
+  };
+  for (const section of diffSections(diff)) {
+    const files = changedFilesInDiff(section);
+    if (files.length !== 1 || !/^\.github\/workflows\/[^/]+\.ya?ml$/i.test(files[0])) continue;
+    for (const run of changedRuns(section).runs) {
+      const removed = run.filter((line) => line.startsWith("-")), added = run.filter((line) => line.startsWith("+"));
+      if (removed.length !== added.length) continue;
+      removed.forEach((line, i) => {
+        const before = ACTION_SHA_PIN_CHANGE_RE.exec(line), after = ACTION_SHA_PIN_CHANGE_RE.exec(added[i]);
+        if (!before || !after || before[2] !== after[2]) return;
+        add(before[2], before[3], after[3]);
+        add(before[2], before[4].replace(/^v/i, ""), after[4].replace(/^v/i, ""));
+      });
+    }
+  }
+  for (const fact of parseDependabotBumpFacts(title, body)) {
+    add(fact.dependency, fact.fromVersion.replace(/^v/i, ""), fact.toVersion.replace(/^v/i, ""));
+  }
+  return [...pairs.values()];
+}
+
+/** The pins that turn `removed` into exactly `added`; undefined when any other text changes. */
+function pinOnlyLineChange(removed: string, added: string, pins: readonly DepReviewPinPair[]): DepReviewPinPair[] | undefined {
+  const text = removed.slice(1);
+  const usable = pins.filter((pin) => isFullSha(pin.from) || text.includes(pin.dependency));
+  if (usable.length === 0) return undefined;
+  const pattern = new RegExp([...new Set(usable.map((pin) => pin.from))].sort((a, b) => b.length - a.length)
+    .map((from) => isFullSha(from)
+      ? String.raw`(?<![0-9a-fA-F])${escapeRegExp(from)}(?![0-9a-fA-F])`
+      : String.raw`(?<![0-9A-Za-z.+_-])v?${escapeRegExp(from)}(?![0-9A-Za-z.+_-])`)
+    .join("|"), "g");
+  const used = new Map<string, DepReviewPinPair>();
+  let ambiguous = false;
+  const moved = text.replace(pattern, (match) => {
+    const from = isFullSha(match) ? match : match.replace(/^v/i, "");
+    const candidates = usable.filter((pin) => pin.from === from);
+    if (new Set(candidates.map((pin) => pin.to)).size !== 1) { ambiguous = true; return match; }
+    const named = candidates.filter((pin) => text.includes(pin.dependency));
+    for (const pin of named.length > 0 ? named : candidates.slice(0, 1)) used.set(`${pin.dependency}\0${pin.from}\0${pin.to}`, pin);
+    return `${match.slice(0, match.length - from.length)}${candidates[0].to}`;
+  });
+  return !ambiguous && used.size > 0 && moved === added.slice(1) ? [...used.values()] : undefined;
+}
+
+/**
+ * W1-T12369 — test files among `offending` whose only change is a pin the bump itself moves.
+ * #17928: test/semgrep-native-install.test.ts asserts the upload-sarif SHA, so every bump of
+ * that action needs the same one-line test edit, which the allowlist alone refuses.
+ */
+export function acceptedTestPinFiles(title: string, body: string, diff: string, offending: readonly string[]): DepReviewAcceptedPinFile[] {
+  const pins = bumpPinPairs(title, body, diff);
+  if (pins.length === 0) return [];
+  const sections = diffSections(diff).map((section) => ({ section, files: changedFilesInDiff(section) }));
+  const out: DepReviewAcceptedPinFile[] = [];
+  for (const file of offending) {
+    const own = sections.filter((s) => s.files.includes(file));
+    if (!file.startsWith("test/") || own.length !== 1 || own[0].files.length !== 1) continue;
+    const { runs, plain } = changedRuns(own[0].section);
+    if (!plain || runs.length === 0) continue;
+    const matched = new Map<string, DepReviewPinPair>();
+    const allPins = runs.every((run) => {
+      const removed = run.filter((line) => line.startsWith("-")), added = run.filter((line) => line.startsWith("+"));
+      return removed.length > 0 && removed.length === added.length && removed.every((line, i) => {
+        const used = pinOnlyLineChange(line, added[i], pins);
+        for (const pin of used ?? []) matched.set(`${pin.dependency}\0${pin.from}\0${pin.to}`, pin);
+        return used !== undefined;
+      });
+    });
+    if (allPins) out.push({ file, pins: [...matched.values()] });
+  }
+  return out;
 }
 
 // ── Required-check gate ──────────────────────────────────────────────────
@@ -884,6 +993,7 @@ export interface DepReviewResult {
   advisoryRed?: string[]; // W1-T9929: reds outside the required set, on every verdict decideDepReview returns
   judgedAgainst?: "required" | "all-checks";
   requiredFallback?: string;
+  acceptedPinFiles?: DepReviewAcceptedPinFile[]; // W1-T12369: present only when not empty
 }
 
 /**
@@ -895,13 +1005,19 @@ export interface DepReviewResult {
  */
 export function decideDepReview(input: DepReviewInput): DepReviewResult {
   const semverLevel = overallSemverLevel(input.title, input.body);
-  const offending = offendingFiles(input.diff);
-  const { holding: red, advisory: advisoryRed } = splitRedChecks(input.checks, input.required);
-  const judged: Pick<DepReviewResult, "advisoryRed" | "judgedAgainst" | "requiredFallback"> = input.required?.kind === "required"
-    ? { advisoryRed, judgedAgainst: "required" }
-    : { advisoryRed, judgedAgainst: "all-checks", ...(input.required ? { requiredFallback: input.required.fallback } : {}) };
-  const migrationBumps = majorMigrationBumps(input.title, input.body);
   const dependabot = isDependabotAuthor(input.author);
+  const outside = offendingFiles(input.diff);
+  const acceptedPinFiles = dependabot && (semverLevel === "minor" || semverLevel === "patch")
+    ? acceptedTestPinFiles(input.title, input.body, input.diff, outside) : [];
+  const offending = outside.filter((file) => !acceptedPinFiles.some((accepted) => accepted.file === file));
+  const { holding: red, advisory: advisoryRed } = splitRedChecks(input.checks, input.required);
+  const judged: Pick<DepReviewResult, "advisoryRed" | "judgedAgainst" | "requiredFallback" | "acceptedPinFiles"> = {
+    ...(input.required?.kind === "required"
+      ? { advisoryRed, judgedAgainst: "required" as const }
+      : { advisoryRed, judgedAgainst: "all-checks" as const, ...(input.required ? { requiredFallback: input.required.fallback } : {}) }),
+    ...(acceptedPinFiles.length > 0 ? { acceptedPinFiles } : {}),
+  };
+  const migrationBumps = majorMigrationBumps(input.title, input.body);
   const pinOnly = dependabot && offending.length === 0 && semverLevel === "unknown" &&
     isActionShaPinOnlyProposal(input.title, input.body, input.diff);
 
@@ -981,6 +1097,7 @@ export function decideDepReview(input: DepReviewInput): DepReviewResult {
     reason: (pinOnly
       ? "pin-only GitHub Actions SHA refresh, release annotations unchanged, gates green — safe to auto-merge"
       : `${semverLevel} bump, confined to manifests, gates green — safe to auto-merge`) +
+      (acceptedPinFiles.length > 0 ? `; test pin edit accepted: ${acceptedPinFiles.map((a) => a.file).join(", ")}` : "") +
       (advisoryRed.length > 0 ? `; advisory red, not holding: ${advisoryRed.join(", ")}` : ""),
   };
 }

@@ -1,0 +1,67 @@
+- id: W1-T12413
+  title: "A single paid cash request runs outside a worker, with the same reservation, deadline and receipt"
+  repo: remudero
+  depends_on: []
+  priority: 1.2
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # one new paid path and a type change on the shared cash transport; the worker paths keep their behaviour
+  band_meaning: span
+  origin: operator-session#decision-models-2026-11-12
+  plan_refs:
+    - W1-T12187
+    - W1-T11075
+    - W1-T4672
+    - W1-T10837
+    - W1-T10858
+    - W1-T3558
+  files:
+    - src/lib/worker-provider.ts
+    - scripts/cash-request-probe.mjs
+    - test/worker/spawn/a-single-paid-cash-request-runs-outside-a-worker.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "sendCashRequest sends one request to the deployment's own endpoint joined with the caller's path, with that deployment's key. It reserves before it sends, settles from the usage in the reply, and returns the served model, the latency and the reserved and settled dollars"
+      proof: "grep: W1-T12413 criterion 1 in test/worker/spawn/a-single-paid-cash-request-runs-outside-a-worker.test.ts"
+    - claim: "The reservation counts the output ceiling that the caller declares, not the worker ceiling of 8,000 tokens. With no declared ceiling, a worker reservation costs the same as today"
+      proof: "grep: W1-T12413 criterion 2 in test/worker/spawn/a-single-paid-cash-request-runs-outside-a-worker.test.ts"
+    - claim: "When the normal figure of the daily cash cap refuses the reservation, no request is sent and the result says so. The squeezed figure is never read, even when it would allow the request"
+      proof: "grep: W1-T12413 criterion 3 in test/worker/spawn/a-single-paid-cash-request-runs-outside-a-worker.test.ts"
+    - claim: "A reply that does not arrive inside the caller's deadline, or a caller abort, ends the request with a named reason and keeps the reservation held. A reply that arrives after the deadline still settles from its usage"
+      proof: "grep: W1-T12413 criterion 4 in test/worker/spawn/a-single-paid-cash-request-runs-outside-a-worker.test.ts"
+    - claim: "A 429 with a retry-after inside the deadline is sent again once with a new reservation, and the refused attempt is settled as the worker path settles it"
+      proof: "grep: W1-T12413 criterion 5 in test/worker/spawn/a-single-paid-cash-request-runs-outside-a-worker.test.ts"
+    - claim: "A 404 settles at zero and marks the deployment absent for OPENWEIGHT_ABSENT_TTL_MS. A second call inside that time sends nothing and says the deployment is absent"
+      proof: "grep: W1-T12413 criterion 6 in test/worker/spawn/a-single-paid-cash-request-runs-outside-a-worker.test.ts"
+    - claim: "With no fetch injected, the request goes through the global fetch. An endpoint that refuses the connection gives a named transport failure and keeps the reservation held"
+      proof: "grep: W1-T12413 criterion 7 in test/worker/spawn/a-single-paid-cash-request-runs-outside-a-worker.test.ts"
+    - claim: "The probe script sends one request through sendCashRequest and prints the status, the latency and the dollars. It never prints the key"
+      proof: "grep: W1-T12413 criterion 8 in test/worker/spawn/a-single-paid-cash-request-runs-outside-a-worker.test.ts"
+    - claim: "The probe script calls the new function"
+      proof: "grep: sendCashRequest( in scripts/cash-request-probe.mjs"
+  rationale: |
+    WHY: rmd's judges answer fixed-option questions. Each one starts a full worker today. A decision model, or a cheap cash model used as a shadow, answers one question about one input in one HTTP request. No code in src/ can send one budgeted cash request without a worker. This task adds that path and nothing else. The tasks that use it come after it.
+    READ 2026-11-12 in the source at origin/main f93618eab:
+    - src/lib/worker-provider.ts:3928 `cashRequestJson` is the budgeted HTTP core. It sets the deadline from `requestTimeoutMs` or OPENWEIGHT_REQUEST_TIMEOUT_MS (:3381, 180,000 ms) and relays the caller's abort. It retries a 429 inside the deadline. It throws OpenWeightDeploymentNotFoundError on a 404. It checks the instance registry before each attempt. It calls `observeHeaders` and settles a late receipt through `onEnvelope`. It is private, and its `args` parameter is typed OpenWeightSpawnArgs, so only the two worker paths (:5620 Foundry Claude and :5878 chat and Responses) can call it.
+    - :4376 `reserveOpenWeightBudget` and :4427 `settleOpenWeightBudget` are exported. A reservation is taken before the request and refuses at a cap with OpenWeightAllowanceExhaustedError.
+    - :4153-4171 `openWeightReservationUsd` always adds OPENWEIGHT_MAX_COMPLETION_TOKENS (:3371, 8,000) output tokens at list price. A request with no output text still reserves for 8,000 output tokens.
+    - The 404 absent mark (:4018 `markOpenWeightDeploymentAbsent`, TTL :4014 30 minutes) is set only by src/lib/worker.ts:2374 and :2380, after a worker returns.
+    - src/lib/config-schema.ts:820 `cashDeploymentTarget` resolves each deployment's endpoint and key env (W1-T10837).
+    - The no-hand-rolled-fetch gate scans only apps/** and packages/** (scripts/no-hand-rolled-fetch-check.mjs DEFAULT_DIRS). The reason to reuse the core is the spend reservation, not that gate.
+    OBSERVED 2026-11-12 about 14:42Z by the operator session from inside remudero-daemon: POST /openai/v1/decisions with model gpt-6-luna on the default cash resource (eastus2) answered HTTP 400 "The requested operation is unsupported" on 3 of 3 tries (2,339, 280 and 141 ms). On the East US resource it answered 404 DeploymentNotFound. That probe was a hand request with no reservation. The probe script of this task makes the same check through the budgeted path.
+    READ 2026-11-12 on the vendors' pages by the operator session (handoff phase 2, corrections 1, 4, 10 and 12): the Azure Decisions URL is https://<resource>.openai.azure.com/openai/v1/decisions with no api-version, `model` is the deployment name, and the auth is `api-key` or Entra. East US 2 is excluded and no region is listed as live. Azure publishes no Decisions price; the gpt-6-luna Global rows are $0.10 input, $0.01 cached, $0.125 cache write and $0.50 output per 1M tokens. Microsoft-Decision-1 is POST <endpoint>/providers/microsoft/v1/systemone with no api-version, at $0.042 per 1M input tokens, Preview, with an inference deprecation date of 2027-02-04; its usage fields are not published. So the caller names the path, and a reply whose usage cannot be read keeps its whole reservation held. A deployment with no price row refuses before any request, as the worker path does today.
+    OBSERVED 2026-11-12 by the operator session, `az cognitiveservices account deployment list` on the default cash resource: gpt-oss-120b (450K tokens per minute), DeepSeek-V4-Flash (300K), DeepSeek-V4.1-Flash (300K) and Kimi-K2.6 (300K) are deployed with spare quota. The operator said: "I have a few open weight models deployed with extra token access too." Each is a cheap generative shadow candidate for W1-T12187 and W1-T11075, and each can be sent one request through this path.
+  design: |
+    1. Narrow the transport. Give `cashRequestJson` a parameter type `Pick<OpenWeightSpawnArgs, "requestTimeoutMs" | "clock" | "signal" | "fetchImpl" | "streamObserver">` in place of OpenWeightSpawnArgs, and an optional output ceiling for the oversized-429 sum (default OPENWEIGHT_MAX_COMPLETION_TOKENS). The two worker paths pass the same values as today, so their requests, retries and settlements stay byte-identical.
+    2. Add an optional output ceiling to `openWeightReservationUsd` and to the input of `reserveOpenWeightBudget`. The default is OPENWEIGHT_MAX_COMPLETION_TOKENS, so every current caller reserves the same dollars.
+    3. Export `sendCashRequest(config, input)`. The input names the deployment, a path under its endpoint (for example `openai/v1/responses`), the body, the output ceiling, a source label, and optionally a deadline, a signal, a clock and a fetch. In order it: refuses a Foundry Claude deployment (it has its own adapter); refuses a deployment known absent, before any reservation; resolves the endpoint and key with `cashDeploymentTarget` (https only); reserves against the normal figure (`squeezed` is never set); sends through `cashRequestJson`; settles from the Responses-shape usage block (`input_tokens`, `output_tokens`, `input_tokens_details`) or the chat-shape block, through the same pricing as the worker path; on a 404 marks the deployment absent and settles at zero; on a 429 retry settles the refused attempt as the chat worker path does (`unbilledCashRefusal`). It returns a result shape and never throws for a refusal or a transport failure: `{ ok: true, envelope, servedModel, latencyMs, reservedUsd, settledUsd, heldUsd }` or `{ ok: false, reason, ... }` with reason `budget-refused`, `deployment-absent`, `not-ready`, `timeout`, `aborted`, `http` or `transport`.
+    4. Add scripts/cash-request-probe.mjs, the first caller. It loads the config, takes `--deployment`, `--path`, `--body-file` and `--output-tokens`, sends one request through `sendCashRequest`, and prints one JSON line with the status, reason, latency, served model and dollars. It prints no key and no request body. The operator runs it inside the daemon container, where the keys are, to repeat the Decisions probe after a deployment changes.
+    NOT IN SCOPE: capability grants (a worker concept; no non-worker caller has one yet); a ledger row (the callers of later tasks write their own); any judge, any decision-model contract, and any change to which model a judge uses.
+  falsifier: |
+    Reserve with the worker ceiling and criterion 2 must fail. Send after a refused reservation and criterion 3 must fail. Drop the late-receipt settlement and criterion 4 must fail. Skip the absent mark and criterion 6 must fail. Restore and require all to pass. The existing worker-path suites under test/worker/spawn/ must pass unchanged at every step.
+  note: |
+    Ids reserved for run-unfiled-1794493022000 with ~/rmd-work/bin/reserve-id.sh. Filed with W1-T12414, W1-T12415, W1-T12416, W1-T12417, W1-T12418 and W1-T12419.
+    OBSERVED 2026-11-12 about 15:40Z, after the operator deployed gpt-6-luna on the East US resource and Microsoft-Decision-1 as decision-1 on the default resource: both answered 200 from inside the daemon container. W1-T12416 sends its decision requests through this path; the probe script stays a general budgeted check.

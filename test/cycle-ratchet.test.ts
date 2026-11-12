@@ -1,3 +1,4 @@
+// @census-reads: src/ scripts/ .dependency-cruiser.cjs package.json .github/workflows/ci.yml test/cycle-ratchet.test.ts — the cruised import graph, its config and ceiling, and itself.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";

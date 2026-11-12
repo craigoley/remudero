@@ -1,3 +1,4 @@
+// @census-reads: scripts/ plan/ MASTER-PLAN.md test/citation-anchor-census.test.ts — the census script, the shards and plan it anchors, itself.
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { spawnSync } from "node:child_process";

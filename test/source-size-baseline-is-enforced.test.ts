@@ -1,3 +1,4 @@
+// @census-reads: src/ scripts/ test/ bin/ .dependency-cruiser.cjs package.json .github/workflows/ci.yml — the measured tree, the ratchet, its config and CI wiring.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";

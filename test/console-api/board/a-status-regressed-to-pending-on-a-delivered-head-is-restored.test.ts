@@ -25,6 +25,9 @@ const PENDING_SINCE = "2026-11-08T12:43:17.000Z";
 const CRITERION = { claim: "W1-T11729 the status is restored", proof: "grep: W1-T11729 in src/x.ts" };
 const DIFF = "diff --git a/src/x.ts b/src/x.ts\n+W1-T11729\n";
 const REGRESSION_KEY = `input:${JSON.stringify(["W1-T11596", URL, HEAD, DIGEST])}|${PENDING_SINCE}`;
+// W1-T11847: the delivered verdict names the full sha of the reviewer code that judged it; the restore posts it only while
+// that code is still current at origin/main (here origin/main is that code).
+const CODE = "c".repeat(40);
 
 function verdict(): ReviewVerdict {
   return judgeReview([CRITERION], { diff: DIFF, report: "W1-T11729 the status is restored.", headCheckoutDir: "/head", execProof: () => "pass" });
@@ -130,7 +133,7 @@ function adapterFixture(t: TestContext, postStatus: "ok" | "fail") {
   process.env.PATH = `${shim.dir}:${oldPath}`;
   t.after(() => { process.env.PATH = oldPath; rmSync(root, { recursive: true, force: true }); });
   appendLedger(ledgerPath, { run_id: "review-original", task_id: "W1-T11596", step: "review.posted", state: "success", pr_url: URL,
-    head_sha: HEAD, review_input_digest: DIGEST, decision_verdict: verdict() });
+    head_sha: HEAD, review_input_digest: DIGEST, decision_verdict: verdict(), reviewer_code_sha: CODE });
   const calls: string[] = [];
   const unexpected = (): never => { throw new Error("the restore path made an unexpected host call"); };
   const host = {
@@ -146,6 +149,7 @@ function adapterFixture(t: TestContext, postStatus: "ok" | "fail") {
     owner: "acme", repo: "scratch", localRepoName: "not-scratch", config: { root } as never, ledgerPath, runId: "restore-adapter",
     plan: { tasks: [], byId: new Map() } as never, log: step => calls.push(step),
     reviewRunner: async () => { calls.push("full-review"); return 0; },
+    reviewerCodeFreshnessImpl: () => ({ status: "fresh", codeSha: CODE, originMainSha: CODE, advance: "none" }),
   });
   const pr = { prNumber: 17354, prUrl: URL, taskId: "W1-T11596", headSha: HEAD, reviewInputDigest: DIGEST, reviewState: "pending",
     reviewPendingSince: PENDING_SINCE, checksState: "green", unmetCriteria: [], priorStrikes: 0, autoMergeArmed: false,
@@ -167,6 +171,7 @@ test("W1-T11729 criterion 1: the adapter re-posts the delivered state and ledger
   const posts = f.ghCalls();
   assert.match(posts, /statuses\/d552219678ee21fc500aa2ed9c6799f5179db58b/);
   assert.match(posts, /state=success/);
+  assert.match(posts, new RegExp(`review code ${CODE}`), "the restored status names the reviewer code that judged it");
   assert.equal(/state=(failure|pending)/.test(posts), false, "no state the delivered verdict lacked is posted");
 });
 

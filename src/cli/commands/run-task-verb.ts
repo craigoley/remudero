@@ -64,7 +64,7 @@ import { decideGatePosture, type GatePostureDecision, type GatePostureFinding, t
 import { refusalReason } from "../../lib/inbox.js";
 import { gatherRuns, parseLedger } from "../../lib/retro.js";
 import type { ChildEntryStoreOptions } from "../../lib/child-entry-argv.js";
-import { bodyWithFailingProofAtOpen, bodyWithInconclusiveProofAtOpen, defaultProofRunnerAsync, openPullRequestCheckedAsync, PrOpenRefusedError, readOtherOpenPrForTask, recordRefusedPrOpen, type AsyncOpenPullRequestProofRunner, type OpenPrJsonReader, type OpenPullRequestProofRunner } from "../../lib/pr-open.js";
+import { bodyWithInconclusiveProofAtOpen, defaultProofRunnerAsync, openPullRequestCheckedAsync, PrOpenRefusedError, proposeStaleProofReplacement, readOtherOpenPrForTask, recordRefusedPrOpen, type AsyncOpenPullRequestProofRunner, type OpenPrJsonReader, type OpenPullRequestProofRunner } from "../../lib/pr-open.js";
 import { createPlanPrRest, probeExistingPlanPr } from "../../lib/plan-pr-emitter.js";
 import { findTaskShard, requestScopeAmendment, readBuildScopeRecovery, saveBuildScopeRecovery, restoreBuildScopeRecovery, type ScopeAmendmentOutcome, type ScopeAmendmentRequest, type ProofAmendmentWritePorts } from "../../lib/proof-amendment.js";
 import { appendLedger, DECISION_RELEVANT_LEDGER_STEPS } from "../../lib/ledger.js";
@@ -119,6 +119,7 @@ import { enrichWorkerStreamEvent } from "../../lib/worker-telemetry.js";
 import { toolStepSignature } from "../../lib/tool-step-signature.js";
 import { loadDefaultCostAnomalyPolicy, type CostAnomalyPolicy } from "../../lib/cost-anomaly.js";
 import { hostWorktreeGit, hostWorktreeGitAsync, type HostWorktreeGitOptions } from "../../lib/worktree-git.js";
+import { observeComputedPlacement } from "../../lib/test-path-resolver.js";
 import { gitPushRunBranch, gitPushRunBranchAsync, LanePushForeignHeadError, step, type PushRunBranchAsyncOpts } from "../../lib/git-push.js";
 import { sweepStaleWorkerHomes, sweepStaleWorkerHomesAsync } from "../../lib/worker-home.js";
 import { FIX_WORKER_TOOLS, FIX_WORKER_TOOLS_HARNESS_COMMITS } from "../../lib/fix-fence.js";
@@ -1123,6 +1124,24 @@ export interface RunTaskContext {
   releasePlan?: () => void;
 }
 
+/**
+ * W1-T11501: the push-time scope comparison, extracted so a test drives it. A declared test written at the folder the
+ * placement engine computes from its contents is the declared test, not an overrun — the SAME predicate
+ * (observeComputedPlacement) worker staging, the fix rung and the review scope advisory use. Everything else keeps
+ * scopeGuardOutOfScopeFiles's exact-path, fail-closed comparison.
+ */
+export function pushScopeOutOfScopeFiles(
+  worktreePath: string,
+  diffFiles: readonly string[],
+  task: Pick<Task, "files" | "acceptance">,
+  registrationChanges: Parameters<typeof scopeGuardOutOfScopeFiles>[2],
+): string[] {
+  return scopeGuardOutOfScopeFiles(diffFiles, task.files, registrationChanges, observeComputedPlacement({
+    root: worktreePath, declaredFiles: task.files, baseRev: "origin/main",
+    proofs: (task.acceptance ?? []).map((c) => c.proof), candidates: diffFiles,
+  }).admitted);
+}
+
 /** Persist a verified implementation credit in the repository state carried by this native run. */
 export function persistRunTaskCredit(
   ctx: Pick<RunTaskContext, "ledgerPath" | "persistCredit">,
@@ -1813,7 +1832,8 @@ async function ghPrCreateFillCommandAsync(
   branch: string,
   title?: string,
   runProofAsync?: AsyncOpenPullRequestProofRunner,
-  /** A finished build whose only defect is a failing filed proof is opened with that proof named, never stranded. */
+  /** W1-T10742: a finished build whose only defect is a proof that reached no verdict opens with that proof named.
+   *  W1-T10355: a proof that conclusively FAILED (exit 1) is never opened — the refusal is rethrown to the caller. */
   openOnFailingProof = false,
   childStore: ChildEntryStoreOptions = {},
 ): Promise<PrCreateCommand> {
@@ -1824,17 +1844,9 @@ async function ghPrCreateFillCommandAsync(
     checkedBody = await openPullRequestCheckedAsync(draft.body, branch, worktreePath, "origin/main", runProofAsync ?? ((proof, base, root, target) => defaultProofRunnerAsync(proof, base, root, target, { store: childStore })), { owner, repo });
   } catch (err) {
     if (!openOnFailingProof || !(err instanceof PrOpenRefusedError)) throw err;
-    if (err.failingProof !== undefined) {
-      const opened: PrCreateDiagnostic = {
-        step: "pr.opened_with_failing_proof",
-        extra: { branch, proof: err.failingProof.proof, refusal_class: err.refusalClass },
-      };
-      return withDiagnostics(
-        prCreateArgv(worktreePath, owner, repo, branch, draft.title, bodyWithFailingProofAtOpen(err.failingProof)),
-        [...draft.diagnostics, opened],
-      );
-    }
-    // W1-T10742: a proof that reached no verdict (even re-run) opens the PR as a conclusively failing one does.
+    // W1-T10355: a known-red proof is never published — opening it only bought a hosted proof-discrimination round.
+    if (err.failingProof !== undefined) throw err;
+    // W1-T10742: a proof that reached no verdict (even re-run) is not evidence the work is wrong, so it still opens.
     if (err.inconclusiveProof === undefined) throw err;
     const inconclusive: PrCreateDiagnostic = {
       step: "pr.opened_with_inconclusive_proof",
@@ -7472,7 +7484,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
         );
         diffFiles = undefined;
       }
-      const outOfScope = diffFiles === undefined ? [] : scopeGuardOutOfScopeFiles(diffFiles, task.files,
+      const outOfScope = diffFiles === undefined ? [] : pushScopeOutOfScopeFiles(worktreePath, diffFiles, task,
         readRegistrationChanges(worktreePath, diffFiles, "origin/main"));
       if (outOfScope.length > 0) {
         // THE REASON IS THIS DECISION'S OWN (the #981 rule — a ledger line carries the reason from
@@ -7597,7 +7609,13 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
         const issues = opts.prOpenRefusalIssues ?? ghIssueGateway(owner, task.repo);
         const keptHead = keptHeadOfFailedRun();
         const changedFiles = refusedBranchChangedFiles(worktreePath);
-        const issueUrl = recordRefusedPrOpen(err, { taskId, branch, headSha, changedFiles, declaredFiles: task.files }, log, { issues, ledgerPath, runId });
+        // W1-T10355: a stale proof's one deterministic replacement rides the amend-proof escalation, never this branch.
+        const proofCorrection = await proposeStaleProofReplacement(
+          err, { changedFiles, declaredFiles: task.files }, worktreePath,
+          opts.prOpenProofRunner ?? ((proof, base, root, target) => defaultProofRunnerAsync(proof, base, root, target, { store: { log } })),
+          "origin/main", { owner, repo: task.repo },
+        );
+        const issueUrl = recordRefusedPrOpen(err, { taskId, branch, headSha, changedFiles, declaredFiles: task.files, proofCorrection }, log, { issues, ledgerPath, runId });
         // W1-T10919: the runner's scope refused this, so hold the task (W1-T3959's own record) until main moves that
         // scope or the task is amended; a rebuild on the same tree would be refused identically.
         if (err.refusalClass === "proof-collected-nothing" && err.runnerConfigDigest !== undefined) {

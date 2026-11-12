@@ -1,3 +1,4 @@
+// @census-reads: test/ — the structural walk of every tracked test fixture, itself included.
 /**
  * A FIXTURE MUST OWN ITS CONDITION — A STRUCTURAL WALK OF `test/`, NOT ANOTHER BRIEF.
  *

@@ -1,3 +1,4 @@
+// @census-reads: src/ scripts/ test/a-union-read-of-an-unretained-step-is-refused.test.ts — the ledger, the union-retention census, itself.
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
