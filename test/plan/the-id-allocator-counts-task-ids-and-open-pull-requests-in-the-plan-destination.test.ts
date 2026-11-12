@@ -3,9 +3,11 @@ import { spawnSync } from "node:child_process";
 import { mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { test, type TestContext } from "node:test";
+import { formatReservationAnchorMessage } from "#src/lib/task-id-reservation.js";
 import { mintNextTaskId } from "#src/lib/task-id.js";
 import { gitRepo, GIT_REPO_FIXTURE_IDENTITY } from "#test/helpers/git-repo.js";
 import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
+import { withGhShim } from "#test/helpers/gh-shim.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 function put(path: string, text: string): void {
@@ -49,19 +51,22 @@ const runGit=(args)=>{calls.push({root:req.pub,args});if(args[0]==='push'&&args.
 const deps={repoRoot:req.pub,runGit,openPrTexts:()=>[],destinationStateDir:()=>req.state,
  destinationPrFetch:(args)=>{calls.push({root:'ops-gh',args});if(req.prFailure)throw Error('private response must not escape');const page=Number(/[?&]page=(\d+)/.exec(args[1])?.[1]??'1');return(req.prPages?.[page-1]??(page===1?req.prTexts??[]:[])).map((text,i)=>({number:(page-1)*100+i+1,title:text,body:'',state:'open',head:{ref:'ops-plan-'+((page-1)*100+i),sha:'a'.repeat(40)},created_at:'2026-11-01T00:00:00Z',updated_at:'2026-11-01T00:00:00Z'}));},
  destinationGit:(cwd,args,input)=>{calls.push({root:cwd,args});if(req.fetchFailure)throw Error('private fetch response must not escape');const r=spawnSync('git',['-C',cwd,...args],{encoding:'utf8',input});if(r.status!==0)throw Error('fixture destination git failed');return r.stdout;},
- auditHistoryIds:()=>[],auditPullRequests:()=>[],auditNowMs:()=>Date.now(),reapLedgerPath:req.root+'/reap-ledger.ndjson'};
+ auditHistoryIds:()=>[],auditPullRequests:()=>req.auditPulls??[],auditNowMs:()=>Date.now(),reapLedgerPath:req.root+'/reap-ledger.ndjson'};
+if(req.defaultGit)delete deps.destinationGit;
+if(req.defaultPr)delete deps.destinationPrFetch;
 if(req.reserve)deps.reserver=reservations.gitRemoteRefReserver({run:mod.gitRunAdapter(runGit),filingBranch:'fixture-plan'});
 const code=await mod.nextTaskIdCommand(req.flags??['--no-reserve'],{},deps);
 process.stdout.write(JSON.stringify({code,out,err,calls})+'\n');
 `;
-interface CaseOptions { flags?: string[]; reserve?: boolean; prTexts?: string[]; prPages?: string[][]; prFailure?: boolean; fetchFailure?: boolean; }
+interface FixturePull { body: string; head: { ref: string }; created_at: string; state: string; }
+interface CaseOptions { auditPulls?: FixturePull[]; flags?: string[]; reserve?: boolean; prTexts?: string[]; prPages?: string[][]; prFailure?: boolean; fetchFailure?: boolean; defaultGit?: boolean; defaultPr?: boolean; }
 function invoke(f: ReturnType<typeof fixture>, options: CaseOptions = {}) {
-  const r = spawnSync(process.execPath, ["--import", import.meta.resolve("tsx"), "--input-type=module", "--eval", CHILD], {
+  const r = spawnSync(process.execPath, ["--enable-source-maps", "--import", import.meta.resolve("tsx"), "--input-type=module", "--eval", CHILD], {
     cwd: REPO_ROOT, encoding: "utf8", timeout: 60_000, maxBuffer: 4 * 1024 * 1024,
     env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null",
       GIT_AUTHOR_NAME: GIT_REPO_FIXTURE_IDENTITY.name, GIT_AUTHOR_EMAIL: GIT_REPO_FIXTURE_IDENTITY.email,
       GIT_COMMITTER_NAME: GIT_REPO_FIXTURE_IDENTITY.name, GIT_COMMITTER_EMAIL: GIT_REPO_FIXTURE_IDENTITY.email,
-      RMD_OPS_ID_CASE: JSON.stringify({ source: REPO_ROOT, root: f.root, pub: f.pub.dir, state: f.state, ...options }) },
+      RMD_GH_CACHE_HOME: join(f.root, "gh-cache"), RMD_OPS_ID_CASE: JSON.stringify({ source: REPO_ROOT, root: f.root, pub: f.pub.dir, state: f.state, ...options }) },
   });
   assert.equal(r.error, undefined, "the command child terminates within its test bound");
   assert.equal(r.status, 0, r.stderr);
@@ -93,12 +98,18 @@ test("W1-T12206 criterion 2: the existing real reserver writes only the public o
 
 test("W1-T12206 criterion 3: an ops-filed id is HELD by both audit and reap, without a deletion attempt", (t) => {
   const f = fixture(t);
-  const sha = f.pub.git("commit-tree", "HEAD^{tree}", "-m", "reserve W1-T200 fixture");
-  f.pub.git("push", "--quiet", "origin", `${sha}:refs/rmd-id/W1-T200`);
+  const day = 24 * 60 * 60 * 1000, now = Date.now();
+  const message = (branch: string) => formatReservationAnchorMessage({ branch, startedAt: new Date(now - 20 * day).toISOString() });
+  const sha = f.pub.git("commit-tree", "HEAD^{tree}", "-m", message("ops-filing"));
+  const sample = f.pub.git("commit-tree", "HEAD^{tree}", "-m", message("public-sample"));
+  f.pub.git("push", "--quiet", "origin", `${sha}:refs/rmd-id/W1-T200`, `${sample}:refs/rmd-id/W1-T100`);
+  const auditPulls = [{ body: "Remudero-Task: W1-T100", head: { ref: "public-sample" },
+    created_at: new Date(now - 19 * day).toISOString(), state: "closed" }];
   const audit = invoke(f, { flags: ["--audit"] });
   assert.equal(audit.code, 0, audit.err.join("\n"));
   assert.match(audit.out.join("\n"), /W1-T200 HELD.*(declared|filed)/);
-  const reap = invoke(f, { flags: ["--audit", "--reap"] });
+  const reap = invoke(f, { flags: ["--audit", "--reap", "--apply"], auditPulls });
+  assert.equal(reap.code, 0, JSON.stringify(reap));
   assert.match(reap.out.join("\n"), /W1-T200 HELD.*(declared|filed)/);
   assert.equal(f.origin.git("rev-parse", "refs/rmd-id/W1-T200"), sha);
   assert.equal(reap.calls.some(c => c.args[0] === "push"), false);
@@ -151,4 +162,61 @@ test("W1-T12206 criterion 4: explicit offline mode never guesses when a second c
   assert.equal(r.code, 2, JSON.stringify(r));
   assert.match(r.err.join("\n"), /destination.*offline/i);
   assert.equal(r.calls.some(c => c.root === f.ops || c.root === "ops-gh" || c.args[0] === "push"), false);
+});
+
+test("W1-T12206 criterion 1: default bounded Git reads the fetched commit rather than stale checkout bytes", (t) => {
+  const f = fixture(t);
+  put(f.opsPlan, plan(220)); f.pub.git("-C", f.ops, "add", "plan/tasks.yaml");
+  f.pub.git("-C", f.ops, "commit", "-qm", "new ops generation");
+  f.pub.git("-C", f.ops, "push", "--quiet", "origin", "HEAD:refs/heads/main");
+  put(f.opsPlan, plan(100)); // Deliberately stale/dirty checkout bytes must not lower the committed ceiling.
+  const r = invoke(f, { defaultGit: true });
+  assert.equal(r.code, 0, r.err.join("\n"));
+  assert.match(r.out.join("\n"), /^W1-T221 /m);
+});
+
+test("W1-T12206 criterion 1: the default GitHub transport uses the actual selected repository", async (t) => {
+  const f = fixture(t);
+  const rows = [{ number: 1, title: "W1-T201", body: "", state: "open", head: { ref: "ops-filing", sha: "a".repeat(40) },
+    updated_at: "2026-11-01T00:00:00Z", created_at: "2026-11-01T00:00:00Z" }];
+  await withGhShim([{ when: "fixture/control", stdout: "controlled" },
+    { when: "repos/fixture-owner/fixture-ops/pulls?", stdout: JSON.stringify(rows) }], shim => {
+    const control = spawnSync("gh", ["api", "fixture/control"], { encoding: "utf8", timeout: 10_000 });
+    assert.equal(control.status, 0); assert.equal(control.stdout.trim(), "controlled");
+    const r = invoke(f, { defaultPr: true, defaultGit: true });
+    assert.equal(r.code, 0, r.err.join("\n")); assert.match(r.out.join("\n"), /^W1-T202 /m);
+    assert.ok(shim.calls().some(c => c.includes("repos/fixture-owner/fixture-ops/pulls?")));
+    assert.equal(shim.calls().some(c => /(?:pr (?:create|merge|close)|--method (?:POST|PATCH|DELETE))/.test(c)), false);
+  });
+});
+
+test("W1-T12206 criterion 3: a still-open ops filing protects its public reservation", (t) => {
+  const f = fixture(t);
+  const sha = f.pub.git("commit-tree", "HEAD^{tree}", "-m", "reserve W1-T201 fixture");
+  f.pub.git("push", "--quiet", "origin", `${sha}:refs/rmd-id/W1-T201`);
+  for (const flags of [["--audit"], ["--audit", "--reap"]]) {
+    const r = invoke(f, { flags, prTexts: ["Remudero-Task: W1-T201"] });
+    assert.match(r.out.join("\n"), /W1-T201 HELD.*open PR/);
+    assert.equal(r.calls.some(c => c.args[0] === "push"), false);
+    assert.equal(f.origin.git("rev-parse", "refs/rmd-id/W1-T201"), sha);
+  }
+});
+
+test("W1-T12206 criterion 4: malformed host selection refuses without reading another repository", (t) => {
+  const f = fixture(t); put(f.switchPath, "not json"); const r = invoke(f);
+  assert.equal(r.code, 2, JSON.stringify(r)); assert.match(r.err.join("\n"), /destination.*switch/);
+  assert.equal(r.calls.some(c => c.root === f.ops || c.root === "ops-gh"), false);
+  assert.doesNotMatch(r.err.join("\n"), new RegExp(f.root));
+});
+
+test("W1-T12206 criterion 4: duplicate private ids are refused, while public dependency edges stay readable", (t) => {
+  const f = fixture(t); put(f.opsPlan, plan(200).replace("depends_on: []", "depends_on: [W1-T100]"));
+  f.pub.git("-C", f.ops, "add", "plan/tasks.yaml"); f.pub.git("-C", f.ops, "commit", "-qm", "public dependency");
+  f.pub.git("-C", f.ops, "push", "--quiet", "origin", "HEAD:refs/heads/main");
+  const healthy = invoke(f); assert.equal(healthy.code, 0, healthy.err.join("\n"));
+  put(join(f.ops, "plan/tasks.d/duplicate.yaml"), plan(200));
+  f.pub.git("-C", f.ops, "add", "plan/tasks.d/duplicate.yaml"); f.pub.git("-C", f.ops, "commit", "-qm", "duplicate id");
+  f.pub.git("-C", f.ops, "push", "--quiet", "origin", "HEAD:refs/heads/main");
+  const r = invoke(f); assert.equal(r.code, 2, JSON.stringify(r)); assert.match(r.err.join("\n"), /destination.*plan/);
+  assert.equal(r.out.some(s => /^W1-T/.test(s)), false);
 });
