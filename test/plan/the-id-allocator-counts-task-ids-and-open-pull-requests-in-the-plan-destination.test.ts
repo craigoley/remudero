@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { delimiter, dirname, join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { formatReservationAnchorMessage } from "#src/lib/task-id-reservation.js";
 import { mintNextTaskId } from "#src/lib/task-id.js";
@@ -61,11 +61,11 @@ let code;try{code=await mod.nextTaskIdCommand(req.flags??['--no-reserve'],{},dep
 process.stdout.write(JSON.stringify({code,out,err,calls,asyncTicks})+'\n');
 `;
 interface FixturePull { body: string; head: { ref: string }; created_at: string; state: string; }
-interface CaseOptions { auditPulls?: FixturePull[]; flags?: string[]; reserve?: boolean; prTexts?: string[]; prPages?: string[][]; prFailure?: boolean; fetchFailure?: boolean; defaultGit?: boolean; defaultPr?: boolean; observePrivateFetch?: string; }
+interface CaseOptions { auditPulls?: FixturePull[]; flags?: string[]; reserve?: boolean; prTexts?: string[]; prPages?: string[][]; prFailure?: boolean; fetchFailure?: boolean; defaultGit?: boolean; defaultPr?: boolean; observePrivateFetch?: string; gitBin?: string; }
 function invoke(f: ReturnType<typeof fixture>, options: CaseOptions = {}) {
   const r = spawnSync(process.execPath, ["--enable-source-maps", "--import", import.meta.resolve("tsx"), "--input-type=module", "--eval", CHILD], {
     cwd: REPO_ROOT, encoding: "utf8", timeout: 60_000, maxBuffer: 4 * 1024 * 1024,
-    env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null",
+    env: { ...process.env, PATH: options.gitBin ? options.gitBin + delimiter + process.env.PATH : process.env.PATH, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null",
       GIT_AUTHOR_NAME: GIT_REPO_FIXTURE_IDENTITY.name, GIT_AUTHOR_EMAIL: GIT_REPO_FIXTURE_IDENTITY.email,
       GIT_COMMITTER_NAME: GIT_REPO_FIXTURE_IDENTITY.name, GIT_COMMITTER_EMAIL: GIT_REPO_FIXTURE_IDENTITY.email,
       RMD_GH_CACHE_HOME: join(f.root, "gh-cache"), RMD_OPS_ID_CASE: JSON.stringify({ source: REPO_ROOT, root: f.root, pub: f.pub.dir, state: f.state, ...options }) },
@@ -225,13 +225,15 @@ test("W1-T12206 criterion 4: duplicate private ids are refused, while public dep
 
 
 test("W1-T12206 criterion 1: the real default private Git fetch yields the caller loop", t => {
-  const f = fixture(t); const marker = join(f.root, "private-fetch"); const hook = join(f.root, "upload-pack.mjs");
-  put(hook, `import {writeFileSync} from 'node:fs';import {spawn} from 'node:child_process';
-writeFileSync(${JSON.stringify(marker + "-start")},'started');
-setTimeout(()=>{const p=spawn('/usr/bin/git-upload-pack',process.argv.slice(2),{stdio:'inherit'});p.on('exit',code=>{writeFileSync(${JSON.stringify(marker + "-done")},'done');process.exit(code??1);});},300);`);
-  const quote = (value: string) => "'" + value.replace(/'/g, "'\\''") + "'";
-  f.pub.git("-C", f.ops, "config", "remote.origin.uploadpack", `${quote(process.execPath)} ${quote(hook)}`);
-  const r = invoke(f, { defaultGit: true, observePrivateFetch: marker });
+  const f = fixture(t); const marker = join(f.root, "private-fetch"); const bin = join(f.root, "git-bin");
+  mkdirSync(bin);
+  const program = `import {writeFileSync} from 'node:fs';import {spawn} from 'node:child_process';
+const args=process.argv.slice(2), fetching=args.includes('fetch');
+if(fetching)writeFileSync(${JSON.stringify(marker + "-start")},'started');
+const launch=()=>{const p=spawn('/usr/bin/git',args,{stdio:'inherit'});p.on('error',()=>process.exit(127));p.on('exit',code=>{if(fetching)writeFileSync(${JSON.stringify(marker + "-done")},'done');process.exit(code??1);});};
+if(fetching)setTimeout(launch,300);else launch();`;
+  writeFileSync(join(bin, "git"), "#!" + process.execPath + "\n" + program, { mode: 0o700, flag: "wx" });
+  const r = invoke(f, { defaultGit: true, observePrivateFetch: marker, gitBin: bin });
   assert.equal(r.code, 0, r.err.join("\n"));
   assert.equal(readFileSync(marker + "-start", "utf8"), "started");
   assert.equal(readFileSync(marker + "-done", "utf8"), "done");
