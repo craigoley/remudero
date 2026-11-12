@@ -2250,7 +2250,12 @@ run_worker_smoke() {
 }
 # W1-T12359: the smoke row holds the leftover clean-up and this smoke; the pause row starts after it.
 recycle_phase smoke "\"image_changed\":$([ "${RECYCLE_IMAGE_BEFORE}" = "${PULLED_IMAGE_ID}" ] && echo false || echo true)"
-if ! cleanup_leftover_smoke "before the smoke" || ! run_worker_smoke before_pause "${PULLED_IMAGE_ID}"; then
+if ! cleanup_leftover_smoke "before the smoke"; then
+  record_recycle_phase smoke "$((SECONDS - RECYCLE_PHASE_AT_S))" '"smoke_at":"before_pause"'
+  echo "  The fleet was not paused." >&2
+  exit 1
+fi
+if ! run_worker_smoke before_pause "${PULLED_IMAGE_ID}"; then
   record_recycle_phase smoke "$((SECONDS - RECYCLE_PHASE_AT_S))" '"smoke_at":"before_pause"'
   echo "  The fleet was not paused." >&2
   exit 1
