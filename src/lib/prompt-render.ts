@@ -50,11 +50,14 @@ export const ONE_TEST_SUITE_AT_A_TIME_LINE =
  * W1-T2672: GENERATED_LEDGER_CLASSES independently admits measurement companions, including
  * scripts/knowledge-budget-baseline.json, which the generator registry does not cover.
  * Both exemptions require a declared scope; neither widens the fail-closed default.
+ * W1-T11501: `placementAdmitted` is the output of observeComputedPlacement (lib/test-path-resolver.ts), the ONE
+ * predicate that admits a declared test written at its contents-computed folder; empty by default.
  */
 export function scopeGuardOutOfScopeFiles(
   diffFiles: readonly string[],
   declaredFiles: readonly string[] | undefined,
   registrationChanges: readonly RegistrationChange[] = [],
+  placementAdmitted: ReadonlySet<string> = new Set(),
 ): string[] {
   if (diffFiles.length === 0) return [];
   if (!declaredFiles || declaredFiles.length === 0) return [...diffFiles];
@@ -63,6 +66,7 @@ export function scopeGuardOutOfScopeFiles(
   return diffFiles.filter(
     (f) =>
       !declared.has(f) &&
+      !placementAdmitted.has(f) &&
       !admittedRegistrations.includes(f) &&
       !Object.hasOwn(REGENERABLE_ARTIFACT_GENERATORS, f) &&
       !isCompanionPath(f, GENERATED_LEDGER_CLASSES),
@@ -104,11 +108,12 @@ export function outOfDeclaredScopeFiles(
   declaredFiles: readonly string[] | undefined,
   registrationChanges: readonly RegistrationChange[] = [],
   regime: FixScopeRegime = fixScopeRegime(declaredFiles),
+  placementAdmitted: ReadonlySet<string> = new Set(),
 ): string[] {
   if (!declaredFiles || declaredFiles.length === 0) return [];
   return regime === "plan"
     ? outOfPlanScopeFiles([...files])
-    : scopeGuardOutOfScopeFiles(files, declaredFiles, registrationChanges);
+    : scopeGuardOutOfScopeFiles(files, declaredFiles, registrationChanges, placementAdmitted);
 }
 
 // W1-T94/W1-T76, #157: preserve the actual failure signal; a proof-keyword gap is not broken code,
