@@ -1,0 +1,75 @@
+- id: W1-T12425
+  title: "Typed answers gain an outcome"
+  repo: remudero
+  depends_on:
+    - W1-T12414
+  priority: 1.42
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # a new ledger row family written by the measurement cadence and a new join in the judge calibration body; no judge, gate or route reads it
+  band_meaning: span
+  origin: operator-session#decision-models-2026-11-12
+  plan_refs:
+    - W1-T12414
+    - W1-T12417
+    - W1-T12416
+    - W1-T424
+    - W1-T3082
+    - W1-T12145
+    - W1-T4243
+  files:
+    - src/lib/verdict-calibration.ts
+    - src/lib/measurement-cadence.ts
+    - src/run-task.ts
+    - src/lib/ledger-steps.ts
+    - src/lib/judge-calibration.ts
+    - src/lib/typed-answer-scores.ts
+    - test/an-analytics-checkpoint-keeps-folds-not-rows.test.ts
+    - test/review/typed-answers-gain-an-outcome.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "For each measurable verdict row, the outcome join gives one verdict_calibration.outcome row with the task id, the head sha, the merge sha and the window: reverted for a revert inside the window, followup_fixed for a follow-up fix inside the window, and clean when the merge is older than the window and has neither. A merge younger than the window with neither, and every unmeasurable row, gives no row"
+      proof: "grep: W1-T12425 criterion 1 in test/review/typed-answers-gain-an-outcome.test.ts"
+    - claim: "A head that already has an outcome row of the same kind in the ledger union gets no second row, and clean is never written for a head that has a reverted or followup_fixed row"
+      proof: "grep: W1-T12425 criterion 2 in test/review/typed-answers-gain-an-outcome.test.ts"
+    - claim: "The measurement cadence writes the outcome rows from the same git read as the verdict calibration report, whenever its caller gives an outcome writer, with or without escalate. A failed git read writes no outcome row. The daemon's cadence call gives the writer"
+      proof: "grep: W1-T12425 criterion 3 in test/review/typed-answers-gain-an-outcome.test.ts"
+    - claim: "The judge calibration reader keeps the outcome rows and gives a typed answer the outcome of its head through one declared map per role. For the risk role, reverted and followup_fixed map to high and clean maps to low. The head comes from the row's head_sha, or from the decision key of the risk surface (task id and head) and the review surface (pull request, head and digest)"
+      proof: "grep: W1-T12425 criterion 4 in test/review/typed-answers-gain-an-outcome.test.ts"
+    - claim: "A risk distribution whose head has an outcome row gets a Brier and a log-loss figure and counts in outcomes.scored. A typed answer with no head, with no outcome row, or in a role with no map entry keeps a null outcome and counts in outcomes.unknown. The current judge's answer is never used as the outcome"
+      proof: "grep: W1-T12425 criterion 5 in test/review/typed-answers-gain-an-outcome.test.ts"
+    - claim: "The analytics checkpoint fold keeps the outcome rows, so the analytics body and a fold of the same rows on the host give the same typed-answer scores"
+      proof: "grep: W1-T12425 criterion 6 in test/review/typed-answers-gain-an-outcome.test.ts"
+    - claim: "The measurement cadence builds the outcome rows"
+      proof: "grep: verdictOutcomeRows( in src/lib/measurement-cadence.ts"
+    - claim: "The judge calibration reader maps outcomes through one table"
+      proof: "grep: TYPED_ANSWER_OUTCOME_MAP in src/lib/judge-calibration.ts"
+  rationale: |
+    WHY: W1-T12414's scorer gives a Brier score, a log-loss and calibration buckets only for a distribution with a known outcome. No outcome is recorded today, so every distribution counts in `outcomes.unknown` and the per-model bar of W1-T12417 has no Brier figure to read. The operator rule (decision-model handoff, 2026-11-12) is that no gate changes model until measurement earns it.
+    READ 2026-11-12 in the W1-T12414 hand build (/mnt/scratch/rmd/hand/wt-T12414, commit badd9e6f1, not yet merged):
+    - src/lib/typed-answer-scores.ts:65 gives each row an `outcome` that is "never the current judge's answer". :118 sets it to null for every decision.answered row. :181-186 score only rows whose outcome is a declared option, and :200 counts the rest as `outcomes.unknown`.
+    - src/lib/judge-calibration.ts:89-100 maps each shadow_judge.paired row to a single answer with `outcome: null` (:98). Its input digest is a hash of the row's decision_key (:96), so the pull request is not in the row. :76 RETAINED_STEPS keeps no outcome step, so the analytics fold has no outcome to join.
+    - src/lib/decision-model.ts:310 (the W1-T12416 build under it) writes `input_digest` as a hash of the input text, and no head sha.
+    READ 2026-11-12 in the source at origin/main 13efbdf36:
+    - src/lib/verdict-calibration.ts:526 `verdictCalibrationReport` is the revert and follow-up-fix join. Per verdict row it finds the merge (:570 `locateMergeCommit`), then asks :592 `wasReverted` and :596 `hasFollowupFix` inside `ATTRIBUTION_POLICY.windowDays` (:424, 14 days). It counts per class and keeps no per-head result.
+    - src/lib/measurement-cadence.ts:2467 mines the verdict rows, :2473-2479 is the one place the host reads git history (`defaultMeasurementCadenceGitLog`, :1816), and :2482 runs the join. Its only rows (:2505-2508, drift rows) are written only with `opts.escalate` and a caller's `writeLedgerLine`.
+    - src/run-task.ts:22042 is the daemon's cadence call (`runMeasurementCadenceReportAsync`). It passes no top-level writer. :22073-22082 shows the pattern for a writer of one row family (W1-T4243's `knowledge.measured`).
+    - The judged heads are already in the shadow keys: the review shadow's key is `<pull request url>:<head>:<digest>` (src/cli/commands/review.ts:1140) and the risk shadow's key is `<task id>:<head>` (src/cli/commands/run-task-verb.ts:8333). src/lib/shadow-judge.ts:44 writes it as decision_key.
+    - W1-T12145 (queued) also changes src/lib/verdict-calibration.ts. It groups the report by reviewer model and writes no row. W1-T12421 gives replayed corpus answers an expected answer as their outcome; it records nothing for live answers. No queued task and no open pull request records a live outcome (open heads checked 2026-11-12: #18184, #18183, #18180, #18033).
+  design: |
+    1. In src/lib/verdict-calibration.ts add `verdictOutcomeRows(verdictRows, gitDump, { now, policy, recorded })`. It uses the same commit index and the same `locateMergeCommit`, `wasReverted` and `hasFollowupFix` as `verdictCalibrationReport`, so the two never disagree. It returns one row per head and kind: `{ step: "verdict_calibration.outcome", task_id, head_sha, merge_sha, outcome: "reverted" | "followup_fixed" | "clean", window_days }`. `clean` needs the merge to be older than `window_days` at `now`. `recorded` is the set of (head, kind) pairs already in the ledger union; a pair in it gives no row (criterion 2).
+    2. In src/lib/measurement-cadence.ts, at :2482, call `verdictOutcomeRows` on the same rows and the same git dump, with the cadence's one clock read. Read `recorded` from the ledger union the cadence already resolves. Write each row through a new optional `outcomes.writeLedgerLine`, not gated on `escalate`. With a git read error, write nothing.
+    3. In src/run-task.ts give the daemon's cadence call an `outcomes.writeLedgerLine` in the shape of the knowledge writer (:22073-22082). Declare the step in src/lib/ledger-steps.ts.
+    4. In src/lib/judge-calibration.ts keep `verdict_calibration.outcome` rows in RETAINED_STEPS and in the fold, keyed by head sha. Add `TYPED_ANSWER_OUTCOME_MAP`, one exported table from (role, outcome kind) to a declared option. It starts with the risk role only (reverted and followup_fixed to high, clean to low), because the review shadow's answer is a vector of per-criterion verdicts with no single option. Moving the map is a reviewed diff, as `ATTRIBUTION_POLICY` is.
+    5. Read each typed answer's head from its row's `head_sha`, else from the risk or review decision key. Add the head to the typed-answer row so the join does not need the raw key. Before `scoreTypedAnswers`, set a typed answer's outcome from its head's rows: reverted or followup_fixed wins over clean. A head with no row stays null.
+    6. If the checkpoint fold digest changes, re-pin it in test/an-analytics-checkpoint-keeps-folds-not-rows.test.ts and state the prior digest, as W1-T12414's amendment did.
+    NOT IN SCOPE: any gate, route, threshold or gardener that reads the scores; an outcome for roles that judge no pull request (ci, fix-progress, verify-human, refresh-value, the quiet-worker watchdog); changing `verdictCalibrationReport`'s figures or W1-T12145's grouping; a head sha on decision.answered rows (see the note).
+  falsifier: |
+    Write clean for a merge younger than the window and criterion 1 must fail. Write a second row for a recorded head and kind and criterion 2 must fail. Gate the outcome rows on escalate and criterion 3 must fail. Use the current judge's answer as the outcome and criterion 5 must fail. Drop the outcome step from RETAINED_STEPS and criterion 6 must fail. Restore and require all to pass.
+  note: |
+    Id reserved for run-unfiled-1794500643001 with ~/rmd-work/bin/reserve-id.sh. Build after W1-T12414 merges. The fleet builds it.
+    A decision.answered row joins only when it carries head_sha. W1-T12417's risk shadow is the first caller that can set it. If W1-T12417 lands first without it, amend W1-T12417 to pass the head into the decision row.
+    The test folder follows W1-T12414's (test/review). The builder runs `rmd test-place` on the real test and amends the path if it moves.
