@@ -4,6 +4,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { createRequire } from "node:module";
 import { test, type TestContext } from "node:test";
+import { formatReservationAnchorMessage } from "#src/lib/task-id-reservation.js";
 import { planPrPreflight, planPrPreflightAsync, planPrPreflightAtCommit, planPrPreflightAtCommitAsync } from "#src/lib/plan-pr-emitter.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
 import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
@@ -63,12 +64,17 @@ test("W1-T12205 criterion 2: the actual task-ID CLI resolves declarations in bot
   f.code.git("add", "--all"); f.code.git("commit", "-qm", "public declaration");
   f.plan.git("add", "--all"); f.plan.git("commit", "-qm", "private declaration");
   f.code.git("push", "--quiet", "origin", "HEAD:refs/rmd-id/W1-T802");
+  const anchor = f.code.git("commit-tree", "HEAD^{tree}", "-m", formatReservationAnchorMessage({ branch: "ops-filing", startedAt: new Date().toISOString() }));
+  f.code.git("push", "--quiet", "origin", `${anchor}:refs/rmd-id/W1-T801`);
   assert.equal(opsOrigin.git("for-each-ref", "--format=%(refname)", "refs/rmd-id/"), "");
+  assert.equal(existsSync(join(f.code.dir, ".git/FETCH_HEAD")), false);
   const baseline = join(f.root, "baseline.json"); put(baseline, "[]\n");
   const r = spawnSync(process.execPath, [join(REPO_ROOT, "scripts/task-id-existence-check.mjs"), "--cwd", f.plan.dir,
-    "--code-root", f.code.dir, "--dir", "plan", "--baseline", baseline], { cwd: REPO_ROOT, encoding: "utf8", timeout: 30_000 });
+    "--code-root", f.code.dir, "--dir", "plan", "--baseline", baseline, "--base", "origin/main", "--head-ref", "ops-filing"], { cwd: REPO_ROOT, encoding: "utf8", timeout: 30_000 });
   assert.equal(r.error, undefined); assert.equal(r.status, 0, `${r.stdout}\n${r.stderr}`);
   assert.doesNotMatch(r.stderr, /UNKNOWN|does not resolve/);
+  assert.equal(existsSync(join(f.code.dir, ".git/FETCH_HEAD")), false, "the code root is never fetched or changed");
+  assert.ok(readFileSync(join(f.plan.dir, ".git/FETCH_HEAD"), "utf8").startsWith(anchor), "the actual public reservation holder is read in the plan workspace");
 });
 
 test("W1-T12205 criterion 4: no code root preserves the existing lint argv and proof cwd", async t => {
