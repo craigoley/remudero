@@ -19,7 +19,7 @@
     - src/cli/commands/run-task-verb.ts
     - test/ci/suites/a-computed-test-placement-preserves-file-scope.test.ts
   priority: 1
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     At main a9eb76ff103a, src/lib/prompt-render.ts:60-68 compares an exact declared Set.
