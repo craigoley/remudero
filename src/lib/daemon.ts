@@ -92,7 +92,8 @@ import {
   type ObservedScopeByTask,
 } from "./dispatch-overlap.js";
 import { OVERLAP_SHADOW_STEP, observedOverlapShadow, overlapShadowPayload, type ObservedOpenPrScope } from "./observed-overlap.js";
-import { DEPLOY_IDLE_DEFER_CEILING_MS } from "./deployer.js";
+import { DEPLOY_IDLE_DEFER_CEILING_MS, readDrainWaitLanes, readImplementDurationsMs, type DrainWaitLane } from "./deployer.js";
+import { predictRecycleWaitRuns, recycleWaitAdmits, soonestRecycleWaitRun, type RecycleWaitInput } from "./recycle-wait-admission.js";
 import { evaluatePauseTier, isRecyclePauseDetail, type PauseTier, type PauseTierInput } from "./fleet-control.js";
 import { createFleetAccountEpisode, redactedAccountLabel, type FleetAccountDivergence, type FleetAccountPair } from "./account-usage.js";
 import { HEADROOM_LIMIT_PCT, RESET_UNKNOWN, UNREADABLE_DEGRADED_LIMIT } from "./headroom.js";
@@ -377,6 +378,10 @@ function medianOf(lengths: number[]): number | undefined {
 /** W1-T9808: the median fix round length, from its start (the `fix.dispatch` row less its spawn's `elapsed_ms`) to
  *  the `fix.done` row for the same round, or undefined with no pair. */
 export function medianFixRoundMs(rawLines: readonly string[]): number | undefined {
+  return medianOf(fixRoundLengthsMs(rawLines));
+}
+
+function fixRoundLengthsMs(rawLines: readonly string[]): number[] {
   const started = new Map<string, number>();
   const lengths: number[] = [];
   for (const raw of rawLines) {
@@ -391,7 +396,7 @@ export function medianFixRoundMs(rawLines: readonly string[]): number | undefine
     started.delete(row.round_id);
     if (at > startedAt) lengths.push(at - startedAt);
   }
-  return medianOf(lengths);
+  return lengths;
 }
 
 type RestartEstimate = { ms: number | undefined; samples: number };
@@ -2376,7 +2381,7 @@ export interface LightPassScope {
 /** W1-T9808: a latched restart's admission predicate. A call without `surface` is a probe: no hold row, no count. */
 export type RestartAdmission = ((
   kind: "review" | "plan-review" | "fix-dispatch" | "dispatch-refill", surface?: "light" | "light-refill" | "full-sweep", lengthMs?: number,
-) => boolean) & { readonly heldBy?: string };
+) => boolean) & { readonly heldBy?: string; readonly recycleWait?: true };
 
 /** W1-T9808: may this light pass open its fix lanes? Never on a review-only pass, nor when the latch refuses a fix. */
 export function lightPassFixAdmitted(scope?: LightPassScope): boolean {
@@ -2515,7 +2520,7 @@ export function reportLoopLag(
   }
 }
 
-/** A `"pause"` clock runs through operator holds, but a recycle PAUSE must drain without new reviews. */
+/** A `"pause"` clock runs through operator holds; under a recycle PAUSE it admits only a review that ends before the wait. */
 export type InterphaseReviewClockScope = "drain" | "pause";
 
 /** The review-only clock for the part of an iteration that previously had none: after the full
@@ -2534,6 +2539,7 @@ export function startInterphaseReviewClock(
   log: (step: string, extra?: Record<string, unknown>) => void,
   scope?: InterphaseReviewClockScope,
   admit?: RestartAdmission,
+  recycleWait?: () => RestartAdmission,
 ): InterphaseReviewClock {
   let active = true;
   let eventWakeSeen = false;
@@ -2595,12 +2601,13 @@ export function startInterphaseReviewClock(
           eventWakePending = false;
           elapsedMs = 0;
           lastPassAtMs = interphaseClock.now();
-          if (isRecyclePauseDetail(paused)) {
+          const passAdmit = isRecyclePauseDetail(paused) ? recycleWaitPassAdmission(recycleWait, admit, log) : admit;
+          if (isRecyclePauseDetail(paused) && passAdmit === undefined) {
             held += 1;
             log("daemon.review_clock.held", { trigger, ...scopeTag, detail: paused, reason: "recycle_pause" });
             continue;
           }
-          if (admit && !admit("review") && !admit("plan-review")) {
+          if (passAdmit && !passAdmit("review") && !passAdmit("plan-review")) {
             held += 1;
             continue;
           }
@@ -2609,7 +2616,7 @@ export function startInterphaseReviewClock(
           const pass = (async () => {
             try {
               const named = { reviewOnly: true, scope: scope ?? "interphase-review" } as const;
-              await (reviewOnly ? deps.sweepLight!(heapHeldLightPass(deps, log, admit ? { ...named, admit } : named))
+              await (reviewOnly ? deps.sweepLight!(heapHeldLightPass(deps, log, passAdmit ? { ...named, admit: passAdmit } : named))
                 : deps.sweepLight!(heapHeldLightPass(deps, log, undefined)));
               if (reviewOnly) log("daemon.review_clock.pass", { trigger, ...scopeTag, review_only: true });
               if (trigger === "github-event") log("daemon.review_clock.wake_consumed", { trigger, ...scopeTag });
@@ -2889,6 +2896,70 @@ function heapHoldWhileLatched(deps: DaemonDeps, surface: string, log: (step: str
     ? heapWorkerAdmissionHold(deps, surface, recordNearLimitHeapSample(deps, `admission:${surface}`), log) : undefined;
 }
 
+export function recycleWaitAdmission(
+  read: { ledgerLines: readonly string[]; stateDir?: string; lengthsMs: RecycleWaitInput["lengthsMs"]; nowMs: () => number;
+    paused?: () => string | undefined },
+  log: (step: string, extra?: Record<string, unknown>) => void,
+): RestartAdmission {
+  const text = read.ledgerLines.join("\n");
+  const buildMs = readImplementDurationsMs(text);
+  const fixMs = fixRoundLengthsMs(read.ledgerLines);
+  let memo: { atS: number; input: RecycleWaitInput } | undefined;
+  const input = (): RecycleWaitInput => {
+    const nowMs = read.nowMs();
+    const atS = Math.floor(nowMs / 1000);
+    if (memo?.atS === atS) return memo.input;
+    const fixLanes = restartDrainInventory().filter((work) => work.what === "detached" && work.kind === "fix-dispatch")
+      .map((work, i): DrainWaitLane => ({ runId: work.task_id ?? `fix-${i}`, ...(work.task_id === undefined ? {} : { taskId: work.task_id }),
+        ageS: Math.max(0, Math.floor((nowMs - work.admitted_at_ms) / 1000)) }));
+    const buildLanes = read.stateDir === undefined ? [] : readDrainWaitLanes(read.stateDir, text, () => nowMs);
+    memo = { atS, input: { lengthsMs: read.lengthsMs,
+      runs: [...predictRecycleWaitRuns("build", buildMs, buildLanes), ...predictRecycleWaitRuns("fix", fixMs, fixLanes)] } };
+    return memo.input;
+  };
+  const decide = (kind: Parameters<RestartAdmission>[0], surface?: Parameters<RestartAdmission>[1]): boolean => {
+    let current: RecycleWaitInput;
+    try {
+      if (read.paused !== undefined && !isRecyclePauseDetail(read.paused())) return true;
+      current = input();
+    } catch (error) {
+      log("daemon.recycle_wait.unreadable", { kind, reason: String((error as Error)?.message ?? error) });
+      return false;
+    }
+    const admitted = recycleWaitAdmits(kind, current);
+    if (surface === undefined) return admitted;
+    const soonest = soonestRecycleWaitRun(current);
+    const lengthMs = kind === "review" || kind === "plan-review" ? current.lengthsMs[kind] : undefined;
+    log(admitted ? "daemon.recycle_wait.review_admitted" : "daemon.admission_held", {
+      surface, kind, ...(admitted ? {} : { reason: "recycle_pause" }),
+      ...(lengthMs === undefined ? {} : { review_length_ms: lengthMs }),
+      ...(soonest === undefined ? {} : { predicted_left_ms: soonest.predictedLeftMs, run_id: soonest.runId, run_kind: soonest.kind }),
+      runs_in_flight: current.runs.length,
+    });
+    return admitted;
+  };
+  return Object.assign(decide, { recycleWait: true as const,
+    heldBy: "recycle pause, and the review would not end before the first run the wait waits for" });
+}
+
+function recycleWaitPassAdmission(
+  recycleWait: (() => RestartAdmission) | undefined, admit: RestartAdmission | undefined,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+): RestartAdmission | undefined {
+  let recycle: RestartAdmission | undefined;
+  try {
+    recycle = recycleWait?.();
+  } catch (error) {
+    log("daemon.recycle_wait.unreadable", { reason: String((error as Error)?.message ?? error) });
+    return undefined;
+  }
+  if (recycle === undefined || (!recycle("review") && !recycle("plan-review"))) return undefined;
+  if (admit === undefined) return recycle;
+  const both = (kind: Parameters<RestartAdmission>[0], surface?: Parameters<RestartAdmission>[1], lengthMs?: number): boolean =>
+    admit(kind, surface, lengthMs) && recycle(kind, surface, lengthMs);
+  return Object.assign(both, { recycleWait: true as const, heldBy: admit.heldBy ?? recycle.heldBy });
+}
+
 /** W1-T11383: a light pass under a heap hold admits no review, refill or fix, and names the hold as its cause. */
 function heapHeldLightPass<S extends LightPassScope | undefined>(
   deps: DaemonDeps, log: (step: string, extra?: Record<string, unknown>) => void, scope: S,
@@ -3152,12 +3223,14 @@ function startInFlightTicker(
             // W1-T5343: a pause stops new work, never the judging of finished work (W1-T4429 design iii), and
             // 11 dispatch-phase pauses once held ~210 min with 0 reviews. So run ONE review-only pass at a time,
             // which closes the fix rung, requeue and update-branch W1-T4191 needed closed, and only while a
-            // lane is in flight, except during a recycle: any new review stretches its drain. STOP wins.
+            // lane is in flight; in a recycle, only a review that ends before the wait (W1-T12241). STOP wins.
             // `daemon.sweep_light.held` keeps meaning "nothing ran" and names which guard held it.
             const stopped = deps.checkStop?.();
+            const recycleAdmit = !stopped && isRecyclePauseDetail(lightHalt)
+              ? recycleWaitPassAdmission(owner.sweepRetrigger?.recycleWaitAdmission, admit, log) : undefined;
             const heldBy = stopped
               ? "stop"
-              : isRecyclePauseDetail(lightHalt)
+              : isRecyclePauseDetail(lightHalt) && recycleAdmit === undefined
                 ? "recycle_pause"
                 : !deps.sweepLight
                   ? "no_light_pass"
@@ -3173,7 +3246,8 @@ function startInFlightTicker(
             log("daemon.sweep_light.review_only", { phase: owner.phase, detail: lightHalt });
             const pass = (async () => {
               try {
-                await deps.sweepLight!(heapHeldLightPass(deps, log, admit ? { reviewOnly: true, scope: "pause", admit } : { reviewOnly: true, scope: "pause" }));
+                const passAdmit = recycleAdmit ?? admit;
+                await deps.sweepLight!(heapHeldLightPass(deps, log, passAdmit ? { reviewOnly: true, scope: "pause", admit: passAdmit } : { reviewOnly: true, scope: "pause" }));
               } catch (e) {
                 log("daemon.sweep_light.failed", { phase: owner.phase, review_only: true, error: String((e as Error)?.message ?? e) });
               }
@@ -3220,6 +3294,7 @@ interface SweepRetrigger {
   slot: { busy: () => boolean; adopt: (pass: Promise<SweepCycleOutcome | undefined>) => void };
   /** W1-T9808: the restart's admission predicate while one is latched, else undefined. */
   latchedAdmission?: () => RestartAdmission | undefined;
+  recycleWaitAdmission?: () => RestartAdmission;
 }
 
 /** The gate itself, extracted so the bound and the light-pass ticker apply identically at every call
@@ -4213,6 +4288,7 @@ export async function runDaemon(
     state: sweepRetriggerState,
     liveness: sweepLiveness,
     latchedAdmission: () => latchedAdmission(),
+    recycleWaitAdmission: () => recycleWait(),
     slot: {
       busy: () => backgroundSweep !== undefined || sweepLiveness.inFlight,
       adopt: (started) => {
@@ -5268,6 +5344,17 @@ export async function runDaemon(
       // An unreadable timing input is no history: the clock admits as before W1-T8172, and the completion row says why.
       return { source: "unreadable" };
     }
+  };
+  const recycleWait = (): RestartAdmission => {
+    const lengths = measuredReviewLength();
+    let ledgerLines: readonly string[] = [];
+    try {
+      ledgerLines = deps.readLedgerLines?.() ?? [];
+    } catch (error) {
+      log("daemon.recycle_wait.unreadable", { reason: String((error as Error)?.message ?? error) });
+    }
+    return recycleWaitAdmission({ ledgerLines, stateDir: deps.fleetLane?.stateDir, nowMs: () => daemonClock.now(), paused: () => deps.checkPause?.(),
+      lengthsMs: { review: lengths.codeMs ?? lengths.ms, "plan-review": lengths.planMs ?? lengths.ms } }, log);
   };
 
   // The drain every restart takes before it returns: live fix workers and in-flight reviews finish (bounded),
@@ -6653,7 +6740,7 @@ export async function runDaemon(
         pauseHoldGovernorStates.set(pauseHold.holdId, holdState);
         await stepPauseHoldGovernor(pauseHold, holdState, deps, log);
       }
-      const pauseReviewClock = (pauseReview.clock ??= startInterphaseReviewClock(deps, pollIntervalMs, log, "pause"));
+      const pauseReviewClock = (pauseReview.clock ??= startInterphaseReviewClock(deps, pollIntervalMs, log, "pause", undefined, recycleWait));
       let slept: Awaited<ReturnType<typeof sleepUntilSweepWake>>;
       try {
         slept = await sleepUntilSweepWake(pollIntervalMs);
