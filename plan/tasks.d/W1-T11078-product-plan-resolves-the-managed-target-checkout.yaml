@@ -17,6 +17,7 @@
     - test/plan/product-case-managed-checkout.test.ts
     - test/console-api/serve/product-routes.test.ts
   status: merged
+  # merge-verified: PR #16070 (78edca82d1) is an ancestor of origin/main
   dispatch_hold: false
   attempts: 0
   rationale: >-

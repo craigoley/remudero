@@ -18,6 +18,7 @@
     - test/serve.test.ts
     - test/console-api/serve/product-routes.test.ts
   status: merged
+  # merge-verified: PR #16094 (b0b293e74a) is an ancestor of origin/main
   dispatch_hold: false
   attempts: 0
   rationale: >-
