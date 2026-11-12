@@ -91,6 +91,7 @@ const EXEMPT: Readonly<Record<string, string>> = {
   "sweep.red_base_refresh.error": A_LANE_RUN_ID,
   "sweep.review_admitted": A_LANE_RUN_ID,
   "sweep.review_eligible": A_LANE_RUN_ID,
+  "sweep.review_requeued": A_LANE_RUN_ID, // W1-T11847: the reviewer-code requeue names pr_url, under the sweep pass's run_id
   "sweep.review_reuse_unreadable": A_LANE_RUN_ID, // the hydration receipt's own sweep-review-reuse- run id has no run.start
   "sweep.reviewer_freshness_probe": A_LANE_RUN_ID, // W1-T5771: the freshness re-probe, under SWEEP-/DAEMON- run ids
   "sweep.stale_red_redrive.attempted": A_LANE_RUN_ID,
