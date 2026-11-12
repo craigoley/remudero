@@ -25,8 +25,10 @@ import { appendLedger } from "#src/lib/ledger.js";
 import type { Mount } from "#src/lib/mounts.js";
 import {
   REVIEW_CONTEXT, REVIEWER_TOKEN_ENV, claimReviewDecision, postReviewPending, postReviewStatus, postReviewStatusGuarded, reviewInputDigest,
-  reviewOutboxDir, reviewOutboxEntryPath, type PostReviewStatusGuardedOpts, type PrLifecycleState, type ReviewVerdict,
+  reviewDescriptionWithCodeProvenance, reviewOutboxDir, reviewOutboxEntryPath, type PostReviewStatusGuardedOpts, type PrLifecycleState,
+  type ReviewVerdict,
 } from "#src/lib/review.js";
+import type { ReviewerCodeFreshness } from "#src/lib/self-sync.js";
 import { readLedgerLines } from "#src/lib/status.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import type { WorkerResult } from "#src/lib/worker.js";
@@ -42,6 +44,11 @@ const INPUT = reviewInputDigest(HEAD, BODY);
 const DECISION = `sha256:${"d".repeat(64)}`;
 const DESCRIPTION = "remudero-review: PASS - 3 criteria substantiated, no test theater";
 const COMMENT = `**remudero-review=success** — ${DESCRIPTION}`;
+// The verdict names the full reviewer-code sha that judged it; its status description carries that sha (W1-T11847).
+const CODE_SHA = "c0de".repeat(10);
+const STATUS_DESCRIPTION = reviewDescriptionWithCodeProvenance(DESCRIPTION, CODE_SHA);
+const FRESH_CODE: ReviewerCodeFreshness = { status: "fresh", codeSha: CODE_SHA, originMainSha: CODE_SHA, advance: "none" };
+const judgeFreshCode = async (): Promise<ReviewerCodeFreshness> => FRESH_CODE;
 const SECRET = "ghs_W1T12251doNotWriteThisToDisk";
 const CHILD_RUN = "review-PR17494-cut";
 
@@ -60,7 +67,7 @@ function terminal(ledgerPath: string, post: PostReviewStatusGuardedOpts["post"])
   return {
     owner: "o", repo: "r", sha: HEAD, state: "success", description: DESCRIPTION, verdict: VERDICT, taskId: TASK,
     evidence: "executed", ledgerPath, runId: CHILD_RUN, prUrl: PR_URL, reviewInputDigest: INPUT,
-    reviewDecisionDigest: DECISION, outboxBeforePost: true,
+    reviewDecisionDigest: DECISION, outboxBeforePost: true, reviewerCodeFreshness: FRESH_CODE,
     readReviewStatusHistory: async () => ({ kind: "readable", failures: [] }),
     fetchLifecycle: () => lifecycle(HEAD), post,
   };
@@ -124,7 +131,7 @@ function fixture(name: string) {
     showCombinedStatus(combined, shim.calls(), sha);
     return postReviewPending({
       owner: "o", repo: "r", sha, taskId: TASK, runId, ledgerPath, prUrl: PR_URL,
-      reviewInputDigest: reviewInputDigest(sha, BODY), fetchLifecycle: () => lifecycle(sha),
+      reviewInputDigest: reviewInputDigest(sha, BODY), fetchLifecycle: () => lifecycle(sha), judgeReviewerCode: judgeFreshCode,
       readReviewStatusHistory: async () => ({ kind: "readable", failures: [] }),
       commentDeps: { fetchNewestReview: () => undefined, postReview: (url, body) => { comments.push({ url, body }); } },
     });
@@ -166,14 +173,15 @@ if (CHILD_DIR === undefined) {
       const entry = JSON.parse(atPost) as Record<string, unknown>;
       assert.equal(entry.posting, true);
       assert.equal(entry.state, "success");
-      assert.equal(entry.description, DESCRIPTION);
+      assert.equal(entry.description, STATUS_DESCRIPTION);
+      assert.equal(entry.reviewer_code_sha, CODE_SHA, "the entry keeps the full reviewer-code sha that judged the verdict");
       assert.equal(entry.head_sha, HEAD);
       assert.equal(entry.input_key, INPUT);
       assert.equal(entry.comment_body, COMMENT);
       assert.equal(atPost.includes(SECRET), false, "no credential reaches the outbox");
       assert.deepEqual(Object.keys(entry).sort(), [
         "comment_body", "decision_verdict", "description", "evidence", "head_sha", "input_key", "owner", "posting", "pr_url", "repo",
-        "review_decision_digest", "run_id", "state", "task_id", "version", "written_at",
+        "review_decision_digest", "reviewer_code_sha", "run_id", "state", "task_id", "version", "written_at",
       ]);
       // A caller that does not ask for the entry gets none, as before.
       const plain = fixture("t12251-plain");
@@ -312,7 +320,7 @@ if (CHILD_DIR === undefined) {
       assert.equal(pass.outbox, "posted");
       const statuses = f.posted();
       assert.deepEqual(statuses.map((status) => status.state), ["pending", "success"], "the verdict is posted once, with no new claim");
-      assert.equal(statuses[1]!.description, DESCRIPTION);
+      assert.equal(statuses[1]!.description, STATUS_DESCRIPTION);
       assert.equal(f.steps("review.posted").length, 1);
       assert.equal(f.steps("review.outbox_posted")[0]?.status, undefined);
       assert.deepEqual(f.comments, [{ url: PR_URL, body: COMMENT }]);

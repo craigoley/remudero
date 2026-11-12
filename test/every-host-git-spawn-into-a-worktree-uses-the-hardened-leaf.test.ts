@@ -1,3 +1,4 @@
+// @census-reads: src/ scripts/lib/git-spawn-shapes.mjs test/every-host-git-spawn-into-a-worktree-uses-the-hardened-leaf.test.ts — every src file's git spawn, and itself.
 /**
  * W1-T6106 — EVERY HOST GIT SPAWN INTO A WORKER WORKTREE USES THE HARDENED LEAF.
  *

@@ -23,7 +23,7 @@
     - test/triage-plan-deps-seam.test.ts
     - test/triage-remote-reservation-timing.test.ts
     - "hooks/mkdtemp-allowlist.txt"
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "A triage run whose outcome is `no_task` or `grill` lands the status change of the feedback file through the feedback landing, and opens no pull request of its own"

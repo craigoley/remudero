@@ -16,6 +16,7 @@
     - W1-T5521
   files:
     - src/lib/plan-pr-emitter.ts
+    - scripts/task-id-existence-check.mjs
     - test/plan/the-plan-preflight-passes-the-code-root-when-the-plan-is-in-another-repository.test.ts
   status: queued
   attempts: 0

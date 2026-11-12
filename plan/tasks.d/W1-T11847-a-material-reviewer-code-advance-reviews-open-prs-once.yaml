@@ -31,6 +31,7 @@
     - test/the-pr-diff-reads-run-off-the-daemon-loop.test.ts
     - test/worker/a-review-slot-is-released-when-its-verdict-posts.test.ts
     - test/daemon/the-daemon-review-worktree-git-runs-off-the-loop.test.ts
+    - test/every-priced-ledger-step-is-in-the-config-garden-read.test.ts
   status: queued
   attempts: 0
   rationale: |
@@ -112,6 +113,11 @@
        to a full review or post nothing under item 5. Each such adapter test seeds a full reviewer-code
        SHA on its prior verdict and a reading of origin/main at that SHA, and keeps every assertion and
        refusal it has. They are the seven test files added to `files` on this date.
+    7. Amended 2026-11-12 by the hand build: the sweep.review_requeued row this task writes names
+       pr_url, so the priced-step census finds it. The row is written under the sweep pass's own run_id,
+       which has no run.start, so the config gardener's gatherRuns skips it. The census test
+       test/every-priced-ledger-step-is-in-the-config-garden-read.test.ts exempts the step with the
+       lane run_id reason, and CONFIG_GARDEN_LEDGER_STEPS does not change.
   acceptance:
     - claim: Every terminal review.posted row retains the exact head_sha and full reviewer_code_sha, and its GitHub-visible remudero-review status description contains that full code SHA
       proof: 'grep: W1-T11847: terminal review provenance is full in the ledger and visible status in test/review/a-material-reviewer-code-advance-queues-one-fresh-review.test.ts'
