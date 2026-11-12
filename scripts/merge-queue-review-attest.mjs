@@ -7,7 +7,9 @@
 // would wait out `check_response_timeout_minutes` and be ejected. This runs as the job named
 // `remudero-review` in .github/workflows/merge-queue-review-attest.yml and passes ONLY when every
 // pull request the group commit contains carries a `success` `remudero-review` status on its own
-// head sha. It never reviews anything: it attests that the real reviewer already did.
+// head sha, and that status names a full reviewer-code sha still materially current at origin/main
+// (W1-T11847: the sweep's own predicate, reviewerCodeFreshnessAt in src/lib/self-sync.ts). It never
+// reviews anything: it attests that the real reviewer already did, with reviewer code still current.
 //
 // FAIL CLOSED. A group commit the script cannot attribute to a PR, a PR it cannot read, or a group
 // resolving to zero PRs all exit non-zero: an attestation that compares nothing must never pass.
@@ -15,10 +17,14 @@
 // ran (or was skipped) on a PR head would satisfy the requirement with no review at all.
 // FALSIFIER: test/merge-queue-review-attest.test.ts pins both the trigger and this behaviour.
 //
-// Usage: node scripts/merge-queue-review-attest.mjs   (reads GITHUB_EVENT_PATH, GITHUB_REPOSITORY,
-// GH_TOKEN and GITHUB_API_URL; exits 0 only when every PR in the group is reviewed)
+// Usage: node --import tsx scripts/merge-queue-review-attest.mjs   (reads GITHUB_EVENT_PATH,
+// GITHUB_REPOSITORY, GH_TOKEN, GITHUB_API_URL and GITHUB_WORKSPACE, a checkout with origin/main;
+// exits 0 only when every PR in the group is reviewed by current reviewer code)
+import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { isMainModule } from "./lib/argv.mjs";
+import { reviewCodeShaFromDescription } from "../src/lib/review.ts";
+import { reviewerCodeFreshnessAt } from "../src/lib/self-sync.ts";
 
 export const REVIEW_CONTEXT = "remudero-review";
 
@@ -60,11 +66,34 @@ async function getJson(fetchImpl, api, token, path) {
 
 /** Decide the attestation. Returns `{ ok, lines }`; never throws for a verdict, only rethrows as a
  *  failed verdict so the job's conclusion names the unreadable call. */
-export async function attest({ event, repo, token, api = "https://api.github.com", fetchImpl = fetch }) {
+function gitIn(repoDir) {
+  return (args) => execFileSync("git", ["-C", repoDir, ...args], { encoding: "utf8", stdio: "pipe", maxBuffer: 256 * 1024 * 1024 });
+}
+
+/** The verdict for one PR's review status: success counts only with a full, materially current reviewer-code sha. */
+function reviewedByCurrentCode(entry, headSha, mainSha, git) {
+  const state = entry?.state ?? "absent";
+  if (state !== "success") return { ok: false, line: `${REVIEW_CONTEXT}=${state}` };
+  const codeSha = reviewCodeShaFromDescription(entry.description);
+  if (codeSha === undefined) return { ok: false, line: `${REVIEW_CONTEXT}=success with no full reviewer-code sha (legacy, short or absent)` };
+  if (mainSha === undefined) return { ok: false, line: `${REVIEW_CONTEXT}=success, reviewer code ${codeSha} unjudged: origin/main is unreadable` };
+  const code = reviewerCodeFreshnessAt(codeSha, mainSha, git);
+  const why = code.status === "unreadable" ? `: ${code.reason}` : code.status === "stale" ? ` behind origin/main ${mainSha}` : "";
+  return { ok: code.status === "fresh", line: `${REVIEW_CONTEXT}=success, reviewer code ${codeSha} ${code.status}${why} (head ${headSha})` };
+}
+
+export async function attest({ event, repo, token, api = "https://api.github.com", fetchImpl = fetch, repoDir = process.cwd() }) {
   const lines = [];
   const mg = event?.merge_group;
   if (!mg?.head_sha || !mg?.base_sha) {
     return { ok: false, lines: ["not a merge_group event (no merge_group.head_sha/base_sha) — refusing to attest"] };
+  }
+  const git = gitIn(repoDir);
+  let mainSha;
+  try {
+    mainSha = git(["rev-parse", "--verify", "refs/remotes/origin/main^{commit}"]).trim();
+  } catch (err) {
+    lines.push(`origin/main is unreadable in ${repoDir}: ${err.message.split("\n")[0]}`);
   }
   try {
     const cmp = await getJson(fetchImpl, api, token, `/repos/${repo}/compare/${mg.base_sha}...${mg.head_sha}`);
@@ -76,9 +105,11 @@ export async function attest({ event, repo, token, api = "https://api.github.com
     for (const n of numbers) {
       const pr = await getJson(fetchImpl, api, token, `/repos/${repo}/pulls/${n}`);
       const status = await getJson(fetchImpl, api, token, `/repos/${repo}/commits/${pr.head.sha}/status?per_page=100`);
-      const state = (status.statuses ?? []).find((s) => s.context === REVIEW_CONTEXT)?.state ?? "absent";
-      lines.push(`#${n} head ${pr.head.sha}: ${REVIEW_CONTEXT}=${state}`);
-      if (state === "success") reviewed += 1;
+      const entry = status.sha === undefined || status.sha === pr.head.sha
+        ? (status.statuses ?? []).find((s) => s.context === REVIEW_CONTEXT) : undefined;
+      const verdict = reviewedByCurrentCode(entry, pr.head.sha, mainSha, git);
+      lines.push(`#${n} head ${pr.head.sha}: ${verdict.line}`);
+      if (verdict.ok) reviewed += 1;
     }
     const ok = own !== null && unattributed.length === 0 && numbers.length > 0 && reviewed === numbers.length;
     lines.push(`${reviewed}/${numbers.length} pull request(s) reviewed`);
@@ -96,6 +127,7 @@ export async function main({ env = process.env, fetchImpl = fetch, log = console
     token: env.GH_TOKEN,
     api: env.GITHUB_API_URL || "https://api.github.com",
     fetchImpl,
+    repoDir: env.GITHUB_WORKSPACE || process.cwd(),
   });
   for (const line of lines) log(line);
   log(ok ? "remudero-review attested for every PR in the group" : "remudero-review NOT attested");

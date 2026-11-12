@@ -7,9 +7,9 @@ import { fileURLToPath } from "node:url";
 import { makeTempDir } from "../src/lib/tmp.js";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
-// One `docker` stub. `$REC/gone` makes the first pulled id vanish before the smoke (another
-// instance's `docker image prune -af` during the drain, 2026-10-10 04:44Z); `$REC/repull-fails`
-// makes every pull after the first fail.
+// One `docker` stub. `$REC/gone` makes the first pulled id vanish during the wait, after its smoke
+// (another instance's `docker image prune -af` during the drain, 2026-10-10 04:44Z);
+// `$REC/repull-fails` makes every pull after the first fail. The smoke passes (W1-T12242).
 const DOCKER = String.raw`#!/usr/bin/env bash
 printf '%s\n' "$*" >> "$REC/calls"
 case "$1" in
@@ -37,8 +37,7 @@ case "$1" in
     fi ;;
   container)
     if [ "$2" = run ]; then
-      echo "WORKER-SMOKE FAIL fixture stops here"
-      exit 1
+      echo "WORKER-SMOKE PASS fixture"
     fi ;;
 esac
 exit 0
@@ -86,26 +85,34 @@ function recycle(t: TestContext, flags: string[] = []) {
   return { result, calls, paused: existsSync(join(state, "state/PAUSE")) };
 }
 
-test("a recycle proves its pulled image still exists before the smoke and does not re-pull when it does", (t) => {
-  const { calls } = recycle(t);
+const smokes = (calls: string[]) => calls.filter(c => c.startsWith("container run "));
+
+test("a recycle proves its smoked image still exists after the wait and does not re-pull when it does", (t) => {
+  const { result, calls } = recycle(t);
+  assert.equal(result.status, 0, result.stdout + result.stderr);
   const check = calls.findIndex(c => c === "image inspect sha256:PULLED");
-  assert.ok(check >= 0, "the pulled id is inspected before the smoke");
-  assert.ok(check < calls.findIndex(c => c.startsWith("container run ")), "the check precedes the smoke");
+  assert.ok(check > calls.findIndex(c => c.startsWith("container run ")), "the check follows the smoke");
+  assert.ok(check < calls.findIndex(c => c.startsWith("stop ")), "the check precedes docker stop");
   assert.equal(calls.filter(c => c.startsWith("pull ")).length, 1, "a present image is never re-pulled");
+  assert.equal(smokes(calls).length, 1, "a present image is smoked once");
 });
 
-test("a pulled image reclaimed during the drain is re-pulled once and the smoke runs on the re-pulled id", (t) => {
-  const { calls } = recycle(t, ["gone"]);
+test("a pulled image reclaimed during the drain is re-pulled once and smoked again on the re-pulled id", (t) => {
+  const { result, calls } = recycle(t, ["gone"]);
+  assert.equal(result.status, 0, result.stdout + result.stderr);
   assert.equal(calls.filter(c => c.startsWith("pull ")).length, 2);
-  const smoke = calls.find(c => c.startsWith("container run "))!;
-  assert.match(smoke, /sha256:REPULLED/);
-  assert.doesNotMatch(smoke, /sha256:PULLED/);
+  const [first, second] = smokes(calls);
+  assert.match(first!, /sha256:PULLED/);
+  assert.match(second!, /sha256:REPULLED/);
+  assert.doesNotMatch(second!, /sha256:PULLED/);
+  assert.ok(calls.indexOf(second!) < calls.findIndex(c => c.startsWith("stop ")), "the second smoke precedes docker stop");
 });
 
-test("a pulled image reclaimed during the drain whose re-pull fails is refused by name, unpaused, never smoked", (t) => {
+test("a pulled image reclaimed during the drain whose re-pull fails is refused by name, unpaused, never smoked again", (t) => {
   const { result, calls, paused } = recycle(t, ["gone", "repull-fails"]);
   assert.equal(result.status, 1);
   assert.match(result.stderr, /was removed during the drain/);
-  assert.equal(calls.filter(c => c.startsWith("container run ")).length, 0);
+  assert.equal(smokes(calls).length, 1, "only the smoke before the pause ran");
+  assert.equal(calls.filter(c => c.startsWith("stop ")).length, 0);
   assert.equal(paused, false);
 });

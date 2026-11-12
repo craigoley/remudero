@@ -22,7 +22,7 @@
     - test/deploy/a-recycle-never-starts-on-a-live-recycles-pause.test.ts
     - test/a-recycle-finds-a-holders-worktree-where-the-container-mounts-it.test.ts
     - test/the-recycler-clears-its-own-stale-smoke-before-the-smoke.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "With a fake `docker`, the recycle runs the worker smoke on the pulled image before it writes the pause file"

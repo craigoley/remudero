@@ -1928,4 +1928,10 @@ finally:
 PYTHON
   )
 fi
+# Refresh this install folder from origin/main after the pass (tmp-reclaim.sh owns the steps).
+if [ -f "$tsx_helper" ]; then
+  refresh_mode=--dry-run; [ "$APPLY" = 1 ] && refresh_mode=--apply
+  while IFS= read -r refresh_line; do [ -z "$refresh_line" ] || log "$refresh_line"; done \
+    < <(bash "$tsx_helper" --refresh-install "$refresh_mode" 2>&1)
+fi
 exit 0

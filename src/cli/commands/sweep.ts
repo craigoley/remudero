@@ -8,7 +8,7 @@ import { loadPlan, type Plan, type MergedResolver } from "../../lib/plan.js";
 import { repoRoot, resolveOwnerRepo } from "../../lib/repo-location.js";
 import { flagValue, unknownArgError } from "../../lib/cli-args.js";
 import { instanceMode, readInstanceRegistryText } from "../../lib/instance-mode.js";
-import { checkReviewerCodeFreshnessAsync, type ReviewerCodeFreshness } from "../../lib/self-sync.js";
+import { checkReviewerCodeFreshnessAsync, reviewerCodeJudge, type ReviewerCodeFreshness } from "../../lib/self-sync.js";
 import { buildBaseProofDir, releaseBaseProofDir, type BaseProofDir } from "../../lib/check-proof.js";
 import { ghJsonAsync } from "../../lib/github-transport.js";
 import { readLedgerLines, buildBatchedGithub, readRequiredStatusCheckContextsAsync, type GitHub } from "../../lib/status.js";
@@ -25,13 +25,13 @@ import { escalatePostReviewStall } from "../../lib/escalation-catalogue.js";
 import { ghPrDiffAsync } from "../../lib/pr-diff.js";
 import { riskJudgePlanContextDigestFor } from "../../lib/risk-judge.js";
 import { fixRebaseMergeFactsFromRest, ghUpdateBranch, readHeadShaRest } from "../../lib/arm-auto-merge.js";
-import { reviewLedgerLegibilityFields, fetchPrLifecycle, postReviewStatusGuarded } from "../../lib/review.js";
+import { reviewLedgerLegibilityFields, fetchPrLifecycle, fetchPrLifecycleAsync, postReviewPending, postReviewStatusGuarded } from "../../lib/review.js";
 import { applyMergeProbeEvidence, probeOpenPrMerges } from "../../lib/merge-probe.js";
 import type { ComposedRealGraph } from "../../lib/composition-root.js";
 import type { EscalationAnswerGateway } from "../../lib/escalation-answers.js";
 import { readEscalationAnswers } from "../../lib/escalation-answers.js";
 import { buildBehindMainByPr, buildBehindMainByPrAsync, createDistanceProbeSequence, buildCreditCandidates, buildOpenPrViewsAsync, buildStaleGateWorkflowsByPr, fetchCiFailuresAsync, type TickReadFacts } from "../../lib/tick-read-worker.js";
-import { DEFAULT_SWEEP_POLICY, REVIEW_STATUS_RESTORED_STEP, restorableDeliveredVerdict, buildSweepEffects as buildSweepEffectsFromLib, dispatchFixCatchOutcome, fixRungTaskFor, discriminateReviewReuseAsync, projectMergedTaskCandidates, runSweep, runSweepLightPass, runCreditBackfill, renderSweepSummary, planOnlyRunBranchReceipts, withFullSweepRepairAdmission, createEscalationTriageHistoryReader, ESCALATION_TRIAGE_EVIDENCE_SLICE, createFullPreludeTimer, LightPassPreReviewTiming, observeLightPassReviewEligibility, runLightPassReadyRefresh, selectLightPassReadyOverlap, refreshAdmissionWaiters, runLightPassRefreshAdmission, lightPassHeadContractRefresh, runArmedRatchetRejudge, isReviewLaneDisposition, deriveDisposition, orderPendingReviews, type BuildSweepEffectsDeps, type SweepDeps, type OpenPrView, type ReviewDispatchMode, type ReviewReuseInputs, type BaseChangedFiles, type Disposition } from "../../lib/sweep.js";
+import { DEFAULT_SWEEP_POLICY, REVIEW_STATUS_RESTORED_STEP, restorableDeliveredVerdict, buildSweepEffects as buildSweepEffectsFromLib, dispatchFixCatchOutcome, fixRungTaskFor, discriminateReviewReuseAsync, projectMergedTaskCandidates, runSweep, runSweepLightPass, runCreditBackfill, renderSweepSummary, planOnlyRunBranchReceipts, withFullSweepRepairAdmission, createEscalationTriageHistoryReader, ESCALATION_TRIAGE_EVIDENCE_SLICE, createFullPreludeTimer, LightPassPreReviewTiming, observeLightPassReviewEligibility, runLightPassReadyRefresh, selectLightPassReadyOverlap, refreshAdmissionWaiters, runLightPassRefreshAdmission, lightPassHeadContractRefresh, runArmedRatchetRejudge, isReviewLaneDisposition, deriveDisposition, orderPendingReviews, type BuildSweepEffectsDeps, type ReviewerCodeAdvance, type SweepDeps, type OpenPrView, type ReviewDispatchMode, type ReviewReuseInputs, type BaseChangedFiles, type Disposition } from "../../lib/sweep.js";
 import { missingReviewReuseFact, priorPostedReviewRow, reviewLedgerKeyFor, REVIEW_ENGINE_REVISION, REVIEW_CONTEXT, reviewEvidenceStrength, type ProofExecutor, type ReviewVerdict } from "../../lib/review.js";
 import { resolveReviewProviderProvenance, reviewProviderProvenanceLedgerFields } from "../../lib/review-provider-provenance.js";
 import { failureRecordingPoster, reviewCommand as reviewCommandFromModule, runReview as runReviewFromModule, type ReviewCommandDeps, type ReviewCommandHost } from "./review.js";
@@ -285,6 +285,7 @@ export function buildSweepEffects(
     spawnReview: spawnRmdReviewForFreshTree,
   };
   const readReviewerCodeFreshness = reviewerCodeFreshnessImpl ?? (() => checkReviewerCodeFreshnessAsync(repoRoot, process.env));
+  const judgeReviewerCode = reviewerCodeJudge(readReviewerCodeFreshness, repoRoot);
   const reviewerCodeGate = buildReviewerCodeFreshnessGate(
     readReviewerCodeFreshness,
     deps.log,
@@ -326,9 +327,15 @@ export function buildSweepEffects(
         mode.regressionKey.slice(0, mode.regressionKey.lastIndexOf("|")));
       if (!("row" in delivered) || delivered.regressionKey !== mode.regressionKey) return 1;
       const verdict = delivered.row.decision_verdict as ReviewVerdict;
+      const deliveredCode = await judgeReviewerCode(delivered.row.reviewer_code_sha);
+      if (deliveredCode.status !== "fresh") {
+        deps.log("sweep.review_restore_withheld", { pr_number: pr.prNumber, head_sha: pr.headSha, reviewer_code_freshness: deliveredCode.status });
+        return 1;
+      }
       const poster = failureRecordingPoster();
       const restored = await postReviewStatusGuarded({
         post: poster.post,
+        reviewerCodeFreshness: deliveredCode,
         owner: deps.owner,
         repo: deps.repo,
         sha: pr.headSha,
@@ -362,6 +369,7 @@ export function buildSweepEffects(
         delivered_state: verdict.state,
         delivered_run_id: delivered.row.run_id,
         delivered_at: delivered.row.ts,
+        reviewer_code_sha: deliveredCode.codeSha,
         ...(pr.reviewPendingSince === undefined ? {} : { regression_since: pr.reviewPendingSince }),
       });
       return verdict.state === "success" ? 0 : 1;
@@ -387,9 +395,12 @@ export function buildSweepEffects(
     if (mode.kind === "discriminate-only") {
       const reuseInputs = pr as OpenPrView & Partial<ReviewReuseInputs>;
       // W1-T11340: the PR's own created_at bounds the archive scan behind a live miss.
-      const prior = (await priorPostedReviewRow(deps.ledgerPath, pr.taskId, pr.prUrl, { prCreatedAt: pr.createdAt }))?.decision_verdict as ReviewVerdict | undefined;
+      const priorRow = await priorPostedReviewRow(deps.ledgerPath, pr.taskId, pr.prUrl, { prCreatedAt: pr.createdAt });
+      const prior = priorRow?.decision_verdict as ReviewVerdict | undefined;
       const missing = missingReviewReuseFact(prior, reuseInputs);
       if (!prior || missing !== undefined) return fallbackToFullReview(missing ?? "no-prior-verdict");
+      const priorCode = await judgeReviewerCode(priorRow?.reviewer_code_sha);
+      if (priorCode.status !== "fresh") return fallbackToFullReview(`prior-reviewer-code-${priorCode.status}`);
 
       let worktreePath: string | undefined;
       let baseProof: BaseProofDir | undefined;
@@ -436,6 +447,7 @@ export function buildSweepEffects(
               const poster = failureRecordingPoster();
               const discriminationPosted = await postReviewStatusGuarded({
                 post: poster.post,
+                reviewerCodeFreshness: priorCode,
                 owner: deps.owner,
                 repo: deps.repo,
                 sha: pr.headSha,
@@ -475,6 +487,7 @@ export function buildSweepEffects(
                   effective_review_mode: "proof-only-discrimination",
                   discriminated_from_head_sha: mode.judgedHeadSha,
                   discrimination_result: verdict.state,
+                  reviewer_code_sha: priorCode.codeSha,
                   ...(pr.reviewInputDigest === undefined ? {} : { review_input_digest: pr.reviewInputDigest }),
                   proof_exec: verdict.criteria.map((criterion) => criterion.proof_exec),
                   ...reviewLedgerLegibilityFields(verdict),
@@ -521,14 +534,18 @@ export function buildSweepEffects(
     if (mode.kind !== "reuse") {
       return fallbackToFullReview("unknown review reuse mode");
     }
-    let verdict = (await priorPostedReviewRow(deps.ledgerPath, pr.taskId, pr.prUrl, { prCreatedAt: pr.createdAt }))?.decision_verdict as ReviewVerdict | undefined;
+    const reusedRow = await priorPostedReviewRow(deps.ledgerPath, pr.taskId, pr.prUrl, { prCreatedAt: pr.createdAt });
+    let verdict = reusedRow?.decision_verdict as ReviewVerdict | undefined;
     if (!verdict || (verdict.state !== "success" && verdict.state !== "failure")) {
       deps.log("sweep.review_reuse_unreadable", { pr_number: pr.prNumber, head_sha: pr.headSha });
       return reviewFallbackRunner(pr.prNumber, pr.isPlanFiling, reviewAttemptId, onPhase, pr.excludeProviders);
     }
+    const reusedCode = await judgeReviewerCode(reusedRow?.reviewer_code_sha);
+    if (reusedCode.status !== "fresh") return fallbackToFullReview(`prior-reviewer-code-${reusedCode.status}`);
     const poster = failureRecordingPoster();
     const reusedStatus = await postReviewStatusGuarded({
       post: poster.post,
+      reviewerCodeFreshness: reusedCode,
       owner: deps.owner,
       repo: deps.repo,
       sha: pr.headSha,
@@ -563,6 +580,7 @@ export function buildSweepEffects(
       requested_review_mode: mode.kind,
       effective_review_mode: "verdict-reuse",
       reused_from_head_sha: mode.judgedHeadSha,
+      reviewer_code_sha: reusedCode.codeSha,
       ...(pr.reviewInputDigest === undefined ? {} : { review_input_digest: pr.reviewInputDigest }),
       proof_exec: verdict.criteria?.map((criterion) => criterion.proof_exec) ?? [],
       ...reviewLedgerLegibilityFields(verdict),
@@ -583,6 +601,8 @@ export function buildSweepEffects(
     reviewCommandImpl: reviewGateCall,
     reviewReuseRunner,
     reviewerCodeStaleThisPassImpl: reviewerCodeGate.staleThisPass,
+    reviewerCodeAdvanceImpl: deriveLedgerActor() === "test" ? undefined
+      : reviewerCodeAdvanceFor({ owner: deps.owner, repo: deps.repo, ledgerPath: deps.ledgerPath, runId: deps.runId }, judgeReviewerCode),
     stallNotice: escalatePostReviewStall,
     registeredOwnerRecovery: {
       capture: captureRegisteredFixOwnerSnapshot,
@@ -655,6 +675,22 @@ export function buildSweepEffects(
   // above rather than bolted on here: returning the lib's object unchanged makes that identity
   // structural instead of something a future edit has to remember to mirror.
   return effects;
+}
+
+/** W1-T11847: the sweep's reviewer-code requeue effects. The pending post goes through the guarded pending path on the
+ *  PR's exact head, and its outbox drain judges stored verdicts with the same judge. */
+export function reviewerCodeAdvanceFor(
+  at: { owner: string; repo: string; ledgerPath: string; runId: string },
+  judge: ReviewerCodeAdvance["judge"],
+): ReviewerCodeAdvance {
+  return {
+    judge,
+    postPending: (pr) => postReviewPending({
+      owner: at.owner, repo: at.repo, sha: pr.headSha, taskId: reviewLedgerKeyFor(pr.taskId, pr.prNumber), runId: at.runId,
+      ledgerPath: at.ledgerPath, prUrl: pr.prUrl, reviewInputDigest: pr.reviewInputDigest, reviewEngineRevision: REVIEW_ENGINE_REVISION,
+      fetchLifecycle: () => fetchPrLifecycleAsync(pr.prUrl), judgeReviewerCode: judge,
+    }),
+  };
 }
 
 /**
@@ -1268,6 +1304,7 @@ export function buildSweepLightHook(
           actionable: (d) => (mergeHold === undefined || d !== "mergeable") &&
             lightPassActionable(d, fixRungAllowed, false, armAdmitted, fixAdmitted),
           ...scopeDeps,
+          ...(scope?.observeRepairTurn ? { observeRepairTurn: scope.observeRepairTurn } : {}),
           // W1-T11510: a held head that derives another disposition keeps its scope's own stand-down text.
           ...(mergeHold !== undefined ? { standDownReasonFor: (d: Disposition) => d === "mergeable"
             ? mergeHold : scopeDeps.standDownReasonFor?.(d) } : {}),

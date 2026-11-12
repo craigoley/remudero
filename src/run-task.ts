@@ -365,7 +365,7 @@ import { sameHost } from "./lib/host-identity.js";
 import { gitBlobSha, isDuplicateKeyError, repairDuplicateKeyShard } from "./lib/plan-shard-repair.js";
 import { gardenPrState, knowledgeGardenSpec, runGardenPass as runKnowledgeGardenPass, recordSkillUsage, skillUsagePath, type GardenWorkspace } from "./lib/knowledge-gardener.js";
 import { foldNarrativeStore, type NarrativeFoldKind } from "./lib/narrative-fold.js";
-import { GardenMintBudget, GardenMintTimedOutError, GARDEN_FILING_RETRY_BASE_MS, gardenClosePr, gardenPassDue, gardenPendingSignal, isPromiseLike, runStepsEager, runGardenAsync, type GardenAction, type GardenCheckout, type GardenCheckoutAsync, type GardenerDeps, type GardenSpec, type GardenTaskIdRelease, type PrState } from "./lib/gardener.js";
+import { GardenMintBudget, GardenMintTimedOutError, GARDEN_FILING_RETRY_BASE_MS, gardenClosePr, gardenPassDue, gardenPendingSignal, isGardenLandWaiting, isPromiseLike, landedPrUrl, runStepsEager, runGardenAsync, type GardenAction, type GardenLandOpts, type GardenLandResult, type GardenCheckout, type GardenCheckoutAsync, type GardenerDeps, type GardenSpec, type GardenTaskIdRelease, type PrState } from "./lib/gardener.js";
 import { boundedGardenPassSpawn, childGardenPassSpawn, flowGardenPass, issueRevalidationGardenPass, GARDEN_DUE_FAILED_STEP, gardenPacingDueAsync, lowYieldGardenPass, recordGardenPacing, GARDEN_HOURLY_FLAG, isRegisteredGardenName, REGISTERED_GARDEN_NAMES, selectorShadowGardenPass, selectorShadowMainFailures, type GardenPassSpawn, type RegisteredGardenName } from "./lib/garden-registry.js";
 import { flakeJudgeEvidencePort } from "./lib/flake-incident-gardener.js";
 import type { SelectorShadowMainFailures } from "./lib/selector-shadow-gardener.js";
@@ -782,6 +782,8 @@ import {
   parseFeedbackAddArgs,
   proposeFeedbackWithSummary,
   readFeedbackEntry,
+  readLandedFeedbackEntry,
+  feedbackEntryRepoPath,
   realDecisionSummarizer,
   realFeedbackExpander,
   resolveDecisionSummaryMount,
@@ -814,6 +816,14 @@ import {
   type PlanReconcileLand,
   type LandFeedbackOpts,
   type LandingReviewRequest,
+  landTaskFilesAsync,
+  stagedTaskFiles,
+  stagedTaskFileOrigins,
+  taskFileOrigin,
+  taskFilesLandingBranchAsync,
+  type LandTaskFilesOpts,
+  type TaskFileInput,
+  type TaskFilesLandingResult,
 } from "./lib/feedback-landing.js";
 export { readStandingDecisions };
 import { resolvePlanDestination } from "./lib/plan-destination.js";
@@ -943,12 +953,11 @@ import { assertProposedPlanLoads,
   commitTriageOrRecordRefusal,
   refusedTriageIds,
   triageCommitMessage,
-  triageDeclaredScope,
-  triageEmptyScopeDisposition,
   unresolvedCitationReferents,
   worktreeCitationEvidence,
   feedbackEntryBlock,
   triagePrompt,
+  type TriageDecision,
 } from "./lib/triage.js";
 import {
   declaredTaskIds,
@@ -1439,6 +1448,10 @@ import {
   changedTaskIds,
   rawChangedTaskIds,
   statusFlipOnlyTaskIds,
+  assertDependenciesKnown,
+  movedTaskIds,
+  planFromFiles,
+  planSourceConflicts,
   criteriaAdded,
   DUPLICATE_SLUG_SHINGLE_K,
   followUpCarriesCriteria,
@@ -1457,6 +1470,8 @@ import {
   type LintOpts,
   type LintViolation,
   type DuplicateSurfaceCorpusEntry,
+  type PlanFiles,
+  type PlanSourceConflict,
 } from "./lib/task-linter.js";
 import { readPriorRefusal, preDispatchContractRevision, writePriorRefusal, repairRefusedTask, type RefusalViolation } from "./lib/dispatch-repair.js";
 import { REPLAY_CORPUS_BOUND, ReplayDispatch, boundedCorpus, harnessRunnerOver, replayOptIn,
@@ -18785,8 +18800,19 @@ export function planLintOutcomeFromOutput(code: number, lines: string[], mergeBa
   };
 }
 
+/** W1-T12171: the plan monolith at `monolithRel` under `root` and its `tasks.d` shards, keyed by path under `root`. */
+function readPlanFiles(root: string, monolithRel: string): Map<string, string> {
+  const files = new Map([[monolithRel, readFileSync(join(root, monolithRel), "utf8")]]);
+  const shardRel = join(dirname(monolithRel), "tasks.d");
+  const names = existsSync(join(root, shardRel)) ? readdirSync(join(root, shardRel)) : [];
+  for (const name of names.filter((f) => f.endsWith(".yaml") || f.endsWith(".yml")).sort()) {
+    files.set(join(shardRel, name), readFileSync(join(root, shardRel, name), "utf8"));
+  }
+  return files;
+}
+
 export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps = {}): Promise<number> {
-  const badArg = unknownArgError("lint-plan", rest, ["--plan", "--base", "--repo-root"], ["--all", "--merge-base", "--offline"]);
+  const badArg = unknownArgError("lint-plan", rest, ["--plan", "--base", "--repo-root", "--code-root"], ["--all", "--merge-base", "--offline"]);
   if (badArg) {
     console.error(badArg + "\n" + USAGE);
     return 2;
@@ -18796,8 +18822,11 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
   const allFlag = rest.includes("--all");
   const offline = deps.offline === true || rest.includes("--offline");
   const checkoutRoot = deps.repoRoot ?? resolve(flagValue(rest, "--repo-root") ?? repoRoot);
+  // W1-T12171: the checkout that holds the code a task names. Without the option it is the plan's own checkout.
+  const codeRootArg = flagValue(rest, "--code-root");
+  const codeRoot = codeRootArg !== undefined ? resolve(codeRootArg) : checkoutRoot;
   let localRepoName: string | undefined;
-  try { localRepoName = resolveOwnerRepoAt(checkoutRoot).repo; } catch { /* no origin identity: preserve existing lint behavior */ }
+  try { localRepoName = resolveOwnerRepoAt(codeRoot).repo; } catch { /* no origin identity: preserve existing lint behavior */ }
   const planPathArg = flagValue(rest, "--plan");
   const planPath = planPathArg !== undefined ? resolve(planPathArg) : join(checkoutRoot, "plan", "tasks.yaml");
   // W1-T120: an explicit --plan OUTSIDE the root is refused here BY NAME, before --base/git-show
@@ -18817,13 +18846,29 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
   const baseLabel = scopeBase === baseRef ? baseRef : `${baseRef} at merge-base ${scopeBase!.slice(0, 12)}`;
   let plan: Plan;
   let planRaw: string;
+  const planRel = relative(checkoutRoot, planPath);
+  let planApart: { headFiles: PlanFiles; codeFiles: PlanFiles; codePlan: Plan } | undefined;
   try {
     planRaw = readFileSync(planPath, "utf8");
-    plan = loadPlan(planPath);
+    if (codeRootArg === undefined) {
+      plan = loadPlan(planPath);
+    } else {
+      const headFiles = readPlanFiles(checkoutRoot, planRel);
+      const codeFiles = readPlanFiles(codeRoot, planRel);
+      const codePlan = planFromFiles(codeFiles, (rel) => join(codeRoot, rel));
+      plan = planFromFiles(headFiles, (rel) => join(checkoutRoot, rel));
+      assertDependenciesKnown(plan.tasks, new Set([...plan.byId.keys(), ...codePlan.byId.keys()]));
+      planApart = { headFiles, codeFiles, codePlan };
+    }
   } catch (e) {
     console.error(`### rmd lint-plan: ${(e as Error).message}`);
     return 2;
   }
+  // The plan a dependency resolves in: with --code-root, a task the code root's plan holds also counts.
+  const dependencyPlan: Plan = planApart === undefined ? plan : (() => {
+    const tasks = [...plan.tasks, ...planApart.codePlan.tasks.filter((t) => !plan.byId.has(t.id))];
+    return { tasks, byId: new Map(tasks.map((t) => [t.id, t])) };
+  })();
 
   let scope: Set<string> | undefined;
   let oldById: Map<string, Task> | undefined;
@@ -18835,15 +18880,20 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
   // status flip to a closed state (queued -> merged, e.g. `plan-reconcile --write`'s own write) —
   // named here so the summary can report them, never silently drop them (design point (iv)).
   let statusFlipCarvedIds: string[] = [];
+  // W1-T12171: tasks moved unchanged from the code root's plan, and ids both plans hold with different bytes.
+  let movedIds: string[] = [];
+  let movedCandidates = new Set<string>();
+  let sourceConflicts: PlanSourceConflict[] = [];
   if (baseRef) {
-    const relPath = relative(checkoutRoot, planPath);
+    const relPath = planRel;
     const basePathCache = new Map<string, boolean>();
     pathExistsAtBase = (rel: string) => {
       const cached = basePathCache.get(rel);
       if (cached !== undefined) return cached;
       let exists = false;
       try {
-        hostWorktreeGit(checkoutRoot, ["cat-file", "-e", `${scopeBase}:${rel}`], { stdio: "ignore" });
+        // With --code-root, the code of a plan-only change is the code root's commit, unchanged.
+        hostWorktreeGit(codeRoot, ["cat-file", "-e", `${planApart === undefined ? scopeBase : "HEAD"}:${rel}`], { stdio: "ignore" });
         exists = true;
       } catch (e) {
         void e;
@@ -18876,8 +18926,15 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
       // guarded), while `rawChangedTaskIds` needs only the base's raw TEXT, so the changed-tasks
       // scope survives. A broken HEAD plan still fails loudly earlier, at `loadPlan(planPath)`.
       let oldPlan: Plan | undefined;
+      let basePlanFiles: PlanFiles | undefined;
       try {
-        oldPlan = loadPlan(tmpFile);
+        if (planApart === undefined) {
+          oldPlan = loadPlan(tmpFile);
+        } else {
+          const tmpFiles = readPlanFiles(tmpDir, "tasks.yaml");
+          basePlanFiles = new Map([...tmpFiles].map(([rel, text]) => [rel === "tasks.yaml" ? relPath : join(dirname(relPath), rel), text]));
+          oldPlan = planFromFiles(basePlanFiles, (rel) => `${scopeBase}:${rel}`);
+        }
       } catch (e) {
         console.error(
           `### rmd lint-plan: the base plan at ${baseRef} does not itself load ` +
@@ -18888,6 +18945,12 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
       scope = oldPlan ? changedTaskIds(oldPlan.tasks, plan.tasks) : new Set<string>();
       if (oldPlan) {
         oldById = new Map(oldPlan.tasks.map((t) => [t.id, t]));
+        if (planApart !== undefined && basePlanFiles !== undefined) {
+          // The base is the union of both plans; the plan repository's record wins for an id both hold.
+          for (const t of planApart.codePlan.tasks) if (!oldById.has(t.id)) oldById.set(t.id, t);
+          movedCandidates = movedTaskIds(plan.tasks, checkoutRoot, planApart.headFiles, planApart.codeFiles);
+          sourceConflicts = planSourceConflicts(basePlanFiles, planApart.codeFiles).filter((c) => !movedCandidates.has(c.id));
+        }
         // Tasks this PR introduces outright (absent at the base ref) — the only tasks that
         // can possibly BE a post-merge-amendment follow-up (W1-T180).
         newTaskIds = new Set(plan.tasks.filter((t) => !oldById!.has(t.id)).map((t) => t.id));
@@ -18932,6 +18995,7 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
       // it has left the population the open-task rules govern (design point (i)).
       const statusFlipCarve = statusFlipOnlyTaskIds(oldCorpusTexts, newCorpusTexts);
       for (const id of statusFlipCarve) scope.delete(id);
+      movedIds = [...movedCandidates].filter((id) => scope!.delete(id)).sort(); // neither a new filing nor an amendment
       statusFlipCarvedIds = [...statusFlipCarve].sort();
       const diffText = hostWorktreeGit(checkoutRoot, ["diff", "--no-ext-diff", "--unified=0", `${scopeBase}...HEAD`, "--", "src"], {
         maxBuffer: 64 * 1024 * 1024,
@@ -18995,10 +19059,10 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
       const github = (deps.ghGateway ?? ghGateway)(owner, repo);
       const evidenceIds = new Set(scope);
       const pending = [...scope];
-      while (pending.length > 0) for (const id of plan.byId.get(pending.pop()!)?.depends_on ?? []) {
+      while (pending.length > 0) for (const id of dependencyPlan.byId.get(pending.pop()!)?.depends_on ?? []) {
         if (!evidenceIds.has(id)) { evidenceIds.add(id); pending.push(id); }
       }
-      const tasks = plan.tasks.filter(t => evidenceIds.has(t.id));
+      const tasks = dependencyPlan.tasks.filter(t => evidenceIds.has(t.id));
       const scopedPlan: Plan = { tasks, byId: new Map(tasks.map(t => [t.id, t])) };
       dependencyStatusByTaskId = (deps.projectPlan ?? projectPlan)(scopedPlan, {
         ledgerPath: ledgerPathFor(config), github, writeCreditStore: SERVE_KEEPS_CREDITS_IN_MEMORY,
@@ -19095,7 +19159,7 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
       releasedIdsForAdmission = new Set<string>();
     }
   }
-  const knownRepos = knownPlanRepos(checkoutRoot); // W1-T4700: the repo rule's names, read once per pass
+  const knownRepos = knownPlanRepos(codeRoot); // W1-T4700: the repo rule's names, read once per pass
   for (const task of plan.tasks) {
     if (scope && !scope.has(task.id)) continue;
     if (wholePlanScope && !wholePlanScope.has(task.id)) continue;
@@ -19166,7 +19230,7 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
     }
     // impl-DO: the CALL-SITE check needs to know whether a module already exists, and the linter
     // is pure — so the predicate is supplied here, the one place holding a real checkout to ask.
-    opts.moduleExists = (rel: string) => existsSync(join(checkoutRoot, rel));
+    opts.moduleExists = (rel: string) => existsSync(join(codeRoot, rel));
     opts.localRepoName = localRepoName;
     opts.knownRepos = knownRepos;
     // W1-T9292: an unminted id BLOCKS only on a task this diff adds; one already on the base, every one in a whole-plan
@@ -19203,9 +19267,9 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
       }
       if (planOnlyFilingDiff !== undefined) opts.planOnlyFiling = planOnlyFilingDiff;
       // #12389: a changed shard's doctrine citations must resolve, or name a page its own files: creates. Read once.
-      doctrineCitations ??= doctrineCitationFactsAt(checkoutRoot);
+      doctrineCitations ??= doctrineCitationFactsAt(codeRoot);
       opts.doctrineCitations = doctrineCitations;
-      opts.resolveNameFilteredCandidates = (rawName: string) => resolveNameFilteredCandidates(checkoutRoot, rawName);
+      opts.resolveNameFilteredCandidates = (rawName: string) => resolveNameFilteredCandidates(codeRoot, rawName);
       // W1-T1225: a `grep:` proof's named file, read ONLY in --base mode (`scope` populated iff
       // `baseRef` was given) — the same changed-tasks scoping W1-T497's resolver above uses, and
       // for the identical reason: a changed task's own grep proofs name a handful of files, so
@@ -19213,7 +19277,7 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
       // 66.4s and this does not reopen it). Absent path (not written yet) ⇒ undefined, exactly
       // the "no predicate ⇒ no opinion" contract `opts.moduleExists` above already uses.
       opts.readGrepProofFile = (rel: string) => {
-        const abs = join(checkoutRoot, rel);
+        const abs = join(codeRoot, rel);
         if (!existsSync(abs)) return undefined;
         try {
           return readFileSync(abs, "utf8");
@@ -19231,7 +19295,7 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
       // file in head or base. This stays scoped: the whole-plan pass must not retroactively refuse
       // the standing population of older machine-authored records.
       opts.machineFilingAdmission = {
-        plan,
+        plan: dependencyPlan,
         releasedIds: releasedIdsForAdmission,
         isMerged: (candidate) => statusByTaskId?.get(candidate.id)?.merged ?? false,
         dependencyEvidence,
@@ -19315,6 +19379,11 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
   // pointed at a fixture tree with no policy.yaml of its own is a no-op here
   // (nothing to check), never a spurious failure over a file that was never
   // meant to exist at that path.
+  for (const c of sourceConflicts) {
+    failing++;
+    console.error(`✗ ${c.id}: the plan repository and the code root hold different bytes for this id: ` +
+      `${scopeBase}:${c.planPath} and ${join(codeRoot, c.codePath)}`);
+  }
   const policyFile = join(dirname(planPath), "policy.yaml");
   if (existsSync(policyFile)) {
     try {
@@ -19379,7 +19448,10 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
       statusFlipCarvedIds.length > 0
         ? ` (${statusFlipCarvedIds.length} status-flip-only, excluded from --base scope: ${statusFlipCarvedIds.join(", ")})`
         : "";
-    summary = `${checked} task(s) checked (${scope.size} new/changed vs ${baseLabel})${carvedNote} — ${failing} failing, ${warned} warning(s)`;
+    const movedNote = movedIds.length > 0
+      ? ` (${movedIds.length} moved unchanged from the code root, not judged: ${movedIds.join(", ")})`
+      : "";
+    summary = `${checked} task(s) checked (${scope.size} new/changed vs ${baseLabel})${carvedNote}${movedNote} — ${failing} failing, ${warned} warning(s)`;
   } else if (wholePlanScope) {
     summary =
       `${checked} task(s) checked (open tasks only) [scoped by ${wholePlanScopeKey}` +
@@ -21336,6 +21408,7 @@ async function triageClaimSweepForPass(
     }
   };
   let reserver = opts.claimReserver;
+  let landedStatus: ((id: string) => string | undefined) | undefined;
   if (reserver === undefined) {
     // The SAME clone the triage lane claims on (`repoDir`): a claim is only visible on its own origin.
     let repoDir: string;
@@ -21347,6 +21420,7 @@ async function triageClaimSweepForPass(
     }
     if (!existsSync(repoDir)) return undefined;
     reserver = triageClaimReserverAsyncFor(repoDir);
+    landedStatus = (id) => readLandedFeedbackEntry(repoDir, id)?.status;
   }
   const readRows =
     opts.readClaimLivenessRows ??
@@ -21354,7 +21428,7 @@ async function triageClaimSweepForPass(
       const read = readLedgerUnionRecordsSync(dirname(ledgerPath), { since: sinceIso, requireArchives: true, refuseIncomplete: true });
       return read.ok ? read.rows : undefined;
     });
-  const result = await sweepTriageClaims(candidates, reserver, { now, readRows, log });
+  const result = await sweepTriageClaims(candidates, reserver, { now, readRows, log, landedStatus });
   return result.held;
 }
 
@@ -27453,12 +27527,15 @@ export function withShardRepairs(stateDir: string, repairs: () => void | Promise
 /** `opened.json`'s value per blob: the PR url, or — once a closed-unmerged PR was replaced — the fresh PR and the one it replaced. */
 type ShardRepairOpened = string | { pr_url: string; reopened_from: string };
 
-/** What one attempt decided: `done` consumes the request; `retry` keeps it, charged to `blob` when the bytes were read. */
-type ShardRepairOutcome = { done: true } | { retry: true; blob?: string };
+/** What one attempt decided: `done` consumes the request; `retry` keeps it, charged to `blob` when the bytes were read;
+ *  `wait` (W1-T12221) keeps it uncharged while the repair waits for the shared landing PR of task files. */
+type ShardRepairOutcome = { done: true } | { retry: true; blob?: string } | { wait: true };
+
+type ShardRepairLand = (rel: string, text: string, pr: { title: string; body: string }) => GardenLandResult | Promise<GardenLandResult>;
 
 async function repairRequestedShard(
   request: ShardRepairRequest,
-  opts: { stateDir: string; log: ShardRepairLog; readOriginBlob: (rel: string) => string | Promise<string>; land: (rel: string, text: string, pr: { title: string; body: string }) => string | undefined | Promise<string | undefined>; prState: (prUrl: string) => PrState | Promise<PrState> },
+  opts: { stateDir: string; log: ShardRepairLog; readOriginBlob: (rel: string) => string | Promise<string>; land: ShardRepairLand; prState: (prUrl: string) => PrState | Promise<PrState>; landingStateRoot?: string },
 ): Promise<ShardRepairOutcome> {
   const at = { id: request.id, file: request.file };
   const failure = (stage: string, e: unknown) => ({ ...at, stage, reason: String((e as Error)?.message ?? e) });
@@ -27498,6 +27575,19 @@ async function repairRequestedShard(
     }
     reopenedFrom = prior;
   }
+  const recordOpened = (prUrl: string, extra: Record<string, unknown>): ShardRepairOutcome => {
+    const entry: ShardRepairOpened = reopenedFrom === undefined ? prUrl : { pr_url: prUrl, reopened_from: reopenedFrom };
+    writeAtomic(openedPath, `${JSON.stringify({ ...opened, [blob]: entry }, null, 2)}\n`);
+    opts.log("plan.shard_repair_opened", { ...at, blob, pr_url: prUrl, ...extra, ...(reopenedFrom === undefined ? {} : { reopened_from: reopenedFrom }) });
+    return { done: true };
+  };
+  // W1-T12221: a repair that waits is found by its staged file, so it opens no second repair for the same file.
+  const staged = opts.landingStateRoot === undefined ? undefined : stagedTaskFiles(opts.landingStateRoot).find((f) => f.relPath === rel);
+  if (staged?.prUrl !== undefined) return recordOpened(staged.prUrl, { via: "task-files-landing" });
+  if (staged !== undefined) {
+    opts.log("plan.shard_repair_waiting", { ...at, blob, path: rel });
+    return { wait: true };
+  }
   const verdict = repairDuplicateKeyShard(text);
   if ("refused" in verdict) {
     opts.log("plan.shard_repair_refused", { ...at, blob, reason: verdict.reason });
@@ -27512,21 +27602,22 @@ async function repairRequestedShard(
       `the record's risk_ruling pin covers, and drops the other line and any backlog-gardener marker it carried.\n\n` +
       `Opened by the duplicate-key repair lane (W1-T5519).\n\n${SHARD_REPAIR_ACCEPTANCE}`,
   };
-  let prUrl: string | undefined;
+  let prUrl: GardenLandResult;
   try {
     prUrl = await opts.land(rel, verdict.text, pr);
   } catch (e) {
     opts.log("plan.shard_repair_failed", failure("land", e));
     return { retry: true, blob };
   }
+  if (isGardenLandWaiting(prUrl)) {
+    opts.log("plan.shard_repair_waiting", { ...at, blob, path: rel, kept: verdict.kept });
+    return { wait: true };
+  }
   if (prUrl === undefined) {
     opts.log("plan.shard_repair_not_landed", { ...at, blob, reason: "the plan-PR preflight refused the repair; plan_pr.preflight_refused names why" });
     return { retry: true, blob };
   }
-  const entry: ShardRepairOpened = reopenedFrom === undefined ? prUrl : { pr_url: prUrl, reopened_from: reopenedFrom };
-  writeAtomic(openedPath, `${JSON.stringify({ ...opened, [blob]: entry }, null, 2)}\n`);
-  opts.log("plan.shard_repair_opened", { ...at, blob, pr_url: prUrl, kept: verdict.kept, ...(reopenedFrom === undefined ? {} : { reopened_from: reopenedFrom }) });
-  return { done: true };
+  return recordOpened(prUrl, { kept: verdict.kept });
 }
 
 /** W1-T5618 — a retried request is rewritten with its attempt count and backoff, or abandoned at the cap. Bytes
@@ -27562,17 +27653,20 @@ export async function runShardRepairPass(opts: {
   repo: string;
   log: ShardRepairLog;
   readOriginBlob?: (rel: string) => string | Promise<string>;
-  land?: (rel: string, text: string, pr: { title: string; body: string }) => string | undefined | Promise<string | undefined>;
+  land?: ShardRepairLand;
   prState?: (prUrl: string) => PrState | Promise<PrState>;
   openCheckout?: (opts: GardenCheckoutOpts) => Promise<GardenCheckoutAsync>;
   clock?: Clock;
+  /** W1-T12221: the shared landing of task files, as {@link GardenCheckoutOpts.taskFilesLanding}. */
+  taskFilesLanding?: GardenCheckoutOpts["taskFilesLanding"];
 }): Promise<void> {
   const readOriginBlob =
     opts.readOriginBlob ?? (async (rel: string) => (await execFilePromise("git", ["-C", opts.repoDir, "show", `origin/main:${rel}`], { encoding: "utf8", maxBuffer: 1 << 26 })).stdout);
   const land =
     opts.land ??
     (async (rel: string, text: string, pr: { title: string; body: string }) => {
-      const checkout = await (opts.openCheckout ?? gardenCheckoutAsync)({ name: "plan", repoDir: opts.repoDir, worktreesRoot: opts.worktreesRoot, owner: opts.owner, repo: opts.repo, log: opts.log, clock: opts.clock });
+      const checkout = await (opts.openCheckout ?? gardenCheckoutAsync)({ name: "plan", repoDir: opts.repoDir, worktreesRoot: opts.worktreesRoot, owner: opts.owner, repo: opts.repo, log: opts.log, clock: opts.clock,
+        ...(opts.taskFilesLanding ? { taskFilesLanding: opts.taskFilesLanding } : {}) });
       try {
         writeFileSync(join(checkout.root, rel), text);
         return await checkout.land({ paths: [rel], ...pr });
@@ -27592,9 +27686,10 @@ export async function runShardRepairPass(opts: {
       rmSync(path, { force: true });
       continue;
     }
-    const outcome = await repairRequestedShard(request, { stateDir: opts.stateDir, log: opts.log, readOriginBlob, land, prState });
+    const outcome = await repairRequestedShard(request, { stateDir: opts.stateDir, log: opts.log, readOriginBlob, land, prState,
+      ...(opts.taskFilesLanding ? { landingStateRoot: opts.taskFilesLanding.stateRoot } : {}) });
     if ("done" in outcome) rmSync(path, { force: true });
-    else rescheduleShardRepair(path, request, outcome.blob, now, opts.log);
+    else if ("retry" in outcome) rescheduleShardRepair(path, request, outcome.blob, now, opts.log);
   }
 }
 
@@ -27647,6 +27742,7 @@ function* retractGardenBranchSteps(
  *  garden PR opens READY FOR REVIEW — never a draft (operator ruling, 2026-09-24: a draft sits like a
  *  stuck PR) — so the sweep reviews and arms it like any other fleet PR (`GARDEN_BRANCH_RE`). */
 export function gardenCheckout(opts: GardenCheckoutOpts): GardenCheckout {
+  if (opts.taskFilesOnly) throw new Error(`${opts.name} garden: a checkout that files only task files lands through the async checkout`);
   const branch = `${opts.name}-garden-${(opts.clock ?? systemClock).now()}`;
   const root = join(opts.worktreesRoot, branch);
   worktreeAdd(opts.repoDir, root, branch, "origin/main", { log: opts.log });
@@ -27660,24 +27756,31 @@ export function gardenCheckout(opts: GardenCheckoutOpts): GardenCheckout {
   return {
     root,
     branch,
-    land: (landing) => runStepsSync(gardenLandSteps(opts, root, branch, landing, io)),
+    land: (landing) => landedPrUrl(runStepsSync(gardenLandSteps(opts, root, branch, landing, io)), `${opts.name} garden`),
     dispose: () => worktreeRemove(opts.repoDir, root),
   };
 }
 
 export async function gardenCheckoutAsync(opts: GardenCheckoutOpts): Promise<GardenCheckoutAsync> {
+  if (opts.taskFilesOnly && !opts.taskFilesLanding) throw new Error(`${opts.name} garden: a checkout that files only task files needs the task-file landing`);
   const branch = `${opts.name}-garden-${(opts.clock ?? systemClock).now()}`;
   const root = join(opts.worktreesRoot, branch);
+  // W1-T12222: the id holder is the branch that files it, so such a checkout reserves on the landing branch.
+  const reservationBranch = opts.taskFilesOnly ? await taskFilesLandingBranchAsync({ owner: opts.owner, repo: opts.repo }) : branch;
   await worktreeAddAsync(opts.repoDir, root, branch, "origin/main", { log: opts.log });
   const io: GardenLandIo = {
     git: async (...args: string[]) => (await execFilePromise("git", ["-C", root, ...args], { encoding: "utf8" })).stdout,
     fetcher: opts.fetcher ?? ((args) => ghJsonAsync(args)),
     generate: (script) => execFilePromise(process.execPath, [...(script === "generate-capability-snapshot.mjs" ? ["--import", import.meta.resolve("tsx")] : []), join(root, "scripts", script)], { cwd: root }),
     preflight: opts.preflight ?? ((input) => planPrPreflightAsync(input, { log: opts.log })),
+    // W1-T12221: the seal is async only, as the landing of W1-T12199 is.
+    ...(opts.taskFilesLanding ? { landTaskFiles: (inputs: TaskFileInput[]) => landTaskFilesAsync(opts.repoDir, inputs, {
+      ...opts.taskFilesLanding!, targetRepository: { owner: opts.owner, repo: opts.repo }, log: opts.log, lane: opts.name,
+    }) } : {}),
   };
   return {
     root,
-    branch,
+    branch: reservationBranch,
     land: (landing) => runStepsAsync(gardenLandSteps(opts, root, branch, landing, io)),
     dispose: () => worktreeRemoveAsync(opts.repoDir, root),
   };
@@ -27694,6 +27797,12 @@ export interface GardenCheckoutOpts {
   clock?: Clock;
   /** W1-T5348: the plan-PR preflight over the committed tree; injected only by a test. */
   preflight?: (input: { cwd: string; title: string; body: string }) => PlanPrPreflightResult;
+  /** W1-T12221: the shared landing of task files: its state root (`config.root`) and its seams. Absent,
+   *  every land opens its own PR. */
+  taskFilesLanding?: Pick<LandTaskFilesOpts, "stateRoot" | "gh" | "planPrPreflight">;
+  /** W1-T12222: every land is a task file, new or edited, through `taskFilesLanding`; `branch` is the landing
+   *  branch, and a land with any other path is refused. Async checkout only. */
+  taskFilesOnly?: true;
 }
 
 interface GardenLandIo {
@@ -27701,15 +27810,76 @@ interface GardenLandIo {
   fetcher: GhApiFetcher;
   generate: (script: "generate-docs-index.mjs" | "generate-capability-snapshot.mjs") => unknown;
   preflight: (input: { cwd: string; title: string; body: string }) => PlanPrPreflightResult | Promise<PlanPrPreflightResult>;
+  landTaskFiles?: (inputs: TaskFileInput[]) => Promise<TaskFilesLandingResult>;
+}
+
+/** W1-T12221: the landing inputs when every path is an edit of a task file main holds and the body's
+ *  `## Acceptance` gives its criterion; otherwise nothing, and the land opens its own PR. */
+function* sealedTaskFileInputs(root: string, paths: readonly string[], body: string, git: GardenLandIo["git"], newFiles: boolean): Steps<TaskFileInput[] | undefined> {
+  const shardDir = relative(root, join(resolveRepoLayout(root).planDir, "tasks.d"));
+  const criteria = parseAcceptanceBlock(body).filter((c) => c.proof !== "");
+  const inputs: TaskFileInput[] = [];
+  for (const relPath of paths) {
+    if (!relPath.startsWith(`${shardDir}/`) || !/\.ya?ml$/.test(relPath) || !existsSync(join(root, relPath))) return undefined;
+    let newFile = false;
+    try {
+      yield* step(() => git("cat-file", "-e", `HEAD:${relPath}`));
+    } catch {
+      if (!newFiles) return undefined; // not an edit: main does not hold the path, so the land opens its own PR
+      newFile = true;
+    }
+    const criterion = criteria.find((c) => c.proof.endsWith(` in ${relPath}`)) ?? (paths.length === 1 && criteria.length === 1 ? criteria[0] : undefined);
+    if (criterion === undefined) return undefined;
+    inputs.push({ relPath, content: readFileSync(join(root, relPath), "utf8"), claim: criterion.claim, proof: criterion.proof, ...(newFile ? { newFile: true as const } : {}) });
+  }
+  return inputs.length > 0 ? inputs : undefined;
+}
+
+/** W1-T12221: the landing PR when it carries every path, a wait when each path waits, else nothing. */
+function* landSealedTaskFiles(opts: GardenCheckoutOpts, paths: readonly string[], inputs: TaskFileInput[], land: NonNullable<GardenLandIo["landTaskFiles"]>): Steps<GardenLandResult> {
+  // W1-T12222: a waiting file holds its finding. A new file whose origin a file in the queue already records is the
+  // same finding filed twice, so it is not staged; the id it reserved goes back, as for any land that opens nothing.
+  if (opts.taskFilesOnly === true) {
+    const held = stagedTaskFileOrigins(opts.taskFilesLanding!.stateRoot);
+    const twice = inputs.flatMap((i) => {
+      const origin = i.newFile === true ? taskFileOrigin(i.content) : "";
+      const first = origin === "" ? undefined : held.find((h) => h.origin === origin && h.relPath !== i.relPath);
+      return first === undefined ? [] : [{ path: i.relPath, reason: `the finding ${origin} already waits in ${first.relPath}` }];
+    });
+    if (twice.length > 0) {
+      opts.log(`${opts.name}.garden_sealed_landing`, { outcome: "refused", paths, pr_url: null, refused: twice });
+      return undefined;
+    }
+  }
+  const result = yield* step(() => land(inputs));
+  const carried = paths.every((p) => result.landed.includes(p));
+  const queued = paths.every((p) => result.landed.includes(p) || result.waiting.includes(p));
+  // W1-T12222: a file that is in the queue keeps the ids of its land, so a partly refused land of new files waits.
+  const partly = opts.taskFilesOnly === true && paths.some((p) => result.landed.includes(p) || result.waiting.includes(p));
+  const outcome = result.prUrl !== undefined && carried ? "opened" : queued || partly ? "waiting" : "not_landed";
+  const refused = [...result.refused, ...result.setAside].filter((r) => paths.includes(r.path)).map((r) => ({ path: r.path, reason: r.reason }));
+  opts.log(`${opts.name}.garden_sealed_landing`, { outcome, paths, pr_url: outcome === "opened" ? result.prUrl : null, ...(refused.length ? { refused } : {}), ...(result.error ? { error: result.error } : {}) });
+  if (outcome === "opened") return result.prUrl;
+  if (outcome === "waiting") return { waiting: { paths: paths.filter((p) => result.landed.includes(p) || result.waiting.includes(p)), stateRoot: opts.taskFilesLanding!.stateRoot, ...(opts.taskFilesOnly === true ? { filed: true as const } : {}) } };
+  return undefined;
 }
 
 function* gardenLandSteps(
   opts: GardenCheckoutOpts,
   root: string,
   branch: string,
-  { paths, title, body }: { paths: string[]; title: string; body: string },
+  landing: GardenLandOpts,
   io: GardenLandIo,
-): Steps<string | undefined> {
+): Steps<GardenLandResult> {
+  const { paths, title, body } = landing;
+  // W1-T12221: an edit of task files rides the shared landing PR, unless the caller keeps its own PR.
+  const only = opts.taskFilesOnly === true && io.landTaskFiles !== undefined;
+  const sealed = !only && (landing.sealedLanding === false || io.landTaskFiles === undefined) ? undefined : yield* sealedTaskFileInputs(root, paths, body, io.git, only);
+  if (sealed !== undefined) return yield* landSealedTaskFiles(opts, paths, sealed, io.landTaskFiles!);
+  if (only) {
+    opts.log(`${opts.name}.garden_sealed_landing`, { outcome: "refused", paths, pr_url: null, error: "a checkout that files only task files lands each path under plan/tasks.d with its criterion" });
+    return undefined;
+  }
   yield* step(() => io.git("add", "--", ...paths));
   // A garden log under docs/ changes what docs/docs-index.json must say, and docs-index-check
   // refuses a PR whose index is stale — regenerate it with the checkout's own generator.
@@ -27771,8 +27941,17 @@ function refreshKnowledgeAssertions(root: string): string[] {
 export type { GardenBuildContext } from "./cli/commands/daemon.js";
 
 export function daemonGardenWorkspace(ctx: Pick<GardenBuildContext, "config" | "repoRoot" | "owner" | "repo" | "log">, name: GardenName): () => Promise<GardenCheckoutAsync> {
-  return () => gardenCheckoutAsync({ name, repoDir: ctx.repoRoot, worktreesRoot: worktreesDir(ctx.config), owner: ctx.owner, repo: ctx.repo, log: ctx.log });
+  return () => gardenCheckoutAsync({ name, repoDir: ctx.repoRoot, worktreesRoot: worktreesDir(ctx.config), owner: ctx.owner, repo: ctx.repo, log: ctx.log,
+    taskFilesLanding: { stateRoot: ctx.config.root }, ...(TASK_FILES_ONLY_GARDENS.has(name) ? { taskFilesOnly: true } : {}) });
 }
+
+/** W1-T12222: the gardens whose every land is a new task file under plan/tasks.d, read from the code. The first four
+ *  hold a wait in their state (`runGardenAsync`); the last three read a land through `landedPrUrl`, which returns the
+ *  reference of a waiting filing, and each keeps its own memory of what it filed. The flake-incident gardener runs on
+ *  the selector-shadow checkout. Not listed: `gate` (it also lands .github/workflows/ci-gate.yml), and the gardens that
+ *  edit task files they do not file, reserve no id, or land other files: plan, backlog, redesign, queue-judge, test,
+ *  config, export, knowledge, machine-judge, review-replay, fix-lane. */
+const TASK_FILES_ONLY_GARDENS: ReadonlySet<GardenName> = new Set(["ci-friction", "hot-file", "flow-remedy", "scout", "flow", "selector-shadow", "host-resource"]);
 
 /** One pass of one garden; it logs its own failure under the garden's own step name and never throws. */
 export type RegisteredGardenPass = (() => void | Promise<void>) & { due?: () => boolean | Promise<boolean> };
@@ -27920,7 +28099,7 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
     }
     case "plan": {
       const d = deps("plan");
-      const repairs = { stateDir, repoDir: repoRoot, worktreesRoot: worktreesDir(config), owner, repo, log };
+      const repairs = { stateDir, repoDir: repoRoot, worktreesRoot: worktreesDir(config), owner, repo, log, taskFilesLanding: { stateRoot: config.root } };
       return withShardRepairs(stateDir, () => runShardRepairPass(repairs), gardenPass(planGardenSpec(d), d), log);
     }
     case "backlog": {
@@ -28116,7 +28295,8 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
       const sources: HotFileGardenSources = {
         ledgerRecords: () => readCiFrictionLedgerRecords(stateDir),
         mainHistory: (sinceIso) => readMainHistory(repoRoot, sinceIso),
-        planOrigins: () => loadPlan(resolveRepoLayout(repoRoot).planMonolith).tasks.map((t) => t.origin).filter((o): o is string => typeof o === "string"),
+        // W1-T12222: a file that waits for the landing holds its finding, so its origin counts as filed.
+        planOrigins: () => [...loadPlan(resolveRepoLayout(repoRoot).planMonolith).tasks.map((t) => t.origin).filter((o): o is string => typeof o === "string"), ...stagedTaskFileOrigins(config.root).map((s) => s.origin)],
         mintTaskId: ciLearningTaskIdMinter(repoRoot, log, undefined, mintOptions),
         fileExists: (file) => existsSync(join(repoRoot, file)),
       };
@@ -28127,7 +28307,7 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
     // Paced (gardenPacingDue): a pass that judged nothing new widens the wait, and a changed plan tree or
     // operator release is due at once.
     case "machine-judge": {
-      const ports = productionMachineFilingJudgePorts({ repoRoot, stateDir, worktreesRoot: worktreesDir(config), owner, repo, log });
+      const ports = productionMachineFilingJudgePorts({ repoRoot, stateDir, worktreesRoot: worktreesDir(config), owner, repo, log, taskFilesLanding: { stateRoot: config.root } });
       const inputs = () => machineJudgeInputsAsync(repoRoot, stateDir, "origin/main");
       return withDue(async () => {
         const seen = await inputs();
@@ -28151,7 +28331,7 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
         handoff: (h: { id: string; raw: string; origin: string }) => void stageFeedbackCapture(repoRoot, config.root, { id: h.id, raw: h.raw, origin: h.origin as FeedbackOrigin }),
         openIncidentOrigins: () => openIncidentFeedbackOrigins(repoRoot, config.root),
         escalate: raiseDuplicate,
-        planOrigins: () => loadPlan(resolveRepoLayout(repoRoot).planMonolith).tasks.map((t) => t.origin).filter((o): o is string => typeof o === "string"),
+        planOrigins: () => [...loadPlan(resolveRepoLayout(repoRoot).planMonolith).tasks.map((t) => t.origin).filter((o): o is string => typeof o === "string"), ...stagedTaskFileOrigins(config.root).map((s) => s.origin)],
         fileConsumer: fileConsumerVia(daemonGardenWorkspace(ctx, "host-resource"), mintTaskId, log),
       };
       const paced = lowYieldGardenPass(stateDir, "host-resource", () => runHostResourcePassAsync(ports).then(() => {}), {
@@ -34582,102 +34762,53 @@ export function triageLockRefusalMessage(pid: number, startedAt: string, lockPat
   );
 }
 
-export interface TriagePrLifecycleIdentity {
-  state: string;
-  headSha: string;
-  baseRef: string;
-  baseSha: string;
-}
-
-/** Read the PR fields needed to prove an empty-scope close still targets the classified PR. */
-async function readTriagePrLifecycleIdentity(prUrl: string, owner: string, repo: string): Promise<TriagePrLifecycleIdentity> {
-  const number = prUrl.match(/\/pull\/(\d+)/)?.[1];
-  if (!number) throw new Error(`triage PR identity: cannot resolve a pull number from ${JSON.stringify(prUrl)}`);
-  const row = await ghJsonAsync(["api", `repos/${owner}/${repo}/pulls/${number}`]) as {
-    state?: unknown;
-    head?: { sha?: unknown };
-    base?: { ref?: unknown; sha?: unknown };
-  };
-  const { state, head, base } = row;
-  if (typeof state !== "string" || typeof head?.sha !== "string" || !/^[0-9a-f]{40}$/i.test(head.sha) ||
-      typeof base?.ref !== "string" || !base.ref || typeof base.sha !== "string" || !/^[0-9a-f]{40}$/i.test(base.sha)) {
-    throw new Error(`triage PR identity: ${prUrl} returned incomplete state/head/base evidence`);
+/**
+ * W1-T12198: land a `no_task` or `grill` status change through the shared feedback landing.
+ * The status write reuses `setFeedbackStatus` in the lane worktree, which is never committed; the
+ * landing carries those bytes. A refused landing leaves origin/main at `status: new`, so a later
+ * pass triages the entry again.
+ */
+function landTriageStatusOutcome(i: {
+  worktreePath: string;
+  repoDir: string;
+  feedbackId: string;
+  entry: FeedbackEntry;
+  decision: Extract<TriageDecision, { action: "no_task" | "grill" }>;
+  grillIssueUrl: string | undefined;
+  repository: string;
+  threadStorePath: string;
+  log: (step: string, extra?: Record<string, unknown>) => void;
+  say: (msg: string) => void;
+}): number {
+  const { decision, feedbackId, log, say } = i;
+  setFeedbackStatus(i.worktreePath, feedbackId, decision.status);
+  const content = readFileSync(feedbackEntryPath(i.worktreePath, feedbackId), "utf8");
+  const landing = landFeedbackStatusContent(i.worktreePath, feedbackEntryRepoPath(feedbackId), content, { log });
+  if (!landing.landed) {
+    const cause = landing.error ?? (landing.refused?.length ? `refused: ${JSON.stringify(landing.refused)}` : "nothing was landed");
+    log("triage.error", { error: `feedback landing refused: ${cause}`, action: decision.action, landing_pr: landing.prUrl ?? null });
+    say(`triage ${decision.action}: the feedback landing refused the status change (${cause}); feedback#${feedbackId} stays new`);
+    worktreeRemove(i.repoDir, i.worktreePath);
+    return 1;
   }
-  return { state, headSha: head.sha, baseRef: base.ref, baseSha: base.sha };
-}
-
-/** Close an empty-scope triage PR through async GitHub transport so the daemon loop never blocks on gh. */
-async function closeTriagedEmptyScopePr(prUrl: string, comment: string): Promise<void> {
-  await ghTextAsync(["pr", "close", prUrl, "--comment", comment]);
-}
-
-export type TriageLiveScopeCheck =
-  | { kind: "empty"; comment: string }
-  | { kind: "nonempty" }
-  | { kind: "unknown"; reason: string };
-
-/** Pure safety decision shared by the live triage path and its admission tests. */
-export function triageLiveScopeDecision(input: {
-  action: string;
-  scopeFiles: readonly string[];
-  liveDiffFiles?: readonly string[];
-  complete: boolean;
-  expectedHeadSha?: string;
-  fetchedBaseSha?: string;
-  before?: TriagePrLifecycleIdentity;
-  after?: TriagePrLifecycleIdentity;
-}): TriageLiveScopeCheck {
-  if (input.action !== "no_task" && input.action !== "grill") return { kind: "nonempty" };
-  if (!input.complete || !input.liveDiffFiles || !input.before || !input.expectedHeadSha || !input.fetchedBaseSha ||
-      input.scopeFiles.length === 0) {
-    return { kind: "unknown", reason: "live scope or PR identity evidence is incomplete" };
-  }
-  const before = input.before;
-  if (before.state !== "open" || before.headSha !== input.expectedHeadSha || before.baseRef !== "main" ||
-      before.baseSha !== input.fetchedBaseSha) {
-    return { kind: "unknown", reason: "PR state, head, or base differs from the fetched classification snapshot" };
-  }
-  const disposition = triageEmptyScopeDisposition(input.liveDiffFiles, input.scopeFiles);
-  if (disposition.action !== "close" || !disposition.comment) return { kind: "nonempty" };
-  const after = input.after;
-  if (!after || after.state !== "open" || after.headSha !== before.headSha || after.baseRef !== before.baseRef ||
-      after.baseSha !== before.baseSha) {
-    return { kind: "unknown", reason: "PR identity changed after empty-scope classification" };
-  }
-  return { kind: "empty", comment: disposition.comment };
-}
-
-/** Classify a declared scope and re-read identity immediately before any empty-scope close. */
-async function checkTriageLiveScope(
-  worktreePath: string,
-  prUrl: string,
-  owner: string,
-  repo: string,
-  action: string,
-  scopeFiles: readonly string[],
-): Promise<TriageLiveScopeCheck> {
+  // `pr.opened` keyed to TRIAGE-<id>: the daemon's in-flight guard and the failed-fire backoff read it.
+  if (landing.prUrl) log("pr.opened", { pr_url: landing.prUrl, plan_only: true, action: decision.action, landing: true, landing_error: landing.error });
+  say(`triage ${decision.action}: status ${decision.status} landed through the feedback landing${landing.prUrl ? `: ${landing.prUrl}` : " (pull request pending)"}`);
   try {
-    await hostWorktreeGitAsync(worktreePath, ["fetch", "origin", "main"], { stdio: "inherit-stdout" });
-    const baseSha = (await hostWorktreeGitAsync(worktreePath, ["rev-parse", "origin/main"])).trim();
-    const headSha = (await hostWorktreeGitAsync(worktreePath, ["rev-parse", "HEAD"])).trim();
-    if (!/^[0-9a-f]{40}$/i.test(baseSha) || !/^[0-9a-f]{40}$/i.test(headSha)) {
-      return { kind: "unknown", reason: "live base/head revision is incomplete" };
-    }
-    const before = await readTriagePrLifecycleIdentity(prUrl, owner, repo);
-    const liveDiffFiles = (await hostWorktreeGitAsync(worktreePath, ["diff", "--name-only", "origin/main", "HEAD", "--", ...scopeFiles]))
-      .split("\n").map((line) => line.trim()).filter(Boolean);
-    const evidence = {
-      action, scopeFiles, liveDiffFiles, complete: true, expectedHeadSha: headSha,
-      fetchedBaseSha: baseSha, before,
-    };
-    if (triageEmptyScopeDisposition(liveDiffFiles, scopeFiles).action !== "close") {
-      return triageLiveScopeDecision(evidence);
-    }
-    const after = await readTriagePrLifecycleIdentity(prUrl, owner, repo);
-    return triageLiveScopeDecision({ ...evidence, after });
+    const prUrl = landing.prUrl;
+    const outcome = prUrl === undefined
+      ? { action: "error" as const, reason: "The landing returned no pull request." }
+      : decision.action === "grill"
+        ? i.grillIssueUrl ? { action: "grill" as const, publicationPr: prUrl, detail: decision.detail, questionIssueUrl: i.grillIssueUrl }
+          : { action: "error" as const, reason: "The intake question has no verified publication." }
+        : { action: decision.action, publicationPr: prUrl, detail: decision.detail };
+    const response = recordEscalationIntakeOutcome(i.entry, outcome, { threadStorePath: i.threadStorePath, repository: i.repository });
+    log("triage.escalation_response", { feedback_id: feedbackId, ...response, work: "pending" });
   } catch (error) {
-    return { kind: "unknown", reason: String((error as Error)?.message ?? error).slice(0, 240) };
+    log("triage.escalation_response", { feedback_id: feedbackId, state: "unknown", reason: String((error as Error)?.message ?? error) });
   }
+  worktreeRemove(i.repoDir, i.worktreePath);
+  return 0;
 }
 
 async function triageCommandLocked(
@@ -34815,7 +34946,8 @@ async function triageCommandLocked(
     claimReserver = triageClaimReserverAsyncFor(repoDir);
     // `mergedSubjects` is read LAZILY — only the LOSING lane ever needs it, so the winner pays
     // nothing for the evidence arm's input.
-    triageClaim = await claimTriageWithLogging(log, feedbackId, claimReserver, { mergedSubjects: () => mergedTriageSubjects(repoDir) });
+    triageClaim = await claimTriageWithLogging(log, feedbackId, claimReserver, { mergedSubjects: () => mergedTriageSubjects(repoDir),
+      landedStatus: (id) => readLandedFeedbackEntry(repoDir, id)?.status });
     if (!triageClaim.proceed) {
       say(`REFUSED — ${triageClaim.reason}`);
       worktreeRemove(repoDir, worktreePath);
@@ -35048,6 +35180,13 @@ async function triageCommandLocked(
       say(`grill opened (needs-human, ${decision.options.length} options + a recommendation): ${grillIssueUrl}`);
     }
 
+    // W1-T12198: an outcome that files no task changes one status line, so it rides the shared
+    // feedback landing pull request and opens no pull request of its own.
+    if (decision.action === "no_task" || decision.action === "grill") {
+      return landTriageStatusOutcome({ worktreePath, repoDir, feedbackId, entry, decision, grillIssueUrl,
+        repository: `${owner}/${repo}`, threadStorePath: inboxThreadStorePath(config.root), log, say });
+    }
+
     // ID-COLLISION GUARD (W1-T236 triple-mint, 2026-07-22): refuse a proposal whose merged plan
     // (monolith + tasks.d shards) does not load — e.g. a minted id a shard already owns — BEFORE
     // any push, with the duplicate named. See lib/triage.ts's assertProposedPlanLoads.
@@ -35194,65 +35333,18 @@ async function triageCommandLocked(
     // Publication ownership, plan-only scope and feedback provenance were verified above.
     // Acknowledging intake ends the ask; it does not claim CI, merge or work completion.
     try {
-      const outcome = decision.action === "grill"
-        ? grillIssueUrl ? { action: "grill" as const, publicationPr: prUrl, detail: decision.detail, questionIssueUrl: grillIssueUrl }
-          : { action: "error" as const, reason: "The intake question has no verified publication." }
-        : { action: decision.action, publicationPr: prUrl, detail: decision.detail };
-      const response = recordEscalationIntakeOutcome(entry, outcome,
+      const response = recordEscalationIntakeOutcome(entry, { action: decision.action, publicationPr: prUrl, detail: decision.detail },
         { threadStorePath: inboxThreadStorePath(config.root), repository: `${owner}/${repo}` });
       log("triage.escalation_response", { feedback_id: feedbackId, ...response, work: "pending" });
     } catch (error) {
       log("triage.escalation_response", { feedback_id: feedbackId, state: "unknown", reason: String((error as Error)?.message ?? error) });
     }
 
-    const declaredScope = decision.action === "no_task" || decision.action === "grill"
-      ? triageDeclaredScope(feedbackId)
-      : undefined;
-    if (declaredScope) {
-      const beforeCi = await checkTriageLiveScope(worktreePath, prUrl, owner, repo, decision.action, declaredScope);
-      if (beforeCi.kind === "empty") {
-        log("triage.already_done", { scope: declaredScope, before_ci: true });
-        say(`triage PR's declared scope (${declaredScope.join(", ")}) is EMPTY against the LIVE origin/main — ` +
-          `a sibling triage PR already landed this change; closing rather than merging: ${prUrl}`);
-        await closeTriagedEmptyScopePr(prUrl, beforeCi.comment);
-        worktreeRemove(repoDir, worktreePath);
-        return 0;
-      }
-      if (beforeCi.kind === "unknown") {
-        // Unknown evidence cannot authorize an early close. Keep the ordinary CI path, then let
-        // the post-CI identity/scope check refuse any later terminalization or merge.
-        log("triage.live_scope_unknown", { scope: declaredScope, phase: "before_ci", reason: beforeCi.reason });
-        say(`triage could not prove the declared scope is empty before CI (${beforeCi.reason}); ` +
-          `retaining the ordinary CI and review gates: ${prUrl}`);
-      }
-    }
-
-    // Confirmed no-op triage PRs terminalize above; every substantive scope still passes CI.
     const ci = ciGateState(await waitForCiGreen(prUrl, (s, extra) => log(s, extra)));
     if (ci !== "green") {
       say(`ci ${ci} — PR left OPEN: ${prUrl}`);
       worktreeRemove(repoDir, worktreePath);
       return 1;
-    }
-
-    // Keep the W1-T963 recheck after CI: a sibling may land the declared feedback update while
-    // checks are running. The same complete-evidence and exact-identity rule applies here.
-    if (declaredScope) {
-      const afterCi = await checkTriageLiveScope(worktreePath, prUrl, owner, repo, decision.action, declaredScope);
-      if (afterCi.kind === "empty") {
-        log("triage.already_done", { scope: declaredScope, after_ci: true });
-        say(`triage PR's declared scope (${declaredScope.join(", ")}) is EMPTY against the LIVE origin/main — ` +
-          `a sibling triage PR already landed this change; closing rather than merging: ${prUrl}`);
-        ghExec(["pr", "close", prUrl, "--comment", afterCi.comment], { stdio: "inherit" });
-        worktreeRemove(repoDir, worktreePath);
-        return 0;
-      }
-      if (afterCi.kind === "unknown") {
-        log("triage.live_scope_unknown", { scope: declaredScope, phase: "after_ci", reason: afterCi.reason });
-        say(`triage PR left OPEN — live empty-scope evidence is unavailable or changed (${afterCi.reason}): ${prUrl}`);
-        worktreeRemove(repoDir, worktreePath);
-        return 1;
-      }
     }
 
     const prNum = prUrl.match(/\/pull\/(\d+)/)?.[1] ?? prUrl;
@@ -37281,6 +37373,8 @@ export function productionMachineFilingJudgePorts(opts: {
   clock?: Clock;
   /** Test files main's CI failed at a sha (W1-T9694). Absent: read from GitHub, as the flake-incident gardener does. */
   mainFailures?: SelectorShadowMainFailures;
+  /** W1-T12221: the shared landing of task files, as {@link GardenCheckoutOpts.taskFilesLanding}. */
+  taskFilesLanding?: GardenCheckoutOpts["taskFilesLanding"];
 }): MachineJudgePorts {
   let mount: Mount | undefined;
   const fetcher = opts.fetcher ?? ghJson;
@@ -37374,7 +37468,8 @@ export function productionMachineFilingJudgePorts(opts: {
         return times.sort((a, b) => Date.parse(a) - Date.parse(b)).at(-1);
       };
     },
-    openWorkspace: () => gardenCheckoutAsync({ name: "machine-judge", repoDir: opts.repoRoot, worktreesRoot: opts.worktreesRoot, owner: opts.owner, repo: opts.repo, log: opts.log, fetcher, clock: opts.clock }),
+    openWorkspace: () => gardenCheckoutAsync({ name: "machine-judge", repoDir: opts.repoRoot, worktreesRoot: opts.worktreesRoot, owner: opts.owner, repo: opts.repo, log: opts.log, fetcher, clock: opts.clock,
+      ...(opts.taskFilesLanding ? { taskFilesLanding: opts.taskFilesLanding } : {}) }),
     prState: (prUrl) => gardenPrState(opts.owner, opts.repo, prUrl, fetcher),
     stageProposal: (proposal) => void stageInboxProposalOnce(join(opts.stateDir, "inbox-proposals.json"), proposal),
     log: opts.log,
