@@ -15605,12 +15605,11 @@ export function ciLearningCommand(
     // MEASURED: without this, an unreadable plan under the run's root took the whole verb out with
     // ENOENT, reddening three of W1-T2959's tests, which pass a tmp root with no plan in it.
     try {
-      if (deps.destinationFailure) throw new Error(deps.destinationFailure);
       const destinationSnapshot = deps.destinationSnapshot;
       const filing = land(result.drafts, checkoutRoot, {
         stateRoot: root,
         mintTaskId: ciLearningTaskIdMinter(checkoutRoot, (step, fields) =>
-          appendLedger(join(root, "state", LEDGER_FILENAME), { run_id: `CI-LEARNING-${process.pid}`, task_id: "DAEMON", step, ...fields }), undefined, { destinationSnapshot }),
+          appendLedger(join(root, "state", LEDGER_FILENAME), { run_id: `CI-LEARNING-${process.pid}`, task_id: "DAEMON", step, ...fields }), undefined, { destinationSnapshot, destinationFailure: deps.destinationFailure }),
         planOrigins,
         renderShard: ciLearningShardYaml,
         recordVerdict: ciLearningRecordVerdict,
@@ -15656,7 +15655,7 @@ const gardenMintBudgets = new Map<string, GardenMintBudget>();
 export function ciLearningTaskIdMinter(root: string, log?: (step: string, fields: Record<string, unknown>) => void,
   executeAsync: (file: string, args: string[], options: { maxBuffer: number; timeout: number; killSignal: "SIGKILL" }) => Promise<{ stdout: string; stderr?: string }> = (file, args, options) => execFileLoopBounded(file, args, { ...options, encoding: "utf8" }),
   opts: { budget?: GardenMintBudget; clock?: Pick<Clock, "now">; pollIntervalMs?: () => number;
-    loadPolicy?: () => { values: Pick<Policy["values"], "pollIntervalMs"> }; destinationSnapshot?: TaskIdDestinationSnapshot | null } = {}):
+    loadPolicy?: () => { values: Pick<Policy["values"], "pollIntervalMs"> }; destinationSnapshot?: TaskIdDestinationSnapshot | null; destinationFailure?: string } = {}):
   ((filingBranch?: string) => string) & { async: (filingBranch: string) => Promise<string>; heldSha: (taskId: string) => string | undefined } & GardenTaskIdRelease {
   let budget = opts.budget ?? gardenMintBudgets.get(root);
   if (!budget) {
@@ -15672,6 +15671,7 @@ export function ciLearningTaskIdMinter(root: string, log?: (step: string, fields
   const releaseOpts = (reason: string) => ({ reason, lane: "garden", log });
   const gitAt = (args: string[], timeout: number) => spawnSync("git", args, { cwd: root, encoding: "utf8", timeout, killSignal: "SIGKILL" });
   const mintSync = (filingBranch?: string) => {
+    if (opts.destinationFailure) throw new Error(opts.destinationFailure);
     const started = now();
     const bound = mintBudget.boundMs();
     const runGit = (args: string[]) => {
@@ -38283,6 +38283,12 @@ export async function approveCommand(
     return code;
   }
 
+  let approveDestinationSnapshot: TaskIdDestinationSnapshot | null = null;
+  let approveDestinationFailure: string | undefined;
+  if (deps.gateway === undefined && classification.state === "ready" && classification.draft) {
+    try { approveDestinationSnapshot = (await taskIdDestinationSnapshot()) ?? null; }
+    catch { approveDestinationFailure = "plan destination is unreadable before approval mint"; }
+  }
   const runId = `APPROVE-${proposalId}-${Date.now()}`;
   const log = (step: string, extra: Record<string, unknown> = {}) => appendLedger(ledgerPath, { run_id: runId, task_id: proposalId, step, lane: "approve", ...extra });
 
@@ -38373,17 +38379,18 @@ export async function approveCommand(
     // derivation rather than re-deriving ids locally here. A degraded mint source or a
     // reservation failure REFUSES (throws) before any write, so no partial union ever reaches
     // the worktree.
-    const approveDestinationSnapshot = (await taskIdDestinationSnapshot()) ?? null;
     const materialized = materializeDraftTaskIds(
       { fragmentYaml: payload.fragmentYaml, stampLine: payload.stampLine },
       {
-        mint: () =>
-          mintNextTaskIdWithHistory({
+        mint: () => {
+          if (approveDestinationFailure) throw new Error(approveDestinationFailure);
+          return mintNextTaskIdWithHistory({
             planPath: join(worktreePath, "plan", "tasks.yaml"),
             repoRoot: worktreePath,
             destinationSnapshot: approveDestinationSnapshot,
             openPrTexts: () => openPrMintTexts(owner, repo),
-          }),
+          });
+        },
         reserveBlock: (startId, count) => {
           idBlock = reserveTaskIdBlock(startId, count, taskIdReservationsDir(config.root), {
             info: { purpose: `rmd approve ${payload.proposalId} (${purposeLabel})` },
@@ -38884,6 +38891,12 @@ async function approveBatchCommand(
     return 2;
   }
 
+  let batchDestinationSnapshot: TaskIdDestinationSnapshot | null = null;
+  let batchDestinationFailure: string | undefined;
+  if (deps.batchGateway === undefined) {
+    try { batchDestinationSnapshot = (await taskIdDestinationSnapshot()) ?? null; }
+    catch { batchDestinationFailure = "plan destination is unreadable before batch approval mint"; }
+  }
   const runId = `APPROVE-BATCH-${Date.now()}`;
   const log = (step: string, extra: Record<string, unknown> = {}) =>
     appendLedger(ledgerPath, { run_id: runId, task_id: "BATCH", step, lane: "approve", ...extra });
@@ -38932,7 +38945,6 @@ async function approveBatchCommand(
       // fileRatificationBatch, so each member gets the single lane's refusal and written-paths list,
       // and every member's stamp folds over this worktree's own MASTER-PLAN.md in order (Q2).
       const batchWorktree = worktreePath;
-      const batchDestinationSnapshot = (await taskIdDestinationSnapshot()) ?? null;
       const filed = fileRatificationBatch(
         batchWorktree,
         payloads,
@@ -38940,13 +38952,15 @@ async function approveBatchCommand(
           const materialized = materializeDraftTaskIds(
             { fragmentYaml: payload.fragmentYaml, stampLine: payload.stampLine },
             {
-              mint: () =>
-                mintNextTaskIdWithHistory({
+              mint: () => {
+                if (batchDestinationFailure) throw new Error(batchDestinationFailure);
+                return mintNextTaskIdWithHistory({
                   planPath: join(batchWorktree, "plan", "tasks.yaml"),
                   repoRoot: batchWorktree,
                   destinationSnapshot: batchDestinationSnapshot,
                   openPrTexts: () => openPrMintTexts(owner, repo),
-                }),
+                });
+              },
               reserveBlock: (startId, count) => {
                 const block = reserveTaskIdBlock(startId, count, taskIdReservationsDir(config.root), {
                   info: { purpose: `rmd approve ${payload.proposalId} (batch run ${runId})` },
