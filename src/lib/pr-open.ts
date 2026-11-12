@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { tryEscalate, type EscalateDeps, type Escalation } from "./escalate.js";
 import { GIT_FETCH_KILL_GRACE_MS } from "./git-fetch-retry.js";
+import { hostWorktreeGitAsync } from "./worktree-git.js";
 import { openPrsRestArgs, prFilesRestArgs, type RestPullRow } from "./open-prs-rest.js";
 import { runnerConfigDigest } from "./dispatch-repair.js";
 import { loadPlan, type AcceptanceCriterion } from "./plan.js";
@@ -418,14 +419,21 @@ export function literalTestTitles(source: string): string[] {
   return titles;
 }
 
-function gitAt(repoRoot: string, args: readonly string[]): { status: number | null; stdout: string } {
-  const result = spawnSync("git", ["-C", repoRoot, ...args], { encoding: "utf8", maxBuffer: PROOF_MAX_BUFFER });
-  return { status: result.error ? null : result.status, stdout: String(result.stdout ?? "") };
+/** `git <args>` in the pinned worktree, off the daemon loop: its exit status and stdout, never a throw. */
+async function gitAt(repoRoot: string, args: readonly string[]): Promise<{ status: number | null; stdout: string }> {
+  try {
+    return { status: 0, stdout: await hostWorktreeGitAsync(repoRoot, args, { maxBuffer: PROOF_MAX_BUFFER }) };
+  } catch (err) {
+    // NOT A SUCCESS: a non-zero exit is returned as that status (git grep exits 1 on no match); a refused pin or a
+    // spawn failure is a null status, which every caller reads as "could not tell" and so proposes nothing.
+    const code = (err as { code?: unknown }).code;
+    return { status: typeof code === "number" ? code : null, stdout: "" };
+  }
 }
 
 /** Lines under test/ holding `title` at `rev`, or null when git could not answer (exit 1 is a clean zero). */
-function titleLinesAt(repoRoot: string, rev: string, title: string): number | null {
-  const found = gitAt(repoRoot, ["grep", "-F", "-n", "-e", title, rev, "--", "test/"]);
+async function titleLinesAt(repoRoot: string, rev: string, title: string): Promise<number | null> {
+  const found = await gitAt(repoRoot, ["grep", "-F", "-n", "-e", title, rev, "--", "test/"]);
   if (found.status === 1) return 0;
   return found.status === 0 ? found.stdout.split("\n").filter(Boolean).length : null;
 }
@@ -448,16 +456,19 @@ export async function proposeStaleProofReplacement(
   target?: SuiteRegistryTarget,
 ): Promise<StaleProofCorrection | undefined> {
   if (err.refusalClass !== "stale-proof" || isTestOnlyDiff(at.declaredFiles) || isTestOnlyDiff(at.changedFiles)) return undefined;
-  const base = gitAt(repoRoot, ["merge-base", baseRef, "HEAD"]);
+  const base = await gitAt(repoRoot, ["merge-base", baseRef, "HEAD"]);
   const mergeBase = base.status === 0 ? base.stdout.trim() : "";
   if (!mergeBase) return { outcome: "unreadable", candidates: [] };
   const titles = new Set<string>();
   for (const file of (at.declaredFiles ?? []).filter((f) => TEST_FILE.test(f))) {
-    const blob = gitAt(repoRoot, ["show", `HEAD:${file}`]);
+    const blob = await gitAt(repoRoot, ["show", `HEAD:${file}`]);
     if (blob.status === 0) for (const title of literalTestTitles(blob.stdout)) titles.add(title);
   }
-  const candidates = [...titles].filter((title) =>
-    runnableProof(`unit test: ${title}`, target) && titleLinesAt(repoRoot, "HEAD", title) === 1 && titleLinesAt(repoRoot, mergeBase, title) === 0);
+  const candidates: string[] = [];
+  for (const title of titles) {
+    if (!runnableProof(`unit test: ${title}`, target)) continue;
+    if ((await titleLinesAt(repoRoot, "HEAD", title)) === 1 && (await titleLinesAt(repoRoot, mergeBase, title)) === 0) candidates.push(title);
+  }
   if (candidates.length === 0) return { outcome: "no-candidate", candidates };
   if (candidates.length > STALE_PROOF_CANDIDATE_LIMIT) return { outcome: "too-many-candidates", candidates };
   const passing: string[] = [];

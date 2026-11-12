@@ -18,7 +18,7 @@ import * as prOpen from "#src/lib/pr-open.js";
 import type { GitHub } from "#src/lib/status.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import type { WorkerResult, spawnWorker } from "#src/lib/worker.js";
-import * as runTaskModule from "#src/run-task.js";
+import * as runTaskModule from "#test/helpers/run-task-test.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
 
 const TASK_ID = "W1-T990355";
@@ -336,6 +336,15 @@ test("W1-T10355 criterion 2: only an escalating stale-proof refusal is corrected
   const bounded = await prOpen.proposeStaleProofReplacement(staleRefusal(), AT, history(t, {}, { [DECLARED]: `${many.join("\n")}\n` }), runner.run);
   assert.equal(bounded?.outcome, "too-many-candidates");
   assert.deepEqual(runner.asked, [], "past the bound no check-proof is spent");
+});
+
+test("W1-T10355 criterion 2: a checkout git cannot read proposes nothing and runs no proof", async (t) => {
+  const notARepo = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}stale-proof-unreadable-`));
+  t.after(() => rmSync(notARepo, { recursive: true, force: true }));
+  const runner = passingTitles([NEW_TITLE]);
+  const correction = await prOpen.proposeStaleProofReplacement(staleRefusal(), AT, notARepo, runner.run);
+  assert.deepEqual(correction, { outcome: "unreadable", candidates: [] });
+  assert.deepEqual(runner.asked, []);
 });
 
 test("W1-T10355 criterion 2: a daemon build's stale proof names its one replacement, never in a pr body or the branch", async (t) => {
