@@ -231,6 +231,16 @@ test("W1-T11501 criterion 3: staging, push scope, fix scope and review scope sha
   assert.deepEqual(withoutCheckout.unwiredAdvisories?.find((a) => a.reasonCode === "scope_violation")?.symbols, [home]);
 });
 
+test("W1-T11501 criterion 2: a candidate that vanishes from the checkout is refused with the read error carried", () => {
+  const { wt, home } = fixture();
+  // The path is listed as changed but nothing exists on disk, so lstat itself throws (ENOENT).
+  const outcome = observeComputedPlacement({
+    root: wt.dir, declaredFiles: FILES, proofs: PROOFS, candidates: [home], baseTracked: [],
+  });
+  assert.equal(outcome.admitted.size, 0);
+  assert.match(outcome.refusals.get(home)!, /the candidate is not a readable regular file \(ENOENT/);
+});
+
 test("W1-T11501 criterion 3: a non-test path keeps exact matching and the review admits nothing without a checkout", () => {
   const { wt, home } = fixture();
   write(wt, IMPL, "export const impl = 6;\n");
