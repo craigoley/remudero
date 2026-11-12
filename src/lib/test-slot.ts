@@ -22,7 +22,7 @@
  */
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { chmodSync, closeSync, constants, existsSync, fchmodSync, fstatSync, ftruncateSync, futimesSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readlinkSync, readSync, realpathSync, renameSync, statfsSync, statSync, unlinkSync, writeSync, type Stats } from "node:fs";
+import { accessSync, chmodSync, closeSync, constants, existsSync, fchmodSync, fstatSync, ftruncateSync, futimesSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readlinkSync, readSync, realpathSync, renameSync, statfsSync, statSync, unlinkSync, writeSync, type Stats } from "node:fs";
 import { availableParallelism, hostname, loadavg, tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as sleepAsync } from "node:timers/promises";
@@ -328,6 +328,67 @@ export function resolveTestSlotDir(
   }
   if (isDir(HOST_SCRATCH_RMD_DIR)) return { dir: join(HOST_SCRATCH_RMD_DIR, "test-slots"), scope: "host-scratch" };
   return { dir: "/tmp/rmd-test-slots", scope: "local" };
+}
+
+/** W1-T11938 — Node's compile cache, shared by every test and rule-suite child: `<slot dir>/node-compile-cache`. The slot dir
+ *  is the scratch disk's `/mnt/scratch/rmd/test-slots` on the host and the same directory through each container's
+ *  `RMD_TEST_SLOT_DIR` bind, so one directory serves them all; Node keys its entries by version, arch and uid inside it. */
+export const TEST_COMPILE_CACHE_DIR_NAME = "node-compile-cache";
+/** The lease labels whose child is a plain `node --test` runner (scripts/test-run.mjs's `test:npm`); no other lease
+ *  carries the cache, so a preflight, static stage or coverage batch never hands it down to a coverage shard. */
+export const COMPILE_CACHE_TEST_LABELS: ReadonlySet<string> = new Set(["test:npm"]);
+
+/** What a child's environment gains for the compile cache, and why when it runs uncached. */
+export interface TestCompileCache {
+  environment: Record<string, string>;
+  dir?: string;
+  /** Why the child runs uncached; absent when NODE_COMPILE_CACHE names the directory. */
+  reason?: string;
+}
+
+/** Create the cache directory (world-writable when this process made it, like the slot dir) and prove it writable;
+ *  a file at the path throws EEXIST, a file above it ENOTDIR, another uid's read-only directory EACCES. */
+function prepareCompileCacheDir(dir: string): void {
+  if (mkdirSync(dir, { recursive: true, mode: 0o777 }) !== undefined) chmodSync(dir, 0o777);
+  accessSync(dir, constants.W_OK | constants.X_OK);
+}
+
+/**
+ * The compile-cache environment for one `node` child with argv `args`. A coverage child (`--experimental-test-coverage`
+ * or a non-empty NODE_V8_COVERAGE) gets NODE_DISABLE_COMPILE_CACHE=1, as scripts/test-with-retry.mjs's coverage
+ * children do — Node honours it over any inherited NODE_COMPILE_CACHE. An environment that already disables the cache
+ * keeps it disabled. Otherwise NODE_COMPILE_CACHE names the shared directory, created on demand; a directory that cannot
+ * be created or written adds nothing, so the child runs uncached and never fails on it.
+ */
+export function testCompileCache(
+  args: readonly string[],
+  env: NodeJS.ProcessEnv = process.env,
+  deps: { dir?: string } = {},
+): TestCompileCache {
+  if (args.includes("--experimental-test-coverage") || env.NODE_V8_COVERAGE) {
+    return { environment: { NODE_DISABLE_COMPILE_CACHE: "1" }, reason: "coverage child: the compile cache stays disabled" };
+  }
+  if (env.NODE_DISABLE_COMPILE_CACHE !== undefined) return { environment: {}, reason: "NODE_DISABLE_COMPILE_CACHE is set" };
+  let dir: string | undefined;
+  try {
+    dir = deps.dir ?? join(resolveTestSlotDir(env).dir, TEST_COMPILE_CACHE_DIR_NAME);
+    prepareCompileCacheDir(dir);
+  } catch (error) {
+    // Uncached, never failed: the child still starts, and the reason names the directory and the error.
+    return { environment: {}, reason: `compile cache directory ${dir ?? "unresolved"} unusable: ${String((error as Error)?.message ?? error)}` };
+  }
+  return { environment: { NODE_COMPILE_CACHE: dir }, dir };
+}
+
+/** A `test:npm` lease's child environment also names the shared compile cache; this process's own argv and environment
+ *  are the child's (scripts/test-run.mjs passes its argv through), so a coverage run gets the cache disabled instead. */
+export function withTestCompileCache(label: string, lease: TestSlotLease, argv: readonly string[] = process.argv,
+  env: NodeJS.ProcessEnv = process.env): TestSlotLease {
+  const slotDir = lease.childEnvironment?.[TEST_SLOT_DIR_ENV];
+  if (!COMPILE_CACHE_TEST_LABELS.has(label) || slotDir === undefined) return lease;
+  const cache = testCompileCache(argv, env, { dir: join(slotDir, TEST_COMPILE_CACHE_DIR_NAME) });
+  lease.childEnvironment = { ...lease.childEnvironment, ...cache.environment };
+  return lease;
 }
 
 /** One slot's holder record. */
@@ -1233,7 +1294,7 @@ export function acquireTestSlot(label: string, opts: TestSlotOptions = {}): Test
       next = acquisition.throw(error);
     }
   }
-  return next.value;
+  return withTestCompileCache(label, next.value);
 }
 
 export async function acquireTestSlotAsync(label: string, opts: Omit<TestSlotOptions, "sleep"> = {}): Promise<TestSlotLease> {
@@ -1252,7 +1313,7 @@ export async function acquireTestSlotAsync(label: string, opts: Omit<TestSlotOpt
     await refresh();
     next = acquisition.next();
   }
-  return next.value;
+  return withTestCompileCache(label, next.value);
 }
 
 /** W1-T9952: on darwin, with no injected `memoryHeadroom`, admission's memory reading is the driver's vm_stat report. */

@@ -4,6 +4,7 @@ import { availableParallelism } from "node:os";
 import { fileURLToPath } from "node:url";
 
 import { listRuleSuites } from "../src/lib/ci-parity.ts";
+import { testCompileCache } from "../src/lib/test-slot.ts";
 import { isMainModule } from "./lib/argv.mjs";
 import { boundedNodeTestArgs } from "./test-tier-manifest.mjs";
 
@@ -15,6 +16,11 @@ export function ruleSuites(repoRoot = root) {
 
 // The spec reporter, named: W1-T7848's failed-suite reader parses its `✖ failing tests:` block.
 const suiteArgs = (suite, repoRoot) => boundedNodeTestArgs(["--test", "--test-reporter=spec", "--import", "tsx", "--import", "./test/setup/tmp-hygiene.ts", suite], repoRoot);
+
+/** A suite child's environment: this process's, plus the one compile cache every rule-suite child shares (W1-T11938). */
+export function suiteEnvironment(args, env = process.env, cache = testCompileCache) {
+  return { ...env, ...cache(args, env).environment };
+}
 
 /** Record one suite's outcome; `true` when it failed. */
 function reportSuite(suite, result) {
@@ -45,7 +51,8 @@ export function runRuleSuites(repoRoot = root, run = spawnSync) {
   const failed = new Set();
   for (const suite of suites) {
     console.log(`rule-checks: ${suite}`);
-    if (reportSuite(suite, run(process.execPath, suiteArgs(suite, repoRoot), { cwd: repoRoot, stdio: "inherit" }))) failed.add(suite);
+    const args = suiteArgs(suite, repoRoot);
+    if (reportSuite(suite, run(process.execPath, args, { cwd: repoRoot, stdio: "inherit", env: suiteEnvironment(args) }))) failed.add(suite);
   }
   return finish(suites, failed);
 }
@@ -54,7 +61,8 @@ export function runRuleSuites(repoRoot = root, run = spawnSync) {
 export function spawnSuiteCaptured(suite, repoRoot) {
   return new Promise((resolve) => {
     const chunks = [];
-    const child = spawn(process.execPath, suiteArgs(suite, repoRoot), { cwd: repoRoot, stdio: ["ignore", "pipe", "pipe"] });
+    const args = suiteArgs(suite, repoRoot);
+    const child = spawn(process.execPath, args, { cwd: repoRoot, stdio: ["ignore", "pipe", "pipe"], env: suiteEnvironment(args) });
     const output = () => Buffer.concat(chunks).toString();
     child.stdout.on("data", (chunk) => chunks.push(chunk));
     child.stderr.on("data", (chunk) => chunks.push(chunk));
