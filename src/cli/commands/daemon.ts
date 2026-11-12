@@ -47,7 +47,7 @@ import { plannedSequence, runDrain, type DrainDeps, type MergedSet, type OpenPrC
 import { fileTargetJobStore, nativeTargetAdmission, readTargetExecution, type ProductBuildInstances } from "../../lib/product-build.js";
 import { loadManagedRepos } from "../../lib/managed-repos.js";
 import type { RunResult } from "../../lib/run-result.js";
-import { runBoundedTargetJob, type BoundedTargetJobPorts, type BoundedTargetJobOutcome, daemonBoot, daemonExitCodeForSummary, resolveFleetControlHold, runDaemon, readRestartHistoryLines, type CrashLoopVerdict, type DaemonDeps, type DaemonKick, type DaemonOpts, type DaemonSummary, priorUnrecognisedResetStrings, daemonPushTokenSource, receivePackCredentialProbe } from "../../lib/daemon.js";
+import { runBoundedTargetJob, type BoundedTargetJobPorts, type BoundedTargetJobOutcome, daemonBoot, daemonExitCodeForSummary, resolveFleetControlHold, runDaemon, readRestartHistoryLines, type BootPhases, type CrashLoopVerdict, type DaemonDeps, type DaemonKick, type DaemonOpts, type DaemonSummary, priorUnrecognisedResetStrings, daemonPushTokenSource, receivePackCredentialProbe } from "../../lib/daemon.js";
 import { sweepStrandedReviewWorktreesAsync } from "../../lib/review-worktree-reclaim.js";
 import { sweepReclaimableArtifacts } from "../../lib/disk-artifact-reclaim.js";
 import { readGhRateLimitBuckets } from "../../lib/daemon-health.js";
@@ -67,7 +67,7 @@ import { feedbackLandingSweepRungs, type LandingReviewRequest } from "../../lib/
 import { readAffectedSuitesInputAsync } from "../../lib/affected-suites.js";
 import { parseProposalRegistry } from "../../lib/inbox.js";
 import { appendLedger, markDaemonProcessActor } from "../../lib/ledger.js";
-import { clockFromMillisFn, fixedClock, systemClock } from "../../lib/clock.js";
+import { clockFromMillisFn, fixedClock, systemClock, type Clock } from "../../lib/clock.js";
 import { getHeapStatistics } from "node:v8";
 import { sweepInflightLocksWithReceipts } from "../../lib/benchmark-run.js";
 import { ledgerMemoHolders } from "../../lib/ledger-union.js";
@@ -78,7 +78,7 @@ import { readOperatorReleaseRecords } from "../../lib/machine-filing-judge.js";
 import { readReleaseLedgerLines } from "../../lib/operator-release.js";
 import { runnerConfigDigest, terminalPreDispatchRefusalRevisions } from "../../lib/dispatch-repair.js";
 import { loadMounts, mountsPath } from "../../lib/mounts.js";
-import { loadPolicy, policyPath } from "../../lib/policy.js";
+import { loadPolicy, policyPath, type FreshnessRestartValues } from "../../lib/policy.js";
 import { refreshReviewPublisherToken as refreshInstallationToken } from "../../lib/review.js";
 import { feedbackStatusOnMain } from "../../lib/auto-triage.js";
 import { bootSweepDispatchClaims, dispatchClaimRef, releaseLandedDispatchClaims, claimMintedByRerun, type DispatchClaimReserver, type DispatchClaimReserverAsync } from "../../lib/dispatch-claim.js";
@@ -657,6 +657,47 @@ function opsCatalogShadowFeed(source: { refresh(): Promise<OpsCatalogShadowInput
   };
 }
 
+/** W1-T12244: the parts of the time from the process start to the first tick, on the daemon clock. */
+function startBootPhases(clock: Pick<Clock, "now">, uptimeMs: number): BootPhases {
+  const startedAtMs = clock.now() - uptimeMs;
+  const parts: Record<string, number> = {};
+  let lastMs = startedAtMs;
+  let taken = false;
+  return {
+    mark: (name) => {
+      const atMs = clock.now();
+      parts[`${name}_ms`] = (parts[`${name}_ms`] ?? 0) + atMs - lastMs;
+      lastMs = atMs;
+    },
+    firstTick: (log) => {
+      if (taken) return;
+      taken = true;
+      const totalMs = clock.now() - startedAtMs;
+      const namedMs = Object.values(parts).reduce((sum, ms) => sum + ms, 0);
+      try {
+        log("daemon.boot_phases", { ...parts, other_ms: totalMs - namedMs, total_ms: totalMs });
+      } catch {
+        // A timing row that cannot be written never stops the start; the tick row before it was written.
+      }
+    },
+  };
+}
+
+/** W1-T12228: `plan/policy.yaml`'s `freshnessRestart` rows as the daemon's options, beside `sweepWallClockBoundMs`. */
+export function freshnessRestartOpts(rows: FreshnessRestartValues): Pick<DaemonOpts, "freshnessScoreLimit" | "freshnessStalenessHorizonMs" | "freshnessQuietWindowMs" | "freshnessMinLifetimeMs"> {
+  return {
+    freshnessScoreLimit: rows.scoreLimit,
+    freshnessStalenessHorizonMs: rows.stalenessHorizonMs,
+    freshnessQuietWindowMs: rows.quietWindowMs,
+    freshnessMinLifetimeMs: rows.minLifetimeMs,
+  };
+}
+
+/** W1-T12228: the live-edit ladder weighs pressure with the daemon's own score limit and staleness horizon. */
+export function freshnessRestartLadder(rows: FreshnessRestartValues): { scoreLimit: number; stalenessHorizonMs: number } {
+  return { scoreLimit: rows.scoreLimit, stalenessHorizonMs: rows.stalenessHorizonMs };
+}
+
 export async function daemonCommand(
   rest: string[],
   deps: {
@@ -753,6 +794,8 @@ export async function daemonCommand(
   if (selectedInstanceRegistryEnvPath() !== undefined && !instanceRegistryRuntimePresent()) {
     return withInstanceRegistryRuntime(() => daemonCommand(rest, deps, host));
   }
+  const bootPhases = startBootPhases(clockFromMillisFn(deps.now), Math.round(process.uptime() * 1000));
+  bootPhases.mark("module_load");
   const {
     USAGE,
     auditedLifetimeTalliesFromArchives,
@@ -894,6 +937,8 @@ export async function daemonCommand(
     // different populations, so each now reads its OWN `plan/policy.yaml` row (see
     // `fixSpawnWallClockBoundMs`'s own doc for why one row could no longer bound both).
     sweepWallClockBoundMs: policy.values.sweepWallClockBoundMs,
+    // W1-T12228: the four freshnessRestart rows (plan/policy.yaml); read at start, so an edit applies after the next restart.
+    ...freshnessRestartOpts(policy.values.freshnessRestart),
   };
   const config = deps.config ?? loadConfig();
   // Headroom governor switch (operator ruling fb-1784894405468-a4153e; default clause
@@ -1027,10 +1072,12 @@ export async function daemonCommand(
   // when `armed` (a plain-`GH_TOKEN` host with no `GH_APP_*` names has nothing to wait for) and
   // NEVER rejects (github-app.ts's own doc on `ready`), so this await can only delay the first
   // sweep by the mint's own latency — it can never hang the daemon or surface a throw here.
+  bootPhases.mark("setup");
   const githubAppRefresh = (deps.startGithubAppRefresh ?? startInstallationTokenRefresh)({ log, refresh: refreshInstallationToken });
   if (githubAppRefresh.ready) {
     await githubAppRefresh.ready;
   }
+  bootPhases.mark("token_mint");
 
   // Read the plan to schedule. For a NON-self target without an explicit --plan, read it from a
   // clone of the target repo (the daemon clones it for execution anyway), SYNCED to the latest
@@ -1084,6 +1131,7 @@ export async function daemonCommand(
     // An explicit --plan overrides the derived path — read it literally, no git sync.
     plan = loadDaemonPlan(target.planPath, log, raiseDuplicate);
   }
+  bootPhases.mark("plan_load");
 
   // `lastProj` also backs `isOpenPr` (W1-T80, the in-flight dispatch-dedup
   // guard) — the SAME projection `refreshMerged` just derived, never a second
@@ -1275,8 +1323,10 @@ export async function daemonCommand(
   };
   // W1-T3758: one bounded archive scan before the daemon starts dispatching. The live ledger is
   // still read at each gate consultation; unread history retains the old live-only behaviour.
+  bootPhases.mark("wiring");
   const archivedLifetime = await auditedLifetimeTalliesFromArchives(dirname(ledgerPath), undefined,
     (failure: LifetimeIndexFailure) => log("dispatch.lifetime_history_unavailable", { ...failure, phase: "index" }));
+  bootPhases.mark("lifetime_history");
   try {
   if (archivedLifetime.history === undefined) {
     log("dispatch.lifetime_history_unavailable", {
@@ -1331,6 +1381,7 @@ export async function daemonCommand(
     { resource: "stop_marker", close: () => { consumeStop(config.root); } },
   ];
   try {
+  bootPhases.mark("wiring");
   const bootClaimLock = fixedClock(clockFromMillisFn(deps.now).now());
   const landedClaimRerunReported = new Set<string>();
   try {
@@ -1345,6 +1396,7 @@ export async function daemonCommand(
   } catch (error) {
     log("dispatch.claim_sweep_failed", { surface: "boot-sweep", error: String((error as Error)?.message ?? error).slice(0, 300) });
   }
+  bootPhases.mark("claim_sweep");
   // Publish only after this process owns the shared daemon/drain lock. Dry-run returned above,
   // and a refused second daemon returned from the catch, so neither can replace material state.
   // This is telemetry only: disk failure must not change whether the daemon starts.
@@ -1441,7 +1493,9 @@ export async function daemonCommand(
   // W1-T9087: under `auto` the mode is decided from the ledger's own evidence since the previous boot, fed every run-child
   // row this daemon writes since (`childLog`); it keeps counts. W1-T9816: that window and the settlements are one UNION read,
   // because rotation prunes them from the live file. Read here, before adoption, so the boot's adoption pass is folded once.
+  bootPhases.mark("wiring");
   const bootLedgerLines = readLedgerLines(ledgerPath);
+  bootPhases.mark("ledger_read");
   const childPolicy = deps.readRunChildMode ?? (() => loadRunChildMode());
   const bootChildPolicy = readRunChildPolicy(childPolicy);
   // `auto` adopts whatever it decides: a child an earlier `on` started outlives a demotion and must still be adopted.
@@ -1462,6 +1516,7 @@ export async function daemonCommand(
     adoptedRunIds.add(child.runId);
     void child.settled.then(() => adoptedRunIds.delete(child.runId), () => adoptedRunIds.delete(child.runId));
   }
+  bootPhases.mark("run_child_adoption");
   // W1-T9089: a failing contract under `on` no longer demotes; it escalates once per evidence window.
   const childContract: (decision: RunChildModeDecision | undefined) => boolean =
     host.daemonRunChildContract(deps.runChildContractEscalate ?? raiseDuplicate, log);
@@ -1549,6 +1604,7 @@ export async function daemonCommand(
   if (target.isSelf && !deps.runDaemon) unwireOwnCheckoutCredentialHelper(repoRoot, log);
   const invokeDaemonBoot: typeof daemonBoot = (...args) => daemonBoot(...args);
   const bootHold = resolveFleetControlHold({ checkStop, checkPause });
+  bootPhases.mark("wiring");
   if (bootHold) {
     log("daemon.boot_held", {
       control: bootHold.control,
@@ -1678,6 +1734,7 @@ export async function daemonCommand(
     readCheckoutDepth(daemonModuleRepoDir),
     );
   }
+  bootPhases.mark("boot_sweeps");
 
   const runDaemonFn = deps.runDaemon ?? runDaemon;
   const runTaskFn = deps.runTask ?? runTask;
@@ -1809,7 +1866,9 @@ export async function daemonCommand(
   log("daemon.heap_ceiling_shadow", { basis: "boot", ...slackReclaimer.derivedCeiling() });
     try { await gardenerRuntime.flush(); } catch { log("garden.telemetry_failed", { reason: "runtime-inventory-write-failed" }); }
     // W1-T7744: the filing read is awaited here, before the loop, and behind each selection after — never on the loop.
+    bootPhases.mark("loop_wiring");
     await dispatchFilingPrefetch.refresh(target.planPath);
+    bootPhases.mark("filing_prefetch");
     // W1-T11770: absent the flag, nothing is built, read or passed. Present, the first read starts here, unawaited.
     const opsShadow = shadowOpsCatalog === undefined ? undefined
       : opsCatalogShadowFeed(createOpsCatalogShadowSource({ repository: shadowOpsCatalog }, deps.opsCatalogApi));
@@ -1817,6 +1876,7 @@ export async function daemonCommand(
     const summary = await runDaemonFn(
       plan,
       {
+        bootPhases,
         refreshMerged,
         refreshMergedAsync: readTick ? buildDaemonReadRefresher({
           read: readTick, plan: () => activePlanRef.current, previous: () => lastProj,
@@ -2115,7 +2175,7 @@ export async function daemonCommand(
         // The same read drains the host-escalation spool: host-side alerts the host itself could not post.
         checkFreshness: testRunnerOnItsOwnCheckout(repoRoot)
           ? daemonFreshnessReads(repoRoot, process.env, { loadedCodeSha: daemonLoadedCodeSha }).checkFreshness
-          : withEscalationSpoolDrain(withLiveEditLadders(daemonFreshnessReads(repoRoot, process.env, { loadedCodeSha: daemonLoadedCodeSha }).checkFreshness, liveEditLadderWiring(config)), escalationSpoolDrainWiring(config)),
+          : withEscalationSpoolDrain(withLiveEditLadders(daemonFreshnessReads(repoRoot, process.env, { loadedCodeSha: daemonLoadedCodeSha }).checkFreshness, { ...liveEditLadderWiring(config), ...freshnessRestartLadder(policy.values.freshnessRestart) }), escalationSpoolDrainWiring(config)),
         // W1-T10919: read main's tree directly; a config-only fetch need not reset the consumer checkout.
         readTerminalPreDispatchRefusalRevisions: () => terminalPreDispatchRefusalRevisions(join(config.root, "state"), () => runnerConfigDigest(targetCheckoutRoot, "origin/main")),
         categorizedRefusalRejoinFor: (id) => lastProj?.get(id)?.categorizedRefusalRejoin,

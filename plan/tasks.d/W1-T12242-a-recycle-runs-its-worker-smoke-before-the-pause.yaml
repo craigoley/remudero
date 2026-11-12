@@ -18,6 +18,10 @@
   files:
     - deploy/recycle-container.sh
     - test/deploy/a-recycle-runs-its-worker-smoke-before-the-pause.test.ts
+    - test/a-pulled-image-reclaimed-during-the-drain-is-re-pulled-before-the-smoke.test.ts
+    - test/deploy/a-recycle-never-starts-on-a-live-recycles-pause.test.ts
+    - test/a-recycle-finds-a-holders-worktree-where-the-container-mounts-it.test.ts
+    - test/the-recycler-clears-its-own-stale-smoke-before-the-smoke.test.ts
   status: queued
   attempts: 0
   acceptance:
@@ -48,6 +52,11 @@
     - Keep the check after the wait that the pulled image id still exists. If it is gone, pull again and run the smoke again before `docker stop`. That is the only case with a smoke after the wait.
     - Add `smoke_at` and `smoke_s` to the `recycle.ended` row.
     Test with the fake `docker` on the path that the tests in test/deploy use for this script.
+    Four existing tests assert the old order, and their fixtures change with it:
+    - test/a-pulled-image-reclaimed-during-the-drain-is-re-pulled-before-the-smoke.test.ts: its fake smoke always fails, and it reads the image check before the smoke. The fake smoke passes, the image check follows the smoke, and a re-pulled image is smoked a second time.
+    - test/deploy/a-recycle-never-starts-on-a-live-recycles-pause.test.ts: a refusal for a pause that a live recycle owns now comes after the smoke. It still asserts no `docker stop` and no `docker rm`.
+    - test/a-recycle-finds-a-holders-worktree-where-the-container-mounts-it.test.ts: its fake `docker` counted `docker container` (the smoke) as a container replacement. A drain refusal now follows a smoke, so only `stop`, `rm` and `run` count.
+    - test/the-recycler-clears-its-own-stale-smoke-before-the-smoke.test.ts: a refusal for a leftover smoke container read "pause removed". It now comes before the pause, so the test reads that no pause was written.
     NOT IN SCOPE: what the smoke checks, the wait, the lock (W1-T12243), and the serve container.
   falsifier: |
     Run the smoke after the pause and criterion 1 must fail. Leave a pause file after a failed smoke and criterion 2 must fail. Skip the second smoke after a new pull and criterion 3 must fail. Restore and require all five to pass.

@@ -14,7 +14,7 @@ import { join } from "node:path";
 
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { readFileIfExists, writeAtomic } from "./fs-race-safe.js";
-import { GardenMintTimedOutError, prepareGardenTaskIds, recordGardenMintTimeout, type GardenTaskIdMinter, type GardenerDeps } from "./gardener.js";
+import { GardenMintTimedOutError, landedPrUrl, prepareGardenTaskIds, recordGardenMintTimeout, type GardenTaskIdMinter, type GardenerDeps } from "./gardener.js";
 import { ghJsonAsync, ghTextAsync } from "./github-transport.js";
 import { classifyContribution, feedbackContentDigest, type AdmissionSettings, type AdmissionDecision } from "./contributor-admission.js";
 import { readLedgerUnionRecordsSync } from "./ledger-union.js";
@@ -965,13 +965,13 @@ async function landFollowUp(
     writeAtomic(join(workspace.root, relativePath), rendered.text);
     const refused = machineShardLandingGuard(deps)(workspace.root, [relativePath]);
     if (refused !== undefined) throw new Error(`flow: follow-up record failed lint-plan's machine-filing admission: ${refused}`);
-    const prUrl = await workspace.land({
+    const prUrl = landedPrUrl(await workspace.land({
       paths: [relativePath],
       title: `chore(plan): file the ${stat.cls} ${stat.stage} flow regression`,
       body: `The W1-T5904 flow gardener measured ${stat.key}: p50 ${stat.current!.p50} against a ${stat.baseline!.p50} baseline ` +
         `(${stat.baseline!.source}). Slowest: ${stat.slowest.map((s) => `#${s.pr}`).join(", ")}.\n\n` +
         `## Acceptance\n\n- claim: the flow regression is recorded as a parked task\n  proof: grep: ${origin(stat.key)} in ${relativePath}`,
-    });
+    }), "flow");
     if (!prUrl) throw new Error("flow: follow-up PR was not opened");
     return { taskId, prUrl };
   } finally {

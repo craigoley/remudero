@@ -362,11 +362,11 @@ import {
   holdTaskForRefusal,
   noPrVerdictRowsFromLedger,
   readTaskShard,
-  refusalIsMainCaused,
   taskAwaitsAmendment,
   type RefusalAmendmentResult,
   type RefusalCandidate,
 } from "./refusal-amendment.js";
+import { landTaskFilesAsync, stagedTaskFiles, type LandTaskFilesOpts } from "./feedback-landing.js";
 
 /** W1-T6434: the bounded, already-scrubbed view of a preserved fix-owner patch. */
 export interface PriorPartialWork {
@@ -5244,7 +5244,21 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     // written FIRST (cheap, local, idempotent) so a slow or failed PR never lets the task re-dispatch.
     draftRefusalAmendments: async (candidates) => {
       const results: RefusalAmendmentResult[] = [];
-      const currentPlan = reloadPlanForFix() ?? plan;
+      // W1-T12199: amendments land through the sealed task-file landing. A test's injected git and gh
+      // carry the landing too, so it never runs a real child against the checkout the test runs in.
+      const landingOpts: LandTaskFilesOpts = {
+        stateRoot: config.root,
+        targetRepository: { owner, repo },
+        log,
+        planPrPreflight: (sha, pr) => planPrPreflightImpl(repoDir, sha, pr, { log }),
+        ...(deps.planRepairGitImpl ? { git: (args: string[]) => planRepairGit("git", ["-C", repoDir, ...args]) } : {}),
+        ...(deps.ghJsonImpl ? { gh: (args: string[]) => {
+          const out = ghJsonForBuild(args);
+          return typeof out === "string" ? out : JSON.stringify(out);
+        } } : {}),
+      };
+      const stagedFor = new Map<string, string>();
+      const currentPlan = candidates.length > 0 ? reloadPlanForFix() ?? plan : plan;
       for (const c of candidates) {
         const task = currentPlan.byId.get(c.taskId);
         const base = { taskId: c.taskId, sourceRunId: c.runId, classes: c.refusals.map((r) => r.refusalClass) };
@@ -5260,73 +5274,53 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         results.push(
           await draftRefusalAmendment(c, {
             readShard: (taskId) => readTaskShard(repoDir, taskId),
-            probeExisting: (branch) => probeExistingPlanPr(ghJsonForBuild, owner, repo, branch),
+            // W1-T12199: an amendment that waits, or that the open landing PR carries, is found by its staged
+            // file. The per-task branch is still read for an amendment opened before this landing.
+            probeExisting: (branch) => {
+              const relPath = readTaskShard(repoDir, c.taskId)?.relPath;
+              const waiting = relPath === undefined ? undefined : stagedTaskFiles(config.root).find((f) => f.relPath === relPath);
+              return waiting ? { ...(waiting.prUrl ? { prUrl: waiting.prUrl } : {}) } : probeExistingPlanPr(ghJsonForBuild, owner, repo, branch);
+            },
             nowIso: () => clockFromMillisFn(nowMsImpl).iso(),
             openAmendmentPr: async (input) => {
-              try {
-                planRepairGit("git", ["-C", repoDir, "fetch", "origin", "--quiet"]);
-              } catch {
-                /* best-effort — a stale local view still lets the PR open */
-              }
-              const worktreePath = join(worktreesDir(config), `refusal-amendment-${c.taskId}-${nowMsImpl()}`);
-              try {
-                try {
-                  planRepairGit("git", ["-C", repoDir, "branch", "-D", input.branch]);
-                } catch {
-                  /* no stale local branch to clear — the common case */
-                }
-                worktreeAddForBuild(repoDir, worktreePath, input.branch, "origin/main", { log });
-                writeFileSync(join(worktreePath, input.shardRelPath), input.amendedText);
-                planRepairGit("git", ["-C", worktreePath, "add", input.shardRelPath]);
-                planRepairGit("git", [
-                  "-C",
-                  worktreePath,
-                  "commit",
-                  "-m",
-                  buildPlanPrCommitMessage({ scope: "plan", subject: `propose an amendment for ${c.taskId}`, extraBody: input.commitBody }),
-                ]);
-                const headSha = planRepairGit("git", ["-C", worktreePath, "rev-parse", "HEAD"]).trim();
-                const body = buildPlanPrBodyImpl({
-                  intro: input.prIntro,
-                  criteria: [{ claim: input.claim, proof: input.proof }],
-                  changedFiles: [input.shardRelPath],
-                  proofCwd: worktreePath,
-                });
+              const landing = await landTaskFilesAsync(
+                repoDir,
+                [{ relPath: input.shardRelPath, content: input.amendedText, claim: input.claim, proof: input.proof }],
+                { ...landingOpts, stageOnly: true, lane: "refusal_amendment" },
+              );
+              const refusal = landing.refused[0];
+              // A check that ran out of its budget is no refusal: `plan_pr.preflight_timed_out` records it,
+              // and no amendment row settles this source run, so a later pass asks again.
+              if (refusal?.timedOut) throw new PlanPrPreflightTimedOutError("refusal_amendment", refusal.failures ?? []);
+              if (refusal?.failures) {
                 // W1-T5405: a red preflight is ledgered as this source run's outcome, so the next pass does not re-pay it.
-                const verdict = await planPrPreflightImpl(worktreePath, headSha, { title: input.title, body }, { log });
-                if (!planPrPreflightAllows(verdict, { lane: "refusal_amendment", branch: input.branch, log })) {
-                  // A check that ran out of its budget is no refusal: `plan_pr.preflight_timed_out` records it,
-                  // and no amendment row settles this source run, so a later pass asks again.
-                  if (verdict.ok) throw new PlanPrPreflightTimedOutError("refusal_amendment", verdict.timedOut ?? []);
-                  // W1-T5531: preflight the base alone, so a red main's refusal is retried once main moves.
-                  // A probe that cannot run records why and leaves the refusal final, as before W1-T5531.
-                  const base: { origin_main_sha?: string; main_red: boolean; main_red_probe_error?: string } = { main_red: false };
-                  try {
-                    base.origin_main_sha = planRepairGit("git", ["-C", worktreePath, "rev-parse", "HEAD^"]).trim();
-                    const onBase = await planPrPreflightImpl(repoDir, base.origin_main_sha, { title: input.title, body }, { log });
-                    base.main_red = refusalIsMainCaused(verdict.failures, onBase.failures);
-                  } catch (e) {
-                    const reason = String((e as Error)?.message ?? e);
-                    base.main_red_probe_error = reason;
-                  }
-                  log(REFUSAL_AMENDMENT_STEP, { task_id: c.taskId, source_run_id: c.runId, outcome: "preflight_refused", failures: verdict.failures, ...base });
-                  throw new PlanPrPreflightRefusedError("refusal_amendment", verdict.failures);
-                }
-                await gitPushRunBranchForBuild(worktreePath, { stdio: "ignore", expectedHeadSha: headSha });
-                assertLiveWriteAllowed("gh-pr-create", `opening the refusal-amendment PR for ${c.taskId}'s shard`);
-                return createPlanPrRest(ghJsonForBuild, owner, repo, { title: input.title, body, head: input.branch, base: "main" });
-              } finally {
-                try {
-                  worktreeRemoveForBuild(repoDir, worktreePath);
-                } catch {
-                  /* best-effort cleanup */
-                }
+                // W1-T5531: the landing tested the base alone, so a red main's refusal is retried once main moves.
+                log(REFUSAL_AMENDMENT_STEP, {
+                  task_id: c.taskId, source_run_id: c.runId, outcome: "preflight_refused", failures: refusal.failures,
+                  ...(refusal.mainSha !== undefined ? { origin_main_sha: refusal.mainSha } : {}),
+                  main_red: refusal.mainRed ?? false,
+                  ...(refusal.mainRedProbeError !== undefined ? { main_red_probe_error: refusal.mainRedProbeError } : {}),
+                });
+                throw new PlanPrPreflightRefusedError("refusal_amendment", refusal.failures);
               }
+              if (refusal) throw new Error(refusal.reason);
+              if (landing.error) throw new Error(landing.error);
+              stagedFor.set(c.taskId, input.shardRelPath);
+              return {};
             },
           }),
         );
       }
-      return results;
+      // One landing call per pass: the amendments of this pass share one pull request, and a file that
+      // waited behind a merged landing goes into the next one with no new refusal.
+      const landed = await landTaskFilesAsync(repoDir, [], landingOpts);
+      if (landed.error) log("sweep.task_files_landing.error", { error: landed.error, waiting: landed.waiting });
+      return results.map((r) => {
+        const relPath = r.outcome === "waiting" ? stagedFor.get(r.taskId) : undefined;
+        return relPath !== undefined && landed.prUrl !== undefined && landed.landed.includes(relPath)
+          ? { ...r, outcome: "drafted" as const, prUrl: landed.prUrl }
+          : r;
+      });
     },
 
     rebaseDirtyFleetBranch: (pr) =>
@@ -7261,13 +7255,15 @@ export interface SweepPolicy {
    *  rotation selects against the marker, so the bound re-arms, and the window is BYTE-DRIVEN.
    *  NEVER PRE-EMPTS {@link pendingCeilingMinutes}. */
   repeatDispositionBound: number;
+  /** W1-T12267: the sweep tick bound; a light pass's plan-merge budget never passes half of it. */
+  sweepWallClockBoundMs?: number;
 }
 
 /** The shipped default policy. A BOUNDED FAIL-SAFE (rule 2): an absent value falls back to a bounded
  *  default, never to unbounded spend, and the cost ceiling bounds RUNAWAY spend, not a budget.
  *  Several rows are COLLECTED from `plan/policy.yaml` rather than written as source literals, each a
  *  RELOCATION and never a retune. // Why: FROZEN AT IMPORT (W1-T331) — docs/forensics/sweep.md. */
-const POLICY_SWEEP = loadDefaultPolicy().values.sweep;
+const { sweep: POLICY_SWEEP, sweepWallClockBoundMs: POLICY_SWEEP_WALL_CLOCK_BOUND_MS } = loadDefaultPolicy().values;
 
 /** W1-T1049 — reads `plan/policy.yaml`'s `sweep.reviewLanes` row DIRECTLY, never through
  *  `policy.ts`'s schema, which is outside this task's declared files. Validated like every other
@@ -7439,6 +7435,7 @@ export const DEFAULT_SWEEP_POLICY: SweepPolicy = {
   // literal, 50, derived against the merge-time population measured 2026-08-26 (see the field's
   // own doc for the full derivation), never a round number picked because it looked safe.
   repeatDispositionBound: 50,
+  sweepWallClockBoundMs: POLICY_SWEEP_WALL_CLOCK_BOUND_MS,
 };
 
 /** W1-T923 — one GATE failure whose remedy is a SINGLE, unambiguous form, so the fix rung can act
@@ -9115,6 +9112,24 @@ export function reaggregatedCiGateKeysFromLedger(lines: Array<Record<string, unk
     }
   }
   return out;
+}
+
+/** W1-T1275/W1-T12273 — re-drive a stale ci-gate's own job at most once per (head, sibling transition).
+ *  The row is ledgered before the call, so a crash between them still bounds the next pass. */
+async function redriveStaleCiGate(deps: Pick<SweepDeps, "ledgerPath" | "runId" | "reaggregateCiGate" | "appendLine">,
+  pr: OpenPrView, transition: StaleCiGateTransition, keys: Set<string>): Promise<string> {
+  const key = ciGateReaggregateKey(pr.headSha, transition);
+  if (!ciGateReaggregateDecision(keys.has(key)).reaggregate) {
+    return `stale ci-gate verdict already re-driven for this transition — awaiting the fresh result`;
+  }
+  (deps.appendLine ?? appendLedger)(deps.ledgerPath, {
+    run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", step: CI_GATE_REAGGREGATE_STEP, pr_number: pr.prNumber,
+    pr_url: pr.prUrl, head_sha: pr.headSha, sibling_name: transition.siblingName, sibling_started_at: transition.siblingStartedAt,
+  });
+  keys.add(key);
+  if (deps.reaggregateCiGate) await deps.reaggregateCiGate(pr, transition);
+  return `stale ci-gate verdict — re-driving its job (required sibling "${transition.siblingName}" ` +
+    `reached success at ${transition.siblingStartedAt}, after the gate concluded)`;
 }
 
 const MS_PER_DAY = 86_400_000;
@@ -15173,6 +15188,12 @@ export interface SweepDeps {
   standDownReasonFor?: (d: Disposition) => string | undefined;
   /** W1-T9569: set only by a review-only light pass; every `sweep.disposed` row it writes carries it. */
   lightPassScope?: LightPassScopeName;
+  /** W1-T11502: told each PR's derived disposition and exact head just before the light pass acts on it, so an
+   *  interphase review pass can keep a repair its scope stood down as scheduling debt, and the pass that takes
+   *  the debt's turn can tell a still-due repair from a settled or moved one (`due`: nothing already done at this head). Observation only: it admits nothing. */
+  observeRepairTurn?: (observation: { prNumber: number; headSha: string; disposition: Disposition; due: boolean }) => void;
+  /** W1-T12267: one id for every light pass that one tick starts. The plan-merge interval counts a tick once. */
+  lightTickId?: string;
 
   /** W1-T2379/W1-T3202 — DO NOT AWAIT THE FIX RUNG'S CI WAIT. Set by the light pass and by the
    *  production full-sweep wrapper. The
@@ -20465,6 +20486,7 @@ export async function runSweep(
   // Full passes only. Only a `no_pr` row whose excerpt `extractRefusal` parses is a candidate: an
   // uncategorized `no_pr` is skipped here and retries exactly as before. `error` outcomes write no
   // ledger row, so the next pass retries; every other outcome is recorded once per source run.
+  // W1-T12199: the effect runs with no candidate too, so a task file that waits is landed on this pass.
   if (deps.draftRefusalAmendments && deps.repairAdmissionSurface !== "light") {
     try {
       const candidates: RefusalCandidate[] = [];
@@ -20472,7 +20494,7 @@ export async function runSweep(
         const refusals = extractRefusal(row.reportExcerpt);
         if (refusals.length > 0) candidates.push({ ...row, refusals });
       }
-      if (candidates.length > 0) {
+      {
         for (const r of await deps.draftRefusalAmendments(candidates)) {
           if (r.outcome === "error") {
             log("sweep.refusal_amendment.error", { task_id: r.taskId, error: r.error });
@@ -21864,8 +21886,14 @@ export async function runSweep(
     // W1-T5543: fleet filings have their own plan surface; the code rung still never owns one.
     if (planConflictRound || (disposition === "blocked-fixable" && isBlockedCi(pr) && pr.isPlanFiling === true)) {
       const pendingJudgment = judgedUnavailable.get(pr.prNumber);
+      const staleGate = pendingJudgment || planConflictRound || !deps.readCiGateRollup ? undefined
+        : staleCiGateTransition(await deps.readCiGateRollup(pr));
       const repair = pendingJudgment ? { repaired: true, reason: pendingJudgment }
-        : planConflictRound ? { repaired: false, reason: "" } : await tryPlanRepair(pr);
+        : planConflictRound ? { repaired: false, reason: "" }
+        : staleGate ? { repaired: true, reason: deps.dryRun || !(deps.actionable?.("blocked-fixable") ?? true)
+          ? "stale ci-gate verdict — its re-run waits for a full sweep pass"
+          : await redriveStaleCiGate(deps, pr, staleGate, reaggregatedCiGateKeys) }
+        : await tryPlanRepair(pr);
       const facts = planRoundFacts.get(pr.prNumber);
       let planRoundExhausted = false;
       if (!repair.repaired && deps.dispatchPlanGateRound && isFleetAppAuthor(facts?.authorLogin) &&
@@ -22580,6 +22608,7 @@ export async function runSweep(
     }
 
     let acted = !alreadyDone && !deps.dryRun;
+    deps.observeRepairTurn?.({ prNumber: pr.prNumber, headSha: pr.headSha, disposition, due: acted });
     // The dep-review lane's decision for THIS pass (dep-review disposition only)
     // — ledgered so priorActionsFromLedger can tell terminal from hold.
     let depReviewOutcome: string | undefined;
@@ -23562,30 +23591,8 @@ export async function runSweep(
                 ? classifyCiTimeoutNoVerdict(pr.ciFailures ?? [], pr.redRequiredChecks ?? [], (pr.cancelledRequiredChecks ?? []).map((c) => c.name))
                 : undefined;
               if (staleTransition && (!timeoutShape || timeoutShape.notReady.includes(staleTransition.siblingName))) {
-                const key = ciGateReaggregateKey(pr.headSha, staleTransition);
-                const decision = ciGateReaggregateDecision(reaggregatedCiGateKeys.has(key));
-                if (decision.reaggregate) {
-                  // LEDGERED BEFORE THE CALL, the same ordering the re-queue uses below: a crash
-                  // between this write and the real GitHub call still bounds the NEXT pass toward
-                  // standing down rather than re-driving twice.
-                  appendLine(deps.ledgerPath, {
-                    run_id: deps.runId,
-                    task_id: pr.taskId ?? "SWEEP",
-                    step: CI_GATE_REAGGREGATE_STEP,
-                    pr_number: pr.prNumber,
-                    pr_url: pr.prUrl,
-                    head_sha: pr.headSha,
-                    sibling_name: staleTransition.siblingName,
-                    sibling_started_at: staleTransition.siblingStartedAt,
-                  });
-                  reaggregatedCiGateKeys.add(key);
-                  if (deps.reaggregateCiGate) await deps.reaggregateCiGate(pr, staleTransition);
-                }
                 acted = false;
-                standDownReason = decision.reaggregate
-                  ? `stale ci-gate verdict — re-driving its job (required sibling "${staleTransition.siblingName}" ` +
-                    `reached success at ${staleTransition.siblingStartedAt}, after the gate concluded)`
-                  : `stale ci-gate verdict already re-driven for this transition — awaiting the fresh result`;
+                standDownReason = await redriveStaleCiGate(deps, pr, staleTransition, reaggregatedCiGateKeys);
                 break;
               }
               let ciFailuresForFix = isBlockedCi(pr) ? pr.ciFailures ?? [] : [];
@@ -25908,7 +25915,9 @@ function lightPassIntervalBudgetFromLedger(
   type RowAt = { row: Readonly<Record<string, unknown>>; index: number };
   type PassRows = { starts: RowAt[]; summaries: RowAt[] };
   const byId = new Map<string, PassRows>();
-  const events: Array<{ index: number; valid: boolean; startedAtMs?: number }> = [];
+  let events: Array<{ index: number; valid: boolean; startedAtMs?: number; tickId?: string }> = [];
+  const tickOf = (row: Readonly<Record<string, unknown>>): { tickId?: string } =>
+    typeof row.tick_id === "string" && row.tick_id.length > 0 ? { tickId: row.tick_id } : {};
   const groupFor = (id: string): PassRows => {
     const current = byId.get(id);
     if (current) return current;
@@ -25921,7 +25930,7 @@ function lightPassIntervalBudgetFromLedger(
     if (row.step !== "sweep.pass" && row.step !== "sweep.summary") return;
     const hasId = typeof row.pass_id === "string" && row.pass_id.trim().length > 0;
     if (row.step === "sweep.pass" && row.light_pass_scope === scope && !hasId) {
-      events.push({ index, valid: false });
+      events.push({ index, valid: false, ...tickOf(row) });
       return;
     }
     if (!hasId) return;
@@ -25941,11 +25950,27 @@ function lightPassIntervalBudgetFromLedger(
         summary.index > start.index && Number.isFinite(startMs) &&
         typeof elapsed === "number" && Number.isFinite(elapsed) && elapsed >= 0;
       events.push({ index: start.index, valid,
-        ...(valid ? { startedAtMs: startMs } : {}) });
+        ...(valid ? { startedAtMs: startMs } : {}), ...tickOf(start.row) });
     }
   }
 
   events.sort((left, right) => left.index - right.index);
+  // W1-T12267: one tick starts several light passes a few milliseconds apart. The interval is between ticks,
+  // so the passes of one tick count as one start, the earliest. A row with no tick id is its own tick.
+  const ticks = new Map<string, (typeof events)[number]>();
+  const singles: typeof events = [];
+  for (const event of events) {
+    const tick = event.tickId === undefined ? undefined : ticks.get(event.tickId);
+    if (event.tickId === undefined) singles.push(event);
+    else if (tick === undefined) ticks.set(event.tickId, { ...event });
+    else {
+      tick.valid = tick.valid && event.valid;
+      if (event.startedAtMs !== undefined && (tick.startedAtMs === undefined || event.startedAtMs < tick.startedAtMs)) {
+        tick.startedAtMs = event.startedAtMs;
+      }
+    }
+  }
+  events = [...singles, ...ticks.values()].sort((left, right) => left.index - right.index);
   const intervals: number[] = [];
   let previousStartMs: number | undefined;
   for (const event of events) {
@@ -25974,9 +25999,11 @@ export async function runSweepLightPass(
 ): Promise<SweepSummary[]> {
   const passId = randomUUID();
   const passScope = deps.lightPassScope ?? "idle";
+  const planMergeReport: LightPassPlanMergeReport = { turns: 0, attempts: 0, merged: 0, spentMs: 0 };
   if (deps.dryRun || !deps.log) {
-    return runSweepLightPassCore(openPrs, deps, policy, passId, passScope);
+    return runSweepLightPassCore(openPrs, deps, policy, passId, passScope, planMergeReport);
   }
+  const tick = deps.lightTickId ? { tick_id: deps.lightTickId } : {};
 
   const startedAtMs = performance.now();
   const startedAt = clockFromMillisFn(deps.now ?? Date.now).iso();
@@ -25989,7 +26016,7 @@ export async function runSweepLightPass(
       if (step === "sweep.pass") {
         if (passRecorded) return;
         passRecorded = true;
-        log(step, { ...extra, ts: startedAt, pass_id: passId, light_pass_scope: passScope });
+        log(step, { ...extra, ts: startedAt, pass_id: passId, light_pass_scope: passScope, ...tick });
       } else if (step === "sweep.summary") {
         summaries.push(extra);
       } else {
@@ -25997,7 +26024,7 @@ export async function runSweepLightPass(
       }
     },
   };
-  const result = await runSweepLightPassCore(openPrs, measuredDeps, policy, passId, passScope);
+  const result = await runSweepLightPassCore(openPrs, measuredDeps, policy, passId, passScope, planMergeReport);
   const elapsedMs = performance.now() - startedAtMs;
   if (passRecorded && Number.isFinite(elapsedMs) && elapsedMs >= 0) {
     const aggregate: Record<string, unknown> = {};
@@ -26008,9 +26035,30 @@ export async function runSweepLightPass(
           : value;
       }
     }
-    log("sweep.summary", { ...aggregate, pass_id: passId, light_pass_scope: passScope, elapsed_ms: elapsedMs });
+    // W1-T12267: how many plan merges this pass made, against which budget, and why it stopped.
+    const planMerges = planMergeReport.turns === 0 ? {} : {
+      plan_merge_attempts: planMergeReport.attempts, plan_merges: planMergeReport.merged,
+      plan_merge_spent_ms: planMergeReport.spentMs,
+      ...(planMergeReport.budgetMs === undefined ? {} : { plan_merge_budget_ms: planMergeReport.budgetMs }),
+      ...(planMergeReport.intervalMs === undefined ? {} : { plan_merge_interval_ms: planMergeReport.intervalMs }),
+      ...(planMergeReport.stop === undefined ? {} : { plan_merge_stop: planMergeReport.stop }),
+    };
+    log("sweep.summary", { ...aggregate, ...planMerges, pass_id: passId, light_pass_scope: passScope, ...tick, elapsed_ms: elapsedMs });
   }
   return result;
+}
+
+/** W1-T12267: what one light pass did with its plan merge turns; it rides the pass's `sweep.summary` row. */
+interface LightPassPlanMergeReport {
+  turns: number;
+  attempts: number;
+  merged: number;
+  spentMs: number;
+  /** The budget in force: the measured interval between ticks, never above half of `sweepWallClockBoundMs`. */
+  budgetMs?: number;
+  intervalMs?: number;
+  /** The first stop sentence of the pass. */
+  stop?: string;
 }
 
 async function runSweepLightPassCore(
@@ -26019,11 +26067,12 @@ async function runSweepLightPassCore(
   policy: SweepPolicy,
   passId: string,
   passScope: LightPassScopeName,
+  planMergeReport: LightPassPlanMergeReport,
 ): Promise<SweepSummary[]> {
   const memoryHeld = openPrs.filter((pr) => lightPassMemoryWaits.has(lightPassHeadKey(pr)));
   if (memoryHeld.length > 0) {
     const held = memoryHeld.map((pr) => lightPassMemoryWaitSummary(pr, deps, lightPassMemoryWaits.get(lightPassHeadKey(pr))!.sinceMs));
-    return [...held, ...await runSweepLightPassCore(openPrs.filter((pr) => !memoryHeld.includes(pr)), deps, policy, passId, passScope)];
+    return [...held, ...await runSweepLightPassCore(openPrs.filter((pr) => !memoryHeld.includes(pr)), deps, policy, passId, passScope, planMergeReport)];
   }
   if (openPrs.length === 0) {
     noteIdleReviewDemand(0, 0, deps.now ? deps.now() : systemClock.now());
@@ -26147,8 +26196,13 @@ async function runSweepLightPassCore(
   const planMergeToken = Symbol("light-pass-plan-merge");
   // W1-T9212: the pass that owns the claim also re-evaluates every OTHER held plan PR it observes ready,
   // one at a time under that same claim, instead of leaving each for a later pass.
-  const passIntervalBudgetMs = lightPassIntervalBudgetFromLedger(
+  const measuredIntervalMs = lightPassIntervalBudgetFromLedger(
     selectionLedgerLines.filter((row) => row.pass_id !== passId), passScope);
+  // W1-T12267 — BACKSTOP: a pass that spends its whole budget starts the next tick later, so an interval measured
+  // between ticks grows with the work. The budget never passes HALF of `sweepWallClockBoundMs`: the daemon loop awaits
+  // its light pass and the restart drain stops at that row, so a pass must end, with one merge still running, inside it.
+  const passIntervalBudgetMs = measuredIntervalMs === undefined ? undefined
+    : Math.min(measuredIntervalMs, Math.floor((policy.sweepWallClockBoundMs ?? POLICY_SWEEP_WALL_CLOCK_BOUND_MS) / 2));
   const availablePlanMerges = lightPassPlanMergeOwner !== undefined
     ? []
     : selectLightPassPlanMerges(openPrs, policy, now, selectionLedgerLines, passIntervalBudgetMs !== undefined);
@@ -26161,6 +26215,11 @@ async function runSweepLightPassCore(
     "(the one plan PR direct-merges per light pass bound remains; measured interval unavailable: " +
     "fewer than three valid same-scope intervals); held PRs keep their W1-T9212 re-evaluation";
   const planMergeStopReason = (index: number | undefined, held: boolean): string | undefined => {
+    const stop = planMergeStopDecision(index, held);
+    if (stop !== undefined) planMergeReport.stop ??= stop;
+    return stop;
+  };
+  const planMergeStopDecision = (index: number | undefined, held: boolean): string | undefined => {
     if (passIntervalBudgetMs === undefined) return index === 0 || held ? undefined : unavailablePlanMergeReason;
     if (index !== undefined && planMergeBudget.attempts === 0) return undefined;
     if (!planMergeBudget.durationKnown) {
@@ -26176,6 +26235,11 @@ async function runSweepLightPassCore(
     return undefined;
   };
   const planMergeCandidate = planMerges[0];
+  if (planMerges.length > 0) {
+    planMergeReport.turns += planMerges.length;
+    if (passIntervalBudgetMs !== undefined) planMergeReport.budgetMs = passIntervalBudgetMs;
+    if (measuredIntervalMs !== undefined) planMergeReport.intervalMs = measuredIntervalMs;
+  }
   if (planMergeCandidate) lightPassPlanMergeOwner = planMergeToken;
   const releasePlanMerge = (): void => {
     if (lightPassPlanMergeOwner === planMergeToken) lightPassPlanMergeOwner = undefined;
@@ -26326,6 +26390,9 @@ async function runSweepLightPassCore(
             const elapsedMs = Number.isFinite(elapsed) && elapsed >= 0 ? elapsed : undefined;
             attempt = { outcome, ...(elapsedMs === undefined ? {} : { elapsedMs }) };
             planMergeBudget.attempts++;
+            planMergeReport.attempts++;
+            if (outcome === "direct-merged") planMergeReport.merged++;
+            if (elapsedMs !== undefined) planMergeReport.spentMs += elapsedMs;
             if (elapsedMs === undefined) planMergeBudget.durationKnown = false;
             else planMergeBudget.spentMs += elapsedMs;
           }

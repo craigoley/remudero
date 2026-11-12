@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { loadConfig, type Config } from "../../lib/config.js";
 import { ledgerPathFor } from "../../lib/ledger-path.js";
@@ -1204,6 +1205,8 @@ export function buildSweepLightHook(
     // W1-T4053: a freshness drain's pass. The fix rung reads closed and the requeue batch never forms,
     // so `post-review` is the only lane left.
     const reviewOnly = scope?.reviewOnly === true;
+    // W1-T12267: every light pass this tick starts carries one tick id, so the plan-merge interval counts the tick once.
+    const lightTickId = randomUUID();
     const timing = new LightPassPreReviewTiming(io.clock);
     let timingWritten = false;
     const finishTiming = () => {
@@ -1256,7 +1259,7 @@ export function buildSweepLightHook(
         const requeueOnlyPrs = reviewOnly ? [] : passPrs.filter((pr) => blockedFixableIsRequeueOnly(pr));
         const requeueNumbers = new Set(requeueOnlyPrs.map((pr) => pr.prNumber));
         const restPrs = passPrs.filter((pr) => !requeueNumbers.has(pr.prNumber));
-        const common = { ...effects, ledgerPath, runId, log, reviewerCodeRecovery, updateBranch: undefined };
+        const common = { ...effects, ledgerPath, runId, log, reviewerCodeRecovery, updateBranch: undefined, lightTickId };
         const scopeDeps = reviewOnlyLightPassDeps(scope);
         // W1-T528: branch updates belong to the whole-snapshot selection, never this per-PR fan-out.
         const passes: Array<Promise<unknown>> = [runSweepLightPass(restPrs, {
@@ -1265,6 +1268,7 @@ export function buildSweepLightHook(
           actionable: (d) => (mergeHold === undefined || d !== "mergeable") &&
             lightPassActionable(d, fixRungAllowed, false, armAdmitted, fixAdmitted),
           ...scopeDeps,
+          ...(scope?.observeRepairTurn ? { observeRepairTurn: scope.observeRepairTurn } : {}),
           // W1-T11510: a held head that derives another disposition keeps its scope's own stand-down text.
           ...(mergeHold !== undefined ? { standDownReasonFor: (d: Disposition) => d === "mergeable"
             ? mergeHold : scopeDeps.standDownReasonFor?.(d) } : {}),

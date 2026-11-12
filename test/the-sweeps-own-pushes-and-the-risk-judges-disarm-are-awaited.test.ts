@@ -202,7 +202,9 @@ test(`${PROOF}: awaited risk disarm retains every sync disposition and lost-race
 });
 
 test(`${PROOF}: both sweep plan filings await push before creating a pr or cleaning up`, async () => {
-  for (const lane of ["refusal", "repair"] as const) {
+  // W1-T12199: the refusal amendment no longer pushes a branch of its own. It lands through the sealed
+  // task-file landing, whose push is an awaited step of the landing. The plan repair still pushes here.
+  for (const lane of ["repair"] as ReadonlyArray<"refusal" | "repair">) {
     for (const refused of [false, true]) {
       const root = mkdtempSync(join(tmpdir(), "rmd-t5742-plan-push-"));
       const shard = "plan/tasks.d/W1-T5742-fixture.yaml";

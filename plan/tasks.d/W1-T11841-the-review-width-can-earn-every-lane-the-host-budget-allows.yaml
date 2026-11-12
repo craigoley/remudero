@@ -23,7 +23,7 @@
   # refusal-amendment (W1-T11841, run W1-T11841-1794287366630, 2026-11-11T09:05:34.423Z): the worker refused criterion 1 [proof-unexecutable-at-head] — proposed re-scope-criteria: repair the criterion's proof so it is executable at HEAD, or re-scope the criterion
   #   worker evidence: W1-T11841: a filed proof already passes at the merge base, so branch run-W1-T11841-1794287366630 cannot open a PR
   #   this task is held from dispatch until its record changes; an Architect must make the change above
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: >-
