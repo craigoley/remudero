@@ -1,12 +1,13 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { readdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { parse as parseYaml } from "yaml";
-import { withTempDir } from "../src/lib/tmp.js";
+import { withTempDir } from "#src/lib/tmp.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
 // @ts-expect-error — plain .mjs script with no type declarations
-import { attest, groupPullNumbers, main, prFromQueueRef, prFromSquashSubject } from "../scripts/merge-queue-review-attest.mjs";
+import { attest, groupPullNumbers, main, prFromQueueRef, prFromSquashSubject } from "#scripts/merge-queue-review-attest.mjs";
 
 // The merge queue evaluates branch protection's required `remudero-review` context on its own group
 // commit, which the orchestrator never reviews. merge-queue-review-attest.yml reports it there, and
@@ -14,7 +15,6 @@ import { attest, groupPullNumbers, main, prFromQueueRef, prFromSquashSubject } f
 // The workflow is a REVIEW BYPASS if it ever runs (or is skipped) on a PR head, so its triggers are
 // pinned here against the real file on disk.
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const WORKFLOWS = join(REPO_ROOT, ".github", "workflows");
 const ATTEST_FILE = "merge-queue-review-attest.yml";
 
@@ -43,8 +43,23 @@ const GROUP = {
   },
 };
 
+/** W1-T11847: a checkout whose origin/main is the reviewer code every `success` below names, so the
+ *  attestor judges real ancestry with the sweep's own predicate. */
+function reviewerCodeAtMain(): { dir: string; code: string } {
+  const repo = gitRepo({ kind: "mq-attest" });
+  mkdirSync(join(repo.dir, "src/lib"), { recursive: true });
+  writeFileSync(join(repo.dir, "src/lib/review.ts"), "export const v = 1;\n");
+  repo.git("add", "-A");
+  repo.git("commit", "--quiet", "-m", "reviewer code");
+  const code = repo.git("rev-parse", "HEAD");
+  repo.git("update-ref", "refs/remotes/origin/main", code);
+  return { dir: repo.dir, code };
+}
+const CHECKOUT = reviewerCodeAtMain();
+
 /** A fake GitHub REST API: compare returns `subjects` as group commits, each PR's head is `h<N>`,
- *  and `h<N>`'s combined status carries `reviews[N]` (omitted = no status at all). */
+ *  and `h<N>`'s combined status carries `reviews[N]` (omitted = no status at all). A `success`
+ *  names the checkout's full reviewer-code sha, as the real reviewer's status does. */
 function fakeApi(subjects: string[], reviews: Record<number, string>, failPath?: string) {
   const calls: string[] = [];
   const fetchImpl = async (url: string) => {
@@ -60,7 +75,8 @@ function fakeApi(subjects: string[], reviews: Record<number, string>, failPath?:
     const status = /^\/repos\/o\/r\/commits\/h(\d+)\/status/.exec(path);
     if (status) {
       const state = reviews[Number(status[1])];
-      return reply({ statuses: state ? [{ context: "remudero-review", state }] : [{ context: "ci-gate", state: "success" }] });
+      const description = state === "success" ? `remudero-review: PASS [review code ${CHECKOUT.code}]` : undefined;
+      return reply({ statuses: state ? [{ context: "remudero-review", state, description }] : [{ context: "ci-gate", state: "success" }] });
     }
     return reply({}, 404);
   };
@@ -101,7 +117,7 @@ test("the queue ref and squash subjects name the group pull requests", () => {
 
 test("attests a group whose every pull request has a successful review", async () => {
   const api = fakeApi(["first (#11)", "second (#12)"], { 11: "success", 12: "success" });
-  const r = await attest({ event: GROUP, repo: "o/r", token: "t", fetchImpl: api.fetchImpl });
+  const r = await attest({ event: GROUP, repo: "o/r", token: "t", fetchImpl: api.fetchImpl, repoDir: CHECKOUT.dir });
   assert.equal(r.ok, true, r.lines.join("\n"));
   assert.ok(api.calls.includes("/repos/o/r/commits/h11/status?per_page=100"));
   assert.ok(api.calls.includes("/repos/o/r/commits/h12/status?per_page=100"));
@@ -109,20 +125,20 @@ test("attests a group whose every pull request has a successful review", async (
 
 test("refuses a group where one pull request has no review status", async () => {
   const api = fakeApi(["first (#11)", "second (#12)"], { 12: "success" });
-  const r = await attest({ event: GROUP, repo: "o/r", token: "t", fetchImpl: api.fetchImpl });
+  const r = await attest({ event: GROUP, repo: "o/r", token: "t", fetchImpl: api.fetchImpl, repoDir: CHECKOUT.dir });
   assert.equal(r.ok, false);
   assert.ok(r.lines.some((l: string) => l.includes("#11") && l.includes("absent")), r.lines.join("\n"));
 });
 
 test("refuses a group whose review status is a failure", async () => {
   const api = fakeApi(["second (#12)"], { 12: "failure" });
-  const r = await attest({ event: GROUP, repo: "o/r", token: "t", fetchImpl: api.fetchImpl });
+  const r = await attest({ event: GROUP, repo: "o/r", token: "t", fetchImpl: api.fetchImpl, repoDir: CHECKOUT.dir });
   assert.equal(r.ok, false);
 });
 
 test("refuses a group commit it cannot attribute to a pull request", async () => {
   const api = fakeApi(["second (#12)", "a direct push"], { 12: "success" });
-  const r = await attest({ event: GROUP, repo: "o/r", token: "t", fetchImpl: api.fetchImpl });
+  const r = await attest({ event: GROUP, repo: "o/r", token: "t", fetchImpl: api.fetchImpl, repoDir: CHECKOUT.dir });
   assert.equal(r.ok, false);
   assert.ok(r.lines.some((l: string) => l.includes("no (#N)")), r.lines.join("\n"));
 });
@@ -130,20 +146,20 @@ test("refuses a group commit it cannot attribute to a pull request", async () =>
 test("refuses a queue ref that names no pull request", async () => {
   const api = fakeApi(["second (#12)"], { 12: "success" });
   const event = { merge_group: { ...GROUP.merge_group, head_ref: "refs/heads/main" } };
-  const r = await attest({ event, repo: "o/r", token: "t", fetchImpl: api.fetchImpl });
+  const r = await attest({ event, repo: "o/r", token: "t", fetchImpl: api.fetchImpl, repoDir: CHECKOUT.dir });
   assert.equal(r.ok, false);
 });
 
 test("refuses an event that is not a merge group", async () => {
   const api = fakeApi([], {});
-  const r = await attest({ event: { pull_request: { number: 1 } }, repo: "o/r", token: "t", fetchImpl: api.fetchImpl });
+  const r = await attest({ event: { pull_request: { number: 1 } }, repo: "o/r", token: "t", fetchImpl: api.fetchImpl, repoDir: CHECKOUT.dir });
   assert.equal(r.ok, false);
   assert.equal(api.calls.length, 0);
 });
 
 test("refuses when the GitHub API is unreadable", async () => {
   const api = fakeApi(["second (#12)"], { 12: "success" }, "/repos/o/r/pulls/");
-  const r = await attest({ event: GROUP, repo: "o/r", token: "t", fetchImpl: api.fetchImpl });
+  const r = await attest({ event: GROUP, repo: "o/r", token: "t", fetchImpl: api.fetchImpl, repoDir: CHECKOUT.dir });
   assert.equal(r.ok, false);
   assert.ok(r.lines.some((l: string) => l.includes("HTTP 502")), r.lines.join("\n"));
 });
@@ -153,7 +169,7 @@ test("main reads the event file and exits by the verdict", async () => {
     const eventPath = join(dir, "event.json");
     writeFileSync(eventPath, JSON.stringify(GROUP));
     const logged: string[] = [];
-    const env = { GITHUB_EVENT_PATH: eventPath, GITHUB_REPOSITORY: "o/r", GH_TOKEN: "t" };
+    const env = { GITHUB_EVENT_PATH: eventPath, GITHUB_REPOSITORY: "o/r", GH_TOKEN: "t", GITHUB_WORKSPACE: CHECKOUT.dir };
     const pass = fakeApi(["second (#12)"], { 12: "success" });
     assert.equal(await main({ env, fetchImpl: pass.fetchImpl, log: (l: string) => logged.push(l) }), 0);
     const fail = fakeApi(["second (#12)"], {});
