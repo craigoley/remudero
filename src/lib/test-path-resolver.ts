@@ -1,4 +1,4 @@
-import { existsSync, lstatSync, readFileSync } from "node:fs";
+import { closeSync, constants, existsSync, fstatSync, openSync, readFileSync } from "node:fs";
 import { join, posix } from "node:path";
 import { placePaths } from "./test-placement.js";
 import { hostWorktreeGit } from "./worktree-git.js";
@@ -275,10 +275,17 @@ export function observeComputedPlacement(opts: ObservedPlacementOptions): Comput
     baseTracked,
     read: (path) => {
       const abs = join(opts.root, path);
+      let fd: number | undefined;
       try {
-        return lstatSync(abs).isFile() ? readFileSync(abs, "utf8") : { unreadable: "the candidate is not a readable regular file" };
+        // Judge and read the same object through one descriptor; the path can change after open.
+        fd = openSync(abs, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+        return fstatSync(fd).isFile()
+          ? readFileSync(fd, "utf8")
+          : { unreadable: "the candidate is not a readable regular file" };
       } catch (e) {
         return { unreadable: `the candidate is not a readable regular file (${String((e as Error)?.message ?? e).split("\n")[0]})` };
+      } finally {
+        if (fd !== undefined) closeSync(fd);
       }
     },
     folderOf: (path) => placePaths(opts.root, [path], treeSha)[0]?.placement.folder,
