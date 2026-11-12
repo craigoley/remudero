@@ -5,6 +5,7 @@ import { request, type IncomingMessage, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { join } from "node:path";
 import { test } from "node:test";
+import { clockFromMillisFn } from "#src/lib/clock.js";
 import { createServeDemand, recordServeRequest, SERVE_DEMAND_WINDOW_MS, SERVE_DEMAND_FAMILY_CAP } from "#src/lib/serve-demand.js";
 import { buildServeServer, type ServeDeps } from "#src/lib/serve.js";
 import { createService, type Route } from "#src/lib/service.js";
@@ -25,7 +26,7 @@ test("W1-T11814 criterion 1: finish and early close tally exactly once, with abo
     const ledgerPath = join(root, "ledger.ndjson");
     writeFileSync(ledgerPath, "");
     let clock = 0;
-    const demand = createServeDemand({ ledgerPath, routes: [{ method: "GET", path: "/v1/probe" }], now: () => clock });
+    const demand = createServeDemand({ ledgerPath, routes: [{ method: "GET", path: "/v1/probe" }], clock: clockFromMillisFn(() => clock) });
     for (const [status, aborted, elapsed] of [[200, false, 5], [302, false, 10], [401, false, 25], [500, false, 50], [503, true, 100]] as const) {
       const res = response(); res.statusCode = status;
       res.once("finish", () => res.emit("close"));
@@ -51,7 +52,7 @@ test("W1-T11814 criterion 2: declared families redact instance and id segments, 
     let clock = 0;
     const routes = ["/v1/i/private-instance/task", "/v1/i/second-instance/task", "/v1/tasks/private-task", "/v1/runs/private-run", "/v1/items/private-id"]
       .map(path => ({ method: "GET", path }));
-    const demand = createServeDemand({ ledgerPath, routes, now: () => clock });
+    const demand = createServeDemand({ ledgerPath, routes, clock: clockFromMillisFn(() => clock) });
     for (const route of routes) {
       const res = response();
       recordServeRequest(demand, { method: route.method, url: route.path + "?token=private-token&id=private-query" } as IncomingMessage, res as unknown as ServerResponse);
@@ -72,7 +73,7 @@ test("W1-T11814 criterion 3: a nonempty five-minute window writes one row and re
   await withTempDir("demand-windows", async root => {
     const ledgerPath = join(root, "ledger.ndjson"); writeFileSync(ledgerPath, "");
     let clock = 10_000, tick: (() => void) | undefined, stopped = 0;
-    const demand = createServeDemand({ ledgerPath, routes: [], now: () => clock, every: (fn, ms) => {
+    const demand = createServeDemand({ ledgerPath, routes: [], clock: clockFromMillisFn(() => clock), every: (fn, ms) => {
       assert.equal(ms, 300_000); tick = fn; return () => { stopped++; };
     } });
     const stop = demand.start();
@@ -100,7 +101,7 @@ test("W1-T11814 criterion 4: family and histogram storage stay bounded and obser
   await withTempDir("demand-bounds", async root => {
     const ledgerPath = join(root, "ledger.ndjson"); writeFileSync(ledgerPath, "");
     let clock = 0, reads = 0;
-    const demand = createServeDemand({ ledgerPath, routes: [{ method: "GET", path: "/v1/probe" }], now: () => { reads++; return clock; } });
+    const demand = createServeDemand({ ledgerPath, routes: [{ method: "GET", path: "/v1/probe" }], clock: clockFromMillisFn(() => { reads++; return clock; }) });
     const res = response();
     const guarded = new Proxy(res, { set: () => assert.fail("observation must never mutate a response"), get: (target, key) => {
       if (["writeHead", "setHeader", "write", "end", "destroy"].includes(String(key))) assert.fail("observation touched response output");
@@ -129,7 +130,7 @@ test("a failed demand ledger write reports its reason and the next window can st
     const ledgerPath = join(root, "ledger.ndjson"); mkdirSync(ledgerPath);
     let clock = 0;
     const failures: Array<{ step: string; extra: Record<string, unknown> }> = [];
-    const demand = createServeDemand({ ledgerPath, routes: [], now: () => clock,
+    const demand = createServeDemand({ ledgerPath, routes: [], clock: clockFromMillisFn(() => clock),
       log: (step, extra) => { failures.push({ step, extra }); } });
     demand.record("other", 200, 1, false);
     clock = SERVE_DEMAND_WINDOW_MS; demand.flush();
@@ -138,7 +139,7 @@ test("a failed demand ledger write reports its reason and the next window can st
     assert.equal(failures[0]!.extra.windowEnd, clock);
     const errorLog = t.mock.method(console, "error", () => {});
     let reporterClock = clock;
-    const defaultReporter = createServeDemand({ ledgerPath, routes: [], now: () => reporterClock });
+    const defaultReporter = createServeDemand({ ledgerPath, routes: [], clock: clockFromMillisFn(() => reporterClock) });
     defaultReporter.record("other", 200, 1, false);
     reporterClock += SERVE_DEMAND_WINDOW_MS; defaultReporter.flush();
     assert.equal(errorLog.mock.callCount(), 1);
@@ -155,14 +156,13 @@ test("a failed demand ledger write reports its reason and the next window can st
 test("the default demand timer writes at five minutes, starts once, and stops idempotently", async t => {
   await withTempDir("demand-default-timer", async root => {
     const ledgerPath = join(root, "ledger.ndjson"); writeFileSync(ledgerPath, "");
-    let clock = 0;
-    t.mock.timers.enable({ apis: ["setInterval"] });
-    const demand = createServeDemand({ ledgerPath, routes: [], now: () => clock });
+    t.mock.timers.enable({ apis: ["setInterval", "Date"], now: 0 });
+    const demand = createServeDemand({ ledgerPath, routes: [] });
     const stop = demand.start(); demand.start();
     demand.record("other", 200, 1, false);
     t.mock.timers.tick(SERVE_DEMAND_WINDOW_MS - 1);
     assert.equal(rows(ledgerPath).length, 0);
-    clock = SERVE_DEMAND_WINDOW_MS; t.mock.timers.tick(1);
+    t.mock.timers.tick(1);
     assert.equal(rows(ledgerPath).length, 1);
     assert.equal(rows(ledgerPath)[0]!.families.other!.n, 1);
     stop(); stop();
@@ -178,7 +178,7 @@ test("declared SSE families and method matching follow the service router", asyn
     const ledgerPath = join(root, "ledger.ndjson"); writeFileSync(ledgerPath, "");
     let clock = 0;
     const demand = createServeDemand({ ledgerPath, routes: [{ method: "POST", path: "/v1/probe" }],
-      sse: [{ path: "/v1/status/stream" }], now: () => clock });
+      sse: [{ path: "/v1/status/stream" }], clock: clockFromMillisFn(() => clock) });
     for (const [method, url] of [["GET", "/v1/status/stream"], ["GET", "/v1/probe"], ["POST", "/v1/probe"], ["GET", "/v1"], ["GET", "/v10/secret"]]) {
       const res = response();
       recordServeRequest(demand, { method, url } as IncomingMessage, res as unknown as ServerResponse);
@@ -204,7 +204,7 @@ test("real HTTP completion, handler failure, auth refusal and client cancellatio
       { method: "GET", path: "/v1/error", scope: "read", handler: () => { throw new Error("test-handler-failure"); } },
       { method: "GET", path: "/v1/slow", scope: "read", handler: (_req, res) => { res.writeHead(200); res.write("partial"); entered(); } },
     ];
-    const demand = createServeDemand({ ledgerPath, routes, now: () => clock });
+    const demand = createServeDemand({ ledgerPath, routes, clock: clockFromMillisFn(() => clock) });
     const server = createService({ tokens: { read: "r", write: "w" }, routes });
     server.prependListener("request", (req, res) => recordServeRequest(demand, req, res));
     await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
@@ -245,7 +245,7 @@ test("serve production assembly records an answered request and stops its five-m
       consoleSha: "aaaaaaaa", resolveCurrentSha: () => "aaaaaaaa", gatewayCheckout: async () => ({ state: "clean" }) as never,
       githubAppRefresh: { start: () => ({ armed: false, stop() {} }) as never },
       assistantRepository: "craigoley/remudero",
-      demand: { now: () => clock, every: (fn, ms) => { assert.equal(ms, 300_000); tick = fn; return () => { stopped = true; }; } },
+      demand: { clock: clockFromMillisFn(() => clock), every: (fn, ms) => { assert.equal(ms, 300_000); tick = fn; return () => { stopped = true; }; } },
     };
     const server = buildServeServer(deps);
     assert.equal(tick, undefined, "a standby starts no demand writer");

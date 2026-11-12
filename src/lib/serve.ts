@@ -381,7 +381,7 @@ export interface ServeDeps {
   phaseElapsedThresholdsMs?: Record<string, number>;
   /** Forwarded to `createService` — one ledger line per auth decision/SSE lifecycle/handler error. */
   log?: ServiceOptions["log"];
-  demand?: Pick<ServeDemandOptions, "now" | "every">;
+  demand?: Pick<ServeDemandOptions, "clock" | "every">;
   /**
    * W1-T163: per-token recap markers (last-seen.ts), shared with digest.ts's
    * `sendMarkerAwareDigest` so push and pull read/advance the same state. Injectable; otherwise

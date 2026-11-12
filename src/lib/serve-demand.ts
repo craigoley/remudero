@@ -1,4 +1,5 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { systemClock, type Clock } from "./clock.js";
 import { appendLedger } from "./ledger.js";
 
 export const SERVE_DEMAND_WINDOW_MS = 300_000;
@@ -16,7 +17,7 @@ export interface ServeDemandOptions {
   ledgerPath: string;
   routes: readonly { method: string; path: string }[];
   sse?: readonly { path: string }[];
-  now?: () => number;
+  clock?: Clock;
   every?: (tick: () => void, ms: number) => () => void;
   log?: (step: string, extra: Record<string, unknown>) => void;
 }
@@ -33,7 +34,8 @@ function percentile(tally: Tally, fraction: number): number {
 }
 
 export function createServeDemand(options: ServeDemandOptions) {
-  const now = options.now ?? Date.now;
+  const clock = options.clock ?? systemClock;
+  const now = () => clock.now();
   // Only declared paths enter the lookup. A request's query or unmatched path is never a family.
   const routeFamilies = new Map<string, string>();
   for (const route of options.routes) {
