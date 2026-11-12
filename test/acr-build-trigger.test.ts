@@ -1,3 +1,4 @@
+// @census-reads: src/ deploy/ .github/workflows/acr-build.yml .dockerignore test/acr-build-trigger.test.ts — the baked path catalog, the build workflow, its ignore file, itself.
 import assert from "node:assert/strict";
 import { BAKED_RUNTIME_SOURCE_PATHS } from "../src/lib/baked-runtime-inputs.js";
 import { readFileSync } from "node:fs";

@@ -1,3 +1,4 @@
+// @census-reads: scripts/ test/ — the blanking check script and every tracked test file it scans.
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { dirname, join } from "node:path";

@@ -1,3 +1,4 @@
+// @census-reads: learnings/ src/ test/sandbox-subject-generator.test.ts — the learnings index and bindings, the generator source, itself.
 import assert from "node:assert/strict";
 import { join } from "node:path";
 import { test } from "node:test";

@@ -224,8 +224,12 @@ export interface GardenLandOpts {
 
 /** W1-T12221: the files wait for the shared landing PR of task files; no PR carries them yet. */
 export interface GardenLandWaiting {
-  waiting: { paths: string[]; stateRoot: string };
+  /** `filed` (W1-T12222): a checkout that files only task files holds the new file, so the filing is done. */
+  waiting: { paths: string[]; stateRoot: string; filed?: true };
 }
+
+/** W1-T12222: what {@link landedPrUrl} returns for a filing that waits: no PR carries it yet, and this names its files. */
+export const GARDEN_WAITING_FILING_PREFIX = "task-files-landing:waiting:";
 
 /** A PR url for "opened", nothing for "not landed", or a wait. */
 export type GardenLandResult = string | undefined | GardenLandWaiting;
@@ -234,9 +238,14 @@ export function isGardenLandWaiting(result: unknown): result is GardenLandWaitin
   return typeof result === "object" && result !== null && "waiting" in result;
 }
 
-/** W1-T12221: the PR url of a land of new files. Only an edit waits, so a wait here is a fault, never a url. */
+/** W1-T12221: the PR url of a land of new files. Only an edit waits, so a wait here is a fault, never a url.
+ *  W1-T12222: except a new file from a checkout that files only task files: it waits for the sealed landing, and the
+ *  filing counts as made, so the caller records it and does not file the finding again. Its reference is not a url. */
 export function landedPrUrl(result: GardenLandResult, who: string): string | undefined {
-  if (isGardenLandWaiting(result)) throw new Error(`${who}: a land of new files waited for the task-file landing`);
+  if (isGardenLandWaiting(result)) {
+    if (result.waiting.filed === true && result.waiting.paths.length > 0) return `${GARDEN_WAITING_FILING_PREFIX}${result.waiting.paths.join(",")}`;
+    throw new Error(`${who}: a land of new files waited for the task-file landing`);
+  }
   return result;
 }
 
