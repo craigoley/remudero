@@ -1,0 +1,97 @@
+- id: W1-T12409
+  title: "The nightly agent history reclaim never removes the Codex login, config or installed files, and no test walks the real home"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10
+  risk: high
+  band_meaning: blast-radius
+  origin: operator session 2026-11-12, found while a covering test run hung 90 minutes in find over the real ~/.codex
+  plan_refs: [W1-T3626, W1-T3676, W1-T3837]
+  files:
+    - deploy/host-update.sh
+    - test/the-agent-history-reclaim-never-removes-a-login-or-config-file.test.ts
+    - test/agent-history-does-not-fill-the-root-disk.test.ts
+    - test/the-reclaim-survives-a-find-without-printf.test.ts
+    - test/host-update-reclaim.test.ts
+    - test/the-git-reclaim-warns-when-its-target-has-a-live-sibling.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: In the Codex home, the age sweep removes old files only under the history folders (sessions, archived_sessions, log, shell_snapshots). An old auth.json, config.toml, rmd_registry_*.config.toml, installation_id, installed CLI file under packages/ and file under work-artifacts/ are all kept, in a real run and in a dry run.
+      proof: 'grep: test("W1-T12409 criterion 1: in the Codex home only the history folders lose old files in test/the-agent-history-reclaim-never-removes-a-login-or-config-file.test.ts'
+    - claim: In every tree, the age sweep never removes a file named auth.json, .credentials.json or installation_id, or a file whose name ends in .toml, however old it is.
+      proof: 'grep: test("W1-T12409 criterion 2: no tree loses a login or config file by name in test/the-agent-history-reclaim-never-removes-a-login-or-config-file.test.ts'
+    - claim: The old files the sweep keeps are reported per tree on one line with the reason never-removed, their count and their bytes, so the report still names every byte it could not reach.
+      proof: 'grep: test("W1-T12409 criterion 3: the old files the sweep keeps are reported as never-removed in test/the-agent-history-reclaim-never-removes-a-login-or-config-file.test.ts'
+    - claim: Under a test process (NODE_TEST_CONTEXT set), a tree that comes from HOME because RMD_CODEX_DIR, RMD_CLAUDE_DIR and RMD_AGENT_HISTORY_DIRS are not set is skipped with one line that says why. Nothing under it is walked, compacted or removed.
+      proof: 'grep: test("W1-T12409 criterion 4: a test process never walks the agent history under its home in test/the-agent-history-reclaim-never-removes-a-login-or-config-file.test.ts'
+    - claim: The host-update-reclaim runner names an agent history tree inside its own temp state directory, so its reclaim runs never reach the real home.
+      proof: 'grep: RMD_AGENT_HISTORY_DIRS: join(state, "no-agent-history"), in test/host-update-reclaim.test.ts'
+    - claim: The git reclaim sibling-warning runner names an agent history tree inside its own temp state root, so its reclaim runs never reach the real home.
+      proof: 'grep: RMD_AGENT_HISTORY_DIRS: join(stateRoot, "no-agent-history") in test/the-git-reclaim-warns-when-its-target-has-a-live-sibling.test.ts'
+  rationale: |
+    FROM THE CODE, origin/main d8f72c334, and the Azure host, 2026-11-12.
+    - Section 4b of deploy/host-update.sh (about lines 1491 to 1715) is the nightly agent
+      history reclaim. Its trees default to `${CODEX_DIR}:${CRED_DIR}/projects`, and CODEX_DIR
+      defaults to `$HOME/.codex`. The age sweep runs `find "${hdir}" -type f -mtime +14` over the
+      whole tree and removes every match, oldest first.
+    - The Codex home is not only history. On the Azure host it holds auth.json (the Codex
+      login, last written 2026-11-05), config.toml, three rmd_registry_*.config.toml files,
+      installation_id, the installed Codex CLI under packages/standalone/releases/ (written
+      2026-11-05), plugins/, skills/ and work-artifacts/ (git checkouts, 25,098 files).
+    - So if the fleet is down at night and the login is not refreshed for 14 days, the nightly
+      rung removes the Codex login, the config and the CLI itself. The operator does not want
+      credentials rotated. Losing them is the worst outcome of this rung.
+    - What grows, measured 2026-11-12: thread_history_1.sqlite 6.8 GiB and state_5.sqlite 2.7 GiB
+      (compacted in place by W1-T3676, never removed), sessions/ 778 MiB (2,610 files). W1-T3626
+      measured sessions/ at 1.6 GiB. No other folder in the Codex home is history. So the bulk is
+      still in reach when the sweep removes only the history folders.
+    - The existing test claudeFixture already pins this rule for the Claude tree: a 60-day-old
+      .credentials.json beside projects/ must survive. The Codex tree has no such rule.
+    - TESTS WALK THE REAL HOME. test/host-update-reclaim.test.ts (runHostUpdate, about line 163)
+      and test/the-git-reclaim-warns-when-its-target-has-a-live-sibling.test.ts (runHostUpdate,
+      about line 97) spread `...process.env` and set none of HOME, RMD_CODEX_DIR, RMD_CLAUDE_DIR
+      or RMD_AGENT_HISTORY_DIRS. Their fake docker reports no live container, so each
+      `--reclaim-only` run removes old files under the real ~/.codex and ~/.claude/projects of
+      whoever runs the tests (every author preflight; CI has no such files). A covering run on
+      2026-11-12 hung 90 minutes in find over the real ~/.codex.
+  design: |
+    All in deploy/host-update.sh, section 4b. Bash 3.2 safe (no empty array expansions).
+    1. History folders. When a tree is the Codex home (the tree, without a trailing slash,
+       equals CODEX_DIR without one), the age sweep and its dry-run count walk only the folders
+       sessions, archived_sessions, log and shell_snapshots that exist under it. Any other tree
+       is walked whole, as before. The compaction pass and the refusal count do not change.
+    2. Names never removed. In every tree the age sweep finds with
+       `! -name auth.json ! -name .credentials.json ! -name installation_id ! -name '*.toml'`.
+    3. Report. After the sweep (real or dry run), count the files in the whole tree older than
+       the tier that the sweep may not remove, and print one `could not reach <bytes> — reason:
+       never-removed (<n> file(s))` line through agent_history_unreached. Count them in the
+       "every byte was in scope" check, so that line is not printed when such files exist.
+    4. Test process guard. When NODE_TEST_CONTEXT is set and RMD_AGENT_HISTORY_DIRS is not set,
+       keep the Codex tree only when RMD_CODEX_DIR is set and the Claude tree only when
+       RMD_CLAUDE_DIR is set. For each tree dropped, print `agent history reclaim — <tree>:
+       skipped — a test process never walks the agent history under HOME`. This is the same
+       rule deploy/scratch-mounts.sh uses for /mnt/scratch (NODE_TEST_CONTEXT). It applies
+       before the live-container refusal, so the refusal count does not walk the home either.
+    5. Tests. The new test file drives the real script with `--reclaim-only` and a fake docker
+       that reports no container, one test per criterion with the exact titles in the proofs,
+       always with a temp HOME. Move the old fixture files that the existing tests expect to be
+       removed from the top of the Codex home into sessions/ (codexFixture and the oldest-first
+       test in test/agent-history-does-not-fill-the-root-disk.test.ts, and the three cases in
+       test/the-reclaim-survives-a-find-without-printf.test.ts). Add
+       `RMD_AGENT_HISTORY_DIRS` to the two runners named in the rationale.
+  falsifier: |
+    Walk the whole Codex home again in the age sweep and criterion 1 fails: auth.json,
+    config.toml and the CLI file are removed. Drop the name filter and criterion 2 fails on a
+    tree that is not the Codex home. Drop the never-removed line and criterion 3 fails. Drop the
+    test process guard and criterion 4 fails: the old session files under the temp HOME are
+    removed. The two runner greps do not match on origin/main.
+  note: |
+    W1-T12360 (in the lane) also edits deploy/host-update.sh and test/host-update-reclaim.test.ts,
+    in other places (CRED_DIR derivation and the printed daemon command). A rebase may need a
+    small merge. deploy/codex-sessions-mount.sh can move the live Codex sessions to scratch; this
+    task does not change which sessions folder the reclaim reaches.
