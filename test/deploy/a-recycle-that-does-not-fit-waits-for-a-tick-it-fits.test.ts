@@ -368,3 +368,19 @@ test("W1-T12294: the deferral record survives from one tick to the next", async 
   assert.equal(rows[1]!.deferred_since, new Date(stored.since_ms).toISOString());
   assert.deepEqual(record(h), stored);
 });
+
+test("W1-T12294: a deferral record that cannot be removed is logged and does not throw", (t) => {
+  const h = harness(t);
+  const real = h.real();
+  // An absent record is already gone: nothing is logged.
+  real.setFitDeferral!(undefined);
+  assert.deepEqual(h.rowsOf("deploy.failure_retraction_failed"), []);
+  // A non-empty directory in the record's place makes the unlink fail with something other than ENOENT.
+  const blocked = h.file("DEPLOY_FIT_DEFERRAL");
+  mkdirSync(join(blocked, "keep"), { recursive: true });
+  assert.doesNotThrow(() => real.setFitDeferral!(undefined));
+  const rows = h.rowsOf("deploy.failure_retraction_failed");
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0]!.marker, "DEPLOY_FIT_DEFERRAL");
+  assert.match(String(rows[0]!.error), /EISDIR|EPERM/);
+});
