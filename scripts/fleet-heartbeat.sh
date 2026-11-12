@@ -658,6 +658,52 @@ num_or_unknown() { case "$1" in ''|*[!0-9]*) printf 'unknown' ;; *) printf '%s' 
 
 ROOT_FS_TOTAL_KB="$(num_or_unknown "$(df_field / 2)")"
 
+# W1-T12253: THE RESERVE OF EACH VOLUME. A free value tells a reader nothing without the floor it is
+# judged against, and on 2026-11-10 the Azure janitor's floor reached ~/host-cleanup.log only. The
+# reserve comes from the host janitor's mark (deploy/rmd-host-cleanup.sh), read from the same
+# HIGH_WATER and RMD_CLEANUP_WATCH_FS with the same defaults: the part of the total above the mark
+# percent, or the mark's free space when that is larger. Paths on one device take the strictest mark,
+# as the janitor does. Plain bash, so it still beats when node is gone. An unreadable size is
+# `unknown`, never 0; a volume that no mark watches is `none`. On macOS each reserve is `unknown`:
+# no Mac account publishes a heartbeat, so this script holds no Mac reserve.
+RESERVE_HIGH_WATER="${HIGH_WATER:-85}"
+RESERVE_WATCH_FS="${RMD_CLEANUP_WATCH_FS-/mnt/rmd:85 /mnt/scratch:90/40G}"
+RESERVE_KERNEL="$(uname -s 2>/dev/null)"
+fs_reserve_kb() {
+  local path="$1" dev="$2" total="$3" marks="$RESERVE_WATCH_FS" pct="" min_kb=0 entry
+  local w_path w_mark w_pct w_free w_kb w_dev r
+  [ "$RESERVE_KERNEL" != "Darwin" ] || { printf 'unknown'; return; }
+  case "$total" in ''|*[!0-9]*) printf 'unknown'; return ;; esac
+  case " $marks " in *" /:"*) ;; *) marks="/:${RESERVE_HIGH_WATER} ${marks}" ;; esac
+  for entry in $marks; do
+    case "$entry" in *:*) ;; *) continue ;; esac
+    w_path="${entry%:*}"; w_mark="${entry##*:}"; w_pct="${w_mark%%/*}"; w_free=""
+    case "$w_mark" in */*) w_free="${w_mark#*/}" ;; esac
+    case "$w_pct" in ''|*[!0-9]*|????*) continue ;; esac
+    w_kb="${w_free%[KMGT]}"
+    case "$w_kb" in *[!0-9]*|????????????????*) continue ;; esac
+    w_kb=$((10#${w_kb:-0})); w_pct=$((10#$w_pct))
+    [ "$w_pct" -le 100 ] || continue
+    case "$w_free" in *M) w_kb=$((w_kb * 1024)) ;; *G) w_kb=$((w_kb * 1048576)) ;; *T) w_kb=$((w_kb * 1073741824)) ;; esac
+    if [ "$w_path" != "$path" ]; then
+      w_dev="$(df_field "$w_path" 1)"
+      [ -n "$w_dev" ] && [ "$dev" != "unknown" ] && [ "$w_dev" = "$dev" ] || continue
+    fi
+    if [ -z "$pct" ] || [ "$w_pct" -lt "$pct" ]; then pct="$w_pct"; fi
+    [ "$w_kb" -gt "$min_kb" ] && min_kb="$w_kb"
+  done
+  [ -n "$pct" ] || { printf 'none'; return; }
+  r=$((total * (100 - pct) / 100))
+  [ "$min_kb" -gt "$r" ] && r="$min_kb"
+  printf '%s' "$r"
+}
+ROOT_FS_RESERVE_KB="$(fs_reserve_kb / "$ROOT_FS_DEVICE" "$ROOT_FS_TOTAL_KB")"
+STATE_FS_RESERVE_LINE=""
+if [ "$STATE_FS_DEVICE" = "unknown" ] || [ "$STATE_FS_DEVICE" != "$ROOT_FS_DEVICE" ]; then
+  STATE_FS_RESERVE_LINE="
+state_fs_reserve_kb=$(fs_reserve_kb "$RMD_ROOT" "$STATE_FS_DEVICE" "$(num_or_unknown "$(df_field "$RMD_ROOT" 2)")")"
+fi
+
 # Free inodes on `/`: the column is found by its HEADER (`IFree` on Linux, `ifree` on macOS) because
 # the column position differs between the two. A filesystem that reports no inode table (`-`) is
 # `unknown`.
@@ -1553,9 +1599,10 @@ ledger_state=${LEDGER_STATE}
 ledger_bytes=${LEDGER_BYTES}
 disk_free_kb=${DISK_FREE_KB}
 state_fs_device=${STATE_FS_DEVICE}
-state_fs_free_kb=${DISK_FREE_KB}
+state_fs_free_kb=${DISK_FREE_KB}${STATE_FS_RESERVE_LINE}
 root_fs_device=${ROOT_FS_DEVICE}
 root_fs_free_kb=${ROOT_FS_FREE_KB}
+root_fs_reserve_kb=${ROOT_FS_RESERVE_KB}
 scratch_fs_device=${SCRATCH_FS_DEVICE}
 scratch_fs_free_kb=${SCRATCH_FS_FREE_KB}
 disk_min_free_kb=${DISK_MIN_FREE_KB}
