@@ -36,11 +36,90 @@ fi
 
 APPLY=0
 TSX_ONLY=0
+REFRESH_ONLY=0
 for option in "$@"; do
   case "$option" in --apply) APPLY=1 ;; --dry-run) APPLY=0 ;; --tsx-only) TSX_ONLY=1 ;;
+    --refresh-install) REFRESH_ONLY=1 ;;
     *) printf 'unknown cleanup option: %s\n' "$option" >&2; exit 2 ;;
   esac
 done
+REFRESH_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
+
+# Replace the code in this install folder with `origin/main` of the checkout that its installer
+# recorded in `install-source`. Both installed layouts hold this file, and remudero-janitor.sh calls
+# it with --refresh-install. It reads only the ref as the checkout last fetched it: no fetch, and
+# never a file of the working tree. Any read that fails keeps every installed file. The pass that
+# calls it keeps the code it started with; the next pass runs the new code.
+rmd_janitor_refresh() ( # $1 = 1 to install, 0 to report only
+  set -o pipefail
+  unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY
+  kept() { printf 'janitor refresh: kept (%s)\n' "$1"; exit 0; }
+  dir=$REFRESH_DIR record="$REFRESH_DIR/install-source"
+  [ -n "$dir" ] || kept 'install folder unreadable'
+  [ -f "$record" ] && [ ! -L "$record" ] && [ -r "$record" ] || kept "no install-source record in $dir"
+  [ -O "$dir" ] && [ -O "$record" ] || kept "install folder owned by another account: $dir"
+  checkout='' layout='' origin=''
+  while IFS='=' read -r key value || [ -n "$key" ]; do
+    case "$key" in checkout) checkout=$value ;; layout) layout=$value ;; origin) origin=$value ;; esac
+  done < "$record"
+  case "$checkout" in /*) ;; *) kept 'install-source names no absolute checkout' ;; esac
+  guards='workspace-retirement-guard.sh:deploy/workspace-retirement-guard.sh'
+  cache='dependency-seed-guard.sh:deploy/dependency-seed-guard.sh tmp-reclaim.sh:deploy/mac/tmp-reclaim.sh cache-reclaim.py:deploy/mac/cache-reclaim.py'
+  janitor='retire-legacy-sweeper.py:deploy/mac/retire-legacy-sweeper.py preserve-retire.py:deploy/mac/preserve-retire.py remudero-janitor.sh:deploy/mac/remudero-janitor.sh'
+  case "$layout" in
+    home-bin) installer=deploy/mac/install-janitor.sh files="$guards $cache $janitor" ;;
+    shared) installer=deploy/mac/install-janitor.sh files="$guards $cache $janitor"
+      [ "${dir##*/}" = remudero-mac ] || kept "shared layout outside a remudero-mac folder: $dir" ;;
+    application-support) installer=deploy/mac/install-tmp-reclaim.sh files=$cache
+      support=$(cd "$HOME/Library/Application Support/remudero" 2>/dev/null && pwd -P)
+      [ "$support" = "$dir" ] || kept "application-support layout outside $HOME/Library/Application Support/remudero" ;;
+    *) kept "install-source names an unknown layout: ${layout:-none}" ;;
+  esac
+  [ -d "$checkout" ] && [ -O "$checkout" ] || kept "checkout unreadable or owned by another account: $checkout"
+  g() { git -C "$checkout" "$@"; }
+  current=$(g remote get-url origin 2>/dev/null) || kept "checkout has no readable origin: $checkout"
+  [ "$current" = "$origin" ] || kept "checkout origin $current is not the recorded origin ${origin:-none}"
+  case "$origin" in *github.com[:/]craigoley/remudero|*github.com[:/]craigoley/remudero.git) ;;
+    *) kept "origin is not the remudero repository: $origin" ;; esac
+  commit=$(g rev-parse --verify --quiet 'refs/remotes/origin/main^{commit}' 2>/dev/null) || kept "origin/main unreadable in $checkout"
+  for pair in $files "installer:$installer"; do
+    g cat-file -e "$commit:${pair#*:}" 2>/dev/null || kept "source set at origin/main is not complete: ${pair#*:} missing"
+  done
+  changed=()
+  for pair in $files; do
+    name=${pair%%:*}
+    new=$(g rev-parse --verify --quiet "$commit:${pair#*:}") || kept "origin/main unreadable: ${pair#*:}"
+    old=absent
+    if [ -e "$dir/$name" ]; then old=$(g hash-object --no-filters -- "$dir/$name") || kept "installed file unreadable: $name"; fi
+    [ "$old" = "$new" ] || changed+=("$name $old -> $new")
+  done
+  short=${commit:0:12}
+  [ "${#changed[@]}" -gt 0 ] || { printf 'janitor refresh: current at %s\n' "$short"; exit 0; }
+  if [ "$1" != 1 ]; then
+    printf 'janitor refresh: would install %d files from %s\n' "${#changed[@]}" "$short"
+    printf 'janitor refresh: would replace %s\n' "${changed[@]}"
+    exit 0
+  fi
+  stage=$(mktemp -d "${TMPDIR:-/tmp}/rmd-janitor-refresh.XXXXXX") || kept 'temporary folder unavailable'
+  trap 'rm -rf "$stage"' EXIT
+  g archive --format=tar "$commit" -- deploy/workspace-retirement-guard.sh deploy/dependency-seed-guard.sh deploy/mac \
+    | tar -xf - -C "$stage" || kept "git archive of $short failed"
+  # An installer without a code-only mode would rewrite the schedule; never run one.
+  grep -q -- '--code-only)' "$stage/$installer" || kept "$installer at $short has no code-only mode"
+  case "$layout" in
+    home-bin) out=$(REMUDERO_JANITOR_INSTALL_DIR="$dir" bash "$stage/$installer" --code-only 2>&1) ;;
+    shared) out=$(bash "$stage/$installer" --shared-root "${dir%/*}" --code-only 2>&1) ;;
+    *) out=$(bash "$stage/$installer" --code-only 2>&1) ;;
+  esac || { printf 'janitor refresh: failed (installer exit %s: %s)\n' "$?" "${out##*$'\n'}"; exit 0; }
+  for pair in $files; do
+    name=${pair%%:*}
+    [ "$(g hash-object --no-filters -- "$dir/$name" 2>/dev/null)" = "$(g rev-parse "$commit:${pair#*:}")" ] ||
+      { printf 'janitor refresh: failed (%s differs from %s after the install)\n' "$name" "$short"; exit 0; }
+  done
+  printf 'janitor refresh: replaced %s\n' "${changed[@]}"
+  printf 'janitor refresh: installed %d files from %s\n' "${#changed[@]}" "$short"
+)
+if [ "$REFRESH_ONLY" = 1 ]; then rmd_janitor_refresh "$APPLY"; exit 0; fi
 ROOT="${RMD_RECLAIM_ROOT:-/private/tmp}"
 SESSION_ROOT="${RMD_RECLAIM_SESSION_ROOT:-$HOME/Remudero/.session-scratch}"
 REPORT="${RMD_RECLAIM_REPORT:-$HOME/Library/Logs/remudero/tmp-reclaim-kept.txt}"
@@ -804,3 +883,5 @@ if [ $APPLY = 1 ]; then
     if [ "$risky_n" -gt 0 ]; then printf '%s\n' "${risky[@]}"; fi
   } > "$REPORT"
 fi
+# The scheduled full pass refreshes its own install folder last; the delegated cache-only call does not.
+[ "$TSX_ONLY" = 1 ] || rmd_janitor_refresh "$APPLY"
