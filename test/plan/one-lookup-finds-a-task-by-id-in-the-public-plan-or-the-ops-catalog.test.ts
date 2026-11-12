@@ -9,6 +9,7 @@ import { REPO_ROOT } from "#test/helpers/repo-root.js";
 import { mergePlanBlobs, type Task } from "#src/lib/plan.js";
 import type { OpsCatalogApi } from "#src/lib/ops-catalog-source.js";
 import { ghShim } from "#test/helpers/gh-shim.js";
+import { originWithClone, GIT_REPO_FIXTURE_IDENTITY } from "#test/helpers/git-repo.js";
 import { FIXTURE_CONFIG_PATH_SEGMENTS } from "#src/lib/config.js";
 import type { ReviewCommandHost, ReviewCommandDeps } from "#src/cli/commands/review.js";
 
@@ -89,12 +90,11 @@ test("W1-T12207 criterion 3: fix and sweep scope checks use the private task fil
 });
 
 test("W1-T12207 criterion 4: the real claim CLI and default ops transport reserve only the public fixture origin", async t => {
-  const fx = fixture(t), publicRoot = join(fx.root, "public"), origin = join(fx.root, "public-origin.git");
-  mkdirSync(join(publicRoot, "plan"), { recursive: true }); writeFileSync(join(publicRoot, "plan", "tasks.yaml"), "[]\n");
-  const git = (args: string[], cwd = publicRoot) => execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
-  git(["init", "--bare", "--initial-branch=main", origin], fx.root); git(["init", "--initial-branch=main"]);
-  git(["config", "user.name", "fixture"]); git(["config", "user.email", "fixture@example.invalid"]);
-  git(["add", "plan/tasks.yaml"]); git(["commit", "-m", "fixture public plan"]); git(["remote", "add", "origin", origin]); git(["push", "--set-upstream", "origin", "main"]);
+  const fx = fixture(t), publicRoot = join(fx.root, "public");
+  const repos = originWithClone(publicRoot, { scope: t, seed: { "plan/tasks.yaml": "[]\n" } });
+  const origin = repos.origin.dir, git = (args: string[]) => repos.clone.git(...args);
+  git(["config", "user.name", GIT_REPO_FIXTURE_IDENTITY.name]);
+  git(["config", "user.email", GIT_REPO_FIXTURE_IDENTITY.email]);
   const fixtureHome = join(fx.root, "home"); mkdirSync(join(fixtureHome, ...FIXTURE_CONFIG_PATH_SEGMENTS.slice(0, -1)), { recursive: true });
   writeFileSync(join(fixtureHome, ...FIXTURE_CONFIG_PATH_SEGMENTS), JSON.stringify({ root: fx.root, claudeBin: "/usr/bin/false" }));
   const routes = await Promise.all(fx.apiPaths.map(async path => ({ when: `api ${path}`, stdout: JSON.stringify(await fx.api(path)) })));
