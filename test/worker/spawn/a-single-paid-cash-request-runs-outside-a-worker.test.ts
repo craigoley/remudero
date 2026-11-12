@@ -105,9 +105,16 @@ test("W1-T12413 criterion 3: a normal-cap refusal sends nothing, and the squeeze
 
 test("W1-T12413 criterion 4: a missed deadline or a caller abort keeps the reservation held, and a late reply still settles", async (t) => {
   const { dir, config } = fixture(t);
+  // The reply is held until the deadline has been reported, so a slow host cannot let the 40ms timer
+  // fire before fetch is even called (which would leave no reply to settle late).
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  let fetched = 0;
   const late = await sendCashRequest(config, { deployment: DEPLOYMENT, path: "openai/v1/decisions", body: BODY,
-    source: "fixture", outputTokenCeiling: 16, env, requestTimeoutMs: 40,
-    fetchImpl: async () => { await delay(120); return reply(); } });
+    source: "fixture", outputTokenCeiling: 16, env, requestTimeoutMs: 1_000,
+    fetchImpl: async () => { fetched++; await gate; return reply(); } });
+  assert.equal(fetched, 1);
+  release();
   assert.equal(late.ok, false);
   if (late.ok) return;
   assert.equal(late.reason, "timeout");
