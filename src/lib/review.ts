@@ -7,7 +7,7 @@ import { createHash } from "node:crypto";
 import { createScanner, SyntaxKind } from "typescript/unstable/ast";
 import { promisedFollowUps, unreportedFollowUps, followUpPlanRecords, parseHarvestableFollowUps, type HarvestableFollowUp, type PromisedFollowUp, type FollowUpPlanRecord } from "./promised-follow-ups.js";
 import { hostWorktreeGitAsync } from "./worktree-git.js";
-import { basenameResolutionNote, resolveTestPath, type TestPathResolution, type TestPathResolverGit } from "./test-path-resolver.js";
+import { basenameResolutionNote, listBaseTests, observeComputedPlacement, resolveTestPath, type TestPathResolution, type TestPathResolverGit } from "./test-path-resolver.js";
 import { classifyGrepZeroHit } from "./grep-zero-cause.js";
 // Re-exported so a script already importing the proof dialect from here reaches the resolver through one import.
 export { resolveTestPath };
@@ -5528,6 +5528,29 @@ function admittedProofTests(diff: string, criteria: readonly AcceptanceCriterion
   return admitted;
 }
 
+export function reviewPlacementAdmitted(
+  diff: string, checkoutDir: string | undefined, declaredFiles: readonly string[] | undefined,
+  criteria: readonly AcceptanceCriterion[],
+): Set<string> {
+  if (!checkoutDir || !declaredFiles || declaredFiles.length === 0) return new Set();
+  const added: string[] = [];
+  const deleted: string[] = [];
+  for (const block of diff.split(/^diff --git /m)) {
+    const added_ = /^\+\+\+ b\/(.+)$/m.exec(block)?.[1];
+    if (added_ && /^--- \/dev\/null$/m.test(block) && !/^new file mode 120000$/m.test(block)) added.push(added_);
+    const removed = /^--- a\/(.+)$/m.exec(block)?.[1];
+    if (removed && /^\+\+\+ \/dev\/null$/m.test(block)) deleted.push(removed);
+  }
+  if (added.length === 0) return new Set();
+  return observeComputedPlacement({
+    root: checkoutDir, declaredFiles, proofs: criteria.map((c) => c.proof), candidates: added,
+    baseTracked: () => {
+      const addedSet = new Set(added);
+      return [...listBaseTests(checkoutDir, "HEAD").filter((p) => !addedSet.has(p)), ...deleted];
+    },
+  }).admitted;
+}
+
 /** Scope widening is advisory; subtract the harness's registered artifacts and admitted new proof tests. */
 function scopeViolationFiles(
   diffFiles: readonly string[], declaredFiles: readonly string[] | undefined,
@@ -5551,12 +5574,13 @@ export interface ReviewScopeContext {
 export function reviewScopeContext(
   diff: string,
   declaredFiles: readonly string[] | undefined,
+  placementAdmitted: ReadonlySet<string> = new Set(),
 ): ReviewScopeContext {
   const diffFiles = changedFiles(walkDiff(diff));
   return {
     declaredFiles: [...(declaredFiles ?? [])],
     changedFiles: diffFiles,
-    widenedFiles: scopeViolationFiles(diffFiles, declaredFiles),
+    widenedFiles: scopeViolationFiles(diffFiles, declaredFiles).filter((f) => !placementAdmitted.has(f)),
   };
 }
 
@@ -5850,7 +5874,9 @@ function unwiredAdvisoriesFor(
     });
   }
 
-  const violating = scopeViolationFiles(diffFiles, taskDeclaredFiles, admittedProofTests(diff, criteria));
+  const violating = scopeViolationFiles(diffFiles, taskDeclaredFiles, new Set([
+    ...admittedProofTests(diff, criteria), ...reviewPlacementAdmitted(diff, checkoutDir, taskDeclaredFiles, criteria),
+  ]));
   if (violating.length > 0) {
     out.push({
       reasonCode: "scope_violation",

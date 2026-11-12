@@ -1,0 +1,72 @@
+- id: W1-T12417
+  title: "A fixed-option judge's shadow can name a decision model"
+  repo: remudero
+  depends_on:
+    - W1-T12187
+    - W1-T12416
+    - W1-T12414
+  priority: 1.5
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # every fixed-option judge gains a second paid request; each judge's answer stays its own
+  band_meaning: span
+  origin: operator-session#decision-models-2026-11-12
+  plan_refs:
+    - W1-T12187
+    - W1-T11075
+    - W1-T12416
+    - W1-T12414
+    - W1-T4672
+    - W1-T10858
+  files:
+    - src/lib/judge-shadow.ts
+    - src/lib/risk-judge.ts
+    - src/lib/sweep.ts
+    - src/lib/verify-human-judge.ts
+    - src/lib/refresh-value.ts
+    - src/lib/quiet-worker-watchdog.ts
+    - src/lib/typed-judgment.ts
+    - src/lib/config-gardener.ts
+    - src/lib/mounts.ts
+    - .remudero/mounts.yaml
+    - docs/model-routing.md
+    - test/review/a-judge-shadow-can-name-a-decision-model.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "A role's mount row can name a shadow candidate, either a decision model from the decision_models section or any configured cash deployment. A role with no named candidate keeps W1-T12187's shadow unchanged"
+      proof: "grep: W1-T12417 criterion 1 in test/review/a-judge-shadow-can-name-a-decision-model.test.ts"
+    - claim: "The risk judge's low/high verdict is asked of a named decision model as one choice question. The shadow row adds the distribution, the latency and the cost, and the caller still gets the risk judge's own verdict first"
+      proof: "grep: W1-T12417 criterion 2 in test/review/a-judge-shadow-can-name-a-decision-model.test.ts"
+    - claim: "The same shadow serves every fixed-option judge in this order: risk, ci, fix-progress, verify-human, refresh-value, quiet-worker-watchdog, head-rehome, and each single-question typed-judgment spawn. Each role writes its rows under its own role name"
+      proof: "grep: W1-T12417 criterion 3 in test/review/a-judge-shadow-can-name-a-decision-model.test.ts"
+    - claim: "An unavailable, refused, failed or abstaining candidate changes nothing for the caller and writes one row with the reason. A tuned threshold is read only for the model id it was stored with, and a role never runs another model under it"
+      proof: "grep: W1-T12417 criterion 4 in test/review/a-judge-shadow-can-name-a-decision-model.test.ts"
+    - claim: "The config gardener proposes switching a role's primary to its shadow candidate when that role and model clear the per-model bar of W1-T12414's scores, and proposes nothing below the bar. The proposal goes through the fleet's normal review and merge"
+      proof: "grep: W1-T12417 criterion 5 in test/review/a-judge-shadow-can-name-a-decision-model.test.ts"
+    - claim: "The sweep's judges call the shadow"
+      proof: "grep: shadowJudgeCall( in src/lib/sweep.ts"
+    - claim: "Each typed-judgment spawn calls the shadow"
+      proof: "grep: shadowJudgeCall( in src/lib/typed-judgment.ts"
+  rationale: |
+    WHY: the operator wants decision models applied throughout for efficiency, with no manual step (2026-11-12). Each fixed-option judge starts a full worker today. A decision model answers the same question in one request (observed 2026-11-12: 332 to 446 ms on the East US Decisions deployment, 232 ms warm on decision-1, against a worker judge).
+    READ 2026-11-12 in the operator's decision-model handoff (Part 2, [R] facts re-checked at origin/main f93618eab for the files named here):
+    - The fixed-option judges are: the risk judge (realRiskJudge, low/high, src/lib/risk-judge.ts:1563), the ci judge and the fix-progress judge (src/lib/sweep.ts, continue/change-approach/escalate/harness; mount rows from W1-T11075), the verify-human judge (automate/keep human), refresh-value (overlap/independent), the quiet-worker watchdog (nudge/kill_poll_child/end_round/wait), head-rehome (wait/trailer, src/lib/sweep.ts:3545, the only live typed judgment), and each single-question typed-judgment spawn (src/lib/typed-judgment.ts:182 `runTypedJudgment`).
+    - Excluded by the handoff: the ruling judge, the machine-filing judge and the flight judge, where a wrong answer refuses a ruling or dispatches work, or the tier rule binds.
+    - The risk judge's typed shadow seam `typedJudge` (src/lib/risk-judge.ts:1228) has no production caller.
+    OPERATOR RULE (handoff, decisions 3, 6 and 7): calibration is per model and a threshold is stored with its model id; a refusal or abstention is its own outcome; a shadow never changes a caller's decision, never waits on the caller's path, and reserves against the normal cap only.
+    OBSERVED 2026-11-12: the open-weight deployments gpt-oss-120b, DeepSeek-V4-Flash, DeepSeek-V4.1-Flash and Kimi-K2.6 have spare quota, so a role may name one as a generative shadow; W1-T12414 scores its single answer as agreement only.
+  design: |
+    Extend W1-T12187's `shadowJudgeCall` so a role's mount row may name a candidate (`shadow: <decision model name>` or `shadow: <cash deployment>`). For a decision model the shadow builds the role's question set (its options as one choice question, plus any yes/no the role already asks) and calls `askDecisionModel`. For a cash deployment it keeps W1-T12187's prompt path.
+    Wire the roles in the order of criterion 3. ci and fix-progress follow W1-T11075's rows. Each typed-judgment spawn passes its question and options, so every single-question spawn gains the shadow without its own change.
+    AUTOMATIC SWITCH: W1-T12187's config gardener reads W1-T12414's per-model figures. When a role and model clear the bar, it proposes one edit that makes the candidate the role's primary (with its threshold stored beside the model id). The canary rolls it back as for a mount today. No operator step is needed for the gain to arrive; the fleet's review and merge still apply.
+    The bar starts as W1-T12187's (200 paired calls in 14 days, 98% agreement, at most 2% unusable) plus a Brier ceiling the builder sets from W1-T12414's first figures and states in the PR.
+    Fallback: an unavailable candidate (missing entry, unset key, absent deployment, budget refusal) leaves today's judge as the only answer.
+    Capacity: decision-1 rate-limited at capacity 1 after two calls on 2026-11-12. The shadow samples within the deployment's reported limit and records a 429 as unavailable.
+    NOT IN SCOPE: the ruling, machine-filing and flight judges; the code review triage (W1-T12419).
+  falsifier: |
+    Return the shadow's answer to the caller and criterion 2 must fail. Skip a listed role and criterion 3 must fail. Read a threshold stored for another model and criterion 4 must fail. Propose a switch below the bar and criterion 5 must fail. Restore and require all to pass.
+  note: |
+    Ids reserved for run-unfiled-1794493022000 with ~/rmd-work/bin/reserve-id.sh. Build after W1-T12187, W1-T12416 and W1-T12414 merge. The fleet builds it.

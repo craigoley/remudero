@@ -17,7 +17,7 @@
     - deploy/host-update.sh
     - test/host-update-reclaim.test.ts
     - test/deploy/host-update-uses-the-shared-claude-directory.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "host-update.sh takes `CRED_DIR` from `claude_host_directory` in deploy/claude-directory.sh, so `RMD_CLAUDE_DIR` and `HOME` give the same path as in recycle-container.sh and serve-container.sh"
