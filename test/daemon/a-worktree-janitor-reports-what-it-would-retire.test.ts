@@ -10,12 +10,13 @@
 import { after, before, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { fixedClock, systemClock } from "#src/lib/clock.js";
 import { runDaemon, type DaemonDeps } from "#src/lib/daemon.js";
+import { daemonCommand } from "#src/run-task.js";
 import { loadPlanFromYaml } from "#src/lib/plan.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import {
@@ -24,6 +25,7 @@ import {
   WORKTREE_RETIRE_WOULD_RETIRE_STEP, type WorktreeRegistration, type WorktreeRetirePorts,
 } from "#src/lib/worktree-retire.js";
 import { gitRepo, GIT_REPO_FIXTURE_IDENTITY } from "#test/helpers/git-repo.js";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 const DAY = 24 * 60 * 60 * 1000;
 const ID = GIT_REPO_FIXTURE_IDENTITY;
@@ -423,5 +425,35 @@ describe("the daemon tick", () => {
     assert.ok(lists >= 2, `the janitor ran on more than one tick (${lists})`);
     assert.ok(steps.includes(WORKTREE_RETIRE_PASS_STEP), "a pass row reached the daemon's ledger log");
     assert.ok(steps.includes("daemon.worktree_retire_report.error"), "a thrown pass is logged and the daemon carries on");
+  });
+});
+
+describe("the production daemon command", () => {
+  it("W1-T11941 criterion 1: supplies its operator checkout to the shadow janitor", async () => {
+    const home = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}t11941-command-`));
+    const root = join(home, "Remudero");
+    mkdirSync(join(home, ".config", "remudero"), { recursive: true });
+    mkdirSync(root, { recursive: true });
+    writeFileSync(join(home, ".config", "remudero", "config.json"), JSON.stringify({ claudeBin: "/bin/true", root }));
+    const planPath = join(home, "tasks.yaml");
+    writeFileSync(planPath, "[]\n");
+    const oldHome = process.env.HOME;
+    let captured: DaemonDeps | undefined;
+    process.env.HOME = home;
+    try {
+      const code = await daemonCommand(["--allow-self-target", "--plan", planPath, "--max", "0"], {
+        runDaemon: async (_plan, deps) => {
+          captured = deps;
+          return { attempted: [], merged: [], stopReason: "stopped", costUsd: 0, ticks: 0 };
+        },
+      });
+      assert.equal(code, 0);
+      assert.equal(captured?.worktreeRetire?.operatorCheckout, REPO_ROOT,
+        "the live composition root names the checkout whose registration list the janitor reads");
+    } finally {
+      if (oldHome === undefined) delete process.env.HOME;
+      else process.env.HOME = oldHome;
+      rmSync(home, { recursive: true, force: true });
+    }
   });
 });
