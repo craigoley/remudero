@@ -10,10 +10,29 @@ import {
 import { readLedgerLines } from "#src/lib/status.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import {
-  drainDetachedSweepActions, runSweepLightPass, trackInFlightReview,
-  type FixDispatchEvidence, type OpenPrView, type SweepDeps,
+  drainDetachedSweepActions, isReviewLaneDisposition, reviewOnlyStandDownReason, runSweepLightPass,
+  trackInFlightReview,
+  type Disposition, type FixDispatchEvidence, type OpenPrView, type SweepDeps,
 } from "#src/lib/sweep.js";
-import { lightPassActionable, reviewOnlyLightPassDeps } from "#src/run-task.js";
+
+// The two `src/run-task.ts` wiring helpers, mirrored over the sweep.ts exports they are built from. This suite must
+// not import run-task.ts directly: the affected-suite reach ratchet caps that importer set and only lets it shrink.
+// Only the arguments the light hook passes on an ordinary or review-only pass are modelled (no fix rung, no requeue lane).
+function lightPassActionable(
+  disposition: Disposition, fixRungAllowed: boolean, requeueLaneOnly: boolean, armAllowed: boolean,
+  repairFixAllowed: boolean,
+): boolean {
+  if (isReviewLaneDisposition(disposition)) return true;
+  if (disposition === "mergeable") return armAllowed;
+  if (disposition === "blocked-fixable") return fixRungAllowed || requeueLaneOnly || repairFixAllowed;
+  if (disposition === "conflicted") return fixRungAllowed || repairFixAllowed;
+  return false;
+}
+
+function reviewOnlyLightPassDeps(scope?: LightPassScope): Pick<SweepDeps, "lightPassScope" | "standDownReasonFor"> {
+  const name = scope?.reviewOnly === true ? scope.scope : undefined;
+  return name ? { lightPassScope: name, standDownReasonFor: () => reviewOnlyStandDownReason(name) } : {};
+}
 
 // W1-T11502 — A DUE REPAIR GETS A SERIALIZED TURN BETWEEN OVERLAPPING REVIEW PASSES. Consecutive review passes kept
 // the clock's "any active pass or in-flight review" condition true, so every pass was review-only and a due repair
