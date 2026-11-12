@@ -55,9 +55,14 @@ test("W1-T12205 criterion 2: sync and gardener-shaped async proof readers use th
 });
 
 test("W1-T12205 criterion 2: the actual task-ID CLI resolves declarations in both catalogs without a second namespace", t => {
-  const f = fixture(t); const origin = gitRepo({ bare: true, scope: t }); f.plan.addRemote("origin", origin.dir);
+  const f = fixture(t); const origin = gitRepo({ bare: true, scope: t }); const opsOrigin = gitRepo({ bare: true, scope: t });
+  f.code.addRemote("origin", origin.dir); f.plan.addRemote("origin", opsOrigin.dir);
   put(join(f.code.dir, "plan/tasks.yaml"), "- id: W1-T800\n");
-  put(join(f.plan.dir, "plan/tasks.yaml"), "- id: W1-T801\n  depends_on: [W1-T800]\n");
+  put(join(f.plan.dir, "plan/tasks.yaml"), "- id: W1-T801\n  depends_on: [W1-T800, W1-T802]\n");
+  f.code.git("add", "--all"); f.code.git("commit", "-qm", "public declaration");
+  f.plan.git("add", "--all"); f.plan.git("commit", "-qm", "private declaration");
+  f.code.git("push", "--quiet", "origin", "HEAD:refs/rmd-id/W1-T802");
+  assert.equal(opsOrigin.git("for-each-ref", "--format=%(refname)", "refs/rmd-id/"), "");
   const baseline = join(f.root, "baseline.json"); put(baseline, "[]\n");
   const r = spawnSync(process.execPath, [join(REPO_ROOT, "scripts/task-id-existence-check.mjs"), "--cwd", f.plan.dir,
     "--code-root", f.code.dir, "--dir", "plan", "--baseline", baseline], { cwd: REPO_ROOT, encoding: "utf8", timeout: 30_000 });
