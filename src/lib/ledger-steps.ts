@@ -267,6 +267,18 @@ const SEED_ROWS: readonly SeedRow[] = [
     writer: ["runDaemon", "fixRungTaskWithPlanReload"],
     outcomes: ["reloaded"],
   },
+  {
+    // W1-T12416: shadow only; no gate, route or judge reads this row.
+    step: "decision.answered",
+    meaning:
+      "One decision-model request about one input: the role, the input digest, the candidate, its " +
+      "deployment and request shape, the served model, the latency, the reserved, settled and held " +
+      "dollars, the usage, the question count and each question's distribution, abstention or " +
+      "rejection. A request refused before sending, a candidate that is unavailable and a request " +
+      "that failed write the same row with their reason, so every request has exactly one row.",
+    writer: ["askDecisionModel"],
+    outcomes: ["answered", "refused", "unavailable", "failed"],
+  },
 ];
 
 /** THE REGISTRY — every step this task has decoded so far, `family` derived from `step` (never

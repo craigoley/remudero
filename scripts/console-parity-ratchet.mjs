@@ -135,6 +135,9 @@ export const CLI_ONLY = {
       // 2026-09-24 ruling: an operator report over the ledger union on the daemon host; the console
       // reads the same experiment through routing.decision on each worker.assignment row.
       "routing-ab",
+      // W1-T12416: one paid shadow request to a decision model from the daemon host, with the cash
+      // key in its environment; no gate, route or judge reads the row it writes.
+      "decisions",
       // W1-T5687: a progress verdict over the ledger union on the daemon host; capture-diagnostics writes a bundle under <state>/diagnostics/ (docker ps, docker logs), at most one per 15 min; it recycles nothing.
       "progress-watchdog",
       // 2026-10-11: the host watchdog's rung of the live-edit ladder over a checkout on that host; the
