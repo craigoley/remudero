@@ -185,6 +185,48 @@ export function readHostLoad(): HostLoad {
   return { cores: availableParallelism(), load1: loadavg()[0] ?? 0 };
 }
 
+/** One host-pressure reading a run's width follows (W1-T11939); each field is undefined where it could not be read. */
+export interface HostPressure {
+  cores: number;
+  /** PSI `some avg10` of /proc/pressure/cpu: the percent of the last 10 s some runnable task waited for a CPU. */
+  cpuStallPercent?: number;
+  /** The one-minute load average. */
+  load1?: number;
+}
+
+/** The host's CPU pressure now, or undefined when nothing could be read — the caller then keeps its width. */
+export function readHostPressure(read: (path: string) => string = (path) => readFileSync(path, "utf8"),
+  load: () => readonly number[] = loadavg, cores: () => number = availableParallelism): HostPressure | undefined {
+  const count = cores();
+  if (!Number.isFinite(count) || count < 1) return undefined;
+  let cpuStallPercent: number | undefined;
+  try {
+    const some = /^some avg10=(\d+(?:\.\d+)?) /m.exec(read("/proc/pressure/cpu"))?.[1];
+    if (some !== undefined && Number(some) <= 100) cpuStallPercent = Number(some);
+  } catch {
+    // No PSI here (macOS, a kernel without it, a masked /proc): the load average below decides alone.
+  }
+  const load1 = load()[0];
+  const sample: HostPressure = { cores: Math.floor(count) };
+  if (cpuStallPercent !== undefined) sample.cpuStallPercent = cpuStallPercent;
+  if (load1 !== undefined && Number.isFinite(load1) && load1 >= 0) sample.load1 = load1;
+  return sample.cpuStallPercent === undefined && sample.load1 === undefined ? undefined : sample;
+}
+
+/**
+ * How many children a pressure-following run keeps in flight (W1-T11939): the cores the host is not stalling on —
+ * PSI's stall share when it reads, else the load average less this run's own `inFlight` children — never below one,
+ * and with no ceiling but the host's own core count. A missing sample keeps `current` (at least one), never zero.
+ */
+export function pressureWidth(sample: HostPressure | undefined, current: number, inFlight = 0): number {
+  const kept = Math.max(1, Number.isFinite(current) ? Math.floor(current) : 1);
+  if (sample === undefined || !Number.isFinite(sample.cores) || sample.cores < 1) return kept;
+  const cores = Math.floor(sample.cores);
+  if (sample.cpuStallPercent !== undefined) return Math.max(1, Math.floor(cores * (1 - sample.cpuStallPercent / 100)));
+  if (sample.load1 !== undefined) return Math.max(1, Math.floor(cores - Math.max(0, sample.load1 - inFlight)));
+  return kept;
+}
+
 /** An UNSLOTTED caller's share divisor: `RMD_TEST_SLOTS`, else one per four cores, at least one. The slot pool itself
  *  is measured ({@link cpuAdmission}) unless `RMD_TEST_SLOTS` fixes it. */
 export function defaultTestSlots(cores: number, env: NodeJS.ProcessEnv = process.env): number {
