@@ -100,7 +100,9 @@ test("W1-T12207 criterion 4: the real claim CLI and default ops transport reserv
   const routes = await Promise.all(fx.apiPaths.map(async path => ({ when: `api ${path}`, stdout: JSON.stringify(await fx.api(path)) })));
   const shim = ghShim([...routes.sort((a, b) => b.when.length - a.when.length), { when: "", stderr: "forbidden fixture GitHub route", exit: 97 }]);
   const env = { PATH: `${shim.dir}:${process.env.PATH}`, HOME: fixtureHome, TMPDIR: tmpdir(), LANG: "C", RMD_SELF_SYNC_DONE: "1",
-    GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null", GIT_ALLOW_PROTOCOL: "file" };
+    GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null", GIT_ALLOW_PROTOCOL: "file",
+    ...(process.env.NODE_OPTIONS === undefined ? {} : { NODE_OPTIONS: process.env.NODE_OPTIONS }),
+    ...(process.env.NODE_V8_COVERAGE === undefined ? {} : { NODE_V8_COVERAGE: process.env.NODE_V8_COVERAGE }) };
   assert.equal(git(["ls-remote", origin, `refs/rmd-dispatch/${ID}`]).trim(), "");
   const output = execFileSync(join(REPO_ROOT, "bin", "rmd"), ["claim", ID], { cwd: publicRoot, env, encoding: "utf8", timeout: 30_000 });
   assert.ok(output.includes(`claimed refs/rmd-dispatch/${ID}`));

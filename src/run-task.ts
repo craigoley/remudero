@@ -41769,8 +41769,7 @@ async function claimCatalogPlanRoot(taskId: string, opts: ClaimVerbOpts): Promis
   if (located.ok) return located.root;
   const destination = planDestinationRepository(stateDir());
   if (destination.outcome !== "off") {
-    const publicRoot = resolveVerbPlanRoot(undefined, { cwdRoot: repoRoot, stateDir });
-    if (!publicRoot.ok) return undefined;
+    const publicRoot = instanceVerbPlanRoot(stateDir);
     let publicPlan: Plan;
     try { publicPlan = await loadPlanAtRefAsync(publicRoot.root, "plan/tasks.yaml", "origin/main"); }
     catch (error) {
