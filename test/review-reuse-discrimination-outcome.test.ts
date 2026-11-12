@@ -19,6 +19,9 @@ const CRITERION = {
   proof: "grep: W1-T3901 in src/review-reuse.ts",
 };
 const DIFF = "diff --git a/src/review-reuse.ts b/src/review-reuse.ts\n+W1-T3901\n";
+// W1-T11847: a reused or rediscriminated verdict posts only while the reviewer code that judged it is current.
+const REVIEWER_CODE = "c".repeat(40);
+const CURRENT_CODE = () => ({ status: "fresh" as const, codeSha: REVIEWER_CODE, originMainSha: REVIEWER_CODE, advance: "none" as const });
 const BODY = "W1-T3901 proof discrimination observes the current head.";
 const TEST_CRITERION = {
   claim: "W1-T3901 executable test proof observes the current head",
@@ -214,6 +217,7 @@ function adapterFixture(options: AdapterFixtureOptions = {}) {
     head_sha: priorHead,
     pr_url: "https://github.com/acme/scratch/pull/3704",
     decision_verdict: prior,
+    reviewer_code_sha: REVIEWER_CODE,
   });
   process.env.PATH = `${bin}:${oldPath}`;
   const effects = buildSweepEffects({
@@ -225,6 +229,7 @@ function adapterFixture(options: AdapterFixtureOptions = {}) {
     runId: "reuse-adapter",
     plan: { tasks: [], byId: new Map([[taskId, { id: taskId, files: [] }]]) } as never,
     log: (step) => calls.push(step),
+    reviewerCodeFreshnessImpl: CURRENT_CODE,
     reviewRunner: async () => {
       calls.push("fallback-review");
       return 0;
@@ -406,6 +411,7 @@ test("W1-T3901 run-task adapter posts proof-only discrimination and records effe
     head_sha: priorHead,
     pr_url: "https://github.com/acme/scratch/pull/3704",
     decision_verdict: prior,
+    reviewer_code_sha: REVIEWER_CODE,
   });
   process.env.PATH = `${bin}:${oldPath}`;
   try {
@@ -418,6 +424,7 @@ test("W1-T3901 run-task adapter posts proof-only discrimination and records effe
       runId: "reuse-adapter",
       plan: { tasks: [], byId: new Map([[taskId, { id: taskId, files: [] }]]) } as never,
       log: (step) => calls.push(step),
+      reviewerCodeFreshnessImpl: CURRENT_CODE,
       reviewRunner: async () => {
         calls.push("fallback-review");
         return 0;
@@ -520,6 +527,7 @@ test("W1-T3901 run-task adapter posts proof-only discrimination and records effe
     const row = {
       run_id: "prior", task_id: `PR-${PR_NUMBER}`, step: "review.posted", state: prior.state, head_sha: PRIOR_HEAD, pr_url: PR_URL,
       decision_verdict: options.verdict ? options.verdict(prior) : prior,
+      reviewer_code_sha: REVIEWER_CODE,
     };
     appendLedger(ledgerPath, { run_id: "other", task_id: "PR-1", step: "review.posted", state: "failure", pr_url: "https://github.com/acme/scratch/pull/1", decision_verdict: { ...prior, state: "failure" } });
     if ((options.prior ?? "live") === "live") appendLedger(ledgerPath, row);
@@ -535,6 +543,7 @@ test("W1-T3901 run-task adapter posts proof-only discrimination and records effe
       runId: "t9681",
       plan: { tasks: [], byId: new Map() } as never,
       log: (step, fields) => steps.push({ step, fields: (fields ?? {}) as Record<string, unknown> }),
+      reviewerCodeFreshnessImpl: CURRENT_CODE,
       reviewRunner: async () => {
         steps.push({ step: "full-review", fields: {} });
         return 0;

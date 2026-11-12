@@ -1,3 +1,4 @@
+// @census-reads: src/ test/ledger-rotation.test.ts — the ledger source it copies and mutates, and its own text.
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {

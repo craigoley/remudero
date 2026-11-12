@@ -26,7 +26,7 @@ import fs, { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, unl
 import { createHash, randomUUID } from "node:crypto";
 import { daemonInstanceRegistryPath, deployFailedAlertPath, deployLastFailedPath, deployMarkerPath, IMAGE_BUILD_SHA_PATH, readDeployFactsAsync, realDeploySensorsAsync, type AsyncDeploySensors, type DeployFacts } from "./deployer.js";
 import { resolveInstallRoot } from "./install-root.js";
-import { probeReviewerCodeFreshnessAsync, type ReviewerCodeFreshness } from "./self-sync.js";
+import { isFullReviewerCodeSha, probeReviewerCodeFreshnessAsync, type ReviewerCodeFreshness } from "./self-sync.js";
 import {
   deployStateRows, mainWorkflowStateRows, reconcileFleetState,
   type DeployStateReader, type FleetStateRow,
@@ -212,6 +212,9 @@ import {
   reviewLaneCancellation,
   reviewLanePr,
   reviewTaskNarrative,
+  REVIEW_REQUEUED_STEP,
+  REVIEWER_CODE_ADVANCED,
+  reviewerCodeAdvanceNames,
   UNFILED_RUN_SENTINEL,
   unknownReservationReads,
 } from "./review.js";
@@ -1602,6 +1605,8 @@ export interface BuildSweepEffectsDeps {
    *  W1-T2890 holds the lib-built and entrypoint-built effect surfaces key-identical, and a member
    *  present on one but not the other is exactly the drift that test exists to catch. */
   reviewerCodeStaleThisPassImpl?: () => { oldSha: string; newSha: string } | undefined;
+  /** W1-T11847: the entrypoint's reviewer-code judge and pending poster. Omitted: no reviewer-code requeue. */
+  reviewerCodeAdvanceImpl?: ReviewerCodeAdvance;
   reviewCommandImpl?: (
     pr: string,
     args: string[],
@@ -2476,6 +2481,7 @@ export const SWEEP_EFFECT_SURFACE = [
   // daemon never pays for a review it cannot publish. It is an effect, not a plain value, because
   // buildSweepEffects caches the read once per sweep cycle rather than once per PR.
   "reviewerCodeStaleThisPass",
+  "reviewerCodeAdvance", // W1-T11847
   // W1-T4415: every open draft is marked ready for review (operator ruling 2026-09-24: no drafts).
   "readyDraft",
   "readPrHeadDiff",
@@ -2626,6 +2632,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   | "refreshJudge"
   | "readPrFileSource"
   | "readyDraft"
+  | "reviewerCodeAdvance"
   | "guardArmedBody"
   | "draftRefusalAmendments"
   | "captureRepairFeedback"
@@ -2716,6 +2723,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     registeredWorktreeOwnerImpl = requiredSweepRuntime<NonNullable<BuildSweepEffectsDeps["registeredWorktreeOwnerImpl"]>>("registeredWorktreeOwnerImpl"),
     reviewCommandImpl = requiredSweepRuntime<NonNullable<BuildSweepEffectsDeps["reviewCommandImpl"]>>("reviewCommandImpl"),
     reviewerCodeStaleThisPassImpl = requiredSweepRuntime<NonNullable<BuildSweepEffectsDeps["reviewerCodeStaleThisPassImpl"]>>("reviewerCodeStaleThisPassImpl"),
+    reviewerCodeAdvanceImpl,
     registeredOwnerRecovery = {
       capture: requiredSweepRuntime("registeredOwnerRecovery.capture"),
       remove: requiredSweepRuntime("registeredOwnerRecovery.remove"),
@@ -3167,6 +3175,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     // W1-T3618: the entrypoint's freshness gate, surfaced so the lib-built and entrypoint-built
     // effect surfaces stay key-identical (W1-T2890).
     reviewerCodeStaleThisPass: reviewerCodeStaleThisPassImpl,
+    reviewerCodeAdvance: reviewerCodeAdvanceImpl,
     // W1-T2853: one controller instance is retained per config root by review-capacity.ts, while
     // each pass supplies its already-read ledger snapshot. Host observation is local, provider
     // capacity comes only from the existing age-bounded status file, and all worker kinds count
@@ -14146,7 +14155,7 @@ export const REFUSED_POST_HOST_GAP_REREVIEW_STEP = "sweep.review_host_gap_rerevi
 export const STALE_BODY_REREVIEW_STEP = "sweep.stale_body_rereview";
 
 /** W1-T9970: the ledger step that records one re-review of an unchanged head, and the reason a newer reviewer image earns it. */
-export const REVIEW_REQUEUED_STEP = "sweep.review_requeued";
+export { REVIEW_REQUEUED_STEP };
 export const REVIEWER_IMAGE_CHANGED = "reviewer-image-changed";
 
 /** W1-T9970: the image this process runs in, from {@link IMAGE_BUILD_SHA_PATH}. Off-container, or unreadable, it is
@@ -14224,6 +14233,67 @@ export function reviewerImageDecisionDigest(
   const requested = ctx.requeues.some((line) => line.step === REVIEW_REQUEUED_STEP && line.reason === REVIEWER_IMAGE_CHANGED &&
     line.head_sha === ctx.headSha && line.new_image_sha === image);
   return requested ? `v2:${createHash("sha256").update(`${digest}\0runtime-image:${image}`, "utf8").digest("hex")}` : digest;
+}
+
+/** W1-T11847: the sweep's two reviewer-code effects. `judge` reads a recorded sha against origin/main; `postPending`
+ *  posts `remudero-review=pending` on the PR's exact head through the guarded pending path. */
+export interface ReviewerCodeAdvance {
+  judge: (codeSha: unknown) => Promise<ReviewerCodeFreshness>;
+  postPending: (pr: OpenPrView) => Promise<{ posted: boolean; reason?: string }>;
+}
+
+const REVIEWER_CODE_REQUEUE_DISPOSITIONS: ReadonlySet<Disposition> =
+  new Set(["mergeable", "blocked-fixable", "post-review", "review-reused", "discriminate-only", "wait"]);
+
+/** W1-T11847: one requeue row per (PR URL, exact head, judged reviewer-code sha). The row follows the newest delivered
+ *  terminal verdict of this head and input; a later verdict needs its own. While the row is the newest, the review is
+ *  admitted only when GitHub shows pending, so the old terminal is never left visible beside a queued review. */
+async function reviewerCodeRequeue(
+  pr: OpenPrView,
+  lines: Array<Record<string, unknown>>,
+  advance: ReviewerCodeAdvance,
+  at: { ledgerPath: string; runId: string; ts: string; append: (path: string, line: LedgerLine) => void },
+): Promise<{ admit: boolean; reason: string } | undefined> {
+  const taskId = reviewOutcomeTaskIdFor(pr);
+  let delivered: Record<string, unknown> | undefined;
+  let requeued = false;
+  for (const line of lines) {
+    if (delivered !== undefined && reviewerCodeAdvanceNames(line, pr.prUrl, pr.headSha)) requeued = true;
+    else if (line.step === "review.posted" && line.task_id === taskId && line.pr_url === pr.prUrl && line.head_sha === pr.headSha &&
+      line.review_input_digest === pr.reviewInputDigest && (line.state === "success" || line.state === "failure")) {
+      delivered = line;
+      requeued = false;
+    }
+  }
+  if (delivered === undefined) return undefined;
+  const codeSha = delivered.reviewer_code_sha;
+  if (!requeued) {
+    const code = await advance.judge(codeSha);
+    const incomplete = !isFullReviewerCodeSha(codeSha);
+    if (code.status !== "stale" && !incomplete) return undefined;
+    const row = {
+      ts: at.ts, run_id: at.runId, task_id: taskId, step: REVIEW_REQUEUED_STEP, reason: REVIEWER_CODE_ADVANCED,
+      pr_number: pr.prNumber, pr_url: pr.prUrl, head_sha: pr.headSha, review_input_digest: pr.reviewInputDigest,
+      review_key: reviewOutcomeKeyForPr(pr), requeue_key: `${pr.prUrl}|${pr.headSha}|${incomplete ? "incomplete" : codeSha}`,
+      judged_reviewer_code_sha: incomplete ? null : codeSha, reviewer_code_freshness: incomplete ? "incomplete" : code.status,
+      ...(code.status === "stale" ? { origin_main_sha: code.originMainSha, changed_paths: code.changedPaths } : {}),
+      delivered_run_id: delivered.run_id, delivered_state: delivered.state,
+    };
+    at.append(at.ledgerPath, row);
+    lines.push(row);
+  }
+  const judged = isFullReviewerCodeSha(codeSha) ? `reviewer code ${codeSha.slice(0, 12)} is materially behind origin/main`
+    : "the delivered verdict names no full reviewer-code sha";
+  if (pr.reviewState === "pending") return { admit: true, reason: `${judged} — one fresh review of this head (W1-T11847)` };
+  let pending: { posted: boolean; reason?: string };
+  try {
+    pending = await advance.postPending(pr);
+  } catch (error) {
+    pending = { posted: false, reason: String((error as Error)?.message ?? error) };
+  }
+  return pending.posted
+    ? { admit: true, reason: `${judged} — posted pending on ${pr.headSha.slice(0, 7)}; one fresh review of this head (W1-T11847)` }
+    : { admit: false, reason: `${judged} — pending was not posted (${pending.reason ?? "no reason"}); no review is admitted until it is` };
 }
 
 /** The slice of an open PR view {@link detectStaleBody} reads. */
@@ -14975,6 +15045,8 @@ export interface SweepDeps {
      * can distinguish one. The sweep keeps the bounded backoff either way. */
     takeAncestryFailure?: () => string | undefined;
   };
+  /** W1-T11847: judges a delivered verdict's reviewer code and posts pending before its fresh review. Omitted: no requeue. */
+  reviewerCodeAdvance?: ReviewerCodeAdvance;
   /** W1-T2853 — choose this pass's review width from one already-derived queue and ledger snapshot.
    *  Omission preserves the committed `reviewLanes` behaviour for CLI and test callers. */
   selectAdaptiveReviewWidth?: (input: {
@@ -21542,6 +21614,14 @@ export async function runSweep(
           `handed this head back (${due.handoff.step}${due.handoff.site ? ` ${due.handoff.site}` : ""}); image ` +
           `${due.runningImageSha.slice(0, 7)} is running now — re-reviewing the unchanged head once on it`;
       }
+    }
+    const codeAdvance = deps.reviewerCodeAdvance && !deps.dryRun && REVIEWER_CODE_REQUEUE_DISPOSITIONS.has(disposition) &&
+      (pr.checksState === "green" || pr.checksState === "pending") ? await reviewerCodeRequeue(pr, ledgerLines, deps.reviewerCodeAdvance,
+      { ledgerPath: deps.ledgerPath, runId: deps.runId, ts: clockFromMillisFn(() => now).iso(), append: appendLine }) : undefined;
+    if (codeAdvance !== undefined) {
+      if (codeAdvance.admit) prior.reviewDelivered.delete(reviewOutcomeKeyForPr(pr));
+      disposition = codeAdvance.admit ? "post-review" : "wait";
+      reason = codeAdvance.reason;
     }
     if (headIdentityRed(pr) && !isDispatchedRunBranch(pr.headRefName)) {
       const row = { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", from_pr: pr.prNumber,

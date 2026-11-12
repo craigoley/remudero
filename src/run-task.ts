@@ -818,6 +818,9 @@ import {
   type LandingReviewRequest,
   landTaskFilesAsync,
   stagedTaskFiles,
+  stagedTaskFileOrigins,
+  taskFileOrigin,
+  taskFilesLandingBranchAsync,
   type LandTaskFilesOpts,
   type TaskFileInput,
   type TaskFilesLandingResult,
@@ -2936,6 +2939,7 @@ import { buildYieldsToRepair } from "./lib/repair-memory-demand.js";
 // `plan/policy.yaml`, so no new policy row is added here).
 import { loadDefaultCostAnomalyPolicy, type CostAnomalyPolicy } from "./lib/cost-anomaly.js";
 import { hostWorktreeGit, hostWorktreeGitAsync, WorktreePointerRefusedError, type HostWorktreeGitOptions } from "./lib/worktree-git.js";
+import { observeComputedPlacement } from "./lib/test-path-resolver.js";
 import {
   defaultGitCapture,
   defaultGitCaptureAsync,
@@ -6550,6 +6554,7 @@ export function fixRungScopeStandDownReason(
   reachableRemedyFiles: readonly ReachableRemedyFileInput[] = [],
   failingChecks: readonly Pick<CiFailure, "name" | "logTail">[] = [],
   registrationChanges: readonly RegistrationChange[] = [],
+  placement?: { root: string; proofs: readonly string[] },
 ):
   | {
       reason: string;
@@ -6558,7 +6563,7 @@ export function fixRungScopeStandDownReason(
       gateRemedyDeadlock?: FixRungGateRemedyScopeDeadlock;
     }
   | undefined {
-  return fixCommandHelpers(fixCommandHost()).fixRungScopeStandDownReason(currentDiffFiles, baselineDiffFiles, declaredFiles, reachableRemedyFiles, failingChecks, registrationChanges);
+  return fixCommandHelpers(fixCommandHost()).fixRungScopeStandDownReason(currentDiffFiles, baselineDiffFiles, declaredFiles, reachableRemedyFiles, failingChecks, registrationChanges, placement);
 }
 
 /**
@@ -27739,6 +27744,7 @@ function* retractGardenBranchSteps(
  *  garden PR opens READY FOR REVIEW — never a draft (operator ruling, 2026-09-24: a draft sits like a
  *  stuck PR) — so the sweep reviews and arms it like any other fleet PR (`GARDEN_BRANCH_RE`). */
 export function gardenCheckout(opts: GardenCheckoutOpts): GardenCheckout {
+  if (opts.taskFilesOnly) throw new Error(`${opts.name} garden: a checkout that files only task files lands through the async checkout`);
   const branch = `${opts.name}-garden-${(opts.clock ?? systemClock).now()}`;
   const root = join(opts.worktreesRoot, branch);
   worktreeAdd(opts.repoDir, root, branch, "origin/main", { log: opts.log });
@@ -27758,8 +27764,11 @@ export function gardenCheckout(opts: GardenCheckoutOpts): GardenCheckout {
 }
 
 export async function gardenCheckoutAsync(opts: GardenCheckoutOpts): Promise<GardenCheckoutAsync> {
+  if (opts.taskFilesOnly && !opts.taskFilesLanding) throw new Error(`${opts.name} garden: a checkout that files only task files needs the task-file landing`);
   const branch = `${opts.name}-garden-${(opts.clock ?? systemClock).now()}`;
   const root = join(opts.worktreesRoot, branch);
+  // W1-T12222: the id holder is the branch that files it, so such a checkout reserves on the landing branch.
+  const reservationBranch = opts.taskFilesOnly ? await taskFilesLandingBranchAsync({ owner: opts.owner, repo: opts.repo }) : branch;
   await worktreeAddAsync(opts.repoDir, root, branch, "origin/main", { log: opts.log });
   const io: GardenLandIo = {
     git: async (...args: string[]) => (await execFilePromise("git", ["-C", root, ...args], { encoding: "utf8" })).stdout,
@@ -27773,7 +27782,7 @@ export async function gardenCheckoutAsync(opts: GardenCheckoutOpts): Promise<Gar
   };
   return {
     root,
-    branch,
+    branch: reservationBranch,
     land: (landing) => runStepsAsync(gardenLandSteps(opts, root, branch, landing, io)),
     dispose: () => worktreeRemoveAsync(opts.repoDir, root),
   };
@@ -27793,6 +27802,9 @@ export interface GardenCheckoutOpts {
   /** W1-T12221: the shared landing of task files: its state root (`config.root`) and its seams. Absent,
    *  every land opens its own PR. */
   taskFilesLanding?: Pick<LandTaskFilesOpts, "stateRoot" | "gh" | "planPrPreflight">;
+  /** W1-T12222: every land is a task file, new or edited, through `taskFilesLanding`; `branch` is the landing
+   *  branch, and a land with any other path is refused. Async checkout only. */
+  taskFilesOnly?: true;
 }
 
 interface GardenLandIo {
@@ -27805,33 +27817,52 @@ interface GardenLandIo {
 
 /** W1-T12221: the landing inputs when every path is an edit of a task file main holds and the body's
  *  `## Acceptance` gives its criterion; otherwise nothing, and the land opens its own PR. */
-function* sealedTaskFileInputs(root: string, paths: readonly string[], body: string, git: GardenLandIo["git"]): Steps<TaskFileInput[] | undefined> {
+function* sealedTaskFileInputs(root: string, paths: readonly string[], body: string, git: GardenLandIo["git"], newFiles: boolean): Steps<TaskFileInput[] | undefined> {
   const shardDir = relative(root, join(resolveRepoLayout(root).planDir, "tasks.d"));
   const criteria = parseAcceptanceBlock(body).filter((c) => c.proof !== "");
   const inputs: TaskFileInput[] = [];
   for (const relPath of paths) {
     if (!relPath.startsWith(`${shardDir}/`) || !/\.ya?ml$/.test(relPath) || !existsSync(join(root, relPath))) return undefined;
+    let newFile = false;
     try {
       yield* step(() => git("cat-file", "-e", `HEAD:${relPath}`));
     } catch {
-      return undefined; // not an edit: main does not hold the path, so the land opens its own PR
+      if (!newFiles) return undefined; // not an edit: main does not hold the path, so the land opens its own PR
+      newFile = true;
     }
     const criterion = criteria.find((c) => c.proof.endsWith(` in ${relPath}`)) ?? (paths.length === 1 && criteria.length === 1 ? criteria[0] : undefined);
     if (criterion === undefined) return undefined;
-    inputs.push({ relPath, content: readFileSync(join(root, relPath), "utf8"), claim: criterion.claim, proof: criterion.proof });
+    inputs.push({ relPath, content: readFileSync(join(root, relPath), "utf8"), claim: criterion.claim, proof: criterion.proof, ...(newFile ? { newFile: true as const } : {}) });
   }
   return inputs.length > 0 ? inputs : undefined;
 }
 
 /** W1-T12221: the landing PR when it carries every path, a wait when each path waits, else nothing. */
 function* landSealedTaskFiles(opts: GardenCheckoutOpts, paths: readonly string[], inputs: TaskFileInput[], land: NonNullable<GardenLandIo["landTaskFiles"]>): Steps<GardenLandResult> {
+  // W1-T12222: a waiting file holds its finding. A new file whose origin a file in the queue already records is the
+  // same finding filed twice, so it is not staged; the id it reserved goes back, as for any land that opens nothing.
+  if (opts.taskFilesOnly === true) {
+    const held = stagedTaskFileOrigins(opts.taskFilesLanding!.stateRoot);
+    const twice = inputs.flatMap((i) => {
+      const origin = i.newFile === true ? taskFileOrigin(i.content) : "";
+      const first = origin === "" ? undefined : held.find((h) => h.origin === origin && h.relPath !== i.relPath);
+      return first === undefined ? [] : [{ path: i.relPath, reason: `the finding ${origin} already waits in ${first.relPath}` }];
+    });
+    if (twice.length > 0) {
+      opts.log(`${opts.name}.garden_sealed_landing`, { outcome: "refused", paths, pr_url: null, refused: twice });
+      return undefined;
+    }
+  }
   const result = yield* step(() => land(inputs));
   const carried = paths.every((p) => result.landed.includes(p));
-  const outcome = result.prUrl !== undefined && carried ? "opened" : paths.every((p) => result.landed.includes(p) || result.waiting.includes(p)) ? "waiting" : "not_landed";
+  const queued = paths.every((p) => result.landed.includes(p) || result.waiting.includes(p));
+  // W1-T12222: a file that is in the queue keeps the ids of its land, so a partly refused land of new files waits.
+  const partly = opts.taskFilesOnly === true && paths.some((p) => result.landed.includes(p) || result.waiting.includes(p));
+  const outcome = result.prUrl !== undefined && carried ? "opened" : queued || partly ? "waiting" : "not_landed";
   const refused = [...result.refused, ...result.setAside].filter((r) => paths.includes(r.path)).map((r) => ({ path: r.path, reason: r.reason }));
   opts.log(`${opts.name}.garden_sealed_landing`, { outcome, paths, pr_url: outcome === "opened" ? result.prUrl : null, ...(refused.length ? { refused } : {}), ...(result.error ? { error: result.error } : {}) });
   if (outcome === "opened") return result.prUrl;
-  if (outcome === "waiting") return { waiting: { paths: [...paths], stateRoot: opts.taskFilesLanding!.stateRoot } };
+  if (outcome === "waiting") return { waiting: { paths: paths.filter((p) => result.landed.includes(p) || result.waiting.includes(p)), stateRoot: opts.taskFilesLanding!.stateRoot, ...(opts.taskFilesOnly === true ? { filed: true as const } : {}) } };
   return undefined;
 }
 
@@ -27844,8 +27875,13 @@ function* gardenLandSteps(
 ): Steps<GardenLandResult> {
   const { paths, title, body } = landing;
   // W1-T12221: an edit of task files rides the shared landing PR, unless the caller keeps its own PR.
-  const sealed = landing.sealedLanding === false || io.landTaskFiles === undefined ? undefined : yield* sealedTaskFileInputs(root, paths, body, io.git);
+  const only = opts.taskFilesOnly === true && io.landTaskFiles !== undefined;
+  const sealed = !only && (landing.sealedLanding === false || io.landTaskFiles === undefined) ? undefined : yield* sealedTaskFileInputs(root, paths, body, io.git, only);
   if (sealed !== undefined) return yield* landSealedTaskFiles(opts, paths, sealed, io.landTaskFiles!);
+  if (only) {
+    opts.log(`${opts.name}.garden_sealed_landing`, { outcome: "refused", paths, pr_url: null, error: "a checkout that files only task files lands each path under plan/tasks.d with its criterion" });
+    return undefined;
+  }
   yield* step(() => io.git("add", "--", ...paths));
   // A garden log under docs/ changes what docs/docs-index.json must say, and docs-index-check
   // refuses a PR whose index is stale — regenerate it with the checkout's own generator.
@@ -27908,8 +27944,16 @@ export type { GardenBuildContext } from "./cli/commands/daemon.js";
 
 export function daemonGardenWorkspace(ctx: Pick<GardenBuildContext, "config" | "repoRoot" | "owner" | "repo" | "log">, name: GardenName): () => Promise<GardenCheckoutAsync> {
   return () => gardenCheckoutAsync({ name, repoDir: ctx.repoRoot, worktreesRoot: worktreesDir(ctx.config), owner: ctx.owner, repo: ctx.repo, log: ctx.log,
-    taskFilesLanding: { stateRoot: ctx.config.root } });
+    taskFilesLanding: { stateRoot: ctx.config.root }, ...(TASK_FILES_ONLY_GARDENS.has(name) ? { taskFilesOnly: true } : {}) });
 }
+
+/** W1-T12222: the gardens whose every land is a new task file under plan/tasks.d, read from the code. The first four
+ *  hold a wait in their state (`runGardenAsync`); the last three read a land through `landedPrUrl`, which returns the
+ *  reference of a waiting filing, and each keeps its own memory of what it filed. The flake-incident gardener runs on
+ *  the selector-shadow checkout. Not listed: `gate` (it also lands .github/workflows/ci-gate.yml), and the gardens that
+ *  edit task files they do not file, reserve no id, or land other files: plan, backlog, redesign, queue-judge, test,
+ *  config, export, knowledge, machine-judge, review-replay, fix-lane. */
+const TASK_FILES_ONLY_GARDENS: ReadonlySet<GardenName> = new Set(["ci-friction", "hot-file", "flow-remedy", "scout", "flow", "selector-shadow", "host-resource"]);
 
 /** One pass of one garden; it logs its own failure under the garden's own step name and never throws. */
 export type RegisteredGardenPass = (() => void | Promise<void>) & { due?: () => boolean | Promise<boolean> };
@@ -28253,7 +28297,8 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
       const sources: HotFileGardenSources = {
         ledgerRecords: () => readCiFrictionLedgerRecords(stateDir),
         mainHistory: (sinceIso) => readMainHistory(repoRoot, sinceIso),
-        planOrigins: () => loadPlan(resolveRepoLayout(repoRoot).planMonolith).tasks.map((t) => t.origin).filter((o): o is string => typeof o === "string"),
+        // W1-T12222: a file that waits for the landing holds its finding, so its origin counts as filed.
+        planOrigins: () => [...loadPlan(resolveRepoLayout(repoRoot).planMonolith).tasks.map((t) => t.origin).filter((o): o is string => typeof o === "string"), ...stagedTaskFileOrigins(config.root).map((s) => s.origin)],
         mintTaskId: ciLearningTaskIdMinter(repoRoot, log, undefined, mintOptions),
         fileExists: (file) => existsSync(join(repoRoot, file)),
       };
@@ -28288,7 +28333,7 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
         handoff: (h: { id: string; raw: string; origin: string }) => void stageFeedbackCapture(repoRoot, config.root, { id: h.id, raw: h.raw, origin: h.origin as FeedbackOrigin }),
         openIncidentOrigins: () => openIncidentFeedbackOrigins(repoRoot, config.root),
         escalate: raiseDuplicate,
-        planOrigins: () => loadPlan(resolveRepoLayout(repoRoot).planMonolith).tasks.map((t) => t.origin).filter((o): o is string => typeof o === "string"),
+        planOrigins: () => [...loadPlan(resolveRepoLayout(repoRoot).planMonolith).tasks.map((t) => t.origin).filter((o): o is string => typeof o === "string"), ...stagedTaskFileOrigins(config.root).map((s) => s.origin)],
         fileConsumer: fileConsumerVia(daemonGardenWorkspace(ctx, "host-resource"), mintTaskId, log),
       };
       const paced = lowYieldGardenPass(stateDir, "host-resource", () => runHostResourcePassAsync(ports).then(() => {}), {
@@ -31453,11 +31498,19 @@ export function commitWorkerEdits(
     declaresProofTitle(readFileSync(join(repoDir, path), "utf8"), titles),
   );
   const admittedTests = admittedFixTestPaths(changed, options.admitTests);
+  // W1-T11501: a declared-but-not-yet-created test written at its contents-computed folder is the declared test, not
+  // scope widening — the ONE shared predicate (lib/test-path-resolver.ts) also used by the push, fix and review guards.
+  const computedPlacementTests = observeComputedPlacement({
+    root: repoDir, declaredFiles: declaredPaths, proofs: acceptance.map((criterion) => criterion.proof),
+    candidates: changed.filter((path) => !pathIsUnderDeclaredSurface(path, declaredPaths)),
+    baseTracked: () => runGit(["ls-tree", "-r", "--name-only", "-z", "HEAD", "--", "test/"]).split("\0").filter(Boolean),
+  }).admitted;
   const registrationChanges = declaredPaths.every(isInPlanScope) ? [] :
     readRegistrationChanges(repoDir, changed.filter((path) => !pathIsUnderDeclaredSurface(path, declaredPaths)), undefined, runGit, options.priorHeadSha);
   const admittedRegistrations = registrationChanges.filter(isAdditiveRegistrationChange).map((change) => change.path);
   const declared = changed.filter((path) => pathIsUnderDeclaredSurface(path, declaredPaths) ||
-    regenerable.includes(path) || proofMatchedTests.includes(path) || admittedTests.includes(path) || admittedRegistrations.includes(path));
+    regenerable.includes(path) || proofMatchedTests.includes(path) || admittedTests.includes(path) || computedPlacementTests.has(path) ||
+    admittedRegistrations.includes(path));
   const undeclared = changed.filter((path) => !declared.includes(path));
   // A checkpoint stages the undeclared paths as well; git itself still forces the refusals below.
   const staged = options.checkpoint ? changed : declared;

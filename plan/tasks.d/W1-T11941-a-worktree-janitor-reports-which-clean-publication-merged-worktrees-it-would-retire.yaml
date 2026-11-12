@@ -18,6 +18,7 @@
     - src/lib/worktree-retire.ts
     - src/lib/daemon.ts
     - test/daemon/a-worktree-janitor-reports-what-it-would-retire.test.ts
+    - "src/cli/commands/daemon.ts"
   status: queued
   attempts: 0
   acceptance:

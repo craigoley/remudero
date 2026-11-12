@@ -5,12 +5,14 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { readLedgerLines } from "#src/lib/status.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { reviewerCodeJudge } from "#src/lib/self-sync.js";
 import {
   REVIEWER_TOKEN_ENV,
   claimReviewDecision,
   postReviewCommentGuarded,
   postReviewPending,
   postReviewStatusGuarded,
+  reviewDescriptionWithCodeProvenance,
   reviewInputDigest,
   reviewOutboxDir,
   reviewOutboxEntryPath,
@@ -33,6 +35,11 @@ const DECISION = `sha256:${"d".repeat(64)}`;
 const DESCRIPTION = "remudero-review: PASS - 3 criteria substantiated, no test theater";
 const COMMENT = `**remudero-review=success** — ${DESCRIPTION}`;
 const SECRET = "ghs_W1T11928doNotWriteThisToDisk";
+// W1-T11847: the verdict names the full sha of the reviewer code that judged it, and the drain posts it only while
+// that code is still current at origin/main (here origin/main is that code).
+const CODE = "c".repeat(40);
+const POSTED = reviewDescriptionWithCodeProvenance(DESCRIPTION, CODE);
+const CURRENT = reviewerCodeJudge(() => ({ status: "fresh", codeSha: CODE, originMainSha: CODE, advance: "none" }), "/unused");
 
 const VERDICT: ReviewVerdict = {
   state: "success",
@@ -54,6 +61,7 @@ function fixture(name: string) {
     owner: "o", repo: "r", sha: HEAD, state: "success", description: DESCRIPTION, verdict: VERDICT, taskId: TASK,
     evidence: "executed", ledgerPath, runId: "review-PR17494-1794264570958", prUrl: PR_URL, reviewInputDigest: INPUT,
     reviewDecisionDigest: DECISION,
+    reviewerCodeFreshness: { status: "fresh", codeSha: CODE, originMainSha: CODE, advance: "none" },
     readReviewStatusHistory: async () => ({ kind: "readable", failures: [] }),
     fetchLifecycle: () => lifecycle(HEAD), post,
   });
@@ -80,7 +88,8 @@ test("W1-T11928 criterion 1: a verdict whose post failed is in an outbox entry w
     const raw = readFileSync(path, "utf8");
     const entry = JSON.parse(raw) as Record<string, unknown>;
     assert.equal(entry.state, "success");
-    assert.equal(entry.description, DESCRIPTION);
+    assert.equal(entry.description, POSTED);
+    assert.equal(entry.reviewer_code_sha, CODE);
     assert.equal(entry.head_sha, HEAD);
     assert.equal(entry.input_key, INPUT);
     assert.equal(entry.comment_body, COMMENT);
@@ -89,7 +98,7 @@ test("W1-T11928 criterion 1: a verdict whose post failed is in an outbox entry w
     assert.equal(raw.includes(SECRET), false, "no credential reaches the outbox");
     assert.deepEqual(Object.keys(entry).sort(), [
       "comment_body", "decision_verdict", "description", "evidence", "head_sha", "input_key", "owner", "pr_url", "repo",
-      "review_decision_digest", "run_id", "state", "task_id", "version", "written_at",
+      "review_decision_digest", "reviewer_code_sha", "run_id", "state", "task_id", "version", "written_at",
     ]);
     assert.equal(f.steps("review.post_failed")[0]?.outboxed, true, "the failure row says the verdict was kept");
   } finally {
@@ -112,10 +121,11 @@ test("W1-T11928 criterion 2: the next pass for that input posts the outbox verdi
       readReviewStatusHistory: async () => ({ kind: "readable", failures: [] }),
       commentDeps: { fetchNewestReview: () => undefined, postReview: (url, body) => { comments.push({ url, body }); } },
       fetchStatus: () => { throw new Error("a pass that posts the outbox verdict reads no pending claim"); },
+      judgeReviewerCode: CURRENT,
     });
 
     assert.equal(pending.outbox, "posted");
-    assert.deepEqual(f.posts, [{ owner: "o", repo: "r", sha: HEAD, state: "success", description: DESCRIPTION }],
+    assert.deepEqual(f.posts, [{ owner: "o", repo: "r", sha: HEAD, state: "success", description: POSTED }],
       "the stored verdict is the only status posted: no pending claim precedes it");
     assert.deepEqual(comments, [{ url: PR_URL, body: COMMENT }]);
     assert.deepEqual(f.entries(), [], "a posted entry is removed");
@@ -163,6 +173,7 @@ test("W1-T11928 criterion 2: the entry builds its comment from the verdict the r
       readReviewStatusHistory: async () => ({ kind: "readable", failures: [] }),
       commentDeps: { fetchNewestReview: () => undefined, postReview: (url, text) => { comments.push({ url, body: text }); } },
       fetchStatus: () => { throw new Error("a pass that posts the outbox verdict reads no pending claim"); },
+      judgeReviewerCode: CURRENT,
     });
 
     assert.equal(pending.outbox, "posted");
@@ -210,7 +221,7 @@ test("W1-T11928 criterion 3: a review whose post succeeds writes no outbox entry
 
     // The same review for a second task: the status carries the caller's fields and nothing from the outbox.
     assert.equal((await postReviewStatusGuarded({ ...f.terminal(f.record), taskId: "W1-T17494-second" })).posted, true);
-    const expected = { owner: "o", repo: "r", sha: HEAD, state: "success", description: DESCRIPTION };
+    const expected = { owner: "o", repo: "r", sha: HEAD, state: "success", description: POSTED };
     assert.deepEqual(f.posts, [expected, expected], "the status posted holds no outbox field");
 
     const comments: Array<{ url: string; body: string }> = [];
