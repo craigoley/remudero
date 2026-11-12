@@ -1289,7 +1289,6 @@ function kickRepoField(kick: DaemonKick): { repo?: string } {
   return kick.repo === undefined ? {} : { repo: kick.repo };
 }
 
-/** W1-T12244: `mark` adds the time since the last mark to `<name>_ms`; `firstTick` writes `daemon.boot_phases` once. */
 export interface BootPhases {
   mark(name: string): void;
   firstTick(log: (step: string, extra?: Record<string, unknown>) => void): void;
@@ -1326,7 +1325,6 @@ export interface DaemonDeps {
   readDurableReleases?: () => ReleaseEvidence;
   /** Complete archive union for the boot-time restart estimates and sweep-bound seed (W1-T9632); unreadable disables holdouts. */
   readRestartHistory?: () => readonly string[];
-  /** W1-T12244: the boot's step timer; the loop marks its own steps and writes `daemon.boot_phases` on its first tick. */
   bootPhases?: BootPhases;
   /** Re-read the plan from the same source the boot used, returning the fresh plan or `null` when
    *  nothing changed; omitted means the plan stays frozen at boot. The dep owns change detection
