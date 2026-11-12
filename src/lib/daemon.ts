@@ -2672,7 +2672,7 @@ export function startInterphaseReviewClock(
           }
           if (passAdmit && !passAdmit("review") && !passAdmit("plan-review")) {
             held += 1;
-            if (repairTurnDue) holdRepairTurn("restart_latch", admit.heldBy);
+            if (repairTurnDue) holdRepairTurn("restart_latch", passAdmit.heldBy);
             continue;
           }
           const handoff = repairTurnDue ? new Map(repairDebt) : undefined;
