@@ -16,7 +16,7 @@ import { join } from "node:path";
 
 import { fixedClock, systemClock } from "#src/lib/clock.js";
 import { runDaemon, type DaemonDeps } from "#src/lib/daemon.js";
-import { daemonCommand } from "#src/run-task.js";
+import { daemonCommand } from "#test/helpers/run-task-daemon.js";
 import { loadPlanFromYaml } from "#src/lib/plan.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import {
