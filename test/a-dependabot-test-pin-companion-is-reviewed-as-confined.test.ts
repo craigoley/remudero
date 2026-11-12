@@ -106,14 +106,23 @@ test("W1-T12369: any other edit in the test file is still refused", () => {
     // A second hunk changes an assertion with no pin in it.
     PR17928_DIFF + `@@ -200,1 +200,1 @@\n-  assert.equal(a, 1);\n+  assert.equal(a, 2);\n`,
     // A pure deletion of the pin assertion.
-    WORKFLOW_DIFF + testSection(`-${PIN_LINE(OLD_SHA)}`, "").replace(/\n\n/, "\n"),
+    WORKFLOW_DIFF + testSection(`-${PIN_LINE(OLD_SHA)}`, "").replace(`${PIN_LINE(OLD_SHA)}\n\n`, `${PIN_LINE(OLD_SHA)}\n`),
   ];
   for (const diff of variants) {
     const r = decide(diff);
     assert.equal(r.decision, "refuse", diff.slice(-200));
     assert.deepEqual(r.offendingFiles, [TEST_FILE]);
     assert.equal(r.acceptedPinFiles, undefined);
+    assert.doesNotMatch(r.reason, /test pin edit accepted/);
+    // The workflow half of each variant is the same bump that arms with its pin edit alone, so the
+    // refusal is caused by the extra test edit and by nothing else.
+    assert.equal(decide(WORKFLOW_DIFF).decision, "arm");
   }
+  // The pure deletion variant really removes the pin assertion and adds nothing in the test file.
+  const deletion = variants[variants.length - 1]!;
+  const testHalf = deletion.slice(deletion.indexOf(`diff --git a/${TEST_FILE}`));
+  assert.equal(testHalf.split("\n").filter((l) => l.startsWith("-") && !l.startsWith("---")).length, 1);
+  assert.equal(testHalf.split("\n").filter((l) => l.startsWith("+") && !l.startsWith("+++")).length, 0);
 });
 
 test("W1-T12369: a pin the bump does not change is still refused", () => {

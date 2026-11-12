@@ -1289,7 +1289,27 @@ diff --git a/test/semgrep-native-install.test.ts b/test/semgrep-native-install.t
       file: "test/semgrep-native-install.test.ts",
       pins: [{ dependency: "github/codeql-action/upload-sarif", from: oldSha, to: newSha }],
     }]);
+    assert.match(String(row?.reason), /test pin edit accepted: test\/semgrep-native-install\.test\.ts/);
   } finally {
     rmSync(r.tmp, { recursive: true, force: true });
+  }
+  // The same bump with one extra, non-pin edit in the test file is refused, arms nothing, and the
+  // ledgered row names no accepted file.
+  const refused = await driveMigrationDepReview({
+    prNumber: 17928,
+    title: "chore(deps): bump the actions-minor-and-patch group with 3 updates",
+    body: "Updates `github/codeql-action/upload-sarif` from 4.39.1 to 4.39.3",
+    diff: diff.replace(`+${pin(newSha)}\n`, `+${pin(newSha)} // moved\n`),
+    checks: GREEN_CHECKS,
+  });
+  try {
+    assert.deepEqual(refused.armCalls, []);
+    assert.deepEqual(refused.statusCalls, []);
+    const row = refused.ledger.find((line) => line.step === "dep-review.decided");
+    assert.equal(row?.decision, "refuse");
+    assert.deepEqual(row?.offendingFiles, ["test/semgrep-native-install.test.ts"]);
+    assert.equal(row?.acceptedPinFiles, undefined);
+  } finally {
+    rmSync(refused.tmp, { recursive: true, force: true });
   }
 });
