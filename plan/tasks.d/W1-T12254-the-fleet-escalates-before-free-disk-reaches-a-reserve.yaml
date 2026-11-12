@@ -55,7 +55,7 @@
     - New exported function `evaluateReserve(host, samples)`. It takes the newest sample of the host. For `root` and `state` it returns a finding when free is less than 1.5 times the reserve.
     - The finding holds the host, the volume, free, the reserve, and the consumers of that sample whose device is the device of the volume, sorted by size. Use `consumerDevices`, as `attributeGrowth` does.
     - The pass calls `evaluateReserve` for each host after the trend rule. The episode key is `<host>:<volume>:reserve`. Open the episode and raise the escalation once. Close it and write `host_resource.recovered` when free is at or above the line.
-    - The escalation follows the operator message standard. First line: "Free disk on <host> <volume> is <x> GiB. The reserve is <y> GiB." Then the three consumers. Then what happens if nobody acts: on the Mac the author preflight refuses, on Azure the janitor pass fails.
+    - The escalation follows the operator message standard. First line: "Free disk on <host> <volume> is <x> GiB. The reserve is <y> GiB." Then the three consumers. Then what happens if nobody acts: the janitor pass fails.
     - Its `taskId` is `host-reserve-<host>-<volume>`, so that it does not join the trend escalation of the same volume.
     - `state/HOST_RESOURCE_OFF` stops this rule as it stops the others.
     NOT IN SCOPE: swap and inodes, the trend rule, the SRE hand-off, the filing of a consumer, and the janitors.
@@ -63,6 +63,6 @@
     Use the reserve and not 1.5 times the reserve and criterion 1 must fail. List consumers of another device and criterion 2 must fail. Keep the episode in memory only and criterion 3 must fail. Read a missing reserve as 0 and criterion 5 must fail. Require a negative slope and criterion 6 must fail. Restore and require all seven to pass.
   note: |
     Host and account: the gardener runs inside the daemon of the core instance, in its container on the Azure host. It reads the heartbeat of every host.
-    The factor 1.5 is new. With today's values the line is 30 GiB on the Mac and about 14 GiB on the root volume of the Azure host (61 GiB at an 85% mark).
-    The Mac agent account is often below 30 GiB. It then has one open escalation until someone frees space or changes the reserve. That is the intended result.
+    The factor 1.5 is new. With today's values the line is about 14 GiB on the root volume of the Azure host (61 GiB at an 85% mark).
+    Amended 2026-11-12: W1-T12259 is retired, so no Mac account publishes a heartbeat and this rule never reads a Mac sample.
     The task removes nothing.

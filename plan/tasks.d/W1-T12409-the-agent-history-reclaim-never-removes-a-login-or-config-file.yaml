@@ -18,7 +18,7 @@
     - test/the-reclaim-survives-a-find-without-printf.test.ts
     - test/host-update-reclaim.test.ts
     - test/the-git-reclaim-warns-when-its-target-has-a-live-sibling.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: In the Codex home, the age sweep removes old files only under the history folders (sessions, archived_sessions, log, shell_snapshots). An old auth.json, config.toml, rmd_registry_*.config.toml, installation_id, installed CLI file under packages/ and file under work-artifacts/ are all kept, in a real run and in a dry run.
