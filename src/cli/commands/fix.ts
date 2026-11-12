@@ -5654,7 +5654,7 @@ export async function fixCommand(
   //
   // `self` is the checkout's owner/repo, otherwise read from `origin`. A sandboxed checkout has no
   // origin remote, so a test that drives this verb end to end must be able to name the slug itself.
-  deps: { config?: Config; fetch?: GhApiFetcher; route?: ReturnType<typeof fixCommandHelpers>["routeFix"]; self?: { owner: string; repo: string }; contributorAdmission?: AdmissionObserver; taskLookup?: TaskLookupOptions } = {},
+  deps: { config?: Config; fetch?: GhApiFetcher; route?: ReturnType<typeof fixCommandHelpers>["routeFix"]; self?: { owner: string; repo: string }; contributorAdmission?: AdmissionObserver; taskLookup?: TaskLookupOptions; readRequiredContexts?: typeof ghRequiredStatusCheckContexts } = {},
 
   host: FixCommandHost,
 ): Promise<number> {
@@ -5706,7 +5706,7 @@ export async function fixCommand(
   const reviewVerdictPostedAt = reviewVerdictPostedAtFromRollup(raw.statusCheckRollup);
   // W1-T103: same required-contexts gate as buildOpenPrViews — see
   // checksStateFromRollup's doc.
-  const requiredContexts = ghRequiredStatusCheckContexts(owner, repo);
+  const requiredContexts = (deps.readRequiredContexts ?? ghRequiredStatusCheckContexts)(owner, repo);
   const checksState = checksStateFromRollup(raw.statusCheckRollup, requiredContexts);
   const ciGateRequired = readCiGateRequiredChecks(repoRoot);
   const redRequiredChecks = redQualityGateNames(raw.statusCheckRollup, ciGateRequired);

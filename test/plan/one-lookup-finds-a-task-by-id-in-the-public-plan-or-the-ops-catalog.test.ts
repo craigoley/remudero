@@ -6,11 +6,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
-import { mergePlanBlobs, type Task } from "#src/lib/plan.js";
+import { mergePlanBlobs, type Plan, type Task } from "#src/lib/plan.js";
 import type { OpsCatalogApi } from "#src/lib/ops-catalog-source.js";
 import { ghShim } from "#test/helpers/gh-shim.js";
 import { originWithClone, GIT_REPO_FIXTURE_IDENTITY } from "#test/helpers/git-repo.js";
 import { FIXTURE_CONFIG_PATH_SEGMENTS } from "#src/lib/config.js";
+import type { FixCommandHost } from "#src/cli/commands/fix.js";
 import type { ReviewCommandHost, ReviewCommandDeps } from "#src/cli/commands/review.js";
 
 const ID = "W1-T900000", REPOSITORY = "fixture-private/ops";
@@ -181,4 +182,48 @@ test("an empty ops contract never borrows acceptance from the public pull-reques
     postReviewPending: async () => { throw Error("forbidden pending status"); },
   });
   assert.equal(code, 2); assert.equal(reviewed, 0);
+});
+
+
+test("the real fix command gives its local repair scope the private canonical record and refuses unreadable catalogs", async t => {
+  const { fixCommand } = await import("#src/cli/commands/fix.js");
+  for (const mode of ["found", "absent", "ops-unreadable", "public-unreadable", "legacy-off"] as const) {
+    const fx = fixture(t, mode === "absent" ? "[]\n" : yaml());
+    if (mode === "legacy-off") rmSync(join(fx.stateDir, "plan-destination.json"));
+    const plans: Plan[] = []; let routes = 0;
+    const host = {
+      USAGE: "fixture", commandSyntax: () => "rmd fix <pr>", workerBoundaryStack: { loadedModule: undefined },
+      buildSweepEffects: (input: { plan: Plan }) => { plans.push(input.plan); return {
+        dispatchFix: async () => { throw Error("forbidden repair effect"); }, escalate: async () => { throw Error("forbidden escalation"); },
+      }; },
+    } as unknown as FixCommandHost;
+    const code = await fixCommand(mode === "public-unreadable" || mode === "legacy-off" ? ["42", "--repo", "missing-fixture"] : ["42"], {
+      config: { root: fx.root } as never, self: { owner: "fixture", repo: "remudero" }, contributorAdmission: async () => {},
+      readRequiredContexts: () => [],
+      taskLookup: { api: mode === "ops-unreadable" ? async () => { throw Error("PRIVATE_FIX_API_FAILURE"); } : fx.api },
+      fetch: args => {
+        const path = args[1] ?? "";
+        if (/\/pulls\/42$/.test(path)) return { number: 42, html_url: "https://github.com/fixture/remudero/pull/42", state: "open", merged: false,
+          body: `Remudero-Task: ${ID}`, updated_at: new Date().toISOString(), head: { ref: `run-${ID}-1`, sha: "a".repeat(40) }, auto_merge: null };
+        if (path.includes("/check-runs?")) return { total_count: 0, check_runs: [] };
+        if (path.includes("/status")) return { statuses: [] };
+        throw Error("forbidden fixture REST route");
+      },
+      route: async (_state, pr) => { routes++; assert.deepEqual(pr.taskDeclaredFiles, mode === "found" ? ["src/fixture.ts"] : undefined); return { outcome: "refused", reason: "fixture prevents effects" }; },
+    }, host);
+    assert.equal(code, 1);
+    const expected = mode === "ops-unreadable" || mode === "public-unreadable" ? 0 : 1;
+    assert.equal(routes, expected); assert.equal(plans.length, expected);
+    if (mode === "found") {
+      assert.deepEqual(plans[0]?.byId.get(ID)?.files, ["src/fixture.ts"]);
+      assert.equal(plans[0]?.byId.get(ID)?.risk, "high"); assert.equal(plans[0]?.byId.get(ID)?.budget_usd, 0.5);
+    }
+    if (mode === "public-unreadable" || mode === "legacy-off") assert.equal(fx.calls.length, 0);
+  }
+});
+
+test("invalid fix input uses the existing refusal before a catalog read or effect", async () => {
+  const { fixCommand } = await import("#src/cli/commands/fix.js");
+  const host = { USAGE: "fixture", commandSyntax: () => "rmd fix <pr>", workerBoundaryStack: { loadedModule: undefined } } as unknown as FixCommandHost;
+  assert.equal(await fixCommand(["0"], undefined, host), 2);
 });
