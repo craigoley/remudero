@@ -1,4 +1,5 @@
 // @census-closure: src/lib/deployer.ts
+// @census-reads: src/ deploy/ bin/ .github/workflows/acr-build.yml test/a-busy-primary-reaches-its-image-recycle.test.ts — the deployer's import closure, the host-unit installer, itself.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";

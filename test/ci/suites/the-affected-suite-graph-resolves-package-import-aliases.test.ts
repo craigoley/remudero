@@ -1,4 +1,5 @@
 // @source-text-subject: this suite's subject is the import specifiers in tracked test files and package.json's imports map.
+// @census-reads: src/ scripts/ bin/ test/ package.json — the tracked import graph and the imports map it resolves through.
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
