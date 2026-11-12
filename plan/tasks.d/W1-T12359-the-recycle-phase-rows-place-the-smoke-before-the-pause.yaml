@@ -1,0 +1,44 @@
+- id: W1-T12359
+  title: "The recycle phase rows put the smoke time in the pause row once the smoke runs before the pause"
+  repo: remudero
+  depends_on: [W1-T12244, W1-T12242]
+  priority: 1.2
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # spans the recycle script and the phase-row test of W1-T12244; the recycle pauses the fleet
+  band_meaning: blast-radius
+  origin: operator-session#hand-build-follow-ups-2026-11-11
+  plan_refs:
+    - W1-T12244
+    - W1-T12242
+  files:
+    - deploy/recycle-container.sh
+    - test/daemon/a-recycle-and-a-start-write-a-row-for-each-phase.test.ts
+    - test/deploy/the-recycle-phase-rows-place-the-smoke-before-the-pause.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "With a fake `docker`, a daemon recycle writes its `recycle.phase` rows in this order: lock_wait, registry_login, pull, smoke, pause, wait_for_workers, stop, remove, start"
+      proof: 'grep: test("W1-T12359: a recycle writes the smoke row before the pause row in test/deploy/the-recycle-phase-rows-place-the-smoke-before-the-pause.test.ts'
+    - claim: "The `smoke` row is written when the smoke before the pause ends, and its seconds cover that smoke and the clean-up of a leftover smoke; the `pause` row's seconds do not include any smoke time"
+      proof: 'grep: test("W1-T12359: the pause row does not count the smoke time in test/deploy/the-recycle-phase-rows-place-the-smoke-before-the-pause.test.ts'
+    - claim: "When the pulled image is gone after the wait and the recycle smokes again (`SMOKE_AT=after_wait`), that smoke writes its own `smoke` row with `smoke_at: after_wait`, and the `wait_for_workers` row does not include its time"
+      proof: 'grep: test("W1-T12359: a second smoke after the wait writes its own smoke row in test/deploy/the-recycle-phase-rows-place-the-smoke-before-the-pause.test.ts'
+    - claim: "A smoke that fails before the pause ends the recycle with the rows of lock_wait, registry_login, pull and smoke, and no pause row"
+      proof: 'grep: test("W1-T12359: a failed smoke before the pause writes no pause row in test/deploy/the-recycle-phase-rows-place-the-smoke-before-the-pause.test.ts'
+  rationale: |
+    FROM THE CODE OF TWO HAND BUILDS, 2026-11-11.
+    - W1-T12244 (amendment in the lane; code in /mnt/scratch/rmd/hand/wt-T12244, commit b47a4ccd9) adds `recycle_phase <next>` to deploy/recycle-container.sh. Each call writes the `recycle.phase` row of the phase in progress and starts the next one. Its order is pull, pause, wait_for_workers, smoke, stop: `recycle_phase pause` follows the pull, and `recycle_phase smoke` sits at the old smoke, after the wait (`COMMISSION_PHASE="smoke"`). Its test (test/daemon/a-recycle-and-a-start-write-a-row-for-each-phase.test.ts) pins `RECYCLE_PHASES` in that order.
+    - W1-T12242 (open as #18037) moves the worker smoke before the pause: `run_worker_smoke before_pause` runs after the pull and before the pause file is written. It keeps a second smoke after the wait (`run_worker_smoke after_wait`) for an image that was reclaimed during the drain.
+    - With both on main, `recycle_phase pause` runs before the moved smoke. So the `pause` row's seconds include the whole smoke (about 11 s in the 2026-11-10 20:21 recycle), the `smoke` row times the stop-side work after the wait, and the rows no longer tell where the time went. That is the question W1-T12244 was filed to answer.
+  design: |
+    1. In deploy/recycle-container.sh, call `recycle_phase smoke` right before the clean-up of a leftover smoke and the smoke before the pause, so the pull row ends there. Call `recycle_phase pause` right after that smoke passes, so the smoke row ends there and the pause row starts after it. Remove the old `recycle_phase smoke` after the wait.
+    2. For the second smoke after the wait, call `recycle_phase smoke` before it (this ends the `wait_for_workers` row) and pass `"smoke_at":"after_wait"` on the row it ends. Pass `"smoke_at":"before_pause"` on the first smoke row. Use the `SMOKE_AT` values W1-T12242 already writes on `recycle.ended`.
+    3. Change `RECYCLE_PHASES` in test/daemon/a-recycle-and-a-start-write-a-row-for-each-phase.test.ts to the new order, and the refused-recycle lists in that file (they now include `smoke` before `pause`).
+    4. Add the test file named in `files`, one test per criterion with the exact titles in the proofs. Use the fake `docker` and the fixture of the W1-T12244 test; read the rows from the ledger file the script writes.
+    NOT IN SCOPE: the smoke itself, the pause, deploy/serve-container.sh, and the daemon's `daemon.boot_phases` row.
+    BUILD ORDER: build after W1-T12244 and W1-T12242 are both on main.
+  falsifier: |
+    Keep `recycle_phase pause` before the moved smoke and criteria 1 and 2 must fail. Drop the `recycle_phase smoke` before the second smoke and criterion 3 must fail: the wait row counts the smoke. Write `recycle_phase pause` before the smoke result is known and criterion 4 must fail.

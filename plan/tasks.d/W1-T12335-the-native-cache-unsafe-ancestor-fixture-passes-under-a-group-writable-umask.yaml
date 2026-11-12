@@ -1,0 +1,87 @@
+- id: W1-T12335
+  title: "The native-cache unsafe-ancestor fixture creates .cache/remudero with an explicit 0700 mode, so test/worker/spawn/codex-native-cache.test.ts passes under umask 0002 as well as 0022"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: low  # fixture-only change inside one existing test file; the production ownership guard is untouched
+  band_meaning: blast-radius
+  priority: 2  # a pre-existing umask-dependent red that every author preflight on the 0002 Azure host must otherwise disclose (seen in W1-T12114's preflight)
+  origin: architect
+  plan_refs: [W1-T12246, W1-T11102, W1-T10265]
+  files:
+    - test/worker/spawn/codex-native-cache.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED (initiative brief, W1-T12114 author preflight on base fbc78512de07845d2d1148bb63a11d3a280c33e3):
+    test/worker/spawn/codex-native-cache.test.ts and src/lib/worker-native-cache.ts are unchanged from that base. On that
+    base the suite has 1 failure out of 10 under the Azure operator umask 0002. The failing case is "native cache refuses
+    unsafe ancestors and existing public namespaces without changing their modes". It expects /private to its writer/
+    and gets "Native cache has an untrusted directory: .../.cache/remudero". The same base passes 10/10 under umask 0022.
+    READ at this checkout (symbols, not lines): in that test the fixture runs `chmodSync(parent, 0o700)` and then
+    `mkdirSync(root, { recursive: true })` for `.cache/remudero/swc-native`. Recursive mkdir with no mode gives the
+    implicit intermediate `.cache/remudero` the default mode filtered by the umask, which is 0775 under 0002.
+    `prepareWorkerNativeCache` (src/lib/worker-native-cache.ts) walks every ancestor. It refuses any non-sticky
+    directory with `mode & 0o022` as "untrusted directory" before it reaches the leaf's "private to its writer" check.
+    The guard is right and the fixture depends on the runner's umask.
+    Settled by lookup: is this already filed or already decided? -> no. W1-T12246 (merged) repaired only
+      test/review/evidence-storage.test.ts. W1-T11102 (merged) repaired only shared-git-storage and the scratch-root suite.
+      W1-T10265 (merged) was the storage-permission diagnosis. W1-T11437 (merged) lists this test file but is about
+      egress containment. A sweep of plan/ for codex-native-cache, worker-native-cache and umask finds no fixture task for
+      this file (plan/tasks.d/W1-T12246-*, W1-T11102-*, W1-T10265-*, W1-T11437-*).
+    Settled by lookup: should the production guard relax for group-writable ancestors? -> no. The initiative keeps it strict,
+      and the same 0o022 ancestor rule is the settled shape of the storage guards that W1-T10265/W1-T11102/W1-T12246 left
+      strict (src/lib/worker-native-cache.ts; plan/tasks.d/W1-T12246-*).
+    Settled by lookup: does this depend on W1-T12114? -> no. It is the prerequisite repair for that task's author-preflight
+      signal, and it touches no file in W1-T12114's scope (initiative brief; plan/tasks.d/W1-T12114-*).
+    Settled by lookup: is this file run in a shared process, where a umask change could leak? -> no. It uses `t.mock.method`
+      and spawns children, both of which pure-test-pool refuses, so it gets its own node process. Its top-level tests run
+      one after another (scripts/pure-test-pool.mjs POOL_REFUSALS).
+    Settled by lookup: how should the proofs discriminate when CI runs under umask 0022, where the file already passes at
+      the merge base? -> a title-filtered `unit test:` naming the not-yet-written test is refused by lint-plan
+      (proof-unit-test-unresolvable, since files: names this test). A whole-file proof that passes at base is graded
+      executed_stale, which is a degrade to the keyword floor and not a refusal (ProofExecOutcome, src/lib/review.ts).
+      So the whole file is declared `kind: guard`: it runs at head and keeps the refusal assertions green. Two greps on
+      text the change adds do the discriminating: the new test title and the explicit 0700 intermediate mkdir
+      (proofBaseDiscriminationViolations guidance, src/lib/task-linter.ts).
+  design: |
+    All changes are in test/worker/spawn/codex-native-cache.test.ts. Touch no other file.
+    1. Move the body of "native cache refuses unsafe ancestors and existing public namespaces without changing their modes"
+       into a local function `assertUnsafeAncestorRefusals(home: string)`. Keep the existing title, which now calls
+       `cacheFixture(assertUnsafeAncestorRefusals)` under the ambient umask.
+    2. In that function, replace `mkdirSync(root, { recursive: true })` with an explicit two-step creation:
+       `mkdirSync(join(parent, "remudero"), { mode: 0o700 })`, then `mkdirSync(root, { mode: 0o755 })`. Keep
+       `chmodSync(root, 0o755)` so the leaf really is public whatever the umask. Every assertion stays exactly as it is:
+       the 0777 `.cache` raising /untrusted directory/ with its mode kept and no `remudero` created; the 0755 leaf raising
+       /private to its writer/ with mode 0755 kept; the 0500 leaf raising /private to its writer/ with mode 0500 kept.
+    3. Add a new top-level test with exactly this title:
+       "native cache unsafe-ancestor refusals hold under umask 0002 and 0022"
+       For each mask in [0o002, 0o022]: `const prior = process.umask(mask)`, then inside try/finally run the following and
+       restore with `process.umask(prior)`.
+       (a) Positive control so the run is not vacuous: in a fresh mkdtemp dir, a plain `mkdirSync(probe)` must have
+           `mode & 0o777` equal to `0o777 & ~mask` (0775 for 0002, 0755 for 0022). Remove the dir afterwards.
+       (b) `cacheFixture(assertUnsafeAncestorRefusals)`.
+       The test must be synchronous so no other test runs while the umask is changed.
+    UNCHANGED: src/lib/worker-native-cache.ts and its guard, every other test in the file, test/setup/tmp-hygiene.ts, the
+    operator's umask, host permissions and generated environments. No test is skipped or marked todo.
+  acceptance:
+    - claim: "On the same head, the whole suite passes, including the new test that forces umask 0002 and then 0022 around the unsafe-ancestor fixture. The plain-mkdir control in each case shows the forced umask really applied (0775 and 0755). The 0777-ancestor /untrusted directory/ refusal and both public/read-only leaf /private to its writer/ refusals still fire with their modes kept."
+      proof: "unit test: test/worker/spawn/codex-native-cache.test.ts"
+      kind: guard
+    - claim: "the suite carries the new top-level test that runs the unsafe-ancestor fixture under both forced umasks"
+      proof: "grep: native cache unsafe-ancestor refusals hold under umask 0002 and 0022 in test/worker/spawn/codex-native-cache.test.ts"
+    - claim: "the fixture creates the intermediate .cache/remudero directory with an explicit 0700 mode before creating the public leaf"
+      proof: 'grep: mkdirSync(join(parent, "remudero"), { mode: 0o700 }) in test/worker/spawn/codex-native-cache.test.ts'
+  falsifier: |
+    At base fbc78512 the fixture calls `mkdirSync(root, { recursive: true })`. With the new title added and no other fix,
+    its 0002 iteration throws "untrusted directory: .../.cache/remudero" where /private to its writer/ is expected, and
+    the grep reads 0. The repair is wrong if, after it lands, any of these holds: the 0002 iteration fails; the 0002
+    control dir is not 0775, so the run proves nothing; any /untrusted directory/ or /private to its writer/ assertion in
+    the unsafe-ancestor body is removed or weakened; or src/lib/worker-native-cache.ts changes.
+  note: |
+    Fixture-only, the same class as W1-T12246. A change to src/lib/worker-native-cache.ts, tmp-hygiene, host permissions or
+    the operator umask is out of scope and refuses review. It does not depend on W1-T12114. It clears a pre-existing red
+    from that task's author preflight.

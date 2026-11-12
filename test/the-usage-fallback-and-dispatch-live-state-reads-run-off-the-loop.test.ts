@@ -79,7 +79,7 @@ test("the async usage runner still parses a good read and keeps parse failures d
     const good = await withHome(home, () =>
       readUsageSnapshotAsync(config, async () => SAMPLE_USAGE_TEXT, (stage) => failures.push(stage), 1000),
     );
-    assert.equal(good?.session.percentUsed, 12);
+    assert.equal(good?.session?.percentUsed, 12);
     const garbled = await withHome(home, () =>
       readUsageSnapshotAsync(config, async () => "not a usage panel", (stage) => failures.push(stage), 1000),
     );

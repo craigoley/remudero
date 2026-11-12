@@ -67,6 +67,31 @@ else
   log "git identity: $(git -C / config --get user.name) <$(git -C / config --get user.email)> (override with RMD_GIT_AUTHOR_NAME/RMD_GIT_AUTHOR_EMAIL)"
 fi
 
+# ── W1-T12293: the Claude account file survives a container recreate ─────────────────────────
+# deploy/recycle-container.sh mounts the host file read-only at the side path. Copy it in only when
+# ~/.claude.json is missing or holds no login; never replace one that does. Never print the content.
+account_file_holds_login() {
+  node -e 'try { const j = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
+    process.exit(j && typeof j.oauthAccount === "object" && j.oauthAccount !== null ? 0 : 1) } catch { process.exit(1) }' "$1" 2>/dev/null
+}
+seed_claude_account_file() {
+  local target="${HOME}/.claude.json" side="${HOME}/.rmd-claude-account.json" case_name="it was missing" tmp=""
+  if [ ! -f "${side}" ]; then log "claude account file: no host copy at ${side}; ${target} left as it is"; return 0; fi
+  if [ -e "${target}" ] && [ ! -f "${target}" ]; then log "claude account file: NOT seeded — ${target} is not a regular file"; return 0; fi
+  if [ -f "${target}" ]; then
+    if account_file_holds_login "${target}"; then log "claude account file: kept ${target} (it holds a login)"; return 0; fi
+    case_name="it held no login"
+  fi
+  if ! account_file_holds_login "${side}"; then log "claude account file: NOT seeded — the host copy holds no login"; return 0; fi
+  if tmp="$(mktemp "${HOME}/.claude.json.rmd-seed.XXXXXX")" && cp "${side}" "${tmp}" && chmod 0600 "${tmp}" && mv -f "${tmp}" "${target}"; then
+    log "claude account file: seeded from the host copy (${case_name})"
+  else
+    [ -z "${tmp}" ] || rm -f "${tmp}"
+    log "claude account file: NOT seeded — the copy to ${target} failed"
+  fi
+}
+seed_claude_account_file
+
 if [ "${RMD_SKIP_BOOTSTRAP:-}" = "1" ]; then
   log "RMD_SKIP_BOOTSTRAP=1 — no clone, no fetch, no install (the identity above is already written)"
   exec "$@"

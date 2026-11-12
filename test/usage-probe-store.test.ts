@@ -119,7 +119,7 @@ test("readUsageSnapshot: the exec seam is injectable, and its DEFAULT implementa
     const snap = withHome(realHome, () => readUsageSnapshot(config)); // no runner arg ⇒ defaultUsageProbeRunner
 
     assert.ok(snap, "the real default runner must have produced a parsed snapshot");
-    assert.equal(snap!.session.percentUsed, 12);
+    assert.equal(snap!.session?.percentUsed, 12);
   } finally {
     rmSync(root, { recursive: true, force: true });
     rmSync(realHome, { recursive: true, force: true });
