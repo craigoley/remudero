@@ -120,6 +120,21 @@ test("W1-T11445 criterion 3: plan merge work stops at the measured interval budg
   assert.match(String(deferred?.stand_down_reason), /spent/);
 });
 
+test("W1-T12267: the plan-merge budget is half of the sweep tick bound the policy carries", async () => {
+  const ledger = writeLedger(pairedPassRows([250, 250, 250])).path;
+  const armed: number[] = [];
+  const slowArm: SweepDeps["arm"] = async (pr): Promise<"direct-merged"> => {
+    armed.push(pr.prNumber);
+    await new Promise<void>((resolve) => setTimeout(resolve, 150));
+    return "direct-merged";
+  };
+  await runSweepLightPass([planPr(1226761), planPr(1226762), planPr(1226763)],
+    sweepDeps(ledger, armed, slowArm), { ...DEFAULT_SWEEP_POLICY, sweepWallClockBoundMs: 200 });
+  assert.deepEqual(armed, [1226761], "half of a 200ms bound is a 100ms budget: one merge, not two");
+  const deferred = rowsAt(ledger).find((row) => row.step === "sweep.disposed" && row.pr_number === 1226762);
+  assert.match(String(deferred?.stand_down_reason), /measured interval budget 100ms spent/);
+});
+
 test("W1-T11445 criterion 4: invalid or sparse measurements keep the one-plan bound", async () => {
   const sparse = pairedPassRows([25]);
   const malformed = [
