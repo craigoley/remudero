@@ -1,0 +1,25 @@
+- id: W1-T12328
+  title: W1-T11280's design names the state root and the eager snapshot-cache load
+  repo: remudero
+  depends_on:
+    - W1-T11280
+  type: implement
+  verify: auto
+  risk: low
+  status: queued
+  attempts: 0
+  files:
+    - plan/tasks.d/W1-T11280-reuse-the-persisted-github-snapshot-in-status-json-reads.yaml
+  acceptance:
+    - claim: W1-T11280's design says the JSON status gateway takes its snapshot-cache root from config.root, the config statusCommand already loads, with no new knob and no deps.stateDir
+      proof: "grep: createBoardSnapshotCache(config.root, owner, repo in plan/tasks.d/W1-T11280-reuse-the-persisted-github-snapshot-in-status-json-reads.yaml"
+    - claim: W1-T11280's design says createBoardSnapshotCache reads its snapshot file when it is constructed, so the build runs only in JSON mode, inside the existing try, under the shared deadline
+      proof: "grep: reads the snapshot file at construction in plan/tasks.d/W1-T11280-reuse-the-persisted-github-snapshot-in-status-json-reads.yaml"
+  origin: architect
+  rationale: >-
+    From the 2026-11-11 follow-up on W1-T11280-1794402165543, ratified via rmd approve:
+  
+    follow-up harvest [research]: how `statusCommand` can obtain the state root (`deps.stateDir`
+    or `loadConfig`), and whether `createBoardSnapshotCache` does I/O at construction. This
+    decides how the cache is wired without adding a new knob. — from W1-T11280 (run
+    W1-T11280-1794402165543)

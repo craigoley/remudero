@@ -21,7 +21,7 @@
     - src/lib/idle-lane-accounting.ts
     - test/daemon/a-lane-held-by-its-lane-target-is-decided-again.test.ts
     - test/the-build-lane-count-follows-the-memory-governor.test.ts
-  status: queued
+  status: merged
   attempts: 0
   note: |
     reservation hand-off: run-unfiled-1794398100000 -> run-unfiled-1794413364000

@@ -170,10 +170,8 @@ STATE_MOUNT_DEST="/home/node/Remudero"
 DAEMON_REPO_DIR="${STATE_MOUNT_DEST}/${DAEMON_REPO}"
 SERVE_REPO_DIR="${RMD_SERVE_REPO_DIR:-${HOME:-/root}/rmd-serve-repo}"
 # W1-T2434: the host-side account file and where it lands in the container — see the header note
-# above. Derived from `${HOME}` the same way `recycle-container.sh`'s `CRED_DIR` derives the
-# daemon's credential directory, so both containers agree on whose `.claude.json` is authoritative
-# without either retyping the other's default.
-CLAUDE_JSON_PATH="${RMD_CLAUDE_JSON_PATH:-${HOME:-/root}/.claude.json}"
+# above. W1-T12293: deploy/claude-directory.sh derives it for serve and the daemon launcher alike.
+CLAUDE_JSON_PATH="$(claude_host_account_file)"
 CLAUDE_JSON_MOUNT_DEST="/home/node/.claude.json"
 # W1-T2568: the GitHub webhook secret — see the header note above. No default host path (unlike
 # CLAUDE_JSON_PATH's `~/.claude.json` guess): a webhook secret has no conventional dotfile
@@ -956,6 +954,14 @@ fi
 
 serve_replace_admission "before the image pull"
 
+# W1-T12244: one recycle.phase row as each step of a replace ends. A failed write never stops it.
+serve_phase_row() {
+  printf '{"ts":"%s","run_id":"RECYCLE-%s","task_id":"RECYCLE","step":"recycle.phase","lane":"deploy","container":"%s","phase":"%s","seconds":%s}\n' \
+    "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" "$$" "${CONTAINER_NAME}" "$1" "$((SECONDS - SERVE_PHASE_AT_S))" \
+    >> "${STATE_DIR}/state/ledger.ndjson" 2>/dev/null || true
+  SERVE_PHASE_AT_S="${SECONDS}"
+}
+
 if [ ! -d "${SERVE_REPO_DIR}" ]; then
   mkdir -p "${SERVE_REPO_DIR}"
 fi
@@ -977,10 +983,12 @@ else
   echo "serve-container: az unavailable; checking the host's existing docker login with the preflight pull." >&2
 fi
 echo "serve-container: preflight docker pull ${REF}"
+SERVE_PHASE_AT_S="${SECONDS}"
 if ! docker pull "${REF}" >/dev/null 2>&1; then
   echo "serve-container: REFUSING — target image ${REF} could not be pulled; existing container was left untouched." >&2
   exit 1
 fi
+serve_phase_row pull
 foreign_repos_recheck
 SERVE_SELECTED_IMAGE=""
 if [ "${SELECTED_REGISTRY_ACTIVE}" = 1 ]; then
@@ -1014,10 +1022,14 @@ if [ "${CONTAINER_EXISTS}" -eq 1 ]; then
   fi
   echo "serve-container: docker stop ${CONTAINER_NAME}"
   registry_shadow_observe serve "$INSTANCE_NAME" "${INSTANCE_GITHUB_REPO:-}" host "$STATE_DIR|$CONTAINER_NAME"
+  SERVE_PHASE_AT_S="${SECONDS}"
   docker stop "${CONTAINER_NAME}" >/dev/null
+  serve_phase_row stop
   echo "serve-container: docker rm ${CONTAINER_NAME}"
   docker rm "${CONTAINER_NAME}" >/dev/null
+  serve_phase_row remove
 fi
+SERVE_PHASE_AT_S="${SECONDS}"
 
 if [ "${#SCRATCH_ARGS[@]}" -gt 0 ]; then scratch_fresh_tmp; fi
 echo "serve-container: docker run -d --name ${CONTAINER_NAME} ${REF}"
@@ -1025,6 +1037,7 @@ if [ "${SELECTED_REGISTRY_ACTIVE}" = 1 ]; then selected_registry_recheck; fi
 registry_shadow_observe serve "$INSTANCE_NAME" "${INSTANCE_GITHUB_REPO:-}" host "$STATE_DIR|$CONTAINER_NAME"
 foreign_repos_recheck
 docker "${RUN_ARGS[@]}" >/dev/null
+serve_phase_row start
 if [ "${SELECTED_REGISTRY_ACTIVE}" = 1 ]; then
   "${SCRIPT_ROOT}/deploy/container-runtime-contract.sh" --container "${CONTAINER_NAME}" \
     --expect "${SELECTED_REGISTRY_HOST_FILE}" "${SELECTED_REGISTRY_CONTAINER_FILE}" ro

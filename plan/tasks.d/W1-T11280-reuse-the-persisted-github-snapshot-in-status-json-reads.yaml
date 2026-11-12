@@ -14,7 +14,7 @@
     - W1-T11155
   files: [src/lib/report-commands.ts, test/status-json-deadline.test.ts]
   priority: 4
-  status: queued
+  status: merged
   # backlog gardener: band=4 evidence=f59d8828f1f28637
   # backlog gardener: placed=2026-11-04T03:16:35.154Z
   attempts: 0

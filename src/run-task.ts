@@ -365,7 +365,7 @@ import { sameHost } from "./lib/host-identity.js";
 import { gitBlobSha, isDuplicateKeyError, repairDuplicateKeyShard } from "./lib/plan-shard-repair.js";
 import { gardenPrState, knowledgeGardenSpec, runGardenPass as runKnowledgeGardenPass, recordSkillUsage, skillUsagePath, type GardenWorkspace } from "./lib/knowledge-gardener.js";
 import { foldNarrativeStore, type NarrativeFoldKind } from "./lib/narrative-fold.js";
-import { GardenMintBudget, GardenMintTimedOutError, GARDEN_FILING_RETRY_BASE_MS, gardenClosePr, gardenPassDue, gardenPendingSignal, isPromiseLike, runStepsEager, runGardenAsync, type GardenAction, type GardenCheckout, type GardenCheckoutAsync, type GardenerDeps, type GardenSpec, type GardenTaskIdRelease, type PrState } from "./lib/gardener.js";
+import { GardenMintBudget, GardenMintTimedOutError, GARDEN_FILING_RETRY_BASE_MS, gardenClosePr, gardenPassDue, gardenPendingSignal, isGardenLandWaiting, isPromiseLike, landedPrUrl, runStepsEager, runGardenAsync, type GardenAction, type GardenLandOpts, type GardenLandResult, type GardenCheckout, type GardenCheckoutAsync, type GardenerDeps, type GardenSpec, type GardenTaskIdRelease, type PrState } from "./lib/gardener.js";
 import { boundedGardenPassSpawn, childGardenPassSpawn, flowGardenPass, issueRevalidationGardenPass, GARDEN_DUE_FAILED_STEP, gardenPacingDueAsync, lowYieldGardenPass, recordGardenPacing, GARDEN_HOURLY_FLAG, isRegisteredGardenName, REGISTERED_GARDEN_NAMES, selectorShadowGardenPass, selectorShadowMainFailures, type GardenPassSpawn, type RegisteredGardenName } from "./lib/garden-registry.js";
 import { flakeJudgeEvidencePort } from "./lib/flake-incident-gardener.js";
 import type { SelectorShadowMainFailures } from "./lib/selector-shadow-gardener.js";
@@ -816,6 +816,11 @@ import {
   type PlanReconcileLand,
   type LandFeedbackOpts,
   type LandingReviewRequest,
+  landTaskFilesAsync,
+  stagedTaskFiles,
+  type LandTaskFilesOpts,
+  type TaskFileInput,
+  type TaskFilesLandingResult,
 } from "./lib/feedback-landing.js";
 export { readStandingDecisions };
 import { resolvePlanDestination } from "./lib/plan-destination.js";
@@ -1103,7 +1108,7 @@ import {
   writeFeedbackDocketMarker,
   type FeedbackDocket,
 } from "./lib/feedback-docket.js";
-import { parseUsage, usageSnapshotFromSdk, type SdkUsageReading, type UsageSnapshot } from "./lib/headroom.js";
+import { parseUsage, usageOutputShape, usageSnapshotFromSdk, type SdkUsageReading, type UsageSnapshot } from "./lib/headroom.js";
 import {
   aggregateCitationEvidence,
   assertArchitectAboveWorker,
@@ -2991,7 +2996,7 @@ import { branchCitationPattern, branchNamesFingerprint, decideAutomaticBranchRea
 // were not exported before this move and stay that way, used here under their original names.
 import { repoRoot, resolveOwnerRepo, resolveRepoRoot } from "./lib/repo-location.js";
 import { resolveVerbPlanRoot, type VerbPlanRoot } from "./lib/repo-location.js";
-import { refusalExcerptFromFixReport, taskAwaitsAmendment } from "./lib/refusal-amendment.js";
+import { planAmendmentReceipt, refusalExcerptFromFixReport, taskAwaitsAmendment } from "./lib/refusal-amendment.js";
 import { fetchPrDiff, ghPrDiffAsync, prDiffSourceAsync } from "./lib/pr-diff.js";
 import { boundGitCall, fetchOriginRetryingRefLock, fetchOriginRetryingRefLockAsync, GATEWAY_FETCH_TIMEOUT_MS, GIT_FETCH_KILL_GRACE_MS, killAfterGrace, type AsyncGitRunner } from "./lib/git-fetch-retry.js";
 import { asOwnerRepoUnresolvable, resolveOwnerRepoAt, resolveOwnerRepoAtAsync } from "./lib/owner-repo.js";
@@ -3144,8 +3149,7 @@ export function buildEscalationTriageRuntime(
               { run_id: deps.runId, task_id: e.taskId, step, ...extra }) });
           const [result] = await effects.draftRefusalAmendments!([{ taskId: e.taskId, runId: e.runId ?? deps.runId,
             reportExcerpt: e.detail, refusals: [{ criterion: 1, refusalClass: "proof-unexecutable-at-head", detail: e.summary }] }]);
-          if (result === undefined || !result.prUrl) throw new Error(`amendment not opened: ${result?.outcome ?? "unavailable"}`);
-          return `${result.prUrl} proposes the proof amendment; decline the PR to undo`;
+          return planAmendmentReceipt(e.taskId, result);
         },
         rekick_once: (e) => {
           if (io.kick) io.kick(e);
@@ -24052,10 +24056,11 @@ export const defaultAsyncUsageProbeRunner: AsyncUsageProbeRunner = async (bin, a
  * those have three different fixes: an SDK upgrade renamed the method, the session refused, or
  * the credential legitimately has no plan limits.
  */
-export type UsageProbeFailureStage = "spawn" | "parse" | "grant" | "sdk";
+export type UsageProbeFailureStage = "spawn" | "parse" | "grant" | "sdk" | "weekly-only";
 
-/** Injected sink for that failure — the real caller gets {@link ledgerUsageProbeFailure}. */
-export type UsageProbeFailureSink = (stage: UsageProbeFailureStage, reason: string) => void;
+/** Injected sink for that failure — the real caller gets {@link ledgerUsageProbeFailure}.
+ *  `shape` is {@link usageOutputShape} of the CLI output, for the parse and weekly-only stages. */
+export type UsageProbeFailureSink = (stage: UsageProbeFailureStage, reason: string, shape?: string) => void;
 
 /**
  * How much of the failure message reaches the ledger. Generous enough for the whole of a real
@@ -24082,7 +24087,7 @@ const USAGE_PROBE_REASON_MAX = 400;
  * the reason a best-effort read becomes a crash — if the ledger is unwritable, the caller still
  * gets its `undefined` and the drain still continues.
  */
-export function ledgerUsageProbeFailure(config: Config, stage: UsageProbeFailureStage, reason: string): void {
+export function ledgerUsageProbeFailure(config: Config, stage: UsageProbeFailureStage, reason: string, shape?: string): void {
   try {
     appendLedger(ledgerPathFor(config), {
       run_id: "USAGE-PROBE",
@@ -24090,6 +24095,7 @@ export function ledgerUsageProbeFailure(config: Config, stage: UsageProbeFailure
       step: "usage.probe_failed",
       stage,
       reason: reason.slice(0, USAGE_PROBE_REASON_MAX),
+      ...(shape !== undefined ? { shape: shape.slice(0, USAGE_PROBE_REASON_MAX) } : {}),
     });
   } catch {
     // Diagnostics are never worth a throw on this path.
@@ -24232,7 +24238,7 @@ export async function readUsageSnapshotPreferSdk(
     viaCli?: (onUnreadable: UsageProbeFailureSink) => UsageSnapshot | undefined | Promise<UsageSnapshot | undefined>;
   } = {},
 ): Promise<UsageSnapshot | undefined> {
-  const sink: UsageProbeFailureSink = (stage, reason) => ledgerUsageProbeFailure(config, stage, reason);
+  const sink: UsageProbeFailureSink = (stage, reason, shape) => ledgerUsageProbeFailure(config, stage, reason, shape);
   const viaSdk = deps.viaSdk ?? ((s) => readUsageSnapshotViaSdk(undefined, s, { onCredentialSeed: usageCredentialSink(config) }));
   // W1-T5719: the CLI fallback is AWAITED off the loop, never an `execFileSync` on it.
   const viaCli = deps.viaCli ?? ((s) => readUsageSnapshotAsync(config, defaultAsyncUsageProbeRunner, s));
@@ -24290,7 +24296,7 @@ function prepareUsageProbeEnv(config: Config, onUnreadable: UsageProbeFailureSin
 export function readUsageSnapshot(
   config: Config,
   runUsageProbe: UsageProbeRunner = defaultUsageProbeRunner,
-  onUnreadable: UsageProbeFailureSink = (stage, reason) => ledgerUsageProbeFailure(config, stage, reason),
+  onUnreadable: UsageProbeFailureSink = (stage, reason, shape) => ledgerUsageProbeFailure(config, stage, reason, shape),
 ): UsageSnapshot | undefined {
   let out: string;
   // ── SPAWN. Its own try, ending at the probe call — see the two-try note below. ───────────
@@ -24326,12 +24332,18 @@ export function readUsageSnapshot(
 /** The PARSE half, in its own try so a successful read that cannot be understood is `"parse"`,
  *  never `"spawn"`. Shared by the sync and async readers so the two cannot drift. */
 function parseUsageReporting(out: string, onUnreadable: UsageProbeFailureSink): UsageSnapshot | undefined {
+  let snap: UsageSnapshot;
   try {
-    return parseUsage(out);
+    snap = parseUsage(out);
   } catch (e) {
-    onUnreadable("parse", String((e as Error)?.message ?? e));
+    onUnreadable("parse", String((e as Error)?.message ?? e), usageOutputShape(out));
     return undefined;
   }
+  // W1-T12153: a readable snapshot with no session window. The row names the case; the weekly windows bind.
+  if (!snap.session) {
+    onUnreadable("weekly-only", "no 'Current session:' line in /usage output; read the weekly windows only", usageOutputShape(out));
+  }
+  return snap;
 }
 
 /**
@@ -24343,7 +24355,7 @@ function parseUsageReporting(out: string, onUnreadable: UsageProbeFailureSink): 
 export async function readUsageSnapshotAsync(
   config: Config,
   runUsageProbe: AsyncUsageProbeRunner = defaultAsyncUsageProbeRunner,
-  onUnreadable: UsageProbeFailureSink = (stage, reason) => ledgerUsageProbeFailure(config, stage, reason),
+  onUnreadable: UsageProbeFailureSink = (stage, reason, shape) => ledgerUsageProbeFailure(config, stage, reason, shape),
   timeoutMs: number = USAGE_PROBE_TIMEOUT_MS,
 ): Promise<UsageSnapshot | undefined> {
   let out: string;
@@ -27449,12 +27461,15 @@ export function withShardRepairs(stateDir: string, repairs: () => void | Promise
 /** `opened.json`'s value per blob: the PR url, or — once a closed-unmerged PR was replaced — the fresh PR and the one it replaced. */
 type ShardRepairOpened = string | { pr_url: string; reopened_from: string };
 
-/** What one attempt decided: `done` consumes the request; `retry` keeps it, charged to `blob` when the bytes were read. */
-type ShardRepairOutcome = { done: true } | { retry: true; blob?: string };
+/** What one attempt decided: `done` consumes the request; `retry` keeps it, charged to `blob` when the bytes were read;
+ *  `wait` (W1-T12221) keeps it uncharged while the repair waits for the shared landing PR of task files. */
+type ShardRepairOutcome = { done: true } | { retry: true; blob?: string } | { wait: true };
+
+type ShardRepairLand = (rel: string, text: string, pr: { title: string; body: string }) => GardenLandResult | Promise<GardenLandResult>;
 
 async function repairRequestedShard(
   request: ShardRepairRequest,
-  opts: { stateDir: string; log: ShardRepairLog; readOriginBlob: (rel: string) => string | Promise<string>; land: (rel: string, text: string, pr: { title: string; body: string }) => string | undefined | Promise<string | undefined>; prState: (prUrl: string) => PrState | Promise<PrState> },
+  opts: { stateDir: string; log: ShardRepairLog; readOriginBlob: (rel: string) => string | Promise<string>; land: ShardRepairLand; prState: (prUrl: string) => PrState | Promise<PrState>; landingStateRoot?: string },
 ): Promise<ShardRepairOutcome> {
   const at = { id: request.id, file: request.file };
   const failure = (stage: string, e: unknown) => ({ ...at, stage, reason: String((e as Error)?.message ?? e) });
@@ -27494,6 +27509,19 @@ async function repairRequestedShard(
     }
     reopenedFrom = prior;
   }
+  const recordOpened = (prUrl: string, extra: Record<string, unknown>): ShardRepairOutcome => {
+    const entry: ShardRepairOpened = reopenedFrom === undefined ? prUrl : { pr_url: prUrl, reopened_from: reopenedFrom };
+    writeAtomic(openedPath, `${JSON.stringify({ ...opened, [blob]: entry }, null, 2)}\n`);
+    opts.log("plan.shard_repair_opened", { ...at, blob, pr_url: prUrl, ...extra, ...(reopenedFrom === undefined ? {} : { reopened_from: reopenedFrom }) });
+    return { done: true };
+  };
+  // W1-T12221: a repair that waits is found by its staged file, so it opens no second repair for the same file.
+  const staged = opts.landingStateRoot === undefined ? undefined : stagedTaskFiles(opts.landingStateRoot).find((f) => f.relPath === rel);
+  if (staged?.prUrl !== undefined) return recordOpened(staged.prUrl, { via: "task-files-landing" });
+  if (staged !== undefined) {
+    opts.log("plan.shard_repair_waiting", { ...at, blob, path: rel });
+    return { wait: true };
+  }
   const verdict = repairDuplicateKeyShard(text);
   if ("refused" in verdict) {
     opts.log("plan.shard_repair_refused", { ...at, blob, reason: verdict.reason });
@@ -27508,21 +27536,22 @@ async function repairRequestedShard(
       `the record's risk_ruling pin covers, and drops the other line and any backlog-gardener marker it carried.\n\n` +
       `Opened by the duplicate-key repair lane (W1-T5519).\n\n${SHARD_REPAIR_ACCEPTANCE}`,
   };
-  let prUrl: string | undefined;
+  let prUrl: GardenLandResult;
   try {
     prUrl = await opts.land(rel, verdict.text, pr);
   } catch (e) {
     opts.log("plan.shard_repair_failed", failure("land", e));
     return { retry: true, blob };
   }
+  if (isGardenLandWaiting(prUrl)) {
+    opts.log("plan.shard_repair_waiting", { ...at, blob, path: rel, kept: verdict.kept });
+    return { wait: true };
+  }
   if (prUrl === undefined) {
     opts.log("plan.shard_repair_not_landed", { ...at, blob, reason: "the plan-PR preflight refused the repair; plan_pr.preflight_refused names why" });
     return { retry: true, blob };
   }
-  const entry: ShardRepairOpened = reopenedFrom === undefined ? prUrl : { pr_url: prUrl, reopened_from: reopenedFrom };
-  writeAtomic(openedPath, `${JSON.stringify({ ...opened, [blob]: entry }, null, 2)}\n`);
-  opts.log("plan.shard_repair_opened", { ...at, blob, pr_url: prUrl, kept: verdict.kept, ...(reopenedFrom === undefined ? {} : { reopened_from: reopenedFrom }) });
-  return { done: true };
+  return recordOpened(prUrl, { kept: verdict.kept });
 }
 
 /** W1-T5618 — a retried request is rewritten with its attempt count and backoff, or abandoned at the cap. Bytes
@@ -27558,17 +27587,20 @@ export async function runShardRepairPass(opts: {
   repo: string;
   log: ShardRepairLog;
   readOriginBlob?: (rel: string) => string | Promise<string>;
-  land?: (rel: string, text: string, pr: { title: string; body: string }) => string | undefined | Promise<string | undefined>;
+  land?: ShardRepairLand;
   prState?: (prUrl: string) => PrState | Promise<PrState>;
   openCheckout?: (opts: GardenCheckoutOpts) => Promise<GardenCheckoutAsync>;
   clock?: Clock;
+  /** W1-T12221: the shared landing of task files, as {@link GardenCheckoutOpts.taskFilesLanding}. */
+  taskFilesLanding?: GardenCheckoutOpts["taskFilesLanding"];
 }): Promise<void> {
   const readOriginBlob =
     opts.readOriginBlob ?? (async (rel: string) => (await execFilePromise("git", ["-C", opts.repoDir, "show", `origin/main:${rel}`], { encoding: "utf8", maxBuffer: 1 << 26 })).stdout);
   const land =
     opts.land ??
     (async (rel: string, text: string, pr: { title: string; body: string }) => {
-      const checkout = await (opts.openCheckout ?? gardenCheckoutAsync)({ name: "plan", repoDir: opts.repoDir, worktreesRoot: opts.worktreesRoot, owner: opts.owner, repo: opts.repo, log: opts.log, clock: opts.clock });
+      const checkout = await (opts.openCheckout ?? gardenCheckoutAsync)({ name: "plan", repoDir: opts.repoDir, worktreesRoot: opts.worktreesRoot, owner: opts.owner, repo: opts.repo, log: opts.log, clock: opts.clock,
+        ...(opts.taskFilesLanding ? { taskFilesLanding: opts.taskFilesLanding } : {}) });
       try {
         writeFileSync(join(checkout.root, rel), text);
         return await checkout.land({ paths: [rel], ...pr });
@@ -27588,9 +27620,10 @@ export async function runShardRepairPass(opts: {
       rmSync(path, { force: true });
       continue;
     }
-    const outcome = await repairRequestedShard(request, { stateDir: opts.stateDir, log: opts.log, readOriginBlob, land, prState });
+    const outcome = await repairRequestedShard(request, { stateDir: opts.stateDir, log: opts.log, readOriginBlob, land, prState,
+      ...(opts.taskFilesLanding ? { landingStateRoot: opts.taskFilesLanding.stateRoot } : {}) });
     if ("done" in outcome) rmSync(path, { force: true });
-    else rescheduleShardRepair(path, request, outcome.blob, now, opts.log);
+    else if ("retry" in outcome) rescheduleShardRepair(path, request, outcome.blob, now, opts.log);
   }
 }
 
@@ -27656,7 +27689,7 @@ export function gardenCheckout(opts: GardenCheckoutOpts): GardenCheckout {
   return {
     root,
     branch,
-    land: (landing) => runStepsSync(gardenLandSteps(opts, root, branch, landing, io)),
+    land: (landing) => landedPrUrl(runStepsSync(gardenLandSteps(opts, root, branch, landing, io)), `${opts.name} garden`),
     dispose: () => worktreeRemove(opts.repoDir, root),
   };
 }
@@ -27670,6 +27703,10 @@ export async function gardenCheckoutAsync(opts: GardenCheckoutOpts): Promise<Gar
     fetcher: opts.fetcher ?? ((args) => ghJsonAsync(args)),
     generate: (script) => execFilePromise(process.execPath, [...(script === "generate-capability-snapshot.mjs" ? ["--import", import.meta.resolve("tsx")] : []), join(root, "scripts", script)], { cwd: root }),
     preflight: opts.preflight ?? ((input) => planPrPreflightAsync(input, { log: opts.log })),
+    // W1-T12221: the seal is async only, as the landing of W1-T12199 is.
+    ...(opts.taskFilesLanding ? { landTaskFiles: (inputs: TaskFileInput[]) => landTaskFilesAsync(opts.repoDir, inputs, {
+      ...opts.taskFilesLanding!, targetRepository: { owner: opts.owner, repo: opts.repo }, log: opts.log, lane: opts.name,
+    }) } : {}),
   };
   return {
     root,
@@ -27690,6 +27727,9 @@ export interface GardenCheckoutOpts {
   clock?: Clock;
   /** W1-T5348: the plan-PR preflight over the committed tree; injected only by a test. */
   preflight?: (input: { cwd: string; title: string; body: string }) => PlanPrPreflightResult;
+  /** W1-T12221: the shared landing of task files: its state root (`config.root`) and its seams. Absent,
+   *  every land opens its own PR. */
+  taskFilesLanding?: Pick<LandTaskFilesOpts, "stateRoot" | "gh" | "planPrPreflight">;
 }
 
 interface GardenLandIo {
@@ -27697,15 +27737,52 @@ interface GardenLandIo {
   fetcher: GhApiFetcher;
   generate: (script: "generate-docs-index.mjs" | "generate-capability-snapshot.mjs") => unknown;
   preflight: (input: { cwd: string; title: string; body: string }) => PlanPrPreflightResult | Promise<PlanPrPreflightResult>;
+  landTaskFiles?: (inputs: TaskFileInput[]) => Promise<TaskFilesLandingResult>;
+}
+
+/** W1-T12221: the landing inputs when every path is an edit of a task file main holds and the body's
+ *  `## Acceptance` gives its criterion; otherwise nothing, and the land opens its own PR. */
+function* sealedTaskFileInputs(root: string, paths: readonly string[], body: string, git: GardenLandIo["git"]): Steps<TaskFileInput[] | undefined> {
+  const shardDir = relative(root, join(resolveRepoLayout(root).planDir, "tasks.d"));
+  const criteria = parseAcceptanceBlock(body).filter((c) => c.proof !== "");
+  const inputs: TaskFileInput[] = [];
+  for (const relPath of paths) {
+    if (!relPath.startsWith(`${shardDir}/`) || !/\.ya?ml$/.test(relPath) || !existsSync(join(root, relPath))) return undefined;
+    try {
+      yield* step(() => git("cat-file", "-e", `HEAD:${relPath}`));
+    } catch {
+      return undefined; // not an edit: main does not hold the path, so the land opens its own PR
+    }
+    const criterion = criteria.find((c) => c.proof.endsWith(` in ${relPath}`)) ?? (paths.length === 1 && criteria.length === 1 ? criteria[0] : undefined);
+    if (criterion === undefined) return undefined;
+    inputs.push({ relPath, content: readFileSync(join(root, relPath), "utf8"), claim: criterion.claim, proof: criterion.proof });
+  }
+  return inputs.length > 0 ? inputs : undefined;
+}
+
+/** W1-T12221: the landing PR when it carries every path, a wait when each path waits, else nothing. */
+function* landSealedTaskFiles(opts: GardenCheckoutOpts, paths: readonly string[], inputs: TaskFileInput[], land: NonNullable<GardenLandIo["landTaskFiles"]>): Steps<GardenLandResult> {
+  const result = yield* step(() => land(inputs));
+  const carried = paths.every((p) => result.landed.includes(p));
+  const outcome = result.prUrl !== undefined && carried ? "opened" : paths.every((p) => result.landed.includes(p) || result.waiting.includes(p)) ? "waiting" : "not_landed";
+  const refused = [...result.refused, ...result.setAside].filter((r) => paths.includes(r.path)).map((r) => ({ path: r.path, reason: r.reason }));
+  opts.log(`${opts.name}.garden_sealed_landing`, { outcome, paths, pr_url: outcome === "opened" ? result.prUrl : null, ...(refused.length ? { refused } : {}), ...(result.error ? { error: result.error } : {}) });
+  if (outcome === "opened") return result.prUrl;
+  if (outcome === "waiting") return { waiting: { paths: [...paths], stateRoot: opts.taskFilesLanding!.stateRoot } };
+  return undefined;
 }
 
 function* gardenLandSteps(
   opts: GardenCheckoutOpts,
   root: string,
   branch: string,
-  { paths, title, body }: { paths: string[]; title: string; body: string },
+  landing: GardenLandOpts,
   io: GardenLandIo,
-): Steps<string | undefined> {
+): Steps<GardenLandResult> {
+  const { paths, title, body } = landing;
+  // W1-T12221: an edit of task files rides the shared landing PR, unless the caller keeps its own PR.
+  const sealed = landing.sealedLanding === false || io.landTaskFiles === undefined ? undefined : yield* sealedTaskFileInputs(root, paths, body, io.git);
+  if (sealed !== undefined) return yield* landSealedTaskFiles(opts, paths, sealed, io.landTaskFiles!);
   yield* step(() => io.git("add", "--", ...paths));
   // A garden log under docs/ changes what docs/docs-index.json must say, and docs-index-check
   // refuses a PR whose index is stale — regenerate it with the checkout's own generator.
@@ -27767,7 +27844,8 @@ function refreshKnowledgeAssertions(root: string): string[] {
 export type { GardenBuildContext } from "./cli/commands/daemon.js";
 
 export function daemonGardenWorkspace(ctx: Pick<GardenBuildContext, "config" | "repoRoot" | "owner" | "repo" | "log">, name: GardenName): () => Promise<GardenCheckoutAsync> {
-  return () => gardenCheckoutAsync({ name, repoDir: ctx.repoRoot, worktreesRoot: worktreesDir(ctx.config), owner: ctx.owner, repo: ctx.repo, log: ctx.log });
+  return () => gardenCheckoutAsync({ name, repoDir: ctx.repoRoot, worktreesRoot: worktreesDir(ctx.config), owner: ctx.owner, repo: ctx.repo, log: ctx.log,
+    taskFilesLanding: { stateRoot: ctx.config.root } });
 }
 
 /** One pass of one garden; it logs its own failure under the garden's own step name and never throws. */
@@ -27916,7 +27994,7 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
     }
     case "plan": {
       const d = deps("plan");
-      const repairs = { stateDir, repoDir: repoRoot, worktreesRoot: worktreesDir(config), owner, repo, log };
+      const repairs = { stateDir, repoDir: repoRoot, worktreesRoot: worktreesDir(config), owner, repo, log, taskFilesLanding: { stateRoot: config.root } };
       return withShardRepairs(stateDir, () => runShardRepairPass(repairs), gardenPass(planGardenSpec(d), d), log);
     }
     case "backlog": {
@@ -28123,7 +28201,7 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
     // Paced (gardenPacingDue): a pass that judged nothing new widens the wait, and a changed plan tree or
     // operator release is due at once.
     case "machine-judge": {
-      const ports = productionMachineFilingJudgePorts({ repoRoot, stateDir, worktreesRoot: worktreesDir(config), owner, repo, log });
+      const ports = productionMachineFilingJudgePorts({ repoRoot, stateDir, worktreesRoot: worktreesDir(config), owner, repo, log, taskFilesLanding: { stateRoot: config.root } });
       const inputs = () => machineJudgeInputsAsync(repoRoot, stateDir, "origin/main");
       return withDue(async () => {
         const seen = await inputs();
@@ -37189,6 +37267,8 @@ export function productionMachineFilingJudgePorts(opts: {
   clock?: Clock;
   /** Test files main's CI failed at a sha (W1-T9694). Absent: read from GitHub, as the flake-incident gardener does. */
   mainFailures?: SelectorShadowMainFailures;
+  /** W1-T12221: the shared landing of task files, as {@link GardenCheckoutOpts.taskFilesLanding}. */
+  taskFilesLanding?: GardenCheckoutOpts["taskFilesLanding"];
 }): MachineJudgePorts {
   let mount: Mount | undefined;
   const fetcher = opts.fetcher ?? ghJson;
@@ -37282,7 +37362,8 @@ export function productionMachineFilingJudgePorts(opts: {
         return times.sort((a, b) => Date.parse(a) - Date.parse(b)).at(-1);
       };
     },
-    openWorkspace: () => gardenCheckoutAsync({ name: "machine-judge", repoDir: opts.repoRoot, worktreesRoot: opts.worktreesRoot, owner: opts.owner, repo: opts.repo, log: opts.log, fetcher, clock: opts.clock }),
+    openWorkspace: () => gardenCheckoutAsync({ name: "machine-judge", repoDir: opts.repoRoot, worktreesRoot: opts.worktreesRoot, owner: opts.owner, repo: opts.repo, log: opts.log, fetcher, clock: opts.clock,
+      ...(opts.taskFilesLanding ? { taskFilesLanding: opts.taskFilesLanding } : {}) }),
     prState: (prUrl) => gardenPrState(opts.owner, opts.repo, prUrl, fetcher),
     stageProposal: (proposal) => void stageInboxProposalOnce(join(opts.stateDir, "inbox-proposals.json"), proposal),
     log: opts.log,
