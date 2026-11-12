@@ -170,10 +170,8 @@ STATE_MOUNT_DEST="/home/node/Remudero"
 DAEMON_REPO_DIR="${STATE_MOUNT_DEST}/${DAEMON_REPO}"
 SERVE_REPO_DIR="${RMD_SERVE_REPO_DIR:-${HOME:-/root}/rmd-serve-repo}"
 # W1-T2434: the host-side account file and where it lands in the container — see the header note
-# above. Derived from `${HOME}` the same way `recycle-container.sh`'s `CRED_DIR` derives the
-# daemon's credential directory, so both containers agree on whose `.claude.json` is authoritative
-# without either retyping the other's default.
-CLAUDE_JSON_PATH="${RMD_CLAUDE_JSON_PATH:-${HOME:-/root}/.claude.json}"
+# above. W1-T12293: deploy/claude-directory.sh derives it for serve and the daemon launcher alike.
+CLAUDE_JSON_PATH="$(claude_host_account_file)"
 CLAUDE_JSON_MOUNT_DEST="/home/node/.claude.json"
 # W1-T2568: the GitHub webhook secret — see the header note above. No default host path (unlike
 # CLAUDE_JSON_PATH's `~/.claude.json` guess): a webhook secret has no conventional dotfile

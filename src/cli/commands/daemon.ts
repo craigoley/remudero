@@ -78,7 +78,7 @@ import { readOperatorReleaseRecords } from "../../lib/machine-filing-judge.js";
 import { readReleaseLedgerLines } from "../../lib/operator-release.js";
 import { runnerConfigDigest, terminalPreDispatchRefusalRevisions } from "../../lib/dispatch-repair.js";
 import { loadMounts, mountsPath } from "../../lib/mounts.js";
-import { loadPolicy, policyPath } from "../../lib/policy.js";
+import { loadPolicy, policyPath, type FreshnessRestartValues } from "../../lib/policy.js";
 import { refreshReviewPublisherToken as refreshInstallationToken } from "../../lib/review.js";
 import { feedbackStatusOnMain } from "../../lib/auto-triage.js";
 import { bootSweepDispatchClaims, dispatchClaimRef, releaseLandedDispatchClaims, claimMintedByRerun, type DispatchClaimReserver, type DispatchClaimReserverAsync } from "../../lib/dispatch-claim.js";
@@ -683,6 +683,21 @@ function startBootPhases(clock: Pick<Clock, "now">, uptimeMs: number): BootPhase
   };
 }
 
+/** W1-T12228: `plan/policy.yaml`'s `freshnessRestart` rows as the daemon's options, beside `sweepWallClockBoundMs`. */
+export function freshnessRestartOpts(rows: FreshnessRestartValues): Pick<DaemonOpts, "freshnessScoreLimit" | "freshnessStalenessHorizonMs" | "freshnessQuietWindowMs" | "freshnessMinLifetimeMs"> {
+  return {
+    freshnessScoreLimit: rows.scoreLimit,
+    freshnessStalenessHorizonMs: rows.stalenessHorizonMs,
+    freshnessQuietWindowMs: rows.quietWindowMs,
+    freshnessMinLifetimeMs: rows.minLifetimeMs,
+  };
+}
+
+/** W1-T12228: the live-edit ladder weighs pressure with the daemon's own score limit and staleness horizon. */
+export function freshnessRestartLadder(rows: FreshnessRestartValues): { scoreLimit: number; stalenessHorizonMs: number } {
+  return { scoreLimit: rows.scoreLimit, stalenessHorizonMs: rows.stalenessHorizonMs };
+}
+
 export async function daemonCommand(
   rest: string[],
   deps: {
@@ -922,6 +937,8 @@ export async function daemonCommand(
     // different populations, so each now reads its OWN `plan/policy.yaml` row (see
     // `fixSpawnWallClockBoundMs`'s own doc for why one row could no longer bound both).
     sweepWallClockBoundMs: policy.values.sweepWallClockBoundMs,
+    // W1-T12228: the four freshnessRestart rows (plan/policy.yaml); read at start, so an edit applies after the next restart.
+    ...freshnessRestartOpts(policy.values.freshnessRestart),
   };
   const config = deps.config ?? loadConfig();
   // Headroom governor switch (operator ruling fb-1784894405468-a4153e; default clause
@@ -2156,7 +2173,7 @@ export async function daemonCommand(
         // The same read drains the host-escalation spool: host-side alerts the host itself could not post.
         checkFreshness: testRunnerOnItsOwnCheckout(repoRoot)
           ? daemonFreshnessReads(repoRoot, process.env, { loadedCodeSha: daemonLoadedCodeSha }).checkFreshness
-          : withEscalationSpoolDrain(withLiveEditLadders(daemonFreshnessReads(repoRoot, process.env, { loadedCodeSha: daemonLoadedCodeSha }).checkFreshness, liveEditLadderWiring(config)), escalationSpoolDrainWiring(config)),
+          : withEscalationSpoolDrain(withLiveEditLadders(daemonFreshnessReads(repoRoot, process.env, { loadedCodeSha: daemonLoadedCodeSha }).checkFreshness, { ...liveEditLadderWiring(config), ...freshnessRestartLadder(policy.values.freshnessRestart) }), escalationSpoolDrainWiring(config)),
         // W1-T10919: read main's tree directly; a config-only fetch need not reset the consumer checkout.
         readTerminalPreDispatchRefusalRevisions: () => terminalPreDispatchRefusalRevisions(join(config.root, "state"), () => runnerConfigDigest(targetCheckoutRoot, "origin/main")),
         categorizedRefusalRejoinFor: (id) => lastProj?.get(id)?.categorizedRefusalRejoin,
