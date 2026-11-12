@@ -135,7 +135,6 @@ import {
   directMergeRestartItem,
   type RestartDrainInventoryEntry,
 } from "./sweep.js";
-// W1-T11503: a direct merge is drained by its own registry, not through the sweep wrapper that started it.
 import {
   cancelUnsubmittedDirectMerges,
   closeDirectMergeAdmissions,
@@ -4262,7 +4261,6 @@ export async function runDaemon(
   deps: DaemonDeps,
   opts: DaemonOpts = {},
 ): Promise<DaemonSummary> {
-  // W1-T11503: a daemon lifetime begins with direct-merge admission open; only its own latch or exit closes it.
   openDirectMergeAdmissions();
   const pollIntervalMs = opts.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
   // W1-T1044: see DaemonOpts.sweepWallClockBoundMs's own doc — POLICY DATA (rule 2), threaded
@@ -5339,7 +5337,6 @@ export async function runDaemon(
   const latchedAdmission = (): RestartAdmission | undefined => restartWindow && restartAdmission;
   const beginLatchDrain = (latchAtMs: number): void => {
     if (latchDrain?.latchAtMs === latchAtMs) return;
-    // W1-T11503: the latch closes NEW direct-merge admissions only; one already admitted drains to its own settlement.
     closeDirectMergeAdmissions("freshness_latch");
     const lengths = measuredReviewLength();
     restartWindow = { deadlineMs: latchAtMs + sweepWallClockBoundMs, held: 0, latchAtMs,
@@ -5461,8 +5458,6 @@ export async function runDaemon(
           boundMs: Math.max(0, deadlineMs - daemonClock.now()), onWait: observation.watch, closeRefills: placements.review?.placement !== "child",
         });
       }
-      // W1-T11503: at the bound a merge not yet written is asked to refuse AT its write; one already submitted is an UNKNOWN
-      // write, named so and never counted as drained. The next boot reconciles the pull request's real state.
       if (unresolvedMerges.length > 0) cancelUnsubmittedDirectMerges();
       for (const operation of unresolvedMerges) {
         log("daemon.direct_merge_unresolved", {
@@ -5525,10 +5520,8 @@ export async function runDaemon(
     dispatchLatchAtMs?: number,
     advanceSinceMs?: number,
   ): Promise<FreshnessPass> => {
-    // W1-T11503: close NEW direct-merge admissions before the bounded sweep is awaited; an admitted one is drained below.
     closeDirectMergeAdmissions("freshness_exit");
-    // Install BEFORE the loop stops for restart, never after, so the relaunched process inherits deps
-    // matching the new sha rather than the stale tree this process is still running (W1-T151).
+    // Install BEFORE the loop stops, so the relaunched process inherits deps matching the new sha (W1-T151).
     if (freshness.installNeeded) {
       deps.runInstall?.();
     }

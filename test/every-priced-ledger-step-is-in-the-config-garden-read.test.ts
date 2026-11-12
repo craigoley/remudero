@@ -110,6 +110,9 @@ const EXEMPT: Readonly<Record<string, string>> = {
   "daemon.block.parked": A_LANE_RUN_ID,
   "daemon.block.rearmed": A_LANE_RUN_ID,
   "daemon.blocked": A_LANE_RUN_ID,
+  // W1-T11503: the freshness exit's unresolved direct-merge receipt, written by the daemon's own emitLog under its
+  // DAEMON- lane run_id (never a worker run's), so no worker run's pricing or credit can read it.
+  "daemon.direct_merge_unresolved": A_LANE_RUN_ID,
   "feedback.landing_review.failed": A_LANE_RUN_ID,
   "drain.blocked": A_LANE_RUN_ID,
   "drain.continued": A_LANE_RUN_ID,
