@@ -165,6 +165,7 @@ import { clockFromDateFn, clockFromIsoFn, fixedClock, loopAvailableDeadline, sys
 import { createNearLimitHeapTelemetry, NEAR_HEAP_FILE, type NearLimitHeapTelemetry, type NearLimitSample } from "./daemon-heap-near-limit.js";
 import { createHeapAdmissionHold, type HeapAdmissionHoldLatch, type HeapAdmissionHoldMode, type HeapHoldTrace } from "./daemon-heap-admission-hold.js";
 import { readLedgerUnionRecordsSync } from "./ledger-union.js";
+import { reportRetirableWorktrees, type WorktreeRetireOptions } from "./worktree-retire.js";
 import { createGateObservationState, observeGate } from "./gate-observations.js";
 import { getHeapStatistics } from "node:v8";
 import { defaultLaneGovernorPorts, DISPATCH_LANE_CPU_CLASS, initialLaneCpuLearner, LANE_TARGET_STEP, laneTarget, laneTargetPayload, publishLaneCpuBound, publishLaneCpuClasses, readLaneCpu, relabelLaneCpu, REVIEW_LANE_CPU_CLASS, type LaneGovernorPorts, type LaneMemoryReading, type LaneTarget, type RunningLane } from "./lane-governor.js";
@@ -1566,6 +1567,7 @@ export interface DaemonDeps {
    *  a tree held by uncommitted work. Same zero-arg, best-effort contract as the sweep above.
    *  Optional — omitted, this tick performs no artifact sweep. */
   sweepReclaimableArtifacts?: () => void;
+  worktreeRetire?: WorktreeRetireOptions;
   /** W1-T7093: update this instance's shared host-memory reservation tree on every heartbeat.
    *  Bookkeeping only; a failure is logged and never delays or gates work. */
   sweepHostMemoryReservations?: () => void;
@@ -3148,6 +3150,11 @@ function startInFlightTicker(
             } catch (e) {
               log("daemon.disk_artifact_sweep.error", { error: String((e as Error)?.message ?? e) });
             }
+          }
+          if (deps.worktreeRetire) {
+            void reportRetirableWorktrees(deps.worktreeRetire, log).catch((e: unknown) => {
+              log("daemon.worktree_retire_report.error", { error: String((e as Error)?.message ?? e) });
+            });
           }
           // Sample account headroom once the last reading has gone stale. Placed after the liveness write on purpose:
           // this tick's heartbeat is already on the ledger before the probe is awaited, so a slow probe can delay the
