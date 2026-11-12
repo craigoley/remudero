@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { boundChildByLoopTime } from "./loop-bounded-child.js";
 import { existsSync, readFileSync } from "node:fs";
-import { hostname } from "node:os";
+import { hostname, uptime } from "node:os";
 import { LEDGER_FILENAME } from "./ledger-path.js";
 import { sameHost } from "./host-identity.js";
 import { ledgerLivePath, ledgerRotationEntries, readLedgerUnionRecords, realLedgerFs, rotationStampIso, type LedgerGrepFsDeps } from "./ledger-union.js";
@@ -601,14 +601,28 @@ export function gitClaimRunnerAsync(
 
 /**
  * W1-T2784: epoch ms this PID namespace's init started, or `undefined` on bad input — declines
- * arm 3 rather than guessing. `/proc/stat`'s `btime` plus `/proc/1/stat` field 22 (start ticks)
- * sums to the namespace's own start.
+ * arm 3 rather than guessing. On linux and every platform but darwin, `/proc/stat`'s `btime` plus
+ * `/proc/1/stat` field 22 (start ticks) sums to the namespace's own start; without `/proc` it is
+ * `undefined`. W1-T12356: darwin has no `/proc` and no pid namespace, so its pid space starts with
+ * the kernel: now minus `os.uptime()`. No `sysctl` spawn, because the boot sweep is on the daemon path.
  *
  * TRAP: field 22 counts from the END of the line — `comm` (field 2) is parenthesized and can
  * contain spaces, so splitting on whitespace mis-indexes everything after it; slice after the
  * LAST `)` instead.
  */
-export function readNamespaceBootMs(deps: { readFile?: (p: string) => string; clockTicks?: () => number } = {}): number | undefined {
+export function readNamespaceBootMs(
+  deps: {
+    readFile?: (p: string) => string;
+    clockTicks?: () => number;
+    platform?: NodeJS.Platform;
+    uptimeSec?: () => number;
+    nowMs?: () => number;
+  } = {},
+): number | undefined {
+  if ((deps.platform ?? process.platform) === "darwin") {
+    const bootMs = Math.round((deps.nowMs ?? (() => systemClock.now()))() - (deps.uptimeSec ?? uptime)() * 1000);
+    return Number.isFinite(bootMs) && bootMs >= 0 ? bootMs : undefined;
+  }
   const read = deps.readFile ?? ((p: string) => readFileSync(p, "utf8"));
   try {
     const btimeLine = /^btime\s+(\d+)/m.exec(read("/proc/stat"));
@@ -627,8 +641,22 @@ export function readNamespaceBootMs(deps: { readFile?: (p: string) => string; cl
   }
 }
 
-/** W1-T2784: does `pid` exist here? `true` on doubt — absence is half of arm 3's proof. */
-export function pidIsPresent(pid: number, deps: { exists?: (p: string) => boolean } = {}): boolean {
+/** W1-T2784: does `pid` exist here? `true` on doubt — absence is half of arm 3's proof. On linux and
+ *  every platform but darwin it checks `/proc/<pid>`. W1-T12356: on darwin it asks the kernel with
+ *  `process.kill(pid, 0)`; only `ESRCH` means absent, and `EPERM` or any other error means present. */
+export function pidIsPresent(
+  pid: number,
+  deps: { exists?: (p: string) => boolean; platform?: NodeJS.Platform; kill?: (pid: number, signal: number) => unknown } = {},
+): boolean {
+  if ((deps.platform ?? process.platform) === "darwin") {
+    try {
+      (deps.kill ?? ((p: number, signal: number) => process.kill(p, signal)))(pid, 0);
+      return true;
+    } catch (err) {
+      // The kernel's answer, not a failure: only ESRCH proves absence; anything else stays PRESENT (fail-closed).
+      return (err as { code?: unknown } | null)?.code !== "ESRCH";
+    }
+  }
   const exists = deps.exists ?? ((p: string) => existsSync(p));
   try {
     return exists(`/proc/${pid}`);
