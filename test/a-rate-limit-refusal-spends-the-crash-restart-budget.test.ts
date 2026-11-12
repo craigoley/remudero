@@ -117,7 +117,7 @@ test("W1-T2546: the entrypoint's environmental code is the SAME NUMBER as DAEMON
   // Same parity guard W1-T490 and W1-T2537 already established for their own codes: the shell
   // script cannot import a TypeScript constant, so the duplication is deliberate and this test is
   // what makes a drift a red test rather than a silent mis-route.
-  const script = readFileSync(join(REPO_ROOT, "deploy", "entrypoint.sh"), "utf8");
+  const script = readFileSync(join(REPO_ROOT, "deploy", "entrypoint-supervise.sh"), "utf8");
   const m = script.match(/^DAEMON_EXIT_ENVIRONMENTAL=(\d+)$/m);
   assert.ok(m, "the entrypoint must define DAEMON_EXIT_ENVIRONMENTAL as a plain assignment this test can read");
   assert.equal(Number(m![1]), DAEMON_EXIT_ENVIRONMENTAL, "entrypoint and daemon.ts disagree about the environmental exit code");
@@ -129,7 +129,7 @@ test("W1-T2546: the entrypoint's environmental code is the SAME NUMBER as DAEMON
 });
 
 test("W1-T2546: the in-container retry is BOUNDED, so a bound is replaced rather than removed", () => {
-  const script = readFileSync(join(REPO_ROOT, "deploy", "entrypoint.sh"), "utf8");
+  const script = readFileSync(join(REPO_ROOT, "deploy", "entrypoint-supervise.sh"), "utf8");
   // Past the cap it must fall through to the crash throttle, which is what keeps docker's
   // on-failure budget as the outer bound rather than leaving the container to spin forever.
   assert.match(script, /ENVIRONMENTAL_RESTART_MAX="\$\{RMD_ENVIRONMENTAL_RESTART_MAX:-100\}"/);

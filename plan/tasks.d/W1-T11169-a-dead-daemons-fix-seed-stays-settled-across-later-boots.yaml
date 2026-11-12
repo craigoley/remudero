@@ -92,3 +92,9 @@
     (implementation, merge sha 11e00baba2), #17355, #17425, #17426 (ratifications), #17755 (status
     reconcile). Remote heads run-W1-T11169-1794089750259 and run-W1-T11169-1794120655199 remain. Whether
     any PR is still open was not checked, because the open-PR list was unavailable.
+    checkpoint verification: run at exact head 860fd523fd40830575fe787d8b6aa6af39c7e333 (branch
+    run-W1-T11169-1794120655199, detached checkout, 2026-11-12). Seed test a-dead-daemons-fix-seed-stays-settled-across-later-boots:
+    PASS (4 tests, 0 fail). Seed test a-started-fix-seed-is-reconciled-after-a-clean-boot: PASS (11 tests, 0 fail).
+    npm run typecheck: PASS (exit 0). lint: no lint script exists in package.json (npm run lint errors with
+    Missing script), so it could not be run; not a failure of the checkpoint.
+    checkpoint verdict: finish-and-ship. Nothing to rework; the work is already merged as #17367 (status merged).
