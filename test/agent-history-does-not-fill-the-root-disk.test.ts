@@ -118,10 +118,12 @@ interface Run {
 /** A day count expressed as milliseconds, for `utimesSync`. */
 const DAYS = 24 * 60 * 60 * 1000;
 
-/** A codex-shaped home: one file older than the default 14-day tier, one fresh (still growing). */
+/** A codex-shaped home: one session older than the default 14-day tier, one fresh (still growing). */
 function codexFixture(): { dir: string; old: string; fresh: string } {
   const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}host-update-codex-`));
-  const old = join(dir, "thread_history_1.sqlite");
+  // W1-T12409: in the Codex home the age sweep removes old files only under its history folders.
+  mkdirSync(join(dir, "sessions"));
+  const old = join(dir, "sessions", "rollout-old.jsonl");
   const fresh = join(dir, "state_5.sqlite");
   writeFileSync(old, "x".repeat(4096));
   writeFileSync(fresh, "y".repeat(2048));
@@ -217,9 +219,10 @@ test("oldest first: files are removed in ascending mtime order, not filesystem o
   const now = new Date();
   // Written to disk NEWEST-NAMED-FIRST so filesystem/readdir order would disagree with mtime order
   // if the script did not sort explicitly.
-  const third = join(dir, "z-third.log");
-  const first = join(dir, "a-first.log");
-  const second = join(dir, "m-second.log");
+  mkdirSync(join(dir, "sessions"));
+  const third = join(dir, "sessions", "z-third.log");
+  const first = join(dir, "sessions", "a-first.log");
+  const second = join(dir, "sessions", "m-second.log");
   for (const [p, daysAgo] of [
     [third, 20],
     [first, 90],

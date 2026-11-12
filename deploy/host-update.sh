@@ -1507,6 +1507,13 @@ fi
 # purpose — this fleet is always up, so a non-zero refusal would fail every nightly and bury the
 # snapshot alarm (W1-T5545) under a permanent false one.
 #
+# W1-T12409 — THE AGE SWEEP REMOVES HISTORY ONLY. The Codex home also holds the Codex login
+# (auth.json), its config, installation_id, the installed CLI (packages/) and work checkouts. In
+# the Codex home the sweep removes old files only under its history folders; in every tree it never
+# removes auth.json, .credentials.json, installation_id or a *.toml file. The old files it keeps
+# are reported as `never-removed`. Under a test process (NODE_TEST_CONTEXT) a tree that comes from
+# HOME is skipped, so no test run walks or prunes the real home (the scratch-mounts.sh rule).
+#
 # FALSIFIER: remove the live-worker refusal and a fixture's old file is reclaimed beside a live
 # container; collapse the per-tree report into one total and the split assertion fails. Sweep by
 # mtime alone, or report only bytes freed, and test/agent-history-reclaim-reaches-the-bulk.test.ts
@@ -1516,6 +1523,16 @@ if [ "${RECLAIM_ONLY}" -eq 1 ]; then
   echo
   AGENT_HISTORY_MAX_AGE_DAYS="${RMD_AGENT_HISTORY_MAX_AGE_DAYS:-14}"
   IFS=':' read -r -a AGENT_HISTORY_DIRS <<<"${RMD_AGENT_HISTORY_DIRS:-${CODEX_DIR}:${CRED_DIR}/projects}"
+  if [ -n "${NODE_TEST_CONTEXT:-}" ] && [ -z "${RMD_AGENT_HISTORY_DIRS:-}" ]; then
+    if [ -z "${RMD_CODEX_DIR:-}" ]; then
+      echo "host-update: agent history reclaim — ${CODEX_DIR}: skipped — a test process never walks the agent history under HOME; set RMD_CODEX_DIR"
+      AGENT_HISTORY_DIRS[0]=""
+    fi
+    if [ -z "${RMD_CLAUDE_DIR:-}" ]; then
+      echo "host-update: agent history reclaim — ${CRED_DIR}/projects: skipped — a test process never walks the agent history under HOME; set RMD_CLAUDE_DIR"
+      AGENT_HISTORY_DIRS[1]=""
+    fi
+  fi
   # `find -printf` is GNU-only. BSD find has the same `-print0` primitive, so keep the traversal
   # portable and ask the host's `stat` for the two metadata fields separately. The format is probed
   # once per tree: GNU stat accepts `-c`; BSD stat accepts `-f`.
@@ -1544,6 +1561,37 @@ if [ "${RECLAIM_ONLY}" -eq 1 ]; then
   # <tree> <label> <bytes> <reason> <files> <why>
   agent_history_unreached() {
     echo "host-update: agent history reclaim${2} — ${1}: could not reach $(human_kb $(($3 / 1024))) — reason: ${4} (${5} file(s)); ${6}"
+  }
+  AGENT_HISTORY_CODEX_HISTORY=(sessions archived_sessions log shell_snapshots)
+  AGENT_HISTORY_KEPT_N=0
+  # <tree>: the old files the age sweep may remove, NUL-separated.
+  agent_history_old_removable() {
+    local sub found=0
+    local -a roots
+    roots=("$1")
+    if [ "${1%/}" = "${CODEX_DIR%/}" ]; then
+      for sub in "${AGENT_HISTORY_CODEX_HISTORY[@]}"; do
+        if [ -d "$1/${sub}" ]; then roots[found]="$1/${sub}"; found=$((found + 1)); fi
+      done
+      [ "${found}" -gt 0 ] || return 0
+    fi
+    find "${roots[@]}" -type f -mtime "+${AGENT_HISTORY_MAX_AGE_DAYS}" ! -name auth.json ! -name .credentials.json \
+      ! -name installation_id ! -name '*.toml' -print0 2>/dev/null
+  }
+  # <tree> <label>: name, on one line, the old files the age sweep may not remove.
+  agent_history_report_kept() {
+    local path m all_n=0 all_b=0 rm_n=0 rm_b=0
+    while IFS= read -r -d '' path; do
+      m="$(agent_history_file_metadata "${path}")" || continue
+      all_n=$((all_n + 1)); all_b=$((all_b + ${m#* }))
+    done < <(find "$1" -type f -mtime "+${AGENT_HISTORY_MAX_AGE_DAYS}" -print0 2>/dev/null)
+    while IFS= read -r -d '' path; do
+      m="$(agent_history_file_metadata "${path}")" || continue
+      rm_n=$((rm_n + 1)); rm_b=$((rm_b + ${m#* }))
+    done < <(agent_history_old_removable "$1")
+    AGENT_HISTORY_KEPT_N=$((all_n - rm_n))
+    [ "${AGENT_HISTORY_KEPT_N}" -eq 0 ] || agent_history_unreached "$1" "$2" $((all_b - rm_b)) never-removed "${AGENT_HISTORY_KEPT_N}" \
+      "older than ${AGENT_HISTORY_MAX_AGE_DAYS}d, but a login or config file, or outside the Codex history folders; never removed"
   }
   if [ -n "${LIVE}" ]; then
     echo "host-update: REFUSING agent history reclaim — a fleet container is RUNNING." >&2
@@ -1666,7 +1714,7 @@ try {
       [ "${eng_n}" -eq 0 ] || agent_history_unreached "${tree}" "${label}" "${eng_b}" no-sqlite-engine "${eng_n}" "live SQLite database(s), and no sqlite3 (or node with node:sqlite) on this host to compact them"
       [ "${space_n}" -eq 0 ] || agent_history_unreached "${tree}" "${label}" "${space_b}" insufficient-free-space "${space_n}" "VACUUM needs twice the file's size free on its filesystem"
       [ "${fail_n}" -eq 0 ] || agent_history_unreached "${tree}" "${label}" "${fail_b}" compaction-failed "${fail_n}" "${fail_why}"
-      if [ $((tier_n + rows_n + eng_n + space_n + fail_n)) -eq 0 ]; then
+      if [ $((tier_n + rows_n + eng_n + space_n + fail_n + AGENT_HISTORY_KEPT_N)) -eq 0 ]; then
         echo "host-update: agent history reclaim${label} — ${tree}: could not reach 0.0KB — every byte was in scope"
       fi
     }
@@ -1683,9 +1731,10 @@ try {
           metadata="$(agent_history_file_metadata "${path}")" || continue
           file_size="${metadata#* }"
           would_bytes=$((would_bytes + file_size))
-        done < <(find "${hdir}" -type f -mtime "+${AGENT_HISTORY_MAX_AGE_DAYS}" -print0 2>/dev/null)
+        done < <(agent_history_old_removable "${hdir}")
         would_kb=$((would_bytes / 1024))
         echo "host-update: agent history reclaim (DRY RUN) — ${hdir}: would free $(human_kb "${would_kb:-0}") across files older than ${AGENT_HISTORY_MAX_AGE_DAYS}d; nothing removed"
+        agent_history_report_kept "${hdir}" " (DRY RUN)"
         agent_history_compact_tree "${hdir}"
         continue
       fi
@@ -1699,7 +1748,7 @@ try {
           echo "  removed ${path}"
         fi
       done < <(
-        find "${hdir}" -type f -mtime "+${AGENT_HISTORY_MAX_AGE_DAYS}" -print0 2>/dev/null |
+        agent_history_old_removable "${hdir}" |
           while IFS= read -r -d '' path; do
             metadata="$(agent_history_file_metadata "${path}")" || continue
             printf '%s\t%s\t%s\n' "${metadata%% *}" "${metadata#* }" "${path}"
@@ -1708,6 +1757,7 @@ try {
       )
       freed_kb=$((freed_bytes / 1024))
       echo "host-update: agent history reclaim — ${hdir}: freed $(human_kb "${freed_kb}") across ${removed} file(s) older than ${AGENT_HISTORY_MAX_AGE_DAYS}d, oldest first"
+      agent_history_report_kept "${hdir}" ""
       agent_history_compact_tree "${hdir}"
     done
   fi
