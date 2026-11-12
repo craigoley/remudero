@@ -8,7 +8,8 @@
   risk: high
   band_meaning: span
   priority: 4
-  status: queued
+  status: blocked
+  retirement: withdrawn  # null harvest: both asks already ship as advisory warnings via merged W1-T2967 (sharedProofViolations) and proofDialectViolations/looksLikeNonTitleBody in src/lib/task-linter.ts; owner GRILL #18025 answered WITHDRAW
   # backlog gardener: band=4 evidence=e51d66657dd57ff0
   attempts: 0
   files:
@@ -31,3 +32,23 @@
     correction (distinct, length-bounded test titles) with a matching precedent already in the
     plan; no separate follow-up task is warranted. — from PLAN-create (run DAEMON-1789932902089,
     https://github.com/craigoley/remudero/pull/6258)
+
+    WITHDRAWN 2026-11-11 (PLAN-clarify-1794439825698), on the owner's WITHDRAW answer to GRILL #18025.
+    The original criteria above are kept as history only; this record must not be dispatched.
+
+    Settled by lookup: is this already filed or already decided? -> yes; both asks already ship on
+    main as ADVISORY warnings (src/lib/task-linter.ts, merged W1-T2967).
+
+    Settled by lookup: is a duplicate identical proof inside one task already flagged? -> yes;
+    sharedProofViolations warns on criteria sharing one identical proof, whole-file or test title,
+    and names the colliding criterion indices (W1-T2967, status merged; src/lib/task-linter.ts).
+
+    Settled by lookup: is an over-long name-filtered `unit test:` title already flagged? -> yes;
+    proofDialectViolations warns via looksLikeNonTitleBody when a name-filtered body is over 100
+    characters or contains ` -> ` / `; ` (src/lib/task-linter.ts).
+
+    Settled by lookup: should this become a hard refusal or a fixed title-length cap? -> no;
+    W1-T2967 design (i) keeps the shared-proof check advisory because some legitimate cases exist,
+    and looksLikeNonTitleBody is warn-only because some real titles are long. That policy stands.
+
+    Settled by lookup: does anything depend on W1-T9299? -> no; no depends_on in plan/ names it.
