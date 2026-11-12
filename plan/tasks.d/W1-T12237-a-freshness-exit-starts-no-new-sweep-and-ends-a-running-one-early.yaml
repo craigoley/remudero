@@ -27,6 +27,7 @@
     - test/daemon-freshness.test.ts
     - test/daemon.test.ts
     - test/daemon/a-restart-drain-names-what-it-waits-on.test.ts
+    - test/an-unlatched-freshness-exit-skips-a-pass-that-already-ran.test.ts
   status: queued
   attempts: 0
   acceptance:
@@ -96,6 +97,10 @@
       do not run. The settle of the repair memory demand covers only the visited pull requests.
     - A pass that ended early is not a completed pass: it does not set `lastCompletedAtMs` and it is not a
       sample of the learned sweep bound. Its `daemon.sweep.settled` row has `ended_early: true`.
+    - W1-T9352 (merged) added test/an-unlatched-freshness-exit-skips-a-pass-that-already-ran.test.ts. Its third
+      test, "an exit with no pass since the advance still runs one", expects `pre_exit_pass: ran` and 2 sweeps.
+      W1-T12237 removes the exit sweep, so that test changes to expect `no_sweep_at_exit` and 1 sweep. The
+      `skipped_ran_since_stale` arm of W1-T9352 and its evidence fields stay as merged.
     NOT IN SCOPE: the time limit of the drain, the admission rule after the restart decision, and the stages of the sweep themselves (W1-T12234 shortens the longest one).
   falsifier: |
     Call `runGatedSweep` in the exit again and criterion 1 must fail. Stop the sweep in the middle of a pull request and criterion 5 must fail. Ignore the stop answer before the first pull request and criterion 4 must fail. Restore and require all eight to pass.
