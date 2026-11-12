@@ -14,7 +14,9 @@ six-hour guards, per-account locks and schedules. Do not widen home-directory
 permissions to make a cross-account launcher work. `--shared-root PATH` installs
 the identical layout under an alternate absolute root for testing.
 
-Run `~/bin/remudero-janitor.sh --dry-run` before `--apply`.
+Run the installed janitor with `--dry-run` before `--apply`. On the agent account it is
+`"$HOME/Library/Application Support/remudero/remudero-janitor.sh" --dry-run` (installed as
+shown below); `~/bin/remudero-janitor.sh` exists only where the default layout was installed.
 
 The agent account's hourly `:17` job uses
 `/Users/craigoleyagent/Library/Application Support/remudero/tmp-reclaim.sh`.
