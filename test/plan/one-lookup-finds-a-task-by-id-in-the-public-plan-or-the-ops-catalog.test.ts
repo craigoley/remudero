@@ -31,7 +31,7 @@ function fixture(t: TestContext, text = yaml()) {
     assert.equal(path, `${base}/git/blobs/${blob}`, "only pinned read-only fixture routes may run");
     return { sha: blob, encoding: "base64", size: Buffer.byteLength(text), content: Buffer.from(text).toString("base64") };
   };
-  return { root, stateDir, api, calls };
+  return { root, stateDir, api, calls, rootTree: tree };
 }
 async function lookup() { return import("#src/lib/task-lookup.js"); }
 
@@ -39,10 +39,10 @@ test("W1-T12207 criterion 1: public wins without a private read; a named empty-k
   const fx = fixture(t), { findTaskInCatalogs } = await lookup();
   const publicTask = task();
   const first = await findTaskInCatalogs(ID, { readPublic: () => publicTask, stateDir: fx.stateDir, api: fx.api });
-  assert.equal(first.outcome, "found"); assert.equal(first.catalog, "public"); assert.equal(first.task, publicTask); assert.deepEqual(fx.calls, []);
+  assert.equal(first.outcome, "found"); assert.equal(first.catalog, "public"); assert.equal(first.task, publicTask); assert.equal(fx.calls.length, 0);
   const second = await findTaskInCatalogs(ID, { readPublic: () => undefined, stateDir: fx.stateDir, api: fx.api });
   assert.equal(second.outcome, "found"); assert.equal(second.catalog, "ops"); assert.equal(second.task?.id, ID);
-  assert.equal(second.task?.files[0], "src/fixture.ts"); assert.ok(fx.calls.length > 4); assert.equal(fx.calls.filter(p => p.endsWith("/git/ref/heads/main")).length, 2);
+  assert.equal(second.task?.files?.[0], "src/fixture.ts"); assert.ok(fx.calls.length > 4); assert.equal(fx.calls.filter(p => p.endsWith("/git/ref/heads/main")).length, 2);
 });
 
 test("W1-T12207 criterion 2: the real review command receives the private canonical criteria files risk budget and narrative before body fallback", async t => {
@@ -57,7 +57,7 @@ test("W1-T12207 criterion 2: the real review command receives the private canoni
     taskLookup: { api: fx.api },
     postReviewPending: async () => ({ posted: true }) as never,
     materialize: () => ({ worktreePath: undefined, failure: { errorClass: "fixture", message: "no real worker" } }) as never,
-    runReview: (async args => { reviewed = args.task; throw Error("fixture captured canonical task"); }) as never,
+    runReview: (async (args: Parameters<NonNullable<ReviewCommandDeps["runReview"]>>[0]) => { reviewed = args.task; throw Error("fixture captured canonical task"); }) as never,
     postStatus: (() => { throw Error("forbidden public status"); }) as never,
   };
   await assert.rejects(() => reviewCommand("42", [], deps), /fixture captured canonical task/);
@@ -89,11 +89,36 @@ test("W1-T12207 criterion 5: unreadable public destination or ops evidence never
   writeFileSync(join(fx.stateDir, "plan-destination.json"), "invalid private bytes");
   assert.equal((await findTaskInCatalogs(ID, { readPublic, stateDir: fx.stateDir, api: fx.api })).outcome, "unreadable");
   assert.equal((await findTaskInCatalogs(ID, { readPublic: () => { throw Error("public unreadable"); }, stateDir: fx.stateDir, api: fx.api })).outcome, "unreadable");
-  assert.deepEqual(fx.calls, []);
+  assert.equal(fx.calls.length, 0);
 });
 
 test("W1-T12207 criterion 6: an absent host file preserves public results and never reads a private catalog", async t => {
   const fx = fixture(t), { findTaskInCatalogs } = await lookup(); rmSync(join(fx.stateDir, "plan-destination.json"));
   let reads = 0; const deps = { readPublic: () => { reads++; return undefined; }, stateDir: fx.stateDir, api: fx.api };
-  assert.equal((await findTaskInCatalogs(ID, deps)).outcome, "absent"); assert.equal(reads, 1); assert.deepEqual(fx.calls, []);
+  assert.equal((await findTaskInCatalogs(ID, deps)).outcome, "absent"); assert.equal(reads, 1); assert.equal(fx.calls.length, 0);
+});
+
+
+test("the real review refuses an unreadable ops catalog before body fallback or a status effect", async t => {
+  const fx = fixture(t); const { reviewCommand } = await import("#src/run-task.js");
+  const head = execFileSync("git", ["rev-parse", "HEAD"], { cwd: REPO_ROOT, encoding: "utf8" }).trim();
+  let reviewed = 0, pending = 0;
+  const code = await reviewCommand("42", [], {
+    loadConfig: () => ({ root: fx.root }) as never,
+    resolveOwnerRepo: () => ({ owner: "fixture", repo: "remudero" }),
+    fetchView: () => ({ body: `Remudero-Task: ${ID}\n\n## Acceptance\n- wrong fallback | grep: wrong in src/wrong.ts`, html_url: "https://github.com/fixture/remudero/pull/42", number: 42, head: { ref: `run-${ID}-1`, sha: head }, updated_at: new Date().toISOString() }),
+    fetchHead: () => {}, taskLookup: { api: async () => { throw Error("PRIVATE_API_RESPONSE"); } },
+    runReview: (async () => { reviewed++; throw Error("forbidden review"); }) as never,
+    postReviewPending: async () => { pending++; return { posted: true } as never; },
+  });
+  assert.equal(code, 2); assert.equal(reviewed, 0); assert.equal(pending, 0);
+});
+
+test("a readable empty ops catalog is absent, while missing source metadata stays unreadable", async t => {
+  const fx = fixture(t, "[]\n"), { findTaskInCatalogs } = await lookup();
+  assert.equal((await findTaskInCatalogs(ID, { readPublic: () => undefined, stateDir: fx.stateDir, api: fx.api })).outcome, "absent");
+  const missing: OpsCatalogApi = async path => path === `repos/${REPOSITORY}/git/trees/${fx.rootTree}`
+    ? { sha: fx.rootTree, truncated: false, tree: [] } : fx.api(path);
+  const result = await findTaskInCatalogs(ID, { readPublic: () => undefined, stateDir: fx.stateDir, api: missing });
+  assert.equal(result.outcome, "unreadable"); assert.equal(result.outcome === "unreadable" && result.reason, "ops-source_absent");
 });

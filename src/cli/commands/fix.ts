@@ -1,4 +1,6 @@
 /** The fix verb and its exclusive helpers, moved from the entrypoint (W1-T9337). */
+import { findTaskInCatalogs, type TaskLookupOptions, type TaskLookupResult } from "../../lib/task-lookup.js";
+import { planDestinationRepository } from "../../lib/plan-destination.js";
 import type { RunTaskCommandHost, GitRunner, CiGateOutcome, ReviewRunResult, FixRungOutcome, LiveHeadResult, WorktreeSnapshot, FixRebaseMergeFacts, FixRoundCommit, CensusPushRefusal, FixRoundPushReceipt } from "./run-task-verb.js";
 import { buildBaseProofDir, releaseBaseProofDir, type BaseProofDir } from "../../lib/check-proof.js";
 import { judgeFixProgress, resolveFixProgress, type FixProgressJudge, type FixProgressVerdict, type FixProgressWorkerProofResult, reviewerProofFailures, unfiledScopeGrant, UNFILED_SCOPE_GRANT_ANSWER } from "../../lib/fix-progress-judge.js";
@@ -5636,6 +5638,10 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
  *
  * FAIL LOUD on junk args BEFORE any `gh` lookup/spawn (Standing rule).
  */
+export async function fixCatalogTask(taskId: string, plan: Plan, options: TaskLookupOptions = {}): Promise<TaskLookupResult> {
+  return findTaskInCatalogs(taskId, { ...options, readPublic: id => plan.byId.get(id) });
+}
+
 export async function fixCommand(
   rest: string[],
   // Injectable exactly as approveCommand/inboxCommand already are — the seam that lets the
@@ -5648,7 +5654,7 @@ export async function fixCommand(
   //
   // `self` is the checkout's owner/repo, otherwise read from `origin`. A sandboxed checkout has no
   // origin remote, so a test that drives this verb end to end must be able to name the slug itself.
-  deps: { config?: Config; fetch?: GhApiFetcher; route?: ReturnType<typeof fixCommandHelpers>["routeFix"]; self?: { owner: string; repo: string }; contributorAdmission?: AdmissionObserver } = {},
+  deps: { config?: Config; fetch?: GhApiFetcher; route?: ReturnType<typeof fixCommandHelpers>["routeFix"]; self?: { owner: string; repo: string }; contributorAdmission?: AdmissionObserver; taskLookup?: TaskLookupOptions } = {},
 
   host: FixCommandHost,
 ): Promise<number> {
@@ -5762,12 +5768,32 @@ export async function fixCommand(
   const planPath =
     repo === self.repo ? join(repoRoot, "plan", "tasks.yaml") : join(config.root, "repos", repo, "plan", "tasks.yaml");
   let plan: Plan = { tasks: [], byId: new Map() };
+  let publicPlanReadable = true;
   try {
     plan = loadPlan(planPath);
   } catch (e) {
+    publicPlanReadable = false;
     log("fix.plan.unavailable", { plan_path: planPath, error: String((e as Error)?.message ?? e) });
   }
 
+  if (taskId && !plan.byId.has(taskId)) {
+    if (!publicPlanReadable && planDestinationRepository(join(config.root, "state")).outcome !== "off") {
+      console.error("rmd fix: public plan unreadable; no private fallback or repair");
+      return 1;
+    }
+    if (publicPlanReadable) {
+      const found = await fixCatalogTask(taskId, plan, { ...deps.taskLookup, stateDir: join(config.root, "state") });
+      if (found.outcome === "unreadable") {
+        log("fix.catalog.unreadable", { reason: found.reason });
+        console.error("rmd fix: task catalog unreadable; no repair");
+        return 1;
+      }
+      if (found.outcome === "found") {
+        plan = { tasks: [...plan.tasks, found.task], byId: new Map([...plan.byId, [taskId, found.task]]) };
+        pr.taskDeclaredFiles = found.task.files;
+      }
+    }
+  }
   const effects = host.buildSweepEffects({
     productionProgressJudge: true,
     owner: owner,

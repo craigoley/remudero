@@ -1,4 +1,5 @@
 import { isImprovementBoundProposal, isReviewedImprovementDraft, runImprovementAction, type ImprovementPlanReceipt } from "./lib/improvement-thread.js";
+import { findTaskInCatalogs, catalogTaskContract, type TaskLookupOptions } from "./lib/task-lookup.js";
 import { operatorReleaseContractChanged, operatorReleasePin, qualifyReleaseEvidence, readReleaseLedgerLines, releaseContractPins, type ReleaseEvidence } from "./lib/operator-release.js";
 import {
   buildSweepEffects as buildSweepEffectsFromModule,
@@ -826,7 +827,7 @@ import {
   type TaskFilesLandingResult,
 } from "./lib/feedback-landing.js";
 export { readStandingDecisions };
-import { resolvePlanDestination } from "./lib/plan-destination.js";
+import { resolvePlanDestination, planDestinationRepository } from "./lib/plan-destination.js";
 import {
   reconcileFeedbackLanding,
   type FeedbackReconcileRoot,
@@ -12006,7 +12007,11 @@ export async function resolveFixRungTaskContractAtHeadAsync(
   } catch {
     return undefined; // an unreadable HEAD is unreadable regardless of which read failed first
   }
-  return resolvePlanCriteriaAtHeadAsync(`Remudero-Task: ${taskId}`, repoDir, "plan/tasks.yaml", headSha);
+  const resolved = await resolvePlanCriteriaAtHeadAsync(`Remudero-Task: ${taskId}`, repoDir, "plan/tasks.yaml", headSha);
+  if (resolved.divergence || resolved.criteria.length > 0 || resolved.taskDeclaredFiles !== undefined) return resolved;
+  const found = await findTaskInCatalogs(taskId, { readPublic: () => undefined, stateDir: instanceStateDirIfConfigured() });
+  if (found.outcome === "unreadable") throw new Error(`task catalog unreadable: ${found.reason}`);
+  return found.outcome === "found" ? catalogTaskContract(found) : resolved;
 }
 
 /**
@@ -41721,6 +41726,7 @@ export function progressWatchdogCommand(
 }
 
 export interface ClaimVerbOpts {
+  taskLookup?: TaskLookupOptions;
   reserver?: DispatchClaimReserver;
   /** W1-T10925: builds the reserver for the resolved plan root (default {@link dispatchClaimReserverFor}). */
   reserverFor?: (repoDir: string) => DispatchClaimReserver;
@@ -41754,7 +41760,43 @@ export function plannedOnOriginMain(taskId: string, dir: string = repoRoot): boo
   return mono.status === 0 && new RegExp(`^\\s*-?\\s*id:\\s*"?${escaped}"?\\s*$`, "m").test(mono.stdout ?? "");
 }
 
-export function claimCommand(rest: string[], opts: ClaimVerbOpts = {}): number {
+async function claimCatalogPlanRoot(taskId: string, opts: ClaimVerbOpts): Promise<string | undefined> {
+  let savedState: { value: string | undefined } | undefined;
+  const stateDir = () => (savedState ??= { value: opts.stateDir ?? instanceStateDirIfConfigured() }).value;
+  const located = resolveVerbPlanRoot(taskId, {
+    cwdRoot: repoRoot, stateDir, holds: (root, id) => (opts.isPlanned ?? plannedOnOriginMain)(id, root),
+  });
+  if (located.ok) return located.root;
+  const destination = planDestinationRepository(stateDir());
+  if (destination.outcome !== "off") {
+    const publicRoot = resolveVerbPlanRoot(undefined, { cwdRoot: repoRoot, stateDir });
+    if (!publicRoot.ok) return undefined;
+    const publicContract = await resolvePlanCriteriaAtHeadAsync(`Remudero-Task: ${taskId}`, publicRoot.root, "plan/tasks.yaml", "origin/main");
+    if (publicContract.divergence) {
+      console.error("rmd claim: public plan unreadable — no private fallback");
+      return undefined;
+    }
+    if (publicContract.criteria.length > 0 || publicContract.taskDeclaredFiles !== undefined) return publicRoot.root;
+    const found = await findTaskInCatalogs(taskId, { ...opts.taskLookup, stateDir: stateDir(), readPublic: () => undefined });
+    if (found.outcome === "unreadable") {
+      console.error(`rmd claim: task catalog unreadable (${found.reason}) — no claim`);
+      return undefined;
+    }
+    if (found.outcome === "found") return publicRoot.root;
+  }
+  console.error(`rmd claim: ${taskId} is not in the plan on origin/main — refusing to claim an unplanned id (${located.error})`);
+  return undefined;
+}
+
+export async function claimCommandWithCatalogs(rest: string[], opts: ClaimVerbOpts = {}): Promise<number> {
+  const taskId = rest[0];
+  if (taskId === undefined || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(taskId) ||
+      unknownArgError("claim", rest.slice(1), [], ["--drop", "--renew"]) !== null) return claimCommand(rest, opts);
+  const root = await claimCatalogPlanRoot(taskId, opts);
+  return root === undefined ? 1 : claimCommand(rest, opts, root);
+}
+
+export function claimCommand(rest: string[], opts: ClaimVerbOpts = {}, preparedRoot?: string): number {
   const taskId = rest[0];
   const badArg = taskId === undefined || taskId.startsWith("-")
     ? "rmd claim: a task id is required"
@@ -41767,7 +41809,7 @@ export function claimCommand(rest: string[], opts: ClaimVerbOpts = {}): number {
     console.error(`rmd claim: '${taskId}' is not a task id`);
     return 2;
   }
-  const planRoot = claimPlanRoot(taskId, opts);
+  const planRoot = preparedRoot ?? claimPlanRoot(taskId, opts);
   if (planRoot === undefined) return 1;
   const reserver = opts.reserver ?? (opts.reserverFor ?? dispatchClaimReserverFor)(planRoot);
   const ref = dispatchClaimRef(taskId);
@@ -41850,7 +41892,7 @@ export async function claimHoldCommand(rest: string[], opts: ClaimHoldOpts = {})
     console.error(`rmd claim: '${taskId}' is not a task id, or --interval-ms is not a positive integer`);
     return 2;
   }
-  const planRoot = claimPlanRoot(taskId, opts);
+  const planRoot = await claimCatalogPlanRoot(taskId, opts);
   if (planRoot === undefined) return 1;
   const reserver = opts.reserver ?? (opts.reserverFor ?? dispatchClaimReserverFor)(planRoot);
   const held = takeOrAdoptClaim(taskId, reserver, opts.localHost ?? hostname());
@@ -43318,7 +43360,7 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
   ["live-edits", async (rest) => await liveEditsCommand(rest)],
   ["host-alert", async (rest) => hostAlertCommand(rest)],
   ["test-place", (rest) => testPlaceCommand(rest)],
-  ["claim", (rest) => rest.includes("--hold") ? claimHoldCommand(rest) : claimCommand(rest)],
+  ["claim", (rest) => rest.includes("--hold") ? claimHoldCommand(rest) : claimCommandWithCatalogs(rest)],
   ["impossible-canary", async (rest) => await impossibleCanaryCommand(rest, (input) => runImpossibleCanary(input))],
   ["benchmark-aa", async (rest) => rest[0] === "balanced" ? await codexBalancedTrialCommand(rest.slice(1), (request, stateDir) =>
     registerCodexBalancedTrial({ request, stateDir, readiness: (registration) =>

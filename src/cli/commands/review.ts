@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { findTaskInCatalogs, catalogTaskContract, type TaskLookupOptions } from "../../lib/task-lookup.js";
 import type { WorkerStreamEvent } from "../../lib/worker.js";
 import type { GhApiFetcher } from "../../lib/open-prs-rest.js";
 import { type WorkerStateSensor, type ReviewRunResult, type MaterializationErrorClass, type MaterializationFailure, type CensusChildResult } from "./run-task-verb.js";
@@ -1811,6 +1812,7 @@ export function reviewLedgerReasonFields(args: {
  * be a brand-new, never-invoked-under-test line this same gate would then flag).
  */
 export interface ReviewCommandDeps {
+  taskLookup?: TaskLookupOptions;
   disarm?: (prUrl: string) => DisarmOutcome | void;
   onPhase?: (phase: string) => void;
   planLintRetryHead?: string;
@@ -2281,6 +2283,7 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
   }
   let resolverDivergence: PlanCriteriaAtHeadDivergence | undefined;
   let ownTaskRecordMissing = false, headTaskResolved = false;
+  let publicTaskAbsent = false;
   // W1-T2846: a fleet PR can lose its trailer while retaining the task-bearing run branch.
   // Give the existing exact-trailer criteria resolver only the recovered identity it needs;
   // `reportBody` still carries the real PR body unchanged to the fallback and reviewer below.
@@ -2311,6 +2314,29 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
       const atMain = await resolvePlanCriteriaAtHeadAsync(body, subjectRepoDir, "plan/tasks.yaml", "origin/main")
         .then(recordMainSuccess, recordMainFailure);
       ownTaskRecordMissing = headLacksOwnTaskRecord(resolved, atMain);
+      publicTaskAbsent = atMain.divergence === undefined && atMain.criteria.length === 0 &&
+        atMain.taskDeclaredFiles === undefined && atMain.taskRisk === undefined && atMain.taskBudgetUsd === undefined;
+    }
+  }
+  if (taskId && publicTaskAbsent) {
+    const found = await findTaskInCatalogs(taskId, {
+      ...deps.taskLookup, stateDir: join(config.root, "state"), readPublic: () => undefined,
+    });
+    if (found.outcome === "unreadable") {
+      log("review.catalog.unreadable", { reason: found.reason });
+      console.error("rmd review: task catalog unreadable; no body fallback or review effect");
+      exit.as("task-metadata-unavailable");
+      return 2;
+    }
+    if (found.outcome === "found") {
+      const contract = catalogTaskContract(found);
+      criteria = contract.criteria;
+      taskDeclaredFiles = contract.taskDeclaredFiles;
+      taskRisk = contract.taskRisk;
+      taskBudgetUsd = contract.taskBudgetUsd;
+      taskNarrative = contract.taskNarrative ?? {};
+      source = contract.source ?? source;
+      headTaskResolved = true;
     }
   }
   if (criteria.length === 0) {
