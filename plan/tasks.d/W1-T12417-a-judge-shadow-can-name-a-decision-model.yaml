@@ -5,6 +5,7 @@
     - W1-T12187
     - W1-T12416
     - W1-T12414
+    - W1-T12420
   priority: 1.5
   type: implement
   verify: auto
@@ -18,6 +19,8 @@
     - W1-T11075
     - W1-T12416
     - W1-T12414
+    - W1-T12420
+    - W1-T12425
     - W1-T4672
     - W1-T10858
   files:
@@ -28,6 +31,7 @@
     - src/lib/refresh-value.ts
     - src/lib/quiet-worker-watchdog.ts
     - src/lib/typed-judgment.ts
+    - src/lib/decision-model.ts
     - src/lib/config-gardener.ts
     - src/lib/mounts.ts
     - .remudero/mounts.yaml
@@ -42,10 +46,12 @@
       proof: "grep: W1-T12417 criterion 2 in test/review/a-judge-shadow-can-name-a-decision-model.test.ts"
     - claim: "The same shadow serves every fixed-option judge in this order: risk, ci, fix-progress, verify-human, refresh-value, quiet-worker-watchdog, head-rehome, and each single-question typed-judgment spawn. Each role writes its rows under its own role name"
       proof: "grep: W1-T12417 criterion 3 in test/review/a-judge-shadow-can-name-a-decision-model.test.ts"
-    - claim: "An unavailable, refused, failed or abstaining candidate changes nothing for the caller and writes one row with the reason. A tuned threshold is read only for the model id it was stored with, and a role never runs another model under it"
+    - claim: "An unavailable, refused, failed or abstaining candidate changes nothing for the caller and writes one row with the reason. A tuned threshold is read only for the model id and model surface it was stored with, and a role never runs another model or surface under it"
       proof: "grep: W1-T12417 criterion 4 in test/review/a-judge-shadow-can-name-a-decision-model.test.ts"
     - claim: "The config gardener proposes switching a role's primary to its shadow candidate when that role and model clear the per-model bar of W1-T12414's scores, and proposes nothing below the bar. The proposal goes through the fleet's normal review and merge"
       proof: "grep: W1-T12417 criterion 5 in test/review/a-judge-shadow-can-name-a-decision-model.test.ts"
+    - claim: "When a judge's shadow asks a decision model, the request passes the judged head sha, and the pull request where there is one. The decision.answered row records both as head_sha and pr_url, and a shadow with no judged head writes neither"
+      proof: "grep: W1-T12417 criterion 6 in test/review/a-judge-shadow-can-name-a-decision-model.test.ts"
     - claim: "The sweep's judges call the shadow"
       proof: "grep: shadowJudgeCall( in src/lib/sweep.ts"
     - claim: "Each typed-judgment spawn calls the shadow"
@@ -61,12 +67,14 @@
   design: |
     Extend W1-T12187's `shadowJudgeCall` so a role's mount row may name a candidate (`shadow: <decision model name>` or `shadow: <cash deployment>`). For a decision model the shadow builds the role's question set (its options as one choice question, plus any yes/no the role already asks) and calls `askDecisionModel`. For a cash deployment it keeps W1-T12187's prompt path.
     Wire the roles in the order of criterion 3. ci and fix-progress follow W1-T11075's rows. Each typed-judgment spawn passes its question and options, so every single-question spawn gains the shadow without its own change.
-    AUTOMATIC SWITCH: W1-T12187's config gardener reads W1-T12414's per-model figures. When a role and model clear the bar, it proposes one edit that makes the candidate the role's primary (with its threshold stored beside the model id). The canary rolls it back as for a mount today. No operator step is needed for the gain to arrive; the fleet's review and merge still apply.
+    AUTOMATIC SWITCH: W1-T12187's config gardener reads W1-T12414's per-model figures. When a role and model clear the bar, it proposes one edit that makes the candidate the role's primary (with its threshold stored beside the model id and model surface). The canary rolls it back as for a mount today. No operator step is needed for the gain to arrive; the fleet's review and merge still apply.
+    THRESHOLD KEY: W1-T12420 makes a model's surface part of its key. Every stored threshold names its model id and its model surface (`decisions` for a decision model, `text` for a cash deployment that generates its answer), and is read only for that pair. A gpt-6-luna decisions threshold never serves a gpt-6-luna text shadow.
+    JUDGED HEAD: when a judge's shadow asks a decision model, it passes the judged head sha (and the pull request, where there is one) to `askDecisionModel`, and the decision.answered row records them as `head_sha` and `pr_url`, so W1-T12425's outcome rows join decision-model distributions by head sha. This task only records the head; the outcome join is W1-T12425's.
     The bar starts as W1-T12187's (200 paired calls in 14 days, 98% agreement, at most 2% unusable) plus a Brier ceiling the builder sets from W1-T12414's first figures and states in the PR.
     Fallback: an unavailable candidate (missing entry, unset key, absent deployment, budget refusal) leaves today's judge as the only answer.
     Capacity: decision-1 rate-limited at capacity 1 after two calls on 2026-11-12. The shadow samples within the deployment's reported limit and records a 429 as unavailable.
     NOT IN SCOPE: the ruling, machine-filing and flight judges; the code review triage (W1-T12419).
   falsifier: |
-    Return the shadow's answer to the caller and criterion 2 must fail. Skip a listed role and criterion 3 must fail. Read a threshold stored for another model and criterion 4 must fail. Propose a switch below the bar and criterion 5 must fail. Restore and require all to pass.
+    Return the shadow's answer to the caller and criterion 2 must fail. Skip a listed role and criterion 3 must fail. Read a threshold stored for another model, or for the other surface of the same model id, and criterion 4 must fail. Propose a switch below the bar and criterion 5 must fail. Restore and require all to pass.
   note: |
     Ids reserved for run-unfiled-1794493022000 with ~/rmd-work/bin/reserve-id.sh. Build after W1-T12187, W1-T12416 and W1-T12414 merge. The fleet builds it.

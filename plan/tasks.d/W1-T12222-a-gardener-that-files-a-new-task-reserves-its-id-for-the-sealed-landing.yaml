@@ -19,7 +19,7 @@
     - src/lib/feedback-landing.ts
     - src/run-task.ts
     - test/gardeners/a-gardener-that-files-a-new-task-reserves-its-id-for-the-sealed-landing.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "A gardener checkout that declares it files only task files gives the branch of the sealed landing as the branch for the id reservation"

@@ -16,7 +16,7 @@
   files:
     - scripts/list-rule-suites.mjs
     - test/ci/rule-suite-children-report-their-start-to-exit-time.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: Under --run each rule-suite child prints one timing line naming the suite and its start-to-exit milliseconds

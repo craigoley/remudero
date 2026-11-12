@@ -21,7 +21,7 @@
     - deploy/host-recycle-lock.sh
     - deploy/host-update.sh
     - test/deploy/a-recycle-releases-the-host-lock-while-it-waits-for-workers.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "With a fake `docker`, a recycle of one instance does not hold the host recycle lock while it waits for its workers. A recycle of a second instance takes the lock in that time"

@@ -1,0 +1,70 @@
+- id: W1-T12420
+  title: "A model's surface is part of its key, so a Decisions answer never pools with generated text from the same model id"
+  repo: remudero
+  depends_on:
+    - W1-T12416
+    - W1-T12414
+  priority: 1.45
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # changes the key of the deployment absence mark that cash selection reads, and the key of every typed-answer figure
+  band_meaning: span
+  origin: operator-session#field-trials-new-models-2026-11-12
+  plan_refs:
+    - W1-T12413
+    - W1-T12414
+    - W1-T12416
+    - W1-T12417
+    - W1-T10856
+    - W1-T100001
+  files:
+    - src/lib/worker-provider.ts
+    - src/lib/decision-model.ts
+    - src/lib/typed-answer-scores.ts
+    - src/lib/judge-calibration.ts
+    - docs/model-routing.md
+    - test/review/a-model-surface-is-part-of-its-key.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "A 404 marks a deployment absent only on the model surface that got it. After a decisions request to the deployment gpt-6-luna answers 404, openWeightDeploymentReady still reads the worker deployment gpt-6-luna as ready"
+      proof: "grep: W1-T12420 criterion 1 in test/review/a-model-surface-is-part-of-its-key.test.ts"
+    - claim: "The reverse also holds: after a worker request to gpt-6-luna answers 404, a decisions request to gpt-6-luna is still sent, and a second decisions 404 inside OPENWEIGHT_ABSENT_TTL_MS sends nothing"
+      proof: "grep: W1-T12420 criterion 2 in test/review/a-model-surface-is-part-of-its-key.test.ts"
+    - claim: "Every caller that names no surface reads and writes the text surface, so each worker path marks, reads and clears absence exactly as it does today"
+      proof: "grep: W1-T12420 criterion 3 in test/review/a-model-surface-is-part-of-its-key.test.ts"
+    - claim: "Each decision.answered row carries model_surface decisions, and each shadow row that the judge calibration reader maps to a typed answer carries model_surface text"
+      proof: "grep: W1-T12420 criterion 4 in test/review/a-model-surface-is-part-of-its-key.test.ts"
+    - claim: "The typed-answer scores key every figure by role, model id and model surface. A gpt-6-luna Decisions distribution and a gpt-6-luna generated single answer in one role give two figures, never one"
+      proof: "grep: W1-T12420 criterion 5 in test/review/a-model-surface-is-part-of-its-key.test.ts"
+    - claim: "A decision.answered row with served model gpt-6-luna leaves the field-trials snapshot's adoption, guardrail and served-cohort figures for gpt-6-luna the same"
+      proof: "grep: W1-T12420 criterion 6 in test/review/a-model-surface-is-part-of-its-key.test.ts"
+    - claim: "The absence mark is keyed through one function"
+      proof: "grep: openWeightAbsenceKey( in src/lib/worker-provider.ts"
+    - claim: "The scorer keys its figures through one function"
+      proof: "grep: typedAnswerKey( in src/lib/typed-answer-scores.ts"
+  rationale: |
+    WHY: the operator asked on 2026-11-12 that field trials and benchmarks take in the new decision models. One model id now has two surfaces. The text surface is a Responses or chat reply with output text. The decisions surface is a reply that gives a probability for each declared option, with no output text, at a different price. If rmd keys state or figures by model id alone, the two surfaces mix.
+    OBSERVED 2026-11-12 about 15:40Z by the operator session (handoff-decision-models.md, probe 2): the operator deployed gpt-6-luna on the East US resource under the deployment name gpt-6-luna. A Decisions request answered 200 and its reply named model "gpt-6-luna". The default eastus2 resource also has a deployment named gpt-6-luna (1,000K tokens per minute), which serves worker Responses traffic. So the deployment name and the served model are the same string on both surfaces.
+    READ 2026-11-12 in the source at origin/main 920669542:
+    - src/lib/worker-provider.ts:4015 `openWeightAbsentUntil` is keyed by the deployment name alone. :4018 `markOpenWeightDeploymentAbsent` sets it and :4033-4039 `openWeightDeploymentReady` reads it, and cash selection passes over a deployment that is not ready. The mark lasts 30 minutes (:4014).
+    - :1021 the learned per-minute limit is already "Keyed by resolved endpoint AND deployment id" (:1043 `cashCapacityKey`). That key is right as it is: both surfaces of one deployment share its quota.
+    - W1-T12413 (queued, filed in PR #18175) makes `sendCashRequest` mark a deployment absent on a 404 and refuse a deployment known absent. W1-T12416 sends each decision request through it, with the deployment gpt-6-luna on the East US endpoint. So a 404 from the East US Decisions deployment would take the eastus2 worker deployment out of the economy and balanced cash rows (.remudero/mounts.yaml:285-287 and :295-297) for 30 minutes, and a worker 404 would stop decision requests.
+    - W1-T12414 criterion 6 keys every figure "by role and model id". W1-T12417 lets a role name a decision model or "any configured cash deployment" as its shadow. A role can therefore hold gpt-6-luna Decisions answers and gpt-6-luna generated answers, and they would pool.
+    - src/lib/field-trials-flow.ts:72 FLOW_STEPS and :74 GUARDRAIL_STEPS do not hold decision.answered, so no Decisions row enters the snapshot today. src/lib/field-trials-cohorts.ts:113-116 keys a cohort by model with no surface. Criterion 6 keeps that true; W1-T12423 gives judge rows their own family, keyed by surface.
+    - NAME CLASH: src/lib/shadow-judge.ts:43 already writes a field named `surface` that means the judge role (review, risk, verify-human). This task names the new field `model_surface` so the two never mix.
+  design: |
+    1. In src/lib/worker-provider.ts add `export type ModelSurface = "text" | "decisions"` and `openWeightAbsenceKey(deployment, surface)`. Key `openWeightAbsentUntil` by it. `markOpenWeightDeploymentAbsent`, `openWeightDeploymentKnownAbsent` and `openWeightDeploymentReady` take an optional surface whose default is `text`, so every current caller keeps its behaviour (criterion 3). `sendCashRequest` takes an optional `surface` and passes it to the mark and the check.
+    2. In src/lib/decision-model.ts (W1-T12416) pass `surface: "decisions"` to `sendCashRequest`, and add `model_surface: "decisions"` to each decision.answered row.
+    3. In src/lib/typed-answer-scores.ts (W1-T12414) give each recorded answer a `modelSurface`, and key every figure with `typedAnswerKey(role, model, modelSurface)`. A decision.answered row with no `model_surface` field reads as decisions by its step. In src/lib/judge-calibration.ts the reader maps each shadow row with `modelSurface: "text"`.
+    4. Add a short section "Model surfaces" to docs/model-routing.md: the two surfaces, the rule that state and figures are keyed by model id and surface, and the rule that calibration and any stored threshold belong to one model on one surface.
+    NOT IN SCOPE: the per-minute limit key (already right); the field-trials judge family (W1-T12423); the bake-off key (W1-T12422); any change to which model serves a request.
+  falsifier: |
+    Key the absence mark by the deployment name alone and criteria 1 and 2 must fail. Default a caller with no surface to decisions and criterion 3 must fail. Pool two surfaces of one model in the scorer and criterion 5 must fail. Add decision.answered to FLOW_STEPS and criterion 6 must fail. Restore and require all to pass.
+  note: |
+    Ids reserved for run-unfiled-1794497247000 with ~/rmd-work/bin/reserve-id.sh. Filed with W1-T12421, W1-T12422, W1-T12423 and W1-T12424.
+    This is item FT1 of the operator backlog section "Field trials and benchmarks: updates for the new models". The backlog item DOC is split over this task (docs/model-routing.md) and W1-T12423 (docs/research/model-evidence-program.md).
+    W1-T12417 stores each threshold with its model id. It should build after this task so the threshold also names the surface; the operator may add W1-T12420 to its depends_on.
+    The test folder came from `rmd test-place` on a draft with low confidence (review, runner-up models-routing). The builder runs it again on the real test and moves the path if it changes.

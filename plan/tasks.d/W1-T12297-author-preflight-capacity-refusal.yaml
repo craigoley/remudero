@@ -14,7 +14,7 @@
     - scripts/preflight-author.mjs
     - deploy/mac/JANITOR.md
     - test/ci/author-preflight-capacity-refusal.test.ts
-  status: queued
+  status: merged
   rationale: |
     The Mac author preflight refuses on capacity on two paths, and neither tells the
     operator how short the disk is or what to do next.

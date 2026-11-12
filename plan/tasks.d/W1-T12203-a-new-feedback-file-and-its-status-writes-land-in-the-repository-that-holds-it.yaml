@@ -19,7 +19,7 @@
     - src/lib/feedback-landing.ts
     - src/cli/commands/daemon.ts
     - test/inbox/a-new-feedback-file-and-its-status-writes-land-in-the-repository-that-holds-it.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "With `feedback` in the kinds of the host file, `captureFeedback` lands a new feedback file in the destination repository"
