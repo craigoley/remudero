@@ -51,6 +51,7 @@ import {
   planTreeIsBehindMain as planTreeIsBehindMainFromModule,
   reviewCommand as reviewCommandFromModule,
   REVIEW_EXIT_CAUSE_FLAG,
+  reviewEndedAs,
   whileWorkerRunLive as whileWorkerRunLiveFromModule,
   type ReviewCommandHost,
   type ReviewPostedRecheck,
@@ -2284,12 +2285,14 @@ export function buildReviewerCodeFreshnessGate(
           const childArgs = [...rest, ...reviewOptionFlags(reviewDeps), JUDGE_AT_OWN_START_FLAG];
           return reviewFromFreshTree(prArg, childArgs, freshness, (why) => { failure = why; }, (choice) => { entry = choice; }, (ended) => { exit = ended; }).then((code) => {
             if (code !== undefined) {
+              // W1-T12226 — the class is written by the gate from the code and the cause; only a defect carries `failure`.
+              const ended_as = reviewEndedAs(code, exit.cause);
               const why = code === 0 ? {} : {
-                failure: failure ?? "no failure reported", exit_cause: exit.cause,
+                ...(ended_as === "defect" ? { failure: failure ?? "no failure reported" } : {}), exit_cause: exit.cause,
                 ...(exit.signal === undefined ? {} : { exit_signal: exit.signal }),
                 ...(exit.errorClass === undefined ? {} : { exit_error_class: exit.errorClass }),
               };
-              log("review.ran_from_fresh_tree", { ...stale, exit_code: code, entry_kind: entry.kind, entry_reason: entry.reason, ...why });
+              log("review.ran_from_fresh_tree", { ...stale, exit_code: code, ended_as, entry_kind: entry.kind, entry_reason: entry.reason, ...why });
               return code;
             }
             // COULD NOT RUN — fall through to the original skip rather than judging with stale

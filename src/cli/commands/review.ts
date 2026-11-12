@@ -120,6 +120,19 @@ export const REVIEW_EXIT_CAUSES = [
   ...REVIEW_EXIT_STEPS.map((step) => `threw-in-${step}` as const),
 ] as const;
 export type ReviewExitCause = (typeof REVIEW_EXIT_CAUSES)[number];
+/** W1-T12226 — how a fresh-tree review ended: `verdict` (the child judged and the verdict is terminal), `no_verdict`
+ *  (the review correctly had nothing to post), `defect` (every other exit, including a name this code does not know). */
+export type ReviewEndedAs = "verdict" | "no_verdict" | "defect";
+const VERDICT_EXIT_CAUSES: readonly string[] = ["verdict-failure", "verdict-pending", "verdict-not-success"];
+const NO_VERDICT_EXIT_CAUSES: readonly string[] = ["closed-before-review"];
+
+/** Class an exit from its code and the name the child gave. Code 0 is a posted verdict; a non-zero code is classed by name, never by code alone. */
+export function reviewEndedAs(code: number, cause: string): ReviewEndedAs {
+  if (code === 0) return "verdict";
+  if (VERDICT_EXIT_CAUSES.includes(cause)) return "verdict";
+  return NO_VERDICT_EXIT_CAUSES.includes(cause) ? "no_verdict" : "defect";
+}
+
 type ReviewExit = { step: (typeof REVIEW_EXIT_STEPS)[number]; as: (cause: ReviewExitCause) => void };
 
 function writeReviewExitCause(rest: string[], cause: ReviewExitCause, error?: unknown): void {
