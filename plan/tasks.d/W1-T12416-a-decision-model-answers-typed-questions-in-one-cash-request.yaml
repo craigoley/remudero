@@ -1,0 +1,81 @@
+- id: W1-T12416
+  title: "A decision model answers typed questions about one input in one cash request, shadow only"
+  repo: remudero
+  depends_on:
+    - W1-T12413
+  priority: 1.3
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # a new paid request type, a new config map and a new ledger row; no gate, route or judge reads it
+  band_meaning: span
+  origin: operator-session#decision-models-2026-11-12
+  plan_refs:
+    - W1-T10913
+    - W1-T12413
+    - W1-T12187
+    - W1-T4672
+    - W1-T10837
+    - W1-T10858
+  files:
+    - src/lib/decision-model.ts
+    - src/lib/worker-provider.ts
+    - src/lib/mounts.ts
+    - .remudero/mounts.yaml
+    - src/lib/ledger-steps.ts
+    - src/lib/producer-identity.ts
+    - src/run-task.ts
+    - docs/cli-reference.md
+    - test/review/a-decision-model-answers-typed-questions-in-one-cash-request.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "A question set is provider-neutral: yes/no, a choice of 2 to 255 typed options, or a score of 2 to 10 ordered levels, each with a name. A set outside those bounds, or with a duplicate name or option, is refused before any reservation"
+      proof: "grep: W1-T12416 criterion 1 in test/review/a-decision-model-answers-typed-questions-in-one-cash-request.test.ts"
+    - claim: "The OpenAI-shape backend sends the questions as an array and reads each answer in order: a yes/no probability, a choice distribution, a score distribution over its levels, or a native refusal. Typed option values keep their type"
+      proof: "grep: W1-T12416 criterion 2 in test/review/a-decision-model-answers-typed-questions-in-one-cash-request.test.ts"
+    - claim: "The Microsoft-shape backend sends the questions as an object keyed by name with a declared cannot-tell option, and reads the answers by name: the yes/no probability from its noul field, a choice from its probability map, and a score from its legend and index-keyed probabilities. A cannot-tell answer is an abstention"
+      proof: "grep: W1-T12416 criterion 3 in test/review/a-decision-model-answers-typed-questions-in-one-cash-request.test.ts"
+    - claim: "Each answer is a distribution over the declared options whose sum is inside TYPED_JUDGMENT_SUM_TOLERANCE, with its confidence, or an abstention, or a rejection with a reason. An out-of-set or badly summed answer is rejected and never coerced"
+      proof: "grep: W1-T12416 criterion 4 in test/review/a-decision-model-answers-typed-questions-in-one-cash-request.test.ts"
+    - claim: "A candidate is declared in the decision_models section of .remudero/mounts.yaml with its deployment name, request shape, price row and endpoint source. The endpoint source is the default cash endpoint and key, or the endpoint and key env of a named existing cashDeploymentEndpoints entry. The worker's own entry for the same deployment name is never read or changed"
+      proof: "grep: W1-T12416 criterion 5 in test/review/a-decision-model-answers-typed-questions-in-one-cash-request.test.ts"
+    - claim: "A candidate resolves with no new config keys: a config that has only today's keys resolves both declared candidates. A candidate whose named entry is missing, or whose key env is unset, is unavailable with a named reason and sends nothing"
+      proof: "grep: W1-T12416 criterion 9 in test/review/a-decision-model-answers-typed-questions-in-one-cash-request.test.ts"
+    - claim: "Each request reserves on its input size plus the small declared output margin, through sendCashRequest against the normal cap, and settles from the reply's usage at the candidate's own price row, which names its readAt and its source"
+      proof: "grep: W1-T12416 criterion 6 in test/review/a-decision-model-answers-typed-questions-in-one-cash-request.test.ts"
+    - claim: "Each request writes one decision.answered row: role, input digest, candidate, deployment, served model, latency, reserved and settled dollars, usage, question count, and each question's distribution, abstention or rejection. A refused or failed request writes the same row with its reason"
+      proof: "grep: W1-T12416 criterion 7 in test/review/a-decision-model-answers-typed-questions-in-one-cash-request.test.ts"
+    - claim: "rmd decisions probe sends one question set about one input to a named candidate and prints the row it wrote. Nothing else calls a decision model"
+      proof: "grep: W1-T12416 criterion 8 in test/review/a-decision-model-answers-typed-questions-in-one-cash-request.test.ts"
+    - claim: "The probe verb calls the decision request"
+      proof: "grep: askDecisionModel( in src/run-task.ts"
+  rationale: |
+    OVERLAP: W1-T10913 (queued) also edits src/run-task.ts and docs/cli-reference.md, for the field-trials flags only. This task adds a different verb; the two touch different entries of the command registry.
+    WHY: rmd's judges answer fixed-option questions, and each starts a full worker today. A decision model answers many fixed-option questions about one input in one request, with probabilities and no output text. Operator decision 2026-11-12: target both candidates, OpenAI-shape Decisions first and Microsoft-Decision-1 second, shadow only.
+    OBSERVED 2026-11-12 about 15:40Z by the operator session from inside remudero-daemon, 3 calls each:
+    - OpenAI-shape Decisions on the East US resource (operator deployed gpt-6-luna there, GlobalStandard, capacity 100): POST <eus resource>/openai/v1/decisions with api-key RMD_CASH_EASTUS_API_KEY → 200 three times, 446, 385 and 332 ms. The reply: `answers` is an array in question order of {type: predicate, probability}, {type: choice, choice, probabilities: [{value, probability}], confidence} and {type: score, score, probabilities: [{value: int, label, probability}], confidence}; `usage` is {input_tokens: 387, input_tokens_details: {cached_tokens: 0, cache_write_tokens: 0}, output_tokens: 0, total_tokens: 387}. For an easy 3-question case every probability was 1.0 or 0.0, so raw confidence is not calibrated until W1-T12414 measures it.
+    - Microsoft-Decision-1 on the default resource (operator deployed it as `decision-1`, GlobalStandard, capacity 1): POST <eastus2 resource>/providers/microsoft/v1/systemone with api-key RMD_OPENWEIGHT_API_KEY, body {model, state, questions: {<name>: {type: noul|choice|score, instructions, criteria}}} → 200, 200, then 429 RateLimitReached. 4,996 ms cold and 232 ms warm. The reply: `answers` is an object keyed by name: {type: noul, noul: 0.9964}, {type: choice, choice, confidence, probabilities: {high: 0.0759, low: 0.9241}}, {type: score, score, confidence, legend: {"0": "tiny", ...}, probabilities: {"0": 0.931, ...}}; usage {input_tokens: 101, output_tokens: 3}; served model "microsoft-decision-1".
+    - The earlier probe the same day on the default resource answered 400 "The requested operation is unsupported" for /openai/v1/decisions (East US 2 is excluded).
+    READ 2026-11-12 on the vendors' pages by the operator session (handoff phase 2): OpenAI Decisions takes 1 to 400 questions, choices of 2 to 255 and score levels of 2 to 10, with a per-question refusal; GA; price $0.10 per 1M input tokens and no output charge; cached reads $0.01 and cache writes $0.125 per 1M. Azure documents the URL with no api-version and publishes no Decisions price; the gpt-6-luna Global input row is $0.10. Microsoft-Decision-1: no refusal type (the caller declares a cannot-tell option), 32,768 input tokens, text only, $0.042 per 1M input tokens with output listed as N/A, Preview, inference deprecation 2027-02-04.
+    READ 2026-11-12 in the source at origin/main f93618eab:
+    - src/lib/config-schema.ts:820 `cashDeploymentTarget` keys endpoints by deployment name. The daemon config's existing `gpt-6-luna` entry routes worker Responses traffic to eastus2. Remapping it to East US for Decisions would move worker traffic. The daemon config already maps gpt-6.1-terra to the East US resource with RMD_CASH_EASTUS_API_KEY (handoff, probe 1), so a repo row can name that entry instead.
+    - src/lib/typed-judgment.ts:42 TYPED_JUDGMENT_SUM_TOLERANCE (0.01) and its reject-never-coerce parser (:89) are the contract for one answer.
+    - W1-T12413 adds `sendCashRequest`, the budgeted single request this task sends through.
+  design: |
+    THE OPERATOR WANTS NO MANUAL STEP (2026-11-12). Every candidate is declared in the repo and reuses config the daemon already has. No hostname goes in the repo.
+    1. Add a `decision_models` section to .remudero/mounts.yaml, parsed by src/lib/mounts.ts. One row per candidate, each on one line: name, deployment name, shape (`openai-decisions` or `microsoft-systemone`), price row (input and output dollars per 1M tokens, readAt, source), and endpoint source. The endpoint source is `cash-default` (the default cash endpoint and DEFAULT_CASH_KEY_ENV) or `cash-entry: <key>` (the endpoint and keyEnv of the existing cashDeploymentEndpoints entry with that key). The two rows of this task: the East US Decisions deployment with `cash-entry: gpt-6.1-terra` (that entry already points at the East US resource and RMD_CASH_EASTUS_API_KEY), and `decision-1` with `cash-default` (the default eastus2 resource and RMD_OPENWEIGHT_API_KEY). A missing entry or an unset key env makes the candidate unavailable with a named reason; the caller falls back to today's judge.
+    2. The worker's cashDeploymentEndpoints entry keyed by the same deployment name routes worker Responses traffic to eastus2. A decision request never reads it and never changes it.
+    3. Let `sendCashRequest` take an explicit target {endpoint, key} and an explicit price row in place of `cashDeploymentTarget` and `openWeightPriceFor`. Its other steps stay the same.
+    4. Add src/lib/decision-model.ts with `askDecisionModel(config, {role, candidate, input, questions})`. It checks the question set (criterion 1), builds the body for the candidate's shape, reserves on input size plus a declared output margin of 64 tokens, sends one request, parses the answers into the neutral form (criteria 2 to 4) and writes one `decision.answered` row (declared in src/lib/ledger-steps.ts and src/lib/producer-identity.ts). One input per request; never two inputs in one request.
+    5. Price rows, each with readAt 2026-11-12 and its source: OpenAI-shape Decisions $0.10 per 1M input and $0 output (OpenAI Decisions guide; Azure publishes no Decisions price, so this is the Global input rate); Microsoft-Decision-1 $0.042 per 1M input (Azure pricing page). The Microsoft reply carries output tokens and the page lists output as N/A, so that row prices output tokens at the input rate until W1-T10858 reconciles an invoice. The row says so.
+    6. Add `rmd decisions probe --candidate <name> --input-file <file> --questions-file <file> [--role <role>]` to src/run-task.ts and docs/cli-reference.md. It replaces the hand probes.
+    The only operator step left is capacity: decision-1 at capacity 1 rate-limited after two calls, so it needs more before shadow traffic (W1-T12417 notes it).
+    NOT IN SCOPE: any judge or shadow calling it (W1-T12417 and W1-T12419), any gate or route reading the row, scoring (W1-T12414), and any Gemini or self-hosted backend.
+  falsifier: |
+    Coerce an out-of-set answer and criterion 4 must fail. Read the worker's entry for the decision deployment and criterion 5 must fail. Require a new config key and criterion 9 must fail. Reserve with the worker output ceiling and criterion 6 must fail. Map a cannot-tell answer to an option and criterion 3 must fail. Restore and require all to pass.
+  note: |
+    Ids reserved for run-unfiled-1794493022000 with ~/rmd-work/bin/reserve-id.sh. Filed with W1-T12413, W1-T12414, W1-T12415, W1-T12417, W1-T12418 and W1-T12419.
+    Considered and deferred, 2026-11-12: Gemini Decision-1 (a v1beta API on Google's own endpoint, not on Azure; it needs a Gemini key in the daemon env and a new allowed host; free-tier prompts are used to improve Google's products) and Strands Decider (open weights that need self-hosting, experimental, model-card licences unread). Neither is filed or built.
+    Treat the Microsoft candidate as short-lived: its inference deprecation date is 2027-02-04.
