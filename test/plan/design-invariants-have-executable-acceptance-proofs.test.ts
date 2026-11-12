@@ -5,19 +5,15 @@
  * without preserving it. `invariantSlugViolations` now demands, for each new/changed implementation task,
  * either `NO-INVARIANTS: <reason>` or one `INVARIANT <slug>:` line per guarantee, each slug mapped to exactly
  * one `invariant:<slug>` acceptance claim with a distinct non-empty proof. The pure helper is driven directly;
- * the real `lintPlanCommand --base` pass is driven over a real git repo to prove the changed-task scope.
+ * test/lint-plan-fast-scopes-to-the-merge-base.test.ts drives the real changed-task pass over a git repo.
  */
 import assert from "node:assert/strict";
-import { mkdirSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
 import { test } from "node:test";
 
 import {
   INVARIANT_CLAIM_RE, INVARIANT_DECL_RE, NO_INVARIANTS_RE, invariantSlugViolations, lintTask,
 } from "#src/lib/task-linter.js";
 import type { Task } from "#src/lib/plan.js";
-import { lintPlanCommand } from "#src/run-task.js";
-import { gitRepo, type GitRepo } from "#test/helpers/git-repo.js";
 
 const ON = { requireDesignInvariantDeclaration: true };
 
@@ -102,64 +98,6 @@ test("unit test: the rule is silent outside the changed-task pass and for non-im
   assert.deepEqual(invariantSlugViolations(task("just prose", [], "research" as Task["type"]), ON), []);
   assert.ok(!lintTask(bare, {}).violations.some((v) => v.check === "design-invariant-proof"));
   assert.ok(lintTask(bare, ON).violations.some((v) => v.check === "design-invariant-proof" && v.severity === "block"));
-});
-
-// ---- the real changed-task pass over a real repo ------------------------------------------------
-
-const LINT_DEPS = {
-  offline: true,
-  loadConfig: (() => ({ root: "/synthetic" })) as never,
-  resolveOwnerRepo: (() => ({ owner: "o", repo: "r" })) as never,
-  ghGateway: (() => ({})) as never,
-  projectPlan: ((plan: { tasks: { id: string }[] }) =>
-    new Map(plan.tasks.map((t) => [t.id, { merged: false }]))) as never,
-};
-
-const record = (id: string, note: string, design?: string): string =>
-  [
-    `- id: ${id}`, `  title: "invariant pass fixture ${id}"`, "  repo: remudero", "  depends_on: []",
-    "  type: implement", "  verify: human", "  risk: high", "  status: queued", '  origin: "W1-T11746 test fixture"',
-    `  note: "${note}"`,
-    ...(design === undefined ? [] : [`  design: ${JSON.stringify(design)}`]),
-    "  acceptance:",
-    '    - claim: "invariant:keep-a — a stays"', '      proof: "unit test: test/w1-t11746-fixture.test.ts"',
-    "",
-  ].join("\n");
-
-function commitPlan(repo: GitRepo, records: string[], message: string): void {
-  writeFileSync(join(repo.dir, "plan", "tasks.yaml"), records.join(""), "utf8");
-  repo.git("add", "plan/tasks.yaml");
-  repo.git("commit", "-q", "-m", message);
-}
-
-async function lint(repo: GitRepo): Promise<{ code: number; out: string[] }> {
-  const out: string[] = [];
-  const orig = { error: console.error, warn: console.warn, log: console.log };
-  console.error = console.warn = console.log = (...a: unknown[]) => void out.push(a.map(String).join(" "));
-  try {
-    const code = await lintPlanCommand(["--base", "main"], { ...LINT_DEPS, repoRoot: repo.dir } as never);
-    return { code, out };
-  } finally {
-    Object.assign(console, orig);
-  }
-}
-
-test("unit test: the changed-task lint refuses an unmapped design and leaves an unchanged historical task valid", async () => {
-  const repo = gitRepo({ kind: "w1-t11746" });
-  mkdirSync(join(repo.dir, "plan"));
-  // The historical task has no design at all and carries a dangling invariant claim: it must stay untouched.
-  commitPlan(repo, [record("ZZ-Old", "old"), record("ZZ-Edit", "before")], "base");
-  repo.git("checkout", "-q", "-b", "work");
-  commitPlan(repo, [record("ZZ-Old", "old"), record("ZZ-Edit", "after")], "edit one record");
-  const refused = await lint(repo);
-  assert.equal(refused.code, 1, refused.out.join("\n"));
-  assert.ok(refused.out.some((l) => l.startsWith("✗ ZZ-Edit:")), refused.out.join("\n"));
-  assert.match(refused.out.join("\n"), /\[design-invariant-proof\] task ZZ-Edit: design declares neither/);
-  assert.ok(!refused.out.some((l) => l.includes("ZZ-Old")), `unchanged history must not be named:\n${refused.out.join("\n")}`);
-
-  commitPlan(repo, [record("ZZ-Old", "old"), record("ZZ-Edit", "after", "INVARIANT keep-a: a stays")], "declare it");
-  const accepted = await lint(repo);
-  assert.equal(accepted.code, 0, accepted.out.join("\n"));
 });
 
 test("unit test: the declaration grammars accept the structured forms and reject prose and placeholders", () => {
