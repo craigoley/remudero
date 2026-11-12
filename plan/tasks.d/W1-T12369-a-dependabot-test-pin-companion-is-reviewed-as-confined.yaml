@@ -15,7 +15,7 @@
     - src/lib/dep-review.ts
     - test/dep-review.test.ts
     - test/a-dependabot-test-pin-companion-is-reviewed-as-confined.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: A bump shaped like #17928, whose test file changes only the action SHA pin the workflow bump changes, arms, has no offending file, and names the accepted file and its pin

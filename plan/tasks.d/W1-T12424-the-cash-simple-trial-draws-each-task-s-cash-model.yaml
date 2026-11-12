@@ -1,0 +1,59 @@
+- id: W1-T12424
+  title: "The cash-simple trial draws each task's cash model from the reconciled open-weight deployments, and reports merges per model"
+  repo: remudero
+  depends_on:
+    - W1-T10858
+  priority: 2.2
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # moves some simple implement work from gpt-oss-120b to other paid deployments inside the trial's existing budget share
+  band_meaning: span
+  origin: operator-session#field-trials-new-models-2026-11-12
+  plan_refs:
+    - W1-T10858
+    - W1-T10857
+    - W1-T10855
+    - W1-T10842
+    - W1-T12142
+    - W1-T3614
+  files:
+    - src/lib/cash-trial.ts
+    - src/cli/commands/run-task-verb.ts
+    - test/routing/the-cash-simple-trial-draws-each-task-s-cash-model.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "The cash arm's models are the policy's models plus each ready open-weight deployment whose newest cash.invoice.reconciled verdict is reconciled and whose newest bake-off row ran with tools. A deployment with no verdict, or a diverged or unreconcilable one, is not an arm"
+      proof: "grep: W1-T12424 criterion 1 in test/routing/the-cash-simple-trial-draws-each-task-s-cash-model.test.ts"
+    - claim: "A cash-arm task draws one model by a stable hash of the task id, so every retry of the task gets the same model. The spawn gets that one model and no fallback to another arm"
+      proof: "grep: W1-T12424 criterion 2 in test/routing/the-cash-simple-trial-draws-each-task-s-cash-model.test.ts"
+    - claim: "The trial summary gives, for each cash model, its assignments, PRs, merges and settled dollars beside the control arm. An attempt served by another model counts as a crossover for its drawn model"
+      proof: "grep: W1-T12424 criterion 3 in test/routing/the-cash-simple-trial-draws-each-task-s-cash-model.test.ts"
+    - claim: "The stop rule applies to each cash model alone. A model whose PR rate falls below minRelativeSuccess of the control after minSample tasks leaves the draw, and the other models and the control arm go on"
+      proof: "grep: W1-T12424 criterion 4 in test/routing/the-cash-simple-trial-draws-each-task-s-cash-model.test.ts"
+    - claim: "The trial's budget share, eligible population and 50 percent cash share are the same as today. With no reconciled open-weight deployment, every cash-arm task runs on gpt-oss-120b as today"
+      proof: "grep: W1-T12424 criterion 5 in test/routing/the-cash-simple-trial-draws-each-task-s-cash-model.test.ts"
+    - claim: "The implement spawn uses the drawn model"
+      proof: "grep: cashTrialModelFor( in src/cli/commands/run-task-verb.ts"
+  rationale: |
+    WHY: the operator asked on 2026-11-12 for routing experiments with arms for the open-weight deployments that have spare quota, on economy work, scored by merge rate as today (backlog item BM3). The operator wants a new deployment to enter trials with no operator step.
+    READ 2026-11-12 at origin/main 920669542:
+    - src/lib/routing-experiments.ts:31-69 ROUTING_EXPERIMENTS holds only Claude-versus-Codex epochs. W1-T10842 (queued) adds a Codex-versus-Codex shape and W1-T12150 (queued) an effort shape. Neither covers the cash provider.
+    - The cash work that exists is the cash-simple trial. src/lib/cash-trial.ts:33-41 DEFAULT_CASH_TRIAL_POLICY sends 50 percent of the simplest implement work to cash, with models ["gpt-oss-120b"] (:40), a budget of 10 percent of the daily cap (:36), and a stop rule against the control arm (:144 `cashTrialStopReason`). :29 records why gpt-5-nano left: 158 assignments, 54 errors, 1 PR in 45 verdicts.
+    - :259-268 `cashTrialSpawnFields` passes the whole models list to the spawn, so the spawn takes the first ready one. There is no per-task draw between cash models and no figure per model. src/cli/commands/run-task-verb.ts:5543-5551 is the only caller.
+    - W1-T10855 (merged) priced DeepSeek-V4-Flash, DeepSeek-V4.1-Flash and Kimi-K2.6 and kept them "off every lead". W1-T10857 (merged) put them in the bake-off with tools. W1-T10858 (queued) lets an open-weight deployment lead only after one UTC day's metered cost matches the invoice. This task uses the same verdict, so a trial arm is a lead that is paid at a checked price.
+    OBSERVED 2026-11-12 by the operator session: gpt-oss-120b has 450K tokens per minute and DeepSeek-V4-Flash, DeepSeek-V4.1-Flash and Kimi-K2.6 have 300K each, with spare quota.
+    WHY THE CASH-SIMPLE TRIAL AND NOT A NEW EXPERIMENT SHAPE: the trial already has the eligible population, the budget share, the control arm and the merge outcome. A new epoch kind would repeat all of them.
+  design: |
+    1. In src/lib/cash-trial.ts add `cashTrialModels(policy, readiness)`: the policy's models, then each ready open-weight deployment (`openWeightDeploymentReady`) whose newest `cash.invoice.reconciled` row (W1-T10858) says reconciled and whose newest `inbox.bakeoff` row ran with tools. Add `cashTrialModelFor(taskId, models)`, a stable hash of the task id over the models in name order, with its own draw point so it does not depend on the cash or control draw.
+    2. In src/cli/commands/run-task-verb.ts pass `[cashTrialModelFor(task.id, models)]` to `cashTrialSpawnFields` in place of the whole list, and log the drawn model in `cash_trial.decided`.
+    3. Extend `summarizeCashTrial` with a per-model breakdown keyed by the drawn model, and apply `cashTrialStopReason` per model. A stopped model leaves the draw; a task whose drawn model is stopped draws again over the models left.
+    4. When W1-T12142 has merged, give the per-model comparison its decision rule. If not, keep minSample as the floor.
+    NOT IN SCOPE: the cash economy and balanced rows of .remudero/mounts.yaml; any automatic change of a lead; the decision models (they are not workers).
+  falsifier: |
+    Admit a deployment with no reconciled verdict and criterion 1 must fail. Draw by attempt in place of task and criterion 2 must fail. Pool two cash models in the summary and criterion 3 must fail. Stop the whole trial for one weak model and criterion 4 must fail. Restore and require all to pass.
+  note: |
+    Ids reserved for run-unfiled-1794497247000 with ~/rmd-work/bin/reserve-id.sh. Filed with W1-T12420, W1-T12421, W1-T12422 and W1-T12423.
+    The test folder came from `rmd test-place` on a draft. The builder runs it again on the real test and moves the path if it changes.

@@ -28,7 +28,7 @@
     - test/daemon/a-slow-crash-loop-is-reported.test.ts
     - test/serve-freshness-restart.test.ts
     - test/run-task-benchmark-cohort-wiring.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "After the first checkout sync, the entrypoint runs the supervise script of the checkout, `deploy/entrypoint-supervise.sh`, when `bash -n` accepts it. The test runs the entrypoint against a fixture checkout"
