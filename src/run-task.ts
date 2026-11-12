@@ -33757,7 +33757,7 @@ export function reviewOnlyLightPassDeps(scope?: LightPassScope): Pick<SweepDeps,
 
 
 interface LightPassReadPorts {
-  openPrViews?: () => Promise<OpenPrView[]>;
+  openPrViews?: (scope?: LightPassScope) => Promise<OpenPrView[]> | undefined;
   effects?: (deps: Parameters<typeof buildSweepEffects>[0]) => SweepDeps;
   readCompare?: (args: string[]) => Promise<unknown>;
   clock?: Pick<Clock, "now">;

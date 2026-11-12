@@ -31,7 +31,7 @@ import { resolveProviderRoutingPolicy } from "../../lib/provider-routing-policy.
 import { writeProviderRoutingStatus, type ProviderRoutingWriteInput } from "../../lib/provider-routing-status.js";
 import { readFileIfExists } from "../../lib/fs-race-safe.js";
 import { mergedInLastDayAsync } from "../../lib/fleet-lane.js";
-import { startDaemonSreLane } from "../../lib/daemon.js";
+import { startDaemonSreLane, type LightPassScope } from "../../lib/daemon.js";
 import { REGISTERED_GARDEN_NAMES, startGardenOffLoop, type GardenPassSpawn, type RegisteredGardenName } from "../../lib/garden-registry.js";
 import { gardenSchedule } from "../../lib/garden-registry.js";
 import { createGardenerRuntimeWriter } from "../../lib/gardener-runtime.js";
@@ -83,7 +83,7 @@ import { refreshReviewPublisherToken as refreshInstallationToken } from "../../l
 import { feedbackStatusOnMain } from "../../lib/auto-triage.js";
 import { bootSweepDispatchClaimsAsync, dispatchClaimRef, releaseLandedDispatchClaims, claimMintedByRerun, type DispatchClaimReserverAsync } from "../../lib/dispatch-claim.js";
 import { loadCreditStore, saveCreditStore, recordCredit, refusesAsPlanOnly, buildCommitTrailerIndex, projectPlan, independentBlockReleasesFrom, readLedgerLines, readLedgerSnapshot, buildLedgerIndex, createDispatchBreakerCache, evaluateDispatchBreakerCorroboratedDetailed, hasRepeatedTaskAttributableLifetimeDispatches, type LedgerLines, type LedgerSnapshot, type DispatchBreakerDetail, type GitHub, type PrRef, type StatusProjection, taskIdFromRunBranch } from "../../lib/status.js";
-import { DEFAULT_SWEEP_POLICY, productionFixPressure, readIdleLightCadence, readObservedReviewMedianMs } from "../../lib/sweep.js";
+import { DEFAULT_SWEEP_POLICY, productionFixPressure, readIdleLightCadence, readObservedReviewMedianMs, type OpenPrView } from "../../lib/sweep.js";
 import { startMainEntryWatch } from "../../lib/main-entry.js";
 import { createLiveSetKeeper, createPlanCopyBook, daemonHolderSource, observedPlanSync, startDaemonMemoryCensus } from "../../lib/daemon-memory-census.js";
 import { terminalUnionScans } from "../../lib/sweep.js";
@@ -632,6 +632,21 @@ export async function daemonSreLaneEnabled(
   return sreLaneEnabled(sreLane);
 }
 
+/** W1-T12236: the boot light sweep takes the open pull request views of a tick read that started in this tick.
+ * Any other scope, no tick read, an older one, or one whose open list failed gives undefined: the hook reads its own. */
+export function servedOpenPrViews(
+  published: () => ReadGeneration<TickReadFacts> | undefined,
+  tickStartedAtMs: () => number | undefined,
+): (scope?: LightPassScope) => Promise<OpenPrView[]> | undefined {
+  return (scope) => {
+    const generation = published();
+    const startedAtMs = tickStartedAtMs();
+    if (scope?.scope !== "boot" || !generation || startedAtMs === undefined) return undefined;
+    if (generation.publishedAtMs < startedAtMs || generation.facts.openPrError !== undefined) return undefined;
+    return Promise.resolve(structuredClone(generation.facts.openPrViews));
+  };
+}
+
 /** W1-T11770: one GitHub `<owner>/<name>`: no path, URL, `.` or `..` segment. */
 function isOpsCatalogSlug(slug: string): boolean {
   return /^[A-Za-z0-9][A-Za-z0-9-]{0,38}\/[A-Za-z0-9_.-]{1,100}$/.test(slug) && !/\/\.{1,2}$/.test(slug) && !slug.includes("..");
@@ -1137,6 +1152,7 @@ export async function daemonCommand(
   // GitHub read path.
   let lastProj: Map<string, StatusProjection> | undefined;
   let tickReadGeneration: ReadGeneration<TickReadFacts> | undefined;
+  let tickReadStartedAtMs: number | undefined;
   const boardSnapshotFor = memoiseBoardSnapshotByRepo(config.root, log);
   const targetCheckoutRoot = daemonTargetCheckoutRoot(target, config.root);
   const targetRecordWrite = writeDaemonTargetRecord(join(config.root, "state"),
@@ -1880,7 +1896,10 @@ export async function daemonCommand(
         claimSweepSettled,
         bootPhases,
         refreshMerged,
-        refreshMergedAsync: readTick ? buildDaemonReadRefresher({
+        refreshMergedAsync: readTick ? ((refresh: NonNullable<DaemonDeps["refreshMergedAsync"]>) => (plan?: Plan) => {
+          tickReadStartedAtMs = systemClock.now();
+          return refresh(plan);
+        })(buildDaemonReadRefresher({
           read: readTick, plan: () => activePlanRef.current, previous: () => lastProj,
           invalidate: () => { tickReadGeneration = undefined; },
           publish: (snapshot: ReadGeneration<TickReadFacts>) => {
@@ -1892,7 +1911,7 @@ export async function daemonCommand(
             boardOpenPrCount.observe(snapshot.facts.openBranches);
           },
           ledgerPath, statusPath, log,
-        }) : undefined,
+        })) : undefined,
         readLoopTelemetry: loopTelemetry.sample,
         readMemoryTelemetry: daemonMemoryTelemetryReader(daemonLoadedCodeSha, { generation: runId, footprint: daemonFootprint }),
         memoryGovernor: daemonMemoryGovernor,
@@ -2424,6 +2443,7 @@ export async function daemonCommand(
           () => activePlanRef.current,
           // A run in flight starves the full sweep, so the light pass also watches main.
           mainHealthRung,
+          { openPrViews: servedOpenPrViews(() => tickReadGeneration, () => tickReadStartedAtMs) },
         ),
         // W1-T7734: the idle sleep runs the light pass while review demand waits, at a cadence the sweep
         // derives from observed review duration and head churn. Reads the sweep's in-process memo only.

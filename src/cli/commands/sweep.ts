@@ -19,7 +19,7 @@ import { withMainHealthOnLightPass } from "../../lib/main-health-rung.js";
 import { lightPassArmAdmitted, lightPassFixAdmitted, type LightPassScope, type ReviewAdmissionGate, type SweepCycleOutcome } from "../../lib/daemon.js";
 import type { BoardSnapshotCache } from "../../lib/board-snapshot-cache.js";
 import type { PanelGraphDeps } from "../../lib/panel-graph.js";
-import { createPlanFilingFileCache, type GhCallPacer } from "../../lib/open-prs-rest.js";
+import { createPlanFilingFileCache, loadPlanFilingFileCache, type GhCallPacer } from "../../lib/open-prs-rest.js";
 import { configureEscalationTriage, ghIssueGateway, tryEscalate } from "../../lib/escalate.js";
 import { escalatePostReviewStall } from "../../lib/escalation-catalogue.js";
 import { ghPrDiffAsync } from "../../lib/pr-diff.js";
@@ -1215,7 +1215,8 @@ export function buildSweepLightHook(
   planAccessor?: () => Plan,
   mainHealthRung?: () => Promise<void>,
   io: {
-    openPrViews?: () => Promise<OpenPrView[]>;
+    /** W1-T12236: undefined leaves the hook on its own read. */
+    openPrViews?: (scope?: LightPassScope) => Promise<OpenPrView[]> | undefined;
     effects?: (deps: Parameters<SweepCommandHost["buildSweepEffects"]>[0]) => SweepDeps;
     readCompare?: (args: string[]) => Promise<unknown>;
     clock?: Pick<Clock, "now">;
@@ -1234,7 +1235,10 @@ export function buildSweepLightHook(
   const resolvedReadMainPlan = legacyResequenceShape
     ? (isMergedOrReadMainPlan as ((root: string) => Plan) | undefined)
     : readMainPlan;
-  const planFilingFileCache = createPlanFilingFileCache();
+  const planFilingFileCache = loadPlanFilingFileCache(join(config.root, "state"));
+  if (planFilingFileCache.unreadable !== undefined) {
+    log("plan_filing_files.store_unreadable", { reason: planFilingFileCache.unreadable });
+  }
   const reportPlanFilingClassification = createPlanFilingClassificationTelemetry(log);
   const compares = createLightPassCompareReader(owner, repo, io.readCompare ?? ghJsonAsync);
   return withMainHealthOnLightPass(async (scope?: LightPassScope) => {
@@ -1245,20 +1249,33 @@ export function buildSweepLightHook(
     const lightTickId = randomUUID();
     const timing = new LightPassPreReviewTiming(io.clock);
     let timingWritten = false;
+    let viewsSource: "tick_read" | "own_read" | undefined;
     const finishTiming = () => {
       if (timingWritten) return;
       timingWritten = true;
-      log("sweep_light.pre_review_timing", { run_id: runId, ...timing.finish() });
+      log("sweep_light.pre_review_timing", { run_id: runId, ...timing.finish(),
+        ...(viewsSource ? { views_source: viewsSource } : {}) });
     };
     try {
       await timing.run(async () => {
-      const readViews = () => io.openPrViews?.() ?? buildOpenPrViewsAsync(owner, repo, ledgerPath, {
-        planFilingFileCache,
-        onPlanFilingClassification: reportPlanFilingClassification,
-        isMerged,
-        readMainPlan: resolvedReadMainPlan,
-      });
-      const openPrs = await timing.run(() => timing.measure("open_pr_views", readViews));
+      // W1-T12236: only the first read passes the scope; a refill read reads its own views.
+      const readViews = async (passScope?: LightPassScope) => {
+        const served = io.openPrViews?.(passScope);
+        if (served) return { source: "tick_read" as const, views: await served };
+        const views = await buildOpenPrViewsAsync(owner, repo, ledgerPath, {
+          planFilingFileCache,
+          onPlanFilingClassification: reportPlanFilingClassification,
+          isMerged,
+          readMainPlan: resolvedReadMainPlan,
+        });
+        planFilingFileCache.retain(owner, repo, views.map((pr) => pr.prNumber));
+        const saved = planFilingFileCache.save();
+        if (!saved.ok) log("plan_filing_files.store_save_failed", { reason: saved.reason });
+        return { source: "own_read" as const, views };
+      };
+      const first = await timing.run(() => timing.measure("open_pr_views", () => readViews(scope)));
+      viewsSource = first.source;
+      const openPrs = first.views;
       compares.retain(openPrs);
       const activePlan = planAccessor?.() ?? plan;
       const effects: Omit<SweepDeps, "ledgerPath" | "runId"> = timing.run(() => (io.effects ?? buildSweepEffects)({
@@ -1314,7 +1331,7 @@ export function buildSweepLightHook(
           readOpenPrsForRefill: async () => {
             const owned = new Set(restPrs.map((pr) => pr.prNumber));
             const snapshot = new Set(openPrs.map((pr) => pr.prNumber));
-            return (await readViews()).filter((pr) => owned.has(pr.prNumber) || !snapshot.has(pr.prNumber));
+            return (await readViews()).views.filter((pr) => owned.has(pr.prNumber) || !snapshot.has(pr.prNumber));
           },
           rereadPrAtAct: effects.rereadPrAtAct ?? buildRereadPrAtAct(owner, repo, ledgerPath, {
             views: { planFilingFileCache, onPlanFilingClassification: reportPlanFilingClassification, isMerged,
