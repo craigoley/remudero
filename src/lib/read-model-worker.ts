@@ -476,7 +476,7 @@ export function scopedReadPath(path: string, instance: string | undefined): stri
 const LEDGER_SOURCE_PREFIX = "ledger:";
 
 export interface ReadModelTickerOptions {
-  /** The keys of the demand views that stay materialized; absent, `want` is refused and nothing is evicted. */
+  /** The keys of the demand views that stay materialized, and a demand unit is due only while it holds one; absent, `want` is refused, nothing is evicted and demand units are paced like any other. */
   demand?: DemandBook;
   /** Core's state dir: every instance's DB lives under its `read-model/` (design §1.7). */
   stateDir: string;
@@ -1770,7 +1770,9 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
     }));
     log("read_model.view_lane_held", { lane: opts.lane, count: held.length, units: held });
   }
-  const dueUnits = (now: number): ViewUnit[] => units.filter((unit) => owns(unit) && built(unit.view.name) && unit.dueAt <= now).sort((a, b) => a.dueAt - b.dueAt);
+  /** W1-T11934: a demand unit is due only while the book holds a key of its view; its default keys alone rebuilt it every tick. */
+  const demanded = (unit: ViewUnit): boolean => unit.view.demand !== true || !opts.demand || opts.demand.keys(unit.view.name).length > 0;
+  const dueUnits = (now: number): ViewUnit[] => units.filter((unit) => owns(unit) && built(unit.view.name) && unit.dueAt <= now && demanded(unit)).sort((a, b) => a.dueAt - b.dueAt);
 
   /**
    * Build oldest due units within the pass left since `tickStart`, fitting each by last cost.
