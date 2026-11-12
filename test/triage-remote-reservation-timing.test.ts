@@ -374,13 +374,12 @@ test("W1-T2326: an already-decided verdict takes the remote reservation and give
         spawn: async () => fakeWorker("ALREADY_DECIDED: MASTER-PLAN.md §7B already covers this"),
       }),
     );
-    assert.equal(result, 1, "the terminal failing fixture check refuses the PR before review or merge");
+    // W1-T12198: a no_task outcome lands through the feedback landing and opens no pull request of its own.
+    assert.equal(result, 0, "the status change landed through the feedback landing");
     const calls = readFileSync(join(f.shimDir, "calls.log"), "utf8").split("\n");
-    assert.ok(calls.some((call) => /^api repos\/[^/]+\/[^/]+\/pulls\/999$/.test(call)), "triage read its actual REST pull");
-    assert.ok(calls.some((call) => /\/commits\/[0-9a-f]{40}\/check-runs\?per_page=100$/.test(call)), "triage read checks for the actual pushed head");
-    assert.ok(!calls.some((call) => /pr merge|remudero-review/.test(call)), "a refused check never advances to merge or review");
+    assert.ok(!calls.some((call) => /pr merge|remudero-review/.test(call)), "the triage run never advances to merge or review");
 
-    // W1-T9488: it files nothing, so the branch it pushed declares no id and the whole block is given back.
+    // W1-T9488: it files nothing and pushes no run branch, so the whole block is given back.
     const reserved = remoteReservedIds(f.bare);
     assert.deepEqual(reserved, [], `an already-decided verdict files nothing and releases the whole reserved block, got ${reserved.join(", ")}`);
 
