@@ -19226,6 +19226,9 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
         // in the changed-tasks pass, so a newly filed or edited shard is refused before it
         // repeats the pattern.
         proofSelfPath: "block",
+        // W1-T11746: only this changed-task pass demands INVARIANT/NO-INVARIANTS declarations, so the
+        // whole-plan pass and dispatch leave the historical population valid.
+        requireDesignInvariantDeclaration: true,
       };
     }
     // impl-DO: the CALL-SITE check needs to know whether a module already exists, and the linter

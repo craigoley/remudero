@@ -159,6 +159,7 @@ function fixtureTask(id: string, status: string, retirement?: string): string {
     `  status: ${status}`,
     "  attempts: 0",
     "  files: [test/a-blocked-task-must-name-its-disposition.test.ts]",
+    `  design: "NO-INVARIANTS: synthetic lint fixture with no inherited behavior to preserve"`,
     "  acceptance:",
     '    - claim: "the thing holds"',
     '      proof: "unit test: test/a-blocked-task-must-name-its-disposition.test.ts"',

@@ -42,6 +42,7 @@ const task = (id: string, title: string, proof: string) =>
     `  risk: high`,
     `  status: queued`,
     `  origin: "W1-T4381 test fixture"`,
+    `  design: "NO-INVARIANTS: synthetic lint fixture with no inherited behavior to preserve"`,
     `  acceptance:`,
     `    - claim: "something is proven"`,
     `      proof: "${proof}"`,

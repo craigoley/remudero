@@ -95,7 +95,8 @@ export type LintCheck =
   | "shard-shape"
   | "unminted-task-id"
   | "superseded-by"
-  | "doctrine-citation-unresolved";
+  | "doctrine-citation-unresolved"
+  | "design-invariant-proof";
 export type LintSeverity = "block" | "warn";
 
 export interface LintViolation {
@@ -3500,6 +3501,11 @@ export function unmintedTaskIdViolations(task: Task, opts: LintOpts = {}): LintV
 }
 
 export interface LintOpts {
+  /** W1-T11746 — require a new/changed implementation task's design to declare `INVARIANT <slug>:` lines
+   *  or `NO-INVARIANTS: <reason>`, with each slug mapped to its own `invariant:<slug>` acceptance claim.
+   *  Set only by the changed-task (`lint-plan --base`) pass; absent ⇒ {@link invariantSlugViolations} is
+   *  silent, so the whole-plan pass and dispatch never refuse the historical population. */
+  requireDesignInvariantDeclaration?: boolean;
   /** Resolved repository name of this checkout; when known, call-site analysis skips tasks
    *  targeting a different repository because their source tree is not present here. */
   localRepoName?: string;
@@ -3729,6 +3735,77 @@ export function doctrineCitationViolations(task: Task, opts: LintOpts = {}): Lin
   }));
 }
 
+// ── DESIGN INVARIANTS NEED THEIR OWN ACCEPTANCE PROOF (W1-T11746) ───────────────────────────────
+// A compatibility guarantee that lives only in design prose can be broken while every acceptance
+// proof stays green (PR #17212). An implementation task declares each guarantee as a design line
+// `INVARIANT <slug>: <statement>` (or the single line `NO-INVARIANTS: <reason>`), and each slug must
+// map to exactly one acceptance claim `invariant:<slug>` carrying its own non-empty proof. This reads
+// only those structured markers — never arbitrary prose, never a keyword count — and only when the
+// changed-task pass sets {@link LintOpts.requireDesignInvariantDeclaration}.
+const INVARIANT_DECL_RE = /^[ \t]*INVARIANT[ \t]+([a-z0-9][a-z0-9-]*)[ \t]*:[ \t]*(\S.*)$/gm;
+const NO_INVARIANTS_RE = /^[ \t]*NO-INVARIANTS[ \t]*:[ \t]*([^<\s].*)$/gm;
+const INVARIANT_CLAIM_RE = /\binvariant:([a-z0-9][a-z0-9-]*)/g;
+
+/** The `invariant:<slug>` and `INVARIANT <slug>:` templates in prose are not declarations: a slug is
+ *  lower-case alphanumerics and hyphens, and a NO-INVARIANTS reason may not open with a `<` placeholder. */
+export function invariantSlugViolations(task: Task, opts: LintOpts = {}): LintViolation[] {
+  if (opts.requireDesignInvariantDeclaration !== true) return [];
+  if (task.type !== "implement") return [];
+  const design = task.design ?? "";
+  const out: LintViolation[] = [];
+  const block = (message: string): void => {
+    out.push({ check: "design-invariant-proof", severity: "block", message: `task ${task.id}: ${message}` });
+  };
+  const declared = [...design.matchAll(INVARIANT_DECL_RE)].map((m) => m[1]!);
+  const noInvariants = [...design.matchAll(NO_INVARIANTS_RE)];
+  if (declared.length === 0 && noInvariants.length === 0) {
+    block(
+      "design declares neither `INVARIANT <slug>: <statement>` nor `NO-INVARIANTS: <reason>`; inventory the prior " +
+        "behavior (output buckets, legacy receipts, defaults, error/unknown paths, public side effects) and declare one form",
+    );
+  }
+  if (declared.length > 0 && noInvariants.length > 0) {
+    block("design declares both INVARIANT lines and NO-INVARIANTS; declare exactly one form");
+  }
+  if (noInvariants.length > 1) block("design carries more than one NO-INVARIANTS line; declare it once");
+  const seen = new Set<string>();
+  for (const slug of declared) {
+    if (seen.has(slug)) block(`invariant slug "${slug}" is declared more than once in the design`);
+    seen.add(slug);
+  }
+  const claimsBySlug = new Map<string, number[]>();
+  (task.acceptance ?? []).forEach((criterion, index) => {
+    const slugs = [...new Set([...criterion.claim.matchAll(INVARIANT_CLAIM_RE)].map((m) => m[1]!))];
+    if (slugs.length > 1) {
+      block(`acceptance claim ${index + 1} maps more than one invariant (${slugs.join(", ")}); each slug needs its own claim`);
+    }
+    for (const slug of slugs) claimsBySlug.set(slug, [...(claimsBySlug.get(slug) ?? []), index]);
+  });
+  const proofOwner = new Map<string, string>();
+  for (const [slug, indexes] of claimsBySlug) {
+    if (!seen.has(slug)) {
+      block(`acceptance claim invariant:${slug} has no matching \`INVARIANT ${slug}:\` declaration in the design (orphaned)`);
+      continue;
+    }
+    if (indexes.length > 1) {
+      block(`invariant "${slug}" is mapped by ${indexes.length} acceptance claims; map it exactly once`);
+      continue;
+    }
+    const proof = (task.acceptance![indexes[0]!]!.proof ?? "").trim();
+    if (proof === "") {
+      block(`acceptance claim invariant:${slug} has an empty proof`);
+      continue;
+    }
+    const other = proofOwner.get(proof);
+    if (other !== undefined) block(`invariants "${other}" and "${slug}" share one proof; each needs its own distinct proof`);
+    else proofOwner.set(proof, slug);
+  }
+  for (const slug of seen) {
+    if (!claimsBySlug.has(slug)) block(`invariant "${slug}" has no acceptance claim \`invariant:${slug}\` (missing)`);
+  }
+  return out;
+}
+
 export function lintTask(task: Task, opts: LintOpts = {}): LintResult {
   const violations: LintViolation[] = [];
   const sizing = sizingViolation(task, opts);
@@ -3755,6 +3832,7 @@ export function lintTask(task: Task, opts: LintOpts = {}): LintResult {
   violations.push(...newShardRuleSuiteViolations(task, opts));
   violations.push(...postMergeAmendmentViolations(task, opts));
   violations.push(...blockedDispositionViolations(task, opts));
+  violations.push(...invariantSlugViolations(task, opts));
   violations.push(...blockedRecordUnruledViolations(task));
   violations.push(...callSiteViolations(task, opts));
   violations.push(...monolithFilingViolations(task, opts));

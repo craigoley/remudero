@@ -21,7 +21,12 @@ output_contract: >
   triggering item is a feedback entry) origin: feedback#<id> provenance;
   gated by ci-gate+remudero-review. AMBIGUOUS scope grills via
   AskUserQuestion (interactive) or a needs-human issue (async) before
-  proposing.
+  proposing. An implementation task's design first inventories the prior
+  behavior it touches (output buckets, legacy receipts, defaults, error and
+  unknown paths, public side effects), then declares each one to preserve as
+  a design line "INVARIANT <slug>: <statement>" with its own acceptance claim
+  "invariant:<slug>" and proof. Entirely new behavior, with nothing inherited
+  to preserve, says so on one design line instead, "NO-INVARIANTS: <reason>".
 
 grounding_sources:
   - MASTER-PLAN.md
