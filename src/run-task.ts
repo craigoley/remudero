@@ -818,6 +818,7 @@ import {
   type LandingReviewRequest,
   landTaskFilesAsync,
   stagedTaskFiles,
+  taskFilesLandingBranchAsync,
   type LandTaskFilesOpts,
   type TaskFileInput,
   type TaskFilesLandingResult,
@@ -27676,6 +27677,7 @@ function* retractGardenBranchSteps(
  *  garden PR opens READY FOR REVIEW — never a draft (operator ruling, 2026-09-24: a draft sits like a
  *  stuck PR) — so the sweep reviews and arms it like any other fleet PR (`GARDEN_BRANCH_RE`). */
 export function gardenCheckout(opts: GardenCheckoutOpts): GardenCheckout {
+  if (opts.taskFilesOnly) throw new Error(`${opts.name} garden: a checkout that files only task files lands through the async checkout`);
   const branch = `${opts.name}-garden-${(opts.clock ?? systemClock).now()}`;
   const root = join(opts.worktreesRoot, branch);
   worktreeAdd(opts.repoDir, root, branch, "origin/main", { log: opts.log });
@@ -27695,8 +27697,11 @@ export function gardenCheckout(opts: GardenCheckoutOpts): GardenCheckout {
 }
 
 export async function gardenCheckoutAsync(opts: GardenCheckoutOpts): Promise<GardenCheckoutAsync> {
+  if (opts.taskFilesOnly && !opts.taskFilesLanding) throw new Error(`${opts.name} garden: a checkout that files only task files needs the task-file landing`);
   const branch = `${opts.name}-garden-${(opts.clock ?? systemClock).now()}`;
   const root = join(opts.worktreesRoot, branch);
+  // W1-T12222: the id holder is the branch that files it, so such a checkout reserves on the landing branch.
+  const reservationBranch = opts.taskFilesOnly ? await taskFilesLandingBranchAsync({ owner: opts.owner, repo: opts.repo }) : branch;
   await worktreeAddAsync(opts.repoDir, root, branch, "origin/main", { log: opts.log });
   const io: GardenLandIo = {
     git: async (...args: string[]) => (await execFilePromise("git", ["-C", root, ...args], { encoding: "utf8" })).stdout,
@@ -27710,7 +27715,7 @@ export async function gardenCheckoutAsync(opts: GardenCheckoutOpts): Promise<Gar
   };
   return {
     root,
-    branch,
+    branch: reservationBranch,
     land: (landing) => runStepsAsync(gardenLandSteps(opts, root, branch, landing, io)),
     dispose: () => worktreeRemoveAsync(opts.repoDir, root),
   };
@@ -27730,6 +27735,9 @@ export interface GardenCheckoutOpts {
   /** W1-T12221: the shared landing of task files: its state root (`config.root`) and its seams. Absent,
    *  every land opens its own PR. */
   taskFilesLanding?: Pick<LandTaskFilesOpts, "stateRoot" | "gh" | "planPrPreflight">;
+  /** W1-T12222: every land is a task file, new or edited, through `taskFilesLanding`; `branch` is the landing
+   *  branch, and a land with any other path is refused. Async checkout only. */
+  taskFilesOnly?: true;
 }
 
 interface GardenLandIo {
@@ -27742,20 +27750,22 @@ interface GardenLandIo {
 
 /** W1-T12221: the landing inputs when every path is an edit of a task file main holds and the body's
  *  `## Acceptance` gives its criterion; otherwise nothing, and the land opens its own PR. */
-function* sealedTaskFileInputs(root: string, paths: readonly string[], body: string, git: GardenLandIo["git"]): Steps<TaskFileInput[] | undefined> {
+function* sealedTaskFileInputs(root: string, paths: readonly string[], body: string, git: GardenLandIo["git"], newFiles: boolean): Steps<TaskFileInput[] | undefined> {
   const shardDir = relative(root, join(resolveRepoLayout(root).planDir, "tasks.d"));
   const criteria = parseAcceptanceBlock(body).filter((c) => c.proof !== "");
   const inputs: TaskFileInput[] = [];
   for (const relPath of paths) {
     if (!relPath.startsWith(`${shardDir}/`) || !/\.ya?ml$/.test(relPath) || !existsSync(join(root, relPath))) return undefined;
+    let newFile = false;
     try {
       yield* step(() => git("cat-file", "-e", `HEAD:${relPath}`));
     } catch {
-      return undefined; // not an edit: main does not hold the path, so the land opens its own PR
+      if (!newFiles) return undefined; // not an edit: main does not hold the path, so the land opens its own PR
+      newFile = true;
     }
     const criterion = criteria.find((c) => c.proof.endsWith(` in ${relPath}`)) ?? (paths.length === 1 && criteria.length === 1 ? criteria[0] : undefined);
     if (criterion === undefined) return undefined;
-    inputs.push({ relPath, content: readFileSync(join(root, relPath), "utf8"), claim: criterion.claim, proof: criterion.proof });
+    inputs.push({ relPath, content: readFileSync(join(root, relPath), "utf8"), claim: criterion.claim, proof: criterion.proof, ...(newFile ? { newFile: true as const } : {}) });
   }
   return inputs.length > 0 ? inputs : undefined;
 }
@@ -27764,11 +27774,14 @@ function* sealedTaskFileInputs(root: string, paths: readonly string[], body: str
 function* landSealedTaskFiles(opts: GardenCheckoutOpts, paths: readonly string[], inputs: TaskFileInput[], land: NonNullable<GardenLandIo["landTaskFiles"]>): Steps<GardenLandResult> {
   const result = yield* step(() => land(inputs));
   const carried = paths.every((p) => result.landed.includes(p));
-  const outcome = result.prUrl !== undefined && carried ? "opened" : paths.every((p) => result.landed.includes(p) || result.waiting.includes(p)) ? "waiting" : "not_landed";
+  const queued = paths.every((p) => result.landed.includes(p) || result.waiting.includes(p));
+  // W1-T12222: a file that is in the queue keeps the ids of its land, so a partly refused land of new files waits.
+  const partly = opts.taskFilesOnly === true && paths.some((p) => result.landed.includes(p) || result.waiting.includes(p));
+  const outcome = result.prUrl !== undefined && carried ? "opened" : queued || partly ? "waiting" : "not_landed";
   const refused = [...result.refused, ...result.setAside].filter((r) => paths.includes(r.path)).map((r) => ({ path: r.path, reason: r.reason }));
   opts.log(`${opts.name}.garden_sealed_landing`, { outcome, paths, pr_url: outcome === "opened" ? result.prUrl : null, ...(refused.length ? { refused } : {}), ...(result.error ? { error: result.error } : {}) });
   if (outcome === "opened") return result.prUrl;
-  if (outcome === "waiting") return { waiting: { paths: [...paths], stateRoot: opts.taskFilesLanding!.stateRoot } };
+  if (outcome === "waiting") return { waiting: { paths: paths.filter((p) => result.landed.includes(p) || result.waiting.includes(p)), stateRoot: opts.taskFilesLanding!.stateRoot } };
   return undefined;
 }
 
@@ -27781,8 +27794,13 @@ function* gardenLandSteps(
 ): Steps<GardenLandResult> {
   const { paths, title, body } = landing;
   // W1-T12221: an edit of task files rides the shared landing PR, unless the caller keeps its own PR.
-  const sealed = landing.sealedLanding === false || io.landTaskFiles === undefined ? undefined : yield* sealedTaskFileInputs(root, paths, body, io.git);
+  const only = opts.taskFilesOnly === true && io.landTaskFiles !== undefined;
+  const sealed = !only && (landing.sealedLanding === false || io.landTaskFiles === undefined) ? undefined : yield* sealedTaskFileInputs(root, paths, body, io.git, only);
   if (sealed !== undefined) return yield* landSealedTaskFiles(opts, paths, sealed, io.landTaskFiles!);
+  if (only) {
+    opts.log(`${opts.name}.garden_sealed_landing`, { outcome: "refused", paths, pr_url: null, error: "a checkout that files only task files lands each path under plan/tasks.d with its criterion" });
+    return undefined;
+  }
   yield* step(() => io.git("add", "--", ...paths));
   // A garden log under docs/ changes what docs/docs-index.json must say, and docs-index-check
   // refuses a PR whose index is stale — regenerate it with the checkout's own generator.
@@ -27845,8 +27863,12 @@ export type { GardenBuildContext } from "./cli/commands/daemon.js";
 
 export function daemonGardenWorkspace(ctx: Pick<GardenBuildContext, "config" | "repoRoot" | "owner" | "repo" | "log">, name: GardenName): () => Promise<GardenCheckoutAsync> {
   return () => gardenCheckoutAsync({ name, repoDir: ctx.repoRoot, worktreesRoot: worktreesDir(ctx.config), owner: ctx.owner, repo: ctx.repo, log: ctx.log,
-    taskFilesLanding: { stateRoot: ctx.config.root } });
+    taskFilesLanding: { stateRoot: ctx.config.root }, ...(TASK_FILES_ONLY_GARDENS.has(name) ? { taskFilesOnly: true } : {}) });
 }
+
+/** W1-T12222: the gardens whose every land is a task file and whose pass holds a wait (`runGardenAsync`). The
+ *  others that file tasks read a land through `landedPrUrl`, which refuses a wait, so they keep their own PR. */
+const TASK_FILES_ONLY_GARDENS: ReadonlySet<GardenName> = new Set(["ci-friction", "hot-file", "flow-remedy", "scout"]);
 
 /** One pass of one garden; it logs its own failure under the garden's own step name and never throws. */
 export type RegisteredGardenPass = (() => void | Promise<void>) & { due?: () => boolean | Promise<boolean> };

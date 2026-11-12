@@ -205,7 +205,7 @@ const ACKNOWLEDGEMENT_PATH_LIMIT = 50;
 
 const refusedPlanPrTrees = new Map<string, PlanPrPreflightResult>();
 
-type PlanPrPreflightAsk = { commitSha: string; pr: { title: string; body: string } };
+type PlanPrPreflightAsk = { commitSha: string; pr: { title: string; body: string; headRef?: string } };
 type PlanPrPreflightFn = (commitSha: string, pr: PlanPrPreflightAsk["pr"]) => PlanPrPreflightResult;
 type PlanPrPreflightAsyncFn = (commitSha: string, pr: PlanPrPreflightAsk["pr"]) => PlanPrPreflightResult | Promise<PlanPrPreflightResult>;
 /** W1-T5672: a child-process ask; the sync driver runs `run`, the async one awaits `runAsync` so the loop turns meanwhile. */
@@ -2334,6 +2334,8 @@ export interface TaskFileInput {
   content: string;
   claim: string;
   proof: string;
+  /** W1-T12222: a new task file from a checkout that files only task files; main need not hold the path. */
+  newFile?: true;
 }
 
 export interface TaskFileRefusal {
@@ -2372,7 +2374,8 @@ export interface LandTaskFilesOpts extends LandFeedbackAsyncOpts {
 }
 
 interface StagedTaskFileMeta {
-  baseBlob: string;
+  /** Null for a new file: main held no blob at the path when it was staged. */
+  baseBlob: string | null;
   claim: string;
   proof: string;
   prUrl?: string;
@@ -2400,6 +2403,11 @@ function readStagedTaskFiles(stateRoot: string): StagedTaskFile[] {
     }
   }
   return staged;
+}
+
+/** W1-T12222: the branch {@link landTaskFilesAsync} pushes for this target, the holder of an id a new task file takes. */
+export async function taskFilesLandingBranchAsync(targetRepository: LandingRepository): Promise<string> {
+  return landingIdentity({ family: "task-files", targetRepository, sourceRepository: await sourceRepositoryFromCwdAsync() }).branch;
 }
 
 /** W1-T12199: every edit that waits under `stateRoot`, and the landing PR that carries it once one does. */
@@ -2518,7 +2526,7 @@ function* taskFilesLandingSteps(
       const known = refusedPlanPrTrees.get(treeSha);
       if (known) return known;
       const commitSha = yield* commitOf(treeSha, files.map((f) => f.relPath));
-      const verdict = (yield { commitSha, pr: { title: kind.prTitle, body: taskFilesPrBody(files) } }) as PlanPrPreflightResult;
+      const verdict = (yield { commitSha, pr: { title: kind.prTitle, body: taskFilesPrBody(files), headRef: kind.branch } }) as PlanPrPreflightResult;
       planPrPreflightAllows(verdict, { lane, branch: kind.branch, log: opts.log });
       if (!verdict.ok) refusedPlanPrTrees.set(treeSha, verdict);
       else if (verdict.timedOut === undefined) {
@@ -2559,7 +2567,7 @@ function* taskFilesLandingSteps(
         continue;
       }
       const baseBlob = yield* mainBlobOf(relPath);
-      if (baseBlob === null) {
+      if (baseBlob === null && !input.newFile) {
         refuse(`origin/main does not hold ${relPath}; this landing takes only an edit of a task file that exists`);
         continue;
       }
