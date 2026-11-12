@@ -4092,6 +4092,8 @@ export async function sendCashRequest(config: Config, input: CashTransportOption
   let attempts = 0;
   try {
     azureOpenAi429Unbilled = unbilledAzureOpenAi429Policy(input.deployment, endpoint);
+    const normalCapUsd = typeof config.dailyCapUsd === "object" ? config.dailyCapUsd?.normal : config.dailyCapUsd;
+    if (normalCapUsd === 0) return failed("budget-refused", "dailyCapUsd normal cap is zero");
     const { envelope } = await cashRequestJson<CashBudgetAttempt>({
       args: input, deployment: input.deployment, source: input.source, endpoint, body: input.body,
       outputTokenCeiling: input.outputTokenCeiling,
@@ -4133,7 +4135,7 @@ export async function sendCashRequest(config: Config, input: CashTransportOption
     const absent = error instanceof OpenWeightDeploymentNotFoundError;
     if (absent) markOpenWeightDeploymentAbsent(input.deployment, clock.now());
     const detail = error instanceof Error ? error.message : String(error);
-    if (pending) settle(pending, { ...(absent ? { actualUsd: 0, unbilled: true } : {}), reason: detail });
+    if (pending) settle(pending, { ...(unbilledCashRefusal(error, azureOpenAi429Unbilled) ? { actualUsd: 0, unbilled: true } : {}), reason: detail });
     if (error instanceof OpenWeightUnpricedDeploymentError) return failed("not-ready", detail);
     if (error instanceof OpenWeightAllowanceExhaustedError) return failed("budget-refused", detail);
     if (absent) return failed("deployment-absent", detail, 404);

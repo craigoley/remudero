@@ -141,23 +141,27 @@ test("W1-T12413 criterion 2: the reservation counts the declared output ceiling,
   assert.equal(single.reservedUsd, openWeightReservationUsd(DEPLOYMENT, bytes, 0, 16));
 });
 
-test("W1-T12413 criterion 3: a normal-cap refusal sends nothing, and the squeezed figure is never read", async (t) => {
-  const { dir, config } = fixture(t, { normal: 1e-9, squeezed: 1000 });
-  let calls = 0;
-  const outcome = await sendCashRequest(config, { deployment: DEPLOYMENT, path: "openai/v1/decisions", body: BODY,
-    source: "fixture", outputTokenCeiling: 16, env, fetchImpl: async () => { calls++; return reply(); } });
-  assert.equal(calls, 0);
-  assert.equal(outcome.ok, false);
-  if (outcome.ok) return;
-  assert.equal(outcome.reason, "budget-refused");
-  assert.equal(outcome.reservedUsd, 0);
-  assert.match(outcome.detail, /normal|fleet|cap/i);
-  let reservations: OpenWeightAllowanceState["reservations"] = {};
-  try { reservations = allowance(dir).reservations; } catch (error) {
-    assert.equal((error as NodeJS.ErrnoException).code, "ENOENT");
-  }
-  assert.equal(Object.keys(reservations).length, 0);
-});
+for (const normal of [0, 1e-9]) {
+  test(`W1-T12413 criterion 3: a normal-cap refusal (${normal}) sends nothing, and the squeezed figure is never read`, async (t) => {
+    const { dir, config } = fixture(t, { normal, squeezed: 1000 });
+    let calls = 0;
+    const outcome = await sendCashRequest(config, { deployment: DEPLOYMENT, path: "openai/v1/decisions", body: BODY,
+      source: "fixture", outputTokenCeiling: 16, env, fetchImpl: async () => { calls++; return reply(); } });
+    assert.equal(calls, 0);
+    assert.equal(outcome.ok, false);
+    if (outcome.ok) return;
+    assert.equal(outcome.reason, "budget-refused");
+    assert.equal(outcome.reservedUsd, 0);
+    assert.equal(outcome.settledUsd, 0);
+    assert.equal(outcome.heldUsd, 0);
+    assert.match(outcome.detail, /normal|fleet|cap/i);
+    let reservations: OpenWeightAllowanceState["reservations"] = {};
+    try { reservations = allowance(dir).reservations; } catch (error) {
+      assert.equal((error as NodeJS.ErrnoException).code, "ENOENT");
+    }
+    assert.equal(Object.keys(reservations).length, 0);
+  });
+}
 
 test("W1-T12413 criterion 4: a missed deadline or a caller abort keeps the reservation held, and a late reply still settles", async (t) => {
   const { dir, config } = fixture(t);
@@ -239,6 +243,41 @@ test("W1-T12413 criterion 5: a 429 inside the deadline is sent once more with a 
   if (!outcome.ok) return;
   assert.equal(outcome.reservedUsd, rows.reduce((sum, row) => sum + row.reservedUsd, 0));
 });
+
+for (const azure of [true, false]) {
+  test(`W1-T12413 criterion 5: consecutive 429s settle both attempts according to endpoint policy (azure=${azure})`, async (t) => {
+    const { dir, config } = fixture(t);
+    const deployment = "gpt-5-nano";
+    config.workerProviders!.cashEndpoint = azure ? "https://fixture.openai.azure.com/" : "https://cash.example.test/";
+    let calls = 0;
+    const outcome = await sendCashRequest(config, { deployment, path: "openai/v1/decisions", body: BODY,
+      source: "fixture", outputTokenCeiling: 16, env, requestTimeoutMs: 5_000,
+      fetchImpl: async () => {
+        calls++;
+        assert.equal(Object.keys(allowance(dir).reservations).length, calls);
+        return new Response("{}", { status: 429, headers: { "retry-after-ms": "10" } });
+      } });
+    assert.equal(calls, 2);
+    assert.equal(outcome.ok, false);
+    if (outcome.ok) return;
+    assert.equal(outcome.reason, "http");
+    assert.equal(outcome.status, 429);
+    const rows = Object.values(allowance(dir).reservations);
+    assert.equal(rows.length, 2);
+    assert.equal(new Set(rows.map(row => row.identity!.requestId)).size, 2);
+    const reserved = openWeightReservationUsd(deployment, Buffer.byteLength(BODY, "utf8"), 0, 16);
+    assert.equal(outcome.reservedUsd, reserved * 2);
+    assert.equal(outcome.settledUsd, azure ? 0 : reserved * 2);
+    assert.equal(outcome.heldUsd, azure ? 0 : reserved * 2);
+    for (const row of rows) {
+      assert.equal(row.reservedUsd, reserved);
+      assert.equal(row.settledUsd, azure ? 0 : null);
+      assert.equal(row.heldUsd, azure ? 0 : reserved);
+      assert.equal(row.accountingState, azure ? "known-unbilled" : "held-unknown");
+      assert.match((azure ? row.settledReason : row.heldReason) ?? "", /429/);
+    }
+  });
+}
 
 test("W1-T12413 criterion 6: a 404 settles at zero and marks the deployment absent, so a second call sends nothing", async (t) => {
   const { dir, config } = fixture(t);
