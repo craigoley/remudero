@@ -184,7 +184,11 @@ test("W1-T12206 criterion 1: the default GitHub transport uses the actual select
     updated_at: "2026-11-01T00:00:00Z", created_at: "2026-11-01T00:00:00Z" }];
   await withGhShim([{ when: "fixture/control", stdout: "controlled" },
     { when: "repos/fixture-owner/fixture-ops/pulls?", stdout: JSON.stringify(rows) }], shim => {
-    const control = spawnSync("gh", ["api", "fixture/control"], { encoding: "utf8", timeout: 10_000 });
+    // Exercise the same shipped transport as the default reader instead of a separate raw executable launch.
+    const controlProgram = `const {ghExec}=await import(${JSON.stringify(join(REPO_ROOT, "src/lib/github-transport.ts"))});process.stdout.write(ghExec(["api","fixture/control"],{encoding:"utf8",timeout:10000}));`;
+    const control = spawnSync(process.execPath, ["--import", import.meta.resolve("tsx"), "--input-type=module", "--eval", controlProgram], {
+      env: { ...process.env, RMD_GH_CACHE_HOME: join(f.root, "control-gh-cache") }, encoding: "utf8", timeout: 10_000,
+    });
     assert.equal(control.status, 0); assert.equal(control.stdout.trim(), "controlled");
     const r = invoke(f, { defaultPr: true, defaultGit: true });
     assert.equal(r.code, 0, r.err.join("\n")); assert.match(r.out.join("\n"), /^W1-T202 /m);
