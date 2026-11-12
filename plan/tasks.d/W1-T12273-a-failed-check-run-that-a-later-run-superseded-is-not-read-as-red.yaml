@@ -23,7 +23,7 @@
     - test/ci-gate-reads-a-superseded-attempt.test.ts
     - test/a-superseded-runs-rerun-never-overrides-the-newest-run.test.ts
     - test/superseded-reds-shared-reader.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "With the check runs and workflow runs that GitHub recorded for head 14b8062 of #17793, a full sweep pass re-runs CI's ci-gate job once (job 130260991771, through `reaggregateCiGate`), writes one `sweep.ci_gate_reaggregated` row, disposes the pull request as `wait` and files no escalation"

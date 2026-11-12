@@ -16,7 +16,7 @@
   files:
     - scripts/fixture-copy-census.mjs
     - test/fixture-copy-census.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "A test file whose only quoted `\"gh\"` is the fixture-directory name in `ownedFixtureDir(t, \"gh\")` is not counted in `ghPathShimFiles`, even when the file also calls `writeFileSync` and names `PATH`"

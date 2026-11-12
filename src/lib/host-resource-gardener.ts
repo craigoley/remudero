@@ -8,7 +8,7 @@ import type { Escalation } from "./escalate.js";
 import { slug as kebabSlug } from "./feedback-docket.js";
 import { readFileIfExists, writeAtomic } from "./fs-race-safe.js";
 import { gitDirOf } from "./typecheck-buildinfo.js";
-import { prepareGardenTaskIds, recordGardenMintTimeout, releaseGardenTaskIds, type GardenTaskIdMinter, runStepsEager, runStepsSyncOnly, type GardenCheckout, type GardenCheckoutAsync, type GardenWorkspacePort } from "./gardener.js";
+import { landedPrUrl, prepareGardenTaskIds, recordGardenMintTimeout, releaseGardenTaskIds, type GardenTaskIdMinter, runStepsEager, runStepsSyncOnly, type GardenCheckout, type GardenCheckoutAsync, type GardenWorkspacePort } from "./gardener.js";
 import { runStepsAsync, step, type Steps } from "./git-push.js";
 import { machineShardLandingRefusal, renderMachineShard } from "./machine-filing.js";
 import { resolveRepoLayout } from "./repo-layout.js";
@@ -958,7 +958,8 @@ export function landConsumerShard(ws: GardenCheckout | GardenCheckoutAsync, mint
     "- claim: the persistent grower is filed once as a parked task",
     `  proof: grep: ${f.origin} in ${relPath}`,
   ].join("\n");
-  return ws.land({ paths: [relPath], title: `chore(plan): host ${f.host} ${f.consumer} keeps growing and no janitor rule reaps it`, body });
+  const landed = ws.land({ paths: [relPath], title: `chore(plan): host ${f.host} ${f.consumer} keeps growing and no janitor rule reaps it`, body });
+  return landed instanceof Promise ? landed.then((r) => landedPrUrl(r, "host-resource gardener")) : landedPrUrl(landed, "host-resource gardener");
 }
 
 /** The production filer: a fresh checkout per filing, always disposed, the shard landed through it —

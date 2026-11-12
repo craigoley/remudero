@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 2.5
   status: queued
@@ -25,10 +25,12 @@
     Retry outcomes: 4 recovered on retry, 0 also failed on retry.
     Evidence: test.flake_retry ledger rows, 4 read from the PR coverage-shard logs and 0 from fix-round reroutes the PR's diff cannot reach.
   risk_ruling:
-    verdict: "high"
-    action: escalate
-    confidence: 0.55
+    verdict: "low"
+    action: proceed
+    confidence: 0.8
     reasons:
-      - "high-risk verdict at confidence 0.55 — on the change's description/files alone, no diff was read — The filed rationale says 4 retries recovered, but the harness-computed evidence says 1 recovered over 3 PRs, so the filing and the harness disagree.; on the change's description/files alone, no diff was read — The task asserts a specific cause (\"the cause ... is fixed\") but names none, and the harness evidence shows main's CI did not fail the test at the bases, so the finding cannot be verified from what is shown.; on the change's description/files alone, no diff was read — The family track record shows 6 declined of 14 machine tasks (Beta mean 0.56), which calls for stricter judgment.; on the change's description/files alone, no diff was read — The declared scope is a single test file with no secrets, auth, deletion, or policy surface, which limits the blast radius. This is why confidence is only moderate."
-    judged_at: "2026-11-11T05:42:55.986Z"
-    pin: "0fa0fadee9d57af7093d384ad7f47ca7b41ffe1909e11a8c517500fcd202bae3"
+      - "Declared files are only test/serve-view-events.test.ts, which exists at the base. No secrets, auth, deploy, merge-policy, or deletion surface appears in the description."
+      - "The acceptance criteria are verifiable by auto proofs (a unit test and a grep). The flake evidence is concrete: 3 distinct PRs whose diffs don't touch the test, and 4 retries that recovered."
+      - "The family track record (7 merged, 6 declined; Beta mean 0.56) is mixed but not alarming. The change is reversible and still passes CI and review."
+    judged_at: "2026-11-12T06:45:01.340Z"
+    pin: "434ab10445f4dca2c555017012d5610670496a04449d7080b3c90d772bbd5a04"

@@ -32,7 +32,7 @@ import { dirname, join, normalize } from "node:path/posix";
 import { censusWalksOf } from "./ci-parity.js";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { readFileIfExists, writeAtomic } from "./fs-race-safe.js";
-import type { GardenerDeps } from "./gardener.js";
+import { landedPrUrl, type GardenerDeps } from "./gardener.js";
 import { ledgerRotationDigests, readLedgerUnionRecordsSync } from "./ledger-union.js";
 import { machineShardLandingGuard, renderMachineShard } from "./machine-filing.js";
 import { retirementHoldsOrigin, taskLandedOnMain } from "./plan.js";
@@ -613,11 +613,11 @@ async function fileIncident(
     const refused = machineShardLandingGuard(deps)(workspace.root, [relativePath]);
     if (refused !== undefined) throw new Error(`flake-incident: task failed lint-plan's machine-filing admission: ${refused}`);
     const stem = (title === "" ? file.split("/").at(-1)! : title).slice(0, 40).toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
-    const prUrl = await workspace.land({
+    const prUrl = landedPrUrl(await workspace.land({
       paths: [relativePath],
       title: `chore(plan): file ${taskId}, a flake incident in ${stem}`.slice(0, 100),
       body: `${subject} failed CI on ${prs.length} pull requests that do not touch it (${prs.map((n) => `#${n}`).join(", ")}), so it is filed once as a flake incident.\n\n## Acceptance\n\n- claim: the incident is recorded as one machine task\n  proof: grep: ${origin.replace(/[.\[\]*^$\\()+?{}|]/g, "\\$&")} in ${relativePath}`,
-    });
+    }), "flake-incident");
     if (!prUrl) throw new Error("flake-incident: task PR was not opened");
     deps.log("flake_incident.filed", {
       origin, task_id: taskId, pr_url: prUrl, file, title, prs, run_ids: runs,
