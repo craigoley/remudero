@@ -124,6 +124,7 @@ test("W1-T12204 criterion 3: proposal provenance is the new task origin, not ano
   assert.equal(diffCitesFeedback(patch("architect"), ID, TASK_PATH), false);
   const nested = patch("architect").replace(`+  title: feedback#${ID}`, `+  description: |\n+    origin: feedback#${ID}`);
   assert.equal(diffCitesFeedback(nested, ID, TASK_PATH), false, "an origin-shaped line inside prose is not the task origin");
+  assert.equal(diffCitesFeedback(patch("[unterminated"), ID, TASK_PATH), false, "malformed YAML cannot prove an origin");
 });
 
 test("W1-T12204 criterion 4: claim evidence reads the origin status in the repository holding the entry", (t) => {
@@ -137,7 +138,7 @@ test("W1-T12204 criterion 6: the legacy public proposal still uses its feedback 
 });
 
 
-test("W1-T12204 criterion 2 and criterion 7: real ops PROPOSE publishes only the new task with a public task proof", async (t) => {
+test("W1-T12204 criterion 7: real ops PROPOSE publishes only the new task with a public task proof", async (t) => {
   const f = fixture(t);
   const result = await f.run(true);
   const branch = f.publicOrigin.git("for-each-ref", "--format=%(refname)", "refs/heads/run-TRIAGE-*").trim();
