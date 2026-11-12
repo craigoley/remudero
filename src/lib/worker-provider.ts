@@ -3933,6 +3933,8 @@ async function cashRequestJson<T>(input: {
   onEnvelope?: (envelope: unknown, attempt: T) => void;
   /** W1-T10856: sees every response's headers (success or failure) before its status is handled. */
   observeHeaders?: (headers: Headers) => void;
+  /** The deadline or an abort ended this reserved attempt before fetch was called, so nothing was sent. */
+  unsent?: (attempt: T, error: unknown) => void;
 }): Promise<{ envelope: unknown; attempt: T }> {
   const { args } = input;
   const timeoutMs = args.requestTimeoutMs ?? OPENWEIGHT_REQUEST_TIMEOUT_MS;
@@ -3948,15 +3950,19 @@ async function cashRequestJson<T>(input: {
     controller.signal.throwIfAborted();
   };
   const timer = setTimeout(timeout, timeoutMs);
+  let current: T | undefined, dispatched = false;
   try {
     for (;;) {
       checkActive();
       if (runtimeInstanceRegistryPrivateFile() !== undefined) await assertInstanceRegistryRuntimeCurrent();
       const attempt = input.next(checkActive);
+      current = attempt;
+      dispatched = false;
       checkActive();
       try {
         const response = await cashAbortable(controller.signal, () => {
           checkActive();
+          dispatched = true;
           return (args.fetchImpl ?? fetch)(input.endpoint, {
             method: "POST", headers: input.headers, body: input.body, signal: controller.signal,
           });
@@ -4005,6 +4011,9 @@ async function cashRequestJson<T>(input: {
         await abortableDelay(error.retryAfterMs, undefined, { signal: controller.signal });
       }
     }
+  } catch (error) {
+    if (current !== undefined && !dispatched) input.unsent?.(current, error);
+    throw error;
   } finally {
     clearTimeout(timer);
     args.signal?.removeEventListener("abort", relay);
@@ -4087,6 +4096,11 @@ export async function sendCashRequest(config: Config, input: CashTransportOption
           attempt.receipt = settleOpenWeightBudget(config, { requestId: attempt.requestId, identity: attempt.identity, actualUsd, atIso: attempt.atIso });
       },
       canContinue: () => attempts < 2,
+      unsent: (attempt, error) => {
+        if (attempt !== pending) return;
+        settle(attempt, { actualUsd: 0, unbilled: true, reason: `not sent: ${error instanceof Error ? error.message : String(error)}` });
+        pending = undefined;
+      },
       chargeFailure: (error) => {
         settle(pending!, { ...(unbilledCashRefusal(error, azureOpenAi429Unbilled) ? { actualUsd: 0, unbilled: true } : {}), reason: error.message });
         pending = undefined;

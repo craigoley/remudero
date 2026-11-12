@@ -105,9 +105,15 @@ test("W1-T12413 criterion 3: a normal-cap refusal sends nothing, and the squeeze
 
 test("W1-T12413 criterion 4: a missed deadline or a caller abort keeps the reservation held, and a late reply still settles", async (t) => {
   const { dir, config } = fixture(t);
+  // The clock holds still, so a slow reservation write cannot use up the deadline before the send;
+  // only the deadline timer ends the wait, and the reply comes after that abort.
+  const held = Date.now();
+  const stillClock = { now: () => held, iso: () => new Date(held).toISOString() };
   const late = await sendCashRequest(config, { deployment: DEPLOYMENT, path: "openai/v1/decisions", body: BODY,
-    source: "fixture", outputTokenCeiling: 16, env, requestTimeoutMs: 40,
-    fetchImpl: async () => { await delay(120); return reply(); } });
+    source: "fixture", outputTokenCeiling: 16, env, requestTimeoutMs: 40, clock: stillClock,
+    fetchImpl: (_url, init) => new Promise<Response>((resolve) => {
+      init?.signal?.addEventListener("abort", () => resolve(reply()), { once: true });
+    }) });
   assert.equal(late.ok, false);
   if (late.ok) return;
   assert.equal(late.reason, "timeout");
@@ -134,6 +140,29 @@ test("W1-T12413 criterion 4: a missed deadline or a caller abort keeps the reser
   if (stopped.ok) return;
   assert.equal(stopped.reason, "aborted");
   assert.equal(stopped.heldUsd, stopped.reservedUsd);
+});
+
+test("W1-T12413 criterion 4: a deadline that passes before the request is sent releases the reservation at zero, and nothing is sent", async (t) => {
+  const { dir, config } = fixture(t);
+  // The reservation is stamped with clock.iso(); moving the clock past the deadline there is a
+  // reservation write that took longer than the whole deadline.
+  let now = Date.now();
+  const clock = { now: () => now, iso: () => { const iso = new Date(now).toISOString(); now += 41; return iso; } };
+  let calls = 0;
+  const outcome = await sendCashRequest(config, { deployment: DEPLOYMENT, path: "openai/v1/decisions", body: BODY,
+    source: "fixture", outputTokenCeiling: 16, env, requestTimeoutMs: 40, clock,
+    fetchImpl: async () => { calls++; return reply(); } });
+  assert.equal(calls, 0);
+  assert.equal(outcome.ok, false);
+  if (outcome.ok) return;
+  assert.equal(outcome.reason, "timeout");
+  assert.ok(outcome.reservedUsd > 0);
+  assert.equal(outcome.heldUsd, 0);
+  assert.equal(outcome.settledUsd, 0);
+  const [row] = Object.values(allowance(dir).reservations);
+  assert.equal(row!.settledUsd, 0);
+  assert.equal(row!.accountingState, "known-unbilled");
+  assert.match(row!.settledReason ?? "", /^not sent: /);
 });
 
 test("W1-T12413 criterion 5: a 429 inside the deadline is sent once more with a new reservation, and the refused attempt stays charged", async (t) => {
