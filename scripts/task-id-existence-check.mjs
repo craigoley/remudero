@@ -847,6 +847,7 @@ export function main(argv) {
     args: argv,
     options: {
       dir: { type: "string", multiple: true },
+      "code-root": { type: "string" },
       "plan-tasks-file": { type: "string", default: "plan/tasks.yaml" },
       "plan-tasks-dir": { type: "string", default: "plan/tasks.d" },
       baseline: { type: "string", default: "scripts/task-id-existence-baseline.json" },
@@ -884,7 +885,20 @@ export function main(argv) {
     planTasksFile: values["plan-tasks-file"],
     planTasksDir: values["plan-tasks-dir"],
   });
-  const reservation = resolveReservedIds(values.remote, cwd);
+  // The selected plan owns its declarations and PR collisions; the public checkout still owns
+  // the one reservation namespace. Never fetch or mutate either checkout here.
+  const codeRoot = values["code-root"];
+  if (codeRoot !== undefined) {
+    try {
+      readFileSync(join(codeRoot, "plan/tasks.yaml"), "utf8");
+      for (const id of scanDeclaredPlanIds(codeRoot)) declaredIds.add(id);
+    } catch {
+      console.error("task-id-existence: FAILED -- the public code root plan is unreadable");
+      process.exitCode = 1;
+      return;
+    }
+  }
+  const reservation = resolveReservedIds(values.remote, codeRoot ?? cwd);
 
   if (!reservation.reachable) {
     console.error(
