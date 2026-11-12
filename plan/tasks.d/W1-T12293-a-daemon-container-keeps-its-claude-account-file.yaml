@@ -1,0 +1,74 @@
+- id: W1-T12293
+  title: "A daemon container keeps its Claude account file"
+  repo: remudero
+  depends_on: []
+  priority: 0.85
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the file that names the Claude login of every daemon container; a wrong copy must never replace a good one
+  band_meaning: blast-radius
+  origin: operator-session#account-file-2026-11-11
+  plan_refs:
+    - W1-T2434
+    - W1-T981
+    - W1-T10511
+  files:
+    - deploy/claude-directory.sh
+    - deploy/serve-container.sh
+    - deploy/recycle-container.sh
+    - deploy/entrypoint.sh
+    - test/deploy/a-daemon-container-keeps-its-claude-account-file.test.ts
+    - test/recycle-container.test.ts
+    - test/account-identity-is-readable.test.ts
+    - test/routing/the-console-claude-login-reaches-the-fleet-store.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "`claude_host_account_file` in deploy/claude-directory.sh prints the Claude directory path with `.json` added (`~/.claude` gives `~/.claude.json`). `RMD_CLAUDE_JSON_PATH` overrides it. It fails when the directory derivation fails"
+      proof: "grep: W1-T12293 criterion 1 in test/deploy/a-daemon-container-keeps-its-claude-account-file.test.ts"
+    - claim: "deploy/serve-container.sh mounts the path that `claude_host_account_file` prints, read-only at /home/node/.claude.json, and gets it from no other derivation"
+      proof: "grep: W1-T12293 criterion 2 in test/routing/the-console-claude-login-reaches-the-fleet-store.test.ts"
+    - claim: "When the host account file exists, deploy/recycle-container.sh mounts it read-only at /home/node/.rmd-claude-account.json, and the runtime contract refuses a container that came up without that mount"
+      proof: "grep: W1-T12293 criterion 3 in test/recycle-container.test.ts"
+    - claim: "When the host has no account file, deploy/recycle-container.sh starts the container as before, with no account file mount, and prints a note that names the path"
+      proof: "grep: W1-T12293 criterion 4 in test/recycle-container.test.ts"
+    - claim: "At container start, when ~/.claude.json is missing and the side file holds `oauthAccount`, deploy/entrypoint.sh copies the side file in. The result has the same bytes, mode 0600, and no temp file is left. One line says it was seeded because the file was missing"
+      proof: "grep: W1-T12293 criterion 5 in test/deploy/a-daemon-container-keeps-its-claude-account-file.test.ts"
+    - claim: "A ~/.claude.json that holds no `oauthAccount` (the thin file the CLI writes when it finds none) is replaced from the side file, and the line says the file held no login"
+      proof: "grep: W1-T12293 criterion 6 in test/deploy/a-daemon-container-keeps-its-claude-account-file.test.ts"
+    - claim: "A ~/.claude.json that holds `oauthAccount` is never replaced, even when the side file differs. A side file that holds no `oauthAccount` is never copied in"
+      proof: "grep: W1-T12293 criterion 7 in test/deploy/a-daemon-container-keeps-its-claude-account-file.test.ts"
+    - claim: "With no side file, or a side file that is not valid JSON, the container starts and the command still runs. No case prints the content of either file"
+      proof: "grep: W1-T12293 criterion 8 in test/deploy/a-daemon-container-keeps-its-claude-account-file.test.ts"
+  rationale: |
+    MEASURED 2026-11-11 on the Azure host, by the operator:
+    - At 11:47Z `claude -p /usage` in `remudero-daemon` printed "Claude configuration file not found at: /home/node/.claude.json. A backup file exists at ...".
+    - `remudero-site-daemon` and `remudero-console-daemon` had no /home/node/.claude.json at all. Both had been up for 14 hours.
+    - The newest backup in `~/.claude/backups` at 11:48Z was 84 bytes: the thin file the CLI writes when it finds none. The last good backups were about 100 KB, from 2026-11-10. So "restore the newest backup" restores the empty file.
+    - At 12:05Z the operator copied the host file into the two containers by hand, through a temp file and a rename.
+    Why it happens:
+    - deploy/recycle-container.sh mounts the host `~/.claude` directory at /home/node/.claude (`CRED_DIR`, from deploy/claude-directory.sh). It does not provide `~/.claude.json`, the CLI's account file beside that directory.
+    - So the file lives only in the container's own layer, and every container recreate loses it.
+    - deploy/serve-container.sh already mounts the host file read-only at /home/node/.claude.json (W1-T2434). Serve only reads it. A daemon cannot use that mount: the CLI writes the file and replaces it by rename, which a read-only or single-file bind mount refuses.
+    - src/lib/account-usage.ts reads `oauthAccount` and `cachedUsageUtilization` from this file. src/lib/worker-home.ts (W1-T981) keeps each worker's own `.claude.json` slot empty and bounds the backups. This task does not change either. It only gives the daemon's own home a file that holds the login.
+  design: |
+    1. deploy/claude-directory.sh gets `claude_host_account_file`: `${RMD_CLAUDE_JSON_PATH:-<claude_host_directory>.json}`, with a trailing slash removed first. The CLI keeps the file beside the directory, so it is the directory path with `.json` added. On a default host this is `~/.claude.json`, the same path serve uses today. A fixture that sets `RMD_CLAUDE_DIR` to a temp directory gets a temp account path too, so no test reads the runner's own file.
+    2. deploy/serve-container.sh sets `CLAUDE_JSON_PATH` from `claude_host_account_file`. The mount, the env var and the absent-file note do not change.
+    3. deploy/recycle-container.sh sets `CLAUDE_ACCOUNT_FILE` from the same function. When it is a regular file, the daemon run gets `-v <file>:/home/node/.rmd-claude-account.json:ro`, and the runtime contract gets `--expect <file> /home/node/.rmd-claude-account.json ro`. When it is absent, the recycle prints a NOTE that names the path and starts as before. The smoke container does not need the file and does not get it.
+    4. deploy/entrypoint.sh runs one step before the `RMD_SKIP_BOOTSTRAP` exit. The target is `$HOME/.claude.json`, the side file is `$HOME/.rmd-claude-account.json`. "Holds a login" means the file parses as JSON and `oauthAccount` is an object (checked with `node -e`).
+       - No side file: print "no host copy" and change nothing.
+       - Target holds a login: print "kept" and change nothing.
+       - Side file holds no login: print "NOT seeded" and change nothing.
+       - Target is missing, or holds no login: copy the side file to a temp file in `$HOME`, set mode 0600, and rename it onto the target. Print "seeded" with the case (missing, or held no login).
+       - Any failure prints one "NOT seeded" line and the boot goes on. The step never prints the content of either file.
+    5. No ledger row at daemon boot. The entrypoint has no ledger writer before the daemon starts, so a row needs a new step, a hand-over to the daemon, and an `rmd status` reader: three more files. The one entrypoint line is in `docker logs`. A later task can add the row.
+    6. Existing tests: test/account-identity-is-readable.test.ts asserts the old `CLAUDE_JSON_PATH` text. Replace that assertion with criterion 1. test/routing/the-console-claude-login-reaches-the-fleet-store.test.ts replaces deploy/claude-directory.sh with a stub that defines only `claude_host_directory`; its stubs must also define `claude_host_account_file`.
+    NOT IN SCOPE: deploy/host-update.sh (its own `CRED_DIR` copy), the worker homes, and restoring from `~/.claude/backups`. deploy/entrypoint.sh is baked into the image, so step 4 takes effect after the next image build.
+  falsifier: |
+    Make the entrypoint copy over a file that holds `oauthAccount`, and criterion 7 must fail. Drop the `--expect` line in recycle-container.sh, and the refusal half of criterion 3 must fail. Mount the side file without `:ro`, and criterion 3 must fail. Derive the account file from `$HOME` in recycle-container.sh, and criterion 3 must fail (its fixture names the file only through `RMD_CLAUDE_DIR`). Restore and require all to pass.
+  note: |
+    reservation hand-off: run-unfiled-1794398465000 -> run-unfiled-1794413364000
+
+    The single-file bind mount keeps the inode the host file had when the container was created. When the host CLI replaces its file, the side file in the container shows the old content until the next recreate. That is acceptable: the side file is read only to seed a missing or thin file, and a recreate binds it again.

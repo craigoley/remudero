@@ -23,7 +23,7 @@
     - test/wiring-ordering-behaviour.test.ts
     - test/arm-ordering.test.ts
     - test/review-status-pending.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "A review writes its outbox entry before it posts its verdict. The entry holds the verdict fields only and no credential"
