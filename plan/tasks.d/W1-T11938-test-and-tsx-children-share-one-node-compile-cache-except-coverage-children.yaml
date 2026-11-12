@@ -1,7 +1,8 @@
 - id: W1-T11938
   title: Test and tsx child processes share one Node compile cache directory so repeated process starts skip V8 parse and compile, and coverage children keep it disabled
   repo: remudero
-  depends_on: []
+  depends_on:
+    - W1-T12401
   priority: 0.6
   type: implement
   verify: auto
@@ -13,28 +14,37 @@
   plan_refs:
     - W1-T11098
     - W1-T11818
+    - W1-T12401
   files:
     - src/lib/test-slot.ts
-    - scripts/list-rule-suites.mjs
     - test/ci/test-children-share-one-compile-cache.test.ts
   status: queued
   attempts: 0
   acceptance:
     - claim: The child environment for test and rule-suite children sets NODE_COMPILE_CACHE to one declared directory on the scratch disk
-      proof: "grep: W1-T11938 criterion 1 in test/ci/test-children-share-one-compile-cache.test.ts"
+      proof: "unit test: W1-T11938 c1 test children get one scratch compile cache"
     - claim: Coverage children still disable the cache, as scripts/test-with-retry.mjs does today
-      proof: "grep: W1-T11938 criterion 2 in test/ci/test-children-share-one-compile-cache.test.ts"
+      proof: "unit test: W1-T11938 c2 coverage children keep the compile cache off"
     - claim: A before and after measurement of a repeated child start on this host is recorded in the PR body
-      proof: "grep: W1-T11938 criterion 3 in test/ci/test-children-share-one-compile-cache.test.ts"
+      proof: "unit test: W1-T11938 c3 a second measured start reuses the cache"
     - claim: An unusable cache directory never fails a child, it runs uncached
-      proof: "grep: W1-T11938 criterion 4 in test/ci/test-children-share-one-compile-cache.test.ts"
+      proof: "unit test: W1-T11938 c4 an unusable cache dir runs the child uncached"
   rationale: |
+    REWIRED 2026-11-12 (architect, clarify run PLAN-clarify-1794468573955): the instrument half moved to W1-T12401, which this task now depends on; files narrowed to the product change in src/lib/test-slot.ts and its regression suite. Risk stays high, verify stays auto, all four claims are unchanged word for word, coverage children keep the cache off, and no hosted gate changes.
+    Settled by lookup: is this already filed or already decided? -> the instrument was not filed anywhere; W1-T12401 is reserved for it. The earlier local proposal W1-T12396 was refused before push for giving criteria 1 to 3 one shared proof and exists in no plan source.
+    Settled by lookup: where does the product change land? -> the test-slot lease's childEnvironment (src/lib/test-slot.ts), which preflight and test-run apply to their children. Rule-suite children inherit it because scripts/list-rule-suites.mjs spawns them with no env of its own (lines 48 and 57), so this task need not edit that script.
+    Settled by lookup: which proof form gives each criterion its own evidence? -> `unit test: <exact title>`, escaped into one --test-name-pattern over test/**/*.test.ts (src/lib/review.ts parseWhitelistedProof); identical proofs across criteria draw the shared-proof warning (src/lib/task-linter.ts sharedProofViolations). Each criterion now names its own title, and the test-file path is not used as a proof.
+    The four titles do NOT resolve on main today. They are the exact literal titles the implementer must give the four tests in test/ci/test-children-share-one-compile-cache.test.ts. Criterion 3's number for the PR body is taken with W1-T12401's measure mode; its test checks that a second measured start with the leased environment reads the cache the first one wrote.
+    Follow-up planning only: this rewire does not close or modify PR #18071 or its branch, and it does not dispatch anything.
+    ORIGINAL RATIONALE:
     OBSERVED 2026-11-10 (preflight research): Node's compile cache is enabled nowhere; NODE_COMPILE_CACHE appears only inside coverageChildEnvironment, which disables it (scripts/test-with-retry.mjs:309). Every preflight, rule suite and test child re-parses and compiles the same modules; about 9 preflights, 20 node --test and 35 run-task processes were live at once.
     - Effect: avoidable CPU on every process start; estimate 10 to 20 percent of child startup, unmeasured.
   design: |
-    Set NODE_COMPILE_CACHE for the non-coverage test and rule-suite child environments to one directory under the scratch disk, created on demand. NOT IN SCOPE: tsx's own transform cache and the node_modules link layout.
+    Set NODE_COMPILE_CACHE for the non-coverage test and rule-suite child environments to one directory under the scratch disk, created on demand, through the test-slot lease's childEnvironment in src/lib/test-slot.ts. Coverage children keep deleting it (scripts/test-with-retry.mjs coverageChildEnvironment, unchanged). Take the before and after numbers with W1-T12401's measure mode and record them in the PR body.
+    Tests go in test/ci/test-children-share-one-compile-cache.test.ts with these exact titles: `W1-T11938 c1 test children get one scratch compile cache`, `W1-T11938 c2 coverage children keep the compile cache off`, `W1-T11938 c3 a second measured start reuses the cache`, `W1-T11938 c4 an unusable cache dir runs the child uncached`.
+    NOT IN SCOPE: tsx's own transform cache, the node_modules link layout, the measurement instrument (W1-T12401), and scripts/list-rule-suites.mjs.
   falsifier: |
-    Delete the variable and criterion 1 must fail. Set it for coverage children and criterion 2 must fail. Restore and require all four to pass.
+    Delete the variable and c1 must fail. Set it for coverage children and c2 must fail. Stop the second measured start from reading the first start's cache and c3 must fail. Make an unusable cache directory fail the child and c4 must fail. Restore and require all four to pass.
   note: |
     reservation hand-off: run-unfiled-1794269694199 -> run-unfiled-1794269694199
     Reserved with rmd next-task-id (--count 9 and 1 on run-unfiled-1794269694199). Hand-built by the operator's choice (rulings 2026-11-10: slim serve, lighten preflight with no hard caps, janitor trims old worktrees). Check refs/rmd-dispatch/<id> and any run branch before building.

@@ -934,6 +934,8 @@ export function queueJudgeGardenSpec(
       }) as GardenCheckout["land"];
       return {
         paths,
+        // W1-T12221: the judge matches its predictions on `pr_url`, so its land keeps its own PR.
+        sealedLanding: false,
         title: `chore(plan): queue judge re-ranks ${landed.length} task(s) by measured cost of delay`,
         body: [
           "The queue judge (W1-T9925) re-ranks these queued tasks by measured cost of delay. Close this PR to decline them.", "",
