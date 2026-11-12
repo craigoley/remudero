@@ -1151,7 +1151,20 @@ for repo in "${RETAINED_CHECKOUTS[@]+"${RETAINED_CHECKOUTS[@]}"}"; do
       skipped_worktrees=$((skipped_worktrees+1)); log "SKIP unverified-activity $repo"; continue;
     }
     activity_age=$(( (NOW - activity_stamp) / 3600 ))
-    if [ "$activity_age" -lt "$WORKTREE_AGE_HOURS" ]; then
+    # A linked worktree that is clean, whose HEAD GitHub holds, and whose pull
+    # requests are all merged or closed has no work in progress for the six
+    # hours to protect. Every other test below still applies; any answer that
+    # cannot be read leaves the six-hour rule of today.
+    finished=0; retire_age="${activity_age}h"
+    if [ -f "$marker" ] \
+      && finished_status=$(rmd_retirement_git "$repo" status --porcelain --untracked-files=all 2>/dev/null) \
+      && [ -z "$finished_status" ] \
+      && finished_head=$(rmd_retirement_git "$repo" rev-parse --verify HEAD 2>/dev/null) \
+      && rmd_workspace_published "$repo" \
+      && rmd_commit_pulls_finished "$repo" "$finished_head"; then
+      finished=1; retire_age="pull-request-finished"
+    fi
+    if [ "$finished" != 1 ] && [ "$activity_age" -lt "$WORKTREE_AGE_HOURS" ]; then
       skipped_worktrees=$((skipped_worktrees+1)); log "SKIP recent-file-activity ${activity_age}h $repo"; continue
     fi
     refresh_process_snapshot || { log "SKIP unverified process snapshot $repo"; continue; }
@@ -1200,7 +1213,7 @@ for repo in "${RETAINED_CHECKOUTS[@]+"${RETAINED_CHECKOUTS[@]}"}"; do
     }
     head_file=$(rmd_retirement_git "$repo" rev-parse --path-format=absolute --git-path HEAD 2>/dev/null) || head_file=""
     head_stamp=$(artifact_mtime "$head_file" 2>/dev/null) || head_stamp=0
-    if [ "$head_stamp" -eq 0 ] || [ "$((NOW - head_stamp))" -lt "$((WORKTREE_AGE_HOURS * 3600))" ]; then
+    if [ "$head_stamp" -eq 0 ] || { [ "$finished" != 1 ] && [ "$((NOW - head_stamp))" -lt "$((WORKTREE_AGE_HOURS * 3600))" ]; }; then
       log "SKIP recent-or-unverified-git-head $repo"; continue
     fi
     if [ -n "$branch" ] && ! rmd_retirement_git "$repo" show-ref --verify --quiet "refs/heads/$branch"; then
@@ -1241,7 +1254,7 @@ for repo in "${RETAINED_CHECKOUTS[@]+"${RETAINED_CHECKOUTS[@]}"}"; do
         fi
         latest_activity=$(checkout_activity_mtime "$repo") || latest_activity=0
         latest_age=$(( (NOW - latest_activity) / 3600 ))
-        if [ "$latest_activity" -eq 0 ] || [ "$latest_age" -lt "$WORKTREE_AGE_HOURS" ]; then
+        if [ "$latest_activity" -eq 0 ] || { [ "$finished" != 1 ] && [ "$latest_age" -lt "$WORKTREE_AGE_HOURS" ]; }; then
           skipped_worktrees=$((skipped_worktrees+1)); log "SKIP recent-before-remove ${latest_age}h $repo"; continue
         fi
         if ! status=$(rmd_retirement_git "$repo" status --porcelain --untracked-files=all 2>/dev/null); then
@@ -1256,8 +1269,11 @@ for repo in "${RETAINED_CHECKOUTS[@]+"${RETAINED_CHECKOUTS[@]}"}"; do
         if [ "$current_head" != "$head" ] || ! rmd_workspace_published "$repo" head 1; then
           log "SKIP ref-changed-or-not-proven-published-before-remove $repo"; continue
         fi
+        if [ "$finished" = 1 ] && ! rmd_commit_pulls_finished "$repo" "$current_head"; then
+          log "SKIP pull-request-unfinished-before-remove $repo"; continue
+        fi
         head_stamp=$(artifact_mtime "$head_file" 2>/dev/null) || head_stamp=0
-        if [ "$head_stamp" -eq 0 ] || [ "$(( $(date +%s) - head_stamp ))" -lt "$((WORKTREE_AGE_HOURS * 3600))" ]; then
+        if [ "$head_stamp" -eq 0 ] || { [ "$finished" != 1 ] && [ "$(( $(date +%s) - head_stamp ))" -lt "$((WORKTREE_AGE_HOURS * 3600))" ]; }; then
           log "SKIP recent-or-unverified-git-head-before-remove $repo"; continue
         fi
         removed_link_paths=()
@@ -1282,14 +1298,14 @@ for repo in "${RETAINED_CHECKOUTS[@]+"${RETAINED_CHECKOUTS[@]}"}"; do
         fi
         if rmd_retirement_git "$common_repo" worktree remove "$repo"; then
           removed_worktrees=$((removed_worktrees+1)); reclaimed_kb=$((reclaimed_kb+kb))
-          log "REMOVED-WORKTREE ${activity_age}h $((kb/1024))M $repo (branch=$branch retained)"
+          log "REMOVED-WORKTREE ${retire_age} $((kb/1024))M $repo (branch=$branch retained)"
         else
           restore_dependency_symlinks
           skipped_worktrees=$((skipped_worktrees+1)); log "SKIP git-remove-failed $repo"
         fi
       else
         planned_worktrees=$((planned_worktrees+1)); estimated_kb=$((estimated_kb+kb))
-        log "WOULD-REMOVE-WORKTREE ${activity_age}h $((kb/1024))M $repo (branch=$branch retained)"
+        log "WOULD-REMOVE-WORKTREE ${retire_age} $((kb/1024))M $repo (branch=$branch retained)"
       fi
     elif [ -d "$marker" ]; then
       # A standalone clone owns objects possibly borrowed by other accounts.

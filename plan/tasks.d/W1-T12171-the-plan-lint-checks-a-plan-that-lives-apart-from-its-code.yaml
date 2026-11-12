@@ -21,7 +21,7 @@
   # refusal-amendment (W1-T12171, run work-fix-dispatch-W1-T12171-1794458069721-f730@b5a5cf6b9495ee598534c20add69b3667a7b6557, 2026-11-12T05:25:11.125Z): the worker refused criterion 1 [needs-operator-input] — proposed add-precondition: record the operator decision the worker needs as a precondition, then re-dispatch
   #   worker evidence: The only remedy is a PR-body edit, which needs `gh` or REST access that this no-shell round doesn't have.
   #   this task is held from dispatch until its record changes; an Architect must make the change above
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "With the option --code-root, the lint reads the plan from the plan repository and resolves the paths in files, in proofs and in call-site criteria in the code root"

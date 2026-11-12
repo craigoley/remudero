@@ -1,0 +1,55 @@
+- id: W1-T12418
+  title: "The judge corpora replay through a named model in a Message Batch on the Anthropic API lane"
+  repo: remudero
+  depends_on:
+    - W1-T12414
+  priority: 2.5
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # a new paid lane through the secret boundary; offline only, no judge reads it
+  band_meaning: span
+  origin: operator-session#decision-models-2026-11-12
+  plan_refs:
+    - W1-T10913
+    - W1-T12414
+    - W1-T12416
+    - W1-T2699
+  files:
+    - src/lib/judge-replay-batch.ts
+    - src/lib/secret-boundary.ts
+    - src/lib/ledger-steps.ts
+    - src/lib/producer-identity.ts
+    - src/run-task.ts
+    - docs/cli-reference.md
+    - test/worker/sandbox/the-judge-corpora-replay-through-a-named-model-in-a-batch.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "A replay reads test/fixtures/machine-judge-probes.json and the risk-judge disposition fixtures, and sends each case as one request of one Message Batch to a named model, with its expected answer kept beside it"
+      proof: "grep: W1-T12418 criterion 1 in test/worker/sandbox/the-judge-corpora-replay-through-a-named-model-in-a-batch.test.ts"
+    - claim: "The batch is sent by the daemon through the secret boundary. A worker environment never holds the key, and the request is refused when the key is absent"
+      proof: "grep: W1-T12418 criterion 2 in test/worker/sandbox/the-judge-corpora-replay-through-a-named-model-in-a-batch.test.ts"
+    - claim: "The batch reserves its whole cost at the batch price before it is sent, and settles from each result's usage"
+      proof: "grep: W1-T12418 criterion 3 in test/worker/sandbox/the-judge-corpora-replay-through-a-named-model-in-a-batch.test.ts"
+    - claim: "The results are written as recorded typed answers that W1-T12414's scorer reads, keyed by the model id"
+      proof: "grep: W1-T12418 criterion 4 in test/worker/sandbox/the-judge-corpora-replay-through-a-named-model-in-a-batch.test.ts"
+    - claim: "The replay verb calls the batch"
+      proof: "grep: replayJudgeCorpus( in src/run-task.ts"
+  rationale: |
+    OVERLAP: W1-T10913 (queued) also edits src/run-task.ts and docs/cli-reference.md, for the field-trials flags only. This task adds a different verb; the two touch different entries of the command registry.
+    WHY: W1-T12414 scores answers per model, but live shadow rows accrue slowly. A replay of the existing judge corpora gives each candidate a first record offline, at batch price.
+    READ 2026-11-12 in the operator's decision-model handoff and re-read on the vendor pages (handoff phase 2):
+    - Message Batches cost 50% of the standard price on the Anthropic API. Microsoft Foundry does not support Message Batches. The Haiku 5.5 rows are $0.10 input and $0.50 output per 1M tokens up to 100K.
+    - Haiku 5.5 is eligible for zero data retention, BUT Message Batches are NOT zero-retention: batch prompts are kept for 29 days. The corpora must hold nothing sensitive, and the replay says so in its output.
+    - OpenAI Decisions is not a Batch endpoint, so the Decisions candidates cannot go through any batch. They replay through W1-T12416's single requests instead, at their own price.
+    READ 2026-11-12 at origin/main f93618eab: package.json has only @anthropic-ai/claude-agent-sdk (no @anthropic-ai/sdk). src/lib/env.ts uses an Anthropic API key only for the overflow valve. src/lib/secret-boundary.ts (W1-T2699) keeps sentinels in workers and swaps in the real token in the daemon proxy, with boundary.request rows; MODEL_HOST_DEFAULT is api.anthropic.com. risk-judge-eval.ts replays the risk fixtures (test/fixtures/risk-judge-dispositions/, 9 YAML) with no model call.
+  design: |
+    Add src/lib/judge-replay-batch.ts with `replayJudgeCorpus(config, {model, corpus})`. It builds one batch of cases, reserves the batch cost, sends it from the daemon through the boundary proxy, polls with the daemon's clock until the batch ends, settles from each result's usage and writes one recorded typed answer per case. Add `rmd judge-replay --model <id> --corpus <name>`.
+    OPERATOR DECISION, recorded here: the official Anthropic SDK versus raw HTTP through the budgeted transport. Recommendation: the budgeted transport, so the reservation and the boundary rows stay one mechanism. The builder asks before adding the SDK.
+    NOT IN SCOPE: any live judge, any gate, and the Decisions candidates (no batch).
+  falsifier: |
+    Send the key from a worker environment and criterion 2 must fail. Send before the reservation and criterion 3 must fail. Restore and require both to pass.
+  note: |
+    Ids reserved for run-unfiled-1794493022000 with ~/rmd-work/bin/reserve-id.sh. Priority below the other decision-model tasks. The fleet builds it after W1-T12414 merges.

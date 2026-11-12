@@ -1,0 +1,68 @@
+- id: W1-T12414
+  title: "Recorded typed answers are scored with Brier, log-loss and agreement, per role and per model"
+  repo: remudero
+  depends_on:
+    - W1-T12416
+  priority: 1.4
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # a new scorer and a new field in the judge calibration body; no judge, gate or route reads it
+  band_meaning: span
+  origin: operator-session#decision-models-2026-11-12
+  plan_refs:
+    - W1-T12187
+    - W1-T11075
+    - W1-T12413
+    - W1-T12416
+    - W1-T4672
+    - W1-T4629
+    - W1-T10858
+  files:
+    - src/lib/typed-answer-scores.ts
+    - src/lib/judge-calibration.ts
+    - src/lib/analytics-route.ts
+    - test/review/recorded-typed-answers-are-scored-per-role-and-model.test.ts
+    - test/an-analytics-checkpoint-keeps-folds-not-rows.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "A recorded typed answer is one of four kinds: a distribution over the declared options, a single answer with no distribution, an abstention, or a rejection. A distribution whose sum is outside TYPED_JUDGMENT_SUM_TOLERANCE, or that names an option outside the declared set, is a rejection and is never coerced"
+      proof: "grep: W1-T12414 criterion 1 in test/review/recorded-typed-answers-are-scored-per-role-and-model.test.ts"
+    - claim: "For each role and each model, the scorer gives the number of answers, the share that agree with the current judge, the share that abstain and the share rejected. A single answer counts toward agreement only and gets no Brier or log-loss figure"
+      proof: "grep: W1-T12414 criterion 2 in test/review/recorded-typed-answers-are-scored-per-role-and-model.test.ts"
+    - claim: "A distribution with a known outcome gets a multi-class Brier score and a log-loss with the probability clamped away from zero. A distribution with no outcome is counted and is not scored against the current judge's answer as if it were an outcome"
+      proof: "grep: W1-T12414 criterion 3 in test/review/recorded-typed-answers-are-scored-per-role-and-model.test.ts"
+    - claim: "A score question of 2 to 10 ordered levels is scored on its levels, and an abstention, either a native refusal or a declared cannot-tell option, is its own outcome and is never scored as a wrong answer"
+      proof: "grep: W1-T12414 criterion 4 in test/review/recorded-typed-answers-are-scored-per-role-and-model.test.ts"
+    - claim: "The calibration buckets group distributions by the probability of their top option, and each bucket gives its count, its mean probability and its observed rate"
+      proof: "grep: W1-T12414 criterion 5 in test/review/recorded-typed-answers-are-scored-per-role-and-model.test.ts"
+    - claim: "Every figure is keyed by role and model id. Two models in one role are never pooled, and a model with no rows has no figure"
+      proof: "grep: W1-T12414 criterion 6 in test/review/recorded-typed-answers-are-scored-per-role-and-model.test.ts"
+    - claim: "The judge calibration body folds the live shadow_judge.paired rows through the scorer, so each shadow surface and shadow model shows its agreement"
+      proof: "grep: W1-T12414 criterion 7 in test/review/recorded-typed-answers-are-scored-per-role-and-model.test.ts"
+    - claim: "The judge calibration reader calls the scorer"
+      proof: "grep: scoreTypedAnswers( in src/lib/judge-calibration.ts"
+  rationale: |
+    WHY: the decision-model work (operator handoff 2026-11-12) needs a measured record before any judge changes model: "no gate decision changes until measurement earns it", and "calibration is per model; a threshold is stored with its model id". W1-T12187 measures agreement only. Nothing scores a probability distribution over judge options, and nothing keeps figures apart per model.
+    READ 2026-11-12 in the source at origin/main f93618eab:
+    - src/lib/shadow-judge.ts:76 writes `shadow_judge.paired` rows with the shadow model and `agreement`, for the surfaces review, risk and verify-human (:4). Production callers: src/cli/commands/review.ts:1139, src/cli/commands/run-task-verb.ts:8313 and src/run-task.ts:36982. Its reader `measureShadowJudgeAgreement` (:97) has no production caller, and no file outside shadow-judge.ts reads those rows.
+    - src/lib/self-forecast.ts:99-130 `scoreSelfForecasts` already gives a Brier score and a binned reliability curve per (model, task class) for a yes/no forecast. This task reuses its bin shape. CORRECTION to the handoff, which said nothing in src scores probabilities: this one does, for yes/no forecasts only; there is no log-loss and no multi-class score.
+    - src/lib/typed-judgment.ts:42 TYPED_JUDGMENT_SUM_TOLERANCE is 0.01, and its parser rejects, never coerces, an out-of-set distribution (:16, :89).
+    - src/lib/judge-calibration.ts folds review and risk verdict rows (:86 `judgeCalibrationRow`, :170 `foldJudgeVerdictRow`) and gives kappa and PPI. src/lib/analytics-route.ts:1611 folds those rows and :2862 serves the body. That body is this task's first consumer.
+    - src/lib/verdict-calibration.ts joins review verdicts to reverts and follow-up fixes. That join is the outcome source for the review surface where it fits.
+    READ 2026-11-12 on the vendors' pages by the operator session (handoff phase 2, corrections 7 and 12, and item 4): OpenAI Decisions choices take 2 to 255 options and score questions 2 to 10 levels, with a per-question refusal. Microsoft-Decision-1 has no refusal type; the caller declares a cannot-tell option. The open-weight deployments on Azure (gpt-oss-120b, DeepSeek-V4-Flash, DeepSeek-V4.1-Flash, Kimi-K2.6) document no logprobs, so as judges they give one answer. That is why criterion 2 scores a single answer as agreement only.
+    OBSERVED 2026-11-12 by the operator session: those four open-weight deployments have spare quota on the default cash resource (450K, 300K, 300K and 300K tokens per minute). Their single answers will be the first rows this scorer sees beside the existing shadow rows, before any decision model is deployed.
+  design: |
+    Add src/lib/typed-answer-scores.ts with `scoreTypedAnswers(rows, opts)`. Each row is one recorded answer: role, model, input digest, the declared options (or ordered levels), the answer (distribution, single, abstain or rejected), the current judge's answer, and an outcome where one is known. The scorer works on any recorded typed answers: a decision model's distribution and a generative judge's single answer.
+    Agreement compares the top option of a distribution, or the single answer, with the current judge's answer. Brier is the sum over options of (p - 1[outcome])^2. Log-loss is -ln(max(p_outcome, 1e-6)). A score question is scored over its levels as options. Buckets reuse the bin shape of `scoreSelfForecasts` on the top option's probability.
+    A reader in src/lib/judge-calibration.ts maps each `shadow_judge.paired` row to a single-answer row (role = surface, model = shadow model) and adds `typedAnswerScores` to the calibration body. The fold keeps its JSON form so the analytics checkpoint still round-trips; the builder changes analytics-route.ts only if the checkpoint needs it.
+    The scorer reads W1-T12416's `decision.answered` rows (distributions) beside the shadow rows (single answers). It works on any recorded typed answers. This task is useful before B lands (B is W1-T12416), because the shadow rows exist now.
+    NOT IN SCOPE: storing or reading a threshold (the later task that lets a shadow name a decision model stores each threshold with its model id); any gate, route or gardener that reads these figures; a new ledger step.
+  falsifier: |
+    Coerce an out-of-set distribution and criterion 1 must fail. Give a single answer a Brier figure and criterion 2 must fail. Score a distribution against the current judge as an outcome and criterion 3 must fail. Score an abstention as wrong and criterion 4 must fail. Pool two models in one role and criterion 6 must fail. Restore and require all to pass.
+  note: |
+    Ids reserved for run-unfiled-1794493022000 with ~/rmd-work/bin/reserve-id.sh. Filed with W1-T12413, W1-T12415, W1-T12416, W1-T12417, W1-T12418 and W1-T12419.
+    B in the operator's handoff is W1-T12416. The figures here feed W1-T12417's per-model bar and W1-T12419's triage record.
+    The test folder came from `rmd test-place` on a draft with low confidence (review, runner-up daemon-loop). The builder runs it again on the real test and amends the path if it moves.
