@@ -1,0 +1,67 @@
+- id: W1-T12509
+  title: "The merge-time ratchet verdict counts every recorded-count gate on the merged tree, not only the clock-signature gate"
+  repo: remudero
+  depends_on: []
+  priority: 1.2
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the one verdict the arm, the direct merge and the armed re-judge consult; a false clean lets two pull requests cross a ceiling together
+  band_meaning: blast-radius
+  origin: operator-session#checking-off-the-author-path-2026-11-13
+  plan_refs:
+    - W1-T9962
+    - W1-T5522
+  files:
+    - src/lib/merged-ratchet-verdict.ts
+    - test/a-ceiling-is-rejudged-against-current-main-before-a-merge.test.ts
+    - test/gardeners/two-pull-requests-that-cross-a-ceiling-together-are-held-at-merge-time.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "COUNTED_RATCHET_GATES holds clock-signature, source-size, fixture-copy, deps-interface, affected-reach, learnings-budget, claude-md-budget and house-layout. Each is counted on the merge-tree of (main tip, pull request head) with that gate's own counter, never a copy"
+      proof: "grep: W1-T12509 criterion 1 in test/gardeners/two-pull-requests-that-cross-a-ceiling-together-are-held-at-merge-time.test.ts"
+    - claim: "Two pull requests that each pass a gate on their own base, and together cross its recorded value on the merged tree, give the verdict `crossing` with one row naming the gate, the path or field, the merged count and the ceiling. One test per gate in criterion 1"
+      proof: "grep: W1-T12509 criterion 2 in test/gardeners/two-pull-requests-that-cross-a-ceiling-together-are-held-at-merge-time.test.ts"
+    - claim: "A counter that throws, or a tree it cannot read, gives `unread` with the gate named in the reason, never `clean`"
+      proof: "grep: W1-T12509 criterion 3 in test/gardeners/two-pull-requests-that-cross-a-ceiling-together-are-held-at-merge-time.test.ts"
+    - claim: "UNCOUNTED_RATCHET_GATES keeps only comment-load (advisory), coverage and mutation (run-derived), each with its class"
+      proof: "grep: W1-T12509 criterion 4 in test/gardeners/two-pull-requests-that-cross-a-ceiling-together-are-held-at-merge-time.test.ts"
+    - claim: "invariant:no-clean-without-count — a gate is reported clean only when it was counted on both trees; every other answer is `unread` or a named uncounted gate"
+      proof: "grep: W1-T12509 criterion 5 in test/gardeners/two-pull-requests-that-cross-a-ceiling-together-are-held-at-merge-time.test.ts"
+  rationale: |
+    Main's branch protection is not strict, so two pull requests green on their own bases can cross a recorded ceiling together.
+    The merge-time verdict was built for that, but it counts only one gate.
+    READ at origin/main 6cf453f7a:
+    - GitHub: main's required checks are remudero-review, ci-gate and security-merge-policy, with strict false.
+    - src/lib/merged-ratchet-verdict.ts:43 COUNTED_RATCHET_GATES is ["clock-signature"]. :45-56 UNCOUNTED_RATCHET_GATES lists
+      comment-load (advisory), coverage and mutation (run-derived), source-size (delta-only), and fixture-copy, house-layout,
+      deps-interface, affected-reach, learnings-budget and claude-md-budget (population).
+    - :149 `judgeMergedRatchets` builds rows only from `clockRows`. src/lib/arm-auto-merge.ts:852-860 and src/lib/sweep.ts:25654
+      call it before an arm or a merge.
+    - doctrine/ci-and-merging/ratchet-collision.md records #10695 and #10697, which each passed comment-load on their own base
+      and together took src/lib/daemon.ts to 1760 comment lines over 1750, then #10712 and #10724.
+    WHY NOW: the operator asked that checking move off the per-push author path. The merge-time verdict is what then stops a
+    collision, so it must count every recorded-count gate it can count from two trees.
+    CHECKED for overlap on origin/main plan/tasks.d and open pull request heads: no queued or blocked task names
+    merged-ratchet-verdict, COUNTED_RATCHET_GATES or a merged-tree count. W1-T9962 and W1-T5522 are merged.
+  design: |
+    1. For each gate in criterion 1, import its counter from its script (as the module imports scripts/clock-signature-ratchet.mjs)
+       and count on the merged tree and on main's tip.
+    2. Single-file and per-path gates (source-size, learnings-budget, claude-md-budget) read only the paths they count, through
+       `mergedRatchetReadSet`.
+    3. Population gates (fixture-copy, deps-interface, affected-reach, house-layout) read the tree's file list with
+       `git ls-tree -r` and the blobs they need with one `git cat-file --batch` per tree, as the module reads blobs today. Bound
+       each count; a count past its bound is `unread` for that gate.
+    4. Keep `judgeCount` for the crossing and stale-lowering verdicts. Do not change any baseline file or the callers. Update the W1-T9962 test that pins the counted list.
+    INVARIANT no-clean-without-count: a gate is reported clean only when it was counted on both trees; every other answer is
+    `unread` or a named uncounted gate.
+    NOT IN SCOPE: comment-load, which the operator made advisory (#14087); coverage and mutation, which need a test run.
+  falsifier: |
+    Leave a gate out of COUNTED_RATCHET_GATES and its criterion 2 test must fail. Report `clean` when a counter throws and
+    criterion 3 must fail. Restore and require all five to pass.
+  note: |
+    Id W1-T12509 reserved for run-unfiled-1794582098000 with ~/rmd-work/bin/reserve-id.sh.
+    If one counter cannot be imported without a worktree, the builder files a follow-up for that gate and leaves it uncounted
+    with a reason, rather than copying the counter.
