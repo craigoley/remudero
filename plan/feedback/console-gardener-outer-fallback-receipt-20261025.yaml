@@ -38,10 +38,11 @@ raw: "Approved Console gardener-telemetry follow-up, submitted by Codex for the
   Trials and the canceled heartbeat remain out of scope."
 attachments: []
 origin: cli
-status: new
+status: rejected
 reply_to: null
 proposal_pr: null
 summary: null
 expansion: null
 submission_key: console-followup:008cfbbb-c1f0-4ad8-93a7-9777ae2bcd3f
 thread_id: null
+answered_by: null
