@@ -82,6 +82,24 @@ type SeedRow = Omit<LedgerStepRow, "family">;
 // `src/lib/review.ts`, `src/lib/sweep.ts` and `src/lib/panel-actions.ts` at 2026-09-07.
 const SEED_ROWS: readonly SeedRow[] = [
   {
+    step: "recycle.inflight_reclaimed",
+    meaning: "The recycle script moved an inflight lock to inflight/reclaimed/ because a process on this same host wrote it and that process is gone: its pid is dead, or the pid now belongs to a process that started after the lock. A lock whose process is alive with the lock's start time is never moved, whatever its age.",
+    writer: ["reclaim_dead_inflight_locks"],
+    outcomes: ["pid-dead", "pid-reused"],
+  },
+  {
+    step: "host_cleanup.inflight_reclaimed",
+    meaning: "The host janitor (deploy/rmd-host-cleanup.sh), in its six-hour or hourly pass, moved an inflight lock to inflight/reclaimed/ on the same test as recycle.inflight_reclaimed: written on this host, and its pid is dead or was used again. Locks of other hosts and of live processes stay.",
+    writer: ["reclaim_host_inflight_locks"],
+    outcomes: ["pid-dead", "pid-reused"],
+  },
+  {
+    step: "daemon.inflight_host_lock_silent",
+    meaning: "The daemon found an inflight lock that a host process wrote, whose run wrote no ledger row for longer than the longest closed quiet gap in the ledger window. The daemon cannot test a host pid from its container, so it only reports: the lock stays in place. One row per bound of silence, not per poll.",
+    writer: ["reportSilentHostLocks"],
+    outcomes: ["reported"],
+  },
+  {
     step: "issue_revalidation.attempt_spend",
     meaning: "One already-executed issue-revalidation judge attempt's own monetary evidence before verdict parsing, deduplicated by reported attempt identity. Unknown and unstarted prices stay unknown; API zero is reported evidence, subscription notional is separate, and no figure is an invoice or task outcome.",
     writer: ["issueRevalidationJudgeText"],
