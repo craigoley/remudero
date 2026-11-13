@@ -15,6 +15,7 @@
     - W1-T9962
   files:
     - src/lib/gate-gardener.ts
+    - src/lib/plan.ts
     - test/gardeners/the-gate-gardener-files-one-cleanup-task-for-a-gate-near-its-limit.test.ts
   status: queued
   attempts: 0
@@ -55,6 +56,10 @@
     3. Exact-count baselines: read the window's commits of each baseline file and propose when a recorded value rose.
     4. File through the gardener's existing task-id minting and landing (`prepareGardenTaskIds`, `machineShardLandingGuard`),
        one task per gate and row, deduplicated by origin.
+    5. Admission (amended 2026-11-13): src/lib/plan.ts gains a parked-proposal shape for a `headroom:` origin, as comment
+       compression has (`isCommentCompressionShape`): one existing subject and then its new regression test, or one
+       existing test file that carries the regression. Without it, machine-filing admission refuses every headroom draft
+       as "not selectable by runnableCandidates" (verify:human).
     NO-INVARIANTS: a new proposal class; criterion 4 pins that it writes no baseline.
     NOT IN SCOPE: changing any ceiling or share; coverage and mutation floors; comment volume, which
     `commentCompressionCandidates` already files and which is advisory, not a merge ceiling.
