@@ -60,7 +60,7 @@ function makeOrigin(feedbackId: string): string {
   writeFileSync(join(seed, "MASTER-PLAN.md"), "# MASTER-PLAN\n", "utf8");
   writeFileSync(
     join(seed, "plan", "tasks.yaml"),
-    ["- id: W1-T4", '  title: "a seed task the plan loader accepts"', "  repo: remudero", "  depends_on: []", "  type: implement", "  verify: auto", "  status: queued", "  attempts: 0", ""].join("\n"),
+    ["- id: W1-T4", '  title: "a seed task the plan loader accepts"', "  repo: remudero", "  depends_on: []", "  type: implement", "  design: |", "    NO-INVARIANTS: synthetic lint fixture with no inherited behavior to preserve", "  verify: auto", "  status: queued", "  attempts: 0", ""].join("\n"),
   );
   writeFileSync(
     join(seed, "plan", "feedback", `${feedbackId}.yaml`),
@@ -308,6 +308,8 @@ test("W1-T1011: a proposed verdict reserves the id before the shard is written",
               "  origin: architect",
               "  depends_on: []",
               "  type: implement",
+              "  design: |",
+              "    NO-INVARIANTS: synthetic lint fixture with no inherited behavior to preserve",
               "  verify: auto",
               "  status: queued",
               "  attempts: 0",
