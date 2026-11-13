@@ -9,13 +9,13 @@
  * `daemonCommand` over a checkout whose `plan/policy.yaml` names another bound.
  */
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
 import { ghShim } from "#test/helpers/gh-shim.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import type { OpenPrView, SweepDeps } from "#src/lib/sweep.js";
@@ -24,13 +24,13 @@ import type { DaemonSummary } from "#src/lib/daemon.js";
 // The daemon reads `plan/policy.yaml` under the checkout the argv module finds. Point it at a fixture checkout
 // before the modules load; the fixture's policy is the real one with another sweep bound.
 const CHANGED_BOUND_MS = 400_000;
-const checkout = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}t12357-checkout-`));
+const checkoutRepo = gitRepo({ kind: "t12357-checkout", seedCommit: false });
+const checkout = checkoutRepo.dir;
 mkdirSync(join(checkout, "plan"), { recursive: true });
 const realPolicy = readFileSync(join(REPO_ROOT, "plan", "policy.yaml"), "utf8");
 const changedPolicy = realPolicy.replace(/^(sweepWallClockBoundMs:\n {2}value: )\d+$/m, `$1${CHANGED_BOUND_MS}`);
 writeFileSync(join(checkout, "plan", "policy.yaml"), changedPolicy);
-execFileSync("git", ["init", "-q", checkout]);
-execFileSync("git", ["-C", checkout, "remote", "add", "origin", "https://github.com/craigoley/remudero.git"]);
+checkoutRepo.addRemote("origin", "https://github.com/craigoley/remudero.git");
 const savedArgv = [...process.argv];
 process.argv.push("--repo-root", checkout);
 // The run-task test seam, not a direct `src/run-task.ts` import: the reach ratchet caps direct importers.
