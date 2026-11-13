@@ -24,6 +24,7 @@ import type { Mount, Mounts } from "./mounts.js";
 import { resolveRiskJudgeMount } from "./risk-judge.js";
 import { spawnWorker, type SpawnWorkerArgs, type WorkerResult } from "./worker.js";
 import { benchmarkNonDispatchSpawn } from "./benchmark-run.js";
+import type { ConsoleCorrection } from "./console-feedback.js";
 
 /** `plan/feedback/` — the durable, diffable feedback inbox (MASTER-PLAN §7B, W1-T40). One entry
  * per item: id, timestamp, raw text, attachments, origin, status. Capture is pure filesystem
@@ -128,6 +129,10 @@ export interface FeedbackEntry {
   thread_id?: string | null;
   /** W1-T7754: immutable original-source evidence, not a replayable authority grant. */
   contribution?: FeedbackContribution | null;
+  /** W1-T11104: an operator's explicit console wording correction — bounded source facts bound to
+   *  one native conversation revision. Immutable once captured; absent on every other entry. It is
+   *  evidence for the weekly docket, never a reply, a grill answer or an authority grant. */
+  console_correction?: ConsoleCorrection | null;
 }
 
 // ── Decision summaries (W1-T313) ─────────────────────────────────────────────
@@ -943,6 +948,9 @@ export interface CaptureFeedbackOptions {
   contribution?: FeedbackContributionInput;
   admission?: FeedbackAdmissionContext;
   derivedFrom?: { entry: Pick<FeedbackEntry, "id" | "origin" | "contribution">; relayedBy: string };
+  /** W1-T11104: the explicit wording correction, ALREADY BOUND to the native conversation by the
+   *  caller (`bindConsoleCorrection`); this function verifies nothing about it. */
+  consoleCorrection?: ConsoleCorrection;
 }
 
 /** Find an existing feedback entry by its console-minted `submission_key` (W1-T2302) —
@@ -1041,6 +1049,7 @@ function writeCapture(root: string, opts: CaptureFeedbackOptions): FeedbackEntry
     submission_key: opts.submissionKey ?? null,
     thread_id: opts.threadId ?? null,
     ...(contribution === null ? {} : { contribution }),
+    ...(opts.consoleCorrection === undefined ? {} : { console_correction: opts.consoleCorrection }),
   };
   writeFileSync(feedbackEntryPath(root, id), stringifyYaml(entry));
   observeFeedbackAdmission(entry, opts.admission, "capture");

@@ -1,0 +1,56 @@
+- id: W1-T12513
+  title: "The review-replay sample accepts a recorded UNABLE verdict line, so the six recorded reviews that hold one no longer fail every review-replay gardener pass"
+  repo: remudero
+  depends_on: []
+  priority: 1.0
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # sized high only for the plan lint's sizing rule: one module and its replay tests
+  band_meaning: blast-radius
+  origin: operator-session#checking-off-the-author-path-2026-11-13
+  plan_refs:
+    - W1-T10270
+    - W1-T11428
+    - W1-T12026
+  files:
+    - src/lib/review-replay-sample.ts
+    - test/review/a-recorded-unable-verdict-is-a-valid-review-replay-input.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "A review.replay_input row whose verdict_lines hold `REVIEW_VERDICT <n>: UNABLE` derives into the sample, keeps its recorded class, and replays to the same class"
+      proof: "grep: W1-T12513 criterion 1 in test/review/a-recorded-unable-verdict-is-a-valid-review-replay-input.test.ts"
+    - claim: "A verdict line with any other token, a line over 128 characters, or more lines than twice criteria_count still refuses with \"invalid review replay input\""
+      proof: "grep: W1-T12513 criterion 2 in test/review/a-recorded-unable-verdict-is-a-valid-review-replay-input.test.ts"
+    - claim: "The reader accepts exactly the tokens the recorder writes: a test runs `recordedReviewVerdictLines` over a transcript with PASS, FAIL and UNABLE lines and feeds its output through `deriveReviewReplaySample` with no error"
+      proof: "grep: W1-T12513 criterion 3 in test/review/a-recorded-unable-verdict-is-a-valid-review-replay-input.test.ts"
+  rationale: |
+    The review-replay gardener has not completed a pass for at least a day.
+    OBSERVED in the Azure core ledger from 2026-11-12T15:00Z to 2026-11-13T15:07Z: 53 review-replay passes exited 1, each with
+    `review-replay.gardener_failed` "invalid review replay input"; 20 `garden.due_failed` rows carry the same error; no pass
+    exited 0. The other passes were deferred (22 admission-rank, 16 memory-budget-shortfall).
+    CAUSE, read at origin/main 6cf453f7a:
+    - src/lib/review-outcome-class.ts:47-48 `recordedReviewVerdictLines` records PASS, FAIL and UNABLE tokens (W1-T11428, #16956,
+      2026-11-05: "UNABLE is recorded as its own token, so a replay sees an answered-but-unable criterion").
+    - src/lib/review-replay-sample.ts:44 `checkedInput` accepts only `/^REVIEW_VERDICT[ \t]+\d+[ \t]*:[ \t]*(PASS|FAIL)$/i` and
+      throws "invalid review replay input" (:47). `deriveReviewReplaySample` (:137) calls `checkedRow` on every recorded row
+      (:169), so one such row fails the whole pass.
+    - In the rotated core ledgers since 2026-10-01, 6 of 4,236 review.replay_input rows fail that check, all on verdict_lines;
+      the first is 2026-11-06T09:40:56Z (pull request 17025, verdict_lines "REVIEW_VERDICT 1: UNABLE", "REVIEW_VERDICT 2: UNABLE").
+    W1-T12026 fixed the same shape for a null reviewer code sha. While the gardener fails, a review-path change has no fresh
+    replay sample (W1-T10270).
+    CHECKED for overlap: W1-T12145 (queued) scores the reviewer against known answers and does not change the input check. No
+    open pull request touches src/lib/review-replay-sample.ts.
+  design: |
+    In `checkedInput`, accept PASS, FAIL or UNABLE in the verdict-line pattern, matching the recorder. Keep the length, count
+    and shape limits. Change nothing else.
+    NO-INVARIANTS: one pattern brought in line with its recorder.
+    NOT IN SCOPE: the queue-judge gardener (6 of 46 passes completed in the same window, "malformed judge answer"); the
+    recorder.
+  falsifier: |
+    Remove UNABLE from the pattern and criteria 1 and 3 must fail. Accept any token and criterion 2 must fail. Restore and
+    require all three to pass.
+  note: |
+    Id W1-T12513 reserved for run-unfiled-1794582098000 with ~/rmd-work/bin/reserve-id.sh.

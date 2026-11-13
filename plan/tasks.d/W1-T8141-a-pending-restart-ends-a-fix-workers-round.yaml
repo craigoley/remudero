@@ -9,8 +9,8 @@
   risk: high  # Rule 19: one concern — a fix worker yields to a pending restart with its partial work kept for the next round
   band_meaning: span
   origin: "operator approval 2026-10-11: follow-ups from the recycle-stall fix (hand PR #10925)"
-  plan_refs: [W1-T6362, W1-T5974, W1-T5918, W1-T7697, W1-T7807, W1-T5127, W1-T1046]
-  files: [src/run-task.ts, test/a-pending-restart-ends-a-fix-workers-round.test.ts]
+  plan_refs: [W1-T6362, W1-T5974, W1-T5918, W1-T7697, W1-T7807, W1-T5127, W1-T1046, W1-T9337, W1-T9089, W1-T6434]
+  files: [src/run-task.ts, src/cli/commands/fix.ts, src/cli/commands/run-task-verb.ts, test/a-pending-restart-ends-a-fix-workers-round.test.ts]
   status: queued
   priority: 2  # raised 2026-11-11 on the 7-day restart study (36 exits to 2026-11-11): the drain gave up on 20 fix dispatches at a median age of 51 min; was 3
   attempts: 0
@@ -31,6 +31,21 @@
     the fix-rung half.
     DEPENDENCY: the sibling task (W1-T8139) adds the pending-yield predicate (recycle PAUSE or restart latch) this
     task reads. Both edit src/run-task.ts. Serialized after it.
+    Scope amended 2026-11-13 (hand build, read on origin/main): the pointers above are stale.
+      - W1-T9337 moved the body of runFixRung to src/cli/commands/fix.ts. src/cli/commands/sweep.ts calls that module
+        directly (`runFixRungFromModule(opts, host.fixCommandHost())`), so the sweep's fix lane never passes the
+        src/run-task.ts wrapper. The one spawn every fix round shares is `spawnFixWorkerBounded` in src/run-task.ts,
+        reached through `host.spawnFixWorkerBounded`. Its context type is declared in src/cli/commands/run-task-verb.ts
+        (`RunTaskCommandHost["spawnFixWorkerBounded"]`) and carries no PR url or branch.
+      - W1-T9089 retired the restart latch that W1-T8139 read (`restartPending` is gone from
+        src/lib/quiet-worker-watchdog.ts). The pending-yield predicate on main is the recycle PAUSE only:
+        `recyclePauseDetail(config.root)` in src/lib/recycle-yield.ts, which the implement watchdog and the sweep's CI
+        wait already read.
+      - The next round's offer reads the newest `sweep.fix.owner_residue_preserved` row for the PR and head
+        (`readPreservedOwnerPatch`, src/lib/sweep.ts, W1-T6434). That row needs the PR number.
+    So the build needs src/cli/commands/fix.ts (pass the PR and branch to the strike's spawn, and end the round when the
+    spawn reports a yield) and src/cli/commands/run-task-verb.ts (the context field and the yield outcome in the spawn's
+    type). The trigger is the recycle PAUSE; a restart latch no longer exists to read.
   design: |
     Operator rulings: no hard thresholds; lean into automation.
     1. A fix worker's spawn is watched for the same pending-yield predicate (recycle PAUSE or the daemon's restart
@@ -44,6 +59,26 @@
        is offered the preserved patch as prior partial work, as W1-T6362 already does for a dead owner.
     4. The fix claim and its `fix-branch--*` lock are released through the normal round exit, so the recycle's
        drain sees the lane free.
+    Amended 2026-11-13 to the code on main (see the rationale):
+    5. The watch lives in `spawnFixWorkerBounded` (src/run-task.ts), as one more arm beside the wall-clock bound and
+       the W1-T4105 supersession watch. It runs only for a strike's spawn: the call that passes the new context field
+       `fixRound: { prUrl, branch }` (src/cli/commands/fix.ts) and a `config.root`. It polls `recyclePauseDetail` at
+       the cadence the supersession watch already uses (`DEFAULT_POLL_INTERVAL_MS`). The predicate is the recycle PAUSE;
+       the restart latch named in point 1 was retired by W1-T9089.
+    6. On a pending recycle it aborts the spawn and waits for the worker to stop (the wall-clock bound still applies).
+       It then preserves the whole worktree against the head the round started from: commits the worker made, staged
+       and unstaged edits, and new files, into one `refs/rmd-recovery/fix-dirty/...` ref through
+       preserveTrackedDirtyPatch, which proves the ref's tree equals the worktree's. Only then does it reset the
+       worktree to that head. It writes `fix.round_yielded` and a `sweep.fix.owner_residue_preserved` row for the PR
+       and its head, so `readPreservedOwnerPatch` offers the ref to the next round.
+    7. The spawn returns a `yielded` outcome. runFixRung writes `fix.done` (subtype `round_yielded`, with the branch
+       claim's run id), releases the claim and stands down. It writes no `fix.dispatch` row, so no strike is counted.
+    8. When the work cannot be preserved, nothing is reset: the round stands down with `retainWorktree`, so the sweep
+       keeps the worktree as the worker left it and the dead-owner recovery (W1-T6362) finds it.
+    INVARIANT no-partial-push: a yielded fix round never pushes to the PR branch and never commits the worker's partial
+    work onto it; the PR head after the yield is the head before it.
+    INVARIANT operator-pause-holds: a PAUSE whose detail is not the recycle's own leaves a running fix worker alone; only
+    `recyclePauseDetail` ends a round.
     Tests (new file, `test(` titles verbatim as in the proofs below) drive runFixRung with injected seams and a
     real gitRepo() fixture, a pending recycle PAUSE, and a worker with one staged and one unstaged edit.
   acceptance:
@@ -51,11 +86,11 @@
       proof: "unit test: test/a-pending-restart-ends-a-fix-workers-round.test.ts"
     - claim: "a pending recycle ends a fix worker's round and preserves both staged and unstaged work"
       proof: 'grep: test("W1-T8141: a pending recycle ends a fix round and preserves its work" in test/a-pending-restart-ends-a-fix-workers-round.test.ts'
-    - claim: "a yielded fix round pushes nothing to the PR head and is not counted as a strike"
+    - claim: "invariant:no-partial-push — a yielded fix round pushes nothing to the PR head and is not counted as a strike"
       proof: 'grep: test("W1-T8141: a yielded fix round pushes nothing and costs no strike" in test/a-pending-restart-ends-a-fix-workers-round.test.ts'
     - claim: "the next fix round is offered the preserved patch"
       proof: 'grep: test("W1-T8141: the next fix round is offered the preserved patch" in test/a-pending-restart-ends-a-fix-workers-round.test.ts'
-    - claim: "an operator PAUSE that is not a recycle does not end a fix round"
+    - claim: "invariant:operator-pause-holds — an operator PAUSE that is not a recycle does not end a fix round"
       proof: 'grep: test("W1-T8141: an operator pause does not end a fix round" in test/a-pending-restart-ends-a-fix-workers-round.test.ts'
   falsifier: |
     Leave fix spawns unwatched, as on main: under the pending recycle the first test sees the worker run to its end

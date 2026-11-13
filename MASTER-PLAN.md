@@ -4848,6 +4848,26 @@ panel button IS the registry entry.
 are granted PER SKILL (§7B, §7C) — an implement worker's profile grants none of them. A skill can PROPOSE
 anything and MERGE nothing; every output is contained by the same PR + review gate as any worker.
 
+### CLI worker runtime and target repositories without tsx
+
+The CLI installation owns its worker runtime dependencies. Resolve the Codex capacity probe's
+TypeScript loader from the running Remudero package, preserving the target repository's working
+directory. Target repositories need no Remudero `tsx` dependency. This extends W1-T4590's existing
+harness-runtime/target-cwd separation and preserves W1-T3951's target plan, Git identity and mount
+policy ownership. It does not substitute the configured daemon install for the running CLI package.
+
+W1-T12516 owns that bounded bootstrap correction and real default-thread regression, with an
+outside-Core target lacking `tsx` and a fresh Core positive control. W1-T12517 exercises the same
+boundary through `rmd plan` and its existing filing gates. Local protocol stubs provide deterministic
+evidence without paid inference or credential changes. Subscription-only routing and all existing
+ownership, filing, test, review, hosted CI and protected merge gates remain required.
+
+CONSOLE-T172 already owns its Console timeout implementation. W1-T12515 separately corrects its
+authoritative plan proofs, which currently name existing nonce/general-timeout/receipt tests rather
+than the proposed delayed-response behavior. Require that plan amendment and W1-T12516/W1-T12517
+to land normally before any fresh T172 attempt. This initiative authorizes no retry, no Console
+dependency addition, no credential or limit change, and no edit to the retained failed T172 branch.
+
 ## 5C. Task pre-flight: the plan gate
 
 **Task quality is a GATED, LEARNED property — caught BEFORE dispatch by a deterministic linter, refined by
