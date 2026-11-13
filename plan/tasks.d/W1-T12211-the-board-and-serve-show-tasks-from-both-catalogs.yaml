@@ -18,6 +18,9 @@
     - src/lib/serve-plan-reload.ts
     - src/lib/board.ts
     - test/console-api/board/the-board-and-serve-show-tasks-from-both-catalogs.test.ts
+    - src/lib/now-view.ts
+    - openapi/daemon.yaml
+    - packages/api-client/src/schema.d.ts
   status: queued
   attempts: 0
   acceptance:
