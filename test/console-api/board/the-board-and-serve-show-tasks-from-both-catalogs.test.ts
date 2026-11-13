@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { serialize } from "node:v8";
+import { serialize, deserialize } from "node:v8";
 import { mkdirSync, mkdtempSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -379,8 +379,11 @@ test("private worker packets fail closed on expiry, corruption, wrong root and u
   client.accept(packet);
   assert.deepEqual(client.current(shared, h.state)?.plan?.tasks.map(t => t.id), ["PUBLIC-T1", "OPS-T1"]);
   assert.doesNotMatch(JSON.stringify(client.current(shared, h.state)), new RegExp(secret));
-  const corrupt = Buffer.from(packet.buffer);
-  corrupt[0] = corrupt[0]! ^ 1;
+  const forgedPlan = mergePlanBlobs([{ label: "ops.yaml", text: privateRecord().replaceAll("OPS-T1", "OPS-T2") }]);
+  const forged = catalogPacket(h.state, forgedPlan, clock);
+  assert.equal(forged.buffer.byteLength, packet.buffer.byteLength, "tampering preserves packet length");
+  assert.equal(deserialize(Buffer.from(forged.buffer)).plan.tasks[0].id, "OPS-T2", "the altered V8 payload still decodes; its header is valid");
+  Buffer.from(packet.buffer).set(Buffer.from(forged.buffer));
   client.accept(packet);
   const damaged = client.current(shared, h.state);
   assert.equal(damaged?.outcome, "unreadable");
