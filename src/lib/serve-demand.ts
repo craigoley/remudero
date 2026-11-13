@@ -106,7 +106,13 @@ export function createServeDemand(options: ServeDemandOptions) {
   }
 
   function familyFor(req: IncomingMessage): string | undefined {
-    const path = new URL(req.url ?? "/", "http://localhost").pathname;
+    let path: string;
+    try {
+      path = new URL(req.url ?? "/", "http://localhost").pathname;
+    } catch {
+      // Dispatch owns malformed targets and its 400 response; observation must not intercept them.
+      return undefined;
+    }
     if (path !== "/v1" && !path.startsWith("/v1/")) return undefined;
     return routeFamilies.get(`${(req.method ?? "GET").toUpperCase()} ${path}`) ?? "other";
   }

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { mkdirSync, readFileSync, rmdirSync, writeFileSync } from "node:fs";
-import { request, type IncomingMessage, type ServerResponse } from "node:http";
+import { request, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -19,6 +19,23 @@ function rows(path: string): Array<{ step: string; windowStart: number; windowEn
 
 function response() {
   return Object.assign(new EventEmitter(), { statusCode: 200, writableFinished: false });
+}
+
+function dispatchAnswer(server: Server, target: string): Promise<{ status: number; headers: Record<string, string>; body: string }> {
+  return new Promise(resolve => {
+    let status = 0, headers: Record<string, string> = {}, body = "";
+    const res = Object.assign(new EventEmitter(), {
+      headersSent: false, writableEnded: false, writableFinished: false, statusCode: 200,
+      writeHead(code: number, fields: Record<string, string>) {
+        status = code; headers = fields; res.statusCode = code; res.headersSent = true; return res;
+      },
+      end(chunk = "") {
+        body = String(chunk); res.writableEnded = true; res.writableFinished = true;
+        res.emit("finish"); resolve({ status, headers, body }); return res;
+      },
+    });
+    server.emit("request", { method: "GET", url: target, headers: {} } as IncomingMessage, res as unknown as ServerResponse);
+  });
 }
 
 test("W1-T11814 criterion 1: finish and early close tally exactly once, with aborts separate from errors", async () => {
@@ -122,6 +139,29 @@ test("W1-T11814 criterion 4: family and histogram storage stay bounded and obser
     reads = 0;
     recordServeRequest(demand, { method: "GET", url: "/health" } as IncomingMessage, guarded as unknown as ServerResponse);
     assert.equal(reads, 0); assert.equal(res.listenerCount("finish"), 0);
+  });
+});
+
+test("a malformed request target keeps the service's 400 response and the next request works", async () => {
+  await withTempDir("demand-malformed-target", async root => {
+    const ledgerPath = join(root, "ledger.ndjson"); writeFileSync(ledgerPath, "");
+    const routes: Route[] = [{ method: "GET", path: "/v1/probe", scope: "read", handler: (_req, res) => {
+      res.writeHead(200, { "x-probe": "unchanged" }); res.end("original");
+    } }];
+    const answers: Array<Array<{ status: number; headers: Record<string, string>; body: string }>> = [];
+    for (const observed of [false, true]) {
+      const server = createService({ tokens: { read: "r", write: "w" }, routes });
+      if (observed) {
+        const demand = createServeDemand({ ledgerPath, routes });
+        server.prependListener("request", (req, res) => recordServeRequest(demand, req, res));
+      }
+      answers.push([await dispatchAnswer(server, "http://["), await dispatchAnswer(server, "/v1/probe")]);
+    }
+    const without = answers[0]!, withDemand = answers[1]!;
+    assert.equal(withDemand[0]!.status, 400);
+    assert.deepEqual(JSON.parse(withDemand[0]!.body), { error: "bad_request" });
+    assert.equal(withDemand[1]!.status, 401);
+    assert.deepEqual(withDemand, without);
   });
 });
 
