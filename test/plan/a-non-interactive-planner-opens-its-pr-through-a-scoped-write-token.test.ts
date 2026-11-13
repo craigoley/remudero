@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { after, before, describe, test } from "node:test";
 import * as boundary from "#src/lib/secret-boundary.js";
 import { mintScopedToken, type ScopedTokenResult } from "#src/lib/github-app.js";
-import { openPrMintTexts, planCommand, runGhPrCreate } from "#src/run-task.js";
+import { openPrMintTexts, planCommand, runGhPrCreate } from "#test/helpers/run-task-test.js";
 import { buildWorkerEnv } from "#src/lib/env.js";
 import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
