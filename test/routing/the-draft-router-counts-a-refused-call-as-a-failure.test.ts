@@ -23,6 +23,9 @@ function refusals(count = 10): Record<string, unknown>[] {
   return Array.from({ length: count }, (_, i) => row(i % 2 ? "failed" : "refused",
     { ts: new Date(now - (count - 1 - i) * 1000).toISOString() }));
 }
+function budgetRefusals(): Record<string, unknown>[] {
+  return refusals().map((r) => ({ ...r, outcome: "refused", quality_sample: "not-invoked-budget-refusal" }));
+}
 function choice(rows: Record<string, unknown>[], at = now) {
   return chooseDraftDeployment(draftStatsFromRows(rows, lane), arms, seededRandom(7), at);
 }
@@ -142,18 +145,62 @@ test("W1-T12147 criterion 3: the worker records one skip and keeps it out of fal
   assert.equal(skips[0].reason, "refused-or-failed");
 });
 
+test("W1-T12147 criterion 3: uninvoked budget refusals affect availability without sampling quality", () => {
+  const history = budgetRefusals();
+  assert.deepEqual(draftStatsFromRows(history, lane), {});
+  assert.deepEqual(choice(history).skipped, [{ deployment: arms[0].deployment, count: 10, until: new Date(now + hour).toISOString() }]);
+  assert.equal(choice(history, now + hour - 1).arms.length, 1);
+  assert.equal(choice(history, now + hour).arms.length, 2);
+  assert.equal(choice(history.slice(1)).arms.length, 2);
+  assert.equal(choice([...history, row("clean")]).arms.length, 2);
+  const paid = row("clean", { draft_cost_usd: 0.12 });
+  assert.deepEqual(draftStatsFromRows([paid, ...history], lane), draftStatsFromRows([paid], lane));
+  const sole = chooseDraftDeployment(draftStatsFromRows(history, lane), arms.slice(0, 1), seededRandom(7), now);
+  assert.equal(sole.deployment, arms[0].deployment);
+  assert.equal(sole.posterior.beta, 1);
+  assert.equal(sole.posterior.costPerAttemptUsd, arms[0].estimatedCostUsd);
+  const legacy = { step: "inbox.draft_synthesized", run_id: "old", proposal_id: "P1", model: arms[0].deployment };
+  assert.equal(choice([...history.slice(0, 9), legacy, history[9]!]).arms.length, 1);
+});
+
+test("W1-T12147 criterion 3: production-marked budget refusals produce one logged skip", async () => {
+  const { outcomes } = await workerFixture({ isError: true, budgetRefused: true, budgetReservedUsd: 0,
+    budgetSettledUsd: 0, costUsd: 0, servedModel: null, sessionId: "", text: "", blocks: [],
+    tokens: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 } },
+  { clean: false, contractFailed: false }, [], [arms[0].deployment]);
+  assert.equal(outcomes.length, 1);
+  assert.equal(outcomes[0].outcome, "refused");
+  assert.equal(outcomes[0].quality_sample, "not-invoked-budget-refusal");
+  const history = refusals().map((r, i) => ({ ...outcomes[0], ts: r.ts, selection_assignment_id: `refusal-${i}` }));
+  const { rows, attempted } = await workerFixture({}, { clean: true, contractFailed: false }, history);
+  assert.deepEqual(attempted, [arms[1].deployment]);
+  const skips = rows.filter((r) => r.step === "draft.routing.skip");
+  assert.equal(skips.length, 1);
+  assert.equal(skips[0].deployment, arms[0].deployment);
+  assert.equal(skips[0].count, 10);
+  assert.equal(skips[0].reason, "refused-or-failed");
+  assert.equal(skips[0].until, new Date(now + hour).toISOString());
+});
+
 test("W1-T12147 criterion 3: disk and session snapshots retain the latest ten calls", async () => {
-  await withTempDir("rmd-refused-stats-", async (root) => {
-    writeFileSync(join(root, "ledger.ndjson"), refusals().map((r) => JSON.stringify(r)).join("\n") + "\n");
-    const stats = readDraftStats(root, lane);
-    assert.equal(chooseDraftDeployment(stats, arms, seededRandom(7), now).arms.length, 1);
-  });
-  const session = createDraftStatsSession("unused", lane, () => {}, () => draftStatsFromRows(refusals(9), lane));
-  session.readStats();
-  session.log("draft.routing.outcome", row("failed"));
-  assert.equal(chooseDraftDeployment(session.readStats(), arms, seededRandom(7), now).arms.length, 1);
-  session.log("draft.routing.outcome", row("clean"));
-  assert.equal(chooseDraftDeployment(session.readStats(), arms, seededRandom(7), now).arms.length, 2);
+  for (const history of [refusals(), budgetRefusals()]) {
+    await withTempDir("rmd-refused-stats-", async (root) => {
+      writeFileSync(join(root, "ledger.ndjson"), history.map((r) => JSON.stringify(r)).join("\n") + "\n");
+      const stats = readDraftStats(root, lane);
+      assert.equal(chooseDraftDeployment(stats, arms, seededRandom(7), now).arms.length, 1);
+    });
+    const session = createDraftStatsSession("unused", lane, () => {}, () => draftStatsFromRows(history.slice(0, 9), lane));
+    session.readStats();
+    session.log("draft.routing.outcome", history[9]!);
+    assert.equal(chooseDraftDeployment(session.readStats(), arms, seededRandom(7), now).arms.length, 1);
+    session.log("draft.routing.outcome", row("clean"));
+    assert.equal(chooseDraftDeployment(session.readStats(), arms, seededRandom(7), now).arms.length, 2);
+  }
+  const live = createDraftStatsSession("unused", lane, () => {}, () => ({}));
+  live.readStats();
+  for (const refusal of budgetRefusals()) live.log("draft.routing.outcome", refusal);
+  assert.deepEqual(live.readStats(), {});
+  assert.equal(chooseDraftDeployment(live.readStats(), arms, seededRandom(7), now).arms.length, 1);
 });
 
 test("W1-T12147 criterion 4: a sole eligible deployment is picked despite its refusal streak", async () => {

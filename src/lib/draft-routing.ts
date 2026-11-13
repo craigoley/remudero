@@ -13,14 +13,20 @@ export type DraftStats = Record<string, DraftDeploymentStats>;
 export type DraftOutcome = "clean" | "not-clean" | "contract-failed" | "refused" | "failed";
 interface DraftMeasurements {
   costedAttempts: number;
-  recent: Array<{ outcome: unknown; tsMs: number }>;
+}
+type DraftRecentOutcomes = Record<string, Array<{ outcome: unknown; tsMs: number }>>;
+const operationalHistory = new WeakMap<DraftStats, DraftRecentOutcomes>();
+function recentOutcomes(stats: DraftStats): DraftRecentOutcomes {
+  let recent = operationalHistory.get(stats);
+  if (!recent) operationalHistory.set(stats, recent = {});
+  return recent;
 }
 // Per-call evidence belongs to the snapshot's lifetime; aggregate-only callers remain supported.
 const measurements = new WeakMap<DraftDeploymentStats, DraftMeasurements>();
 function evidence(stats: DraftDeploymentStats): DraftMeasurements {
   let value = measurements.get(stats);
   if (!value) {
-    value = { costedAttempts: stats.costUsd > 0 ? stats.attempts : 0, recent: [] };
+    value = { costedAttempts: stats.costUsd > 0 ? stats.attempts : 0 };
     measurements.set(stats, value);
   }
   return value;
@@ -69,12 +75,16 @@ export function createDraftStatsSession(stateDir: string, lane: string, log: Dra
     log: (step, extra = {}) => {
       recordDraftRouting(log, step, extra);
       if (stats && step === "draft.routing.outcome") {
-        for (const [deployment, delta] of Object.entries(draftStatsFromRows([{ step, ...extra }], lane))) {
+        const deltaStats = draftStatsFromRows([{ step, ...extra }], lane);
+        const recent = recentOutcomes(stats);
+        for (const [deployment, incoming] of Object.entries(recentOutcomes(deltaStats))) {
+          recent[deployment] = [...(recent[deployment] ?? []), ...incoming].slice(-10);
+        }
+        for (const [deployment, delta] of Object.entries(deltaStats)) {
           const measured = stats[deployment] ??= { attempts: 0, clean: 0, contractFailures: 0, costUsd: 0 };
           const current = evidence(measured);
           const incoming = evidence(delta);
           current.costedAttempts += incoming.costedAttempts;
-          current.recent = [...current.recent, ...incoming.recent].slice(-10);
           measured.attempts += delta.attempts;
           measured.clean += delta.clean;
           measured.contractFailures += delta.contractFailures;
@@ -101,8 +111,7 @@ function gamma(shape: number, random: () => number): number {
 export function chooseDraftDeployment(stats: DraftStats, candidates: readonly DraftArm[], random: () => number = Math.random, now = systemClock.now()): DraftChoice {
   if (candidates.length === 0) throw new Error("draft routing has no eligible deployments");
   const blocked = candidates.flatMap((arm) => {
-    const measured = stats[arm.deployment];
-    const recent = measured && evidence(measured).recent;
+    const recent = recentOutcomes(stats)[arm.deployment];
     if (!recent || recent.length < 10 || !recent.every((r) => r.outcome === "refused" || r.outcome === "failed")) return [];
     const until = recent[recent.length - 1]!.tsMs + 60 * 60 * 1000;
     return Number.isFinite(until) && now < until ? [{ deployment: arm.deployment, count: recent.length, until: fixedClock(until).iso() }] : [];
@@ -131,6 +140,7 @@ export function chooseDraftDeployment(stats: DraftStats, candidates: readonly Dr
 /** Correlate legacy outcomes by run and proposal, never crediting an earlier relint's deployment. */
 export function draftStatsFromRows(rows: readonly Record<string, unknown>[], lane: string): DraftStats {
   const stats: DraftStats = {};
+  const recent = recentOutcomes(stats);
   const identities = (row: Record<string, unknown>): string[] => [
     typeof row.selection_assignment_id === "string" && row.selection_assignment_id ? `assignment:${row.selection_assignment_id}` : undefined,
     typeof row.session_id === "string" && row.session_id ? `session:${row.session_id}` : undefined,
@@ -141,6 +151,9 @@ export function draftStatsFromRows(rows: readonly Record<string, unknown>[], lan
   const cost = (row: Record<string, unknown>) => typeof row.cost_usd === "number" && Number.isFinite(row.cost_usd) && row.cost_usd >= 0 ? row.cost_usd : 0;
   for (const row of rows) {
     if (row.step === "draft.routing.outcome" && row.lane === lane && typeof row.deployment === "string") {
+      recent[row.deployment] = [...(recent[row.deployment] ?? []), {
+        outcome: row.outcome, tsMs: typeof row.ts === "string" ? Date.parse(row.ts) : NaN,
+      }].slice(-10);
       // Keep its identity in recordedAttempts so a legacy copy cannot resurrect this refusal.
       // Unmarked history and contradictory markers retain their original interpretation.
       if (row.quality_sample === "not-invoked-budget-refusal" && row.draft_cost_usd === 0 &&
@@ -149,7 +162,6 @@ export function draftStatsFromRows(rows: readonly Record<string, unknown>[], lan
       const detail = evidence(measured);
       const dollars = cost({ cost_usd: row.draft_cost_usd });
       if (dollars > 0) detail.costedAttempts++;
-      detail.recent = [...detail.recent, { outcome: row.outcome, tsMs: typeof row.ts === "string" ? Date.parse(row.ts) : NaN }].slice(-10);
       measured.attempts++;
       measured.costUsd += dollars;
       if (row.clean === true && row.outcome !== "refused" && row.outcome !== "failed") measured.clean++;
@@ -166,7 +178,6 @@ export function draftStatsFromRows(rows: readonly Record<string, unknown>[], lan
       const measured = arm(deployment);
       const detail = evidence(measured);
       if (cost(row) > 0) detail.costedAttempts++;
-      detail.recent = [...detail.recent, { outcome: undefined, tsMs: NaN }].slice(-10);
       measured.attempts++;
       measured.costUsd += cost(row);
       pending.set(key, measured);
