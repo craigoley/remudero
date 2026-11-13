@@ -1,0 +1,50 @@
+- id: W1-T12456
+  title: "A new task file refused at staging releases its reserved id"
+  repo: remudero
+  depends_on: []
+  priority: 0.5
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # a wrong release frees an id that a branch or a pull request still carries
+  band_meaning: blast-radius
+  origin: operator-session#root-cause-defects-2026-11-12
+  plan_refs:
+    - W1-T12199
+    - W1-T12221
+    - W1-T12222
+    - W1-T12410
+  files:
+    - src/lib/feedback-landing.ts
+    - src/run-task.ts
+    - test/gardeners/a-task-file-the-landing-sets-aside-releases-its-reserved-id.test.ts
+    - test/gardeners/a-new-task-file-refused-at-staging-releases-its-reserved-id.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "In one land of a checkout that files only task files, where the landing stages or keeps one new file and refuses another at the stage step, the id of the refused file is released when the landing branch holds it, and the id of the kept file is not"
+      proof: "grep: W1-T12456 criterion 1 in test/gardeners/a-new-task-file-refused-at-staging-releases-its-reserved-id.test.ts"
+    - claim: "Each stage refusal of a new file releases its id: the plan preflight refused it, the same bytes were set aside before, or origin/main already holds the bytes at its path when no other file holds the id. A preflight that ran out of its budget keeps the id"
+      proof: "grep: W1-T12456 criterion 2 in test/gardeners/a-new-task-file-refused-at-staging-releases-its-reserved-id.test.ts"
+    - claim: "A reservation whose holder is another branch, an unreadable anchor, and a refused edit of a file that origin/main holds release nothing"
+      proof: "grep: W1-T12456 criterion 3 in test/gardeners/a-new-task-file-refused-at-staging-releases-its-reserved-id.test.ts"
+    - claim: "The refusal of a new file in the landing result carries `reserved_id` and `id_release`, with the same outcomes as the set-aside row of W1-T12410, and the gardener's `garden_sealed_landing` row shows them for each refused path"
+      proof: "grep: W1-T12456 criterion 4 in test/gardeners/a-new-task-file-refused-at-staging-releases-its-reserved-id.test.ts"
+  rationale: |
+    FROM THE CODE, origin/main 12047b93a, 2026-11-12.
+    - W1-T12410 (merged) releases the id of a new file that the landing sets aside after it was staged (src/lib/feedback-landing.ts:2706, `task_files_landing.set_aside`). It does not cover a file that the stage step refuses.
+    - The stage step (src/lib/feedback-landing.ts:2720 to :2765) refuses a file through `refuse(...)` (:2724) into `result.refused`: the plan preflight refused it (:2759), its preflight ran out of budget (:2763), the same bytes were set aside before (:2747), or origin/main already holds the bytes (:2754). None of these releases an id.
+    - src/run-task.ts:27957 `landSealedTaskFiles`: for a checkout that files only task files, :27976 sets `partly` when any path of the land was landed or waits, and the land returns a wait (:27982).
+    - src/lib/gardener.ts:1379 records a wait, and `releaseGardenTaskIds` (:643) releases nothing unless the land is `unstarted` or `not_opened`. So the gardener keeps every id of the land, and the id of the refused file is never filed and never freed.
+    - The holder of the reservation is the landing branch, which the landing keeps pushing, so `reservationHolderDrift` reads the id as held for as long as the landing is in use.
+  design: |
+    1. In the stage step of `taskFilesLandingSteps`, when `refuse` refuses an input that is a new file (main holds no blob at its path), release its id as the set-aside path of W1-T12410 does: read the id from the `- id:` line, read the anchor of `refs/rmd-id/<id>`, and release it with `releaseTaskIdReservationAsync` only when the holder is the landing branch. Reuse the W1-T12410 helper; do not copy it.
+    2. Keep the id when the preflight ran out of its budget, since a later pass stages the same file again.
+    3. Add `reserved_id` and `id_release` to the `TaskFileRefusal` of a new file. In `landSealedTaskFiles` (src/run-task.ts:27978) keep the two fields in the `refused` list of the `garden_sealed_landing` row.
+    4. The release is idempotent, so a later release by the gardener's own pass finds the ref absent and does nothing.
+    NOT IN SCOPE: the gardener's wait rule (W1-T12221, W1-T12222), the set-aside path, and the reaper of old reservations.
+  falsifier: |
+    Remove the release from the stage step and criteria 1 and 2 must fail. Release whatever the holder is and criterion 3 must fail. Release after a timed-out preflight and criterion 2 must fail. Restore and require all four to pass.
+  note: |
+    Id reserved for run-unfiled-1794528010000 with ~/rmd-work/bin/reserve-id.sh. Low priority. The fleet builds it.

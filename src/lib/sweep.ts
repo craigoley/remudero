@@ -1,4 +1,5 @@
 import { hasNonBotAuthor, namePathLanding, type DependencyMainIdentity } from "./dependency-main-identity.js";
+import { findTaskInCatalogs, type TaskLookupOptions, type TaskLookupResult } from "./task-lookup.js";
 import { decideLoopOutcome } from "./loop-decision.js";
 import { CI_REFRESH_GUARD_VERSION } from "./ci-refresh-prevention.js";
 import { createSelectedModeQualification, observeSelectedMode, readInstanceRegistryText } from "./instance-mode.js";
@@ -71,6 +72,8 @@ import {
   realArmDepsAsync,
   readMergedRatchetsAsync,
   stackPrerequisiteFromRest,
+  directMergeOperationsInFlight,
+  type DirectMergeOperation,
   type ArmAttemptResult,
   type ArmReprobeFacts,
   type MergeQueueMembership,
@@ -3132,8 +3135,9 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
 
   // The daemon hands each pass its tick's fresh plan; a task missing from it gets ONE re-read per cycle.
   let reloadedForContract: { plan: Plan | undefined } | undefined;
+  const privateContractTasks = new Map<string, Task>();
   const readContractTask = (taskId: string): Task | undefined => {
-    let task = plan.byId.get(taskId);
+    let task = plan.byId.get(taskId) ?? privateContractTasks.get(taskId);
     if (task === undefined) {
       reloadedForContract ??= { plan: reloadPlanForFix() };
       task = reloadedForContract.plan?.byId.get(taskId);
@@ -4287,6 +4291,19 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         );
         // W1-T4073: `let` — the PR-head contract below may replace both once the checkout exists.
         let { task, synthetic } = snapshotResolved;
+        if (synthetic && pr.taskId) {
+          const scoped = await catalogTaskScope(pr.taskId, changedPaths, {
+            stateDir: join(config.root, "state"), byId: new Map(),
+          });
+          if (scoped.outcome === "unreadable") throw new Error(`task catalog unreadable: ${scoped.reason}`);
+          if (scoped.outcome === "found") {
+            privateContractTasks.set(pr.taskId, scoped.task);
+            const catalogPlan = { tasks: [scoped.task], byId: new Map([[pr.taskId, scoped.task]]) };
+            ({ task, synthetic } = fixRungTaskForForBuild(catalogPlan, pr, headRef.body, realBranch, changedPaths));
+            pr = { ...pr, taskDeclaredFiles: scoped.task.files };
+            if (scoped.outside.length > 0) log("sweep.fix.catalog_scope", { task_id: pr.taskId, outside_count: scoped.outside.length });
+          }
+        }
         if (synthetic) log("sweep.fix.synthetic_task", { pr_number: pr.prNumber, task_id: task.id });
         // W1-T4667: the parallel-attempts DECISION for this repair round — never an effect. No
         // spawn, push or worktree happens here; `planParallelAttempts` only says whether this
@@ -9372,6 +9389,13 @@ function declaredPathCovers(declared: string, changed: string): boolean {
     .map((part) => part.replace(/[|\\{}()[\]^$+?.]/g, "\\$&"))
     .join("[^\\n]*");
   return new RegExp(`^${escaped}$`).test(changed);
+}
+
+export type CatalogTaskScope = TaskLookupResult & { outside: string[] };
+
+export async function catalogTaskScope(taskId: string, changed: readonly string[] | undefined, deps: TaskLookupOptions & Pick<Plan, "byId">): Promise<CatalogTaskScope> {
+  const found = await findTaskInCatalogs(taskId, deps);
+  return { ...found, outside: found.outcome === "found" ? changedPathsOutsideDeclaredFiles(changed, found.task.files) : [] };
 }
 
 export function changedPathsOutsideDeclaredFiles(
@@ -17776,10 +17800,11 @@ export function currentReviewSignal(): AbortSignal | undefined {
 /** W1-T10057: a read-only view of the existing wait registries, not another owner of work.
  * `settled` is an internal identity/settlement handle; ledger writers must omit it. */
 export interface RestartDrainInventoryEntry {
-  what: "review" | "detached";
+  what: "review" | "detached" | "direct-merge";
   kind: string;
   task_id?: string;
   pr?: number;
+  head_sha?: string;
   phase: string;
   admitted_at_ms: number;
   settled: Promise<void>;
@@ -17794,10 +17819,18 @@ function reviewRestartItem(settled: Promise<void>, review: ReviewRegistration): 
     ...(review.prNumber === undefined ? {} : { pr: review.prNumber }),
     admitted_at_ms: review.admittedAtMs, settled };
 }
+/** W1-T11503: a direct merge in its own preflight or write — owned by itself, not by the sweep that started it. */
+export function directMergeRestartItem(operation: DirectMergeOperation): RestartDrainInventoryEntry {
+  return { what: "direct-merge", kind: "direct-merge", phase: operation.phase,
+    ...(operation.prNumber === undefined ? {} : { pr: operation.prNumber }),
+    ...(operation.headSha === undefined ? {} : { head_sha: operation.headSha }),
+    admitted_at_ms: operation.admittedAtMs, settled: operation.settled };
+}
 export function restartDrainInventory(): RestartDrainInventoryEntry[] {
   return [...inFlightReviewRuns].map(([work, review]) => reviewRestartItem(work, review)).concat(
     [...detachedSweepActions].filter(([, action]) => isRestartInterruptible(action))
-      .map(([work, action]) => detachedRestartItem(work, action)));
+      .map(([work, action]) => detachedRestartItem(work, action)),
+    directMergeOperationsInFlight().map(directMergeRestartItem));
 }
 
 /** Hand one review attempt to {@link inFlightReviewRuns}; returns `work` unchanged for the caller to await. */

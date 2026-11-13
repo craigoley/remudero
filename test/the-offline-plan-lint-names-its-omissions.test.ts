@@ -35,7 +35,7 @@ function creditTaskYaml(id: string, depends: readonly string[], note: string, ma
   files: readonly string[] = ["src/value.ts"]): string {
   const text = [
     "- id: " + id, '  title: "dependency credit fixture ' + id + '"', "  repo: remudero",
-    "  depends_on: [" + depends.join(", ") + "]", "  type: implement", "  verify: auto",
+    "  depends_on: [" + depends.join(", ") + "]", "  type: implement", "  design: |", "    NO-INVARIANTS: synthetic lint fixture with no inherited behavior to preserve", "  verify: auto",
     "  risk: low", "  status: queued", "  attempts: 0", "  budget_usd: 1",
     '  origin: "test-fixture:offline-dependency-credit"',
     ...(machine ? ["  author_class: machine"] : []),
@@ -504,6 +504,8 @@ function taskYaml(proofs: readonly string[]): string {
     "  repo: remudero",
     "  depends_on: []",
     "  type: implement",
+    "  design: |",
+    "    NO-INVARIANTS: synthetic lint fixture with no inherited behavior to preserve",
     "  verify: human",
     "  risk: low",
     "  status: queued",

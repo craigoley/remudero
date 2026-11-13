@@ -15,7 +15,7 @@
   files:
     - src/lib/read-model-worker.ts
     - test/lib/a-demand-view-builds-only-while-a-demand-key-is-held.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: With no demand key held, a view declared demand builds zero times over a fake-clock window of ten minutes

@@ -125,6 +125,12 @@ export const READ_MODEL_READ_HOT_MS = 2 * 60_000;
  * `now@core` (~4.8 s cost, ~12 s interval) then runs every ~6.4 min at ~1/32 of its read cost.
  */
 export const READ_MODEL_IDLE_STRETCH_MAX = 32;
+/**
+ * BACKSTOP (W1-T11933): an {@link ReadModelView.idleFloor} unit unread for {@link READ_MODEL_READ_HOT_MS}
+ * waits at least this long between builds; a read restores cost / share cadence on the next tick.
+ * OBSERVED 2026-11-10, no console open: instances, nav-badge and analytics rebuilt ~3.4 times a second.
+ */
+export const READ_MODEL_IDLE_FLOOR_MS = 45_000;
 /** Main posts one read of a path to the worker at most this often: well inside {@link READ_MODEL_READ_HOT_MS}. */
 export const READ_MODEL_READ_NOTE_MS = 5_000;
 /**
@@ -304,6 +310,8 @@ export interface ReadModelView {
    * judges every source at request time, so a body read before its rebuild says it is stale.
    */
   readPaced?: true;
+  /** Its cadence floors while unread: {@link READ_MODEL_IDLE_FLOOR_MS} between builds, never for a `demand` view. */
+  idleFloor?: true;
 }
 
 export interface ReadModelViewFactory {
@@ -314,6 +322,8 @@ export interface ReadModelViewFactory {
   snapshotSourced?: true;
   /** {@link ReadModelView.readPaced}: the unit is paced by the factory's flag, so a view made cold after a lane move keeps it. */
   readPaced?: true;
+  /** {@link ReadModelView.idleFloor}, read from the factory like `readPaced`. */
+  idleFloor?: true;
   create(): ReadModelView;
 }
 
@@ -466,7 +476,7 @@ export function scopedReadPath(path: string, instance: string | undefined): stri
 const LEDGER_SOURCE_PREFIX = "ledger:";
 
 export interface ReadModelTickerOptions {
-  /** The keys of the demand views that stay materialized; absent, `want` is refused and nothing is evicted. */
+  /** The keys of the demand views that stay materialized, and a demand unit is due only while it holds one; absent, `want` is refused, nothing is evicted and demand units are paced like any other. */
   demand?: DemandBook;
   /** Core's state dir: every instance's DB lives under its `read-model/` (design §1.7). */
   stateDir: string;
@@ -866,6 +876,8 @@ interface ViewUnit {
   stretch?: number;
   /** When it would be due unstretched; a read pulls `dueAt` back to it. */
   baseDueAt?: number;
+  /** An idle-floor unit's last build was finished unread, so `dueAt` waits {@link READ_MODEL_IDLE_FLOOR_MS}. */
+  floored?: true;
   startedAt?: number;
   peakMs?: number;
   heavy?: boolean;
@@ -1547,8 +1559,11 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
   function paced(unit: ViewUnit, finished: number): number {
     const waitMs = unit.costMs! / READ_MODEL_VIEW_SHARE;
     unit.baseDueAt = finished + waitMs;
-    if (unit.view.readPaced !== true) return unit.baseDueAt;
     const idleMs = finished - lastReadOf(unit);
+    if (unit.view.readPaced !== true) {
+      unit.floored = unit.view.idleFloor === true && unit.view.demand !== true && idleMs >= READ_MODEL_READ_HOT_MS ? true : undefined;
+      return unit.floored ? finished + Math.max(waitMs, READ_MODEL_IDLE_FLOOR_MS) : unit.baseDueAt;
+    }
     unit.stretch = idleMs < READ_MODEL_READ_HOT_MS ? 1 : Math.min(READ_MODEL_IDLE_STRETCH_MAX, (unit.stretch ?? 1) * 2);
     return finished + waitMs * unit.stretch;
   }
@@ -1755,7 +1770,9 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
     }));
     log("read_model.view_lane_held", { lane: opts.lane, count: held.length, units: held });
   }
-  const dueUnits = (now: number): ViewUnit[] => units.filter((unit) => owns(unit) && built(unit.view.name) && unit.dueAt <= now).sort((a, b) => a.dueAt - b.dueAt);
+  /** W1-T11934: a demand unit is due only while the book holds a key of its view; its default keys alone rebuilt it every tick. */
+  const demanded = (unit: ViewUnit): boolean => unit.view.demand !== true || !opts.demand || opts.demand.keys(unit.view.name).length > 0;
+  const dueUnits = (now: number): ViewUnit[] => units.filter((unit) => owns(unit) && built(unit.view.name) && unit.dueAt <= now && demanded(unit)).sort((a, b) => a.dueAt - b.dueAt);
 
   /**
    * Build oldest due units within the pass left since `tickStart`, fitting each by last cost.
@@ -1928,10 +1945,11 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
         instance !== undefined && name === direct && views.some((view) => view.name === name && view.perInstance) ? instance : undefined;
       for (const view of read) readAt.set(only(view) === undefined ? view : `${view}@${only(view)}`, now);
       for (const unit of units) {
-        if (!read.has(unit.view.name) || (unit.stretch ?? 1) === 1) continue;
+        if (!read.has(unit.view.name) || ((unit.stretch ?? 1) === 1 && unit.floored !== true)) continue;
         const scope = only(unit.view.name);
         if (scope !== undefined && unit.slot?.instance.name !== scope) continue;
         unit.stretch = 1;
+        unit.floored = undefined;
         if (unit.baseDueAt !== undefined) unit.dueAt = Math.min(unit.dueAt, unit.baseDueAt);
       }
     },
@@ -2122,7 +2140,7 @@ export function readModelLaneViews(
 ): Array<ReadModelView | ReadModelViewFactory> {
   const instances = data.instances;
   const selectedRegistryObserver = selectedRegistryObserverFromIntent(data.selectedRegistryIntent, log);
-  return [
+  const views: Array<ReadModelView | ReadModelViewFactory> = [
     { name: NAV_BADGE_VIEW_NAME, create: () => createNavBadgeReadModelView(ledgerSource) },
     { name: "repositories", create: () => createRepositoriesReadModelView(ledgerSource, selectedRegistryObserver) },
     { name: CODE_HEALTH_VIEW_NAME, demand: true, create: () => createCodeHealthView({
@@ -2145,6 +2163,8 @@ export function readModelLaneViews(
     { name: INCIDENTS_VIEW_NAME, create: () => createIncidentsView({ instances, ledgerSource }) },
     { name: OPERATOR_AGENT_ROWS_VIEW, create: () => createOperatorAgentRowsView(ledgerSource) },
   ];
+  // W1-T11933: a view no demand key holds and not already read-paced floors its cadence while unread.
+  return views.map((view) => view.demand === true || view.readPaced === true ? view : { ...view, idleFloor: true as const });
 }
 
 export function readModelWorkerLog(post: (message: ReadModelWorkerMessage) => void, viewsOnly: boolean, lane?: "fast" | "heavy"): (step: string, extra: Record<string, unknown>) => void {

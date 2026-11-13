@@ -2097,7 +2097,6 @@ if [ -z "${PULLED_IMAGE_ID}" ]; then
 fi
 echo "recycle-container: pulled image id ${PULLED_IMAGE_ID}"
 selected_registry_image "${PULLED_IMAGE_ID}"
-recycle_phase smoke "\"image_changed\":$([ "${RECYCLE_IMAGE_BEFORE}" = "${PULLED_IMAGE_ID}" ] && echo false || echo true)"
 
 COMMISSION_PHASE="smoke"
 
@@ -2249,15 +2248,19 @@ run_worker_smoke() {
   fi
   echo "recycle-container: worker smoke PASSED — ${SMOKE_LINE:-exit 0}"
 }
+# W1-T12359: the smoke row holds the leftover clean-up and this smoke; the pause row starts after it.
+recycle_phase smoke "\"image_changed\":$([ "${RECYCLE_IMAGE_BEFORE}" = "${PULLED_IMAGE_ID}" ] && echo false || echo true)"
 if ! cleanup_leftover_smoke "before the smoke"; then
+  record_recycle_phase smoke "$((SECONDS - RECYCLE_PHASE_AT_S))" '"smoke_at":"before_pause"'
   echo "  The fleet was not paused." >&2
   exit 1
 fi
 if ! run_worker_smoke before_pause "${PULLED_IMAGE_ID}"; then
+  record_recycle_phase smoke "$((SECONDS - RECYCLE_PHASE_AT_S))" '"smoke_at":"before_pause"'
   echo "  The fleet was not paused." >&2
   exit 1
 fi
-recycle_phase pause
+recycle_phase pause '"smoke_at":"before_pause"'
 
 COMMISSION_PHASE="drain"
 
@@ -2498,17 +2501,170 @@ lock_pid_field() {
 #      `ABSENT`, from the container's OWN kernel, for the pid the LOCK ITSELF names. Anything else
 #      (pid present, or the probe cannot run at all) is read as "still alive or unknown" and left
 #      alone — the same fail-closed direction W1-T2556 already takes on an unparsable inspect.
+# ── W1-T12316: A LOCK THAT A PROCESS ON THIS SAME HOST WROTE ──────────────────────────────────────
+#
+# A host-level `rmd run-task` writes the host's own name as `host`, not a container id, so the
+# branch above skipped it. This script runs on that host and CAN test the pid. The verdict is
+# "dead" (no such process) or "used again" (alive, but started more than 2 s after the lock's
+# `startedAt`). Any other answer (alive with the lock's start time, no readable pid, a probe that
+# fails) leaves the lock in place, whatever its age. deploy/rmd-host-cleanup.sh carries the same
+# probe: it is installed as a copy and cannot source this file.
+inflight_host_identity() {
+  local id
+  id="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
+  id="${id%.}"
+  printf '%s' "${id%.local}"
+}
+
+# Same rule as `sameHost` (src/lib/host-identity.ts): equal identities, or a bare label that is
+# the first label of the other side's FQDN. A container id matches only itself.
+inflight_same_host() {
+  local a b bare qualified
+  a="$(inflight_host_identity "$1")"
+  b="$(inflight_host_identity "$2")"
+  [ -n "${a}" ] && [ -n "${b}" ] || return 1
+  [ "${a}" = "${b}" ] && return 0
+  case "${a}" in *.*) qualified="${a}"; bare="${b}" ;; *) qualified="${b}"; bare="${a}" ;; esac
+  case "${bare}" in *.*) return 1 ;; esac
+  case "${qualified}" in *.*) ;; *) return 1 ;; esac
+  printf '%s' "${bare}" | grep -Eq "${INFLIGHT_CONTAINER_ID_RE}" && return 1
+  [ "${qualified%%.*}" = "${bare}" ]
+}
+
+# Epoch seconds a live pid started: /proc/<pid>/stat field 22 plus the boot time, else `ps -o lstart=`.
+# Empty when neither answers.
+inflight_pid_start_epoch() {
+  local pid="$1" btime rest ticks hz lstart
+  if [ -r "/proc/${pid}/stat" ] && btime="$(awk '$1 == "btime" { print $2 }' /proc/stat 2>/dev/null)"; then
+    rest="$(sed -E 's/^.*\) //' "/proc/${pid}/stat" 2>/dev/null || true)"
+    ticks="$(printf '%s\n' "${rest}" | awk '{ print $20 }')"
+    hz="$(getconf CLK_TCK 2>/dev/null || true)"
+    if printf '%s' "${btime}:${ticks}:${hz}" | grep -Eq '^[0-9]+:[0-9]+:[1-9][0-9]*$'; then
+      printf '%s' "$((btime + ticks / hz))"
+      return 0
+    fi
+  fi
+  lstart="$(ps -o lstart= -p "${pid}" 2>/dev/null || true)"
+  [ -n "${lstart}" ] || return 0
+  date -d "${lstart}" +%s 2>/dev/null || date -j -f '%a %b %e %T %Y' "${lstart}" +%s 2>/dev/null || true
+}
+
+# Sets SAME_HOST_VERDICT (empty: leave the lock) and SAME_HOST_EVIDENCE for a lock this host wrote.
+same_host_inflight_verdict() {
+  local f="$1" pid started lock_epoch start_epoch pids listed_pid pid_seen=0 table_read=0
+  SAME_HOST_VERDICT=""
+  SAME_HOST_EVIDENCE=""
+  pid="$(lock_pid_field "${f}")"
+  printf '%s' "${pid}" | grep -Eq '^[1-9][0-9]*$' || return 0
+  if [ -d /proc/self ]; then
+    if [ ! -e "/proc/${pid}" ]; then
+      SAME_HOST_VERDICT="pid-dead"
+      SAME_HOST_EVIDENCE="pid ${pid} is dead: no /proc/${pid} on this host"
+      return 0
+    fi
+  else
+    # `ps -p` returns nonzero both for an absent pid and for a failed probe. Only a successful
+    # process-table read can prove absence when /proc is unavailable.
+    pids="$(ps -e -o pid= 2>/dev/null)" || return 0
+    for listed_pid in ${pids}; do
+      case "${listed_pid}" in *[!0-9]*|'') return 0 ;; esac
+      table_read=1
+      [ "${listed_pid}" = "${pid}" ] && pid_seen=1
+    done
+    [ "${table_read}" = 1 ] || return 0
+    if [ "${pid_seen}" = 0 ]; then
+      SAME_HOST_VERDICT="pid-dead"
+      SAME_HOST_EVIDENCE="pid ${pid} is dead: a successful ps process-table read finds no such process on this host"
+      return 0
+    fi
+  fi
+  started="$(lock_started_at_field "${f}")"
+  lock_epoch="$(epoch_of_started_at "${started}")"
+  start_epoch="$(inflight_pid_start_epoch "${pid}")"
+  printf '%s' "${lock_epoch}:${start_epoch}" | grep -Eq '^[0-9]+:[0-9]+$' || return 0
+  if [ "$((start_epoch - lock_epoch))" -gt 2 ]; then
+    SAME_HOST_VERDICT="pid-reused"
+    SAME_HOST_EVIDENCE="pid ${pid} was used again: the process started at epoch ${start_epoch}, the lock at ${started} (epoch ${lock_epoch})"
+  fi
+}
+
+lock_run_id_field() {
+  grep -ao '"run_id"[[:space:]]*:[[:space:]]*"[^"]*"' "$1" 2>/dev/null \
+    | head -1 \
+    | sed -E 's/.*"([^"]*)"[[:space:]]*$/\1/' || true
+}
+
+# Device, inode and bytes of the exact lock judged by the host pid probe. An acquirer may replace
+# a dead lock while that probe runs; a new file at the same pathname must never inherit its verdict.
+inflight_lock_identity() {
+  local file="$1" inode bytes
+  if inode="$(stat -c '%d:%i' -- "${file}" 2>/dev/null)"; then :
+  else inode="$(stat -f '%d:%i' -- "${file}" 2>/dev/null)" || return 1; fi
+  bytes="$(cksum < "${file}" 2>/dev/null)" || return 1
+  [ -n "${inode}" ] && [ -n "${bytes}" ] || return 1
+  printf '%s %s' "${inode}" "${bytes}"
+}
+
+# Prints, moves aside (never deletes) and records one lock. $3 is the verdict, $4 extra reason lines.
+move_inflight_lock_aside() {
+  local f="$1" host="$2" verdict="$3" extra="${4:-}" expected="${5:-}" current reclaimed_dir reclaimed_path
+  echo "recycle-container: ${f} names host ${host}, which ${verdict}." >&2
+  echo "  RECLAIMING — printed in full below before anything acts on it, never deleted:" >&2
+  sed 's/^/    /' "${f}" >&2 2>/dev/null || echo "    (unreadable)" >&2
+
+  reclaimed_dir="${INFLIGHT_DIR}/reclaimed"
+  mkdir -p "${reclaimed_dir}"
+  reclaimed_path="${reclaimed_dir}/$(basename "${f}").recycle-$$"
+  if [ -n "${expected}" ]; then
+    current="$(inflight_lock_identity "${f}")" || current=""
+    if [ "${current}" != "${expected}" ]; then
+      echo "  KEEP ${f}: lock changed during the host pid probe; the replacement still blocks" >&2
+      return 1
+    fi
+  fi
+  mv "${f}" "${reclaimed_path}"
+  printf 'reclaimed by recycle-container.sh (W1-T2556/W1-T3611/W1-T12316) pid %s at %s\nhost: %s\nverdict: %s\n%s' \
+    "$$" "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" "${host}" "${verdict}" "${extra}" > "${reclaimed_path}.reason"
+  echo "  moved aside to ${reclaimed_path} (reason recorded alongside it) — recycle proceeds" >&2
+}
+
+reclaim_same_host_inflight_lock() {
+  local f="$1" host="$2" expected="$3" slot run_id pid started start_epoch
+  slot="$(basename "${f}" .lock)"
+  run_id="$(lock_run_id_field "${f}")"
+  pid="$(lock_pid_field "${f}")"
+  started="$(lock_started_at_field "${f}")"
+  start_epoch="$(inflight_pid_start_epoch "${pid}")"
+  echo "recycle-container: slot ${slot} run ${run_id:-unknown}: ${SAME_HOST_EVIDENCE}" >&2
+  move_inflight_lock_aside "${f}" "${host}" "is this host; ${SAME_HOST_VERDICT}: ${SAME_HOST_EVIDENCE}" \
+    "$(printf 'pid: %s\nlock startedAt: %s\nprocess start epoch: %s\nevidence: %s\n' "${pid}" "${started}" "${start_epoch:-none, no live process}" "${SAME_HOST_EVIDENCE}")" \
+    "${expected}" || return 0
+  if [ -d "$(dirname "${LEDGER_FILE}")" ]; then
+    printf '{"ts":"%s","run_id":%s,"task_id":%s,"step":"recycle.inflight_reclaimed","lane":"deploy","pid":%s,"host":%s,"verdict":%s,"evidence":%s,"lock_started_at":%s,"recycle_pid":%s}\n' \
+      "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" "$(recycle_json_string "${run_id:-RECYCLE-$$}")" "$(recycle_json_string "${slot}")" "${pid}" \
+      "$(recycle_json_string "${host}")" "$(recycle_json_string "${SAME_HOST_VERDICT}")" "$(recycle_json_string "${SAME_HOST_EVIDENCE}")" \
+      "$(recycle_json_string "${started}")" "$$" >> "${LEDGER_FILE}" || true
+  fi
+}
+
 reclaim_dead_inflight_locks() {
   [ -d "${INFLIGHT_DIR}" ] || return 0
-  local f host verdict running reclaimed_dir reclaimed_path pid probe target_id
+  local f host verdict running pid probe target_id self_host identity
+  self_host="$(hostname 2>/dev/null || true)"
   # Resolved ONCE per sweep, not per lock — the RUNNING target container's own id never changes
   # mid-sweep. Empty when `${CONTAINER_NAME}` cannot be resolved at all (e.g. no container yet on a
   # first-ever run), which the branch below treats as "cannot judge" and leaves every lock alone.
   target_id="$(docker inspect --format '{{.Id}}' "${CONTAINER_NAME}" 2>/dev/null || true)"
   for f in "${INFLIGHT_DIR}"/*.lock; do
     [ -e "${f}" ] || continue
+    identity="$(inflight_lock_identity "${f}")" || continue
     host="$(lock_host_field "${f}")"
     [ -n "${host}" ] || continue # unreadable or malformed — leave alone, still blocks
+    if inflight_same_host "${host}" "${self_host}"; then
+      same_host_inflight_verdict "${f}"
+      [ -z "${SAME_HOST_VERDICT}" ] || reclaim_same_host_inflight_lock "${f}" "${host}" "${identity}"
+      continue # alive with its start time, or unprobeable — leave alone, still blocks
+    fi
     printf '%s' "${host}" | grep -Eq "${INFLIGHT_CONTAINER_ID_RE}" || continue # host cannot be resolved — leave alone
 
     verdict=""
@@ -2533,17 +2689,7 @@ reclaim_dead_inflight_locks() {
     fi
     [ -n "${verdict}" ] || continue # running elsewhere, unprobeable, or pid still alive — leave alone
 
-    echo "recycle-container: ${f} names host ${host}, which docker reports ${verdict}." >&2
-    echo "  RECLAIMING — printed in full below before anything acts on it, never deleted:" >&2
-    sed 's/^/    /' "${f}" >&2 2>/dev/null || echo "    (unreadable)" >&2
-
-    reclaimed_dir="${INFLIGHT_DIR}/reclaimed"
-    mkdir -p "${reclaimed_dir}"
-    reclaimed_path="${reclaimed_dir}/$(basename "${f}").recycle-$$"
-    mv "${f}" "${reclaimed_path}"
-    printf 'reclaimed by recycle-container.sh (W1-T2556/W1-T3611) pid %s at %s\nhost: %s\nverdict: %s\n' \
-      "$$" "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" "${host}" "${verdict}" > "${reclaimed_path}.reason"
-    echo "  moved aside to ${reclaimed_path} (reason recorded alongside it) — recycle proceeds" >&2
+    move_inflight_lock_aside "${f}" "${host}" "docker reports ${verdict}"
   done
 }
 
@@ -3084,13 +3230,15 @@ if ! docker image inspect "${PULLED_IMAGE_ID}" >/dev/null 2>&1; then
   COMMISSION_PHASE="smoke"
   recycle_phase smoke
   if ! cleanup_leftover_smoke "before the smoke" || ! run_worker_smoke after_wait "${PULLED_IMAGE_ID}"; then
+    record_recycle_phase smoke "$((SECONDS - RECYCLE_PHASE_AT_S))" '"smoke_at":"after_wait"'
     clear_own_pause "recycle-container: pause removed — the refusal above must not leave the fleet paused" >&2
     exit 1
   fi
+  AFTER_WAIT_SMOKE_FIELDS='"smoke_at":"after_wait"'
 fi
 
 COMMISSION_PHASE="replace"
-recycle_phase stop
+recycle_phase stop "${AFTER_WAIT_SMOKE_FIELDS:-}"
 
 record_recycled_cadence_child() {
   local state run_id pid attempt status at

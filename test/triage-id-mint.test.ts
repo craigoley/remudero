@@ -76,7 +76,7 @@ function makeOriginWithPlan(feedbackId: string): string {
   // a PROPOSED verdict, this seed plan is now actually LOADED by the propose-path collision guard
   // (assertProposedPlanLoads) and linted (lintFiledTasks) — a bare id/title pair fails BOTH with
   // "missing required field", which is not the thing under test here.
-  const taskFields = ["  repo: remudero", "  depends_on: []", "  type: implement", "  verify: auto", "  status: queued", "  attempts: 0"].join("\n");
+  const taskFields = ["  repo: remudero", "  depends_on: []", "  type: implement", "  design: |", "    NO-INVARIANTS: synthetic lint fixture with no inherited behavior to preserve", "  verify: auto", "  status: queued", "  attempts: 0"].join("\n");
   writeFileSync(
     join(seed, "plan", "tasks.yaml"),
     `- id: W1-T4\n  title: "a"\n${taskFields}\n- id: W1-T5\n  title: "b"\n${taskFields}\n`,
@@ -182,6 +182,8 @@ test("TRIAGE ID MINT (the #770/#775 collision class): `rmd triage` derives the i
               "  origin: architect",
               "  depends_on: []",
               "  type: implement",
+              "  design: |",
+              "    NO-INVARIANTS: synthetic lint fixture with no inherited behavior to preserve",
               "  verify: auto",
               "  status: queued",
               "  attempts: 0",

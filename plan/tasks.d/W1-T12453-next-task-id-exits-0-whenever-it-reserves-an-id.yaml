@@ -1,0 +1,63 @@
+- id: W1-T12453
+  title: "next-task-id exits 0 whenever it reserves an id"
+  repo: remudero
+  depends_on: []
+  priority: 1.0
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the exit code of the one id-reservation verb; every filing lane and the gate gardener read it
+  band_meaning: blast-radius
+  origin: operator-session#root-cause-defects-2026-11-12
+  plan_refs:
+    - W1-T1055
+    - W1-T2324
+    - W1-T2710
+    - W1-T3062
+    - W1-T9683
+  files:
+    - src/run-task.ts
+    - src/lib/task-id.ts
+    - test/next-task-id-reserve.test.ts
+    - test/cli/next-task-id-exits-0-whenever-it-reserves-an-id.test.ts
+    - test/mint-open-pr-surface-is-rest.test.ts
+    - test/a-green-pr-that-can-never-merge-asks-once.test.ts
+  status: merged
+  attempts: 0
+  acceptance:
+    - claim: "When the mint has a degraded source other than the open-PR surface (for example the local plan half is behind the reservation namespace) and the reservation holds an id, `rmd next-task-id --reserve --branch <b>` prints the RESERVED line and exits 0"
+      proof: "grep: W1-T12453 criterion 1 in test/cli/next-task-id-exits-0-whenever-it-reserves-an-id.test.ts"
+    - claim: "In that case each degraded note is written to stderr, and stdout holds the RESERVED line and no DEGRADED text"
+      proof: "grep: W1-T12453 criterion 2 in test/cli/next-task-id-exits-0-whenever-it-reserves-an-id.test.ts"
+    - claim: "A reservation that holds no id still exits non-zero: an unreadable open-PR surface exits 2, a refused push exits 2, and a partial --count exits 2, as today"
+      proof: "grep: W1-T12453 criterion 3 in test/cli/next-task-id-exits-0-whenever-it-reserves-an-id.test.ts"
+    - claim: "A print-only mint (--no-reserve or --offline) with a degraded source keeps its exit code of today"
+      proof: "grep: W1-T12453 criterion 4 in test/cli/next-task-id-exits-0-whenever-it-reserves-an-id.test.ts"
+    - claim: "The gate gardener's fallback minter, which runs the verb through execFileSync, gets the held id from a degraded reservation instead of an exception"
+      proof: "grep: W1-T12453 criterion 5 in test/cli/next-task-id-exits-0-whenever-it-reserves-an-id.test.ts"
+  rationale: |
+    OBSERVED 2026-11-12: `rmd next-task-id --branch <b>` exits 1 after a reservation that succeeded. Its output has a `RESERVED W1-T<n>` line. Callers that read the exit code think the reservation failed. The operator's wrapper `~/rmd-work/bin/reserve-id.sh` works around it: "Success is a RESERVED line, whatever the exit code: rmd can exit 1 on a degraded-but-completed reservation."
+    READ at origin/main 12047b93a.
+    - src/run-task.ts:17593 `nextTaskIdCommand`. The reserve path (:17770 to :17849) prints a RESERVED line for each held id (:17833). After the try block, :17850 is `return mint.degraded.length ? 1 : 0;`. So any degraded mint source gives exit 1, also when the id is held.
+    - Only the open-PR surface stops a reservation (`openPrSurfaceOutage`, :17589, returns 2 before any claim). The other sources (shards, local-plan, remote-plan, reservations) degrade and the claim goes on. src/lib/task-id.ts:407 adds a `local-plan` degradation whenever the checkout's plan ceiling is below the reservation namespace. That is the normal state while ids are reserved and not yet filed, so most reservations exit 1.
+    - The degraded notes go to stdout in the mint line (src/lib/task-id.ts:457, ` — DEGRADED: ...`).
+    - src/lib/gate-gardener.ts:777 to :783 is a production caller. Without an injected minter it runs the verb with `execFileSync`, which throws on exit 1. The id is then held on origin, but `prepareGardenTaskIds` never records it, so no release path frees it.
+  design: |
+    1. In `nextTaskIdCommand`, when the reserve path held at least one id and no error was thrown, return 0, whatever `mint.degraded` holds.
+    2. In the reserve path, write the degraded notes to stderr (one `### rmd next-task-id: DEGRADED <source>: <reason>` line each) and keep them out of the stdout mint line. Keep the print-only path's output and exit code as today.
+    3. Keep exit 2 for every refusal: open-PR outage, push refused, contention past max-scan, and a partial --count.
+    4. Check every reader of the verb's output (gate gardener, reserve-id wrappers, tests that match `DEGRADED`) and move a match on stdout DEGRADED text to stderr.
+    5. test/mint-open-pr-surface-is-rest.test.ts asserts the old reserve output: a DEGRADED note on stdout and exit 1
+       after a held id. Its degraded-shards test moves that note to stderr and expects exit 0.
+    6. The new test imports src/run-task.ts, and the importer count of that file is at its limit (1010).
+       test/a-green-pr-that-can-never-merge-asks-once.test.ts imports only terminalArmRefusal from it,
+       which src/lib/tick-read-worker.ts defines. That test imports it from there, so the count stays at its limit.
+    NO-INVARIANTS: the task changes the reserve path's exit code and moves its notes to stderr on purpose;
+       criteria 3 and 4 pin the behavior that stays (refusal exit codes and the print-only output).
+    NOT IN SCOPE: which sources count as degraded, the open-PR refusal, the --prefix path.
+  falsifier: |
+    Restore `return mint.degraded.length ? 1 : 0` for the reserve path and criteria 1 and 5 must fail. Print the notes on stdout and criterion 2 must fail. Return 0 after a refusal and criterion 3 must fail. Restore and require all five to pass.
+  note: |
+    Id reserved for run-unfiled-1794528010000 with ~/rmd-work/bin/reserve-id.sh. The fleet builds it.
+    The test reaches the degraded path with an injected mint source that lags the reservation namespace; it calls `nextTaskIdCommand` in process, not through a child that imports src/run-task.ts.

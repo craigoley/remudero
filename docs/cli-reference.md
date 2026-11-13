@@ -52,6 +52,7 @@ usage:
   rmd ledger-compact [--older-than <days> | --older-than-hours <hours>] [--max-sources <n>] [--dry-run]   # Compact one bounded window of old ledger rotations without losing a distinct row.
   rmd read-model rebuild [--instance <id>] [--ledger-dir <dir>] [--window-days <n>] | status [--json] | switch <projector|<view>> <mode>   # Rebuild, inspect or switch the serve read model projected from the ledger.
   rmd hand-runs   # Print which verb sequence the operator keeps hand-running, on demand.
+  rmd decisions probe --candidate <name> --input-file <file> --questions-file <file> [--role <role>]   # Ask one decision model one question set about one input, and print the row it wrote.
   rmd field-trials [--source <label>=<owner/repo>]... [--ledger <label>=<state-dir>]... [--out-dir <dir>] [--consent <file>] [--case-files <file>] [--max-pages <n>] [--offline] [--revoke <release-id>] [--field-note <out> [--site-registry <file>]] [--json] [--refresh-step <name>=<exit-code|skipped>]... [--refresh-script-blob <sha1>] [--refresh-record-only]   # Join the ledger union and GitHub history into observational field-trials aggregates.
   rmd ci-failures [--days N]   # Report the window's red CI gates, each paired with the commit that repaired it.
   rmd board [--repo <owner/repo> ...]   # Print what is open, and what is red, across every fleet repository.
@@ -90,7 +91,7 @@ usage:
   rmd fix <pr-number> [--repo <name>]   # Operator verb for the fix rung: dispatch the same rung `rmd sweep` uses.
   rmd wipe-test <task-id> [--factor learnings|recon|rules] [--repo remudero-sandbox] [--allow-non-sandbox]   # P12 A/B harness: run a sandbox task twice, ledger the deltas for one factor.
   rmd stop [--reason <text>]   # Fleet control: one-shot halt of the running drain; auto-clears when it ends.
-  rmd pause [--instance <name>] [--reason <text>] | rmd pause --fleet [--reason <text>]   # Fleet control: drain-and-hold ONE instance until `rmd resume`; --fleet holds every instance.
+  rmd pause [--instance <name>] [--status] | rmd pause [--instance <name>] --reason <text> | rmd pause --fleet --reason <text>   # Fleet control: show the pause state, or with --reason hold ONE instance until `rmd resume`.
   rmd resume [--instance <name>] | rmd resume --fleet   # Fleet control: clear ONE instance's PAUSE (and any STOP); --fleet clears the fleet-wide hold.
   rmd away [on|off]   # Set/show operator presence; batches escalations into a recap while away.
   rmd correct <task-id> --pr <n> [--reason <text>]   # Sanctioned operator-correction writer: name a task's true merged PR.
@@ -518,6 +519,16 @@ rmd hand-runs
 
 W1-T2697: the ledger records every rmd verb but never who ran it — a worker subprocess, the daemon's own in-process loop, and an operator's bare `./bin/rmd` are now distinguished by the `actor` field every appendLedger call stamps at write time (a pre-stamp row reads `unknown`, never guessed). This prints the hand-run census: over the archive+live ledger UNION (never the live file alone — W1-T1013), operator rows are grouped into sessions by their writing process and a thirty-minute gap, each session reduced to its ordered step sequence, and any sequence of length >= 2 recurring across at least the policy floor of DISTINCT CALENDAR DAYS (never session count) is printed with its days and session count. The same census, when the daemon's own cadence supplies a run id, additionally proposes each unproposed recurrence as ONE `plan/feedback/` entry (deduped by sequence signature against the ledger union, `hand_run.census_proposed`) — this command never does that itself. READ-ONLY: writes no ledger line, no feedback entry, no state file.
 
+### `rmd decisions`
+
+Ask one decision model one question set about one input, and print the row it wrote.
+
+```
+rmd decisions probe --candidate <name> --input-file <file> --questions-file <file> [--role <role>]
+```
+
+W1-T12416: sends ONE paid cash request to a candidate named in the decision_models section of .remudero/mounts.yaml. The questions file is a JSON array of yes-no, choice (2 to 255 typed options) and score (2 to 10 ordered levels) questions, each with a name and instructions; a bad set is refused before any reservation. The request reserves on its input size plus a 64-token output margin against the normal daily cash cap, settles from the reply's usage at the candidate's own price row, and writes one decision.answered row: role, input digest, candidate, deployment, served model, latency, reserved and settled dollars, usage, and each question's distribution, abstention or rejection. A candidate whose cashDeploymentEndpoints entry or key is missing is unavailable and sends nothing. Shadow only: no gate, route or judge reads the row. Exit 0 answered, 1 refused, unavailable or failed, 2 bad usage.
+
 ### `rmd field-trials`
 
 Join the ledger union and GitHub history into observational field-trials aggregates.
@@ -900,13 +911,13 @@ fleet control: ONE-SHOT halt of the RUNNING drain; auto-clears when that run end
 
 ### `rmd pause`
 
-Fleet control: drain-and-hold ONE instance until `rmd resume`; --fleet holds every instance.
+Fleet control: show the pause state, or with --reason hold ONE instance until `rmd resume`.
 
 ```
-rmd pause [--instance <name>] [--reason <text>] | rmd pause --fleet [--reason <text>]
+rmd pause [--instance <name>] [--status] | rmd pause [--instance <name>] --reason <text> | rmd pause --fleet --reason <text>
 ```
 
-fleet control: PERSISTENT drain-and-hold of ONE instance — the one --instance names, else the instance whose registry state_dir is this config.root; an unresolvable target refuses before writing. In-flight completes, no new spawns; survives across runs until `rmd resume`. --fleet is the separate, explicit fleet-wide hold (refs/rmd-pause/hold), cleared only by `rmd resume --fleet`.
+fleet control: a bare `rmd pause` only reads: it prints the pause state of the instance and of the fleet-wide hold, changes nothing and exits 0 (--status does the same with any other flag). A hold needs --reason <text>; without it --instance or --fleet refuses and changes nothing, and an unknown flag refuses. With --reason: PERSISTENT drain-and-hold of ONE instance — the one --instance names, else the instance whose registry state_dir is this config.root; an unresolvable target refuses before writing. In-flight completes, no new spawns; survives across runs until `rmd resume`. --fleet is the separate, explicit fleet-wide hold (refs/rmd-pause/hold), cleared only by `rmd resume --fleet`.
 
 ### `rmd resume`
 

@@ -1,4 +1,6 @@
 /** The fix verb and its exclusive helpers, moved from the entrypoint (W1-T9337). */
+import { findTaskInCatalogs, type TaskLookupOptions, type TaskLookupResult, type CatalogTaskContract } from "../../lib/task-lookup.js";
+import { planDestinationRepository } from "../../lib/plan-destination.js";
 import type { RunTaskCommandHost, GitRunner, CiGateOutcome, ReviewRunResult, FixRungOutcome, LiveHeadResult, WorktreeSnapshot, FixRebaseMergeFacts, FixRoundCommit, CensusPushRefusal, FixRoundPushReceipt } from "./run-task-verb.js";
 import { buildBaseProofDir, releaseBaseProofDir, type BaseProofDir } from "../../lib/check-proof.js";
 import { judgeFixProgress, resolveFixProgress, type FixProgressJudge, type FixProgressVerdict, type FixProgressWorkerProofResult, reviewerProofFailures, unfiledScopeGrant, UNFILED_SCOPE_GRANT_ANSWER } from "../../lib/fix-progress-judge.js";
@@ -24,7 +26,7 @@ import { conflictedFilePaths } from "../../lib/hot-file-gardener.js";
 import { billingMode } from "../../lib/env.js";
 import { FIX_MODE_RULES, deriveFixMode, fixScopeRegime, outOfDeclaredScopeFiles, renderFixPrompt, renderPrerequisitePrPrompt, sameHeadReviewUnmet, type FixEvidence, type FixReviewFinding } from "../../lib/prompt-render.js";
 import { bakedClosureCatalogDetails } from "../../lib/baked-closure-catalog.js";
-import { escalateWithJudge, escalationCause, realEscalationJudge, escalationHeadSha, openEscalationStandDownReason, fixEscalationDedupKey, findDuplicateEscalation, taskContractRevision, taskSemanticRevision, type EscalationDedupKey, type IssueGateway, type OpenIssue } from "../../lib/escalate.js";
+import { escalateWithJudge, escalationCause, realEscalationJudge, escalationHeadSha, openEscalationStandDownReason, fixEscalationDedupKey, findDuplicateEscalation, taskContractRevision, taskSemanticRevision, type Escalation, type EscalationDedupKey, type IssueGateway, type OpenIssue } from "../../lib/escalate.js";
 import { fetchSinglePrRest, codeqlCheckFailed, hydrateCodeqlHeadAlertsSteps, CODEQL_CHECK_NAME, type GhApiFetcher } from "../../lib/open-prs-rest.js";
 import { remedyFilesForFailingChecks, type RemedyFileForGate } from "../../lib/ci-parity.js";
 import { isInPlanScope } from "../../lib/plan-architect.js";
@@ -42,7 +44,7 @@ import { loadMounts, mountsPath, type Mount } from "../../lib/mounts.js";
 import { fixArmEvidence, fixRoutingWeights, readFixRoutingRows, type FixLearnedArms } from "../../lib/fix-routing-learner.js";
 import { loadInjectableSkills, observeSkillSelection, renderSkillsPart, SKILL_FIX_TASK_TYPE, skillWithheldForRun } from "../../lib/skill-workshop.js";
 import { DEFAULT_KNOWLEDGE_BUDGET_CHARS } from "../../lib/learnings.js";
-import { recognizeChangesetClaims, acceptanceAuthorTimeCheck, extractTaskTrailerId, parseAcceptanceBlock, reviewLedgerKeyFor, UNFILED_RUN_SENTINEL, reviewInputDigest, reviewLedgerReasons, resolvePlanCriteriaAtHeadAsync, type PlanCriteriaAtHeadResult, type CriterionVerdict } from "../../lib/review.js";
+import { recognizeChangesetClaims, acceptanceAuthorTimeCheck, extractTaskTrailerId, parseAcceptanceBlock, reviewLedgerKeyFor, UNFILED_RUN_SENTINEL, reviewInputDigest, reviewLedgerReasons, resolvePlanCriteriaAtHeadAsync, type CriterionVerdict } from "../../lib/review.js";
 import { repairedProofsAreSafeToPush, diagnoseUnrunnableProofs, renderBodyDefects } from "../../lib/body-repair.js";
 import { recordHeadProviderAfterPush } from "../../lib/review-provider-provenance.js";
 import { ghRequiredStatusCheckContexts, readLedgerLines, taskIdFromRunBranch } from "../../lib/status.js";
@@ -2247,6 +2249,28 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
 },
   host: FixCommandHost,
 ): ReturnType<RunTaskCommandHost["runFixRung"]> {
+  opts = noEditRecoveryOptions(opts);
+  /** Keep fix-rung issues within an ops task's public contract; detailed diagnostics stay host-side. */
+  const fixRungEscalationForTask = (
+    task: { catalog?: "public" | "ops"; title: string; acceptance?: AcceptanceCriterion[] },
+    escalation: Escalation,
+  ): Escalation => {
+    if (task.catalog !== "ops") return escalation;
+    const pullRequest = /https:\/\/github\.com\/[^\s)]+\/pull\/\d+/.exec(`${escalation.summary}\n${escalation.detail}`)?.[0];
+    const acceptance = visibleCriteria(task.acceptance ?? []).map(({ claim }) => `- ${claim}`).join("\n");
+    return {
+      ...escalation,
+      summary: `${task.title}${pullRequest ? ` — ${pullRequest}` : ""}`,
+      detail: acceptance || task.title,
+      options: escalation.options.map((option) => ({ ...option, detail: task.title })),
+      runId: undefined,
+      decisionSummary: null,
+      contractRevision: undefined,
+      consequence: null,
+    };
+  };
+  const escalateForTask = (escalation: Escalation, deps: Parameters<typeof escalateWithJudge>[1]) =>
+    escalateWithJudge(fixRungEscalationForTask(opts.task, escalation), deps);
   const {
     formerBoundStandIn,
     fixRungStandDownReason,
@@ -2728,7 +2752,7 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
       if (foreignTree) {
         deps.log("rung.foreign_tree", { site: "rung.strike", strike: strikes + 1, branch: opts.branch, reason: foreignTree.reason, porcelain_paths: foreignTree.porcelainPaths, diffstat: foreignTree.diffstat, other_worktrees: foreignTree.otherWorktrees });
         const detail = `The blocked_review FIX RUNG (W1-T76, W1-T2652) observed local worktree content on ${opts.branch} before spending strike ${strikes + 1}: ${foreignTree.reason}. The rung did not observe an author for this content and will not reset, stash, clean, commit or push it. Observed porcelain paths: ${JSON.stringify(foreignTree.porcelainPaths)}. Observed diffstat: ${JSON.stringify(foreignTree.diffstat)}. Other registered worktrees on this branch: ${JSON.stringify(foreignTree.otherWorktrees)}.`;
-        const issueUrl = await escalateWithJudge(
+        const issueUrl = await escalateForTask(
           { class: "BLOCKED", taskId: opts.taskId, runId: opts.runId, headSha: review.headSha, cause: escalationCause(currentMergeConflict !== undefined, noReviewYet), summary: `fix rung standing down — foreign worktree content before round 1 — ${opts.prUrl}`, detail, options: [{ label: "discard", detail: "remove the foreign local content, then re-run the fix rung against a clean materialized worktree." }, { label: "adopt", detail: "confirm this local content is intentional and should be preserved before resuming the fix rung." }], recommendation: "discard" },
           { issues: deps.escalationIssues ?? deps.issues, ledgerPath: deps.ledgerPath, runId: opts.runId, judge: escalationJudge },
         );
@@ -2744,7 +2768,7 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
         // Distinct disposition from W1-T196's unattributable-pr stand-down,
         // which ledgers because THAT state carries no decidable question.
         const { headSha: foreignHeadSha, author: foreignAuthor } = preStrikeStandDown.foreignHead;
-        const issueUrl = await escalateWithJudge(
+        const issueUrl = await escalateForTask(
           {
             class: "BLOCKED",
             taskId: opts.taskId,
@@ -2972,7 +2996,7 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
         // The judge decides WHEN to stop; the escalation still names the mode's own evidence (W1-T100/W1-T106).
         const stillConflicted = currentMergeConflict !== undefined;
         const unmet = review.criteria.filter((c) => !c.met);
-        const issueUrl = await escalateWithJudge({ class: "BLOCKED", taskId: opts.taskId, runId: opts.runId,
+        const issueUrl = await escalateForTask({ class: "BLOCKED", taskId: opts.taskId, runId: opts.runId,
           headSha: review.headSha, cause: escalationCause(stillConflicted, noReviewYet),
           summary: stillConflicted
             ? `conflicted fix rung stopped by the progress judge (${strikes} strike(s), merge state never resolved): ${decision.loop} — ${opts.prUrl}`
@@ -3360,7 +3384,7 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
         const gateRemedyDetail = gateRemedy
           ? ` Observed blocker: failing gate ${gateRemedy.gate} prescribes ${gateRemedy.file} as its own remedy; declaring entry: ${gateRemedy.declaringEntry}.`
           : "";
-        const issueUrl = await escalateWithJudge(
+        const issueUrl = await escalateForTask(
           {
             class: "BLOCKED",
             taskId: opts.taskId,
@@ -3463,7 +3487,7 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
         `fix rung: REFUSED — the diff itself edits plan/tasks.yaml's acceptance criteria (Standing rule 15); ` +
           `escalating rather than dispatching a fix worker: ${opts.prUrl}`,
       );
-      const issueUrl = await escalateWithJudge(
+      const issueUrl = await escalateForTask(
         {
           class: "BLOCKED",
           taskId: opts.taskId,
@@ -3534,7 +3558,7 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
       // W1-T3166: async because the escalation it opens is now judged. Wording and options are
       // untouched — W1-T2436 requires this arm to file the identical, already-understood issue.
       const escalateInstrumentEntangled = async (): Promise<string> =>
-        await escalateWithJudge(
+        await escalateForTask(
           {
             class: "BLOCKED",
             taskId: opts.taskId,
@@ -3975,7 +3999,7 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
       let issueUrl = typeof escalated?.issue_url === "string" ? escalated.issue_url : undefined;
       let deliveryError: { error: string } | undefined;
       if (!issueUrl) try {
-        issueUrl = (await escalateWithJudge({ class: "BLOCKED", taskId: opts.taskId, runId: opts.runId,
+        issueUrl = (await escalateForTask({ class: "BLOCKED", taskId: opts.taskId, runId: opts.runId,
           headSha: priorHeadSha, cause: escalationCause(currentMergeConflict !== undefined, noReviewYet), contractRevision: `needs-design:${prNumber}:${priorHeadSha}`,
           summary: `PR #${prNumber}'s fix lane handed it back NEEDS_DESIGN and stands down every pass — ${opts.prUrl}`,
           detail: `${opts.prUrl} at ${priorHeadSha}: a fix worker answered NEEDS_DESIGN, so every later pass stands down ` +
@@ -4832,7 +4856,7 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
         let issueUrl = typeof prior?.issue_url === "string" ? prior.issue_url : undefined;
         let deliveryError: { error: string } | undefined;
         if (!issueUrl) try {
-          issueUrl = await escalateWithJudge({ class: "BLOCKED", taskId: opts.taskId, runId: opts.runId,
+          issueUrl = await escalateForTask({ class: "BLOCKED", taskId: opts.taskId, runId: opts.runId,
             headSha: priorHeadSha, cause: escalationCause(currentMergeConflict !== undefined, noReviewYet), contractRevision: identityKey,
             ...(headIndependent ? { headDedup: "independent" as const } : {}),
             summary: scopeKind === "workflow"
@@ -5077,7 +5101,7 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
             `fix rung: ESCAPING after strike ${strikes}/${opts.strikeCap} — ${ciFalseBlockReason} — escalating for ` +
               `re-judgment rather than striking toward exhaustion: ${opts.prUrl}`,
           );
-          const issueUrl = await escalateWithJudge(
+          const issueUrl = await escalateForTask(
             {
               class: "BLOCKED",
               taskId: opts.taskId,
@@ -5256,7 +5280,7 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
     // snapshot named in this task's rationale; `reviewTask` is what actually reaches the reviewer.
     let reviewTask = opts.task;
     if (deps.resolveTaskContractAtHead) {
-      let resolvedContract: PlanCriteriaAtHeadResult | undefined;
+      let resolvedContract: CatalogTaskContract | undefined;
       let resolveError: string | undefined;
       try {
         resolvedContract = await deps.resolveTaskContractAtHead(opts.prUrl, opts.taskId);
@@ -5276,11 +5300,11 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
         deps.say(`fix rung: standing down — ${reason}`);
         return { outcome: "stood_down", review, strikes, retriggers, reason, standDownReason: reason };
       }
-      reviewTask = {
-        ...opts.task,
+      reviewTask = Object.assign({}, opts.task, {
         acceptance: resolvedContract.criteria,
         files: resolvedContract.taskDeclaredFiles,
-      };
+        catalog: resolvedContract.taskCatalog,
+      });
       deps.log("fix.head_contract_refreshed", {
         strike: strikes,
         criteria_count: resolvedContract.criteria.length,
@@ -5345,7 +5369,7 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
     }
     if (review.decisionDisposition === "conflict") {
       const digest = review.reviewDecisionDigest ?? "unknown";
-      const issueUrl = await escalateWithJudge(
+      const issueUrl = await escalateForTask(
         {
           class: "BLOCKED",
           taskId: opts.taskId,
@@ -5411,7 +5435,7 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
         `fix rung: ESCAPING after strike ${strikes}/${opts.strikeCap} — ${falseBlockReason} — escalating for ` +
           `re-judgment rather than striking toward exhaustion: ${opts.prUrl}`,
       );
-      const issueUrl = await escalateWithJudge(
+      const issueUrl = await escalateForTask(
         {
           class: "BLOCKED",
           taskId: opts.taskId,
@@ -5489,7 +5513,7 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
       };
     }
     const staleCheckNames = Array.from(new Set([...everRedCiCheckNames, ...(currentCiFailures ?? []).map((f) => f.name)]));
-    const issueUrl = await escalateWithJudge(
+    const issueUrl = await escalateForTask(
       {
         class: "BLOCKED",
         taskId: opts.taskId,
@@ -5549,7 +5573,7 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
   // still spent trying to resolve a dirty merge state — mirrors `noReviewYet`
   // for the ci-log shape, checked first (mutually exclusive by construction).
   const stillConflicted = currentMergeConflict !== undefined;
-  const issueUrl = await escalateWithJudge(
+  const issueUrl = await escalateForTask(
     {
       class: "BLOCKED",
       taskId: opts.taskId,
@@ -5622,6 +5646,36 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
     reason: judgedStop?.judged ? `fix progress loop: ${judgedStop.loop} — ${judgedStop.reason}` : exhaustionReason, issueUrl };
 }
 
+/** Shared by the sweep's direct fix-module call and the run-task entrypoint. */
+export function noEditRecoveryOptions(opts: Parameters<RunTaskCommandHost["runFixRung"]>[0]) {
+  const original = opts.deps;
+  let pendingHead: string | undefined;
+  let recovered = false;
+  const deps: typeof original = {
+    ...original,
+    log: (step, fields) => {
+      if (step === "fix.commit_refused") {
+        pendingHead = fields?.reason === "the worker changed nothing" && fields.fix_outcome === "FIXED"
+          ? fields.head_sha as string | undefined : undefined;
+      }
+      original.log(step, fields);
+    },
+    spawn: async (args) => {
+      if (pendingHead === undefined || recovered) return original.spawn(args);
+      recovered = true;
+      original.log("fix.no_edit_recovery", { head_sha: pendingHead });
+      // The rung still owns admission, accounting, commit guards and push; only its next prompt changes.
+      return original.spawn({ ...args, prompt: `${args.prompt}\n\n` +
+        `NO_EDIT_RECOVERY: Your previous FIXED report at ${pendingHead} was refused: the worker changed nothing.\n` +
+        "This is the one recovery dispatch for that refusal. Reproduce the current failing proof or check, " +
+        "make a concrete repair within the permitted scope, and verify it. A FIXED report requires actual edits. " +
+        "If no safe repair is possible, report the observed blocker instead of claiming FIXED again. " +
+        "The harness will retry the same guarded commit; an unchanged head cannot be pushed.\n" });
+    },
+  };
+  return Object.assign(opts, { deps });
+}
+
 /**
  * `rmd fix <pr-number> [--repo <name>]` — the operator verb for the W1-T76 fix
  * rung (W1-T95). The rung is drive-only: drain invokes it live (a blocked_review
@@ -5636,6 +5690,10 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
  *
  * FAIL LOUD on junk args BEFORE any `gh` lookup/spawn (Standing rule).
  */
+export async function fixCatalogTask(taskId: string, plan: Plan, options: TaskLookupOptions = {}): Promise<TaskLookupResult> {
+  return findTaskInCatalogs(taskId, { ...options, byId: plan.byId });
+}
+
 export async function fixCommand(
   rest: string[],
   // Injectable exactly as approveCommand/inboxCommand already are — the seam that lets the
@@ -5648,7 +5706,7 @@ export async function fixCommand(
   //
   // `self` is the checkout's owner/repo, otherwise read from `origin`. A sandboxed checkout has no
   // origin remote, so a test that drives this verb end to end must be able to name the slug itself.
-  deps: { config?: Config; fetch?: GhApiFetcher; route?: ReturnType<typeof fixCommandHelpers>["routeFix"]; self?: { owner: string; repo: string }; contributorAdmission?: AdmissionObserver } = {},
+  deps: { config?: Config; fetch?: GhApiFetcher; route?: ReturnType<typeof fixCommandHelpers>["routeFix"]; self?: { owner: string; repo: string }; contributorAdmission?: AdmissionObserver; taskLookup?: TaskLookupOptions; readRequiredContexts?: typeof ghRequiredStatusCheckContexts } = {},
 
   host: FixCommandHost,
 ): Promise<number> {
@@ -5700,7 +5758,7 @@ export async function fixCommand(
   const reviewVerdictPostedAt = reviewVerdictPostedAtFromRollup(raw.statusCheckRollup);
   // W1-T103: same required-contexts gate as buildOpenPrViews — see
   // checksStateFromRollup's doc.
-  const requiredContexts = ghRequiredStatusCheckContexts(owner, repo);
+  const requiredContexts = (deps.readRequiredContexts ?? ghRequiredStatusCheckContexts)(owner, repo);
   const checksState = checksStateFromRollup(raw.statusCheckRollup, requiredContexts);
   const ciGateRequired = readCiGateRequiredChecks(repoRoot);
   const redRequiredChecks = redQualityGateNames(raw.statusCheckRollup, ciGateRequired);
@@ -5762,12 +5820,32 @@ export async function fixCommand(
   const planPath =
     repo === self.repo ? join(repoRoot, "plan", "tasks.yaml") : join(config.root, "repos", repo, "plan", "tasks.yaml");
   let plan: Plan = { tasks: [], byId: new Map() };
+  let publicPlanReadable = true;
   try {
     plan = loadPlan(planPath);
   } catch (e) {
+    publicPlanReadable = false;
     log("fix.plan.unavailable", { plan_path: planPath, error: String((e as Error)?.message ?? e) });
   }
 
+  if (taskId && !plan.byId.has(taskId)) {
+    if (!publicPlanReadable && planDestinationRepository(join(config.root, "state")).outcome !== "off") {
+      console.error("rmd fix: public plan unreadable; no private fallback or repair");
+      return 1;
+    }
+    if (publicPlanReadable) {
+      const found = await fixCatalogTask(taskId, plan, { ...deps.taskLookup, stateDir: join(config.root, "state") });
+      if (found.outcome === "unreadable") {
+        log("fix.catalog.unreadable", { reason: found.reason });
+        console.error("rmd fix: task catalog unreadable; no repair");
+        return 1;
+      }
+      if (found.outcome === "found") {
+        plan = { tasks: [...plan.tasks, found.task], byId: new Map([...plan.byId, [taskId, found.task]]) };
+        pr.taskDeclaredFiles = found.task.files;
+      }
+    }
+  }
   const effects = host.buildSweepEffects({
     productionProgressJudge: true,
     owner: owner,

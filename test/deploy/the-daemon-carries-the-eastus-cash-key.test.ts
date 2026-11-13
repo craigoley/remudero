@@ -176,8 +176,11 @@ test("W1-T10838: the eastus key value never reaches argv, a unit file or output"
     let output = f.install() + f.boot();
     assert.match(f.argv(), /-e\nRMD_CASH_EASTUS_API_KEY\n/);
     assert.equal(f.argv().includes(KEY), false);
-    for (const name of readdirSync(join(f.root, "units"))) {
-      assert.equal(readFileSync(join(f.root, "units", name), "utf8").includes(KEY), false);
+    for (const entry of readdirSync(join(f.root, "units"), { recursive: true, withFileTypes: true })) {
+      if (entry.isDirectory()) continue;
+      const path = join(entry.parentPath, entry.name);
+      assert.ok(entry.isFile(), `unexpected non-regular unit artifact: ${path}`);
+      assert.equal(readFileSync(path, "utf8").includes(KEY), false, path);
     }
     assert.equal(readFileSync(f.launcher, "utf8").includes(KEY), false);
     output += f.recycle();
