@@ -363,11 +363,11 @@ test("assertProposedPlanLoads: a minted id already owned by a tasks.d shard thro
     mkdirSync(join(root, "plan", "tasks.d"), { recursive: true });
     writeFileSync(
       join(root, "plan", "tasks.yaml"),
-      "- id: W1-T236\n  title: minted by the worker off the monolith max\n  repo: r\n  type: implement\n  verify: auto\n  status: queued\n",
+      "- id: W1-T236\n  title: minted by the worker off the monolith max\n  repo: r\n  type: implement\n  design: |\n    NO-INVARIANTS: synthetic lint fixture with no inherited behavior to preserve\n  verify: auto\n  status: queued\n",
     );
     writeFileSync(
       join(root, "plan", "tasks.d", "W1-T236-already-owned.yaml"),
-      "- id: W1-T236\n  title: the shard that already owns the id\n  repo: r\n  type: implement\n  verify: auto\n  status: queued\n",
+      "- id: W1-T236\n  title: the shard that already owns the id\n  repo: r\n  type: implement\n  design: |\n    NO-INVARIANTS: synthetic lint fixture with no inherited behavior to preserve\n  verify: auto\n  status: queued\n",
     );
     assert.throws(() => assertProposedPlanLoads(root), /duplicate task id 'W1-T236'/);
   } finally {
@@ -381,7 +381,7 @@ test("assertProposedPlanLoads: a collision-free proposal loads clean — the gua
     mkdirSync(join(root, "plan"), { recursive: true });
     writeFileSync(
       join(root, "plan", "tasks.yaml"),
-      "- id: W1-T240\n  title: a fresh id\n  repo: r\n  type: implement\n  verify: auto\n  status: queued\n",
+      "- id: W1-T240\n  title: a fresh id\n  repo: r\n  type: implement\n  design: |\n    NO-INVARIANTS: synthetic lint fixture with no inherited behavior to preserve\n  verify: auto\n  status: queued\n",
     );
     assert.doesNotThrow(() => assertProposedPlanLoads(root));
   } finally {
@@ -972,7 +972,7 @@ test("W1-T348: a triage PROPOSE writes a validated decisionSummary onto the feed
   writeFileSync(join(seed, "MASTER-PLAN.md"), "# MASTER-PLAN\n", "utf8");
   writeFileSync(
     join(seed, "plan", "tasks.yaml"),
-    ["- id: W1-T4", '  title: "a seed task the plan loader accepts"', "  repo: remudero", "  depends_on: []", "  type: implement", "  verify: auto", "  status: queued", "  attempts: 0", ""].join("\n"),
+    ["- id: W1-T4", '  title: "a seed task the plan loader accepts"', "  repo: remudero", "  depends_on: []", "  type: implement", "  design: |", "    NO-INVARIANTS: synthetic lint fixture with no inherited behavior to preserve", "  verify: auto", "  status: queued", "  attempts: 0", ""].join("\n"),
   );
   writeFileSync(
     join(seed, "plan", "feedback", `${feedbackId}.yaml`),
@@ -1048,6 +1048,8 @@ test("W1-T348: a triage PROPOSE writes a validated decisionSummary onto the feed
               "  origin: architect",
               `  depends_on: []`,
               "  type: implement",
+              "  design: |",
+              "    NO-INVARIANTS: synthetic lint fixture with no inherited behavior to preserve",
               "  verify: auto",
               "  status: queued",
               "  attempts: 0",
@@ -1104,7 +1106,7 @@ test("W1-T348: a THROWING decision-summary rung still writes the `proposed` tran
   writeFileSync(join(seed, "MASTER-PLAN.md"), "# MASTER-PLAN\n", "utf8");
   writeFileSync(
     join(seed, "plan", "tasks.yaml"),
-    ["- id: W1-T4", '  title: "a seed task the plan loader accepts"', "  repo: remudero", "  depends_on: []", "  type: implement", "  verify: auto", "  status: queued", "  attempts: 0", ""].join("\n"),
+    ["- id: W1-T4", '  title: "a seed task the plan loader accepts"', "  repo: remudero", "  depends_on: []", "  type: implement", "  design: |", "    NO-INVARIANTS: synthetic lint fixture with no inherited behavior to preserve", "  verify: auto", "  status: queued", "  attempts: 0", ""].join("\n"),
   );
   writeFileSync(
     join(seed, "plan", "feedback", `${feedbackId}.yaml`),
@@ -1173,6 +1175,8 @@ test("W1-T348: a THROWING decision-summary rung still writes the `proposed` tran
               "  origin: architect",
               `  depends_on: []`,
               "  type: implement",
+              "  design: |",
+              "    NO-INVARIANTS: synthetic lint fixture with no inherited behavior to preserve",
               "  verify: auto",
               "  status: queued",
               "  attempts: 0",
@@ -1239,7 +1243,7 @@ test("W1-T348: a triage GRILL opens its needs-human issue WITH a validated decis
   writeFileSync(join(seed, "MASTER-PLAN.md"), "# MASTER-PLAN\n", "utf8");
   writeFileSync(
     join(seed, "plan", "tasks.yaml"),
-    ["- id: W1-T4", '  title: "a seed task the plan loader accepts"', "  repo: remudero", "  depends_on: []", "  type: implement", "  verify: auto", "  status: queued", "  attempts: 0", ""].join("\n"),
+    ["- id: W1-T4", '  title: "a seed task the plan loader accepts"', "  repo: remudero", "  depends_on: []", "  type: implement", "  design: |", "    NO-INVARIANTS: synthetic lint fixture with no inherited behavior to preserve", "  verify: auto", "  status: queued", "  attempts: 0", ""].join("\n"),
   );
   writeFileSync(
     join(seed, "plan", "feedback", `${feedbackId}.yaml`),
@@ -1365,7 +1369,7 @@ test("W1-T2205: a triage GRILL driven through the FAITHFUL overlapping fixture (
   writeFileSync(join(seed, "MASTER-PLAN.md"), "# MASTER-PLAN\n", "utf8");
   writeFileSync(
     join(seed, "plan", "tasks.yaml"),
-    ["- id: W1-T4", '  title: "a seed task the plan loader accepts"', "  repo: remudero", "  depends_on: []", "  type: implement", "  verify: auto", "  status: queued", "  attempts: 0", ""].join("\n"),
+    ["- id: W1-T4", '  title: "a seed task the plan loader accepts"', "  repo: remudero", "  depends_on: []", "  type: implement", "  design: |", "    NO-INVARIANTS: synthetic lint fixture with no inherited behavior to preserve", "  verify: auto", "  status: queued", "  attempts: 0", ""].join("\n"),
   );
   writeFileSync(
     join(seed, "plan", "feedback", `${feedbackId}.yaml`),
