@@ -1,0 +1,87 @@
+- id: W1-T12529
+  title: "Review width returns to base when the CPU pressure is not review's own"
+  repo: remudero
+  depends_on: []
+  priority: 1.4
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: medium # the review admission width on every pass; the shed arm and the max bound stay as they are
+  band_meaning: blast-radius
+  origin: operator-session#review-capacity-2026-11-13
+  plan_refs:
+    - W1-T2853
+    - W1-T11129
+    - W1-T11150
+    - W1-T2989
+  files:
+    - src/lib/review-capacity.ts
+    - test/review/review-width-returns-to-base-when-the-cpu-pressure-is-not-reviews-own.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "With CPU PSI full above the low watermark but not over what the weight share predicts, memory PSI quiet, more PRs queued than the width, and the host load less the review lane's CPU-phase children above the core count, a width shed to 1 returns to base (or to the room the host worker budget leaves) in one sample, with reason cpu-pressure-not-review"
+      proof: "grep: W1-T12529 criterion 1 in test/review/review-width-returns-to-base-when-the-cpu-pressure-is-not-reviews-own.test.ts"
+    - claim: "invariant:width-bounded-by-base-and-max — that restore never takes the width above base or above max, and lanes above base are still earned only by the healthy window on calm PSI"
+      proof: "grep: W1-T12529 criterion 2 in test/review/review-width-returns-to-base-when-the-cpu-pressure-is-not-reviews-own.test.ts"
+    - claim: "invariant:own-pressure-still-sheds — when the review lane's own CPU-phase children explain the load (host load less those children at or below the core count), the width does not return to base, and when the CPU verdict is a shed the width still drops one lane with reason cpu-pressure"
+      proof: "grep: W1-T12529 criterion 3 in test/review/review-width-returns-to-base-when-the-cpu-pressure-is-not-reviews-own.test.ts"
+    - claim: "An unread host load, core count, review child count or weight share, or memory PSI above its low watermark, never restores the width: the decision is the one origin/main makes"
+      proof: "grep: W1-T12529 criterion 4 in test/review/review-width-returns-to-base-when-the-cpu-pressure-is-not-reviews-own.test.ts"
+    - claim: "The review.capacity row that selectRuntimeReviewWidth writes carries review_cpu_children, the count the new branch judged"
+      proof: "grep: W1-T12529 criterion 5 in test/review/review-width-returns-to-base-when-the-cpu-pressure-is-not-reviews-own.test.ts"
+  rationale: |
+    Review width sits at 1 with PRs queued while the CPU pressure comes from work that is not review.
+    MEASURED by the operator session, 2026-11-13 13:05-19:05Z (ledger ~/rmd-state2/state/ledger.ndjson): 70 review.capacity
+    samples; width 1 in 31, 2 in 22, 3 in 7, 4 in 10; never above base 4 (max 8). 40 had reason backlog-not-sustained and 28
+    host-worker-budget. Reviews mostly wait on the model (median 5.0 min, small local CPU). CI-green to verdict: median 9 min,
+    p90 72, max 146; 12 green PRs had no review.
+    READ AGAIN by the filing session from the ledger segments still on the host (two rotated segments and the live file):
+    32 rows in that window. 11 backlog-not-sustained rows had more PRs queued than the width; 8 of them sat at width 1, and 9
+    of the 11 had cpu_phase_in_flight 0. Example 18:31:28Z: width 1, queue 6, active workers 5, cpu full 22.61, some 66.18,
+    weight share 0.123, load1 32.87 on 8 cores, no review in its CPU phase.
+    READ at origin/main 51e329755, src/lib/review-capacity.ts:
+    - :403-407 restoreBase returns at once unless psiCalm, and psiCalm (:395) needs cpuPressureTier's calm, which needs PSI full
+      at or below cpuPsiLowPct (:311-312). So no branch can restore while any other load keeps PSI full above 5.
+    - :567-574 the `!cpuCalm || memory PSI > low` branch sets backlog-not-sustained and does not call restoreBase at all.
+    - :301-313 W1-T11129 already says contention the weight share predicts, (1 - share) * some, is other containers' load,
+      and does not shed on it. The 18:31 row is that case: (1 - 0.123) * 66.18 = 58 > 22.61, tier hold, not shed. The
+      controller excuses foreign load from a shed but not from a restore, so the width a past shed took never comes back.
+    - :942 selectRuntimeReviewWidth already supplies reviewCpuChildren (settlements.cpuPhaseChildren) and :696
+      readReviewHostObservation supplies hostLoad1 and hostCpuCount; nothing branches on load today (:226-232).
+    CHECKED for overlap: W1-T2989 (being unblocked in the same filing) changes which workers count toward the host worker
+    budget; it does not touch the CPU gate. W1-T11150's suspension hands lanes back only after a shed proves ineffective; it
+    does not restore a width shed before the current source.
+  design: |
+    1. In selectAdaptiveReviewWidth compute one internal boolean, notReviewsCpu: the weight share is read (shareKnown),
+       memory PSI is read and at or below memoryPsiLowPct, reviewCpuChildren, hostLoad1 and hostCpuCount are finite,
+       hostCpuCount > 0, and hostLoad1 - reviewCpuChildren > hostCpuCount. In words: take away every review child in its
+       CPU phase and the run queue still exceeds the cores, so the contention would be there with no review running.
+       Do not export it; tests reach it through selectAdaptiveReviewWidth.
+    2. restoreBase's gate becomes `psiCalm || notReviewsCpu`. Its bounds stay: never above baseWidth, never past the room
+       hostWorkerBudget - activeWorkers leaves, never lower than the current width.
+    3. In the `!cpuCalm || memory PSI > low` branch: when notReviewsCpu, call restoreBase() and set reason
+       "cpu-pressure-not-review" (add it to ReviewCapacityReason). healthySamples still resets to 0, so a lane above base is
+       still earned only on calm PSI. Otherwise the branch is unchanged.
+    4. The shed arm runs first and is unchanged: when cpuOverloaded and no suspension, the width drops one lane before this
+       branch is reached. So the restore runs only on a sample where no shed fires. A restore that the learned lane bound
+       then sheds again is judged by W1-T11150's effect check, which hands the lanes back and suspends on that source when
+       the shed does not lower PSI.
+    5. Add review_cpu_children (observation.reviewCpuChildren ?? null) to the review.capacity row in
+       selectRuntimeReviewWidth, so the row shows the count the branch judged.
+    6. Run the existing review-capacity tests that set hostLoad1 (test/adaptive-review-capacity.test.ts,
+       test/a-slow-review-cannot-collapse-review-width.test.ts, test/review/a-review-shed-that-does-not-lower-pressure-stops-
+       shedding.test.ts, test/review/the-lane-governor-sheds-on-learned-cpu-not-a-fixed-psi-line.test.ts). If one asserts the
+       old hold on a row the new branch now restores, this task needs an amendment that adds it to files.
+    INVARIANT width-bounded-by-base-and-max: a restore never sets the width above min(baseWidth, maxWidth).
+    INVARIANT own-pressure-still-sheds: when the CPU verdict is a shed and no suspension holds, the width drops one lane,
+    whatever the host load reads.
+    NOT IN SCOPE: which workers count toward the host worker budget (W1-T2989); the CPU weight of serve (W1-T12532).
+  falsifier: |
+    Remove `|| notReviewsCpu` from restoreBase's gate and criterion 1 must fail. Drop the reviewCpuChildren term (use hostLoad1
+    alone) and criterion 3 must fail. Let restoreBase go past baseWidth and criterion 2 must fail. Restore and all must pass.
+  note: |
+    Id W1-T12529 reserved for run-unfiled-1794597956000 with ~/rmd-work/bin/reserve-id.sh.
+    The 70-sample census comes from the operator session's read before the ledger rotated; the 32-row recount is what the
+    host still held at filing time.
