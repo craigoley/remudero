@@ -23,7 +23,7 @@
     - src/lib/tick-read-worker.ts
     - src/run-task.ts
     - test/sweep/a-restart-reads-each-open-pull-request-once-before-the-first-review.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "When the tick read of the current tick holds open pull request views, the light sweep with the scope `boot` uses those views and makes no GitHub read of its own for them"
