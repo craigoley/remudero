@@ -222,3 +222,25 @@ test("a real default reader refusal reports only its finite code and leaves the 
     assert.equal(JSON.stringify(f.calls).includes(marker), false);
   });
 });
+
+test("status reconciliation distinguishes a valid ops-to-public dependency from a dangling one", async t => {
+  for (const sample of [{ dependency: publicIds[0]!, outcome: "ok" },
+    { dependency: "W1-T999999", outcome: "invalid_cross_catalog_dependency" }] as const) await t.test(sample.outcome, async t => {
+    const f = fixture(t, true, false, false, root => {
+      const path = join(root, "plan", "tasks.d", opsIds[0] + ".yaml");
+      writeFileSync(path, readFileSync(path, "utf8").replace("depends_on: []", `depends_on: [${sample.dependency}]`));
+    });
+    const input = await buildPlanReconcileProductionInput(f.options); assert.ok(input);
+    assert.equal(input.catalogOutcome, sample.outcome);
+    const report = planReconcileCadence(input); await input.settled();
+    assert.ok(f.reads.some(path => path.includes("/git/blobs/")), "the controlled pinned source was actually read");
+    assert.equal(f.calls.filter(call => call.root === f.publicRoot).length, 1);
+    if (sample.outcome === "ok") {
+      assert.equal(input.isCreditedMerged(opsIds[0]!), true); assert.equal(report.drift, 20);
+      const ops = f.calls.find(call => call.root === f.opsRoot); assert.ok(ops); assert.equal(ops.paths.length, 10);
+    } else {
+      assert.equal(input.isCreditedMerged(opsIds[0]!), false); assert.equal(report.drift, 10);
+      assert.equal(f.calls.some(call => call.root === f.opsRoot), false);
+    }
+  });
+});
