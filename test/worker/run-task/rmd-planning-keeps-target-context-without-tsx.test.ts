@@ -7,7 +7,6 @@ import { dirname, isAbsolute, join, relative } from "node:path";
 import { test } from "node:test";
 import { pathToFileURL } from "node:url";
 import { parse as parseYaml } from "yaml";
-import { PLAN_MAX_NEW_TASKS } from "#src/run-task.js";
 import { ghShim, type GhShim } from "#test/helpers/gh-shim.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
@@ -207,7 +206,7 @@ function assertReachedArchitect(run: PlanRun, label: string): string {
   const minted = ledger.find((row) => row.step === "plan.id_minted");
   assert.ok(minted, "the reservation was ledgered");
   const reserved = minted.reserved as string[];
-  assert.equal(reserved.length, PLAN_MAX_NEW_TASKS, "the harness reserved its declared ceiling of ids");
+  assert.equal(reserved.length, 5, "the harness reserved the five-id planning budget");
   assert.ok(reserved.length > 0 && reserved.every((id) => architect.prompt!.includes(id)), "every reserved id reached the Architect");
   assert.ok(!reserved.includes(SEED_ID), "the reserved ids continue the target's plan");
   const model = argv[argv.indexOf("--model") + 1]!;

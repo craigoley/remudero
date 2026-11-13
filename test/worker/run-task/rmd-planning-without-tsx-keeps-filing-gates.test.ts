@@ -7,7 +7,6 @@ import { dirname, isAbsolute, join, relative } from "node:path";
 import { test } from "node:test";
 import { pathToFileURL } from "node:url";
 import { parse as parseYaml } from "yaml";
-import { PLAN_MAX_NEW_TASKS } from "#src/run-task.js";
 import { ghShim, type GhShim } from "#test/helpers/gh-shim.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
@@ -245,7 +244,7 @@ function assertArchitectRan(run: Proposed, label: string): StubCall {
   const first = execs[0]!;
   assert.ok(first.id && /^W1-T\d+$/.test(first.id), `${label}: the Architect was handed a reserved id`);
   const minted = run.ledger.find((row) => row.step === "plan.id_minted");
-  assert.equal((minted?.reserved as string[] | undefined)?.length, PLAN_MAX_NEW_TASKS, `${label}: the id reservation ran before the Architect`);
+  assert.equal((minted?.reserved as string[] | undefined)?.length, 5, `${label}: the five-id reservation ran before the Architect`);
   const start = run.ledger.find((row) => row.step === "plan.start");
   assert.equal(start?.mode, "create", `${label}: the verb ran the requested mode`);
   assert.equal(start?.brief, BRIEF, `${label}: the verb carried the requested brief`);
