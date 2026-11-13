@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 1.47
   status: queued
@@ -21,3 +21,11 @@
     The ledger step improvement_effects.repository_unavailable carries a failure shape and landed rows in both halves of the trailing 7 days: 108 in the older half, 135 in the newer.
     No queued task and no task merged in that window cites this step, and no gardener scorecard prices it.
     The rows name no file; tracked source literals locate this step in: src/lib/opportunity-outcomes.ts. Start there.
+  risk_ruling:
+    verdict: "rule-3-low-privilege"
+    action: proceed
+    confidence: 1
+    reasons:
+      - "rule 3 (live and low-privilege): the symptom is live, 243 occurrence(s) across 7 day(s), last seen 2026-11-12T21:14:22.086Z, and the record declares no privileged path"
+    judged_at: "2026-11-12T23:04:01.402Z"
+    pin: "24220cef50499bfbedcf40d2f995a13f0ad4c8812c83ffb48df7674b4b047922"
