@@ -22,6 +22,7 @@
     - test/next-task-id-reserve.test.ts
     - test/cli/next-task-id-exits-0-whenever-it-reserves-an-id.test.ts
     - test/mint-open-pr-surface-is-rest.test.ts
+    - test/a-green-pr-that-can-never-merge-asks-once.test.ts
   status: queued
   attempts: 0
   acceptance:
@@ -49,6 +50,9 @@
     4. Check every reader of the verb's output (gate gardener, reserve-id wrappers, tests that match `DEGRADED`) and move a match on stdout DEGRADED text to stderr.
     5. test/mint-open-pr-surface-is-rest.test.ts asserts the old reserve output: a DEGRADED note on stdout and exit 1
        after a held id. Its degraded-shards test moves that note to stderr and expects exit 0.
+    6. The new test imports src/run-task.ts, and the importer count of that file is at its limit (1010).
+       test/a-green-pr-that-can-never-merge-asks-once.test.ts imports only terminalArmRefusal from it,
+       which src/lib/tick-read-worker.ts defines. That test imports it from there, so the count stays at its limit.
     NO-INVARIANTS: the task changes the reserve path's exit code and moves its notes to stderr on purpose;
        criteria 3 and 4 pin the behavior that stays (refusal exit codes and the print-only output).
     NOT IN SCOPE: which sources count as degraded, the open-PR refusal, the --prefix path.
