@@ -27,6 +27,7 @@
     - src/lib/producer-identity.ts
     - src/run-task.ts
     - docs/cli-reference.md
+    - docs/operator-guide.md
     - scripts/console-parity-ratchet.mjs
     - scripts/console-parity-baseline.json
     - test/help-renders-a-summary-not-a-paragraph.test.ts
