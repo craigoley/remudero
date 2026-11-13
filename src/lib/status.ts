@@ -75,18 +75,23 @@ export async function readCatalogStatusContext(publicPlan: Plan, stateDir: strin
   }
   const ops = snapshot.plan;
   if (ops.tasks.some(task => publicPlan.byId.has(task.id))) return statusCatalogContext("duplicate_task_id", publicPlan);
-  const tasks = [...publicPlan.tasks, ...ops.tasks], plan: Plan = { tasks, byId: new Map(tasks.map(task => [task.id, task])) };
+  const snapshotTasks = [...publicPlan.tasks, ...ops.tasks], snapshotById = new Map(snapshotTasks.map(task => [task.id, task]));
   if (publicPlan.tasks.some(task => task.depends_on.some(id => ops.byId.has(id))) ||
-      ops.tasks.some(task => task.depends_on.some(id => !plan.byId.has(id)))) {
+      ops.tasks.some(task => task.depends_on.some(id => !snapshotById.has(id)))) {
     return statusCatalogContext("invalid_cross_catalog_dependency", publicPlan);
   }
-  const first = ops.tasks[0];
-  if (first) {
-    const found = await findTaskInCatalogs(first.id, { byId: publicPlan.byId, stateDir, api });
-    if (found.outcome !== "found" || found.catalog !== "ops") return statusCatalogContext("unreadable", publicPlan);
-    if (found.commit !== snapshot.binding.commit) return statusCatalogContext("ref_moved", publicPlan);
+  const tasks: Task[] = [];
+  for (const source of snapshotTasks) {
+    const expectedCatalog = publicPlan.byId.has(source.id) ? "public" : "ops";
+    const found = await findTaskInCatalogs(source.id, { byId: publicPlan.byId, stateDir, api, opsSnapshot: snapshot });
+    if (found.outcome !== "found" || found.catalog !== expectedCatalog) return statusCatalogContext("unreadable", publicPlan);
+    if (expectedCatalog === "ops" && found.commit !== snapshot.binding.commit) return statusCatalogContext("ref_moved", publicPlan);
+    tasks.push(found.task);
   }
-  return statusCatalogContext("ok", plan, ops, destination, snapshot.binding.commit);
+  const plan: Plan = { tasks, byId: new Map(tasks.map(task => [task.id, task])) };
+  const opsTasks = tasks.filter(task => !publicPlan.byId.has(task.id));
+  const resolvedOps: Plan = { tasks: opsTasks, byId: new Map(opsTasks.map(task => [task.id, task])) };
+  return statusCatalogContext("ok", plan, resolvedOps, destination, snapshot.binding.commit);
 }
 
 /**

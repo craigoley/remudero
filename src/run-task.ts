@@ -18677,7 +18677,16 @@ async function buildCatalogPlanReconcileInput(deps: CatalogPlanReconcileProducti
   if (context.outcome !== "ok" || !target || !pin || !ops || ops.tasks.length === 0) return { ...publicInput, catalogOutcome: context.outcome };
   const sources = new Map<string, string>(), taskPaths = new Map<string, string>();
   try {
-    if ((await hostWorktreeGitAsync(target.checkoutDir, ["rev-parse", "HEAD"])).trim() !== pin) throw new Error("ops-status-checkout-stale");
+    const head = (await hostWorktreeGitAsync(target.checkoutDir, ["rev-parse", "HEAD"])).trim();
+    if (head !== pin) {
+      // The checkout may lag the API-pinned default branch. Fetch objects and the tracking ref without
+      // switching its branch; only proceed when the fetched main is the same commit as the read snapshot.
+      await hostWorktreeGitAsync(target.checkoutDir, ["fetch", "--quiet", "--no-tags", "origin",
+        "+refs/heads/main:refs/remotes/origin/main"]);
+      if ((await hostWorktreeGitAsync(target.checkoutDir, ["rev-parse", "origin/main"])).trim() !== pin) {
+        throw new Error("ops-status-source-moved");
+      }
+    }
     for (const task of ops.tasks) {
       const source = task.sourcePath;
       if (!source || !/^(?:tasks\.yaml|tasks\.d\/[^/]+\.ya?ml)$/.test(source)) throw new Error("ops-status-source-unbound");

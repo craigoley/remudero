@@ -30,9 +30,11 @@ function init(path: string, ids: string[], origin: string) {
 }
 function fixture(t: TestContext, configured = true, unreadable = false, refuseOps = false, prepareOps?: (root: string) => void) {
   const root = gitRepo({ scope: t }).dir, stateDir = join(root, "state"), publicRoot = join(root, "repos", "remudero"), opsRoot = join(root, "repos", "ops");
+  const opsOrigin = gitRepo({ bare: true, scope: t, kind: "ops-origin" });
   mkdirSync(stateDir, { recursive: true }); init(publicRoot, publicIds, "https://github.com/craigoley/remudero.git");
-  init(opsRoot, opsIds, "https://github.com/fixture-private/ops.git");
+  init(opsRoot, opsIds, opsOrigin.dir);
   if (prepareOps) { prepareOps(opsRoot); git(opsRoot, "add", "."); git(opsRoot, "commit", "--quiet", "-m", "test: prepare the pinned catalog shape"); }
+  git(opsRoot, "push", "--quiet", "origin", "main");
   if (configured) writeFileSync(join(stateDir, "plan-destination.json"), JSON.stringify({ repository: "fixture-private/ops", kinds: [] }));
   const tasks = publicIds.map(id => parseTasksFromYaml(shard(id), id)[0]!); const publicPlan: Plan = { tasks, byId: new Map(tasks.map(task => [task.id, task])) };
   const allIds = [...publicIds, ...opsIds], publicPrs = new Map(allIds.map((id, index) => [id, { number: index + 1,
@@ -42,22 +44,22 @@ function fixture(t: TestContext, configured = true, unreadable = false, refuseOp
     findMergedByTrailer: id => publicPrs.get(id) ?? null, findMergedByTrailerAll: id => publicPrs.has(id) ? [publicPrs.get(id)!] : [],
     headRefName: url => prForUrl(url)?.headRefName, prBody: url => prForUrl(url)?.body, changedFiles: () => ["src/fixture.ts"], readState: () => "ok" };
   const derived: string[] = []; const calls: Array<{ root: string; paths: string[]; contents: string[]; target: unknown }> = []; const reads: string[] = [];
-  const commit = git(opsRoot, "rev-parse", "HEAD"), api: OpsCatalogApi = async path => {
+  let commit = git(opsOrigin.dir, "rev-parse", "refs/heads/main"); const api: OpsCatalogApi = async path => {
     reads.push(path); if (unreadable) throw new Error("fixture source unavailable");
     const prefix = "repos/fixture-private/ops"; assert.ok(path === prefix || path.startsWith(prefix + "/"), "source is GET-only for the named repository");
     const tail = path.slice(prefix.length);
     if (tail === "") return { id: 42, full_name: "fixture-private/ops", default_branch: "main" };
     if (tail === "/git/ref/heads/main") return { object: { type: "commit", sha: commit } };
-    if (tail === `/git/commits/${commit}`) return { sha: commit, tree: { sha: git(opsRoot, "rev-parse", "HEAD^{tree}") } };
+    if (tail === `/git/commits/${commit}`) return { sha: commit, tree: { sha: git(opsOrigin.dir, "rev-parse", `${commit}^{tree}`) } };
     if (tail.startsWith("/git/trees/")) {
-      const sha = tail.slice("/git/trees/".length); const listing = execFileSync("git", ["-C", opsRoot, "ls-tree", "-z", sha], { encoding: "utf8" });
+      const sha = tail.slice("/git/trees/".length); const listing = execFileSync("git", ["-C", opsOrigin.dir, "ls-tree", "-z", sha], { encoding: "utf8" });
       return { sha, truncated: false, tree: listing.split("\0").filter(Boolean).map(row => {
         const match = /^(\d+) (blob|tree) ([a-f0-9]+)\t(.+)$/.exec(row); assert.ok(match, row);
         return { mode: match[1], type: match[2], sha: match[3], path: match[4] };
       }) };
     }
     if (tail.startsWith("/git/blobs/")) {
-      const sha = tail.slice("/git/blobs/".length), content = execFileSync("git", ["-C", opsRoot, "cat-file", "blob", sha]);
+      const sha = tail.slice("/git/blobs/".length), content = execFileSync("git", ["-C", opsOrigin.dir, "cat-file", "blob", sha]);
       return { sha, encoding: "base64", size: content.length, content: content.toString("base64") };
     }
     assert.fail("unexpected source path " + path);
@@ -71,7 +73,9 @@ function fixture(t: TestContext, configured = true, unreadable = false, refuseOp
     creditedMergedIds: (plan: Plan = publicPlan) => new Set(plan.tasks.filter((task: Task) => {
       derived.push(task.id); return deriveStatus(task, { ledgerPath: join(stateDir, "ledger.ndjson"), github, readLedger: () => [] }).merged;
     }).map(task => task.id)), land };
-  return { root, stateDir, publicRoot, opsRoot, options, publicPlan, derived, calls, reads };
+  return { root, stateDir, publicRoot, opsRoot, opsOrigin, options, publicPlan, derived, calls, reads,
+    refreshOpsCommit: () => { commit = git(opsOrigin.dir, "rev-parse", "refs/heads/main"); },
+    currentOpsCommit: () => commit };
 }
 
 test("W1-T12210 criterion 1: real cadence composition gives an ops task credit from its merged public implementation", async t => {
@@ -131,13 +135,30 @@ test("an inline ops catalog changes only its queued status scalars", async t => 
   assert.deepEqual(ops.contents, [before.replaceAll("status: 'queued'", "status: 'merged'")]);
   assert.ok(f.calls.filter(call => call.root === f.publicRoot).every(call => call.contents.every(text => !text.includes("PRIVATE_COMMENT"))));
 });
-test("a checkout that moved after the pinned catalog read leaves only public status reconciliation", async t => {
+test("a checkout ahead of the pinned ops main keeps ops status reconciliation based on that pin", async t => {
   const f = fixture(t);
   writeFileSync(join(f.opsRoot, "src", "unrelated.ts"), "export const later = true;\n");
   git(f.opsRoot, "add", "."); git(f.opsRoot, "commit", "--quiet", "-m", "test: move the checkout after the reader pin");
   const input = await buildPlanReconcileProductionInput(f.options); assert.ok(input);
-  const report = planReconcileCadence(input); await input.settled(); assert.equal(report.drift, 10);
-  assert.equal(input.catalogOutcome, "unreadable"); assert.deepEqual(f.calls.map(call => call.root), [f.publicRoot]);
+  const head = git(f.opsRoot, "rev-parse", "HEAD");
+  const report = planReconcileCadence(input); await input.settled(); assert.equal(report.drift, 20);
+  assert.equal(input.catalogOutcome, "ok"); assert.deepEqual(f.calls.map(call => call.root), [f.publicRoot, f.opsRoot]);
+  assert.equal(git(f.opsRoot, "rev-parse", "HEAD"), head, "status reconciliation never switches the checkout branch");
+});
+test("a lagging ops checkout fetches the API-pinned main without advancing its worktree HEAD", async t => {
+  const f = fixture(t), staleHead = git(f.opsRoot, "rev-parse", "HEAD");
+  const updater = gitRepo({ cloneFrom: f.opsOrigin.dir, scope: t, kind: "ops-main-advance" });
+  git(updater.dir, "config", "user.name", "fixture"); git(updater.dir, "config", "user.email", "fixture@remudero.invalid");
+  writeFileSync(join(updater.dir, "src", "remote-main.ts"), "export const remoteMain = true;\n");
+  git(updater.dir, "add", "."); git(updater.dir, "commit", "--quiet", "-m", "test: advance ops main independently of checkout");
+  git(updater.dir, "push", "--quiet", "origin", "main"); f.refreshOpsCommit();
+  const remoteMain = f.currentOpsCommit(); assert.notEqual(remoteMain, staleHead);
+  const input = await buildPlanReconcileProductionInput(f.options); assert.ok(input);
+  const report = planReconcileCadence(input); await input.settled();
+  assert.equal(report.drift, 20); assert.equal(input.catalogOutcome, "ok");
+  assert.deepEqual(f.calls.map(call => call.root), [f.publicRoot, f.opsRoot]);
+  assert.equal(git(f.opsRoot, "rev-parse", "HEAD"), staleHead, "fetching main does not check it out");
+  assert.equal(git(f.opsRoot, "rev-parse", "origin/main"), remoteMain, "the candidate source is available at the API-pinned commit");
 });
 test("an asynchronously refused ops group still settles the independently started public group", async t => {
   const f = fixture(t), original = f.options.land;
@@ -196,10 +217,10 @@ test("a rejected ops landing is retained until the caller settles after another 
 });
 
 async function defaultReaderRoutes(f: ReturnType<typeof fixture>): Promise<GhShimRoute[]> {
-  const base = "repos/fixture-private/ops", pin = git(f.opsRoot, "rev-parse", "HEAD");
+  const base = "repos/fixture-private/ops", pin = f.currentOpsCommit();
   const paths = [base, `${base}/git/ref/heads/main`, `${base}/git/commits/${pin}`];
-  for (const row of git(f.opsRoot, "rev-list", "--objects", "HEAD").split("\n")) {
-    const sha = row.split(" ")[0]!, kind = git(f.opsRoot, "cat-file", "-t", sha);
+  for (const row of git(f.opsOrigin.dir, "rev-list", "--objects", pin).split("\n")) {
+    const sha = row.split(" ")[0]!, kind = git(f.opsOrigin.dir, "cat-file", "-t", sha);
     if (kind === "tree" || kind === "blob") paths.push(`${base}/git/${kind === "tree" ? "trees" : "blobs"}/${sha}`);
   }
   const routes: GhShimRoute[] = [];
