@@ -35,21 +35,20 @@ const escapedRejections: string[] = [];
 const escapedReasons: unknown[] = [];
 let escapedRejectionHandler: ((reason: unknown) => void) | undefined;
 installUnhandledRejectionGuard({
-  target: {
-    on: (_event, handler) => {
-      escapedRejectionHandler = (reason: unknown) => {
-        escapedReasons.push(reason);
-        handler(reason);
-      };
-      process.on("unhandledRejection", escapedRejectionHandler);
-    },
+  // Use the real target so main()'s default install sees this guard and stays idempotent.
+  // The injected seams keep an escaped rejection observable without exiting the test process.
+  target: process,
+  log: (reason) => {
+    escapedReasons.push(reason);
   },
-  log: () => {},
   error: () => {},
   exit: (code) => {
     escapedRejections.push(`exit ${code}`);
   },
 });
+escapedRejectionHandler = process.listeners("unhandledRejection").at(-1) as
+  | ((reason: unknown) => void)
+  | undefined;
 
 after(() => {
   assert.deepEqual(
