@@ -415,3 +415,13 @@ test("the cycle selects the adjacent freshness exit and stops at the next boot",
   for (const step of ["daemon.memory_exit", "daemon.signal_exit", "daemon.stop"])
     assert.equal(restartCycleRow([...rows, row(350, step)], epoch + 400), null);
 });
+
+test("a drain reporting more abandoned reviews than it inventoried pads the rest with unknown ages", () => {
+  const rows = fixture().map(r => r.step === "daemon.freshness_drain.completed" ? { ...r, abandoned_in_flight_reviews: 3 } : r);
+  const r = cycle(rows);
+  assert.equal(r.gave_up.reviews?.length, 3);
+  assert.deepEqual(r.gave_up.reviews?.slice(1).map(w => [w.what, w.kind, w.age_ms]), [["review", "review", null], ["review", "review", null]]);
+  assert.equal(r.gave_up_age_ms, null);
+  assert.equal(r.restart_cost_ms, null);
+  assert.ok(r.missing_parts.includes("gave_up_age_ms"));
+});
