@@ -27,24 +27,51 @@ function snapshot(source: string) {
   };
 }
 
-test("W1-T10852: comment compression preserves executable code", () => {
-  // Captured before compression from cfa32ee06fa43b109da3f8e49f5de664990a38c5.
-  // These are comparison evidence for this edit, not a new comment-volume ceiling.
-  const source = readFileSync(join(REPO_ROOT, "src/lib/review.ts"), "utf8");
+function assertCompression(source: string, before: string | undefined) {
   const actual = snapshot(source);
-  const before = compressionPinBase("src/lib/review.ts", import.meta.url);
   if (before !== undefined) {
     // Only on the PR that adds this pin: later feature edits to the module stay free.
     const base = snapshot(before);
     assert.deepEqual([actual.tokenCount, actual.tokenDigest, actual.astDigest],
       [base.tokenCount, base.tokenDigest, base.astDigest], "executable tokens and syntax match the PR base");
     assert.ok(actual.commentLines < base.commentLines, "comment lines decrease from the PR base");
+    assert.ok(actual.commentBytes < base.commentBytes,
+      "comment bytes decrease from the PR base; rewrapping alone is insufficient");
   }
-  assert.ok(actual.commentLines < 3222,
-    "comment lines must decrease from the measured pre-compression source");
-  assert.ok(actual.commentBytes < 319723,
-    "comment bytes must decrease too; rewrapping alone is insufficient");
+}
 
+test("W1-T10852: comment compression preserves executable code", () => {
+  const source = readFileSync(join(REPO_ROOT, "src/lib/review.ts"), "utf8");
+  assertCompression(source, compressionPinBase("src/lib/review.ts", import.meta.url));
+});
+
+test("W1-T12164 criterion 1: later comment growth passes the pin", () => {
+  const source = "const value = 1;";
+  const grown = `${"// added\n".repeat(3222)}/*${"x".repeat(319723)}*/\n${source}`;
+  const original = snapshot(source);
+  const actual = snapshot(grown);
+  assert.ok(actual.commentLines > original.commentLines);
+  assert.ok(actual.commentBytes > original.commentBytes);
+  assert.doesNotThrow(() => assertCompression(grown, undefined));
+});
+
+test("W1-T12164 criterion 2: the adding PR requires reductions and unchanged executable code", () => {
+  const source = "const value = 1;";
+  const before = `// long comment\n// another long comment\n${source}`;
+  assert.doesNotThrow(() => assertCompression(`// short\n${source}`, before));
+  assert.throws(() => assertCompression(before, before), /comment lines decrease/);
+  assert.throws(() => assertCompression(`// a\n// b\n${source}`, before), /comment lines decrease/);
+  assert.throws(() => assertCompression(`// a\n// b\n// c\n${source}`, before), /comment lines decrease/);
+  const sameBytes = `/*${"x".repeat(snapshot(before).commentBytes - 4)}*/\n${source}`;
+  assert.throws(() => assertCompression(sameBytes, before), /comment bytes/);
+  assert.throws(() => assertCompression(sameBytes.replace("/*", "/*x"), before), /comment bytes/);
+  assert.throws(() => assertCompression(source.replace("1", "2"), before), /executable tokens/);
+  assert.throws(() => assertCompression(`${source}\nconst extra = 2;`, before), /executable tokens/);
+  assert.throws(() => assertCompression("function f() { return\n1; }",
+    "// comment\nfunction f() { return 1; }"), /executable tokens and syntax/);
+});
+
+test("W1-T12164 criterion 3: parser distinguishes comments from strings, regexes and templates", () => {
   const fixture = 'const re = /https?:\\/\\//; const s = "// kept"; const t = `/* ${`// ${1}`} */`;';
   const original = snapshot(fixture);
   const commented = snapshot(`/** extra */\n${fixture}\n// extra`);
