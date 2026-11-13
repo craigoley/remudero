@@ -142,6 +142,17 @@ import { type RollupCheck, fetchCiFailures, fetchCiFailuresAsync } from "../../l
 
 export type GitRunner = (args: string[], stdin?: string) => string;
 
+/** W1-T8141: a fix round its spawn ended for a pending recycle. `recoveryRef` holds the whole worktree; without it
+ *  (`keepError`) nothing was reset and the worktree is as the worker left it. */
+export interface FixRoundYield {
+  trigger: "recycle";
+  detail: string;
+  recoveryRef?: string;
+  paths: string[];
+  costUsd: number;
+  keepError?: string;
+}
+
 export interface RunTaskCommandHost {
   readonly syncPlanOrRefuse: (planPath: string, opts: { allowStale: boolean; log: (step: string, extra?: Record<string, unknown>) => void; say: (msg: string) => void; planSnapshot?: (o: { allowStale?: boolean }) => SyncedPlan; quarantine?: (quarantined: QuarantinedTask[]) => void }) => SyncedPlan | { error: string };
   readonly lintPlanForReview: (headCheckoutDir: string | undefined) => Promise<PlanLintOutcome>;
@@ -301,10 +312,15 @@ export interface RunTaskCommandHost {
     reclaimWorker?: (info: { runId: string; taskId: string; elapsedMs: number }) => void | Promise<void>;
     watchSuperseded?: (snapshot: FixDispatchSnapshot, signal: AbortSignal) => Promise<FixSuperseded | undefined>;
     log: (step: string, extra?: Record<string, unknown>) => void;
-  }, args: SpawnWorkerArgs, ctx: { runId: string; taskId: string; snapshot?: FixDispatchSnapshot }) => Promise<
+  }, args: SpawnWorkerArgs, ctx: {
+    runId: string; taskId: string; snapshot?: FixDispatchSnapshot;
+    /** W1-T8141: a strike's PR and branch; a spawn given them yields to a pending recycle, its work kept. */
+    fixRound?: { prUrl: string; branch: string };
+  }) => Promise<
   | { kind: "spawned"; result: WorkerResult; elapsedMs: number }
   | { kind: "abandoned"; elapsedMs: number }
   | { kind: "superseded"; elapsedMs: number; superseded: FixSuperseded }
+  | { kind: "yielded"; elapsedMs: number; yielded: FixRoundYield }
 >;
   readonly readFixRoundCommitsViaGit: (worktreePath: string, sinceSha: string) => FixRoundCommit[];
   readonly runNpmScriptViaSpawn: (script: string, cwd: string) => { status: number; stdout: string; stderr: string };

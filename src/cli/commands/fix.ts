@@ -4274,12 +4274,27 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
         runId: opts.runId,
         taskId: opts.taskId,
         snapshot: { headSha: priorHeadSha, failingChecks: (priorCiFailures ?? []).map((f) => f.name) },
+        fixRound: { prUrl: opts.prUrl, branch: opts.branch },
       }), deps.log);
       if (spawnOutcome.kind === "superseded") {
         const s = spawnOutcome.superseded;
         const reason = `fix superseded (${s.condition}): ${s.oldHead.slice(0, 12)} -> ${s.newHead.slice(0, 12)}`;
         deps.say(`fix rung: STOPPED strike ${attempt}/${opts.strikeCap} — ${reason}: ${opts.prUrl}`);
         return { outcome: "stood_down", review, strikes, retriggers, reason, standDownReason: reason, superseded: s };
+      }
+      if (spawnOutcome.kind === "yielded") {
+        // W1-T8141: a pending recycle ended the round; spawnFixWorkerBounded kept the work. No fix.dispatch, no strike.
+        const y = spawnOutcome.yielded;
+        deps.log("fix.done", { ...fixReceipt.joinFields(), round_id: roundId, head_sha: priorHeadSha,
+          ...(deps.branchClaim ? { branch_claim_run_id: deps.branchClaim.id() } : {}),
+          strike: attempt, round, subtype: "round_yielded", trigger: y.trigger, recovery_ref: y.recoveryRef ?? null,
+          cost_usd: y.costUsd, elapsed_ms: spawnOutcome.elapsedMs });
+        deps.branchClaim?.release();
+        const reason = `fix round yielded to a pending ${y.trigger}: ${y.recoveryRef ? `work kept at ${y.recoveryRef}`
+          : y.keepError ? `work left in the worktree (${y.keepError})` : "no work to keep"}`;
+        deps.say(`fix rung: strike ${attempt}/${opts.strikeCap} YIELDED, no strike spent — ${reason}: ${opts.prUrl}`);
+        return { outcome: "stood_down", review, strikes, retriggers, reason, standDownReason: reason,
+          ...(y.keepError ? { retainWorktree: reason } : {}) };
       }
       if (spawnOutcome.kind === "abandoned") {
         deps.say(
