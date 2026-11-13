@@ -1,14 +1,13 @@
 /**
- * W1-T4901 — THE PRE-PUSH HOOK LINTS A PLAN DIFF, SO A SHARD CI WILL BLOCK IS FOUND BEFORE THE PUSH.
+ * W1-T4901 — THE PLAN LINT PRECHECK FINDS A SHARD CI WILL BLOCK BEFORE THE PUSH.
  *
  * MEASURED 2026-09-16..30: 14 of 55 single-shard test reds were ci-parity's real `lint-plan:fast` run refusing the PR's
- * own changed shard. Every arm that decides a push goes through a REAL `git push` from a LINKED WORKTREE (the shape
- * every fleet lane has, and the only shape in which git exports GIT_DIR to the hook), against a bare remote built by
- * test/helpers/git-repo.ts. The pure arms drive the exported verdict directly.
+ * own changed shard. W1-T12510 took this precheck out of hooks/pre-push (CI's lint-plan job runs the lint), so each
+ * arm runs scripts/lint-plan-precheck.mjs in a LINKED WORKTREE, as the hook used to. The pure arms drive the verdict.
  */
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, copyFileSync, mkdirSync, symlinkSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -18,7 +17,6 @@ import { gitRepo } from "#test/helpers/git-repo.js";
 import { lintArgvFromPackage, lintPlanPrecheckVerdict, runLintPlanPrecheck } from "#scripts/lint-plan-precheck.mjs";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
-const HOOK = join(REPO_ROOT, "hooks", "pre-push");
 const LINT_SCRIPT = `node --import tsx ${join(REPO_ROOT, "scripts", "lint-plan-offline.mjs")} --base origin/main --merge-base`;
 
 let counter = 0;
@@ -50,9 +48,7 @@ function fixture(t: TestContext, opts: { lintScript?: string } = {}) {
   const work = parent.addWorktree(join(parent.dir, `rmd-t4901-wt-${counter++}`), "pushbranch");
   t.after(() => work.cleanup());
 
-  for (const dir of ["hooks", "scripts/lib", "plan/tasks.d", "docs"]) mkdirSync(join(work.dir, dir), { recursive: true });
-  copyFileSync(HOOK, join(work.dir, "hooks", "pre-push"));
-  chmodSync(join(work.dir, "hooks", "pre-push"), 0o755);
+  for (const dir of ["scripts/lib", "plan/tasks.d", "docs"]) mkdirSync(join(work.dir, dir), { recursive: true });
   for (const file of ["lint-plan-precheck.mjs", "lib/argv.mjs", "lib/git.mjs"]) {
     copyFileSync(join(REPO_ROOT, "scripts", file), join(work.dir, "scripts", file));
   }
@@ -65,7 +61,6 @@ function fixture(t: TestContext, opts: { lintScript?: string } = {}) {
   // target absent at the base makes that proof discriminating under lint-plan too.
   writeFileSync(join(work.dir, "docs", "a.md"), "initial fixture text\n");
 
-  work.git("config", "core.hooksPath", "hooks");
   work.addRemote("origin", remote.dir);
   work.git("add", "-A");
   work.git("commit", "--quiet", "-m", "lint-plan fixture base");
@@ -77,35 +72,33 @@ function fixture(t: TestContext, opts: { lintScript?: string } = {}) {
     work.git("commit", "--quiet", "-m", message);
   };
   const writeShard = (text: string) => writeFileSync(join(work.dir, "plan", "tasks.d", "W9-T1-shard.yaml"), text);
-  const push = () => {
-    const result = spawnSync("git", ["push", "origin", "HEAD:refs/heads/topic"], {
+  const precheck = () => {
+    const result = spawnSync(process.execPath, [join(work.dir, "scripts", "lint-plan-precheck.mjs"), "--base", "origin/main"], {
       cwd: work.dir,
       encoding: "utf8",
-      env: { ...process.env, RMD_PREPUSH_GATES: "1" },
     });
     return { status: result.status, stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
   };
-  return { work, commit, writeShard, push };
+  return { work, commit, writeShard, precheck };
 }
 
-test("W1-T4901: a real push of a plan-only diff whose shard fails the plan lint is refused, naming the rule and the remedy", (t) => {
+test("W1-T4901: a plan-only diff whose shard fails the plan lint is refused, naming the rule and the remedy", (t) => {
   const f = fixture(t);
   f.writeShard(BARE_TITLE_SHARD);
   f.commit("file a shard with a bare-title proof", ["plan"]);
-  const result = f.push();
+  const result = f.precheck();
   assert.notEqual(result.status, 0, result.stderr);
   assert.match(result.stderr, /lint-plan-precheck: the plan lint CI runs on this diff REFUSES it \[proof-dialect\]/);
   assert.match(result.stderr, /✗ W9-T1: 1 violation/);
   assert.match(result.stderr, /TO FIX: .*npm run lint-plan:fast/);
-  assert.match(result.stderr, /pre-push REFUSED/);
 });
 
-test("W1-T4901: positive control, a clean shard passes the same real push", (t) => {
+test("W1-T4901: positive control, a clean shard passes the same precheck", (t) => {
   const f = fixture(t);
   f.writeShard(CLEAN_SHARD);
   writeFileSync(join(f.work.dir, "docs", "a.md"), "hello\n");
   f.commit("file a clean shard and its matching documentation", ["plan", "docs/a.md"]);
-  const result = f.push();
+  const result = f.precheck();
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /lint-plan-precheck: OK/);
   assert.doesNotMatch(`${result.stdout}${result.stderr}`, /^TAP version/m);
@@ -115,7 +108,7 @@ test("a diff that changes no plan file skips the lint", (t) => {
   const f = fixture(t);
   writeFileSync(join(f.work.dir, "docs", "b.md"), "no plan here\n");
   f.commit("docs only", ["docs"]);
-  const result = f.push();
+  const result = f.precheck();
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /lint-plan-precheck: SKIP -- no plan\/ path in this diff/);
 
@@ -138,7 +131,7 @@ test("a range holding a squash-merge subject abstains naming git fetch instead o
   f.commit("feat: something another PR merged (#4242)", ["docs"]);
   f.writeShard(BARE_TITLE_SHARD);
   f.commit("file a shard with a bare-title proof", ["plan"]);
-  const result = f.push();
+  const result = f.precheck();
   assert.equal(result.status, 0, `a stale origin/main is not a reason to refuse: ${result.stderr}`);
   assert.match(result.stderr, /lint-plan-precheck: SKIP -- the local origin\/main is behind/);
   assert.match(result.stderr, /run `git fetch origin` and push again/);
@@ -149,11 +142,10 @@ test("a machine-filing-admission finding alone is reported and does not block", 
   const f = fixture(t);
   f.writeShard(MACHINE_ONLY_SHARD);
   f.commit("file a machine shard naming an absent file", ["plan"]);
-  const result = f.push();
+  const result = f.precheck();
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stderr, /REFUSES it \[machine-filing-admission\]/);
   assert.match(result.stderr, /reported, not blocking/);
-  assert.doesNotMatch(result.stderr, /pre-push REFUSED/);
 
   const mixed = lintPlanPrecheckVerdict({
     changedFiles: ["plan/tasks.d/x.yaml"],
@@ -172,10 +164,9 @@ test("a lint that could not run is never a refusal, whatever the reason", (t) =>
   const f = fixture(t, { lintScript: "" });
   f.writeShard(BARE_TITLE_SHARD);
   f.commit("file a shard, with no lint script to run", ["plan"]);
-  const result = f.push();
-  assert.equal(result.status, 0, result.stderr);
+  const result = f.precheck();
+  assert.equal(result.status, 2, "could-not-run is exit 2, which no caller reads as a refusal: " + result.stderr);
   assert.match(result.stderr, /lint-plan-precheck: could not run \(package\.json has no plain `node \.\.\.` lint-plan:fast script\)/);
-  assert.match(result.stderr, /lint-plan-precheck could not run the lint — not blocking/);
 });
 
 test("the precheck takes its lint argv from the lint-plan:fast script and reads its base from there", () => {
