@@ -1,8 +1,38 @@
 #!/usr/bin/env bash
 # W1-T5319: source for deploy authentication; --refresh also publishes the host's latest result.
 
+rmd_acr_failure_cause() {
+  local output code="$2"
+  output="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
+  # Only emit fixed descriptions: CLI output may include tokens, headers or credential paths.
+  case "$output" in
+    *permission\ denied*) printf '%s' 'local credential/configuration permission denied' ;;
+    *error*saving*credentials*|*error*storing*credentials*|*credential*helper*)
+      printf '%s' 'local credentials could not be saved or read' ;;
+    *no\ managed\ identity*|*identity*not*found*|*identity*not*assigned*|*no\ access\ was\ configured\ for\ the\ vm*)
+      printf '%s' 'no managed identity on this host' ;;
+    *aadsts700082*|*expired*) printf '%s' 'Azure login expired; run az login' ;;
+    *nameresolutionerror*|*failed\ to\ resolve*|*name\ or\ service\ not\ known*|*name\ resolution*|*getaddrinfo*)
+      printf '%s' 'DNS resolution failed' ;;
+    *timed\ out*|*timeout*) printf '%s' 'request timed out' ;;
+    *connection*failed*|*connection*refused*|*connection*reset*|*connectionerror*|*failed\ to\ connect*|*could\ not\ connect*|*network\ is\ unreachable*)
+      printf '%s' 'network connection failed' ;;
+    *requested\ access\ to\ the\ resource\ is\ denied*|*unauthorized:\ authentication\ required*|*access\ to\ registry*was\ denied*|*does\ not\ have\ authorization*microsoft.containerregistry/*)
+      printf '%s' 'registry authorization refused' ;;
+    *authorizationfailed*|*forbidden*|*unauthorized*|*access\ denied*)
+      printf '%s' 'Azure authorization refused' ;;
+    *aadsts*|*please\ run*az\ login*|*not\ logged\ in*) printf '%s' 'Azure authentication failed; run az login' ;;
+    *)
+      if [ "$code" -eq 124 ] || [ "$code" -eq 137 ]; then
+        printf '%s' 'request timed out'
+      else
+        printf 'unclassified Azure CLI failure (exit %s)' "$code"
+      fi ;;
+  esac
+}
+
 rmd_acr_login() {
-  local registry="${1:-${REGISTRY:-synthwatcholey0620}}" output config identity_reason code
+  local registry="${1:-${REGISTRY:-synthwatcholey0620}}" output config identity_reason cause code
   RMD_ACR_LOGIN_REASON=""
   RMD_ACR_LOGIN_METHOD="none"
   if ! command -v az >/dev/null 2>&1; then
@@ -20,18 +50,15 @@ rmd_acr_login() {
         return 0
       else
         code=$?
-        identity_reason="managed identity registry login failed (exit $code) for $registry"
-        case "$output" in
-          *[Dd][Ee][Nn][Ii][Ee][Dd]*|*[Uu]nauthorized*|*Forbidden*|*403*|*401*)
-            identity_reason="managed identity is missing AcrPull on registry $registry (registry refused login)" ;;
-        esac
+        cause="$(rmd_acr_failure_cause "$output" "$code")"
+        identity_reason="managed identity registry login failed for $registry: $cause"
+        if [ "$cause" = 'registry authorization refused' ]; then
+          identity_reason="managed identity is missing AcrPull on registry $registry (registry refused login)"
+        fi
       fi
     else
       code=$?
-      identity_reason="managed identity unavailable: Azure login failed (exit $code)"
-      if [ "$code" -eq 124 ] || [ "$code" -eq 137 ]; then
-        identity_reason="managed identity unavailable: Azure login timed out"
-      fi
+      identity_reason="managed identity unavailable: $(rmd_acr_failure_cause "$output" "$code")"
     fi
     rm -rf -- "$config"
   fi
@@ -41,11 +68,7 @@ rmd_acr_login() {
   else
     code=$?
   fi
-  # Emit only classified diagnostics; arbitrary CLI output can contain credentials.
-  RMD_ACR_LOGIN_REASON="$identity_reason; stored login failed (exit $code) for $registry"
-  case "$output" in
-    *AADSTS700082*|*expired*|*Expired*) RMD_ACR_LOGIN_REASON="$identity_reason; stored login expired for $registry; run az login" ;;
-  esac
+  RMD_ACR_LOGIN_REASON="$identity_reason; stored login failed for $registry: $(rmd_acr_failure_cause "$output" "$code")"
   printf 'acr-login: %s\n' "$RMD_ACR_LOGIN_REASON" >&2
   return 1
 }

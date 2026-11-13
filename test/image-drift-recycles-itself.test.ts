@@ -198,7 +198,11 @@ test("real deploy dependency probes recover expired ACR auth without conflating 
       }
       if (cmd === "git" && args.includes("--parents")) return `${NEWEST}\n`;
       if (cmd === "git" && args.includes("log")) return `${NEWEST}\n`;
-      if (cmd === "az") { refreshedRegistries.push(args[3]!); return ""; }
+      if (cmd === "bash") {
+        assert.deepEqual(args, [join(install, "deploy/acr-login.sh"), "--probe", "synthwatcholey0620"]);
+        refreshedRegistries.push(args[2]!);
+        return JSON.stringify({ status: 0, method: "managed-identity", reason: "" });
+      }
       if (cmd === "docker" && args[0] === "manifest") {
         const ref = args[2]!;
         inspected.push(ref);
@@ -246,10 +250,10 @@ test("real deploy dependency probes recover expired ACR auth without conflating 
       let authorized = false;
       const refreshed = publicationDeps((cmd, args) => {
         calls.push(`${cmd} ${args.join(" ")}`);
-        if (cmd === "az") {
-          assert.deepEqual(args, ["acr", "login", "-n", "synthwatcholey0620"]);
+        if (cmd === "bash") {
+          assert.deepEqual(args, [join(install, "deploy/acr-login.sh"), "--probe", "synthwatcholey0620"]);
           authorized = true;
-          return "Login Succeeded";
+          return JSON.stringify({ status: 0, method: "stored-login", reason: "" });
         }
         if (cmd === "docker" && args[0] === "manifest") {
           if (!authorized) throw Object.assign(new Error("manifest inspect failed"),
@@ -261,7 +265,7 @@ test("real deploy dependency probes recover expired ACR auth without conflating 
       assert.equal(refreshed.imagePublished?.(NEWEST), true);
       assert.deepEqual(calls, [
         `docker manifest inspect synthwatcholey0620.azurecr.io/remudero:${NEWEST}`,
-        "az acr login -n synthwatcholey0620",
+        `bash ${join(install, "deploy/acr-login.sh")} --probe synthwatcholey0620`,
         `docker manifest inspect synthwatcholey0620.azurecr.io/remudero:${NEWEST}`,
       ]);
       assert.deepEqual(events, [{ step: "deploy.image_auth_refresh", outcome: "recovered" }]);
@@ -272,11 +276,11 @@ test("real deploy dependency probes recover expired ACR auth without conflating 
       const failed = publicationDeps((cmd, args) => {
         calls.push(cmd);
         if (cmd === "docker" && args[0] === "manifest") throw new Error("unauthorized: authentication required");
-        if (cmd === "az") throw new Error("Azure login expired");
+        if (cmd === "bash") return JSON.stringify({ status: 1, method: "none", reason: "Azure login expired" });
         return "";
       });
       assert.equal(failed.imagePublished?.(NEWEST), undefined);
-      assert.deepEqual(calls, ["docker", "az"]);
+      assert.deepEqual(calls, ["docker", "bash"]);
     });
 
     await t.test("image publication distinguishes a missing tag after auth recovery", () => {
@@ -287,6 +291,7 @@ test("real deploy dependency probes recover expired ACR auth without conflating 
           if (probes === 1) throw new Error("unauthorized: authentication required");
           throw new Error("manifest unknown: no such manifest");
         }
+        if (cmd === "bash") return JSON.stringify({ status: 0, method: "managed-identity", reason: "" });
         return "";
       });
       assert.equal(missing.imagePublished?.(NEWEST), false);

@@ -26,18 +26,21 @@ printf 'Authorization: Bearer %s\\n' "$SECRET" >&2
 if [ "$1" = login ]; then
   printf identity > "$AZURE_CONFIG_DIR/account"
   [ "$IDENTITY" = ok ] && exit 0
-  echo 'No managed identity found' >&2; exit 1
+  echo "$IDENTITY_REASON" >&2; exit 1
 fi
 if [ "$AZURE_CONFIG_DIR" = "$STORED_CONFIG" ]; then
   [ "$STORED" = ok ] && exit 0
-  echo 'AADSTS700082: stored session expired' >&2; exit 2
+  echo "$STORED_REASON" >&2; exit 2
 fi
 [ "$MANAGED" = ok ] && exit 0
-echo 'DENIED: requested access to the resource is denied' >&2; exit 3
+echo "$MANAGED_REASON" >&2; exit 3
 `, { mode: 0o755 });
   const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, HOME: root, TMPDIR: root,
     AZURE_CONFIG_DIR: config, STORED_CONFIG: config, CALLS: calls, SECRET: secret,
-    IDENTITY: identity, MANAGED: managed, STORED: stored, REGISTRY: registry, RMD_ROOT: root };
+    IDENTITY: identity, MANAGED: managed, STORED: stored, REGISTRY: registry, RMD_ROOT: root,
+    IDENTITY_REASON: identity === "absent" ? "No managed identity found" : identity,
+    MANAGED_REASON: managed === "denied" ? "DENIED: requested access to the resource is denied" : managed,
+    STORED_REASON: stored === "expired" ? "AADSTS700082: stored session expired" : stored };
   const run = () => spawnSync("bash", [helper, "--refresh"], { env, encoding: "utf8", timeout: 10_000 });
   const record = () => JSON.parse(readFileSync(join(root, "state/acr-login.json"), "utf8"));
   const commands = () => readFileSync(calls, "utf8").trim().split("\n").map(line => {
@@ -126,6 +129,46 @@ test("W1-T12177 criterion 5: both failure reasons survive without tokens", (t) =
   assert.equal(f.rows[0]!.outcome, "failed");
   assert.equal(f.rows[0]!.reason, f.record().reason);
   assert.ok(!JSON.stringify([f.record(), f.rows, result.stdout, result.stderr]).includes(secret));
+});
+
+test("W1-T12177 criterion 4: local credentials and network errors never imply missing AcrPull", (t) => {
+  for (const [error, expected] of [
+    ["Error saving credentials: open /home/person/.docker/config.json: permission denied", /local.*permission denied/i],
+    ["error storing credentials - err: exit status 1, out: access denied", /local.*credential/i],
+    ["Failed to resolve registry.azurecr.io", /DNS/i],
+    ["Docker daemon connection failed (request id 403401)", /network|connection/i],
+  ] as const) {
+    const f = fixture(t, "ok", error, "expired");
+    const result = f.run();
+    assert.equal(result.status, 1);
+    assert.match(f.record().reason, expected);
+    assert.doesNotMatch(f.record().reason, /AcrPull/);
+    assert.equal(f.deploy(), undefined);
+    assert.equal(f.rows[0]!.reason, f.record().reason);
+    assert.doesNotMatch(JSON.stringify([f.record(), f.rows, result.stdout, result.stderr]), new RegExp(secret));
+  }
+});
+
+test("W1-T12177 criterion 5: missing identity and stored DNS or authorization failures retain both causes", (t) => {
+  for (const [identity, stored, identityCause, storedCause] of [
+    ["absent", "NameResolutionError: Failed to resolve fixture-registry.azurecr.io", /no managed identity/i, /DNS/i],
+    ["absent", "DENIED: requested access to the resource is denied", /no managed identity/i, /authorization.*refused/i],
+    ["MSI endpoint connection failed", "Connection refused", /connection/i, /connection/i],
+    ["Identity request timed out", "AADSTS700016: Application not found", /timed out/i, /Azure authentication/i],
+  ] as const) {
+    const f = fixture(t, identity, "ok", stored);
+    const result = f.run();
+    assert.equal(result.status, 1);
+    const [identityReason, storedReason] = f.record().reason.split("; stored login");
+    assert.match(identityReason, identityCause);
+    assert.match(storedReason, storedCause);
+    assert.doesNotMatch(f.record().reason, /AcrPull/);
+    assert.equal(f.deploy(), undefined);
+    assert.equal(f.rows[0]!.reason, f.record().reason);
+    assert.match(result.stderr, identityCause);
+    assert.match(result.stderr, storedCause);
+    assert.doesNotMatch(JSON.stringify([f.record(), f.rows, result.stdout, result.stderr]), new RegExp(secret));
+  }
 });
 
 test("identity timeout falls back without touching stored credentials", (t) => {
