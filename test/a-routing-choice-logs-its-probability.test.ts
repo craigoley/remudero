@@ -1,3 +1,4 @@
+import { attributeAttemptOutcome } from "#src/lib/attempt-outcome-attribution.js";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -285,7 +286,7 @@ test("crossover: a decision serving another arm than the task was assigned is re
     { ts: "2026-09-27T01:00:00Z", task_id: taskId, step: "worker.assignment", worker_assignment: row },
     { ts: "2026-09-27T02:00:00Z", task_id: taskId, step: "verdict.merged" },
   ];
-  const report = evaluateRoutingExperiment(rows, SOL_VS_SONNET, "2026-09-28");
+  const report = evaluateRoutingExperiment(rows, SOL_VS_SONNET, "2026-09-28", attributeAttemptOutcome);
   assert.equal(report.crossoverTasks, 1);
   assert.equal(report.mixedTasks, 0);
   assert.equal(report.arms.find((arm) => arm.arm === "sonnet")?.tasks, 1, "intention to treat: counted under the assigned arm");
