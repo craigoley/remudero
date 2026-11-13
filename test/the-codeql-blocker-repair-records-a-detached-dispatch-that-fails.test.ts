@@ -4,14 +4,13 @@
 // CodeQL-blocker arm still detached `dispatchFix` through a bare `detachSweepAction`: the rejection was
 // swallowed and the pre-dispatch CODEQL_BLOCKER_DISPATCH_STEP row's dedupe key held the PR with no worker.
 // The arm now writes `sweep.fix.dispatch_failed` carrying that key, the key's dedup honours it, and
-// FIX_DISPATCH_FAILED_BACKSTOP bounds the retries.
+// failed retries now use the shared cause probes and progress judge.
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { classifyScannerBlocker, type ScannerBlockerCandidate } from "#src/lib/open-prs-rest.js";
 import {
   CODEQL_BLOCKER_DISPATCH_STEP,
   DEFAULT_SWEEP_POLICY,
-  FIX_DISPATCH_FAILED_BACKSTOP,
   codeqlBlockerDedupeKey,
   drainDetachedSweepActions,
   runSweep,
@@ -74,7 +73,7 @@ function blockedPr(head = HEAD): OpenPrView {
 
 const dispatchRow = (key = KEY) => ({ step: CODEQL_BLOCKER_DISPATCH_STEP, task_id: TASK, pr_number: PR, head_sha: HEAD, dedupe_key: key });
 const failed = (key = KEY, head = HEAD) =>
-  ({ step: FAILED_STEP, task_id: TASK, pr_number: PR, head_sha: head, dedupe_key: key, error: ERROR });
+  ({ step: FAILED_STEP, task_id: TASK, pr_number: PR, head_sha: head, dedupe_key: key, error: ERROR, ts: new Date(NOW - 1_000_000).toISOString() });
 
 type Pass = { row: Record<string, unknown>; rows: Array<Record<string, unknown>>; dispatched: number; escalations: string[] };
 
@@ -94,7 +93,7 @@ async function pass(pr: OpenPrView, seed: Array<Record<string, unknown>>, over: 
     now: () => NOW,
     readLedger: () => [...seed, ...rows],
     appendLine: (_path, row) => {
-      rows.push(row);
+      rows.push({ ts: new Date(over.now?.() ?? NOW).toISOString(), ...row });
     },
     ...over,
     dispatchFix: (p, e) => {
@@ -138,8 +137,12 @@ test("a CodeQL-blocker repair whose detached dispatch rejects writes sweep.fix.d
     "the key is still ledgered before the worker starts",
   );
 
-  const second = await pass(blockedPr(), first.rows);
-  assert.equal(second.dispatched, 1, "the next pass retries instead of deduping on the key");
+  const waiting = await pass(blockedPr(), first.rows);
+  assert.equal(waiting.dispatched, 0, "the first failure waits one sweep pass");
+  assert.equal(waiting.row.dispatch_held, "fix_dispatch_failed");
+  const second = await pass(blockedPr(), [...first.rows, ...waiting.rows], {
+    now: () => Date.parse(String(waiting.row.next_retry_at)) });
+  assert.equal(second.dispatched, 1, "the backoff expires without spending the dedupe key");
   assert.doesNotMatch(String(second.row.stand_down_reason), DEDUPED);
   assert.deepEqual(second.escalations, []);
 
@@ -163,31 +166,22 @@ test("a CodeQL repair dispatch that started still dedups on its codeql key", asy
   }
 });
 
-test("FIX_DISPATCH_FAILED_BACKSTOP failed CodeQL repairs on one head stop the retries and escalate once", async () => {
-  const failures = (n: number) => Array.from({ length: n }, () => [dispatchRow(), failed()]).flat();
-
-  const below = await pass(blockedPr(), failures(FIX_DISPATCH_FAILED_BACKSTOP - 1));
-  assert.equal(below.dispatched, 1, "below the bound the repair is retried");
-  assert.deepEqual(below.escalations, []);
-
-  const seed = failures(FIX_DISPATCH_FAILED_BACKSTOP);
-  const at = await pass(blockedPr(), seed);
-  assert.equal(at.dispatched, 0, "at the bound no further repair is attempted");
-  assert.equal(at.rows.some((l) => l.step === CODEQL_BLOCKER_DISPATCH_STEP), false, "no key is spent at the bound");
-  assert.equal(at.escalations.length, 1);
-  for (const named of [`#${PR}`, HEAD.slice(0, 7), ERROR, "FIX_DISPATCH_FAILED_BACKSTOP"]) {
-    assert.ok(at.escalations[0].includes(named), `the escalation names ${named}: ${at.escalations[0]}`);
-  }
-  assert.equal(at.row.acted, false);
-  assert.equal(at.row.fix_dispatch_failed_escalated, true);
-
-  const again = await pass(blockedPr(), [...seed, ...at.rows]);
-  assert.equal(again.escalations.length, 0, "the escalation is written once per (PR, head)");
+test("failed CodeQL retries hold and escalate once on the cause judge's verdict", async () => {
+  const seed = [dispatchRow(), failed(), { ...failed(), ts: new Date(NOW).toISOString() }];
+  const fixProgressJudge: SweepDeps["fixProgressJudge"] = async () => ({ verdict: "escalate", loop: "codeql launch", reason: "launch broken" });
+  const held = await pass(blockedPr(), seed, { fixProgressJudge });
+  assert.equal(held.dispatched, 0);
+  assert.equal(held.rows.some(row => row.step === CODEQL_BLOCKER_DISPATCH_STEP), false);
+  assert.equal(held.escalations.length, 1);
+  for (const named of [`#${PR}`, HEAD.slice(0, 7), ERROR]) assert.ok(held.escalations[0].includes(named));
+  assert.equal(held.row.judge_verdict, "escalate");
+  const again = await pass(blockedPr(), [...seed, ...held.rows], { fixProgressJudge });
+  assert.equal(again.escalations.length, 0);
   assert.equal(again.dispatched, 0);
 });
 
 test("a new head resets the CodeQL repair failure count", async () => {
-  const old = Array.from({ length: FIX_DISPATCH_FAILED_BACKSTOP }, () => [dispatchRow(), failed()]).flat();
+  const old = Array.from({ length: 3 }, () => [dispatchRow(), failed()]).flat();
   const escalated = { step: "sweep.disposed", acted: false, pr_number: PR, head_sha: HEAD, fix_dispatch_failed_escalated: true };
   const next = await pass(blockedPr(NEW_HEAD), [...old, escalated]);
   assert.equal(next.dispatched, 1, "the new head's repair is attempted");

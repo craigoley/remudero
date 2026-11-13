@@ -23,6 +23,11 @@
     - test/a-detached-fix-dispatch-that-throws-before-fix-dispatch-is-not-dispatched.test.ts
     - test/a-held-fix-dispatch-never-claims-it-is-dispatching.test.ts
     - test/the-codeql-blocker-repair-records-a-detached-dispatch-that-fails.test.ts
+    - test/a-new-codeql-alert-is-judged-and-never-holds-the-pr.test.ts
+    - test/fix-dedup-seed.test.ts
+    - test/reviews-and-detached-actions-run-as-run-children.test.ts
+    - test/a-dead-dirty-fix-owner-at-the-current-head-is-reclaimed.test.ts
+    - test/worker/spawn/a-review-re-admitted-after-an-unable-reviewer-avoids-that-provider.test.ts
   status: queued
   attempts: 0
   acceptance:
@@ -54,6 +59,8 @@
     NOT COVERED ELSEWHERE: W1-T10709 (blocked) re-checks a stopped owner recovery once after an accepted answer. That is an answer
     path, not the hold's own retry. The sibling item 5b, W1-T11169 (stale fix seeds), is a different hold, the dedup on a dead daemon's seed.
   design: |
+    Prior behavior inventory: the sweep wrote failed-dispatch and owner-claim-decline rows, then `sweep.disposed` carried the held/acted result; two fixed-count backstops were the legacy retry receipt. The no-history default was one sweep cadence; unreadable or omitted fleet/owner probes could release or retain a hold inconsistently. Dispatch and escalation are the public effects; a refused dispatch spends no fix round and pushes no branch.
+    NO-INVARIANTS: the filed acceptance criteria are the complete contract; the count-based retry and hold receipt behavior is intentionally replaced below.
     1. CAUSE. Classify each failure and decline row's recorded reason into a cause with a probe where one exists: owner-held
        (worktree_path present, and its owner pid or claim live; the claim path's existing owner census), fleet-held (PAUSE held,
        origin unreadable; the existing workerAdmissionHoldReason and FLEET_PAUSE_REFUSAL reads), or unprobed (anything else,

@@ -1,0 +1,74 @@
+- id: W1-T12514
+  title: "The main merge queue ruleset is rehearsed on a test pull request and then enabled, so the merge-group CI run is the check that a merge leaves main no worse"
+  repo: remudero
+  depends_on:
+    - W1-T12509
+  priority: 1.0
+  type: implement
+  verify: human
+  principles:
+    tdd: strict
+  risk: high # every merge to main would pass through the queue; a group check that never reports ejects every pull request
+  band_meaning: blast-radius
+  origin: operator-session#checking-off-the-author-path-2026-11-13
+  plan_refs:
+    - W1-T4406
+    - W1-T5515
+    - W1-T5522
+    - W1-T11847
+    - W1-T12509
+  files:
+    - scripts/merge-queue-rehearsal.mjs
+    - docs/operator-guide.md
+    - test/ci/the-main-merge-queue-is-rehearsed-and-then-enabled.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "scripts/merge-queue-rehearsal.mjs reads the ruleset and the workflows and refuses, naming the gap, unless each check the ruleset requires (ci, coverage-ratchet, test-slow) and each check branch protection requires (remudero-review, ci-gate, security-merge-policy) has a job that triggers on `merge_group` with no job `if:` that skips it there"
+      proof: "grep: W1-T12514 criterion 1 in test/ci/the-main-merge-queue-is-rehearsed-and-then-enabled.test.ts"
+    - claim: "The rehearsal reads the sweep's merge-queue reading for an open pull request (the `mergeQueue` port of src/lib/arm-auto-merge.ts) and reports whether the arm would enqueue rather than merge"
+      proof: "grep: W1-T12514 criterion 2 in test/ci/the-main-merge-queue-is-rehearsed-and-then-enabled.test.ts"
+    - claim: "docs/operator-guide.md has a merge queue section: the rehearsal command, the evidence it must print, the operator step that sets the ruleset to active, and the step that sets it back to disabled"
+      proof: "grep: merge queue rehearsal in docs/operator-guide.md"
+    - claim: "invariant:read-only-rehearsal — the rehearsal never writes to GitHub; a test runs it with a gh shim that refuses every non-GET call and it still completes"
+      proof: "grep: W1-T12514 criterion 4 in test/ci/the-main-merge-queue-is-rehearsed-and-then-enabled.test.ts"
+    - claim: "The operator records the enable: the ruleset `main merge queue (W1-T5515/W1-T5522)` reads enforcement active, and one test pull request merged through the queue with every required check reported on its group commit"
+      proof: "demonstration: the operator sets the ruleset active after a clean rehearsal and links the test pull request that merged through the queue"
+  rationale: |
+    Main's branch protection is not strict, so a pull request is checked against its own base, not against the main it lands
+    on. A merge queue checks the group commit, which is the tree that lands. The queue is built and wired, but disabled.
+    READ on GitHub and at origin/main 6cf453f7a:
+    - The ruleset 24525891 "main merge queue (W1-T5515/W1-T5522)" has enforcement disabled. It sets SQUASH, ALLGREEN grouping,
+      up to 4 entries, a 60-minute check timeout, and requires ci, coverage-ratchet and test-slow.
+    - Branch protection requires remudero-review, ci-gate and security-merge-policy, strict false.
+    - ci.yml:43 triggers on merge_group; .github/workflows/ci-gate.yml:20-27 documents MERGE_GROUP_REQUIRED (W1-T4406, W1-T5515);
+      .github/workflows/merge-queue-review-attest.yml reports remudero-review on a group commit (W1-T11847);
+      security-merge-policy.yml triggers on merge_group checks_requested.
+    - src/lib/arm-auto-merge.ts:629 has a `mergeQueue` port and :870 caches the reading per pull request.
+    - ci.yml:28 says W1-T5940 narrows a group to its affected suites, so the group run is a selection, not the full suite.
+    WHY verify: human: enabling the ruleset changes how every pull request merges, and only the operator can set a ruleset's
+    enforcement. The builder ships the rehearsal and the guide; the operator decides whether and when to enable it.
+    CHECKED for overlap: no queued or blocked task names the ruleset or its enforcement. W1-T11434 (queued) is a plan-merge
+    shadow lane, not the merge queue.
+  design: |
+    1. scripts/merge-queue-rehearsal.mjs: read the ruleset and branch protection with `gh api` (read only), parse the workflows,
+       and print one line per required check: the workflow and job that reports it on merge_group, or REFUSED with the reason.
+       Exit 1 on any refusal. Also read `mergeQueue` for one open pull request through the sweep's own port.
+    2. docs/operator-guide.md: a short "merge queue rehearsal" section in plain words.
+    3. The script writes nothing to GitHub. Enabling is an operator step.
+    INVARIANT read-only-rehearsal: the rehearsal never writes to GitHub; the ruleset changes only by the operator's hand.
+    NOT IN SCOPE: changing the ruleset's parameters; making branch protection strict.
+  falsifier: |
+    Add an `if: github.event_name == 'pull_request'` to a fixture ci-gate job and criterion 1 must refuse. Restore and require
+    criteria 1 and 2 to pass.
+  note: |
+    Id W1-T12514 reserved for run-unfiled-1794582098000 with ~/rmd-work/bin/reserve-id.sh.
+    Depends on W1-T12509 so the merge-time ratchet verdict is complete before the queue becomes the main merge path.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 1
+    reasons:
+      - "deterministic backstop: it declares scripts/merge-queue-rehearsal.mjs, a secrets, auth, CI, deploy, merge-policy or ruling path — irreversible or privileged work goes to a person"
+    judged_at: "2026-11-13T18:12:28.718Z"
+    pin: "413199805bf91514e0fbcd29ac30b14a65f07bf0f16b6d60157d30b20837d8b5"

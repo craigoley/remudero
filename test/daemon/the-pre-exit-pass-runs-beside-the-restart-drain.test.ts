@@ -103,10 +103,10 @@ async function fixture(t: TestContext, background = false, unlatched = false, ch
     enterChild: () => { assert.ok(enterChild); enterChild(); },
     admit: async (work?: () => void) => { onAdmit = work; admit.resolve(); await pump(); },
     settlePass: async () => { pass.resolve(); await pump(); t.mock.timers.tick(0); await pump(); },
-    exit: async () => {
+    exit: async (passes = 2) => {
       at(40); exiting = true; stale = true;
       if (!childMode) lane.resolve({ taskId: "A", runId: "fixture", merged: true, verdict: "merged", costUsd: 0 });
-      await wake(); assert.equal(calls, 2, "the exit runs or awaits its pass");
+      await wake(); assert.equal(calls, passes, "the exit awaits a running pass and starts none (W1-T12237)");
     },
     fix: () => {
       const held = deferred<void>(); cleanups.push(() => held.resolve());
@@ -117,17 +117,13 @@ async function fixture(t: TestContext, background = false, unlatched = false, ch
 }
 
 test("W1-T9812: the restart drain starts before the pre-exit pass settles", async (t) => {
-  for (const background of [false, true]) {
-    await t.test(background ? "background pass" : "fresh pass", async (t) => {
-      const h = await fixture(t, background), review = h.review("LATCHED");
-      await h.latch(); await h.exit();
-      h.at(110); t.mock.timers.tick(70); await pump();
-      assert.equal(review.aborted(), true, "the real review drain reaches the latch deadline while the pass runs");
-      assert.equal(h.finished(), false);
-      await h.admit(); await h.settlePass();
-      assert.equal((await h.daemon).stopReason, "stale");
-    });
-  }
+  const h = await fixture(t, true), review = h.review("LATCHED");
+  await h.latch(); await h.exit();
+  h.at(110); t.mock.timers.tick(70); await pump();
+  assert.equal(review.aborted(), true, "the real review drain reaches the latch deadline while the pass runs");
+  assert.equal(h.finished(), false);
+  await h.admit(); await h.settlePass();
+  assert.equal((await h.daemon).stopReason, "stale");
 });
 
 test("W1-T9812: the restart still waits for the pre-exit pass to settle", async (t) => {
@@ -147,7 +143,7 @@ test("W1-T9812: the restart still waits for the pre-exit pass to settle", async 
 test("W1-T9812: what the pre-exit pass admits keeps the latch bound", async (t) => {
   for (const kind of ["review", "fix"] as const) {
     await t.test(kind, async (t) => {
-      const h = await fixture(t);
+      const h = await fixture(t, true);
       await h.latch(); await h.exit();
       let review: ReturnType<typeof h.review> | undefined;
       h.at(70);
@@ -160,7 +156,7 @@ test("W1-T9812: what the pre-exit pass admits keeps the latch bound", async (t) 
       assert.equal(h.finished(), true, "admitted work gets no fresh bound after the pass");
       assert.equal((await h.daemon).stopReason, "stale");
       const completed = h.row("daemon.freshness_drain.completed");
-      assert.equal(completed?.pre_exit_pass, "ran");
+      assert.equal(completed?.pre_exit_pass, "awaited_in_flight");
       assert.equal(completed?.pass_overlap_ms, 50);
       assert.equal(completed?.exit_bound_ms, 70);
       assert.equal(completed?.[kind === "review" ? "abandoned_in_flight_reviews" : "abandoned_detached_sweep_actions"], 1);
@@ -170,7 +166,7 @@ test("W1-T9812: what the pre-exit pass admits keeps the latch bound", async (t) 
 });
 
 test("W1-T9812: what the pre-exit pass admits keeps the latch bound in child mode", async (t) => {
-  const h = await fixture(t, false, false, true);
+  const h = await fixture(t, true, false, true);
   await h.latch(); h.enterChild(); await h.exit();
   let review: ReturnType<typeof h.review> | undefined;
   h.at(70); await h.admit(() => { review = h.review("AFTER"); });
@@ -185,13 +181,12 @@ test("W1-T9812: what the pre-exit pass admits keeps the latch bound in child mod
   assert.equal((await h.daemon).stopReason, "stale");
 });
 
-test("an exit with no dispatch latch keeps the pass before the drain", async (t) => {
+test("an exit with no dispatch latch and no running pass starts no pass before the drain", async (t) => {
   const h = await fixture(t, false, true), review = h.review("UNLATCHED");
-  await h.exit();
-  t.mock.timers.tick(boundMs / 2); await pump();
-  assert.equal(review.aborted(), false, "the unlatched exit has not started its drain");
-  assert.equal(h.row("daemon.freshness_drain.started"), undefined);
-  h.at(80); review.resolve(); await h.admit(); await h.settlePass();
+  await h.exit(1);
+  assert.ok(h.row("daemon.freshness_drain.started"), "the drain starts with no pass before it");
+  h.at(80); review.resolve(); await pump(); t.mock.timers.tick(0); await pump();
   assert.equal((await h.daemon).stopReason, "stale");
-  assert.equal(h.row("daemon_selfrestart_for_freshness")?.pre_exit_pass, "ran");
+  assert.equal(h.calls(), 1);
+  assert.equal(h.row("daemon_selfrestart_for_freshness")?.pre_exit_pass, "no_sweep_at_exit");
 });

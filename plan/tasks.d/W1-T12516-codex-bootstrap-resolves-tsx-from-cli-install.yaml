@@ -1,0 +1,85 @@
+- id: W1-T12516
+  title: Resolve the Codex probe's tsx loader from the CLI installation while retaining target cwd
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: high
+  band_meaning: blast-radius
+  origin: architect
+  plan_refs: ["§5B", W1-T4590, W1-T3951, W1-T9854, W1-T8777]
+  files:
+    - src/lib/worker-provider.ts
+    - test/worker/spawn/codex-bootstrap-resolves-tsx-from-cli-install.test.ts
+    - test/worker-provider.test.ts
+    - test/codex-capacity-singleflight.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    Settled by lookup: is this already filed or already decided? -> W1-T4590 fixes consumer PR proof
+    launch, W1-T3951 separates settings/hooks from target policy, W1-T8777 handles other bundled
+    worker entries, and W1-T9854 classifies missing harness modules. None fixes this Codex capacity
+    thread's bare loader specifier (their plan/tasks.d shards; src/lib/worker-provider.ts
+    readCodexRuntimeOffThread).
+    Settled by lookup: where is the unresolved loader requested? -> readCodexRuntimeOffThread
+    starts codex-capacity-probe.mjs with execArgv [--import, tsx]; that entry imports
+    worker-provider.js and needs the harness's TypeScript loader before it can report capacity
+    (src/lib/worker-provider.ts; src/lib/codex-capacity-probe.mjs).
+    Settled by lookup: should runtime lookup move the target cwd? -> no. W1-T4590 explicitly
+    resolves harness runtime from its own module while preserving the consumer cwd, bin/rmd
+    resolves its installed package through symlinks without changing caller cwd, and W1-T3951
+    retains the target's plan, feedback, Git identity and mount policy (bin/rmd; src/lib/pr-open.ts;
+    plan/tasks.d/W1-T4590-a-consumer-repo-pr-opens-after-its-proofs-run.yaml; W1-T3951).
+    The initiative reports CONSOLE-T172 failed before PR open with Cannot find package tsx imported
+    from the Console checkout. The source exposes a matching bootstrap defect; a real launch
+    regression must confirm it rather than infer every missing-module failure has this cause.
+  design: |
+    Replace the probe thread's bare tsx preload with an absolute loader URL/path resolved relative
+    to the running Remudero module/package, using the installed package's supported tsx entry.
+    Keep resolution inside the existing startup failure boundary. This is the CLI package that
+    supplied worker-provider.ts, not process.cwd(), target node_modules, or an unrelated configured
+    daemon install. Follow the existing module-relative runtime precedent. Do not change cwd or
+    copy/link/install dependencies into the target, use npx downloads, depend on NODE_PATH, or
+    introduce a general child-launch rewrite. Inventory adjacent CLI-backed launch sites and name
+    any separate defect without widening this task to unrelated workers or cash-provider checks.
+
+    The regression starts an isolated real Node process from a fixture target outside Core's
+    ancestor node_modules tree, with no tsx dependency or node_modules symlink. Load the harness
+    entry with its installed absolute loader and exercise the default readCodexRuntimeOffThread
+    Worker constructor; do not fake workerFactory, the thread, or the capacity answer. A local
+    bounded app-server stub answers the actual initialization, rate-limit and model RPCs. Assert
+    usable capacity and a Codex worker launch through spawnWorker with the target's cwd/-C, using
+    a local deterministic CLI stub instead of a paid model or live credentials. Clear capacity
+    caches so a prior read cannot hide the thread launch. Include a Core-cwd positive control in
+    another isolated child, with the same response and selection assertions. Prove the target
+    has no loader dependency before and after and capture bounded child output and exit status.
+
+    INVARIANT subscription-routing: A healthy Codex subscription remains eligible under the
+    existing mount selection; unreadable capacity still reports the existing failure and cannot
+    manufacture availability, skip containment, or enable a cash/API fallback forbidden by policy.
+    INVARIANT probe-lifecycle: Probe singleflight, hedged recovery, outer deadline, error/exit
+    results, termination and app-server reap-before-report behavior retain their current semantics.
+
+    Extend the existing provider and lifecycle suites only if needed, without changing their
+    source assertions to accommodate weaker behavior. Use #src/#test aliases and REPO_ROOT/repoRoot;
+    confirm the new suite's worker/spawn placement with rmd test-place from its imports. Keep all
+    ownership, filing, proof, review, hosted CI and protected merge gates. No credentials, limits,
+    provider policy, Console dependency or retained failed T172 branch changes; no live T172 retry.
+  acceptance:
+    - claim: The real Codex probe and CLI-backed worker start from a target without tsx, preserve target cwd, and pass the Core positive control
+      proof: "unit test: test/worker/spawn/codex-bootstrap-resolves-tsx-from-cli-install.test.ts"
+    - claim: "invariant:subscription-routing — provider eligibility, subscription policy and unreadable-capacity refusal retain their existing behavior"
+      kind: guard
+      proof: "unit test: test/worker-provider.test.ts"
+    - claim: "invariant:probe-lifecycle — startup errors, exits, deadlines, singleflight and hedged recovery retain their existing behavior"
+      kind: guard
+      proof: "unit test: test/codex-capacity-singleflight.test.ts"
+  falsifier: |
+    Restore only the bare --import tsx preload: the outside-Core target child must fail loader
+    resolution while the Core positive control succeeds. Restore the fix: both must pass with
+    nonzero executed test counts. Report both results. Also run the existing
+    test/a-codex-probe-thread-reports-only-after-its-app-server-is-reaped.test.ts lifecycle suite.
+    A mocked thread, inherited Core cwd, cached capacity or added target dependency invalidates
+    the regression even if its summary is green.
