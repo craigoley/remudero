@@ -51,6 +51,15 @@
     A row written under a lane run_id (DAEMON-, SWEEP-, DRAIN-) is an A_LANE_RUN_ID exemption.
     Only a step that can be a worker run's first pr_url row, or a DONE_STEPS price row, joins the
     catalog (census EXEMPT table; config-gardener.ts W1-T5668 comment).
+    Settled by lookup: is this criterion 3 proof clarification already filed or already decided? ->
+    no; W1-T11503 still names the whole census file, and no other plan or decision record names
+    the new criterion 3 test title (plan/tasks.yaml, plan/tasks.d, MASTER-PLAN.md, LEARNINGS.md, DECISIONS.md).
+    Settled by lookup: is the named assertion within the approved scope? -> yes; add
+    'W1-T11503 criterion 3: the priced-step census accounts for the direct-merge receipt' in the
+    already-listed test/every-priced-ledger-step-is-in-the-config-garden-read.test.ts (W1-T11503 files).
+    Settled by lookup: does changing the proof target change the claim or gates? -> no; retain
+    the whole-census passing requirement and all existing assertions, scope, budget, status and
+    verification, review and merge gates (W1-T11503 acceptance, design and scope amendment).
   design: |
     Register an admitted direct-merge operation with the daemon-lifetime drain owner before its
     asynchronous preflight/write can outlive a sweep wrapper. Keep registration until actual
@@ -80,7 +89,7 @@
     - claim: "Freshness closes new merge admission; refusal, error, changed head and bound exhaustion produce explicit outcomes and cleanup without a false success or duplicate write"
       proof: "grep: W1-T11503 criterion 2 in test/github/a-freshness-exit-drains-an-admitted-direct-merge.test.ts"
     - claim: "Every priced ledger step the change writes is in CONFIG_GARDEN_LEDGER_STEPS or carries a reasoned census exemption, and the whole priced-step census passes"
-      proof: "unit test: test/every-priced-ledger-step-is-in-the-config-garden-read.test.ts"
+      proof: "unit test: W1-T11503 criterion 3: the priced-step census accounts for the direct-merge receipt"
   note: |
     H4-F. Computed test/github MEDIUM from daemon, sweep and arm-auto-merge sketch. Host investigation
     was read-only and bounded to one named archive. No actual merge, restart or status write in
