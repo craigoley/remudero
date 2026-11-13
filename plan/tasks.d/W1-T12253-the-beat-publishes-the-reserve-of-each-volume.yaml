@@ -19,7 +19,7 @@
     - scripts/fleet-heartbeat.sh
     - test/gardeners/the-beat-publishes-the-reserve-of-each-volume.test.ts
     - test/fleet-heartbeat.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "Each heartbeat carries `root_fs_reserve_kb`. When the state volume is another device, it also carries `state_fs_reserve_kb`"

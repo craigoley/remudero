@@ -18,7 +18,7 @@
     - src/lib/triage.ts
     - src/lib/auto-triage.ts
     - test/triage/a-triage-run-commits-the-feedback-edit-in-the-repository-that-holds-the-entry.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "For a feedback entry that the ops repository holds, the triage run lands the status edit in the ops repository. No byte of the feedback file enters the public worktree or a public pull request"
