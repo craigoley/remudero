@@ -1,0 +1,56 @@
+- id: W1-T12454
+  title: "The host janitor retires finished hand worktrees on the scratch disk"
+  repo: remudero
+  depends_on:
+    - W1-T12256
+  priority: 1.0
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # a deletion rule of the host janitor for a new worktree root
+  band_meaning: blast-radius
+  origin: operator-session#root-cause-defects-2026-11-12
+  plan_refs:
+    - W1-T12256
+    - W1-T12258
+    - W1-T8863
+    - W1-T8861
+    - W1-T5669
+  files:
+    - deploy/install-host-units.sh
+    - deploy/rmd-host-cleanup.sh
+    - test/host-units-install.test.ts
+    - test/deploy/the-host-janitor-retires-finished-hand-worktrees-on-the-scratch-disk.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "The installed janitor schedule names `/mnt/scratch/rmd/hand` as a worktree root beside `/mnt/scratch/worktrees` and `~/rmd-work`, and a host whose `RMD_CLEANUP_WORKTREE_ROOTS` is set keeps its own value"
+      proof: "grep: W1-T12454 criterion 1 in test/deploy/the-host-janitor-retires-finished-hand-worktrees-on-the-scratch-disk.test.ts"
+    - claim: "A linked worktree under `/mnt/scratch/rmd/hand` that is clean, whose HEAD commit GitHub holds, and whose pull requests are all merged or closed is removed at the next pass, through the finished-worktree rule of W1-T12256"
+      proof: "grep: W1-T12454 criterion 2 in test/deploy/the-host-janitor-retires-finished-hand-worktrees-on-the-scratch-disk.test.ts"
+    - claim: "A hand worktree with an open pull request, with no pull request, with uncommitted or unpushed work, that is locked, held open by a process, or mounted in a container is kept"
+      proof: "grep: W1-T12454 criterion 3 in test/deploy/the-host-janitor-retires-finished-hand-worktrees-on-the-scratch-disk.test.ts"
+    - claim: "The shared reservation checkout `/mnt/scratch/rmd/hand/wt-reserve` is never removed: it is a live checkout of the installed schedule"
+      proof: "grep: W1-T12454 criterion 4 in test/deploy/the-host-janitor-retires-finished-hand-worktrees-on-the-scratch-disk.test.ts"
+    - claim: "A child of `/mnt/scratch/rmd/hand` is judged once per pass, by the worktree rules, and not again as a scratch unit"
+      proof: "grep: W1-T12454 criterion 5 in test/deploy/the-host-janitor-retires-finished-hand-worktrees-on-the-scratch-disk.test.ts"
+  rationale: |
+    OBSERVED 2026-11-12 on the Azure host: `/mnt/scratch/rmd/hand` held 105 worktrees. The hand lane makes its worktrees there (BUILD-RULES-AZURE.md, after W1-T5669 moved hand worktrees to the scratch disk).
+    - The service user's crontab runs the janitor with `RMD_CLEANUP_WORKTREE_ROOTS=/mnt/scratch/worktrees:/home/craigoleyagent/rmd-work`. `/mnt/scratch/rmd/hand` is not a worktree root.
+    - The janitor reaches these trees only as scratch units under the scratch root `/mnt/scratch`. `~/host-cleanup.log` has 212 decisions on them, all KEEP: 115 `preserve-then-retire hold: alternates scan failed (unknown)` (74 distinct worktrees), 92 `written within 360 min`, 2 `held open by a process`, 3 for the folder itself. None is removed.
+    READ at origin/main 12047b93a.
+    - deploy/install-host-units.sh:2136 sets the default `CLEANUP_WORKTREE_ROOTS` to `/mnt/scratch/worktrees:/home/${SERVICE_USER}/rmd-work`.
+    - deploy/rmd-host-cleanup.sh:160 reads `RMD_CLEANUP_WORKTREE_ROOTS`. :1065 `lender_check` keeps every scratch unit when the alternates scan of the pass failed.
+    - W1-T12258 (queued) only measures `~/rmd-work`. W1-T12256 (queued, claimed by the fleet on 2026-11-12) adds the finished-worktree rule, for the roots `/mnt/scratch/worktrees` and `~/rmd-work` only. No task names `/mnt/scratch/rmd/hand`.
+  design: |
+    1. In deploy/install-host-units.sh add `/mnt/scratch/rmd/hand` to the default `CLEANUP_WORKTREE_ROOTS`, and add `/mnt/scratch/rmd/hand/wt-reserve` to the default `CLEANUP_LIVE_CHECKOUTS`. An explicit `RMD_CLEANUP_*` value still wins.
+    2. In deploy/rmd-host-cleanup.sh make the scratch-unit walk skip a path that is under a worktree root, so the worktree rules judge it once. Keep the alternates scan over every root, as today.
+    3. Use W1-T12256's finished-worktree rule with no change. A hand worktree with no pull request keeps the idle rule of today.
+    NOT IN SCOPE: the cause of the failed alternates scan, the six-hour idle time, standalone clones, and the Mac janitor.
+  falsifier: |
+    Leave `/mnt/scratch/rmd/hand` out of the default roots and criteria 1 and 2 must fail. Drop the live-checkout entry and criterion 4 must fail. Judge a child as a scratch unit too and criterion 5 must fail. Restore and require all five to pass.
+  note: |
+    Id reserved for run-unfiled-1794528010000 with ~/rmd-work/bin/reserve-id.sh. Build after W1-T12256 merges. The fleet builds it.
+    The installed crontab changes only when deploy/install-host-units.sh runs again on the host.
+    Seen and not filed: the alternates scan fails in many passes and then holds every scratch unit (`alternates scan failed (unknown)`). Its cause is not known.

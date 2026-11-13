@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 1
   status: queued
@@ -25,3 +25,13 @@
     Compare the token streams with assertSameTokens from #test/helpers/compression-pin.js, never assert.deepEqual: its failure diff over two whole token arrays grows quadratically (W1-T11342).
     Preserve every existing behavioral assertion and run the actual callers. Do not invent a new hard comment ceiling or claim success from a title-only proof.
     Preserve existing owners, stops and deployment holds. This maintenance task grants no service restart, release or publication override.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.96
+    reasons:
+      - "The filed scope is comment compression in one source file plus a regression test, with explicit requirements to preserve executable tokens, behavioral assertions, invariants and historical citations."
+      - "The plan specifies measurable comment reduction and token comparison using established compression helpers; it explicitly preserves owners, stops and deployment holds."
+      - "The supplied gates show no concerning condition, and the family record reports 42 merged tasks with no declines. This is a filing-time assessment; no implementation or test results are supplied."
+    judged_at: "2026-11-13T00:42:15.347Z"
+    pin: "42de3b4e2c5281e8845361ff5c8b9adff4329774ab32416f05f7c28f5e2e2a98"
