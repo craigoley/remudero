@@ -619,7 +619,7 @@ prune_held_worktree() {
   done
 }
 sweep_worktree() {
-  local wt="$1" gitdir idle_status kind head hosted unsaved orphaned=0 seed_reason bytes
+  local wt="$1" gitdir idle_status kind head hosted unsaved orphaned=0 finished=0 seed_reason bytes
   if seed_reason=$(rmd_dependency_seed_risk "$wt"); then log "KEEP $wt: $seed_reason"; return; fi
   [ -d "$wt" ] && [ ! -L "$wt" ] || { log "KEEP $wt: not a regular directory"; return; }
   if [ -d "$wt/.git" ] && [ ! -L "$wt/.git" ]; then kind="standalone clone"
@@ -631,13 +631,22 @@ sweep_worktree() {
     else log "KEEP $wt: Git metadata is unreadable or missing"; return; fi
   fi
   if [ "$orphaned" = 0 ] && [ -f "$gitdir/locked" ]; then prune_held_worktree "$wt" "Git worktree is locked"; return; fi
-  if [ "$orphaned" = 0 ] && ! git_head_idle "$wt"; then log "KEEP $wt: recent or unverified Git HEAD activity"; return; fi
-  is_worktree_idle "$wt"; idle_status=$?
-  case "$idle_status" in
-    0) ;;
-    1) log "KEEP $wt: written within ${IDLE_MINUTES} min"; return ;;
-    *) log "KEEP $wt: activity probe failed (unknown)"; return ;;
-  esac
+  # A clean linked worktree whose HEAD GitHub holds and whose pull requests are all merged or closed
+  # has no work in progress for the six hours to protect (W1-T12256). Every other test still holds.
+  if [ "$orphaned" = 0 ] && [ "$kind" = "linked worktree" ] && worktree_clean "$wt" && worktree_ignored_safe "$wt" &&
+     worktree_saved "$wt" && head="$(rgit "$wt" rev-parse --verify HEAD 2>/dev/null)" &&
+     rmd_commit_pulls_finished "$wt" "$head"; then
+    finished=1
+  fi
+  if [ "$finished" = 0 ]; then
+    if [ "$orphaned" = 0 ] && ! git_head_idle "$wt"; then log "KEEP $wt: recent or unverified Git HEAD activity"; return; fi
+    is_worktree_idle "$wt"; idle_status=$?
+    case "$idle_status" in
+      0) ;;
+      1) log "KEEP $wt: written within ${IDLE_MINUTES} min"; return ;;
+      *) log "KEEP $wt: activity probe failed (unknown)"; return ;;
+    esac
+  fi
   if is_open "$wt"; then log "KEEP $wt: held open by a process"; return; fi
   if [ "$DOCKER_OK" != 1 ]; then log "KEEP $wt: Docker mount snapshot failed (unknown)"; return; fi
   if is_docker_mount "$wt"; then log "KEEP $wt: Docker mount ($DOCKER_PATH_REASON)"; return; fi
@@ -680,9 +689,11 @@ sweep_worktree() {
   fi
   if [ "$DRY_RUN" != 1 ]; then
     snapshot_open; snapshot_docker
-    if ! is_worktree_idle "$wt" || is_open "$wt" || [ "$DOCKER_OK" != 1 ] || is_docker_mount "$wt" ||
-       ! worktree_clean "$wt" || ! worktree_ignored_safe "$wt" || ! git_head_idle "$wt" ||
-       [ "$(rgit "$wt" rev-parse HEAD 2>/dev/null)" != "$head" ] || ! worktree_saved "$wt" 1; then
+    if { [ "$finished" = 0 ] && ! is_worktree_idle "$wt"; } || is_open "$wt" || [ "$DOCKER_OK" != 1 ] ||
+       is_docker_mount "$wt" || ! worktree_clean "$wt" || ! worktree_ignored_safe "$wt" ||
+       { [ "$finished" = 0 ] && ! git_head_idle "$wt"; } ||
+       [ "$(rgit "$wt" rev-parse HEAD 2>/dev/null)" != "$head" ] || ! worktree_saved "$wt" 1 ||
+       { [ "$finished" = 1 ] && ! rmd_commit_pulls_finished "$wt" "$head"; }; then
       log "KEEP $wt: changed, active or not-proven-published before remove"; return
     fi
     if [ -f "$gitdir/locked" ]; then log "KEEP $wt: Git worktree is locked"; return; fi
@@ -694,7 +705,7 @@ sweep_worktree() {
   fi
   if [ "$DRY_RUN" != 1 ] && ! audit_writable; then log "KEEP $wt: audit log unwritable ($AUDIT_LOG)"; return; fi
   bytes="$(du_bytes "$wt")"
-  log "REMOVE $wt ($kind)"
+  if [ "$finished" = 1 ]; then log "REMOVE $wt (linked worktree, pull request finished)"; else log "REMOVE $wt ($kind)"; fi
   if [ "$DRY_RUN" = 1 ]; then
     if [ "$kind" = "standalone clone" ]; then log "DRYRUN would: rm -rf -- $wt"
     else log "DRYRUN would: git worktree remove $wt"; fi

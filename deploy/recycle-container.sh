@@ -2097,7 +2097,6 @@ if [ -z "${PULLED_IMAGE_ID}" ]; then
 fi
 echo "recycle-container: pulled image id ${PULLED_IMAGE_ID}"
 selected_registry_image "${PULLED_IMAGE_ID}"
-recycle_phase smoke "\"image_changed\":$([ "${RECYCLE_IMAGE_BEFORE}" = "${PULLED_IMAGE_ID}" ] && echo false || echo true)"
 
 COMMISSION_PHASE="smoke"
 
@@ -2249,15 +2248,19 @@ run_worker_smoke() {
   fi
   echo "recycle-container: worker smoke PASSED — ${SMOKE_LINE:-exit 0}"
 }
+# W1-T12359: the smoke row holds the leftover clean-up and this smoke; the pause row starts after it.
+recycle_phase smoke "\"image_changed\":$([ "${RECYCLE_IMAGE_BEFORE}" = "${PULLED_IMAGE_ID}" ] && echo false || echo true)"
 if ! cleanup_leftover_smoke "before the smoke"; then
+  record_recycle_phase smoke "$((SECONDS - RECYCLE_PHASE_AT_S))" '"smoke_at":"before_pause"'
   echo "  The fleet was not paused." >&2
   exit 1
 fi
 if ! run_worker_smoke before_pause "${PULLED_IMAGE_ID}"; then
+  record_recycle_phase smoke "$((SECONDS - RECYCLE_PHASE_AT_S))" '"smoke_at":"before_pause"'
   echo "  The fleet was not paused." >&2
   exit 1
 fi
-recycle_phase pause
+recycle_phase pause '"smoke_at":"before_pause"'
 
 COMMISSION_PHASE="drain"
 
@@ -3196,13 +3199,15 @@ if ! docker image inspect "${PULLED_IMAGE_ID}" >/dev/null 2>&1; then
   COMMISSION_PHASE="smoke"
   recycle_phase smoke
   if ! cleanup_leftover_smoke "before the smoke" || ! run_worker_smoke after_wait "${PULLED_IMAGE_ID}"; then
+    record_recycle_phase smoke "$((SECONDS - RECYCLE_PHASE_AT_S))" '"smoke_at":"after_wait"'
     clear_own_pause "recycle-container: pause removed — the refusal above must not leave the fleet paused" >&2
     exit 1
   fi
+  AFTER_WAIT_SMOKE_FIELDS='"smoke_at":"after_wait"'
 fi
 
 COMMISSION_PHASE="replace"
-recycle_phase stop
+recycle_phase stop "${AFTER_WAIT_SMOKE_FIELDS:-}"
 
 record_recycled_cadence_child() {
   local state run_id pid attempt status at

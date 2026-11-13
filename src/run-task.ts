@@ -2996,7 +2996,7 @@ import {
 import { checkSharedPause, disposeSharedPauseRefresh, prepareSharedPause, requestKick, consumeStop, isQuietHours, requestFleetPause, requestPause, requestStop, restartInPlaceVerb, resumeFleet, resumeFleetWide, sharedPauseRef, stopDetail, type SharedPauseGitDeps } from "./lib/fleet-control.js";
 import { resolvePauseTarget, type PauseTarget } from "./lib/pause-target.js";
 import { parseInstanceRegistry } from "./lib/instance-registry.js";
-import { openPlannerGitCredential, plannerHostGitCredential } from "./lib/secret-boundary.js";
+import { openPlannerGitCredential, plannerHostGitCredential, plannerPrWriteToken } from "./lib/secret-boundary.js";
 import { hasThreadEvent, inboxThreadId, readThread, verifiedInboxInput, type InboxCausalScope, type InboxInputReference } from "./lib/inbox-thread.js";
 import { gatherActorEvidence } from "./lib/actor-evidence.js";
 import { readGithubWebhookSecret, resolveGithubWebhookSecretFilePath } from "./lib/github-event-wake.js";
@@ -4872,7 +4872,8 @@ export function runGhPrCreate(
   branch: string,
   log: (step: string, extra?: Record<string, unknown>) => void,
   say: (msg: string) => void,
-  exec: (command: string, args: string[], options: { cwd: string; encoding: "utf8" }) => string = execFileSync,
+  exec: (command: string, args: string[], options: { cwd: string; encoding: "utf8"; env?: NodeJS.ProcessEnv }) => string = execFileSync,
+  readExec: typeof exec = exec,
 ): { prUrl?: string; prNumber?: number } {
   for (const { step, extra } of prCreate.diagnostics ?? []) log(step, extra);
   let out: string;
@@ -4887,7 +4888,7 @@ export function runGhPrCreate(
       );
     }
     if (isGhPrCreateValidationError(e)) {
-      const adopted = adoptExistingPrForHead(prCreate, branch, exec);
+      const adopted = adoptExistingPrForHead(prCreate, branch, readExec);
       if (adopted?.prUrl !== undefined) {
         const ghErr = e as NodeJS.ErrnoException & { stderr?: string | Buffer };
         log("pr_create.adopted_existing", {
@@ -19344,6 +19345,9 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
         // in the changed-tasks pass, so a newly filed or edited shard is refused before it
         // repeats the pattern.
         proofSelfPath: "block",
+        // W1-T11746: only this changed-task pass demands INVARIANT/NO-INVARIANTS declarations, so the
+        // whole-plan pass and dispatch leave the historical population valid.
+        requireDesignInvariantDeclaration: true,
       };
     }
     // impl-DO: the CALL-SITE check needs to know whether a module already exists, and the linter
@@ -35570,7 +35574,9 @@ export const PLAN_MAX_NEW_TASKS = 5;
 
 export async function planCommand(
   rest: string[],
-  opts: { spawn?: typeof spawnWorker; config?: Config; overlap?: OverlapWarningDeps; lintPlanForReviewFn?: typeof lintPlanForReview } = {},
+  opts: { spawn?: typeof spawnWorker; config?: Config; overlap?: OverlapWarningDeps; lintPlanForReviewFn?: typeof lintPlanForReview;
+    plannerHostGitCredential?: typeof plannerHostGitCredential; openPlannerGitCredential?: typeof openPlannerGitCredential;
+    prWriteToken?: Parameters<typeof plannerPrWriteToken>[2]; prCreateExec?: Parameters<typeof runGhPrCreate>[4] } = {},
 ): Promise<number> {
   const parsed = parsePlanArgs(rest);
   if ("error" in parsed) {
@@ -35598,6 +35604,16 @@ export async function planCommand(
   log("plan.start", { mode, brief, architect: arch, effort: mountsTable.architect.effort, worker: wrk });
   say(`plan ${runId} — mode=${mode} — architect ${arch} over worker ${wrk}`);
 
+  const credential = await (opts.plannerHostGitCredential ?? plannerHostGitCredential)(`${owner}/${repo}`);
+  if (credential.kind === "app") {
+    const preflight = await plannerPrWriteToken(credential, `${owner}/${repo}`, opts.prWriteToken);
+    if (!preflight.ok) {
+      log("plan.credential_refused", { reason: preflight.reason, missing: preflight.missing, boundary: "pr_create" });
+      say(`plan refused — ${preflight.reason}`);
+      return 1;
+    }
+  }
+
   const settingsFile = renderWorkerSettings({
     templatePath: join(resolveInstallRoot(config), "settings", "worker.json"),
     hooksDir: join(resolveInstallRoot(config), "hooks"),
@@ -35615,7 +35631,7 @@ export async function planCommand(
   // W1-T11851: this lane's own pushes present the host App identity, minted per request at the git credential-helper
   // boundary — never a ~/.bashrc token a non-interactive shell cannot see, and never an env var. An unusable source
   // refuses HERE, before any id is claimed or any worker spawns; only a host with no registry keeps today's helpers.
-  const planCred = await openPlannerGitCredential(await plannerHostGitCredential(`${owner}/${repo}`), {
+  const planCred = await (opts.openPlannerGitCredential ?? openPlannerGitCredential)(credential, {
     runDir: join(config.root, "tmp", `plan-cred-${runId}`), log, wire: wireCredentialHelperSocket, unwire: unwireCredentialHelperSocket,
     shared: (cwd) => sharesHarnessCheckout(cwd, repoDir) || sharesHarnessCheckout(cwd, repoRoot),
   });
@@ -35882,7 +35898,21 @@ export async function planCommand(
     // The title is the SAME header string that just went into the commit, split off
     // its first line — never a second computation (W1-T327 design point ii).
     const prCreate = ghPrCreateFillCommand(worktreePath, owner, repo, branch, commitMessage.split("\n")[0], planPrBody, undefined, { log });
-    const prUrl = runGhPrCreate(prCreate, branch, log, say).prUrl;
+    let prUrl: string | undefined;
+    if (credential.kind === "app") {
+      const write = await plannerPrWriteToken(credential, `${owner}/${repo}`, opts.prWriteToken);
+      if (!write.ok) {
+        log("plan.pr_write_credential_failed", { branch, reason: write.reason });
+        say(`plan PR not opened — ${write.reason}`);
+        removePlanWorktree();
+        return 1;
+      }
+      const exec: NonNullable<Parameters<typeof runGhPrCreate>[4]> = opts.prCreateExec ?? execFileSync;
+      prUrl = runGhPrCreate(prCreate, branch, log, say,
+        (file, args, options) => exec(file, args, { ...options, env: { ...process.env, GH_TOKEN: write.token } }), exec).prUrl;
+    } else {
+      prUrl = runGhPrCreate(prCreate, branch, log, say, opts.prCreateExec).prUrl;
+    }
     if (!prUrl) {
       log("plan.error", { error: "no PR opened" });
       removePlanWorktree();
