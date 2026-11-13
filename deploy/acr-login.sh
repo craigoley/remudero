@@ -1,6 +1,27 @@
 #!/usr/bin/env bash
 # W1-T5319: source for deploy authentication; --refresh also publishes the host's latest result.
 
+rmd_acr_failure_reason() {
+  # Only fixed classifications leave this function; Azure diagnostics can include credentials.
+  case "${1,,}" in
+    *nameresolutionerror*|*getaddrinfo*|*name\ resolution*|*name\ or\ service\ not\ known*|*failed\ to\ resolve*|*could\ not\ resolve*|*enotfound*)
+      printf 'DNS name resolution failed' ;;
+    *certificate_verify_failed*|*certificate\ verify\ failed*|*sslerror*|*tls*certificate*)
+      printf 'TLS certificate verification failed' ;;
+    *timed\ out*|*timeout*) printf 'request timed out' ;;
+    *connectionerror*|*connection\ refused*|*connection\ reset*|*connection\ aborted*|*network\ is\ unreachable*|*failed\ to\ establish\ a\ new\ connection*)
+      printf 'network connection failed' ;;
+    *aadsts700082*|*expired*) printf 'Azure session expired; run az login' ;;
+    *error*saving*credentials*|*error*storing*credentials*|*docker*permission\ denied*|*permission\ denied*docker*)
+      printf 'local credential store access failed' ;;
+    *permission\ denied*) printf 'permission denied' ;;
+    *denied:\ requested\ access*|*unauthorized*|*forbidden*|*403*|*401*) printf 'registry refused login' ;;
+    *az\ login*) printf 'no Azure session; run az login' ;;
+    *no*identity*|*identity*not*found*|*failed*msi*) printf 'no managed identity found' ;;
+    *) printf 'unclassified Azure CLI failure' ;;
+  esac
+}
+
 rmd_acr_login() {
   local registry="${1:-${REGISTRY:-synthwatcholey0620}}" output config identity_reason code
   RMD_ACR_LOGIN_REASON=""
@@ -20,15 +41,16 @@ rmd_acr_login() {
         return 0
       else
         code=$?
-        identity_reason="managed identity registry login failed (exit $code) for $registry"
+        output="$(rmd_acr_failure_reason "$output")"
+        identity_reason="managed identity registry login failed (exit $code) for $registry: $output"
         case "$output" in
-          *[Dd][Ee][Nn][Ii][Ee][Dd]*|*[Uu]nauthorized*|*Forbidden*|*403*|*401*)
+          'registry refused login')
             identity_reason="managed identity is missing AcrPull on registry $registry (registry refused login)" ;;
         esac
       fi
     else
       code=$?
-      identity_reason="managed identity unavailable: Azure login failed (exit $code)"
+      identity_reason="managed identity unavailable: $(rmd_acr_failure_reason "$output") (exit $code)"
       if [ "$code" -eq 124 ] || [ "$code" -eq 137 ]; then
         identity_reason="managed identity unavailable: Azure login timed out"
       fi
@@ -42,10 +64,7 @@ rmd_acr_login() {
     code=$?
   fi
   # Emit only classified diagnostics; arbitrary CLI output can contain credentials.
-  RMD_ACR_LOGIN_REASON="$identity_reason; stored login failed (exit $code) for $registry"
-  case "$output" in
-    *AADSTS700082*|*expired*|*Expired*) RMD_ACR_LOGIN_REASON="$identity_reason; stored login expired for $registry; run az login" ;;
-  esac
+  RMD_ACR_LOGIN_REASON="$identity_reason; stored login failed (exit $code) for $registry: $(rmd_acr_failure_reason "$output")"
   printf 'acr-login: %s\n' "$RMD_ACR_LOGIN_REASON" >&2
   return 1
 }

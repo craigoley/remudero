@@ -26,14 +26,20 @@ printf 'Authorization: Bearer %s\\n' "$SECRET" >&2
 if [ "$1" = login ]; then
   printf identity > "$AZURE_CONFIG_DIR/account"
   [ "$IDENTITY" = ok ] && exit 0
-  echo 'No managed identity found' >&2; exit 1
+  if [ "$IDENTITY" = absent ]; then echo 'No managed identity found' >&2
+  else printf '%s\\n' "$IDENTITY" >&2; fi
+  exit 1
 fi
 if [ "$AZURE_CONFIG_DIR" = "$STORED_CONFIG" ]; then
   [ "$STORED" = ok ] && exit 0
-  echo 'AADSTS700082: stored session expired' >&2; exit 2
+  if [ "$STORED" = expired ]; then echo 'AADSTS700082: stored session expired' >&2
+  else printf '%s\\n' "$STORED" >&2; fi
+  exit 2
 fi
 [ "$MANAGED" = ok ] && exit 0
-echo 'DENIED: requested access to the resource is denied' >&2; exit 3
+if [ "$MANAGED" = denied ]; then echo 'DENIED: requested access to the resource is denied' >&2
+else printf '%s\\n' "$MANAGED" >&2; fi
+exit 3
 `, { mode: 0o755 });
   const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, HOME: root, TMPDIR: root,
     AZURE_CONFIG_DIR: config, STORED_CONFIG: config, CALLS: calls, SECRET: secret,
@@ -115,17 +121,66 @@ test("W1-T12177 criterion 4: refused registry identity names AcrPull and registr
   assert.match(String(f.rows[0]!.reason), /AcrPull.*fixture-registry/);
 });
 
-test("W1-T12177 criterion 5: both failure reasons survive without tokens", (t) => {
-  const f = fixture(t, "absent", "ok", "expired");
-  const result = f.run();
-  assert.equal(result.status, 1);
-  assert.match(f.record().reason, /managed identity.*unavailable/i);
-  assert.match(f.record().reason, /stored login.*expired/i);
-  assert.doesNotMatch(f.record().reason, /AcrPull/);
-  assert.equal(f.deploy(), undefined);
-  assert.equal(f.rows[0]!.outcome, "failed");
-  assert.equal(f.rows[0]!.reason, f.record().reason);
-  assert.ok(!JSON.stringify([f.record(), f.rows, result.stdout, result.stderr]).includes(secret));
+test("W1-T12177 criterion 4: local credential failures do not claim a missing registry role", (t) => {
+  for (const failure of ["open /home/person/.docker/config.json: permission denied",
+    "error saving credentials: access denied", "permission denied"]) {
+    const f = fixture(t, "ok", failure, "expired");
+    const result = f.run();
+    assert.equal(result.status, 1);
+    assert.match(f.record().reason, /managed identity registry login failed.*(?:credential store access failed|permission denied)/);
+    assert.doesNotMatch(f.record().reason, /AcrPull|registry refused login/);
+    assert.equal(f.deploy(), undefined);
+    assert.equal(f.rows[0]!.reason, f.record().reason);
+    assert.ok(!JSON.stringify([f.record(), f.rows, result.stdout, result.stderr]).includes(secret));
+  }
+});
+
+test("W1-T12177 criterion 5: both failure reasons survive without tokens", async (t) => {
+  const failures: Array<[string, RegExp]> = [
+    ["expired", /session expired/],
+    ["Failed to resolve registry.azurecr.io: Name or service not known", /DNS name resolution failed/],
+    ["NameResolutionError: Temporary failure in name resolution", /DNS name resolution failed/],
+    ["getaddrinfo failed", /DNS name resolution failed/],
+    ["Could not resolve host: registry.azurecr.io", /DNS name resolution failed/],
+    ["ConnectionError: connection reset by peer", /network connection failed/],
+    ["ConnectTimeout: connection timed out", /request timed out/],
+    ["SSLError: CERTIFICATE_VERIFY_FAILED", /TLS certificate verification failed/],
+    ["UNAUTHORIZED: authentication required", /registry refused login/],
+    ["Please run 'az login' to setup account", /no Azure session/],
+    ["unexpected private diagnostic", /unclassified Azure CLI failure/],
+  ];
+  for (const [failure, expected] of failures) await t.test(failure, (t) => {
+    const f = fixture(t, "absent", "ok", failure);
+    const result = f.run();
+    assert.equal(result.status, 1, result.stderr);
+    assert.equal(f.record().result, "failed");
+    assert.equal(f.record().method, "none");
+    const reason = f.record().reason;
+    assert.match(reason, /managed identity unavailable: no managed identity found/);
+    assert.match(reason, new RegExp(`stored login failed.*${expected.source}`));
+    assert.doesNotMatch(reason, /AcrPull/);
+    assert.ok(result.stderr.includes(reason));
+    assert.equal(f.deploy(), undefined);
+    assert.equal(f.rows[0]!.outcome, "failed");
+    assert.equal(f.rows[0]!.reason, reason);
+    assert.equal(f.rows[0]!.method, "none");
+    assert.ok(!JSON.stringify([f.record(), f.rows, result.stdout, result.stderr]).includes(secret));
+    assert.ok(!reason.includes("unexpected private diagnostic"));
+  });
+});
+
+test("identity network failures retain their cause without claiming a missing role", (t) => {
+  for (const identity of ["ok", "NameResolutionError"]) {
+    const f = fixture(t, identity, "ConnectionError: connection refused", "expired");
+    const result = f.run();
+    assert.equal(result.status, 1);
+    assert.match(f.record().reason, identity === "ok" ? /managed identity.*network connection failed/ : /managed identity unavailable: DNS name resolution failed/);
+    assert.match(f.record().reason, /stored login failed.*session expired/);
+    assert.doesNotMatch(f.record().reason, /AcrPull/);
+    assert.equal(f.deploy(), undefined);
+    assert.equal(f.rows[0]!.reason, f.record().reason);
+    assert.ok(!JSON.stringify([f.record(), f.rows, result.stdout, result.stderr]).includes(secret));
+  }
 });
 
 test("identity timeout falls back without touching stored credentials", (t) => {
