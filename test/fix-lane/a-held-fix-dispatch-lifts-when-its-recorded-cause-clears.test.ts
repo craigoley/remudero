@@ -8,6 +8,7 @@ import { buildSweepEffects, DEFAULT_SWEEP_POLICY, fixDispatchHoldAtHead, fixDisp
   type FixDispatchHoldOptions, type OpenPrView, type SweepDeps } from "#src/lib/sweep.js";
 import * as sweep from "#src/lib/sweep.js";
 import type { FixProgressInput, FixProgressJudge } from "#src/lib/fix-progress-judge.js";
+import type { ProcessCwdCensus } from "#src/lib/process-cwd-census.js";
 
 const NOW = Date.parse("2026-11-03T12:00:00Z");
 const pr: OpenPrView = { prNumber: 15679, prUrl: "https://github.com/craigoley/remudero/pull/15679",
@@ -62,6 +63,8 @@ test("a production owner probe releases a recorded process owner when its claim 
   const claimKey = "fix-owner-claim";
   const inflightDir = join(root, "state", "inflight");
   const lockPath = join(inflightDir, `${claimKey}.lock`);
+  let census: ProcessCwdCensus = { state: "unknown", scanned: 1, reason: "cwd_unreadable" };
+  let censusCalls = 0;
   try {
     mkdirSync(ownerPath, { recursive: true });
     mkdirSync(inflightDir, { recursive: true });
@@ -71,7 +74,13 @@ test("a production owner probe releases a recorded process owner when its claim 
       startedAt: new Date().toISOString() }));
     const built = buildSweepEffects({ owner: "acme", repo: "scratch", config: { root }, ledgerPath,
       runId: "owner-probe", plan: { tasks: [], byId: new Map() }, policy: DEFAULT_SWEEP_POLICY,
+      log: () => {},
       fixBranchClaimKeyImpl: () => claimKey,
+      ownerProcessCwdCensusImpl: (path: string) => {
+        assert.equal(path, ownerPath);
+        censusCalls++;
+        return census;
+      },
       registeredOwnerRecovery: { capture: () => ({ path: ownerPath, pathState: "managed",
         attachmentState: "exact", treeState: "clean", remoteState: "exact", historyState: "unknown",
         claimState: "unknown", processState: "unknown", ageMs: 1000, localSha: pr.headSha,
@@ -81,9 +90,19 @@ test("a production owner probe releases a recorded process owner when its claim 
       worktree_path: ownerPath, ts: at(NOW) };
     assert.ok(fixDispatchHoldAtHead(pr, [owner], () => true, built.fixOwnerReclaimableAtHold, options()),
       "the live claim holds despite unreadable git history");
+    assert.equal(censusCalls, 0, "a live claim already establishes ownership");
     unlinkSync(lockPath);
+    assert.equal(fixDispatchHoldAtHead(pr, [owner], () => true, built.fixOwnerReclaimableAtHold, options())?.fields.probe_result,
+      "present", "a cleared claim with an unreadable process census still holds");
+    assert.equal(censusCalls, 1);
+    census = { state: "occupied", scanned: 1, pid: process.pid };
+    assert.ok(fixDispatchHoldAtHead(pr, [owner], () => true, built.fixOwnerReclaimableAtHold, options()),
+      "a live process still holds after its claim clears");
+    assert.equal(censusCalls, 2);
+    census = { state: "clear", scanned: 1 };
     assert.equal(fixDispatchHoldAtHead(pr, [owner], () => true, built.fixOwnerReclaimableAtHold, options()), undefined,
       "the production claim and process census release the recorded cause at this head");
+    assert.equal(censusCalls, 3, "the process census is re-read each pass");
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 

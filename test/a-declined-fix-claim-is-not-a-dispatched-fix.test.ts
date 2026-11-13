@@ -198,7 +198,8 @@ test("an awaited declined dispatch records acted:false naming the decline, and t
 
 test("an owner claim holds while its probe is present and escalates only on the judge verdict", async () => {
   for (const pr of [view(), conflictedView()]) {
-    const seed = [earlierHeadDispatch, decline(HEAD), { ...decline(HEAD), ts: new Date(NOW).toISOString() }];
+    const ownerDecline = { ...decline(HEAD), owner_recovery_reason: "process_cwd_owner" };
+    const seed = [earlierHeadDispatch, ownerDecline, { ...ownerDecline, ts: new Date(NOW).toISOString() }];
     const overrides: Partial<SweepDeps> = { fixOwnerReclaimableAtHold: () => false,
       fixProgressJudge: async () => ({ verdict: "escalate", loop: "owner", reason: "owner cannot recover" }) };
     const held = await pass(pr, seed, overrides);
@@ -207,7 +208,7 @@ test("an owner claim holds while its probe is present and escalates only on the 
     assert.equal(held.row.probe_result, "present");
     assert.equal(held.row.judge_verdict, "escalate");
     assert.equal(held.escalations.length, 1);
-    for (const named of [`#${PR}`, HEAD.slice(0, 7), OWNER, "owner_dirty_recovery_preserve_failed"]) assert.ok(held.escalations[0].includes(named));
+    for (const named of [`#${PR}`, HEAD.slice(0, 7), OWNER, "process_cwd_owner"]) assert.ok(held.escalations[0].includes(named));
     const again = await pass(pr, seed, { ...overrides, ledgerPath: held.ledgerPath });
     assert.equal(again.dispatched, 0);
     assert.equal(again.escalations.length, 0);

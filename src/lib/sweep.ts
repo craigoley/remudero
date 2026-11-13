@@ -1651,6 +1651,7 @@ export interface BuildSweepEffectsDeps {
   repairMetadataImpl?: (pr: OpenPrView, checks: readonly string[]) => Promise<MetadataRepairResult>;
   registeredWorktreeOwnerImpl?: (repoDir: string, branchRef: string) => string | undefined;
   registeredOwnerRecovery?: RegisteredFixOwnerRecoveryDeps;
+  ownerProcessCwdCensusImpl?: typeof readBoundedProcessCwdCensus;
   depReviewCommandImpl?: (prArg: string, rest?: string[]) => Promise<number>;
   dispatchFixPreflightStandDownImpl?: SweepRuntimeFn;
   ghLiveStateImpl?: SweepRuntimeFn;
@@ -2734,6 +2735,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
       capture: requiredSweepRuntime("registeredOwnerRecovery.capture"),
       remove: requiredSweepRuntime("registeredOwnerRecovery.remove"),
     },
+    ownerProcessCwdCensusImpl = readBoundedProcessCwdCensus,
     depReviewCommandImpl: depReviewCommand = requiredSweepRuntime<NonNullable<BuildSweepEffectsDeps["depReviewCommandImpl"]>>("depReviewCommandImpl"),
     dispatchFixPreflightStandDownImpl: dispatchFixPreflightStandDown = requiredSweepRuntime("dispatchFixPreflightStandDownImpl"),
     ghLiveStateImpl: ghLiveState = requiredSweepRuntime("ghLiveStateImpl"),
@@ -3982,7 +3984,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
             else log("sweep.fix.owner_claim_probe_unreadable", { pr_number: pr.prNumber,
               head_sha: pr.headSha, worktree_path: ownerPath, reason: String(error) });
           }
-          if (claimClear && readBoundedProcessCwdCensus(ownerPath).state === "clear") return true;
+          if (claimClear && ownerProcessCwdCensusImpl(ownerPath).state === "clear") return true;
         }
         // This probe answers whether the recorded owner still owns the checkout. A stale or
         // unreadable history can block recovery, but cannot keep a cleared claim/process cause held.
