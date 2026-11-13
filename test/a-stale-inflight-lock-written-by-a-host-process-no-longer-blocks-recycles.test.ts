@@ -26,6 +26,7 @@ import { REPO_ROOT } from "#test/helpers/repo-root.js";
 const SCRIPT = join(REPO_ROOT, "deploy", "recycle-container.sh");
 /** The host name every shimmed `hostname` answers, and the `host` a host process writes. */
 const HOST = "rmd-fixture-host";
+const PROC_SELF = "/proc/self";
 /** Above every pid_max a kernel allows, so no real process can hold it. */
 const DEAD_PID = 2147483646;
 const THIRTY_DAYS_S = 30 * 24 * 3600;
@@ -68,7 +69,7 @@ function unavailableProcAndPs(probe: "error" | "absent", targetPid: number): { d
   const psCalls = join(dir, "ps-calls");
   const realPs = spawnSync("sh", ["-c", "command -v ps"], { encoding: "utf8" }).stdout.trim();
   assert.ok(realPs.startsWith("/"), "the fixture can delegate unrelated ps calls");
-  writeFileSync(bashEnv, 'function [ { if [[ "$1" == -d && "$2" == /proc/self ]]; then return 1; fi; builtin [ "$@"; }\n');
+  writeFileSync(bashEnv, 'function [ { if [[ "$1" == -d && "$2" == ' + PROC_SELF + ' ]]; then return 1; fi; builtin [ "$@"; }\n');
   writeFileSync(join(dir, "ps"), [
     "#!/bin/sh",
     'if [ "$1" = -e ] && [ "$2" = -o ] && [ "$3" = "pid=" ]; then',
@@ -93,7 +94,7 @@ function acquireDuringProbe(lockPath: string, childPid: number, startedAt: strin
   const marker = join(dir, "acquired");
   const realPs = spawnSync("sh", ["-c", "command -v ps"], { encoding: "utf8" }).stdout.trim();
   assert.ok(realPs.startsWith("/"));
-  writeFileSync(bashEnv, 'function [ { if [[ "$1" == -d && "$2" == /proc/self ]]; then return 1; fi; builtin [ "$@"; }\n');
+  writeFileSync(bashEnv, 'function [ { if [[ "$1" == -d && "$2" == ' + PROC_SELF + ' ]]; then return 1; fi; builtin [ "$@"; }\n');
   writeFileSync(join(dir, "ps"), [
     "#!/bin/sh",
     'if [ "$1" = -e ] && [ "$2" = -o ] && [ "$3" = "pid=" ]; then',
