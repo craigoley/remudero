@@ -1,0 +1,24 @@
+- id: W1-T12475
+  title: Record the exact insertion points in task-linter.ts and the --base changed-task path of run-task.ts for W1-T11746's proof hooks
+  repo: remudero
+  depends_on:
+    - W1-T11746
+  type: recon
+  verify: auto
+  risk: low
+  status: queued
+  attempts: 0
+  files:
+    - docs/forensics/task-linter.md
+  acceptance:
+    - claim: The forensics page names the function and anchor symbol in src/lib/task-linter.ts where a compatibility-invariant proof check would be added, with the neighbouring checks it follows.
+      proof: "grep: W1-T11746 insertion point: task-linter in docs/forensics/task-linter.md"
+    - claim: The forensics page names the function in src/run-task.ts that builds the --base changed-task set and states how a changed task reaches the linter there.
+      proof: "grep: W1-T11746 insertion point: base changed-task path in docs/forensics/task-linter.md"
+  origin: follow-up harvest from W1-T11746 (run W1-T11746-1794490856498, follow-up 2026-11-12T13:46:34.638Z:1)
+  rationale: >-
+    From the 2026-11-12 follow-up on W1-T11746-1794490856498, ratified via rmd approve:
+  
+    follow-up harvest [research]: Read `src/lib/task-linter.ts` and the `--base` changed-task path
+    in `src/run-task.ts` — the recon did not read them, and the design hooks need exact insertion
+    points. — from W1-T11746 (run W1-T11746-1794490856498)
