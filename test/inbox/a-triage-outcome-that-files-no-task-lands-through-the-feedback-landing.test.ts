@@ -41,7 +41,7 @@ function fakeWorker(text: string): WorkerResult {
   } as unknown as WorkerResult;
 }
 
-const TASK_FIELDS = ["  repo: remudero", "  depends_on: []", "  type: implement", "  verify: auto", "  status: queued", "  attempts: 0"].join("\n");
+const TASK_FIELDS = ["  repo: remudero", "  depends_on: []", "  type: implement", "  design: |", "    NO-INVARIANTS: synthetic lint fixture with no inherited behavior to preserve", "  verify: auto", "  status: queued", "  attempts: 0"].join("\n");
 
 const NO_TASK_VERDICT = "ALREADY_DECIDED: W1-T4 already covers this request";
 const GRILL_VERDICT = [
@@ -199,7 +199,7 @@ test("W1-T12198 criterion 2: a propose outcome still opens its own pull request 
       mkdirSync(join(cwd, "plan", "tasks.d"), { recursive: true });
       writeFileSync(join(cwd, "plan", "tasks.d", `${id}-fixture.yaml`), [
         `- id: ${id}`, `  title: "a task filed for feedback#${f.feedbackId}"`, "  repo: remudero", "  origin: architect",
-        "  depends_on: []", "  type: implement", "  verify: auto", "  status: queued", "  attempts: 0",
+        "  depends_on: []", "  type: implement", "  design: |", "    NO-INVARIANTS: synthetic lint fixture with no inherited behavior to preserve", "  verify: auto", "  status: queued", "  attempts: 0",
         "  files: [test/inbox/a-triage-outcome-that-files-no-task-lands-through-the-feedback-landing.test.ts]",
         "  acceptance:", '    - claim: "the thing holds"',
         '      proof: "unit test: test/inbox/a-triage-outcome-that-files-no-task-lands-through-the-feedback-landing.test.ts"', "",

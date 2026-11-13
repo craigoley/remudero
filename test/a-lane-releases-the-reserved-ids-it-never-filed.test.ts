@@ -53,7 +53,7 @@ function fakeWorker(text: string): WorkerResult {
   } as unknown as WorkerResult;
 }
 
-const TASK_FIELDS = ["  repo: remudero", "  depends_on: []", "  type: implement", "  verify: auto", "  status: queued", "  attempts: 0"].join("\n");
+const TASK_FIELDS = ["  repo: remudero", "  depends_on: []", "  type: implement", "  design: |", "    NO-INVARIANTS: synthetic lint fixture with no inherited behavior to preserve", "  verify: auto", "  status: queued", "  attempts: 0"].join("\n");
 
 /** The fixture world: a bare origin, a managed clone of it at `<root>/repos/<repo>`, and a HOME whose config points at it. */
 function world(kind: string, seed: (dir: string) => void) {
@@ -198,7 +198,7 @@ function batchWorld(break_: (w: ReturnType<typeof world>) => void) {
     join(w.root, "state", "inbox-drafts.json"),
     JSON.stringify(Object.fromEntries(ids.map((id, i) => [id, {
       proposalId: id,
-      fragmentYaml: `- id: NEW-${i + 1}\n  title: ${i === 0 ? "a quiet zebra crossing" : "a loud giraffe parade"}\n  repo: remudero\n  type: implement\n  verify: human\n  origin: architect\n`,
+      fragmentYaml: `- id: NEW-${i + 1}\n  title: ${i === 0 ? "a quiet zebra crossing" : "a loud giraffe parade"}\n  repo: remudero\n  type: implement\n  design: |\n    NO-INVARIANTS: synthetic lint fixture with no inherited behavior to preserve\n  verify: human\n  origin: architect\n`,
       stampLine: `- ${id} (plan) — RATIFIED -> NEW-${i + 1}.`,
       anchorFingerprint: "",
     }]))),

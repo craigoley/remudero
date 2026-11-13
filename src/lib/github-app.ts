@@ -312,6 +312,8 @@ export const SCOPED_TOKEN_MINT_FAILED_STEP = "github_app.scoped_token_mint_faile
 export interface ScopedTokenResult {
   ok: boolean;
   token?: string;
+  permissions?: Record<string, string>;
+  repositories?: string[];
   /** Capped at `now() + ttlMs`, never GitHub's own fixed one-hour expiry alone (W1-T2398's model). */
   expiresAtMs?: number;
   reason?: string;
@@ -393,9 +395,9 @@ export async function mintScopedToken(repo: string, ttlMs: number, opts: Refresh
     log(SCOPED_TOKEN_MINT_FAILED_STEP, { reason: `exchange rejected: ${res.status}` });
     return { ok: false, reason: `exchange rejected: ${res.status}` };
   }
-  let parsed: { token?: string; expires_at?: string };
+  let parsed: { token?: string; expires_at?: string; permissions?: Record<string, string>; repositories?: Array<{ name: string }> };
   try {
-    parsed = (await res.json()) as { token?: string; expires_at?: string };
+    parsed = await res.json() as typeof parsed;
   } catch {
     log(SCOPED_TOKEN_MINT_FAILED_STEP, { reason: "exchange response unparsable" });
     return { ok: false, reason: "exchange response unparsable" };
@@ -411,7 +413,9 @@ export async function mintScopedToken(repo: string, ttlMs: number, opts: Refresh
     now() + ttlMs,
   );
   log(SCOPED_TOKEN_MINTED_STEP, { installation_id: installationId, scoped_repo: repo, expires_at: new Date(cappedExpiry).toISOString() });
-  return { ok: true, token: parsed.token, expiresAtMs: cappedExpiry };
+  return { ok: true, token: parsed.token, expiresAtMs: cappedExpiry,
+    permissions: parsed.permissions,
+    repositories: Array.isArray(parsed.repositories) ? parsed.repositories.map((repository) => repository?.name) : undefined };
 }
 
 /**
