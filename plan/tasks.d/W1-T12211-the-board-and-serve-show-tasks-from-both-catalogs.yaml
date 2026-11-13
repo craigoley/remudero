@@ -21,6 +21,8 @@
     - src/lib/now-view.ts
     - openapi/daemon.yaml
     - packages/api-client/src/schema.d.ts
+    - src/lib/board-worker.ts
+    - src/lib/read-model-worker.ts
   status: queued
   attempts: 0
   acceptance:
