@@ -574,6 +574,57 @@ export interface components {
       required_scope?: "write";
       required_tier?: "high";
     };
+    RunnerConfigProposal: {
+      path: ".remudero/mounts.yaml";
+      bytes: string;
+      digest: string;
+      targetHead: string;
+      source: {
+        kind: "serving-instance-mounts";
+        commit: string;
+      };
+      validation: {
+        valid: true;
+        g17: true;
+      };
+      changes: ({
+        operation: "add";
+        path: ".remudero/mounts.yaml";
+      })[];
+    };
+    /** Informational committed-tree observation. Only absent carries a proposal; no mutation is authorized. */
+    RunnerConfigPreview: ({
+      version: "product-runner-config-preview-v1";
+      productId: ProductId;
+      revision: number;
+      objectiveRevision: number;
+      path: ".remudero/mounts.yaml";
+      state: "absent";
+      head: string;
+      proposal: RunnerConfigProposal;
+    }) | ({
+      version: "product-runner-config-preview-v1";
+      productId: ProductId;
+      revision: number;
+      objectiveRevision: number;
+      path: ".remudero/mounts.yaml";
+      state: "present";
+      head: string;
+      digest: string;
+    }) | ({
+      version: "product-runner-config-preview-v1";
+      productId: ProductId;
+      revision: number;
+      objectiveRevision: number;
+      path: ".remudero/mounts.yaml";
+      state: "invalid" | "unreadable" | "source_unavailable";
+      head?: string;
+      reason: string;
+    });
+    RunnerConfigPreviewError: {
+      version: "product-runner-config-preview-v1";
+      error: "invalid_identity" | "invalid_input" | "not_found" | "stale_revision" | "repository_missing" | "repository_conflict" | "capacity" | "busy" | "corrupt" | "unavailable" | "outcome_unknown" | "recovery_required" | "idempotency_conflict";
+    };
     /** A server observation of the exact repository a create or adopt would act on, taken at observedAt. It is informational: it writes nothing and authorizes nothing, and the mutation rechecks every prerequisite itself. state ready means the exact adoption target exists, or the creation target is absent and the owner namespace allows creation. absent, conflict, stale, denied and unavailable are never ready; reasons name why. creation reports the provider's answer for the owner namespace and is not_checked when the repository read did not succeed or a product-level state decided first. */
     ProductRepositoryPreview: {
       version: "product-repository-preview-v1";
@@ -7124,6 +7175,19 @@ export interface paths {
           "409": ProductRepositoryError;
           "413": ProductRepositoryError;
           "503": ProductRepositoryError;
+        };
+    };
+  };
+  "/v1/products/runner-config-preview": {
+    get: {
+      responses: {
+          "200": RunnerConfigPreview;
+          "400": RunnerConfigPreviewError;
+          "401": ProductAccessError;
+          "403": (RunnerConfigPreviewError) | (ProductAccessError);
+          "404": RunnerConfigPreviewError;
+          "409": RunnerConfigPreviewError;
+          "503": RunnerConfigPreviewError;
         };
     };
   };

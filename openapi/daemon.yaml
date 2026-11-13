@@ -1312,6 +1312,88 @@ components:
         error: { type: string, enum: [unauthorized, forbidden, confirm_nonce_required] }
         required_scope: { type: string, enum: [write] }
         required_tier: { type: string, enum: [high] }
+    RunnerConfigProposal:
+      type: object
+      additionalProperties: false
+      required: [path, bytes, digest, targetHead, source, validation, changes]
+      properties:
+        path: { type: string, enum: [.remudero/mounts.yaml] }
+        bytes: { type: string, maxLength: 1048576 }
+        digest: { type: string, pattern: '^[a-f0-9]{64}$' }
+        targetHead: { type: string, pattern: '^[a-f0-9]{40}$' }
+        source:
+          type: object
+          additionalProperties: false
+          required: [kind, commit]
+          properties:
+            kind: { type: string, enum: [serving-instance-mounts] }
+            commit: { type: string, pattern: '^[a-f0-9]{40}$' }
+        validation:
+          type: object
+          additionalProperties: false
+          required: [valid, g17]
+          properties:
+            valid: { type: boolean, enum: [true] }
+            g17: { type: boolean, enum: [true] }
+        changes:
+          type: array
+          minItems: 1
+          maxItems: 1
+          items:
+            type: object
+            additionalProperties: false
+            required: [operation, path]
+            properties:
+              operation: { type: string, enum: [add] }
+              path: { type: string, enum: [.remudero/mounts.yaml] }
+    RunnerConfigPreview:
+      description: Informational committed-tree observation. Only absent carries a proposal; no mutation is authorized.
+      oneOf:
+        - type: object
+          additionalProperties: false
+          required: [version, productId, revision, objectiveRevision, path, state, head, proposal]
+          properties:
+            version: { type: string, enum: [product-runner-config-preview-v1] }
+            productId: { $ref: "#/components/schemas/ProductId" }
+            revision: { type: integer, minimum: 1 }
+            objectiveRevision: { type: integer, minimum: 1 }
+            path: { type: string, enum: [.remudero/mounts.yaml] }
+            state: { type: string, enum: [absent] }
+            head: { type: string, pattern: '^[a-f0-9]{40}$' }
+            proposal: { $ref: "#/components/schemas/RunnerConfigProposal" }
+        - type: object
+          additionalProperties: false
+          required: [version, productId, revision, objectiveRevision, path, state, head, digest]
+          properties:
+            version: { type: string, enum: [product-runner-config-preview-v1] }
+            productId: { $ref: "#/components/schemas/ProductId" }
+            revision: { type: integer, minimum: 1 }
+            objectiveRevision: { type: integer, minimum: 1 }
+            path: { type: string, enum: [.remudero/mounts.yaml] }
+            state: { type: string, enum: [present] }
+            head: { type: string, pattern: '^[a-f0-9]{40}$' }
+            digest: { type: string, pattern: '^[a-f0-9]{64}$' }
+        - type: object
+          additionalProperties: false
+          required: [version, productId, revision, objectiveRevision, path, state, reason]
+          properties:
+            version: { type: string, enum: [product-runner-config-preview-v1] }
+            productId: { $ref: "#/components/schemas/ProductId" }
+            revision: { type: integer, minimum: 1 }
+            objectiveRevision: { type: integer, minimum: 1 }
+            path: { type: string, enum: [.remudero/mounts.yaml] }
+            state: { type: string, enum: [invalid, unreadable, source_unavailable] }
+            head: { type: string, pattern: '^[a-f0-9]{40}$' }
+            reason: { type: string, maxLength: 512 }
+    RunnerConfigPreviewError:
+      type: object
+      additionalProperties: false
+      required: [version, error]
+      properties:
+        version: { type: string, enum: [product-runner-config-preview-v1] }
+        error:
+          type: string
+          enum: [invalid_identity, invalid_input, not_found, stale_revision, repository_missing, repository_conflict, capacity, busy, corrupt, unavailable, outcome_unknown, recovery_required, idempotency_conflict]
     ProductRepositoryPreview:
       type: object
       additionalProperties: false
@@ -17154,6 +17236,75 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ProductRepositoryError" }
+  /v1/products/runner-config-preview:
+    parameters:
+      - name: x-rmd-operator-session
+        in: header
+        required: true
+        schema: { type: string, minLength: 1 }
+    get:
+      summary: Preview the exact validated runner configuration missing from a product target.
+      description: >
+        Requires the verified owner and sensitive read grant. Accepts only productId and expected
+        revisions, with no duplicate keys. Rechecks live repository identity and default-branch head,
+        then reads the committed tree with the bounded target configuration reader. Present and
+        invalid files are preserved. Unreadable or moved targets never offer bytes. Only confirmed
+        absence offers exactly one add of the serving install's validated mounts table, bound to
+        its source commit, digest and target head. Missing, invalid or uncommitted source bytes
+        return source_unavailable. Writes no product, journal, branch, file or resource. Later
+        mutation rechecks everything. Responses use Cache-Control private, no-store.
+      parameters:
+        - name: productId
+          in: query
+          required: true
+          schema: { $ref: "#/components/schemas/ProductId" }
+        - name: expectedRevision
+          in: query
+          required: true
+          schema: { type: integer, minimum: 1, maximum: 9007199254740991 }
+        - name: expectedObjectiveRevision
+          in: query
+          required: true
+          schema: { type: integer, minimum: 1, maximum: 9007199254740991 }
+      responses:
+        "200":
+          description: Present, absent, invalid, unreadable or source_unavailable observation.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RunnerConfigPreview" }
+        "400":
+          description: Missing, duplicate, unknown or malformed query keys.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RunnerConfigPreviewError" }
+        "401":
+          description: No recognized service credential.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProductAccessError" }
+        "403":
+          description: Missing verified owner or sensitive read grant.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - { $ref: "#/components/schemas/RunnerConfigPreviewError" }
+                  - { $ref: "#/components/schemas/ProductAccessError" }
+        "404":
+          description: No product owned by this operator.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RunnerConfigPreviewError" }
+        "409":
+          description: Stale revision, missing repository binding or conflicting live identity.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RunnerConfigPreviewError" }
+        "503":
+          description: Product state is busy, corrupt or unavailable.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RunnerConfigPreviewError" }
   /v1/products/repository-preview:
     parameters:
       - name: x-rmd-operator-session

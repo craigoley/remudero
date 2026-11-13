@@ -652,6 +652,25 @@ test("W1-T10613: POST /v1/products/repository is high tier, confirmed, and journ
   } finally { process.env.PATH = originalPath; }
 });
 
+test("W1-T11196: GET /v1/products/runner-config-preview reads the owned product from the fleet root", async () => {
+  await withProductionServer(async h => {
+    const headers = { authorization: `Bearer ${WRITE_TOKEN}`, "content-type": "application/json", [OPERATOR_SESSION_HEADER]: h.operatorSession! };
+    const saved = await fetch(`${h.base}/v1/products`, { method: "POST", headers, body: JSON.stringify({ version: "product-intent-v1",
+      requestId: "wiring-runner-00001", expectedRevision: 0, brief: { idea: "runner preview wiring" } }) });
+    assert.equal(saved.status, 200);
+    const { receipt } = await saved.json() as { receipt: { productId: string } };
+    const url = `${h.base}/v1/products/runner-config-preview?productId=${receipt.productId}&expectedRevision=1&expectedObjectiveRevision=1`;
+    assert.equal((await fetch(url, { headers: { authorization: `Bearer ${READ_TOKEN}` } })).status, 403);
+    const before = readFileSync(h.ledgerPath, "utf8");
+    const preview = await fetch(url, { headers: { authorization: `Bearer ${READ_TOKEN}`, [OPERATOR_SESSION_HEADER]: h.operatorSession! } });
+    assert.equal(preview.status, 409);
+    assert.deepEqual(await preview.json(), { version: "product-runner-config-preview-v1", error: "repository_missing" });
+    assert.equal(preview.headers.get("cache-control"), "private, no-store");
+    assert.equal(readFileSync(h.ledgerPath, "utf8"), before);
+    assert.ok(!existsSync(join(h.questionsRoot, "state/products")));
+  }, true);
+});
+
 test("W1-T10726: GET /v1/products/repository-preview is verified-operator read-only over the fleet root", async () => {
   const shim = ghShim([{ when: "api repos/craigoley/wreckterra", stdout: JSON.stringify({ id: 1432832754, name: "wreckterra",
     owner: { login: "craigoley" }, private: false, default_branch: "main" }) }, { when: "api user", stdout: JSON.stringify({ login: "craigoley" }) }]);

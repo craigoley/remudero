@@ -19,6 +19,7 @@ import {
 } from "./product-evaluation.js";
 import { PRODUCT_INTENT_LIMITS, PRODUCT_INTENT_VERSION, type ProductStoreCode } from "./product-intent.js";
 import { PRODUCT_RESEARCH_LIMITS, PRODUCT_RESEARCH_VERSION, ProductResearchService, type ProductResearchCode, type ProductResearchProvider } from "./product-research.js";
+import { previewRunnerConfigBootstrap, RUNNER_CONFIG_PREVIEW_VERSION } from "./product-target-config.js";
 
 const status: Record<ProductStoreCode, number> = {
   invalid_identity: 403, invalid_input: 400, not_found: 404, stale_revision: 409,
@@ -104,11 +105,26 @@ const repositoryStatus: Record<ProductRepositoryCode, number> = {
 };
 
 /** Exact create-or-adopt of the product repository. HIGH tier: it may create a real GitHub repository. */
-export function buildProductRepositoryRoutes(options: { root?: string; provider?: ProductRepositoryProvider }): Route[] {
+export function buildProductRepositoryRoutes(options: { root?: string; provider?: ProductRepositoryProvider; installRoot?: string }): Route[] {
   const provider = options.provider ?? ghProductRepositoryProvider();
   const service = new ProductRepositoryService({ ...options, provider });
   const intents = new ProductIntentStore(options);
   return [
+    { method: "GET", path: "/v1/products/runner-config-preview", scope: "read", sensitivity: "sensitive", async handler(req, res) {
+      res.setHeader("Cache-Control", "private, no-store");
+      const fail = (code: number, error: string) => sendJson(res, code, { version: RUNNER_CONFIG_PREVIEW_VERSION, error });
+      const actor = verifiedActor(req);
+      if (!actor) { fail(403, "invalid_identity"); return; }
+      const params = new URL(req.url ?? "/", "http://rmd.local").searchParams;
+      const keys = [...params.keys()];
+      if (keys.length !== 3 || new Set(keys).size !== keys.length) { fail(400, "invalid_input"); return; }
+      const result = await previewRunnerConfigBootstrap({ store: intents, provider, installRoot: options.installRoot ?? "" }, actor, Object.fromEntries(params));
+      if (!result.ok) {
+        fail(result.code === "repository_missing" || result.code === "repository_conflict" ? 409 : status[result.code], result.code);
+        return;
+      }
+      sendJson(res, 200, result.value);
+    } },
     { method: "GET", path: "/v1/products/repository-preview", scope: "read", sensitivity: "sensitive", async handler(req, res) {
       res.setHeader("Cache-Control", "private, no-store");
       const reply = (code: number, body: Record<string, unknown>) => sendJson(res, code, { version: PRODUCT_REPOSITORY_VERSION, ...body });

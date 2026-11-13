@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
-import { generateKeyPairSync, sign } from "node:crypto";
+import { createHash, generateKeyPairSync, sign } from "node:crypto";
 import { once } from "node:events";
-import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { join } from "node:path";
@@ -647,6 +647,72 @@ test("W1-T10726: served preview matches the public product contract", async (t) 
     assert.deepEqual(readdirSync(root, { recursive: true }).sort(), before, "preview creates no product or journal state");
     assert.ok(!shim.calls().some((call) => call.includes("-X POST")), "preview makes no create call over the real transport");
   } finally { await new Promise<void>((resolve, reject) => instance.close((error) => error ? reject(error) : resolve())); }
+});
+
+test("test/console-api/serve/product-routes.test.ts: runner config preview matches its authenticated contract", async t => {
+  const target = gitRepo({ scope: t });
+  const head = target.git("rev-parse", "HEAD");
+  const blob = "b".repeat(40);
+  const tree = "c".repeat(40);
+  const shim = ghShim([
+    { when: "/git/commits/", stdout: JSON.stringify({ sha: head }) },
+    { when: "/git/trees/", stdout: JSON.stringify({ truncated: false, tree: [] }) },
+    { when: "/commits/main", stdout: JSON.stringify({ sha: head }) },
+    { when: "api repos/craigoley/wreckterra", stdout: JSON.stringify({ id: WRECKTERRA_ID, name: "wreckterra",
+      owner: { login: "craigoley" }, private: false, default_branch: "main" }) },
+  ]);
+  const prior = process.env.PATH;
+  process.env.PATH = `${shim.dir}:${prior}`;
+  t.after(() => { process.env.PATH = prior; });
+  const root = ownedFixtureDir(t, "runner-preview-http").dir;
+  const mounted = assembled(root, "/v1/products/runner-config-preview");
+  assert.equal(mounted[0]?.scope, "read"); assert.equal(mounted[0]?.sensitivity, "sensitive");
+  const store = new ProductIntentStore({ root });
+  const saved = store.write("clerk:alice", command); assert.ok(saved.ok);
+  const productId = saved.value.receipt.productId;
+  const binding = { provider: "github" as const, id: WRECKTERRA_ID, owner: "craigoley", name: "wreckterra", defaultBranch: "main",
+    visibility: "public" as const, verifiedAt: new Date().toISOString() };
+  const instance = createService({ tokens: { read: "fixture-read", write: "fixture-write" }, operatorSession: identity,
+    routes: mounted, enforceReadSensitivity: true });
+  await new Promise<void>(resolve => instance.listen(0, "127.0.0.1", resolve));
+  t.after(() => new Promise<void>((resolve, reject) => instance.close(error => error ? reject(error) : resolve())));
+  const base = `http://127.0.0.1:${(instance.address() as AddressInfo).port}`;
+  const files = () => Object.fromEntries(readdirSync(root, { recursive: true, encoding: "utf8" })
+    .filter(path => statSync(join(root, path)).isFile()).map(path => [path, readFileSync(join(root, path)).toString("base64")]));
+  const get = async (session: string | null = "alice", suffix = "", over: Record<string, string> = {}, token: string | null = "fixture-read") => {
+    const before = files();
+    const query = new URLSearchParams({ productId, expectedRevision: "2", expectedObjectiveRevision: "1", ...over });
+    const response = await fetch(`${base}/v1/products/runner-config-preview?${query}${suffix}`, { headers: {
+      ...(token ? { authorization: `Bearer ${token}` } : {}), ...(session ? { "x-test-session": session } : {}) } });
+    const body = await response.json() as { state?: string; digest?: string; proposal?: { bytes: string; targetHead: string; digest: string }; error?: string };
+    assert.deepEqual(violations(body, declaredBody("/v1/products/runner-config-preview", "GET", response.status)), []);
+    assert.deepEqual(files(), before, "every HTTP call preserves product and journal bytes");
+    return { status: response.status, body, headers: response.headers };
+  };
+  assert.equal((await get(null)).status, 403);
+  assert.equal((await get(null, "", {}, null)).status, 401);
+  assert.equal((await get("alice", "", {}, null)).status, 409, "the verified session supplies a read grant");
+  assert.equal((await get("bob")).status, 404);
+  assert.equal((await get("alice", "", { expectedRevision: "1" })).body.error, "repository_missing");
+  assert.ok(store.transition("clerk:alice", { version: "product-intent-v1", requestId: "runner-route-bind01", id: productId,
+    expectedRevision: 1, expectedObjectiveRevision: 1, repository: binding }).ok);
+  const result = await get();
+  assert.equal(result.status, 200); assert.equal(result.body.state, "absent");
+  assert.equal(result.headers.get("cache-control"), "private, no-store");
+  const bytes = readFileSync(join(REPO_ROOT, ".remudero/mounts.yaml"), "utf8");
+  assert.equal(result.body.proposal?.bytes, bytes); assert.equal(result.body.proposal?.targetHead, head);
+  assert.equal(result.body.proposal?.digest, createHash("sha256").update(bytes).digest("hex"));
+  for (const [content, state] of [[bytes, "present"], ["broken: [", "invalid"]]) {
+    shim.addRoute({ when: `/git/trees/${head}`, stdout: JSON.stringify({ truncated: false, tree: [{ mode: "040000", type: "tree", sha: tree, path: ".remudero" }] }) });
+    shim.addRoute({ when: `/git/trees/${tree}`, stdout: JSON.stringify({ truncated: false, tree: [{ mode: "100644", type: "blob", sha: blob, path: "mounts.yaml", size: Buffer.byteLength(content!) }] }) });
+    shim.addRoute({ when: `/git/blobs/${blob}`, stdout: JSON.stringify({ encoding: "base64", content: Buffer.from(content!).toString("base64") }) });
+    const existing = await get(); assert.equal(existing.body.state, state); assert.equal(existing.body.proposal, undefined);
+  }
+  shim.addRoute({ when: "/commits/main", stderr: "unreadable head", exit: 1 });
+  assert.equal((await get()).body.state, "unreadable");
+  for (const suffix of ["&productId=duplicate", "&bytes=unsafe", "&path=elsewhere"]) assert.equal((await get("alice", suffix)).status, 400);
+  assert.equal((await get("alice", "", { expectedRevision: "9" })).status, 409);
+  assert.ok(!shim.calls().some(call => /POST|PATCH|DELETE/.test(call)), "the assembled preview never mutates its provider");
 });
 
 test("W1-T10615: the served product build operation matches the authenticated API contract", async (t) => {

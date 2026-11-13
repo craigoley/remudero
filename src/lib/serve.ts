@@ -3008,7 +3008,7 @@ function assembleServeRoutes(
     ...buildImprovementThreadRoutes({ stateDir: dirname(deps.ledgerPath) }),
     ...buildProductRoutes({ root: deps.fleetControlRoot }),
     ...buildProductResearchRoutes({ root: deps.fleetControlRoot, provider: deps.productResearchProvider, budgetUsd: deps.productResearchBudgetUsd }),
-    ...buildProductRepositoryRoutes({ root: deps.fleetControlRoot }),
+    ...buildProductRepositoryRoutes({ root: deps.fleetControlRoot, installRoot: serveRepoDir() }),
     ...buildProductDeploymentRoutes({ root: deps.fleetControlRoot }),
     ...buildProductEvaluationRoutes({ root: deps.fleetControlRoot }),
     // W1-T10615: the kick marker lands under the target's OWN daemon root, resolved through the same
