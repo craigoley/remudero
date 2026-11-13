@@ -2449,6 +2449,8 @@ export interface TaskFileRefusal {
   mainRed?: boolean;
   mainRedProbeError?: string;
   timedOut?: true;
+  reserved_id?: string;
+  id_release?: SetAsideIdRelease["id_release"];
 }
 
 export interface TaskFilesLandingResult {
@@ -2721,19 +2723,29 @@ function* taskFilesLandingSteps(
     let n = 0;
     for (const input of inputs) {
       const { relPath, content, claim, proof } = input;
-      const refuse = (reason: string, extra: Partial<TaskFileRefusal> = {}): void => void result.refused.push({ path: relPath, reason, ...extra });
+      let baseBlob: string | null | undefined;
+      const refuse = function* (reason: string, extra: Partial<TaskFileRefusal> = {}): Generator<LandingAsk, void, AskReply> {
+        let idRelease: SetAsideIdRelease | undefined;
+        if (baseBlob === null && input.newFile === true && extra.timedOut !== true && !existsSync(join(taskFilesPendingRoot(stateRoot), relPath))) {
+          idRelease = JSON.parse((yield {
+            run: () => { throw new Error("the task-file landing releases an id only under the async driver"); },
+            runAsync: async () => JSON.stringify(await releaseSetAsideTaskIdAsync(opts.gitAsync!, content, kind.branch, reason, lane, opts.log)),
+          }) as string) as SetAsideIdRelease;
+        }
+        result.refused.push({ path: relPath, reason, ...extra, ...idRelease });
+      };
       if (!relPath.startsWith(`${shardDir}/`) || !/\.ya?ml$/.test(relPath) || relPath.includes("..")) {
-        refuse(`${relPath} is not a task file under ${shardDir}`);
+        yield* refuse(`${relPath} is not a task file under ${shardDir}`);
         continue;
       }
-      const baseBlob = yield* mainBlobOf(relPath);
+      baseBlob = yield* mainBlobOf(relPath);
       if (baseBlob === null && !input.newFile) {
-        refuse(`origin/main does not hold ${relPath}; this landing takes only an edit of a task file that exists`);
+        yield* refuse(`origin/main does not hold ${relPath}; this landing takes only an edit of a task file that exists`);
         continue;
       }
       const stagedAbs = join(taskFilesPendingRoot(stateRoot), relPath);
       if (existsSync(stagedAbs)) {
-        if (readFileSync(stagedAbs, "utf8") !== content) refuse(`another edit of ${relPath} waits for its landing`);
+        if (readFileSync(stagedAbs, "utf8") !== content) yield* refuse(`another edit of ${relPath} waits for its landing`);
         continue; // the same bytes wait already
       }
       const refusedAbs = join(taskFilesRefusedRoot(stateRoot), relPath);
@@ -2744,23 +2756,26 @@ function* taskFilesLandingSteps(
         } catch {
           // The bytes alone prove the earlier refusal; only its cause is unreadable.
         }
-        refuse(`the same bytes were set aside before: ${why}`);
+        yield* refuse(`the same bytes were set aside before: ${why}`);
         continue;
       }
       const tmpFile = join(scratch, `input-${n++}`);
       writeFileSync(tmpFile, content);
       const blob = (yield* net.git(["hash-object", "-w", tmpFile], { env })).trim();
       if (blob === baseBlob) {
-        refuse(`origin/main already holds these bytes at ${relPath}`);
+        yield* refuse(`origin/main already holds these bytes at ${relPath}`);
         continue;
       }
       const verdict = yield* verdictOf([{ relPath, blob, claim, proof }]);
       if (!verdict.ok) {
-        refuse(refusalText(verdict.failures), { failures: verdict.failures, mainSha: yield* freshMain(), ...(yield* mainRedOf(verdict.failures)) });
+        yield* refuse(refusalText(verdict.failures), {
+          failures: verdict.failures, mainSha: yield* freshMain(), ...(yield* mainRedOf(verdict.failures)),
+          ...(verdict.timedOut === undefined ? {} : { timedOut: true as const }),
+        });
         continue;
       }
       if (verdict.timedOut !== undefined) {
-        refuse("the plan preflight ran out of its budget, so the file was not staged", { failures: verdict.timedOut, timedOut: true });
+        yield* refuse("the plan preflight ran out of its budget, so the file was not staged", { failures: verdict.timedOut, timedOut: true });
         continue;
       }
       writeStagedTaskFile(stateRoot, relPath, content, { baseBlob, claim, proof });
