@@ -85,7 +85,7 @@ const OPENAI_ANSWERS = [
 const microsoftReply = (answers: Record<string, unknown>) => json({ model: "served-fixture", answers, usage: { input_tokens: 101, output_tokens: 3 } });
 const MICROSOFT_ANSWERS = {
   docs_only: { type: "noul", noul: 0.9964 },
-  risk: { type: "choice", choice: "low", confidence: 0.848, probabilities: { high: 0.0759, low: 0.9141, [CANNOT_TELL_OPTION]: 0.01 } },
+  risk: { type: "choice", choice: "low", confidence: 0.848, probabilities: { high: 0.0759, low: 0.9191, [CANNOT_TELL_OPTION]: 0.005 } },
   size: { type: "score", score: 0.0707, confidence: 0.908, legend: { 0: "tiny", 1: "small", 2: "medium", 3: "large" },
     probabilities: { 0: 0.931, 1: 0.0674, 2: 0.0012, 3: 0.0003 } },
 };
@@ -178,8 +178,8 @@ test("W1-T12416 criterion 3: the Microsoft-shape backend sends questions keyed b
   assert.equal(row.outcome, "answered");
   assert.deepEqual(answer(row, "docs_only"), { name: "docs_only", outcome: "distribution", confidence: null,
     distribution: [{ option: true, probability: 0.9964 }, { option: false, probability: 1 - 0.9964 }] });
-  assert.deepEqual(answer(row, "risk"), { name: "risk", outcome: "distribution", confidence: 0.848, cannotTell: 0.01,
-    distribution: [{ option: "low", probability: 0.9141 }, { option: "high", probability: 0.0759 }] });
+  assert.deepEqual(answer(row, "risk"), { name: "risk", outcome: "distribution", confidence: 0.848, cannotTell: 0.005,
+    distribution: [{ option: "low", probability: 0.9191 }, { option: "high", probability: 0.0759 }] });
   assert.deepEqual(answer(row, "size"), { name: "size", outcome: "distribution", confidence: 0.908, score: 0.0707, distribution: [
     { option: "tiny", probability: 0.931 }, { option: "small", probability: 0.0674 }, { option: "medium", probability: 0.0012 }, { option: "large", probability: 0.0003 }] });
   const second = await askDecisionModel(config, { role: "risk", candidate: microsoftCandidate, input: INPUT, questions: QUESTIONS, env,
@@ -222,6 +222,23 @@ test("W1-T12416 criterion 4: an out-of-set or badly summed answer is rejected wi
   assert.equal(answer(badMicrosoft, "risk").outcome, "rejected");
   assert.equal(answer(badMicrosoft, "size").outcome, "rejected");
   assert.equal(answer(badMicrosoft, "docs_only").outcome, "distribution");
+  for (const [low, cannotTell, expectedSum] of [[0.6, 0.3, "0.700"], [0.88, 0.02, "0.980"]] as const) {
+    const row = await ask(microsoftCandidate, microsoftReply({ ...MICROSOFT_ANSWERS,
+      risk: { type: "choice", choice: "low", confidence: 0.8,
+        probabilities: { low, high: 0.1, [CANNOT_TELL_OPTION]: cannotTell } } }));
+    assert.deepEqual(answer(row, "risk"), { name: "risk", outcome: "rejected",
+      reason: `risk summed to ${expectedSum}, not 1` }, "cannot-tell mass cannot complete the declared-option sum");
+    assert.equal(answer(row, "docs_only").outcome, "distribution");
+    assert.equal(answer(row, "size").outcome, "distribution");
+  }
+  for (const [low, cannotTell] of [[0.9, 0], [0.895, 0.005]] as const) {
+    const row = await ask(microsoftCandidate, microsoftReply({ ...MICROSOFT_ANSWERS,
+      risk: { type: "choice", choice: "low", confidence: 0.8,
+        probabilities: { low, high: 0.1, [CANNOT_TELL_OPTION]: cannotTell } } }));
+    assert.deepEqual(answer(row, "risk"), { name: "risk", outcome: "distribution", confidence: 0.8, cannotTell,
+      distribution: [{ option: "low", probability: low }, { option: "high", probability: 0.1 }] },
+    "declared-option mass inside tolerance is preserved without normalization");
+  }
 });
 
 test("W1-T12416 criterion 5: a candidate reads its endpoint source from the decision_models row and never the worker's entry for its deployment", async (t) => {

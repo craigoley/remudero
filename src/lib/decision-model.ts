@@ -180,7 +180,7 @@ function confidenceOf(name: string, raw: Record<string, unknown>): Checked<numbe
 
 function finished(question: DecisionQuestion, mass: Checked<Mass>, raw: Record<string, unknown>, extra: { cannotTell?: number } = {}): DecisionAnswer {
   if (!mass.ok) return { name: question.name, outcome: "rejected", reason: mass.reason };
-  const all = [...mass.value.map((m) => m.probability), ...(extra.cannotTell === undefined ? [] : [extra.cannotTell])];
+  const all = mass.value.map((m) => m.probability);
   if (!summed(all)) return { name: question.name, outcome: "rejected", reason: `${question.name} summed to ${all.reduce((a, b) => a + b, 0).toFixed(3)}, not 1` };
   const confidence = confidenceOf(question.name, raw);
   if (!confidence.ok) return { name: question.name, outcome: "rejected", reason: confidence.reason };
