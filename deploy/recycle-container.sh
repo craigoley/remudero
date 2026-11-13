@@ -2594,9 +2594,20 @@ lock_run_id_field() {
     | sed -E 's/.*"([^"]*)"[[:space:]]*$/\1/' || true
 }
 
+# Device, inode and bytes of the exact lock judged by the host pid probe. An acquirer may replace
+# a dead lock while that probe runs; a new file at the same pathname must never inherit its verdict.
+inflight_lock_identity() {
+  local file="$1" inode bytes
+  if inode="$(stat -c '%d:%i' -- "${file}" 2>/dev/null)"; then :
+  else inode="$(stat -f '%d:%i' -- "${file}" 2>/dev/null)" || return 1; fi
+  bytes="$(cksum < "${file}" 2>/dev/null)" || return 1
+  [ -n "${inode}" ] && [ -n "${bytes}" ] || return 1
+  printf '%s %s' "${inode}" "${bytes}"
+}
+
 # Prints, moves aside (never deletes) and records one lock. $3 is the verdict, $4 extra reason lines.
 move_inflight_lock_aside() {
-  local f="$1" host="$2" verdict="$3" extra="${4:-}" reclaimed_dir reclaimed_path
+  local f="$1" host="$2" verdict="$3" extra="${4:-}" expected="${5:-}" current reclaimed_dir reclaimed_path
   echo "recycle-container: ${f} names host ${host}, which ${verdict}." >&2
   echo "  RECLAIMING — printed in full below before anything acts on it, never deleted:" >&2
   sed 's/^/    /' "${f}" >&2 2>/dev/null || echo "    (unreadable)" >&2
@@ -2604,6 +2615,13 @@ move_inflight_lock_aside() {
   reclaimed_dir="${INFLIGHT_DIR}/reclaimed"
   mkdir -p "${reclaimed_dir}"
   reclaimed_path="${reclaimed_dir}/$(basename "${f}").recycle-$$"
+  if [ -n "${expected}" ]; then
+    current="$(inflight_lock_identity "${f}")" || current=""
+    if [ "${current}" != "${expected}" ]; then
+      echo "  KEEP ${f}: lock changed during the host pid probe; the replacement still blocks" >&2
+      return 1
+    fi
+  fi
   mv "${f}" "${reclaimed_path}"
   printf 'reclaimed by recycle-container.sh (W1-T2556/W1-T3611/W1-T12316) pid %s at %s\nhost: %s\nverdict: %s\n%s' \
     "$$" "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" "${host}" "${verdict}" "${extra}" > "${reclaimed_path}.reason"
@@ -2611,7 +2629,7 @@ move_inflight_lock_aside() {
 }
 
 reclaim_same_host_inflight_lock() {
-  local f="$1" host="$2" slot run_id pid started start_epoch
+  local f="$1" host="$2" expected="$3" slot run_id pid started start_epoch
   slot="$(basename "${f}" .lock)"
   run_id="$(lock_run_id_field "${f}")"
   pid="$(lock_pid_field "${f}")"
@@ -2619,7 +2637,8 @@ reclaim_same_host_inflight_lock() {
   start_epoch="$(inflight_pid_start_epoch "${pid}")"
   echo "recycle-container: slot ${slot} run ${run_id:-unknown}: ${SAME_HOST_EVIDENCE}" >&2
   move_inflight_lock_aside "${f}" "${host}" "is this host; ${SAME_HOST_VERDICT}: ${SAME_HOST_EVIDENCE}" \
-    "$(printf 'pid: %s\nlock startedAt: %s\nprocess start epoch: %s\nevidence: %s\n' "${pid}" "${started}" "${start_epoch:-none, no live process}" "${SAME_HOST_EVIDENCE}")"
+    "$(printf 'pid: %s\nlock startedAt: %s\nprocess start epoch: %s\nevidence: %s\n' "${pid}" "${started}" "${start_epoch:-none, no live process}" "${SAME_HOST_EVIDENCE}")" \
+    "${expected}" || return 0
   if [ -d "$(dirname "${LEDGER_FILE}")" ]; then
     printf '{"ts":"%s","run_id":%s,"task_id":%s,"step":"recycle.inflight_reclaimed","lane":"deploy","pid":%s,"host":%s,"verdict":%s,"evidence":%s,"lock_started_at":%s,"recycle_pid":%s}\n' \
       "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" "$(recycle_json_string "${run_id:-RECYCLE-$$}")" "$(recycle_json_string "${slot}")" "${pid}" \
@@ -2630,7 +2649,7 @@ reclaim_same_host_inflight_lock() {
 
 reclaim_dead_inflight_locks() {
   [ -d "${INFLIGHT_DIR}" ] || return 0
-  local f host verdict running pid probe target_id self_host
+  local f host verdict running pid probe target_id self_host identity
   self_host="$(hostname 2>/dev/null || true)"
   # Resolved ONCE per sweep, not per lock — the RUNNING target container's own id never changes
   # mid-sweep. Empty when `${CONTAINER_NAME}` cannot be resolved at all (e.g. no container yet on a
@@ -2638,11 +2657,12 @@ reclaim_dead_inflight_locks() {
   target_id="$(docker inspect --format '{{.Id}}' "${CONTAINER_NAME}" 2>/dev/null || true)"
   for f in "${INFLIGHT_DIR}"/*.lock; do
     [ -e "${f}" ] || continue
+    identity="$(inflight_lock_identity "${f}")" || continue
     host="$(lock_host_field "${f}")"
     [ -n "${host}" ] || continue # unreadable or malformed — leave alone, still blocks
     if inflight_same_host "${host}" "${self_host}"; then
       same_host_inflight_verdict "${f}"
-      [ -z "${SAME_HOST_VERDICT}" ] || reclaim_same_host_inflight_lock "${f}" "${host}"
+      [ -z "${SAME_HOST_VERDICT}" ] || reclaim_same_host_inflight_lock "${f}" "${host}" "${identity}"
       continue # alive with its start time, or unprobeable — leave alone, still blocks
     fi
     printf '%s' "${host}" | grep -Eq "${INFLIGHT_CONTAINER_ID_RE}" || continue # host cannot be resolved — leave alone

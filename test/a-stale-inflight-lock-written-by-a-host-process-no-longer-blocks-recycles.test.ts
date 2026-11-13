@@ -85,6 +85,43 @@ function unavailableProcAndPs(probe: "error" | "absent", targetPid: number): { d
   return { dir, bashEnv, psCalls };
 }
 
+/** During the dead-pid probe, replace the probed inode through the real lock acquisition API. */
+function acquireDuringProbe(lockPath: string, childPid: number, startedAt: string) {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-t12316-race-"));
+  const bashEnv = join(dir, "bash-env");
+  const oldPath = `${lockPath}.probed-old`;
+  const marker = join(dir, "acquired");
+  const realPs = spawnSync("sh", ["-c", "command -v ps"], { encoding: "utf8" }).stdout.trim();
+  assert.ok(realPs.startsWith("/"));
+  writeFileSync(bashEnv, 'function [ { if [[ "$1" == -d && "$2" == /proc/self ]]; then return 1; fi; builtin [ "$@"; }\n');
+  writeFileSync(join(dir, "ps"), [
+    "#!/bin/sh",
+    'if [ "$1" = -e ] && [ "$2" = -o ] && [ "$3" = "pid=" ]; then',
+    '  if [ -e "$RACE_MARKER" ]; then printf "%s\\n" "$RACE_CHILD_PID"; exit 0; fi',
+    '  mv -- "$RACE_LOCK_PATH" "$RACE_OLD_PATH" || exit 7',
+    "  node --import tsx --input-type=module -e 'import { acquireInflightLock } from \"#src/lib/inflight-lock.js\"; acquireInflightLock(process.env.RACE_INFLIGHT_DIR, \"W1-T12114\", { run_id: \"W1-T12114-concurrent-live\", reclaim: false, info: { pid: Number(process.env.RACE_CHILD_PID), host: process.env.RACE_HOST, startedAt: process.env.RACE_STARTED_AT } });' || exit 8",
+    '  : > "$RACE_MARKER"',
+    "  printf '1\\n'",
+    "  exit 0",
+    "fi",
+    `exec '${realPs}' "$@"`,
+    "",
+  ].join("\n"), { mode: 0o755 });
+  return {
+    dir, bashEnv, oldPath, marker,
+    env: {
+      BASH_ENV: bashEnv,
+      RACE_LOCK_PATH: lockPath,
+      RACE_OLD_PATH: oldPath,
+      RACE_INFLIGHT_DIR: join(lockPath, ".."),
+      RACE_CHILD_PID: String(childPid),
+      RACE_HOST: HOST,
+      RACE_STARTED_AT: startedAt,
+      RACE_MARKER: marker,
+    },
+  };
+}
+
 function dockerShim(state: string, claude: string): string {
   const routes: GhShimRoute[] = [
     { when: "image inspect", stdout: "sha256:PULLEDID" },
@@ -462,6 +499,47 @@ test("W1-T12316 criteria 3 and 10: failed ps probes without /proc keep the same 
   } finally {
     child.kill();
     rmSync(probe.dir, { recursive: true, force: true });
+    rmSync(recycleCase.state, { recursive: true, force: true });
+    rmSync(janitorCase.fx.root, { recursive: true, force: true });
+  }
+});
+
+test("W1-T12316 criteria 3 and 10: concurrent acquisition during the dead-pid probe preserves the live replacement in both scripts", () => {
+  const { child, startedAt } = liveChild();
+  const oldLock = { pid: DEAD_PID, run_id: "W1-T12114-probed-old", host: HOST, startedAt: "2026-11-11T09:13:44.000Z" };
+  const recycleCase = stateWithLock("W1-T12114", oldLock);
+  const janitorCase = janitorWithLock(oldLock);
+  const recycleRace = acquireDuringProbe(recycleCase.lockPath, child.pid!, startedAt);
+  const janitorRace = acquireDuringProbe(janitorCase.lockPath, child.pid!, startedAt);
+  try {
+    const recycled = recycle(recycleCase.state, [recycleRace.dir], recycleRace.env);
+    const cleaned = runJanitor(janitorCase.fx, {
+      ...janitorRace.env,
+      RMD_CLEANUP_ONLY_TMP: "1",
+      PATH: `${janitorRace.dir}:${hostnameShim()}:${process.env.PATH ?? ""}`,
+    });
+
+    assert.ok(existsSync(recycleRace.marker), `recycle probe let a second run acquire the slot: ${recycled.stderr}`);
+    assert.ok(existsSync(janitorRace.marker), `janitor probe let a second run acquire the slot: ${cleaned.stdout}`);
+    assert.notEqual(recycled.status, 0, "the new live holder still blocks the recycle");
+    assert.match(recycled.stderr, /REFUSING — 1 lane-holding/);
+    assert.match(recycled.stderr, /lock changed during the host pid probe/);
+    assert.match(cleaned.stdout, /lock changed during the host pid probe/);
+    for (const [lockPath, inflight, oldPath, ledgerPath, step] of [
+      [recycleCase.lockPath, recycleCase.inflight, recycleRace.oldPath, join(recycleCase.state, "state", "ledger.ndjson"), "recycle.inflight_reclaimed"],
+      [janitorCase.lockPath, janitorCase.inflight, janitorRace.oldPath, janitorCase.ledgerPath, "host_cleanup.inflight_reclaimed"],
+    ]) {
+      assert.deepEqual(JSON.parse(readFileSync(oldPath!, "utf8")), oldLock, "the stale inode was the one probed");
+      const replacement = JSON.parse(readFileSync(lockPath!, "utf8")) as Lock;
+      assert.equal(replacement.pid, child.pid);
+      assert.equal(replacement.run_id, "W1-T12114-concurrent-live");
+      assert.deepEqual(reclaimedEntries(inflight!), [], "neither script moves a replacement live lock");
+      assert.equal(rowsIn(ledgerPath!).some((row) => row.step === step), false, "a lost race writes no reclaim row");
+    }
+  } finally {
+    child.kill();
+    rmSync(recycleRace.dir, { recursive: true, force: true });
+    rmSync(janitorRace.dir, { recursive: true, force: true });
     rmSync(recycleCase.state, { recursive: true, force: true });
     rmSync(janitorCase.fx.root, { recursive: true, force: true });
   }

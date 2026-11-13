@@ -2073,6 +2073,14 @@ inflight_field() {   # inflight_field <lock> <key>: the value of a quoted string
 inflight_pid() {
   grep -ao '"pid"[[:space:]]*:[[:space:]]*[0-9]*' "$1" 2>/dev/null | head -1 | sed -E 's/.*:[[:space:]]*([0-9]*)$/\1/' || true
 }
+inflight_lock_identity() {
+  local file="$1" inode bytes
+  if inode="$(stat -c '%d:%i' -- "$file" 2>/dev/null)"; then :
+  else inode="$(stat -f '%d:%i' -- "$file" 2>/dev/null)" || return 1; fi
+  bytes="$(cksum < "$file" 2>/dev/null)" || return 1
+  [ -n "$inode" ] && [ -n "$bytes" ] || return 1
+  printf '%s %s' "$inode" "$bytes"
+}
 inflight_json() { printf '"%s"' "$(printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g')"; }
 inflight_host_identity() {
   local id
@@ -2149,7 +2157,7 @@ inflight_verdict() {
   fi
 }
 reclaim_host_inflight_locks() {
-  local dir f self host slot run_id pid started owner dest ledger seen=":"
+  local dir f self host slot run_id pid started owner dest ledger identity current seen=":"
   self="$(hostname 2>/dev/null || true)"
   while IFS= read -r dir; do
     [ -n "$dir" ] && [ -d "$dir" ] && [ ! -L "$dir" ] || continue
@@ -2157,6 +2165,7 @@ reclaim_host_inflight_locks() {
     seen="$seen$dir:"
     for f in "$dir"/*.lock; do
       [ -f "$f" ] && [ ! -L "$f" ] || continue
+      identity="$(inflight_lock_identity "$f")" || { log "KEEP $f: lock identity unreadable"; continue; }
       host="$(inflight_field "$f" host)"
       if ! inflight_same_host "$host" "$self"; then log "KEEP $f: written on host ${host:-unknown}, not this host"; continue; fi
       inflight_verdict "$f"
@@ -2168,9 +2177,12 @@ reclaim_host_inflight_locks() {
         log "DRYRUN would: reclaim lock $f (slot $slot, run ${run_id:-unknown}): $INFLIGHT_EVIDENCE"
         continue
       fi
-      log "RECLAIM-LOCK $f (slot $slot, run ${run_id:-unknown}): $INFLIGHT_EVIDENCE; moved to $dest"
       sed 's/^/    /' "$f" 2>/dev/null || true
-      if ! mkdir -p -- "$dir/reclaimed" || ! mv -- "$f" "$dest"; then log "KEEP $f: could not move it to $dir/reclaimed"; continue; fi
+      if ! mkdir -p -- "$dir/reclaimed"; then log "KEEP $f: could not create $dir/reclaimed"; continue; fi
+      current="$(inflight_lock_identity "$f")" || current=""
+      if [ "$current" != "$identity" ]; then log "KEEP $f: lock changed during the host pid probe; the replacement still blocks"; continue; fi
+      if ! mv -- "$f" "$dest"; then log "KEEP $f: could not move it to $dir/reclaimed"; continue; fi
+      log "RECLAIM-LOCK $f (slot $slot, run ${run_id:-unknown}): $INFLIGHT_EVIDENCE; moved to $dest"
       printf 'reclaimed by rmd-host-cleanup.sh (W1-T12316) pid %s at %s\nhost: %s\npid: %s\nlock owner uid: %s\nlock startedAt: %s\nprocess start epoch: %s\nverdict: %s\nevidence: %s\n' \
         "$$" "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" "$host" "$pid" "${owner:-unknown}" "$started" "${INFLIGHT_START_EPOCH:-none, no live process}" \
         "$INFLIGHT_VERDICT" "$INFLIGHT_EVIDENCE" > "$dest.reason" 2>/dev/null || log "WARN $dest.reason: could not be written"
