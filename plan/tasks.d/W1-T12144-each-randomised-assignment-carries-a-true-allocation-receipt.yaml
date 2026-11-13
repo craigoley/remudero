@@ -16,7 +16,7 @@
   files:
     - src/lib/benchmark-run.ts
     - test/routing/each-randomised-assignment-carries-a-true-allocation-receipt.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "An assignment that joined a routing experiment records an allocation with the method randomized. The allocation names the experiment id, the assigned arm, the served arm, the probability of the assigned arm and the unit task"

@@ -28,7 +28,7 @@
     - test/reviews-and-detached-actions-run-as-run-children.test.ts
     - test/a-dead-dirty-fix-owner-at-the-current-head-is-reclaimed.test.ts
     - test/worker/spawn/a-review-re-admitted-after-an-unable-reviewer-avoids-that-provider.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: A detached-dispatch failure or an owner-claim decline at a head holds that PR's next dispatch only while the cause its row recorded is still observed (the named owner worktree exists and its owner is live, the fleet PAUSE is held, origin is unreadable), and the first pass that reads the cause cleared dispatches again at the same head with no new push; fixDispatchHoldAtHead no longer reads FIX_DISPATCH_FAILED_BACKSTOP or FIX_CLAIM_DECLINE_BACKSTOP, and both constants are gone

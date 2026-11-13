@@ -18,7 +18,7 @@
     - W1-T12303
   files:
     - test/w1-t5319-the-acr-login-refreshes-itself-and-escalates-when-it-cannot.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "The fixture of the file starts each script with no `timeout` and no `killSignal` of its own. A script that hangs is stopped by the bound of the runner of the whole file"

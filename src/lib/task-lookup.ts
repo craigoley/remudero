@@ -1,11 +1,13 @@
 import type { Plan, Task } from "./plan.js";
 import { planDestinationRepository } from "./plan-destination.js";
-import { readOpsCatalogSnapshotAsync, type OpsCatalogApi } from "./ops-catalog-source.js";
+import { readOpsCatalogSnapshotAsync, type OpsCatalogApi, type OpsCatalogSnapshot } from "./ops-catalog-source.js";
 import type { PlanCriteriaAtHeadResult } from "./review.js";
 
 export interface TaskLookupOptions {
   stateDir?: string;
   api?: OpsCatalogApi;
+  /** A caller that already read and pinned both catalogs can reuse that exact ops snapshot. */
+  opsSnapshot?: OpsCatalogSnapshot;
 }
 export type TaskLookupResult =
   | { outcome: "found"; task: Task & { catalog?: "public" | "ops" }; catalog: "public" | "ops"; commit?: string }
@@ -24,7 +26,7 @@ export async function findTaskInCatalogs(taskId: string, sources: TaskLookupOpti
   const destination = planDestinationRepository(sources.stateDir);
   if (destination.outcome === "off") return { outcome: "absent" };
   if (destination.outcome === "unreadable") return { outcome: "unreadable", reason: "destination-unreadable" };
-  const snapshot = await readOpsCatalogSnapshotAsync({ repository: `${destination.owner}/${destination.repo}` }, sources.api);
+  const snapshot = sources.opsSnapshot ?? await readOpsCatalogSnapshotAsync({ repository: `${destination.owner}/${destination.repo}` }, sources.api);
   if (snapshot.outcome !== "ok" || snapshot.plan === undefined) {
     return { outcome: "unreadable", reason: `ops-${snapshot.outcome}` };
   }

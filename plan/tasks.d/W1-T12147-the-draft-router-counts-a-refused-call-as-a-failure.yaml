@@ -17,7 +17,7 @@
     - src/lib/draft-routing.ts
     - src/lib/worker.ts
     - test/routing/the-draft-router-counts-a-refused-call-as-a-failure.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "The cost of one attempt for a deployment comes only from attempts that reported a cost above zero. With no such attempt the router uses the estimate, and a refused call never lowers the cost"

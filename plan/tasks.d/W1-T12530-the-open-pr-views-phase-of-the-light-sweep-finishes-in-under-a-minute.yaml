@@ -1,0 +1,72 @@
+- id: W1-T12530
+  title: "The open-PR views phase of the light sweep finishes in under a minute on a 25-PR board"
+  repo: remudero
+  depends_on: []
+  priority: 1.2
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # every light pass reads its views here; a reused read must not serve stale data
+  band_meaning: blast-radius
+  origin: operator-session#review-capacity-2026-11-13
+  plan_refs:
+    - W1-T6591
+    - W1-T6247
+    - W1-T11149
+  files:
+    - src/lib/tick-read-worker.ts
+    - src/lib/sweep.ts
+    - src/cli/commands/sweep.ts
+    - test/sweep/the-open-pr-views-phase-finishes-in-under-a-minute.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "The sweep_light.pre_review_timing row carries open_pr_view_stages_ms: the time of each stage of openPrViewSteps (the open-PR list, the ledger read, the plan read, and each hydrate stage), so the row names the slow stage"
+      proof: "grep: W1-T12530 criterion 1 in test/sweep/the-open-pr-views-phase-finishes-in-under-a-minute.test.ts"
+    - claim: "On a 25-PR fake board whose PRs, base tip and check rollups did not change since the last pass, a second buildOpenPrViewsAsync makes no per-PR GitHub read; one changed PR head causes reads for that PR only"
+      proof: "grep: W1-T12530 criterion 2 in test/sweep/the-open-pr-views-phase-finishes-in-under-a-minute.test.ts"
+    - claim: "invariant:no-stale-view — a reused per-PR result is keyed on every input its read takes (PR head SHA, base tip SHA, check-rollup digest); a change to any one of them reads again, and a stage whose input cannot be read is not reused"
+      proof: "grep: W1-T12530 criterion 3 in test/sweep/the-open-pr-views-phase-finishes-in-under-a-minute.test.ts"
+    - claim: "On a 25-PR fake board whose every GitHub read waits 200 ms, the per-PR reads of one stage run concurrently under the existing pacer, and the views phase takes less than a quarter of the serial time"
+      proof: "grep: W1-T12530 criterion 4 in test/sweep/the-open-pr-views-phase-finishes-in-under-a-minute.test.ts"
+  rationale: |
+    Building the open-PR views takes most of each light sweep pass, so reviews and merges wait for it.
+    MEASURED by the operator session, 2026-11-13 13:05-19:05Z: light-sweep passes take 5-35 min, and the open-PR views
+    phase takes 7-27 min of that.
+    READ AGAIN by the filing session from the sweep_light.pre_review_timing rows still on the host (16:24-19:22Z): 18 passes
+    after the daemon's warm-up had phase_ms.open_pr_views from 107 s to 1,619 s (median about 530 s); every other phase was
+    under 50 s. sync_on_loop_ms in the same rows was 38-303 s, so part of the phase holds the event loop. 21 PRs were open
+    at filing time.
+    READ at origin/main 51e329755:
+    - src/cli/commands/sweep.ts:1261 times the whole phase as one number (timing.measure("open_pr_views", readViews)), so a
+      row cannot say which stage is slow.
+    - src/lib/tick-read-worker.ts:2633 buildOpenPrViewsAsync runs openPrViewSteps (:2030). That generator reads the PR list
+      (:2080), the whole ledger synchronously (:2081), the main plan (:2120), then runs about ten hydrate stages in order
+      (plan-filing files, dependency identities, merge states, merge conflicts, workflow runs, supersession, review reuse,
+      scanner blockers, review-queue holds, CodeQL alerts) and one CI-failure read per PR in a loop (:2319). Each per-PR read
+      is awaited before the next starts.
+    - src/lib/sweep.ts:25560 LightPassPreReviewTiming writes the row; :25603 adds sync_on_loop_ms.
+    W1-T6591 moved these reads off the synchronous path and W1-T6247 reuses the parsed plan; both are merged, and the phase is
+    still minutes long because the reads run one after another and every pass reads every PR again.
+    CHECKED for overlap: W1-T12531 (filed beside this) changes how each GitHub read is sent, not how many are made or in what
+    order. Together they shorten the phase from both ends; neither depends on the other.
+  design: |
+    1. Measure first. Time each stage of openPrViewSteps and add the result to the pre_review_timing row as
+       open_pr_view_stages_ms ({stage: ms}). Read the rows on the live host for one hour and record in the why-file which
+       stages take the time. Steps 2 and 3 target those stages.
+    2. Run the per-PR reads inside a stage concurrently, bounded by the existing GhCallPacer (no new cap, no new limiter). The
+       pacer's rate-limit handling stays the one place that slows reads.
+    3. Reuse a per-PR stage result from the previous pass while every input that read takes is unchanged: the PR head SHA,
+       the base tip SHA, and a digest of the PR's check rollup. Keep the cache in process, one entry per PR and stage, and drop
+       entries for PRs that are no longer open. A stage whose input cannot be read reads again; nothing is reused on a guess.
+    4. If step 1 shows the ledger read (:2081) or another synchronous read is a large share, move it to the existing
+       tick-read worker or reuse the last read while the file's size and mtime are unchanged, as W1-T6247 does for the plan.
+    INVARIANT no-stale-view: a view built from a reused result equals the view a fresh read would build for the same inputs.
+    NOT IN SCOPE: the gh transport (W1-T12531); review admission (W1-T12529, W1-T2989).
+  falsifier: |
+    Clear the reuse cache before each pass and criterion 2 must fail. Leave the base tip SHA out of the key and criterion 3
+    must fail. Await each per-PR read in turn and criterion 4 must fail. Restore and all must pass.
+  note: |
+    Id W1-T12530 reserved for run-unfiled-1794597956000 with ~/rmd-work/bin/reserve-id.sh.
+    The 5-35 min and 7-27 min figures are the operator session's; the 107-1,619 s recount is from the rows still on the host.

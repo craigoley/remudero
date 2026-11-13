@@ -19,7 +19,7 @@
     - src/lib/ledger-steps.ts
     - src/run-task.ts
     - test/routing/a-routing-experiment-ends-with-a-recorded-result.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "For each live experiment the pass groups tasks by the experiment arm they were assigned. It reports each pipeline apart: build runs merged, fix rounds accepted, review verdicts that fail, median cost and median duration"
