@@ -19,7 +19,8 @@ const stopped: DaemonSummary = { attempted: [], merged: [], stopReason: "stopped
 function generationFor(n: number, plan: unknown, task: string) {
   const now = Date.now();
   return { generation: n, source: "inline", publishedAtMs: now, settledAtMs: now, facts: {
-    plan, projection: [[task, { taskId: task, merged: true, status: "merged", source: "credit" }]], openBranches: [], creditUpdates: [] } };
+    plan, projection: [[task, { taskId: task, merged: true, status: "merged", source: "credit" }]], openBranches: [], creditUpdates: [],
+    openPrViews: [{ prNumber: n, headRefName: `run-${task}-${n}` }] } };
 }
 
 /** A daemon on a temporary root. Only the read plane's thread is replaced: the early read, its use by the
@@ -128,6 +129,33 @@ test("W1-T12239 criterion 2: the first tick uses the early read and asks for no 
     assert.equal(row?.source, "early");
     assert.equal(typeof row?.first_tick_read_ms, "number");
     assert.equal(typeof row?.first_tick_read_overlap_ms, "number");
+  } finally {
+    f.cleanup();
+  }
+});
+
+test("W1-T12239: the boot review takes the open pull request views of the early read (W1-T12236)", async () => {
+  const f = fixture();
+  let views: ((scope?: { reviewOnly: boolean; scope?: string }) => Promise<unknown[]> | undefined) | undefined;
+  try {
+    assert.equal(await f.run({
+      buildSweepLightHook: ((...args: unknown[]) => {
+        views = (args.at(-1) as { openPrViews?: typeof views } | undefined)?.openPrViews;
+        return async () => {};
+      }) as never,
+      runDaemon: async (plan, deps: DaemonDeps) => {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        await deps.refreshMergedAsync!(plan);
+        assert.equal(f.reads.length, 1, "the first tick used the early read");
+        const boot = await views?.({ reviewOnly: true, scope: "boot" });
+        assert.deepEqual(boot?.map((view) => (view as { prNumber: number }).prNumber), [1], "the boot review has the early read's views");
+        await deps.refreshMergedAsync!(plan);
+        const later = await views?.({ reviewOnly: true, scope: "boot" });
+        assert.deepEqual(later?.map((view) => (view as { prNumber: number }).prNumber), [2], "a later tick serves its own read");
+        return stopped;
+      },
+    }), 0);
+    assert.ok(views, "positive control: the daemon gave the light sweep a views port");
   } finally {
     f.cleanup();
   }

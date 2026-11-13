@@ -1358,8 +1358,16 @@ export async function daemonCommand(
   const readTick = readPlane && planReaders.tickRead(readPlane.read);
   const checkStop = deps.checkStop ?? (() => stopDetail(config.root));
   // A loop that ends before its first read (max 0, or STOP at the start) gets no early read.
-  const firstTickRead = readTick && (opts.max === 0 || checkStop() ? readTick
-    : firstTickReadOf(readTick, plan, log, clockFromMillisFn(deps.now)));
+  const earlyRead = readTick !== undefined && opts.max !== 0 && !checkStop();
+  // The first tick counts the early read as its own, so the boot review (W1-T12236) takes its views.
+  let earlyReadStartedAtMs = earlyRead ? systemClock.now() : undefined;
+  const firstTickRead = readTick
+    && (earlyRead ? firstTickReadOf(readTick, plan, log, clockFromMillisFn(deps.now)) : readTick);
+  const tickStartStamp = (): number => {
+    const stamp = earlyReadStartedAtMs ?? systemClock.now();
+    earlyReadStartedAtMs = undefined;
+    return stamp;
+  };
 
   // W1-T414: ONE batched read for this whole `rmd daemon` invocation — see drainCommand's
   // identical wiring/doc just above. Resolved AFTER the `--dry-run` early return above (never
@@ -1940,7 +1948,7 @@ export async function daemonCommand(
         refreshMerged,
         refreshMergedAsync: firstTickRead ? buildDaemonReadRefresher({
           read: firstTickRead, plan: () => activePlanRef.current, previous: () => lastProj,
-          invalidate: () => { tickReadGeneration = undefined; tickReadStartedAtMs = systemClock.now(); },
+          invalidate: () => { tickReadGeneration = undefined; tickReadStartedAtMs = tickStartStamp(); },
           publish: (snapshot: ReadGeneration<TickReadFacts>) => {
             tickReadGeneration = snapshot;
             lastProj = new Map(snapshot.facts.projection);
