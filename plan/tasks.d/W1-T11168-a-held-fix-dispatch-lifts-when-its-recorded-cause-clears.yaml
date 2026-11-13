@@ -60,6 +60,7 @@
     path, not the hold's own retry. The sibling item 5b, W1-T11169 (stale fix seeds), is a different hold, the dedup on a dead daemon's seed.
   design: |
     Prior behavior inventory: the sweep wrote failed-dispatch and owner-claim-decline rows, then `sweep.disposed` carried the held/acted result; two fixed-count backstops were the legacy retry receipt. The no-history default was one sweep cadence; unreadable or omitted fleet/owner probes could release or retain a hold inconsistently. Dispatch and escalation are the public effects; a refused dispatch spends no fix round and pushes no branch.
+    NO-INVARIANTS: the filed acceptance criteria are the complete contract; the count-based retry and hold receipt behavior is intentionally replaced below.
     1. CAUSE. Classify each failure and decline row's recorded reason into a cause with a probe where one exists: owner-held
        (worktree_path present, and its owner pid or claim live; the claim path's existing owner census), fleet-held (PAUSE held,
        origin unreadable; the existing workerAdmissionHoldReason and FLEET_PAUSE_REFUSAL reads), or unprobed (anything else,
