@@ -73,6 +73,34 @@ test("W1-T12205 criterion 2: sync and gardener-shaped async proof readers use th
   assert.deepEqual(seen, [f.code.dir, f.code.dir]);
 });
 
+test("ops status body proofs run from the candidate plan while the public checkout supplies the proof runner", async t => {
+  const f = fixture(t);
+  const marker = "OPS_STATUS_SENTINEL_18306";
+  put(join(f.plan.dir, "plan/tasks.yaml"), `- id: ${marker}\n  status: merged\n`);
+  f.plan.git("add", "plan/tasks.yaml"); f.plan.git("commit", "-qm", "ops status candidate");
+  const head = f.plan.git("rev-parse", "HEAD");
+  assert.equal(f.plan.git("show", "origin/main:plan/tasks.yaml").includes(marker), false);
+  assert.equal(f.plan.git("show", `${head}:plan/tasks.yaml`).includes(marker), true);
+  const input = { cwd: f.plan.dir, title: "chore(plan): fixture", body: `Acceptance:\n- ops status is visible | grep: ${marker} in plan/tasks.yaml\n`,
+    codeRoot: REPO_ROOT, bodyProofRoot: "plan" as const };
+  const checks = { lintPlan: GREEN, taskIdExistence: GREEN, shardCensus: GREEN };
+  const directSync = planPrPreflight(input, checks);
+  assert.equal(directSync.ok, true, JSON.stringify(directSync));
+  const direct = await planPrPreflightAsync(input, asAsyncChecks(checks));
+  assert.equal(direct.ok, true, JSON.stringify(direct));
+  assert.deepEqual(direct.unreadable, []);
+  const committedSync = planPrPreflightAtCommit(f.plan.dir, head,
+    { title: input.title, body: input.body, codeRoot: input.codeRoot, bodyProofRoot: input.bodyProofRoot }, checks);
+  assert.equal(committedSync.ok, true, JSON.stringify(committedSync));
+  const committed = await planPrPreflightAtCommitAsync(f.plan.dir, head,
+    { title: input.title, body: input.body, codeRoot: input.codeRoot, bodyProofRoot: input.bodyProofRoot }, asAsyncChecks(checks));
+  assert.equal(committed.ok, true, JSON.stringify(committed));
+  assert.deepEqual(committed.unreadable, []);
+  const wrongRoot = await planPrPreflightAsync({ ...input, bodyProofRoot: "code" }, asAsyncChecks(checks));
+  assert.equal(wrongRoot.ok, false, JSON.stringify(wrongRoot));
+  assert.ok(wrongRoot.failures.some(failure => failure.check === "proof-discrimination"));
+});
+
 test("W1-T12205 criterion 2: the actual task-ID CLI resolves declarations in both catalogs without a second namespace", async t => {
   const f = fixture(t); const origin = gitRepo({ bare: true, scope: t }); const opsOrigin = gitRepo({ bare: true, scope: t });
   f.code.addRemote("origin", origin.dir); f.plan.addRemote("origin", opsOrigin.dir);
