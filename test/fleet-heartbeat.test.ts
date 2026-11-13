@@ -811,7 +811,7 @@ test("W1-T2767: the REAL df leaf runs and reports this host's actual root filesy
   // NO dfStub — the default implementation executes. Without this the seam's real leaf is never
   // exercised and only the fakes above are ever proven (CLAUDE.md's all-fakes trap), which is
   // exactly how a reading that measures the wrong device survives a green suite.
-  const beat = runBeat();
+  const beat = runBeat({ env: { HIGH_WATER: "85", RMD_CLEANUP_WATCH_FS: "" } });
   assert.equal(beat.status, 0, beat.stderr);
 
   const rootKb = field(beat.published, "root_fs_free_kb");
@@ -822,6 +822,10 @@ test("W1-T2767: the REAL df leaf runs and reports this host's actual root filesy
   assert.match(String(rootKb), /^[0-9]+$/, `real df must yield a numeric block count, got ${rootKb}`);
   assert.ok(Number(rootKb) > 0, "a mounted root filesystem has non-zero available blocks");
   assert.ok(String(rootDev).length > 0 && rootDev !== "unknown", `real df must name a device, got ${rootDev}`);
+  const reserve = field(beat.published, "root_fs_reserve_kb");
+  assert.equal(reserve, process.platform === "linux"
+    ? String(Math.floor(Number(field(beat.published, "root_fs_total_kb")) * 15 / 100))
+    : "unknown", "the native disk reading also supplies its janitor reserve");
   assert.match(String(minKb), /^[0-9]+$/, "the minimum over readable devices is numeric");
   assert.ok(Number(minKb) <= Number(rootKb), "the minimum never exceeds a device it is taken over");
 });
