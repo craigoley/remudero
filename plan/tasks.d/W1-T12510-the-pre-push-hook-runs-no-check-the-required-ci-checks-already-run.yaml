@@ -17,6 +17,15 @@
   files:
     - hooks/pre-push
     - test/ci/the-pre-push-hook-runs-no-check-the-required-ci-checks-already-run.test.ts
+    - test/a-branch-delete-push-runs-no-content-gate.test.ts
+    - test/a-census-this-branch-grows-is-refused-before-the-push.test.ts
+    - test/census-precheck-counts-the-house-layout-ratchet.test.ts
+    - test/ci/gates/ci-friction-remedy-5fd7bbef9be02369.test.ts
+    - test/dependency-declarations-match-use.test.ts
+    - test/github/a-managed-worktree-push-measures-its-reader-suites.test.ts
+    - test/prepush-lints-a-plan-diff.test.ts
+    - test/the-harness-pre-push-gate-runs-no-worktree-code.test.ts
+    - test/the-pre-push-gate-runs-the-branch-s-own-checks-in-the-proof-sandbox.test.ts
   status: queued
   attempts: 0
   acceptance:
@@ -49,6 +58,10 @@
     2. Print one line: "pre-push: census suites and plan lint run in CI (ci.yml ci-shard and lint-plan, aggregated by ci-gate)".
     3. Keep every other block, its order and its exit codes.
     4. Update any test that asserts the hook spawns either removed script; list each in the why-file.
+    AMENDED 2026-11-13: step 4 names nine test files outside `files`. Each copies hooks/pre-push and asserts that a push runs
+    the census precheck or the plan lint. A test that judged the script itself now runs the script directly, as the author
+    preflight runs census-precheck and plan-pr-emitter runs lint-plan-precheck. A test that judged the hook now asserts the
+    hook starts neither. These nine files are added to `files`.
     NO-INVARIANTS: a removal of two copies; criterion 2 pins what stays.
     NOT IN SCOPE: the author preflight's census precheck; the commit-time proposal of W1-T7741.
   falsifier: |
