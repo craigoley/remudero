@@ -247,8 +247,11 @@ function srcTree(dir: string, out = new Map<string, string>()): Map<string, stri
 let scanned: Map<string, Set<string>> | undefined;
 const srcPricedSteps = (): Map<string, Set<string>> => (scanned ??= stepsWrittenWithAPrice(srcTree("src")));
 
-test("test/every-priced-ledger-step-is-in-the-config-garden-read.test.ts: every ledger step written with pr_url or cost_usd is in CONFIG_GARDEN_LEDGER_STEPS or a reasoned exemption", () => {
+test("W1-T11503 criterion 3: the priced-step census accounts for the direct-merge receipt", () => {
   const found = srcPricedSteps();
+  assert.ok(found.has("daemon.direct_merge_unresolved"), "the census finds the freshness exit's direct-merge receipt");
+  assert.equal(EXEMPT["daemon.direct_merge_unresolved"], A_LANE_RUN_ID,
+    "the daemon's direct-merge receipt has its reasoned lane-run exemption");
   // Positive control: the known members, and one step per idiom, so a scanner that finds nothing fails.
   for (const known of ["pr.opened", "implement.done", "cost.anomaly", "verdict.merged", "refusal_amendment.drafted"]) {
     assert.ok(found.has(known), `the census reads ${known} out of src`);
