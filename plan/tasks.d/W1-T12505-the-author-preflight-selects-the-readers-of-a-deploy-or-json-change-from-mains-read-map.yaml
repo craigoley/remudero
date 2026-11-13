@@ -21,19 +21,24 @@
     - src/lib/affected-suites.ts
     - doctrine/before-you-push/preflight-before-first-push.md
     - test/ci/the-author-preflight-selects-the-readers-of-a-deploy-or-json-change-from-mains-read-map.test.ts
+    - test/read-map-descriptors-are-lifecycle-bound.test.ts
+    - test/read-map-unobserved-descendants.test.ts
+    - src/lib/review.ts
   status: queued
   attempts: 0
   acceptance:
-    - claim: "coverage-nightly.yml builds an `rmd-read-map-v2` file for the commit it tested and uploads it as the `read-map` artifact, beside the `test-impact-map` artifact. scripts/build-read-map.mjs merges the per-suite records with `readReadRecords` and `buildReadMap`. A build that fails or passes its time bound uploads no map and does not fail the job"
+    - claim: "coverage-nightly.yml records each suite's reads in a `read-map-shards` matrix job (the eight shards, uninstrumented, RMD_READ_MAP_DIR set) and builds an `rmd-read-map-v2` file for the commit it tested in a `read-map` job, uploaded as the `read-map` artifact beside the `test-impact-map` artifact. scripts/build-read-map.mjs merges the records with `readReadRecords` and `buildReadMap`. A red shard uploads no records, a build that fails or passes its time bound uploads no map, and both jobs are continue-on-error, so the floor run, its ratchet and the notify job run as before"
       proof: "grep: W1-T12505 criterion 1 in test/ci/the-author-preflight-selects-the-readers-of-a-deploy-or-json-change-from-mains-read-map.test.ts"
-    - claim: "scripts/preflight-author.mjs reads the newest `read-map` artifact of a successful coverage-nightly run on main into a cache file, within a bounded time, and passes `readReadMapInput(root, mapPath, base)` to the selector as `readMap`. This is the first production caller of `readReadMapInput`"
+    - claim: "When a changed path is a read-mapped path, scripts/preflight-author.mjs reads the newest `read-map` artifact of a successful coverage-nightly run on main into a cache file, within a bounded time, and passes `readReadMapInput(root, mapPath, base)` to the selector as `readMap`. This is the first production caller of `readReadMapInput`"
       proof: "grep: W1-T12505 criterion 2 in test/ci/the-author-preflight-selects-the-readers-of-a-deploy-or-json-change-from-mains-read-map.test.ts"
-    - claim: "With a usable map, a change to deploy/recycle-container.sh selects the suites the map records as its readers, plus the changed tests and the modelled rest. The receipt selection is not `full-fallback` and names the map's sha"
+    - claim: "With a map in which suites have unknown descriptor coverage (the corpus today: a suite that starts a child process is unknown), a change to deploy/recycle-container.sh selects the suites the map records as its readers, the unknown-coverage suites that name the path, its file name or a directory above it, plus the changed tests and the modelled rest. The receipt selection is not `full-fallback` and names the map's sha"
       proof: "grep: W1-T12505 criterion 3 in test/ci/the-author-preflight-selects-the-readers-of-a-deploy-or-json-change-from-mains-read-map.test.ts"
-    - claim: "A map that is missing, cannot be fetched, is not an ancestor of the base, is past IMPACT_MAP_STALENESS_BOUND, or has a suite with unknown descriptors gives the selection of today, and the receipt names the reason from `readMapProblem`"
+    - claim: "A map that is missing, cannot be fetched, is not an ancestor of the base, or is past IMPACT_MAP_STALENESS_BOUND gives the selection of today, and the receipt names the reason from `readMapProblem`. A changed root-level or dot-directory path, while any suite has unknown coverage, forces a full run, and the reason from `readMapPathProblem` names the path"
       proof: "grep: W1-T12505 criterion 4 in test/ci/the-author-preflight-selects-the-readers-of-a-deploy-or-json-change-from-mains-read-map.test.ts"
     - claim: "invariant:read-map-only-narrows-the-author — the read map changes only the author preflight's selection; ci.yml's selection and every required check run as before"
       proof: "grep: W1-T12505 criterion 5 in test/ci/the-author-preflight-selects-the-readers-of-a-deploy-or-json-change-from-mains-read-map.test.ts"
+    - claim: "invariant:no-narrowing-past-unknown-reader — a suite with unknown descriptor coverage that names a changed read-mapped path, its file name or a directory above it, itself or through a test/ file it imports, is always selected"
+      proof: "grep: W1-T12505 criterion 6 in test/ci/the-author-preflight-selects-the-readers-of-a-deploy-or-json-change-from-mains-read-map.test.ts"
   rationale: |
     The author preflight runs every suite for a change to a deploy/ file or a json file, because no read map is ever passed to it.
     READ at origin/main 6cf453f7a:
@@ -52,27 +57,66 @@
     (deploy/recycle-container.sh 7, deploy/rmd-host-cleanup.sh 2, deploy/install-host-units.sh 1, deploy/host-recycle-lock.sh 1).
     W1-T9953 cuts a full fallback to a partial set, but that set follows only the import graph, so a shell script or a json
     file has no readers in it.
+    AMENDED 2026-11-13 (the hand build found this before it wrote code): `readMapProblem` (:219) refuses the WHOLE map when
+    any suite has unknown descriptor coverage, and test/setup/read-map.ts marks a suite unknown, for good, on any
+    exec/execFile/spawn/fork call. MEASURED at ecd94c0da: a static grep finds at least 2,376 of 4,628 suites that spawn,
+    directly or through a helper, and 64 of the 74 suites that name deploy/recycle-container.sh spawn it. Two deploy readers
+    run through the real preload (test/git-author-commissioning.test.ts, which read 33 deploy/ files, and
+    test/repositories-from-the-read-model.test.ts, which spawns nothing itself) both wrote `unknownDescriptors: true`.
+    So a map built from a full run is always refused, and the first design would only change the fallback's reason.
+    The operator session chose per-path narrowing: the unknown suites that may read the changed path are selected, and
+    the map speaks for the rest. MEASURED on the real tree with every suite unknown: the naming rule of design step 4
+    selects 642 of 4,629 suites for deploy/recycle-container.sh (236 name the path or deploy/; the file name and the
+    quoted "deploy" segment add the rest). Walking the src/ import closure instead reaches 4,076, no narrower than the
+    full run, because src/lib/daemon.ts and src/lib/config.ts name deploy/ files.
+    W1-T12523 closes the residual gap: it records child processes' reads into the parent suite's record.
     CHECKED for overlap on origin/main plan/tasks.d and open pull request heads: W1-T10435 (queued) is a parked research
     report on platform-aware shadows; W1-T11916 (queued) adds run-time tree walkers to the narrow arm. Neither produces or
     reads a read map. No open pull request files a task on this subject.
   design: |
     1. Add scripts/build-read-map.mjs: read the record directory with `readReadRecords`, build with `buildReadMap(records, { sha })`,
        write the map. It exits non-zero when any record problem is found, so no partial map is written.
-    2. In coverage-nightly.yml, beside the W1-T6107 step: run the shards' suites with RMD_READ_MAP_DIR set (the existing hook,
-       test/setup/read-map.ts, loaded with --import), then build and upload `read-map` (retention 14 days,
-       if-no-files-found: ignore). A failed or late build is reported in the step summary and never fails the job.
-    3. In scripts/preflight-author.mjs, fetch the newest `read-map` artifact of a successful coverage-nightly run on main
-       (the same `gh run download` call ci.yml:1844 makes) into a cache under the author's scratch dir, bounded to 60 s.
-       Pass `readReadMapInput(root, mapPath, base)` into `readAffectedSuitesInput`'s `extra` as `readMap`. Add `readMap` to
-       that `extra` type in src/lib/affected-suites.ts.
-    4. Change no selector rule: `readMapProblem` keeps every refusal it has today, including unknown descriptors and the
-       staleness bound. A fetch failure is a `mapProblem`.
+    2. In coverage-nightly.yml, after the merge job: a `read-map-shards` job runs ci.yml's eight shards (`--select-all
+       --shard n/8`) without coverage, with RMD_READ_MAP_DIR and RMD_READ_MAP_ROOT set (the existing hook,
+       test/setup/read-map.ts, loaded by test/setup/tmp-hygiene.ts). A shard whose suite exits non-zero uploads no
+       records, so its suites are absent from the map and the selector picks them for every read-mapped change. A
+       `read-map` job downloads the records, builds the map within a 5-minute bound and uploads `read-map` (retention 14
+       days, if-no-files-found: ignore). Both jobs are continue-on-error; a failed or late build is reported in the step
+       summary. The `shards`, `merge` and `notify` jobs do not change.
+    3. In scripts/preflight-author.mjs, only when a changed path is a read-mapped path (`isReadMappedPath`), fetch the
+       newest `read-map` artifact of a successful coverage-nightly run on main (the `gh run list` and `gh run download`
+       calls ci.yml:1838-1844 makes) into a cache under the author's tmp dir, bounded to 60 s in all. Pass
+       `readReadMapInput(root, mapPath, base)` into `readAffectedSuitesInput`'s `extra` as `readMap`; a fetch failure
+       is a `mapProblem`. Add `readMap` to that `extra` type in src/lib/affected-suites.ts. The receipt carries
+       `readMapSha` when the map spoke, and `readMapFallback` when it did not.
+    4. PER-PATH, in src/lib/affected-suites.ts. `readMapProblem` keeps its whole-map refusals (missing, malformed, not an
+       ancestor, past the staleness bound) and no longer refuses the whole map because some suite has unknown descriptor
+       coverage. A new `readMapPathProblem(map, path)` refuses one changed path: a root-level path, or one with a
+       dot-directory segment, while any suite has unknown coverage (a child tool reads such files, such as package.json,
+       without naming them). `fullRunTrigger` takes a per-path test. For each other changed read-mapped path the
+       selector picks, beside the observed readers and listers and the existing absent, changed-since-map and spawner
+       rules, every suite with unknown coverage (on the map's `unknownDescriptorSuites`, or a spawner) whose text, or the
+       text of a test/ file it imports, names the path, its file name, or a directory above it (as `dir/` or as a quoted
+       segment).
     5. Update the doctrine sentence that says configuration and fixture changes fall back to every suite, for deploy/ and json.
+    6. test/read-map-descriptors-are-lifecycle-bound.test.ts and test/read-map-unobserved-descendants.test.ts assert the
+       whole-map refusal by `readMapProblem`; they assert the per-path refusal instead. Their record and hook assertions
+       do not change.
+    7. scripts/build-read-map.mjs is a script a workflow runs, so test/instrument-surface-completeness.test.ts asks for
+       it in src/lib/review.ts. It goes in INSTRUMENT_SURFACE_EXCLUSIONS with its reason (no CI gate reads the read map),
+       with no new comment lines (review.ts has a comment cap).
+    8. The author preflight fetches the map only when a changed read-mapped path is nested and has no dot-directory
+       segment: the nightly map always holds unknown suites, so it can never narrow a root-level or dot-directory path.
     INVARIANT read-map-only-narrows-the-author: the read map changes only the author preflight's selection; ci.yml's
     selection and every required check run as before.
-    NOT IN SCOPE: test/helpers, .remudero and hooks paths (a separate task); the impact arm; any change to CI's selection.
+    INVARIANT no-narrowing-past-unknown-reader: a suite whose reads are unknown and that names the changed path, its file
+    name or a directory above it, itself or through a test/ file it imports, is never left out of that path's selection.
+    NOT IN SCOPE: test/helpers, .remudero and hooks paths (a separate task); the impact arm; any change to CI's selection;
+    recording child processes' reads (W1-T12523).
   falsifier: |
-    Drop the `readMap` argument and criterion 3 must fail. Accept a map with an unknown-descriptor suite and criterion 4 must
-    fail. Fail the nightly job on a build error and criterion 1 must fail. Restore and require all five to pass.
+    Drop the `readMap` argument and criterion 3 must fail. Drop the unknown-coverage naming rule and criterion 6 must fail.
+    Let a root-level json path narrow past an unknown suite and criterion 4 must fail. Fail the nightly job on a build
+    error and criterion 1 must fail. Restore and require all six to pass.
   note: |
     Id W1-T12505 reserved for run-unfiled-1794582098000 with ~/rmd-work/bin/reserve-id.sh.
+    Amended by the hand build on plan-amend-W1-T12505-1794589154000 (per-path narrowing, operator session decision).
