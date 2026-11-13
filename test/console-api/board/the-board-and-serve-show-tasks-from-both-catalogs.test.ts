@@ -92,7 +92,7 @@ test("W1-T12211 criterion 1 / criterion 6: real serve reload composes both catal
   assert.doesNotMatch(renderStatusBoardText(model), new RegExp(secret));
 });
 
-test("W1-T12211 criterion 2 / criterion 3: actual public board whitelists ops fields and labels catalog", async () => {
+test("W1-T12211 criterion 2 / W1-T12211 criterion 3: actual public board whitelists ops fields and labels catalog", async () => {
   const h = host(), fx = source(privateRecord()), board = { plan: publicPlan(), ledgerPath: h.ledgerPath };
   await reloadServePlan(board, "/unused-public-checkout", "a".repeat(40), { read: async () => ({ plan: publicPlan(), quarantined: [] }), opsCatalogApi: fx.api });
   const snapshot = computeBoardSnapshot({ ...board, github: fakeGitHub({}), readLedger: () => [], now: () => 0 });
