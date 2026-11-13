@@ -3970,6 +3970,25 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
       if (typeof ownerPath !== "string" || typeof branch !== "string" || typeof taskId !== "string") return false;
       const failed = revalidatedOwnerPreservation(decline.owner_recovery_reason);
       if (failed && (branch !== pr.headRefName || taskId !== fixLedgerTaskIdFor(pr))) return false;
+      // `capture` intentionally returns before its claim/process probes when the checkout is
+      // detached or belongs to another task. That is useful for dirty-tree recovery decisions,
+      // but `process_cwd_owner` is a liveness cause: branch attachment cannot make a live owner
+      // disappear or keep a dead one alive. Probe its claim and cwd directly in that case.
+      if (!failed && decline.owner_recovery_reason === "process_cwd_owner") {
+        const lockPath = inflightLockPath(inflightDir, fixBranchClaimKey(owner, repo, branch));
+        let claimClear = false;
+        try {
+          const holder = parseInflightLockInfo(readFileSync(lockPath, "utf8"));
+          claimClear = holder !== null &&
+            (fixRoundClaimEnded(ledgerPath, holder.run_id) || isHolderStale(holder, { isPidAlive: defaultIsPidAlive }));
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === "ENOENT") claimClear = true;
+          else log("sweep.fix.owner_claim_probe_unreadable", { pr_number: pr.prNumber,
+            head_sha: pr.headSha, worktree_path: ownerPath, reason: String(error) });
+        }
+        if (!claimClear) return false;
+        return ownerProcessCwdCensusImpl(ownerPath).state === "clear";
+      }
       try {
         const snapshot = registeredOwnerRecovery.capture({
           repoDir, worktreesRoot: worktreesDir(config), ownerPath, taskId, branch,
@@ -3981,9 +4000,8 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         // The claim path failed after preserving the bytes. Only a new claim attempt can prove
         // that clearStaleDirty now succeeds; preservation alone cannot clear that failure.
         if (decline.owner_recovery_reason === "owner_stale_dirty_reset_failed") return false;
-        if (!failed && snapshot.pathState === "managed" &&
-            (decline.owner_recovery_reason === "process_cwd_owner" ||
-              (snapshot.historyState === "unknown" && snapshot.attachmentState === "exact"))) {
+        if (!failed && snapshot.pathState === "managed" && snapshot.historyState === "unknown" &&
+            snapshot.attachmentState === "exact") {
           const lockPath = inflightLockPath(inflightDir, fixBranchClaimKey(owner, repo, branch));
           let claimClear = false;
           try {
@@ -14897,9 +14915,9 @@ function dispatchFailureCause(row: Record<string, unknown>): string {
 }
 
 function fixDispatchSuccess(row: Record<string, unknown>, pr: OpenPrView): boolean {
+  if (isProofAmendmentIdentityRow(row)) return false;
   return (row.step === "fix.dispatch" || row.step === "fix.retrigger") &&
-    (row.pr_number === pr.prNumber || (row.pr_number === undefined && pr.taskId !== undefined && row.task_id === pr.taskId) ||
-      (row.pr_number === undefined && pr.taskId === undefined && row.head_sha === pr.headSha));
+    (row.pr_number === pr.prNumber || (row.pr_number === undefined && row.task_id === fixLedgerTaskIdFor(pr)));
 }
 
 function medianDispatchWait(values: number[]): number | undefined {
@@ -14935,7 +14953,7 @@ function* fixDispatchHoldAtHeadSteps(
   const nextSuccess = new Map<string, number>();
   const prForTask = new Map<string, number>();
   const prsForHead = new Map<string, Set<number>>();
-  if (pr.taskId !== undefined) prForTask.set(pr.taskId, pr.prNumber);
+  prForTask.set(fixLedgerTaskIdFor(pr), pr.prNumber);
   const associateHead = (headSha: unknown, prNumber: unknown) => {
     if (typeof headSha !== "string" || typeof prNumber !== "number") return;
     const owners = prsForHead.get(headSha) ?? new Set<number>();
@@ -14953,7 +14971,7 @@ function* fixDispatchHoldAtHeadSteps(
     if (!Number.isFinite(stamp(row))) continue;
     const prKey = `pr:${row.pr_number}`;
     const taskKey = `task:${row.task_id}`;
-    if (row.step === "fix.dispatch" || row.step === "fix.retrigger") {
+    if ((row.step === "fix.dispatch" || row.step === "fix.retrigger") && !isProofAmendmentIdentityRow(row)) {
       if (typeof row.pr_number === "number") nextSuccess.set(prKey, stamp(row));
       else if (typeof row.task_id === "string") {
         nextSuccess.set(taskKey, stamp(row));

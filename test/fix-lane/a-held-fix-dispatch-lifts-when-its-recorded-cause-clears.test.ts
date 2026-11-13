@@ -123,7 +123,7 @@ test("a production owner probe releases a recorded process owner when its claim 
         censusCalls++;
         return census;
       },
-      registeredOwnerRecovery: { capture: () => ({ path: ownerPath, pathState: "managed",
+      registeredOwnerRecovery: { capture: () => ({ path: ownerPath, pathState: "foreign",
         attachmentState: "exact", treeState: "clean", remoteState: "exact", historyState: "unknown",
         claimState: "unknown", processState: "unknown", ageMs: 1000, localSha: pr.headSha,
         remoteSha: pr.headSha }), remove: () => {} } } as never);
@@ -185,14 +185,26 @@ test("W1-T11168 criterion 2: ledger median, doubling, success reset and one-pass
   assert.equal(hold(hosted)?.fields.backoff_ms, 200,
     "a hosted-child SWEEP task id joins the successful task-id-only dispatch by PR");
   const tasklessPr = { ...pr, taskId: undefined };
+  const tasklessIdentityRows = [
+    { ...failure(NOW - 1000), task_id: "DAEMON-1" },
+    { step: "fix.dispatch", task_id: `PR-${pr.prNumber}`, head_sha: pr.headSha, ts: at(NOW - 100) },
+    { ...failure(NOW), task_id: "SWEEP-2" },
+    { step: "sweep.disposed", pr_number: pr.prNumber + 1, head_sha: pr.headSha, ts: at(NOW) },
+  ];
+  assert.equal(fixDispatchHoldAtHead(tasklessPr, tasklessIdentityRows, () => true, undefined,
+    options())?.fields.backoff_ms, 900,
+  "PR-number task identity associates a taskless success even when another PR shares the head");
+  const proofAmendmentRows = [failure(NOW - 1000), dispatch(NOW - 900, { kind: "proof_amendment" }), failure(NOW)];
+  assert.equal(hold(proofAmendmentRows)?.fields.backoff_ms, 200,
+    "a proof-amendment identity row neither resets consecutive failures nor supplies a wait sample");
   const hostedSuccessWithoutPrNumber = [
     { ...failure(NOW - 300), task_id: "SWEEP-123" },
-    { step: "fix.dispatch", task_id: "W1-T9796", head_sha: pr.headSha, ts: at(NOW - 100) },
+    { step: "fix.dispatch", task_id: `PR-${pr.prNumber}`, head_sha: pr.headSha, ts: at(NOW - 100) },
     { ...failure(NOW), task_id: "DAEMON-456" },
   ];
   assert.equal(fixDispatchHoldAtHead(tasklessPr, hostedSuccessWithoutPrNumber, () => true, undefined,
     options())?.fields.backoff_ms, 200,
-  "a success without pr_number joins an earlier hosted failure by the uniquely observed PR head");
+  "a success without pr_number joins an earlier hosted failure by the taskless PR's PR-number task identity");
   const preserveFailure = { step: "sweep.fix.checkout_claim_declined", task_id: pr.taskId,
     pr_number: pr.prNumber, head_sha: pr.headSha, worktree_path: "/worktrees/sweep-W1-T9796-1",
     reason: "registered_worktree_owner",
