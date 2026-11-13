@@ -18,7 +18,7 @@
     - src/lib/progress-watchdog.ts
     - deploy/install-host-units.sh
     - test/deploy/the-host-watchdog-does-not-report-healthy-while-the-daemon-loop-is-stopped.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "The watchdog tick prints the word healthy only when the progress verdict is PROGRESSING or IDLE with the action none. For any other verdict the line names the state and the action"

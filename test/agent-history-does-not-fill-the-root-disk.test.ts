@@ -48,7 +48,8 @@ function writeDockerStub(dir: string): void {
     '    case "$STUB_MODE" in live) echo c0ffee ;; esac; exit 0 ;;',
     "  inspect)",
     '    case "$STUB_MODE" in',
-    '      live) echo "/ad-hoc|rmd-local:latest|/home/node/Remudero " ;;',
+    // W1-T12495: the open-file check asks for the container's user and mounts.
+    '      live) case "$*" in *Config.User*) echo "$(id -u):$(id -u)|" ;; *) echo "/ad-hoc|rmd-local:latest|/home/node/Remudero " ;; esac ;;',
     "    esac; exit 0 ;;",
     "  image)",
     '    if [ "$2" = "inspect" ]; then exit 0; fi',
@@ -67,6 +68,9 @@ function writeDockerStub(dir: string): void {
   ].join("\n");
   writeFileSync(join(dir, "docker"), docker, { mode: 0o755 });
   chmodSync(join(dir, "docker"), 0o755);
+  // W1-T12495: the open files beside a live fleet come from this `lsof`, never the host's.
+  writeFileSync(join(dir, "lsof"), '#!/usr/bin/env bash\nprintf "%s" "${STUB_LSOF_OUT:-}"\n', { mode: 0o755 });
+  chmodSync(join(dir, "lsof"), 0o755);
 }
 
 /** The absolute path of the REAL `find` binary, resolved once via the shell's own `command -v` so
@@ -284,17 +288,18 @@ test("--dry-run reports what would free without removing anything", () => {
   assert.ok(existsSync(codex.old), "a dry run must remove nothing");
 });
 
-// ── ACCEPTANCE 2: refuses while a fleet container is live ──────────────────────────────────────
+// ── ACCEPTANCE 2: beside a live fleet container, every old file a process holds open is kept ───
+// W1-T12495 replaced the whole refusal with a per-file rule; the full rules are in
+// test/deploy/the-nightly-reclaim-reaches-the-root-disk-while-the-fleet-runs.test.ts.
 
-test("agent history reclaim refuses while a fleet container is live", () => {
+test("beside a live fleet container the agent history reclaim keeps every old file a process holds open", () => {
   const codex = codexFixture();
   const claude = claudeFixture();
-  const run = runHostUpdate("live", { RMD_CODEX_DIR: codex.dir, RMD_CLAUDE_DIR: claude.dir });
-  assert.match(run.stderr, /REFUSING agent history reclaim — a fleet container is RUNNING/);
-  assert.match(run.stderr, /rmd-local:latest/, "the refusal must name the live holder");
-  assert.ok(existsSync(codex.old), "nothing may be removed while a fleet container is live");
-  assert.ok(existsSync(claude.oldSession), "nothing may be removed while a fleet container is live");
-  assert.doesNotMatch(run.stdout, /agent history reclaim —.*: freed/, "no tree may report a reclaim while live");
+  const run = runHostUpdate("live", { RMD_CODEX_DIR: codex.dir, RMD_CLAUDE_DIR: claude.dir, STUB_LSOF_OUT: `p1\nn${codex.old}\n` });
+  assert.match(run.stdout, /rmd-local:latest/, "the run must name the live holder");
+  assert.ok(existsSync(codex.old), "an old file a process holds open is kept beside a live fleet container");
+  assert.match(run.stdout, new RegExp(`${esc(codex.dir)}: could not reach 4\\.0KB — reason: open-by-process \\(1 file\\(s\\)\\)`));
+  assert.ok(!existsSync(claude.oldSession), "an old file no process holds open is removed");
 });
 
 // ── ACCEPTANCE 3: never reads STATE_DIR state ───────────────────────────────────────────────────
@@ -376,42 +381,42 @@ function mutate(find: string, replace: string): string {
   return p;
 }
 
-test("MUTANT: dropping the live-worker refusal lets agent history reclaim run beside a live fleet container", () => {
+test("MUTANT: dropping the open-file check lets the reclaim remove an open file beside a live fleet container", () => {
   const mutant = mutate(
-    '  if [ -n "${LIVE}" ]; then\n    echo "host-update: REFUSING agent history reclaim',
-    '  if [ -n "${LIVE}" ] && false; then\n    echo "host-update: REFUSING agent history reclaim',
+    '      if [ -n "${LIVE}" ] && agent_history_is_open "${path}"; then\n        held_bytes=$((held_bytes + size))',
+    '      if false; then\n        held_bytes=$((held_bytes + size))',
   );
   const codex = codexFixture();
   const claude = claudeFixture();
-  const runMutant = runHostUpdate("live", { RMD_CODEX_DIR: codex.dir, RMD_CLAUDE_DIR: claude.dir }, mutant);
-  assert.ok(!existsSync(codex.old), "the mutant must actually reach the reclaim, or this proves nothing about the guard");
+  const held = (dir: string) => ({ RMD_CODEX_DIR: dir, RMD_CLAUDE_DIR: claude.dir, STUB_LSOF_OUT: `p1\nn${dir}/sessions/rollout-old.jsonl\n` });
+  runHostUpdate("live", held(codex.dir), mutant);
+  assert.ok(!existsSync(codex.old), "the mutant must actually reach the open file, or this proves nothing about the guard");
 
-  // …and the real script must not: the assertion the refusal test above makes, restated here so
-  // the pair reads as one claim.
+  // …and the real script must not: the assertion the test above makes, restated here so the pair
+  // reads as one claim.
   const codexReal = codexFixture();
-  const claudeReal = claudeFixture();
-  const real = runHostUpdate("live", { RMD_CODEX_DIR: codexReal.dir, RMD_CLAUDE_DIR: claudeReal.dir });
+  runHostUpdate("live", held(codexReal.dir));
   assert.ok(existsSync(codexReal.old));
 });
 
 test("MUTANT: collapsing the per-tree report into one combined total is caught by the per-tree test", () => {
   const src = readFileSync(SCRIPT, "utf8");
   const reportLine =
-    '      echo "host-update: agent history reclaim — ${hdir}: freed $(human_kb "${freed_kb}") across ${removed} file(s) older than ${AGENT_HISTORY_MAX_AGE_DAYS}d, oldest first"\n';
+    '    echo "host-update: agent history reclaim — ${hdir}: freed $(human_kb "${freed_kb}") across ${removed} file(s) older than ${AGENT_HISTORY_MAX_AGE_DAYS}d, oldest first"\n';
   assert.equal(src.split(reportLine).length - 1, 1, "the report line must be locatable and unique, or this proves nothing");
   const mutated = src.replace(
     reportLine,
-    '      TOTAL_AGENT_HISTORY_FREED_KB=$((TOTAL_AGENT_HISTORY_FREED_KB + freed_kb))\n',
+    '    TOTAL_AGENT_HISTORY_FREED_KB=$((TOTAL_AGENT_HISTORY_FREED_KB + freed_kb))\n',
   );
   assert.notEqual(mutated, src, "the mutation must actually change the script");
   const loopHeader = 'for hdir in "${AGENT_HISTORY_DIRS[@]}"; do';
-  const withInit = mutated.replace(loopHeader, `TOTAL_AGENT_HISTORY_FREED_KB=0\n    ${loopHeader}`);
-  const doneOnce = withInit.indexOf("    done\n  fi\nfi\n\n# ── 4c.");
+  const withInit = mutated.replace(loopHeader, `TOTAL_AGENT_HISTORY_FREED_KB=0\n  ${loopHeader}`);
+  const doneOnce = withInit.indexOf("  done\nfi\n\n# ── 4c.");
   assert.ok(doneOnce >= 0, "the loop close before section 4c must be locatable, or this proves nothing");
   const withTotal =
     withInit.slice(0, doneOnce) +
-    '    done\n    echo "host-update: agent history reclaim — freed $(human_kb "${TOTAL_AGENT_HISTORY_FREED_KB}") total"\n  fi\nfi\n\n# ── 4c.' +
-    withInit.slice(doneOnce + "    done\n  fi\nfi\n\n# ── 4c.".length);
+    '  done\n  echo "host-update: agent history reclaim — freed $(human_kb "${TOTAL_AGENT_HISTORY_FREED_KB}") total"\nfi\n\n# ── 4c.' +
+    withInit.slice(doneOnce + "  done\nfi\n\n# ── 4c.".length);
 
   const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}host-update-mutant-agent-history-total-`));
   const mutant = join(dir, "host-update.sh");

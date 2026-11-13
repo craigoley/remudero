@@ -14,6 +14,9 @@ import { parse as parseYaml } from "yaml";
 import { createLedgerRotationMemo, readLedgerUnionRecordsMemoized, readLedgerUnionRecordsSync, type LedgerGrepFsDeps, type LedgerRotationHook, type LedgerRotationMemo, type LedgerRotationMemoPass } from "./ledger-union.js";
 import { PLAN_ONLY_REVIEW_MARKER_STEP } from "./ledger-carry.js";
 import type { DependencyMergeEvidence, Plan, Task, TaskStatus } from "./plan.js";
+import { planDestinationRepository, type PlanDestinationRepository } from "./plan-destination.js";
+import { readOpsCatalogSnapshotAsync, type OpsCatalogApi, type OpsCatalogOutcome } from "./ops-catalog-source.js";
+import { findTaskInCatalogs } from "./task-lookup.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
 import { NEEDS_HUMAN_LABEL } from "./poll-interval.js";
 import { isHolderStale } from "./fs-race-safe.js";
@@ -43,6 +46,53 @@ import { activeCategorizedRefusal, categorizedRefusalRejoin, type CategorizedRef
 import { preDispatchContractRevision } from "./dispatch-repair.js";
 import { DEFAULT_LIVENESS_BOUND_MS, infrastructureRefusal, lifetimeInfrastructureRefusal, provenOrphanRunIds, streakRefusal } from "./non-worker-verdict.js";
 import { startWorker } from "./child-entry-argv.js";
+
+/** Host-private inputs for one status pass. Only the finite outcome is enumerable. */
+export interface CatalogStatusContext {
+  outcome: OpsCatalogOutcome | "off" | "invalid_cross_catalog_dependency";
+  plan: Plan;
+  opsPlan?: Plan;
+  destination?: PlanDestinationRepository;
+  commit?: string;
+}
+function statusCatalogContext(outcome: CatalogStatusContext["outcome"], plan: Plan,
+  opsPlan?: Plan, destination?: PlanDestinationRepository, commit?: string): CatalogStatusContext {
+  return Object.freeze(Object.defineProperties({ outcome }, {
+    plan: { value: plan }, opsPlan: { value: opsPlan }, destination: { value: destination }, commit: { value: commit },
+  })) as CatalogStatusContext;
+}
+
+/** One pinned catalog observation and one canonical lookup corroboration, not a whole read per task.
+ * The second reader still performs its own mutable-ref checks; no freshness response is cached here. */
+export async function readCatalogStatusContext(publicPlan: Plan, stateDir: string,
+  api?: OpsCatalogApi): Promise<CatalogStatusContext> {
+  const destination = planDestinationRepository(stateDir);
+  if (destination.outcome === "off") return statusCatalogContext("off", publicPlan);
+  if (destination.outcome === "unreadable") return statusCatalogContext("unreadable", publicPlan);
+  const snapshot = await readOpsCatalogSnapshotAsync({ repository: `${destination.owner}/${destination.repo}` }, api);
+  if (snapshot.outcome !== "ok" || !snapshot.plan || !snapshot.binding) {
+    return statusCatalogContext(snapshot.outcome === "ok" ? "unreadable" : snapshot.outcome, publicPlan);
+  }
+  const ops = snapshot.plan;
+  if (ops.tasks.some(task => publicPlan.byId.has(task.id))) return statusCatalogContext("duplicate_task_id", publicPlan);
+  const snapshotTasks = [...publicPlan.tasks, ...ops.tasks], snapshotById = new Map(snapshotTasks.map(task => [task.id, task]));
+  if (publicPlan.tasks.some(task => task.depends_on.some(id => ops.byId.has(id))) ||
+      ops.tasks.some(task => task.depends_on.some(id => !snapshotById.has(id)))) {
+    return statusCatalogContext("invalid_cross_catalog_dependency", publicPlan);
+  }
+  const tasks: Task[] = [];
+  for (const source of snapshotTasks) {
+    const expectedCatalog = publicPlan.byId.has(source.id) ? "public" : "ops";
+    const found = await findTaskInCatalogs(source.id, { byId: publicPlan.byId, stateDir, api, opsSnapshot: snapshot });
+    if (found.outcome !== "found" || found.catalog !== expectedCatalog) return statusCatalogContext("unreadable", publicPlan);
+    if (expectedCatalog === "ops" && found.commit !== snapshot.binding.commit) return statusCatalogContext("ref_moved", publicPlan);
+    tasks.push(found.task);
+  }
+  const plan: Plan = { tasks, byId: new Map(tasks.map(task => [task.id, task])) };
+  const opsTasks = tasks.filter(task => !publicPlan.byId.has(task.id));
+  const resolvedOps: Plan = { tasks: opsTasks, byId: new Map(opsTasks.map(task => [task.id, task])) };
+  return statusCatalogContext("ok", plan, resolvedOps, destination, snapshot.binding.commit);
+}
 
 /**
  * Derive merge-state from GitHub; cache in state/status.json, never plan/tasks.yaml's decorative `status:`.
