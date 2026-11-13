@@ -12,9 +12,11 @@ import {
   askDecisionModel,
   checkDecisionQuestions,
   decisionsCommand,
+  readDecisionAnswers,
   resolveDecisionTarget,
   type DecisionAnswer,
   type DecisionAnsweredRow,
+  type DecisionQuestion,
 } from "#src/lib/decision-model.js";
 import { DECISION_MODEL_SHAPES, loadMounts, mountsPath, validateMounts, type DecisionCandidate } from "#src/lib/mounts.js";
 import {
@@ -85,7 +87,8 @@ const OPENAI_ANSWERS = [
 const microsoftReply = (answers: Record<string, unknown>) => json({ model: "served-fixture", answers, usage: { input_tokens: 101, output_tokens: 3 } });
 const MICROSOFT_ANSWERS = {
   docs_only: { type: "noul", noul: 0.9964 },
-  risk: { type: "choice", choice: "low", confidence: 0.848, probabilities: { high: 0.0759, low: 0.9191, [CANNOT_TELL_OPTION]: 0.005 } },
+  risk: { type: "choice", choice: "string:low", confidence: 0.848,
+    probabilities: { "string:high": 0.0759, "string:low": 0.9191, [CANNOT_TELL_OPTION]: 0.005 } },
   size: { type: "score", score: 0.0707, confidence: 0.908, legend: { 0: "tiny", 1: "small", 2: "medium", 3: "large" },
     probabilities: { 0: 0.931, 1: 0.0674, 2: 0.0012, 3: 0.0003 } },
 };
@@ -119,7 +122,7 @@ test("W1-T12416 criterion 1: a question set outside the bounds, or with a duplic
   }
   const typed = [{ type: "choice", name: "flag", instructions: "Which?", options: [{ value: true }, { value: "true" }] }];
   assert.equal(checkDecisionQuestions(typed, "openai-decisions").ok, true, "a boolean and its text are two options");
-  assert.equal(checkDecisionQuestions(typed, "microsoft-systemone").ok, false, "the Microsoft shape keys options by text");
+  assert.equal(checkDecisionQuestions(typed, "microsoft-systemone").ok, true, "typed options are provider-neutral");
   const { dir, config } = fixture(t);
   const seen: Sent[] = [];
   const row = await askDecisionModel(config, { role: "probe", candidate: openAiCandidate, input: INPUT, questions: [choice(1)],
@@ -129,6 +132,52 @@ test("W1-T12416 criterion 1: a question set outside the bounds, or with a duplic
   assert.equal(row.outcome, "refused");
   assert.equal(row.reason, "invalid-questions");
   assert.equal(row.reserved_usd, 0);
+});
+
+test("W1-T12416 criterion 1: Microsoft wire identifiers preserve distinct typed options and the user's cannot_tell option", async (t) => {
+  const { config } = fixture(t);
+  const values = [true, "true", false, "false", CANNOT_TELL_OPTION, "boolean:true", "string:true", "__proto__"];
+  const wires = ["boolean:true", "string:true", "boolean:false", "string:false", "string:cannot_tell",
+    "string:boolean:true", "string:string:true", "string:__proto__"];
+  const questions = [{ type: "choice", name: "flag", instructions: "Which typed value?", options: values.map((value) => ({ value })) }];
+  for (const candidate of [openAiCandidate, microsoftCandidate]) {
+    assert.equal(checkDecisionQuestions(questions, candidate.shape).ok, true);
+    for (const [picked, value] of values.entries()) {
+      const distribution = values.map((option, index) => ({ option, probability: index === picked ? 1 : 0 }));
+      const probabilities = Object.fromEntries(wires.map((wire, index) => [wire, index === picked ? 1 : 0]));
+      const seen: Sent[] = [];
+      const row = await askDecisionModel(config, { role: "probe", candidate, input: INPUT, questions, env,
+        fetchImpl: replying(seen, candidate.shape === "openai-decisions"
+          ? openAiReply([{ type: "choice", name: "flag", choice: value, confidence: 1,
+            probabilities: distribution.map(({ option, probability }) => ({ value: option, probability })) }])
+          : microsoftReply({ flag: { type: "choice", choice: wires[picked], confidence: 1,
+            probabilities: { ...probabilities, [CANNOT_TELL_OPTION]: 0 } } })) });
+      assert.equal(seen.length, 1, "one input and all options travel in one request");
+      assert.equal(row.outcome, "answered");
+      assert.deepEqual(answer(row, "flag"), { name: "flag", outcome: "distribution", confidence: 1, distribution,
+        ...(candidate.shape === "microsoft-systemone" ? { cannotTell: 0 } : {}) });
+      if (candidate.shape === "microsoft-systemone") {
+        const sent = seen[0]!.body.questions as Record<string, { criteria: Record<string, string> }>;
+        assert.deepEqual(Object.keys(sent.flag!.criteria), [...wires, CANNOT_TELL_OPTION]);
+        assert.equal(sent.flag!.criteria["boolean:true"], "true");
+        assert.equal(sent.flag!.criteria["string:true"], '"true"');
+        assert.equal(sent.flag!.criteria["string:cannot_tell"], '"cannot_tell"');
+      }
+    }
+  }
+  const abstained = await askDecisionModel(config, { role: "probe", candidate: microsoftCandidate, input: INPUT, questions, env,
+    fetchImpl: replying([], microsoftReply({ flag: { type: "choice", choice: CANNOT_TELL_OPTION,
+      probabilities: { [CANNOT_TELL_OPTION]: 1 } } })) });
+  assert.deepEqual(answer(abstained, "flag"), { name: "flag", outcome: "abstained", reason: "cannot-tell" });
+  for (const invalid of [
+    { choice: "true", probabilities: { "boolean:true": 1, "string:true": 0, [CANNOT_TELL_OPTION]: 0 } },
+    { choice: "boolean:true", probabilities: { true: 1, "string:true": 0, [CANNOT_TELL_OPTION]: 0 } },
+  ]) {
+    const row = await askDecisionModel(config, { role: "probe", candidate: microsoftCandidate, input: INPUT,
+      questions: [{ ...questions[0], options: [{ value: true }, { value: "true" }] }], env,
+      fetchImpl: replying([], microsoftReply({ flag: { type: "choice", ...invalid } })) });
+    assert.equal(answer(row, "flag").outcome, "rejected", "unencoded values are not coerced into wire identifiers");
+  }
 });
 
 test("W1-T12416 criterion 2: the OpenAI-shape backend sends an array and reads each answer in order, keeping typed option values", async (t) => {
@@ -167,12 +216,12 @@ test("W1-T12416 criterion 3: the Microsoft-shape backend sends questions keyed b
   const row = await askDecisionModel(config, { role: "risk", candidate: microsoftCandidate, input: INPUT, questions: QUESTIONS, env,
     fetchImpl: replying(seen, microsoftReply(MICROSOFT_ANSWERS),
       microsoftReply({ ...MICROSOFT_ANSWERS, risk: { type: "choice", choice: CANNOT_TELL_OPTION, confidence: 0.6,
-        probabilities: { high: 0.2, low: 0.2, [CANNOT_TELL_OPTION]: 0.6 } } })) });
+        probabilities: { "string:high": 0.2, "string:low": 0.2, [CANNOT_TELL_OPTION]: 0.6 } } })) });
   assert.equal(seen[0]!.url, "https://default.example.test/providers/microsoft/v1/systemone");
   assert.equal(seen[0]!.key, DEFAULT_KEY);
   assert.deepEqual(seen[0]!.body, { model: DEPLOYMENT, state: INPUT, questions: {
     docs_only: { type: "noul", instructions: "Does the change touch only docs?" },
-    risk: { type: "choice", instructions: "How risky is it?", criteria: { low: "safe", high: "high",
+    risk: { type: "choice", instructions: "How risky is it?", criteria: { "string:low": "safe", "string:high": '"high"',
       [CANNOT_TELL_OPTION]: "The input does not say enough to choose any other option." } },
     size: { type: "score", instructions: "How big is it?", criteria: ["tiny", "small", "medium", "large"] } } });
   assert.equal(row.outcome, "answered");
@@ -184,7 +233,7 @@ test("W1-T12416 criterion 3: the Microsoft-shape backend sends questions keyed b
     { option: "tiny", probability: 0.931 }, { option: "small", probability: 0.0674 }, { option: "medium", probability: 0.0012 }, { option: "large", probability: 0.0003 }] });
   const second = await askDecisionModel(config, { role: "risk", candidate: microsoftCandidate, input: INPUT, questions: QUESTIONS, env,
     fetchImpl: replying(seen, microsoftReply({ ...MICROSOFT_ANSWERS, risk: { type: "choice", choice: CANNOT_TELL_OPTION, confidence: 0.6,
-      probabilities: { high: 0.2, low: 0.2, [CANNOT_TELL_OPTION]: 0.6 } } })) });
+      probabilities: { "string:high": 0.2, "string:low": 0.2, [CANNOT_TELL_OPTION]: 0.6 } } })) });
   assert.deepEqual(answer(second, "risk"), { name: "risk", outcome: "abstained", reason: "cannot-tell" });
 });
 
@@ -217,15 +266,16 @@ test("W1-T12416 criterion 4: an out-of-set or badly summed answer is rejected wi
   const short = await ask(openAiCandidate, openAiReply([yesNo, choice]));
   assert.ok(short.answers.every((a) => a.outcome === "rejected"));
   const badMicrosoft = await ask(microsoftCandidate, microsoftReply({ ...MICROSOFT_ANSWERS,
-    risk: { type: "choice", choice: "low", confidence: 0.8, probabilities: { low: 0.5, high: 0.1, [CANNOT_TELL_OPTION]: 0.1 } },
+    risk: { type: "choice", choice: "string:low", confidence: 0.8,
+      probabilities: { "string:low": 0.5, "string:high": 0.1, [CANNOT_TELL_OPTION]: 0.1 } },
     size: { ...MICROSOFT_ANSWERS.size, legend: { 0: "tiny", 1: "big", 2: "medium", 3: "large" } } }));
   assert.equal(answer(badMicrosoft, "risk").outcome, "rejected");
   assert.equal(answer(badMicrosoft, "size").outcome, "rejected");
   assert.equal(answer(badMicrosoft, "docs_only").outcome, "distribution");
   for (const [low, cannotTell, expectedSum] of [[0.6, 0.3, "0.700"], [0.88, 0.02, "0.980"]] as const) {
     const row = await ask(microsoftCandidate, microsoftReply({ ...MICROSOFT_ANSWERS,
-      risk: { type: "choice", choice: "low", confidence: 0.8,
-        probabilities: { low, high: 0.1, [CANNOT_TELL_OPTION]: cannotTell } } }));
+      risk: { type: "choice", choice: "string:low", confidence: 0.8,
+        probabilities: { "string:low": low, "string:high": 0.1, [CANNOT_TELL_OPTION]: cannotTell } } }));
     assert.deepEqual(answer(row, "risk"), { name: "risk", outcome: "rejected",
       reason: `risk summed to ${expectedSum}, not 1` }, "cannot-tell mass cannot complete the declared-option sum");
     assert.equal(answer(row, "docs_only").outcome, "distribution");
@@ -233,11 +283,42 @@ test("W1-T12416 criterion 4: an out-of-set or badly summed answer is rejected wi
   }
   for (const [low, cannotTell] of [[0.9, 0], [0.895, 0.005]] as const) {
     const row = await ask(microsoftCandidate, microsoftReply({ ...MICROSOFT_ANSWERS,
-      risk: { type: "choice", choice: "low", confidence: 0.8,
-        probabilities: { low, high: 0.1, [CANNOT_TELL_OPTION]: cannotTell } } }));
+      risk: { type: "choice", choice: "string:low", confidence: 0.8,
+        probabilities: { "string:low": low, "string:high": 0.1, [CANNOT_TELL_OPTION]: cannotTell } } }));
     assert.deepEqual(answer(row, "risk"), { name: "risk", outcome: "distribution", confidence: 0.8, cannotTell,
       distribution: [{ option: "low", probability: low }, { option: "high", probability: 0.1 }] },
     "declared-option mass inside tolerance is preserved without normalization");
+  }
+});
+
+test("W1-T12416 criterion 4: score values must match declared ordered labels without duplicates and scores stay in range", () => {
+  const questions: DecisionQuestion[] = [{ type: "score", name: "rank", instructions: "Rank.", levels: [{ label: "low" }, { label: "high" }] }];
+  const rows = [{ value: 0, label: "low", probability: 0.75 }, { value: 1, label: "high", probability: 0.25 }];
+  const base = { type: "score", name: "rank", score: 0.25, confidence: 0.75, probabilities: rows };
+  const parse = (raw: unknown) => readDecisionAnswers("openai-decisions", questions, { answers: [raw] })[0]!;
+  const expected = { name: "rank", outcome: "distribution", score: 0.25, confidence: 0.75,
+    distribution: [{ option: "low", probability: 0.75 }, { option: "high", probability: 0.25 }] };
+  assert.deepEqual(parse(base), expected);
+  assert.deepEqual(parse({ ...base, probabilities: [...rows].reverse() }), expected, "values identify levels regardless of reply order");
+  for (const [values, labels] of [
+    [[99, 100], ["low", "high"]], [[0, 0], ["low", "high"]], [[1, 0], ["low", "high"]],
+    [[-1, 1], ["low", "high"]], [[0.5, 1], ["low", "high"]], [["0", 1], ["low", "high"]],
+    [[0, 1], ["high", "low"]], [[0, 1], ["low", "low"]],
+  ] as const) {
+    const got = parse({ ...base, probabilities: rows.map((row, index) => ({ ...row, value: values[index], label: labels[index] })) });
+    assert.equal(got.outcome, "rejected", JSON.stringify({ values, labels }));
+    assert.ok(got.outcome === "rejected" && got.reason.length > 0);
+  }
+  const microsoft = { type: "score", score: 0.25, confidence: 0.75, legend: { 0: "low", 1: "high" }, probabilities: { 0: 0.75, 1: 0.25 } };
+  for (const shape of DECISION_MODEL_SHAPES) {
+    const parseScore = (score: unknown) => readDecisionAnswers(shape, questions, { answers: shape === "openai-decisions"
+      ? [{ ...base, score }] : { rank: { ...microsoft, score } } })[0]!;
+    for (const score of [-1, 99, 1.01, "0", NaN, Infinity]) {
+      const got = parseScore(score);
+      assert.equal(got.outcome, "rejected", `${shape}: ${String(score)}`);
+      assert.ok(got.outcome === "rejected" && got.reason.length > 0);
+    }
+    for (const score of [0, 0.25, 1]) assert.deepEqual(parseScore(score), { ...expected, score });
   }
 });
 

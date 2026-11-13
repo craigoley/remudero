@@ -80,7 +80,7 @@ const nonEmpty = (value: unknown): value is string => typeof value === "string" 
 const optionKey = (value: DecisionOptionValue): string => `${typeof value}:${String(value)}`;
 
 /** Criterion 1: the question set is checked before any reservation; a bad set sends nothing. */
-export function checkDecisionQuestions(raw: unknown, shape: DecisionModelShape): Checked<DecisionQuestion[]> {
+export function checkDecisionQuestions(raw: unknown, _shape: DecisionModelShape): Checked<DecisionQuestion[]> {
   if (!Array.isArray(raw) || raw.length < 1 || raw.length > DECISION_MAX_QUESTIONS)
     return { ok: false, reason: `a question set has 1 to ${DECISION_MAX_QUESTIONS} questions` };
   const names = new Set<string>();
@@ -99,7 +99,6 @@ export function checkDecisionQuestions(raw: unknown, shape: DecisionModelShape):
       if (!Array.isArray(options) || options.length < DECISION_CHOICE_OPTIONS.min || options.length > DECISION_CHOICE_OPTIONS.max)
         return { ok: false, reason: `${name} needs ${DECISION_CHOICE_OPTIONS.min} to ${DECISION_CHOICE_OPTIONS.max} options` };
       const seen = new Set<string>();
-      const text = new Set<string>();
       const parsed: Array<{ value: DecisionOptionValue; description?: string }> = [];
       for (const option of options) {
         if (!isRecord(option) || !(nonEmpty(option.value) || typeof option.value === "boolean"))
@@ -108,10 +107,6 @@ export function checkDecisionQuestions(raw: unknown, shape: DecisionModelShape):
           return { ok: false, reason: `${name} has an option whose description is not text` };
         if (seen.has(optionKey(option.value))) return { ok: false, reason: `${name} has the option ${String(option.value)} twice` };
         seen.add(optionKey(option.value));
-        // The Microsoft shape keys its options by text and adds its own cannot-tell option.
-        if (shape === "microsoft-systemone" && (text.has(String(option.value)) || String(option.value) === CANNOT_TELL_OPTION))
-          return { ok: false, reason: `${name} has options that are the same as text, or ${CANNOT_TELL_OPTION}` };
-        text.add(String(option.value));
         parsed.push({ value: option.value, ...(option.description === undefined ? {} : { description: option.description }) });
       }
       questions.push({ type, name, instructions, options: parsed });
@@ -148,7 +143,7 @@ export function decisionRequestBody(shape: DecisionModelShape, deployment: strin
   return { model: deployment, state: input, questions: Object.fromEntries(questions.map((q) => [q.name,
     q.type === "yes-no" ? { type: "noul", instructions: q.instructions }
     : q.type === "choice" ? { type: "choice", instructions: q.instructions, criteria: {
-      ...Object.fromEntries(q.options.map((o) => [String(o.value), o.description ?? String(o.value)])),
+      ...Object.fromEntries(q.options.map((o) => [optionKey(o.value), o.description ?? JSON.stringify(o.value)])),
       [CANNOT_TELL_OPTION]: "The input does not say enough to choose any other option." } }
     : { type: "score", instructions: q.instructions, criteria: q.levels.map((l) => l.label) }])) };
 }
@@ -186,6 +181,8 @@ function finished(question: DecisionQuestion, mass: Checked<Mass>, raw: Record<s
   if (!confidence.ok) return { name: question.name, outcome: "rejected", reason: confidence.reason };
   if (raw.score !== undefined && (typeof raw.score !== "number" || !Number.isFinite(raw.score)))
     return { name: question.name, outcome: "rejected", reason: `${question.name} has a score that is not a number` };
+  if (question.type === "score" && typeof raw.score === "number" && (raw.score < 0 || raw.score > question.levels.length - 1))
+    return { name: question.name, outcome: "rejected", reason: `${question.name} has a score outside its declared levels` };
   return { name: question.name, outcome: "distribution", distribution: mass.value, confidence: confidence.value, ...extra,
     ...(typeof raw.score === "number" ? { score: raw.score } : {}) };
 }
@@ -215,6 +212,8 @@ function readOpenAiAnswer(question: DecisionQuestion, raw: unknown): DecisionAns
   }
   const labels = question.levels.map((l) => l.label);
   if (rows.some((row) => !Number.isInteger(row.value))) return rejected(question.name, `${question.name} has a level with no whole-number value`);
+  if (rows.some((row) => (row.value as number) < 0 || (row.value as number) >= labels.length || labels[row.value as number] !== row.label))
+    return rejected(question.name, `${question.name} has a level value that does not match its declared label`);
   return finished(question, declaredMass(question.name, labels, rows.map((row) => [row.label, row.probability]),
     (label) => labels.find((l) => l === label)), raw);
 }
@@ -232,11 +231,11 @@ function readMicrosoftAnswer(question: DecisionQuestion, raw: unknown): Decision
   if (question.type === "choice") {
     if (raw.choice === CANNOT_TELL_OPTION) return { name: question.name, outcome: "abstained", reason: "cannot-tell" };
     const declared = question.options.map((o) => o.value);
-    const byText = (text: unknown) => declared.find((option) => String(option) === text);
-    if (byText(raw.choice) === undefined) return rejected(question.name, `${question.name} chose ${JSON.stringify(raw.choice)}, which was not declared`);
+    const byWire = (wire: unknown) => declared.find((option) => optionKey(option) === wire);
+    if (byWire(raw.choice) === undefined) return rejected(question.name, `${question.name} chose ${JSON.stringify(raw.choice)}, which was not declared`);
     const { [CANNOT_TELL_OPTION]: cannotTell, ...rest } = raw.probabilities;
     if (!probability(cannotTell)) return rejected(question.name, `${question.name} gave no mass to ${CANNOT_TELL_OPTION}`);
-    return finished(question, declaredMass(question.name, declared, Object.entries(rest), byText), raw, { cannotTell });
+    return finished(question, declaredMass(question.name, declared, Object.entries(rest), byWire), raw, { cannotTell });
   }
   const labels = question.levels.map((l) => l.label);
   const legend = isRecord(raw.legend) ? raw.legend : {};
