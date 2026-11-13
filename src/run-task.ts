@@ -34932,6 +34932,19 @@ interface PrivateTriagePublication {
   stage: "task_committed" | "feedback_landed";
 }
 
+/** A persistent Git lock protects the receipt's commit and branch from both worktree reapers,
+ * even after the worker's process lock is released. Only the recorded publication can release it. */
+function holdPrivateTriagePublication(publication: PrivateTriagePublication, hold: boolean): void {
+  const { worktreePath, commit } = publication;
+  if (!hold && !existsSync(worktreePath)) return;
+  const reason = `triage-publication:${commit}`;
+  const lockPath = resolve(worktreePath, hostWorktreeGit(worktreePath, ["rev-parse", "--git-path", "locked"]).trim());
+  const current = readFileIfExists(lockPath)?.trim();
+  if (current !== undefined && current !== reason) throw new Error("triage publication worktree lock belongs to another owner");
+  if (hold && current === undefined) hostWorktreeGit(worktreePath, ["worktree", "lock", "--reason", reason, worktreePath]);
+  if (!hold && current === reason) hostWorktreeGit(worktreePath, ["worktree", "unlock", worktreePath]);
+}
+
 /** The public commit precedes the private status. A host-only atomic receipt retains that exact
  * commit/branch across either failure, including an unknown push/create result. Retry uses the
  * same branch (the existing 422 adoption checks its head), never another mint or model proposal. */
@@ -34939,6 +34952,7 @@ async function finishPrivateTriagePublication(publication: PrivateTriagePublicat
   feedbackId: string, taskId: string, config: Config, summarizeDeps: SummarizeDeps,
   log: (step: string, extra?: Record<string, unknown>) => void, say: (msg: string) => void): Promise<string> {
   const { worktreePath, branch } = publication;
+  holdPrivateTriagePublication(publication, true);
   const [owner, repo] = publication.repository.split("/");
   const diff = hostWorktreeGit(worktreePath, ["diff", worktreeMergeBase(worktreePath), "HEAD", "--", "plan"]);
   if (!diffCitesFeedback(diff, feedbackId, publication.taskPath)
@@ -34984,6 +34998,7 @@ async function finishPrivateTriagePublication(publication: PrivateTriagePublicat
     log("triage.error", { error: "private feedback status write failed", write: "private_feedback_status", feedback_id: feedbackId });
     throw new Error("private feedback status write failed; retained the existing public task pull request", { cause: error });
   }
+  holdPrivateTriagePublication(publication, false);
   return publication.prUrl;
 }
 
@@ -35084,8 +35099,6 @@ async function triageCommandLocked(
     mkdirSync(dirname(repoDir), { recursive: true });
     ghExec(["repo", "clone", `${owner}/${repo}`, repoDir], { stdio: "inherit" });
   }
-  const pruned = pruneStaleRuns(repoDir, worktreesDir(config), { graceMs: DEFAULT_PRUNE_GRACE_MS });
-  if (pruned.worktrees.length || pruned.branches.length || pruned.skipped.length) log("worktree.prune", { ...pruned });
   const receiptPath = join(config.root, "state", "triage-publication", createHash("sha256").update(`${owner}/${repo}\0${feedbackId}`).digest("hex") + ".json");
   const receiptText = readFileIfExists(receiptPath);
   let publication: PrivateTriagePublication | undefined = receiptText === undefined ? undefined : JSON.parse(receiptText);
@@ -35097,6 +35110,7 @@ async function triageCommandLocked(
       || !["task_committed", "feedback_landed"].includes(publication.stage)
       || (publication.prUrl !== undefined && (typeof publication.prUrl !== "string" || prUrlTarget(publication.prUrl)?.owner !== owner || prUrlTarget(publication.prUrl)?.repo !== repo))) throw new Error("triage publication receipt is invalid; refusing a second task");
     if (publication.stage === "feedback_landed") {
+      holdPrivateTriagePublication(publication, false);
       say("the previous task and feedback landing are already published; awaiting their normal gates");
       return 1;
     }
@@ -35104,7 +35118,11 @@ async function triageCommandLocked(
       || hostWorktreeGit(publication.worktreePath, ["status", "--porcelain", "--untracked-files=normal"]).trim() !== "") {
       throw new Error("triage publication worktree changed; refusing a second task");
     }
+    // Adopt receipts written before persistent holds existed BEFORE the stale-run sweep.
+    holdPrivateTriagePublication(publication, true);
   }
+  const pruned = pruneStaleRuns(repoDir, worktreesDir(config), { graceMs: DEFAULT_PRUNE_GRACE_MS });
+  if (pruned.worktrees.length || pruned.branches.length || pruned.skipped.length) log("worktree.prune", { ...pruned });
   const { branch, worktreePath } = publication ?? await addLaneWorktree(repoDir, worktreesDir(config), runId, log); // W1-T2528
 
   // W1-T348: the decision-summary rung, resolved ONCE and reused at both sites this run may

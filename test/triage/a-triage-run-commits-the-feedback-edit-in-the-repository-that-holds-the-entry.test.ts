@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, readFileSync, writeFileSync, existsSync, rmSync } from "node:fs";
-import { join } from "node:path";
+import { mkdirSync, readFileSync, readdirSync, writeFileSync, existsSync, rmSync, utimesSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { diffCitesFeedback, triageCommitMessage } from "#src/lib/triage.js";
 import { feedbackStatusOnMain } from "#src/lib/auto-triage.js";
@@ -10,6 +10,7 @@ import { gitRepo } from "#test/helpers/git-repo.js";
 import { ghShim } from "#test/helpers/gh-shim.js";
 import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
+import { DEFAULT_PRUNE_GRACE_MS, pruneStaleRuns } from "#src/lib/worker.js";
 
 const ID = "fb-triage-private-entry";
 const REL = `plan/feedback/${ID}.yaml`;
@@ -136,6 +137,30 @@ function fixture(t: TestContext, privateEntry = true) {
 
 }
 
+function pendingPublication(f: ReturnType<typeof fixture>) {
+  const dir = join(f.root, "state", "triage-publication");
+  const receipts = readdirSync(dir);
+  assert.equal(receipts.length, 1, "the failed run leaves one durable publication receipt");
+  return JSON.parse(readFileSync(join(dir, receipts[0]), "utf8")) as { worktreePath: string; branch: string; commit: string };
+}
+
+function pruneFailedRun(f: ReturnType<typeof fixture>) {
+  const publication = pendingPublication(f);
+  const root = dirname(publication.worktreePath);
+  const control = join(root, "run-prune-control");
+  f.publicClone.addWorktree(control, "run-prune-control");
+  const stale = new Date(Date.now() - DEFAULT_PRUNE_GRACE_MS - 60000);
+  for (const path of [publication.worktreePath, control]) utimesSync(path, stale, stale);
+  const result = pruneStaleRuns(f.publicClone.dir, root, { graceMs: DEFAULT_PRUNE_GRACE_MS });
+  assert.ok(result.worktrees.includes(control), "positive control: stale-run pruning actually deletes an unprotected worktree");
+  assert.ok(result.branches.includes("run-prune-control"));
+  assert.ok(existsSync(publication.worktreePath), "the receipt-owned worktree survives stale-run pruning after the worker exits");
+  f.publicClone.git("reflog", "expire", "--expire=now", "--all");
+  f.publicClone.git("gc", "--prune=now");
+  assert.equal(f.publicClone.git("rev-parse", publication.branch), publication.commit);
+  return publication;
+}
+
 test("W1-T12204 criterion 1 and criterion 7: real rmd triage lands an ops status without a public feedback file", async (t) => {
   const f = fixture(t);
   const result = await f.run();
@@ -201,6 +226,11 @@ test("W1-T12204 criterion 5: a failed private status write resumes without minti
   assert.ok(before.trim());
   const rows = readFileSync(join(f.root, "state", "ledger.ndjson"), "utf8").trim().split("\n").map(line => JSON.parse(line));
   assert.ok(rows.some(row => row.step === "pr.opened" && row.pr_url === "https://github.com/craigoley/remudero/pull/99"), "the actual public PR is visible to existing priced-run consumers even while its private status write is pending");
+  const publication = pruneFailedRun(f);
+  // Older receipts have no persistent hold. Recovery must adopt them before its own sweep.
+  f.publicClone.git("worktree", "unlock", publication.worktreePath);
+  const stale = new Date(Date.now() - DEFAULT_PRUNE_GRACE_MS - 60000);
+  utimesSync(publication.worktreePath, stale, stale);
   rmSync(hook);
   const next = await f.run(true);
   assert.equal(next.error, undefined);
@@ -209,6 +239,9 @@ test("W1-T12204 criterion 5: a failed private status write resumes without minti
   assert.equal(f.publicOrigin.git("for-each-ref", "--format=%(refname) %(objectname)", "refs/heads/run-TRIAGE-*"), before);
   assert.equal(f.calls().filter(x => x.includes("api --method POST repos/craigoley/remudero/pulls")).length, 1);
   assert.match(f.privateOrigin.git("show", `${LANDING_BRANCH}:${REL}`), /status: proposed/);
+  assert.equal(existsSync(publication.worktreePath), false, "both writes completed, so normal cleanup can retire the worktree");
+  assert.equal((await f.run(true)).code, 1, "a fresh pass can read the completed receipt after cleanup");
+  assert.equal(f.spawns(), 1);
 });
 
 test("W1-T12204 criterion 5: a refused public task push retries its same committed task before any status write", async (t) => {
@@ -219,12 +252,15 @@ test("W1-T12204 criterion 5: a refused public task push retries its same committ
   assert.match(String(first.error), /public task write failed or is unknown/);
   assert.equal(f.calls().filter(x => x.includes("api --method POST repos/craigoley/remudero/pulls")).length, 0);
   assert.equal(f.privateOrigin.git("for-each-ref", "--format=%(refname)", "refs/heads/feedback-landing*").trim(), "");
+  const publication = pruneFailedRun(f);
   rmSync(hook);
   const next = await f.run(true);
   assert.equal(next.error, undefined);
   assert.equal(f.spawns(), 1);
   assert.equal(f.publicOrigin.git("for-each-ref", "--format=%(refname)", "refs/heads/run-TRIAGE-*").trim().split("\n").length, 1);
   assert.equal(f.calls().filter(x => x.includes("api --method POST repos/craigoley/remudero/pulls")).length, 1);
+  assert.equal(f.publicOrigin.git("rev-parse", `refs/heads/${publication.branch}`), publication.commit, "the retry publishes the original unpushed commit after pruning and garbage collection");
+  assert.match(f.privateOrigin.git("show", `${LANDING_BRANCH}:${REL}`), /status: proposed/);
 });
 
 test("W1-T12204 criterion 6 and criterion 7: real legacy PROPOSE commits its feedback edit and task together", async (t) => {
@@ -246,6 +282,13 @@ test("W1-T12204 criterion 5: recovery refuses a changed public task head without
   writeFileSync(hook, "#!/bin/sh\nexit 1\n", { mode: 0o700 });
   assert.match(String((await f.run(true)).error), /private feedback status write failed/);
   rmSync(hook);
+  const publication = pendingPublication(f);
+  f.publicClone.git("worktree", "unlock", publication.worktreePath);
+  f.publicClone.git("worktree", "lock", "--reason", "fixture-other-owner", publication.worktreePath);
+  assert.match(String((await f.run(true)).error), /worktree lock belongs to another owner/);
+  assert.ok(f.publicClone.git("worktree", "list", "--porcelain").includes("locked fixture-other-owner"), "recovery cannot take another owner's hold");
+  assert.equal(f.publicClone.git("rev-parse", publication.branch), publication.commit);
+  f.publicClone.git("worktree", "unlock", publication.worktreePath);
   const branch = f.publicOrigin.git("for-each-ref", "--format=%(refname:short)", "refs/heads/run-TRIAGE-*").trim();
   const update = gitRepo({ cloneFrom: f.publicOrigin.dir, scope: t });
   update.git("checkout", "--quiet", branch);
