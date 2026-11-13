@@ -13,7 +13,7 @@ import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { prepareWorkerNativeCache } from "./worker-native-cache.js";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { StringDecoder } from "node:string_decoder";
 import { Worker } from "node:worker_threads";
 import {
@@ -1995,9 +1995,12 @@ export function readCodexRuntimeOffThread(
   return new Promise((resolve) => {
     let probe: Worker;
     try {
+      // W1-T12516: the preload is THIS harness install's tsx, resolved from this module. A bare
+      // `tsx` resolves from the process cwd, which is the target checkout, and that may carry no tsx.
+      const loader = pathToFileURL(createRequire(import.meta.url).resolve("tsx")).href;
       probe = workerFactory(new URL("./codex-capacity-probe.mjs", import.meta.url), {
         workerData: { bin, codexHome: codexHome(config), timeoutMs },
-        execArgv: ["--import", "tsx"],
+        execArgv: ["--import", loader],
       });
     } catch (error) {
       const reason = `app-server probe worker failed to start: ${String((error as Error).message ?? error)}`;

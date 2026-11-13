@@ -1,0 +1,70 @@
+- id: W1-T12512
+  title: "The gate gardener files one cleanup task for a ratchet on main that is near its limit or whose recorded count grew, so headroom is made before a pull request is refused"
+  repo: remudero
+  depends_on: []
+  priority: 1.0
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # a new action class in a gardener that files plan tasks; a wrong reading files noise into the queue
+  band_meaning: blast-radius
+  origin: operator-session#checking-off-the-author-path-2026-11-13
+  plan_refs:
+    - W1-T4116
+    - W1-T9962
+  files:
+    - src/lib/gate-gardener.ts
+    - src/lib/plan.ts
+    - test/gardeners/the-gate-gardener-files-one-cleanup-task-for-a-gate-near-its-limit.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "A gate gardener pass reads, on main's tip, each capped ratchet that refuses a pull request (the learnings budget's hardCapChars, the jscpd threshold) and proposes a HEADROOM action for one whose measured value is within RATCHET_HEADROOM_SHARE (10%) of its limit. It reads no source-size row: source-size is a non-blocking signal"
+      proof: "grep: W1-T12512 criterion 1 in test/gardeners/the-gate-gardener-files-one-cleanup-task-for-a-gate-near-its-limit.test.ts"
+    - claim: "For each exact-count baseline (fixture-copy, deps-interface, console-parity), the pass proposes a HEADROOM action when a commit on main in the last 7 days raised a recorded value, read from `git log -p` of the baseline file"
+      proof: "grep: W1-T12512 criterion 2 in test/gardeners/the-gate-gardener-files-one-cleanup-task-for-a-gate-near-its-limit.test.ts"
+    - claim: "A HEADROOM action files at most one plan task per gate and row, with an origin key of gate, path or field, and rounded limit. A pass that finds an open task with that origin files nothing. The task names the measured value, the limit and the commit that raised it"
+      proof: "grep: W1-T12512 criterion 3 in test/gardeners/the-gate-gardener-files-one-cleanup-task-for-a-gate-near-its-limit.test.ts"
+    - claim: "A HEADROOM action never edits a baseline or a ceiling; its task asks to lower the measured value"
+      proof: "grep: W1-T12512 criterion 4 in test/gardeners/the-gate-gardener-files-one-cleanup-task-for-a-gate-near-its-limit.test.ts"
+  rationale: |
+    When checking moves to merge time, a ceiling with no headroom refuses pull requests one after another. Nothing files the
+    cleanup that would make room before that happens.
+    READ at origin/main 6cf453f7a:
+    - src/lib/gate-gardener.ts:29-45 (W1-T4116) proposes TIGHTEN (a ceiling the code fell below), REFRESH (a stale row) and
+      DEMOTE (a gate that never fires). No class acts on a gate that is close to its limit, and :38 says the learnings
+      `capChars` headroom "is deliberate and never touched".
+    - :657 `commentCompressionCandidates` (#14087) already turns comment volume into follow-up work; it is the model for
+      one-task-per-row filing.
+    - scripts/fixture-copy-baseline.json and scripts/deps-interface-baseline.json record exact counts that "can only fall";
+      growth is refused. A raise of one of these rows on main is a sign the population is at its limit.
+    - .jscpd.json:2 sets threshold 2. scripts/source-size-baseline.json holds per-file ceilings.
+    - The Azure build rules record refusals for this reason: W1-T12416 was refused after a re-cut because main used the
+      headroom (ledgerHelperNames 52 > 51).
+    CHECKED for overlap: no queued or blocked task adds a headroom or near-limit class to a gardener. W1-T11436 (queued) rules
+    on comment compression pins, not headroom.
+  design: |
+    1. Add a HEADROOM action class to src/lib/gate-gardener.ts with RATCHET_HEADROOM_SHARE = 0.1 and a 7-day window.
+    2. Capped ratchets: measure with each ratchet's own counter. Propose when
+       `limit - measured <= limit * RATCHET_HEADROOM_SHARE`. The learnings limit is `hardCapChars`, measured by the
+       ratchet's own `computeActiveChars`; its `capChars` is a curation target that refuses nothing (W1-T3734). The jscpd
+       limit is `.jscpd.json` `threshold`, measured by one jscpd run with a JSON report, awaited off the daemon loop.
+       Amended 2026-11-13: the source-size rows are not read. ci.yml runs source-size as a signal with
+       `continue-on-error: true`, so a row refuses nothing. On main at the amendment, 141 rows were within 10% of their
+       row or over it, and each would file a task that removes no refusal.
+    3. Exact-count baselines: read the window's commits of each baseline file and propose when a recorded value rose.
+    4. File through the gardener's existing task-id minting and landing (`prepareGardenTaskIds`, `machineShardLandingGuard`),
+       one task per gate and row, deduplicated by origin.
+    5. Admission (amended 2026-11-13): src/lib/plan.ts gains a parked-proposal shape for a `headroom:` origin, as comment
+       compression has (`isCommentCompressionShape`): one existing subject and then its new regression test, or one
+       existing test file that carries the regression. Without it, machine-filing admission refuses every headroom draft
+       as "not selectable by runnableCandidates" (verify:human).
+    NO-INVARIANTS: a new proposal class; criterion 4 pins that it writes no baseline.
+    NOT IN SCOPE: changing any ceiling or share; coverage and mutation floors; comment volume, which
+    `commentCompressionCandidates` already files and which is advisory, not a merge ceiling.
+  falsifier: |
+    File two tasks for one row and criterion 3 must fail. Raise the baseline instead of filing and criterion 4 must fail.
+    Restore and require all four to pass.
+  note: |
+    Id W1-T12512 reserved for run-unfiled-1794582098000 with ~/rmd-work/bin/reserve-id.sh.

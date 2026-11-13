@@ -1,0 +1,72 @@
+- id: W1-T12510
+  title: "The pre-push hook stops running the census precheck and the plan lint copy, which the required CI checks already run, and keeps its identity, rule 15, rule 25 and control-plane prechecks"
+  repo: remudero
+  depends_on: []
+  priority: 1.2
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the hook runs on every push from every account; a removed check must be one CI still runs
+  band_meaning: blast-radius
+  origin: operator-session#checking-off-the-author-path-2026-11-13
+  plan_refs:
+    - W1-T3225
+    - W1-T4901
+    - W1-T3423
+  files:
+    - hooks/pre-push
+    - test/ci/the-pre-push-hook-runs-no-check-the-required-ci-checks-already-run.test.ts
+    - test/a-branch-delete-push-runs-no-content-gate.test.ts
+    - test/a-census-this-branch-grows-is-refused-before-the-push.test.ts
+    - test/census-precheck-counts-the-house-layout-ratchet.test.ts
+    - test/ci/gates/ci-friction-remedy-5fd7bbef9be02369.test.ts
+    - test/dependency-declarations-match-use.test.ts
+    - test/github/a-managed-worktree-push-measures-its-reader-suites.test.ts
+    - test/prepush-lints-a-plan-diff.test.ts
+    - test/the-harness-pre-push-gate-runs-no-worktree-code.test.ts
+    - test/the-pre-push-gate-runs-the-branch-s-own-checks-in-the-proof-sandbox.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "A push through hooks/pre-push does not start scripts/census-precheck.mjs or scripts/lint-plan-precheck.mjs, on a source diff and on a plan diff"
+      proof: "grep: W1-T12510 criterion 1 in test/ci/the-pre-push-hook-runs-no-check-the-required-ci-checks-already-run.test.ts"
+    - claim: "The hook still runs the head-identity check, rule15-precheck, rule25-precheck and ci-control-plane-precheck, and a refusal from any of them still refuses the push"
+      proof: "grep: W1-T12510 criterion 2 in test/ci/the-pre-push-hook-runs-no-check-the-required-ci-checks-already-run.test.ts"
+    - claim: "The hook prints one line naming the two checks it leaves to CI (ci.yml's ci-shard census suites and its lint-plan job), so a reader of the push log knows where they run"
+      proof: "grep: W1-T12510 criterion 3 in test/ci/the-pre-push-hook-runs-no-check-the-required-ci-checks-already-run.test.ts"
+  rationale: |
+    The hook repeats two checks that CI runs on every pull request, and on the Mac those copies often cannot run at all.
+    READ at origin/main 6cf453f7a, hooks/pre-push (500 lines):
+    - :243-290 the census precheck block runs `node scripts/census-precheck.mjs --base origin/main`; :283 prints "census-precheck
+      could not measure — not blocking on an unreadable check". The hook's own header (:239) says "every census suite runs in
+      CI's ci-shard, unchanged".
+    - :292-330 the lint-plan precheck (W1-T4901) runs the plan lint CI runs on a changed shard; it prints "lint-plan-precheck
+      could not run the lint — not blocking on an unreadable check".
+    - .github/workflows/ci.yml:1259 runs lint-plan on every pull request and :2696 makes the `ci` job need lint-plan and the
+      census and ratchet jobs. ci-gate, a required check, aggregates them.
+    - :131-206 the rule15, rule25 and ci-control-plane prechecks read only the diff; the head-identity advice needs the
+      destination. CI has no earlier place for these.
+    MEASURED by the operator session on the Mac: 135 "census-precheck could not measure" lines and 64 "lint-plan-precheck could
+    not run" lines in the recorded push logs. Each one is a wait that ends with no verdict.
+    The author preflight still runs the census precheck (test/preflight-runs-the-pre-push-precheck.test.ts, W1-T6435), so
+    the script-ratchet parity rule (scripts/census-precheck.mjs:300-320, W1-T5737) still has its pre-push verdict.
+    CHECKED for overlap: W1-T7741 (queued) proposes a census count at commit time; it does not remove the push-time copy, and
+    the operator may rule on it separately. W1-T10296 (queued) changes the head-identity diff, which this task keeps.
+  design: |
+    1. Delete the census precheck block and the lint-plan precheck block from hooks/pre-push.
+    2. Print one line: "pre-push: census suites and plan lint run in CI (ci.yml ci-shard and lint-plan, aggregated by ci-gate)".
+    3. Keep every other block, its order and its exit codes.
+    4. Update any test that asserts the hook spawns either removed script; list each in the why-file.
+    AMENDED 2026-11-13: step 4 names nine test files outside `files`. Each copies hooks/pre-push and asserts that a push runs
+    the census precheck or the plan lint. A test that judged the script itself now runs the script directly, as the author
+    preflight runs census-precheck and plan-pr-emitter runs lint-plan-precheck. A test that judged the hook now asserts the
+    hook starts neither. These nine files are added to `files`.
+    NO-INVARIANTS: a removal of two copies; criterion 2 pins what stays.
+    NOT IN SCOPE: the author preflight's census precheck; the commit-time proposal of W1-T7741.
+  falsifier: |
+    Keep the census block and criterion 1 must fail. Drop the rule15 block too and criterion 2 must fail. Restore and require
+    all three to pass.
+  note: |
+    Id W1-T12510 reserved for run-unfiled-1794582098000 with ~/rmd-work/bin/reserve-id.sh.
+    The two Mac counts come from the operator session's reading of the push logs; they are not stored on main.

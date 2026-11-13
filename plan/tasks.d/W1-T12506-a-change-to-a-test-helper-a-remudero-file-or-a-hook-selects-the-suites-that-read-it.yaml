@@ -1,0 +1,71 @@
+- id: W1-T12506
+  title: "A change to a test helper, a .remudero file or a git hook selects the suites that import, name or read it, not every suite"
+  repo: remudero
+  depends_on: []
+  priority: 1.3
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the selector rule that decides how wide an author run is; a missed reader passes a run that should fail
+  band_meaning: blast-radius
+  origin: operator-session#checking-off-the-author-path-2026-11-13
+  plan_refs:
+    - W1-T6084
+    - W1-T9953
+    - W1-T12505
+  files:
+    - src/lib/affected-suites.ts
+    - doctrine/before-you-push/preflight-before-first-push.md
+    - test/ci/a-change-to-a-test-helper-a-remudero-file-or-a-hook-selects-the-suites-that-read-it.test.ts
+    - test/a-full-fallback-author-selection-is-never-run-whole.test.ts
+    - test/each-suite-records-the-non-code-files-it-reads.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "A change to a code file under test/helpers/ selects every suite that reaches it through the import graph, plus the changed tests and the modelled rest. `fullRunTrigger` returns undefined for it"
+      proof: "grep: W1-T12506 criterion 1 in test/ci/a-change-to-a-test-helper-a-remudero-file-or-a-hook-selects-the-suites-that-read-it.test.ts"
+    - claim: "A change to a file under .remudero/ or hooks/ selects the suites whose text names that path, and with a usable read map also the suites the map records as its readers. `fullRunTrigger` returns undefined for it"
+      proof: "grep: W1-T12506 criterion 2 in test/ci/a-change-to-a-test-helper-a-remudero-file-or-a-hook-selects-the-suites-that-read-it.test.ts"
+    - claim: "A modelled helper or hook path that no suite imports, names or reads still forces the full run, with a reason that names the path and says no reader was found"
+      proof: "grep: W1-T12506 criterion 3 in test/ci/a-change-to-a-test-helper-a-remudero-file-or-a-hook-selects-the-suites-that-read-it.test.ts"
+    - claim: "A change under .github/, openapi/ (other than the contract file) or packages/ (other than the contract file) still forces the full run, as today"
+      proof: "grep: W1-T12506 criterion 4 in test/ci/a-change-to-a-test-helper-a-remudero-file-or-a-hook-selects-the-suites-that-read-it.test.ts"
+  rationale: |
+    A change to a test helper, a .remudero file or a git hook runs every suite on the author path, although the selector can
+    already find the suites that import or name such a file.
+    READ at origin/main 6cf453f7a, src/lib/affected-suites.ts:
+    - :104 MODELLED is `^(?:src|scripts|bin|test|docs|doctrine|plan)\/|^[^/]+\.md$`. .remudero/ and hooks/ are not in it, so
+      `fullRunTrigger` (:112-119) forces a full run for them.
+    - :117 a test/ file that is not a suite (`SUITE`, :100) forces a full run, so every test/helpers/ edit does.
+    - :852 `readAffectedSuitesInput` already lists every tracked file under test/ with its content (TRACKED_CODE_ARGS, :868),
+      so the import graph sees test/helpers/ files and the suites that import them. scripts/preflight-author.mjs:168
+      `fullFallbackPartialSet` (W1-T9953) already walks those importers, but only to cut a run that is still labelled a full run.
+    MEASURED by the operator session over about four days: of 22 author full fallbacks, 3 named a test/helpers/ file,
+    2 a .remudero/ file and 1 hooks/. The Azure lane log on 2026-11-13 holds "full run: test/helpers/registry-shell-fixture.ts
+    is outside what the selector models". On origin/main 75 files are tracked under test/helpers/, 130 suites name .remudero
+    and 95 name hooks/.
+    CHECKED for overlap: W1-T11916 (queued) adds suites that walk the source tree at run time; it does not model these paths.
+    W1-T9922 (blocked) is about plan-only diffs. No open pull request files a task on this subject.
+  design: |
+    1. MODELLED gains `.remudero/` and `hooks/`. A non-suite code file under `test/helpers/` is modelled as code: the import
+       graph (`buildAffectedSuitesGraph`) selects its importers. Other non-suite test/ files keep today's rule.
+    2. For .remudero/ and hooks/ files, select suites by the named-path arm the selector already has (a suite whose text names
+       the changed path), and by `readMapReaders` when the read map is usable (W1-T12505 supplies it; without it, the named-path
+       arm alone).
+    3. When a modelled path in this set has no reader at all, keep the full-run trigger, with a reason that says so. An empty
+       reader set never becomes an empty selection.
+    4. .github/, openapi/ and packages/ keep their full-run rule.
+    5. Update the doctrine sentence that lists fixture and helper changes as full fallbacks.
+    6. Two existing suites use a test/helpers/ path as their example of a file outside the model, and change with it:
+       test/each-suite-records-the-non-code-files-it-reads.test.ts asserts `fullRunTrigger(["test/helpers/x.ts"], true)`
+       returns that path, and the full-fallback fixture in test/a-full-fallback-author-selection-is-never-run-whole.test.ts
+       sets aside test/helpers/shared.ts. Both move their example to a test/fixtures/ path, which stays outside the model.
+    NO-INVARIANTS: this widens what the selector models; the unchanged full-run rule for paths with no reader is criterion 3.
+    NOT IN SCOPE: the read map producer (W1-T12505); CI's own selection rules, which call the same selector and gain the same
+    modelling only where ci.yml already uses the narrow arm.
+  falsifier: |
+    Leave test/helpers/ files unmodelled and criterion 1 must fail. Return an empty selection for a hook with no reader and
+    criterion 3 must fail. Model .github/ too and criterion 4 must fail. Restore and require all four to pass.
+  note: |
+    Id W1-T12506 reserved for run-unfiled-1794582098000 with ~/rmd-work/bin/reserve-id.sh.
