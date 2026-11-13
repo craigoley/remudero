@@ -154,6 +154,8 @@ export type ReviewCapacityReason =
    *  from `telemetry-unavailable`, which means the host itself could not be read. */
   | "provider-telemetry-unavailable"
   | "backlog-not-sustained"
+  /** W1-T12529 — PSI is not calm, but the run queue less review's CPU-phase children still exceeds the cores: base restored. */
+  | "cpu-pressure-not-review"
   | "host-worker-budget"
   | "provider-headroom"
   | "review-history-insufficient"
@@ -400,8 +402,13 @@ export function selectAdaptiveReviewWidth(
     (finite(observation.memoryPsiSomeAvg10Pct) && observation.memoryPsiSomeAvg10Pct > policy.memoryPsiLowPct);
   // Back to base in one sample, never past what the host worker budget leaves room for, and never
   // above base: lanes above it stay earned by the healthy window below.
+  // W1-T12529 — the pressure is not review's own: without review's CPU-phase children the run queue still exceeds the cores.
+  const notReviewsCpu = shareKnown &&
+    finite(observation.memoryPsiSomeAvg10Pct) && observation.memoryPsiSomeAvg10Pct <= policy.memoryPsiLowPct &&
+    finite(observation.reviewCpuChildren) && finite(observation.hostLoad1) && finite(observation.hostCpuCount) &&
+    observation.hostCpuCount > 0 && observation.hostLoad1 - observation.reviewCpuChildren > observation.hostCpuCount;
   const restoreBase = (): void => {
-    if (!psiCalm || effectiveWidth >= baseWidth) return;
+    if (!(psiCalm || notReviewsCpu) || effectiveWidth >= baseWidth) return;
     const room = Math.trunc(policy.hostWorkerBudget) - Math.max(0, Math.trunc(observation.activeWorkers));
     effectiveWidth = Math.max(effectiveWidth, Math.min(baseWidth, room));
   };
@@ -570,7 +577,8 @@ export function selectAdaptiveReviewWidth(
     ) {
       healthySamples = 0;
       lastHealthySampleAtMs = undefined;
-      reason = "backlog-not-sustained";
+      reason = notReviewsCpu ? "cpu-pressure-not-review" : "backlog-not-sustained";
+      restoreBase();
     } else if (
       observation.provider.headroomPct! < observation.provider.reservePct! + policy.providerAllowancePct
     ) {
@@ -991,6 +999,7 @@ export function selectRuntimeReviewWidth(input: RuntimeReviewCapacityInput): num
       review_latency_ratio: result.decision.evidence.reviewLatencyRatio ?? null,
       host_load1: result.decision.evidence.hostLoad1 ?? null,
       host_cpu_count: result.decision.evidence.hostCpuCount ?? null,
+      review_cpu_children: observation.reviewCpuChildren ?? null,
       pressure_source: result.decision.evidence.pressureSource ?? null,
       // W1-T11150 — the CPU shed's own measured effect, so every shed is auditable from the ledger.
       shed_effect: result.decision.evidence.shedEffect ?? null,
