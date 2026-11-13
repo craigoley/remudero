@@ -128,7 +128,7 @@ function cutLane(): { wt: string; branch: string; remote: string; markers: strin
   worktreeAdd(seed.dir, wt, branch, "origin/main", { readRemoteHead: () => seed.git("rev-parse", "HEAD"), warn: () => {} });
   raw(wt, "config", "user.email", GIT_REPO_FIXTURE_IDENTITY.email);
   raw(wt, "config", "user.name", GIT_REPO_FIXTURE_IDENTITY.name);
-  // The worker's edit: a path the census table walks, so the gate reaches the census-suite arm.
+  // The worker's edit: a source path, the shape every gate judges.
   put(join(wt, "src", "feature.ts"), "export const x = 1;\n");
   raw(wt, "add", "src/feature.ts");
   raw(wt, "commit", "-q", "-m", "feat: the worker's edit");
@@ -178,7 +178,7 @@ describe("W1-T6120: the harness pre-push gate runs no worktree code", () => {
   it("the control: the same hook run as the TREE's own hook by a raw push does run the tree's scripts", () => {
     const { wt, markers } = cutLane();
     raw(wt, "push", "-q", "origin", "HEAD");
-    for (const name of ["tree-rule15-precheck", "tree-census-precheck", "tree-tsx-loader"]) {
+    for (const name of ["tree-rule15-precheck", "tree-tsx-loader"]) {
       assert.ok(existsSync(join(markers, name)), `control: the tree's own hook ran ${name}`);
     }
     assert.ok(JSON.parse(readFileSync(join(markers, "tree-rule15-precheck"), "utf8")).includes("GH_TOKEN"), "control: the env route is live");
@@ -193,24 +193,21 @@ describe("W1-T6120: the harness pre-push gate runs no worktree code", () => {
     assert.deepEqual(readdirSync(markers), [], "no worktree script, loader, census suite or lint argv ran");
     const runs = gateRuns();
     const ran = new Set(runs.map((r) => r.check));
-    for (const check of ["rule15-precheck", "rule25-precheck", "ci-control-plane-precheck", "test-tier-manifest", "census-table", "census-precheck", "worker-branch-shape", "head-identity-gate"]) {
+    for (const check of ["rule15-precheck", "rule25-precheck", "ci-control-plane-precheck", "test-tier-manifest", "worker-branch-shape", "head-identity-gate"]) {
       assert.ok(ran.has(check), `the harness copy of ${check} ran`);
     }
-    assert.equal(ran.has("lint-plan-precheck"), false, "the lint argv check, which runs the tree's own code, is not run by the host gate");
+    // W1-T12510: the census precheck and the plan lint run in CI, so the host gate starts neither.
+    for (const check of ["census-table", "census-precheck", "lint-plan-precheck"]) assert.equal(ran.has(check), false, `${check} did not run`);
     for (const run of runs) {
       assert.equal(realpathSync(run.cwd), realpathSync(wt), `${run.check} judged the worktree as its data root`);
       assert.deepEqual(run.env.filter((k) => CREDENTIAL_NAME.test(k)), [], `${run.check} saw no credential variable`);
       assert.notEqual(run.home, process.env.HOME, `${run.check} ran with a throwaway HOME`);
       assert.equal(existsSync(run.home), false, "the throwaway HOME is removed after the gate");
     }
-    const census = runs.find((r) => r.check === "census-precheck");
-    assert.match(String(census?.refused), /host gate runs no worktree code/, "a census suite to run is refused, not run");
-    assert.equal(realpathSync(String(runs.find((r) => r.check === "census-table")?.root)), realpathSync(harness), "the admission table is the gate root's");
     assert.deepEqual(runs.find((r) => r.check === "ci-control-plane-precheck")?.files, ["src/feature.ts"]);
 
     assert.match(stderr, /proof-resolve-precheck\.mjs absent — skipped, NOT passed/, "an absent harness check is skipped by name");
-    assert.match(stderr, /lint-plan-precheck runs the branch's own package\.json lint argv.*skipped, NOT passed/);
-    assert.match(stderr, /census-precheck: census suites NOT MEASURED/);
+    assert.match(stderr, /pre-push: census suites and plan lint run in CI/);
   });
 
   it("off the event loop the same holds, and a capability-snapshot diff skips the control-plane check by name", async () => {
