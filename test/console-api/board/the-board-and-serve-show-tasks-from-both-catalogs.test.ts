@@ -4,16 +4,19 @@ import { mkdirSync, mkdtempSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { computeBoardSnapshot, createBoardSnapshotCache } from "#src/lib/board.js";
+import { buildStatusRoute, computeBoardSnapshot, createBoardSnapshotCache, type BoardSnapshot } from "#src/lib/board.js";
 import { computeTaskCard } from "#src/lib/task-card.js";
 import { assembleNowView } from "#src/lib/now-view.js";
 import { buildStatusBoard, buildStatusBoardAsync, renderStatusBoardText } from "#src/lib/status-board.js";
-import { readBoardCatalogs, reloadServePlan, serveBoardCatalogs } from "#src/lib/serve-plan-reload.js";
+import { PLAN_RELOAD_TIMEOUT_MS, readBoardCatalogs, reloadServePlan, serveBoardCatalogs } from "#src/lib/serve-plan-reload.js";
 import { mergePlanBlobs, type Plan } from "#src/lib/plan.js";
 import { type OpsCatalogApi } from "#src/lib/ops-catalog-source.js";
 import { fakeGitHub } from "#test/helpers/fake-github.js";
 import { withGhShim } from "#test/helpers/gh-shim.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { createBoardProjectionWorker } from "#src/lib/board-worker.js";
+import { threadStrictPlan } from "#src/lib/thread-plan.js";
+import type { IncomingMessage, ServerResponse } from "node:http";
 
 const repository = "fixture-private/ops";
 const secret = "OPS_PRIVATE_METADATA_SENTINEL";
@@ -279,4 +282,65 @@ test("healthy private input does not turn unavailable GitHub status evidence int
   assert.equal(row.indeterminate, true);
   assert.match(renderStatusBoardText(model), /OPS-T1.*unverified/);
   assert.doesNotMatch(JSON.stringify(model), new RegExp(secret));
+});
+
+
+test("W1-T12211 production board worker and supplied status route use the selected catalog", async () => {
+  const h = host(), fx = source(privateRecord());
+  const planDir = join(h.root, "plan"), planPath = join(planDir, "tasks.yaml"), inflightDir = join(h.state, "inflight");
+  mkdirSync(join(planDir, "tasks.d"), { recursive: true });
+  mkdirSync(inflightDir);
+  writeFileSync(planPath, record("PUBLIC-T1"));
+  assert.deepEqual(threadStrictPlan(planPath).tasks.map(t => t.id), ["PUBLIC-T1"], "the real public worker fixture loads before judging private composition");
+  assert.equal((await readBoardCatalogs(publicPlan, h.state, fx.api))?.outcome, "ok");
+  const routes = [...fx.responses].sort((a, b) => b[0].length - a[0].length)
+    .map(([path, response]) => ({ when: `api ${path}`, stdout: JSON.stringify(response) }));
+  await withGhShim(routes, async shim => {
+    const seen: BoardSnapshot[] = [];
+    const waiters = new Set<() => void>();
+    const github = fakeGitHub({ listMergedHeadBranches: () => [], listOpenHeadBranches: () => [], findMergedByHeadBranch: () => [] });
+    const worker = createBoardProjectionWorker(github, { planPath, ledgerPath: h.ledgerPath, inflightDir }, {
+      intervalMs: 50,
+      onSnapshot: () => {
+        const state = worker.current();
+        if (state.state === "ready") seen.push(state.snapshot);
+        for (const wake of [...waiters]) wake();
+      },
+    });
+    const snapshot = (predicate: (value: BoardSnapshot) => boolean): Promise<BoardSnapshot> => {
+      const prior = seen.find(predicate);
+      if (prior) return Promise.resolve(prior);
+      return new Promise((resolve, reject) => {
+        const signal = AbortSignal.timeout(PLAN_RELOAD_TIMEOUT_MS);
+        const clear = (): void => { waiters.delete(wake); signal.removeEventListener("abort", abort); };
+        const wake = (): void => { const value = seen.find(predicate); if (value) { clear(); resolve(value); } };
+        const abort = (): void => { clear(); reject(new Error("the default worker never produced the required catalog observation")); };
+        waiters.add(wake); signal.addEventListener("abort", abort, { once: true }); wake();
+      });
+    };
+    try {
+      worker.start();
+      const first = await snapshot(() => true);
+      assert.ok(first.opsCatalog, "the real selected worker must label private pending/unreadable state, never silently serve public-only as a healthy whole");
+      const ready = await snapshot(value => value.opsCatalog?.outcome === "ok");
+      assert.deepEqual(ready.tasks.map(t => t.taskId), ["PUBLIC-T1", "OPS-T1"]);
+      let status: number | undefined, body: string | undefined;
+      const response = {
+        writeHead(code: number) { status = code; return this; },
+        end(value: string) { body = value; return this; },
+      } as unknown as ServerResponse;
+      buildStatusRoute({ plan: publicPlan(), ledgerPath: h.ledgerPath, github, readLedger: () => [] }, undefined, worker)
+        .handler({ headers: {} } as IncomingMessage, response);
+      assert.equal(status, 200);
+      assert.ok(body);
+      const served = JSON.parse(body) as BoardSnapshot;
+      assert.deepEqual(served.tasks.map(t => t.taskId), ["PUBLIC-T1", "OPS-T1"], "serve must use the supplied production worker, not its separate public-only fallback cache");
+      assert.doesNotMatch(body, new RegExp(secret));
+      assert.ok(shim.calls().length >= fx.responses.size, "the parent default must execute the real pinned GET-only child reader");
+      for (const call of shim.calls()) assert.match(call, /^api repos\//);
+    } finally {
+      await worker.pause();
+      worker.stop();
+    }
+  });
 });
