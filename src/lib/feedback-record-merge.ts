@@ -124,7 +124,7 @@ export function mergeFeedbackRecord(upstreamBytes: string | undefined, localByte
   }
   const upstream = upstreamParsed.record;
   const local = localParsed.record;
-  const causalFields = ["submission_key", "thread_id", "reply_to"] as const;
+  const causalFields = ["submission_key", "thread_id", "reply_to", "console_correction"] as const;
   const changedIdentity = causalFields.find(field => upstream[field] != null && local[field] != null && !isDeepStrictEqual(upstream[field], local[field]));
   if (changedIdentity) return { kind: "refuse", reason: `immutable feedback identity "${changedIdentity}" changed` };
   const takeLocal = (): FeedbackRecordMergeDecision => {

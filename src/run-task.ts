@@ -1108,6 +1108,7 @@ import { CASH_RESPONSES_DEPLOYMENTS } from "./lib/cash-responses.js";
 import { runSweepBakeoff } from "./lib/sweep.js";
 import { OPENWEIGHT_PRICES, OPENWEIGHT_CONTEXT_WINDOWS, OPENWEIGHT_TEMPERATURE, openWeightDeploymentReady, OpenWeightAllowanceExhaustedError } from "./lib/worker-provider.js";
 import { createDraftStatsSession, type DraftStats } from "./lib/draft-routing.js";
+import { correctionEvidenceOf, parseReplayPackets, type ReplayPacket } from "./lib/console-feedback.js";
 import {
   buildFeedbackDocket,
   feedbackDocketDue,
@@ -32993,6 +32994,21 @@ export function readDocketLedgerCorpus(
   return rows;
 }
 
+/** W1-T11104: the curated replay packets the docket attaches to a correction candidate. Unreadable or
+ *  malformed packets are NAMED in the ledger and the candidate reports its packets as unverified. */
+function readConsoleReplayPackets(root: string, log: (step: string, extra?: Record<string, unknown>) => void): ReplayPacket[] | undefined {
+  const path = join(root, "test", "fixtures", "console-feedback-replays.json");
+  if (!existsSync(path)) return undefined;
+  try {
+    const parsed = parseReplayPackets(JSON.parse(readFileSync(path, "utf8")) as unknown);
+    if (parsed.ok) return parsed.packets;
+    log("feedback_docket.replay_packets_unavailable", { reason: parsed.reason });
+  } catch (e) {
+    log("feedback_docket.replay_packets_unavailable", { reason: String((e as Error)?.message ?? e) });
+  }
+  return undefined;
+}
+
 export function runFeedbackDocketRung(
   config: Config,
   ledgerPath: string,
@@ -33012,7 +33028,14 @@ export function runFeedbackDocketRung(
 
     const window = feedbackDocketLookbackWindow(now);
     const ledgerLines = readDocketLedgerCorpus(ledgerPath, log);
-    const rejectedFeedback = listFeedback(root, { status: "rejected" }).map((e) => ({ id: e.id, ts: e.ts, raw: e.raw }));
+    // W1-T11104: carry an explicit console correction through the rung instead of projecting only text.
+    const rejectedFeedback = listFeedback(root, { status: "rejected" }).map((e) => {
+      const correction = correctionEvidenceOf(e);
+      return { id: e.id, ts: e.ts, raw: e.raw, ...(correction ? { correction } : {}) };
+    });
+    const consoleCorrections = listFeedback(root).filter((e) => e.status !== "rejected")
+      .flatMap((e) => { const correction = correctionEvidenceOf(e); return correction ? [correction] : []; });
+    const replayPackets = readConsoleReplayPackets(root, log);
     const questionLines = readQuestionsNdjson(root);
     const noteStore = Object.hasOwn(deps, "noteStore") ? deps.noteStore :
       deps.root && !deps.repository ? root : configuredOperatorNoteStore(config, deps.repository, root);
@@ -33020,12 +33043,13 @@ export function runFeedbackDocketRung(
       .filter((n) => typeof n.note === "string" && typeof n.taskId === "string" && typeof n.ts === "string")
       .map((n) => ({ ts: n.ts as string, taskId: n.taskId as string, note: n.note as string }));
 
-    const docket = buildFeedbackDocket({ ledgerLines, rejectedFeedback, questionLines, operatorNotes, window });
+    const docket = buildFeedbackDocket({ ledgerLines, rejectedFeedback, questionLines, operatorNotes, window,
+      consoleCorrections, ...(replayPackets ? { replayPackets } : {}) });
     if (docket.items.length === 0) {
       // Recorded before returning, deliberately — mirrors auto-triage's "record the fire first"
       // discipline while retaining the per-surface counts doctor judges after ledger rotation.
       writeFeedbackDocketMarker(markerPath, feedbackDocketMarkerWithFire(markerPath, now, "feedback_docket.empty", docket));
-      log("feedback_docket.empty", { window, counts_by_source: docket.countsBySource });
+      log("feedback_docket.empty", { window, counts_by_source: docket.countsBySource, console_correction_unverified: docket.consoleCorrection.unverified });
       return { fired: false };
     }
 
@@ -33055,6 +33079,8 @@ export function runFeedbackDocketRung(
       proposal_id: result.candidate.id,
       referent: result.referent,
       consumed_count: result.consumed.length,
+      console_correction_candidates: docket.consoleCorrection.candidates.length,
+      console_correction_unverified: docket.consoleCorrection.unverified.length,
       window,
     });
     return { fired: filed };
