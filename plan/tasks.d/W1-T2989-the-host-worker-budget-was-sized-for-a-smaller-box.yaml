@@ -1,19 +1,30 @@
 - id: W1-T2989
-  title: "THE HOST WORKER BUDGET OF 4 WAS SIZED FOR A SMALLER BOX AND NOW SHEDS REVIEW CAPACITY ON AN 8-CORE HOST WITH 28 GiB FREE — it is the next governor to bind once W1-T2985 removes the cpu-pressure shed"
+  title: "The host worker budget of the review width counts only workers that use local CPU, not reviews waiting on the model provider"
   repo: remudero
   depends_on: [W1-T2987]
   type: implement
-  verify: human
+  verify: auto
   principles: {tdd: strict}
   budget_usd: 30.00
-  risk: medium
+  risk: high
+  band_meaning: blast-radius
   origin: architect
-  plan_refs: ["W1-T2853", "W1-T2985", "W1-T1049", "W1-T312"]
-  files: [plan/policy.yaml]
-  status: blocked
-  retirement: closed
-  # CLOSED 2026-09-20 by operator authorization: W1-T3209/#4731 shipped the measured host budget.
+  plan_refs: ["W1-T2853", "W1-T2985", "W1-T1049", "W1-T312", "W1-T3209", "W1-T11149", "W1-T12529"]
+  files:
+    - src/lib/review-capacity.ts
+    - src/lib/sweep.ts
+    - test/review/the-host-worker-budget-counts-only-workers-that-use-local-cpu.test.ts
+  status: queued
   attempts: 0
+  acceptance:
+    - claim: "With 8 active workers of which 3 are reviews in their provider phase, a host worker budget of 8 and base width 4, the review width is judged against 5 local-CPU workers: the host-worker-budget arm does not fire and restoreBase leaves room for 3 lanes"
+      proof: "grep: W1-T2989 criterion 1 in test/review/the-host-worker-budget-counts-only-workers-that-use-local-cpu.test.ts"
+    - claim: "invariant:budget-never-below-origin — with no provider-phase count supplied, or a count of 0, every review width decision equals the one origin/main makes"
+      proof: "grep: W1-T2989 criterion 2 in test/review/the-host-worker-budget-counts-only-workers-that-use-local-cpu.test.ts"
+    - claim: "invariant:local-count-bounded — a provider-phase count above the active workers, or a negative one, leaves the local CPU worker count between 0 and activeWorkers"
+      proof: "grep: W1-T2989 criterion 4 in test/review/the-host-worker-budget-counts-only-workers-that-use-local-cpu.test.ts"
+    - claim: "The sweep's selectAdaptiveReviewWidth adapter passes the provider-phase review count from reviewPhaseSplit, and the review.capacity row carries active_workers (all) and local_cpu_workers (the count the budget judged)"
+      proof: "grep: W1-T2989 criterion 3 in test/review/the-host-worker-budget-counts-only-workers-that-use-local-cpu.test.ts"
   rationale: |
     `sweep.reviewCapacity.hostWorkerBudget` is 4. The shed fires when
     `activeWorkers + effectiveWidth > hostWorkerBudget`, and today's steady state is 2 dispatch
@@ -30,6 +41,38 @@
     the repo's own recurring mistake in reverse — moving a bound before the population it separates
     has been observed under the new regime. Land the other two, re-read the `review.capacity`
     reason census, and only then decide the number, with that census as the evidence.
-  acceptance:
-    - claim: "the budget is re-decided against a measured reason census taken after W1-T2985 and W1-T2987 are live"
-      proof: "grep: hostWorkerBudget in plan/policy.yaml"
+
+    AMENDED 2026-11-13 (operator approved unblocking it that day). The number was decided: W1-T3209 (#4731) set the
+    budget to 8 (plan/policy.yaml:660), and the 2026-09-20 retirement recorded that. The budget still binds, for a
+    different reason: it counts workers that use no local CPU.
+    MEASURED by the operator session, 2026-11-13 13:05-19:05Z: 28 of 70 review.capacity samples had reason
+    host-worker-budget, with 5-7 active workers against the budget of 8; reviews mostly wait on the model (median 5.0 min).
+    READ AGAIN by the filing session from the rows still on the host: 14 host-worker-budget rows in that window, active
+    workers 4-9, judge_phase_in_flight 1 or 2 in 6 of them.
+    READ at origin/main 51e329755:
+    - src/lib/sweep.ts:3145-3149 the adapter passes activeWorkerCount() (src/lib/worker.ts:2171, "Builds and reviews share
+      this count") as activeWorkers.
+    - src/lib/sweep.ts:26092 reviewPhaseSplit already counts reviews in their provider phase (judgePhaseInFlight, W1-T11149),
+      and the adapter calls it only after the width is chosen (:3156-3160).
+    - src/lib/review-capacity.ts: the host-worker-budget arms (:505, :562), restoreBase's room (:405) and the shed's
+      roomNow (:417) all subtract the whole activeWorkers from hostWorkerBudget, so a review waiting minutes on the provider
+      takes a lane of local CPU it does not use.
+    The original verify: human hold waited for W1-T2985 and W1-T2987, which are merged; the proofs below are automated.
+  design: |
+    1. Add an optional `providerPhaseWorkers` to ReviewCapacityObservation and to RuntimeReviewCapacityInput: active workers
+       known to be waiting on the model provider. Today only reviews in their provider phase are known (reviewPhaseSplit's
+       judgePhaseInFlight); a build worker counts as local CPU.
+    2. In selectAdaptiveReviewWidth, compute localCpuWorkers = max(0, activeWorkers - (providerPhaseWorkers ?? 0)) once, and use
+       it wherever the controller compares workers against hostWorkerBudget: the two host-worker-budget arms, restoreBase's
+       room, the shed's roomNow, and reviewPressureSource's fleet-budget test. The learned lane bound (laneCpuBound) uses it
+       too, since it is a CPU bound.
+    3. In the sweep adapter (src/lib/sweep.ts:3145), read reviewPhaseSplit(policy.reviewLanes).judgePhaseInFlight before the
+       selection and pass it as providerPhaseWorkers. Absent (an injected activeWorkers in a test), pass nothing.
+    4. Add local_cpu_workers to the review.capacity row; active_workers keeps its meaning (all workers).
+    INVARIANT budget-never-below-origin: with providerPhaseWorkers absent or 0, every decision equals origin/main's.
+    INVARIANT local-count-bounded: localCpuWorkers is never below 0 and never above activeWorkers.
+    NOT IN SCOPE: the budget's value (8 stays); fix capacity (src/lib/sweep.ts:18659) and the focus gardener, which read the
+    same budget; whether build workers waiting on the model can be counted.
+  falsifier: |
+    Pass activeWorkers unchanged to the budget arms and criterion 1 must fail. Let localCpuWorkers go negative and criterion 2
+    must fail. Drop the adapter's providerPhaseWorkers and criterion 3 must fail. Restore and all must pass.
