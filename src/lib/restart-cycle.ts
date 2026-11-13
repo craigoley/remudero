@@ -96,7 +96,28 @@ export function restartCycleRow(rows: readonly Row[], startAtMs: number): Restar
     item !== null && typeof item === "object") : undefined;
   const abandoned = inventory?.filter(item => item.abandoned === true).map((item): AbandonedWork => ({ ...item,
     age_ms: finite(item.admitted_at_ms) && item.admitted_at_ms <= drain!.ms ? drain!.ms - item.admitted_at_ms : null }));
-  const reviews = abandoned?.filter(item => item.what === "review") ?? null;
+  const reviewsByKey = new Map<string, AbandonedWork>();
+  for (const item of abandoned?.filter(item => item.what === "review") ?? []) {
+    const key = typeof item.pr === "number" ? `pr:${item.pr}` : typeof item.task_id === "string" ? `task:${item.task_id}` : `unknown:${reviewsByKey.size}`;
+    reviewsByKey.set(key, item);
+  }
+  // A review aborts at the drain bound and can settle/remove itself before the completion inventory is written.
+  // Its pre-abort event carries the exact identity and age captured while it was still registered.
+  for (const event of before.filter(r => r.row.step === "daemon.in_flight_review_abandoned")) {
+    const row = event.row;
+    const key = typeof row.pr === "number" ? `pr:${row.pr}` : typeof row.task_id === "string" ? `task:${row.task_id}` : `unknown:${reviewsByKey.size}`;
+    reviewsByKey.set(key, { what: "review", kind: typeof row.kind === "string" ? row.kind : "review",
+      ...(row.pr === undefined ? {} : { pr: row.pr }), ...(row.task_id === undefined ? {} : { task_id: row.task_id }),
+      ...(row.admitted_at_ms === undefined ? {} : { admitted_at_ms: row.admitted_at_ms }), age_ms: finite(row.age_ms) ? row.age_ms : null });
+  }
+  const reportedAbandonedReviews = drain?.row.abandoned_in_flight_reviews;
+  if (typeof reportedAbandonedReviews === "number" && Number.isInteger(reportedAbandonedReviews)) {
+    while (reviewsByKey.size < reportedAbandonedReviews) {
+      reviewsByKey.set(`unknown:${reviewsByKey.size}`, { what: "review", kind: "review", age_ms: null });
+    }
+  }
+  const reviews = abandoned || before.some(r => r.row.step === "daemon.in_flight_review_abandoned") ||
+    reportedAbandonedReviews === 0 ? [...reviewsByKey.values()] : null;
   const fixesByTask = new Map<string, AbandonedWork>();
   for (const item of abandoned?.filter(item => item.what === "detached" && item.kind === "fix-dispatch") ?? []) {
     const key = typeof item.task_id === "string" ? item.task_id : `unknown:${fixesByTask.size}`;

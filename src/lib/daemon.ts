@@ -5591,6 +5591,11 @@ export async function runDaemon(
         [abandoned, abandonedReviews, unresolvedMerges] = await Promise.all([
           drainDetached(detachedBoundMs),
           drainInFlightReviews({ boundMs: reviewBoundMs, onWait: observation.watch,
+            onAbandon: (item, ageMs) => log("daemon.in_flight_review_abandoned", {
+              kind: item.kind, ...(item.task_id === undefined ? {} : { task_id: item.task_id }),
+              ...(item.pr === undefined ? {} : { pr: item.pr }), admitted_at_ms: item.admitted_at_ms, age_ms: ageMs,
+              bound_ms: reviewBoundMs,
+            }),
             closeRefills: pass?.overlapped !== true && placements.review?.placement !== "child" }),
           drainDirectMergeOperations({ boundMs: detachedBoundMs, onWait: (operation) => observation.watch(directMergeRestartItem(operation)) }),
           pass?.overlapped ? pass.settled : undefined,
@@ -5605,7 +5610,11 @@ export async function runDaemon(
         const boundMs = Math.max(0, deadlineMs - daemonClock.now());
         [abandoned, abandonedReviews] = await Promise.all([
           pass?.overlapped ? drainDetached(boundMs) : Promise.resolve(abandoned),
-          drainInFlightReviews({ boundMs, onWait: observation.watch, closeRefills: placements.review?.placement !== "child" }),
+          drainInFlightReviews({ boundMs, onWait: observation.watch,
+            onAbandon: (item, ageMs) => log("daemon.in_flight_review_abandoned", {
+              kind: item.kind, ...(item.task_id === undefined ? {} : { task_id: item.task_id }),
+              ...(item.pr === undefined ? {} : { pr: item.pr }), admitted_at_ms: item.admitted_at_ms, age_ms: ageMs, bound_ms: boundMs,
+            }), closeRefills: placements.review?.placement !== "child" }),
         ]);
       }
       if (unresolvedMerges.length > 0) cancelUnsubmittedDirectMerges();

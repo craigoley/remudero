@@ -8,6 +8,7 @@ import { runDaemon } from "#src/lib/daemon.js";
 import { rotateLedger } from "#src/lib/ledger.js";
 import type { Plan } from "#src/lib/plan.js";
 import * as sweep from "#src/lib/sweep.js";
+import { currentReviewSignal, trackInFlightReview } from "#src/lib/sweep.js";
 
 const epoch = Date.now();
 const at = (ms: number) => new Date(epoch + ms).toISOString();
@@ -93,6 +94,13 @@ test("W1-T12229 criterion 3: production freshness drain preserves a cancelled fi
     abandon: abandoned, fixKey: "FIX-229@head", release: () => { releaseFixKey++; },
   });
   fixWait("admission", { sinceMs: oldStart, attempts: 1 });
+  let finishReview!: () => void;
+  const reviewWork = new Promise<void>(resolve => { finishReview = resolve; });
+  const reviewFailsafe = setTimeout(finishReview, 250);
+  const review = trackInFlightReview(() => {
+    currentReviewSignal()?.addEventListener("abort", finishReview, { once: true });
+    return reviewWork;
+  }, { prNumber: 42, kind: "review", admittedAtMs: oldStart });
   const priorRows: Row[] = [{ ts: new Date(oldStart).toISOString(), step: "daemon.boot", run_id: "old" }];
   const daemonRows: Row[] = [];
   const empty: Plan = { tasks: [], byId: new Map() };
@@ -116,6 +124,9 @@ test("W1-T12229 criterion 3: production freshness drain preserves a cancelled fi
     assert.equal(abandonedRow?.action_kind, "fix-dispatch");
     assert.equal(abandonedRow?.task_id, "FIX-229");
     assert.equal(abandonedRow?.age_ms, 229);
+    const abandonedReview = daemonRows.find(entry => entry.step === "daemon.in_flight_review_abandoned");
+    assert.equal(abandonedReview?.pr, 42);
+    assert.equal(abandonedReview?.age_ms, 229);
     assert.equal(releaseFixKey, 1);
     const completion = daemonRows.find(entry => entry.step === "daemon.freshness_drain.completed");
     assert.ok(Array.isArray(completion?.waited_on));
@@ -126,11 +137,14 @@ test("W1-T12229 criterion 3: production freshness drain preserves a cancelled fi
       { ts: new Date(oldStart + 310).toISOString(), step: "review.posted", pr: 1 }];
     const cycle = restartCycleRow(cycleRows, oldStart + 300);
     assert.ok(cycle);
+    assert.deepEqual(cycle.gave_up.reviews?.map(item => [item.pr, item.age_ms]), [[42, 229]]);
     assert.deepEqual(cycle.gave_up.fix_rounds?.map(item => [item.task_id, item.age_ms]), [["FIX-229", 229]]);
-    assert.equal(cycle.gave_up_age_ms, 229);
+    assert.equal(cycle.gave_up_age_ms, 458);
   } finally {
     if (!abandoned.signal.aborted) abandoned.abort();
     await sweep.drainDetachedSweepActions();
+    await review;
+    clearTimeout(reviewFailsafe);
     t.mock.restoreAll();
   }
 });
