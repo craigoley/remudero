@@ -1,0 +1,24 @@
+- id: W1-T12462
+  title: Check merge-path overlap for restartDrainInventory changes
+  repo: remudero
+  depends_on:
+    - W1-T1050
+    - W1-T1111
+    - W1-T1255
+  type: recon
+  verify: auto
+  risk: low
+  status: queued
+  attempts: 0
+  files:
+    - MASTER-PLAN.md
+  acceptance:
+    - claim: The current plan records whether open pull requests or branches touch restartDrainInventory or a direct-merge path, including the evidence source and an explicit unknown if the check could not be completed
+      proof: "grep: restartDrainInventory in MASTER-PLAN.md"
+  origin: followup:W1-T11503-1794435496429:2026-11-11T22:22:54.117Z:1
+  rationale: >-
+    From the 2026-11-11 follow-up on W1-T11503-1794435496429, ratified via rmd approve:
+  
+    follow-up harvest [research]: check for open PRs or branches touching `restartDrainInventory`
+    or the direct-merge path, such as PR16971. This guards against overlap and conflicts. — from
+    W1-T11503 (run W1-T11503-1794435496429)

@@ -5467,7 +5467,12 @@ export async function runDaemon(
   // The drain every restart takes before it returns: live fix workers and in-flight reviews finish (bounded),
   // best-effort cadences and CI waits are released to be re-derived after restart. Shared by the freshness exit
   // and the memory-pressure exit so neither restart can kill work the other would have waited for.
-  const drainBeforeRestart = async (stepPrefix: "daemon.freshness_drain" | "daemon.memory_drain", latchAtMs?: number): Promise<void> => {
+  type FreshnessPass = "skipped_ran_since_latch" | "skipped_ran_since_stale" | "awaited_in_flight" | "ran";
+  type ExitPass = { kind: FreshnessPass; settled: Promise<void>; overlapped: boolean; overlapMs: number };
+  const drainBeforeRestart = async (
+    stepPrefix: "daemon.freshness_drain" | "daemon.memory_drain", latchAtMs?: number, pass?: ExitPass,
+    exitDeadlineAtMs?: number,
+  ): Promise<void> => {
     const fromLatch = stepPrefix === "daemon.freshness_drain" && latchAtMs !== undefined &&
       latchDrain?.latchAtMs === latchAtMs && !latchDrain.done ? latchDrain : undefined;
     if (fromLatch) fromLatch.done = true;
@@ -5485,7 +5490,7 @@ export async function runDaemon(
     const reviewsAtExit = inFlightReviewRunsNow();
     const reviewsAtFreshness = reviewsAtExit.length;
     const latchStarted = fromLatch?.started === true ? fromLatch : undefined;
-    if (detachedAtFreshness > 0 || reviewsAtFreshness > 0 || directMergesAtFreshness > 0 || latchStarted || hasChildrenLeft) {
+    if (detachedAtFreshness > 0 || reviewsAtFreshness > 0 || directMergesAtFreshness > 0 || latchStarted || hasChildrenLeft || pass?.overlapped) {
       const drainStartedAtMs = latchStarted ? latchStarted.latchAtMs : exitAtMs;
       const latchFields = fromLatch ? { started_at: fromLatch.started ? "latch" : "exit", latched_at: fixedClock(fromLatch.latchAtMs).iso() }
         : stepPrefix === "daemon.freshness_drain" ? { started_at: "exit" } : {};
@@ -5495,8 +5500,9 @@ export async function runDaemon(
         in_flight_reviews: reviewsAtFreshness,
         waited_on: observation.snapshot(),
       });
-      // Bounds: what the latch saw has had the wait since the latch; anything newer gets the exit's whole bound.
-      const latchLeftMs = fromLatch ? Math.max(0, fromLatch.latchAtMs + sweepWallClockBoundMs - exitAtMs) : sweepWallClockBoundMs;
+      // Work admitted by an overlapping pass shares the latch deadline, including work not yet in the inventory.
+      const latchLeftMs = exitDeadlineAtMs !== undefined ? Math.max(0, exitDeadlineAtMs - exitAtMs)
+        : fromLatch ? Math.max(0, fromLatch.latchAtMs + sweepWallClockBoundMs - exitAtMs) : sweepWallClockBoundMs;
       const seen = new Set(reviewsAtExit);
       const settled = new Set<Promise<void>>();
       const watch = (reviews: Iterable<Promise<void>>): void => {
@@ -5504,9 +5510,9 @@ export async function runDaemon(
       };
       watch(reviewsAtExit);
       const afterLatch = (): Promise<void>[] => fromLatch ? [...seen].filter((review) => !fromLatch.reviews.has(review)) : [];
-      const reviewBoundMs = afterLatch().length > 0 ? sweepWallClockBoundMs : latchLeftMs;
+      const reviewBoundMs = pass?.overlapped !== true && afterLatch().length > 0 ? sweepWallClockBoundMs : latchLeftMs;
       let detachedBoundMs = latchLeftMs;
-      if (fromLatch && detachedAtFreshness > 0) {
+      if (fromLatch && detachedAtFreshness > 0 && pass?.overlapped !== true) {
         const sinceLatchMs = exitAtMs - fromLatch.latchAtMs;
         const live = await drainDetachedSweepActions({ boundMs: 0 });
         if (live.some((action) => action.ageMs < sinceLatchMs)) detachedBoundMs = sweepWallClockBoundMs;
@@ -5526,33 +5532,36 @@ export async function runDaemon(
       let unresolvedMerges: DirectMergeOperation[];
       let reviewPasses = 0;
       let reviewPassesHeld = 0;
+      const drainDetached = (boundMs: number) => drainDetachedSweepActions({
+        boundMs, freshness: true, onWait: observation.watch,
+        onRelease: (action, work) => {
+          observation.release(work, action.phase);
+          log("daemon.detached_action_released", {
+            action_kind: action.actionKind, task_id: action.taskId,
+            age_ms: action.ageMs, phase: action.phase, reason: action.reason,
+          });
+        },
+      });
       try {
         [abandoned, abandonedReviews, unresolvedMerges] = await Promise.all([
-          drainDetachedSweepActions({
-            boundMs: detachedBoundMs,
-            freshness: true,
-            onWait: observation.watch,
-            onRelease: (action, work) => {
-              observation.release(work, action.phase);
-              log("daemon.detached_action_released", {
-                action_kind: action.actionKind, task_id: action.taskId,
-                age_ms: action.ageMs, phase: action.phase, reason: action.reason,
-              });
-            },
-          }),
-          drainInFlightReviews({ boundMs: reviewBoundMs, onWait: observation.watch, closeRefills: placements.review?.placement !== "child" }),
+          drainDetached(detachedBoundMs),
+          drainInFlightReviews({ boundMs: reviewBoundMs, onWait: observation.watch,
+            closeRefills: pass?.overlapped !== true && placements.review?.placement !== "child" }),
           drainDirectMergeOperations({ boundMs: detachedBoundMs, onWait: (operation) => observation.watch(directMergeRestartItem(operation)) }),
+          pass?.overlapped ? pass.settled : undefined,
         ]);
       } finally {
         const stopped = drainReviewClock ? await drainReviewClock.stop() : undefined;
         reviewPasses = stopped?.passes ?? 0;
         reviewPassesHeld = stopped?.held ?? 0;
       }
-      if (drainReviewClock) {
+      if (drainReviewClock || (pass?.overlapped && (inFlightReviewCount() > 0 || detachedSweepActionCount() > 0))) {
         watch(inFlightReviewRunsNow());
-        abandonedReviews = await drainInFlightReviews({
-          boundMs: Math.max(0, deadlineMs - daemonClock.now()), onWait: observation.watch, closeRefills: placements.review?.placement !== "child",
-        });
+        const boundMs = Math.max(0, deadlineMs - daemonClock.now());
+        [abandoned, abandonedReviews] = await Promise.all([
+          pass?.overlapped ? drainDetached(boundMs) : Promise.resolve(abandoned),
+          drainInFlightReviews({ boundMs, onWait: observation.watch, closeRefills: placements.review?.placement !== "child" }),
+        ]);
       }
       if (unresolvedMerges.length > 0) cancelUnsubmittedDirectMerges();
       for (const operation of unresolvedMerges) {
@@ -5594,6 +5603,7 @@ export async function runDaemon(
           review_length_ms: reviewLength?.ms ?? null,
           review_length_source: reviewLength?.source,
           admissions_held_after_latch: restartWindow?.held ?? 0,
+          ...(pass ? { pre_exit_pass: pass.kind, pass_overlap_ms: pass.overlapMs } : {}),
         } : {}),
         ...(fromLatch ? {
           admitted_after_latch: afterLatch().length,
@@ -5602,13 +5612,12 @@ export async function runDaemon(
       });
     }
     if (stepPrefix === "daemon.freshness_drain") {
-      freshnessPhases.drain = (freshnessPhases.drain ?? 0) + Math.max(0, daemonClock.now() - exitAtMs);
+      freshnessPhases.drain = (freshnessPhases.drain ?? 0) + Math.max(0, daemonClock.now() - exitAtMs - (pass?.overlapMs ?? 0));
     }
   };
 
   // One stale-exit path for both freshness boundaries. Both must preserve the same install, bounded pass, named
   // ledger and stale summary contract; duplicating that sequence would let them drift (W1-T2845).
-  type FreshnessPass = "skipped_ran_since_latch" | "skipped_ran_since_stale" | "awaited_in_flight" | "ran";
   let preparedFreshnessExit: Promise<FreshnessPass> | undefined;
   let advanceEvidence: { stale_since_ms: number; last_pass_completed_ms: number | null } | undefined;
   const prepareFreshnessExit = async (
@@ -5629,9 +5638,10 @@ export async function runDaemon(
       advanceEvidence = { stale_since_ms: advanceSinceMs, last_pass_completed_ms: lastPassCompletedAtMs ?? null };
     }
     const passStartedAtMs = daemonClock.now();
+    let pendingPass: Promise<unknown> | undefined;
     if (backgroundSweep) {
       preExitPass = "awaited_in_flight";
-      await backgroundSweep;
+      pendingPass = backgroundSweep;
     } else if (dispatchLatchAtMs !== undefined && sweepLiveness.lastCompletedAtMs !== undefined &&
       sweepLiveness.lastCompletedAtMs > dispatchLatchAtMs) {
       preExitPass = "skipped_ran_since_latch";
@@ -5640,14 +5650,18 @@ export async function runDaemon(
       preExitPass = "skipped_ran_since_stale";
     } else if (deps.sweep) {
       sweepRetriggerState.lastRunAtMs = daemonClock.now();
-      await runGatedSweep(deps, pollIntervalMs, sweepBound, log, diskHeadroomLatch, headroomSampler, sweepLiveness, undefined, latchedAdmission);
+      pendingPass = runGatedSweep(deps, pollIntervalMs, sweepBound, log, diskHeadroomLatch, headroomSampler, sweepLiveness, undefined, latchedAdmission);
     }
-    if (preExitPass === "awaited_in_flight" || (preExitPass === "ran" && deps.sweep)) {
-      freshnessPhases.pre_exit_pass = Math.max(0, daemonClock.now() - passStartedAtMs);
-    }
+    const pass: ExitPass = { kind: preExitPass, settled: Promise.resolve(),
+      overlapped: dispatchLatchAtMs !== undefined && pendingPass !== undefined, overlapMs: 0 };
+    pass.settled = Promise.resolve(pendingPass).then(() => {
+      if (pendingPass) freshnessPhases.pre_exit_pass = Math.max(0, daemonClock.now() - passStartedAtMs);
+      if (pass.overlapped) pass.overlapMs = freshnessPhases.pre_exit_pass!;
+    });
+    if (!pass.overlapped) await pass.settled;
     // W1-T5721: protect live fix workers; cadences and CI waits are re-derived after restart.
     // The caller stops its interphase clock before the final pass (W1-T2865).
-    await drainBeforeRestart("daemon.freshness_drain", dispatchLatchAtMs);
+    await drainBeforeRestart("daemon.freshness_drain", dispatchLatchAtMs, pass);
     return preExitPass;
   };
   const stopForFreshness = async (
@@ -8557,7 +8571,7 @@ export async function runDaemon(
       preparedFreshnessExit ??= prepareFreshnessExit(restartDecided!, restartWait.decidedAtMs);
       childDrain ??= preparedFreshnessExit.then(async () => {
         await stopTicker();
-        await drainBeforeRestart("daemon.freshness_drain");
+        await drainBeforeRestart("daemon.freshness_drain", undefined, undefined, restartWait.decidedAtMs + sweepWallClockBoundMs);
         childDrainDone = true;
         poolControl.detach?.(outOfProcess);
       }).catch((reason: unknown) => {

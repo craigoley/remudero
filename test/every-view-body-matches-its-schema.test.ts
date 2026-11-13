@@ -44,6 +44,7 @@ import { fakeGitHub } from "#test/helpers/fake-github.js";
 import { declaredBody, resolve, violations, type Schema } from "#test/helpers/openapi-strict.js";
 import { createBoardSnapshotCache } from "#src/lib/board-snapshot-cache.js";
 import { collectDailyProgress } from "#src/lib/daily-progress-collector.js";
+import { DAILY_PROGRESS_VIEW_NAME, dailyProgressRequestKey } from "#src/lib/daily-progress-view.js";
 import { acquireLease, flushReadModelTransactions, openReadModel } from "#src/lib/read-model-db.js";
 import type { DailyProgressReport } from "#src/lib/daily-progress-contract.js";
 
@@ -179,6 +180,8 @@ async function materializeAll(root: string, stateDir: string, deps: ServeDeps): 
   const incidents = createIncidentsView({ instances: [{ name: "core", ledgerDir: stateDir }], ledgerSource });
   const demand = createDemandBook({ clock });
   demand.want(TASK_VIEW_NAME, taskViewKey("core", "W1-T1"));
+  // W1-T11934: a demand view builds only while a key is held; serve's route wants the current day's key on a miss.
+  demand.want(DAILY_PROGRESS_VIEW_NAME, dailyProgressRequestKey(new URLSearchParams({ repository: "all", date: "today" }), clock.now()));
   const task = createTaskView({ instances: [{ name: "core", ledgerDir: stateDir, planPath: deps.panelGraph.planPath, repo: "craigoley/remudero" }], ledgerSource, demand, clock });
   // The code-health view reads the configured repository list the repositories publisher saved above, and one
   // saved measurement with a finding, so the selected-repository body carries an assessment and an opportunity.

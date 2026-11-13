@@ -174,7 +174,7 @@ test('online filing lint consumes verified dependency evidence while retaining i
   writeFileSync(join(repo.dir, 'src/lib/subject.ts'), 'export const value = 1;\n');
   mkdirSync(join(repo.dir, 'test'));
   writeFileSync(join(repo.dir, 'test/proof.test.ts'), 'import { test } from "node:test"; test("controlled dependency evidence fixture", () => {});\n');
-  const record = (id: string, depends: string[], machine = false) => `- id: ${id}\n  title: "A dependency evidence fixture ${id}"\n  repo: remudero\n  depends_on: [${depends.join(', ')}]\n  type: implement\n  verify: human\n  risk: low\n  status: queued\n  attempts: 0\n  ${machine ? 'author_class: machine\n  origin: flow-blocker:own-red:required checks red' : 'origin: fixture'}\n  files: [src/lib/subject.ts, test/proof.test.ts]\n  acceptance:\n    - claim: "The controlled fixture holds"\n      proof: "unit test: controlled dependency evidence fixture"\n`;
+  const record = (id: string, depends: string[], machine = false) => `- id: ${id}\n  title: "A dependency evidence fixture ${id}"\n  repo: remudero\n  depends_on: [${depends.join(', ')}]\n  type: implement\n  design: |\n    NO-INVARIANTS: synthetic lint fixture with no inherited behavior to preserve\n  verify: human\n  risk: low\n  status: queued\n  attempts: 0\n  ${machine ? 'author_class: machine\n  origin: flow-blocker:own-red:required checks red' : 'origin: fixture'}\n  files: [src/lib/subject.ts, test/proof.test.ts]\n  acceptance:\n    - claim: "The controlled fixture holds"\n      proof: "unit test: controlled dependency evidence fixture"\n`;
   writeFileSync(join(repo.dir, 'plan/tasks.yaml'), record('ZZ-T1', []));
   repo.git('add', '.'); repo.git('commit', '-qm', 'test: dependency plan');
   const base = repo.git('rev-parse', 'HEAD');
