@@ -27,6 +27,7 @@
     - src/lib/producer-identity.ts
     - src/run-task.ts
     - docs/cli-reference.md
+    - docs/operator-guide.md
     - scripts/console-parity-ratchet.mjs
     - scripts/console-parity-baseline.json
     - test/help-renders-a-summary-not-a-paragraph.test.ts
@@ -75,6 +76,8 @@
     5. Price rows, each with readAt 2026-11-12 and its source: OpenAI-shape Decisions $0.10 per 1M input and $0 output (OpenAI Decisions guide; Azure publishes no Decisions price, so this is the Global input rate); Microsoft-Decision-1 $0.042 per 1M input (Azure pricing page). The Microsoft reply carries output tokens and the page lists output as N/A, so that row prices output tokens at the input rate until W1-T10858 reconciles an invoice. The row says so.
     6. Add `rmd decisions probe --candidate <name> --input-file <file> --questions-file <file> [--role <role>]` to src/run-task.ts and docs/cli-reference.md. It replaces the hand probes.
     The only operator step left is capacity: decision-1 at capacity 1 rate-limited after two calls, so it needs more before shadow traffic (W1-T12417 notes it).
+    NO-INVARIANTS: shadow only. The task adds a verb, a ledger row and two candidates that no judge, gate or route reads
+       (criterion 9: nothing else calls a decision model), and design item 2 leaves worker routing as it is.
     NOT IN SCOPE: any judge or shadow calling it (W1-T12417 and W1-T12419), any gate or route reading the row, scoring (W1-T12414), and any Gemini or self-hosted backend.
   falsifier: |
     Coerce an out-of-set answer and criterion 4 must fail. Read the worker's entry for the decision deployment and criterion 5 must fail. Require a new config key and criterion 9 must fail. Reserve with the worker output ceiling and criterion 6 must fail. Map a cannot-tell answer to an option and criterion 3 must fail. Restore and require all to pass.

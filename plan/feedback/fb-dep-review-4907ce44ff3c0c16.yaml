@@ -241,10 +241,27 @@ raw: |-
   </details>
 attachments: []
 origin: repair#dep-review
-status: new
+status: proposed
 reply_to: null
-proposal_pr: null
-summary: null
+proposal_pr: https://github.com/craigoley/remudero/pull/18282
+summary:
+  headline: Land the two dependency updates with required companion fixes
+  what_happened: Dependabot proposed updating setuptools to 84.1.0 and
+    opentelemetry-api to 1.45.1, but its PR also changes files outside the
+    allowed lane and has failing checks. The same version moves and any required
+    companion edits must go through an owned task branch; no sibling PRs need
+    folding in.
+  decision: "Land both version updates and the required companion edits together
+    on an owned task branch; leave Dependabot PR #14094 untouched."
+  options:
+    - label: Approve owned fix
+      consequence: Carries both updates and required companion edits through the
+        allowed review path.
+      intent: approve
+    - label: Decline the updates
+      consequence: Keeps current versions and avoids taking on the companion changes.
+      intent: decline
 expansion: null
 submission_key: dep-review:own-red:craigoley/remudero:opentelemetry-api@1.45.1,setuptools@84.1.0
 thread_id: null
+answered_by: null

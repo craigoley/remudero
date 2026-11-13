@@ -593,8 +593,8 @@ resource_policy_build_args() {
 # claimant on the same budget as the containers above: RMD_SESSION_MEMORY_WEIGHT against
 # RMD_MEMORY_WEIGHTS. It is rounded to RMD_SESSION_HIGH_STEP_MIB so a MemTotal that moves by a few
 # MiB across kernels never rewrites the file. The container shares are left as they are: memory.high
-# is soft, and on this host their working-set floors already exceed the budget. CPUWeight 30 is about
-# half a build daemon's measured 59, so a session yields to the fleet when both want the CPU.
+# is soft, and on this host their working-set floors already exceed the budget. CPUWeight also goes
+# on user.slice, which competes with system.slice; the UID slice alone has no rival (W1-T12060).
 RMD_SESSION_MEMORY_WEIGHT="${RMD_SESSION_MEMORY_WEIGHT:-24}"
 RMD_SESSION_CPU_WEIGHT="${RMD_SESSION_CPU_WEIGHT:-30}"
 RMD_SESSION_HIGH_STEP_MIB="${RMD_SESSION_HIGH_STEP_MIB:-256}"
@@ -604,7 +604,7 @@ resource_policy_session_slice() {
   local total budget sum=0 entry share step="${RMD_SESSION_HIGH_STEP_MIB}"
   RP_SESSION_HIGH_MIB="" RP_SESSION_NOTE=""
   if ! total="$(resource_policy_mem_total_mib)" || [ -z "${total}" ]; then
-    RP_SESSION_NOTE="NO session cap — host MemTotal unreadable at ${RMD_MEMINFO_PATH:-/proc/meminfo}"
+    RP_SESSION_NOTE="NO session cap — host MemTotal unreadable at ${RMD_MEMINFO_PATH:-/proc/meminfo}, CPUWeight ${RMD_SESSION_CPU_WEIGHT} on user.slice"
     return 0
   fi
   budget=$((total - RMD_HOST_RESERVE_MIB))
@@ -614,11 +614,16 @@ resource_policy_session_slice() {
   [ "${step}" -gt 0 ] 2>/dev/null || step=1
   share=$(((share + step / 2) / step * step))
   if [ "${share}" -le 0 ]; then
-    RP_SESSION_NOTE="NO session cap — weight ${RMD_SESSION_MEMORY_WEIGHT}/${sum} of a ${budget} MiB budget rounds to nothing"
+    RP_SESSION_NOTE="NO session cap — weight ${RMD_SESSION_MEMORY_WEIGHT}/${sum} of a ${budget} MiB budget rounds to nothing, CPUWeight ${RMD_SESSION_CPU_WEIGHT} on user.slice"
     return 0
   fi
   RP_SESSION_HIGH_MIB="${share}"
-  RP_SESSION_NOTE="session MemoryHigh ${share} MiB = weight ${RMD_SESSION_MEMORY_WEIGHT}/${sum} of a ${budget} MiB budget (host ${total} - reserve ${RMD_HOST_RESERVE_MIB}), CPUWeight ${RMD_SESSION_CPU_WEIGHT}"
+  RP_SESSION_NOTE="session MemoryHigh ${share} MiB = weight ${RMD_SESSION_MEMORY_WEIGHT}/${sum} of a ${budget} MiB budget (host ${total} - reserve ${RMD_HOST_RESERVE_MIB}), CPUWeight ${RMD_SESSION_CPU_WEIGHT} on user.slice"
+}
+
+resource_policy_session_cpu_slice_dropin() {
+  printf '# CPUWeight %s on user.slice, the sibling of system.slice (W1-T12060).\n' "${RMD_SESSION_CPU_WEIGHT}"
+  printf '[Slice]\nCPUWeight=%s\n' "${RMD_SESSION_CPU_WEIGHT}"
 }
 
 # The systemd drop-in for user-<uid>.slice, or nothing when no cap can be sized.

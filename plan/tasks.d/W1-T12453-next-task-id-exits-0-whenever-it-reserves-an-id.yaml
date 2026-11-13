@@ -23,7 +23,7 @@
     - test/cli/next-task-id-exits-0-whenever-it-reserves-an-id.test.ts
     - test/mint-open-pr-surface-is-rest.test.ts
     - test/a-green-pr-that-can-never-merge-asks-once.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "When the mint has a degraded source other than the open-PR surface (for example the local plan half is behind the reservation namespace) and the reservation holds an id, `rmd next-task-id --reserve --branch <b>` prints the RESERVED line and exits 0"
