@@ -211,7 +211,8 @@ test("W1-T12166: a refused docs precheck reuses the passing census and reruns fr
   const first = run(f, ["docs-index:check"]);
   assert.equal(first.receipt.verdict, "refused");
   assert.deepEqual(first.ran, ["census", "docs-index:check"]);
-  assert.deepEqual(first.receipt.dependencyProvenance.after, first.receipt.dependencyProvenance.before,
+  const provenance = first.receipt.dependencyProvenance as { before: unknown; after: unknown };
+  assert.deepEqual(provenance.after, provenance.before,
     "the refusal records whether its dependencies stayed stable");
 
   const second = run(f);
