@@ -17,6 +17,18 @@
   acceptance:
     - claim: "commit-refused:the worker changed nothing no longer needs an operator hand fix"
       proof: "grep: test(\"W1-T11014: fix-lane-commit-refused-the-worker-changed-nothing clears without a person\" in test/triage/fix-lane-no-edit-refusal-recovery.test.ts"
+    - claim: "invariant:non-matching-refusals"
+      proof: "unit test: other commit refusals do not receive a no-edit recovery"
+    - claim: "invariant:unchanged-recovery-guard"
+      proof: "unit test: an unchanged recovery is refused without another recovery or a push"
+  design: |
+    Prior behavior: runFixRung owns refusal outcomes and keeps non-matching refusal prompts, commit guards, accounting,
+    and push behavior on their existing paths. The recovery is additive only after a FIXED report is refused because
+    the worker changed nothing. Every recovery dispatch still passes through the same rung's commit and push guards.
+    INVARIANT non-matching-refusals: commit refusals other than the exact FIXED plus "the worker changed nothing"
+    case retain the existing prompt and dispatch behavior without a no-edit recovery.
+    INVARIANT unchanged-recovery-guard: the single recovery dispatch remains subject to the rung's commit guard, so an
+    unchanged worktree cannot be pushed and cannot trigger a second recovery dispatch.
   note: "Filed by fix-lane at rung 2; measure the cause's share of PR-hours after the build merges."
   rationale: |
     commit-refused:the worker changed nothing cost 53.95 PR-hours; owner fix-lane
