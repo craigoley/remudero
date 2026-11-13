@@ -265,3 +265,18 @@ test("public acceptance projection preserves prior credit while isolating privat
   projected[0]!.claim = "changed public response copy";
   assert.equal(serveBoardCatalogs(board)?.plan?.byId.get("OPS-T1")?.acceptance?.[0]?.claim, "public allowed claim");
 });
+
+
+test("healthy private input does not turn unavailable GitHub status evidence into certainty", async () => {
+  const h = host(), fx = source(privateRecord());
+  const model = await buildStatusBoardAsync(h.root, h.ledgerPath, {
+    ...boardDeps(), github: fakeGitHub({ readFailed: () => true }), opsCatalogApi: fx.api,
+  });
+  const catalog = model.opsCatalog;
+  assert.ok(catalog?.outcome === "ok", "catalog read health and task status health are distinct");
+  const row = catalog.rows.find(row => row.taskId === "OPS-T1");
+  assert.ok(row);
+  assert.equal(row.indeterminate, true);
+  assert.match(renderStatusBoardText(model), /OPS-T1.*unverified/);
+  assert.doesNotMatch(JSON.stringify(model), new RegExp(secret));
+});
