@@ -1,4 +1,5 @@
 // @census-closure: src/lib/serve-supervisor-main.ts
+// @census-reads: src/ .github/ deploy/ test/baked-supervisor-inputs.test.ts — the supervisor's import closure, the build catalogs, itself.
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, normalize } from "node:path";

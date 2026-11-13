@@ -109,7 +109,7 @@ test("W1-T9515: every recycle invocation writes a recycle.invoked row", (t) => {
     if (mode === "missing-state") assert.match(r.stderr, /state is MISSING/);
     if (mode === "drain") {
       assert.match(r.stdout + r.stderr, /PAUSE engaged/);
-      assert.equal(JSON.parse(readFileSync(join(f.root, "before-pull"), "utf8")).step, "recycle.invoked");
+      assert.equal(JSON.parse(readFileSync(join(f.root, "before-pull"), "utf8").split("\n")[0]!).step, "recycle.invoked");
     } else assert.equal(existsSync(join(f.root, "state/PAUSE")), false);
   }
 });

@@ -1,4 +1,5 @@
 // @source-text-subject: this census measures the selector's graph over the tracked code tree.
+// @census-reads: src/ scripts/ bin/ test/ package.json — the tracked code tree, the reach baseline and the imports map.
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";

@@ -528,7 +528,9 @@ export class GhReadBroker {
   private readonly sleep: (ms: number) => Promise<void>;
   private readonly freeBytes: () => number;
   private readonly entries = new Map<string, { bytes: number; subjects: GhBrokerSubject[] }>();
-  private readonly memo = new Map<string, GhBrokerCacheEntry>();
+  private readonly memo = new Map<string, { entry: GhBrokerCacheEntry; bytes: number }>();
+  private memoryBytes = 0;
+  private memoryTimer: ReturnType<typeof setTimeout> | undefined;
   private readonly inflight = new Map<string, InFlight>();
   private readonly queues = new Map<GhBrokerLimiter, QueuedJob[]>();
   private readonly draining = new Set<GhBrokerLimiter>();
@@ -711,10 +713,11 @@ export class GhReadBroker {
 
   private readEntry(key: string): GhBrokerCacheEntry | undefined {
     const memo = this.memo.get(key);
-    if (memo) return memo;
+    if (memo) return memo.entry;
     try {
-      const entry = JSON.parse(readFileSync(this.entryPath(key), "utf8")) as GhBrokerCacheEntry;
-      this.memo.set(key, entry);
+      const text = readFileSync(this.entryPath(key), "utf8");
+      const entry = JSON.parse(text) as GhBrokerCacheEntry;
+      this.remember(entry, Buffer.byteLength(text));
       return entry;
     } catch {
       // Absent and unreadable are both a miss: the read goes upstream and rewrites the entry.
@@ -722,9 +725,49 @@ export class GhReadBroker {
     }
   }
 
+  private forgetMemo(key: string): void {
+    const memo = this.memo.get(key);
+    if (memo) this.memoryBytes -= memo.bytes;
+    this.memo.delete(key);
+  }
+
+  /** Payload bytes use the complete serialized entry, including headers and duplicated output fields. */
+  private remember(entry: GhBrokerCacheEntry, bytes: number): void {
+    this.forgetMemo(entry.key);
+    if (this.fresh(entry, this.now()) && bytes <= this.cacheShareOfFree * this.freeBytes()) {
+      this.memo.set(entry.key, { entry, bytes });
+      this.memoryBytes += bytes;
+    }
+    this.trimMemory();
+  }
+
+  /** Memory has no newest-entry exemption; disk entries remain available for hits and revalidation. */
+  private trimMemory(): number {
+    if (this.memoryTimer) clearTimeout(this.memoryTimer);
+    this.memoryTimer = undefined;
+    const nowMs = this.now();
+    const budget = Math.max(0, this.cacheShareOfFree * this.freeBytes());
+    for (const [key, memo] of this.memo) {
+      if (!this.fresh(memo.entry, nowMs)) this.forgetMemo(key);
+    }
+    for (const key of this.memo.keys()) {
+      if (this.memoryBytes <= budget) break;
+      this.forgetMemo(key);
+    }
+    let expiresAt = Infinity;
+    for (const { entry } of this.memo.values()) {
+      if (!entry.immutable) expiresAt = Math.min(expiresAt, entry.storedAtMs + entry.maxAgeMs!);
+    }
+    if (Number.isFinite(expiresAt)) {
+      this.memoryTimer = setTimeout(() => this.trimMemory(), Math.min(2 ** 31 - 1, Math.max(1, expiresAt - nowMs)));
+      this.memoryTimer.unref();
+    }
+    return budget;
+  }
+
   private dropEntry(key: string): void {
     this.entries.delete(key);
-    this.memo.delete(key);
+    this.forgetMemo(key);
     rmSync(this.entryPath(key), { force: true });
     rmSync(this.ghCachePath(key), { recursive: true, force: true });
   }
@@ -735,7 +778,6 @@ export class GhReadBroker {
     const tmp = `${this.entryPath(entry.key)}.${process.pid}.tmp`;
     writeFileSync(tmp, text, { mode: 0o600 });
     renameSync(tmp, this.entryPath(entry.key));
-    this.memo.set(entry.key, entry);
     this.entries.delete(entry.key);
     this.entries.set(entry.key, { bytes: Buffer.byteLength(text) + this.ghCacheBytes(entry.key), subjects: entry.subjects });
     const budget = this.cacheShareOfFree * this.freeBytes();
@@ -745,9 +787,15 @@ export class GhReadBroker {
       this.dropEntry(key);
       total -= meta.bytes;
     }
+    this.remember(entry, Buffer.byteLength(text));
   }
 
   private touch(key: string): void {
+    const memo = this.memo.get(key);
+    if (memo) {
+      this.memo.delete(key);
+      this.memo.set(key, memo);
+    }
     const meta = this.entries.get(key);
     if (!meta) return;
     this.entries.delete(key);
@@ -933,6 +981,7 @@ export class GhReadBroker {
 
   /** One read. Never throws: every failure comes back as `gh` would have reported it. */
   async read(request: GhBrokerReadRequest, onProgress?: (p: GhBrokerProgress) => void): Promise<GhBrokerResult> {
+    this.trimMemory();
     this.inProgress += 1;
     try {
       return await this.readOnce(request, onProgress);
@@ -1089,6 +1138,7 @@ export class GhReadBroker {
   }
 
   status(): Record<string, unknown> {
+    const memoryBudget = this.trimMemory();
     const nowMs = this.now();
     const queues: Record<string, Record<string, number>> = {};
     for (const [limiter, queue] of this.queues) {
@@ -1114,6 +1164,10 @@ export class GhReadBroker {
       cache_entries: this.entries.size,
       cache_bytes: [...this.entries.values()].reduce((sum, e) => sum + e.bytes, 0),
       cache_share_of_free: this.cacheShareOfFree,
+      memory_entries: this.memo.size,
+      memory_bytes: this.memoryBytes,
+      memory_budget_bytes: memoryBudget,
+      memory_maps: { memo: this.memo.size, entries: this.entries.size, last_served: this.lastServed.size, inflight: this.inflight.size },
       log_retention_days: this.logRetentionDays,
       login: this.loginKnown ?? null,
       account: this.account,

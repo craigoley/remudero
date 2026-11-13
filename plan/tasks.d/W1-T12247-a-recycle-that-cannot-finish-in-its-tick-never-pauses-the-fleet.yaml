@@ -23,7 +23,7 @@
     - src/lib/config-schema.ts
     - deploy/install-host-units.sh
     - test/deploy/a-recycle-that-cannot-finish-in-its-tick-never-pauses-the-fleet.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "Each time the deployer derives a recycle wait, it writes one `deploy.recycle_wait_fit` row with the derived wait, the time that the tick still allows the deploy step, the time that a recycle needs outside its wait, and whether the recycle fits"

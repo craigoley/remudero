@@ -16,8 +16,9 @@
     - W1-T5521
   files:
     - src/lib/plan-pr-emitter.ts
+    - scripts/task-id-existence-check.mjs
     - test/plan/the-plan-preflight-passes-the-code-root-when-the-plan-is-in-another-repository.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "When the input names a code root, `planPrPreflight`, `planPrPreflightAsync` and the two forms that read a commit run the plan lint with the option --code-root"

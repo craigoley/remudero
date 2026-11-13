@@ -21,7 +21,7 @@
     - src/lib/daemon.ts
     - src/lib/dispatch-claim.ts
     - test/dispatch/the-start-claim-sweep-runs-before-the-first-dispatch-not-before-the-first-review.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "`daemonCommand` writes `daemon.start` before the claim sweep of the start has settled. The test holds the sweep open and drives the command"

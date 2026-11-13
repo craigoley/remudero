@@ -1,3 +1,4 @@
+// @census-reads: src/ test/ — the worker-containment source and every tracked test fixture holding a real sweep lock.
 // test/orphan-sweep-names-the-third-party.test.ts — W1-T2407: name the competing process
 // instead of leaving it to inference.
 //

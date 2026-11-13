@@ -79,3 +79,7 @@ Each section is one pass of the gate gardener (W1-T4116).
 ## Pass 2026-11-02T07:38:24.151Z
 
 - demote scan-pr / osv-scan: It never refused on 75 pull requests and cost 74.6 CI minutes.
+
+## Pass 2026-11-12T15:54:46.465Z
+
+- tighten scripts/source-size-baseline.json#src/lib/compaction.ts: The file shrank a whole bucket; the ratchet now records 500.

@@ -174,7 +174,7 @@ describe("test/deploy/a-recycle-ledgers-how-it-ended.test.ts", () => {
       const f = fixture(t);
       const r = f.run({ BREAK_LEDGER: "1", PULL_RC: pullRc });
       assert.equal(r.status, pullRc === "0" ? 0 : 1, r.stdout + r.stderr);
-      assert.equal(JSON.parse(readFileSync(join(f.root, "invoked"), "utf8")).step, "recycle.invoked");
+      assert.equal(JSON.parse(readFileSync(join(f.root, "invoked"), "utf8").split("\n")[0]!).step, "recycle.invoked");
       assert.equal(existsSync(join(f.root, "started")), pullRc === "0");
     }
   });

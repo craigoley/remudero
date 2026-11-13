@@ -21,7 +21,7 @@
     - src/cli/commands/run-task-verb.ts
     - test/inbox/a-new-decision-file-lands-in-the-plan-destination-and-readers-read-both.test.ts
     - test/helpers/git-repo.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "With `decision` in the kinds of the host file, `recordDecision`, `recordDecisionAsync` and `recordRuling` commit the new file in the destination checkout, push to that repository and open the landing pull request there"

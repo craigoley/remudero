@@ -81,3 +81,29 @@
     under the operator ruling of 2026-11-02 that rmd must resolve merge conflicts automatically. Do not build it in parallel with
     W1-T11168, which edits the neighbouring hold code in src/lib/sweep.ts. PR #15532 is being hand-fixed in the operator's
     thread. A build must not push to it.
+    build-order check W1-T11168, observed at origin/main 3b1b758e9 on 2026-11-12: W1-T11168 is still
+    queued (attempts 0), with no PR and no merge sha. Its only origin/main commits are fee3e5ef2c (#16368,
+    filing) and e9df4405ca (#17755, status reconcile). No branch run-W1-T11168-* exists on origin. The
+    "do not build in parallel" caution above is now moot for W1-T11169, which is already merged; it only
+    matters for whoever builds W1-T11168, who must start from main with W1-T11169's edit in
+    src/lib/sweep.ts. Found by git log and git ls-remote only.
+    PRs naming W1-T11169, found by git log origin/main --grep and git ls-remote --heads, not by the
+    GitHub PR listing (the deny-floor 180 s cadence refused it): merged #16369 (filing), #17367
+    (implementation, merge sha 11e00baba2), #17355, #17425, #17426 (ratifications), #17755 (status
+    reconcile). Remote heads run-W1-T11169-1794089750259 and run-W1-T11169-1794120655199 remain. Whether
+    any PR is still open was not checked, because the open-PR list was unavailable.
+    checkpoint verification: run at exact head 860fd523fd40830575fe787d8b6aa6af39c7e333 (branch
+    run-W1-T11169-1794120655199, detached checkout, 2026-11-12). Seed test a-dead-daemons-fix-seed-stays-settled-across-later-boots:
+    PASS (4 tests, 0 fail). Seed test a-started-fix-seed-is-reconciled-after-a-clean-boot: PASS (11 tests, 0 fail).
+    npm run typecheck: PASS (exit 0). lint: no lint script exists in package.json (npm run lint errors with
+    Missing script), so it could not be run; not a failure of the checkpoint.
+    checkpoint verdict: finish-and-ship. Nothing to rework; the work is already merged as #17367 (status merged).
+    Implemented on 2f59eaea3: that commit (tip of origin/run-APPROVE-followup-W1-T11169-1794120655199-...-1-...)
+    is a single-file ratification, "chore(plan): ratify followup:W1-T11169-1794120655199:...:1 via rmd approve".
+    Its diff against origin/main adds only the W1-T11712 shard (24 lines) and nothing under src/ or test/, so
+    none of the dead-daemon fix-seed settlement code is in it. The implementation is #17367 (11e00baba2), not
+    this branch. The W1-T11712 shard is on origin/main already (#18093, same file name).
+    Remaining after 2f59eaea3: no review fixes are owed and no build step remains. The branch's content landed
+    as #17355 (ratification :1, merged, found by git log origin/main --grep); W1-T11169 is status merged.
+    Whether a PR is still open for the run-APPROVE branch was not checked, because the GitHub listing was
+    unavailable; its content is on main, so an open one would be redundant and can be closed.

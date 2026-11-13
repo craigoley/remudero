@@ -26,7 +26,7 @@
     - test/a-recycle-names-the-cadence-child-it-kills.test.ts
     - test/deploy/a-recycle-ledgers-how-it-ended.test.ts
     - test/every-recycle-names-who-invoked-it.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "With a fake `docker`, a daemon recycle writes one `recycle.phase` row at the end of each phase: lock wait, registry login, pull, smoke, pause written, wait for workers, stop, remove, start. Each row has the phase name and its seconds"

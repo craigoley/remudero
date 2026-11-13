@@ -39,7 +39,8 @@ import { ghExec } from "./github-transport.js";
 import { resolveRepoLayout } from "./repo-layout.js";
 import { loadMounts, mountsPath } from "./mounts.js";
 import { hostWorktreeGit, hostWorktreeGitAsync } from "./worktree-git.js";
-import type { GardenWorkspacePort, PrState } from "./gardener.js";
+import { isGardenLandWaiting, type GardenWorkspacePort, type PrState } from "./gardener.js";
+import { stagedTaskFiles } from "./feedback-landing.js";
 import type { Proposal } from "./inbox.js";
 import { machineFilingAdmissionViolations, parseTasksFromYaml, type MachineFilingAdmissionContext, type Plan, type Task } from "./plan.js";
 import {
@@ -653,6 +654,9 @@ interface MachineJudgeState {
   operatorDeclined?: Record<string, string>;
   operatorReapprovalRequired?: string[];
   pending?: { prUrl: string; ids: string[]; records?: RulingPins[]; repoRoot?: string };
+  /** W1-T12221: rulings whose records wait for the shared landing PR of task files. The judge rules on
+   *  nothing while they wait; the landing PR that later carries them becomes `pending`. */
+  waitingLanding?: { paths: string[]; stateRoot: string; ids: string[]; records?: RulingPins[]; repoRoot?: string; since: string };
   /** A record whose judge PR a person closed, by the pin it had: not re-asked until it changes. */
   declined?: Record<string, string>;
   /** The judge's answer for a record not yet landed, by the pin it judged: reused with no model call
@@ -788,6 +792,8 @@ export interface MachineJudgeReport {
   settled: string[];
   prUrl?: string;
   unlanded?: string[];
+  /** W1-T12221: records whose rulings wait for the shared landing PR of task files. */
+  waiting?: string[];
   /** W1-T8830: the parked escalations asked again this pass, whatever they answered. */
   reasked?: string[];
   /** W1-T9694: flake-incident records retired as main-inherited, routed to main-health. */
@@ -1253,6 +1259,21 @@ export async function runMachineFilingJudge(ports: MachineJudgePorts): Promise<M
   const statePath = join(ports.stateDir, MACHINE_JUDGE_STATE_FILE);
   const state = readState(statePath);
   const report: MachineJudgeReport = { proceeded: [], escalated: [], unavailable: [], refused: [], failed: [], settled: [] };
+  if (state.waitingLanding) {
+    const w = state.waitingLanding;
+    const staged = stagedTaskFiles(w.stateRoot).filter((f) => w.paths.includes(f.relPath));
+    if (staged.some((f) => f.prUrl === undefined)) {
+      ports.log("machine_judge.landing_waits", { ids: w.ids, paths: w.paths, since: w.since });
+      return { ...report, waiting: w.ids };
+    }
+    state.waitingLanding = undefined;
+    const prUrl = staged[0]?.prUrl;
+    if (prUrl !== undefined) {
+      state.pending = { prUrl, ids: w.ids, ...(w.records ? { records: w.records } : {}), ...(w.repoRoot ? { repoRoot: w.repoRoot } : {}) };
+      ports.log("machine_judge.landing_carried", { landing_pr: prUrl, ids: w.ids });
+    } else ports.log("machine_judge.landing_left_queue", { ids: w.ids, paths: w.paths });
+    writeAtomic(statePath, JSON.stringify(state) + "\n");
+  }
   if (state.pending) {
     const pr = ports.prState?.(state.pending.prUrl) ?? "unknown";
     if (pr === "open" || pr === "unknown") {
@@ -1600,17 +1621,22 @@ export async function runMachineFilingJudge(ports: MachineJudgePorts): Promise<M
       for (const r of ruled) if (report.escalated.includes(r.task.id)) ports.stageProposal(machineJudgeProposal(r));
     }
     if (ws && landed.length > 0) {
-      report.prUrl = await ws.land({
+      const result = await ws.land({
         paths: landed.map((l) => l.relPath),
         title: `chore(plan): the machine-filing judge rules on ${landed.length} machine-filed task(s)`,
         body: machineJudgePrBody(landed),
       });
-      if (report.prUrl) state.pending = {
-        prUrl: report.prUrl, ids: landed.map((l) => l.id), records: landed,
-        repoRoot: dirname(dirname(dirname((ruled[0]?.task ?? retire[0]?.task ?? mechRetire[0]?.task ?? withdraw[0]!.task).sourcePath!))),
-      };
-      else report.unlanded = landed.map((l) => l.id);
-      ports.log("machine_judge.landed", { pr_url: report.prUrl ?? null, ids: landed.map((l) => l.id) });
+      const ids = landed.map((l) => l.id);
+      const repoRoot = dirname(dirname(dirname((ruled[0]?.task ?? retire[0]?.task ?? mechRetire[0]?.task ?? withdraw[0]!.task).sourcePath!)));
+      if (isGardenLandWaiting(result)) {
+        state.waitingLanding = { ...result.waiting, ids, records: landed, repoRoot, since: ports.clock.iso() };
+        report.waiting = ids;
+      } else {
+        report.prUrl = result;
+        if (report.prUrl) state.pending = { prUrl: report.prUrl, ids, records: landed, repoRoot };
+        else report.unlanded = ids;
+      }
+      ports.log("machine_judge.landed", { pr_url: report.prUrl ?? null, ids, ...(report.waiting ? { waiting: true } : {}) });
     }
   } finally {
     await ws?.dispose();

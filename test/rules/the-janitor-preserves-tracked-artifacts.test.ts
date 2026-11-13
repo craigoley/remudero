@@ -1,3 +1,4 @@
+// @census-reads: deploy/ scripts/census-precheck.mjs test/rules/the-janitor-preserves-tracked-artifacts.test.ts — the janitor and retirement-guard scripts, itself.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";

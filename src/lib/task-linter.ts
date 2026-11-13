@@ -2,7 +2,7 @@ import { operatorReleaseContractChanged } from "./operator-release.js";
 import { createHash } from "node:crypto";
 import { relative, sep } from "node:path";
 import type { AcceptanceCriterion, MachineFilingAdmissionContext, Plan, Task, TaskStatus } from "./plan.js";
-import { RETIREMENT_REASONS, machineFilingAdmissionViolations, unmetDependencies } from "./plan.js";
+import { PlanError, RETIREMENT_REASONS, machineFilingAdmissionViolations, mergePlanBlobs, unmetDependencies } from "./plan.js";
 import { isInPlanScope } from "./plan-architect.js";
 import {
   isDemonstrationProof,
@@ -95,7 +95,8 @@ export type LintCheck =
   | "shard-shape"
   | "unminted-task-id"
   | "superseded-by"
-  | "doctrine-citation-unresolved";
+  | "doctrine-citation-unresolved"
+  | "design-invariant-proof";
 export type LintSeverity = "block" | "warn";
 
 export interface LintViolation {
@@ -3500,6 +3501,11 @@ export function unmintedTaskIdViolations(task: Task, opts: LintOpts = {}): LintV
 }
 
 export interface LintOpts {
+  /** W1-T11746 — require a new/changed implementation task's design to declare `INVARIANT <slug>:` lines
+   *  or `NO-INVARIANTS: <reason>`, with each slug mapped to its own `invariant:<slug>` acceptance claim.
+   *  Set only by the changed-task (`lint-plan --base`) pass; absent ⇒ {@link invariantSlugViolations} is
+   *  silent, so the whole-plan pass and dispatch never refuse the historical population. */
+  requireDesignInvariantDeclaration?: boolean;
   /** Resolved repository name of this checkout; when known, call-site analysis skips tasks
    *  targeting a different repository because their source tree is not present here. */
   localRepoName?: string;
@@ -3729,6 +3735,81 @@ export function doctrineCitationViolations(task: Task, opts: LintOpts = {}): Lin
   }));
 }
 
+// ── DESIGN INVARIANTS NEED THEIR OWN ACCEPTANCE PROOF (W1-T11746) ───────────────────────────────
+// A compatibility guarantee that lives only in design prose can be broken while every acceptance
+// proof stays green (PR #17212). An implementation task declares each guarantee as a design line
+// `INVARIANT <slug>: <statement>` (or the single line `NO-INVARIANTS: <reason>`), and each slug must
+// map to exactly one acceptance claim `invariant:<slug>` carrying its own non-empty proof. This reads
+// only those structured markers — never arbitrary prose, never a keyword count — and only when the
+// changed-task pass sets {@link LintOpts.requireDesignInvariantDeclaration}.
+export const INVARIANT_DECL_RE = /^[ \t]*INVARIANT[ \t]+([a-z0-9][a-z0-9-]*)[ \t]*:[ \t]*(\S.*)$/m;
+export const NO_INVARIANTS_RE = /^[ \t]*NO-INVARIANTS[ \t]*:[ \t]*([^<\s].*)$/m;
+export const INVARIANT_CLAIM_RE = /\binvariant:([a-z0-9][a-z0-9-]*)/;
+
+/** The `invariant:<slug>` and `INVARIANT <slug>:` templates in prose are not declarations: a slug is
+ *  lower-case alphanumerics and hyphens, and a NO-INVARIANTS reason may not open with a `<` placeholder. */
+export function invariantSlugViolations(task: Task, opts: LintOpts = {}): LintViolation[] {
+  if (opts.requireDesignInvariantDeclaration !== true) return [];
+  if (task.type !== "implement") return [];
+  const design = task.design ?? "";
+  const out: LintViolation[] = [];
+  const block = (message: string): void => {
+    out.push({ check: "design-invariant-proof", severity: "block", message: `task ${task.id}: ${message}` });
+  };
+  const declared = [...design.matchAll(new RegExp(INVARIANT_DECL_RE.source, "gm"))].map((m) => m[1]!);
+  const noInvariants = [...design.matchAll(new RegExp(NO_INVARIANTS_RE.source, "gm"))];
+  if (declared.length === 0 && noInvariants.length === 0) {
+    block(
+      "design declares neither `INVARIANT <slug>: <statement>` nor `NO-INVARIANTS: <reason>`; inventory the prior " +
+        "behavior (output buckets, legacy receipts, defaults, error/unknown paths, public side effects) and declare one form",
+    );
+  }
+  if (declared.length > 0 && noInvariants.length > 0) {
+    block("design declares both INVARIANT lines and NO-INVARIANTS; declare exactly one form");
+  }
+  if (noInvariants.length > 1) block("design carries more than one NO-INVARIANTS line; declare it once");
+  const seen = new Set<string>();
+  for (const slug of declared) {
+    if (seen.has(slug)) block(`invariant slug "${slug}" is declared more than once in the design`);
+    seen.add(slug);
+  }
+  const claimsBySlug = new Map<string, number[]>();
+  (task.acceptance ?? []).forEach((criterion, index) => {
+    const slugs = [...new Set([...criterion.claim.matchAll(new RegExp(INVARIANT_CLAIM_RE.source, "g"))].map((m) => m[1]!))];
+    if (slugs.length > 1) {
+      block(`acceptance claim ${index + 1} maps more than one invariant (${slugs.join(", ")}); each slug needs its own claim`);
+    }
+    for (const slug of slugs) claimsBySlug.set(slug, [...(claimsBySlug.get(slug) ?? []), index]);
+  });
+  const proofOwner = new Map<string, string>();
+  for (const [slug, indexes] of claimsBySlug) {
+    if (!seen.has(slug)) {
+      block(`acceptance claim invariant:${slug} has no matching \`INVARIANT ${slug}:\` declaration in the design (orphaned)`);
+      continue;
+    }
+    if (indexes.length > 1) {
+      block(`invariant "${slug}" is mapped by ${indexes.length} acceptance claims; map it exactly once`);
+      continue;
+    }
+    const proof = (task.acceptance![indexes[0]!]!.proof ?? "").trim();
+    if (proof === "") {
+      block(`acceptance claim invariant:${slug} has an empty proof`);
+      continue;
+    }
+    const target = opts.taskRepoOwner === undefined ? undefined : { owner: opts.taskRepoOwner, repo: task.repo };
+    if (!parseWhitelistedProof(proof, target)) {
+      block(`acceptance claim invariant:${slug} needs an executable proof dialect even when satisfied_by supplies prior credit`);
+    }
+    const other = proofOwner.get(proof);
+    if (other !== undefined) block(`invariants "${other}" and "${slug}" share one proof; each needs its own distinct proof`);
+    else proofOwner.set(proof, slug);
+  }
+  for (const slug of seen) {
+    if (!claimsBySlug.has(slug)) block(`invariant "${slug}" has no acceptance claim \`invariant:${slug}\` (missing)`);
+  }
+  return out;
+}
+
 export function lintTask(task: Task, opts: LintOpts = {}): LintResult {
   const violations: LintViolation[] = [];
   const sizing = sizingViolation(task, opts);
@@ -3755,6 +3836,7 @@ export function lintTask(task: Task, opts: LintOpts = {}): LintResult {
   violations.push(...newShardRuleSuiteViolations(task, opts));
   violations.push(...postMergeAmendmentViolations(task, opts));
   violations.push(...blockedDispositionViolations(task, opts));
+  violations.push(...invariantSlugViolations(task, opts));
   violations.push(...blockedRecordUnruledViolations(task));
   violations.push(...callSiteViolations(task, opts));
   violations.push(...monolithFilingViolations(task, opts));
@@ -3967,3 +4049,56 @@ export function formatReadIdentity(absPath: string, raw: string): string {
 /** W1-T3099 — `lint-plan --base` reaches its rule-15 verdict through the SAME function
  *  `rmd preflight` calls. Re-exported, never re-implemented: two copies are two things to drift. */
 export { rule15SplitViolation, RULE_15_SPLIT_REMEDY, type Rule15SplitVerdict } from "./ci-parity.js";
+
+// ── A PLAN APART FROM ITS CODE (W1-T12171) ──────────────────────────────────
+// `lint-plan --code-root <dir>`: the plan lives in one checkout and the code it names in another.
+
+/** Plan files of one checkout: the path relative to the checkout, to the file's text. The monolith comes first. */
+export type PlanFiles = ReadonlyMap<string, string>;
+
+/** The plan in `files`, with `label(rel)` as each task's source path. A dependency may name a task in the
+ *  other plan, so {@link assertDependenciesKnown} judges dependencies against both plans. */
+export function planFromFiles(files: PlanFiles, label: (rel: string) => string): Plan {
+  const blobs = [...files].map(([rel, text]) => ({ label: label(rel), text }));
+  return mergePlanBlobs(blobs, {}, { dependencyMode: "preserve-external" });
+}
+
+/** Refuses a dependency that no plan in `known` holds, with the message `loadPlan` gives. */
+export function assertDependenciesKnown(tasks: readonly Task[], known: ReadonlySet<string>): void {
+  for (const task of tasks) {
+    for (const dep of task.depends_on) {
+      if (!known.has(dep)) throw new PlanError(`task ${task.id}: depends_on unknown task '${dep}'`);
+    }
+  }
+}
+
+/** The tasks whose file has the same bytes as the file at the same path in the code root's plan: moved tasks.
+ *  `root` is the plan checkout that `task.sourcePath` is under. */
+export function movedTaskIds(tasks: readonly Task[], root: string, planFiles: PlanFiles, codeFiles: PlanFiles): Set<string> {
+  const moved = new Set<string>();
+  for (const task of tasks) {
+    if (task.sourcePath === undefined) continue;
+    const rel = relative(root, task.sourcePath);
+    const text = planFiles.get(rel);
+    if (text !== undefined && codeFiles.get(rel) === text) moved.add(task.id);
+  }
+  return moved;
+}
+
+export interface PlanSourceConflict { id: string; planPath: string; codePath: string }
+
+/** The ids that both plans hold with different record bytes, with the path of each record, sorted by id. */
+export function planSourceConflicts(planFiles: PlanFiles, codeFiles: PlanFiles): PlanSourceConflict[] {
+  const records = (files: PlanFiles) => {
+    const byId = new Map<string, { path: string; block: string }>();
+    for (const [path, text] of files) for (const [id, block] of splitTaskRecordBlocks(text)) byId.set(id, { path, block });
+    return byId;
+  };
+  const code = records(codeFiles);
+  const conflicts: PlanSourceConflict[] = [];
+  for (const [id, held] of records(planFiles)) {
+    const other = code.get(id);
+    if (other !== undefined && other.block !== held.block) conflicts.push({ id, planPath: held.path, codePath: other.path });
+  }
+  return conflicts.sort((a, b) => a.id.localeCompare(b.id));
+}

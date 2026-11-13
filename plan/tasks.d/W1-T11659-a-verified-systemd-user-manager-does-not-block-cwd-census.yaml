@@ -13,7 +13,7 @@
   files:
     - src/lib/process-cwd-census.ts
     - test/ci/a-verified-systemd-user-manager-does-not-block-cwd-census.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED on the approved Azure worker host while dispatching the governed proof repair for PR #17229:

@@ -39,3 +39,9 @@
   note: |
     reservation hand-off: plan-file-1793755004000 -> plan-file-1793755004000
     Reserved with rmd next-task-id --branch plan-file-1793755004000 from the operator session's ops worktree. Operator, 2026-11-03: fix the reds and their root causes.
+  verification: |
+    post-merge verification (W1-T11825), run at head 2fcd3cb08 (origin/main, containing 544f735f2):
+    new test file test/a-no-commit-fix-on-a-moved-main-refreshes-instead-of-replaying-the-old-merge.test.ts: pass (9 of 9);
+    typecheck (tsc --noEmit): pass (exit 0);
+    sweep-surface census suites (source-text-assertion-census, negative-reachability-ratchet, catch-erasure-ratchet,
+    clock-signature-census, expiring-fixture-census, error-subclass-census): pass (108 of 108, 0 failed).

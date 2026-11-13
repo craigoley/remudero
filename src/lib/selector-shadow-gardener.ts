@@ -9,7 +9,7 @@ import { callerReachableSuites } from "./ci-parity.js";
 import { defaultPreflightSpawn, type PreflightSpawn } from "./commit-message.js";
 import { readFileIfExists, writeAtomic } from "./fs-race-safe.js";
 import { clockFromMillisFn, systemClock, type Clock } from "./clock.js";
-import { prepareGardenTaskIds, releaseGardenTaskIds, type GardenCheckout, type GardenCheckoutAsync, type GardenerDeps, type GardenTaskIdMinter, type GardenTaskIdRelease } from "./gardener.js";
+import { landedPrUrl, prepareGardenTaskIds, releaseGardenTaskIds, type GardenCheckout, type GardenCheckoutAsync, type GardenerDeps, type GardenTaskIdMinter, type GardenTaskIdRelease } from "./gardener.js";
 import { ghExec, ghJson, ghJsonAsync, ghTextAsync } from "./github-transport.js";
 import { ledgerRotationDigests, readLedgerUnionRecordsSync } from "./ledger-union.js";
 import { linkWorktreeNodeModules } from "./worker.js";
@@ -1721,7 +1721,7 @@ export async function runSelectorShadowGardener(
       writeAtomic(join(workspace.root, relativePath), made.contents);
       const refused = machineShardLandingGuard(deps)(workspace.root, [relativePath]);
       if (refused !== undefined) throw new Error(`selector shadow: missed-edge task failed lint-plan's machine-filing admission: ${refused}`);
-      const prUrl = await workspace.land({ paths: [relativePath], title: made.title, body: made.body(relativePath) });
+      const prUrl = landedPrUrl(await workspace.land({ paths: [relativePath], title: made.title, body: made.body(relativePath) }), "selector shadow");
       if (!prUrl) throw new Error("selector shadow: task PR was not opened");
       return { taskId: taskId!, prUrl };
     } catch (e) {

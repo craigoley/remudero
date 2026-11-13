@@ -9,7 +9,7 @@ import { collectBenchmarkReadinessCandidates, readinessGapOutcome, readReadiness
 import { ciFrictionOrigin, ciFrictionRoundsFromLedger, priceCiFrictionCauses, readCiFrictionLedgerRecords, readGateFireRateReport } from "./ci-friction-gardener.js";
 import { feedbackEntryPath, listFeedback, type FeedbackEntry } from "./feedback.js";
 import type { GateFireRateReport } from "./gate-fire-rate.js";
-import { syncGardenWorkspace, type GardenCheckout, type GardenCheckoutAsync, type GardenerDeps } from "./gardener.js";
+import { landedPrUrl, syncGardenWorkspace, type GardenCheckout, type GardenCheckoutAsync, type GardenerDeps } from "./gardener.js";
 import { ghJson } from "./github-transport.js";
 import { loadProposalRegistry, updateProposalRegistry, type Proposal } from "./inbox.js";
 import { familyTrackRecord, judgeMachineShard } from "./machine-filing-judge.js";
@@ -312,7 +312,7 @@ function opportunityIntakePortsOver(ws: GardenCheckout | GardenCheckoutAsync, ga
       const path = feedbackEntryPath(ws.root, id);
       mkdirSync(dirname(path), { recursive: true });
       writeFileSync(path, stringify(entry));
-      return ws.land({ paths: [relative(ws.root, path)], title: "chore(plan): route one measured opportunity for governed triage", body: `Route one source-qualified candidate through the existing feedback-to-plan workflow.\n\nOpportunity-Key: ${key}\n\n${JSON.stringify(candidate)}` });
+      return landedPrUrl(await ws.land({ paths: [relative(ws.root, path)], title: "chore(plan): route one measured opportunity for governed triage", body: `Route one source-qualified candidate through the existing feedback-to-plan workflow.\n\nOpportunity-Key: ${key}\n\n${JSON.stringify(candidate)}` }), "opportunity intake");
     },
   };
 }

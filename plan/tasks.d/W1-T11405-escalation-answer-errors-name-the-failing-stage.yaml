@@ -12,7 +12,7 @@
   files:
     - src/lib/escalation-answers.ts
     - test/inbox/escalation-answer-errors-name-the-failing-stage.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE GAP. The latest complete ledger union holds 59 deduplicated rows, all step escalation_answers.error and

@@ -24,7 +24,7 @@
     - test/the-shared-mac-janitor-never-enters-another-accounts-home.test.ts
     - test/the-mac-reclaims-its-own-scratch.test.ts
     - test/workspace-retirement-safety.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "Each installer writes a record beside the files it installs: the checkout it ran from and the layout it installed (`HOME/bin`, the shared root, or the Application Support folder)"

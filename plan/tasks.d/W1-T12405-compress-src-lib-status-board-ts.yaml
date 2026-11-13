@@ -1,0 +1,38 @@
+- id: W1-T12405
+  title: "Compress the 643 comment lines in src/lib/status-board.ts without changing executable code"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: low
+  priority: 1
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "comment-compression:src/lib/status-board.ts"
+  files:
+    - src/lib/status-board.ts
+    - test/console-api/board/compress-src-lib-status-board-ts.test.ts
+  acceptance:
+    - claim: "Comment volume is measurably reduced while executable tokens and existing behavioral assertions are preserved."
+      proof: "unit test: W1-T12405: comment compression preserves executable code"
+  rationale: |
+    Observed 643 comment lines in src/lib/status-board.ts. This is maintenance debt, never a merge ceiling.
+    Operator 2026-10-24: excess comments create high-priority follow-up work; they must not block the originating change.
+    Compress repeated explanations. Preserve displaced historical detail in the PR review record and retain its citation; keep invariants, traps, falsifiers and text pinned by existing tests.
+    Add the named regression in test/console-api/board/compress-src-lib-status-board-ts.test.ts; compare executable tokens against the pre-compression source and verify a real comment-count reduction.
+    Read the pre-compression source with compressionPinBase from #test/helpers/compression-pin.js, never a frozen digest or token count: a frozen pin fails every later feature edit to the module (#16082).
+    Compare the token streams with assertSameTokens from #test/helpers/compression-pin.js, never assert.deepEqual: its failure diff over two whole token arrays grows quadratically (W1-T11342).
+    Preserve every existing behavioral assertion and run the actual callers. Do not invent a new hard comment ceiling or claim success from a title-only proof.
+    Preserve existing owners, stops and deployment holds. This maintenance task grants no service restart, release or publication override.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.93
+    reasons:
+      - "The declared files are only src/lib/status-board.ts and a new regression test, and the described work is comment compression that leaves executable code unchanged."
+      - "The plan states it grants no service restart, release or publication override and preserves existing owners, stops and deployment holds, so it touches no secrets, auth, deploy or review policy."
+      - "The acceptance is verifiable by an automatic unit test that compares token streams, using the named helpers."
+      - "The family track record is 42 merged and 0 declined (Beta mean 0.98), and the gates state is clean."
+    judged_at: "2026-11-12T11:19:33.994Z"
+    pin: "c792f4c0123cbdd02757eef564e39ac86ad92adb9a390ba7e8ed3b6ab2dbadac"

@@ -25,7 +25,7 @@
     - test/the-usage-fallback-and-dispatch-live-state-reads-run-off-the-loop.test.ts
     - test/usage-probe-failure-logged.test.ts
     - test/usage-probe-store.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "When the /usage output cannot be parsed, the usage.probe_failed row records the shape of the output. The shape is the number of lines and the label of each line, with digits masked and no account name"

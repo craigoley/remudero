@@ -251,13 +251,16 @@ test("a genuine crash — no signal involved — still exits non-zero and pays t
 
 // ── MUTANT: reverting the classification reproduces the MEASURED defect exactly ────────────────
 
+// W1-T12240: the loop lives in the second stage. The fixture checkout has none, so the entrypoint
+// runs the copy beside itself: the mutant is that copy, next to an unchanged entrypoint.
 function mutate(find: string, replace: string): string {
-  const src = readFileSync(SCRIPT, "utf8");
+  const src = readFileSync(join(REPO_ROOT, "deploy", "entrypoint-supervise.sh"), "utf8");
   assert.equal(src.split(find).length - 1, 1, `the mutation target must be unique: ${JSON.stringify(find)}`);
   const dir = tmp("op-stop-mutant-");
   const p = join(dir, "entrypoint.sh");
-  writeFileSync(p, src.replace(find, replace), { mode: 0o755 });
+  writeFileSync(p, readFileSync(SCRIPT, "utf8"), { mode: 0o755 });
   chmodSync(p, 0o755);
+  writeFileSync(join(dir, "entrypoint-supervise.sh"), src.replace(find, replace));
   return p;
 }
 

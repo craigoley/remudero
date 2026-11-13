@@ -98,7 +98,8 @@ for (const phase of ["waiting", "stopping"]) {
     assert.equal(after.ino, before.ino, "the original PAUSE is not replaced");
     assert.equal(after.mtimeNs, before.mtimeNs, "even rewriting identical bytes is forbidden");
     const calls = readFileSync(join(f.root, "calls"), "utf8").split("\n");
-    assert.equal(calls.some((line) => /^(stop|rm|container run) /.test(line)), false, r.out);
+    // W1-T12242: the smoke runs before the pause, so only a container stop or removal is a touch.
+    assert.equal(calls.some((line) => /^(stop|rm) /.test(line)), false, r.out);
     const rows = f.refusals();
     assert.equal(rows.length, 1);
     assert.equal(rows[0]!.reason, "live-recycle-owns-pause");

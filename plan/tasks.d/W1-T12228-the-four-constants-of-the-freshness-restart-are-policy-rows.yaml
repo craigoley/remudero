@@ -23,7 +23,7 @@
     - src/lib/live-edit-ladder.ts
     - src/cli/commands/daemon.ts
     - test/daemon/the-four-constants-of-the-freshness-restart-are-policy-rows.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "The policy file has a block `freshnessRestart` with four rows: `scoreLimit` 18, `stalenessHorizonMs` 3600000, `quietWindowMs` 600000 and `minLifetimeMs` 5400000. Each row has `min`, `max` and an `origin` that names its constant in src/lib/deploy-judge.ts. Each row is on one line"

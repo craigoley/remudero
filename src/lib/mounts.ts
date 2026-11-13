@@ -216,6 +216,56 @@ export interface Mounts {
   /** Worker routing: task_type → risk band → class (W1-T167) → mount. Every
    *  risk band carries at least a {@link DEFAULT_TASK_CLASS} row. */
   routes: Record<string, Record<string, Record<string, Mount>>>;
+  /** OPTIONAL (W1-T12416) — the decision models a shadow may ask, by candidate name. */
+  decision_models?: Record<string, DecisionCandidate>;
+}
+
+/** The two request shapes a decision model answers in (W1-T12416). */
+export const DECISION_MODEL_SHAPES = ["openai-decisions", "microsoft-systemone"] as const;
+export type DecisionModelShape = (typeof DECISION_MODEL_SHAPES)[number];
+
+/** One `decision_models` row. The endpoint is config the daemon already has: the default cash
+ *  endpoint and key, or the endpoint and key env of one named `cashDeploymentEndpoints` entry. */
+export interface DecisionCandidate {
+  name: string;
+  deployment: string;
+  shape: DecisionModelShape;
+  endpoint: { source: "cash-default" } | { source: "cash-entry"; entry: string };
+  price: { inputUsdPerMillion: number; outputUsdPerMillion: number; readAt: string; source: string };
+}
+
+function parseDecisionModels(raw: unknown): Record<string, DecisionCandidate> {
+  if (!isObject(raw)) throw new MountsError("'decision_models' must be a mapping of candidate name → row.");
+  const rows: Record<string, DecisionCandidate> = {};
+  for (const [name, row] of Object.entries(raw)) {
+    const where = `decision_models.${name}`;
+    if (!isObject(row)) throw new MountsError(`'${where}' must be a mapping.`);
+    const text = (field: string): string => {
+      const value = row[field];
+      if (typeof value !== "string" || value.trim() === "") throw new MountsError(`'${where}.${field}' must be a non-empty string.`);
+      return value;
+    };
+    const rate = (field: string): number => {
+      const value = row[field];
+      if (typeof value !== "number" || !Number.isFinite(value) || value < 0) throw new MountsError(`'${where}.${field}' must be a dollar figure of 0 or more.`);
+      return value;
+    };
+    const shape = text("shape");
+    if (!(DECISION_MODEL_SHAPES as readonly string[]).includes(shape)) {
+      throw new MountsError(`'${where}.shape' must be one of ${DECISION_MODEL_SHAPES.join(", ")}, got '${shape}'.`);
+    }
+    const endpoint = row.endpoint;
+    let parsedEndpoint: DecisionCandidate["endpoint"];
+    if (endpoint === "cash-default") parsedEndpoint = { source: "cash-default" };
+    else if (isObject(endpoint) && Object.keys(endpoint).length === 1 && typeof endpoint["cash-entry"] === "string" && endpoint["cash-entry"] !== "") {
+      parsedEndpoint = { source: "cash-entry", entry: endpoint["cash-entry"] };
+    } else throw new MountsError(`'${where}.endpoint' must be cash-default or { cash-entry: <cashDeploymentEndpoints key> }.`);
+    const readAt = text("read_at");
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(readAt)) throw new MountsError(`'${where}.read_at' must be a YYYY-MM-DD date.`);
+    rows[name] = { name, deployment: text("deployment"), shape: shape as DecisionModelShape, endpoint: parsedEndpoint,
+      price: { inputUsdPerMillion: rate("input_usd_per_million"), outputUsdPerMillion: rate("output_usd_per_million"), readAt, source: text("source") } };
+  }
+  return rows;
 }
 
 /** The plan-authorship effort floor the Architect must meet or exceed (§9). */
@@ -669,6 +719,7 @@ export function validateMounts(raw: unknown, opts: MountsOptions = {}): Mounts {
   const machineFilingJudge =
     raw.machine_filing_judge === undefined ? undefined : parseMount(raw.machine_filing_judge, "machine_filing_judge", tiers, efforts);
   const stepUp = raw.step_up === undefined ? undefined : parseMount(raw.step_up, "step_up", tiers, efforts);
+  const decisionModels = raw.decision_models === undefined ? undefined : parseDecisionModels(raw.decision_models);
 
   // W1-T2559: synthesis rungs — each REQUIRED, validated like architect/judge, never a fallback.
   if (!isObject(raw.synthesis)) throw new MountsError(`'synthesis' must be a mapping of role → mount (${SYNTHESIS_ROLES.join(", ")}).`);
@@ -693,7 +744,7 @@ export function validateMounts(raw: unknown, opts: MountsOptions = {}): Mounts {
     }
   }
 
-  const mounts: Mounts = { tiers, efforts, ...(capabilities ? { capabilities } : {}), architect, judge, ...(escalationJudge ? { escalation_judge: escalationJudge } : {}), ...(verifyHumanJudge ? { verify_human_judge: verifyHumanJudge } : {}), ...(machineFilingJudge ? { machine_filing_judge: machineFilingJudge } : {}), ...(stepUp ? { step_up: stepUp } : {}), synthesis, routes };
+  const mounts: Mounts = { tiers, efforts, ...(capabilities ? { capabilities } : {}), architect, judge, ...(escalationJudge ? { escalation_judge: escalationJudge } : {}), ...(verifyHumanJudge ? { verify_human_judge: verifyHumanJudge } : {}), ...(machineFilingJudge ? { machine_filing_judge: machineFilingJudge } : {}), ...(stepUp ? { step_up: stepUp } : {}), synthesis, routes, ...(decisionModels ? { decision_models: decisionModels } : {}) };
   // G-17 FIRST: checking the step-up ahead of it MASKED the Tier Invariant's own message, so a
   // table violating G-17 reported the step-up's refusal instead. Both fire; only the order moved.
   enforceTierInvariant(mounts, opts.thinkingDefault);

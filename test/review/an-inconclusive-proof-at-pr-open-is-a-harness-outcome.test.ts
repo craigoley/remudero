@@ -107,23 +107,21 @@ test("W1-T10742: an inconclusive proof that is conclusive on the re-run opens wi
   assert.deepEqual(stepsOf(command).filter((s) => s.startsWith("pr.opened_with")), []);
 });
 
-test("W1-T10742: a proof that fails conclusively on the re-run opens as a failing proof", async (t) => {
+test("W1-T10742: a proof that fails conclusively on the re-run is refused, never opened (W1-T10355)", async (t) => {
   const dir = filedRunBranch(t);
   const runner = scriptedRunner([4, 1]);
-  const command = await openAsDaemon(dir, runner.run);
+  await assert.rejects(() => openAsDaemon(dir, runner.run), (err: unknown) => {
+    assert.ok(err instanceof prOpen.PrOpenRefusedError);
+    assert.equal(err.failingProof?.proof, PROOF);
+    assert.equal(err.inconclusiveProof, undefined);
+    return true;
+  });
   assert.equal(runner.calls(), 2);
-  assert.match(bodyOf(command), /## Pre-open proof failure/);
-  assert.doesNotMatch(bodyOf(command), /Pre-open proof inconclusive/);
-  assert.ok(stepsOf(command).includes("pr.opened_with_failing_proof"));
 });
 
 test("W1-T10742: a conclusive proof result is never re-run and keeps its refusal class", async (t) => {
   const dir = filedRunBranch(t);
-  const failing = scriptedRunner([1]);
-  const command = await openAsDaemon(dir, failing.run);
-  assert.equal(failing.calls(), 1, "an exit-1 proof opens red on its first answer");
-  assert.ok(stepsOf(command).includes("pr.opened_with_failing_proof"));
-  for (const [status, refusalClass] of [[5, "stale-proof"], [3, "branch-gap"]] as const) {
+  for (const [status, refusalClass] of [[1, "branch-gap"], [5, "stale-proof"], [3, "branch-gap"]] as const) {
     const runner = scriptedRunner([status]);
     await assert.rejects(
       () => openAsDaemon(dir, runner.run),

@@ -78,10 +78,11 @@ rmd_commit_published() {
 # current tips, so ask GitHub whether it has this exact commit: the endpoint
 # answers 422 for a commit GitHub has never received. Any failure (no gh, no
 # auth, not GitHub) is "no".
-RMD_GH_KNOWN=" "
-rmd_commit_on_github() {
-  local repo="$1" commit="$2" url slug gh count
-  case "$RMD_GH_KNOWN" in *" $commit "*) return 0 ;; esac
+# One bounded GitHub read of the pull requests that hold a commit, printed
+# through the caller's jq program. Any failure (no gh, not GitHub, a bad slug
+# or commit, a timeout) returns 1.
+rmd_gh_commit_pulls() {
+  local repo="$1" commit="$2" jq="$3" url slug gh
   # The configured URL names the GitHub repository; `remote get-url` would
   # apply insteadOf rewrites (mirrors, local caches) that hide it.
   url=$(rmd_retirement_git "$repo" config --get remote.origin.url 2>/dev/null) || return 1
@@ -94,12 +95,31 @@ rmd_commit_on_github() {
   case "$commit" in *[!0-9a-f]*|'') return 1 ;; esac
   gh=$(command -v gh 2>/dev/null) || { [ -x /opt/homebrew/bin/gh ] && gh=/opt/homebrew/bin/gh; } || { [ -x /usr/local/bin/gh ] && gh=/usr/local/bin/gh; } || return 1
   if command -v timeout >/dev/null 2>&1; then
-    count=$(GH_PROMPT_DISABLED=1 timeout 20 "$gh" api "repos/$slug/commits/$commit/pulls" --jq length 2>/dev/null) || return 1
+    GH_PROMPT_DISABLED=1 timeout 20 "$gh" api "repos/$slug/commits/$commit/pulls" --jq "$jq" 2>/dev/null || return 1
   else
-    count=$(GH_PROMPT_DISABLED=1 perl -e 'alarm 20; exec @ARGV' "$gh" api "repos/$slug/commits/$commit/pulls" --jq length 2>/dev/null) || return 1
+    GH_PROMPT_DISABLED=1 perl -e 'alarm 20; exec @ARGV' "$gh" api "repos/$slug/commits/$commit/pulls" --jq "$jq" 2>/dev/null || return 1
   fi
+}
+RMD_GH_KNOWN=" "
+rmd_commit_on_github() {
+  local repo="$1" commit="$2" count
+  case "$RMD_GH_KNOWN" in *" $commit "*) return 0 ;; esac
+  count=$(rmd_gh_commit_pulls "$repo" "$commit" length) || return 1
   case "$count" in ''|*[!0-9]*) return 1 ;; esac
   RMD_GH_KNOWN="$RMD_GH_KNOWN$commit "
+}
+# Is every pull request of this commit finished (merged or closed; a merged one
+# is closed)? Returns 0 only for one pull request or more, all closed. A commit
+# with no pull request, one with an open pull request, and an answer that
+# cannot be read are each "not finished". Never cached: a state changes.
+rmd_commit_pulls_finished() {
+  local repo="$1" commit="$2" answer total closed
+  answer=$(rmd_gh_commit_pulls "$repo" "$commit" \
+    '"\(length) \([.[] | select(.state == "closed")] | length)"') || return 1
+  read -r total closed <<< "$answer"
+  case "$total" in ''|*[!0-9]*) return 1 ;; esac
+  case "$closed" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$total" -ge 1 ] && [ "$total" -eq "$closed" ]
 }
 rmd_workspace_published() {
   local repo="$1" scope="${2:-head}" refresh="${3:-0}" head refs oid ref

@@ -142,8 +142,10 @@ function assertRefused(out: Outcome, state: string) {
   assert.equal(smokeRuns(out).length, 0, "a blocked cleanup must refuse before trying the smoke");
   assert.equal(out.calls.filter(c => ["stop", "rm", "run"].includes(c[0])).length, 0);
   assert.deepEqual(out.rows.find(r => r.id === "c-daemon"), { id: "c-daemon", name: DAEMON, state: "running" });
-  assert.equal(out.pause, null, "the refusal must clear this recycle's pause");
-  assert.match(out.output, /pause removed/);
+  // W1-T12242: the check runs before the pause, so a refusal leaves no pause to remove.
+  assert.equal(out.pause, null, "the refusal comes before any pause");
+  assert.match(out.output, /The fleet was not paused\./);
+  assert.doesNotMatch(out.output, /PAUSE engaged/);
 }
 
 test("W1-T6172: a created leftover smoke is removed before the smoke and named", () => {
@@ -174,7 +176,7 @@ test("W1-T6172: a container whose name only contains the smoke name is left alon
   assert.match(out.output, /worker smoke PASSED/);
 });
 
-test("W1-T6172: an unremovable leftover refuses and clears its pause without force", () => {
+test("W1-T6172: an unremovable leftover refuses before any pause, without force", () => {
   const out = recycle("exited", { REFUSE_RM: "1" });
   assertRefused(out, "exited");
   assert.deepEqual(smokeRemovals(out), [["container", "rm", "c-smoke"]]);

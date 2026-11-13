@@ -1,3 +1,4 @@
+// @census-reads: src/ scripts/ test/ — it re-runs three existing suites under a shifted clock, so it reads what they read.
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { DEFUSE_CONTROL_SHIFT_DAYS, runSuiteShiftedMeasured } from "#src/lib/gate-gardener.js";

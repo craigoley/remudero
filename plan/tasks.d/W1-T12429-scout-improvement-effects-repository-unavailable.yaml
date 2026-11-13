@@ -1,0 +1,31 @@
+- id: W1-T12429
+  title: "THE SCOUT'S UNCOVERED RECURRING SYMPTOM — improvement_effects.repository_unavailable landed 243 ledger rows across the trailing window and no task cites it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: low
+  priority: 1.47
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "scout:improvement_effects.repository_unavailable"
+  files:
+    - src/lib/opportunity-outcomes.ts
+    - test/triage/scout-improvement-effects-repository-unavailable.test.ts
+  acceptance:
+    - claim: "improvement_effects.repository_unavailable stops recurring: its cause is fixed rather than its rows hidden"
+      proof: "grep: test(\"W1-T12429: improvement_effects.repository_unavailable no longer recurs\" in test/triage/scout-improvement-effects-repository-unavailable.test.ts"
+  note: "Filed by the scout gardener (W1-T5454). The scout measures this step again once the build merges and credits or debits its class by whether the rows stopped. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person."
+  rationale: |
+    The ledger step improvement_effects.repository_unavailable carries a failure shape and landed rows in both halves of the trailing 7 days: 108 in the older half, 135 in the newer.
+    No queued task and no task merged in that window cites this step, and no gardener scorecard prices it.
+    The rows name no file; tracked source literals locate this step in: src/lib/opportunity-outcomes.ts. Start there.
+  risk_ruling:
+    verdict: "rule-3-low-privilege"
+    action: proceed
+    confidence: 1
+    reasons:
+      - "rule 3 (live and low-privilege): the symptom is live, 243 occurrence(s) across 7 day(s), last seen 2026-11-12T21:14:22.086Z, and the record declares no privileged path"
+    judged_at: "2026-11-12T23:04:01.402Z"
+    pin: "24220cef50499bfbedcf40d2f995a13f0ad4c8812c83ffb48df7674b4b047922"

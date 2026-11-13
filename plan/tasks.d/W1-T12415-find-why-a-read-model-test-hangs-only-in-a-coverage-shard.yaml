@@ -1,0 +1,50 @@
+- id: W1-T12415
+  title: "Find why test/operator-agent-gets-read-the-read-model.test.ts hangs only in a CI coverage shard"
+  repo: remudero
+  depends_on: []
+  priority: 1.5
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # a run bound on every coverage shard; a bound set too low fails a healthy slow test
+  band_meaning: span
+  origin: operator-session#decision-models-2026-11-12
+  plan_refs:
+    - W1-T11411
+    - W1-T2433
+    - W1-T11938
+    - W1-T297
+  files:
+    - .github/workflows/ci.yml
+    - scripts/test-tier-manifest.mjs
+    - test/operator-agent-gets-read-the-read-model.test.ts
+    - test/helpers/operator-agent-corpus.ts
+    - test/ci/suites/a-hung-coverage-test-fails-by-name.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "The coverage shard's test command carries a per-test timeout from the same duration policy as the fast tier, so a test that hangs fails by its name inside the 49-minute job ceiling"
+      proof: "grep: W1-T12415 criterion 1 in test/ci/suites/a-hung-coverage-test-fails-by-name.test.ts"
+    - claim: "A planted test that never settles, run under the coverage flags with that bound, fails by its name and the run still writes its lcov file"
+      proof: "grep: W1-T12415 criterion 2 in test/ci/suites/a-hung-coverage-test-fails-by-name.test.ts"
+    - claim: "The cause of the hang is named and fixed, and a test that fails without the fix shows it"
+      proof: "grep: W1-T12415 criterion 3 in test/ci/suites/a-hung-coverage-test-fails-by-name.test.ts"
+  rationale: |
+    OBSERVED 2026-10-27 on PR #14880 at 4c49598ba (full comment: https://github.com/craigoley/remudero/pull/14880#issuecomment-6448703809): coverage-shard (4/8) was cancelled at its 49-minute ceiling. In the last 5,000 log lines (312 test files) only test/operator-agent-gets-read-the-read-model.test.ts was dequeued (16:36:04Z) and never completed. Every other file finished by 16:49:37Z. The cancel came at 17:17:21Z, so the shard waited about 28 minutes on one file. At the same head on a host the file passed: plain node --test `# tests 8 # pass 8 # fail 0` in 25 s, and under the coverage flags (--experimental-test-coverage, NODE_V8_COVERAGE) in 15 s. One re-run passed and #14880 merged.
+    READ 2026-11-12 at origin/main f93618eab:
+    - .github/workflows/ci.yml:1977-1983, the coverage shard runs `node scripts/test-with-retry.mjs --coverage-first-pass coverage/raw node --experimental-test-coverage ... --test ...` with no `--test-timeout`. Its job ceiling is `timeout-minutes: 49` (:1708).
+    - The fast tier and the slow tier both bound a hung test: scripts/test-tier-manifest.mjs:82 `fastTierHangBoundArgs` and :130 `slowTierHangBoundArgs`, added at :1084. The coverage shard is the one lane without that bound. So a hang there costs the whole ceiling and names nothing.
+    - The test makes every synchronous fs read on the main thread throw (its header, and `syncBuiltinESMExports` in its imports), and it starts a read-model ticker. W1-T11411 (merged, #17384) already made its fixture flush the transaction publisher before removing its state dir.
+    - A per-test timeout cannot fire while the event loop is blocked synchronously (scripts/test-tier-manifest.mjs, the comment above :82). If the cause is a synchronous block, criterion 1 alone does not fix it, which is why criterion 3 exists.
+  design: |
+    1. Reproduce first. Run the file with the shard's exact command (ci.yml:1977-1983), alone and then with the 312 files of that shard's selection where the log still has them, on a loaded host. Record each run's `# tests` line and duration. Inspect active handles at the stall (`process.getActiveResourcesInfo()` from a timer, or `--cpu-prof`), and check whether the stall is a pending promise or a blocked loop.
+    2. Bound the shard. Pass the coverage shard's files through `boundedNodeTestArgs` with the coverage duration manifest (scripts/test-tier-coverage-manifest.json), or add the same `--test-timeout` it computes. Add `--test-force-exit` only if criterion 2 shows the lcov file is still written.
+    3. Fix the cause in the test or its helper. If the cause is outside `files`, amend the task first.
+    NOT IN SCOPE: retries, skips, a longer job ceiling, or moving the file out of the coverage shard. A retry hides the hang; it does not name it.
+  falsifier: |
+    Remove the timeout from the shard command and criterion 1 must fail. Remove the fix and criterion 3 must fail. Restore and require both to pass.
+  note: |
+    Ids reserved for run-unfiled-1794493022000 with ~/rmd-work/bin/reserve-id.sh. Filed with W1-T12413, W1-T12414 and the decision-model tasks W1-T12416 to W1-T12419.
+    This diff edits a workflow run bound, so it rides alone (W1-T297).
+    Swept 2026-11-12 over 577 remote heads: no open head adds this file's name except a stale test-placement map on run-W1-T9874-1792306142260, which does not touch the hang.

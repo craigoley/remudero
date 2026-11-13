@@ -276,5 +276,8 @@ USER node
 #   docker run --rm -e RMD_SKIP_BOOTSTRAP=1 <image> <probe>                    # go through it, no clone
 # Not fixed deliberately: a heuristic guessing which commands are diagnostic would fail expensively.
 COPY --chown=node:node deploy/entrypoint.sh /usr/local/bin/rmd-entrypoint
+# W1-T12240: the image copy of the second stage. The entrypoint reads the checkout copy first; this
+# one runs only when that copy cannot, so it is not a baked path and may be older than main.
+COPY --chown=node:node deploy/entrypoint-supervise.sh /usr/local/lib/rmd/entrypoint-supervise.sh
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/rmd-entrypoint"]
 CMD ["./bin/rmd", "status"]

@@ -1,0 +1,37 @@
+- id: W1-T12461
+  title: "Compress the 460 comment lines in src/lib/worker-home.ts without changing executable code"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: low
+  priority: 1
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "comment-compression:src/lib/worker-home.ts"
+  files:
+    - src/lib/worker-home.ts
+    - test/worker/spawn/compress-src-lib-worker-home-ts.test.ts
+  acceptance:
+    - claim: "Comment volume is measurably reduced while executable tokens and existing behavioral assertions are preserved."
+      proof: "unit test: W1-T12461: comment compression preserves executable code"
+  rationale: |
+    Observed 460 comment lines in src/lib/worker-home.ts. This is maintenance debt, never a merge ceiling.
+    Operator 2026-10-24: excess comments create high-priority follow-up work; they must not block the originating change.
+    Compress repeated explanations. Preserve displaced historical detail in the PR review record and retain its citation; keep invariants, traps, falsifiers and text pinned by existing tests.
+    Add the named regression in test/worker/spawn/compress-src-lib-worker-home-ts.test.ts; compare executable tokens against the pre-compression source and verify a real comment-count reduction.
+    Read the pre-compression source with compressionPinBase from #test/helpers/compression-pin.js, never a frozen digest or token count: a frozen pin fails every later feature edit to the module (#16082).
+    Compare the token streams with assertSameTokens from #test/helpers/compression-pin.js, never assert.deepEqual: its failure diff over two whole token arrays grows quadratically (W1-T11342).
+    Preserve every existing behavioral assertion and run the actual callers. Do not invent a new hard comment ceiling or claim success from a title-only proof.
+    Preserve existing owners, stops and deployment holds. This maintenance task grants no service restart, release or publication override.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.96
+    reasons:
+      - "The filed scope limits work to comment compression and a regression test, requiring preserved executable tokens, behavioral assertions, invariants and historical citations."
+      - "The plan specifies measurable comment reduction and established compression-pin helpers; the supplied family track record reports 42 merged tasks."
+      - "The supplied gates show no concerning state, and the plan explicitly preserves owners, stops and deployment holds without granting restart, release or publication authority."
+    judged_at: "2026-11-13T02:00:41.549Z"
+    pin: "c29dde809e210fa48964b6d32628f519e66e151c60e7e700296e3d36371dbec7"

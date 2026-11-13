@@ -23,7 +23,7 @@
     - src/lib/daemon.ts
     - src/lib/sweep.ts
     - test/daemon/a-recycle-wait-admits-a-review-that-ends-before-the-wait-does.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "`recycleWaitAdmits` returns true for a review when the measured length of a review is shorter than the predicted time left of the build run or fix round that will end first among those the recycle waits for"

@@ -21,6 +21,7 @@ import {
   parseTriageArgs,
   parseTriageVerdict,
   triageCommitMessage,
+  feedbackEntryBlock,
   triagePrompt,
   type TriageDecision,
 } from "../src/lib/triage.js";
@@ -30,12 +31,29 @@ import { TRIAGE_WORKER_TOOLS, triageCommand } from "../src/run-task.js";
 import { escalate, renderIssueBody, type IssueGateway } from "../src/lib/escalate.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 import { workerTranscript, type WorkerResult } from "../src/lib/worker.js";
+import { consoleCorrectionSubmissionKey, type ConsoleCorrection, type CorrectionEvidence, type CorrectionSymptom } from "#src/lib/console-feedback.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(__dirname, "..");
 
 function tempLedgerPath(): string {
   return join(mkdtempSync(join(tmpdir(), "rmd-triage-grill-")), "ledger.ndjson");
+}
+
+// A correction as the console route captures it: bound thread, native key and console origin.
+function evidence(o: { id: string; ts?: string; symptom?: CorrectionSymptom; version?: string; cls?: string; issue?: number; revision?: string;
+  before?: string; after?: string; text?: string; replayCaseIds?: string[]; forgeKey?: boolean }): CorrectionEvidence {
+  const threadId = `thread:W1-T${o.issue ?? 1}::${o.cls ?? "MANUAL"}::-::-`;
+  const issueUrl = `https://github.com/craigoley/remudero/issues/${o.issue ?? 1}`;
+  const revision = o.revision ?? "a".repeat(64);
+  const correction: ConsoleCorrection = {
+    kind: "wording_correction", version: 1, symptom: o.symptom ?? "stale_read", issue_url: issueUrl, repository: "craigoley/remudero",
+    thread_id: threadId, intent_id: `intent-${o.id}`, conversation_revision: revision, source_revision: "b".repeat(64),
+    rendered_version: o.version ?? "tmpl-v1", rendered_digest: null, before: o.before ?? "Status is current.",
+    after: o.after ?? "This status is 3 hours old.", replay_case_ids: o.replayCaseIds ?? [], context: "operator_reported",
+  };
+  return { feedbackId: o.id, ts: o.ts ?? "2026-11-10T10:00:00.000Z", raw: o.text ?? "Say how old the status is.", origin: "ui", threadId,
+    submissionKey: o.forgeKey ? "forged" : consoleCorrectionSubmissionKey(threadId, correction.intent_id, issueUrl, revision), correction };
 }
 
 const ENTRY: FeedbackEntry = {
@@ -109,6 +127,20 @@ test("triagePrompt: WITHOUT a minted id the fallback still names BOTH sources â€
   assert.match(prompt, /plan\/tasks\.d\/\*\.yaml/);
   assert.match(prompt, /monolith AND every shard/);
   assert.doesNotMatch(prompt, /USE EXACTLY/, "no id was minted, so none is asserted");
+});
+
+test("triage feedback envelope carries an explicit console correction as untrusted evidence", () => {
+  const e = evidence({ id: "fb-1700000000000-abc123", issue: 41, replayCaseIds: ["stale-read"] });
+  const corrected: FeedbackEntry = { ...ENTRY, origin: "ui", thread_id: e.threadId, submission_key: e.submissionKey, console_correction: e.correction };
+  const block = feedbackEntryBlock(corrected);
+  assert.match(block, /Console wording correction \(operator-reported evidence only, not permission\)/);
+  assert.match(block, /"kind":"wording_correction"/);
+  assert.match(block, /"conversation_revision":"a{64}"/);
+  assert.match(block, /issues\/41/);
+  assert.match(block, /can we get a --dry-run flag/, "the raw text still rides in the same envelope");
+  const prompt = triagePrompt(corrected, "r1");
+  assert.match(prompt, /"symptom":"stale_read"/);
+  assert.doesNotMatch(feedbackEntryBlock(ENTRY), /wording correction/i, "an entry with no correction keeps the legacy block");
 });
 
 test("triagePrompt: notes when there are no attachments and lists them when present", () => {
@@ -363,11 +395,11 @@ test("assertProposedPlanLoads: a minted id already owned by a tasks.d shard thro
     mkdirSync(join(root, "plan", "tasks.d"), { recursive: true });
     writeFileSync(
       join(root, "plan", "tasks.yaml"),
-      "- id: W1-T236\n  title: minted by the worker off the monolith max\n  repo: r\n  type: implement\n  verify: auto\n  status: queued\n",
+      "- id: W1-T236\n  title: minted by the worker off the monolith max\n  repo: r\n  type: implement\n  design: |\n    NO-INVARIANTS: synthetic lint fixture with no inherited behavior to preserve\n  verify: auto\n  status: queued\n",
     );
     writeFileSync(
       join(root, "plan", "tasks.d", "W1-T236-already-owned.yaml"),
-      "- id: W1-T236\n  title: the shard that already owns the id\n  repo: r\n  type: implement\n  verify: auto\n  status: queued\n",
+      "- id: W1-T236\n  title: the shard that already owns the id\n  repo: r\n  type: implement\n  design: |\n    NO-INVARIANTS: synthetic lint fixture with no inherited behavior to preserve\n  verify: auto\n  status: queued\n",
     );
     assert.throws(() => assertProposedPlanLoads(root), /duplicate task id 'W1-T236'/);
   } finally {
@@ -381,7 +413,7 @@ test("assertProposedPlanLoads: a collision-free proposal loads clean â€” the gua
     mkdirSync(join(root, "plan"), { recursive: true });
     writeFileSync(
       join(root, "plan", "tasks.yaml"),
-      "- id: W1-T240\n  title: a fresh id\n  repo: r\n  type: implement\n  verify: auto\n  status: queued\n",
+      "- id: W1-T240\n  title: a fresh id\n  repo: r\n  type: implement\n  design: |\n    NO-INVARIANTS: synthetic lint fixture with no inherited behavior to preserve\n  verify: auto\n  status: queued\n",
     );
     assert.doesNotThrow(() => assertProposedPlanLoads(root));
   } finally {
@@ -972,7 +1004,7 @@ test("W1-T348: a triage PROPOSE writes a validated decisionSummary onto the feed
   writeFileSync(join(seed, "MASTER-PLAN.md"), "# MASTER-PLAN\n", "utf8");
   writeFileSync(
     join(seed, "plan", "tasks.yaml"),
-    ["- id: W1-T4", '  title: "a seed task the plan loader accepts"', "  repo: remudero", "  depends_on: []", "  type: implement", "  verify: auto", "  status: queued", "  attempts: 0", ""].join("\n"),
+    ["- id: W1-T4", '  title: "a seed task the plan loader accepts"', "  repo: remudero", "  depends_on: []", "  type: implement", "  design: |", "    NO-INVARIANTS: synthetic lint fixture with no inherited behavior to preserve", "  verify: auto", "  status: queued", "  attempts: 0", ""].join("\n"),
   );
   writeFileSync(
     join(seed, "plan", "feedback", `${feedbackId}.yaml`),
@@ -1048,6 +1080,8 @@ test("W1-T348: a triage PROPOSE writes a validated decisionSummary onto the feed
               "  origin: architect",
               `  depends_on: []`,
               "  type: implement",
+              "  design: |",
+              "    NO-INVARIANTS: synthetic lint fixture with no inherited behavior to preserve",
               "  verify: auto",
               "  status: queued",
               "  attempts: 0",
@@ -1104,7 +1138,7 @@ test("W1-T348: a THROWING decision-summary rung still writes the `proposed` tran
   writeFileSync(join(seed, "MASTER-PLAN.md"), "# MASTER-PLAN\n", "utf8");
   writeFileSync(
     join(seed, "plan", "tasks.yaml"),
-    ["- id: W1-T4", '  title: "a seed task the plan loader accepts"', "  repo: remudero", "  depends_on: []", "  type: implement", "  verify: auto", "  status: queued", "  attempts: 0", ""].join("\n"),
+    ["- id: W1-T4", '  title: "a seed task the plan loader accepts"', "  repo: remudero", "  depends_on: []", "  type: implement", "  design: |", "    NO-INVARIANTS: synthetic lint fixture with no inherited behavior to preserve", "  verify: auto", "  status: queued", "  attempts: 0", ""].join("\n"),
   );
   writeFileSync(
     join(seed, "plan", "feedback", `${feedbackId}.yaml`),
@@ -1173,6 +1207,8 @@ test("W1-T348: a THROWING decision-summary rung still writes the `proposed` tran
               "  origin: architect",
               `  depends_on: []`,
               "  type: implement",
+              "  design: |",
+              "    NO-INVARIANTS: synthetic lint fixture with no inherited behavior to preserve",
               "  verify: auto",
               "  status: queued",
               "  attempts: 0",
@@ -1239,7 +1275,7 @@ test("W1-T348: a triage GRILL opens its needs-human issue WITH a validated decis
   writeFileSync(join(seed, "MASTER-PLAN.md"), "# MASTER-PLAN\n", "utf8");
   writeFileSync(
     join(seed, "plan", "tasks.yaml"),
-    ["- id: W1-T4", '  title: "a seed task the plan loader accepts"', "  repo: remudero", "  depends_on: []", "  type: implement", "  verify: auto", "  status: queued", "  attempts: 0", ""].join("\n"),
+    ["- id: W1-T4", '  title: "a seed task the plan loader accepts"', "  repo: remudero", "  depends_on: []", "  type: implement", "  design: |", "    NO-INVARIANTS: synthetic lint fixture with no inherited behavior to preserve", "  verify: auto", "  status: queued", "  attempts: 0", ""].join("\n"),
   );
   writeFileSync(
     join(seed, "plan", "feedback", `${feedbackId}.yaml`),
@@ -1365,7 +1401,7 @@ test("W1-T2205: a triage GRILL driven through the FAITHFUL overlapping fixture (
   writeFileSync(join(seed, "MASTER-PLAN.md"), "# MASTER-PLAN\n", "utf8");
   writeFileSync(
     join(seed, "plan", "tasks.yaml"),
-    ["- id: W1-T4", '  title: "a seed task the plan loader accepts"', "  repo: remudero", "  depends_on: []", "  type: implement", "  verify: auto", "  status: queued", "  attempts: 0", ""].join("\n"),
+    ["- id: W1-T4", '  title: "a seed task the plan loader accepts"', "  repo: remudero", "  depends_on: []", "  type: implement", "  design: |", "    NO-INVARIANTS: synthetic lint fixture with no inherited behavior to preserve", "  verify: auto", "  status: queued", "  attempts: 0", ""].join("\n"),
   );
   writeFileSync(
     join(seed, "plan", "feedback", `${feedbackId}.yaml`),

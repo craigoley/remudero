@@ -1,3 +1,4 @@
+// @census-reads: scripts/ src/ test/a-near-fixture-crossing-blocks-only-once-a-shifted-run-proves-it-red.test.ts — the census and clock-shift scripts, the gate gardener, itself.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";

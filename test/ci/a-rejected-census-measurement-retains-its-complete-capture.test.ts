@@ -1,3 +1,4 @@
+// @census-reads: scripts/ test/setup/ test/ci/a-rejected-census-measurement-retains-its-complete-capture.test.ts — the census script, retained-fixture helpers, itself.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";

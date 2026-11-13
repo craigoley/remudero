@@ -94,11 +94,23 @@ export function decideTriageClaim(
 }
 
 /**
- * PURE. Does any merged commit subject name this feedback entry? Matched as a plain substring,
- * never a regex — a feedback id may contain characters a pattern would need to escape.
+ * PURE. Does main show an outcome for this feedback entry? Either a merged commit subject names
+ * it (a plain substring, never a regex), or its status on origin/main is not `new`. W1-T12198:
+ * the shared feedback landing merges under a subject that names no feedback id.
  */
-export function feedbackOutcomeObserved(subjects: readonly string[], feedbackId: string): boolean {
-  return subjects.some((s) => s.includes(feedbackId));
+export function feedbackOutcomeObserved(subjects: readonly string[], feedbackId: string, landedStatus?: string): boolean {
+  return subjects.some((s) => s.includes(feedbackId)) || (landedStatus !== undefined && landedStatus !== "new");
+}
+
+/** The evidence-arm inputs. Each is read lazily, and only for an id whose claim is held. */
+interface TriageOutcomeEvidence {
+  mergedSubjects?: () => readonly string[];
+  /** The entry's `status:` on origin/main; `undefined` when it cannot be read. */
+  landedStatus?: (feedbackId: string) => string | undefined;
+}
+
+function outcomeObservedFor(feedbackId: string, evidence: TriageOutcomeEvidence): boolean {
+  return feedbackOutcomeObserved(evidence.mergedSubjects?.() ?? [], feedbackId, evidence.landedStatus?.(feedbackId));
 }
 
 /** Which release arm applies. `liveness` (W1-T4769) is the fourth, and still no bare timer: it
@@ -448,7 +460,7 @@ export interface TriageClaimResult extends TriageClaimDecision {
 export async function claimTriage(
   feedbackId: string,
   reserver: TriageClaimReserverAsync,
-  opts: { mergedSubjects?: () => readonly string[] } = {},
+  opts: TriageOutcomeEvidence = {},
 ): Promise<TriageClaimResult> {
   const anchor = await reserver.mintAnchor();
   if (!anchor) return decideTriageClaim("unreachable", { feedbackId, stderr: reserver.lastAttemptStderr?.() ?? "the claim anchor came back empty" });
@@ -457,7 +469,7 @@ export async function claimTriage(
   const holder = outcome === "taken" ? await reserver.holder(feedbackId) : undefined;
   const decision = decideTriageClaim(outcome, { feedbackId, holder, stderr: reserver.lastAttemptStderr?.() });
   if (outcome !== "taken") return decision;
-  const observed = feedbackOutcomeObserved(opts.mergedSubjects?.() ?? [], feedbackId);
+  const observed = outcomeObservedFor(feedbackId, opts);
   const released = await releaseTriageClaim(feedbackId, reserver, { outcomeObserved: observed });
   return { ...decision, reason: `${decision.reason} ${released.reason}`, staleReleased: released.dropped };
 }
@@ -507,12 +519,11 @@ export interface TriageClaimSweep {
 export async function sweepTriageClaims(
   candidates: readonly string[],
   reserver: TriageClaimReserverAsync,
-  o: {
+  o: TriageOutcomeEvidence & {
     now: Date;
     /** Rows stamped at or after `sinceIso`, or `undefined` when the ledger union was unreadable. */
     readRows: (sinceIso: string) => readonly TriageLivenessRow[] | undefined;
     log: (step: string, extra?: Record<string, unknown>) => void;
-    mergedSubjects?: () => readonly string[];
   },
 ): Promise<TriageClaimSweep> {
   const claimed = await reserver.claimedIds?.();
@@ -534,7 +545,7 @@ export async function sweepTriageClaims(
       liveness = assessTriageClaimLiveness({ holder, rows, now: o.now });
     }
     const result = await releaseTriageClaim(id, reserver, {
-      outcomeObserved: feedbackOutcomeObserved(o.mergedSubjects?.() ?? [], id),
+      outcomeObserved: outcomeObservedFor(id, o),
       liveness,
       heldSha: sha,
     });
@@ -565,7 +576,7 @@ export async function claimTriageWithLogging(
   log: (step: string, extra?: Record<string, unknown>) => void,
   feedbackId: string,
   reserver: TriageClaimReserverAsync,
-  opts: { mergedSubjects?: () => readonly string[] } = {},
+  opts: TriageOutcomeEvidence = {},
 ): Promise<TriageClaimResult> {
   const result = await claimTriage(feedbackId, reserver, opts);
   log("triage.claim", {
@@ -1085,15 +1096,18 @@ function readTextOrUndefined(path: string): string | undefined {
 /** The feedback entry's `status:` as committed on origin/main — the daemon's own checkout can lag a merged
  *  triage (#10265). `undefined` when the ref, the file or the field cannot be read. */
 export function feedbackStatusOnMain(root: string, feedbackId: string): string | undefined {
-  let text: string;
-  try {
-    text = hostWorktreeGit(root, ["show", `origin/main:plan/feedback/${feedbackId}.yaml`], { timeout: 10_000 });
-  } catch (error) {
-    // A missing ref/file is an unreadable main status. Preserve security refusals from the leaf.
-    if (error !== null && typeof error === "object" && "status" in error) return undefined;
-    throw error;
+  const copies: Array<{ path: string; text: string }> = [];
+  for (const dir of feedbackReadRoots(root, planDestinationRepository(instanceStateDir()))) {
+    try {
+      copies.push({ path: `${dir} origin/main`, text: hostWorktreeGit(dir,
+        ["show", `origin/main:plan/feedback/${feedbackId}.yaml`], { timeout: 10_000 }) });
+    } catch (error) {
+      // Missing/unreadable Git bytes provide no release evidence. Preserve leaf security refusals.
+      if (error === null || typeof error !== "object" || !("status" in error)) throw error;
+    }
   }
-  return /^status:\s*(\S+)\s*$/m.exec(text)?.[1];
+  if (copies.length === 2) assertOneFeedbackCopy(feedbackId, copies[0], copies[1]);
+  return copies[0] === undefined ? undefined : /^status:\s*(\S+)\s*$/m.exec(copies[0].text)?.[1];
 }
 
 /** Feedback ids at `status: new`, oldest first — the count half of

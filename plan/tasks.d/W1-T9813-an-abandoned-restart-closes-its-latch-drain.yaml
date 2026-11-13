@@ -12,7 +12,7 @@
   plan_refs: [W1-T8172, W1-T8170, W1-T9069, W1-T5343, W1-T4429]
   files:
     - src/lib/daemon.ts
-    - test/an-abandoned-restart-closes-its-latch-drain.test.ts
+    - test/daemon/an-abandoned-restart-closes-its-latch-drain.test.ts
   status: queued
   priority: 2  # raised 2026-11-11 on the 7-day restart study (36 exits to 2026-11-11): the restart cycle row of W1-T12229 reads these drain rows; was 3
   attempts: 0
@@ -50,11 +50,11 @@
        - a restart that fires still writes one `.completed` and no `.abandoned` (positive control).
   acceptance:
     - claim: "a stop after the latch closes the latch drain with an abandoned row"
-      proof: 'grep: test("W1-T9813: a stop after the latch closes the latch drain" in test/an-abandoned-restart-closes-its-latch-drain.test.ts'
+      proof: "unit test: W1-T9813: a stop after the latch closes the latch drain"
     - claim: "a pause after the latch closes the latch drain, and a later latch starts its own"
-      proof: 'grep: test("W1-T9813: a pause after the latch closes the latch drain" in test/an-abandoned-restart-closes-its-latch-drain.test.ts'
+      proof: "unit test: W1-T9813: a pause after the latch closes the latch drain"
     - claim: "a restart that fires writes one completed row and no abandoned row"
-      proof: 'grep: test("W1-T9813: a restart that fires writes one completed row" in test/an-abandoned-restart-closes-its-latch-drain.test.ts'
+      proof: "unit test: W1-T9813: a restart that fires writes one completed row"
   falsifier: |
     At origin/main, runDaemon with a review in flight at a latch and STOP set before the last lane settles writes
     `daemon.freshness_drain.started` (started_at latch) and returns "stopped" with no closing row, so the first test

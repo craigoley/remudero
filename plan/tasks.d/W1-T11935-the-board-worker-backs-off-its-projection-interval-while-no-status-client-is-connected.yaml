@@ -15,7 +15,7 @@
   files:
     - src/lib/board-worker.ts
     - test/lib/the-board-worker-backs-off-while-no-client-is-connected.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: With no connected client the board worker projects no more often than the declared idle interval

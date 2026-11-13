@@ -22,7 +22,7 @@ import {
   type PromotionRecord,
 } from "./experiment-promotion.js";
 import { readFileIfExists, writeAtomic } from "./fs-race-safe.js";
-import { gardenNeedsInventory, gardenPassDue, gardenStatePath, judgeGardenDecision, readGardenState, runGardenAsync, type GardenAction, type GardenCheckout, type GardenPassResult, type GardenSpec, type GardenerDeps, type PrState } from "./gardener.js";
+import { gardenNeedsInventory, gardenPassDue, landedPrUrl, gardenStatePath, judgeGardenDecision, readGardenState, runGardenAsync, type GardenAction, type GardenCheckout, type GardenPassResult, type GardenSpec, type GardenerDeps, type PrState } from "./gardener.js";
 import { buildEntryWeightIndex, DEFAULT_KNOWLEDGE_BUDGET_CHARS, loadLearningsCorpus } from "./learnings.js";
 import type { LedgerLine } from "./ledger.js";
 import { ledgerRotationEntries, readLedgerUnionRecordsSync } from "./ledger-union.js";
@@ -857,7 +857,7 @@ async function rollBack(deps: GardenerDeps, c: ConfigCanary): Promise<string | u
       return undefined;
     }
     const body = [`The config gardener (W1-T4113) rolls back its \`${c.actionClass}\` canary from ${c.prUrl}: ${c.reason ?? "a cohort guardrail breach"}.`, "", ...acceptance(edits)].join("\n");
-    const prUrl = await ws.land({ paths, title: `revert(config): the config gardener rolls back its ${c.actionClass} canary`, body });
+    const prUrl = landedPrUrl(await ws.land({ paths, title: `revert(config): the config gardener rolls back its ${c.actionClass} canary`, body }), "config gardener");
     if (!prUrl) throw new Error(`config gardener: rollback PR was not opened for ${c.prUrl}`);
     return prUrl;
   } finally {

@@ -500,8 +500,8 @@ test("W1-T11421: rotation preserves the last row and heap sample before a long r
 });
 
 test("W1-T11421 criterion 2: the real entrypoint supplies each exit code and heap-limit stderr to one incident", (t) => {
-  // @source-text-subject: deploy/entrypoint.sh is the executed supervisor under test.
-  const source = readFileSync(join(REPO_ROOT, "deploy/entrypoint.sh"), "utf8");
+  // @source-text-subject: deploy/entrypoint-supervise.sh is the executed supervisor under test.
+  const source = readFileSync(join(REPO_ROOT, "deploy/entrypoint-supervise.sh"), "utf8");
   const boundary = source.indexOf("# ── Signal forwarding");
   assert.ok(boundary > 0, "the real supervision section must exist");
   const fixture = writeLedger([], { scope: t });
@@ -700,7 +700,7 @@ if (n === 1) {
 }
 `);
   // @source-text-subject: this is the actual supervision section, not a substitute observer.
-  const source = readFileSync(join(REPO_ROOT, "deploy/entrypoint.sh"), "utf8");
+  const source = readFileSync(join(REPO_ROOT, "deploy/entrypoint-supervise.sh"), "utf8");
   const boundary = source.indexOf("# ── Signal forwarding");
   assert.ok(boundary > 0);
   const shell = String.raw`set -euo pipefail
@@ -721,6 +721,7 @@ log() { :; }
 die() { printf '%s\n' "$*" >&2; exit 1; }
 sync_tree() { printf 'sync\n' >> "$TEST_SYNC_PATH"; }
 resolve_rmd_on_path() { :; }
+supervise_follow_checkout() { :; }
 wait() { builtin wait "$@" 2>> "$TEST_WAIT_ERRORS"; }
 ` + source.slice(boundary);
   const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("RMD_")));

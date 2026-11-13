@@ -1,3 +1,4 @@
+// @census-reads: test/ src/ .dependency-cruiser.cjs package.json — every tracked test module it walks, the cruiser config and pin.
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";

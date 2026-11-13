@@ -127,3 +127,20 @@
   note: |
     reservation hand-off: plan-file branch reserved via rmd next-task-id --branch from the operator session's ops worktree.
     The 83 listed suites were selected at origin/main 2026-11-05 by: imports createReadModelTicker|createReadModelWorker|openReadModelDb|read-model-db, removes a temp dir in an after-hook, and has no flushReadModelTransactions.
+    census re-derived at origin/main 8fc9704d4 (W1-T11745), selection: git-tracked *.test.ts that
+    import createReadModelTicker|createReadModelWorker|openReadModelDb and contain a rm-like call
+    (rmSync, rm(, rmdir, removeTempDir, cleanup). Count: 29 suites. Every one uses
+    readModelFixtureDir or awaits flushReadModelTransactions, so the census as built passes.
+    The selection does NOT equal the 83 listed suites. Of the 83 listed suites, 18 are in the
+    selection and 65 are not: after migration the helper does the removal, so those suites have
+    no rm-like call of their own and/or no direct opener import, and all 65 use readModelFixtureDir.
+    In the selection but not in files: 11 suites (all already compliant, none needs migrating):
+    a-read-model-lock-stall-names-the-connection-holding-the-lock, a-stalled-read-model-projector-heals-itself,
+    agent-view, analytics-view, every-view-body-matches-its-schema, inbox-thread-view,
+    repositories-from-the-read-model, scout-read-model-materialize-failed, task-view, view-demand,
+    view-etags-are-deterministic (all test/*.test.ts); ten await flushReadModelTransactions
+    directly and a-stalled-read-model-projector-heals-itself uses the helper.
+    In files: but not in the selection: 67 entries, the helper, the census test and 65 migrated
+    suites (see above). Scope amendment: none needed before the census lands, since the 11 are
+    already compliant; the 83-suite list was the pre-migration population (no flush) and is
+    not expected to equal the post-migration selection.
