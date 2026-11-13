@@ -2993,7 +2993,7 @@ import {
   liveWritesExempt,
   LIVE_WRITE_OVERRIDE_ENV,
 } from "./lib/live-write-guard.js";
-import { checkSharedPause, disposeSharedPauseRefresh, prepareSharedPause, requestKick, consumeStop, isQuietHours, requestFleetPause, requestPause, requestStop, restartInPlaceVerb, resumeFleet, resumeFleetWide, sharedPauseRef, stopDetail, type SharedPauseGitDeps } from "./lib/fleet-control.js";
+import { checkSharedPause, disposeSharedPauseRefresh, prepareSharedPause, requestKick, consumeStop, isQuietHours, pauseHoldSummary, readSharedPause, requestFleetPause, requestPause, requestStop, restartInPlaceVerb, resumeFleet, resumeFleetWide, sharedPauseRef, stopDetail, type SharedPauseGitDeps } from "./lib/fleet-control.js";
 import { resolvePauseTarget, type PauseTarget } from "./lib/pause-target.js";
 import { parseInstanceRegistry } from "./lib/instance-registry.js";
 import { openPlannerGitCredential, plannerHostGitCredential, plannerPrWriteToken } from "./lib/secret-boundary.js";
@@ -34184,7 +34184,7 @@ async function pauseTargetOrRefuse(verb: "pause" | "resume", rest: string[], con
 }
 
 /**
- * `rmd pause [--instance <name>] [--reason <text>]` — drain-and-hold ONE instance (W1-T11).
+ * `rmd pause [--instance <name>] --reason <text>` — drain-and-hold ONE instance (W1-T11).
  * Writes that instance's PAUSE flag under its own state root. No new spawn after the current
  * tick; an in-flight task ALWAYS runs to completion (verdict + merge).
  *
@@ -34194,9 +34194,22 @@ async function pauseTargetOrRefuse(verb: "pause" | "resume", rest: string[], con
  * explicit act, `rmd pause --fleet`, which writes no instance flag.
  */
 async function pauseCommand(rest: string[]): Promise<number> {
+  // W1-T12457: a guessed flag, a bare call or --status never holds anything; a hold needs a reason.
+  const usage = `usage: ${commandSyntax("pause")}`;
+  const badArg = unknownArgError("pause", rest, ["--instance", "--reason"], ["--fleet", "--status"]);
+  if (badArg) {
+    console.error(`${badArg} — nothing was changed.\n${usage}`);
+    return 2;
+  }
   const config = loadConfig();
+  if (rest.length === 0 || rest.includes("--status")) return await pauseStatus(rest, config);
   const runId = `FLEET-${Date.now()}`;
-  const reason = flagValue(rest, "--reason");
+  const given = flagValue(rest, "--reason");
+  const reason = given?.trim() ? given : undefined;
+  if (reason === undefined) {
+    console.error(`### rmd pause — REFUSED: a hold needs --reason <text>; nothing was changed.\n${usage}`);
+    return 2;
+  }
   if (rest.includes("--fleet")) {
     if (flagValue(rest, "--instance") !== undefined) {
       console.error("### rmd pause — REFUSED: --fleet holds every instance; it cannot be combined with --instance — nothing was changed.");
@@ -34209,7 +34222,7 @@ async function pauseCommand(rest: string[]): Promise<number> {
       step: "fleet.pause",
       scope: "fleet",
       pushed: result.pushed,
-      reason: reason ?? null,
+      reason,
       session_id: result.sessionId,
       actor_evidence: result.actor_evidence,
       expires_at: result.expiresAt,
@@ -34238,7 +34251,7 @@ async function pauseCommand(rest: string[]): Promise<number> {
     instance: target.instance,
     root: target.root,
     resolved_by: target.resolvedBy,
-    reason: reason ?? null,
+    reason,
     session_id: info.sessionId ?? null,
     actor_evidence: info.actor_evidence,
     expires_at: info.expiresAt ?? null,
@@ -34248,6 +34261,24 @@ async function pauseCommand(rest: string[]): Promise<number> {
     `### rmd pause — instance '${target.instance}'${selectedInstanceRegistryEnvPath() === undefined ? ` (${target.root})` : ""} is PAUSED (drain-and-hold). Its in-flight task still ` +
       `reaches merge; it spawns nothing new until \`rmd resume --instance ${target.instance}\`. No other instance is held.`,
   );
+  return 0;
+}
+
+/** W1-T12457 — `rmd pause` alone or with --status: print the instance's and the fleet-wide hold state, write nothing. */
+async function pauseStatus(rest: string[], config: Config): Promise<number> {
+  const lines = ["### rmd pause — read only; nothing was changed."];
+  if (!rest.includes("--fleet") || flagValue(rest, "--instance") !== undefined) {
+    const target = await pauseTargetOrRefuse("pause", rest, config);
+    if (!target) return 2;
+    const hold = pauseHoldSummary(target.root);
+    lines.push(hold === undefined
+      ? `instance '${target.instance}': not paused. To hold it: rmd pause --instance ${target.instance} --reason <text>`
+      : `instance '${target.instance}': PAUSED — ${hold}. To clear it: rmd resume --instance ${target.instance}`);
+  }
+  const shared = readSharedPause(realDeps().sharedPauseGit);
+  lines.push(`fleet-wide hold (${sharedPauseRef()}): ${shared === "held" ? "HELD — every instance holds new spawns until `rmd resume --fleet`"
+    : shared === "absent" ? "not held" : "unknown — origin could not be read"}`);
+  console.log(lines.join("\n"));
   return 0;
 }
 
@@ -42607,9 +42638,9 @@ const COMMANDS: readonly CommandSpec[] = [
   },
   {
     name: "pause",
-    syntax: "rmd pause [--instance <name>] [--reason <text>] | rmd pause --fleet [--reason <text>]",
-    summary: "Fleet control: drain-and-hold ONE instance until `rmd resume`; --fleet holds every instance.",
-    detail: "fleet control: PERSISTENT drain-and-hold of ONE instance — the one --instance names, else the instance whose registry state_dir is this config.root; an unresolvable target refuses before writing. In-flight completes, no new spawns; survives across runs until `rmd resume`. --fleet is the separate, explicit fleet-wide hold (refs/rmd-pause/hold), cleared only by `rmd resume --fleet`.",
+    syntax: "rmd pause [--instance <name>] [--status] | rmd pause [--instance <name>] --reason <text> | rmd pause --fleet --reason <text>",
+    summary: "Fleet control: show the pause state, or with --reason hold ONE instance until `rmd resume`.",
+    detail: "fleet control: a bare `rmd pause` only reads: it prints the pause state of the instance and of the fleet-wide hold, changes nothing and exits 0 (--status does the same with any other flag). A hold needs --reason <text>; without it --instance or --fleet refuses and changes nothing, and an unknown flag refuses. With --reason: PERSISTENT drain-and-hold of ONE instance — the one --instance names, else the instance whose registry state_dir is this config.root; an unresolvable target refuses before writing. In-flight completes, no new spawns; survives across runs until `rmd resume`. --fleet is the separate, explicit fleet-wide hold (refs/rmd-pause/hold), cleared only by `rmd resume --fleet`.",
   },
   { name: "resume", syntax: "rmd resume [--instance <name>] | rmd resume --fleet", summary: "Fleet control: clear ONE instance's PAUSE (and any STOP); --fleet clears the fleet-wide hold.", detail: "fleet control: clear the targeted instance's PAUSE (and any STOP), resolved as `rmd pause` resolves it; never deletes the fleet-wide hold, which only `rmd resume --fleet` clears" },
   {
