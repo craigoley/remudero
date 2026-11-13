@@ -43,7 +43,7 @@ function checkedInput(value: unknown): ReviewReplayInput {
         "own_task_record_missing"].some(k => typeof value[k] !== "boolean") ||
       !(value.verdict_lines === "unrecorded" || (Array.isArray(value.verdict_lines) &&
         value.verdict_lines.length <= 2 * (value.criteria_count as number) && value.verdict_lines.every(line =>
-          typeof line === "string" && line.length <= 128 && /^REVIEW_VERDICT[ \t]+\d+[ \t]*:[ \t]*(PASS|FAIL)$/i.test(line))))) {
+          typeof line === "string" && line.length <= 128 && /^REVIEW_VERDICT[ \t]+\d+[ \t]*:[ \t]*(PASS|FAIL|UNABLE)$/i.test(line))))) {
     throw new Error("invalid review replay input");
   }
   return value as unknown as ReviewReplayInput;

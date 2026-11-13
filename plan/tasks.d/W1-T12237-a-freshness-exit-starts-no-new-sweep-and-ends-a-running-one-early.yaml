@@ -30,7 +30,7 @@
     - test/an-unlatched-freshness-exit-skips-a-pass-that-already-ran.test.ts
     - test/a-bound-that-stops-waiting-does-not-stop-the-work.test.ts
     - test/daemon/the-pre-exit-pass-runs-beside-the-restart-drain.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "When the daemon decides to restart and no sweep is running, `prepareFreshnessExit` starts no sweep. The restart row has `pre_exit_pass: no_sweep_at_exit`. The test drives `runDaemon` with an injected sweep"
