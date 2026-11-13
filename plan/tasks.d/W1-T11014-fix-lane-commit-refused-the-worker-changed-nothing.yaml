@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: auto
+  verify: human
   risk: high
   priority: 1.2
   status: queued
@@ -13,22 +13,31 @@
   files:
     - src/run-task.ts
     - src/cli/commands/fix.ts
+    - src/lib/fix-no-edit-recovery.ts
     - test/triage/fix-lane-no-edit-refusal-recovery.test.ts
+    - test/triage/fix-lane-no-edit-recovery-non-matching-refusals.test.ts
+    - test/triage/fix-lane-no-edit-recovery-unchanged-guard.test.ts
   acceptance:
     - claim: "commit-refused:the worker changed nothing no longer needs an operator hand fix"
       proof: "grep: test(\"W1-T11014: fix-lane-commit-refused-the-worker-changed-nothing clears without a person\" in test/triage/fix-lane-no-edit-refusal-recovery.test.ts"
-    - claim: "invariant:non-matching-refusals"
-      proof: "unit test: other commit refusals do not receive a no-edit recovery"
-    - claim: "invariant:unchanged-recovery-guard"
-      proof: "unit test: an unchanged recovery is refused without another recovery or a push"
+    - claim: "invariant:non-matching-refusals — a commit refusal other than a FIXED report refused with exactly \"the worker changed nothing\" (another refusal reason, or that reason on a non-FIXED outcome) gets no no-edit recovery dispatch and keeps its existing prompt, accounting and dispatch behavior"
+      proof: "unit test: test/triage/fix-lane-no-edit-recovery-non-matching-refusals.test.ts"
+    - claim: "invariant:unchanged-recovery-guard — the single no-edit recovery dispatch still passes the rung's commit guard, so a recovery that again leaves the worktree unchanged is refused, is not pushed, and triggers no second recovery dispatch"
+      proof: "unit test: test/triage/fix-lane-no-edit-recovery-unchanged-guard.test.ts"
   design: |
     Prior behavior: runFixRung owns refusal outcomes and keeps non-matching refusal prompts, commit guards, accounting,
     and push behavior on their existing paths. The recovery is additive only after a FIXED report is refused because
     the worker changed nothing. Every recovery dispatch still passes through the same rung's commit and push guards.
+    The eligibility decision lives in a distinct pure helper, src/lib/fix-no-edit-recovery.ts, which fix.ts's runFixRung
+    consults at its refusal arm; it is separate from W1-T7748's shouldRecheckAfterNothingChanged in
+    src/lib/fix-rung-classify.ts, which did not move the cause.
     INVARIANT non-matching-refusals: commit refusals other than the exact FIXED plus "the worker changed nothing"
     case retain the existing prompt and dispatch behavior without a no-edit recovery.
     INVARIANT unchanged-recovery-guard: the single recovery dispatch remains subject to the rung's commit guard, so an
     unchanged worktree cannot be pushed and cannot trigger a second recovery dispatch.
+    Each invariant has its own test file: its proving test title carries "W1-T11014 criterion 2" in
+    fix-lane-no-edit-recovery-non-matching-refusals.test.ts and "W1-T11014 criterion 3" in
+    fix-lane-no-edit-recovery-unchanged-guard.test.ts, so the whole-file proof is bound to its criterion.
   note: "Filed by fix-lane at rung 2; measure the cause's share of PR-hours after the build merges."
   rationale: |
     commit-refused:the worker changed nothing cost 53.95 PR-hours; owner fix-lane
@@ -73,13 +82,25 @@
     (plan/seeds/test-restructure-2026-10-16/proposed-map.tsv:1889; plan/tasks.d/W1-T7748-*.yaml).
     Settled by lookup: is the new filename available in test/triage? -> yes, no file of that name exists there (Glob
     test/triage/*.test.ts), and test/helpers/run-task-test.ts exists for the import.
-  risk_ruling:
-    verdict: "low"
-    action: proceed
-    confidence: 0.88
-    reasons:
-      - "The filed scope explicitly adds fix.ts to reach the production sweep path identified in the rationale, aligning the proposed recovery with the measured defect."
-      - "Acceptance requires other commit refusals to remain unaffected and unchanged recovery to stop without another recovery or push."
-      - "The filing describes recovery before push and excludes secrets, permissions, deletion, and merge/deploy/review policy changes; the supplied gates identify no failed check or operator-only decision."
-    judged_at: "2026-11-13T04:56:53.167Z"
-    pin: "9ca81156a24127b50b9a96ea9ed72dd93a31342833c84c0c8aaa355a5d3de712"
+    Invariant proofs amended 2026-11-13 (architect clarify pass): the two invariant claims now state their guarantees in
+    full and each binds to its own path-form unit test (test/triage/fix-lane-no-edit-recovery-non-matching-refusals.test.ts
+    and test/triage/fix-lane-no-edit-recovery-unchanged-guard.test.ts); the previous title-form proofs named tests that
+    did not exist. The distinct recovery helper src/lib/fix-no-edit-recovery.ts and both test paths join files. The
+    first acceptance claim and its grep proof are unchanged. risk: high (Rule 19, as judged above) and verify: human are
+    kept. The risk_ruling judged 2026-11-13T04:56:53Z (verdict low, proceed, confidence 0.88, pin 9ca81156…) is dropped:
+    it disagreed with this record's risk: high, it is stale once files and acceptance change, and this pass makes no risk
+    ruling of its own; the task stays parked for a fresh machine-filing ruling or an operator release.
+    Settled by lookup: is this already filed or decided? -> no. No other task declares src/lib/fix-no-edit-recovery.ts
+    or either new test path, and W1-T10029 (merged) and W1-T7748 changed only src/run-task.ts and
+    src/lib/fix-rung-classify.ts (plan/tasks.d grep; plan/tasks.d/W1-T10029-fix-refusal-the-worker-changed-nothing.yaml).
+    Settled by lookup: must each invariant have its own distinct executable proof? -> yes; invariantSlugViolations
+    refuses two invariants sharing one proof and a proof outside the whitelisted dialect (src/lib/task-linter.ts,
+    W1-T11746).
+    Settled by lookup: does a title-form proof that names a test the build will add work? -> no, it reads pass on a base
+    with no such file and is refused (proofUnitTestBaseWrapperViolations, src/lib/task-linter.ts, W1-T3651), so the
+    path form is used.
+    Settled by lookup: are the new names free? -> yes, no src/ or test/ file matches no-edit, non-matching-refusal or
+    unchanged-recovery (Glob), and none of the basenames reads as a CI rule suite (no census, ratchet or baseline).
+    Settled by lookup: does a stale pin let a machine record stay at verify: auto? -> no; machine-author-verify refuses a
+    stale pin and reparkStaleRuling drops the ruling and parks at verify: human (src/lib/task-linter.ts
+    machineAuthorVerifyViolation; src/lib/machine-filing.ts reparkStaleRuling).
