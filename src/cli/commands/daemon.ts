@@ -16,6 +16,7 @@ import { judgeCiEscalation, productionCiJudgePorts, singleFlightCiJudge, withCiJ
 import { recyclePauseDetail } from "../../lib/recycle-yield.js";
 import { judgeDiskHeadroom, readDiskFreeBytes } from "../../lib/doctor.js";
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { execFileLoopBounded } from "../../lib/loop-bounded-child.js";
 import { GATEWAY_FETCH_TIMEOUT_MS } from "../../lib/git-fetch-retry.js";
 import { productionDispatchBreakJudge, productionFixProgressJudge } from "../../lib/sweep.js";
@@ -24,10 +25,11 @@ import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { homedir, hostname } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { loadConfig, providerRoutingOwnsHeadroom, resolveHeadroomEnabled, workerHomeDir, type Config } from "../../lib/config.js";
+import { configPath, isWorkerProviderId, loadConfig, providerRoutingOwnsHeadroom, resolveHeadroomEnabled, workerHomeDir, type Config } from "../../lib/config.js";
 import { ledgerPathFor } from "../../lib/ledger-path.js";
 import { daemonCrashSentinel, escalateCrashLoop, escalateDiskHeadroomBreach, escalateHeadroomParkCeiling, escalateHeadroomReserve, escalateQuotaExhaustion, escalateReplayStranded, escalateStarvation, escalateStarvationCleared } from "../../lib/escalation-catalogue.js";
-import { resolveProviderRoutingPolicy } from "../../lib/provider-routing-policy.js";
+import { lostWorkerProviders, resolveProviderRoutingPolicy, type EffectiveProviderRoutingPolicy } from "../../lib/provider-routing-policy.js";
+import { readCashModelCatalog } from "../../lib/model-availability.js";
 import { writeProviderRoutingStatus, type ProviderRoutingWriteInput } from "../../lib/provider-routing-status.js";
 import { readFileIfExists } from "../../lib/fs-race-safe.js";
 import { mergedInLastDayAsync } from "../../lib/fleet-lane.js";
@@ -70,7 +72,7 @@ import { appendLedger, markDaemonProcessActor } from "../../lib/ledger.js";
 import { clockFromMillisFn, fixedClock, systemClock, type Clock } from "../../lib/clock.js";
 import { getHeapStatistics } from "node:v8";
 import { sweepInflightLocksWithReceipts } from "../../lib/benchmark-run.js";
-import { ledgerMemoHolders } from "../../lib/ledger-union.js";
+import { ledgerMemoHolders, readLedgerUnionRecordsSync } from "../../lib/ledger-union.js";
 import { childMeasurementCadenceSpawn, measurementCadenceChildRunner } from "../../lib/measurement-cadence.js";
 import { loadPlan, type Plan } from "../../lib/plan.js";
 import { PLAN_DESTINATION_KINDS, planDestinationRepository, resolvePlanDestination, type PlanDestinationRepository } from "../../lib/plan-destination.js";
@@ -142,6 +144,85 @@ export function daemonImprovementActionDeps(stateDir: string, gateway: RatifyCli
       return gateway.improvement(target);
     },
   };
+}
+
+export async function recordWorkerProvidersAtStart(opts: {
+  config: Config;
+  policy: EffectiveProviderRoutingPolicy;
+  at: string;
+  log: (step: string, extra: Record<string, unknown>) => void;
+  raise: (escalation: Escalation) => string | Promise<string>;
+}): Promise<void> {
+  const step = "daemon.worker_providers";
+  const enabled = [...new Set(opts.policy.committed.enabledProviders)].sort();
+  const file = configPath();
+  let previous: Record<string, unknown> | undefined;
+  let comparisonReason: string | undefined;
+  try {
+    const read = readLedgerUnionRecordsSync(dirname(ledgerPathFor(opts.config)), {
+      step: "daemon.worker_providers", refuseIncomplete: true, liveFirst: true, order: "newest-first",
+      satisfied: (seen) => seen.has(step),
+    });
+    if (!read.ok || read.torn || read.unclassified.length) {
+      throw new Error(`provider startup history unreadable: ${[...read.unread, ...read.unclassified].join(", ")}; torn=${read.torn}`);
+    }
+    previous = read.rows.filter((row) => row.step === step).sort((a, b) => Date.parse(String(b.ts)) - Date.parse(String(a.ts)))[0];
+    if (previous && (typeof previous.ts !== "string" || !Number.isFinite(Date.parse(previous.ts)) ||
+      !Array.isArray(previous.enabled_providers) || !previous.enabled_providers.every(isWorkerProviderId) ||
+      !Array.isArray(previous.cash_deployments) || !previous.cash_deployments.every((name) => typeof name === "string"))) {
+      throw new Error("provider startup history contains a malformed snapshot");
+    }
+  } catch (error) {
+    previous = undefined;
+    const reason = String(error);
+    comparisonReason = reason;
+  }
+  let cash: string[] = [];
+  const cashErrors: string[] = [];
+  if (enabled.includes("cash")) {
+    try {
+      cash = [...new Set(await readCashModelCatalog(
+        opts.config,
+        // PRIMARY CONTROL: a catalog request cannot hold startup beyond the gateway transport timeout.
+        (url, init) => fetch(url, { ...init, signal: AbortSignal.timeout(GATEWAY_FETCH_TIMEOUT_MS) }),
+        process.env, (failure) => cashErrors.push(failure.reason),
+      ))].sort();
+    } catch (error) {
+      const reason = String(error);
+      cashErrors.push(reason);
+    }
+  }
+  const comparison = comparisonReason ? "skipped" : previous ? "compared" : "first-start";
+  opts.log(step, { ts: opts.at, config_file: file, enabled_providers: enabled,
+    cash_deployments: cash, cash_read: cashErrors.length ? "unreadable" : "readable",
+    ...(cashErrors.length ? { cash_read_error: cashErrors.join("; ") } : {}),
+    comparison, ...(comparisonReason ? { comparison_reason: comparisonReason } : {}),
+  });
+  if (!previous) return;
+  const earlier = previous.enabled_providers as string[];
+  const lost = lostWorkerProviders(earlier, enabled);
+  if (previous.cash_read === "readable" && cashErrors.length === 0) {
+    lost.push(...lostWorkerProviders(previous.cash_deployments as string[], cash).map((name) => `cash:${name}`));
+  }
+  if (lost.length === 0) return;
+  const priorSet = [...earlier, ...(previous.cash_deployments as string[]).map((name) => `cash:${name}`)].sort();
+  const key = createHash("sha256").update(JSON.stringify([priorSet, lost.sort()])).digest("hex");
+  const restore = "Restore the provider configuration";
+  try {
+    await opts.raise({ class: "MANUAL", taskId: `DAEMON-PROVIDERS:${key}`,
+      summary: `Worker providers lost at startup: ${lost.join(", ")}`,
+      detail: `Lost: ${lost.join(", ")}. Config file: ${file}. Last start with these providers: ${previous.ts}. ` +
+        "An intentional removal also raises this escalation; close it if the removal was intended.",
+      options: [
+        { label: restore, detail: `Check ${file} and restore the missing providers and cash deployment access.`, kind: { type: "operator-only" } },
+        { label: "Confirm the intentional removal", detail: "Close this escalation if the smaller provider set was intended.", kind: { type: "operator-only" } },
+      ],
+      recommendation: restore,
+      consequence: "The daemon continues with fewer worker providers until configuration or access is restored.",
+    });
+  } catch (error) {
+    opts.log("daemon.worker_providers_escalation_failed", { reason: String(error), lost_providers: lost });
+  }
 }
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export type HostValue = any;
@@ -1405,6 +1486,8 @@ export async function daemonCommand(
   if (bootProviderRoutingPolicy.fallback) {
     log("daemon.provider_routing_policy_fallback", { reason: bootProviderRoutingPolicy.fallback.reason });
   }
+  await recordWorkerProvidersAtStart({ config, policy: bootProviderRoutingPolicy,
+    at: clockFromMillisFn(deps.now).iso(), log, raise: raiseDuplicate });
   try {
     (deps.writeProviderRoutingStatus ?? writeProviderRoutingStatus)(config.root, {
       state: "not-probed",

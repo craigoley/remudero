@@ -19,6 +19,12 @@ import {
 } from "./worker-provider.js";
 
 export const PROVIDER_ROUTING_POLICY_VERSION = 2;
+
+export function lostWorkerProviders(previous: readonly string[], current: readonly string[]): string[] {
+  const available = new Set(current);
+  return [...new Set(previous)].filter((provider) => !available.has(provider)).sort();
+}
+
 const LEGACY_PROVIDER_ROUTING_POLICY_VERSION = 1;
 /** BACKSTOP: ordinary records are under 1 KiB; this caps hostile/corrupt state before parsing. */
 export const MAX_PROVIDER_ROUTING_POLICY_BYTES = 16 * 1024;
