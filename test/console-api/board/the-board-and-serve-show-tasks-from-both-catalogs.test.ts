@@ -1,14 +1,25 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { serialize } from "node:v8";
 import { mkdirSync, mkdtempSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { setTimeout as delay } from "node:timers/promises";
 import { buildStatusRoute, computeBoardSnapshot, createBoardSnapshotCache, type BoardSnapshot } from "#src/lib/board.js";
 import { computeTaskCard } from "#src/lib/task-card.js";
-import { assembleNowView } from "#src/lib/now-view.js";
+import { assembleNowView, type NowViewData } from "#src/lib/now-view.js";
 import { buildStatusBoard, buildStatusBoardAsync, renderStatusBoardText } from "#src/lib/status-board.js";
-import { PLAN_RELOAD_TIMEOUT_MS, readBoardCatalogs, reloadServePlan, serveBoardCatalogs } from "#src/lib/serve-plan-reload.js";
+import { PLAN_RELOAD_TIMEOUT_MS, readBoardCatalogs, reloadServePlan, serveBoardCatalogs,
+  BOARD_CATALOG_REFRESH_MS, createBoardCatalogParentBridge, createWorkerBoardCatalogClient, type BoardCatalogReply } from "#src/lib/serve-plan-reload.js";
+import { planDestinationRepository } from "#src/lib/plan-destination.js";
+import { fixedClock, type Clock } from "#src/lib/clock.js";
+import { MessageChannel } from "node:worker_threads";
+import { pathToFileURL } from "node:url";
+import { startWorker } from "#src/lib/child-entry-argv.js";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
+import { openProjectorReadModel } from "#src/lib/ledger-projector.js";
+import { createReadModelWorker, readModelSwitchesPath } from "#src/lib/read-model-worker.js";
 import { mergePlanBlobs, type Plan } from "#src/lib/plan.js";
 import { type OpsCatalogApi } from "#src/lib/ops-catalog-source.js";
 import { fakeGitHub } from "#test/helpers/fake-github.js";
@@ -342,5 +353,280 @@ test("W1-T12211 production board worker and supplied status route use the select
       await worker.pause();
       worker.stop();
     }
+  });
+});
+
+function catalogPacket(state: string, plan: Plan, clock: Clock, sequence = 1): BoardCatalogReply {
+  const bytes = serialize({ observedAt: clock.iso(), plan }), buffer = new SharedArrayBuffer(bytes.length);
+  Buffer.from(buffer).set(bytes);
+  return { type: "ops_catalog_snapshot", version: 1, root: state, sequence, buffer,
+    selection: createHash("sha256").update(JSON.stringify(planDestinationRepository(state))).digest("hex"),
+    sha256: createHash("sha256").update(bytes).digest("hex") };
+}
+
+test("private worker packets fail closed on expiry, corruption, wrong root and unsupported peers", () => {
+  const h = host(), other = host(), off = host(false), shared = publicPlan();
+  let ms = 1_000;
+  const clock: Clock = { now: () => ms, date: () => new Date(ms), iso: () => new Date(ms).toISOString() };
+  const requests: unknown[] = [], client = createWorkerBoardCatalogClient(true, request => requests.push(request), clock);
+  const ops = mergePlanBlobs([{ label: "ops.yaml", text: privateRecord() }]);
+  assert.equal(client.current(shared, off.state), undefined);
+  assert.deepEqual(requests, [], "unconfigured legacy producers add no private reads");
+  assert.equal(client.current(shared, h.state)?.outcome, "unreadable", "initial pending is not healthy zero");
+  const packet = catalogPacket(h.state, ops, clock);
+  client.accept({ ...packet, root: other.state });
+  assert.equal(client.current(shared, h.state)?.outcome, "unreadable", "a different configured root cannot satisfy this request");
+  client.accept(packet);
+  assert.deepEqual(client.current(shared, h.state)?.plan?.tasks.map(t => t.id), ["PUBLIC-T1", "OPS-T1"]);
+  assert.doesNotMatch(JSON.stringify(client.current(shared, h.state)), new RegExp(secret));
+  const corrupt = Buffer.from(packet.buffer);
+  corrupt[0] = corrupt[0]! ^ 1;
+  client.accept(packet);
+  const damaged = client.current(shared, h.state);
+  assert.equal(damaged?.outcome, "unreadable");
+  assert.deepEqual(damaged?.plan?.tasks.map(t => t.id), ["PUBLIC-T1"]);
+  client.accept(catalogPacket(h.state, ops, clock, 2));
+  const captured = client.current(shared, h.state)!;
+  assert.equal(captured.outcome, "ok");
+  const old = catalogPacket(h.state, ops, clock, 3);
+  ms += BOARD_CATALOG_REFRESH_MS;
+  assert.equal(client.current(shared, h.state)?.outcome, "unreadable");
+  client.accept(old);
+  assert.equal(client.current(shared, h.state)?.outcome, "unreadable", "a delayed expired packet cannot restore health");
+  assert.equal(captured.outcome, "ok", "a previously published body's captured input stays immutable");
+  const unsupportedRequests: unknown[] = [];
+  const olderParent = createWorkerBoardCatalogClient(false, request => unsupportedRequests.push(request), clock);
+  assert.equal(olderParent.current(shared, h.state)?.outcome, "unreadable");
+  assert.deepEqual(unsupportedRequests, [], "new children do not send unknown protocol to older parents");
+  unlinkSync(join(h.state, "plan-destination.json"));
+  assert.equal(client.current(shared, h.state), undefined, "leaving selection drops all private handles");
+});
+
+test("parent catalog reads coalesce across producers and reject roots outside their configuration", async () => {
+  const h = host(), forbidden = host(), fx = source(privateRecord());
+  await readBoardCatalogs(publicPlan, h.state, fx.api);
+  const routes = [...fx.responses].sort((a, b) => b[0].length - a[0].length)
+    .map(([path, response]) => ({ when: `api ${path}`, stdout: JSON.stringify(response) }));
+  await withGhShim(routes, async shim => {
+    const replies: BoardCatalogReply[] = [];
+    let finish!: () => void;
+    const completed = new Promise<void>(resolve => { finish = resolve; });
+    const post = (reply: BoardCatalogReply): void => { replies.push(reply); if (replies.length === 2) finish(); };
+    const a = createBoardCatalogParentBridge([h.state], post), b = createBoardCatalogParentBridge([h.state], post);
+    try {
+      a.request({ type: "ops_catalog_read", version: 1, root: forbidden.state });
+      assert.equal(shim.calls().length, 0, "the parent validates the configured root before any egress");
+      a.request({ type: "ops_catalog_read", version: 1, root: h.state });
+      b.request({ type: "ops_catalog_read", version: 1, root: h.state });
+      await completed;
+      assert.equal(replies[0]!.buffer, replies[1]!.buffer, "both consumers share the same packet allocation");
+      assert.equal(replies[0]!.sequence, replies[1]!.sequence);
+      assert.equal(shim.calls().length, fx.calls.length, "two consumers perform one whole pinned source read");
+      const before = shim.calls().length;
+      a.close();
+      b.request({ type: "ops_catalog_read", version: 1, root: h.state });
+      assert.equal(shim.calls().length, before, "closing one producer preserves the other producer's fresh read");
+      b.close();
+      b.request({ type: "ops_catalog_read", version: 1, root: h.state });
+      assert.equal(shim.calls().length, before, "a closed producer cannot start another read");
+    } finally { a.close(); b.close(); }
+  });
+});
+
+test("actual nested now worker publishes both catalogs without persisting private task narratives", async () => {
+  const h = host(), fx = source(privateRecord()), planDir = join(h.root, "plan"), planPath = join(planDir, "tasks.yaml");
+  mkdirSync(join(planDir, "tasks.d"), { recursive: true });
+  writeFileSync(planPath, record("PUBLIC-T1"));
+  assert.deepEqual(threadStrictPlan(planPath).tasks.map(t => t.id), ["PUBLIC-T1"]);
+  await readBoardCatalogs(publicPlan, h.state, fx.api);
+  const routes = [...fx.responses].sort((a, b) => b[0].length - a[0].length)
+    .map(([path, response]) => ({ when: `api ${path}`, stdout: JSON.stringify(response) }));
+  routes.push({ when: "api rate_limit", stdout: JSON.stringify({ resources: { core: { remaining: 5000 } } }) });
+  mkdirSync(join(h.state, "read-model"), { recursive: true });
+  writeFileSync(readModelSwitchesPath(h.state), JSON.stringify({ projector: "on", views: { now: "shadow" } }));
+  await withGhShim(routes, async shim => {
+    const observed: unknown[] = [];
+    const worker = createReadModelWorker({ stateDir: h.state,
+      instances: [{ name: "fixture", ledgerDir: h.state, planPath, repo: "public/core" }], tickMs: 50,
+      observe: message => observed.push(message) });
+    const pause = worker.pause, want = worker.want;
+    assert.ok(pause && want, "the actual producer exposes its demand and bounded pause lifecycle");
+    let resolveBody!: (body: NowViewData) => void;
+    const completed = new Promise<NowViewData>(resolve => { resolveBody = resolve; });
+    const unsubscribe = worker.onBody(entry => {
+      if (entry.view !== "now" || entry.key !== "instance=fixture") return;
+      const data = entry.body.data as NowViewData;
+      if (data.board.tasks.some(task => task.taskId === "OPS-T1")) resolveBody(data);
+    });
+    const abort = AbortSignal.timeout(PLAN_RELOAD_TIMEOUT_MS);
+    try {
+      worker.start();
+      want("now", "instance=fixture");
+      const body = await Promise.race([completed, new Promise<never>((_resolve, reject) => {
+        abort.addEventListener("abort", () => reject(new Error("nested now worker did not publish the selected catalog")), { once: true });
+      })]);
+      assert.deepEqual(body.board.tasks.map(task => task.taskId).sort(), ["OPS-T1", "PUBLIC-T1"]);
+      assert.equal(body.board.tasks.find(task => task.taskId === "OPS-T1")?.risk, "withheld");
+      assert.doesNotMatch(JSON.stringify(body), new RegExp(secret));
+      assert.doesNotMatch(JSON.stringify(observed), new RegExp(secret), "private packets never enter generic public observation messages");
+      assert.ok(shim.calls().some(call => call === `api repos/${repository}`), "the real nested producer reaches the parent's actual GET reader");
+      await pause();
+      const db = openProjectorReadModel(h.state, "fixture");
+      try {
+        const tables = db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as Array<{ name: string }>;
+        assert.ok(tables.some(table => table.name === "view_body"), "the actual persisted-body corpus is present");
+        let stored = "", rows = 0;
+        for (const table of tables) {
+          for (const row of db.prepare(`SELECT * FROM "${table.name.replaceAll('"', '""')}"`).all()) {
+            rows++;
+            stored += Object.values(row).map(value => Buffer.isBuffer(value) ? value.toString("utf8") : String(value)).join("\n");
+          }
+        }
+        assert.ok(rows > 0 && stored.includes("PUBLIC-T1"), "positive control: the scan reaches real public projections and published bodies");
+        assert.doesNotMatch(stored, new RegExp(secret), "no persistence table receives the private rationale/design/paths");
+      } finally { db.close(); }
+    } finally {
+      unsubscribe();
+      await pause();
+      worker.stop();
+    }
+  });
+});
+
+async function within<T>(promise: Promise<T>, reason: string): Promise<T> {
+  const signal = AbortSignal.timeout(PLAN_RELOAD_TIMEOUT_MS);
+  return Promise.race([promise, new Promise<never>((_resolve, reject) => {
+    signal.addEventListener("abort", () => reject(new Error(reason)), { once: true });
+  })]);
+}
+
+function workerPublicPlan(h: ReturnType<typeof host>) {
+  const planDir = join(h.root, "plan"), planPath = join(planDir, "tasks.yaml"), inflightDir = join(h.state, "inflight");
+  mkdirSync(join(planDir, "tasks.d"), { recursive: true });
+  mkdirSync(inflightDir);
+  writeFileSync(planPath, record("PUBLIC-T1"));
+  assert.deepEqual(threadStrictPlan(planPath).tasks.map(task => task.id), ["PUBLIC-T1"]);
+  return { planPath, ledgerPath: h.ledgerPath, inflightDir };
+}
+
+test("new board parent keeps older public-only children available and marks selected evidence unsupported", async () => {
+  const h = host(), input = workerPublicPlan(h);
+  const snapshot = computeBoardSnapshot({ plan: publicPlan(), ledgerPath: h.ledgerPath, github: fakeGitHub({}), readLedger: () => [], now: () => 0 });
+  const url = new URL(`data:text/javascript,${encodeURIComponent(`import { parentPort } from 'node:worker_threads';
+parentPort.postMessage({ kind: 'snapshot', snapshot: ${JSON.stringify(snapshot)}, planIdentity: 'older-child' });
+parentPort.on('message', () => {});`)}`);
+  let ready!: () => void;
+  const completed = new Promise<void>(resolve => { ready = resolve; });
+  const worker = createBoardProjectionWorker(fakeGitHub({}), input, { workerUrl: url, clock: fixedClock(0), onSnapshot: ready });
+  await withGhShim([], async shim => {
+    try {
+      worker.start();
+      await within(completed, "older board child did not answer");
+      const state = worker.current();
+      assert.equal(state.state, "ready");
+      if (state.state !== "ready") throw Error("older child unavailable");
+      assert.deepEqual(state.snapshot.tasks, snapshot.tasks);
+      assert.equal(state.snapshot.opsCatalog?.outcome, "unreadable");
+      assert.equal(shim.calls().length, 0, "an older peer cannot activate private reads by receiving a new capability field");
+    } finally { await worker.pause(); worker.stop(); }
+  });
+});
+
+test("new board child with an older parent sends only legacy facts and explicit unknown private state", async () => {
+  const h = host(), input = workerPublicPlan(h), { port1, port2 } = new MessageChannel(), signal = new SharedArrayBuffer(4);
+  const github = fakeGitHub({ listMergedHeadBranches: () => [], listOpenHeadBranches: () => [], findMergedByHeadBranch: () => [] });
+  const child = startWorker(pathToFileURL(join(REPO_ROOT, "src/lib/board-worker.ts")), { workerData: {
+    kind: "remudero-board-projection", ...input, methods: Object.entries(github).filter(([, value]) => typeof value === "function").map(([name]) => name),
+    replyPort: port2, signal, intervalMs: 50, delayMs: 0,
+    // Deliberately no new capability: this is the old parent contract.
+  }, transferList: [port2] });
+  const messages: unknown[] = [];
+  const completed = new Promise<BoardSnapshot>((resolve, reject) => {
+    child.on("error", reject);
+    child.on("message", message => {
+      messages.push(message);
+      if (message.kind === "snapshot") return resolve(message.snapshot);
+      if (message.kind === "failure") return reject(new Error(message.reason));
+      if (message.kind !== "fact") return reject(new Error("new protocol reached an older parent"));
+      let reply: { id: number; ok: boolean; value?: unknown; error?: string };
+      try {
+        const value = message.method === "beginMergedTrailerLookup" ? false : message.method === "lookupMergedTrailer" ? null
+          : (github[message.method as keyof typeof github] as (...args: unknown[]) => unknown)(...message.args);
+        reply = { id: message.id, ok: true, value };
+      } catch (error) { reply = { id: message.id, ok: false, error: String(error) }; }
+      port1.postMessage(reply);
+      Atomics.store(new Int32Array(signal), 0, 1);
+      Atomics.notify(new Int32Array(signal), 0);
+    });
+  });
+  try {
+    const snapshot = await within(completed, "new child did not answer its older parent");
+    assert.deepEqual(snapshot.tasks.map(task => task.taskId), ["PUBLIC-T1"]);
+    assert.equal(snapshot.opsCatalog?.outcome, "unreadable");
+    assert.ok(messages.some(message => (message as { kind?: string }).kind === "snapshot"), "the positive control is an actual worker projection");
+    assert.ok(messages.every(message => !(message as { type?: string }).type), "no private request is sent without negotiation");
+  } finally { await child.terminate(); port1.close(); port2.close(); }
+});
+
+async function fixtureUntil(predicate: () => boolean): Promise<void> {
+  const signal = AbortSignal.timeout(PLAN_RELOAD_TIMEOUT_MS);
+  while (!predicate()) {
+    signal.throwIfAborted();
+    await delay(10);
+  }
+}
+
+test("closing the last catalog producer lets its current owned GET finish and starts no later GET", async () => {
+  const h = host(), fx = source(privateRecord());
+  await readBoardCatalogs(publicPlan, h.state, fx.api);
+  const first = fx.responses.get(`repos/${repository}`);
+  await withGhShim([{ when: `api repos/${repository}`, stdout: JSON.stringify(first), delaySeconds: 1 }], async shim => {
+    const posted: unknown[] = [], bridge = createBoardCatalogParentBridge([h.state], reply => posted.push(reply));
+    try {
+      bridge.request({ type: "ops_catalog_read", version: 1, root: h.state });
+      await fixtureUntil(() => shim.events().some(event => event.phase === "start"));
+      assert.equal(shim.events().filter(event => event.phase === "end").length, 0, "positive control: our own real child is still in flight");
+      bridge.close();
+      await fixtureUntil(() => shim.events().some(event => event.phase === "end"));
+      await delay(20);
+      assert.equal(shim.calls().length, 1, "the next pinned-reader GET is refused after its last consumer closes");
+      assert.deepEqual(posted, [], "an ended consumer receives no late private packet");
+      assert.equal(shim.events().filter(event => event.phase === "start").length, shim.events().filter(event => event.phase === "end").length,
+        "the active parent-owned child ends naturally; no foreign process is signaled");
+    } finally { bridge.close(); }
+  });
+});
+
+test("actual private GET failure leaves public tasks available and recovers only with a fresh observation", async () => {
+  const h = host(), fx = source(privateRecord()), metadata = join(h.root, "metadata-response.json");
+  await readBoardCatalogs(publicPlan, h.state, fx.api);
+  writeFileSync(metadata, secret);
+  const routes = [...fx.responses].sort((a, b) => b[0].length - a[0].length).map(([path, response]) => path === `repos/${repository}`
+    ? { when: `api ${path}`, stdoutFile: metadata } : { when: `api ${path}`, stdout: JSON.stringify(response) });
+  let ms = 1_000;
+  const clock: Clock = { now: () => ms, date: () => new Date(ms), iso: () => new Date(ms).toISOString() };
+  await withGhShim(routes, async shim => {
+    let received = 0;
+    const client = createWorkerBoardCatalogClient(true, request => bridge.request(request), clock);
+    const bridge = createBoardCatalogParentBridge([h.state], reply => { client.accept(reply); received++; }, clock);
+    try {
+      client.current(publicPlan(), h.state);
+      await fixtureUntil(() => received === 1);
+      const failed = client.current(publicPlan(), h.state);
+      assert.equal(failed?.outcome, "unreadable");
+      assert.deepEqual(failed?.plan?.tasks.map(task => task.id), ["PUBLIC-T1"]);
+      assert.doesNotMatch(JSON.stringify(failed), new RegExp(secret));
+      const before = shim.calls().length;
+      writeFileSync(metadata, JSON.stringify(fx.responses.get(`repos/${repository}`)));
+      client.current(publicPlan(), h.state);
+      assert.equal(shim.calls().length, before, "fixing input does not create an immediate retry loop");
+      ms += BOARD_CATALOG_REFRESH_MS + 1;
+      assert.equal(client.current(publicPlan(), h.state)?.outcome, "unreadable", "a requested refresh is still pending evidence");
+      await fixtureUntil(() => received === 2);
+      const restored = client.current(publicPlan(), h.state);
+      assert.equal(restored?.outcome, "ok");
+      assert.deepEqual(restored?.plan?.tasks.map(task => task.id), ["PUBLIC-T1", "OPS-T1"]);
+      assert.ok(shim.calls().length > before, "fresh real pinned GETs, not the previous failure, establish recovery");
+    } finally { bridge.close(); }
   });
 });

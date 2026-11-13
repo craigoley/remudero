@@ -436,7 +436,8 @@ export function createWorkerBoardCatalogClient(enabled: boolean, post: (request:
         const bytes = Buffer.from(Buffer.from(reply.buffer));
         if (createHash("sha256").update(bytes).digest("hex") !== reply.sha256) throw new Error("catalog integrity");
         const payload = deserialize(bytes) as CatalogPayload;
-        if (typeof payload.observedAt !== "string" || (payload.plan !== undefined &&
+        const age = clock.now() - Date.parse(payload.observedAt);
+        if (!Number.isFinite(age) || age < 0 || age >= BOARD_CATALOG_REFRESH_MS || (payload.plan !== undefined &&
           (!Array.isArray(payload.plan.tasks) || !(payload.plan.byId instanceof Map)))) throw new Error("catalog shape");
         entry.payload = payload;
       } catch (error) {

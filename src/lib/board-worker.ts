@@ -2,6 +2,7 @@
 import { MessageChannel, Worker, isMainThread, parentPort, receiveMessageOnPort, workerData, type MessagePort } from "node:worker_threads";
 import { statSync } from "node:fs";
 import { dirname } from "node:path";
+import { planDestinationRepository } from "./plan-destination.js";
 import { performance } from "node:perf_hooks";
 import { createBoardSnapshotCache, type BoardSnapshot, type BoardSnapshotCache, type BoardSnapshotSource, type BoardSnapshotState } from "./board.js";
 import { systemClock, type Clock } from "./clock.js";
@@ -258,7 +259,13 @@ export function createBoardProjectionWorker(
           return;
         }
         if (message.kind === "snapshot") {
-          state = { state: "ready", snapshot: message.snapshot };
+          // An older child ignores the advertised capability and sends only public rows. Keep
+          // those available, but never mistake that unsupported private producer for a healthy whole.
+          const selected = planDestinationRepository(dirname(input.ledgerPath)).outcome !== "off";
+          const snapshot = selected && message.snapshot.opsCatalog === undefined
+            ? { ...message.snapshot, opsCatalog: { outcome: "unreadable" as const, observedAt: clock.iso(), reason: "catalog-bridge-unavailable" } }
+            : message.snapshot;
+          state = { state: "ready", snapshot };
           planIdentity = message.planIdentity;
           options.onSnapshot?.(message.planIdentity);
         } else unavailable(`worker_projection_failed: ${message.reason}`);

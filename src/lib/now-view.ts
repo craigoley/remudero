@@ -972,7 +972,8 @@ export function createNowView(opts: NowViewOptions): {
   const planKey = (instance: NowInstance): string => {
     const path = nowPlanPath(instance);
     const publicKey = path ? planStamp(path) + threadPlanPin(path) : "none";
-    return opts.catalogs ? `${publicKey}:${opts.catalogs.revision(instance.ledgerDir)}` : publicKey;
+    const revision = opts.catalogs?.revision(instance.ledgerDir);
+    return revision && revision !== "off" ? `${publicKey}:ops:${revision}` : publicKey;
   };
   const github = opts.github ?? ((instance: NowInstance) => {
     const [owner, repo] = (instance.repo ?? "/").split("/");
