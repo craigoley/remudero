@@ -36,6 +36,7 @@ import { RMD_TMP_PREFIX } from "./tmp.js";
 import { resolveTestPath, type ResolveTestPathOptions } from "./test-path-resolver.js";
 import { hostWorktreeGit, hostWorktreeGitAsync } from "./worktree-git.js";
 import { REVIEW_MATERIAL_ADVANCE_PATHS } from "./self-sync.js";
+import { resolveRepoLayout } from "./repo-layout.js";
 
 export { stripComments };
 
@@ -100,12 +101,14 @@ const CODE_FILE = /\.(?:ts|mts|mjs|js|cjs)$/;
 const SUITE = /^test\/.*\.test\.ts$/;
 /** Where a changed declaration can name a symbol other suites reach: never test/. */
 const SYMBOL_SOURCE = /^(?:src|scripts|bin)\//;
+/** W1-T12506: the harness state directory, repo-relative; its layout never overrides it, so no file is read. */
+const STATE_DIR = resolveRepoLayout("", () => undefined).stateDir.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 /** Areas the selector models: code the graph walks, and prose the path readers cover. */
-const MODELLED = /^(?:src|scripts|bin|test|docs|doctrine|plan|\.remudero|hooks)\/|^[^/]+\.md$/;
+const MODELLED = new RegExp(`^(?:src|scripts|bin|test|docs|doctrine|plan|${STATE_DIR}|hooks)/|^[^/]+\\.md$`);
 /** W1-T12506: a test/ code file that is not a suite, which the import graph walks to its importers. */
 const TEST_HELPER = /^test\/helpers\/.*\.(?:ts|mts|mjs|js|cjs)$/;
 /** W1-T12506: files no code imports, read by the suites that name them (and those the read map records). */
-const NAMED_BY_SUITES = /^(?:\.remudero|hooks)\//;
+const NAMED_BY_SUITES = new RegExp(`^(?:${STATE_DIR}|hooks)/`);
 const CONTRACT_FILE = /^(?:openapi\/daemon\.yaml|packages\/api-client\/src\/schema\.d\.ts)$/;
 
 /** The non-code files whose readers the read map OBSERVES: the contract and deploy trees, and json. */
@@ -731,7 +734,7 @@ export function selectAffectedSuites(changed: readonly string[], input: Affected
       if (readers.length === 0 && listers.length === 0) notes.push(`${f}: read by no suite on the read map`);
     }
   }
-  // W1-T12506: a test helper's readers are the suites the graph reaches from it; a .remudero/ or hooks/ file's
+  // W1-T12506: a test helper's readers are the suites the graph reaches from it; a state-dir or hooks/ file's
   // are the suites naming it, plus those the read map records. Either way the narrow arm keeps them.
   for (const f of files) {
     const helper = TEST_HELPER.test(f);
