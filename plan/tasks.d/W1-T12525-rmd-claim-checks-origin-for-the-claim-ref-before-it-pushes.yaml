@@ -7,7 +7,7 @@
   verify: auto
   principles:
     tdd: strict
-  risk: medium # one module's claim attempt and its tests; the push stays create-only and the hook is unchanged
+  risk: high # one claim attempt, but three existing suites (live-write guard, daemon loop, dispatch claim) pin its git calls; the push stays create-only and the hook is unchanged
   band_meaning: blast-radius
   origin: operator-session#follow-ups-2026-11-13
   plan_refs:
@@ -16,6 +16,9 @@
   files:
     - src/lib/dispatch-claim.ts
     - test/dispatch/rmd-claim-checks-origin-for-the-claim-ref-before-it-pushes.test.ts
+    - test/live-write-guard.test.ts
+    - test/the-dispatch-claim-runs-git-off-the-daemon-loop.test.ts
+    - test/dispatch-claim.test.ts
   status: queued
   attempts: 0
   acceptance:
@@ -57,6 +60,20 @@
     4. Before you change anything, grep test/ for fakes that pin the git call order of `attempt`
        (test/dispatch-claim.test.ts, test/the-dispatch-claim-runs-git-off-the-daemon-loop.test.ts and the others
        that build `gitDispatchClaimReserver`). If one outside `files` asserts the exact call list, amend first.
+    5. AMENDED after the step 4 grep. Three tests outside the first `files` list pin the old git calls of
+       `attempt`, and the check breaks each one. Their fakes answer the new ls-remote, and no claim they make
+       is removed:
+       - test/live-write-guard.test.ts: its fake origin answers every ls-remote with a sha, so the dispatch
+         attempt reads `taken` and skips its push (6 pushes, not 7). The fake answers a dispatch claim ref as
+         free. Its child process with no runner variable expects the argv list `["ls-remote","push"]`, still
+         with no `remote get-url` lookup.
+       - test/the-dispatch-claim-runs-git-off-the-daemon-loop.test.ts: a git that hangs is now killed on the
+         ls-remote, so the refusal names `git ls-remote timed out`, not `git push timed out`.
+       - test/dispatch-claim.test.ts: its W1-T1268 shape fake fails every ls-remote. It answers the claim
+         ref's ls-remote as free, so the attempt still pushes and reads `created`.
+       A held claim keeps a stderr line for `lastAttemptStderr` that says the push would be rejected, so the
+       real-origin test that matches `rejected` passes unchanged. The three suites are three surfaces, so
+       Rule 19 raises the risk to high.
     INVARIANT claim-stays-create-only: the claim push never overwrites a ref origin holds; the new check only
     skips a push that would be refused.
     NOT IN SCOPE: the pre-push hook; the triage and pull request claim reservers (they may get the same check later).
