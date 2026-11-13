@@ -13,7 +13,7 @@
  */
 import assert from "node:assert/strict";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -61,6 +61,30 @@ function azureShim(): string {
   return ghShim([{ when: "acr login", stdout: "Login Succeeded" }], { command: "az", kind: "t12316-az" }).dir;
 }
 
+/** Force the real Bash scripts through their no-/proc branch and record ps table probes. */
+function unavailableProcAndPs(probe: "error" | "absent", targetPid: number): { dir: string; bashEnv: string; psCalls: string } {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-t12316-no-proc-"));
+  const bashEnv = join(dir, "bash-env");
+  const psCalls = join(dir, "ps-calls");
+  const realPs = spawnSync("sh", ["-c", "command -v ps"], { encoding: "utf8" }).stdout.trim();
+  assert.ok(realPs.startsWith("/"), "the fixture can delegate unrelated ps calls");
+  writeFileSync(bashEnv, 'function [ { if [[ "$1" == -d && "$2" == /proc/self ]]; then return 1; fi; builtin [ "$@"; }\n');
+  writeFileSync(join(dir, "ps"), [
+    "#!/bin/sh",
+    'if [ "$1" = -e ] && [ "$2" = -o ] && [ "$3" = "pid=" ]; then',
+    `  printf '%s\\n' "$*" >> '${psCalls}'`,
+    probe === "error" ? "  exit 2" : "  printf '1\\n'",
+    "fi",
+    `if [ "$1" = -p ] && [ "$2" = '${targetPid}' ]; then`,
+    `  printf '%s\\n' "$*" >> '${psCalls}'`,
+    probe === "error" ? "  exit 2" : "  exit 1",
+    "fi",
+    `exec '${realPs}' "$@"`,
+    "",
+  ].join("\n"), { mode: 0o755 });
+  return { dir, bashEnv, psCalls };
+}
+
 function dockerShim(state: string, claude: string): string {
   const routes: GhShimRoute[] = [
     { when: "image inspect", stdout: "sha256:PULLEDID" },
@@ -85,7 +109,7 @@ function stateWithLock(taskId: string, lock: Lock): { state: string; inflight: s
   return { state, inflight, lockPath };
 }
 
-function recycle(state: string, extraPath: string[] = []) {
+function recycle(state: string, extraPath: string[] = [], extraEnv: Record<string, string> = {}) {
   const claude = mkdtempSync(join(tmpdir(), "rmd-t12316-claude-"));
   const scratch = mkdtempSync(join(tmpdir(), "rmd-t12316-run-"));
   const cashKeyPath = join(scratch, "openweight-api-key");
@@ -107,6 +131,7 @@ function recycle(state: string, extraPath: string[] = []) {
       GH_TOKEN: "",
       RMD_OPENWEIGHT_API_KEY_PATH: cashKeyPath,
       RMD_RECYCLE_DOCKERENV_PATH: join(scratch, "no-such-dockerenv-marker"),
+      ...extraEnv,
     },
   });
   return { status: r.status ?? -1, stderr: r.stderr ?? "", stdout: r.stdout ?? "" };
@@ -401,4 +426,71 @@ test("W1-T12316 criterion 10: the janitor keeps a live lock whatever its age and
   assert.ok(existsSync(dry.lockPath), "a dry run moves nothing");
   assert.equal(reclaimedEntries(dry.inflight).length, 0);
   assert.equal(rowsIn(dry.ledgerPath).length, 0, "a dry run writes no row");
+});
+
+test("W1-T12316 criteria 3 and 10: failed ps probes without /proc keep the same live lock in recycle and janitor", () => {
+  const { child, startedAt } = liveChild();
+  const probe = unavailableProcAndPs("error", child.pid!);
+  const lock = { pid: child.pid!, run_id: "W1-T12114-probe-failed", host: HOST, startedAt };
+  const recycleCase = stateWithLock("W1-T12114", lock);
+  const janitorCase = janitorWithLock(lock);
+  try {
+    for (const lockPath of [recycleCase.lockPath, janitorCase.lockPath]) {
+      const old = new Date(Date.now() - THIRTY_DAYS_S * 1000);
+      utimesSync(lockPath, old, old);
+    }
+    const before = readFileSync(recycleCase.lockPath, "utf8");
+    const recycled = recycle(recycleCase.state, [probe.dir], { BASH_ENV: probe.bashEnv });
+    const recycleProbes = readFileSync(probe.psCalls, "utf8").trim().split("\n").length;
+    const cleaned = runJanitor(janitorCase.fx, {
+      BASH_ENV: probe.bashEnv,
+      PATH: `${probe.dir}:${hostnameShim()}:${process.env.PATH ?? ""}`,
+    });
+
+    assert.notEqual(recycled.status, 0, `recycle must refuse when ps fails: ${recycled.stderr}`);
+    assert.match(recycled.stderr, /REFUSING — 1 lane-holding/);
+    assert.equal(cleaned.status, 0, cleaned.stderr + cleaned.stdout);
+    assert.equal(readFileSync(recycleCase.lockPath, "utf8"), before, "recycle keeps the live lock byte for byte");
+    assert.equal(readFileSync(janitorCase.lockPath, "utf8"), before, "janitor keeps the same live lock byte for byte");
+    assert.deepEqual(reclaimedEntries(recycleCase.inflight), []);
+    assert.deepEqual(reclaimedEntries(janitorCase.inflight), []);
+    assert.equal(rowsIn(join(recycleCase.state, "state", "ledger.ndjson")).some((row) => row.step === "recycle.inflight_reclaimed"), false);
+    assert.equal(rowsIn(janitorCase.ledgerPath).some((row) => row.step === "host_cleanup.inflight_reclaimed"), false);
+    assert.ok(recycleProbes >= 1, "recycle reached the failing ps process-table probe");
+    assert.ok(readFileSync(probe.psCalls, "utf8").trim().split("\n").length > recycleProbes,
+      "janitor also reached the failing ps process-table probe");
+  } finally {
+    child.kill();
+    rmSync(probe.dir, { recursive: true, force: true });
+    rmSync(recycleCase.state, { recursive: true, force: true });
+    rmSync(janitorCase.fx.root, { recursive: true, force: true });
+  }
+});
+
+test("W1-T12316: a successful process-table read without /proc lets both host scripts reclaim an absent pid", () => {
+  const probe = unavailableProcAndPs("absent", DEAD_PID);
+  const lock = { pid: DEAD_PID, run_id: "W1-T12114-no-proc-dead", host: HOST, startedAt: "2026-11-11T09:13:44.000Z" };
+  const recycleCase = stateWithLock("W1-T12114", lock);
+  const janitorCase = janitorWithLock(lock);
+  try {
+    const recycled = recycle(recycleCase.state, [probe.dir], { BASH_ENV: probe.bashEnv });
+    const cleaned = runJanitor(janitorCase.fx, {
+      BASH_ENV: probe.bashEnv,
+      PATH: `${probe.dir}:${hostnameShim()}:${process.env.PATH ?? ""}`,
+    });
+
+    assert.equal(recycled.status, 0, recycled.stderr);
+    assert.equal(cleaned.status, 0, cleaned.stderr + cleaned.stdout);
+    assert.equal(existsSync(recycleCase.lockPath), false);
+    assert.equal(existsSync(janitorCase.lockPath), false);
+    assert.match(reasonText(recycleCase.inflight), /successful ps process-table read/);
+    assert.match(reasonText(janitorCase.inflight), /successful ps process-table read/);
+    assert.equal(rowsIn(join(recycleCase.state, "state", "ledger.ndjson")).filter((row) => row.step === "recycle.inflight_reclaimed").length, 1);
+    assert.equal(rowsIn(janitorCase.ledgerPath).filter((row) => row.step === "host_cleanup.inflight_reclaimed").length, 1);
+    assert.ok(readFileSync(probe.psCalls, "utf8").trim().split("\n").length >= 2);
+  } finally {
+    rmSync(probe.dir, { recursive: true, force: true });
+    rmSync(recycleCase.state, { recursive: true, force: true });
+    rmSync(janitorCase.fx.root, { recursive: true, force: true });
+  }
 });

@@ -2551,7 +2551,7 @@ inflight_pid_start_epoch() {
 
 # Sets SAME_HOST_VERDICT (empty: leave the lock) and SAME_HOST_EVIDENCE for a lock this host wrote.
 same_host_inflight_verdict() {
-  local f="$1" pid started lock_epoch start_epoch
+  local f="$1" pid started lock_epoch start_epoch pids listed_pid pid_seen=0 table_read=0
   SAME_HOST_VERDICT=""
   SAME_HOST_EVIDENCE=""
   pid="$(lock_pid_field "${f}")"
@@ -2562,10 +2562,21 @@ same_host_inflight_verdict() {
       SAME_HOST_EVIDENCE="pid ${pid} is dead: no /proc/${pid} on this host"
       return 0
     fi
-  elif ! ps -p "${pid}" >/dev/null 2>&1; then
-    SAME_HOST_VERDICT="pid-dead"
-    SAME_HOST_EVIDENCE="pid ${pid} is dead: ps -p finds no such process on this host"
-    return 0
+  else
+    # `ps -p` returns nonzero both for an absent pid and for a failed probe. Only a successful
+    # process-table read can prove absence when /proc is unavailable.
+    pids="$(ps -e -o pid= 2>/dev/null)" || return 0
+    for listed_pid in ${pids}; do
+      case "${listed_pid}" in *[!0-9]*|'') return 0 ;; esac
+      table_read=1
+      [ "${listed_pid}" = "${pid}" ] && pid_seen=1
+    done
+    [ "${table_read}" = 1 ] || return 0
+    if [ "${pid_seen}" = 0 ]; then
+      SAME_HOST_VERDICT="pid-dead"
+      SAME_HOST_EVIDENCE="pid ${pid} is dead: a successful ps process-table read finds no such process on this host"
+      return 0
+    fi
   fi
   started="$(lock_started_at_field "${f}")"
   lock_epoch="$(epoch_of_started_at "${started}")"
