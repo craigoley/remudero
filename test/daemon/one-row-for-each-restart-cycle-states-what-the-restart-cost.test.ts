@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 import { restartCycleLedgerRows, restartCycleRow } from "#src/lib/restart-cycle.js";
 import { runDaemon } from "#src/lib/daemon.js";
+import { rotateLedger } from "#src/lib/ledger.js";
 import type { Plan } from "#src/lib/plan.js";
 
 const epoch = Date.now();
@@ -90,14 +94,18 @@ test("W1-T12229 criterion 5: costs sum known parts and name unavailable parts as
 });
 
 async function daemon(rows: Row[], ticks: number, afterSleep?: (tick: number, rows: Row[]) => void,
-  read?: (tick: number, rows: Row[]) => readonly string[]) {
+  read?: (tick: number, rows: Row[]) => readonly string[], freshnessEnabled = false) {
   const logs: Array<{ step: string; fields: Row }> = [];
   let tick = 0, reads = 0;
+  const readsByTick = new Map<number, number>();
   const start = rows.filter(r => r.step === "daemon.boot").map(r => Date.parse(String(r.ts))).at(-1) ?? epoch + 400;
   const empty: Plan = { tasks: [], byId: new Map() };
   await runDaemon(empty, {
     now: () => new Date(start + tick * 100),
-    readLedgerLines: () => { reads++; return read ? read(tick, rows) : rows.map(r => JSON.stringify(r)); },
+    readLedgerLines: () => { reads++; readsByTick.set(tick, (readsByTick.get(tick) ?? 0) + 1);
+      return read ? read(tick, rows) : rows.map(r => JSON.stringify(r)); },
+    ...(freshnessEnabled ? { checkFreshness: () => ({ stale: true, oldSha: "old", newSha: "new",
+      staleSinceMs: epoch + 100, changes: [{ sha: "new", subject: "fix: refresh worker", files: ["src/lib/worker.ts"] }] }) } : {}),
     refreshMerged: () => () => false,
     checkStop: () => tick > ticks ? "fixture done" : undefined,
     runOne: async () => { throw new Error("empty plan must not dispatch"); },
@@ -107,7 +115,7 @@ async function daemon(rows: Row[], ticks: number, afterSleep?: (tick: number, ro
     },
     sleep: async () => {},
   }, { pollIntervalMs: 1 });
-  return { cycles: logs.filter(r => r.step === "daemon.restart_cycle").map(r => r.fields), reads, logs };
+  return { cycles: logs.filter(r => r.step === "daemon.restart_cycle").map(r => r.fields), reads, readsByTick, logs };
 }
 
 test("W1-T12229 criterion 6: runDaemon writes once on the first tick with a verdict", async () => {
@@ -119,6 +127,18 @@ test("W1-T12229 criterion 6: runDaemon writes once on the first tick with a verd
   assert.equal(result.cycles[0].first_verdict_at, at(500));
   assert.equal(result.cycles[0].started_at, at(400));
   assert.equal(result.reads, 4, "one boot read and one shared read per active tick, including release resolution");
+});
+
+test("W1-T12229 criterion 6: freshness scoring and restart observation share each tick read", async () => {
+  const rows = fixture().filter(r => Date.parse(String(r.ts)) <= epoch + 400);
+  const result = await daemon(rows, 3, (tick, ledger) => {
+    if (tick === 1) ledger.push(row(500, "review.posted", { pr_url: "https://github.com/o/r/pull/1" }));
+  }, undefined, true);
+  assert.equal(result.cycles.length, 1);
+  assert.equal(result.cycles[0].first_verdict_at, at(500));
+  assert.ok(result.logs.some(r => r.step === "daemon.freshness_decision"), "freshness scoring ran");
+  for (const tick of [1, 2]) assert.equal(result.readsByTick.get(tick), 1, `tick ${tick} reads once`);
+  assert.ok((result.readsByTick.get(3) ?? 0) <= 1, "the stopping tick does not reread");
 });
 
 test("W1-T12229 criterion 7: the next start closes a lifetime with no verdict", async () => {
@@ -133,6 +153,42 @@ test("W1-T12229 criterion 7: the next start closes a lifetime with no verdict", 
   assert.equal((await daemon([row(400, "daemon.boot")], 1)).cycles.length, 0);
   rows.push(row(710, "daemon.restart_cycle", { started_at: at(400) }));
   assert.equal((await daemon(rows, 1)).cycles.length, 0, "a carried cycle is not written again");
+});
+
+test("W1-T12229 criterion 7: rotation keeps an unfinished cycle's prior boot boundary", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-restart-cycle-"));
+  try {
+    const path = join(dir, "ledger.ndjson");
+    const now = Date.now();
+    const atTime = (offset: number) => new Date(now + offset).toISOString();
+    const oldStart = -40 * 60_000;
+    const newStart = -20 * 60_000;
+    const prior = [
+      { ts: atTime(oldStart), step: "daemon.boot", run_id: "old" },
+      { ts: atTime(oldStart + 1000), step: "daemon.freshness_decision", action: "restart", stale_since_ms: now + oldStart },
+      { ts: atTime(oldStart + 2000), step: "daemon.freshness_exit", phases_ms: { total: 1000 } },
+      { ts: atTime(newStart), step: "daemon.boot", run_id: "new" },
+    ];
+    const noise = (n: number) => Array.from({ length: 300 }, (_, i) =>
+      ({ ts: atTime(n), step: "ci.polling", detail: `noise-${i}-${"x".repeat(70)}` }));
+    writeFileSync(path, [...prior, ...noise(-1000)].map(r => JSON.stringify(r)).join("\n") + "\n");
+    assert.equal(rotateLedger(path, { ceilingBytes: 8000, smoothingWindowMs: 0,
+      now: () => new Date(now - 500) }).rotated, true);
+    const afterFirst = restartCycleLedgerRows(readFileSync(path, "utf8").trim().split("\n")).rows;
+    assert.equal(afterFirst.filter(r => r.step === "daemon.boot").length, 2);
+    const third = { ts: atTime(0), step: "daemon.boot", run_id: "third" };
+    writeFileSync(path, [...afterFirst, { ts: atTime(-1000), step: "daemon.memory_exit" }, third, ...noise(100)]
+      .map(r => JSON.stringify(r)).join("\n") + "\n");
+    assert.equal(rotateLedger(path, { ceilingBytes: 8000, smoothingWindowMs: 0,
+      now: () => new Date(now + 200) }).rotated, true);
+    const retained = restartCycleLedgerRows(readFileSync(path, "utf8").trim().split("\n")).rows;
+    assert.ok(retained.some(r => r.step === "daemon.boot" && r.ts === atTime(newStart)));
+    assert.ok(restartCycleRow(retained, now + newStart));
+    const result = await daemon(retained as Row[], 1);
+    assert.equal(result.cycles.length, 1);
+    assert.equal(result.cycles[0].started_at, atTime(newStart));
+    assert.equal(result.cycles[0].first_verdict_at, null);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
 test("an unreadable cycle read carries its error and retries on the next tick", async () => {

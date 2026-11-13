@@ -1961,24 +1961,43 @@ function rotateLedgerLocked(
   // ── PASS 2: recency-window bound — health and render steps are heartbeats, not one-shot
   // decisions, so only lines inside their own window are retained; that stops a restart storm's
   // boot spam bloating the core. A line with no parseable `ts` is kept, never guessed away. ────
-  // W1-T3755: retain exactly the newest daemon.boot beyond the health window, not every boot.
+  // W1-T3755: retain the newest daemon.boot beyond the health window; unfinished
+  // restart cycles also need their adjacent boot boundaries until recorded.
   // 2026-09-18: a 00:49 daemon still ran at 06:00; its boot row survived 00:52/01:52 snapshots
   // but vanished by 04:28. readLatestBootSha returned undefined, the board falsely reported STALE
   // and prescribed rmd deploy, which skipped on the same missing row.
   // assessBootHealth needs 45s; readLatestBootSha needs the process lifetime. Do not widen
   // HEALTH_STEP_RETENTION_WINDOW_MS to couple those consumers. Older boots name replaced
-  // processes and must age out, or a restart storm bloats the core again.
+  // processes and must age out once their restart cycles are recorded, or a restart storm bloats the core again.
   // Falsifier: test/the-newest-boot-row-outlives-the-health-window.test.ts.
   const newestBootLine = candidates.reduce<ParsedLedgerLine | undefined>(
     (best, p) =>
       p.step === "daemon.boot" && p.tsMs !== undefined && (best?.tsMs === undefined || p.tsMs > best.tsMs) ? p : best,
     undefined,
   );
+  // An unfinished restart cycle needs its starting boot and the preceding lifetime's
+  // boundary. Keep both until daemon.restart_cycle records that start, even when a
+  // later boot makes them older than the health window.
+  const recordedCycleStarts = new Set(originalOrder.filter((p) => p.step === "daemon.restart_cycle")
+    .map((p) => Date.parse(String(p.json?.started_at ?? ""))).filter(Number.isFinite));
+  const restartBoundaryBoots = new Set<ParsedLedgerLine>();
+  const byTime = originalOrder.filter((p) => p.tsMs !== undefined).sort((a, b) => a.tsMs! - b.tsMs!);
+  let precedingBoot: ParsedLedgerLine | undefined;
+  let precedingExit: ParsedLedgerLine | undefined;
+  for (const p of byTime) {
+    if (["daemon.freshness_exit", "daemon.memory_exit", "daemon.signal_exit", "daemon.stop"].includes(p.step ?? "")) precedingExit = p;
+    if (p.step !== "daemon.boot") continue;
+    if (precedingExit?.step === "daemon.freshness_exit" && !recordedCycleStarts.has(p.tsMs!)) {
+      restartBoundaryBoots.add(p);
+      if (precedingBoot) restartBoundaryBoots.add(precedingBoot);
+    }
+    precedingBoot = p;
+  }
 
   candidates = candidates.filter((p) => {
     if (!p.step) return true;
     if (isModelAttributionStep(p.step)) return true;
-    if (newestBootLine !== undefined && p === newestBootLine) return true;
+    if (p === newestBootLine || restartBoundaryBoots.has(p)) return true;
     const isHealth = isHealthOrDeployStep(p.step);
     const isRender = isRenderRelevantStep(p.step);
     if (!isHealth && !isRender) return true;

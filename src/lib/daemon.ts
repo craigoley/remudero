@@ -4336,6 +4336,20 @@ export async function runDaemon(
   deps: DaemonDeps,
   opts: DaemonOpts = {},
 ): Promise<DaemonSummary> {
+  // Every consumer reached during a tick sees the same ledger read, including freshness scoring.
+  // Cache failures too: a second consumer must not silently turn an unreadable tick into a good one.
+  const ledgerReader = deps.readLedgerLines;
+  let tickLedgerActive = false;
+  let tickLedger: { lines: readonly string[] } | { error: unknown } | undefined;
+  if (ledgerReader) deps = { ...deps, readLedgerLines: () => {
+    if (!tickLedgerActive) return ledgerReader();
+    if (tickLedger === undefined) {
+      try { tickLedger = { lines: ledgerReader() }; }
+      catch (error) { tickLedger = { error }; }
+    }
+    if ("error" in tickLedger) throw tickLedger.error;
+    return tickLedger.lines;
+  } };
   const pollIntervalMs = opts.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
   // W1-T1044: see DaemonOpts.sweepWallClockBoundMs's own doc — POLICY DATA (rule 2), threaded
   // by the real `rmd daemon` entry, defaulted here for a direct/test caller that omits it.
@@ -4714,22 +4728,17 @@ export async function runDaemon(
   }
   let restartCyclePending = !recordedRestartStarts.has(restartStartedAtMs) &&
     restartCycleRow(restartLedger.rows, restartStartedAtMs) !== null;
-  type RestartTickLedger = { lines: readonly string[] } | { error: unknown };
-  const observeRestartCycle = (): RestartTickLedger | undefined => {
+  const observeRestartCycle = (): void => {
     if (!restartCyclePending || !deps.readLedgerLines) return;
-    let snapshot: RestartTickLedger | undefined;
     try {
       const lines = deps.readLedgerLines();
-      snapshot = { lines };
       const ledger = restartCycleLedgerRows(lines);
       if (ledger.errors.length) log("daemon.restart_cycle_unreadable", { errors: ledger.errors });
       const cycle = restartCycleRow(ledger.rows, restartStartedAtMs);
       if (cycle?.first_verdict_at) { log("daemon.restart_cycle", { ...cycle }); restartCyclePending = false; }
     } catch (error) {
-      snapshot ??= { error };
       log("daemon.restart_cycle_unreadable", { error: String(error) });
     }
-    return snapshot;
   };
   deps.bootPhases?.mark("loop_ledger_read");
   const measuredRuns: MeasuredRun[] = [];
@@ -6727,6 +6736,8 @@ export async function runDaemon(
 
   const tickMemory = { sampled: false };
   for (;;) {
+    tickLedgerActive = true;
+    tickLedger = undefined;
     // The liveness tick: the one row this loop writes unconditionally, every iteration, on every path below.
     // Every other daemon-prefixed step is either boot-time and one-shot, or confined to the three windows the
     // in-flight ticker runs in. Measured: the prefix went silent for 102.5 minutes on 2026-08-23 while the
@@ -6735,7 +6746,7 @@ export async function runDaemon(
     // no row has within one poll interval; a throwing sampler rides it as mem_telemetry, never escapes it.
     log("daemon.tick", { poll_interval_ms: pollIntervalMs, ...tickMemorySample(deps, daemonClock.now(), pollIntervalMs, tickMemory) });
     deps.bootPhases?.firstTick(log);
-    const restartRead = observeRestartCycle();
+    observeRestartCycle();
     recordNearLimitHeapSample(deps, "tick");
     if (tickMemory.sampled) startMemoryReadAfterRow(deps, log);
     const tickStartedAtMs = daemonClock.now();
@@ -7537,12 +7548,7 @@ export async function runDaemon(
     const mergedTask: MergedResolver = (t) => isMerged(t.id);
     // W1-T10348: the released set, resolved ONCE per tick by the resolver every admission site shares
     // (ledger rows plus operator-releases.json), and handed to the kick, the tick selection and the refill.
-    const tickReleases = resolveReleases({
-      ...deps, readLedgerLines: restartRead === undefined ? deps.readLedgerLines : () => {
-        if ("error" in restartRead) throw restartRead.error;
-        return restartRead.lines;
-      },
-    }, planForBatch);
+    const tickReleases = resolveReleases(deps, planForBatch);
     if (tickReleases.durableUnreadable !== undefined || tickReleases.ledgerUnreadable !== undefined) {
       log("dispatch.releases_unreadable", {
         ...(tickReleases.ledgerUnreadable !== undefined ? { ledger_error: tickReleases.ledgerUnreadable } : {}),
@@ -8461,6 +8467,8 @@ export async function runDaemon(
       wakeParkedLanes();
     };
     const onDispatchTick = checkFreshness || restartCyclePending || (deps.reloadPlan && deps.sweepLight) ? (): void | Promise<void> => {
+      tickLedgerActive = true;
+      tickLedger = undefined;
       observeRestartCycle();
       wakeParkedLanes();
       if (inFlightTasks.size === 0 || deps.checkPause?.()) return;
