@@ -31,16 +31,19 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, relative } from "node:path";
-import { fileURLToPath } from "node:url";
-import { test } from "node:test";
+import { join, relative } from "node:path";
+import { after, test } from "node:test";
 
 import { RETIREMENT_REASONS, type Task } from "../src/lib/plan.js";
 import { blockedDispositionViolations, type BlockedDispositionContext } from "../src/lib/task-linter.js";
 import { lintPlanCommand, type LintPlanStatusDeps } from "../src/run-task.js";
 import { fakeGitHub } from "./helpers/fake-github.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const FIXTURE_REPO = gitRepo({ kind: "blocked-disposition" });
+const FIXTURE_ROOT = FIXTURE_REPO.dir;
+after(() => FIXTURE_REPO.cleanup());
 
 /** W1-T4226: lint-plan reads GitHub through its `LintPlanStatusDeps` seam, not the refused `gh` —
  *  offline, with a recording fake gateway so a test can assert none was ever built (mirrors
@@ -48,6 +51,7 @@ const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 function offlineLintDeps(gatewaysBuilt: string[]): LintPlanStatusDeps {
   const github = fakeGitHub();
   return {
+    repoRoot: FIXTURE_ROOT,
     offline: true,
     ghGateway: (owner, repo) => {
       gatewaysBuilt.push(`${owner}/${repo}`);
@@ -81,7 +85,7 @@ const FIXTURE_IDENTITY = { name: "remudero test fixture", email: "fixture@remude
 
 function git(args: string[], env?: NodeJS.ProcessEnv): string {
   return execFileSync("git", args, {
-    cwd: REPO_ROOT,
+    cwd: FIXTURE_ROOT,
     encoding: "utf8",
     maxBuffer: 1 << 26,
     env: { ...process.env, ...env },
@@ -97,7 +101,7 @@ function baseCommitWithBlob(relPath: string, content: string): string {
     const env = { GIT_INDEX_FILE: indexFile };
     git(["read-tree", "HEAD"], env);
     const blob = execFileSync("git", ["hash-object", "-w", "--stdin"], {
-      cwd: REPO_ROOT,
+      cwd: FIXTURE_ROOT,
       encoding: "utf8",
       input: content,
     }).trim();
@@ -118,9 +122,9 @@ function baseCommitWithBlob(relPath: string, content: string): string {
 }
 
 function fixturePlanPaths(): { dir: string; planPath: string; relPath: string } {
-  const dir = mkdtempSync(join(REPO_ROOT, ".rmd-w1-t2487-fixture-"));
+  const dir = mkdtempSync(join(FIXTURE_ROOT, ".rmd-w1-t2487-fixture-"));
   const planPath = join(dir, "tasks.yaml");
-  const relPath = relative(REPO_ROOT, planPath);
+  const relPath = relative(FIXTURE_ROOT, planPath);
   return { dir, planPath, relPath };
 }
 
@@ -159,6 +163,7 @@ function fixtureTask(id: string, status: string, retirement?: string): string {
     `  status: ${status}`,
     "  attempts: 0",
     "  files: [test/a-blocked-task-must-name-its-disposition.test.ts]",
+    `  design: "NO-INVARIANTS: synthetic lint fixture with no inherited behavior to preserve"`,
     "  acceptance:",
     '    - claim: "the thing holds"',
     '      proof: "unit test: test/a-blocked-task-must-name-its-disposition.test.ts"',

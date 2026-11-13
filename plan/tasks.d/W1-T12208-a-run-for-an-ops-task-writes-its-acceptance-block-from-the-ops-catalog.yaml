@@ -15,6 +15,7 @@
     - W1-T11770
   files:
     - src/cli/commands/run-task-verb.ts
+    - src/lib/pr-open.ts
     - test/infra/a-run-for-an-ops-task-writes-its-acceptance-block-from-the-ops-catalog.test.ts
   status: queued
   attempts: 0

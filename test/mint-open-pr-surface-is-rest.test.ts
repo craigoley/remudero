@@ -199,10 +199,12 @@ test("W1-T2324 (Q2): --reserve still proceeds when only a SETTLED surface (shard
       cap.restore();
     }
     const text = cap.out.join("\n");
-    assert.match(text, /DEGRADED: shards/, "sanity: the shard really did degrade the mint");
+    // W1-T12453: the reserve path writes its degraded notes to stderr and exits 0 once it holds an id.
+    assert.match(cap.err.join("\n"), /DEGRADED shards: /, "sanity: the shard really did degrade the mint");
+    assert.doesNotMatch(text, /DEGRADED/);
     assert.match(text, /^RESERVED W1-T\d+ on origin/m, "a degraded SETTLED surface must not stop the atomic claim");
     assert.equal(reserver.tried.length, 1, "the claim was actually attempted, not skipped");
-    assert.equal(code, 1, "the mint's own degraded exit code is preserved even though the claim proceeded");
+    assert.equal(code, 0, "a held id exits 0 even though a settled source was degraded");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
