@@ -12,7 +12,7 @@ import { openPrMintTexts, planCommand, runGhPrCreate } from "#src/run-task.js";
 import { buildWorkerEnv } from "#src/lib/env.js";
 import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
-import { ghShim } from "#test/helpers/gh-shim.js";
+import { withGhShim } from "#test/helpers/gh-shim.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 const TOKEN = "ghs_fake_t11864_write_only";
@@ -133,14 +133,14 @@ test("the PR-create executor and adoption GET have separate credential boundarie
 });
 
 test("planCommand mints afresh at POST only, keeps reads and worker env clear, and refuses a late mint failure", async (t) => {
-  for (const mode of ["app", "adopt", "late refusal", "ambient"] as const) await t.test(mode, async (t) => {
+  for (const mode of ["app", "adopt", "late refusal", "ambient"] as const) await t.test(mode, async (t) => withGhShim([
+    { when: "pulls?state=open", stdout: "[]" }, { when: "pr list", stdout: "[]" },
+    { when: "api --method POST", stdout: '{"html_url":"https://github.com/craigoley/remudero/pull/1","number":1}' },
+    { when: "headRefName", stdout: '{"headRefName":"different-branch"}' },
+  ], async (shim) => {
     const root = mkdtempSync(join(tmpdir(), "rmd-t11864-plan-"));
     const origin = gitRepo({ bare: true });
     const seed = gitRepo();
-    const shim = ghShim([{ when: "pulls?state=open", stdout: "[]" }, { when: "pr list", stdout: "[]" },
-      { when: "api --method POST", stdout: '{"html_url":"https://github.com/craigoley/remudero/pull/1","number":1}' },
-      { when: "headRefName", stdout: '{"headRefName":"different-branch"}' }]);
-    const oldPath = process.env.PATH;
     const oldHooks = process.env.RMD_HARNESS_HOOKS_DIR;
     const said: string[] = [];
     t.mock.method(console, "log", (...args: unknown[]) => said.push(args.join(" ")));
@@ -158,7 +158,6 @@ test("planCommand mints afresh at POST only, keeps reads and worker env clear, a
       execFileSync("git", ["clone", "--quiet", origin.dir, repoDir]);
       execFileSync("git", ["-C", repoDir, "config", "user.name", "fixture"]);
       execFileSync("git", ["-C", repoDir, "config", "user.email", "fixture@example.invalid"]);
-      process.env.PATH = `${shim.dir}:${oldPath}`;
       process.env.RMD_HARNESS_HOOKS_DIR = join(root, "fixture-hooks");
       mkdirSync(process.env.RMD_HARNESS_HOOKS_DIR);
       const code = await withLiveWritesAllowed(() => planCommand(["--mode=create", "a fixture task"], {
@@ -226,14 +225,12 @@ test("planCommand mints afresh at POST only, keeps reads and worker env clear, a
       assert.equal(origin.git("for-each-ref", "--format=%(refname)", "refs/rmd-id/"), "refs/rmd-id/W1-T5",
         "finally releases unused ids and preserves the pushed filing under the existing release policy");
     } finally {
-      process.env.PATH = oldPath;
       if (oldHooks === undefined) delete process.env.RMD_HARNESS_HOOKS_DIR;
       else process.env.RMD_HARNESS_HOOKS_DIR = oldHooks;
       seed.cleanup(); origin.cleanup();
-      rmSync(shim.dir, { recursive: true, force: true });
       rmSync(root, { recursive: true, force: true });
     }
-  });
+  }));
 });
 
 test("planner open-PR reads select the broker subprocess without a write credential", (t) => {
