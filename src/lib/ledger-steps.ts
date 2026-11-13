@@ -82,6 +82,12 @@ type SeedRow = Omit<LedgerStepRow, "family">;
 // `src/lib/review.ts`, `src/lib/sweep.ts` and `src/lib/panel-actions.ts` at 2026-09-07.
 const SEED_ROWS: readonly SeedRow[] = [
   {
+    step: "routing.experiment.result",
+    meaning: "A daily intention-to-treat routing experiment result, with separate pipeline metrics, task-cluster bootstrap intervals, the decision rule and sample requirement. Missing outcomes remain counted. Terminal results are preserved; the result changes no routing.",
+    writer: ["recordRoutingExperimentResults"],
+    outcomes: ["running", "concluded", "underpowered"],
+  },
+  {
     step: "recycle.inflight_reclaimed",
     meaning: "The recycle script moved an inflight lock to inflight/reclaimed/ because a process on this same host wrote it and that process is gone: its pid is dead, or the pid now belongs to a process that started after the lock. A lock whose process is alive with the lock's start time is never moved, whatever its age.",
     writer: ["reclaim_dead_inflight_locks"],

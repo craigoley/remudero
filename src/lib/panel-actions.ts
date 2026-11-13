@@ -47,7 +47,8 @@ import { readLedgerLines, DEFAULT_LIVENESS_BOUND_MS, type LedgerReader } from ".
 import { deriveLastPoll } from "./daemon-health.js";
 import { deriveThreadId, readThread, appendThreadMessage, appendThreadReplyOnce, type ThreadIdentity, type ThreadMessageExtra } from "./inbox-thread.js";
 import type { EscalationConversationReader } from "./escalation-conversation.js";
-import { captureFeedback, feedbackEntryRepoPath, listFeedback, setFeedbackStatus } from "./feedback.js";
+import { captureFeedback, feedbackEntryRepoPath, findFeedbackBySubmissionKey, listFeedback, setFeedbackStatus } from "./feedback.js";
+import { bindConsoleCorrection, consoleCorrectionSubmissionKey, parseConsoleCorrectionRequest, type ConsoleCorrectionRequest } from "./console-feedback.js";
 import { escalationReplySubmissionKey, readEscalationQuestionFeedback } from "./escalation-correspondence.js";
 import { queueFeedbackRecord, readQueuedFeedbackRecords } from "./feedback-landing.js";
 import { applyOperatorMergeHold, type OperatorMergeHoldAction } from "./operator-merge-hold.js";
@@ -832,6 +833,8 @@ interface EscalationReplyInput {
   intentId?: string;
   startConversation?: true;
   recommendationResponse?: "accept" | "decline";
+  /** W1-T11104: present only for the explicit wording-correction kind; never inferred from `text`. */
+  correction?: ConsoleCorrectionRequest;
 }
 
 function validateEscalationReply(body: unknown): { error: string } | EscalationReplyInput {
@@ -850,7 +853,16 @@ function validateEscalationReply(body: unknown): { error: string } | EscalationR
     || typeof body.intentId !== "string" || !/^[A-Za-z0-9._:-]{8,128}$/.test(body.intentId))) {
     return { error: "a bound reply requires issueUrl, expectedRevision and a valid intentId" };
   }
+  let correction: ConsoleCorrectionRequest | undefined;
+  if (body.kind !== undefined || body.correction !== undefined) {
+    if (!bound) return { error: "a wording correction requires a bound request" };
+    if (body.startConversation !== undefined || body.recommendationResponse !== undefined) return { error: "a wording correction cannot also start a conversation or answer a recommendation" };
+    const parsed = parseConsoleCorrectionRequest(body);
+    if ("error" in parsed) return parsed;
+    correction = parsed;
+  }
   return {
+    ...(correction ? { correction } : {}),
     taskId: body.taskId,
     class: body.class,
     cause: body.cause as string | undefined,
@@ -860,6 +872,36 @@ function validateEscalationReply(body: unknown): { error: string } | EscalationR
     ...(body.recommendationResponse ? { recommendationResponse: body.recommendationResponse as "accept" | "decline" } : {}),
     ...(bound ? { issueUrl: body.issueUrl as string, expectedRevision: body.expectedRevision as string, intentId: body.intentId as string } : {}),
   };
+}
+
+/** W1-T11104: record an explicit wording correction as its own feedback receipt. It never touches the
+ *  thread, the question store or the reply interpreter, so it cannot clear Action required, archive the
+ *  discussion or stage an answer. Source binding is re-read fresh and refused when foreign or changed. */
+async function captureConsoleCorrection(deps: PanelActionDeps, input: EscalationReplyInput & { correction: ConsoleCorrectionRequest },
+  threadId: string, origin: string, res: ServerResponse): Promise<void> {
+  const key = consoleCorrectionSubmissionKey(threadId, input.intentId!, input.issueUrl!, input.expectedRevision!);
+  const id = `fb-console-correction-${createHash("sha256").update(key).digest("hex")}`;
+  const prior = findFeedbackBySubmissionKey(deps.root, key, deps.root);
+  let bound: ReturnType<typeof bindConsoleCorrection> | undefined;
+  if (!prior) {
+    const read = await deps.readEscalationConversation?.(input.issueUrl!, true);
+    bound = bindConsoleCorrection(input.correction, { issueUrl: input.issueUrl!, threadId, expectedRevision: input.expectedRevision!, intentId: input.intentId! }, read);
+    if (!bound.ok) return void sendJson(res, bound.status, { error: bound.error, detail: bound.detail });
+  }
+  const entry = prior ?? captureFeedback(deps.root, { id, raw: input.text, origin: "ui", threadId, submissionKey: key,
+    consoleCorrection: bound!.ok ? bound!.correction : undefined, land: { stateRoot: deps.root } });
+  if (entry.submission_key !== key || entry.thread_id !== threadId || entry.raw !== input.text.trim() || !entry.console_correction
+    || entry.console_correction.after !== input.correction.after || entry.console_correction.before !== input.correction.before) {
+    return void sendJson(res, 409, { error: "intent_conflict", detail: "That correction identity already belongs to different input. Nothing was changed." });
+  }
+  const rel = feedbackEntryRepoPath(entry.id);
+  const staged = readQueuedFeedbackRecords(deps.root).has(rel) ? { queued: true as const } : queueFeedbackRecord(deps.root, rel, deps.root);
+  ledgerPanelAction(deps, "panel.console_correction_captured", input.taskId, origin, {
+    thread_id: threadId, feedback_id: entry.id, symptom: input.correction.symptom, duplicate: prior !== null,
+    ...(staged.queued ? { landing: "queued" } : { landing_error: staged.error }),
+  });
+  sendJson(res, 200, { ok: true, kind: "wording_correction", taskId: input.taskId, threadId, feedback: entry,
+    duplicate: prior !== null, ...(staged.queued ? { landing: "queued" } : {}), reply: "not_recorded", work: "not_observed" });
 }
 
 const boundFeedbackId = (submissionKey: string): string => `fb-escalation-${createHash("sha256").update(submissionKey).digest("hex")}`;
@@ -916,6 +958,7 @@ export function buildEscalationReplyRoute(deps: PanelActionDeps): Route {
     handler: jsonAction(validateEscalationReply, async (input, req, res) => {
       const identity: ThreadIdentity = { taskId: input.taskId, class: input.class, cause: input.cause, prRef: input.prRef };
       const threadId = deriveThreadId(identity);
+      if (input.correction) return captureConsoleCorrection(deps, { ...input, correction: input.correction }, threadId, bearerTokenId(req), res);
       if (!deps.threadStorePath) {
         sendJson(res, 400, {
           error: "invalid_request",

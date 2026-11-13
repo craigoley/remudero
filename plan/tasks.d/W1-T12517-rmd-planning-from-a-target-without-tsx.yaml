@@ -1,0 +1,83 @@
+- id: W1-T12517
+  title: Exercise rmd planning from a repository without tsx and preserve its filing gates
+  repo: remudero
+  depends_on: [W1-T12516]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: high
+  band_meaning: span
+  origin: architect
+  plan_refs: ["§5B", W1-T3951, W1-T4590, W1-T12515, W1-T12516]
+  files:
+    - test/worker/run-task/rmd-planning-keeps-target-context-without-tsx.test.ts
+    - test/worker/run-task/rmd-planning-without-tsx-keeps-filing-gates.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    Settled by lookup: is this already filed or already decided? -> W1-T45 unified the planning
+    modes, W1-T3951 covers settings/hooks, and W1-T4590 covers proof launch. The new W1-T12516
+    owns the Codex loader correction; none provides this bounded CLI planning regression
+    (MASTER-PLAN §5B; plan/tasks.yaml W1-T45; W1-T3951; W1-T4590; W1-T12516).
+    Settled by lookup: does planning use the same worker boundary? -> yes. planCommand runs a
+    reserved-ID relint loop and spawns the Architect through the worker seam with cwd equal to
+    its target plan worktree, while settings/hooks come from resolveInstallRoot(config)
+    (src/run-task.ts planCommand; src/lib/plan-architect.ts).
+    Settled by lookup: what is the positive control and what must remain real? -> Core's own cwd
+    with its installed tsx is the paired control. The production Codex probe constructor and
+    loader must run in a separate process; existing injected-only plan tests cannot prove module
+    resolution (test/the-architect-proposal-survives-commitlint-and-uses-its-mount.test.ts;
+    test/codex-capacity-singleflight.test.ts; W1-T12516).
+    Settled by lookup: where do these new planning tests belong? -> the placement classifier maps
+    the intended run-task and plan-architect imports to test/worker/run-task
+    (src/lib/test-placement.ts placeTest; scripts/test-placement/subsystem-map.json).
+  design: |
+    Add bounded integration regressions around the existing bin/rmd -> planCommand -> spawnWorker
+    path. Run from a disposable target repository outside Core's node_modules ancestry with valid
+    target plan/mount configuration and no tsx, settings or hooks of its own, using the explicit
+    harness settings/install fixture. Use isolated state, local Git fixtures with fixture-local
+    identity, and local deterministic Codex app-server/exec stubs; no remote PR, credentials,
+    network, subscription call or live dispatch. Do not replace spawnWorker or its real default
+    probe with an always-successful fake. Run a matching fresh Core-context control and assert both
+    reach the Architect. Control inherited loader/preload flags and cold capacity caches so the
+    target's missing dependency is actually exercised. Assert the intended lookup corpus with a
+    successful stub handshake, not merely absence of a tsx error.
+
+    INVARIANT planning-context: The harness supplies runtime, settings and hooks; target plan,
+    mounts, owner/repository and worker cwd remain target-scoped. A deterministic CLEAR response
+    produces no plan edits or PR in both target and Core cases, and fixture dependencies are unchanged.
+    INVARIANT planning-gates: Architect tier/subscription routing, ownership, ID reservation,
+    allowed plan paths, task lint and acceptance proof checks still gate a PROPOSED result before
+    publication; ordinary review, hosted CI and protected merge retain authority afterward.
+
+    In the separate filing-gates suite, use local/injected publication boundaries to demonstrate a
+    valid plan-only proposal reaches the existing publisher once, an invalid proof or out-of-plan
+    edit is refused before publication, and no worker can edit its own implementation criteria.
+    Assert the existing gate calls and preserved publisher inputs; do not pretend an offline test
+    proves hosted CI or protected merge has passed. Keep the real bootstrap portion from the first
+    suite; downstream publication can be recorded offline. Do not refactor production planCommand
+    for a test-only shortcut. Confirm test/worker/run-task placement with rmd test-place; use package aliases
+    and the shared root helper. Clean up only the fixtures each test owns.
+    Give the first suite an executed test titled "W1-T12517 target without tsx reaches its architect"
+    so the added regression artifact has a positive head-versus-base proof. The whole-file guard
+    proofs execute its behavior after W1-T12516 has already corrected the runtime.
+
+    This task adds regression evidence only. If it exposes another production launch defect, name
+    the exact site and file a separate bounded amendment instead of weakening a gate or expanding
+    scope. T172 remains untried until this task, W1-T12516 and the separate W1-T12515 Console proof
+    correction have landed through their normal gates. Preserve its failed branch unchanged.
+  acceptance:
+    - claim: "invariant:planning-context — real rmd planning reaches its Architect without target tsx, retains target context, and passes the fresh Core CLEAR control"
+      kind: guard
+      proof: "unit test: test/worker/run-task/rmd-planning-keeps-target-context-without-tsx.test.ts"
+    - claim: "invariant:planning-gates — valid plan-only proposals use existing publication while malformed proofs and unauthorized edits are refused before it"
+      kind: guard
+      proof: "unit test: test/worker/run-task/rmd-planning-without-tsx-keeps-filing-gates.test.ts"
+    - claim: The added planning suite declares the target-without-tsx bootstrap regression
+      proof: "grep: W1-T12517 target without tsx reaches its architect in test/worker/run-task/rmd-planning-keeps-target-context-without-tsx.test.ts"
+  falsifier: |
+    With W1-T12516's loader fix removed, the target planning child must fail before the Architect
+    while the Core control succeeds; restore it and both reach the stub Architect. Independently
+    plant an invalid proof and out-of-plan edit: each must leave the publisher uncalled. Record
+    actual executed test counts. No green result from a fake probe or zero matched tests counts.
