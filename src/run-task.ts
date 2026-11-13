@@ -803,6 +803,8 @@ import {
   ciLearningPendingOrigins,
   findPendingLandingPr,
   landFeedbackStatusContent,
+  planDestinationLandingOpts,
+  queuedFeedbackDir,
   landCiLearningShards,
   landCiLearningShardsAsync,
   feedbackLandingSweepRungs,
@@ -955,6 +957,7 @@ import { assertProposedPlanLoads,
   commitTriageOrRecordRefusal,
   refusedTriageIds,
   triageCommitMessage,
+  triageFeedbackHome,
   unresolvedCitationReferents,
   worktreeCitationEvidence,
   feedbackEntryBlock,
@@ -1308,6 +1311,7 @@ import {
   type LedgerGrepFsDeps,
 } from "./lib/ledger-grep.js";
 import { routingAbCommand } from "./lib/routing-experiments.js";
+import { askDecisionModel, decisionsCommand } from "./lib/decision-model.js";
 import {
   PROGRESS_WATCHDOG_READ_STEPS,
   captureDiagnosticsBundle,
@@ -2993,10 +2997,10 @@ import {
   liveWritesExempt,
   LIVE_WRITE_OVERRIDE_ENV,
 } from "./lib/live-write-guard.js";
-import { checkSharedPause, disposeSharedPauseRefresh, prepareSharedPause, requestKick, consumeStop, isQuietHours, requestFleetPause, requestPause, requestStop, restartInPlaceVerb, resumeFleet, resumeFleetWide, sharedPauseRef, stopDetail, type SharedPauseGitDeps } from "./lib/fleet-control.js";
+import { checkSharedPause, disposeSharedPauseRefresh, prepareSharedPause, requestKick, consumeStop, isQuietHours, pauseHoldSummary, readSharedPause, requestFleetPause, requestPause, requestStop, restartInPlaceVerb, resumeFleet, resumeFleetWide, sharedPauseRef, stopDetail, type SharedPauseGitDeps } from "./lib/fleet-control.js";
 import { resolvePauseTarget, type PauseTarget } from "./lib/pause-target.js";
 import { parseInstanceRegistry } from "./lib/instance-registry.js";
-import { openPlannerGitCredential, plannerHostGitCredential } from "./lib/secret-boundary.js";
+import { openPlannerGitCredential, plannerHostGitCredential, plannerPrWriteToken } from "./lib/secret-boundary.js";
 import { hasThreadEvent, inboxThreadId, readThread, verifiedInboxInput, type InboxCausalScope, type InboxInputReference } from "./lib/inbox-thread.js";
 import { gatherActorEvidence } from "./lib/actor-evidence.js";
 import { readGithubWebhookSecret, resolveGithubWebhookSecretFilePath } from "./lib/github-event-wake.js";
@@ -4872,7 +4876,8 @@ export function runGhPrCreate(
   branch: string,
   log: (step: string, extra?: Record<string, unknown>) => void,
   say: (msg: string) => void,
-  exec: (command: string, args: string[], options: { cwd: string; encoding: "utf8" }) => string = execFileSync,
+  exec: (command: string, args: string[], options: { cwd: string; encoding: "utf8"; env?: NodeJS.ProcessEnv }) => string = execFileSync,
+  readExec: typeof exec = exec,
 ): { prUrl?: string; prNumber?: number } {
   for (const { step, extra } of prCreate.diagnostics ?? []) log(step, extra);
   let out: string;
@@ -4887,7 +4892,7 @@ export function runGhPrCreate(
       );
     }
     if (isGhPrCreateValidationError(e)) {
-      const adopted = adoptExistingPrForHead(prCreate, branch, exec);
+      const adopted = adoptExistingPrForHead(prCreate, branch, readExec);
       if (adopted?.prUrl !== undefined) {
         const ghErr = e as NodeJS.ErrnoException & { stderr?: string | Buffer };
         log("pr_create.adopted_existing", {
@@ -17783,6 +17788,8 @@ export async function nextTaskIdCommand(
       );
       return 2;
     }
+    // W1-T12453: a degraded source that does not refuse is a note on stderr; stdout keeps the id lines.
+    for (const d of mint.degraded) console.error(`### rmd next-task-id: DEGRADED ${d.source}: ${d.reason}`);
     const contested: string[] = [];
     const run = deps.runGit ?? ((args: string[]) => spawnSync("git", args, { cwd: repoRoot, encoding: "utf8" }));
     // W1-T4414: `--branch` names the holder the filing PR's head must match; absent keeps the current branch.
@@ -17825,7 +17832,7 @@ export async function nextTaskIdCommand(
         contestedAt.push(contested.length);
         return handle;
       });
-      if (held.length) console.log(describeMintWithHistory(mintForReservationAttempt(mint, held[0].id, held[0].taskId)));
+      if (held.length) console.log(describeMintWithHistory({ ...mintForReservationAttempt(mint, held[0].id, held[0].taskId), degraded: [] }));
       held.forEach((handle, i) => {
         for (const line of contested.slice(contestedAt[i - 1] ?? 0, contestedAt[i])) console.log(line);
         // W1-T6026: a takeover rides the RESERVED line itself, and leaves one durable row.
@@ -17841,6 +17848,8 @@ export async function nextTaskIdCommand(
       if (error !== undefined) throw error;
       for (const line of overlapAdvisoryLines(rest, offline, self.owner, self.repo, planPath, overlapDeps))
         (overlapDeps.say ?? console.log)(line);
+      // W1-T12453: the id is held, so the reservation succeeded; the notes above do not undo it.
+      return 0;
     } catch (e) {
       const err = e as TaskIdReservationError;
       console.error(describeReservationRefusal(err.outcome, `${err.message}${requestedMaxScan === undefined ? "" : ` (max-scan: ${requestedMaxScan})`}`));
@@ -19344,6 +19353,9 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
         // in the changed-tasks pass, so a newly filed or edited shard is refused before it
         // repeats the pattern.
         proofSelfPath: "block",
+        // W1-T11746: only this changed-task pass demands INVARIANT/NO-INVARIANTS declarations, so the
+        // whole-plan pass and dispatch leave the historical population valid.
+        requireDesignInvariantDeclaration: true,
       };
     }
     // impl-DO: the CALL-SITE check needs to know whether a module already exists, and the linter
@@ -34180,7 +34192,7 @@ async function pauseTargetOrRefuse(verb: "pause" | "resume", rest: string[], con
 }
 
 /**
- * `rmd pause [--instance <name>] [--reason <text>]` — drain-and-hold ONE instance (W1-T11).
+ * `rmd pause [--instance <name>] --reason <text>` — drain-and-hold ONE instance (W1-T11).
  * Writes that instance's PAUSE flag under its own state root. No new spawn after the current
  * tick; an in-flight task ALWAYS runs to completion (verdict + merge).
  *
@@ -34190,9 +34202,22 @@ async function pauseTargetOrRefuse(verb: "pause" | "resume", rest: string[], con
  * explicit act, `rmd pause --fleet`, which writes no instance flag.
  */
 async function pauseCommand(rest: string[]): Promise<number> {
+  // W1-T12457: a guessed flag, a bare call or --status never holds anything; a hold needs a reason.
+  const usage = `usage: ${commandSyntax("pause")}`;
+  const badArg = unknownArgError("pause", rest, ["--instance", "--reason"], ["--fleet", "--status"]);
+  if (badArg) {
+    console.error(`${badArg} — nothing was changed.\n${usage}`);
+    return 2;
+  }
   const config = loadConfig();
+  if (rest.length === 0 || rest.includes("--status")) return await pauseStatus(rest, config);
   const runId = `FLEET-${Date.now()}`;
-  const reason = flagValue(rest, "--reason");
+  const given = flagValue(rest, "--reason");
+  const reason = given?.trim() ? given : undefined;
+  if (reason === undefined) {
+    console.error(`### rmd pause — REFUSED: a hold needs --reason <text>; nothing was changed.\n${usage}`);
+    return 2;
+  }
   if (rest.includes("--fleet")) {
     if (flagValue(rest, "--instance") !== undefined) {
       console.error("### rmd pause — REFUSED: --fleet holds every instance; it cannot be combined with --instance — nothing was changed.");
@@ -34205,7 +34230,7 @@ async function pauseCommand(rest: string[]): Promise<number> {
       step: "fleet.pause",
       scope: "fleet",
       pushed: result.pushed,
-      reason: reason ?? null,
+      reason,
       session_id: result.sessionId,
       actor_evidence: result.actor_evidence,
       expires_at: result.expiresAt,
@@ -34234,7 +34259,7 @@ async function pauseCommand(rest: string[]): Promise<number> {
     instance: target.instance,
     root: target.root,
     resolved_by: target.resolvedBy,
-    reason: reason ?? null,
+    reason,
     session_id: info.sessionId ?? null,
     actor_evidence: info.actor_evidence,
     expires_at: info.expiresAt ?? null,
@@ -34244,6 +34269,24 @@ async function pauseCommand(rest: string[]): Promise<number> {
     `### rmd pause — instance '${target.instance}'${selectedInstanceRegistryEnvPath() === undefined ? ` (${target.root})` : ""} is PAUSED (drain-and-hold). Its in-flight task still ` +
       `reaches merge; it spawns nothing new until \`rmd resume --instance ${target.instance}\`. No other instance is held.`,
   );
+  return 0;
+}
+
+/** W1-T12457 — `rmd pause` alone or with --status: print the instance's and the fleet-wide hold state, write nothing. */
+async function pauseStatus(rest: string[], config: Config): Promise<number> {
+  const lines = ["### rmd pause — read only; nothing was changed."];
+  if (!rest.includes("--fleet") || flagValue(rest, "--instance") !== undefined) {
+    const target = await pauseTargetOrRefuse("pause", rest, config);
+    if (!target) return 2;
+    const hold = pauseHoldSummary(target.root);
+    lines.push(hold === undefined
+      ? `instance '${target.instance}': not paused. To hold it: rmd pause --instance ${target.instance} --reason <text>`
+      : `instance '${target.instance}': PAUSED — ${hold}. To clear it: rmd resume --instance ${target.instance}`);
+  }
+  const shared = readSharedPause(realDeps().sharedPauseGit);
+  lines.push(`fleet-wide hold (${sharedPauseRef()}): ${shared === "held" ? "HELD — every instance holds new spawns until `rmd resume --fleet`"
+    : shared === "absent" ? "not held" : "unknown — origin could not be read"}`);
+  console.log(lines.join("\n"));
   return 0;
 }
 
@@ -34894,6 +34937,103 @@ export function triageLockRefusalMessage(pid: number, startedAt: string, lockPat
  * landing carries those bytes. A refused landing leaves origin/main at `status: new`, so a later
  * pass triages the entry again.
  */
+/** Serialize with the existing queued writer, then land in the entry's home. Neither the public
+ * lane nor the shared private checkout receives a mutable feedback copy. The existing queue keeps
+ * a refused private write recoverable by the normal landing sweep. */
+function landPrivateTriageStatus(root: string, stateRoot: string, feedbackId: string, status: FeedbackEntry["status"],
+  opts: { proposalPr?: string; summary?: FeedbackEntry["summary"]; log: (step: string, extra?: Record<string, unknown>) => void }) {
+  const home = triageFeedbackHome(root, feedbackId);
+  if (home.destination === undefined) throw new Error("private triage status has no destination");
+  const updated = setFeedbackStatus(root, feedbackId, status, { ...opts, land: { stateRoot } });
+  const content = readFileSync(join(queuedFeedbackDir(stateRoot), `${feedbackId}.yaml`), "utf8");
+  if (content !== stringifyYaml(updated)) throw new Error("feedback status queue does not hold the requested edit");
+  return landFeedbackStatusContent(home.root, feedbackEntryRepoPath(feedbackId), content,
+    planDestinationLandingOpts({ log: opts.log }, home.destination));
+}
+
+interface PrivateTriagePublication {
+  version: 1;
+  repository: string;
+  feedbackId: string;
+  feedbackDigest: string;
+  branch: string;
+  worktreePath: string;
+  commit: string;
+  taskPath: string;
+  prUrl?: string;
+  stage: "task_committed" | "feedback_landed";
+}
+
+/** A persistent Git lock protects the receipt's commit and branch from both worktree reapers,
+ * even after the worker's process lock is released. Only the recorded publication can release it. */
+function holdPrivateTriagePublication(publication: PrivateTriagePublication, hold: boolean): void {
+  const { worktreePath, commit } = publication;
+  if (!hold && !existsSync(worktreePath)) return;
+  const reason = `triage-publication:${commit}`;
+  const lockPath = resolve(worktreePath, hostWorktreeGit(worktreePath, ["rev-parse", "--git-path", "locked"]).trim());
+  const current = readFileIfExists(lockPath)?.trim();
+  if (current !== undefined && current !== reason) throw new Error("triage publication worktree lock belongs to another owner");
+  if (hold && current === undefined) hostWorktreeGit(worktreePath, ["worktree", "lock", "--reason", reason, worktreePath]);
+  if (!hold && current === reason) hostWorktreeGit(worktreePath, ["worktree", "unlock", worktreePath]);
+}
+
+/** The public commit precedes the private status. A host-only atomic receipt retains that exact
+ * commit/branch across either failure, including an unknown push/create result. Retry uses the
+ * same branch (the existing 422 adoption checks its head), never another mint or model proposal. */
+async function finishPrivateTriagePublication(publication: PrivateTriagePublication, receiptPath: string,
+  feedbackId: string, taskId: string, config: Config, summarizeDeps: SummarizeDeps,
+  log: (step: string, extra?: Record<string, unknown>) => void, say: (msg: string) => void): Promise<string> {
+  const { worktreePath, branch } = publication;
+  holdPrivateTriagePublication(publication, true);
+  const [owner, repo] = publication.repository.split("/");
+  const diff = hostWorktreeGit(worktreePath, ["diff", worktreeMergeBase(worktreePath), "HEAD", "--", "plan"]);
+  if (!diffCitesFeedback(diff, feedbackId, publication.taskPath)
+    || hostWorktreeGit(worktreePath, ["diff", "--name-only", worktreeMergeBase(worktreePath), "HEAD"]).trim() !== publication.taskPath) {
+    throw new Error("public task write is not the recorded single new task with feedback origin");
+  }
+  try {
+    if (publication.prUrl === undefined) {
+      const entry = readFeedbackEntry(worktreePath, feedbackId);
+      await observeFeedbackPublication(config.contributorAdmission === undefined ? undefined : { mode: "shadow", record: log },
+        entry.contribution ? [entry.contribution] : [], publication.repository, "triage-publication");
+      await gitPushRunBranchAsync(worktreePath);
+      const message = hostWorktreeGit(worktreePath, ["log", "-1", "--format=%B"]);
+      const create = ghPrCreateFillCommand(worktreePath, owner, repo, branch, message.split("\n")[0], undefined, undefined, { log });
+      const prUrl = runGhPrCreate(create, branch, log, say).prUrl;
+      if (!prUrl) throw new Error("no task pull request returned");
+      const target = prUrlTarget(prUrl);
+      if (target?.owner !== owner || target.repo !== repo) throw new Error("public task pull request returned a different repository");
+      const ownership = checkPrOwnership(prUrl, branch, ghPrHeadGateway(), 0);
+      if (ownership) throw new Error("public task pull request is not this branch");
+      ensureTaskTrailer(prUrl, taskId, log);
+      publication.prUrl = prUrl;
+      writeAtomic(receiptPath, JSON.stringify(publication), { mode: 0o600 });
+    } else if (checkPrOwnership(publication.prUrl, branch, ghPrHeadGateway(), 0)) {
+      throw new Error("recorded public task pull request changed ownership");
+    }
+    if (readHeadShaRest(publication.prUrl) !== publication.commit) throw new Error("the recorded public task head changed or is unreadable");
+  } catch (error) {
+    log("triage.error", { error: "public task write failed or unknown", write: "public_task", feedback_id: feedbackId });
+    throw new Error("public task write failed or is unknown; retained the original task for a later pass", { cause: error });
+  }
+  // The public PR already exists even if the private write fails. Existing priced-run and
+  // in-flight consumers read pr.opened; a new unregistered failure step would hide that fact.
+  log("pr.opened", { pr_url: publication.prUrl, plan_only: true, action: "propose", feedback_status: "pending" });
+  try {
+    const stateRoot = join(config.root, "state");
+    await proposeFeedbackWithSummary(worktreePath, feedbackId, summarizeDeps, { proposalPr: publication.prUrl, land: { stateRoot } });
+    const landing = landPrivateTriageStatus(worktreePath, stateRoot, feedbackId, "proposed", { proposalPr: publication.prUrl, log });
+    if (!landing.landed) throw new Error("the private feedback landing refused the write");
+    publication.stage = "feedback_landed";
+    writeAtomic(receiptPath, JSON.stringify(publication), { mode: 0o600 });
+  } catch (error) {
+    log("triage.error", { error: "private feedback status write failed", write: "private_feedback_status", feedback_id: feedbackId });
+    throw new Error("private feedback status write failed; retained the existing public task pull request", { cause: error });
+  }
+  holdPrivateTriagePublication(publication, false);
+  return publication.prUrl;
+}
+
 function landTriageStatusOutcome(i: {
   worktreePath: string;
   repoDir: string;
@@ -34903,13 +35043,19 @@ function landTriageStatusOutcome(i: {
   grillIssueUrl: string | undefined;
   repository: string;
   threadStorePath: string;
+  stateRoot: string;
   log: (step: string, extra?: Record<string, unknown>) => void;
   say: (msg: string) => void;
 }): number {
   const { decision, feedbackId, log, say } = i;
-  setFeedbackStatus(i.worktreePath, feedbackId, decision.status);
-  const content = readFileSync(feedbackEntryPath(i.worktreePath, feedbackId), "utf8");
-  const landing = landFeedbackStatusContent(i.worktreePath, feedbackEntryRepoPath(feedbackId), content, { log });
+  const home = triageFeedbackHome(i.worktreePath, feedbackId);
+  const landing = home.destination !== undefined
+    ? landPrivateTriageStatus(i.worktreePath, i.stateRoot, feedbackId, decision.status, { log })
+    : (() => {
+      setFeedbackStatus(i.worktreePath, feedbackId, decision.status);
+      const content = readFileSync(feedbackEntryPath(i.worktreePath, feedbackId), "utf8");
+      return landFeedbackStatusContent(i.worktreePath, feedbackEntryRepoPath(feedbackId), content, { log });
+    })();
   if (!landing.landed) {
     const cause = landing.error ?? (landing.refused?.length ? `refused: ${JSON.stringify(landing.refused)}` : "nothing was landed");
     log("triage.error", { error: `feedback landing refused: ${cause}`, action: decision.action, landing_pr: landing.prUrl ?? null });
@@ -34985,9 +35131,31 @@ async function triageCommandLocked(
     mkdirSync(dirname(repoDir), { recursive: true });
     ghExec(["repo", "clone", `${owner}/${repo}`, repoDir], { stdio: "inherit" });
   }
+  const receiptPath = join(config.root, "state", "triage-publication", createHash("sha256").update(`${owner}/${repo}\0${feedbackId}`).digest("hex") + ".json");
+  const receiptText = readFileIfExists(receiptPath);
+  let publication: PrivateTriagePublication | undefined = receiptText === undefined ? undefined : JSON.parse(receiptText);
+  if (publication !== undefined) {
+    if (publication.version !== 1 || publication.repository !== `${owner}/${repo}` || publication.feedbackId !== feedbackId
+      || typeof publication.branch !== "string" || !publication.branch.startsWith(`run-TRIAGE-${feedbackId}-`)
+      || typeof publication.worktreePath !== "string" || resolve(publication.worktreePath) !== resolve(worktreesDir(config), publication.branch)
+      || !/^[a-f0-9]{40}$/.test(publication.commit) || !/^plan\/tasks\.d\/W[0-9]+-T[0-9]+-[^/]+\.yaml$/.test(publication.taskPath)
+      || !["task_committed", "feedback_landed"].includes(publication.stage)
+      || (publication.prUrl !== undefined && (typeof publication.prUrl !== "string" || prUrlTarget(publication.prUrl)?.owner !== owner || prUrlTarget(publication.prUrl)?.repo !== repo))) throw new Error("triage publication receipt is invalid; refusing a second task");
+    if (publication.stage === "feedback_landed") {
+      holdPrivateTriagePublication(publication, false);
+      say("the previous task and feedback landing are already published; awaiting their normal gates");
+      return 1;
+    }
+    if (hostWorktreeGit(publication.worktreePath, ["rev-parse", "HEAD"]).trim() !== publication.commit
+      || hostWorktreeGit(publication.worktreePath, ["status", "--porcelain", "--untracked-files=normal"]).trim() !== "") {
+      throw new Error("triage publication worktree changed; refusing a second task");
+    }
+    // Adopt receipts written before persistent holds existed BEFORE the stale-run sweep.
+    holdPrivateTriagePublication(publication, true);
+  }
   const pruned = pruneStaleRuns(repoDir, worktreesDir(config), { graceMs: DEFAULT_PRUNE_GRACE_MS });
   if (pruned.worktrees.length || pruned.branches.length || pruned.skipped.length) log("worktree.prune", { ...pruned });
-  const { branch, worktreePath } = await addLaneWorktree(repoDir, worktreesDir(config), runId, log); // W1-T2528
+  const { branch, worktreePath } = publication ?? await addLaneWorktree(repoDir, worktreesDir(config), runId, log); // W1-T2528
 
   // W1-T348: the decision-summary rung, resolved ONCE and reused at both sites this run may
   // reach a human/operator — the GRILL escalation below and the proposal write further down.
@@ -35048,6 +35216,9 @@ async function triageCommandLocked(
       return 1;
     }
     await observeFeedbackInputs(config.contributorAdmission, entry.contribution ? [entry.contribution] : [], "triage-adoption", log);
+    const feedbackHome = triageFeedbackHome(worktreePath, feedbackId);
+
+
 
     // ── THE CROSS-HOST CLAIM (W1-T1132), TAKEN BEFORE THE ARCHITECT CALL ────────────────────
     // HERE, not before the write: the loser's RESEARCH is the actual cost. Everything below this
@@ -35072,12 +35243,25 @@ async function triageCommandLocked(
     claimReserver = triageClaimReserverAsyncFor(repoDir);
     // `mergedSubjects` is read LAZILY — only the LOSING lane ever needs it, so the winner pays
     // nothing for the evidence arm's input.
-    triageClaim = await claimTriageWithLogging(log, feedbackId, claimReserver, { mergedSubjects: () => mergedTriageSubjects(repoDir),
+    triageClaim = await claimTriageWithLogging(log, feedbackId, claimReserver, { mergedSubjects: () => feedbackHome.destination === undefined ? mergedTriageSubjects(repoDir) : [],
       landedStatus: (id) => readLandedFeedbackEntry(repoDir, id)?.status });
     if (!triageClaim.proceed) {
       say(`REFUSED — ${triageClaim.reason}`);
       worktreeRemove(repoDir, worktreePath);
       return 2;
+    }
+
+    // Both first publication and recovery converge on the unchanged gate below. Recovery must
+    // not mint again, respawn an Architect or fabricate a WorkerResult to reach that gate.
+    let publicationOutcome: { prUrl: string; decision: Extract<TriageDecision, { action: "propose" }>; proposalTaskPath?: string };
+    triagePublication: {
+    if (publication !== undefined) {
+      if (feedbackHome.destination === undefined || publication.feedbackDigest !== createHash("sha256").update(JSON.stringify(entry)).digest("hex")) {
+        throw new Error("triage publication feedback changed; refusing a second task");
+      }
+      const prUrl = await finishPrivateTriagePublication(publication, receiptPath, feedbackId, taskId, config, summarizeDeps, log, say);
+      publicationOutcome = { prUrl, decision: { action: "propose", status: "proposed", detail: "resume the existing public task", files: [publication.taskPath] }, proposalTaskPath: publication.taskPath };
+      break triagePublication;
     }
 
     // ID MINT (the 2/2 collision evidence: W1-T256->257 #770, W1-T260->261 #775; lineage
@@ -35184,7 +35368,8 @@ async function triageCommandLocked(
     const loop = await runRelintLoop<{ decision: ReturnType<typeof decideTriage>; changedFiles: string[] }>({
       lane: "triage",
       filedIds: reservedIds,
-      initialPrompt: triagePrompt(entry, runId, reservedHeadTaskId, reservedIds.slice(1), triageFeedbackBlock),
+      initialPrompt: triagePrompt(entry, runId, reservedHeadTaskId, reservedIds.slice(1), triageFeedbackBlock)
+        + (feedbackHome.destination === undefined ? "" : "\nThis feedback is host-private. Never create or copy its file in this public worktree. A proposal adds exactly one new public task file, with origin: feedback#" + feedbackId + "."),
       log,
       run: async (prompt, attempt, previous) => {
         worker = await spawn({
@@ -35310,7 +35495,7 @@ async function triageCommandLocked(
     // feedback landing pull request and opens no pull request of its own.
     if (decision.action === "no_task" || decision.action === "grill") {
       return landTriageStatusOutcome({ worktreePath, repoDir, feedbackId, entry, decision, grillIssueUrl,
-        repository: `${owner}/${repo}`, threadStorePath: inboxThreadStorePath(config.root), log, say });
+        repository: `${owner}/${repo}`, threadStorePath: inboxThreadStorePath(config.root), stateRoot: join(config.root, "state"), log, say });
     }
 
     // ID-COLLISION GUARD (W1-T236 triple-mint, 2026-07-22): refuse a proposal whose merged plan
@@ -35356,6 +35541,28 @@ async function triageCommandLocked(
         source_history: mint.historyMax,
         degraded: mint.degraded.map((d) => d.source),
       });
+    }
+
+    if (feedbackHome.destination !== undefined) {
+      if (changedFiles.length !== 1 || !/^plan\/tasks\.d\/W[0-9]+-T[0-9]+-[^/]+\.yaml$/.test(changedFiles[0])) {
+        throw new Error("private-feedback triage must add only one new public task file");
+      }
+      const taskPath = changedFiles[0];
+      const tasks = parseYaml(readFileSync(join(worktreePath, taskPath), "utf8")) as Array<{ id: string; origin: string }>;
+      if (!Array.isArray(tasks) || tasks.length !== 1 || !reservedIds.includes(tasks[0].id) || tasks[0].origin !== `feedback#${feedbackId}`
+        || hostWorktreeGitResult(worktreePath, ["cat-file", "-e", `origin/main:${taskPath}`]).status === 0) {
+        throw new Error("private-feedback task must be new and bind its reserved id and feedback origin");
+      }
+      const message = triageCommitMessage({ decision, feedbackId, taskId, proposalTaskPath: taskPath, proposalTaskId: tasks[0].id });
+      await applyPlanProposalCommitAsync(worktreePath, message, log);
+      publication = { version: 1, repository: `${owner}/${repo}`, feedbackId, feedbackDigest: createHash("sha256").update(JSON.stringify(entry)).digest("hex"),
+        branch, worktreePath, commit: hostWorktreeGit(worktreePath, ["rev-parse", "HEAD"]).trim(), taskPath, stage: "task_committed" };
+      writeAtomic(receiptPath, JSON.stringify(publication), { mode: 0o600 });
+      triagePushed = pushedBranchIds(worktreePath, log);
+      const prUrl = await finishPrivateTriagePublication(publication, receiptPath, feedbackId, taskId, config, summarizeDeps, log, say);
+      triagePushed = pushedBranchIds(worktreePath, log);
+      publicationOutcome = { prUrl, decision, proposalTaskPath: taskPath };
+      break triagePublication;
     }
 
     // Harness-owned deterministic status write (never LLM-authored) — folded into the SAME diff
@@ -35438,6 +35645,10 @@ async function triageCommandLocked(
       await gitPushRunBranchAsync(worktreePath);
     }
 
+    publicationOutcome = { prUrl, decision };
+    }
+    const { prUrl, decision, proposalTaskPath } = publicationOutcome;
+
     // DETERMINISTIC GUARD: a triage PR is PLAN-ONLY. Fail closed if the diff touches anything
     // outside plan/ (lib/triage.ts's `nonPlanFilesInDiff`, the same shape as retro's guard).
     const diff = ghExec(["pr", "diff", prUrl], { encoding: "utf8", maxBuffer: 1 << 26 });
@@ -35448,13 +35659,13 @@ async function triageCommandLocked(
       worktreeRemove(repoDir, worktreePath);
       return 1;
     }
-    if (decision.action === "propose" && !diffCitesFeedback(diff, feedbackId)) {
+    if (decision.action === "propose" && !diffCitesFeedback(diff, feedbackId, proposalTaskPath)) {
       log("triage.error", { error: "proposed diff missing feedback# provenance" });
       say(`triage PROPOSED but the diff never cites feedback#${feedbackId} — leaving PR OPEN for inspection`);
       worktreeRemove(repoDir, worktreePath);
       return 1;
     }
-    log("pr.opened", { pr_url: prUrl, plan_only: true, action: decision.action });
+    if (proposalTaskPath === undefined) log("pr.opened", { pr_url: prUrl, plan_only: true, action: decision.action });
     say(`triage PR (plan-only, ${decision.action}): ${prUrl}`);
     // Publication ownership, plan-only scope and feedback provenance were verified above.
     // Acknowledging intake ends the ask; it does not claim CI, merge or work completion.
@@ -35500,7 +35711,7 @@ async function triageCommandLocked(
     log("triage.error", { error: String((e as Error)?.message ?? e) });
     triageEnding = `errored: ${String((e as Error)?.message ?? e).slice(0, 160)}`;
     try {
-      worktreeRemove(repoDir, worktreePath);
+      if (publication === undefined) worktreeRemove(repoDir, worktreePath);
     } catch {
       /* best-effort */
     }
@@ -35570,7 +35781,9 @@ export const PLAN_MAX_NEW_TASKS = 5;
 
 export async function planCommand(
   rest: string[],
-  opts: { spawn?: typeof spawnWorker; config?: Config; overlap?: OverlapWarningDeps; lintPlanForReviewFn?: typeof lintPlanForReview } = {},
+  opts: { spawn?: typeof spawnWorker; config?: Config; overlap?: OverlapWarningDeps; lintPlanForReviewFn?: typeof lintPlanForReview;
+    plannerHostGitCredential?: typeof plannerHostGitCredential; openPlannerGitCredential?: typeof openPlannerGitCredential;
+    prWriteToken?: Parameters<typeof plannerPrWriteToken>[2]; prCreateExec?: Parameters<typeof runGhPrCreate>[4] } = {},
 ): Promise<number> {
   const parsed = parsePlanArgs(rest);
   if ("error" in parsed) {
@@ -35598,6 +35811,16 @@ export async function planCommand(
   log("plan.start", { mode, brief, architect: arch, effort: mountsTable.architect.effort, worker: wrk });
   say(`plan ${runId} — mode=${mode} — architect ${arch} over worker ${wrk}`);
 
+  const credential = await (opts.plannerHostGitCredential ?? plannerHostGitCredential)(`${owner}/${repo}`);
+  if (credential.kind === "app") {
+    const preflight = await plannerPrWriteToken(credential, `${owner}/${repo}`, opts.prWriteToken);
+    if (!preflight.ok) {
+      log("plan.credential_refused", { reason: preflight.reason, missing: preflight.missing, boundary: "pr_create" });
+      say(`plan refused — ${preflight.reason}`);
+      return 1;
+    }
+  }
+
   const settingsFile = renderWorkerSettings({
     templatePath: join(resolveInstallRoot(config), "settings", "worker.json"),
     hooksDir: join(resolveInstallRoot(config), "hooks"),
@@ -35615,7 +35838,7 @@ export async function planCommand(
   // W1-T11851: this lane's own pushes present the host App identity, minted per request at the git credential-helper
   // boundary — never a ~/.bashrc token a non-interactive shell cannot see, and never an env var. An unusable source
   // refuses HERE, before any id is claimed or any worker spawns; only a host with no registry keeps today's helpers.
-  const planCred = await openPlannerGitCredential(await plannerHostGitCredential(`${owner}/${repo}`), {
+  const planCred = await (opts.openPlannerGitCredential ?? openPlannerGitCredential)(credential, {
     runDir: join(config.root, "tmp", `plan-cred-${runId}`), log, wire: wireCredentialHelperSocket, unwire: unwireCredentialHelperSocket,
     shared: (cwd) => sharesHarnessCheckout(cwd, repoDir) || sharesHarnessCheckout(cwd, repoRoot),
   });
@@ -35882,7 +36105,21 @@ export async function planCommand(
     // The title is the SAME header string that just went into the commit, split off
     // its first line — never a second computation (W1-T327 design point ii).
     const prCreate = ghPrCreateFillCommand(worktreePath, owner, repo, branch, commitMessage.split("\n")[0], planPrBody, undefined, { log });
-    const prUrl = runGhPrCreate(prCreate, branch, log, say).prUrl;
+    let prUrl: string | undefined;
+    if (credential.kind === "app") {
+      const write = await plannerPrWriteToken(credential, `${owner}/${repo}`, opts.prWriteToken);
+      if (!write.ok) {
+        log("plan.pr_write_credential_failed", { branch, reason: write.reason });
+        say(`plan PR not opened — ${write.reason}`);
+        removePlanWorktree();
+        return 1;
+      }
+      const exec: NonNullable<Parameters<typeof runGhPrCreate>[4]> = opts.prCreateExec ?? execFileSync;
+      prUrl = runGhPrCreate(prCreate, branch, log, say,
+        (file, args, options) => exec(file, args, { ...options, env: { ...process.env, GH_TOKEN: write.token } }), exec).prUrl;
+    } else {
+      prUrl = runGhPrCreate(prCreate, branch, log, say, opts.prCreateExec).prUrl;
+    }
     if (!prUrl) {
       log("plan.error", { error: "no PR opened" });
       removePlanWorktree();
@@ -42353,6 +42590,12 @@ const COMMANDS: readonly CommandSpec[] = [
     detail: "W1-T2697: the ledger records every rmd verb but never who ran it — a worker subprocess, the daemon's own in-process loop, and an operator's bare `./bin/rmd` are now distinguished by the `actor` field every appendLedger call stamps at write time (a pre-stamp row reads `unknown`, never guessed). This prints the hand-run census: over the archive+live ledger UNION (never the live file alone — W1-T1013), operator rows are grouped into sessions by their writing process and a thirty-minute gap, each session reduced to its ordered step sequence, and any sequence of length >= 2 recurring across at least the policy floor of DISTINCT CALENDAR DAYS (never session count) is printed with its days and session count. The same census, when the daemon's own cadence supplies a run id, additionally proposes each unproposed recurrence as ONE `plan/feedback/` entry (deduped by sequence signature against the ledger union, `hand_run.census_proposed`) — this command never does that itself. READ-ONLY: writes no ledger line, no feedback entry, no state file.",
   },
   {
+    name: "decisions",
+    syntax: "rmd decisions probe --candidate <name> --input-file <file> --questions-file <file> [--role <role>]",
+    summary: "Ask one decision model one question set about one input, and print the row it wrote.",
+    detail: "W1-T12416: sends ONE paid cash request to a candidate named in the decision_models section of .remudero/mounts.yaml. The questions file is a JSON array of yes-no, choice (2 to 255 typed options) and score (2 to 10 ordered levels) questions, each with a name and instructions; a bad set is refused before any reservation. The request reserves on its input size plus a 64-token output margin against the normal daily cash cap, settles from the reply's usage at the candidate's own price row, and writes one decision.answered row: role, input digest, candidate, deployment, served model, latency, reserved and settled dollars, usage, and each question's distribution, abstention or rejection. A candidate whose cashDeploymentEndpoints entry or key is missing is unavailable and sends nothing. Shadow only: no gate, route or judge reads the row. Exit 0 answered, 1 refused, unavailable or failed, 2 bad usage.",
+  },
+  {
     name: "field-trials",
     syntax: "rmd field-trials [--source <label>=<owner/repo>]... [--ledger <label>=<state-dir>]... [--out-dir <dir>] [--consent <file>] [--case-files <file>] [--max-pages <n>] [--offline] [--revoke <release-id>] [--field-note <out> [--site-registry <file>]] [--json] [--refresh-step <name>=<exit-code|skipped>]... [--refresh-script-blob <sha1>] [--refresh-record-only]",
     summary: "Join the ledger union and GitHub history into observational field-trials aggregates.",
@@ -42577,9 +42820,9 @@ const COMMANDS: readonly CommandSpec[] = [
   },
   {
     name: "pause",
-    syntax: "rmd pause [--instance <name>] [--reason <text>] | rmd pause --fleet [--reason <text>]",
-    summary: "Fleet control: drain-and-hold ONE instance until `rmd resume`; --fleet holds every instance.",
-    detail: "fleet control: PERSISTENT drain-and-hold of ONE instance — the one --instance names, else the instance whose registry state_dir is this config.root; an unresolvable target refuses before writing. In-flight completes, no new spawns; survives across runs until `rmd resume`. --fleet is the separate, explicit fleet-wide hold (refs/rmd-pause/hold), cleared only by `rmd resume --fleet`.",
+    syntax: "rmd pause [--instance <name>] [--status] | rmd pause [--instance <name>] --reason <text> | rmd pause --fleet --reason <text>",
+    summary: "Fleet control: show the pause state, or with --reason hold ONE instance until `rmd resume`.",
+    detail: "fleet control: a bare `rmd pause` only reads: it prints the pause state of the instance and of the fleet-wide hold, changes nothing and exits 0 (--status does the same with any other flag). A hold needs --reason <text>; without it --instance or --fleet refuses and changes nothing, and an unknown flag refuses. With --reason: PERSISTENT drain-and-hold of ONE instance — the one --instance names, else the instance whose registry state_dir is this config.root; an unresolvable target refuses before writing. In-flight completes, no new spawns; survives across runs until `rmd resume`. --fleet is the separate, explicit fleet-wide hold (refs/rmd-pause/hold), cleared only by `rmd resume --fleet`.",
   },
   { name: "resume", syntax: "rmd resume [--instance <name>] | rmd resume --fleet", summary: "Fleet control: clear ONE instance's PAUSE (and any STOP); --fleet clears the fleet-wide hold.", detail: "fleet control: clear the targeted instance's PAUSE (and any STOP), resolved as `rmd pause` resolves it; never deletes the fleet-wide hold, which only `rmd resume --fleet` clears" },
   {
@@ -43491,6 +43734,7 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
     (dir, sinceMs, login) => ghBrokerLoginStatus(dir, sinceMs, { login }),
   )],
   ["routing-ab", async (rest) => await routingAbCommand(rest)],
+  ["decisions", async (rest) => await decisionsCommand(rest, (config, request) => askDecisionModel(config, request), { repoRoot })],
   ["progress-watchdog", (rest) => progressWatchdogCommand(rest)],
   ["live-edits", async (rest) => await liveEditsCommand(rest)],
   ["host-alert", async (rest) => hostAlertCommand(rest)],

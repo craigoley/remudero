@@ -15,7 +15,7 @@
   files:
     - src/lib/gh-read-broker.ts
     - test/github/the-read-brokers-memory-stays-level-while-it-serves-reads.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "After the broker serves many distinct reads, the entries and bytes it keeps in memory are no more than what its cache budget allows, and an entry past its freshness is dropped from memory"

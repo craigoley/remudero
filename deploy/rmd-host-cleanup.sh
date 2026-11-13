@@ -619,7 +619,7 @@ prune_held_worktree() {
   done
 }
 sweep_worktree() {
-  local wt="$1" gitdir idle_status kind head hosted unsaved orphaned=0 seed_reason bytes
+  local wt="$1" gitdir idle_status kind head hosted unsaved orphaned=0 finished=0 seed_reason bytes
   if seed_reason=$(rmd_dependency_seed_risk "$wt"); then log "KEEP $wt: $seed_reason"; return; fi
   [ -d "$wt" ] && [ ! -L "$wt" ] || { log "KEEP $wt: not a regular directory"; return; }
   if [ -d "$wt/.git" ] && [ ! -L "$wt/.git" ]; then kind="standalone clone"
@@ -631,13 +631,22 @@ sweep_worktree() {
     else log "KEEP $wt: Git metadata is unreadable or missing"; return; fi
   fi
   if [ "$orphaned" = 0 ] && [ -f "$gitdir/locked" ]; then prune_held_worktree "$wt" "Git worktree is locked"; return; fi
-  if [ "$orphaned" = 0 ] && ! git_head_idle "$wt"; then log "KEEP $wt: recent or unverified Git HEAD activity"; return; fi
-  is_worktree_idle "$wt"; idle_status=$?
-  case "$idle_status" in
-    0) ;;
-    1) log "KEEP $wt: written within ${IDLE_MINUTES} min"; return ;;
-    *) log "KEEP $wt: activity probe failed (unknown)"; return ;;
-  esac
+  # A clean linked worktree whose HEAD GitHub holds and whose pull requests are all merged or closed
+  # has no work in progress for the six hours to protect (W1-T12256). Every other test still holds.
+  if [ "$orphaned" = 0 ] && [ "$kind" = "linked worktree" ] && worktree_clean "$wt" && worktree_ignored_safe "$wt" &&
+     worktree_saved "$wt" && head="$(rgit "$wt" rev-parse --verify HEAD 2>/dev/null)" &&
+     rmd_commit_pulls_finished "$wt" "$head"; then
+    finished=1
+  fi
+  if [ "$finished" = 0 ]; then
+    if [ "$orphaned" = 0 ] && ! git_head_idle "$wt"; then log "KEEP $wt: recent or unverified Git HEAD activity"; return; fi
+    is_worktree_idle "$wt"; idle_status=$?
+    case "$idle_status" in
+      0) ;;
+      1) log "KEEP $wt: written within ${IDLE_MINUTES} min"; return ;;
+      *) log "KEEP $wt: activity probe failed (unknown)"; return ;;
+    esac
+  fi
   if is_open "$wt"; then log "KEEP $wt: held open by a process"; return; fi
   if [ "$DOCKER_OK" != 1 ]; then log "KEEP $wt: Docker mount snapshot failed (unknown)"; return; fi
   if is_docker_mount "$wt"; then log "KEEP $wt: Docker mount ($DOCKER_PATH_REASON)"; return; fi
@@ -680,9 +689,11 @@ sweep_worktree() {
   fi
   if [ "$DRY_RUN" != 1 ]; then
     snapshot_open; snapshot_docker
-    if ! is_worktree_idle "$wt" || is_open "$wt" || [ "$DOCKER_OK" != 1 ] || is_docker_mount "$wt" ||
-       ! worktree_clean "$wt" || ! worktree_ignored_safe "$wt" || ! git_head_idle "$wt" ||
-       [ "$(rgit "$wt" rev-parse HEAD 2>/dev/null)" != "$head" ] || ! worktree_saved "$wt" 1; then
+    if { [ "$finished" = 0 ] && ! is_worktree_idle "$wt"; } || is_open "$wt" || [ "$DOCKER_OK" != 1 ] ||
+       is_docker_mount "$wt" || ! worktree_clean "$wt" || ! worktree_ignored_safe "$wt" ||
+       { [ "$finished" = 0 ] && ! git_head_idle "$wt"; } ||
+       [ "$(rgit "$wt" rev-parse HEAD 2>/dev/null)" != "$head" ] || ! worktree_saved "$wt" 1 ||
+       { [ "$finished" = 1 ] && ! rmd_commit_pulls_finished "$wt" "$head"; }; then
       log "KEEP $wt: changed, active or not-proven-published before remove"; return
     fi
     if [ -f "$gitdir/locked" ]; then log "KEEP $wt: Git worktree is locked"; return; fi
@@ -694,7 +705,7 @@ sweep_worktree() {
   fi
   if [ "$DRY_RUN" != 1 ] && ! audit_writable; then log "KEEP $wt: audit log unwritable ($AUDIT_LOG)"; return; fi
   bytes="$(du_bytes "$wt")"
-  log "REMOVE $wt ($kind)"
+  if [ "$finished" = 1 ]; then log "REMOVE $wt (linked worktree, pull request finished)"; else log "REMOVE $wt ($kind)"; fi
   if [ "$DRY_RUN" = 1 ]; then
     if [ "$kind" = "standalone clone" ]; then log "DRYRUN would: rm -rf -- $wt"
     else log "DRYRUN would: git worktree remove $wt"; fi
@@ -2049,6 +2060,143 @@ judge_filesystems() {
   [ -z "$fails" ] || printf '%s' "$fails"
 }
 
+# ── W1-T12316: an inflight lock written by a process on this host that is gone ──
+# The same test as deploy/recycle-container.sh's same-host branch (this file is installed as a copy
+# and cannot source it): the lock's host is this host, and its pid is dead or started more than 2 s
+# after the lock's startedAt. Any other answer keeps the lock, whatever its age. Default dirs: the
+# pass's home, and the home this script is installed in (the hourly pass runs as root).
+INFLIGHT_DIRS="${RMD_CLEANUP_INFLIGHT_DIRS-$CLEAN_HOME/rmd-state2/state/inflight:$SEED_GUARD_DIR/rmd-state2/state/inflight}"
+INFLIGHT_CONTAINER_ID_RE='^[0-9a-f]{12}$|^[0-9a-f]{64}$'
+inflight_field() {   # inflight_field <lock> <key>: the value of a quoted string field
+  grep -ao "\"$2\"[[:space:]]*:[[:space:]]*\"[^\"]*\"" "$1" 2>/dev/null | head -1 | sed -E 's/.*"([^"]*)"[[:space:]]*$/\1/' || true
+}
+inflight_pid() {
+  grep -ao '"pid"[[:space:]]*:[[:space:]]*[0-9]*' "$1" 2>/dev/null | head -1 | sed -E 's/.*:[[:space:]]*([0-9]*)$/\1/' || true
+}
+inflight_lock_identity() {
+  local file="$1" inode bytes
+  if inode="$(stat -c '%d:%i' -- "$file" 2>/dev/null)"; then :
+  else inode="$(stat -f '%d:%i' -- "$file" 2>/dev/null)" || return 1; fi
+  bytes="$(cksum < "$file" 2>/dev/null)" || return 1
+  [ -n "$inode" ] && [ -n "$bytes" ] || return 1
+  printf '%s %s' "$inode" "$bytes"
+}
+inflight_json() { printf '"%s"' "$(printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g')"; }
+inflight_host_identity() {
+  local id
+  id="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
+  id="${id%.}"
+  printf '%s' "${id%.local}"
+}
+inflight_same_host() {
+  local a b bare qualified
+  a="$(inflight_host_identity "$1")"
+  b="$(inflight_host_identity "$2")"
+  [ -n "$a" ] && [ -n "$b" ] || return 1
+  [ "$a" = "$b" ] && return 0
+  case "$a" in *.*) qualified="$a"; bare="$b" ;; *) qualified="$b"; bare="$a" ;; esac
+  case "$bare" in *.*) return 1 ;; esac
+  case "$qualified" in *.*) ;; *) return 1 ;; esac
+  printf '%s' "$bare" | grep -Eq "$INFLIGHT_CONTAINER_ID_RE" && return 1
+  [ "${qualified%%.*}" = "$bare" ]
+}
+inflight_epoch_of() {
+  local iso="$1" trimmed
+  [ -n "$iso" ] || return 0
+  date -u -d "$iso" +%s 2>/dev/null && return 0
+  trimmed="${iso%Z}"
+  date -u -j -f "%Y-%m-%dT%H:%M:%S" "${trimmed%.*}" +%s 2>/dev/null || true
+}
+inflight_pid_start_epoch() {
+  local pid="$1" btime rest ticks hz lstart
+  if [ -r "/proc/$pid/stat" ] && btime="$(awk '$1 == "btime" { print $2 }' /proc/stat 2>/dev/null)"; then
+    rest="$(sed -E 's/^.*\) //' "/proc/$pid/stat" 2>/dev/null || true)"
+    ticks="$(printf '%s\n' "$rest" | awk '{ print $20 }')"
+    hz="$(getconf CLK_TCK 2>/dev/null || true)"
+    if printf '%s' "$btime:$ticks:$hz" | grep -Eq '^[0-9]+:[0-9]+:[1-9][0-9]*$'; then
+      printf '%s' "$((btime + ticks / hz))"
+      return 0
+    fi
+  fi
+  lstart="$(ps -o lstart= -p "$pid" 2>/dev/null || true)"
+  [ -n "$lstart" ] || return 0
+  date -d "$lstart" +%s 2>/dev/null || date -j -f '%a %b %e %T %Y' "$lstart" +%s 2>/dev/null || true
+}
+# Sets INFLIGHT_VERDICT (empty: keep) and INFLIGHT_EVIDENCE for a lock this host wrote.
+inflight_verdict() {
+  local f="$1" pid started lock_epoch start_epoch pids listed_pid pid_seen=0 table_read=0
+  INFLIGHT_VERDICT=""; INFLIGHT_EVIDENCE=""; INFLIGHT_START_EPOCH=""
+  pid="$(inflight_pid "$f")"
+  printf '%s' "$pid" | grep -Eq '^[1-9][0-9]*$' || return 0
+  if [ -d /proc/self ]; then
+    if [ ! -e "/proc/$pid" ]; then INFLIGHT_VERDICT="pid-dead"; INFLIGHT_EVIDENCE="pid $pid is dead: no /proc/$pid on this host"; return 0; fi
+  else
+    # `ps -p` also fails on probe errors. A successful, nonempty process-table read is the only
+    # absence proof when /proc is unavailable; an unreadable table keeps the lock.
+    pids="$(ps -e -o pid= 2>/dev/null)" || return 0
+    for listed_pid in $pids; do
+      case "$listed_pid" in *[!0-9]*|'') return 0 ;; esac
+      table_read=1
+      [ "$listed_pid" = "$pid" ] && pid_seen=1
+    done
+    [ "$table_read" = 1 ] || return 0
+    if [ "$pid_seen" = 0 ]; then
+      INFLIGHT_VERDICT="pid-dead"
+      INFLIGHT_EVIDENCE="pid $pid is dead: a successful ps process-table read finds no such process on this host"
+      return 0
+    fi
+  fi
+  started="$(inflight_field "$f" startedAt)"
+  lock_epoch="$(inflight_epoch_of "$started")"
+  start_epoch="$(inflight_pid_start_epoch "$pid")"
+  INFLIGHT_START_EPOCH="$start_epoch"
+  printf '%s' "$lock_epoch:$start_epoch" | grep -Eq '^[0-9]+:[0-9]+$' || return 0
+  if [ "$((start_epoch - lock_epoch))" -gt 2 ]; then
+    INFLIGHT_VERDICT="pid-reused"
+    INFLIGHT_EVIDENCE="pid $pid was used again: the process started at epoch $start_epoch, the lock at $started (epoch $lock_epoch)"
+  fi
+}
+reclaim_host_inflight_locks() {
+  local dir f self host slot run_id pid started owner dest ledger identity current seen=":"
+  self="$(hostname 2>/dev/null || true)"
+  while IFS= read -r dir; do
+    [ -n "$dir" ] && [ -d "$dir" ] && [ ! -L "$dir" ] || continue
+    case "$seen" in *":$dir:"*) continue ;; esac
+    seen="$seen$dir:"
+    for f in "$dir"/*.lock; do
+      [ -f "$f" ] && [ ! -L "$f" ] || continue
+      identity="$(inflight_lock_identity "$f")" || { log "KEEP $f: lock identity unreadable"; continue; }
+      host="$(inflight_field "$f" host)"
+      if ! inflight_same_host "$host" "$self"; then log "KEEP $f: written on host ${host:-unknown}, not this host"; continue; fi
+      inflight_verdict "$f"
+      if [ -z "$INFLIGHT_VERDICT" ]; then log "KEEP $f: written on this host and its process is alive with the lock's start time, or cannot be tested"; continue; fi
+      slot="$(basename "$f" .lock)"; run_id="$(inflight_field "$f" run_id)"; pid="$(inflight_pid "$f")"
+      started="$(inflight_field "$f" startedAt)"; owner="$(owner_uid "$f")"
+      dest="$dir/reclaimed/$(basename "$f").host-cleanup-$$"
+      if [ "$DRY_RUN" = 1 ]; then
+        log "DRYRUN would: reclaim lock $f (slot $slot, run ${run_id:-unknown}): $INFLIGHT_EVIDENCE"
+        continue
+      fi
+      sed 's/^/    /' "$f" 2>/dev/null || true
+      if ! mkdir -p -- "$dir/reclaimed"; then log "KEEP $f: could not create $dir/reclaimed"; continue; fi
+      current="$(inflight_lock_identity "$f")" || current=""
+      if [ "$current" != "$identity" ]; then log "KEEP $f: lock changed during the host pid probe; the replacement still blocks"; continue; fi
+      if ! mv -- "$f" "$dest"; then log "KEEP $f: could not move it to $dir/reclaimed"; continue; fi
+      log "RECLAIM-LOCK $f (slot $slot, run ${run_id:-unknown}): $INFLIGHT_EVIDENCE; moved to $dest"
+      printf 'reclaimed by rmd-host-cleanup.sh (W1-T12316) pid %s at %s\nhost: %s\npid: %s\nlock owner uid: %s\nlock startedAt: %s\nprocess start epoch: %s\nverdict: %s\nevidence: %s\n' \
+        "$$" "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" "$host" "$pid" "${owner:-unknown}" "$started" "${INFLIGHT_START_EPOCH:-none, no live process}" \
+        "$INFLIGHT_VERDICT" "$INFLIGHT_EVIDENCE" > "$dest.reason" 2>/dev/null || log "WARN $dest.reason: could not be written"
+      chown --reference="$dir" -- "$dir/reclaimed" "$dest.reason" 2>/dev/null || true
+      ledger="$(dirname "$dir")/ledger.ndjson"
+      [ -d "$(dirname "$ledger")" ] || continue
+      printf '{"ts":"%s","run_id":%s,"task_id":%s,"step":"host_cleanup.inflight_reclaimed","lane":"deploy","pid":%s,"host":%s,"verdict":%s,"evidence":%s,"lock_owner_uid":%s,"lock_started_at":%s,"cleanup_pid":%s}\n' \
+        "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" "$(inflight_json "${run_id:-HOST-CLEANUP-$$}")" "$(inflight_json "$slot")" "$pid" "$(inflight_json "$host")" \
+        "$(inflight_json "$INFLIGHT_VERDICT")" "$(inflight_json "$INFLIGHT_EVIDENCE")" "$(inflight_json "${owner:-unknown}")" "$(inflight_json "$started")" "$$" \
+        >> "$ledger" 2>/dev/null || log "WARN $ledger: the host_cleanup.inflight_reclaimed row could not be written"
+    done
+  done < <(printf '%s\n' "$INFLIGHT_DIRS" | tr ':' '\n')
+}
+
 # ── the pass ──
 before_pct="$(df_field pct)"; before_avail="$(df_field avail)"
 
@@ -2142,6 +2290,8 @@ done < <(printf '%s\n' "$NESTED_COVERAGE_ROOTS" | tr ':' '\n')
 while IFS= read -r coverage; do
   [ -n "$coverage" ] && [ -e "$coverage" ] && sweep_path "$coverage"
 done < <(printf '%s\n' "$COVERAGE_PATHS" | tr ':' '\n')
+
+reclaim_host_inflight_locks
 
 if [ "$ONLY_TMP" != 1 ]; then
   for wt in "$CLEAN_HOME"/*/.claude/worktrees/*; do

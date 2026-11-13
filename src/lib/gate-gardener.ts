@@ -754,7 +754,8 @@ export function renderDefuseShard(action: GateGardenAction, taskId: string) {
   return renderMachineShard({
     taskId, title: `Defuse the expiring fixture in ${f.file} before ${crossing}`, origin: action.target,
     files: [f.file], cost: 1, costPopulation: urgent ? [0, 1] : [1],
-    acceptance: [{ claim: `The census reports no crossing for ${f.file} with now past ${crossing}, and the test remains green across the crossing.`,
+    design: "INVARIANT fixture-behavior: preserve the fixture's behavioral assertions across the clock crossing.",
+    acceptance: [{ claim: `invariant:fixture-behavior — The census reports no crossing for ${f.file} with now past ${crossing}, and the test remains green across the crossing while preserving its behavioral assertions.`,
       proof: `grep: test("${breLiteral(title)}" in ${f.file}` }],
     rationale: [
       `${f.file}:${f.line}: ${f.field} is stamped ${f.stamp}; ${f.threshold} crosses on ${crossing}.`,
