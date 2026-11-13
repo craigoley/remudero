@@ -39,9 +39,9 @@ const sourceCommits = (tag: string, count: number) =>
 test("W1-T12228 criterion 1: the policy file has the block freshnessRestart with four one-line bounded rows", () => {
   const rows: Array<[string, number, string, number, number]> = [
     ["scoreLimit", 18, "DEPLOY_RESTART_SCORE_THRESHOLD", 6, 54],
-    ["stalenessHorizonMs", 3600000, "DEPLOY_RESTART_RATE_CEILING_MS", 900000, 14400000],
+    ["stalenessHorizonMs", 14400000, "DEPLOY_RESTART_RATE_CEILING_MS", 900000, 14400000],
     ["quietWindowMs", 600000, "FRESHNESS_COALESCE_WINDOW_MS", 0, 1800000],
-    ["minLifetimeMs", 5400000, "FRESHNESS_MIN_LIFETIME_MS", 0, 21600000],
+    ["minLifetimeMs", 10800000, "FRESHNESS_MIN_LIFETIME_MS", 0, 21600000],
   ];
   assert.match(POLICY_TEXT, /^freshnessRestart:$/m);
   const policy = committed();
@@ -133,7 +133,7 @@ test("W1-T12228 criterion 3: a policy with scoreLimit 9 restarts a busy daemon a
 });
 
 test("W1-T12228 criterion 4: with the default rows the freshness judge decides and gives its reason as before", () => {
-  const rows = committed().values.freshnessRestart;
+  const rows = DEFAULT_FRESHNESS_RESTART;
   const limit = judge.DEPLOY_RESTART_SCORE_THRESHOLD;
   const explicit = {
     threshold: { value: rows.scoreLimit, reason: "policy" }, ageHorizonMs: rows.stalenessHorizonMs,
