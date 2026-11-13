@@ -134,7 +134,7 @@ test("W1-T12205 criterion 3: the actual configured plan lint accepts a code path
   put(join(f.code.dir, "package.json"), JSON.stringify({ scripts: { "lint-plan:fast":
     `node --import ${loader} ${join(REPO_ROOT, "scripts/lint-plan-offline.mjs")} --base origin/main` } }));
   const task = ["- id: W1-T900", '  title: "The held fixture has a focused test"', "  repo: remudero", "  depends_on: []",
-    "  priority: 1", "  type: implement", "  verify: auto", "  risk: low", "  status: queued", "  attempts: 0", "  budget_usd: 1",
+    "  priority: 1", "  type: implement", "  design: |", "    NO-INVARIANTS: synthetic lint fixture with no inherited behavior to preserve", "  verify: auto", "  risk: low", "  status: queued", "  attempts: 0", "  budget_usd: 1",
     '  origin: "test-fixture:plan-preflight-apart"', "  files: [src/lib/held.ts, test/plan/held.test.ts]", "  acceptance:",
     '    - claim: "The held value is covered by its focused proof"', '      proof: "unit test: test/plan/held.test.ts"', ""].join("\n");
   put(join(f.plan.dir, "plan/tasks.d/W1-T900-held.yaml"), task);

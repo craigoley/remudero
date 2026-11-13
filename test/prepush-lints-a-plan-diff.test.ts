@@ -28,6 +28,8 @@ const CLEAN_SHARD = [
   '  title: "a clean shard"',
   "  repo: remudero",
   "  type: implement",
+  "  design: |",
+  "    NO-INVARIANTS: synthetic lint fixture with no inherited behavior to preserve",
   "  verify: auto",
   "  status: queued",
   '  origin: "fixture"',

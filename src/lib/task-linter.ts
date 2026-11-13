@@ -3796,6 +3796,10 @@ export function invariantSlugViolations(task: Task, opts: LintOpts = {}): LintVi
       block(`acceptance claim invariant:${slug} has an empty proof`);
       continue;
     }
+    const target = opts.taskRepoOwner === undefined ? undefined : { owner: opts.taskRepoOwner, repo: task.repo };
+    if (!parseWhitelistedProof(proof, target)) {
+      block(`acceptance claim invariant:${slug} needs an executable proof dialect even when satisfied_by supplies prior credit`);
+    }
     const other = proofOwner.get(proof);
     if (other !== undefined) block(`invariants "${other}" and "${slug}" share one proof; each needs its own distinct proof`);
     else proofOwner.set(proof, slug);

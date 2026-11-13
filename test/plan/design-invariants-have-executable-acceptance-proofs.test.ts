@@ -12,8 +12,10 @@ import { test } from "node:test";
 
 import {
   INVARIANT_CLAIM_RE, INVARIANT_DECL_RE, NO_INVARIANTS_RE, invariantSlugViolations, lintTask,
+  type LintOpts,
 } from "#src/lib/task-linter.js";
 import type { Task } from "#src/lib/plan.js";
+import { validateAcceptanceShape } from "#src/lib/plan.js";
 
 const ON = { requireDesignInvariantDeclaration: true };
 
@@ -25,7 +27,7 @@ function task(design: string | undefined, acceptance: Array<[string, string]>, t
   } as Task;
 }
 
-const messages = (t: Task, opts = ON): string[] => invariantSlugViolations(t, opts).map((v) => v.message);
+const messages = (t: Task, opts: LintOpts = ON): string[] => invariantSlugViolations(t, opts).map((v) => v.message);
 
 test("unit test: a mapped invariant with its own proof passes and NO-INVARIANTS with a reason passes", () => {
   const mapped = task("INVARIANT keep-buckets: legacy buckets keep their counts", [
@@ -89,6 +91,48 @@ test("unit test: an invariant claim needs a non-empty proof distinct from anothe
     ["invariant:a — a", "unit test: same.test.ts"], ["invariant:b — b", "unit test: same.test.ts"],
   ]));
   assert.deepEqual(shared, ['task ZZ-INV: invariants "a" and "b" share one proof; each needs its own distinct proof']);
+});
+
+test("unit test: satisfied_by cannot exempt an invariant from an executable proof dialect", () => {
+  for (const verify of ["auto", "human"] as const) {
+    for (const proof of ["not executable", "grep: missing target", "unit test: ../escape.test.ts", "demonstration: inspect output"]) {
+      const credited = task("INVARIANT keep-a: keep a", [["invariant:keep-a — keep a", proof]]);
+      credited.origin = "fixture";
+      credited.files = ["src/lib/subject.ts"];
+      credited.verify = verify;
+      credited.acceptance![0]!.satisfied_by = "PR #1";
+      assert.deepEqual(validateAcceptanceShape(credited.acceptance, "fixture", credited.id), credited.acceptance);
+      const result = lintTask(credited, ON);
+      assert.equal(result.ok, false, `${verify}: ${proof}`);
+      assert.ok(result.violations.some((v) => v.check === "design-invariant-proof" && v.severity === "block"),
+        JSON.stringify(result.violations));
+      assert.deepEqual(messages(credited, {}), [], "legacy credit is unchanged outside the changed-task pass");
+      assert.equal(lintTask(credited, {}).ok, true, "ordinary prior-credit behavior stays unchanged");
+    }
+  }
+  for (const proof of ["unit test: test/plan/design-invariants-have-executable-acceptance-proofs.test.ts", "grep: keep a in src/lib/subject.ts"]) {
+    const credited = task("INVARIANT keep-a: keep a", [["invariant:keep-a — keep a", proof]]);
+    credited.origin = "fixture";
+    credited.files = ["src/lib/subject.ts"];
+    credited.acceptance![0]!.satisfied_by = "PR #1";
+    assert.deepEqual(messages(credited), [], "executable dialects remain valid with prior credit");
+    assert.deepEqual(messages(credited, { ...ON, taskRepoOwner: "craigoley" }), []);
+    assert.equal(lintTask(credited, ON).ok, true);
+  }
+});
+
+test("unit test: mapping an invariant preserves ordinary proof resolution and base discrimination", () => {
+  const mapped = task("INVARIANT keep-a: keep a", [["invariant:keep-a — keep a", "unit test: a missing invariant title"]]);
+  mapped.origin = "fixture";
+  mapped.files = ["test/subject.test.ts"];
+  const unresolved = lintTask(mapped, { ...ON, resolveNameFilteredCandidates: () => ({ status: "absent" }) });
+  assert.equal(unresolved.ok, false);
+  assert.ok(unresolved.violations.some((v) => v.check === "proof-unit-test-unresolvable" && v.severity === "block"));
+  assert.deepEqual(messages(mapped), [], "a valid mapping does not establish that its proof resolves");
+  mapped.acceptance![0]!.proof = "unit test: test/subject.test.ts";
+  const existing = lintTask(mapped, { ...ON, pathExistsAtBase: () => true });
+  assert.ok(existing.violations.some((v) => v.check === "proof-base-discrimination"));
+  assert.ok(!lintTask(mapped, { ...ON, pathExistsAtBase: () => false }).violations.some((v) => v.check === "proof-base-discrimination"));
 });
 
 test("unit test: the rule is silent outside the changed-task pass and for non-implementation tasks", () => {
