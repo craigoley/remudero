@@ -106,6 +106,7 @@ test("a production owner probe releases a recorded process owner when its claim 
   const inflightDir = join(root, "state", "inflight");
   const lockPath = join(inflightDir, `${claimKey}.lock`);
   let census: ProcessCwdCensus = { state: "unknown", scanned: 1, reason: "cwd_unreadable" };
+  let censusThrows = false;
   let censusCalls = 0;
   try {
     mkdirSync(ownerPath, { recursive: true });
@@ -121,6 +122,7 @@ test("a production owner probe releases a recorded process owner when its claim 
       ownerProcessCwdCensusImpl: (path: string) => {
         assert.equal(path, ownerPath);
         censusCalls++;
+        if (censusThrows) throw new Error("process census unavailable");
         return census;
       },
       registeredOwnerRecovery: { capture: () => ({ path: ownerPath, pathState: "foreign",
@@ -149,7 +151,8 @@ test("a production owner probe releases a recorded process owner when its claim 
     built = buildSweepEffects({ owner: "acme", repo: "scratch", config: { root }, ledgerPath,
       runId: "detached-owner-probe", plan: { tasks: [], byId: new Map() }, policy: DEFAULT_SWEEP_POLICY,
       log: () => {}, fixBranchClaimKeyImpl: () => claimKey,
-      ownerProcessCwdCensusImpl: (path: string) => { assert.equal(path, ownerPath); censusCalls++; return census; },
+      ownerProcessCwdCensusImpl: (path: string) => { assert.equal(path, ownerPath); censusCalls++;
+        if (censusThrows) throw new Error("process census unavailable"); return census; },
       registeredOwnerRecovery: { capture: () => ({ path: ownerPath, pathState: "managed",
         attachmentState: "detached_or_other", treeState: "unknown", remoteState: "unknown", historyState: "unknown",
         claimState: "unknown", processState: "unknown", ageMs: 1000, localSha: pr.headSha,
@@ -157,6 +160,10 @@ test("a production owner probe releases a recorded process owner when its claim 
     assert.equal(fixDispatchHoldAtHead(pr, [owner], () => true, built.fixOwnerReclaimableAtHold, options()), undefined,
       "a changed owner branch cannot hide a cleared claim and process cause");
     assert.equal(censusCalls, 4, "liveness is re-probed even when attachment changed");
+    censusThrows = true;
+    assert.equal(fixDispatchHoldAtHead(pr, [owner], () => true, built.fixOwnerReclaimableAtHold, options())?.fields.probe_result,
+      "present", "an unreadable detached-owner census keeps the cause held");
+    assert.equal(censusCalls, 5);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 

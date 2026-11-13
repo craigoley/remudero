@@ -3987,7 +3987,13 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
             head_sha: pr.headSha, worktree_path: ownerPath, reason: String(error) });
         }
         if (!claimClear) return false;
-        return ownerProcessCwdCensusImpl(ownerPath).state === "clear";
+        try {
+          return ownerProcessCwdCensusImpl(ownerPath).state === "clear";
+        } catch (error) {
+          log("sweep.fix.owner_process_probe_unreadable", { pr_number: pr.prNumber,
+            head_sha: pr.headSha, worktree_path: ownerPath, reason: String(error) });
+          return false;
+        }
       }
       try {
         const snapshot = registeredOwnerRecovery.capture({
