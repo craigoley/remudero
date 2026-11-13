@@ -4346,8 +4346,7 @@ export async function runDaemon(
   opts: DaemonOpts = {},
 ): Promise<DaemonSummary> {
   openDirectMergeAdmissions();
-  // Every consumer reached during a tick sees the same ledger read, including freshness scoring.
-  // Cache failures too: a second consumer must not silently turn an unreadable tick into a good one.
+  // Pending cycle consumers share one tick read, including failures and freshness scoring.
   const ledgerReader = deps.readLedgerLines;
   let tickLedgerActive = false;
   let tickLedger: { lines: readonly string[] } | { error: unknown } | undefined;
@@ -6761,7 +6760,7 @@ export async function runDaemon(
 
   const tickMemory = { sampled: false };
   for (;;) {
-    tickLedgerActive = true;
+    tickLedgerActive = restartCyclePending;
     tickLedger = undefined;
     // The liveness tick: the one row this loop writes unconditionally, every iteration, on every path below.
     // Every other daemon-prefixed step is either boot-time and one-shot, or confined to the three windows the
@@ -8492,7 +8491,7 @@ export async function runDaemon(
       wakeParkedLanes();
     };
     const onDispatchTick = checkFreshness || restartCyclePending || (deps.reloadPlan && deps.sweepLight) ? (): void | Promise<void> => {
-      tickLedgerActive = true;
+      tickLedgerActive = restartCyclePending;
       tickLedger = undefined;
       observeRestartCycle();
       wakeParkedLanes();

@@ -157,6 +157,30 @@ test("W1-T12229 criterion 5: costs sum known parts and name unavailable parts as
   for (const part of ["refused_review_ms", "review_wait_ms", "gave_up_age_ms"]) assert.ok(missing.missing_parts.includes(part));
 });
 
+test("W1-T12229 criterion 5: an empty drain inventory has zero abandonment cost", () => {
+  const rows = [
+    row(0, "daemon.boot"),
+    row(390, "review.posted", { pr: 1 }),
+    row(392, "daemon.freshness_drain.completed", {
+      waited_on: [], abandoned_in_flight_reviews: 0, abandoned_detached_sweep_actions: 0,
+    }),
+    row(395, "daemon.freshness_exit"),
+    row(400, "daemon.boot"),
+    row(415, "review.posted", { pr: 2 }),
+  ];
+  const known = cycle(rows);
+  assert.deepEqual(known.gave_up, { reviews: [], fix_rounds: [] });
+  assert.equal(known.gave_up_age_ms, 0);
+  assert.equal(known.verdict_gap_ms, 25);
+  assert.equal(known.restart_cost_ms, 25);
+  assert.ok(!known.missing_parts.includes("gave_up_age_ms"));
+
+  const unavailable = cycle(rows.filter(item => item.step !== "daemon.freshness_drain.completed"));
+  assert.equal(unavailable.gave_up_age_ms, null);
+  assert.equal(unavailable.restart_cost_ms, null);
+  assert.ok(unavailable.missing_parts.includes("gave_up_age_ms"));
+});
+
 async function daemon(rows: Row[], ticks: number, afterSleep?: (tick: number, rows: Row[]) => void,
   read?: (tick: number, rows: Row[]) => readonly string[], freshnessEnabled = false) {
   const logs: Array<{ step: string; fields: Row }> = [];

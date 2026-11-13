@@ -112,7 +112,7 @@ export function restartCycleRow(rows: readonly Row[], startAtMs: number): Restar
     fixesByTask.set(task, { ...(prior ?? { what: "detached", kind: "fix-dispatch", task_id: event.row.task_id }),
       age_ms: event.row.age_ms as number });
   }
-  const fixes = fixesByTask.size ? [...fixesByTask.values()] : null;
+  const fixes = abandoned || fixesByTask.size ? [...fixesByTask.values()] : null;
   const gaveUpMs = reviews && fixes ? sum([...reviews, ...fixes].map(item => item.age_ms)) : null;
   const last = ordered.findLast(r => r.row.step === "review.posted" && r.ms < exit.ms);
   const gapMs = last && first ? first.ms - last.ms : null;
