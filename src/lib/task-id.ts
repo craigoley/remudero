@@ -159,6 +159,8 @@ export interface MintSources {
    *  fetched reads it as stale as its own tree. This is read from origin at reserve time. `null`
    *  with no reader injected — the offline host and the W1-T2203 403 class, both unchanged. */
   reservations: number | null;
+  /** Present only when a second, readable catalog was explicitly supplied. */
+  destinationPlan?: number | null;
 }
 
 /** The mint: the id to use, what it was derived from, and what could not be read. */
@@ -237,6 +239,10 @@ function shardTaskIds(planPath: string): { ids: number[]; degraded: MintDegradat
 export function mintNextTaskId(opts: {
   /** Path to `plan/tasks.yaml`; its sibling `tasks.d/` is read alongside it. */
   planPath: string;
+  /** Verified immutable plan blobs from a separately selected catalog; a failed reader throws. */
+  additionalPlanTexts?: () => readonly string[];
+  /** Open PRs of that catalog, read before minting rather than silently dropped on failure. */
+  additionalOpenPrTexts?: () => readonly string[];
   /** Open plan PRs' text (title/body/branch), scanned for MENTIONED ids. */
   openPrTexts?: () => string[];
   /**
@@ -257,6 +263,7 @@ export function mintNextTaskId(opts: {
   const monolithIds = declaredTaskIds(readFileSync(opts.planPath, "utf8"));
   const shards = shardTaskIds(opts.planPath);
   degraded.push(...shards.degraded);
+  const destinationIds = opts.additionalPlanTexts?.().flatMap(declaredTaskIds) ?? [];
 
   let openPrIds: number[] = [];
   let openPrsEnumerated = false;
@@ -267,6 +274,11 @@ export function mintNextTaskId(opts: {
     } catch (err) {
       degraded.push({ source: "open-prs", reason: `cannot enumerate open PRs: ${String(err)}` });
     }
+  }
+
+  if (opts.additionalOpenPrTexts) {
+    openPrIds.push(...opts.additionalOpenPrTexts().flatMap(mentionedTaskIds));
+    openPrsEnumerated = true;
   }
 
   // W1-T2710: THE ONE SOURCE THAT CANNOT SILENTLY LAG. Every source above reads THIS CHECKOUT,
@@ -302,6 +314,7 @@ export function mintNextTaskId(opts: {
     openPrs: openPrsEnumerated ? highest(openPrIds) : null,
     remotePlan: remotePlanCeiling,
     reservations: reservationCeiling,
+    ...(opts.additionalPlanTexts ? { destinationPlan: highest(destinationIds) } : {}),
   };
 
   // THE CORROBORATION CHECK (a source that is PRESENT AND ABSURD). `degraded` already covers a
@@ -357,7 +370,7 @@ export function mintNextTaskId(opts: {
     // MEASURED 2026-09-07, three consecutive mints: `shards` read 216 behind origin, the open-PR
     // scan read the truth, the lead computed as 216, the only current source was dropped and the
     // DEGRADED line blamed it. A tracking ref could not save that; the namespace can.
-    const planCeiling = Math.max(localPlanCeiling, sources.remotePlan ?? 0, sources.reservations ?? 0);
+    const planCeiling = Math.max(localPlanCeiling, sources.remotePlan ?? 0, sources.reservations ?? 0, sources.destinationPlan ?? 0);
     const lead = sources.openPrs - planCeiling;
     if (planCeiling > 0 && lead > MAX_MENTION_LEAD) {
       degraded.push({
@@ -406,9 +419,9 @@ export function mintNextTaskId(opts: {
   // re-applied at the max.
   const maxSeen = Math.max(
     0,
-    ...[sources.monolith, sources.shards, sources.openPrs, sources.remotePlan].filter((n): n is number => n != null),
+    ...[sources.monolith, sources.shards, sources.openPrs, sources.remotePlan, sources.destinationPlan].filter((n): n is number => n != null),
   );
-  const ignoredAboveBound = countAboveBound(monolithIds, shards.ids, openPrIds);
+  const ignoredAboveBound = countAboveBound(monolithIds, shards.ids, openPrIds, destinationIds);
   return { id: `W1-T${maxSeen + 1}`, n: maxSeen + 1, maxSeen, sources, degraded, ignoredAboveBound, planBehindBy };
 }
 
@@ -438,7 +451,8 @@ export function describeMint(mint: MintedTaskId): string {
   const src =
     `tasks.yaml ${mint.sources.monolith ?? "-"}, shards ${mint.sources.shards ?? "-"}, ` +
     `open PRs ${openPrs}, remote plan ${mint.sources.remotePlan ?? "-"}, ` +
-    `reservations ${mint.sources.reservations ?? "-"}`;
+    `reservations ${mint.sources.reservations ?? "-"}` +
+    (mint.sources.destinationPlan === undefined ? "" : `, destination plan ${mint.sources.destinationPlan ?? "-"}`);
   const warn = mint.degraded.length
     ? ` — DEGRADED: ${mint.degraded.map((d) => `${d.source} (${d.reason})`).join("; ")}`
     : "";

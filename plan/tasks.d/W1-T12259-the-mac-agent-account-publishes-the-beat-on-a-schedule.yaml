@@ -2,7 +2,6 @@
   title: "The Mac agent account publishes the heartbeat on a schedule"
   repo: remudero
   depends_on: []
-  priority: 0.9
   type: implement
   verify: auto
   principles:
@@ -19,7 +18,8 @@
     - deploy/mac/install-heartbeat.sh
     - deploy/mac/JANITOR.md
     - test/deploy/the-mac-agent-account-publishes-the-beat-on-a-schedule.test.ts
-  status: queued
+  status: blocked
+  retirement: retired
   attempts: 0
   acceptance:
     - claim: "`deploy/mac/install-heartbeat.sh` writes one launchd property list for the account that runs it. The job starts scripts/fleet-heartbeat.sh of the named checkout every 300 seconds"
@@ -62,6 +62,11 @@
   falsifier: |
     Write a token variable into the property list and criterion 2 must fail. Accept the host name `azure` and criterion 3 must fail. Write a file under `--check` and criterion 4 must fail. Unload another job and criterion 5 must fail. Restore and require all seven to pass.
   note: |
+    RETIRED 2026-11-12 by operator ruling. No Mac account publishes a heartbeat.
+    The operator said: "I think that's an outdated task. At one point we wanted a mac heartbeat because rmd was running on it and I needed to know when my mac restarted or went down. Now that it's on azure, that's a non-issue. I think you can retire that item."
+    The standing ruling of 2026-11-11 also holds: no rmd service runs on either Mac account.
+    This task is not built. W1-T12253, W1-T12254 and W1-T12258 do not depend on it. Each one now serves the Azure host only.
+    The text below is kept as history only.
     Host and account: the Mac, for each account whose owner runs the installer. The first one is the agent account `craigoleyagent`.
     The job removes nothing. It reads sizes and pushes one commit to its own branch.
     After the merge the owner of the account runs the installer once. A merge alone starts no job.

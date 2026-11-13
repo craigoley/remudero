@@ -1,4 +1,5 @@
 import { isImprovementBoundProposal, isReviewedImprovementDraft, runImprovementAction, type ImprovementPlanReceipt } from "./lib/improvement-thread.js";
+import { findTaskInCatalogs, catalogTaskContract, type TaskLookupOptions } from "./lib/task-lookup.js";
 import { operatorReleaseContractChanged, operatorReleasePin, qualifyReleaseEvidence, readReleaseLedgerLines, releaseContractPins, type ReleaseEvidence } from "./lib/operator-release.js";
 import {
   buildSweepEffects as buildSweepEffectsFromModule,
@@ -776,6 +777,7 @@ import { applyMergeProbeEvidence, mergedHeadTypechecks, probeMerge, probeOpenPrM
 import { surveyPullRequestBoard, type PullRequestBoard } from "./lib/pr-board.js";
 import {
   captureFeedback,
+  instanceStateDir,
   feedbackCaptured,
   feedbackEntryPath,
   listFeedback,
@@ -826,7 +828,7 @@ import {
   type TaskFilesLandingResult,
 } from "./lib/feedback-landing.js";
 export { readStandingDecisions };
-import { resolvePlanDestination } from "./lib/plan-destination.js";
+import { resolvePlanDestination, planDestinationRepository } from "./lib/plan-destination.js";
 import {
   reconcileFeedbackLanding,
   type FeedbackReconcileRoot,
@@ -961,6 +963,7 @@ import { assertProposedPlanLoads,
 } from "./lib/triage.js";
 import {
   declaredTaskIds,
+  mentionedTaskIds,
   isAllocatableTaskId,
   mintNextTaskId,
   UNTRUSTED_SOURCE_REASON_PREFIX,
@@ -1428,6 +1431,7 @@ import {
   parseTasksFromYaml,
   taskRecordPath,
   readBlobsAtRef,
+  readBlobsAtRefAsync,
   mergePlanBlobs,
   loadPlanAtRefAsync,
   TaskAdmissionError,
@@ -7260,7 +7264,7 @@ async function runReview(args: {
   runtimeImageSha?: string | null;
   /** `files` (W1-T322): the task's declared scope — see {@link "./lib/review.js".ReviewEvidence.taskDeclaredFiles}'s
    *  doc. Every real caller already passes the full plan `Task`, so this widens for free. */
-  task: { id: string; acceptance?: AcceptanceCriterion[]; files?: string[]; risk?: TaskRisk; budget_usd?: number; sourcePath?: string } & ReviewTaskNarrativeInput;
+  task: { catalog?: "public" | "ops"; id: string; acceptance?: AcceptanceCriterion[]; files?: string[]; risk?: TaskRisk; budget_usd?: number; sourcePath?: string } & ReviewTaskNarrativeInput;
   /** W1-T3704 (completed here) — injectable producer for the review-reuse pair recorded on this verdict's
    *  `review.posted` line (`own_diff_digest`/`merge_base_sha`). Production omits it and gets one
    *  best-effort REST compare against `main`; a test supplies a stub so it never reaches the
@@ -12006,7 +12010,11 @@ export async function resolveFixRungTaskContractAtHeadAsync(
   } catch {
     return undefined; // an unreadable HEAD is unreadable regardless of which read failed first
   }
-  return resolvePlanCriteriaAtHeadAsync(`Remudero-Task: ${taskId}`, repoDir, "plan/tasks.yaml", headSha);
+  const resolved = await resolvePlanCriteriaAtHeadAsync(`Remudero-Task: ${taskId}`, repoDir, "plan/tasks.yaml", headSha);
+  if (resolved.divergence || resolved.criteria.length > 0 || resolved.taskDeclaredFiles !== undefined) return resolved;
+  const found = await findTaskInCatalogs(taskId, { byId: new Map(), stateDir: instanceStateDirIfConfigured() });
+  if (found.outcome === "unreadable") throw new Error(`task catalog unreadable: ${found.reason}`);
+  return found.outcome === "found" ? catalogTaskContract(found) : resolved;
 }
 
 /**
@@ -13130,12 +13138,81 @@ export function remotePlanCeilingOnRef(
  *  silently instead of erroring, which would return a clean, wrong zero here. */
 const REMOTE_PLAN_ID_DECL_PATTERN = '^[[:space:]]*(-[[:space:]]*)?id:[[:space:]]*["\']?W1-T[0-9]+';
 
+/** Host-only reads for the already selected catalog. No second reservation namespace is introduced. */
+export interface TaskIdDestinationChecks {
+  destinationStateDir?: () => string | undefined;
+  destinationGit?: (cwd: string, args: string[], input?: string) => string | Promise<string>;
+  destinationPrFetch?: (args: string[]) => unknown | Promise<unknown>;
+}
+interface TaskIdDestinationSnapshot {
+  planTexts: readonly string[];
+  ids: readonly string[];
+  openPrTexts: readonly string[];
+}
+
+/** A fetched, commit-pinned ID population. Dirty checkout bytes never replace the fetched plan. */
+export async function taskIdDestinationSnapshot(
+  checks: TaskIdDestinationChecks = {}, offline = false,
+): Promise<TaskIdDestinationSnapshot | undefined> {
+  let stage: "switch" | "offline" | "fetch" | "plan" | "pulls" = "switch";
+  try {
+    const destination = planDestinationRepository((checks.destinationStateDir ?? instanceStateDir)());
+    if (destination.outcome === "off") return undefined;
+    if (destination.outcome === "unreadable") throw new Error("unreadable host switch");
+    if (offline) { stage = "offline"; throw new Error("selected catalog requires a fresh read"); }
+    const run = async (cwd: string, args: string[], input?: string): Promise<string> =>
+      checks.destinationGit ? await checks.destinationGit(cwd, args, input) : await hostWorktreeGitAsync(cwd, args, { timeout: DEFAULT_GH_CALL_TIMEOUT_MS, ...(input === undefined ? {} : { input }) });
+    stage = "fetch";
+    await run(destination.checkoutDir, ["fetch", "--no-tags", "origin", "main"]);
+    stage = "plan";
+    const commit = (await run(destination.checkoutDir, ["rev-parse", "--verify", "origin/main^{commit}"])).trim();
+    if (!/^[a-f0-9]{40}$/.test(commit)) throw new Error("invalid commit");
+    const paths = (await run(destination.checkoutDir, ["ls-tree", "-r", "--name-only", commit, "--", "plan/tasks.yaml", "plan/tasks.d/"]))
+      .split("\n").filter(path => path === "plan/tasks.yaml" || /^plan\/tasks\.d\/[^/]+\.ya?ml$/.test(path));
+    if (!paths.includes("plan/tasks.yaml")) throw new Error("missing plan");
+    const texts = await readBlobsAtRefAsync((args, input) => run(destination.checkoutDir, args, input), commit, paths);
+    const tasks = texts.flatMap(text => parseTasksFromYaml(text, "plan destination", undefined, {}, "preserve-external"));
+    const ids = tasks.map(task => task.id);
+    if (new Set(ids).size !== ids.length) throw new Error("duplicate task id");
+    stage = "pulls";
+    const pulls = await fetchBoardPrsRestAsync(destination.owner, destination.repo, async args => checks.destinationPrFetch ? await checks.destinationPrFetch(args) : await ghJsonAsync(args), undefined, "open");
+    if (pulls.truncated || pulls.rows.some(row => !Number.isSafeInteger(row.number) || row.number <= 0 ||
+        row.state !== "OPEN" || row.headRefName === "")) throw new Error("incomplete open PR population");
+    const openPrTexts = pulls.rows.map(row => [row.title, row.body, row.headRefName].join("\n"));
+    return { planTexts: texts, ids, openPrTexts };
+  } catch {
+    // Upstream responses, private repository names and checkout paths are not a safe diagnostic vocabulary.
+    // A selected source that did not answer must refuse, never become an empty catalog or an advisory floor.
+    throw new Error(`plan destination is unreadable at ${stage}`);
+  }
+}
+
+/** Only the snapshot reader's finite stage vocabulary may reach a public-facing failure. */
+function taskIdDestinationFailureReason(error: unknown): string {
+  return error instanceof Error && /^plan destination is unreadable at (switch|offline|fetch|plan|pulls)$/.test(error.message)
+    ? error.message : "plan destination is unreadable at an unknown stage";
+}
+
+/** Prepare private Git/API reads off the caller loop, then use the existing public mint fold. */
+export async function mintNextTaskIdWithHistoryAsync(opts: Parameters<typeof mintNextTaskIdWithHistory>[0]): Promise<MintedTaskIdWithHistory> {
+  const snapshot = opts.destinationSnapshot === undefined ? await taskIdDestinationSnapshot(opts.destination) : opts.destinationSnapshot;
+  return mintNextTaskIdWithHistory({ ...opts, destinationSnapshot: snapshot ?? null });
+}
+
 export function mintNextTaskIdWithHistory(opts: {
   planPath: string;
   repoRoot: string;
   openPrTexts?: () => string[];
   gitRunner?: (args: string[]) => string;
+  destination?: TaskIdDestinationChecks;
+  destinationSnapshot?: TaskIdDestinationSnapshot | null;
 }): MintedTaskIdWithHistory {
+  // This synchronous fold never adds network work to a daemon loop. A selected catalog
+  // requires the awaited snapshot supplied by the async entry or its owning command.
+  if (opts.destinationSnapshot === undefined && planDestinationRepository((opts.destination?.destinationStateDir ?? instanceStateDir)()).outcome !== "off") {
+    throw new Error("plan destination needs an awaited snapshot before minting");
+  }
+  const destination = opts.destinationSnapshot ?? undefined;
   const planRelPathForRemote = relative(opts.repoRoot, dirname(opts.planPath));
   // W1-T2710 — THE WIRING END, and the reason it lives here rather than in `task-id.ts`. That
   // module is deliberately free of child-process access (its three sources are file reads and an
@@ -13155,6 +13232,7 @@ export function mintNextTaskIdWithHistory(opts: {
   const base = mintNextTaskId({
     planPath: opts.planPath,
     openPrTexts: opts.openPrTexts,
+    ...(destination ? { additionalPlanTexts: () => destination.planTexts, additionalOpenPrTexts: () => destination.openPrTexts } : {}),
     remotePlanCeiling:
       !isAbsolute(planRelPathForRemote) && !planRelPathForRemote.startsWith("..")
         ? () => remotePlanCeilingOnRef(opts.repoRoot, planRelPathForRemote === "" ? "." : planRelPathForRemote, opts.gitRunner)
@@ -15402,6 +15480,20 @@ export function callerSweepCommand(
  *  `machineAuthorVerifyViolation` refuses at `verify: auto`. The command stages the linter-checked
  *  bytes outside its checkout and uses the same gated landing bridge as the scheduled rung, so a
  *  manual inspection cannot leave a daemon checkout unable to refresh. */
+/** The production CLI awaits its new source reads; the report/landing API stays synchronous. */
+export async function ciLearningCommandWithDestination(
+  rest: string[], checks: TaskIdDestinationChecks = {}, command: typeof ciLearningCommand = ciLearningCommand,
+): Promise<number> {
+  let destinationSnapshot: TaskIdDestinationSnapshot | null = null;
+  let destinationFailure: string | undefined;
+  try { destinationSnapshot = (await taskIdDestinationSnapshot(checks)) ?? null; }
+  catch (error) {
+    const reason = taskIdDestinationFailureReason(error);
+    destinationFailure = reason; // Report-only/deduplicated paths do not mint; a real mint refuses this cause.
+  }
+  return command(rest, { destinationSnapshot, destinationFailure });
+}
+
 export function ciLearningCommand(
   rest: string[],
   deps: CiFailuresCommandDeps & {
@@ -15415,6 +15507,8 @@ export function ciLearningCommand(
     /** W1-T3542 — the isolated landing bridge. Injected so a test writes nothing; production
      *  stages outside the checkout and lands only through the dedicated gated PR. */
     landShards?: typeof landCiLearningShards;
+    destinationSnapshot?: TaskIdDestinationSnapshot | null;
+    destinationFailure?: string;
   } = {},
 ): number {
   const badArg = unknownArgError("ci-learning", rest, ["--days"], ["--force"]);
@@ -15541,10 +15635,11 @@ export function ciLearningCommand(
     // MEASURED: without this, an unreadable plan under the run's root took the whole verb out with
     // ENOENT, reddening three of W1-T2959's tests, which pass a tmp root with no plan in it.
     try {
+      const destinationSnapshot = deps.destinationSnapshot;
       const filing = land(result.drafts, checkoutRoot, {
         stateRoot: root,
         mintTaskId: ciLearningTaskIdMinter(checkoutRoot, (step, fields) =>
-          appendLedger(join(root, "state", LEDGER_FILENAME), { run_id: `CI-LEARNING-${process.pid}`, task_id: "DAEMON", step, ...fields })),
+          appendLedger(join(root, "state", LEDGER_FILENAME), { run_id: `CI-LEARNING-${process.pid}`, task_id: "DAEMON", step, ...fields }), undefined, { destinationSnapshot, destinationFailure: deps.destinationFailure }),
         planOrigins,
         renderShard: ciLearningShardYaml,
         recordVerdict: ciLearningRecordVerdict,
@@ -15590,7 +15685,7 @@ const gardenMintBudgets = new Map<string, GardenMintBudget>();
 export function ciLearningTaskIdMinter(root: string, log?: (step: string, fields: Record<string, unknown>) => void,
   executeAsync: (file: string, args: string[], options: { maxBuffer: number; timeout: number; killSignal: "SIGKILL" }) => Promise<{ stdout: string; stderr?: string }> = (file, args, options) => execFileLoopBounded(file, args, { ...options, encoding: "utf8" }),
   opts: { budget?: GardenMintBudget; clock?: Pick<Clock, "now">; pollIntervalMs?: () => number;
-    loadPolicy?: () => { values: Pick<Policy["values"], "pollIntervalMs"> } } = {}):
+    loadPolicy?: () => { values: Pick<Policy["values"], "pollIntervalMs"> }; destinationSnapshot?: TaskIdDestinationSnapshot | null; destinationFailure?: string } = {}):
   ((filingBranch?: string) => string) & { async: (filingBranch: string) => Promise<string>; heldSha: (taskId: string) => string | undefined } & GardenTaskIdRelease {
   let budget = opts.budget ?? gardenMintBudgets.get(root);
   if (!budget) {
@@ -15606,6 +15701,7 @@ export function ciLearningTaskIdMinter(root: string, log?: (step: string, fields
   const releaseOpts = (reason: string) => ({ reason, lane: "garden", log });
   const gitAt = (args: string[], timeout: number) => spawnSync("git", args, { cwd: root, encoding: "utf8", timeout, killSignal: "SIGKILL" });
   const mintSync = (filingBranch?: string) => {
+    if (opts.destinationFailure) throw new Error(opts.destinationFailure);
     const started = now();
     const bound = mintBudget.boundMs();
     const runGit = (args: string[]) => {
@@ -15616,6 +15712,7 @@ export function ciLearningTaskIdMinter(root: string, log?: (step: string, fields
       return result;
     };
     const mint = mintNextTaskIdWithHistory({ planPath: join(root, "plan", "tasks.yaml"), repoRoot: root,
+      destinationSnapshot: opts.destinationSnapshot,
       gitRunner: (args) => {
         const result = runGit(args);
         if (result.status !== 0) throw new Error(result.stderr || String(result.error));
@@ -15662,11 +15759,11 @@ export function ciLearningTaskIdMinter(root: string, log?: (step: string, fields
           `import { format } from "node:util";
            const rows = [];
            console.log = (...args) => rows.push({ say: format(...args) });
-           const { ciLearningTaskIdMinter } = await import(${JSON.stringify(import.meta.url)});
+           const { ciLearningTaskIdMinter, taskIdDestinationSnapshot } = await import(${JSON.stringify(import.meta.url)});
            const { GardenMintBudget } = await import(${JSON.stringify(new URL("./lib/gardener.js", import.meta.url).href)});
            try {
              const minter = ciLearningTaskIdMinter(process.argv[1], (step, fields) => rows.push({ step, fields }), undefined,
-               { budget: new GardenMintBudget(() => ${JSON.stringify(bound)}) });
+               { budget: new GardenMintBudget(() => ${JSON.stringify(bound)}), destinationSnapshot: (await taskIdDestinationSnapshot()) ?? null });
              const id = minter(process.argv[2]);
              process.stdout.write(JSON.stringify({ id, sha: minter.heldSha(id), rows }));
            } catch (error) {
@@ -16729,7 +16826,7 @@ export function mergedTriageSubjects(worktreePath: string, limit = 500): string[
 /** Injectable seams for `--reserve` (W1-T1055) — the reserver itself, the git runner behind the
  *  holder read, and the holder classifier. Real callers pass none of them; a test drives every arm
  *  (created / taken-then-created / unreachable) without a git remote. */
-export interface NextTaskIdReserveDeps {
+export interface NextTaskIdReserveDeps extends TaskIdDestinationChecks {
   repoRoot?: string;
   reserver?: RemoteRefReserver;
   runGit?: (args: string[]) => { status: number | null; stdout: string; stderr: string };
@@ -17042,6 +17139,7 @@ function buildReservationAuditReport(opts: {
   self: { owner: string; repo: string };
   deps: NextTaskIdReserveDeps;
   reap?: boolean;
+  destinationSnapshot?: TaskIdDestinationSnapshot;
 }): ReservationAuditReport | "unreadable-reservations" {
   const run = gitRunAdapter(opts.deps.runGit ?? ((args: string[]) => {
     const r = spawnSync("git", args, { cwd: opts.deps.repoRoot ?? repoRoot, encoding: "utf8", maxBuffer: 1 << 26 });
@@ -17052,6 +17150,7 @@ function buildReservationAuditReport(opts: {
   if (refs.status === "unknown") return "unreadable-reservations";
   const reservations = refs.refs.map((r) => ({ ...r, anchor: readReservationAuditAnchor(r.ref, run) }));
   const declaredIds = reservationAuditPlanIds(opts.planPath);
+  for (const id of opts.destinationSnapshot?.ids ?? []) declaredIds.add(id);
   const historicalIds = new Set(opts.deps.auditHistoryIds ? opts.deps.auditHistoryIds().map((n) => `W1-T${n}`) : [...reservationAuditHistoryIds(opts.planPath)]);
   const branches = openRunBranchesByTaskId(run);
   let openPrTrailerIds: Set<string> | "unknown" = "unknown";
@@ -17063,6 +17162,11 @@ function buildReservationAuditReport(opts: {
       openPrTrailerIds = idsFromOpenPrTrailers((opts.deps.openPrTexts ?? (() => openPrMintTexts(opts.self.owner, opts.self.repo)))());
     } catch (err) {
       degraded.push(`open PR read failed: ${String(err)}`);
+    }
+  }
+  if (openPrTrailerIds !== "unknown") {
+    for (const text of opts.destinationSnapshot?.openPrTexts ?? []) {
+      for (const id of mentionedTaskIds(text).filter(isAllocatableTaskId)) openPrTrailerIds.add(`W1-T${id}`);
     }
   }
   if (branches.status === "unknown") degraded.push(branches.reason);
@@ -17083,7 +17187,7 @@ function buildReservationAuditReport(opts: {
 }
 
 function buildReservationReapReport(
-  opts: { planPath: string; self: { owner: string; repo: string }; deps: NextTaskIdReserveDeps },
+  opts: { planPath: string; self: { owner: string; repo: string }; deps: NextTaskIdReserveDeps; destinationSnapshot?: TaskIdDestinationSnapshot },
   run: ReturnType<typeof gitRunAdapter>,
 ): ReservationAuditReport {
   const clock = clockFromMillisFn(opts.deps.auditNowMs);
@@ -17139,6 +17243,7 @@ function buildReservationReapReport(
     return rows;
   }, [] as ReservationAuditPull[]);
   const declaredIds = read("plan read", () => reservationAuditPlanIds(opts.planPath), new Set<string>());
+  for (const id of opts.destinationSnapshot?.ids ?? []) declaredIds.add(id);
   const namespace = `refs/rmd-reap/${randomUUID()}/`;
   let historicalIds = new Set<string>();
   try {
@@ -17169,6 +17274,9 @@ function buildReservationReapReport(
     }, undefined);
   }
   const openPrTrailerIds = idsFromOpenPrTrailers(pulls.filter(p => p.state === "open").map(p => p.body ?? ""));
+  for (const text of opts.destinationSnapshot?.openPrTexts ?? []) {
+    for (const id of mentionedTaskIds(text).filter(isAllocatableTaskId)) openPrTrailerIds.add(`W1-T${id}`);
+  }
   for (const pull of pulls.filter(p => p.state === "open")) {
     const match = RUN_BRANCH_TASK_REF_RE.exec(`refs/heads/${pull.head.ref}`);
     if (match) openPrTrailerIds.add(match[1]);
@@ -17549,8 +17657,15 @@ export async function nextTaskIdCommand(
       return 2;
     }
   }
+  let destinationSnapshot: TaskIdDestinationSnapshot | undefined;
+  try {
+    destinationSnapshot = await taskIdDestinationSnapshot(deps, offline);
+  } catch (error) {
+    console.error(`### rmd next-task-id: ${(error as Error).message}`);
+    return 2;
+  }
   if (rest.includes("--audit")) {
-    const report = buildReservationAuditReport({ planPath, offline, thresholdDays: auditAgeDays, self, deps, reap });
+    const report = buildReservationAuditReport({ planPath, offline, thresholdDays: auditAgeDays, self, deps, reap, destinationSnapshot });
     if (report === "unreadable-reservations") {
       console.error("### rmd next-task-id --audit: cannot read origin refs/rmd-id/*");
       return 2;
@@ -17571,6 +17686,7 @@ export async function nextTaskIdCommand(
       planPath,
       repoRoot: mintRepoRoot,
       openPrTexts: offline ? undefined : (deps.openPrTexts ?? (() => openPrMintTexts(self.owner, self.repo))),
+      destinationSnapshot: destinationSnapshot ?? null,
     });
   } catch (e) {
     console.error(`### rmd next-task-id: ${(e as Error).message}`);
@@ -34972,7 +35088,7 @@ async function triageCommandLocked(
     // open plan PRs have already minted, and handed to the worker — which has no Bash tool
     // and so could never have run the grep the prompt used to describe. Ledgered with its
     // provenance so a degraded source is visible, never silent.
-    const mint = mintNextTaskIdWithHistory({
+    const mint = await mintNextTaskIdWithHistoryAsync({
       planPath: join(worktreePath, "plan", "tasks.yaml"),
       repoRoot: worktreePath,
       openPrTexts: () => openPrMintTexts(owner, repo),
@@ -35531,7 +35647,7 @@ export async function planCommand(
     // wording in every mode) and the count is unknowable until the worker has run. Reserving a
     // bounded block up front is the only ordering that both refuses cheaply on collision and leaves
     // no id stranded — every id, used or not, is released in the `finally` below.
-    const mint = mintNextTaskIdWithHistory({
+    const mint = await mintNextTaskIdWithHistoryAsync({
       planPath: join(worktreePath, "plan", "tasks.yaml"),
       repoRoot: worktreePath,
       openPrTexts: () => openPrMintTexts(owner, repo),
@@ -38245,6 +38361,15 @@ export async function approveCommand(
     return code;
   }
 
+  let approveDestinationSnapshot: TaskIdDestinationSnapshot | null = null;
+  let approveDestinationFailure: string | undefined;
+  if (deps.gateway === undefined && classification.state === "ready" && classification.draft) {
+    try { approveDestinationSnapshot = (await taskIdDestinationSnapshot()) ?? null; }
+    catch (error) {
+      const reason = taskIdDestinationFailureReason(error);
+      approveDestinationFailure = reason; // Deferred to the actual mint callback; adoption/skills keep their own flow.
+    }
+  }
   const runId = `APPROVE-${proposalId}-${Date.now()}`;
   const log = (step: string, extra: Record<string, unknown> = {}) => appendLedger(ledgerPath, { run_id: runId, task_id: proposalId, step, lane: "approve", ...extra });
 
@@ -38338,12 +38463,15 @@ export async function approveCommand(
     const materialized = materializeDraftTaskIds(
       { fragmentYaml: payload.fragmentYaml, stampLine: payload.stampLine },
       {
-        mint: () =>
-          mintNextTaskIdWithHistory({
+        mint: () => {
+          if (approveDestinationFailure) throw new Error(approveDestinationFailure);
+          return mintNextTaskIdWithHistory({
             planPath: join(worktreePath, "plan", "tasks.yaml"),
             repoRoot: worktreePath,
+            destinationSnapshot: approveDestinationSnapshot,
             openPrTexts: () => openPrMintTexts(owner, repo),
-          }),
+          });
+        },
         reserveBlock: (startId, count) => {
           idBlock = reserveTaskIdBlock(startId, count, taskIdReservationsDir(config.root), {
             info: { purpose: `rmd approve ${payload.proposalId} (${purposeLabel})` },
@@ -38844,6 +38972,15 @@ async function approveBatchCommand(
     return 2;
   }
 
+  let batchDestinationSnapshot: TaskIdDestinationSnapshot | null = null;
+  let batchDestinationFailure: string | undefined;
+  if (deps.batchGateway === undefined) {
+    try { batchDestinationSnapshot = (await taskIdDestinationSnapshot()) ?? null; }
+    catch (error) {
+      const reason = taskIdDestinationFailureReason(error);
+      batchDestinationFailure = reason; // The batch reports this exact cause only if it needs a new id.
+    }
+  }
   const runId = `APPROVE-BATCH-${Date.now()}`;
   const log = (step: string, extra: Record<string, unknown> = {}) =>
     appendLedger(ledgerPath, { run_id: runId, task_id: "BATCH", step, lane: "approve", ...extra });
@@ -38899,12 +39036,15 @@ async function approveBatchCommand(
           const materialized = materializeDraftTaskIds(
             { fragmentYaml: payload.fragmentYaml, stampLine: payload.stampLine },
             {
-              mint: () =>
-                mintNextTaskIdWithHistory({
+              mint: () => {
+                if (batchDestinationFailure) throw new Error(batchDestinationFailure);
+                return mintNextTaskIdWithHistory({
                   planPath: join(batchWorktree, "plan", "tasks.yaml"),
                   repoRoot: batchWorktree,
+                  destinationSnapshot: batchDestinationSnapshot,
                   openPrTexts: () => openPrMintTexts(owner, repo),
-                }),
+                });
+              },
               reserveBlock: (startId, count) => {
                 const block = reserveTaskIdBlock(startId, count, taskIdReservationsDir(config.root), {
                   info: { purpose: `rmd approve ${payload.proposalId} (batch run ${runId})` },
@@ -41721,6 +41861,7 @@ export function progressWatchdogCommand(
 }
 
 export interface ClaimVerbOpts {
+  taskLookup?: TaskLookupOptions;
   reserver?: DispatchClaimReserver;
   /** W1-T10925: builds the reserver for the resolved plan root (default {@link dispatchClaimReserverFor}). */
   reserverFor?: (repoDir: string) => DispatchClaimReserver;
@@ -41754,7 +41895,43 @@ export function plannedOnOriginMain(taskId: string, dir: string = repoRoot): boo
   return mono.status === 0 && new RegExp(`^\\s*-?\\s*id:\\s*"?${escaped}"?\\s*$`, "m").test(mono.stdout ?? "");
 }
 
-export function claimCommand(rest: string[], opts: ClaimVerbOpts = {}): number {
+async function claimCatalogPlanRoot(taskId: string, opts: ClaimVerbOpts): Promise<string | undefined> {
+  let savedState: { value: string | undefined } | undefined;
+  const stateDir = () => (savedState ??= { value: opts.stateDir ?? instanceStateDirIfConfigured() }).value;
+  const located = resolveVerbPlanRoot(taskId, {
+    cwdRoot: repoRoot, stateDir, holds: (root, id) => (opts.isPlanned ?? plannedOnOriginMain)(id, root),
+  });
+  if (located.ok) return located.root;
+  const destination = planDestinationRepository(stateDir());
+  if (destination.outcome !== "off") {
+    const publicRoot = instanceVerbPlanRoot(stateDir);
+    let publicPlan: Plan;
+    try { publicPlan = await loadPlanAtRefAsync(publicRoot.root, "plan/tasks.yaml", "origin/main"); }
+    catch (error) {
+      // Membership needs a readable plan, not review criteria; keep an unreadable plan distinct from an absent id.
+      console.error(`rmd claim: public plan unreadable (${error instanceof Error ? "plan-error" : "plan-thrown"}) — no private fallback`);
+      return undefined;
+    }
+    const found = await findTaskInCatalogs(taskId, { ...opts.taskLookup, stateDir: stateDir(), byId: publicPlan.byId });
+    if (found.outcome === "unreadable") {
+      console.error(`rmd claim: task catalog unreadable (${found.reason}) — no claim`);
+      return undefined;
+    }
+    if (found.outcome === "found") return publicRoot.root;
+  }
+  console.error(`rmd claim: ${taskId} is not in the plan on origin/main — refusing to claim an unplanned id (${located.error})`);
+  return undefined;
+}
+
+export async function claimCommandWithCatalogs(rest: string[], opts: ClaimVerbOpts = {}): Promise<number> {
+  const taskId = rest[0];
+  if (taskId === undefined || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(taskId) ||
+      unknownArgError("claim", rest.slice(1), [], ["--drop", "--renew"]) !== null) return claimCommand(rest, opts);
+  const root = await claimCatalogPlanRoot(taskId, opts);
+  return root === undefined ? 1 : claimCommand(rest, opts, root);
+}
+
+export function claimCommand(rest: string[], opts: ClaimVerbOpts = {}, preparedRoot?: string): number {
   const taskId = rest[0];
   const badArg = taskId === undefined || taskId.startsWith("-")
     ? "rmd claim: a task id is required"
@@ -41767,7 +41944,7 @@ export function claimCommand(rest: string[], opts: ClaimVerbOpts = {}): number {
     console.error(`rmd claim: '${taskId}' is not a task id`);
     return 2;
   }
-  const planRoot = claimPlanRoot(taskId, opts);
+  const planRoot = preparedRoot ?? claimPlanRoot(taskId, opts);
   if (planRoot === undefined) return 1;
   const reserver = opts.reserver ?? (opts.reserverFor ?? dispatchClaimReserverFor)(planRoot);
   const ref = dispatchClaimRef(taskId);
@@ -41850,7 +42027,7 @@ export async function claimHoldCommand(rest: string[], opts: ClaimHoldOpts = {})
     console.error(`rmd claim: '${taskId}' is not a task id, or --interval-ms is not a positive integer`);
     return 2;
   }
-  const planRoot = claimPlanRoot(taskId, opts);
+  const planRoot = await claimCatalogPlanRoot(taskId, opts);
   if (planRoot === undefined) return 1;
   const reserver = opts.reserver ?? (opts.reserverFor ?? dispatchClaimReserverFor)(planRoot);
   const held = takeOrAdoptClaim(taskId, reserver, opts.localHost ?? hostname());
@@ -43318,7 +43495,7 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
   ["live-edits", async (rest) => await liveEditsCommand(rest)],
   ["host-alert", async (rest) => hostAlertCommand(rest)],
   ["test-place", (rest) => testPlaceCommand(rest)],
-  ["claim", (rest) => rest.includes("--hold") ? claimHoldCommand(rest) : claimCommand(rest)],
+  ["claim", (rest) => rest.includes("--hold") ? claimHoldCommand(rest) : claimCommandWithCatalogs(rest)],
   ["impossible-canary", async (rest) => await impossibleCanaryCommand(rest, (input) => runImpossibleCanary(input))],
   ["benchmark-aa", async (rest) => rest[0] === "balanced" ? await codexBalancedTrialCommand(rest.slice(1), (request, stateDir) =>
     registerCodexBalancedTrial({ request, stateDir, readiness: (registration) =>
@@ -43347,7 +43524,7 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
     },
   ],
   ["caller-sweep", (rest) => callerSweepCommand(rest)],
-  ["ci-learning", (rest) => ciLearningCommand(rest)],
+  ["ci-learning", ciLearningCommandWithDestination],
   ["rule-efficacy", (rest) => ruleEfficacyCommand(rest)],
   ["coverage-improve", (rest) => coverageImproveCommand(rest)],
   ["verdict-calibration", (rest) => verdictCalibrationCommand(rest)],

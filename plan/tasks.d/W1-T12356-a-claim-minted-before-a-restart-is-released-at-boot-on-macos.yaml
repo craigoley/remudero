@@ -16,7 +16,7 @@
   files:
     - src/lib/dispatch-claim.ts
     - test/dispatch/a-claim-minted-before-a-restart-is-released-at-boot-on-macos.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "On darwin, `readNamespaceBootMs` gives the kernel boot time (now minus `os.uptime()`), with no child process and no read of `/proc`"
