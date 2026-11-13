@@ -13,10 +13,10 @@
   files:
     - src/run-task.ts
     - src/cli/commands/fix.ts
-    - test/worker/run-task/fix-lane-commit-refused-the-worker-changed-nothing.test.ts
+    - test/triage/fix-lane-commit-refused-the-worker-changed-nothing.test.ts
   acceptance:
     - claim: "commit-refused:the worker changed nothing no longer needs an operator hand fix"
-      proof: "grep: test(\"W1-T11014: fix-lane-commit-refused-the-worker-changed-nothing clears without a person\" in test/worker/run-task/fix-lane-commit-refused-the-worker-changed-nothing.test.ts"
+      proof: "grep: test(\"W1-T11014: fix-lane-commit-refused-the-worker-changed-nothing clears without a person\" in test/triage/fix-lane-commit-refused-the-worker-changed-nothing.test.ts"
   note: "Filed by fix-lane at rung 2; measure the cause's share of PR-hours after the build merges."
   rationale: |
     commit-refused:the worker changed nothing cost 53.95 PR-hours; owner fix-lane
@@ -50,3 +50,15 @@
     permissions, data deletion, or merge/deploy/review policy. The previous ruling (verdict low, proceed, confidence
     0.86, pin e3917b34…, judged 2026-11-10T00:56:37Z) covered the pre-amendment files only and was dropped as stale;
     verify: human parks this task for a fresh machine-filing risk ruling after the scope change lands.
+    Test path amended 2026-11-12 (architect clarify pass, operator-authorized after author preflight): the declared test
+    file and the grep proof path move from test/worker/run-task/fix-lane-commit-refused-the-worker-changed-nothing.test.ts
+    to test/triage/fix-lane-commit-refused-the-worker-changed-nothing.test.ts. Author preflight refused the old path
+    because it collides by basename with W1-T7748's existing test/fix-lane-commit-refused-the-worker-changed-nothing.test.ts,
+    which the test-restructure map sends to that exact test/worker/run-task destination. The new test imports
+    #test/helpers/run-task-test.js, and rmd test-place computes test/triage for it. The acceptance claim text, the grep
+    pattern, risk: high, and verify: human are unchanged; only the path moved.
+    Settled by lookup: does the old path collide with an existing test? -> yes, W1-T7748's
+    test/fix-lane-commit-refused-the-worker-changed-nothing.test.ts maps to test/worker/run-task
+    (plan/seeds/test-restructure-2026-10-16/proposed-map.tsv:1889; plan/tasks.d/W1-T7748-*.yaml).
+    Settled by lookup: is the test/triage path free today? -> yes, no file of that name exists there (Glob
+    test/triage/*.test.ts), and test/helpers/run-task-test.ts exists for the import.
