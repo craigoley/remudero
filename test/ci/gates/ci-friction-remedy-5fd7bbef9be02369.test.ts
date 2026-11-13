@@ -1,12 +1,11 @@
 import assert from "node:assert/strict";
-import { copyFileSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { pathToFileURL } from "node:url";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
-import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
 
 // @source-text-subject: the worker's registration source is the input to the parity parser.
 test("W1-T10798: a new CI census is refused until the worker registers it", async () => {
@@ -33,9 +32,8 @@ test("W1-T10798: a new CI census is refused until the worker registers it", asyn
     "export const UNREADABLE_EXTRAS = {")), /worker PRECHECK_EXTRA_CI_CENSUSES declaration is not statically readable/);
 });
 
-// @source-text-subject: worker declarations are untrusted inputs to the managed hook's static reader.
-test("W1-T10798: check:test:test/every-ci-census-is-asked-before-the-push.test.ts is prevented, not retried — managed hook population", async (t) => {
-  const harness = ownedFixtureDir(t, "managed-census-harness").dir;
+// @source-text-subject: worker declarations are untrusted inputs to the precheck's static reader.
+test("W1-T10798: check:test:test/every-ci-census-is-asked-before-the-push.test.ts is prevented, not retried — harness precheck population", async (t) => {
   const repo = gitRepo({ scope: t, kind: "managed-census-worker" });
   const workerPath = join(REPO_ROOT, "scripts/census-precheck.mjs");
   const worker = await import(pathToFileURL(workerPath).href);
@@ -45,13 +43,6 @@ test("W1-T10798: check:test:test/every-ci-census-is-asked-before-the-push.test.t
     mkdirSync(dirname(join(repo.dir, path)), { recursive: true });
     writeFileSync(join(repo.dir, path), text);
   };
-  mkdirSync(join(harness, "hooks"));
-  mkdirSync(join(harness, "scripts"));
-  copyFileSync(join(REPO_ROOT, "hooks/pre-push"), join(harness, "hooks/pre-push"));
-  // Expose the real census entry point and its real defaults; unrelated hook gates are absent.
-  writeFileSync(join(harness, "scripts/census-precheck.mjs"),
-    `export { main, listAdmittedCensusMembers, runCensusSuitesViaChild } from ${JSON.stringify(pathToFileURL(workerPath).href)};\n`);
-  symlinkSync(join(REPO_ROOT, "node_modules"), join(harness, "node_modules"));
   const fillers = Array.from({ length: 20 }, (_, i) => `test/filler-${i}-census.test.ts`);
   for (const path of fillers) write(path, "");
   const retained = "test/checkout-writers.test.ts";
@@ -74,10 +65,11 @@ test("W1-T10798: check:test:test/every-ci-census-is-asked-before-the-push.test.t
   assert.notEqual(extraSource, source);
   const saveWorker = (text: string) => write("scripts/census-precheck.mjs",
     `${text}\nthrow new Error("worker module must never execute");\n`);
+  // W1-T12510: the hook no longer runs the precheck; the harness's own copy judges the tree as its --root.
   const hook = () => {
-    const result = spawnSync("sh", [join(harness, "hooks/pre-push")], {
-      cwd: repo.dir, encoding: "utf8", input: "", timeout: 60_000,
-      env: { ...process.env, RMD_PREPUSH_GATES: "1", RMD_CENSUS_SNAPSHOT: "" },
+    const result = spawnSync(process.execPath, [workerPath, "--root", repo.dir, "--base", "origin/main"], {
+      cwd: repo.dir, encoding: "utf8", timeout: 60_000,
+      env: { ...process.env, RMD_CENSUS_SNAPSHOT: "" },
     });
     assert.equal(result.error, undefined);
     assert.equal(result.signal, null);
@@ -89,12 +81,12 @@ test("W1-T10798: check:test:test/every-ci-census-is-asked-before-the-push.test.t
   const refused = hook();
   assert.equal(refused.status, 1, refused.output);
   assert.ok(refused.output.includes(`census-parity: ${added} is a CI census nothing asks before the push`), refused.output);
-  assert.match(refused.output, /pre-push REFUSED/);
 
   saveWorker(extraSource.replace("export const PRECHECK_PARITY = {",
     `export const PRECHECK_PARITY = {\n  "${added}": { modeled: () => [] },`));
   const registered = hook();
-  assert.equal(registered.status, 0, registered.output);
+  // Status 2 is a fixture tree the other measures cannot read; only 1 is a refusal.
+  assert.notEqual(registered.status, 1, registered.output);
   assert.doesNotMatch(registered.output, /census-parity:/);
 
   saveWorker(extraSource.replace(`"${added}": "worker addition #10798"`,
@@ -112,7 +104,8 @@ test("W1-T10798: check:test:test/every-ci-census-is-asked-before-the-push.test.t
   assert.ok(stale.output.includes(`census-parity: ${retained} is baselined but precheck now asks it or CI no longer runs it`), stale.output);
   write("src/lib/rule-suites.ts", selectorSource);
   const restored = hook();
-  assert.equal(restored.status, 0, restored.output);
+  assert.notEqual(restored.status, 1, restored.output);
+  assert.doesNotMatch(restored.output, /census-parity:/);
 });
 
 test("W1-T10798: the census-parity trigger measures a diff outside its own path list", async () => {

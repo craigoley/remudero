@@ -315,13 +315,16 @@ test("the reclaim reports bytes per volume — --reclaim-only clears a stranded 
   assert.match(run.stdout, new RegExp(`git reclaim — ${esc(repoB)}: freed`));
 });
 
-test("a live worker refuses the git reclaim and names the holder — a live fleet container, and nothing is touched", () => {
+// W1-T12495: beside a live fleet the rung judges each checkout alone. A checkout written in the last
+// 30 minutes (this fresh fixture) is kept with its reason; the full per-checkout rules are in
+// test/deploy/the-nightly-reclaim-reaches-the-root-disk-while-the-fleet-runs.test.ts.
+test("beside a live worker a recently written checkout is kept with its reason, and the holder is named", () => {
   const repo = gcLogFixture();
   const run = runHostUpdate("live-mount", ["--reclaim-only"], SCRIPT, { RMD_GIT_RECLAIM_DIRS: repo });
-  assert.match(run.stderr, /REFUSING git object reclaim/);
-  assert.match(run.stderr, /rmd-local:latest/, "the refusal must name the live holder");
-  assert.ok(existsSync(join(repo, ".git", "gc.log")), "the gc.log must survive the refusal untouched");
-  assert.doesNotMatch(run.stdout, /git reclaim —.*: freed/, "no checkout may report a reclaim while live");
+  assert.match(run.stdout, new RegExp(`git reclaim — ${esc(repo)}: kept — recent-write: `));
+  assert.match(run.stdout, /rmd-local:latest/, "the run must name the live holder");
+  assert.ok(existsSync(join(repo, ".git", "gc.log")), "the gc.log must survive untouched");
+  assert.doesNotMatch(run.stdout, /git reclaim —.*: freed/, "a busy checkout may not report a reclaim while live");
 });
 
 // W1-T3682: a target with no .git used to print "no .git here, skipping" to STDOUT and exit 0 —
@@ -343,29 +346,30 @@ test("--dry-run --reclaim-only reports what it would do without touching the gc.
   assert.ok(existsSync(join(repo, ".git", "gc.log")), "a dry run must not remove the gc.log");
 });
 
-test("MUTANT: dropping the live-worker refusal lets git gc run beside a live fleet container", () => {
+test("MUTANT: dropping the idle proof lets git write in a busy checkout beside a live fleet container", () => {
   const mutant = mutate(
-    '  if [ -n "${LIVE}" ]; then\n    echo "host-update: REFUSING git object reclaim',
-    '  if [ -n "${LIVE}" ] && false; then\n    echo "host-update: REFUSING git object reclaim',
+    '      kept_reason="$(git_reclaim_kept_reason "${gdir}/.git")"\n',
+    '      kept_reason=""\n',
   );
   const repo = gcLogFixture();
   const runMutant = runHostUpdate("live-mount", ["--reclaim-only"], mutant, { RMD_GIT_RECLAIM_DIRS: repo });
-  assert.ok(
-    !existsSync(join(repo, ".git", "gc.log")),
-    "the mutant must actually reach git gc and clear the log — otherwise this proves nothing about the guard",
+  assert.match(
+    runMutant.stdout + runMutant.stderr,
+    new RegExp(`git reclaim — ${esc(repo)}: (freed|'git maintenance' FAILED)`),
+    "the mutant must actually reach git in the busy checkout — otherwise this proves nothing about the guard",
   );
-  // …and the real script must not: the assertion the refusal test above makes, restated here so the
-  // pair reads as one claim.
+  // …and the real script must not: the assertion the test above makes, restated here so the pair
+  // reads as one claim.
   const repoReal = gcLogFixture();
   const real = runHostUpdate("live-mount", ["--reclaim-only"], SCRIPT, { RMD_GIT_RECLAIM_DIRS: repoReal });
-  assert.ok(existsSync(join(repoReal, ".git", "gc.log")));
+  assert.match(real.stdout, new RegExp(`git reclaim — ${esc(repoReal)}: kept — `));
 });
 
 test("MUTANT: collapsing the per-checkout report into one combined total is caught by the per-volume test", () => {
   const src = readFileSync(SCRIPT, "utf8");
-  const loopHeader = '    for gdir in "${GIT_RECLAIM_DIRS[@]}"; do\n';
-  const perCheckoutLine = '        echo "host-update: git reclaim — ${gdir}: freed $(human_kb "${freed_kb}") ${had_gc_log}"\n';
-  const doneMarker = "    done\n  fi\nfi\n\n# ── 4b.";
+  const loopHeader = '  for gdir in "${GIT_RECLAIM_DIRS[@]}"; do\n';
+  const perCheckoutLine = '      echo "host-update: git reclaim — ${gdir}: freed $(human_kb "${freed_kb}") ${had_gc_log}"\n';
+  const doneMarker = "  done\nfi\n\n# ── 4b.";
   for (const [name, needle] of [
     ["loop header", loopHeader],
     ["per-checkout report line", perCheckoutLine],
@@ -374,10 +378,10 @@ test("MUTANT: collapsing the per-checkout report into one combined total is caug
     assert.equal(src.split(needle).length - 1, 1, `the ${name} must be locatable and unique, or this proves nothing`);
   }
   let mutated = src.replace(loopHeader, `TOTAL_FREED_KB=0\n${loopHeader}`);
-  mutated = mutated.replace(perCheckoutLine, '        TOTAL_FREED_KB=$((TOTAL_FREED_KB + freed_kb))\n');
+  mutated = mutated.replace(perCheckoutLine, '      TOTAL_FREED_KB=$((TOTAL_FREED_KB + freed_kb))\n');
   mutated = mutated.replace(
     doneMarker,
-    '    done\n    echo "host-update: git reclaim — freed $(human_kb "${TOTAL_FREED_KB}") total"\n  fi\nfi\n\n# ── 4b.',
+    '  done\n  echo "host-update: git reclaim — freed $(human_kb "${TOTAL_FREED_KB}") total"\nfi\n\n# ── 4b.',
   );
   assert.notEqual(mutated, src, "the mutation must actually change the script");
   const dir = mkdtempSync(join(tmpdir(), "host-update-mutant-vol-"));

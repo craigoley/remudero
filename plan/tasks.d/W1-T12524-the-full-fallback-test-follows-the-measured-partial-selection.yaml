@@ -1,0 +1,37 @@
+- id: W1-T12524
+  title: "The full-fallback test follows the measured partial selection instead of a fixed suite count"
+  repo: remudero
+  depends_on: []
+  priority: 1.0
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: low
+  band_meaning: blast-radius
+  origin: operator-followup#capacity-aware-full-fallback-assertion
+  files:
+    - test/a-full-fallback-author-selection-is-never-run-whole.test.ts
+  status: queued
+  attempts: 0
+  budget_usd: 2.00
+  rationale: |
+    W1-T11583 removed the fixed author-worker ceiling, so the amount of a partial
+    fallback left to CI can vary with measured host capacity. Its approved scope
+    included this existing suite, but the test still required exactly three suites
+    for CI and printed a fixed 3-of-6 sentence. Make the test derive its expectations
+    from the receipt, verify that executed suites are the planned subset, and ensure
+    a refusal before test execution does not claim that a partial run occurred.
+    This is a test-only correction; it changes no runtime behavior or admission gate.
+  design: |
+    NO-INVARIANTS: this change updates only test expectations; it preserves the existing runtime behavior and public output contract.
+  acceptance:
+    - claim: "The partial-run assertion derives the count left to CI from planned and executed suites, and checks the receipt and user-facing sentence against those measured counts."
+      proof: "grep: leftToCi = notRun\\.length in test/a-full-fallback-author-selection-is-never-run-whole.test.ts"
+    - claim: "A run refused before test execution does not claim that a full-fallback partial run occurred."
+      proof: 'grep: full-fallback: PARTIAL — ran" in test/a-full-fallback-author-selection-is-never-run-whole.test.ts'
+  note: |
+    Id W1-T12524 reserved by the operator allocator on
+    plan-file-W1-T12524-author-fallback-assertion. The focused suite and author
+    preflight evidence were produced before this filing; the code PR must use this
+    task id and satisfy its exact-head and hosted gates.
