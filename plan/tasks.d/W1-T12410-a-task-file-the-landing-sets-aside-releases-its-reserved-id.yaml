@@ -17,7 +17,7 @@
     - src/lib/feedback-landing.ts
     - src/lib/flake-incident-gardener.ts
     - test/gardeners/a-task-file-the-landing-sets-aside-releases-its-reserved-id.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "A new task file that a later landing call sets aside, because its landing pull request closed without a merge or the plan preflight refused it, releases its id reservation when the landing branch holds it"

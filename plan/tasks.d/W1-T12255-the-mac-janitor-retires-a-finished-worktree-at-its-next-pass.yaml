@@ -20,7 +20,7 @@
     - test/deploy/the-mac-janitor-retires-a-finished-worktree-at-its-next-pass.test.ts
     - test/the-mac-janitor-reclaims-regenerable-output-from-held-checkouts.test.ts
     - test/workspace-retirement-safety.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "The retirement guard answers one question for a commit: is every pull request of this commit merged or closed. A commit with no pull request, a commit with an open pull request and an answer that cannot be read are each not finished"
