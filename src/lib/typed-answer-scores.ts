@@ -127,7 +127,11 @@ export function decisionAnsweredTypedAnswers(line: Record<string, unknown>): Typ
       : raw.score !== undefined ? "score" : "choice";
     return { ...base, questionType, options: [...distribution.map((entry) => entry.option), ...(cannotTell === undefined ? [] : [CANNOT_TELL_OPTION])],
       ...(cannotTell === undefined ? {} : { abstainOption: CANNOT_TELL_OPTION }),
-      answer: { kind: "distribution", distribution: [...distribution, ...(cannotTell === undefined ? [] : [{ option: CANNOT_TELL_OPTION, probability: cannotTell }])] } };
+      // A decision row gives the declared options a distribution that sums to 1 and the cannot-tell mass apart from it
+      // (W1-T12416). The joint answer gives cannot-tell its own mass and each option its share of the rest.
+      answer: { kind: "distribution", distribution: cannotTell === undefined ? distribution
+        : [...distribution.map((entry) => ({ option: entry.option, probability: entry.probability * (1 - cannotTell) })),
+          { option: CANNOT_TELL_OPTION, probability: cannotTell }] } };
   });
 }
 

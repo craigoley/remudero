@@ -131,8 +131,8 @@ test("W1-T12414 criterion 4: a score question is scored on its 2 to 10 levels, a
   const envelope = { answers: {
     size: { type: "score", score: 0.2, confidence: 0.9, legend: { 0: "tiny", 1: "small", 2: "medium", 3: "large" },
       probabilities: { 0: 0.1, 1: 0.6, 2: 0.2, 3: 0.1 } },
-    risk: { type: "choice", choice: "cannot_tell", probabilities: { low: 0.1, high: 0.1, cannot_tell: 0.8 } },
-    scope: { type: "choice", choice: "in", confidence: 0.5, probabilities: { in: 0.3, out: 0.2, cannot_tell: 0.5 } },
+    risk: { type: "choice", choice: "cannot_tell", probabilities: { "string:low": 0.1, "string:high": 0.1, cannot_tell: 0.8 } },
+    scope: { type: "choice", choice: "string:in", confidence: 0.5, probabilities: { "string:in": 0.6, "string:out": 0.4, cannot_tell: 0.5 } },
   } };
   const answers = readDecisionAnswers("microsoft-systemone", sizes, envelope);
   const recorded = decisionAnsweredTypedAnswers({ step: DECISION_ANSWERED_STEP, outcome: "answered", role: "review", candidate: "model-d", answers });
