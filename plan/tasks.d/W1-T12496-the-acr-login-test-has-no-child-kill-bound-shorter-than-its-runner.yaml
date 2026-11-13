@@ -1,0 +1,53 @@
+- id: W1-T12496
+  title: "The ACR login test of W1-T5319 starts its scripts with no kill bound of 15 s, so a slow host makes the file NOT MEASURED and not red"
+  repo: remudero
+  depends_on: []
+  priority: 1.2
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: low # one test file; the scripts and every assertion on them stay as they are
+  band_meaning: blast-radius
+  origin: operator-session#root-cause-defects-2026-11-13
+  plan_refs:
+    - W1-T5319
+    - W1-T2811
+    - W1-T9919
+    - W1-T12003
+    - W1-T12303
+  files:
+    - test/w1-t5319-the-acr-login-refreshes-itself-and-escalates-when-it-cannot.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "The fixture of the file starts each script with no `timeout` and no `killSignal` of its own. A script that hangs is stopped by the bound of the runner of the whole file"
+      proof: "grep: W1-T12496 criterion 1 in test/w1-t5319-the-acr-login-refreshes-itself-and-escalates-when-it-cannot.test.ts"
+    - claim: "When a script that the fixture starts ends on a signal or with a spawn error, the test fails with a message that names the script, the signal and the error code. It never fails with only `null` against an exit status"
+      proof: "grep: W1-T12496 criterion 2 in test/w1-t5319-the-acr-login-refreshes-itself-and-escalates-when-it-cannot.test.ts"
+  rationale: |
+    OBSERVED 2026-11-13 on the Azure host, ~/rmd-work/ship/T12359/history:
+    - "03:12:25Z preflight attempt 2 failed: REAL census finding: test/w1-t5319-the-acr-login-refreshes-itself-and-escalates-when-it-cannot.test.ts fails". The lane then stopped the branch as BLOCKED.
+    - The census precheck of that attempt measured the file at 36,507 ms. The 1-minute load was 22 to 27 on 8 cores in the same step.
+    - The ship lane (~/rmd-work/bin/ship.sh, `triage`) reads a failed census suite as a real red of the branch. It does not rerun it. So a slow host stops a branch that does not touch this file.
+    MEASURED 2026-11-13 on the host, at origin/main 53ef46888:
+    - At a 1-minute load of 9.6 the file passes 13 of 13 in 8.4 s. The tests that run scripts/fleet-heartbeat.sh take 0.4 to 2.3 s.
+    - Under `systemd-run --user --scope -p CPUQuota=8%` the file passes 10 of 13. The three red tests are the three that run scripts/fleet-heartbeat.sh: "the refresh records a failed az acr login with its reason" (15.5 s), "a successful refresh publishes ok and clears the failed reason" (16.2 s) and "an absent or unreadable refresh receipt never publishes ok" (15.1 s). Each fails with `actual: null`: the child was killed and has no exit status.
+    READ at origin/main 53ef46888.
+    - The fixture `run` (line 52) calls `spawnSync` with `timeout: 15_000`. When the bound fires, Node kills the script and the next assertion compares `null` with an exit status. The failure does not say that the child was killed.
+    - The census precheck runs the whole file under `CENSUS_SUITE_CHILD_TIME_BOUND_MS` = 120,000 ms (scripts/census-precheck.mjs:496). When that bound fires it reports NOT MEASURED, and the lane treats that as a fault of the host. The bound of 15 s turns the same slowness into a red assertion.
+    - The bound of 15 s asserts nothing about the scripts. No criterion of W1-T5319 is about how long a script takes.
+    CHECKED for overlap: W1-T12003 (queued) reruns a red rule suite alone, and lists the fixed child timeouts inside suites as not in scope. W1-T12004, W1-T12301 and W1-T12303 (queued) change admission and receipts in src/lib/test-slot.ts. W1-T11099 (queued) records census admission in shadow. W1-T10252 (queued) adds the host load to a fast-gate RUNAWAY refusal. None removes the kill bound of a test child, and none changes how a census suite failure from a killed child is read.
+  design: |
+    In test/w1-t5319-the-acr-login-refreshes-itself-and-escalates-when-it-cannot.test.ts:
+    1. Remove `timeout: 15_000` from the fixture `run`. Keep the options in one value that the fixture returns, so a test can read them.
+    2. Add one small helper in the file that asserts a child result. It fails first when `result.error` is set or `result.signal` is not null, with the script, the signal and the error code in the message. Then it checks the exit status as the tests do today. Use it at every place that reads the status of a fixture child.
+    3. Keep every other assertion of the 13 tests as it is.
+    Do not add a wall-clock bound. A script that hangs is stopped by the bound of the runner of the whole file: 120 s in the census precheck, and the timeout of the test runner in CI.
+    NO-INVARIANTS: one test file changes; no rule of the product changes.
+    NOT IN SCOPE: the run time of scripts/fleet-heartbeat.sh, other test files with a child timeout, and the triage in ship.sh.
+  falsifier: |
+    Put `timeout: 15_000` back and criterion 1 must fail. Compare the status without the helper and criterion 2 must fail, because a killed child then fails with `null` only. Restore and require both to pass. Then run the file under `systemd-run --user --scope -p CPUQuota=8%` and require 13 of 13 to pass.
+  note: |
+    Id reserved for run-unfiled-1794559757000 with ~/rmd-work/bin/reserve-id.sh, after W1-T12495.
+    The test for criterion 2 can start a stub script that ends with `kill -TERM $$`. It needs no slow host.

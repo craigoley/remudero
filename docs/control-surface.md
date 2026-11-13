@@ -30,16 +30,21 @@ unattended, because the bogus `install` subcommand was ignored.)
 | scope | the **currently running** drain/daemon | **one instance**, across runs (`--fleet`: every instance) |
 | lifecycle | **ONE-SHOT** — auto-consumed when the halted run terminates | **PERSISTENT** — survives across runs |
 | cleared by | nothing (auto) — your next drain starts clean | **`rmd resume`** only |
-| when idle | **no-op that warns** (writes no latch) | writes the hold |
+| when idle | **no-op that warns** (writes no latch) | writes the hold (needs `--reason`) |
 
 - **`rmd stop`** halts the running drain within one tick and **auto-clears** as that run
   exits, so a subsequent `rmd drain` starts clean with **no `rmd resume` and no manual
   `rm`**. With nothing running, `rmd stop` is a **no-op that warns** — it never writes a
   persistent latch that would silently block your next drain. (Regression: STOP used to be a
   persistent latch that blocked every future drain until manually cleared.)
-- **`rmd pause`** is drain-and-hold: any in-flight task still runs to full completion
-  (verdict + merge), no new task spawns, and the hold **survives across runs** until you run
-  **`rmd resume`**. This is the deliberate-maintenance case.
+- **`rmd pause --reason <text>`** is drain-and-hold: any in-flight task still runs to full
+  completion (verdict + merge), no new task spawns, and the hold **survives across runs** until
+  you run **`rmd resume`**. This is the deliberate-maintenance case.
+- **A bare `rmd pause` only reads** (W1-T12457). It prints the instance's pause state (reason, who
+  set it, expiry) and the fleet-wide hold state, changes nothing and exits 0. `rmd pause --status`
+  does the same with `--instance` or `--fleet`, also when `--reason` is given. A hold needs a
+  non-empty `--reason`: without one, `--instance <name>` or `--fleet` refuses with exit 2 and
+  changes nothing. An unknown flag also refuses with exit 2.
 - **`rmd resume`** clears the pause (and any stop) — the one command that always means "go".
 
 ### Which instance a pause holds (W1-T7727)
@@ -48,7 +53,7 @@ Core, site and console run one checkout against one origin, each from its own st
 `state_dir` in `.remudero/daemon-instances.yaml`, mounted as the container's `config.root`). A pause
 holds exactly **one** of them:
 
-- **`rmd pause [--instance <name>] [--reason <text>]`** writes `<state_dir>/state/PAUSE` for the
+- **`rmd pause [--instance <name>] --reason <text>`** writes `<state_dir>/state/PAUSE` for the
   instance `--instance` names. Without the flag, it writes it for the instance whose registry
   `state_dir` is this process's `config.root`.
   - It is resolved only through the registry and the config, never the cwd, repository, hostname or
@@ -56,12 +61,12 @@ holds exactly **one** of them:
   - An unreadable registry, an unknown or retired name, a `config.root` that matches no instance or
     several, or an unreachable `state_dir` all **refuse before anything is written**.
   - Inside a daemon container, `config.root` is not the host path the registry records, so run
-    `rmd pause --instance <name>` on the host.
+    `rmd pause --instance <name> --reason <text>` on the host.
   - The flag and the `fleet.pause` row (in that instance's own ledger) carry the instance, reason,
     owner session and expiry.
 - **`rmd resume [--instance <name>]`** clears that instance's PAUSE and STOP only. Another
   instance's hold stands.
-- **`rmd pause --fleet`** / **`rmd resume --fleet`** are the separate, explicit fleet-wide hold:
+- **`rmd pause --fleet --reason <text>`** / **`rmd resume --fleet`** are the separate, explicit fleet-wide hold:
   `refs/rmd-pause/hold` on origin, which every daemon on every host sharing that origin honors
   (W1-T1216; an unreachable read still holds). An instance resume never deletes it, and an existing
   fleet-wide hold keeps its meaning.

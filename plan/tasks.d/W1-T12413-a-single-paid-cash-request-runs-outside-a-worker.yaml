@@ -21,7 +21,7 @@
     - src/lib/worker-provider.ts
     - scripts/cash-request-probe.mjs
     - test/worker/spawn/a-single-paid-cash-request-runs-outside-a-worker.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "sendCashRequest sends one request to the deployment's own endpoint joined with the caller's path, with that deployment's key. It reserves before it sends, settles from the usage in the reply, and returns the served model, the latency and the reserved and settled dollars"

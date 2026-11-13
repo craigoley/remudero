@@ -241,7 +241,7 @@ raw: |-
   </details>
 attachments: []
 origin: repair#dep-review
-status: proposed
+status: accepted
 reply_to: null
 proposal_pr: https://github.com/craigoley/remudero/pull/18282
 summary:

@@ -17,7 +17,7 @@
     - src/lib/serve-demand.ts
     - src/lib/serve.ts
     - test/console-api/serve/a-serve-window-counts-requests-latency-and-client-aborts-by-route-family.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: Every /v1 request ends in exactly one tally of its route family, status class and elapsed milliseconds, and a request whose client closed before the response finished is tallied as aborted, never as an error

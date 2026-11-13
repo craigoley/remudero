@@ -17,7 +17,7 @@
     - deploy/recycle-container.sh
     - test/daemon/a-recycle-and-a-start-write-a-row-for-each-phase.test.ts
     - test/deploy/the-recycle-phase-rows-place-the-smoke-before-the-pause.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "With a fake `docker`, a daemon recycle writes its `recycle.phase` rows in this order: lock_wait, registry_login, pull, smoke, pause, wait_for_workers, stop, remove, start"
