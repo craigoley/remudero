@@ -26,6 +26,7 @@
     - test/a-new-codeql-alert-is-judged-and-never-holds-the-pr.test.ts
     - test/fix-dedup-seed.test.ts
     - test/reviews-and-detached-actions-run-as-run-children.test.ts
+    - test/a-dead-dirty-fix-owner-at-the-current-head-is-reclaimed.test.ts
   status: queued
   attempts: 0
   acceptance:
