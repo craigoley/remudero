@@ -37,6 +37,7 @@ import { boardSweepRepeat, createBoardProjection, rowsNamingTasksBefore, type Bo
 import { boardOpenSnapshotPath, boardSnapshotPath, createBoardSnapshotReader, OPEN_SNAPSHOT_RESAVE_MS, readOpenBoardSnapshot, type SharedBoardSnapshotRows } from "./board-snapshot-cache.js";
 import { changedFilesCachePath, createChangedFilesCache } from "./changed-files-cache.js";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
+import { serveBoardCatalogs, type BoardCatalogClient, type BoardCatalogContext } from "./serve-plan-reload.js";
 import { deriveLastPoll, readDiskFreeBytes, readGhRateLimitRemaining } from "./daemon-health.js";
 import { deployAutoPath, deployImageManualPath, deployMarkerPath } from "./deployer.js";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
@@ -663,6 +664,8 @@ export function snapshotGeneration(root: string, owner: string, repo: string): s
 }
 
 export interface NowViewOptions {
+  /** Private parent-owned reader; absent legacy callers retain their existing catalog binding. */
+  catalogs?: BoardCatalogClient;
   instances: readonly NowInstance[];
   /** Defaults to the first instance (serve's own). */
   coreInstance?: string;
@@ -842,6 +845,7 @@ interface Held {
 
 /** What one assembled body was built from, so the shadow's legacy side reads that body's inputs and not a later build's. */
 interface Shown {
+  catalog?: BoardCatalogContext;
   plan: Plan;
   planKey: string;
   gateway: ReturnType<typeof snapshotGithub>;
@@ -967,7 +971,8 @@ export function createNowView(opts: NowViewOptions): {
   });
   const planKey = (instance: NowInstance): string => {
     const path = nowPlanPath(instance);
-    return path ? planStamp(path) + threadPlanPin(path) : "none";
+    const publicKey = path ? planStamp(path) + threadPlanPin(path) : "none";
+    return opts.catalogs ? `${publicKey}:${opts.catalogs.revision(instance.ledgerDir)}` : publicKey;
   };
   const github = opts.github ?? ((instance: NowInstance) => {
     const [owner, repo] = (instance.repo ?? "/").split("/");
@@ -1191,6 +1196,7 @@ export function createNowView(opts: NowViewOptions): {
     stage: number;
     keys: { plan: string; github: string; feedback: string; decisions: string };
     plan?: Plan;
+    catalog?: BoardCatalogContext;
     gateway?: ReturnType<typeof snapshotGithub>;
     h?: Held;
     rows?: ReadonlyArray<Row>;
@@ -1229,6 +1235,8 @@ export function createNowView(opts: NowViewOptions): {
       const cachedPlan = planCache.get(instance.name);
       b.plan = cachedPlan?.key === b.keys.plan ? cachedPlan.plan : readPlan(instance);
       planCache.set(instance.name, { key: b.keys.plan, plan: b.plan });
+      b.catalog = opts.catalogs ? opts.catalogs.current(b.plan, instance.ledgerDir)
+        : serveBoardCatalogs({ plan: b.plan, ledgerPath: ledgerPathOf(instance) });
       if (cachedPlan?.plan !== b.plan) holds.account(`now:plan@${instance.name}`, b.plan.tasks, b.plan.tasks.length, "tasks");
     }],
     ["github", (instance, b) => {
@@ -1271,7 +1279,10 @@ export function createNowView(opts: NowViewOptions): {
     }],
     ["snapshot", (instance, b) => {
       const projections = b.h!.board.projections();
-      b.snapshot = computeBoardSnapshot({ ...depsOf(instance, b), ledgerIndex: b.index! }, { reuseProjection: (task) => projections.get(task.id) });
+      // Persisted projections remain public-only. Private rows are derived solely for this
+      // whitelisted body, from its captured observation rather than a later asynchronous reply.
+      b.snapshot = computeBoardSnapshot({ ...depsOf(instance, b), ledgerIndex: b.index! },
+        { catalog: b.catalog ?? null, reuseProjection: (task) => projections.get(task.id) });
       // The fact store keeps only the steps a reader decides on; a task's newest row of any step is legacy's sort time.
       const activity = readTaskActivity(b.db);
       for (const t of b.snapshot.tasks) {
@@ -1290,7 +1301,7 @@ export function createNowView(opts: NowViewOptions): {
       const { h, snapshot, rows, now, state } = b as Required<NowBuild>;
       const data = assembleNowView({ instance: instance.name, snapshot, rows, plan: b.plan!, recent: recentActivityEntries(h.recent, 20), health: h.probe!.health, decisions: b.decisions!, nowMs: now });
       Object.assign(h, { generation: state.generation, planKey: b.keys.plan, at: now, decisionsKey: b.keys.decisions });
-      shown.set(data, { plan: b.plan!, planKey: b.keys.plan, gateway: b.gateway!, probe: h.probe!, builtMs: now, members: nowCountMembers(snapshot.tasks), spend: dayCostRows(rows, now),
+      shown.set(data, { catalog: b.catalog, plan: b.plan!, planKey: b.keys.plan, gateway: b.gateway!, probe: h.probe!, builtMs: now, members: nowCountMembers(snapshot.tasks), spend: dayCostRows(rows, now),
         sortedBy: new Map(snapshot.tasks.map((t) => [t.taskId, t.lastActivityAt])), disposedAt: new Map(snapshot.prQueue.rows.map((r) => [r.prNumber, r.observedAt])), credit: h.board.creditRead() });
       const sources: ViewSource[] = [
         // A row the projector ingested after the board stage is not in this body: its asOf must not claim it, or the
@@ -1408,7 +1419,7 @@ export function createNowView(opts: NowViewOptions): {
       const rows = board.rows;
       const deps = { plan: built.plan, ledgerPath, github: built.gateway.github, readLedger: () => rows, now: () => now,
         readCreditStore: () => built.credit.credit, readCreditOverrideFile: () => built.credit.overrides };
-      const snapshot = computeBoardSnapshot(deps);
+      const snapshot = computeBoardSnapshot(deps, { catalog: built.catalog ?? null });
       const decisions: NowDecisionsData = { decisions: mine.decisions, ...(mine.decisionsMore ? { decisionsMore: mine.decisionsMore } : {}), ...(mine.decisionsReasons ? { decisionsReasons: mine.decisionsReasons } : {}), ...(mine.humanGates ? { humanGates: mine.humanGates } : {}), ...(mine.needsYou ? { needsYou: mine.needsYou } : {}) };
       const legacy = assembleNowView({ instance: name, snapshot, rows, plan: built.plan, recent: [], health: mine.health, decisions, nowMs: now });
       legacy.board.spendTodayUsd = deriveDayCostUsd(spent.rows, built.builtMs);

@@ -29,6 +29,8 @@ import { LEDGER_FILENAME } from "./ledger-path.js";
 import { FUTURE_ROW_TOLERANCE_MS, LEDGER_PROJECTOR_SCHEMA_VERSION, createLedgerProjector, openProjectorReadModel, type LedgerProjector, type ProjectorTickResult } from "./ledger-projector.js";
 import { createNavBadgeReadModelView, NAV_BADGE_VIEW_NAME } from "./nav-badge-view.js";
 import { createNowView, NOW_VIEW_NAME } from "./now-view.js";
+import { BOARD_CATALOG_WIRE_VERSION, createBoardCatalogParentBridge, createWorkerBoardCatalogClient,
+  isBoardCatalogReply, isBoardCatalogRequest, type BoardCatalogClient, type BoardCatalogReply, type BoardCatalogRequest } from "./serve-plan-reload.js";
 import { createOperatorAgentRowsView, OPERATOR_AGENT_ROWS_VIEW } from "./operator-agent-read-model.js";
 import { createTaskView, type ReadModelInstanceState as TaskViewInstanceState } from "./task-view.js";
 import { planFilesIdentity, threadPlanPin } from "./thread-plan.js";
@@ -243,6 +245,7 @@ export type ReadModelInstanceState = TaskViewInstanceState;
 export type ReadModelBodyEntry = ViewBodyEntry;
 
 export type ReadModelWorkerMessage =
+  | BoardCatalogRequest
   | { type: "body"; entry: ReadModelBodyEntry }
   /** Pending precedes bodies; current follows the whole committed batch, including retired-key drops. */
   | { type: "qualification"; view: typeof INBOX_VIEW_NAME; generation: string; scope: InboxQualificationScope; snapshotKey?: string }
@@ -2031,6 +2034,7 @@ const READ_MODEL_VIEWS_KIND = "remudero-read-model-views" as const;
 
 /** What the view thread needs, all serializable. */
 export interface ReadModelViewsData {
+  catalogBridgeVersion?: number;
   selectedRegistryIntent?: SelectedRegistryIntent;
   kind: typeof READ_MODEL_VIEWS_KIND;
   stateDir: string;
@@ -2052,6 +2056,7 @@ export interface ReadModelViewsData {
 
 /** What the projector thread tells its view thread. */
 export type ReadModelViewsInput =
+  | BoardCatalogReply
   | { type: "state"; instances: ReadModelInstanceState[] }
   | { type: "shadow"; request: ShadowRequest }
   | { type: "shadow-prepare"; request: ShadowRequest }
@@ -2079,7 +2084,9 @@ export function runReadModelViewWorker(
   let timer: NodeJS.Timeout | undefined;
   let stopped = false;
   const early: ReadModelViewsInput[] = [];
+  const catalogs = createWorkerBoardCatalogClient(data.catalogBridgeVersion === BOARD_CATALOG_WIRE_VERSION, post, clock);
   const handle = (msg: ReadModelViewsInput): void => {
+    if (isBoardCatalogReply(msg)) { catalogs.accept(msg); return; }
     if (msg.type === "stop") {
       stopped = true;
       clearTimeout(timer);
@@ -2124,7 +2131,7 @@ export function runReadModelViewWorker(
     const demand = createDemandBook({ clock });
     ticker = createReadModelTicker({
       stateDir: data.stateDir, instances: data.instances, tickMs: data.tickMs, clock, holder: data.holder, post, viewsOnly: true, oracle: "off", demand, ...(data.lane ? { lane: data.lane } : {}), ...(data.restoreCosts === false ? { restoreCosts: false } : {}),
-      views: [...readModelLaneViews(data, clock, log, demand), ...extra],
+      views: [...readModelLaneViews(data, clock, log, demand, catalogs), ...extra],
     });
     ticker.start();
     for (const msg of early.splice(0)) handle(msg);
@@ -2137,6 +2144,7 @@ export function readModelLaneViews(
   clock: Clock,
   log: (step: string, extra: Record<string, unknown>) => void,
   demand: DemandBook,
+  catalogs?: BoardCatalogClient,
 ): Array<ReadModelView | ReadModelViewFactory> {
   const instances = data.instances;
   const selectedRegistryObserver = selectedRegistryObserverFromIntent(data.selectedRegistryIntent, log);
@@ -2152,7 +2160,7 @@ export function readModelLaneViews(
       keys: () => demand.keys(DAILY_PROGRESS_VIEW_NAME),
     }) },
     readModelStatusView,
-    { name: NOW_VIEW_NAME, perInstance: true, readPaced: true, create: () => createNowView({ instances, ledgerSource, clock, log }) },
+    { name: NOW_VIEW_NAME, perInstance: true, readPaced: true, create: () => createNowView({ instances, ledgerSource, clock, log, catalogs }) },
     { name: INSTANCES_VIEW_NAME, qualificationGeneration: INSTANCES_QUALIFICATION_GENERATION, create: () => createInstancesView({ instances, ...data.registry, ledgerSource }) },
     { name: TASK_VIEW_NAME, demand: true, create: () => createTaskView({ instances, ledgerSource, clock, demand, log }) },
     { name: INBOX_THREAD_VIEW_NAME, demand: true, create: () => createInboxThreadView({ ...(data.inboxRoot ? { inboxRoot: data.inboxRoot } : {}), clock, demand, log }) },
@@ -2173,6 +2181,7 @@ export function readModelWorkerLog(post: (message: ReadModelWorkerMessage) => vo
 
 /** The projector thread's handle on its view thread. */
 export interface ReadModelViewLane {
+  catalog(reply: BoardCatalogReply): void;
   state(instances: ReadModelInstanceState[]): void;
   shadow(request: ShadowRequest): void;
   accept(built: SlowLaneBodies): void;
@@ -2345,6 +2354,7 @@ export function threadViews(opts: {
   };
   spawnLane(fast);
   return {
+    catalog: (reply) => send(reply),
     state: (instances) => send({ type: "state", instances }),
     shadow: (request) => {
       const instance = new URLSearchParams(request.key).get("instance") ?? undefined;
@@ -2385,6 +2395,7 @@ const spawnViews = (override: URL | undefined, data: ReadModelViewsData): Worker
 const spawnHeavyViews = (override: URL | undefined, data: ReadModelViewsData): Worker => startWorker(import.meta.url, { workerData: data, env: SHARE_ENV }, { override });
 
 export interface ReadModelWorkerData {
+  catalogBridgeVersion?: number;
   selectedRegistryIntent?: SelectedRegistryIntent;
   kind: typeof READ_MODEL_WORKER_KIND;
   stateDir: string;
@@ -2429,7 +2440,7 @@ export function runReadModelWorker(
   setLedgerMemoRetentionContext({ thread: "projector", log, instances: data.instances });
   const holder = randomUUID();
   const views = threadViews({
-    data: { stateDir: data.stateDir, instances: data.instances, tickMs: data.tickMs, holder, ...(data.registry ? { registry: data.registry } : {}), ...(data.viewsModule ? { viewsModule: data.viewsModule } : {}), ...(data.slowLane?.inbox ? { inboxRoot: data.slowLane.inbox.inboxRoot } : {}), ...hostOf(data.slowLane), ...(data.modelApprovalConfig ? { modelApprovalConfig: data.modelApprovalConfig } : {}), ...(data.selectedRegistryIntent === undefined ? {} : { selectedRegistryIntent: data.selectedRegistryIntent }),
+    data: { catalogBridgeVersion: data.catalogBridgeVersion, stateDir: data.stateDir, instances: data.instances, tickMs: data.tickMs, holder, ...(data.registry ? { registry: data.registry } : {}), ...(data.viewsModule ? { viewsModule: data.viewsModule } : {}), ...(data.slowLane?.inbox ? { inboxRoot: data.slowLane.inbox.inboxRoot } : {}), ...hostOf(data.slowLane), ...(data.modelApprovalConfig ? { modelApprovalConfig: data.modelApprovalConfig } : {}), ...(data.selectedRegistryIntent === undefined ? {} : { selectedRegistryIntent: data.selectedRegistryIntent }),
       ...(data.slowLane?.dailyProgress?.timeZone ? { dailyProgressTimeZone: data.slowLane.dailyProgress.timeZone } : {}) },
     relay: (m) => port.postMessage(m), log, clock,
   });
@@ -2508,6 +2519,7 @@ export function runReadModelWorker(
     timer = setTimeout(loop, data.tickMs);
   };
   port.on("message", (msg) => {
+    if (isBoardCatalogReply(msg)) return void views.catalog(msg);
     if (answerThreadHeaps(port, msg, threads, views.holdsOf)) return;
     if (msg.type === "shadow") return void views.shadow(msg as unknown as ShadowRequest);
     if (msg.type === "want") return void views.want((msg as unknown as { view: string }).view, (msg as unknown as { key: string }).key);
@@ -2901,6 +2913,7 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
     noteRecycle({ at: clock.now(), silentMs, boundMs, ...last });
   };
 
+  let closeCatalogBridge = (): void => {};
   const bodyListeners = new Set<(entry: ReadModelBodyEntry) => void>();
   const onMessage = (msg: ReadModelWorkerMessage): void => {
     heardAt = clock.now();
@@ -2946,6 +2959,7 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
   const spawn = (): void => {
     const shared = new SharedArrayBuffer(8);
     const data: ReadModelWorkerData = {
+      catalogBridgeVersion: BOARD_CATALOG_WIRE_VERSION,
       kind: READ_MODEL_WORKER_KIND, stateDir: opts.stateDir, instances: [...opts.instances], tickMs: opts.tickMs ?? READ_MODEL_TICK_MS, signal: shared, ...(opts.registry ? { registry: opts.registry } : {}),
       ...(selectedRegistryIntent === undefined ? {} : { selectedRegistryIntent }),
       ...(opts.escalationRepository ? { escalationRepository: opts.escalationRepository } : {}),
@@ -2963,9 +2977,20 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
     spawned.unref();
     // A heap answer is not a sign of progress: the watchdog never hears it, so a loop that died still recycles.
     const heapAnswer = askNestedThreadHeaps(spawned);
-    spawned.on("message", (msg: ReadModelWorkerMessage) => void (heapAnswer(msg) || onMessage(msg)));
+    const catalogBridge = createBoardCatalogParentBridge(opts.instances.map(instance => instance.ledgerDir), reply => {
+      if (worker === spawned && !stopping && !paused) spawned.postMessage(reply);
+    }, clock);
+    closeCatalogBridge = () => catalogBridge.close();
+    spawned.on("message", (msg: ReadModelWorkerMessage) => {
+      if (worker !== spawned || stopping || paused) return;
+      // Private packets never enter observation/log/body relays. Only negotiated child requests
+      // from configured roots reach the parent-owned GET reader.
+      if (isBoardCatalogRequest(msg)) { catalogBridge.request(msg); return; }
+      void (heapAnswer(msg) || onMessage(msg));
+    });
     spawned.on("error", (error) => opts.log?.("read_model.worker_failed", { error: String(error?.message ?? error) }));
     spawned.on("exit", (code) => {
+      catalogBridge.close();
       if (worker !== spawned || stopping) return;
       worker = undefined;
       deaths++;
@@ -3065,6 +3090,7 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
     },
     stop: () => {
       stopping = true;
+      closeCatalogBridge();
       stopSwitchWatch();
       clearTimeout(respawnTimer);
       const running = worker;
@@ -3081,6 +3107,7 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
     pause: async () => {
       if (stopping || paused || !started) return false;
       paused = true;
+      closeCatalogBridge();
       stopSwitchWatch();
       clearTimeout(respawnTimer);
       const running = worker;

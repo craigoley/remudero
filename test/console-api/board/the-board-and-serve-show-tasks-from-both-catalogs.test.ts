@@ -329,8 +329,8 @@ test("W1-T12211 production board worker and supplied status route use the select
         writeHead(code: number) { status = code; return this; },
         end(value: string) { body = value; return this; },
       } as unknown as ServerResponse;
-      buildStatusRoute({ plan: publicPlan(), ledgerPath: h.ledgerPath, github, readLedger: () => [] }, undefined, worker)
-        .handler({ headers: {} } as IncomingMessage, response);
+      await buildStatusRoute({ plan: publicPlan(), ledgerPath: h.ledgerPath, github, readLedger: () => [] }, undefined, worker)
+        .handler({ headers: {} } as IncomingMessage, response, { params: {} });
       assert.equal(status, 200);
       assert.ok(body);
       const served = JSON.parse(body) as BoardSnapshot;

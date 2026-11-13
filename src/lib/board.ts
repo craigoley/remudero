@@ -146,6 +146,8 @@ export interface PrQueueSnapshot {
 }
 
 interface BoardComputeOptions {
+  /** Captured private input for one materialized body; null deliberately means no overlay. */
+  catalog?: BoardCatalogContext | null;
   lastGoodPrQueueAt?: string;
   /** A cache-key read handed into the projection so one snapshot uses one immutable open index. */
   prQueueIndex?: PrQueueIndexRead;
@@ -402,7 +404,7 @@ export function computeBoardSnapshot(deps: BoardDeps, options: BoardComputeOptio
     writeCreditStore: SERVE_KEEPS_CREDITS_IN_MEMORY,
     ...(options.reuseProjection ? { reuseProjection: options.reuseProjection } : {}),
   };
-  const catalog = serveBoardCatalogs(deps);
+  const catalog = options.catalog === undefined ? serveBoardCatalogs(deps) : options.catalog ?? undefined;
   const plan = catalog?.plan ?? deps.plan;
   const byId = projectPlan(plan, effectiveDeps);
   options.captureProjections?.(byId);

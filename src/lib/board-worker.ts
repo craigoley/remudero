@@ -1,6 +1,7 @@
 /** The status board's plan/ledger projection runs here, never in serve's request loop. */
 import { MessageChannel, Worker, isMainThread, parentPort, receiveMessageOnPort, workerData, type MessagePort } from "node:worker_threads";
 import { statSync } from "node:fs";
+import { dirname } from "node:path";
 import { performance } from "node:perf_hooks";
 import { createBoardSnapshotCache, type BoardSnapshot, type BoardSnapshotCache, type BoardSnapshotSource, type BoardSnapshotState } from "./board.js";
 import { systemClock, type Clock } from "./clock.js";
@@ -8,6 +9,8 @@ import { readInflightLock } from "./inflight-lock.js";
 import type { BoardDeps, GitHub } from "./status.js";
 import { planFilesIdentity, threadPlanPin, threadStrictPlan } from "./thread-plan.js";
 import { startWorker } from "./child-entry-argv.js";
+import { adoptBoardCatalogs, BOARD_CATALOG_WIRE_VERSION, createBoardCatalogParentBridge, createWorkerBoardCatalogClient,
+  isBoardCatalogReply, isBoardCatalogRequest, type BoardCatalogClient, type BoardCatalogParentBridge, type BoardCatalogReply, type BoardCatalogRequest } from "./serve-plan-reload.js";
 
 const KIND = "remudero-board-projection";
 export const BOARD_PROJECTION_INTERVAL_MS = 3_000;
@@ -20,6 +23,7 @@ export const BOARD_PROJECTION_STALE_MS = 30_000;
 const FACT_REPLY_BOUND_MS = 5_000;
 
 type WorkerInput = {
+  catalogBridgeVersion?: number;
   kind: typeof KIND;
   planPath: string;
   ledgerPath: string;
@@ -86,6 +90,7 @@ export function boardWorkerPass(
   input: { planPath: string; ledgerPath: string; inflightDir: string },
   github: GitHub,
   cache: BoardSnapshotCache,
+  catalogs?: BoardCatalogClient,
 ): BoardSnapshot {
   const deps: BoardDeps = {
     plan: threadStrictPlan(input.planPath),
@@ -93,6 +98,7 @@ export function boardWorkerPass(
     github,
     inflightHolder: (taskId) => readInflightLock(input.inflightDir, taskId),
   };
+  if (catalogs) adoptBoardCatalogs(deps, catalogs.current(deps.plan, dirname(input.ledgerPath)));
   return computeWorkerBoardSnapshot(deps, cache);
 }
 
@@ -117,6 +123,7 @@ export function paceBoardProjection(
 function runBoardWorker(input: WorkerInput): void {
   const github = projectionGithub(input);
   const cache = createBoardSnapshotCache();
+  const catalogs = createWorkerBoardCatalogClient(input.catalogBridgeVersion === BOARD_CATALOG_WIRE_VERSION, request => parentPort!.postMessage(request));
   let busy = false;
   const tick = (): void => {
     if (busy) return;
@@ -125,7 +132,7 @@ function runBoardWorker(input: WorkerInput): void {
       if (input.delayMs > 0) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, input.delayMs);
       // The identity is taken BEFORE the pass reads the plan, so it can only name a plan at least as old as the one projected.
       const planIdentity = threadPlanPin(input.planPath) || planFilesIdentity(input.planPath);
-      parentPort!.postMessage({ kind: "snapshot", snapshot: boardWorkerPass(input, github, cache), planIdentity } satisfies ProjectionMessage);
+      parentPort!.postMessage({ kind: "snapshot", snapshot: boardWorkerPass(input, github, cache, catalogs), planIdentity } satisfies ProjectionMessage);
     } catch (error) {
       parentPort!.postMessage({ kind: "failure", reason: String((error as Error)?.message ?? error) } satisfies ProjectionMessage);
     } finally {
@@ -133,7 +140,10 @@ function runBoardWorker(input: WorkerInput): void {
     }
   };
   const pace = paceBoardProjection(tick, input.intervalMs);
-  parentPort!.on("message", (message: BoardProjectionPace) => pace(message));
+  parentPort!.on("message", (message: BoardProjectionPace | BoardCatalogReply) => {
+    if (isBoardCatalogReply(message)) { catalogs.accept(message); tick(); }
+    else if (message.kind === "pace") pace(message);
+  });
 }
 
 export interface BoardProjectionWorker extends BoardSnapshotSource {
@@ -172,6 +182,7 @@ export function createBoardProjectionWorker(
   let thread: Worker | undefined;
   let planIdentity: string | undefined;
   let replyPort: MessagePort | undefined;
+  let catalogBridge: BoardCatalogParentBridge | undefined;
   let stopped = false;
   let paused = false;
   let clientPresent = true;
@@ -203,6 +214,7 @@ export function createBoardProjectionWorker(
       const signal = new SharedArrayBuffer(4);
       const data: WorkerInput = {
         kind: KIND,
+        catalogBridgeVersion: BOARD_CATALOG_WIRE_VERSION,
         ...input,
         methods: Object.entries(github).filter(([, value]) => typeof value === "function").map(([name]) => name),
         replyPort: port2,
@@ -222,8 +234,12 @@ export function createBoardProjectionWorker(
       }
       const wake = new Int32Array(signal);
       const spawned = thread;
-      thread.on("message", (message: FactRequest | ProjectionMessage) => {
+      catalogBridge = createBoardCatalogParentBridge([dirname(input.ledgerPath)], reply => {
+        if (!stopped && thread === spawned) spawned.postMessage(reply);
+      }, clock);
+      thread.on("message", (message: FactRequest | ProjectionMessage | BoardCatalogRequest) => {
         if (stopped || thread !== spawned) return;
+        if (isBoardCatalogRequest(message)) { catalogBridge?.request(message); return; }
         if (message.kind === "fact") {
           let reply: FactReply;
           try {
@@ -253,6 +269,8 @@ export function createBoardProjectionWorker(
       thread.once("exit", (code) => {
         // A paused thread is already replaced by undefined, or by its successor: neither is this exit's to clear.
         if (thread !== spawned) return;
+        catalogBridge?.close();
+        catalogBridge = undefined;
         if (!stopped) unavailable(crash ?? `worker_exited: ${code}`);
         thread = undefined;
         replyPort?.close();
@@ -261,6 +279,8 @@ export function createBoardProjectionWorker(
     },
     stop() {
       stopped = true;
+      catalogBridge?.close();
+      catalogBridge = undefined;
       void thread?.terminate();
       replyPort?.close();
     },
@@ -268,6 +288,8 @@ export function createBoardProjectionWorker(
       const running = thread;
       if (stopped || !running) return false;
       paused = true;
+      catalogBridge?.close();
+      catalogBridge = undefined;
       thread = undefined;
       replyPort?.close();
       replyPort = undefined;
