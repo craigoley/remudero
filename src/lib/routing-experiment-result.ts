@@ -138,30 +138,22 @@ export function evaluateRoutingExperimentResult(input: Iterable<Row>, experiment
     assignments.set(id, { task, arm: experimentArmForTask(experiment, task).arm,
       served: experiment.arms[provider] ?? provider, ts: text(row.ts) });
   }
-  const taskAssignments = new Map<string, Array<[string, { task: string; arm: string; served: string; ts: string }]>>();
-  for (const entry of assignments) {
-    const group = taskAssignments.get(entry[1].task) ?? [];
-    group.push(entry);
-    taskAssignments.set(entry[1].task, group);
+  const prAssignments = new Map<string, string>();
+  for (const row of rows) {
+    if (row.step !== "pr.opened") continue;
+    const prUrl = text(row.pr_url), assignmentId = text(row.head_assignment);
+    if (prUrl && assignmentId) prAssignments.set(prUrl, assignmentId);
   }
   const outcomes = new Map<string, { pipeline: Pipeline; positive: number; row: Row }>();
   const receipts = new Map<string, Row>();
   for (const row of rows) {
     let id = terminalAssignmentId(row);
     let assignment = assignments.get(id);
-    // Sweep merge credit is task-level by design and carries no selection_assignment_id.
-    // Attach it to the latest experiment assignment for that task that predates the merge.
-    if (!assignment && row.step === "verdict.merged") {
-      const candidates = taskAssignments.get(text(row.task_id)) ?? [];
-      const mergedAt = text(row.ts);
-      let low = 0, high = candidates.length;
-      while (low < high) {
-        const mid = Math.floor((low + high) / 2);
-        if (candidates[mid]![1].ts <= mergedAt) low = mid + 1;
-        else high = mid;
-      }
-      const inferred = low > 0 ? candidates[low - 1] : undefined;
-      if (inferred) [id, assignment] = inferred;
+    // Sweep merge credit is task-level by design. Resolve its exact producer from the PR head
+    // provenance recorded when that PR opened; an explicit but unmatched assignment stays refused.
+    if (!id && row.step === "verdict.merged") {
+      id = prAssignments.get(text(row.pr_url)) ?? "";
+      assignment = assignments.get(id);
     }
     if (!assignment || row.task_id !== assignment.task || text(row.ts) < assignment.ts) continue;
     if (["worker.attempt", "worker.done", "verdict", "fix.done", "review.posted", "verdict.merged"].includes(text(row.step))) {
@@ -223,7 +215,7 @@ export async function recordRoutingExperimentResults(opts: {
   const today = opts.today ?? systemClock.iso().slice(0, 10);
   if (!dayValid(today)) throw new Error(`invalid routing result day: ${today}`);
   const read = readLedgerUnionRecordsSync(opts.stateDir, { refuseIncomplete: true,
-    step: ["worker.assignment", "worker.attempt", "worker.done", "verdict", "verdict.merged", "fix.done", "review.posted", "routing.experiment.result"] });
+    step: ["worker.assignment", "worker.attempt", "worker.done", "verdict", "verdict.merged", "fix.done", "review.posted", "pr.opened", "routing.experiment.result"] });
   if (!read.ok) throw new Error(`routing result ledger unreadable: ${read.unread.join(", ")}`);
   const recorded: RoutingExperimentResult[] = [];
   for (const experiment of opts.experiments ?? ROUTING_EXPERIMENTS) {

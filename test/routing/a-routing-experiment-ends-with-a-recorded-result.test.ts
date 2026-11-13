@@ -33,21 +33,26 @@ function outcome(task: string, id: string, pipeline: string, success: boolean, e
 function cohort(count: number, different: boolean): Row[] {
   return labels.flatMap((arm, armIndex) => tasks(arm, count).flatMap(task => {
     const merged = different ? armIndex === 0 : true;
-    return [assignment(task, task), outcome(task, task, "build", merged,
-      merged ? { selection_assignment_id: undefined, run_id: `sweep-${task}` } : {})];
+    const prUrl = `https://example.test/${task}`;
+    return [assignment(task, task), { ts, task_id: task, step: "pr.opened", pr_url: prUrl, head_assignment: task },
+      outcome(task, task, "build", merged,
+        merged ? { selection_assignment_id: undefined, run_id: `sweep-${task}`, pr_url: prUrl } : {})];
   }));
 }
 
 test("W1-T12142 criterion 1: assigned arms keep build, fix and review outcomes separate", () => {
   const task = tasks(labels[0]!, 1)[0]!;
+  const prUrl = `https://example.test/${task}`;
   const rows = [assignment(task, "build", "codex", `${today}T10:00:00.000Z`),
     assignment(task, "fix", "codex", `${today}T10:01:00.000Z`),
     assignment(task, "review", "codex", `${today}T10:02:00.000Z`),
-    outcome(task, "build", "build", true, { selection_assignment_id: undefined, run_id: "sweep-build", ts: `${today}T10:00:30.000Z` }),
+    { ts: `${today}T10:00:15.000Z`, task_id: task, step: "pr.opened", pr_url: prUrl, head_assignment: "build" },
+    outcome(task, "build", "build", true, { selection_assignment_id: undefined, run_id: "sweep-build", pr_url: prUrl, ts: `${today}T10:00:30.000Z` }),
     outcome(task, "fix", "fix", true, { ts: `${today}T10:01:30.000Z` }),
     outcome(task, "review", "review", false,
       { selection_assignment_id: undefined, evaluator_provenance: { selectionAssignmentId: "review" }, ts: `${today}T10:02:30.000Z` }),
-    outcome("W1-T99999", "shared", "build", true), outcome(task, "unknown", "build", true)];
+    outcome(task, "foreign", "build", true, { pr_url: prUrl, ts: `${today}T10:03:00.000Z` }),
+    outcome("W1-T99999", "build", "build", true), outcome(task, "unknown", "build", true)];
   const result = evaluateRoutingExperimentResult(rows, experiment, today);
   const arm = result.arms.find(item => item.arm === labels[0])!;
   assert.equal(arm.tasks, 1);
