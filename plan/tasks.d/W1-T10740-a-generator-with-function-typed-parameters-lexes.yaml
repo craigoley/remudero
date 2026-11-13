@@ -2,7 +2,6 @@
   title: The changed-symbol lexer reads a generator whose parameters carry function types, so a src/run-task.ts diff stops forcing the full 4069-suite author run
   repo: remudero
   depends_on: []
-  priority: 0.1
   type: implement
   verify: auto
   principles:
@@ -17,12 +16,18 @@
   # refusal-amendment (W1-T10740, run W1-T10740-1793318639618, 2026-10-30T00:55:58.843Z): the worker refused criterion 1 [premise-rotted] — proposed close-unbuilt: the premise no longer holds at HEAD — close this task unbuilt, or restate the premise it should build on
   #   worker evidence: The reported lexer failure is already repaired at HEAD, so another implementation cannot demonstrate the required behavior change against this base.
   #   this task is held from dispatch until its record changes; an Architect must make the change above
-  status: queued
+  status: blocked
+  retirement: retired  # already fixed on main: the worker refusal above (run W1-T10740-1793318639618) found the lexer failure repaired; operator approval 2026-11-13
   attempts: 0
   note: |
     reservation hand-off: run-W1-T10733-1793035320662 -> run-unfiled-1793035320662
+    CLOSED UNBUILT 2026-11-13 (operator approval): the premise no longer holds, so nothing remains to build.
+    The worker of run W1-T10740-1793318639618 refused criterion 1 as premise-rotted (the refusal-amendment
+    comment above `status:`): the lexer failure is already repaired at HEAD. Measured lane logs show 0
+    full-fallbacks from it, and on main 0fcf0f49e src/run-task.ts lexes end to end in conservative mode.
+    Retirement set on the operator's explicit approval, 2026-11-13.
   rationale: "OBSERVED 2026-10-26 (author preflight for W1-T10734, base 3c0e6a00d): 'author selection: full-fallback, 4069 suite(s) ... full-fallback because: full run: the selector could not read its input — changed-symbols \"src/run-task.ts\": lexical context unknown at line 10834 after )'. The line is the return-type annotation `): Steps<string | undefined> {` of `function* writeFixCensusSnapshotSteps(` (origin/main src/run-task.ts around line 10814), whose parameter list carries function types: `log: (step: string, extra?: Record<string, unknown>) => void` and `runGit: (...) => string | Promise<string>`. The same text is on main, so EVERY diff touching src/run-task.ts (the repository's largest hub) makes the author preflight select all 4069 suites instead of the affected set. On this host that run takes hours under the heavy-run admission. HYPOTHESIS, unverified: the conservative scanner in src/lib/test-impact-map.ts (scanCode) reads the `=>` of a parameter's TYPE annotation as an expression arrow, then sets functionBody state, so the `:` after the closing `)` throws `unknown()`."
-  design: "Make stripComments/maskLiterals in conservative mode lex a function or generator declaration whose parameter list contains TypeScript function-type annotations, including the multi-line form above, without throwing. Keep the scanner conservative: a genuinely ambiguous regex-versus-division context must still throw `lexical context unknown`. Diagnose the actual cause before changing the state machine; the rationale's hypothesis is unverified. Positive control: the CURRENT origin/main src/run-task.ts lexes end to end in conservative mode without throwing."
+  design: "Make stripComments/maskLiterals in conservative mode lex a function or generator declaration whose parameter list contains TypeScript function-type annotations, including the multi-line form above, without throwing. Keep the scanner conservative: a genuinely ambiguous regex-versus-division context must still throw `lexical context unknown`. Diagnose the actual cause before changing the state machine; the rationale's hypothesis is unverified. Positive control: the CURRENT origin/main src/run-task.ts lexes end to end in conservative mode without throwing.\nNO-INVARIANTS: closed unbuilt on 2026-11-13; no code changes, so no invariant to hold."
   acceptance:
     - claim: a generator whose parameters carry function types lexes in conservative mode, the current src/run-task.ts lexes end to end, and an ambiguous regex-versus-division context still throws
       proof: "unit test: test/ci/suites/a-generator-with-function-typed-parameters-lexes.test.ts"

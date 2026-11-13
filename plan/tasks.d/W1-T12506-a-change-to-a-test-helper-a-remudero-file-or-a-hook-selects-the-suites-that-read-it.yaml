@@ -18,6 +18,8 @@
     - src/lib/affected-suites.ts
     - doctrine/before-you-push/preflight-before-first-push.md
     - test/ci/a-change-to-a-test-helper-a-remudero-file-or-a-hook-selects-the-suites-that-read-it.test.ts
+    - test/a-full-fallback-author-selection-is-never-run-whole.test.ts
+    - test/each-suite-records-the-non-code-files-it-reads.test.ts
   status: queued
   attempts: 0
   acceptance:
@@ -55,6 +57,10 @@
        reader set never becomes an empty selection.
     4. .github/, openapi/ and packages/ keep their full-run rule.
     5. Update the doctrine sentence that lists fixture and helper changes as full fallbacks.
+    6. Two existing suites use a test/helpers/ path as their example of a file outside the model, and change with it:
+       test/each-suite-records-the-non-code-files-it-reads.test.ts asserts `fullRunTrigger(["test/helpers/x.ts"], true)`
+       returns that path, and the full-fallback fixture in test/a-full-fallback-author-selection-is-never-run-whole.test.ts
+       sets aside test/helpers/shared.ts. Both move their example to a test/fixtures/ path, which stays outside the model.
     NO-INVARIANTS: this widens what the selector models; the unchanged full-run rule for paths with no reader is criterion 3.
     NOT IN SCOPE: the read map producer (W1-T12505); CI's own selection rules, which call the same selector and gain the same
     modelling only where ci.yml already uses the narrow arm.

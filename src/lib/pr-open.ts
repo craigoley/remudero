@@ -519,18 +519,58 @@ function mergeBaseFor(repoRoot: string, baseRef: string): string {
     : reject(`cannot resolve merge base ${baseRef}: git returned no merge-base sha`);
 }
 
-/** The review contract's truthy credits are context; only the remaining criteria may execute. */
-function filedCriteria(taskId: string, repoRoot: string): { executable: AcceptanceCriterion[]; priorCredit: string } {
-  const plan = loadPlan(join(repoRoot, "plan", "tasks.yaml"));
-  const task = plan.tasks.find((candidate) => candidate.id === taskId);
-  if (!task) return reject(`run branch names ${taskId}, but that task is absent from the filed plan`);
-  const criteria = task.acceptance ?? [];
-  if (criteria.length === 0) return reject(`${taskId} has no filed acceptance criteria to put in the PR body`);
+/** Host-only canonical criteria from the pinned ops lookup. This is never a PR-body authority. */
+export interface CanonicalOpsCriteriaAtOpen {
+  readonly catalog: "ops";
+  readonly taskId: string;
+  readonly title: string;
+  readonly targetRepository: string;
+  readonly sourceCommit: string;
+  readonly criteria: readonly AcceptanceCriterion[];
+}
+
+function snapshotOpsCriteria(input?: CanonicalOpsCriteriaAtOpen): CanonicalOpsCriteriaAtOpen | undefined {
+  if (input === undefined) return undefined;
+  if (!Array.isArray(input.criteria)) return reject("canonical ops criteria are unreadable");
+  return Object.freeze({ catalog: input.catalog, taskId: input.taskId, title: input.title,
+    targetRepository: input.targetRepository, sourceCommit: input.sourceCommit,
+    criteria: Object.freeze(input.criteria.map(criterion => Object.freeze({ ...criterion }))) });
+}
+
+/** Copy the two approved fields and their host provenance before any worker or asynchronous proof. */
+export function bindCanonicalOpsCriteria(taskId: string, title: string, targetRepository: string,
+  sourceCommit: string | undefined, criteria: readonly AcceptanceCriterion[]): CanonicalOpsCriteriaAtOpen {
+  if (sourceCommit === undefined || !/^[a-f0-9]{40}$/.test(sourceCommit)) return reject("canonical ops source pin is unreadable");
+  return snapshotOpsCriteria({ catalog: "ops", taskId, title, targetRepository, sourceCommit, criteria })!;
+}
+
+/** One partition for the shared gate and the ops public serializer; credited criteria are context only. */
+export function partitionAcceptanceCriteria(criteria: readonly AcceptanceCriterion[]): { executable: AcceptanceCriterion[]; priorCredit: string } {
   const credited = criteria.filter((criterion) => criterion.satisfied_by);
   const executable = criteria.filter((criterion) => !criterion.satisfied_by);
   const priorCredit = credited.length === 0 ? "" : "## Prior acceptance credit\n\n" + credited.map((criterion) =>
     `- ${JSON.stringify(criterion.claim)} (satisfied_by: ${JSON.stringify(criterion.satisfied_by)})`,
   ).join("\n");
+  return { executable, priorCredit };
+}
+
+/** The review contract's truthy credits are context; only the remaining criteria may execute. */
+function filedCriteria(taskId: string, repoRoot: string, target?: SuiteRegistryTarget,
+  canonicalOps?: CanonicalOpsCriteriaAtOpen): { executable: AcceptanceCriterion[]; priorCredit: string } {
+  const plan = loadPlan(join(repoRoot, "plan", "tasks.yaml"));
+  const task = plan.tasks.find((candidate) => candidate.id === taskId);
+  let criteria = task?.acceptance ?? [];
+  if (!task) {
+    if (!canonicalOps) return reject(`run branch names ${taskId}, but that task is absent from the filed plan`);
+    if (canonicalOps.catalog !== "ops" || canonicalOps.taskId !== taskId || !target ||
+        canonicalOps.targetRepository !== `${target.owner}/${target.repo}` ||
+        !/^[a-f0-9]{40}$/.test(canonicalOps.sourceCommit)) {
+      return reject("canonical ops criteria do not bind this run branch and target");
+    }
+    criteria = canonicalOps.criteria.map(criterion => ({ ...criterion }));
+  }
+  if (criteria.length === 0) return reject(`${taskId} has no filed acceptance criteria to put in the PR body`);
+  const { executable, priorCredit } = partitionAcceptanceCriteria(criteria);
   if (executable.length === 0) {
     return reject(`${taskId} has no executable acceptance criteria; all criteria carry prior credit.\n\n${priorCredit}`, "all-credited");
   }
@@ -575,6 +615,7 @@ export function openPullRequestChecked(
   runProof: OpenPullRequestProofRunner = defaultProofRunner,
   /** W1-T4590: the repository this PR targets; proofs parse and run against ITS suite roots. */
   target?: SuiteRegistryTarget,
+  canonicalOps?: CanonicalOpsCriteriaAtOpen,
 ): string {
   const taskId = filedTaskIdFromRunBranch(branch);
   if (!taskId) {
@@ -583,7 +624,7 @@ export function openPullRequestChecked(
     return body;
   }
 
-  const { executable: criteria, priorCredit } = filedCriteria(taskId, repoRoot);
+  const { executable: criteria, priorCredit } = filedCriteria(taskId, repoRoot, target, canonicalOps);
 
   const existingTrailer = extractTaskTrailerId(body);
   if (existingTrailer !== undefined && existingTrailer !== taskId) {
@@ -664,6 +705,7 @@ export async function prerunPullRequestProofs(
   baseRef = "origin/main",
   target?: SuiteRegistryTarget,
   runProofAsync: AsyncOpenPullRequestProofRunner = defaultProofRunnerAsync,
+  canonicalOps?: CanonicalOpsCriteriaAtOpen,
 ): Promise<OpenPullRequestProofRunner> {
   const results = new Map<string, OpenPullRequestProofResult>();
   const key = (proof: string, mergeBase: string | undefined): string => `${mergeBase ?? "head-only"}\0${proof}`;
@@ -677,7 +719,7 @@ export async function prerunPullRequestProofs(
   let criteria: AcceptanceCriterion[];
   let mergeBase: string;
   try {
-    criteria = filedCriteria(taskId, repoRoot).executable;
+    criteria = filedCriteria(taskId, repoRoot, target, canonicalOps).executable;
     mergeBase = mergeBaseFor(repoRoot, baseRef);
   } catch (err) {
     // NOT A SUCCESS: a refusal here (no such task, no criteria, no merge base) is one the sync open
@@ -712,9 +754,11 @@ export async function openPullRequestCheckedAsync(
   baseRef = "origin/main",
   runProofAsync: AsyncOpenPullRequestProofRunner = defaultProofRunnerAsync,
   target?: SuiteRegistryTarget,
+  canonicalOps?: CanonicalOpsCriteriaAtOpen,
 ): Promise<string> {
-  const answer = await prerunPullRequestProofs(branch, repoRoot, baseRef, target, runProofAsync);
-  return openPullRequestChecked(body, branch, repoRoot, baseRef, answer, target);
+  const pinned = snapshotOpsCriteria(canonicalOps);
+  const answer = await prerunPullRequestProofs(branch, repoRoot, baseRef, target, runProofAsync, pinned);
+  return openPullRequestChecked(body, branch, repoRoot, baseRef, answer, target, pinned);
 }
 
 /** W1-T5520: an open PR for this task that is NOT the run's own branch. `trailer` means only the body's

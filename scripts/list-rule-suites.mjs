@@ -99,18 +99,26 @@ function samplePressure(pressure) {
  *  Still one file per child process, `concurrency` at a time; each suite prints its header and output as one
  *  block when it ends, and the closing line is the same as {@link runRuleSuites}'. Given a `pressure` sampler
  *  (W1-T11939), the width is re-derived from host pressure at the start and whenever a suite ends — up when the
- *  host is idle, down when it is busy, never below one; `concurrency` is only the width an unreadable sample keeps. */
-export async function runRuleSuitesConcurrently(repoRoot = root, { concurrency = 1, run = spawnSuiteCaptured, write = (text) => process.stdout.write(text), pressure, now } = {}) {
+ *  host is idle, down when it is busy, never below one; `concurrency` is only the width an unreadable sample keeps.
+ *  With `rerunAlone` (W1-T12003), a suite that failed while another suite was in flight is run once more, alone,
+ *  after the pass: green alone passes it, red alone fails it as before. A suite that already ran alone is not rerun. */
+export async function runRuleSuitesConcurrently(repoRoot = root, { concurrency = 1, run = spawnSuiteCaptured, write = (text) => process.stdout.write(text), pressure, now, rerunAlone = false } = {}) {
   const suites = ruleSuites(repoRoot);
   const failed = new Set();
+  const running = new Set();
+  const shared = new Set();
+  const passMs = new Map();
   let width = Math.max(1, concurrency);
   let next = 0;
   let inFlight = 0;
+  const writeOutput = (output) => { if (output) write(output.endsWith("\n") ? output : `${output}\n`); };
   await new Promise((resolve, reject) => {
     const settle = (suite, { result, ms }) => {
       inFlight--;
+      running.delete(suite);
+      passMs.set(suite, ms);
       console.log(`rule-checks: ${suite}`);
-      if (result.output) write(result.output.endsWith("\n") ? result.output : `${result.output}\n`);
+      writeOutput(result.output);
       reportTime(suite, ms);
       if (reportSuite(suite, result)) failed.add(suite);
       launch();
@@ -120,13 +128,38 @@ export async function runRuleSuitesConcurrently(repoRoot = root, { concurrency =
       while (next < suites.length && inFlight < width) {
         const suite = suites[next++];
         inFlight++;
+        if (running.size > 0) for (const peer of [suite, ...running]) shared.add(peer);
+        running.add(suite);
         Promise.resolve().then(() => timedSuiteRun(() => run(suite, repoRoot), now)).then((timed) => settle(suite, timed)).catch(reject);
       }
       if (next >= suites.length && inFlight === 0) resolve();
     };
     launch();
   });
+  if (rerunAlone) await rerunSharedReds(suites, failed, shared, passMs, { repoRoot, run, now, writeOutput });
   return finish(suites, failed);
+}
+
+/** W1-T12003 — rerun each suite that failed beside others, once and one at a time, in population order. A suite
+ *  green alone leaves `failed` and prints RERUN-GREEN with both durations; one red alone stays failed, with the
+ *  output of both runs printed. The closing count line comes before the failed-suites line, which stays last. */
+async function rerunSharedReds(suites, failed, shared, passMs, { repoRoot, run, now, writeOutput }) {
+  const reds = suites.filter((suite) => failed.has(suite) && shared.has(suite));
+  let green = 0;
+  for (const suite of reds) {
+    console.log(`rule-checks: ${suite}: rerun alone`);
+    const { result, ms } = await timedSuiteRun(() => run(suite, repoRoot), now);
+    writeOutput(result.output);
+    const durations = `${passMs.get(suite)} ms in the concurrent pass, ${ms} ms alone`;
+    if (reportSuite(suite, result)) {
+      console.error(`rule-checks: ${suite}: still red alone (${durations})`);
+      continue;
+    }
+    green += 1;
+    failed.delete(suite);
+    console.log(`rule-checks: RERUN-GREEN ${suite}: ${durations}`);
+  }
+  console.log(`rule-checks: reran ${reds.length} suites alone: ${green} green alone, ${reds.length - green} still red`);
 }
 
 /** How many suites `--run` executes at once: `RMD_RULE_SUITE_CONCURRENCY` when it is a positive integer,
@@ -141,6 +174,12 @@ export function ruleSuiteConcurrency(env = process.env, cores = availableParalle
 export function ruleSuitePressure(env = process.env) {
   const raw = env.RMD_RULE_SUITE_CONCURRENCY;
   return raw !== undefined && /^[1-9]\d*$/.test(raw) ? undefined : () => readHostPressure();
+}
+
+/** W1-T12003 — whether `--run` reruns a suite red beside others alone: yes, except in hosted CI, which runs every
+ *  suite once and stays the gate for a suite that is red only beside others. */
+export function ruleSuiteRerunsAlone(env = process.env) {
+  return env.GITHUB_ACTIONS !== "true";
 }
 
 /** The middle of an ascending list; the mean of the two middles when its length is even. */
@@ -171,7 +210,7 @@ const USAGE = "usage: node --import tsx scripts/list-rule-suites.mjs [--list|--r
 /** The CLI: `--list` (the default) prints the population, `--run` executes it at a width that follows host
  *  pressure, starting from {@link ruleSuiteConcurrency}, or one at a time through an injected `run`, and
  *  `--measure-starts <n> [suite]` times `n` starts of one suite (the population's first when none is named). */
-export function main(argv, run, concurrency = ruleSuiteConcurrency(), runConcurrently = runRuleSuitesConcurrently, pressure = ruleSuitePressure()) {
+export function main(argv, run, concurrency = ruleSuiteConcurrency(), runConcurrently = runRuleSuitesConcurrently, pressure = ruleSuitePressure(), rerunAlone = ruleSuiteRerunsAlone()) {
   if (argv[0] === "--measure-starts") {
     const [, count, suite = ruleSuites()[0], ...extra] = argv;
     if (!/^[1-9]\d*$/.test(count ?? "") || extra.length > 0) {
@@ -182,7 +221,7 @@ export function main(argv, run, concurrency = ruleSuiteConcurrency(), runConcurr
   }
   if (argv.includes("--run")) {
     if (run !== undefined || concurrency === 1) return runRuleSuites(root, run ?? spawnSync);
-    return runConcurrently(root, { concurrency, pressure });
+    return runConcurrently(root, { concurrency, pressure, rerunAlone });
   }
   if (argv.length > 0 && !argv.includes("--list")) {
     console.error(USAGE);
