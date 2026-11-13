@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 2.58
   status: queued
@@ -21,3 +21,11 @@
     The ledger step primary_shadow.alert_failed carries a failure shape and landed rows in both halves of the trailing 7 days: 2 in the older half, 16 in the newer.
     No queued task and no task merged in that window cites this step, and no gardener scorecard prices it.
     The rows name no file; tracked source literals locate this step in: src/lib/sweep.ts. Start there.
+  risk_ruling:
+    verdict: "rule-3-low-privilege"
+    action: proceed
+    confidence: 1
+    reasons:
+      - "rule 3 (live and low-privilege): the symptom is live, 18 occurrence(s) across 7 day(s), last seen 2026-11-12T08:59:29.088Z, and the record declares no privileged path"
+    judged_at: "2026-11-12T23:04:01.402Z"
+    pin: "60ba8b49e0db12dbac381935cf063053240150586683b32ce2f93bffd939af57"
