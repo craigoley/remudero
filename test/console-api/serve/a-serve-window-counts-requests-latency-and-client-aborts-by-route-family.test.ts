@@ -6,6 +6,7 @@ import type { AddressInfo } from "node:net";
 import { join } from "node:path";
 import { test } from "node:test";
 import { clockFromMillisFn } from "#src/lib/clock.js";
+import { appendLedger } from "#src/lib/ledger.js";
 import { createServeDemand, recordServeRequest, SERVE_DEMAND_WINDOW_MS, SERVE_DEMAND_FAMILY_CAP } from "#src/lib/serve-demand.js";
 import { buildServeServer, type ServeDeps } from "#src/lib/serve.js";
 import { createService, type Route } from "#src/lib/service.js";
@@ -21,7 +22,7 @@ function response() {
   return Object.assign(new EventEmitter(), { statusCode: 200, writableFinished: false });
 }
 
-function dispatchAnswer(server: Server, target: string): Promise<{ status: number; headers: Record<string, string>; body: string }> {
+function dispatchAnswer(server: Server, target: string, requestHeaders: Record<string, string> = {}): Promise<{ status: number; headers: Record<string, string>; body: string }> {
   return new Promise(resolve => {
     let status = 0, headers: Record<string, string> = {}, body = "";
     const res = Object.assign(new EventEmitter(), {
@@ -34,7 +35,7 @@ function dispatchAnswer(server: Server, target: string): Promise<{ status: numbe
         res.emit("finish"); resolve({ status, headers, body }); return res;
       },
     });
-    server.emit("request", { method: "GET", url: target, headers: {} } as IncomingMessage, res as unknown as ServerResponse);
+    server.emit("request", { method: "GET", url: target, headers: requestHeaders } as IncomingMessage, res as unknown as ServerResponse);
   });
 }
 
@@ -114,6 +115,42 @@ test("W1-T11814 criterion 3: a nonempty five-minute window writes one row and re
   });
 });
 
+test("W1-T11814 criterion 3: delayed ticks keep completions in separate windows and skip only empty windows", async () => {
+  await withTempDir("demand-delayed-ticks", async root => {
+    const ledgerPath = join(root, "ledger.ndjson"); writeFileSync(ledgerPath, "");
+    let clock = 0, reads = 0, tick!: () => void;
+    const demand = createServeDemand({ ledgerPath, routes: [{ method: "GET", path: "/v1/probe" }],
+      clock: clockFromMillisFn(() => { reads++; return clock; }), every: fn => { tick = fn; return () => {}; } });
+    const stop = demand.start();
+    const complete = (at: number, status: number, aborted: boolean) => {
+      clock = at - 10;
+      const res = response(); res.statusCode = status;
+      reads = 0;
+      recordServeRequest(demand, { method: "GET", url: "/v1/probe" } as IncomingMessage, res as unknown as ServerResponse);
+      clock = at; res.writableFinished = !aborted; res.emit(aborted ? "close" : "finish");
+      assert.equal(reads, 2, "window rollover reuses the completion clock read");
+    };
+    complete(100_000, 200, false);
+    complete(450_000, 503, false);
+    clock = 600_000; tick(); tick();
+    let written = rows(ledgerPath);
+    assert.deepEqual(written.map(row => [row.windowStart, row.windowEnd]), [[0, 300_000], [300_000, 600_000]]);
+    assert.deepEqual(written.map(row => row.families["/v1/probe"]), [
+      { n: 1, ok: 1, error: 0, aborted: 0, statuses: { "1xx": 0, "2xx": 1, "3xx": 0, "4xx": 0, "5xx": 0 }, p50: 10, p95: 10, max: 10 },
+      { n: 1, ok: 0, error: 1, aborted: 0, statuses: { "1xx": 0, "2xx": 0, "3xx": 0, "4xx": 0, "5xx": 1 }, p50: 10, p95: 10, max: 10 },
+    ]);
+    complete(600_000, 503, true);
+    complete(1_800_000, 200, false);
+    clock = 2_400_000; tick(); stop();
+    written = rows(ledgerPath);
+    assert.deepEqual(written.map(row => [row.windowStart, row.windowEnd]),
+      [[0, 300_000], [300_000, 600_000], [600_000, 900_000], [1_800_000, 2_100_000]]);
+    assert.equal(written[2]!.families["/v1/probe"]!.aborted, 1);
+    assert.equal(written[2]!.families["/v1/probe"]!.error, 0);
+    assert.equal(written[3]!.families["/v1/probe"]!.ok, 1);
+  });
+});
+
 test("W1-T11814 criterion 4: family and histogram storage stay bounded and observing a response only reads two clocks", async () => {
   await withTempDir("demand-bounds", async root => {
     const ledgerPath = join(root, "ledger.ndjson"); writeFileSync(ledgerPath, "");
@@ -190,6 +227,43 @@ test("a failed demand ledger write reports its reason and the next window can st
     clock += SERVE_DEMAND_WINDOW_MS; demand.flush();
     assert.equal(rows(ledgerPath).length, 1); assert.equal(rows(ledgerPath)[0]!.families.other!.error, 1);
     assert.equal(rows(ledgerPath)[0]!.windowStart, SERVE_DEMAND_WINDOW_MS);
+  });
+});
+
+test("W1-T11814 criterion 4: a ledger-backed logger failure cannot escape the default timer or interrupt responses", async t => {
+  await withTempDir("demand-logger-failure", async root => {
+    const ledgerPath = join(root, "ledger.ndjson"); mkdirSync(ledgerPath);
+    t.mock.timers.enable({ apis: ["setInterval", "Date"], now: 0 });
+    const fallback = t.mock.method(console, "error", () => {});
+    let reports = 0;
+    const routes: Route[] = [{ method: "GET", path: "/v1/probe", scope: "read", handler: (_req, res) => {
+      res.writeHead(201, { "x-probe": "unchanged" }); res.end("original");
+    } }];
+    const demand = createServeDemand({ ledgerPath, routes, log: (step, extra) => {
+      reports++;
+      appendLedger(ledgerPath, { run_id: "serve", task_id: "", step, ...extra });
+    } });
+    const stop = demand.start();
+    const server = createService({ tokens: { read: "r", write: "w" }, routes });
+    server.prependListener("request", (req, res) => recordServeRequest(demand, req, res));
+    const headers = { authorization: "Bearer r" };
+    const first = await dispatchAnswer(server, "/v1/probe", headers);
+    assert.deepEqual(first, { status: 201, headers: { "x-probe": "unchanged" }, body: "original" });
+    assert.doesNotThrow(() => t.mock.timers.tick(SERVE_DEMAND_WINDOW_MS));
+    assert.equal(reports, 1, "the real ledger-backed reporting path was exercised");
+    assert.equal(fallback.mock.callCount(), 1);
+    const [step, extra] = fallback.mock.calls[0]!.arguments;
+    assert.equal(step, "serve.demand_report_failed");
+    assert.match(String(extra.reason), /EISDIR/);
+    assert.match(String(extra.reportReason), /EISDIR/);
+    rmdirSync(ledgerPath); writeFileSync(ledgerPath, "");
+    assert.deepEqual(await dispatchAnswer(server, "/v1/probe", headers), first);
+    t.mock.timers.tick(SERVE_DEMAND_WINDOW_MS); stop();
+    const written = rows(ledgerPath);
+    assert.equal(written.length, 1);
+    assert.equal(written[0]!.windowStart, SERVE_DEMAND_WINDOW_MS);
+    assert.equal(written[0]!.families["/v1/probe"]!.n, 1);
+    t.mock.timers.reset();
   });
 });
 

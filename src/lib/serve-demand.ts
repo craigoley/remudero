@@ -48,7 +48,9 @@ export function createServeDemand(options: ServeDemandOptions) {
   let namedFamilies = 0;
   let stopTimer: (() => void) | undefined;
 
-  function record(family: string, status: number, elapsed: number, aborted: boolean): void {
+  function record(family: string, status: number, elapsed: number, aborted: boolean, at = now()): void {
+    // Close the previous window before tallying this completion, even if the timer ran late.
+    flush(at);
     if (family !== "other" && !families.has(family) && namedFamilies >= SERVE_DEMAND_FAMILY_CAP) family = "other";
     let tally = families.get(family);
     if (!tally) {
@@ -70,8 +72,7 @@ export function createServeDemand(options: ServeDemandOptions) {
     tally.max = Math.max(tally.max, ms);
   }
 
-  function flush(): void {
-    const at = now();
+  function flush(at = now()): void {
     if (at < windowStart + SERVE_DEMAND_WINDOW_MS) return;
     const windowEnd = windowStart + SERVE_DEMAND_WINDOW_MS;
     if (families.size > 0) {
@@ -86,7 +87,13 @@ export function createServeDemand(options: ServeDemandOptions) {
         appendLedger(options.ledgerPath, row);
       } catch (error) {
         // Observation must not take down the gateway when its ledger is unavailable.
-        (options.log ?? ((step, extra) => console.error(step, extra)))("serve.demand_write_failed", { reason: String(error), windowStart, windowEnd });
+        const extra = { reason: String(error), windowStart, windowEnd };
+        try {
+          (options.log ?? ((step, detail) => console.error(step, detail)))("serve.demand_write_failed", extra);
+        } catch (reportError) {
+          // The production logger shares the ledger; its failure needs an independent sink.
+          console.error("serve.demand_report_failed", { ...extra, reportReason: String(reportError) });
+        }
       }
     }
     families = new Map(); namedFamilies = 0;
@@ -132,7 +139,8 @@ export function recordServeRequest(demand: ServeDemand, req: IncomingMessage, re
     recorded = true;
     res.off("finish", complete);
     res.off("close", complete);
-    demand.record(family, res.statusCode, demand.now() - started, !res.writableFinished);
+    const at = demand.now();
+    demand.record(family, res.statusCode, at - started, !res.writableFinished, at);
   };
   res.once("finish", complete);
   res.once("close", complete);
