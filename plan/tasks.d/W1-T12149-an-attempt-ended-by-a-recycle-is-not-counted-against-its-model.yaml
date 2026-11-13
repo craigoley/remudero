@@ -18,6 +18,8 @@
     - src/lib/routing-experiments.ts
     - src/lib/fix-routing-learner.ts
     - test/routing/an-attempt-ended-by-a-recycle-is-not-counted-against-its-model.test.ts
+    - "scripts/private-routing-daily-review.mjs"
+    - "src/run-task.ts"
   status: queued
   attempts: 0
   acceptance:
