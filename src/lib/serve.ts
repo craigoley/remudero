@@ -178,6 +178,7 @@ import {
   type ProviderRoutingPolicyOverrideInput,
 } from "./provider-routing-policy.js";
 import { appendLedger } from "./ledger.js";
+import { createServeDemand, recordServeRequest, type ServeDemandOptions } from "./serve-demand.js";
 import {
   buildAnalyticsRoute,
   coldAnalyticsSnapshot,
@@ -380,6 +381,7 @@ export interface ServeDeps {
   phaseElapsedThresholdsMs?: Record<string, number>;
   /** Forwarded to `createService` — one ledger line per auth decision/SSE lifecycle/handler error. */
   log?: ServiceOptions["log"];
+  demand?: Pick<ServeDemandOptions, "clock" | "every">;
   /**
    * W1-T163: per-token recap markers (last-seen.ts), shared with digest.ts's
    * `sendMarkerAwareDigest` so push and pull read/advance the same state. Injectable; otherwise
@@ -3429,6 +3431,7 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
   const wakeCounters = createWakeCounters();
   const routeReads = createRouteReadRollup({ stateDir: join(deps.fleetControlRoot, "state"), log: deps.log, write: (row) => deps.log?.(ROUTE_READS_STEP, { ...row }) });
   let stopRouteReads = (): void => {};
+  let stopDemand = (): void => {};
   const stopWakeSummary = startWakeSummaryFlush({
     counters: wakeCounters,
     clock: systemClock,
@@ -3463,6 +3466,7 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
       liveAnalyticsCache.stop();
       stopWakeSummary();
       stopRouteReads();
+      stopDemand();
       prewarm.stop();
       routeAssembly.linkRefusals.stop();
     },
@@ -3555,6 +3559,8 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
     // and HIGH after a recent step-up; the bearer token is still pinned at LOW.
     enforceWriteTiers: true,
   });
+  const demand = createServeDemand({ ...deps.demand, log: deps.log, ledgerPath: deps.ledgerPath, routes, sse: [prewarm.route] });
+  server.prependListener("request", (req, res) => recordServeRequest(demand, req, res));
   serveDrain.attach(server);
   viewEventsHandover = routeAssembly.viewEvents.handover;
   if (readModel) {
@@ -3573,8 +3579,8 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
   server.on("close", prewarm.stop);
   if (keepWarm) server.once("listening", keepWarm.start);
   server.on("close", stopWakeSummary);
-  server.once("listening", () => (stopRouteReads = routeReads.start()));
-  server.on("close", () => stopRouteReads());
+  server.once("listening", () => { stopRouteReads = routeReads.start(); stopDemand = demand.start(); });
+  server.on("close", () => { stopRouteReads(); stopDemand(); });
   server.once("listening", analyticsCache.start);
   server.on("close", analyticsCache.stop);
   server.once("listening", () => { for (const cache of routeAssembly.instanceAnalyticsCaches) cache.start(); });

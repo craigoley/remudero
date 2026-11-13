@@ -52,6 +52,8 @@ const FIXTURE_PLAN = `- id: TST-BAD
   repo: remudero
   depends_on: []
   type: implement
+  design: |
+    NO-INVARIANTS: synthetic lint fixture with no inherited behavior to preserve
   verify: auto
   risk: medium
   origin: architect
@@ -66,6 +68,8 @@ const FIXTURE_PLAN = `- id: TST-BAD
   repo: remudero
   depends_on: []
   type: implement
+  design: |
+    NO-INVARIANTS: synthetic lint fixture with no inherited behavior to preserve
   verify: auto
   risk: medium
   origin: architect
@@ -80,6 +84,8 @@ const FIXTURE_PLAN = `- id: TST-BAD
   repo: remudero
   depends_on: []
   type: implement
+  design: |
+    NO-INVARIANTS: synthetic lint fixture with no inherited behavior to preserve
   verify: auto
   risk: medium
   origin: architect
@@ -94,6 +100,8 @@ const FIXTURE_PLAN = `- id: TST-BAD
   repo: remudero
   depends_on: []
   type: implement
+  design: |
+    NO-INVARIANTS: synthetic lint fixture with no inherited behavior to preserve
   verify: auto
   risk: medium
   origin: architect
@@ -110,6 +118,8 @@ const FIXTURE_PLAN = `- id: TST-BAD
   repo: remudero
   depends_on: []
   type: implement
+  design: |
+    NO-INVARIANTS: synthetic lint fixture with no inherited behavior to preserve
   verify: auto
   risk: medium
   origin: architect
@@ -399,6 +409,8 @@ function probeShardYaml(): string {
     "  origin: architect",
     "  depends_on: []",
     "  type: implement",
+    "  design: |",
+    "    NO-INVARIANTS: synthetic lint fixture with no inherited behavior to preserve",
     "  verify: auto",
     "  risk: low",
     "  status: queued",
@@ -539,6 +551,8 @@ function grepProbeShardYaml(caseFileRel: string, dirAsFileRel: string): string {
     "  origin: architect",
     "  depends_on: []",
     "  type: implement",
+    "  design: |",
+    "    NO-INVARIANTS: synthetic lint fixture with no inherited behavior to preserve",
     "  verify: auto",
     "  risk: low",
     "  status: queued",
@@ -634,6 +648,8 @@ function sharedProofShardYaml(proofs: string[]): string {
     "  origin: architect",
     "  depends_on: []",
     "  type: implement",
+    "  design: |",
+    "    NO-INVARIANTS: synthetic lint fixture with no inherited behavior to preserve",
     "  verify: auto",
     "  risk: low",
     "  status: queued",
