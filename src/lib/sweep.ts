@@ -16,6 +16,9 @@ import { createHeadRehomePorts, headIdentityRed, headRehomePlan, type HeadRehome
 import { argmaxTypedJudgmentOption, runTypedJudgment } from "./typed-judgment.js";
 import { diffCoverageTargets } from "./diff-coverage-targets.js";
 import { execFileSync } from "node:child_process";
+import { defaultIsPidAlive } from "./drain-lock.js";
+import { isHolderStale } from "./fs-race-safe.js";
+import { readBoundedProcessCwdCensus } from "./process-cwd-census.js";
 import { HOST_GIT_CONFIG, hostWorktreeGit, hostWorktreeGitAsync, WorktreePointerRefusedError } from "./worktree-git.js";
 import { execFileLoopBounded } from "./loop-bounded-child.js";
 import { createScanner, SyntaxKind } from "typescript/unstable/ast";
@@ -39,7 +42,7 @@ import { gatedRemoteRefReserver, reserveTaskIdRemote, type RemoteReserveDeps } f
 import { basename, dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { recyclePauseDetail } from "./recycle-yield.js";
-import { isRecyclePauseDetail } from "./fleet-control.js";
+import { checkSharedPause, isRecyclePauseDetail, realSharedPauseGitDeps, type SharedPauseGitDeps } from "./fleet-control.js";
 import {
   BASE_REPRODUCTION_MAX_FILES, baseProbeSetupFailure, boundedBaseProbeReason,
   baseReproductionFiles, ciContradictedProbeFiles, decideBaseReproduction, failingRuleSuitesFromCiFailures, failingTestFilesFromCiFailures,
@@ -627,19 +630,12 @@ function assessReviewReuse(
   };
 }
 
-/**
- * Escalations use the trailer task id or the review lane's `PR-<n>` identity, minted without I/O.
- * Previously `UNKNOWN` missed `buildEscalationReconcileCandidates`'s plan lookup, preventing
- * retirement of 53 of 57 open needs-human issues (the reconciler saw 0).
- * {@link buildEscalationReconcileCandidates} resolves `PR-<n>` directly: synthetic ids must
- * round-trip, or an enumerable orphan becomes invisible.
- */
+/** Escalations use trailer ids or I/O-free `PR-<n>` identities that must round-trip through
+ * {@link buildEscalationReconcileCandidates}; `UNKNOWN` made synthetic orphans invisible. */
 /** Drop a stalled reason's moving age and episode start. The identity reader also drops its
  *  diagnosis; the full reason stays in the issue detail. Any other reason is returned unchanged. */
 export function stalledStageEscalationSummary(reason: string): string {
-  // An ownerless stall reads "(owner: none)" where an owned one reads "(BACKSTOP <n>)", and a held repair appends
-  // its withheld minutes: both kept the title moving, so #15368 got four issues for one head and cause (#15403,
-  // #15414, #15453, #15476), and 16 open issues on 2026-10-29 carried the unstripped "(owner: none); since".
+  // #15368/#15403/#15414/#15453/#15476: owner and withheld-age changes must not mint new stall issues.
   if (!reason.startsWith("PR stage stalled: ")) return reason;
   return reason
     .replace(/^(PR stage stalled: .+?) for \d+ minutes \((?:BACKSTOP \d+|owner: none)\); since [^;]*;/, "$1;")
@@ -691,13 +687,8 @@ export function reviewOutcomeTaskIdFor(pr: { taskId?: string; prNumber: number; 
   return pr.reviewInputDigest !== undefined ? reviewLedgerKeyFor(pr.taskId, pr.prNumber) : (pr.taskId ?? "");
 }
 
-/**
- * W1-T516: `sweep.armSessionPrs` gates the arm's task-id fallback. Previously the sweep passed
- * raw `pr.taskId` to {@link armAndLogOutcome}, so `armAutoMerge` refused every trailer-less PR.
- * OFF (default) preserves that `undefined` / `no-task-id` behavior. ON uses the review,
- * {@link escalationTaskIdFor} and `approveCommand` identity, `PR-<n>`, so
- * `decideArmFromLedgerVerdict` finds the existing review key.
- */
+/** W1-T516: `sweep.armSessionPrs` defaults OFF (`undefined` / `no-task-id`); ON uses the
+ * review/approve `PR-<n>` identity so `decideArmFromLedgerVerdict` finds the review key. */
 export function sweepArmTaskId(pr: { taskId?: string; prNumber: number }, armSessionPrs: boolean): string | undefined {
   // W1-T5866: deliberately NOT {@link escalationTaskIdFor} — the arm gate reads rows already scoped to this PR's url
   // (armLedgerLinesForPr), and a legacy `unfiled`-keyed row must keep matching the id the arm passes.
@@ -773,13 +764,8 @@ type FixRungTask = {
 
 const NEVER_A_PLAN_TASK_ID = /^(?:PR-\d+|RETRO|TRIAGE-.+|PLAN-.+|APPROVE-.+)$/;
 
-/**
- * W1-T4460 design (ii): reload only a real task id missing from the snapshot. In #6916/W1-T4413,
- * #6910 filed its shard after the poll's read, causing a real task to be treated as synthetic.
- * `PR-<n>` and RETRO/TRIAGE/PLAN/APPROVE ids never have records and cannot benefit from reload.
- * Missing or throwing `reloadPlan` falls back to `fixRungTaskFor` with the old snapshot.
- * Reuse `runDaemon`'s `daemon.plan_reloaded` step (design iv).
- */
+/** W1-T4460 (ii)/(iv), #6916/W1-T4413/#6910: reload missing real tasks, never synthetic ids.
+ * Missing/throwing `reloadPlan` keeps `fixRungTaskFor`'s snapshot; log `daemon.plan_reloaded`. */
 export function fixRungTaskWithPlanReload(
   plan: Plan,
   pr: { prNumber: number; taskId?: string },
@@ -810,22 +796,14 @@ export function fixRungTaskWithPlanReload(
   return fixRungTaskFor(plan, pr, body, headRefName, changedPaths);
 }
 
-/**
- * W1-T4073: whether {@link fixRungTaskAtHead} has a plan record to look for — a real plan task id,
- * never the `PR-<n>`/orchestrator-lane shapes (no record exists at any head, so the read is waste).
- */
+/** W1-T4073: only real task ids can have a {@link fixRungTaskAtHead} plan record. */
 export function fixRungWantsHeadContract(pr: { taskId?: string }): pr is { taskId: string } {
   return pr.taskId !== undefined && !NEVER_A_PLAN_TASK_ID.test(pr.taskId);
 }
 
-/**
- * W1-T4073: resolve the contract at the PR head via `resolvePlanCriteriaAtHead` /
- * `resolveFixRungTaskContractAtHead`; prompt, scope guard and commit all use this `opts.task`.
- * #6630 used a 27-minute-stale plan and committed a test #6627 had already replaced.
- * UNREADABLE NEVER FALLS BACK: an unresolved sha, thrown resolver or divergence stands down.
- * A readable head plan lacking the id keeps `fixRungTaskWithPlanReload`'s result. A present
- * record replaces acceptance, files, risk, budget and narrative, and is never synthetic.
- */
+/** W1-T4073, #6630/#6627: resolve the PR-head contract for prompt, scope guard and commit.
+ * Unresolved SHA, resolver failure or divergence stands down, NEVER falls back. A readable
+ * plan missing the id keeps `fixRungTaskWithPlanReload`; a present record replaces the contract. */
 export function fixRungTaskAtHead(
   current: { task: FixRungTask; synthetic: boolean },
   taskId: string,
@@ -858,13 +836,8 @@ export function fixRungTaskAtHead(
   };
 }
 
-/**
- * W1-T3585: #5537 resequenced #5545/W1-T3558 (2026-09-14) after admission, leaving an open PR
- * dispatch could no longer build. Mirror drain.ts's `isDispatchEligible`: blocked (including
- * retirement), or `unmetDependencies` agreed by the current plan and fresh {@link MergedResolver}.
- * A runnable task returns `undefined`, granting no closure authority. The caller must prove
- * these inputs fresh; this pure predicate neither fetches nor infers freshness from names.
- */
+/** W1-T3585, #5537/#5545: mirror drain's `isDispatchEligible` after plan resequencing.
+ * Caller must prove plan/resolver freshness. Runnable returns `undefined`, granting no closure. */
 export function currentPlanIneligibilityReason(plan: Plan, task: Task, isMerged: MergedResolver): string | undefined {
   if (task.status === "blocked") {
     return task.retirement !== undefined
@@ -878,14 +851,8 @@ export function currentPlanIneligibilityReason(plan: Plan, task: Task, isMerged:
   return undefined;
 }
 
-/**
- * W1-T4565 — a CLOSE must not rest on one lagging read. `currentPlanIneligibilityReason`'s resolver
- * is the daemon's per-tick projection, which lagged a real merge by 13-28 minutes (MEASURED: the
- * sweep credited W1-T4567 itself at 20:38:57, then closed #7333 at 20:42 for that "unmet"
- * dependency). An unmet dependency the ledger already credits as merged is met: `creditedInLedger`
- * is asked about exactly the unmet ids, and only when a close is proposed. It can only remove a
- * reason, never add one; a `blocked`/retired task is unaffected.
- */
+/** W1-T4565/#7333: a CLOSE cannot trust one lagging resolver. Query ledger credit only for
+ * unmet ids when proposing closure; it can remove a dependency reason, never add one or unblock a task. */
 export function corroboratedIneligibilityReason(
   plan: Plan,
   task: Task,
@@ -928,13 +895,8 @@ function isSyntheticOrchestratorLaneId(taskId: string): boolean {
   return /^(?:RETRO(?:-.+)?|TRIAGE-.+|PLAN-.+|APPROVE-.+)$/.test(taskId);
 }
 
-/**
- * W1-T4465 design (i): fleet ownership requires a filed run id ({@link TASK_ID_TRAILER_RE})
- * or a synthetic RETRO/TRIAGE/PLAN/APPROVE lane ({@link isSyntheticOrchestratorLaneId}).
- * Operator `run-unfiled-*`, human and dependabot heads return false: the governor counts them
- * but cannot throttle them (the incident included 4-7 operator sessions).
- * Undefined heads fail CLOSED: unreadable ownership must keep gating the WIP ceiling.
- */
+/** W1-T4465 (i): only filed runs and synthetic lanes are throttleable; operator/unfiled,
+ * human and dependabot heads only count. Undefined ownership fails CLOSED at the WIP ceiling. */
 export function isFleetOwnedRunBranch(head: string | undefined): boolean {
   if (head === undefined) return true;
   const owner = taskIdFromRunBranch(head);
@@ -942,22 +904,9 @@ export function isFleetOwnedRunBranch(head: string | undefined): boolean {
   return isSyntheticOrchestratorLaneId(owner) || TASK_ID_TRAILER_RE.test(owner);
 }
 
-/**
- * Is `head` an acceptable branch for a fix dispatch to amend?
- *
- * FOR A PLAN TASK, unchanged and still strict: the fix must amend THAT task's own run branch,
- * because creditability is load-bearing (status.ts's `ownsBranch`) and a fix on an uncreditable
- * head loops forever and strands dependents.
- *
- * FOR A SYNTHETIC (no-task) PR the entire rationale is inapplicable — there is no task to credit
- * and no dependent to strand — so its own descriptive head is acceptable. ONE guard remains, and it
- * is the load-bearing half: a head that CLAIMS SOME OTHER TASK (`run-W1-T123-…`) is refused. Such a
- * PR is not task-less, it is MIS-TRAILERED, and amending it would push commits onto another task's
- * run branch under a synthetic identity.
- *
- * This never widens WHICH PRs are fixable — the disposition set is untouched — only whether the
- * rung can act on one the sweep has already classified.
- */
+/** Fix ownership: plan tasks require their own creditable run branch (`status.ts:ownsBranch`).
+ * Synthetic PRs may use descriptive heads, but NEVER another task's run branch: that would
+ * amend foreign work under a mis-trailered identity. Disposition eligibility stays unchanged. */
 
 /**
  * Is `head` ANY dispatched run's own branch — `run-<taskId>-<epochMs>`, the shape every
@@ -1648,6 +1597,9 @@ export interface BuildSweepEffectsDeps {
   repairMetadataImpl?: (pr: OpenPrView, checks: readonly string[]) => Promise<MetadataRepairResult>;
   registeredWorktreeOwnerImpl?: (repoDir: string, branchRef: string) => string | undefined;
   registeredOwnerRecovery?: RegisteredFixOwnerRecoveryDeps;
+  ownerProcessCwdCensusImpl?: typeof readBoundedProcessCwdCensus;
+  /** The fix-dispatch cause probe uses this reader even in light and one-shot sweeps. */
+  fixDispatchPauseGitImpl?: SharedPauseGitDeps;
   depReviewCommandImpl?: (prArg: string, rest?: string[]) => Promise<number>;
   dispatchFixPreflightStandDownImpl?: SweepRuntimeFn;
   ghLiveStateImpl?: SweepRuntimeFn;
@@ -2434,6 +2386,7 @@ export const SWEEP_EFFECT_SURFACE = [
   "dispatchPlanOnlyRepair",
   "escalate",
   "fixOwnerReclaimableAtHold", // W1-T7998
+  "fixDispatchFleetHold", // W1-T11168
   "readLiveState",
   "terminalFixStandDown",
   "readRedBaseRefreshFacts",
@@ -2622,6 +2575,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   | "dispatchPlanOnlyRepair"
   | "escalate"
   | "fixOwnerReclaimableAtHold"
+  | "fixDispatchFleetHold"
   | "strikeLadder"
   | "readLiveState"
   | "terminalFixStandDown"
@@ -2731,6 +2685,8 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
       capture: requiredSweepRuntime("registeredOwnerRecovery.capture"),
       remove: requiredSweepRuntime("registeredOwnerRecovery.remove"),
     },
+    ownerProcessCwdCensusImpl = readBoundedProcessCwdCensus,
+    fixDispatchPauseGitImpl,
     depReviewCommandImpl: depReviewCommand = requiredSweepRuntime<NonNullable<BuildSweepEffectsDeps["depReviewCommandImpl"]>>("depReviewCommandImpl"),
     dispatchFixPreflightStandDownImpl: dispatchFixPreflightStandDown = requiredSweepRuntime("dispatchFixPreflightStandDownImpl"),
     ghLiveStateImpl: ghLiveState = requiredSweepRuntime("ghLiveStateImpl"),
@@ -2802,6 +2758,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   };
 
   const repoDir = repo === localRepoName ? entrypointRepoRoot : join(config.root, "repos", repo);
+  const pauseGit = fixDispatchPauseGitImpl ?? realSharedPauseGitDeps(repoDir);
   // W1-T4460 (design ii): the real default reads this repo's OWN plan fresh off disk, swallowing a
   // read failure (an unreadable plan on this one opportunistic re-read is never this dispatch's
   // reason to throw — `fixRungTaskWithPlanReload` already degrades to the stale `plan` on `undefined`).
@@ -3169,6 +3126,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   };
   return {
     readerAgreement: { owner, repo, plan, readJson: readJsonImpl },
+    fixDispatchFleetHold: () => checkSharedPause(config.root, { run: pauseGit.run, mintAnchor: pauseGit.mintAnchor }),
     reconcilePrimaryShadowAlert: () => primaryShadowAlerts.reconcile().catch(primaryShadowAlertFailed),
     readOpenEscalations: () => issues.listOpen?.(NEEDS_HUMAN_LABEL) ?? [],
     fixProgressJudge: effectsProgressJudge,
@@ -3958,6 +3916,32 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
       if (typeof ownerPath !== "string" || typeof branch !== "string" || typeof taskId !== "string") return false;
       const failed = revalidatedOwnerPreservation(decline.owner_recovery_reason);
       if (failed && (branch !== pr.headRefName || taskId !== fixLedgerTaskIdFor(pr))) return false;
+      // `capture` intentionally returns before its claim/process probes when the checkout is
+      // detached or belongs to another task. That is useful for dirty-tree recovery decisions,
+      // but `process_cwd_owner` is a liveness cause: branch attachment cannot make a live owner
+      // disappear or keep a dead one alive. Probe its claim and cwd directly in that case.
+      if (!failed && (decline.owner_recovery_reason === "process_cwd_owner" ||
+        decline.owner_recovery_reason === "live_branch_claim")) {
+        const lockPath = inflightLockPath(inflightDir, fixBranchClaimKey(owner, repo, branch));
+        let claimClear = false;
+        try {
+          const holder = parseInflightLockInfo(readFileSync(lockPath, "utf8"));
+          claimClear = holder !== null &&
+            (fixRoundClaimEnded(ledgerPath, holder.run_id) || isHolderStale(holder, { isPidAlive: defaultIsPidAlive }));
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === "ENOENT") claimClear = true;
+          else log("sweep.fix.owner_claim_probe_unreadable", { pr_number: pr.prNumber,
+            head_sha: pr.headSha, worktree_path: ownerPath, reason: String(error) });
+        }
+        if (!claimClear) return false;
+        try {
+          return ownerProcessCwdCensusImpl(ownerPath).state === "clear";
+        } catch (error) {
+          log("sweep.fix.owner_process_probe_unreadable", { pr_number: pr.prNumber,
+            head_sha: pr.headSha, worktree_path: ownerPath, reason: String(error) });
+          return false;
+        }
+      }
       try {
         const snapshot = registeredOwnerRecovery.capture({
           repoDir, worktreesRoot: worktreesDir(config), ownerPath, taskId, branch,
@@ -3966,6 +3950,27 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
           claimRoundEnded: (claimRunId: string) => fixRoundClaimEnded(ledgerPath, claimRunId),
           idleBoundMs: registeredFixOwnerIdleBoundMs(readLedgerLines(ledgerPath), spawnWallClockBoundMs), // ledger-read-intent: live
         });
+        // The claim path failed after preserving the bytes. Only a new claim attempt can prove
+        // that clearStaleDirty now succeeds; preservation alone cannot clear that failure.
+        if (decline.owner_recovery_reason === "owner_stale_dirty_reset_failed") return false;
+        if (!failed && snapshot.pathState === "managed" && snapshot.historyState === "unknown" &&
+            snapshot.attachmentState === "exact") {
+          const lockPath = inflightLockPath(inflightDir, fixBranchClaimKey(owner, repo, branch));
+          let claimClear = false;
+          try {
+            const holder = parseInflightLockInfo(readFileSync(lockPath, "utf8"));
+            claimClear = holder !== null &&
+              (fixRoundClaimEnded(ledgerPath, holder.run_id) || isHolderStale(holder, { isPidAlive: defaultIsPidAlive }));
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code === "ENOENT") claimClear = true;
+            else log("sweep.fix.owner_claim_probe_unreadable", { pr_number: pr.prNumber,
+              head_sha: pr.headSha, worktree_path: ownerPath, reason: String(error) });
+          }
+          if (claimClear && ownerProcessCwdCensusImpl(ownerPath).state === "clear") return true;
+        }
+        // This probe answers whether the recorded owner still owns the checkout. A stale or
+        // unreadable history can block recovery, but cannot keep a cleared claim/process cause held.
+        if (!failed && snapshot.claimState === "clear" && snapshot.processState === "clear") return true;
         const decision = decideRegisteredFixOwnerRecovery(snapshot);
         if (!failed) return decision.kind !== "keep";
         const localSha = snapshot.localSha;
@@ -4515,10 +4520,8 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
             // W1-T6362: the same holds on the PR's CURRENT head. The owner is already proven dead
             // (decideRegisteredFixOwnerRecovery admits this arm only with the claim and process
             // census both clear), and the preserve proves the recovery ref reproduces the owner's
-            // exact index tree before anything is reset, so nothing is lost by reclaiming. The old
-            // current-head refusal held the PR's fix lane until FIX_CLAIM_DECLINE_BACKSTOP escalated
-            // it to a human (#10041, #10063, #10066, #10071, #10074). Only a preserve that FAILS
-            // still declines -- by name, head-stamped, so the backstop escalates it once.
+            // exact index tree before anything is reset, so nothing is lost by reclaiming. A failed
+            // preserve still declines by name and head, so its cause is re-probed (W1-T11168).
             if (residue?.refusal) {
               const superseded = snapshot.remoteSha !== null && snapshot.remoteSha !== localSha && snapshot.historyState === "contained";
               try {
@@ -14721,23 +14724,16 @@ export function fleetWithheldStageMs(rows: ReadonlyArray<Record<string, unknown>
       row.stand_down_reason === "overtaken by a repair queued before it — this review keeps its place in the queue, re-derived next pass" ||
       row.stand_down_reason === "review lanes taken by repairs queued before their reviews — re-derived next pass"
     );
-    if (row.acted === true || !(FLEET_WITHHELD_STAND_DOWN.test(text) || admissionHeld)) return;
+    if (row.acted === true || !(FLEET_WITHHELD_STAND_DOWN.test(text) || admissionHeld ||
+      (row.cause === "fleet-held" && row.probe_result === "present"))) return;
     held += Math.max(0, Math.min(passes[i + 1]?.at ?? nowMs, nowMs) - at);
   });
   return held;
 }
 
-/** W1-T5932 — BACKSTOP: detached dispatch failures per (PR, head) before the sweep stops and escalates once;
- *  the {@link FIX_CLAIM_DECLINE_BACKSTOP} sibling, the first attempt plus two retries. */
-export const FIX_DISPATCH_FAILED_BACKSTOP = 3;
-
-/** W1-T5919 — BACKSTOP: owner-claim declines per (PR, head) before the sweep stops and escalates once;
- *  three is the first attempt plus two retries, time for an exiting owner to clear. */
-export const FIX_CLAIM_DECLINE_BACKSTOP = 3;
-
-/** PR 14405 and its follow-up: each failed owner recovery `declineClaim` names, keyed to the decision
- *  that must still admit it and the ordinary helper whose verified result lifts its backstop hold.
- *  A failed stale-dirty RESET re-proves only its preservation: the claim path then redoes both. */
+/** PR 14405 and its follow-up: preservation failures can be revalidated by the same helper.
+ *  A failed stale-dirty reset waits for a new claim attempt after backoff; saving bytes again
+ *  cannot prove that the reset will succeed. */
 const REVALIDATED_OWNER_PRESERVATIONS: Readonly<Record<string, {
   kind: "preserve-tracked-dirty" | "preserve-stale-dirty";
   helper: "preserveTrackedDirty" | "preserveStagedResidue" | "preserveStaleDirty";
@@ -14745,7 +14741,6 @@ const REVALIDATED_OWNER_PRESERVATIONS: Readonly<Record<string, {
   owner_dirty_recovery_preserve_failed: { kind: "preserve-tracked-dirty", helper: "preserveTrackedDirty" },
   owner_staged_residue_preserve_failed: { kind: "preserve-tracked-dirty", helper: "preserveStagedResidue" },
   owner_stale_dirty_preserve_failed: { kind: "preserve-stale-dirty", helper: "preserveStaleDirty" },
-  owner_stale_dirty_reset_failed: { kind: "preserve-stale-dirty", helper: "preserveStaleDirty" },
 };
 
 function revalidatedOwnerPreservation(reason: unknown) {
@@ -14753,8 +14748,7 @@ function revalidatedOwnerPreservation(reason: unknown) {
     ? REVALIDATED_OWNER_PRESERVATIONS[reason] : undefined;
 }
 
-/** A fix dispatch the backstop holds at this head, read from the ledger alone so EVERY pass (the light
- *  pass included, which never reaches the action arm) classifies it the same way. */
+/** A cause holding a fix dispatch at this head, shared by action and reporting on every pass. */
 export interface FixDispatchHold {
   reason: string;
   fields: Record<string, unknown>;
@@ -14811,7 +14805,8 @@ export function ownEscalationAtHead(
     }
     if (row.step !== "sweep.disposed" || row.pr_number !== pr.prNumber || !atHead) continue;
     const filed = row.acted === true && (row.disposition === "blocked-ambiguous" || row.disposition === "refused-escalate");
-    const latch = typeof row.progress_escalated_key === "string" ? `progress\u0000${row.progress_escalated_key}`
+    const latch = typeof row.dispatch_cause_escalated === "string" ? `dispatch-cause\u0000${row.dispatch_cause_escalated}`
+      : typeof row.progress_escalated_key === "string" ? `progress\u0000${row.progress_escalated_key}`
       : typeof row.fix_claim_decline_escalated === "string" ? `claim\u0000${row.fix_claim_decline_escalated}`
         : row.fix_dispatch_failed_escalated === true ? "dispatch-failed" : undefined;
     const firstOfLatch = latch !== undefined && !latched.has(latch);
@@ -14824,103 +14819,192 @@ export function ownEscalationAtHead(
   return found;
 }
 
-/** W1-T5919 + W1-T5932 — the backstop holds, pure. The claim-decline hold stands only while the
- *  declined owner worktree still exists: once an operator or the janitor removes it, the next pass
- *  re-attempts the claim, so clearing the cause never also needs a hand-pushed head (#10551, 2026-10-10:
- *  a dirty `sweep-` owner held a conflicted PR at one head with nothing able to lift it). A decline
- *  that named no path cannot be re-probed and keeps holding. W1-T7998: a decline the owner DECISION
- *  kept is re-asked through `ownerReclaimable`; once it admits recovery the hold lifts this pass.
- *  A failed recovery in {@link REVALIDATED_OWNER_PRESERVATIONS} lifts only on a re-verified preservation. */
+/** W1-T11168: probes and progress evidence for a retry of a failed dispatch at the same head. */
+export interface FixDispatchHoldOptions {
+  nowMs?: number;
+  sweepPassMs?: number;
+  fleetHold?: () => string | undefined;
+  judge?: FixProgressJudge;
+  record?: (row: Record<string, unknown> & { step: string }) => void;
+  onProgress?: (progress: FixProgressResult) => void;
+}
+
+/** The synchronous reader never starts a judge; the async sweep records its verdict for later readers. */
 export function fixDispatchHoldAtHead(
   pr: OpenPrView, lines: ReadonlyArray<Record<string, unknown>>,
   ownerWorktreeExists: (path: string) => boolean = existsSync,
   ownerReclaimable?: SweepDeps["fixOwnerReclaimableAtHold"],
+  options: FixDispatchHoldOptions = {},
 ): FixDispatchHold | undefined {
-  return runStepsSync(fixDispatchHoldAtHeadSteps(pr, lines, ownerWorktreeExists, ownerReclaimable));
+  return runStepsSync(fixDispatchHoldAtHeadSteps(pr, lines, ownerWorktreeExists, ownerReclaimable, options));
 }
 
 export function fixDispatchHoldAtHeadAsync(
   pr: OpenPrView, lines: ReadonlyArray<Record<string, unknown>>,
   ownerWorktreeExists: (path: string) => boolean = existsSync,
   ownerReclaimable?: SweepDeps["fixOwnerReclaimableAtHold"],
+  options: FixDispatchHoldOptions = {},
 ): Promise<FixDispatchHold | undefined> {
-  return runStepsAsync(fixDispatchHoldAtHeadSteps(pr, lines, ownerWorktreeExists, ownerReclaimable));
+  return runStepsAsync(fixDispatchHoldAtHeadSteps(pr, lines, ownerWorktreeExists, ownerReclaimable,
+    { ...options, judge: options.judge ?? (async () => undefined) }));
+}
+
+const FLEET_PAUSE_REFUSAL = /PAUSE held on |cannot reach origin|origin.*unreadable/;
+
+function dispatchFailureCause(row: Record<string, unknown>): string {
+  const reason = String(row.owner_recovery_reason ?? row.error ?? row.reason ?? "unreadable dispatch failure");
+  if (FLEET_PAUSE_REFUSAL.test(reason)) return "fleet-held";
+  // A verified preservation does not prove that a failed index reset has cleared.
+  if (isOwnerClaimDecline(row) && reason === "owner_stale_dirty_reset_failed") return `reset:${reason}`;
+  // This failure has no separate cause probe: a worktree liveness check cannot establish
+  // that the untracked preservation operation will succeed on retry.
+  if (isOwnerClaimDecline(row) && reason === "owner_untracked_preserve_failed") return `untracked-preserve:${reason}`;
+  if (isOwnerClaimDecline(row) && revalidatedOwnerPreservation(row.owner_recovery_reason))
+    return `preservation:${reason}`;
+  if (isOwnerClaimDecline(row) && typeof row.worktree_path === "string") return `owner-held:${reason}`;
+  // Match the fix-lane gardener's reasonClass without importing its sweep-dependent module graph.
+  return reason.split(" — ")[0]!.replace(/\b[0-9a-f]{7,40}\b/gi, "<sha>")
+    .replace(/\/pull\/\d+/g, "/pull/<n>").replace(/\b\d+(?:\.\d+)?\b/g, "<n>").trim();
+}
+
+function fixDispatchSuccess(row: Record<string, unknown>, pr: OpenPrView): boolean {
+  if (isProofAmendmentIdentityRow(row)) return false;
+  return (row.step === "fix.dispatch" || row.step === "fix.retrigger") &&
+    (row.pr_number === pr.prNumber || (row.pr_number === undefined && row.task_id === fixLedgerTaskIdFor(pr)));
+}
+
+function medianDispatchWait(values: number[]): number | undefined {
+  if (values.length === 0) return undefined;
+  values.sort((a, b) => a - b);
+  const mid = Math.floor(values.length / 2);
+  return values.length % 2 ? values[mid] : (values[mid - 1]! + values[mid]!) / 2;
 }
 
 function* fixDispatchHoldAtHeadSteps(
-  pr: OpenPrView,
-  lines: ReadonlyArray<Record<string, unknown>>,
-  ownerWorktreeExists: (path: string) => boolean = existsSync,
-  ownerReclaimable?: SweepDeps["fixOwnerReclaimableAtHold"],
+  pr: OpenPrView, lines: ReadonlyArray<Record<string, unknown>>,
+  ownerWorktreeExists: (path: string) => boolean,
+  ownerReclaimable: SweepDeps["fixOwnerReclaimableAtHold"],
+  options: FixDispatchHoldOptions,
 ): Steps<FixDispatchHold | undefined> {
-  const declines = lines.filter((l) => isOwnerClaimDecline(l) && l.pr_number === pr.prNumber && l.head_sha === pr.headSha);
-  const last = declines[declines.length - 1];
-  const ownerPath = typeof last?.worktree_path === "string" ? last.worktree_path : undefined;
-  // Revalidation re-proves a failed RESET's preservation but never tries the reset, so a reset that keeps
-  // failing would lift and re-decline forever with no escalation. It is re-asked once per head: after a
-  // revalidation lifted this head, a reset that fails again holds and escalates.
-  const resetRelifted = last?.owner_recovery_reason === "owner_stale_dirty_reset_failed" &&
-    lines.slice(0, lines.lastIndexOf(last)).some((l) => l.from_backstop_revalidation === true &&
-      l.pr_number === pr.prNumber && l.head_sha === pr.headSha);
-  if (declines.length >= FIX_CLAIM_DECLINE_BACKSTOP && (ownerPath === undefined || ownerWorktreeExists(ownerPath)) &&
-      !(ownerPath !== undefined && !resetRelifted && (last.owner_recovery_decision === "keep" ||
-        revalidatedOwnerPreservation(last.owner_recovery_reason) !== undefined) && (yield* step(() => ownerReclaimable?.(pr, last))) === true)) {
-    const why = String(last.owner_recovery_reason);
-    // W1-T5974: a staged-only refusal names the paths an operator must inspect before clearing it.
-    const staged = Array.isArray(last.staged_paths) && last.staged_paths.length > 0
-      ? `, staged ${last.staged_paths.map(String).join(", ")}${Number(last.staged_more) > 0 ? ` (+${Number(last.staged_more)} more)` : ""}`
-      : "";
-    const reason =
-      `fix checkout claim declined ${declines.length} times on #${pr.prNumber} at head ${pr.headSha.slice(0, 7)} ` +
-      `(registered worktree owner ${ownerPath ?? "path unread"}, ${why}${staged}) — ` +
-      `FIX_CLAIM_DECLINE_BACKSTOP ${FIX_CLAIM_DECLINE_BACKSTOP} reached, no further claim is attempted at this head ` +
-      `while that worktree exists`;
-    const escalated = lines.some((l) => l.step === "sweep.disposed" && l.pr_number === pr.prNumber &&
-      l.head_sha === pr.headSha && l.fix_claim_decline_escalated === why);
-    return { reason, fields: { fix_claim_decline_escalated: why, dispatch_held: "fix_claim_decline" }, escalated };
+  const atHead = (l: Record<string, unknown>) => l.pr_number === pr.prNumber && l.head_sha === pr.headSha;
+  const failed = (l: Record<string, unknown>) => isOwnerClaimDecline(l) || isDetachedFixDispatchFailure(l);
+  const history: Record<string, unknown>[] = [];
+  for (const row of lines) {
+    if (fixDispatchSuccess(row, pr) && row.head_sha === pr.headSha) history.length = 0;
+    else if (atHead(row) && failed(row)) history.push(row);
   }
-  return dispatchFailureHoldAtHead(pr, lines);
+  const last = history.at(-1);
+  if (!last) return undefined;
+  const cause = dispatchFailureCause(last);
+  let consecutive = 0;
+  for (let i = history.length - 1; i >= 0 && dispatchFailureCause(history[i]!) === cause; i--) consecutive++;
+  const nowMs = options.nowMs ?? systemClock.now();
+  const stamp = (row: Record<string, unknown>) => Date.parse(String(row.ts));
+  const passTimes = [...new Set(lines.filter(row => row.step === "sweep.disposed" && atHead(row)).map(stamp).filter(Number.isFinite))].sort((a, b) => a - b);
+  const cadence = options.sweepPassMs ?? medianDispatchWait(passTimes.slice(1).map((t, i) => t - passTimes[i]!)) ?? DEFAULT_POLL_INTERVAL_MS;
+  const samples: number[] = [];
+  const nextSuccess = new Map<string, number>();
+  const prForTask = new Map<string, number>();
+  const prsForHead = new Map<string, Set<number>>();
+  prForTask.set(fixLedgerTaskIdFor(pr), pr.prNumber);
+  const associateHead = (headSha: unknown, prNumber: unknown) => {
+    if (typeof headSha !== "string" || typeof prNumber !== "number") return;
+    const owners = prsForHead.get(headSha) ?? new Set<number>();
+    owners.add(prNumber);
+    prsForHead.set(headSha, owners);
+  };
+  associateHead(pr.headSha, pr.prNumber);
+  for (const row of lines) {
+    associateHead(row.head_sha, row.pr_number);
+    if (typeof row.pr_number === "number" && typeof row.task_id === "string" &&
+        !/^(?:SWEEP|DAEMON)(?:-|$)/.test(row.task_id)) prForTask.set(row.task_id, row.pr_number);
+  }
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const row = lines[i]!;
+    if (!Number.isFinite(stamp(row))) continue;
+    const prKey = `pr:${row.pr_number}`;
+    const taskKey = `task:${row.task_id}`;
+    if ((row.step === "fix.dispatch" || row.step === "fix.retrigger") && !isProofAmendmentIdentityRow(row)) {
+      if (typeof row.pr_number === "number") nextSuccess.set(prKey, stamp(row));
+      else if (typeof row.task_id === "string") {
+        nextSuccess.set(taskKey, stamp(row));
+        const owningPr = prForTask.get(row.task_id);
+        if (owningPr !== undefined) nextSuccess.set(`pr:${owningPr}`, stamp(row));
+      }
+      if (typeof row.pr_number !== "number" && typeof row.head_sha === "string") {
+        const owners = prsForHead.get(row.head_sha);
+        if (owners?.size === 1) nextSuccess.set(`pr:${owners.values().next().value!}`, stamp(row));
+      }
+    } else if (failed(row) && dispatchFailureCause(row) === cause) {
+      const successAt = nextSuccess.get(prKey) ?? nextSuccess.get(taskKey);
+      if (successAt !== undefined && successAt > stamp(row)) samples.push(successAt - stamp(row));
+    }
+  }
+  const failureKey = createHash("sha256").update(JSON.stringify(history)).digest("hex");
+  const priorHold = lines.find(row => atHead(row) && row.failure_key === failureKey && row.step === "sweep.disposed");
+  const base = medianDispatchWait(samples) ?? cadence;
+  const backoffMs = typeof priorHold?.backoff_ms === "number" ? priorHold.backoff_ms
+    : Math.min(Number.MAX_SAFE_INTEGER, base * 2 ** (consecutive - 1));
+  const receipt = lines.findLast(row => row.site === "fix-dispatch-cause" && atHead(row) && row.failure_key === failureKey);
+  let progress: FixProgressResult = parseFixProgressVerdict(JSON.stringify(receipt ?? {})) ??
+    { verdict: "unavailable", reason: String(receipt?.reason ?? "no dispatch-cause judgment available") };
+  if (consecutive > 1 && receipt === undefined && options.judge) {
+    const input: FixProgressInput = { taskId: pr.taskId, prNumber: pr.prNumber, headSha: pr.headSha,
+      currentRed: [cause], redClass: cause, strikesSpent: 0, rounds: [], remedyHistory: history,
+      parkedReason: `fix dispatch cause: ${cause}`, signals: { noOpRounds: consecutive, identicalRedSets: consecutive,
+        identicalDiffs: 0, oscillating: false, refusedRounds: consecutive, incompleteRounds: 0, reviewerOnlyFailurePersists: 0 } };
+    const judged = yield* step(() => resolveFixProgress(input, lines, { judge: options.judge }));
+    progress = judged.decision;
+    options.record?.({ ...judged.receipt, ...progress, site: "fix-dispatch-cause", pr_number: pr.prNumber,
+      head_sha: pr.headSha, cause, failure_key: failureKey });
+  }
+  options.onProgress?.(progress);
+  let probe = "unprobed";
+  if (cause === "fleet-held") {
+    // Missing a probe (for example on a one-shot/light sweep) is not proof that
+    // PAUSE/origin recovered. Only an actual clear observation lifts this hold.
+    if (options.fleetHold) {
+      if (options.fleetHold() === undefined) return undefined;
+      probe = "present";
+    }
+  } else if (cause.startsWith("owner-held:")) {
+    const path = String(last.worktree_path);
+    if (!ownerWorktreeExists(path) || (yield* step(() => ownerReclaimable?.(pr, last))) === true) return undefined;
+    probe = "present";
+  } else if (cause.startsWith("preservation:") && typeof last.worktree_path === "string") {
+    if (!ownerWorktreeExists(last.worktree_path) ||
+        (yield* step(() => ownerReclaimable?.(pr, last))) === true) return undefined;
+  }
+  const recordedFailureAt = Date.parse(String(priorHold?.failure_at));
+  const failureAt = Number.isFinite(stamp(last)) ? stamp(last) : Number.isFinite(recordedFailureAt) ? recordedFailureAt : nowMs;
+  const nextRetryMs = Math.min(8.64e15, probe === "present" ? nowMs + cadence : failureAt + backoffMs);
+  const nextRetryAt = clockFromMillisFn(() => nextRetryMs).iso();
+  const escalationKey = `${pr.prNumber}@${pr.headSha}:${cause}`;
+  const escalated = lines.some(row => atHead(row) && row.step === "sweep.disposed" && row.dispatch_cause_escalated === escalationKey);
+  if (probe === "unprobed" && nowMs >= nextRetryMs && progress.verdict !== "escalate") return undefined;
+  const decline = isOwnerClaimDecline(last);
+  const staged = Array.isArray(last.staged_paths) ? `, staged ${last.staged_paths.map(String).join(", ")}` : "";
+  const reason = `${decline ? "fix checkout claim declined" : "detached fix dispatch failed before fix.dispatch"} on #${pr.prNumber} ` +
+    `at head ${pr.headSha.slice(0, 7)} (${String(last.worktree_path ?? last.error ?? "path unread")}, ` +
+    `${String(last.owner_recovery_reason ?? cause)}${staged}) — cause ${cause} ${probe}; next retry ${nextRetryAt}; ` +
+    `judge ${progress.verdict}: ${progress.reason}`;
+  return { reason, escalated, fields: { cause, probe_result: probe, next_retry_at: nextRetryAt,
+    backoff_ms: backoffMs, judge_verdict: progress.verdict, failure_key: failureKey, failure_at: clockFromMillisFn(() => failureAt).iso(),
+    dispatch_held: decline ? "fix_claim_decline" : "fix_dispatch_failed", dispatch_cause_key: escalationKey,
+    ...(escalated ? { dispatch_cause_escalated: escalationKey } : {}) } };
 }
 
-/** A refusal the shared PAUSE gate gave every PR alike (held, or origin unreadable): not this PR's failure. */
-const FLEET_PAUSE_REFUSAL = /PAUSE held on |cannot reach origin to read /;
-
-function dispatchFailureHoldAtHead(pr: OpenPrView, lines: ReadonlyArray<Record<string, unknown>>): FixDispatchHold | undefined {
-  // #15679 hit the backstop on three fleet PAUSE refusals; only a new head lifts it and only a dispatch makes one.
-  const failures = lines.filter((l) => isDetachedFixDispatchFailure(l) && l.pr_number === pr.prNumber && l.head_sha === pr.headSha &&
-    !FLEET_PAUSE_REFUSAL.test(String(l.error ?? "")));
-  if (failures.length < FIX_DISPATCH_FAILED_BACKSTOP) return undefined;
-  const reason =
-    `detached fix dispatch failed before fix.dispatch ${failures.length} times on #${pr.prNumber} at head ` +
-    `${pr.headSha.slice(0, 7)} (${String(failures[failures.length - 1].error)}) — ` +
-    `FIX_DISPATCH_FAILED_BACKSTOP ${FIX_DISPATCH_FAILED_BACKSTOP} reached, no further dispatch is attempted at this head`;
-  const escalated = lines.some((l) => l.step === "sweep.disposed" && l.pr_number === pr.prNumber &&
-    l.head_sha === pr.headSha && l.fix_dispatch_failed_escalated === true);
-  return { reason, fields: { fix_dispatch_failed_escalated: true, dispatch_held: "fix_dispatch_failed" }, escalated };
-}
-
-/** At either backstop, the stand-down; escalates once per (PR, head, reason). */
 async function holdRepeatedFixClaimDecline(
-  pr: OpenPrView,
-  lines: ReadonlyArray<Record<string, unknown>>,
-  escalate: SweepDeps["escalate"],
-  ownerReclaimable?: SweepDeps["fixOwnerReclaimableAtHold"],
+  pr: OpenPrView, hold: FixDispatchHold | undefined, escalate: SweepDeps["escalate"],
 ): Promise<{ reason: string; fields: Record<string, unknown> } | undefined> {
-  const hold = await fixDispatchHoldAtHeadAsync(pr, lines, existsSync, ownerReclaimable);
   if (hold === undefined) return undefined;
-  if (!hold.escalated) await escalate(pr, hold.reason, renderClarificationQuestion(pr, hold.reason, pr.strikeHistory ?? []));
-  return { reason: hold.reason, fields: hold.fields };
-}
-
-/** W1-T5932 — {@link FIX_DISPATCH_FAILED_BACKSTOP} alone, for the CodeQL repair route. */
-async function holdRepeatedFixDispatchFailure(
-  pr: OpenPrView,
-  lines: ReadonlyArray<Record<string, unknown>>,
-  escalate: SweepDeps["escalate"],
-): Promise<{ reason: string; fields: Record<string, unknown> } | undefined> {
-  const hold = dispatchFailureHoldAtHead(pr, lines);
-  if (hold === undefined) return undefined;
-  if (!hold.escalated) await escalate(pr, hold.reason, renderClarificationQuestion(pr, hold.reason, pr.strikeHistory ?? []));
+  if (hold.fields.judge_verdict === "escalate") {
+    if (!hold.escalated) await escalate(pr, hold.reason, renderClarificationQuestion(pr, hold.reason, pr.strikeHistory ?? []));
+    hold.fields.dispatch_cause_escalated = hold.fields.dispatch_cause_key;
+    if (hold.fields.dispatch_held === "fix_claim_decline")
+      hold.fields.fix_claim_decline_escalated = String(hold.fields.cause).replace(/^(?:owner-held:|preservation:)/, "");
+    else hold.fields.fix_dispatch_failed_escalated = true;
+  }
   return { reason: hold.reason, fields: hold.fields };
 }
 
@@ -15081,9 +15165,11 @@ export interface SweepDeps {
     activeWorkers?: number;
   }) => number;
   /** W1-T2584 — time-bounded gate for a next review admission; it never interrupts a running reviewer. */
-  continueReviewAdmissions?: (reviewClass?: ReviewLaneClass) => boolean;
+  continueReviewAdmissions?: ((reviewClass?: ReviewLaneClass) => boolean) & { restartDecided?: () => boolean };
   /** W1-T3491 — fleet hold checked before review or repair admission; direct CLI/test callers omit it. */
   workerAdmissionHold?: (kind?: "review") => string | undefined;
+  /** Re-read the shared PAUSE ref for a recorded fleet-held fix failure. */
+  fixDispatchFleetHold?: () => string | undefined;
   restartAdmission?: ((kind: ReviewLaneClass, surface: "light" | "light-refill") => boolean) & { readonly heldBy?: string; readonly recycleWait?: true };
   /** W1-T11148: the head diff (reviewer's source) and the plan-lane bound's readings; absent: code lane, review-width bound. */
   readPrHeadDiff?: (pr: OpenPrView) => Promise<string>;
@@ -15295,7 +15381,7 @@ export interface SweepDeps {
    *  production full-sweep wrapper. The
    *  dispatch is still CALLED and still writes its `acted: true` row before returning, so the dedup
    *  seed is untouched — only the `await` moves into {@link drainDetachedSweepActions}. NOT AN
-   *  ADMISSION CHANGE. */
+   *  ADMISSION CHANGE. A freshness early end awaits this pass's begun fixes before returning. */
   detachFixWait?: boolean;
   /** W1-T5491: the light pass owns this review promise and releases its reservation on settlement. */
   detachReviewWait?: (work: Promise<void>) => void;
@@ -19414,6 +19500,21 @@ export async function runSweep(
   sweepDeps: SweepDeps,
   policy: SweepPolicy = DEFAULT_SWEEP_POLICY,
 ): Promise<SweepSummary> {
+  const detachedFixes: Promise<unknown>[] = [];
+  const detachPassFix: typeof detachSweepAction = (work, action) => detachSweepAction((onPhase) => {
+    const started = typeof work === "function" ? work(onPhase) : work;
+    detachedFixes.push(started);
+    return started;
+  }, action);
+  // W1-T12237: a decided restart ends the pass before any stage or pull request it has not begun.
+  const endsForRestart = (stage: string, notVisited = openPrs.length): boolean => {
+    if (sweepDeps.continueReviewAdmissions?.restartDecided?.() !== true) return false;
+    sweepDeps.log?.("sweep.ended_early", { reason: "restart_decided", stage, prs_not_visited: notVisited });
+    return true;
+  };
+  const endedEarly = (): SweepSummary => ({ total: openPrs.length, byDisposition: ZERO_COUNTS(), actionsTaken: 0,
+    actionsFailed: 0, actions: [], noneCount: 0 });
+  if (endsForRestart("start")) return endedEarly();
   if (!sweepDeps.dryRun && sweepDeps.repairAdmissionSurface !== "light") {
     await sweepDeps.reconcilePrimaryShadowAlert?.();
   }
@@ -19421,6 +19522,13 @@ export async function runSweep(
   const memoryHeldSummaries = memoryHeld.map((pr) =>
     lightPassMemoryWaitSummary(pr, sweepDeps, lightPassMemoryWaits.get(lightPassHeadKey(pr))!.sinceMs));
   openPrs = openPrs.filter((pr) => !memoryHeld.includes(pr));
+  const dispatchCauseProgress = new Map<number, FixProgressResult>();
+  const withDispatchCauseProgress = (pr: OpenPrView, evidence: FixDispatchEvidence): FixDispatchEvidence => {
+    const progress = dispatchCauseProgress.get(pr.prNumber);
+    return progress?.verdict === "change-approach"
+      ? { ...evidence, progressApproach: [evidence.progressApproach, progress.approach].filter(Boolean).join("\n") }
+      : evidence;
+  };
   // W1-T7096: every round this pass dispatches is judged by the judge this pass was given.
   const deps: SweepDeps = {
     ...sweepDeps,
@@ -19428,7 +19536,7 @@ export async function runSweep(
       const started = performance.now();
       try {
         return sweepDeps.dispatchFix(pr,
-          { ...evidence, progressJudge: evidence.progressJudge ?? sweepDeps.fixProgressJudge }, (phase, wait) => {
+          { ...withDispatchCauseProgress(pr, evidence), progressJudge: evidence.progressJudge ?? sweepDeps.fixProgressJudge }, (phase, wait) => {
             if (phase === "ci-wait") {
               fixCapacityReleases.get(pr.prNumber)?.();
               fixCapacityReleases.delete(pr.prNumber);
@@ -19442,6 +19550,7 @@ export async function runSweep(
     },
   };
   sweepDeps.markPrelude?.("sweep_entry");
+  if (endsForRestart("sweep_entry")) return endedEarly();
   // Alias-bound call site (W1-T2393): the bare `readLedgerLines` regex cannot match a name-bound
   // call, so this marker is documentary only — the enforced corpus and the regex are unchanged.
   // ledger-read-intent: live — this fold reads the live file only, never rotations.
@@ -19486,6 +19595,7 @@ export async function runSweep(
     }
   }
   deps.markPrelude?.("reader_agreement");
+  if (endsForRestart("reader_agreement")) return endedEarly();
   if (deps.readyDraft && (deps.actionable?.("held-draft") ?? true)) {
     for (const pr of openPrs) if (pr.isDraft === true) await deps.readyDraft(pr);
   }
@@ -19517,6 +19627,7 @@ export async function runSweep(
   // byte-identical — the level-triggered idempotence mechanism. The SAME read feeds
   // {@link decideSweepArm}'s head-bound recovery, so arming parity costs no extra read.
   deps.markPrelude?.("armed_body_guard");
+  if (endsForRestart("armed_body_guard")) return endedEarly();
   // W1-T11260: the live tail's rows are shared and read-only; this pass appends its own receipts, so it copies them.
   const ledgerLines = [...readLedger(deps.ledgerPath)];
   const openEscalationHistory = new Map<string, ReadonlyArray<Record<string, unknown>>>();
@@ -19843,6 +19954,26 @@ export async function runSweep(
   const baseRedStandDownPrs = new Set<number>();
   const incidentHeldPrs = new Set<number>(); // W1-T5939: blocker reads awaiting-ci, so no stage stall escalates
   const infrastructureBlockerByPr = new Map<number, PrBlocker>(); // W1-T9932: a plan-only infra red's re-run or escalation
+  const dispatchCauseHolds = new Map<number, FixDispatchHold | undefined>();
+  let dispatchFleetHoldRead = false;
+  let dispatchFleetHold: string | undefined;
+  for (const pr of openPrs) {
+    const opts: FixDispatchHoldOptions = { nowMs: now,
+      fleetHold: () => {
+        if (!dispatchFleetHoldRead) {
+          dispatchFleetHold = deps.fixDispatchFleetHold ? deps.fixDispatchFleetHold() : workerAdmissionHoldReason(deps);
+          dispatchFleetHoldRead = true;
+        }
+        return dispatchFleetHold;
+      },
+      onProgress: progress => dispatchCauseProgress.set(pr.prNumber, progress) };
+    if (!deps.dryRun) {
+      opts.judge = deps.fixProgressJudge;
+      opts.record = row => appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", ...row });
+    }
+    dispatchCauseHolds.set(pr.prNumber, await fixDispatchHoldAtHeadAsync(pr, ledgerLines, existsSync,
+      deps.dryRun ? undefined : deps.fixOwnerReclaimableAtHold, opts));
+  }
   const strikeLadderRows = [...ledgerLines];
   openPrs = openPrs.map(pr => hasUnspentLadderRefresh(strikeLadderRows, pr.taskId, pr.prNumber)
     ? { ...pr, priorStrikes: fixCeilingInForce(pr, policy.strikeCap, policy.clarify) }
@@ -20166,6 +20297,7 @@ export async function runSweep(
   // W1-T2620/W1-T3422 — ONE read per pass, never per PR. The SHA-only compatibility seam stays
   // available to direct callers; production's effects cache both fields from one REST response.
   deps.markPrelude?.("ledger_fold");
+  if (endsForRestart("ledger_fold")) return endedEarly();
   let mainRepair: MainRepairEvidence | undefined;
   try {
     mainRepair = deps.readMainRepair ? await deps.readMainRepair() : undefined;
@@ -20207,6 +20339,7 @@ export async function runSweep(
     }
   }
   deps.markPrelude?.("main_repair");
+  if (endsForRestart("main_repair")) return endedEarly();
   const reproductionHistory = [...ledgerLines];
   const reproductionCache = probeCacheFromLedger(ledgerLines);
   const formerlyFailingOnMain = mainTipSha === undefined ? new Set<string>() : mainFormerlyFailingTestFiles(ledgerLines, mainTipSha);
@@ -20451,6 +20584,7 @@ export async function runSweep(
   const repeatMeta = new Map<number, { streak: number; escalated: boolean }>();
 
   deps.markPrelude?.("stale_releases");
+  if (endsForRestart("stale_releases")) return endedEarly();
   // ── W1-T931 COST-ANOMALY SENTINEL ───────────────────────────────────────────────────────────
   // Hung off THIS pass rather than a new call site: `runSweep` already read the whole ledger and runs
   // on the daemon's cadence. Independent of `openPrs`, guarded by `!deps.dryRun`, and wrapped in the
@@ -20506,6 +20640,7 @@ export async function runSweep(
   }
 
   deps.markPrelude?.("anomaly_sentinels");
+  if (endsForRestart("anomaly_sentinels")) return endedEarly();
   // ── W1-T4817 MAIN COMMIT WITH NO WORKFLOW RUN ─────────────────────────────────────────────
   // Full passes only: a light pass fans this function out one PR at a time, and the reads below
   // are per-pass, not per-PR. The dedupe is the ledger fold handed to the effect, so a commit
@@ -20564,6 +20699,7 @@ export async function runSweep(
   }
 
   deps.markPrelude?.("fleet_state", false, fleetStateParts && { fleet_state_parts: fleetStateParts });
+  if (endsForRestart("fleet_state")) return endedEarly();
   // Full passes only: one paced list per pass, deduped on the ledger's own run_ids.
   if (deps.pullMutationVerdicts && deps.repairAdmissionSurface !== "light") {
     try {
@@ -20575,6 +20711,7 @@ export async function runSweep(
     }
   }
   deps.markPrelude?.("mutation_verdicts");
+  if (endsForRestart("mutation_verdicts")) return endedEarly();
   // W1-T7853: the same full passes, deduped on the workflow runs the ledger already settled.
   if (deps.pullFoldDebt && deps.repairAdmissionSurface !== "light") {
     try {
@@ -20587,6 +20724,7 @@ export async function runSweep(
   }
 
   deps.markPrelude?.("fold_debt");
+  if (endsForRestart("fold_debt")) return endedEarly();
   // ── W1-T4838 A WORKER'S CATEGORIZED REFUSAL IS AN AMENDMENT, NOT A FAILED ATTEMPT ─────────
   // Full passes only. Only a `no_pr` row whose excerpt `extractRefusal` parses is a candidate: an
   // uncategorized `no_pr` is skipped here and retries exactly as before. `error` outcomes write no
@@ -20623,6 +20761,7 @@ export async function runSweep(
   }
 
   deps.markPrelude?.("refusal_amendments");
+  if (endsForRestart("refusal_amendments")) return endedEarly();
   const byDisposition = ZERO_COUNTS();
   // Filled by INDEX, never pushed — post-review actions are finalized out of pass order, so
   // `actions[i]` is the only way to keep {@link SweepSummary.actions}'s "in input order" invariant
@@ -20891,7 +21030,7 @@ export async function runSweep(
     if (deps.dryRun || host?.spawnFix === undefined || host.mode() !== "on") return false;
     let envelope: FixDispatchEnvelope;
     try {
-      envelope = buildFixDispatchEnvelope(pr, evidence, { fixKey: claim.fixKey, decidedAtMs: deps.now?.() ?? systemClock.now(),
+      envelope = buildFixDispatchEnvelope(pr, withDispatchCauseProgress(pr, evidence), { fixKey: claim.fixKey, decidedAtMs: deps.now?.() ?? systemClock.now(),
         admissionSinceMs: claim.control.admissionSinceMs, planContextDigest: deps.planContextDigestFor?.(pr), dedupeKey });
     } catch (error) {
       log("sweep.fix.child_envelope_refused", { pr_number: pr.prNumber, head_sha: pr.headSha, error: String((error as Error)?.message ?? error) });
@@ -20917,6 +21056,7 @@ export async function runSweep(
     }
     // Release this pass's claim (its capacity too), then let the registry hold the same key at once: no await between the two.
     claim.release();
+    detachedFixes.push(hosted.settled);
     void adoptChildWork({
       runId: hosted.runId, taskId: escalationTaskIdFor(pr),
       work: { kind: "fix-dispatch", prNumber: pr.prNumber, headSha: pr.headSha, fixKey: claim.fixKey, ...(dedupeKey === undefined ? {} : { inputs: { dedupeKey } }) },
@@ -20931,7 +21071,7 @@ export async function runSweep(
   async function detachFixDispatch(pr: OpenPrView, work: (onPhase: DetachedFixPhaseObserver) => Promise<unknown>, claim: DetachedFixClaim,
     dedupeKey?: string, evidence?: FixDispatchEvidence): Promise<void> {
     if (evidence !== undefined && await hostFixDispatch(pr, evidence, claim, dedupeKey)) return;
-    detachSweepAction(
+    detachPassFix(
       (onPhase) => work(onPhase).catch((e: unknown) => appendLine(deps.ledgerPath, {
         run_id: deps.runId,
         task_id: pr.taskId ?? "SWEEP",
@@ -21200,7 +21340,7 @@ export async function runSweep(
     // The rule row's sentence predicts the dispatch; when this pass stood it down, say so and why —
     // and a backstop hold names itself on EVERY pass, the light pass included.
     const repairArm = disposition === "conflicted" || disposition === "blocked-fixable";
-    const dispatchHold = repairArm && !acted ? fixDispatchHoldAtHead(pr, ledgerLines) : undefined;
+    const dispatchHold = repairArm && !acted ? dispatchCauseHolds.get(pr.prNumber) : undefined;
     const notDispatched = repairArm && !acted && !deps.dryRun
       ? dispatchHold?.reason ?? standDownReason ?? actionError ?? "no dispatch was attempted"
       : undefined;
@@ -21215,7 +21355,7 @@ export async function runSweep(
           ? ` — mergeability unread this pass; last known "${refusedMergeState.state}" for head ${pr.headSha.slice(0, 7)} ` +
             `was read against main ${refusedMergeState.mainSha?.slice(0, 7) ?? "(unrecorded)"}, and main is now ${mainTipSha.slice(0, 7)}, so it is not inherited (W1-T11166)`
           : "");
-    if (dispatchHold !== undefined) extraDisposedFields = { ...extraDisposedFields, dispatch_held: dispatchHold.fields.dispatch_held };
+    if (dispatchHold !== undefined) extraDisposedFields = { ...extraDisposedFields, ...dispatchHold.fields };
     const blocker: PrBlocker = incidentHeldPrs.has(pr.prNumber) ? "awaiting-ci" : infrastructureBlockerByPr.get(pr.prNumber) ??
       finalBlocker(ruleBlockerByIndex.get(index)!, {
       baseRedStandDown: baseRedStandDownPrs.has(pr.prNumber),
@@ -21429,8 +21569,13 @@ export async function runSweep(
   let lightConflictDeferred = 0;
   const rederivedPrs = new Set<number>();
   const admissionFinalizations: Array<() => Promise<void>> = [];
+  let walkEndedAt: number | undefined;
   for (let walkStep = 0; walkStep < walkOrder.length; walkStep++) {
     const prIndex = walkOrder[walkStep];
+    if (walkOrder[walkStep - 1] !== prIndex && endsForRestart("walk", walkOrder.length - walkStep)) {
+      walkEndedAt = walkStep;
+      break;
+    }
     // W1-T4470 — HYSTERESIS FIRST, before anything else reads `mergeState`: an `unknown` read
     // (mergeState undefined) inherits the last KNOWN mergeability this exact head proved on a
     // prior pass, so `pr` below is what EVERY downstream read sees — `deriveDisposition`, the
@@ -22093,7 +22238,7 @@ export async function runSweep(
               appendLine(deps.ledgerPath, { ...row, step: result.outcome === "refused" ? "sweep.plan_round.refused" : "sweep.plan_round.pushed", ...result });
               repair.reason = `plan-scoped round ${result.outcome}${result.reason ? `: ${result.reason}` : ""}`;
             });
-            if (deps.detachFixWait) detachSweepAction(work, { actionKind: "fix-dispatch", taskId: escalationTaskIdFor(pr),
+            if (deps.detachFixWait) detachPassFix(work, { actionKind: "fix-dispatch", taskId: escalationTaskIdFor(pr),
               fixKey: claimed.fixKey, release: claimed.release, abandon: claimed.abandon });
             else await work;
           }
@@ -22231,7 +22376,7 @@ export async function runSweep(
     let heldEscalationDedup: string | undefined;
     if ((disposition === "conflicted" || disposition === "blocked-fixable") &&
         !inFlightFixKeys.has(`${fixLedgerTaskIdFor(pr) ?? ""}@${pr.headSha}`) &&
-        !await fixDispatchHoldAtHeadAsync(pr, ledgerLines, existsSync, deps.fixOwnerReclaimableAtHold)) {
+        !dispatchCauseHolds.get(pr.prNumber)) {
       const handoff = terminalFixDesignHandoff(pr, ledgerLines, () => readFixRoundArchiveRows(deps.ledgerPath));
       if (handoff.kind === "handoff") {
         const held = handoff.producer;
@@ -22291,7 +22436,7 @@ export async function runSweep(
     if ((disposition === "conflicted" || disposition === "blocked-fixable") && terminalDesignHold === undefined &&
         !designReleasedByBody && prior.fixed.has(`${pr.prNumber}@${pr.headSha}`) &&
         !inFlightFixKeys.has(`${fixLedgerTaskIdFor(pr) ?? ""}@${pr.headSha}`) &&
-        !await fixDispatchHoldAtHeadAsync(pr, ledgerLines, existsSync, deps.fixOwnerReclaimableAtHold)) {
+        !dispatchCauseHolds.get(pr.prNumber)) {
       let contractRevision: string | undefined;
       let readable = true;
       // A run-unfiled PR's task is synthetic (`PR-<n>`): its body, not a plan record, is the contract it read.
@@ -22956,7 +23101,7 @@ export async function runSweep(
                   standDownReason = reason;
                   break;
                 }
-                const retryHold = await holdRepeatedFixClaimDecline(pr, armLines, deps.escalate, deps.fixOwnerReclaimableAtHold);
+                const retryHold = await holdRepeatedFixClaimDecline(pr, dispatchCauseHolds.get(pr.prNumber), deps.escalate);
                 if (retryHold !== undefined) {
                   acted = false;
                   standDownReason = retryHold.reason;
@@ -23413,7 +23558,7 @@ export async function runSweep(
                   standDownReason = hold;
                   break;
                 }
-                const codeqlFailureHold = await holdRepeatedFixDispatchFailure(pr, ledgerLines, deps.escalate);
+                const codeqlFailureHold = await holdRepeatedFixClaimDecline(pr, dispatchCauseHolds.get(pr.prNumber), deps.escalate);
                 if (codeqlFailureHold) {
                   extraDisposedFields = { ...extraDisposedFields, ...codeqlFailureHold.fields };
                   acted = false;
@@ -24063,7 +24208,7 @@ export async function runSweep(
                 standDownReason = reason;
                 break;
               }
-              const declineHold = await holdRepeatedFixClaimDecline(pr, ledgerLines, deps.escalate, deps.fixOwnerReclaimableAtHold);
+              const declineHold = await holdRepeatedFixClaimDecline(pr, dispatchCauseHolds.get(pr.prNumber), deps.escalate);
               if (declineHold) {
                 extraDisposedFields = { ...extraDisposedFields, ...declineHold.fields };
                 acted = false;
@@ -24103,7 +24248,7 @@ export async function runSweep(
                 const dispatchPlanOnlyRepair = deps.dispatchPlanOnlyRepair;
                 if (progressDecision?.verdict === "change-approach") planRepairEvidence.progressApproach = progressDecision.approach;
                 if (deps.detachFixWait) {
-                  detachSweepAction(
+                  detachPassFix(
                     fixClaim.run(() => dispatchPlanOnlyRepair(pr, planRepairEvidence)),
                     // Shares "fix-dispatch"'s kind, deliberately: a plan-shard repair and an
                     // ordinary body repair must never race for the SAME task's detached slot.
@@ -24282,7 +24427,7 @@ export async function runSweep(
                 standDownReason = stackHold.reason;
                 break;
               }
-              const conflictedDeclineHold = await holdRepeatedFixClaimDecline(pr, ledgerLines, deps.escalate, deps.fixOwnerReclaimableAtHold);
+              const conflictedDeclineHold = await holdRepeatedFixClaimDecline(pr, dispatchCauseHolds.get(pr.prNumber), deps.escalate);
               if (conflictedDeclineHold) {
                 extraDisposedFields = { ...extraDisposedFields, ...conflictedDeclineHold.fields };
                 acted = false;
@@ -24878,6 +25023,9 @@ export async function runSweep(
       contradictoryMemory.set(`${deps.ledgerPath}@${contradictoryCheckpoint.key}`, contradictoryCheckpoint);
     }
   }
+  if (walkEndedAt === undefined && endsForRestart("walk", 0)) walkEndedAt = walkOrder.length;
+  // W1-T12237: finish this pass's begun fixes before its early settlement, including detached CI waits.
+  if (walkEndedAt !== undefined) await Promise.allSettled(detachedFixes);
   await refreshAdmission.run((row) => appendLine(deps.ledgerPath, row), deps.runId);
   for (const finalize of admissionFinalizations) await finalize();
 
@@ -24897,7 +25045,8 @@ export async function runSweep(
   const reviewLanes = Math.max(0, (fullReviewLanes ?? effectiveReviewWidth(deps, policy, codeLane.jobs.length, now, ledgerLines)) -
     overtakenReviews.size);
   const postReview = deps.postReview;
-  let admissionStopReason: string | undefined;
+  const walkEndedEarly = walkEndedAt !== undefined;
+  let admissionStopReason: string | undefined = walkEndedEarly ? "restart decided — re-derived after the restart" : undefined;
 
   const closeAdmissions = (reason: string): void => {
     admissionStopReason ??= reason;
@@ -25244,8 +25393,8 @@ export async function runSweep(
   // W1-T528 — PRESS THE BUTTON. {@link selectUpdateBranchTarget} picks AT MOST ONE PR from the set
   // just reported and, when the dep is wired, requests GitHub update it. Never a loop, and a
   // conflict is REPORTED and skipped rather than retried this pass.
-  const ratchetRefreshed = new Set(await runArmedRatchetRejudge(openPrs, deps));
-  if (!deps.dryRun && deps.updateBranch) {
+  const ratchetRefreshed = new Set(walkEndedEarly ? [] : await runArmedRatchetRejudge(openPrs, deps));
+  if (!walkEndedEarly && !deps.dryRun && deps.updateBranch) {
     // An overlap judgment cannot override a clearance refusal for this same red head and main.
     // A different identity or a head whose checks are no longer red keeps its ordinary eligibility.
     const refreshPrs = openPrs.filter((pr) => pr.prNumber !== staleBaseAttemptedPrNumber && !refreshAdmission.has(pr.prNumber) && !ladderUpdatedPrs.has(pr.prNumber) && !gardenRecordRefusals.has(pr.prNumber) && !ratchetRefreshed.has(pr.prNumber))
@@ -25423,7 +25572,8 @@ export async function runSweep(
       }
     }
   }
-  settleRepairMemoryPass(repairDemandMark, deps.repairAdmissionSurface === "full" ? undefined : openPrs.map((pr) => pr.prNumber));
+  settleRepairMemoryPass(repairDemandMark, walkEndedAt !== undefined ? walkOrder.slice(0, walkEndedAt).map((index) => openPrs[index]!.prNumber)
+    : deps.repairAdmissionSurface === "full" ? undefined : openPrs.map((pr) => pr.prNumber));
   return summary;
 }
 

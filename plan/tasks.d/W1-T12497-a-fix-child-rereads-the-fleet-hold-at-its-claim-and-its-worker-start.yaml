@@ -1,0 +1,70 @@
+- id: W1-T12497
+  title: "A fix child re-reads the fleet hold at its claim and at its worker start, so a PAUSE written during its slow recheck never lets it start a worker inside a recycle drain"
+  repo: remudero
+  depends_on: []
+  priority: 0.8
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the fail-closed gate of every fix child and the start path of every fix worker; a clear hold must start exactly as today
+  band_meaning: blast-radius
+  origin: operator-session#recycle-drain-2026-11-13
+  plan_refs:
+    - W1-T10001
+    - W1-T11336
+    - W1-T9114
+    - W1-T11559
+    - W1-T11383
+    - W1-T8141
+  files:
+    - src/lib/sweep.ts
+    - src/lib/worker.ts
+    - test/fix-lane/a-fix-child-rereads-the-fleet-hold-at-its-claim-and-its-worker-start.test.ts
+    - test/worker/spawn/an-in-process-fix-start-rereads-the-fleet-hold.test.ts
+    - test/reviews-and-detached-actions-run-as-run-children.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "When the recheck of a fix child passes and a PAUSE is written while the child reads its task, the child logs `sweep.fix.child_refused` with a reason that names the PAUSE and throws. It takes no admission grant, builds no dispatcher, and calls no `dispatchFix`, so it takes no fix-branch claim and starts no worker"
+      proof: "grep: W1-T12497 criterion 1 in test/fix-lane/a-fix-child-rereads-the-fleet-hold-at-its-claim-and-its-worker-start.test.ts"
+    - claim: "When a PAUSE or STOP is written after the admission grant and before `dispatchFix`, the child logs `sweep.fix.child_refused` with a reason that names the hold, releases the grant, does not call `dispatchFix`, and throws"
+      proof: "grep: W1-T12497 criterion 2 in test/fix-lane/a-fix-child-rereads-the-fleet-hold-at-its-claim-and-its-worker-start.test.ts"
+    - claim: "A hold reader that throws at either new read refuses the child in the same way, with a reason that names the failed read"
+      proof: "grep: W1-T12497 criterion 3 in test/fix-lane/a-fix-child-rereads-the-fleet-hold-at-its-claim-and-its-worker-start.test.ts"
+    - claim: "Inside a run child (a run-child reservation is set), a fix-class `spawnWorker` under a real PAUSE flag, read by the default hold reader, spawns nothing and returns `notStarted` `admission-abandoned`. A run-child start of any other class does not read this hold and starts as before"
+      proof: "grep: W1-T12497 criterion 4 in test/fix-lane/a-fix-child-rereads-the-fleet-hold-at-its-claim-and-its-worker-start.test.ts"
+    - claim: "With no hold at any read, the child takes its grant, calls `dispatchFix` once and releases the grant, as today; the events keep the order pr, task, claim, dispatcher, dispatch, release"
+      proof: "grep: W1-T12497 criterion 5 in test/fix-lane/a-fix-child-rereads-the-fleet-hold-at-its-claim-and-its-worker-start.test.ts"
+    - claim: "invariant:no-fix-start-past-a-hold — a fix child never takes its admission grant, never calls `dispatchFix`, and never starts a fix worker when a STOP or PAUSE is in place at the read directly before that step"
+      proof: "grep: W1-T12497 criterion 6 in test/fix-lane/a-fix-child-rereads-the-fleet-hold-at-its-claim-and-its-worker-start.test.ts"
+  rationale: |
+    OBSERVED 2026-11-13 on the Azure host, core ledger (~/rmd-state2/state, archives ledger.2026-11-13T11-17-48-407Z and ledger.2026-11-13T12-17-23-649Z):
+    - 11:08:36Z the sweep decided a fix for W1-T11168 (PR 18281). The run id work-fix-dispatch-W1-T11168-1794568116590-623c carries that time.
+    - 11:08:40Z `run_child.spawned` for that run (pid 1950091); 11:08:42Z `run_child.launch_segments`.
+    - 11:10:12Z the deploy tick started a bounded recycle handoff with a wait of 2,827 s. 11:10:46Z the recycle wrote its PAUSE (`recycle.phase` pause).
+    - 11:24:57Z the first row of the child after launch: `sweep.fix_capacity`, the admission grant (fixes_admitted 1). The child wrote no row for 16 min 15 s before that.
+    - 11:25:22Z the child took its fix-branch claim (claim id ...:fix-claim:18281:1794569122486) and `sweep.fix.prepare_timing`.
+    - 11:26:53Z `sweep.fix.child_phase` worker; 11:26:55Z `worker.assignment`. The worker ran inside the PAUSE until `worker.attempt` at 11:39:08Z. The round then pushed and kept its fix-branch claim until `inflight.recycle_yield` at 12:03:46Z.
+    - The recycle counted that claim as work in flight (`daemon.recycle_wait.review_admitted` rows at 11:28:00Z and 11:59:04Z name it). The lane ended at 12:03:47Z (`run_child.settled`), 92 s before the wait ran out.
+    - 12:05:19Z `deploy.restart_refused`: "REFUSING — 0 lane-holding and 1 lane-less worker(s) still in flight after 2827s". The last blocker was a review worker 55 s old. This task does not change review admission. It stops the fix round that started inside the PAUSE and held its claim for 38 min.
+    READ at origin/main 479944844.
+    - src/lib/sweep.ts:18128 `recheckFixDispatch` reads `ports.hold()` first. Then it awaits `readLivePr` and calls `readTask`. In the child (src/run-task.ts:44296) `readTask` syncs the plan and projects it through GitHub. These reads ran between the hold read and the grant; they write no row.
+    - src/lib/sweep.ts:18168 `runFixDispatchChild` then calls `claimFixAdmission`, builds the dispatcher, and calls `dispatchFix`, which takes the fix-branch claim (`acquireFixRoundClaim`, src/lib/sweep.ts:4783) and starts the worker. None of these steps reads the hold again.
+    - src/lib/worker.ts:2579 the W1-T11336 re-read at worker start runs only when `currentRunChildReservationId()` is undefined. A fix child runs inside `withRunChildReservation` (src/lib/run-child-reservation.ts:52), so its fix workers skip it.
+    - The run-child re-read of W1-T10001 (src/lib/run-child.ts, `run_child.spawn_withheld`) runs once, before the child process spawns. Here that was at 11:08:40Z, before the PAUSE.
+    - The child's hold reader (src/run-task.ts:44283-44288) reads STOP, then `checkSharedPause`, which returns the local recycle PAUSE (src/lib/fleet-control.ts:602 and :617). The worker's reader `workerAdmissionHold` (src/lib/worker.ts:2213) reads `stopDetail` and `pauseDetail`. Both see a recycle PAUSE.
+    CHECKED for overlap: W1-T11336 (merged) covers in-process fix starts only and says so. W1-T11559 (merged) makes the first shared-PAUSE read of a fresh child complete before it decides. W1-T9114 (merged) made the recheck. W1-T11383 settled that the later re-reads need no heap hold. W1-T8141 (queued) ends a fix worker's round that is already running; it does not stop a start. No queued task changes `runFixDispatchChild` or the W1-T11336 condition.
+  design: |
+    1. In `runFixDispatchChild` (src/lib/sweep.ts), read `deps.hold()` again directly before `deps.claimFixAdmission(envelope.pr)`. When it names a hold, log `sweep.fix.child_refused` with the reason `worker admission is held: <hold>` and throw `fix dispatch refused: <reason>`, as the recheck does. When the read throws, refuse with a reason that names the failed read.
+    2. Read `deps.hold()` again after `deps.dispatcher()` and directly before `effects.dispatchFix(...)`. Refuse in the same way. The existing `finally` releases the grant. `dispatchFix` is not called, so no fix-branch claim is taken.
+    3. In `spawnWorker` (src/lib/worker.ts), apply the W1-T11336 re-read to every start of worker class `fix`, also inside a run child: remove the `childReservationId === undefined` part of the condition. For a run child, `admission` is undefined, so `admissionAbandoned()` releases nothing that the daemon holds. `runFixRung` already stands down on `admission-abandoned` with no strike, and the round exit releases the fix-branch claim.
+    4. Keep the W1-T11336 comment and add `W1-T12497` to it. Add no other comment lines to src/lib/sweep.ts or src/lib/worker.ts; both have a comment cap test (test/sweep/compress-src-lib-sweep-ts.test.ts, test/worker/spawn/compress-src-lib-worker-ts.test.ts).
+    5. The test for criteria 1 to 3, 5 and 6 drives `runFixDispatchChild` with ports in the way of test/reviews-and-detached-actions-run-as-run-children.test.ts: a hold port whose answer changes while `readTask` runs, or after the grant. The test for criterion 4 calls `spawnWorker` inside `withRunChildReservation` with a real PAUSE flag under a temp root and no injected hold reader. Neither test imports `#src/run-task.js`.
+    INVARIANT no-fix-start-past-a-hold: a fix child never takes its admission grant, never calls `dispatchFix`, and never starts a fix worker when a STOP or PAUSE is in place at the read directly before that step.
+    NOT IN SCOPE: review and plan-review admission during a recycle wait, the derived recycle wait, the bounded handoff (src/lib/deployer.ts), a fix worker that is already running (W1-T8141), and how fast `readTask` is.
+  falsifier: |
+    Remove the read before `claimFixAdmission` and criterion 1 must fail. Remove the read before `dispatchFix` and criterion 2 must fail. Let a throwing hold read pass and criterion 3 must fail. Put back `childReservationId === undefined` in src/lib/worker.ts and criterion 4 must fail. Read the hold in a way that refuses a clear hold and criterion 5 must fail. Restore and require all six to pass.
+  note: |
+    Id W1-T12497 reserved for run-unfiled-1794575894000 with ~/rmd-work/bin/reserve-id.sh.
+    The same session also looked at a second proposal: a bounded recycle handoff that asks the lanes in flight to yield. It was not filed. On 2026-11-13 the four lanes named at 11:10:12Z ended inside the wait (three `pr_open_yield` between 11:19Z and 11:51Z, one fix `recycle_yield` at 11:52:53Z). The remaining times of 13,600 to 14,300 s were predictions. The next tick at 12:06:18Z fit and the recycle ended `deploy.ok` at 12:07:47Z. A fix round that is already running yields under W1-T8141 (queued).

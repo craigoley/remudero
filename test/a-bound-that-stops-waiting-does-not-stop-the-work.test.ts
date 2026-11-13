@@ -108,10 +108,18 @@ test("the retrigger interval is closed as a second entry route, not only the wal
   // And the flag it threads must be the SAME object the top-of-iteration calls hold — a fresh one
   // per route would make each route exclude only itself, which is not exclusion at all.
   assert.match(src, /liveness: sweepLiveness,/, "SweepRetrigger must carry the daemon's own sweepLiveness, not a fresh object");
-  // The pause-hold pass and the per-tick pass pass it before an optional trailing `true`/predicate; the
-  // pre-restart final pass (W1-T9808) threads it ahead of the latched-admission predicate.
+  // The pause-hold pass and the per-tick pass pass it before optional trailing arguments. W1-T12237
+  // removed the third, the pre-restart final pass: a freshness exit now starts no pass of its own.
   const topOfIteration = [...src.matchAll(/runGatedSweep\([^)]*\bsweepLiveness\b[^)]*\)/g)];
-  assert.equal(topOfIteration.length, 3, `all three daemon-owned call sites must thread it; found ${topOfIteration.length}`);
+  assert.equal(topOfIteration.length, 2, `both daemon-owned call sites must thread it; found ${topOfIteration.length}`);
+  // Every call is one of those two or the retrigger, so no call site can skip the shared flag.
+  const allCalls = [...src.matchAll(/(?<!function )\brunGatedSweep\(/g)];
+  assert.equal(allCalls.length, 3, `the retrigger and the two daemon-owned passes are the only calls; found ${allCalls.length}`);
+  // W1-T12237: a freshness exit awaits a running pass and starts none.
+  const exitStart = src.indexOf("const prepareFreshnessExit = async (");
+  const exitEnd = src.indexOf("const takeRestartRequest = ", exitStart);
+  assert.ok(exitStart >= 0 && exitEnd > exitStart, "prepareFreshnessExit and stopForFreshness must be found");
+  assert.doesNotMatch(src.slice(exitStart, exitEnd), /runGatedSweep\(/, "a freshness exit must start no sweep");
 });
 
 function readDaemonSource(): string {

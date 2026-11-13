@@ -2,7 +2,7 @@
 // LIVE 2026-10-10: #10551 (W1-T7243, head 3644414) was disposed `conflicted`, blocker_owner
 // `conflict-rebase`, every ~2 minutes for hours with the reason "… dispatching the bounded
 // merge-conflict fix worker …" — yet no fix.dispatch row followed. The stand-down was
-// FIX_CLAIM_DECLINE_BACKSTOP: three `sweep.fix.checkout_claim_declined` rows at that head
+// the former count backstop: three `sweep.fix.checkout_claim_declined` rows at that head
 // (registered owner /home/node/Remudero/worktrees/sweep-W1-T7243-1791611477902, dirty_worktree)
 // held every later pass, and a light pass hid even that behind "deferred to full sweep". The
 // stuck lane then escalated the stage as "unknown signature", and nothing could lift the hold:
@@ -13,7 +13,6 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  FIX_CLAIM_DECLINE_BACKSTOP,
   runSweep,
   type OpenPrView,
   type SweepDeps,
@@ -57,7 +56,7 @@ function decline(owner: string): Record<string, unknown> {
   };
 }
 
-const declines = (owner: string) => Array.from({ length: FIX_CLAIM_DECLINE_BACKSTOP }, () => decline(owner));
+const declines = (owner: string) => Array.from({ length: 3 }, () => decline(owner));
 
 function ownerDir(): string {
   return mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}sweep-${TASK}-`));
@@ -84,11 +83,11 @@ async function pass(seed: Array<Record<string, unknown>>, over: Partial<SweepDep
   return { row: disposed[disposed.length - 1], rows, dispatched, escalations };
 }
 
-test("a conflicted PR held at the claim-decline backstop never records dispatching and is escalated, not conflict-rebase", async () => {
+test("a conflicted PR held by an owner never records dispatching and names the cause", async () => {
   const owner = ownerDir();
   try {
     // Positive control: below the backstop the same PR does dispatch, so the reason is truthful.
-    const control = await pass([decline(owner)]);
+    const control = await pass([decline(owner)], { fixOwnerReclaimableAtHold: () => true });
     assert.equal(control.row.disposition, "conflicted");
     assert.equal(control.dispatched, 1);
     assert.match(String(control.row.reason), /dispatching the bounded merge-conflict fix worker/);
@@ -100,7 +99,7 @@ test("a conflicted PR held at the claim-decline backstop never records dispatchi
       assert.equal(held.row.acted, false);
       assert.doesNotMatch(String(held.row.reason), /\bdispatching\b/, String(held.row.reason));
       assert.match(String(held.row.reason), /NOT DISPATCHED this pass: fix checkout claim declined/);
-      assert.match(String(held.row.reason), /FIX_CLAIM_DECLINE_BACKSTOP/);
+      assert.match(String(held.row.reason), /cause owner-held:/);
       assert.equal(held.row.blocker, "escalated");
       assert.equal(held.row.blocker_owner, "NONE");
       assert.equal(held.row.dispatch_held, "fix_claim_decline");
