@@ -257,6 +257,7 @@ import {
   cashFallbackRefusal,
   capStderrExcerpt,
   listRegisteredWorktrees,
+  removeRunLock,
   renderWorkerSettings,
   STDERR_EXCERPT_CAP,
   excludeNodeModulesFromGit,
@@ -266,6 +267,7 @@ import {
   worktreeRemoveAsync,
   releaseReviewWorktree,
   worktreesDir,
+  writeRunLock,
   type QuestionEntry,
   type SpawnWorkerArgs,
   type WorkerResult,
@@ -4818,6 +4820,9 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
 
         const dispatchNowMs = nowMsImpl();
         worktreePath = join(worktreesDir(config), `sweep-${task.id}-${dispatchNowMs}`);
+        // W1-T12537: the run lane's lock, before the add, so another run's start-up prune keeps it.
+        mkdirSync(worktreePath, { recursive: true });
+        writeRunLock(worktreePath, { pid: process.pid, run_id: runId, startedAt: clockFromMillisFn(() => dispatchNowMs).iso() });
         try {
           const recoveredHead = await createFixRungWorktree(repoDir, worktreePath, realBranch);
           if (recoveredHead) {
@@ -5131,6 +5136,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
             /* best-effort cleanup */
           }
         }
+        if (worktreePath) removeRunLock(worktreePath);
         // W1-T2609: release the branch claim LAST, on every exit path (return, decline, throw) —
         // symmetric with the worktree cleanup just above, so a lost race or a mid-round crash
         // never strands the claim past this round's own dispatch.
