@@ -80,7 +80,7 @@ import {
 } from "./now-decisions.js";
 import type { BoardIssueRest, BoardPrRest } from "./open-prs-rest.js";
 import { projectReconciledFeedback } from "./panel-graph.js";
-import { unmetDependencies, type Plan } from "./plan.js";
+import { unmetDependencies, type Plan, type AcceptanceCriterion } from "./plan.js";
 import { loadPolicy, policyPath, type PolicyValues } from "./policy.js";
 import { ratificationsPath, type Ratifications } from "./ratification.js";
 import { parse as parseYaml } from "yaml";
@@ -132,6 +132,8 @@ export interface NowTask {
   title: string;
   status: string;
   risk: string;
+  catalog?: "ops";
+  acceptance?: AcceptanceCriterion[];
   lastActivityAt?: string;
   prUrl?: string;
   prNumber?: number;
@@ -199,6 +201,7 @@ export interface NowViewData {
     taskProjection: { complete: boolean; returned: number; limit: number; total: number };
     tasks: NowTask[];
     groups: NowGroups;
+    opsCatalog?: { outcome: "ok"; taskCount: number } | { outcome: "unreadable"; reason: string };
   };
   prQueue: { complete: boolean; unavailableReason?: string; rows: Array<{ prNumber: number; prUrl: string; title: string; taskId?: string; disposition: string; queueClass: string; held: boolean; reviewState: PrQueueRow["reviewState"] }> };
   actions: NowAction[];
@@ -425,7 +428,10 @@ function nowTask(row: BoardRow): NowTask {
     : undefined;
   const t = row.workerTelemetry;
   return {
-    taskId: row.taskId, title: row.title, status: row.status, risk: row.risk,
+    taskId: row.taskId, title: row.title, status: row.status,
+    // Public rows retain their legacy risk. Only ops rows omit private risk at the board boundary.
+    risk: row.catalog === "ops" ? "withheld" : row.risk!,
+    ...(row.catalog === "ops" ? { catalog: row.catalog, acceptance: row.acceptance } : {}),
     ...(row.lastActivityAt ? { lastActivityAt: row.lastActivityAt } : {}), ...(row.prUrl ? { prUrl: row.prUrl } : {}),
     ...(row.prNumber !== undefined ? { prNumber: row.prNumber } : {}), ...(row.phase ? { phase: row.phase } : {}),
     ...(row.startedAt ? { startedAt: row.startedAt } : {}),
@@ -473,6 +479,9 @@ export function assembleNowView(input: {
       taskProjection: { complete: tasks.length === snapshot.tasks.length, returned: tasks.length, limit: NOW_QUEUED_ROWS, total: snapshot.tasks.length },
       tasks,
       groups,
+      ...(snapshot.opsCatalog ? { opsCatalog: snapshot.opsCatalog.outcome === "ok"
+        ? { outcome: "ok" as const, taskCount: snapshot.opsCatalog.taskCount }
+        : { outcome: "unreadable" as const, reason: snapshot.opsCatalog.reason } } : {}),
     },
     prQueue: {
       complete: snapshot.prQueue.complete,
@@ -1289,6 +1298,11 @@ export function createNowView(opts: NowViewOptions): {
         ...(opts.ledgerSource ? [opts.ledgerSource({ ...state, newestTs: b.boardNewestTs !== undefined ? b.boardNewestTs : state.newestTs }, now)] : []),
         judgeSource({ name: `github:${instance.name}`, ...b.gateway!.source }, now),
         planSource(`plan:${instance.name}`, planBehind(instance), now),
+        ...(snapshot.opsCatalog ? [judgeSource({ name: `plan:ops:${instance.name}`, kind: "plan", instance: instance.name,
+          asOf: snapshot.opsCatalog.outcome === "ok" ? snapshot.opsCatalog.observedAt : null,
+          state: snapshot.opsCatalog.outcome === "ok" ? "fresh" : "unavailable",
+          ...(snapshot.opsCatalog.outcome === "unreadable" ? { reason: snapshot.opsCatalog.reason } : {}),
+        }, now)] : []),
         judgeSource({ name: `host-probe:${instance.name}`, asOf: h.probe!.sampledAt, state: "fresh" }, now),
       ];
       b.body = { key: `instance=${encodeURIComponent(instance.name)}`, data, sources };
