@@ -4355,7 +4355,7 @@ export async function runDaemon(
     if (!tickLedgerActive) return ledgerReader();
     if (tickLedger === undefined) {
       try { tickLedger = { lines: ledgerReader() }; }
-      catch (error) { tickLedger = { error }; }
+      catch (reason) { tickLedger = { error: reason }; }
     }
     if ("error" in tickLedger) throw tickLedger.error;
     return tickLedger.lines;
