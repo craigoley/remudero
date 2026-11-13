@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { join } from "node:path";
-import { systemClock } from "./clock.js";
+import { fixedClock, systemClock } from "./clock.js";
 import { twoProportionSampleSize } from "./eval-card.js";
 import { appendLedger } from "./ledger.js";
 import { LEDGER_FILENAME } from "./ledger-path.js";
@@ -52,7 +52,7 @@ const median = (values: number[]): number | null => {
   return sorted.length % 2 ? sorted[mid]! : (sorted[mid - 1]! + sorted[mid]!) / 2;
 };
 const dayValid = (day: string): boolean => /^\d{4}-\d{2}-\d{2}$/.test(day)
-  && Number.isFinite(Date.parse(day)) && new Date(day).toISOString().slice(0, 10) === day;
+  && Number.isFinite(Date.parse(day)) && fixedClock(Date.parse(day)).iso().slice(0, 10) === day;
 
 export function requiredRoutingTasksPerArm(experiment: RoutingExperiment): number {
   const d = experiment.decision;

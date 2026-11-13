@@ -6,7 +6,7 @@ import { test } from "node:test";
 import { gzipSync } from "node:zlib";
 import { experimentArmForTask, ROUTING_EXPERIMENTS, type RoutingExperiment } from "#src/lib/routing-experiments.js";
 import { evaluateRoutingExperimentResult, recordRoutingExperimentResults, requiredRoutingTasksPerArm } from "#src/lib/routing-experiment-result.js";
-import { buildMeasurementCadenceDaemonHooks } from "#src/run-task.js";
+import { buildMeasurementCadenceDaemonHooks } from "#test/helpers/run-task-test.js";
 import type { Config } from "#src/lib/config.js";
 
 type Row = Record<string, unknown>;
