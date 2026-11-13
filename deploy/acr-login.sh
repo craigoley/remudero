@@ -3,7 +3,9 @@
 
 rmd_acr_failure_reason() {
   # Only fixed classifications leave this function; Azure diagnostics can include credentials.
-  case "${1,,}" in
+  local lowered
+  lowered="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"  # bash 3.2 (macOS) has no ${var,,}
+  case "$lowered" in
     *nameresolutionerror*|*getaddrinfo*|*name\ resolution*|*name\ or\ service\ not\ known*|*failed\ to\ resolve*|*could\ not\ resolve*|*enotfound*)
       printf 'DNS name resolution failed' ;;
     *certificate_verify_failed*|*certificate\ verify\ failed*|*sslerror*|*tls*certificate*)
