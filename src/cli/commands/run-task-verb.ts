@@ -16,7 +16,7 @@ import { RUN_AGENT_WAIT_HEAP_STEP, type AgentWaitHeap } from "../../lib/agent-wa
 import { type FixOutcome as TypedFixOutcome } from "../../lib/fix-outcome.js";
 import { type FixRoundReapplyPorts } from "../../lib/fix-round-reapply.js";
 import { fixRoundBranchClaim, productionFixProgressJudge, type JobRequeueOutcome } from "../../lib/sweep.js";
-import { ghExec, ghJsonAsync } from "../../lib/github-transport.js";
+import { ghExec, ghJsonAsync, ghTextAsync } from "../../lib/github-transport.js";
 import { findTaskInCatalogs } from "../../lib/task-lookup.js";
 import { renderAcceptanceBlock } from "../../lib/plan-pr-emitter.js";
 import { createHash } from "node:crypto";
@@ -1048,6 +1048,8 @@ export interface ProbeAdmissionOptions {
 }
 
 export interface RunTaskBodyOptions extends ProbeAdmissionOptions {
+  /** The existing outer run signal also prevents a post-worker private PR write after cancellation. */
+  abortSignal?: AbortSignal;
   /** W1-T7096: set only by the drain and the CLI — the fix rung then asks the production judge. */
   productionProgressJudge?: boolean;
   /** Test seam for the pre-open fast gate; production runs `runPreopenGate`, an injected spawn skips it. */
@@ -3528,26 +3530,12 @@ function normalizeRunPrAcceptanceFromPlan(
   // The SAME two leaves (and the same defaults) repairRetroAcceptanceBlock injects — reused from its
   // own signature rather than a second inline copy; its retro-only `diff` input is omitted here.
   deps: Omit<NonNullable<Parameters<RunTaskCommandHost["repairRetroAcceptanceBlock"]>[2]>, "diff"> = {},
-  opsTitle?: string,
 ): "rewritten" | "healthy" | "no-block" | "raced" | "error" {
   const { rewriteAcceptanceBlockFromPlan, defaultRetroFetchBody, defaultRetroEditBody } = helperHost;
-  if (planCriteria.length === 0 || (opsTitle !== undefined && !planCriteria.some(criterion => !criterion.satisfied_by))) return "no-block";
+  if (planCriteria.length === 0) return "no-block";
   const { fetchBody, editBody } = { fetchBody: defaultRetroFetchBody, editBody: defaultRetroEditBody, ...deps };
   try {
     const body = fetchBody(prUrl);
-    if (opsTitle !== undefined) {
-      const publication = opsRunPublication(taskId, opsTitle, planCriteria);
-      const target = helperHost.prUrlTarget(prUrl);
-      if (target === undefined) throw new Error("ops publication has no public PR identity");
-      if (fetchBody(prUrl) !== body) {
-        log("pr.body_normalize.raced", { pr_url: prUrl });
-        return "raced";
-      }
-      ghExec(["api", "-X", "PATCH", `repos/${target.owner}/${target.repo}/pulls/${target.number}`,
-        "-f", `title=${publication.title}`, "-f", `body=${publication.body}`], { stdio: "pipe" });
-      log("pr.body_normalized", { pr: prUrl, rendered_proofs: planCriteria.map(c => c.proof) });
-      return "rewritten";
-    }
     // W1-T5544: the comparison and splice live in {@link rewriteAcceptanceBlockFromPlan}, shared with the sweep cure.
     const rewrite = rewriteAcceptanceBlockFromPlan(body, taskId, planCriteria);
     if (rewrite.kind !== "rewritten") return rewrite.kind;
@@ -3561,6 +3549,47 @@ function normalizeRunPrAcceptanceFromPlan(
     return "rewritten";
   } catch (e) {
     log("pr.body_normalize.error", { pr_url: prUrl, error: String((e as Error)?.message ?? e) });
+    return "error";
+  }
+}
+
+/** Private-task normalization uses awaited transport; the public legacy helper keeps its original contract. */
+async function normalizeOpsRunPrPublication(
+  helperHost: Pick<RunTaskHelperHost, "prUrlTarget">,
+  prUrl: string,
+  canonical: CanonicalOpsCriteriaAtOpen,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  signal?: AbortSignal,
+): Promise<"rewritten" | "no-block" | "raced" | "error"> {
+  if (!canonical.criteria.some(criterion => !criterion.satisfied_by)) return "no-block";
+  try {
+    const target = helperHost.prUrlTarget(prUrl);
+    if (target === undefined || `${target.owner}/${target.repo}` !== canonical.targetRepository) {
+      throw new Error("ops publication has no matching public PR identity");
+    }
+    const fetchBody = async (): Promise<string> => {
+      const value = await ghJsonAsync(["pr", "view", prUrl, "--json", "body"], undefined, undefined, { fresh: true });
+      if (typeof value !== "object" || value === null || !("body" in value) || typeof value.body !== "string") {
+        throw new Error("ops publication body is unreadable");
+      }
+      return value.body;
+    };
+    const body = await fetchBody();
+    const publication = opsRunPublication(canonical.taskId, canonical.title, canonical.criteria);
+    // GitHub has no body CAS: a changed body refuses this write rather than overwriting its owner.
+    if (await fetchBody() !== body) {
+      log("pr.body_normalize.raced", { pr_url: prUrl });
+      return "raced";
+    }
+    signal?.throwIfAborted();
+    assertLiveWriteAllowed("gh-transport", "normalize the bound ops task public PR");
+    await ghTextAsync(["api", "-X", "PATCH", `repos/${target.owner}/${target.repo}/pulls/${target.number}`,
+      "-f", `title=${publication.title}`, "-f", `body=${publication.body}`]);
+    log("pr.body_normalized", { pr: prUrl, rendered_proofs: canonical.criteria.map(c => c.proof) });
+    return "rewritten";
+  } catch (error) {
+    // Unreadable/raced transport is not permission to publish another body or open a replacement PR.
+    log("pr.body_normalize.error", { pr_url: prUrl, error: String((error as Error)?.message ?? error) });
     return "error";
   }
 }
@@ -7640,18 +7669,18 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
     // plan record before the trailer-amend push below, so `trailer-body-proof-divergence` never
     // reaches CI (#6888, #6929, #6931). Best-effort/no-op cases are documented on the function
     // itself. The fallback below may adopt a worker-opened PR and normalize it afterward.
-    const normalizePublishedRunPr = (url: string): void => {
+    const normalizePublishedRunPr = async (url: string): Promise<void> => {
       if (task.catalog === "ops" && checkPrOwnership(url, branch, ghPrHeadGateway(), costUsd, impl.accountLabel)) {
         throw new Error("ops public PR ownership refused");
       }
-      const outcome = normalizeRunPrAcceptanceFromPlan(url, taskId,
-        opsCriteriaAtOpen ? [...opsCriteriaAtOpen.criteria] : task.acceptance ?? [], log,
-        undefined, opsCriteriaAtOpen?.title);
+      const outcome = opsCriteriaAtOpen
+        ? await normalizeOpsRunPrPublication(host, url, opsCriteriaAtOpen, log, opts.abortSignal)
+        : normalizeRunPrAcceptanceFromPlan(url, taskId, task.acceptance ?? [], log);
       if (task.catalog === "ops" && outcome !== "rewritten" && outcome !== "healthy") {
         throw new Error(`ops public PR normalization refused (${outcome})`);
       }
     };
-    if (prUrl) normalizePublishedRunPr(prUrl);
+    if (prUrl) await normalizePublishedRunPr(prUrl);
     // W1-T1012: append the `Remudero-Task:` trailer to the branch's actual tip commit HERE —
     // after both push paths above (the worker's own sandbox push, or the orchestrator
     // fallback just above) have already landed it on origin, and before EITHER PR path below
@@ -7724,7 +7753,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
       // adoption above discovers it only here, after the earlier direct-PR normalization point.
       // Reuse that same body repair before review so the adopted worker prose cannot fail the
       // plan's acceptance gate. A newly created, already-matching body is a no-op.
-      if (prUrl) normalizePublishedRunPr(prUrl);
+      if (prUrl) await normalizePublishedRunPr(prUrl);
     }
     if (!prUrl) {
       const keptHead = keptHeadOfFailedRun();

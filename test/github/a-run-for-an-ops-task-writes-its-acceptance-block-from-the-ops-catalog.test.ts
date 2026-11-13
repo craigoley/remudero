@@ -36,7 +36,7 @@ const result = (text: string): WorkerResult => ({
   tokens: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 }, modelUsage: {}, compactionEvents: [], qualitySuspect: false,
 });
 
-async function runFixture(t: TestContext, catalog: "ops" | "public", mode: "reported" | "created" = "reported", acceptance: readonly AcceptanceCriterion[] = criteria, refusal?: "ownership" | "normalization") {
+async function runFixture(t: TestContext, catalog: "ops" | "public", mode: "reported" | "created" = "reported", acceptance: readonly AcceptanceCriterion[] = criteria, refusal?: "ownership" | "normalization" | "slow-write") {
   const root = gitRepo({ scope: t }), origin = gitRepo({ bare: true, scope: t }), seed = gitRepo({ scope: t });
   mkdirSync(join(seed.dir, "plan")); writeFileSync(join(seed.dir, "plan", "tasks.yaml"), catalog === "public" ? yaml(acceptance) : "[]\n");
   seed.git("add", "plan"); seed.git("commit", "--quiet", "-m", "test: seed the actual public plan");
@@ -67,7 +67,7 @@ async function runFixture(t: TestContext, catalog: "ops" | "public", mode: "repo
     ...opsRoutes,
     { when: "pulls?", stdout: "[]" },
     { when: "--method POST repos/", stdout: JSON.stringify({ html_url: url, number: 7 }) },
-    { when: "PATCH repos/", stdout: "{}", exit: refusal === "normalization" ? 1 : 0, stderr: refusal === "normalization" ? "fixture normalization refused" : "" },
+    { when: "PATCH repos/", stdout: "{}", delaySeconds: refusal === "slow-write" ? 1 : 0, exit: refusal === "normalization" ? 1 : 0, stderr: refusal === "normalization" ? "fixture normalization refused" : "" },
     { when: "--json body", stdout: JSON.stringify({ body }) },
     { when: "pr view", stdout: JSON.stringify({ headRefName: refusal === "ownership" ? "run-W1-T900009-other" : branch, body, number: 7 }) },
     { when: "/pulls/7", stdout: JSON.stringify({ number: 7, state: "open", merged: false, head: { sha: "c".repeat(40) } }) },
@@ -76,6 +76,12 @@ async function runFixture(t: TestContext, catalog: "ops" | "public", mode: "repo
     { when: "pr edit", stdout: "" },
   ]);
   const priorPath = process.env.PATH, priorHooks = process.env.RMD_HARNESS_HOOKS_DIR;
+  let asyncPatchObserved = false;
+  const patchTimer = refusal === "slow-write" ? setInterval(() => {
+    const events = gh.events();
+    if (events.some(start => start.phase === "start" && start.args.includes("PATCH")
+      && !events.some(end => end.phase === "end" && end.id === start.id))) asyncPatchObserved = true;
+  }, 5) : undefined;
   process.env.PATH = `${gh.dir}:${priorPath}`; mkdirSync(join(root.dir, "hooks")); process.env.RMD_HARNESS_HOOKS_DIR = join(root.dir, "hooks");
   t.after(() => {
     try {
@@ -86,6 +92,7 @@ async function runFixture(t: TestContext, catalog: "ops" | "public", mode: "repo
         assert.equal(writes.length, refusal === "ownership" ? 0 : 1);
       }
     } finally {
+      if (patchTimer !== undefined) clearInterval(patchTimer);
       process.env.PATH = priorPath;
       if (priorHooks === undefined) delete process.env.RMD_HARNESS_HOOKS_DIR; else process.env.RMD_HARNESS_HOOKS_DIR = priorHooks;
       rmSync(gh.dir, { recursive: true, force: true });
@@ -121,7 +128,7 @@ async function runFixture(t: TestContext, catalog: "ops" | "public", mode: "repo
     const title = / -f title=([\s\S]*?)(?: -f body=|$)/.exec(a); return title ? [title[1]!] : [];
   });
   const rows = readFileSync(join(root.dir, "state", "ledger.ndjson"), "utf8").trim().split("\n").map(line => JSON.parse(line));
-  return { outcome, bodies, titles, prompts, calls, rows, workerRoot, branch, originDir: origin.dir, publicWrites,
+  return { outcome, bodies, titles, prompts, calls, rows, workerRoot, branch, originDir: origin.dir, publicWrites, asyncPatchObserved,
     sourceReads: calls.filter(a => a.some(x => x.startsWith(base))),
     sourceReadCount: () => gh.events().filter(e => e.phase === "start" && e.args.some(x => x.startsWith(base))).length };
 }
@@ -290,4 +297,9 @@ test("a reported ops PR with a different owning branch refuses before a public w
 });
 test("a refused ops body normalization ends the real run before another public publication", async t => {
   await assert.rejects(runFixture(t, "ops", "reported", criteria, "normalization"), /ops public PR normalization refused/);
+});
+
+test("the real ops publication write keeps the event loop responsive while its child is in flight", async t => {
+  const f = await runFixture(t, "ops", "reported", criteria, "slow-write");
+  assert.equal(f.asyncPatchObserved, true, "a timer ran between the controlled PATCH child start and end");
 });
