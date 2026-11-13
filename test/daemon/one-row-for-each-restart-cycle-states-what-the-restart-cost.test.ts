@@ -65,10 +65,17 @@ test("W1-T12229 criterion 2: waiting counts distinguish stale refusals and resta
 });
 
 test("W1-T12229 criterion 3: abandoned reviews and fix rounds retain each age", () => {
-  const r = cycle();
+  const rows = fixture().map(r => r.step === "daemon.freshness_drain.completed" ? { ...r, waited_on: [
+    ...(r.waited_on as Row[]).map(item => item.kind === "fix-dispatch" ? { ...item, abandoned: undefined, released: true } : item),
+  ] } : r);
+  // Admission cancellation settles the registry entry after the bound. The explicit abandoned row
+  // retains its age even though the final inventory snapshot calls that entry released.
+  rows.splice(rows.findIndex(r => r.step === "daemon.freshness_drain.completed"), 0,
+    row(285, "daemon.detached_action_abandoned", { action_kind: "fix-dispatch", task_id: "FIX", age_ms: 229 }));
+  const r = cycle(rows);
   assert.deepEqual(r.gave_up.reviews?.map(item => [item.pr, item.age_ms]), [[4, 100]]);
-  assert.deepEqual(r.gave_up.fix_rounds?.map(item => [item.task_id, item.age_ms]), [["FIX", 110]]);
-  assert.equal(r.gave_up_age_ms, 210);
+  assert.deepEqual(r.gave_up.fix_rounds?.map(item => [item.task_id, item.age_ms]), [["FIX", 229]]);
+  assert.equal(r.gave_up_age_ms, 329);
 });
 
 test("W1-T12229 criterion 4: verdict count and gap end at the first verdict", () => {
@@ -166,6 +173,7 @@ test("W1-T12229 criterion 7: rotation keeps an unfinished cycle's prior boot bou
     const prior = [
       { ts: atTime(oldStart), step: "daemon.boot", run_id: "old" },
       { ts: atTime(oldStart + 1000), step: "daemon.freshness_decision", action: "restart", stale_since_ms: now + oldStart },
+      { ts: atTime(oldStart + 1500), step: "daemon.detached_action_abandoned", action_kind: "fix-dispatch", task_id: "FIX", age_ms: 229 },
       { ts: atTime(oldStart + 2000), step: "daemon.freshness_exit", phases_ms: { total: 1000 } },
       { ts: atTime(newStart), step: "daemon.boot", run_id: "new" },
     ];
@@ -183,12 +191,30 @@ test("W1-T12229 criterion 7: rotation keeps an unfinished cycle's prior boot bou
       now: () => new Date(now + 200) }).rotated, true);
     const retained = restartCycleLedgerRows(readFileSync(path, "utf8").trim().split("\n")).rows;
     assert.ok(retained.some(r => r.step === "daemon.boot" && r.ts === atTime(newStart)));
+    assert.ok(retained.some(r => r.step === "daemon.detached_action_abandoned" && r.task_id === "FIX"));
     assert.ok(restartCycleRow(retained, now + newStart));
     const result = await daemon(retained as Row[], 1);
     assert.equal(result.cycles.length, 1);
     assert.equal(result.cycles[0].started_at, atTime(newStart));
     assert.equal(result.cycles[0].first_verdict_at, null);
   } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("startup records every earlier unrecorded freshness cycle after multiple restarts", async () => {
+  const rows = [
+    row(0, "daemon.boot", { run_id: "first" }),
+    row(10, "daemon.freshness_decision", { action: "restart", stale_since_ms: epoch + 5 }),
+    row(20, "daemon.freshness_exit"),
+    row(100, "daemon.boot", { run_id: "second" }),
+    row(110, "review.posted", { pr: 1 }),
+    row(120, "daemon.freshness_decision", { action: "restart", stale_since_ms: epoch + 105 }),
+    row(130, "daemon.freshness_exit"),
+    row(200, "daemon.boot", { run_id: "third" }),
+    row(210, "review.posted", { pr: 2 }),
+  ];
+  const result = await daemon(rows, 1);
+  assert.deepEqual(result.cycles.map(r => r.started_at), [at(100), at(200)]);
+  assert.deepEqual(result.cycles.map(r => r.first_verdict_at), [at(110), at(210)]);
 });
 
 test("an unreadable cycle read carries its error and retries on the next tick", async () => {

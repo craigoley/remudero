@@ -134,8 +134,17 @@ import {
   installReviewLaneTransition,
   runningReviewLaneIds,
   restartDrainInventory,
+  directMergeRestartItem,
   type RestartDrainInventoryEntry,
 } from "./sweep.js";
+import {
+  cancelUnsubmittedDirectMerges,
+  closeDirectMergeAdmissions,
+  directMergeOperationsInFlight,
+  drainDirectMergeOperations,
+  openDirectMergeAdmissions,
+  type DirectMergeOperation,
+} from "./arm-auto-merge.js";
 // VALUE import (W1-T342's gate moved to its own pure module so drain.ts can share it — see that
 // module's header for why neither daemon.ts nor sweep.ts could host it). Pure, no filesystem.
 import { checkDispatchGovernors, checkNewBuildReservation, governorDeferPayload, newBuildReservationPayload, type DispatchGovernorDeps, type DispatchGovernorVerdict, type MemoryReadTracker, type QuietHoursHoldResult } from "./dispatch-governor.js";
@@ -4336,6 +4345,7 @@ export async function runDaemon(
   deps: DaemonDeps,
   opts: DaemonOpts = {},
 ): Promise<DaemonSummary> {
+  openDirectMergeAdmissions();
   // Every consumer reached during a tick sees the same ledger read, including freshness scoring.
   // Cache failures too: a second consumer must not silently turn an unreadable tick into a good one.
   const ledgerReader = deps.readLedgerLines;
@@ -4721,7 +4731,7 @@ export async function runDaemon(
   const restartStartedAtMs = restartBoots.at(-1) ?? clockFromDateFn(deps.now).now();
   const recordedRestartStarts = new Set(restartLedger.rows.filter(row => row.step === "daemon.restart_cycle")
     .map(row => Date.parse(String(row.started_at))));
-  for (const started of restartBoots.slice(-2, -1)) {
+  for (const started of restartBoots.slice(1, -1)) {
     if (recordedRestartStarts.has(started)) continue;
     const cycle = restartCycleRow(restartLedger.rows, started);
     if (cycle) { log("daemon.restart_cycle", { ...cycle }); recordedRestartStarts.add(started); }
@@ -5284,6 +5294,7 @@ export async function runDaemon(
       ...(liveLanes > 0 ? ["lanes"] : []),
       ...(reviews > 0 ? ["reviews"] : []),
       ...(interruptible > 0 ? ["detached_work"] : []),
+      ...(directMergeOperationsInFlight().length > 0 ? ["direct_merge"] : []),
     ];
     const busy = busyReasons.length > 0;
     const background = {
@@ -5452,6 +5463,7 @@ export async function runDaemon(
   const latchedAdmission = (): RestartAdmission | undefined => restartWindow && restartAdmission;
   const beginLatchDrain = (latchAtMs: number): void => {
     if (latchDrain?.latchAtMs === latchAtMs) return;
+    closeDirectMergeAdmissions("freshness_latch");
     const lengths = measuredReviewLength();
     restartWindow = { deadlineMs: latchAtMs + sweepWallClockBoundMs, held: 0, latchAtMs,
       lengths: { review: lengths.codeMs ?? lengths.ms, "plan-review": lengths.planMs ?? lengths.ms, "fix-dispatch": lengths.fixMs } };
@@ -5460,7 +5472,8 @@ export async function runDaemon(
     const observation = observeDrain(latchAtMs, latchAtMs);
     for (const item of restartDrainInventory()) observation.watch(item);
     if (freshnessDecidedAtMs !== undefined) freshnessPhases.decision_to_latch = Math.max(0, latchAtMs - freshnessDecidedAtMs);
-    latchDrain = { latchAtMs, reviews, detached, observation, started: reviews.size > 0 || detached > 0 };
+    latchDrain = { latchAtMs, reviews, detached, observation,
+      started: reviews.size > 0 || detached > 0 || directMergeOperationsInFlight().length > 0 };
     if (latchDrain.started) log("daemon.freshness_drain.started", { started_at: "latch", latched_at: fixedClock(latchAtMs).iso(),
       detached_sweep_actions: detached, in_flight_reviews: reviews.size, waited_on: observation.snapshot() });
   };
@@ -5509,6 +5522,7 @@ export async function runDaemon(
     const observation = fromLatch?.observation ?? observeDrain(exitAtMs, latchAtMs);
     for (const item of restartDrainInventory()) observation.watch(item);
     const detachedAtFreshness = detachedSweepActionCount();
+    const directMergesAtFreshness = directMergeOperationsInFlight().length;
     // W1-T9114: the inventory says where each kind runs. A child is left running, never waited for; what is still in process is awaited.
     const placements = detachedWorkPlacements();
     const childrenLeft = childWorkLeftRunning();
@@ -5517,7 +5531,7 @@ export async function runDaemon(
     const reviewsAtExit = inFlightReviewRunsNow();
     const reviewsAtFreshness = reviewsAtExit.length;
     const latchStarted = fromLatch?.started === true ? fromLatch : undefined;
-    if (detachedAtFreshness > 0 || reviewsAtFreshness > 0 || latchStarted || hasChildrenLeft || pass?.overlapped) {
+    if (detachedAtFreshness > 0 || reviewsAtFreshness > 0 || directMergesAtFreshness > 0 || latchStarted || hasChildrenLeft || pass?.overlapped) {
       const drainStartedAtMs = latchStarted ? latchStarted.latchAtMs : exitAtMs;
       const latchFields = fromLatch ? { started_at: fromLatch.started ? "latch" : "exit", latched_at: fixedClock(fromLatch.latchAtMs).iso() }
         : stepPrefix === "daemon.freshness_drain" ? { started_at: "exit" } : {};
@@ -5556,6 +5570,7 @@ export async function runDaemon(
         detachedAtFreshness > 0 ? startInterphaseReviewClock(deps, pollIntervalMs, log, "drain", latchedAdmission()) : undefined;
       let abandoned: Awaited<ReturnType<typeof drainDetachedSweepActions>>;
       let abandonedReviews: number;
+      let unresolvedMerges: DirectMergeOperation[];
       let reviewPasses = 0;
       let reviewPassesHeld = 0;
       const drainDetached = (boundMs: number) => drainDetachedSweepActions({
@@ -5569,10 +5584,11 @@ export async function runDaemon(
         },
       });
       try {
-        [abandoned, abandonedReviews] = await Promise.all([
+        [abandoned, abandonedReviews, unresolvedMerges] = await Promise.all([
           drainDetached(detachedBoundMs),
           drainInFlightReviews({ boundMs: reviewBoundMs, onWait: observation.watch,
             closeRefills: pass?.overlapped !== true && placements.review?.placement !== "child" }),
+          drainDirectMergeOperations({ boundMs: detachedBoundMs, onWait: (operation) => observation.watch(directMergeRestartItem(operation)) }),
           pass?.overlapped ? pass.settled : undefined,
         ]);
       } finally {
@@ -5587,6 +5603,14 @@ export async function runDaemon(
           pass?.overlapped ? drainDetached(boundMs) : Promise.resolve(abandoned),
           drainInFlightReviews({ boundMs, onWait: observation.watch, closeRefills: placements.review?.placement !== "child" }),
         ]);
+      }
+      if (unresolvedMerges.length > 0) cancelUnsubmittedDirectMerges();
+      for (const operation of unresolvedMerges) {
+        log("daemon.direct_merge_unresolved", {
+          pr: operation.prNumber ?? null, pr_url: operation.prUrl, head_sha: operation.headSha ?? null, phase: operation.phase,
+          outcome: operation.phase === "write-submitted" ? "unknown_write" : "cancelled_before_write",
+          age_ms: Math.max(0, daemonClock.now() - operation.admittedAtMs), bound_ms: detachedBoundMs,
+        });
       }
       for (const action of abandoned) {
         const release = await abandonDetachedSweepAction(action);
@@ -5605,6 +5629,7 @@ export async function runDaemon(
         detached_sweep_actions: latchStarted ? latchStarted.detached : detachedAtFreshness,
         remaining_detached_sweep_actions: detachedSweepActionCount(),
         abandoned_detached_sweep_actions: abandoned.length,
+        unresolved_direct_merges: unresolvedMerges.length,
         in_flight_reviews: latchStarted ? latchStarted.reviews.size : reviewsAtFreshness,
         abandoned_in_flight_reviews: abandonedReviews,
         detached_children_left_running: childWorkLeftRunning(),
@@ -5641,8 +5666,8 @@ export async function runDaemon(
     dispatchLatchAtMs?: number,
     advanceSinceMs?: number,
   ): Promise<FreshnessPass> => {
-    // Install BEFORE the loop stops for restart, never after, so the relaunched process inherits deps
-    // matching the new sha rather than the stale tree this process is still running (W1-T151).
+    closeDirectMergeAdmissions("freshness_exit");
+    // Install BEFORE the loop stops, so the relaunched process inherits deps matching the new sha (W1-T151).
     if (freshness.installNeeded) {
       deps.runInstall?.();
     }
@@ -8890,6 +8915,7 @@ export async function runDaemon(
       return stopForFreshness(restartDecided, restartWait.decidedAtMs);
     }
     restartWindow = undefined;
+    openDirectMergeAdmissions();
 
     if (apiWindowHoldMs > 0) {
       // Consecutive different-task transient refusals at or above the floor: hold dispatch rather than let

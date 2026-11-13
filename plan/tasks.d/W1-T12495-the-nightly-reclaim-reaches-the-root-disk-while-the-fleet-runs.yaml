@@ -1,0 +1,84 @@
+- id: W1-T12495
+  title: "The nightly reclaim reaches the root disk while the fleet runs: it proves each checkout and each file idle, and it does not wait for a stopped fleet"
+  repo: remudero
+  depends_on: []
+  priority: 1.0
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # git maintenance and file removal on the root disk beside live lanes; each item needs its own idle proof
+  band_meaning: blast-radius
+  origin: operator-session#root-cause-defects-2026-11-13
+  plan_refs:
+    - W1-T3612
+    - W1-T3626
+    - W1-T3676
+    - W1-T2725
+    - W1-T12253
+    - W1-T12254
+    - W1-T12256
+    - W1-T12454
+  files:
+    - deploy/host-update.sh
+    - test/host-update-reclaim.test.ts
+    - test/agent-history-does-not-fill-the-root-disk.test.ts
+    - test/agent-history-reclaim-reaches-the-bulk.test.ts
+    - test/deploy/the-nightly-reclaim-reaches-the-root-disk-while-the-fleet-runs.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "With a fleet container live, the git rung runs in a checkout whose git directory has no lock file and no file written in the last 30 minutes. In that case it runs only `git maintenance run` with the loose-objects, incremental-repack and pack-refs tasks. It never runs `git gc` and never prunes an object. The line for the checkout names the bytes freed"
+      proof: "grep: W1-T12495 criterion 1 in test/deploy/the-nightly-reclaim-reaches-the-root-disk-while-the-fleet-runs.test.ts"
+    - claim: "With a fleet container live, a checkout with a lock file, or with a file written in the last 30 minutes under its git directory or the git directory of a linked worktree, is kept. Its line names the reason. No git command that writes runs in it"
+      proof: "grep: W1-T12495 criterion 2 in test/deploy/the-nightly-reclaim-reaches-the-root-disk-while-the-fleet-runs.test.ts"
+    - claim: "With a fleet container live, the age sweep removes an old history file that no process holds open. It keeps an old file that a process holds open, also when the process sees the file at its container path, and names the reason `open-by-process`"
+      proof: "grep: W1-T12495 criterion 3 in test/deploy/the-nightly-reclaim-reaches-the-root-disk-while-the-fleet-runs.test.ts"
+    - claim: "With a fleet container live, when the list of open files cannot be read in full, the age sweep removes nothing, every tree names the reason `open-check-unreadable`, and the closing verdict is `agent history reclaim: REFUSED`"
+      proof: "grep: W1-T12495 criterion 4 in test/deploy/the-nightly-reclaim-reaches-the-root-disk-while-the-fleet-runs.test.ts"
+    - claim: "With a fleet container live, no SQLite database is compacted. The `live-fleet-container` line counts only the free pages of the databases in the age tier, not every byte of the tree"
+      proof: "grep: W1-T12495 criterion 5 in test/deploy/the-nightly-reclaim-reaches-the-root-disk-while-the-fleet-runs.test.ts"
+    - claim: "A `--reclaim-only` run with a fleet container live never prints `no fleet container running`"
+      proof: "grep: W1-T12495 criterion 6 in test/deploy/the-nightly-reclaim-reaches-the-root-disk-while-the-fleet-runs.test.ts"
+    - claim: "With no fleet container live, the git rung runs `git gc` and the age sweep and compaction run as before"
+      proof: "grep: W1-T12495 criterion 7 in test/deploy/the-nightly-reclaim-reaches-the-root-disk-while-the-fleet-runs.test.ts"
+    - claim: "invariant:no-prune-beside-a-live-fleet — while any fleet container is live, a `--reclaim-only` run never runs `git gc` or a git prune, never compacts a database, and never removes a file that a process holds open or that it cannot prove closed"
+      proof: "grep: W1-T12495 criterion 8 in test/deploy/the-nightly-reclaim-reaches-the-root-disk-while-the-fleet-runs.test.ts"
+  rationale: |
+    OBSERVED 2026-11-13 04:17Z in ~/reclaim.log on the Azure host (nightly-reclaim.sh, host-update.sh --reclaim-only at 7ff222b13):
+    - "REFUSING git object reclaim — a fleet container is RUNNING." Four containers were live: remudero-daemon, remudero-console-daemon, remudero-site-daemon and remudero-serve.
+    - "REFUSING agent history reclaim — a fleet container is RUNNING." The lines for the trees said "could not reach 11.1GB — reason: live-fleet-container (28123 file(s))" for ~/.codex and "328.2MB ... (158 file(s))" for ~/.claude/projects.
+    - Docker prune: "Total reclaimed space: 0B". Free on / after the run: 9,151,076 KiB of 61 GB.
+    - Directly before that run, the line "fleet container(s) RUNNING — proceeding anyway under --reclaim-only" was followed by "no fleet container running". The second line is false.
+    - The operator measured a loss of about 5 GB a day on the root disk. The fleet runs all day, so these two rungs never run.
+    READ at origin/main 53ef46888.
+    - deploy/host-update.sh:888 sets `LIVE` to every fleet container. :1431 refuses the git rung when `LIVE` is not empty. :1613 refuses the agent history rung on the same test. One container anywhere stops the rung for every checkout and every file.
+    - deploy/host-update.sh:926 prints "no fleet container running" after the --reclaim-only branch at :904, also when `LIVE` is not empty.
+    - The reason for the git refusal (:1407) is that `git gc` can prune objects a live lane still needs. `git maintenance run` with the loose-objects, incremental-repack and pack-refs tasks prunes no unreachable object. git-maintenance(1) says the loose-objects and incremental-repack tasks work in two steps to avoid races with concurrent git commands. The host has git 2.43.0.
+    - The reason for the history refusal (:1617) is that a running lane may still write the file. That is a fact about one file. The host janitor already tests it for one path: `is_open` (deploy/rmd-host-cleanup.sh:453) reads an lsof list of open files, maps container paths to host paths, and keeps everything when the list is incomplete.
+    - The containers run as uid 1000, the same uid as the host user, so the host user can list their open files.
+    MEASURED 2026-11-13 on the host, read-only:
+    - ~/.codex holds 12 GB. Its history folders hold 0 files older than 14 days. thread_history_1.sqlite (7.35 GB) has 0 free pages and state_5.sqlite (2.86 GB) has 4. These bytes are live rows. Today the refused rung could free little in this tree, but its report gives `live-fleet-container` as the reason for all of them.
+    - ~/rmd-op/.git holds 406 MB (41 MiB loose objects, 10 packs). ~/Remudero/remudero/.git holds 447 MB (48 MiB loose objects, 45 packs).
+    CHECKED for overlap: W1-T12256 and W1-T12454 (queued) retire finished worktrees in the host janitor; they do not change host-update.sh. W1-T3612, W1-T3626 and W1-T3676 (merged) made these rungs and their refusal. A free-space alarm for the root disk exists in the plan: W1-T12253 (merged) publishes `root_fs_reserve_kb`, and the installed heartbeat at 53ef46888 writes it. W1-T12254 (queued) raises the escalation from it. This task adds no alarm.
+  design: |
+    In deploy/host-update.sh, in the `--reclaim-only` path only:
+    1. Print "no fleet container running" only when `LIVE` is empty.
+    2. Git rung (section 4a). When `LIVE` is empty, run as today. When it is not empty, judge each checkout in `GIT_RECLAIM_DIRS` alone:
+       - Keep it when its git directory, or the git directory of a linked worktree (`<gitdir>/worktrees/*`), holds a `*.lock` file or `gc.pid`, or a file written in the last 30 minutes. Print `host-update: git reclaim — <dir>: kept — <reason>`.
+       - Otherwise run `git -C <dir> maintenance run --task=loose-objects --task=incremental-repack --task=pack-refs`. Do not remove gc.log and do not run `git gc`. Print the bytes freed for the checkout, as today.
+       - Keep the per-checkout report. Never sum the checkouts.
+    3. Agent history rung (section 4b). When `LIVE` is empty, run as today. When it is not empty:
+       - Read the list of open files once with lsof, as `is_open` in deploy/rmd-host-cleanup.sh does. Map each container path to its host path with the mount sources of the live fleet containers (`docker inspect`, the same call as `fleet_containers`). When lsof is missing, fails or reports incomplete visibility, remove nothing and report `open-check-unreadable` for each tree.
+       - Run the age sweep. Keep an old file that a process holds open and report it as `open-by-process`.
+       - Do not compact a database. Report the free pages of each in-tier SQLite database (`freelist_count` times `page_size`, read-only) as `live-fleet-container`. Report the other bytes with the reasons of today.
+       - The closing verdict is `COMPLETED` when the sweep ran, and `REFUSED` only for `open-check-unreadable`.
+    4. Change the existing tests that require the whole refusal so that they require the per-item rules. Keep their mutants: a run that skips the idle proof or the open-file check must still fail a test.
+    INVARIANT no-prune-beside-a-live-fleet: while any fleet container is live, the reclaim never runs `git gc` or a git prune, never compacts a database, and never removes a file that a process holds open or that it cannot prove closed.
+    NOT IN SCOPE: the Codex databases as such (their bytes are live rows), the state backups and the worktrees under ~/rmd-state2, the janitor (deploy/rmd-host-cleanup.sh), the free-space alarm (W1-T12254), and the docker rungs.
+  falsifier: |
+    Run the git rung beside a live container without the idle proof and criterion 2 must fail. Run `git gc` there and criterion 1 must fail. Skip the open-file check and criterion 3 must fail. Remove files when lsof fails and criterion 4 must fail. Compact beside a live container, or count every byte of the tree, and criterion 5 must fail. Print the false line again and criterion 6 must fail. Remove the open-file check and the idle proof together and criterion 8 must fail. Restore and require all eight to pass.
+  note: |
+    Ids W1-T12495 and W1-T12496 reserved for run-unfiled-1794559757000 with ~/rmd-work/bin/reserve-id.sh.
+    The nightly job runs host-update.sh from a clean checkout of origin/main (~/rmd-work/bin/nightly-reclaim.sh), so the change reaches the host on the first night after it merges.
+    Seen and not filed: the off-host state snapshot failed on 2026-11-13 with AuthorizationFailed for `Microsoft.Compute/disks/read`. That is a permission of the host identity, not code.

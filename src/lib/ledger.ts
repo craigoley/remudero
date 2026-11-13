@@ -643,6 +643,7 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   "daemon.freshness_decision", // restartCycleRow joins the decision and material-change time across lifetimes.
   "daemon_selfrestart_for_freshness",
   "daemon.admission_held",
+  "daemon.detached_action_abandoned", // restartCycleRow uses the bounded age after admission cancellation removes the wait row.
   "daemon.restart_cycle",
   "daemon.freshness_drain.completed",
   "daemon.memory_exit",

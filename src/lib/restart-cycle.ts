@@ -97,7 +97,22 @@ export function restartCycleRow(rows: readonly Row[], startAtMs: number): Restar
   const abandoned = inventory?.filter(item => item.abandoned === true).map((item): AbandonedWork => ({ ...item,
     age_ms: finite(item.admitted_at_ms) && item.admitted_at_ms <= drain!.ms ? drain!.ms - item.admitted_at_ms : null }));
   const reviews = abandoned?.filter(item => item.what === "review") ?? null;
-  const fixes = abandoned?.filter(item => item.what === "detached" && item.kind === "fix-dispatch") ?? null;
+  const fixesByTask = new Map<string, AbandonedWork>();
+  for (const item of abandoned?.filter(item => item.what === "detached" && item.kind === "fix-dispatch") ?? []) {
+    const key = typeof item.task_id === "string" ? item.task_id : `unknown:${fixesByTask.size}`;
+    fixesByTask.set(key, item);
+  }
+  // Admission cancellation settles and removes a fix action after the drain hits its bound.
+  // The completion snapshot then calls it `released`, although the explicit abandonment row
+  // still carries the age at the bound. Prefer that row and recover it if the snapshot omitted it.
+  for (const event of before.filter(r => r.row.step === "daemon.detached_action_abandoned" &&
+    r.row.action_kind === "fix-dispatch" && finite(r.row.age_ms))) {
+    const task = typeof event.row.task_id === "string" ? event.row.task_id : `unknown:${fixesByTask.size}`;
+    const prior = fixesByTask.get(task);
+    fixesByTask.set(task, { ...(prior ?? { what: "detached", kind: "fix-dispatch", task_id: event.row.task_id }),
+      age_ms: event.row.age_ms as number });
+  }
+  const fixes = fixesByTask.size ? [...fixesByTask.values()] : null;
   const gaveUpMs = reviews && fixes ? sum([...reviews, ...fixes].map(item => item.age_ms)) : null;
   const last = ordered.findLast(r => r.row.step === "review.posted" && r.ms < exit.ms);
   const gapMs = last && first ? first.ms - last.ms : null;

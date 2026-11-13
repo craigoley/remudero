@@ -1524,7 +1524,11 @@ $(render_serve_memory_tuning)
     if [ -f "\$DAEMON_CODE/src/run-task.ts" ]; then
       refresh_deploy_code '${CONTAINER_NAME}' || deploy_code_busy_handoff '${CONTAINER_NAME}' || exit 0
     fi
-    echo "rmd-relaunch: ${CONTAINER_NAME} healthy -- asking the supervisor whether a RECYCLE is due."
+    if watchdog_healthy; then
+      echo "rmd-relaunch: ${CONTAINER_NAME} healthy -- asking the supervisor whether a RECYCLE is due."
+    else
+      echo "rmd-relaunch: ${CONTAINER_NAME} \${PROGRESS_STATE:-UNKNOWN} action=\${PROGRESS_ACTION:-none} -- \$(verdict_field reason)"
+    fi
     DEPLOY_SHADOW_ARGS=()
     if [ -n "\${registry_shadow_session:-}" ] && [ -r "\$DAEMON_CODE/src/run-task.ts" ] && \\
         grep -F -- 'selectedRegistryLifecycleExec(' "\$DAEMON_CODE/src/run-task.ts" >/dev/null; then

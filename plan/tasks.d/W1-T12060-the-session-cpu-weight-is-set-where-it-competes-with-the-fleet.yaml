@@ -16,7 +16,7 @@
     - deploy/resource-policy.sh
     - deploy/install-host-units.sh
     - test/deploy/the-session-cpu-weight-is-set-where-it-competes-with-the-fleet.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "The installer writes the session CPU weight for user.slice, the sibling of system.slice, and applies it at runtime when systemd is live"

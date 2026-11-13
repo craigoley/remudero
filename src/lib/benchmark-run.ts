@@ -11,13 +11,15 @@ import { fileURLToPath } from "node:url";
 import { appendLedger } from "./ledger.js";
 import { ledgerPathFor } from "./ledger-path.js";
 import { isTestRunner } from "./live-write-guard.js";
-import { fixedClock } from "./clock.js";
-import { readInflightLock, sweepStaleInflightLocks, type InflightLockInfo, type InflightSweepResult } from "./inflight-lock.js";
+import { fixedClock, systemClock } from "./clock.js";
+import { HOST_LOCK_SILENT_STEP, hostLockSilence, isHostWrittenLock, readInflightLock, sweepStaleInflightLocks, type InflightLockInfo,
+  type InflightSweepResult } from "./inflight-lock.js";
 import { readLedgerUnionRecordsSync } from "./ledger-union.js";
 import type { Config } from "./config.js";
 import { workerClassOfLane } from "./host-memory-learning.js";
 import { spawnWorker, workerLedgerFields, type SpawnWorkerArgs, type WorkerResult, type WorkerSelectionAssignment } from "./worker.js";
 import { OPENWEIGHT_TEMPERATURE } from "./worker-provider.js";
+import type { ExperimentIntentionToTreat } from "./routing-experiments.js";
 
 export const BENCHMARK_RUN_VERSION = "benchmark-run-v1" as const;
 
@@ -351,6 +353,7 @@ export interface BenchmarkRunAssignmentInput {
   id: string;
   requested: { model: string; effort: string };
   selected: { provider: string; model: string; effort: string };
+  routing?: { experiment?: ExperimentIntentionToTreat };
 }
 
 export function benchmarkRunAssignmentReceipt(
@@ -358,6 +361,7 @@ export function benchmarkRunAssignmentReceipt(
   work: BenchmarkWorkInput,
   stackEvidence: BenchmarkStackEvidence & { loadedModule?: ImportedModuleEvidence } = {},
 ) {
+  const experiment = assignment.routing?.experiment;
   // No inference from checkout HEAD, route, or site-level consent: none of those pins the
   // actual prompt/tools/scorer used by this worker call or grants this instance publication.
   return {
@@ -383,7 +387,10 @@ export function benchmarkRunAssignmentReceipt(
       environmentRevision: pinEvidence("environmentRevision", stackEvidence.environmentRevision),
     },
     rights: { state: "private" as const, reason: "no-local-consent-receipt" },
-    allocation: { method: "observational" as const, reason: "no-random-allocation-receipt" },
+    allocation: experiment ? {
+      method: "randomized" as const, experimentId: experiment.id, arm: experiment.assignedArm,
+      servedArm: experiment.servedArm, probability: experiment.assignedProbability, unit: experiment.unit,
+    } : { method: "observational" as const, reason: "no-random-allocation-receipt" },
   };
 }
 
@@ -771,7 +778,9 @@ export function receiptOrphanedAssignments(run: OrphanedRun, ledgerPath: string)
 }
 
 /** The in-flight lock sweep, receipting each reaped lock's run: its holder died without releasing it. */
-export function sweepInflightLocksWithReceipts(inflightDir: string, ledgerPath: string): InflightSweepResult {
+export function sweepInflightLocksWithReceipts(inflightDir: string, ledgerPath: string,
+  writeHostLockReport: typeof appendLedger = appendLedger,
+): InflightSweepResult & { hostLockReport?: { written: number; reason?: string } } {
   const holders = new Map<string, InflightLockInfo>();
   const entries = existsSync(inflightDir) ? readdirSync(inflightDir) : [];
   for (const entry of entries.filter((name) => name.endsWith(".lock"))) {
@@ -784,5 +793,44 @@ export function sweepInflightLocksWithReceipts(inflightDir: string, ledgerPath: 
     if (holder) receiptOrphanedAssignments({ runId: holder.run_id, taskId, startedAt: holder.startedAt,
       detectedBy: "inflight-lock-sweep" }, ledgerPath);
   }
+  const hostLocks = swept.unverifiableForeignHost.flatMap((taskId) => {
+    const holder = holders.get(taskId);
+    return holder && isHostWrittenLock(holder) && Number.isFinite(Date.parse(holder.startedAt)) ? [{ taskId, holder }] : [];
+  });
+  if (hostLocks.length > 0) {
+    const report = reportSilentHostLocks(hostLocks, ledgerPath, writeHostLockReport);
+    if (report.reason) return { ...swept, hostLockReport: report };
+  }
   return swept;
+}
+
+/** W1-T12316: report, never reclaim. A host-written lock's pid lives in the host's pid table, so the
+ *  daemon writes one row per bound of its run's silence and leaves the lock to host-side code. */
+function reportSilentHostLocks(locks: Array<{ taskId: string; holder: InflightLockInfo }>, ledgerPath: string,
+  writeLedger: typeof appendLedger): { written: number; reason?: string } {
+  let written = 0;
+  try {
+    const sinceTs = fixedClock(Math.min(...locks.map((l) => Date.parse(l.holder.startedAt)))).iso();
+    const read = readLedgerUnionRecordsSync(dirname(ledgerPath), { sinceTs });
+    if (!read.ok) return { written, reason: "ledger-window-incomplete" };
+    const nowMs = systemClock.now();
+    for (const { taskId, holder } of locks) {
+      const silence = hostLockSilence(holder, read.rows, nowMs);
+      if (!silence.silent || silence.boundMs === undefined) continue;
+      const reportedMs = read.rows
+        .filter((row) => row.step === HOST_LOCK_SILENT_STEP && row.run_id === holder.run_id && row.task_id === taskId)
+        .map((row) => Date.parse(String(row.ts)))
+        .filter(Number.isFinite);
+      if (reportedMs.length > 0 && nowMs - Math.max(...reportedMs) < silence.boundMs) continue;
+      writeLedger(ledgerPath, { run_id: holder.run_id, task_id: taskId, step: "daemon.inflight_host_lock_silent", lock_pid: holder.pid,
+        lock_host: holder.host, lock_started_at: holder.startedAt, newest_row_ts: silence.newestRowTs, silent_ms: silence.silentMs,
+        bound_ms: silence.boundMs, bound_source: silence.boundSource, bound_samples: silence.boundSamples,
+        action: "reported only: the lock stays; host-side code tests the pid" });
+      written += 1;
+    }
+    return { written };
+  } catch (error) {
+    const reason = `host-lock-report-failed: ${String((error as Error)?.message ?? error)}`;
+    return { written, reason };
+  }
 }
