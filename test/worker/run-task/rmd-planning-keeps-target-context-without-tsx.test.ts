@@ -8,6 +8,7 @@ import { test } from "node:test";
 import { pathToFileURL } from "node:url";
 import { parse as parseYaml } from "yaml";
 import { PLAN_MAX_NEW_TASKS } from "#src/run-task.js";
+import { ghShim, type GhShim } from "#test/helpers/gh-shim.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 // W1-T12517: `rmd plan` run from a TARGET repository that carries no tsx. The Codex capacity probe used to
@@ -77,15 +78,6 @@ if (mode === "app-server") {
   chmodSync(path, 0o755);
 }
 
-/** `gh` stand-in: records every call and answers an empty list, so nothing reaches GitHub. */
-function ghStub(path: string, log: string): void {
-  writeFileSync(path, `#!${process.execPath}
-require("node:fs").appendFileSync(${JSON.stringify(log)}, JSON.stringify(process.argv.slice(2)) + "\\n");
-process.stdout.write("[]\\n");
-`);
-  chmodSync(path, 0o755);
-}
-
 const GIT_IDENTITY = { GIT_AUTHOR_NAME: "fixture", GIT_AUTHOR_EMAIL: "fixture@example.invalid", GIT_COMMITTER_NAME: "fixture", GIT_COMMITTER_EMAIL: "fixture@example.invalid" };
 const git = (cwd: string, ...args: string[]): string =>
   execFileSync("git", args, { cwd, encoding: "utf8", env: { PATH: process.env.PATH, HOME: cwd, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null", ...GIT_IDENTITY } });
@@ -128,6 +120,7 @@ interface LedgerRow { step?: string; [key: string]: unknown }
  *  bare origin named owner/target) and an isolated state root, from `cwdFor(target)`. */
 async function planFrom(label: "target" | "core", mode: string) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), `rmd-plan-${label}-`)));
+  let shim: GhShim | undefined;
   try {
     const bare = join(root, "origin", "owner", "target.git"), target = join(root, "target");
     const home = join(root, "home"), state = join(root, "state-root"), cli = join(root, "cli"), codexHome = join(root, "codex-home"), privateTmp = join(root, "tmp");
@@ -143,10 +136,10 @@ async function planFrom(label: "target" | "core", mode: string) {
     git(target, "commit", "-qm", "seed the target plan");
     git(target, "push", "-q", "origin", "HEAD:main");
     git(root, "clone", "-q", bare, join(state, "repos", "target")); // the managed clone, so nothing is fetched from GitHub
-    const calls = join(cli, "calls.ndjson"), ghLog = join(cli, "gh.ndjson"), codexBin = join(cli, "codex");
+    const calls = join(cli, "calls.ndjson"), codexBin = join(cli, "codex");
     codexStub(codexBin, calls);
-    mkdirSync(join(cli, "bin"));
-    ghStub(join(cli, "bin", "gh"), ghLog);
+    // The shared PATH shim: records every call and answers an empty list, so nothing reaches GitHub.
+    shim = ghShim([{ when: "", stdout: "[]" }], { kind: "rmd-plan-gh" });
     writeFileSync(join(home, ".config", "remudero", "config.json"), JSON.stringify({
       claudeBin: join(cli, "no-claude-in-this-fixture"), root: state, installRoot: REPO_ROOT,
       workerProviders: { enabled: ["codex"], codexBin, codexHome, capacityCacheMs: 60_000 },
@@ -158,7 +151,7 @@ async function planFrom(label: "target" | "core", mode: string) {
     // Whitelisted environment: no NODE_OPTIONS/NODE_PATH preload and no test-runner context, and the
     // coverage session is blanked rather than deleted so the child never inherits the runner's.
     const env: NodeJS.ProcessEnv = {
-      PATH: `${join(cli, "bin")}:${process.env.PATH}`, LANG: process.env.LANG, HOME: home, TMPDIR: privateTmp,
+      PATH: `${shim.dir}:${process.env.PATH}`, LANG: process.env.LANG, HOME: home, TMPDIR: privateTmp,
       RMD_TEST_SLOT_DIR: join(privateTmp, "test-slots"), GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null",
       ...GIT_IDENTITY, NODE_V8_COVERAGE: undefined,
     };
@@ -173,7 +166,7 @@ async function planFrom(label: "target" | "core", mode: string) {
       ? readFileSync(path, "utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line) as T) : [];
     return {
       run, evidence, cwd, target, state,
-      calls: read<StubCall>(calls), gh: read<string[]>(ghLog), ledger: read<LedgerRow>(join(state, "state", "ledger.ndjson")),
+      calls: read<StubCall>(calls), gh: shim.calls(), ledger: read<LedgerRow>(join(state, "state", "ledger.ndjson")),
       planBefore, planAfter: readFileSync(join(target, "plan", "tasks.yaml"), "utf8"),
       headBefore, headAfter: git(target, "rev-parse", "HEAD").trim(),
       status: git(target, "status", "--porcelain").trim(), targetEntries: readdirSync(target).sort(),
@@ -181,6 +174,7 @@ async function planFrom(label: "target" | "core", mode: string) {
     };
   } finally {
     rmSync(root, { recursive: true, force: true });
+    if (shim) rmSync(shim.dir, { recursive: true, force: true });
   }
 }
 
@@ -224,7 +218,7 @@ function assertReachedArchitect(run: PlanRun, label: string): string {
   assert.equal(run.status, "", "the target working tree is clean");
   assert.deepEqual(run.targetEntries, [".git", ".remudero", "MASTER-PLAN.md", "plan"], "nothing was installed or linked into the target");
   assert.equal(run.remoteAfter, run.remoteBefore, "no branch or ref was left on the target's origin");
-  assert.deepEqual(run.gh.filter((call) => call[0] === "pr"), [], "no gh pr call was made");
+  assert.deepEqual(run.gh.filter((call) => call.startsWith("pr ")), [], "no gh pr call was made");
   assert.equal(ledger.some((row) => row.step === "pr.opened"), false, "no PR was recorded");
   const verdict = ledger.find((row) => row.step === "plan.verdict");
   assert.equal(verdict?.action, "no_action");

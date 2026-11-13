@@ -8,6 +8,7 @@ import { test } from "node:test";
 import { pathToFileURL } from "node:url";
 import { parse as parseYaml } from "yaml";
 import { PLAN_MAX_NEW_TASKS } from "#src/run-task.js";
+import { ghShim, type GhShim } from "#test/helpers/gh-shim.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 // W1-T12517: a PROPOSED `rmd plan` result from a target repository without tsx still crosses every existing
@@ -81,15 +82,6 @@ if (mode === "app-server") {
     process.stdout.write(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 1, cached_input_tokens: 0, output_tokens: 1 } }) + "\\n");
   });
 }
-`);
-  chmodSync(path, 0o755);
-}
-
-/** `gh` stand-in: records every call and answers an empty list, so nothing reaches GitHub. */
-function ghStub(path: string, log: string): void {
-  writeFileSync(path, `#!${process.execPath}
-require("node:fs").appendFileSync(${JSON.stringify(log)}, JSON.stringify(process.argv.slice(2)) + "\\n");
-process.stdout.write("[]\\n");
 `);
   chmodSync(path, 0o755);
 }
@@ -169,6 +161,7 @@ interface Published { file: string; args: string[]; cwd: string }
  *  the publisher. `inspect` runs against the origin while the fixture still exists. */
 async function proposeFrom(scenario: Scenario) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), "rmd-plan-gates-")));
+  let shim: GhShim | undefined;
   try {
     const bare = join(root, "origin", "owner", "target.git"), target = join(root, "target");
     const home = join(root, "home"), state = join(root, "state-root"), cli = join(root, "cli"), codexHome = join(root, "codex-home"), privateTmp = join(root, "tmp");
@@ -184,10 +177,10 @@ async function proposeFrom(scenario: Scenario) {
     git(target, "commit", "-qm", "seed the target plan");
     git(target, "push", "-q", "origin", "HEAD:main");
     git(root, "clone", "-q", bare, join(state, "repos", "target"));
-    const calls = join(cli, "calls.ndjson"), ghLog = join(cli, "gh.ndjson"), codexBin = join(cli, "codex");
+    const calls = join(cli, "calls.ndjson"), codexBin = join(cli, "codex");
     codexStub(codexBin, calls, scenario);
-    mkdirSync(join(cli, "bin"));
-    ghStub(join(cli, "bin", "gh"), ghLog);
+    // The shared PATH shim: records every call and answers an empty list, so nothing reaches GitHub.
+    shim = ghShim([{ when: "", stdout: "[]" }], { kind: "rmd-plan-gh" });
     writeFileSync(join(home, ".config", "remudero", "config.json"), JSON.stringify({
       claudeBin: join(cli, "no-claude-in-this-fixture"), root: state, installRoot: REPO_ROOT,
       workerProviders: { enabled: ["codex"], codexBin, codexHome, capacityCacheMs: 60_000 },
@@ -195,7 +188,7 @@ async function proposeFrom(scenario: Scenario) {
     assertTargetCarriesNoLoader(target, "before");
     const mainBefore = git(target, "rev-parse", "HEAD").trim();
     const env: NodeJS.ProcessEnv = {
-      PATH: `${join(cli, "bin")}:${process.env.PATH}`, LANG: process.env.LANG, HOME: home, TMPDIR: privateTmp,
+      PATH: `${shim.dir}:${process.env.PATH}`, LANG: process.env.LANG, HOME: home, TMPDIR: privateTmp,
       RMD_TEST_SLOT_DIR: join(privateTmp, "test-slots"), GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null",
       ...GIT_IDENTITY, NODE_V8_COVERAGE: undefined,
     };
@@ -227,7 +220,7 @@ async function proposeFrom(scenario: Scenario) {
     }
     return {
       rule15,
-      evidence, outcome, published, calls: read<StubCall>(calls), gh: read<string[]>(ghLog),
+      evidence, outcome, published, calls: read<StubCall>(calls), gh: shim.calls(),
       ledger: read<LedgerRow>(join(state, "state", "ledger.ndjson")), stdout: run.stdout,
       pushed, mainAfter: git(root, "--git-dir", bare, "rev-parse", "main").trim(), mainBefore,
       /** What each pushed branch changes against main, read while the fixture still exists. */
@@ -239,6 +232,7 @@ async function proposeFrom(scenario: Scenario) {
     };
   } finally {
     rmSync(root, { recursive: true, force: true });
+    if (shim) rmSync(shim.dir, { recursive: true, force: true });
   }
 }
 
@@ -314,7 +308,7 @@ test("W1-T12517 a valid plan-only proposal from a target without tsx reaches the
   const architect = assertArchitectRan(run, "valid");
   assert.equal(run.published.length, 1, `exactly one pull request creation reached the publication boundary\n${run.evidence}`);
   const [publication] = run.published as [Published];
-  assert.equal(publication.file, "gh");
+  assert.match(publication.file, /^gh$/);
   // The existing publisher: a REST pull-request creation against the TARGET's owner/repo.
   assert.deepEqual(publication.args.slice(0, 4), ["api", "--method", "POST", "repos/owner/target/pulls"]);
   assert.equal(run.pushed.length, 1, "exactly one run branch was pushed to the origin");
@@ -354,7 +348,7 @@ test("W1-T12517 an acceptance proof with no dialect prefix is refused before pub
   assert.deepEqual(run.published, [], "the publisher was never called");
   assert.deepEqual(run.pushed, [], "no branch was pushed to the origin");
   assert.equal(run.outcome.code, 1, `the verb exits non-zero\n${run.evidence}`);
-  assert.equal(run.gh.some((call) => call[0] === "pr"), false, "no gh pr call was made");
+  assert.equal(run.gh.some((call) => call.startsWith("pr ")), false, "no gh pr call was made");
   assert.equal(run.ledger.some((row) => row.step === "pr.opened"), false, "no PR was recorded");
 });
 
