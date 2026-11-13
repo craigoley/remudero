@@ -18674,12 +18674,16 @@ async function buildCatalogPlanReconcileInput(deps: CatalogPlanReconcileProducti
       if (!sources.has(path)) sources.set(path, await hostWorktreeGitAsync(target.checkoutDir, ["show", `${pin}:${path}`]));
     }
   } catch (error) {
+    // The public group remains valid; catalogOutcome carries the private failure without adding ops rows.
     void error; reportUnknown("unreadable"); return { ...publicInput, catalogOutcome: "unreadable" };
   }
   const pending: Promise<void>[] = [];
   // Observe rejection immediately, retaining the original promise for the caller's later settlement.
   const retainSettlement = (result: Promise<void>): void => {
-    pending.push(result); void result.catch(() => {});
+    pending.push(result); void result.catch(() => {
+      // The observer result is unused. pending retains the original rejection for settled()'s
+      // allSettled and failure propagation; this callback never replaces that promise.
+    });
   };
   const opsLanding = planReconcileLanding(target.checkoutDir, () => ({
     targetRepository: { owner: target.owner, repo: target.repo }, landingOwner: "measurement-cadence", log: deps.log,
@@ -18705,7 +18709,10 @@ async function buildCatalogPlanReconcileInput(deps: CatalogPlanReconcileProducti
         const result = publicInput.land?.(pub);
         retainSettlement(publicInput.settled());
         landed += result?.landed ?? pub.length; held.push(...(result?.held ?? []));
-      } } catch (error) { retainSettlement(Promise.reject(error)); }
+      } } catch (error) {
+        // Preserve the original failure for settled(); the independent ops group still gets its attempt.
+        retainSettlement(Promise.reject(error));
+      }
       if (selected.length) {
         try {
           const only = new Set(selected.map(write => write.taskId));
@@ -18726,7 +18733,10 @@ async function buildCatalogPlanReconcileInput(deps: CatalogPlanReconcileProducti
           if (inputs.length) {
             opsLanding.land(inputs); retainSettlement(opsLanding.settled()); landed += batch.length;
           }
-        } catch (error) { retainSettlement(Promise.reject(error)); }
+        } catch (error) {
+          // Preserve the original failure for settled(); already-started public work is not discarded.
+          retainSettlement(Promise.reject(error));
+        }
       }
       // Rejections remain awaited alongside the independent group; neither aborts its opportunity to land.
       return { landed, held };

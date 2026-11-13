@@ -93,6 +93,18 @@ test("W1-T12210 criterion 3: a refused ops status landing cannot suppress the in
   planReconcileCadence(input); await assert.rejects(input.settled(), /fixture landing refused/);
   assert.equal(f.calls.filter(call => call.root === f.publicRoot).length, 1); assert.equal(f.calls.filter(call => call.root === f.opsRoot).length, 1);
 });
+test("a synchronous public landing failure still attempts the independent ops group and preserves its cause", async t => {
+  const f = fixture(t), original = f.options.land;
+  f.options.land = (root, inputs, opts) => {
+    const result = original(root, inputs, opts);
+    if (root === f.publicRoot) throw new Error("public status landing refused");
+    return result;
+  };
+  const input = await buildPlanReconcileProductionInput(f.options); assert.ok(input);
+  planReconcileCadence(input); await assert.rejects(input.settled(), /public status landing refused/);
+  assert.equal(f.calls.filter(call => call.root === f.publicRoot).length, 1);
+  assert.equal(f.calls.filter(call => call.root === f.opsRoot).length, 1);
+});
 test("W1-T12210 criterion 4: an unreadable catalog is named and cannot suppress healthy public reconciliation", async t => {
   const f = fixture(t, true, true); const input = await buildPlanReconcileProductionInput(f.options); assert.ok(input);
   const report = planReconcileCadence(input); await input.settled(); assert.equal(report.drift, 10);
