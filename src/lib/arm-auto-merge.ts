@@ -571,6 +571,91 @@ function isRealArmDepsObject(deps: unknown): boolean {
 /** W1-T5284: a write or read {@link ArmDeps} lets the async driver await when `A` is true. */
 type MaybeAsync<T, A extends boolean> = A extends true ? T | Promise<T> : T;
 
+type MergeDrainOwner = { admits: () => boolean; log: (step: string, extra: Record<string, unknown>) => void };
+export interface DirectMergeOperation {
+  pr_url: string;
+  head_sha?: string;
+  phase: "preflight" | "write-submitted" | "write-unknown";
+  admitted_at_ms: number;
+  outcome?: string;
+  reason?: string;
+  cancelled?: true;
+  settled: Promise<void>;
+}
+let mergeDrainOwner: MergeDrainOwner | undefined;
+const directMerges = new Set<DirectMergeOperation>();
+const uncertainDirectMerges = new Set<string>();
+const mergeAttempts = new WeakMap<object, DirectMergeOperation>();
+
+export function installDirectMergeDrainOwner(owner: MergeDrainOwner): () => void {
+  mergeDrainOwner = owner;
+  return () => { if (mergeDrainOwner === owner) mergeDrainOwner = undefined; };
+}
+
+export function directMergeInventory(): DirectMergeOperation[] { return [...directMerges]; }
+
+// The sweep wrapper never owns this promise: only the original attempt can settle it (W1-T11503).
+async function trackDirectMergeAttempt<D extends Pick<ArmDeps<true>, "mergeDirect">>(
+  prUrl: string, deps: D, start: (owned: D) => Promise<ArmAttemptResult>,
+): Promise<ArmAttemptResult> {
+  let settle!: () => void;
+  const operation: DirectMergeOperation = { pr_url: prUrl, phase: "preflight", admitted_at_ms: systemClock.now(),
+    settled: new Promise<void>(resolve => { settle = resolve; }) };
+  const owner = mergeDrainOwner;
+  const log = owner?.log ?? (() => {});
+  const owned: D = { ...deps, mergeDirect: async (url: string) => {
+    if (uncertainDirectMerges.has(url)) {
+      const merged = await (deps as Partial<ArmDeps<true>>).isMerged?.(url);
+      if (merged !== false) throw new Error("previous direct merge outcome requires reconciliation");
+      uncertainDirectMerges.delete(url);
+    }
+    const head = (deps as Partial<ArmDeps<true>>).headSha;
+    if (owner && head && operation.head_sha) {
+      const fresh = await head(url);
+      if (fresh !== operation.head_sha) throw new Error(`head moved from ${operation.head_sha} to ${fresh}`);
+    }
+    if (operation.cancelled || owner?.admits() === false) throw new Error("restart latched before direct merge submission");
+    operation.phase = "write-submitted";
+    await deps.mergeDirect(url);
+  } };
+  mergeAttempts.set(owned, operation);
+  try {
+    const result = await start(owned);
+    operation.outcome = result.outcome;
+    operation.reason = result.error ?? result.directMergePreflight?.error ?? result.directMergePreflight?.reason;
+    return result;
+  } catch (error) {
+    operation.outcome = operation.phase === "preflight" ? "preflight-error" : "write-unknown";
+    operation.reason = String((error as Error)?.message ?? error);
+    if (operation.outcome === "write-unknown") uncertainDirectMerges.add(prUrl);
+    throw error;
+  } finally {
+    try {
+      if (directMerges.delete(operation)) log("daemon.direct_merge.settled", {
+        pr_url: prUrl, head_sha: operation.head_sha, phase: operation.phase,
+        outcome: operation.outcome, reason: operation.reason,
+      });
+    } finally {
+      mergeAttempts.delete(owned);
+      settle();
+    }
+  }
+}
+
+function admitDirectMerge(deps: object, prUrl: string, head?: string): ArmAttemptResult | undefined {
+  const operation = mergeAttempts.get(deps);
+  if (!operation) return undefined;
+  if (directMerges.has(operation)) return undefined;
+  const reason = mergeDrainOwner?.admits() === false ? "restart latched: direct merge admission closed"
+    : [...directMerges].some(item => item.pr_url === prUrl) ? "direct merge still unresolved; reconcile before retry" : undefined;
+  if (reason) return { outcome: "direct-merge-preflight-refused", error: reason };
+  operation.head_sha = head;
+  directMerges.add(operation);
+  const log = mergeDrainOwner?.log ?? (() => {});
+  log("daemon.direct_merge.admitted", { pr_url: prUrl, head_sha: head, phase: operation.phase });
+  return undefined;
+}
+
 /** Injectable side effects for {@link armAutoMerge} — exported so a behavioral test drives EVERY
  *  branch (incl. the clean-status direct-merge fallback) with fakes; the real defaults are the
  *  same gh calls the function always made. W1-T5284: `ArmDeps<true>` is the same seam whose gh
@@ -1130,7 +1215,7 @@ export async function armAutoMergeDetailedAsync(
   isDraft?: boolean,
 ): Promise<ArmAttemptResult> {
   requireExplicitArmSeam("armAutoMergeDetailedAsync", !isRealArmDepsObject(deps));
-  return runStepsAsync(armDetailedSteps(prUrl, taskId, deps, isDraft));
+  return trackDirectMergeAttempt(prUrl, deps, owned => runStepsAsync(armDetailedSteps(prUrl, taskId, owned, isDraft)));
 }
 
 function* armDetailedSteps(
@@ -1190,6 +1275,8 @@ function* directMergePreflightSteps(
   judged?: MergedRatchetJudgement,
   rereads = 0,
 ): Steps<DirectMergePreflightDecision> {
+  const refused = admitDirectMerge(deps, prUrl, priorHeadSha);
+  if (refused) return { proceed: false, result: refused };
   if (!deps.readMergeFacts || !deps.updateBranch) return { proceed: true };
 
   let observedHead = priorHeadSha;
@@ -1221,6 +1308,8 @@ function* directMergePreflightSteps(
     }
   }
   let facts: ArmMergeFacts;
+  const operation = mergeAttempts.get(deps);
+  if (operation) operation.head_sha = observedHead;
   let readError: string | undefined;
   try {
     facts = yield* step(() => deps.readMergeFacts!(prUrl));
@@ -1576,7 +1665,7 @@ export function attemptArmAsync(
   priorHeadSha?: string,
   isDraft?: boolean,
 ): Promise<ArmAttemptResult> {
-  return runStepsAsync(attemptArmSteps(prUrl, deps, priorHeadSha, isDraft));
+  return trackDirectMergeAttempt(prUrl, deps, owned => runStepsAsync(attemptArmSteps(prUrl, owned, priorHeadSha, isDraft)));
 }
 
 function* attemptArmSteps(
@@ -1945,6 +2034,8 @@ function* attemptPlanPrMergeSteps(
   priorHeadSha?: string,
 ): Steps<ArmAttemptResult> {
   let facts: ArmMergeFacts = {};
+  const refused = admitDirectMerge(deps, prUrl, priorHeadSha);
+  if (refused) return refused;
   let error: string | undefined;
   if (!deps.readMergeFacts || !deps.updateBranch) {
     error = "no merge-facts or update-branch seam is wired, so a behind head could not be refreshed";
@@ -1981,9 +2072,12 @@ function* attemptPlanPrMergeSteps(
   if (error === undefined && !unknown && (facts.mergeableState === "clean" || facts.mergeableState === "behind" ||
     facts.mergeableState === "unstable" || facts.mergeableState === "has_hooks" || greenBlocked)) {
     const fresh = facts;
+    const preflightDeps = { ...deps, readMergeFacts: () => fresh, readPlanTouch: () => planTouch };
+    const operation = mergeAttempts.get(deps);
+    if (operation) mergeAttempts.set(preflightDeps, operation);
     const preflight = yield* directMergePreflightSteps(
       prUrl,
-      { ...deps, readMergeFacts: () => fresh, readPlanTouch: () => planTouch },
+      preflightDeps,
       priorHeadSha,
     );
     if (!preflight.proceed) return preflight.result;
@@ -2100,7 +2194,7 @@ export function armAutoMergeAtOpen(
   isDraft = false,
 ): ArmOutcome {
   requireExplicitArmSeam("armAutoMergeAtOpen", !isRealArmDepsObject(deps));
-  return runStepsSync(armAtOpenSteps(prUrl, deps, irreversible, isDraft));
+  return runStepsSync(armAtOpenSteps(prUrl, deps, irreversible, isDraft)).outcome;
 }
 
 /** W1-T5284 — {@link armAutoMergeAtOpen} for runTaskBody, which runs on the daemon loop: the same
@@ -2113,7 +2207,8 @@ export async function armAutoMergeAtOpenAsync(
   isDraft = false,
 ): Promise<ArmOutcome> {
   requireExplicitArmSeam("armAutoMergeAtOpenAsync", !isRealArmDepsObject(deps));
-  return runStepsAsync(armAtOpenSteps(prUrl, deps, irreversible, isDraft));
+  return (await trackDirectMergeAttempt(prUrl, deps,
+    owned => runStepsAsync(armAtOpenSteps(prUrl, owned, irreversible, isDraft)))).outcome;
 }
 
 function* armAtOpenSteps(
@@ -2122,15 +2217,15 @@ function* armAtOpenSteps(
     Partial<Pick<ArmDeps<true>, "headSha" | "ledgerLines" | "readMergeFacts" | "updateBranch" | "readPlanTouch" | "readPlanMergeSafety" | "readOwnFiles" | "readMergedRatchets" | "armStanding" | "sleep" | "sleepSync" | "mergeQueue" | "enqueue" | "stackPrerequisite" | "closingReferences" | "contributorAdmission">>,
   irreversible: boolean,
   isDraft: boolean,
-): Steps<ArmOutcome> {
+): Steps<ArmAttemptResult> {
   if (irreversible) {
     deps.say(
       `automerge.irreversible_refused (W1-T919/W1-T947): diff classified irreversible — refusing to ` +
         `arm at open; an operator must review and merge this manually: ${prUrl}`,
     );
-    return "irreversible-refused";
+    return { outcome: "irreversible-refused" };
   }
-  return (yield* attemptArmSteps(prUrl, deps, undefined, isDraft)).outcome;
+  return yield* attemptArmSteps(prUrl, deps, undefined, isDraft);
 }
 
 /**

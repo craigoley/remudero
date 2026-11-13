@@ -105,6 +105,8 @@ const EXEMPT: Readonly<Record<string, string>> = {
   "refusal_amendment.drafted": A_LANE_RUN_ID,
   "plan_repair.dispatch": A_LANE_RUN_ID,
   // The daemon and drain.
+  "daemon.direct_merge.admitted": A_LANE_RUN_ID,
+  "daemon.direct_merge.settled": A_LANE_RUN_ID,
   "daemon.block.awaiting_merge": A_LANE_RUN_ID,
   "daemon.block.independent_failure": A_LANE_RUN_ID,
   "daemon.block.parked": A_LANE_RUN_ID,
@@ -244,10 +246,11 @@ function srcTree(dir: string, out = new Map<string, string>()): Map<string, stri
 let scanned: Map<string, Set<string>> | undefined;
 const srcPricedSteps = (): Map<string, Set<string>> => (scanned ??= stepsWrittenWithAPrice(srcTree("src")));
 
-test("test/every-priced-ledger-step-is-in-the-config-garden-read.test.ts: every ledger step written with pr_url or cost_usd is in CONFIG_GARDEN_LEDGER_STEPS or a reasoned exemption", () => {
+test("test/every-priced-ledger-step-is-in-the-config-garden-read.test.ts: every ledger step written with pr_url or cost_usd is in CONFIG_GARDEN_LEDGER_STEPS or a reasoned exemption (W1-T11503 criterion 3)", () => {
   const found = srcPricedSteps();
   // Positive control: the known members, and one step per idiom, so a scanner that finds nothing fails.
-  for (const known of ["pr.opened", "implement.done", "cost.anomaly", "verdict.merged", "refusal_amendment.drafted"]) {
+  for (const known of ["pr.opened", "implement.done", "cost.anomaly", "verdict.merged", "refusal_amendment.drafted",
+    "daemon.direct_merge.admitted", "daemon.direct_merge.settled"]) {
     assert.ok(found.has(known), `the census reads ${known} out of src`);
   }
   const listed = new Set(CONFIG_GARDEN_LEDGER_STEPS);

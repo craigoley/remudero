@@ -1,4 +1,5 @@
 import { settledSpansByClass } from "./cost-anomaly.js";
+import { directMergeInventory, installDirectMergeDrainOwner } from "./arm-auto-merge.js";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 import type { LedgerRecord } from "./retro.js";
@@ -4923,6 +4924,8 @@ export async function runDaemon(
   };
   // Installed once `children` exists (below, beside the boot adoption): the lane reader above reads it.
   let uninstallReviewLaneTransition: () => void = () => {};
+  let mergeAdmissionClosed = false;
+  const uninstallMergeDrainOwner = installDirectMergeDrainOwner({ admits: () => !mergeAdmissionClosed, log });
   /** The lanes new admissions may fill: the governor's target under enforce, otherwise unbounded. */
   const enforcedLaneTarget = (inFlight: number, wipBound: number | undefined): number => {
     if (!laneGovernorPorts) return Infinity;
@@ -4996,6 +4999,7 @@ export async function runDaemon(
     for (const stop of [
       () => prActionPumpRef.stop(), () => improvementActionPumpRef.stop(), () => plainBackfill?.stop(), () => recommendationBackfill?.stop(), () => fleetLane?.stop(),
       () => inboxResponder?.stop(), () => gardenerRef.stop(), () => livenessPulse?.stop(), () => uninstallReviewLaneTransition(),
+      () => uninstallMergeDrainOwner(),
     ]) {
       try { stop(); }
       catch (reason) { /* Retained in the cleanup AggregateError, never converted into successful closure. */ failures.push(reason); }
@@ -5355,10 +5359,12 @@ export async function runDaemon(
   // Settlement is observed at the latch, not reconstructed from whatever remains at exit.
   const observeDrain = (startedAtMs: number, latchAtMs?: number) => {
     const items = new Map<Promise<void>, WaitedOn>();
-    const watch = ({ settled, ...item }: RestartDrainInventoryEntry): void => {
+    const watch = (entry: RestartDrainInventoryEntry): void => {
+      const { settled, ...item } = entry;
       if (items.has(settled)) {
         const row = items.get(settled)!;
         row.phase = item.phase;
+        if (entry.what === "merge") { row.outcome = entry.outcome; row.reason = entry.reason; }
         delete row.released;
         return;
       }
@@ -5366,7 +5372,11 @@ export async function runDaemon(
         admitted: item.admitted_at_ms <= latchAtMs ? "before_latch" as const : "after_latch" as const,
       }) };
       items.set(settled, row);
-      void settled.then(() => { row.settled_after_ms = Math.max(0, daemonClock.now() - startedAtMs); });
+      void settled.then(() => {
+        row.settled_after_ms = Math.max(0, daemonClock.now() - startedAtMs);
+        row.phase = entry.phase;
+        if (entry.what === "merge") { row.outcome = entry.outcome; row.reason = entry.reason; }
+      });
     };
     const snapshot = (completed = false): WaitedOn[] => {
       const waiting = completed ? new Set(restartDrainInventory().map(item => item.settled)) : undefined;
@@ -5410,6 +5420,7 @@ export async function runDaemon(
   };
   const latchedAdmission = (): RestartAdmission | undefined => restartWindow && restartAdmission;
   const beginLatchDrain = (latchAtMs: number): void => {
+    mergeAdmissionClosed = true;
     if (latchDrain?.latchAtMs === latchAtMs) return;
     const lengths = measuredReviewLength();
     restartWindow = { deadlineMs: latchAtMs + sweepWallClockBoundMs, held: 0, latchAtMs,
@@ -5419,7 +5430,7 @@ export async function runDaemon(
     const observation = observeDrain(latchAtMs, latchAtMs);
     for (const item of restartDrainInventory()) observation.watch(item);
     if (freshnessDecidedAtMs !== undefined) freshnessPhases.decision_to_latch = Math.max(0, latchAtMs - freshnessDecidedAtMs);
-    latchDrain = { latchAtMs, reviews, detached, observation, started: reviews.size > 0 || detached > 0 };
+    latchDrain = { latchAtMs, reviews, detached, observation, started: reviews.size > 0 || detached > 0 || directMergeInventory().length > 0 };
     if (latchDrain.started) log("daemon.freshness_drain.started", { started_at: "latch", latched_at: fixedClock(latchAtMs).iso(),
       detached_sweep_actions: detached, in_flight_reviews: reviews.size, waited_on: observation.snapshot() });
   };
@@ -5476,7 +5487,7 @@ export async function runDaemon(
     const reviewsAtExit = inFlightReviewRunsNow();
     const reviewsAtFreshness = reviewsAtExit.length;
     const latchStarted = fromLatch?.started === true ? fromLatch : undefined;
-    if (detachedAtFreshness > 0 || reviewsAtFreshness > 0 || latchStarted || hasChildrenLeft || pass?.overlapped) {
+    if (detachedAtFreshness > 0 || reviewsAtFreshness > 0 || directMergeInventory().length > 0 || latchStarted || hasChildrenLeft || pass?.overlapped) {
       const drainStartedAtMs = latchStarted ? latchStarted.latchAtMs : exitAtMs;
       const latchFields = fromLatch ? { started_at: fromLatch.started ? "latch" : "exit", latched_at: fixedClock(fromLatch.latchAtMs).iso() }
         : stepPrefix === "daemon.freshness_drain" ? { started_at: "exit" } : {};
@@ -5530,7 +5541,7 @@ export async function runDaemon(
       try {
         [abandoned, abandonedReviews] = await Promise.all([
           drainDetached(detachedBoundMs),
-          drainInFlightReviews({ boundMs: reviewBoundMs, onWait: observation.watch,
+          drainInFlightReviews({ boundMs: reviewBoundMs, onWait: observation.watch, includeDirectMerges: true,
             closeRefills: pass?.overlapped !== true && placements.review?.placement !== "child" }),
           pass?.overlapped ? pass.settled : undefined,
         ]);
@@ -5539,12 +5550,12 @@ export async function runDaemon(
         reviewPasses = stopped?.passes ?? 0;
         reviewPassesHeld = stopped?.held ?? 0;
       }
-      if (drainReviewClock || (pass?.overlapped && (inFlightReviewCount() > 0 || detachedSweepActionCount() > 0))) {
+      if (drainReviewClock || (pass?.overlapped && (inFlightReviewCount() > 0 || detachedSweepActionCount() > 0 || directMergeInventory().length > 0))) {
         watch(inFlightReviewRunsNow());
         const boundMs = Math.max(0, deadlineMs - daemonClock.now());
         [abandoned, abandonedReviews] = await Promise.all([
           pass?.overlapped ? drainDetached(boundMs) : Promise.resolve(abandoned),
-          drainInFlightReviews({ boundMs, onWait: observation.watch, closeRefills: placements.review?.placement !== "child" }),
+          drainInFlightReviews({ boundMs, onWait: observation.watch, includeDirectMerges: true, closeRefills: placements.review?.placement !== "child" }),
         ]);
       }
       for (const action of abandoned) {
@@ -5566,6 +5577,7 @@ export async function runDaemon(
         abandoned_detached_sweep_actions: abandoned.length,
         in_flight_reviews: latchStarted ? latchStarted.reviews.size : reviewsAtFreshness,
         abandoned_in_flight_reviews: abandonedReviews,
+        unresolved_direct_merges: directMergeInventory().length,
         detached_children_left_running: childWorkLeftRunning(),
         detached_work_placement: Object.fromEntries(Object.entries(placements).map(([kind, p]) => [kind, p.placement])),
         review_passes: reviewPasses,
@@ -5600,6 +5612,7 @@ export async function runDaemon(
     dispatchLatchAtMs?: number,
     advanceSinceMs?: number,
   ): Promise<FreshnessPass> => {
+    mergeAdmissionClosed = true;
     // Install BEFORE the loop stops for restart, never after, so the relaunched process inherits deps
     // matching the new sha rather than the stale tree this process is still running (W1-T151).
     if (freshness.installNeeded) {

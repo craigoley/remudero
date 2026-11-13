@@ -53,6 +53,8 @@ export { failingTestFilesFromCiFailures } from "./base-reproduction.js";
 import { proofTargetPaths } from "./task-linter.js";
 import { parse as parseYaml } from "yaml";
 import {
+  directMergeInventory,
+  type DirectMergeOperation,
   armAutoMergeDetailedAsync,
   armEvidenceFingerprint,
   armOutcomeReason,
@@ -17798,13 +17800,23 @@ export function currentReviewSignal(): AbortSignal | undefined {
 /** W1-T10057: a read-only view of the existing wait registries, not another owner of work.
  * `settled` is an internal identity/settlement handle; ledger writers must omit it. */
 export interface RestartDrainInventoryEntry {
-  what: "review" | "detached";
+  what: "review" | "detached" | "merge";
   kind: string;
   task_id?: string;
   pr?: number;
+  head_sha?: string;
+  pr_url?: string;
+  outcome?: string;
+  reason?: string;
   phase: string;
   admitted_at_ms: number;
   settled: Promise<void>;
+}
+export function directMergeRestartItem(operation: DirectMergeOperation): RestartDrainInventoryEntry {
+  return { what: "merge", kind: "direct-merge", pr: Number(operation.pr_url.match(/\/pull\/(\d+)/)?.[1]),
+    pr_url: operation.pr_url, head_sha: operation.head_sha, admitted_at_ms: operation.admitted_at_ms,
+    settled: operation.settled, get phase() { return operation.phase; },
+    get outcome() { return operation.outcome; }, get reason() { return operation.reason; } };
 }
 function detachedRestartItem(settled: Promise<void>, action: DetachedSweepActionRegistration): RestartDrainInventoryEntry {
   return { what: "detached", kind: action.actionKind, task_id: action.taskId,
@@ -17819,7 +17831,7 @@ function reviewRestartItem(settled: Promise<void>, review: ReviewRegistration): 
 export function restartDrainInventory(): RestartDrainInventoryEntry[] {
   return [...inFlightReviewRuns].map(([work, review]) => reviewRestartItem(work, review)).concat(
     [...detachedSweepActions].filter(([, action]) => isRestartInterruptible(action))
-      .map(([work, action]) => detachedRestartItem(work, action)));
+      .map(([work, action]) => detachedRestartItem(work, action)), directMergeInventory().map(directMergeRestartItem));
 }
 
 /** Hand one review attempt to {@link inFlightReviewRuns}; returns `work` unchanged for the caller to await. */
@@ -17872,25 +17884,35 @@ export function inFlightReviewRunsNow(): Promise<void>[] {
  *  awaited, so the drain cannot be extended by new work. Returns how many were still running at the bound. */
 export async function drainInFlightReviews(opts: {
   boundMs: number; onWait?: (item: RestartDrainInventoryEntry) => void;
+  /** W1-T11503: direct merges share the existing restart wait and its measured bound. */
+  includeDirectMerges?: boolean;
   /** W1-T9114: `false` when the next review admitted is a run child, which the restart does not wait for. Default: close. */
   closeRefills?: boolean;
 }): Promise<number> {
   // A drain is an exit: a freed lane must not refill behind it. The next light pass reopens refills.
   if (opts.closeRefills !== false) lightPassRefillsClosed = true;
   const running = [...inFlightReviewRuns.keys()];
+  const merges = opts.includeDirectMerges ? directMergeInventory() : [];
   for (const work of running) opts.onWait?.(reviewRestartItem(work, inFlightReviewRuns.get(work)!));
-  if (running.length === 0) return 0;
+  for (const operation of merges) opts.onWait?.(directMergeRestartItem(operation));
+  if (running.length === 0 && merges.length === 0) return 0;
   const settled = new Set<Promise<void>>();
   for (const review of running) void review.then(() => settled.add(review));
   let timer: ReturnType<typeof setTimeout> | undefined;
   const bound = new Promise<void>((resolve) => { timer = setTimeout(resolve, Math.max(0, opts.boundMs)); });
   try {
-    await Promise.race([Promise.all(running), bound]);
+    await Promise.race([Promise.all([...running, ...merges.map(operation => operation.settled)]), bound]);
   } finally {
     clearTimeout(timer);
   }
   const abandoned = running.filter((review) => !settled.has(review));
   for (const review of abandoned) inFlightReviewStops.get(review)?.abort();
+  const unresolved = new Set(directMergeInventory());
+  for (const operation of merges.filter(operation => unresolved.has(operation))) {
+    if (operation.phase === "preflight") operation.cancelled = true;
+    else operation.phase = "write-unknown";
+    opts.onWait?.(directMergeRestartItem(operation));
+  }
   return abandoned.length;
 }
 
