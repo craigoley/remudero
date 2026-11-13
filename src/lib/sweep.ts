@@ -15295,7 +15295,7 @@ export interface SweepDeps {
    *  production full-sweep wrapper. The
    *  dispatch is still CALLED and still writes its `acted: true` row before returning, so the dedup
    *  seed is untouched — only the `await` moves into {@link drainDetachedSweepActions}. NOT AN
-   *  ADMISSION CHANGE. */
+   *  ADMISSION CHANGE. A freshness early end awaits this pass's begun fixes before returning. */
   detachFixWait?: boolean;
   /** W1-T5491: the light pass owns this review promise and releases its reservation on settlement. */
   detachReviewWait?: (work: Promise<void>) => void;
@@ -19414,6 +19414,12 @@ export async function runSweep(
   sweepDeps: SweepDeps,
   policy: SweepPolicy = DEFAULT_SWEEP_POLICY,
 ): Promise<SweepSummary> {
+  const detachedFixes: Promise<unknown>[] = [];
+  const detachPassFix: typeof detachSweepAction = (work, action) => detachSweepAction((onPhase) => {
+    const started = typeof work === "function" ? work(onPhase) : work;
+    detachedFixes.push(started);
+    return started;
+  }, action);
   // W1-T12237: a decided restart ends the pass before any stage or pull request it has not begun.
   const endsForRestart = (stage: string, notVisited = openPrs.length): boolean => {
     if (sweepDeps.continueReviewAdmissions?.restartDecided?.() !== true) return false;
@@ -20937,6 +20943,7 @@ export async function runSweep(
     }
     // Release this pass's claim (its capacity too), then let the registry hold the same key at once: no await between the two.
     claim.release();
+    detachedFixes.push(hosted.settled);
     void adoptChildWork({
       runId: hosted.runId, taskId: escalationTaskIdFor(pr),
       work: { kind: "fix-dispatch", prNumber: pr.prNumber, headSha: pr.headSha, fixKey: claim.fixKey, ...(dedupeKey === undefined ? {} : { inputs: { dedupeKey } }) },
@@ -20951,7 +20958,7 @@ export async function runSweep(
   async function detachFixDispatch(pr: OpenPrView, work: (onPhase: DetachedFixPhaseObserver) => Promise<unknown>, claim: DetachedFixClaim,
     dedupeKey?: string, evidence?: FixDispatchEvidence): Promise<void> {
     if (evidence !== undefined && await hostFixDispatch(pr, evidence, claim, dedupeKey)) return;
-    detachSweepAction(
+    detachPassFix(
       (onPhase) => work(onPhase).catch((e: unknown) => appendLine(deps.ledgerPath, {
         run_id: deps.runId,
         task_id: pr.taskId ?? "SWEEP",
@@ -22118,7 +22125,7 @@ export async function runSweep(
               appendLine(deps.ledgerPath, { ...row, step: result.outcome === "refused" ? "sweep.plan_round.refused" : "sweep.plan_round.pushed", ...result });
               repair.reason = `plan-scoped round ${result.outcome}${result.reason ? `: ${result.reason}` : ""}`;
             });
-            if (deps.detachFixWait) detachSweepAction(work, { actionKind: "fix-dispatch", taskId: escalationTaskIdFor(pr),
+            if (deps.detachFixWait) detachPassFix(work, { actionKind: "fix-dispatch", taskId: escalationTaskIdFor(pr),
               fixKey: claimed.fixKey, release: claimed.release, abandon: claimed.abandon });
             else await work;
           }
@@ -24128,7 +24135,7 @@ export async function runSweep(
                 const dispatchPlanOnlyRepair = deps.dispatchPlanOnlyRepair;
                 if (progressDecision?.verdict === "change-approach") planRepairEvidence.progressApproach = progressDecision.approach;
                 if (deps.detachFixWait) {
-                  detachSweepAction(
+                  detachPassFix(
                     fixClaim.run(() => dispatchPlanOnlyRepair(pr, planRepairEvidence)),
                     // Shares "fix-dispatch"'s kind, deliberately: a plan-shard repair and an
                     // ordinary body repair must never race for the SAME task's detached slot.
@@ -24903,6 +24910,9 @@ export async function runSweep(
       contradictoryMemory.set(`${deps.ledgerPath}@${contradictoryCheckpoint.key}`, contradictoryCheckpoint);
     }
   }
+  if (walkEndedAt === undefined && endsForRestart("walk", 0)) walkEndedAt = walkOrder.length;
+  // W1-T12237: finish this pass's begun fixes before its early settlement, including detached CI waits.
+  if (walkEndedAt !== undefined) await Promise.allSettled(detachedFixes);
   await refreshAdmission.run((row) => appendLine(deps.ledgerPath, row), deps.runId);
   for (const finalize of admissionFinalizations) await finalize();
 

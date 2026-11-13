@@ -8,7 +8,8 @@ import { setImmediate as flush } from "node:timers/promises";
 import { runDaemon, type DaemonDeps, type ReviewAdmissionGate } from "#src/lib/daemon.js";
 import { DEPLOY_RESTART_SCORE_THRESHOLD, FRESHNESS_COALESCE_WINDOW_MS } from "#src/lib/deploy-judge.js";
 import { loadPlan } from "#src/lib/plan.js";
-import { runSweep, type OpenPrView, type SweepDeps } from "#src/lib/sweep.js";
+import { detachSweepAction, drainDetachedSweepActions, installDetachedWorkHost, runSweep, withFullSweepRepairAdmission,
+  type OpenPrView, type SweepDeps } from "#src/lib/sweep.js";
 import { readLedgerLines } from "#src/lib/status.js";
 import { writeLedger } from "#test/helpers/ledger-fixture.js";
 
@@ -266,6 +267,66 @@ test("W1-T12237 criterion 5: an arm begun for the pull request in hand completes
     "the sweep settled before the exit");
   assert.equal(restartRow(h.rows)?.pre_exit_pass, "awaited_in_flight");
 });
+
+for (const [rejects, prCount, hosted] of [[false, 2, false], [true, 2, false], [false, 1, false], [false, 2, true]] as const) {
+  test(`W1-T12237 criterion 5: a production detached fix ${rejects ? "rejects" : "completes"} before an early-ended sweep of ${prCount} PRs settles (child: ${hosted})`, async (t) => {
+    const fix = deferred();
+    const unrelated = deferred();
+    const boundary = deferred();
+    const rows: Row[] = [];
+    const fixes: number[] = [];
+    let decided = false;
+    let fixDone = false;
+    let settled = false;
+    detachSweepAction(unrelated.promise, { actionKind: "fix-dispatch", taskId: "another-pass" });
+    const deps = sweepDeps((step, extra) => rows.push({ step, extra }), () => assert.fail("no arm after the restart"));
+    const red = { ...pr(1), reviewState: "failure" as const,
+      unmetCriteria: [{ claim: "repair", proof: "unit test: repair", met: false, reason: "not done", proof_exec: "executed_fail" as const }] };
+    const startFix: SweepDeps["dispatchFix"] = async (open, _evidence, onPhase) => {
+      fixes.push(open.prNumber);
+      decided = true;
+      onPhase?.("ci-wait");
+      await fix.promise;
+      fixDone = true;
+      if (rejects) throw new Error("fixture dispatch failed");
+    };
+    if (hosted) installDetachedWorkHost({
+      hosts: new Set(["fix-dispatch"]), mode: () => "on", spawnReview: async () => undefined,
+      spawnFix: async () => ({ runId: "w1-t12237-fix-child", settled: Promise.resolve(startFix(red, { unmetCriteria: red.unmetCriteria })) }),
+    });
+    const pass = runSweep([red, pr(2)].slice(0, prCount), withFullSweepRepairAdmission({
+      ...deps,
+      readActiveWorkerCount: () => 0,
+      dispatchFix: hosted ? () => assert.fail("a hosted fix must run in its child") : startFix,
+      continueReviewAdmissions: Object.assign(() => true, { restartDecided: () => {
+        if (decided) boundary.resolve();
+        return decided;
+      } }),
+    })).then((summary) => { settled = true; return summary; });
+    t.after(async () => {
+      if (hosted) installDetachedWorkHost(undefined);
+      fix.resolve();
+      unrelated.resolve();
+      await pass;
+      await drainDetachedSweepActions();
+    });
+    await boundary.promise;
+    await flush();
+    assert.deepEqual(fixes, [1], "the production wrapper dispatched the pull request in hand");
+    assert.equal(fixDone, false, "the dispatch is still pending even after it entered CI wait");
+    assert.equal(settled, false, "an early-ended pass must await its own begun fix, before the daemon drain");
+    fix.resolve();
+    const summary = await pass;
+    assert.equal(fixDone, true, "the dispatch completed before sweep settlement");
+    assert.equal(summary.actionsTaken, 1, "the later pull request was never acted on");
+    const ledger = readLedgerLines(deps.ledgerPath);
+    assert.deepEqual(ledger.filter(({ step }) => step === "sweep.disposed").map((row) => row.pr_number), [1]);
+    assert.equal(ledger.some(({ step }) => step === "sweep.fix.dispatch_failed"), rejects,
+      "a rejected detached fix keeps its failure evidence");
+    assert.deepEqual(rows.filter(({ step }) => step === "sweep.ended_early").map(({ extra }) => extra),
+      [{ reason: "restart_decided", stage: "walk", prs_not_visited: prCount - 1 }]);
+  });
+}
 
 test("W1-T12237 criterion 7: a sweep that ended early writes one row and the restart row says so", async (t) => {
   const h = await armInHand(t);
