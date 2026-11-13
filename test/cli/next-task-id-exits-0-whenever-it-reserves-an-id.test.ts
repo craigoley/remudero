@@ -13,38 +13,28 @@ import { execFileSync } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
 
 import { fixedClock } from "#src/lib/clock.js";
 import { gateGardenSpec, loadGateProbes } from "#src/lib/gate-gardener.js";
 import type { GardenCheckout } from "#src/lib/gardener.js";
 import type { RemoteRefReserver, RemoteReserveOutcome } from "#src/lib/task-id-reservation.js";
 import { nextTaskIdCommand } from "#src/run-task.js";
-import { gitRepo } from "#test/helpers/git-repo.js";
+import { gitRepo, originWithClone } from "#test/helpers/git-repo.js";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
-const ROOT = fileURLToPath(new URL("../..", import.meta.url));
 const BRANCH = "run-unfiled-1791072000000";
 
-/** A checkout whose plan says W1-T5 while origin/main already says W1-T9. */
-function laggingCheckout(): string {
-  const origin = gitRepo({ bare: true, kind: "t12453-origin" });
-  const work = gitRepo({ kind: "t12453-work" });
-  mkdirSync(join(work.dir, "plan"), { recursive: true });
-  writeFileSync(join(work.dir, "plan", "tasks.yaml"), "- id: W1-T5\n  title: seed\n");
-  work.git("add", "plan/tasks.yaml");
-  work.git("commit", "--quiet", "-m", "seed plan");
-  work.addRemote("origin", origin.dir);
-  work.git("push", "--quiet", "origin", "main");
-  const behind = gitRepo({ cloneFrom: origin.dir, kind: "t12453-behind" });
-  writeFileSync(join(work.dir, "plan", "tasks.yaml"), "- id: W1-T9\n  title: newer\n");
-  work.git("add", "plan/tasks.yaml");
-  work.git("commit", "--quiet", "-m", "advance plan");
-  work.git("push", "--quiet", "origin", "main");
-  behind.git("fetch", "--quiet", "origin", "main");
-  return behind.dir;
-}
-
-const CHECKOUT = laggingCheckout();
+// The checkout's plan says W1-T5 while origin/main already says W1-T9.
+const { origin: ORIGIN, clone: BEHIND } = originWithClone(join(gitRepo({ kind: "t12453-behind", seedCommit: false }).dir, "clone"), {
+  seed: { "plan/tasks.yaml": "- id: W1-T5\n  title: seed\n" },
+});
+const AHEAD = gitRepo({ cloneFrom: ORIGIN.dir, kind: "t12453-ahead" });
+writeFileSync(join(AHEAD.dir, "plan", "tasks.yaml"), "- id: W1-T9\n  title: newer\n");
+AHEAD.git("add", "plan/tasks.yaml");
+AHEAD.git("commit", "--quiet", "-m", "advance plan");
+AHEAD.git("push", "--quiet", "origin", "main");
+BEHIND.git("fetch", "--quiet", "origin", "main");
+const CHECKOUT = BEHIND.dir;
 /** No plan-destination switch here, so the mint never reads this host's own catalog. */
 const STATE_DIR = gitRepo({ kind: "t12453-state", seedCommit: false }).dir;
 /** The print-only path's namespace advisory reads origin; this fixture answers "unreadable". */
@@ -151,7 +141,7 @@ test("W1-T12453 criterion 5: the gate gardener's fallback minter gets the held i
   const workspace: GardenCheckout = { root: repo.dir, branch: BRANCH, land: () => "https://github.com/acme/remudero/pull/1", dispose: () => {} };
   const deps = { repoRoot: repo.dir, stateDir: join(repo.dir, "state"), clock: fixedClock(now), seed: 1, log: () => {}, openWorkspace: () => workspace };
   let reservations = 0;
-  const spec = gateGardenSpec(deps, await loadGateProbes(ROOT), {
+  const spec = gateGardenSpec(deps, await loadGateProbes(REPO_ROOT), {
     thresholdDays: 30,
     openOrigins: () => [],
     runSuite: (_file: string, shiftDays: number) => shiftDays < 1,
