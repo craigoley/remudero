@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 2.97
   status: queued
@@ -21,3 +21,11 @@
     The ledger step engine.build_failed carries a failure shape and landed rows in both halves of the trailing 7 days: 2 in the older half, 7 in the newer.
     No queued task and no task merged in that window cites this step, and no gardener scorecard prices it.
     The rows name no file; tracked source literals locate this step in: src/lib/engine-tree.ts. Start there.
+  risk_ruling:
+    verdict: "rule-3-low-privilege"
+    action: proceed
+    confidence: 1
+    reasons:
+      - "rule 3 (live and low-privilege): the symptom is live, 9 occurrence(s) across 7 day(s), last seen 2026-11-11T22:27:24.975Z, and the record declares no privileged path"
+    judged_at: "2026-11-13T00:41:50.687Z"
+    pin: "33265959895c34cdbaba9d1bd3fd2d8ef15f7a58fa71bbd538d4ad745bf661d0"
