@@ -1543,6 +1543,8 @@ export interface components {
       thread_id?: string | null;
       /** W1-T2302 -- the console-minted per-submission key a repeat of the same submit is recognised by. Null when none was supplied. */
       submission_key?: string | null;
+      /** W1-T11104 -- an explicit console wording correction bound to one native conversation revision. Immutable once captured; absent on every other entry. Evidence for the weekly docket, never a reply or an authority grant. */
+      console_correction?: Record<string, never> | null;
       /** Set once `rmd triage` opens a proposal PR for this entry; null until then. */
       proposal_pr: string | null;
       /** W1-T313 -- src/lib/feedback.ts's `DecisionSummary`, the plain-language decision card generated once when the entry moves to `proposed`; null until then or on a summarizer failure. */
@@ -6529,6 +6531,11 @@ export interface components {
         decline: string;
       };
       replyUnavailableReason?: string;
+      /** Advertised only by a native read that verified this conversation. Opt-in explicit wording-correction kind on the reply route; it is not a reply, clears no Action required, archives nothing and grants no authority. */
+      wordingCorrection?: {
+        kind: "wording_correction";
+        version: 1;
+      };
       details: string;
     };
     EscalationConversationRead: {
@@ -6643,6 +6650,17 @@ export interface components {
       issueUrl?: string;
       expectedRevision?: string;
       intentId?: string;
+      /** Explicit opt-in. Records the operator's wording correction as a separate feedback receipt bound to the exact native conversation revision. Requires a bound request and `correction`; never a reply, never inferred from `text`. */
+      kind?: "wording_correction";
+      /** Bounded source facts. `renderedVersion` and `renderedDigest` are operator-reported context, not a server attestation of what the browser displayed. */
+      correction?: {
+        symptom: "stale_read" | "unauthorized_read" | "missing_diagnosis" | "unit_or_time_zone" | "denominator" | "changed_recommendation" | "reply_failed" | "reply_duplicate" | "reply_lost" | "agent_ack_vs_work" | "archive_no_more_input" | "reopened_question" | "other";
+        renderedVersion: string;
+        renderedDigest?: string | null;
+        before: string;
+        after: string;
+        replayCaseIds?: (string)[];
+      };
     };
     /** One clarification the reply interpreter asks (src/lib/reply-interpreter.ts's `ClarifyingQuestion`). */
     ClarifyingQuestion: {
@@ -6671,6 +6689,10 @@ export interface components {
       };
       inputDelivery?: "recorded" | "unverified";
       work?: "not_observed";
+      /** Present only for an explicit wording correction. */
+      kind?: "wording_correction";
+      /** A wording correction appends no reply and clears no Action required. */
+      reply?: "not_recorded";
       duplicate?: boolean;
       detail?: string;
       feedback?: FeedbackEntry;
