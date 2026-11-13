@@ -2249,6 +2249,7 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
 },
   host: FixCommandHost,
 ): ReturnType<RunTaskCommandHost["runFixRung"]> {
+  opts = noEditRecoveryOptions(opts);
   /** Keep fix-rung issues within an ops task's public contract; detailed diagnostics stay host-side. */
   const fixRungEscalationForTask = (
     task: { catalog?: "public" | "ops"; title: string; acceptance?: AcceptanceCriterion[] },
@@ -5643,6 +5644,36 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
   deps.say(`fix rung: exhausted after ${strikes} strike(s) — escalated: ${issueUrl}`);
   return { outcome: "escalated", review, strikes, retriggers,
     reason: judgedStop?.judged ? `fix progress loop: ${judgedStop.loop} — ${judgedStop.reason}` : exhaustionReason, issueUrl };
+}
+
+/** Shared by the sweep's direct fix-module call and the run-task entrypoint. */
+export function noEditRecoveryOptions(opts: Parameters<RunTaskCommandHost["runFixRung"]>[0]) {
+  const original = opts.deps;
+  let pendingHead: string | undefined;
+  let recovered = false;
+  const deps: typeof original = {
+    ...original,
+    log: (step, fields) => {
+      if (step === "fix.commit_refused") {
+        pendingHead = fields?.reason === "the worker changed nothing" && fields.fix_outcome === "FIXED"
+          ? fields.head_sha as string | undefined : undefined;
+      }
+      original.log(step, fields);
+    },
+    spawn: async (args) => {
+      if (pendingHead === undefined || recovered) return original.spawn(args);
+      recovered = true;
+      original.log("fix.no_edit_recovery", { head_sha: pendingHead });
+      // The rung still owns admission, accounting, commit guards and push; only its next prompt changes.
+      return original.spawn({ ...args, prompt: `${args.prompt}\n\n` +
+        `NO_EDIT_RECOVERY: Your previous FIXED report at ${pendingHead} was refused: the worker changed nothing.\n` +
+        "This is the one recovery dispatch for that refusal. Reproduce the current failing proof or check, " +
+        "make a concrete repair within the permitted scope, and verify it. A FIXED report requires actual edits. " +
+        "If no safe repair is possible, report the observed blocker instead of claiming FIXED again. " +
+        "The harness will retry the same guarded commit; an unchanged head cannot be pushed.\n" });
+    },
+  };
+  return Object.assign(opts, { deps });
 }
 
 /**

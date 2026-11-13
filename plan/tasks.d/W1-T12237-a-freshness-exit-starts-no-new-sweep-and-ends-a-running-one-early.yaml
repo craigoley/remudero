@@ -29,6 +29,7 @@
     - test/daemon/a-restart-drain-names-what-it-waits-on.test.ts
     - test/an-unlatched-freshness-exit-skips-a-pass-that-already-ran.test.ts
     - test/a-bound-that-stops-waiting-does-not-stop-the-work.test.ts
+    - test/daemon/the-pre-exit-pass-runs-beside-the-restart-drain.test.ts
   status: queued
   attempts: 0
   acceptance:
@@ -42,7 +43,7 @@
       proof: "grep: W1-T12237 criterion 4 in test/daemon/a-freshness-exit-starts-no-new-sweep-and-ends-a-running-one-early.test.ts"
     - claim: "A merge, an arm or a fix dispatch that the sweep began for the pull request in hand completes before the sweep settles. The exit still waits for the sweep to settle and for the drain"
       proof: "grep: W1-T12237 criterion 5 in test/daemon/a-freshness-exit-starts-no-new-sweep-and-ends-a-running-one-early.test.ts"
-    - claim: "The first tick of the next daemon lifetime starts a sweep, as today"
+    - claim: "invariant:next-lifetime-sweeps The first tick of the next daemon lifetime starts a sweep, as today"
       proof: "grep: W1-T12237 criterion 6 in test/daemon/a-freshness-exit-starts-no-new-sweep-and-ends-a-running-one-early.test.ts"
     - claim: "A sweep that ended early writes one row with the count of pull requests that it did not visit, and the restart row says that the sweep ended early"
       proof: "grep: W1-T12237 criterion 7 in test/daemon/a-freshness-exit-starts-no-new-sweep-and-ends-a-running-one-early.test.ts"
@@ -106,6 +107,13 @@
       `runGatedSweep` calls that thread `sweepLiveness` and expects 3. The exit call was the third, so the
       count becomes 2. The test also asserts that the exit path calls no `runGatedSweep` and that the
       retrigger and the two daemon-owned passes are the only calls, so the liveness guard keeps its reach.
+    - W1-T9812 (merged) added test/daemon/the-pre-exit-pass-runs-beside-the-restart-drain.test.ts. Four of its
+      tests let the exit start its own pass and expect `pre_exit_pass: ran` and 2 sweeps. Under this task the exit
+      starts no pass. So those tests use a pass that is running at the exit (`awaited_in_flight`). They still prove
+      that the drain starts beside that pass and that work the pass admits keeps the latch bound. The test of an
+      exit with no dispatch latch expects `no_sweep_at_exit` and 1 sweep. The three test titles that W1-T9812
+      names as proofs do not change.
+    INVARIANT next-lifetime-sweeps: the first tick of the next daemon lifetime starts a sweep, as before this task.
     NOT IN SCOPE: the time limit of the drain, the admission rule after the restart decision, and the stages of the sweep themselves (W1-T12234 shortens the longest one).
   falsifier: |
     Call `runGatedSweep` in the exit again and criterion 1 must fail. Stop the sweep in the middle of a pull request and criterion 5 must fail. Ignore the stop answer before the first pull request and criterion 4 must fail. Restore and require all eight to pass.

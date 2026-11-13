@@ -1,0 +1,60 @@
+- id: W1-T12508
+  title: "The author preflight selects tests from main's per-test impact map when the map is fresh, and leaves the module floor to CI"
+  repo: remudero
+  depends_on:
+    - W1-T12505
+  priority: 1.3
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # moves the impact arm from shadow evidence to the author's live selection; a miss passes a run CI must fail
+  band_meaning: blast-radius
+  origin: operator-session#checking-off-the-author-path-2026-11-13
+  plan_refs:
+    - W1-T6083
+    - W1-T6107
+    - W1-T12505
+  files:
+    - scripts/preflight-author.mjs
+    - doctrine/before-you-push/preflight-before-first-push.md
+    - test/ci/the-author-preflight-selects-tests-from-a-fresh-impact-map.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "scripts/preflight-author.mjs reads the newest `test-impact-map` artifact of a successful coverage-nightly run on main, through the same bounded fetch as the read map, and passes `readImpactArmInput(root, mapPath, base, diffText)` to the selector as `impact`. This is the first production caller of `readImpactArmInput` outside scripts/select-affected-suites.mjs"
+      proof: "grep: W1-T12508 criterion 1 in test/ci/the-author-preflight-selects-tests-from-a-fresh-impact-map.test.ts"
+    - claim: "When the selection has an `impact` arm and no `impactFallback`, the author runs the impact suites plus the changed tests. The receipt selection is `affected-impact`, it names the map's sha and distance, and it says the module floor is left to CI"
+      proof: "grep: W1-T12508 criterion 2 in test/ci/the-author-preflight-selects-tests-from-a-fresh-impact-map.test.ts"
+    - claim: "A map that is missing, cannot be fetched, is past IMPACT_MAP_STALENESS_BOUND, or gives an `impactFallback` leaves the author selection as it is today (narrow, else floor), and the receipt names the reason"
+      proof: "grep: W1-T12508 criterion 3 in test/ci/the-author-preflight-selects-tests-from-a-fresh-impact-map.test.ts"
+    - claim: "The impact arm is used only for an author run. ci.yml's shadow selector (ci.yml:1995-1996) still records the arm as shadow evidence and selects as before"
+      proof: "grep: W1-T12508 criterion 4 in test/ci/the-author-preflight-selects-tests-from-a-fresh-impact-map.test.ts"
+  rationale: |
+    The impact map can name, per changed function, the suites that ran it on main. It is built every night and read only as
+    shadow evidence, so the author still runs the whole module floor.
+    READ at origin/main 6cf453f7a:
+    - src/lib/affected-suites.ts:66-74 the W1-T6083 `impact` arm is "measured in shadow only". Its input is
+      `AffectedSuitesInput.impact` (:92); `readAffectedSuitesInput` (:843) never sets it.
+    - src/lib/test-impact-map.ts:941 `readImpactArmInput` has one caller, scripts/select-affected-suites.mjs:76, run by
+      ci.yml:1995-1996 for the shadow record. :321 IMPACT_MAP_STALENESS_BOUND is 500 commits.
+    - coverage-nightly.yml:206-222 builds and uploads the `test-impact-map` artifact (W1-T6107).
+    MEASURED by the operator session from the shadow records: for a function edit the impact arm selects about 1% of the
+    floor. The author's narrow set had a median of 843 suites over the over-capacity runs of the last four days.
+    CHECKED for overlap: W1-T10740 (queued) is a lexer fix whose premise a worker reported as rotted. W1-T10435 (queued) is a
+    parked research report. No open pull request files a task on this subject.
+  design: |
+    1. Reuse the bounded artifact fetch W1-T12505 adds, for the `test-impact-map` artifact.
+    2. Pass `readImpactArmInput` into `readAffectedSuitesInput`'s `extra` as `impact` (add the field to that `extra` type).
+    3. When `selection.impact` is present and `selection.impactFallback` is absent, set `receipt.selection = 'affected-impact'`
+       and run `selection.impact` plus the changed tests. Record `impactSha`, `impactDistance` and `floorLeftToCi: true`.
+    4. Otherwise keep today's narrow-else-floor choice and record the reason.
+    5. Update the doctrine sentence that says the preflight runs the module-level affected floor.
+    NO-INVARIANTS: an author-side selection choice; the staleness bound and the fallback rules are the impact arm's own,
+    unchanged.
+    NOT IN SCOPE: promoting the impact arm in CI; changing IMPACT_MAP_STALENESS_BOUND.
+  falsifier: |
+    Use the impact arm when `impactFallback` is set and criterion 3 must fail. Drop the changed tests from the set and criterion 2
+    must fail. Restore and require all four to pass.
+  note: |
+    Id W1-T12508 reserved for run-unfiled-1794582098000 with ~/rmd-work/bin/reserve-id.sh.

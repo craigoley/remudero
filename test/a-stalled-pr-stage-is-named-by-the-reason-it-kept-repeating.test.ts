@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { test } from "node:test";
-import { DEFAULT_SWEEP_POLICY, FIX_DISPATCH_FAILED_BACKSTOP, PLAN_REPAIR_DISPATCH_STEP,
+import { DEFAULT_SWEEP_POLICY, PLAN_REPAIR_DISPATCH_STEP,
   runSweep, type OpenPrView, type SweepDeps } from "#src/lib/sweep.js";
 import { incidentEventFromLedgerRow } from "#src/lib/sre-lane.js";
 
@@ -186,16 +186,17 @@ test("W1-T8267: an ownerless stage preserves a repair judge's wait and recovery"
   assert.equal(f.escalations.length, 0);
 });
 
-test("W1-T8267: a dispatch backstop owns its escalation while the ownerless stage records an incident", async () => {
+test("W1-T8267: a judged dispatch cause owns its escalation while the ownerless stage records an incident", async () => {
   const view = pr(7243, { checksState: "red", reviewState: "pending",
     ciFailures: [{ name: "ci", logTail: "test failed" }] });
-  const f = fixture(Array.from({ length: FIX_DISPATCH_FAILED_BACKSTOP }, () => ({
+  const f = fixture(Array.from({ length: 3 }, () => ({
     task_id: view.taskId, step: "sweep.fix.dispatch_failed", pr_number: view.prNumber,
     head_sha: view.headSha, error: "worker launch failed",
-  })), { actionable: () => true });
+  })), { actionable: () => true, fixProgressJudge: async () =>
+    ({ verdict: "escalate", loop: "worker launch", reason: "launch still fails" }) });
   await runSweep([view], f.deps);
   assert.equal(f.escalations.length, 1);
-  assert.match(f.escalations[0].reason, /FIX_DISPATCH_FAILED_BACKSTOP/);
+  assert.match(f.escalations[0].reason, /worker launch failed/);
   assert.equal(f.rows("pr.stuck")[0].owner, "none");
   assert.equal(f.rows("incident.event").length, 1);
   await runSweep([view], f.deps);
