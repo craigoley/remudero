@@ -18249,6 +18249,21 @@ export async function runFixDispatchChild(inputs: Record<string, unknown>, deps:
     deps.log("sweep.fix.child_refused", { pr_number: envelope.pr.prNumber, head_sha: envelope.pr.headSha, reason: rechecked.reason });
     throw new Error(`fix dispatch refused: ${rechecked.reason}`);
   }
+  const refuseOnHold = (step: string): void => {
+    let hold: string | undefined;
+    try {
+      hold = deps.hold();
+    } catch (error) {
+      const reason = `the fleet hold could not be read ${step} (${String((error as Error)?.message ?? error)})`;
+      deps.log("sweep.fix.child_refused", { pr_number: envelope.pr.prNumber, head_sha: envelope.pr.headSha, reason });
+      throw new Error(`fix dispatch refused: ${reason}`);
+    }
+    if (hold === undefined) return;
+    const reason = `worker admission is held: ${hold}`;
+    deps.log("sweep.fix.child_refused", { pr_number: envelope.pr.prNumber, head_sha: envelope.pr.headSha, reason });
+    throw new Error(`fix dispatch refused: ${reason}`);
+  };
+  refuseOnHold("before the admission grant");
   let grant: ReturnType<FixDispatchChildPorts["claimFixAdmission"]>;
   try {
     grant = deps.claimFixAdmission(envelope.pr);
@@ -18267,6 +18282,7 @@ export async function runFixDispatchChild(inputs: Record<string, unknown>, deps:
       deps.log("sweep.fix.child_refused", { pr_number: envelope.pr.prNumber, head_sha: envelope.pr.headSha, reason });
       throw new Error(`fix dispatch refused: ${reason}`);
     }
+    refuseOnHold("before the fix dispatch");
     const outcome = await effects.dispatchFix(
       envelope.pr, { ...envelope.evidence, ...(effects.fixProgressJudge === undefined ? {} : { progressJudge: effects.fixProgressJudge }) },
       (phase) => {

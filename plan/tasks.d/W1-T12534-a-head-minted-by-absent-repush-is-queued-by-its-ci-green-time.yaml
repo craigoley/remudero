@@ -1,0 +1,79 @@
+- id: W1-T12534
+  title: "A head minted by absent-repush is queued by its CI-green time, not the pull request's createdAt"
+  repo: remudero
+  depends_on: []
+  priority: 1.2
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: medium # the light pass's review admission order; only heads named as new_head by sweep.absent_repush change place
+  band_meaning: blast-radius
+  origin: operator-session#review-admission-order-2026-11-13
+  plan_refs:
+    - W1-T2426
+    - W1-T11153
+    - W1-T10992
+  files:
+    - src/lib/sweep.ts
+    - test/sweep/a-head-minted-by-absent-repush-is-queued-by-its-ci-green-time.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "With the 20:41 shape (width 3; #18328 created 15:39 and #18343 created 17:23, each with a sweep.absent_repush row whose new_head is its current head and a sweep.review_eligible row for that head after 20:00; #18332 created 15:57 and not re-pushed; three PRs created later whose heads went review-eligible before 20:00), the light pass admits #18332 and the two later PRs, and #18328 then #18343 lead the refill tail"
+      proof: "grep: W1-T12534 criterion 1 in test/sweep/a-head-minted-by-absent-repush-is-queued-by-its-ci-green-time.test.ts"
+    - claim: "invariant:unrepushed-order-unchanged — a head that no sweep.absent_repush row names as new_head keeps the createdAt key, so a pass with no re-pushed head admits exactly what origin/main admits, and equal keys still order by PR number"
+      proof: "grep: W1-T12534 criterion 2 in test/sweep/a-head-minted-by-absent-repush-is-queued-by-its-ci-green-time.test.ts"
+    - claim: "A re-pushed head with no sweep.review_eligible row in the pass's ledger lines is keyed by the ts of the sweep.absent_repush row that minted it; with neither row in the lines it keeps the createdAt key"
+      proof: "grep: W1-T12534 criterion 3 in test/sweep/a-head-minted-by-absent-repush-is-queued-by-its-ci-green-time.test.ts"
+    - claim: "invariant:key-fixed-per-head — the key of one head does not change when a verdict is posted or the PR is updated without a new head, so the W1-T2426 starvation argument still holds"
+      proof: "grep: W1-T12534 criterion 4 in test/sweep/a-head-minted-by-absent-repush-is-queued-by-its-ci-green-time.test.ts"
+  rationale: |
+    A PR whose head was reset by an absent-repush keeps the front of the review queue against PRs that went green hours
+    before its new head.
+    OBSERVED by the operator session, Azure ledger ~/rmd-state2/state/ledger.ndjson, 2026-11-13:
+    - 19:56:42Z sweep.absent_repush for #18328 (old_head ff3ac788, new_head 37d55002) and 19:58:18Z for #18343
+      (10fee3ca to 762a835f): no check runs were found, so a new head was minted. A new head resets the review.
+    - 20:41:23Z review.capacity: queue_depth 12, effective_width 4. 20:41:28Z sweep.review_order_shadow (width 3)
+      admitted [18328, 18332, 18343], the three oldest by createdAt (15:39, 15:57, 17:23). Eight CI-green PRs waited
+      (#18345 #18346 #18348 #18351 #18354 #18359 #18362 #18366). 20:41:24Z sweep.review_admitted #18328 at head 37d55002.
+    - Eligible to admitted over the window: median 0.1 min, p90 27, max 121 (n=166); 37 of 203 eligible heads were never
+      admitted.
+    READ at origin/main 0daaf315c, src/lib/sweep.ts:
+    - :27181-27217 selectReviewAdmissions sorts both lanes with oldestFirst (:27199-27211), keyed by reviewAdmissionKey.
+    - :27243-27247 reviewAdmissionKey returns createdAt, falling back to lastActivityAt. The doc above it (W1-T2426) chose
+      an immutable key so that posting a verdict cannot re-age a PR. createdAt is immutable per PR, not per head, so a
+      minted head inherits the PR's age.
+    - :24844-24851 the sweep.absent_repush row carries pr_number, old_head and new_head. :27008 observeReviewEligibility
+      writes one sweep.review_eligible row per review key, with head_sha, before either admission bound.
+    - Light-pass callers of selectReviewAdmissions: :26399, :26402, :26419 (the refill tail) and :26780 (the refreshed
+      tail). All of them have selectionLedgerLines in scope.
+    CHECKED for overlap: W1-T11153 (merged) orders needs-person PRs last and shadows a cost/value rank; W1-T10992 (merged)
+    observes order and width; W1-T5083 (merged) is the daemon build lane. No queued or blocked task changes the key.
+  design: |
+    1. Add one internal function, repushedHeadQueuedAt(ledgerLines), that returns a Map from `<pr_number>@<head>` to an
+       ISO time. For each sweep.absent_repush row with a string new_head, the value is the ts of the first
+       sweep.review_eligible row with the same pr_number and head_sha equal to new_head; if there is none, the ts of the
+       absent_repush row itself. Rows without a parsable ts are skipped.
+    2. selectReviewAdmissions takes this map as one more optional parameter (after needsPerson). oldestFirst keys a PR by
+       map.get(`${pr.prNumber}@${pr.headSha}`) when present, else by reviewAdmissionKey(pr) as today. The needs-person
+       group and the PR-number tie-break are unchanged.
+    3. runSweepLightPassCore builds the map once from selectionLedgerLines and passes it at :26399, :26402, :26419 and
+       :26780. reviewAdmissionKey itself is unchanged, so orderPendingReviews and reviewPriority keep their keys.
+    4. Run the existing admission tests (test/sweep-review-admission.test.ts, test/review-admission-dedup.test.ts,
+       test/plan-filing-admission-bound.test.ts, test/a-freed-review-lane-refills-without-waiting-for-another-pass.test.ts,
+       test/daemon/review-admission-is-ordered-by-measured-cost-and-value-in-shadow.test.ts). Their fixtures have no
+       absent_repush rows, so none should change. If one does, this task needs an amendment that adds it to files.
+    5. Run test/sweep/compress-src-lib-sweep-ts.test.ts; add as few comments as possible to src/lib/sweep.ts.
+    INVARIANT unrepushed-order-unchanged: a head no sweep.absent_repush row names as new_head is keyed by
+    reviewAdmissionKey, exactly as on origin/main.
+    INVARIANT key-fixed-per-head: the key of a head comes only from ledger rows about that head, which are never rewritten.
+    NOT IN SCOPE: the full pass's order (orderPendingReviews), the shadow rank's wait term (reviewPriority), and keying
+    heads that were not minted by absent-repush. A later task may extend the CI-green key to every new head once these
+    rows show the effect.
+  falsifier: |
+    Pass an empty map at :26402 and criterion 1 must fail. Key every PR by its eligibility time and criterion 2 must fail.
+    Drop the absent_repush ts fallback and criterion 3 must fail. Key by the latest sweep.review_eligible row instead of the
+    first and criterion 4 must fail. Restore and all must pass.
+  note: |
+    Id W1-T12534 reserved for run-unfiled-1794603730000 with ~/rmd-work/bin/reserve-id.sh.

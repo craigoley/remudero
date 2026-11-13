@@ -6,7 +6,7 @@
   verify: auto
   risk: low
   priority: 1.2
-  status: queued
+  status: merged
   attempts: 0
   origin: "operator follow-up to PR #18227: acceptance proofs name two recovery tests by title"
   note: "reservation hand-off: run-W1-T12502-1794576999572 -> plan-file-W1-T12502-1794583950"
