@@ -151,15 +151,27 @@ test("W1-T12525 criterion 5: hooks/pre-push with an empty stdin still runs every
   writeFileSync(join(tree, "tsconfig.json"), "{}\n");
   mkdirSync(join(tree, "scripts"));
   mkdirSync(join(tree, "hooks"));
+  mkdirSync(join(tree, "bin"));
   const log = join(tree, "gate.log");
   for (const gate of GATES) {
-    writeFileSync(join(tree, "scripts", gate),
-      `import { appendFileSync } from "node:fs";\nappendFileSync(process.env.GATE_LOG, "${gate}\\n");\nprocess.exit(1);\n`);
+    writeFileSync(join(tree, "scripts", gate), "");
   }
+  // Record the hook's gate invocations without starting nine Node runtimes under flake-screen load.
+  // The hook still sees each gate file and a refusing exit status from every invocation.
+  const node = join(tree, "bin", "node");
+  writeFileSync(node, `#!/bin/sh
+for arg do
+  case "$arg" in
+    */scripts/*.mjs) printf '%s\\n' "\${arg##*/}" >> "$GATE_LOG"; exit 1 ;;
+  esac
+done
+exit 1
+`);
+  chmodSync(node, 0o755);
   copyFileSync(join(REPO_ROOT, "hooks", "pre-push"), join(tree, "hooks", "pre-push"));
   const res = spawnSync("sh", [join(tree, "hooks", "pre-push")], {
     cwd: tree, encoding: "utf8", input: "",
-    env: { PATH: process.env.PATH ?? "", HOME: tree, RMD_PREPUSH_GATES: "1", GATE_LOG: log },
+    env: { PATH: `${join(tree, "bin")}:${process.env.PATH ?? ""}`, HOME: tree, RMD_PREPUSH_GATES: "1", GATE_LOG: log },
   });
   assert.equal(res.error, undefined);
   const ran = existsSync(log) ? readFileSync(log, "utf8").split("\n").filter(Boolean) : [];
