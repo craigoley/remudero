@@ -71,7 +71,8 @@ test("W1-T9515: a recycle PAUSE names its caller and actor", (t) => {
   assert.equal(actor.claimed_session_id, "claimed-session");
   assert.equal(actor.host, hostname());
   assert.ok(actor.os_user);
-  assert.ok(actor.parents.length > 0);
+  if (process.platform === "linux") assert.ok(actor.parents.length > 0);
+  else assert.deepEqual(actor.parents, [], "the /proc parent walk is Linux-only");
   assert.deepEqual(actor.agent_markers, ["AI_AGENT"]);
   assert.deepEqual(actor.tty, { stdin: false, stdout: false });
   assert.equal(pause.reason, "container recycle (deploy/recycle-container.sh)");
@@ -206,10 +207,13 @@ test("W1-T9515: the sre runbook names itself", async (t) => {
 
 test("W1-T9515: actor evidence records the writer's terminal before capture redirects stdout", (t) => {
   const f = fixture(t);
-  const args = process.platform === "darwin"
-    ? ["-q", "/dev/null", "bash", join(REPO_ROOT, "deploy/recycle-container.sh"), "--bad-argument"]
+  const onDarwin = process.platform === "darwin";
+  const pythonPty = "import errno, os, pty, sys; pid, fd = pty.fork(); os.execv(sys.argv[1], sys.argv[1:]) if pid == 0 else None; exec(\"while True:\\n try: data = os.read(fd, 4096)\\n except OSError as error:\\n  if error.errno == errno.EIO: break\\n  raise\\n if not data: break\\n sys.stdout.buffer.write(data)\"); _, status = os.waitpid(pid, 0); sys.exit(os.waitstatus_to_exitcode(status))";
+  const executable = onDarwin ? "python3" : "script";
+  const args = onDarwin
+    ? ["-c", pythonPty, "/bin/bash", join(REPO_ROOT, "deploy/recycle-container.sh"), "--bad-argument"]
     : ["-qec", 'exec bash "$RECYCLE_TEST_SCRIPT" --bad-argument', "/dev/null"];
-  const result = spawnSync("script", args, {
+  const result = spawnSync(executable, args, {
     encoding: "utf8", timeout: 30_000,
     env: { ...f.env, RECYCLE_TEST_SCRIPT: join(REPO_ROOT, "deploy/recycle-container.sh") },
   });

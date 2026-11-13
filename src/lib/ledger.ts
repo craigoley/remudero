@@ -252,11 +252,10 @@ export function appendLedger(
   const actor = (opts.actor ?? deriveLedgerActor)();
   if (deriveLedgerActor() === "test" || actor === "test") {
     const outside = (rel: string) => rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel);
-    if (outside(relative(resolve(tmpdir()), resolve(path)))) {
-      throw new Error(`ledger: REFUSED test append outside the temporary root: ${path}`);
-    }
     let ancestor = resolve(path);
     while (!existsSync(ancestor) && dirname(ancestor) !== ancestor) ancestor = dirname(ancestor);
+    // Compare canonical paths: on macOS tmpdir() can spell the same directory as
+    // /var/... while a caller supplies its realpath under /private/var/....
     const rel = relative(realpathSync(tmpdir()), realpathSync(ancestor));
     if (outside(rel)) {
       throw new Error(`ledger: REFUSED test append outside the temporary root: ${path}`);

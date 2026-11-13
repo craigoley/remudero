@@ -14,8 +14,14 @@
     - W1-T5319
   files:
     - deploy/acr-login.sh
+    - src/lib/ledger.ts
     - src/lib/deployer.ts
+    - test/daemon/a-canonical-temporary-ledger-path-is-accepted.test.ts
     - test/deploy/a-deploy-signs-in-to-the-image-registry-with-the-hosts-managed-identity.test.ts
+    - test/every-recycle-names-who-invoked-it.test.ts
+    - test/image-drift-recycles-itself.test.ts
+    - test/worker/selected-registry-child-consumers.test.ts
+    - test/w1-t5319-the-acr-login-refreshes-itself-and-escalates-when-it-cannot.test.ts
   status: queued
   attempts: 0
   acceptance:
