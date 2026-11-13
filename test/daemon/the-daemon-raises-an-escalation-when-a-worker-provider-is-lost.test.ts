@@ -141,6 +141,48 @@ test(`W1-T12175 criterion 2: a lost ${removal} escalates with unchanged two-acco
 });
 }
 
+test("a definite deployment loss still escalates when another cash deployment is unreadable", async (t) => {
+  const f = fixture(t);
+  const endpointA = "https://account-a.openai.azure.com";
+  const endpointB = "https://account-b.openai.azure.com";
+  t.mock.property(process, "env", { ...process.env,
+    RMD_CASH_ACCOUNT_A_KEY: "account-a-key", RMD_CASH_ACCOUNT_B_KEY: "account-b-key" });
+  let missingA = false;
+  let offlineB = false;
+  t.mock.method(globalThis, "fetch", async (url: string | URL | Request, init?: RequestInit) => {
+    const parsed = new URL(String(url));
+    const name = decodeURIComponent(parsed.pathname.split("/").at(-3) ?? "");
+    if (name.startsWith("rmd-absent-")) {
+      return Response.json({ error: { code: "DeploymentNotFound" } }, { status: 404 });
+    }
+    if (name === "deployment-a" && missingA) {
+      return Response.json({ error: { code: "DeploymentNotFound" } }, { status: 404 });
+    }
+    if (name === "deployment-b" && offlineB) return new Response("offline", { status: 503 });
+    const headers = init?.headers as Record<string, string>;
+    assert.equal(headers["api-key"], parsed.origin === endpointA ? "account-a-key" : "account-b-key");
+    return Response.json({ error: { code: "OperationNotSupported" } }, { status: 400 });
+  });
+  const config = { workerProviders: { enabled: ["claude", "cash"] as ("claude" | "cash")[], cashDeploymentEndpoints: {
+    "deployment-a": { endpoint: endpointA, keyEnv: "RMD_CASH_ACCOUNT_A_KEY" },
+    "deployment-b": { endpoint: endpointB, keyEnv: "RMD_CASH_ACCOUNT_B_KEY" },
+  } } };
+  const previous = await f.start(config);
+  assert.deepEqual(f.rows().at(-1)?.cash_deployments, ["deployment-a", "deployment-b"], JSON.stringify(f.rows().at(-1)));
+  missingA = true;
+  offlineB = true;
+  await f.start(config);
+  const current = f.rows().at(-1)!;
+  assert.equal(current.cash_read, "unreadable");
+  assert.deepEqual(current.cash_deployments, []);
+  assert.deepEqual(current.cash_unreadable_deployments, ["deployment-b"]);
+  assert.equal(f.alerts.length, 1);
+  assert.ok(f.alerts[0].detail.includes("cash:deployment-a"));
+  assert.ok(!f.alerts[0].detail.includes("cash:deployment-b"));
+  assert.ok(f.alerts[0].detail.includes(configPath()));
+  assert.ok(f.alerts[0].detail.includes(previous));
+});
+
 test("W1-T12175 criterion 2: a loss names every provider, config file and last available start", async (t) => {
   const f = fixture(t);
   const previous = await f.start({ workerProviders: { enabled: ["claude", "codex", "cash"] } },
@@ -312,7 +354,7 @@ test("Foundry Claude deployments are probed through the Anthropic adapter and lo
   const config = { workerProviders: { enabled: ["claude", "cash"] as ("claude" | "cash")[] } };
   await f.start(config);
   assert.deepEqual(f.rows().at(-1)?.cash_deployments, names);
-  assert.equal(f.rows().at(-1)?.cash_read, "readable");
+  assert.equal(f.rows().at(-1)?.cash_read, "readable", JSON.stringify(f.rows().at(-1)));
   missing.add("claude-sonnet-5-5");
   const previous = f.rows().at(-1)?.ts;
   await f.start(config);

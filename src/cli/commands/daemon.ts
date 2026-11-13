@@ -152,12 +152,17 @@ export function daemonImprovementActionDeps(stateDir: string, gateway: RatifyCli
   };
 }
 
-async function reachableCashDeployments(config: Config): Promise<{ deployments: string[]; errors: string[] }> {
+async function reachableCashDeployments(config: Config, priorDeployments: string[] = []): Promise<{
+  deployments: string[]; unreadableDeployments: string[]; confirmedAbsentDeployments: string[]; errors: string[];
+}> {
   const deployments: string[] = [];
+  const unreadableDeployments = new Set<string>();
+  const confirmedAbsentDeployments = new Set<string>();
   const errors = new Set<string>();
+  const priorOpenWeightDeployments = priorDeployments.filter((name) => !Object.hasOwn(FOUNDRY_CLAUDE_PRICES, name));
   const candidates = [...new Set([...(config.workerProviders?.cashEndpoint ?? config.workerProviders?.openweightEndpoint
     ? Object.keys(OPENWEIGHT_PRICES) : []),
-    ...Object.keys(config.workerProviders?.cashDeploymentEndpoints ?? {})])];
+    ...Object.keys(config.workerProviders?.cashDeploymentEndpoints ?? {}), ...priorOpenWeightDeployments])];
   // PRIMARY CONTROL: all account controls and deployment checks share one startup deadline.
   const signal = AbortSignal.timeout(GATEWAY_FETCH_TIMEOUT_MS);
   const controls = new Map<string, Promise<boolean>>();
@@ -176,6 +181,8 @@ async function reachableCashDeployments(config: Config): Promise<{ deployments: 
   await Promise.all(candidates.map(async (name) => {
     const target = cashDeploymentTarget(config, name);
     if (!target.ok) {
+      if (target.reason === "no-endpoint") confirmedAbsentDeployments.add(name);
+      else unreadableDeployments.add(name);
       errors.add(`cash deployment ${name}: ${target.reason}${"keyEnv" in target ? ` (${target.keyEnv})` : ""}`);
       return;
     }
@@ -189,7 +196,10 @@ async function reachableCashDeployments(config: Config): Promise<{ deployments: 
       }
       if (!await control) throw new Error("account cannot distinguish an absent deployment from request validation");
       const reply = await probe(target.endpoint, target.key, name);
-      if (reply.status === 404 && reply.error?.code === "DeploymentNotFound") return;
+      if (reply.status === 404 && reply.error?.code === "DeploymentNotFound") {
+        confirmedAbsentDeployments.add(name);
+        return;
+      }
       if (reply.status === 400 && (reply.error?.code === "OperationNotSupported" ||
         reply.error?.param === "messages" || /messages/i.test(reply.error?.message ?? ""))) {
         deployments.push(name);
@@ -198,6 +208,7 @@ async function reachableCashDeployments(config: Config): Promise<{ deployments: 
       throw new Error(`deployment check returned HTTP ${reply.status} (${reply.error?.code ?? "unknown error"})`);
     } catch (error) {
       const reason = String(error);
+      unreadableDeployments.add(name);
       errors.add(`cash deployment ${name}: ${reason}`);
     }
   }));
@@ -209,6 +220,7 @@ async function reachableCashDeployments(config: Config): Promise<{ deployments: 
   const foundryKey = process.env[FOUNDRY_CLAUDE_API_KEY_ENV];
   if (foundryEndpoint || foundryKey) {
     if (!foundryEndpoint || !foundryKey) {
+      for (const name of Object.keys(FOUNDRY_CLAUDE_PRICES)) unreadableDeployments.add(name);
       errors.add(`Foundry Claude cash requires both ${FOUNDRY_CLAUDE_ENDPOINT_ENV} and ${FOUNDRY_CLAUDE_API_KEY_ENV}`);
     } else {
       try {
@@ -236,7 +248,10 @@ async function reachableCashDeployments(config: Config): Promise<{ deployments: 
               throw new Error("Foundry account cannot distinguish an absent deployment from request validation");
             }
             const reply = await probeFoundry(name);
-            if (reply.status === 404 && (reply.error?.code === "DeploymentNotFound" || reply.error?.type === "not_found_error")) continue;
+            if (reply.status === 404 && (reply.error?.code === "DeploymentNotFound" || reply.error?.type === "not_found_error")) {
+              confirmedAbsentDeployments.add(name);
+              continue;
+            }
             if (reply.status === 400 && /messages/i.test(reply.error?.message ?? "")) {
               deployments.push(name);
               continue;
@@ -244,16 +259,23 @@ async function reachableCashDeployments(config: Config): Promise<{ deployments: 
             throw new Error(`Foundry deployment check returned HTTP ${reply.status} (${reply.error?.code ?? reply.error?.type ?? "unknown error"})`);
           } catch (error) {
             const reason = String(error);
+            unreadableDeployments.add(name);
             errors.add(`Foundry Claude deployment ${name}: ${reason}`);
           }
         }
       } catch (error) {
         const reason = String(error);
+        for (const name of Object.keys(FOUNDRY_CLAUDE_PRICES)) unreadableDeployments.add(name);
         errors.add(`Foundry Claude endpoint: ${reason}`);
       }
     }
   }
-  return { deployments: deployments.sort(), errors: [...errors].sort() };
+  return {
+    deployments: deployments.sort(),
+    unreadableDeployments: [...unreadableDeployments].sort(),
+    confirmedAbsentDeployments: [...confirmedAbsentDeployments].sort(),
+    errors: [...errors].sort(),
+  };
 }
 
 export async function recordWorkerProvidersAtStart(opts: {
@@ -288,23 +310,33 @@ export async function recordWorkerProvidersAtStart(opts: {
     comparisonReason = reason;
   }
   let cash: string[] = [];
+  let cashUnreadable: string[] = [];
+  let cashConfirmedAbsent: string[] = [];
   const cashErrors: string[] = [];
   if (enabled.includes("cash")) {
-    const reading = await reachableCashDeployments(opts.config);
+    const priorCash = previous?.cash_read === "readable" && Array.isArray(previous.cash_deployments)
+      ? previous.cash_deployments as string[] : [];
+    const reading = await reachableCashDeployments(opts.config, priorCash);
     cash = reading.deployments;
+    cashUnreadable = reading.unreadableDeployments;
+    cashConfirmedAbsent = reading.confirmedAbsentDeployments;
     cashErrors.push(...reading.errors);
   }
   const comparison = comparisonReason ? "skipped" : previous ? "compared" : "first-start";
   opts.log(step, { ts: opts.at, config_file: file, enabled_providers: enabled,
     cash_deployments: cash, cash_read: cashErrors.length ? "unreadable" : "readable",
+    cash_unreadable_deployments: cashUnreadable,
+    cash_confirmed_absent_deployments: cashConfirmedAbsent,
     ...(cashErrors.length ? { cash_read_error: cashErrors.join("; ") } : {}),
     comparison, ...(comparisonReason ? { comparison_reason: comparisonReason } : {}),
   });
   if (!previous) return;
   const earlier = previous.enabled_providers as string[];
   const lost = lostWorkerProviders(earlier, enabled);
-  if (previous.cash_read === "readable" && cashErrors.length === 0) {
-    lost.push(...lostWorkerProviders(previous.cash_deployments as string[], cash).map((name) => `cash:${name}`));
+  if (previous.cash_read === "readable") {
+    const unreadable = new Set(cashUnreadable);
+    lost.push(...lostWorkerProviders(previous.cash_deployments as string[], cash)
+      .filter((name) => !unreadable.has(name)).map((name) => `cash:${name}`));
   }
   if (lost.length === 0) return;
   const priorSet = [...earlier, ...(previous.cash_deployments as string[]).map((name) => `cash:${name}`)].sort();
