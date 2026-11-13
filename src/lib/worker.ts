@@ -70,7 +70,7 @@ import {
   type WorkerProviderId,
 } from "./config.js";
 import { assertModelAllowed } from "./model-gate.js";
-import { chooseDraftDeployment, readDraftStats, recordDraftRouting, type DraftStats, type DraftChoice } from "./draft-routing.js";
+import { chooseDraftDeployment, readDraftStats, recordDraftRouting, type DraftStats, type DraftChoice, type DraftOutcome } from "./draft-routing.js";
 import { sdkUsageReadingCase } from "./headroom.js";
 import {
   detectCompactionEvents,
@@ -3171,8 +3171,11 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
         draftChoice = chooseDraftDeployment(stats, [openWeight.model, ...openWeight.alternatives].map((deployment) => ({
           deployment, estimatedCostUsd: openWeightUsageUsd(deployment, openWeight.estimatedTokens ?? 1, OPENWEIGHT_MAX_COMPLETION_TOKENS),
         })), args.draftRouting.random);
+        for (const skip of draftChoice.skipped ?? []) recordDraftRouting(args.draftRouting.log, "draft.routing.skip", {
+          lane: args.draftRouting.lane, proposal_id: args.draftRouting.proposalId, ...skip, reason: "refused-or-failed",
+        });
         openWeight = { ...openWeight, model: draftChoice.deployment,
-          alternatives: [openWeight.model, ...openWeight.alternatives].filter((model) => model !== draftChoice!.deployment) };
+          alternatives: draftChoice.arms.map((arm) => arm.deployment).filter((model) => model !== draftChoice!.deployment) };
       }
     }
     assertModelAllowed(openWeight.model, config);
@@ -3241,6 +3244,8 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
               }
             }
             draftContractFailed = outcome.contractFailed;
+            const endClass: DraftOutcome = rung.usageRefusal || rung.budgetRefused ? "refused"
+              : rung.isError ? "failed" : outcome.contractFailed ? "contract-failed" : outcome.clean ? "clean" : "not-clean";
             // A denied first reservation is operational evidence, not a model-quality sample.
             // budgetRefused alone also covers later paid turns: require the complete zero-work receipt.
             const notInvokedBudgetRefusal = rung.isError && rung.budgetRefused === true &&
@@ -3251,6 +3256,7 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
               proposal_id: args.draftRouting.proposalId, deployment: selection.model, session_id: rung.sessionId,
               selection_assignment_id: selectionAssignmentId,
               ...(notInvokedBudgetRefusal ? { quality_sample: "not-invoked-budget-refusal" } : {}),
+              ts: systemClock.iso(), outcome: endClass,
               draft_cost_usd: rung.costUsd, clean: outcome.clean, contract_failed: outcome.contractFailed });
           }
           return rung;
