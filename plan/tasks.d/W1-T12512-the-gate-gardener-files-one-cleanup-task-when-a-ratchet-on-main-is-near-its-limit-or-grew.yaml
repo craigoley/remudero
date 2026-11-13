@@ -15,11 +15,12 @@
     - W1-T9962
   files:
     - src/lib/gate-gardener.ts
+    - src/lib/plan.ts
     - test/gardeners/the-gate-gardener-files-one-cleanup-task-for-a-gate-near-its-limit.test.ts
   status: queued
   attempts: 0
   acceptance:
-    - claim: "A gate gardener pass reads, on main's tip, each capped ratchet (the source-size rows, the learnings budget cap, the jscpd threshold) and proposes a HEADROOM action for one whose measured value is within RATCHET_HEADROOM_SHARE (10%) of its limit"
+    - claim: "A gate gardener pass reads, on main's tip, each capped ratchet that refuses a pull request (the learnings budget's hardCapChars, the jscpd threshold) and proposes a HEADROOM action for one whose measured value is within RATCHET_HEADROOM_SHARE (10%) of its limit. It reads no source-size row: source-size is a non-blocking signal"
       proof: "grep: W1-T12512 criterion 1 in test/gardeners/the-gate-gardener-files-one-cleanup-task-for-a-gate-near-its-limit.test.ts"
     - claim: "For each exact-count baseline (fixture-copy, deps-interface, console-parity), the pass proposes a HEADROOM action when a commit on main in the last 7 days raised a recorded value, read from `git log -p` of the baseline file"
       proof: "grep: W1-T12512 criterion 2 in test/gardeners/the-gate-gardener-files-one-cleanup-task-for-a-gate-near-its-limit.test.ts"
@@ -45,11 +46,20 @@
     on comment compression pins, not headroom.
   design: |
     1. Add a HEADROOM action class to src/lib/gate-gardener.ts with RATCHET_HEADROOM_SHARE = 0.1 and a 7-day window.
-    2. Capped ratchets: measure with each ratchet's own counter (as the TIGHTEN class does for source-size, :840). Propose when
-       `limit - measured <= limit * RATCHET_HEADROOM_SHARE`.
+    2. Capped ratchets: measure with each ratchet's own counter. Propose when
+       `limit - measured <= limit * RATCHET_HEADROOM_SHARE`. The learnings limit is `hardCapChars`, measured by the
+       ratchet's own `computeActiveChars`; its `capChars` is a curation target that refuses nothing (W1-T3734). The jscpd
+       limit is `.jscpd.json` `threshold`, measured by one jscpd run with a JSON report, awaited off the daemon loop.
+       Amended 2026-11-13: the source-size rows are not read. ci.yml runs source-size as a signal with
+       `continue-on-error: true`, so a row refuses nothing. On main at the amendment, 141 rows were within 10% of their
+       row or over it, and each would file a task that removes no refusal.
     3. Exact-count baselines: read the window's commits of each baseline file and propose when a recorded value rose.
     4. File through the gardener's existing task-id minting and landing (`prepareGardenTaskIds`, `machineShardLandingGuard`),
        one task per gate and row, deduplicated by origin.
+    5. Admission (amended 2026-11-13): src/lib/plan.ts gains a parked-proposal shape for a `headroom:` origin, as comment
+       compression has (`isCommentCompressionShape`): one existing subject and then its new regression test, or one
+       existing test file that carries the regression. Without it, machine-filing admission refuses every headroom draft
+       as "not selectable by runnableCandidates" (verify:human).
     NO-INVARIANTS: a new proposal class; criterion 4 pins that it writes no baseline.
     NOT IN SCOPE: changing any ceiling or share; coverage and mutation floors; comment volume, which
     `commentCompressionCandidates` already files and which is advisory, not a merge ceiling.
