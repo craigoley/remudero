@@ -9,7 +9,8 @@ this post-migration rule supersedes its first-push **full-parity** obligation.
 Commit first, then run `node --import tsx scripts/preflight-author.mjs` before the first push. The script refreshes and
 pins `origin/main`, verifies the committed tree and each selected test path, checks the shipped
 cheap census before expensive validation, runs default static preflight and the module-level affected floor, and refuses missing/zero test
-summaries. Configuration, dependency, workflow, fixture/helper, unknown and empty-floor changes
+summaries. A test helper, a `.remudero/` file or a `hooks/` file selects the suites that import, name or read it
+(W1-T12506), and every suite when none does. Configuration, dependency, workflow, fixture, unknown and empty-floor changes
 fall back to every suite, without full-suite coverage instrumentation. A failing test is not
 retried into a green verdict. An unsuccessful static gate stops before affected tests: the receipt cannot
 pass, retains the selected floor and native static outcome, and explicitly records why tests were not run.

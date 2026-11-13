@@ -27,18 +27,18 @@ const calibration = (await import(pathToFileURL(join(ROOT, "scripts/calibrate-au
 };
 
 const DEPLOY = "deploy/acr-login.sh";
-const HELPER = "test/helpers/shared.ts";
+const HELPER = "test/fixtures/shared.ts";
 const DEPLOY_REASON = `full run: ${DEPLOY} is outside what the selector models (the read map cannot speak for it: no read map supplied)`;
 const CHANGED = "test/changed.test.ts", READER = "test/uses-helper.test.ts", MODELLED = "test/modelled.test.ts";
 const DECOYS = ["test/decoy-one.test.ts", "test/decoy-three.test.ts", "test/decoy-two.test.ts"];
 const ALL = [CHANGED, MODELLED, READER, ...DECOYS].sort();
 
-/** Six trivial suites. The head commit changes a deploy script, a test helper, a src leaf and one test
+/** Six trivial suites. The head commit changes a deploy script, a test fixture, a src leaf and one test
  *  (`mixed`), or only `.gitignore`. READER imports the helper; nothing in the tree reaches the decoys. */
 function fixture(change: "mixed" | "gitignore", manifest: Record<string, number> = {}) {
   const repo = gitRepo({ kind: "full-fallback-partial", seedCommit: false });
   const root = repo.dir;
-  for (const dir of ["scripts", "test/setup", "test/helpers", "src", "deploy"]) mkdirSync(join(root, dir), { recursive: true });
+  for (const dir of ["scripts", "test/setup", "test/fixtures", "src", "deploy"]) mkdirSync(join(root, dir), { recursive: true });
   writeFileSync(join(root, ".nvmrc"), process.versions.node + "\n");
   writeFileSync(join(root, ".gitignore"), "coverage\nnode_modules\n");
   writeFileSync(join(root, "package-lock.json"), readFileSync(join(ROOT, "package-lock.json")));
@@ -56,7 +56,7 @@ function fixture(change: "mixed" | "gitignore", manifest: Record<string, number>
   const suite = (name: string) => `import { test } from 'node:test'; test('${name}', () => {});\n`;
   for (const file of [CHANGED, MODELLED, ...DECOYS]) writeFileSync(join(root, file), suite(file));
   // The fixture's own import is relative; this file's text names it through a variable.
-  const helper = [".", "helpers", "shared.js"].join("/");
+  const helper = [".", "fixtures", "shared.js"].join("/");
   writeFileSync(join(root, READER), `import { test } from 'node:test'; import { shared } from '${helper}';\n` +
     "test('reads the helper', () => { if (shared < 1) throw new Error('helper'); });\n");
   repo.git("add", "."); repo.git("commit", "-m", "test: full-fallback baseline");

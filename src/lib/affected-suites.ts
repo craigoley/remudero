@@ -14,7 +14,7 @@
  *   - the path-reading census selects suites that read a changed file as TEXT — a suite that greps a
  *     source file imports nothing, so the graph alone misses it (the falsifier);
  *   - suites that failed recently stay selected while they are unstable.
- * A change the graph cannot model — config, the lockfile, a workflow, a test helper or fixture —
+ * A change the graph cannot model — config, the lockfile, a workflow, a test fixture —
  * selects the FULL suite and says which file forced it.
  */
 import { execFile, spawnSync, type ExecFileOptionsWithStringEncoding } from "node:child_process";
@@ -101,7 +101,11 @@ const SUITE = /^test\/.*\.test\.ts$/;
 /** Where a changed declaration can name a symbol other suites reach: never test/. */
 const SYMBOL_SOURCE = /^(?:src|scripts|bin)\//;
 /** Areas the selector models: code the graph walks, and prose the path readers cover. */
-const MODELLED = /^(?:src|scripts|bin|test|docs|doctrine|plan)\/|^[^/]+\.md$/;
+const MODELLED = /^(?:src|scripts|bin|test|docs|doctrine|plan|\.remudero|hooks)\/|^[^/]+\.md$/;
+/** W1-T12506: a test/ code file that is not a suite, which the import graph walks to its importers. */
+const TEST_HELPER = /^test\/helpers\/.*\.(?:ts|mts|mjs|js|cjs)$/;
+/** W1-T12506: files no code imports, read by the suites that name them (and those the read map records). */
+const NAMED_BY_SUITES = /^(?:\.remudero|hooks)\//;
 const CONTRACT_FILE = /^(?:openapi\/daemon\.yaml|packages\/api-client\/src\/schema\.d\.ts)$/;
 
 /** The non-code files whose readers the read map OBSERVES: the contract and deploy trees, and json. */
@@ -114,7 +118,7 @@ export function fullRunTrigger(changed: readonly string[], readMapUsable = false
     if (CONTRACT_FILE.test(f)) return false;
     if (/^(?:openapi|packages)\//.test(f)) return true;
     return !(readMapUsable && READ_MAPPED.test(f)) &&
-      (!MODELLED.test(f) || (f.startsWith("test/") && !SUITE.test(f)));
+      (!MODELLED.test(f) || (f.startsWith("test/") && !SUITE.test(f) && !TEST_HELPER.test(f)));
   });
 }
 
@@ -252,6 +256,33 @@ export function readMapReaders(map: ReadMap, file: string): { readers: string[];
     for (const i of map.listed[key]!) listers.push({ suite: name(i), dir: key });
   }
   return { readers, listers };
+}
+
+/** The suites that reach any of `from` through `importers`, however many hops away. */
+function suitesReaching(from: readonly string[], importers: ReadonlyMap<string, ReadonlySet<string>>, only?: (f: string) => boolean): string[] {
+  const seen = new Set<string>();
+  const queue = [...from];
+  while (queue.length > 0) {
+    const f = queue.shift()!;
+    if (seen.has(f)) continue;
+    seen.add(f);
+    for (const next of importers.get(f) ?? []) if (only === undefined || only(next)) queue.push(next);
+  }
+  return [...seen].filter((s) => SUITE.test(s)).sort();
+}
+
+/** W1-T12506 — the suites whose comment-free text, or that of a test/ file they import, names `path` or its
+ *  directory: as written (`hooks/pre-push`, `hooks/`) or as quoted segments (`join(ROOT, "hooks", "pre-push")`). */
+function suitesNaming(path: string, files: ReadonlyMap<string, string>, importers: ReadonlyMap<string, ReadonlySet<string>>): string[] {
+  const parts = path.split("/");
+  const quoted = (segments: string[]) => segments.map((s) => `["'\`]${s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}["'\`]`).join("\\s*,\\s*");
+  const dir = parts.slice(0, -1);
+  const plain = [path, `${dir.join("/")}/`];
+  const forms = new RegExp(`${quoted(parts)}|${quoted(dir)}`);
+  const names = (text: string) => plain.some((n) => text.includes(n)) || forms.test(text);
+  const namers = [...files].filter(([f, text]) => f.startsWith("test/") && CODE_FILE.test(f) && names(text) && names(stripComments(text)))
+    .map(([f]) => f);
+  return suitesReaching(namers, importers, (f) => f.startsWith("test/"));
 }
 
 /** Every module specifier a file names: static and dynamic imports, re-exports and requires. */
@@ -698,6 +729,25 @@ export function selectAffectedSuites(changed: readonly string[], input: Affected
         observed.add(s);
       }
       if (readers.length === 0 && listers.length === 0) notes.push(`${f}: read by no suite on the read map`);
+    }
+  }
+  // W1-T12506: a test helper's readers are the suites the graph reaches from it; a .remudero/ or hooks/ file's
+  // are the suites naming it, plus those the read map records. Either way the narrow arm keeps them.
+  for (const f of files) {
+    const helper = TEST_HELPER.test(f);
+    if (!helper && !NAMED_BY_SUITES.test(f)) continue;
+    const readers = helper ? suitesReaching([f], importers) : suitesNaming(f, input.files, importers);
+    for (const s of readers) {
+      pathNamers.add(s);
+      pick(s, helper ? `reaches ${f}` : `names ${f}`);
+    }
+    const mapped = !helper && mapProblem === undefined && Object.values(readMapReaders(input.readMap!.map!, f)).some((r) => r.length > 0);
+    if (readers.length === 0 && !mapped) {
+      return {
+        suites: [], fullRun: true, recentOnly: { floor: [] },
+        reasons: [`full run: ${f} is modelled, but no reader was found: no suite imports, names or reads it`],
+        ...(input.readMap !== undefined && mapProblem !== undefined ? { readMapFallback: mapProblem } : {}),
+      };
     }
   }
   for (const s of recent) pick(s, "failed recently");
