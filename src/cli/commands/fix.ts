@@ -4288,10 +4288,13 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
         deps.log("fix.done", { ...fixReceipt.joinFields(), round_id: roundId, head_sha: priorHeadSha,
           ...(deps.branchClaim ? { branch_claim_run_id: deps.branchClaim.id() } : {}),
           strike: attempt, round, subtype: "round_yielded", trigger: y.trigger, recovery_ref: y.recoveryRef ?? null,
+          index_recovery_ref: y.indexRecoveryRef ?? null,
           cost_usd: y.costUsd, elapsed_ms: spawnOutcome.elapsedMs });
         deps.branchClaim?.release();
-        const reason = `fix round yielded to a pending ${y.trigger}: ${y.recoveryRef ? `work kept at ${y.recoveryRef}`
-          : y.keepError ? `work left in the worktree (${y.keepError})` : "no work to keep"}`;
+        const kept = [y.recoveryRef && `work kept at ${y.recoveryRef}`, y.indexRecoveryRef && `staged work kept at ${y.indexRecoveryRef}`]
+          .filter(Boolean).join(", ");
+        const reason = `fix round yielded to a pending ${y.trigger}: ${kept
+          || (y.keepError ? `work left in the worktree (${y.keepError})` : "no work to keep")}`;
         deps.say(`fix rung: strike ${attempt}/${opts.strikeCap} YIELDED, no strike spent — ${reason}: ${opts.prUrl}`);
         return { outcome: "stood_down", review, strikes, retriggers, reason, standDownReason: reason,
           ...(y.keepError ? { retainWorktree: reason } : {}) };

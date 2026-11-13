@@ -8449,19 +8449,21 @@ async function keepYieldedFixRound(
   const prNumber = prNumberFromRef(fixRound.prUrl);
   const row = { pr_url: fixRound.prUrl, pr_number: prNumber ?? null, branch: fixRound.branch, trigger: "recycle", detail: recycle,
     head_sha: headSha, start_sha: startSha, pushed: false, strike_spent: false };
-  let kept: { recoveryRef?: string; paths: string[] };
+  let kept: { recoveryRef?: string; indexRecoveryRef?: string; paths: string[] };
   try {
     kept = await runStepsAsync(keepYieldedFixWorkSteps(hostWorktreeGitAsync, cwd, fixRound.branch, startSha));
   } catch (error) {
     const keepError = capStderrExcerpt(String((error as Error)?.message ?? error), STDERR_EXCERPT_CAP);
-    log("fix.round_yielded", { ...row, recovery_ref: null, paths: [], keep_error: keepError });
+    log("fix.round_yielded", { ...row, recovery_ref: null, index_recovery_ref: null, paths: [], keep_error: keepError });
     return { trigger: "recycle", detail: recycle, paths: [], costUsd, keepError };
   }
-  log("fix.round_yielded", { ...row, recovery_ref: kept.recoveryRef ?? null, paths: kept.paths });
-  if (kept.recoveryRef && prNumber !== undefined) {
+  log("fix.round_yielded", { ...row, recovery_ref: kept.recoveryRef ?? null, index_recovery_ref: kept.indexRecoveryRef ?? null, paths: kept.paths });
+  // The next round is offered the worktree's ref; with no worktree change, the staged work's ref.
+  const offered = kept.recoveryRef ?? kept.indexRecoveryRef;
+  if (offered && prNumber !== undefined) {
     log("sweep.fix.owner_residue_preserved", { pr_number: prNumber, branch: fixRound.branch, head_sha: headSha, worktree_path: cwd,
       local_sha_prefix: startSha.slice(0, 12), staged_paths: kept.paths.slice(0, FIX_OWNER_RESIDUE_PATH_BOUND),
-      staged_more: Math.max(0, kept.paths.length - FIX_OWNER_RESIDUE_PATH_BOUND), recovery_ref: kept.recoveryRef.slice(0, 512),
+      staged_more: Math.max(0, kept.paths.length - FIX_OWNER_RESIDUE_PATH_BOUND), recovery_ref: offered.slice(0, 512),
       preserved_at: systemClock.iso(), source: "fix.round_yielded" });
   }
   return { trigger: "recycle", detail: recycle, costUsd, ...kept };
@@ -31316,11 +31318,14 @@ function* preserveTrackedDirtyPatchSteps(git: ReviewRecoveryGit, repoDir: string
 }
 
 /** W1-T8141: the whole worktree against `startSha` (worker commits, index, edits, new files) as one recovery ref, built
- *  the way the ref's own tree check builds the owner tree; only a verified ref lets the reset run. */
-function* keepYieldedFixWorkSteps(git: ReviewRecoveryGit, cwd: string, branch: string, startSha: string): Steps<{ recoveryRef?: string; paths: string[] }> {
+ *  the way the ref's own tree check builds the owner tree; only a verified ref lets the reset run. The worktree
+ *  snapshot reads each file's bytes on disk, so staged content that the disk no longer shows (a file staged as B and
+ *  then edited back to A) is in no worktree tree. When the real index differs from the worktree, the index is kept
+ *  too, in a second recovery ref with its own tree check, before anything is reset. */
+function* keepYieldedFixWorkSteps(git: ReviewRecoveryGit, cwd: string, branch: string, startSha: string): Steps<{ recoveryRef?: string; indexRecoveryRef?: string; paths: string[] }> {
   let patch = "";
   let paths: string[] = [];
-  yield* temporaryIndexTreeSteps(git, cwd, startSha, function* (env): Steps<void> {
+  const worktreeTree = yield* temporaryIndexTreeSteps(git, cwd, startSha, function* (env): Steps<void> {
     const tracked = yield* step(() => git(cwd, ["ls-files", "--cached", "-z"], { maxBuffer: 1 << 26 }));
     if (tracked.length > 0) yield* step(() => git(cwd, ["--literal-pathspecs", "add", "--force", "--all", "--pathspec-from-file=-", "--pathspec-file-nul"], {
       env, input: tracked, maxBuffer: 1 << 26 }));
@@ -31328,10 +31333,26 @@ function* keepYieldedFixWorkSteps(git: ReviewRecoveryGit, cwd: string, branch: s
     patch = yield* step(() => git(cwd, ["diff", "--cached", "--binary", "--no-ext-diff", startSha], { env, maxBuffer: 1 << 26 }));
     paths = nulPaths(yield* step(() => git(cwd, ["diff", "--cached", "--name-only", "-z", startSha], { env })));
   });
+  // The real index, read and never changed: `write-tree` only writes objects. An index with a conflict fails here,
+  // and a failure resets nothing.
+  const indexTree = (yield* step(() => git(cwd, ["write-tree"]))).trim();
+  let indexRecoveryRef: string | undefined;
+  if (indexTree !== worktreeTree) {
+    // A staged path whose worktree bytes differ from its staged bytes: only the index holds that content.
+    const staged = nulPaths(yield* step(() => git(cwd, ["diff-tree", "-r", "--name-only", "-z", startSha, indexTree], { maxBuffer: 1 << 26 })));
+    const apart = new Set(nulPaths(yield* step(() => git(cwd, ["diff-tree", "-r", "--name-only", "-z", indexTree, worktreeTree], { maxBuffer: 1 << 26 }))));
+    if (staged.some((path) => apart.has(path))) {
+      const indexPatch = yield* step(() => git(cwd, ["diff", "--binary", "--no-ext-diff", startSha, indexTree], { maxBuffer: 1 << 26 }));
+      indexRecoveryRef = yield* preserveTrackedDirtyPatchSteps(git, cwd, cwd, branch, startSha, indexPatch, {}, function* (): Steps<string> {
+        return indexTree;
+      });
+      paths = [...new Set([...paths, ...staged])];
+    }
+  }
   const recoveryRef = patch.length > 0 ? yield* preserveTrackedDirtyPatchSteps(git, cwd, cwd, branch, startSha, patch, {}) : undefined;
   yield* step(() => git(cwd, ["reset", "--hard", startSha]));
   yield* step(() => git(cwd, ["clean", "-fd"]));
-  return { ...(recoveryRef ? { recoveryRef } : {}), paths };
+  return { ...(recoveryRef ? { recoveryRef } : {}), ...(indexRecoveryRef ? { indexRecoveryRef } : {}), paths };
 }
 
 // W1-T3822 — the tracked-only diff is durably captured by `preserveTrackedDirtyFixOwner` above,

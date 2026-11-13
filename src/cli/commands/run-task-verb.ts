@@ -142,12 +142,14 @@ import { type RollupCheck, fetchCiFailures, fetchCiFailuresAsync } from "../../l
 
 export type GitRunner = (args: string[], stdin?: string) => string;
 
-/** W1-T8141: a fix round its spawn ended for a pending recycle. `recoveryRef` holds the whole worktree; without it
- *  (`keepError`) nothing was reset and the worktree is as the worker left it. */
+/** W1-T8141: a fix round its spawn ended for a pending recycle. `recoveryRef` holds the whole worktree, and
+ *  `indexRecoveryRef` the staged work when the index differs from the worktree; with `keepError` nothing was reset
+ *  and the worktree is as the worker left it. */
 export interface FixRoundYield {
   trigger: "recycle";
   detail: string;
   recoveryRef?: string;
+  indexRecoveryRef?: string;
   paths: string[];
   costUsd: number;
   keepError?: string;

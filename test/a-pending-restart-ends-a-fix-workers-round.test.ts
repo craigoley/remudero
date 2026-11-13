@@ -111,8 +111,13 @@ async function fixRound(t: TestContext, co: Checkout, runId: string,
   return { outcome, rows, pushes: () => pushes };
 }
 
+/** How the worker leaves src/a.ts. "spread": staged as "a staged". "restored": staged as "a staged", then put back on
+ *  disk to its start bytes, so only the index holds the edit. "restaged": staged as "a staged", then edited again on
+ *  disk to "a on disk", so the index and the disk hold two different edits of one file. */
+type AShape = "spread" | "restored" | "restaged";
+
 /** A worker that leaves one staged edit, one unstaged edit and one new file, then runs until it is stopped. */
-function editingWorker(co: Checkout, seen: { signal?: AbortSignal; started?: () => void }, opts: { commit?: boolean } = {}) {
+function editingWorker(co: Checkout, seen: { signal?: AbortSignal; started?: () => void }, opts: { commit?: boolean; a?: AShape } = {}) {
   return async (args: SpawnWorkerArgs): Promise<WorkerResult> => {
     seen.signal = args.signal;
     if (opts.commit) {
@@ -122,6 +127,8 @@ function editingWorker(co: Checkout, seen: { signal?: AbortSignal; started?: () 
     }
     writeFileSync(join(co.clone.dir, "src/a.ts"), "a staged\n");
     co.clone.git("add", "src/a.ts");
+    if (opts.a === "restored") writeFileSync(join(co.clone.dir, "src/a.ts"), "a\n");
+    if (opts.a === "restaged") writeFileSync(join(co.clone.dir, "src/a.ts"), "a on disk\n");
     writeFileSync(join(co.clone.dir, "src/b.ts"), "b unstaged\n");
     writeFileSync(join(co.clone.dir, "src/c.ts"), "c new\n");
     seen.started?.();
@@ -137,7 +144,7 @@ function editingWorker(co: Checkout, seen: { signal?: AbortSignal; started?: () 
 }
 
 /** Run a round under a recycle PAUSE: the watch's next poll sees it. */
-async function yieldedRound(t: TestContext, opts: { commit?: boolean } = {}) {
+async function yieldedRound(t: TestContext, opts: { commit?: boolean; a?: AShape } = {}) {
   onlyGitRuns(t);
   t.mock.timers.enable({ apis: ["setInterval"] });
   const co = checkout(t);
@@ -152,28 +159,88 @@ async function yieldedRound(t: TestContext, opts: { commit?: boolean } = {}) {
 }
 
 test("W1-T8141: a pending recycle ends a fix round and preserves its work", async (t) => {
-  const { co, seen, rows, outcome } = await yieldedRound(t);
-  assert.equal(seen.signal?.aborted, true, "the recycle stopped the worker");
-  const yielded = rows.find((row) => row.step === "fix.round_yielded");
-  assert.ok(yielded, "the round writes fix.round_yielded");
-  assert.equal(yielded.trigger, "recycle");
-  assert.equal(yielded.pr_number, PR_NUMBER);
-  assert.equal(yielded.head_sha, co.headSha);
-  const ref = String(yielded.recovery_ref);
-  assert.ok(ref.startsWith(`refs/rmd-recovery/fix-dirty/${BRANCH}/${co.headSha}/`), ref);
-  assert.deepEqual([...(yielded.paths as string[])].sort(), ["src/a.ts", "src/b.ts", "src/c.ts"]);
-  assert.equal(co.clone.git("show", `${ref}:src/a.ts`), "a staged", "the staged edit is kept");
-  assert.equal(co.clone.git("show", `${ref}:src/b.ts`), "b unstaged", "the unstaged edit is kept");
-  assert.equal(co.clone.git("show", `${ref}:src/c.ts`), "c new", "the new file is kept");
-  assert.equal(co.clone.git("rev-parse", `${ref}^`), co.headSha, "the ref's parent is the round's start head");
-  assert.equal(co.clone.git("status", "--porcelain"), "", "the worktree is reset once the ref holds the work");
-  assert.equal(co.clone.git("rev-parse", "HEAD"), co.headSha);
-  const done = rows.filter((row) => row.step === "fix.done");
-  assert.equal(done.length, 1);
-  assert.equal(done[0]!.subtype, "round_yielded");
-  assert.equal(done[0]!.recovery_ref, ref);
-  assert.equal(outcome.outcome, "stood_down");
-  assert.equal(outcome.retainWorktree, undefined, "the work is in the ref, so the sweep may remove the worktree");
+  await t.test("staged, unstaged and new files in one ref", async (t) => {
+    const { co, seen, rows, outcome } = await yieldedRound(t);
+    assert.equal(seen.signal?.aborted, true, "the recycle stopped the worker");
+    const yielded = rows.find((row) => row.step === "fix.round_yielded");
+    assert.ok(yielded, "the round writes fix.round_yielded");
+    assert.equal(yielded.trigger, "recycle");
+    assert.equal(yielded.pr_number, PR_NUMBER);
+    assert.equal(yielded.head_sha, co.headSha);
+    const ref = String(yielded.recovery_ref);
+    assert.ok(ref.startsWith(`refs/rmd-recovery/fix-dirty/${BRANCH}/${co.headSha}/`), ref);
+    assert.deepEqual([...(yielded.paths as string[])].sort(), ["src/a.ts", "src/b.ts", "src/c.ts"]);
+    assert.equal(co.clone.git("show", `${ref}:src/a.ts`), "a staged", "the staged edit is kept");
+    assert.equal(co.clone.git("show", `${ref}:src/b.ts`), "b unstaged", "the unstaged edit is kept");
+    assert.equal(co.clone.git("show", `${ref}:src/c.ts`), "c new", "the new file is kept");
+    assert.equal(co.clone.git("rev-parse", `${ref}^`), co.headSha, "the ref's parent is the round's start head");
+    assert.equal(co.clone.git("status", "--porcelain"), "", "the worktree is reset once the ref holds the work");
+    assert.equal(co.clone.git("rev-parse", "HEAD"), co.headSha);
+    const done = rows.filter((row) => row.step === "fix.done");
+    assert.equal(done.length, 1);
+    assert.equal(done[0]!.subtype, "round_yielded");
+    assert.equal(done[0]!.recovery_ref, ref);
+    assert.equal(outcome.outcome, "stood_down");
+    assert.equal(outcome.retainWorktree, undefined, "the work is in the ref, so the sweep may remove the worktree");
+    assert.equal(yielded.index_recovery_ref, null, "the index holds nothing the worktree ref does not");
+  });
+
+  await t.test("staged content that the disk no longer shows is kept", async (t) => {
+    // The reviewer's case: src/a.ts is staged as "a staged" and then put back on disk to its start bytes. The worktree
+    // snapshot alone sees no change to src/a.ts; the staged content must still be kept before the reset.
+    const { co, rows, outcome } = await yieldedRound(t, { a: "restored" });
+    const yielded = rows.find((row) => row.step === "fix.round_yielded")!;
+    const ref = String(yielded.recovery_ref);
+    const indexRef = String(yielded.index_recovery_ref);
+    assert.ok(indexRef.startsWith(`refs/rmd-recovery/fix-dirty/${BRANCH}/${co.headSha}/`), indexRef);
+    assert.notEqual(indexRef, ref);
+    assert.equal(co.clone.git("show", `${indexRef}:src/a.ts`), "a staged", "the staged content is kept");
+    assert.equal(co.clone.git("rev-parse", `${indexRef}^`), co.headSha);
+    assert.equal(co.clone.git("show", `${ref}:src/a.ts`), "a", "the worktree ref holds the disk bytes");
+    assert.equal(co.clone.git("show", `${ref}:src/b.ts`), "b unstaged");
+    assert.deepEqual([...(yielded.paths as string[])].sort(), ["src/a.ts", "src/b.ts", "src/c.ts"]);
+    assert.equal(co.clone.git("status", "--porcelain"), "", "the reset runs only after both refs hold the work");
+    assert.equal(rows.find((row) => row.step === "fix.done")!.index_recovery_ref, indexRef);
+    assert.equal(outcome.retainWorktree, undefined);
+  });
+
+  await t.test("a file staged and then edited again keeps both edits", async (t) => {
+    const { co, rows } = await yieldedRound(t, { a: "restaged" });
+    const yielded = rows.find((row) => row.step === "fix.round_yielded")!;
+    assert.equal(co.clone.git("show", `${String(yielded.recovery_ref)}:src/a.ts`), "a on disk", "the unstaged edit is kept");
+    assert.equal(co.clone.git("show", `${String(yielded.index_recovery_ref)}:src/a.ts`), "a staged", "the staged edit is kept");
+    assert.equal(co.clone.git("status", "--porcelain"), "");
+  });
+
+  await t.test("only staged work, with no change on disk, is kept and offered", async (t) => {
+    onlyGitRuns(t);
+    t.mock.timers.enable({ apis: ["setInterval"] });
+    const co = checkout(t);
+    requestPause(co.root, RECYCLE_REASON);
+    let started!: () => void;
+    const ready = new Promise<void>((resolve) => { started = resolve; });
+    const round = fixRound(t, co, "DAEMON-1", async (args) => {
+      writeFileSync(join(co.clone.dir, "src/a.ts"), "a staged\n");
+      co.clone.git("add", "src/a.ts");
+      writeFileSync(join(co.clone.dir, "src/a.ts"), "a\n");
+      started();
+      return new Promise<WorkerResult>((_resolve, reject) => {
+        args.signal?.addEventListener("abort", () => reject(Object.assign(new Error("worker aborted"), { name: "AbortError" })), { once: true });
+      });
+    });
+    await ready;
+    t.mock.timers.tick(DEFAULT_POLL_INTERVAL_MS);
+    const { rows } = await round;
+    const yielded = rows.find((row) => row.step === "fix.round_yielded")!;
+    assert.equal(yielded.recovery_ref, null, "the disk holds no change");
+    const indexRef = String(yielded.index_recovery_ref);
+    assert.equal(co.clone.git("show", `${indexRef}:src/a.ts`), "a staged", "the staged content is not discarded");
+    assert.deepEqual(yielded.paths, ["src/a.ts"]);
+    assert.equal(co.clone.git("status", "--porcelain"), "");
+    const offered = readPreservedOwnerPatch({ repoDir: co.clone.dir, prNumber: PR_NUMBER, headSha: co.headSha, ledgerLines: rows });
+    assert.equal(offered?.recoveryRef, indexRef, "the next round is offered the staged work");
+    assert.match(offered!.excerpt, /a staged/);
+  });
 });
 
 test("W1-T8141: a yielded fix round pushes nothing and costs no strike", async (t) => {
