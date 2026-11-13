@@ -1843,9 +1843,12 @@ async function ghPrCreateFillCommandAsync(
   canonicalOps?: CanonicalOpsCriteriaAtOpen,
 ): Promise<PrCreateCommand> {
   const { withDiagnostics, draftPrCreate, prCreateArgv } = helperHost;
+  // Preserve the public authored-title call site; private titles use the immutable catalog binding.
+  const draftTitle = canonicalOps === undefined ? title
+    : prTitleForTask([], { id: canonicalOps.taskId, title: canonicalOps.title }) ?? canonicalOps.title;
   const draft = bodyOverride === undefined
-    ? draftPrCreate(worktreePath, owner, repo, branch, title)
-    : draftPrCreate(worktreePath, owner, repo, branch, title, bodyOverride);
+    ? draftPrCreate(worktreePath, owner, repo, branch, draftTitle)
+    : draftPrCreate(worktreePath, owner, repo, branch, draftTitle, bodyOverride);
   let checkedBody: string;
   try {
     checkedBody = await openPullRequestCheckedAsync(draft.body, branch, worktreePath, "origin/main", runProofAsync ?? ((proof, base, root, target) => defaultProofRunnerAsync(proof, base, root, target, { store: childStore })), { owner, repo }, canonicalOps);
@@ -7657,7 +7660,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
         // W1-T6034: the filed proofs run as awaited children, off the daemon loop. W1-T7952: titled after the task.
         const publication = opsCriteriaAtOpen ? opsRunPublication(taskId, opsCriteriaAtOpen.title, opsCriteriaAtOpen.criteria) : undefined;
         prCreate = await ghPrCreateFillCommandAsync(worktreePath, owner, task.repo, branch,
-          publication?.title ?? branchPrTitle(worktreePath, task), opts.prOpenProofRunner, true, { log }, publication?.body, opsCriteriaAtOpen);
+          branchPrTitle(worktreePath, task), opts.prOpenProofRunner, true, { log }, publication?.body, opsCriteriaAtOpen);
       } catch (err) {
         if (!(err instanceof PrOpenRefusedError)) throw err;
         // The branch is already on origin (both push paths ran above), so a refusal names it rather than stranding it.
