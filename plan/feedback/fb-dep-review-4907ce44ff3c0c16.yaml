@@ -241,10 +241,11 @@ raw: |-
   </details>
 attachments: []
 origin: repair#dep-review
-status: new
+status: proposed
 reply_to: null
 proposal_pr: null
 summary: null
 expansion: null
 submission_key: dep-review:own-red:craigoley/remudero:opentelemetry-api@1.45.1,setuptools@84.1.0
 thread_id: null
+answered_by: null
