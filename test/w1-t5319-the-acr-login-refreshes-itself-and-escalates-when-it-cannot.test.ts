@@ -1,6 +1,6 @@
 // @census-reads: deploy/
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawnSync, type SpawnSyncOptionsWithStringEncoding, type SpawnSyncReturns } from "node:child_process";
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -48,15 +48,52 @@ case "$1" in
   *) exit 0 ;;
 esac
 `, { mode: 0o755 });
+  // No timeout and no killSignal: a script that hangs is stopped by the bound of the runner of the whole file.
+  const options = (over: Record<string, string> = {}): SpawnSyncOptionsWithStringEncoding =>
+    ({ encoding: "utf8", env: { ...env, ...over } });
+  const start = (path: string, args: string[] = [], over: Record<string, string> = {}) =>
+    spawnSync("bash", [path, ...args], options(over));
   const run = (script: string, args: string[] = [], over: Record<string, string> = {}) =>
-    spawnSync("bash", [join(repo, script), ...args], { encoding: "utf8", env: { ...env, ...over }, timeout: 15_000 });
-  return { root, bin, state, env, run, calls: () => readFileSync(calls, "utf8").trim().split("\n") };
+    start(join(repo, script), args, over);
+  return { root, bin, state, env, options, start, run, calls: () => readFileSync(calls, "utf8").trim().split("\n") };
 }
+
+// A child that a signal or a spawn error stopped has no exit status. Name the script, the signal and the
+// error code, so that such a failure never reads as only `null` against an exit status.
+function assertExit(script: string, result: SpawnSyncReturns<string>, status?: number, message?: string) {
+  if (result.error !== undefined || result.signal !== null) {
+    const code = (result.error as NodeJS.ErrnoException | undefined)?.code ?? "none";
+    assert.fail(`${script} did not exit: signal ${result.signal ?? "none"}, error code ${code}\n${result.stderr ?? ""}`);
+  }
+  if (status !== undefined) assert.equal(result.status, status, message);
+}
+
+test("W1-T12496 criterion 1: the fixture starts each script with no timeout and no killSignal", (t) => {
+  const f = fixture(t);
+  const options = f.options({ AZ_RESULT: "1" });
+  assert.equal("timeout" in options, false);
+  assert.equal("killSignal" in options, false);
+  assert.equal(options.env?.AZ_RESULT, "1");
+});
+
+test("W1-T12496 criterion 2: a child stopped by a signal or a spawn error fails with its script, signal and code", (t) => {
+  const f = fixture(t);
+  const stub = join(f.root, "stopped.sh");
+  writeFileSync(stub, "#!/bin/bash\nkill -TERM $$\n", { mode: 0o755 });
+  const stopped = f.start(stub);
+  assert.equal(stopped.signal, "SIGTERM");
+  assert.throws(() => assertExit("stopped.sh", stopped, 0),
+    (e: Error) => /stopped\.sh did not exit: signal SIGTERM, error code none/.test(e.message));
+  const unstarted = spawnSync(join(f.root, "no-such-script"), [], f.options());
+  assert.throws(() => assertExit("no-such-script", unstarted, 0),
+    (e: Error) => /no-such-script did not exit: signal none, error code ENOENT/.test(e.message));
+  assertExit("acr-login.sh", f.run("deploy/acr-login.sh", ["--refresh"]), 0);
+});
 
 test("W1-T5319: serve-container logs in to the registry before its preflight pull", (t) => {
   const f = fixture(t);
   const result = f.run("deploy/serve-container.sh", ["--replace"]);
-  assert.equal(result.status, 1, result.stderr);
+  assertExit("deploy/serve-container.sh", result, 1, result.stderr);
   const calls = f.calls();
   const login = calls.indexOf("az acr login -n fixture-registry");
   const pull = calls.indexOf("docker pull fixture-registry.azurecr.io/remudero:latest");
@@ -69,18 +106,18 @@ test("W1-T5319: serve-container logs in to the registry before its preflight pul
 test("W1-T5319: a failed serve login refuses before pull or replacement", (t) => {
   const f = fixture(t);
   const result = f.run("deploy/serve-container.sh", ["--replace"], { AZ_RESULT: "1" });
-  assert.equal(result.status, 1);
+  assertExit("deploy/serve-container.sh", result, 1);
   assert.ok(result.stderr.includes(reason));
   assert.equal(f.calls().some((c) => /^docker (pull|stop|rm|run) /.test(c)), false);
   const dry = f.run("deploy/serve-container.sh", ["--dry-run"], { AZ_RESULT: "1" });
-  assert.equal(dry.status, 0, dry.stderr);
+  assertExit("deploy/serve-container.sh", dry, 0, dry.stderr);
   assert.equal(f.calls().filter((c) => c.startsWith("az ")).length, 1);
 });
 
 test("W1-T5319: the refresh records a failed az acr login with its reason", (t) => {
   const f = fixture(t);
   const result = f.run("deploy/acr-login.sh", ["--refresh"], { AZ_RESULT: "1" });
-  assert.equal(result.status, 1, result.stderr);
+  assertExit("deploy/acr-login.sh", result, 1, result.stderr);
   assert.ok(result.stderr.includes(reason));
   const record = JSON.parse(readFileSync(join(f.state, "acr-login.json"), "utf8"));
   assert.equal(record.result, "failed");
@@ -88,7 +125,7 @@ test("W1-T5319: the refresh records a failed az acr login with its reason", (t) 
   assert.equal(record.registry, "fixture-registry");
   assert.ok(Number.isFinite(Date.parse(record.ts)));
   const beat = f.run("scripts/fleet-heartbeat.sh");
-  assert.equal(beat.status, 0, beat.stderr);
+  assertExit("scripts/fleet-heartbeat.sh", beat, 0, beat.stderr);
   const payload = parseHeartbeatPayload(beat.stdout);
   assert.equal(payload.acr_login_result, "failed");
   assert.equal(payload.acr_login_ts, record.ts);
@@ -98,20 +135,22 @@ test("W1-T5319: the refresh records a failed az acr login with its reason", (t) 
 
 test("W1-T5319: a successful refresh publishes ok and clears the failed reason", (t) => {
   const f = fixture(t);
-  f.run("deploy/acr-login.sh", ["--refresh"], { AZ_RESULT: "1" });
+  assertExit("deploy/acr-login.sh", f.run("deploy/acr-login.sh", ["--refresh"], { AZ_RESULT: "1" }));
   const result = f.run("deploy/acr-login.sh", ["--refresh"]);
-  assert.equal(result.status, 0, result.stderr);
+  assertExit("deploy/acr-login.sh", result, 0, result.stderr);
   const record = JSON.parse(readFileSync(join(f.state, "acr-login.json"), "utf8"));
   assert.equal(record.result, "ok");
   assert.equal(record.reason, "");
-  const payload = parseHeartbeatPayload(f.run("scripts/fleet-heartbeat.sh").stdout);
+  const ok = f.run("scripts/fleet-heartbeat.sh");
+  assertExit("scripts/fleet-heartbeat.sh", ok);
+  const payload = parseHeartbeatPayload(ok.stdout);
   assert.equal(payload.acr_login_result, "ok");
   assert.equal(payload.acr_login_reason, "");
 });
 
 test("W1-T5319: a host without az publishes unavailable even with an old failed record", (t) => {
   const f = fixture(t);
-  f.run("deploy/acr-login.sh", ["--refresh"], { AZ_RESULT: "1" });
+  assertExit("deploy/acr-login.sh", f.run("deploy/acr-login.sh", ["--refresh"], { AZ_RESULT: "1" }));
   rmSync(join(f.bin, "az"));
   const ambient = join(f.root, "ambient-bin");
   mkdirSync(ambient);
@@ -131,21 +170,27 @@ test("W1-T5319: a host without az publishes unavailable even with an old failed 
   const absent = spawnSync("bash", ["-c", "command -v az"], { env: f.env, encoding: "utf8" });
   assert.equal(absent.status, 1, "the fixture must exclude az even when the runner has it installed");
   const refresh = f.run("deploy/acr-login.sh", ["--refresh"]);
-  assert.equal(refresh.status, 0, refresh.stderr);
+  assertExit("deploy/acr-login.sh", refresh, 0, refresh.stderr);
   const record = JSON.parse(readFileSync(join(f.state, "acr-login.json"), "utf8"));
   assert.equal(record.result, "unavailable");
   assert.match(record.reason, /Azure CLI is not installed/);
   writeFileSync(join(f.state, "acr-login.json"), JSON.stringify({ ...record, result: "failed" }));
   const beat = f.run("scripts/fleet-heartbeat.sh");
+  assertExit("scripts/fleet-heartbeat.sh", beat);
   assert.equal(parseHeartbeatPayload(beat.stdout).acr_login_result, "unavailable");
 });
 
 test("W1-T5319: an absent or unreadable refresh receipt never publishes ok", (t) => {
   const f = fixture(t);
   const path = join(f.state, "acr-login.json");
-  assert.equal(parseHeartbeatPayload(f.run("scripts/fleet-heartbeat.sh").stdout).acr_login_result, "unknown");
+  const beat = () => {
+    const result = f.run("scripts/fleet-heartbeat.sh");
+    assertExit("scripts/fleet-heartbeat.sh", result);
+    return parseHeartbeatPayload(result.stdout);
+  };
+  assert.equal(beat().acr_login_result, "unknown");
   writeFileSync(path, '{"result":"garbage","ts":"broken"}');
-  assert.equal(parseHeartbeatPayload(f.run("scripts/fleet-heartbeat.sh").stdout).acr_login_result, "unknown");
+  assert.equal(beat().acr_login_result, "unknown");
 });
 
 test("W1-T5319: a sourced helper waits for an explicit login call", (t) => {
@@ -153,7 +198,7 @@ test("W1-T5319: a sourced helper waits for an explicit login call", (t) => {
   const result = spawnSync("bash", ["-c", 'source "$1"; echo sourced', "fixture", join(repo, "deploy/acr-login.sh")], {
     encoding: "utf8", env: f.env,
   });
-  assert.equal(result.status, 0, result.stderr);
+  assertExit("deploy/acr-login.sh", result, 0, result.stderr);
   assert.match(result.stdout, /sourced/);
   assert.deepEqual(f.calls(), [""]);
 });
@@ -239,7 +284,7 @@ test("W1-T5319: removing the serve login makes the order proof fail", (t) => {
   assert.ok(mutated !== source, "the mutant must remove the helper call");
   writeFileSync(path, mutated);
   const result = spawnSync("bash", [path, "--replace"], { encoding: "utf8", env: f.env });
-  assert.equal(result.status, 1, result.stderr);
+  assertExit("deploy/serve-container.sh (mutated)", result, 1, result.stderr);
   assert.ok(f.calls().some((c) => c.startsWith("docker pull ")));
   assert.equal(f.calls().some((c) => c.startsWith("az ")), false);
 });
@@ -253,7 +298,7 @@ test("W1-T5319: the installed timer runs refresh as the host credential owner", 
     RMD_LAUNCHER_PATH: join(f.root, "launcher"), RMD_NODE_MAX_OLD_SPACE_MB: "8192",
     RMD_SERVICE_USER: "fixture-owner", RMD_REVIVAL_LOG: join(f.root, "revivals"),
   });
-  assert.equal(result.status, 0, result.stderr);
+  assertExit("deploy/install-host-units.sh", result, 0, result.stderr);
   const service = readFileSync(join(units, "rmd-acr-login.service"), "utf8");
   const timer = readFileSync(join(units, "rmd-acr-login.timer"), "utf8");
   assert.match(service, /User=fixture-owner/);
