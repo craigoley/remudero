@@ -8,6 +8,7 @@ import type { Route } from "./service.js";
 import { readLedgerUnionRecordsSync } from "./ledger-union.js";
 import { escalationReplySubmissionKey, readEscalationQuestionFeedback } from "./escalation-correspondence.js";
 import type { FeedbackEntry } from "./feedback.js";
+import { CONSOLE_CORRECTION_KIND, CONSOLE_CORRECTION_VERSION } from "./console-feedback.js";
 
 const MAX_SOURCE_BYTES = 65_536;
 const MAX_HISTORY_MESSAGES = 100;
@@ -47,6 +48,9 @@ export interface EscalationConversation {
   recommendationReplies?: { accept?: string; decline: string };
   activeQuestion?: { issueUrl: string; feedbackId: string; revision: string; seq: number; observedAt: string; updatedAt: string };
   replyUnavailableReason?: string;
+  /** W1-T11104: advertised only by a native read that can verify this conversation; an explicit,
+   *  opt-in wording-correction kind on the reply route. It is not a reply and clears nothing. */
+  wordingCorrection?: { kind: typeof CONSOLE_CORRECTION_KIND; version: typeof CONSOLE_CORRECTION_VERSION };
   details: string;
 }
 
@@ -338,6 +342,7 @@ export function createEscalationConversationReader(opts: {
       ...(activeQuestion ? { activeQuestion } : {}),
       ...(canStartConversation ? { initialMessage: `${parsed.headline}\n\n${parsed.detail}` } : {}),
       ...(recommendationReplies ? { recommendationReplies } : {}),
+      wordingCorrection: { kind: CONSOLE_CORRECTION_KIND, version: CONSOLE_CORRECTION_VERSION },
       ...(!canReply && !canStartConversation ? { replyUnavailableReason: questionFailure === "invalid" ? "The current question no longer matches this conversation. Refresh before answering."
         : questionFailure === "unavailable" ? "The current agent question could not be verified. Earlier messages remain readable."
         : stale ? "The saved source is stale. Refresh before replying."

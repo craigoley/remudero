@@ -18,6 +18,9 @@
     - src/lib/serve-plan-reload.ts
     - src/lib/board.ts
     - test/console-api/board/the-board-and-serve-show-tasks-from-both-catalogs.test.ts
+    - src/lib/now-view.ts
+    - openapi/daemon.yaml
+    - packages/api-client/src/schema.d.ts
   status: queued
   attempts: 0
   acceptance:
@@ -29,7 +32,7 @@
       proof: "grep: W1-T12211 criterion 3 in test/console-api/board/the-board-and-serve-show-tasks-from-both-catalogs.test.ts"
     - claim: "If the ops catalog is unreadable, the board says that it is unreadable and shows the public tasks. It does not show a count of zero ops tasks"
       proof: "grep: W1-T12211 criterion 4 in test/console-api/board/the-board-and-serve-show-tasks-from-both-catalogs.test.ts"
-    - claim: "With no host file, the board and serve make the same reads and give the same output as today"
+    - claim: "invariant:legacy-output — With no host file, the board and serve make the same reads and give the same output as today"
       proof: "grep: W1-T12211 criterion 5 in test/console-api/board/the-board-and-serve-show-tasks-from-both-catalogs.test.ts"
     - claim: "The plan reload of serve, the production caller, composes both catalogs, and the test goes through that reload"
       proof: "grep: planDestinationRepository( in src/lib/serve-plan-reload.ts"
@@ -41,6 +44,7 @@
     - The id and the status of an ops task are already public: the id is in the trailer of its public pull request, and the status follows from the merge.
     - The switch is the host file `<state dir>/plan-destination.json`. If the file is absent, the switch is off and the behaviour is byte-identical to today. This task adds no kind. It must merge before `task` is turned on.
   design: |
+    INVARIANT legacy-output: With no host file, preserve the public-only reads, output, callbacks and plan identity; no private reader or writer is activated.
     Compose the plan in the plan reload of serve and in the status board. Mark each task with its catalog.
     Build the public row of an ops task from an explicit list of fields. Do not build it from the task object with fields removed, so that a new field of a task is private by default.
     The console at app.remudero.com needs a sign-in. The builder lists each surface that this task changes and says which ones are public. A surface that is not public may show more only if the operator says so.
