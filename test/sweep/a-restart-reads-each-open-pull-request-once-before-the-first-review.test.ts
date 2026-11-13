@@ -20,7 +20,8 @@ import { servedOpenPrViews } from "#src/cli/commands/daemon.js";
 import type { LightPassScope } from "#src/lib/daemon.js";
 import { loadPlanFilingFileCache } from "#src/lib/open-prs-rest.js";
 import type { ReadGeneration } from "#src/lib/read-plane.js";
-import { decideReviewStatusPost } from "#src/lib/review.js";
+import { fetchPrLifecycle, postReviewStatusGuarded, reviewInputDigest } from "#src/lib/review.js";
+import { readLedgerLines } from "#src/lib/status.js";
 import type { OpenPrView, SweepDeps } from "#src/lib/sweep.js";
 import { createTickReadProducer, type TickReadFacts } from "#src/lib/tick-read-worker.js";
 import { loadPlan, type Plan } from "#src/lib/plan.js";
@@ -38,7 +39,7 @@ function view(headSha: string): OpenPrView {
     prNumber: PR, prUrl: `https://github.com/o/r/pull/${PR}`, taskId: `W1-T${PR}`, headSha,
     headRefName: `run-W1-T${PR}-1`, lastActivityAt: new Date().toISOString(), reviewState: "none",
     checksState: "green", unmetCriteria: [], priorStrikes: 0, autoMergeArmed: false, mergeState: "clean",
-    changedFiles: ["src/subject.ts"], reviewInputDigest: `digest-${headSha}`,
+    changedFiles: ["src/subject.ts"], reviewInputDigest: reviewInputDigest(headSha, pullRow(headSha).body as string),
   };
 }
 
@@ -99,22 +100,15 @@ function fixture() {
   const logs: Array<Record<string, unknown>> = [];
   const posted: Array<{ prNumber: number; headSha: string }> = [];
   const rows: Array<Record<string, unknown>> = [];
-  /** The live head at post time. The guard is the review module's own `decideReviewStatusPost`. */
-  let liveDigest: string | undefined;
+  let liveHead: string | undefined;
   const effects: SweepDeps = {
     ledgerPath: join(root, "ledger.ndjson"), runId: "T12236", readLedger: () => rows,
     appendLine: (_path, row) => { rows.push(row); }, readLedgerUnion: () => ({ complete: true, lines: rows }),
     readActiveWorkerCount: () => 0, arm: () => assert.fail("unexpected arm"),
-    postReview: (pr) => {
-      const decision = decideReviewStatusPost({ headSha: pr.headSha, state: "success", evidence: "executed",
-        ...(pr.reviewInputDigest ? { reviewInputDigest: pr.reviewInputDigest } : {}) }, undefined,
-        { merged: false, closed: false, reviewInputDigest: liveDigest ?? pr.reviewInputDigest });
-      if (decision.post) posted.push({ prNumber: pr.prNumber, headSha: pr.headSha });
-      else rows.push({ step: "review.post_refused", head_sha: pr.headSha, reason: decision.reason });
-    },
+    postReview: (pr) => { posted.push({ prNumber: pr.prNumber, headSha: pr.headSha }); },
     close: () => assert.fail("unexpected close"), dispatchFix: () => assert.fail("unexpected fix"),
     escalate: () => assert.fail("unexpected escalation"),
-    readLiveState: (p) => ({ ok: true, state: "OPEN", headSha: p.headSha }), rereadPrAtAct: async (p) => p,
+    readLiveState: (p) => ({ ok: true, state: "OPEN", headSha: liveHead ?? p.headSha }), rereadPrAtAct: async (p) => p,
   };
   const hook = (openPrViews?: ReturnType<typeof servedOpenPrViews>) =>
     buildSweepLightHook("o", repo, { root } as never, effects.ledgerPath, "T12236", NO_PLAN,
@@ -122,8 +116,9 @@ function fixture() {
       { effects: () => effects, readCompare: async () => ({ ahead_by: 0, files: [] }), ...(openPrViews ? { openPrViews } : {}) });
   const timing = () => logs.filter((row) => row.step === "sweep_light.pre_review_timing");
   const storePath = join(root, "state", "cache", "plan-filing-files.json");
-  return { root, repo, logs, posted, rows, hook, timing, storePath, useShim,
-    moveLiveHead: (headSha: string) => { liveDigest = `digest-${headSha}`; },
+  return { root, repo, logs, posted, rows, hook, timing, storePath, useShim, effects,
+    livePull: () => pullRow(liveHead!, repo),
+    moveLiveHead: (headSha: string) => { liveHead = headSha; },
     cleanup: async () => {
       // A posted review frees a lane, and the refill reads the open pull requests after the hook returns.
       // Wait until every shim call has ended and none starts for 250 ms, so no read reaches the real `gh`.
@@ -194,19 +189,45 @@ test("W1-T12236 criterion 4: a boot review from the tick read is for its head, a
   const f = fixture();
   try {
     f.useShim("head-live");
+    f.moveLiveHead("head-tick");
+    const attempts: string[] = [];
+    const observedHeads: string[] = [];
+    const completed: Array<Promise<unknown>> = [];
+    f.effects.postReview = (pr) => {
+      attempts.push(pr.headSha);
+      const posting = postReviewStatusGuarded({
+        owner: "o", repo: f.repo, sha: pr.headSha, state: "success", evidence: "executed",
+        taskId: pr.taskId!, ledgerPath: f.effects.ledgerPath, runId: "T12236", prUrl: pr.prUrl,
+        reviewInputDigest: pr.reviewInputDigest,
+        readReviewStatusHistory: async () => ({ kind: "readable", failures: [] }),
+        fetchLifecycle: () => fetchPrLifecycle(pr.prUrl, () => {
+          const row = f.livePull();
+          observedHeads.push((row.head as { sha: string }).sha);
+          return row;
+        }),
+        post: (status) => { f.posted.push({ prNumber: pr.prNumber, headSha: status.sha }); },
+      });
+      completed.push(posting);
+      return posting.then(() => {});
+    };
     const tickViews = [view("head-tick")];
     const served = servedOpenPrViews(() => generation(TICK_STARTED_AT_MS + 5, tickViews), () => TICK_STARTED_AT_MS);
     await f.hook(served)(BOOT);
+    await Promise.all(completed);
     assert.deepEqual(f.posted, [{ prNumber: PR, headSha: "head-tick" }], "the review is for the head in the views");
     assert.equal(tickViews[0]!.headSha, "head-tick", "the hook got a copy, never the published views");
     f.posted.length = 0;
     f.rows.length = 0;
     f.moveLiveHead("head-pushed");
     await f.hook(served)(BOOT);
+    await Promise.all(completed);
     assert.equal(f.posted.length, 0, "the review for the old head did not post");
-    const refused = f.rows.filter((row) => row.step === "review.post_refused");
+    assert.deepEqual(attempts, ["head-tick", "head-tick"], "both admitted reviews target the tick head");
+    assert.deepEqual(observedHeads, ["head-tick", "head-pushed"], "the production guard reads the changed live head");
+    const refused = readLedgerLines(f.effects.ledgerPath).filter((row) => row.step === "review.post_refused");
     assert.equal(refused.length, 1);
     assert.equal(refused[0]!.head_sha, "head-tick");
+    assert.match(String(refused[0]!.reason), /review input changed.*different head\+body subject/);
   } finally { await f.cleanup(); }
 });
 
@@ -259,6 +280,23 @@ test("W1-T12236 criterion 7: sweep_light.pre_review_timing names the source of i
     await hook(IDLE);
     assert.deepEqual(f.timing().map((row) => row.views_source), ["tick_read", "own_read"]);
   } finally { await f.cleanup(); }
+});
+
+test("W1-T12236 criterion 7: failed reads still name their selected views source", async () => {
+  for (const source of ["tick_read", "own_read"] as const) {
+    const f = fixture();
+    try {
+      const gh = f.useShim("head-live");
+      gh.addRoute({ when: "state=open", stderr: "open views unavailable", exit: 1 });
+      await f.hook(source === "tick_read" ? () => Promise.reject(new Error("tick views unavailable")) : undefined)(BOOT);
+      assert.equal(f.posted.length, 0);
+      const errors = f.logs.filter((row) => row.step === "sweep_light.error");
+      assert.equal(errors.length, 1, JSON.stringify(f.logs));
+      assert.match(String(errors[0]!.error), /views unavailable/);
+      assert.deepEqual(f.timing().map((row) => row.views_source), [source]);
+      assert.equal(listReads(gh, f.repo) > 0, source === "own_read");
+    } finally { await f.cleanup(); }
+  }
 });
 
 test("W1-T12236: a kept entry is used only for its own pull request number and head", () => {

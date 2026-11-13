@@ -1249,18 +1249,18 @@ export function buildSweepLightHook(
     const lightTickId = randomUUID();
     const timing = new LightPassPreReviewTiming(io.clock);
     let timingWritten = false;
-    let viewsSource: "tick_read" | "own_read" | undefined;
+    let viewsSource: "tick_read" | "own_read" = "own_read";
     const finishTiming = () => {
       if (timingWritten) return;
       timingWritten = true;
-      log("sweep_light.pre_review_timing", { run_id: runId, ...timing.finish(),
-        ...(viewsSource ? { views_source: viewsSource } : {}) });
+      log("sweep_light.pre_review_timing", { run_id: runId, ...timing.finish(), views_source: viewsSource });
     };
     try {
       await timing.run(async () => {
       // W1-T12236: only the first read passes the scope; a refill read reads its own views.
-      const readViews = async (passScope?: LightPassScope) => {
+      const readViews = async (passScope?: LightPassScope, initial = false) => {
         const served = io.openPrViews?.(passScope);
+        if (initial) viewsSource = served ? "tick_read" : "own_read";
         if (served) return { source: "tick_read" as const, views: await served };
         const views = await buildOpenPrViewsAsync(owner, repo, ledgerPath, {
           planFilingFileCache,
@@ -1273,8 +1273,7 @@ export function buildSweepLightHook(
         if (!saved.ok) log("plan_filing_files.store_save_failed", { reason: saved.reason });
         return { source: "own_read" as const, views };
       };
-      const first = await timing.run(() => timing.measure("open_pr_views", () => readViews(scope)));
-      viewsSource = first.source;
+      const first = await timing.run(() => timing.measure("open_pr_views", () => readViews(scope, true)));
       const openPrs = first.views;
       compares.retain(openPrs);
       const activePlan = planAccessor?.() ?? plan;
