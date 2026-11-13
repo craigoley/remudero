@@ -19,7 +19,7 @@
     - src/lib/gh-read-broker-watch.ts
     - src/lib/daemon.ts
     - test/github/a-stale-read-broker-heartbeat-is-reported.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: A heartbeat file older than twice its declared interval writes one ledger row naming its age and interval, and a fresh heartbeat writes none
