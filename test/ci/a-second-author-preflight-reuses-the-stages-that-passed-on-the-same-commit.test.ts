@@ -42,7 +42,7 @@ const stageScript = (stage: string) => [
   `if (existsSync(process.env.T12166_RED + '/${stage}')) process.exitCode = 1;`, ""].join("\n");
 
 /** A committed author tree whose census, static gate and changed suite pass unless a marker names them. */
-function fixture(opts: { otherCostMs?: number } = {}) {
+function fixture(opts: { otherCostMs?: number; docsInput?: boolean } = {}) {
   const repo = gitRepo({ kind: "stage-reuse", seedCommit: false });
   cleanups.push(() => repo.cleanup());
   const root = repo.dir;
@@ -53,6 +53,18 @@ function fixture(opts: { otherCostMs?: number } = {}) {
   writeFileSync(join(root, "package-lock.json"), readFileSync(join(ROOT, "package-lock.json")));
   writeFileSync(join(root, "scripts/diff-class.mjs"), "// This fixture has no census path readers.\n");
   writeFileSync(join(root, "scripts/census-precheck.mjs"), stageScript("census"));
+  if (opts.docsInput) {
+    writeFileSync(join(root, "scripts/docs-stage.mjs"), [
+      "import { appendFileSync, existsSync } from 'node:fs';",
+      "const stage = `docs-index:${process.argv[2]}`;",
+      "appendFileSync(process.env.T12166_LOG, `${stage}\\n`);",
+      "if (existsSync(`${process.env.T12166_RED}/${stage}`)) process.exitCode = 1;", "",
+    ].join("\n"));
+    writeFileSync(join(root, "package.json"), JSON.stringify({ type: "module", scripts: {
+      "docs-index:check": "node scripts/docs-stage.mjs check",
+      "docs-index:check-paths": "node scripts/docs-stage.mjs check-paths",
+    }, description: "baseline" }) + "\n");
+  }
   writeFileSync(join(root, "src/run-task.ts"), stageScript("static"));
   writeFileSync(join(root, "test/setup/tmp-hygiene.ts"), "export {};\n");
   writeFileSync(join(root, "src/leaf.ts"), "export const value = 1;\n");
@@ -65,6 +77,14 @@ function fixture(opts: { otherCostMs?: number } = {}) {
   repo.git("commit", "-m", "test: baseline");
   repo.git("remote", "add", "origin", root);
   repo.git("checkout", "-b", "run-unfiled-stage-reuse");
+  if (opts.docsInput) {
+    const packagePath = join(root, "package.json");
+    const packageData = JSON.parse(readFileSync(packagePath, "utf8"));
+    packageData.description = "changed docs input";
+    writeFileSync(packagePath, JSON.stringify(packageData) + "\n");
+    repo.git("add", "package.json");
+    repo.git("commit", "-m", "docs: change index input");
+  }
   writeFileSync(join(root, "src/leaf.ts"), "export const value = 2;\n");
   writeFileSync(join(root, "test/leaf.test.ts"), [
     "import { appendFileSync, existsSync } from 'node:fs';", "import { test } from 'node:test';",
@@ -184,6 +204,24 @@ test("W1-T12166 criterion 3: a stage that failed, did not run or was not measure
   assert.deepEqual(reused([good("census-precheck"), { ...good("affected-tests"), testSummary: { ...summary, fail: 1 } }]), ["census-precheck"]);
   assert.deepEqual(reused([good("census-precheck"), { ...good("affected-tests"), name: "affected-tests-subset" }]), ["census-precheck"]);
   assert.deepEqual(reused([good("census-precheck"), good("affected-tests")], { tiered: { ran: [] } }), ["census-precheck"]);
+});
+
+test("W1-T12166: a refused docs precheck reuses the passing census and reruns from the refused stage", () => {
+  const f = fixture({ docsInput: true });
+  const first = run(f, ["docs-index:check"]);
+  assert.equal(first.receipt.verdict, "refused");
+  assert.deepEqual(first.ran, ["census", "docs-index:check"]);
+  assert.deepEqual(first.receipt.dependencyProvenance.after, first.receipt.dependencyProvenance.before,
+    "the refusal records whether its dependencies stayed stable");
+
+  const second = run(f);
+  assert.equal(second.receipt.stageReuse?.state, "reused", second.receipt.stageReuse?.reason);
+  assert.deepEqual(second.receipt.stageReuse?.reused, ["census-precheck"]);
+  assert.deepEqual(second.ran, ["docs-index:check", "docs-index:check-paths", "static", "tests"]);
+  assert.equal(step(second.receipt, "census-precheck")?.reused?.runStartedAt, first.receipt.startedAt);
+  assert.equal(step(second.receipt, "docs-index-precheck:docs-index:check")?.reused, undefined,
+    "the refused docs stage is rerun");
+  assert.equal(second.receipt.verdict, "passed");
 });
 
 test("W1-T12166 criterion 4: when one key field differs, or the last receipt is absent or does not parse, every stage runs", () => {

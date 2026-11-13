@@ -329,19 +329,29 @@ function stagePassedAndMeasured(step, previous) {
     summary?.pass > 0 && summary.fail === 0 && summary.cancelled === 0;
 }
 
+/** A refused run may still have a reusable prefix when its last recorded stage failed explicitly. */
+function refusedAtRecordedStage(previous) {
+  const steps = previous.steps;
+  return previous.verdict === 'refused' && typeof previous.error === 'string' &&
+    Array.isArray(steps) && steps.length > 0 && steps.at(-1)?.ok === false;
+}
+
 /**
  * W1-T12166 — the stages of the last receipt of this checkout that a new run need not run again.
  * OBSERVED 2026-11-10..13: 11 Azure preflights failed only on suites that pass alone, and each second run
  * repeated 15 to 20 minutes of census and static work on the same commit.
- * RULE: reuse only when the last run ended without a refusal, its dependency record did not change while it
- * ran, and the head, base, Node version, dependency record and selection are all the same. Reuse the stages
- * in their order and stop at the first one that failed, did not run or was not measured: every later stage runs.
+ * RULE: reuse only when the last run completed or refused at a recorded failed stage, its dependency record
+ * did not change while it ran, and the head, base, Node version, dependency record and selection are all the
+ * same. Reuse the stages in their order and stop at the first one that failed, did not run or was not measured:
+ * every later stage runs.
  */
 export function reusableAuthorStages(previous, current) {
   const none = (reason) => ({ state: 'none', reason, stages: [] });
   if (!previous || previous.unreadable) return none(`no readable last receipt (${previous?.unreadable ?? 'absent'})`);
   if (typeof previous.startedAt !== 'string') return none('the last receipt names no run start time');
-  if (previous.dryRun !== false || previous.error !== undefined || !['passed', 'failed', 'over-capacity'].includes(previous.verdict)) {
+  const stageRefusal = refusedAtRecordedStage(previous);
+  if (previous.dryRun !== false || (previous.error !== undefined && !stageRefusal) ||
+      (!['passed', 'failed', 'over-capacity'].includes(previous.verdict) && !stageRefusal)) {
     return none(`the last run ended ${previous.verdict ?? 'running'}${previous.error ? `: ${previous.error}` : ''}`);
   }
   const record = previous.dependencyProvenance;
@@ -967,6 +977,14 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
       : receipt.selection === 'over-capacity' ? 'over-capacity' : 'passed';
   } catch (error) {
     receipt.verdict = error instanceof MacAuthorCapacityRefusal ? 'over-capacity' : 'refused';
+    // A failed early precheck exits before the normal end-of-run provenance read. Record it here so a
+    // later same-input retry can reuse only the measured prefix when the dependency donor stayed stable.
+    if (receipt.dependencyProvenance?.before && receipt.dependencyProvenance.after === undefined) {
+      try { receipt.dependencyProvenance.after = authorDependencyProvenance(root); }
+      catch (provenanceError) {
+        receipt.dependencyProvenance.after = { state: 'unavailable', reason: provenanceError.message };
+      }
+    }
     let refusalLines = [];
     if (error instanceof MacAuthorCapacityRefusal) {
       const { summary, lines } = macAuthorRefusalReport(error.stage, error.admission);
