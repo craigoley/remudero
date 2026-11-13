@@ -73,7 +73,8 @@ test("W1-T11014: fix-lane-commit-refused-the-worker-changed-nothing clears witho
   assert.equal(f.pushes(), 1);
 });
 
-test("an unchanged recovery is refused without another recovery or a push", async t => {
+test("W1-T12502 criterion 1: W1-T11014 criterion 3: unchanged recovery is refused without another recovery or a push", async t => {
+  assert.match(t.name, /^W1-T12502 criterion 1:/);
   const f = fixture(t, "the worker changed nothing", false);
   const result = await runFixRung(f.options);
   assert.equal(result.outcome, "stood_down");
@@ -83,7 +84,8 @@ test("an unchanged recovery is refused without another recovery or a push", asyn
   assert.equal(f.pushes(), 0);
 });
 
-test("other commit refusals do not receive a no-edit recovery", async t => {
+test("W1-T12502 criterion 2: W1-T11014 criterion 2: a different refusal reason does not receive a no-edit recovery", async t => {
+  assert.match(t.name, /^W1-T12502 criterion 2:/);
   const matching = fixture(t);
   assert.equal((await runFixRung(matching.options)).outcome, "fixed");
   assert.equal(matching.prompts.length, 2);
