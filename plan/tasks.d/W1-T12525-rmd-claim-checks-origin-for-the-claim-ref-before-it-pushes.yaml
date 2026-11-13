@@ -1,0 +1,85 @@
+- id: W1-T12525
+  title: "rmd claim checks origin for the claim ref before it pushes, and reports a held claim as taken without a push"
+  repo: remudero
+  depends_on: []
+  priority: 1.3
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # one claim attempt, but three existing suites (live-write guard, daemon loop, dispatch claim) pin its git calls; the push stays create-only and the hook is unchanged
+  band_meaning: blast-radius
+  origin: operator-session#follow-ups-2026-11-13
+  plan_refs:
+    - W1-T8000
+    - W1-T2552
+  files:
+    - src/lib/dispatch-claim.ts
+    - test/dispatch/rmd-claim-checks-origin-for-the-claim-ref-before-it-pushes.test.ts
+    - test/live-write-guard.test.ts
+    - test/the-dispatch-claim-runs-git-off-the-daemon-loop.test.ts
+    - test/dispatch-claim.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "When `git ls-remote origin refs/rmd-dispatch/<id>` names a holder, the sync and the async reserver's `attempt` return `taken` and run no `git push`. The refusal names the holder's anchor"
+      proof: "grep: W1-T12525 criterion 1 in test/dispatch/rmd-claim-checks-origin-for-the-claim-ref-before-it-pushes.test.ts"
+    - claim: "invariant:claim-stays-create-only — when the ls-remote prints nothing, `attempt` pushes `<anchor-sha>:refs/rmd-dispatch/<id>` exactly as today, with no `+` and no force flag. A push that loses a race (the ref appears between the check and the push) still returns `taken`"
+      proof: "grep: W1-T12525 criterion 2 in test/dispatch/rmd-claim-checks-origin-for-the-claim-ref-before-it-pushes.test.ts"
+    - claim: "When the ls-remote fails, `attempt` returns `unreachable`, keeps git's stderr for `lastAttemptStderr`, and runs no push"
+      proof: "grep: W1-T12525 criterion 3 in test/dispatch/rmd-claim-checks-origin-for-the-claim-ref-before-it-pushes.test.ts"
+    - claim: "With a real fixture origin that already holds the ref and a pre-push hook that writes a marker file, the real git reserver returns `taken` and the hook never runs"
+      proof: "grep: W1-T12525 criterion 4 in test/dispatch/rmd-claim-checks-origin-for-the-claim-ref-before-it-pushes.test.ts"
+    - claim: "hooks/pre-push is unchanged: an empty stdin still runs every gate. test/a-branch-delete-push-runs-no-content-gate.test.ts passes unchanged"
+      proof: "grep: W1-T12525 criterion 5 in test/dispatch/rmd-claim-checks-origin-for-the-claim-ref-before-it-pushes.test.ts"
+  rationale: |
+    A claim of a task that origin already holds costs 10 to 45 minutes of host time before git refuses it.
+    READ at origin/main 713c610e6:
+    - src/lib/dispatch-claim.ts:444-446 `claimPushArgs` is `push origin <anchor-sha>:refs/rmd-dispatch/<id>`.
+      `attempt` runs it with no check first: the sync reserver at :334-339 (push at :336) and the async one at
+      :531-536 (push at :533). `holder` (:340-342) already reads the ref with ls-remote, but only after the push fails.
+    - hooks/pre-push:63 reads stdin once. The loop at :78-95 sorts the lines, and :96-103 are the two fast paths
+      (deletion-only, dispatch-claim-only). Every content check (:131-497) runs when neither fast path matches.
+    REPRODUCED with git 2.43.0 (the Azure host's git): when origin already holds the ref, the push is a
+    non-fast-forward. git leaves a rejected ref out of the hook's input, so the hook runs with an EMPTY stdin.
+    :78-95 then sees no dispatch line, the fast path at :100 does not match, and every content check runs against
+    the whole branch. Then the push is refused, and `classifyPushFailure` reads it as `taken`.
+    The hand lane works around this today (shipbuilt.sh skips its claim when origin holds the ref, and the Azure
+    build rules say to claim once). Every other caller of `rmd claim`, and a run's own claim, still pays.
+    CHECKED for overlap on origin/main plan/tasks.d: no queued or blocked task names `claimPushArgs`, a claim
+    holder check, or the hook's empty-stdin case.
+  design: |
+    1. At the top of `attempt` in both reservers, after the push guard, read `git ls-remote origin <ref>`.
+       A non-zero exit is `unreachable` with its stderr kept, as a failed push is today. A listed sha is `taken`
+       with no push. Reuse `holderFromLsRemote` for the parse; add no new exported function.
+    2. Otherwise push as today. The push stays create-only (no `+`, no force), so a race between the check and
+       the push still ends in a rejected push that reads `taken`. The check only saves the push when origin
+       already holds the ref.
+    3. Do not change hooks/pre-push. An empty stdin must keep running every gate, because hand runs and tests
+       call the hook with no input.
+    4. Before you change anything, grep test/ for fakes that pin the git call order of `attempt`
+       (test/dispatch-claim.test.ts, test/the-dispatch-claim-runs-git-off-the-daemon-loop.test.ts and the others
+       that build `gitDispatchClaimReserver`). If one outside `files` asserts the exact call list, amend first.
+    5. AMENDED after the step 4 grep. Three tests outside the first `files` list pin the old git calls of
+       `attempt`, and the check breaks each one. Their fakes answer the new ls-remote, and no claim they make
+       is removed:
+       - test/live-write-guard.test.ts: its fake origin answers every ls-remote with a sha, so the dispatch
+         attempt reads `taken` and skips its push (6 pushes, not 7). The fake answers a dispatch claim ref as
+         free. Its child process with no runner variable expects the argv list `["ls-remote","push"]`, still
+         with no `remote get-url` lookup.
+       - test/the-dispatch-claim-runs-git-off-the-daemon-loop.test.ts: a git that hangs is now killed on the
+         ls-remote, so the refusal names `git ls-remote timed out`, not `git push timed out`.
+       - test/dispatch-claim.test.ts: its W1-T1268 shape fake fails every ls-remote. It answers the claim
+         ref's ls-remote as free, so the attempt still pushes and reads `created`.
+       A held claim keeps a stderr line for `lastAttemptStderr` that says the push would be rejected, so the
+       real-origin test that matches `rejected` passes unchanged. The three suites are three surfaces, so
+       Rule 19 raises the risk to high.
+    INVARIANT claim-stays-create-only: the claim push never overwrites a ref origin holds; the new check only
+    skips a push that would be refused.
+    NOT IN SCOPE: the pre-push hook; the triage and pull request claim reservers (they may get the same check later).
+  falsifier: |
+    Remove the ls-remote check and criteria 1 and 4 must fail (a push runs and the marker hook runs).
+    Add `+` to the push refspec and criterion 2 must fail. Return `created` when ls-remote fails and criterion 3
+    must fail. Restore and require all five to pass.
+  note: |
+    Id W1-T12525 reserved for run-unfiled-1794594748000 with ~/rmd-work/bin/reserve-id.sh.
