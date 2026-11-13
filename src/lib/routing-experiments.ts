@@ -26,6 +26,7 @@ export interface RoutingExperiment {
   reviewCadence?: "daily";
   /** Fewer tasks than this in either arm is reported as an insufficient sample, never a verdict. */
   minTasksPerArm: number;
+  decision: { minimumDifference: number; power: number; confidence: number; stopOn: string };
 }
 
 export const ROUTING_EXPERIMENTS: readonly RoutingExperiment[] = [
@@ -40,6 +41,7 @@ export const ROUTING_EXPERIMENTS: readonly RoutingExperiment[] = [
     revisitOn: "2026-10-08",
     // W1-T3570's admission bar for a cash lane, reused so both trials read against one standard.
     minTasksPerArm: 20,
+    decision: { minimumDifference: 0.1, power: 0.8, confidence: 0.95, stopOn: "2026-12-10" },
   },
   {
     id: "sol-vs-sonnet55",
@@ -51,6 +53,7 @@ export const ROUTING_EXPERIMENTS: readonly RoutingExperiment[] = [
     startedOn: "2026-09-29",
     revisitOn: "2026-10-13",
     minTasksPerArm: 20,
+    decision: { minimumDifference: 0.1, power: 0.8, confidence: 0.95, stopOn: "2026-12-10" },
   },
   ...["claude-sonnet-5-5", "claude-sonnet-5"].map((model) => ({
     id: model === "claude-sonnet-5-5" ? "sol61-vs-sonnet55" : "sol61-vs-sonnet5",
@@ -58,6 +61,7 @@ export const ROUTING_EXPERIMENTS: readonly RoutingExperiment[] = [
     arms: { claude: "sonnet", codex: "sol61" },
     claudeModel: new RegExp(`^${model}$`), codexModel: /^gpt-6\.1-sol$/,
     startedOn: "2026-10-02", revisitOn: "2026-10-02", reviewCadence: "daily" as const, minTasksPerArm: 20,
+    decision: { minimumDifference: 0.1, power: 0.8, confidence: 0.95, stopOn: "2026-12-10" },
   })),
   ...["low", "medium", "high"].map((effort) => ({
     id: `haiku55-vs-luna6-${effort}`, capability: "economy", effort,
@@ -65,6 +69,7 @@ export const ROUTING_EXPERIMENTS: readonly RoutingExperiment[] = [
     claudeModel: /^claude-haiku-5-5$/, codexModel: /^gpt-6-luna$/,
     startedOn: "2026-10-07", revisitOn: "2026-10-07", reviewCadence: "daily" as const,
     minTasksPerArm: 20,
+    decision: { minimumDifference: 0.1, power: 0.8, confidence: 0.95, stopOn: "2026-12-10" },
   })),
 ];
 
