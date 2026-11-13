@@ -101,7 +101,10 @@ test("W1-T12229 criterion 3: production freshness drain preserves a cancelled fi
     currentReviewSignal()?.addEventListener("abort", finishReview, { once: true });
     return reviewWork;
   }, { prNumber: 42, kind: "review", admittedAtMs: oldStart });
-  const priorRows: Row[] = [{ ts: new Date(oldStart).toISOString(), step: "daemon.boot", run_id: "old" }];
+  const priorRows: Row[] = [
+    { ts: new Date(oldStart).toISOString(), step: "daemon.boot", run_id: "old" },
+    { ts: new Date(oldStart + 10).toISOString(), step: "review.posted", pr: 7 },
+  ];
   const daemonRows: Row[] = [];
   const empty: Plan = { tasks: [], byId: new Map() };
   try {
@@ -134,12 +137,14 @@ test("W1-T12229 criterion 3: production freshness drain preserves a cancelled fi
       "the production cancellation settles/removes the admission before the final snapshot");
     const cycleRows = [...priorRows, ...daemonRows,
       { ts: new Date(oldStart + 300).toISOString(), step: "daemon.boot", run_id: "new" },
-      { ts: new Date(oldStart + 310).toISOString(), step: "review.posted", pr: 1 }];
+      { ts: new Date(oldStart + 1_220).toISOString(), step: "review.posted", pr: 7 }];
     const cycle = restartCycleRow(cycleRows, oldStart + 300);
     assert.ok(cycle);
     assert.deepEqual(cycle.gave_up.reviews?.map(item => [item.pr, item.age_ms]), [[42, 229]]);
     assert.deepEqual(cycle.gave_up.fix_rounds?.map(item => [item.task_id, item.age_ms]), [["FIX-229", 229]]);
     assert.equal(cycle.gave_up_age_ms, 458);
+    assert.equal(cycle.verdict_gap_ms, 1_210);
+    assert.equal(cycle.restart_cost_ms, 1_668);
   } finally {
     if (!abandoned.signal.aborted) abandoned.abort();
     await sweep.drainDetachedSweepActions();
