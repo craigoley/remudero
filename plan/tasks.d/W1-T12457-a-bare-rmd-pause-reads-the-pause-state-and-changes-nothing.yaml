@@ -1,0 +1,68 @@
+- id: W1-T12457
+  title: "A bare rmd pause reads the pause state and changes nothing"
+  repo: remudero
+  depends_on: []
+  priority: 1.0
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the operator's hold control; a wrong default stops the fleet or fails to stop it
+  band_meaning: blast-radius
+  origin: operator-session#bare-pause-paused-core-2026-11-12
+  plan_refs:
+    - W1-T4429
+    - W1-T7727
+    - W1-T7839
+    - W1-T8245
+    - W1-T10913
+  files:
+    - src/run-task.ts
+    - src/lib/fleet-control.ts
+    - docs/cli-reference.md
+    - docs/control-surface.md
+    - docs/operator-guide.md
+    - test/a-pause-holds-only-the-instance-it-targets.test.ts
+    - test/a-fleet-pause-records-who-really-set-it.test.ts
+    - test/cli/a-bare-rmd-pause-reads-the-pause-state-and-changes-nothing.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "`rmd pause` with no arguments prints the targeted instance's pause state (paused or not, with reason, actor and expiry when paused) and the fleet-wide hold state, and exits 0"
+      proof: "grep: W1-T12457 criterion 1 in test/cli/a-bare-rmd-pause-reads-the-pause-state-and-changes-nothing.test.ts"
+    - claim: "Falsifier: after a bare `rmd pause` on an instance that is not paused, its state/PAUSE file does not exist, no fleet.pause ledger row is written, and refs/rmd-pause/hold is not pushed"
+      proof: "grep: W1-T12457 criterion 2 in test/cli/a-bare-rmd-pause-reads-the-pause-state-and-changes-nothing.test.ts"
+    - claim: "`rmd pause --status` (alone or with --instance or --fleet) is read-only in the same way: it prints the state, exits 0 and writes no PAUSE file, ledger row or ref, also when --reason is given with it"
+      proof: "grep: W1-T12457 criterion 3 in test/cli/a-bare-rmd-pause-reads-the-pause-state-and-changes-nothing.test.ts"
+    - claim: "`rmd pause --instance <name>` or `rmd pause --fleet` without a non-empty --reason refuses with exit 2, prints 'nothing was changed' and the usage, and writes nothing"
+      proof: "grep: W1-T12457 criterion 4 in test/cli/a-bare-rmd-pause-reads-the-pause-state-and-changes-nothing.test.ts"
+    - claim: "`rmd pause --reason <text>` (with or without --instance) pauses the instance as today, and the fleet.pause ledger row and the PAUSE flag both carry that reason; `rmd pause --fleet --reason <text>` pushes the fleet-wide hold as today with the reason on its row"
+      proof: "grep: W1-T12457 criterion 5 in test/cli/a-bare-rmd-pause-reads-the-pause-state-and-changes-nothing.test.ts"
+    - claim: "An unknown flag (for example --state or --show) refuses with exit 2 before anything is written, instead of being ignored"
+      proof: "grep: W1-T12457 criterion 6 in test/cli/a-bare-rmd-pause-reads-the-pause-state-and-changes-nothing.test.ts"
+    - claim: "The pause entry in the command registry and docs/cli-reference.md says that a bare `rmd pause` only reads the state and that a hold needs --reason"
+      proof: "grep: a bare `rmd pause` only reads in docs/cli-reference.md"
+  rationale: |
+    OBSERVED 2026-11-12: at 15:22:39Z and again at 15:26:29Z an agent session ran `bin/rmd --repo-root <root> pause` to READ the pause state. Each run paused instance 'core'. The ledger shows the fleet.pause rows. Nobody saw the hold for some minutes, and core spawned nothing in that time. A verb whose bare form stops the fleet for two hours is a trap for any caller that guesses the read form.
+    READ at origin/main 04d0e48d6.
+    - src/run-task.ts:34192 `pauseCommand`. It has no read path. :34195 reads `--reason` with `flagValue`, so a missing reason is `undefined` and nothing refuses it. Without --fleet it resolves the target (:34224, `pauseTargetOrRefuse`, which falls back to the instance whose registry state_dir is config.root) and calls `requestPause(target.root, reason, ...)` at :34228. It appends a fleet.pause row with `reason: reason ?? null` (:34229 to :34242) and prints "is PAUSED (drain-and-hold)" (:34244).
+    - pauseCommand never calls `unknownArgError`, unlike deploy (:28972) and release (:41717). So `rmd pause --status` or any other guessed flag also pauses.
+    - src/lib/fleet-control.ts:163 `requestPause` calls `resolvePauseExpiry` (:129). With no --until it uses `PAUSE_DEFAULT_TTL_MS[classifyPauseReason(reason)]` (:111). A missing reason is class `other`, which is 2 hours (:115).
+    - The --fleet branch (:34196 to :34221) has the same shape: no reason is needed, and it pushes refs/rmd-pause/hold for every instance on every host.
+    - The read helpers already exist: `isPaused` (fleet-control.ts:208), `pauseDetail` (:244) and `pauseActor` (:239). The daemon and the panel use them (src/cli/commands/daemon.ts:1600, src/lib/panel-actions.ts:315). No CLI verb prints them.
+    - Registry help: src/run-task.ts:42579 to :42584 gives the syntax `rmd pause [--instance <name>] [--reason <text>]`, so the reason reads as optional.
+    - Overlap: W1-T10913 (queued) also edits src/run-task.ts and docs/cli-reference.md, for the field-trials registry text. This task changes only the pause entry and pause handler, so the two edits sit in different parts of those files.
+    - `--reason` is the existing flag name, also on stop, deploy and release. release already refuses without it (:41724). Keep that name.
+  design: |
+    1. In `pauseCommand`, check arguments first with `unknownArgError("pause", rest, ["--instance", "--reason"], ["--fleet", "--status"])` or the shape that helper takes. An unknown flag returns 2.
+    2. Read mode: when `rest` is empty or has --status, resolve the target as today (a target refusal still exits 2) and print the state: for the instance, `isPaused`, `pauseDetail`, `pauseActor` and the flag's expires_at; for the fleet-wide hold, the state the status board already reads for refs/rmd-pause/hold. Write no flag, no ledger row and no ref. Exit 0. --status wins over --reason.
+    3. Write mode needs a non-empty --reason. Without it, `--instance <name>` or `--fleet` refuses: `### rmd pause — REFUSED: a hold needs --reason <text>; nothing was changed.` plus the usage. Exit 2.
+    4. Keep the instance and fleet write paths, ledger rows and messages as today. The row's reason is now always the given text.
+    5. Update the registry syntax and detail to `rmd pause [--instance <name>] [--status] | rmd pause [--instance <name>] --reason <text> | rmd pause --fleet --reason <text>` and say that a bare `rmd pause` only reads. Regenerate or edit docs/cli-reference.md, and update docs/control-surface.md and docs/operator-guide.md to match.
+    6. Add --reason to the existing tests that pause without one (a-pause-holds-only-the-instance-it-targets, a-fleet-pause-records-who-really-set-it). Keep their refusal cases.
+    NOT IN SCOPE: the TTL classes, `rmd resume`, the panel's pause action (src/lib/panel-actions.ts), deploy/recycle-container.sh's own PAUSE write.
+  falsifier: |
+    Restore the write on a bare `rmd pause` and criteria 1 and 2 must fail (a PAUSE file appears). Let --status fall through to the write path and criterion 3 must fail. Drop the reason check and criterion 4 must fail. Drop `unknownArgError` and criterion 6 must fail. Restore and require all seven to pass.
+  note: |
+    Id reserved for run-unfiled-1794529383796 with ~/rmd-work/bin/reserve-id.sh. The fleet builds it.
+    The new test calls the pause command in process against a fixture registry and state root, not through a child that imports src/run-task.ts. Check the docs generator for docs/cli-reference.md before editing it by hand.
