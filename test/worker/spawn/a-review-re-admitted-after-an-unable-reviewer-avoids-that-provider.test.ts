@@ -263,7 +263,7 @@ test("W1-T11432 criterion 1: overflow fallback retains an excluded Claude mount 
   const result = await spawnWorker({
     cwd: root, permissionMode: "bypassPermissions", prompt: "bounded review", settingsFile, config,
     env: { ANTHROPIC_API_KEY: "fixture-only" },
-    keychain: { readCredentialFile: () => JSON.stringify({ claudeAiOauth: { accessToken: "fixture-only", expiresAt: NOW + 86_400_000 } }) },
+    keychain: { platform: "linux", readCredentialFile: () => JSON.stringify({ claudeAiOauth: { accessToken: "fixture-only", expiresAt: NOW + 86_400_000 } }) },
     excludeProviders: ["claude"], onSelectionAssignment: assignment => assignments.push(assignment),
     providerRouting: {
       readClaudeHealth: async () => ({ degradedModels: [], source: "fresh", observedAtMs: NOW }),
