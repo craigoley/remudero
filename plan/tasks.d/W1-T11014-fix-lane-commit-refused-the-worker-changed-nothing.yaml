@@ -4,7 +4,7 @@
   depends_on: []
   type: implement
   verify: human
-  risk: low
+  risk: high
   priority: 1.2
   status: queued
   attempts: 0
@@ -45,8 +45,8 @@
     parks at verify: human for the machine-filing judge, because a hand-carried stale pin fails machine-author-verify
     (src/lib/machine-filing.ts reparkStaleRuling; src/lib/task-linter.ts machineAuthorVerifyViolation; files is in the
     taskRulingPin digest).
-    Risk re-judged for the widened files (input for the judge, not a pinned ruling): this should stay low. fix.ts is the
-    fix-lane module the defect already lives in, and the change is confined to the commit-refusal recovery before push.
-    It does not touch secrets, auth, permissions, data deletion, or merge/deploy/review policy. The previous ruling
-    (verdict low, proceed, confidence 0.86, pin e3917b34…, judged 2026-11-10T00:56:37Z) covered the pre-amendment
-    files only and was dropped as stale.
+    Risk re-judged for the widened files: risk is high under Rule 19 because the task spans the run-task and fix
+    subsystems. The recovery remains confined to the commit-refusal path before push and does not change secrets, auth,
+    permissions, data deletion, or merge/deploy/review policy. The previous ruling (verdict low, proceed, confidence
+    0.86, pin e3917b34…, judged 2026-11-10T00:56:37Z) covered the pre-amendment files only and was dropped as stale;
+    verify: human parks this task for a fresh machine-filing risk ruling after the scope change lands.
