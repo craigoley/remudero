@@ -23,6 +23,9 @@
     - test/a-detached-fix-dispatch-that-throws-before-fix-dispatch-is-not-dispatched.test.ts
     - test/a-held-fix-dispatch-never-claims-it-is-dispatching.test.ts
     - test/the-codeql-blocker-repair-records-a-detached-dispatch-that-fails.test.ts
+    - test/a-new-codeql-alert-is-judged-and-never-holds-the-pr.test.ts
+    - test/fix-dedup-seed.test.ts
+    - test/reviews-and-detached-actions-run-as-run-children.test.ts
   status: queued
   attempts: 0
   acceptance:

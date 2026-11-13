@@ -14886,7 +14886,9 @@ function dispatchFailureCause(row: Record<string, unknown>): string {
   if (isOwnerClaimDecline(row) && reason === "owner_stale_dirty_reset_failed") return `reset:${reason}`;
   if (isOwnerClaimDecline(row) && revalidatedOwnerPreservation(row.owner_recovery_reason))
     return `preservation:${reason}`;
-  if (isOwnerClaimDecline(row) && typeof row.worktree_path === "string") return `owner-held:${reason}`;
+  if (isOwnerClaimDecline(row) && typeof row.worktree_path === "string" &&
+      ["process_cwd_owner", "live_branch_claim"].includes(String(row.owner_recovery_reason)))
+    return `owner-held:${reason}`;
   // Match the fix-lane gardener's reasonClass without importing its sweep-dependent module graph.
   return reason.split(" — ")[0]!.replace(/\b[0-9a-f]{7,40}\b/gi, "<sha>")
     .replace(/\/pull\/\d+/g, "/pull/<n>").replace(/\b\d+(?:\.\d+)?\b/g, "<n>").trim();
@@ -14894,7 +14896,8 @@ function dispatchFailureCause(row: Record<string, unknown>): string {
 
 function fixDispatchSuccess(row: Record<string, unknown>, pr: OpenPrView): boolean {
   return (row.step === "fix.dispatch" || row.step === "fix.retrigger") &&
-    (row.pr_number === pr.prNumber || (row.pr_number === undefined && pr.taskId !== undefined && row.task_id === pr.taskId));
+    (row.pr_number === pr.prNumber || (row.pr_number === undefined && pr.taskId !== undefined && row.task_id === pr.taskId) ||
+      (row.pr_number === undefined && pr.taskId === undefined && row.head_sha === pr.headSha));
 }
 
 function medianDispatchWait(values: number[]): number | undefined {
@@ -14929,8 +14932,17 @@ function* fixDispatchHoldAtHeadSteps(
   const samples: number[] = [];
   const nextSuccess = new Map<string, number>();
   const prForTask = new Map<string, number>();
+  const prsForHead = new Map<string, Set<number>>();
   if (pr.taskId !== undefined) prForTask.set(pr.taskId, pr.prNumber);
+  const associateHead = (headSha: unknown, prNumber: unknown) => {
+    if (typeof headSha !== "string" || typeof prNumber !== "number") return;
+    const owners = prsForHead.get(headSha) ?? new Set<number>();
+    owners.add(prNumber);
+    prsForHead.set(headSha, owners);
+  };
+  associateHead(pr.headSha, pr.prNumber);
   for (const row of lines) {
+    associateHead(row.head_sha, row.pr_number);
     if (typeof row.pr_number === "number" && typeof row.task_id === "string" &&
         !/^(?:SWEEP|DAEMON)(?:-|$)/.test(row.task_id)) prForTask.set(row.task_id, row.pr_number);
   }
@@ -14945,6 +14957,10 @@ function* fixDispatchHoldAtHeadSteps(
         nextSuccess.set(taskKey, stamp(row));
         const owningPr = prForTask.get(row.task_id);
         if (owningPr !== undefined) nextSuccess.set(`pr:${owningPr}`, stamp(row));
+      }
+      if (typeof row.pr_number !== "number" && typeof row.head_sha === "string") {
+        const owners = prsForHead.get(row.head_sha);
+        if (owners?.size === 1) nextSuccess.set(`pr:${owners.values().next().value!}`, stamp(row));
       }
     } else if (failed(row) && dispatchFailureCause(row) === cause) {
       const successAt = nextSuccess.get(prKey) ?? nextSuccess.get(taskKey);
@@ -14972,8 +14988,12 @@ function* fixDispatchHoldAtHeadSteps(
   options.onProgress?.(progress);
   let probe = "unprobed";
   if (cause === "fleet-held") {
-    if (options.fleetHold?.() === undefined) return undefined;
-    probe = "present";
+    // Missing a probe (for example on a one-shot/light sweep) is not proof that
+    // PAUSE/origin recovered. Only an actual clear observation lifts this hold.
+    if (options.fleetHold) {
+      if (options.fleetHold() === undefined) return undefined;
+      probe = "present";
+    }
   } else if (cause.startsWith("owner-held:")) {
     const path = String(last.worktree_path);
     if (!ownerWorktreeExists(path) || (yield* step(() => ownerReclaimable?.(pr, last))) === true) return undefined;

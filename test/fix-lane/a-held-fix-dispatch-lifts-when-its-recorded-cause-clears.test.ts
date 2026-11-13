@@ -34,6 +34,11 @@ test("test/fix-lane/a-held-fix-dispatch-lifts-when-its-recorded-cause-clears.tes
     assert.equal(held.fields.probe_result, "present");
     assert.equal(hold(rows, { fleetHold: () => undefined }), undefined, "first clear probe lifts at the same head");
   }
+  const fleetFailure = failure(NOW, "PAUSE: cannot reach origin to read refs/rmd-pause/hold");
+  const noFleetProbe = hold([fleetFailure]);
+  assert.equal(noFleetProbe?.fields.probe_result, "unprobed", "an omitted one-shot fleet probe is not a clear observation");
+  assert.equal(noFleetProbe?.fields.next_retry_at, at(NOW + 100));
+  assert.equal(hold([fleetFailure], { nowMs: NOW + 100 }), undefined, "an unprobed fleet cause retries after one pass");
   const owner = { step: "sweep.fix.checkout_claim_declined", pr_number: pr.prNumber, head_sha: pr.headSha,
     reason: "registered_worktree_owner", owner_recovery_reason: "process_cwd_owner", owner_recovery_decision: "keep",
     worktree_path: "/worktrees/sweep-W1-T10559-1792983204646", ts: at(NOW) };
@@ -167,6 +172,15 @@ test("W1-T11168 criterion 2: ledger median, doubling, success reset and one-pass
     { ...failure(NOW, "hosted child refused"), task_id: "SWEEP-123" }];
   assert.equal(hold(hosted)?.fields.backoff_ms, 200,
     "a hosted-child SWEEP task id joins the successful task-id-only dispatch by PR");
+  const tasklessPr = { ...pr, taskId: undefined };
+  const hostedSuccessWithoutPrNumber = [
+    { ...failure(NOW - 300), task_id: "SWEEP-123" },
+    { step: "fix.dispatch", task_id: "W1-T9796", head_sha: pr.headSha, ts: at(NOW - 100) },
+    { ...failure(NOW), task_id: "DAEMON-456" },
+  ];
+  assert.equal(fixDispatchHoldAtHead(tasklessPr, hostedSuccessWithoutPrNumber, () => true, undefined,
+    options())?.fields.backoff_ms, 200,
+  "a success without pr_number joins an earlier hosted failure by the uniquely observed PR head");
   const preserveFailure = { step: "sweep.fix.checkout_claim_declined", task_id: pr.taskId,
     pr_number: pr.prNumber, head_sha: pr.headSha, worktree_path: "/worktrees/sweep-W1-T9796-1",
     reason: "registered_worktree_owner",
@@ -174,6 +188,23 @@ test("W1-T11168 criterion 2: ledger median, doubling, success reset and one-pass
   assert.equal(hold([preserveFailure])?.fields.probe_result, "unprobed");
   assert.equal(hold([preserveFailure], { nowMs: NOW + 100 }), undefined,
     "a failed preservation retries after its backoff even while the checkout remains");
+  const resetFailure = { ...preserveFailure, owner_recovery_reason: "owner_stale_dirty_reset_failed" };
+  let resetProbeCalls = 0;
+  const resetHold = fixDispatchHoldAtHead(pr, [resetFailure], () => true, () => {
+    resetProbeCalls++;
+    return true;
+  }, options());
+  assert.equal(resetHold?.fields.probe_result, "unprobed", "preserved dirt cannot prove a failed reset safe to clear");
+  assert.equal(resetProbeCalls, 0, "the reset failure does not call the preservation-only probe");
+  assert.equal(fixDispatchHoldAtHead(pr, [resetFailure], () => true, () => true,
+    options({ nowMs: NOW + 100 })), undefined, "the reset failure retries on backoff");
+  const untrackedFailure = { ...preserveFailure, owner_recovery_reason: "owner_untracked_preserve_failed" };
+  let untrackedProbeCalls = 0;
+  assert.equal(fixDispatchHoldAtHead(pr, [untrackedFailure], () => true, () => {
+    untrackedProbeCalls++;
+    return true;
+  }, options())?.fields.probe_result, "unprobed", "a failed untracked preservation has no verified revalidation");
+  assert.equal(untrackedProbeCalls, 0, "the unresolved preservation failure does not probe owner liveness");
 });
 
 test("W1-T11168 criterion 3: failed retries ask the judge and escalate once per head and cause", async () => {
@@ -264,6 +295,25 @@ test("a cause judge's change of approach reaches the next dispatch", async () =>
     readLedger: () => rows, appendLine: (_path, row) => { rows.push({ ts: at(NOW), ...row }); },
     fixProgressJudge: async () => ({ verdict: "change-approach", reason: "different transport", approach: "refresh credentials first" }) });
   assert.equal(approach, "refresh credentials first");
+});
+
+test("an untracked-preservation failure keeps an escalate verdict and never calls the owner liveness probe", async () => {
+  const ownerFailure = { step: "sweep.fix.checkout_claim_declined", task_id: pr.taskId,
+    pr_number: pr.prNumber, head_sha: pr.headSha, worktree_path: "/worktrees/dirty",
+    reason: "registered_worktree_owner", owner_recovery_reason: "owner_untracked_preserve_failed", ts: at(NOW) };
+  const rows: Record<string, unknown>[] = [ownerFailure, { ...ownerFailure, ts: at(NOW + 1) }];
+  let ownerProbeCalls = 0;
+  let escalations = 0;
+  let dispatches = 0;
+  await runSweep([pr], { arm: () => {}, close: () => {}, escalate: () => { escalations++; },
+    dispatchFix: () => { dispatches++; }, runId: "untracked-escalate", ledgerPath: "/unused",
+    now: () => NOW + 1000000, readLedger: () => rows, appendLine: (_path, row) => { rows.push({ ts: at(NOW), ...row }); },
+    fixOwnerReclaimableAtHold: () => { ownerProbeCalls++; return true; },
+    fixProgressJudge: async () => ({ verdict: "escalate", loop: "owner-preservation", reason: "preservation keeps failing" }) });
+  assert.equal(ownerProbeCalls, 0);
+  assert.equal(escalations, 1);
+  assert.equal(dispatches, 0);
+  assert.equal(rows.findLast(row => row.step === "sweep.disposed")?.judge_verdict, "escalate");
 });
 
 test("a change-approach constraint reaches the hosted fix child envelope", async () => {
