@@ -81,7 +81,8 @@ test("W1-T2877: check mode reports missing units and changes nothing, including 
       "systemd/rmd-fleet-watchdog.service", "systemd/rmd-fleet-watchdog.timer", "systemd/rmd-fleet.service",
       "systemd/rmd-reap-stray.service", "systemd/rmd-reap-stray.timer",
       "systemd/rmd-session-reaper.service", "systemd/rmd-session-reaper.timer", dropinRelative,
-    ].sort(), "install renders the exact units, helpers, launcher, and session slice drop-in");
+      "systemd/user.slice.d/50-rmd-cap.conf",
+    ].sort(), "install renders the exact units, helpers, launcher, and session slice drop-ins");
     const dropin = join(root, dropinRelative);
     const cap = readFileSync(dropin, "utf8");
     assert.match(cap, /^\[Slice\]$/m);
@@ -553,8 +554,8 @@ test("W1-T3245: the watchdog tick evaluates a recycle and no second timer exists
       "no separate deploy service or timer may be rendered",
     );
     assert.ok(entries.every((entry) => entry.isFile() || entry.isDirectory()), "no symlink or unclassified unit artifact");
-    assert.deepEqual(entries.filter((entry) => entry.isDirectory()).map((entry) => entry.name),
-      [`user-${SESSION_UID}.slice.d`], "the only directory is the separately verified session cap drop-in");
+    assert.deepEqual(entries.filter((entry) => entry.isDirectory()).map((entry) => entry.name).sort(),
+      [`user-${SESSION_UID}.slice.d`, "user.slice.d"].sort(), "only the session memory and CPU drop-in directories exist");
     assert.deepEqual(entries.filter((entry) => entry.isFile()).map((entry) => entry.name).sort(), [
       "rmd-acr-login.service", "rmd-acr-login.timer", "rmd-fleet-watchdog.service",
       "rmd-fleet-watchdog.timer", "rmd-fleet.service", "rmd-reap-stray.service", "rmd-reap-stray.timer",

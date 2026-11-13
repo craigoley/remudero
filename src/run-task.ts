@@ -2996,7 +2996,7 @@ import {
 import { checkSharedPause, disposeSharedPauseRefresh, prepareSharedPause, requestKick, consumeStop, isQuietHours, requestFleetPause, requestPause, requestStop, restartInPlaceVerb, resumeFleet, resumeFleetWide, sharedPauseRef, stopDetail, type SharedPauseGitDeps } from "./lib/fleet-control.js";
 import { resolvePauseTarget, type PauseTarget } from "./lib/pause-target.js";
 import { parseInstanceRegistry } from "./lib/instance-registry.js";
-import { openPlannerGitCredential, plannerHostGitCredential } from "./lib/secret-boundary.js";
+import { openPlannerGitCredential, plannerHostGitCredential, plannerPrWriteToken } from "./lib/secret-boundary.js";
 import { hasThreadEvent, inboxThreadId, readThread, verifiedInboxInput, type InboxCausalScope, type InboxInputReference } from "./lib/inbox-thread.js";
 import { gatherActorEvidence } from "./lib/actor-evidence.js";
 import { readGithubWebhookSecret, resolveGithubWebhookSecretFilePath } from "./lib/github-event-wake.js";
@@ -4872,7 +4872,8 @@ export function runGhPrCreate(
   branch: string,
   log: (step: string, extra?: Record<string, unknown>) => void,
   say: (msg: string) => void,
-  exec: (command: string, args: string[], options: { cwd: string; encoding: "utf8" }) => string = execFileSync,
+  exec: (command: string, args: string[], options: { cwd: string; encoding: "utf8"; env?: NodeJS.ProcessEnv }) => string = execFileSync,
+  readExec: typeof exec = exec,
 ): { prUrl?: string; prNumber?: number } {
   for (const { step, extra } of prCreate.diagnostics ?? []) log(step, extra);
   let out: string;
@@ -4887,7 +4888,7 @@ export function runGhPrCreate(
       );
     }
     if (isGhPrCreateValidationError(e)) {
-      const adopted = adoptExistingPrForHead(prCreate, branch, exec);
+      const adopted = adoptExistingPrForHead(prCreate, branch, readExec);
       if (adopted?.prUrl !== undefined) {
         const ghErr = e as NodeJS.ErrnoException & { stderr?: string | Buffer };
         log("pr_create.adopted_existing", {
@@ -17783,6 +17784,8 @@ export async function nextTaskIdCommand(
       );
       return 2;
     }
+    // W1-T12453: a degraded source that does not refuse is a note on stderr; stdout keeps the id lines.
+    for (const d of mint.degraded) console.error(`### rmd next-task-id: DEGRADED ${d.source}: ${d.reason}`);
     const contested: string[] = [];
     const run = deps.runGit ?? ((args: string[]) => spawnSync("git", args, { cwd: repoRoot, encoding: "utf8" }));
     // W1-T4414: `--branch` names the holder the filing PR's head must match; absent keeps the current branch.
@@ -17825,7 +17828,7 @@ export async function nextTaskIdCommand(
         contestedAt.push(contested.length);
         return handle;
       });
-      if (held.length) console.log(describeMintWithHistory(mintForReservationAttempt(mint, held[0].id, held[0].taskId)));
+      if (held.length) console.log(describeMintWithHistory({ ...mintForReservationAttempt(mint, held[0].id, held[0].taskId), degraded: [] }));
       held.forEach((handle, i) => {
         for (const line of contested.slice(contestedAt[i - 1] ?? 0, contestedAt[i])) console.log(line);
         // W1-T6026: a takeover rides the RESERVED line itself, and leaves one durable row.
@@ -17841,6 +17844,8 @@ export async function nextTaskIdCommand(
       if (error !== undefined) throw error;
       for (const line of overlapAdvisoryLines(rest, offline, self.owner, self.repo, planPath, overlapDeps))
         (overlapDeps.say ?? console.log)(line);
+      // W1-T12453: the id is held, so the reservation succeeded; the notes above do not undo it.
+      return 0;
     } catch (e) {
       const err = e as TaskIdReservationError;
       console.error(describeReservationRefusal(err.outcome, `${err.message}${requestedMaxScan === undefined ? "" : ` (max-scan: ${requestedMaxScan})`}`));
@@ -35573,7 +35578,9 @@ export const PLAN_MAX_NEW_TASKS = 5;
 
 export async function planCommand(
   rest: string[],
-  opts: { spawn?: typeof spawnWorker; config?: Config; overlap?: OverlapWarningDeps; lintPlanForReviewFn?: typeof lintPlanForReview } = {},
+  opts: { spawn?: typeof spawnWorker; config?: Config; overlap?: OverlapWarningDeps; lintPlanForReviewFn?: typeof lintPlanForReview;
+    plannerHostGitCredential?: typeof plannerHostGitCredential; openPlannerGitCredential?: typeof openPlannerGitCredential;
+    prWriteToken?: Parameters<typeof plannerPrWriteToken>[2]; prCreateExec?: Parameters<typeof runGhPrCreate>[4] } = {},
 ): Promise<number> {
   const parsed = parsePlanArgs(rest);
   if ("error" in parsed) {
@@ -35601,6 +35608,16 @@ export async function planCommand(
   log("plan.start", { mode, brief, architect: arch, effort: mountsTable.architect.effort, worker: wrk });
   say(`plan ${runId} — mode=${mode} — architect ${arch} over worker ${wrk}`);
 
+  const credential = await (opts.plannerHostGitCredential ?? plannerHostGitCredential)(`${owner}/${repo}`);
+  if (credential.kind === "app") {
+    const preflight = await plannerPrWriteToken(credential, `${owner}/${repo}`, opts.prWriteToken);
+    if (!preflight.ok) {
+      log("plan.credential_refused", { reason: preflight.reason, missing: preflight.missing, boundary: "pr_create" });
+      say(`plan refused — ${preflight.reason}`);
+      return 1;
+    }
+  }
+
   const settingsFile = renderWorkerSettings({
     templatePath: join(resolveInstallRoot(config), "settings", "worker.json"),
     hooksDir: join(resolveInstallRoot(config), "hooks"),
@@ -35618,7 +35635,7 @@ export async function planCommand(
   // W1-T11851: this lane's own pushes present the host App identity, minted per request at the git credential-helper
   // boundary — never a ~/.bashrc token a non-interactive shell cannot see, and never an env var. An unusable source
   // refuses HERE, before any id is claimed or any worker spawns; only a host with no registry keeps today's helpers.
-  const planCred = await openPlannerGitCredential(await plannerHostGitCredential(`${owner}/${repo}`), {
+  const planCred = await (opts.openPlannerGitCredential ?? openPlannerGitCredential)(credential, {
     runDir: join(config.root, "tmp", `plan-cred-${runId}`), log, wire: wireCredentialHelperSocket, unwire: unwireCredentialHelperSocket,
     shared: (cwd) => sharesHarnessCheckout(cwd, repoDir) || sharesHarnessCheckout(cwd, repoRoot),
   });
@@ -35885,7 +35902,21 @@ export async function planCommand(
     // The title is the SAME header string that just went into the commit, split off
     // its first line — never a second computation (W1-T327 design point ii).
     const prCreate = ghPrCreateFillCommand(worktreePath, owner, repo, branch, commitMessage.split("\n")[0], planPrBody, undefined, { log });
-    const prUrl = runGhPrCreate(prCreate, branch, log, say).prUrl;
+    let prUrl: string | undefined;
+    if (credential.kind === "app") {
+      const write = await plannerPrWriteToken(credential, `${owner}/${repo}`, opts.prWriteToken);
+      if (!write.ok) {
+        log("plan.pr_write_credential_failed", { branch, reason: write.reason });
+        say(`plan PR not opened — ${write.reason}`);
+        removePlanWorktree();
+        return 1;
+      }
+      const exec: NonNullable<Parameters<typeof runGhPrCreate>[4]> = opts.prCreateExec ?? execFileSync;
+      prUrl = runGhPrCreate(prCreate, branch, log, say,
+        (file, args, options) => exec(file, args, { ...options, env: { ...process.env, GH_TOKEN: write.token } }), exec).prUrl;
+    } else {
+      prUrl = runGhPrCreate(prCreate, branch, log, say, opts.prCreateExec).prUrl;
+    }
     if (!prUrl) {
       log("plan.error", { error: "no PR opened" });
       removePlanWorktree();
