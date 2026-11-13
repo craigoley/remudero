@@ -17,6 +17,8 @@ import { type FixOutcome as TypedFixOutcome } from "../../lib/fix-outcome.js";
 import { type FixRoundReapplyPorts } from "../../lib/fix-round-reapply.js";
 import { fixRoundBranchClaim, productionFixProgressJudge, type JobRequeueOutcome } from "../../lib/sweep.js";
 import { ghExec, ghJsonAsync } from "../../lib/github-transport.js";
+import { findTaskInCatalogs } from "../../lib/task-lookup.js";
+import { renderAcceptanceBlock } from "../../lib/plan-pr-emitter.js";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmdirSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
@@ -1115,7 +1117,7 @@ export interface RunTaskContext {
   runReviewFn: RunTaskCommandHost["runReview"];
   say: (msg: string) => void;
   spawn: typeof spawnWorker;
-  task: Task;
+  task: Task & { catalog?: "public" | "ops" };
   taskId: string;
   /** Resolved once by the outer run so reviewer watchdogs reuse the same policy value. */
   workerAbandonMs?: number;
@@ -1836,9 +1838,10 @@ async function ghPrCreateFillCommandAsync(
    *  W1-T10355: a proof that conclusively FAILED (exit 1) is never opened — the refusal is rethrown to the caller. */
   openOnFailingProof = false,
   childStore: ChildEntryStoreOptions = {},
+  bodyOverride?: string,
 ): Promise<PrCreateCommand> {
   const { withDiagnostics, draftPrCreate, prCreateArgv } = helperHost;
-  const draft = draftPrCreate(worktreePath, owner, repo, branch, title);
+  const draft = draftPrCreate(worktreePath, owner, repo, branch, title, bodyOverride);
   let checkedBody: string;
   try {
     checkedBody = await openPullRequestCheckedAsync(draft.body, branch, worktreePath, "origin/main", runProofAsync ?? ((proof, base, root, target) => defaultProofRunnerAsync(proof, base, root, target, { store: childStore })), { owner, repo });
@@ -3499,20 +3502,42 @@ async function repairCensusRefusedPush(helperHost: Pick<RunTaskHelperHost, "CENS
   return { outcome: "refused", strikes: strikeCap, refusal, reason: `not cleared in ${strikeCap} strike(s)` };
 }
 
+/** Public output is constructed from the two approved task fields, never by subtracting private fields. */
+function opsRunPublication(taskId: string, title: string, criteria: readonly AcceptanceCriterion[]): { title: string; body: string } {
+  return {
+    title: prTitleForTask([], { id: taskId, title }) ?? title,
+    body: `${title}\n\n## Decisions\n\n- Keep private task fields host-side.\n\n${renderAcceptanceBlock([...criteria])}\n\nRemudero-Task: ${taskId}\n`,
+  };
+}
+
 function normalizeRunPrAcceptanceFromPlan(
-  helperHost: Pick<RunTaskHelperHost, "rewriteAcceptanceBlockFromPlan" | "defaultRetroFetchBody" | "defaultRetroEditBody">, prUrl: string,
+  helperHost: Pick<RunTaskHelperHost, "rewriteAcceptanceBlockFromPlan" | "defaultRetroFetchBody" | "defaultRetroEditBody" | "prUrlTarget">, prUrl: string,
   taskId: string,
   planCriteria: readonly AcceptanceCriterion[],
   log: (step: string, extra?: Record<string, unknown>) => void,
   // The SAME two leaves (and the same defaults) repairRetroAcceptanceBlock injects — reused from its
   // own signature rather than a second inline copy; its retro-only `diff` input is omitted here.
   deps: Omit<NonNullable<Parameters<RunTaskCommandHost["repairRetroAcceptanceBlock"]>[2]>, "diff"> = {},
+  opsTitle?: string,
 ): "rewritten" | "healthy" | "no-block" | "raced" | "error" {
   const { rewriteAcceptanceBlockFromPlan, defaultRetroFetchBody, defaultRetroEditBody } = helperHost;
   if (planCriteria.length === 0) return "no-block";
   const { fetchBody, editBody } = { fetchBody: defaultRetroFetchBody, editBody: defaultRetroEditBody, ...deps };
   try {
     const body = fetchBody(prUrl);
+    if (opsTitle !== undefined) {
+      const publication = opsRunPublication(taskId, opsTitle, planCriteria);
+      const target = helperHost.prUrlTarget(prUrl);
+      if (target === undefined) throw new Error("ops publication has no public PR identity");
+      if (fetchBody(prUrl) !== body) {
+        log("pr.body_normalize.raced", { pr_url: prUrl });
+        return "raced";
+      }
+      ghExec(["api", "-X", "PATCH", `repos/${target.owner}/${target.repo}/pulls/${target.number}`,
+        "-f", `title=${publication.title}`, "-f", `body=${publication.body}`], { stdio: "pipe" });
+      log("pr.body_normalized", { pr: prUrl, rendered_proofs: planCriteria.map(c => c.proof) });
+      return "rewritten";
+    }
     // W1-T5544: the comparison and splice live in {@link rewriteAcceptanceBlockFromPlan}, shared with the sweep cure.
     const rewrite = rewriteAcceptanceBlockFromPlan(body, taskId, planCriteria);
     if (rewrite.kind !== "rewritten") return rewrite.kind;
@@ -4825,7 +4850,12 @@ export async function runTask(
     }
     plan = synced.plan;
   }
-  const task = selectTask(plan, taskId);
+  const lookup = await findTaskInCatalogs(taskId, { byId: plan.byId, stateDir: join(config.root, "state") });
+  if (lookup.outcome === "unreadable") throw new Error(`task catalog unreadable (${lookup.reason})`);
+  const task: RunTaskContext["task"] = lookup.outcome === "found" ? lookup.task : selectTask(plan, taskId);
+  if (task.catalog === "ops" && !plan.byId.has(taskId)) {
+    plan = { ...plan, tasks: [...plan.tasks, task], byId: new Map([...plan.byId, [taskId, task]]) };
+  }
 
   // ── Merge-state is DERIVED FROM GITHUB, never from the yaml `status:` field
   // (MASTER-PLAN v2.1). Project the whole plan against GitHub, cache it to a
@@ -6620,7 +6650,10 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
     const ruleToolPointer = ruleLookup
       ? `\nTo read a doctrine rule by id or phrase, or a learning's evidence by learnings#id, call ${WORKER_RULE_TOOL_NAME}.`
       : "";
-    const prompt = `${renderedImplementPrompt}${reconcilePrompt}${scopeRecoveryPrompt}${ruleToolPointer}\n${IMPLEMENT_REFUSAL_REPORT_CONTRACT}\n${IMPLEMENT_WAIT_TARGET_CONTRACT}\n${BRANCH_NAME_CONTRACT_PART}\n${SELF_FORECAST_REPORT_CONTRACT}`;
+    const publicationRestriction = task.catalog === "ops"
+      ? "\nFor this ops task, copy only the title and acceptance criteria from the task contract into a commit, a pull request or a comment. Keep every other task field private and host-side."
+      : "";
+    const prompt = `${renderedImplementPrompt}${reconcilePrompt}${scopeRecoveryPrompt}${ruleToolPointer}\n${IMPLEMENT_REFUSAL_REPORT_CONTRACT}\n${IMPLEMENT_WAIT_TARGET_CONTRACT}\n${BRANCH_NAME_CONTRACT_PART}\n${SELF_FORECAST_REPORT_CONTRACT}${publicationRestriction}`;
     assertProvenance(prompt); // throws ProvenanceError on any uncited CONTEXT claim
     // W1-T71: the ONE new emission this task makes — a sha256 of the fully-rendered prompt this
     // run is about to spawn with, so `rmd receipt <pr>` (src/lib/receipt.ts's buildReceipt) has a
@@ -6652,7 +6685,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
     // drill will send. `ruleHeadlinesPart` is the SAME string the turn-0 prompt above just
     // carried (design (iii)) — never re-derived, so a compaction can never re-inject a
     // headline index that drifted from what turn 0 actually said.
-    const anchor = `${renderAnchorBlock(task, runId, ruleHeadlinesPart, harnessOwnsGit)}\n${IMPLEMENT_REFUSAL_REPORT_CONTRACT}\n${IMPLEMENT_WAIT_TARGET_CONTRACT}\n${BRANCH_NAME_CONTRACT_PART}\n${SELF_FORECAST_REPORT_CONTRACT}`;
+    const anchor = `${renderAnchorBlock(task, runId, ruleHeadlinesPart, harnessOwnsGit)}\n${IMPLEMENT_REFUSAL_REPORT_CONTRACT}\n${IMPLEMENT_WAIT_TARGET_CONTRACT}\n${BRANCH_NAME_CONTRACT_PART}\n${SELF_FORECAST_REPORT_CONTRACT}${publicationRestriction}`;
     log("anchor.built", { anchor });
 
     // ── Implement + DIAGNOSE-THEN-RETRY (W1-T7B — Standing rule 14: the CALL SITE is the
@@ -7584,9 +7617,17 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
     // plan record before the trailer-amend push below, so `trailer-body-proof-divergence` never
     // reaches CI (#6888, #6929, #6931). Best-effort/no-op cases are documented on the function
     // itself. The fallback below may adopt a worker-opened PR and normalize it afterward.
-    if (prUrl) {
-      normalizeRunPrAcceptanceFromPlan(prUrl, taskId, task.acceptance ?? [], log);
-    }
+    const normalizePublishedRunPr = (url: string): void => {
+      if (task.catalog === "ops" && checkPrOwnership(url, branch, ghPrHeadGateway(), costUsd, impl.accountLabel)) {
+        throw new Error("ops public PR ownership refused");
+      }
+      const outcome = normalizeRunPrAcceptanceFromPlan(url, taskId, task.acceptance ?? [], log,
+        undefined, task.catalog === "ops" ? task.title : undefined);
+      if (task.catalog === "ops" && outcome !== "rewritten" && outcome !== "healthy") {
+        throw new Error(`ops public PR normalization refused (${outcome})`);
+      }
+    };
+    if (prUrl) normalizePublishedRunPr(prUrl);
     // W1-T1012: append the `Remudero-Task:` trailer to the branch's actual tip commit HERE —
     // after both push paths above (the worker's own sandbox push, or the orchestrator
     // fallback just above) have already landed it on origin, and before EITHER PR path below
@@ -7601,7 +7642,9 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
       reprovisionInstallIfDrifted("pr_open");
       try {
         // W1-T6034: the filed proofs run as awaited children, off the daemon loop. W1-T7952: titled after the task.
-        prCreate = await ghPrCreateFillCommandAsync(worktreePath, owner, task.repo, branch, branchPrTitle(worktreePath, task), opts.prOpenProofRunner, true, { log });
+        const publication = task.catalog === "ops" ? opsRunPublication(taskId, task.title, task.acceptance ?? []) : undefined;
+        prCreate = await ghPrCreateFillCommandAsync(worktreePath, owner, task.repo, branch,
+          publication?.title ?? branchPrTitle(worktreePath, task), opts.prOpenProofRunner, true, { log }, publication?.body);
       } catch (err) {
         if (!(err instanceof PrOpenRefusedError)) throw err;
         // The branch is already on origin (both push paths ran above), so a refusal names it rather than stranding it.
@@ -7657,7 +7700,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
       // adoption above discovers it only here, after the earlier direct-PR normalization point.
       // Reuse that same body repair before review so the adopted worker prose cannot fail the
       // plan's acceptance gate. A newly created, already-matching body is a no-op.
-      if (prUrl) normalizeRunPrAcceptanceFromPlan(prUrl, taskId, task.acceptance ?? [], log);
+      if (prUrl) normalizePublishedRunPr(prUrl);
     }
     if (!prUrl) {
       const keptHead = keptHeadOfFailedRun();
