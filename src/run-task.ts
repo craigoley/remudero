@@ -18702,7 +18702,11 @@ async function buildCatalogPlanReconcileInput(deps: CatalogPlanReconcileProducti
       // A candidate based on a newer main must never overwrite it with bytes read from our older pin.
       // Later main changes are left to the ordinary three-way PR merge and its required gates.
       if ((await hostWorktreeGitAsync(target.checkoutDir, ["rev-parse", `${sha}^`])).trim() !== pin) throw new Error("ops-status-source-moved");
-      return planPrPreflightAtCommitAsync(target.checkoutDir, sha, { ...pr, codeRoot: deps.checkoutRoot }, { log: deps.log });
+      return planPrPreflightAtCommitAsync(target.checkoutDir, sha, {
+        ...pr,
+        codeRoot: deps.checkoutRoot,
+        bodyProofRoot: "plan",
+      }, { log: deps.log });
     },
   }), deps.land);
   const opsById = ops.byId;
