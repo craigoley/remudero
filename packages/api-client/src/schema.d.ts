@@ -1544,7 +1544,23 @@ export interface components {
       /** W1-T2302 -- the console-minted per-submission key a repeat of the same submit is recognised by. Null when none was supplied. */
       submission_key?: string | null;
       /** W1-T11104 -- an explicit console wording correction bound to one native conversation revision. Immutable once captured; absent on every other entry. Evidence for the weekly docket, never a reply or an authority grant. */
-      console_correction?: Record<string, never> | null;
+      console_correction?: {
+        kind: "wording_correction";
+        version: 1;
+        symptom: "stale_read" | "unauthorized_read" | "missing_diagnosis" | "unit_or_time_zone" | "denominator" | "changed_recommendation" | "reply_failed" | "reply_duplicate" | "reply_lost" | "agent_ack_vs_work" | "archive_no_more_input" | "reopened_question" | "other";
+        issue_url: string;
+        repository: string;
+        thread_id: string;
+        intent_id: string;
+        conversation_revision: string;
+        source_revision: string;
+        rendered_version: string;
+        rendered_digest?: string | null;
+        before: string;
+        after: string;
+        replay_case_ids: (string)[];
+        context: "operator_reported";
+      } | null;
       /** Set once `rmd triage` opens a proposal PR for this entry; null until then. */
       proposal_pr: string | null;
       /** W1-T313 -- src/lib/feedback.ts's `DecisionSummary`, the plain-language decision card generated once when the entry moves to `proposed`; null until then or on a summarizer failure. */
