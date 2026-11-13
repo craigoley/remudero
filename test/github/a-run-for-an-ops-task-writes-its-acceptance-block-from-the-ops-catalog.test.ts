@@ -86,9 +86,15 @@ async function runFixture(t: TestContext, catalog: "ops" | "public", mode: "repo
     if (events.some(start => start.phase === "start" && start.args.includes("PATCH")
       && !events.some(end => end.phase === "end" && end.id === start.id))) asyncPatchObserved = true;
   }, 5) : undefined;
+  let raceChanged = false;
   const raceTimer = refusal === "race" ? setInterval(() => {
-    const starts = gh.events().filter(event => event.phase === "start" && event.args.includes("--json") && event.args.includes("body"));
-    if (starts.length >= 2) writeFileSync(bodyFile, JSON.stringify({ body: "another owner changed this body" }));
+    const completedReads = gh.events().filter(event => event.phase === "end" && event.args.includes("--json") && event.args.includes("body"));
+    if (completedReads.length >= 1 && !raceChanged) {
+      const replacement = `${bodyFile}.replacement`;
+      writeFileSync(replacement, JSON.stringify({ body: "another owner changed this body" }));
+      renameSync(replacement, bodyFile);
+      raceChanged = true;
+    }
   }, 5) : undefined;
   process.env.PATH = `${gh.dir}:${priorPath}`; mkdirSync(join(root.dir, "hooks")); process.env.RMD_HARNESS_HOOKS_DIR = join(root.dir, "hooks");
   t.after(() => {
