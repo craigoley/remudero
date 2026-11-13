@@ -420,6 +420,29 @@ export function hostAppIdentityEnv(identity: HostAppIdentity): NodeJS.ProcessEnv
     [GH_APP_PRIVATE_KEY_PATH_ENV]: identity.keyPath };
 }
 
+/** Validate the granted scope, keeping the token and App identity private to this mint. */
+export async function plannerPrWriteToken(
+  identity: HostAppIdentity,
+  ownerRepo: string,
+  opts: { mint?: typeof mintScopedToken } = {},
+): Promise<{ ok: true; token: string } | { ok: false; reason: string; missing: string[] }> {
+  let minted;
+  try {
+    minted = await (opts.mint ?? mintScopedToken)(ownerRepo, SCOPED_TOKEN_TTL_MS, { env: hostAppIdentityEnv(identity) });
+  } catch (err) {
+    // A mint exception can contain credentials; report only the failed boundary, never its text.
+    void err;
+    return { ok: false, reason: "PR-create token mint threw", missing: ["token"] };
+  }
+  if (!minted.ok || !minted.token) return { ok: false, reason: "PR-create token mint failed", missing: ["token"] };
+  const missing = ["contents", "pull_requests"].filter((name) => minted.permissions?.[name] !== "write");
+  const repo = ownerRepo.split("/")[1];
+  if (!repo || minted.repositories?.length !== 1 || minted.repositories[0] !== repo) missing.push("repositories");
+  return missing.length > 0
+    ? { ok: false, reason: "insufficient PR-create token scope", missing }
+    : { ok: true, token: minted.token };
+}
+
 export function realScopedMint(log: DaemonLog, mint: typeof mintScopedToken = mintScopedToken, identity?: HostAppIdentity): ScopedTokenMint {
   return async (repo) => {
     const minted = await mint(repo, SCOPED_TOKEN_TTL_MS, {

@@ -25,6 +25,9 @@
     - test/a-pause-holds-only-the-instance-it-targets.test.ts
     - test/a-fleet-pause-records-who-really-set-it.test.ts
     - test/cli/a-bare-rmd-pause-reads-the-pause-state-and-changes-nothing.test.ts
+    - test/w1-t143-diff-coverage.test.ts
+    - test/shadow-instance-safety.test.ts
+    - test/the-sre-lane-runs-on-the-primary-instance.test.ts
   status: queued
   attempts: 0
   acceptance:
@@ -36,7 +39,7 @@
       proof: "grep: W1-T12457 criterion 3 in test/cli/a-bare-rmd-pause-reads-the-pause-state-and-changes-nothing.test.ts"
     - claim: "`rmd pause --instance <name>` or `rmd pause --fleet` without a non-empty --reason refuses with exit 2, prints 'nothing was changed' and the usage, and writes nothing"
       proof: "grep: W1-T12457 criterion 4 in test/cli/a-bare-rmd-pause-reads-the-pause-state-and-changes-nothing.test.ts"
-    - claim: "`rmd pause --reason <text>` (with or without --instance) pauses the instance as today, and the fleet.pause ledger row and the PAUSE flag both carry that reason; `rmd pause --fleet --reason <text>` pushes the fleet-wide hold as today with the reason on its row"
+    - claim: "invariant:reasoned-hold-unchanged — `rmd pause --reason <text>` (with or without --instance) pauses the instance as today, and the fleet.pause ledger row and the PAUSE flag both carry that reason; `rmd pause --fleet --reason <text>` pushes the fleet-wide hold as today with the reason on its row"
       proof: "grep: W1-T12457 criterion 5 in test/cli/a-bare-rmd-pause-reads-the-pause-state-and-changes-nothing.test.ts"
     - claim: "An unknown flag (for example --state or --show) refuses with exit 2 before anything is written, instead of being ignored"
       proof: "grep: W1-T12457 criterion 6 in test/cli/a-bare-rmd-pause-reads-the-pause-state-and-changes-nothing.test.ts"
@@ -60,9 +63,17 @@
     4. Keep the instance and fleet write paths, ledger rows and messages as today. The row's reason is now always the given text.
     5. Update the registry syntax and detail to `rmd pause [--instance <name>] [--status] | rmd pause [--instance <name>] --reason <text> | rmd pause --fleet --reason <text>` and say that a bare `rmd pause` only reads. Regenerate or edit docs/cli-reference.md, and update docs/control-surface.md and docs/operator-guide.md to match.
     6. Add --reason to the existing tests that pause without one (a-pause-holds-only-the-instance-it-targets, a-fleet-pause-records-who-really-set-it). Keep their refusal cases.
+    7. Amendment (build of W1-T12457): three more tests run a write-mode `rmd pause` with no reason and expect a hold.
+       test/w1-t143-diff-coverage.test.ts calls main() with `pause` and `pause --fleet`; test/shadow-instance-safety.test.ts
+       spawns `pause` against a selected registry and expects a PAUSE file; test/the-sre-lane-runs-on-the-primary-instance.test.ts
+       runs `pause` and expects its selected-registry receipt. Each now passes --reason, so it still drives the write path.
+    INVARIANT reasoned-hold-unchanged: a pause given a non-empty --reason, for one instance or with --fleet, writes the same
+    PAUSE flag, fleet.pause ledger row, shared ref and message as before, and the row and flag carry that reason.
     NOT IN SCOPE: the TTL classes, `rmd resume`, the panel's pause action (src/lib/panel-actions.ts), deploy/recycle-container.sh's own PAUSE write.
   falsifier: |
     Restore the write on a bare `rmd pause` and criteria 1 and 2 must fail (a PAUSE file appears). Let --status fall through to the write path and criterion 3 must fail. Drop the reason check and criterion 4 must fail. Drop `unknownArgError` and criterion 6 must fail. Restore and require all seven to pass.
   note: |
     Id reserved for run-unfiled-1794529383796 with ~/rmd-work/bin/reserve-id.sh. The fleet builds it.
-    The new test calls the pause command in process against a fixture registry and state root, not through a child that imports src/run-task.ts. Check the docs generator for docs/cli-reference.md before editing it by hand.
+    The new test drives the real CLI (bin/rmd) against a fixture registry, state root and bare origin, as its two sibling pause tests do.
+    A test that imports src/run-task.ts, directly or through test/helpers/run-task-test.ts, raises the affected-reach census
+    (importer count or median reach), so the test does not import it. Check the docs generator for docs/cli-reference.md before editing it by hand.
