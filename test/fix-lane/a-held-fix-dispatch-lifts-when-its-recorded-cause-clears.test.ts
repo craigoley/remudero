@@ -25,7 +25,7 @@ const options = (extra: FixDispatchHoldOptions = {}): FixDispatchHoldOptions => 
 const hold = (rows: Record<string, unknown>[], extra: FixDispatchHoldOptions = {}) =>
   fixDispatchHoldAtHead(pr, rows, () => true, undefined, options(extra));
 
-test("test/fix-lane/a-held-fix-dispatch-lifts-when-its-recorded-cause-clears.test.ts", async () => {
+test("W1-T11168 criterion 1: test/fix-lane/a-held-fix-dispatch-lifts-when-its-recorded-cause-clears.test.ts", async () => {
   for (const name of ["FIX_DISPATCH_FAILED_BACKSTOP", "FIX_CLAIM_DECLINE_BACKSTOP"]) assert.equal(name in sweep, false);
   for (const error of ["PAUSE held on refs/rmd-pause/hold", "PAUSE: cannot reach origin to read refs/rmd-pause/hold"]) {
     const rows = Array.from({ length: 126 }, (_, i) => failure(NOW - i, error));
