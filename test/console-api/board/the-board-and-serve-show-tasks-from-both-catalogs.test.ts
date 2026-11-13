@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { serialize, deserialize } from "node:v8";
-import { mkdirSync, mkdtempSync, unlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -23,7 +23,7 @@ import { createReadModelWorker, readModelSwitchesPath } from "#src/lib/read-mode
 import { mergePlanBlobs, type Plan } from "#src/lib/plan.js";
 import { type OpsCatalogApi } from "#src/lib/ops-catalog-source.js";
 import { fakeGitHub } from "#test/helpers/fake-github.js";
-import { withGhShim } from "#test/helpers/gh-shim.js";
+import { withGhShim, type GhShimRoute } from "#test/helpers/gh-shim.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import { createBoardProjectionWorker } from "#src/lib/board-worker.js";
 import { threadStrictPlan } from "#src/lib/thread-plan.js";
@@ -630,6 +630,49 @@ test("actual private GET failure leaves public tasks available and recovers only
       assert.equal(restored?.outcome, "ok");
       assert.deepEqual(restored?.plan?.tasks.map(task => task.id), ["PUBLIC-T1", "OPS-T1"]);
       assert.ok(shim.calls().length > before, "fresh real pinned GETs, not the previous failure, establish recovery");
+    } finally { bridge.close(); }
+  });
+});
+
+test("a selected repository round-trip invalidates the old in-flight read and rechecks the new upstream revision", async () => {
+  const h = host(), old = source(privateRecord()), fresh = source(privateRecord().replaceAll("OPS-T1", "OPS-T2"));
+  await readBoardCatalogs(publicPlan, h.state, old.api);
+  await readBoardCatalogs(publicPlan, h.state, fresh.api);
+  const refPath = `repos/${repository}/git/ref/heads/main`, refFile = join(h.root, "changing-ref.json");
+  const selectionPath = join(h.state, "plan-destination.json"), original = readFileSync(selectionPath, "utf8");
+  writeFileSync(refFile, JSON.stringify(old.responses.get(refPath)));
+  const oldBlob = [...old.responses.keys()].find(path => path.includes("/git/blobs/"));
+  assert.ok(oldBlob, "the delayed route is a real pinned blob, after the original upstream ref was captured");
+  const routes: GhShimRoute[] = [...new Map([...old.responses, ...fresh.responses])].sort((a, b) => b[0].length - a[0].length)
+    .map(([path, response]) => path === refPath ? { when: `api ${path}`, stdoutFile: refFile }
+      : { when: `api ${path}`, stdout: JSON.stringify(response), ...(path === oldBlob ? { delaySeconds: 1 } : {}) });
+  await withGhShim(routes, async shim => {
+    const seen: Array<{ sequence: number; outcome?: string; ids?: string[] }> = [];
+    let done!: () => void;
+    const completed = new Promise<void>(resolve => { done = resolve; });
+    const client = createWorkerBoardCatalogClient(true, request => bridge.request(request));
+    const bridge = createBoardCatalogParentBridge([h.state], reply => {
+      client.accept(reply);
+      const context = client.current(publicPlan(), h.state);
+      const ids = context?.plan?.tasks.map(task => task.id);
+      seen.push({ sequence: reply.sequence, outcome: context?.outcome, ids });
+      if (context?.outcome === "ok" && ids?.includes("OPS-T2")) done();
+    });
+    try {
+      client.current(publicPlan(), h.state);
+      await fixtureUntil(() => shim.events().some(event => event.phase === "start" && event.args.join(" ") === `api ${oldBlob}`));
+      assert.ok(shim.calls().includes(`api ${refPath}`), "positive control: the first read already pinned the old upstream revision");
+      writeFileSync(selectionPath, JSON.stringify({ repository: "fixture-private/other-ops", kinds: [] }));
+      assert.equal(client.current(publicPlan(), h.state)?.outcome, "unreadable");
+      writeFileSync(refFile, JSON.stringify(fresh.responses.get(refPath)));
+      writeFileSync(selectionPath, original);
+      assert.equal(client.current(publicPlan(), h.state)?.outcome, "unreadable", "returning to the same spelling cannot revive the prior observation");
+      await within(completed, "the current selection did not receive a distinct fresh pinned read");
+      assert.equal(seen.length, 1, "the superseded operation publishes no old result, even though the final root spelling matches");
+      assert.deepEqual(seen[0]!.ids, ["PUBLIC-T1", "OPS-T2"]);
+      assert.ok(seen[0]!.sequence > 1);
+      assert.equal(shim.calls().filter(call => call === `api repos/${repository}`).length, 2, "a new read begins after the old one closes");
+      assert.ok(shim.calls().every(call => !call.includes("fixture-private/other-ops")), "a changed selection waits behind the one existing GET, not a parallel reader");
     } finally { bridge.close(); }
   });
 });

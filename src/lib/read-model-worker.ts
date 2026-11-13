@@ -2982,10 +2982,12 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
     }, clock);
     closeCatalogBridge = () => catalogBridge.close();
     spawned.on("message", (msg: ReadModelWorkerMessage) => {
-      if (worker !== spawned || stopping || paused) return;
-      // Private packets never enter observation/log/body relays. Only negotiated child requests
-      // from configured roots reach the parent-owned GET reader.
-      if (isBoardCatalogRequest(msg)) { catalogBridge.request(msg); return; }
+      // Guard only the new private protocol. Legacy finalization messages, including the
+      // stopped/lease-release receipt, must still arrive after stop or pause clears `worker`.
+      if (isBoardCatalogRequest(msg)) {
+        if (worker === spawned && !stopping && !paused) catalogBridge.request(msg);
+        return;
+      }
       void (heapAnswer(msg) || onMessage(msg));
     });
     spawned.on("error", (error) => opts.log?.("read_model.worker_failed", { error: String(error?.message ?? error) }));
