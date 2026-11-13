@@ -1311,6 +1311,7 @@ import {
   type LedgerGrepFsDeps,
 } from "./lib/ledger-grep.js";
 import { routingAbCommand } from "./lib/routing-experiments.js";
+import { askDecisionModel, decisionsCommand } from "./lib/decision-model.js";
 import {
   PROGRESS_WATCHDOG_READ_STEPS,
   captureDiagnosticsBundle,
@@ -42558,6 +42559,12 @@ const COMMANDS: readonly CommandSpec[] = [
     detail: "W1-T2697: the ledger records every rmd verb but never who ran it — a worker subprocess, the daemon's own in-process loop, and an operator's bare `./bin/rmd` are now distinguished by the `actor` field every appendLedger call stamps at write time (a pre-stamp row reads `unknown`, never guessed). This prints the hand-run census: over the archive+live ledger UNION (never the live file alone — W1-T1013), operator rows are grouped into sessions by their writing process and a thirty-minute gap, each session reduced to its ordered step sequence, and any sequence of length >= 2 recurring across at least the policy floor of DISTINCT CALENDAR DAYS (never session count) is printed with its days and session count. The same census, when the daemon's own cadence supplies a run id, additionally proposes each unproposed recurrence as ONE `plan/feedback/` entry (deduped by sequence signature against the ledger union, `hand_run.census_proposed`) — this command never does that itself. READ-ONLY: writes no ledger line, no feedback entry, no state file.",
   },
   {
+    name: "decisions",
+    syntax: "rmd decisions probe --candidate <name> --input-file <file> --questions-file <file> [--role <role>]",
+    summary: "Ask one decision model one question set about one input, and print the row it wrote.",
+    detail: "W1-T12416: sends ONE paid cash request to a candidate named in the decision_models section of .remudero/mounts.yaml. The questions file is a JSON array of yes-no, choice (2 to 255 typed options) and score (2 to 10 ordered levels) questions, each with a name and instructions; a bad set is refused before any reservation. The request reserves on its input size plus a 64-token output margin against the normal daily cash cap, settles from the reply's usage at the candidate's own price row, and writes one decision.answered row: role, input digest, candidate, deployment, served model, latency, reserved and settled dollars, usage, and each question's distribution, abstention or rejection. A candidate whose cashDeploymentEndpoints entry or key is missing is unavailable and sends nothing. Shadow only: no gate, route or judge reads the row. Exit 0 answered, 1 refused, unavailable or failed, 2 bad usage.",
+  },
+  {
     name: "field-trials",
     syntax: "rmd field-trials [--source <label>=<owner/repo>]... [--ledger <label>=<state-dir>]... [--out-dir <dir>] [--consent <file>] [--case-files <file>] [--max-pages <n>] [--offline] [--revoke <release-id>] [--field-note <out> [--site-registry <file>]] [--json] [--refresh-step <name>=<exit-code|skipped>]... [--refresh-script-blob <sha1>] [--refresh-record-only]",
     summary: "Join the ledger union and GitHub history into observational field-trials aggregates.",
@@ -43696,6 +43703,7 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
     (dir, sinceMs, login) => ghBrokerLoginStatus(dir, sinceMs, { login }),
   )],
   ["routing-ab", async (rest) => await routingAbCommand(rest)],
+  ["decisions", async (rest) => await decisionsCommand(rest, (config, request) => askDecisionModel(config, request), { repoRoot })],
   ["progress-watchdog", (rest) => progressWatchdogCommand(rest)],
   ["live-edits", async (rest) => await liveEditsCommand(rest)],
   ["host-alert", async (rest) => hostAlertCommand(rest)],
