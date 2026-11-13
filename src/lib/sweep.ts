@@ -3981,8 +3981,9 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         // The claim path failed after preserving the bytes. Only a new claim attempt can prove
         // that clearStaleDirty now succeeds; preservation alone cannot clear that failure.
         if (decline.owner_recovery_reason === "owner_stale_dirty_reset_failed") return false;
-        if (!failed && snapshot.historyState === "unknown" && snapshot.pathState === "managed" &&
-            snapshot.attachmentState === "exact") {
+        if (!failed && snapshot.pathState === "managed" &&
+            (decline.owner_recovery_reason === "process_cwd_owner" ||
+              (snapshot.historyState === "unknown" && snapshot.attachmentState === "exact"))) {
           const lockPath = inflightLockPath(inflightDir, fixBranchClaimKey(owner, repo, branch));
           let claimClear = false;
           try {

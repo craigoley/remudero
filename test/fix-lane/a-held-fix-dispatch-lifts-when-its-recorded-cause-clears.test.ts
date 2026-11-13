@@ -114,7 +114,7 @@ test("a production owner probe releases a recorded process owner when its claim 
     writeFileSync(ledgerPath, "");
     writeFileSync(lockPath, JSON.stringify({ pid: process.pid, host: hostname(), run_id: "live-owner",
       startedAt: new Date().toISOString() }));
-    const built = buildSweepEffects({ owner: "acme", repo: "scratch", config: { root }, ledgerPath,
+    let built = buildSweepEffects({ owner: "acme", repo: "scratch", config: { root }, ledgerPath,
       runId: "owner-probe", plan: { tasks: [], byId: new Map() }, policy: DEFAULT_SWEEP_POLICY,
       log: () => {},
       fixBranchClaimKeyImpl: () => claimKey,
@@ -145,6 +145,18 @@ test("a production owner probe releases a recorded process owner when its claim 
     assert.equal(fixDispatchHoldAtHead(pr, [owner], () => true, built.fixOwnerReclaimableAtHold, options()), undefined,
       "the production claim and process census release the recorded cause at this head");
     assert.equal(censusCalls, 3, "the process census is re-read each pass");
+    census = { state: "clear", scanned: 1 };
+    built = buildSweepEffects({ owner: "acme", repo: "scratch", config: { root }, ledgerPath,
+      runId: "detached-owner-probe", plan: { tasks: [], byId: new Map() }, policy: DEFAULT_SWEEP_POLICY,
+      log: () => {}, fixBranchClaimKeyImpl: () => claimKey,
+      ownerProcessCwdCensusImpl: (path: string) => { assert.equal(path, ownerPath); censusCalls++; return census; },
+      registeredOwnerRecovery: { capture: () => ({ path: ownerPath, pathState: "managed",
+        attachmentState: "detached_or_other", treeState: "unknown", remoteState: "unknown", historyState: "unknown",
+        claimState: "unknown", processState: "unknown", ageMs: 1000, localSha: pr.headSha,
+        remoteSha: pr.headSha }), remove: () => {} } } as never);
+    assert.equal(fixDispatchHoldAtHead(pr, [owner], () => true, built.fixOwnerReclaimableAtHold, options()), undefined,
+      "a changed owner branch cannot hide a cleared claim and process cause");
+    assert.equal(censusCalls, 4, "liveness is re-probed even when attachment changed");
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
