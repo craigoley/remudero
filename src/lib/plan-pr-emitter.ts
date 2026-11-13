@@ -822,19 +822,14 @@ function runProofInTree(cwd: string, entryRoot: string, proof: string, budgetMs:
   log?: CheckProofChildLog, storeRoot?: string | false): PlanPrPreflightReading {
   if (!existsSync(join(entryRoot, CHECK_PROOF_CHILD_ENTRY))) return absentFromTree(CHECK_PROOF_CHILD_ENTRY);
   const args = checkProofLaunchArgv(entryRoot, proof, log, storeRoot);
-  const { file, env } = inTreeCommand(cwd, CHECK_PROOF_CHILD_ENTRY, args);
-  const r = spawnSync(file, args, { cwd, encoding: "utf8", maxBuffer: 1 << 26, env, ...budgetedSpawn(budgetMs) });
-  const output = `${r.stdout ?? ""}\n${r.stderr ?? ""}`;
-  if ((r.error as NodeJS.ErrnoException | undefined)?.code !== "ETIMEDOUT") return { status: r.status, output };
-  killBudgetLeftovers(r.pid);
-  return { status: null, output, timedOutMs: budgetMs };
+  // Reuse the shared sync tree runner so this adds no second sync-spawn path to the daemon census.
+  return runInTree(cwd, join(entryRoot, CHECK_PROOF_CHILD_ENTRY), args, budgetMs);
 }
 async function runProofInTreeAsync(cwd: string, entryRoot: string, proof: string, budgetMs: number,
   log?: CheckProofChildLog, storeRoot?: string | false): Promise<PlanPrPreflightReading> {
   if (!existsSync(join(entryRoot, CHECK_PROOF_CHILD_ENTRY))) return absentFromTree(CHECK_PROOF_CHILD_ENTRY);
   const args = checkProofLaunchArgv(entryRoot, proof, log, storeRoot);
-  const { file, env } = inTreeCommand(cwd, CHECK_PROOF_CHILD_ENTRY, args);
-  return runChildAsync(file, args, cwd, env, budgetMs);
+  return runInTreeAsync(cwd, join(entryRoot, CHECK_PROOF_CHILD_ENTRY), args, budgetMs);
 }
 
 interface PlanLintScriptTools { lintArgvFromPackage(text: string): { args: string[]; base?: string } | undefined; }

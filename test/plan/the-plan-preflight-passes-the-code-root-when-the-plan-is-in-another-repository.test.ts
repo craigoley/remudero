@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { createRequire } from "node:module";
 import { test, type TestContext } from "node:test";
@@ -60,7 +60,10 @@ test("W1-T12205 criterion 1: all four real preflight forms pass --code-root to t
   for (const result of results) { assert.equal(result.ok, true, JSON.stringify(result)); assert.deepEqual(result.unreadable, []); }
   const calls = traced(f.trace); assert.equal(calls.length, 4);
   assert.deepEqual(calls.map(c => c.identity), ["current", "current", "target", "target"]);
-  for (const call of calls) { assert.equal(call.args[call.args.indexOf("--code-root") + 1], f.code.dir); assert.notEqual(call.cwd, f.code.dir); }
+  for (const call of calls) {
+    assert.equal(call.args[call.args.indexOf("--code-root") + 1], realpathSync(f.code.dir));
+    assert.notEqual(call.cwd, realpathSync(f.code.dir));
+  }
 });
 
 test("W1-T12205 criterion 2: sync and gardener-shaped async proof readers use the code checkout", async t => {
@@ -70,7 +73,7 @@ test("W1-T12205 criterion 2: sync and gardener-shaped async proof readers use th
   const input = { cwd: f.plan.dir, title: "chore(plan): fixture", body: BODY, codeRoot: f.code.dir };
   assert.equal(planPrPreflight(input, checks).ok, true);
   assert.equal((await planPrPreflightAsync(input, asAsyncChecks(checks))).ok, true);
-  assert.deepEqual(seen, [f.code.dir, f.code.dir]);
+  assert.deepEqual(seen, [realpathSync(f.code.dir), realpathSync(f.code.dir)]);
 });
 
 test("ops status body proofs run from the candidate plan while the public checkout supplies the proof runner", async t => {
@@ -153,7 +156,8 @@ test("W1-T12205 criterion 5: async preflight derives its code root through the r
   const checks = { ...otherChecks, destinationStateDir: () => state, publicCodeRoot: () => f.code.dir };
   const r = await planPrPreflightAsync({ cwd: selected, title: "chore(plan): fixture", body: BODY }, asAsyncChecks(checks));
   assert.equal(r.ok, true, JSON.stringify(r)); assert.deepEqual(r.unreadable, []);
-  const calls = traced(f.trace); assert.equal(calls.length, 1); assert.equal(calls[0]!.args[calls[0]!.args.indexOf("--code-root") + 1], f.code.dir);
+  const calls = traced(f.trace); assert.equal(calls.length, 1);
+  assert.equal(calls[0]!.args[calls[0]!.args.indexOf("--code-root") + 1], realpathSync(f.code.dir));
 });
 
 
@@ -182,7 +186,7 @@ test("W1-T12205 criterion 5: the selected async route defaults to the actual pub
   const seen: string[] = []; const checks = { ...otherChecks, lintPlan: GREEN, destinationStateDir: () => state,
     checkProof: (cwd: string) => { seen.push(cwd); return 0; } };
   const r = await planPrPreflightAsync({ cwd: selected, title: "chore(plan): fixture", body: BODY }, asAsyncChecks(checks));
-  assert.equal(r.ok, true, JSON.stringify(r)); assert.deepEqual(seen, [REPO_ROOT]);
+  assert.equal(r.ok, true, JSON.stringify(r)); assert.deepEqual(seen, [realpathSync(REPO_ROOT)]);
 });
 
 test("W1-T12205 criterion 5: an unreadable selected host file refuses without exposing its contents", async t => {
