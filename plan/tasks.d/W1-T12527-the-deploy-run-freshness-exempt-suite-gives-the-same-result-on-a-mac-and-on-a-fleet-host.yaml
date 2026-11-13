@@ -1,0 +1,64 @@
+- id: W1-T12527
+  title: "The deploy-run-freshness-exempt suite gives the same result on a Mac and on a fleet host"
+  repo: remudero
+  depends_on: []
+  priority: 1.0
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: medium # one test file; no production code changes
+  band_meaning: blast-radius
+  origin: operator-session#follow-ups-2026-11-13
+  plan_refs:
+    - W1-T12162
+    - W1-T11337
+    - W1-T1134
+  files:
+    - test/deploy-run-freshness-exempt.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "The deploy-run case reads no host config, install root, service manager or ledger: it runs `main()` with a state root, HOME and config under a temp dir, and still proves the entry gate did not refuse deploy-run"
+      proof: "grep: W1-T12527 criterion 1 in test/deploy-run-freshness-exempt.test.ts"
+    - claim: "A case points HOME and the instance config at a path that fails on any read and the suite gives the same result, with no escaped rejection at file teardown"
+      proof: "grep: W1-T12527 criterion 2 in test/deploy-run-freshness-exempt.test.ts"
+    - claim: "The suite passes on the Mac agent account and on the Azure host, on the same commit. The pull request records the failure message seen on the Mac before the fix"
+      proof: "grep: W1-T12527 criterion 3 in test/deploy-run-freshness-exempt.test.ts"
+  rationale: |
+    OBSERVED on the Mac agent account: test/deploy-run-freshness-exempt.test.ts failed in 11 hand-lane author
+    preflights on 2026-11-10 and 2026-11-11 (~/rmd-hand/ship/<task>/preflight.<n>.log for T11841, T11884,
+    T11926, T12024, T12057 twice, T12234, T12247, T12266, T12273, T12294). It passes in hosted CI and on the Azure
+    host. W1-T12162's builder named it in "What remains".
+    THE MESSAGE WAS NOT KEPT: each log holds only the file-level line, for example
+    "not ok 163 - test/deploy-run-freshness-exempt.test.ts". The complete outputs (coverage/rmd-author-*) went with
+    their worktrees. No subtest of this file is listed as failing, while other failing files in the same logs list
+    their subtests. So the failure is at file level: the `after()` hook (escaped rejections) or the process exit.
+    LIKELY HOST DEPENDENCY, read at origin/main 713c610e6:
+    - test/deploy-run-freshness-exempt.test.ts:131-132 runs the real `main()` in-process with
+      `["deploy-run", "--dry-run"]`. Only the freshness check is injected (:116).
+    - src/run-task.ts:29017 `deployRunCommand` then runs for real: `loadConfig()` (:29037), `resolveInstallRoot` and
+      `assessInstallForDeploy` (:29043-29044), `realDeps().deployFor` with the ledger path, `queryLaunchdServiceSensed`
+      (a real `launchctl` on a Mac; Linux has none), the process table, and `runServePolicyCycle`.
+    - The file's `after()` (:53-58) fails the file if any rejection escaped from these in-process calls (W1-T11337).
+    On a Mac the launchd and install-root reads answer differently than on Linux or in CI, so the real deploy-run
+    path differs by host.
+    CHECKED for overlap: W1-T11788 (queued) also edits this file, to add the gh-broker verb to the exempt set; it does
+    not change how the deploy-run case reads the host. W1-T12162 (queued) fixes three other suites.
+  design: |
+    1. First reproduce on the Mac agent account (`node --test --import tsx test/deploy-run-freshness-exempt.test.ts`
+       in a hand worktree) and record the failure message and the reading that leaves the fixture in the pull request.
+    2. Then fix that reading in the test. For the deploy-run case, give `main()` a temp HOME and instance config
+       and pass `--state-root <temp dir>`, so `deployRunCommand` stops at its own no-op before any launchd, process
+       table, install or ledger read. Keep the assertion that the gate's refusal message is absent.
+    3. Add the criterion 2 case: HOME and the instance config point at a path that fails on any read.
+    4. Restore every environment value the suite sets in `after()`.
+    NO-INVARIANTS: a test-only fix of host readings.
+    NOT IN SCOPE: production code. If the suite can be fixed only through a new injection point in src, stop and
+    report it; that is a separate task. The exempt set itself (W1-T11788).
+  falsifier: |
+    Restore the real HOME and config in the deploy-run case and criterion 2 must fail on any host. Restore the fix
+    and require all three to pass on the Mac agent account and on the Azure host.
+  note: |
+    Id W1-T12527 reserved for run-unfiled-1794594748000 with ~/rmd-work/bin/reserve-id.sh.
+    If the Mac message names a different reading than the ones above, fix that one and say so in the pull request.

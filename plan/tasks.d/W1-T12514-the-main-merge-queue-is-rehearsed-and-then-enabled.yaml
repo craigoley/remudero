@@ -64,3 +64,11 @@
   note: |
     Id W1-T12514 reserved for run-unfiled-1794582098000 with ~/rmd-work/bin/reserve-id.sh.
     Depends on W1-T12509 so the merge-time ratchet verdict is complete before the queue becomes the main merge path.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 1
+    reasons:
+      - "deterministic backstop: it declares scripts/merge-queue-rehearsal.mjs, a secrets, auth, CI, deploy, merge-policy or ruling path — irreversible or privileged work goes to a person"
+    judged_at: "2026-11-13T18:12:28.718Z"
+    pin: "413199805bf91514e0fbcd29ac30b14a65f07bf0f16b6d60157d30b20837d8b5"
