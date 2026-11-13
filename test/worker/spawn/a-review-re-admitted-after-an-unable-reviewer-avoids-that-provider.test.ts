@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "node:test";
+import { test, type TestContext } from "node:test";
 import { buildSweepEffects as buildCliSweepEffects, type SweepCommandHost } from "#src/cli/commands/sweep.js";
 import type { Config } from "#src/lib/config.js";
 import type { Plan } from "#src/lib/plan.js";
@@ -247,7 +247,9 @@ test("W1-T11432 criterion 2: a detached child rejects malformed provider exclusi
   { runId: "detached-review", taskId: "W1-T9716" }, async () => 0), /malformed provider exclusions/);
 });
 
-test("W1-T11432 criterion 1: overflow fallback retains an excluded Claude mount and records the unhonoured exclusion", async (t) => {
+/** One overflow-fallback spawn with every host reading fixed: the platform, the account, the provider
+ *  capacity and HOME (where provider logins and the login keychain live). */
+async function overflowRun(t: TestContext, home: string) {
   const root = mkdtempSync(join(tmpdir(), "rmd-t11432-overflow-exclusion-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const settingsFile = join(root, "settings.json");
@@ -260,36 +262,73 @@ test("W1-T11432 criterion 1: overflow fallback retains an excluded Claude mount 
   let codexReads = 0;
   let queryCalls = 0;
   const assignments: WorkerSelectionAssignment[] = [];
-  const result = await spawnWorker({
-    cwd: root, permissionMode: "bypassPermissions", prompt: "bounded review", settingsFile, config,
-    env: { ANTHROPIC_API_KEY: "fixture-only" },
-    keychain: { platform: "linux", readCredentialFile: () => JSON.stringify({ claudeAiOauth: { accessToken: "fixture-only", expiresAt: NOW + 86_400_000 } }) },
-    excludeProviders: ["claude"], onSelectionAssignment: assignment => assignments.push(assignment),
-    providerRouting: {
-      readClaudeHealth: async () => ({ degradedModels: [], source: "fresh", observedAtMs: NOW }),
-      readClaude: async () => {
-        claudeReads++;
-        // On an erroneous second auction, make Claude eligible so the falsifier fails a bounded read-count assertion
-        // instead of looping indefinitely through the same overflow fallback.
-        return claudeReads > 1 ? capacity("claude", 15)
-          : { provider: "claude", readable: false, windows: [], detail: "blocked" };
+  const savedHome = process.env.HOME;
+  process.env.HOME = home;
+  try {
+    const result = await spawnWorker({
+      cwd: root, permissionMode: "bypassPermissions", prompt: "bounded review", settingsFile, config,
+      env: { ANTHROPIC_API_KEY: "fixture-only" },
+      keychain: { platform: "linux", accountId: "fixture-account",
+        readCredentialFile: () => JSON.stringify({ claudeAiOauth: { accessToken: "fixture-only", expiresAt: NOW + 86_400_000 } }) },
+      excludeProviders: ["claude"], onSelectionAssignment: assignment => assignments.push(assignment),
+      providerRouting: {
+        readClaudeHealth: async () => ({ degradedModels: [], source: "fresh", observedAtMs: NOW }),
+        readClaude: async () => {
+          claudeReads++;
+          // On an erroneous second auction, make Claude eligible so the falsifier fails a bounded read-count assertion
+          // instead of looping indefinitely through the same overflow fallback.
+          return claudeReads > 1 ? capacity("claude", 15)
+            : { provider: "claude", readable: false, windows: [], detail: "blocked" };
+        },
+        readCodex: async () => { codexReads++; return { provider: "codex", readable: false, windows: [], detail: "blocked" }; },
+        writeStatus: () => {},
       },
-      readCodex: async () => { codexReads++; return { provider: "codex", readable: false, windows: [], detail: "blocked" }; },
-      writeStatus: () => {},
-    },
-    claudeExecutable: { cache: createClaudeExecutableCache(), deps: {
-      env: { RMD_CLAUDE_BIN: "/fixture/claude" }, home: root, exists: () => true,
-      which: () => "/fixture/claude", canExecute: () => true, locations: [],
-    } },
-    queryFn: ((input: { prompt: string; options: { resume?: string } }) => {
-      assert.match(input.prompt, /bounded review/);
-      queryCalls++;
-      return (async function* () {
-        yield { type: "result", subtype: "success", is_error: false, result: "done",
-          session_id: "overflow-review", total_cost_usd: 0, num_turns: 1 };
-      })();
-    }) as SpawnWorkerArgs["queryFn"],
-  });
+      claudeExecutable: { cache: createClaudeExecutableCache(), deps: {
+        env: { RMD_CLAUDE_BIN: "/fixture/claude" }, home: root, exists: () => true,
+        which: () => "/fixture/claude", canExecute: () => true, locations: [],
+      } },
+      queryFn: ((input: { prompt: string; options: { resume?: string } }) => {
+        assert.match(input.prompt, /bounded review/);
+        queryCalls++;
+        return (async function* () {
+          yield { type: "result", subtype: "success", is_error: false, result: "done",
+            session_id: "overflow-review", total_cost_usd: 0, num_turns: 1 };
+        })();
+      }) as SpawnWorkerArgs["queryFn"],
+    });
+    return { result, assignments, claudeReads, codexReads, queryCalls };
+  } finally {
+    if (savedHome === undefined) delete process.env.HOME;
+    else process.env.HOME = savedHome;
+  }
+}
+
+/** A HOME of the test's own; with `logins`, it holds a Claude and a Codex login and a login keychain. */
+function fixtureHome(t: TestContext, logins: boolean): string {
+  const home = mkdtempSync(join(tmpdir(), "rmd-t12162-home-"));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  if (!logins) return home;
+  mkdirSync(join(home, ".claude"), { recursive: true });
+  mkdirSync(join(home, ".codex"), { recursive: true });
+  mkdirSync(join(home, "Library", "Keychains"), { recursive: true });
+  writeFileSync(join(home, ".claude.json"), JSON.stringify({ oauthAccount: { accountUuid: "host-login", emailAddress: "host@example.test" } }));
+  writeFileSync(join(home, ".claude", ".credentials.json"),
+    JSON.stringify({ claudeAiOauth: { accessToken: "host-only", expiresAt: NOW + 86_400_000 } }));
+  writeFileSync(join(home, ".codex", "auth.json"), JSON.stringify({ tokens: { access_token: "host-only" } }));
+  writeFileSync(join(home, "Library", "Keychains", "login.keychain-db"), "");
+  return home;
+}
+
+function overflowOutcome(run: Awaited<ReturnType<typeof overflowRun>>) {
+  return {
+    isError: run.result.isError, accountLabel: run.result.accountLabel, provider: run.assignments[0]?.selected.provider,
+    assignments: run.assignments.length, exclusionUnhonoured: run.assignments[0]?.routing.exclusion_unhonoured,
+    claudeReads: run.claudeReads, codexReads: run.codexReads, queryCalls: run.queryCalls,
+  };
+}
+
+test("W1-T11432 criterion 1: overflow fallback retains an excluded Claude mount and records the unhonoured exclusion", async (t) => {
+  const { result, assignments, claudeReads, codexReads, queryCalls } = await overflowRun(t, fixtureHome(t, false));
   assert.equal(result.isError, false, JSON.stringify(result));
   assert.equal(claudeReads, 1, "the retry must skip the blocked subscription auction");
   assert.equal(codexReads, 1, "the retry must skip the blocked subscription auction");
@@ -300,4 +339,13 @@ test("W1-T11432 criterion 1: overflow fallback retains an excluded Claude mount 
   assert.deepEqual(assignments[0]?.routing.exclusion_unhonoured, {
     reason: "no-eligible-alternative", excludedProviders: ["claude"],
   });
+});
+
+test("W1-T12162 criterion 3: the overflow case gives the same result with and without provider logins on the host", async (t) => {
+  const without = overflowOutcome(await overflowRun(t, fixtureHome(t, false)));
+  const withLogins = overflowOutcome(await overflowRun(t, fixtureHome(t, true)));
+  assert.deepEqual(withLogins, without);
+  assert.equal(without.isError, false);
+  assert.equal(without.accountLabel, "fixture-account", "the account is the fixture's, never the host's login");
+  assert.deepEqual(without.exclusionUnhonoured, { reason: "no-eligible-alternative", excludedProviders: ["claude"] });
 });
