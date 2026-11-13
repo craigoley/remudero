@@ -640,6 +640,10 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   "daemon.stop",
   "daemon.stop_drain.completed",
   "daemon.freshness_exit",
+  "daemon.freshness_decision", // restartCycleRow joins the decision and material-change time across lifetimes.
+  "daemon_selfrestart_for_freshness",
+  "daemon.admission_held",
+  "daemon.restart_cycle",
   "daemon.freshness_drain.completed",
   "daemon.memory_exit",
   "daemon.memory_drain.completed",

@@ -1,4 +1,5 @@
 import { settledSpansByClass } from "./cost-anomaly.js";
+import { restartCycleLedgerRows, restartCycleRow } from "./restart-cycle.js";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 import type { LedgerRecord } from "./retro.js";
@@ -4700,6 +4701,36 @@ export async function runDaemon(
   // survives the very process replacement it caused (design v); updated once per tick below from
   // that tick's own `sweepCycleOutcome.reviewerCodeStale` reading.
   const bootLedgerLines = deps.readLedgerLines?.() ?? [];
+  const restartLedger = restartCycleLedgerRows(bootLedgerLines);
+  const restartBoots = restartLedger.rows.filter(row => row.step === "daemon.boot" && typeof row.ts === "string")
+    .map(row => Date.parse(String(row.ts))).filter(Number.isFinite).sort((a, b) => a - b);
+  const restartStartedAtMs = restartBoots.at(-1) ?? clockFromDateFn(deps.now).now();
+  const recordedRestartStarts = new Set(restartLedger.rows.filter(row => row.step === "daemon.restart_cycle")
+    .map(row => Date.parse(String(row.started_at))));
+  for (const started of restartBoots.slice(-2, -1)) {
+    if (recordedRestartStarts.has(started)) continue;
+    const cycle = restartCycleRow(restartLedger.rows, started);
+    if (cycle) { log("daemon.restart_cycle", { ...cycle }); recordedRestartStarts.add(started); }
+  }
+  let restartCyclePending = !recordedRestartStarts.has(restartStartedAtMs) &&
+    restartCycleRow(restartLedger.rows, restartStartedAtMs) !== null;
+  type RestartTickLedger = { lines: readonly string[] } | { error: unknown };
+  const observeRestartCycle = (): RestartTickLedger | undefined => {
+    if (!restartCyclePending || !deps.readLedgerLines) return;
+    let snapshot: RestartTickLedger | undefined;
+    try {
+      const lines = deps.readLedgerLines();
+      snapshot = { lines };
+      const ledger = restartCycleLedgerRows(lines);
+      if (ledger.errors.length) log("daemon.restart_cycle_unreadable", { errors: ledger.errors });
+      const cycle = restartCycleRow(ledger.rows, restartStartedAtMs);
+      if (cycle?.first_verdict_at) { log("daemon.restart_cycle", { ...cycle }); restartCyclePending = false; }
+    } catch (error) {
+      snapshot ??= { error };
+      log("daemon.restart_cycle_unreadable", { error: String(error) });
+    }
+    return snapshot;
+  };
   deps.bootPhases?.mark("loop_ledger_read");
   const measuredRuns: MeasuredRun[] = [];
   const runLengths = dispatchRunHistory(bootLedgerLines, measuredRuns);
@@ -5311,6 +5342,7 @@ export async function runDaemon(
     freshnessHeld = coalesced.action === "hold";
     log(FRESHNESS_DECISION_STEP, {
       action,
+      stale_since_ms: staleAtMs,
       busy,
       busy_reasons: busyReasons,
       background,
@@ -6703,6 +6735,7 @@ export async function runDaemon(
     // no row has within one poll interval; a throwing sampler rides it as mem_telemetry, never escapes it.
     log("daemon.tick", { poll_interval_ms: pollIntervalMs, ...tickMemorySample(deps, daemonClock.now(), pollIntervalMs, tickMemory) });
     deps.bootPhases?.firstTick(log);
+    const restartRead = observeRestartCycle();
     recordNearLimitHeapSample(deps, "tick");
     if (tickMemory.sampled) startMemoryReadAfterRow(deps, log);
     const tickStartedAtMs = daemonClock.now();
@@ -7504,7 +7537,12 @@ export async function runDaemon(
     const mergedTask: MergedResolver = (t) => isMerged(t.id);
     // W1-T10348: the released set, resolved ONCE per tick by the resolver every admission site shares
     // (ledger rows plus operator-releases.json), and handed to the kick, the tick selection and the refill.
-    const tickReleases = resolveReleases(deps, planForBatch);
+    const tickReleases = resolveReleases({
+      ...deps, readLedgerLines: restartRead === undefined ? deps.readLedgerLines : () => {
+        if ("error" in restartRead) throw restartRead.error;
+        return restartRead.lines;
+      },
+    }, planForBatch);
     if (tickReleases.durableUnreadable !== undefined || tickReleases.ledgerUnreadable !== undefined) {
       log("dispatch.releases_unreadable", {
         ...(tickReleases.ledgerUnreadable !== undefined ? { ledger_error: tickReleases.ledgerUnreadable } : {}),
@@ -8422,7 +8460,8 @@ export async function runDaemon(
       if (freshness.stale && decideFreshness(freshness, inFlightTasks.size) === "restart") decideRestart(freshness);
       wakeParkedLanes();
     };
-    const onDispatchTick = checkFreshness || (deps.reloadPlan && deps.sweepLight) ? (): void | Promise<void> => {
+    const onDispatchTick = checkFreshness || restartCyclePending || (deps.reloadPlan && deps.sweepLight) ? (): void | Promise<void> => {
+      observeRestartCycle();
       wakeParkedLanes();
       if (inFlightTasks.size === 0 || deps.checkPause?.()) return;
       // W1-T11327: a requested restart releases child lanes and awaits in-process ones, as a decided restart does.
