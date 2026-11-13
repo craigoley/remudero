@@ -75,7 +75,8 @@ test("a production owner probe releases a recorded process owner when its claim 
       registeredOwnerRecovery: { capture: () => ({ path: ownerPath, pathState: "managed",
         attachmentState: "exact", treeState: "clean", remoteState: "exact", historyState: "unknown",
         claimState: "unknown", processState: "unknown", ageMs: 1000, localSha: pr.headSha,
-        remoteSha: pr.headSha }), remove: () => {} } } as never);
+        remoteSha: pr.headSha }), remove: () => {} },
+      processCwdCensusAtHoldImpl: () => ({ state: "clear", scanned: 0 }) } as never);
     const owner = { step: "sweep.fix.checkout_claim_declined", pr_number: pr.prNumber, head_sha: pr.headSha,
       task_id: pr.taskId, branch, reason: "registered_worktree_owner", owner_recovery_reason: "process_cwd_owner",
       worktree_path: ownerPath, ts: at(NOW) };
@@ -118,6 +119,12 @@ test("W1-T11168 criterion 2: ledger median, doubling, success reset and one-pass
   assert.equal(hold([preserveFailure])?.fields.probe_result, "unprobed");
   assert.equal(hold([preserveFailure], { nowMs: NOW + 100 }), undefined,
     "a failed preservation retries after its backoff even while the checkout remains");
+  const untrackedFailure = { ...preserveFailure, owner_recovery_reason: "owner_untracked_preserve_failed" };
+  const untracked = hold([untrackedFailure])!;
+  assert.equal(untracked.fields.cause, "owner_untracked_preserve_failed");
+  assert.equal(untracked.fields.probe_result, "unprobed");
+  assert.equal(hold([untrackedFailure], { nowMs: NOW + 100 }), undefined,
+    "an unprobed preservation failure waits one pass even when claim and process are clear");
 });
 
 test("W1-T11168 criterion 3: failed retries ask the judge and escalate once per head and cause", async () => {
@@ -144,6 +151,26 @@ test("W1-T11168 criterion 3: failed retries ask the judge and escalate once per 
   assert.equal(unavailable?.fields.fix_dispatch_failed_escalated, undefined);
   assert.equal(await fixDispatchHoldAtHeadAsync(pr, seed, () => true, undefined,
     options({ nowMs: NOW + 200, judge: async () => undefined })), undefined, "unavailable keeps the retry schedule");
+  const untracked = { step: "sweep.fix.checkout_claim_declined", pr_number: pr.prNumber,
+    task_id: pr.taskId, head_sha: pr.headSha, worktree_path: "/worktrees/sweep-W1-T9796-1",
+    reason: "registered_worktree_owner", owner_recovery_reason: "owner_untracked_preserve_failed" };
+  const untrackedRows: Record<string, unknown>[] = [{ ...untracked, ts: at(NOW - 200) }, { ...untracked, ts: at(NOW) }];
+  let escalations = 0;
+  let dispatched = 0;
+  await runSweep([pr], { arm: () => {}, close: () => {}, dispatchFix: () => { dispatched++; },
+    escalate: () => { escalations++; }, runId: "untracked-preservation", ledgerPath: "/unused",
+    now: () => NOW, readLedger: () => untrackedRows,
+    appendLine: (_path, row) => { untrackedRows.push({ ts: at(NOW), ...row }); },
+    fixOwnerReclaimableAtHold: () => true,
+    fixProgressJudge: async input => {
+      assert.deepEqual(input.remedyHistory, untrackedRows.slice(0, 2));
+      return { verdict: "escalate", reason: "preservation keeps failing", loop: "preservation" };
+    } } as SweepDeps);
+  assert.equal(dispatched, 0, "a clear owner cannot erase the unprobed preservation verdict");
+  assert.equal(escalations, 1);
+  const disposition = untrackedRows.findLast(row => row.step === "sweep.disposed")!;
+  assert.equal(disposition.cause, "owner_untracked_preserve_failed");
+  assert.equal(disposition.judge_verdict, "escalate");
 });
 
 test("a cause judge's change of approach reaches the next dispatch", async () => {

@@ -243,9 +243,10 @@ test("W1-T7998: a held owner cause is re-probed and lifts when claim and process
     let asked = 0;
     const spy = () => { asked++; return true; };
     const failedRecovery = keptDeclines(f, { owner_recovery_reason: "owner_untracked_preserve_failed" });
-    assert.equal(fixDispatchHoldAtHead(pr, failedRecovery, existsSync, spy), undefined,
-      "a cleared owner cause lifts even when the prior recovery failed");
-    assert.equal(asked, 1);
+    const failedHold = fixDispatchHoldAtHead(pr, failedRecovery, existsSync, spy);
+    assert.equal(failedHold?.fields.probe_result, "unprobed",
+      "an untracked preservation failure has no owner probe that can prove preservation succeeded");
+    assert.equal(asked, 0);
 
     const pass = async (reclaimable: SweepDeps["fixOwnerReclaimableAtHold"]) => {
       const ledgerPath = join(mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}held-owner-`)), "ledger.ndjson");

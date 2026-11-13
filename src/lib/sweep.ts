@@ -1727,6 +1727,8 @@ export interface BuildSweepEffectsDeps {
   ghJsonImpl?: GhApiFetcher;
   ghBufferImpl?: (args: string[]) => Buffer;
   fixBranchClaimKeyImpl?: SweepRuntimeFn;
+  /** The live process census used when an owner snapshot cannot read git history. */
+  processCwdCensusAtHoldImpl?: typeof readBoundedProcessCwdCensus;
   boundedWorktreeOwnerPathImpl?: SweepRuntimeFn;
   decideRegisteredFixOwnerRecoveryImpl?: SweepRuntimeFn;
   fixRungCheckoutRefusedErrorImpl?: SweepRuntimeCtor;
@@ -2771,6 +2773,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     ghJsonImpl: ghJsonForBuild = ghJson,
     ghBufferImpl: ghBufferForBuild = readMutationVerdictZip,
     fixBranchClaimKeyImpl: fixBranchClaimKey = requiredSweepRuntime("fixBranchClaimKeyImpl"),
+    processCwdCensusAtHoldImpl: processCwdCensusAtHold = readBoundedProcessCwdCensus,
     boundedWorktreeOwnerPathImpl: boundedWorktreeOwnerPath = requiredSweepRuntime("boundedWorktreeOwnerPathImpl"),
     decideRegisteredFixOwnerRecoveryImpl: decideRegisteredFixOwnerRecovery = requiredSweepRuntime("decideRegisteredFixOwnerRecoveryImpl"),
     fixRungCheckoutRefusedErrorImpl: FixRungCheckoutRefusedError = requiredSweepRuntimeCtor("fixRungCheckoutRefusedErrorImpl"),
@@ -3980,7 +3983,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
             else log("sweep.fix.owner_claim_probe_unreadable", { pr_number: pr.prNumber,
               head_sha: pr.headSha, worktree_path: ownerPath, reason: String(error) });
           }
-          if (claimClear && readBoundedProcessCwdCensus(ownerPath).state === "clear") return true;
+          if (claimClear && processCwdCensusAtHold(ownerPath).state === "clear") return true;
         }
         // This probe answers whether the recorded owner still owns the checkout. A stale or
         // unreadable history can block recovery, but cannot keep a cleared claim/process cause held.
@@ -14871,7 +14874,10 @@ function dispatchFailureCause(row: Record<string, unknown>): string {
   if (FLEET_PAUSE_REFUSAL.test(reason)) return "fleet-held";
   if (isOwnerClaimDecline(row) && revalidatedOwnerPreservation(row.owner_recovery_reason))
     return `preservation:${reason}`;
-  if (isOwnerClaimDecline(row) && typeof row.worktree_path === "string") return `owner-held:${reason}`;
+  // A failed helper or unreadable read is not evidence that a live process or claim still owns
+  // the checkout. In particular, untracked preservation has no safe revalidation probe.
+  if (isOwnerClaimDecline(row) && typeof row.worktree_path === "string" &&
+      !/(?:_failed|_unreadable)$/.test(reason)) return `owner-held:${reason}`;
   // Match the fix-lane gardener's reasonClass without importing its sweep-dependent module graph.
   return reason.split(" — ")[0]!.replace(/\b[0-9a-f]{7,40}\b/gi, "<sha>")
     .replace(/\/pull\/\d+/g, "/pull/<n>").replace(/\b\d+(?:\.\d+)?\b/g, "<n>").trim();
