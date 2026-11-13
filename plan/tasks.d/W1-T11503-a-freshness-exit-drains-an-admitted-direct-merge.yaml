@@ -61,6 +61,12 @@
     the whole-census passing requirement and all existing assertions, scope, budget, status and
     verification, review and merge gates (W1-T11503 acceptance, design and scope amendment).
   design: |
+    Prior-behavior inventory: freshness still refuses new merge admissions; review/check/head, plan-safety,
+    holds and single-plan-merge ownership gates still decide whether a write can start. A preflight message is
+    not a successful merge receipt. Refusal and error remain explicit outcomes; an unresolved submitted write
+    remains unknown and is never blindly retried.
+    INVARIANT direct-merge-settlement: an admitted direct merge remains in restart drain until settled; wrapper completion cannot substitute.
+    INVARIANT freshness-admission: freshness closes new admissions while an unresolved submitted write stays explicit and never becomes a duplicate write.
     Register an admitted direct-merge operation with the daemon-lifetime drain owner before its
     asynchronous preflight/write can outlive a sweep wrapper. Keep registration until actual
     settlement, including refusal/error, and include PR/head, phase and settlement evidence in
@@ -90,6 +96,10 @@
       proof: "grep: W1-T11503 criterion 2 in test/github/a-freshness-exit-drains-an-admitted-direct-merge.test.ts"
     - claim: "Every priced ledger step the change writes is in CONFIG_GARDEN_LEDGER_STEPS or carries a reasoned census exemption, and the whole priced-step census passes"
       proof: "unit test: W1-T11503 criterion 3: the priced-step census accounts for the direct-merge receipt"
+    - claim: "invariant:direct-merge-settlement - an admitted direct merge stays in restart drain until its own settlement, not wrapper completion"
+      proof: "unit test: W1-T11503 criterion 1: the real freshness exit"
+    - claim: "invariant:freshness-admission - freshness closes new merge admission while already admitted work retains an explicit outcome"
+      proof: "unit test: W1-T11503 criterion 2: the latch closes new merge admission"
   note: |
     H4-F. Computed test/github MEDIUM from daemon, sweep and arm-auto-merge sketch. Host investigation
     was read-only and bounded to one named archive. No actual merge, restart or status write in
