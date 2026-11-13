@@ -14884,11 +14884,12 @@ function dispatchFailureCause(row: Record<string, unknown>): string {
   if (FLEET_PAUSE_REFUSAL.test(reason)) return "fleet-held";
   // A verified preservation does not prove that a failed index reset has cleared.
   if (isOwnerClaimDecline(row) && reason === "owner_stale_dirty_reset_failed") return `reset:${reason}`;
+  // This failure has no separate cause probe: a worktree liveness check cannot establish
+  // that the untracked preservation operation will succeed on retry.
+  if (isOwnerClaimDecline(row) && reason === "owner_untracked_preserve_failed") return `untracked-preserve:${reason}`;
   if (isOwnerClaimDecline(row) && revalidatedOwnerPreservation(row.owner_recovery_reason))
     return `preservation:${reason}`;
-  if (isOwnerClaimDecline(row) && typeof row.worktree_path === "string" &&
-      ["process_cwd_owner", "live_branch_claim"].includes(String(row.owner_recovery_reason)))
-    return `owner-held:${reason}`;
+  if (isOwnerClaimDecline(row) && typeof row.worktree_path === "string") return `owner-held:${reason}`;
   // Match the fix-lane gardener's reasonClass without importing its sweep-dependent module graph.
   return reason.split(" — ")[0]!.replace(/\b[0-9a-f]{7,40}\b/gi, "<sha>")
     .replace(/\/pull\/\d+/g, "/pull/<n>").replace(/\b\d+(?:\.\d+)?\b/g, "<n>").trim();
