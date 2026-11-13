@@ -25,6 +25,8 @@
   status: queued
   attempts: 0
   acceptance:
+    - claim: "invariant:identity-config-isolation — the managed-identity attempt uses a temporary Azure CLI config and leaves the person's stored account untouched"
+      proof: "unit test: test/deploy/a-deploy-signs-in-to-the-image-registry-with-the-hosts-managed-identity.test.ts"
     - claim: "The sign-in first tries the managed identity of the host. When that works, it signs in to the registry and no person's login is used"
       proof: "grep: W1-T12177 criterion 1 in test/deploy/a-deploy-signs-in-to-the-image-registry-with-the-hosts-managed-identity.test.ts"
     - claim: "When the host has no managed identity, the sign-in uses the login that is already on the host, as today"
@@ -46,6 +48,7 @@
     Tell the two failures of the identity path apart by the output of `az`: no identity on the host, or an identity that the registry refuses. Only the second names AcrPull.
     Add the method to the JSON line that `rmd_acr_refresh` writes to state/acr-login.json. src/lib/deployer.ts copies it to the row.
     `az login --identity` changes the active account of the Azure command line on the host. Keep it inside its own config directory (`AZURE_CONFIG_DIR`), so a person's login on the host stays as it was.
+    INVARIANT identity-config-isolation: the managed-identity attempt uses a temporary Azure CLI config and leaves the person's stored account untouched.
     NOT IN SCOPE: giving the host an identity or a role, which is an operator action in Azure, and the image pull itself.
   falsifier: |
     Skip the identity and criterion 1 must fail. Stop when the host has no identity and criterion 2 must fail. Report a refused identity without the role name and criterion 4 must fail. Restore and require all five to pass.
