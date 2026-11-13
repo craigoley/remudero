@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
-import { runTask } from "#test/helpers/run-task-test.js";
+import { runTask, ghPrCreateFillCommand } from "#test/helpers/run-task-test.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
 import { ghShim, type GhShimRoute } from "#test/helpers/gh-shim.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
@@ -18,14 +18,17 @@ const { evaluateGate } = await import(gateSpecifier) as {
 };
 import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
 import type { WorkerResult } from "#src/lib/worker.js";
+import type { AcceptanceCriterion } from "#src/lib/plan.js";
+import { bindCanonicalOpsCriteria, openPullRequestCheckedAsync, PrOpenRefusedError, type CanonicalOpsCriteriaAtOpen, type AsyncOpenPullRequestProofRunner } from "#src/lib/pr-open.js";
 
 const ID = "W1-T900008", TITLE = "Publish the approved fixture contract", PRIVATE = [
   "PRIVATE_RATIONALE_12208", "PRIVATE_DESIGN_12208", "PRIVATE_FALSIFIER_12208",
   "PRIVATE_NOTE_12208", "PRIVATE_ORIGIN_12208",
 ];
 const criteria = [{ claim: "the fixture exports its public value", proof: "grep: publicValue in src/fixture.ts" }];
-function yaml() {
-  return `- id: ${ID}\n  title: ${TITLE}\n  repo: remudero\n  depends_on: []\n  type: implement\n  verify: auto\n  risk: medium\n  origin: test#${PRIVATE[4]}\n  files: [src/fixture.ts]\n  rationale: ${PRIVATE[0]}\n  design: ${PRIVATE[1]}\n  falsifier: ${PRIVATE[2]}\n  note: ${PRIVATE[3]}\n  acceptance:\n    - claim: ${criteria[0]!.claim}\n      proof: "${criteria[0]!.proof}"\n`;
+function yaml(acceptance: readonly AcceptanceCriterion[] = criteria) {
+  const records = acceptance.map(c => `    - claim: ${JSON.stringify(c.claim)}\n      proof: ${JSON.stringify(c.proof)}${c.satisfied_by ? `\n      satisfied_by: ${JSON.stringify(c.satisfied_by)}` : ""}`).join("\n");
+  return `- id: ${ID}\n  title: ${TITLE}\n  repo: remudero\n  depends_on: []\n  type: implement\n  verify: auto\n  risk: medium\n  origin: test#${PRIVATE[4]}\n  files: [src/fixture.ts]\n  rationale: ${PRIVATE[0]}\n  design: ${PRIVATE[1]}\n  falsifier: ${PRIVATE[2]}\n  note: ${PRIVATE[3]}\n  acceptance:\n${records}\n`;
 }
 const result = (text: string): WorkerResult => ({
   sessionId: "fixture", costUsd: 0, numTurns: 1, text, blocks: [], stderr: "", subtype: "success",
@@ -33,21 +36,21 @@ const result = (text: string): WorkerResult => ({
   tokens: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 }, modelUsage: {}, compactionEvents: [], qualitySuspect: false,
 });
 
-async function runFixture(t: TestContext, catalog: "ops" | "public", mode: "reported" | "created" = "reported") {
+async function runFixture(t: TestContext, catalog: "ops" | "public", mode: "reported" | "created" = "reported", acceptance: readonly AcceptanceCriterion[] = criteria) {
   const root = gitRepo({ scope: t }), origin = gitRepo({ bare: true, scope: t }), seed = gitRepo({ scope: t });
-  mkdirSync(join(seed.dir, "plan")); writeFileSync(join(seed.dir, "plan", "tasks.yaml"), catalog === "public" ? yaml() : "[]\n");
+  mkdirSync(join(seed.dir, "plan")); writeFileSync(join(seed.dir, "plan", "tasks.yaml"), catalog === "public" ? yaml(acceptance) : "[]\n");
   seed.git("add", "plan"); seed.git("commit", "--quiet", "-m", "test: seed the actual public plan");
   seed.addRemote("origin", origin.dir); seed.git("push", "--quiet", "origin", "main");
   const repo = gitRepo({ cloneFrom: origin.dir, scope: t });
   repo.git("config", "user.name", "fixture"); repo.git("config", "user.email", "fixture@remudero.invalid");
   mkdirSync(join(root.dir, "repos")); const checkout = join(root.dir, "repos", "remudero"); renameSync(repo.dir, checkout);
-  const planPath = join(root.dir, "tasks.yaml"); writeFileSync(planPath, catalog === "public" ? yaml() : "[]\n");
+  const planPath = join(root.dir, "tasks.yaml"); writeFileSync(planPath, catalog === "public" ? yaml(acceptance) : "[]\n");
   mkdirSync(join(root.dir, "state"), { recursive: true });
   if (catalog === "ops") writeFileSync(join(root.dir, "state", "plan-destination.json"), JSON.stringify({ repository: "fixture-private/ops", kinds: [] }));
   const now = Date.now(); t.mock.method(Date, "now", () => now);
   const branch = `run-${ID}-${now}`, url = "https://github.com/craigoley/remudero/pull/7";
   const body = `Worker prose to preserve for a public task. ${PRIVATE.join(" ")}\n\nAcceptance:\n- old criterion | grep: old in src/fixture.ts\n\nRemudero-Task: ${ID}`;
-  const text = yaml(), hash = (s: string) => createHash("sha1").update(s).digest("hex");
+  const text = yaml(acceptance), hash = (s: string) => createHash("sha1").update(s).digest("hex");
   const commit = hash(text), tree = hash(commit + "root"), plan = hash(commit + "plan"), blob = hash(`blob ${Buffer.byteLength(text)}\0${text}`);
   const base = "repos/fixture-private/ops";
   const opsRoutes: GhShimRoute[] = [
@@ -105,7 +108,7 @@ async function runFixture(t: TestContext, catalog: "ops" | "public", mode: "repo
     const title = / -f title=([\s\S]*?)(?: -f body=|$)/.exec(a); return title ? [title[1]!] : [];
   });
   const rows = readFileSync(join(root.dir, "state", "ledger.ndjson"), "utf8").trim().split("\n").map(line => JSON.parse(line));
-  return { outcome, bodies, titles, prompts, calls, rows, workerRoot, branch,
+  return { outcome, bodies, titles, prompts, calls, rows, workerRoot, branch, originDir: origin.dir, publicWrites,
     sourceReads: calls.filter(a => a.some(x => x.startsWith(base))),
     sourceReadCount: () => gh.events().filter(e => e.phase === "start" && e.args.some(x => x.startsWith(base))).length };
 }
@@ -145,4 +148,121 @@ test("W1-T12208 criterion 5: public-only runs preserve their worker prose and us
   const f = await runFixture(t, "public"); assert.equal(f.sourceReads.length, 0); assert.ok(f.bodies.length);
   assert.ok(f.bodies.at(-1)!.includes("Worker prose to preserve for a public task."), JSON.stringify({ bodies: f.bodies, titles: f.titles, calls: f.calls }));
   assert.deepEqual(parseAcceptanceBlock(f.bodies.at(-1)!), criteria); assert.equal(f.calls.some(a => a[0] === "pr" && a.includes("--title")), false);
+});
+
+test("an ops run retains prior credit as context and proves only the remaining criterion", async t => {
+  const acceptance = [{ claim: "already credited fixture behavior", proof: "grep: neverRunThisProof in src/missing.ts", satisfied_by: "PR-1" }, ...criteria];
+  const f = await runFixture(t, "ops", "created", acceptance);
+  assert.deepEqual(parseAcceptanceBlock(f.bodies.at(-1)!), criteria);
+  assert.match(f.bodies.at(-1)!, /Prior acceptance credit/); assert.match(f.bodies.at(-1)!, /already credited fixture behavior/);
+});
+
+function openerFixture(t: TestContext, publicTask = false) {
+  const repo = gitRepo({ scope: t }); mkdirSync(join(repo.dir, "plan"), { recursive: true });
+  writeFileSync(join(repo.dir, "plan", "tasks.yaml"), publicTask ? yaml() : "[]\n");
+  repo.git("add", "plan"); repo.git("commit", "--quiet", "-m", "test: bind the canonical opener base");
+  const base = repo.git("rev-parse", "HEAD").trim(); repo.git("update-ref", "refs/remotes/origin/main", base);
+  mkdirSync(join(repo.dir, "src"), { recursive: true }); writeFileSync(join(repo.dir, "src", "fixture.ts"), "export const publicValue = true;\n");
+  repo.git("add", "src"); repo.git("commit", "--quiet", "-m", "feat(test): satisfy the fixture proof");
+  const target = { owner: "craigoley", repo: "remudero" }, branch = `run-${ID}-123456`;
+  const body = `${TITLE}\n\nAcceptance:\n- ${criteria[0]!.claim} | ${criteria[0]!.proof}\n\nRemudero-Task: ${ID}`;
+  const canonical: CanonicalOpsCriteriaAtOpen = { catalog: "ops", taskId: ID, title: TITLE,
+    targetRepository: "craigoley/remudero", sourceCommit: base, criteria: criteria.map(c => ({ ...c })) };
+  const open = (contract: CanonicalOpsCriteriaAtOpen | undefined, runner: AsyncOpenPullRequestProofRunner,
+    input = body) => openPullRequestCheckedAsync(input, branch, repo.dir, "origin/main", runner, target, contract);
+  return { repo, base, branch, target, body, canonical, open };
+}
+
+test("the canonical ops opener runs the same merge-base proof before accepting a private task", async t => {
+  const f = openerFixture(t); const runs: string[] = [];
+  const body = await f.open(f.canonical, async (proof, base, root, target) => {
+    runs.push(proof); assert.equal(base, f.base); assert.equal(root, f.repo.dir); assert.deepEqual(target, f.target); return { status: 0 };
+  });
+  assert.equal(body, f.body); assert.deepEqual(runs, [criteria[0]!.proof]);
+});
+test("missing or wrongly bound canonical ops evidence cannot authorize the opener", async t => {
+  const f = openerFixture(t); let calls = 0; const runner: AsyncOpenPullRequestProofRunner = async () => { calls++; return { status: 0 }; };
+  for (const contract of [undefined, { ...f.canonical, taskId: "W1-T900009" }, { ...f.canonical, sourceCommit: "not-a-pin" },
+    { ...f.canonical, targetRepository: "different/public" }, { ...f.canonical, criteria: [] },
+    { ...f.canonical, catalog: "public" as "ops" }]) await assert.rejects(f.open(contract, runner), PrOpenRefusedError);
+  await assert.rejects(openPullRequestCheckedAsync(f.body, f.branch, f.repo.dir, "origin/main", runner, undefined, f.canonical), PrOpenRefusedError);
+  assert.equal(calls, 0, "unbound criteria never reach proof execution or a publication transport");
+});
+test("a body cannot replace canonical ops criteria or the run-branch trailer", async t => {
+  const f = openerFixture(t); let calls = 0; const runner: AsyncOpenPullRequestProofRunner = async (proof, base) => { calls++; assert.equal(proof, criteria[0]!.proof); assert.equal(base, f.base); return { status: 0 }; };
+  await assert.rejects(f.open(f.canonical, runner, f.body.replace(criteria[0]!.claim, "body-authored contract")), /does not match/);
+  await assert.rejects(f.open(f.canonical, runner, f.body.replace(`Remudero-Task: ${ID}`, "Remudero-Task: W1-T900009")), /trailer names/);
+  assert.equal(calls, 2, "the unchanged async API pre-runs canonical proofs before synchronous body validation");
+});
+test("failed and stale ops proofs keep their normal pre-open refusals", async t => {
+  const f = openerFixture(t);
+  for (const status of [1, 5]) await assert.rejects(f.open(f.canonical, async () => ({ status })), error => {
+    assert.ok(error instanceof PrOpenRefusedError); assert.equal(error.refusalClass, status === 5 ? "stale-proof" : "branch-gap"); return true;
+  });
+});
+test("inconclusive ops proofs remain inconclusive after only the maintained retry", async t => {
+  const f = openerFixture(t); let calls = 0;
+  await assert.rejects(f.open(f.canonical, async () => { calls++; return { status: 4 }; }), error => {
+    assert.ok(error instanceof PrOpenRefusedError); assert.equal(error.inconclusiveProof?.attempts, 2); return true;
+  });
+  assert.equal(calls, 2);
+});
+test("the private criteria snapshot survives mutation while a proof is awaited", async t => {
+  const f = openerFixture(t), mutable = criteria.map(c => ({ ...c }));
+  const input = { ...f.canonical, criteria: mutable };
+  const body = await f.open(input, async () => {
+    mutable[0]!.claim = "changed during the proof"; mutable.push({ claim: "new late criterion", proof: "grep: late in src/fixture.ts" });
+    input.taskId = "W1-T900009"; input.sourceCommit = "changed-after-start"; input.targetRepository = "changed/public";
+    await Promise.resolve(); return { status: 0 };
+  });
+  assert.equal(body, f.body); assert.deepEqual(parseAcceptanceBlock(body), criteria);
+});
+test("a real public filed task keeps precedence over an ops criteria argument", async t => {
+  const f = openerFixture(t, true);
+  const body = await f.open({ ...f.canonical, sourceCommit: "not-a-pin", criteria: [{ claim: "ops must not replace public", proof: "grep: other in src/fixture.ts" }] },
+    async proof => { assert.equal(proof, criteria[0]!.proof); return { status: 0 }; });
+  assert.equal(body, f.body);
+});
+test("canonical ops criteria carrying prior credit retain the existing all-credited refusal", async t => {
+  const f = openerFixture(t); let calls = 0;
+  await assert.rejects(f.open({ ...f.canonical, criteria: [{ ...criteria[0]!, satisfied_by: "PR-1" }] }, async () => { calls++; return { status: 0 }; }), error => {
+    assert.ok(error instanceof PrOpenRefusedError); assert.equal(error.refusalClass, "all-credited"); return true;
+  });
+  assert.equal(calls, 0);
+});
+
+test("the public opener retains the same proof pre-run before body and trailer refusals", async t => {
+  const f = openerFixture(t, true); let calls = 0;
+  const proof: AsyncOpenPullRequestProofRunner = async (given, base) => { calls++; assert.equal(given, criteria[0]!.proof); assert.equal(base, f.base); return { status: 0 }; };
+  await assert.rejects(f.open(undefined, proof, f.body.replace(criteria[0]!.claim, "body-authored contract")), /does not match/);
+  await assert.rejects(f.open(undefined, proof, f.body.replace(`Remudero-Task: ${ID}`, "Remudero-Task: W1-T900009")), /trailer names/);
+  assert.equal(calls, 2);
+});
+
+test("a harness-created public task keeps the existing checked builder's exact body", async t => {
+  const f = await runFixture(t, "public", "created"); assert.equal(f.sourceReads.length, 0);
+  assert.equal(f.publicWrites.filter(write => /^api (?:-X|--method) POST /.test(write)).length, 1);
+  const clone = gitRepo({ cloneFrom: f.originDir, scope: t }); clone.git("checkout", "--quiet", f.branch);
+  let proofs = 0;
+  const command = withLiveWritesAllowed(() => ghPrCreateFillCommand(clone.dir, "craigoley", "remudero", f.branch,
+    f.titles[0], undefined, proof => { proofs++; assert.equal(proof, criteria[0]!.proof); return { status: 0 }; }));
+  const index = command.args.findIndex(arg => arg.startsWith("body=")); assert.ok(index >= 0); assert.equal(proofs, 1);
+  const raw = f.publicWrites.find(write => /^api (?:-X|--method) POST /.test(write)); assert.ok(raw);
+  assert.equal(raw, command.args.join(" "), "the complete actual create invocation matches the unchanged checked builder");
+  // This is the controlled command's known field position, not an arbitrary joined-argv decoder.
+  const prefix = command.args.slice(0, index).join(" ") + " body=";
+  const suffix = index + 1 < command.args.length ? " " + command.args.slice(index + 1).join(" ") : "";
+  assert.ok(raw.startsWith(prefix) && raw.endsWith(suffix));
+  assert.equal(raw.slice(prefix.length, suffix ? raw.length - suffix.length : raw.length), command.args[index]!.slice("body=".length));
+  assert.equal(f.sourceReadCount(), 0, "the public create and comparison read no private catalog");
+});
+
+test("the canonical ops constructor refuses missing provenance and malformed criteria", () => {
+  for (const pin of [undefined, "not-a-pin"]) assert.throws(() => bindCanonicalOpsCriteria(ID, TITLE, "craigoley/remudero", pin, criteria), PrOpenRefusedError);
+  assert.throws(() => bindCanonicalOpsCriteria(ID, TITLE, "craigoley/remudero", "b".repeat(40), undefined as unknown as readonly AcceptanceCriterion[]), PrOpenRefusedError);
+  const mutable = criteria.map(criterion => ({ ...criterion }));
+  const pinned = bindCanonicalOpsCriteria(ID, TITLE, "craigoley/remudero", "b".repeat(40), mutable);
+  mutable[0]!.claim = "changed later";
+  assert.ok(Object.isFrozen(pinned) && Object.isFrozen(pinned.criteria) && Object.isFrozen(pinned.criteria[0]));
+  assert.deepEqual(pinned.criteria, criteria);
 });

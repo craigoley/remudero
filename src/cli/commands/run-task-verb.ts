@@ -66,7 +66,7 @@ import { decideGatePosture, type GatePostureDecision, type GatePostureFinding, t
 import { refusalReason } from "../../lib/inbox.js";
 import { gatherRuns, parseLedger } from "../../lib/retro.js";
 import type { ChildEntryStoreOptions } from "../../lib/child-entry-argv.js";
-import { bodyWithInconclusiveProofAtOpen, defaultProofRunnerAsync, openPullRequestCheckedAsync, PrOpenRefusedError, proposeStaleProofReplacement, readOtherOpenPrForTask, recordRefusedPrOpen, type AsyncOpenPullRequestProofRunner, type OpenPrJsonReader, type OpenPullRequestProofRunner } from "../../lib/pr-open.js";
+import { bindCanonicalOpsCriteria, partitionAcceptanceCriteria, bodyWithInconclusiveProofAtOpen, defaultProofRunnerAsync, openPullRequestCheckedAsync, PrOpenRefusedError, proposeStaleProofReplacement, readOtherOpenPrForTask, recordRefusedPrOpen, type CanonicalOpsCriteriaAtOpen, type AsyncOpenPullRequestProofRunner, type OpenPrJsonReader, type OpenPullRequestProofRunner } from "../../lib/pr-open.js";
 import { createPlanPrRest, probeExistingPlanPr } from "../../lib/plan-pr-emitter.js";
 import { findTaskShard, requestScopeAmendment, readBuildScopeRecovery, saveBuildScopeRecovery, restoreBuildScopeRecovery, type ScopeAmendmentOutcome, type ScopeAmendmentRequest, type ProofAmendmentWritePorts } from "../../lib/proof-amendment.js";
 import { appendLedger, DECISION_RELEVANT_LEDGER_STEPS } from "../../lib/ledger.js";
@@ -1118,6 +1118,7 @@ export interface RunTaskContext {
   say: (msg: string) => void;
   spawn: typeof spawnWorker;
   task: Task & { catalog?: "public" | "ops" };
+  opsCriteriaAtOpen?: CanonicalOpsCriteriaAtOpen;
   taskId: string;
   /** Resolved once by the outer run so reviewer watchdogs reuse the same policy value. */
   workerAbandonMs?: number;
@@ -1839,12 +1840,15 @@ async function ghPrCreateFillCommandAsync(
   openOnFailingProof = false,
   childStore: ChildEntryStoreOptions = {},
   bodyOverride?: string,
+  canonicalOps?: CanonicalOpsCriteriaAtOpen,
 ): Promise<PrCreateCommand> {
   const { withDiagnostics, draftPrCreate, prCreateArgv } = helperHost;
-  const draft = draftPrCreate(worktreePath, owner, repo, branch, title, bodyOverride);
+  const draft = bodyOverride === undefined
+    ? draftPrCreate(worktreePath, owner, repo, branch, title)
+    : draftPrCreate(worktreePath, owner, repo, branch, title, bodyOverride);
   let checkedBody: string;
   try {
-    checkedBody = await openPullRequestCheckedAsync(draft.body, branch, worktreePath, "origin/main", runProofAsync ?? ((proof, base, root, target) => defaultProofRunnerAsync(proof, base, root, target, { store: childStore })), { owner, repo });
+    checkedBody = await openPullRequestCheckedAsync(draft.body, branch, worktreePath, "origin/main", runProofAsync ?? ((proof, base, root, target) => defaultProofRunnerAsync(proof, base, root, target, { store: childStore })), { owner, repo }, canonicalOps);
   } catch (err) {
     if (!openOnFailingProof || !(err instanceof PrOpenRefusedError)) throw err;
     // W1-T10355: a known-red proof is never published — opening it only bought a hosted proof-discrimination round.
@@ -3504,9 +3508,12 @@ async function repairCensusRefusedPush(helperHost: Pick<RunTaskHelperHost, "CENS
 
 /** Public output is constructed from the two approved task fields, never by subtracting private fields. */
 function opsRunPublication(taskId: string, title: string, criteria: readonly AcceptanceCriterion[]): { title: string; body: string } {
+  const { executable, priorCredit } = partitionAcceptanceCriteria(criteria);
+  // An all-credited draft still reaches the shared gate's existing typed refusal before POST.
+  const block = executable.length > 0 ? renderAcceptanceBlock(executable) : "";
   return {
     title: prTitleForTask([], { id: taskId, title }) ?? title,
-    body: `${title}\n\n## Decisions\n\n- Keep private task fields host-side.\n\n${renderAcceptanceBlock([...criteria])}\n\nRemudero-Task: ${taskId}\n`,
+    body: `${title}\n\n## Decisions\n\n- Keep private task fields host-side.\n\n${priorCredit ? `${priorCredit}\n\n` : ""}${block}\n\nRemudero-Task: ${taskId}\n`,
   };
 }
 
@@ -3521,7 +3528,7 @@ function normalizeRunPrAcceptanceFromPlan(
   opsTitle?: string,
 ): "rewritten" | "healthy" | "no-block" | "raced" | "error" {
   const { rewriteAcceptanceBlockFromPlan, defaultRetroFetchBody, defaultRetroEditBody } = helperHost;
-  if (planCriteria.length === 0) return "no-block";
+  if (planCriteria.length === 0 || (opsTitle !== undefined && !planCriteria.some(criterion => !criterion.satisfied_by))) return "no-block";
   const { fetchBody, editBody } = { fetchBody: defaultRetroFetchBody, editBody: defaultRetroEditBody, ...deps };
   try {
     const body = fetchBody(prUrl);
@@ -4853,6 +4860,9 @@ export async function runTask(
   const lookup = await findTaskInCatalogs(taskId, { byId: plan.byId, stateDir: join(config.root, "state") });
   if (lookup.outcome === "unreadable") throw new Error(`task catalog unreadable (${lookup.reason})`);
   const task: RunTaskContext["task"] = lookup.outcome === "found" ? lookup.task : selectTask(plan, taskId);
+  const opsCriteriaAtOpen = lookup.outcome === "found" && lookup.catalog === "ops"
+    ? bindCanonicalOpsCriteria(task.id, task.title, `${owner}/${task.repo}`, lookup.commit, task.acceptance ?? [])
+    : undefined;
   if (task.catalog === "ops" && !plan.byId.has(taskId)) {
     plan = { ...plan, tasks: [...plan.tasks, task], byId: new Map([...plan.byId, [taskId, task]]) };
   }
@@ -5122,6 +5132,7 @@ export async function runTask(
       say,
       spawn,
       task,
+      opsCriteriaAtOpen,
       taskId,
       workerAbandonMs,
       workerStateSensor,
@@ -5412,6 +5423,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
     say,
     spawn,
     task,
+    opsCriteriaAtOpen,
     taskId,
     workerAbandonMs,
     workerStateSensor,
@@ -7621,8 +7633,9 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
       if (task.catalog === "ops" && checkPrOwnership(url, branch, ghPrHeadGateway(), costUsd, impl.accountLabel)) {
         throw new Error("ops public PR ownership refused");
       }
-      const outcome = normalizeRunPrAcceptanceFromPlan(url, taskId, task.acceptance ?? [], log,
-        undefined, task.catalog === "ops" ? task.title : undefined);
+      const outcome = normalizeRunPrAcceptanceFromPlan(url, taskId,
+        opsCriteriaAtOpen ? [...opsCriteriaAtOpen.criteria] : task.acceptance ?? [], log,
+        undefined, opsCriteriaAtOpen?.title);
       if (task.catalog === "ops" && outcome !== "rewritten" && outcome !== "healthy") {
         throw new Error(`ops public PR normalization refused (${outcome})`);
       }
@@ -7642,9 +7655,9 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
       reprovisionInstallIfDrifted("pr_open");
       try {
         // W1-T6034: the filed proofs run as awaited children, off the daemon loop. W1-T7952: titled after the task.
-        const publication = task.catalog === "ops" ? opsRunPublication(taskId, task.title, task.acceptance ?? []) : undefined;
+        const publication = opsCriteriaAtOpen ? opsRunPublication(taskId, opsCriteriaAtOpen.title, opsCriteriaAtOpen.criteria) : undefined;
         prCreate = await ghPrCreateFillCommandAsync(worktreePath, owner, task.repo, branch,
-          publication?.title ?? branchPrTitle(worktreePath, task), opts.prOpenProofRunner, true, { log }, publication?.body);
+          publication?.title ?? branchPrTitle(worktreePath, task), opts.prOpenProofRunner, true, { log }, publication?.body, opsCriteriaAtOpen);
       } catch (err) {
         if (!(err instanceof PrOpenRefusedError)) throw err;
         // The branch is already on origin (both push paths ran above), so a refusal names it rather than stranding it.
