@@ -7,6 +7,7 @@ import { restartCycleLedgerRows, restartCycleRow } from "#src/lib/restart-cycle.
 import { runDaemon } from "#src/lib/daemon.js";
 import { rotateLedger } from "#src/lib/ledger.js";
 import type { Plan } from "#src/lib/plan.js";
+import * as sweep from "#src/lib/sweep.js";
 
 const epoch = Date.now();
 const at = (ms: number) => new Date(epoch + ms).toISOString();
@@ -64,7 +65,7 @@ test("W1-T12229 criterion 2: waiting counts distinguish stale refusals and resta
   assert.equal(r.admissions_held, 2);
 });
 
-test("W1-T12229 criterion 3: abandoned reviews and fix rounds retain each age", () => {
+test("W1-T12229 criterion 3: explicit abandonment age repairs a settled inventory snapshot", () => {
   const rows = fixture().map(r => r.step === "daemon.freshness_drain.completed" ? { ...r, waited_on: [
     ...(r.waited_on as Row[]).map(item => item.kind === "fix-dispatch" ? { ...item, abandoned: undefined, released: true } : item),
   ] } : r);
@@ -76,6 +77,62 @@ test("W1-T12229 criterion 3: abandoned reviews and fix rounds retain each age", 
   assert.deepEqual(r.gave_up.reviews?.map(item => [item.pr, item.age_ms]), [[4, 100]]);
   assert.deepEqual(r.gave_up.fix_rounds?.map(item => [item.task_id, item.age_ms]), [["FIX", 229]]);
   assert.equal(r.gave_up_age_ms, 329);
+});
+
+test("W1-T12229 criterion 3: production freshness drain preserves a cancelled fix's 229ms age", async t => {
+  const oldStart = Date.now();
+  let now = oldStart;
+  t.mock.method(Date, "now", () => now);
+  const abandoned = new AbortController();
+  let releaseFixKey = 0;
+  let settle!: () => void;
+  const action = new Promise<void>(resolve => { settle = resolve; });
+  abandoned.signal.addEventListener("abort", () => { releaseFixKey++; settle(); }, { once: true });
+  const fixWait = sweep.detachSweepAction(action, {
+    actionKind: "fix-dispatch", taskId: "FIX-229", phase: "admission", startedAtMs: oldStart,
+    abandon: abandoned, fixKey: "FIX-229@head", release: () => { releaseFixKey++; },
+  });
+  fixWait("admission", { sinceMs: oldStart, attempts: 1 });
+  const priorRows: Row[] = [{ ts: new Date(oldStart).toISOString(), step: "daemon.boot", run_id: "old" }];
+  const daemonRows: Row[] = [];
+  const empty: Plan = { tasks: [], byId: new Map() };
+  try {
+    const result = await runDaemon(empty, {
+      now: () => new Date(now),
+      readLedgerLines: () => [...priorRows, ...daemonRows].map(entry => JSON.stringify(entry)),
+      refreshMerged: () => () => false,
+      checkFreshness: () => ({ stale: true, oldSha: "old", newSha: "new", staleSinceMs: oldStart - 100,
+        changes: [{ sha: "new", subject: "fix: refresh worker", files: ["src/lib/worker.ts"] }] }),
+      runOne: async () => { throw new Error("empty plan must not dispatch"); },
+      log: (step, fields = {}) => {
+        if (step === "daemon.freshness_decision") now = oldStart + 229;
+        daemonRows.push({ ts: new Date(now).toISOString(), step, ...fields });
+      },
+      sleep: async () => {},
+    }, { pollIntervalMs: 1, freshnessMinLifetimeMs: 0, freshnessScoreLimit: 0,
+      freshnessQuietWindowMs: 0, sweepWallClockBoundMs: 0 });
+    assert.equal(result.stopReason, "stale");
+    const abandonedRow = daemonRows.find(entry => entry.step === "daemon.detached_action_abandoned");
+    assert.equal(abandonedRow?.action_kind, "fix-dispatch");
+    assert.equal(abandonedRow?.task_id, "FIX-229");
+    assert.equal(abandonedRow?.age_ms, 229);
+    assert.equal(releaseFixKey, 1);
+    const completion = daemonRows.find(entry => entry.step === "daemon.freshness_drain.completed");
+    assert.ok(Array.isArray(completion?.waited_on));
+    assert.notEqual((completion?.waited_on as Row[]).find(item => item.task_id === "FIX-229")?.abandoned, true,
+      "the production cancellation settles/removes the admission before the final snapshot");
+    const cycleRows = [...priorRows, ...daemonRows,
+      { ts: new Date(oldStart + 300).toISOString(), step: "daemon.boot", run_id: "new" },
+      { ts: new Date(oldStart + 310).toISOString(), step: "review.posted", pr: 1 }];
+    const cycle = restartCycleRow(cycleRows, oldStart + 300);
+    assert.ok(cycle);
+    assert.deepEqual(cycle.gave_up.fix_rounds?.map(item => [item.task_id, item.age_ms]), [["FIX-229", 229]]);
+    assert.equal(cycle.gave_up_age_ms, 229);
+  } finally {
+    if (!abandoned.signal.aborted) abandoned.abort();
+    await sweep.drainDetachedSweepActions();
+    t.mock.restoreAll();
+  }
 });
 
 test("W1-T12229 criterion 4: verdict count and gap end at the first verdict", () => {
