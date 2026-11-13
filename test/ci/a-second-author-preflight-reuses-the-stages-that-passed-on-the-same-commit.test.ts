@@ -16,7 +16,7 @@ type Step = { name: string; ok: boolean; exitCode?: number | null; startedAt?: s
 type Receipt = Record<string, unknown> & { verdict: string; startedAt: string; steps: Step[]; suites: string[];
   pushEligible: boolean; pushEligibleReason: string; stageReuse?: { state: string; reason: string; reused: string[] } };
 const author = authorModule as unknown as {
-  main: (argv: string[], deps: { root: string; select?: () => unknown; host?: () => unknown }) => number;
+  main: (argv: string[], deps: { root: string; select?: () => unknown; host?: () => unknown; enqueueTestSlot?: () => unknown }) => number;
   reusableAuthorStages: (previous: unknown, current: unknown) => { state: string; reason: string; stages: Step[] };
   authorPushEligibility: (receipt: unknown) => { pushEligible: boolean; pushEligibleReason: string };
 };
@@ -103,7 +103,7 @@ const host = () => ({ cores: 8, load1: 0, headroomBytes: 8 * 1024 ** 3 });
 const HUGE = 10 * 60 * 60 * 1000;
 
 /** One real author run: which stages ran (from their own log lines), what main returned and the receipt it wrote. */
-function run(f: Fixture, red: string[] = []) {
+function run(f: Fixture, red: string[] = [], deps: { enqueueTestSlot?: () => unknown } = {}) {
   rmSync(f.red, { recursive: true, force: true });
   mkdirSync(f.red);
   for (const stage of red) writeFileSync(join(f.red, stage), "");
@@ -113,7 +113,7 @@ function run(f: Fixture, red: string[] = []) {
   const log = console.log, error = console.error;
   console.log = () => {}; console.error = () => {};
   let status: number;
-  try { status = author.main([], { root: f.root, select, host }); }
+  try { status = author.main([], { root: f.root, select, host, ...deps }); }
   finally { console.log = log; console.error = error; }
   const receipt = JSON.parse(readFileSync(join(f.root, "coverage/preflight-author.json"), "utf8")) as Receipt;
   return { status, receipt, ran: readFileSync(f.log, "utf8").split("\n").filter(Boolean) };
@@ -222,6 +222,24 @@ test("W1-T12166: a refused docs precheck reuses the passing census and reruns fr
   assert.equal(step(second.receipt, "census-precheck")?.reused?.runStartedAt, first.receipt.startedAt);
   assert.equal(step(second.receipt, "docs-index-precheck:docs-index:check")?.reused, undefined,
     "the refused docs stage is rerun");
+  assert.equal(second.receipt.verdict, "passed");
+});
+
+test("W1-T12166: a suite-admission refusal reuses census and static, then retries the suites", () => {
+  const f = fixture();
+  const refusedQueue = () => ({ ticketed: false, note: "fixture suite queue", setPrice() {}, cancel() {},
+    admit: () => ({ outcome: "slot_unavailable", executionAllowed: false, concurrency: 1, waitedMs: 0,
+      note: "NOT_RUN: private coordination requires an admitted lease", release() {} }) });
+  const first = run(f, [], { enqueueTestSlot: refusedQueue });
+  assert.equal(first.receipt.verdict, "refused");
+  assert.deepEqual(first.ran, ["census", "static"]);
+  assert.equal(first.receipt.error, "author preflight NOT_RUN (NOT_RUN: private coordination requires an admitted lease)");
+  assert.deepEqual(first.receipt.steps.map((entry) => [entry.name, entry.ok]), [["census-precheck", true], ["static-preflight", true]]);
+
+  const second = run(f);
+  assert.equal(second.receipt.stageReuse?.state, "reused", second.receipt.stageReuse?.reason);
+  assert.deepEqual(second.receipt.stageReuse?.reused, ["census-precheck", "static-preflight"]);
+  assert.deepEqual(second.ran, ["tests"]);
   assert.equal(second.receipt.verdict, "passed");
 });
 
