@@ -4067,7 +4067,8 @@ export async function sendCashRequest(config: Config, input: CashTransportOption
   if (openWeightDeploymentKnownAbsent(input.deployment, clock.now())) return failed("deployment-absent", `${input.deployment} answered 404 inside ${OPENWEIGHT_ABSENT_TTL_MS}ms`);
   const target = cashDeploymentTarget(config, input.deployment, input.env ?? process.env);
   if (!target.ok) return failed("not-ready", target.reason === "no-endpoint" ? "no cash endpoint" : `${target.keyEnv} is not set`);
-  const base = new URL(target.endpoint.endsWith("/") ? target.endpoint : `${target.endpoint}/`);
+  const base = URL.parse(target.endpoint.endsWith("/") ? target.endpoint : `${target.endpoint}/`);
+  if (base === null) return failed("not-ready", "cash endpoint must be a valid URL");
   if (base.protocol !== "https:") return failed("not-ready", "cash endpoint must use https");
   if (/^[a-z][a-z0-9+.-]*:/i.test(input.path) || /^[\/\\]/.test(input.path) || /[\u0000-\u0020\u007f\\]/.test(input.path))
     return failed("not-ready", "cash path must be relative to the deployment endpoint");

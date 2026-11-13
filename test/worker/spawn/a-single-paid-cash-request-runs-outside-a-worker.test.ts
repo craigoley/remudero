@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import { promisify } from "node:util";
-import type { Config } from "#src/lib/config.js";
+import { validateConfig, type Config } from "#src/lib/config.js";
 import { DEFAULT_CASH_KEY_ENV } from "#src/lib/config-schema.js";
 import {
   FOUNDRY_CLAUDE_PRICES,
@@ -109,6 +109,26 @@ test("W1-T12413 criterion 1: absolute caller URLs and paths escaping the deploym
       assert.equal(existsSync(join(dir, "state", OPENWEIGHT_ALLOWANCE_FILENAME)), false);
     });
   }
+});
+
+test("W1-T12413 criterion 1: a malformed endpoint returns not-ready without sending or reserving", async (t) => {
+  const { dir, config } = fixture(t);
+  config.workerProviders!.cashEndpoint = "not-a-url";
+  assert.doesNotThrow(() => validateConfig(config));
+  let calls = 0;
+  const outcome = await sendCashRequest(config, { deployment: DEPLOYMENT, path: "openai/v1/decisions", body: BODY,
+    source: "fixture", outputTokenCeiling: 16, env,
+    fetchImpl: async () => { calls++; return reply(); } });
+  assert.equal(outcome.ok, false);
+  if (outcome.ok) return;
+  assert.equal(outcome.reason, "not-ready");
+  assert.match(outcome.detail, /cash endpoint.*valid URL/);
+  assert.ok(outcome.latencyMs >= 0);
+  assert.equal(outcome.reservedUsd, 0);
+  assert.equal(outcome.settledUsd, 0);
+  assert.equal(outcome.heldUsd, 0);
+  assert.equal(calls, 0);
+  assert.equal(existsSync(join(dir, "state", OPENWEIGHT_ALLOWANCE_FILENAME)), false);
 });
 
 test("W1-T12413 criterion 1: an unpriced deployment returns not-ready without sending or reserving", async (t) => {
@@ -365,6 +385,31 @@ test("W1-T12413 criterion 8: the probe script sends one request and prints the s
   const usage = await probe(dir, ["--deployment", DEPLOYMENT]);
   assert.equal(usage.code, 2);
   assert.equal(JSON.parse(usage.stdout).reason, "usage");
+});
+
+test("W1-T12413 criterion 8: a malformed endpoint still prints one refusal JSON line with latency and zero dollars", async (t) => {
+  const { dir } = ownedFixtureDir(t, "cash-request-probe-malformed");
+  mkdirSync(join(dir, ".config", "remudero"), { recursive: true });
+  writeFileSync(join(dir, ".config", "remudero", "config.json"), JSON.stringify({ claudeBin: process.execPath, root: dir,
+    dailyCapUsd: 25, workerProviders: { cashEndpoint: "not-a-url" } }));
+  const bodyFile = join(dir, "body.json");
+  writeFileSync(bodyFile, BODY);
+  const sent = await probe(dir, ["--deployment", DEPLOYMENT, "--path", "openai/v1/decisions",
+    "--body-file", bodyFile, "--output-tokens", "16"]);
+  assert.equal(sent.code, 1, sent.stdout);
+  assert.equal(sent.stdout.trim().split("\n").length, 1);
+  assert.ok(!sent.stdout.includes(KEY));
+  assert.ok(!sent.stdout.includes("one input"));
+  const printed = JSON.parse(sent.stdout);
+  assert.deepEqual(Object.keys(printed).sort(), ["heldUsd", "latencyMs", "ok", "reason", "reservedUsd", "settledUsd"].sort());
+  assert.equal(printed.ok, false);
+  assert.equal(printed.reason, "not-ready");
+  assert.equal(typeof printed.latencyMs, "number");
+  assert.ok(printed.latencyMs >= 0);
+  assert.equal(printed.reservedUsd, 0);
+  assert.equal(printed.settledUsd, 0);
+  assert.equal(printed.heldUsd, 0);
+  assert.equal(existsSync(join(dir, "state", OPENWEIGHT_ALLOWANCE_FILENAME)), false);
 });
 
 test("W1-T12413 criterion 8: a successful probe omits echoed credentials and request body", async (t) => {
