@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -74,6 +74,8 @@ test("W1-T12211 criterion 1 / criterion 6: real serve reload composes both catal
   const model = await buildStatusBoardAsync(h.root, h.ledgerPath, { ...boardDeps(), opsCatalogApi: fx.api });
   assert.equal((model as unknown as { opsCatalog: { outcome: string } }).opsCatalog.outcome, "ok");
   assert.doesNotMatch(JSON.stringify(model), new RegExp(secret));
+  assert.match(renderStatusBoardText(model), /OPS-T1/);
+  assert.doesNotMatch(renderStatusBoardText(model), new RegExp(secret));
 });
 
 test("W1-T12211 criterion 2 / criterion 3: actual public board whitelists ops fields and labels catalog", async () => {
@@ -235,4 +237,31 @@ test("now consumer carries unreadable ops state without a healthy zero count", a
   assert.equal(Object.hasOwn(data.opsCatalog, "taskCount"), false);
   assert.equal(Object.hasOwn(data.opsCatalog, "observedAt"), false);
   assert.deepEqual(view.board.tasks.map(t => t.taskId), ["PUBLIC-T1"]);
+});
+
+
+test("returning the fixture host to off clears cached ops rows without another private read", async () => {
+  const h = host(), plan = publicPlan(), board = { plan, ledgerPath: h.ledgerPath }, fx = source(privateRecord());
+  const read = async () => ({ plan, quarantined: [] });
+  await reloadServePlan(board, "/unused", "a".repeat(40), { read, opsCatalogApi: fx.api });
+  const deps = { ...board, github: fakeGitHub({}), readLedger: () => [], now: () => 0 }, cache = createBoardSnapshotCache();
+  assert.ok(cache.get(deps).tasks.some(t => t.taskId === "OPS-T1"));
+  const calls = fx.calls.length;
+  unlinkSync(join(h.state, "plan-destination.json"));
+  await reloadServePlan(board, "/unused", "a".repeat(40), { read, opsCatalogApi: fx.api });
+  assert.equal(serveBoardCatalogs(board), undefined);
+  assert.deepEqual(cache.get(deps).tasks.map(t => t.taskId), ["PUBLIC-T1"]);
+  assert.equal(cache.get(deps).opsCatalog, undefined);
+  assert.equal(fx.calls.length, calls);
+});
+
+test("public acceptance projection preserves prior credit while isolating private objects", async () => {
+  const h = host(), board = { plan: publicPlan(), ledgerPath: h.ledgerPath };
+  const text = privateRecord().replace("  rationale:", "      satisfied_by: PR-1\n  rationale:");
+  await reloadServePlan(board, "/unused", "a".repeat(40), { read: async () => ({ plan: publicPlan(), quarantined: [] }), opsCatalogApi: source(text).api });
+  const snapshot = computeBoardSnapshot({ ...board, github: fakeGitHub({}), readLedger: () => [], now: () => 0 });
+  const projected = snapshot.tasks.find(t => t.taskId === "OPS-T1")!.acceptance!;
+  assert.equal(projected[0]!.satisfied_by, "PR-1");
+  projected[0]!.claim = "changed public response copy";
+  assert.equal(serveBoardCatalogs(board)?.plan?.byId.get("OPS-T1")?.acceptance?.[0]?.claim, "public allowed claim");
 });
