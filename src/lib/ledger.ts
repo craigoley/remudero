@@ -552,6 +552,7 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   "implement.preopen_gate", // preopen-gate.ts counts the fleet streak across rotations.
   "implement.preopen_gate.alert", // preopen-gate.ts dedups raises and clears on recovery.
   "run.start",
+  "daemon.in_flight_review_abandoned", // W1-T12229: restart-cycle recovery needs the pre-cancel review identity and age after rotation.
   "dispatch.claim", // W1-T9001: promise recovery uses the earliest claim to bound its archive read.
   "memory_read.recovered", // W1-T7720: past recovery durations derive the sustained-unreadable bound.
   "sweep.fix.owner_residue_preserved", // W1-T6434: the next fix round reads the preserved patch it names.

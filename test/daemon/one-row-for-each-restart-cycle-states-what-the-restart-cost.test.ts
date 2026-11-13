@@ -274,6 +274,8 @@ test("W1-T12229 criterion 7: rotation keeps an unfinished cycle's prior boot bou
       { ts: atTime(oldStart), step: "daemon.boot", run_id: "old" },
       { ts: atTime(oldStart + 1000), step: "daemon.freshness_decision", action: "restart", stale_since_ms: now + oldStart },
       { ts: atTime(oldStart + 1500), step: "daemon.detached_action_abandoned", action_kind: "fix-dispatch", task_id: "FIX", age_ms: 229 },
+      { ts: atTime(oldStart + 1600), step: "daemon.in_flight_review_abandoned", kind: "review", pr: 42,
+        admitted_at_ms: now + oldStart + 1371, age_ms: 229 },
       { ts: atTime(oldStart + 2000), step: "daemon.freshness_exit", phases_ms: { total: 1000 } },
       { ts: atTime(newStart), step: "daemon.boot", run_id: "new" },
     ];
@@ -292,7 +294,11 @@ test("W1-T12229 criterion 7: rotation keeps an unfinished cycle's prior boot bou
     const retained = restartCycleLedgerRows(readFileSync(path, "utf8").trim().split("\n")).rows;
     assert.ok(retained.some(r => r.step === "daemon.boot" && r.ts === atTime(newStart)));
     assert.ok(retained.some(r => r.step === "daemon.detached_action_abandoned" && r.task_id === "FIX"));
-    assert.ok(restartCycleRow(retained, now + newStart));
+    assert.ok(retained.some(r => r.step === "daemon.in_flight_review_abandoned" && r.pr === 42));
+    const recovered = restartCycleRow(retained, now + newStart);
+    assert.ok(recovered);
+    assert.deepEqual(recovered.gave_up.reviews?.map(item => [item.pr, item.age_ms]), [[42, 229]]);
+    assert.equal(recovered.gave_up_age_ms, 458);
     const result = await daemon(retained as Row[], 1);
     assert.equal(result.cycles.length, 1);
     assert.equal(result.cycles[0].started_at, atTime(newStart));
