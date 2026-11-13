@@ -3,8 +3,9 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from "no
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
-import { runFixRung } from "#src/run-task.js";
+import { runFixRung } from "#test/helpers/run-task-test.js";
 import type { Config } from "#src/lib/config.js";
+import { shouldRecheckAfterNothingChanged } from "#src/lib/fix-rung-classify.js";
 
 function fixture(t: TestContext, reason = "the worker changed nothing", repairs = true) {
   const root = mkdtempSync(join(tmpdir(), "rmd-no-edit-recovery-"));
@@ -85,4 +86,11 @@ test("other commit refusals do not receive a no-edit recovery", async t => {
   assert.equal(f.prompts.length, 1);
   assert.equal(f.rows.some(row => row.step === "fix.no_edit_recovery"), false);
   assert.equal(f.pushes(), 0);
+});
+
+test("W1-T7748: fix-lane-commit-refused-the-worker-changed-nothing clears without a person", () => {
+  assert.equal(shouldRecheckAfterNothingChanged("FIXED", "the worker changed nothing", 1), true);
+  assert.equal(shouldRecheckAfterNothingChanged("FIXED", "the worker changed nothing", 2), false);
+  assert.equal(shouldRecheckAfterNothingChanged(undefined, "the worker changed nothing", 1), false);
+  assert.equal(shouldRecheckAfterNothingChanged("FIXED", "other reason", 1), false);
 });
