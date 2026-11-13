@@ -16,6 +16,9 @@ import { createHeadRehomePorts, headIdentityRed, headRehomePlan, type HeadRehome
 import { argmaxTypedJudgmentOption, runTypedJudgment } from "./typed-judgment.js";
 import { diffCoverageTargets } from "./diff-coverage-targets.js";
 import { execFileSync } from "node:child_process";
+import { defaultIsPidAlive } from "./drain-lock.js";
+import { isHolderStale } from "./fs-race-safe.js";
+import { readBoundedProcessCwdCensus } from "./process-cwd-census.js";
 import { HOST_GIT_CONFIG, hostWorktreeGit, hostWorktreeGitAsync, WorktreePointerRefusedError } from "./worktree-git.js";
 import { execFileLoopBounded } from "./loop-bounded-child.js";
 import { createScanner, SyntaxKind } from "typescript/unstable/ast";
@@ -3964,6 +3967,24 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
           claimRoundEnded: (claimRunId: string) => fixRoundClaimEnded(ledgerPath, claimRunId),
           idleBoundMs: registeredFixOwnerIdleBoundMs(readLedgerLines(ledgerPath), spawnWallClockBoundMs), // ledger-read-intent: live
         });
+        if (!failed && snapshot.historyState === "unknown" && snapshot.pathState === "managed" &&
+            snapshot.attachmentState === "exact") {
+          const lockPath = inflightLockPath(inflightDir, fixBranchClaimKey(owner, repo, branch));
+          let claimClear = false;
+          try {
+            const holder = parseInflightLockInfo(readFileSync(lockPath, "utf8"));
+            claimClear = holder !== null &&
+              (fixRoundClaimEnded(ledgerPath, holder.run_id) || isHolderStale(holder, { isPidAlive: defaultIsPidAlive }));
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code === "ENOENT") claimClear = true;
+            else log("sweep.fix.owner_claim_probe_unreadable", { pr_number: pr.prNumber,
+              head_sha: pr.headSha, worktree_path: ownerPath, reason: String(error) });
+          }
+          if (claimClear && readBoundedProcessCwdCensus(ownerPath).state === "clear") return true;
+        }
+        // This probe answers whether the recorded owner still owns the checkout. A stale or
+        // unreadable history can block recovery, but cannot keep a cleared claim/process cause held.
+        if (!failed && snapshot.claimState === "clear" && snapshot.processState === "clear") return true;
         const decision = decideRegisteredFixOwnerRecovery(snapshot);
         if (!failed) return decision.kind !== "keep";
         const localSha = snapshot.localSha;
@@ -14848,6 +14869,8 @@ const FLEET_PAUSE_REFUSAL = /PAUSE held on |cannot reach origin|origin.*unreadab
 function dispatchFailureCause(row: Record<string, unknown>): string {
   const reason = String(row.owner_recovery_reason ?? row.error ?? row.reason ?? "unreadable dispatch failure");
   if (FLEET_PAUSE_REFUSAL.test(reason)) return "fleet-held";
+  if (isOwnerClaimDecline(row) && revalidatedOwnerPreservation(row.owner_recovery_reason))
+    return `preservation:${reason}`;
   if (isOwnerClaimDecline(row) && typeof row.worktree_path === "string") return `owner-held:${reason}`;
   // Match the fix-lane gardener's reasonClass without importing its sweep-dependent module graph.
   return reason.split(" — ")[0]!.replace(/\b[0-9a-f]{7,40}\b/gi, "<sha>")
@@ -14890,6 +14913,12 @@ function* fixDispatchHoldAtHeadSteps(
   const cadence = options.sweepPassMs ?? medianDispatchWait(passTimes.slice(1).map((t, i) => t - passTimes[i]!)) ?? DEFAULT_POLL_INTERVAL_MS;
   const samples: number[] = [];
   const nextSuccess = new Map<string, number>();
+  const prForTask = new Map<string, number>();
+  if (pr.taskId !== undefined) prForTask.set(pr.taskId, pr.prNumber);
+  for (const row of lines) {
+    if (typeof row.pr_number === "number" && typeof row.task_id === "string" &&
+        !/^(?:SWEEP|DAEMON)(?:-|$)/.test(row.task_id)) prForTask.set(row.task_id, row.pr_number);
+  }
   for (let i = lines.length - 1; i >= 0; i--) {
     const row = lines[i]!;
     if (!Number.isFinite(stamp(row))) continue;
@@ -14897,7 +14926,11 @@ function* fixDispatchHoldAtHeadSteps(
     const taskKey = `task:${row.task_id}`;
     if (row.step === "fix.dispatch" || row.step === "fix.retrigger") {
       if (typeof row.pr_number === "number") nextSuccess.set(prKey, stamp(row));
-      else if (row.task_id !== undefined) nextSuccess.set(taskKey, stamp(row));
+      else if (typeof row.task_id === "string") {
+        nextSuccess.set(taskKey, stamp(row));
+        const owningPr = prForTask.get(row.task_id);
+        if (owningPr !== undefined) nextSuccess.set(`pr:${owningPr}`, stamp(row));
+      }
     } else if (failed(row) && dispatchFailureCause(row) === cause) {
       const successAt = nextSuccess.get(prKey) ?? nextSuccess.get(taskKey);
       if (successAt !== undefined && successAt > stamp(row)) samples.push(successAt - stamp(row));
@@ -14930,6 +14963,9 @@ function* fixDispatchHoldAtHeadSteps(
     const path = String(last.worktree_path);
     if (!ownerWorktreeExists(path) || (yield* step(() => ownerReclaimable?.(pr, last))) === true) return undefined;
     probe = "present";
+  } else if (cause.startsWith("preservation:") && typeof last.worktree_path === "string") {
+    if (!ownerWorktreeExists(last.worktree_path) ||
+        (yield* step(() => ownerReclaimable?.(pr, last))) === true) return undefined;
   }
   const recordedFailureAt = Date.parse(String(priorHold?.failure_at));
   const failureAt = Number.isFinite(stamp(last)) ? stamp(last) : Number.isFinite(recordedFailureAt) ? recordedFailureAt : nowMs;
@@ -14958,7 +14994,7 @@ async function holdRepeatedFixClaimDecline(
     if (!hold.escalated) await escalate(pr, hold.reason, renderClarificationQuestion(pr, hold.reason, pr.strikeHistory ?? []));
     hold.fields.dispatch_cause_escalated = hold.fields.dispatch_cause_key;
     if (hold.fields.dispatch_held === "fix_claim_decline")
-      hold.fields.fix_claim_decline_escalated = String(hold.fields.cause).replace(/^owner-held:/, "");
+      hold.fields.fix_claim_decline_escalated = String(hold.fields.cause).replace(/^(?:owner-held:|preservation:)/, "");
     else hold.fields.fix_dispatch_failed_escalated = true;
   }
   return { reason: hold.reason, fields: hold.fields };
@@ -19453,17 +19489,20 @@ export async function runSweep(
     lightPassMemoryWaitSummary(pr, sweepDeps, lightPassMemoryWaits.get(lightPassHeadKey(pr))!.sinceMs));
   openPrs = openPrs.filter((pr) => !memoryHeld.includes(pr));
   const dispatchCauseProgress = new Map<number, FixProgressResult>();
+  const withDispatchCauseProgress = (pr: OpenPrView, evidence: FixDispatchEvidence): FixDispatchEvidence => {
+    const progress = dispatchCauseProgress.get(pr.prNumber);
+    return progress?.verdict === "change-approach"
+      ? { ...evidence, progressApproach: [evidence.progressApproach, progress.approach].filter(Boolean).join("\n") }
+      : evidence;
+  };
   // W1-T7096: every round this pass dispatches is judged by the judge this pass was given.
   const deps: SweepDeps = {
     ...sweepDeps,
     dispatchFix: (pr, evidence, onPhase, control) => {
       const started = performance.now();
-      const causeProgress = dispatchCauseProgress.get(pr.prNumber);
       try {
         return sweepDeps.dispatchFix(pr,
-          { ...evidence, progressJudge: evidence.progressJudge ?? sweepDeps.fixProgressJudge,
-            ...(causeProgress?.verdict === "change-approach"
-              ? { progressApproach: [evidence.progressApproach, causeProgress.approach].filter(Boolean).join("\n") } : {}) }, (phase, wait) => {
+          { ...withDispatchCauseProgress(pr, evidence), progressJudge: evidence.progressJudge ?? sweepDeps.fixProgressJudge }, (phase, wait) => {
             if (phase === "ci-wait") {
               fixCapacityReleases.get(pr.prNumber)?.();
               fixCapacityReleases.delete(pr.prNumber);
@@ -20937,7 +20976,7 @@ export async function runSweep(
     if (deps.dryRun || host?.spawnFix === undefined || host.mode() !== "on") return false;
     let envelope: FixDispatchEnvelope;
     try {
-      envelope = buildFixDispatchEnvelope(pr, evidence, { fixKey: claim.fixKey, decidedAtMs: deps.now?.() ?? systemClock.now(),
+      envelope = buildFixDispatchEnvelope(pr, withDispatchCauseProgress(pr, evidence), { fixKey: claim.fixKey, decidedAtMs: deps.now?.() ?? systemClock.now(),
         admissionSinceMs: claim.control.admissionSinceMs, planContextDigest: deps.planContextDigestFor?.(pr), dedupeKey });
     } catch (error) {
       log("sweep.fix.child_envelope_refused", { pr_number: pr.prNumber, head_sha: pr.headSha, error: String((error as Error)?.message ?? error) });

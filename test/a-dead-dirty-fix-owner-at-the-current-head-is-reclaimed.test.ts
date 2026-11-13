@@ -17,7 +17,7 @@ import {
   type BuildSweepEffectsDeps, type CaptureRegisteredFixOwnerDeps, type RegisteredFixOwnerSnapshot,
 } from "#src/run-task.js";
 import {
-  DEFAULT_SWEEP_POLICY, FIX_CLAIM_DECLINE_BACKSTOP, fixDispatchHoldAtHead, registeredFixOwnerIdleBoundMs,
+  DEFAULT_SWEEP_POLICY, fixDispatchHoldAtHead, registeredFixOwnerIdleBoundMs,
   runSweep, type OpenPrView, type SweepDeps,
 } from "#test/helpers/sweep-test.js";
 import type { Plan, Task } from "#src/lib/plan.js";
@@ -148,7 +148,7 @@ async function dispatch(f: Fixture, built: ReturnType<typeof effectsFor>) {
 }
 
 function keptDeclines(f: Fixture, extra: Record<string, unknown> = { owner_recovery_decision: "keep" }) {
-  return Array.from({ length: FIX_CLAIM_DECLINE_BACKSTOP }, () => ({
+  return Array.from({ length: 3 }, () => ({
     step: "sweep.fix.checkout_claim_declined", task_id: TASK, reason: "registered_worktree_owner",
     owner_recovery_reason: "dirty_worktree", pr_number: PR, head_sha: f.head, branch: BRANCH,
     worktree_path: realpathSync(f.ownerPath), ...extra,
@@ -224,7 +224,7 @@ test("W1-T7998: no fix-round history still yields a finite idle bound", async ()
   } finally { f.cleanup(); }
 });
 
-test("W1-T7998: a backstop hold re-asks the owner decision and lifts when it is reclaimable", async () => {
+test("W1-T7998: a held owner cause is re-probed and lifts when claim and process clear", async () => {
   const f = fixture();
   try {
     const pr = prView(f);
@@ -243,8 +243,9 @@ test("W1-T7998: a backstop hold re-asks the owner decision and lifts when it is 
     let asked = 0;
     const spy = () => { asked++; return true; };
     const failedRecovery = keptDeclines(f, { owner_recovery_reason: "owner_untracked_preserve_failed" });
-    assert.ok(fixDispatchHoldAtHead(pr, failedRecovery, existsSync, spy), "a failed recovery is not re-asked; it escalates once");
-    assert.equal(asked, 0);
+    assert.equal(fixDispatchHoldAtHead(pr, failedRecovery, existsSync, spy), undefined,
+      "a cleared owner cause lifts even when the prior recovery failed");
+    assert.equal(asked, 1);
 
     const pass = async (reclaimable: SweepDeps["fixOwnerReclaimableAtHold"]) => {
       const ledgerPath = join(mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}held-owner-`)), "ledger.ndjson");
@@ -261,7 +262,7 @@ test("W1-T7998: a backstop hold re-asks the owner decision and lifts when it is 
     };
     const held = await pass(live.fixOwnerReclaimableAtHold);
     assert.equal(held.dispatched, 0);
-    assert.ok(held.escalations.some(r => /FIX_CLAIM_DECLINE_BACKSTOP/.test(r)), "the kept owner's hold escalates exactly as today");
+    assert.deepEqual(held.escalations, [], "a live owner does not escalate by count");
     const lifted = await pass(effects.fixOwnerReclaimableAtHold);
     assert.equal(lifted.dispatched, 1, "the claim proceeds in the pass the owner became reclaimable");
     assert.deepEqual(lifted.escalations, []);
@@ -468,7 +469,7 @@ test("every failed-owner revalidation keeps the hold on a live owner, an error o
   assert.equal(checked, 33);
 });
 
-test("a failed stale-dirty reset that fails again after its revalidation holds and escalates", () => {
+test("a failed stale-dirty reset can retry after another cleared owner probe", () => {
   const f = fixture();
   try {
     const pr = prView(f), reason = { owner_recovery_reason: "owner_stale_dirty_reset_failed" };
@@ -478,10 +479,8 @@ test("a failed stale-dirty reset that fails again after its revalidation holds a
     const lifted = { step: "sweep.fix.checkout_owner_stale_dirty_preserved", pr_number: PR, head_sha: f.head,
       branch: BRANCH, from_backstop_revalidation: true };
     const again = [...first, lifted, ...keptDeclines(f, reason)];
-    const held = fixDispatchHoldAtHead(pr, again, existsSync, reclaimable);
-    assert.ok(held, "a reset that fails again after a lift is not re-asked, so it cannot loop silently");
-    assert.equal(held.fields.fix_claim_decline_escalated, "owner_stale_dirty_reset_failed");
-    assert.equal(held.escalated, false, "the hold escalates once on the next disposition");
+    assert.equal(fixDispatchHoldAtHead(pr, again, existsSync, reclaimable), undefined,
+      "a recorded revalidation does not impose a count ceiling on a later cleared cause");
     const otherHead = [...first, { ...lifted, head_sha: "f".repeat(40) }, ...keptDeclines(f, reason)];
     assert.equal(fixDispatchHoldAtHead(pr, otherHead, existsSync, reclaimable), undefined,
       "a lift recorded at another head does not count against this one");

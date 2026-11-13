@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, mkdirSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { hostname, tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
-import { fixDispatchHoldAtHead, fixDispatchHoldAtHeadAsync, runSweep,
+import { buildSweepEffects, DEFAULT_SWEEP_POLICY, fixDispatchHoldAtHead, fixDispatchHoldAtHeadAsync,
+  installDetachedWorkHost, runSweep,
   type FixDispatchHoldOptions, type OpenPrView, type SweepDeps } from "#src/lib/sweep.js";
 import * as sweep from "#src/lib/sweep.js";
 import type { FixProgressInput, FixProgressJudge } from "#src/lib/fix-progress-judge.js";
@@ -51,6 +55,38 @@ test("test/fix-lane/a-held-fix-dispatch-lifts-when-its-recorded-cause-clears.tes
   assert.equal(dispatched, 1, "dispatches again at the same head without a push");
 });
 
+test("a production owner probe releases a recorded process owner when its claim clears despite unreadable history", () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-held-owner-"));
+  const ownerPath = join(root, "worktrees", "sweep-W1-T9796-1792983204646");
+  const branch = pr.headRefName!;
+  const claimKey = "fix-owner-claim";
+  const inflightDir = join(root, "state", "inflight");
+  const lockPath = join(inflightDir, `${claimKey}.lock`);
+  try {
+    mkdirSync(ownerPath, { recursive: true });
+    mkdirSync(inflightDir, { recursive: true });
+    const ledgerPath = join(root, "ledger.ndjson");
+    writeFileSync(ledgerPath, "");
+    writeFileSync(lockPath, JSON.stringify({ pid: process.pid, host: hostname(), run_id: "live-owner",
+      startedAt: new Date().toISOString() }));
+    const built = buildSweepEffects({ owner: "acme", repo: "scratch", config: { root }, ledgerPath,
+      runId: "owner-probe", plan: { tasks: [], byId: new Map() }, policy: DEFAULT_SWEEP_POLICY,
+      fixBranchClaimKeyImpl: () => claimKey,
+      registeredOwnerRecovery: { capture: () => ({ path: ownerPath, pathState: "managed",
+        attachmentState: "exact", treeState: "clean", remoteState: "exact", historyState: "unknown",
+        claimState: "unknown", processState: "unknown", ageMs: 1000, localSha: pr.headSha,
+        remoteSha: pr.headSha }), remove: () => {} } } as never);
+    const owner = { step: "sweep.fix.checkout_claim_declined", pr_number: pr.prNumber, head_sha: pr.headSha,
+      task_id: pr.taskId, branch, reason: "registered_worktree_owner", owner_recovery_reason: "process_cwd_owner",
+      worktree_path: ownerPath, ts: at(NOW) };
+    assert.ok(fixDispatchHoldAtHead(pr, [owner], () => true, built.fixOwnerReclaimableAtHold, options()),
+      "the live claim holds despite unreadable git history");
+    unlinkSync(lockPath);
+    assert.equal(fixDispatchHoldAtHead(pr, [owner], () => true, built.fixOwnerReclaimableAtHold, options()), undefined,
+      "the production claim and process census release the recorded cause at this head");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 test("W1-T11168 criterion 2: ledger median, doubling, success reset and one-pass first retry", () => {
   const history = [failure(NOW - 3000), dispatch(NOW - 2900), failure(NOW - 2000), dispatch(NOW - 1700)];
   const first = failure(NOW);
@@ -70,6 +106,18 @@ test("W1-T11168 criterion 2: ledger median, doubling, success reset and one-pass
   assert.equal(hold([...many, failure(NOW + 1200, "different cause")], { nowMs: NOW + 1200 })?.fields.backoff_ms, 100);
   assert.equal(hold([...many, dispatch(NOW + 1200)]), undefined, "a success clears previous failures");
   assert.equal(hold([failure(NOW, "transport failed 501")])?.fields.cause, hold([first])?.fields.cause);
+  const hosted = [failure(NOW - 2000, "hosted child refused"),
+    dispatch(NOW - 1800, { pr_number: undefined }),
+    { ...failure(NOW, "hosted child refused"), task_id: "SWEEP-123" }];
+  assert.equal(hold(hosted)?.fields.backoff_ms, 200,
+    "a hosted-child SWEEP task id joins the successful task-id-only dispatch by PR");
+  const preserveFailure = { step: "sweep.fix.checkout_claim_declined", task_id: pr.taskId,
+    pr_number: pr.prNumber, head_sha: pr.headSha, worktree_path: "/worktrees/sweep-W1-T9796-1",
+    reason: "registered_worktree_owner",
+    owner_recovery_reason: "owner_staged_residue_preserve_failed", ts: at(NOW) };
+  assert.equal(hold([preserveFailure])?.fields.probe_result, "unprobed");
+  assert.equal(hold([preserveFailure], { nowMs: NOW + 100 }), undefined,
+    "a failed preservation retries after its backoff even while the checkout remains");
 });
 
 test("W1-T11168 criterion 3: failed retries ask the judge and escalate once per head and cause", async () => {
@@ -107,4 +155,21 @@ test("a cause judge's change of approach reaches the next dispatch", async () =>
     readLedger: () => rows, appendLine: (_path, row) => { rows.push({ ts: at(NOW), ...row }); },
     fixProgressJudge: async () => ({ verdict: "change-approach", reason: "different transport", approach: "refresh credentials first" }) });
   assert.equal(approach, "refresh credentials first");
+});
+
+test("a change-approach constraint reaches the hosted fix child envelope", async () => {
+  const rows: Record<string, unknown>[] = [failure(NOW - 1000), failure(NOW - 500)];
+  let envelopeApproach: string | undefined;
+  installDetachedWorkHost({ hosts: new Set(["review", "fix-dispatch"]), mode: () => "on",
+    spawnReview: async () => undefined,
+    spawnFix: async ({ envelope }) => { envelopeApproach = envelope.evidence.progressApproach; return undefined; } });
+  try {
+    await runSweep([pr], { arm: () => {}, close: () => {}, escalate: () => {}, dispatchFix: () => {},
+      runId: "hosted-approach", ledgerPath: "/unused", now: () => NOW + 1000000,
+      detachFixWait: true,
+      readLedger: () => rows, appendLine: (_path, row) => { rows.push({ ts: at(NOW), ...row }); },
+      fixProgressJudge: async () => ({ verdict: "change-approach", reason: "different transport",
+        approach: "refresh credentials first" }) });
+    assert.equal(envelopeApproach, "refresh credentials first");
+  } finally { installDetachedWorkHost(undefined); }
 });
