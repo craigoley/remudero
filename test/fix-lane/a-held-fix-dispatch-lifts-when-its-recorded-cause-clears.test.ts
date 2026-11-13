@@ -56,6 +56,43 @@ test("test/fix-lane/a-held-fix-dispatch-lifts-when-its-recorded-cause-clears.tes
   assert.equal(dispatched, 1, "dispatches again at the same head without a push");
 });
 
+test("a production sweep without worker admission re-reads the shared PAUSE and origin cause", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-held-fleet-"));
+  let state: "held" | "unreachable" | "absent" = "held";
+  const reads: string[][] = [];
+  try {
+    const effects = buildSweepEffects({ owner: "acme", repo: "scratch", config: { root },
+      ledgerPath: join(root, "ledger.ndjson"), runId: "fleet-probe", plan: { tasks: [], byId: new Map() },
+      log: () => {}, fixDispatchPauseGitImpl: {
+        run: (args: string[]) => {
+          reads.push(args);
+          if (args[0] === "cat-file") return { status: 1, stdout: "" };
+          return state === "unreachable" ? { status: 1, stdout: "" } :
+            { status: 0, stdout: state === "held" ? "abc123\trefs/rmd-pause/hold\n" : "" };
+        }, mintAnchor: () => "unused",
+      } } as never);
+    for (const initial of ["held", "unreachable"] as const) {
+      state = initial;
+      const rows: Record<string, unknown>[] = [failure(NOW, initial === "held"
+        ? "PAUSE held on refs/rmd-pause/hold" : "PAUSE: cannot reach origin to read refs/rmd-pause/hold")];
+      let dispatched = 0;
+      const deps: SweepDeps = { arm: () => {}, close: () => {}, dispatchFix: () => { dispatched++; },
+        escalate: () => {}, fixDispatchFleetHold: effects.fixDispatchFleetHold,
+        runId: initial, ledgerPath: join(root, "ledger.ndjson"), now: () => NOW,
+        readLedger: () => rows, appendLine: (_path, row) => { rows.push({ ts: at(NOW), ...row }); } };
+      assert.equal(deps.workerAdmissionHold, undefined, "one-shot and light sweeps omit this admission callback");
+      await runSweep([pr], deps);
+      assert.equal(dispatched, 0, `${initial} remains held by the production PAUSE reader`);
+      assert.equal(rows.findLast(row => row.step === "sweep.disposed")?.probe_result, "present");
+      state = "absent";
+      await runSweep([pr], { ...deps, runId: `${initial}-clear` });
+      assert.equal(dispatched, 1, `${initial} releases on the first clear read at the same head`);
+    }
+    assert.ok(reads.filter(args => args[0] === "ls-remote").length >= 4,
+      "the shared PAUSE ref is re-read on each pass");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 test("a production owner probe releases a recorded process owner when its claim clears despite unreadable history", () => {
   const root = mkdtempSync(join(tmpdir(), "rmd-held-owner-"));
   const ownerPath = join(root, "worktrees", "sweep-W1-T9796-1792983204646");
@@ -163,6 +200,59 @@ test("W1-T11168 criterion 3: failed retries ask the judge and escalate once per 
   assert.equal(unavailable?.fields.fix_dispatch_failed_escalated, undefined);
   assert.equal(await fixDispatchHoldAtHeadAsync(pr, seed, () => true, undefined,
     options({ nowMs: NOW + 200, judge: async () => undefined })), undefined, "unavailable keeps the retry schedule");
+});
+
+test("a production reset failure keeps its backoff and the judge's escalate verdict", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-held-reset-"));
+  const ownerPath = join(root, "worktrees", "sweep-W1-T9796-reset");
+  const ledgerPath = join(root, "ledger.ndjson");
+  let captures = 0;
+  let preserves = 0;
+  try {
+    mkdirSync(ownerPath, { recursive: true });
+    writeFileSync(ledgerPath, "");
+    const effects = buildSweepEffects({ owner: "acme", repo: "scratch", config: { root }, ledgerPath,
+      runId: "reset-probe", plan: { tasks: [], byId: new Map() }, log: () => {},
+      fixBranchClaimKeyImpl: () => "reset-owner", registeredOwnerRecovery: {
+        capture: () => { captures++; return { path: ownerPath, pathState: "managed", attachmentState: "exact",
+          treeState: "tracked_dirty", remoteState: "exact", historyState: "contained", claimState: "clear",
+          processState: "clear", ageMs: 1000, localSha: pr.headSha, remoteSha: pr.headSha }; },
+        preserveStaleDirty: () => { preserves++; return join(root, "recovery", "fix-owner", pr.headRefName!, `${pr.headSha}-saved`); },
+        remove: () => {},
+      } } as never);
+    const resetFailure = { step: "sweep.fix.checkout_claim_declined", pr_number: pr.prNumber,
+      task_id: pr.taskId, head_sha: pr.headSha, branch: pr.headRefName,
+      reason: "registered_worktree_owner", owner_recovery_reason: "owner_stale_dirty_reset_failed",
+      worktree_path: ownerPath, preserved_path: join(root, "recovery", "fix-owner", "prior"), ts: at(NOW) };
+    assert.equal(effects.fixOwnerReclaimableAtHold!(pr, resetFailure), false,
+      "the production revalidator cannot clear an unresolved reset by preserving again");
+    assert.equal(captures, 1);
+    assert.equal(preserves, 0);
+    const rows: Record<string, unknown>[] = [{ ...resetFailure, ts: at(NOW - 100) }, resetFailure];
+    let dispatched = 0;
+    let escalated = 0;
+    let judged = 0;
+    const deps: SweepDeps = { arm: () => {}, close: () => {}, dispatchFix: () => { dispatched++; },
+      escalate: () => { escalated++; }, fixOwnerReclaimableAtHold: effects.fixOwnerReclaimableAtHold,
+      fixProgressJudge: async input => { judged++; assert.deepEqual(input.remedyHistory, rows.slice(0, 2));
+        return { verdict: "escalate", loop: "reset", reason: "reset remains unresolved" }; },
+      runId: "reset-held", ledgerPath, now: () => NOW, readLedger: () => rows,
+      appendLine: (_path, row) => { rows.push({ ts: at(NOW), ...row }); } };
+    await runSweep([pr], deps);
+    const disposed = rows.findLast(row => row.step === "sweep.disposed")!;
+    assert.equal(dispatched, 0, "backoff holds at the last failure time");
+    assert.equal(disposed.cause, "reset:owner_stale_dirty_reset_failed");
+    assert.equal(disposed.probe_result, "unprobed");
+    assert.equal(disposed.backoff_ms, 120_000, "two same-cause failures double the one-pass default");
+    assert.equal(disposed.next_retry_at, at(NOW + 120_000));
+    assert.equal(disposed.judge_verdict, "escalate");
+    assert.equal(escalated, 1, "the sweep honors the reset cause's escalation");
+    await runSweep([pr], { ...deps, runId: "reset-still-held", now: () => NOW + 120_000 });
+    assert.equal(dispatched, 0, "the escalate verdict is not bypassed when the timer expires");
+    assert.equal(escalated, 1, "escalation is once per PR, head and reset cause");
+    assert.equal(judged, 1, "the same failed retry is judged once");
+    assert.equal(preserves, 0, "a preservation cannot act as a reset probe");
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
 test("a cause judge's change of approach reaches the next dispatch", async () => {

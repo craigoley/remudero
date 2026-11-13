@@ -42,7 +42,7 @@ import { gatedRemoteRefReserver, reserveTaskIdRemote, type RemoteReserveDeps } f
 import { basename, dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { recyclePauseDetail } from "./recycle-yield.js";
-import { isRecyclePauseDetail } from "./fleet-control.js";
+import { checkSharedPause, isRecyclePauseDetail, realSharedPauseGitDeps, type SharedPauseGitDeps } from "./fleet-control.js";
 import {
   BASE_REPRODUCTION_MAX_FILES, baseProbeSetupFailure, boundedBaseProbeReason,
   baseReproductionFiles, ciContradictedProbeFiles, decideBaseReproduction, failingRuleSuitesFromCiFailures, failingTestFilesFromCiFailures,
@@ -1652,6 +1652,8 @@ export interface BuildSweepEffectsDeps {
   registeredWorktreeOwnerImpl?: (repoDir: string, branchRef: string) => string | undefined;
   registeredOwnerRecovery?: RegisteredFixOwnerRecoveryDeps;
   ownerProcessCwdCensusImpl?: typeof readBoundedProcessCwdCensus;
+  /** The fix-dispatch cause probe uses this reader even in light and one-shot sweeps. */
+  fixDispatchPauseGitImpl?: SharedPauseGitDeps;
   depReviewCommandImpl?: (prArg: string, rest?: string[]) => Promise<number>;
   dispatchFixPreflightStandDownImpl?: SweepRuntimeFn;
   ghLiveStateImpl?: SweepRuntimeFn;
@@ -2438,6 +2440,7 @@ export const SWEEP_EFFECT_SURFACE = [
   "dispatchPlanOnlyRepair",
   "escalate",
   "fixOwnerReclaimableAtHold", // W1-T7998
+  "fixDispatchFleetHold", // W1-T11168
   "readLiveState",
   "terminalFixStandDown",
   "readRedBaseRefreshFacts",
@@ -2626,6 +2629,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   | "dispatchPlanOnlyRepair"
   | "escalate"
   | "fixOwnerReclaimableAtHold"
+  | "fixDispatchFleetHold"
   | "strikeLadder"
   | "readLiveState"
   | "terminalFixStandDown"
@@ -2736,6 +2740,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
       remove: requiredSweepRuntime("registeredOwnerRecovery.remove"),
     },
     ownerProcessCwdCensusImpl = readBoundedProcessCwdCensus,
+    fixDispatchPauseGitImpl,
     depReviewCommandImpl: depReviewCommand = requiredSweepRuntime<NonNullable<BuildSweepEffectsDeps["depReviewCommandImpl"]>>("depReviewCommandImpl"),
     dispatchFixPreflightStandDownImpl: dispatchFixPreflightStandDown = requiredSweepRuntime("dispatchFixPreflightStandDownImpl"),
     ghLiveStateImpl: ghLiveState = requiredSweepRuntime("ghLiveStateImpl"),
@@ -2807,6 +2812,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   };
 
   const repoDir = repo === localRepoName ? entrypointRepoRoot : join(config.root, "repos", repo);
+  const pauseGit = fixDispatchPauseGitImpl ?? realSharedPauseGitDeps(repoDir);
   // W1-T4460 (design ii): the real default reads this repo's OWN plan fresh off disk, swallowing a
   // read failure (an unreadable plan on this one opportunistic re-read is never this dispatch's
   // reason to throw — `fixRungTaskWithPlanReload` already degrades to the stale `plan` on `undefined`).
@@ -3174,6 +3180,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   };
   return {
     readerAgreement: { owner, repo, plan, readJson: readJsonImpl },
+    fixDispatchFleetHold: () => checkSharedPause(config.root, { run: pauseGit.run, mintAnchor: pauseGit.mintAnchor }),
     reconcilePrimaryShadowAlert: () => primaryShadowAlerts.reconcile().catch(primaryShadowAlertFailed),
     readOpenEscalations: () => issues.listOpen?.(NEEDS_HUMAN_LABEL) ?? [],
     fixProgressJudge: effectsProgressJudge,
@@ -3971,6 +3978,9 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
           claimRoundEnded: (claimRunId: string) => fixRoundClaimEnded(ledgerPath, claimRunId),
           idleBoundMs: registeredFixOwnerIdleBoundMs(readLedgerLines(ledgerPath), spawnWallClockBoundMs), // ledger-read-intent: live
         });
+        // The claim path failed after preserving the bytes. Only a new claim attempt can prove
+        // that clearStaleDirty now succeeds; preservation alone cannot clear that failure.
+        if (decline.owner_recovery_reason === "owner_stale_dirty_reset_failed") return false;
         if (!failed && snapshot.historyState === "unknown" && snapshot.pathState === "managed" &&
             snapshot.attachmentState === "exact") {
           const lockPath = inflightLockPath(inflightDir, fixBranchClaimKey(owner, repo, branch));
@@ -14749,9 +14759,9 @@ export function fleetWithheldStageMs(rows: ReadonlyArray<Record<string, unknown>
   return held;
 }
 
-/** PR 14405 and its follow-up: each failed owner recovery `declineClaim` names, keyed to the decision
- *  that must still admit it and the ordinary helper whose verified result lifts its backstop hold.
- *  A failed stale-dirty RESET re-proves only its preservation: the claim path then redoes both. */
+/** PR 14405 and its follow-up: preservation failures can be revalidated by the same helper.
+ *  A failed stale-dirty reset waits for a new claim attempt after backoff; saving bytes again
+ *  cannot prove that the reset will succeed. */
 const REVALIDATED_OWNER_PRESERVATIONS: Readonly<Record<string, {
   kind: "preserve-tracked-dirty" | "preserve-stale-dirty";
   helper: "preserveTrackedDirty" | "preserveStagedResidue" | "preserveStaleDirty";
@@ -14759,7 +14769,6 @@ const REVALIDATED_OWNER_PRESERVATIONS: Readonly<Record<string, {
   owner_dirty_recovery_preserve_failed: { kind: "preserve-tracked-dirty", helper: "preserveTrackedDirty" },
   owner_staged_residue_preserve_failed: { kind: "preserve-tracked-dirty", helper: "preserveStagedResidue" },
   owner_stale_dirty_preserve_failed: { kind: "preserve-stale-dirty", helper: "preserveStaleDirty" },
-  owner_stale_dirty_reset_failed: { kind: "preserve-stale-dirty", helper: "preserveStaleDirty" },
 };
 
 function revalidatedOwnerPreservation(reason: unknown) {
@@ -14873,6 +14882,8 @@ const FLEET_PAUSE_REFUSAL = /PAUSE held on |cannot reach origin|origin.*unreadab
 function dispatchFailureCause(row: Record<string, unknown>): string {
   const reason = String(row.owner_recovery_reason ?? row.error ?? row.reason ?? "unreadable dispatch failure");
   if (FLEET_PAUSE_REFUSAL.test(reason)) return "fleet-held";
+  // A verified preservation does not prove that a failed index reset has cleared.
+  if (isOwnerClaimDecline(row) && reason === "owner_stale_dirty_reset_failed") return `reset:${reason}`;
   if (isOwnerClaimDecline(row) && revalidatedOwnerPreservation(row.owner_recovery_reason))
     return `preservation:${reason}`;
   if (isOwnerClaimDecline(row) && typeof row.worktree_path === "string") return `owner-held:${reason}`;
@@ -15164,6 +15175,8 @@ export interface SweepDeps {
   continueReviewAdmissions?: (reviewClass?: ReviewLaneClass) => boolean;
   /** W1-T3491 — fleet hold checked before review or repair admission; direct CLI/test callers omit it. */
   workerAdmissionHold?: (kind?: "review") => string | undefined;
+  /** Re-read the shared PAUSE ref for a recorded fleet-held fix failure. */
+  fixDispatchFleetHold?: () => string | undefined;
   restartAdmission?: ((kind: ReviewLaneClass, surface: "light" | "light-refill") => boolean) & { readonly heldBy?: string; readonly recycleWait?: true };
   /** W1-T11148: the head diff (reviewer's source) and the plan-lane bound's readings; absent: code lane, review-width bound. */
   readPrHeadDiff?: (pr: OpenPrView) => Promise<string>;
@@ -19931,8 +19944,17 @@ export async function runSweep(
   const incidentHeldPrs = new Set<number>(); // W1-T5939: blocker reads awaiting-ci, so no stage stall escalates
   const infrastructureBlockerByPr = new Map<number, PrBlocker>(); // W1-T9932: a plan-only infra red's re-run or escalation
   const dispatchCauseHolds = new Map<number, FixDispatchHold | undefined>();
+  let dispatchFleetHoldRead = false;
+  let dispatchFleetHold: string | undefined;
   for (const pr of openPrs) {
-    const opts: FixDispatchHoldOptions = { nowMs: now, fleetHold: () => workerAdmissionHoldReason(deps),
+    const opts: FixDispatchHoldOptions = { nowMs: now,
+      fleetHold: () => {
+        if (!dispatchFleetHoldRead) {
+          dispatchFleetHold = deps.fixDispatchFleetHold ? deps.fixDispatchFleetHold() : workerAdmissionHoldReason(deps);
+          dispatchFleetHoldRead = true;
+        }
+        return dispatchFleetHold;
+      },
       onProgress: progress => dispatchCauseProgress.set(pr.prNumber, progress) };
     if (!deps.dryRun) {
       opts.judge = deps.fixProgressJudge;

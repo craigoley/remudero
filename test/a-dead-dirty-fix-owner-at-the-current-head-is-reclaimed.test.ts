@@ -397,26 +397,27 @@ test("a verified staged-residue preservation lifts its failed-owner backstop", (
   } finally { f.cleanup(); }
 });
 
-test("a failed stale-dirty reset lifts only once its preservation is re-verified, without resetting", () => {
+test("a failed stale-dirty reset waits for backoff even when preservation succeeds", () => {
   const f = fixture();
   try {
+    const nowMs = Date.parse("2026-11-03T12:00:00Z");
     const pr = prView(f), declines = keptDeclines(f, {
       owner_recovery_reason: "owner_stale_dirty_reset_failed", preserved_path: join(f.root, "recovery", "fix-owner", BRANCH, "earlier"),
-    });
-    assert.ok(fixDispatchHoldAtHead(pr, declines), "three failed resets still hold without a fresh preservation");
+    }).map(row => ({ ...row, ts: new Date(nowMs).toISOString() }));
+    const options = { nowMs, sweepPassMs: 100 };
+    assert.equal(fixDispatchHoldAtHead(pr, declines, existsSync, undefined, options)?.fields.backoff_ms, 400);
     const unproven = effectsFor(f, { preserveStale: () => { throw new Error("saved owner state did not verify: index.patch"); } });
-    assert.ok(fixDispatchHoldAtHead(pr, declines, existsSync, unproven.effects.fixOwnerReclaimableAtHold),
-      "a preservation that does not re-verify keeps the hold");
-    assert.deepEqual(unproven.order, ["save"]);
+    assert.ok(fixDispatchHoldAtHead(pr, declines, existsSync, unproven.effects.fixOwnerReclaimableAtHold, options));
+    assert.deepEqual(unproven.order, []);
     const before = ownerState(f);
     const built = effectsFor(f);
-    assert.equal(fixDispatchHoldAtHead(pr, declines, existsSync, built.effects.fixOwnerReclaimableAtHold), undefined);
-    assert.deepEqual(built.order, ["save", "receipt"], "re-proved, never reset");
+    assert.equal(fixDispatchHoldAtHead(pr, declines, existsSync, built.effects.fixOwnerReclaimableAtHold, options)?.fields.probe_result,
+      "unprobed", "preservation cannot prove a failed reset cleared");
+    assert.deepEqual(built.order, [], "revalidation neither preserves again nor resets");
     assertOwnerUntouched(f, built, before);
     assert.ok(existsSync(join(f.ownerPath, FILE)), "the untracked copy a reset would clear is still there");
-    const row = built.logs.find(l => l.step === "sweep.fix.checkout_owner_stale_dirty_preserved")!.extra!;
-    assert.equal(row.from_backstop_revalidation, true);
-    assertStalePreserved(f, String(row.preserved_path));
+    assert.equal(fixDispatchHoldAtHead(pr, declines, existsSync, built.effects.fixOwnerReclaimableAtHold,
+      { nowMs: nowMs + 400, sweepPassMs: 100 }), undefined, "the cause retries when its backoff ends");
   } finally { f.cleanup(); }
 });
 
@@ -469,21 +470,26 @@ test("every failed-owner revalidation keeps the hold on a live owner, an error o
   assert.equal(checked, 33);
 });
 
-test("a failed stale-dirty reset can retry after another cleared owner probe", () => {
+test("a failed stale-dirty reset can retry after backoff without a count ceiling", () => {
   const f = fixture();
   try {
+    const nowMs = Date.parse("2026-11-03T12:00:00Z");
     const pr = prView(f), reason = { owner_recovery_reason: "owner_stale_dirty_reset_failed" };
     const reclaimable = () => true;
-    const first = keptDeclines(f, reason);
-    assert.equal(fixDispatchHoldAtHead(pr, first, existsSync, reclaimable), undefined, "the first revalidation lifts the hold");
+    const first = keptDeclines(f, reason).map(row => ({ ...row, ts: new Date(nowMs).toISOString() }));
+    const at = (rows: Record<string, unknown>[]) => fixDispatchHoldAtHead(pr, rows, existsSync, reclaimable,
+      { nowMs, sweepPassMs: 100 });
+    const due = (rows: Record<string, unknown>[]) => fixDispatchHoldAtHead(pr, rows, existsSync, reclaimable,
+      { nowMs: Date.parse(String(at(rows)!.fields.next_retry_at)), sweepPassMs: 100 });
+    assert.ok(at(first), "the first reset failure remains held during backoff");
+    assert.equal(due(first), undefined, "the first retry proceeds after backoff");
     const lifted = { step: "sweep.fix.checkout_owner_stale_dirty_preserved", pr_number: PR, head_sha: f.head,
       branch: BRANCH, from_backstop_revalidation: true };
-    const again = [...first, lifted, ...keptDeclines(f, reason)];
-    assert.equal(fixDispatchHoldAtHead(pr, again, existsSync, reclaimable), undefined,
-      "a recorded revalidation does not impose a count ceiling on a later cleared cause");
-    const otherHead = [...first, { ...lifted, head_sha: "f".repeat(40) }, ...keptDeclines(f, reason)];
-    assert.equal(fixDispatchHoldAtHead(pr, otherHead, existsSync, reclaimable), undefined,
-      "a lift recorded at another head does not count against this one");
+    const again = [...first, lifted, ...first];
+    assert.ok(at(again), "the repeated reset failure keeps its doubled backoff");
+    assert.equal(due(again), undefined, "a revalidation receipt does not impose a count ceiling");
+    const otherHead = [...first, { ...lifted, head_sha: "f".repeat(40) }, ...first];
+    assert.equal(due(otherHead), undefined, "a receipt at another head does not impose a count ceiling");
     const staged = { owner_recovery_reason: "owner_staged_residue_preserve_failed" };
     assert.equal(fixDispatchHoldAtHead(pr, [...keptDeclines(f, staged), lifted, ...keptDeclines(f, staged)], existsSync, reclaimable),
       undefined, "the once-per-head bound applies to the reset arm alone");
