@@ -145,39 +145,46 @@ const GATES = [
   "proof-resolve-precheck.mjs",
 ];
 
-test("W1-T12525 criterion 5: hooks/pre-push with an empty stdin still runs every content gate", (t) => {
-  const tree = gitRepo({ scope: t, kind: "empty-stdin-hook" }).dir;
-  symlinkSync(join(REPO_ROOT, "node_modules"), join(tree, "node_modules"));
-  writeFileSync(join(tree, "tsconfig.json"), "{}\n");
-  mkdirSync(join(tree, "scripts"));
-  mkdirSync(join(tree, "hooks"));
-  mkdirSync(join(tree, "bin"));
-  const log = join(tree, "gate.log");
-  for (const gate of GATES) {
-    writeFileSync(join(tree, "scripts", gate), "");
-  }
-  // Record the hook's gate invocations without starting nine Node runtimes under flake-screen load.
-  // The hook still sees each gate file and a refusing exit status from every invocation.
-  const node = join(tree, "bin", "node");
-  writeFileSync(node, `#!/bin/sh
+test("W1-T12525 criterion 5: hooks/pre-push with an empty stdin still runs every content gate", async (t) => {
+  for (const route of ["own", "harness"] as const) await t.test(route, (t) => {
+    const tree = gitRepo({ scope: t, kind: "empty-stdin-hook" }).dir;
+    const gateRoot = route === "own" ? tree : join(tree, "harness");
+    mkdirSync(gateRoot, { recursive: true });
+    symlinkSync(join(REPO_ROOT, "node_modules"), join(gateRoot, "node_modules"));
+    writeFileSync(join(gateRoot, "tsconfig.json"), "{}\n");
+    mkdirSync(join(gateRoot, "scripts"));
+    mkdirSync(join(gateRoot, "hooks"));
+    mkdirSync(join(tree, "bin"));
+    const log = join(tree, "gate.log");
+    for (const gate of GATES) {
+      writeFileSync(join(gateRoot, "scripts", gate), "");
+    }
+    // Record direct scripts and the harness route's inline imports without starting gate runtimes.
+    // Unknown invocations refuse without recording a gate, so missing gates still fail the assertion.
+    const node = join(tree, "bin", "node");
+    writeFileSync(node, `#!/bin/sh
 for arg do
-  case "$arg" in
-    */scripts/*.mjs) printf '%s\\n' "\${arg##*/}" >> "$GATE_LOG"; exit 1 ;;
-  esac
+  for gate in ${GATES.join(" ")}; do
+    case "$arg" in
+      */scripts/"$gate"|*'at("/scripts/'"$gate"'")'*)
+        printf '%s\\n' "$gate" >> "$GATE_LOG"; exit 1 ;;
+    esac
+  done
 done
 exit 1
-`);
-  chmodSync(node, 0o755);
-  copyFileSync(join(REPO_ROOT, "hooks", "pre-push"), join(tree, "hooks", "pre-push"));
-  const res = spawnSync("sh", [join(tree, "hooks", "pre-push")], {
-    cwd: tree, encoding: "utf8", input: "",
-    env: { PATH: `${join(tree, "bin")}:${process.env.PATH ?? ""}`, HOME: tree, RMD_PREPUSH_GATES: "1", GATE_LOG: log },
+    `);
+    chmodSync(node, 0o755);
+    copyFileSync(join(REPO_ROOT, "hooks", "pre-push"), join(gateRoot, "hooks", "pre-push"));
+    const res = spawnSync("sh", [join(gateRoot, "hooks", "pre-push")], {
+      cwd: tree, encoding: "utf8", input: "",
+      env: { PATH: `${join(tree, "bin")}:${process.env.PATH ?? ""}`, HOME: tree, RMD_PREPUSH_GATES: "1", GATE_LOG: log },
+    });
+    assert.equal(res.error, undefined);
+    const ran = existsSync(log) ? readFileSync(log, "utf8").split("\n").filter(Boolean) : [];
+    for (const gate of GATES) assert.ok(ran.includes(gate), `${gate} must still run on an empty stdin (ran: ${ran.join(", ")})`);
+    assert.equal(res.status, 1, "the recording gates refuse, so the hook refuses as before");
+    assert.doesNotMatch(res.stderr, /dispatch-claim-only/, "an empty stdin never takes the claim fast path");
   });
-  assert.equal(res.error, undefined);
-  const ran = existsSync(log) ? readFileSync(log, "utf8").split("\n").filter(Boolean) : [];
-  for (const gate of GATES) assert.ok(ran.includes(gate), `${gate} must still run on an empty stdin (ran: ${ran.join(", ")})`);
-  assert.equal(res.status, 1, "the recording gates refuse, so the hook refuses as before");
-  assert.doesNotMatch(res.stderr, /dispatch-claim-only/, "an empty stdin never takes the claim fast path");
 });
 
 /** A synchronous git runner over one fixture checkout, with the fixture's own identity and no host config. */
