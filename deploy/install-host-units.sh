@@ -2290,9 +2290,12 @@ fi
 SESSION_SLICE_DROPIN=""
 SESSION_SLICE_WANT=""
 SESSION_SLICE_WRITTEN=0
+SESSION_CPU_DROPIN=""
 if [ -z "$INSTANCE_NAME" ] || [ "$INSTANCE_NAME" = "core" ]; then
   # shellcheck source=deploy/resource-policy.sh
   . "${SCRIPT_DIR}/resource-policy.sh"
+  SESSION_CPU_DROPIN="${UNIT_DIR}/user.slice.d/50-rmd-cap.conf"
+  SESSION_CPU_WANT="$(resource_policy_session_cpu_slice_dropin)"
   SESSION_UID="${RMD_SERVICE_UID:-$(id -u "$SERVICE_USER" 2>/dev/null || true)}"
   case "$SESSION_UID" in
     ''|*[!0-9]*) echo "install-host-units: skipped session slice cap -- no uid for service user '${SERVICE_USER}'" ;;
@@ -2325,6 +2328,28 @@ if [ -n "$SESSION_SLICE_DROPIN" ]; then
     SESSION_SLICE_WRITTEN=1
     UNIT_CHANGED=1
     echo "install-host-units: wrote   $SESSION_SLICE_DROPIN (${RP_SESSION_NOTE})"
+  fi
+fi
+
+# The parent CPU weight is independent of the UID slice's memory sizing (W1-T12060).
+if [ -n "$SESSION_CPU_DROPIN" ]; then
+  if [ -e "$SESSION_CPU_DROPIN" ] && [ "$(effective_directives "$SESSION_CPU_WANT")" = "$(effective_directives "$(cat "$SESSION_CPU_DROPIN" 2>/dev/null)")" ]; then
+    echo "install-host-units: ok      $SESSION_CPU_DROPIN"
+  elif [ "$MODE" = "check" ]; then
+    if [ -e "$SESSION_CPU_DROPIN" ]; then
+      echo "install-host-units: DRIFTED $SESSION_CPU_DROPIN (want: CPUWeight=${RMD_SESSION_CPU_WEIGHT})"
+    else
+      echo "install-host-units: MISSING $SESSION_CPU_DROPIN"
+    fi
+    drift=$(( drift + 1 ))
+  else
+    mkdir -p "$(dirname "$SESSION_CPU_DROPIN")"
+    tmp="${SESSION_CPU_DROPIN}.tmp.$$"
+    printf '%s\n' "$SESSION_CPU_WANT" > "$tmp"
+    chmod 0644 "$tmp"
+    mv -f "$tmp" "$SESSION_CPU_DROPIN"
+    UNIT_CHANGED=1
+    echo "install-host-units: wrote   $SESSION_CPU_DROPIN (CPUWeight ${RMD_SESSION_CPU_WEIGHT} on user.slice)"
   fi
 fi
 
@@ -2399,6 +2424,17 @@ if [ "$SYSTEMD_LIVE" = 1 ]; then
     echo "install-host-units: ${reload_note}; ${SERVICE_UNIT_NAME}, ${WATCHDOG_TIMER_NAME} are enabled"
   fi
   echo "install-host-units: NOTE — the daemon itself was not started or stopped; run ${LAUNCHER} to bring it up."
+fi
+
+if [ -n "$SESSION_CPU_DROPIN" ] && [ "$SYSTEMD_LIVE" = 1 ]; then
+  live_cpu="$("$SYSTEMCTL" show user.slice -p CPUWeight --value 2>/dev/null || true)"
+  if [ "$live_cpu" = "$RMD_SESSION_CPU_WEIGHT" ]; then
+    echo "install-host-units: user.slice CPUWeight confirmed live at ${RMD_SESSION_CPU_WEIGHT}"
+  elif "$SYSTEMCTL" set-property --runtime user.slice "CPUWeight=${RMD_SESSION_CPU_WEIGHT}" 2>/dev/null; then
+    echo "install-host-units: user.slice CPUWeight read ${live_cpu:-unknown}; applied ${RMD_SESSION_CPU_WEIGHT} at runtime"
+  else
+    echo "install-host-units: WARNING user.slice CPUWeight reads ${live_cpu:-unknown}, not ${RMD_SESSION_CPU_WEIGHT}; the file takes effect at the next boot" >&2
+  fi
 fi
 
 # A rewritten slice drop-in takes effect at the daemon-reload above. Confirm it from what systemd

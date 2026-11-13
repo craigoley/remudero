@@ -803,6 +803,8 @@ import {
   ciLearningPendingOrigins,
   findPendingLandingPr,
   landFeedbackStatusContent,
+  planDestinationLandingOpts,
+  queuedFeedbackDir,
   landCiLearningShards,
   landCiLearningShardsAsync,
   feedbackLandingSweepRungs,
@@ -955,6 +957,7 @@ import { assertProposedPlanLoads,
   commitTriageOrRecordRefusal,
   refusedTriageIds,
   triageCommitMessage,
+  triageFeedbackHome,
   unresolvedCitationReferents,
   worktreeCitationEvidence,
   feedbackEntryBlock,
@@ -17784,6 +17787,8 @@ export async function nextTaskIdCommand(
       );
       return 2;
     }
+    // W1-T12453: a degraded source that does not refuse is a note on stderr; stdout keeps the id lines.
+    for (const d of mint.degraded) console.error(`### rmd next-task-id: DEGRADED ${d.source}: ${d.reason}`);
     const contested: string[] = [];
     const run = deps.runGit ?? ((args: string[]) => spawnSync("git", args, { cwd: repoRoot, encoding: "utf8" }));
     // W1-T4414: `--branch` names the holder the filing PR's head must match; absent keeps the current branch.
@@ -17826,7 +17831,7 @@ export async function nextTaskIdCommand(
         contestedAt.push(contested.length);
         return handle;
       });
-      if (held.length) console.log(describeMintWithHistory(mintForReservationAttempt(mint, held[0].id, held[0].taskId)));
+      if (held.length) console.log(describeMintWithHistory({ ...mintForReservationAttempt(mint, held[0].id, held[0].taskId), degraded: [] }));
       held.forEach((handle, i) => {
         for (const line of contested.slice(contestedAt[i - 1] ?? 0, contestedAt[i])) console.log(line);
         // W1-T6026: a takeover rides the RESERVED line itself, and leaves one durable row.
@@ -17842,6 +17847,8 @@ export async function nextTaskIdCommand(
       if (error !== undefined) throw error;
       for (const line of overlapAdvisoryLines(rest, offline, self.owner, self.repo, planPath, overlapDeps))
         (overlapDeps.say ?? console.log)(line);
+      // W1-T12453: the id is held, so the reservation succeeded; the notes above do not undo it.
+      return 0;
     } catch (e) {
       const err = e as TaskIdReservationError;
       console.error(describeReservationRefusal(err.outcome, `${err.message}${requestedMaxScan === undefined ? "" : ` (max-scan: ${requestedMaxScan})`}`));
@@ -34898,6 +34905,103 @@ export function triageLockRefusalMessage(pid: number, startedAt: string, lockPat
  * landing carries those bytes. A refused landing leaves origin/main at `status: new`, so a later
  * pass triages the entry again.
  */
+/** Serialize with the existing queued writer, then land in the entry's home. Neither the public
+ * lane nor the shared private checkout receives a mutable feedback copy. The existing queue keeps
+ * a refused private write recoverable by the normal landing sweep. */
+function landPrivateTriageStatus(root: string, stateRoot: string, feedbackId: string, status: FeedbackEntry["status"],
+  opts: { proposalPr?: string; summary?: FeedbackEntry["summary"]; log: (step: string, extra?: Record<string, unknown>) => void }) {
+  const home = triageFeedbackHome(root, feedbackId);
+  if (home.destination === undefined) throw new Error("private triage status has no destination");
+  const updated = setFeedbackStatus(root, feedbackId, status, { ...opts, land: { stateRoot } });
+  const content = readFileSync(join(queuedFeedbackDir(stateRoot), `${feedbackId}.yaml`), "utf8");
+  if (content !== stringifyYaml(updated)) throw new Error("feedback status queue does not hold the requested edit");
+  return landFeedbackStatusContent(home.root, feedbackEntryRepoPath(feedbackId), content,
+    planDestinationLandingOpts({ log: opts.log }, home.destination));
+}
+
+interface PrivateTriagePublication {
+  version: 1;
+  repository: string;
+  feedbackId: string;
+  feedbackDigest: string;
+  branch: string;
+  worktreePath: string;
+  commit: string;
+  taskPath: string;
+  prUrl?: string;
+  stage: "task_committed" | "feedback_landed";
+}
+
+/** A persistent Git lock protects the receipt's commit and branch from both worktree reapers,
+ * even after the worker's process lock is released. Only the recorded publication can release it. */
+function holdPrivateTriagePublication(publication: PrivateTriagePublication, hold: boolean): void {
+  const { worktreePath, commit } = publication;
+  if (!hold && !existsSync(worktreePath)) return;
+  const reason = `triage-publication:${commit}`;
+  const lockPath = resolve(worktreePath, hostWorktreeGit(worktreePath, ["rev-parse", "--git-path", "locked"]).trim());
+  const current = readFileIfExists(lockPath)?.trim();
+  if (current !== undefined && current !== reason) throw new Error("triage publication worktree lock belongs to another owner");
+  if (hold && current === undefined) hostWorktreeGit(worktreePath, ["worktree", "lock", "--reason", reason, worktreePath]);
+  if (!hold && current === reason) hostWorktreeGit(worktreePath, ["worktree", "unlock", worktreePath]);
+}
+
+/** The public commit precedes the private status. A host-only atomic receipt retains that exact
+ * commit/branch across either failure, including an unknown push/create result. Retry uses the
+ * same branch (the existing 422 adoption checks its head), never another mint or model proposal. */
+async function finishPrivateTriagePublication(publication: PrivateTriagePublication, receiptPath: string,
+  feedbackId: string, taskId: string, config: Config, summarizeDeps: SummarizeDeps,
+  log: (step: string, extra?: Record<string, unknown>) => void, say: (msg: string) => void): Promise<string> {
+  const { worktreePath, branch } = publication;
+  holdPrivateTriagePublication(publication, true);
+  const [owner, repo] = publication.repository.split("/");
+  const diff = hostWorktreeGit(worktreePath, ["diff", worktreeMergeBase(worktreePath), "HEAD", "--", "plan"]);
+  if (!diffCitesFeedback(diff, feedbackId, publication.taskPath)
+    || hostWorktreeGit(worktreePath, ["diff", "--name-only", worktreeMergeBase(worktreePath), "HEAD"]).trim() !== publication.taskPath) {
+    throw new Error("public task write is not the recorded single new task with feedback origin");
+  }
+  try {
+    if (publication.prUrl === undefined) {
+      const entry = readFeedbackEntry(worktreePath, feedbackId);
+      await observeFeedbackPublication(config.contributorAdmission === undefined ? undefined : { mode: "shadow", record: log },
+        entry.contribution ? [entry.contribution] : [], publication.repository, "triage-publication");
+      await gitPushRunBranchAsync(worktreePath);
+      const message = hostWorktreeGit(worktreePath, ["log", "-1", "--format=%B"]);
+      const create = ghPrCreateFillCommand(worktreePath, owner, repo, branch, message.split("\n")[0], undefined, undefined, { log });
+      const prUrl = runGhPrCreate(create, branch, log, say).prUrl;
+      if (!prUrl) throw new Error("no task pull request returned");
+      const target = prUrlTarget(prUrl);
+      if (target?.owner !== owner || target.repo !== repo) throw new Error("public task pull request returned a different repository");
+      const ownership = checkPrOwnership(prUrl, branch, ghPrHeadGateway(), 0);
+      if (ownership) throw new Error("public task pull request is not this branch");
+      ensureTaskTrailer(prUrl, taskId, log);
+      publication.prUrl = prUrl;
+      writeAtomic(receiptPath, JSON.stringify(publication), { mode: 0o600 });
+    } else if (checkPrOwnership(publication.prUrl, branch, ghPrHeadGateway(), 0)) {
+      throw new Error("recorded public task pull request changed ownership");
+    }
+    if (readHeadShaRest(publication.prUrl) !== publication.commit) throw new Error("the recorded public task head changed or is unreadable");
+  } catch (error) {
+    log("triage.error", { error: "public task write failed or unknown", write: "public_task", feedback_id: feedbackId });
+    throw new Error("public task write failed or is unknown; retained the original task for a later pass", { cause: error });
+  }
+  // The public PR already exists even if the private write fails. Existing priced-run and
+  // in-flight consumers read pr.opened; a new unregistered failure step would hide that fact.
+  log("pr.opened", { pr_url: publication.prUrl, plan_only: true, action: "propose", feedback_status: "pending" });
+  try {
+    const stateRoot = join(config.root, "state");
+    await proposeFeedbackWithSummary(worktreePath, feedbackId, summarizeDeps, { proposalPr: publication.prUrl, land: { stateRoot } });
+    const landing = landPrivateTriageStatus(worktreePath, stateRoot, feedbackId, "proposed", { proposalPr: publication.prUrl, log });
+    if (!landing.landed) throw new Error("the private feedback landing refused the write");
+    publication.stage = "feedback_landed";
+    writeAtomic(receiptPath, JSON.stringify(publication), { mode: 0o600 });
+  } catch (error) {
+    log("triage.error", { error: "private feedback status write failed", write: "private_feedback_status", feedback_id: feedbackId });
+    throw new Error("private feedback status write failed; retained the existing public task pull request", { cause: error });
+  }
+  holdPrivateTriagePublication(publication, false);
+  return publication.prUrl;
+}
+
 function landTriageStatusOutcome(i: {
   worktreePath: string;
   repoDir: string;
@@ -34907,13 +35011,19 @@ function landTriageStatusOutcome(i: {
   grillIssueUrl: string | undefined;
   repository: string;
   threadStorePath: string;
+  stateRoot: string;
   log: (step: string, extra?: Record<string, unknown>) => void;
   say: (msg: string) => void;
 }): number {
   const { decision, feedbackId, log, say } = i;
-  setFeedbackStatus(i.worktreePath, feedbackId, decision.status);
-  const content = readFileSync(feedbackEntryPath(i.worktreePath, feedbackId), "utf8");
-  const landing = landFeedbackStatusContent(i.worktreePath, feedbackEntryRepoPath(feedbackId), content, { log });
+  const home = triageFeedbackHome(i.worktreePath, feedbackId);
+  const landing = home.destination !== undefined
+    ? landPrivateTriageStatus(i.worktreePath, i.stateRoot, feedbackId, decision.status, { log })
+    : (() => {
+      setFeedbackStatus(i.worktreePath, feedbackId, decision.status);
+      const content = readFileSync(feedbackEntryPath(i.worktreePath, feedbackId), "utf8");
+      return landFeedbackStatusContent(i.worktreePath, feedbackEntryRepoPath(feedbackId), content, { log });
+    })();
   if (!landing.landed) {
     const cause = landing.error ?? (landing.refused?.length ? `refused: ${JSON.stringify(landing.refused)}` : "nothing was landed");
     log("triage.error", { error: `feedback landing refused: ${cause}`, action: decision.action, landing_pr: landing.prUrl ?? null });
@@ -34989,9 +35099,31 @@ async function triageCommandLocked(
     mkdirSync(dirname(repoDir), { recursive: true });
     ghExec(["repo", "clone", `${owner}/${repo}`, repoDir], { stdio: "inherit" });
   }
+  const receiptPath = join(config.root, "state", "triage-publication", createHash("sha256").update(`${owner}/${repo}\0${feedbackId}`).digest("hex") + ".json");
+  const receiptText = readFileIfExists(receiptPath);
+  let publication: PrivateTriagePublication | undefined = receiptText === undefined ? undefined : JSON.parse(receiptText);
+  if (publication !== undefined) {
+    if (publication.version !== 1 || publication.repository !== `${owner}/${repo}` || publication.feedbackId !== feedbackId
+      || typeof publication.branch !== "string" || !publication.branch.startsWith(`run-TRIAGE-${feedbackId}-`)
+      || typeof publication.worktreePath !== "string" || resolve(publication.worktreePath) !== resolve(worktreesDir(config), publication.branch)
+      || !/^[a-f0-9]{40}$/.test(publication.commit) || !/^plan\/tasks\.d\/W[0-9]+-T[0-9]+-[^/]+\.yaml$/.test(publication.taskPath)
+      || !["task_committed", "feedback_landed"].includes(publication.stage)
+      || (publication.prUrl !== undefined && (typeof publication.prUrl !== "string" || prUrlTarget(publication.prUrl)?.owner !== owner || prUrlTarget(publication.prUrl)?.repo !== repo))) throw new Error("triage publication receipt is invalid; refusing a second task");
+    if (publication.stage === "feedback_landed") {
+      holdPrivateTriagePublication(publication, false);
+      say("the previous task and feedback landing are already published; awaiting their normal gates");
+      return 1;
+    }
+    if (hostWorktreeGit(publication.worktreePath, ["rev-parse", "HEAD"]).trim() !== publication.commit
+      || hostWorktreeGit(publication.worktreePath, ["status", "--porcelain", "--untracked-files=normal"]).trim() !== "") {
+      throw new Error("triage publication worktree changed; refusing a second task");
+    }
+    // Adopt receipts written before persistent holds existed BEFORE the stale-run sweep.
+    holdPrivateTriagePublication(publication, true);
+  }
   const pruned = pruneStaleRuns(repoDir, worktreesDir(config), { graceMs: DEFAULT_PRUNE_GRACE_MS });
   if (pruned.worktrees.length || pruned.branches.length || pruned.skipped.length) log("worktree.prune", { ...pruned });
-  const { branch, worktreePath } = await addLaneWorktree(repoDir, worktreesDir(config), runId, log); // W1-T2528
+  const { branch, worktreePath } = publication ?? await addLaneWorktree(repoDir, worktreesDir(config), runId, log); // W1-T2528
 
   // W1-T348: the decision-summary rung, resolved ONCE and reused at both sites this run may
   // reach a human/operator — the GRILL escalation below and the proposal write further down.
@@ -35052,6 +35184,9 @@ async function triageCommandLocked(
       return 1;
     }
     await observeFeedbackInputs(config.contributorAdmission, entry.contribution ? [entry.contribution] : [], "triage-adoption", log);
+    const feedbackHome = triageFeedbackHome(worktreePath, feedbackId);
+
+
 
     // ── THE CROSS-HOST CLAIM (W1-T1132), TAKEN BEFORE THE ARCHITECT CALL ────────────────────
     // HERE, not before the write: the loser's RESEARCH is the actual cost. Everything below this
@@ -35076,12 +35211,25 @@ async function triageCommandLocked(
     claimReserver = triageClaimReserverAsyncFor(repoDir);
     // `mergedSubjects` is read LAZILY — only the LOSING lane ever needs it, so the winner pays
     // nothing for the evidence arm's input.
-    triageClaim = await claimTriageWithLogging(log, feedbackId, claimReserver, { mergedSubjects: () => mergedTriageSubjects(repoDir),
+    triageClaim = await claimTriageWithLogging(log, feedbackId, claimReserver, { mergedSubjects: () => feedbackHome.destination === undefined ? mergedTriageSubjects(repoDir) : [],
       landedStatus: (id) => readLandedFeedbackEntry(repoDir, id)?.status });
     if (!triageClaim.proceed) {
       say(`REFUSED — ${triageClaim.reason}`);
       worktreeRemove(repoDir, worktreePath);
       return 2;
+    }
+
+    // Both first publication and recovery converge on the unchanged gate below. Recovery must
+    // not mint again, respawn an Architect or fabricate a WorkerResult to reach that gate.
+    let publicationOutcome: { prUrl: string; decision: Extract<TriageDecision, { action: "propose" }>; proposalTaskPath?: string };
+    triagePublication: {
+    if (publication !== undefined) {
+      if (feedbackHome.destination === undefined || publication.feedbackDigest !== createHash("sha256").update(JSON.stringify(entry)).digest("hex")) {
+        throw new Error("triage publication feedback changed; refusing a second task");
+      }
+      const prUrl = await finishPrivateTriagePublication(publication, receiptPath, feedbackId, taskId, config, summarizeDeps, log, say);
+      publicationOutcome = { prUrl, decision: { action: "propose", status: "proposed", detail: "resume the existing public task", files: [publication.taskPath] }, proposalTaskPath: publication.taskPath };
+      break triagePublication;
     }
 
     // ID MINT (the 2/2 collision evidence: W1-T256->257 #770, W1-T260->261 #775; lineage
@@ -35188,7 +35336,8 @@ async function triageCommandLocked(
     const loop = await runRelintLoop<{ decision: ReturnType<typeof decideTriage>; changedFiles: string[] }>({
       lane: "triage",
       filedIds: reservedIds,
-      initialPrompt: triagePrompt(entry, runId, reservedHeadTaskId, reservedIds.slice(1), triageFeedbackBlock),
+      initialPrompt: triagePrompt(entry, runId, reservedHeadTaskId, reservedIds.slice(1), triageFeedbackBlock)
+        + (feedbackHome.destination === undefined ? "" : "\nThis feedback is host-private. Never create or copy its file in this public worktree. A proposal adds exactly one new public task file, with origin: feedback#" + feedbackId + "."),
       log,
       run: async (prompt, attempt, previous) => {
         worker = await spawn({
@@ -35314,7 +35463,7 @@ async function triageCommandLocked(
     // feedback landing pull request and opens no pull request of its own.
     if (decision.action === "no_task" || decision.action === "grill") {
       return landTriageStatusOutcome({ worktreePath, repoDir, feedbackId, entry, decision, grillIssueUrl,
-        repository: `${owner}/${repo}`, threadStorePath: inboxThreadStorePath(config.root), log, say });
+        repository: `${owner}/${repo}`, threadStorePath: inboxThreadStorePath(config.root), stateRoot: join(config.root, "state"), log, say });
     }
 
     // ID-COLLISION GUARD (W1-T236 triple-mint, 2026-07-22): refuse a proposal whose merged plan
@@ -35360,6 +35509,28 @@ async function triageCommandLocked(
         source_history: mint.historyMax,
         degraded: mint.degraded.map((d) => d.source),
       });
+    }
+
+    if (feedbackHome.destination !== undefined) {
+      if (changedFiles.length !== 1 || !/^plan\/tasks\.d\/W[0-9]+-T[0-9]+-[^/]+\.yaml$/.test(changedFiles[0])) {
+        throw new Error("private-feedback triage must add only one new public task file");
+      }
+      const taskPath = changedFiles[0];
+      const tasks = parseYaml(readFileSync(join(worktreePath, taskPath), "utf8")) as Array<{ id: string; origin: string }>;
+      if (!Array.isArray(tasks) || tasks.length !== 1 || !reservedIds.includes(tasks[0].id) || tasks[0].origin !== `feedback#${feedbackId}`
+        || hostWorktreeGitResult(worktreePath, ["cat-file", "-e", `origin/main:${taskPath}`]).status === 0) {
+        throw new Error("private-feedback task must be new and bind its reserved id and feedback origin");
+      }
+      const message = triageCommitMessage({ decision, feedbackId, taskId, proposalTaskPath: taskPath, proposalTaskId: tasks[0].id });
+      await applyPlanProposalCommitAsync(worktreePath, message, log);
+      publication = { version: 1, repository: `${owner}/${repo}`, feedbackId, feedbackDigest: createHash("sha256").update(JSON.stringify(entry)).digest("hex"),
+        branch, worktreePath, commit: hostWorktreeGit(worktreePath, ["rev-parse", "HEAD"]).trim(), taskPath, stage: "task_committed" };
+      writeAtomic(receiptPath, JSON.stringify(publication), { mode: 0o600 });
+      triagePushed = pushedBranchIds(worktreePath, log);
+      const prUrl = await finishPrivateTriagePublication(publication, receiptPath, feedbackId, taskId, config, summarizeDeps, log, say);
+      triagePushed = pushedBranchIds(worktreePath, log);
+      publicationOutcome = { prUrl, decision, proposalTaskPath: taskPath };
+      break triagePublication;
     }
 
     // Harness-owned deterministic status write (never LLM-authored) — folded into the SAME diff
@@ -35442,6 +35613,10 @@ async function triageCommandLocked(
       await gitPushRunBranchAsync(worktreePath);
     }
 
+    publicationOutcome = { prUrl, decision };
+    }
+    const { prUrl, decision, proposalTaskPath } = publicationOutcome;
+
     // DETERMINISTIC GUARD: a triage PR is PLAN-ONLY. Fail closed if the diff touches anything
     // outside plan/ (lib/triage.ts's `nonPlanFilesInDiff`, the same shape as retro's guard).
     const diff = ghExec(["pr", "diff", prUrl], { encoding: "utf8", maxBuffer: 1 << 26 });
@@ -35452,13 +35627,13 @@ async function triageCommandLocked(
       worktreeRemove(repoDir, worktreePath);
       return 1;
     }
-    if (decision.action === "propose" && !diffCitesFeedback(diff, feedbackId)) {
+    if (decision.action === "propose" && !diffCitesFeedback(diff, feedbackId, proposalTaskPath)) {
       log("triage.error", { error: "proposed diff missing feedback# provenance" });
       say(`triage PROPOSED but the diff never cites feedback#${feedbackId} — leaving PR OPEN for inspection`);
       worktreeRemove(repoDir, worktreePath);
       return 1;
     }
-    log("pr.opened", { pr_url: prUrl, plan_only: true, action: decision.action });
+    if (proposalTaskPath === undefined) log("pr.opened", { pr_url: prUrl, plan_only: true, action: decision.action });
     say(`triage PR (plan-only, ${decision.action}): ${prUrl}`);
     // Publication ownership, plan-only scope and feedback provenance were verified above.
     // Acknowledging intake ends the ask; it does not claim CI, merge or work completion.
@@ -35504,7 +35679,7 @@ async function triageCommandLocked(
     log("triage.error", { error: String((e as Error)?.message ?? e) });
     triageEnding = `errored: ${String((e as Error)?.message ?? e).slice(0, 160)}`;
     try {
-      worktreeRemove(repoDir, worktreePath);
+      if (publication === undefined) worktreeRemove(repoDir, worktreePath);
     } catch {
       /* best-effort */
     }
