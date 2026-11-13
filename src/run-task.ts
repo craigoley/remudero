@@ -18633,10 +18633,11 @@ function buildPublicPlanReconcileInput(deps: PlanReconcileProductionInputOptions
   }
 }
 
-/** Apply only a queued status scalar, preserving every other byte, including multi-task YAML. */
-function mergedCatalogStatusBytes(text: string, taskIds: ReadonlySet<string>): string {
+/** Flip queued status scalars, preserving the catalog bytes except for a proof marker on ambiguous monolith lines. */
+function mergedCatalogStatusBytes(text: string, taskIds: ReadonlySet<string>, monolithic = false): string {
   const document = parseDocument(text);
   if (document.errors.length || !isSeq(document.contents)) throw new Error("ops-status-source-malformed");
+  const sourceLines = monolithic ? new Set(text.split("\n")) : undefined;
   const edits: Array<{ start: number; end: number; text: string }> = [];
   const seen = new Set<string>();
   for (const item of document.contents.items) {
@@ -18650,7 +18651,18 @@ function mergedCatalogStatusBytes(text: string, taskIds: ReadonlySet<string>): s
     const value: unknown = status.value;
     if (value !== "queued") throw new Error("ops-status-source-changed");
     const [start, end] = status.range, old = text.slice(start, end);
-    const replacement = old.startsWith('"') ? '"merged"' : old.startsWith("'") ? "'merged'" : "merged";
+    let replacement = old.startsWith('"') ? '"merged"' : old.startsWith("'") ? "'merged'" : "merged";
+    if (monolithic) {
+      // A proof for `status: merged` is ambiguous when another row already has that value. Add a
+      // YAML comment only in that collision case; it keeps the task value unchanged and gives the
+      // landing PR a line that exists only in its candidate tree.
+      const lineStart = text.lastIndexOf("\n", start - 1) + 1;
+      const newline = text.indexOf("\n", end);
+      const lineEnd = newline < 0 ? text.length : newline;
+      const before = text.slice(lineStart, start), after = text.slice(end, lineEnd);
+      const candidate = before + replacement + after;
+      if (sourceLines?.has(candidate)) replacement += ` # plan-reconcile ${id}`;
+    }
     edits.push({ start, end, text: replacement }); seen.add(id);
   }
   if (seen.size !== taskIds.size) throw new Error("ops-status-source-missing-task");
@@ -18753,7 +18765,8 @@ async function buildCatalogPlanReconcileInput(deps: CatalogPlanReconcileProducti
           const batch = takePlanReconcileBatch(landable, write => taskPaths.get(write.taskId)!);
           const byPath = new Map<string, Set<string>>();
           for (const write of batch) { const path = taskPaths.get(write.taskId)!; const ids = byPath.get(path) ?? new Set<string>(); ids.add(write.taskId); byPath.set(path, ids); }
-          const inputs = [...byPath].map(([relPath, ids]) => ({ relPath, content: mergedCatalogStatusBytes(sources.get(relPath)!, ids) }));
+          const inputs = [...byPath].map(([relPath, ids]) => ({ relPath,
+            content: mergedCatalogStatusBytes(sources.get(relPath)!, ids, relPath === "plan/tasks.yaml") }));
           if (inputs.length) {
             opsLanding.land(inputs); retainSettlement(opsLanding.settled()); landed += batch.length;
           }

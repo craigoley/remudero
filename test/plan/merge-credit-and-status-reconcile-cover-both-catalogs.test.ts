@@ -9,8 +9,11 @@ import { withGhShim, type GhShimRoute } from "#test/helpers/gh-shim.js";
 import { parseTasksFromYaml, type Plan, type Task } from "#src/lib/plan.js";
 import { deriveStatus, type GitHub } from "#src/lib/status.js";
 import { planReconcileCadence } from "#src/lib/measurement-cadence.js";
+import { landPlanReconcileShardsAsync, type PlanReconcileLand } from "#src/lib/feedback-landing.js";
+import { planPrPreflightAtCommitAsync, type PlanPrPreflightAsyncChecks } from "#src/lib/plan-pr-emitter.js";
+import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
 import type { OpsCatalogApi } from "#src/lib/ops-catalog-source.js";
-import type { PlanReconcileLand } from "#src/lib/feedback-landing.js";
 import { PLAN_RECONCILE_LANDING_FILE_LIMIT } from "#src/lib/plan-reconcile-batch.js";
 
 const git = (cwd: string, ...args: string[]) => execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8" }).trim();
@@ -134,6 +137,43 @@ test("an inline ops catalog changes only its queued status scalars", async t => 
   assert.deepEqual(ops.paths, ["plan/tasks.yaml"]);
   assert.deepEqual(ops.contents, [before.replaceAll("status: 'queued'", "status: 'merged'")]);
   assert.ok(f.calls.filter(call => call.root === f.publicRoot).every(call => call.contents.every(text => !text.includes("PRIVATE_COMMENT"))));
+});
+test("a mixed-status inline catalog passes the real ops landing preflight", async t => {
+  const f = fixture(t, true, false, false, root => {
+    for (const id of opsIds) git(root, "rm", "plan/tasks.d/" + id + ".yaml");
+    writeFileSync(join(root, "plan", "tasks.yaml"), opsIds.map((id, index) =>
+      shard(id).replace("status: queued", index === 0 ? "status: 'merged'" : "status: 'queued'")).join("\n"));
+  });
+  const original = f.options.land, preflights: Array<{ body: string; ok: boolean }> = [];
+  const green = async () => ({ status: 0, output: "fixture check passed" });
+  const checks: PlanPrPreflightAsyncChecks = { lintPlan: green, taskIdExistence: green, shardCensus: green };
+  const ghAsync = async (args: string[]) => {
+    if (args[0] === "pr" && args[1] === "list") return "[]";
+    if (args[0] === "pr" && args[1] === "create") return "https://github.com/fixture-private/ops/pull/900100\n";
+    throw new Error(`unexpected gh call: ${JSON.stringify(args)}`);
+  };
+  f.options.land = async (root, inputs, opts) => {
+    original(root, inputs, opts); // retain the production-composition observations for both catalogs
+    if (root !== f.opsRoot) return { landed: true, files: inputs.map(input => input.relPath) };
+    return withLiveWritesAllowed(() => landPlanReconcileShardsAsync(root, inputs, {
+      ...opts,
+      ghAsync,
+      planPrPreflight: async (sha, pr) => {
+        const verdict = await planPrPreflightAtCommitAsync(root, sha,
+          { ...pr, codeRoot: REPO_ROOT, bodyProofRoot: "plan" }, checks);
+        preflights.push({ body: pr.body, ok: verdict.ok });
+        return verdict;
+      },
+    }));
+  };
+
+  const input = await buildPlanReconcileProductionInput(f.options); assert.ok(input);
+  const report = planReconcileCadence(input); await input.settled();
+  assert.equal(report.drift, 19);
+  assert.equal(preflights.length, 1);
+  assert.equal(preflights[0]!.ok, true, preflights[0]!.body);
+  assert.match(preflights[0]!.body, /status: 'merged' # plan-reconcile W1-T900101/);
+  assert.equal(f.calls.filter(call => call.root === f.opsRoot).length, 1);
 });
 test("a checkout ahead of the pinned ops main keeps ops status reconciliation based on that pin", async t => {
   const f = fixture(t);
