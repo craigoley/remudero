@@ -2,13 +2,14 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { EventEmitter } from "node:events";
+import { createRequire } from "node:module";
 import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { performance } from "node:perf_hooks";
 import { PassThrough } from "node:stream";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import type { Worker } from "node:worker_threads";
 import {
   clearCodexCapacityCache,
@@ -18,6 +19,7 @@ import {
 } from "#src/lib/worker-provider.js";
 import type { Config } from "#src/lib/config.js";
 import type { CapabilityLadder } from "#src/lib/mounts.js";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 type RpcRequest = { id?: number; method?: string };
 type FakeIo = { stdout: PassThrough; stderr: PassThrough; proc: EventEmitter };
@@ -657,6 +659,19 @@ test("an isolated Codex probe reports a worker construction failure", async () =
   assert.ok("provider" in result);
   assert.equal(result.readable, false);
   assert.match(result.detail ?? "", /worker failed to start: worker constructor failed/);
+});
+
+test("an isolated Codex probe preloads the harness's own tsx loader, never a cwd-resolved bare specifier", async () => {
+  const probe = Object.assign(new EventEmitter(), { terminate: async () => 0 });
+  let execArgv: string[] | undefined;
+  const pending = readCodexRuntimeOffThread(config("/tmp"), "/unused", 100, (_url, options) => {
+    execArgv = options?.execArgv;
+    return probe as unknown as Worker;
+  });
+  probe.emit("message", { rateLimits: {}, models: [] });
+  await pending;
+  // W1-T12516: a bare `tsx` resolves from the target checkout's cwd, which may carry no tsx at all.
+  assert.deepEqual(execArgv, ["--import", pathToFileURL(createRequire(join(REPO_ROOT, "package.json")).resolve("tsx")).href]);
 });
 
 test("an isolated Codex probe rejects malformed worker replies and reports cleanup failure", async (t) => {
