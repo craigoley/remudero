@@ -30,7 +30,12 @@ import { cashDeploymentTarget } from "../../lib/config-schema.js";
 import { ledgerPathFor } from "../../lib/ledger-path.js";
 import { daemonCrashSentinel, escalateCrashLoop, escalateDiskHeadroomBreach, escalateHeadroomParkCeiling, escalateHeadroomReserve, escalateQuotaExhaustion, escalateReplayStranded, escalateStarvation, escalateStarvationCleared } from "../../lib/escalation-catalogue.js";
 import { lostWorkerProviders, resolveProviderRoutingPolicy, type EffectiveProviderRoutingPolicy } from "../../lib/provider-routing-policy.js";
-import { OPENWEIGHT_PRICES } from "../../lib/worker-provider.js";
+import {
+  FOUNDRY_CLAUDE_API_KEY_ENV,
+  FOUNDRY_CLAUDE_ENDPOINT_ENV,
+  FOUNDRY_CLAUDE_PRICES,
+  OPENWEIGHT_PRICES,
+} from "../../lib/worker-provider.js";
 import { writeProviderRoutingStatus, type ProviderRoutingWriteInput } from "../../lib/provider-routing-status.js";
 import { readFileIfExists } from "../../lib/fs-race-safe.js";
 import { mergedInLastDayAsync } from "../../lib/fleet-lane.js";
@@ -196,6 +201,58 @@ async function reachableCashDeployments(config: Config): Promise<{ deployments: 
       errors.add(`cash deployment ${name}: ${reason}`);
     }
   }));
+
+  // Foundry Claude has a separate Anthropic protocol endpoint and credential pair. Its supported
+  // deployments never appear in the OpenAI-compatible mounts or account catalog, so probe them
+  // with an empty messages list (validation only, no completion or charge).
+  const foundryEndpoint = process.env[FOUNDRY_CLAUDE_ENDPOINT_ENV];
+  const foundryKey = process.env[FOUNDRY_CLAUDE_API_KEY_ENV];
+  if (foundryEndpoint || foundryKey) {
+    if (!foundryEndpoint || !foundryKey) {
+      errors.add(`Foundry Claude cash requires both ${FOUNDRY_CLAUDE_ENDPOINT_ENV} and ${FOUNDRY_CLAUDE_API_KEY_ENV}`);
+    } else {
+      try {
+        const base = new URL(foundryEndpoint);
+        if (base.protocol !== "https:" || base.pathname.replace(/\/$/, "") !== "/anthropic" || base.search || base.hash) {
+          throw new Error("Foundry Claude requires an HTTPS /anthropic base endpoint");
+        }
+        const url = new URL("v1/messages", `${base.toString().replace(/\/$/, "")}/`);
+        const probeFoundry = async (model: string) => {
+          const response = await fetch(url, {
+            method: "POST",
+            headers: { "content-type": "application/json", "x-api-key": foundryKey, "anthropic-version": "2023-06-01" },
+            body: JSON.stringify({ model, messages: [], max_tokens: 1 }),
+            signal,
+          });
+          const payload = await response.json() as { error?: { code?: string; type?: string; message?: string } };
+          return { status: response.status, error: payload.error };
+        };
+        const control = await probeFoundry(`rmd-absent-${randomUUID()}`);
+        const controlConfirmsAbsence = control.status === 404 &&
+          (control.error?.code === "DeploymentNotFound" || control.error?.type === "not_found_error");
+        for (const name of Object.keys(FOUNDRY_CLAUDE_PRICES).sort()) {
+          try {
+            if (!controlConfirmsAbsence) {
+              throw new Error("Foundry account cannot distinguish an absent deployment from request validation");
+            }
+            const reply = await probeFoundry(name);
+            if (reply.status === 404 && (reply.error?.code === "DeploymentNotFound" || reply.error?.type === "not_found_error")) continue;
+            if (reply.status === 400 && /messages/i.test(reply.error?.message ?? "")) {
+              deployments.push(name);
+              continue;
+            }
+            throw new Error(`Foundry deployment check returned HTTP ${reply.status} (${reply.error?.code ?? reply.error?.type ?? "unknown error"})`);
+          } catch (error) {
+            const reason = String(error);
+            errors.add(`Foundry Claude deployment ${name}: ${reason}`);
+          }
+        }
+      } catch (error) {
+        const reason = String(error);
+        errors.add(`Foundry Claude endpoint: ${reason}`);
+      }
+    }
+  }
   return { deployments: deployments.sort(), errors: [...errors].sort() };
 }
 

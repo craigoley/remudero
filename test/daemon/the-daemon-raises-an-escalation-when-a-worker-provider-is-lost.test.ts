@@ -10,6 +10,7 @@ import { resolveProviderRoutingPolicy } from "#src/lib/provider-routing-policy.j
 import { configPath, type Config } from "#src/lib/config.js";
 import { validateConfigShape } from "#src/lib/config-schema.js";
 import { readCashModelCatalog } from "#src/lib/model-availability.js";
+import { FOUNDRY_CLAUDE_API_KEY_ENV, FOUNDRY_CLAUDE_ENDPOINT_ENV, FOUNDRY_CLAUDE_PRICES } from "#src/lib/worker-provider.js";
 import type { Escalation } from "#src/lib/escalate.js";
 import { appendLedger } from "#src/lib/ledger.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
@@ -285,6 +286,41 @@ test("a validation response also returned for absent deployments is not reachabi
   assert.match(String(f.rows().at(-1)?.cash_read_error), /cannot distinguish an absent deployment/);
   assert.deepEqual(f.rows().at(-1)?.cash_deployments, []);
   assert.equal(f.alerts.length, 0);
+});
+
+test("Foundry Claude deployments are probed through the Anthropic adapter and losses escalate", async (t) => {
+  const f = fixture(t);
+  const names = Object.keys(FOUNDRY_CLAUDE_PRICES).sort();
+  const missing = new Set<string>();
+  t.mock.property(process, "env", { ...process.env,
+    [FOUNDRY_CLAUDE_API_KEY_ENV]: "fixture-foundry-key",
+    [FOUNDRY_CLAUDE_ENDPOINT_ENV]: "https://fixture.foundry.azure.com/anthropic" });
+  t.mock.method(globalThis, "fetch", async (url: string | URL | Request, init?: RequestInit) => {
+    assert.equal(String(url), "https://fixture.foundry.azure.com/anthropic/v1/messages");
+    assert.equal(init?.method, "POST");
+    assert.deepEqual(init?.headers, { "content-type": "application/json", "x-api-key": "fixture-foundry-key",
+      "anthropic-version": "2023-06-01" });
+    assert.ok(init?.signal instanceof AbortSignal);
+    const body = JSON.parse(String(init?.body)) as { model: string; messages: unknown[]; max_tokens: number };
+    assert.deepEqual(body.messages, []);
+    assert.equal(body.max_tokens, 1);
+    if (body.model.startsWith("rmd-absent-") || missing.has(body.model)) {
+      return Response.json({ type: "error", error: { type: "not_found_error", message: "model not found" } }, { status: 404 });
+    }
+    return Response.json({ type: "error", error: { type: "invalid_request_error", message: "messages must not be empty" } }, { status: 400 });
+  });
+  const config = { workerProviders: { enabled: ["claude", "cash"] as ("claude" | "cash")[] } };
+  await f.start(config);
+  assert.deepEqual(f.rows().at(-1)?.cash_deployments, names);
+  assert.equal(f.rows().at(-1)?.cash_read, "readable");
+  missing.add("claude-sonnet-5-5");
+  const previous = f.rows().at(-1)?.ts;
+  await f.start(config);
+  assert.equal(f.rows().at(-1)?.cash_read, "readable");
+  assert.equal(f.alerts.length, 1);
+  assert.ok(f.alerts[0].detail.includes("cash:claude-sonnet-5-5"));
+  assert.ok(f.alerts[0].detail.includes(String(previous)));
+  assert.doesNotMatch(f.alerts[0].summary, /claude-haiku-5-5|claude-opus-5-5/);
 });
 
 test("missing cash credentials and ambiguous deployment replies stay diagnostic", async (t) => {
