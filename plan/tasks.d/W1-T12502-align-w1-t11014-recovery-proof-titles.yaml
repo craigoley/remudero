@@ -1,0 +1,28 @@
+- id: W1-T12502
+  title: "Align W1-T11014 recovery test titles with their acceptance proofs"
+  repo: remudero
+  depends_on: [W1-T11014]
+  type: implement
+  verify: auto
+  risk: low
+  priority: 1.2
+  status: queued
+  attempts: 0
+  origin: "operator follow-up to PR #18227: acceptance proofs name two recovery tests by title"
+  files:
+    - test/triage/fix-lane-no-edit-refusal-recovery.test.ts
+  acceptance:
+    - claim: "The no-edit recovery and other-refusal tests preserve their behavior through title changes"
+      kind: guard
+      proof: "unit test: test/triage/fix-lane-no-edit-refusal-recovery.test.ts"
+    - claim: "the unchanged-recovery title carries its W1-T12502 criterion marker"
+      proof: "grep: W1-T12502 criterion 1: in test/triage/fix-lane-no-edit-refusal-recovery.test.ts"
+    - claim: "the non-matching-refusal title carries its W1-T12502 criterion marker"
+      proof: "grep: W1-T12502 criterion 2: in test/triage/fix-lane-no-edit-refusal-recovery.test.ts"
+  design: |
+    NO-INVARIANTS: this follow-up changes test-title metadata only; it does not change runtime behavior.
+  rationale: |
+    PR #18295 added title-specific proofs for W1-T11014's two recovery invariants. Prefix the two existing
+    test titles with this task's criterion markers while retaining the W1-T11014 criterion text so the
+    original acceptance proofs continue to resolve. This follow-up is limited to one test file and title
+    text. The operator assessed this bounded change as low risk and requested automatic verification.
