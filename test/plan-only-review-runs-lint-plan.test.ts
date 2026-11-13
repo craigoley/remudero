@@ -75,7 +75,7 @@ const PORTAL_T27 = `- id: PORTAL-T27
   files: [instrumentation.ts, app/api/errors/route.ts, app/error.tsx, app/global-error.tsx]
   status: queued
   rationale: "Operator ruling 2026-09-23: no paid APM. The public site had no error reporting at all."
-  design: "Server: instrumentation.ts onRequestError posts to core. Client: app/error.tsx and app/global-error.tsx post to POST /api/errors."
+  design: "NO-INVARIANTS: synthetic lint fixture with no inherited behavior to preserve\\nServer: instrumentation.ts onRequestError posts to core. Client: app/error.tsx and app/global-error.tsx post to POST /api/errors."
   acceptance:
     - claim: "a server error reaches the incident ingest with its route pattern and deploy sha"
       proof: "grep: a server error reaches the incident ingest with its route pattern and deploy sha in tests/unit/site-errors-reach-the-sre-gardener.test.ts"
@@ -103,7 +103,7 @@ const CLEAN_FILING = `- id: PORTAL-T90
   files: [app/footer.tsx, tests/unit/footer.test.ts]
   status: queued
   rationale: "An operator cannot tell which deploy is serving."
-  design: "Render VERCEL_GIT_COMMIT_SHA's first seven characters in the footer."
+  design: "NO-INVARIANTS: synthetic lint fixture with no inherited behavior to preserve\\nRender VERCEL_GIT_COMMIT_SHA's first seven characters in the footer."
   acceptance:
     - claim: "the footer renders the deploy sha"
       proof: "grep: the footer renders the deploy sha in tests/unit/footer.test.ts"

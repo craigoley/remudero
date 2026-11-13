@@ -20,7 +20,7 @@ const CHILD_TIMEOUT_MS = 240_000;
 function taskYaml(id: string, note: string, opts: { depends?: string[]; files?: string[]; proof?: string } = {}): string {
   return [
     `- id: ${id}`, `  title: "plan apart fixture ${id}"`, "  repo: remudero",
-    `  depends_on: [${(opts.depends ?? []).join(", ")}]`, "  type: implement", "  verify: auto", "  priority: 1",
+    `  depends_on: [${(opts.depends ?? []).join(", ")}]`, "  type: implement", "  design: |", "    NO-INVARIANTS: synthetic lint fixture with no inherited behavior to preserve", "  verify: auto", "  priority: 1",
     "  risk: low", "  status: queued", "  attempts: 0", "  budget_usd: 1", '  origin: "test-fixture:plan-apart"',
     `  files: [${(opts.files ?? ["src/lib/held.ts"]).join(", ")}]`, `  note: ${JSON.stringify(note)}`,
     "  acceptance:", '    - claim: "the fixture proof is resolvable"',
