@@ -157,7 +157,7 @@ function supervisorFixture(t: { after(fn: () => void): void }) {
 const fs = require('node:fs'), cp = require('node:child_process');
 const args = process.argv.slice(2);
 fs.appendFileSync(process.env.FIXTURE_CALLS, JSON.stringify({bin:'rmd', args}) + '\\n');
-if (args[0] !== 'deploy-run') { console.log('{"state":"HEALTHY","action":"none"}'); process.exit(0); }
+if (args[0] !== 'deploy-run') { console.log('{"state":"PROGRESSING","action":"none"}'); process.exit(0); }
 const r = cp.spawnSync(process.execPath, ['--import', ${JSON.stringify(join(REPO_ROOT, "node_modules/tsx/dist/loader.mjs"))},
   ${JSON.stringify(join(REPO_ROOT, "src/run-task.ts"))}, ...args, '--repo-root', ${JSON.stringify(join(f.state, "daemon-install"))}],
   {stdio:'inherit', env:process.env});
