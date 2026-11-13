@@ -36,7 +36,7 @@ const result = (text: string): WorkerResult => ({
   tokens: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 }, modelUsage: {}, compactionEvents: [], qualitySuspect: false,
 });
 
-async function runFixture(t: TestContext, catalog: "ops" | "public", mode: "reported" | "created" = "reported", acceptance: readonly AcceptanceCriterion[] = criteria, refusal?: "ownership" | "normalization" | "slow-write") {
+async function runFixture(t: TestContext, catalog: "ops" | "public", mode: "reported" | "created" = "reported", acceptance: readonly AcceptanceCriterion[] = criteria, refusal?: "ownership" | "normalization" | "slow-write" | "target" | "body" | "race") {
   const root = gitRepo({ scope: t }), origin = gitRepo({ bare: true, scope: t }), seed = gitRepo({ scope: t });
   mkdirSync(join(seed.dir, "plan")); writeFileSync(join(seed.dir, "plan", "tasks.yaml"), catalog === "public" ? yaml(acceptance) : "[]\n");
   seed.git("add", "plan"); seed.git("commit", "--quiet", "-m", "test: seed the actual public plan");
@@ -48,8 +48,11 @@ async function runFixture(t: TestContext, catalog: "ops" | "public", mode: "repo
   mkdirSync(join(root.dir, "state"), { recursive: true });
   if (catalog === "ops") writeFileSync(join(root.dir, "state", "plan-destination.json"), JSON.stringify({ repository: "fixture-private/ops", kinds: [] }));
   const now = Date.now(); t.mock.method(Date, "now", () => now);
-  const branch = `run-${ID}-${now}`, url = "https://github.com/craigoley/remudero/pull/7";
+  const branch = `run-${ID}-${now}`, url = refusal === "target"
+    ? "https://github.com/different-owner/remudero/pull/7" : "https://github.com/craigoley/remudero/pull/7";
   const body = `Worker prose to preserve for a public task. ${PRIVATE.join(" ")}\n\nAcceptance:\n- old criterion | grep: old in src/fixture.ts\n\nRemudero-Task: ${ID}`;
+  const bodyFile = join(root.dir, "public-pr-body.json");
+  writeFileSync(bodyFile, JSON.stringify({ body }));
   const text = yaml(acceptance), hash = (s: string) => createHash("sha1").update(s).digest("hex");
   const commit = hash(text), tree = hash(commit + "root"), plan = hash(commit + "plan"), blob = hash(`blob ${Buffer.byteLength(text)}\0${text}`);
   const base = "repos/fixture-private/ops";
@@ -68,7 +71,8 @@ async function runFixture(t: TestContext, catalog: "ops" | "public", mode: "repo
     { when: "pulls?", stdout: "[]" },
     { when: "--method POST repos/", stdout: JSON.stringify({ html_url: url, number: 7 }) },
     { when: "PATCH repos/", stdout: "{}", delaySeconds: refusal === "slow-write" ? 1 : 0, exit: refusal === "normalization" ? 1 : 0, stderr: refusal === "normalization" ? "fixture normalization refused" : "" },
-    { when: "--json body", stdout: JSON.stringify({ body }) },
+    { when: "--json body", ...(refusal === "race"
+      ? { stdoutFile: bodyFile, delaySeconds: 1 } : { stdout: JSON.stringify({ body: refusal === "body" ? null : body }) }) },
     { when: "pr view", stdout: JSON.stringify({ headRefName: refusal === "ownership" ? "run-W1-T900009-other" : branch, body, number: 7 }) },
     { when: "/pulls/7", stdout: JSON.stringify({ number: 7, state: "open", merged: false, head: { sha: "c".repeat(40) } }) },
     { when: "/check-runs", stdout: JSON.stringify({ check_runs: [{ name: "ci", status: "queued" }] }) },
@@ -82,6 +86,10 @@ async function runFixture(t: TestContext, catalog: "ops" | "public", mode: "repo
     if (events.some(start => start.phase === "start" && start.args.includes("PATCH")
       && !events.some(end => end.phase === "end" && end.id === start.id))) asyncPatchObserved = true;
   }, 5) : undefined;
+  const raceTimer = refusal === "race" ? setInterval(() => {
+    const starts = gh.events().filter(event => event.phase === "start" && event.args.includes("--json") && event.args.includes("body"));
+    if (starts.length >= 2) writeFileSync(bodyFile, JSON.stringify({ body: "another owner changed this body" }));
+  }, 5) : undefined;
   process.env.PATH = `${gh.dir}:${priorPath}`; mkdirSync(join(root.dir, "hooks")); process.env.RMD_HARNESS_HOOKS_DIR = join(root.dir, "hooks");
   t.after(() => {
     try {
@@ -89,10 +97,11 @@ async function runFixture(t: TestContext, catalog: "ops" | "public", mode: "repo
         const writes = gh.events().filter(event => event.phase === "start" && event.args[0] === "api"
           && event.args.some(arg => ["POST", "PATCH", "PUT", "DELETE"].includes(arg)));
         assert.equal(writes.some(event => event.args.includes("POST") || event.args.includes("DELETE")), false);
-        assert.equal(writes.length, refusal === "ownership" ? 0 : 1);
+        assert.equal(writes.length, refusal === "normalization" || refusal === "slow-write" ? 1 : 0);
       }
     } finally {
       if (patchTimer !== undefined) clearInterval(patchTimer);
+      if (raceTimer !== undefined) clearInterval(raceTimer);
       process.env.PATH = priorPath;
       if (priorHooks === undefined) delete process.env.RMD_HARNESS_HOOKS_DIR; else process.env.RMD_HARNESS_HOOKS_DIR = priorHooks;
       rmSync(gh.dir, { recursive: true, force: true });
@@ -302,4 +311,11 @@ test("a refused ops body normalization ends the real run before another public p
 test("the real ops publication write keeps the event loop responsive while its child is in flight", async t => {
   const f = await runFixture(t, "ops", "reported", criteria, "slow-write");
   assert.equal(f.asyncPatchObserved, true, "a timer ran between the controlled PATCH child start and end");
+});
+
+test("the async ops normalizer refuses mismatched identity, unreadable body and a real changed reread", async t => {
+  for (const refusal of ["target", "body", "race"] as const) await t.test(refusal, async t => {
+    await assert.rejects(runFixture(t, "ops", "reported", criteria, refusal),
+      refusal === "race" ? /ops public PR normalization refused \(raced\)/ : /ops public PR normalization refused \(error\)/);
+  });
 });
