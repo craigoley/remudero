@@ -35,6 +35,10 @@
     - test/the-offline-plan-lint-names-its-omissions.test.ts
     - test/triage-remote-reservation-timing.test.ts
     - test/a-status-flip-is-not-a-task-edit.test.ts
+    - test/a-lane-releases-the-reserved-ids-it-never-filed.test.ts
+    - test/fixtures/live-plan-writers/status-flip/tasks.d/STATUS-FLIP-A-pure-flip.yaml
+    - test/fixtures/live-plan-writers/status-flip/tasks.d/STATUS-FLIP-B-flip-plus-edit.yaml
+    - test/fixtures/live-plan-writers/status-flip/tasks.d/STATUS-FLIP-C-open-flip.yaml
     - test/ci/parity/a-ci-dependency-receipt-never-becomes-production-credit.test.ts
     - test/base-lint-attributes-pre-existing-violations.test.ts
     - test/run-task.test.ts
@@ -63,6 +67,9 @@
     TEST-ONLY OVERLAP with W1-T11225: this task changes the invariant lint rule and adds explicit NO-INVARIANTS
     declarations to synthetic implementation records in affected lint and plan fixtures, including W1-T11225's.
     Those test edits preserve the fixtures' existing purpose; the other tests' product behavior stays out of scope.
+    Latest hosted coverage identified three committed status-flip shard fixtures and one lane-release synthetic plan
+    task that also require explicit NO-INVARIANTS reasons. This expansion remains test-only and leaves those suites'
+    behavior and acceptance meaning unchanged.
     W1-T9366 shares test/run-task.test.ts for a comment-load ceiling assertion; this task adds only invariant declarations
     to the synthetic plan tasks in that suite, while W1-T9366's comment-load behavior remains unchanged.
     Settled by lookup: may files: grow to cover the three synthetic-fixture tests that regressed in exact-head
@@ -75,6 +82,9 @@
     NO-INVARIANTS reasons; this preserves the lint rule and each test's existing purpose without changing production
     behavior or acceptance meaning. The CLI integration assertion moves into the already-scoped lint-plan-fast test
     so the new test does not increase run-task's importer count beyond its existing ceiling.
+    2026-11-12, operator-approved test-only expansion after hosted coverage surfaced additional synthetic records:
+    add the three status-flip shards and lane-release fixture suite so every synthetic implementation task in scope
+    declares NO-INVARIANTS with a reason; no production behavior or acceptance criteria change.
   design: |
     1. In an implementation task's design, authors declare each behavior-preservation or intentional-compatibility
        contract as INVARIANT <slug>: <statement>. When source behavior is entirely new, they explicitly write
