@@ -842,6 +842,7 @@ import {
 // src/lib/report-commands.ts (W1-T2888); ghTraceGateway has a second caller here and stays.
 import { ghTraceGateway } from "./lib/trace.js";
 import { checkCommitMessage, defaultPreflightSpawn, fitConventionalTitle, runPreflight, shapeCommitMessage, wrapBodyLines, type PreflightDeps, type PreflightSpawn } from "./lib/commit-message.js";
+import { planFilingFixRoundRefusal, readPlanFilingFixRoundInput } from "./lib/plan-filing-fix-guard.js";
 import { resolveProjectPreflight, runProjectPreflight } from "./lib/ci-project-preflight.js";
 import { observeSynchronousPreflightPhase, reportPreflightPhase } from "./lib/preflight-phase-progress.js";
 import {
@@ -6101,6 +6102,9 @@ async function runPlanScopedConflictRound(input: PlanScopedFixRoundInput): Promi
     }
     git(["commit", "-m", `Merge branch 'main' into ${pr.headRefName}`]);
     const sha = git(["rev-parse", "HEAD"]).trim();
+    const filingRefusal = planFilingFixRoundRefusal(await readPlanFilingFixRoundInput(
+      input.task.files, pr.headSha, sha, git));
+    if (filingRefusal) return refuse(filingRefusal);
     const verdict = await preflight(worktreePath, sha, metadata);
     if (!verdict.ok || verdict.unreadable.length || verdict.timedOut) return refuse((verdict.failures[0] ?? verdict.unreadable[0] ?? verdict.timedOut?.[0])!.firstLine, verdict);
     if (metadata.title !== input.title || metadata.body !== input.body) await deps.updateMetadata(metadata);
@@ -6198,6 +6202,9 @@ export async function runPlanScopedFixRound(input: PlanScopedFixRoundInput): Pro
       git(["commit", "-m", message, ...(filedTask ? ["-m", `Remudero-Task: ${input.task.id}`] : [])]);
       sha = git(["rev-parse", "HEAD"]).trim();
     } else if (metadata.title === input.title && metadata.body === input.body) return refuse("the worker changed nothing");
+    const filingRefusal = planFilingFixRoundRefusal(await readPlanFilingFixRoundInput(
+      files, pr.headSha, sha, git));
+    if (filingRefusal) return refuse(filingRefusal);
     const verdict = await preflight(worktreePath, sha, metadata);
     // A check that ran out of its budget has no verdict, so it holds the push like an unreadable one.
     if (!verdict.ok || verdict.unreadable.length || verdict.timedOut) return refuse((verdict.failures[0] ?? verdict.unreadable[0] ?? verdict.timedOut?.[0])!.firstLine, verdict);
