@@ -5,15 +5,13 @@
 // acted:true `sweep.disposed` row before `dispatchFix` settles, and a throw before `fix.dispatch` was
 // swallowed by `detachSweepAction`; W1-T1127's acted:false path never fired, and `prior.fixed` deduped
 // the head with no worker. A detached rejection now writes `sweep.fix.dispatch_failed`, which voids the
-// dedup by W1-T5919's rule, and FIX_DISPATCH_FAILED_BACKSTOP failures on one head escalate once.
+// dedup by W1-T5919's rule, and repeated failures are paced and judged.
 import assert from "node:assert/strict";
 import { after, test } from "node:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  FIX_CLAIM_DECLINE_BACKSTOP,
-  FIX_DISPATCH_FAILED_BACKSTOP,
   drainDetachedSweepActions,
   runSweep,
   type OpenPrView,
@@ -23,8 +21,8 @@ import { DECISION_RELEVANT_LEDGER_STEPS } from "#src/lib/ledger.js";
 import { readLedgerLines } from "#src/lib/status.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
-const NOW = Date.parse("2026-10-05T23:00:00Z");
-const RECENT = "2026-10-05T22:00:00Z";
+const NOW = Date.now();
+const RECENT = new Date(NOW - 60 * 60_000).toISOString();
 const PR = 9379;
 const TASK = "W1-T5882";
 const HEAD = "9c0fa1b0aa";
@@ -75,7 +73,7 @@ function disposed(head: string, extra: Record<string, unknown> = {}): Record<str
 }
 
 function failed(head: string, error = ERROR): Record<string, unknown> {
-  return { step: FAILED_STEP, task_id: TASK, pr_number: PR, head_sha: head, error };
+  return { step: FAILED_STEP, task_id: TASK, pr_number: PR, head_sha: head, error, ts: new Date(NOW - 1_000_000).toISOString() };
 }
 
 function decline(head: string): Record<string, unknown> {
@@ -84,6 +82,7 @@ function decline(head: string): Record<string, unknown> {
     task_id: TASK,
     reason: "registered_worktree_owner",
     owner_recovery_reason: "owner_remove_failed",
+    ts: new Date(NOW - 1_000_000).toISOString(),
     pr_number: PR,
     head_sha: head,
   };
@@ -159,8 +158,12 @@ test("a detached fix dispatch that rejects before fix.dispatch writes sweep.fix.
     assert.equal(failures[0].task_id, TASK);
     assert.equal(failures[0].error, ERROR);
 
-    const second = await pass(pr, [], { ledgerPath: first.ledgerPath });
-    assert.equal(second.dispatched, 1, "the next pass retries instead of deduping");
+    const waiting = await pass(pr, [], { ledgerPath: first.ledgerPath });
+    assert.equal(waiting.dispatched, 0, "the first failure waits one sweep pass");
+    assert.equal(waiting.row.dispatch_held, "fix_dispatch_failed");
+    const second = await pass(pr, [], { ledgerPath: first.ledgerPath,
+      now: () => Date.parse(String(waiting.row.next_retry_at)) });
+    assert.equal(second.dispatched, 1, JSON.stringify(second.row));
     assert.doesNotMatch(String(second.row.stand_down_reason), DEDUPED);
     assert.deepEqual(second.escalations, []);
   }
@@ -188,42 +191,31 @@ test("a real fix.dispatch at that head still dedups, whatever order the failure 
   assert.match(String(legacy.row.stand_down_reason), DEDUPED);
 });
 
-test("FIX_DISPATCH_FAILED_BACKSTOP failures on one head stop the retries and escalate once, naming the error", async () => {
-  assert.ok(Number.isInteger(FIX_DISPATCH_FAILED_BACKSTOP) && FIX_DISPATCH_FAILED_BACKSTOP >= 2);
-  const failures = (n: number, head = HEAD) => Array.from({ length: n }, () => [disposed(head), failed(head)]).flat();
-
-  const below = await pass(view(), failures(FIX_DISPATCH_FAILED_BACKSTOP - 1));
-  assert.equal(below.dispatched, 1, "below the bound the dispatch is retried");
-  assert.deepEqual(below.escalations, []);
-
+test("a failed retry escalates once only when its cause judge says escalate", async () => {
   for (const pr of [view(), conflictedView()]) {
-    const seed = failures(FIX_DISPATCH_FAILED_BACKSTOP);
-    const at = await pass(pr, seed);
-    assert.equal(at.dispatched, 0, "at the bound no further dispatch is attempted");
+    const seed = [failed(HEAD), { ...failed(HEAD), ts: new Date(NOW).toISOString() }];
+    const fixProgressJudge: SweepDeps["fixProgressJudge"] = async () => ({ verdict: "escalate", loop: "launch", reason: "launch is broken" });
+    const at = await pass(pr, seed, { fixProgressJudge });
+    assert.equal(at.dispatched, 0);
     assert.equal(at.escalations.length, 1);
-    for (const named of [`#${PR}`, HEAD.slice(0, 7), ERROR, "FIX_DISPATCH_FAILED_BACKSTOP", String(FIX_DISPATCH_FAILED_BACKSTOP)]) {
-      assert.ok(at.escalations[0].includes(named), `the escalation names ${named}: ${at.escalations[0]}`);
-    }
-    assert.equal(at.row.acted, false);
+    for (const named of [`#${PR}`, HEAD.slice(0, 7), ERROR, "judge escalate"]) assert.ok(at.escalations[0].includes(named));
+    assert.equal(at.row.judge_verdict, "escalate");
     assert.equal(at.row.fix_dispatch_failed_escalated, true);
-    assert.doesNotMatch(String(at.row.stand_down_reason), DEDUPED);
-
-    const again = await pass(pr, seed, { ledgerPath: at.ledgerPath });
-    assert.equal(again.escalations.length, 0, "the escalation is written once per (PR, head)");
+    const again = await pass(pr, seed, { ledgerPath: at.ledgerPath, fixProgressJudge });
+    assert.equal(again.escalations.length, 0);
     assert.equal(again.dispatched, 0);
-    assert.equal(again.row.fix_dispatch_failed_escalated, true);
   }
 });
 
-test("a new head resets the failure count and re-earns its own escalation", async () => {
-  const old = Array.from({ length: FIX_DISPATCH_FAILED_BACKSTOP }, () => [disposed(HEAD), failed(HEAD)]).flat();
+test("a new head starts without the previous head's cause hold", async () => {
+  const old = Array.from({ length: 3 }, () => [disposed(HEAD), failed(HEAD)]).flat();
   const escalated = disposed(HEAD, { acted: false, fix_dispatch_failed_escalated: true });
   const next = await pass(view({ headSha: NEW_HEAD }), [...old, escalated]);
   assert.equal(next.dispatched, 1, "the new head's first dispatch is attempted");
   assert.deepEqual(next.escalations, []);
 });
 
-test("a dispatch failure and a W1-T5919 claim decline void the dedup by one rule and keep separate bounds", async () => {
+test("a dispatch failure and a W1-T5919 claim decline void the dedup by one rule and keep their recorded causes", async () => {
   // A decline written before its acted:true row voids it too, as the failure row does.
   const earlyDecline = await pass(view(), [decline(HEAD), disposed(HEAD)]);
   assert.equal(earlyDecline.dispatched, 1);
@@ -231,20 +223,18 @@ test("a dispatch failure and a W1-T5919 claim decline void the dedup by one rule
   assert.equal(declineThenReal.dispatched, 0);
 
   // Below each bound, a mix of both still retries and escalates nothing.
-  const mixed = Array.from({ length: Math.min(FIX_CLAIM_DECLINE_BACKSTOP, FIX_DISPATCH_FAILED_BACKSTOP) - 1 }, () => [
+  const mixed = Array.from({ length: Math.min(3) - 1 }, () => [
     disposed(HEAD), decline(HEAD), disposed(HEAD), failed(HEAD),
   ]).flat();
   const both = await pass(view(), mixed);
   assert.equal(both.dispatched, 1);
   assert.deepEqual(both.escalations, []);
 
-  // The decline bound keeps its own escalation and wording.
-  const declines = Array.from({ length: FIX_CLAIM_DECLINE_BACKSTOP }, () => [disposed(HEAD), decline(HEAD)]).flat();
+  // A legacy decline without an owner path is paced, never escalated by a count.
+  const declines = Array.from({ length: 3 }, () => [disposed(HEAD), decline(HEAD)]).flat();
   const declined = await pass(view(), declines);
-  assert.equal(declined.dispatched, 0);
-  assert.equal(declined.escalations.length, 1);
-  assert.match(declined.escalations[0], /FIX_CLAIM_DECLINE_BACKSTOP/);
-  assert.equal(declined.row.fix_dispatch_failed_escalated, undefined);
+  assert.equal(declined.dispatched, 1);
+  assert.deepEqual(declined.escalations, []);
 });
 
 test("the dispatch-failed row is retained across ledger rotation", () => {
@@ -252,23 +242,21 @@ test("the dispatch-failed row is retained across ledger rotation", () => {
 });
 
 test("a fleet-wide PAUSE refusal never counts toward the dispatch-failure backstop", async () => {
-  // LIVE 2026-10-30: #15679 (W1-T9796, head 0a66a11) hit FIX_DISPATCH_FAILED_BACKSTOP on three refusals reading
+  // LIVE 2026-10-30: #15679 (W1-T9796, head 0a66a11) hit 3 on three refusals reading
   // "PAUSE: cannot reach origin to read refs/rmd-pause/hold". The hold lifts only on a new head, and only a
   // dispatch makes one, so the PR was stranded for two days (issue #15885, 43 appends). A fleet hold is no PR's fault.
   const pause = [
     "cannot reach origin to read refs/rmd-pause/hold — holding rather than dispatching optimistically (an unreachable remote is never read as clear)",
     "PAUSE held on refs/rmd-pause/hold — set by pid 4242@vm at 2026-10-30T17:50:00Z; actor: operator — run `rmd resume --fleet` to clear",
   ];
-  const held = Array.from({ length: FIX_DISPATCH_FAILED_BACKSTOP }, (_, n) => [disposed(HEAD), failed(HEAD, pause[n % 2])]).flat();
+  const held = Array.from({ length: 3 }, (_, n) => [disposed(HEAD), failed(HEAD, pause[n % 2])]).flat();
   const after = await pass(view(), held);
   assert.equal(after.dispatched, 1, "the PR is dispatched once the fleet hold clears");
   assert.deepEqual(after.escalations, []);
   assert.notEqual(after.row.fix_dispatch_failed_escalated, true);
-  // Real failures still count, and a fleet refusal between them neither adds to nor resets the count.
-  const real = Array.from({ length: FIX_DISPATCH_FAILED_BACKSTOP }, () => [disposed(HEAD), failed(HEAD), failed(HEAD, pause[0])]).flat();
-  const stopped = await pass(view(), real);
-  assert.equal(stopped.dispatched, 0);
-  assert.equal(stopped.escalations.length, 1);
-  assert.ok(stopped.escalations[0].includes(`failed before fix.dispatch ${FIX_DISPATCH_FAILED_BACKSTOP} times`), stopped.escalations[0]);
-  assert.ok(stopped.escalations[0].includes(ERROR), "the escalation names the PR's own failure, not the fleet hold");
+  // A cleared fleet cause supersedes earlier dispatch failures at the same head.
+  const real = Array.from({ length: 3 }, () => [disposed(HEAD), failed(HEAD), failed(HEAD, pause[0])]).flat();
+  const resumed = await pass(view(), real);
+  assert.equal(resumed.dispatched, 1);
+  assert.deepEqual(resumed.escalations, []);
 });
