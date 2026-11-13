@@ -27,6 +27,7 @@
     - test/fix-dedup-seed.test.ts
     - test/reviews-and-detached-actions-run-as-run-children.test.ts
     - test/a-dead-dirty-fix-owner-at-the-current-head-is-reclaimed.test.ts
+    - test/worker/spawn/a-review-re-admitted-after-an-unable-reviewer-avoids-that-provider.test.ts
   status: queued
   attempts: 0
   acceptance:
