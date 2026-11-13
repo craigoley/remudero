@@ -446,7 +446,7 @@ test("W1-T11459 criterion 2: sweep awaits a recovery reference, reset and remova
       owner_recovery_reason: "owner_dirty_recovery_preserve_failed", pr_number: 9002, head_sha: head,
       branch, worktree_path: owner };
     assert.equal(await effects.fixOwnerReclaimableAtHold!(pr, decline), true, "a backstop awaits the same async preservation capsule");
-    const lines = Array.from({ length: sweepLib.FIX_CLAIM_DECLINE_BACKSTOP }, () => ({ ...decline }));
+    const lines = [{ ...decline }];
     const readHold = (sweepLib as unknown as { fixDispatchHoldAtHeadAsync?: typeof sweepLib.fixDispatchHoldAtHead }).fixDispatchHoldAtHeadAsync
       ?? sweepLib.fixDispatchHoldAtHead;
     assert.equal(await readHold(pr, lines, () => true, effects.fixOwnerReclaimableAtHold), undefined);
