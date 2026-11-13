@@ -3974,7 +3974,8 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
       // detached or belongs to another task. That is useful for dirty-tree recovery decisions,
       // but `process_cwd_owner` is a liveness cause: branch attachment cannot make a live owner
       // disappear or keep a dead one alive. Probe its claim and cwd directly in that case.
-      if (!failed && decline.owner_recovery_reason === "process_cwd_owner") {
+      if (!failed && (decline.owner_recovery_reason === "process_cwd_owner" ||
+        decline.owner_recovery_reason === "live_branch_claim")) {
         const lockPath = inflightLockPath(inflightDir, fixBranchClaimKey(owner, repo, branch));
         let claimClear = false;
         try {

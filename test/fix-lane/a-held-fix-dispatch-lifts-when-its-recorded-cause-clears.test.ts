@@ -160,10 +160,14 @@ test("a production owner probe releases a recorded process owner when its claim 
     assert.equal(fixDispatchHoldAtHead(pr, [owner], () => true, built.fixOwnerReclaimableAtHold, options()), undefined,
       "a changed owner branch cannot hide a cleared claim and process cause");
     assert.equal(censusCalls, 4, "liveness is re-probed even when attachment changed");
+    const branchClaim = { ...owner, owner_recovery_reason: "live_branch_claim" };
+    assert.equal(fixDispatchHoldAtHead(pr, [branchClaim], () => true, built.fixOwnerReclaimableAtHold, options()), undefined,
+      "a changed owner branch cannot hide a cleared live branch claim");
+    assert.equal(censusCalls, 5, "a live-branch claim uses the same attachment-independent liveness probe");
     censusThrows = true;
     assert.equal(fixDispatchHoldAtHead(pr, [owner], () => true, built.fixOwnerReclaimableAtHold, options())?.fields.probe_result,
       "present", "an unreadable detached-owner census keeps the cause held");
-    assert.equal(censusCalls, 5);
+    assert.equal(censusCalls, 6);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
