@@ -19,8 +19,8 @@ const labels = Object.values(experiment.arms) as string[];
 const tasks = (arm: string, count: number) => Array.from({ length: 10000 }, (_, i) => `W1-T${i + 1}`)
   .filter(task => experimentArmForTask(experiment, task).arm === arm).slice(0, count);
 
-function assignment(task: string, id: string, served = "codex"): Row {
-  return { ts, task_id: task, step: "worker.assignment", worker_assignment: { id,
+function assignment(task: string, id: string, served = "codex", at = ts): Row {
+  return { ts: at, task_id: task, step: "worker.assignment", worker_assignment: { id,
     selected: { provider: served }, routing: { decision: { ab: experiment.id },
       experiment: { assignedArm: "deliberately-wrong" } } } };
 }
@@ -31,16 +31,23 @@ function outcome(task: string, id: string, pipeline: string, success: boolean, e
     state: success ? "success" : "failure", total_cost_usd: 2, worker_duration_ms: 60000, ...extra };
 }
 function cohort(count: number, different: boolean): Row[] {
-  return labels.flatMap((arm, armIndex) => tasks(arm, count).flatMap(task => [assignment(task, task),
-    outcome(task, task, "build", different ? armIndex === 0 : true)]));
+  return labels.flatMap((arm, armIndex) => tasks(arm, count).flatMap(task => {
+    const merged = different ? armIndex === 0 : true;
+    return [assignment(task, task), outcome(task, task, "build", merged,
+      merged ? { selection_assignment_id: undefined, run_id: `sweep-${task}` } : {})];
+  }));
 }
 
 test("W1-T12142 criterion 1: assigned arms keep build, fix and review outcomes separate", () => {
   const task = tasks(labels[0]!, 1)[0]!;
-  const rows = [assignment(task, "build"), assignment(task, "fix"), assignment(task, "review"), assignment(task, "pending"),
-    outcome(task, "build", "build", true), outcome(task, "fix", "fix", true), outcome(task, "review", "review", false),
-    outcome("W1-T99999", "pending", "build", true), outcome(task, "unknown", "build", true),
-    { ...outcome(task, "pending", "build", true), selection_assignment_id: undefined }];
+  const rows = [assignment(task, "build", "codex", `${today}T10:00:00.000Z`),
+    assignment(task, "fix", "codex", `${today}T10:01:00.000Z`),
+    assignment(task, "review", "codex", `${today}T10:02:00.000Z`),
+    outcome(task, "build", "build", true, { selection_assignment_id: undefined, run_id: "sweep-build", ts: `${today}T10:00:30.000Z` }),
+    outcome(task, "fix", "fix", true, { ts: `${today}T10:01:30.000Z` }),
+    outcome(task, "review", "review", false,
+      { selection_assignment_id: undefined, evaluator_provenance: { selectionAssignmentId: "review" }, ts: `${today}T10:02:30.000Z` }),
+    outcome("W1-T99999", "shared", "build", true), outcome(task, "unknown", "build", true)];
   const result = evaluateRoutingExperimentResult(rows, experiment, today);
   const arm = result.arms.find(item => item.arm === labels[0])!;
   assert.equal(arm.tasks, 1);
@@ -52,7 +59,7 @@ test("W1-T12142 criterion 1: assigned arms keep build, fix and review outcomes s
     assert.equal(pipeline.medianCostUsd, 2);
     assert.equal(pipeline.medianDurationMs, 60000);
   }
-  assert.equal(result.assignmentsWithoutOutcome, 1);
+  assert.equal(result.assignmentsWithoutOutcome, 0);
   assert.equal(result.crossoverShare, labels[0] === experiment.arms.codex ? 0 : 1);
   assert.equal(result.arms.find(item => item.arm === labels[1])!.tasks, 0);
   assert.deepEqual(evaluateRoutingExperimentResult([...rows].reverse(), experiment, today), result);
@@ -107,7 +114,7 @@ test("W1-T12142 criterion 4: results run, conclude or stop underpowered using di
   const worse = new Set(tasks(labels[1]!, 30).slice(0, 18));
   for (const row of moderate) {
     if (row.step === "verdict.merged" && worse.has(String(row.task_id))) {
-      row.step = "verdict"; row.verdict = "failed";
+      row.step = "verdict"; row.verdict = "failed"; row.selection_assignment_id = row.task_id;
     }
   }
   assert.equal(evaluateRoutingExperimentResult(moderate, experiment, today).winner, labels[0]);

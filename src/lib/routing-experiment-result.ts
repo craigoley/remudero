@@ -114,6 +114,10 @@ function terminal(row: Row): { pipeline: Pipeline; positive: number } | undefine
   return undefined;
 }
 
+function terminalAssignmentId(row: Row): string {
+  return text(row.selection_assignment_id) || text(object(row.evaluator_provenance).selectionAssignmentId);
+}
+
 /** ITT estimates: each task has equal weight; retries remain inside its bootstrap cluster. */
 export function evaluateRoutingExperimentResult(input: Iterable<Row>, experiment: RoutingExperiment, today: string): RoutingExperimentResult {
   const requiredTasksPerArm = requiredRoutingTasksPerArm(experiment);
@@ -134,10 +138,31 @@ export function evaluateRoutingExperimentResult(input: Iterable<Row>, experiment
     assignments.set(id, { task, arm: experimentArmForTask(experiment, task).arm,
       served: experiment.arms[provider] ?? provider, ts: text(row.ts) });
   }
+  const taskAssignments = new Map<string, Array<[string, { task: string; arm: string; served: string; ts: string }]>>();
+  for (const entry of assignments) {
+    const group = taskAssignments.get(entry[1].task) ?? [];
+    group.push(entry);
+    taskAssignments.set(entry[1].task, group);
+  }
   const outcomes = new Map<string, { pipeline: Pipeline; positive: number; row: Row }>();
   const receipts = new Map<string, Row>();
   for (const row of rows) {
-    const id = text(row.selection_assignment_id), assignment = assignments.get(id);
+    let id = terminalAssignmentId(row);
+    let assignment = assignments.get(id);
+    // Sweep merge credit is task-level by design and carries no selection_assignment_id.
+    // Attach it to the latest experiment assignment for that task that predates the merge.
+    if (!assignment && row.step === "verdict.merged") {
+      const candidates = taskAssignments.get(text(row.task_id)) ?? [];
+      const mergedAt = text(row.ts);
+      let low = 0, high = candidates.length;
+      while (low < high) {
+        const mid = Math.floor((low + high) / 2);
+        if (candidates[mid]![1].ts <= mergedAt) low = mid + 1;
+        else high = mid;
+      }
+      const inferred = low > 0 ? candidates[low - 1] : undefined;
+      if (inferred) [id, assignment] = inferred;
+    }
     if (!assignment || row.task_id !== assignment.task || text(row.ts) < assignment.ts) continue;
     if (["worker.attempt", "worker.done", "verdict", "fix.done", "review.posted", "verdict.merged"].includes(text(row.step))) {
       const prior = receipts.get(id) ?? {};
