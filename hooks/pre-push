@@ -240,104 +240,10 @@ fi
 # WHEN a small subset runs, never WHETHER any of them do. `rmd census-membership` keeps its verb
 # and its purpose as a report an author can run by hand.
 
-# BEGIN census precheck — counts and the suites admitted after W1-T3225.
-# Three suites (clock-signature, comment-load, fixture-copy) cost a CI round each in one session,
-# because a census names none of a caller's symbols. scripts/census-precheck.mjs imports each one's
-# own counter, reads files and spawns git plus bounded TAP suite children. A head-failing suite
-# runs again in a detached merge-base worktree borrowing node_modules (W1-T5663). Only head-red,
-# base-green refuses; an unreadable base is not measured. Counts block only this branch's growth.
-if has census-precheck.mjs; then
-  if [ "$own_tree" -eq 1 ]; then
-    node "$gate_root/scripts/census-precheck.mjs" --base origin/main
-  else
-    # Counts and admission remain harness-owned; only the suite child crosses the sandbox boundary.
-    node ${tsx_loader:+--import "$tsx_loader"} -e '
-      const { pathToFileURL } = require("node:url");
-      const at = (p) => import(pathToFileURL(process.env.RMD_GATE_ROOT + p).href);
-      at("/scripts/census-precheck.mjs").then(async (m) => {
-        let runSuites = () => { throw new Error("they are the branch\x27s own test files and the host gate runs no worktree code (CI runs them)"); };
-        try {
-          const p = await at("/src/lib/git-push.ts");
-          // W1-T11285: a reader-calibrated suite is measured too. Its policy reaches runCensusSuitesViaChild, whose
-          // calibration and qualification runs each go through this same sandboxed child (with their own budget as
-          // the timeout); a sandbox that cannot start still throws below and reads skipped, NOT passed.
-          runSuites = ({ root, files, readerRuntimePolicy }) => {
-            try {
-              const run = p.createPrePushSandboxRunner(root);
-              return m.runCensusSuitesViaChild({ root, files, readerRuntimePolicy, run: (_file, _args, options) => run(process.execPath,
-                ["--test", "--test-reporter=tap", "--test-timeout=" + options.timeout, "--test-concurrency=1", "--import", "tsx", "--import", pathToFileURL(root + "/test/setup/tmp-hygiene.ts").href, ...files], options) });
-            } catch (e) {
-              console.error("pre-push: census-precheck — " + e.message + ": skipped, NOT passed (CI runs it)");
-              throw e;
-            }
-          };
-        } catch (e) {
-          console.error("pre-push: census-precheck sandbox runner unavailable: " + e.message + ": skipped, NOT passed");
-        }
-        process.exitCode = m.main(["--base", "origin/main"], { admitted: () => m.listAdmittedCensusMembers(process.env.RMD_GATE_ROOT), runSuites });
-      }, (e) => { console.error(String(e?.message ?? e)); process.exitCode = 2; });
-    '
-  fi
-  rc=$?
-  if [ "$rc" -eq 2 ]; then
-    echo "pre-push: census-precheck could not measure — not blocking on an unreadable check" >&2
-  elif [ "$rc" -ne 0 ]; then
-    fail=1
-  fi
-else
-  echo "pre-push: scripts/census-precheck.mjs absent — skipped, NOT passed" >&2
-fi
-# END census precheck
-
-# BEGIN lint-plan precheck (W1-T4901) — the plan lint CI runs on a changed shard, asked before the push.
-# MEASURED 2026-09-16..30: 14 of 55 single-shard test reds were the PR's own shard failing `lint-plan:fast`. The script
-# spawns that npm script's argv (offline, no test runner), abstains on a stale origin/main, and reports a
-# machine-filing-admission-only finding without blocking.
-if [ "$own_tree" -ne 1 ] && has lint-plan-precheck.mjs; then
-  node ${tsx_loader:+--import "$tsx_loader"} -e '
-    const { readFileSync } = require("node:fs");
-    const { pathToFileURL } = require("node:url");
-    const at = (p) => import(pathToFileURL(process.env.RMD_GATE_ROOT + p).href);
-    at("/src/lib/git-push.ts").then(async (p) => {
-        const [m, g] = await Promise.all([at("/scripts/lint-plan-precheck.mjs"), at("/scripts/lib/git.mjs")]);
-        const root = g.gitOrThrow(["rev-parse", "--show-toplevel"]);
-        const lint = m.lintArgvFromPackage(readFileSync(root + "/package.json", "utf8"));
-        if (!lint) throw new Error("package.json has no plain node lint-plan:fast script");
-        const fork = g.gitOrThrow(["merge-base", "HEAD", lint.base ?? "origin/main"]);
-        const run = p.createPrePushSandboxRunner(root);
-        const verdict = m.lintPlanPrecheckVerdict({
-          changedFiles: g.gitOrThrow(["diff", "--name-only", fork + "...HEAD"]).split("\n").filter(Boolean),
-          subjects: g.gitOrThrow(["log", "--format=%s", fork + "..HEAD"]).split("\n").filter(Boolean),
-          lint: () => {
-            const r = run(process.execPath, lint.args);
-            return { status: r.status, output: String(r.stdout ?? "") + "\n" + String(r.stderr ?? "") };
-          }
-        });
-        for (const line of verdict.lines) (verdict.exit === 0 && verdict.lines.length === 1 ? console.log : console.error)(line);
-        process.exitCode = verdict.exit;
-    }).catch((e) => {
-      console.error("pre-push: lint-plan-precheck runs the branch\x27s own package.json lint argv; the host gate runs no worktree code: " + e.message + ": skipped, NOT passed (CI runs it)");
-      process.exitCode = 2;
-    });
-  '
-  rc=$?
-  if [ "$rc" -eq 2 ]; then
-    echo "pre-push: lint-plan-precheck could not run the lint — not blocking on an unreadable check" >&2
-  elif [ "$rc" -ne 0 ]; then
-    fail=1
-  fi
-elif has lint-plan-precheck.mjs; then
-  node "$gate_root/scripts/lint-plan-precheck.mjs" --base origin/main
-  rc=$?
-  if [ "$rc" -eq 2 ]; then
-    echo "pre-push: lint-plan-precheck could not run the lint — not blocking on an unreadable check" >&2
-  elif [ "$rc" -ne 0 ]; then
-    fail=1
-  fi
-else
-  echo "pre-push: scripts/lint-plan-precheck.mjs absent — skipped, NOT passed" >&2
-fi
-# END lint-plan precheck
+# W1-T12510 — the census precheck and the lint-plan precheck (W1-T4901) left this hook. ci.yml runs
+# both on every pull request (ci-shard census suites, lint-plan job) and ci-gate requires them; the
+# hook copies often could not run and waited for no verdict. The author preflight keeps its census run.
+echo "pre-push: census suites and plan lint run in CI (ci.yml ci-shard and lint-plan, aggregated by ci-gate)" >&2
 
 # W1-T3388 — BEGIN head-identity admission (ADVISORY)
 # MEASURED 2026-09-16: head-identity-gate is a REQUIRED check that no local route ran, so two PRs
