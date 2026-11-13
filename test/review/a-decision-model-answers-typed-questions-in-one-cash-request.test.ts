@@ -24,6 +24,7 @@ import {
   openWeightDeploymentKnownAbsent,
   type OpenWeightAllowanceState,
 } from "#src/lib/worker-provider.js";
+import { readLedgerLines } from "#src/lib/status.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
 
@@ -94,9 +95,9 @@ function allowance(dir: string): OpenWeightAllowanceState | undefined {
   catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; }
 }
 
-function ledgerRows(dir: string): Array<Record<string, unknown>> {
-  return readFileSync(join(dir, "state", "ledger.ndjson"), "utf8").trim().split("\n").map((line) => JSON.parse(line))
-    .filter((row) => row.step === DECISION_ANSWERED_STEP);
+/** The decision_answered rows, read with the daemon's own ledger reader. */
+function answeredRows(dir: string): Array<Record<string, unknown>> {
+  return readLedgerLines(join(dir, "state", "ledger.ndjson")).filter((row) => row.step === DECISION_ANSWERED_STEP);
 }
 
 const answer = (row: DecisionAnsweredRow, name: string): DecisionAnswer => row.answers.find((a) => a.name === name)!;
@@ -320,7 +321,7 @@ test("W1-T12416 criterion 7: each request writes one decision.answered row with 
     fetchImpl: replying([], openAiReply(OPENAI_ANSWERS)) });
   const failed = await askDecisionModel(config, { role: "risk", candidate: microsoftCandidate, input: INPUT, questions: QUESTIONS, env,
     fetchImpl: replying([], json({ error: { code: "RateLimitReached" } }, 429)) });
-  const rows = ledgerRows(dir);
+  const rows = answeredRows(dir);
   assert.equal(rows.length, 3, "one row per request");
   const [first] = rows;
   for (const field of ["role", "input_digest", "candidate", "deployment", "served_model", "latency_ms", "reserved_usd", "settled_usd",
@@ -390,7 +391,7 @@ test("W1-T12416 criterion 8: rmd decisions probe sends one question set to a nam
   assert.ok(!out[0]!.includes(DEFAULT_KEY));
   const printed = JSON.parse(out[0]!);
   assert.deepEqual([printed.outcome, printed.reason, printed.candidate, printed.role], ["failed", "transport", declared.name, "risk"]);
-  const [written] = ledgerRows(dir);
+  const [written] = answeredRows(dir);
   assert.deepEqual(Object.fromEntries(Object.keys(printed).map((key) => [key, written![key]])), printed, "it prints the row it wrote");
   assert.ok(printed.reserved_usd > 0);
 
