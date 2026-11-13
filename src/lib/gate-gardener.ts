@@ -14,7 +14,9 @@ import { resolveRepoLayout } from "./repo-layout.js";
 import { defaultTestSlots, lowPriorityCommand, readHostLoad, testRunArgv, testRunConcurrency } from "./test-slot.js";
 import { machineShardLandingGuard, renderMachineShard } from "./machine-filing.js";
 import { loadPlan, loadPlanFromYaml, machineFilingAdmissionViolations, retirementHoldsOrigin, taskLandedArgs, newTestPath, loadPlanForLayout } from "./plan.js";
-import { hostWorktreeGit } from "./worktree-git.js";
+import { hostWorktreeGit, hostWorktreeGitAsync } from "./worktree-git.js";
+import { execFileLoopBounded } from "./loop-bounded-child.js";
+import { RMD_TMP_PREFIX } from "./tmp.js";
 import { loadPolicy } from "./policy.js";
 import { sameTestFile } from "./test-path-resolver.js";
 import { collectCiFailureCorpus, rollupAtSha, type CiFailurePair, type CorpusCommit } from "./ci-failure-corpus.js";
@@ -42,10 +44,13 @@ import { commentCompressionOrigin, nextCommentCompression, readGateFollowupOrigi
  * DEFUSE files a remedy for a fixture about to expire; that tally never measures it, so it is judged
  * by its PR's decision (W1-T5825). COMPRESS files priority-1 comment maintenance without
  * blocking the change that exposed it; its decision metric measures proposal acceptance.
+ * HEADROOM (W1-T12512) files one cleanup task for a refusing ratchet near its limit or raised on main.
  */
 
-export type GateGardenClass = "tighten" | "refresh" | "demote" | "defuse" | "false-positive" | "compress";
-export const GATE_GARDEN_CLASSES: readonly GateGardenClass[] = ["tighten", "refresh", "demote", "defuse", "false-positive", "compress"];
+export type GateGardenClass = "tighten" | "refresh" | "demote" | "defuse" | "false-positive" | "compress" | "headroom";
+export const GATE_GARDEN_CLASSES: readonly GateGardenClass[] = ["tighten", "refresh", "demote", "defuse", "false-positive", "compress", "headroom"];
+/** The classes that file a plan task through machine filing instead of editing a gate file. */
+const FOLLOW_UP_CLASSES: ReadonlySet<GateGardenClass> = new Set(["defuse", "false-positive", "compress", "headroom"]);
 export const DEFUSE_LEAD_DAYS = 21;
 
 export type GateRepairClass = "baseline-only" | "token-dodge" | "rename-dodge" | "off-subject" | "genuine";
@@ -560,7 +565,8 @@ export type GateEdit =
   | { kind: "demote"; gate: string; rationale: string }
   | { kind: "defuse"; finding: ExpiringFixture; leadDays: number; urgent: boolean; controlFailed?: boolean }
   | { kind: "false-positive"; rule: GateRepairRule; observation: GateRepairObservation; classification: GateRepairClass }
-  | { kind: "compress"; finding: CommentCompressionFinding };
+  | { kind: "compress"; finding: CommentCompressionFinding }
+  | { kind: "headroom"; finding: HeadroomFinding };
 
 export interface GateGardenAction extends GardenAction<GateGardenClass> {
   /** Repo-relative file the edit lands in. */
@@ -592,7 +598,8 @@ export interface GateProbes {
   fp?: { GATE_REPAIR_RULES: readonly GateRepairRule[] };
   ss: { listSourceFiles: (r: string) => string[]; countLines: (t: string) => number; evaluateSourceSizeRatchet: (c: Json, b: Json) => LedgerVerdict };
   cl: { listMeasuredFiles: (r: string) => string[]; countCommentLines: (t: string, p: string) => { comments: number }; evaluateCommentLoadRatchet: (c: Json, b: Json) => LedgerVerdict };
-  lb: { loadCorpus: (d: string) => unknown[]; computeActiveChars: (e: unknown[]) => { chars: number; activeCount: number } };
+  lb: { loadCorpus: (d: string) => unknown[]; loadShardEntries: (p: string) => unknown[]; computeActiveChars: (e: unknown[]) => { chars: number; activeCount: number } };
+  lf: { learningsSourceFiles: (d: string) => Array<{ filename: string }> };
   gm: { readGateLists: (t: string) => { required: Set<string> }; evaluateGateMonotonic: (b: unknown, h: unknown) => { ok: boolean; detail: string } };
   ef?: { MARGIN_DAYS: number; censusExpiringFixtures: (opts: { files: string[]; readFile: (path: string) => string; now: number; thresholdDays: number; marginDays: number }) => { reported: ExpiringFixture[] } };
 }
@@ -603,6 +610,7 @@ export async function loadGateProbes(root: string): Promise<GateProbes> {
     ss: await load("scripts/source-size-ratchet.mjs"),
     cl: await load("scripts/comment-load-ratchet.mjs"),
     lb: await load("scripts/learnings-budget-ratchet.mjs"),
+    lf: await load("scripts/lib/learnings-files.mjs"),
     gm: await load("scripts/gate-monotonic-check.mjs"),
     ef: await load("scripts/expiring-fixture-census.mjs"),
     fp: await load("scripts/census-precheck.mjs"),
@@ -681,6 +689,184 @@ export function commentCompressionCandidates(deps: GardenerDeps, probes: GatePro
 }
 
 /**
+ * W1-T12512 (scripts/fixture-copy-census.mjs, scripts/learnings-budget-ratchet.mjs, .jscpd.json): a ratchet with no
+ * headroom refuses pull requests one after another. HEADROOM files one cleanup task before that happens. It never
+ * edits a baseline or a ceiling; the task it files asks to lower the measured value.
+ */
+export const RATCHET_HEADROOM_SHARE = 0.1;
+export const HEADROOM_WINDOW_DAYS = 7;
+export const HEADROOM_EXACT_COUNT_BASELINES: Readonly<Record<string, string>> = {
+  "fixture-copy": "scripts/fixture-copy-baseline.json",
+  "deps-interface": "scripts/deps-interface-baseline.json",
+  "console-parity": "scripts/console-parity-baseline.json",
+};
+const JSCPD_TIMEOUT_MS = 300_000;
+
+export interface HeadroomFinding {
+  gate: string;
+  field: string;
+  /** The file that holds the limit. */
+  limitFile: string;
+  measured: number;
+  limit: number;
+  /** The commit on main that raised an exact-count row, and by how much. */
+  raised?: { commit: string; detail: string };
+  /** The files the cleanup works in. */
+  files: string[];
+}
+
+export const headroomOrigin = (f: Pick<HeadroomFinding, "gate" | "field" | "limit">): string => `headroom:${f.gate}:${f.field}:${Math.round(f.limit)}`;
+const nearLimit = (measured: number, limit: number): boolean => limit - measured <= limit * RATCHET_HEADROOM_SHARE;
+
+function learningsHeadroom(root: string, { lb, lf }: GateProbes): HeadroomFinding[] {
+  const limitFile = "scripts/learnings-budget-baseline.json";
+  if (!existsSync(join(root, limitFile))) return [];
+  const limit = readJson(join(root, limitFile)).hardCapChars;
+  if (typeof limit !== "number") return [];
+  const dir = resolveRepoLayout(root).learningsDir;
+  const measured = lb.computeActiveChars(lb.loadCorpus(dir)).chars;
+  if (!nearLimit(measured, limit)) return [];
+  const largest = lf.learningsSourceFiles(dir)
+    .map(({ filename }) => ({ file: relative(root, join(dir, filename)), chars: lb.computeActiveChars(lb.loadShardEntries(join(dir, filename))).chars }))
+    .sort((a, b) => b.chars - a.chars || a.file.localeCompare(b.file))[0];
+  return [{ gate: "learnings-budget", field: "hardCapChars", limitFile, measured, limit, files: largest ? [largest.file] : [] }];
+}
+
+/** The jscpd gate's own measurement: one run with the repo's config and a JSON report, awaited off the loop. */
+async function jscpdHeadroom(root: string): Promise<HeadroomFinding[]> {
+  const limitFile = ".jscpd.json";
+  if (!existsSync(join(root, limitFile))) return [];
+  const limit = readJson(join(root, limitFile)).threshold;
+  if (typeof limit !== "number") return [];
+  const out = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}jscpd-headroom-`));
+  try {
+    const bin = createRequire(import.meta.url).resolve("jscpd/run-jscpd.js");
+    const dirs = ["src", "scripts"].filter((d) => existsSync(join(root, d)));
+    const cmd = lowPriorityCommand(process.execPath, [bin, ...dirs, "--config", limitFile, "--reporters", "json", "--output", out, "--silent"]);
+    // jscpd exits non-zero over its threshold and still writes the report; only a missing report is a failure.
+    const exit = await execFileLoopBounded(cmd.file, cmd.args, { cwd: root, encoding: "utf8", timeout: JSCPD_TIMEOUT_MS, maxBuffer: 16 * 1024 * 1024 })
+      .then(() => "exit 0", (e: unknown) => String(e));
+    const reportPath = join(out, "jscpd-report.json");
+    if (!existsSync(reportPath)) throw new Error(`gate gardener: jscpd wrote no report (${exit})`);
+    const report = readJson(reportPath) as { statistics?: { total?: { percentage?: unknown } }; duplicates?: Array<{ lines?: number; firstFile?: { name?: string }; secondFile?: { name?: string } }> };
+    const measured = report.statistics?.total?.percentage;
+    if (typeof measured !== "number") throw new Error("gate gardener: the jscpd report has no total percentage");
+    if (!nearLimit(measured, limit)) return [];
+    const lines = new Map<string, number>();
+    for (const d of report.duplicates ?? []) {
+      for (const name of [d.firstFile?.name, d.secondFile?.name]) {
+        const file = name === undefined ? undefined : [...dirs.map((dir) => `${dir}/${name}`), name].find((p) => existsSync(join(root, p)));
+        if (file) lines.set(file, (lines.get(file) ?? 0) + (d.lines ?? 0));
+      }
+    }
+    const top = [...lines].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))[0]?.[0];
+    return [{ gate: "jscpd", field: "threshold", limitFile, measured: Math.round(measured * 100) / 100, limit, files: top ? [top] : [] }];
+  } finally {
+    rmSync(out, { recursive: true, force: true });
+  }
+}
+
+/**
+ * The rows each commit in `git log -p --unified=0` of one exact-count baseline raised, newest first. A raise
+ * counts only while it stands at `head`: a numeric row at least the raised value, or every added entry still listed.
+ */
+export function baselineRaises(log: string, head: Json): Array<{ commit: string; field: string; measured: number; detail: string }> {
+  const listField = Object.keys(head).find((k) => Array.isArray(head[k]));
+  const listed = new Set(listField ? (head[listField] as unknown[]).map(String) : []);
+  const raises: Array<{ commit: string; field: string; measured: number; detail: string }> = [];
+  for (const chunk of log.split(/^commit (?=[0-9a-f]{7,}$)/m).slice(1)) {
+    const commit = chunk.slice(0, chunk.indexOf("\n")).trim();
+    if (/^new file mode/m.test(chunk)) continue;
+    const rows = { "-": new Map<string, number>(), "+": new Map<string, number>() };
+    const entries = { "-": [] as string[], "+": [] as string[] };
+    for (const line of chunk.split("\n")) {
+      if (line.startsWith("---") || line.startsWith("+++")) continue;
+      const row = /^([-+])\s*"([^"]+)"\s*:\s*(-?\d+(?:\.\d+)?)\s*,?\s*$/.exec(line);
+      if (row) { rows[row[1] as "-" | "+"].set(row[2]!, Number(row[3])); continue; }
+      const entry = /^([-+])\s*"((?:\\.|[^"\\])*)"\s*,?\s*$/.exec(line);
+      if (entry) entries[entry[1] as "-" | "+"].push(entry[2]!);
+    }
+    for (const [field, to] of rows["+"]) {
+      const from = rows["-"].get(field), now = head[field];
+      if (from !== undefined && to > from && typeof now === "number" && now >= to) raises.push({ commit, field, measured: now, detail: `from ${from} to ${to}` });
+    }
+    const added = entries["+"].filter((e) => !entries["-"].includes(e));
+    if (listField && added.length > entries["-"].filter((e) => !entries["+"].includes(e)).length && added.every((e) => listed.has(e))) {
+      raises.push({ commit, field: listField, measured: listed.size, detail: `by adding ${added.join(", ")}` });
+    }
+  }
+  return raises;
+}
+
+async function raisedBaselines(root: string, sinceMs: number): Promise<HeadroomFinding[]> {
+  const findings: HeadroomFinding[] = [];
+  for (const [gate, limitFile] of Object.entries(HEADROOM_EXACT_COUNT_BASELINES)) {
+    if (!existsSync(join(root, limitFile))) continue;
+    const log = await hostWorktreeGitAsync(root, ["log", `--since=${fixedClock(sinceMs).iso()}`, "--format=commit %H", "-p", "--unified=0", "--no-color", "HEAD", "--", limitFile]);
+    const seen = new Set<string>();
+    for (const r of baselineRaises(log, readJson(join(root, limitFile)))) {
+      if (seen.has(r.field)) continue;
+      seen.add(r.field);
+      const changed = (await hostWorktreeGitAsync(root, ["show", "--format=", "--name-only", r.commit])).split("\n")
+        .filter((p) => p !== "" && !Object.values(HEADROOM_EXACT_COUNT_BASELINES).includes(p) && !p.startsWith("plan/") && existsSync(join(root, p)));
+      // One subject file keeps the filed task to one concern (the sizing lint); a fallen count is never refused.
+      findings.push({ gate, field: r.field, limitFile, measured: r.measured, limit: r.measured,
+        raised: { commit: r.commit.slice(0, 12), detail: r.detail }, files: changed.slice(0, 1) });
+    }
+  }
+  return findings;
+}
+
+/** HEADROOM: one finding per pass, the raised rows first and then the least headroom, never one an open task holds. */
+export async function headroomCandidates(deps: GardenerDeps, probes: GateProbes, sources: GateDefuseSources = {}): Promise<GateGardenAction[]> {
+  const now = (deps.clock ?? systemClock).now();
+  const findings = [...learningsHeadroom(deps.repoRoot, probes), ...await jscpdHeadroom(deps.repoRoot),
+    ...await raisedBaselines(deps.repoRoot, now - HEADROOM_WINDOW_DAYS * 86_400_000)];
+  if (findings.length === 0) return [];
+  const layout = resolveRepoLayout(deps.repoRoot);
+  if (!existsSync(layout.planMonolith)) throw new Error("ratchet headroom plan context is unreadable");
+  const held = new Set(sources.openOrigins?.() ?? []);
+  for (const task of loadPlanForLayout(layout).tasks) {
+    const open = (task.status !== "done" && task.status !== "merged" && !task.retirement) || retirementHoldsOrigin(task, () => false);
+    if (task.origin?.startsWith("headroom:") && open) held.add(task.origin);
+  }
+  const share = (f: HeadroomFinding): number => f.raised ? -1 : (f.limit - f.measured) / f.limit;
+  const finding = findings.filter((f) => {
+    if (!held.has(headroomOrigin(f))) return true;
+    deps.log("gate_garden.headroom_held", { origin: headroomOrigin(f) });
+    return false;
+  }).sort((a, b) => share(a) - share(b) || headroomOrigin(a).localeCompare(headroomOrigin(b)))[0];
+  if (!finding) return [];
+  return [{ class: "headroom", target: headroomOrigin(finding), file: finding.limitFile, edit: { kind: "headroom", finding },
+    reason: `${finding.gate} ${finding.field} measures ${finding.measured} against its limit ${finding.limit}${finding.raised ? `; ${finding.raised.commit} raised it ${finding.raised.detail}` : ""}.` }];
+}
+
+function headroomSlug(f: HeadroomFinding): string {
+  return `headroom-${f.gate}-${f.field}`.replace(/[^a-zA-Z0-9-]/g, "-");
+}
+
+export function renderHeadroomShard(f: HeadroomFinding, taskId: string) {
+  const subjects = f.files.length > 0 ? f.files : [f.limitFile];
+  // A test-file subject carries the regression itself; a second test file would be a second concern.
+  const testFile = subjects.find((file) => /^test\/.*\.test\.[mc]?[jt]s$/.test(file)) ?? newTestPath(headroomSlug(f), subjects, subjects[0]!);
+  const rendered = renderMachineShard({
+    taskId, title: `Lower the measured ${f.gate} ${f.field} below its limit of ${f.limit} before it refuses a pull request`,
+    origin: headroomOrigin(f), files: [...new Set([...subjects, testFile])],
+    acceptance: [{ claim: `The ${f.gate} ${f.field} measures below ${f.limit} and no limit, baseline or ceiling is raised.`,
+      proof: `unit test: ${taskId}: ${f.gate} ${f.field} has headroom under its limit` }],
+    rationale: [
+      `Measured ${f.measured} against the limit ${f.limit} (${f.field} in ${f.limitFile}).`,
+      f.raised ? `Commit ${f.raised.commit} on main raised it ${f.raised.detail} in the last ${HEADROOM_WINDOW_DAYS} days; the census refuses any growth past it.`
+        : `That is within ${RATCHET_HEADROOM_SHARE * 100}% of the limit, so the next growth is refused.`,
+      "Lower the measured value: remove what the gate counts in the named files.",
+      "Do not raise the limit, the baseline or the ceiling. The gate gardener edits no baseline for this class.",
+      `Add the regression in ${testFile}: run the gate's own counter on the tree and assert the value is below ${f.limit}.`,
+    ],
+  });
+  return { ...rendered, text: rendered.text.replace("  status: queued\n", "  priority: 1\n  status: queued\n") };
+}
+
+/**
  * W1-T6036: a field-name census is a CANDIDATE generator. Measured 2026-10-06, the widened census
  * named 22 `updated_at`/`updatedAt` rows that no threshold ages, so a finding is filed only when its
  * file passes at the control shift and fails shifted one day past the crossing. Anything else is
@@ -746,6 +932,7 @@ export function renderCommentCompressionShard(finding: CommentCompressionFinding
 }
 
 export function renderDefuseShard(action: GateGardenAction, taskId: string) {
+  if (action.edit.kind === "headroom") return renderHeadroomShard(action.edit.finding, taskId);
   if (action.edit.kind === "compress") return renderCommentCompressionShard(action.edit.finding, taskId);
   if (action.edit.kind !== "defuse") throw new Error("gate gardener: mixed defuse plan");
   const { finding: f, leadDays, urgent, controlFailed } = action.edit;
@@ -805,7 +992,8 @@ function applyDefuseActions(ws: GardenCheckout, actions: GateGardenAction[], dep
     const rendered = action.edit.kind === "false-positive" ? renderFalsePositiveShard(action, taskId) : renderDefuseShard(action, taskId);
     if (rendered.refused) throw new Error(`gate gardener: defuse shard refused (${rendered.refused})`);
     const stem = action.file.replace(/^test\//, "").replace(/\.test\.ts$/, "").replace(/[^a-zA-Z0-9-]/g, "-");
-    const path = join(resolveRepoLayout(ws.root).planDir, "tasks.d", `${taskId}-${action.edit.kind === "compress" ? commentCompressionSlug(action.file) : `${action.edit.kind}-${stem}`}.yaml`);
+    const slug = action.edit.kind === "compress" ? commentCompressionSlug(action.file) : action.edit.kind === "headroom" ? headroomSlug(action.edit.finding) : `${action.edit.kind}-${stem}`;
+    const path = join(resolveRepoLayout(ws.root).planDir, "tasks.d", `${taskId}-${slug}.yaml`);
     mkdirSync(join(path, ".."), { recursive: true });
     writeFileSync(path, rendered.text);
     paths.push(relative(ws.root, path));
@@ -818,6 +1006,7 @@ function applyDefuseActions(ws: GardenCheckout, actions: GateGardenAction[], dep
       if (a.edit.kind === "defuse") deps.log("gate_garden.defuse_filed", defuseEvidence(a.edit.finding, a.edit.leadDays));
       if (a.edit.kind === "false-positive") deps.log("gate.false_positive_filed", { gate: a.edit.rule.gate, recognizer: a.file, classification: a.edit.classification });
       if (a.edit.kind === "compress") deps.log("gate_garden.comment_compression_filed", { file: a.edit.finding.file, observed_comments: a.edit.finding.comments, priority: 1, origin: a.target });
+      if (a.edit.kind === "headroom") deps.log("gate_garden.headroom_filed", { origin: a.target, measured: a.edit.finding.measured, limit: a.edit.finding.limit, ...(a.edit.finding.raised ? { commit: a.edit.finding.raised.commit } : {}) });
     }
     return url;
   };
@@ -825,7 +1014,7 @@ function applyDefuseActions(ws: GardenCheckout, actions: GateGardenAction[], dep
     const out = land(opts) as GardenLandResult | Promise<GardenLandResult>;
     return out instanceof Promise ? out.then(filed) : filed(out);
   }) as GardenCheckout["land"];
-  const subject = actions[0]?.class === "false-positive" ? "gate recognizer" : actions[0]?.class === "compress" ? "comment compression" : "expiring fixture";
+  const subject = actions[0]?.class === "false-positive" ? "gate recognizer" : actions[0]?.class === "compress" ? "comment compression" : actions[0]?.class === "headroom" ? "ratchet headroom" : "expiring fixture";
   return { paths, title: `chore(plan): file ${actions.length} ${subject} remedy task(s)`, body: [
     "The gate gardener files measured maintenance follow-ups through normal machine-filing admission.", "", "## Acceptance",
     ...actions.flatMap((a, i) => [`- claim: ${a.target} has a machine-filed remedy`, `  proof: grep: ${a.target} in ${paths[i]}`]),
@@ -935,7 +1124,7 @@ export function applyGateActions(root: string, actions: GateGardenAction[], head
   for (const [file, list] of byFile) {
     let text = readFileSync(join(root, file), "utf8");
     for (const a of list) {
-      if (a.edit.kind === "defuse" || a.edit.kind === "false-positive" || a.edit.kind === "compress") throw new Error("follow-up actions require machine filing");
+      if (FOLLOW_UP_CLASSES.has(a.class) || a.edit.kind !== "row" && a.edit.kind !== "demote") throw new Error("follow-up actions require machine filing");
       text = a.edit.kind === "row" ? editBaselineRow(text, a.edit.key, a.edit.to) : demoteInCiGate(text, a.edit.gate, a.edit.rationale);
     }
     if (file === CI_GATE_YML) {
@@ -952,7 +1141,7 @@ export function applyGateActions(root: string, actions: GateGardenAction[], head
 }
 
 function prBody(actions: GateGardenAction[], heading: string): string {
-  const proofs = actions.flatMap((a) => a.edit.kind === "defuse" || a.edit.kind === "false-positive" || a.edit.kind === "compress" ? [] :
+  const proofs = actions.flatMap((a) => a.edit.kind !== "row" && a.edit.kind !== "demote" ? [] :
     a.edit.kind === "demote"
       ? [`- claim: ${a.edit.gate} is moved to ADVISORY with a reviewed rationale`, `  proof: grep: GATE_RATIONALE: "W1-T4116 gate gardener: ${a.edit.gate} refused 0 in ${CI_GATE_YML}`]
       : a.edit.to === null
@@ -986,7 +1175,7 @@ export function gateGardenSpec(deps: GardenerDeps, probes: GateProbes, sources: 
     landingRefusal: machineShardLandingGuard({ ...deps, admissionViolations: sources.admissionViolations }),
     classes: GATE_GARDEN_CLASSES,
     review: { demote: "demoting a required gate stops it blocking merges, which is a judgement call." },
-    decision: ["defuse", "compress"],
+    decision: ["defuse", "compress", "headroom"],
     cheapFingerprint: () => {
       const head = checkoutHeadStamp(deps.repoRoot, clock);
       const report = gateFireRatesPath(deps.stateDir);
@@ -1010,6 +1199,7 @@ export function gateGardenSpec(deps: GardenerDeps, probes: GateProbes, sources: 
         input = { ...sources, openOrigins: () => origins };
       }
       const inv = localInventory(input);
+      if (!existsSync(join(deps.stateDir, "GATE_OFF-headroom"))) inv.candidates.push(...await headroomCandidates(deps, probes, input));
       if (!falsePositiveOff()) {
         const repairs = await falsePositiveInventoryAsync(deps, probes, sources);
         inv.candidates.push(...repairs.actions);
@@ -1022,12 +1212,12 @@ export function gateGardenSpec(deps: GardenerDeps, probes: GateProbes, sources: 
     candidates: (inv) => inv.candidates,
     scorecard: (inv, plan) => ({ candidates: inv.candidates.length, tally: inv.tally, proposed: plan.actions.length }),
     prepare: (ws, plan, async) => {
-      const actions = plan.acting[0] === "defuse" || plan.acting[0] === "false-positive" || plan.acting[0] === "compress" ? plan.actions : [];
+      const actions = plan.acting[0] !== undefined && FOLLOW_UP_CLASSES.has(plan.acting[0]) ? plan.actions : [];
       for (const action of actions) assertDefuseAdmission(action, deps, sources);
       return prepareDefuseTaskIds(ws, actions.length, deps, sources, async);
     },
     apply: (ws, plan, _scorecard, heldIds) => {
-      if (plan.acting[0] === "defuse" || plan.acting[0] === "false-positive" || plan.acting[0] === "compress") return applyDefuseActions(ws, plan.actions, deps, sources, heldIds);
+      if (plan.acting[0] !== undefined && FOLLOW_UP_CLASSES.has(plan.acting[0])) return applyDefuseActions(ws, plan.actions, deps, sources, heldIds);
       const heading = `## Pass ${clock.iso()}`;
       const paths = applyGateActions(ws.root, plan.actions, heading, probes);
       return { paths, title: `chore(gates): the gate gardener proposes to ${plan.acting[0]} ${plan.actions.length} gate row(s)`, body: prBody(plan.actions, heading) };
