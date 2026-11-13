@@ -19,6 +19,7 @@ import type { Config } from "./config.js";
 import { workerClassOfLane } from "./host-memory-learning.js";
 import { spawnWorker, workerLedgerFields, type SpawnWorkerArgs, type WorkerResult, type WorkerSelectionAssignment } from "./worker.js";
 import { OPENWEIGHT_TEMPERATURE } from "./worker-provider.js";
+import type { ExperimentIntentionToTreat } from "./routing-experiments.js";
 
 export const BENCHMARK_RUN_VERSION = "benchmark-run-v1" as const;
 
@@ -352,6 +353,7 @@ export interface BenchmarkRunAssignmentInput {
   id: string;
   requested: { model: string; effort: string };
   selected: { provider: string; model: string; effort: string };
+  routing?: { experiment?: ExperimentIntentionToTreat };
 }
 
 export function benchmarkRunAssignmentReceipt(
@@ -359,6 +361,7 @@ export function benchmarkRunAssignmentReceipt(
   work: BenchmarkWorkInput,
   stackEvidence: BenchmarkStackEvidence & { loadedModule?: ImportedModuleEvidence } = {},
 ) {
+  const experiment = assignment.routing?.experiment;
   // No inference from checkout HEAD, route, or site-level consent: none of those pins the
   // actual prompt/tools/scorer used by this worker call or grants this instance publication.
   return {
@@ -384,7 +387,10 @@ export function benchmarkRunAssignmentReceipt(
       environmentRevision: pinEvidence("environmentRevision", stackEvidence.environmentRevision),
     },
     rights: { state: "private" as const, reason: "no-local-consent-receipt" },
-    allocation: { method: "observational" as const, reason: "no-random-allocation-receipt" },
+    allocation: experiment ? {
+      method: "randomized" as const, experimentId: experiment.id, arm: experiment.assignedArm,
+      servedArm: experiment.servedArm, probability: experiment.assignedProbability, unit: experiment.unit,
+    } : { method: "observational" as const, reason: "no-random-allocation-receipt" },
   };
 }
 
