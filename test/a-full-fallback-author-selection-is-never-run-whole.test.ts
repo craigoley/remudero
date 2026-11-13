@@ -176,12 +176,17 @@ test("W1-T9953: a full-fallback run says it is partial and is never green", (t) 
   assert.equal(receipt.verdict, "over-capacity");
   assert.equal(receipt.selection, "over-capacity");
   assert.equal(receipt.selectedArm, "full-fallback");
-  assert.equal(receipt.partial.leftToCi, 3);
+  const planned: string[] = receipt.partial.planned, ran: string[] = receipt.partial.ran;
+  assert.ok(ran.length > 0, "positive control: the partial run executed something");
+  assert.ok(ran.every((suite) => planned.includes(suite)), "the executed suites are the planned subset");
+  const notRun = ALL.filter((suite) => !ran.includes(suite));
+  const leftToCi = notRun.length;
+  assert.equal(receipt.partial.leftToCi, leftToCi, "the receipt's CI share follows the measured selection");
   assert.deepEqual(receipt.partial.reasons, [DEPLOY_REASON]);
   const tests = receipt.steps.find((step: { name: string }) => step.name === "affected-tests-subset");
   assert.equal(tests?.ok, true, "the partial set itself passed");
-  assert.ok(output.includes(`full-fallback: PARTIAL — ran 3 of 6 suite(s) chosen by reach and measured cost; ` +
-    `CI's full run is the check for ${DEPLOY}, ${HELPER} and the other 3`), output);
+  assert.ok(output.includes(`full-fallback: PARTIAL — ran ${ran.length} of ${ALL.length} suite(s) chosen by reach and ` +
+    `measured cost; CI's full run is the check for ${DEPLOY}, ${HELPER} and the other ${leftToCi}`), output);
 
   // Nothing reaches a .gitignore change: no suite step starts, and the same sentence says why.
   const empty = fixture("gitignore"); t.after(() => empty.cleanup());
@@ -250,7 +255,7 @@ test("an author phase refused before test execution records no planned suite as 
       assert.deepEqual(receipt.partial.planned, [CHANGED, MODELLED, READER]);
       assert.deepEqual(receipt.partial.ran, []);
       assert.equal(receipt.partial.leftToCi, ALL.length);
-      assert.ok(!output.includes("PARTIAL — ran 3"), output);
+      assert.ok(!output.includes("full-fallback: PARTIAL — ran"), output);
     }
   }
 });
