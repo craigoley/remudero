@@ -28,7 +28,7 @@
     - test/feedback-docket.test.ts
     - test/feedback-docket-union-corpus.test.ts
     - test/triage.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     The operator asked to automate console improvement, preserve plain language and learn from real

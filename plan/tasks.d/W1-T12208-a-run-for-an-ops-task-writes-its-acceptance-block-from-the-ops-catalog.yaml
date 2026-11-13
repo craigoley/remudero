@@ -17,7 +17,7 @@
     - src/cli/commands/run-task-verb.ts
     - src/lib/pr-open.ts
     - test/infra/a-run-for-an-ops-task-writes-its-acceptance-block-from-the-ops-catalog.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "For a task that the ops catalog holds, the run writes the acceptance block of the public pull request body from the criteria of the ops task"
