@@ -630,19 +630,12 @@ function assessReviewReuse(
   };
 }
 
-/**
- * Escalations use the trailer task id or the review lane's `PR-<n>` identity, minted without I/O.
- * Previously `UNKNOWN` missed `buildEscalationReconcileCandidates`'s plan lookup, preventing
- * retirement of 53 of 57 open needs-human issues (the reconciler saw 0).
- * {@link buildEscalationReconcileCandidates} resolves `PR-<n>` directly: synthetic ids must
- * round-trip, or an enumerable orphan becomes invisible.
- */
+/** Escalations use trailer ids or I/O-free `PR-<n>` identities that must round-trip through
+ * {@link buildEscalationReconcileCandidates}; `UNKNOWN` made synthetic orphans invisible. */
 /** Drop a stalled reason's moving age and episode start. The identity reader also drops its
  *  diagnosis; the full reason stays in the issue detail. Any other reason is returned unchanged. */
 export function stalledStageEscalationSummary(reason: string): string {
-  // An ownerless stall reads "(owner: none)" where an owned one reads "(BACKSTOP <n>)", and a held repair appends
-  // its withheld minutes: both kept the title moving, so #15368 got four issues for one head and cause (#15403,
-  // #15414, #15453, #15476), and 16 open issues on 2026-10-29 carried the unstripped "(owner: none); since".
+  // #15368/#15403/#15414/#15453/#15476: owner and withheld-age changes must not mint new stall issues.
   if (!reason.startsWith("PR stage stalled: ")) return reason;
   return reason
     .replace(/^(PR stage stalled: .+?) for \d+ minutes \((?:BACKSTOP \d+|owner: none)\); since [^;]*;/, "$1;")
@@ -694,13 +687,8 @@ export function reviewOutcomeTaskIdFor(pr: { taskId?: string; prNumber: number; 
   return pr.reviewInputDigest !== undefined ? reviewLedgerKeyFor(pr.taskId, pr.prNumber) : (pr.taskId ?? "");
 }
 
-/**
- * W1-T516: `sweep.armSessionPrs` gates the arm's task-id fallback. Previously the sweep passed
- * raw `pr.taskId` to {@link armAndLogOutcome}, so `armAutoMerge` refused every trailer-less PR.
- * OFF (default) preserves that `undefined` / `no-task-id` behavior. ON uses the review,
- * {@link escalationTaskIdFor} and `approveCommand` identity, `PR-<n>`, so
- * `decideArmFromLedgerVerdict` finds the existing review key.
- */
+/** W1-T516: `sweep.armSessionPrs` defaults OFF (`undefined` / `no-task-id`); ON uses the
+ * review/approve `PR-<n>` identity so `decideArmFromLedgerVerdict` finds the review key. */
 export function sweepArmTaskId(pr: { taskId?: string; prNumber: number }, armSessionPrs: boolean): string | undefined {
   // W1-T5866: deliberately NOT {@link escalationTaskIdFor} — the arm gate reads rows already scoped to this PR's url
   // (armLedgerLinesForPr), and a legacy `unfiled`-keyed row must keep matching the id the arm passes.
@@ -776,13 +764,8 @@ type FixRungTask = {
 
 const NEVER_A_PLAN_TASK_ID = /^(?:PR-\d+|RETRO|TRIAGE-.+|PLAN-.+|APPROVE-.+)$/;
 
-/**
- * W1-T4460 design (ii): reload only a real task id missing from the snapshot. In #6916/W1-T4413,
- * #6910 filed its shard after the poll's read, causing a real task to be treated as synthetic.
- * `PR-<n>` and RETRO/TRIAGE/PLAN/APPROVE ids never have records and cannot benefit from reload.
- * Missing or throwing `reloadPlan` falls back to `fixRungTaskFor` with the old snapshot.
- * Reuse `runDaemon`'s `daemon.plan_reloaded` step (design iv).
- */
+/** W1-T4460 (ii)/(iv), #6916/W1-T4413/#6910: reload missing real tasks, never synthetic ids.
+ * Missing/throwing `reloadPlan` keeps `fixRungTaskFor`'s snapshot; log `daemon.plan_reloaded`. */
 export function fixRungTaskWithPlanReload(
   plan: Plan,
   pr: { prNumber: number; taskId?: string },
@@ -813,22 +796,14 @@ export function fixRungTaskWithPlanReload(
   return fixRungTaskFor(plan, pr, body, headRefName, changedPaths);
 }
 
-/**
- * W1-T4073: whether {@link fixRungTaskAtHead} has a plan record to look for — a real plan task id,
- * never the `PR-<n>`/orchestrator-lane shapes (no record exists at any head, so the read is waste).
- */
+/** W1-T4073: only real task ids can have a {@link fixRungTaskAtHead} plan record. */
 export function fixRungWantsHeadContract(pr: { taskId?: string }): pr is { taskId: string } {
   return pr.taskId !== undefined && !NEVER_A_PLAN_TASK_ID.test(pr.taskId);
 }
 
-/**
- * W1-T4073: resolve the contract at the PR head via `resolvePlanCriteriaAtHead` /
- * `resolveFixRungTaskContractAtHead`; prompt, scope guard and commit all use this `opts.task`.
- * #6630 used a 27-minute-stale plan and committed a test #6627 had already replaced.
- * UNREADABLE NEVER FALLS BACK: an unresolved sha, thrown resolver or divergence stands down.
- * A readable head plan lacking the id keeps `fixRungTaskWithPlanReload`'s result. A present
- * record replaces acceptance, files, risk, budget and narrative, and is never synthetic.
- */
+/** W1-T4073, #6630/#6627: resolve the PR-head contract for prompt, scope guard and commit.
+ * Unresolved SHA, resolver failure or divergence stands down, NEVER falls back. A readable
+ * plan missing the id keeps `fixRungTaskWithPlanReload`; a present record replaces the contract. */
 export function fixRungTaskAtHead(
   current: { task: FixRungTask; synthetic: boolean },
   taskId: string,
@@ -861,13 +836,8 @@ export function fixRungTaskAtHead(
   };
 }
 
-/**
- * W1-T3585: #5537 resequenced #5545/W1-T3558 (2026-09-14) after admission, leaving an open PR
- * dispatch could no longer build. Mirror drain.ts's `isDispatchEligible`: blocked (including
- * retirement), or `unmetDependencies` agreed by the current plan and fresh {@link MergedResolver}.
- * A runnable task returns `undefined`, granting no closure authority. The caller must prove
- * these inputs fresh; this pure predicate neither fetches nor infers freshness from names.
- */
+/** W1-T3585, #5537/#5545: mirror drain's `isDispatchEligible` after plan resequencing.
+ * Caller must prove plan/resolver freshness. Runnable returns `undefined`, granting no closure. */
 export function currentPlanIneligibilityReason(plan: Plan, task: Task, isMerged: MergedResolver): string | undefined {
   if (task.status === "blocked") {
     return task.retirement !== undefined
@@ -881,14 +851,8 @@ export function currentPlanIneligibilityReason(plan: Plan, task: Task, isMerged:
   return undefined;
 }
 
-/**
- * W1-T4565 — a CLOSE must not rest on one lagging read. `currentPlanIneligibilityReason`'s resolver
- * is the daemon's per-tick projection, which lagged a real merge by 13-28 minutes (MEASURED: the
- * sweep credited W1-T4567 itself at 20:38:57, then closed #7333 at 20:42 for that "unmet"
- * dependency). An unmet dependency the ledger already credits as merged is met: `creditedInLedger`
- * is asked about exactly the unmet ids, and only when a close is proposed. It can only remove a
- * reason, never add one; a `blocked`/retired task is unaffected.
- */
+/** W1-T4565/#7333: a CLOSE cannot trust one lagging resolver. Query ledger credit only for
+ * unmet ids when proposing closure; it can remove a dependency reason, never add one or unblock a task. */
 export function corroboratedIneligibilityReason(
   plan: Plan,
   task: Task,
@@ -931,13 +895,8 @@ function isSyntheticOrchestratorLaneId(taskId: string): boolean {
   return /^(?:RETRO(?:-.+)?|TRIAGE-.+|PLAN-.+|APPROVE-.+)$/.test(taskId);
 }
 
-/**
- * W1-T4465 design (i): fleet ownership requires a filed run id ({@link TASK_ID_TRAILER_RE})
- * or a synthetic RETRO/TRIAGE/PLAN/APPROVE lane ({@link isSyntheticOrchestratorLaneId}).
- * Operator `run-unfiled-*`, human and dependabot heads return false: the governor counts them
- * but cannot throttle them (the incident included 4-7 operator sessions).
- * Undefined heads fail CLOSED: unreadable ownership must keep gating the WIP ceiling.
- */
+/** W1-T4465 (i): only filed runs and synthetic lanes are throttleable; operator/unfiled,
+ * human and dependabot heads only count. Undefined ownership fails CLOSED at the WIP ceiling. */
 export function isFleetOwnedRunBranch(head: string | undefined): boolean {
   if (head === undefined) return true;
   const owner = taskIdFromRunBranch(head);
@@ -945,22 +904,9 @@ export function isFleetOwnedRunBranch(head: string | undefined): boolean {
   return isSyntheticOrchestratorLaneId(owner) || TASK_ID_TRAILER_RE.test(owner);
 }
 
-/**
- * Is `head` an acceptable branch for a fix dispatch to amend?
- *
- * FOR A PLAN TASK, unchanged and still strict: the fix must amend THAT task's own run branch,
- * because creditability is load-bearing (status.ts's `ownsBranch`) and a fix on an uncreditable
- * head loops forever and strands dependents.
- *
- * FOR A SYNTHETIC (no-task) PR the entire rationale is inapplicable — there is no task to credit
- * and no dependent to strand — so its own descriptive head is acceptable. ONE guard remains, and it
- * is the load-bearing half: a head that CLAIMS SOME OTHER TASK (`run-W1-T123-…`) is refused. Such a
- * PR is not task-less, it is MIS-TRAILERED, and amending it would push commits onto another task's
- * run branch under a synthetic identity.
- *
- * This never widens WHICH PRs are fixable — the disposition set is untouched — only whether the
- * rung can act on one the sweep has already classified.
- */
+/** Fix ownership: plan tasks require their own creditable run branch (`status.ts:ownsBranch`).
+ * Synthetic PRs may use descriptive heads, but NEVER another task's run branch: that would
+ * amend foreign work under a mis-trailered identity. Disposition eligibility stays unchanged. */
 
 /**
  * Is `head` ANY dispatched run's own branch — `run-<taskId>-<epochMs>`, the shape every

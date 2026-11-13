@@ -1,0 +1,94 @@
+- id: W1-T12526
+  title: "The merge-time ratchet verdict counts the learnings budget, affected reach and house layout gates"
+  repo: remudero
+  depends_on:
+    - W1-T12509
+  priority: 1.1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the one verdict the arm, the direct merge and the armed re-judge consult; a false clean lets two pull requests cross a gate together
+  band_meaning: blast-radius
+  origin: operator-session#follow-ups-2026-11-13
+  plan_refs:
+    - W1-T12509
+    - W1-T9332
+  files:
+    - src/lib/merged-ratchet-verdict.ts
+    - scripts/learnings-budget-ratchet.mjs
+    - scripts/affected-reach-count.mjs
+    - scripts/house-layout-census.mjs
+    - scripts/house-layout-split-table.json
+    - test/the-affected-suite-reach-ratchet.test.ts
+    - test/learnings-budget-ratchet.test.ts
+    - test/a-ceiling-is-rejudged-against-current-main-before-a-merge.test.ts
+    - test/gardeners/the-merge-time-verdict-counts-learnings-reach-and-house-layout.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "COUNTED_RATCHET_GATES also holds learnings-budget, affected-reach and house-layout, and UNCOUNTED_RATCHET_GATES no longer names them. Each is counted on the merge-tree of (main tip, pull request head) with the gate's own counter, never a copy"
+      proof: "grep: W1-T12526 criterion 1 in test/gardeners/the-merge-time-verdict-counts-learnings-reach-and-house-layout.test.ts"
+    - claim: "learnings-budget: scripts/learnings-budget-ratchet.mjs exports a parse from shard text that `loadShardEntries` itself calls. Two pull requests that each stay under the cap and together cross it give `crossing` with one row naming the gate, the merged count and the cap"
+      proof: "grep: W1-T12526 criterion 2 in test/gardeners/the-merge-time-verdict-counts-learnings-reach-and-house-layout.test.ts"
+    - claim: "affected-reach: `measureReach` lives in scripts/affected-reach-count.mjs and the reach suite imports it from there. Two pull requests that together push importerCount, largestScc or medianReachPercent past scripts/affected-reach-baseline.json give `crossing` naming the field"
+      proof: "grep: W1-T12526 criterion 3 in test/gardeners/the-merge-time-verdict-counts-learnings-reach-and-house-layout.test.ts"
+    - claim: "affected-reach is bounded: when no landed file changes an import line, the merged graph is main's and no graph is built; when the read set is past its bound, the gate is `unread` and the reason names it"
+      proof: "grep: W1-T12526 criterion 4 in test/gardeners/the-merge-time-verdict-counts-learnings-reach-and-house-layout.test.ts"
+    - claim: "house-layout: the W1-T9332 split table is data in scripts/house-layout-split-table.json, not path strings in the census module. The merged tree judged against main's tip gives `crossing` for a layout break that neither pull request has on its own base"
+      proof: "grep: W1-T12526 criterion 5 in test/gardeners/the-merge-time-verdict-counts-learnings-reach-and-house-layout.test.ts"
+    - claim: "With the verdict module importing all three counters, `npm run census:affected-reach` passes: largestScc and medianReachPercent do not grow past scripts/affected-reach-baseline.json"
+      proof: "grep: W1-T12526 criterion 6 in test/gardeners/the-merge-time-verdict-counts-learnings-reach-and-house-layout.test.ts"
+    - claim: "invariant:no-clean-without-count — a counter that throws or a tree it cannot read gives `unread` for that gate, never `clean`"
+      proof: "grep: W1-T12526 criterion 7 in test/gardeners/the-merge-time-verdict-counts-learnings-reach-and-house-layout.test.ts"
+  rationale: |
+    W1-T12509 counts five recorded-count gates at merge time. It left three uncounted, each with a reason, and its
+    note asks for this follow-up. Until they are counted, two pull requests can each pass one of them on their own
+    base and cross it together.
+    READ in the W1-T12509 build (~/rmd-work/ship/bodies/12509.why.md on the Azure host, branch
+    run-W1-T12509-1794588885000, not yet merged):
+    - learnings-budget: `loadCorpus` and `loadShardEntries` read shard files from a directory on disk. No function
+      parses shard text, so counting from two trees would need a copy of the parser.
+    - affected-reach: `measureReach` is in a test suite, and importing a test suite runs it. The count is a
+      whole-tree import graph, which is not cheap.
+    - house-layout: importing the census closed an import ring through the sweep. `census:affected-reach` refused
+      it with largestScc 128 > 85 and medianReachPercent 58.4 > 49.0. House-layout records no number; its gate
+      compares with the merge base.
+    READ at origin/main 713c610e6:
+    - scripts/learnings-budget-ratchet.mjs:57 `loadShardEntries(path)` starts with `readFileSync` (:58);
+      :96 `loadCorpus(dir)` reads every `learnings/*.yaml` shard.
+    - test/the-affected-suite-reach-ratchet.test.ts:58 `export function measureReach(files: ReadonlyMap<string, string>)`
+      already takes file texts, not paths. Only its place in a test suite stops an import.
+    - scripts/house-layout-census.mjs:44 `RUN_TASK_LAYOUT_SPLIT` names "src/run-task.ts" and
+      "src/cli/commands/run-task-verb.ts", and :52 names "src/cli/commands/sweep.ts". The affected-suite graph reads
+      these strings as edges.
+    - src/lib/merged-ratchet-verdict.ts:52-55 lists house-layout, affected-reach and learnings-budget as uncounted.
+    CHECKED for overlap on origin/main plan/tasks.d: W1-T12509 (queued, claimed) is the base; no other queued or
+    blocked task names measureReach, the house-layout split table or a shard-text parser.
+  design: |
+    Build on W1-T12509 once it merges; re-cut off origin/main then.
+    1. learnings-budget: add `parseShardEntries(text, path)` to scripts/learnings-budget-ratchet.mjs and make
+       `loadShardEntries` call it. The verdict lists `learnings/*.yaml` on each tree with `git ls-tree`, reads the
+       blobs in the one `git cat-file --batch` call it already makes, and sums with the script's own functions.
+       Count only when the merge lands a file under learnings/ or the baseline; otherwise the two counts are equal.
+    2. affected-reach: move `measureReach` and its types into scripts/affected-reach-count.mjs, unchanged. The
+       reach suite imports it from there. The verdict counts only when a landed file in src/ or test/ changes an
+       import or export-from line; otherwise the merged graph is main's. When it counts, it reads the same bounded
+       listing W1-T12509 uses (48 MiB); past the bound the gate is `unread`.
+    3. house-layout: move the W1-T9332 split table into scripts/house-layout-split-table.json and read it there,
+       so the census module holds no source path strings. Judge the merged tree against main's tip, the way the
+       gate judges a branch against its merge base: a violation the merged tree has and main's tip does not is a
+       crossing.
+    4. Run `npm run census:affected-reach` and depcruise on src/lib/merged-ratchet-verdict.ts after each import.
+       If the ring comes back, stop and report the cycle; do not raise the baseline.
+    5. Update the W1-T9962 test that pins the counted list.
+    INVARIANT no-clean-without-count: a gate is reported clean only when it was counted on both trees; every other
+    answer is `unread` or a named uncounted gate.
+    NOT IN SCOPE: comment-load, coverage and mutation; any baseline value; the callers of the verdict.
+  falsifier: |
+    Leave one of the three gates out of COUNTED_RATCHET_GATES and its criterion test must fail. Put the split-table
+    path strings back in the census module and criterion 6 must fail. Report `clean` when a counter throws and
+    criterion 7 must fail. Restore and require all seven to pass.
+  note: |
+    Id W1-T12526 reserved for run-unfiled-1794594748000 with ~/rmd-work/bin/reserve-id.sh.
+    W1-T12509 was not merged when this was filed (no Remudero-Task trailer on main; refs/rmd-dispatch/W1-T12509 held).

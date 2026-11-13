@@ -1,0 +1,70 @@
+- id: W1-T12528
+  title: "The boot sweep reads the host boot time, process presence and hostname through an injected probe"
+  repo: remudero
+  depends_on: []
+  priority: 0.9
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the boot sweep's same-host release arm; a wrong reading drops a live claim or keeps a dead one
+  band_meaning: blast-radius
+  origin: operator-session#follow-ups-2026-11-13
+  plan_refs:
+    - W1-T10896
+    - W1-T12356
+    - W1-T12162
+    - W1-T2784
+  files:
+    - src/lib/dispatch-claim.ts
+    - src/cli/commands/daemon.ts
+    - test/helpers/restart-orphan.ts
+    - test/dispatch/the-boot-sweep-reads-the-host-through-an-injected-probe.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "The boot sweep (`bootSweepDispatchClaims` and `bootSweepDispatchClaimsAsync`) takes its hostname, namespace boot time and process presence from one host probe in its inputs. With a fixed probe, the same claims give the same release rows on linux, on darwin and on a host with no /proc"
+      proof: "grep: W1-T12528 criterion 1 in test/dispatch/the-boot-sweep-reads-the-host-through-an-injected-probe.test.ts"
+    - claim: "The daemon's boot passes the real probe (`readNamespaceBootMs`, `pidIsPresent`, `os.hostname`) built in one place in src/lib/dispatch-claim.ts. A test drives the daemon's boot with no probe injected and the sweep still reads the real host"
+      proof: "grep: W1-T12528 criterion 2 in test/dispatch/the-boot-sweep-reads-the-host-through-an-injected-probe.test.ts"
+    - claim: "invariant:fail-closed-liveness — a probe whose boot time is unknown declines the same-host arm, as an unreadable /proc does today; a probe that cannot tell if a pid exists reports it present"
+      proof: "grep: W1-T12528 criterion 3 in test/dispatch/the-boot-sweep-reads-the-host-through-an-injected-probe.test.ts"
+    - claim: "test/helpers/restart-orphan.ts boots the sweep with a fixed probe, so test/a-quiet-worker-round-end-is-resumed-from-its-checkpoint.test.ts and test/dispatch/a-claim-minted-before-a-restart-is-released-at-boot-on-macos.test.ts read nothing from the host and pass unchanged"
+      proof: "grep: W1-T12528 criterion 4 in test/dispatch/the-boot-sweep-reads-the-host-through-an-injected-probe.test.ts"
+  rationale: |
+    The boot sweep reads the host directly, so the suites that drive it depend on the host they run on.
+    W1-T12162's builder found this on the Mac (~/rmd-work/ship/bodies/12162.why.md, "What remains"): the sweep
+    read the boot time from /proc/stat, which macOS does not have, and kept a dead claim. W1-T12356 (#18169) fixed
+    the reading in production for darwin. The tests still cannot fix the readings, because the sweep takes no probe.
+    READ at origin/main 713c610e6:
+    - src/lib/dispatch-claim.ts:827-833 `sameHostLivenessProbe(localHost)` calls `readNamespaceBootMs()` (:613) and
+      `pidIsPresent(anchor.pid)` (:647) with no inputs, so each reads the real host: /proc/stat and /proc/1/stat on
+      linux, `os.uptime()` and `process.kill(pid, 0)` on darwin.
+    - :1000-1009 `bootSweepReads` builds `livenessProbe: sameHostLivenessProbe(i.localHost)`; `BootSweepInputs`
+      (:991-997) has no field for it. `bootSweepDispatchClaims` (:1020) and `bootSweepDispatchClaimsAsync` (:1034)
+      both use it.
+    - src/cli/commands/daemon.ts:1389-1390 passes `localHost: hostname()`. test/helpers/restart-orphan.ts:22 sets
+      `LOCAL = hostname()` for the same reason.
+    - test/dispatch/a-claim-minted-before-a-restart-is-released-at-boot-on-macos.test.ts:90 can test darwin only by
+      mocking the platform and the real `os.uptime` and `process.kill`.
+    CHECKED for overlap on origin/main plan/tasks.d: no queued or blocked task names `sameHostLivenessProbe` or
+    `bootSweepDispatchClaims`. W1-T12504 (queued) probes a test slot's pid namespace in src/lib/test-slot.ts, not
+    the claim sweep. W1-T12162 (queued) is test-only and put this out of its scope.
+  design: |
+    1. Add a `hostProbe` field to `BootSweepInputs`: `{ hostname(): string; namespaceBootMs(): number | undefined;
+       pidPresent(pid: number): boolean }`. Use an inline type or a `Pick` of an existing type; add no new named
+       `...Deps` interface. It replaces `localHost`.
+    2. Export one real probe from src/lib/dispatch-claim.ts built from `os.hostname`, `readNamespaceBootMs` and
+       `pidIsPresent`. `sameHostLivenessProbe` takes the probe. The runTask `taken` arm keeps its own readings.
+    3. src/cli/commands/daemon.ts passes the real probe, or `deps.hostProbe` when a test gives one (next to
+       `deps.bootClaimReserver`). Add no comment lines there.
+    4. test/helpers/restart-orphan.ts passes a fixed probe whose hostname is a fixed string.
+    INVARIANT fail-closed-liveness: an unknown boot time declines the same-host arm, and a pid that cannot be
+    checked is present; the probe changes where the readings come from, not what they mean.
+    NOT IN SCOPE: the runTask `taken` arm in src/cli/commands/run-task-verb.ts:6060-6066; the replaced-container arm.
+  falsifier: |
+    Make `sameHostLivenessProbe` call `readNamespaceBootMs()` directly again and criterion 1 must fail on any host
+    whose real boot time differs from the fixed probe. Make an unknown boot time release the claim and criterion 3
+    must fail. Restore and require all four to pass.
+  note: |
+    Id W1-T12528 reserved for run-unfiled-1794594748000 with ~/rmd-work/bin/reserve-id.sh.
