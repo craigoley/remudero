@@ -8,6 +8,8 @@ import "#src/lib/live-analytics-snapshot-cache.js";
 import { recordWorkerProvidersAtStart } from "#src/cli/commands/daemon.js";
 import { resolveProviderRoutingPolicy } from "#src/lib/provider-routing-policy.js";
 import { configPath, type Config } from "#src/lib/config.js";
+import { validateConfigShape } from "#src/lib/config-schema.js";
+import { readCashModelCatalog } from "#src/lib/model-availability.js";
 import type { Escalation } from "#src/lib/escalate.js";
 import { appendLedger } from "#src/lib/ledger.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
@@ -15,6 +17,14 @@ import { ghShim } from "#test/helpers/gh-shim.js";
 import { daemonCommand } from "#test/helpers/run-task-daemon.js";
 
 type Row = Record<string, unknown>;
+function deploymentReply(url: string | URL | Request, available: readonly string[]): Response {
+  const path = new URL(String(url)).pathname;
+  const name = decodeURIComponent(path.split("/")[3] ?? "");
+  return available.includes(name)
+    ? Response.json({ error: { code: "invalid_request_error", param: "messages", message: "messages must be non-empty" } }, { status: 400 })
+    : Response.json({ error: { code: "DeploymentNotFound", message: "The API deployment does not exist" } }, { status: 404 });
+}
+
 function fixture(t: TestContext) {
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}provider-start-`));
   mkdirSync(join(root, "state"));
@@ -31,11 +41,13 @@ function fixture(t: TestContext) {
       let catalog;
       if (cash !== undefined) {
         fullConfig.workerProviders = { ...fullConfig.workerProviders,
-          cashEndpoint: "https://fixture.openai.azure.com" };
+          cashEndpoint: "https://fixture.openai.azure.com",
+          cashDeploymentEndpoints: Object.fromEntries((cash instanceof Error ? [] : cash).map((name) =>
+            [name, { endpoint: "https://fixture.openai.azure.com", keyEnv: "RMD_OPENWEIGHT_API_KEY" }])) };
         process.env.RMD_OPENWEIGHT_API_KEY = "fixture-key";
-        catalog = t.mock.method(globalThis, "fetch", async () => {
+        catalog = t.mock.method(globalThis, "fetch", async (url: string | URL | Request) => {
           if (cash instanceof Error) throw cash;
-          return Response.json({ data: cash.map((id) => ({ id })) });
+          return deploymentReply(url, cash);
         });
       }
       const at = new Date(Date.now() + starts++ * 1000).toISOString();
@@ -58,16 +70,22 @@ function fixture(t: TestContext) {
 test("W1-T12175 criterion 1: each start snapshots enabled providers and reachable cash deployments", async (t) => {
   const f = fixture(t);
   let requests = 0;
-  t.mock.method(globalThis, "fetch", async (url: string, init: RequestInit) => {
+  t.mock.method(globalThis, "fetch", async (url: string | URL | Request, init?: RequestInit) => {
     requests++;
-    assert.equal(url, "https://fixture.openai.azure.com/openai/models?api-version=2024-10-21");
-    assert.deepEqual(init.headers, { "api-key": "fixture-key" });
+    assert.match(String(url), /^https:\/\/fixture.openai.azure.com\/openai\/deployments\//);
+    assert.ok(init);
+    assert.equal(init.method, "POST");
+    assert.deepEqual(init.headers, { "api-key": "fixture-key", "Content-Type": "application/json" });
+    assert.deepEqual(JSON.parse(String(init.body)), { messages: [] });
     assert.ok(init.signal instanceof AbortSignal);
-    return Response.json({ data: [{ id: "deployment-b" }, { id: "deployment-a" }, { id: "deployment-a" }] });
+    return deploymentReply(url, ["deployment-b", "deployment-a"]);
   });
   t.mock.property(process, "env", { ...process.env, RMD_OPENWEIGHT_API_KEY: "fixture-key" });
   const config = { workerProviders: { enabled: ["claude", "codex", "cash"] as const,
-    cashEndpoint: "https://fixture.openai.azure.com" } };
+    cashEndpoint: "https://fixture.openai.azure.com", cashDeploymentEndpoints: {
+      "deployment-a": { endpoint: "https://fixture.openai.azure.com", keyEnv: "RMD_OPENWEIGHT_API_KEY" },
+      "deployment-b": { endpoint: "https://fixture.openai.azure.com", keyEnv: "RMD_OPENWEIGHT_API_KEY" },
+    } } };
   await f.start({ workerProviders: { ...config.workerProviders, enabled: [...config.workerProviders.enabled] } });
   await f.start();
   const snapshots = f.rows().filter((row) => row.step === "daemon.worker_providers");
@@ -77,8 +95,50 @@ test("W1-T12175 criterion 1: each start snapshots enabled providers and reachabl
   assert.equal(snapshots[0].config_file, configPath());
   assert.deepEqual(snapshots[1].enabled_providers, ["claude"]);
   assert.deepEqual(snapshots[1].cash_deployments, []);
-  assert.equal(requests, 1);
+  assert.ok(requests > 2, "both deployment identities and the account's absence control were checked");
+  assert.equal(snapshots[0].cash_read, "readable");
 });
+
+for (const removal of ["mapping", "deployment"] as const) {
+test(`W1-T12175 criterion 2: a lost ${removal} escalates with unchanged two-account model catalogs`, async (t) => {
+  const f = fixture(t);
+  const primary = "https://primary.openai.azure.com";
+  const secondary = "https://secondary.openai.azure.com";
+  t.mock.property(process, "env", { ...process.env, RMD_OPENWEIGHT_API_KEY: "primary-key",
+    RMD_CASH_SECONDARY_API_KEY: "secondary-key" });
+  let missing = false;
+  let secondaryChecks = 0;
+  t.mock.method(globalThis, "fetch", async (url: string | URL | Request, init?: RequestInit) => {
+    const parsed = new URL(String(url));
+    if (parsed.pathname === "/openai/models") return Response.json({ data: [{ id: "gpt-oss-120b" }] });
+    assert.ok(init?.signal instanceof AbortSignal);
+    const headers = init.headers as Record<string, string>;
+    assert.equal(headers["api-key"], parsed.origin === secondary ? "secondary-key" : "primary-key");
+    if (parsed.origin === secondary) secondaryChecks++;
+    return deploymentReply(url, parsed.origin === primary ? ["gpt-oss-120b"] : missing ? [] : ["secondary-alias"]);
+  });
+  const config = validateConfigShape({ root: f.root, claudeBin: "/bin/true", workerProviders: {
+    enabled: ["claude", "cash"], cashEndpoint: primary, cashDeploymentEndpoints: {
+      "secondary-alias": { endpoint: secondary, keyEnv: "RMD_CASH_SECONDARY_API_KEY" },
+    },
+  } }, "provider loss fixture");
+  assert.deepEqual(await readCashModelCatalog(config), ["gpt-oss-120b"]);
+  const previous = await f.start(config);
+  assert.deepEqual(f.rows().at(-1)?.cash_deployments, ["gpt-oss-120b", "secondary-alias"]);
+  assert.equal(f.rows().at(-1)?.cash_read, "readable");
+  if (removal === "mapping") config.workerProviders!.cashDeploymentEndpoints = {};
+  else missing = true;
+  assert.deepEqual(await readCashModelCatalog(config), ["gpt-oss-120b"]);
+  await f.start(config);
+  await f.start(config);
+  assert.ok(secondaryChecks >= 2, "the mapped deployment was checked on its own account");
+  assert.deepEqual(f.rows().at(-1)?.cash_deployments, ["gpt-oss-120b"]);
+  assert.equal(f.rows().at(-1)?.cash_read, "readable");
+  assert.equal(f.alerts.length, 1);
+  for (const text of ["cash:secondary-alias", configPath(), previous]) assert.ok(f.alerts[0].detail.includes(text));
+  assert.doesNotMatch(f.alerts[0].summary, /cash:gpt-oss-120b/);
+});
+}
 
 test("W1-T12175 criterion 2: a loss names every provider, config file and last available start", async (t) => {
   const f = fixture(t);
@@ -210,6 +270,64 @@ test("an unreadable cash account does not masquerade as lost deployments", async
   await f.start(config);
   assert.equal(f.rows().at(-1)?.cash_read, "unreadable");
   assert.match(String(f.rows().at(-1)?.cash_read_error), /503/);
+  assert.equal(f.alerts.length, 0);
+});
+
+test("a validation response also returned for absent deployments is not reachability evidence", async (t) => {
+  const f = fixture(t);
+  const config = { workerProviders: { enabled: ["claude", "cash"] as ("claude" | "cash")[],
+    cashEndpoint: "https://fixture.openai.azure.com" } };
+  await f.start(config, ["deployment-a"]);
+  t.mock.property(process, "env", { ...process.env, RMD_OPENWEIGHT_API_KEY: "fixture-key" });
+  t.mock.method(globalThis, "fetch", async () => Response.json({ error: { param: "messages" } }, { status: 400 }));
+  await f.start(config);
+  assert.equal(f.rows().at(-1)?.cash_read, "unreadable");
+  assert.match(String(f.rows().at(-1)?.cash_read_error), /cannot distinguish an absent deployment/);
+  assert.deepEqual(f.rows().at(-1)?.cash_deployments, []);
+  assert.equal(f.alerts.length, 0);
+});
+
+test("missing cash credentials and ambiguous deployment replies stay diagnostic", async (t) => {
+  const f = fixture(t);
+  const config = { workerProviders: { enabled: ["cash"] as "cash"[], cashDeploymentEndpoints: {
+    "deployment-a": { endpoint: "https://fixture.openai.azure.com", keyEnv: "RMD_CASH_FIXTURE_API_KEY" },
+  } } };
+  t.mock.property(process, "env", { ...process.env, RMD_CASH_FIXTURE_API_KEY: undefined });
+  const transport = t.mock.method(globalThis, "fetch", async () => { throw new Error("must not send without a key"); });
+  await f.start(config);
+  assert.equal(transport.mock.callCount(), 0);
+  assert.equal(f.rows().at(-1)?.cash_read, "unreadable");
+  assert.match(String(f.rows().at(-1)?.cash_read_error), /no-key.*RMD_CASH_FIXTURE_API_KEY/);
+  transport.mock.restore();
+  process.env.RMD_CASH_FIXTURE_API_KEY = "fixture-key";
+  let reply = Response.json({ error: { code: "UnrelatedBadRequest" } }, { status: 400 });
+  t.mock.method(globalThis, "fetch", async (url: string | URL | Request) =>
+    String(url).includes("rmd-absent-") ? deploymentReply(url, []) : reply.clone());
+  await f.start(config);
+  assert.match(String(f.rows().at(-1)?.cash_read_error), /HTTP 400 \(UnrelatedBadRequest\)/);
+  assert.equal(f.alerts.length, 0);
+  reply = Response.json({ error: { code: "OperationNotSupported" } }, { status: 400 });
+  await f.start(config);
+  assert.equal(f.rows().at(-1)?.cash_read, "readable");
+  assert.deepEqual(f.rows().at(-1)?.cash_deployments, ["deployment-a"]);
+  assert.equal(f.alerts.length, 0);
+});
+
+test("cash deployment checks share a deadline and an expired check still writes the startup row", async (t) => {
+  const f = fixture(t);
+  const signal = AbortSignal.abort(new Error("fixture: startup check deadline"));
+  const timeout = t.mock.method(AbortSignal, "timeout", () => signal);
+  t.mock.property(process, "env", { ...process.env, RMD_OPENWEIGHT_API_KEY: "fixture-key" });
+  t.mock.method(globalThis, "fetch", async (_url: unknown, init?: RequestInit) => {
+    assert.ok(init?.signal);
+    assert.equal(init?.signal, signal);
+    init.signal.throwIfAborted();
+    return deploymentReply(String(_url), []);
+  });
+  await f.start({ workerProviders: { enabled: ["cash"], cashEndpoint: "https://fixture.openai.azure.com" } });
+  assert.equal(timeout.mock.callCount(), 1);
+  assert.equal(f.rows().at(-1)?.cash_read, "unreadable");
+  assert.match(String(f.rows().at(-1)?.cash_read_error), /startup check deadline/);
   assert.equal(f.alerts.length, 0);
 });
 

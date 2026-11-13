@@ -16,7 +16,7 @@ import { judgeCiEscalation, productionCiJudgePorts, singleFlightCiJudge, withCiJ
 import { recyclePauseDetail } from "../../lib/recycle-yield.js";
 import { judgeDiskHeadroom, readDiskFreeBytes } from "../../lib/doctor.js";
 import { execFileSync } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { execFileLoopBounded } from "../../lib/loop-bounded-child.js";
 import { GATEWAY_FETCH_TIMEOUT_MS } from "../../lib/git-fetch-retry.js";
 import { productionDispatchBreakJudge, productionFixProgressJudge } from "../../lib/sweep.js";
@@ -26,10 +26,11 @@ import { homedir, hostname } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { configPath, isWorkerProviderId, loadConfig, providerRoutingOwnsHeadroom, resolveHeadroomEnabled, workerHomeDir, type Config } from "../../lib/config.js";
+import { cashDeploymentTarget } from "../../lib/config-schema.js";
 import { ledgerPathFor } from "../../lib/ledger-path.js";
 import { daemonCrashSentinel, escalateCrashLoop, escalateDiskHeadroomBreach, escalateHeadroomParkCeiling, escalateHeadroomReserve, escalateQuotaExhaustion, escalateReplayStranded, escalateStarvation, escalateStarvationCleared } from "../../lib/escalation-catalogue.js";
 import { lostWorkerProviders, resolveProviderRoutingPolicy, type EffectiveProviderRoutingPolicy } from "../../lib/provider-routing-policy.js";
-import { readCashModelCatalog } from "../../lib/model-availability.js";
+import { OPENWEIGHT_PRICES } from "../../lib/worker-provider.js";
 import { writeProviderRoutingStatus, type ProviderRoutingWriteInput } from "../../lib/provider-routing-status.js";
 import { readFileIfExists } from "../../lib/fs-race-safe.js";
 import { mergedInLastDayAsync } from "../../lib/fleet-lane.js";
@@ -146,6 +147,58 @@ export function daemonImprovementActionDeps(stateDir: string, gateway: RatifyCli
   };
 }
 
+async function reachableCashDeployments(config: Config): Promise<{ deployments: string[]; errors: string[] }> {
+  const deployments: string[] = [];
+  const errors = new Set<string>();
+  const candidates = [...new Set([...(config.workerProviders?.cashEndpoint ?? config.workerProviders?.openweightEndpoint
+    ? Object.keys(OPENWEIGHT_PRICES) : []),
+    ...Object.keys(config.workerProviders?.cashDeploymentEndpoints ?? {})])];
+  // PRIMARY CONTROL: all account controls and deployment checks share one startup deadline.
+  const signal = AbortSignal.timeout(GATEWAY_FETCH_TIMEOUT_MS);
+  const controls = new Map<string, Promise<boolean>>();
+  const probe = async (endpoint: string, key: string, name: string) => {
+    const base = endpoint.endsWith("/") ? endpoint : `${endpoint}/`;
+    const url = new URL(`openai/deployments/${encodeURIComponent(name)}/chat/completions?api-version=2024-10-21`, base);
+    // Missing required inference input: routing/validation only, never a completion request.
+    const response = await fetch(url, { method: "POST", headers: { "api-key": key, "Content-Type": "application/json" },
+      body: JSON.stringify({ messages: [] }), signal });
+    if (response.status !== 400 && response.status !== 404) {
+      throw new Error(`deployment check returned HTTP ${response.status}`);
+    }
+    const payload = await response.json() as { error?: { code?: string; param?: string; message?: string } };
+    return { status: response.status, error: payload.error };
+  };
+  await Promise.all(candidates.map(async (name) => {
+    const target = cashDeploymentTarget(config, name);
+    if (!target.ok) {
+      errors.add(`cash deployment ${name}: ${target.reason}${"keyEnv" in target ? ` (${target.keyEnv})` : ""}`);
+      return;
+    }
+    try {
+      const account = JSON.stringify([target.endpoint, target.keyEnv]);
+      let control = controls.get(account);
+      if (!control) {
+        control = probe(target.endpoint, target.key, `rmd-absent-${randomUUID()}`).then((reply) =>
+          reply.status === 404 && reply.error?.code === "DeploymentNotFound");
+        controls.set(account, control);
+      }
+      if (!await control) throw new Error("account cannot distinguish an absent deployment from request validation");
+      const reply = await probe(target.endpoint, target.key, name);
+      if (reply.status === 404 && reply.error?.code === "DeploymentNotFound") return;
+      if (reply.status === 400 && (reply.error?.code === "OperationNotSupported" ||
+        reply.error?.param === "messages" || /messages/i.test(reply.error?.message ?? ""))) {
+        deployments.push(name);
+        return;
+      }
+      throw new Error(`deployment check returned HTTP ${reply.status} (${reply.error?.code ?? "unknown error"})`);
+    } catch (error) {
+      const reason = String(error);
+      errors.add(`cash deployment ${name}: ${reason}`);
+    }
+  }));
+  return { deployments: deployments.sort(), errors: [...errors].sort() };
+}
+
 export async function recordWorkerProvidersAtStart(opts: {
   config: Config;
   policy: EffectiveProviderRoutingPolicy;
@@ -180,17 +233,9 @@ export async function recordWorkerProvidersAtStart(opts: {
   let cash: string[] = [];
   const cashErrors: string[] = [];
   if (enabled.includes("cash")) {
-    try {
-      cash = [...new Set(await readCashModelCatalog(
-        opts.config,
-        // PRIMARY CONTROL: a catalog request cannot hold startup beyond the gateway transport timeout.
-        (url, init) => fetch(url, { ...init, signal: AbortSignal.timeout(GATEWAY_FETCH_TIMEOUT_MS) }),
-        process.env, (failure) => cashErrors.push(failure.reason),
-      ))].sort();
-    } catch (error) {
-      const reason = String(error);
-      cashErrors.push(reason);
-    }
+    const reading = await reachableCashDeployments(opts.config);
+    cash = reading.deployments;
+    cashErrors.push(...reading.errors);
   }
   const comparison = comparisonReason ? "skipped" : previous ? "compared" : "first-start";
   opts.log(step, { ts: opts.at, config_file: file, enabled_providers: enabled,
