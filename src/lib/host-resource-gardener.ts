@@ -30,6 +30,7 @@ import { resolveRepoLayout } from "./repo-layout.js";
  * when the heartbeat went silent while the last samples were falling — it escalates, once per
  * episode. A fall is attributed to the consumer whose growth explains most of it; a consumer that
  * keeps growing across several janitor passes is filed once as a plan-only task.
+ * Separately, free disk below 1.5 times a volume's published reserve escalates without a trend.
  *
  * Time is read through the {@link Clock} port. Off switch: `state/HOST_RESOURCE_OFF`.
  */
@@ -113,7 +114,7 @@ export interface HostSample {
   host: string;
   beatTs: string;
   tsMs: number;
-  /** root_free_kb, root_total_kb, state_free_kb, swap_used_kb, swap_total_kb, inodes_free — only those read. */
+  /** Free space, published reserves, totals, swap usage and free inodes — only readable values. */
   values: Record<string, number>;
   /** Consumer name → kb, only on the beats that measured them. */
   consumers: Record<string, number>;
@@ -191,6 +192,8 @@ export function sampleFromPayload(host: string, payload: Record<string, string>)
   };
   put("root_free_kb", digits(payload["root_fs_free_kb"]));
   put("root_total_kb", digits(payload["root_fs_total_kb"]));
+  put("root_reserve_kb", digits(payload["root_fs_reserve_kb"]));
+  put("state_reserve_kb", digits(payload["state_fs_reserve_kb"]));
   // The state root is its own device only when it names a different one; else it double-reports root.
   const stateDevice = payload["state_fs_device"];
   if (stateDevice !== undefined && stateDevice !== "unknown" && stateDevice !== payload["root_fs_device"]) put("state_free_kb", digits(payload["state_fs_free_kb"]));
@@ -494,6 +497,35 @@ export function isPersistentGrower(a: Attribution | undefined): a is Attribution
 }
 
 // ── one host ─────────────────────────────────────────────────────────────────────────────────
+
+export interface ReserveFinding {
+  host: string;
+  device: "root" | "state";
+  freeKb: number;
+  reserveKb: number;
+  consumers: Array<{ consumer: string; sizeKb: number }>;
+}
+
+function newestHostSample(host: string, samples: readonly HostSample[]): HostSample | undefined {
+  return samples.filter((s) => s.host === host).sort((a, b) => b.tsMs - a.tsMs)[0];
+}
+
+/** A volume's published reserve is independent of the falling-space projection. */
+export function evaluateReserve(host: string, samples: readonly HostSample[]): ReserveFinding[] {
+  const sample = newestHostSample(host, samples);
+  if (!sample) return [];
+  return (["root", "state"] as const).flatMap((device) => {
+    const freeKb = sample.values[`${device}_free_kb`];
+    const reserveKb = sample.values[`${device}_reserve_kb`];
+    if (!Number.isFinite(freeKb) || !Number.isFinite(reserveKb) || freeKb! >= 1.5 * reserveKb!) return [];
+    const disk = sample.devices?.[device];
+    const consumers = Object.entries(sample.consumers)
+      .filter(([name]) => disk !== undefined && disk !== "unknown" && disk !== "" && sample.consumerDevices?.[name] === disk)
+      .map(([consumer, sizeKb]) => ({ consumer, sizeKb }))
+      .sort((a, b) => b.sizeKb - a.sizeKb);
+    return [{ host, device, freeKb: freeKb!, reserveKb: reserveKb!, consumers }];
+  });
+}
 
 export interface Finding {
   host: string;
@@ -903,6 +935,23 @@ export function hostResourceEscalation(f: Finding): Escalation {
   };
 }
 
+function reserveEscalation(f: ReserveFinding): Escalation {
+  const gib = (kb: number): string => `${(kb / 1024 ** 2).toFixed(1)} GiB`;
+  const summary = `Free disk on ${f.host} ${f.device} is ${gib(f.freeKb)}. The reserve is ${gib(f.reserveKb)}.`;
+  return {
+    class: "BLOCKED",
+    taskId: `host-reserve-${f.host}-${f.device}`,
+    summary,
+    detail: [summary,
+      ...(f.consumers.length ? f.consumers.slice(0, 3).map((c) => `- ${c.consumer}: ${gib(c.sizeKb)}`) : [`No measured consumers on ${f.device}.`]),
+      "Free space on this volume now. If nobody acts and free disk reaches the reserve, the janitor pass fails.",
+    ].join("\n"),
+    options: [{ label: "free-space", detail: `free space on ${f.host} ${f.device}, starting with its largest measured consumers` }],
+    recommendation: "free-space",
+    headDedup: "independent",
+  };
+}
+
 /** What a filing asks of its build: the janitor file and the acceptance criterion. The proof greps the filing's
  *  ORIGIN, never the bare consumer name: a name the janitor already mentions (`rmd`) passes at origin/main, so
  *  proof-discrimination refused that filing every time it was offered. */
@@ -1073,7 +1122,8 @@ function* hostResourcePassSteps(ports: HostResourcePorts): Steps<PassResult> {
   const { appended, all } = appendNewSamples(ports.stateDir, incoming, nowMs);
   if (appended.length) ports.log(`${HOST_RESOURCE}.sampled`, { appended: appended.length, hosts: [...new Set(appended.map((s) => s.host))].sort() });
 
-  const findings = [...new Set(all.map((s) => s.host))].sort().flatMap((host) => evaluateHost(host, all, nowMs));
+  const hosts = [...new Set(all.map((s) => s.host))].sort();
+  const findings = hosts.flatMap((host) => evaluateHost(host, all, nowMs));
   const live = new Set<string>();
   for (const f of findings) {
     const key = `${f.host}:${f.device}`;
@@ -1132,6 +1182,30 @@ function* hostResourcePassSteps(ports: HostResourcePorts): Steps<PassResult> {
       }
     }
   }
+  for (const host of hosts) {
+    for (const f of evaluateReserve(host, all)) {
+      const key = `${host}:${f.device}:reserve`;
+      live.add(key);
+      const episode = (state.episodes[key] ??= { tier: "escalate" });
+      if (!episode.escalatedAt && ports.escalate) {
+        const issueUrl = ports.escalate(reserveEscalation(f));
+        episode.escalatedAt = clock.iso();
+        ports.log(`${HOST_RESOURCE}.escalated`, { key, host, device: f.device, free_kb: f.freeKb, reserve_kb: f.reserveKb, issue_url: issueUrl });
+      }
+    }
+    const sample = newestHostSample(host, all)!;
+    for (const device of ["root", "state"] as const) {
+      const key = `${host}:${device}:reserve`;
+      if (live.has(key) || !state.episodes[key]) continue;
+      const free = sample.values[`${device}_free_kb`];
+      const reserve = sample.values[`${device}_reserve_kb`];
+      // Missing measurements cannot establish recovery or reset the persisted deduplication.
+      if (Number.isFinite(free) && Number.isFinite(reserve) && free! >= 1.5 * reserve!) {
+        ports.log(`${HOST_RESOURCE}.recovered`, { key });
+        delete state.episodes[key];
+      }
+    }
+  }
   for (const f of [...new Set(all.map((s) => s.host))].sort().flatMap((host) => evaluateIo(host, all, nowMs))) {
     const key = `${f.host}:io:${f.device}`;
     live.add(key);
@@ -1181,6 +1255,7 @@ function* hostResourcePassSteps(ports: HostResourcePorts): Steps<PassResult> {
     }
   }
   for (const key of Object.keys(state.episodes)) {
+    if (key.endsWith(":reserve")) continue; // Only a measured reserve recovery closes these episodes.
     const episode = state.episodes[key]!;
     const isJanitor = key.endsWith(":janitor");
     const isIo = key.includes(":io:");
