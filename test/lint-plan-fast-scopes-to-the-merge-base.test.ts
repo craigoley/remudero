@@ -42,6 +42,7 @@ const task = (id: string, title: string, proof: string) =>
     `  risk: high`,
     `  status: queued`,
     `  origin: "W1-T4381 test fixture"`,
+    `  design: "NO-INVARIANTS: synthetic lint fixture with no inherited behavior to preserve"`,
     `  acceptance:`,
     `    - claim: "something is proven"`,
     `      proof: "${proof}"`,
@@ -132,3 +133,33 @@ test("W1-T4381: the default git seam really answers the merge-base", () => {
   const repo = planFork();
   assert.equal(lintScopeMergeBase(repo.dir, "main"), repo.git("merge-base", "main", "HEAD"));
 });
+
+const invariantRecord = (id: string, note: string, design?: string): string =>
+  [
+    `- id: ${id}`, `  title: "invariant pass fixture ${id}"`, "  repo: remudero", "  depends_on: []",
+    "  type: implement", "  verify: human", "  risk: high", "  status: queued", '  origin: "W1-T11746 test fixture"',
+    `  note: "${note}"`,
+    ...(design === undefined ? [] : [`  design: ${JSON.stringify(design)}`]),
+    "  acceptance:",
+    '    - claim: "invariant:keep-a — a stays"', '      proof: "unit test: test/w1-t11746-fixture.test.ts"',
+    "",
+  ].join("\n");
+
+test("unit test: the changed-task lint refuses an unmapped design and leaves an unchanged historical task valid", async () => {
+  const repo = gitRepo({ kind: "w1-t11746" });
+  mkdirSync(join(repo.dir, "plan"));
+  // The historical task has no design at all and carries a dangling invariant claim: it must stay untouched.
+  commitPlan(repo, [invariantRecord("ZZ-Old", "old"), invariantRecord("ZZ-Edit", "before")], "base");
+  repo.git("checkout", "-q", "-b", "work");
+  commitPlan(repo, [invariantRecord("ZZ-Old", "old"), invariantRecord("ZZ-Edit", "after")], "edit one record");
+  const refused = await lint(repo, ["--base", "main"]);
+  assert.equal(refused.code, 1, refused.out.join("\n"));
+  assert.ok(refused.out.some((l) => l.startsWith("✗ ZZ-Edit:")), refused.out.join("\n"));
+  assert.match(refused.out.join("\n"), /\[design-invariant-proof\] task ZZ-Edit: design declares neither/);
+  assert.ok(!refused.out.some((l) => l.includes("ZZ-Old")), `unchanged history must not be named:\n${refused.out.join("\n")}`);
+
+  commitPlan(repo, [invariantRecord("ZZ-Old", "old"), invariantRecord("ZZ-Edit", "after", "INVARIANT keep-a: a stays")], "declare it");
+  const accepted = await lint(repo, ["--base", "main"]);
+  assert.equal(accepted.code, 0, accepted.out.join("\n"));
+});
+

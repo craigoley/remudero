@@ -21,7 +21,7 @@
     - test/deploy/the-host-janitor-retires-a-finished-worktree-at-its-next-pass.test.ts
     - test/host-root-disk-janitor.test.ts
     - test/deploy/the-azure-janitor-preserves-then-retires-idle-checkouts.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "`sweep_worktree` retires a linked worktree that is clean, whose HEAD commit GitHub holds, and whose pull requests are all merged or closed. It does so although a file in the worktree was written inside the idle time"

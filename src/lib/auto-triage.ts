@@ -1096,15 +1096,18 @@ function readTextOrUndefined(path: string): string | undefined {
 /** The feedback entry's `status:` as committed on origin/main — the daemon's own checkout can lag a merged
  *  triage (#10265). `undefined` when the ref, the file or the field cannot be read. */
 export function feedbackStatusOnMain(root: string, feedbackId: string): string | undefined {
-  let text: string;
-  try {
-    text = hostWorktreeGit(root, ["show", `origin/main:plan/feedback/${feedbackId}.yaml`], { timeout: 10_000 });
-  } catch (error) {
-    // A missing ref/file is an unreadable main status. Preserve security refusals from the leaf.
-    if (error !== null && typeof error === "object" && "status" in error) return undefined;
-    throw error;
+  const copies: Array<{ path: string; text: string }> = [];
+  for (const dir of feedbackReadRoots(root, planDestinationRepository(instanceStateDir()))) {
+    try {
+      copies.push({ path: `${dir} origin/main`, text: hostWorktreeGit(dir,
+        ["show", `origin/main:plan/feedback/${feedbackId}.yaml`], { timeout: 10_000 }) });
+    } catch (error) {
+      // Missing/unreadable Git bytes provide no release evidence. Preserve leaf security refusals.
+      if (error === null || typeof error !== "object" || !("status" in error)) throw error;
+    }
   }
-  return /^status:\s*(\S+)\s*$/m.exec(text)?.[1];
+  if (copies.length === 2) assertOneFeedbackCopy(feedbackId, copies[0], copies[1]);
+  return copies[0] === undefined ? undefined : /^status:\s*(\S+)\s*$/m.exec(copies[0].text)?.[1];
 }
 
 /** Feedback ids at `status: new`, oldest first — the count half of

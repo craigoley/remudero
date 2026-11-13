@@ -43,6 +43,13 @@ export function registryShellFixture(t: { after(fn: () => void): void }) {
   // The maintained script directory is used verbatim. No production state or real git is reachable.
   symlinkSync(join(REPO_ROOT, "deploy"), join(state, "daemon-install", "deploy"));
   writeFileSync(join(state, "state", "ledger.ndjson"), '{"step":"daemon.idle","ts":"2026-10-29T00:00:00Z"}\n');
+  // W1-T12455: with no selected registry, serve reads its own checkout's instance registry. Run from `checkout`, it
+  // reads this one, whose second instance lives under the fixture root, so no real host state folder is reached.
+  const checkout = join(state, "daemon-install"), foreign = join(root, "foreign-state");
+  for (const dir of [join(foreign, "state"), join(foreign, "repos"), join(checkout, ".remudero")]) mkdirSync(dir, { recursive: true });
+  writeFileSync(join(checkout, ".remudero", "daemon-instances.yaml"), "instances:\n" +
+    `  core:\n    repo: remudero\n    github_repo: craigoley/remudero\n    primary: true\n    container_name: remudero-daemon\n    state_dir: ${state}\n` +
+    `  other:\n    repo: remudero-other\n    github_repo: craigoley/remudero-other\n    container_name: remudero-other-daemon\n    state_dir: ${foreign}\n`);
   const selected = join(root, "selected-private.yaml"), session = join(root, "session.json");
   const text = "instances:\n  core:\n    github_repo: craigoley/remudero\n    mode: shadow\n    state_dir: /private-material-sentinel\n";
   writeFileSync(selected, text);
@@ -101,6 +108,9 @@ if (bin === "docker") {
   } else if (args[0] === "inspect") {
     const fmt = args[args.indexOf("--format") + 1] ?? "";
     if (fmt.includes("MemoryHigh")) out("/remudero-daemon uint64 6442450944\n/remudero-other-daemon uint64 6442450944");
+    else if (fmt === "{{json .Mounts}}") out(e.FIXTURE_MOUNTS === "empty" ? "" : JSON.stringify([
+      {Type:"bind", Source:e.FIXTURE_FOREIGN_ROOT, Destination:"/home/node/Remudero"},
+      ...(e.FIXTURE_MOUNTS === "unknown" ? [{Type:"volume", Source:"", Destination:"/home/node/Remudero/repos/unknown"}] : [])]));
     else if (fmt.includes("Mounts")) out("");
     else if (fmt.includes(".State.Status")) out("exited");
     else if (fmt.includes(".State.ExitCode") || fmt.includes("RestartCount")) out("1");
@@ -160,7 +170,7 @@ process.exit(98);
     PATH: hermeticToolPath(root, bin), HOME: join(root, "home"), TMPDIR: root,
     NODE_TEST_CONTEXT: process.env.NODE_TEST_CONTEXT,
     FIXTURE_UID: String(process.getuid?.()), FIXTURE_CALLS: callsPath, FIXTURE_PAYLOAD: payload,
-    FIXTURE_SELECTED: selected, RMD_INSTANCE_REGISTRY: legacy, RMD_ROOT: state, RMD_STATE_DIR: state,
+    FIXTURE_SELECTED: selected, FIXTURE_FOREIGN_ROOT: foreign, RMD_INSTANCE_REGISTRY: legacy, RMD_ROOT: state, RMD_STATE_DIR: state,
     RMD_UNIT_DIR: join(output, "systemd"), RMD_BIN_DIR: join(output, "bin"),
     RMD_LAUNCHER_PATH: join(output, "launcher"), RMD_REVIVAL_LOG: join(output, "revivals.log"),
     RMD_SERVICE_USER: "fixture", RMD_SERVICE_UID: "42424", RMD_NODE_MAX_OLD_SPACE_MB: "8192",
@@ -201,5 +211,5 @@ process.exit(98);
   const rows = (): Record<string, unknown>[] => readFileSync(session + ".observations", "utf8").trim().split("\n").map(line => JSON.parse(line));
   const install = (shadow = true) => run(join(REPO_ROOT, "deploy/install-host-units.sh"),
     ["--install", ...(shadow ? ["--selected-registry-shadow", session] : [])]);
-  return { root, state, output, selected, session, text, legacy, payload, env, run, cli, capture, receipts, rows, install };
+  return { root, state, checkout, foreign, output, selected, session, text, legacy, payload, env, run, cli, capture, receipts, rows, install };
 }

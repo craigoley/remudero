@@ -22,7 +22,7 @@
     - src/lib/sweep.ts
     - src/run-task.ts
     - test/review/one-lookup-finds-a-task-by-id-in-the-public-plan-or-the-ops-catalog.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "The lookup returns a task with the name of the catalog that holds it. It reads the public plan first, and the ops catalog only when the public plan lacks the id and the host file names a repository"
