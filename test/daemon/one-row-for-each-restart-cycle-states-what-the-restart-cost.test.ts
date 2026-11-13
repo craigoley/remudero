@@ -150,6 +150,7 @@ test("a torn tick row is reported beside the cycle derived from intact rows", as
   assert.equal(result.cycles.length, 1);
   const errors = result.logs.find(r => r.step === "daemon.restart_cycle_unreadable")?.fields.errors;
   assert.ok(Array.isArray(errors)); assert.equal(errors.length, 1);
+  assert.match(String(errors[0]), /^ledger row parse failed: SyntaxError:/);
 });
 
 test("missing pull request identity and reviewer duration leave waiting cost unknown", () => {
@@ -197,6 +198,8 @@ test("a daemon decision records the first material change for the next lifetime"
 test("torn and non-object rows are reported without inventing ledger facts", () => {
   const parsed = restartCycleLedgerRows(["{", "null", "[]", ...fixture().map(r => JSON.stringify(r))]);
   assert.equal(parsed.errors.length, 3);
+  assert.match(parsed.errors[0], /^ledger row parse failed: SyntaxError:/);
+  assert.deepEqual(parsed.errors.slice(1), ["ledger row is not an object", "ledger row is not an object"]);
   assert.equal(cycle(parsed.rows).restart_cost_ms, 460);
 });
 

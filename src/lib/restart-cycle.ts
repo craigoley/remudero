@@ -48,7 +48,10 @@ export function restartCycleLedgerRows(lines: readonly string[]): { rows: Row[];
       const row: unknown = JSON.parse(raw);
       if (row && typeof row === "object" && !Array.isArray(row)) rows.push(row as Row);
       else errors.push("ledger row is not an object");
-    } catch (error) { errors.push(String(error)); }
+    } catch (error) {
+      const reason = `ledger row parse failed: ${String(error)}`;
+      errors.push(reason);
+    }
   }
   return { rows, errors };
 }
