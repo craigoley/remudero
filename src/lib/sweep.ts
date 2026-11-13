@@ -4513,10 +4513,8 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
             // W1-T6362: the same holds on the PR's CURRENT head. The owner is already proven dead
             // (decideRegisteredFixOwnerRecovery admits this arm only with the claim and process
             // census both clear), and the preserve proves the recovery ref reproduces the owner's
-            // exact index tree before anything is reset, so nothing is lost by reclaiming. The old
-            // current-head refusal held the PR's fix lane until FIX_CLAIM_DECLINE_BACKSTOP escalated
-            // it to a human (#10041, #10063, #10066, #10071, #10074). Only a preserve that FAILS
-            // still declines -- by name, head-stamped, so the backstop escalates it once.
+            // exact index tree before anything is reset, so nothing is lost by reclaiming. A failed
+            // preserve still declines by name and head, so its cause is re-probed (W1-T11168).
             if (residue?.refusal) {
               const superseded = snapshot.remoteSha !== null && snapshot.remoteSha !== localSha && snapshot.historyState === "contained";
               try {
@@ -14719,19 +14717,12 @@ export function fleetWithheldStageMs(rows: ReadonlyArray<Record<string, unknown>
       row.stand_down_reason === "overtaken by a repair queued before it — this review keeps its place in the queue, re-derived next pass" ||
       row.stand_down_reason === "review lanes taken by repairs queued before their reviews — re-derived next pass"
     );
-    if (row.acted === true || !(FLEET_WITHHELD_STAND_DOWN.test(text) || admissionHeld)) return;
+    if (row.acted === true || !(FLEET_WITHHELD_STAND_DOWN.test(text) || admissionHeld ||
+      (row.cause === "fleet-held" && row.probe_result === "present"))) return;
     held += Math.max(0, Math.min(passes[i + 1]?.at ?? nowMs, nowMs) - at);
   });
   return held;
 }
-
-/** W1-T5932 — BACKSTOP: detached dispatch failures per (PR, head) before the sweep stops and escalates once;
- *  the {@link FIX_CLAIM_DECLINE_BACKSTOP} sibling, the first attempt plus two retries. */
-export const FIX_DISPATCH_FAILED_BACKSTOP = 3;
-
-/** W1-T5919 — BACKSTOP: owner-claim declines per (PR, head) before the sweep stops and escalates once;
- *  three is the first attempt plus two retries, time for an exiting owner to clear. */
-export const FIX_CLAIM_DECLINE_BACKSTOP = 3;
 
 /** PR 14405 and its follow-up: each failed owner recovery `declineClaim` names, keyed to the decision
  *  that must still admit it and the ordinary helper whose verified result lifts its backstop hold.
@@ -14751,8 +14742,7 @@ function revalidatedOwnerPreservation(reason: unknown) {
     ? REVALIDATED_OWNER_PRESERVATIONS[reason] : undefined;
 }
 
-/** A fix dispatch the backstop holds at this head, read from the ledger alone so EVERY pass (the light
- *  pass included, which never reaches the action arm) classifies it the same way. */
+/** A cause holding a fix dispatch at this head, shared by action and reporting on every pass. */
 export interface FixDispatchHold {
   reason: string;
   fields: Record<string, unknown>;
@@ -14809,7 +14799,8 @@ export function ownEscalationAtHead(
     }
     if (row.step !== "sweep.disposed" || row.pr_number !== pr.prNumber || !atHead) continue;
     const filed = row.acted === true && (row.disposition === "blocked-ambiguous" || row.disposition === "refused-escalate");
-    const latch = typeof row.progress_escalated_key === "string" ? `progress\u0000${row.progress_escalated_key}`
+    const latch = typeof row.dispatch_cause_escalated === "string" ? `dispatch-cause\u0000${row.dispatch_cause_escalated}`
+      : typeof row.progress_escalated_key === "string" ? `progress\u0000${row.progress_escalated_key}`
       : typeof row.fix_claim_decline_escalated === "string" ? `claim\u0000${row.fix_claim_decline_escalated}`
         : row.fix_dispatch_failed_escalated === true ? "dispatch-failed" : undefined;
     const firstOfLatch = latch !== undefined && !latched.has(latch);
@@ -14822,103 +14813,154 @@ export function ownEscalationAtHead(
   return found;
 }
 
-/** W1-T5919 + W1-T5932 — the backstop holds, pure. The claim-decline hold stands only while the
- *  declined owner worktree still exists: once an operator or the janitor removes it, the next pass
- *  re-attempts the claim, so clearing the cause never also needs a hand-pushed head (#10551, 2026-10-10:
- *  a dirty `sweep-` owner held a conflicted PR at one head with nothing able to lift it). A decline
- *  that named no path cannot be re-probed and keeps holding. W1-T7998: a decline the owner DECISION
- *  kept is re-asked through `ownerReclaimable`; once it admits recovery the hold lifts this pass.
- *  A failed recovery in {@link REVALIDATED_OWNER_PRESERVATIONS} lifts only on a re-verified preservation. */
+/** W1-T11168: probes and progress evidence for a retry of a failed dispatch at the same head. */
+export interface FixDispatchHoldOptions {
+  nowMs?: number;
+  sweepPassMs?: number;
+  fleetHold?: () => string | undefined;
+  judge?: FixProgressJudge;
+  record?: (row: Record<string, unknown> & { step: string }) => void;
+  onProgress?: (progress: FixProgressResult) => void;
+}
+
+/** The synchronous reader never starts a judge; the async sweep records its verdict for later readers. */
 export function fixDispatchHoldAtHead(
   pr: OpenPrView, lines: ReadonlyArray<Record<string, unknown>>,
   ownerWorktreeExists: (path: string) => boolean = existsSync,
   ownerReclaimable?: SweepDeps["fixOwnerReclaimableAtHold"],
+  options: FixDispatchHoldOptions = {},
 ): FixDispatchHold | undefined {
-  return runStepsSync(fixDispatchHoldAtHeadSteps(pr, lines, ownerWorktreeExists, ownerReclaimable));
+  return runStepsSync(fixDispatchHoldAtHeadSteps(pr, lines, ownerWorktreeExists, ownerReclaimable, options));
 }
 
 export function fixDispatchHoldAtHeadAsync(
   pr: OpenPrView, lines: ReadonlyArray<Record<string, unknown>>,
   ownerWorktreeExists: (path: string) => boolean = existsSync,
   ownerReclaimable?: SweepDeps["fixOwnerReclaimableAtHold"],
+  options: FixDispatchHoldOptions = {},
 ): Promise<FixDispatchHold | undefined> {
-  return runStepsAsync(fixDispatchHoldAtHeadSteps(pr, lines, ownerWorktreeExists, ownerReclaimable));
+  return runStepsAsync(fixDispatchHoldAtHeadSteps(pr, lines, ownerWorktreeExists, ownerReclaimable,
+    { ...options, judge: options.judge ?? (async () => undefined) }));
+}
+
+const FLEET_PAUSE_REFUSAL = /PAUSE held on |cannot reach origin|origin.*unreadable/;
+
+function dispatchFailureCause(row: Record<string, unknown>): string {
+  const reason = String(row.owner_recovery_reason ?? row.error ?? row.reason ?? "unreadable dispatch failure");
+  if (FLEET_PAUSE_REFUSAL.test(reason)) return "fleet-held";
+  if (isOwnerClaimDecline(row) && typeof row.worktree_path === "string") return `owner-held:${reason}`;
+  // Match the fix-lane gardener's reasonClass without importing its sweep-dependent module graph.
+  return reason.split(" — ")[0]!.replace(/\b[0-9a-f]{7,40}\b/gi, "<sha>")
+    .replace(/\/pull\/\d+/g, "/pull/<n>").replace(/\b\d+(?:\.\d+)?\b/g, "<n>").trim();
+}
+
+function fixDispatchSuccess(row: Record<string, unknown>, pr: OpenPrView): boolean {
+  return (row.step === "fix.dispatch" || row.step === "fix.retrigger") &&
+    (row.pr_number === pr.prNumber || (row.pr_number === undefined && pr.taskId !== undefined && row.task_id === pr.taskId));
+}
+
+function medianDispatchWait(values: number[]): number | undefined {
+  if (values.length === 0) return undefined;
+  values.sort((a, b) => a - b);
+  const mid = Math.floor(values.length / 2);
+  return values.length % 2 ? values[mid] : (values[mid - 1]! + values[mid]!) / 2;
 }
 
 function* fixDispatchHoldAtHeadSteps(
-  pr: OpenPrView,
-  lines: ReadonlyArray<Record<string, unknown>>,
-  ownerWorktreeExists: (path: string) => boolean = existsSync,
-  ownerReclaimable?: SweepDeps["fixOwnerReclaimableAtHold"],
+  pr: OpenPrView, lines: ReadonlyArray<Record<string, unknown>>,
+  ownerWorktreeExists: (path: string) => boolean,
+  ownerReclaimable: SweepDeps["fixOwnerReclaimableAtHold"],
+  options: FixDispatchHoldOptions,
 ): Steps<FixDispatchHold | undefined> {
-  const declines = lines.filter((l) => isOwnerClaimDecline(l) && l.pr_number === pr.prNumber && l.head_sha === pr.headSha);
-  const last = declines[declines.length - 1];
-  const ownerPath = typeof last?.worktree_path === "string" ? last.worktree_path : undefined;
-  // Revalidation re-proves a failed RESET's preservation but never tries the reset, so a reset that keeps
-  // failing would lift and re-decline forever with no escalation. It is re-asked once per head: after a
-  // revalidation lifted this head, a reset that fails again holds and escalates.
-  const resetRelifted = last?.owner_recovery_reason === "owner_stale_dirty_reset_failed" &&
-    lines.slice(0, lines.lastIndexOf(last)).some((l) => l.from_backstop_revalidation === true &&
-      l.pr_number === pr.prNumber && l.head_sha === pr.headSha);
-  if (declines.length >= FIX_CLAIM_DECLINE_BACKSTOP && (ownerPath === undefined || ownerWorktreeExists(ownerPath)) &&
-      !(ownerPath !== undefined && !resetRelifted && (last.owner_recovery_decision === "keep" ||
-        revalidatedOwnerPreservation(last.owner_recovery_reason) !== undefined) && (yield* step(() => ownerReclaimable?.(pr, last))) === true)) {
-    const why = String(last.owner_recovery_reason);
-    // W1-T5974: a staged-only refusal names the paths an operator must inspect before clearing it.
-    const staged = Array.isArray(last.staged_paths) && last.staged_paths.length > 0
-      ? `, staged ${last.staged_paths.map(String).join(", ")}${Number(last.staged_more) > 0 ? ` (+${Number(last.staged_more)} more)` : ""}`
-      : "";
-    const reason =
-      `fix checkout claim declined ${declines.length} times on #${pr.prNumber} at head ${pr.headSha.slice(0, 7)} ` +
-      `(registered worktree owner ${ownerPath ?? "path unread"}, ${why}${staged}) — ` +
-      `FIX_CLAIM_DECLINE_BACKSTOP ${FIX_CLAIM_DECLINE_BACKSTOP} reached, no further claim is attempted at this head ` +
-      `while that worktree exists`;
-    const escalated = lines.some((l) => l.step === "sweep.disposed" && l.pr_number === pr.prNumber &&
-      l.head_sha === pr.headSha && l.fix_claim_decline_escalated === why);
-    return { reason, fields: { fix_claim_decline_escalated: why, dispatch_held: "fix_claim_decline" }, escalated };
+  const atHead = (l: Record<string, unknown>) => l.pr_number === pr.prNumber && l.head_sha === pr.headSha;
+  const failed = (l: Record<string, unknown>) => isOwnerClaimDecline(l) || isDetachedFixDispatchFailure(l);
+  const history: Record<string, unknown>[] = [];
+  for (const row of lines) {
+    if (fixDispatchSuccess(row, pr) && row.head_sha === pr.headSha) history.length = 0;
+    else if (atHead(row) && failed(row)) history.push(row);
   }
-  return dispatchFailureHoldAtHead(pr, lines);
+  const last = history.at(-1);
+  if (!last) return undefined;
+  const cause = dispatchFailureCause(last);
+  let consecutive = 0;
+  for (let i = history.length - 1; i >= 0 && dispatchFailureCause(history[i]!) === cause; i--) consecutive++;
+  const nowMs = options.nowMs ?? systemClock.now();
+  const stamp = (row: Record<string, unknown>) => Date.parse(String(row.ts));
+  const passTimes = [...new Set(lines.filter(row => row.step === "sweep.disposed" && atHead(row)).map(stamp).filter(Number.isFinite))].sort((a, b) => a - b);
+  const cadence = options.sweepPassMs ?? medianDispatchWait(passTimes.slice(1).map((t, i) => t - passTimes[i]!)) ?? DEFAULT_POLL_INTERVAL_MS;
+  const samples: number[] = [];
+  const nextSuccess = new Map<string, number>();
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const row = lines[i]!;
+    if (!Number.isFinite(stamp(row))) continue;
+    const prKey = `pr:${row.pr_number}`;
+    const taskKey = `task:${row.task_id}`;
+    if (row.step === "fix.dispatch" || row.step === "fix.retrigger") {
+      if (typeof row.pr_number === "number") nextSuccess.set(prKey, stamp(row));
+      else if (row.task_id !== undefined) nextSuccess.set(taskKey, stamp(row));
+    } else if (failed(row) && dispatchFailureCause(row) === cause) {
+      const successAt = nextSuccess.get(prKey) ?? nextSuccess.get(taskKey);
+      if (successAt !== undefined && successAt > stamp(row)) samples.push(successAt - stamp(row));
+    }
+  }
+  const failureKey = createHash("sha256").update(JSON.stringify(history)).digest("hex");
+  const priorHold = lines.find(row => atHead(row) && row.failure_key === failureKey && row.step === "sweep.disposed");
+  const base = medianDispatchWait(samples) ?? cadence;
+  const backoffMs = typeof priorHold?.backoff_ms === "number" ? priorHold.backoff_ms
+    : Math.min(Number.MAX_SAFE_INTEGER, base * 2 ** (consecutive - 1));
+  const receipt = lines.findLast(row => row.site === "fix-dispatch-cause" && atHead(row) && row.failure_key === failureKey);
+  let progress: FixProgressResult = parseFixProgressVerdict(JSON.stringify(receipt ?? {})) ??
+    { verdict: "unavailable", reason: String(receipt?.reason ?? "no dispatch-cause judgment available") };
+  if (consecutive > 1 && receipt === undefined && options.judge) {
+    const input: FixProgressInput = { taskId: pr.taskId, prNumber: pr.prNumber, headSha: pr.headSha,
+      currentRed: [cause], redClass: cause, strikesSpent: 0, rounds: [], remedyHistory: history,
+      parkedReason: `fix dispatch cause: ${cause}`, signals: { noOpRounds: consecutive, identicalRedSets: consecutive,
+        identicalDiffs: 0, oscillating: false, refusedRounds: consecutive, incompleteRounds: 0, reviewerOnlyFailurePersists: 0 } };
+    const judged = yield* step(() => resolveFixProgress(input, lines, { judge: options.judge }));
+    progress = judged.decision;
+    options.record?.({ ...judged.receipt, ...progress, site: "fix-dispatch-cause", pr_number: pr.prNumber,
+      head_sha: pr.headSha, cause, failure_key: failureKey });
+  }
+  options.onProgress?.(progress);
+  let probe = "unprobed";
+  if (cause === "fleet-held") {
+    if (options.fleetHold?.() === undefined) return undefined;
+    probe = "present";
+  } else if (cause.startsWith("owner-held:")) {
+    const path = String(last.worktree_path);
+    if (!ownerWorktreeExists(path) || (yield* step(() => ownerReclaimable?.(pr, last))) === true) return undefined;
+    probe = "present";
+  }
+  const recordedFailureAt = Date.parse(String(priorHold?.failure_at));
+  const failureAt = Number.isFinite(stamp(last)) ? stamp(last) : Number.isFinite(recordedFailureAt) ? recordedFailureAt : nowMs;
+  const nextRetryMs = Math.min(8.64e15, probe === "present" ? nowMs + cadence : failureAt + backoffMs);
+  const nextRetryAt = clockFromMillisFn(() => nextRetryMs).iso();
+  const escalationKey = `${pr.prNumber}@${pr.headSha}:${cause}`;
+  const escalated = lines.some(row => atHead(row) && row.step === "sweep.disposed" && row.dispatch_cause_escalated === escalationKey);
+  if (probe === "unprobed" && nowMs >= nextRetryMs && progress.verdict !== "escalate") return undefined;
+  const decline = isOwnerClaimDecline(last);
+  const staged = Array.isArray(last.staged_paths) ? `, staged ${last.staged_paths.map(String).join(", ")}` : "";
+  const reason = `${decline ? "fix checkout claim declined" : "detached fix dispatch failed before fix.dispatch"} on #${pr.prNumber} ` +
+    `at head ${pr.headSha.slice(0, 7)} (${String(last.worktree_path ?? last.error ?? "path unread")}, ` +
+    `${String(last.owner_recovery_reason ?? cause)}${staged}) — cause ${cause} ${probe}; next retry ${nextRetryAt}; ` +
+    `judge ${progress.verdict}: ${progress.reason}`;
+  return { reason, escalated, fields: { cause, probe_result: probe, next_retry_at: nextRetryAt,
+    backoff_ms: backoffMs, judge_verdict: progress.verdict, failure_key: failureKey, failure_at: clockFromMillisFn(() => failureAt).iso(),
+    dispatch_held: decline ? "fix_claim_decline" : "fix_dispatch_failed", dispatch_cause_key: escalationKey,
+    ...(escalated ? { dispatch_cause_escalated: escalationKey } : {}) } };
 }
 
-/** A refusal the shared PAUSE gate gave every PR alike (held, or origin unreadable): not this PR's failure. */
-const FLEET_PAUSE_REFUSAL = /PAUSE held on |cannot reach origin to read /;
-
-function dispatchFailureHoldAtHead(pr: OpenPrView, lines: ReadonlyArray<Record<string, unknown>>): FixDispatchHold | undefined {
-  // #15679 hit the backstop on three fleet PAUSE refusals; only a new head lifts it and only a dispatch makes one.
-  const failures = lines.filter((l) => isDetachedFixDispatchFailure(l) && l.pr_number === pr.prNumber && l.head_sha === pr.headSha &&
-    !FLEET_PAUSE_REFUSAL.test(String(l.error ?? "")));
-  if (failures.length < FIX_DISPATCH_FAILED_BACKSTOP) return undefined;
-  const reason =
-    `detached fix dispatch failed before fix.dispatch ${failures.length} times on #${pr.prNumber} at head ` +
-    `${pr.headSha.slice(0, 7)} (${String(failures[failures.length - 1].error)}) — ` +
-    `FIX_DISPATCH_FAILED_BACKSTOP ${FIX_DISPATCH_FAILED_BACKSTOP} reached, no further dispatch is attempted at this head`;
-  const escalated = lines.some((l) => l.step === "sweep.disposed" && l.pr_number === pr.prNumber &&
-    l.head_sha === pr.headSha && l.fix_dispatch_failed_escalated === true);
-  return { reason, fields: { fix_dispatch_failed_escalated: true, dispatch_held: "fix_dispatch_failed" }, escalated };
-}
-
-/** At either backstop, the stand-down; escalates once per (PR, head, reason). */
 async function holdRepeatedFixClaimDecline(
-  pr: OpenPrView,
-  lines: ReadonlyArray<Record<string, unknown>>,
-  escalate: SweepDeps["escalate"],
-  ownerReclaimable?: SweepDeps["fixOwnerReclaimableAtHold"],
+  pr: OpenPrView, hold: FixDispatchHold | undefined, escalate: SweepDeps["escalate"],
 ): Promise<{ reason: string; fields: Record<string, unknown> } | undefined> {
-  const hold = await fixDispatchHoldAtHeadAsync(pr, lines, existsSync, ownerReclaimable);
   if (hold === undefined) return undefined;
-  if (!hold.escalated) await escalate(pr, hold.reason, renderClarificationQuestion(pr, hold.reason, pr.strikeHistory ?? []));
-  return { reason: hold.reason, fields: hold.fields };
-}
-
-/** W1-T5932 — {@link FIX_DISPATCH_FAILED_BACKSTOP} alone, for the CodeQL repair route. */
-async function holdRepeatedFixDispatchFailure(
-  pr: OpenPrView,
-  lines: ReadonlyArray<Record<string, unknown>>,
-  escalate: SweepDeps["escalate"],
-): Promise<{ reason: string; fields: Record<string, unknown> } | undefined> {
-  const hold = dispatchFailureHoldAtHead(pr, lines);
-  if (hold === undefined) return undefined;
-  if (!hold.escalated) await escalate(pr, hold.reason, renderClarificationQuestion(pr, hold.reason, pr.strikeHistory ?? []));
+  if (hold.fields.judge_verdict === "escalate") {
+    if (!hold.escalated) await escalate(pr, hold.reason, renderClarificationQuestion(pr, hold.reason, pr.strikeHistory ?? []));
+    hold.fields.dispatch_cause_escalated = hold.fields.dispatch_cause_key;
+    if (hold.fields.dispatch_held === "fix_claim_decline")
+      hold.fields.fix_claim_decline_escalated = String(hold.fields.cause).replace(/^owner-held:/, "");
+    else hold.fields.fix_dispatch_failed_escalated = true;
+  }
   return { reason: hold.reason, fields: hold.fields };
 }
 
@@ -19410,14 +19452,18 @@ export async function runSweep(
   const memoryHeldSummaries = memoryHeld.map((pr) =>
     lightPassMemoryWaitSummary(pr, sweepDeps, lightPassMemoryWaits.get(lightPassHeadKey(pr))!.sinceMs));
   openPrs = openPrs.filter((pr) => !memoryHeld.includes(pr));
+  const dispatchCauseProgress = new Map<number, FixProgressResult>();
   // W1-T7096: every round this pass dispatches is judged by the judge this pass was given.
   const deps: SweepDeps = {
     ...sweepDeps,
     dispatchFix: (pr, evidence, onPhase, control) => {
       const started = performance.now();
+      const causeProgress = dispatchCauseProgress.get(pr.prNumber);
       try {
         return sweepDeps.dispatchFix(pr,
-          { ...evidence, progressJudge: evidence.progressJudge ?? sweepDeps.fixProgressJudge }, (phase, wait) => {
+          { ...evidence, progressJudge: evidence.progressJudge ?? sweepDeps.fixProgressJudge,
+            ...(causeProgress?.verdict === "change-approach"
+              ? { progressApproach: [evidence.progressApproach, causeProgress.approach].filter(Boolean).join("\n") } : {}) }, (phase, wait) => {
             if (phase === "ci-wait") {
               fixCapacityReleases.get(pr.prNumber)?.();
               fixCapacityReleases.delete(pr.prNumber);
@@ -19832,6 +19878,17 @@ export async function runSweep(
   const baseRedStandDownPrs = new Set<number>();
   const incidentHeldPrs = new Set<number>(); // W1-T5939: blocker reads awaiting-ci, so no stage stall escalates
   const infrastructureBlockerByPr = new Map<number, PrBlocker>(); // W1-T9932: a plan-only infra red's re-run or escalation
+  const dispatchCauseHolds = new Map<number, FixDispatchHold | undefined>();
+  for (const pr of openPrs) {
+    const opts: FixDispatchHoldOptions = { nowMs: now, fleetHold: () => workerAdmissionHoldReason(deps),
+      onProgress: progress => dispatchCauseProgress.set(pr.prNumber, progress) };
+    if (!deps.dryRun) {
+      opts.judge = deps.fixProgressJudge;
+      opts.record = row => appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", ...row });
+    }
+    dispatchCauseHolds.set(pr.prNumber, await fixDispatchHoldAtHeadAsync(pr, ledgerLines, existsSync,
+      deps.dryRun ? undefined : deps.fixOwnerReclaimableAtHold, opts));
+  }
   const strikeLadderRows = [...ledgerLines];
   openPrs = openPrs.map(pr => hasUnspentLadderRefresh(strikeLadderRows, pr.taskId, pr.prNumber)
     ? { ...pr, priorStrikes: fixCeilingInForce(pr, policy.strikeCap, policy.clarify) }
@@ -21189,7 +21246,7 @@ export async function runSweep(
     // The rule row's sentence predicts the dispatch; when this pass stood it down, say so and why —
     // and a backstop hold names itself on EVERY pass, the light pass included.
     const repairArm = disposition === "conflicted" || disposition === "blocked-fixable";
-    const dispatchHold = repairArm && !acted ? fixDispatchHoldAtHead(pr, ledgerLines) : undefined;
+    const dispatchHold = repairArm && !acted ? dispatchCauseHolds.get(pr.prNumber) : undefined;
     const notDispatched = repairArm && !acted && !deps.dryRun
       ? dispatchHold?.reason ?? standDownReason ?? actionError ?? "no dispatch was attempted"
       : undefined;
@@ -21204,7 +21261,7 @@ export async function runSweep(
           ? ` — mergeability unread this pass; last known "${refusedMergeState.state}" for head ${pr.headSha.slice(0, 7)} ` +
             `was read against main ${refusedMergeState.mainSha?.slice(0, 7) ?? "(unrecorded)"}, and main is now ${mainTipSha.slice(0, 7)}, so it is not inherited (W1-T11166)`
           : "");
-    if (dispatchHold !== undefined) extraDisposedFields = { ...extraDisposedFields, dispatch_held: dispatchHold.fields.dispatch_held };
+    if (dispatchHold !== undefined) extraDisposedFields = { ...extraDisposedFields, ...dispatchHold.fields };
     const blocker: PrBlocker = incidentHeldPrs.has(pr.prNumber) ? "awaiting-ci" : infrastructureBlockerByPr.get(pr.prNumber) ??
       finalBlocker(ruleBlockerByIndex.get(index)!, {
       baseRedStandDown: baseRedStandDownPrs.has(pr.prNumber),
@@ -22220,7 +22277,7 @@ export async function runSweep(
     let heldEscalationDedup: string | undefined;
     if ((disposition === "conflicted" || disposition === "blocked-fixable") &&
         !inFlightFixKeys.has(`${fixLedgerTaskIdFor(pr) ?? ""}@${pr.headSha}`) &&
-        !await fixDispatchHoldAtHeadAsync(pr, ledgerLines, existsSync, deps.fixOwnerReclaimableAtHold)) {
+        !dispatchCauseHolds.get(pr.prNumber)) {
       const handoff = terminalFixDesignHandoff(pr, ledgerLines, () => readFixRoundArchiveRows(deps.ledgerPath));
       if (handoff.kind === "handoff") {
         const held = handoff.producer;
@@ -22280,7 +22337,7 @@ export async function runSweep(
     if ((disposition === "conflicted" || disposition === "blocked-fixable") && terminalDesignHold === undefined &&
         !designReleasedByBody && prior.fixed.has(`${pr.prNumber}@${pr.headSha}`) &&
         !inFlightFixKeys.has(`${fixLedgerTaskIdFor(pr) ?? ""}@${pr.headSha}`) &&
-        !await fixDispatchHoldAtHeadAsync(pr, ledgerLines, existsSync, deps.fixOwnerReclaimableAtHold)) {
+        !dispatchCauseHolds.get(pr.prNumber)) {
       let contractRevision: string | undefined;
       let readable = true;
       // A run-unfiled PR's task is synthetic (`PR-<n>`): its body, not a plan record, is the contract it read.
@@ -22945,7 +23002,7 @@ export async function runSweep(
                   standDownReason = reason;
                   break;
                 }
-                const retryHold = await holdRepeatedFixClaimDecline(pr, armLines, deps.escalate, deps.fixOwnerReclaimableAtHold);
+                const retryHold = await holdRepeatedFixClaimDecline(pr, dispatchCauseHolds.get(pr.prNumber), deps.escalate);
                 if (retryHold !== undefined) {
                   acted = false;
                   standDownReason = retryHold.reason;
@@ -23402,7 +23459,7 @@ export async function runSweep(
                   standDownReason = hold;
                   break;
                 }
-                const codeqlFailureHold = await holdRepeatedFixDispatchFailure(pr, ledgerLines, deps.escalate);
+                const codeqlFailureHold = await holdRepeatedFixClaimDecline(pr, dispatchCauseHolds.get(pr.prNumber), deps.escalate);
                 if (codeqlFailureHold) {
                   extraDisposedFields = { ...extraDisposedFields, ...codeqlFailureHold.fields };
                   acted = false;
@@ -24052,7 +24109,7 @@ export async function runSweep(
                 standDownReason = reason;
                 break;
               }
-              const declineHold = await holdRepeatedFixClaimDecline(pr, ledgerLines, deps.escalate, deps.fixOwnerReclaimableAtHold);
+              const declineHold = await holdRepeatedFixClaimDecline(pr, dispatchCauseHolds.get(pr.prNumber), deps.escalate);
               if (declineHold) {
                 extraDisposedFields = { ...extraDisposedFields, ...declineHold.fields };
                 acted = false;
@@ -24271,7 +24328,7 @@ export async function runSweep(
                 standDownReason = stackHold.reason;
                 break;
               }
-              const conflictedDeclineHold = await holdRepeatedFixClaimDecline(pr, ledgerLines, deps.escalate, deps.fixOwnerReclaimableAtHold);
+              const conflictedDeclineHold = await holdRepeatedFixClaimDecline(pr, dispatchCauseHolds.get(pr.prNumber), deps.escalate);
               if (conflictedDeclineHold) {
                 extraDisposedFields = { ...extraDisposedFields, ...conflictedDeclineHold.fields };
                 acted = false;
