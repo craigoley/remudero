@@ -1273,7 +1273,7 @@ test("W1-T9114: a fix dispatch the sweep decides is spawned as a child before an
     const appended: Array<Record<string, unknown>> = [];
     const logged: Array<Record<string, unknown>> = [];
     // The task's earlier head's dispatch keeps the no-dispatch re-arm from firing, as in the sweep's own detached-dispatch fixtures.
-    const seed = [{ step: "fix.dispatch", task_id: FIX_TASK, head_sha: "81c30d80bb" }];
+    const seed: Array<Record<string, unknown>> = [];
     let inProcess = 0;
     const deps = (over: Partial<SweepDeps> = {}): SweepDeps => ({
       arm: () => {}, close: () => {}, escalate: () => {}, runId: "SWEEP-W1-T9114", now: () => Date.parse("2026-10-05T23:00:00Z"),
@@ -1341,7 +1341,7 @@ test("W1-T9114: abandoned child fix admission never falls back in process and re
   let finish!: (value: RunResult) => void;
   const settled = new Promise<RunResult>((resolve) => { finish = resolve; });
   try {
-    const clock = fixedClock(Date.parse("2026-10-05T23:00:00Z"));
+    let nowMs = Date.parse("2026-10-05T23:00:00Z");
     const appended: Array<Record<string, unknown>> = [];
     const seed = [{ step: "fix.dispatch", task_id: FIX_TASK, head_sha: "81c30d80bb" }];
     let inProcess = 0;
@@ -1361,7 +1361,7 @@ test("W1-T9114: abandoned child fix admission never falls back in process and re
         waited_on: [{ what: "detached", kind: "fix-dispatch", settled_after_ms: 1_000 }] }],
     }));
     const deps: SweepDeps = {
-      arm: () => {}, close: () => {}, escalate: () => {}, runId: "SWEEP-W1-T9114", now: () => clock.now(),
+      arm: () => {}, close: () => {}, escalate: () => {}, runId: "SWEEP-W1-T9114", now: () => nowMs,
       ledgerPath: join(f.stateRoot, "ledger.ndjson"), readLedger: () => [...seed, ...appended],
       appendLine: (_path, row) => { appended.push(row); }, log: f.log, detachFixWait: true,
       dispatchFix: () => { inProcess += 1; },
@@ -1371,7 +1371,7 @@ test("W1-T9114: abandoned child fix admission never falls back in process and re
         return { admitted: true, release: () => { heldCapacity -= 1; releasedCapacity += 1; } };
       },
     };
-    for (const control of ["STOP", "PAUSE"] as const) {
+    const rejectedAttempt = async (control: "STOP" | "PAUSE") => {
       hold = control;
       await runSweep([fixPr()], deps);
       await drainDetachedSweepActions();
@@ -1383,8 +1383,18 @@ test("W1-T9114: abandoned child fix admission never falls back in process and re
       assert.equal(refusal?.reason, "admission-abandoned");
       assert.equal(refusal?.head_sha, FIX_HEAD);
       assert.equal(refusal?.admission_waited_ms, 23);
-    }
+    };
+    await rejectedAttempt("STOP");
+    await runSweep([fixPr()], deps); // first observation starts the retry delay for this untimestamped refusal
+    await drainDetachedSweepActions();
+    assert.equal(attempts, 1, "an unprobed failure waits one pass before retrying");
+    nowMs += 2 * 60_000;
+    await rejectedAttempt("PAUSE");
     assert.equal(attempts, 2, "the same head is re-admitted after abandonment, without resetting retry state");
+    await runSweep([fixPr()], deps); // observe the second failure and its doubled backoff
+    await drainDetachedSweepActions();
+    assert.equal(attempts, 2, "the doubled backoff holds the next pass");
+    nowMs += 3 * 60_000;
     hold = undefined;
     await runSweep([fixPr()], deps);
     await drainDetachedSweepActions();
