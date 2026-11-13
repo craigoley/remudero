@@ -1,4 +1,5 @@
 import { readdirSync } from "node:fs";
+import { fixedClock, systemClock } from "./clock.js";
 import { readLedgerUnionRecordsSync } from "./ledger-union.js";
 
 export interface DraftDeploymentStats {
@@ -9,6 +10,21 @@ export interface DraftDeploymentStats {
 }
 
 export type DraftStats = Record<string, DraftDeploymentStats>;
+export type DraftOutcome = "clean" | "not-clean" | "contract-failed" | "refused" | "failed";
+interface DraftMeasurements {
+  costedAttempts: number;
+  recent: Array<{ outcome: unknown; tsMs: number }>;
+}
+// Per-call evidence belongs to the snapshot's lifetime; aggregate-only callers remain supported.
+const measurements = new WeakMap<DraftDeploymentStats, DraftMeasurements>();
+function evidence(stats: DraftDeploymentStats): DraftMeasurements {
+  let value = measurements.get(stats);
+  if (!value) {
+    value = { costedAttempts: stats.costUsd > 0 ? stats.attempts : 0, recent: [] };
+    measurements.set(stats, value);
+  }
+  return value;
+}
 export interface DraftArm { deployment: string; estimatedCostUsd: number }
 export interface DraftPosterior extends DraftArm {
   alpha: number;
@@ -22,6 +38,7 @@ export interface DraftChoice {
   reason: "thompson-clean-per-dollar";
   posterior: DraftPosterior;
   arms: DraftPosterior[];
+  skipped?: Array<{ deployment: string; count: number; until: string }>;
 }
 
 export type DraftRoutingLog = (step: string, extra?: Record<string, unknown>) => void;
@@ -54,6 +71,10 @@ export function createDraftStatsSession(stateDir: string, lane: string, log: Dra
       if (stats && step === "draft.routing.outcome") {
         for (const [deployment, delta] of Object.entries(draftStatsFromRows([{ step, ...extra }], lane))) {
           const measured = stats[deployment] ??= { attempts: 0, clean: 0, contractFailures: 0, costUsd: 0 };
+          const current = evidence(measured);
+          const incoming = evidence(delta);
+          current.costedAttempts += incoming.costedAttempts;
+          current.recent = [...current.recent, ...incoming.recent].slice(-10);
           measured.attempts += delta.attempts;
           measured.clean += delta.clean;
           measured.contractFailures += delta.contractFailures;
@@ -77,9 +98,18 @@ function gamma(shape: number, random: () => number): number {
 }
 
 /** Row order supplies a weak Beta prior; measured outcomes and dollars determine traffic. */
-export function chooseDraftDeployment(stats: DraftStats, candidates: readonly DraftArm[], random: () => number = Math.random): DraftChoice {
+export function chooseDraftDeployment(stats: DraftStats, candidates: readonly DraftArm[], random: () => number = Math.random, now = systemClock.now()): DraftChoice {
   if (candidates.length === 0) throw new Error("draft routing has no eligible deployments");
-  const arms = candidates.map((arm, index): DraftPosterior => {
+  const blocked = candidates.flatMap((arm) => {
+    const measured = stats[arm.deployment];
+    const recent = measured && evidence(measured).recent;
+    if (!recent || recent.length < 10 || !recent.every((r) => r.outcome === "refused" || r.outcome === "failed")) return [];
+    const until = recent[recent.length - 1]!.tsMs + 60 * 60 * 1000;
+    return Number.isFinite(until) && now < until ? [{ deployment: arm.deployment, count: recent.length, until: fixedClock(until).iso() }] : [];
+  });
+  const skipped = blocked.length < candidates.length ? blocked : [];
+  const arms = candidates.flatMap((arm, index): DraftPosterior[] => {
+    if (skipped.some((skip) => skip.deployment === arm.deployment)) return [];
     const measured = stats[arm.deployment];
     const attempts = measured?.attempts ?? 0;
     const clean = Math.min(attempts, measured?.clean ?? 0);
@@ -88,13 +118,14 @@ export function chooseDraftDeployment(stats: DraftStats, candidates: readonly Dr
     const a = gamma(alpha, random);
     const b = gamma(beta, random);
     const sampledCleanRate = a / (a + b);
-    const costPerAttemptUsd = measured && measured.costUsd > 0 && attempts > 0
-      ? measured.costUsd / attempts : arm.estimatedCostUsd;
+    const costedAttempts = measured ? evidence(measured).costedAttempts : 0;
+    const costPerAttemptUsd = measured && costedAttempts > 0
+      ? measured.costUsd / costedAttempts : arm.estimatedCostUsd;
     if (!(costPerAttemptUsd > 0) || !Number.isFinite(costPerAttemptUsd)) throw new Error(`invalid draft cost for ${arm.deployment}`);
-    return { ...arm, alpha, beta, sampledCleanRate, costPerAttemptUsd, cleanPerDollar: sampledCleanRate / costPerAttemptUsd };
+    return [{ ...arm, alpha, beta, sampledCleanRate, costPerAttemptUsd, cleanPerDollar: sampledCleanRate / costPerAttemptUsd }];
   });
   const posterior = arms.reduce((best, arm) => arm.cleanPerDollar > best.cleanPerDollar ? arm : best);
-  return { deployment: posterior.deployment, reason: "thompson-clean-per-dollar", posterior, arms };
+  return { deployment: posterior.deployment, reason: "thompson-clean-per-dollar", posterior, arms, ...(skipped.length ? { skipped } : {}) };
 }
 
 /** Correlate legacy outcomes by run and proposal, never crediting an earlier relint's deployment. */
@@ -115,9 +146,13 @@ export function draftStatsFromRows(rows: readonly Record<string, unknown>[], lan
       if (row.quality_sample === "not-invoked-budget-refusal" && row.draft_cost_usd === 0 &&
           row.clean === false && row.contract_failed === false) continue;
       const measured = arm(row.deployment);
+      const detail = evidence(measured);
+      const dollars = cost({ cost_usd: row.draft_cost_usd });
+      if (dollars > 0) detail.costedAttempts++;
+      detail.recent = [...detail.recent, { outcome: row.outcome, tsMs: typeof row.ts === "string" ? Date.parse(row.ts) : NaN }].slice(-10);
       measured.attempts++;
-      measured.costUsd += cost({ cost_usd: row.draft_cost_usd });
-      if (row.clean === true) measured.clean++;
+      measured.costUsd += dollars;
+      if (row.clean === true && row.outcome !== "refused" && row.outcome !== "failed") measured.clean++;
       if (row.contract_failed === true) measured.contractFailures++;
       continue;
     }
@@ -129,6 +164,9 @@ export function draftStatsFromRows(rows: readonly Record<string, unknown>[], lan
       const deployment = row.routed_model ?? row.model;
       if (typeof deployment !== "string" || (row.provider !== undefined && row.provider !== "cash" && row.provider !== "openweight")) continue;
       const measured = arm(deployment);
+      const detail = evidence(measured);
+      if (cost(row) > 0) detail.costedAttempts++;
+      detail.recent = [...detail.recent, { outcome: undefined, tsMs: NaN }].slice(-10);
       measured.attempts++;
       measured.costUsd += cost(row);
       pending.set(key, measured);
