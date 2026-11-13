@@ -183,6 +183,47 @@ test("a definite deployment loss still escalates when another cash deployment is
   assert.ok(f.alerts[0].detail.includes(previous));
 });
 
+test("confirmed deployments in a partial prior snapshot remain comparable", async (t) => {
+  const f = fixture(t);
+  const names = ["deployment-a", "deployment-b", "deployment-c"];
+  const endpoints = Object.fromEntries(names.map((name) => [name, `https://${name}.openai.azure.com`])) as Record<string, string>;
+  t.mock.property(process, "env", { ...process.env,
+    RMD_CASH_A_KEY: "a-key", RMD_CASH_B_KEY: "b-key", RMD_CASH_C_KEY: "c-key" });
+  let missingA = false;
+  t.mock.method(globalThis, "fetch", async (url: string | URL | Request) => {
+    const parsed = new URL(String(url));
+    const name = decodeURIComponent(parsed.pathname.split("/").at(-3) ?? "");
+    if (name.startsWith("rmd-absent-")) return Response.json({ error: { code: "DeploymentNotFound" } }, { status: 404 });
+    if (name === "deployment-c") return new Response("offline", { status: 503 });
+    if (name === "deployment-a" && missingA) {
+      return Response.json({ error: { code: "DeploymentNotFound" } }, { status: 404 });
+    }
+    return Response.json({ error: { code: "OperationNotSupported" } }, { status: 400 });
+  });
+  const config = { workerProviders: { enabled: ["claude", "cash"] as ("claude" | "cash")[], cashDeploymentEndpoints: {
+    "deployment-a": { endpoint: endpoints["deployment-a"], keyEnv: "RMD_CASH_A_KEY" },
+    "deployment-b": { endpoint: endpoints["deployment-b"], keyEnv: "RMD_CASH_B_KEY" },
+    "deployment-c": { endpoint: endpoints["deployment-c"], keyEnv: "RMD_CASH_C_KEY" },
+  } } };
+  await f.start(config);
+  const previous = f.rows().at(-1)!;
+  assert.equal(previous.cash_read, "unreadable");
+  assert.deepEqual(previous.cash_deployments, ["deployment-a", "deployment-b"]);
+  assert.deepEqual(previous.cash_unreadable_deployments, ["deployment-c"]);
+  missingA = true;
+  await f.start(config);
+  const current = f.rows().at(-1)!;
+  assert.equal(current.cash_read, "unreadable");
+  assert.deepEqual(current.cash_deployments, ["deployment-b"]);
+  assert.deepEqual(current.cash_confirmed_absent_deployments, ["deployment-a"]);
+  assert.deepEqual(current.cash_unreadable_deployments, ["deployment-c"]);
+  assert.equal(f.alerts.length, 1);
+  assert.ok(f.alerts[0].detail.includes("cash:deployment-a"));
+  assert.ok(!f.alerts[0].detail.includes("cash:deployment-b"));
+  assert.ok(!f.alerts[0].detail.includes("cash:deployment-c"));
+  assert.ok(f.alerts[0].detail.includes(String(previous.ts)));
+});
+
 test("W1-T12175 criterion 2: a loss names every provider, config file and last available start", async (t) => {
   const f = fixture(t);
   const previous = await f.start({ workerProviders: { enabled: ["claude", "codex", "cash"] } },

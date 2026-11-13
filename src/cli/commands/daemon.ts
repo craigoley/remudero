@@ -299,9 +299,12 @@ export async function recordWorkerProvidersAtStart(opts: {
       throw new Error(`provider startup history unreadable: ${[...read.unread, ...read.unclassified].join(", ")}; torn=${read.torn}`);
     }
     previous = read.rows.filter((row) => row.step === step).sort((a, b) => Date.parse(String(b.ts)) - Date.parse(String(a.ts)))[0];
+    const previousCashUnreadableValid = previous?.cash_unreadable_deployments === undefined ||
+      (Array.isArray(previous.cash_unreadable_deployments) && previous.cash_unreadable_deployments.every((name) => typeof name === "string"));
     if (previous && (typeof previous.ts !== "string" || !Number.isFinite(Date.parse(previous.ts)) ||
       !Array.isArray(previous.enabled_providers) || !previous.enabled_providers.every(isWorkerProviderId) ||
-      !Array.isArray(previous.cash_deployments) || !previous.cash_deployments.every((name) => typeof name === "string"))) {
+      !Array.isArray(previous.cash_deployments) || !previous.cash_deployments.every((name) => typeof name === "string") ||
+      !previousCashUnreadableValid)) {
       throw new Error("provider startup history contains a malformed snapshot");
     }
   } catch (error) {
@@ -314,7 +317,11 @@ export async function recordWorkerProvidersAtStart(opts: {
   let cashConfirmedAbsent: string[] = [];
   const cashErrors: string[] = [];
   if (enabled.includes("cash")) {
-    const priorCash = previous?.cash_read === "readable" && Array.isArray(previous.cash_deployments)
+    // New partial snapshots still carry positively confirmed reachable IDs in cash_deployments;
+    // only legacy unreadable rows lack the unreadable-list field that distinguishes this contract.
+    const previousCashComparable = previous?.cash_read === "readable" ||
+      Array.isArray(previous?.cash_unreadable_deployments);
+    const priorCash = previousCashComparable && Array.isArray(previous?.cash_deployments)
       ? previous.cash_deployments as string[] : [];
     const reading = await reachableCashDeployments(opts.config, priorCash);
     cash = reading.deployments;
@@ -333,7 +340,9 @@ export async function recordWorkerProvidersAtStart(opts: {
   if (!previous) return;
   const earlier = previous.enabled_providers as string[];
   const lost = lostWorkerProviders(earlier, enabled);
-  if (previous.cash_read === "readable") {
+  const previousCashComparable = previous.cash_read === "readable" ||
+    Array.isArray(previous.cash_unreadable_deployments);
+  if (previousCashComparable) {
     const unreadable = new Set(cashUnreadable);
     lost.push(...lostWorkerProviders(previous.cash_deployments as string[], cash)
       .filter((name) => !unreadable.has(name)).map((name) => `cash:${name}`));
