@@ -6,7 +6,8 @@ import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative } from "node:path";
 import { test } from "node:test";
 import { pathToFileURL } from "node:url";
-import { loadMounts, mountsPath } from "#src/lib/mounts.js";
+import type { WorkerResult } from "#src/lib/worker.js";
+import { codexCandidatesForCapability, resolveCodexCapability, type CodexModelInfo, type ProviderCapacity } from "#src/lib/worker-provider.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 // W1-T12516: the Codex capacity probe thread used a bare `--import tsx` preload, which Node resolves
@@ -24,21 +25,19 @@ const LIMITS = {
   rateLimitsByLimitId: { codex: { limitId: "codex", primary: { usedPercent: 20 } } },
 };
 
-/** Every Codex id the committed ladder names, so selection resolves exactly as production would. */
-function ladderModels(): Array<Record<string, unknown>> {
-  const ladder = loadMounts(mountsPath(REPO_ROOT)).capabilities;
-  assert.ok(ladder, "positive control: Core's mounts carry a capability ladder");
-  const ids = new Set<string>();
-  for (const efforts of Object.values(ladder.codex)) for (const list of Object.values(efforts)) for (const id of list) ids.add(id);
-  assert.ok(ids.size > 0, "positive control: the ladder names at least one Codex model");
-  return [...ids].sort().map((id) => ({
-    id, model: id, displayName: id, defaultReasoningEffort: "medium",
-    supportedReasoningEfforts: ["low", "medium", "high", "xhigh"].map((reasoningEffort) => ({ reasoningEffort })),
+/** The children's config.root carries no mounts table, so an unspecified request routes over the
+ *  built-in fallback candidates; the stub offers exactly those, and the head is the expected choice. */
+const CANDIDATES = codexCandidatesForCapability(undefined, resolveCodexCapability(undefined, undefined).tier, undefined);
+function candidateModels(): CodexModelInfo[] {
+  assert.ok(CANDIDATES.length > 0, "positive control: the fallback ladder names at least one Codex model");
+  return CANDIDATES.map((id) => ({
+    id, displayName: id, defaultReasoningEffort: "medium",
+    supportedReasoningEfforts: ["low", "medium", "high"].map((reasoningEffort) => ({ reasoningEffort })),
   }));
 }
 
 /** A deterministic stand-in for the Codex CLI: `app-server` answers the three RPCs; `exec` records its launch. */
-function codexStub(path: string, log: string, models: Array<Record<string, unknown>>): void {
+function codexStub(path: string, log: string, models: CodexModelInfo[]): void {
   writeFileSync(path, `#!${process.execPath}
 const { appendFileSync } = require("node:fs");
 const log = ${JSON.stringify(log)};
@@ -138,12 +137,12 @@ async function launchFrom(label: "target" | "core", cwdFor: (target: string) => 
     const home = join(root, "home"), privateTmp = join(root, "tmp"), codexHome = join(root, "codex-home");
     for (const dir of [target, cli, stateRoot, home, privateTmp, codexHome]) mkdirSync(dir, { recursive: true });
     const log = join(cli, "calls.ndjson"), codexBin = join(cli, "codex");
-    codexStub(codexBin, log, ladderModels());
+    codexStub(codexBin, log, candidateModels());
     assertTargetCarriesNoLoader(target, "before");
     const cwd = cwdFor(target);
     const run = await runIsolatedChild(cwd, {
-      workerProviderUrl: pathToFileURL(join(REPO_ROOT, "src", "lib", "worker-provider.ts")).href,
-      workerUrl: pathToFileURL(join(REPO_ROOT, "src", "lib", "worker.ts")).href,
+      workerProviderUrl: pathToFileURL(join(REPO_ROOT, "src/lib/worker-provider.ts")).href,
+      workerUrl: pathToFileURL(join(REPO_ROOT, "src/lib/worker.ts")).href,
       settingsFile: join(REPO_ROOT, "settings", "worker.json"),
       stateRoot, codexBin, codexHome,
     }, home, privateTmp);
@@ -154,8 +153,8 @@ async function launchFrom(label: "target" | "core", cwdFor: (target: string) => 
     const line = run.stdout.split("\n").find((entry) => entry.startsWith("RESULT "));
     assert.ok(line, `the ${label} child reports a result\n${evidence}`);
     const result = JSON.parse(line.slice("RESULT ".length)) as {
-      cwd: string; capacity: { readable: boolean; model?: string; detail: string | null };
-      launch: { provider?: string; text?: string; isError?: boolean; routedModel?: string; error?: string };
+      cwd: string; capacity: Pick<ProviderCapacity, "readable" | "model"> & { detail: string | null };
+      launch: Partial<Pick<WorkerResult, "provider" | "text" | "isError" | "routedModel">> & { error?: string };
     };
     const calls = existsSync(log)
       ? readFileSync(log, "utf8").trim().split("\n").map((entry) => JSON.parse(entry) as { mode: string; method?: string; argv?: string[]; cwd: string })
@@ -171,7 +170,7 @@ function assertUsableCapacityAndLaunch(run: Awaited<ReturnType<typeof launchFrom
   assert.equal(result.cwd, cwd, "the child ran in the cwd it was given");
   assert.doesNotMatch(result.capacity.detail ?? "", /tsx|worker error|failed to start/i, evidence);
   assert.equal(result.capacity.readable, true, `the real off-thread probe reads usable capacity: ${result.capacity.detail}\n${evidence}`);
-  assert.ok(result.capacity.model, "the probe selected a Codex model");
+  assert.equal(result.capacity.model, CANDIDATES[0], "the probe selected the head candidate from the stub's answer");
   const appServerInits = calls.filter((call) => call.mode === "app-server" && call.method === "initialize");
   // The direct read and spawnWorker's routing read each follow a cache clear; the launch's attribution
   // re-reads may add sessions, so the floor is two and every session completes all three RPCs.
