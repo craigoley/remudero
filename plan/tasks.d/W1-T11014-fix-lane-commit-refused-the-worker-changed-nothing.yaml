@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: high
   priority: 1.2
   status: queued
@@ -73,3 +73,13 @@
     (plan/seeds/test-restructure-2026-10-16/proposed-map.tsv:1889; plan/tasks.d/W1-T7748-*.yaml).
     Settled by lookup: is the new filename available in test/triage? -> yes, no file of that name exists there (Glob
     test/triage/*.test.ts), and test/helpers/run-task-test.ts exists for the import.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.88
+    reasons:
+      - "The filed scope explicitly adds fix.ts to reach the production sweep path identified in the rationale, aligning the proposed recovery with the measured defect."
+      - "Acceptance requires other commit refusals to remain unaffected and unchanged recovery to stop without another recovery or push."
+      - "The filing describes recovery before push and excludes secrets, permissions, deletion, and merge/deploy/review policy changes; the supplied gates identify no failed check or operator-only decision."
+    judged_at: "2026-11-13T04:56:53.167Z"
+    pin: "9ca81156a24127b50b9a96ea9ed72dd93a31342833c84c0c8aaa355a5d3de712"
