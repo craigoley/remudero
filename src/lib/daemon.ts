@@ -4350,15 +4350,20 @@ export async function runDaemon(
   const ledgerReader = deps.readLedgerLines;
   let tickLedgerActive = false;
   let tickLedger: { lines: readonly string[] } | { error: unknown } | undefined;
-  if (ledgerReader) deps = { ...deps, readLedgerLines: () => {
-    if (!tickLedgerActive) return ledgerReader();
-    if (tickLedger === undefined) {
-      try { tickLedger = { lines: ledgerReader() }; }
-      catch (reason) { tickLedger = { error: reason }; }
-    }
-    if ("error" in tickLedger) throw tickLedger.error;
-    return tickLedger.lines;
-  } };
+  if (ledgerReader) deps = new Proxy(deps, {
+    get(target, property, receiver) {
+      if (property !== "readLedgerLines") return Reflect.get(target, property, receiver);
+      return () => {
+        if (!tickLedgerActive) return ledgerReader();
+        if (tickLedger === undefined) {
+          try { tickLedger = { lines: ledgerReader() }; }
+          catch (reason) { tickLedger = { error: reason }; }
+        }
+        if ("error" in tickLedger) throw tickLedger.error;
+        return tickLedger.lines;
+      };
+    },
+  });
   const pollIntervalMs = opts.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
   // W1-T1044: see DaemonOpts.sweepWallClockBoundMs's own doc — POLICY DATA (rule 2), threaded
   // by the real `rmd daemon` entry, defaulted here for a direct/test caller that omits it.
