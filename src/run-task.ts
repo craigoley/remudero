@@ -1311,6 +1311,7 @@ import {
   type LedgerGrepFsDeps,
 } from "./lib/ledger-grep.js";
 import { routingAbCommand } from "./lib/routing-experiments.js";
+import { askDecisionModel, decisionsCommand } from "./lib/decision-model.js";
 import {
   PROGRESS_WATCHDOG_READ_STEPS,
   captureDiagnosticsBundle,
@@ -2996,7 +2997,7 @@ import {
   liveWritesExempt,
   LIVE_WRITE_OVERRIDE_ENV,
 } from "./lib/live-write-guard.js";
-import { checkSharedPause, disposeSharedPauseRefresh, prepareSharedPause, requestKick, consumeStop, isQuietHours, requestFleetPause, requestPause, requestStop, restartInPlaceVerb, resumeFleet, resumeFleetWide, sharedPauseRef, stopDetail, type SharedPauseGitDeps } from "./lib/fleet-control.js";
+import { checkSharedPause, disposeSharedPauseRefresh, prepareSharedPause, requestKick, consumeStop, isQuietHours, pauseHoldSummary, readSharedPause, requestFleetPause, requestPause, requestStop, restartInPlaceVerb, resumeFleet, resumeFleetWide, sharedPauseRef, stopDetail, type SharedPauseGitDeps } from "./lib/fleet-control.js";
 import { resolvePauseTarget, type PauseTarget } from "./lib/pause-target.js";
 import { parseInstanceRegistry } from "./lib/instance-registry.js";
 import { openPlannerGitCredential, plannerHostGitCredential, plannerPrWriteToken } from "./lib/secret-boundary.js";
@@ -34191,7 +34192,7 @@ async function pauseTargetOrRefuse(verb: "pause" | "resume", rest: string[], con
 }
 
 /**
- * `rmd pause [--instance <name>] [--reason <text>]` — drain-and-hold ONE instance (W1-T11).
+ * `rmd pause [--instance <name>] --reason <text>` — drain-and-hold ONE instance (W1-T11).
  * Writes that instance's PAUSE flag under its own state root. No new spawn after the current
  * tick; an in-flight task ALWAYS runs to completion (verdict + merge).
  *
@@ -34201,9 +34202,22 @@ async function pauseTargetOrRefuse(verb: "pause" | "resume", rest: string[], con
  * explicit act, `rmd pause --fleet`, which writes no instance flag.
  */
 async function pauseCommand(rest: string[]): Promise<number> {
+  // W1-T12457: a guessed flag, a bare call or --status never holds anything; a hold needs a reason.
+  const usage = `usage: ${commandSyntax("pause")}`;
+  const badArg = unknownArgError("pause", rest, ["--instance", "--reason"], ["--fleet", "--status"]);
+  if (badArg) {
+    console.error(`${badArg} — nothing was changed.\n${usage}`);
+    return 2;
+  }
   const config = loadConfig();
+  if (rest.length === 0 || rest.includes("--status")) return await pauseStatus(rest, config);
   const runId = `FLEET-${Date.now()}`;
-  const reason = flagValue(rest, "--reason");
+  const given = flagValue(rest, "--reason");
+  const reason = given?.trim() ? given : undefined;
+  if (reason === undefined) {
+    console.error(`### rmd pause — REFUSED: a hold needs --reason <text>; nothing was changed.\n${usage}`);
+    return 2;
+  }
   if (rest.includes("--fleet")) {
     if (flagValue(rest, "--instance") !== undefined) {
       console.error("### rmd pause — REFUSED: --fleet holds every instance; it cannot be combined with --instance — nothing was changed.");
@@ -34216,7 +34230,7 @@ async function pauseCommand(rest: string[]): Promise<number> {
       step: "fleet.pause",
       scope: "fleet",
       pushed: result.pushed,
-      reason: reason ?? null,
+      reason,
       session_id: result.sessionId,
       actor_evidence: result.actor_evidence,
       expires_at: result.expiresAt,
@@ -34245,7 +34259,7 @@ async function pauseCommand(rest: string[]): Promise<number> {
     instance: target.instance,
     root: target.root,
     resolved_by: target.resolvedBy,
-    reason: reason ?? null,
+    reason,
     session_id: info.sessionId ?? null,
     actor_evidence: info.actor_evidence,
     expires_at: info.expiresAt ?? null,
@@ -34255,6 +34269,24 @@ async function pauseCommand(rest: string[]): Promise<number> {
     `### rmd pause — instance '${target.instance}'${selectedInstanceRegistryEnvPath() === undefined ? ` (${target.root})` : ""} is PAUSED (drain-and-hold). Its in-flight task still ` +
       `reaches merge; it spawns nothing new until \`rmd resume --instance ${target.instance}\`. No other instance is held.`,
   );
+  return 0;
+}
+
+/** W1-T12457 — `rmd pause` alone or with --status: print the instance's and the fleet-wide hold state, write nothing. */
+async function pauseStatus(rest: string[], config: Config): Promise<number> {
+  const lines = ["### rmd pause — read only; nothing was changed."];
+  if (!rest.includes("--fleet") || flagValue(rest, "--instance") !== undefined) {
+    const target = await pauseTargetOrRefuse("pause", rest, config);
+    if (!target) return 2;
+    const hold = pauseHoldSummary(target.root);
+    lines.push(hold === undefined
+      ? `instance '${target.instance}': not paused. To hold it: rmd pause --instance ${target.instance} --reason <text>`
+      : `instance '${target.instance}': PAUSED — ${hold}. To clear it: rmd resume --instance ${target.instance}`);
+  }
+  const shared = readSharedPause(realDeps().sharedPauseGit);
+  lines.push(`fleet-wide hold (${sharedPauseRef()}): ${shared === "held" ? "HELD — every instance holds new spawns until `rmd resume --fleet`"
+    : shared === "absent" ? "not held" : "unknown — origin could not be read"}`);
+  console.log(lines.join("\n"));
   return 0;
 }
 
@@ -42558,6 +42590,12 @@ const COMMANDS: readonly CommandSpec[] = [
     detail: "W1-T2697: the ledger records every rmd verb but never who ran it — a worker subprocess, the daemon's own in-process loop, and an operator's bare `./bin/rmd` are now distinguished by the `actor` field every appendLedger call stamps at write time (a pre-stamp row reads `unknown`, never guessed). This prints the hand-run census: over the archive+live ledger UNION (never the live file alone — W1-T1013), operator rows are grouped into sessions by their writing process and a thirty-minute gap, each session reduced to its ordered step sequence, and any sequence of length >= 2 recurring across at least the policy floor of DISTINCT CALENDAR DAYS (never session count) is printed with its days and session count. The same census, when the daemon's own cadence supplies a run id, additionally proposes each unproposed recurrence as ONE `plan/feedback/` entry (deduped by sequence signature against the ledger union, `hand_run.census_proposed`) — this command never does that itself. READ-ONLY: writes no ledger line, no feedback entry, no state file.",
   },
   {
+    name: "decisions",
+    syntax: "rmd decisions probe --candidate <name> --input-file <file> --questions-file <file> [--role <role>]",
+    summary: "Ask one decision model one question set about one input, and print the row it wrote.",
+    detail: "W1-T12416: sends ONE paid cash request to a candidate named in the decision_models section of .remudero/mounts.yaml. The questions file is a JSON array of yes-no, choice (2 to 255 typed options) and score (2 to 10 ordered levels) questions, each with a name and instructions; a bad set is refused before any reservation. The request reserves on its input size plus a 64-token output margin against the normal daily cash cap, settles from the reply's usage at the candidate's own price row, and writes one decision.answered row: role, input digest, candidate, deployment, served model, latency, reserved and settled dollars, usage, and each question's distribution, abstention or rejection. A candidate whose cashDeploymentEndpoints entry or key is missing is unavailable and sends nothing. Shadow only: no gate, route or judge reads the row. Exit 0 answered, 1 refused, unavailable or failed, 2 bad usage.",
+  },
+  {
     name: "field-trials",
     syntax: "rmd field-trials [--source <label>=<owner/repo>]... [--ledger <label>=<state-dir>]... [--out-dir <dir>] [--consent <file>] [--case-files <file>] [--max-pages <n>] [--offline] [--revoke <release-id>] [--field-note <out> [--site-registry <file>]] [--json] [--refresh-step <name>=<exit-code|skipped>]... [--refresh-script-blob <sha1>] [--refresh-record-only]",
     summary: "Join the ledger union and GitHub history into observational field-trials aggregates.",
@@ -42782,9 +42820,9 @@ const COMMANDS: readonly CommandSpec[] = [
   },
   {
     name: "pause",
-    syntax: "rmd pause [--instance <name>] [--reason <text>] | rmd pause --fleet [--reason <text>]",
-    summary: "Fleet control: drain-and-hold ONE instance until `rmd resume`; --fleet holds every instance.",
-    detail: "fleet control: PERSISTENT drain-and-hold of ONE instance — the one --instance names, else the instance whose registry state_dir is this config.root; an unresolvable target refuses before writing. In-flight completes, no new spawns; survives across runs until `rmd resume`. --fleet is the separate, explicit fleet-wide hold (refs/rmd-pause/hold), cleared only by `rmd resume --fleet`.",
+    syntax: "rmd pause [--instance <name>] [--status] | rmd pause [--instance <name>] --reason <text> | rmd pause --fleet --reason <text>",
+    summary: "Fleet control: show the pause state, or with --reason hold ONE instance until `rmd resume`.",
+    detail: "fleet control: a bare `rmd pause` only reads: it prints the pause state of the instance and of the fleet-wide hold, changes nothing and exits 0 (--status does the same with any other flag). A hold needs --reason <text>; without it --instance or --fleet refuses and changes nothing, and an unknown flag refuses. With --reason: PERSISTENT drain-and-hold of ONE instance — the one --instance names, else the instance whose registry state_dir is this config.root; an unresolvable target refuses before writing. In-flight completes, no new spawns; survives across runs until `rmd resume`. --fleet is the separate, explicit fleet-wide hold (refs/rmd-pause/hold), cleared only by `rmd resume --fleet`.",
   },
   { name: "resume", syntax: "rmd resume [--instance <name>] | rmd resume --fleet", summary: "Fleet control: clear ONE instance's PAUSE (and any STOP); --fleet clears the fleet-wide hold.", detail: "fleet control: clear the targeted instance's PAUSE (and any STOP), resolved as `rmd pause` resolves it; never deletes the fleet-wide hold, which only `rmd resume --fleet` clears" },
   {
@@ -43696,6 +43734,7 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
     (dir, sinceMs, login) => ghBrokerLoginStatus(dir, sinceMs, { login }),
   )],
   ["routing-ab", async (rest) => await routingAbCommand(rest)],
+  ["decisions", async (rest) => await decisionsCommand(rest, (config, request) => askDecisionModel(config, request), { repoRoot })],
   ["progress-watchdog", (rest) => progressWatchdogCommand(rest)],
   ["live-edits", async (rest) => await liveEditsCommand(rest)],
   ["host-alert", async (rest) => hostAlertCommand(rest)],

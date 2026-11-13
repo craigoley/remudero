@@ -18,7 +18,7 @@
   files:
     - test/selected-registry-shell-consumers.test.ts
     - test/helpers/registry-shell-fixture.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "The test \"selected shell shadow reaches real lifecycle and heartbeat consumers\" passes when the test process runs with HOME set to a new empty temp folder"

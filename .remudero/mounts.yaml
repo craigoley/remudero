@@ -501,6 +501,21 @@ machine_filing_judge:
   max_turns: 400
   context_budget: 60000
 
+# ── Decision models (W1-T12416, operator decision 2026-11-12) ──────────────────
+# A decision model answers many fixed-option questions about ONE input in one paid cash request,
+# with a probability for each option and no output text. Shadow only: `rmd decisions probe` is the
+# one caller, and no gate, route or judge reads the answers. Each row names config the daemon
+# already has, so no config edit is needed: `cash-default` is the default cash endpoint and its
+# key; `{ cash-entry: <key> }` is the endpoint and key env of that existing
+# workerProviders.cashDeploymentEndpoints entry. The worker's own entry for the same deployment
+# name is never read. A missing entry or an unset key makes the candidate unavailable.
+# OBSERVED 2026-11-12 from inside remudero-daemon: the East US resource answered 200 on
+# openai/v1/decisions (446, 385, 332 ms); decision-1 answered 200, 200, then 429. Its 429s came
+# after two calls even at capacity 100 (perhaps a fixed Preview limit); a 429 ends as a named reason.
+decision_models:
+  decisions-eastus: { deployment: gpt-6-luna, shape: openai-decisions, endpoint: { cash-entry: gpt-6.1-terra }, input_usd_per_million: 0.10, output_usd_per_million: 0, read_at: "2026-11-12", source: "OpenAI Decisions guide: $0.10 per 1M uncached input, output not charged. Azure publishes no Decisions price; this is the gpt-6-luna Global input rate on the Azure OpenAI pricing page." }
+  systemone-eastus2: { deployment: decision-1, shape: microsoft-systemone, endpoint: cash-default, input_usd_per_million: 0.042, output_usd_per_million: 0.042, read_at: "2026-11-12", source: "Azure Foundry Microsoft models pricing page: $0.042 per 1M input; output is listed as N/A, but replies carry output tokens, so output is priced at the input rate until W1-T10858 reconciles an invoice." }
+
 # ── max_turns is a RUNAWAY CLIFF, not a work limit (§9 tripwire re-base) ────────
 # The implement/reviewer/fix/diagnose worker lanes stay at a FLAT 400 — a tripwire
 # set WAY above any real run, whose only job is to kill a genuinely runaway loop.
