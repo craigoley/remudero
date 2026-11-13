@@ -4860,7 +4860,12 @@ export async function runTask(
     }
     plan = synced.plan;
   }
-  const lookup = await findTaskInCatalogs(taskId, { byId: plan.byId, stateDir: join(config.root, "state") });
+  // A public hit keeps the original synchronous setup before selected intent is copied.
+  // Only the proven public miss opens the asynchronous private reader.
+  const publicTask = plan.byId.get(taskId);
+  const lookup = publicTask === undefined
+    ? await findTaskInCatalogs(taskId, { byId: plan.byId, stateDir: join(config.root, "state") })
+    : { outcome: "found" as const, task: publicTask, catalog: "public" as const };
   if (lookup.outcome === "unreadable") throw new Error(`task catalog unreadable (${lookup.reason})`);
   const task: RunTaskContext["task"] = lookup.outcome === "found" ? lookup.task : selectTask(plan, taskId);
   const opsCriteriaAtOpen = lookup.outcome === "found" && lookup.catalog === "ops"
@@ -5189,6 +5194,9 @@ export function claimRunTaskFixBranch(input: {
 }
 
 export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost): Promise<RunResult> {
+  if (ctx.task.catalog === "ops" && ctx.opsCriteriaAtOpen === undefined) {
+    throw new Error("ops run has no canonical publication binding");
+  }
   const {
     BRANCH_NAME_CONTRACT_PART,
     syncPlanOrRefuse,

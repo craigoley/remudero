@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
-import { runTask, ghPrCreateFillCommand } from "#test/helpers/run-task-test.js";
+import { runTask, runTaskBody, ghPrCreateFillCommand } from "#test/helpers/run-task-test.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
 import { ghShim, type GhShimRoute } from "#test/helpers/gh-shim.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
@@ -265,4 +265,9 @@ test("the canonical ops constructor refuses missing provenance and malformed cri
   mutable[0]!.claim = "changed later";
   assert.ok(Object.isFrozen(pinned) && Object.isFrozen(pinned.criteria) && Object.isFrozen(pinned.criteria[0]));
   assert.deepEqual(pinned.criteria, criteria);
+});
+
+test("a direct ops run body without a canonical publication binding refuses before effects", async () => {
+  await assert.rejects(runTaskBody({ task: { catalog: "ops" } } as unknown as Parameters<typeof runTaskBody>[0]),
+    /ops run has no canonical publication binding/);
 });
