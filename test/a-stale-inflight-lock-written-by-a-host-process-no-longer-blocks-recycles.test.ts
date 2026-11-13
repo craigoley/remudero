@@ -273,6 +273,19 @@ test("W1-T12316 criterion 5: the daemon's sweep reports a host-written lock sile
   assert.equal(existsSync(join(f.inflight, "reclaimed")), false, "nothing is written to inflight/reclaimed/");
 });
 
+test("W1-T12316: a failed silent-host-lock ledger write reports its reason and keeps the lock", () => {
+  const f = daemonState([3.5 * 3600_000, 3 * 3600_000]);
+  const before = readFileSync(f.lockPath, "utf8");
+
+  const swept = sweepInflightLocksWithReceipts(f.inflight, f.ledgerPath,
+    () => { throw new Error("injected ledger write failure"); });
+
+  assert.deepEqual(swept.unverifiableForeignHost, ["W1-T12114"]);
+  assert.deepEqual(swept.hostLockReport, { written: 0, reason: "host-lock-report-failed: injected ledger write failure" });
+  assert.equal(silentRows(f.ledgerPath).length, 0, "a failed append records no silent-lock row");
+  assert.equal(readFileSync(f.lockPath, "utf8"), before, "a reporting failure never reclaims the host lock");
+});
+
 test("W1-T12316 criterion 6: at most one row per bound of silence, and a run that wrote inside the bound gets none", () => {
   const f = daemonState([3.5 * 3600_000, 3 * 3600_000]);
   sweepInflightLocksWithReceipts(f.inflight, f.ledgerPath);

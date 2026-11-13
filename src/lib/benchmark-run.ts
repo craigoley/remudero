@@ -772,7 +772,9 @@ export function receiptOrphanedAssignments(run: OrphanedRun, ledgerPath: string)
 }
 
 /** The in-flight lock sweep, receipting each reaped lock's run: its holder died without releasing it. */
-export function sweepInflightLocksWithReceipts(inflightDir: string, ledgerPath: string): InflightSweepResult {
+export function sweepInflightLocksWithReceipts(inflightDir: string, ledgerPath: string,
+  writeHostLockReport: typeof appendLedger = appendLedger,
+): InflightSweepResult & { hostLockReport?: { written: number; reason?: string } } {
   const holders = new Map<string, InflightLockInfo>();
   const entries = existsSync(inflightDir) ? readdirSync(inflightDir) : [];
   for (const entry of entries.filter((name) => name.endsWith(".lock"))) {
@@ -789,13 +791,17 @@ export function sweepInflightLocksWithReceipts(inflightDir: string, ledgerPath: 
     const holder = holders.get(taskId);
     return holder && isHostWrittenLock(holder) && Number.isFinite(Date.parse(holder.startedAt)) ? [{ taskId, holder }] : [];
   });
-  if (hostLocks.length > 0) reportSilentHostLocks(hostLocks, ledgerPath);
+  if (hostLocks.length > 0) {
+    const report = reportSilentHostLocks(hostLocks, ledgerPath, writeHostLockReport);
+    if (report.reason) return { ...swept, hostLockReport: report };
+  }
   return swept;
 }
 
 /** W1-T12316: report, never reclaim. A host-written lock's pid lives in the host's pid table, so the
  *  daemon writes one row per bound of its run's silence and leaves the lock to host-side code. */
-function reportSilentHostLocks(locks: Array<{ taskId: string; holder: InflightLockInfo }>, ledgerPath: string): { written: number; reason?: string } {
+function reportSilentHostLocks(locks: Array<{ taskId: string; holder: InflightLockInfo }>, ledgerPath: string,
+  writeLedger: typeof appendLedger): { written: number; reason?: string } {
   let written = 0;
   try {
     const sinceTs = fixedClock(Math.min(...locks.map((l) => Date.parse(l.holder.startedAt)))).iso();
@@ -810,15 +816,15 @@ function reportSilentHostLocks(locks: Array<{ taskId: string; holder: InflightLo
         .map((row) => Date.parse(String(row.ts)))
         .filter(Number.isFinite);
       if (reportedMs.length > 0 && nowMs - Math.max(...reportedMs) < silence.boundMs) continue;
-      appendLedger(ledgerPath, { run_id: holder.run_id, task_id: taskId, step: "daemon.inflight_host_lock_silent", lock_pid: holder.pid,
+      writeLedger(ledgerPath, { run_id: holder.run_id, task_id: taskId, step: "daemon.inflight_host_lock_silent", lock_pid: holder.pid,
         lock_host: holder.host, lock_started_at: holder.startedAt, newest_row_ts: silence.newestRowTs, silent_ms: silence.silentMs,
         bound_ms: silence.boundMs, bound_source: silence.boundSource, bound_samples: silence.boundSamples,
         action: "reported only: the lock stays; host-side code tests the pid" });
       written += 1;
     }
     return { written };
-  } catch {
-    const reason = "host-lock-report-failed";
+  } catch (error) {
+    const reason = `host-lock-report-failed: ${String((error as Error)?.message ?? error)}`;
     return { written, reason };
   }
 }
