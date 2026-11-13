@@ -1,0 +1,74 @@
+- id: W1-T12511
+  title: "The author preflight is advisory: the doctrine and the operator guide name the required checks and the merge-time ratchet verdict as the gate, and the author's static step runs only checks no required CI job runs"
+  repo: remudero
+  depends_on:
+    - W1-T12509
+  priority: 1.2
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # changes what the hand route treats as the gate; a check that leaves the author path must have a required CI job
+  band_meaning: blast-radius
+  origin: operator-session#checking-off-the-author-path-2026-11-13
+  plan_refs:
+    - W1-T373
+    - W1-T6435
+    - W1-T5737
+    - W1-T12509
+  files:
+    - src/lib/ci-parity.ts
+    - scripts/preflight-author.mjs
+    - doctrine/before-you-push/preflight-before-first-push.md
+    - docs/operator-guide.md
+    - test/ci/the-author-preflight-is-advisory-and-its-static-step-runs-only-checks-ci-does-not.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "Each FAST_GATE_STEPS entry carries a `ciJob` field naming the ci.yml job that runs the same check on every pull request (for example jscpd runs in `jscpd-gate`), or no field when no such job exists. The author static step passes `runPreflightFast` only the entries with no `ciJob`, and the receipt lists each skipped entry as left to CI with its job name"
+      proof: "grep: W1-T12511 criterion 1 in test/ci/the-author-preflight-is-advisory-and-its-static-step-runs-only-checks-ci-does-not.test.ts"
+    - claim: "The author preflight still runs the steps no CI job runs: worker-branch-shape and the census precheck with its meta rows (script-ratchet parity, census-precheck parity, instrument-surface)"
+      proof: "grep: W1-T12511 criterion 2 in test/ci/the-author-preflight-is-advisory-and-its-static-step-runs-only-checks-ci-does-not.test.ts"
+    - claim: "A test reads ci.yml and refuses a `ciJob` that names no job, or a job with a job-level `if:` that can skip it on a pull request. Such an entry stays on the author path"
+      proof: "grep: W1-T12511 criterion 3 in test/ci/the-author-preflight-is-advisory-and-its-static-step-runs-only-checks-ci-does-not.test.ts"
+    - claim: "doctrine/before-you-push/preflight-before-first-push.md and docs/operator-guide.md say that the author preflight is advisory, and that the gate is the required checks (remudero-review, ci-gate, security-merge-policy) plus the merge-time ratchet verdict"
+      proof: "grep: the author preflight is advisory in doctrine/before-you-push/preflight-before-first-push.md"
+    - claim: "invariant:no-check-leaves-without-a-ci-job — a static check leaves the author path only when a ci.yml job that runs on every pull request runs it"
+      proof: "grep: W1-T12511 criterion 5 in test/ci/the-author-preflight-is-advisory-and-its-static-step-runs-only-checks-ci-does-not.test.ts"
+  rationale: |
+    The author preflight repeats, on every first push, static gates that ci.yml runs on every pull request, and the doctrine
+    still reads as if the local run were the gate.
+    READ at origin/main 6cf453f7a:
+    - src/lib/ci-parity.ts:2895-3021 FAST_GATE_STEPS has 14 steps: rule-checks, cli-reference, claims, learnings-budget-ratchet,
+      jscpd, comment-load-ratchet, depcruise, api-client-drift, no-hand-rolled-fetch, source-size, lint-plan, self-path-proof,
+      worker-branch-shape and census-precheck. For most, the `reason` says a ci.yml job runs the same check unconditionally
+      (for example "ci.yml's jscpd-gate job runs unconditionally"). ci.yml has a job named claims, learnings-budget-ratchet,
+      comment-load-ratchet, depcruise, api-client-drift, no-hand-rolled-fetch, source-size and lint-plan; the names do not
+      always match (jscpd runs in jscpd-gate), so the link must be stated per step.
+    - src/lib/ci-parity.ts:3579 `runPreflightFast` takes `deps.steps`, so a caller can pass a subset without changing the list.
+    - worker-branch-shape (:3001, scripts/worker-branch-shape.mjs) and census-precheck have no job under .github/workflows/.
+    - scripts/census-precheck.mjs:300-320 (script-ratchet parity, W1-T5737), and :432-490 (instrument-surface) model rules that
+      are asked only before the push.
+    - doctrine/before-you-push/preflight-before-first-push.md already limits the preflight to the first push and says
+      "required hosted checks still gate merge", but describes the local receipt as the check that matters.
+    - GitHub: main's required checks are remudero-review, ci-gate and security-merge-policy (strict false). Because strict is
+      false, the merge-time ratchet verdict (W1-T12509) is what stops two green pull requests from crossing a ceiling together.
+    CHECKED for overlap: W1-T10948 (queued) keeps census and static outcomes complete; it does not change which checks run.
+    W1-T11850 (queued) shares one run between identical keys. No open pull request files a task on this subject.
+  design: |
+    1. Add an optional `ciJob` field to `FastGateStep` and set it on each entry whose check a ci.yml job runs on every pull
+       request. The builder reads ci.yml for each one and sets none on a guess.
+    2. In scripts/preflight-author.mjs, pass `runPreflightFast` the entries with no `ciJob` (`deps.steps`, :3583). Record
+       `leftToCi: [{ job, ciJob }]` on the receipt. run-task and the pre-open gate keep the full list.
+    3. Keep the census precheck in the author preflight unchanged, so its meta rows still run.
+    4. Rewrite the doctrine and the operator guide in plain words: the author preflight is advisory; the gate is the three
+       required checks and the merge-time ratchet verdict.
+    INVARIANT no-check-leaves-without-a-ci-job: a static check leaves the author path only when a ci.yml job that runs on
+    every pull request runs it.
+    NOT IN SCOPE: the pre-push hook (W1-T12510); the worker path's static step.
+  falsifier: |
+    Set `ciJob` on a step whose ci.yml job has a job-level `if:` and criterion 3 must fail. Set `ciJob` on worker-branch-shape
+    and criterion 2 must fail. Restore and require all five to pass.
+  note: |
+    Id W1-T12511 reserved for run-unfiled-1794582098000 with ~/rmd-work/bin/reserve-id.sh.
+    Depends on W1-T12509: the doctrine names the merge-time verdict as part of the gate only once it counts every gate it can.
