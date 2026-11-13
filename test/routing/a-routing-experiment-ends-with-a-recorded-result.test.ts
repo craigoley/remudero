@@ -33,10 +33,8 @@ function outcome(task: string, id: string, pipeline: string, success: boolean, e
 function cohort(count: number, different: boolean): Row[] {
   return labels.flatMap((arm, armIndex) => tasks(arm, count).flatMap(task => {
     const merged = different ? armIndex === 0 : true;
-    const prUrl = `https://example.test/${task}`;
-    return [assignment(task, task), { ts, task_id: task, step: "pr.opened", pr_url: prUrl, head_assignment: task },
-      outcome(task, task, "build", merged,
-        merged ? { selection_assignment_id: undefined, run_id: `sweep-${task}`, pr_url: prUrl } : {})];
+    return [assignment(task, task), outcome(task, task, "build", merged,
+      merged ? { step: "verdict", verdict: "merged" } : {})];
   }));
 }
 
@@ -45,10 +43,12 @@ test("W1-T12142 criterion 1: assigned arms keep build, fix and review outcomes s
   const prUrl = `https://example.test/${task}`;
   const rows = [assignment(task, "build", "codex", `${today}T10:00:00.000Z`),
     assignment(task, "fix", "codex", `${today}T10:01:00.000Z`),
+    assignment(task, "handoff", "codex", `${today}T10:01:45.000Z`),
     assignment(task, "review", "codex", `${today}T10:02:00.000Z`),
     { ts: `${today}T10:00:15.000Z`, task_id: task, step: "pr.opened", pr_url: prUrl, head_assignment: "build" },
     outcome(task, "build", "build", true, { selection_assignment_id: undefined, run_id: "sweep-build", pr_url: prUrl, ts: `${today}T10:00:30.000Z` }),
-    outcome(task, "fix", "fix", true, { ts: `${today}T10:01:30.000Z` }),
+    outcome(task, "fix", "fix", true, { pushed_head_sha: "fix-head", ts: `${today}T10:01:30.000Z` }),
+    outcome(task, "handoff", "fix", true, { fix_outcome: "NEEDS_DESIGN", ts: `${today}T10:01:50.000Z` }),
     outcome(task, "review", "review", false,
       { selection_assignment_id: undefined, evaluator_provenance: { selectionAssignmentId: "review" }, ts: `${today}T10:02:30.000Z` }),
     outcome(task, "foreign", "build", true, { pr_url: prUrl, ts: `${today}T10:03:00.000Z` }),
@@ -58,11 +58,13 @@ test("W1-T12142 criterion 1: assigned arms keep build, fix and review outcomes s
   assert.equal(arm.tasks, 1);
   assert.equal(arm.pipelines.build.positive, 1);
   assert.equal(arm.pipelines.fix.positive, 1);
+  assert.equal(arm.pipelines.fix.rate, 0.5, "a success-subtype handoff without a pushed fix is not accepted");
   assert.equal(arm.pipelines.review.positive, 1);
   for (const pipeline of Object.values(arm.pipelines)) {
-    assert.equal(pipeline.assignments, 1);
-    assert.equal(pipeline.medianCostUsd, 2);
-    assert.equal(pipeline.medianDurationMs, 60000);
+    const expectedAssignments = pipeline === arm.pipelines.fix ? 2 : 1;
+    assert.equal(pipeline.assignments, expectedAssignments);
+    assert.equal(pipeline.medianCostUsd, pipeline === arm.pipelines.fix ? 4 : 2);
+    assert.equal(pipeline.medianDurationMs, pipeline === arm.pipelines.fix ? 120000 : 60000);
   }
   assert.equal(result.assignmentsWithoutOutcome, 0);
   assert.equal(result.crossoverShare, labels[0] === experiment.arms.codex ? 0 : 1);
@@ -118,7 +120,8 @@ test("W1-T12142 criterion 4: results run, conclude or stop underpowered using di
   const moderate = cohort(30, false);
   const worse = new Set(tasks(labels[1]!, 30).slice(0, 18));
   for (const row of moderate) {
-    if (row.step === "verdict.merged" && worse.has(String(row.task_id))) {
+    if ((row.step === "verdict.merged" || row.step === "verdict" && row.verdict === "merged")
+      && worse.has(String(row.task_id))) {
       row.step = "verdict"; row.verdict = "failed"; row.selection_assignment_id = row.task_id;
     }
   }
@@ -201,7 +204,8 @@ test("pipeline decisions prefer merges and accepted fixes but fewer failed revie
     ["build", "fix", "review"].flatMap(pipeline => {
       const id = `${task}-${pipeline}`;
       return [assignment(task, id), outcome(task, id, pipeline, index === 0,
-        { billing_mode: "subscription", total_cost_usd: 0, notional_cost_usd: 3 })];
+        { billing_mode: "subscription", total_cost_usd: 0, notional_cost_usd: 3,
+          ...(pipeline === "fix" && index === 0 ? { pushed_head_sha: "accepted-fix" } : {}) })];
     })));
   const result = evaluateRoutingExperimentResult(rows, experiment, today);
   assert.equal(result.winner, labels[0]);

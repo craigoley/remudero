@@ -105,9 +105,11 @@ function differences(a: Cluster[], b: Cluster[], seed: string, confidence: numbe
 }
 
 function terminal(row: Row): { pipeline: Pipeline; positive: number } | undefined {
-  if (row.step === "verdict.merged") return { pipeline: "build", positive: 1 };
+  if (row.step === "verdict.merged" || (row.step === "verdict" && row.verdict === "merged")) return { pipeline: "build", positive: 1 };
   if (row.step === "verdict" && ["failed", "refused", "abandoned"].includes(text(row.verdict))) return { pipeline: "build", positive: 0 };
-  if (row.step === "fix.done") return { pipeline: "fix", positive: row.subtype === "success" ? 1 : 0 };
+  if (row.step === "fix.done") return { pipeline: "fix", positive: row.subtype === "success"
+    && typeof row.pushed_head_sha === "string" && row.pushed_head_sha.length > 0
+    && row.fix_outcome !== "NEEDS_DESIGN" && row.fix_outcome !== "NEEDS_SCOPE" ? 1 : 0 };
   if (row.step === "review.posted" && ["success", "failure"].includes(text(row.state))) {
     return { pipeline: "review", positive: row.state === "failure" ? 1 : 0 };
   }
