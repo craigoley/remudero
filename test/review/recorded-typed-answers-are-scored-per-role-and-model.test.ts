@@ -77,6 +77,45 @@ test("W1-T12414 criterion 1: a recorded answer is a distribution, a single answe
   assert.equal(group.distributions, 0, "the rejected distribution is not scored as a distribution");
   assert.equal(group.brier, null);
   assert.equal(scores.version, TYPED_ANSWER_SCORES_VERSION);
+
+  // From the producer to the scorer: a choice may declare `true` and "true" as two options
+  // (lib/decision-model.ts DecisionOptionValue). The reader keeps them two, so a valid
+  // distribution over them is a distribution, not a rejection for a repeated option.
+  const mixed: DecisionQuestion[] = [
+    { type: "choice", name: "flag", instructions: "Which flag?", options: [{ value: true }, { value: "true" }, { value: "no" }] },
+  ];
+  const openAi = readDecisionAnswers("openai-decisions", mixed, { answers: [
+    { type: "choice", choice: "true", probabilities: [{ value: true, probability: 0.2 }, { value: "true", probability: 0.7 }, { value: "no", probability: 0.1 }] },
+  ] });
+  assert.equal(openAi[0]!.outcome, "distribution", "the producer accepts the mixed options");
+  const [flag] = decisionAnsweredTypedAnswers({ step: DECISION_ANSWERED_STEP, outcome: "answered", role: "risk", candidate: "model-m", answers: openAi });
+  assert.deepEqual(flag!.options, ["boolean:true", "string:true", "string:no"], "two options with the same text keep their type");
+  const checkedFlag = checkTypedAnswer(flag!);
+  assert.equal(checkedFlag.kind, "distribution", "a valid mixed-type distribution is never rejected as a repeat");
+  assert.deepEqual(checkedFlag, dist([["boolean:true", 0.2], ["string:true", 0.7], ["string:no", 0.1]]), "and is never coerced");
+  const flagGroup = only(scoreTypedAnswers([{ ...flag!, outcome: "string:true" }]).groups, "model-m");
+  assert.equal(flagGroup.rejected, 0);
+  near(flagGroup.brier, 0.2 ** 2 + 0.3 ** 2 + 0.1 ** 2, "Brier keeps the two options apart");
+
+  // A string option named like the cannot-tell option stays apart from the cannot-tell mass.
+  const named: DecisionQuestion[] = [
+    { type: "choice", name: "named", instructions: "Which?", options: [{ value: "cannot_tell" }, { value: "other" }] },
+  ];
+  const microsoft = readDecisionAnswers("microsoft-systemone", named, { answers: {
+    named: { type: "choice", choice: "string:other", probabilities: { "string:cannot_tell": 0.4, "string:other": 0.6, cannot_tell: 0.1 } },
+  } });
+  assert.equal(microsoft[0]!.outcome, "distribution");
+  const [namedRow] = decisionAnsweredTypedAnswers({ step: DECISION_ANSWERED_STEP, outcome: "answered", role: "risk", candidate: "model-m", answers: microsoft });
+  assert.deepEqual(namedRow!.options, ["string:cannot_tell", "string:other", "cannot_tell"]);
+  assert.equal(checkTypedAnswer(namedRow!).kind, "distribution");
+
+  // Plain options keep their plain text, and a real repeat is still a rejection.
+  const [plain] = decisionAnsweredTypedAnswers({ step: DECISION_ANSWERED_STEP, outcome: "answered", role: "risk", candidate: "model-m",
+    answers: [{ name: "risk", outcome: "distribution", distribution: [{ option: "low", probability: 0.4 }, { option: "high", probability: 0.6 }], confidence: null }] });
+  assert.deepEqual(plain!.options, ["low", "high"]);
+  const [repeat] = decisionAnsweredTypedAnswers({ step: DECISION_ANSWERED_STEP, outcome: "answered", role: "risk", candidate: "model-m",
+    answers: [{ name: "risk", outcome: "distribution", distribution: [{ option: "low", probability: 0.4 }, { option: "low", probability: 0.6 }], confidence: null }] });
+  assert.equal(checkTypedAnswer(repeat!).kind, "rejected", "a repeated option is still rejected");
 });
 
 test("W1-T12414 criterion 2: per role and model the scorer counts answers, agreement, abstentions and rejections, and a single answer gets no Brier", () => {

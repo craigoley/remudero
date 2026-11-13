@@ -106,6 +106,21 @@ export function checkTypedAnswer(row: Pick<TypedAnswerRow, "answer" | "options" 
 const topOf = (distribution: Array<{ option: string; probability: number }>): { option: string; probability: number } =>
   distribution.reduce((best, entry) => (entry.probability > best.probability ? entry : best));
 
+/**
+ * The text key of a decision option. A decision option is a string or a boolean
+ * (lib/decision-model.ts `DecisionOptionValue`), so `true` and `"true"` are two options. The plain
+ * text (`String(value)`) is kept when it names every option, and the cannot-tell option, once. When
+ * two options share their plain text (a choice of `true` and `"true"`, or a string option named
+ * like the cannot-tell option), every option of that question is keyed by its type and text
+ * (`boolean:true`, `string:true`), so no two declared options become one.
+ */
+export function decisionOptionKeyFor(values: readonly unknown[], withCannotTell: boolean): (value: unknown) => string {
+  const plain = [...values.map((value) => String(value)), ...(withCannotTell ? [CANNOT_TELL_OPTION] : [])];
+  const typed = (value: unknown): string => `${typeof value}:${String(value)}`;
+  const typedUnique = new Set(values.map(typed)).size === values.length;
+  return new Set(plain).size === plain.length || !typedUnique ? (value) => String(value) : typed;
+}
+
 /** The rows of one `decision.answered` ledger row: one per question, model = the candidate's name. */
 export function decisionAnsweredTypedAnswers(line: Record<string, unknown>): TypedAnswerRow[] {
   if (line.step !== DECISION_ANSWERED_STEP || line.outcome !== "answered" || !Array.isArray(line.answers)) return [];
@@ -121,8 +136,9 @@ export function decisionAnsweredTypedAnswers(line: Record<string, unknown>): Typ
     if (raw.outcome !== "distribution" || !Array.isArray(raw.distribution))
       return { ...base, questionType: null, options: null, answer: rejected(typeof raw.reason === "string" ? raw.reason : "the answer is not readable") };
     const entries = raw.distribution.filter(isRecord);
-    const distribution = entries.map((entry) => ({ option: String(entry.option), probability: entry.probability as number }));
     const cannotTell = typeof raw.cannotTell === "number" ? raw.cannotTell : undefined;
+    const key = decisionOptionKeyFor(entries.map((entry) => entry.option), cannotTell !== undefined);
+    const distribution = entries.map((entry) => ({ option: key(entry.option), probability: entry.probability as number }));
     const questionType: TypedQuestionType = entries.every((entry) => typeof entry.option === "boolean") ? "yes-no"
       : raw.score !== undefined ? "score" : "choice";
     return { ...base, questionType, options: [...distribution.map((entry) => entry.option), ...(cannotTell === undefined ? [] : [CANNOT_TELL_OPTION])],
