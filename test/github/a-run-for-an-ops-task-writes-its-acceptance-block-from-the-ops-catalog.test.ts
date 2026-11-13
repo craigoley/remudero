@@ -36,7 +36,7 @@ const result = (text: string): WorkerResult => ({
   tokens: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 }, modelUsage: {}, compactionEvents: [], qualitySuspect: false,
 });
 
-async function runFixture(t: TestContext, catalog: "ops" | "public", mode: "reported" | "created" = "reported", acceptance: readonly AcceptanceCriterion[] = criteria) {
+async function runFixture(t: TestContext, catalog: "ops" | "public", mode: "reported" | "created" = "reported", acceptance: readonly AcceptanceCriterion[] = criteria, refusal?: "ownership" | "normalization") {
   const root = gitRepo({ scope: t }), origin = gitRepo({ bare: true, scope: t }), seed = gitRepo({ scope: t });
   mkdirSync(join(seed.dir, "plan")); writeFileSync(join(seed.dir, "plan", "tasks.yaml"), catalog === "public" ? yaml(acceptance) : "[]\n");
   seed.git("add", "plan"); seed.git("commit", "--quiet", "-m", "test: seed the actual public plan");
@@ -67,9 +67,9 @@ async function runFixture(t: TestContext, catalog: "ops" | "public", mode: "repo
     ...opsRoutes,
     { when: "pulls?", stdout: "[]" },
     { when: "--method POST repos/", stdout: JSON.stringify({ html_url: url, number: 7 }) },
-    { when: "--method PATCH repos/", stdout: "{}" },
+    { when: "PATCH repos/", stdout: "{}", exit: refusal === "normalization" ? 1 : 0, stderr: refusal === "normalization" ? "fixture normalization refused" : "" },
     { when: "--json body", stdout: JSON.stringify({ body }) },
-    { when: "pr view", stdout: JSON.stringify({ headRefName: branch, body, number: 7 }) },
+    { when: "pr view", stdout: JSON.stringify({ headRefName: refusal === "ownership" ? "run-W1-T900009-other" : branch, body, number: 7 }) },
     { when: "/pulls/7", stdout: JSON.stringify({ number: 7, state: "open", merged: false, head: { sha: "c".repeat(40) } }) },
     { when: "/check-runs", stdout: JSON.stringify({ check_runs: [{ name: "ci", status: "queued" }] }) },
     { when: "/status", stdout: JSON.stringify({ statuses: [] }) },
@@ -77,7 +77,20 @@ async function runFixture(t: TestContext, catalog: "ops" | "public", mode: "repo
   ]);
   const priorPath = process.env.PATH, priorHooks = process.env.RMD_HARNESS_HOOKS_DIR;
   process.env.PATH = `${gh.dir}:${priorPath}`; mkdirSync(join(root.dir, "hooks")); process.env.RMD_HARNESS_HOOKS_DIR = join(root.dir, "hooks");
-  t.after(() => { process.env.PATH = priorPath; if (priorHooks === undefined) delete process.env.RMD_HARNESS_HOOKS_DIR; else process.env.RMD_HARNESS_HOOKS_DIR = priorHooks; rmSync(gh.dir, { recursive: true, force: true }); });
+  t.after(() => {
+    try {
+      if (refusal !== undefined) {
+        const writes = gh.events().filter(event => event.phase === "start" && event.args[0] === "api"
+          && event.args.some(arg => ["POST", "PATCH", "PUT", "DELETE"].includes(arg)));
+        assert.equal(writes.some(event => event.args.includes("POST") || event.args.includes("DELETE")), false);
+        assert.equal(writes.length, refusal === "ownership" ? 0 : 1);
+      }
+    } finally {
+      process.env.PATH = priorPath;
+      if (priorHooks === undefined) delete process.env.RMD_HARNESS_HOOKS_DIR; else process.env.RMD_HARNESS_HOOKS_DIR = priorHooks;
+      rmSync(gh.dir, { recursive: true, force: true });
+    }
+  });
   const prompts: Array<{ prompt: string }> = []; let workers = 0, workerRoot = "";
   const outcome = await withLiveWritesAllowed(() => runTask(ID, {
     config: { claudeBin: "/bin/true", root: root.dir, installRoot: REPO_ROOT, workerProviders: { harnessCommitsImplement: true } },
@@ -270,4 +283,11 @@ test("the canonical ops constructor refuses missing provenance and malformed cri
 test("a direct ops run body without a canonical publication binding refuses before effects", async () => {
   await assert.rejects(runTaskBody({ task: { catalog: "ops" } } as unknown as Parameters<typeof runTaskBody>[0]),
     /ops run has no canonical publication binding/);
+});
+
+test("a reported ops PR with a different owning branch refuses before a public write", async t => {
+  await assert.rejects(runFixture(t, "ops", "reported", criteria, "ownership"), /ops public PR ownership refused/);
+});
+test("a refused ops body normalization ends the real run before another public publication", async t => {
+  await assert.rejects(runFixture(t, "ops", "reported", criteria, "normalization"), /ops public PR normalization refused/);
 });
