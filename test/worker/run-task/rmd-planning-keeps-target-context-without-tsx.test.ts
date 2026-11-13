@@ -6,8 +6,8 @@ import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative } from "node:path";
 import { test } from "node:test";
 import { pathToFileURL } from "node:url";
-import { loadMounts, mountsPath } from "#src/lib/mounts.js";
-import { codexCandidatesForCapability } from "#src/lib/worker-provider.js";
+import { parse as parseYaml } from "yaml";
+import { PLAN_MAX_NEW_TASKS } from "#src/run-task.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 // W1-T12517: `rmd plan` run from a TARGET repository that carries no tsx. The Codex capacity probe used to
@@ -23,16 +23,17 @@ const CHILD_DEADLINE_MS = 120_000;
 const OUTPUT_TAIL_CHARS = 16_384;
 const BRIEF = "check that retries are covered";
 const SEED_ID = "W1-T10";
-const SEED_PLAN = `version: 1\ntasks:\n  - id: ${SEED_ID}\n    title: seeded target task\n    repo: target\n    type: implement\n    status: queued\n`;
+const SEED_PLAN = `- id: ${SEED_ID}\n  title: seeded target task\n  repo: target\n  type: implement\n  status: queued\n`;
 const LIMITS = {
   rateLimits: { limitId: "codex", primary: { usedPercent: 20 } },
   rateLimitsByLimitId: { codex: { limitId: "codex", primary: { usedPercent: 20 } } },
 };
 
-/** The stub offers exactly the mounts table's Codex candidates for the Architect's frontier capability, so
+/** The stub offers exactly the mounts table's own Codex candidates for the Architect's frontier capability, so
  *  the successful handshake decides which model the launch must carry. */
 function stubModels() {
-  const ids = codexCandidatesForCapability(loadMounts(mountsPath(REPO_ROOT)).capabilities, "frontier", "high");
+  const table = parseYaml(readFileSync(join(REPO_ROOT, ".remudero", "mounts.yaml"), "utf8")) as { capabilities: { codex: Record<string, Record<string, string[]>> } };
+  const ids = table.capabilities.codex.frontier!.high!;
   assert.ok(ids.length > 0, "positive control: the ladder names at least one Codex model for the Architect");
   return ids.map((id) => ({
     id, displayName: id, defaultReasoningEffort: "medium",
@@ -137,6 +138,7 @@ async function planFrom(label: "target" | "core", mode: string) {
     mkdirSync(join(target, ".remudero"));
     cpSync(join(REPO_ROOT, ".remudero", "mounts.yaml"), join(target, ".remudero", "mounts.yaml"));
     writeFileSync(join(target, "plan", "tasks.yaml"), SEED_PLAN);
+    writeFileSync(join(target, "MASTER-PLAN.md"), "# Target plan\n"); // planCommand stages plan/ and MASTER-PLAN.md
     git(target, "add", "-A");
     git(target, "commit", "-qm", "seed the target plan");
     git(target, "push", "-q", "origin", "HEAD:main");
@@ -211,6 +213,7 @@ function assertReachedArchitect(run: PlanRun, label: string): string {
   const minted = ledger.find((row) => row.step === "plan.id_minted");
   assert.ok(minted, "the reservation was ledgered");
   const reserved = minted.reserved as string[];
+  assert.equal(reserved.length, PLAN_MAX_NEW_TASKS, "the harness reserved its declared ceiling of ids");
   assert.ok(reserved.length > 0 && reserved.every((id) => architect.prompt!.includes(id)), "every reserved id reached the Architect");
   assert.ok(!reserved.includes(SEED_ID), "the reserved ids continue the target's plan");
   const model = argv[argv.indexOf("--model") + 1]!;
@@ -219,14 +222,15 @@ function assertReachedArchitect(run: PlanRun, label: string): string {
   assert.equal(run.planAfter, run.planBefore, "the target plan is unchanged");
   assert.equal(run.headAfter, run.headBefore, "the target head is unchanged");
   assert.equal(run.status, "", "the target working tree is clean");
-  assert.deepEqual(run.targetEntries, [".git", ".remudero", "plan"], "nothing was installed or linked into the target");
+  assert.deepEqual(run.targetEntries, [".git", ".remudero", "MASTER-PLAN.md", "plan"], "nothing was installed or linked into the target");
   assert.equal(run.remoteAfter, run.remoteBefore, "no branch or ref was left on the target's origin");
   assert.deepEqual(run.gh.filter((call) => call[0] === "pr"), [], "no gh pr call was made");
   assert.equal(ledger.some((row) => row.step === "pr.opened"), false, "no PR was recorded");
   const verdict = ledger.find((row) => row.step === "plan.verdict");
   assert.equal(verdict?.action, "no_action");
   const start = ledger.find((row) => row.step === "plan.start");
-  assert.equal(start?.mode, "clarify");
+  assert.equal(start?.mode, "clarify", `the ${label} verb ran the requested mode`);
+  assert.equal(start?.brief, BRIEF, `the ${label} verb carried the requested brief`);
   return model;
 }
 
