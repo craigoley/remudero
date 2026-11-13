@@ -1,0 +1,83 @@
+- id: W1-T12537
+  title: "A sweep fix round holds a run lock beside its worktree, so another run's start-up prune never removes it mid-round"
+  repo: remudero
+  depends_on: []
+  priority: 1.5
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # every sweep fix round (CI-red, review-red, merge-conflict) on every PR; the prune guards every run lane
+  band_meaning: blast-radius
+  origin: operator-session#fix-round-worktree-loss-2026-11-13
+  plan_refs:
+    - W1-T10299
+    - W1-T5280
+    - W1-T5356
+    - W1-T5955
+    - W1-T208
+  files:
+    - src/lib/sweep.ts
+    - test/fix-lane/a-sweep-fix-round-holds-a-run-lock-beside-its-worktree.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "A sweep fix round writes a run lock (pid, run_id and startedAt, the shape writeRunLock writes for the run lane) beside its sweep-<task>-<ms> worktree before it adds that worktree, and the lock is on disk and names a live pid while the fix worker runs"
+      proof: "grep: W1-T12537 criterion 1 in test/fix-lane/a-sweep-fix-round-holds-a-run-lock-beside-its-worktree.test.ts"
+    - claim: "When another run's start-up prune (createDaemonLaneWorktree, default grace) runs during a real sweep fix round whose worktree is older than the grace, the worktree stays, that run's worktree.prune row names it in skipped, the round's push to the PR branch succeeds, and no fix.stood_down row reads \"a later round reclaimed this round's worktree\""
+      proof: "grep: W1-T12537 criterion 2 in test/fix-lane/a-sweep-fix-round-holds-a-run-lock-beside-its-worktree.test.ts"
+    - claim: "The round removes its run lock on every exit path: a finished round, a round whose fix worker throws, and a round whose checkout fails after the lock was written leave no lock beside the worktree path"
+      proof: "grep: W1-T12537 criterion 3 in test/fix-lane/a-sweep-fix-round-holds-a-run-lock-beside-its-worktree.test.ts"
+    - claim: "invariant:dead-owner-still-reclaimed — a sweep fix worktree on a run-* branch whose run lock names a dead pid is still removed by pruneStaleRuns, with its lock, as a lockless one past the grace is"
+      proof: "grep: W1-T12537 criterion 4 in test/fix-lane/a-sweep-fix-round-holds-a-run-lock-beside-its-worktree.test.ts"
+    - claim: "invariant:lock-is-never-committed — the run lock is a sibling file outside the fix worktree, so the round's commit and push carry no lock file"
+      proof: "grep: W1-T12537 criterion 5 in test/fix-lane/a-sweep-fix-round-holds-a-run-lock-beside-its-worktree.test.ts"
+  rationale: |
+    Sweep fix rounds lose their worktree to another run's start-up prune and throw away a finished fix.
+    MEASURED by the operator session from the ledger (~/rmd-state2/state/ledger.ndjson, 2026-11-11 21:45Z to 2026-11-13
+    21:45Z, one row per round): 30 sweep fix rounds (CI-red, review-red and merge-conflict) made a fixed commit and then
+    stood down with "a later round reclaimed this round's worktree". Each loss came 1 to 12 s after a worktree.prune row from
+    another run (triage runs, the daemon, other task runs) that named the live sweep-W1-T... worktree as removed.
+    Example: 2026-11-13 13:32:04Z, W1-T11168, fix.stood_down site rung.branch_claim.
+    READ at origin/main ff8367a11:
+    - src/lib/worker.ts:7028-7080 pruneStaleRuns force-removes every registered worktree under the worktrees root on a
+      run-* branch, unless its sibling run lock (runLockPath, `<worktree>.lock`) names a live pid (:7052-7056). A lockless
+      worktree is safe only for pruneGraceMs (120 s, plan/policy.yaml) after its mtime (:7060-7071).
+    - src/lib/sweep.ts:4820-4822 the fix round makes `sweep-<task>-<ms>` under worktreesDir and checks out the PR's own
+      run-* branch there (createFixRungWorktree, src/run-task.ts:32318). It never writes a run lock, so after 120 s any prune
+      removes it. Its finally (src/lib/sweep.ts:5125-5133) removes the worktree at the end of the round.
+    - src/cli/commands/fix.ts:2371-2377 before the next strike and after the CI wait the round re-takes its branch claim;
+      reclaimFixRoundBranch (src/lib/sweep.ts:13796) then finds the worktree gone and stands down.
+    - Only the run lane writes the lock: src/cli/commands/run-task-verb.ts:6189 (W1-T5280: written before the add, after
+      an empty directory, because reapStaleWorktrees' widowed-lock pass deletes a lock whose directory does not exist).
+      Every prune caller (run-task.ts:23696, :35185, :35865, :36350, :38702-:39283; run-task-verb.ts:6108) uses the
+      default grace.
+    CHECKED for overlap: W1-T10299 (merged) covered only the run lane's worktrees. W1-T5356 locked the approve, triage, plan
+    and daemon lanes before their adds; the sweep fix lane was not among them. W1-T5955 made the branch claim, which
+    serializes fix rounds on one branch but is not read by the prune.
+  design: |
+    1. In dispatchFix (src/lib/sweep.ts), after the branch claim and the worktreePath assignment and before
+       createFixRungWorktree: mkdirSync(worktreePath, { recursive: true }), then writeRunLock(worktreePath, { pid:
+       process.pid, run_id: runId, startedAt }) with startedAt from the sweep's own clock (nowMsImpl). This is the run
+       lane's order (empty directory, lock, add). git worktree add accepts an existing empty directory.
+    2. In the same function's finally, after the worktree removal and before the branch claim release, removeRunLock(
+       worktreePath) whenever worktreePath is set, on every exit path (finished, declined, thrown, kept). A kept
+       (superseded or held) worktree is left lockless, as it is on origin/main.
+    3. pruneStaleRuns is not changed: it already keeps a worktree whose lock names a live pid and removes one whose lock
+       names a dead pid (with the lock). Its callers' existing worktree.prune row lists a kept worktree in skipped, so no
+       new ledger step is needed.
+    4. The test drives the real dispatchFix through buildSweepEffects against a real bare origin (the fixture shape of
+       test/a-finished-fix-round-releases-its-branch-claim.test.ts). Inside the fix worker it commits, sets the worktree's
+       mtime past the grace, and calls the real createDaemonLaneWorktree, whose prune and worktree.prune row are the
+       production start-up path. The push is a real git push of the round's head to the bare origin.
+    INVARIANT dead-owner-still-reclaimed: a run lock whose pid is dead never protects a worktree from pruneStaleRuns.
+    INVARIANT lock-is-never-committed: the run lock is written only at runLockPath, outside the working tree.
+    NOT IN SCOPE: the ratchet, plan-repair and plan-renumber worktrees in src/lib/sweep.ts (:3018, :5702, :5822) and the
+    boot rung's pid-reuse check (worktreeLockIsPidAlive), which already reads startedAt.
+  falsifier: |
+    Remove the writeRunLock call and criterion 1 and criterion 2 must fail (the prune removes the worktree and the push or
+    the claim re-take refuses). Remove the removeRunLock call in the finally and criterion 3 must fail. Make pruneStaleRuns
+    keep a lock whose pid is dead and criterion 4 must fail. Restore and all must pass.
+  note: |
+    Id W1-T12537 reserved for run-unfiled-1794606987000 with ~/rmd-work/bin/reserve-id.sh.
+    The 30-round count is the operator session's deduplicated read of the ledger window above.

@@ -19,7 +19,7 @@
     - src/lib/host-resource-gardener.ts
     - test/gardeners/the-fleet-escalates-before-free-disk-reaches-a-reserve.test.ts
     - test/host-resource-gardener.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "When the newest sample of a host has less free disk on the root or the state volume than 1.5 times the reserve of that volume, `runHostResourcePassAsync` raises one escalation. Its summary names the host, the volume, the free amount and the reserve"

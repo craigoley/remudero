@@ -37,7 +37,7 @@
     - test/stale-lock-host-ordering.test.ts
     - test/status-board.test.ts
     - test/console-api/board/compress-src-lib-status-board-ts.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "The recycle script finds a lock whose `host` is the host's own hostname and whose pid is dead. It moves the lock to `inflight/reclaimed/` with a `.reason` file, prints the slot, the run id and the evidence, and the recycle goes on"
