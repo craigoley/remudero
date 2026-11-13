@@ -14,8 +14,14 @@
     - src/lib/risk-judge.ts
     - test/review/compress-src-lib-risk-judge-ts.test.ts
   acceptance:
-    - claim: "Comment volume is measurably reduced while executable tokens and existing behavioral assertions are preserved."
+    - claim: "invariant:executable-code — Comment volume is measurably reduced while executable tokens and existing behavioral assertions are preserved."
       proof: "unit test: W1-T12469: comment compression preserves executable code"
+  design: |
+    Prior behavior includes low/high verdicts, historical verdicts without availability, unavailable and malformed-response paths,
+    default escalation and explicitly configured proceed behavior, description/diff evidence tiers, and ledger and escalation side effects.
+    These contracts remain unchanged through a comment-only rewrite: retain executable tokens, including prompt strings, existing
+    behavioral assertions, coverage directives, and comment text pinned by tests. Retain invariants, traps, falsifiers, and historical citations.
+    INVARIANT executable-code: comment compression preserves executable tokens and existing behavioral assertions while reducing comment volume.
   rationale: |
     Observed 428 comment lines in src/lib/risk-judge.ts. This is maintenance debt, never a merge ceiling.
     Operator 2026-10-24: excess comments create high-priority follow-up work; they must not block the originating change.
