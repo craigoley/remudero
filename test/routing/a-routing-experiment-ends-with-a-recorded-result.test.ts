@@ -34,7 +34,7 @@ function cohort(count: number, different: boolean): Row[] {
   return labels.flatMap((arm, armIndex) => tasks(arm, count).flatMap(task => {
     const merged = different ? armIndex === 0 : true;
     return [assignment(task, task), outcome(task, task, "build", merged,
-      merged ? { step: "verdict", verdict: "merged" } : {})];
+      merged ? { step: "verdict", verdict: "merged" } : { step: "verdict", verdict: "no_pr" })];
   }));
 }
 
@@ -42,11 +42,13 @@ test("W1-T12142 criterion 1: assigned arms keep build, fix and review outcomes s
   const task = tasks(labels[0]!, 1)[0]!;
   const prUrl = `https://example.test/${task}`;
   const rows = [assignment(task, "build", "codex", `${today}T10:00:00.000Z`),
+    assignment(task, "no-pr", "codex", `${today}T10:00:45.000Z`),
     assignment(task, "fix", "codex", `${today}T10:01:00.000Z`),
     assignment(task, "handoff", "codex", `${today}T10:01:45.000Z`),
     assignment(task, "review", "codex", `${today}T10:02:00.000Z`),
     { ts: `${today}T10:00:15.000Z`, task_id: task, step: "pr.opened", pr_url: prUrl, head_assignment: "build" },
     outcome(task, "build", "build", true, { selection_assignment_id: undefined, run_id: "sweep-build", pr_url: prUrl, ts: `${today}T10:00:30.000Z` }),
+    outcome(task, "no-pr", "build", false, { verdict: "no_pr", ts: `${today}T10:00:55.000Z` }),
     outcome(task, "fix", "fix", true, { pushed_head_sha: "fix-head", ts: `${today}T10:01:30.000Z` }),
     outcome(task, "handoff", "fix", true, { fix_outcome: "NEEDS_DESIGN", ts: `${today}T10:01:50.000Z` }),
     outcome(task, "review", "review", false,
@@ -57,14 +59,15 @@ test("W1-T12142 criterion 1: assigned arms keep build, fix and review outcomes s
   const arm = result.arms.find(item => item.arm === labels[0])!;
   assert.equal(arm.tasks, 1);
   assert.equal(arm.pipelines.build.positive, 1);
+  assert.equal(arm.pipelines.build.rate, 0.5, "a completed no-PR build is a non-merge outcome, not missing data");
   assert.equal(arm.pipelines.fix.positive, 1);
   assert.equal(arm.pipelines.fix.rate, 0.5, "a success-subtype handoff without a pushed fix is not accepted");
   assert.equal(arm.pipelines.review.positive, 1);
   for (const pipeline of Object.values(arm.pipelines)) {
-    const expectedAssignments = pipeline === arm.pipelines.fix ? 2 : 1;
+    const expectedAssignments = pipeline === arm.pipelines.fix || pipeline === arm.pipelines.build ? 2 : 1;
     assert.equal(pipeline.assignments, expectedAssignments);
-    assert.equal(pipeline.medianCostUsd, pipeline === arm.pipelines.fix ? 4 : 2);
-    assert.equal(pipeline.medianDurationMs, pipeline === arm.pipelines.fix ? 120000 : 60000);
+    assert.equal(pipeline.medianCostUsd, expectedAssignments === 2 ? 4 : 2);
+    assert.equal(pipeline.medianDurationMs, expectedAssignments === 2 ? 120000 : 60000);
   }
   assert.equal(result.assignmentsWithoutOutcome, 0);
   assert.equal(result.crossoverShare, labels[0] === experiment.arms.codex ? 0 : 1);
