@@ -13,10 +13,22 @@
   files:
     - src/run-task.ts
     - src/cli/commands/fix.ts
-    - test/worker/run-task/fix-lane-commit-refused-the-worker-changed-nothing.test.ts
+    - test/triage/fix-lane-no-edit-refusal-recovery.test.ts
   acceptance:
     - claim: "commit-refused:the worker changed nothing no longer needs an operator hand fix"
-      proof: "grep: test(\"W1-T11014: fix-lane-commit-refused-the-worker-changed-nothing clears without a person\" in test/worker/run-task/fix-lane-commit-refused-the-worker-changed-nothing.test.ts"
+      proof: "grep: test(\"W1-T11014: fix-lane-commit-refused-the-worker-changed-nothing clears without a person\" in test/triage/fix-lane-no-edit-refusal-recovery.test.ts"
+    - claim: "invariant:non-matching-refusals"
+      proof: "unit test: other commit refusals do not receive a no-edit recovery"
+    - claim: "invariant:unchanged-recovery-guard"
+      proof: "unit test: an unchanged recovery is refused without another recovery or a push"
+  design: |
+    Prior behavior: runFixRung owns refusal outcomes and keeps non-matching refusal prompts, commit guards, accounting,
+    and push behavior on their existing paths. The recovery is additive only after a FIXED report is refused because
+    the worker changed nothing. Every recovery dispatch still passes through the same rung's commit and push guards.
+    INVARIANT non-matching-refusals: commit refusals other than the exact FIXED plus "the worker changed nothing"
+    case retain the existing prompt and dispatch behavior without a no-edit recovery.
+    INVARIANT unchanged-recovery-guard: the single recovery dispatch remains subject to the rung's commit guard, so an
+    unchanged worktree cannot be pushed and cannot trigger a second recovery dispatch.
   note: "Filed by fix-lane at rung 2; measure the cause's share of PR-hours after the build merges."
   rationale: |
     commit-refused:the worker changed nothing cost 53.95 PR-hours; owner fix-lane
@@ -50,3 +62,14 @@
     permissions, data deletion, or merge/deploy/review policy. The previous ruling (verdict low, proceed, confidence
     0.86, pin e3917b34…, judged 2026-11-10T00:56:37Z) covered the pre-amendment files only and was dropped as stale;
     verify: human parks this task for a fresh machine-filing risk ruling after the scope change lands.
+    Test path amended 2026-11-12 (architect clarify pass, operator-authorized after author preflight): the declared test
+    file and the grep proof path move from test/worker/run-task/fix-lane-commit-refused-the-worker-changed-nothing.test.ts
+    to test/triage/fix-lane-no-edit-refusal-recovery.test.ts. Author preflight refused the old path because it collides
+    by basename with W1-T7748's existing test/fix-lane-commit-refused-the-worker-changed-nothing.test.ts. The new unique
+    basename uses the test/triage folder computed by rmd test-place for its #test/helpers/run-task-test.js import. The
+    acceptance claim text and grep pattern, risk: high, and verify: human are unchanged; only the test path changed.
+    Settled by lookup: does the old path collide with an existing test? -> yes, W1-T7748's
+    test/fix-lane-commit-refused-the-worker-changed-nothing.test.ts maps to test/worker/run-task
+    (plan/seeds/test-restructure-2026-10-16/proposed-map.tsv:1889; plan/tasks.d/W1-T7748-*.yaml).
+    Settled by lookup: is the new filename available in test/triage? -> yes, no file of that name exists there (Glob
+    test/triage/*.test.ts), and test/helpers/run-task-test.ts exists for the import.
