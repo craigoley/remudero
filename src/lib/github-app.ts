@@ -87,6 +87,8 @@ export interface RefreshOptions {
   fetchImpl?: typeof fetch;
   /** Injectable private-key reader — defaults to `readFileSync(path, "utf8")`. */
   readKey?: (path: string) => string;
+  /** The refresh loop's copy of the last key it read. A failed re-read signs with it (2026-11-10). */
+  retainedKey?: { pem?: string };
   /** Log sink — defaults to a no-op. Never receives the key or token (see the file header). */
   log?: (step: string, extra?: Record<string, unknown>) => void;
 }
@@ -227,11 +229,18 @@ export async function refreshInstallationToken(opts: RefreshOptions = {}): Promi
   }
 
   let privateKeyPem: string;
+  let keyReadError: string | undefined;
   try {
     privateKeyPem = readKey(keyPath);
-  } catch {
-    log(TOKEN_REFRESH_FAILED_STEP, { reason: "private key unreadable" });
-    return { ok: false, reason: "private key unreadable" };
+    if (opts.retainedKey) opts.retainedKey.pem = privateKeyPem;
+  } catch (err) {
+    keyReadError = keyReadErrorCode(err);
+    const retained = opts.retainedKey?.pem;
+    if (retained === undefined) {
+      log(TOKEN_REFRESH_FAILED_STEP, { reason: "private key unreadable", error_code: keyReadError });
+      return { ok: false, reason: "private key unreadable" };
+    }
+    privateKeyPem = retained;
   }
 
   let jwt: string;
@@ -298,8 +307,16 @@ export async function refreshInstallationToken(opts: RefreshOptions = {}): Promi
   // The one seam from the file header: every consumer reads process.env at call/spawn time, so
   // this line reaches all three with no call-site change.
   env.GH_TOKEN = body.token;
-  log(TOKEN_REFRESHED_STEP, { installation_id: installationId, expires_at: body.expires_at });
+  log(TOKEN_REFRESHED_STEP, {
+    installation_id: installationId, expires_at: body.expires_at,
+    ...(keyReadError === undefined ? {} : { private_key: "retained", key_read_error: keyReadError }),
+  });
   return { ok: true, expiresAtMs };
+}
+
+function keyReadErrorCode(err: unknown): string {
+  const code = (err as NodeJS.ErrnoException | undefined)?.code;
+  return typeof code === "string" && code !== "" ? code : "unknown";
 }
 
 /** {@link mintScopedToken}'s own ledger steps — kept OUT of {@link TOKEN_REFRESH_REASONS}' closed
@@ -478,6 +495,7 @@ export function startInstallationTokenRefresh(opts: {
   const now = opts.now ?? Date.now;
   let lastSuccessfulExpiresAtMs: number | undefined;
   let immediateFailureRetryUsed = false;
+  const retainedKey: { pem?: string } = {};
   let stopped = false;
   let timer: { unref?: () => void } | undefined;
   let dueAt = now();
@@ -520,7 +538,7 @@ export function startInstallationTokenRefresh(opts: {
   // The mint-and-rearm body, factored out of `tick` so its promise can be returned to the first
   // caller via `ready`, while every later tick stays fire-and-forget as before.
   const runOnce = (): Promise<RefreshResult> =>
-    Promise.resolve().then(() => refresh({ log: opts.log, env })).then(
+    Promise.resolve().then(() => refresh({ log: opts.log, env, retainedKey })).then(
       (result) => {
         settled();
         if (result.ok && result.expiresAtMs !== undefined) {
