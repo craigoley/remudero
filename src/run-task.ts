@@ -8371,10 +8371,11 @@ async function spawnFixWorkerBounded(
         )
       : new Promise<never>(() => {});
   const recycled = yieldRoot && startSha ? watchFixRoundRecycle(yieldRoot, watchStop.signal) : new Promise<never>(() => {});
-  let recycleTimedOut: { detail: string; keepError: string } | undefined;
+  let pendingRecycle: string | undefined;
   try {
     let winner = await Promise.race([spawnPromise, bound, superseded, recycled]);
     if (winner !== "abandoned" && "recycle" in winner) {
+      pendingRecycle = winner.recycle;
       // The worker's own abort path stops it; the wall-clock bound still holds while it stops.
       spawnStop.abort();
       const settled = await Promise.race([spawnPromise.then((result) => ({ result }), (error: unknown) => ({ error })), bound]);
@@ -8383,20 +8384,11 @@ async function spawnFixWorkerBounded(
         const yielded = await keepYieldedFixRound(deps.log, args.cwd, ctx.fixRound, ctx.snapshot.headSha, startSha, winner.recycle, costUsd);
         return { kind: "yielded", elapsedMs: systemClock.now() - startedAt, yielded };
       }
-      if (settled === "abandoned" && ctx.fixRound && ctx.snapshot && startSha) {
-        // The worker may still be writing after its abort signal. Do not snapshot or reset a
-        // live worktree: retain it intact and make the incomplete preservation visible to the
-        // rung so sweep cannot reclaim it as an ordinary abandoned spawn.
-        recycleTimedOut = {
-          detail: winner.recycle,
-          keepError: `worker did not stop within ${boundMs}ms after recycle; recovery could not safely snapshot while it may still be writing`,
-        };
-      }
       winner = "abandoned";
     }
     if (winner === "abandoned" || "superseded" in winner) {
       const elapsedMs = Date.now() - startedAt;
-      if (winner === "abandoned" && !recycleTimedOut) {
+      if (winner === "abandoned") {
         deps.log("fix.spawn_abandoned", {
           run_id: ctx.runId,
           task_id: ctx.taskId,
@@ -8404,23 +8396,7 @@ async function spawnFixWorkerBounded(
           bound_ms: boundMs,
           reason: "spawn wall-clock bound exceeded",
         });
-      } else if (winner === "abandoned" && recycleTimedOut && ctx.fixRound && ctx.snapshot && startSha) {
-        deps.log("fix.round_yielded", {
-          branch: ctx.fixRound.branch,
-          trigger: "recycle",
-          detail: recycleTimedOut.detail,
-          head_sha: ctx.snapshot.headSha,
-          start_sha: startSha,
-          pushed: false,
-          strike_spent: false,
-          recovery_ref: null,
-          index_recovery_ref: null,
-          paths: [],
-          keep_error: recycleTimedOut.keepError,
-          preservation_deferred: true,
-          retain_worktree: true,
-        });
-      } else if (winner !== "abandoned" && "superseded" in winner) {
+      } else {
         deps.log("fix.superseded", {
           run_id: ctx.runId,
           task_id: ctx.taskId,
@@ -8450,17 +8426,15 @@ async function spawnFixWorkerBounded(
           deps.log("fix.spawn_settled_after_abandon", {
             run_id: ctx.runId,
             task_id: ctx.taskId,
-            ...(recycleTimedOut ? { after_recycle_yield: true } : {}),
             error: String((e as Error)?.message ?? e),
           });
         },
       );
-      if (recycleTimedOut) {
-        return {
-          kind: "yielded",
-          elapsedMs,
-          yielded: { trigger: "recycle", detail: recycleTimedOut.detail, paths: [], costUsd: 0, keepError: recycleTimedOut.keepError },
-        };
+      if (pendingRecycle && ctx.fixRound && ctx.snapshot && startSha) {
+        // An unsettled worker may still write: retain its checkout without snapshotting or resetting it.
+        const yielded = await keepYieldedFixRound(deps.log, args.cwd, ctx.fixRound, ctx.snapshot.headSha, startSha,
+          pendingRecycle, 0, "worker did not stop before the spawn wall-clock bound; worktree retained for recovery");
+        return { kind: "yielded", elapsedMs, yielded };
       }
       return winner === "abandoned" ? { kind: "abandoned", elapsedMs } : { kind: "superseded", elapsedMs, superseded: winner.superseded };
     }
@@ -8499,17 +8473,23 @@ async function keepYieldedFixRound(
   startSha: string,
   recycle: string,
   costUsd: number,
+  workerStopError?: string,
 ): Promise<FixRoundYield> {
   const prNumber = prNumberFromRef(fixRound.prUrl);
   const row = { pr_url: fixRound.prUrl, pr_number: prNumber ?? null, branch: fixRound.branch, trigger: "recycle", detail: recycle,
     head_sha: headSha, start_sha: startSha, pushed: false, strike_spent: false };
+  const failed = (keepError: string): FixRoundYield => {
+    log("fix.round_yielded", { ...row, recovery_ref: null, index_recovery_ref: null, paths: [], keep_error: keepError,
+      ...(workerStopError ? { preservation_deferred: true, retain_worktree: true } : {}) });
+    return { trigger: "recycle", detail: recycle, paths: [], costUsd, keepError };
+  };
+  if (workerStopError) return failed(workerStopError);
   let kept: { recoveryRef?: string; indexRecoveryRef?: string; paths: string[] };
   try {
     kept = await runStepsAsync(keepYieldedFixWorkSteps(hostWorktreeGitAsync, cwd, fixRound.branch, startSha));
   } catch (error) {
     const keepError = capStderrExcerpt(String((error as Error)?.message ?? error), STDERR_EXCERPT_CAP);
-    log("fix.round_yielded", { ...row, recovery_ref: null, index_recovery_ref: null, paths: [], keep_error: keepError });
-    return { trigger: "recycle", detail: recycle, paths: [], costUsd, keepError };
+    return failed(keepError);
   }
   log("fix.round_yielded", { ...row, recovery_ref: kept.recoveryRef ?? null, index_recovery_ref: kept.indexRecoveryRef ?? null, paths: kept.paths });
   // Offer both snapshots when staged bytes differ from the disk; otherwise the only ref suffices.

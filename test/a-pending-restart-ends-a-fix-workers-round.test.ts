@@ -11,14 +11,15 @@
  */
 import assert from "node:assert/strict";
 import childProcess from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
-import { runFixRung } from "#test/helpers/run-task-test.js";
+import { fixBranchClaimKey, runFixRung } from "#test/helpers/run-task-test.js";
 import { originWithClone, type GitRepo } from "#test/helpers/git-repo.js";
-import { fixRoundTally, readPreservedOwnerPatch } from "#src/lib/sweep.js";
+import { fixRoundBranchClaim, fixRoundTally, readPreservedOwnerPatch } from "#src/lib/sweep.js";
+import { acquireInflightLock } from "#src/lib/inflight-lock.js";
 import { pauseFilePath, requestPause } from "#src/lib/fleet-control.js";
 import { DEFAULT_POLL_INTERVAL_MS } from "#src/lib/poll-interval.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
@@ -82,7 +83,7 @@ function workerResult(runId: string, costUsd = 0): WorkerResult {
 async function fixRound(t: TestContext, co: Checkout, runId: string,
   worker: (args: SpawnWorkerArgs) => Promise<WorkerResult>, extra: {
     priorPartialWork?: ReturnType<typeof readPreservedOwnerPatch>;
-    spawnWallClockBoundMs?: number;
+    deps?: Pick<Parameters<typeof runFixRung>[0]["deps"], "spawnWallClockBoundMs" | "reclaimWorker" | "branchClaim">;
   } = {}) {
   const rows: Row[] = [];
   let pushes = 0;
@@ -108,8 +109,8 @@ async function fixRound(t: TestContext, co: Checkout, runId: string,
       issues: { create: () => "https://github.com/acme/remudero/issues/1", listOpen: () => [], comment: () => {} } as IssueGateway,
       ledgerPath: join(co.root, "ledger.ndjson"), log: (step, fields) => rows.push({ step, task_id: TASK, ...(fields ?? {}) }),
       readHeadShaForProvenance: () => co.headSha,
-      ...(extra.spawnWallClockBoundMs === undefined ? {} : { spawnWallClockBoundMs: extra.spawnWallClockBoundMs }),
       say: () => {}, account: (result) => result,
+      ...extra.deps,
     },
   });
   return { outcome, rows, pushes: () => pushes };
@@ -121,11 +122,7 @@ async function fixRound(t: TestContext, co: Checkout, runId: string,
 type AShape = "spread" | "restored" | "restaged";
 
 /** A worker that leaves one staged edit, one unstaged edit and one new file, then runs until it is stopped. */
-function editingWorker(co: Checkout, seen: { signal?: AbortSignal; started?: () => void }, opts: {
-  commit?: boolean;
-  a?: AShape;
-  abortDelayMs?: number;
-} = {}) {
+function editingWorker(co: Checkout, seen: { signal?: AbortSignal; started?: () => void }, opts: { commit?: boolean; a?: AShape } = {}) {
   return async (args: SpawnWorkerArgs): Promise<WorkerResult> => {
     seen.signal = args.signal;
     if (opts.commit) {
@@ -145,24 +142,21 @@ function editingWorker(co: Checkout, seen: { signal?: AbortSignal; started?: () 
       const ownEnd = setTimeout(() => resolve(workerResult("DAEMON-1")), 10_000);
       args.signal?.addEventListener("abort", () => {
         clearTimeout(ownEnd);
-        const rejectAborted = () => reject(Object.assign(new Error("worker aborted"), { name: "AbortError" }));
-        if (opts.abortDelayMs === undefined) rejectAborted();
-        else setTimeout(rejectAborted, opts.abortDelayMs);
+        reject(Object.assign(new Error("worker aborted"), { name: "AbortError" }));
       }, { once: true });
     });
   };
 }
 
 /** Run a round under a recycle PAUSE: the watch's next poll sees it. */
-async function yieldedRound(t: TestContext, opts: { commit?: boolean; a?: AShape; abortDelayMs?: number; boundMs?: number } = {}) {
+async function yieldedRound(t: TestContext, opts: { commit?: boolean; a?: AShape } = {}) {
   onlyGitRuns(t);
   t.mock.timers.enable({ apis: ["setInterval"] });
   const co = checkout(t);
   requestPause(co.root, RECYCLE_REASON);
   const seen: { signal?: AbortSignal; started?: () => void } = {};
   const started = new Promise<void>((resolve) => { seen.started = resolve; });
-  const round = fixRound(t, co, "DAEMON-1", editingWorker(co, seen, opts),
-    opts.boundMs === undefined ? {} : { spawnWallClockBoundMs: opts.boundMs });
+  const round = fixRound(t, co, "DAEMON-1", editingWorker(co, seen, opts));
   await started;
   t.mock.timers.tick(DEFAULT_POLL_INTERVAL_MS);
   const result = await round;
@@ -252,28 +246,72 @@ test("W1-T8141: a pending recycle ends a fix round and preserves its work", asyn
     assert.equal(offered?.recoveryRef, indexRef, "the next round is offered the staged work");
     assert.match(offered!.excerpt, /a staged/);
   });
-});
 
-test("W1-T8141: a recycle that outlasts the spawn bound retains an unsnapshotted worktree", async (t) => {
-  const { co, seen, rows, outcome, pushes } = await yieldedRound(t, { boundMs: 20, abortDelayMs: 100 });
-  assert.equal(seen.signal?.aborted, true, "the recycle requested that the worker stop");
-  assert.equal(outcome.outcome, "stood_down", "a recycle timeout is a yield, not an ordinary abandoned spawn");
-  assert.ok(outcome.retainWorktree, "the sweep must retain the dirty worktree because capture was unsafe");
-  assert.equal(pushes(), 0, "a yielded round never pushes partial work");
-  const yielded = rows.find((row) => row.step === "fix.round_yielded");
-  assert.ok(yielded, "the incomplete preservation is recorded");
-  assert.equal(yielded.preservation_deferred, true);
-  assert.equal(yielded.retain_worktree, true);
-  assert.equal(yielded.recovery_ref, null, "no recovery ref is claimed while the worker may still write");
-  assert.match(String(yielded.keep_error), /could not safely snapshot/);
-  assert.equal(rows.some((row) => row.step === "fix.spawn_abandoned"), false, "the recycle yield is not classified as a normal abandonment");
-  const status = co.clone.git("status", "--porcelain");
-  assert.match(status, /M  src\/a\.ts/, "the staged file remains in the worktree");
-  assert.match(status, / M src\/b\.ts/, "the unstaged file remains in the worktree");
-  assert.match(status, /\?\? src\/c\.ts/, "the new file remains in the worktree");
-  assert.match(co.clone.git("diff", "--cached", "--", "src/a.ts"), /\+a staged/);
-  assert.match(co.clone.git("diff", "--", "src/b.ts"), /\+b unstaged/);
-  await new Promise((resolve) => setTimeout(resolve, 120));
+  await t.test("cancellation outlasting the bound retains the worktree for dead-owner recovery", async (t) => {
+    onlyGitRuns(t);
+    t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+    const co = checkout(t);
+    requestPause(co.root, RECYCLE_REASON);
+    const claimDir = join(co.root, "state", "inflight");
+    const key = fixBranchClaimKey("acme", "remudero", BRANCH);
+    const lock = acquireInflightLock(claimDir, key, { run_id: "FIX-CLAIM" });
+    const claim = fixRoundBranchClaim(lock, () => "test: no second round");
+    t.after(() => claim.release());
+    let started!: () => void;
+    let aborted!: () => void;
+    let finish!: () => void;
+    const ready = new Promise<void>((resolve) => { started = resolve; });
+    const cancelled = new Promise<void>((resolve) => { aborted = resolve; });
+    let reclaimed = 0;
+    const round = fixRound(t, co, "DAEMON-1", async (args) => {
+      writeFileSync(join(co.clone.dir, "src/a.ts"), "a staged\n");
+      co.clone.git("add", "src/a.ts");
+      writeFileSync(join(co.clone.dir, "src/b.ts"), "b unstaged\n");
+      writeFileSync(join(co.clone.dir, "src/c.ts"), "c new\n");
+      args.signal!.addEventListener("abort", aborted, { once: true });
+      started();
+      await new Promise<void>((resolve) => { finish = resolve; });
+      throw Object.assign(new Error("worker stopped late"), { name: "AbortError" });
+    }, { deps: {
+      spawnWallClockBoundMs: DEFAULT_POLL_INTERVAL_MS * 2,
+      reclaimWorker: () => { reclaimed++; }, branchClaim: claim,
+    } });
+    await ready;
+    const dirtyBefore = co.clone.git("status", "--porcelain");
+    t.mock.timers.tick(DEFAULT_POLL_INTERVAL_MS);
+    await cancelled;
+    t.mock.timers.tick(DEFAULT_POLL_INTERVAL_MS);
+    const { outcome, rows, pushes } = await round;
+    finish();
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(outcome.outcome, "stood_down", "the timed-out cancellation is still a yield");
+    assert.ok(outcome.retainWorktree, "the sweep must keep work that could not be safely preserved");
+    assert.equal(reclaimed, 1, "the bound still reclaims the worker");
+    assert.equal(co.clone.git("status", "--porcelain"), dirtyBefore, "no reset, even after a late worker exit");
+    assert.equal(co.clone.git("show", ":src/a.ts"), "a staged");
+    assert.equal(readFileSync(join(co.clone.dir, "src/b.ts"), "utf8"), "b unstaged\n");
+    assert.equal(readFileSync(join(co.clone.dir, "src/c.ts"), "utf8"), "c new\n");
+    assert.equal(co.clone.git("rev-parse", "HEAD"), co.headSha);
+    assert.equal(co.origin.git("rev-parse", BRANCH), co.headSha);
+    assert.equal(pushes(), 0);
+    assert.equal(outcome.strikes, 0);
+    assert.equal(rows.some((row) => row.step === "fix.dispatch"), false);
+    assert.equal(rows.some((row) => row.step === "sweep.fix.owner_residue_preserved"), false, "no unproven recovery claim");
+    const yielded = rows.find((row) => row.step === "fix.round_yielded")!;
+    assert.equal(yielded.pr_number, PR_NUMBER);
+    assert.equal(yielded.trigger, "recycle");
+    assert.equal(yielded.recovery_ref, null);
+    assert.match(String(yielded.keep_error), /worker.*stop.*bound/);
+    assert.equal(yielded.preservation_deferred, true);
+    assert.equal(yielded.retain_worktree, true);
+    const done = rows.filter((row) => row.step === "fix.done");
+    assert.equal(done.length, 1);
+    assert.equal(done[0]!.subtype, "round_yielded");
+    assert.equal(done[0]!.branch_claim_run_id, "FIX-CLAIM");
+    assert.equal(existsSync(lock.path), false, "the recycle drain sees the branch claim released");
+    const successor = acquireInflightLock(claimDir, key, { run_id: "NEXT-ROUND" });
+    successor.release();
+  });
 });
 
 test("W1-T8141: a yielded fix round pushes nothing and costs no strike", async (t) => {
