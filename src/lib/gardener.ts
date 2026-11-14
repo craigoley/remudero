@@ -1348,7 +1348,7 @@ function* gardenPassBody<C extends string, I, A extends GardenAction<C>, W exten
     try {
       const ws = yield* step<W | GardenCheckoutAsync<W>>(() => deps.openWorkspace());
       let unfiled = "the filing ended before its PR opened";
-      // W1-T12550: once the landing has its own outcome, a dispose failure is logged and does not replace it.
+      // W1-T12550: an opened PR or a landing failure/refusal keeps its outcome over a dispose error.
       let settled = false;
       try {
         // A spec's apply only writes the tree; landing and disposal stay with the pass, awaited or not.
@@ -1381,7 +1381,7 @@ function* gardenPassBody<C extends string, I, A extends GardenAction<C>, W exten
           // W1-T12221: a wait is a filing in flight, not a failure: no streak, no refused draft, no id released.
           if (isGardenLandWaiting(landed)) waiting = landed.waiting;
           else prUrl = landed;
-          settled = prUrl !== undefined || waiting !== undefined;
+          settled = prUrl !== undefined;
           if (prUrl === undefined && waiting === undefined) throw new GardenLandingRefusedError(digest!, "not_opened", `${spec.name} gardener: the landing's PR did not open (plan_pr.preflight_refused or _timed_out names why)`);
         }
       } catch (e) {

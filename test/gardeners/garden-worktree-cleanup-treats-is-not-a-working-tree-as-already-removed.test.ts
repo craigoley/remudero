@@ -219,6 +219,31 @@ describe("test/gardeners/garden-worktree-cleanup-treats-is-not-a-working-tree-as
     } finally { p.close(); }
   });
 
+  test("W1-T12550 criterion 3: a waiting landing without a PR still reports a dispose failure", async () => {
+    const p = passFixture("waiting");
+    const reason = "fatal: waiting checkout cleanup failed";
+    const landed = { waiting: { paths: ["change.txt"], stateRoot: p.dir, filed: true as const } };
+    try {
+      await runGardenAsync(p.spec, {
+        ...p.deps,
+        openWorkspace: async (): Promise<GardenCheckoutAsync> => ({
+          root: p.dir, land: async () => landed, dispose: async () => { throw new Error(reason); },
+        }),
+      });
+      const failed = p.steps("garden_filing_failed");
+      assert.equal(failed.length, 1);
+      assert.equal(failed[0][1]?.reason, reason);
+      assert.deepEqual(p.steps("garden_dispose_failed"), [[`${p.spec.name}.garden_dispose_failed`, { reason }]]);
+      const state = p.state();
+      assert.equal(state.filingFailures?.count, 1);
+      assert.equal(state.filingFailures?.reason, reason);
+      assert.equal(state.pending, undefined);
+      assert.equal(state.waiting, undefined);
+      assert.equal(state.lastPass, undefined, "a failed cleanup does not record a completed pass");
+      assert.equal(p.steps("scorecard").at(-1)?.[1]?.filing_failed, 1);
+    } finally { p.close(); }
+  });
+
   test("W1-T12550 criterion 4: a landing that fails or is refused reports its own reason, not the dispose error", async () => {
     const disposeError = "fatal: dispose broke";
     for (const [stage, expected] of [["throws", /the landing broke/], ["not-opened", /did not open/]] as const) {
