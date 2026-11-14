@@ -17,7 +17,7 @@
   files:
     - src/lib/sweep.ts
     - test/sweep/the-stall-backstop-re-arms-when-no-new-fix-round-has-started.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "invariant:stalled-repair-is-reported — An own-red or conflict stage whose last fix.dispatch or pushed fix.done ended more than the stage's bound ago, with no round in flight and no newer round, gets a pr.stuck report. The report names the end time of the last round"

@@ -55,10 +55,11 @@ attachments:
   - https://github.com/craigoley/remudero/blob/e2e63b75b17bb05071a24a1ce558ebbde6d21088/src/lib/view-shadow.ts
   - https://github.com/craigoley/remudero/blob/e2e63b75b17bb05071a24a1ce558ebbde6d21088/src/lib/inbox-view.ts
 origin: repair#console-inbox-shadow-key-population
-status: new
+status: rejected
 reply_to: null
 proposal_pr: null
 summary: null
 expansion: null
 submission_key: console-followup:inbox-shadow-current-membership-20261027-v1
 thread_id: null
+answered_by: null

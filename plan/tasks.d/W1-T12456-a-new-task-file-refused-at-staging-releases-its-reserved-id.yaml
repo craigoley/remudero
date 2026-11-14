@@ -20,7 +20,7 @@
     - src/run-task.ts
     - test/gardeners/a-task-file-the-landing-sets-aside-releases-its-reserved-id.test.ts
     - test/gardeners/a-new-task-file-refused-at-staging-releases-its-reserved-id.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "In one land of a checkout that files only task files, where the landing stages or keeps one new file and refuses another at the stage step, the id of the refused file is released when the landing branch holds it, and the id of the kept file is not"

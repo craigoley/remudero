@@ -943,7 +943,7 @@ export function freshnessRestartLadder(rows: FreshnessRestartValues): { scoreLim
  *  changed plan, a failed or stale early read, and every later call read again. One `daemon.first_tick_read` row. */
 function firstTickReadOf<I extends { plan: Plan }, T>(
   read: (input: I) => Promise<ReadGeneration<T>>, plan: Plan, log: (step: string, extra?: Record<string, unknown>) => void,
-  clock: Clock,
+  clock: Clock, onEarlyRead: (startedAtMs: number) => void,
 ): (input: I) => Promise<ReadGeneration<T>> {
   const startedAtMs = clock.now();
   let settledAtMs: number | undefined;
@@ -964,6 +964,7 @@ function firstTickReadOf<I extends { plan: Plan }, T>(
       reason = outcome.reason;
       const fresh = freshReadGeneration(outcome.generation, { consumer: "first_tick_read", clock, log });
       source = fresh ? "early" : reason === undefined ? "early_stale" : "early_failed";
+      if (fresh) onEarlyRead(startedAtMs);
       return fresh ?? await read(input);
     } finally {
       log("daemon.first_tick_read", { source, first_tick_read_ms: clock.now() - askedAtMs,
@@ -1592,15 +1593,11 @@ export async function daemonCommand(
   const checkStop = deps.checkStop ?? (() => stopDetail(config.root));
   // A loop that ends before its first read (max 0, or STOP at the start) gets no early read.
   const earlyRead = readTick !== undefined && opts.max !== 0 && !checkStop();
-  // The first tick counts the early read as its own, so the boot review (W1-T12236) takes its views.
-  let earlyReadStartedAtMs = earlyRead ? systemClock.now() : undefined;
+  const tickReadClock = clockFromMillisFn(deps.now);
   const firstTickRead = readTick
-    && (earlyRead ? firstTickReadOf(readTick, plan, log, clockFromMillisFn(deps.now)) : readTick);
-  const tickStartStamp = (): number => {
-    const stamp = earlyReadStartedAtMs ?? systemClock.now();
-    earlyReadStartedAtMs = undefined;
-    return stamp;
-  };
+    && (earlyRead ? firstTickReadOf(readTick, plan, log, tickReadClock, (startedAtMs) => {
+      tickReadStartedAtMs = Math.min(tickReadStartedAtMs ?? startedAtMs, startedAtMs);
+    }) : readTick);
 
   // W1-T414: ONE batched read for this whole `rmd daemon` invocation — see drainCommand's
   // identical wiring/doc just above. Resolved AFTER the `--dry-run` early return above (never
@@ -2183,7 +2180,7 @@ export async function daemonCommand(
         refreshMerged,
         refreshMergedAsync: firstTickRead ? buildDaemonReadRefresher({
           read: firstTickRead, plan: () => activePlanRef.current, previous: () => lastProj,
-          invalidate: () => { tickReadGeneration = undefined; tickReadStartedAtMs = tickStartStamp(); },
+          invalidate: () => { tickReadGeneration = undefined; tickReadStartedAtMs = tickReadClock.now(); },
           publish: (snapshot: ReadGeneration<TickReadFacts>) => {
             tickReadGeneration = snapshot;
             lastProj = new Map(snapshot.facts.projection);
@@ -2728,7 +2725,8 @@ export async function daemonCommand(
           () => activePlanRef.current,
           // A run in flight starves the full sweep, so the light pass also watches main.
           mainHealthRung,
-          { openPrViews: servedOpenPrViews(() => tickReadGeneration, () => tickReadStartedAtMs),
+          { openPrViews: servedOpenPrViews(() => freshReadGeneration(tickReadGeneration,
+              { consumer: "sweep_light", clock: tickReadClock }), () => tickReadStartedAtMs),
             sweepWallClockBoundMs: opts.sweepWallClockBoundMs },
         ),
         // W1-T7734: the idle sleep runs the light pass while review demand waits, at a cadence the sweep

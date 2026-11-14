@@ -27,6 +27,7 @@ import { closeSync, fstatSync, openSync, readFileSync } from "node:fs";
 import { parse as parseYaml } from "yaml";
 import { attemptAssignmentJoin, benchmarkEvidenceLedgerPath, benchmarkNonDispatchSpawn, benchmarkWorkerAttemptResources, withReceiptIdentity } from "./benchmark-run.js";
 import type { Config } from "./config.js";
+import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import {
   escalationHeadSha, ghIssueGatewayAsync, prReferentFromIssueText, splitConcatenatedJsonPages, type AsyncIssueGateway,
@@ -991,6 +992,20 @@ export function productionIssueRevalidationPorts(opts: ProductionIssueRevalidati
   };
 }
 
+/** W1-T12549: a worker result that failed is not a judge answer. Thrown after its spend is recorded. */
+export class JudgeWorkerFailedError extends RmdError {
+  constructor(readonly subtype: string) {
+    super("gardener", GENERIC_EXIT_CODE, `worker result failed (${subtype})`, { subtype });
+    this.name = "JudgeWorkerFailedError";
+  }
+}
+
+function failedResultSubtype(result: WorkerResult): string | undefined {
+  if (result.subtype === "success" && !result.isError && !result.apiError) return undefined;
+  if (typeof result.subtype !== "string" || result.subtype === "") return "no subtype";
+  return result.subtype;
+}
+
 /** The existing single judge spawn, with best-effort monetary receipts before parsing can discard a
  * paid result. The optional config names only the evidence sink, never the router or child environment. */
 export function issueRevalidationJudgeText(opts: { mount: Mount; cwd: string; settingsFile: string; spawn?: typeof spawnWorker; config?: Config }): IssueRevalidationJudgeText {
@@ -1080,6 +1095,8 @@ export function issueRevalidationJudgeText(opts: { mount: Mount; cwd: string; se
       }
       try { observe(identity); } catch { /* optional receipt observers cannot change the worker result */ }
     }
+    const failed = failedResultSubtype(result);
+    if (failed !== undefined) throw new JudgeWorkerFailedError(failed);
     return result.text;
   };
 }

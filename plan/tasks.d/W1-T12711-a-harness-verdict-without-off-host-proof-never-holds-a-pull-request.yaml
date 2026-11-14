@@ -1,0 +1,79 @@
+- id: W1-T12711
+  title: "A harness verdict without off-host proof results, or an unparseable progress verdict, never holds a pull request"
+  repo: remudero
+  depends_on: []
+  priority: 1.4
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the progress judge's prompt and its unavailable path; a corroborated harness verdict is unchanged
+  band_meaning: blast-radius
+  origin: "operator-session#stuck-pr-root-causes-2026-11-14"
+  plan_refs:
+    - W1-T12710
+    - W1-T7096
+    - W1-T9297
+    - W1-T11146
+  files:
+    - src/lib/fix-progress-judge.ts
+    - src/lib/sweep.ts
+    - src/lib/ledger-steps.ts
+    - test/fix-lane/a-harness-verdict-without-off-host-proof-never-holds-a-pull-request.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "The fix progress judge prompt offers the harness verdict only when signals.offHostPass is true; otherwise its schema lists continue, change-approach and escalate, and says why harness is not offered"
+      proof: "grep: W1-T12711 criterion 1 in test/fix-lane/a-harness-verdict-without-off-host-proof-never-holds-a-pull-request.test.ts"
+    - claim: "A harness answer without corroborating off-host proof results, or an unparseable answer, is asked again once in the same pass with the reason it was refused"
+      proof: "grep: W1-T12711 criterion 2 in test/fix-lane/a-harness-verdict-without-off-host-proof-never-holds-a-pull-request.test.ts"
+    - claim: "If the second answer is again an uncorroborated harness, the sweep reruns the failed checks on the exact head once and judges again on the new results; a rerun that reproduces the same red marks the harness claim refuted for that head, and harness is not offered again there"
+      proof: "grep: W1-T12711 criterion 3 in test/fix-lane/a-harness-verdict-without-off-host-proof-never-holds-a-pull-request.test.ts"
+    - claim: "If the second answer is again unparseable, the decision is continue with judge_skipped unparseable-twice, so the round runs and W1-T12710's stall count still applies"
+      proof: "grep: W1-T12711 criterion 4 in test/fix-lane/a-harness-verdict-without-off-host-proof-never-holds-a-pull-request.test.ts"
+    - claim: "invariant:no-hold-on-a-refused-answer — no pass ends with a fix progress hold whose reason is harness-uncorroborated or unparseable while the judge input key is unchanged from the previous pass"
+      kind: guard
+      proof: "grep: W1-T12711 criterion 5 in test/fix-lane/a-harness-verdict-without-off-host-proof-never-holds-a-pull-request.test.ts"
+    - claim: "invariant:corroborated-harness-unchanged — with offHostPass true and off-host evidence present, a harness answer escalates exactly as on origin/main"
+      kind: guard
+      proof: "grep: W1-T12711 criterion 6 in test/fix-lane/a-harness-verdict-without-off-host-proof-never-holds-a-pull-request.test.ts"
+  rationale: |
+    WHY: the judge is offered a verdict the code then refuses. The pull request is held, the next pass asks the same question
+    with the same input, and gets the same answer.
+    MEASURED read-only on the Azure host, ledger and rotated archives 2026-11-11 20:25Z to 2026-11-14 20:25Z:
+    - 1,314 fix.progress_judged rows: continue 764, change-approach 244, escalate 19, unavailable 287.
+    - Of the unavailable rows, 170 said "harness judgment lacks corroborating off-host proof results", on 36 pull requests.
+      In all 170, signals.reviewerOnlyFailurePersists was 0 and offHostPass was unset. 86 of the 170 had red class
+      security-merge-policy, a CI red and not a review red.
+    - 115 more said "absent or unparseable fix progress verdict; re-ask next pass". 2 were provider capacity.
+    - Hold time from such an answer to the next verdict or dispatch, cut at merge or close: harness-uncorroborated 79 spells
+      on 35 pull requests, 75.2 PR-hours; unparseable 65 spells on 41 pull requests, 41.6 PR-hours.
+    - Most such rows: #18439 26, #18033 20, #18296 15, #18250 11 (12 of its 13 child runs), #18427 10, #18343 9.
+    WHY THE PROOF RESULTS ARE MISSING, read at origin/main 5d1670adc:
+    - src/lib/fix-progress-judge.ts:512-517 computes offHostPassEvidence only when reviewerOnlyFailurePersists > 0: a
+      worker said FIXED and the reviewer then failed the same proof with the same output. No such round existed on any of
+      the 170 rows, so no evidence could exist.
+    - src/lib/sweep.ts:2486 offers `harness` in the schema on every input.
+    - src/lib/fix-progress-judge.ts:610-612 turns a harness answer without evidence into unavailable.
+    - src/lib/sweep.ts:573 and :22327 turn unavailable into a hold. The input key does not change, so the reuse lookup
+      (fix-progress-judge.ts:647) does not apply and the next pass asks again.
+  design: |
+    INVARIANT no-hold-on-a-refused-answer: a verdict the code refuses is followed in the same pass by a re-ask, a rerun or
+    a decision, never by a hold on an unchanged input.
+    INVARIANT corroborated-harness-unchanged: the corroborated harness path is as on origin/main.
+    1. src/lib/sweep.ts productionFixProgressJudge: build the schema line from the input. Offer harness only when
+       input.signals.offHostPass is true. Otherwise add "harness is not offered: no reviewer-only failure persisted, so there
+       is no off-host proof pass to weigh".
+    2. src/lib/fix-progress-judge.ts judgeFixProgress: on an uncorroborated harness or an unparseable answer, ask once more
+       with the refusal reason appended. Record `reask: 1` on the row.
+    3. On a second uncorroborated harness, return a new result `{ verdict: "rerun-checks" }`. The sweep calls the existing
+       rerunFailedChecks dependency once per head and records `fix.progress_rerun`. The next judgment carries the rerun's
+       results; when the same checks fail again, the input carries `harnessRefuted: true` and step 1 does not offer harness.
+    4. On a second unparseable answer, return continue with judge_skipped `unparseable-twice`.
+    NOT IN SCOPE: what a round does after many rounds (W1-T12710); the judge's model.
+  falsifier: |
+    Offer harness on every input and criterion 1 must fail. Hold on the first refused answer and criteria 2 and 5 must fail.
+    Skip the rerun and criterion 3 must fail. Hold on the second unparseable answer and criterion 4 must fail. Change the
+    corroborated path and criterion 6 must fail. Restore and all must pass.
+  note: |
+    Id reserved for run-unfiled-1794689039000 with ~/rmd-work/bin/reserve-id.sh. The fleet builds it.
