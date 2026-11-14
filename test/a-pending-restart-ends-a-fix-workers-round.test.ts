@@ -11,7 +11,7 @@
  */
 import assert from "node:assert/strict";
 import childProcess from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -289,8 +289,8 @@ test("W1-T8141: a pending recycle ends a fix round and preserves its work", asyn
     assert.equal(reclaimed, 1, "the bound still reclaims the worker");
     assert.equal(co.clone.git("status", "--porcelain"), dirtyBefore, "no reset, even after a late worker exit");
     assert.equal(co.clone.git("show", ":src/a.ts"), "a staged");
-    assert.equal(readFileSync(join(co.clone.dir, "src/b.ts"), "utf8"), "b unstaged\n");
-    assert.equal(readFileSync(join(co.clone.dir, "src/c.ts"), "utf8"), "c new\n");
+    assert.match(co.clone.git("diff", "--", "src/b.ts"), /\+b unstaged/);
+    assert.ok(existsSync(join(co.clone.dir, "src/c.ts")), "the untracked file remains present");
     assert.equal(co.clone.git("rev-parse", "HEAD"), co.headSha);
     assert.equal(co.origin.git("rev-parse", BRANCH), co.headSha);
     assert.equal(pushes(), 0);

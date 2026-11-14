@@ -8370,7 +8370,7 @@ async function spawnFixWorkerBounded(
           () => new Promise<never>(() => {}),
         )
       : new Promise<never>(() => {});
-  const recycled = yieldRoot && startSha ? watchFixRoundRecycle(yieldRoot, watchStop.signal) : new Promise<never>(() => {});
+  const recycled = yieldRoot && startSha ? watchFixRoundRecycle(yieldRoot, watchStop.signal, deps.log) : new Promise<never>(() => {});
   let pendingRecycle: string | undefined;
   try {
     let winner = await Promise.race([spawnPromise, bound, superseded, recycled]);
@@ -8446,13 +8446,22 @@ async function spawnFixWorkerBounded(
 }
 
 /** W1-T8141: resolves with the recycle PAUSE detail once one is pending, at the supersession watch's cadence. */
-function watchFixRoundRecycle(root: string, signal: AbortSignal): Promise<{ recycle: string }> {
+function watchFixRoundRecycle(
+  root: string,
+  signal: AbortSignal,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+): Promise<{ recycle: string }> {
+  let unreadableReported = false;
   return new Promise((resolve) => {
     const timer = setInterval(() => {
       let recycle: string | undefined;
       try {
         recycle = recyclePauseDetail(root);
-      } catch {
+      } catch (error) {
+        if (!unreadableReported) {
+          log("fix.round_recycle_probe_failed", { root, error: String((error as Error)?.message ?? error) });
+          unreadableReported = true;
+        }
         return; // an unreadable PAUSE is no recycle yet; the next poll reads it again
       }
       if (!recycle) return;
@@ -8489,6 +8498,7 @@ async function keepYieldedFixRound(
     kept = await runStepsAsync(keepYieldedFixWorkSteps(hostWorktreeGitAsync, cwd, fixRound.branch, startSha));
   } catch (error) {
     const keepError = capStderrExcerpt(String((error as Error)?.message ?? error), STDERR_EXCERPT_CAP);
+    log("fix.round_preservation_failed", { branch: fixRound.branch, head_sha: headSha, start_sha: startSha, error: keepError });
     return failed(keepError);
   }
   log("fix.round_yielded", { ...row, recovery_ref: kept.recoveryRef ?? null, index_recovery_ref: kept.indexRecoveryRef ?? null, paths: kept.paths });
