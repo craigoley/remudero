@@ -87,7 +87,7 @@ test("native Semgrep pins the runner and Python action and caches both hash lock
   assert.deepEqual(String(setup.with?.["cache-dependency-path"]).trim().split("\n"), [buildPath, runtimePath]);
 });
 
-test("native Semgrep installs into a fresh environment then verifies offline hashes and closure", () => {
+test("W1-T12492 criterion 2 native install preserves qualification controls", () => {
   const install = step("Install hash-locked Community Edition");
   const run = install.run!;
   assert.equal(install.shell, "bash");

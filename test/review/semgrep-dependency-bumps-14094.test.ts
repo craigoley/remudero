@@ -19,16 +19,45 @@ test("W1-T12492 admits only reviewed setuptools wheels and refuses the incompati
   const workflow = read(".github/workflows/semgrep-runtime-compatibility.yml");
 
   const buildPins = [...build.matchAll(/^setuptools==([^\s]+) --hash=sha256:([a-f0-9]+)$/gm)];
-  assert.equal(buildPins.length, 1);
-  assert.ok([["84.0.0", "51a52592b3b99e102b609654876bd65f19f999935166d1352678931132b0c670"],
-    ["84.1.0", "5231689c6ac8156cd155cfb98c3fd6fb252c3e7e9bd3d78b64d3c55f132624c9"]]
-    .some(([version, digest]) => buildPins[0]![1] === version && buildPins[0]![2] === digest),
-  "the lock has one exact reviewed build-tool artifact");
+  assert.deepEqual(buildPins.map(([, version, digest]) => [version, digest]),
+    [["84.1.0", "5231689c6ac8156cd155cfb98c3fd6fb252c3e7e9bd3d78b64d3c55f132624c9"]],
+    "the adopted setuptools move is exactly the reviewed 84.1.0 wheel");
   assert.match(auditor, /"setuptools": frozenset\(\{\s*\("84\.0\.0", "51a52592b3b99e102b609654876bd65f19f999935166d1352678931132b0c670"\),\s*\("84\.1\.0", "5231689c6ac8156cd155cfb98c3fd6fb252c3e7e9bd3d78b64d3c55f132624c9"\),/);
   assert.match(auditor, /APPROVED_SPECIAL_MEMBER_ALIASES = \{[\s\S]*"84\.1\.0", "5231689c6ac8156cd155cfb98c3fd6fb252c3e7e9bd3d78b64d3c55f132624c9"\)[\s\S]*"84\.0\.0", "51a52592b3b99e102b609654876bd65f19f999935166d1352678931132b0c670"\)/);
   assert.match(runtime, /^opentelemetry-api==1\.37\.0 --hash=sha256:accf2024d3e89faec14302213bc39550ec0f4095d1cf5ca688e1bfb1c8612f47$/m);
   assert.match(runtime, /^opentelemetry-sdk==1\.37\.0 --hash=sha256:8f3c3c22063e52475c5dbced7209495c2c16723d016d39287dfc215d1771257c$/m);
   assert.doesNotMatch(runtime, /^opentelemetry-api==1\.45\.2\b/m);
+  const refusal = {
+    outcome: "REFUSED",
+    class: "premise-rotted",
+    target: "opentelemetry-api 1.45.2",
+    consumers: [
+      {
+        name: "Semgrep 1.181.0 source",
+        artifact: "semgrep-1.181.0.tar.gz",
+        sha256: "4c0905288ccf9ee5330e766f1c677a31642a4cc0aac5a95097e7563f3f3a92fa",
+        metadata: "semgrep-1.181.0/pyproject.toml",
+        constraint: "opentelemetry-api~=1.37.0",
+      },
+      {
+        name: "opentelemetry-sdk 1.37.0",
+        artifact: "opentelemetry_sdk-1.37.0-py3-none-any.whl",
+        sha256: "8f3c3c22063e52475c5dbced7209495c2c16723d016d39287dfc215d1771257c",
+        metadata: "opentelemetry_sdk-1.37.0.dist-info/METADATA",
+        constraint: "Requires-Dist: opentelemetry-api==1.37.0",
+      },
+    ],
+  } as const;
+  const sourcePolicy = JSON.parse(read(".github/semgrep/source-build-policy.json"));
+  assert.equal(sourcePolicy.source.sha256, refusal.consumers[0].sha256);
+  assert.equal(runtime.match(/^opentelemetry-sdk==1\.37\.0 --hash=sha256:([a-f0-9]{64})$/m)?.[1], refusal.consumers[1].sha256);
+  assert.equal(refusal.outcome, "REFUSED");
+  assert.equal(refusal.class, "premise-rotted");
+  assert.equal(refusal.target, "opentelemetry-api 1.45.2");
+  assert.deepEqual(refusal.consumers.map(({ name, metadata, constraint }) => [name, metadata, constraint]), [
+    ["Semgrep 1.181.0 source", "semgrep-1.181.0/pyproject.toml", "opentelemetry-api~=1.37.0"],
+    ["opentelemetry-sdk 1.37.0", "opentelemetry_sdk-1.37.0.dist-info/METADATA", "Requires-Dist: opentelemetry-api==1.37.0"],
+  ]);
   assert.equal(isDependencyDeclarationPath(".github/semgrep/build-requirements.txt", () => "{}"), false,
     "do not widen Dependabot's general dependency-file allowlist for this reviewed repair");
 
