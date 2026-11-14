@@ -18,7 +18,7 @@
     - src/lib/status.ts
     - src/run-task.ts
     - test/console-api/board/merge-credit-and-status-reconcile-cover-both-catalogs.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "A merged public pull request whose trailer names an ops task gives that task its merge credit"
