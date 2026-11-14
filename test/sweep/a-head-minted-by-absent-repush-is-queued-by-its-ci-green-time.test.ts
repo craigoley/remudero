@@ -85,7 +85,8 @@ test("W1-T12534 criterion 2: with no re-pushed head the pass keeps the createdAt
   // Eligibility runs opposite to createdAt here, so keying every PR by eligibility would reverse the order.
   const prs = [pr(501, at("12:00")), pr(502, at("11:00")), pr(503, at("10:00")), pr(504, at("11:00"))];
   const ledger = [
-    eligible(501, at("12:05")), eligible(502, at("13:00")), eligible(503, at("14:00")), eligible(504, at("15:00")),
+    { ...eligible(501, at("12:05")), queued_at: at("09:00") },
+    eligible(502, at("13:00")), eligible(503, at("14:00")), eligible(504, at("15:00")),
     repushed(501, at("12:30"), "head-older-501"),
   ];
   const { first, order } = await admissionOrder(prs, ledger, 1);
@@ -131,8 +132,6 @@ test("W1-T12534 criterion 4: a re-pushed head keeps its key after the ledger cap
   // The cap drops the oldest eligibility row; then it drops the absent_repush row too.
   const firstEligibleDropped = await admissionOrder(prs, [minted[0]!, ...rewritten], 1);
   assert.deepEqual(firstEligibleDropped.order, [712, 711, 713]);
-  const mintDropped = await admissionOrder(prs, rewritten, 1);
-  assert.deepEqual(mintDropped.order, [712, 711, 713]);
 });
 
 test("W1-T12534 criterion 4: the first eligibility row of a minted head records its own queued time", async () => {
@@ -142,23 +141,25 @@ test("W1-T12534 criterion 4: the first eligibility row of a minted head records 
   assert.equal(row?.queued_at, new Date(NOW).toISOString());
 });
 
-test("W1-T12534 criterion 4: the live ledger keeps the key through a real rotation after a same-head update", async () => {
+test("W1-T12534 criterion 4: archive history keeps the key through rotation and a same-head update", async () => {
   const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}repush-queue-`));
   const ledgerPath = join(dir, "ledger.ndjson");
   const realLedger = { ledgerPath, readLedger: undefined, appendLine: undefined };
-  const prs = [pr(731, at("09:00")), pr(732, at("19:20")), pr(733, at("18:00"))];
+  const prs = [pr(731, at("09:00")), pr(732, at("19:05")), pr(733, at("18:00"))];
   const lines = (rows: Row[]) => rows.map((row) => JSON.stringify({ run_id: "repush-order-test", task_id: "SWEEP", ...row }))
     .join("\n") + "\n";
   try {
     writeFileSync(ledgerPath, lines([
-      repushed(731, at("19:00")), eligible(731, at("19:10")),
+      repushed(731, at("19:00")),
+      { ...eligible(731, at("19:10")), review_key: "W1-T731@head-731" },
       ...Array.from({ length: MAX_RETAINED_LINES_PER_STEP }, (_, i) => repushed(800 + i, at("19:30"))),
       ...Array.from({ length: MAX_RETAINED_LINES_PER_STEP }, (_, i) => eligible(800 + i, at("20:00"))),
     ]));
-    // The pass writes its own eligibility rows through the production ledger writer.
-    const updated = { ...prs[0]!, lastActivityAt: at("20:35"), reviewInputDigest: "updated-input" };
-    assert.deepEqual((await admissionOrder([updated, prs[1]!, prs[2]!], [], 1, undefined, realLedger)).order,
-      [733, 731, 732]);
+    assert.deepEqual((await admissionOrder(prs, [], 1, undefined, realLedger)).order,
+      [733, 732, 731]);
+    assert.ok(!readLedgerLines(ledgerPath).some((row) => row.step === "sweep.review_eligible" &&
+      row.pr_number === 731 && row.queued_at !== undefined),
+    "the matching production review key suppresses queued_at backfill before rotation");
     const rotated = rotateLedger(ledgerPath, {
       ceilingBytes: statSync(ledgerPath).size - 1, smoothingWindowMs: 0, now: () => new Date(NOW),
     });
@@ -168,10 +169,19 @@ test("W1-T12534 criterion 4: the live ledger keeps the key through a real rotati
       "the mint row left the live ledger");
     assert.ok(!live.some((row) => row.step === "sweep.review_eligible" && row.ts === at("19:10")),
       "the first eligibility row left the live ledger");
-    assert.ok(live.some((row) => row.step === "sweep.review_eligible" && row.pr_number === 731 &&
-      row.queued_at === at("19:10")), "the pass's own eligibility row carries the first queued time");
+    assert.ok(!live.some((row) => row.step === "sweep.review_eligible" && row.pr_number === 731),
+      "no carried row for the matching key survives the cap");
+    assert.deepEqual((await admissionOrder(prs, [], 1, undefined, realLedger)).order,
+      [733, 732, 731], "cap removal alone keeps the first eligibility time");
+    const updated = { ...prs[0]!, lastActivityAt: at("20:35"), reviewInputDigest: "updated-input" };
     assert.deepEqual((await admissionOrder([updated, prs[1]!, prs[2]!], [], 1, undefined, realLedger)).order,
-      [733, 731, 732], "rotation keeps the head between its older and newer peers");
+      [733, 732, 731], "same-head re-observation keeps the head behind its 19:05 peer");
+    const archivePath = rotated.archivePath;
+    assert.ok(archivePath);
+    assert.ok(archivePath.endsWith(".gz"));
+    writeFileSync(archivePath, "unreadable archive");
+    await assert.rejects(admissionOrder([updated, prs[1]!, prs[2]!], [], 1, undefined, realLedger),
+      /repushed-head queue history unreadable/, "incomplete history must not assign a new key");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

@@ -124,6 +124,7 @@ import { buildRiskJudgeSpawnArgs, resolveRiskJudgeMount, scrubRiskJudgeText, run
 import {
   createIncrementalLedgerUnion, createLedgerRotationMemo, createSizedMemo, ledgerRotationDigests, ledgerRotationEntries, ndjsonLines,
   readLedgerUnionRecordsSync, realLedgerFs, resolveLedgerUnion,
+  ledgerRowsForSync,
   type IncrementalUnionPass, type LedgerCorpusEntry, type LedgerGrepFsDeps, type LedgerRotationRecords, type LedgerUnionRecordRead,
 } from "./ledger-union.js";
 import { isMergedLedgerRow, PR_TERMINAL_STEP, prUrlKey } from "./ledger-carry.js";
@@ -26471,6 +26472,14 @@ async function runSweepLightPassCore(
   // ledger-read-intent: live — this fold reads the live file only, never rotations.
   const readLedger = deps.readLedger ?? readLiveLedgerRows;
   const selectionLedgerLines = readLedger(deps.ledgerPath);
+  const queueHistory = deps.readLedger || openPrs.length === 0 ? selectionLedgerLines : (() => {
+    const history = ledgerRowsForSync(dirname(deps.ledgerPath), {
+      prNumbers: openPrs.map((pr) => pr.prNumber), steps: ["sweep.absent_repush", "sweep.review_eligible"],
+    }, { refuseIncomplete: true });
+    if (!history.ok) throw new Error(`repushed-head queue history unreadable: ${history.unread.join(", ")}`);
+    return [...history.rows, ...selectionLedgerLines];
+  })();
+  const repushedQueuedAt = repushedHeadQueuedAt(queueHistory);
   openPrs = openPrs.map(pr => promiseHarvestRetryView(pr, selectionLedgerLines, deps.sampleLoad));
   const selectionPrior = priorActionsFromLedger(selectionLedgerLines, openPrs, deps.sampleLoad);
   openPrs = openPrs.map(pr => completedRefusalRetryView(pr, selectionPrior));
@@ -26510,7 +26519,6 @@ async function runSweepLightPassCore(
   const policySemanticBound = effectiveReviewWidth(deps, policy, queueDepth, now, selectionLedgerLines, activeWorkers);
   const { bound: semanticBound, inFlight: reviewsInFlight } = reviewAdmissionBound(policySemanticBound);
   const unreserved = openPrs.filter((pr) => !lightPassReservedHeads.has(lightPassHeadKey(pr)));
-  const repushedQueuedAt = repushedHeadQueuedAt(selectionLedgerLines);
   const planBound = planLaneBoundForPass(deps, policy, selectReviewAdmissions(unreserved, policy, now, outcomes, 0, unreserved.length,
     undefined, repushedQueuedAt).planFilings.length, "light");
   const needsPerson = needsPersonPredicate(selectionLedgerLines);
@@ -27338,12 +27346,14 @@ export function selectReviewAdmissions(
   return { spawning, planFilings };
 }
 
-/** W1-T12534: `<pr>@<head>` of a minted head to its first carried queued_at, else first eligible ts, else mint ts. */
+/** W1-T12534: `<pr>@<head>` of a minted head to its first eligible time, else its mint time. */
 function repushedHeadQueuedAt(ledgerLines: ReadonlyArray<Record<string, unknown>>): Map<string, string> {
   const minted = new Map<string, string>();
   const eligible = new Map<string, string>();
-  const carried = new Map<string, string>();
-  const isTime = (value: unknown): value is string => typeof value === "string" && !Number.isNaN(Date.parse(value));
+  const isTime = (value: unknown): value is string => typeof value === "string" && Number.isFinite(Date.parse(value));
+  const first = (values: Map<string, string>, key: string, ts: string): void => {
+    if (!values.has(key) || Date.parse(ts) < Date.parse(values.get(key)!)) values.set(key, ts);
+  };
   for (const row of ledgerLines) {
     if (!isTime(row.ts)) continue;
     const head = row.step === "sweep.absent_repush" ? row.new_head
@@ -27351,14 +27361,13 @@ function repushedHeadQueuedAt(ledgerLines: ReadonlyArray<Record<string, unknown>
     if (typeof head !== "string") continue;
     const key = `${String(row.pr_number)}@${head}`;
     if (row.step === "sweep.absent_repush") {
-      if (!minted.has(key)) minted.set(key, row.ts);
+      first(minted, key, row.ts);
       continue;
     }
-    if (!eligible.has(key)) eligible.set(key, row.ts);
-    if (isTime(row.queued_at) && !carried.has(key)) carried.set(key, row.queued_at);
+    first(eligible, key, row.ts);
+    if (isTime(row.queued_at)) first(eligible, key, row.queued_at);
   }
-  return new Map([...new Set([...minted.keys(), ...carried.keys()])]
-    .map((key) => [key, carried.get(key) ?? eligible.get(key) ?? minted.get(key)!]));
+  return new Map([...minted].map(([key, ts]) => [key, eligible.get(key) ?? ts]));
 }
 
 /** Number of spawning review candidates before the adaptive admission cut. */
