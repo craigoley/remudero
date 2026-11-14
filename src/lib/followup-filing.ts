@@ -1,6 +1,7 @@
 import { parse, stringify } from "yaml";
 import { DAEMON_DRAFT_BATCH_CAP, planRatificationBatch, type DraftRungOutcome,
   type InboxClassification, type Proposal, type RatificationPayload } from "./inbox.js";
+import type { DuplicateCorpusEntry } from "./knowledge-dedup.js";
 import { machineShardRisk } from "./machine-filing.js";
 import { TASK_RISKS, type Task, type TaskRisk } from "./plan.js";
 import type { FollowupCandidate, FollowupRouteOutcome } from "./retro.js";
@@ -73,6 +74,7 @@ function draftRefusal(fragment: string, c: FollowupCandidate, sourceRisk: TaskRi
 
 export interface FollowupFilingDeps extends SelectionFacts {
   sourceRisk?: (candidate: FollowupCandidate) => TaskRisk | undefined;
+  duplicateCorpus?: readonly DuplicateCorpusEntry[];
   draft: (proposals: Proposal[]) => Promise<DraftRungOutcome[]>;
   fileBatch: (payloads: RatificationPayload[], onFiled: (receipt: FilingReceipt) => void,
     finalize: FollowupFinalizer) => Promise<FilingReceipt | undefined>;
@@ -109,7 +111,7 @@ export async function fileEligibleFollowups(outcomes: readonly FollowupRouteOutc
     if (reason) refuse(c.entryId, reason);
     else if (d?.ok) ready.push({ proposalId, state: "ready", reasons: [], draft: d.candidate });
   }
-  const plan = planRatificationBatch(ready, "");
+  const plan = planRatificationBatch(ready, "", { duplicateCorpus: deps.duplicateCorpus });
   for (const skip of plan.skipped) {
     const c = eligible.find(o => o.proposalId === skip.proposalId)!.candidate;
     refuse(c.entryId, skip.reason);

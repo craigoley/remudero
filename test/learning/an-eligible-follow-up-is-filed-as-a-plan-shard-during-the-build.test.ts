@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { parse, stringify } from "yaml";
 import { fileEligibleFollowups, followupFilingPresentation, followupProvenance, selectFileableFollowups } from "#src/lib/followup-filing.js";
-import { approveBatch, fileRatificationBatch, inboxDraftExampleFragmentYaml, materializeDraftTaskIds, type DraftRungOutcome } from "#src/lib/inbox.js";
+import { approveBatch, draftedShardSlugs, fileRatificationBatch, inboxDraftExampleFragmentYaml, materializeDraftTaskIds, type DraftRungOutcome } from "#src/lib/inbox.js";
 import { buildPlanPrBody, filingAcceptanceCriteria } from "#src/lib/plan-pr-emitter.js";
 import { armAutoMerge, type ArmDeps } from "#src/lib/arm-auto-merge.js";
 import { parseAcceptanceBlock, parseWhitelistedProof } from "#src/lib/review.js";
@@ -278,3 +278,33 @@ test("follow-up head provenance survives mining and registry publication", () =>
   } });
 });
 
+
+test("a draft that duplicates a filed shard is skipped by the batch planner and refused with its reason", async () => {
+  const d = draft();
+  assert.ok(d.ok);
+  const corpus = draftedShardSlugs(d.candidate.fragmentYaml);
+  assert.ok(corpus.length > 0);
+  const rows: Record<string, unknown>[] = [];
+  const result = await fileEligibleFollowups([routed()], {
+    planOnMain: [source], openPrOrigins: new Set(), ratifiedIds: new Set(), draft: async () => [d],
+    duplicateCorpus: corpus.map(e => ({ id: "plan/tasks.d/W1-T1-already-filed.yaml", text: e.text })),
+    fileBatch: async () => assert.fail("a duplicate draft reached the publisher"),
+    log: (step, extra) => rows.push({ step, ...extra }),
+  });
+  assert.deepEqual(result.filed, []);
+  assert.equal(result.refused.length, 1);
+  assert.equal(result.refused[0].entryId, candidate.entryId);
+  assert.match(result.refused[0].reason, /already on origin\/main/);
+  assert.deepEqual(rows, [{ step: "followup.file_refused", entry_id: candidate.entryId, reason: result.refused[0].reason }]);
+});
+
+test("a batch the ratifier does not file is refused as batch-not-filed and records no filing", async () => {
+  const rows: Record<string, unknown>[] = [];
+  const result = await fileEligibleFollowups([routed()], {
+    planOnMain: [source], openPrOrigins: new Set(), ratifiedIds: new Set(), draft: async () => [draft()],
+    fileBatch: async () => undefined, log: (step, extra) => rows.push({ step, ...extra }),
+  });
+  assert.deepEqual(result.filed, []);
+  assert.deepEqual(result.refused, [{ entryId: candidate.entryId, reason: "batch-not-filed" }]);
+  assert.deepEqual(rows, [{ step: "followup.file_refused", entry_id: candidate.entryId, reason: "batch-not-filed" }]);
+});
