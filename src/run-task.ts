@@ -1,4 +1,5 @@
 import { isImprovementBoundProposal, isReviewedImprovementDraft, runImprovementAction, type ImprovementPlanReceipt } from "./lib/improvement-thread.js";
+import { fileEligibleFollowups, followupFilingPresentation, type FollowupFinalizer } from "./lib/followup-filing.js";
 import { findTaskInCatalogs, catalogTaskContract, type TaskLookupOptions } from "./lib/task-lookup.js";
 import type { OpsCatalogApi } from "./lib/ops-catalog-source.js";
 import { operatorReleaseContractChanged, operatorReleasePin, qualifyReleaseEvidence, readReleaseLedgerLines, releaseContractPins, type ReleaseEvidence } from "./lib/operator-release.js";
@@ -1025,6 +1026,7 @@ import {
   applyFragmentToPlanYaml,
   approveBatch,
   approveBatchCommitMessage,
+  anchorFingerprint,
   approveCommitMessage,
   approvePrTitle,
   approveProposal,
@@ -9346,6 +9348,8 @@ export function harvestFollowupsFromReport(
     runId?: string;
     /** Injectable memo; defaults to this process's own. */
     seen?: Set<string>;
+    readHeadSha?: () => string;
+    worktreePath?: string;
   },
 ): void {
   const followups = parseFollowups(text);
@@ -9374,7 +9378,17 @@ export function harvestFollowupsFromReport(
     return;
   }
   seen.add(digest);
-  ctx.log("report.followups", { ...(ctx.prUrl ? { pr_url: ctx.prUrl } : {}), entries: followups });
+  let headSha: string | undefined;
+  try {
+    const value = ctx.readHeadSha ? ctx.readHeadSha() : ctx.worktreePath || ctx.runId
+      ? hostWorktreeGit(ctx.worktreePath ?? join(worktreesDir(loadConfig()), `run-${ctx.runId}`), ["rev-parse", "--verify", "HEAD^{commit}"]).trim()
+      : undefined;
+    if (value && /^[0-9a-f]{40}$/i.test(value)) headSha = value;
+  } catch (error) {
+    ctx.log("followup.head_unreadable", { reason: String(error) });
+  }
+  ctx.log("report.followups", { ...(ctx.prUrl ? { pr_url: ctx.prUrl } : {}),
+    ...(headSha ? { head_sha: headSha } : {}), entries: followups });
   ctx.say(`${ctx.label} follow-ups declared: ${followups.map((f) => f.type).join(", ")}`);
 }
 
@@ -23769,10 +23783,60 @@ async function retroCommand(
   // W1-T9240: the real attempt owns cancellation; waiting yields to a live async holder.
   // Publication precedes harvest acknowledgements and remains below the dry-run/integrity guards.
   const followupRegistryPath = join(config.root, "state", "inbox-proposals.json");
-  await withRetroPublicationCancellation(signal => publishFollowupHarvestAsync(gather.followups,
+  const followupOutcomes = await withRetroPublicationCancellation(signal => publishFollowupHarvestAsync(gather.followups,
     { registryPath: followupRegistryPath, ledgerPath }, { signal,
       log: (step, detail) => appendLedger(ledgerPath, { run_id: `RETRO-${retroReadStartedMs}`, task_id: "RETRO", step, ...detail }),
     }));
+  if (followupOutcomes.length > 0) {
+    const filingLog = (step: string, extra: Record<string, unknown> = {}) =>
+      appendLedger(ledgerPath, { run_id: `RETRO-${retroReadStartedMs}`, task_id: "RETRO", step, ...extra });
+    try {
+      const planOnMain = await loadPlanAtRefAsync(checkoutRoot, "plan/tasks.yaml", "origin/main");
+      const openPrOrigins = new Set<string>();
+      const openPages = (opts.openPrs ?? ghJson)([...openPrsRestArgs(owner, repo), "--paginate", "--slurp"]) as RestPullRow[][];
+      for (const pr of openPages.flat()) {
+        const pages = ghJson(["api", `repos/${owner}/${repo}/pulls/${pr.number}/files`, "--paginate", "--slurp"]) as Array<Array<{ filename: string; status: string }>>;
+        for (const file of pages.flat()) if (file.status !== "removed" && /^plan\/tasks\.d\/[^/]+\.yaml$/.test(file.filename)) {
+          if (pr.head === undefined) throw new Error(`missing head metadata for open PR ${pr.number}`);
+          const headSha = pr.head.sha;
+          if (typeof headSha !== "string" || !/^[0-9a-f]{40}$/i.test(headSha)) throw new Error(`unreadable head SHA for open PR ${pr.number}`);
+          const blob = ghJson(["api", `repos/${owner}/${repo}/contents/${file.filename}?ref=${headSha}`]) as { content: string };
+          const tasks = parseYaml(Buffer.from(blob.content, "base64").toString("utf8")) as Array<{ origin?: string }>;
+          for (const task of tasks) if (task.origin) openPrOrigins.add(task.origin);
+        }
+      }
+      const receipts = readLedgerLines(ledgerPath);
+      const ratifiedIds = new Set(followupOutcomes.filter(o => o.routed && isRatifiedInLedger(receipts, o.proposalId))
+        .map(o => o.routed ? o.proposalId : ""));
+      await fileEligibleFollowups(followupOutcomes, {
+        planOnMain: planOnMain.tasks, openPrOrigins, ratifiedIds, log: filingLog,
+        sourceRisk: c => {
+          const row = receipts.findLast(r => r.step === "run.start" && r.run_id === c.runId);
+          return row?.risk === "low" || row?.risk === "medium" || row?.risk === "high" ? row.risk : undefined;
+        },
+        draft: proposals => draftProposalBatch(proposals, config, owner, repo, `FOLLOWUP-${nextLaneEpochMs()}`, filingLog),
+        fileBatch: async (payloads, onFiled, finalize) => {
+          let receipt: { prUrl: string; proposalIds: string[] } | undefined;
+          try {
+            await approveBatchCommand(payloads.map(p => p.proposalId), { config, automaticFollowups: { payloads, finalize },
+              onFiled: result => {
+                receipt = { prUrl: result.prUrl, proposalIds: result.accepted.map(p => p.proposalId) };
+                onFiled(receipt);
+              },
+            });
+          } catch (error) {
+            if (!receipt) throw error;
+            filingLog("followup.filing_gate_error", { reason: String(error), filing_pr: receipt.prUrl });
+          }
+          return receipt;
+        },
+      });
+    } catch (error) {
+      for (const outcome of followupOutcomes) if (outcome.routed) filingLog("followup.file_refused", {
+        entry_id: outcome.candidate.entryId, reason: `filing-unreadable: ${String(error)}`,
+      });
+    }
+  }
 
   // W1-T2559: retro ships no code and supervises no worker, so G-17's Tier Invariant — which
   // exists to keep a supervisor strictly above what it reviews — does not bind it to plan
@@ -37395,6 +37459,7 @@ function loadProposalsForRatify(
   owner: string,
   repo: string,
   config: Config,
+  draftOverrides?: readonly RatificationPayload[],
 ): { found: { id: string; proposal: Proposal; classification: InboxClassification }[]; unknown: string[] } {
   const registryPath = join(config.root, "state", "inbox-proposals.json");
   const proposals: Proposal[] = parseProposalRegistry(readFileIfExists(registryPath));
@@ -37423,7 +37488,12 @@ function loadProposalsForRatify(
       unknown.push(id);
       continue;
     }
-    found.push({ id, proposal, classification: classifyProposal(proposal, drafts[proposal.id], ctx) });
+    const override = draftOverrides?.find(p => p.proposalId === id);
+    const draft = override ? { ...override, anchorFingerprint: anchorFingerprint(proposal.evidenceAnchors) } : drafts[proposal.id];
+    const classification = classifyProposal(proposal, draft, ctx);
+    // Automatic filing already validated the worker's verbatim provenance; do not prepend an operator-approve narrative.
+    if (override) classification.proposal = undefined;
+    found.push({ id, proposal, classification });
   }
   return { found, unknown };
 }
@@ -39394,7 +39464,10 @@ export async function approveCommand(
  */
 async function approveBatchCommand(
   rest: string[],
-  deps: { config?: Config; gateway?: RatifyGateway; batchGateway?: RatifyBatchGateway } = {},
+  deps: { config?: Config; gateway?: RatifyGateway; batchGateway?: RatifyBatchGateway;
+    automaticFollowups?: { payloads: RatificationPayload[]; finalize: FollowupFinalizer };
+    onFiled?: (result: Extract<BatchApproveResult, { ok: true }>) => void;
+  } = {},
 ): Promise<number> {
   const proposalIds = rest;
   const config = deps.config ?? loadConfig();
@@ -39405,7 +39478,7 @@ async function approveBatchCommand(
   const registryPath = join(config.root, "state", "inbox-proposals.json");
   const { owner, repo } = instancePlan.target ?? resolveOwnerRepo();
 
-  const { found, unknown } = loadProposalsForRatify(proposalIds, plan, ledgerPath, owner, repo, config);
+  const { found, unknown } = loadProposalsForRatify(proposalIds, plan, ledgerPath, owner, repo, config, deps.automaticFollowups?.payloads);
   if (found.some(row => row.proposal.improvement !== undefined)) {
     console.error("rmd approve: improvement drafts must be reviewed and filed individually through their bound saved conversation");
     return 1;
@@ -39519,7 +39592,8 @@ async function approveBatchCommand(
             throw new Error(`rmd approve: refusing to materialize task id(s) for ${payload.proposalId} — ${materialized.reason}`);
           }
           log("approve.id_materialized", { proposal_id: payload.proposalId, ids: materialized.ids });
-          return { proposalId: payload.proposalId, fragmentYaml: materialized.fragmentYaml, stampLine: materialized.stampLine };
+          const filedPayload = { proposalId: payload.proposalId, fragmentYaml: materialized.fragmentYaml, stampLine: materialized.stampLine };
+          return deps.automaticFollowups ? deps.automaticFollowups.finalize(filedPayload) : filedPayload;
         },
         { mkdirSync, writeFileSync, readFileSync },
         join,
@@ -39529,14 +39603,16 @@ async function approveBatchCommand(
       log("approve.shards_written", { proposal_ids: payloads.map((p) => p.proposalId), paths: allWrittenPaths });
 
       execFileSync("git", ["-C", batchWorktree, "add", "--", ...allWrittenPaths], { stdio: "inherit" });
-      execFileSync("git", ["-C", worktreePath, "commit", "-m", approveBatchCommitMessage(payloads)], { stdio: "inherit" });
+      const message = deps.automaticFollowups ? followupFilingPresentation(payloads.map(p => p.proposalId), payloads.map(p => p.stampLine)).commitMessage
+        : approveBatchCommitMessage(payloads);
+      execFileSync("git", ["-C", worktreePath, "commit", "-m", message], { stdio: "inherit" });
       batchPushed = "unknown"; // W1-T9488: a push that throws leaves the branch's ids unknowable
       gitPushRunBranch(worktreePath);
       batchPushed = pushedBranchIds(worktreePath, log);
       return branch;
     },
     openPlanPr(branch, ids) {
-      const intro = [
+      const intro = deps.automaticFollowups ? followupFilingPresentation(ids).intro : [
         `Batch ratification of ${ids.length} explicitly-named proposals: ${ids.join(", ")}.`,
         "",
         "The operator's one-bit approve initiated this PR (MASTER-PLAN P25 ii, W1-T111). The",
@@ -39554,7 +39630,8 @@ async function approveBatchCommand(
       });
       assertLiveWriteAllowed("gh-pr-create", `opening a PR against ${owner}/${repo}`);
       const created = createPlanPrRest(ghJson, owner, repo, {
-        title: `chore(plan): ratify ${ids.length} proposals via rmd approve`,
+        title: deps.automaticFollowups ? followupFilingPresentation(ids).title :
+          `chore(plan): ratify ${ids.length} proposals via rmd approve`,
         body,
         head: branch,
         base: "main",
@@ -39605,6 +39682,7 @@ async function approveBatchCommand(
   idBlocks.forEach((b) => b.releaseAll());
   releaseBatchUnfiled("ratified");
 
+  deps.onFiled?.(result);
   updateProposalRegistry(registryPath, (current) => {
     const acceptedIds = new Set(result.accepted.map((p) => p.proposalId));
     const next = current.filter((p) => !acceptedIds.has(p.id));

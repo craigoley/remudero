@@ -2808,6 +2808,7 @@ export interface FollowupCandidate {
    *  than "matched an open title" — currently just {@link decorativeStatusFlipReason}. */
   reason?: string;
   prUrl?: string;
+  headSha?: string;
 }
 
 /** Pure mining result: what to show the Architect, what was already covered, and the ledger lines
@@ -3028,6 +3029,7 @@ export function mineFollowups(records: LedgerRecord[], openTitles: string[] = []
         runId: String(r.run_id ?? "?"),
         taskId: String(r.task_id ?? "?"),
         ...(typeof r.pr_url === "string" ? { prUrl: r.pr_url } : {}),
+        ...(typeof r.head_sha === "string" ? { headSha: r.head_sha } : {}),
       };
       const statusFlipReason = decorativeStatusFlipReason(text);
       const isDup = statusFlipReason !== undefined || openTitleWordSets.some((titleWords) => followupMatchesTitle(text, titleWords));
@@ -3222,26 +3224,14 @@ export function findSettledQuestion(text: string, rows: readonly SettledQuestion
   return rows.find((row) => row.matches(text));
 }
 
-export interface RouteFollowupsDeps {
-  registryPath: string;
-  /** Injectable, defaulting to {@link SETTLED_QUESTIONS}, so a test proves the arm is DATA: `[]`
-   *  routes every candidate as before, and an added row declines one with no code change. */
-  settledQuestions?: readonly SettledQuestionRow[];
-  /** Injectable — production takes `updateProposalRegistry` (the W1-T240 single writer),
-   *  mirroring board-review.ts's `updateRegistry` seam so a test never touches disk. */
-  updateRegistry?: (
-    registryPath: string,
-    update: (current: Proposal[]) => Proposal[] | null,
-    opts?: UpdateProposalRegistryOpts,
-  ) => Proposal[] | null;
-}
-
 /** Stable, deterministic registry id for one followup candidate: `entryId` already carries
  *  `mineFollowups`'s uniqueness key, so the SAME entry always resolves to the SAME id, which is
  *  what lets the existing-id check refuse to re-add it. Never derived from `text`. */
 export function followupProposalId(candidate: FollowupCandidate): string {
   return `followup:${candidate.entryId}`;
 }
+
+const FOLLOWUP_FILING_FALLBACK = "\nFiling: automatic, with operator fallback if refused.";
 
 /** Route one `mineFollowups` harvest into the ACTIVE-proposal registry through the single writer
  *  (inbox.ts's `updateProposalRegistry`) the other lanes already use.
@@ -3259,7 +3249,10 @@ export function followupProposalId(candidate: FollowupCandidate): string {
  *  fabricated claim. The candidate's own ids ride in the summary — enough for ATTRIBUTION, never
  *  for the evidence-anchor arm. IDEMPOTENT: the same {@link followupProposalId} is never
  *  re-added. */
-export function routeFollowupsToRegistry(harvest: FollowupHarvest, deps: RouteFollowupsDeps): FollowupRouteOutcome[] {
+export function routeFollowupsToRegistry(harvest: FollowupHarvest, deps: FollowupRegistryDeps & {
+  /** Defaults to {@link SETTLED_QUESTIONS}; `[]` disables the settled-question predicates. */
+  settledQuestions?: readonly SettledQuestionRow[];
+}): FollowupRouteOutcome[] {
   const updateRegistry = deps.updateRegistry ?? updateProposalRegistry;
   const settledQuestions = deps.settledQuestions ?? SETTLED_QUESTIONS;
   const outcomes: FollowupRouteOutcome[] = [];
@@ -3335,7 +3328,8 @@ export function routeFollowupsToRegistry(harvest: FollowupHarvest, deps: RouteFo
           id: followupProposalId(c),
           summary:
             `follow-up harvest [${c.type}]: ${c.text} — from ${c.taskId} (run ${c.runId}` +
-            `${c.prUrl ? `, ${c.prUrl}` : ""})`,
+            `${c.prUrl ? `, ${c.prUrl}` : ""}${c.headSha ? `, head ${c.headSha}` : ""})` +
+            (c.prUrl || c.headSha ? FOLLOWUP_FILING_FALLBACK : ""),
           // Stated, never synthesized — see this function's own doc for why a fabricated
           // git-grep pattern would be worse than an honest empty set.
           evidenceAnchors: [] as EvidenceAnchor[],
@@ -3368,7 +3362,7 @@ export async function withRetroPublicationCancellation<T>(run: (signal: AbortSig
 /** Same routing predicates and locked writer as synchronous publication; only acquisition yields.
  * Deferred routing outcomes and harvest marks remain private until the real writer has committed. */
 export async function publishFollowupHarvestAsync(harvest: FollowupHarvest,
-  deps: Omit<RouteFollowupsDeps, "updateRegistry"> & Parameters<typeof recordFollowupHarvest>[1],
+  deps: Omit<Parameters<typeof routeFollowupsToRegistry>[1], "updateRegistry"> & Parameters<typeof recordFollowupHarvest>[1],
   wait: UpdateProposalRegistryOpts): Promise<FollowupRouteOutcome[]> {
   const pending: LedgerLine[] = [];
   recordFollowupHarvest(harvest, { ...deps, writeLedger: (_path, line) => { pending.push(line); } });
@@ -3386,7 +3380,7 @@ export async function publishFollowupHarvestAsync(harvest: FollowupHarvest,
  * a crash before the marks replays through the router's existing stable-id dedup. */
 export function publishFollowupHarvest(
   harvest: FollowupHarvest,
-  deps: RouteFollowupsDeps & Parameters<typeof recordFollowupHarvest>[1],
+  deps: Parameters<typeof routeFollowupsToRegistry>[1] & Parameters<typeof recordFollowupHarvest>[1],
 ): FollowupRouteOutcome[] {
   const pending: LedgerLine[] = [];
   recordFollowupHarvest(harvest, { ...deps, writeLedger: (_path, line) => { pending.push(line); } });
@@ -3441,11 +3435,11 @@ export interface FollowupRetireOutcome {
   reason: string;
 }
 
-/** W1-T4107: shared by retireSettledFollowups and pruneFollowups, which took identical seams. */
+/** Shared registry writer for follow-up routing, retirement and pruning. */
 export interface FollowupRegistryDeps {
   registryPath: string;
   /** Injectable — production takes {@link updateProposalRegistry}, mirroring
-   *  {@link RouteFollowupsDeps.updateRegistry}'s own test seam. */
+   *  the routing, retirement and pruning paths' test seam. */
   updateRegistry?: (
     registryPath: string,
     update: (current: Proposal[]) => Proposal[] | null,
@@ -3465,6 +3459,8 @@ export function retireSettledFollowups(read: FollowupReferentRead, deps: Followu
   updateRegistry(deps.registryPath, (current) => {
     const settled: FollowupRetireOutcome[] = [];
     for (const p of current) {
+      // The source merging cannot settle a draft refused by automatic filing. Keep its operator fallback.
+      if (p.id.startsWith("followup:") && p.summary.endsWith(FOLLOWUP_FILING_FALLBACK)) continue;
       const taskId = followupOriginatingTaskId(p);
       if (taskId === undefined) continue;
       // W1-T3524: a PR referent settles on the PR having MERGED — the same signal, and the same

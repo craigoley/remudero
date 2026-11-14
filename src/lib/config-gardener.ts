@@ -313,6 +313,8 @@ export const CONFIG_GARDEN_LEDGER_STEPS: readonly string[] = [
   "pr.body_normalize.raced",
   // W1-T11756: the history guard turns a SUCCESS back to FAILURE after the run's own pr.opened; its receipt is read.
   "review.history_guarded",
+  // Automatic follow-up filing records the originating PR on this worker-priced receipt.
+  "followup.filed",
 ];
 
 /** W1-T5474: the 60-day union read bounded to {@link CONFIG_GARDEN_LEDGER_STEPS}. An incomplete union fails
