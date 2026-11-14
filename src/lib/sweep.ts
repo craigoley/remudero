@@ -26471,6 +26471,13 @@ async function runSweepLightPassCore(
   // ledger-read-intent: live — this fold reads the live file only, never rotations.
   const readLedger = deps.readLedger ?? readLiveLedgerRows;
   const selectionLedgerLines = readLedger(deps.ledgerPath);
+  let repushedLedgerLines: ReadonlyArray<Record<string, unknown>> = selectionLedgerLines;
+  if (!deps.readLedger) {
+    const history = readLedgerUnionRecordsSync(dirname(deps.ledgerPath), {
+      step: ["sweep.absent_repush", "sweep.review_eligible"], order: "oldest-first", refuseIncomplete: true });
+    if (!history.ok) throw new Error(`repushed-head queue history unavailable: ${history.unread.join(", ")}`);
+    repushedLedgerLines = history.rows;
+  }
   openPrs = openPrs.map(pr => promiseHarvestRetryView(pr, selectionLedgerLines, deps.sampleLoad));
   const selectionPrior = priorActionsFromLedger(selectionLedgerLines, openPrs, deps.sampleLoad);
   openPrs = openPrs.map(pr => completedRefusalRetryView(pr, selectionPrior));
@@ -26510,7 +26517,7 @@ async function runSweepLightPassCore(
   const policySemanticBound = effectiveReviewWidth(deps, policy, queueDepth, now, selectionLedgerLines, activeWorkers);
   const { bound: semanticBound, inFlight: reviewsInFlight } = reviewAdmissionBound(policySemanticBound);
   const unreserved = openPrs.filter((pr) => !lightPassReservedHeads.has(lightPassHeadKey(pr)));
-  const repushedQueuedAt = repushedHeadQueuedAt(selectionLedgerLines);
+  const repushedQueuedAt = repushedHeadQueuedAt(repushedLedgerLines);
   const planBound = planLaneBoundForPass(deps, policy, selectReviewAdmissions(unreserved, policy, now, outcomes, 0, unreserved.length,
     undefined, repushedQueuedAt).planFilings.length, "light");
   const needsPerson = needsPersonPredicate(selectionLedgerLines);

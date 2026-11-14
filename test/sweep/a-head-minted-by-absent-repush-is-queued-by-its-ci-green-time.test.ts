@@ -1,5 +1,11 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { gzipSync } from "node:zlib";
+import { MAX_RETAINED_LINES_PER_STEP, rotateLedger } from "#src/lib/ledger.js";
+import { readLedgerLines } from "#src/lib/status.js";
 import {
   DEFAULT_SWEEP_POLICY, drainInFlightReviews, runSweepLightPass,
   type OpenPrView, type SweepDeps,
@@ -27,7 +33,7 @@ const eligible = (n: number, ts: string, head = `head-${n}`): Row =>
   ({ ts, step: "sweep.review_eligible", pr_number: n, head_sha: head, review_key: `${n}@${head}@${ts}` });
 
 /** Runs one light pass at `width`, then frees one lane at a time. Returns the first admissions and the full start order. */
-async function admissionOrder(prs: OpenPrView[], ledger: Row[], width: number) {
+async function admissionOrder(prs: OpenPrView[], ledger: Row[], width: number, overrides: Partial<SweepDeps> = {}) {
   const releases = new Map<number, () => void>();
   const started: number[] = [];
   const deps: SweepDeps = {
@@ -38,6 +44,7 @@ async function admissionOrder(prs: OpenPrView[], ledger: Row[], width: number) {
       started.push(p.prNumber);
       await new Promise<void>((resolve) => { releases.set(p.prNumber, resolve); });
     },
+    ...overrides,
   };
   const policy = { ...DEFAULT_SWEEP_POLICY, reviewLanes: width, reviewLaneMin: width, reviewLaneMax: width };
   try {
@@ -107,4 +114,61 @@ test("W1-T12534 criterion 4: a verdict or an update without a new head does not 
     [pr(701, at("09:00"), { lastActivityAt: at("20:35") }), pr(702, at("19:20"))],
     [...minted, eligible(701, at("20:30"))], 1);
   assert.deepEqual(after.order, [701, 702]);
+});
+
+test("W1-T12534 criterion 4: rotation preserves the first eligibility key after a same-head input update", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "repush-queue-"));
+  const ledgerPath = join(dir, "ledger.ndjson");
+  const realLedger = { ledgerPath, readLedger: undefined };
+  const prs = [pr(701, at("09:00")), pr(702, at("19:20")), pr(703, at("18:00"))];
+  const minted = [repushed(701, at("19:00")), eligible(701, at("19:10"))];
+  const write = (rows: Row[]) => writeFileSync(ledgerPath, rows.map(row => JSON.stringify({
+    run_id: "repush-order-test", task_id: "SWEEP", ...row,
+  })).join("\n") + "\n");
+  try {
+    write(minted);
+    assert.deepEqual((await admissionOrder(prs, [], 1, realLedger)).order, [703, 701, 702]);
+    const updated = [
+      ...minted,
+      ...Array.from({ length: MAX_RETAINED_LINES_PER_STEP }, (_, i) => repushed(800 + i, at("19:30"))),
+      ...Array.from({ length: MAX_RETAINED_LINES_PER_STEP }, (_, i) => eligible(800 + i, at("20:00"))),
+      eligible(701, at("20:30")),
+    ];
+    write(updated);
+    const rotated = rotateLedger(ledgerPath, {
+      ceilingBytes: statSync(ledgerPath).size - 1, smoothingWindowMs: 0, now: () => new Date(NOW),
+    });
+    assert.equal(rotated.rotated, true);
+    const live = readLedgerLines(ledgerPath);
+    assert.ok(!live.some(row => row.step === "sweep.absent_repush" && row.pr_number === 701),
+      "the mint receipt also left the live ledger");
+    assert.ok(!live.some(row => row.step === "sweep.review_eligible" && row.ts === at("19:10")),
+      "the original eligibility receipt really left the live ledger");
+    assert.ok(live.some(row => row.step === "sweep.review_eligible" && row.pr_number === 701 && row.ts === at("20:30")),
+      "the later input's eligibility receipt survived the per-step cap");
+    assert.deepEqual((await admissionOrder([
+      { ...prs[0]!, lastActivityAt: at("20:35"), reviewInputDigest: "updated-input" }, prs[1]!, prs[2]!,
+    ], [], 1, realLedger)).order, [703, 701, 702], "rotation must keep the head between its older and newer peers");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("W1-T12534 criterion 4: unreadable queue history cannot silently change the admission key", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "repush-unreadable-"));
+  const ledgerPath = join(dir, "ledger.ndjson");
+  const archivePath = join(dir, "ledger.2026-11-13T20-00-00-000Z.ndjson.gz");
+  const prs = [pr(701, at("09:00")), pr(702, at("19:20"))];
+  const realLedger = { ledgerPath, readLedger: undefined };
+  try {
+    writeFileSync(ledgerPath, JSON.stringify(eligible(701, at("20:30"))) + "\n");
+    writeFileSync(archivePath, "corrupt gzip");
+    await assert.rejects(admissionOrder(prs, [], 1, realLedger), /repushed-head queue history unavailable/);
+    writeFileSync(archivePath, gzipSync([
+      repushed(701, at("19:00")), eligible(701, at("19:10")),
+    ].map(row => JSON.stringify(row)).join("\n") + "\n"));
+    assert.deepEqual((await admissionOrder(prs, [], 1, realLedger)).order, [701, 702]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
