@@ -3291,19 +3291,30 @@ export function realDeployDeps(o: RealDeployOpts, sensorExec?: DeploySensorExec)
       // then re-read the SAME tag; neither a failed refresh nor a second auth failure is absence.
       const registry = /^([a-z0-9-]+)\.azurecr\.io\//i.exec(image)?.[1];
       if (!registry) return undefined;
+      let method: "managed-identity" | "stored-login" | "none" = "none";
       try {
-        (yield* execSensor("az", ["acr", "login", "-n", registry]));
-      } catch {
-        log("deploy.image_auth_refresh", { outcome: "failed", registry });
+        const refresh = JSON.parse(yield* execSensor("bash", [join(o.installPath, "deploy", "acr-login.sh"), "--probe", registry])) as {
+          status?: unknown; method?: unknown; reason?: unknown;
+        };
+        if ((refresh.method !== "managed-identity" && refresh.method !== "stored-login" && refresh.method !== "none") || typeof refresh.status !== "number"
+          || typeof refresh.reason !== "string") throw new Error("invalid registry authentication result");
+        method = refresh.method;
+        if (refresh.status !== 0 || method === "none") {
+          log("deploy.image_auth_refresh", { outcome: "failed", registry, method, reason: refresh.reason });
+          return undefined;
+        }
+      } catch (error) {
+        log("deploy.image_auth_refresh", { outcome: "failed", registry, method,
+          reason: error instanceof SyntaxError ? "registry authentication result was malformed" : "registry authentication helper failed" });
         return undefined;
       }
       try {
         (yield* execSensor("docker", ["manifest", "inspect", ref]));
-        log("deploy.image_auth_refresh", { outcome: "recovered", registry });
+        log("deploy.image_auth_refresh", { outcome: "recovered", registry, method });
         return true;
       } catch (err) {
         const published = classify(err);
-        log("deploy.image_auth_refresh", { outcome: published === false ? "absent" : "unknown", registry });
+        log("deploy.image_auth_refresh", { outcome: published === false ? "absent" : "unknown", registry, method });
         return published === false && (yield* containingImagePublished()) ? true : published;
       }
     })()),
