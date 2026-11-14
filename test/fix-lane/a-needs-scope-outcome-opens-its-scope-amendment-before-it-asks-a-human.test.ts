@@ -54,6 +54,7 @@ interface Plan {
   /** paths the worker edits */ edited?: string[];
   /** shard text per findShard call; the last one repeats */ shards?: string[];
   /** fetchPrBody throws on these 1-based calls */ bodyThrowsOn?: number[];
+  existingAmendment?: boolean;
   branch?: string;
   body?: string;
   taskId?: string;
@@ -76,7 +77,8 @@ function harness(plan: Plan = {}) {
     repoDir: repo.dir,
     findShard: () => ({ path: shardPath, text: shards[Math.min(shardReads++, shards.length - 1)] }),
     worktreeAdd: () => {}, worktreeRemove: () => {}, writeFile: () => {}, gitAdd: () => {},
-    gitCommit: () => "amendment-sha", gitPush: () => {}, probeExisting: () => undefined,
+    gitCommit: () => "amendment-sha", gitPush: () => {}, probeExisting: () => plan.existingAmendment
+      ? { prUrl: "https://github.com/acme/remudero/pull/99", prNumber: 99 } : undefined,
     createPr: (opts) => { prs.push(opts.head); return { prUrl: "https://github.com/acme/remudero/pull/99", prNumber: 99 }; },
     worktreePathFor: () => "/amendment", lookupIdentity: (key) => records.get(key),
     recordIdentity: (key, record) => { records.set(key, record); }, updateBranch: () => ({ ok: true }),
@@ -133,7 +135,7 @@ function harness(plan: Plan = {}) {
     counts: () => ({ spawns, shardReads, bodyReads }) };
 }
 
-async function replayEscalation(rows: Row[], reviewFailure: boolean, headSha: string, priorStrikes = 0) {
+async function replaySweep(rows: Row[], reviewFailure: boolean, headSha: string, priorStrikes = 0) {
   const delivered: Array<{ reason: string; question: string }> = [];
   let judgments = 0;
   let dispatches = 0;
@@ -157,7 +159,12 @@ async function replayEscalation(rows: Row[], reviewFailure: boolean, headSha: st
     },
     escalate: (_pr, reason, question) => { delivered.push({ reason, question: question.question }); },
   };
-  await runSweep([pr], deps);
+  const result = await runSweep([pr], deps);
+  return { delivered, judgments, dispatches, result };
+}
+
+async function replayEscalation(rows: Row[], reviewFailure: boolean, headSha: string, priorStrikes = 0) {
+  const { delivered, judgments, dispatches } = await replaySweep(rows, reviewFailure, headSha, priorStrikes);
   assert.ok(judgments > 0, "control: the replay reached the progress judge");
   assert.equal(dispatches, 0, "an escalation must not dispatch another fix worker");
   assert.equal(delivered.length, 1, "control: the sweep delivered the escalation question");
@@ -165,19 +172,32 @@ async function replayEscalation(rows: Row[], reviewFailure: boolean, headSha: st
 }
 
 test("W1-T12543 criterion 1: a retryable refusal is asked once more in the same round and the round awaits the amendment", async () => {
-  for (const plan of [{ bodyThrowsOn: [1] }, { shards: [driftedShard, goodShard] }] satisfies Plan[]) {
+  for (const plan of [
+    { bodyThrowsOn: [1] }, { shards: [driftedShard, goodShard] },
+    { bodyThrowsOn: [1], existingAmendment: true },
+  ] satisfies Plan[]) {
     const h = harness(plan);
     const result = await h.round();
+    const outcome = plan.existingAmendment ? "resumed" : "created";
     const scope = h.scopeRows().map((row) => [row.outcome, row.reason, row.retry]);
-    assert.deepEqual(scope, [["refused", scope[0]?.[1], undefined], ["created", undefined, 1]], JSON.stringify(plan));
+    assert.deepEqual(scope, [["refused", scope[0]?.[1], undefined], [outcome, undefined, 1]], JSON.stringify(plan));
     assert.ok(SCOPE_AMENDMENT_RETRYABLE_REFUSALS.has(String(scope[0]?.[1])), String(scope[0]?.[1]));
-    assert.deepEqual(h.prs, [`scope-amendment/${taskId}-${prNumber}`], "the second ask opened the amendment");
+    assert.deepEqual(h.prs, plan.existingAmendment ? [] : [`scope-amendment/${taskId}-${prNumber}`],
+      "the second ask creates or resumes the amendment");
     assert.equal(h.refusals().length, 0, "no refused commit, so no refusal can reach a person");
     assert.equal(h.issues.length, 0);
     assert.equal(result.outcome, "stood_down");
     assert.equal(result.reason, "awaiting scope amendment merge");
     assert.equal(h.rows.findLast((row) => row.step === "fix.done")?.subtype, "scope_amendment_pending");
     assert.equal(h.counts().spawns, 1, "one worker round");
+    const headSha = String(h.scopeRows().at(-1)?.head_sha);
+    for (const reviewFailure of [false, true]) {
+      const replay = await replaySweep(h.rows, reviewFailure, headSha);
+      assert.equal(replay.delivered.length, 0, `${outcome}: a pending amendment must not escalate`);
+      assert.equal(replay.dispatches, 0, `${outcome}: no fix worker before the amendment merges`);
+      assert.equal(replay.result.actions[0]?.acted, false);
+      assert.match(String(replay.result.actions[0]?.reason), /fix report requests a scope amendment/);
+    }
   }
 });
 

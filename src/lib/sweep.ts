@@ -23723,12 +23723,8 @@ export async function runSweep(
               if (scopeAmendment && ["created", "resumed", "branch_update_requested"].includes(String(scopeAmendment.outcome ?? scopeAmendment.kind)) &&
                   !["merged", "closed"].includes(String(amendmentTerminal?.state))) {
                 const reason = `fix report requests a scope amendment: ${refusedSameRed?.scopeAmendment ?? scopeAmendment.paths}`;
-                const alreadyEscalated = ledgerLines.some((line) =>
-                  line.step === "sweep.disposed" && line.pr_number === pr.prNumber &&
-                  line.head_sha === pr.headSha && JSON.stringify(line.scope_amendment_red_checks) === JSON.stringify(redCheckNames(pr)));
-                if (!alreadyEscalated) {
-                  await deps.escalate(pr, reason, renderClarificationQuestion(pr, reason, pr.strikeHistory ?? []));
-                }
+                // The amendment is already the requested remedy. Keep its contract latch while it is
+                // pending, but ask a person only if the amendment writer ultimately refuses it.
                 extraDisposedFields = { ...extraDisposedFields, scope_amendment_red_checks: redCheckNames(pr) };
                 acted = false;
                 standDownReason = await refreshAmendedContract(ledgerLines.filter((line) => line.step === "sweep.disposed" &&

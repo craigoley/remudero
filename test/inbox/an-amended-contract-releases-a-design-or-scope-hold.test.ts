@@ -378,7 +378,7 @@ describe("test/inbox/an-amended-contract-releases-a-design-or-scope-hold.test.ts
     const f = fixture(rows);
 
     await runSweep([pr()], f.deps);
-    assert.equal(f.state.escalated, 1);
+    assert.equal(f.state.escalated, 0, "a pending scope amendment does not open a human escalation");
     assert.equal(lastDisposed(rows).stand_down_reason, "fix report requests a scope amendment: NEEDS_SCOPE src/lib/scout-gardener.ts");
     assert.equal(lastDisposed(rows).progress_contract_revision, "contract-A");
 
@@ -390,7 +390,7 @@ describe("test/inbox/an-amended-contract-releases-a-design-or-scope-hold.test.ts
     await runSweep([pr()], f.deps);
     assert.equal(f.state.refreshed, 1, "the full pass takes main into the branch");
     assert.equal(f.state.dispatched, 0);
-    assert.equal(f.state.escalated, 1, "the scope question is not re-asked");
+    assert.equal(f.state.escalated, 0, "the scope amendment never opens a human escalation");
   });
 
   test("the light route adopts an answered instrument scope without admitting a fix", async () => {
