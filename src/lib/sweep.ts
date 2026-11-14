@@ -88,7 +88,7 @@ import {
   type StackPrerequisiteCheck,
 } from "./arm-auto-merge.js";
 import { diagnoseBodyDefects, type BodyRepairDeps } from "./body-repair.js";
-import { judgeMergedRatchets, ratchetJudgeLedgerFields, ratchetVerdictHolds, type MergedRatchetJudgement } from "./merged-ratchet-verdict.js";
+import { judgeMergedRatchets, ratchetJudgeLedgerFields, ratchetUpdateWithheld, ratchetVerdictHolds, type MergedRatchetJudgement } from "./merged-ratchet-verdict.js";
 import { MAX_PLAN_REPAIR_STRIKES, planCappedRepair, judgeCappedRepair } from "./classify.js";
 import { DEFAULT_ESTIMATE_MIB, readMemoryLedger, type HostMemoryReading } from "./host-memory-ledger.js";
 import { classEstimate, classTypical, type LearnedEstimate } from "./host-memory-learning.js";
@@ -25924,6 +25924,11 @@ export async function runArmedRatchetRejudge(
       l.pr_number === pr.prNumber && l.head_sha === pr.headSha);
     if (!ratchetVerdictHolds(judge) || spent || !deps.updateBranch) {
       appendLine(deps.ledgerPath, { ...row, remedy: !ratchetVerdictHolds(judge) ? "proceed" : spent ? "retry-later" : "unwired" });
+      continue;
+    }
+    const withheld = ratchetUpdateWithheld(judge, pr.prNumber, ledgerLines);
+    if (withheld !== undefined) {
+      appendLine(deps.ledgerPath, { ...row, update_withheld: withheld, remedy: "operator" });
       continue;
     }
     if (incidentHold === undefined) {

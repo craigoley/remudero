@@ -54,7 +54,7 @@ import {
   type PlanMergeSafetyReadings,
 } from "./plan-pr-merge-safety.js";
 import { readLedgerLines } from "./status.js";
-import { describeRatchetRows, judgeMergedRatchets, ratchetJudgeLedgerFields, ratchetVerdictHolds, readMergedRatchetInputsSteps, type MergedRatchetJudgement } from "./merged-ratchet-verdict.js";
+import { describeRatchetRows, judgeMergedRatchets, ratchetJudgeLedgerFields, ratchetUpdateWithheld, ratchetVerdictHolds, readMergedRatchetInputsSteps, type MergedRatchetJudgement, type RatchetUpdateWithheld } from "./merged-ratchet-verdict.js";
 import {
   closingReferenceGuardSteps,
   recordClosingReferenceToLedger,
@@ -1056,6 +1056,8 @@ export interface DirectMergePreflightEvidence {
   reason?: "plan_pr_behind" | "plan_pr_refresh_bound" | "plan_pr_mergeability_unknown_bound" | "main_changed_own_files" | "plan_merge_unread" | "ratchet_collision" | "freshness_latch" | "direct_merge_in_flight";
   /** W1-T9962 — the merged-tree ratchet verdict this decision consulted. */
   ratchetJudge?: MergedRatchetJudgement;
+  /** W1-T12717 — why that verdict was held without an update-branch. */
+  updateWithheld?: RatchetUpdateWithheld;
   /** W1-T9536 — why main's changes since the merge base refreshed a behind PR, and the files. */
   ownFilesCause?: "overlap" | "baseline" | "unread";
   mainChangedOwnFiles?: string[];
@@ -1448,6 +1450,12 @@ function* ratchetCollisionSteps(
       l.reason === "ratchet_collision" && l.pr_url === prUrl && l.prior_head_sha === head)) {
     deps.say(`automerge.direct_merge_preflight_refused (W1-T9962): head ${head} was already refreshed for a ${judge.verdict} — awaiting its new head: ${prUrl}`);
     return { hold: { outcome: "direct-merge-preflight-refused", ...context, directMergePreflight: { ...evidence, remedy: "retry-later" } } };
+  }
+  const withheld = ratchetUpdateWithheld(judge, prNumberFromRef(prUrl), deps.ledgerLines?.() ?? []);
+  if (withheld !== undefined) {
+    deps.say(`automerge.direct_merge_preflight_refused (W1-T12717): ${judge.verdict} ${withheld === "pr-diff" ? "comes from the PR's own diff on a count main already carries over its ceiling"
+      : "was already answered by an update-branch that did not cure it"}: ${describeRatchetRows(judge)} — not updated again, neither armed nor merged: ${prUrl}`);
+    return { hold: { outcome: "direct-merge-preflight-refused", ...context, directMergePreflight: { ...evidence, remedy: "operator", updateWithheld: withheld } } };
   }
   let update: { ok: boolean; error?: string };
   try {
@@ -2385,7 +2393,7 @@ export function logArmAttribution(
   const judge = ratchetJudge ?? directMergePreflight?.ratchetJudge;
   if (judge) {
     const remedy = directMergePreflight?.reason === "ratchet_collision" ? directMergePreflight.remedy : "proceed";
-    log("sweep.ratchet_judge.decided", { task_id: taskId, pr_number: prNumber, lane, ...ratchetJudgeLedgerFields(judge), remedy, outcome });
+    log("sweep.ratchet_judge.decided", { task_id: taskId, pr_number: prNumber, lane, ...ratchetJudgeLedgerFields(judge, directMergePreflight?.updateWithheld), remedy, outcome });
   }
   const ghFields = rateLimit
     ? { gh_bucket: rateLimit.bucket, gh_bucket_resets_at: rateLimit.resetsAt, gh_bucket_operation: rateLimit.operation }

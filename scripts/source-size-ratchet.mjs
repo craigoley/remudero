@@ -26,6 +26,9 @@ import { splitInheritedViolations, inheritedNotice, undeterminedNotice, refResol
 import { assertNoDuplicateKeys } from "./lib/json-duplicate-keys.mjs";
 
 export const DEFAULT_BASELINE_RELATIVE_PATH = "scripts/source-size-baseline.json";
+/** W1-T12717: CI runs this script in its default mode (package.json source-size-signal), which never reads the
+ *  baseline above (INVARIANT 2), so the merge-time judge (src/lib/merged-ratchet-verdict.ts) does not count it. */
+export const CI_READS_BASELINE = false;
 
 /** Every `.ts` file under `<root>/src`, found by a plain recursive `readdirSync` walk -- no
  *  subprocess, no `git ls-files` -- returned as `root`-relative POSIX paths (forward slashes even

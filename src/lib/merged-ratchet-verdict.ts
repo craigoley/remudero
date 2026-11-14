@@ -11,7 +11,8 @@
  * reads text is counted, not only clock-signature. A gate whose scope and baseline the merge does not
  * land holds the same blobs on both trees, so its two counts are equal and it is counted without a read.
  * {@link readMergedRatchetInputsSteps} is the I/O: merge-tree and blob reads in the managed clone,
- * no worktree, no npm and no CI run.
+ * no worktree, no npm and no CI run. W1-T12717: a gate CI runs as a signal is not counted, and
+ * {@link ratchetUpdateWithheld} names a held verdict an update-branch cannot cure.
  */
 import { step, type Steps } from "./git-push.js";
 import { singlePrRestArgs } from "./open-prs-rest.js";
@@ -21,7 +22,7 @@ import { MEASURED_ROOTS } from "../../scripts/comment-load-ratchet.mjs";
 // @ts-expect-error a plain .mjs script with no declaration file, as src/lib/plan-index.ts imports its sibling.
 import { DEFAULT_BASELINE_RELATIVE_PATH as CLOCK_BASELINE, readBaseline as readClockBaseline, scanClockSignaturesFromText } from "../../scripts/clock-signature-ratchet.mjs";
 // @ts-expect-error a plain .mjs script with no declaration file, as src/lib/plan-index.ts imports its sibling.
-import { DEFAULT_BASELINE_RELATIVE_PATH as SOURCE_SIZE_BASELINE, ceilingFor, countLines, readBaseline as readSourceSizeBaseline } from "../../scripts/source-size-ratchet.mjs";
+import { CI_READS_BASELINE as SOURCE_SIZE_CI_READS_BASELINE, DEFAULT_BASELINE_RELATIVE_PATH as SOURCE_SIZE_BASELINE, ceilingFor, countLines, readBaseline as readSourceSizeBaseline } from "../../scripts/source-size-ratchet.mjs";
 // @ts-expect-error a plain .mjs script with no declaration file, as src/lib/plan-index.ts imports its sibling.
 import { FIXTURE_COPY_CENSUS_FILENAME, FIXTURE_COPY_EXCLUDED_DIR, FIXTURE_COPY_SIGNATURES, countFixtureCopiesInTexts } from "../../scripts/fixture-copy-census.mjs";
 // @ts-expect-error a plain .mjs script with no declaration file, as src/lib/plan-index.ts imports its sibling.
@@ -31,9 +32,19 @@ import { evaluateRatchet as evaluateClaudeMdCap, foldDebtCeiling } from "../../s
 
 export type MergedRatchetVerdictName = "clean" | "crossing" | "stale-lowering" | "unread";
 
-export const COUNTED_RATCHET_GATES = ["clock-signature", "source-size", "fixture-copy", "deps-interface", "claude-md-budget"] as const;
+/** The gates this judge has a counter for. W1-T12717: it counts only those CI runs against the same baseline. */
+export const RATCHET_COUNTER_GATES = ["clock-signature", "source-size", "fixture-copy", "deps-interface", "claude-md-budget"] as const;
 
-export type CountedRatchetGate = (typeof COUNTED_RATCHET_GATES)[number];
+export type CountedRatchetGate = (typeof RATCHET_COUNTER_GATES)[number];
+
+/** W1-T12717 — each gate's own script says whether CI's run of it reads the baseline this judge reads.
+ *  A gate whose script exports CI_READS_BASELINE false is a CI signal: a held merge or an update-branch
+ *  on it can never be cured, because CI never refuses its growth. */
+const CI_READS_BASELINE: Partial<Record<CountedRatchetGate, { readsBaseline: boolean; script: string }>> = {
+  "source-size": { readsBaseline: SOURCE_SIZE_CI_READS_BASELINE as boolean, script: "scripts/source-size-ratchet.mjs" },
+};
+
+export const COUNTED_RATCHET_GATES: readonly CountedRatchetGate[] = RATCHET_COUNTER_GATES.filter((g) => CI_READS_BASELINE[g]?.readsBaseline !== false);
 
 /** One count over its ceiling on the merged tree. `prCeiling` is the row as the merge lands it. */
 export interface MergedRatchetRow {
@@ -46,12 +57,14 @@ export interface MergedRatchetRow {
   prCeiling: number;
   /** stale-lowering: the merged count (what the shrink-record writes there); crossing: the gate's printed record value. */
   rederived: number;
+  /** W1-T12717: the merged count minus main's count, which an update-branch cannot remove. */
+  prAdds: number;
 }
 
 /** A gate this judge does not count, and why: never read as clean. */
 export interface UncountedRatchetGate {
   gate: string;
-  class: "run-derived" | "advisory" | "needs-worktree" | "test-suite-counter" | "import-ring";
+  class: "run-derived" | "advisory" | "needs-worktree" | "test-suite-counter" | "import-ring" | "ci-signal";
   reason?: string;
 }
 
@@ -62,6 +75,8 @@ export const UNCOUNTED_RATCHET_GATES: readonly UncountedRatchetGate[] = [
   { gate: "learnings-budget", class: "needs-worktree", reason: "its counter (loadCorpus, loadShardEntries) reads shard files from a directory on disk" },
   { gate: "affected-reach", class: "test-suite-counter", reason: "its counter (measureReach) lives in a test suite, which runs when imported" },
   { gate: "house-layout", class: "import-ring", reason: "its census module names the run-task and sweep command files as paths, so importing it here closes an import ring through the sweep" },
+  ...RATCHET_COUNTER_GATES.filter((g) => !COUNTED_RATCHET_GATES.includes(g)).map((gate): UncountedRatchetGate =>
+    ({ gate, class: "ci-signal", reason: `CI runs it as a signal that never reads its baseline (${CI_READS_BASELINE[gate]!.script} exports CI_READS_BASELINE false)` })),
 ];
 
 export interface MergedRatchetJudgement {
@@ -80,7 +95,7 @@ export interface MergedRatchetJudgement {
 export const RATCHET_JUDGE_ROWS_SHOWN = 10;
 
 /** The `sweep.ratchet_judge.decided` fields one judgement contributes, beside the caller's PR identity and remedy. */
-export function ratchetJudgeLedgerFields(j: MergedRatchetJudgement): Record<string, unknown> {
+export function ratchetJudgeLedgerFields(j: MergedRatchetJudgement, updateWithheld?: RatchetUpdateWithheld): Record<string, unknown> {
   return {
     verdict: j.verdict,
     ...(j.mainSha !== undefined ? { main_sha: j.mainSha } : {}),
@@ -89,9 +104,44 @@ export function ratchetJudgeLedgerFields(j: MergedRatchetJudgement): Record<stri
     uncounted_gates: j.uncounted.map((u) => `${u.gate}:${u.class}`),
     rows: j.rows.slice(0, RATCHET_JUDGE_ROWS_SHOWN),
     rows_count: j.rows.length,
+    ...(j.rows.length > 0 ? { crossing_keys: ratchetCrossingKeys(j) } : {}),
+    ...(updateWithheld !== undefined ? { update_withheld: updateWithheld } : {}),
     ...(j.reason !== undefined ? { reason: j.reason } : {}),
     ...(j.elapsedMs !== undefined ? { elapsed_ms: j.elapsedMs } : {}),
   };
+}
+
+function crossingKey(r: MergedRatchetRow): string {
+  return `${r.verdict}:${r.gate}:${r.path}${r.field ? `#${r.field}` : ""}:+${r.prAdds}`;
+}
+
+/** W1-T12717 — one key per held row: the gate, path, field and the count the pull request adds. */
+export function ratchetCrossingKeys(j: Pick<MergedRatchetJudgement, "rows">): string[] {
+  return j.rows.map(crossingKey);
+}
+
+/** Why an update-branch is not the answer to a held verdict: `pr-diff`, the merge adds to a count main already
+ *  carries over its ceiling; `repeat`, an earlier update already answered the same crossing for this PR. */
+export type RatchetUpdateWithheld = "pr-diff" | "repeat";
+
+/**
+ * W1-T12717 — an update-branch lands the same merged tree, so it cures a held row only by letting CI count
+ * it once. A row whose main is already over its ceiling is the PR's own diff, and a key an earlier update
+ * answered was not cured by it: neither is updated again. Undefined: some held row may still be cured.
+ */
+export function ratchetUpdateWithheld(j: MergedRatchetJudgement, prNumber: number | undefined,
+  ledgerLines: readonly Record<string, unknown>[]): RatchetUpdateWithheld | undefined {
+  if (!ratchetVerdictHolds(j) || j.rows.length === 0) return undefined;
+  const ownDiff = (r: MergedRatchetRow) => r.merged - r.prAdds > r.mainCeiling;
+  const curable = j.rows.filter((r) => !ownDiff(r));
+  if (curable.length === 0) return "pr-diff";
+  const answered = new Set<string>();
+  for (const l of ledgerLines) {
+    if (l.step !== "sweep.ratchet_judge.decided" || l.remedy !== "update-branch" || l.outcome === "direct-merge-update-failed") continue;
+    if (prNumber === undefined || Number(l.pr_number) !== prNumber || !Array.isArray(l.crossing_keys)) continue;
+    for (const k of l.crossing_keys) answered.add(String(k));
+  }
+  return curable.every((r) => answered.has(crossingKey(r))) ? "repeat" : undefined;
 }
 
 /** One line naming each held row, for the `say` beside a refresh. */
@@ -179,7 +229,7 @@ function clockRows(input: TreeInputs): MergedRatchetRow[] {
       const prCeiling = merged[path]?.[field] ?? 0;
       const mainCeiling = main[path]?.[field] ?? 0;
       const verdict = judgeCount(counts[field]!, prCeiling, mainCounts[field]!, mainCeiling);
-      if (verdict) rows.push({ gate: "clock-signature", path, field, verdict, merged: counts[field]!, mainCeiling, prCeiling, rederived: counts[field]! });
+      if (verdict) rows.push({ gate: "clock-signature", path, field, verdict, merged: counts[field]!, mainCeiling, prCeiling, rederived: counts[field]!, prAdds: counts[field]! - mainCounts[field]! });
     }
   }
   return rows;
@@ -203,7 +253,7 @@ function sourceSizeRows(input: TreeInputs): MergedRatchetRow[] {
     const mainLines: number = mainText === null ? 0 : countLines(mainText);
     const mainCeiling = main[path] ?? (ceilingFor(mainLines) as number);
     const verdict = judgeCount(lines, prCeiling, mainLines, mainCeiling);
-    if (verdict) rows.push({ gate: "source-size", path, verdict, merged: lines, mainCeiling, prCeiling, rederived: ceilingFor(lines) as number });
+    if (verdict) rows.push({ gate: "source-size", path, verdict, merged: lines, mainCeiling, prCeiling, rederived: ceilingFor(lines) as number, prAdds: lines - mainLines });
   }
   return rows;
 }
@@ -237,7 +287,7 @@ function recordedFieldRows(gate: CountedRatchetGate, baselinePath: string, input
     if (prCeiling === undefined) continue;
     const mainCeiling = typeof mainBaseline[key] === "number" ? (mainBaseline[key] as number) : Infinity;
     const verdict = judgeCount(merged[count]!, prCeiling, main[count]!, mainCeiling);
-    if (verdict) rows.push({ gate, path: baselinePath, field: key, verdict, merged: merged[count]!, mainCeiling, prCeiling, rederived: merged[count]! });
+    if (verdict) rows.push({ gate, path: baselinePath, field: key, verdict, merged: merged[count]!, mainCeiling, prCeiling, rederived: merged[count]!, prAdds: merged[count]! - main[count]! });
   }
   return rows;
 }
@@ -283,7 +333,7 @@ function claudeMdRows(input: TreeInputs): MergedRatchetRow[] {
   const mainBytes = mainText === null ? 0 : Buffer.byteLength(mainText, "utf8");
   const mainCeiling = claudeMdStopsPast(baselineOf(input.readMain(CLAUDE_MD_BASELINE), parseJson, CLAUDE_MD_BASELINE)) ?? Infinity;
   const verdict = judgeCount(bytes, prCeiling, mainBytes, mainCeiling);
-  return verdict ? [{ gate: "claude-md-budget", path: CLAUDE_MD, verdict, merged: bytes, mainCeiling, prCeiling, rederived: bytes }] : [];
+  return verdict ? [{ gate: "claude-md-budget", path: CLAUDE_MD, verdict, merged: bytes, mainCeiling, prCeiling, rederived: bytes, prAdds: bytes - mainBytes }] : [];
 }
 
 const GATE_ROWS: Record<CountedRatchetGate, (input: TreeInputs) => GateResult> = {
@@ -326,7 +376,7 @@ export function ratchetVerdictHolds(judgement: Pick<MergedRatchetJudgement, "ver
 
 /** The baselines whose rows name paths: when one changes, every path it names is read on both trees.
  *  Clock-signature reads its rows when either side changed it; source-size only when the merge lands it. */
-const PATH_KEYED_BASELINES = [CLOCK_BASELINE, SOURCE_SIZE_BASELINE] as string[];
+const PATH_KEYED_BASELINES = [CLOCK_BASELINE, ...(COUNTED_RATCHET_GATES.includes("source-size") ? [SOURCE_SIZE_BASELINE] : [])] as string[];
 const SINGLE_FILE_READS = [FIXTURE_COPY_BASELINE, DEPS_INTERFACE_BASELINE, CLAUDE_MD, CLAUDE_MD_BASELINE];
 
 /** The paths the judge will read on either tree, so the I/O reads them in one batch per tree.
