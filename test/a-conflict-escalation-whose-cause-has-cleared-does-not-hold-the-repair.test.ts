@@ -393,6 +393,17 @@ test("a conflict escalation whose cause still holds keeps standing the round dow
   assert.match(issues.closed[0]!.comment, /base has moved to c3edd4a3/);
 });
 
+test("W1-T12544: an open escalation that names no cause does not stand down a conflict round with captured evidence", async () => {
+  const issues = issueStore();
+  issues.create(`[BLOCKED] ${TASK_ID}: PR ${PR_URL} needs a clarification — review false-block`,
+    `**Class:** BLOCKED\n**Task:** ${TASK_ID}\n**Head:** ${HEAD}\n\nPR ${PR_URL}`, []);
+  const { spawned, logs } = await conflictRound(issues, BASE_AT_ESCALATION);
+  assert.equal(logs.some((l) => l.step === "fix.stood_down" && /ALREADY OPEN/.test(String(l.extra?.reason))), false,
+    "the #18015 stand-down: a question that is not about the conflict does not hold the conflict round");
+  assert.ok(spawned.length >= 1, "the bounded merge-conflict worker is dispatched");
+  assert.equal(issues.closed.length, 0, "the open question stays open for a person");
+});
+
 test("resolveClearedEscalation ledgers an undelivered close rather than losing it", () => {
   const rows: Array<Record<string, unknown>> = [];
   const log = (step: string, extra?: Record<string, unknown>) => rows.push({ step, ...extra });

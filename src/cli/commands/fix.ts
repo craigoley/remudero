@@ -1019,7 +1019,7 @@ async function fixRungStandDownReason(
     find: (key: EscalationDedupKey) => OpenIssue | undefined;
     redCheckNames?: readonly string[];
     pendingAnswer?: { spent?: true };
-    current?: { conflictEvidenceCaptured: boolean; baseSha?: string };
+    current?: { conflictEvidenceCaptured: boolean; baseSha?: string; conflictRound?: true };
     resolve?: (candidate: OpenIssue, clearedCause: string) => void;
   },
 ): Promise<{ reason: string; foreignHead?: { headSha: string; author: string }; foreignTree?: ForeignTreeStandDown; unchangedTree?: true } | undefined> {
@@ -2722,7 +2722,8 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
             find: (key: EscalationDedupKey) => findDuplicateEscalation(key, { issues: deps.issues }),
             pendingAnswer: opts.pendingAnswer ?? (opts.constraint !== undefined ? {} : undefined),
             redCheckNames: noReviewYet ? currentCiFailures?.map(f => f.name) : undefined,
-            current: { conflictEvidenceCaptured: hasCapturedMergeConflictEvidence(currentMergeConflict), baseSha: opts.baseSha },
+            current: { conflictEvidenceCaptured: hasCapturedMergeConflictEvidence(currentMergeConflict), baseSha: opts.baseSha,
+              ...(hasCapturedMergeConflictEvidence(currentMergeConflict) ? { conflictRound: true as const } : {}) },
             resolve: (candidate: OpenIssue, clearedCause: string) =>
               resolveClearedEscalation(deps.issues, deps.log, opts.taskId, candidate.url, clearedCause),
           }

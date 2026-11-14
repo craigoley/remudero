@@ -286,6 +286,7 @@ import {
   buildEscalationJudgePrompt,
   escalationCause,
   escalationHeadSha,
+  escalationIssueCause,
   fixEscalationDedupKey,
   matchDuplicateEscalation,
   openEscalationStandDownReason,
@@ -16828,6 +16829,31 @@ export function terminalFixDesignHandoff(
   return resolved.kind === "handoff" ? resolved : live;
 }
 
+function conflictRoundOutranksEscalationHold(
+  pr: { disposition: Disposition; mergeConflict?: MergeConflictEvidence },
+  hold: { kind: "design" } | { kind: "escalation"; cause: string | undefined },
+): boolean {
+  return pr.disposition === "conflicted" && hasCapturedMergeConflictEvidence(pr.mergeConflict) &&
+    (hold.kind === "design" || hold.cause !== "conflict");
+}
+
+function conflictRoundHeldHead(pr: Pick<OpenPrView, "taskId" | "prNumber" | "prUrl" | "headSha">,
+  lines: ReadonlyArray<Record<string, unknown>>): string {
+  const key = fixLedgerTaskIdFor(pr);
+  const seen = new Set([pr.headSha]);
+  for (let head = pr.headSha; ;) {
+    const pushedBy = lines.findLast(row => (row.step === "fix.done" && row.task_id === key && row.pushed_head_sha === head &&
+        typeof row.round_id === "string" && lines.some(start => start.step === "fix.dispatch" && start.task_id === key &&
+          start.round_id === row.round_id && start.head_sha === row.head_sha && start.mode === "merge-conflict")) ||
+      (row.step === "sweep.conflict_regenerated" && row.pr_number === pr.prNumber && row.new_head_sha === head &&
+        row.outcome === "pushed"));
+    const from = pushedBy?.head_sha;
+    if (typeof from !== "string" || seen.has(from)) return head;
+    seen.add(from);
+    head = from;
+  }
+}
+
 /** The production `archive` reader: the fix-round rows across rotations and the live file, or undefined if incomplete. */
 function readFixRoundArchiveRows(ledgerPath: string): ReadonlyArray<Record<string, unknown>> | undefined {
   const read = readLedgerUnionRecordsSync(dirname(ledgerPath), {
@@ -22399,10 +22425,14 @@ export async function runSweep(
     let standDownHold: { site: string; reason: string; at?: string } | undefined;
     let heldEscalationAt: string | undefined;
     let heldEscalationDedup: string | undefined;
+    let designHoldKept = false;
+    let escalationHoldKept: string | undefined;
+    const holdHead = (disposition === "conflicted" || disposition === "blocked-fixable") ? conflictRoundHeldHead(pr, ledgerLines) : pr.headSha;
     if ((disposition === "conflicted" || disposition === "blocked-fixable") &&
         !inFlightFixKeys.has(`${fixLedgerTaskIdFor(pr) ?? ""}@${pr.headSha}`) &&
         !dispatchCauseHolds.get(pr.prNumber)) {
-      const handoff = terminalFixDesignHandoff(pr, ledgerLines, () => readFixRoundArchiveRows(deps.ledgerPath));
+      const handoff = terminalFixDesignHandoff(holdHead === pr.headSha ? pr : { ...pr, headSha: holdHead }, ledgerLines,
+        () => readFixRoundArchiveRows(deps.ledgerPath));
       if (handoff.kind === "handoff") {
         const held = handoff.producer;
         const recorded = ledgerLines.findLast(row => row.step === "sweep.disposed" && row.pr_number === pr.prNumber &&
@@ -22433,21 +22463,27 @@ export async function runSweep(
             ? { standingOn: semanticStandingOn, observed: semanticCurrent } : undefined;
           const amended = current !== undefined && standingOn !== undefined &&
             (current !== standingOn || semantic !== undefined && semantic.standingOn !== semantic.observed);
-          const behindBy = deps.behindMainByPr?.get(pr.prNumber);
-          const mainAdoptionDecision = amended ? "contract-amended" : designMainAdoptionSpent ? "pass-budget-spent" :
-            designHoldMainAdoptionDecision(pr, ledgerLines, behindBy, mainTipSha, deps.updateBranch !== undefined);
-          const mainAdoption = mainAdoptionDecision === "due";
-          terminalDesignHold = { amended, mainAdoptionDecision, ...(mainAdoption ? { mainAdoption: true as const } : {}),
-            revision: standingOn ?? current, observedRevision: current, semantic, roundId: handoff.roundId };
-          disposition = amended || mainAdoption ? "blocked-fixable" : "refused-escalate";
-          reason = amended ? "task contract amended under this terminal design handoff — adopting main before any fix admission"
-            : mainAdoption ? `fix needs design at this exact head (round ${handoff.roundId}), which is ${behindBy} commit(s) ` +
-              `behind main — taking main into the branch once before a person is asked: ${handoff.reason}`
-            : `fix needs design at this exact head (round ${handoff.roundId}) — ${handoff.reason}`;
-          if (mainAdoption) designMainAdoptionSpent = true;
-          if (!amended && !mainAdoption) {
-            ruleBlockerByIndex.set(prIndex, "escalated");
-            heldEscalationAt = typeof handoff.producer.ts === "string" ? handoff.producer.ts : undefined;
+          if (!amended && conflictRoundOutranksEscalationHold({ disposition, mergeConflict: pr.mergeConflict }, { kind: "design" })) {
+            designHoldKept = true;
+            reason = `fix needs design at ${holdHead.slice(0, 7)} (round ${handoff.roundId}), but the merge conflict is not that ` +
+              `question — the conflict round runs, and the design hold still applies at the head it pushes: ${handoff.reason}`;
+          } else {
+            const behindBy = deps.behindMainByPr?.get(pr.prNumber);
+            const mainAdoptionDecision = amended ? "contract-amended" : designMainAdoptionSpent ? "pass-budget-spent" :
+              designHoldMainAdoptionDecision(pr, ledgerLines, behindBy, mainTipSha, deps.updateBranch !== undefined);
+            const mainAdoption = mainAdoptionDecision === "due";
+            terminalDesignHold = { amended, mainAdoptionDecision, ...(mainAdoption ? { mainAdoption: true as const } : {}),
+              revision: standingOn ?? current, observedRevision: current, semantic, roundId: handoff.roundId };
+            disposition = amended || mainAdoption ? "blocked-fixable" : "refused-escalate";
+            reason = amended ? "task contract amended under this terminal design handoff — adopting main before any fix admission"
+              : mainAdoption ? `fix needs design at this exact head (round ${handoff.roundId}), which is ${behindBy} commit(s) ` +
+                `behind main — taking main into the branch once before a person is asked: ${handoff.reason}`
+              : `fix needs design at this exact head (round ${handoff.roundId}) — ${handoff.reason}`;
+            if (mainAdoption) designMainAdoptionSpent = true;
+            if (!amended && !mainAdoption) {
+              ruleBlockerByIndex.set(prIndex, "escalated");
+              heldEscalationAt = typeof handoff.producer.ts === "string" ? handoff.producer.ts : undefined;
+            }
           }
         }
       } else if (handoff.kind === "unavailable") {
@@ -22488,6 +22524,19 @@ export async function runSweep(
         reason = `fix stood down at ${held.hold.site} and nothing it read has changed (head ${pr.headSha.slice(0, 7)}, task contract` +
           `${standDownBodySha === undefined ? "" : ", PR body"}) — no worker is dispatched until one does: ${held.hold.reason}`;
         ruleBlockerByIndex.set(prIndex, "escalated");
+      }
+    }
+    if (disposition === "conflicted" && hasCapturedMergeConflictEvidence(pr.mergeConflict) && !deps.dryRun) {
+      const key = fixEscalationDedupKey(escalationTaskIdFor(pr), pr.prUrl, pr.headSha, true, isBlockedCi(pr),
+        deps.readTaskContractRevision?.(escalationTaskIdFor(pr)));
+      const open = matchDuplicateEscalation({ ...key, cause: undefined }, await readOpenEscalations());
+      if (open !== undefined && openEscalationStandDownReason(pr.headSha, open, key.contractRevision,
+        { conflictEvidenceCaptured: true, baseSha: mainTipSha }, undefined, pr.pendingAnswer) !== undefined &&
+        conflictRoundOutranksEscalationHold({ disposition, mergeConflict: pr.mergeConflict },
+          { kind: "escalation", cause: escalationIssueCause(open.body) })) {
+        escalationHoldKept = open.url;
+        reason = `${reason} — the open escalation ${open.url} is not about the merge conflict, so the conflict round runs, ` +
+          "and the escalation still applies at the head it pushes";
       }
     }
     // W1-T10653: an already-open-escalation stand-down is not a hold, so it never reached the SLO below; once it has aged past
@@ -22918,6 +22967,9 @@ export async function runSweep(
     if (standDownHold) extraDisposedFields = { ...extraDisposedFields, stand_down_hold: true, stand_down_site: standDownHold.site,
       ...(standDownHold.site === "rung.strike" && standDownHold.reason === CONFLICT_REPAIR_HANDOFF_REASON && mainTipSha !== undefined
         ? { stand_down_at: standDownHold.at, stand_down_main_sha: mainTipSha } : {}) };
+    if (designHoldKept) extraDisposedFields = { ...extraDisposedFields, design_hold_kept: true };
+    if (escalationHoldKept !== undefined) extraDisposedFields = { ...extraDisposedFields, escalation_hold_kept: escalationHoldKept };
+    if (holdHead !== pr.headSha) extraDisposedFields = { ...extraDisposedFields, hold_head_sha: holdHead };
     if (terminalDesignHold) extraDisposedFields = { ...extraDisposedFields, needs_design_hold: true, needs_design_round_id: terminalDesignHold.roundId,
       design_hold_main_adoption_decision: terminalDesignHold.mainAdoptionDecision,
       ...(terminalDesignHold.revision === undefined ? {} : { progress_contract_revision: terminalDesignHold.revision }),
@@ -23307,10 +23359,10 @@ export async function runSweep(
             case "blocked-fixable": {
               const issues = await readOpenEscalations();
               if (issues.length > 0) {
-                const escalationKey = fixEscalationDedupKey(escalationTaskIdFor(pr), pr.prUrl, pr.headSha,
+                const escalationKey = fixEscalationDedupKey(escalationTaskIdFor(pr), pr.prUrl, holdHead,
                   pr.mergeConflict !== undefined, isBlockedCi(pr), deps.readTaskContractRevision?.(escalationTaskIdFor(pr)));
-                const candidate = matchDuplicateEscalation(escalationKey, issues);
-                const openHold = openEscalationStandDownReason(pr.headSha, candidate, escalationKey.contractRevision,
+                const candidate = matchDuplicateEscalation(holdHead === pr.headSha ? escalationKey : { ...escalationKey, cause: undefined }, issues);
+                const openHold = openEscalationStandDownReason(holdHead, candidate, escalationKey.contractRevision,
                   { conflictEvidenceCaptured: hasCapturedMergeConflictEvidence(pr.mergeConflict), baseSha: mainTipSha },
                   isBlockedCi(pr) ? redCheckNames(pr) : undefined, pr.pendingAnswer);
                 if (openHold) {
