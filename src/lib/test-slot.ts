@@ -465,6 +465,58 @@ export interface ReservedTreeProbeHost {
 }
 
 const goneProcess = (error: unknown): boolean => ["ENOENT", "ESRCH"].includes(String((error as NodeJS.ErrnoException)?.code));
+
+/** Namespace-id reuse or complete absence proves the old namespace's whole tree ended (W1-T12504). */
+export function probeRecordedPidNamespace(held: TestSlotHolder, host: ReservedTreeProbeHost = {}): ReservedTreeEvidence {
+  const evidence = (state: ReservedTreeEvidence["state"], reason: string): ReservedTreeEvidence => ({
+    state, coverage: "pid-namespace-ended", reason,
+  });
+  const unknown = (reason: string) => evidence("unknown", reason);
+  if ((host.platform ?? process.platform) !== "linux") return unknown("pid namespace probe requires linux");
+  const boot = "bootId" in host ? host.bootId : readBootId();
+  if (!held.bootId || !boot || held.bootId !== boot) return unknown("boot identity unproven");
+  if (!/^pid:\[[0-9]+\]$/.test(held.pidNs ?? "")) return unknown("recorded pid namespace missing or invalid");
+  if (!/^proc:[0-9]+$/.test(held.processStart ?? "")) return unknown("recorded kernel process start missing or invalid");
+  const ownerStart = BigInt(held.processStart!.slice(5));
+  const read = host.read ?? ((path: string) => path.endsWith("/ns/pid") ? readlinkSync(path) : readFileSync(path, "utf8"));
+  const judgeInit = (pid: string): ReservedTreeEvidence => {
+    const raw = read(`/proc/${pid}/stat`);
+    const start = raw.slice(raw.lastIndexOf(")") + 1).trim().split(/\s+/)[19];
+    if (!raw.includes(")") || !/^[0-9]+$/.test(start ?? "")) return unknown(`namespace init ${pid} has unparseable stat`);
+    return evidence(BigInt(start!) > ownerStart ? "ended" : "live",
+      `namespace init ${pid} start ${start} ${BigInt(start!) > ownerStart ? ">" : "<="} owner start ${ownerStart}`);
+  };
+  try {
+    if (read("/proc/self/ns/pid") === held.pidNs) return judgeInit("1");
+    const nspid = /^NSpid:[ \t]*([0-9]+(?:[ \t]+[0-9]+)*)[ \t]*$/m.exec(read("/proc/self/status"))?.[1]?.split(/[ \t]+/);
+    if (nspid?.length !== 1) return unknown("waiter is not an ancestor of the recorded pid namespace");
+    const pids = (host.list ?? (() => readdirSync("/proc")))().filter(name => /^[0-9]+$/.test(name));
+    const deadline = performance.now() + 2_000;
+    let member = false;
+    const unreadable: string[] = [];
+    for (const pid of pids) {
+      if (performance.now() >= deadline) return unknown("incomplete: pid namespace observation exceeded its bound");
+      try {
+        if (read(`/proc/${pid}/ns/pid`) !== held.pidNs) continue;
+        member = true;
+        const ids = /^NSpid:[ \t]*([0-9]+(?:[ \t]+[0-9]+)*)[ \t]*$/m.exec(read(`/proc/${pid}/status`))?.[1]?.split(/[ \t]+/);
+        if (ids?.at(-1) !== "1") continue;
+        const result = judgeInit(pid);
+        if (read(`/proc/${pid}/ns/pid`) !== held.pidNs) return unknown(`namespace init ${pid} changed during observation`);
+        return result;
+      } catch (error) {
+        const reason = `${pid}: ${String(error)}`;
+        unreadable.push(reason);
+      }
+    }
+    if (unreadable.length > 0) return unknown(`incomplete: unreadable process entries: ${unreadable.slice(0, 5).join("; ")}`);
+    return member ? unknown("recorded namespace member found but init unreadable or absent") :
+      evidence("ended", "no process member in the recorded pid namespace after a complete scan");
+  } catch (error) {
+    return unknown(`pid namespace observation unreadable: ${String(error)}`);
+  }
+}
+
 const dedicatedScopePath = (path: unknown): path is string => typeof path === "string" &&
   /^\/(?:[^/\0\n]+\/)*[^/\0\n]+\.scope$/.test(path) && !path.split("/").some(part => part === "." || part === "..");
 /** A systemd-logind login scope: sshd, the shell and the agent CLI are the owner's ancestors yet outlive it (W1-T10870). */
@@ -1111,6 +1163,7 @@ export interface TestSlotOptions {
   treeProbe?: (held: TestSlotHolder) => ReservedTreeEvidence;
   /** Exact pinned cgroup evidence for a complete foreign-pid-namespace owner identity. */
   cgroupIdentityProbe?: (held: TestSlotHolder) => ReservedTreeEvidence;
+  pidNamespaceProbe?: (held: TestSlotHolder) => ReservedTreeEvidence;
   /** This waiter's cgroup namespace, named in an aged hold's diagnostic; default {@link readCgroupNamespace}. */
   cgroupNamespace?: () => string | undefined;
   /** Whether any process holds a mutation guard open; default {@link defaultGuardHolderProbe}. */
@@ -1187,6 +1240,7 @@ export interface TestSlotWaiterFacts {
   slot: number;
   /** The W1-T11807 cgroup-identity probe's reason, when that probe ran and could not prove the tree ended. */
   probeReason?: string;
+  namespaceProbeReason?: string;
 }
 
 /** A foreign hold this side cannot observe: AGED once silent past its bound. A diagnostic, never a release. */
@@ -1239,6 +1293,7 @@ export function judgeTestSlotHoldAge(held: TestSlotHolder, waiter: TestSlotWaite
   if (scope?.dev === undefined || scope.ino === undefined || scope.cgroupNs === undefined) missingEvidence.push("no pinned cgroup identity recorded");
   else if (waiter.cgroupNs !== undefined && scope.cgroupNs !== waiter.cgroupNs) missingEvidence.push("cgroup namespace differs");
   if (waiter.probeReason !== undefined) missingEvidence.push(`cgroup identity probe: ${waiter.probeReason}`);
+  if (waiter.namespaceProbeReason !== undefined) missingEvidence.push(`pid namespace probe: ${waiter.namespaceProbeReason}`);
   if (held.ownerUid === undefined) missingEvidence.push("no owner uid recorded");
   const recoveryCommand = ["node", "--import", "tsx", "scripts/test-slot-owner-release.mjs", "--slot-dir", waiter.slotDir, "--slot", String(waiter.slot),
     "--nonce", held.ownerNonce ?? "<unrecorded>", "--pid", String(held.pid), "--start", held.processStart ?? "<unrecorded>"].map(shellWord).join(" ");
@@ -1987,9 +2042,9 @@ function* testSlotPolls(label: string, opts: TestSlotOptions, maximum: number,
           let quiescent: { held: TestSlotHolder; evidence: ReservedTreeEvidence } | undefined;
           let agedHold: TestSlotHoldAge | undefined;
           /** W1-T11809: a retained foreign hold aged past its bound is UNKNOWN — one row and one line, never a release. */
-          const retainUnknown = (held: TestSlotHolder, probeReason?: string): false => {
+          const retainUnknown = (held: TestSlotHolder, probeReason?: string, namespaceProbeReason?: string): false => {
             agedHold = judgeTestSlotHoldAge(held, { hostname: host(), bootId: bootId(), pidNs: pidNamespace(), cgroupNs: cgroupNamespace(),
-              slotDir: dir, slot: i, probeReason }, clock.now());
+              slotDir: dir, slot: i, probeReason, namespaceProbeReason }, clock.now());
             if (agedHold === undefined || !agedHold.aged) return false; // Local, proven ended, or still within its bound.
             const key = `aged:${i}:${held.ownerNonce}`;
             if (observed.has(key)) return false;
@@ -1999,6 +2054,16 @@ function* testSlotPolls(label: string, opts: TestSlotOptions, maximum: number,
               `aged ${ageText(agedHold.ageMs)} with no beat for ${ageText(agedHold.silentMs)}; missing: ${agedHold.missingEvidence.join("; ")}; ` +
               `the hold is kept. Recover it from the owner lane: ${agedHold.recovery}`);
             return false;
+          };
+          const probeAgedNamespace = (held: TestSlotHolder, probeReason?: string): boolean => {
+            const age = judgeTestSlotHoldAge(held, { hostname: host(), bootId: bootId(), pidNs: pidNamespace(),
+              slotDir: dir, slot: i }, clock.now());
+            if (age === undefined || age.aged === false || age.bootIdMatch !== true || !/^pid:\[[0-9]+\]$/.test(held.pidNs ?? "")) return retainUnknown(held, probeReason);
+            let evidence: ReservedTreeEvidence;
+            try { evidence = (opts.pidNamespaceProbe ?? probeRecordedPidNamespace)(structuredClone(held)); }
+            catch (error) { evidence = { state: "unknown", coverage: "pid-namespace-ended", reason: `pid namespace probe failed: ${String(error)}` }; }
+            if (evidence.state === "ended") { quiescent = { held, evidence }; return true; }
+            return retainUnknown(held, probeReason, evidence.reason);
           };
           const reclaim = reclaimStaleLock(path, {
             parseHolder: parseTestSlotHolder,
@@ -2018,14 +2083,14 @@ function* testSlotPolls(label: string, opts: TestSlotOptions, maximum: number,
                   slot: i, pid: held.pid, holder: held.label, ownerNonce: held.ownerNonce, processStart: held.processStart,
                   evidence: evidence.state, coverage: evidence.coverage, reason: evidence.reason });
                 // A complete identity never falls through to heartbeat age; only an unobservable tree is UNKNOWN.
-                return evidence.state === "unknown" && retainUnknown(held, evidence.reason);
+                return evidence.state === "unknown" && probeAgedNamespace(held, evidence.reason);
               }
               const pidStale = testSlotHolderStale(held, clock.now(), { hostname: host, bootId, isPidAlive, pidNamespace });
               const cadence = held.heartbeatIntervalMs;
               const local = sameHost(held.host, host()) && !(held.pidNs !== undefined && myNs !== undefined && held.pidNs !== myNs);
               // A cadence-less record keeps the pid probe; a foreign one its boot id (the lease only without one).
               const recordedCadence = cadence !== undefined && Number.isSafeInteger(cadence) && cadence > 0;
-              if (!local) return pidStale || retainUnknown(held);
+              if (!local) return pidStale || probeAgedNamespace(held);
               if (!recordedCadence && held.workIdentity === undefined) return pidStale;
               reservedWorkUnproven = true;
               const silentMs = clock.now() - Date.parse(held.heartbeatAt);
