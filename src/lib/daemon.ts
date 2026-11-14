@@ -144,7 +144,7 @@ import {
 } from "./arm-auto-merge.js";
 // Pure shared gate; dispatch-governor.ts explains why drain.ts cannot share it from here (W1-T342).
 import { checkDispatchGovernors, checkNewBuildReservation, governorDeferPayload, newBuildReservationPayload, type DispatchGovernorDeps, type DispatchGovernorVerdict, type MemoryReadTracker, type QuietHoursHoldResult } from "./dispatch-governor.js";
-import { assertRunnable, parseTasksFromYaml, PlanError, TASK_RISKS, TASK_STATUSES, TASK_TYPES, TaskAdmissionError, type MergedResolver, type Plan, type Task } from "./plan.js";
+import { assertRunnable, parseTasksFromYaml, PlanError, TASK_RISKS, TASK_STATUSES, TASK_TYPES, TaskAdmissionError, type MergedResolver, type Plan, type Task, type TaskInputAnswer } from "./plan.js";
 import { resolveReleases, closedUnmergedRunBranchRefs, type DispatchFilterReason, type ReleaseResolution } from "./drain.js";
 import type { StatusProjection } from "./status.js";
 import { ENVIRONMENTAL_BLOCK_COOLDOWN_MS, INDEPENDENT_BLOCK_RELEASED_STEP, isEnvironmentalBlock, PRE_RESTORE_RUN_VERDICT_STAGES, type IndependentBlockRelease } from "./status.js";
@@ -1304,6 +1304,8 @@ export interface DaemonDeps {
   /** W1-T10348 — the operator releases kept in state/operator-releases.json, which ledger rotation cannot
    *  shed. Read with `readLedgerLines` once per tick by the shared release resolver. Absent = ledger only. */
   readDurableReleases?: () => ReleaseEvidence;
+  /** W1-T12715: the operator answer for a held task; absent, a task with needs_input is never dispatched. */
+  taskInputAnswer?: TaskInputAnswer;
   /** Complete archive union for the boot-time restart estimates and sweep-bound seed (W1-T9632); unreadable disables holdouts. */
   readRestartHistory?: () => readonly string[];
   bootPhases?: BootPhases;
@@ -7690,6 +7692,7 @@ export async function runDaemon(
       onPriorityReservationReleased: logPriorityRelease,
       dispatchValueContext: deps.buildDispatchValueContext?.(planForBatch, isMerged),
       beginSelectionPass: deps.beginSelectionPass,
+      inputAnswer: deps.taskInputAnswer,
       isOpenPr: deps.isOpenPr,
       // A run the harness yielded before its PR is walked ahead of fresh starts, so a yield never costs its queue place.
       resumableTaskIds: new Set(resumableHandoffs.keys()),
@@ -8023,7 +8026,7 @@ export async function runDaemon(
               if (deps.isCreditIndeterminate!(task.id)) throw new Error(`credit unreadable: ${task.id}`);
               if (isMerged(task.id)) return false;
               try {
-                assertRunnable(planForBatch, task, (dep) => isMerged(dep.id), released);
+                assertRunnable(planForBatch, task, (dep) => isMerged(dep.id), released, deps.taskInputAnswer);
                 return true;
               } catch (e) {
                 if (e instanceof TaskAdmissionError) return false;

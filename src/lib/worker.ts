@@ -1,4 +1,6 @@
 import { withWorkspaceCleanup } from "./workspace-cleanup-contract.js";
+import { newestTaskAnswer, type Task } from "./plan.js";
+import { citation } from "./provenance.js";
 import { BoundedOutput, readBoundedFileTail, type FileTail } from "./bounded-file-tail.js";
 import type { CashRequestEffortCount } from "./cash-request-effort.js";
 import { workerExecutionEvidence, sdkRequestedEffort, sdkRequestedModel, type SdkRequestEvidence,
@@ -4941,6 +4943,33 @@ export function appendQuestionAnswer(repoRoot: string, entry: QuestionAnswerEntr
   } catch {
     return false;
   }
+}
+
+/** W1-T12715: the newest ANSWER text the question store holds for `taskId`, or undefined. An unreadable store
+ * answers nothing, so a task with needs_input stays held. */
+export function taskInputAnswer(repoRoot: string, taskId: string): string | undefined {
+  let text: string;
+  try {
+    text = fs.readFileSync(join(repoRoot, "plan", "questions.ndjson"), "utf8");
+  } catch {
+    return undefined; // deliberate: an absent or unreadable store holds the task, the safe side.
+  }
+  const lines: unknown[] = [];
+  for (const raw of text.split("\n")) {
+    try {
+      lines.push(JSON.parse(raw));
+    } catch {
+      continue; // deliberate: a torn or blank line is skipped, as every other reader of this store does.
+    }
+  }
+  return newestTaskAnswer(lines, taskId);
+}
+
+/** W1-T12715: the answer to a held task's question, as one cited line for the build prompt's operator notes. */
+export function renderTaskInputAnswer(task: Pick<Task, "id" | "needs_input">, answer: string | undefined): string {
+  if (task.needs_input === undefined || answer === undefined || answer.trim() === "") return "";
+  const flat = (text: string): string => text.replace(/\s+/g, " ").trim();
+  return `- Operator answer to "${flat(task.needs_input.question)}": ${flat(answer)} ${citation(`operator#answer@${task.id}`)}`;
 }
 
 // ── Mid-run operator answer delivery (W1-T4673) ─────────────────────────────
