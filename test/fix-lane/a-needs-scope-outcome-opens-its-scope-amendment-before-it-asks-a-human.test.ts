@@ -8,6 +8,7 @@ import { test } from "node:test";
 import type { Config } from "#src/lib/config.js";
 import type { ReviewVerdict } from "#src/lib/review.js";
 import type { WorkerResult } from "#src/lib/worker.js";
+import { runSweep, type OpenPrView, type SweepDeps } from "#src/lib/sweep.js";
 import { SCOPE_AMENDMENT_RETRYABLE_REFUSALS, type ProofAmendmentRecord, type ProofAmendmentWritePorts } from "#src/lib/proof-amendment.js";
 import { runFixRung } from "#test/helpers/run-task-test.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
@@ -132,6 +133,37 @@ function harness(plan: Plan = {}) {
     counts: () => ({ spawns, shardReads, bodyReads }) };
 }
 
+async function replayEscalation(rows: Row[], reviewFailure: boolean, headSha: string, priorStrikes = 0) {
+  const delivered: Array<{ reason: string; question: string }> = [];
+  let judgments = 0;
+  let dispatches = 0;
+  const now = Date.now();
+  const pr: OpenPrView = {
+    taskId, prNumber, prUrl: `https://github.com/acme/remudero/pull/${prNumber}`, headSha,
+    checksState: reviewFailure ? "green" : "red", reviewState: reviewFailure ? "failure" : "pending",
+    unmetCriteria: reviewFailure ? [{ claim: "selector edge", proof: "unit test: edge", reason: "repair the selector",
+      met: false, proof_exec: "not_executable" }] : [],
+    ciFailures: reviewFailure ? [] : [{ name: "ci-shard (1/8)", logTail: "selector assertion failed" }],
+    priorStrikes, autoMergeArmed: false, lastActivityAt: new Date(now).toISOString(),
+  };
+  const ledger = rows.map(row => ({ ...row }));
+  const deps: SweepDeps = {
+    ledgerPath: "/unused/scope-escalation-ledger", runId: "scope-escalation-replay", now: () => now,
+    readLedger: () => ledger, appendLine: (_path, row) => { ledger.push({ ...row, step: String(row.step) }); },
+    arm: () => {}, close: () => {}, dispatchFix: () => { dispatches++; },
+    fixProgressJudge: async () => {
+      judgments++;
+      return { verdict: "escalate", loop: "scope repair blocked", reason: "human decision required" };
+    },
+    escalate: (_pr, reason, question) => { delivered.push({ reason, question: question.question }); },
+  };
+  await runSweep([pr], deps);
+  assert.ok(judgments > 0, "control: the replay reached the progress judge");
+  assert.equal(dispatches, 0, "an escalation must not dispatch another fix worker");
+  assert.equal(delivered.length, 1, "control: the sweep delivered the escalation question");
+  return delivered[0]!;
+}
+
 test("W1-T12543 criterion 1: a retryable refusal is asked once more in the same round and the round awaits the amendment", async () => {
   for (const plan of [{ bodyThrowsOn: [1] }, { shards: [driftedShard, goodShard] }] satisfies Plan[]) {
     const h = harness(plan);
@@ -169,7 +201,7 @@ test("W1-T12543 criterion 2: a main-owned refusal refreshes the base and the ref
   assert.equal(h.issues.length, 0, "no escalation on either round");
 });
 
-test("W1-T12543 criterion 3: the fix lane refuses its commit only after a non-retryable or second refusal, and names it", async () => {
+test("W1-T12543 criterion 3: the delivered escalation names the last non-retryable or second scope refusal", async () => {
   const twice = harness({ shards: [driftedShard] });
   await twice.round();
   assert.deepEqual(twice.scopeRows().map((row) => [row.reason, row.retry]), [["shard-drifted", undefined], ["shard-drifted", 1]]);
@@ -189,6 +221,38 @@ test("W1-T12543 criterion 3: the fix lane refuses its commit only after a non-re
   assert.equal(plain?.scope_amendment_asks, 1);
   assert.match(String(plain?.reason), /path-not-changed: src\/shared\.ts/);
   assert.equal(once.issues.length + twice.issues.length, 0, "the rung itself files no issue; the sweep reads the named refusal");
+
+  const changed = harness({ bodyThrowsOn: [1], shards: [driftedShard] });
+  await changed.round();
+  assert.deepEqual(changed.scopeRows().map(row => [row.reason, row.retry]),
+    [["scope-amendment-error", undefined], ["shard-drifted", 1]], "the retry can fail for a different reason");
+  for (const h of [twice, once, changed]) {
+    const refusal = h.refusals().at(-1)!;
+    for (const [reviewFailure, strikes] of [[false, 0], [true, 0], [false, 3], [true, 3]] as const) {
+      const delivered = await replayEscalation(h.rows, reviewFailure, String(refusal.head_sha), strikes);
+      assert.match(delivered.reason, /scope repair blocked/);
+      for (const text of [delivered.reason, delivered.question]) {
+        assert.ok(text.includes(String(refusal.scope_amendment_refusal)), text);
+        assert.ok(text.includes(String(refusal.scope_amendment_refusal_detail)), text);
+        if (h === changed) assert.doesNotMatch(text, /scope-amendment-error|gh pr view failed/);
+      }
+    }
+  }
+});
+
+test("scope refusal escalation context does not carry across a new head or a superseding round", async () => {
+  const h = harness({ shards: [driftedShard] });
+  await h.round();
+  const headSha = String(h.refusals().at(-1)!.head_sha);
+  const superseded: Row[] = [...h.rows,
+    { step: "fix.dispatch", task_id: taskId, pr_number: prNumber, head_sha: headSha, round_id: "next-round", strike: 2 },
+    { step: "fix.done", task_id: taskId, pr_number: prNumber, head_sha: headSha, round_id: "next-round", subtype: "success" },
+  ];
+  for (const [rows, head] of [[h.rows, "new-head"], [superseded, headSha]] as const) {
+    const delivered = await replayEscalation([...rows], true, head);
+    assert.doesNotMatch(delivered.reason, /last scope amendment refusal|shard-drifted/i);
+    assert.doesNotMatch(delivered.question, /last scope amendment refusal|shard-drifted/i);
+  }
 });
 
 test("W1-T12543 criterion 4: workflow, instrument and unfiled scope still escalate at once with no amendment asked", async () => {
