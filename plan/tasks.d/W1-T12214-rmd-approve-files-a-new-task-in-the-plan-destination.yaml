@@ -16,6 +16,7 @@
     - W1-T5348
   files:
     - src/run-task.ts
+    - src/lib/inbox.ts
     - test/worker/run-task/rmd-approve-files-a-new-task-in-the-plan-destination.test.ts
   status: queued
   attempts: 0
@@ -32,6 +33,8 @@
       proof: "grep: W1-T12214 criterion 5 in test/worker/run-task/rmd-approve-files-a-new-task-in-the-plan-destination.test.ts"
     - claim: "The test goes through `approveCommand` and through the batch form, the production callers"
       proof: "grep: W1-T12214 criterion 6 in test/worker/run-task/rmd-approve-files-a-new-task-in-the-plan-destination.test.ts"
+  amendment: |
+    2026-11-14: src/lib/inbox.ts is added to `files`. The shard writer of an approval checks each path a draft names against the worktree it writes in. In the destination worktree that check refuses every draft that names a public source file.
   rationale: |
     OBSERVED 2026-11-10 on the first-parent history of main, 48 hours, 165 merges: 9 merges were ratifications from `rmd approve`.
     - `approveCommand` and `approveBatchCommand` in src/run-task.ts make a worktree with `addApproveWorktree` and open a pull request with `createPlanPrRest`. The owner and the name are those of the public repository.
@@ -42,6 +45,8 @@
     In both commands, call `resolvePlanDestination("task")` for an approval that adds a task file. Pass its checkout to `addApproveWorktree` and its owner and name to `createPlanPrRest` and to the probe.
     For an approval that changes a task file, find the repository that holds it with `findTaskInCatalogs`.
     The preflight takes the code root from the earlier task of this filing.
+    The draft check of `fileRatificationDraft` and `fileRatificationBatch` in src/lib/inbox.ts reads its path facts from the public code root, not from the worktree: a destination worktree holds no source, so each path a draft names would read as missing.
     NOT IN SCOPE: the inbox, and the proposals that an approval reads.
+    NO-INVARIANTS: criterion 5 is the contract of the path with no host file; the draft check there reads the worktree, as before.
   falsifier: |
     Open the pull request in the public repository with the kind on and criteria 1 and 2 must fail. Probe the public repository for an approval that goes to the destination and criterion 4 must fail. Restore and require all six to pass.

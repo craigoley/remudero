@@ -7,7 +7,7 @@
   principles: {tdd: strict}
   risk: high
   budget_usd: 20.00
-  files: [src/lib/sweep.ts, src/run-task.ts, test/a-capped-pr-advances-to-a-corrected-task-contract.test.ts]
+  files: [src/lib/sweep.ts, src/run-task.ts, src/cli/commands/sweep.ts, test/a-capped-pr-advances-to-a-corrected-task-contract.test.ts]
   origin: "recon#pr-6153-capped-contract-amendment-2026-09-20"
   plan_refs: ["W1-T77", "W1-T78", "W1-T100", "W1-T150", "W1-T168", "W1-T3579", "W1-T3306", "W1-T3817"]
   priority: 5  # queue-judge-2026-10-30: No dependents or incidents, lower priority to reflect low delay cost.
@@ -49,6 +49,14 @@
     re-review the old head, synthesize a success status, change the generic distance threshold,
     or bypass merge checks. The update creates a new head containing the corrected contract;
     existing CI, exact-input review, and auto-merge rules then decide it normally.
+    Amendment (2026-11-14): W1-T2890 moved the sweep wiring out of src/run-task.ts. The entrypoint
+    host there (`sweepCommandHost`) now supplies the PR-head contract read as
+    `taskContractAdvanceAtHead`, and src/cli/commands/sweep.ts passes it to the lib
+    `buildSweepEffects` as `readTaskContractAdvanceAtHeadImpl`. The full sweep reads it through one
+    read port. The read fetches the PR head with awaited git and resolves the task record at that
+    head; a failed fetch, a plan divergence or a task absent at the head is unreadable. The refresh
+    value gate treats a `task-contract` candidate as a repair, as it treats a stale gate.
+    NO-INVARIANTS: each existing update-branch candidate, reason, default and error path is unchanged.
   acceptance:
     - claim: "a capped PR whose current main task contract differs from its PR-head contract is selected once for branch advance before another review is attempted"
       proof: "grep: updateReason: \"task-contract\" in src/lib/sweep.ts"

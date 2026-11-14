@@ -17,15 +17,17 @@
     - src/run-task.ts
     - test/an-eligible-follow-up-is-filed-as-a-plan-shard-during-the-build.test.ts
     - "src/lib/config-gardener.ts"
+    - src/cli/commands/fix.ts
+    - test/learning/an-eligible-follow-up-is-filed-as-a-plan-shard-during-the-build.test.ts
   status: queued
   attempts: 0
   acceptance:
     - claim: "a routed task or research follow-up proposal is filed by one plan-only PR through the existing batch ratifier with no operator approve, and its shard carries origin followup#<entryId>, the source task id, PR URL, exact 40-hex head SHA, run id and the follow-up's verbatim text in its rationale; the PR carries no Remudero-Task trailer and merges only through the ordinary plan-PR gates"
-      proof: "unit test: an eligible task or research follow-up is filed as one plan-only shard with its provenance"
+      proof: 'grep: test("an eligible task or research follow-up is filed as one plan-only shard with its provenance" in test/learning/an-eligible-follow-up-is-filed-as-a-plan-shard-during-the-build.test.ts'
     - claim: "an action follow-up is never filed and stays on the human-owned route; a candidate already filed (a shard with the same followup# origin on origin/main or an open PR), already ratified in the ledger, or declined by any existing router arm files nothing, and a second pass over the same harvest files nothing new"
-      proof: "unit test: an action or already-handled follow-up is never filed"
+      proof: 'grep: test("an action or already-handled follow-up is never filed" in test/learning/an-eligible-follow-up-is-filed-as-a-plan-shard-during-the-build.test.ts'
     - claim: "a drafted shard with empty files, a proof outside the two lintable forms, a files list beyond the machine-filing risk band the source run declared, or an unreadable head SHA is refused with a named reason and left as a proposal for the operator; a pass files at most the existing draft-rung bound"
-      proof: "unit test: an under-specified or over-band follow-up draft is refused with a named reason"
+      proof: 'grep: test("an under-specified or over-band follow-up draft is refused with a named reason" in test/learning/an-eligible-follow-up-is-filed-as-a-plan-shard-during-the-build.test.ts'
     - claim: "the harvest calls the filing step after the registry write"
       proof: "grep: fileEligibleFollowups( in src/run-task.ts"
   rationale: |
@@ -66,6 +68,10 @@
        read with local git at harvest time, on the `report.followups` row. FollowupCandidate gains an optional
        `headSha`, and routeFollowupsToRegistry's summary carries it. An unreadable head records nothing, and step 3
        then refuses to file.
+       FIX-ROUND CHECKOUT. A sweep fix round works in its own `sweep-<task>-<time>` checkout, not in `run-<runId>`.
+       The fix rung's harvest call in src/cli/commands/fix.ts passes `worktreePath: opts.worktreePath`, so the
+       harvest reads the head of the checkout the fix round really used. A test drives that fix-rung call and
+       asserts the `report.followups` row carries that checkout's 40-hex head.
     2. src/lib/followup-filing.ts (new). selectFileableFollowups(outcomes, { planOnMain, openPrOrigins,
        ratifiedIds, bound }) picks routed `task`/`research` proposals that are not ratified and have no shard or
        open PR with origin `followup#<entryId>`. It returns them ordered and capped at W1-T2561's bound. Declines
@@ -91,7 +97,7 @@
        unknown type or a failed filing records followup.file_refused and never throws into the harvest. Public
        side effects: the new followup.filed and followup.file_refused ledger rows and one plan-only filing PR are
        additions; no existing row, verb, flag or merge gate changes meaning.
-    NO-INVARIANTS: additive filing step; every prior output bucket, legacy receipt, default and error path is unchanged and already covered by the acceptance proofs.
+    NO-INVARIANTS: additive filing step; every prior output bucket, legacy receipt, default and error path is unchanged and already covered by the acceptance proofs; the fix-round checkout only adds provenance to the harvest row.
   falsifier: |
     At origin/main, publish a harvest holding one `task:` entry and run a full retro pass with no operator. The
     registry gains `followup:<entryId>` and no shard, PR or approve row exists. If main already files it, close
