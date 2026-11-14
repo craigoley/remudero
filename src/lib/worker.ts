@@ -2574,9 +2574,9 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
       modelUsage: {}, compactionEvents: [], qualitySuspect: false };
   };
   if (admission?.kind === "abandoned" || args.signal?.aborted) return admissionAbandoned();
-  // W1-T11336: the sweep's admission may precede a fleet PAUSE by tens of minutes. In-process fix starts
-  // re-read at the same boundary as run children; reviews and other classes retain their existing path.
-  if (childReservationId === undefined && workerClassOf(args) === "fix") {
+  // W1-T11336, W1-T12497: the sweep's admission may precede a fleet PAUSE by tens of minutes. Every fix start,
+  // in process or in a run child, re-reads the hold here; reviews and other classes retain their existing path.
+  if (workerClassOf(args) === "fix") {
     const root = (args.config ?? loadConfig()).root;
     const hold = (args.readWorkerAdmissionHold ?? workerAdmissionHold)(root);
     if (hold) {

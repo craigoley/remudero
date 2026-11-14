@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { join } from "node:path";
-import { describe, test } from "node:test";
+import { describe, test, type TestContext } from "node:test";
 import { parse, stringify } from "yaml";
 import { prStateCommand } from "#src/lib/pr-state.js";
 import { fixedClock } from "#src/lib/clock.js";
@@ -299,30 +299,11 @@ describe("test/ledger/pr-state-answers-from-the-ledger-before-github.test.ts", (
 
   test("the real broker client sends a single agent revalidation and writes no ledger rows", async t => {
     const fixture = writeLedger(evidence(1, 300_000), { scope: t });
-    // AF_UNIX paths are short on macOS; writeLedger's TMPDIR path plus the broker suffix exceeds that limit.
-    const cacheRoot = mkdtempSync(join("/tmp", "rmd-gh-broker-"));
-    const brokerDir = join(cacheRoot, "remudero", "gh-broker");
-    mkdirSync(brokerDir, { recursive: true });
-    const socket = join(brokerDir, "broker.sock");
-    writeFileSync(join(brokerDir, "heartbeat"), "60");
-    const requests: Row[] = [];
+    const cacheRoot = shortTempDir(t, "rmd-gh-broker-");
     const wireReply = { type: "result", stdout: JSON.stringify(response([1])), stderr: "", exitCode: 0, outcome: "upstream-200" };
-    const server = createServer(connection => {
-      let input = "";
-      connection.on("data", chunk => {
-        input += String(chunk);
-        if (!input.includes("\n")) return;
-        requests.push(JSON.parse(input.trim()));
-        connection.end(JSON.stringify(wireReply) + "\n");
-      });
-    });
-    await new Promise<void>(resolve => server.listen(socket, resolve));
-    t.after(async () => {
-      await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
-      rmSync(cacheRoot, { recursive: true, force: true });
-    });
+    const requests = await brokerAt(t, cacheRoot, wireReply);
     const before = readFileSync(fixture.path, "utf8");
-    const c = capture(fixture.dir, { readBroker: undefined, env: { ...process.env, XDG_CACHE_HOME: undefined, RMD_GH_CACHE_HOME: cacheRoot } });
+    const c = capture(fixture.dir, { readBroker: undefined, env: fixtureBrokerEnv(cacheRoot, shortTempDir(t, "rmd-gh-home-")) });
     assert.equal(await prStateCommand(["1", "--max-age", "2m"], c.deps), 0);
     assert.equal(requests.length, 1);
     assert.equal(requests[0].class, "agent");
@@ -337,4 +318,52 @@ describe("test/ledger/pr-state-answers-from-the-ledger-before-github.test.ts", (
     assert.equal(requests.length, 3);
     assert.equal(readFileSync(fixture.path, "utf8"), before);
   });
+
+  test("W1-T12162 criterion 2: a read broker that runs for the same account does not change the result", async t => {
+    const fixture = writeLedger(evidence(1, 300_000), { scope: t });
+    const cacheRoot = shortTempDir(t, "rmd-gh-broker-");
+    const own = await brokerAt(t, cacheRoot,
+      { type: "result", stdout: JSON.stringify(response([1])), stderr: "", exitCode: 0, outcome: "upstream-200" });
+    // The account's own broker serves at $HOME/.cache, the default cache root, with a live heartbeat.
+    const home = shortTempDir(t, "rmd-gh-home-");
+    const account = await brokerAt(t, join(home, ".cache"),
+      { type: "result", stdout: "", stderr: "the account broker answered", exitCode: 1, outcome: "upstream-error" });
+    const c = capture(fixture.dir, { readBroker: undefined, env: fixtureBrokerEnv(cacheRoot, home) });
+    assert.equal(await prStateCommand(["1", "--max-age", "2m"], c.deps), 0, c.out.join("\n"));
+    assert.equal(own.length, 1, "the fixture socket answers the read");
+    assert.equal(account.length, 0, "the account's broker is never asked");
+    assert.match(c.out[0], /head_sha: "github-1"/);
+  });
 });
+
+/** AF_UNIX paths are short on macOS; writeLedger's TMPDIR path plus the broker suffix exceeds that limit. */
+function shortTempDir(t: TestContext, prefix: string): string {
+  const dir = mkdtempSync(join("/tmp", prefix));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  return dir;
+}
+
+/** The read environment with every cache root fixed: the fixture's broker, and a HOME of the test's own. */
+function fixtureBrokerEnv(cacheRoot: string, home: string): NodeJS.ProcessEnv {
+  return { ...process.env, HOME: home, XDG_CACHE_HOME: undefined, RMD_GH_CACHE_HOME: cacheRoot };
+}
+
+/** A live broker under `<cacheRoot>/remudero/gh-broker` that records each request and sends `reply`. */
+async function brokerAt(t: TestContext, cacheRoot: string, reply: Row): Promise<Row[]> {
+  const brokerDir = join(cacheRoot, "remudero", "gh-broker");
+  mkdirSync(brokerDir, { recursive: true });
+  writeFileSync(join(brokerDir, "heartbeat"), "60");
+  const requests: Row[] = [];
+  const server = createServer(connection => {
+    let input = "";
+    connection.on("data", chunk => {
+      input += String(chunk);
+      if (!input.includes("\n")) return;
+      requests.push(JSON.parse(input.trim()));
+      connection.end(JSON.stringify(reply) + "\n");
+    });
+  });
+  await new Promise<void>(resolve => server.listen(join(brokerDir, "broker.sock"), resolve));
+  t.after(() => new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())));
+  return requests;
+}

@@ -297,7 +297,7 @@ test("paths the map does not observe keep the full run with their reason, map or
   assert.equal(fullRunTrigger(["openapi/other.yaml"]), "openapi/other.yaml");
   assert.equal(fullRunTrigger(["openapi/other.yaml"], true), "openapi/other.yaml");
   assert.equal(fullRunTrigger([".github/workflows/ci.yml"], true), ".github/workflows/ci.yml");
-  assert.equal(fullRunTrigger(["test/helpers/x.ts"], true), "test/helpers/x.ts");
+  assert.equal(fullRunTrigger(["test/fixtures/x.ts"], true), "test/fixtures/x.ts");
 });
 
 test("census membership for a src change is the suites that listed its directory; a missing map falls back and says so", () => {

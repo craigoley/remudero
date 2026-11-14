@@ -1,0 +1,62 @@
+- id: W1-T12548
+  title: "flow-remedy skips a cause it cannot file and drafts the next one, and own-red qualifies by open age"
+  repo: remudero
+  depends_on: []
+  priority: 1.2
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # changes which cause the flow-remedy garden files; each filing still passes the machine-filing judge and lint-plan's admission
+  origin: "operator-session#flow-ledger-research-2026-11-13"
+  plan_refs:
+    - W1-T5538
+    - W1-T7421
+    - W1-T9597
+    - W1-T11097
+    - W1-T5984
+    - W1-T11025
+  files:
+    - src/lib/flow-remedy-gardener.ts
+    - test/gardeners/flow-remedy-skips-a-cause-it-cannot-file-and-drafts-the-next-one.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "invariant:a-skipped-cause-is-recorded — When the first draftable cause has no declared owner module (the \"declared owner NONE names no module\" refusal), the ladder records it as skipped with that reason and the pass drafts the next draftable cause among the candidates"
+      kind: guard
+      proof: "grep: W1-T12548 criterion 1 in test/gardeners/flow-remedy-skips-a-cause-it-cannot-file-and-drafts-the-next-one.test.ts"
+    - claim: "A cause whose owner file the scope check refuses is also skipped for this pass and the next cause is drafted; a cause that is due to escalate still escalates"
+      proof: "grep: W1-T12548 criterion 2 in test/gardeners/flow-remedy-skips-a-cause-it-cannot-file-and-drafts-the-next-one.test.ts"
+    - claim: "When no candidate can be filed, the pass files nothing and does not count a filing failure, so no daily retry wait starts"
+      proof: "grep: W1-T12548 criterion 3 in test/gardeners/flow-remedy-skips-a-cause-it-cannot-file-and-drafts-the-next-one.test.ts"
+    - claim: "An own-red episode that has been open longer than FLOW_OWN_RED_OPEN_AGE_MS (60 minutes) is eligible whatever the p90 of cleared own-red episodes is; an own-red episode open for less is not made eligible by this rule"
+      proof: "grep: W1-T12548 criterion 4 in test/gardeners/flow-remedy-skips-a-cause-it-cannot-file-and-drafts-the-next-one.test.ts"
+    - claim: "The production flowGardenSpec drives the skip: a ledger whose costliest eligible cause is owned by NONE files the next cause"
+      proof: "grep: W1-T12548 criterion 5 in test/gardeners/flow-remedy-skips-a-cause-it-cannot-file-and-drafts-the-next-one.test.ts"
+    - claim: "The flow ladder declares the own-red open age bound"
+      proof: "grep: FLOW_OWN_RED_OPEN_AGE_MS in src/lib/flow-remedy-gardener.ts"
+  rationale: |
+    WHY: the flow-remedy garden prices every PR blocker but files a remedy for only one cause per pass, the first draftable one. When that one cannot be filed, the pass throws and the garden waits a day. Nothing else is ever filed. And the costliest cause, own-red, never becomes a candidate.
+    OBSERVED in the 48 h ledger research (2026-11-11 21:45Z to 2026-11-13 21:45Z) and the latest `flow-remedy.scorecard` (2026-11-13 01:13Z):
+    - `own-red:required checks red` is the costliest priced cause (475.1 PR-hours in the scorecard's `priced`), and it is not in the ladder, which lists the first 8 candidates.
+    - The `next` action is `flow-blocker:plan-proof-unrunnable:plan-only PR is red on ci-shard (<n>/<n>), lint-plan#r2`. Its filing fails every time: `flow-remedy.garden_filing_failed` attempt 10 at 2026-11-12 00:21Z and attempt 11 at 2026-11-13 01:13Z, reason "no source owner found ... declared owner NONE names no module in PR_BLOCKER_OWNER_MODULES", `retry_after_ms` 86399984 (one day).
+    - The ladder holds other draftable causes behind it, for example `plan-proof-unrunnable:plan-only PR is red on mutation-ratchet` at rung 1, state draft.
+    - In the live ledger, `plan-proof-unrunnable` rows name the owner `plan-repair` in 5 rows and `NONE` in 5 rows. A NONE row makes an episode eligible, and NONE has no module.
+    READ 2026-11-13 at origin/main d41354cdd, src/lib/flow-remedy-gardener.ts:
+    - :316-330 `markEligibility`: an episode is eligible when its owner is NONE, its outcome failed, or it is open longer than the p90 of the cleared episodes of its key. Own-red has the declared owner fix-lane and clears often, so an open own-red episode rarely passes its own p90.
+    - :354 the ladder walks the first 8 candidates; :387 only the first draft or escalate becomes `next`.
+    - :399-404 `declaredOwnerFile` throws "no source owner found ... declared owner ... names no module in PR_BLOCKER_OWNER_MODULES". :483-490 `scopeRefusalOf` treats that as no refusal, so :513 `apply` reaches `draftShard`, which throws, and the gardener counts a filing failure.
+    - src/lib/gardener.ts:971-975 `gardenFilingRetryAt` doubles the wait up to its maximum; at attempt 11 it is one day.
+    RELATED: W1-T5984 (blocked) was the rung-1 own-red remedy. W1-T11025 (queued) is the remedy for one cause, "own-red: fix progress judgment due after repeated refusal"; it does not change how the ladder picks or skips. W1-T10519 (blocked) is a ci-friction hand-fix record on this file. None changes the candidate walk.
+  design: |
+    INVARIANT a-skipped-cause-is-recorded: every cause the ladder files still passes the machine-filing judge and lint-plan's admission, and a cause it skips is recorded with its reason, never dropped without a row.
+    1. In `ladderOf`, keep walking the candidates after an unfileable one. Add an optional `fileable(action)` check to `LadderSpecInput`; `ladderGardenSpec` passes one that runs `chooseOwner` and `remedyScopeRefusal`. A cause that fails it gets ladder state `skipped` with the reason, and `next` moves to the following draft or escalate. Escalations are not skipped.
+    2. Log one `flow-remedy.cause_skipped` row per skipped cause and pass, with the cause and the reason, through the garden's own `deps.log`, as `flow.remedy_escalated` is written.
+    3. With no fileable candidate, `next` is undefined and the pass records its scorecard with no filing, so no streak starts.
+    4. In `markEligibility`, add `FLOW_OWN_RED_OPEN_AGE_MS = 60 * 60_000`: an open episode whose key starts with `own-red:` is eligible once it has been open that long.
+    5. The test builds the ledger with test/helpers/ledger-fixture.ts and drives `flowGardenSpec` through a garden pass.
+    NOT IN SCOPE: giving NONE-owned blockers an owner (the sweep's classifier); the fix-lane ladder; the escalation rung; the retry wait itself.
+  falsifier: |
+    Stop the walk at the first unfileable cause and criteria 1 and 5 must fail. Skip an escalation and criterion 2 must fail. Count a pass with nothing fileable as a failure and criterion 3 must fail. Remove the open-age rule and criterion 4 must fail. Restore and require all to pass.
+  note: |
+    Id reserved for run-unfiled-1794610450000 with ~/rmd-work/bin/reserve-id.sh. The fleet builds it.

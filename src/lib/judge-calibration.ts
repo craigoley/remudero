@@ -30,6 +30,7 @@ import { systemClock, type Clock } from "./clock.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import { appendPanelLedger, bearerTokenId, isRecord, jsonAction, sendJson } from "./panel-actions.js";
 import type { Route } from "./service.js";
+import { decisionAnsweredTypedAnswers, scoreTypedAnswers, type TypedAnswerRow, type TypedAnswerScores } from "./typed-answer-scores.js";
 
 export const JUDGE_CALIBRATION_VERSION = "judge-calibration-v1" as const;
 
@@ -82,8 +83,36 @@ const str = (value: unknown): string | undefined => (typeof value === "string" &
 const record = (value: unknown): Row | undefined =>
   value !== null && typeof value === "object" && !Array.isArray(value) ? (value as Row) : undefined;
 
+const answerText = (value: unknown): string => (typeof value === "string" ? value : JSON.stringify(value) ?? "null");
+
+/** W1-T12414: a paired shadow row as one generative single answer, beside the current judge's. */
+function shadowTypedAnswer(line: Row): TypedAnswerRow | undefined {
+  const role = str(line.surface);
+  const model = str(line.shadow_model);
+  if (role === undefined || model === undefined || line.shadow_decision === undefined) return undefined;
+  const key = str(line.decision_key);
+  return {
+    role, question: null, model, source: "generative", questionType: null, options: null,
+    inputDigest: key === undefined ? null : createHash("sha256").update(key).digest("hex").slice(0, 16),
+    answer: { kind: "single", option: answerText(line.shadow_decision) },
+    incumbent: line.primary_decision === undefined ? null : answerText(line.primary_decision), outcome: null,
+  };
+}
+
+/** A ledger row's typed answers, or the ones {@link judgeCalibrationRow} already read off it. */
+function typedAnswersOf(line: Row): TypedAnswerRow[] {
+  if (Array.isArray(line.typed_answers)) return line.typed_answers as TypedAnswerRow[];
+  if (line.step !== "shadow_judge.paired") return decisionAnsweredTypedAnswers(line);
+  const shadow = shadowTypedAnswer(line);
+  return shadow ? [shadow] : [];
+}
+
 /** The fields this projection reads off one ledger row, or `undefined` for a row it never reads. */
 export function judgeCalibrationRow(line: Row): Row | undefined {
+  if (line.step === "shadow_judge.paired" || line.step === "decision.answered") {
+    const typed = typedAnswersOf(line);
+    return typed.length > 0 ? { step: line.step, typed_answers: typed } : undefined;
+  }
   if (typeof line.step !== "string" || !RETAINED_STEPS.has(line.step)) return undefined;
   const out: Row = {};
   for (const field of RETAINED_FIELDS) if (line[field] !== undefined) out[field] = line[field];
@@ -161,13 +190,18 @@ export interface JudgeVerdictFold {
   reviewHeadsByRun: Map<string, ReviewHead[]>;
   candidates: JudgeCandidate[];
   excluded: Record<string, number>;
+  typedAnswers: TypedAnswerRow[];
 }
 
 export function emptyJudgeVerdictFold(): JudgeVerdictFold {
-  return { models: new Map(), headAuthors: new Map(), reviewHeadsByRun: new Map(), candidates: [], excluded: {} };
+  return { models: new Map(), headAuthors: new Map(), reviewHeadsByRun: new Map(), candidates: [], excluded: {}, typedAnswers: [] };
 }
 
 export function foldJudgeVerdictRow(fold: JudgeVerdictFold, row: Row): void {
+  if (row.step === "shadow_judge.paired" || row.step === "decision.answered") {
+    fold.typedAnswers.push(...typedAnswersOf(row));
+    return;
+  }
   const raw = record(row.worker_assignment);
   const id = str(raw?.id);
   const model = str(record(raw?.selected)?.model);
@@ -205,6 +239,7 @@ export function judgeVerdictFoldToJson(fold: JudgeVerdictFold): Row {
     reviewHeadsByRun: [...fold.reviewHeadsByRun].map(([run, heads]) => [run, heads.map((entry) => ({ at: atToJson(entry.at), head: entry.head }))]),
     candidates: fold.candidates.map((candidate) => (candidate.kind === "risk" ? { ...candidate, at: atToJson(candidate.at) } : candidate)),
     excluded: { ...fold.excluded },
+    typedAnswers: [...fold.typedAnswers],
   };
 }
 
@@ -218,6 +253,7 @@ export function judgeVerdictFoldFromJson(json: Row): JudgeVerdictFold {
     candidates: (Array.isArray(json.candidates) ? json.candidates as JudgeCandidate[] : [])
       .map((candidate) => (candidate.kind === "risk" ? { ...candidate, at: atFromJson(candidate.at) } : candidate)),
     excluded: { ...(record(json.excluded) as Record<string, number> | undefined) },
+    typedAnswers: Array.isArray(json.typedAnswers) ? json.typedAnswers as TypedAnswerRow[] : [],
   };
 }
 
@@ -576,6 +612,8 @@ export interface JudgeCalibration {
   betweenJudges: JudgePairAgreement[];
   /** The labelling queue: every sampled verdict, and whether a label already covers it. */
   sample: Array<JudgeSampleItem & { labelled: boolean }>;
+  /** W1-T12414: shadow and decision-model answers, per role and model (lib/typed-answer-scores.ts). */
+  typedAnswerScores: TypedAnswerScores;
 }
 
 export interface JudgeCalibrationOptions {
@@ -611,6 +649,7 @@ export function unavailableJudgeCalibration(reason: string, asOf: string | null 
     strata: [],
     betweenJudges: [],
     sample: [],
+    typedAnswerScores: scoreTypedAnswers([]),
   };
 }
 
@@ -708,7 +747,10 @@ export function finishJudgeCalibration(fold: JudgeVerdictFold, options: JudgeCal
     matched: human.size,
     unmatched: latest.size - human.size,
   };
-  if (verdicts.length === 0) return { ...unavailableJudgeCalibration("no-judge-verdicts-observed", options.asOf), method, labels, excluded, authorUnattributed };
+  const typedAnswerScores = scoreTypedAnswers(fold.typedAnswers);
+  if (verdicts.length === 0) {
+    return { ...unavailableJudgeCalibration("no-judge-verdicts-observed", options.asOf), method, labels, excluded, authorUnattributed, typedAnswerScores };
+  }
 
   const sample = drawJudgeSample(verdicts, { seed: method.seed, perStratum: method.samplePerStratum });
   const sampledByStratum = new Map<string, number>();
@@ -757,5 +799,6 @@ export function finishJudgeCalibration(fold: JudgeVerdictFold, options: JudgeCal
     strata,
     betweenJudges: betweenJudgeAgreement(verdicts, method.minPairedObservations),
     sample: sample.map((item) => ({ ...item, labelled: human.has(item.verdictRef) })),
+    typedAnswerScores,
   };
 }
