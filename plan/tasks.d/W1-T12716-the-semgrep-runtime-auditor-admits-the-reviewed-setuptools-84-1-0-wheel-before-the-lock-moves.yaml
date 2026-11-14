@@ -1,0 +1,72 @@
+- id: W1-T12716
+  title: "The Semgrep runtime auditor admits the reviewed setuptools 84.1.0 wheel before the lock moves"
+  repo: remudero
+  depends_on: []
+  priority: 1.5
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # changes the trusted runtime auditor and its pinned digest; admits one more exact wheel identity and nothing else
+  origin: "operator-session#dependabot-18405-split-2026-11-14"
+  plan_refs:
+    - W1-T12492
+    - W1-T9817
+    - W1-T9979
+  files:
+    - .github/semgrep/runtime-compatibility-audit.py
+    - .github/semgrep/runtime_audit_metadata_tests.py
+    - .github/semgrep/source-runtime-qualification.py
+    - .github/semgrep/test_runtime_compatibility_audit.py
+    - .github/workflows/semgrep-runtime-compatibility.yml
+    - test/semgrep-artifact-audit-ci-contract.test.ts
+    - test/review/semgrep-setuptools-trust-before-lock-12716.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "invariant:exact-artifact-trust — the runtime auditor admits exactly two setuptools wheels, 84.0.0 with sha256 51a52592...c670 and 84.1.0 with sha256 5231689c...24c9, and refuses any other version, any other digest, another owner name and a data-path alias for the .pth exception"
+      kind: guard
+      proof: "grep: W1-T12716 criterion 1 in test/review/semgrep-setuptools-trust-before-lock-12716.test.ts"
+    - claim: "The workflow's AUDITOR_SHA256 and the source qualifier's runtime-compatibility-audit.py digest both equal the SHA-256 of the committed auditor"
+      proof: "grep: W1-T12716 criterion 2 in test/review/semgrep-setuptools-trust-before-lock-12716.test.ts"
+    - claim: "invariant:main-lock-stays-admitted — the setuptools pin in the committed build lock (one line, one hash) is admitted by the auditor, both before and after the lock moves to 84.1.0"
+      kind: guard
+      proof: "grep: W1-T12716 criterion 3 in test/review/semgrep-setuptools-trust-before-lock-12716.test.ts"
+  rationale: |
+    WHY: Dependabot PR #18405 moves setuptools 84.0.0 to 84.1.0 in .github/semgrep/build-requirements.txt.
+    84.1.0 fixes GHSA-xmj3-9gf7-h52w and GHSA-grgh-hr87-3jpw. The PR cannot merge, and no fix on its own branch can make it merge.
+    READ at origin/main af2d3c07a:
+    - src/lib/semgrep-runtime-merge-policy.mjs: when a PR changes a runtime lock, the workflow
+      .github/workflows/semgrep-runtime-compatibility.yml must have the same bytes on the base, the head and the run
+      (reason semgrep-runtime-workflow-not-trusted-main-bytes).
+    - The workflow pins AUDITOR_SHA256, so the head's auditor must equal main's auditor. Main's auditor admits only
+      setuptools 84.0.0 (APPROVED_TOOLS), so it refuses the 84.1.0 wheel.
+    - The repair commit d2ef4ba on #18405 changed the auditor and AUDITOR_SHA256 in the same PR as the lock. The policy
+      refuses that PR (security-merge-policy: unknown, semgrep-runtime-workflow-not-trusted-main-bytes).
+    So the trust change must land on main first, in a PR that changes no lock. Then the lock change alone passes the policy.
+    PR #18538 (W1-T12492) carries that trust change and is green on CI, but its review failed: W1-T12492's criteria
+    require the lock to hold 84.1.0, which a PR without the lock cannot show. This task is the trust step on its own.
+    W1-T12492 keeps the lock adoption, which lands on #18405 after this task merges.
+  design: |
+    INVARIANT exact-artifact-trust: every admitted setuptools wheel is an exact (version, SHA-256) pair; no name-only,
+    version-only or sdist admission, and the lock grammar keeps one hash per line.
+    INVARIANT main-lock-stays-admitted: main's build lock pins 84.0.0 until #18405 merges, so the auditor must admit
+    both exact wheels in the meantime; otherwise any other lock PR fails between the two merges.
+    1. runtime-compatibility-audit.py: add APPROVED_TOOL_ARTIFACTS {"setuptools": frozenset of the two exact pairs} and
+       approved_tool_artifact(name, version, sha); use it in scan_wheel, audit_distribution_set and approved_setuptools_pth
+       in place of the single APPROVED_TOOLS tuple. The other tools keep their single pair.
+    2. The 84.1.0 wheel's vendored special members are the same reviewed members as 84.0.0's: add
+       APPROVED_SPECIAL_MEMBER_ALIASES {84.1.0 identity: 84.0.0 identity}, read only after the whole-wheel digest matched.
+    3. Update AUDIT_TEST_SOURCES digests, source-runtime-qualification.py's auditor digest and the workflow's AUDITOR_SHA256.
+    4. Python unit tests: both identities admitted; wrong owner, version, digest and data-path alias refused; the alias
+       admits a member only under the aliased identity.
+    5. A focused TypeScript test (#test/helpers/repo-root.js) runs the committed auditor with python3 -I -S and asserts
+       criteria 1 to 3 on its behaviour, not its text.
+    Reuse PR #18538's auditor change (CI green there); do not edit either lock and do not touch W1-T12492's test files.
+    NOT IN SCOPE: the lock move and the OpenTelemetry refusal (W1-T12492 on #18405); any change to the merge policy.
+  falsifier: |
+    Remove the 84.1.0 pair from APPROVED_TOOL_ARTIFACTS: criterion 1 must fail. Remove the 84.0.0 pair: criterion 3
+    must fail on main's lock. Change one auditor byte without updating AUDITOR_SHA256: criterion 2 must fail.
+    Restore and require all to pass.
+  note: |
+    Id reserved for run-unfiled-1794691119000 with ~/rmd-work/bin/reserve-id.sh.
