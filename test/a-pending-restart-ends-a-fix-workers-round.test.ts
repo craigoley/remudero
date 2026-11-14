@@ -80,7 +80,10 @@ function workerResult(runId: string, costUsd = 0): WorkerResult {
 
 /** One fix round. `worker` runs as the spawn; it gets the spawn's args and the checkout. */
 async function fixRound(t: TestContext, co: Checkout, runId: string,
-  worker: (args: SpawnWorkerArgs) => Promise<WorkerResult>, extra: { priorPartialWork?: ReturnType<typeof readPreservedOwnerPatch> } = {}) {
+  worker: (args: SpawnWorkerArgs) => Promise<WorkerResult>, extra: {
+    priorPartialWork?: ReturnType<typeof readPreservedOwnerPatch>;
+    spawnWallClockBoundMs?: number;
+  } = {}) {
   const rows: Row[] = [];
   let pushes = 0;
   const mount: Mount = { model: "sonnet", effort: "high", maxTurns: 20, contextBudget: 120000 };
@@ -105,6 +108,7 @@ async function fixRound(t: TestContext, co: Checkout, runId: string,
       issues: { create: () => "https://github.com/acme/remudero/issues/1", listOpen: () => [], comment: () => {} } as IssueGateway,
       ledgerPath: join(co.root, "ledger.ndjson"), log: (step, fields) => rows.push({ step, task_id: TASK, ...(fields ?? {}) }),
       readHeadShaForProvenance: () => co.headSha,
+      ...(extra.spawnWallClockBoundMs === undefined ? {} : { spawnWallClockBoundMs: extra.spawnWallClockBoundMs }),
       say: () => {}, account: (result) => result,
     },
   });
@@ -117,7 +121,11 @@ async function fixRound(t: TestContext, co: Checkout, runId: string,
 type AShape = "spread" | "restored" | "restaged";
 
 /** A worker that leaves one staged edit, one unstaged edit and one new file, then runs until it is stopped. */
-function editingWorker(co: Checkout, seen: { signal?: AbortSignal; started?: () => void }, opts: { commit?: boolean; a?: AShape } = {}) {
+function editingWorker(co: Checkout, seen: { signal?: AbortSignal; started?: () => void }, opts: {
+  commit?: boolean;
+  a?: AShape;
+  abortDelayMs?: number;
+} = {}) {
   return async (args: SpawnWorkerArgs): Promise<WorkerResult> => {
     seen.signal = args.signal;
     if (opts.commit) {
@@ -137,21 +145,24 @@ function editingWorker(co: Checkout, seen: { signal?: AbortSignal; started?: () 
       const ownEnd = setTimeout(() => resolve(workerResult("DAEMON-1")), 10_000);
       args.signal?.addEventListener("abort", () => {
         clearTimeout(ownEnd);
-        reject(Object.assign(new Error("worker aborted"), { name: "AbortError" }));
+        const rejectAborted = () => reject(Object.assign(new Error("worker aborted"), { name: "AbortError" }));
+        if (opts.abortDelayMs === undefined) rejectAborted();
+        else setTimeout(rejectAborted, opts.abortDelayMs);
       }, { once: true });
     });
   };
 }
 
 /** Run a round under a recycle PAUSE: the watch's next poll sees it. */
-async function yieldedRound(t: TestContext, opts: { commit?: boolean; a?: AShape } = {}) {
+async function yieldedRound(t: TestContext, opts: { commit?: boolean; a?: AShape; abortDelayMs?: number; boundMs?: number } = {}) {
   onlyGitRuns(t);
   t.mock.timers.enable({ apis: ["setInterval"] });
   const co = checkout(t);
   requestPause(co.root, RECYCLE_REASON);
   const seen: { signal?: AbortSignal; started?: () => void } = {};
   const started = new Promise<void>((resolve) => { seen.started = resolve; });
-  const round = fixRound(t, co, "DAEMON-1", editingWorker(co, seen, opts));
+  const round = fixRound(t, co, "DAEMON-1", editingWorker(co, seen, opts),
+    opts.boundMs === undefined ? {} : { spawnWallClockBoundMs: opts.boundMs });
   await started;
   t.mock.timers.tick(DEFAULT_POLL_INTERVAL_MS);
   const result = await round;
@@ -241,6 +252,28 @@ test("W1-T8141: a pending recycle ends a fix round and preserves its work", asyn
     assert.equal(offered?.recoveryRef, indexRef, "the next round is offered the staged work");
     assert.match(offered!.excerpt, /a staged/);
   });
+});
+
+test("W1-T8141: a recycle that outlasts the spawn bound retains an unsnapshotted worktree", async (t) => {
+  const { co, seen, rows, outcome, pushes } = await yieldedRound(t, { boundMs: 20, abortDelayMs: 100 });
+  assert.equal(seen.signal?.aborted, true, "the recycle requested that the worker stop");
+  assert.equal(outcome.outcome, "stood_down", "a recycle timeout is a yield, not an ordinary abandoned spawn");
+  assert.ok(outcome.retainWorktree, "the sweep must retain the dirty worktree because capture was unsafe");
+  assert.equal(pushes(), 0, "a yielded round never pushes partial work");
+  const yielded = rows.find((row) => row.step === "fix.round_yielded");
+  assert.ok(yielded, "the incomplete preservation is recorded");
+  assert.equal(yielded.preservation_deferred, true);
+  assert.equal(yielded.retain_worktree, true);
+  assert.equal(yielded.recovery_ref, null, "no recovery ref is claimed while the worker may still write");
+  assert.match(String(yielded.keep_error), /could not safely snapshot/);
+  assert.equal(rows.some((row) => row.step === "fix.spawn_abandoned"), false, "the recycle yield is not classified as a normal abandonment");
+  const status = co.clone.git("status", "--porcelain");
+  assert.match(status, /M  src\/a\.ts/, "the staged file remains in the worktree");
+  assert.match(status, / M src\/b\.ts/, "the unstaged file remains in the worktree");
+  assert.match(status, /\?\? src\/c\.ts/, "the new file remains in the worktree");
+  assert.match(co.clone.git("diff", "--cached", "--", "src/a.ts"), /\+a staged/);
+  assert.match(co.clone.git("diff", "--", "src/b.ts"), /\+b unstaged/);
+  await new Promise((resolve) => setTimeout(resolve, 120));
 });
 
 test("W1-T8141: a yielded fix round pushes nothing and costs no strike", async (t) => {

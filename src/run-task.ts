@@ -8371,6 +8371,7 @@ async function spawnFixWorkerBounded(
         )
       : new Promise<never>(() => {});
   const recycled = yieldRoot && startSha ? watchFixRoundRecycle(yieldRoot, watchStop.signal) : new Promise<never>(() => {});
+  let recycleTimedOut: { detail: string; keepError: string } | undefined;
   try {
     let winner = await Promise.race([spawnPromise, bound, superseded, recycled]);
     if (winner !== "abandoned" && "recycle" in winner) {
@@ -8382,11 +8383,20 @@ async function spawnFixWorkerBounded(
         const yielded = await keepYieldedFixRound(deps.log, args.cwd, ctx.fixRound, ctx.snapshot.headSha, startSha, winner.recycle, costUsd);
         return { kind: "yielded", elapsedMs: systemClock.now() - startedAt, yielded };
       }
+      if (settled === "abandoned" && ctx.fixRound && ctx.snapshot && startSha) {
+        // The worker may still be writing after its abort signal. Do not snapshot or reset a
+        // live worktree: retain it intact and make the incomplete preservation visible to the
+        // rung so sweep cannot reclaim it as an ordinary abandoned spawn.
+        recycleTimedOut = {
+          detail: winner.recycle,
+          keepError: `worker did not stop within ${boundMs}ms after recycle; recovery could not safely snapshot while it may still be writing`,
+        };
+      }
       winner = "abandoned";
     }
     if (winner === "abandoned" || "superseded" in winner) {
       const elapsedMs = Date.now() - startedAt;
-      if (winner === "abandoned") {
+      if (winner === "abandoned" && !recycleTimedOut) {
         deps.log("fix.spawn_abandoned", {
           run_id: ctx.runId,
           task_id: ctx.taskId,
@@ -8394,7 +8404,23 @@ async function spawnFixWorkerBounded(
           bound_ms: boundMs,
           reason: "spawn wall-clock bound exceeded",
         });
-      } else {
+      } else if (winner === "abandoned" && recycleTimedOut && ctx.fixRound && ctx.snapshot && startSha) {
+        deps.log("fix.round_yielded", {
+          branch: ctx.fixRound.branch,
+          trigger: "recycle",
+          detail: recycleTimedOut.detail,
+          head_sha: ctx.snapshot.headSha,
+          start_sha: startSha,
+          pushed: false,
+          strike_spent: false,
+          recovery_ref: null,
+          index_recovery_ref: null,
+          paths: [],
+          keep_error: recycleTimedOut.keepError,
+          preservation_deferred: true,
+          retain_worktree: true,
+        });
+      } else if (winner !== "abandoned" && "superseded" in winner) {
         deps.log("fix.superseded", {
           run_id: ctx.runId,
           task_id: ctx.taskId,
@@ -8424,10 +8450,18 @@ async function spawnFixWorkerBounded(
           deps.log("fix.spawn_settled_after_abandon", {
             run_id: ctx.runId,
             task_id: ctx.taskId,
+            ...(recycleTimedOut ? { after_recycle_yield: true } : {}),
             error: String((e as Error)?.message ?? e),
           });
         },
       );
+      if (recycleTimedOut) {
+        return {
+          kind: "yielded",
+          elapsedMs,
+          yielded: { trigger: "recycle", detail: recycleTimedOut.detail, paths: [], costUsd: 0, keepError: recycleTimedOut.keepError },
+        };
+      }
       return winner === "abandoned" ? { kind: "abandoned", elapsedMs } : { kind: "superseded", elapsedMs, superseded: winner.superseded };
     }
     return { kind: "spawned", result: winner, elapsedMs: Date.now() - startedAt };
