@@ -19,7 +19,7 @@
   files:
     - src/lib/sweep.ts
     - test/fix-lane/a-sweep-fix-round-holds-a-run-lock-beside-its-worktree.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "A sweep fix round writes a run lock (pid, run_id and startedAt, the shape writeRunLock writes for the run lane) beside its sweep-<task>-<ms> worktree before it adds that worktree, and the lock is on disk and names a live pid while the fix worker runs"
