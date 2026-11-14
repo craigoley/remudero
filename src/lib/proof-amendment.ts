@@ -616,6 +616,9 @@ export type ScopeAmendmentOutcome = Exclude<ProofAmendmentOutcome, { kind: "inel
   { kind: "amendment_merged"; amendmentNumber: number } |
   { kind: "refused"; reason: string; detail: string };
 
+/** W1-T12543: scope-amendment refusals a fresh read can clear. The fix lane asks once more before it refuses the commit. */
+export const SCOPE_AMENDMENT_RETRYABLE_REFUSALS: ReadonlySet<string> = new Set(["scope-amendment-error", "worker-diff-unreadable", "shard-drifted"]);
+
 /** W1-T2891's two Stryker registration files. Review admits them beside the product change they register, because a
  *  new suite cannot be registered before it exists; refusing them as scope left a task that adds a classify.ts suite
  *  unable to finish (#12776). Every other instrument, including the mutation score floor, is still refused. */

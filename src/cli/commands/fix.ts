@@ -31,7 +31,7 @@ import { fetchSinglePrRest, codeqlCheckFailed, hydrateCodeqlHeadAlertsSteps, COD
 import { remedyFilesForFailingChecks, type RemedyFileForGate } from "../../lib/ci-parity.js";
 import { isInPlanScope } from "../../lib/plan-architect.js";
 import { createPlanPrRest, probeExistingPlanPr } from "../../lib/plan-pr-emitter.js";
-import { findTaskShard, parseProofAmendmentProposal, requestProofAmendment, requestScopeAmendment, isUngrantableInstrumentPath, saveScopeAmendmentWork, restoreScopeAmendmentWork, type ScopeAmendmentOutcome, type ProofAmendmentOutcome } from "../../lib/proof-amendment.js";
+import { findTaskShard, parseProofAmendmentProposal, requestProofAmendment, requestScopeAmendment, isUngrantableInstrumentPath, SCOPE_AMENDMENT_RETRYABLE_REFUSALS, saveScopeAmendmentWork, restoreScopeAmendmentWork, type ScopeAmendmentOutcome, type ProofAmendmentOutcome } from "../../lib/proof-amendment.js";
 import { appendLedger, isSpawnInfraBlockedError, LEDGER_COST_TAG_INFRA } from "../../lib/ledger.js";
 import { systemClock } from "../../lib/clock.js";
 import { observeFeedbackInputs, type AdmissionObserver } from "../../lib/contributor-admission.js";
@@ -2483,7 +2483,7 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
   const unfiledScope = opts.taskId === `PR-${prNumber}` && (branchTaskId === undefined || branchTaskId === UNFILED_RUN_SENTINEL);
   const unfiledGrantNow = async () => unfiledScope && prNumber !== undefined
     ? unfiledScopeGrant(deps.ledgerLines ? deps.ledgerLines() : await readFixScopeHistory(deps.ledgerPath, prNumber), { prNumber }) : undefined;
-  const amendScope = async (paths: string[], changedPaths: string[], headSha: string, saveWork = false): Promise<ScopeAmendmentOutcome> => {
+  const amendScope = async (paths: string[], changedPaths: string[], headSha: string, saveWork = false, extra: { retry?: 1 } = {}): Promise<ScopeAmendmentOutcome> => {
     let outcome: ScopeAmendmentOutcome;
     try {
       const body = await (deps.fetchPrBody ?? host.fetchPrBodyViaGh)(opts.prUrl);
@@ -2511,7 +2511,7 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
       }
     }
     if (outcome.kind !== "amendment_merged") deps.log("fix.scope_amendment", { outcome: outcome.kind, ...outcome, paths, head_sha: headSha,
-      pr_number: prNumber, amendment_url: "amendmentUrl" in outcome ? outcome.amendmentUrl : undefined, ...recovery });
+      pr_number: prNumber, amendment_url: "amendmentUrl" in outcome ? outcome.amendmentUrl : undefined, ...recovery, ...extra });
     return outcome;
   };
   const scopeWork = (paths: string[], amendmentNumber: number) => ({ root: opts.config.root,
@@ -4890,6 +4890,7 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
         return { outcome: "stood_down", review, strikes, retriggers, reason, standDownReason: reason, issueUrl };
       }
       let amendment: ScopeAmendmentOutcome;
+      let scopeAsks = 0;
       const readWorkerChanged = (): string[] => {
         const changed = host.workerChangedPaths(hostWorktreeGit(opts.worktreePath, ["status", "--porcelain", "-z", host.GIT_UNTRACKED_FILES_ALL]));
         if (roundStartSha) changed.push(...hostWorktreeGit(opts.worktreePath, ["diff", "--name-only", "-z", roundStartSha, "HEAD"]).split("\0").filter(Boolean));
@@ -4908,11 +4909,20 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
         deps.log("fix.scope_amendment", { outcome: amendment.kind, ...amendment, paths: fixAction.paths, head_sha: priorHeadSha,
           pr_number: prNumber, main_sha: mainTip.status === 0 ? mainTip.stdout.trim() : undefined,
           changed_paths: changed && fixAction.paths.filter((path) => changed.includes(path)), changed_paths_error: "error" in read ? read.error : undefined });
-      } else try {
-        amendment = await amendScope(fixAction.paths, readWorkerChanged(), priorHeadSha, true);
-      } catch (error) {
-        amendment = { kind: "refused", reason: "worker-diff-unreadable", detail: String(error) };
-        deps.log("fix.scope_amendment", { outcome: amendment.kind, ...amendment, paths: fixAction.paths, head_sha: priorHeadSha });
+      } else {
+        const ask = async (extra: { retry?: 1 }): Promise<ScopeAmendmentOutcome> => {
+          scopeAsks++;
+          try {
+            return await amendScope(fixAction.paths, readWorkerChanged(), priorHeadSha, true, extra);
+          } catch (error) {
+            const refused = { kind: "refused" as const, reason: "worker-diff-unreadable", detail: String(error) };
+            deps.log("fix.scope_amendment", { outcome: refused.kind, ...refused, paths: fixAction.paths, head_sha: priorHeadSha, ...extra });
+            return refused;
+          }
+        };
+        amendment = await ask({});
+        // W1-T12543: a refusal a fresh read can clear is asked once more before this round refuses its commit.
+        if (amendment.kind === "refused" && SCOPE_AMENDMENT_RETRYABLE_REFUSALS.has(amendment.reason)) amendment = await ask({ retry: 1 });
       }
       if (amendment.kind !== "refused") {
         logFixDone(undefined, "scope_amendment_pending");
@@ -4921,6 +4931,7 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
       deps.log("fix.commit_refused", { round_id: roundId, strike: attempt, round, head_sha: priorHeadSha,
         reason: `non-test paths need scope (${amendment.reason}: ${amendment.detail})`,
         scope_amendment_detail: `NEEDS_SCOPE ${fixAction.paths.join(",")}`,
+        scope_amendment_refusal: amendment.reason, scope_amendment_refusal_detail: amendment.detail, scope_amendment_asks: scopeAsks,
         fix_outcome: fixOutcome?.kind });
       if (harnessCommitCount > 0) {
         let landing: FixRoundLanding | undefined;
@@ -4939,8 +4950,10 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
           test_files: [], matching_base_files: scopeMainOwned, method: "merge", reason: "scope-main-owned" };
         try {
           const updated = await deps.updateBranch(prNumber);
-          if (updated.ok) deps.log("fix.base_refreshed", refresh);
-          else deps.log("fix.base_refresh_failed", { ...refresh, error: updated.error ?? "no error reported" });
+          if (updated.ok) {
+            deps.log("fix.base_refreshed", { ...refresh, scope_amendment_after_refresh: fixAction.paths });
+            return { outcome: "stood_down", review, strikes, retriggers, reason: "scope_amendment_after_refresh" };
+          } else deps.log("fix.base_refresh_failed", { ...refresh, error: updated.error ?? "no error reported" });
         } catch (error) {
           deps.log("fix.base_refresh_failed", { ...refresh, error: String(error) });
         }
