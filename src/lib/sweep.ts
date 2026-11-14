@@ -17975,6 +17975,7 @@ export function inFlightReviewRunsNow(): Promise<void>[] {
  *  awaited, so the drain cannot be extended by new work. Returns how many were still running at the bound. */
 export async function drainInFlightReviews(opts: {
   boundMs: number; onWait?: (item: RestartDrainInventoryEntry) => void;
+  onAbandon?: (item: RestartDrainInventoryEntry, ageMs: number | null) => void;
   /** W1-T9114: `false` when the next review admitted is a run child, which the restart does not wait for. Default: close. */
   closeRefills?: boolean;
 }): Promise<number> {
@@ -17993,7 +17994,15 @@ export async function drainInFlightReviews(opts: {
     clearTimeout(timer);
   }
   const abandoned = running.filter((review) => !settled.has(review));
-  for (const review of abandoned) inFlightReviewStops.get(review)?.abort();
+  for (const review of abandoned) {
+    const registration = inFlightReviewRuns.get(review);
+    if (registration) {
+      const item = reviewRestartItem(review, registration);
+      const ageMs = systemClock.now() - registration.admittedAtMs;
+      opts.onAbandon?.(item, Number.isFinite(ageMs) && ageMs >= 0 ? ageMs : null);
+    }
+    inFlightReviewStops.get(review)?.abort();
+  }
   return abandoned.length;
 }
 
