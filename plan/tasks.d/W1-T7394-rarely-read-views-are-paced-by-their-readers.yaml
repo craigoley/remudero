@@ -11,8 +11,9 @@
   origin: "operator session 2026-10-09: Azure-host performance work, follow-up to #10411 and #10435"
   plan_refs: [W1-T5050]
   files: [src/lib/read-model-worker.ts, test/rarely-read-views-are-paced-by-their-readers.test.ts]
-  status: queued
-  priority: 4
+  status: blocked
+  retirement: retired  # superseded by W1-T11933 (idle floor 45 s) and W1-T11937 (heavy lane ends after 10 min unread); read-pacing these views now builds more, not less; operator request 2026-11-14
+  superseded_by: W1-T11933
   attempts: 0
   rationale: |
     READ 2026-10-09 at origin/main 500b53676: src/lib/read-model-worker.ts:1623 marks only `now` readPaced. The
@@ -24,8 +25,24 @@
   design: |
     Add `readPaced: true` to the repositories, workstreams and host factories. Keep host's own 60 s re-probe if a
     reader depends on it; nothing else changes.
+    NO-INVARIANTS: closed unbuilt on 2026-11-14; no code changes, so no invariant to hold.
   acceptance:
     - claim: "the repositories, workstreams and host view units stretch their cadence while unread"
       proof: 'grep: test("W1-T7394: repositories, workstreams and host are read-paced" in test/rarely-read-views-are-paced-by-their-readers.test.ts'
   falsifier: |
     Leave the factories unflagged: an unread unit keeps its unstretched due time and the test fails.
+  note: |
+    CLOSED UNBUILT 2026-11-14, superseded by W1-T11933 and W1-T11937. Read-only check on origin/main:
+    - W1-T11933 gives every view that is not read-paced and not a demand view an idle floor: unread for
+      READ_MODEL_READ_HOT_MS (2 min), it waits at least READ_MODEL_IDLE_FLOOR_MS (45 s) between builds
+      (src/lib/read-model-worker.ts `paced`, about :1560-1572). repositories, workstreams and host get it.
+    - read pacing waits cost / READ_MODEL_VIEW_SHARE (0.4) times a stretch of at most
+      READ_MODEL_IDLE_STRETCH_MAX (32). For repositories (costMs 1 in read_model.view_lane_moved rows,
+      2026-11-14T18:37Z) that is 1 / 0.4 x 32 = 80 ms,
+      so this task as filed cuts its unread wait from 45 s to about 80 ms: about 560 times
+      more builds (45,000 / 80).
+    - W1-T11937 ends the heavy view lane after 10 minutes with no read, so workstreams and host gain
+      nothing from a stretch inside that window.
+    - Two tests pin the current rule: test/an-unread-view-backs-off-and-a-read-snaps-it-back.test.ts and
+      test/lib/an-idle-serve-view-rebuilds-at-its-idle-floor.test.ts.
+    Nothing remains to build. Retired on the operator's request, 2026-11-14.
