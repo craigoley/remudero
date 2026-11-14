@@ -13467,6 +13467,16 @@ export function renderClarificationQuestion(
   };
 }
 
+function renderFixProgressEscalation(pr: OpenPrView, reason: string, input: FixProgressInput) {
+  const lastRound = input.rounds.at(-1);
+  const scopeRefusal = lastRound?.dispatchedHead === pr.headSha && lastRound.scopeAmendment?.state === "refused"
+    ? lastRound.refusal : undefined;
+  if (scopeRefusal) reason += ` — last scope amendment refusal: ${scopeRefusal}`;
+  const question = renderClarificationQuestion(pr, reason, pr.strikeHistory ?? []);
+  if (scopeRefusal) question.question = `Last scope amendment refusal: ${scopeRefusal}. ${question.question}`;
+  return { reason, question };
+}
+
 /** Render a {@link ClarificationQuestion} into the §2 QUESTION contract's shape for the durable
  *  backlog. `current_assumption` names what stays true while the PR is unanswered: it never
  *  proceeds on a guess, it stays blocked. */
@@ -14735,6 +14745,13 @@ export function fleetWithheldStageMs(rows: ReadonlyArray<Record<string, unknown>
     held += Math.max(0, Math.min(passes[i + 1]?.at ?? nowMs, nowMs) - at);
   });
   return held;
+}
+
+/** W1-T12542 — the ts of the stage's last ended fix round: its newest `fix.dispatch` or pushed `fix.done` row. */
+function lastFixRoundEndedAt(stageRows: ReadonlyArray<Record<string, unknown>>): string | undefined {
+  return stageRows.filter(row => row.step === "fix.dispatch" || (row.step === "fix.done" && typeof row.pushed_head_sha === "string"))
+    .map(row => String(row.ts)).filter(ts => Number.isFinite(Date.parse(ts)))
+    .sort((a, b) => Date.parse(a) - Date.parse(b)).at(-1);
 }
 
 /** PR 14405 and its follow-up: preservation failures can be revalidated by the same helper.
@@ -19798,9 +19815,12 @@ export async function runSweep(
       (fixSeedRead(ledgerLines, pr, deps.runId)?.kind ?? "live") === "live" &&
       ledgerLines.some(row => row.step === "sweep.disposed" && row.pr_number === pr.prNumber && row.acted === true &&
         row.head_sha === pr.headSha && Date.parse(String(row.ts)) >= since);
-    if ((fields.blocker === "conflict" || fields.blocker === "own-red") &&
-        (repairStarted || roundInFlight || stageRows.some(row => row.step === "fix.dispatch" ||
-          (row.step === "fix.done" && typeof row.pushed_head_sha === "string")) ||
+    // W1-T12542: an ended round silences the backstop only while its quiet time since, less held time, is in bound.
+    const lastRoundEnd = fields.blocker === "conflict" || fields.blocker === "own-red" ? lastFixRoundEndedAt(stageRows) : undefined;
+    const lastRoundEndMs = Date.parse(String(lastRoundEnd));
+    const recentRound = lastRoundEnd !== undefined && (!bound || now - lastRoundEndMs -
+      fleetWithheldStageMs(stageRows.filter(row => Date.parse(String(row.ts)) >= lastRoundEndMs), now) <= bound.minutes * 60_000);
+    if ((fields.blocker === "conflict" || fields.blocker === "own-red") && (repairStarted || roundInFlight || recentRound ||
           (priorBlockerByPr.get(pr.prNumber)?.blocker === fields.blocker &&
             ledgerLines.findLast(row => row.step === "sweep.disposed" && row.pr_number === pr.prNumber)?.head_sha !== pr.headSha))) return;
     const signatureOf = (reason: string): string => reason
@@ -19818,7 +19838,8 @@ export async function runSweep(
     const repeated = [...repeats].filter(([, count]) => count > 1).sort((a, b) => b[1] - a[1])[0];
     const repeatDiagnosis = repeated ? `repeat: ${JSON.stringify(repeated[0])} x${repeated[1]}` : undefined;
     const boundFields = { ...(ownerless ? { owner: "none" } : { bound_minutes: bound?.minutes, bound_kind: bound?.kind }),
-      ...(stageHistoryError ? { stage_history_error: stageHistoryError } : {}) };
+      ...(stageHistoryError ? { stage_history_error: stageHistoryError } : {}),
+      ...(lastRoundEnd === undefined ? {} : { last_fix_round_ended_at: lastRoundEnd }) };
     const recordStuck = (row: Record<string, unknown> & { diagnosis: string }): void => {
       record("pr.stuck", row);
       stuckStages.set(key, row);
@@ -19959,7 +19980,8 @@ export async function runSweep(
     const reason = `PR stage stalled: #${pr.prNumber} ${pr.prUrl} — ${fields.blocker} for ` +
       `${Math.floor(fields.blocker_age_ms / 60_000)} minutes ` +
       `${ownerless ? "(owner: none)" : `(BACKSTOP ${bound?.minutes})`}; since ${fields.blocker_since}; DIAGNOSIS: ${diagnosis}` +
-      (heldMs > 0 ? `; the fleet itself withheld the repair for ${Math.floor(heldMs / 60_000)} of those minutes` : "");
+      (heldMs > 0 ? `; the fleet itself withheld the repair for ${Math.floor(heldMs / 60_000)} of those minutes` : "") +
+      (lastRoundEnd === undefined ? "" : `; the last fix round ended at ${lastRoundEnd}`);
     const row = { pr_number: pr.prNumber, ...fields, diagnosis, ...boundFields,
       held_ms: heldMs, ...escalationFields };
     recordStuck(row);
@@ -23457,8 +23479,9 @@ export async function runSweep(
                   return false;
                 }
                 if (result.verdict === "escalate") {
-                  const reason = `fix progress loop: ${result.loop} — ${result.reason}`;
-                  await deps.escalate(pr, reason, renderClarificationQuestion(pr, reason, pr.strikeHistory ?? []));
+                  const { reason, question } = renderFixProgressEscalation(pr,
+                    `fix progress loop: ${result.loop} — ${result.reason}`, input);
+                  await deps.escalate(pr, reason, question);
                   const contract = pr.taskId !== undefined ? deps.readTaskContractRevision?.(pr.taskId) : undefined;
                   extraDisposedFields = { ...extraDisposedFields, progress_escalated_key: inputKey,
                     ...(contract !== undefined ? { progress_contract_revision: contract } : {}) };
@@ -23712,12 +23735,8 @@ export async function runSweep(
               if (scopeAmendment && ["created", "resumed", "branch_update_requested"].includes(String(scopeAmendment.outcome ?? scopeAmendment.kind)) &&
                   !["merged", "closed"].includes(String(amendmentTerminal?.state))) {
                 const reason = `fix report requests a scope amendment: ${refusedSameRed?.scopeAmendment ?? scopeAmendment.paths}`;
-                const alreadyEscalated = ledgerLines.some((line) =>
-                  line.step === "sweep.disposed" && line.pr_number === pr.prNumber &&
-                  line.head_sha === pr.headSha && JSON.stringify(line.scope_amendment_red_checks) === JSON.stringify(redCheckNames(pr)));
-                if (!alreadyEscalated) {
-                  await deps.escalate(pr, reason, renderClarificationQuestion(pr, reason, pr.strikeHistory ?? []));
-                }
+                // The amendment is already the requested remedy. Keep its contract latch while it is
+                // pending, but ask a person only if the amendment writer ultimately refuses it.
                 extraDisposedFields = { ...extraDisposedFields, scope_amendment_red_checks: redCheckNames(pr) };
                 acted = false;
                 standDownReason = await refreshAmendedContract(ledgerLines.filter((line) => line.step === "sweep.disposed" &&
@@ -24902,6 +24921,11 @@ export async function runSweep(
                   // The remedy WOULD have fired but no dep is wired — say so on the ledger line
                   // rather than escalating as if the ABSENT state were unrecognised.
                   standDownReason = `ABSENT re-push not wired — ${absentDecision.reason}`;
+                }
+                if (pr.progressEscalation?.judged) {
+                  const input = buildFixProgressInput({ taskId: fixLedgerTaskIdFor(pr), prNumber: pr.prNumber,
+                    headSha: pr.headSha, currentRed: redCheckNames(pr), ledger: ledgerLines });
+                  ({ reason, question } = renderFixProgressEscalation(pr, reason, input));
                 }
                 await deps.escalate(pr, reason, question!);
                 contradictoryEscalated = isContradictory;
