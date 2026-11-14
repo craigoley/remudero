@@ -16,7 +16,7 @@ import { describe, test } from "node:test";
 import { originWithClone, type GitRepo } from "#test/helpers/git-repo.js";
 import { runFixRung } from "#test/helpers/run-task-test.js";
 import {
-  CONFLICT_REPAIR_HANDOFF_REASON, buildFixDispatchEnvelope, runFixDispatchChild,
+  CONFLICT_REPAIR_HANDOFF_REASON, buildFixDispatchEnvelope, childMergeFacts, runFixDispatchChild,
   type FixDispatchChildPorts, type OpenPrView, type SweepDeps,
 } from "#test/helpers/sweep-test.js";
 import type { Config } from "#src/lib/config.js";
@@ -205,7 +205,7 @@ function child(evidence: Parameters<typeof buildFixDispatchEnvelope>[1], over: P
     hold: () => undefined,
     readLivePr: async () => { reads.live++; return { state: "OPEN", merged: false, headSha: LIVE_HEAD }; },
     readTask: () => { reads.task++; return { found: true, merged: false, retired: false, contextDigest: "digest-1" }; },
-    readMergeFacts: async () => { reads.mergeFacts++; return { mergeable: "CONFLICTING" }; },
+    readMergeFacts: async () => { reads.mergeFacts++; return { mergeable: "CONFLICTING", headSha: LIVE_HEAD }; },
     log: (step, extra) => { rows.push({ step, ...extra }); },
     claimFixAdmission: () => ({ admitted: true }),
     dispatcher: () => ({ dispatchFix: async (pr, ev) => { calls.push({ pr, evidence: ev }); } }),
@@ -227,7 +227,11 @@ describe("a conflicted fix child adopts a moved head that still reads CONFLICTIN
     assert.equal(adopted.reads.live, 2, "the live head is read again after the merge facts");
 
     for (const [name, readMergeFacts] of [
-      ["a mergeable head", async () => ({ mergeable: "MERGEABLE" })],
+      ["a mergeable head", async () => ({ mergeable: "MERGEABLE", headSha: LIVE_HEAD })],
+      ["cached conflict facts from the envelope head", async () => ({ mergeable: "CONFLICTING", headSha: FIX_HEAD })],
+      ["conflict facts from another head", async () => ({ mergeable: "CONFLICTING", headSha: "another-head" })],
+      ["conflict facts without a head", async () => ({ mergeable: "CONFLICTING" })],
+      ["conflict facts with an empty head", async () => ({ mergeable: "CONFLICTING", headSha: "" })],
       ["an unknown merge state", async () => ({})],
       ["an unreadable merge-facts read", async () => { throw new Error("gh down"); }],
     ] as const) {
@@ -244,6 +248,49 @@ describe("a conflicted fix child adopts a moved head that still reads CONFLICTIN
     });
     await assert.rejects(movedAgain.run(), /head moved/, "a head that moves again under the read is refused");
     assert.equal(movedAgain.calls.length, 0);
+  });
+
+  test("W1-T12545 criterion 4: REST conflict facts retain their head and reject a stale cached response", async () => {
+    for (const [name, response, dispatches] of [
+      ["current conflicting head", { head: { sha: LIVE_HEAD }, mergeable: false }, 1],
+      ["current dirty head", { head: { sha: LIVE_HEAD }, mergeable_state: "dirty" }, 1],
+      ["cached conflicting head", { head: { sha: FIX_HEAD }, mergeable: false }, 0],
+      ["cached dirty head", { head: { sha: FIX_HEAD }, mergeable_state: "dirty" }, 0],
+      ["missing head", { mergeable: false }, 0],
+      ["empty head", { head: { sha: "" }, mergeable: false }, 0],
+      ["malformed head", { head: { sha: 123 }, mergeable: false }, 0],
+      ["mergeable live head", { head: { sha: LIVE_HEAD }, mergeable: true }, 0],
+      ["unknown live head", { head: { sha: LIVE_HEAD }, mergeable: null }, 0],
+      ["unreadable response", undefined, 0],
+    ] as const) {
+      const requests: unknown[] = [];
+      const h = child({ unmetCriteria: [], mergeConflict: CONFLICT }, {
+        readMergeFacts: (url) => childMergeFacts(url, async (args, _exec, _rateLimit, options) => {
+          requests.push({ args, options });
+          return response;
+        }),
+      });
+      if (dispatches) await h.run();
+      else await assert.rejects(h.run(), /head moved/, name);
+      assert.deepEqual(requests, [{ args: ["api", "repos/acme/remudero/pulls/18305"], options: { fresh: true } }], name);
+      assert.equal(h.calls.length, dispatches, name);
+      assert.equal(steps(h.rows, "sweep.fix.child_head_adopted").length, dispatches, name);
+      if (dispatches) {
+        assert.equal(h.reads.live, 2, name);
+        assert.equal(h.calls[0]!.pr.headSha, LIVE_HEAD, name);
+        assert.deepEqual(h.calls[0]!.evidence.mergeConflict, CONFLICT, name);
+      }
+    }
+
+    const down = child({ unmetCriteria: [], mergeConflict: CONFLICT }, {
+      readMergeFacts: (url) => childMergeFacts(url, async () => { throw new Error("REST unavailable"); }),
+    });
+    await assert.rejects(down.run(), /head moved/);
+    assert.equal(down.calls.length, 0);
+    assert.equal(steps(down.rows, "sweep.fix.child_head_adopted").length, 0);
+    assert.deepEqual(await childMergeFacts("unreadable PR URL", async () => {
+      assert.fail("an unresolved PR must not query REST");
+    }), {});
   });
 
   test("W1-T12545 criterion 5: a child without conflict evidence refuses a moved head; the other checks run at the live head", async () => {

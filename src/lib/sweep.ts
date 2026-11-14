@@ -68,6 +68,7 @@ import {
   disarmAutoMerge,
   logArmAttribution,
   mergeDirectViaRestAsync,
+  mergeTargetFromPrUrl,
   assertOperatorMergeUnheld,
   readHeadShaRest as readArmHeadShaRest,
   readArmTimeline,
@@ -18288,8 +18289,8 @@ export interface FixDispatchChildPorts {
   log: (step: string, extra?: Record<string, unknown>) => void;
   /** The phase sink: the owned run's `status.json`, so a fix's admission, worker and CI wait stay visible to the adopting daemon. */
   onPhase?: (phase: string) => void;
-  /** W1-T12545: the PR's merge facts now. Absent, the child reads them through the daemon's async merge-facts reader. */
-  readMergeFacts?: (prUrl: string) => Promise<{ mergeable?: string }>;
+  /** W1-T12545: merge facts with their response's head SHA. Absent, the child reads fresh REST facts. */
+  readMergeFacts?: (prUrl: string) => Promise<{ mergeable?: string; headSha?: string }>;
 }
 
 export type FixDispatchRecheckPorts = Pick<FixDispatchChildPorts, "readLivePr" | "readTask" | "hold" | "readMergeFacts">;
@@ -18297,16 +18298,30 @@ export type FixDispatchRecheckPorts = Pick<FixDispatchChildPorts, "readLivePr" |
 /** W1-T12545: the envelope at the live head, only for a conflicted decision whose PR still reads CONFLICTING there. */
 export async function conflictedChildHeadAdoption(
   envelope: FixDispatchEnvelope, live: { state: string; merged?: boolean; headSha?: string },
-  readMergeFacts: (prUrl: string) => Promise<{ mergeable?: string }>,
+  readMergeFacts: NonNullable<FixDispatchChildPorts["readMergeFacts"]>,
 ): Promise<FixDispatchEnvelope | undefined> {
   if (envelope.evidence.mergeConflict === undefined || live.merged === true || live.state.toLowerCase() !== "open" ||
-      live.headSha === undefined || live.headSha === envelope.pr.headSha) return undefined;
-  const facts = await readMergeFacts(envelope.pr.prUrl).catch((error: unknown) => ({ mergeable: undefined, unreadable: String(error) }));
-  if (facts.mergeable !== "CONFLICTING") return undefined;
+      !live.headSha || live.headSha === envelope.pr.headSha) return undefined;
+  const facts = await readMergeFacts(envelope.pr.prUrl).catch((error: unknown) => ({ mergeable: undefined, headSha: undefined, unreadable: String(error) }));
+  if (facts.mergeable !== "CONFLICTING" || facts.headSha !== live.headSha) return undefined;
   return { ...envelope, pr: { ...envelope.pr, headSha: live.headSha } };
 }
 
-const childMergeFacts = async (prUrl: string): Promise<{ mergeable?: string }> => (await realArmDepsAsync().readMergeFacts?.(prUrl)) ?? {};
+export async function childMergeFacts(
+  prUrl: string,
+  readJson: typeof ghJsonAsync = ghJsonAsync,
+): Promise<{ mergeable?: string; headSha?: string }> {
+  const target = mergeTargetFromPrUrl(prUrl);
+  if (!target) return {};
+  const pr = await readJson(["api", `repos/${target.owner}/${target.repo}/pulls/${target.prNumber}`], undefined, undefined, { fresh: true }) as {
+    head?: { sha?: unknown }; mergeable?: unknown; mergeable_state?: unknown;
+  } | undefined;
+  return {
+    headSha: typeof pr?.head?.sha === "string" ? pr.head.sha : undefined,
+    mergeable: pr?.mergeable === false || pr?.mergeable_state === "dirty" ? "CONFLICTING" :
+      pr?.mergeable === true ? "MERGEABLE" : "UNKNOWN",
+  };
+}
 
 /**
  * W1-T9114 — THE CHILD'S RECHECK, run before it takes its own claim: the fleet hold, the PR's current state and head, and the
