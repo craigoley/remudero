@@ -10,6 +10,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { setImmediate as flushMicrotasks } from "node:timers/promises";
 import { after, test } from "node:test";
 
 import { runDaemon, type DaemonDeps } from "#src/lib/daemon.js";
@@ -22,6 +23,7 @@ import { MAX_RETAINED_LINES_PER_STEP } from "#src/lib/ledger.js";
 import { loadPlan, type Plan, type Task } from "#src/lib/plan.js";
 import { QUEUE_JUDGE_SCORECARD_STEP, queueJudgeAvailability } from "#src/lib/queue-judge-gardener.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import type { RunResult } from "#src/run-task.js";
 
 const HOUR = 3_600_000;
 const NOW = Date.parse("2026-11-13T12:00:00.000Z");
@@ -223,4 +225,52 @@ test("W1-T12551 criterion 5: the daemon gives the selector the judge's staleness
 
   const starts = machineShareStarts(ledger.map((line) => JSON.parse(line) as Record<string, unknown>), plan.byId, NOW);
   assert.deepEqual(starts, [{ taskId: "W1-T7", authorClass: undefined }, { taskId: "W1-T8", authorClass: undefined }]);
+});
+
+test("W1-T12551 criterion 5, with W1-T12551 criterion 3 on refill: a lane refill counts the starts this pass made", async () => {
+  // Two operator starts in the trailing day and a stale judge: the tick moves W1-T40 up and starts it with W1-T1.
+  // That makes 1 machine start of 4, which is the share, so the refill must keep today's order and start W1-T2.
+  const plan = planOf(shard("W1-T1"), shard("W1-T2"), shard("W1-T40", { machine: true, priority: 3 }), shard("W1-T50", { machine: true, priority: 3 }));
+  const lines = [
+    { ts: iso(NOW - 30 * HOUR), step: QUEUE_JUDGE_SCORECARD_STEP, asked: true },
+    { ts: iso(NOW - 3 * HOUR), step: "run.start", task_id: "W1-T7" },
+    { ts: iso(NOW - 2 * HOUR), step: "run.start", task_id: "W1-T8" },
+  ].map((row) => JSON.stringify(row));
+  const releases = new Map<string, (r: RunResult) => void>();
+  const spawned: string[] = [];
+  const rows: Array<{ step: string; extra: Record<string, unknown> }> = [];
+  const merged = new Set<string>();
+  let stopping = false;
+  const result = (id: string): RunResult => ({ taskId: id, runId: `${id}-run`, merged: true, costUsd: 0, verdict: "merged" }) as RunResult;
+  const run = runDaemon(plan, {
+    refreshMerged: () => (id: string) => merged.has(id),
+    runOne: (id) => {
+      spawned.push(id);
+      return stopping ? Promise.resolve(result(id)) : new Promise<RunResult>((done) => releases.set(id, done));
+    },
+    sleep: async () => {},
+    checkStop: () => (stopping ? "test stop" : undefined),
+    log: (step, extra = {}) => rows.push({ step, extra }),
+    now: () => new Date(NOW),
+    readLedgerLines: () => lines,
+  } as DaemonDeps, { headroomEnabled: false, laneCount: 2, max: 3 });
+  const settle = async (id: string) => {
+    merged.add(id);
+    releases.get(id)?.(result(id));
+    for (let i = 0; i < 10; i++) await flushMicrotasks();
+  };
+  try {
+    for (let i = 0; i < 5; i++) await flushMicrotasks();
+    assert.deepEqual(spawned, ["W1-T40", "W1-T1"], "the tick moves the machine task up and fills both lanes");
+    await settle("W1-T1");
+    assert.deepEqual(spawned, ["W1-T40", "W1-T1", "W1-T2"], "at the share, the refill starts today's next task, not W1-T50");
+    const moves = rows.filter((r) => r.step === MACHINE_SHARE_STEP).map((r) => r.extra);
+    assert.deepEqual(moves, [{
+      task_id: "W1-T40", share: MACHINE_DISPATCH_SHARE, machine_starts: 0, starts: 2, queue_judge_stale_ms: 30 * HOUR,
+    }], "only the tick's move is logged, with the counts it was decided on");
+  } finally {
+    stopping = true;
+    for (const [id, done] of releases) done(result(id));
+    await run;
+  }
 });

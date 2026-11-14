@@ -85,6 +85,7 @@ import {
   machineShareStarts,
   MACHINE_SHARE_STEP,
   type MachineShareInput,
+  type MachineShareStart,
 } from "./drain.js";
 import { queueJudgeAvailability } from "./queue-judge-gardener.js";
 import { preDispatchContractRevision } from "./dispatch-repair.js";
@@ -5182,12 +5183,13 @@ export async function runDaemon(
   let lastOverlapShadowSignature = "[]";
   let lastSecondaryCatalogShadowSignature: string | undefined;
   let lastMachineShareSignature: string | undefined;
-  const machineShareFor = (plan: Plan, lines: readonly string[] | undefined): MachineShareInput | undefined => {
+  const machineShareFor = (plan: Plan, lines: readonly string[] | undefined, startedSince: readonly MachineShareStart[] = []): MachineShareInput | undefined => {
     if (lines === undefined) return undefined;
     const nowMs = daemonClock.now();
     const rows = restartCycleLedgerRows(lines.filter((line) => line.includes("run.start") || line.includes("queue_judge."))).rows;
+    const starts = machineShareStarts(rows, plan.byId, nowMs);
     return {
-      queueJudgeStaleMs: queueJudgeAvailability(rows, nowMs).staleMs, starts: machineShareStarts(rows, plan.byId, nowMs),
+      queueJudgeStaleMs: queueJudgeAvailability(rows, nowMs).staleMs, starts: starts && [...starts, ...startedSince],
       onMoved: (task, move) => {
         const signature = `${task.id}:${move.machine_starts}:${move.starts}`;
         if (signature === lastMachineShareSignature) return;
@@ -8252,6 +8254,7 @@ export async function runDaemon(
     // Prepared before admission; not an accepted attempt or an in-flight ownership slot.
     const preparedStartTimes = new Map<string, number>();
     const passIds = new Set<string>();
+    const phaseStarts: MachineShareStart[] = [];
     const inFlightTasks = new Set<Task>();
     const refillAdmissions = new WeakMap<Task, {
       snapshot: { plan: Plan; isMerged: MergedSet }; finishedTaskId: string;
@@ -8410,6 +8413,7 @@ export async function runDaemon(
             ...dispatchOpts,
             ...runBranchDispatchOpts(runBranchState, planOnlyReceiptsThisTick, log, reportedRunBranchReleases),
             dispatchValueContext: deps.buildDispatchValueContext?.(snapshot.plan, snapshot.isMerged),
+            machineShare: machineShareFor(snapshot.plan, tickLedgerLines, phaseStarts),
             // Re-read at each refill: a lane that settled since the tick began may have written or spent a receipt.
             resumableTaskIds: new Set(resumableHandoffs.keys()),
             excludeIds: new Set([...(dispatchOpts.excludeIds ?? []), ...pendingMergedCredit, ...passIds,
@@ -8606,6 +8610,7 @@ export async function runDaemon(
       laneStartedAtMs.set(task.id, startedAtMs);
       laneCpuTransition(() => laneCpuBuilds.add(task.id), task.id);
       if (poolControl.occupied?.has(task)) return;
+      phaseStarts.push({ taskId: task.id, authorClass: task.author_class });
       attempted.push(task.id);
       noteBootFirstDispatch({ startedAtMs: daemonClock.now(), admitted: admitted.length });
       if (forcedKick?.taskId === task.id) {
