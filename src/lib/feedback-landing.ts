@@ -2449,6 +2449,8 @@ export interface TaskFileRefusal {
   mainRed?: boolean;
   mainRedProbeError?: string;
   timedOut?: true;
+  reserved_id?: string;
+  id_release?: SetAsideIdRelease["id_release"];
 }
 
 export interface TaskFilesLandingResult {
@@ -2581,11 +2583,15 @@ const greenTaskFileTrees = new Set<string>();
 
 type SetAsideIdRelease = { reserved_id?: string; id_release: ReservationReleaseOutcome | "kept_other_holder" | "kept_main_holds_path" | "no_id" };
 
+function taskIdOfTaskFileText(text: string): string | undefined {
+  return /^\s*(?:-\s+)?id:\s*["']?(W1-T\d+)["']?\s*$/m.exec(text)?.[1];
+}
+
 /** W1-T12410: free the id of a new task file the landing sets aside. Only a reservation the landing branch holds goes. */
 async function releaseSetAsideTaskIdAsync(
   gitAsync: GitExecAsync, text: string, landingBranch: string, reason: string, lane: string, log: LandTaskFilesOpts["log"],
 ): Promise<SetAsideIdRelease> {
-  const taskId = /^\s*(?:-\s+)?id:\s*["']?(W1-T\d+)["']?\s*$/m.exec(text)?.[1];
+  const taskId = taskIdOfTaskFileText(text);
   if (taskId === undefined) return { id_release: "no_id" };
   const run = async (args: string[]) => {
     try {
@@ -2659,6 +2665,18 @@ function* taskFilesLandingSteps(
         return null; // main does not hold the path
       }
     };
+    /** Whether a file on main other than `relPath` holds the id that `text` files. An unreadable search says yes. */
+    const otherMainFileHoldsId = function* (text: string, relPath: string): Generator<LandingAsk, boolean, AskReply> {
+      const id = taskIdOfTaskFileText(text);
+      if (id === undefined) return true;
+      try {
+        const hits = yield* net.git(["grep", "-l", "-E", `^[[:space:]]*(-[[:space:]]+)?id:[[:space:]]*["']?${id}["']?[[:space:]]*$`, yield* freshMain(), "--", relative(root, resolveRepoLayout(root).planDir)]);
+        return hits.split("\n").map((l) => l.trim()).filter((l) => l !== "").some((l) => l.slice(l.indexOf(":") + 1) !== relPath);
+      } catch (e) {
+        // git grep exits 1 for no match; any other failure is unreadable, and unreadable keeps the id.
+        return (e as { code?: unknown; status?: unknown }).code !== 1 && (e as { status?: unknown }).status !== 1;
+      }
+    };
     const treeOf = function* (files: ReadonlyArray<{ relPath: string; blob: string }>): Generator<LandingAsk, string, AskReply> {
       yield* net.git(["read-tree", yield* freshMain()], { env });
       for (const f of files) yield* net.git(["update-index", "--add", "--cacheinfo", `100644,${f.blob},${f.relPath}`], { env });
@@ -2721,19 +2739,29 @@ function* taskFilesLandingSteps(
     let n = 0;
     for (const input of inputs) {
       const { relPath, content, claim, proof } = input;
-      const refuse = (reason: string, extra: Partial<TaskFileRefusal> = {}): void => void result.refused.push({ path: relPath, reason, ...extra });
+      let baseBlob: string | null | undefined;
+      const refuse = function* (reason: string, extra: Partial<TaskFileRefusal> = {}, mainHoldsBytes = false): Generator<LandingAsk, void, AskReply> {
+        let idRelease: SetAsideIdRelease | undefined;
+        if ((baseBlob === null || mainHoldsBytes) && input.newFile === true && extra.timedOut !== true && !existsSync(join(taskFilesPendingRoot(stateRoot), relPath))) {
+          idRelease = JSON.parse((yield {
+            run: () => { throw new Error("the task-file landing releases an id only under the async driver"); },
+            runAsync: async () => JSON.stringify(await releaseSetAsideTaskIdAsync(opts.gitAsync!, content, kind.branch, reason, lane, opts.log)),
+          }) as string) as SetAsideIdRelease;
+        }
+        result.refused.push({ path: relPath, reason, ...extra, ...idRelease });
+      };
       if (!relPath.startsWith(`${shardDir}/`) || !/\.ya?ml$/.test(relPath) || relPath.includes("..")) {
-        refuse(`${relPath} is not a task file under ${shardDir}`);
+        yield* refuse(`${relPath} is not a task file under ${shardDir}`);
         continue;
       }
-      const baseBlob = yield* mainBlobOf(relPath);
+      baseBlob = yield* mainBlobOf(relPath);
       if (baseBlob === null && !input.newFile) {
-        refuse(`origin/main does not hold ${relPath}; this landing takes only an edit of a task file that exists`);
+        yield* refuse(`origin/main does not hold ${relPath}; this landing takes only an edit of a task file that exists`);
         continue;
       }
       const stagedAbs = join(taskFilesPendingRoot(stateRoot), relPath);
       if (existsSync(stagedAbs)) {
-        if (readFileSync(stagedAbs, "utf8") !== content) refuse(`another edit of ${relPath} waits for its landing`);
+        if (readFileSync(stagedAbs, "utf8") !== content) yield* refuse(`another edit of ${relPath} waits for its landing`);
         continue; // the same bytes wait already
       }
       const refusedAbs = join(taskFilesRefusedRoot(stateRoot), relPath);
@@ -2744,23 +2772,28 @@ function* taskFilesLandingSteps(
         } catch {
           // The bytes alone prove the earlier refusal; only its cause is unreadable.
         }
-        refuse(`the same bytes were set aside before: ${why}`);
+        yield* refuse(`the same bytes were set aside before: ${why}`);
         continue;
       }
       const tmpFile = join(scratch, `input-${n++}`);
       writeFileSync(tmpFile, content);
       const blob = (yield* net.git(["hash-object", "-w", tmpFile], { env })).trim();
       if (blob === baseBlob) {
-        refuse(`origin/main already holds these bytes at ${relPath}`);
+        // W1-T12456: main already carries the id in this very file, so its reservation is dead weight —
+        // unless a different file on main also holds the id, which is then not ours to free.
+        yield* refuse(`origin/main already holds these bytes at ${relPath}`, {}, !(yield* otherMainFileHoldsId(content, relPath)));
         continue;
       }
       const verdict = yield* verdictOf([{ relPath, blob, claim, proof }]);
       if (!verdict.ok) {
-        refuse(refusalText(verdict.failures), { failures: verdict.failures, mainSha: yield* freshMain(), ...(yield* mainRedOf(verdict.failures)) });
+        yield* refuse(refusalText(verdict.failures), {
+          failures: verdict.failures, mainSha: yield* freshMain(), ...(yield* mainRedOf(verdict.failures)),
+          ...(verdict.timedOut === undefined ? {} : { timedOut: true as const }),
+        });
         continue;
       }
       if (verdict.timedOut !== undefined) {
-        refuse("the plan preflight ran out of its budget, so the file was not staged", { failures: verdict.timedOut, timedOut: true });
+        yield* refuse("the plan preflight ran out of its budget, so the file was not staged", { failures: verdict.timedOut, timedOut: true });
         continue;
       }
       writeStagedTaskFile(stateRoot, relPath, content, { baseBlob, claim, proof });
