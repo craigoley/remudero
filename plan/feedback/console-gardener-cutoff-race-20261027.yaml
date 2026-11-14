@@ -42,10 +42,11 @@ raw: "Agent technical finding under the current human-approved Console
 attachments:
   - plan/feedback/attachments/console-gardener-cutoff-race-20261027/cases.json
 origin: cli
-status: new
+status: rejected
 reply_to: null
 proposal_pr: null
 summary: null
 expansion: null
 submission_key: console-followup:gardener-cutoff-race:20261027
 thread_id: null
+answered_by: null
