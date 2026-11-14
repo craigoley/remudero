@@ -47,18 +47,17 @@ import { mechanicalAskPurpose, inboxMechanicalTaskDigest, inboxMechanicalProposa
 import { inboxDismissalReceipt } from "./inbox-dismissal-audit.js";
 
 /**
- * Deterministic ratification core (MASTER-PLAN P25(i), W1-T110; docs/forensics/inbox.md).
- * Only READY surfaces to avoid approval fatigue [research: hitl-approval-fatigue-2026].
- * {@link runDraftRung} uses an LLM; {@link classifyProposal} is pure. READY requires merged deps,
- * grep-true main anchors, lint-clean fragments and no open conflicts. Unfired triggers take precedence:
- * DEFERRED_WITH_TRIGGER (P19/WS-2).
+ * Ratification core (MASTER-PLAN P25(i), W1-T110; docs/forensics/inbox.md): only READY surfaces
+ * [research: hitl-approval-fatigue-2026]. runDraftRung uses an LLM; classifyProposal is pure.
+ * READY needs merged deps, grep-true main anchors, lint-clean fragments and no open conflicts;
+ * unfired triggers take precedence as DEFERRED_WITH_TRIGGER (P19/WS-2).
  */
 
 // ── Evidence anchors + triggers (proposal-level facts, supplied by the registry) ──────────
 
-/** One fact a proposal's readiness cites — "still true on main" is a grep, not a vibe. */
+/** Readiness evidence checked against main. */
 export interface EvidenceAnchor {
-  /** Human-readable name of what this anchor asserts (rendered in a not-ready reason). */
+  /** Assertion rendered in not-ready reasons. */
   description: string;
   /** Literal/regex pattern `git grep` checks for on the target ref. */
   pattern: string;
@@ -72,8 +71,7 @@ export interface ProposalTrigger {
   fired: boolean;
 }
 
-/** One round of `rmd reframe` feedback, captured verbatim (P25 iii, W1-T111). `retracted` (W1-T194) is set only by an
- *  explicit `--supersedes`, never inferred from recency, and never deletes. */
+/** Verbatim reframe feedback (P25 iii, W1-T111); only explicit --supersedes retracts, never deletes (W1-T194). */
 export interface ReframeRecord {
   feedback: string;
   retracted?: boolean;
@@ -97,22 +95,17 @@ export interface Proposal {
   trigger?: ProposalTrigger;
   /** Ids of OTHER proposals this one conflicts with, when they are also open. */
   conflictsWith?: string[];
-  /** Every `rmd reframe` round this proposal has been through, oldest first — "the reframe history rides the proposal
-   *  until resolution" (P25 iii design). Empty/absent for a proposal that has never been reframed. */
+  /** Oldest-first reframe history, retained until resolution (P25 iii); empty/absent before any reframe. */
   reframeHistory?: ReframeRecord[];
-  /** W1-T2451: the board item this proposal was minted from, absent for every other family. It is what makes "the PR
-   *  this is ABOUT has resolved" expressible, since anchors here are always []. */
+  /** W1-T2451: board referent for retirement with empty anchors; absent outside the board-review family. */
   originatingItemId?: string;
-  /** W1-T2702: present ONLY on a proposal {@link stageBundleProposals} minted from an imported knowledge bundle's
-   *  `policy_proposals` row — absent for every other proposal family. Provenance for the receiving operator: which
-   *  bundle this row travelled in, and the pin they verified it against before staging. */
+  /** W1-T2702: imported policy_proposals provenance and verified pin; only stageBundleProposals sets this. */
   source?: BundleProposalSource;
   /** Keep this ratified proposal in the active registry until its source reconciler retires it. */
   retainAfterRatification?: boolean;
   /** Present only for a structured lifecycle proposal whose materialization is owned by `rmd approve`. */
   lifecycleAction?: SkillLifecycleAction;
-  /** W1-T4338: present only on a skill-workshop draft. Approval writes this file on its own branch instead of filing
-   *  a task fragment, so the path and body come from the staged draft, never a re-parse of `summary`. */
+  /** W1-T4338: skill-workshop approval writes the staged path/body on its own branch; never re-parses summary. */
   skillFile?: SkillFilePayload;
   skillFileStagedAt?: string;
   skillEval?: SkillEvalRecord;
@@ -132,12 +125,10 @@ export interface SkillEvalRecord {
 }
 
 // ── BUNDLE-SOURCED POLICY PROPOSALS (W1-T2702) ────────────────────────────────────────────────
-// Bundles transfer knowledge, never authority. Stage one Proposal per exported policy row through
-// updateProposalRegistry, the shared sanctioned writer. Only `rmd approve` may initiate the policy
-// plan PR; the receiving operator reviews and merges it (Rule 15/Law 5).
+// Bundles transfer knowledge, never authority: updateProposalRegistry stages each row; only
+// `rmd approve` initiates its policy plan PR for operator review/merge (Rule 15/Law 5).
 
-/** Structural copy of bundle.ts's `PolicyProposalRow` avoids a reverse dependency from this foundational
- *  module; `bundleImportCommand` passes those rows directly without conversion. */
+/** Structural PolicyProposalRow copy avoids a bundle.ts cycle; bundleImportCommand passes rows unchanged. */
 export interface BundlePolicyProposalRow {
   path: string;
   origin: string;
@@ -147,8 +138,7 @@ export interface BundlePolicyProposalRow {
   rowHash: string;
 }
 
-/** Provenance for {@link Proposal.source}; `rowHash` also keys {@link bundlePolicyProposalId},
- *  so re-importing an unchanged row cannot mint a duplicate. */
+/** Proposal.source provenance; rowHash keys bundlePolicyProposalId to deduplicate unchanged imports. */
 export interface BundleProposalSource {
   kind: "bundle";
   sourceRepo: string;
@@ -158,8 +148,7 @@ export interface BundleProposalSource {
   rowHash: string;
 }
 
-/** A structured action for an approved skill's negative lifecycle. Staging this value is still
- *  read-only with respect to `.claude/skills/`; only `rmd approve` may materialize it. */
+/** Skill retirement: staging cannot write .claude/skills/; only `rmd approve` may materialize it. */
 export interface SkillLifecycleAction {
   kind: "skill-retirement";
   skillName: string;
@@ -176,8 +165,7 @@ export interface SkillFilePayload {
   markdown: string;
 }
 
-/** The one repo-relative path an approved skill is written to, or null for a name that is not a single safe path
- *  segment — a staged name is machine-derived, so it is checked here rather than trusted into a filesystem path. */
+/** Approved repo-relative skill path, or null for an unsafe segment; machine-derived names remain untrusted. */
 export function approvedSkillRelPath(name: string): string | null {
   return /^[a-z0-9][a-z0-9-]*$/.test(name) ? `.claude/skills/${name}/SKILL.md` : null;
 }
@@ -187,8 +175,7 @@ export function bundlePolicyProposalId(rowHash: string): string {
   return `bundle-policy:${rowHash.slice(0, 16)}`;
 }
 
-/** Render one staged proposal's `summary` from its row — the rationale, value, bounds and origin
- *  the operator needs to ratify or reject it, all carried verbatim from the exporting repo. */
+/** Summary carries the exporting repo's rationale, value, bounds and origin verbatim for operator ratification. */
 function renderBundlePolicyProposalSummary(row: BundlePolicyProposalRow, source: { sourceRepo: string; sourceSha: string }): string {
   const boundsLine = row.bounds ? `\nBounds: [${row.bounds.min}, ${row.bounds.max}]` : "";
   const rationaleLine = row.rationale ? `\nRationale (from the exporting repo): ${row.rationale}` : "";
@@ -208,11 +195,9 @@ export interface StageBundleProposalsResult {
 }
 
 /**
- * W1-T2702(ii): `rmd bundle import` stages proposals through {@link updateProposalRegistry} only;
- * NEVER writes `plan/policy.yaml` or any other policy file.
- * Idempotent by {@link bundlePolicyProposalId}: existing row hashes enter `alreadyStaged`.
- * Changed value/bounds/origin/rationale yields a new id requiring fresh operator ratification.
- * Prior proposals for that path remain for explicit reframe/conflict reconciliation, never silent retirement.
+ * W1-T2702(ii): bundle import stages via updateProposalRegistry, NEVER writes policy files.
+ * bundlePolicyProposalId deduplicates row hashes into alreadyStaged; changed rows need fresh ratification.
+ * Prior proposals remain for explicit reframe/conflict reconciliation, never silent retirement.
  */
 export function stageBundleProposals(
   registryPath: string,
@@ -253,9 +238,7 @@ export function stageBundleProposals(
 }
 
 // ── The understood-request handoff (W1-T2500) ──────────────────────────────────────────────
-//
-// `interpretReply` (reply-interpreter.ts) reaches `status: "understood"` and stops there by design. This mints a
-// {@link Proposal} for the same tiering and does nothing else: no task filed, nothing auto-approved, nothing paced.
+// interpretReply stops at "understood"; mint only a Proposal for tiering, never file, auto-approve or pace.
 
 /** A fully clarified request and its source thread for {@link proposalFromUnderstoodRequest}. */
 export interface UnderstoodRequest {
@@ -270,8 +253,7 @@ export function understoodRequestProposalId(threadId: string): string {
   return `thread:${threadId}`;
 }
 
-/** Mint the {@link Proposal} an understood thread hands to the tiering, and nothing else. `undefined` for
- *  `"clarifying"` or `"exhausted"`, so such a thread emits nothing and runs nothing. */
+/** Mint only an understood thread's Proposal; clarifying/exhausted threads return undefined and run nothing. */
 export function proposalFromUnderstoodRequest(request: UnderstoodRequest, interpretation: InterpretReplyResult): Proposal | undefined {
   if (interpretation.status !== "understood") return undefined;
   return {
@@ -290,12 +272,10 @@ export interface BoardReferentState {
   unhandledEscalations?: number;
 }
 
-/** One batched referent read. A missing id is individually unreadable; a failed read marks all unverified.
- *  Neither retires a proposal: preserve its other classification (W1-T130, cannot-observe means WAIT). */
+/** Missing ids or failed batch reads never retire proposals: cannot-observe means WAIT (W1-T130). */
 export type BoardReferentRead = { kind: "ok"; states: ReadonlyMap<string, BoardReferentState> } | { kind: "unreadable" };
 
-/** True once a board-review finding's referent has left the state that produced it: no longer open, or escalations
- *  handled. Kind is read off the proposal's own id prefix. */
+/** Board-review referent resolved: no longer open or escalation handled; kind comes from the proposal id prefix. */
 function boardReferentResolved(proposal: Proposal, state: BoardReferentState): boolean {
   if (state.status !== "open") return true;
   return proposal.id.startsWith("board-review:escalation:") && state.unhandledEscalations === 0;
@@ -303,9 +283,7 @@ function boardReferentResolved(proposal: Proposal, state: BoardReferentState): b
 
 type BoardReferentLookup = { kind: "live" } | { kind: "resolved"; referentId: string } | { kind: "unreadable" };
 
-/** W1-T2460: parse the referent out of a legacy board-review id, which board-review.ts has always spelled
- *  `board-review:<kind>:<id>`. Parse-at-read, not a registry backfill: pure and reversible. FAILS SAFE — any other
- *  shape returns `undefined` and the proposal stays `"live"`. */
+/** W1-T2460: parse legacy board-review:<kind>:<id> at read, never backfill; unknown shapes stay live. */
 function deriveLegacyReferent(proposalId: string): string | undefined {
   return /^board-review:(?:stale|escalation):(.+)$/.exec(proposalId)?.[1];
 }
@@ -333,8 +311,7 @@ export function supersedingProposalId(proposalId: string): string | undefined {
   return /^(proof-debt:[A-Za-z0-9][A-Za-z0-9-]*):\d+$/.exec(proposalId)?.[1];
 }
 
-/** Whether a task-referent proposal's own task has merged. `undefined` means NO OPINION — the id
- *  carries no task, or the plan does not hold it — never a false retirement. */
+/** Task merged? undefined means no task/plan entry, never authority to retire. */
 function taskReferentMerged(proposal: Proposal, ctx: ReadinessContext): string | undefined {
   const taskId = deriveTaskReferent(proposal.id);
   if (taskId === undefined) return undefined;
@@ -345,8 +322,7 @@ function taskReferentMerged(proposal: Proposal, ctx: ReadinessContext): string |
   return ctx.isMerged(task) ? taskId : undefined;
 }
 
-/** Resolve ONE proposal's referent against the batch read, never issuing its own. A proposal neither source names a
- *  referent for is simply `"live"`: this mechanism does not apply to it. */
+/** Resolve against the shared batch only; proposals with no referent stay live. */
 function resolveBoardReferent(proposal: Proposal, read: BoardReferentRead | undefined): BoardReferentLookup {
   const referentId = proposal.originatingItemId ?? deriveLegacyReferent(proposal.id);
   if (!referentId) return { kind: "live" };
@@ -360,8 +336,7 @@ function resolveBoardReferent(proposal: Proposal, read: BoardReferentRead | unde
 
 // ── Drafted candidate (the LLM's output — a value from here on, never re-invoked) ─────────
 
-/** The Architect's draft for one proposal: a `plan/tasks.yaml` fragment + the MASTER-PLAN.md ratification stamp line,
- *  cached STATE-SIDE (never committed — `<config.root>/state/inbox-drafts.json`, never a repo path). */
+/** Architect fragment + ratification stamp; state-only cache at <config.root>/state/inbox-drafts.json, never committed. */
 export interface DraftedCandidate {
   /** Durable identity of the generation actually consumed; never inferred from today's history. */
   completion?: InboxDraftCompletion;
@@ -371,8 +346,7 @@ export interface DraftedCandidate {
   fragmentYaml: string;
   /** The MASTER-PLAN.md proposal-list stamp line the approve rung (W1-T111) will use. */
   stampLine: string;
-  /** {@link anchorFingerprint} of the proposal's evidence anchors AT DRAFT TIME — the cache key the next inbox pass
-   *  compares against to decide whether the cached draft is still current or must be re-drafted. */
+  /** Draft-time anchorFingerprint; invalidates the cached draft when the anchor set changes. */
   anchorFingerprint: string;
 }
 
@@ -384,15 +358,13 @@ export function anchorFingerprint(anchors: EvidenceAnchor[]): string {
     .join("|");
 }
 
-/** True when a cached draft was computed against a different anchor set than the proposal's current one. Orthogonal
- *  to whether each anchor is still grep-true; a fixture that moves an anchor usually flips both. */
+/** Anchor-set drift, independent of whether individual anchors remain grep-true. */
 export function isDraftStale(draft: DraftedCandidate, currentAnchors: EvidenceAnchor[]): boolean {
   return draft.anchorFingerprint !== anchorFingerprint(currentAnchors);
 }
 
 // ── The draft rung's "needs a draft" predicate (W1-T192) ──────────────────────────────────
-//
-// `rmd inbox` and the daemon poll rung share this ONE predicate rather than re-deriving it and disagreeing.
+// Shared by `rmd inbox` and the daemon poll rung.
 
 export type DraftExclusionPredicate = "ratified" | "declined" | "referent_resolved" | "trigger" | "evidence_anchors" | "no_conflict";
 
@@ -469,9 +441,7 @@ function rankDraftSelection(proposals: Proposal[], drafts: DraftCache): Proposal
   return [...proposals].sort((a, b) => draftSelectionRank(a, drafts) - draftSelectionRank(b, drafts) || a.id.localeCompare(b.id));
 }
 
-/** Every proposal needing a fresh draft. Takes no throttle input by design — this is the unthrottled predicate behind
- *  `rmd inbox`'s manual force, which {@link draftsDueOnDaemon} wraps. Supplying a readiness context enables the
- *  daemon's draft-independent exclusions; omitting it preserves the manual force. */
+/** Unthrottled manual force, wrapped by draftsDueOnDaemon; readiness context enables daemon-only exclusions. */
 export function proposalsNeedingDraft(proposals: Proposal[], drafts: DraftCache, ctx?: DraftSelectionContext): Proposal[] {
   return proposals.filter((p) => {
     if (isAgeOnlyInboxInformation(p)) {
@@ -503,8 +473,7 @@ export interface DraftLaneIdentity {
   escalationEffort?: string;
 }
 
-/** Resolve the same synthesis mount and cash capability row that the draft spawn uses.
- *  The daemon passes its installation root explicitly; direct library callers use their checkout. */
+/** Resolve the draft spawn's synthesis mount/cash row; daemon supplies its install root, callers default to checkout. */
 export function resolvedInboxDraftLane(repoDir: string = process.cwd()): DraftLaneIdentity {
   const mounts = loadMounts(mountsPath(repoDir));
   const mount = mounts.synthesis.inbox_draft;
@@ -520,22 +489,19 @@ export function resolvedInboxDraftLane(repoDir: string = process.cwd()): DraftLa
     : { leadDeployment, effort: mount.effort };
 }
 
-/** A proposal's current draft-cause fingerprint includes the lead and the cash lane's Sonnet rescue.
- *  Stored keys from an older lane become due once; a clean cached draft still wins before this comparison. */
+/** Lead + Sonnet rescue fingerprint: old lanes become due once, unless a clean cached draft already wins. */
 export function draftAttemptKey(proposal: Proposal, lane: DraftLaneIdentity = resolvedInboxDraftLane()): string {
   return `${anchorFingerprint(proposal.evidenceAnchors)}::${(proposal.reframeHistory ?? []).length}::${JSON.stringify([
     lane.leadDeployment, lane.effort, lane.escalationDeployment ?? null, lane.escalationEffort ?? null,
   ])}`;
 }
 
-/** `<config.root>/state/inbox-draft-attempts.json` — one {@link draftAttemptKey} per proposal id, recording the cause
- *  the daemon rung last attempted. Daemon-only: `rmd inbox`'s manual force never reads or writes it. */
+/** Daemon-only last cause per proposal: <config.root>/state/inbox-draft-attempts.json; manual force never reads/writes. */
 export interface DraftAttemptCache {
   [proposalId: string]: string;
 }
 
-/** Parse a {@link DraftAttemptCache}; `{}` on missing or malformed input — a daemon that has never drafted is the
- *  normal pre-population state, not an error. */
+/** Parse attempt cache; missing/malformed means {} (normal before the daemon's first draft). */
 export function parseDraftAttemptCache(text: string | undefined): DraftAttemptCache {
   if (!text) return {};
   try {
