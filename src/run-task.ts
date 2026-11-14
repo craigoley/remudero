@@ -6120,6 +6120,12 @@ async function runPlanScopedConflictRound(input: PlanScopedFixRoundInput): Promi
   }
 }
 
+function fixRoundCommitMessage(report: string, subject: string): string {
+  // The subject parser omits continuations; keep task trailers for the before-push filing guard.
+  const trailers = [...report.matchAll(/^Remudero-Task:[ \t]*\S+[ \t]*$/gm)].map(match => match[0]);
+  return [subject, ...trailers].join("\n\n");
+}
+
 export async function runPlanScopedFixRound(input: PlanScopedFixRoundInput): Promise<{ outcome: "pushed" | "refused" | "metadata-repaired"; headSha?: string; reason?: string; preflight?: PlanPrPreflightResult }> {
   if (input.conflict === true) return runPlanScopedConflictRound(input);
   const { pr, deps, worktreePath } = input;
@@ -6196,8 +6202,9 @@ export async function runPlanScopedFixRound(input: PlanScopedFixRoundInput): Pro
     if (!filingSelfCreditCheck(metadata.body, introduced).ok || !acceptanceAuthorTimeCheck(metadata.body).ok) return refuse("the proposed filing body fails author-time acceptance");
     let sha = pr.headSha;
     if (changed.length) {
-      const message = parseReport(report)?.commitMessage;
-      if (!message || checkCommitMessage(message).length) return refuse("the plan round needs a valid COMMIT_MESSAGE");
+      const subject = parseReport(report)?.commitMessage;
+      if (!subject || checkCommitMessage(subject).length) return refuse("the plan round needs a valid COMMIT_MESSAGE");
+      const message = fixRoundCommitMessage(report, subject);
       git(["add", "-A", "--", ...changed]);
       const filedTask = taskIdFromRunBranch(pr.headRefName) === input.task.id && namesATask(input.task.id);
       git(["commit", "-m", message, ...(filedTask ? ["-m", `Remudero-Task: ${input.task.id}`] : [])]);
@@ -32164,7 +32171,8 @@ export function harnessCommitForShellLessWorker(
     return input.commitCount;
   }
   const message = withAssignmentTrailer(
-    asked ?? `${input.derivedCommit!.subject}\n\nHarness-derived subject: ${input.derivedCommit!.reason}`,
+    fixRoundCommitMessage(input.report,
+      asked ?? `${input.derivedCommit!.subject}\n\nHarness-derived subject: ${input.derivedCommit!.reason}`),
     input.assignmentId,
   );
   const subjectSource = asked === undefined ? "harness-derived" : input.subjectSource ?? "worker-authored";
