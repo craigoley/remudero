@@ -133,7 +133,7 @@ test("W1-T12228 criterion 3: a policy with scoreLimit 9 restarts a busy daemon a
 });
 
 test("W1-T12228 criterion 4: with the default rows the freshness judge decides and gives its reason as before", () => {
-  const rows = DEFAULT_FRESHNESS_RESTART;
+  const rows = committed().values.freshnessRestart;
   const limit = judge.DEPLOY_RESTART_SCORE_THRESHOLD;
   const explicit = {
     threshold: { value: rows.scoreLimit, reason: "policy" }, ageHorizonMs: rows.stalenessHorizonMs,
@@ -158,17 +158,17 @@ test("W1-T12228 criterion 4: with the default rows the freshness judge decides a
     const deferred = decide(sourceCommits("low", 1), true, T0, extra);
     assert.equal(deferred.action, "defer");
     assert.equal(deferred.reason, "busy, and pressure 1 (change 1 + staleness 0) < 18: wait for an idle moment");
-    // hold for the minimum lifetime: a restart decision in a lifetime younger than 90 minutes.
+    // hold for the minimum lifetime: a restart decision 1 minute into a lifetime.
     const young = coalesce(enough, T0 + MINUTE, T0, T0 + MINUTE, extraCoalesce);
     assert.equal(young.action, "hold");
     assert.equal(young.reason, judge.MIN_LIFETIME_HOLD);
     // hold for the quiet window: old enough, advance 1 minute ago, stale for 1 minute.
-    const quiet = coalesce(enough, T0 + MINUTE, T0 - 2 * HOUR, T0 + MINUTE, extraCoalesce);
+    const quiet = coalesce(enough, T0 + MINUTE, T0 - 4 * HOUR, T0 + MINUTE, extraCoalesce);
     assert.equal(quiet.action, "hold");
     assert.equal(quiet.reason, "coalescing sha: waiting for a quiet advance window");
     assert.equal(quiet.windowEndsAtMs, T0 + MINUTE + 10 * MINUTE);
     // restart: the quiet window has passed.
-    const restart = coalesce(enough, T0 + 11 * MINUTE, T0 - 2 * HOUR, T0 + MINUTE, extraCoalesce);
+    const restart = coalesce(enough, T0 + 11 * MINUTE, T0 - 4 * HOUR, T0 + MINUTE, extraCoalesce);
     assert.equal(restart.action, "restart");
     assert.equal(restart.reason, "window_quiet");
   }
