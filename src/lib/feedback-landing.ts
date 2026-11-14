@@ -2483,6 +2483,8 @@ interface StagedTaskFileMeta {
   claim: string;
   proof: string;
   prUrl?: string;
+  /** W1-T12212: the `<owner>/<name>` it was staged for. A file staged before W1-T12212 names none. */
+  repository?: string;
 }
 
 interface StagedTaskFile extends StagedTaskFileMeta {
@@ -2633,6 +2635,7 @@ function* taskFilesLandingSteps(
   const result: TaskFilesLandingResult = { landed: [], waiting: [], refused: [], setAside: [], pushed: false };
   const { stateRoot } = opts;
   let scratchDir: string | undefined;
+  let queued = (): StagedTaskFile[] => readStagedTaskFiles(stateRoot);
   try {
     if (inputs.length === 0 && readStagedTaskFiles(stateRoot).length === 0) return result;
     const net = landingNet(opts.git ?? defaultGit(root), opts.gh ?? defaultGh(), opts);
@@ -2645,6 +2648,12 @@ function* taskFilesLandingSteps(
       prBody: () => "",
     };
     const lane = opts.lane ?? `${kind.family}-landing`;
+    // W1-T12212: one queue per repository. A file that names no repository is never the plan destination's.
+    const repository = kind.targetRepository === undefined ? undefined : repoKey(kind.targetRepository);
+    const named = planDestinationRepository(join(stateRoot, "state"));
+    const destinationKey = named.outcome === "named" ? `${named.owner}/${named.repo}` : undefined;
+    queued = () => readStagedTaskFiles(stateRoot).filter((f) =>
+      f.repository === undefined ? repository === undefined || repository !== destinationKey : f.repository === repository);
     scratchDir = mkdtempSync(join(tmpdir(), `rmd-${kind.branch}-`));
     const scratch = scratchDir;
     const env = { ...process.env, GIT_INDEX_FILE: join(scratch, "index") };
@@ -2796,12 +2805,12 @@ function* taskFilesLandingSteps(
         yield* refuse("the plan preflight ran out of its budget, so the file was not staged", { failures: verdict.timedOut, timedOut: true });
         continue;
       }
-      writeStagedTaskFile(stateRoot, relPath, content, { baseBlob, claim, proof });
+      writeStagedTaskFile(stateRoot, relPath, content, { baseBlob, claim, proof, ...(repository === undefined ? {} : { repository }) });
     }
 
-    const staged = readStagedTaskFiles(stateRoot);
+    const staged = queued();
     const wait = (reason?: string): TaskFilesLandingResult => {
-      result.waiting = readStagedTaskFiles(stateRoot).map((f) => f.relPath).filter((p) => !result.landed.includes(p));
+      result.waiting = queued().map((f) => f.relPath).filter((p) => !result.landed.includes(p));
       if (reason !== undefined) {
         result.error = reason;
         opts.log?.("task_files_landing.waiting", { branch: kind.branch, reason, files: result.waiting });
@@ -2899,7 +2908,11 @@ function* taskFilesLandingSteps(
     }
     const { prUrl, error } = yield* ensurePrOpen(kind, net, taskFilesPrBody(landing), opts.requestReview);
     if (!prUrl) return wait(`pushed to ${kind.branch} but ${error ?? "its pull request did not open"}`);
-    for (const file of landing) writeStagedTaskFile(stateRoot, file.relPath, undefined, { baseBlob: file.baseBlob, claim: file.claim, proof: file.proof, prUrl });
+    for (const file of landing) {
+      writeStagedTaskFile(stateRoot, file.relPath, undefined, {
+        baseBlob: file.baseBlob, claim: file.claim, proof: file.proof, ...(file.repository === undefined ? {} : { repository: file.repository }), prUrl,
+      });
+    }
     result.prUrl = prUrl;
     result.landed = paths;
     opts.log?.("task_files_landing.opened", { branch: kind.branch, pr_url: prUrl, files: paths, pushed: result.pushed });
@@ -2907,7 +2920,7 @@ function* taskFilesLandingSteps(
   } catch (e) {
     result.error = String((e as Error)?.message ?? e);
     try {
-      result.waiting = readStagedTaskFiles(stateRoot).map((f) => f.relPath);
+      result.waiting = queued().map((f) => f.relPath);
     } catch {
       // The queue is unreadable too; the error above already names the failed call.
     }
