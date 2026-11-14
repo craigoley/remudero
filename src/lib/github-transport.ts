@@ -241,9 +241,11 @@ export function ghExec(args: string[], opts: ExecFileSyncOptions = {}): string |
   // W1-T3297: otherwise this overload spawns the real `gh`, so the cadence floor applies.
   if (socket === undefined) applyGhReadCadence(args);
   const spawned = socket === undefined ? { file: "gh", args } : ghBrokerClientSpawn(socket, args, ghBrokerClassOf(opts.env));
+  refuseSentinelGhToken(spawned.file, spawned.args, opts.env);
   try {
-    const out = ghExecFileResult(spawned.file, spawned.args, opts);
-    if (socket !== undefined && args[0] === "api" && args.includes("-i")) {
+    const out = execFileSync(spawned.file, spawned.args,
+      ghOptionsWithDefaultTimeout(withGhCredentialEnv(spawned.file, spawned.args, opts))) as string | Buffer;
+    if (args[0] === "api" && args.includes("-i")) {
       githubInstallationBudget().record(parseGhRateLimitHeaders(splitGhHeaderBlock(String(out), args.includes("--slurp")).headers));
     }
     return out;
@@ -254,10 +256,6 @@ export function ghExecFile(file: string, args: string[], opts: ExecFileSyncOptio
 export function ghExecFile(file: string, args: string[], opts?: ExecFileSyncOptions): Buffer;
 export function ghExecFile(file: string, args: string[], opts: ExecFileSyncOptions = {}): string | Buffer {
   if (basename(file) === "gh") admitInstallationReadSync(args);
-  return ghExecFileResult(file, args, opts);
-}
-
-function ghExecFileResult(file: string, args: string[], opts: ExecFileSyncOptions): string | Buffer {
   const isGh = basename(file) === "gh";
   refuseSentinelGhToken(file, args, opts.env);
   try {
@@ -640,8 +638,8 @@ export function takeGithubBudgetThrottles(): GithubBudgetThrottledRow[] {
 }
 
 function installationCoreRead(args: readonly string[]): boolean {
-  return args[0] === "api" && !ghArgvIsWrite(args) && !ghArgvIsCadenceExempt(args) &&
-    ghArgvBucketHint(args) === undefined && args[1] !== "graphql";
+  return !ghArgvIsWrite(args) && !ghArgvIsCadenceExempt(args) && ghArgvBucketHint(args) === undefined &&
+    (args[0] !== "api" || parseGhApiArgv(args).endpoint !== "graphql");
 }
 
 function admitInstallationReadSync(args: readonly string[]): void {
@@ -666,8 +664,12 @@ async function admitInstallationReadAsync(args: readonly string[]): Promise<void
 }
 
 function noteInstallationRefusal(err: unknown): void {
+  const failure = err as { stdout?: string | Buffer; stderr?: string | Buffer } | null | undefined;
+  if (failure?.stdout !== undefined) {
+    const stdout = String(failure.stdout);
+    githubInstallationBudget().record(parseGhRateLimitHeaders(splitGhHeaderBlock(stdout, stdout.startsWith("[")).headers));
+  }
   // The transport cannot import status.ts without a dependency cycle; match its primary-limit signal.
-  const failure = err as { stderr?: string | Buffer };
   const text = failure?.stderr === undefined ? (err instanceof Error ? err.message : String(err)) : String(failure.stderr);
   if (/rate limit|quota/i.test(text)) githubInstallationBudget().noteThrottle("refused");
 }

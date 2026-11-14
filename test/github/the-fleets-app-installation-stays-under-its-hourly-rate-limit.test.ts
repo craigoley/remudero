@@ -5,12 +5,13 @@ import { syncBuiltinESMExports } from "node:module";
 import { Worker } from "node:worker_threads";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
+import timerPromises from "node:timers/promises";
 
 import { daemonInstallationBudgetWorkerInput, daemonInstallationRegistry, startDaemonInstallationBudget } from "#src/cli/commands/daemon.js";
 import { clockFromMillisFn } from "#src/lib/clock.js";
 import { createInstallationBudget, createInstallationBudgetState, GITHUB_WRITE_RESERVE_FRACTION } from "#src/lib/github-installation-budget.js";
 import {
-  configureGithubInstallationBudget, createGhCallPacer, ghExec, ghExecFile, ghJson, ghJsonAsync, githubInstallationBudget,
+  configureGithubInstallationBudget, createGhCallPacer, ghExec, ghExecFile, ghJson, ghJsonAsync, ghTextAsync, githubInstallationBudget,
   GhPaceFloorStandDownError, paceGhEntry, takeGithubBudgetThrottles,
 } from "#src/lib/github-transport.js";
 import { DEFAULT_HOST_INSTANCE_REGISTRY_PATH, installationConsumers } from "#src/lib/instance-registry.js";
@@ -292,6 +293,8 @@ test("W1-T12553 criterion 2 and criterion 3: direct and paced ghExecFile reads s
       () => ghExecFile(join(shim.dir, "gh"), args, opts),
       () => paceGhEntry(h.pacer, () => false, () => ghExecFile("gh", args, opts)),
       () => ghExec(args, opts),
+      () => ghExecFile("gh", ["pr", "diff", "1", "--repo", "o/r"], opts),
+      () => ghExec(["pr", "diff", "1", "--repo", "o/r"], opts),
     ];
     const savedGap = process.env.RMD_GH_SHARED_READ_GAP_MS;
     const savedCache = process.env.RMD_GH_CACHE_HOME;
@@ -389,5 +392,141 @@ test("W1-T12553 criterion 5: the actual host-registry read propagates failure an
   } finally {
     t.mock.restoreAll();
     syncBuiltinESMExports();
+  }
+});
+
+test("W1-T12553 criterion 1: failed responses refresh remaining, limit and reset before the refusal is drained", async () => {
+  const reset = RESET_S + 3600;
+  const stdout = `HTTP/2.0 403 Forbidden\r\nX-Ratelimit-Remaining: 0\r\nX-Ratelimit-Limit: 200\r\nX-Ratelimit-Reset: ${reset}\r\nX-Ratelimit-Resource: core\r\n\r\n{}`;
+  for (const output of [stdout, Buffer.from(stdout), `[${stdout}]`]) {
+    for (const run of [
+      (error: Error) => ghJson(["api", "repos/o/r/pulls"], undefined, () => { throw error; }),
+      (error: Error) => ghJsonAsync(["api", "repos/o/r/pulls"], async () => { throw error; }),
+      (error: Error) => ghTextAsync(["api", "repos/o/r/pulls", "-i"], {}, async () => { throw error; }),
+    ]) {
+      const h = harness();
+      h.read(14);
+      assert.equal(githubInstallationBudget().allowance(), 1);
+      const error = Object.assign(new Error("gh api failed"), { stdout: output, stderr: "API rate limit exceeded", status: 403 });
+      let caught: unknown;
+      try { await run(error); } catch (failure) { caught = failure; }
+      assert.equal(caught, error, "header capture preserves the original failure");
+      assert.equal(githubInstallationBudget().allowance(), 0);
+      const decision = githubInstallationBudget().admit();
+      assert.equal(decision.ok, false);
+      if (!decision.ok) assert.equal(decision.waitUntil, reset);
+      assert.deepEqual(throttledRows()[0]?.extra, {
+        instance: "core", reason: "refused", remaining: 0, limit: 200,
+        reset: clockFromMillisFn(() => reset * 1000).iso(), allowance: 0, consumers: 4,
+      });
+    }
+  }
+});
+
+test("W1-T12553 criterion 1: real synchronous subprocess failures retain their response headers", async () => {
+  const stdout = `HTTP/2.0 403 Forbidden\r\nX-Ratelimit-Remaining: 0\r\nX-Ratelimit-Limit: 100\r\nX-Ratelimit-Reset: ${RESET_S + 3600}\r\nX-Ratelimit-Resource: core\r\n\r\n{}`;
+  await withGhShim([{ when: "api", stdout, stderr: "API rate limit exceeded", exit: 1 }], shim => {
+    const env = { ...process.env, RMD_GH_SHARED_READ_GAP_MS: "0", RMD_GH_CACHE_HOME: join(shim.dir, "cache") };
+    for (const run of [
+      () => ghExec(["api", "repos/o/r/pulls", "-i"], { encoding: "utf8", env }),
+      () => ghExecFile("gh", ["api", "repos/o/r/pulls", "-i"], { encoding: "utf8", env }),
+    ]) {
+      harness().read(14);
+      assert.throws(run, /rate limit exceeded/);
+      assert.equal(githubInstallationBudget().allowance(), 0);
+      assert.equal(throttledRows()[0]?.extra.reset, clockFromMillisFn(() => (RESET_S + 3600) * 1000).iso());
+    }
+  });
+});
+
+test("W1-T12553 criterion 2 and criterion 3: porcelain reads spend the share and await reset at the reserve", async t => {
+  let now = START_MS;
+  let wake: (() => void) | undefined;
+  const waits: number[] = [];
+  t.mock.method(Date, "now", () => now);
+  t.mock.method(timerPromises, "setTimeout", ((ms: number) => {
+    waits.push(ms);
+    return new Promise<void>(resolve => { wake = resolve; });
+  }) as typeof timerPromises.setTimeout);
+  syncBuiltinESMExports();
+  try {
+    for (const remaining of [14, 10]) {
+      now = START_MS;
+      waits.length = 0;
+      const h = harness();
+      h.read(remaining);
+      let calls = 0;
+      const read = () => ghTextAsync(["pr", "diff", "1", "--repo", "o/r"], {}, async () => {
+        calls += 1;
+        return { stdout: "diff", stderr: "" };
+      });
+      if (remaining === 14) assert.equal(await read(), "diff");
+      const pending = read();
+      await new Promise<void>(resolve => setImmediate(resolve));
+      const beforeReset = calls;
+      h.setNow(now = RESET_S * 1000 - 1);
+      await new Promise<void>(resolve => setImmediate(resolve));
+      const justBeforeReset = calls;
+      h.setNow(now = RESET_S * 1000);
+      wake?.();
+      assert.equal(await pending, "diff");
+      assert.equal(beforeReset, remaining === 14 ? 1 : 0, "the executor stays idle while the event loop continues");
+      assert.equal(justBeforeReset, beforeReset, "the read cannot start even one millisecond before reset");
+      assert.equal(calls, beforeReset + 1);
+      assert.deepEqual(waits, [RESET_S * 1000 - START_MS], "the transport awaits a timer for the complete reset interval");
+      assert.equal(throttledRows()[0]?.extra.reason, remaining === 14 ? "share" : "reserve");
+    }
+  } finally {
+    t.mock.restoreAll();
+    syncBuiltinESMExports();
+  }
+});
+
+test("W1-T12553 criterion 3: synchronous porcelain reads stand down while async writes keep their reserve", async () => {
+  const h = harness();
+  h.read(10);
+  let reads = 0;
+  assert.throws(() => ghJson(["pr", "view", "1", "--json", "number"], undefined, () => {
+    reads += 1;
+    return "{}";
+  }), GhPaceFloorStandDownError);
+  assert.equal(reads, 0);
+  for (const args of [
+    ["pr", "merge", "1"], ["pr", "review", "1", "--approve"], ["pr", "comment", "1", "--body", "ok"],
+    ["api", "-X", "POST", "repos/o/r/statuses/head", "-f", "state=success"],
+  ]) {
+    let writes = 0;
+    assert.equal(await ghTextAsync(args, {}, async () => { writes += 1; return { stdout: "ok", stderr: "" }; }), "ok");
+    assert.equal(writes, 1);
+  }
+  assert.equal(githubInstallationBudget().admit().ok, false, "writes do not grant or spend read allowance");
+});
+
+test("W1-T12553 criterion 4: a refusal survives an already drained window and is emitted only once", async t => {
+  for (const sharedState of [undefined, createInstallationBudgetState()]) {
+    await t.test(sharedState === undefined ? "local" : "shared worker", () => {
+      const clock = clockFromMillisFn(() => START_MS);
+      const budget = createInstallationBudget({ consumers: 4, instance: "core", clock, sharedState });
+      const writer = sharedState === undefined ? budget : createInstallationBudget({ consumers: 4, instance: "core", clock, sharedState });
+      writer.record({ remaining: 14, limit: 100, reset: RESET_S });
+      writer.noteThrottle("share");
+      assert.equal(budget.takeThrottleRows()[0]?.reason, "share");
+      writer.noteThrottle("share");
+      assert.deepEqual(budget.takeThrottleRows(), []);
+      writer.noteThrottle("refused");
+      assert.deepEqual(budget.takeThrottleRows(), [{
+        step: "github.budget.throttled", instance: "core", reason: "refused", remaining: 14,
+        limit: 100, reset: clockFromMillisFn(() => RESET_S * 1000).iso(), allowance: 1, consumers: 4,
+      }]);
+      writer.noteThrottle("refused");
+      writer.noteThrottle("reserve");
+      assert.deepEqual(budget.takeThrottleRows(), [], "the refusal and ordinary throttle both stay deduplicated");
+      writer.record({ remaining: 14, limit: 100, reset: RESET_S + 3600 });
+      writer.noteThrottle("share");
+      writer.noteThrottle("refused");
+      assert.equal(budget.takeThrottleRows()[0]?.reason, "refused", "an undrained row is upgraded");
+      writer.noteThrottle("refused");
+      assert.deepEqual(budget.takeThrottleRows(), [], "upgrading also records that the refusal was emitted");
+    });
   }
 });

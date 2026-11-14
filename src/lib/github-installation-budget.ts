@@ -67,7 +67,7 @@ export interface InstallationBudget {
   noteRead(): void;
   /** Admit and count a transport read as one atomic operation across the daemon's threads. */
   claimRead(): InstallationBudgetAdmit;
-  /** A refusal, either ours (`admit` said no) or GitHub's (a rate-limit error). Adds at most one row per window. */
+  /** Deduplicate each window, preserving a later GitHub refusal even after its throttle was drained. */
   noteThrottle(reason: "share" | "reserve" | "refused"): void;
   /** The allowance of the latest reading, or undefined when there is no limit. */
   allowance(): number | undefined;
@@ -88,7 +88,8 @@ const enum Slot {
 }
 
 const WINDOW_START = Slot.WindowCursor + 1;
-const ROW_START = WINDOW_START + KEPT_WINDOWS;
+const WINDOW_FIELDS = 2;
+const ROW_START = WINDOW_START + KEPT_WINDOWS * WINDOW_FIELDS;
 const ROW_FIELDS = 6;
 // BACKSTOP: over forty days without a daemon drain must refuse visibly rather than discard evidence.
 const MAX_PENDING_ROWS = 1024;
@@ -113,7 +114,7 @@ export function createInstallationBudget(opts: {
   const instance = opts.instance ?? "unknown";
   let latest: InstallationBudgetReading | undefined;
   let reads = 0;
-  const windows: string[] = [];
+  const windows: Array<{ key: string; refused: boolean }> = [];
   const pending: GithubBudgetThrottledRow[] = [];
   const shared = opts.sharedState === undefined ? undefined : new BigInt64Array(opts.sharedState);
 
@@ -198,27 +199,45 @@ export function createInstallationBudget(opts: {
       const window = `${reading?.reset ?? "unknown"}`;
       if (shared === undefined) {
         const existing = pending.find(row => row.reset === (reading === undefined ? undefined : clockFromMillisFn(() => reading.reset * 1000).iso()));
+        let emitted = windows.find(entry => entry.key === window);
+        if (existing === undefined && emitted !== undefined && (reason !== "refused" || emitted.refused)) return;
+        if (emitted === undefined) {
+          emitted = { key: window, refused: reason === "refused" || existing?.reason === "refused" };
+          windows.push(emitted);
+          if (windows.length > KEPT_WINDOWS) windows.shift();
+        } else if (reason === "refused") emitted.refused = true;
         if (existing !== undefined) {
           if (reason === "refused") existing.reason = reason;
           return;
         }
-        if (windows.includes(window)) return;
-        windows.push(window);
-        if (windows.length > KEPT_WINDOWS) windows.shift();
       } else {
         const newRow = withState(shared, () => {
           const key = BigInt(reading?.reset ?? -1);
           const count = Number(shared[Slot.PendingCount]);
+          let pendingOffset: number | undefined;
           for (let i = 0; i < count; i++) {
             const offset = ROW_START + i * ROW_FIELDS;
-            if (shared[offset] !== key) continue;
-            if (reason === "refused") shared[offset + 1] = 3n;
+            if (shared[offset] === key) { pendingOffset = offset; break; }
+          }
+          let windowOffset: number | undefined;
+          for (let i = 0; i < Math.min(KEPT_WINDOWS, Number(shared[Slot.WindowCursor])); i++) {
+            const offset = WINDOW_START + i * WINDOW_FIELDS;
+            if (shared[offset] === key) { windowOffset = offset; break; }
+          }
+          if (pendingOffset === undefined && windowOffset !== undefined &&
+              (reason !== "refused" || shared[windowOffset + 1] === 1n)) return false;
+          if (pendingOffset === undefined && count === MAX_PENDING_ROWS) throw new RangeError("installation budget throttle queue must be drained");
+          if (windowOffset === undefined) {
+            windowOffset = WINDOW_START + Number(shared[Slot.WindowCursor] % BigInt(KEPT_WINDOWS)) * WINDOW_FIELDS;
+            shared[windowOffset] = key;
+            shared[windowOffset + 1] = pendingOffset !== undefined && shared[pendingOffset + 1] === 3n ? 1n : 0n;
+            shared[Slot.WindowCursor] += 1n;
+          }
+          if (reason === "refused") shared[windowOffset + 1] = 1n;
+          if (pendingOffset !== undefined) {
+            if (reason === "refused") shared[pendingOffset + 1] = 3n;
             return false;
           }
-          for (let i = 0; i < Math.min(KEPT_WINDOWS, Number(shared[Slot.WindowCursor])); i++) {
-            if (shared[WINDOW_START + i] === key) return false;
-          }
-          if (count === MAX_PENDING_ROWS) throw new RangeError("installation budget throttle queue must be drained");
           const offset = ROW_START + count * ROW_FIELDS;
           shared.set([
             key, BigInt(reason === "share" ? 1 : reason === "reserve" ? 2 : 3),
@@ -226,8 +245,6 @@ export function createInstallationBudget(opts: {
             BigInt(reading === undefined ? -1 : allowanceOf(reading, consumers)), BigInt(consumers),
           ], offset);
           shared[Slot.PendingCount] += 1n;
-          shared[WINDOW_START + Number(shared[Slot.WindowCursor] % BigInt(KEPT_WINDOWS))] = key;
-          shared[Slot.WindowCursor] += 1n;
           return true;
         });
         if (!newRow) return;
