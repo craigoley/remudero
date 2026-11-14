@@ -82,7 +82,7 @@ APPROVED_SPECIAL_MEMBERS = {
     ("opentelemetry-instrumentation", "0.58b0", "50f97ac03100676c9f7fc28197f8240c7290ca1baa12da8bfbb9a1de4f34cc45"): {
         "opentelemetry/instrumentation/auto_instrumentation/sitecustomize.py": (673, "ddcfb83130a15563be3e97502e92073e9d0cf69643aa73c410dfa3721eafe265"),
     },
-    ("setuptools", "84.1.0", "5231689c6ac8156cd155cfb98c3fd6fb252c3e7e9bd3d78b64d3c55f132624c9"): {
+    ("setuptools", "84.0.0", "51a52592b3b99e102b609654876bd65f19f999935166d1352678931132b0c670"): {
         "setuptools/_vendor/importlib_metadata-8.7.1.dist-info/licenses/LICENSE": (10278, "458502e12d97bbf64438606a20044aa85eb05fb0a8a807bb35dbec253fd1fc04"),
         "setuptools/_vendor/jaraco_context-6.1.0.dist-info/licenses/LICENSE": (1076, "9755a18519666e5f0f4cae3daad3d7012bcae48a600b31237d75e9fe134e6683"),
         "setuptools/_vendor/jaraco_functools-4.4.0.dist-info/licenses/LICENSE": (1076, "5a57cb4db85e2a2dd88c290628908add57e3451449e0a9a71fdfb38776fd759d"),
@@ -167,14 +167,16 @@ APPROVED_SPECIAL_MEMBERS = {
         "setuptools/_vendor/zipp-3.23.0.dist-info/top_level.txt": (5, "8806dda121df686a817d56f65ee47d26a4901c2a0eb0eb46eb2f42fcb4a9a85c"),
     },
 }
-# The 84.0 and 84.1 wheels carry identical approved vendored metadata members;
-# the whole-wheel digest remains distinct and is checked before this lookup.
-APPROVED_SPECIAL_MEMBERS[("setuptools", "84.0.0", "51a52592b3b99e102b609654876bd65f19f999935166d1352678931132b0c670")] = \
-    APPROVED_SPECIAL_MEMBERS[("setuptools", "84.1.0", "5231689c6ac8156cd155cfb98c3fd6fb252c3e7e9bd3d78b64d3c55f132624c9")]
+# The exact 84.1 wheel has the same reviewed vendored metadata members as 84.0;
+# whole-wheel identity is checked before this narrowly scoped member-policy alias.
+APPROVED_SPECIAL_MEMBER_ALIASES = {
+    ("setuptools", "84.1.0", "5231689c6ac8156cd155cfb98c3fd6fb252c3e7e9bd3d78b64d3c55f132624c9"):
+        ("setuptools", "84.0.0", "51a52592b3b99e102b609654876bd65f19f999935166d1352678931132b0c670"),
+}
 AUDIT_TEST_SOURCES = {
     "runtime_audit_metadata_tests.py": "9eb898e30ab9fd3fc0a96eebe626cdba96bcca2512ff27e5b88880da0f3b4737",
     "runtime_audit_test_fixtures.py": "66d2d91312ab5006bef72ef6ab2daa2ea8816870e7c6f740ca296d428d58190d",
-    "test_runtime_compatibility_audit.py": "db2e2a219ed1e6de3654ccc0a55565da4c2358e8d835c85f4e5ef094cd21019a",
+    "test_runtime_compatibility_audit.py": "1668ff728081f3fb05f7cb9e26970bd6e18228af287211a753572c6dbac12024",
     "runtime_source_recipe.py": "6d1d2cc20e1a2fe225f913d9df815771b4e047c872bdaabbb59eceea52bcb35d",
     "prepare-source-build.py": "96eb19457f4799979e691459ad19ba761ab498d6576470db7c77eb5708171274",
     "source-build-policy.json": "5cf435e3bb81a52e1583ea00008d0e46a3c0ec64d920fe6720d59f88870bd83a",
@@ -227,7 +229,9 @@ def approved_namespace_contributor(row: dict, root: str, destination: tuple) -> 
 
 def approved_special_member(name: str, version: str, artifact_sha: str, path: str,
                             data: bytes, destination: tuple) -> bool:
-    expected = APPROVED_SPECIAL_MEMBERS.get((name, version, artifact_sha), {}).get(path)
+    identity = (name, version, artifact_sha)
+    source_identity = APPROVED_SPECIAL_MEMBER_ALIASES.get(identity, identity)
+    expected = APPROVED_SPECIAL_MEMBERS.get(source_identity, {}).get(path)
     # An install-scheme/case alias is not the reviewed archive path, even if its
     # body or logical destination happens to match an approved member.
     return (expected is not None and expected == (len(data), digest(data)) and
