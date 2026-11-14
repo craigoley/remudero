@@ -198,7 +198,7 @@ test("W1-T12526 criterion 5: house-layout — the merged tree crosses main's tip
 });
 
 test("W1-T12526 criterion 6: with the verdict importing all three counters, the reach graph closes no ring and stays inside its baseline", () => {
-  const paths = execFileSync("git", ["ls-files", "--", "src", "scripts", "bin", "test"], { cwd: REPO_ROOT, encoding: "utf8" })
+  const paths = execFileSync("git", ["ls-tree", "-r", "--name-only", "HEAD", "--", "src", "scripts", "bin", "test"], { cwd: REPO_ROOT, encoding: "utf8" })
     .trim().split("\n").filter((p) => /\.(?:ts|mts|mjs|js|cjs)$/.test(p));
   const files = new Map(paths.map((p) => [p, readFileSync(join(REPO_ROOT, p), "utf8")]));
   const graph = buildAffectedSuitesGraph(files, [], { root: REPO_ROOT });
