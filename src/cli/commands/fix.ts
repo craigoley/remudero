@@ -30,6 +30,7 @@ import { escalateWithJudge, escalationCause, realEscalationJudge, escalationHead
 import { fetchSinglePrRest, codeqlCheckFailed, hydrateCodeqlHeadAlertsSteps, CODEQL_CHECK_NAME, type GhApiFetcher } from "../../lib/open-prs-rest.js";
 import { remedyFilesForFailingChecks, type RemedyFileForGate } from "../../lib/ci-parity.js";
 import { isInPlanScope } from "../../lib/plan-architect.js";
+import { planFilingFixRoundRefusal, readPlanFilingFixRoundInput } from "../../lib/plan-filing-fix-guard.js";
 import { createPlanPrRest, probeExistingPlanPr } from "../../lib/plan-pr-emitter.js";
 import { findTaskShard, parseProofAmendmentProposal, requestProofAmendment, requestScopeAmendment, isUngrantableInstrumentPath, SCOPE_AMENDMENT_RETRYABLE_REFUSALS, saveScopeAmendmentWork, restoreScopeAmendmentWork, type ScopeAmendmentOutcome, type ProofAmendmentOutcome } from "../../lib/proof-amendment.js";
 import { appendLedger, isSpawnInfraBlockedError, LEDGER_COST_TAG_INFRA } from "../../lib/ledger.js";
@@ -2240,9 +2241,27 @@ export async function refreshInheritedCensusRefusal(input: InheritedCensusRefres
   }
 }
 
+/** W1-T12546: red failures read at a published head this rung's worktree already holds, or undefined. */
+async function adoptableEvidenceHead(prUrl: string, head: string, readHead: () => Promise<string | undefined>,
+  requiredContexts: Iterable<string> | undefined,
+  deps: Pick<Parameters<RunTaskCommandHost["runFixRung"]>[0]["deps"], "readCiRollup" | "fetchCiFailures" | "log">,
+): Promise<CiFailure[] | undefined> {
+  if (!deps.readCiRollup || !deps.fetchCiFailures) return undefined;
+  try {
+    if (checksStateFromRollup(await deps.readCiRollup(prUrl), requiredContexts) !== "red") return undefined;
+    const failures = await deps.fetchCiFailures(prUrl, head);
+    const after = await readHead();
+    return failures.length > 0 && after === head ? failures : undefined;
+  } catch (e) {
+    deps.log("fix.evidence_head_unread", { head_sha: head, reason: `published head checks unreadable: ${String((e as Error)?.message ?? e)}` });
+    return undefined;
+  }
+}
+
 export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung"]>[0] & {
   workerProofIo?: Parameters<typeof runWorkerAcceptanceProofs>[1];
   hostedProofReader?: HostedFixProofReader;
+  requiredContexts?: Iterable<string>;
   pendingAnswer?: OpenPrView["pendingAnswer"];
   /** W1-T10339: digest of the PR body a TASKLESS PR was dispatched on — an input every stand-down records. */
   prBodySha256?: string;
@@ -2415,6 +2434,7 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
   // persistent CI/local environment mismatch (never observed, guarded anyway) can spend spinning
   // this rung without ever reaching a worker that could actually diagnose it.
   let generatorFixAttempts = 0;
+  let evidenceHeadAdopted = false; // W1-T12546: one published-head adoption per rung invocation.
   const GENERATOR_FIX_ATTEMPT_CAP = 2;
   // W1-T1279: every check name EVER observed red across this rung's strikes — the trajectory
   // input for the exhaustion escalation's own detail text (renderCiTrajectoryLine, above).
@@ -2542,9 +2562,23 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
       return await opts.ownedConflictPushGuard!.verifyOwnership();
     },
   };
+  const filingRoundRefusal = async (priorHead: string, nextHead: string | undefined): Promise<string | undefined> => {
+    if (baselineDiffFiles === undefined) return undefined;
+    if (baselineDiffFiles.length === 0 || !baselineDiffFiles.every(isInPlanScope)) return undefined;
+    if (nextHead === undefined || nextHead.trim() === "") return "unreadable plan filing nextHead; cannot verify the round before push";
+    return planFilingFixRoundRefusal(await readPlanFilingFixRoundInput(
+      baselineDiffFiles, priorHead, nextHead,
+      args => (deps.scopeAmendmentGit ?? hostWorktreeGitAsync)(opts.worktreePath, args, { maxBuffer: 1 << 26 })));
+  };
   const landRoundPush = async (push: () => unknown, headSha: string | undefined, site: string): Promise<FixRungOutcome | "refused" | undefined> => {
     roundPushFailure = undefined;
     roundPushReceipt = undefined;
+    const filingRefusal = await filingRoundRefusal(review.headSha, headSha);
+    if (filingRefusal) {
+      deps.log("fix.commit_refused", { site, head_sha: review.headSha, reason: filingRefusal });
+      deps.log("fix.done", { site, head_sha: review.headSha, subtype: "commit_refused" });
+      return { outcome: "stood_down", review, strikes, retriggers, reason: filingRefusal, standDownReason: filingRefusal };
+    }
     try {
       const pushed = await push();
       if (isFixRoundPushReceipt(pushed)) roundPushReceipt = pushed;
@@ -4273,6 +4307,19 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
         reason: "remote branch head read failed; no published advance was established" }); }
       // A retained unpublished commit is still this round's existing recovery input, not proof the PR moved.
       if (publishedHead !== undefined && publishedHead !== priorHeadSha) {
+        const adopted = !evidenceHeadAdopted && priorCiFailures !== undefined && publishedHead === roundBase.baseSha
+          ? await adoptableEvidenceHead(opts.prUrl, publishedHead,
+            () => (deps.readRemoteBranchHead ?? lsRemoteBranchHead)(opts.worktreePath, opts.branch),
+            opts.requiredContexts ?? ghRequiredStatusCheckContexts(opts.reviewBase.owner, opts.reviewBase.repo), deps) : undefined;
+        if (adopted) {
+          evidenceHeadAdopted = true;
+          deps.log("fix.evidence_head_adopted", { head_sha: priorHeadSha, current_head_sha: publishedHead,
+            red_checks: [...new Set(adopted.map((f) => f.name))] });
+          currentCiFailures = adopted;
+          for (const f of adopted) everRedCiCheckNames.add(f.name);
+          review = { ...review, headSha: publishedHead };
+          continue;
+        }
         const reason = `published branch advanced from ${priorHeadSha} to ${publishedHead} before the worker started; the ordinary sweep must read fresh exact-head failure evidence`;
         deps.log("fix.evidence_head_superseded", { head_sha: priorHeadSha, current_head_sha: publishedHead, worktree_head_sha: roundBase.baseSha, reason });
         deps.log("fix.stood_down", { head_sha: priorHeadSha, current_head_sha: publishedHead, site: "rung.evidence_head", reason });
@@ -4540,14 +4587,21 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
     // is filed against (DAEMON-1788016810368 / PR #3261 — the worktree's local ref reset back
     // to origin's tip between commit and push) can happen. Threaded to `deps.push` below so
     // `gitPushRunBranch`'s post-condition re-reads HEAD immediately before pushing and raises
-    // if it no longer matches this snapshot, instead of silently pushing zero refs. Best-effort:
-    // an unreadable HEAD here just means this round's push runs without the guard — the same
-    // fail-open discipline every other optional read in this rung already takes.
+    // if it no longer matches this snapshot, instead of silently pushing zero refs. A plan filing
+    // refuses an unreadable result head below, because its commits and criteria must be verified.
     let expectedHeadShaForPush = harnessCommittedSha;
     try {
       expectedHeadShaForPush ??= hostWorktreeGit(opts.worktreePath, ["rev-parse", "HEAD"]).trim();
     } catch {
       // best-effort — see comment above.
+    }
+
+    const filingRefusal = await filingRoundRefusal(priorHeadSha, expectedHeadShaForPush);
+    if (filingRefusal) {
+      deps.log("fix.commit_refused", { round_id: roundId, head_sha: priorHeadSha, reason: filingRefusal });
+      deps.log("fix.done", { round_id: roundId, head_sha: priorHeadSha, subtype: "commit_refused" });
+      deps.branchClaim?.release();
+      return { outcome: "stood_down", review, strikes, retriggers, reason: filingRefusal, standDownReason: filingRefusal };
     }
 
     // A worker DEMONSTRABLY ran (spawn returned rather than throwing) — only now is this round

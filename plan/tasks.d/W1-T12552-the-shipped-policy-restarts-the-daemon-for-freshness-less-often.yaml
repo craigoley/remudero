@@ -16,7 +16,7 @@
     - plan/policy.yaml
     - test/daemon/the-four-constants-of-the-freshness-restart-are-policy-rows.test.ts
     - test/daemon/the-shipped-policy-restarts-the-daemon-for-freshness-less-often.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "The shipped plan/policy.yaml loads freshnessRestart.stalenessHorizonMs as 14400000 and freshnessRestart.minLifetimeMs as 10800000, each inside its row's bounds, and scoreLimit and quietWindowMs keep 18 and 600000"

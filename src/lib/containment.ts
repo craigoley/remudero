@@ -18,36 +18,25 @@ import { WORKER_HOME_SYMLINKS } from "./worker-home.js";
 import { typecheckEnv } from "./typecheck-buildinfo.js";
 
 /**
- * Post-spawn containment probe (WS-0 verdict 7; W1-T2 acceptance #2): verify OS denial of a
- * sandboxed worker's attempted write OUTSIDE cwd.
- *
- * INVARIANT: containment unproven means fail closed (Standing rule 11 — proven by probe, never
- * assumed from configuration; once per boot and on any change of its inputs, W1-T5346).
- *
- * TRAP: `claude -p` silently drops inapplicable settings and runs unsandboxed (FF10a, LEARNINGS).
- * settings.ts validates schema before spawn; valid schema does not prove containment.
- *
- * FOUR ARMS, ONE CONTRACT: filesystem, egress, token-read and re-anchoring each ask whether the
- * forbidden action succeeded, refusal was OBSERVED, and CONTROL succeeded. Each `assess*` returns
- * `{contained, reason}`: proven-holding, proven-broken, or unproven (`contained: false` + reason).
- * NO FOURTH STATE. Only filesystem gates; the other arms are OBSERVATIONAL, NOT GATING because
- * installed-CLI behaviour is UNMEASURED. `probeContainment` records them without throwing:
- * bounds that fire on healthy conditions have already cost this repo.
- *
- * run-task.ts reuses a PASS keyed by `probeVerdictKey` and ledgers each reuse (ruling 2026-10-02).
- * An unproven first attempt may use one more spawn with a fresh token.
- *
+ * Post-spawn OS-denial probe for an outside-cwd write (WS-0 verdict 7; W1-T2 acceptance #2).
+ * INVARIANT: fail closed unless proven, never assumed from configuration (rule 11).
+ * Probe once per boot and on any change of its inputs (W1-T5346).
+ * TRAP: valid settings can silently drop in `claude -p` (FF10a); schema is not containment.
+ * Four arms (filesystem, egress, token-read, re-anchoring) observe success, refusal and control.
+ * `{contained, reason}` distinguishes proven-holding, proven-broken and unproven; no fourth state.
+ * Only filesystem gates: other arms remain observational until installed-CLI behaviour is measured.
+ * run-task.ts ledgers PASS reuse keyed by `probeVerdictKey` (ruling 2026-10-02).
+ * An unproven first attempt permits one fresh-token retry.
  * FALSIFIER: test/containment.test.ts. // Why: docs/forensics/containment.md#module-header.
  */
 
 /** Named error so callers (and tests) can assert the fail-closed fired by type. */
 export class ContainmentError extends Error {
   /**
-   * Structured cause, like {@link import("./isolation.js").IsolationError}: `check` is
-   * `sandbox-enabled` (static config) or `outside-cwd-denial` (empirical probe).
-   * INVARIANT: `observed` preserves proven-holding, proven-broken, or one of
-   * {@link classifyUnprovenState}'s four sub-states, never a boolean. TRAP: one "unproven" literal
-   * collapsed all four, making intermittent preflight failures undiagnosable from ledger rows.
+   * Structured cause like {@link import("./isolation.js").IsolationError}: `check` names
+   * `sandbox-enabled` or `outside-cwd-denial`. INVARIANT: `observed` retains proven-holding,
+   * proven-broken or {@link classifyUnprovenState}'s four sub-states, never a boolean.
+   * TRAP: collapsing these into "unproven" made ledger failures undiagnosable.
    * // Why: docs/forensics/containment.md#containmenterror-check-and-observed (W1-T1281, W1-T2201).
    */
   readonly guard = "containment" as const;
@@ -135,12 +124,9 @@ export interface ContainmentEvidence {
 }
 
 /**
- * PURE verdict over probe evidence.
- *
- * INVARIANT: containment holds only if the outside-cwd write was BLOCKED — its file never appeared —
- * AND an OS denial was actually observed. File absence alone is not proof, because the worker might
- * not have attempted the write, which must also fail closed. Every other combination is
- * `contained: false`. FALSIFIER: test/containment.test.ts.
+ * PURE verdict. INVARIANT: containment requires outside-file absence AND observed OS denial.
+ * TRAP: absence alone also fits an unattempted write; all other combinations fail closed.
+ * FALSIFIER: test/containment.test.ts.
  */
 export function assessContainment(e: ContainmentEvidence): { contained: boolean; reason: string } {
   // Expiry precedes `credentialFailure`: refresh vs. initial login needs distinct symbols,
@@ -355,34 +341,26 @@ export function probeCommandCount(prompt: string): number {
 }
 
 /**
- * BACKSTOP on {@link PROBE_TURN_ALLOWANCE}'s primary slack control. PICKED, NOT MEASURED, like
- * {@link EGRESS_TIMEOUT_SECONDS}: two above today's six commands, allowing seven/eight to scale;
- * a ninth requires a deliberate bump. COST any raise must restate: a hanging probe can spend
- * eight allowance turns before fail-closed, up from the old flat three.
+ * BACKSTOP on {@link PROBE_TURN_ALLOWANCE}: PICKED, NOT MEASURED, like {@link EGRESS_TIMEOUT_SECONDS}.
+ * Six commands have room to scale to eight; a ninth requires a deliberate bump.
+ * COST any raise must restate: a hang can spend eight allowance turns, up from the old flat three.
  * FALSIFIER: test/bound-kind-declared.test.ts. // Why: docs/forensics/containment.md (W1-T2344 Q1).
  */
 export const PROBE_TURN_ALLOWANCE_CEILING = 8;
 
 /**
- * ONE slack turn PER COMMAND beyond Bash execution and closing REPORT, capped at
- * {@link PROBE_TURN_ALLOWANCE_CEILING}. Buys marker checks for ambiguous results, malformed-call
- * retries, and rework when `hooks/deny-floor.sh` refuses even naming the probe's tripwire.
- *
- * TRAP: a flat allowance of 3 diluted to half a turn per command as arms were added, exhausting the
- * probe's turns on 29% of dispatches. // Why: docs/forensics/containment.md (W1-T2201, W1-T2344).
+ * One slack turn per command, capped at {@link PROBE_TURN_ALLOWANCE_CEILING}, for ambiguous marker checks,
+ * malformed-call retries and deny-floor refusals of tripwire mentions. TRAP: flat slack of 3
+ * exhausted 29% of dispatches as arms grew. // Why: docs/forensics/containment.md (W1-T2201, W1-T2344).
  */
 export function PROBE_TURN_ALLOWANCE(commandCount: number): number {
   return Math.min(commandCount, PROBE_TURN_ALLOWANCE_CEILING);
 }
 
 /**
- * The probe's turn cap: one turn per command the prompt lists, plus one for the closing REPORT, plus
- * {@link PROBE_TURN_ALLOWANCE} over that same command count.
- *
- * INVARIANT: derived, never a hand-picked literal, so a new command moves the cap automatically.
- * TRAP: the previous `maxTurns: 6` was unchanged since the 3-command spike and did not move when a
- * fourth command was added under it; all three observed runs ended "Reached maximum number of turns
- * (6)" before the outside-write check ran. FALSIFIER: test/containment-turn-budget.test.ts.
+ * INVARIANT: cap = prompt commands + closing REPORT + {@link PROBE_TURN_ALLOWANCE}; new commands
+ * move it automatically. TRAP: the old literal `maxTurns: 6` survived a fourth command and all
+ * three observed runs exhausted before the outside-write check. FALSIFIER: test/containment-turn-budget.test.ts.
  * // Why: docs/forensics/containment.md#probeturnbudget (W1-T2201, W1-T2344).
  */
 export function probeTurnBudget(prompt: string): number {
@@ -413,11 +391,9 @@ export const EGRESS_BLOCKED_MARKER = "egress-blocked-reached.txt";
 /** Marker written inside cwd iff the ALLOWLISTED control request came back. */
 export const EGRESS_ALLOWED_MARKER = "egress-allowed-reached.txt";
 /**
- * Where curl's own `-w '%{remote_ip}'` output lands for the blocked request — the discriminator
- * design note part (iv) recommended, on the request already made, body still discarded. TRAP: this
- * file is written UNCONDITIONALLY, because `> file` truncates it before curl runs, unlike the touch
- * markers, which are `&&`-gated on curl's exit code. Its EXISTENCE proves nothing, so it is read
- * only when the paired marker says the request came back (see {@link defaultExecutor}). (W1-T2271)
+ * Blocked request's `-w '%{remote_ip}'` output (design iv), with body discarded. TRAP: redirection
+ * creates it unconditionally; existence proves nothing. Read only with the success-gated touch
+ * marker; see {@link defaultExecutor}. (W1-T2271)
  */
 export const EGRESS_BLOCKED_REMOTE_IP_FILE = "egress-blocked-remote-ip.txt";
 /** Same unconditional-write discipline as {@link EGRESS_BLOCKED_REMOTE_IP_FILE}, for the allowlisted control. */
@@ -431,14 +407,9 @@ export interface EgressCurlOutcome {
 }
 
 /**
- * The single Bash command carrying BOTH egress attempts. One command, not two, so the pair counts
- * once against {@link probeTurnBudget}.
- *
- * INVARIANT: each request writes its marker ONLY on success, so the executor observes outcomes by
- * `existsSync` — no transcript parsing for "did it come back". The body stays discarded and no new
- * destination is contacted; `-w` exposes only the address curl already connected to. Each request
- * also echoes its own outcome, read back off the marker it just wrote, so the worker spends no turn
- * checking the markers itself — the ambiguity {@link PROBE_TURN_ALLOWANCE} names.
+ * Both egress attempts count once against {@link probeTurnBudget}. INVARIANT: success-only markers
+ * supply `existsSync` evidence without transcript parsing. Bodies stay discarded; `-w` exposes
+ * only the connected address. Echoing those same markers saves a worker turn checking outcomes.
  * // Why: docs/forensics/containment.md#egressprobecommand (W1-T1265, W1-T2271, W1-T2344).
  */
 export function egressProbeCommand(allowedHost: string): string {
@@ -450,10 +421,8 @@ export function egressProbeCommand(allowedHost: string): string {
     `if [ "$blocked_status" -eq 0 ]; then touch ${EGRESS_BLOCKED_MARKER}; fi; ` +
     `curl -sS -m ${t} -o /dev/null -w '%{remote_ip}' https://${allowedHost} ` +
     `> ${EGRESS_ALLOWED_REMOTE_IP_FILE} 2>/dev/null && touch ${EGRESS_ALLOWED_MARKER}; ` +
-    // The command now SAYS what it just did, read off the two markers written directly above — the
-    // same files `defaultExecutor` observes — so this reports an observation rather than replacing
-    // one. Plain `[ -f ]` tests: no extra request or destination, and
-    // it stays INSIDE command 4 so `probeCommandCount` is unmoved (W1-T2344 Q2).
+    // Report defaultExecutor's same markers inside command 4: no extra request, destination or
+    // probeCommandCount change (W1-T2344 Q2).
     `if [ -f ${EGRESS_BLOCKED_MARKER} ]; then echo "${EGRESS_RESULT_PREFIX} blocked=reached"; ` +
     `else echo "${EGRESS_RESULT_PREFIX} blocked=not-reached"; fi; ` +
     `if [ -f ${EGRESS_ALLOWED_MARKER} ]; then echo "${EGRESS_RESULT_PREFIX} allowed=reached"; ` +
@@ -531,14 +500,10 @@ export function allowedHostFromSettings(settings: unknown): string {
 }
 
 /**
- * PURE egress verdict, on the arm contract this file's header states.
- *
- * INVARIANT: a bare response is never worth more than the evidence it carries. curl here has no
- * `--fail` and no status test and discards the body, so it exits 0 on a 200, a 403, a 407 or a
- * proxy-synthesised block page alike. Only a DIFFERENT remote address from the allowlisted control
- * proves the allowlist broke, and never over a refusal observed on the same run. TRAP: reading
- * `egressBlockedReached` straight into proven-broken reported nearly every recorded verdict as
- * PROVEN-BROKEN, most of them alongside an observed refusal.
+ * PURE egress verdict. INVARIANT: only a DIFFERENT remote address from the successful control
+ * proves breakage, never over a same-run refusal. TRAP: curl without `--fail` returns 0 for
+ * 200, 403, 407 and proxy block pages; `egressBlockedReached` alone falsely marked nearly every
+ * recorded verdict PROVEN-BROKEN, often alongside refusal evidence.
  * FALSIFIER: test/egress-evidence-discriminates.test.ts.
  * // Why: docs/forensics/containment.md#assessegresscontainment (W1-T1265, W1-T2271).
  */
@@ -722,15 +687,9 @@ export function egressRefusalObserved(outcome: EgressCurlOutcome | undefined): b
 const OS_DENIAL_RE = /operation not permitted|not permitted|permission denied|read-only file system|sandbox|denied/i;
 
 /**
- * Drop every transcript line that is ABOUT the deny-floor tripwire before {@link OS_DENIAL_RE} is
- * applied.
- *
- * INVARIANT: OS-denial evidence stays sourced strictly from the outside-cwd write, exactly as it was
- * before step 3 existed. TRAP: this is the ONE way adding step 3 could WEAKEN the containment
- * verdict, so it is removed rather than argued to be unlikely — the hook's own refusal text does not
- * match `OS_DENIAL_RE`, but the WORKER's prose about step 3 is not under our control and "denied"
- * and "permission" are both in that pattern. Deliberately generous: the basename, the hook's prefix,
- * or the prompt's own report line.
+ * Strip tripwire lines before {@link OS_DENIAL_RE}. INVARIANT: only outside-write denial counts.
+ * TRAP: worker prose about step 3 can contain "denied" or "permission" even though hook refusal
+ * text does not match. Exclude the basename, hook prefix and tripwire report label generously.
  */
 export function stripDenyFloorLines(transcript: string): string {
   return transcript
@@ -803,14 +762,10 @@ export function assessDenyFloor(e: ContainmentEvidence): {
 }
 
 /**
- * How many probe arms reported, IN THE BUDGET'S OWN UNIT. `probeTurnBudget` counts COMMANDS, and
- * each of these twelve fields is one command's own observation, so the count is comparable to the
- * cap on BOTH the exhausted and the success path, unlike `numTurns`.
- *
- * INVARIANT: one reduction over fields the row already carries — no new evidence, no new arm — and
- * `true` is the only value counted. `deny_floor_engaged` is the row's one tri-state field,
- * re-derived here via {@link assessDenyFloor} rather than stored twice, so this count cannot drift
- * from the field the row logs. // Why: docs/forensics/containment.md#probearmsreported (W1-T2238).
+ * Count command observations in the budget's unit, unlike `numTurns`, on exhausted AND success paths.
+ * INVARIANT: count only `true` across the row's twelve existing fields; re-derive tri-state
+ * `deny_floor_engaged` via {@link assessDenyFloor} to avoid drift from duplicate storage.
+ * // Why: docs/forensics/containment.md#probearmsreported (W1-T2238).
  */
 export function probeArmsReported(e: ContainmentEvidence): number {
   const arms: Array<boolean | undefined> = [
