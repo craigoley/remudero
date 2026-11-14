@@ -10,7 +10,8 @@
  * the real judge, the arm path and the armed re-judge.
  */
 import assert from "node:assert/strict";
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 
@@ -31,7 +32,9 @@ import { planSafetyGitSync } from "#src/lib/plan-pr-merge-safety.js";
 import { runArmedRatchetRejudge, type ArmedStalledPr, type OpenPrView } from "#src/lib/sweep.js";
 // @ts-expect-error -- plain .mjs script, no type declarations
 import { CI_READS_BASELINE } from "#scripts/source-size-ratchet.mjs";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import { gitRepo, type GitRepo } from "#test/helpers/git-repo.js";
+import * as sweepModule from "#test/helpers/sweep-test.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 type Row = Record<string, unknown>;
@@ -179,14 +182,14 @@ test("W1-T12717 criterion 3: a crossing from the PR's own diff on a CI-enforced 
   const said: string[] = [];
   const result = attemptArm(url(18501), { ...armDeps(calls, () => OWN_DIFF, ledger), say: (m: string) => { said.push(m); } }, "head-sha");
   assert.equal(result.outcome, "direct-merge-preflight-refused");
-  assert.equal(result.directMergePreflight?.remedy, "operator");
+  assert.equal(result.directMergePreflight?.remedy, "fix-lane");
   assert.equal(result.directMergePreflight?.updateWithheld, "pr-diff");
   assert.deepEqual(calls, [], "neither updated, armed nor merged");
   assert.ok(said.some((m) => m.includes("W1-T12717") && m.includes("own diff") && m.includes(FILE)));
   logArmAttribution((step, extra = {}) => ledger.push({ step, ...extra }), result.outcome, url(18501), "W1-T1", "review", {}, undefined,
     result.directMergePreflight, result.ratchetJudge);
   const decided = ledger.find((r) => r.step === "sweep.ratchet_judge.decided");
-  assert.equal(decided?.remedy, "operator");
+  assert.equal(decided?.remedy, "fix-lane");
   assert.equal(decided?.update_withheld, "pr-diff");
 
   const swept: Row[] = [];
@@ -195,7 +198,7 @@ test("W1-T12717 criterion 3: a crossing from the PR's own diff on a CI-enforced 
   assert.equal(updates.length, 0);
   assert.equal(swept.filter((r) => r.step === "sweep.update_branch.attempted").length, 0);
   const row = swept.find((r) => r.step === "sweep.ratchet_judge.decided");
-  assert.equal(row?.remedy, "operator");
+  assert.equal(row?.remedy, "fix-lane");
   assert.equal(row?.update_withheld, "pr-diff");
 });
 
@@ -206,7 +209,7 @@ test("W1-T12717 criterion 4: a crossing main and the PR make together is updated
   assert.equal(armOnce(18439, "head-1", TOGETHER, ledger, calls).outcome, "direct-merge-updated");
   const again = armOnce(18439, "head-2", { ...TOGETHER, mainSha: "main-2" }, ledger, calls);
   assert.equal(again.outcome, "direct-merge-preflight-refused");
-  assert.equal(again.directMergePreflight?.remedy, "operator");
+  assert.equal(again.directMergePreflight?.remedy, "fix-lane");
   assert.equal(again.directMergePreflight?.updateWithheld, "repeat");
   assert.deepEqual(calls, ["updateBranch"]);
   assert.equal(ledger.filter((r) => r.step === "sweep.ratchet_judge.decided").at(-1)?.update_withheld, "repeat");
@@ -225,7 +228,7 @@ test("W1-T12717 criterion 4: a crossing main and the PR make together is updated
   assert.deepEqual(await runArmedRatchetRejudge([armedPr(18424, "head-b")], deps), [], "the head the update made is not updated again");
   assert.equal(updates.length, 1);
   const last = swept.filter((r) => r.step === "sweep.ratchet_judge.decided").at(-1);
-  assert.equal(last?.remedy, "operator");
+  assert.equal(last?.remedy, "fix-lane");
   assert.equal(last?.update_withheld, "repeat");
   const shared = [...ledger];
   assert.deepEqual(await runArmedRatchetRejudge([armedPr(18439, "head-4")], sweepDeps(shared, updates, () => "main-4", () => grown)), []);
@@ -262,5 +265,48 @@ test("W1-T12717 criterion 6: invariant:an-update-never-repeats-for-one-crossing 
   assert.ok(!calls.includes("armAuto") && !calls.includes("mergeDirect"));
   const decided = ledger.filter((r) => r.step === "sweep.ratchet_judge.decided");
   assert.equal(decided.filter((r) => r.remedy === "update-branch").length, 1);
-  assert.ok(decided.slice(1).every((r) => r.remedy === "operator" && r.update_withheld === "repeat"));
+  assert.ok(decided.slice(1).every((r) => r.remedy === "fix-lane" && r.update_withheld === "repeat"));
+});
+
+test("W1-T12717 criterion 7: a withheld crossing is handed to the PR's fix lane with the crossing as its finding, never to the operator", async () => {
+  const n = 18427;
+  const head = "18427aaaa";
+  const view: OpenPrView = { prNumber: n, prUrl: url(n), taskId: `W1-T${n}`, headRefName: `run-W1-T${n}-1794691624000`, reviewState: "success",
+    checksState: "green", unmetCriteria: [], priorStrikes: 0, lastActivityAt: "2026-11-14T19:00:00Z", headSha: head, autoMergeArmed: false };
+  // The arm path withheld the update on this head (main 12 against a ceiling of 10; the PR adds 1).
+  const lines: Row[] = [];
+  const result = attemptArm(url(n), { ...armDeps([], () => OWN_DIFF, lines), headSha: () => head }, head);
+  logArmAttribution((step, extra = {}) => lines.push({ step, ...extra, head_sha: head }), result.outcome, url(n), `W1-T${n}`, "sweep", {}, undefined,
+    result.directMergePreflight, result.ratchetJudge);
+  assert.equal(lines.find((r) => r.step === "sweep.ratchet_judge.decided")?.remedy, "fix-lane");
+  const fixes: string[] = [];
+  const armed: string[] = [];
+  const escalated: string[] = [];
+  const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1-t12717-`));
+  try {
+    const deps: sweepModule.SweepDeps = {
+      arm: (p) => { armed.push(p.headSha); },
+      close: () => {},
+      dispatchFix: (_p, evidence) => { fixes.push(...(evidence as { ciFailures: Array<{ logTail: string }> }).ciFailures.map((f) => f.logTail)); },
+      escalate: (_p, reason) => { escalated.push(reason); },
+      ledgerPath: join(dir, "ledger.ndjson"),
+      runId: "SWEEP-12717",
+      now: () => Date.parse("2026-11-14T20:00:00Z"),
+      readLedger: () => lines,
+      appendLine: (_path, line) => { lines.push(line); },
+      log: (step, extra = {}) => { lines.push({ run_id: "SWEEP-12717", step, ...extra }); },
+      handedOffHeadJudgments: sweepModule.handedOffHeadJudgmentPool({ schedule: () => () => {} }),
+    };
+    await sweepModule.runSweep([view], deps);
+    assert.equal(fixes.length, 1, "the fix lane was dispatched once");
+    assert.match(fixes[0]!, /clock-signature src\/lib\/x\.ts#dateNow: main's count 12 \(ceiling 10\), this pull request's merged count 13, prAdds 1/);
+    assert.match(fixes[0]!, /pr-diff/);
+    assert.deepEqual(armed, [], "a held head is not armed");
+    assert.deepEqual(escalated, [], "nothing reaches the operator");
+    assert.ok(!lines.some((r) => r.remedy === "operator"));
+    await sweepModule.runSweep([view], deps);
+    assert.equal(fixes.length, 1, "an unchanged head dispatches no second fix");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

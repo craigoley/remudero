@@ -1047,7 +1047,7 @@ export interface DirectMergePreflightEvidence {
   priorHeadSha?: string;
   behindBy?: number;
   mergeable?: string;
-  remedy: "direct-merge" | "update-branch" | "retry-later" | "mergeability-unknown" | "operator";
+  remedy: "direct-merge" | "update-branch" | "retry-later" | "mergeability-unknown" | "operator" | "fix-lane";
   error?: string;
   /** W1-T5472 — set only when the plan-touch read ran (a behind PR GitHub would merge as-is). */
   planTouch?: PlanTouch;
@@ -1454,8 +1454,8 @@ function* ratchetCollisionSteps(
   const withheld = ratchetUpdateWithheld(judge, prNumberFromRef(prUrl), deps.ledgerLines?.() ?? []);
   if (withheld !== undefined) {
     deps.say(`automerge.direct_merge_preflight_refused (W1-T12717): ${judge.verdict} ${withheld === "pr-diff" ? "comes from the PR's own diff on a count main already carries over its ceiling"
-      : "was already answered by an update-branch that did not cure it"}: ${describeRatchetRows(judge)} — not updated again, neither armed nor merged: ${prUrl}`);
-    return { hold: { outcome: "direct-merge-preflight-refused", ...context, directMergePreflight: { ...evidence, remedy: "operator", updateWithheld: withheld } } };
+      : "was already answered by an update-branch that did not cure it"}: ${describeRatchetRows(judge)} — not updated; handed to the fix lane, neither armed nor merged: ${prUrl}`);
+    return { hold: { outcome: "direct-merge-preflight-refused", ...context, directMergePreflight: { ...evidence, remedy: "fix-lane", updateWithheld: withheld } } };
   }
   let update: { ok: boolean; error?: string };
   try {
