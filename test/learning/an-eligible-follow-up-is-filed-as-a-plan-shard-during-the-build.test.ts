@@ -320,7 +320,7 @@ test("follow-up head provenance survives mining and registry publication", () =>
   } });
 });
 
-test("an unreadable follow-up head is retained for the operator when its source merges", async () => {
+test("an unreadable follow-up head preserves the proposal and its source-merge retirement", async () => {
   const harvest = mineFollowups([{ step: "report.followups", run_id: "run", task_id: candidate.taskId,
     ts: "timestamp", entries: [{ type: "task", text: candidate.text }] }]);
   let proposals: Proposal[] = [];
@@ -328,28 +328,29 @@ test("an unreadable follow-up head is retained for the operator when its source 
     proposals = update(proposals) ?? proposals;
     return proposals;
   } });
+  assert.equal(proposals.length, 1);
+  const before = structuredClone(proposals);
+  const rows: Record<string, unknown>[] = [];
   const filing = await fileEligibleFollowups(routedOutcomes, {
     planOnMain: [source], openPrOrigins: new Set(), ratifiedIds: new Set(),
     draft: async () => assert.fail("an unreadable source head reached the drafter"),
     fileBatch: async () => assert.fail("an unreadable source head reached the publisher"),
-    log: () => {},
+    log: (step, extra) => rows.push({ step, ...extra }),
   });
-  assert.deepEqual(filing.refused.map(r => r.reason), ["unreadable-head-sha"]);
-  const kept = keepRefusedFollowupsForOperator(filing.refused.map(r => r.entryId), {
-    registryPath: "unused", updateRegistry: (_p, update) => {
+  assert.deepEqual(filing, { filed: [], refused: [{ entryId: harvest.candidates[0].entryId,
+    reason: "unreadable-head-sha" }] });
+  assert.deepEqual(rows, [{ step: "followup.file_refused", entry_id: harvest.candidates[0].entryId,
+    reason: "unreadable-head-sha" }]);
+  assert.deepEqual(proposals, before, "the refused proposal stays unchanged for operator approval");
+  const deps = { registryPath: "unused", updateRegistry: (_path: string, update: (current: Proposal[]) => Proposal[] | null) => {
       proposals = update(proposals) ?? proposals;
       return proposals;
-    },
-  });
-  assert.equal(kept.length, 1);
-  assert.match(proposals[0].summary, /kept for the operator: automatic filing refused it/);
-  const retired = retireSettledFollowups({ kind: "ok", merged: new Set([candidate.taskId]) }, {
-    registryPath: "unused", updateRegistry: (_path, update) => {
-      assert.equal(update(proposals), null, "the refused proposal must survive its source merge");
-      return null;
-    },
-  });
-  assert.deepEqual(retired, []);
+    } };
+  assert.deepEqual(retireSettledFollowups({ kind: "ok", merged: new Set() }, deps), []);
+  assert.deepEqual(proposals, before, "the proposal remains available while its source is unmerged");
+  const retired = retireSettledFollowups({ kind: "ok", merged: new Set([candidate.taskId]) }, deps);
+  assert.deepEqual(retired.map(r => [r.proposalId, r.taskId]), [[before[0].id, candidate.taskId]]);
+  assert.deepEqual(proposals, [], "source merge keeps its prior retirement behavior after refusal");
 });
 
 test("a draft that duplicates a filed shard is skipped by the batch planner and refused with its reason", async () => {
