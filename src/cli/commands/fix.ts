@@ -2546,8 +2546,10 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
   const filingRoundRefusal = async (priorHead: string, nextHead: string | undefined): Promise<string | undefined> => {
     if (baselineDiffFiles === undefined) return undefined;
     if (baselineDiffFiles.length === 0 || !baselineDiffFiles.every(isInPlanScope)) return undefined;
+    // No new head means no round result to guard: nothing was committed, so nothing can carry a trailer.
+    if (nextHead === undefined || nextHead === priorHead) return undefined;
     return planFilingFixRoundRefusal(await readPlanFilingFixRoundInput(
-      baselineDiffFiles, priorHead, nextHead ?? "HEAD",
+      baselineDiffFiles, priorHead, nextHead,
       args => (deps.scopeAmendmentGit ?? hostWorktreeGitAsync)(opts.worktreePath, args, { maxBuffer: 1 << 26 })));
   };
   const landRoundPush = async (push: () => unknown, headSha: string | undefined, site: string): Promise<FixRungOutcome | "refused" | undefined> => {
