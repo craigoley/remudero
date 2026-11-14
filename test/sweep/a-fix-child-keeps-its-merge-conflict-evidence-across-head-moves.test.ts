@@ -13,7 +13,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, test } from "node:test";
 
-import { gitRepo, type GitRepo } from "#test/helpers/git-repo.js";
+import { originWithClone, type GitRepo } from "#test/helpers/git-repo.js";
 import { runFixRung } from "#test/helpers/run-task-test.js";
 import {
   CONFLICT_REPAIR_HANDOFF_REASON, buildFixDispatchEnvelope, runFixDispatchChild,
@@ -32,20 +32,20 @@ const CI_FAILURES = RED.map((name) => ({ name, logTail: `${name}: failed` }));
 const CONFLICT: MergeConflictEvidence = { files: [{ path: "src/shared.ts", oursDeleted: 1, theirsDeleted: 1 }],
   oursLog: "ours", theirsLog: "theirs" };
 
-/** A branch checkout whose `src/shared.ts` edit conflicts with main when `conflicting`, else main edits another file. */
-function branchCheckout(conflicting: boolean): { clone: GitRepo; head: string } {
-  const origin = gitRepo({ kind: "t12545-origin" });
-  writeFileSync(join(origin.dir, "shared.ts"), "export const value = 0;\n");
-  origin.git("add", "shared.ts");
-  origin.git("commit", "-q", "-m", "seed");
-  const clone = gitRepo({ kind: "t12545-branch", cloneFrom: origin.dir });
+/** A clone on a branch whose `shared.ts` edit conflicts with origin/main when `conflicting`, else main edits another file. */
+function conflictFixture(conflicting: boolean): { clone: GitRepo; head: string } {
+  const { clone } = originWithClone(join(mkdtempSync(join(tmpdir(), "rmd-t12545-")), "branch"),
+    { seed: { "shared.ts": "export const value = 0;\n" } });
   clone.git("checkout", "-q", "-b", "run-W1-T12545X-1");
   writeFileSync(join(clone.dir, "shared.ts"), "export const value = 1;\n");
   clone.git("commit", "-q", "-am", "ours");
-  if (conflicting) writeFileSync(join(origin.dir, "shared.ts"), "export const value = 2;\n");
-  else writeFileSync(join(origin.dir, "other.ts"), "export const other = 2;\n");
-  origin.git("add", "-A", ".");
-  origin.git("commit", "-q", "-m", "theirs");
+  clone.git("checkout", "-q", "main");
+  if (conflicting) writeFileSync(join(clone.dir, "shared.ts"), "export const value = 2;\n");
+  else writeFileSync(join(clone.dir, "other.ts"), "export const other = 2;\n");
+  clone.git("add", "-A", ".");
+  clone.git("commit", "-q", "-m", "theirs");
+  clone.git("push", "-q", "origin", "main");
+  clone.git("checkout", "-q", "run-W1-T12545X-1");
   return { clone, head: clone.git("rev-parse", "HEAD") };
 }
 
@@ -67,7 +67,7 @@ function worker(n: number): WorkerResult {
 }
 
 /** A shell-less fix rung on a real branch checkout; `mergeable` answers each pre-strike merge-facts read in turn. */
-function rung(checkout: { clone: GitRepo; head: string }, mergeable: string[], over: Partial<Run> = {}) {
+function rung(checkout: ReturnType<typeof conflictFixture>, mergeable: string[], over: Partial<Run> = {}) {
   const state = mkdtempSync(join(tmpdir(), "rmd-t12545-state-"));
   const rows: Row[] = [];
   const judged: FixProgressInput[] = [];
@@ -115,7 +115,7 @@ const conflictStandDowns = (rows: Row[]) => steps(rows, "fix.stood_down").filter
 
 describe("a fix round re-enters merge-conflict mode from a trial merge's unmerged index", () => {
   test("W1-T12545 criterion 1: a ci-log round that reads CONFLICTING repairs the conflict instead of standing down", async () => {
-    const checkout = branchCheckout(true);
+    const checkout = conflictFixture(true);
     const f = rung(checkout, ["CONFLICTING"], { ciFailures: CI_FAILURES });
     const outcome = await runFixRung(f.run);
     assert.equal(outcome.outcome, "escalated", outcome.reason);
@@ -132,7 +132,7 @@ describe("a fix round re-enters merge-conflict mode from a trial merge's unmerge
   });
 
   test("W1-T12545 criterion 2: a round that left merge-conflict mode re-enters it when main brings the conflict back", async () => {
-    const checkout = branchCheckout(true);
+    const checkout = conflictFixture(true);
     const f = rung(checkout, ["CONFLICTING"], { mergeConflict: CONFLICT });
     const outcome = await runFixRung(f.run);
     assert.equal(outcome.outcome, "escalated", outcome.reason);
@@ -148,7 +148,7 @@ describe("a fix round re-enters merge-conflict mode from a trial merge's unmerge
 
 describe("invariant:conflict-round-needs-captured-evidence", () => {
   test("W1-T12545 criterion 3: no unmerged paths, a dirty tree or an unreadable merge stands down exactly as today", async () => {
-    const clean = branchCheckout(false);
+    const clean = conflictFixture(false);
     const merged = rung(clean, ["CONFLICTING"], { ciFailures: CI_FAILURES });
     const first = await runFixRung(merged.run);
     assert.equal(first.outcome, "stood_down");
@@ -159,7 +159,7 @@ describe("invariant:conflict-round-needs-captured-evidence", () => {
     assert.equal(clean.clone.git("rev-parse", "HEAD"), clean.head, "a clean trial merge is aborted, never committed");
     assert.equal(clean.clone.git("status", "--porcelain", "--untracked-files=all"), "");
 
-    const dirtyCheckout = branchCheckout(true);
+    const dirtyCheckout = conflictFixture(true);
     writeFileSync(join(dirtyCheckout.clone.dir, "stray.txt"), "not the rung's\n");
     const dirty = rung(dirtyCheckout, ["CONFLICTING"], { ciFailures: CI_FAILURES });
     const second = await runFixRung(dirty.run);
@@ -167,7 +167,7 @@ describe("invariant:conflict-round-needs-captured-evidence", () => {
     assert.equal(steps(dirty.rows, "fix.merge_mode_reentered").length, 0, "nothing is inferred from a dirty tree");
     assert.equal(dirtyCheckout.clone.git("rev-parse", "HEAD"), dirtyCheckout.head);
 
-    const unreadable = branchCheckout(true);
+    const unreadable = conflictFixture(true);
     const broken = rung(unreadable, ["CONFLICTING"], { ciFailures: CI_FAILURES });
     broken.run.deps.scopeAmendmentGit = async (_cwd, args) => {
       if (args[0] === "fetch") throw new Error("origin unreachable");
@@ -179,7 +179,7 @@ describe("invariant:conflict-round-needs-captured-evidence", () => {
     assert.match(String(steps(broken.rows, "fix.gate_read_error").find((row) => row.read === "scope_merge_conflict")?.error),
       /origin unreachable/);
 
-    const older = branchCheckout(true);
+    const older = conflictFixture(true);
     const stale = rung(older, ["CONFLICTING"], { ciFailures: CI_FAILURES, initialReview: review("0".repeat(40)) });
     stale.run.deps.runReview = async () => review("0".repeat(40));
     const fourth = await runFixRung(stale.run);
