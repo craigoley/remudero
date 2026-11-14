@@ -242,8 +242,8 @@ export function ghExec(args: string[], opts: ExecFileSyncOptions = {}): string |
   if (socket === undefined) applyGhReadCadence(args);
   const spawned = socket === undefined ? { file: "gh", args } : ghBrokerClientSpawn(socket, args, ghBrokerClassOf(opts.env));
   try {
-    const out = ghExecFile(spawned.file, spawned.args, opts) as string | Buffer;
-    if (args[0] === "api" && args.includes("-i")) {
+    const out = ghExecFileResult(spawned.file, spawned.args, opts);
+    if (socket !== undefined && args[0] === "api" && args.includes("-i")) {
       githubInstallationBudget().record(parseGhRateLimitHeaders(splitGhHeaderBlock(String(out), args.includes("--slurp")).headers));
     }
     return out;
@@ -253,8 +253,23 @@ export function ghExec(args: string[], opts: ExecFileSyncOptions = {}): string |
 export function ghExecFile(file: string, args: string[], opts: ExecFileSyncOptionsWithStringEncoding): string;
 export function ghExecFile(file: string, args: string[], opts?: ExecFileSyncOptions): Buffer;
 export function ghExecFile(file: string, args: string[], opts: ExecFileSyncOptions = {}): string | Buffer {
+  if (basename(file) === "gh") admitInstallationReadSync(args);
+  return ghExecFileResult(file, args, opts);
+}
+
+function ghExecFileResult(file: string, args: string[], opts: ExecFileSyncOptions): string | Buffer {
+  const isGh = basename(file) === "gh";
   refuseSentinelGhToken(file, args, opts.env);
-  return execFileSync(file, args, ghOptionsWithDefaultTimeout(withGhCredentialEnv(file, args, opts))) as string | Buffer;
+  try {
+    const out = execFileSync(file, args, ghOptionsWithDefaultTimeout(withGhCredentialEnv(file, args, opts))) as string | Buffer;
+    if (isGh && args[0] === "api" && args.includes("-i")) {
+      githubInstallationBudget().record(parseGhRateLimitHeaders(splitGhHeaderBlock(String(out), args.includes("--slurp")).headers));
+    }
+    return out;
+  } catch (err) {
+    if (isGh) noteInstallationRefusal(err);
+    throw err;
+  }
 }
 
 export function ghJson(
@@ -407,7 +422,7 @@ export async function ghJsonAsync(
   onRateLimit?: (reading: GhRateLimitReading) => void,
   readOpts: GhJsonReadOptions = {},
 ): Promise<unknown> {
-  const withHeaders = args[0] === "api";
+  const withHeaders = args[0] === "api" && (onRateLimit !== undefined || githubInstallationBudget().consumers !== undefined || args.includes("-i"));
   const execArgs = withHeaders && !args.includes("-i") ? [...args, "-i"] : args;
   const stdout = await ghStdoutAsync(args, execArgs, execAsync, readOpts);
   if (!withHeaders) return parseGhJsonBody(args, stdout);

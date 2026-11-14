@@ -297,15 +297,15 @@ export const HAND_RUN_INSTALLATION_SHARES = 1;
 
 /**
  * W1-T12553 — the consumers that share one GitHub App installation: each live instance whose
- * `gh_app_installation_id` is `installationId`, plus {@link HAND_RUN_INSTALLATION_SHARES}. A live row
- * that names no installation runs on the host's default one (`install-host-units.sh`), so it counts
- * too. `undefined` when no live instance is on the installation: the caller sets no budget.
+ * `gh_app_installation_id` is `installationId`, plus {@link HAND_RUN_INSTALLATION_SHARES}.
+ * An omitted ID establishes no installation identity. `undefined` when no live instance declares
+ * the installation: the caller sets no budget.
  */
 export function installationConsumers(registryText: string, installationId: string): number | undefined {
   const sharing = scanInstances(registryText).filter((row) => {
     if (row.fields.get("retired") === "true") return false;
     const declared = row.fields.get("gh_app_installation_id");
-    return declared === undefined || declared === "" || declared === installationId;
+    return declared !== undefined && declared !== "" && declared === installationId;
   }).length;
   return sharing === 0 ? undefined : sharing + HAND_RUN_INSTALLATION_SHARES;
 }

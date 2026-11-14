@@ -1,16 +1,20 @@
 import assert from "node:assert/strict";
 import { afterEach, test } from "node:test";
+import fs from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { Worker } from "node:worker_threads";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
-import { daemonInstallationBudgetWorkerInput, startDaemonInstallationBudget } from "#src/cli/commands/daemon.js";
+import { daemonInstallationBudgetWorkerInput, daemonInstallationRegistry, startDaemonInstallationBudget } from "#src/cli/commands/daemon.js";
 import { clockFromMillisFn } from "#src/lib/clock.js";
-import { GITHUB_WRITE_RESERVE_FRACTION } from "#src/lib/github-installation-budget.js";
+import { createInstallationBudget, createInstallationBudgetState, GITHUB_WRITE_RESERVE_FRACTION } from "#src/lib/github-installation-budget.js";
 import {
-  configureGithubInstallationBudget, createGhCallPacer, ghJson, ghJsonAsync, githubInstallationBudget,
+  configureGithubInstallationBudget, createGhCallPacer, ghExec, ghExecFile, ghJson, ghJsonAsync, githubInstallationBudget,
   GhPaceFloorStandDownError, paceGhEntry, takeGithubBudgetThrottles,
 } from "#src/lib/github-transport.js";
+import { DEFAULT_HOST_INSTANCE_REGISTRY_PATH, installationConsumers } from "#src/lib/instance-registry.js";
+import { withGhShim } from "#test/helpers/gh-shim.js";
 import { fetchOpenPrsRest } from "#src/lib/open-prs-rest.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
@@ -218,11 +222,11 @@ test("W1-T12553 criterion 5: with no reading, no headers or no registry the pace
   const elsewhere = harness(undefined, { GH_APP_INSTALLATION_ID: "123", RMD_INSTANCE_NAME: "core" });
   assert.equal(elsewhere.rows.find((row) => row.step === "github.budget.configured")?.extra?.reason, "no_instance_on_installation");
 
-  // A checkout registry that names no installation: each live row runs on the host's default one.
+  // Omitted IDs do not establish which installation the instances use.
   const checkout = harness(() => ({
     text: HOST_REGISTRY.replace(/^ {4}gh_app_installation_id: .*\n/gm, ""), source: "checkout",
   }));
-  assert.equal(checkout.rows.find((row) => row.step === "github.budget.configured")?.extra?.consumers, 5);
+  assert.equal(checkout.rows.find((row) => row.step === "github.budget.configured")?.extra?.reason, "no_instance_on_installation");
 
   // The daemon start sets the budget; a pacer made anywhere in the process reads it.
   const shared = harness();
@@ -264,4 +268,126 @@ test("W1-T12553 criterion 5: the production read worker shares the main thread's
   assert.deepEqual(outcome, { pid: process.pid, before: 4, stoodDown: true });
   assert.equal(githubInstallationBudget().admit().ok, false, "the main thread sees the worker's read");
   assert.equal(throttledRows()[0]?.extra.reason, "share", "the worker's row drains on the main thread");
+});
+
+
+test("W1-T12553 criterion 1: omitted and empty installation IDs never match an unrelated installation", () => {
+  const registry = [
+    "instances:", "  omitted:", "    repo: acme/omitted",
+    "  empty:", "    repo: acme/empty", '    gh_app_installation_id: ""',
+    "  explicit:", "    repo: acme/explicit", `    gh_app_installation_id: "${INSTALLATION}"`,
+  ].join("\n");
+  assert.equal(installationConsumers(registry, "999"), undefined);
+  assert.equal(installationConsumers(registry, ""), undefined);
+  assert.equal(installationConsumers(registry, INSTALLATION), 2, "one matching instance and one hand-run share");
+});
+
+test("W1-T12553 criterion 2 and criterion 3: direct and paced ghExecFile reads spend exactly once and writes bypass the reserve", async () => {
+  await withGhShim([{ when: "api", stdout: "[]" }], shim => {
+    const h = harness();
+    const args = ["api", "repos/o/r/commits/head/status"];
+    const opts = { encoding: "utf8" as const };
+    const reads = [
+      () => ghExecFile("gh", args, opts),
+      () => ghExecFile(join(shim.dir, "gh"), args, opts),
+      () => paceGhEntry(h.pacer, () => false, () => ghExecFile("gh", args, opts)),
+      () => ghExec(args, opts),
+    ];
+    const savedGap = process.env.RMD_GH_SHARED_READ_GAP_MS;
+    const savedCache = process.env.RMD_GH_CACHE_HOME;
+    process.env.RMD_GH_SHARED_READ_GAP_MS = "0";
+    process.env.RMD_GH_CACHE_HOME = join(shim.dir, "cache");
+    try {
+      for (const read of reads) {
+        h.write(18); // floor((18 - 10) / 4) = two reads.
+        const before = shim.calls().length;
+        read();
+        assert.equal(githubInstallationBudget().admit().ok, true, "the first call spends only one admission");
+        read();
+        assert.throws(read, GhPaceFloorStandDownError);
+        assert.equal(shim.calls().length - before, 2, "the refused call never spawns gh");
+        h.write(10);
+        assert.throws(read, GhPaceFloorStandDownError, "the reserve blocks the first read, too");
+      }
+      for (const write of [
+        ["api", "-X", "POST", "repos/o/r/issues/1/comments", "-f", "body=x"],
+        ["pr", "merge", "1"], ["pr", "review", "1", "--approve"],
+        ["api", "-X", "POST", "repos/o/r/statuses/head", "-f", "state=success"],
+      ]) {
+        ghExecFile("gh", write, opts);
+        ghExec(write, opts);
+      }
+      const headers = `HTTP/2.0 201 Created\r\nX-Ratelimit-Remaining: 18\r\nX-Ratelimit-Limit: 100\r\nX-Ratelimit-Reset: ${RESET_S}\r\nX-Ratelimit-Resource: core\r\n\r\n{}`;
+      shim.addRoute({ when: "headers", stdout: headers });
+      const meteredWrite = ["api", "-X", "POST", "repos/o/r/headers", "-i"];
+      assert.equal(ghExecFile("gh", meteredWrite, opts).trimEnd(), headers);
+      assert.equal(githubInstallationBudget().allowance(), 2, "direct subprocess headers refresh the allowance");
+      assert.equal(ghExec(meteredWrite, opts).trimEnd(), headers);
+      assert.equal(ghExecFile(process.execPath, ["-e", "process.stdout.write('local')"], opts), "local");
+      shim.addRoute({ when: "api", stderr: "API rate limit exceeded", exit: 1 });
+      h.write(90);
+      assert.throws(() => ghExecFile("gh", args, opts), /rate limit exceeded/);
+      assert.equal(throttledRows()[0]?.extra.reason, "refused");
+    } finally {
+      if (savedGap === undefined) delete process.env.RMD_GH_SHARED_READ_GAP_MS;
+      else process.env.RMD_GH_SHARED_READ_GAP_MS = savedGap;
+      if (savedCache === undefined) delete process.env.RMD_GH_CACHE_HOME;
+      else process.env.RMD_GH_CACHE_HOME = savedCache;
+    }
+  });
+});
+
+test("W1-T12553 criterion 4: consecutive windows retain every undrained throttle across shared consumers", () => {
+  const state = createInstallationBudgetState();
+  const clock = clockFromMillisFn(() => START_MS);
+  const main = createInstallationBudget({ consumers: 4, instance: "core", clock, sharedState: state });
+  const worker = createInstallationBudget({ consumers: 4, instance: "core", clock, sharedState: state });
+  for (let n = 0; n < 12; n++) {
+    worker.record({ remaining: 10, limit: 100, reset: RESET_S + n * 3600, resource: "core" });
+    worker.noteThrottle("reserve");
+    main.noteThrottle("reserve");
+  }
+  worker.noteThrottle("refused");
+  const rows = main.takeThrottleRows();
+  assert.equal(rows.length, 12, "pending evidence outlives the recent-window deduplication history");
+  assert.deepEqual(rows.map(row => row.reset), Array.from({ length: 12 }, (_, n) =>
+    clockFromMillisFn(() => (RESET_S + n * 3600) * 1000).iso()));
+  assert.deepEqual(rows.map(row => row.reason), [...Array(11).fill("reserve"), "refused"]);
+  assert.ok(rows.every(row => row.remaining === 10 && row.limit === 100 && row.allowance === 0 && row.consumers === 4));
+  assert.deepEqual(worker.takeThrottleRows(), []);
+  worker.noteThrottle("reserve");
+  assert.deepEqual(main.takeThrottleRows(), [], "draining does not allow duplicates in the same window");
+
+  const local = createInstallationBudget({ consumers: 4, instance: "core", clock });
+  for (let n = 0; n < 2; n++) {
+    local.record({ remaining: 10, limit: 100, reset: RESET_S + n * 3600 });
+    local.noteThrottle("reserve");
+  }
+  assert.equal(local.takeThrottleRows().length, 2, "an unshared budget also retains distinct pending windows");
+});
+
+test("W1-T12553 criterion 5: the actual host-registry read propagates failure and startup logs why", t => {
+  const originalRead = fs.readFileSync;
+  const attempted: unknown[] = [];
+  const failure = Object.assign(new Error("EACCES: host registry denied"), { code: "EACCES" });
+  t.mock.method(fs, "readFileSync", ((...args: Parameters<typeof fs.readFileSync>) => {
+    attempted.push(args[0]);
+    if (args[0] === DEFAULT_HOST_INSTANCE_REGISTRY_PATH) throw failure;
+    return originalRead(...args);
+  }) as typeof fs.readFileSync);
+  syncBuiltinESMExports();
+  try {
+    const h = harness(() => daemonInstallationRegistry(REPO_ROOT));
+    assert.deepEqual(h.rows[0]?.extra, {
+      outcome: "unconfigured", instance: "core", reason: "registry_unreadable",
+      installation_id: INSTALLATION, error: failure.message,
+    });
+    assert.deepEqual(attempted, [DEFAULT_HOST_INSTANCE_REGISTRY_PATH], "no checkout fallback hides host read errors");
+    assert.equal(daemonInstallationBudgetWorkerInput(), undefined);
+    h.read(10);
+    assert.equal(readsUntilStandDown(h), 200);
+  } finally {
+    t.mock.restoreAll();
+    syncBuiltinESMExports();
+  }
 });

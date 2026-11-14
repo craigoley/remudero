@@ -80,13 +80,18 @@ const KEPT_WINDOWS = 8;
 
 /** Shared with the daemon's read worker through its existing input. All fields are guarded by slot 0. */
 export function createInstallationBudgetState(): SharedArrayBuffer {
-  return new SharedArrayBuffer(BigInt64Array.BYTES_PER_ELEMENT * 12);
+  return new SharedArrayBuffer(BigInt64Array.BYTES_PER_ELEMENT * (ROW_START + ROW_FIELDS * MAX_PENDING_ROWS));
 }
 
 const enum Slot {
-  Lock, Remaining, Limit, Reset, Reads, ThrottleReset, ThrottleReason,
-  Pending, RowRemaining, RowLimit, RowAllowance, RowConsumers,
+  Lock, Remaining, Limit, Reset, Reads, PendingCount, WindowCursor,
 }
+
+const WINDOW_START = Slot.WindowCursor + 1;
+const ROW_START = WINDOW_START + KEPT_WINDOWS;
+const ROW_FIELDS = 6;
+// BACKSTOP: over forty days without a daemon drain must refuse visibly rather than discard evidence.
+const MAX_PENDING_ROWS = 1024;
 
 function withState<T>(state: BigInt64Array, fn: () => T): T {
   while (Atomics.compareExchange(state, Slot.Lock, 0n, 1n) !== 0n) { /* short critical section */ }
@@ -109,6 +114,7 @@ export function createInstallationBudget(opts: {
   let latest: InstallationBudgetReading | undefined;
   let reads = 0;
   const windows: string[] = [];
+  const pending: GithubBudgetThrottledRow[] = [];
   const shared = opts.sharedState === undefined ? undefined : new BigInt64Array(opts.sharedState);
 
   const snapshot = (): { reading: InstallationBudgetReading | undefined; reads: number } => {
@@ -191,24 +197,37 @@ export function createInstallationBudget(opts: {
       const reading = current();
       const window = `${reading?.reset ?? "unknown"}`;
       if (shared === undefined) {
+        const existing = pending.find(row => row.reset === (reading === undefined ? undefined : clockFromMillisFn(() => reading.reset * 1000).iso()));
+        if (existing !== undefined) {
+          if (reason === "refused") existing.reason = reason;
+          return;
+        }
         if (windows.includes(window)) return;
         windows.push(window);
         if (windows.length > KEPT_WINDOWS) windows.shift();
       } else {
         const newRow = withState(shared, () => {
           const key = BigInt(reading?.reset ?? -1);
-          if (shared[Slot.ThrottleReason] !== 0n && shared[Slot.ThrottleReset] === key) {
-            // The ledger has not drained this row yet: preserve the stronger GitHub refusal.
-            if (reason === "refused" && shared[Slot.Pending] === 1n) shared[Slot.ThrottleReason] = 3n;
+          const count = Number(shared[Slot.PendingCount]);
+          for (let i = 0; i < count; i++) {
+            const offset = ROW_START + i * ROW_FIELDS;
+            if (shared[offset] !== key) continue;
+            if (reason === "refused") shared[offset + 1] = 3n;
             return false;
           }
-          shared[Slot.ThrottleReset] = key;
-          shared[Slot.ThrottleReason] = BigInt(reason === "share" ? 1 : reason === "reserve" ? 2 : 3);
-          shared[Slot.RowRemaining] = BigInt(reading?.remaining ?? -1);
-          shared[Slot.RowLimit] = BigInt(reading?.limit ?? -1);
-          shared[Slot.RowAllowance] = BigInt(reading === undefined ? -1 : allowanceOf(reading, consumers));
-          shared[Slot.RowConsumers] = BigInt(consumers);
-          shared[Slot.Pending] = 1n;
+          for (let i = 0; i < Math.min(KEPT_WINDOWS, Number(shared[Slot.WindowCursor])); i++) {
+            if (shared[WINDOW_START + i] === key) return false;
+          }
+          if (count === MAX_PENDING_ROWS) throw new RangeError("installation budget throttle queue must be drained");
+          const offset = ROW_START + count * ROW_FIELDS;
+          shared.set([
+            key, BigInt(reason === "share" ? 1 : reason === "reserve" ? 2 : 3),
+            BigInt(reading?.remaining ?? -1), BigInt(reading?.limit ?? -1),
+            BigInt(reading === undefined ? -1 : allowanceOf(reading, consumers)), BigInt(consumers),
+          ], offset);
+          shared[Slot.PendingCount] += 1n;
+          shared[WINDOW_START + Number(shared[Slot.WindowCursor] % BigInt(KEPT_WINDOWS))] = key;
+          shared[Slot.WindowCursor] += 1n;
           return true;
         });
         if (!newRow) return;
@@ -225,6 +244,7 @@ export function createInstallationBudget(opts: {
           allowance: allowanceOf(reading, consumers),
         }),
       };
+      if (shared === undefined) pending.push(row);
       opts.onThrottle?.(row);
     },
     allowance() {
@@ -232,22 +252,23 @@ export function createInstallationBudget(opts: {
       return consumers === undefined || reading === undefined ? undefined : allowanceOf(reading, consumers);
     },
     takeThrottleRows() {
-      if (shared === undefined) return [];
+      if (shared === undefined) return pending.splice(0);
       return withState(shared, () => {
-        if (shared[Slot.Pending] === 0n) return [];
-        shared[Slot.Pending] = 0n;
-        const reset = Number(shared[Slot.ThrottleReset]);
-        const remaining = Number(shared[Slot.RowRemaining]);
-        const limit = Number(shared[Slot.RowLimit]);
-        const allowance = Number(shared[Slot.RowAllowance]);
-        return [{
-          step: GITHUB_BUDGET_THROTTLED_STEP, instance,
-          reason: shared[Slot.ThrottleReason] === 1n ? "share" as const : shared[Slot.ThrottleReason] === 2n ? "reserve" as const : "refused" as const,
-          consumers: Number(shared[Slot.RowConsumers]),
-          ...(remaining < 0 ? {} : {
-            remaining, limit, reset: clockFromMillisFn(() => reset * 1000).iso(), allowance,
-          }),
-        }];
+        const rows: GithubBudgetThrottledRow[] = [];
+        for (let i = 0; i < Number(shared[Slot.PendingCount]); i++) {
+          const offset = ROW_START + i * ROW_FIELDS;
+          const [reset, reason, remaining, limit, allowance, shares] = Array.from(shared.slice(offset, offset + ROW_FIELDS), Number);
+          rows.push({
+            step: GITHUB_BUDGET_THROTTLED_STEP, instance,
+            reason: reason === 1 ? "share" : reason === 2 ? "reserve" : "refused",
+            consumers: shares,
+            ...(remaining < 0 ? {} : {
+              remaining, limit, reset: clockFromMillisFn(() => reset * 1000).iso(), allowance,
+            }),
+          });
+        }
+        shared[Slot.PendingCount] = 0n;
+        return rows;
       });
     },
   };

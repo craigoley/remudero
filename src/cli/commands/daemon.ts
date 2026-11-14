@@ -2942,17 +2942,11 @@ export function daemonInstallationBudgetWorkerInput(): typeof daemonInstallation
   return daemonInstallationBudgetInput;
 }
 
-/** W1-T12553: the registry that names this host's installations: the selected copy, the host copy, then the checkout's. */
-export function daemonInstallationRegistry(repoRoot: string): { text: string; source: string } | undefined {
+/** W1-T12553: use the selected registry or the host copy; an unreadable host must reach startup's log. */
+export function daemonInstallationRegistry(_repoRoot: string): { text: string; source: string } | undefined {
   const selected = runtimeInstanceRegistryText();
   if (selected !== undefined) return { text: selected, source: "selected" };
-  try {
-    return { text: readFileSync(DEFAULT_HOST_INSTANCE_REGISTRY_PATH, "utf8"), source: DEFAULT_HOST_INSTANCE_REGISTRY_PATH };
-  } catch {
-    // No host copy (a container): the checkout's registry below is the next source, so this does not throw.
-  }
-  const text = readInstanceRegistryText(repoRoot);
-  return text === undefined ? undefined : { text, source: daemonInstanceRegistryPath(repoRoot) };
+  return { text: readFileSync(DEFAULT_HOST_INSTANCE_REGISTRY_PATH, "utf8"), source: DEFAULT_HOST_INSTANCE_REGISTRY_PATH };
 }
 
 /**
