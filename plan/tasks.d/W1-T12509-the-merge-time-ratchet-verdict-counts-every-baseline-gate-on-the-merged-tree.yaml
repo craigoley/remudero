@@ -17,7 +17,7 @@
     - src/lib/merged-ratchet-verdict.ts
     - test/a-ceiling-is-rejudged-against-current-main-before-a-merge.test.ts
     - test/gardeners/two-pull-requests-that-cross-a-ceiling-together-are-held-at-merge-time.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "COUNTED_RATCHET_GATES holds clock-signature, source-size, fixture-copy, deps-interface, affected-reach, learnings-budget, claude-md-budget and house-layout. Each is counted on the merge-tree of (main tip, pull request head) with that gate's own counter, never a copy"

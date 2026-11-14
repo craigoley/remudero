@@ -26,7 +26,7 @@
     - test/prepush-lints-a-plan-diff.test.ts
     - test/the-harness-pre-push-gate-runs-no-worktree-code.test.ts
     - test/the-pre-push-gate-runs-the-branch-s-own-checks-in-the-proof-sandbox.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "A push through hooks/pre-push does not start scripts/census-precheck.mjs or scripts/lint-plan-precheck.mjs, on a source diff and on a plan diff"

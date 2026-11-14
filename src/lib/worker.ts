@@ -1979,23 +1979,11 @@ export function clearClaudeCapacityCache(): void {
 }
 
 
-/**
- * The account a Claude capacity reading was taken under — `oauthAccount.accountUuid`.
- *
- * The operator switches subscriptions by hand, and every instrument follows whatever Claude Code
- * is logged into, so two readings from two accounts are indistinguishable in the ledger. The uuid
- * is stable per account and answers "which account", which is the entire question.
- *
- * NEVER emailAddress OR organizationName. They sit beside the uuid in the same object and are
- * unnecessary exposure; only `accountUuid` is ever bound here, so the others cannot reach a caller
- * even by accident. This mirrors account-usage.ts's own discipline.
- *
- * FAILS OPEN, ALWAYS. An absent, unreadable, unparseable or shape-changed file yields `undefined`,
- * never a throw: the label annotates a reading and is never a precondition for taking one. A host
- * with one account has run fine without it for months and must keep running.
- *
- * FALSIFIER: test/the-capacity-read-cannot-say-which-account-it-measured.test.ts.
- */
+/** Label capacity readings with stable `oauthAccount.accountUuid` across manual account switches.
+ * NEVER emailAddress OR organizationName: bind only the uuid, as in account-usage.ts.
+ * FAILS OPEN, ALWAYS: missing, unreadable, unparseable or changed shapes yield `undefined`;
+ * this annotation must never prevent a capacity read.
+ * FALSIFIER: test/the-capacity-read-cannot-say-which-account-it-measured.test.ts. */
 /** Why a reading carries no label. Four distinct causes, kept apart for the same reason
  *  account-usage.ts keeps its own: "absent" and "unreadable" are different facts. */
 export type ClaudeAccountLabelReason = "unreadable" | "unparseable" | "not-an-object" | "no-account" | "no-uuid";
@@ -2330,25 +2318,12 @@ const WORKER_SPAWN_ISOLATION: { settingSources: SettingSource[] } = {
  *  — never a value asserted independently of it. */
 export const WORKER_SETTING_SOURCES: SettingSource[] = WORKER_SPAWN_ISOLATION.settingSources;
 
-/**
- * Run an open-weight spawn, and on a DEPLOYMENT CAPABILITY REFUSAL try the next rung of the ladder
- * rather than failing the run.
- *
- * MEASURED over the live ledger: 22,356 `openweight_error` runs, 21,942 of them (98%) on ONE
- * deployment across three days — while two other candidates sat configured in the SAME ladder row
- * and were never tried. `selectOpenWeightModel` already walks the ladder for CONTEXT FIT; nothing
- * walked it for FAILURE, so a single unusable deployment took the whole run.
- *
- * Draft callers additionally walk on a failed output contract (W1-T4067).
- * `OpenWeightUnsupportedResponseFormatError` names the deployment and what it could not honour,
- * and its own message prescribes this remedy. Everything else is deliberately NOT walked: a
- * timeout or truncated reply may be transient and walking turns a blip into a second charge
- * against `dailyCapUsd`; a too-large request already consulted the fit gate; auth and cap refusals
- * recur on every rung. Walking those spends real money to learn nothing.
- *
- * BOUNDED BY THE LADDER: one attempt per remaining candidate, over a list the context gate already
- * filtered — it can neither loop nor widen the context rule.
- */
+/** Walk the context-filtered ladder on DEPLOYMENT CAPABILITY REFUSAL; draft callers also walk
+ * on failed output contracts (W1-T4067). `OpenWeightUnsupportedResponseFormatError` names the remedy.
+ * Historical trigger: 21,942 of 22,356 openweight errors hit one deployment while alternatives sat idle.
+ * Never walk timeouts/truncation (a second charge), oversized requests (already fit-gated), or
+ * auth/cap refusals (shared across rungs). BOUNDED BY THE LADDER: one attempt per remaining
+ * candidate, without looping or widening context eligibility. */
 export async function runOpenWeightWalkingLadder(
   run: (selection: OpenWeightModelSelection) => Promise<WorkerResult>,
   selection: OpenWeightModelSelection,
@@ -4761,20 +4736,10 @@ function anchoredPrUrl(text: string): string | undefined {
   return matches.length ? matches[matches.length - 1][1] : undefined;
 }
 
-/**
- * ANCHORED `COMMIT_MESSAGE` extraction, the same dialect and discipline as {@link anchoredPrUrl}:
- * only a line matching `COMMIT_MESSAGE:` at its own start counts, and when the contract is honoured
- * twice the LAST one wins.
- *
- * THE SUBJECT ONLY, AND DELIBERATELY. A worker with no shell cannot run `git commit`, so it names
- * the subject and the harness commits under it — but the text travels as DATA into an argv array,
- * never a command line, so a newline in it could not smuggle a second instruction anywhere. Taking
- * one line keeps that obvious rather than merely true.
- *
- * `undefined` for a missing, empty, or over-long subject rather than a repaired one: an invented
- * commit message would attribute work to a run that never asked for it, and commitlint's header
- * ceiling is 100 CHARACTERS, so a longer subject must be refused here rather than fail at push.
- */
+/** ANCHORED `COMMIT_MESSAGE:` extraction, last line wins, as in {@link anchoredPrUrl}.
+ * THE SUBJECT ONLY: the shell-less worker names it; the harness passes it as DATA in argv.
+ * Missing, empty or over-long subjects yield `undefined`, never an invented repair.
+ * Commitlint's limit is 100 CHARACTERS; refuse here before push. */
 export function anchoredCommitMessage(text: string): string | undefined {
   const matches = [...text.matchAll(/^[ \t]*COMMIT_MESSAGE:[ \t]*(.+)$/gim)];
   if (matches.length === 0) return undefined;
@@ -4810,19 +4775,10 @@ export interface LearningsUsedResult {
 
 const LEARNINGS_USED_REFUSAL_REASON = "never injected into this run";
 
-/** ANCHORED `LEARNINGS_USED` extraction — the citation miner's missing producer (W1-T2760). Same
- * last-line-wins discipline as {@link anchoredPrUrl} (W1-T62): only a line matching
- * `LEARNINGS_USED:` anchored to its own start counts, and when the contract is honoured twice the
- * LAST one wins. `null` when the report carries no anchored line at all — a SILENT report,
- * distinguishable from one that explicitly wrote `LEARNINGS_USED: none` (which parses to
- * `usedIds: []`, not `null`).
- *
- * Every claimed `learnings#<id>` is checked against `injectedIds` — the run's OWN
- * `matched_ids` (the ids `learnings.injected` actually put in this worker's prompt). An id absent
- * from that set is REFUSED BY NAME, never counted as used: a worker citing a learning it was never
- * shown is the exact fabrication the keyword floor already catches on the PR-body channel, and
- * trusting it here would let the citation miner's new signal be gamed as easily as the old one was
- * silent. Duplicate ids within one line count once. */
+/** ANCHORED `LEARNINGS_USED:` extraction (W1-T2760), last line wins as in {@link anchoredPrUrl}
+ * (W1-T62). Missing line yields `null`; explicit `none` yields `usedIds: []`.
+ * Check each claimed `learnings#<id>` against `injectedIds`, the run's OWN `matched_ids` from
+ * `learnings.injected`: unseen ids are REFUSED BY NAME, never credited. Deduplicate within a line. */
 export function parseLearningsUsed(text: string, injectedIds: readonly string[]): LearningsUsedResult | null {
   const matches = [...text.matchAll(/^[ \t]*LEARNINGS_USED:[ \t]*(.*)$/gim)];
   if (matches.length === 0) return null;
@@ -7347,16 +7303,11 @@ export interface WorktreeReapOpts {
   onEnumerationError?: (error: unknown) => void;
 }
 
-/** A {@link WorktreeReapOpts.isPidAlive}-shaped predicate for the one-shot container boot rung: it answers "is THIS the
- * process that wrote the lock", not merely "does some process hold this pid".
- *
- * TRAP: {@link defaultIsPidAlive} answers only the second question, reading this container's OWN pid namespace, which
- * restarts at 1 on every `docker run`. A lock from a previous boot naming a low pid very often finds that number ALIVE as an
- * unrelated process, so the reaper takes the live-pid keep branch forever — PERMANENT NON-RECLAMATION, the shape of the 3.0
- * GB this was filed against, not destruction. Reuses {@link isHolderStale} as written: `pid`/`startedAt` satisfy {@link
- * HolderIdentity} with no `host` key, so its host rung is skipped by construction, and `RunLockInfo` deliberately gains no
- * `host` field because that would import the very hazard — a hostname changing every boot — this avoids. `deps` is injectable
- * so the pid-reuse scenario is drivable (W1-T406, W1-T396, W1-T368). */
+/** Boot-rung {@link WorktreeReapOpts.isPidAlive}: identify the lock writer, not just a live pid.
+ * TRAP: {@link defaultIsPidAlive} sees this container's reset pid namespace; an unrelated reused
+ * pid kept 3.0 GB forever. Reuse {@link isHolderStale} with `pid`/`startedAt` ({@link HolderIdentity}),
+ * omitting `host` so changing container hostnames cannot affect identity. Keep `RunLockInfo`
+ * host-free; injectable `deps` drives pid reuse (W1-T406, W1-T396, W1-T368). */
 export function worktreeLockIsPidAlive(
   pid: number,
   info: RunLockInfo,
@@ -7414,18 +7365,12 @@ function canonicalIdentity(
   }
 }
 
-/** Cross-reference `entryPath` against `git worktree list --porcelain` for its OWN resolved repoDir, never a fixed one — the
- * multi-checkout lesson.
- *
- * W1-T2950 — COMPARE BY INODE IDENTITY, NEVER BY BYTE STRING. Git is allowed to report a canonical path that differs from the
- * spelling used to reach the same directory: MEASURED on macOS, a lane at `/var/folders/...` is registered as
- * `/private/var/folders/...`. The old `entry.path === entryPath` missed that registration, skipped the `branchIsLiveUpstream`
- * probe entirely, and let the armed reaper destroy a lane whose PR was still open. The canonical form is ONLY an equality
- * key — every removal and every ledger line still uses the original paths.
- *
- * A CANONICALIZATION FAILURE IS NOT EVIDENCE OF ANYTHING. It returns `undecidable`, never `unregistered`, and there is
- * deliberately NO fallback to the raw-string compare: falling back would reinstate exactly the defect this fixes, on the one
- * path where the evidence is weakest (W1-T378/W1-T381's doctrine — ambiguous evidence keeps). */
+/** Cross-reference `entryPath` with `git worktree list --porcelain` in its OWN resolved repoDir.
+ * W1-T2950 — COMPARE BY INODE IDENTITY, NEVER BY BYTE STRING: macOS `/var/folders/...` may register
+ * as `/private/var/folders/...`; missing it skipped `branchIsLiveUpstream` and destroyed an open-PR lane.
+ * Canonical paths are equality keys only; removals and ledger rows retain original paths.
+ * A CANONICALIZATION FAILURE IS NOT EVIDENCE OF ANYTHING: return `undecidable`, never `unregistered`
+ * or a raw-string fallback. Ambiguous evidence keeps (W1-T378/W1-T381). */
 function resolveWorktreeRegistration(
   entryPath: string,
   realpath: (p: string) => string = realpathSync,

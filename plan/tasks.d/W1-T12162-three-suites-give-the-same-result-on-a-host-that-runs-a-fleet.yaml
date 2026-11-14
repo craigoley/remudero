@@ -16,7 +16,7 @@
     - test/a-quiet-worker-round-end-is-resumed-from-its-checkpoint.test.ts
     - test/ledger/pr-state-answers-from-the-ledger-before-github.test.ts
     - test/worker/spawn/a-review-re-admitted-after-an-unable-reviewer-avoids-that-provider.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "The suite for a resumed round end reads task claims only from its own fixture remote. A claim ref on the real origin does not change its result"
