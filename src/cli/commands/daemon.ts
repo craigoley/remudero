@@ -2197,7 +2197,6 @@ export async function daemonCommand(
         lastStepBeforeBlock: () => lastReadPlaneStep,
         idleStarvedSupervised: process.env.RMD_IDLE_STARVED_SUPERVISED === "1" && !target.isSelf && !flagValue(rest, "--plan"),
         confirmedOpenPrCount: boardOpenPrCount.readConfirmed,
-        taskInputAnswer: (taskId) => taskInputAnswer(effectiveRepoRoot, taskId),
         onPlanReload: (fresh) => {
           activePlanRef.current = fresh;
           daemonPlanCopies.observe(fresh);
@@ -2223,6 +2222,7 @@ export async function daemonCommand(
         // W1-T988: the target this daemon already resolved and already ledgers as `daemon.target`'s
         // `repo:` field — the SAME value, never a second resolution that could drift from it.
         targetRepo: target.repo,
+        taskInputAnswer: (taskId) => taskInputAnswer(effectiveRepoRoot, taskId),
         // W1-T9680: a worker push's token — the credential socket's own scoped mint, else the ambient GH_TOKEN.
         probeFleetPushCredential: receivePackCredentialProbe({ originUrl: `https://github.com/${target.owner}/${target.repo}.git`,
           token: daemonPushTokenSource(`${target.owner}/${target.repo}`, gitCredentialSocket ? (deps.gitCredentialMint ?? realScopedMint(log)) : undefined) }),
