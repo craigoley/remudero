@@ -25,9 +25,12 @@ function fixture() {
   const home = join(dir, "home");
   const root = join(dir, "volume");
   const bin = join(dir, "bin");
+  const config = join(dir, "container-config");
   mkdirSync(join(root, "state"), { recursive: true });
   mkdirSync(home);
   mkdirSync(bin);
+  mkdirSync(config, { mode: 0o700 });
+  writeFileSync(join(config, "config.json"), '{"workerProviders":["claude"]}\n', { mode: 0o600 });
   writeFileSync(join(root, "state", "ledger.ndjson"), '{"step":"run.start"}\n');
   writeFileSync(join(bin, "docker"), `#!/bin/bash
 case "$1 $2" in
@@ -45,7 +48,12 @@ case "$1" in
       failed) echo 'image unavailable' >&2; exit 125 ;;
       silent) exit 0 ;;
     esac
-    archive=state-backup.2026-10-05T12-00-00-000Z
+    night=0
+    while :; do
+      archive=$(printf 'state-backup.2026-10-05T12-00-00-%03dZ' "$night")
+      [ -d "$BACKUP_ROOT/state-backups/$archive" ] || break
+      night=$((night + 1))
+    done
     mkdir -p "$BACKUP_ROOT/state-backups/$archive"
     cp "$BACKUP_ROOT/state/ledger.ndjson" "$BACKUP_ROOT/state-backups/$archive/ledger.ndjson"
     echo "RMD_STATE_SNAPSHOT $archive 1 0 0 0" ;;
@@ -64,6 +72,7 @@ esac
     encoding: "utf8",
     env: { ...process.env, HOME: home, XDG_STATE_HOME: "", PATH: `${bin}:${process.env.PATH}`, BACKUP_ROOT: root, BACKUP_MODE: mode,
       OFFHOST_MODE: "ok", RMD_STATE_DIR: root, RMD_STATE_OFFHOST: "", RMD_STATE_BACKUP_DIR: "", RMD_STATE_SNAPSHOT_RECEIPT: "",
+      RMD_CONTAINER_CONFIG_DIR: config,
       RMD_STATE_OFFHOST_AZ: join(bin, "az"), RMD_STATE_BACKUP_KEEP: "7", RMD_STATE_OFFHOST_KEEP: "7", ...extra },
   });
   const beat = (path = receipt) => {
