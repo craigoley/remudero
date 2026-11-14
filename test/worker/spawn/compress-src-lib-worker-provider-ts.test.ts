@@ -1,8 +1,9 @@
-import { compressionPinBase } from "#test/helpers/compression-pin.js";
+import { assertSameTokens, compressionPinBase } from "#test/helpers/compression-pin.js";
 // @source-text-subject: worker-provider.ts comment compression against its PR base.
 // @census-reads: src/lib/worker-provider.ts
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { execFileSync } from "node:child_process";
 import { test } from "node:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -17,6 +18,7 @@ function snapshot(source: string) {
     .map((token) => [token.type.label, source.slice(token.start, token.end)]);
   const digest = (text: string) => createHash("sha256").update(text).digest("hex");
   return {
+    tokens,
     tokenDigest: digest(JSON.stringify(tokens)),
     tokenCount: tokens.length,
     // The AST also detects newline-sensitive changes such as return's automatic semicolon insertion.
@@ -60,4 +62,28 @@ test("W1-T10918: comment compression preserves executable code: current PR-base 
   }
   assert.notEqual(snapshot("function f() { return 1; }").astDigest,
     snapshot("function f() { return\n1; }").astDigest);
+});
+
+
+test("W1-T12298: comment compression preserves executable code", () => {
+  const sourcePath = "src/lib/worker-provider.ts";
+  const title = "W1-T12298: comment compression preserves executable code";
+  let before = compressionPinBase(sourcePath, import.meta.url);
+  if (before === undefined) {
+    // This file already contains a pin: activate this comparison while the new title is absent
+    // at the PR base, then release subsequent feature edits, as the shared helper does for additions.
+    const git = (...args: string[]) => execFileSync("git", args, {
+      cwd: REPO_ROOT, encoding: "utf8", maxBuffer: 16 * 1024 * 1024,
+    });
+    const base = git("merge-base", "origin/main", "HEAD").trim();
+    const baseTest = git("show", `${base}:test/worker/spawn/compress-src-lib-worker-provider-ts.test.ts`);
+    if (baseTest.includes(title)) return;
+    before = git("show", `${base}:${sourcePath}`);
+  }
+  const actual = snapshot(readFileSync(join(REPO_ROOT, sourcePath), "utf8"));
+  const original = snapshot(before);
+  assertSameTokens(actual.tokens, original.tokens, "executable tokens and literals match the PR base");
+  assert.equal(actual.astDigest, original.astDigest, "syntax and automatic semicolon insertion match");
+  assert.ok(actual.commentLines < original.commentLines, "comment lines decrease from the PR base");
+  assert.ok(actual.commentBytes < original.commentBytes, "comment bytes decrease from the PR base");
 });

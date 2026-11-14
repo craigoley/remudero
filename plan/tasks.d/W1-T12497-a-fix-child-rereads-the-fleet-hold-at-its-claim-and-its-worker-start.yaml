@@ -23,7 +23,7 @@
     - test/fix-lane/a-fix-child-rereads-the-fleet-hold-at-its-claim-and-its-worker-start.test.ts
     - test/worker/spawn/an-in-process-fix-start-rereads-the-fleet-hold.test.ts
     - test/reviews-and-detached-actions-run-as-run-children.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "When the recheck of a fix child passes and a PAUSE is written while the child reads its task, the child logs `sweep.fix.child_refused` with a reason that names the PAUSE and throws. It takes no admission grant, builds no dispatcher, and calls no `dispatchFix`, so it takes no fix-branch claim and starts no worker"

@@ -13,7 +13,7 @@
   files:
     - test/worker/run-task/rmd-planning-keeps-target-context-without-tsx.test.ts
     - test/worker/run-task/rmd-planning-without-tsx-keeps-filing-gates.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     Settled by lookup: is this already filed or already decided? -> W1-T45 unified the planning

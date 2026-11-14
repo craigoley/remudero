@@ -21,6 +21,7 @@
     - src/cli/commands/fix.ts
     - src/lib/proof-amendment.ts
     - test/fix-lane/a-needs-scope-outcome-opens-its-scope-amendment-before-it-asks-a-human.test.ts
+    - "src/lib/sweep.ts"
   status: queued
   attempts: 0
   acceptance:
