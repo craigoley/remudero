@@ -19,7 +19,7 @@
     - src/cli/commands/daemon.ts
     - src/run-task.ts
     - test/daemon/the-light-pass-plan-merge-budget-takes-the-daemons-bound.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "`buildSweepLightHook` takes the sweep tick bound in its `io` argument (`sweepWallClockBoundMs`) and gives every light pass of the tick a policy with that bound"
