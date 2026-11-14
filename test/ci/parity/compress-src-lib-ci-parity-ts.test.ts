@@ -1,6 +1,7 @@
 // @source-text-subject: ci-parity.ts comment compression must preserve its pre-compression code.
 // @census-reads: src/lib/ci-parity.ts
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -58,5 +59,30 @@ test("W1-T10969: comment compression preserves executable code", () => {
   assertSameTokens(executableTokens(source), executableTokens(before),
     "all PR-base executable tokens, literals and line-break boundaries must remain unchanged");
   assert.ok(comments < countCommentLines(before, "src/lib/ci-parity.ts").comments,
+    "comment lines decrease from the PR base");
+});
+
+test("W1-T12346: comment compression preserves executable code", () => {
+  const sourcePath = "src/lib/ci-parity.ts";
+  const source = readFileSync(join(REPO_ROOT, sourcePath), "utf8");
+  const { comments } = countCommentLines(source, sourcePath);
+  assert.ok(comments < 811,
+    `expected a real reduction from this task's 811 comment lines, observed ${comments}`);
+  let before = compressionPinBase(sourcePath, import.meta.url);
+  // This pin file already exists: the shared helper activates only for ADDED files. Compare
+  // this task's PR until its named test reaches the base, then allow later executable edits.
+  if (before === undefined) {
+    const git = (args: string[]) => execFileSync("git", args,
+      { cwd: REPO_ROOT, encoding: "utf8", maxBuffer: 16 * 1024 * 1024 });
+    const base = git(["merge-base", "origin/main", "HEAD"]).trim();
+    const priorTest = git(["show", `${base}:test/ci/parity/compress-src-lib-ci-parity-ts.test.ts`]);
+    if (!priorTest.includes('test("W1-T12346: comment compression preserves executable code"')) {
+      before = git(["show", `${base}:${sourcePath}`]);
+    }
+  }
+  if (before === undefined) return;
+  assertSameTokens(executableTokens(source), executableTokens(before),
+    "all PR-base executable tokens, literals and line-break boundaries must remain unchanged");
+  assert.ok(comments < countCommentLines(before, sourcePath).comments,
     "comment lines decrease from the PR base");
 });

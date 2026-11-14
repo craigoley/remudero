@@ -1,6 +1,7 @@
 // @source-text-subject: ledger.ts comment compression must preserve its pre-compression code.
 // @census-reads: src/lib/ledger.ts
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -62,6 +63,28 @@ test("W1-T10998: comment compression preserves executable code", () => {
     "emitted JavaScript must preserve newline-sensitive behavior");
   assert.ok(comments < countCommentLines(before, "src/lib/ledger.ts").comments,
     "comment lines decrease from the PR base");
+});
+
+test("W1-T12374: comment compression preserves executable code", (t) => {
+  const sourcePath = "src/lib/ledger.ts";
+  let before = compressionPinBase(sourcePath, import.meta.url);
+  if (before === undefined) {
+    // Existing-file pins stay active until this proof reaches the merge base, then retire.
+    const git = (...args: string[]) => execFileSync("git", args, { cwd: REPO_ROOT, encoding: "utf8" });
+    const base = git("merge-base", "origin/main", "HEAD").trim();
+    const oldTest = git("show", `${base}:test/ledger/compress-src-lib-ledger-ts.test.ts`);
+    if (oldTest.includes("W1-T12374: comment compression preserves executable code")) return;
+    before = git("show", `${base}:${sourcePath}`);
+  }
+  const source = readFileSync(join(REPO_ROOT, sourcePath), "utf8");
+  assertSameTokens(executableTokens(source), executableTokens(before),
+    "executable tokens, literals and line-break boundaries must remain unchanged");
+  assert.equal(emittedDigest(source), emittedDigest(before), "emitted JavaScript must remain unchanged");
+  const previous = countCommentLines(before, sourcePath).comments;
+  const comments = countCommentLines(source, sourcePath).comments;
+  t.diagnostic(`comment lines ${previous} -> ${comments}`);
+  assert.ok(previous > 0 && comments > 0, "both sources contain measurable comments");
+  assert.ok(comments < previous, `comment lines decrease from the PR base: ${comments} >= ${previous}`);
 });
 
 test("ledger compression fingerprint distinguishes comments from executable literals", () => {

@@ -5190,7 +5190,7 @@ export async function runDaemon(
     return {
       queueJudgeStaleMs: queueJudgeAvailability(rows, nowMs).staleMs, starts,
       nowMs: () => daemonClock.now(),
-      recordStart: (task, atMs) => starts.push({ taskId: task.id, authorClass: task.author_class, atMs }),
+      recordStart: (task, atMs) => starts?.push({ taskId: task.id, authorClass: task.author_class, atMs }),
       onMoved: (task, move) => {
         const signature = `${task.id}:${move.machine_starts}:${move.starts}`;
         if (signature === lastMachineShareSignature) return;

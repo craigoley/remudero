@@ -10,6 +10,7 @@ import { headroomExhausted, UNREADABLE_DEGRADED_LIMIT } from "./headroom.js";
 import type { UsageSnapshot } from "./headroom.js";
 import type { CostGovernorResult, MemoryGovernorResult, QueueGovernorResult } from "./sweep.js";
 import { checkDispatchGovernors, checkNewBuildReservation, consultMemoryReads, governorDeferPayload, newBuildReservationPayload, type DispatchGovernorDeps, type DispatchGovernorVerdict, type MemoryReadHold, type MemoryReadTracker, type NewBuildReservationVerdict } from "./dispatch-governor.js";
+import { MAX_RETAINED_LINES_PER_STEP } from "./ledger.js";
 import { RELEASE_LEDGER_STEP, unmetDependencies, unmetTaskPrecondition, type Plan, type Task, type TaskPreconditionOptions, type UnmetTaskPrecondition } from "./plan.js";
 import {
   NO_OBSERVED_SCOPE,
@@ -281,18 +282,14 @@ export interface NextRunnableOpts extends TaskPreconditionOptions {
   /** W1-T12551: the queue judge's staleness and the trailing starts. Omitted, the order is {@link dispatchOrder}'s. */
   machineShare?: MachineShareInput;
 
-  /** W1-T2675 — a FAILED credit read, which is not the same as "not merged". `deriveStatus`
-   *  (status.ts) returns `indeterminate: true` when the GitHub read genuinely failed, and a caller
-   *  that gates dispatch must treat that as DO NOT ACT. TRAP: every {@link MergedSet} here is spelled
-   *  `projection.get(id)?.merged ?? false`, which collapses `indeterminate` into a confident `false`,
-   *  so a shipped task is admitted and the rebuild cannot pass review. Optional. */
+  /** W1-T2675: failed credit reads forbid dispatch. TRAP: {@link MergedSet}'s
+   *  `projection.get(id)?.merged ?? false` collapses `deriveStatus`'s indeterminate read into
+   *  "not merged", admitting shipped work. Optional. */
   // Why: the #3512 rebuild lifecycle this closes (W1-T2675) — docs/forensics/drain.md.
   isCreditIndeterminate?: (taskId: string) => boolean;
 
-  /** W1-T2397 — is an OPEN PR building this task that is NOT its own `run-<taskId>-<digits>` branch?
-   *  Read off `StatusProjection.openSiblingBuild` (status.ts), so it costs no extra read. INVARIANT:
-   *  this is not `isOpenPr` and must never become it — it is consulted AFTER a task is chosen, feeds
-   *  {@link onOpenSiblingBuild} alone, and cannot change what is dispatched. */
+  /** W1-T2397: an open sibling outside this task's run branch, from `StatusProjection.openSiblingBuild`.
+   *  INVARIANT: observation AFTER selection via {@link onOpenSiblingBuild}, never eligibility or `isOpenPr`. */
   // Why: the naive eligibility widening W1-T2397 declined on measurement — docs/forensics/drain.md.
   openSiblingBuildFor?: (taskId: string) => OpenSiblingBuild | undefined;
   /** W1-T2397: called once, for the task actually being dispatched, when {@link openSiblingBuildFor}
@@ -398,33 +395,22 @@ export interface NextRunnableOpts extends TaskPreconditionOptions {
    *  to (W1-T1035's crediting MERGED read still fires it). The real wiring corrects the ledgered
    *  reason from "open-pr" to the observed state. */
   onStoodDown?: (task: Task, prNumber: number, state: string) => void;
-  /** W1-T1035 — does this freshly-observed MERGED PR actually credit this task?
-   *  `isMerged(t.id)` is the credit projection for the whole pass, built once before the
-   *  per-candidate walk, so `readLiveState`'s own fresh read can be ahead of it and a bare MERGED is
-   *  ambiguous without this probe. True is the STALE-CREDIT case (this merge credits the task, so
-   *  exclude it rather than re-invite `dispatch.refused_already_merged`); false or omitted is the
-   *  W1-T177 case (the merge credits someone else, so the task stays admitted). Consulted only after
-   *  a `"MERGED"` answer — `"OPEN"` is in flight, `"CLOSED"` credits nobody.
+  /** W1-T1035: after a fresh MERGED read, true credits this task despite the stale pass projection,
+   *  excluding it before `dispatch.refused_already_merged`. False/omitted keeps it admitted (W1-T177:
+   *  the merge credits someone else). OPEN remains in flight; CLOSED credits nobody.
    *  FALSIFIER: test/drain.test.ts's three W1-T177 assertions must keep passing untouched. */
   // Why: the 24-of-32 stood-down-then-refused measurement (W1-T1035) — docs/forensics/drain.md.
   isLiveMergeCredited?: (taskId: string, prNumber: number) => boolean;
   /** Called once per task EXCLUDED because `isLiveMergeCredited` confirmed the stale-credit case,
    *  fired ALONGSIDE `onStoodDown` so "still runnable" and "now excluded" are told apart. */
   onStaleCreditExcluded?: (task: Task, prNumber: number, state: string) => void;
-  /** W1-T534: true when a `run-<taskId>-<epochMs>` branch already exists on origin. INVARIANT: this
-   *  AUGMENTS `isOpenPr` and never replaces it — `isOpenPr` reads a projection re-derived once per
-   *  drain TICK, so a PR opened, or a branch merely pushed ahead of its PR, is invisible to it. The
-   *  two cover disjoint windows. Build the closure from ONE run-ref sweep per pass using
-   *  {@link stillBlockedByPushedRunBranch}; {@link closedUnmergedRunBranchRefs} releases exact refs only.
-   *  W1-T1207 said this probe must gain no age bound; that stands for AGE ALONE. A ref is released
-   *  only on a PROVEN no-PR read at its exact sha plus age plus no live run
-   *  ({@link orphanRunBranchReleased}): 12 such orphans refused 372 dispatches in 23h (2026-09-30). */
+  /** W1-T534: origin run-branch backstop AUGMENTS `isOpenPr` across stale projection/pre-PR windows.
+   *  Use ONE sweep per pass with {@link stillBlockedByPushedRunBranch}; closed-unmerged releases
+   *  are exact refs. W1-T1207: age ALONE never releases; {@link orphanRunBranchReleased} requires
+   *  proven no-PR evidence at the exact sha, age and no live run (12 orphans: 372 refusals in 23h). */
   hasPushedRunBranch?: (taskId: string) => boolean;
-  /** Called once per task excluded because its run branch is already on origin (W1-T534). The real
-   *  wiring rides the existing `dispatch.skipped` row with a distinct reason, and no PR number is
-   *  available in this window — that IS the defect this closes. INVARIANT: the refusal is a SKIP,
-   *  never a terminal state. W1-T1205: fired ALONGSIDE `opts.onFiltered?.(t,
-   *  "run-branch-already-pushed")`, which is what makes it visible to the neutral tally too. */
+  /** W1-T534: once per excluded task, log `dispatch.skipped` without a PR number; SKIP, never terminal.
+   *  W1-T1205: also fire `onFiltered(t, "run-branch-already-pushed")` for the neutral tally. */
   onSkipRunBranch?: (task: Task) => void;
 }
 
@@ -434,9 +420,7 @@ export interface NextRunnableOpts extends TaskPreconditionOptions {
 export function dispatchOrder(tasks: readonly Task[], context?: DispatchValueContext, resumable?: ReadonlySet<string>): Task[] {
   const ordered = [...tasks].sort((a, b) => compareDispatch(a, b, context));
   if (resumable === undefined || resumable.size === 0) return ordered;
-  // A task the harness yielded before its pull request already won a lane; the yield took it, not the queue.
-  // MEASURED 2026-10-17: W1-T9089 and W1-T9757 yielded at 22:07Z to a restart and re-entered at stride ranks 28
-  // and 31, behind a high-fanout family filed four hours earlier, and had no run.start for 6.8 h.
+  // Resume yielded pre-PR lane owners first (W1-T9089/W1-T9757: restart cost 6.8h, 2026-10-17).
   return [...ordered.filter((t) => resumable.has(t.id)), ...ordered.filter((t) => !resumable.has(t.id))];
 }
 
@@ -451,31 +435,38 @@ export interface MachineShareStart { taskId: string; authorClass: string | undef
 export interface MachineShareMove { share: number; machine_starts: number; starts: number; queue_judge_stale_ms: number }
 export interface MachineShareInput {
   queueJudgeStaleMs: number | undefined;
-  starts: readonly MachineShareStart[];
+  /** Undefined when the rows may not hold every start in the window: the share is then unknown and not applied. */
+  starts: readonly MachineShareStart[] | undefined;
   nowMs?: () => number;
   recordStart?: (task: Task, atMs: number) => void;
   onMoved?: (task: Task, move: MachineShareMove) => void;
 }
 
-/** The run starts in the trailing {@link MACHINE_SHARE_WINDOW_MS}, each with its task's author class. */
-export function machineShareStarts(rows: readonly Record<string, unknown>[], tasksById: ReadonlyMap<string, Task>, nowMs: number): MachineShareStart[] {
+/** The run starts in the trailing {@link MACHINE_SHARE_WINDOW_MS}, each with its task's author class. Rotation keeps
+ *  only the newest {@link MAX_RETAINED_LINES_PER_STEP} starts, so when the rows hold that many and none is older
+ *  than the window, older starts in the window may be gone: the result is undefined, not a partial count. */
+export function machineShareStarts(rows: readonly Record<string, unknown>[], tasksById: ReadonlyMap<string, Task>, nowMs: number): MachineShareStart[] | undefined {
   const starts: MachineShareStart[] = [];
+  let total = 0, reachesWindowStart = false;
   for (const r of rows) {
     if (r.step !== "run.start" || typeof r.task_id !== "string" || typeof r.ts !== "string") continue;
     const at = Date.parse(r.ts);
+    total++;
+    if (nowMs - at > MACHINE_SHARE_WINDOW_MS) reachesWindowStart = true;
     if (!(at <= nowMs && nowMs - at <= MACHINE_SHARE_WINDOW_MS)) continue;
     starts.push({ taskId: r.task_id, authorClass: tasksById.get(r.task_id)?.author_class, atMs: at });
   }
-  return starts;
+  return reachesWindowStart || total < MAX_RETAINED_LINES_PER_STEP ? starts : undefined;
 }
 
 /** INVARIANT the-share-never-grants-eligibility: `ordered` is already the eligible set, and only its order changes. */
 function applyMachineShare(ordered: Task[], opts: NextRunnableOpts): Task[] {
   const input = opts.machineShare;
   const staleMs = input?.queueJudgeStaleMs;
-  if (input === undefined || staleMs === undefined || !(staleMs > QUEUE_JUDGE_STALE_MS)) return ordered;
+  if (input === undefined || input.starts === undefined || staleMs === undefined || !(staleMs > QUEUE_JUDGE_STALE_MS)) return ordered;
+  const currentStarts = input.starts;
   const nowMs = input.nowMs?.();
-  const starts = nowMs === undefined ? input.starts : input.starts.filter((s) =>
+  const starts = nowMs === undefined ? currentStarts : currentStarts.filter((s) =>
     s.atMs === undefined || (s.atMs <= nowMs && nowMs - s.atMs <= MACHINE_SHARE_WINDOW_MS));
   const machineStarts = starts.filter((s) => s.authorClass === "machine").length;
   if (starts.length > 0 && machineStarts / starts.length >= MACHINE_DISPATCH_SHARE) return ordered;
@@ -1524,9 +1515,7 @@ export function buildRundown(summary: DrainSummary, ledgerLines: ReadonlyArray<R
       escalationByTask.set(l.task_id, { issueUrl: l.issue_url, class: String(l.class ?? "?") });
     }
   }
-  // A CONTINUED TASK MUST CARRY ITS OWN DETAIL, NEVER THE DRAIN'S `stopDetail`. Before
-  // NON_HALTING_VERDICTS existed only the LAST attempted id could be non-merged. Now an earlier id
-  // can be too, and attaching `stopDetail` blindly prints one task's line against another's verdict.
+  // Continued tasks carry their OWN detail: the drain's stopDetail may belong to a later task.
   const continuedByTask = new Map((summary.continued ?? []).map((c) => [c.taskId, c] as const));
   return summary.attempted.map((taskId): RundownLine => {
     if (merged.has(taskId)) return { taskId, outcome: "merged" };
@@ -1679,18 +1668,9 @@ export interface DrainDeps extends TaskPreconditionOptions {
  *  headroom, pick the next runnable, run it, and stop on any halting verdict. `opts.laneCount >= 2`
  *  hands off to {@link runDrainLanes}, entirely separate code so this loop cannot drift under lane
  *  changes; omitted or <= 1 runs the single-task loop below. */
-/**
- * W1-T3216 — the ids an operator RELEASED, resolved ONCE PER DISPATCH PASS.
- *
- * WHY IT IS A FUNCTION AND NOT A FIELD. #4715 shipped `releasedTaskIds` (plan.ts) and the
- * `releasedIds` parameter with ZERO callers and ZERO producers: a complete, tested feature no
- * production path could reach. This is the producer. It is called at each pass boundary, never
- * inside the per-task filter, because `deps.readLedgerLines` is real file I/O at the caller and a
- * per-task read would put a disk hit in the selection loop once per candidate.
- *
- * NO READER WIRED MEANS AN EMPTY SET, never a throw and never an open door: a caller that has not
- * opted in behaves exactly as it did before this task.
- */
+/** W1-T3216: produce operator-released ids ONCE PER PASS, never per candidate (ledger I/O).
+ *  #4715's unconnected producer is the trap: both dispatch paths must wire this read.
+ *  No reader means an empty set, never an open door. */
 export function resolveReleasedIds(deps: ReleaseReaders, plan?: Plan): ReadonlySet<string> {
   return resolveReleases(deps, plan).ids;
 }
@@ -1807,9 +1787,7 @@ export async function runDrain(plan: Plan, deps: DrainDeps, opts: DrainOpts = {}
   let consecutiveUnreadable = 0;
   const headroomEnabled = opts.headroomEnabled ?? true;
   const unreadableDegradedLimit = opts.unreadableDegradedLimit ?? UNREADABLE_DEGRADED_LIMIT;
-  // BREAKER ESCALATION DEDUP (P29(ii)): the selectors are re-invoked every tick, so a task that stays
-  // tripped would be re-escalated on every tick, violating "exactly one escalation". This set bounds
-  // the CALLBACK to the first observation; the predicate still excludes the task every tick.
+  // P29(ii): dedup escalation callbacks per run; the predicate still excludes on every tick.
   const circuitEscalated = new Set<string>();
   // W1-T4818: one `dispatch.record_task_routed` line per record task per run, not one per pass.
   const routedRecordTasks = new Set<string>();
@@ -2307,9 +2285,7 @@ function allLanesHeldStop(verdict: DispatchGovernorVerdict): { stopReason: StopR
  *  cancels or races ahead of its siblings, and every result is recorded before the pass decides. On
  *  any block or lane failure the WHOLE drain stops afterward, at pass granularity. */
 async function runDrainLanes(plan: Plan, deps: DrainDeps, opts: DrainOpts): Promise<DrainSummary> {
-  // W1-T3216: the lane pass has its OWN boundary — resolved here, exactly once, for the same
-  // reason runDrain does it: deps.readLedgerLines is real I/O and must not enter the per-task
-  // filter. Both passes must answer the same task the same way, so neither may skip this.
+  // W1-T3216: same once-per-pass release read as runDrain; never move ledger I/O into a filter.
   const releasedIds = resolveReleasedIds(deps, plan);
   const laneCount = Math.max(1, opts.laneCount ?? 1);
   const max = opts.max ?? DEFAULT_MAX;
@@ -2642,25 +2618,16 @@ async function runDrainLanes(plan: Plan, deps: DrainDeps, opts: DrainOpts): Prom
     for (const d of partition.serialized) log("dispatch.serialized", serializedLedgerPayload(d));
     const dispatchSet = partition.dispatch;
 
-    // W1-T342's PER-DISPATCH GOVERNOR GATE, APPLIED PER LANE. The pass-level governor reads far above
-    // STOP the whole pass; one reading taken before any lane was admitted stood in for EVERY lane, so
-    // a ceiling crossed between lane 1 and lane 2 admitted lane 2 anyway.
-    // TRAP: a check inside `dispatchSet.map(...)` would LOOK per-lane and not be — `.map`'s callback
-    // runs synchronously for every element, so all N readings land in one tick of the event loop.
-    // Admission therefore happens in this SEQUENTIAL loop, each iteration reading afresh. Stated
-    // rather than overclaimed: lanes run concurrently, so this does NOT let lane 2 see lane 1's spend;
-    // it catches a ceiling crossed by any OTHER writer, and a reading that goes unreadable mid-pass.
-    // INVARIANT: a mid-pass refusal must not abort the pass. `break` stops ADMITTING and never
-    // touches lanes already admitted — refusing lane 2 is a deferral of lane 2, not a failure of 1.
+    // W1-T342: fresh governor read per lane in SEQUENTIAL admission. TRAP: map callbacks all read
+    // in one event-loop tick. Concurrent lanes cannot see each other's spend; this catches other
+    // writers and newly unreadable readings. INVARIANT: refusal stops admission, never admitted lanes.
     const admitted: Task[] = [];
     let refusal: DispatchGovernorVerdict | undefined;
     for (const t of dispatchSet) {
       const verdict = checkDispatchGovernors(deps, undefined);
       if (verdict) {
         refusal = verdict;
-        // A DISTINCT step from the pass-level `drain.cost_governor`/`drain.queue_governor`: "the pass
-        // never started" and "lane 3 of 4 was refused" are different events, and collapsing them hides
-        // a partial batch.
+        // Distinguish partial admission from pass-level cost/queue refusal.
         log("dispatch.lane_governed", {
           task: t.id,
           admitted: admitted.length,
@@ -2672,9 +2639,7 @@ async function runDrainLanes(plan: Plan, deps: DrainDeps, opts: DrainOpts): Prom
       }
       admitted.push(t);
     }
-    // Every lane refused ⇒ nothing dispatches, and the pass says so rather than reporting
-    // "no_runnable" (there WERE runnable tasks; a governor deferred them). W1-T5482: it names the
-    // gate that refused — a memory or quiet-hours hold is never reported as a cost deferral.
+    // W1-T5482: all lanes refused means governor deferral, never no_runnable; name the actual gate.
     if (admitted.length === 0 && refusal) {
       await flushLifetimePressure();
       const held = allLanesHeldStop(refusal);
@@ -2733,9 +2698,7 @@ async function runDrainLanes(plan: Plan, deps: DrainDeps, opts: DrainOpts): Prom
     if (started.length > 0) settledLog("dispatch.concurrent_set", { tasks: started.map((t) => t.id), lane_count: laneCount });
     // Settle accepted siblings before reporting either their outcome or a partial admission hold.
     await Promise.allSettled(work);
-    // THE SETTLED COUNTERPART to `dispatch.concurrent_set`, emitted HERE because the classification
-    // loop below ends in early returns and a row written after it would be skipped exactly when it
-    // matters. `allSettled` never rejects, so this line is reachable whenever dispatch happened.
+    // Pair dispatch.concurrent_set BEFORE classification's early returns; allSettled never rejects.
     settledLog("dispatch.settled_set", settledSetPayload(started, settled, laneCount));
     try { await flushLifetimePressure(); }
     catch (reason) { /* Retain lifetime-pressure failure for the error summary. */ rememberFault(undefined, "lifetime_pressure", reason); }
