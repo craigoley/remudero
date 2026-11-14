@@ -250,6 +250,11 @@ async function selectedRun(enabled: unknown, scenario: Scenario = {}): Promise<{
       if (scenario.coreRefusal) {
         assert.equal(refusalControl?.outcome, "selected", "positive control outside the guard: real pinned input is healthy");
         assert.equal(refusalControl?.outcome === "selected" && refusalControl.source.outcome, "ok");
+        if (refusalControl?.outcome !== "selected") throw new Error("fixture control is not selected");
+        assert.ok(refusalControl.source.plan, "the private graph handle exists before the intended fault");
+        assert.match(refusalControl.source.opsCommit ?? "", /^[a-f0-9]{40}$/);
+        assert.equal(Object.getOwnPropertyDescriptor(refusalControl.source, "plan")?.enumerable, false,
+          "the production source intentionally keeps its private graph off enumerable output");
       }
       const refusalRead = scenario.coreRefusal ? (): OpsTaskDispatchRead => {
         // The healthy control is asserted outside readOpsDispatch's catch; this closure only
@@ -261,8 +266,9 @@ async function selectedRun(enabled: unknown, scenario: Scenario = {}): Promise<{
           case "missing-plan": return { ...current, source: { ...current.source, outcome: "ok", plan: undefined } };
           case "unreadable": return { ...current, source: { outcome: "unreadable" } };
           case "public-revision": return { ...current, publicCommit: "invalid" };
-          case "ops-revision": return { ...current, source: { ...current.source, opsCommit: "invalid" } };
-          case "identity": return { ...current, source: { ...current.source, identityDigest: "invalid" } };
+          // Explicitly preserve the non-enumerable handles while faulting only this named binding.
+          case "ops-revision": return { ...current, source: { ...current.source, plan: current.source.plan, opsCommit: "invalid" } };
+          case "identity": return { ...current, source: { ...current.source, plan: current.source.plan, opsCommit: current.source.opsCommit, identityDigest: "invalid" } };
         }
         throw new Error("fixture refusal case missing");
       } : undefined;
