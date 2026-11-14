@@ -141,6 +141,28 @@ test("W1-T12544 criterion 1: a recorded needs-design stand-down cannot override 
   }
 });
 
+test("W1-T12544 criterion 1: the rung's own design stand-down at the conflicted head does not refuse the conflict round", async t => {
+  // The production shape after a design round: the sweep dispatched at A, the rung stood down at rung.needs_design and
+  // filed its question. The stand-down hold reads that row; it must not turn the conflict round into refused-escalate.
+  const now = systemClock.now();
+  const at = (ms: number) => new Date(now - ms).toISOString();
+  const standDown: Row[] = [
+    { step: "sweep.disposed", ts: at(6500), run_id: "EARLIER-SWEEP", task_id: TASK, pr_number: 18033, head_sha: HELD_HEAD,
+      disposition: "blocked-fixable", acted: true },
+    { step: "fix.stood_down", ts: at(6000), run_id: "DESIGN-ROUND", task_id: TASK, head_sha: HELD_HEAD,
+      site: "rung.needs_design", reason: DESIGN_REASON, read_head_sha: HELD_HEAD, issue_url: ISSUE_URL },
+  ];
+  const control = fixture(t, [...designRows(now), ...standDown]);
+  const held = await runSweep([prAt(control.now, HELD_HEAD, false)], control.deps);
+  assert.equal(held.actions[0]!.disposition, "refused-escalate", "control: a code round at A is still held");
+  const f = fixture(t, [...designRows(now), ...standDown]);
+  const summary = await runSweep([prAt(f.now, HELD_HEAD, true)], f.deps);
+  assert.equal(summary.actions[0]!.disposition, "conflicted");
+  assert.equal(f.effects.evidence.length, 1, "one conflict round is dispatched");
+  const row = f.disposed().at(-1)!;
+  assert.deepEqual([row.disposition, row.design_hold_kept, row.stand_down_hold], ["conflicted", true, undefined]);
+});
+
 test("W1-T12544 criterion 2: an open escalation with no cause or another cause does not stand down a conflict round", async t => {
   for (const cause of [undefined, "review", "ci"]) {
     const issue = openIssue(cause);
@@ -302,10 +324,40 @@ test("W1-T12544 criterion 3: a complete archive keeps the design hold when its l
   }
 });
 
+/** Newer rows of other tasks that push this PR's fix rows, its question included, out of the live file on rotation. */
+function archivingRows(now: number): Row[] {
+  return [...Array.from({ length: MAX_RETAINED_LINES_PER_STEP }, (_, i) =>
+    ["fix.dispatch", "fix.done", "fix.needs_design"].map(step => ({
+      step, ts: new Date(now - 3000 + i).toISOString(), task_id: `W1-T${20000 + i}`,
+      pr_number: 20000 + i, run_id: `OTHER-${i}`, head_sha: OUTSIDE_HEAD, reason: "another task's question",
+    }))).flat(), { step: "cli.invoked", ts: new Date(now).toISOString(), pad: "x".repeat(300_000) }];
+}
+
+test("W1-T12544 criterion 3: a design question that retention archived still holds the conflict-pushed head", async t => {
+  // Rotation keeps the newest rows per step for every PR, so a busy fleet archives this PR's fix.needs_design row too.
+  const now = systemClock.now();
+  const f = fixture(t, [...designRows(now), ...conflictRoundRows(now), ...archivingRows(now)]);
+  assert.equal(rotateLedger(f.deps.ledgerPath, { ceilingBytes: 256_000, smoothingWindowMs: 0,
+    now: () => new Date(now) }).rotated, true, "control: production rotation ran");
+  const live = readLedgerLines(f.deps.ledgerPath);
+  assert.equal(live.some(row => row.step === "fix.needs_design" && row.task_id === TASK), false,
+    "control: the question is only in the archive");
+  const summary = await runSweep([prAt(f.now, MERGE_HEAD, false)], f.deps);
+  assert.equal(f.effects.admissions, 0, "no code admission while the archived question is unanswered");
+  assert.equal(f.effects.evidence.length, 0);
+  assert.equal(summary.actions[0]!.disposition, "refused-escalate");
+  assert.match(summary.actions[0]!.reason, new RegExp(DESIGN_REASON));
+  assert.equal(f.disposed().at(-1)!.hold_head_sha, HELD_HEAD);
+  const outside = await runSweep([prAt(f.now, OUTSIDE_HEAD, false)], f.deps);
+  assert.equal(outside.actions[0]!.disposition, "blocked-fixable", "control: an outside head is still admitted");
+});
+
 async function activeConflictRung(t: TestContext, hold: "design" | "review" | "ci" | "legacy" | "none", answered = false,
   heads: { from: string; to: string; prior: Row[] } = { from: HELD_HEAD, to: MERGE_HEAD, prior: [] },
-  ci: "green" | "red" | "red-unpinned" = "green") {
-  const f = fixture(t, [...heads.prior, ...(hold === "design" ? designRows(systemClock.now(), TASK, PR_URL, heads.from) : [])]);
+  ci: "green" | "red" | "red-unpinned" = "green", archived = false) {
+  const f = fixture(t, [...heads.prior, ...(hold === "design" ? designRows(systemClock.now(), TASK, PR_URL, heads.from) : []),
+    ...(archived ? archivingRows(systemClock.now()) : [])]);
+  if (archived) assert.equal(rotateLedger(f.deps.ledgerPath, { ceilingBytes: 256_000, smoothingWindowMs: 0 }).rotated, true);
   const root = dirname(f.deps.ledgerPath);
   const mount: Mount = { model: "sonnet", effort: "medium", maxTurns: 20, contextBudget: 120000 };
   const issues = hold === "none" || hold === "design" ? [] : [openIssue(hold === "legacy" ? undefined : hold, heads.from)];
@@ -442,6 +494,16 @@ test("W1-T12544 criterion 3: the active rung preserves the hold through a confli
       assert.equal(r.f.effects.evidence.length, 0, `${hold}: a subsequent sweep also admits no code round`);
     });
   }
+});
+
+test("W1-T12544 criterion 3: the active rung keeps a design question that retention archived", async t => {
+  const r = await activeConflictRung(t, "design", false, undefined, "green", true);
+  assert.equal(readLedgerLines(r.f.deps.ledgerPath).some(row => row.step === "fix.needs_design" && row.task_id === TASK &&
+    row.head_sha === HELD_HEAD), false, "control: the question is only in the archive");
+  assert.equal(r.pushedHead, MERGE_HEAD);
+  assert.equal(r.spawned.length, 1, "no code worker after the conflict worker");
+  assert.equal(r.outcome.outcome, "needs_design");
+  assert.match(String(r.outcome.reason), new RegExp(DESIGN_REASON));
 });
 
 test("W1-T12544 criterion 3: the active B→C rung keeps a question introduced after A→B", async t => {

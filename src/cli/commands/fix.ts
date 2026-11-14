@@ -2739,13 +2739,15 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
     // W1-T12544: red CI can leave review at A after our conflict push to B. Trace the hold from
     // the current PR head, and compare the carried head to that same head when selecting its cause.
     const holdLedgerRows = [...(deps.ledgerLines ?? (() => readLedgerLines(deps.ledgerPath)))(), ...roundRows];
+    let holdRows: ReadonlyArray<Record<string, unknown>> = holdLedgerRows;
     const holdHeadSha = prNumber === undefined ? currentPrHeadSha : conflictRoundHeldHead(
       { taskId: opts.taskId, prNumber, prUrl: opts.prUrl, headSha: currentPrHeadSha },
       holdLedgerRows,
       deps.ledgerPath,
       undefined,
-      head => {
-        if (holdLedgerRows.some(row => row.step === "fix.needs_design" && row.task_id === opts.taskId &&
+      (head, history) => {
+        holdRows = history;
+        if (history.some(row => row.step === "fix.needs_design" && row.task_id === opts.taskId &&
             row.head_sha === head && !(typeof row.contract_revision === "string" && row.contract_revision !== currentContractRevision))) return true;
         const key = fixEscalationDedupKey(opts.taskId, opts.prUrl, head, false, noReviewYet, currentContractRevision);
         const issue = findDuplicateEscalation({ ...key, cause: undefined }, { issues: deps.issues });
@@ -4065,7 +4067,7 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
     }
     // W1-T10339: a handoff is reused only while the inputs it read stand — an amended contract or an edited (taskless)
     // PR body at the same head gets a real round. A row from before those fields existed keeps the head-only reuse.
-    const priorDesign = roundLedger.find((row) =>
+    const priorDesign = (holdHeadSha === priorHeadSha ? roundLedger : [...holdRows, ...roundLedger]).find((row) =>
       row.step === "fix.needs_design" && row.task_id === opts.taskId && row.head_sha === holdHeadSha &&
       !(typeof row.contract_revision === "string" && row.contract_revision !== currentContractRevision) &&
       !(typeof row.read_body_sha256 === "string" && opts.prBodySha256 !== undefined && row.read_body_sha256 !== opts.prBodySha256));
