@@ -190,76 +190,86 @@ test("the plan round refuses appended credit and criterion loss before push or m
 });
 
 test("the code lane refuses both worker and generator filing commits without spending a strike", async (t) => {
-  for (const scenario of ["worker", "generator", "head", "evidence"] as const) {
-    const { repo, write, prior } = filing(t);
-    const rows: Record<string, unknown>[] = [];
-    let pushes = 0;
-    let workerCommitted = false;
-    let headReadFailures = 0;
-    let evidenceReadFailures = 0;
-    const execFileSync = childProcess.execFileSync;
-    const headRead = t.mock.method(childProcess, "execFileSync", (...args: Parameters<typeof execFileSync>) => {
-      if (scenario === "head" && workerCommitted && args[0] === "git" &&
-        args[1]?.slice(-2).join(" ") === "rev-parse HEAD") {
-        headReadFailures++;
-        throw new Error("fixture cannot read result head");
-      }
-      return execFileSync(...args);
-    });
-    syncBuiltinESMExports();
-    const review: ReviewVerdict & { headSha: string; reviewerOutcome: string } = { state: "failure", criteria: [], testTheater: false,
-      summary: "blocked", floorDegraded: false, capped: false, keywordOnly: false, planOnly: true, headSha: prior, reviewerOutcome: "failure" };
-    const result = await runFixRung({
-      taskId: "W1-T12062", runId: `filing-${scenario}`, task: { id: "W1-T12062", title: "filing", files: [DECLARED] },
-      initialSessionId: "fixture-session",
-      prUrl: "https://github.com/acme/remudero/pull/9000", branch: "run-W1-T12062-123", worktreePath: repo.dir,
-      mount: { model: "sonnet", effort: "medium", maxTurns: 10, contextBudget: 120000 },
-      settingsFile: join(repo.dir, "settings.json"), config: { root: repo.dir } as Config, budgetUsd: 10,
-      strikeCap: 1, initialReview: review,
-      ciFailures: [{ name: "fixture", logTail: scenario === "generator" ? "Run 'npm run docs-index' and commit the result." : "proof form is invalid" }],
-      reviewBase: { owner: "acme", repo: "remudero", headCheckoutDir: repo.dir,
-        reviewerMount: { model: "sonnet", effort: "medium", maxTurns: 10, contextBudget: 120000 } },
-      deps: {
-        spawn: async () => {
-          write(SHARD, shard(scenario === "head" || scenario === "evidence"
-            ? criteria.map(c => ({ ...c, proof: c.proof.replaceAll("`", "") })) : criteria.slice(0, 1)));
-          repo.git("add", "."); repo.git("commit", "-m", "fix(plan): repair filing proof");
-          workerCommitted = true;
-          return { sessionId: "fixture", text: "REPORT\nCOMMIT_MESSAGE: fix(plan): repair proof", blocks: [], stderr: "",
-            subtype: "success", isError: false, apiError: false, costUsd: 0, numTurns: 1, permissionDenials: [],
-            childEnvKeys: [], model: "sonnet", effort: "medium", tokens: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 },
-            modelUsage: {}, compactionEvents: [], qualitySuspect: false } as WorkerResult;
-        },
-        waitForCiGreen: async () => { assert.fail("a refused round never waits for CI"); },
-        runReview: async () => { assert.fail("a refused round never reviews"); },
-        fetchPrBody: async () => "## Acceptance\n- filing | grep: id: in plan/tasks.d/",
-        fetchPrDiffFiles: async () => [SHARD],
-        ...(scenario === "evidence" ? { scopeAmendmentGit: async () => {
-          evidenceReadFailures++;
-          throw new Error("fixture cannot read filing evidence");
-        } } : {}),
-        push: () => { pushes++; },
-        issues: { create: () => { assert.fail("no escalation"); }, listOpen: () => [], comment() {} },
-        ledgerPath: join(repo.dir, "ledger.ndjson"), log: (step, extra) => rows.push({ step, ...extra }), say() {},
-        account: result => result,
-        ...(scenario === "generator" ? {
-          packageScripts: { "docs-index": "generate", "docs-index:check": "check" },
-          runGeneratorScript: async () => ({ status: 0, stdout: "", stderr: "" }),
-          commitGeneratorOutput: ({ message }: { message: string }) => {
-            repo.git("commit", "--allow-empty", "-m", message);
-            return { changed: true, sha: repo.git("rev-parse", "HEAD") };
+  for (const files of [[SHARD], [DECLARED]]) {
+    for (const scenario of ["credit", "worker", "generator", "head", "evidence"] as const) {
+      const { repo, write, prior } = filing(t);
+      const rows: Record<string, unknown>[] = [];
+      let pushes = 0;
+      let workerCommitted = false;
+      let headReadFailures = 0;
+      let evidenceReadFailures = 0;
+      let evidenceReads = 0;
+      const execFileSync = childProcess.execFileSync;
+      const headRead = t.mock.method(childProcess, "execFileSync", (...args: Parameters<typeof execFileSync>) => {
+        if (scenario === "head" && workerCommitted && args[0] === "git" &&
+          args[1]?.slice(-2).join(" ") === "rev-parse HEAD") {
+          headReadFailures++;
+          throw new Error("fixture cannot read result head");
+        }
+        return execFileSync(...args);
+      });
+      syncBuiltinESMExports();
+      const review: ReviewVerdict & { headSha: string; reviewerOutcome: string } = { state: "failure", criteria: [], testTheater: false,
+        summary: "blocked", floorDegraded: false, capped: false, keywordOnly: false, planOnly: true, headSha: prior, reviewerOutcome: "failure" };
+      const result = await runFixRung({
+        taskId: "W1-T12062", runId: `filing-${scenario}`, task: { id: "W1-T12062", title: "filing", files },
+        initialSessionId: "fixture-session",
+        prUrl: "https://github.com/acme/remudero/pull/9000", branch: "run-W1-T12062-123", worktreePath: repo.dir,
+        mount: { model: "sonnet", effort: "medium", maxTurns: 10, contextBudget: 120000 },
+        settingsFile: join(repo.dir, "settings.json"), config: { root: repo.dir } as Config, budgetUsd: 10,
+        strikeCap: 1, initialReview: review,
+        ciFailures: [{ name: "fixture", logTail: scenario === "generator" ? "Run 'npm run docs-index' and commit the result." : "proof form is invalid" }],
+        reviewBase: { owner: "acme", repo: "remudero", headCheckoutDir: repo.dir,
+          reviewerMount: { model: "sonnet", effort: "medium", maxTurns: 10, contextBudget: 120000 } },
+        deps: {
+          spawn: async () => {
+            write(SHARD, shard(scenario === "credit" || scenario === "head" || scenario === "evidence"
+              ? criteria.map(c => ({ ...c, proof: c.proof.replaceAll("`", "") })) : criteria.slice(0, 1)));
+            repo.git("add", "."); repo.git("commit", "-m", "fix(plan): repair filing proof" +
+              (scenario === "credit" ? "\n\nRemudero-Task: W1-T12062" : ""));
+            workerCommitted = true;
+            return { sessionId: "fixture", text: "REPORT\nCOMMIT_MESSAGE: fix(plan): repair proof", blocks: [], stderr: "",
+              subtype: "success", isError: false, apiError: false, costUsd: 0, numTurns: 1, permissionDenials: [],
+              childEnvKeys: [], model: "sonnet", effort: "medium", tokens: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 },
+              modelUsage: {}, compactionEvents: [], qualitySuspect: false } as WorkerResult;
           },
-        } : {}),
-      },
-    });
-    headRead.mock.restore();
-    syncBuiltinESMExports();
-    assert.equal(result.outcome, "stood_down");
-    assert.match(result.reason!, scenario === "generator" ? /Remudero-Task: W1-T12062/ :
-      scenario === "head" ? /unreadable.*nextHead/ : scenario === "evidence" ? /cannot read filing evidence/ : /criterion count/);
-    if (scenario === "head") assert.ok(headReadFailures > 0, "the result head read actually failed");
-    if (scenario === "evidence") assert.ok(evidenceReadFailures > 0, "the filing evidence read actually failed");
-    assert.equal(result.strikes, 0); assert.equal(pushes, 0);
-    assert.equal(fixRoundTally(rows, "W1-T12062", prior).strikes, 0);
+          waitForCiGreen: async () => { assert.fail("a refused round never waits for CI"); },
+          runReview: async () => { assert.fail("a refused round never reviews"); },
+          fetchPrBody: async () => "## Acceptance\n- filing | grep: id: in plan/tasks.d/",
+          updatePrBody: () => { assert.fail("a refused round never edits the PR body"); },
+          fetchPrDiffFiles: async () => [SHARD],
+          scopeAmendmentGit: async (_worktree, args) => {
+            evidenceReads++;
+            if (scenario === "evidence") {
+              evidenceReadFailures++;
+              throw new Error("fixture cannot read filing evidence");
+            }
+            return repo.git(...args);
+          },
+          push: () => { pushes++; },
+          issues: { create: () => { assert.fail("no escalation"); }, listOpen: () => [], comment() {} },
+          ledgerPath: join(repo.dir, "ledger.ndjson"), log: (step, extra) => rows.push({ step, ...extra }), say() {},
+          account: result => result,
+          ...(scenario === "generator" ? {
+            packageScripts: { "docs-index": "generate", "docs-index:check": "check" },
+            runGeneratorScript: async () => ({ status: 0, stdout: "", stderr: "" }),
+            commitGeneratorOutput: ({ message }: { message: string }) => {
+              repo.git("commit", "--allow-empty", "-m", message);
+              return { changed: true, sha: repo.git("rev-parse", "HEAD") };
+            },
+          } : {}),
+        },
+      });
+      headRead.mock.restore();
+      syncBuiltinESMExports();
+      assert.equal(result.outcome, "stood_down");
+      assert.match(result.reason!, scenario === "generator" || scenario === "credit" ? /Remudero-Task: W1-T12062/ :
+        scenario === "head" ? /unreadable.*nextHead/ : scenario === "evidence" ? /cannot read filing evidence/ : /criterion count/);
+      if (scenario !== "head") assert.ok(evidenceReads > 0, `filing evidence was read for ${files.join(", ")}`);
+      if (scenario === "head") assert.ok(headReadFailures > 0, "the result head read actually failed");
+      if (scenario === "evidence") assert.ok(evidenceReadFailures > 0, "the filing evidence read actually failed");
+      assert.equal(result.strikes, 0); assert.equal(pushes, 0);
+      assert.equal(fixRoundTally(rows, "W1-T12062", prior).strikes, 0);
+    }
   }
 });

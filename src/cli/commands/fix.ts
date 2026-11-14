@@ -2546,9 +2546,6 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
   const filingRoundRefusal = async (priorHead: string, nextHead: string | undefined): Promise<string | undefined> => {
     if (baselineDiffFiles === undefined) return undefined;
     if (baselineDiffFiles.length === 0 || !baselineDiffFiles.every(isInPlanScope)) return undefined;
-    // W1-T5118's filing case: the inherited diff is plan-scoped, while the task declares
-    // future implementation files. Plan maintenance rounds have no introduced task contract.
-    if (opts.task.files?.some((file) => !isInPlanScope(file)) !== true) return undefined;
     if (nextHead === undefined || nextHead.trim() === "") return "unreadable plan filing nextHead; cannot verify the round before push";
     return planFilingFixRoundRefusal(await readPlanFilingFixRoundInput(
       baselineDiffFiles, priorHead, nextHead,

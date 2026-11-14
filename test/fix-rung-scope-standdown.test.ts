@@ -40,10 +40,11 @@
  */
 import assert from "node:assert/strict";
 import { admittedFixTestPaths } from "../src/lib/fix-test-scope.js";
-import { mkdtempSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 import {
   runFixRung,
@@ -307,14 +308,20 @@ test("runFixRung (criterion 2): a fix worker's round-1 commit that adds a path o
   assert.deepEqual(stoodDown[0].extra?.out_of_scope_paths, ["scripts/claude-md-budget-baseline.json"]);
 });
 
-test("runFixRung (criterion 3): on a plan-only task, a fix worker's non-plan addition stands the rung down for the PLAN-SCOPE reason (never the files-scope reason)", async () => {
+test("runFixRung (criterion 3): on a plan-only task, a fix worker's non-plan addition stands the rung down for the PLAN-SCOPE reason (never the files-scope reason)", async (t) => {
+  const repo = gitRepo({ scope: t });
+  mkdirSync(join(repo.dir, "plan/tasks.d"), { recursive: true });
+  writeFileSync(join(repo.dir, "plan/tasks.d/PR-2527X.yaml"), "# existing plan maintenance\n");
+  repo.git("add", "."); repo.git("commit", "-m", "chore(plan): seed maintenance");
+  repo.git("update-ref", "refs/remotes/origin/main", "HEAD");
   const spawnCalls: SpawnWorkerArgs[] = [];
-  const failing = fakeReview("failure", [criterion({ claim: "criterion A merges cleanly", met: false, reason: "r" })]);
+  const failing = fakeReview("failure", [criterion({ claim: "criterion A merges cleanly", met: false, reason: "r" })], repo.git("rev-parse", "HEAD"));
   const issues = fakeIssueStore();
   const logs: Array<{ step: string; extra?: Record<string, unknown> }> = [];
 
   const outcome = await runFixRung({
     ...fixRungBaseOpts({ id: "PR-2527X", title: "correct a filing's criteria", files: ["plan/tasks.d/PR-2527X.yaml"] }),
+    worktreePath: repo.dir,
     strikeCap: 3,
     initialReview: failing,
     deps: {
