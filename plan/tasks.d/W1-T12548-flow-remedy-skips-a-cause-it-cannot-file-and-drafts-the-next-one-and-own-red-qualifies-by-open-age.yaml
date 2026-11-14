@@ -19,6 +19,8 @@
   files:
     - src/lib/flow-remedy-gardener.ts
     - test/gardeners/flow-remedy-skips-a-cause-it-cannot-file-and-drafts-the-next-one.test.ts
+    - test/the-flow-gardener-files-a-remedy-for-the-costliest-unowned-blocker.test.ts
+    - test/admission-pr-flow-gardening.test.ts
   status: queued
   attempts: 0
   acceptance:
@@ -55,8 +57,10 @@
     3. With no fileable candidate, `next` is undefined and the pass records its scorecard with no filing, so no streak starts.
     4. In `markEligibility`, add `FLOW_OWN_RED_OPEN_AGE_MS = 60 * 60_000`: an open episode whose key starts with `own-red:` is eligible once it has been open that long.
     5. The test builds the ledger with test/helpers/ledger-fixture.ts and drives `flowGardenSpec` through a garden pass.
+    6. Two existing tests expect a NONE-owned draft to become `next` through `flowGardenSpec`, which step 1 changes. In test/the-flow-gardener-files-a-remedy-for-the-costliest-unowned-blocker.test.ts and the W1-T7756 integration test in test/admission-pr-flow-gardening.test.ts, a case that needs a filed cause uses an owned cause that is eligible (a closed PR, or an own-red episode past the open age), and a NONE-owned draft is asserted skipped with its reason. What each test checks does not change otherwise.
     NOT IN SCOPE: giving NONE-owned blockers an owner (the sweep's classifier); the fix-lane ladder; the escalation rung; the retry wait itself.
   falsifier: |
     Stop the walk at the first unfileable cause and criteria 1 and 5 must fail. Skip an escalation and criterion 2 must fail. Count a pass with nothing fileable as a failure and criterion 3 must fail. Remove the open-age rule and criterion 4 must fail. Restore and require all to pass.
   note: |
     Id reserved for run-unfiled-1794610450000 with ~/rmd-work/bin/reserve-id.sh. The fleet builds it.
+    Amended 2026-11-14: design step 6 and two existing test files in `files`; the build changed them only where they expected a NONE-owned draft to be filed.

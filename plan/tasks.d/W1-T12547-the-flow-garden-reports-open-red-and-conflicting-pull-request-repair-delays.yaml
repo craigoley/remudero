@@ -19,7 +19,7 @@
     - src/lib/flow-gardener.ts
     - src/lib/ledger-steps.ts
     - test/gardeners/the-flow-garden-reports-open-red-and-conflicting-pull-request-repair-delays.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "For each open pull request in a complete census whose checks read FAILURE or ERROR, or whose mergeability reads CONFLICTING, the daily flow pass writes one flow.open_repair_ages entry with the pull request number, the kind (red, conflict or both), its open age, the delay from open to its first fix round, and the time since its latest fix round ended. A pull request with no fix round has a null first-round delay and the reason no_round_yet"
