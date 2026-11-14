@@ -1,0 +1,72 @@
+- id: W1-T12717
+  title: "The merge-time ratchet judge counts only CI-enforced gates and never repeats an update-branch that cannot cure the crossing"
+  repo: remudero
+  depends_on: []
+  priority: 1.5
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the one verdict the arm, the direct merge and the armed re-judge consult; a wrong answer either loops update-branch or lets a crossing land
+  band_meaning: blast-radius
+  origin: "operator-session#ratchet-collision-update-loop-2026-11-14"
+  plan_refs:
+    - W1-T12509
+    - W1-T9962
+    - W1-T3140
+    - W1-T12526
+  files:
+    - scripts/source-size-ratchet.mjs
+    - src/lib/merged-ratchet-verdict.ts
+    - src/lib/arm-auto-merge.ts
+    - src/lib/sweep.ts
+    - src/lib/ledger-steps.ts
+    - test/a-ceiling-is-rejudged-against-current-main-before-a-merge.test.ts
+    - test/gardeners/two-pull-requests-that-cross-a-ceiling-together-are-held-at-merge-time.test.ts
+    - test/gardeners/an-update-that-cannot-cure-a-crossing-is-never-repeated.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "invariant:judge-counts-what-ci-enforces — the judge counts a gate only when CI runs that gate against the baseline the judge reads. scripts/source-size-ratchet.mjs exports CI_READS_BASELINE false, and its CI script source-size-signal passes no --baseline. So COUNTED_RATCHET_GATES leaves out source-size, UNCOUNTED_RATCHET_GATES names it with class ci-signal, and the judge never reads scripts/source-size-baseline.json"
+      kind: guard
+      proof: "grep: W1-T12717 criterion 1 in test/gardeners/an-update-that-cannot-cure-a-crossing-is-never-repeated.test.ts"
+    - claim: "The #18427 replay: main is over its src/lib/worker.ts source-size ceiling and the pull request adds lines to that file. Through the real merge-tree read, the real judge, the arm path and runArmedRatchetRejudge, as main moves three times, the verdict is clean and updateBranch is never called"
+      proof: "grep: W1-T12717 criterion 2 in test/gardeners/an-update-that-cannot-cure-a-crossing-is-never-repeated.test.ts"
+    - claim: "A crossing on a CI-enforced gate that comes from the pull request's own diff (main's count is already over main's ceiling, and the merge adds to it) is never answered with update-branch. The arm path holds with remedy operator. The armed re-judge writes remedy operator with update_withheld naming pr-diff, and no sweep.update_branch.attempted row"
+      proof: "grep: W1-T12717 criterion 3 in test/gardeners/an-update-that-cannot-cure-a-crossing-is-never-repeated.test.ts"
+    - claim: "A crossing that main and the pull request make together gets one update-branch. After main moves and the head changes, the same crossing (same gate, path, field and count the pull request adds) is not updated again, in either the arm path or the armed re-judge: the row says remedy operator and update_withheld repeat. A crossing whose added count changed gets one new update"
+      proof: "grep: W1-T12717 criterion 4 in test/gardeners/an-update-that-cannot-cure-a-crossing-is-never-repeated.test.ts"
+    - claim: "Every sweep.ratchet_judge.decided row with held rows carries crossing_keys for all of its rows, not only the first ten it lists, and each row carries prAdds, the count the merge adds over main's"
+      proof: "grep: W1-T12717 criterion 5 in test/gardeners/an-update-that-cannot-cure-a-crossing-is-never-repeated.test.ts"
+    - claim: "invariant:an-update-never-repeats-for-one-crossing — for one pull request, no crossing key is answered with update-branch twice while the count the pull request adds stays the same"
+      kind: guard
+      proof: "grep: W1-T12717 criterion 6 in test/gardeners/an-update-that-cannot-cure-a-crossing-is-never-repeated.test.ts"
+  rationale: |
+    WHY: the merge-time judge holds pull requests on a ceiling that CI does not enforce, and answers each hold with an update-branch that cannot cure it. Each update drops the exact-head review and restarts the CI run of about 45 minutes, and then main moves and the judge holds again.
+    READ at origin/main af2d3c07a:
+    - src/lib/merged-ratchet-verdict.ts:34 COUNTED_RATCHET_GATES holds source-size (W1-T12509, #18362). `sourceSizeRows` (:188-208) reads scripts/source-size-baseline.json on both trees.
+    - scripts/source-size-ratchet.mjs header, INVARIANT 2: the default mode "never reads or writes scripts/source-size-baseline.json"; package.json `source-size-signal` passes no --baseline; .github/workflows/ci.yml:1341 runs `source-size-signal` ("growth informs review"). W1-T3140 made the step a signal.
+    - So the baseline is stale: src/lib/worker.ts has a ceiling of 4000 and 8354 lines on main; src/run-task.ts 37002 against 44983; src/lib/sweep.ts 7000 against 29713; src/lib/deployer.ts 1000 against 3661.
+    - `judgeCount` (:148-153): when main is already over a ceiling, any growth the merge adds is a crossing.
+    - The remedy is update-branch: src/lib/arm-auto-merge.ts:1427-1466 `ratchetCollisionSteps` (once per head) and src/lib/sweep.ts:25896-25953 `runArmedRatchetRejudge` (once per head). An update never changes the merged tree, and its new head is a new head, so the guard never fires. Merging main cannot remove the pull request's own lines.
+    MEASURED read-only on the Azure host, the live ledger and the rotated archives of 2026-11-14 (00:00Z to 21:16Z):
+    - 540 sweep.ratchet_judge.decided rows; 289 crossings, all source-size (src/run-task.ts 105, deployer.ts 102, sweep.ts 73, worker.ts 34, review-capacity.ts 18, prompt-render.ts 10, nine more files). By pull request: #18305 100, #18427 34, #18439 24, #18424 20, #18501 18, #18410 15, #18388 13, #18343 12.
+    - Update-branch from ratchet_collision: 280 updates (114 sweep.update_branch.updated from the armed re-judge, 166 direct-merge-updated from the arm path) over 156 distinct (pull request, head) pairs on 22 pull requests (#18305 43, #18427 19, #18424 13, #18388 12, #18439 12, #18501 9).
+    - Cost: 156 CI restarts at about 45 minutes is about 117 PR-hours of CI reruns. 107 of the 156 updates dropped a passing exact-head review; 93 of those have a measured review time, 21.5 review-hours in all (mean 13.9 minutes), so about 25 review-hours for the 107.
+    - A second defect, not in scope: fixture-copy and deps-interface read unread on every pass that lands src and test files, because the population (src 26.5 MB plus test 61.2 MB, 87.6 MB) is past the 50331648-byte bound (:240). Unread proceeds, so it causes no loop.
+    CHECKED for overlap: W1-T12526 (#18550, open) adds learnings-budget, affected-reach and house-layout to the counted gates. CI enforces those against their baselines, so criterion 1 keeps them, and criteria 3 and 4 stop any loop on them. Whichever of the two merges second takes the other's gate list. No queued task names ratchet_collision or update-branch repeats.
+  design: |
+    INVARIANT judge-counts-what-ci-enforces: the judge counts a gate only when CI runs that gate against the baseline the judge reads; a gate CI runs as a signal is named uncounted (class ci-signal), never counted clean or crossing.
+    INVARIANT an-update-never-repeats-for-one-crossing: for one pull request, no crossing key is answered with update-branch twice while the count the pull request adds stays the same.
+    W1-T12509's invariant no-clean-without-count is kept.
+    1. scripts/source-size-ratchet.mjs: export `CI_READS_BASELINE = false` beside its header INVARIANT. No behaviour change, no baseline change.
+    2. src/lib/merged-ratchet-verdict.ts: rename the five-gate list to the gates the judge has counters for. COUNTED_RATCHET_GATES is that list minus each gate whose script exports CI_READS_BASELINE false (imported from the script, not a second list). UNCOUNTED_RATCHET_GATES adds one `ci-signal` row per such gate, with a reason naming the script. PATH_KEYED_BASELINES drops the source-size baseline when source-size is not counted, so it is not read.
+    3. Each MergedRatchetRow gains `prAdds` (merged count minus main's count). Export `ratchetCrossingKeys(judgement)` (`<verdict>:<gate>:<path>[#field]:+<prAdds>`) and `ratchetUpdateWithheld(judgement, prNumber, ledgerLines)`. It returns `pr-diff` when every held row has main's count over main's ceiling, and `repeat` when every held row that is not pr-diff has a key already answered for this pull request by a sweep.ratchet_judge.decided row with remedy update-branch (outcome not direct-merge-update-failed). Otherwise undefined.
+    4. `ratchetJudgeLedgerFields(j, withheld?)` adds `crossing_keys` (all rows) and `update_withheld`.
+    5. arm-auto-merge.ts `ratchetCollisionSteps`: when withheld, no update; hold with outcome direct-merge-preflight-refused and remedy operator, and say why. `logArmAttribution` passes the reason to the ledger row. sweep.ts `runArmedRatchetRejudge`: when withheld, append the judge row with remedy operator and update_withheld, and do not update.
+    6. Update the W1-T12509 and W1-T9962 tests that pin the counted list and the source-size crossing. Update the sweep.ratchet_judge.decided meaning in src/lib/ledger-steps.ts if it names the remedies.
+    NOT IN SCOPE: any baseline value (no raise, no lower); routing the withheld crossing to the fix lane as a finding (the row and the say report it); the population bound.
+  falsifier: |
+    Count source-size again (drop the CI_READS_BASELINE filter) and the criterion 2 replay must show an update-branch on every main move. Drop the pr-diff rule and criterion 3 must fail with an update. Drop the repeat rule and criterion 4 must fail with a second update. List only the first ten keys and criterion 5 must fail. Restore and require all to pass.
+  note: |
+    Id W1-T12717 reserved for run-unfiled-1794691294000 with ~/rmd-work/bin/reserve-id.sh. Hand-built on the Azure lane, stacked on this filing.
