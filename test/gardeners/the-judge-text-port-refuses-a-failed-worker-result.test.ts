@@ -25,7 +25,7 @@ import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import type { SpawnWorkerArgs, WorkerResult } from "#src/lib/worker.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
-const NOW = Date.parse("2026-11-13T12:00:00.000Z");
+const NOW = Date.now();
 type Row = Record<string, unknown>;
 
 function workerResult(over: Partial<WorkerResult> = {}): WorkerResult {
@@ -70,7 +70,7 @@ test("W1-T12549 criterion 1: a failed worker result throws JudgeWorkerFailedErro
 const issueUrl = (n: number) => `https://github.com/acme/remudero/issues/${n}`;
 const handFiled = (n: number): RevalidationIssue => ({ number: n, url: issueUrl(n), title: `issue ${n}`,
   body: "Hand-filed: the `stale.widget` rows stopped after src/lib/widget.ts changed.", labels: [],
-  createdAt: "2026-11-01T00:00:00.000Z", updatedAt: "2026-11-02T00:00:00.000Z" });
+  createdAt: new Date(NOW - 12.5 * 86_400_000).toISOString(), updatedAt: new Date(NOW - 11.5 * 86_400_000).toISOString() });
 
 async function revalidate(t: { after(fn: () => void): void }, result: WorkerResult) {
   const port = judgePort(t, () => result);
@@ -81,7 +81,7 @@ async function revalidate(t: { after(fn: () => void): void }, result: WorkerResu
   const ports: IssueRevalidationPorts = {
     policy: () => ({ mode: "act", maxClosesPerPass: 5 }),
     listOpenIssues: async () => [handFiled(2), handFiled(3)],
-    listComments: async () => [{ authorLogin: "remudero-fleet[bot]", authorType: "Bot", authorAssociation: "NONE", createdAt: "2026-11-03T00:00:00.000Z" }],
+    listComments: async () => [{ authorLogin: "remudero-fleet[bot]", authorType: "Bot", authorAssociation: "NONE", createdAt: new Date(NOW - 10.5 * 86_400_000).toISOString() }],
     referentVerdicts: async () => new Map(), hasReferent: () => false,
     livenessVerdict: () => ({ verdict: "unknown", reason: "unused" }), readModelVerdict: () => ({ verdict: "unknown", reason: "unused" }),
     evidence: () => ({ facts: ["fact"] }), judge, priorVerdicts: () => new Map(),
