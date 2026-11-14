@@ -191,6 +191,16 @@ export const VIEW_AUTO_DEMOTED_STEP = "view.auto_demoted";
 
 export const DEFAULT_READ_MODEL_SWITCHES: ReadModelSwitches = { projector: "on", views: {} };
 
+/** The calling thread's own user plus system CPU in microseconds, or undefined when the runtime has no per-thread reading. */
+function threadCpuMicros(): number | undefined {
+  try {
+    const usage = process.threadCpuUsage();
+    return usage.user + usage.system;
+  } catch {
+    return undefined; // a missing reading only omits cpuMs; it must never fail a build
+  }
+}
+
 export function readModelSwitchesPath(stateDir: string): string {
   return join(stateDir, READ_MODEL_DIRNAME, READ_MODEL_SWITCHES_FILE);
 }
@@ -1530,20 +1540,20 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
   }
 
   const unswitched = new Map<string, { builds: number; ms: number }>();
-  const viewBuilds = new Map<ViewUnit, { calls: number; builds: number; skipped: number; notSkipped: Record<string, number>; ms: number; maxMs: number }>();
+  const viewBuilds = new Map<ViewUnit, { calls: number; builds: number; skipped: number; notSkipped: Record<string, number>; ms: number; maxMs: number; cpuUs?: number }>();
   let viewBuildsFrom = clock.now();
   function reportViewBuilds(): void {
     const now = clock.now();
     if (now - viewBuildsFrom < 10 * 60_000) return;
     for (const [unit, tally] of viewBuilds) {
       if (tally.calls === 0 && tally.ms === 0) continue;
-      const { skipped, notSkipped, ...counts } = tally;
+      const { skipped, notSkipped, cpuUs, ...counts } = tally;
       log("read_model.view_builds", {
         view: unit.view.name,
         ...(unit.slot ? { instance: unit.slot.instance.name } : {}),
         thread: viewsOnly ? "views" : "projector",
         ...(opts.lane ? { lane: opts.lane } : {}),
-        ...counts, ...(skipped > 0 ? { skipped } : {}), ...(Object.keys(notSkipped).length > 0 ? { not_skipped: notSkipped } : {}), window: [viewBuildsFrom, now],
+        ...counts, ...(cpuUs === undefined ? {} : { cpuMs: Math.round(cpuUs / 1000) }), ...(skipped > 0 ? { skipped } : {}), ...(Object.keys(notSkipped).length > 0 ? { not_skipped: notSkipped } : {}), window: [viewBuildsFrom, now],
       });
     }
     viewBuilds.clear();
@@ -1618,6 +1628,7 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
   function build(unit: ViewUnit, now: number, ctx: ReadModelViewContext, generation: number, allowanceMs: number): void {
     const { view } = unit;
     const started = clock.now();
+    const cpuFrom = threadCpuMicros();
     const named = { view: view.name, ...(unit.slot ? { instance: unit.slot.instance.name } : {}) };
     if (viewsOnly) opts.post({ type: "view_unit", ...named, phase: "start" });
     let ready = true;
@@ -1665,6 +1676,8 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
       log("read_model.materialize_failed", { view: view.name, error: (error as Error).message });
     }
     const finished = clock.now();
+    const cpuTo = cpuFrom === undefined ? undefined : threadCpuMicros();
+    const cpuUs = cpuFrom === undefined || cpuTo === undefined ? undefined : Math.max(0, cpuTo - cpuFrom);
     if (!skipped) {
       unit.lastInputDigest = succeeded ? digest : undefined;
       unit.builtKeys = succeeded ? builtKeys : undefined;
@@ -1679,6 +1692,7 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
     if (why !== undefined) counts.notSkipped[why] = (counts.notSkipped[why] ?? 0) + 1;
     counts.ms += elapsedMs;
     counts.maxMs = Math.max(counts.maxMs, elapsedMs);
+    if (cpuUs !== undefined) counts.cpuUs = (counts.cpuUs ?? 0) + cpuUs;
     viewBuilds.set(unit, counts);
     const peakMs = (unit.peakMs = Math.max(unit.peakMs ?? 0, unit.costMs));
     if (unit.cold && succeeded) {
@@ -1705,7 +1719,7 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
     const stages = elapsedMs > passMs ? live?.stages?.(scoped) : undefined;
     const tally = switches.views[view.name] === undefined ? unswitched.get(view.name) ?? { builds: 0, ms: 0 } : undefined;
     if (tally) unswitched.set(view.name, { builds: tally.builds + (yielded > 0 ? 1 : 0), ms: tally.ms + elapsedMs });
-    if (elapsedMs > passMs) log("read_model.slow_view", { ...named, ms: elapsedMs, passMs, thread: viewsOnly ? "views" : "projector", ...(stages ? { stages } : {}), ...(tally ? { unswitched: unswitched.get(view.name) } : {}) });
+    if (elapsedMs > passMs) log("read_model.slow_view", { ...named, ms: elapsedMs, ...(cpuUs === undefined ? {} : { cpuMs: Math.round(cpuUs / 1000) }), passMs, thread: viewsOnly ? "views" : "projector", ...(stages ? { stages } : {}), ...(tally ? { unswitched: unswitched.get(view.name) } : {}) });
   }
 
   const readers = opts.readers ?? READ_MODEL_VIEW_READERS;
