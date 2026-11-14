@@ -4,6 +4,7 @@ import { assertSameTokens, compressionPinBase } from "#test/helpers/compression-
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { readFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 import { createScanner, SyntaxKind } from "typescript/unstable/ast";
@@ -68,4 +69,28 @@ test("worker compression fingerprint ignores comments and catches executable edi
     assert.notDeepEqual(executableTokens(control), executableTokens(control.replace(before, after)));
   }
   assert.notDeepEqual(executableTokens("return value"), executableTokens("return\nvalue"));
+});
+
+test("W1-T12280: comment compression preserves executable code", () => {
+  const sourcePath = "src/lib/worker.ts";
+  const title = "W1-T12280: comment compression preserves executable code";
+  const source = readFileSync(join(REPO_ROOT, sourcePath), "utf8");
+  let before = compressionPinBase(sourcePath, import.meta.url);
+  if (before === undefined) {
+    // This task extends an existing pin file; the shared helper activates only for added files.
+    // Compare while this title is new at the PR base, then release later feature edits as usual.
+    const git = (...args: string[]) => execFileSync("git", args, {
+      cwd: REPO_ROOT, encoding: "utf8", maxBuffer: 16 * 1024 * 1024,
+    });
+    const base = git("merge-base", "origin/main", "HEAD").trim();
+    const baseTest = git("show", `${base}:test/worker/spawn/compress-src-lib-worker-ts.test.ts`);
+    if (baseTest.includes(title)) return;
+    before = git("show", `${base}:${sourcePath}`);
+  }
+  assertSameTokens(executableTokens(source), executableTokens(before),
+    "all PR-base executable tokens, literals and line-break boundaries must remain unchanged");
+  const oldComments = countCommentLines(before, sourcePath).comments;
+  const comments = countCommentLines(source, sourcePath).comments;
+  assert.ok(comments < oldComments,
+    `expected fewer than the PR base's ${oldComments} comment lines, observed ${comments}`);
 });
