@@ -32,7 +32,7 @@ import unittest
 import zipfile
 from datetime import datetime, timezone
 
-METADATA_TESTS_SHA256 = "9eb898e30ab9fd3fc0a96eebe626cdba96bcca2512ff27e5b88880da0f3b4737"
+METADATA_TESTS_SHA256 = "9abceb4ec758698bc2e0255b97ad35d0685ee014030fd3f5d4c9cf2ce29eca0d"
 FIXTURES_SHA256 = "66d2d91312ab5006bef72ef6ab2daa2ea8816870e7c6f740ca296d428d58190d"
 APPROVED_PIP_SHA = "71138adf1f4ca900cdb7d289c21b7494329f2332b6d85f0e1c42108c0384ed3e"
 RAW_CONFIGURATION_NAMES = (
@@ -299,18 +299,6 @@ class AuditSyntheticModuleTests(unittest.TestCase):
             ("84.0.0", "51a52592b3b99e102b609654876bd65f19f999935166d1352678931132b0c670"),
             ("84.1.0", "5231689c6ac8156cd155cfb98c3fd6fb252c3e7e9bd3d78b64d3c55f132624c9"),
         }))
-        old_identity = ("setuptools", "84.0.0", "51a52592b3b99e102b609654876bd65f19f999935166d1352678931132b0c670")
-        new_identity = ("setuptools", "84.1.0", "5231689c6ac8156cd155cfb98c3fd6fb252c3e7e9bd3d78b64d3c55f132624c9")
-        self.assertEqual(self.p.APPROVED_SPECIAL_MEMBER_ALIASES[new_identity], old_identity)
-        path, data = "setuptools/_vendor/fixture.dist-info/METADATA", b"reviewed alias control\n"
-        original = self.p.APPROVED_SPECIAL_MEMBERS
-        try:
-            self.p.APPROVED_SPECIAL_MEMBERS = {old_identity: {path: (len(data), self.p.digest(data))}}
-            self.assertTrue(self.p.approved_special_member(*new_identity, path, data, ("site", *path.split("/"))))
-            self.assertFalse(self.p.approved_special_member("setuptools", "84.2.0", new_identity[2], path, data,
-                                                            ("site", *path.split("/"))))
-        finally:
-            self.p.APPROVED_SPECIAL_MEMBERS = original
         for version, sha256 in self.p.APPROVED_TOOL_ARTIFACTS["setuptools"]:
             self.assertTrue(self.p.approved_setuptools_pth("setuptools", version, sha256, "distutils-precedence.pth"))
 

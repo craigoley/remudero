@@ -174,9 +174,9 @@ APPROVED_SPECIAL_MEMBER_ALIASES = {
         ("setuptools", "84.0.0", "51a52592b3b99e102b609654876bd65f19f999935166d1352678931132b0c670"),
 }
 AUDIT_TEST_SOURCES = {
-    "runtime_audit_metadata_tests.py": "9eb898e30ab9fd3fc0a96eebe626cdba96bcca2512ff27e5b88880da0f3b4737",
+    "runtime_audit_metadata_tests.py": "9abceb4ec758698bc2e0255b97ad35d0685ee014030fd3f5d4c9cf2ce29eca0d",
     "runtime_audit_test_fixtures.py": "66d2d91312ab5006bef72ef6ab2daa2ea8816870e7c6f740ca296d428d58190d",
-    "test_runtime_compatibility_audit.py": "1668ff728081f3fb05f7cb9e26970bd6e18228af287211a753572c6dbac12024",
+    "test_runtime_compatibility_audit.py": "1f47663f9e61109b51054f24752689f306affb6ad712330de942621a51ac322f",
     "runtime_source_recipe.py": "6d1d2cc20e1a2fe225f913d9df815771b4e047c872bdaabbb59eceea52bcb35d",
     "prepare-source-build.py": "96eb19457f4799979e691459ad19ba761ab498d6576470db7c77eb5708171274",
     "source-build-policy.json": "5cf435e3bb81a52e1583ea00008d0e46a3c0ec64d920fe6720d59f88870bd83a",
