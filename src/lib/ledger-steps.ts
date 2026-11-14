@@ -304,6 +304,26 @@ const SEED_ROWS: readonly SeedRow[] = [
     outcomes: ["answered", "refused", "unavailable", "failed"],
   },
   {
+    // W1-T12553: the daemon instances and hand runs share one GitHub App installation.
+    step: "github.budget.throttled",
+    meaning:
+      "This daemon instance held back its GitHub reads, at most once per consumer and reset window. " +
+      "\"share\": it spent its allowance, the remaining count less the write reserve divided by the " +
+      "consumers on the installation. \"reserve\": the remaining count is in the write reserve. " +
+      "\"refused\": GitHub refused a read for its rate limit. Writes never wait on this budget.",
+    writer: ["daemonCommand"],
+    outcomes: ["share", "reserve", "refused"],
+  },
+  {
+    step: "github.budget.configured",
+    meaning:
+      "At start, the daemon set its share of the GitHub App installation from the instance registry: " +
+      "the consumer count and the registry it read. \"unconfigured\" names why there is no share " +
+      "(no installation id, an unreadable registry, no instance on the installation); its reads are then paced as before.",
+    writer: ["startDaemonInstallationBudget"],
+    outcomes: ["configured", "unconfigured"],
+  },
+  {
     step: "flow.open_repair_ages",
     meaning:
       "The daily flow pass read the open pull requests whose checks are red or whose branch conflicts. " +
