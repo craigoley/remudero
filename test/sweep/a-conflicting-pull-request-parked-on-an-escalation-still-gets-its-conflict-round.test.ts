@@ -22,6 +22,7 @@ import type { SpawnWorkerArgs, WorkerResult } from "#src/lib/worker.js";
 const TASK = "W1-T12544";
 const HELD_HEAD = "3ddaee544d2f1f0d9a3c6b1e7f1a2b3c4d5e6f70";
 const MERGE_HEAD = "80aa617193a03c2fdc244b6e4f1e328e650cc4d0";
+const NEXT_MERGE_HEAD = "90aa617193a03c2fdc244b6e4f1e328e650cc4d1";
 const OUTSIDE_HEAD = "c3edd4a3bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 const PR_URL = "https://github.com/o/r/pull/18033";
 const ISSUE_URL = "https://github.com/o/r/issues/18100";
@@ -45,8 +46,8 @@ function prAt(now: number, headSha: string, conflicted: boolean, over: Partial<O
 }
 
 /** A worker round at HELD_HEAD that ended NEEDS_DESIGN, as the fix rung writes it. */
-function designRows(now: number, task = TASK, prUrl = PR_URL): Row[] {
-  const common = { task_id: task, head_sha: HELD_HEAD, run_id: "DESIGN-ROUND", host: "fixture-host", actor_pid: 777 };
+function designRows(now: number, task = TASK, prUrl = PR_URL, head = HELD_HEAD): Row[] {
+  const common = { task_id: task, head_sha: head, run_id: "DESIGN-ROUND", host: "fixture-host", actor_pid: 777 };
   const round = { ...common, round_id: "DESIGN-ROUND:1", repair_pr_url: prUrl };
   return [
     { ...round, step: "fix.dispatch", ts: new Date(now - 9000).toISOString(), mode: "ci-log" },
@@ -56,13 +57,13 @@ function designRows(now: number, task = TASK, prUrl = PR_URL): Row[] {
 }
 
 /** The conflict round at HELD_HEAD that pushed MERGE_HEAD. `mode` other than merge-conflict makes it a code round. */
-function conflictRoundRows(now: number, mode = "merge-conflict"): Row[] {
-  const round = { task_id: TASK, head_sha: HELD_HEAD, run_id: "CONFLICT-ROUND", host: "fixture-host", actor_pid: 778,
+function conflictRoundRows(now: number, mode = "merge-conflict", from = HELD_HEAD, to = MERGE_HEAD): Row[] {
+  const round = { task_id: TASK, head_sha: from, run_id: `CONFLICT-ROUND-${from}`, host: "fixture-host", actor_pid: 778,
     round_id: "CONFLICT-ROUND:1", repair_pr_url: PR_URL };
   return [
     { ...round, step: "fix.dispatch", ts: new Date(now - 5000).toISOString(), mode },
     { ...round, step: "fix.done", ts: new Date(now - 4000).toISOString(), fix_outcome: "FIXED", subtype: "success",
-      pushed_head_sha: MERGE_HEAD },
+      pushed_head_sha: to },
   ];
 }
 
@@ -101,6 +102,16 @@ test("W1-T12544 criterion 1: a conflicted PR under a terminal design handoff get
   const row = f.disposed().at(-1)!;
   assert.deepEqual([row.disposition, row.design_hold_kept, row.acted], ["conflicted", true, true]);
   assert.match(String(row.reason), /design hold still applies at the head it pushes/);
+});
+
+test("W1-T12544 criterion 1: a design handoff first recorded at B survives an earlier A→B conflict push", async t => {
+  const now = systemClock.now();
+  const f = fixture(t, [...conflictRoundRows(now), ...designRows(now, TASK, PR_URL, MERGE_HEAD)]);
+  const summary = await runSweep([prAt(f.now, MERGE_HEAD, true)], f.deps);
+  assert.equal(summary.actions[0]!.disposition, "conflicted");
+  assert.equal(f.effects.evidence.length, 1, "B receives a conflict worker under its own design hold");
+  assert.equal(f.disposed().at(-1)!.design_hold_kept, true);
+  assert.equal(f.disposed().at(-1)!.hold_head_sha, undefined, "the hold belongs to current head B, not A");
 });
 
 test("W1-T12544 criterion 2: an open escalation with no cause or another cause does not stand down a conflict round", async t => {
@@ -148,6 +159,27 @@ test("W1-T12544 criterion 3: the design hold and the escalation still hold at th
   const later = fixture(t, conflictRoundRows(now), [openIssue("review")]);
   await runSweep([prAt(later.now, OUTSIDE_HEAD, false)], later.deps);
   assert.equal(later.effects.evidence.length, 1, "an escalation at the held head does not hold an outside head");
+});
+
+test("W1-T12544 criterion 3: a new hold at B survives the B→C conflict push without a code round", async t => {
+  const now = systemClock.now();
+  const pushes = [...conflictRoundRows(now), ...conflictRoundRows(now, "merge-conflict", MERGE_HEAD, NEXT_MERGE_HEAD)];
+  for (const hold of ["design", "escalation"] as const) {
+    const rows = hold === "design" ? [...pushes, ...designRows(now, TASK, PR_URL, MERGE_HEAD)] : pushes;
+    const issues = hold === "escalation" ? [openIssue("review", MERGE_HEAD)] : [];
+    const f = fixture(t, rows, issues);
+    const atB = await runSweep([prAt(f.now, MERGE_HEAD, true)], f.deps);
+    assert.equal(atB.actions[0]!.disposition, "conflicted", `${hold}: B still gets its conflict round`);
+    assert.equal(f.effects.evidence.length, 1);
+    assert.equal(f.disposed().at(-1)![hold === "design" ? "design_hold_kept" : "escalation_hold_kept"],
+      hold === "design" ? true : ISSUE_URL);
+    const atC = await runSweep([prAt(f.now, NEXT_MERGE_HEAD, false)], f.deps);
+    assert.equal(f.effects.evidence.length, 1, `${hold}: C admits no code worker`);
+    assert.equal(f.effects.admissions, 1, `${hold}: only B's conflict admission occurred`);
+    assert.equal(f.disposed().at(-1)!.hold_head_sha, MERGE_HEAD, `${hold}: C carries B's question`);
+    if (hold === "design") assert.equal(atC.actions[0]!.disposition, "refused-escalate");
+    else assert.match(String(f.disposed().at(-1)!.stand_down_reason), /ALREADY OPEN/);
+  }
 });
 
 test("W1-T12544 criterion 3: newest-200 retention archives conflict pushes without releasing their holds", async t => {
@@ -202,18 +234,19 @@ test("W1-T12544 criterion 3: newest-200 retention archives conflict pushes witho
   }
 });
 
-async function activeConflictRung(t: TestContext, hold: "design" | "review" | "ci" | "legacy" | "none", answered = false) {
-  const f = fixture(t, hold === "design" ? designRows(systemClock.now()) : []);
+async function activeConflictRung(t: TestContext, hold: "design" | "review" | "ci" | "legacy" | "none", answered = false,
+  heads: { from: string; to: string; prior: Row[] } = { from: HELD_HEAD, to: MERGE_HEAD, prior: [] }) {
+  const f = fixture(t, [...heads.prior, ...(hold === "design" ? designRows(systemClock.now(), TASK, PR_URL, heads.from) : [])]);
   const root = dirname(f.deps.ledgerPath);
   const mount: Mount = { model: "sonnet", effort: "medium", maxTurns: 20, contextBudget: 120000 };
-  const issues = hold === "none" || hold === "design" ? [] : [openIssue(hold === "legacy" ? undefined : hold)];
+  const issues = hold === "none" || hold === "design" ? [] : [openIssue(hold === "legacy" ? undefined : hold, heads.from)];
   const spawned: SpawnWorkerArgs[] = [], rows: Row[] = [];
-  let pushedHead = HELD_HEAD, reviews = 0, closed = 0;
+  let pushedHead = heads.from, reviews = 0, closed = 0;
   const args = buildFixRungDispatchArgs({
     task: { id: TASK, title: "conflict round under a hold" }, runId: "ACTIVE-CONFLICT-ROUND", prUrl: PR_URL,
     branch: `run-${TASK}-1794610450000`, worktreePath: join(root, "wt"), mount,
     settingsFile: join(root, "settings.json"), config: { root } as Config, budgetUsd: 5, strikeCap: 3,
-    evidence: { unmetCriteria: [], mergeConflict: EVIDENCE }, pr: { headSha: HELD_HEAD },
+    evidence: { unmetCriteria: [], mergeConflict: EVIDENCE }, pr: { headSha: heads.from },
     reviewBase: { owner: "o", repo: "r", headCheckoutDir: join(root, "wt"), reviewerMount: mount },
   });
   const outcome = await runFixRung({ ...args,
@@ -227,7 +260,7 @@ async function activeConflictRung(t: TestContext, hold: "design" | "review" | "c
           model: "default", effort: "default", tokens: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 },
           modelUsage: {}, compactionEvents: [], qualitySuspect: false };
       },
-      push: () => { pushedHead = MERGE_HEAD; return { fixRoundPushedHead: MERGE_HEAD }; },
+      push: () => { pushedHead = heads.to; return { fixRoundPushedHead: heads.to }; },
       readRemoteBranchHead: async () => pushedHead,
       readHeadShaForProvenance: async () => pushedHead,
       waitForCiGreen: async () => "green" as const,
@@ -235,7 +268,7 @@ async function activeConflictRung(t: TestContext, hold: "design" | "review" | "c
       runReview: async () => {
         reviews++;
         if (answered) issues.length = 0;
-        return { ...args.initialReview, headSha: MERGE_HEAD, state: reviews === 1 ? "failure" as const : "success" as const,
+        return { ...args.initialReview, headSha: heads.to, state: reviews === 1 ? "failure" as const : "success" as const,
           criteria: [{ claim: "the review question still needs an answer", met: reviews > 1, reason: "observed failure" }] };
       },
       issues: { listOpen: () => issues, create: () => ISSUE_URL, comment: () => {}, closeWithComment: () => { closed++; } },
@@ -275,6 +308,19 @@ test("W1-T12544 criterion 3: the active rung preserves the hold through a confli
   }
 });
 
+test("W1-T12544 criterion 3: the active B→C rung keeps a question introduced after A→B", async t => {
+  const heads = { from: MERGE_HEAD, to: NEXT_MERGE_HEAD, prior: conflictRoundRows(systemClock.now()) };
+  for (const hold of ["design", "review"] as const) {
+    const r = await activeConflictRung(t, hold, false, heads);
+    assert.equal(r.pushedHead, NEXT_MERGE_HEAD);
+    assert.equal(r.outcome.review.headSha, NEXT_MERGE_HEAD);
+    assert.equal(r.spawned.length, 1, `${hold}: the conflict worker is the only worker`);
+    assert.equal(r.outcome.outcome, hold === "design" ? "needs_design" : "stood_down");
+    assert.equal(r.rows.filter(row => row.step === "fix.dispatch").length, 1);
+    assert.equal(r.closed, 0);
+  }
+});
+
 test("W1-T12544 criterion 3: the active rung admits code at the merge head without a hold or after the issue is answered", async t => {
   for (const answered of [false, true]) {
     const r = await activeConflictRung(t, answered ? "review" : "none", answered);
@@ -295,12 +341,12 @@ test("W1-T12544 criterion 4: no captured evidence, or an escalation about the co
   }
   // The one route to `conflicted` with no captured evidence: a fleet-owned head whose merge probe read a conflict.
   const ownedUrl = "https://github.com/o/r/pull/18034";
-  const owned = (rows: Row[]) => {
-    const g = fixture(t, [...rows, { step: "sweep.merge_probe", pr_number: 18034, head_sha: HELD_HEAD, main_sha: OUTSIDE_HEAD,
+  const owned = (rows: Row[], head = HELD_HEAD) => {
+    const g = fixture(t, [...rows, { step: "sweep.merge_probe", pr_number: 18034, head_sha: head, main_sha: OUTSIDE_HEAD,
       verdict: "conflict", conflict_paths: ["src/lib/example.ts"] }]);
     g.deps.readMainTip = () => OUTSIDE_HEAD;
     g.deps.readPlanRepairFacts = async () => ({ authorLogin: "remudero-fleet[bot]" });
-    const pr = prAt(g.now, HELD_HEAD, true, { prNumber: 18034, prUrl: ownedUrl, taskId: undefined,
+    const pr = prAt(g.now, head, true, { prNumber: 18034, prUrl: ownedUrl, taskId: undefined,
       headRefName: "plan-garden-1794610450000", mergeableState: "dirty", mergeConflict: undefined });
     return { g, pr };
   };
@@ -311,6 +357,16 @@ test("W1-T12544 criterion 4: no captured evidence, or an escalation about the co
   assert.equal((await runSweep([probed.pr], probed.g.deps)).actions[0]!.disposition, "refused-escalate",
     "a probe-only conflict keeps the design hold");
   assert.equal(probed.g.disposed().at(-1)!.design_hold_kept, undefined);
+  const pushed = owned([
+    { step: "sweep.conflict_regenerated", pr_number: 18034, head_sha: HELD_HEAD,
+      new_head_sha: MERGE_HEAD, outcome: "pushed" },
+    ...designRows(now, "PR-18034", ownedUrl, MERGE_HEAD),
+  ], MERGE_HEAD);
+  assert.equal((await runSweep([pushed.pr], pushed.g.deps)).actions[0]!.disposition, "refused-escalate",
+    "a probe-only conflict after A→B keeps the new design hold at B");
+  assert.equal(pushed.g.effects.evidence.length, 0);
+  assert.equal(pushed.g.disposed().at(-1)!.design_hold_kept, undefined);
+  assert.equal(pushed.g.disposed().at(-1)!.hold_head_sha, undefined);
   const conflictCause = openIssue("conflict");
   assert.match(openEscalationStandDownReason(HELD_HEAD, conflictCause, undefined,
     { conflictEvidenceCaptured: true, conflictRound: true })!.reason, /ALREADY OPEN/, "a question about the conflict holds the round");

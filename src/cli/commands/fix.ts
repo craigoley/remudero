@@ -2702,10 +2702,21 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
         })
         : undefined;
     // W1-T12544: this invocation's own conflict push carries the hold too, before the sweep runs again.
+    const holdLedgerRows = [...(deps.ledgerLines ?? (() => readLedgerLines(deps.ledgerPath)))(), ...roundRows];
     const holdHeadSha = prNumber === undefined ? review.headSha : conflictRoundHeldHead(
       { taskId: opts.taskId, prNumber, prUrl: opts.prUrl, headSha: review.headSha },
-      [...(deps.ledgerLines ?? (() => readLedgerLines(deps.ledgerPath)))(), ...roundRows],
+      holdLedgerRows,
       deps.ledgerPath,
+      undefined,
+      head => {
+        if (holdLedgerRows.some(row => row.step === "fix.needs_design" && row.task_id === opts.taskId &&
+            row.head_sha === head && !(typeof row.contract_revision === "string" && row.contract_revision !== currentContractRevision))) return true;
+        const key = fixEscalationDedupKey(opts.taskId, opts.prUrl, head, false, noReviewYet, currentContractRevision);
+        const issue = findDuplicateEscalation({ ...key, cause: undefined }, { issues: deps.issues });
+        return openEscalationStandDownReason(head, issue, currentContractRevision,
+          { conflictEvidenceCaptured: hasCapturedMergeConflictEvidence(currentMergeConflict), baseSha: opts.baseSha },
+          undefined, opts.pendingAnswer) !== undefined;
+      },
     );
     let preStrikeStandDown = await fixRungStandDownReason(
       deps.readLiveState,

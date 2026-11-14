@@ -16845,12 +16845,16 @@ function conflictRoundOutranksEscalationHold(
 
 export function conflictRoundHeldHead(pr: Pick<OpenPrView, "taskId" | "prNumber" | "prUrl" | "headSha">,
   lines: ReadonlyArray<Record<string, unknown>>, ledgerPath?: string,
-  archive?: () => ReadonlyArray<Record<string, unknown>> | undefined): string {
+  archive?: () => ReadonlyArray<Record<string, unknown>> | undefined,
+  holdsAtHead?: (headSha: string) => boolean): string {
   const key = fixLedgerTaskIdFor(pr);
   const seen = new Set([pr.headSha]);
   const readArchive = archive ?? (ledgerPath === undefined ? undefined : () => readFixRoundArchiveRows(ledgerPath));
   let history = lines, archiveRead = false;
   for (let head = pr.headSha; ;) {
+    // A new question can arrive after an earlier conflict push. The nearest held head owns the
+    // question carried by the next push; walking unconditionally to the oldest ancestor loses it.
+    if (holdsAtHead?.(head)) return head;
     const pushedBy = history.findLast(row => (row.step === "fix.done" && row.task_id === key && row.pushed_head_sha === head &&
         typeof row.round_id === "string" && history.some(start => start.step === "fix.dispatch" && start.task_id === key &&
           start.round_id === row.round_id && start.head_sha === row.head_sha && start.mode === "merge-conflict")) ||
@@ -22450,7 +22454,18 @@ export async function runSweep(
     let heldEscalationDedup: string | undefined;
     let designHoldKept = false;
     let escalationHoldKept: string | undefined;
-    const holdHead = (disposition === "conflicted" || disposition === "blocked-fixable") ? conflictRoundHeldHead(pr, ledgerLines, deps.ledgerPath, readRepairArchive) : pr.headSha;
+    const holdable = disposition === "conflicted" || disposition === "blocked-fixable";
+    const openForHead = holdable && !deps.dryRun ? await readOpenEscalations() : [];
+    const holdHead = holdable ? conflictRoundHeldHead(pr, ledgerLines, deps.ledgerPath, readRepairArchive, head => {
+      const atHead = head === pr.headSha ? pr : { ...pr, headSha: head };
+      if (terminalFixDesignHandoff(atHead, ledgerLines, readRepairArchive).kind !== "none") return true;
+      const key = fixEscalationDedupKey(escalationTaskIdFor(pr), pr.prUrl, head,
+        pr.mergeConflict !== undefined, isBlockedCi(pr), undefined);
+      const issue = matchDuplicateEscalation({ ...key, cause: undefined }, openForHead);
+      return openEscalationStandDownReason(head, issue, undefined,
+        { conflictEvidenceCaptured: hasCapturedMergeConflictEvidence(pr.mergeConflict), baseSha: mainTipSha },
+        undefined, pr.pendingAnswer) !== undefined && escalationIssueCause(issue?.body) !== "conflict";
+    }) : pr.headSha;
     if ((disposition === "conflicted" || disposition === "blocked-fixable") &&
         !inFlightFixKeys.has(`${fixLedgerTaskIdFor(pr) ?? ""}@${pr.headSha}`) &&
         !dispatchCauseHolds.get(pr.prNumber)) {
