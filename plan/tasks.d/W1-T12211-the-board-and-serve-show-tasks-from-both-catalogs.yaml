@@ -23,7 +23,7 @@
     - packages/api-client/src/schema.d.ts
     - src/lib/board-worker.ts
     - src/lib/read-model-worker.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "While the host file names a repository, the status board and the plan that serve reloads hold the tasks of both catalogs"

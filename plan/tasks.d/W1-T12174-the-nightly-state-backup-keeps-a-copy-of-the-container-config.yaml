@@ -17,7 +17,7 @@
   files:
     - deploy/host-update.sh
     - test/deploy/the-nightly-state-backup-keeps-a-copy-of-the-container-config.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "The nightly snapshot copies each file of the container config directory into the backup of that night. The copy has mode 600 and its directory has mode 700"
