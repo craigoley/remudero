@@ -1,4 +1,4 @@
-- id: W1-T12523
+- id: W1-T12536
   title: "A test's child processes record their reads into the parent suite's read-map record"
   repo: remudero
   depends_on: [W1-T12505]
@@ -22,11 +22,11 @@
   attempts: 0
   acceptance:
     - claim: "When RMD_READ_MAP_DIR is set, a node child process a suite starts loads the read hook and writes its reads and listings into a record credited to the parent suite, and the parent's merged record holds them"
-      proof: "grep: W1-T12523 criterion 1 in test/a-tests-child-processes-record-their-reads-into-the-parent-suites-read-map-record.test.ts"
+      proof: "grep: W1-T12536 criterion 1 in test/a-tests-child-processes-record-their-reads-into-the-parent-suites-read-map-record.test.ts"
     - claim: "A suite whose every child was a node process that loaded the hook and flushed its record keeps `unknownDescriptors: false`; a child that is not node, does not load the hook, drops the environment, or exits without a record leaves the suite unknown"
-      proof: "grep: W1-T12523 criterion 2 in test/a-tests-child-processes-record-their-reads-into-the-parent-suites-read-map-record.test.ts"
+      proof: "grep: W1-T12536 criterion 2 in test/a-tests-child-processes-record-their-reads-into-the-parent-suites-read-map-record.test.ts"
     - claim: "invariant:unknown-stays-unknown — a child read the hook cannot credit never turns a suite from unknown to known"
-      proof: "grep: W1-T12523 criterion 3 in test/a-tests-child-processes-record-their-reads-into-the-parent-suites-read-map-record.test.ts"
+      proof: "grep: W1-T12536 criterion 3 in test/a-tests-child-processes-record-their-reads-into-the-parent-suites-read-map-record.test.ts"
   rationale: |
     W1-T12505 narrows a read-mapped change per path, but a suite that starts a child process has unknown descriptor
     coverage, so the selector must pick every unknown suite that names the changed path. MEASURED at ecd94c0da: at least
@@ -47,4 +47,4 @@
     Drop the child's record from the parent's merge and criterion 1 must fail. Mark a suite known when one child wrote no
     record and criterion 3 must fail.
   note: |
-    Id W1-T12523 reserved for run-W1-T12505-1794590412000 with ~/rmd-work/bin/reserve-id.sh.
+    Id W1-T12536 reserved for plan-amend-W1-T12505-1794589154000 by the remote rmd-id reservation.

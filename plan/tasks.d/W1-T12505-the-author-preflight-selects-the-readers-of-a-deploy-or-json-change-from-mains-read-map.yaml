@@ -69,7 +69,7 @@
     selects 642 of 4,629 suites for deploy/recycle-container.sh (236 name the path or deploy/; the file name and the
     quoted "deploy" segment add the rest). Walking the src/ import closure instead reaches 4,076, no narrower than the
     full run, because src/lib/daemon.ts and src/lib/config.ts name deploy/ files.
-    W1-T12523 closes the residual gap: it records child processes' reads into the parent suite's record.
+    W1-T12536 closes the residual gap: it records child processes' reads into the parent suite's record.
     CHECKED for overlap on origin/main plan/tasks.d and open pull request heads: W1-T10435 (queued) is a parked research
     report on platform-aware shadows; W1-T11916 (queued) adds run-time tree walkers to the narrow arm. Neither produces or
     reads a read map. No open pull request files a task on this subject.
@@ -112,7 +112,7 @@
     INVARIANT no-narrowing-past-unknown-reader: a suite whose reads are unknown and that names the changed path, its file
     name or a directory above it, itself or through a test/ file it imports, is never left out of that path's selection.
     NOT IN SCOPE: test/helpers, .remudero and hooks paths (a separate task); the impact arm; any change to CI's selection;
-    recording child processes' reads (W1-T12523).
+    recording child processes' reads (W1-T12536).
   falsifier: |
     Drop the `readMap` argument and criterion 3 must fail. Drop the unknown-coverage naming rule and criterion 6 must fail.
     Let a root-level json path narrow past an unknown suite and criterion 4 must fail. Fail the nightly job on a build
