@@ -24,7 +24,7 @@
     - src/cli/commands/daemon.ts
     - src/lib/ledger-steps.ts
     - test/github/the-fleets-app-installation-stays-under-its-hourly-rate-limit.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "The installation budget reads the remaining count, the limit and the reset time from each response's x-ratelimit headers. An instance's read allowance until the reset is the remaining count less the write reserve, divided by the number of consumers that share the installation (the registry instances with the same gh_app_installation_id, plus one share for hand runs)"

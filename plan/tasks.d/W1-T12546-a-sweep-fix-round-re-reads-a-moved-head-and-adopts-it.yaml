@@ -20,6 +20,7 @@
     - src/cli/commands/fix.ts
     - src/lib/ledger-steps.ts
     - test/sweep/a-sweep-fix-round-adopts-a-moved-head.test.ts
+    - test/reviews-and-detached-actions-run-as-run-children.test.ts
   status: queued
   attempts: 0
   acceptance:
@@ -51,6 +52,7 @@
     3. In src/cli/commands/fix.ts at :4253-4259, when the published head descends from the round's head, read the required check rollup at the published head with the rung's existing CI reader. Red with readable failures: log `fix.evidence_head_adopted`, replace the round's failures and head, and continue. Otherwise stand down as today.
     4. Declare the three new steps in src/lib/ledger-steps.ts. Run test/sweep/compress-src-lib-sweep-ts.test.ts; add no net comment lines to sweep.ts.
     INVARIANT fix-acts-on-exact-head-evidence: a fix round acts only on failure evidence read at the head it will push onto; a moved head is adopted only with evidence read at that head.
+    5. Only failure evidence that can be read again at the new head is adopted: CI failure evidence. A dispatch that carries review, conflict, gate-remedy or proof evidence defers with reason evidence_not_ci, because that evidence was judged at the old head. A deferral returns a dispatch that was not accepted: no strike and no claim decline. The detached fix child then ends with no worker instead of failing at the checkout claim; test/reviews-and-detached-actions-run-as-run-children.test.ts expects that for its moved head.
     NOT IN SCOPE: an unreadable head read; a head that does not descend from the judged head inside the rung (it still stands down); the fix child's recheck (W1-T12545); the claim-decline backstop's count.
   falsifier: |
     Decline on every moved head and criterion 1 must fail. Count a deferral as a claim decline and criterion 2 must fail. Adopt a published head whose checks are pending and criterion 4 must fail. Skip the branch claim for an adopted head and criterion 5 must fail. Restore and require all to pass.

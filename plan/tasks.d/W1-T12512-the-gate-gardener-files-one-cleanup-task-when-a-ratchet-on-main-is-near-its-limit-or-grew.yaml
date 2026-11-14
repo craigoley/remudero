@@ -17,7 +17,7 @@
     - src/lib/gate-gardener.ts
     - src/lib/plan.ts
     - test/gardeners/the-gate-gardener-files-one-cleanup-task-for-a-gate-near-its-limit.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "A gate gardener pass reads, on main's tip, each capped ratchet that refuses a pull request (the learnings budget's hardCapChars, the jscpd threshold) and proposes a HEADROOM action for one whose measured value is within RATCHET_HEADROOM_SHARE (10%) of its limit. It reads no source-size row: source-size is a non-blocking signal"

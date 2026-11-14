@@ -20,7 +20,7 @@
     - test/fix-lane/a-merge-conflict-round-never-asks-the-ci-progress-judge.test.ts
     - test/a-refused-merge-start-escalates-in-the-same-rung.test.ts
     - test/fix-rung-unchanged-tree-stand-down.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "A fix round in merge-conflict mode on a PR with earlier CI or review rounds does not call the progress judge. The round continues, and its fix.progress_judged row records judge_skipped conflict-round"

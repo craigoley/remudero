@@ -24,7 +24,7 @@ const iso = (hours: number) => fixedClock(NOW + hours * HOUR).iso();
 function row(pr: number, hours: number, blocker = "escalated", reason = "metadata-only body red", owner = "NONE"): LedgerRecord {
   return { step: "sweep.disposed", pr_number: pr, ts: iso(hours), blocker, reason, blocker_owner: owner };
 }
-/** W1-T9597: a NONE-owned cause escalates instead of drafting, so a filed cause is an owned one its owner failed to clear. */
+/** W1-T12548: a NONE-owned draft names no owner module and is skipped, so a filed cause is an owned one its owner failed to clear. */
 const owned = (pr: number, hours: number, reason = "metadata-only body red") => row(pr, hours, "own-red", reason, "fix-lane");
 const closedPrs = (...prs: number[]) => () => new Map(prs.map(pr => [pr, { state: "closed" as const, at: iso(0) }]));
 function fixture(root: string, records: LedgerRecord[], overrides: Partial<FlowGardenSources> = {}) {
@@ -83,7 +83,9 @@ test("W1-T5538: the costliest unowned or uncleared blocker ranks first", () => {
   ]) });
   const inv = spec.inventory();
   assert.equal(inv.priced[0]!.key, "own-red:ci red", "all causes retain their cost for effect measurement");
-  assert.equal(inv.next!.price.key, "escalated:metadata-only body red", "the expensive owner-cleared cause is skipped");
+  assert.equal(inv.next!.price.key, "awaiting-ci:pending", "the expensive owner-cleared cause is not a candidate");
+  assert.deepEqual(inv.ladder.filter(l => l.state === "skipped").map(l => l.cause),
+    ["escalated:metadata-only body red", "escalated:plan-only red"], "W1-T12548: the NONE-owned drafts are skipped");
   assert.deepEqual(inv.candidates.map(p => p.key), [
     "escalated:metadata-only body red", "escalated:plan-only red", "awaiting-ci:pending", "conflict:dirty", "own-red:ci red",
   ]);
@@ -91,7 +93,7 @@ test("W1-T5538: the costliest unowned or uncleared blocker ranks first", () => {
   assert.equal(inv.candidates.find(p => p.key === "awaiting-ci:pending")!.thresholdHours, 2);
   assert.equal(inv.episodes.find(e => e.pr === 6)!.eligible, false);
   const cold = fixture("/unused", [row(10, -1100), row(10, -1000), row(11, -3, "escalated", "plan-only red"), row(11, 0, "escalated", "plan-only red")]).spec.inventory();
-  assert.equal(cold.next!.price.key, "escalated:plan-only red", "recency can outrank a larger old wait");
+  assert.equal(cold.candidates[0]!.key, "escalated:plan-only red", "recency can outrank a larger old wait");
   const noControl = fixture("/unused", [row(12, -200, "awaiting-ci", "pending", "ci"), row(12, -1, "awaiting-ci", "pending", "ci")]).spec.inventory();
   assert.equal(noControl.next, undefined, "no cleared episode means no invented age bar");
 });
@@ -121,8 +123,10 @@ test("W1-T5538: the top cause is filed once and a debited remedy reopens one run
   assert.equal(scorecard.total_pr_hours, inv.priced.reduce((n, p) => n + p.hours, 0));
   const receipt = { step: `${f.spec.name}.scorecard`, pr_url: "https://github.com/acme/remudero/pull/900", next: scorecard.next };
   const held = fixture(root, [...records, receipt], { prOutcomes }).spec.inventory();
-  assert.equal(held.next!.price.key, "escalated:plan-only red", "a filing receipt holds the cause until main sees it");
-  const remedy = { id: "W1-T9001", origin: actions[0]!.origin, files: ["src/lib/sweep.ts"], status: "queued", retired: false, mergedAt: iso(-2) };
+  assert.equal(held.ladder.find(l => l.cause === "own-red:metadata-only body red")!.state, "in_progress", "a filing receipt holds the cause until main sees it");
+  assert.equal(held.next, undefined, "W1-T12548: the NONE-owned cause behind it is skipped");
+  // W1-T12548: a rung-2 draft on the file the debited remedy used is skipped, so this remedy used another file.
+  const remedy = { id: "W1-T9001", origin: actions[0]!.origin, files: ["src/lib/review.ts"], status: "queued", retired: false, mergedAt: iso(-2) };
   const reopened = fixture(root, records, { prOutcomes, planState: () => ({ tasks: [remedy] }) }).spec.inventory();
   assert.equal(reopened.next!.origin, "flow-blocker:own-red:metadata-only body red#r2");
   assert.equal(reopened.next!.prior!.effect!.verdict, "debit");
@@ -137,15 +141,16 @@ test("flow-remedy holds a cause on the receipt its own pass logs, a filing close
   for (const kind of [FLOW_LADDER, ADMISSION_FLOW_LADDER, FIX_LANE_LADDER]) {
     assert.equal(kind.receiptStep, `${kind.name}.scorecard`, `${kind.prefix}: a pass logs only \`<spec name>.scorecard\` (gardener.ts)`);
   }
-  const records = [row(1, -4), row(1, -2), row(2, -2), row(2, 0), row(3, -1, "escalated", "plan-only red"), row(3, 0, "escalated", "plan-only red")];
-  const f = fixture("/unused", records);
+  const records = [owned(1, -4), owned(1, -2), owned(2, -2), owned(2, 0), owned(3, -1, "plan-only red"), owned(3, 0, "plan-only red")];
+  const prOutcomes = closedPrs(1, 2, 3);
+  const f = fixture("/unused", records, { prOutcomes });
   assert.equal(f.spec.name, FLOW_LADDER.name);
   const inv = f.spec.inventory();
   const scorecard = f.spec.scorecard(inv, { actions: f.spec.candidates(inv, () => 0), acting: ["draft" as const] });
   const receipt = { step: `${f.spec.name}.scorecard`, pr_url: "https://github.com/acme/remudero/pull/900", next: scorecard.next, ts: iso(0) };
-  const nextKey = (extra: LedgerRecord[]) => fixture("/unused", [...records, receipt, ...extra]).spec.inventory().next!.price.key;
-  assert.equal(nextKey([]), "escalated:plan-only red", "an open filing holds its cause");
-  assert.equal(nextKey([{ step: "pr.terminal", pr_number: 900, state: "merged", ts: iso(0) }]), "escalated:plan-only red",
+  const nextKey = (extra: LedgerRecord[]) => fixture("/unused", [...records, receipt, ...extra], { prOutcomes }).spec.inventory().next!.price.key;
+  assert.equal(nextKey([]), "own-red:plan-only red", "an open filing holds its cause");
+  assert.equal(nextKey([{ step: "pr.terminal", pr_number: 900, state: "merged", ts: iso(0) }]), "own-red:plan-only red",
     "a merged filing holds its cause until main shows the task");
   assert.equal(nextKey([{ step: "pr.terminal", pr_number: 900, state: "closed", ts: iso(0) }]), inv.next!.price.key,
     "a filing closed unmerged releases its cause");
@@ -235,9 +240,9 @@ test("flow ownership calibrates the percentile per cause and ties by distinct PR
   const inv = fixture("/unused", records).spec.inventory();
   assert.equal(inv.candidates[0]!.thresholdHours, 9);
   assert.equal(inv.next!.price.key, "awaiting-ci:pending");
-  const tied = fixture("/unused", [row(20, -1), row(20, 0), row(21, -0.5, "escalated", "plan-only red"), row(21, 0, "escalated", "plan-only red"),
-    row(22, -0.5, "escalated", "plan-only red"), row(22, 0, "escalated", "plan-only red")]).spec.inventory();
-  assert.equal(tied.next!.price.key, "escalated:plan-only red");
+  const tied = fixture("/unused", [owned(20, -1), owned(20, 0), owned(21, -0.5, "plan-only red"), owned(21, 0, "plan-only red"),
+    owned(22, -0.5, "plan-only red"), owned(22, 0, "plan-only red")], { prOutcomes: closedPrs(20, 21, 22) }).spec.inventory();
+  assert.equal(tied.next!.price.key, "own-red:plan-only red");
   assert.equal(tied.next!.price.prs, 2);
   for (const actor of ["remudero-fleet[bot]", "app/remudero-fleet", undefined]) {
     const owned = fixture("/unused", [row(30, -3, "own-red", "red", "fix-lane"), row(30, -1, "own-red", "red", "fix-lane")], {
@@ -261,8 +266,9 @@ test("flow refuses malformed proofs and unavailable owners before writing, and h
   assert.equal(f.spec.apply(workspace(root), { actions: [], acting: [] }, {}), undefined);
   assert.throws(() => f.spec.apply({ ...workspace(root), branch: undefined }, plan, {}), /reservation branch/);
   const noOwner = fixture(root, [row(1, -2), row(1, 0)]);
-  const unowned = { actions: noOwner.spec.candidates(noOwner.spec.inventory(), () => 0), acting: ["draft" as const] };
-  assert.throws(() => noOwner.spec.apply(workspace(root), unowned, {}), /no source owner found for escalated:metadata-only body red: declared owner NONE/);
+  const unowned = noOwner.spec.inventory();
+  assert.equal(unowned.next, undefined, "W1-T12548: a NONE-owned draft is skipped, not thrown at filing");
+  assert.match(unowned.ladder[0]!.reason ?? "", /no source owner found for escalated:metadata-only body red: declared owner NONE/);
   const first = f.spec.apply(workspace(root), plan, {})!;
   const valid = readFileSync(join(root, first.paths[0]!), "utf8");
   const broken = valid.replace(/proof: .+/, 'proof: "grep: [ in src/lib/sweep.ts"');
@@ -365,7 +371,7 @@ test("flow's default plan reader carries fetch failure, treats an empty plan as 
   repo.addRemote("origin", repo.dir);
   repo.git("fetch", "origin");
   repo.git("remote", "set-url", "origin", join(repo.dir, "missing-origin"));
-  const f = fixture(repo.dir, [row(1, -1), row(1, 0)], { planState: undefined });
+  const f = fixture(repo.dir, [owned(1, -1), owned(1, 0)], { planState: undefined, prOutcomes: closedPrs(1) });
   const inv = f.spec.inventory();
   assert.ok(inv.next, "a fetched empty plan still permits a filing when fetch is unavailable");
   assert.equal(f.logs[0]!.step, "flow.origins_degraded");

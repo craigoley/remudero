@@ -1035,6 +1035,10 @@ export interface components {
       /** The board row's plan title, or its escalation title for a task-less escalation. */
       title?: string;
       risk?: "low" | "medium" | "high";
+      /** Present only for a task held in the ops catalog. */
+      catalog?: "ops";
+      /** The operator-approved public acceptance claims and proofs; other private task fields are withheld. */
+      acceptance?: (AcceptanceCriterion)[];
       /** The last ledger activity naming this task; absent when none was observed. */
       lastActivityAt?: string;
       /** Observed accumulated spend for the current in-flight run, including measured zero. */
@@ -1091,8 +1095,19 @@ export interface components {
         firstSignalLatencyMs?: number;
       };
     };
+    /** An unreadable ops catalog is explicit unknown, never a healthy zero count. No private repository identity is exposed. */
+    OpsCatalogState: ({
+      outcome: "ok";
+      taskCount: number;
+    }) | ({
+      outcome: "unreadable";
+      reason: string;
+    });
     /** GET /v1/status's body -- one StatusProjection per plan task, as of `generated_at`, plus (W1-T163, when the daemon's per-token last-seen marker store is wired) the calling token's own "since you last checked" recap. */
     StatusSnapshot: {
+      opsCatalog?: (OpsCatalogState) & ({
+        observedAt: string;
+      });
       generated_at: string;
       tasks: (StatusProjection)[];
       /** W1-T163: every recap-worthy event (src/lib/recap.ts) after this token's PRIOR marker -- absent entirely on a daemon with no last-seen store wired; `[]` on this token's first-ever view (nothing to recap FROM). */
@@ -5187,6 +5202,7 @@ export interface components {
       data: {
         instance: string;
         board: {
+          opsCatalog?: OpsCatalogState;
           counts: {
             running: number;
             queued: number;
@@ -5383,7 +5399,12 @@ export interface components {
       taskId: string;
       title: string;
       status: string;
+      /** Existing public risk, or the literal withheld for an ops task; never its private risk band. */
       risk: string;
+      /** Present only for a task held in the ops catalog. */
+      catalog?: "ops";
+      /** The operator-approved public acceptance claims and proofs; other private task fields are withheld. */
+      acceptance?: (AcceptanceCriterion)[];
       lastActivityAt?: string;
       prUrl?: string;
       prNumber?: number;

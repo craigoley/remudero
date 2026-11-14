@@ -25,7 +25,7 @@
     - test/agent-history-does-not-fill-the-root-disk.test.ts
     - test/agent-history-reclaim-reaches-the-bulk.test.ts
     - test/deploy/the-nightly-reclaim-reaches-the-root-disk-while-the-fleet-runs.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "With a fleet container live, the git rung runs in a checkout whose git directory has no lock file and no file written in the last 30 minutes. In that case it runs only `git maintenance run` with the loose-objects, incremental-repack and pack-refs tasks. It never runs `git gc` and never prunes an object. The line for the checkout names the bytes freed"

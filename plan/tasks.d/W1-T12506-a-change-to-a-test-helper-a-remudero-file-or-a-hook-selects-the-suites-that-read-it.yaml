@@ -20,7 +20,7 @@
     - test/ci/a-change-to-a-test-helper-a-remudero-file-or-a-hook-selects-the-suites-that-read-it.test.ts
     - test/a-full-fallback-author-selection-is-never-run-whole.test.ts
     - test/each-suite-records-the-non-code-files-it-reads.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "A change to a code file under test/helpers/ selects every suite that reaches it through the import graph, plus the changed tests and the modelled rest. `fullRunTrigger` returns undefined for it"

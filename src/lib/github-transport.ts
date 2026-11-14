@@ -11,12 +11,14 @@ import { hostname, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, sep } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
+import { workerData } from "node:worker_threads";
 
 import { clockFromMillisFn, loopAvailableDeadline, systemClock } from "./clock.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
 import { RmdError } from "./errors.js";
 import { brokerGhRead, ghBrokerClientSpawn, ghBrokerRouteFor, type GhBrokerClass, type GhBrokerResult } from "./gh-read-broker-client.js";
 import { refreshInstallationToken } from "./github-app.js";
+import { createInstallationBudget, type InstallationBudget, type GithubBudgetThrottledRow } from "./github-installation-budget.js";
 import { ghArgvNeedsNoCredential, githubRepoOfGhArgv, resolveGithubCredential } from "./github-credential.js";
 import { sameHost } from "./host-identity.js";
 import { LIVE_WRITE_SENTINEL_TOKEN, LiveWriteBlockedError } from "./live-write-guard.js";
@@ -233,19 +235,39 @@ async function ghBrokeredAsync(args: readonly string[], readOpts: GhJsonReadOpti
 export function ghExec(args: string[], opts: ExecFileSyncOptionsWithStringEncoding): string;
 export function ghExec(args: string[], opts?: ExecFileSyncOptions): Buffer;
 export function ghExec(args: string[], opts: ExecFileSyncOptions = {}): string | Buffer {
+  admitInstallationReadSync(args);
   // W1-T10279: with a live broker the same one spawn runs the broker client in place of `gh`, unfloored.
   const socket = ghBrokerSocketFor(args, opts.env, typeof opts.cwd === "string" ? opts.cwd : undefined);
   // W1-T3297: otherwise this overload spawns the real `gh`, so the cadence floor applies.
   if (socket === undefined) applyGhReadCadence(args);
   const spawned = socket === undefined ? { file: "gh", args } : ghBrokerClientSpawn(socket, args, ghBrokerClassOf(opts.env));
-  return ghExecFile(spawned.file, spawned.args, opts) as string | Buffer;
+  refuseSentinelGhToken(spawned.file, spawned.args, opts.env);
+  try {
+    const out = execFileSync(spawned.file, spawned.args,
+      ghOptionsWithDefaultTimeout(withGhCredentialEnv(spawned.file, spawned.args, opts))) as string | Buffer;
+    if (args[0] === "api" && args.includes("-i")) {
+      githubInstallationBudget().record(parseGhRateLimitHeaders(splitGhHeaderBlock(String(out), args.includes("--slurp")).headers));
+    }
+    return out;
+  } catch (err) { noteInstallationRefusal(err); throw err; }
 }
 
 export function ghExecFile(file: string, args: string[], opts: ExecFileSyncOptionsWithStringEncoding): string;
 export function ghExecFile(file: string, args: string[], opts?: ExecFileSyncOptions): Buffer;
 export function ghExecFile(file: string, args: string[], opts: ExecFileSyncOptions = {}): string | Buffer {
+  if (basename(file) === "gh") admitInstallationReadSync(args);
+  const isGh = basename(file) === "gh";
   refuseSentinelGhToken(file, args, opts.env);
-  return execFileSync(file, args, ghOptionsWithDefaultTimeout(withGhCredentialEnv(file, args, opts))) as string | Buffer;
+  try {
+    const out = execFileSync(file, args, ghOptionsWithDefaultTimeout(withGhCredentialEnv(file, args, opts))) as string | Buffer;
+    if (isGh && args[0] === "api" && args.includes("-i")) {
+      githubInstallationBudget().record(parseGhRateLimitHeaders(splitGhHeaderBlock(String(out), args.includes("--slurp")).headers));
+    }
+    return out;
+  } catch (err) {
+    if (isGh) noteInstallationRefusal(err);
+    throw err;
+  }
 }
 
 export function ghJson(
@@ -259,7 +281,8 @@ export function ghJson(
 ): unknown {
   // W1-T3297: injected exec reaches no network and must not spend a shared window.
   const isApiCall = args[0] === "api";
-  const execArgs = isApiCall ? [...args, "-i"] : args;
+  const execArgs = isApiCall && !args.includes("-i") ? [...args, "-i"] : args;
+  admitInstallationReadSync(args);
   let spawned = { file: "gh", args: execArgs };
   if (exec === execFileSync) {
     refuseSentinelGhToken("gh", args, undefined);
@@ -270,10 +293,18 @@ export function ghJson(
   const execOpts: { encoding: "utf8"; maxBuffer: number; timeout: number; killSignal: NodeJS.Signals; env?: NodeJS.ProcessEnv } =
     { encoding: "utf8", maxBuffer: DEFAULT_GH_MAX_BUFFER, timeout: DEFAULT_GH_CALL_TIMEOUT_MS, killSignal: DEFAULT_GH_SYNC_KILL_SIGNAL };
   // W1-T11926: only the real spawn takes a credential. An injected exec reaches no network.
-  const out = exec(spawned.file, spawned.args, exec === execFileSync ? withGhCredentialEnv(spawned.file, spawned.args, execOpts) : execOpts);
+  let out: string;
+  try {
+    out = exec(spawned.file, spawned.args, exec === execFileSync ? withGhCredentialEnv(spawned.file, spawned.args, execOpts) : execOpts);
+  } catch (err) {
+    noteInstallationRefusal(err);
+    throw err;
+  }
   if (!isApiCall) return parseGhJsonBody(args, out);
   const { headers, body } = splitGhHeaderBlock(out, args.includes("--slurp"));
-  if (onRateLimit) onRateLimit(parseGhRateLimitHeaders(headers));
+  const reading = parseGhRateLimitHeaders(headers);
+  githubInstallationBudget().record(reading);
+  if (onRateLimit) onRateLimit(reading);
   return parseGhJsonBody(args, body);
 }
 
@@ -389,12 +420,14 @@ export async function ghJsonAsync(
   onRateLimit?: (reading: GhRateLimitReading) => void,
   readOpts: GhJsonReadOptions = {},
 ): Promise<unknown> {
-  const withHeaders = onRateLimit !== undefined && args[0] === "api";
-  const execArgs = withHeaders ? [...args, "-i"] : args;
+  const withHeaders = args[0] === "api" && (onRateLimit !== undefined || githubInstallationBudget().consumers !== undefined || args.includes("-i"));
+  const execArgs = withHeaders && !args.includes("-i") ? [...args, "-i"] : args;
   const stdout = await ghStdoutAsync(args, execArgs, execAsync, readOpts);
   if (!withHeaders) return parseGhJsonBody(args, stdout);
   const { headers, body } = splitGhHeaderBlock(stdout, args.includes("--slurp"));
-  onRateLimit(parseGhRateLimitHeaders(headers));
+  const reading = parseGhRateLimitHeaders(headers);
+  githubInstallationBudget().record(reading);
+  onRateLimit?.(reading);
   return parseGhJsonBody(args, body);
 }
 
@@ -409,18 +442,22 @@ async function ghStdoutAsync(args: string[], execArgs: string[], execAsync: type
     DEFAULT_GH_CALL_TIMEOUT_MS,
   )).stdout;
   // Only real transport coalesces; injected executors may have independent side effects.
-  if (execAsync !== execFileAsync) return run();
+  if (execAsync !== execFileAsync) {
+    await admitInstallationReadAsync(args);
+    try { return await run(); } catch (err) { noteInstallationRefusal(err); throw err; }
+  }
   const key = ghArgsAreCoalescibleRead(args) ? `${readOpts.fresh === true ? "fresh:" : ""}${JSON.stringify(execArgs)}` : undefined;
   const existing = key === undefined ? undefined : asyncReadInFlight.get(key) as Promise<string> | undefined;
   if (existing) return existing;
   const request = (async (): Promise<string> => {
+    await admitInstallationReadAsync(args);
     // Async CI/review polls must share ghJson/ghExec's floor to prevent rapid read bursts.
     refuseSentinelGhToken("gh", args, undefined);
     const brokered = await ghBrokeredAsync(execArgs, readOpts);
     if (brokered !== undefined) return brokered;
     await applyGhReadCadenceAsync(args);
     return run();
-  })();
+  })().catch((err: unknown) => { noteInstallationRefusal(err); throw err; });
   if (key === undefined) return request;
   asyncReadInFlight.set(key, request);
   try {
@@ -447,20 +484,30 @@ export async function ghTextAsync(
     const { stdout } = await withGhKillEscalation(execAsync("gh", args, execOpts), args, timeout);
     return stdout;
   };
+  const rememberHeaders = (stdout: string): string => {
+    if (args[0] === "api" && args.includes("-i")) {
+      githubInstallationBudget().record(parseGhRateLimitHeaders(splitGhHeaderBlock(stdout, args.includes("--slurp")).headers));
+    }
+    return stdout;
+  };
 
   // An injected executor is an offline seam; only the real `gh` process spends cadence and joins
   // same-request reads. Prefix the key so a concurrent JSON reader can never receive raw text.
-  if (execAsync !== execFileAsync) return read();
+  if (execAsync !== execFileAsync) {
+    await admitInstallationReadAsync(args);
+    try { return rememberHeaders(await read()); } catch (err) { noteInstallationRefusal(err); throw err; }
+  }
   const key = env === undefined && ghArgsAreCoalescibleRead(args) ? `text:${opts.fresh === true ? "fresh:" : ""}${JSON.stringify(args)}:${maxBuffer}:${timeout}` : undefined;
   const existing = key === undefined ? undefined : asyncReadInFlight.get(key) as Promise<string> | undefined;
   if (existing) return existing;
   const request = (async (): Promise<string> => {
+    await admitInstallationReadAsync(args);
     refuseSentinelGhToken("gh", args, env);
     const brokered = await ghBrokeredAsync(args, opts, env);
-    if (brokered !== undefined) return brokered;
+    if (brokered !== undefined) return rememberHeaders(brokered);
     await applyGhReadCadenceAsync(args);
-    return read();
-  })();
+    return rememberHeaders(await read());
+  })().catch((err: unknown) => { noteInstallationRefusal(err); throw err; });
   if (key === undefined) return request;
   asyncReadInFlight.set(key, request);
   try {
@@ -483,6 +530,7 @@ export async function ghLinesAsync(
   opts: { timeout?: number } = {},
 ): Promise<void> {
   const timeout = opts.timeout ?? DEFAULT_GH_CALL_TIMEOUT_MS;
+  await admitInstallationReadAsync(args);
   refuseSentinelGhToken("gh", args, undefined);
   const brokered = await ghBrokeredAsync(args);
   if (brokered !== undefined) {
@@ -530,7 +578,8 @@ export async function ghLinesAsync(
     });
   }) as Promise<{ stdout: string; stderr: string }> & { child?: typeof child };
   read.child = child;
-  await withGhKillEscalation(read, args, timeout);
+  try { await withGhKillEscalation(read, args, timeout); }
+  catch (err) { noteInstallationRefusal(err); throw err; }
 }
 
 export const DEFAULT_GH_PACE_MIN_GAP_MS = 1_500;
@@ -560,6 +609,69 @@ export class GhPaceFloorStandDownError extends Error {
     this.remaining = budget.remaining;
     this.limit = budget.limit;
   }
+}
+
+let processInstallationBudget: InstallationBudget | undefined;
+
+function workerInstallationBudget(): InstallationBudget | undefined {
+  const config = (workerData as { input?: { githubInstallationBudget?: {
+    state: SharedArrayBuffer; consumers: number; instance: string;
+  } } } | undefined)?.input?.githubInstallationBudget;
+  if (config?.state === undefined) return undefined;
+  return createInstallationBudget({
+    consumers: config.consumers, instance: config.instance, clock: systemClock, sharedState: config.state,
+  });
+}
+
+/** W1-T12553: the one installation budget every pacer in this process reads. */
+export function githubInstallationBudget(): InstallationBudget {
+  return processInstallationBudget ??= workerInstallationBudget() ?? createInstallationBudget({ consumers: undefined, clock: systemClock });
+}
+
+export function configureGithubInstallationBudget(budget: InstallationBudget | undefined): void {
+  processInstallationBudget = budget ?? createInstallationBudget({ consumers: undefined, clock: systemClock });
+}
+
+/** The daemon drains rows that either its own thread or its read worker recorded. */
+export function takeGithubBudgetThrottles(): GithubBudgetThrottledRow[] {
+  return githubInstallationBudget().takeThrottleRows();
+}
+
+function installationCoreRead(args: readonly string[]): boolean {
+  return !ghArgvIsWrite(args) && !ghArgvIsCadenceExempt(args) && ghArgvBucketHint(args) === undefined &&
+    (args[0] !== "api" || parseGhApiArgv(args).endpoint !== "graphql");
+}
+
+function admitInstallationReadSync(args: readonly string[]): void {
+  if (!installationCoreRead(args)) return;
+  const budget = githubInstallationBudget();
+  const admitted = budget.claimRead();
+  if (!admitted.ok) {
+    budget.noteThrottle(admitted.reason);
+    throw new GhPaceFloorStandDownError(admitted.reading);
+  }
+}
+
+async function admitInstallationReadAsync(args: readonly string[]): Promise<void> {
+  if (!installationCoreRead(args)) return;
+  const budget = githubInstallationBudget();
+  for (;;) {
+    const admitted = budget.claimRead();
+    if (admitted.ok) return;
+    budget.noteThrottle(admitted.reason);
+    await defaultTimerSleep(Math.max(1, admitted.waitUntil * 1000 - systemClock.now()));
+  }
+}
+
+function noteInstallationRefusal(err: unknown): void {
+  const failure = err as { stdout?: string | Buffer; stderr?: string | Buffer } | null | undefined;
+  if (failure?.stdout !== undefined) {
+    const stdout = String(failure.stdout);
+    githubInstallationBudget().record(parseGhRateLimitHeaders(splitGhHeaderBlock(stdout, stdout.startsWith("[")).headers));
+  }
+  // The transport cannot import status.ts without a dependency cycle; match its primary-limit signal.
+  const text = failure?.stderr === undefined ? (err instanceof Error ? err.message : String(err)) : String(failure.stderr);
+  if (/rate limit|quota/i.test(text)) githubInstallationBudget().noteThrottle("refused");
 }
 
 export interface GhCallPacer {
@@ -605,6 +717,12 @@ export function createGhCallPacer(
   return {
     wait() {
       takeStandDown();
+      const budget = githubInstallationBudget();
+      const admit = budget.admit();
+      if (!admit.ok) {
+        budget.noteThrottle(admit.reason);
+        throw new GhPaceFloorStandDownError(admit.reading);
+      }
       if (lastCallAt !== undefined) {
         const remaining = gapMs - (now() - lastCallAt);
         if (remaining > 0) gapSleepSync(remaining);
@@ -613,12 +731,19 @@ export function createGhCallPacer(
     },
     async waitAsync() {
       takeStandDown();
+      const budget = githubInstallationBudget();
+      const admit = budget.admit();
+      if (!admit.ok) {
+        budget.noteThrottle(admit.reason);
+        await sleep(Math.max(0, admit.waitUntil * 1000 - now()));
+      }
       const remaining = lastCallAt === undefined ? 0 : gapMs - (now() - lastCallAt);
       // The slot is claimed before the timer, so a second waiter queues behind it rather than beside it.
       lastCallAt = now() + Math.max(0, remaining);
       if (remaining > 0) await sleep(remaining);
     },
     recordResult(rateLimited, budget) {
+      if (rateLimited) githubInstallationBudget().noteThrottle("refused");
       const lowWater = budget !== undefined && budget.limit > 0 && budget.remaining <= budget.limit * lowWaterFraction;
       gapMs = rateLimited || lowWater ? rateLimitGapMs : minGapMs;
       standDown = budget !== undefined && budget.limit > 0 && budget.remaining <= budget.limit * floorFraction ? budget : undefined;

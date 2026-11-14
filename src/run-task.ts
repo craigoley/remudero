@@ -376,7 +376,7 @@ import { reconcileManagedImprovementEffects } from "./lib/opportunity-outcomes.j
 import { classifyGardenerStep, productionGardenerOverseerPorts, runGardenerOverseer } from "./lib/gardener-overseer.js";
 import { planGardenSpec } from "./lib/plan-gardener.js";
 import { backlogGardenSpec } from "./lib/backlog-gardener.js";
-import { queueJudgeGardenSpec, type QueueJudgeSources } from "./lib/queue-judge-gardener.js";
+import { queueJudgeGardenSpec, queueJudgeRouteWindow, type QueueJudgeSources } from "./lib/queue-judge-gardener.js";
 import { redesignGardenSpec } from "./lib/redesign-gardener.js";
 import { SCOUT_WINDOW_MS, scoutGardenSpec } from "./lib/scout-gardener.js";
 import { gateGardenSpec, loadGateProbes } from "./lib/gate-gardener.js";
@@ -842,6 +842,7 @@ import {
 // src/lib/report-commands.ts (W1-T2888); ghTraceGateway has a second caller here and stays.
 import { ghTraceGateway } from "./lib/trace.js";
 import { checkCommitMessage, defaultPreflightSpawn, fitConventionalTitle, runPreflight, shapeCommitMessage, wrapBodyLines, type PreflightDeps, type PreflightSpawn } from "./lib/commit-message.js";
+import { planFilingFixRoundRefusal, readPlanFilingFixRoundInput } from "./lib/plan-filing-fix-guard.js";
 import { resolveProjectPreflight, runProjectPreflight } from "./lib/ci-project-preflight.js";
 import { observeSynchronousPreflightPhase, reportPreflightPhase } from "./lib/preflight-phase-progress.js";
 import {
@@ -6102,6 +6103,9 @@ async function runPlanScopedConflictRound(input: PlanScopedFixRoundInput): Promi
     }
     git(["commit", "-m", `Merge branch 'main' into ${pr.headRefName}`]);
     const sha = git(["rev-parse", "HEAD"]).trim();
+    const filingRefusal = planFilingFixRoundRefusal(await readPlanFilingFixRoundInput(
+      input.task.files, pr.headSha, sha, git));
+    if (filingRefusal) return refuse(filingRefusal);
     const verdict = await preflight(worktreePath, sha, metadata);
     if (!verdict.ok || verdict.unreadable.length || verdict.timedOut) return refuse((verdict.failures[0] ?? verdict.unreadable[0] ?? verdict.timedOut?.[0])!.firstLine, verdict);
     if (metadata.title !== input.title || metadata.body !== input.body) await deps.updateMetadata(metadata);
@@ -6114,6 +6118,12 @@ async function runPlanScopedConflictRound(input: PlanScopedFixRoundInput): Promi
     deps.log("sweep.plan_round.error", { pr_number: pr.prNumber, head_sha: pr.headSha, reason });
     return refuse(reason);
   }
+}
+
+function fixRoundCommitMessage(report: string, subject: string): string {
+  // The subject parser omits continuations; keep task trailers for the before-push filing guard.
+  const trailers = [...report.matchAll(/^Remudero-Task:[ \t]*\S+[ \t]*$/gm)].map(match => match[0]);
+  return [subject, ...trailers].join("\n\n");
 }
 
 export async function runPlanScopedFixRound(input: PlanScopedFixRoundInput): Promise<{ outcome: "pushed" | "refused" | "metadata-repaired"; headSha?: string; reason?: string; preflight?: PlanPrPreflightResult }> {
@@ -6192,13 +6202,17 @@ export async function runPlanScopedFixRound(input: PlanScopedFixRoundInput): Pro
     if (!filingSelfCreditCheck(metadata.body, introduced).ok || !acceptanceAuthorTimeCheck(metadata.body).ok) return refuse("the proposed filing body fails author-time acceptance");
     let sha = pr.headSha;
     if (changed.length) {
-      const message = parseReport(report)?.commitMessage;
-      if (!message || checkCommitMessage(message).length) return refuse("the plan round needs a valid COMMIT_MESSAGE");
+      const subject = parseReport(report)?.commitMessage;
+      if (!subject || checkCommitMessage(subject).length) return refuse("the plan round needs a valid COMMIT_MESSAGE");
+      const message = fixRoundCommitMessage(report, subject);
       git(["add", "-A", "--", ...changed]);
       const filedTask = taskIdFromRunBranch(pr.headRefName) === input.task.id && namesATask(input.task.id);
       git(["commit", "-m", message, ...(filedTask ? ["-m", `Remudero-Task: ${input.task.id}`] : [])]);
       sha = git(["rev-parse", "HEAD"]).trim();
     } else if (metadata.title === input.title && metadata.body === input.body) return refuse("the worker changed nothing");
+    const filingRefusal = planFilingFixRoundRefusal(await readPlanFilingFixRoundInput(
+      files, pr.headSha, sha, git));
+    if (filingRefusal) return refuse(filingRefusal);
     const verdict = await preflight(worktreePath, sha, metadata);
     // A check that ran out of its budget has no verdict, so it holds the push like an unreadable one.
     if (!verdict.ok || verdict.unreadable.length || verdict.timedOut) return refuse((verdict.failures[0] ?? verdict.unreadable[0] ?? verdict.timedOut?.[0])!.firstLine, verdict);
@@ -28165,7 +28179,11 @@ function* landSealedTaskFiles(opts: GardenCheckoutOpts, paths: readonly string[]
   // W1-T12222: a file that is in the queue keeps the ids of its land, so a partly refused land of new files waits.
   const partly = opts.taskFilesOnly === true && paths.some((p) => result.landed.includes(p) || result.waiting.includes(p));
   const outcome = result.prUrl !== undefined && carried ? "opened" : queued || partly ? "waiting" : "not_landed";
-  const refused = [...result.refused, ...result.setAside].filter((r) => paths.includes(r.path)).map((r) => ({ path: r.path, reason: r.reason }));
+  const refused = [...result.refused, ...result.setAside].filter((r) => paths.includes(r.path)).map((r) => ({
+    path: r.path, reason: r.reason,
+    ...(r.reserved_id === undefined ? {} : { reserved_id: r.reserved_id }),
+    ...(r.id_release === undefined ? {} : { id_release: r.id_release }),
+  }));
   opts.log(`${opts.name}.garden_sealed_landing`, { outcome, paths, pr_url: outcome === "opened" ? result.prUrl : null, ...(refused.length ? { refused } : {}), ...(result.error ? { error: result.error } : {}) });
   if (outcome === "opened") return result.prUrl;
   if (outcome === "waiting") return { waiting: { paths: paths.filter((p) => result.landed.includes(p) || result.waiting.includes(p)), stateRoot: opts.taskFilesLanding!.stateRoot, ...(opts.taskFilesOnly === true ? { filed: true as const } : {}) } };
@@ -28330,11 +28348,19 @@ export function issueRevalidationRunTaskPorts(
 export function queueJudgeRunTaskPorts(
   ctx: { owner: string; repo: string; repoRoot: string; stateDir: string; root: string; log: (step: string, extra?: Record<string, unknown>) => void },
   seams: { spawn?: Parameters<typeof issueRevalidationJudgeText>[0]["spawn"]; openBoard?: typeof readOpenBoardSnapshot } = {},
-): Pick<QueueJudgeSources, "judgeText" | "openPrNumbers"> {
+): Pick<QueueJudgeSources, "judgeText" | "openPrNumbers" | "promptWindow"> {
   const { owner, repo, repoRoot, stateDir, root, log } = ctx;
   const judge = issueRevalidationRunTaskPorts({ owner, repo, repoRoot, stateDir, log }, { spawn: seams.spawn });
   return {
     judgeText: (prompt) => judge.judgeText(prompt, 0),
+    promptWindow: () => {
+      try {
+        const mounts = loadMounts(mountsPath(repoRoot));
+        return queueJudgeRouteWindow(mounts.escalation_judge ?? resolveRiskJudgeMount(mounts), mounts.capabilities);
+      } catch (e) {
+        return { tokens: undefined, reason: `the judge mount could not be loaded or resolved (${String((e as Error)?.message ?? e).slice(0, 120)})` };
+      }
+    },
     openPrNumbers: () => {
       const open = (seams.openBoard ?? readOpenBoardSnapshot)(root, owner, repo);
       if (!open.ok) throw new Error(`queue judge: the open-PR snapshot is unavailable (${open.reason})`);
@@ -32153,7 +32179,8 @@ export function harnessCommitForShellLessWorker(
     return input.commitCount;
   }
   const message = withAssignmentTrailer(
-    asked ?? `${input.derivedCommit!.subject}\n\nHarness-derived subject: ${input.derivedCommit!.reason}`,
+    fixRoundCommitMessage(input.report,
+      asked ?? `${input.derivedCommit!.subject}\n\nHarness-derived subject: ${input.derivedCommit!.reason}`),
     input.assignmentId,
   );
   const subjectSource = asked === undefined ? "harness-derived" : input.subjectSource ?? "worker-authored";
@@ -34102,6 +34129,8 @@ interface LightPassReadPorts {
   effects?: (deps: Parameters<typeof buildSweepEffects>[0]) => SweepDeps;
   readCompare?: (args: string[]) => Promise<unknown>;
   clock?: Pick<Clock, "now">;
+  /** W1-T12357: the daemon's sweep tick bound; absent, the default policy's. */
+  sweepWallClockBoundMs?: number;
 }
 
 /** W1-T11293: the light pass reads every READY PR's distance; the reader lives in src/lib/light-pass-compare.ts. */

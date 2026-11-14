@@ -21,7 +21,8 @@
     - src/cli/commands/fix.ts
     - src/lib/proof-amendment.ts
     - test/fix-lane/a-needs-scope-outcome-opens-its-scope-amendment-before-it-asks-a-human.test.ts
-  status: queued
+    - "src/lib/sweep.ts"
+  status: merged
   attempts: 0
   acceptance:
     - claim: "A NEEDS_SCOPE outcome for a filed task whose scope amendment is refused for a retryable reason (scope-amendment-error, worker-diff-unreadable or shard-drifted) asks for the amendment once more in the same round after a fresh read. When the second request creates or resumes the amendment, the round ends awaiting the amendment merge and no escalation is filed"

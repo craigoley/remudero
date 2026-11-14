@@ -19,6 +19,9 @@
     - src/lib/sweep.ts
     - src/lib/escalate.ts
     - test/sweep/a-conflicting-pull-request-parked-on-an-escalation-still-gets-its-conflict-round.test.ts
+    - src/cli/commands/fix.ts
+    - test/a-stood-down-fix-rung-re-derives-its-remedy.test.ts
+    - test/a-conflict-escalation-whose-cause-has-cleared-does-not-hold-the-repair.test.ts
   status: queued
   attempts: 0
   acceptance:
@@ -56,12 +59,21 @@
     1. In src/lib/sweep.ts add `conflictRoundOutranksEscalationHold(pr, hold)`. It is true when the disposition is
        `conflicted`, `hasCapturedMergeConflictEvidence(pr.mergeConflict)` holds, and the hold is a terminal design handoff
        or an open escalation whose cause is not `conflict`.
-    2. At :22433 and :22478, when the function is true, keep `conflicted`, dispatch the conflict round, and log
-       `design_hold_kept: true` or `escalation_hold_kept: <issue url>` on sweep.disposed.
-    3. In src/lib/escalate.ts `openEscalationStandDownReason`, take an optional `conflictRound: true`. With it, an issue
-       whose cause is not `conflict` or is absent returns undefined.
+    2. At :22433, when the function is true and the contract is not amended, keep `conflicted`, dispatch the conflict
+       round, and log `design_hold_kept: true` on sweep.disposed. An open-escalation stand-down is never a held hold at
+       :22478 (fixRungInputsUnchanged refuses it), so for the escalation case the sweep reads the open escalations of a
+       conflicted PR and logs `escalation_hold_kept: <issue url>` when the function is true for the issue at this head.
+    3. In src/lib/escalate.ts `openEscalationStandDownReason`, take an optional `conflictRound: true` in its `current`
+       facts. With it, an issue whose cause is not `conflict` or is absent returns undefined. The fix rung in
+       src/cli/commands/fix.ts passes `conflictRound: true` in the `current` facts when the round has captured conflict
+       evidence; that rung is where an open issue stands the conflict round down.
     4. Carry the hold to the merge head: a head whose fix.done row is a conflict round that pushed it from the held head
-       reads the same design handoff and the same open escalation as the held head.
+       reads the same design handoff and the same open escalation as the held head. A pushed sweep.conflict_regenerated
+       row is a conflict round too.
+    5. Two existing tests change with this behaviour: the conflict cases of
+       test/a-stood-down-fix-rung-re-derives-its-remedy.test.ts now expect the conflict round under a design handoff,
+       and test/a-conflict-escalation-whose-cause-has-cleared-does-not-hold-the-repair.test.ts gains the fix rung case
+       for an open issue that names no cause.
     NOT IN SCOPE: the conflict gardener; who answers the escalation; how the conflict round resolves files.
   falsifier: |
     Leave :22433 unchanged and criterion 1 must fail. Drop the conflictRound option and criterion 2 must fail. Drop the

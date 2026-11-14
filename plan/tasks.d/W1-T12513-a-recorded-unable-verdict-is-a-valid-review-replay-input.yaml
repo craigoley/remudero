@@ -17,7 +17,7 @@
   files:
     - src/lib/review-replay-sample.ts
     - test/review/a-recorded-unable-verdict-is-a-valid-review-replay-input.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "A review.replay_input row whose verdict_lines hold `REVIEW_VERDICT <n>: UNABLE` derives into the sample, keeps its recorded class, and replays to the same class"

@@ -303,6 +303,71 @@ const SEED_ROWS: readonly SeedRow[] = [
     writer: ["askDecisionModel"],
     outcomes: ["answered", "refused", "unavailable", "failed"],
   },
+  {
+    // W1-T12546: a fix dispatch whose head moved before the checkout claim.
+    step: "sweep.fix.head_adopted",
+    meaning:
+      "The fresh head read in a fix dispatch found a head other than the one the sweep judged. The PR " +
+      "is open at that head, has no merge conflict, and its checks are red with readable failures, so " +
+      "the dispatch continues at the new head with those failures. Every write-time fence (the live-state " +
+      "preflight, the creditable-head check and the branch claim) runs again at the new head.",
+    writer: ["buildSweepEffects"],
+    outcomes: ["adopted"],
+  },
+  {
+    // W1-T12546: the moved head was not fixable yet, so the dispatch took no claim.
+    step: "sweep.fix.head_moved_deferred",
+    meaning:
+      "The fresh head read in a fix dispatch found a head other than the one the sweep judged, and the " +
+      "new head is not fixable yet. `reason` says why: the evidence is not CI failure evidence, the PR " +
+      "is not open, it moved again, it has a merge conflict, its checks are pending or green, or they " +
+      "cannot be read. No claim is taken and no claim decline is written; the next pass judges the new head.",
+    writer: ["buildSweepEffects"],
+    outcomes: ["evidence_not_ci", "not_open", "head_moved_again", "merge_conflict", "checks_pending", "checks_green", "checks_none", "checks_unreadable", "failures_unreadable", "pr_unreadable"],
+  },
+  {
+    // W1-T12546: the rung adopts a published head instead of standing down at rung.evidence_head.
+    step: "fix.evidence_head_adopted",
+    meaning:
+      "A CI fix round found that the published branch advanced to the head its worktree holds before " +
+      "the worker started. The checks at that head are red with readable failures, so the round takes " +
+      "that head and those failures and builds the prompt again. Once per rung; otherwise it stands down " +
+      "at rung.evidence_head as before.",
+    writer: ["runFixRung"],
+    outcomes: ["adopted"],
+  },
+  {
+    // W1-T12553: the daemon instances and hand runs share one GitHub App installation.
+    step: "github.budget.throttled",
+    meaning:
+      "This daemon instance held back its GitHub reads, at most once per consumer and reset window. " +
+      "\"share\": it spent its allowance, the remaining count less the write reserve divided by the " +
+      "consumers on the installation. \"reserve\": the remaining count is in the write reserve. " +
+      "\"refused\": GitHub refused a read for its rate limit. Writes never wait on this budget.",
+    writer: ["daemonCommand"],
+    outcomes: ["share", "reserve", "refused"],
+  },
+  {
+    step: "github.budget.configured",
+    meaning:
+      "At start, the daemon set its share of the GitHub App installation from the instance registry: " +
+      "the consumer count and the registry it read. \"unconfigured\" names why there is no share " +
+      "(no installation id, an unreadable registry, no instance on the installation); its reads are then paced as before.",
+    writer: ["startDaemonInstallationBudget"],
+    outcomes: ["configured", "unconfigured"],
+  },
+  {
+    step: "flow.open_repair_ages",
+    meaning:
+      "The daily flow pass read the open pull requests whose checks are red or whose branch conflicts. " +
+      "For each one, oldest first, it gives the kind (red, conflict or both), its open age, the delay " +
+      "from opening to its first fix round, the time since its latest fix round and how long it has " +
+      "waited. A figure the ledger read cannot see reads unread, never zero. An unread, incomplete or " +
+      "stale census or an incomplete ledger read writes UNKNOWN with its reason. A wait past 60 " +
+      "minutes files one remedy task with origin flow-regression:open-repair-wait.",
+    writer: ["runFlowGardener"],
+    outcomes: ["OBSERVED", "UNKNOWN"],
+  },
 ];
 
 /** THE REGISTRY — every step this task has decoded so far, `family` derived from `step` (never
