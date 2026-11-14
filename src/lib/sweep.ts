@@ -9,7 +9,8 @@ import { parseInstanceRegistry } from "./instance-registry.js";
 import { selectedInstanceRegistryEnvPath } from "./instance-registry-selection.js";
 import { buildFixProgressInput as buildBaseFixProgressInput, fixRedClass, resolveFixProgress, parseFixProgressVerdict, scopeEscalationStandDown,
   type FixProgressWitness, type FixProgressHostedProofResult,
-  type FixProgressInput, type FixProgressJudge, type FixProgressResult, type FixProgressVerdict } from "./fix-progress-judge.js";
+  type FixProgressInput, type FixProgressJudge, type FixProgressResult, type FixProgressVerdict,
+  sameCriterionStall, nextStallRemedy, stallRemedyRows, failedApproaches, rowPrNumber, type StallRemedy } from "./fix-progress-judge.js";
 import type { DispatchBreakJudge } from "./stall-verifier.js";
 import { readCiGateRequiredChecks } from "./ci-gate-required.js";
 import { createHeadRehomePorts, headIdentityRed, headRehomePlan, type HeadRehomePorts } from "./head-rehome.js";
@@ -184,7 +185,7 @@ import {
 } from "./status.js";
 import type { CreditBackfillReceipt, CreditStore } from "./status.js";
 import { createLiveLedgerTail, type LiveLedgerTail } from "./live-ledger-tail.js";
-import { installPolicyPath, loadDefaultPolicy, PolicyError } from "./policy.js";
+import { installPolicyPath, loadDefaultPolicy, PolicyError, DEFAULT_FIX_STALL_ROUNDS, DEFAULT_FIX_MODEL_ORDER } from "./policy.js";
 import {
   costAnomalyIncidentEvent,
   loadDefaultCostAnomalyPolicy,
@@ -4965,6 +4966,8 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
             reviewBase: { owner, repo, headCheckoutDir: worktreePath, reviewerMount },
           }),
           ...(mountsTable.step_up ? { stepUpMount: mountsTable.step_up } : {}),
+          ...(evidence.stallRemedy ? { mount: stallRemedyMount(evidence.stallRemedy, fixMount, mountsTable, log),
+            failedApproaches: evidence.stallRemedy.approaches } : {}),
           birthWorktreeSnapshot,
           // W1-T322: same plan this sweep already loaded (`fixRungTaskFor(plan, …)` above) — see
           // runTask's own `openTaskIds` comment for what this set is and why it's computed once.
@@ -7205,6 +7208,10 @@ export interface SweepPolicy {
   staleDays: number;
   /** Max fix-rung strikes before a failing review escalates instead of fixing. */
   strikeCap: number;
+  /** W1-T12710: rounds without progress on one criterion after which it gets a new remedy (`fix.stallRounds`). */
+  fixStallRounds?: number;
+  /** W1-T12710: mount names a stronger-worker remedy steps through, weakest first (`fix.modelOrder`). */
+  fixModelOrder?: readonly string[];
   /** W1-T78: re-dispatch strike-cap policy once an operator answers a clarification question. */
   clarify: ClarifyPolicy;
   /** W1-T121 QUEUE GOVERNOR — a WIP limit on DISPATCH ONLY: at or above this many FLEET-OWNED open
@@ -7313,7 +7320,7 @@ export interface SweepPolicy {
  *  default, never to unbounded spend, and the cost ceiling bounds RUNAWAY spend, not a budget.
  *  Several rows are COLLECTED from `plan/policy.yaml` rather than written as source literals, each a
  *  RELOCATION and never a retune. // Why: FROZEN AT IMPORT (W1-T331) — docs/forensics/sweep.md. */
-const { sweep: POLICY_SWEEP, sweepWallClockBoundMs: POLICY_SWEEP_WALL_CLOCK_BOUND_MS } = loadDefaultPolicy().values;
+const { sweep: POLICY_SWEEP, sweepWallClockBoundMs: POLICY_SWEEP_WALL_CLOCK_BOUND_MS, fix: POLICY_FIX } = loadDefaultPolicy().values;
 
 /** W1-T1049 — reads `plan/policy.yaml`'s `sweep.reviewLanes` row DIRECTLY, never through
  *  `policy.ts`'s schema, which is outside this task's declared files. Validated like every other
@@ -7439,6 +7446,8 @@ export const DEFAULT_SWEEP_POLICY: SweepPolicy = {
   },
   staleDays: POLICY_SWEEP.staleDays,
   strikeCap: POLICY_SWEEP.strikeCap,
+  fixStallRounds: POLICY_FIX.stallRounds,
+  fixModelOrder: POLICY_FIX.modelOrder,
   clarify: DEFAULT_CLARIFY_POLICY,
   wipLimit: POLICY_SWEEP.wipLimit,
   // W1-T4465: a literal default beside `wipLimit`, exactly like `pendingCeilingMinutes`/
@@ -13413,6 +13422,94 @@ export interface ClarificationQuestion {
  *  truth ONLY: the task id, the unmet criterion (claim vs the reviewer's requirement vs the spec's
  *  own proof text), and what the fix worker tried per strike. PURE, no guessing — with no single
  *  criterion to point at it names the observed disposition `reason`, but is NEVER silent. */
+/** W1-T12710: the mount a stronger-worker round asks for; a name the mounts table lacks is logged and runs on the fix mount. */
+function stallRemedyMount(remedy: NonNullable<FixDispatchEvidence["stallRemedy"]>, fixMount: Mount,
+  table: ReturnType<typeof loadMounts>, log: (step: string, fields: Record<string, unknown>) => void): Mount {
+  const mount = remedy.mount === "step_up" ? table.step_up : remedy.mount === "fix" ? fixMount : undefined;
+  if (mount === undefined) log("sweep.fix.stall_mount_missing", { mount: remedy.mount, criterion: remedy.criterion });
+  return mount ?? fixMount;
+}
+
+/** W1-T12710: open an acceptance amendment proposal for a stalled criterion through the refusal-amendment writer. */
+async function proposeStallAmendment(pr: OpenPrView, criterion: string, rounds: number, approaches: readonly string[],
+  ledgerLines: readonly Record<string, unknown>[], deps: Pick<SweepDeps, "draftRefusalAmendments" | "readTaskContractRevision">,
+): Promise<{ ok: true; prUrl?: string } | { ok: false; reason: string }> {
+  if (!criterion.startsWith("review:")) return { ok: false, reason: "a CI check is not an acceptance criterion" };
+  if (!deps.draftRefusalAmendments) return { ok: false, reason: "no amendment writer is wired" };
+  const taskId = pr.taskId;
+  if (taskId === undefined || !carriesTaskTrailer(pr)) return { ok: false, reason: "the pull request has no plan task" };
+  const claim = criterion.slice("review:".length);
+  const review = ledgerLines.findLast(row => row.step === "review.posted" && rowPrNumber(row) === pr.prNumber);
+  const criteria = (review?.decision_verdict as { criteria?: unknown } | null | undefined)?.criteria;
+  const index = Array.isArray(criteria) ? criteria.findIndex(c => (c as { claim?: unknown } | null)?.claim === claim) : -1;
+  if (index < 0) return { ok: false, reason: "the newest review does not list the criterion" };
+  const detail = (`${rounds} fix rounds left "${claim}" unmet with the same failure at ${pr.headSha}, so it cannot be met ` +
+    `as written at this head. Approaches that did not work: ${approaches.join(" | ")}`).slice(0, 2000);
+  try {
+    const [result] = await deps.draftRefusalAmendments([{ taskId, runId: `stall-${pr.prNumber}@${pr.headSha}`, reportExcerpt: detail,
+      contractRevision: deps.readTaskContractRevision?.(taskId),
+      refusals: [{ criterion: index + 1, refusalClass: "proof-unexecutable-at-head", detail }] }]);
+    if (result && ["drafted", "deduped", "waiting", "already_flagged"].includes(result.outcome)) return { ok: true, prUrl: result.prUrl };
+    return { ok: false, reason: `the amendment writer answered ${result?.outcome ?? "nothing"}${result?.error ? `: ${result.error}` : ""}` };
+  } catch (error) {
+    return { ok: false, reason: `the amendment writer failed: ${String((error as Error)?.message ?? error)}` };
+  }
+}
+
+/**
+ * W1-T12710: before a fix round, the criterion that did not move in `fix.stallRounds` rounds gets the first remedy it
+ * has not had: a stronger worker, then an acceptance amendment proposal, then one operator question. Each is one
+ * `fix.stall_remedy` row. After every remedy, no round runs for it until the operator answers.
+ */
+async function takeStallRemedy(pr: OpenPrView, ledgerLines: readonly Record<string, unknown>[], policy: SweepPolicy,
+  deps: Pick<SweepDeps, "ledgerPath" | "runId" | "appendLine" | "escalate" | "draftRefusalAmendments" | "readTaskContractRevision" | "dryRun">,
+): Promise<{ kind: "dispatch"; stallRemedy?: NonNullable<FixDispatchEvidence["stallRemedy"]> } | { kind: "hold"; reason: string }> {
+  if (deps.dryRun) return { kind: "dispatch" };
+  const currentRed = [...redCheckNames(pr).filter(r => !r.startsWith("review:")), ...pr.unmetCriteria.map(c => `review:${c.claim}`)];
+  const input = buildFixProgressInput({ taskId: fixLedgerTaskIdFor(pr), prNumber: pr.prNumber, headSha: pr.headSha, currentRed,
+    ledger: ledgerLines, pendingChecks: pr.pendingRequiredChecks });
+  const threshold = policy.fixStallRounds ?? DEFAULT_FIX_STALL_ROUNDS;
+  const stalled = currentRed.map(key => ({ key, rounds: sameCriterionStall(input.rounds, key) }))
+    .filter(s => s.rounds >= threshold).sort((a, b) => b.rounds - a.rounds)[0];
+  if (stalled === undefined) return { kind: "dispatch" };
+  const { key: criterion, rounds } = stalled;
+  const tried = stallRemedyRows(ledgerLines, pr.prNumber, criterion);
+  const approaches = failedApproaches(input.rounds, criterion);
+  const record = (remedy: StallRemedy, outcome: "taken" | "skipped", extra: Record<string, unknown> = {}) => {
+    (deps.appendLine ?? appendLedger)(deps.ledgerPath, { run_id: deps.runId, task_id: escalationTaskIdFor(pr), step: "fix.stall_remedy",
+      pr_number: pr.prNumber, head_sha: pr.headSha, criterion, remedy, outcome, rounds, ...extra });
+    tried.push({ remedy, outcome, rounds, ...(typeof extra.mount === "string" ? { mount: extra.mount } : {}) });
+  };
+  const stronger = tried.findLast(r => r.remedy === "stronger-worker" && r.outcome === "taken");
+  if (stronger?.mount !== undefined && stronger.rounds >= rounds) return { kind: "dispatch", stallRemedy: { criterion, mount: stronger.mount, approaches } };
+  const stalledOn = `fix stall on ${criterion}: ${rounds} rounds left it unmet with the same failure`;
+  for (;;) {
+    const next = nextStallRemedy(tried, { fixModelOrder: policy.fixModelOrder ?? DEFAULT_FIX_MODEL_ORDER });
+    for (const remedy of next?.skipped ?? []) record(remedy, "skipped", { reason: "the policy's fix model order has no stronger mount" });
+    if (next === undefined) {
+      if (pr.pendingAnswer?.constraint) return { kind: "dispatch" };
+      return { kind: "hold", reason: `${stalledOn}, and every remedy was tried; awaiting the operator's answer` };
+    }
+    if (next.remedy === "stronger-worker") {
+      record(next.remedy, "taken", { mount: next.mount });
+      return { kind: "dispatch", stallRemedy: { criterion, mount: next.mount!, approaches } };
+    }
+    if (next.remedy === "amend-criterion") {
+      const proposal = await proposeStallAmendment(pr, criterion, rounds, approaches, ledgerLines, deps);
+      if (!proposal.ok) {
+        record(next.remedy, "skipped", { reason: proposal.reason });
+        continue;
+      }
+      record(next.remedy, "taken", proposal.prUrl ? { amendment_url: proposal.prUrl } : {});
+      return { kind: "hold", reason: `${stalledOn}; an acceptance amendment proposal is open${proposal.prUrl ? `: ${proposal.prUrl}` : ""}` };
+    }
+    const reason = `${stalledOn}; tried ${tried.map(r => `${r.remedy} (${r.outcome})`).join(", ")}; the operator is asked once`;
+    await deps.escalate(pr, reason, renderClarificationQuestion(pr, reason, pr.strikeHistory ?? []));
+    record(next.remedy, "taken");
+    return { kind: "hold", reason };
+  }
+}
+
 export function renderClarificationQuestion(
   pr: OpenPrView,
   reason: string,
@@ -13970,6 +14067,8 @@ export interface FixDispatchEvidence {
   /** W1-T11170: a conflict round on a head that is not the PR task's own run branch. A session branch takes only a
    *  merge commit, pushed with no force flag, after the ownership re-read. */
   ownedConflictHead?: { kind: OwnedConflictHeadKind; push: "leased" | "merge-commit-no-force"; ownership?: SessionOwnershipReads };
+  /** W1-T12710: a stronger-worker round for a stalled criterion: the mount it asks for and the approaches that did not work. */
+  stallRemedy?: { criterion: string; mount: string; approaches: string[] };
 }
 
 /** The only proof grades that establish the capped-green repair has a mechanical body remedy —
@@ -24328,6 +24427,13 @@ export async function runSweep(
               // dispatch after the first (W1-T10039), including one past its former ceiling, is judge-gated.
               const proofRepairFlagRung = proofRepairRoute !== undefined && !proofRepairActive;
               if (!planShardRepairDue && !proofRepairFlagRung && !await askProgress()) break;
+              const stall = planShardRepairDue || proofRepairFlagRung ? undefined : await takeStallRemedy(pr, ledgerLines, policy, deps);
+              if (stall?.kind === "hold") {
+                acted = false;
+                standDownReason = stall.reason;
+                break;
+              }
+              if (stall?.stallRemedy) fixEvidence.stallRemedy = stall.stallRemedy;
               fixEvidence.progressDecision = progressDecision;
               if (progressDecision?.verdict === "change-approach") fixEvidence.progressApproach = progressDecision.approach;
               // W1-T2520 — THE FIX-DISPATCH CLAIM. See {@link claimFixDispatch} for why a claim

@@ -368,6 +368,18 @@ const SEED_ROWS: readonly SeedRow[] = [
     writer: ["runFlowGardener"],
     outcomes: ["OBSERVED", "UNKNOWN"],
   },
+  {
+    // W1-T12710: fix rounds that did not move one criterion get a different remedy.
+    step: "fix.stall_remedy",
+    meaning:
+      "Before a fix round, the sweep found that `rounds` completed rounds left `criterion` unmet with the same " +
+      "failure, or did not land, at or past fix.stallRounds. It took the first remedy not tried for this pull " +
+      "request and criterion: `stronger-worker` (a round on the next mount in fix.modelOrder, named in `mount`, " +
+      "with the earlier approaches listed), `amend-criterion` (an acceptance amendment proposal, `amendment_url`), or " +
+      "`operator-input` (one escalation). \"skipped\" means the remedy could not apply; `reason` says why.",
+    writer: ["takeStallRemedy"],
+    outcomes: ["taken", "skipped"],
+  },
 ];
 
 /** THE REGISTRY — every step this task has decoded so far, `family` derived from `step` (never
