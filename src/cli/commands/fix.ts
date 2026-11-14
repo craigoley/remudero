@@ -2598,9 +2598,12 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
   // unchanged tree is already in the judge's own signals; a false-block finding and merge refusals are not.
   // W1-T12541: a merge-conflict round is decided on its own conflict facts; it never asks the CI progress judge.
   const conflictRoundDecision = (persisted: readonly Record<string, unknown>[], site: string) => {
-    const decision = conflictRoundProgressVerdict({ taskId: opts.taskId, prNumber, headSha: review.headSha,
+    // A landed push can be observed by the CI gate even when no review runs (for example on timeout).
+    // In that case review still names the old head, while the gate names the PR's current head.
+    const headSha = currentPinnedSha ?? review.headSha;
+    const decision = conflictRoundProgressVerdict({ taskId: opts.taskId, prNumber, headSha,
       baseSha: opts.baseSha, conflictedFiles: conflictedFilePaths(currentMergeConflict) ?? [] }, [...persisted, ...roundRows]);
-    deps.log("fix.progress_judged", { pr_number: prNumber, head_sha: review.headSha, site, ...decision });
+    deps.log("fix.progress_judged", { pr_number: prNumber, head_sha: headSha, site, ...decision });
     return decision;
   };
   const conflictBaseField = () => currentMergeConflict !== undefined && opts.baseSha !== undefined ? { base_sha: opts.baseSha } : {};
