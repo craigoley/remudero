@@ -1,11 +1,12 @@
 // @source-text-subject: comment compression and executable-token preservation in src/lib/drain.ts.
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { parse } from "@babel/parser";
-import { compressionPinBase } from "#test/helpers/compression-pin.js";
+import { assertSameTokens, compressionPinBase } from "#test/helpers/compression-pin.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 function snapshot(source: string) {
@@ -16,6 +17,7 @@ function snapshot(source: string) {
     .map((token) => [token.type.label, source.slice(token.start, token.end)]);
   const digest = (text: string) => createHash("sha256").update(text).digest("hex");
   return {
+    tokens,
     tokenCount: tokens.length,
     tokenDigest: digest(JSON.stringify(tokens)),
     // Preserve newline-sensitive syntax while ignoring source positions and comments.
@@ -52,4 +54,27 @@ test("W1-T10971: comment compression preserves executable code", () => {
   }
   assert.notEqual(snapshot("function f() { return 1; }").astDigest,
     snapshot("function f() { return\n1; }").astDigest);
+});
+
+test("W1-T12355: comment compression preserves executable code", (t) => {
+  const sourcePath = "src/lib/drain.ts";
+  let before = compressionPinBase(sourcePath, import.meta.url);
+  if (before === undefined) {
+    // This pin extends an existing test file: activate only while its title is new to the base.
+    const readGit = (args: string[]) => execFileSync("git", args, {
+      cwd: REPO_ROOT, encoding: "utf8", maxBuffer: 16 * 1024 * 1024,
+    });
+    const base = readGit(["merge-base", "origin/main", "HEAD"]).trim();
+    const priorTest = readGit(["show", `${base}:test/dispatch/compress-src-lib-drain-ts.test.ts`]);
+    if (priorTest.includes("W1-T12355: comment compression preserves executable code")) return;
+    before = readGit(["show", `${base}:${sourcePath}`]);
+  }
+  const actual = snapshot(readFileSync(join(REPO_ROOT, sourcePath), "utf8"));
+  const original = snapshot(before);
+  assertSameTokens(actual.tokens, original.tokens, "executable tokens match the pre-compression source");
+  assert.equal(actual.astDigest, original.astDigest, "newline-sensitive syntax is preserved");
+  assert.ok(actual.commentLines < original.commentLines, "comment lines decrease from the PR base");
+  assert.ok(actual.commentBytes < original.commentBytes, "comment bytes decrease from the PR base");
+  t.diagnostic(`comments: ${original.commentLines} → ${actual.commentLines} lines; ` +
+    `${original.commentBytes} → ${actual.commentBytes} bytes`);
 });
