@@ -98,6 +98,12 @@ test("the sweep escalates an exact-head design handoff before admitting another 
     const f = designFixture(t, mode); f.write();
     assert.equal(deriveDisposition(f.pr, DEFAULT_SWEEP_POLICY, f.now).disposition,
       mode === "conflict" ? "conflicted" : "blocked-fixable", "control: this head ordinarily enters the fix lane");
+    if (mode === "conflict") {
+      // W1-T12544: the merge conflict is not the design question, so its conflict round runs under the hold.
+      assert.equal((await runSweep([f.pr], f.deps)).actions[0]!.disposition, "conflicted");
+      assert.deepEqual([f.effects.fixes, f.effects.escalations.length], [1, 0]);
+      continue;
+    }
     for (let pass = 0; pass < 2; pass++) {
       const summary = await runSweep([f.pr], f.deps);
       assert.equal(summary.actions[0]!.disposition, "refused-escalate");
@@ -174,13 +180,15 @@ for (const mode of ["conflict", "ci"] as const) {
     let revision = "contract-A", refreshed = 0;
     f.deps.readTaskContractRevision = () => revision;
     f.deps.updateBranch = async () => { refreshed++; return "updated" as const; };
+    // W1-T12544: a conflicted head gets its conflict round under the hold instead of the escalation.
+    const conflictRounds = mode === "conflict" ? 1 : 0;
     await runSweep([f.pr], f.deps);
-    assert.equal(f.effects.escalations.length, 1); assert.equal(refreshed, 0);
+    assert.equal(f.effects.escalations.length, 1 - conflictRounds); assert.equal(refreshed, 0);
     revision = "contract-B";
     await runSweep([f.pr], f.deps);
     assert.equal(refreshed, 1, "a protected-main operator amendment must reach the existing ordinary base-adoption path");
-    assert.equal(f.effects.admissions, 0, "base adoption cannot consume a new code-fix admission");
-    assert.equal(f.effects.fixes, 0); assert.equal(f.effects.escalations.length, 1);
+    assert.equal(f.effects.admissions, conflictRounds, "base adoption cannot consume a new code-fix admission");
+    assert.equal(f.effects.fixes, conflictRounds); assert.equal(f.effects.escalations.length, 1 - conflictRounds);
     await runSweep([f.pr], f.deps);
     assert.equal(refreshed, 1, "an unchanged head and amendment is taken only once");
   });
