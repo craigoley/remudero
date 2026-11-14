@@ -260,22 +260,61 @@ test("W1-T8141: a yielded fix round pushes nothing and costs no strike", async (
 });
 
 test("W1-T8141: the next fix round is offered the preserved patch", async (t) => {
-  const { co, rows } = await yieldedRound(t);
-  const ref = String(rows.find((row) => row.step === "fix.round_yielded")?.recovery_ref);
-  // The sweep's own reader (W1-T6434), on the rows this round wrote.
-  const offered = readPreservedOwnerPatch({ repoDir: co.clone.dir, prNumber: PR_NUMBER, headSha: co.headSha, ledgerLines: rows });
-  assert.ok(offered, "the sweep finds the preserved patch for this PR and head");
-  assert.equal(offered.recoveryRef, ref);
-  assert.match(offered.excerpt, /a staged/);
-  assert.match(offered.excerpt, /b unstaged/);
-  // The next round, after the recycle, shows it to its worker.
-  rmSync(pauseFilePath(co.root), { force: true });
-  let prompt = "";
-  await fixRound(t, co, "DAEMON-2", async (args) => {
-    prompt = args.prompt;
-    return workerResult("DAEMON-2");
-  }, { priorPartialWork: offered });
-  assert.match(prompt, new RegExp(`RECOVERY REF: ${ref.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
+  for (const a of ["spread", "restored", "restaged"] as const) {
+    await t.test(a, async (t) => {
+      const { co, rows, pushes } = await yieldedRound(t, { a });
+      const yielded = rows.find((row) => row.step === "fix.round_yielded")!;
+      const ref = String(yielded.recovery_ref);
+      const indexRef = yielded.index_recovery_ref;
+      const offered = readPreservedOwnerPatch({ repoDir: co.clone.dir, prNumber: PR_NUMBER, headSha: co.headSha, ledgerLines: rows });
+      assert.ok(offered, "the sweep finds the preserved patch for this PR and head");
+      assert.equal(offered.recoveryRef, ref);
+      assert.match(offered.excerpt, /b unstaged/);
+      if (a === "spread") {
+        assert.match(offered.excerpt, /a staged/);
+        assert.equal(offered.indexPatch, undefined, "one snapshot already holds all the work");
+      } else {
+        assert.equal(typeof indexRef, "string");
+        assert.equal(offered.indexPatch?.recoveryRef, indexRef, "the staged snapshot is also offered");
+        assert.match(offered.indexPatch!.excerpt, /a staged/);
+        assert.doesNotMatch(offered.excerpt, /a staged/, "only the index snapshot holds these bytes");
+        assert.equal(co.clone.git("show", `${indexRef}:src/a.ts`), "a staged");
+        assert.equal(co.clone.git("show", `${ref}:src/a.ts`), a === "restored" ? "a" : "a on disk");
+      }
+      assert.equal(pushes(), 0);
+      assert.equal(co.origin.git("rev-parse", BRANCH), co.headSha);
+      assert.equal(co.clone.git("status", "--porcelain"), "");
+      rmSync(pauseFilePath(co.root), { force: true });
+      let prompt = "";
+      await fixRound(t, co, "DAEMON-2", async (args) => {
+        prompt = args.prompt;
+        return workerResult("DAEMON-2");
+      }, { priorPartialWork: offered });
+      assert.ok(prompt.includes(`RECOVERY REF: ${ref}`));
+      assert.match(prompt, /b unstaged/);
+      assert.match(prompt, /a staged/, "the next worker sees the staged bytes even when the disk does not");
+      if (a !== "spread") {
+        assert.ok(prompt.includes(`INDEX RECOVERY REF: ${indexRef}`));
+        assert.ok(prompt.includes(`git diff ${indexRef}^ ${indexRef}`), "both snapshots can be inspected");
+      }
+    });
+  }
+});
+
+test("W1-T8141: an invalid or unreadable index recovery ref reports an incomplete handoff", async (t) => {
+  const { co, rows } = await yieldedRound(t, { a: "restored" });
+  const row = rows.find((row) => row.step === "sweep.fix.owner_residue_preserved")!;
+  for (const indexRef of ["refs/heads/main", `refs/rmd-recovery/fix-dirty/missing/${co.headSha}`]) {
+    const reasons: string[] = [];
+    const offered = readPreservedOwnerPatch({
+      repoDir: co.clone.dir, prNumber: PR_NUMBER, headSha: co.headSha,
+      ledgerLines: [{ ...row, index_recovery_ref: indexRef }],
+      onUnreadable: ({ reason }) => reasons.push(reason),
+    });
+    assert.equal(offered, undefined, "a partial read must not claim to offer all preserved work");
+    assert.equal(reasons.length, 1);
+    assert.ok(reasons[0]!.length > 0);
+  }
 });
 
 test("W1-T8141: an operator pause does not end a fix round", async (t) => {

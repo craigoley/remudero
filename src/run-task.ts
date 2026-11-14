@@ -8464,12 +8464,13 @@ async function keepYieldedFixRound(
     return { trigger: "recycle", detail: recycle, paths: [], costUsd, keepError };
   }
   log("fix.round_yielded", { ...row, recovery_ref: kept.recoveryRef ?? null, index_recovery_ref: kept.indexRecoveryRef ?? null, paths: kept.paths });
-  // The next round is offered the worktree's ref; with no worktree change, the staged work's ref.
+  // Offer both snapshots when staged bytes differ from the disk; otherwise the only ref suffices.
   const offered = kept.recoveryRef ?? kept.indexRecoveryRef;
   if (offered && prNumber !== undefined) {
     log("sweep.fix.owner_residue_preserved", { pr_number: prNumber, branch: fixRound.branch, head_sha: headSha, worktree_path: cwd,
       local_sha_prefix: startSha.slice(0, 12), staged_paths: kept.paths.slice(0, FIX_OWNER_RESIDUE_PATH_BOUND),
       staged_more: Math.max(0, kept.paths.length - FIX_OWNER_RESIDUE_PATH_BOUND), recovery_ref: offered.slice(0, 512),
+      index_recovery_ref: kept.recoveryRef && kept.indexRecoveryRef ? kept.indexRecoveryRef.slice(0, 512) : null,
       preserved_at: systemClock.iso(), source: "fix.round_yielded" });
   }
   return { trigger: "recycle", detail: recycle, costUsd, ...kept };
