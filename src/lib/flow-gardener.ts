@@ -480,6 +480,14 @@ function prNumberOf(row: Row): number | undefined {
   return undefined;
 }
 
+/** Fix-worker receipts use `repair_pr_url`; operator PR repairs also use `PR-<number>` as their task id. */
+function repairPrNumberOf(row: Row): number | undefined {
+  const url = typeof row.repair_pr_url === "string" ? /\/pull\/([1-9][0-9]*)$/.exec(row.repair_pr_url) : null;
+  const task = typeof row.task_id === "string" ? /^PR-([1-9][0-9]*)$/.exec(row.task_id) : null;
+  const value = Number(url?.[1] ?? task?.[1]);
+  return Number.isSafeInteger(value) && value > 0 ? value : undefined;
+}
+
 /** Every merged PR the rows describe, with what each stage needs. */
 export function flowPrs(rows: readonly Row[]): FlowPr[] {
   const byPr = new Map<number, Row[]>();
@@ -657,6 +665,79 @@ const medianNumber = (values: number[]): number | null => {
   return sorted.length % 2 ? sorted[middle]! : (sorted[middle - 1]! + sorted[middle]!) / 2;
 };
 
+/** Why a census cannot be read as the open queue now: unread, incomplete, for another window, or stale. */
+function censusUnusable(census: FlowOpenQueueRead, nowMs: number): string | undefined {
+  const { fromMs, toMs } = openQueueWindow(nowMs);
+  if (!census.ok || !census.complete) return census.reason ?? "incomplete-census";
+  if (census.windowMs !== undefined && (census.windowMs.fromMs !== fromMs || census.windowMs.toMs !== toMs)) return "census-window-mismatch";
+  if (!Number.isFinite(census.observedAtMs) || census.observedAtMs > nowMs || nowMs - census.observedAtMs > OPEN_QUEUE_MAX_AGE_MS) return "stale-census";
+  return undefined;
+}
+
+export const FLOW_OPEN_REPAIR_AGES_STEP = "flow.open_repair_ages";
+/** PRIMARY CONTROL: an open red or conflicting PR that waits this long for a fix round, since it opened or since its latest
+ *  round, has its wait filed as one remedy. The operator dispatched fixes by hand past an hour (2026-11-13). */
+export const FLOW_OPEN_REPAIR_WAIT_BOUND_MS = 60 * MIN_MS;
+const OPEN_REPAIR_KEY = "open-repair-wait";
+const OPEN_REPAIR_OWNER = "src/lib/sweep.ts";
+
+export interface FlowOpenRepairAge {
+  pr: number; kind: "red" | "conflict" | "both"; task_id: string | null; open_age_ms: number;
+  /** Null with `first_round: "no_round_yet"` (none since it opened) or `"unread"` (it opened before the ledger read). */
+  first_round_delay_ms: number | null; first_round?: "no_round_yet" | "unread";
+  since_latest_round_ms: number | null;
+  /** Since the later of its open time and its latest round; null when the rounds are unread. */
+  wait_ms: number | null; over_bound: boolean;
+  reason?: "no_round_yet" | "unread";
+}
+export type FlowOpenRepairAges = {
+  status: "OBSERVED" | "UNKNOWN"; reason: string; bound_ms: number; over_bound: number; unread: number; prs: FlowOpenRepairAge[];
+};
+
+const openRepairUnknown = (reason: string): FlowOpenRepairAges =>
+  ({ status: "UNKNOWN", reason, bound_ms: FLOW_OPEN_REPAIR_WAIT_BOUND_MS, over_bound: 0, unread: 0, prs: [] });
+
+/** W1-T12547: every open PR whose checks read FAILURE or ERROR, or whose mergeability reads CONFLICTING, with
+ *  its open age and fix-round delays, oldest first. Rounds join by the run branch's task id or by pr_number. */
+export function openRepairAges(census: FlowOpenQueueRead, rows: readonly Row[], nowMs: number, ledgerFromMs: number): FlowOpenRepairAges {
+  const unusable = censusUnusable(census, nowMs);
+  if (unusable !== undefined) return openRepairUnknown(unusable);
+  const fixRows = rows.filter((r) => (r.step === "fix.dispatch" || r.step === "fix.done") && Number.isFinite(tsOf(r)))
+    .sort((a, b) => tsOf(a) - tsOf(b));
+  const prs: FlowOpenRepairAge[] = [];
+  for (const pr of [...census.open].sort((a, b) => a.createdAtMs - b.createdAtMs || a.number - b.number)) {
+    const red = pr.checksState === "FAILURE" || pr.checksState === "ERROR", conflict = pr.mergeable === "CONFLICTING";
+    if (!red && !conflict) continue;
+    const taskId = /^run-(W[0-9]+-T[0-9]+)-[0-9]+$/.exec(pr.headRefName)?.[1] ?? null;
+    const mine = fixRows.filter((r) => tsOf(r) >= pr.createdAtMs && ((taskId !== null && r.task_id === taskId)
+      || prNumberOf(r) === pr.number || repairPrNumberOf(r) === pr.number));
+    const openAge = Math.max(0, nowMs - pr.createdAtMs);
+    const kind = red && conflict ? "both" : red ? "red" : "conflict";
+    const before = pr.createdAtMs < ledgerFromMs;
+    if (before && mine.length === 0) {
+      prs.push({ pr: pr.number, kind, task_id: taskId, open_age_ms: openAge, first_round_delay_ms: null, first_round: "unread",
+        since_latest_round_ms: null, wait_ms: null, over_bound: false, reason: "unread" });
+      continue;
+    }
+    const first = mine.find((r) => r.step === "fix.dispatch");
+    // Completed rounds define the latest end, even if a newer round has only dispatched.
+    // With no completed round, the last dispatch is the only round timestamp available.
+    const latestRow = mine.findLast((r) => r.step === "fix.done") ?? mine.findLast((r) => r.step === "fix.dispatch");
+    const latest = latestRow === undefined ? undefined : tsOf(latestRow);
+    const wait = Math.max(0, nowMs - Math.max(pr.createdAtMs, latest ?? pr.createdAtMs));
+    // Opened before the read: its first round may sit before the read too, so its delay is unread, never a guess.
+    const firstRound = before ? "unread" : first === undefined ? "no_round_yet" : undefined;
+    prs.push({ pr: pr.number, kind, task_id: taskId, open_age_ms: openAge,
+      first_round_delay_ms: firstRound === undefined ? tsOf(first!) - pr.createdAtMs : null,
+      ...(firstRound === undefined ? {} : { first_round: firstRound }),
+      since_latest_round_ms: latest === undefined ? null : Math.max(0, nowMs - latest),
+      wait_ms: wait, over_bound: wait > FLOW_OPEN_REPAIR_WAIT_BOUND_MS, ...(firstRound === "no_round_yet" ? { reason: firstRound } : {}) });
+  }
+  return { status: "OBSERVED", reason: prs.length === 0 ? "no-open-red-or-conflicting-pr" : "complete-census",
+    bound_ms: FLOW_OPEN_REPAIR_WAIT_BOUND_MS, over_bound: prs.filter((p) => p.over_bound).length,
+    unread: prs.filter((p) => p.reason === "unread").length, prs };
+}
+
 /** Right-censored open work and one complete arrival/drain window; it can only recommend in shadow. */
 export function openQueueShadow(
   census: FlowOpenQueueRead, rows: readonly Row[], previous: FlowState["openQueue"], nowMs: number,
@@ -673,9 +754,8 @@ export function openQueueShadow(
       merge_preflight_refused: null, ready_to_direct_merge: null, review_wait_p50_ms: null,
       merge_preflight_refusal_age_p50_ms: null, ready_to_direct_merge_age_p50_ms: null, open_age_p50_ms: null, arrivals_exceed_drain: null },
     nextState: { observedAtMs: census.observedAtMs, windowDay, window, reviewP50: null, pressure: false, streak: 0 } });
-  if (!census.ok || !census.complete) return unknown(census.reason ?? "incomplete-census");
-  if (census.windowMs !== undefined && (census.windowMs.fromMs !== fromMs || census.windowMs.toMs !== toMs)) return unknown("census-window-mismatch");
-  if (!Number.isFinite(census.observedAtMs) || census.observedAtMs > nowMs || nowMs - census.observedAtMs > OPEN_QUEUE_MAX_AGE_MS) return unknown("stale-census");
+  const unusable = censusUnusable(census, nowMs);
+  if (unusable !== undefined) return unknown(unusable);
   const inWindow = (ms: number | undefined) => ms !== undefined && ms >= fromMs && ms < toMs;
   const recent = census.window.filter((pr) => inWindow(pr.createdAtMs));
   const arrivals = recent.length;
@@ -780,7 +860,11 @@ export function flowPassDue(stateDir: string, clock: Clock = systemClock): boole
   }
 }
 
-function renderMarkdown(day: string, stats: readonly FlowStageStat[]): string {
+const minutesOf = (ms: number | null): string => (ms === null ? "-" : String(Math.round(ms / MIN_MS * 10) / 10));
+const firstRoundCell = (p: FlowOpenRepairAge): string => p.first_round === "unread" ? "unread"
+  : p.first_round === "no_round_yet" ? "no round yet" : minutesOf(p.first_round_delay_ms);
+
+function renderMarkdown(day: string, stats: readonly FlowStageStat[], repair: FlowOpenRepairAges): string {
   const cell = (v: number | undefined) => (v === undefined ? "-" : String(v));
   return [
     `# Flow report ${day}`,
@@ -790,6 +874,17 @@ function renderMarkdown(day: string, stats: readonly FlowStageStat[]): string {
     ...stats.map((s) => `| ${s.cls} | ${s.stage} | ${s.surface} | ${cell(s.current?.n)} | ${cell(s.current?.p50)} | ${cell(s.current?.p90)} | ` +
       `${cell(s.baseline?.p50)} | ${cell(s.baseline?.p90)} | ${s.baseline?.source ?? "none"} | ${s.regressed ? "REGRESSED" : "ok"} |`),
     "",
+    "## Open red or conflicting pull requests",
+    "",
+    `Status ${repair.status} (${repair.reason}). Bound ${minutesOf(repair.bound_ms)} min. Oldest first; times in minutes.`,
+    "",
+    ...(repair.prs.length === 0 ? [] : [
+      "| PR | kind | open age | first fix round after | since latest round | wait | past bound |",
+      "| --- | --- | --- | --- | --- | --- | --- |",
+      ...repair.prs.map((p) => `| #${p.pr} | ${p.kind} | ${minutesOf(p.open_age_ms)} | ${firstRoundCell(p)} | ` +
+        `${p.reason === "unread" ? "unread" : minutesOf(p.since_latest_round_ms)} | ${p.reason === "unread" ? "unread" : minutesOf(p.wait_ms)} | ${p.over_bound ? "yes" : "no"} |`),
+      "",
+    ]),
   ].join("\n");
 }
 
@@ -828,6 +923,7 @@ export async function runFlowGardener(
       cohort: { open: null, arrivals: null, merged_or_closed: null, review_waiting: null, merge_preflight_refused: null,
         ready_to_direct_merge: null, review_wait_p50_ms: null, merge_preflight_refusal_age_p50_ms: null,
         ready_to_direct_merge_age_p50_ms: null, open_age_p50_ms: null, arrivals_exceed_drain: null } });
+    deps.log(FLOW_OPEN_REPAIR_AGES_STEP, openRepairUnknown("ledger-incomplete"));
     return { ran: false, stats: [], filed: [] };
   }
   const prs = flowPrs(ledger.rows).filter((pr) => pr.mergedMs > nowMs - (FLOW_BASELINE_DAYS + 1) * DAY_MS && pr.mergedMs <= nowMs);
@@ -852,6 +948,7 @@ export async function runFlowGardener(
       errors.push({ pr: pr.number, error: String((e as Error)?.message ?? e) });
     }
   }
+  let repair = openRepairUnknown("census-reader-unavailable");
   if (sources.readOpenQueue === undefined) {
     deps.log("flow.open_queue_shadow", { mode: "shadow", permission: "not-granted", action: "none", status: "UNKNOWN", reason: "census-reader-unavailable" });
     state.openQueue = { observedAtMs: nowMs, windowDay: day, reviewP50: null, pressure: false, streak: 0 };
@@ -861,12 +958,15 @@ export async function runFlowGardener(
       const shadow = openQueueShadow(census, ledger.rows, state.openQueue, clock.now(), Date.parse(sinceIso));
       deps.log("flow.open_queue_shadow", shadow);
       state.openQueue = shadow.nextState;
+      repair = openRepairAges(census, ledger.rows, clock.now(), Date.parse(sinceIso));
     } catch (e) {
       deps.log("flow.open_queue_shadow", { mode: "shadow", permission: "not-granted", action: "none", status: "UNKNOWN",
         reason: "census-read-failed", error: String((e as Error)?.message ?? e) });
       state.openQueue = { observedAtMs: nowMs, windowDay: day, reviewP50: null, pressure: false, streak: 0 };
+      repair = openRepairUnknown("census-read-failed");
     }
   }
+  deps.log(FLOW_OPEN_REPAIR_AGES_STEP, repair);
   if (errors.length > 0) unreadable("github", { count: errors.length, first_error: errors[0]!.error, prs: errors.slice(0, 10).map((e) => e.pr) });
   for (const [n, entry] of Object.entries(cache)) if (entry.mergedMs <= nowMs - FLOW_READ_DAYS * DAY_MS) delete cache[n];
 
@@ -874,7 +974,7 @@ export async function runFlowGardener(
   const regressed = stats.filter((s) => s.regressed).sort((a, b) =>
     (b.current!.p50 / Math.max(b.baseline!.p50, 1)) - (a.current!.p50 / Math.max(a.baseline!.p50, 1)) || a.key.localeCompare(b.key));
   const inWindow = (from: number, to: number) => prs.filter((pr) => pr.mergedMs > from && pr.mergedMs <= to).length;
-  writeAtomic(join(deps.stateDir, FLOW_REPORT_FILE), renderMarkdown(day, stats));
+  writeAtomic(join(deps.stateDir, FLOW_REPORT_FILE), renderMarkdown(day, stats, repair));
   deps.log(FLOW_REPORT_STEP, {
     day,
     prs_current: inWindow(nowMs - DAY_MS, nowMs),
@@ -886,18 +986,85 @@ export async function runFlowGardener(
     ci_skipped: skipped,
   });
 
-  const filed = await fileRegressions(deps, sources, state, regressed, { nowMs, day });
+  const population = regressed.map((s) => s.current!.p50 - s.baseline!.p50);
+  const remedy = openRepairFiling(repair);
+  const filed = await fileRegressions(deps, sources, state,
+    [...regressed.map((s) => stageFiling(s, population)), ...(remedy === undefined ? [] : [remedy])], { nowMs, day });
   const next: FlowState = { ...state, ci: cache, ...(filed.decided ? { lastReportDay: day } : {}) };
   mkdirSync(deps.stateDir, { recursive: true });
   writeAtomic(join(deps.stateDir, FLOW_STATE_FILE), JSON.stringify(next) + "\n");
   return { ran: true, stats, filed: filed.keys };
 }
 
-/** File each regressed stage once while open, at most {@link FLOW_FILINGS_PER_DAY_MAX} a day; updates `state`. */
+
+/** One follow-up the pass may file: a regressed stage, or the open repair wait (W1-T12547). */
+interface FlowFiling {
+  key: string;
+  /** The PRs the filing names, in the order it names them. */
+  prs: number[];
+  stem: string;
+  render: (taskId: string) => { text: string; refused?: string };
+  title: string;
+  body: (relativePath: string) => string;
+}
+
+function stageFiling(stat: FlowStageStat, population: readonly number[]): FlowFiling {
+  return {
+    key: stat.key, prs: stat.slowest.map((s) => s.pr), stem: flowFollowUpStem(stat),
+    render: (taskId) => renderFlowFollowUp(stat, taskId, population),
+    title: `chore(plan): file the ${stat.cls} ${stat.stage} flow regression`,
+    body: (relativePath) => `The W1-T5904 flow gardener measured ${stat.key}: p50 ${stat.current!.p50} against a ${stat.baseline!.p50} baseline ` +
+      `(${stat.baseline!.source}). Slowest: ${stat.slowest.map((s) => `#${s.pr}`).join(", ")}.\n\n` +
+      `## Acceptance\n\n- claim: the flow regression is recorded as a parked task\n  proof: grep: ${origin(stat.key)} in ${relativePath}`,
+  };
+}
+
+/** The remedy for open red or conflicting PRs that waited past the bound, or none. An unread wait never qualifies. */
+function openRepairFiling(repair: FlowOpenRepairAges): FlowFiling | undefined {
+  const waiting = repair.status === "OBSERVED" ? repair.prs.filter((p) => p.over_bound && p.wait_ms !== null) : [];
+  if (waiting.length === 0) return undefined;
+  const stem = "open-red-and-conflicting-prs-get-a-fix-round-within-the-bound";
+  const bound = minutesOf(FLOW_OPEN_REPAIR_WAIT_BOUND_MS);
+  const waits = waiting.map((p) => Math.round(p.wait_ms! / MIN_MS));
+  const line = (p: FlowOpenRepairAge) => `#${p.pr} (${p.kind}): open ${minutesOf(p.open_age_ms)} min, first fix round ` +
+    `${p.first_round === undefined ? `after ${minutesOf(p.first_round_delay_ms)} min` : p.first_round === "unread" ? "unread" : "not yet"}, ` +
+    `waiting ${minutesOf(p.wait_ms)} min, since latest round ` +
+    `${p.since_latest_round_ms === null ? "no round yet" : `${minutesOf(p.since_latest_round_ms)} min`}`;
+  return {
+    key: OPEN_REPAIR_KEY, prs: waiting.map((p) => p.pr), stem,
+    render: (taskId) => {
+      const testPath = newTestPath(stem, [OPEN_REPAIR_OWNER], "flow-gardener");
+      return renderMachineShard({
+        taskId,
+        title: `OPEN RED OR CONFLICTING PRS WAITED PAST ${bound} MIN FOR A FIX ROUND — ${waiting.length} PRS, LONGEST ${Math.max(...waits)} MIN`,
+        origin: origin(OPEN_REPAIR_KEY),
+        files: [OPEN_REPAIR_OWNER, testPath],
+        cost: Math.max(...waits),
+        costPopulation: waits,
+        acceptance: [{
+          claim: `an open red or conflicting PR gets a fix round within ${bound} min of opening or of its latest round`,
+          proof: `grep: test("open red and conflicting prs get a fix round within the bound" in ${testPath}`,
+        }],
+        note: "Filed by the flow gardener (W1-T12547). MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. The gardener does not file this wait again while this task is open.",
+        rationale: [
+          `${waiting.length} open red or conflicting PRs waited more than ${bound} min since they opened or since their latest fix round, oldest first:`,
+          ...waiting.map(line),
+          "Find why the stall backstop or the fix lane did not start a round before changing a bound.",
+        ],
+      });
+    },
+    title: "chore(plan): file the open repair wait",
+    body: (relativePath) => `The W1-T12547 flow gardener found ${waiting.length} open red or conflicting PRs waiting more than ` +
+      `${bound} min for a fix round: ${waiting.map((p) => `#${p.pr}`).join(", ")}.\n\n` +
+      `## Acceptance\n\n- claim: the open repair wait is recorded as a parked task\n  proof: grep: ${origin(OPEN_REPAIR_KEY)} in ${relativePath}`,
+  };
+}
+
+/** File each follow-up once while open, at most {@link FLOW_FILINGS_PER_DAY_MAX} a day; updates `state`. */
 async function fileRegressions(
-  deps: GardenerDeps, sources: FlowGardenSources, state: FlowState, regressed: readonly FlowStageStat[], at: { nowMs: number; day: string },
+  deps: GardenerDeps, sources: FlowGardenSources, state: FlowState, filings: readonly FlowFiling[], at: { nowMs: number; day: string },
 ): Promise<{ decided: boolean; keys: string[] }> {
-  if (regressed.length === 0) return { decided: true, keys: [] };
+  if (filings.length === 0) return { decided: true, keys: [] };
   let tasks: FlowPlanTask[];
   try {
     tasks = (sources.planTasks ?? (() => loadPlan(resolveRepoLayout(deps.repoRoot).planMonolith).tasks))();
@@ -909,7 +1076,7 @@ async function fileRegressions(
   const landed = new Set<string>();
   try {
     const isLanded = sources.isLanded ?? ((id: string) => taskLandedOnMain(id, (args) => hostWorktreeGitAsync(deps.repoRoot, args)));
-    const keys = new Set(regressed.map((s) => origin(s.key)));
+    const keys = new Set(filings.map((f) => origin(f.key)));
     for (const t of tasks) if (t.superseded_by !== undefined && keys.has(t.origin ?? "") && await isLanded(t.superseded_by)) landed.add(t.superseded_by);
   } catch (e) {
     deps.log(FLOW_INPUT_UNREADABLE_STEP, { input: "landed", error: String((e as Error)?.message ?? e) });
@@ -917,61 +1084,52 @@ async function fileRegressions(
   }
   const closed = (t: FlowPlanTask) => t.status === "merged" || t.status === "done" || (t.retirement !== undefined && !retirementHoldsOrigin(t, (id) => landed.has(id)));
   const filed = { ...(state.filed ?? {}) };
-  const filings = [...(state.filings ?? [])].slice(-30);
+  const daily = [...(state.filings ?? [])].slice(-30);
   const keys: string[] = [];
   let decided = true;
-  const population = regressed.map((s) => s.current!.p50 - s.baseline!.p50);
-  for (const stat of regressed) {
-    const planned = tasks.find((t) => t.origin === origin(stat.key) && !closed(t));
-    const mine = filed[stat.key];
+  for (const filing of filings) {
+    const planned = tasks.find((t) => t.origin === origin(filing.key) && !closed(t));
+    const mine = filed[filing.key];
     const mineInPlan = mine ? tasks.find((t) => t.id === mine.taskId) : undefined;
     const openId = planned?.superseded_by ?? planned?.id ?? (mine && (mineInPlan ? !closed(mineInPlan) : at.nowMs - mine.atMs < FLOW_UNPLANNED_FILING_OPEN_MS) ? mine.taskId : undefined);
     if (openId !== undefined) {
-      deps.log(FLOW_REGRESSION_OPEN_STEP, { key: stat.key, task_id: openId });
+      deps.log(FLOW_REGRESSION_OPEN_STEP, { key: filing.key, task_id: openId });
       continue;
     }
-    if (filings.filter((f) => f.day === at.day).length >= FLOW_FILINGS_PER_DAY_MAX) {
-      deps.log(FLOW_FILING_DEFERRED_STEP, { key: stat.key, bound: FLOW_FILINGS_PER_DAY_MAX });
+    if (daily.filter((f) => f.day === at.day).length >= FLOW_FILINGS_PER_DAY_MAX) {
+      deps.log(FLOW_FILING_DEFERRED_STEP, { key: filing.key, bound: FLOW_FILINGS_PER_DAY_MAX });
       continue;
     }
     try {
-      const landed = await landFollowUp(deps, sources.mintTaskId, stat, population);
-      filed[stat.key] = { taskId: landed.taskId, atMs: at.nowMs };
-      filings.push({ day: at.day, key: stat.key });
-      keys.push(stat.key);
-      deps.log(FLOW_REGRESSION_FILED_STEP, { key: stat.key, task_id: landed.taskId, filing_pr: landed.prUrl, slowest: stat.slowest.map((s) => s.pr) });
+      const landed = await landFollowUp(deps, sources.mintTaskId, filing);
+      filed[filing.key] = { taskId: landed.taskId, atMs: at.nowMs };
+      daily.push({ day: at.day, key: filing.key });
+      keys.push(filing.key);
+      deps.log(FLOW_REGRESSION_FILED_STEP, { key: filing.key, task_id: landed.taskId, filing_pr: landed.prUrl, slowest: filing.prs });
     } catch (e) {
       recordGardenMintTimeout(e, "flow", deps.log);
       if (e instanceof GardenMintTimedOutError) decided = false;
-      deps.log(FLOW_FILING_FAILED_STEP, { key: stat.key, error: String((e as Error)?.message ?? e) });
+      deps.log(FLOW_FILING_FAILED_STEP, { key: filing.key, error: String((e as Error)?.message ?? e) });
     }
   }
   state.filed = filed;
-  state.filings = filings;
+  state.filings = daily;
   return { decided, keys };
 }
 
-async function landFollowUp(
-  deps: GardenerDeps, mintTaskId: GardenTaskIdMinter, stat: FlowStageStat, population: readonly number[],
-): Promise<{ taskId: string; prUrl: string }> {
+async function landFollowUp(deps: GardenerDeps, mintTaskId: GardenTaskIdMinter, filing: FlowFiling): Promise<{ taskId: string; prUrl: string }> {
   const workspace = await deps.openWorkspace();
   try {
     if (!workspace.branch) throw new Error("flow: filing workspace has no branch for task-id reservation");
     const taskId = (await prepareGardenTaskIds(workspace, 1, mintTaskId, true))[0]!;
-    const rendered = renderFlowFollowUp(stat, taskId, population);
+    const rendered = filing.render(taskId);
     if (rendered.refused) throw new Error(`flow: follow-up record refused by lint (${rendered.refused})`);
-    const relativePath = join("plan", "tasks.d", `${taskId}-${flowFollowUpStem(stat)}.yaml`);
+    const relativePath = join("plan", "tasks.d", `${taskId}-${filing.stem}.yaml`);
     mkdirSync(join(workspace.root, "plan", "tasks.d"), { recursive: true });
     writeAtomic(join(workspace.root, relativePath), rendered.text);
     const refused = machineShardLandingGuard(deps)(workspace.root, [relativePath]);
     if (refused !== undefined) throw new Error(`flow: follow-up record failed lint-plan's machine-filing admission: ${refused}`);
-    const prUrl = landedPrUrl(await workspace.land({
-      paths: [relativePath],
-      title: `chore(plan): file the ${stat.cls} ${stat.stage} flow regression`,
-      body: `The W1-T5904 flow gardener measured ${stat.key}: p50 ${stat.current!.p50} against a ${stat.baseline!.p50} baseline ` +
-        `(${stat.baseline!.source}). Slowest: ${stat.slowest.map((s) => `#${s.pr}`).join(", ")}.\n\n` +
-        `## Acceptance\n\n- claim: the flow regression is recorded as a parked task\n  proof: grep: ${origin(stat.key)} in ${relativePath}`,
-    }), "flow");
+    const prUrl = landedPrUrl(await workspace.land({ paths: [relativePath], title: filing.title, body: filing.body(relativePath) }), "flow");
     if (!prUrl) throw new Error("flow: follow-up PR was not opened");
     return { taskId, prUrl };
   } finally {
