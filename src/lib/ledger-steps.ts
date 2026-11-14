@@ -303,6 +303,18 @@ const SEED_ROWS: readonly SeedRow[] = [
     writer: ["askDecisionModel"],
     outcomes: ["answered", "refused", "unavailable", "failed"],
   },
+  {
+    step: "flow.open_repair_ages",
+    meaning:
+      "The daily flow pass read the open pull requests whose checks are red or whose branch conflicts. " +
+      "For each one, oldest first, it gives the kind (red, conflict or both), its open age, the delay " +
+      "from opening to its first fix round, the time since its latest fix round and how long it has " +
+      "waited. A figure the ledger read cannot see reads unread, never zero. An unread, incomplete or " +
+      "stale census or an incomplete ledger read writes UNKNOWN with its reason. A wait past 60 " +
+      "minutes files one remedy task with origin flow-regression:open-repair-wait.",
+    writer: ["runFlowGardener"],
+    outcomes: ["OBSERVED", "UNKNOWN"],
+  },
 ];
 
 /** THE REGISTRY — every step this task has decoded so far, `family` derived from `step` (never

@@ -24,7 +24,9 @@ import { isQueueDispatchRunStart } from "./ledger.js";
 // Keep DEFAULT fs and call-time lookups: non-configurable ESM named bindings defeat spies.
 // Why: the TOCTOU-race test — docs/forensics/status-board.md
 import fs from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { readBoardCatalogs, publicOpsTaskFields, type BoardCatalogContext } from "./serve-plan-reload.js";
+import type { OpsCatalogApi } from "./ops-catalog-source.js";
 import { hostname } from "node:os";
 import {
   detectDaemonCrashLoop,
@@ -561,6 +563,8 @@ export interface NeedsMeSection {
 }
 
 export interface StatusBoardModel {
+  opsCatalog?: { outcome: "unreadable"; reason: string; observedAt: string }
+    | { outcome: "ok"; observedAt: string; rows: Array<ReturnType<typeof publicOpsTaskFields> & { status: Task["status"]; indeterminate?: true }> };
   generatedAt: string;
   repositoryMaintenance?: RepositoryMaintenanceStatus[];
   liveness: LivenessSection;
@@ -617,6 +621,8 @@ export function repositoryMaintenanceStatus(lines: readonly Record<string, unkno
 // ── Deps ─────────────────────────────────────────────────────────────────────────────────────
 
 export interface StatusBoardDeps {
+  opsCatalogApi?: OpsCatalogApi;
+  opsBoardCatalog?: BoardCatalogContext;
   /** Per-service running/pid, plus the last run's exit code for `"deploy-supervisor"`. `launchctl` lives at the CLI
    *  layer (Rule 16), so this is required with no default in lib/. `lastExitCode` is `undefined` when unknown, never a
    *  fabricated `0`; `sensed` (W1-T2450) is `false` iff `launchctl` could not be invoked at all. */
@@ -2360,6 +2366,8 @@ const HEADROOM_NEXT_ACTIONS: readonly NextActionRule<HeadroomSection>[] = [
  * `buildStatusBoard` itself keeps its synchronous contract for the CLI.
  */
 export async function buildStatusBoardAsync(root: string, ledgerPath: string, deps: StatusBoardDeps): Promise<StatusBoardModel> {
+  const catalog = await readBoardCatalogs(() => deps.plan ?? tryLoadDefaultPlan(deps.repoDir), dirname(ledgerPath), deps.opsCatalogApi);
+  if (catalog !== undefined) deps = { ...deps, ...(catalog.publicPlan === undefined ? {} : { plan: catalog.publicPlan }), opsBoardCatalog: catalog };
   if (deps.grepAnchorTrue) return buildStatusBoard(root, ledgerPath, deps);
   const readRegistry = deps.readProposalRegistry ?? (() => parseProposalRegistry(readTextFileIfExists(join(root, "state", "inbox-proposals.json"))));
   const ref = "origin/main";
@@ -2466,8 +2474,19 @@ export function buildStatusBoard(root: string, ledgerPath: string, deps: StatusB
   const plan = deps.plan ?? tryLoadDefaultPlan(deps.repoDir);
   // W1-T6253: one index for the projection and both sections, and none at all while the rows' generation is unchanged.
   const ledgerIndex = buildLedgerIndex(lines);
-  const { projections, unknownReason: ghUnknownReason } = projectPlanOnce(plan, deps.github, ledgerPath, lines, now, ledgerIndex);
-  const isMerged: MergedSet = (id) => projections?.get(id)?.merged === true;
+  const catalog = deps.opsBoardCatalog;
+  const { projections: catalogProjections, unknownReason: ghUnknownReason } = projectPlanOnce(catalog?.plan ?? plan, deps.github, ledgerPath, lines, now, ledgerIndex);
+  // Legacy sections consume the public plan only. Private projections reach only the explicit field whitelist.
+  const projections = catalogProjections === undefined || catalog === undefined ? catalogProjections
+    : new Map([...catalogProjections].filter(([id]) => plan?.byId.has(id)));
+  const isMerged: MergedSet = (id) => catalogProjections?.get(id)?.merged === true;
+  const opsCatalog: StatusBoardModel["opsCatalog"] = catalog === undefined ? undefined
+    : catalog.outcome === "unreadable" ? { outcome: "unreadable", reason: catalog.reason, observedAt: catalog.observedAt }
+    : { outcome: "ok", observedAt: catalog.observedAt, rows: (catalog.plan?.tasks ?? []).filter(t => catalog.opsIds.has(t.id)).map(t => {
+      const projection = catalogProjections?.get(t.id);
+      return { ...publicOpsTaskFields(t), status: projection?.status ?? t.status,
+        ...(projection === undefined || projection.indeterminate ? { indeterminate: true as const } : {}) };
+    }) };
 
   // ── LATCHES ──
   const dispatchClaims = readDispatchClaims(deps.repoDir);
@@ -2552,6 +2571,7 @@ export function buildStatusBoard(root: string, ledgerPath: string, deps: StatusB
 
   return {
     generatedAt: new Date(nowMs).toISOString(),
+    ...(opsCatalog === undefined ? {} : { opsCatalog }),
     repositoryMaintenance: repositoryMaintenanceStatus(lines),
     liveness,
     latches: latchesSection,
@@ -3079,6 +3099,10 @@ export function renderStatusBoardText(model: StatusBoardModel, opts: { colourEna
   // Each block renders into its own array so the presence projection can read what the reader actually sees. The join
   // below reproduces the previous concatenation line for line.
   const blocks: { label: string; section: unknown; rendered: string[] }[] = [
+    ...(model.opsCatalog === undefined ? [] : [{ label: "ops catalog", section: model.opsCatalog,
+      rendered: model.opsCatalog.outcome === "unreadable" ? [`ops catalog: unreadable (${model.opsCatalog.reason})`]
+        : [`ops catalog: ${model.opsCatalog.rows.length} task(s), observed ${model.opsCatalog.observedAt}`,
+          ...model.opsCatalog.rows.map(row => `${row.taskId} [ops] ${row.status}${row.indeterminate ? " (unverified)" : ""}: ${row.title} — ${JSON.stringify(row.acceptance)}`)] }]),
     ...(model.repositoryMaintenance?.length ? [{ label: "repository maintenance", section: model.repositoryMaintenance,
       rendered: ["### repository maintenance", ...model.repositoryMaintenance.map((row) =>
         `${row.repo}: ${row.outcome} — ${row.reason}; gc log ${row.gcLogVerdict}; ` +

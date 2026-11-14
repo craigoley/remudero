@@ -1,6 +1,5 @@
-/** `rmd retro` — the deterministic gather (no LLM) that feeds the Architect retro. It reduces the
- *  ledger and LEARNINGS into a structured gather a higher-tier Architect worker then synthesises
- *  into a plan-only PR: generation deterministic here, publication with the gate and the human. */
+/** `rmd retro`: deterministic ledger/LEARNINGS gather for an Architect plan-only PR.
+ * Generation stays here; publication remains gated and human-owned. */
 
 import { fixDispatchCountsAttributed } from "./workflow-mining.js";
 import { acquireDrainLock, DrainLockError, type DrainLockInfo } from "./drain-lock.js";
@@ -37,9 +36,9 @@ import { notionalSpendUsd } from "./spend-rows.js";
 import { openLedgerUnion, readLedgerUnionRawLinesSync, realLedgerFs, type LedgerGrepFsDeps } from "./ledger-union.js";
 import { closureByClass, guardFireCounts, renderClosureByClass, renderGuardFireCounts, type ClassClosure, type GuardFireCount } from "./retro-closure.js";
 
-/** Hold the shared retro lane through asynchronous synthesis AND publication. A contender defers
- *  to the next cadence tick; after acquisition the caller must re-query pending sync PRs before
- *  gathering. Reuse the atomic lock's dead-owner recovery rather than adding an expiring lease. */
+/** Hold the retro lane through async synthesis and publication; contenders defer a cadence tick.
+ * After acquisition, re-query pending sync PRs before gathering.
+ * Reuse dead-owner lock recovery, never an expiring lease. */
 export function serializeRetroDispatch<T>(
   lockPath: string,
   run: () => Promise<T>,
@@ -91,31 +90,24 @@ export function parseLedger(ndjson: string): LedgerRecord[] {
 // window excluded only 153 rows: the oldest rotation was 2026-08-13. Volume caused the OOM.
 
 /** PRIMARY CONTROL: retained ndjson bytes, independent of the marker window.
- * The 1792MB subprocess holds an insertion-ordered identity map, a joined string and parsed
- * objects (~3x text). The map covers only retained rows; removing this cap defeats the window. */
+ * The 1792MB subprocess holds a retained-row identity map, joined text and parsed objects (~3x text). */
 export const RETRO_LEDGER_MAX_BYTES = 96 * 1024 * 1024;
 
-/** PRIMARY CONTROL: row/identity-map bound: byte limits alone cannot bound bookkeeping for tiny rows.
- * The 2026-09-09 read retained 318,931 rows; 350k accommodates that population without rebuilding
- * the 900,813-entry / 641MB Set. Evict oldest rows and report losses, as with the byte ceiling. */
+/** PRIMARY CONTROL: bound identities too; tiny rows defeat a byte-only budget.
+ * 350k covers the 318,931-row read without the 900,813-entry/641MB Set (W1-T3229).
+ * Evict oldest rows and report losses, as with the byte ceiling. */
 export const RETRO_LEDGER_MAX_ROWS = 350_000;
 
-/** How far back {@link retroLedgerWindowSince} reaches when there is NO marker — a first-ever
- *  retro, or one whose marker was deleted. Not a correctness bound (the byte budget is); this
- *  exists so an absent marker cannot mean "decompress everything" by a second door. */
+/** No-marker lookback for {@link retroLedgerWindowSince}; prevents full decompression on first use
+ * or marker deletion. The byte budget, rather than this I/O window, bounds retained memory. */
 export const RETRO_LEDGER_NO_MARKER_LOOKBACK_MS = 7 * 24 * 60 * 60 * 1_000;
 
-/** Subtracted from the marker so a run that STARTED before it but whose lines continue after it is
- *  read whole. `buildGather` discards runs with `startTs <= sinceTs` anyway, so this margin costs a
- *  little I/O and removes a class of half-read run. */
+/** Marker lead preserves runs starting before it with later rows; `buildGather` still discards
+ * `startTs <= sinceTs`. The extra I/O prevents half-read runs. */
 export const RETRO_LEDGER_WINDOW_LEAD_MS = 48 * 60 * 60 * 1_000;
 
-/** What {@link readRetroLedgerNdjson} read, and what it could not keep.
- *
- *  `droppedRows` is the honesty half and is never omitted: a retro that saw less than its whole
- *  window MUST say so on its own report. A shortened story rendered as a complete one is the
- *  failure this repo has recorded four times over, and it is strictly worse than the loud OOM
- *  this bound replaces. */
+/** What {@link readRetroLedgerNdjson} retained and dropped.
+ * Always report `droppedRows`: truncation must never masquerade as a complete window. */
 export interface RetroLedgerRead {
   /** The retained rows as ndjson, oldest-first — the corpus every miner reads. */
   ndjson: string;
@@ -213,10 +205,9 @@ export async function readRetroLedgerNdjson(
   };
 }
 
-/** Report truncation in both ledger and stderr; return whether anything was reported.
- * Keep the no-op arm here so callers execute unconditionally and tests reach both arms.
- * This follows resolveEventPath's extraction/injection remedy after diff-coverage rejected the
- * call-site conditional, without a coverage exemption. Never present a partial window as whole. */
+/** Report truncation in ledger and stderr; never present a partial window as whole.
+ * Keep the no-op arm so callers run unconditionally and tests reach both arms
+ * (resolveEventPath's extraction/injection remedy after diff-coverage rejection). */
 export function reportRetroLedgerTruncation(
   read: RetroLedgerRead,
   ctx: {
@@ -249,9 +240,8 @@ export function reportRetroLedgerTruncation(
   return true;
 }
 
-/** Scope label for sections reduced from {@link RetroLedgerRead.ndjson}.
- * ratifyTelemetry's approval rate is now a window figure, not a lifetime figure: a changed
- * denominator needs a changed label, even when the window provides the better trend signal. */
+/** Label {@link RetroLedgerRead.ndjson}'s scope: ratifyTelemetry's approval denominator covers
+ * this window, not lifetime history, and must be reported accordingly. */
 export function retroLedgerScopeNote(read: RetroLedgerRead): string {
   const window = read.sinceTs === undefined ? "the whole ledger corpus" : `the ledger since ${read.sinceTs}`;
   const truncation =
@@ -960,11 +950,9 @@ function ledgerOnlyShipped(runs: RunSummary[], sinceTs?: string): ShippedRecord[
 /** The anchored trailer form status.ts and autonomy.ts use — reused so no credit path disagrees. */
 const RETRO_TRAILER_RE = /^Remudero-Task:\s*(\S+)\s*$/m;
 
-/** Every commit merged strictly after `sinceTs` (the boundary {@link shippedSince} uses) whose
- *  task has NO run. An untrailered commit is always included; a trailered one only when
- *  `taskIdsWithRuns` lacks its id, because a trailered commit whose task HAS a run is
- *  `shippedSince`'s to credit and counting it here would double it. This never inspects a head
- *  branch and never re-derives the P9 assert. */
+/** Commits strictly after `sinceTs` with no run: include all untrailered commits and trailered
+ * ones absent from `taskIdsWithRuns`. Others belong to {@link shippedSince}; avoid double credit.
+ * Never inspect head branches or re-derive the P9 assert. */
 export function runlessMergesSince(
   commits: GitLogCommit[],
   sinceTs: string | undefined,
@@ -1079,11 +1067,9 @@ function servedModelOf(r: LedgerRecord): string | undefined {
   return typeof r.served_model === "string" && r.served_model.length > 0 ? r.served_model : undefined;
 }
 
-/** Where {@link runModelAttribution} sourced a run's model, most-authoritative first: a served
- *  model beats a resolved one, and a `verdict` row (the terminal, run-owning record) beats
- *  `implement.done` (rotation-bounded) beats `run.start`'s nested `mount.model` (the mount that
- *  was RESOLVED before dispatch, never necessarily the one that SERVED — provider routing and
- *  model-health fallbacks can substitute a different model; W1-T2704, W1-T2572). */
+/** Model-source precedence: served beats resolved; terminal `verdict` beats rotation-bounded
+ * `implement.done`, then `run.start.mount.model`. Routing/health fallbacks may replace the
+ * resolved model (W1-T2704, W1-T2572). */
 export const MODEL_ATTRIBUTION_SOURCES = [
   "verdict.served_model",
   "verdict.model",
@@ -1412,11 +1398,9 @@ function sortedCountRecord(m: Record<string, number>): Record<string, number> {
   return Object.fromEntries(Object.entries(m).sort(([a], [b]) => (a < b ? -1 : 1)));
 }
 
-/** Verdicts the MAST taxonomy treats as a CREDITED outcome: out of scope for a FAILURE
- *  distribution, never an infrastructure event, never a task defect. `merged`;
- *  `already_satisfied` (W1-T272); and `task_already_merged` (W1-T319), a pre-spawn refusal where
- *  no worker ran. DATA-shaped and shared by every reducer below, so none is miscounted as an
- *  unmapped failure. Why: docs/forensics/retro.md. */
+/** Credited outcomes, excluded from MAST failures, infrastructure events and task defects:
+ * `merged`, `already_satisfied` (W1-T272), `task_already_merged` (pre-spawn; W1-T319).
+ * Shared reducer data prevents unmapped failures; docs/forensics/retro.md. */
 const CREDITED_VERDICTS: ReadonlySet<string> = new Set(["merged", "already_satisfied", "task_already_merged"]);
 
 /** Reduce a cycle's runs into a {@link MastCategoryDistribution}. The mapping is DATA, so a row
@@ -2202,11 +2186,9 @@ export interface PlanHealthReport {
   correctiveTasks: CorrectiveTaskProposal[];
 }
 
-/** Re-grade open tasks against deterministic standing-rule lint (Standing rule 20).
- * Pure proposals for the Architect: no I/O or plan write. isMerged decides shipped state,
- * never yaml status; yamlMergedFallback only supports pure tests. Unresolved reads stay in scope
- * at the cost of an extra advisory proposal. Any retirement value excludes a task from re-lint,
- * preserving the operator's closed ruling (W1-T3076 ratification (a), W1-T3399). */
+/** Re-lint open tasks for Architect proposals; no I/O or plan writes (Standing rule 20).
+ * isMerged decides shipped state; yamlMergedFallback is for pure tests. Unresolved reads stay
+ * advisory; any retirement excludes re-lint to preserve closed rulings (W1-T3076(a), W1-T3399). */
 export function planHealthSweep(
   tasks: Task[],
   optsFor: (task: Task) => LintOpts = () => ({}),
@@ -2252,13 +2234,9 @@ export function renderPlanHealth(report: PlanHealthReport): string {
 // patch. Why: W1-T6, W1-T9 and W1-T12 were three separate rescues for one class before the
 // pattern was named — the reactive-diagnosis anti-pattern this kills.
 
-/** Terminal verdicts representing an OVERRUN or blocked outcome worth mining for a class pattern:
- *  every non-merge terminal state EXCEPT the guard-fired classes, which catch a HOST condition —
- *  mining them would propose "decompose this task class" over a populated `~/.bashrc`. DATA, not
- *  hardcoded logic. `already_satisfied` and `task_already_merged` are deliberately ABSENT;
- *  {@link CREDITED_VERDICTS} covers both. `awaiting_merge` is absent for the opposite reason:
- *  it is not credited, but it is also not an overrun or blocked outcome to mine. Why:
- *  docs/forensics/retro.md. */
+/** Mine non-merge overrun/blocked verdicts, excluding host guard failures: a populated ~/.bashrc
+ * must not suggest task decomposition. {@link CREDITED_VERDICTS} excludes already-satisfied and
+ * already-merged runs; `awaiting_merge` is neither credited nor mineable. docs/forensics/retro.md. */
 export const OVERRUN_VERDICTS: ReadonlySet<string> = new Set([
   "blocked",
   "blocked_ci",
@@ -3100,12 +3078,8 @@ export function renderFollowupCandidates(harvest: FollowupHarvest): string {
 // This lane deliberately chooses less authority than §12 rule 27 permits.
 // Why, measured: docs/forensics/retro.md.
 
-/** `FollowupEntry.type` semantics — defined HERE because nothing previously defined what the three
- *  worker-report prefixes MEAN. Any code branching on `.type` cites this rather than guessing.
- *  "research" (an open question) and "task" (work out of the worker's own one-concern scope) are
- *  ROUTABLE, because a proposal IS a candidate plan task. "action", an ask of a HUMAN, is NOT:
- *  minting it would hand `classifyProposal` something to tier as though it were buildable. A
- *  declined entry stays harvested, never promoted. */
+/** Follow-up type authority for callers: research (open question) and task (out-of-scope work)
+ * can become plan proposals; action asks a human and cannot. Declines stay harvested. */
 export const FOLLOWUP_TYPE_ROUTES: Readonly<Record<FollowupCandidate["type"], "propose" | "not-plan-shaped">> = {
   research: "propose",
   task: "propose",
@@ -3123,12 +3097,9 @@ export type FollowupRouteOutcome =
       reason: string;
     };
 
-/** True when `text`'s own ask IS "implement `taskId`" — a follow-up whose text restates its own
- *  declaring task back at the plan, so routing it would duplicate an existing plan record.
- *  DELIBERATELY NARROW: only a LEADING, word-bounded "implement <taskId>" matches, because the
- *  dangerous direction is dropping a genuine discovery, not admitting a duplicate the registry
- *  tolerates. Shared verbatim by {@link isSelfReferentialFollowup} and
- *  {@link pruneSelfReferentialFollowups}. Why, measured: docs/forensics/retro.md. */
+/** Match only leading, word-bounded "implement <taskId>" self-asks to avoid duplicating tasks.
+ * Stay narrow: losing discoveries is worse than registry duplicates. Shared by
+ * {@link isSelfReferentialFollowup} and {@link pruneSelfReferentialFollowups}; docs/forensics/retro.md. */
 function textAsksToImplementItsOwnTask(text: string, taskId: string): boolean {
   const trimmed = taskId.trim();
   if (!trimmed || trimmed === "?") return false;
@@ -3243,22 +3214,11 @@ export function followupProposalId(candidate: FollowupCandidate): string {
   return `followup:${candidate.entryId}`;
 }
 
-/** Route one `mineFollowups` harvest into the ACTIVE-proposal registry through the single writer
- *  (inbox.ts's `updateProposalRegistry`) the other lanes already use.
- *
- *  FIVE REFUSAL ARMS, each named on its own outcome and none re-implemented here:
- *    - `"title-dedup"`: `harvest.deduped`, `mineFollowups`'s own `followupMatchesTitle` arm.
- *    - `"type-not-plan-shaped"`: {@link FOLLOWUP_TYPE_ROUTES} says the type is not routable.
- *    - `"settled-question"` (W1-T2645): the text re-decides a question already on record. Checked
- *      FIRST — such a candidate should never reach a drafting slot.
- *    - `"self-referential"` (W1-T2617): the ask IS the task that declared it.
- *    - `"dispatch-only"` (W1-T2613): a bare ask to dispatch its own already-filed task.
- *
- *  EVERY MINTED PROPOSAL CARRIES `evidenceAnchors: []`, STATED, NEVER SYNTHESIZED: a followup is
- *  free prose with no `git grep`-able pattern, and inventing one would hand `classifyProposal` a
- *  fabricated claim. The candidate's own ids ride in the summary — enough for ATTRIBUTION, never
- *  for the evidence-anchor arm. IDEMPOTENT: the same {@link followupProposalId} is never
- *  re-added. */
+/** Route harvested follow-ups through inbox.ts's single writer, `updateProposalRegistry`.
+ * Named refusal arms: title-dedup (harvest), type-not-plan-shaped ({@link FOLLOWUP_TYPE_ROUTES}),
+ * settled-question (before drafting; W1-T2645), self-referential (W1-T2617), dispatch-only (W1-T2613).
+ * Always use `evidenceAnchors: []`: free prose supplies attribution ids in the summary, never
+ * fabricated grep evidence. {@link followupProposalId} makes repeated publication idempotent. */
 export function routeFollowupsToRegistry(harvest: FollowupHarvest, deps: RouteFollowupsDeps): FollowupRouteOutcome[] {
   const updateRegistry = deps.updateRegistry ?? updateProposalRegistry;
   const settledQuestions = deps.settledQuestions ?? SETTLED_QUESTIONS;
@@ -3512,11 +3472,9 @@ export interface FollowupPruneOutcome {
   reason: string;
 }
 
-/** Apply {@link isSelfReferentialFollowup}'s predicate — parsed back off each already-minted
- *  proposal's `summary`, since this population predates the admission arm — and remove every match
- *  in ONE write, as {@link retireSettledFollowups} does. NEEDS NO BATCHED READ: the predicate is
- *  local to each summary, so a second pass finds nothing left to remove. A foreign summary is left
- *  alone and never guessed at. */
+/** Prune pre-admission self-asks from minted summaries using {@link isSelfReferentialFollowup}.
+ * One write, like {@link retireSettledFollowups}; no batched read needed for this local predicate.
+ * Leave foreign summaries alone; a second pass removes nothing. */
 export function pruneSelfReferentialFollowups(deps: FollowupRegistryDeps): FollowupPruneOutcome[] {
   const updateRegistry = deps.updateRegistry ?? updateProposalRegistry;
   let outcomes: FollowupPruneOutcome[] = [];
@@ -3843,11 +3801,8 @@ export interface CitationEvidence {
   kind?: "injected" | "used";
 }
 
-/** Mine `learnings.injected` AND `learnings.used` ledger rows for per-id citation evidence
- *  (W1-T2760 extends the W1-T419 injected-only miner with the used half). A PRE-TASK
- *  `learnings.injected` row logs `matched` as a bare count and contributes NOTHING, never a throw:
- *  old-format rows are the expected majority of history, and a malformed `matched_ids`/`used_ids`
- *  is skipped the same way — an unrecognised `step` contributes nothing either. */
+/** Mine injected and used ids separately (W1-T419, W1-T2760). Old `matched` counts, malformed
+ * matched_ids/used_ids and unknown steps contribute nothing without throwing. */
 export function mineLedgerCitations(records: LedgerRecord[]): CitationEvidence[] {
   const out: CitationEvidence[] = [];
   for (const r of records) {
@@ -3893,12 +3848,9 @@ export function mineGitLogCitations(commits: GitLogCommit[]): CitationEvidence[]
   return out;
 }
 
-/** Per-entry mined evidence, reduced: total occurrences and the latest (max, lexicographic) date —
- *  for EACH kind, SEPARATELY. W1-T2760: every field is now optional, because an id can carry
- *  injected evidence with no used evidence, used evidence with no injected evidence, or both — the
- *  two halves are never combined into one count. `citedCount`/`cited` are the INJECTED half
- *  (unchanged name and meaning from W1-T419, so every pre-existing caller reading them keeps
- *  reading exactly what it always did); `usedCount`/`used` are the new USED half. */
+/** Per-kind occurrence totals and latest lexicographic dates (W1-T2760).
+ * Optional `citedCount`/`cited` retain W1-T419's injected meaning; `usedCount`/`used` track use.
+ * An id may have either or both kinds; never sum them. */
 export interface CitationStamp {
   citedCount?: number;
   cited?: string;
@@ -3932,11 +3884,8 @@ export function aggregateCitationEvidence(evidence: CitationEvidence[]): Map<str
  *  caller needs the full round trip (W1-T2760). */
 export type StampedLearningEntry = LearningEntry & { used?: string; usedCount?: number };
 
-/** Stamp mined citation evidence onto every ACTIVE entry — pure, a NEW array. An entry absent from
- *  `evidence`, or whose stamp carries only ONE of the two kinds, keeps whatever it already carried
- *  for the other kind — a pass that found nothing (of a given kind) never blanks that half back to
- *  unevidenced. A non-active entry is never stamped: it is never injected. Writes BOTH halves
- *  (W1-T2760 design iii) whenever the stamp carries them. */
+/** Stamp ACTIVE entries into a new array (W1-T2760(iii)); leave non-active entries untouched.
+ * Write each evidenced kind and preserve unevidenced halves, including ids absent from `evidence`. */
 export function stampCitations(entries: LearningEntry[], evidence: Map<string, CitationStamp>): StampedLearningEntry[] {
   return entries.map((e) => {
     if (e.lifecycle !== "active") return e;
@@ -3950,11 +3899,8 @@ export function stampCitations(entries: LearningEntry[], evidence: Map<string, C
   });
 }
 
-/** W1-T1248: the write half of the four citation miners, which shipped with no production caller.
- *  Reports which ids' stamps actually MOVED — an unevidenced or non-active entry is byte-identical
- *  and never appears, so a pass that finds nothing new produces a NO-OP diff. W1-T2760: moves on
- *  EITHER half (cited/citedCount or used/usedCount) count, and the returned stamp names only the
- *  half(s) that actually moved — never a phantom key for a half that stayed put. */
+/** W1-T1248: report ids whose citation stamps moved; absent/non-active evidence stays byte-identical.
+ * W1-T2760: either kind can move; return only changed halves, avoiding phantom keys and no-op diffs. */
 export function changedCitationStamps(
   entries: LearningEntry[],
   evidence: Map<string, CitationStamp>,
@@ -3981,11 +3927,8 @@ export function changedCitationStamps(
   return out;
 }
 
-/** Text-surgery stamp of ONE entry's `cited`/`cited_count` within a shard's raw YAML: it touches
- *  only the lines that change and never round-trips the document through the `yaml` stringifier,
- *  which would reflow every other entry into a noisy whole-file diff each cycle. A no-op when
- *  `id`'s block is not in this shard, so callers loop every stamp over every file with no
- *  id-to-file index. Adds a `cited_count` line after `cited` when the entry has none yet. */
+/** Edit only changed `cited`/`cited_count` lines in raw YAML; stringifying reflows unrelated entries.
+ * Missing ids are no-ops, permitting shard scans without an index. Add absent `cited_count` after `cited`. */
 interface EntryBlockLocation {
   start: number;
   end: number;
@@ -4037,11 +3980,8 @@ function stampDateCountPair(block: string, dateKey: string, date: string, countK
   return block;
 }
 
-/** Text-surgery stamp of ONE entry's evidence fields within a shard's raw YAML — `cited`/
- *  `cited_count` (the injected half) and, W1-T2760, `used`/`used_count` (the used half),
- *  INDEPENDENTLY: a stamp carrying only one half writes only that half, leaving the other line (if
- *  any) exactly as it was — the same "never blank what a pass found nothing new for" discipline
- *  {@link stampCitations} keeps in memory. */
+/** Stamp raw YAML evidence halves independently: cited/cited_count (injected), used/used_count
+ * (used; W1-T2760). Preserve unstamped halves, as {@link stampCitations} does in memory. */
 export function stampCitationInShardText(text: string, id: string, stamp: CitationStamp): string {
   const loc = locateEntryBlock(text, id);
   if (!loc) return text; // id not in this shard — no-op
@@ -4135,11 +4075,8 @@ export function compareCitationBaseline(id: string, baseline: string, fresh: str
   return { id, field: "block", before: "(present)", after: "(missing)" };
 }
 
-/** W1-T1267: default `readFreshShardText` — one memoized `git fetch`, then
- *  `git show origin/main:<relPath>`: the "read the blob, never the working tree" idiom. This closes
- *  the window the task names: the worktree's own `learnings/` copy is origin/main AS OF THE CUT
- *  and is never refreshed. Best-effort — no remote, no network, or a path not yet on `origin/main`
- *  resolve to `undefined`, no signal, rather than a false refusal. */
+/** W1-T1267: memoize one fetch, then read `origin/main:<relPath>` blobs, never stale cut-time files.
+ * No remote/network/path resolves to undefined (best-effort, no signal), avoiding false refusals. */
 function defaultFreshShardTextReader(worktreePath: string): (relPath: string) => string | undefined {
   let fetchAttempted = false;
   let fetchOk = false;
@@ -4174,15 +4111,10 @@ export interface StampCitationsAndCommitResult {
   diff?: string;
 }
 
-/** Apply every {@link changedCitationStamps} entry onto its shard's raw text, `git add` the
- *  touched shards, and commit ONLY if something actually staged. The plan index is derived when
- *  read, so this writer has no generated index artifact to commit.
- *
- *  PASS ONE, STAMP ONLY: never adds an entry, drops one, or touches `lifecycle`. An empty
- *  `changed` map short-circuits before disk or git, so a quiet cycle produces an empty diff rather
- *  than an empty commit. W1-T1267: with a baseline for an id, this re-reads that id's CURRENT
- *  block before writing and REFUSES — drops for this cycle, never retries, never blocks another id
- *  — when anything outside the two stamped lines moved. */
+/** Stamp changed shards, stage them, and commit only a nonempty stage; no derived plan index.
+ * Never add/drop entries or touch lifecycle; an empty map short-circuits before disk/git.
+ * W1-T1267: re-read baselined ids and refuse only that id for this cycle if non-evidence text moved;
+ * never retry it or block other ids. */
 export function stampCitationsAndCommit(opts: {
   worktreePath: string;
   /** Absolute path, typically `join(worktreePath, "learnings")`. */
@@ -4313,11 +4245,8 @@ export type MarkerResolution =
   | { kind: "corrupt"; error: MarkerCorruptError }
   | { kind: "ok"; marker: RetroMarker };
 
-/** Resolve the last-retro marker for the gather step. A caller MUST branch on `.kind` rather than
- *  reduce this to `marker | undefined`: "absent" is the only state that legitimately widens the
- *  gather to full history, while "corrupt" MUST fail closed and abort, because falling through to
- *  a full-history gather would reprocess a consumed window and double-count. "ok" scopes the
- *  gather to `sinceTs = marker.ts`. */
+/** Branch on `.kind`: absent alone widens to full history; corrupt aborts to prevent consumed-window
+ * reprocessing/double counts; ok scopes `sinceTs` to marker.ts. Never collapse to marker | undefined. */
 export function resolveMarkerForGather(path: string): MarkerResolution {
   try {
     const marker = loadMarker(path);
@@ -4389,15 +4318,9 @@ export type RetroTriggerDecision =
 
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
 
-/** PURE trigger predicate (W1-T160): fires on `mergesSinceMarker >= policy.mergesThreshold` OR
- *  `daysSinceMarker >= policy.daysThreshold`, whichever crosses first. `markerTs` undefined makes
- *  `daysSinceMarker` `Infinity`, so a repo with no retro history is always eligible.
- *
- *  A THIRD, INDEPENDENT SIGNAL (W1-T2289): `followupsPending` past its own threshold fires with
- *  `reason: "followups"`. The two existing thresholds describe the FLEET's shipped activity, never
- *  the retro's own queue; `followupsPending` defaults to 0, so this is a WIDENING, not a
- *  replacement. TIE-BREAK: `reason` prefers "merges", then "days" — the more informative signals,
- *  never masked by a staleness or backlog floor. */
+/** Pure cadence trigger (W1-T160): merges OR elapsed days; absent marker gives infinite days.
+ * Pending follow-ups add an independent signal (W1-T2289), defaulting to zero for old callers.
+ * Reason precedence is merges, days, followups, so backlog never masks fleet activity. */
 export function evaluateRetroTrigger(
   mergesSinceMarker: number,
   markerTs: string | undefined,
@@ -4425,11 +4348,9 @@ export interface RetroIntegrityResult {
   reason?: string;
 }
 
-/** The INTEGRITY GATE (W1-T160): a HARD precondition inside the AUTOMATED path only, since an
- *  operator-run `rmd retro` is watched by a human. A mismatch — the trigger saw real merge
- *  activity and the gather credits NONE — means the credit union degraded in between (a throttle,
- *  an ownership assert rejecting everything, an outage), so the retro ABORTS rather than write on
- *  a zero-credit gather. Fail-closed, because no human is watching an unattended run. */
+/** Automated-only integrity gate (W1-T160): abort if the trigger saw merges but gather credits none.
+ * Throttle, ownership rejection or outage may degrade the credit union; unattended runs fail closed.
+ * Operator-run `rmd retro` remains human-watched. */
 export function checkRetroIntegrity(priorMergesSinceMarker: number, gatherShippedCount: number): RetroIntegrityResult {
   if (priorMergesSinceMarker > 0 && gatherShippedCount === 0) {
     return {
@@ -4486,12 +4407,9 @@ export type RetroBackoffDecision =
 // https://tc39.es/ecma262/2025/multipage/numbers-and-dates.html#sec-timeclip
 const MAX_FORMATTABLE_DATE_MS = 8_640_000_000_000_000;
 
-/** PURE (W1-T4664). Decide whether a new automated retro attempt is due, given the last recorded
- *  attempt (if any) and the CURRENT `mergesSinceMarker`/`markerTs`/`now` the trigger is about to
- *  evaluate. No prior attempt, or a prior attempt against a DIFFERENT `markerTs` (the marker
- *  moved — a publish landed, resetting the cycle), is always eligible: design (ii)'s "a published
- *  retro resets both." Otherwise the streak's DOUBLING delay or the merges floor — whichever
- *  opens first — decides; this function adds no ceiling to either. */
+/** Pure retry decision (W1-T4664): no prior attempt or a changed marker starts a fresh cycle.
+ * Otherwise, the streak's doubling delay OR additional-merges floor opens first; neither is capped.
+ * Use current mergesSinceMarker, markerTs and now. */
 export function evaluateRetroBackoff(
   lastAttempt: RetroAttemptRecord | undefined,
   mergesSinceMarker: number,
@@ -4606,13 +4524,9 @@ function cleanRuleLine(s: string): string {
   return s.replace(/\*\*/g, "").replace(/\s+/g, " ").trim();
 }
 
-/** Join a rule's physical lines back into ONE rule string while KEEPING those lines.
- *
- *  W1-T2483 — WHY THIS NO LONGER COLLAPSES. Folding continuations onto one line is not what
- *  "verbatim" means, and it broke a real gate: `test/rule-15-16-filing-misattribution.test.ts`
- *  judges a citation inside a THREE-LINE window, a proximity proxy, and proximity is a property of
- *  line breaks a renderer owns. The gate is correct and is not touched. Blank lines are kept for
- *  the same reason; trailing blanks are trimmed. Why, measured: docs/forensics/retro.md. */
+/** Keep rule line breaks and interior blanks; trim trailing blanks (W1-T2483).
+ * Folding broke test/rule-15-16-filing-misattribution.test.ts's three-line citation window:
+ * proximity belongs to the renderer. Evidence: docs/forensics/retro.md. */
 function joinRuleLines(lines: string[]): string {
   const cleaned = lines.map(cleanRuleLine);
   while (cleaned.length > 0 && cleaned[cleaned.length - 1] === "") cleaned.pop();
@@ -4865,13 +4779,9 @@ export interface PlanStateTruthFinding {
   prUrl?: string;
 }
 
-/** {@link planStateTruthRung}'s result — THREE STATES, THREE RENDERINGS (design (vii)), plus the
- *  fourth "unexamined" mode designs (iii) and (vi) require:
- *   - `unavailable`: no resolver in hand. The rung did not scan and vouches for nothing.
- *   - `unexamined`: the positive control failed. An empty scan must never render as `clean`.
- *   - `clean`: every extracted id that resolved is UNMERGED; the plan agrees with truth.
- *   - `findings`: an asserted-unbuilt id is MERGED. BLOCKING, and it outranks the plan-health
- *     sweep beside it, because it decides the KICK ORDER. */
+/** Plan-truth states (design (iii), (vi), (vii)): unavailable has no resolver; unexamined failed
+ * its positive control; clean resolved extracted ids as unmerged; findings reports merged ids
+ * asserted unbuilt. Findings block and outrank plan-health because they decide kick order. */
 export type PlanStateTruthReport =
   | { kind: "unavailable" }
   | { kind: "unexamined"; reason: string; examinedLines: number; proposalOnlyLines: number }
@@ -4884,14 +4794,9 @@ export type PlanStateTruthReport =
       idsChecked: number;
     };
 
-/** THE RUNG (W1-T410). Re-derives every task id MASTER-PLAN.md asserts unbuilt against `resolve`,
- *  the SAME merge resolver the retro gather already computed. `resolve` omitted means the caller
- *  has no projection in hand: `unavailable`, never a silent skip.
- *
- *  BOTH CONTROLS ARE BLOCKING (design (iii)), not merely test-time assertions. Empty extraction, or
- *  ids the resolver has no opinion on at all, reports `unexamined` — loud, never a clean pass. A
- *  run whose only bound subjects are proposals is the `proposalOnlyLines` count on an
- *  otherwise-clean report, never folded into `unexamined`. */
+/** W1-T410: resolve asserted-unbuilt task ids with gather's existing merge resolver.
+ * No resolver means unavailable. Empty extraction or wholly unresolved ids blocks as unexamined
+ * (design (iii)); proposal-only subjects instead count as proposalOnlyLines on a clean report. */
 export function planStateTruthRung(masterPlanMd: string, resolve?: PlanStateTruthResolver): PlanStateTruthReport {
   if (!resolve) return { kind: "unavailable" };
   const { ids, examinedLines, proposalOnlyLines } = extractAssertedUnbuiltTaskIds(masterPlanMd);
@@ -4970,12 +4875,9 @@ export type PlanCoherenceReport =
       monolithRecordsExamined: number;
     };
 
-/** THE RUNG (W1-T2642, mirroring W1-T410's shape). Re-derives, every cycle, the question "do
- *  plan/tasks.yaml and plan/tasks.d/*.yaml disagree about which tasks EXIST" that NET STATE carried
- *  as unmeasured prose for fourteen cycles. `shards` carries `{ ok: false, reason }` exactly when
- *  the caller could not ASSEMBLE the corpus — not the back-compat "directory does not exist yet"
- *  case, which reads as zero shards. Either failure renders `unexamined`, never a `clean` over a
- *  scan that never ran (P48). */
+/** W1-T2642: compare task existence in plan/tasks.yaml and plan/tasks.d/*.yaml each cycle.
+ * A failed corpus assembly (`shards.ok: false`) renders unexamined, never clean (P48).
+ * A not-yet-existing shard directory remains a compatible zero-shard corpus (W1-T410 shape). */
 export function planCoherenceRung(
   monolith: { path: string; text: string },
   shards: PlanCoherenceShardListing,

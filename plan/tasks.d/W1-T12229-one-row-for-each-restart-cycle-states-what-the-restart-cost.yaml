@@ -22,7 +22,7 @@
     - src/lib/daemon.ts
     - src/lib/ledger.ts
     - test/daemon/one-row-for-each-restart-cycle-states-what-the-restart-cost.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "From the rows of a fixture, `restartCycleRow` returns the five times of one restart cycle: the first material change, the restart decision, the exit, the start and the first verdict after the start"

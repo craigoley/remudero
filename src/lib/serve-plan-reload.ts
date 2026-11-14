@@ -8,11 +8,16 @@
  */
 import { execFileLoopBounded } from "./loop-bounded-child.js";
 import { createHash } from "node:crypto";
+import { serialize, deserialize } from "node:v8";
 import { isMainThread, parentPort, threadId, Worker, workerData } from "node:worker_threads";
 import { bundledWorkerUrl } from "./child-entry-argv.js";
 import { systemClock, type Clock } from "./clock.js";
 import { mergePlanBlobsQuarantiningDuplicates, readBlobsAtRefAsync, type Plan, type QuarantinedTask } from "./plan.js";
 import { resolveRepoLayout } from "./repo-layout.js";
+import { dirname } from "node:path";
+import { planDestinationRepository } from "./plan-destination.js";
+import { defaultOpsCatalogApi, readOpsCatalogSnapshotAsync, type OpsCatalogApi } from "./ops-catalog-source.js";
+import type { AcceptanceCriterion, Task } from "./plan.js";
 
 const HOUSE_LAYOUT = resolveRepoLayout("", () => undefined);
 const PLAN_MONOLITH = `${HOUSE_LAYOUT.planDir}/tasks.yaml`;
@@ -175,6 +180,276 @@ export interface PlanSourceFailure {
 export interface PlanSourceHolder {
   plan: Plan;
   planSource?: PlanSourceOutcome;
+  /** Existing BoardDeps host binding; absent legacy holders never consult a destination. */
+  ledgerPath?: string;
+}
+
+export type BoardCatalogSummary =
+  | { outcome: "ok"; observedAt: string; taskCount: number }
+  | { outcome: "unreadable"; observedAt: string; reason: string };
+export type BoardCatalogContext = BoardCatalogSummary & {
+  readonly plan?: Plan;
+  readonly publicPlan?: Plan;
+  readonly opsIds: ReadonlySet<string>;
+};
+
+// Key by both immutable public plan and the explicit host state directory. Spreading BoardDeps
+// cannot lose the binding, and two instances sharing a public revision cannot share private data.
+const boardCatalogs = new WeakMap<Plan, Map<string, BoardCatalogContext>>();
+
+function catalogContext(summary: BoardCatalogSummary, publicPlan?: Plan, plan = publicPlan,
+  opsIds: ReadonlySet<string> = new Set()): BoardCatalogContext {
+  Object.defineProperties(summary, { plan: { value: plan }, publicPlan: { value: publicPlan }, opsIds: { value: opsIds } });
+  return Object.freeze(summary) as BoardCatalogContext;
+}
+
+/** Only these task fields may cross the public read-model boundary (W1-T12211). */
+export function publicOpsTaskFields(task: Task): {
+  taskId: string; title: string; catalog: "ops"; acceptance: AcceptanceCriterion[];
+} {
+  return { taskId: task.id, title: task.title, catalog: "ops", acceptance: (task.acceptance ?? []).map(c => ({
+    claim: c.claim, proof: c.proof, ...(c.satisfied_by === undefined ? {} : { satisfied_by: c.satisfied_by }),
+  })) };
+}
+
+/** Current disk selection and one actual pinned reader observation; never starts a writer/selector. */
+export async function readBoardCatalogs(readPublic: () => Plan | undefined, stateDir: string | undefined,
+  api?: OpsCatalogApi, clock: Clock = systemClock): Promise<BoardCatalogContext | undefined> {
+  const destination = planDestinationRepository(stateDir);
+  if (destination.outcome === "off") return undefined;
+  let primary: Plan | undefined;
+  try { primary = readPublic(); }
+  catch (error) {
+    // Retain an explicit public-read error, not a healthy empty catalog; error text may hold private bytes.
+    void error;
+    return catalogContext({ outcome: "unreadable", observedAt: clock.iso(), reason: "public-read-error" });
+  }
+  const refused = (reason: string): BoardCatalogContext => catalogContext({ outcome: "unreadable", observedAt: clock.iso(), reason }, primary);
+  if (primary === undefined) return refused("public-unreadable");
+  if (destination.outcome === "unreadable") return refused("destination-unreadable");
+  const snapshot = await readOpsCatalogSnapshotAsync({ repository: `${destination.owner}/${destination.repo}` }, api);
+  if (snapshot.outcome !== "ok" || snapshot.plan === undefined) return refused(snapshot.outcome === "ok" ? "missing-plan" : snapshot.outcome);
+  if (snapshot.binding === undefined) return refused("identity-unavailable");
+  const after = planDestinationRepository(stateDir);
+  if (after.outcome !== "named" || after.owner !== destination.owner || after.repo !== destination.repo ||
+    after.checkoutDir !== destination.checkoutDir) return refused("destination-changed");
+  return composeBoardCatalog(primary, snapshot.plan, clock.iso());
+}
+
+function composeBoardCatalog(primary: Plan, ops: Plan, observedAt: string): BoardCatalogContext {
+  const refused = (reason: string): BoardCatalogContext => catalogContext({ outcome: "unreadable", observedAt, reason }, primary);
+  const opsIds = new Set(ops.tasks.map(t => t.id));
+  if (ops.tasks.some(t => primary!.byId.has(t.id))) return refused("duplicate_task_id");
+  if (primary.tasks.some(t => t.depends_on.some(id => opsIds.has(id))) ||
+    ops.tasks.some(t => t.depends_on.some(id => !primary!.byId.has(id) && !opsIds.has(id)))) return refused("invalid_cross_catalog_dependency");
+  const combined: Plan = { tasks: [...primary.tasks, ...ops.tasks], byId: new Map([...primary.byId, ...ops.byId]) };
+  return catalogContext({ outcome: "ok", observedAt, taskCount: ops.tasks.length }, primary, combined, opsIds);
+}
+
+/** Private composite for the scoped board only. Legacy task-card/graph readers retain the public plan. */
+export function serveBoardCatalogs(holder: PlanSourceHolder): BoardCatalogContext | undefined {
+  return holder.ledgerPath === undefined ? undefined : boardCatalogs.get(holder.plan)?.get(dirname(holder.ledgerPath));
+}
+
+export function adoptBoardCatalogs(holder: PlanSourceHolder, context: BoardCatalogContext | undefined): void {
+  if (holder.ledgerPath === undefined) return;
+  const key = dirname(holder.ledgerPath);
+  if (context === undefined) { boardCatalogs.get(holder.plan)?.delete(key); return; }
+  let hosts = boardCatalogs.get(holder.plan);
+  if (hosts === undefined) { hosts = new Map(); boardCatalogs.set(holder.plan, hosts); }
+  hosts.set(key, context);
+}
+
+/** Existing plan refresh cadence, not a deadline for reading an entire private catalog. */
+export const BOARD_CATALOG_REFRESH_MS = 120_000;
+export const BOARD_CATALOG_WIRE_VERSION = 1;
+export type BoardCatalogRequest = { type: "ops_catalog_read"; version: 1; root: string };
+export type BoardCatalogReply = { type: "ops_catalog_snapshot"; version: 1; root: string; selection: string;
+  sequence: number; buffer: SharedArrayBuffer; sha256: string };
+type CatalogPayload = { observedAt: string; plan?: Plan; reason?: string };
+
+export function isBoardCatalogRequest(message: unknown): message is BoardCatalogRequest {
+  const value = message as Partial<BoardCatalogRequest> | null;
+  return value?.type === "ops_catalog_read" && value.version === 1 && typeof value.root === "string";
+}
+export function isBoardCatalogReply(message: unknown): message is BoardCatalogReply {
+  const value = message as Partial<BoardCatalogReply> | null;
+  return value?.type === "ops_catalog_snapshot" && value.version === 1 && typeof value.root === "string" &&
+    typeof value.selection === "string" && Number.isSafeInteger(value.sequence) && value.buffer instanceof SharedArrayBuffer &&
+    typeof value.sha256 === "string";
+}
+
+function catalogSelection(root: string): string {
+  const destination = planDestinationRepository(root);
+  return destination.outcome === "off" ? "off" : createHash("sha256").update(JSON.stringify(destination)).digest("hex");
+}
+
+interface CatalogPoolEntry {
+  clients: Set<(reply: BoardCatalogReply) => void>;
+  selection: string;
+  sequence: number;
+  attemptedAt: number;
+  pending?: Promise<void>;
+  reply?: BoardCatalogReply;
+}
+// Serve's two independent producers share one parent-owned read. No private Plan enters a public
+// worker body or generic log message; this channel is intercepted before either relay.
+const catalogPools = new Map<string, CatalogPoolEntry>();
+const parentCatalogApi = defaultOpsCatalogApi();
+
+export interface BoardCatalogParentBridge {
+  request(message: BoardCatalogRequest): void;
+  close(): void;
+}
+/** Only trusted configured roots may request a read. Closing the last consumer prevents subsequent
+ * GETs; an already-running GET retains its existing child timeout and remains owned by this parent. */
+export function createBoardCatalogParentBridge(roots: readonly string[], post: (reply: BoardCatalogReply) => void,
+  clock: Clock = systemClock): BoardCatalogParentBridge {
+  const allowed = new Set(roots), joined = new Set<string>();
+  let closed = false;
+  const deliver = (reply: BoardCatalogReply): void => { if (!closed) post(reply); };
+  const pump = (root: string, entry: CatalogPoolEntry): void => {
+    if (entry.pending || entry.clients.size === 0) return;
+    const selection = catalogSelection(root);
+    if (selection === "off") return;
+    if (selection === entry.selection && clock.now() - entry.attemptedAt < BOARD_CATALOG_REFRESH_MS) return;
+    entry.selection = selection;
+    entry.attemptedAt = clock.now();
+    entry.reply = undefined;
+    const sequence = ++entry.sequence;
+    const active = (): boolean => entry.clients.size > 0 && sequence === entry.sequence && catalogSelection(root) === selection;
+    entry.pending = (async () => {
+      let payload: CatalogPayload;
+      const destination = planDestinationRepository(root);
+      if (destination.outcome !== "named") payload = { observedAt: clock.iso(), reason: "destination-unreadable" };
+      else {
+        const api: OpsCatalogApi = (path) => active() ? parentCatalogApi(path) : Promise.reject(new Error("catalog consumer changed"));
+        const snapshot = await readOpsCatalogSnapshotAsync({ repository: `${destination.owner}/${destination.repo}` }, api);
+        payload = snapshot.outcome === "ok" && snapshot.plan && snapshot.binding
+          ? { observedAt: clock.iso(), plan: snapshot.plan }
+          : { observedAt: clock.iso(), reason: snapshot.outcome === "ok" ? "identity-unavailable" : snapshot.outcome };
+      }
+      if (!active()) return;
+      // The source's Plan handle is deliberately non-enumerable: extract it explicitly, then share
+      // one immutable-by-convention byte packet. Receivers copy/hash before decoding, never trust a
+      // live shared view. The digest proves byte integrity, not publication permission.
+      const bytes = serialize(payload), buffer = new SharedArrayBuffer(bytes.length);
+      Buffer.from(buffer).set(bytes);
+      const reply: BoardCatalogReply = { type: "ops_catalog_snapshot", version: 1, root, selection, sequence, buffer,
+        sha256: createHash("sha256").update(bytes).digest("hex") };
+      entry.reply = reply;
+      for (const client of entry.clients) client(reply);
+    })().finally(() => {
+      entry.pending = undefined;
+      if (entry.clients.size === 0) catalogPools.delete(root);
+      else if (catalogSelection(root) !== entry.selection) pump(root, entry);
+    });
+  };
+  return {
+    request(message) {
+      if (closed || !allowed.has(message.root)) return;
+      const root = message.root;
+      let entry = catalogPools.get(root);
+      if (!entry) {
+        entry = { clients: new Set(), selection: "", sequence: 0, attemptedAt: Number.NEGATIVE_INFINITY };
+        catalogPools.set(root, entry);
+      }
+      // A changed selection invalidates the old operation even if it changes back before its
+      // final read. The successor remains serial behind that parent's already-running GET.
+      if (entry.pending && entry.selection !== catalogSelection(root)) {
+        entry.sequence++;
+        entry.selection = "";
+        entry.reply = undefined;
+      }
+      entry.clients.add(deliver);
+      joined.add(root);
+      if (entry.reply && entry.reply.selection === catalogSelection(root) && clock.now() - entry.attemptedAt < BOARD_CATALOG_REFRESH_MS) deliver(entry.reply);
+      pump(root, entry);
+    },
+    close() {
+      closed = true;
+      for (const root of joined) {
+        const entry = catalogPools.get(root);
+        entry?.clients.delete(deliver);
+        if (entry && entry.clients.size === 0) {
+          entry.sequence++;
+          entry.reply = undefined;
+          entry.selection = "";
+          if (!entry.pending) catalogPools.delete(root);
+        }
+      }
+      joined.clear();
+    },
+  };
+}
+
+export interface BoardCatalogClient {
+  current(plan: Plan, root: string): BoardCatalogContext | undefined;
+  revision(root: string): string;
+  accept(reply: BoardCatalogReply): void;
+}
+/** A child never shells out for this catalog. Older parents have no advertised capability: an
+ * explicitly selected catalog then stays UNKNOWN, while an unconfigured legacy producer is unchanged. */
+export function createWorkerBoardCatalogClient(enabled: boolean, post: (request: BoardCatalogRequest) => void,
+  clock: Clock = systemClock): BoardCatalogClient {
+  type Held = { selection: string; requestedAt: number; sequence: number; payload?: CatalogPayload;
+    contexts: WeakMap<Plan, BoardCatalogContext> };
+  const held = new Map<string, Held>();
+  const inspect = (root: string): Held | undefined => {
+    const selection = catalogSelection(root);
+    if (selection === "off") { held.delete(root); return undefined; }
+    let entry = held.get(root);
+    if (!entry || entry.selection !== selection) {
+      entry = { selection, requestedAt: Number.NEGATIVE_INFINITY, sequence: 0, contexts: new WeakMap() };
+      held.set(root, entry);
+    }
+    if (enabled && clock.now() - entry.requestedAt >= BOARD_CATALOG_REFRESH_MS) {
+      entry.requestedAt = clock.now();
+      entry.contexts = new WeakMap();
+      // Expired evidence cannot look like a healthy empty catalog while its successor is pending.
+      entry.payload = undefined;
+      post({ type: "ops_catalog_read", version: 1, root });
+    }
+    return entry;
+  };
+  return {
+    current(plan, root) {
+      const entry = inspect(root);
+      if (!entry) return undefined;
+      const prior = entry.contexts.get(plan);
+      if (prior) return prior;
+      const payload = entry.payload;
+      const context = payload?.plan ? composeBoardCatalog(plan, payload.plan, payload.observedAt)
+        : catalogContext({ outcome: "unreadable", observedAt: payload?.observedAt ?? clock.iso(),
+          reason: payload?.reason ?? (enabled ? "catalog-pending" : "catalog-bridge-unavailable") }, plan);
+      entry.contexts.set(plan, context);
+      return context;
+    },
+    revision(root) {
+      const entry = inspect(root);
+      return entry ? `${entry.selection}:${entry.sequence}:${entry.payload === undefined ? "pending" : "received"}` : "off";
+    },
+    accept(reply) {
+      const entry = held.get(reply.root);
+      if (!enabled || !entry || reply.selection !== entry.selection || catalogSelection(reply.root) !== entry.selection || reply.sequence < entry.sequence) return;
+      try {
+        const bytes = Buffer.from(Buffer.from(reply.buffer));
+        if (createHash("sha256").update(bytes).digest("hex") !== reply.sha256) throw new Error("catalog integrity");
+        const payload = deserialize(bytes) as CatalogPayload;
+        const age = clock.now() - Date.parse(payload.observedAt);
+        if (!Number.isFinite(age) || age < 0 || age >= BOARD_CATALOG_REFRESH_MS || (payload.plan !== undefined &&
+          (!Array.isArray(payload.plan.tasks) || !(payload.plan.byId instanceof Map)))) throw new Error("catalog shape");
+        entry.payload = payload;
+      } catch (error) {
+        // Integrity/shape failures discard the private handle and preserve an explicit public-safe
+        // failure; exception text and packet contents never enter the public body.
+        void error;
+        entry.payload = { observedAt: clock.iso(), reason: "catalog-packet-unreadable" };
+      }
+      entry.sequence = reply.sequence;
+      entry.contexts = new WeakMap();
+    },
+  };
 }
 
 /** BACKSTOP: the longest failure reason a response carries; a reader needs the cause, not an unbounded error text. */
@@ -227,6 +502,7 @@ export function adoptPlanSource(
 
 /** Seams for a hermetic test. */
 export interface ServePlanReloadOptions {
+  opsCatalogApi?: OpsCatalogApi;
   read?: (repoDir: string, ref: string) => Promise<PlanRead>;
   offLoop?: (repoDir: string, ref: string) => Promise<PlanRead>;
   clock?: Clock;
@@ -262,7 +538,10 @@ export async function reloadServePlan(
   if (read.quarantined.length > 0) {
     log("serve.plan_quarantined", { ref, ids: read.quarantined.map((q) => q.id), files: read.quarantined.flatMap((q) => q.files) });
   }
+  const catalogs = await readBoardCatalogs(() => read.plan,
+    board.ledgerPath === undefined ? undefined : dirname(board.ledgerPath), options.opsCatalogApi, clock);
   board.plan = read.plan;
+  adoptBoardCatalogs(board, catalogs);
   if (board.planSource !== undefined) board.planSource = planSourceLoaded(board.planSource, `ref:${repoDir}@${ref}`, clock);
   options.onReloaded?.(ref, read);
   log("serve.plan_reloaded", { ref, tasks: read.plan.tasks.length, elapsedMs: clock.now() - startedAt, gitMs: read.gitMs, parseMs: read.parseMs });

@@ -15,7 +15,7 @@
     - W1-T11312
   files:
     - test/review/compress-src-lib-review-ts.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "On a pull request that does not add the pin, a change that adds comment lines and comment bytes to src/lib/review.ts passes the pin"
