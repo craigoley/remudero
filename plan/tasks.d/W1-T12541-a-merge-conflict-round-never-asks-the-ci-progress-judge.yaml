@@ -19,6 +19,7 @@
     - src/lib/fix-progress-judge.ts
     - test/fix-lane/a-merge-conflict-round-never-asks-the-ci-progress-judge.test.ts
     - test/a-refused-merge-start-escalates-in-the-same-rung.test.ts
+    - test/fix-rung-unchanged-tree-stand-down.test.ts
   status: queued
   attempts: 0
   acceptance:
@@ -75,6 +76,10 @@
        decides merge-refusal rounds (a change of approach past two refusals, a hand-off on an unavailable answer).
        Its cases now assert the conflict-fact verdict: two refused rounds at one head, base and file set escalate
        with loop conflict, and the judge is not asked.
+    7. A round sent at the PR's current head that has ended left the PR at that head, so whatever it pushed did not
+       reach the PR: step 1 counts it as a round with no pushed head. Without this, a round whose push never
+       became the PR head loops with no bound (the conflict cases of test/fix-rung-unchanged-tree-stand-down.test.ts
+       did). Those cases now expect the conflict loop, not the fixture judge's former ceiling.
     NOT IN SCOPE: the judge's prompt and model; the first-round skip of W1-T10039; how the sweep picks a conflict round;
     the conflict gardener of W1-T11172.
   falsifier: |
