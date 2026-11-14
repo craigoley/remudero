@@ -246,10 +246,16 @@ async function selectedRun(enabled: unknown, scenario: Scenario = {}): Promise<{
       } : undefined;
       paused = scenario.ownerHold === "pause";
       stopped = scenario.ownerHold === "stop";
-      const refusalRead = scenario.coreRefusal ? (publicPlan: Plan): OpsTaskDispatchRead => {
-        const current = wired.readOpsTaskDispatch!(publicPlan);
-        assert.equal(current.outcome, "selected", "positive control: real pinned input is healthy before the boundary fault");
-        if (current.outcome !== "selected") throw new Error("fixture source was not ready");
+      const refusalControl = scenario.coreRefusal ? wired.readOpsTaskDispatch!(plan) : undefined;
+      if (scenario.coreRefusal) {
+        assert.equal(refusalControl?.outcome, "selected", "positive control outside the guard: real pinned input is healthy");
+        assert.equal(refusalControl?.outcome === "selected" && refusalControl.source.outcome, "ok");
+      }
+      const refusalRead = scenario.coreRefusal ? (): OpsTaskDispatchRead => {
+        // The healthy control is asserted outside readOpsDispatch's catch; this closure only
+        // applies the named boundary fault, so a swallowed fixture assertion cannot pass a case.
+        if (refusalControl?.outcome !== "selected") throw new Error("fixture source was not ready");
+        const current = refusalControl;
         switch (scenario.coreRefusal) {
           case "throw": throw new Error(PRIVATE);
           case "missing-plan": return { ...current, source: { ...current.source, outcome: "ok", plan: undefined } };
@@ -402,7 +408,10 @@ test("W1-T12209 criterion 5: incomplete identities and throwing readers or diagn
   for (const coreRefusal of ["throw", "missing-plan", "unreadable", "public-revision", "ops-revision", "identity"] as const) {
     const result = await selectedRun(true, { coreRefusal, throwingHoldLog: coreRefusal === "throw" });
     assert.deepEqual(result.ran, ["PUB-A", "PUB-B", "PUB-C"], coreRefusal);
-    assert.equal(result.rows.filter(row => row.step === "dispatch.ops_catalog_held").length, 1, "an unchanged refusal is deduplicated even if its diagnostic throws");
+    const expected = { throw: "selection_unreadable", "missing-plan": "source_identity_unknown", unreadable: "unreadable",
+      "public-revision": "primary_revision_unknown", "ops-revision": "source_identity_unknown", identity: "source_identity_unknown" };
+    assert.deepEqual(result.rows.filter(row => row.step === "dispatch.ops_catalog_held").map(row => row.data.outcome), [expected[coreRefusal]],
+      "the exact fault reason is deduplicated even if its diagnostic throws");
     assert.doesNotMatch(JSON.stringify(result.rows), new RegExp(PRIVATE));
   }
 });
