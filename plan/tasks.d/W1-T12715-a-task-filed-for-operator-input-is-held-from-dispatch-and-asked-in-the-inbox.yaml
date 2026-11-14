@@ -1,0 +1,77 @@
+- id: W1-T12715
+  title: "A task filed for operator input is held from dispatch and asked in the operator's inbox until it is answered"
+  repo: remudero
+  depends_on: []
+  priority: 1.5
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # a new hold on dispatch; a task with no needs_input field dispatches exactly as today
+  band_meaning: blast-radius
+  origin: "operator-session#stuck-pr-root-causes-2026-11-14"
+  plan_refs:
+    - W1-T12709
+    - W1-T12543
+    - W1-T12544
+    - W1-T12710
+    - W1-T12214
+  files:
+    - src/lib/plan.ts
+    - src/lib/drain.ts
+    - src/lib/task-linter.ts
+    - src/lib/human-gate.ts
+    - src/lib/worker.ts
+    - test/plan/a-task-filed-for-operator-input-is-held-until-it-is-answered.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "invariant:held-until-answered — a task whose needs_input block has a question and no ANSWER entry for its id in the question store is never returned by nextRunnable and is refused by assertRunnable with a reason that names the question"
+      kind: guard
+      proof: "grep: W1-T12715 criterion 1 in test/plan/a-task-filed-for-operator-input-is-held-until-it-is-answered.test.ts"
+    - claim: "Once an ANSWER entry for the task is in the question store, the same task is runnable, and the worker prompt for its build carries the answer text"
+      proof: "grep: W1-T12715 criterion 2 in test/plan/a-task-filed-for-operator-input-is-held-until-it-is-answered.test.ts"
+    - claim: "invariant:no-field-no-change — a task with no needs_input block gets the same nextRunnable and assertRunnable result as on origin/main"
+      kind: guard
+      proof: "grep: W1-T12715 criterion 3 in test/plan/a-task-filed-for-operator-input-is-held-until-it-is-answered.test.ts"
+    - claim: "Each held task is one task_question gate with ownerSurface inbox, so the rmd inbox and the console both list it, with the question text and the source pull request"
+      proof: "grep: W1-T12715 criterion 4 in test/plan/a-task-filed-for-operator-input-is-held-until-it-is-answered.test.ts"
+    - claim: "The task linter refuses a needs_input block with an empty question, and refuses one on a task whose status is not queued"
+      proof: "grep: W1-T12715 criterion 5 in test/plan/a-task-filed-for-operator-input-is-held-until-it-is-answered.test.ts"
+  rationale: |
+    WHY: the operator ruled on 2026-11-14 that a pull request must never wait on a person in the inbox. "I would rather
+    immediately update the PR to fix the concerns and get it through, file follow up tasks that can be in my inbox and held
+    from a build, or worst case, close the PR and file a rebuild with the input needed from me and it held."
+    The fleet has no way to file a task that is held until the operator answers. W1-T12709 needs one.
+    READ at origin/main 5d1670adc (2026-11-14):
+    - src/lib/worker.ts:4903 appends a QUESTION to the durable question store (`questions.ndjson`), and :4919 appends an
+      ANSWER to the same store.
+    - src/lib/now-decisions.ts:8 lists a QUESTION with no later answer as a `task_question` decision, answered through
+      `POST /v1/questions/answer`.
+    - src/lib/human-gate.ts:10 already declares the `task_question` gate kind with the inbox as its surface.
+    - src/lib/drain.ts:503 nextRunnable and src/lib/plan.ts:1356 assertRunnable do not read the question store, so a task
+      with an open question is dispatched anyway.
+    - `status: blocked` cannot carry the hold: src/lib/task-linter.ts:2043 refuses a new blocked task with no retirement.
+    The console is not fully working (operator, 2026-11-14), so the question must also reach `rmd inbox`.
+  design: |
+    INVARIANT no-field-no-change: a task without a needs_input block dispatches exactly as on origin/main.
+    INVARIANT held-until-answered: a task with a needs_input block is never dispatched while the question store holds no
+    ANSWER for its id.
+    1. src/lib/plan.ts: add an optional `needs_input` to Task: `{ question: string; source_pr?: string; asked_at: string }`.
+    2. src/lib/worker.ts: export one reader `taskInputAnswer(stateDir, taskId)` over the existing question store. It
+       returns the newest ANSWER text for the task, or undefined. It reuses the store's own parser.
+    3. src/lib/drain.ts nextRunnable and src/lib/plan.ts assertRunnable: a task with needs_input and no answer is not
+       runnable. The refusal reason is `needs-input: <question>`. Both read the answer through the one reader.
+    4. When the answer exists, the build's worker prompt carries it under "Operator answer", the same place a pending
+       answer goes today.
+    5. src/lib/human-gate.ts: each queued task with needs_input and no answer is one `task_question` gate (subject: the
+       task id; reason: the question and the source pull request; url: the task file on main). `rmd inbox` and the console
+       read the same gates.
+    6. src/lib/task-linter.ts: refuse an empty question, and refuse needs_input on a task whose status is not queued.
+    NOT IN SCOPE: who files these tasks (W1-T12709); the console's answer form, which already exists.
+  falsifier: |
+    Let nextRunnable ignore needs_input and criterion 1 must fail. Drop the answer lookup and criterion 2 must fail. Hold a
+    task with no needs_input and criterion 3 must fail. Skip the gate and criterion 4 must fail. Accept an empty question
+    and criterion 5 must fail. Restore and all must pass.
+  note: |
+    Id reserved for run-unfiled-1794689039000 with ~/rmd-work/bin/reserve-id.sh. The fleet builds it.
