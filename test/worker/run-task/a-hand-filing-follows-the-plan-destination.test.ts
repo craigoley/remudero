@@ -75,7 +75,8 @@ process.stdout.write(JSON.stringify({code,out,err})+'\n');
 function invoke(f: ReturnType<typeof fixture>, mode: "command" | "lint" | "next", args: string[] = [], cwd = f.hand) {
   const r = spawnSync(process.execPath, ["--import", import.meta.resolve("tsx"), "--input-type=module", "--eval", CHILD], {
     cwd: REPO_ROOT, encoding: "utf8", timeout: 120_000, maxBuffer: 8 * 1024 * 1024,
-    env: { ...process.env, HOME: f.home, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null",
+    // A hand session has no GitHub PR head; CI must not replace the fixture's branch.
+    env: { ...process.env, GITHUB_HEAD_REF: "", HOME: f.home, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null",
       GIT_AUTHOR_NAME: GIT_REPO_FIXTURE_IDENTITY.name, GIT_AUTHOR_EMAIL: GIT_REPO_FIXTURE_IDENTITY.email,
       GIT_COMMITTER_NAME: GIT_REPO_FIXTURE_IDENTITY.name, GIT_COMMITTER_EMAIL: GIT_REPO_FIXTURE_IDENTITY.email,
       RMD_GH_CACHE_HOME: join(f.root, "gh-cache"),
