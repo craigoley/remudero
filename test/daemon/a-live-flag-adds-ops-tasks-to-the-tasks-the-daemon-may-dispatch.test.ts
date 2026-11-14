@@ -5,6 +5,8 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { test } from "node:test";
+import { inspect } from "node:util";
+import { findTaskInCatalogs, opsPlanForLookup } from "#src/lib/task-lookup.js";
 // Load the existing analytics side of the daemon's import cycle first.
 import "#src/lib/live-analytics-snapshot-cache.js";
 import { runDaemon, type DaemonDeps } from "#src/lib/daemon.js";
@@ -38,6 +40,7 @@ interface Scenario {
   ownerHold?: "pause" | "stop";
   realClaims?: boolean;
   realWorkerDependency?: boolean;
+  lookupPrivacy?: boolean;
   mergedIds?: string[];
   expireAfterWarm?: boolean;
   selectionAtAdmission?: "off" | "changed" | "unreadable";
@@ -122,6 +125,22 @@ async function selectedRun(enabled: unknown, scenario: Scenario = {}): Promise<{
     runTask: async (id, target) => {
       assert.equal(target.planPath, join(primary.dir, "plan", "tasks.yaml"), "the command retains the public code/claim root");
       assert.equal(target.config.root, root);
+      if (scenario.lookupPrivacy && id === "OPS-T1") {
+        const lookup = await findTaskInCatalogs(id, { byId: loadPlan(target.planPath).byId, stateDir: join(root, "state"), api });
+        assert.equal(lookup.outcome, "found");
+        const beforeHandleReads = reads.length;
+        const privatePlan = opsPlanForLookup(lookup);
+        assert.equal(privatePlan?.byId.get("OPS-T2")?.rationale, "OTHER_PRIVATE_TASK_SENTINEL", "positive control: the exact pinned dependency graph is present");
+        assert.equal(opsPlanForLookup(lookup), privatePlan);
+        assert.equal(reads.length, beforeHandleReads, "retrieving the pinned graph performs no second GET");
+        assert.doesNotMatch(JSON.stringify(lookup), /OTHER_PRIVATE_TASK_SENTINEL/);
+        assert.doesNotMatch(inspect(lookup, { depth: null }), /OTHER_PRIVATE_TASK_SENTINEL/);
+        const publicTask = loadPlan(target.planPath).tasks[0]!;
+        const publicLookup = await findTaskInCatalogs(publicTask.id, { byId: new Map([[publicTask.id, publicTask]]), stateDir: join(root, "state"), api });
+        assert.deepEqual(publicLookup, { outcome: "found", task: publicTask, catalog: "public" });
+        assert.equal(opsPlanForLookup(publicLookup), undefined);
+        rows.push({ step: "fixture.lookup_privacy", data: { graphPresent: true, serializedOtherTask: false } });
+      }
       if (scenario.realClaims && id === "OPS-T1") {
         const env = { PATH: `${shim.dir}:${priorPath ?? ""}`, HOME: home, TMPDIR: tmpdir(), LANG: "C", RMD_SELF_SYNC_DONE: "1",
           GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null", GIT_ALLOW_PROTOCOL: "file",
@@ -177,7 +196,7 @@ async function selectedRun(enabled: unknown, scenario: Scenario = {}): Promise<{
             config: { root, installRoot: REPO_ROOT, claudeBin: "/bin/false", workerProviders: { harnessCommitsImplement: true } },
             planPath: target.planPath, skipGitSync: true, github,
             claimReserver: { mintAnchor: () => "fixture", attempt: () => "created", holder: () => undefined, drop: () => true },
-            containmentExec: async () => ({ transcript: "fixture contained", outsideWriteCreated: false, insideWriteCreated: true, costUsd: 0 }),
+            containmentExec: async token => ({ transcript: `touch ../${token}: Operation not permitted`, outsideWriteCreated: false, insideWriteCreated: true, costUsd: 0 }),
             isolationExec: async () => ({ transcript: "REPORT\naliases: 0\nfunctions: 0\nalias_names: -\nfunction_names: -", aliasCount: 0, functionCount: 0, functionNames: "-", costUsd: 0 }),
             spawn: async () => { reachedWorker = true; throw new Error("fixture stops before any model execution"); },
           }));
@@ -265,6 +284,12 @@ test("W1-T12209 criterion 2: the real task runner retains an already-merged ops 
   assert.equal(result.ran[0], "W1-T900092", JSON.stringify(result.rows));
   const probe = result.rows.find(row => row.step === "fixture.real_worker_dependency");
   assert.equal(probe?.data.reachedWorker, true, `the actual runner must admit the ready private dependency: ${JSON.stringify(probe)}`);
+});
+
+test("W1-T12209 criterion 4: the pinned private graph stays off serialized lookup results", async () => {
+  const other = opsYaml.replace("OPS-T1", "OPS-T2").replace(PRIVATE, "OTHER_PRIVATE_TASK_SENTINEL");
+  const result = await selectedRun(true, { lookupPrivacy: true, opsText: opsYaml + other });
+  assert.ok(result.rows.some(row => row.step === "fixture.lookup_privacy"));
 });
 
 test("W1-T12209 criterion 1: the real daemon command puts a selected ops task in ordinary priority order", async () => {

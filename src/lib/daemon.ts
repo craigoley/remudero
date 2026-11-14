@@ -144,7 +144,8 @@ import {
 } from "./arm-auto-merge.js";
 // Pure shared gate; dispatch-governor.ts explains why drain.ts cannot share it from here (W1-T342).
 import { checkDispatchGovernors, checkNewBuildReservation, governorDeferPayload, newBuildReservationPayload, type DispatchGovernorDeps, type DispatchGovernorVerdict, type MemoryReadTracker, type QuietHoursHoldResult } from "./dispatch-governor.js";
-import { assertRunnable, parseTasksFromYaml, PlanError, TASK_RISKS, TASK_STATUSES, TASK_TYPES, TaskAdmissionError, type MergedResolver, type Plan, type Task } from "./plan.js";
+import { assertRunnable, PlanError, TaskAdmissionError, type MergedResolver, type Plan, type Task } from "./plan.js";
+import { composeSecondaryPlan } from "./task-lookup.js";
 import { resolveReleases, closedUnmergedRunBranchRefs, type DispatchFilterReason, type ReleaseResolution } from "./drain.js";
 import type { StatusProjection } from "./status.js";
 import { ENVIRONMENTAL_BLOCK_COOLDOWN_MS, INDEPENDENT_BLOCK_RELEASED_STEP, isEnvironmentalBlock, PRE_RESTORE_RUN_VERDICT_STAGES, type IndependentBlockRelease } from "./status.js";
@@ -2083,66 +2084,6 @@ export interface SecondaryCatalogShadowResult {
   combined_candidate_count: number | null;
   secondary_candidate_count: number | null;
   displaced_primary_count: number | null;
-}
-
-function isParsedPlanTask(value: unknown): value is Task {
-  if (value === null || typeof value !== "object") return false;
-  const task = value as Task;
-  return typeof task.id === "string" && task.id.length > 0 &&
-    typeof task.title === "string" && task.title.length > 0 &&
-    typeof task.repo === "string" && task.repo.length > 0 &&
-    Array.isArray(task.depends_on) && task.depends_on.every((dependency) => typeof dependency === "string") &&
-    TASK_TYPES.includes(task.type) && TASK_RISKS.includes(task.risk) && TASK_STATUSES.includes(task.status) &&
-    (task.verify === "auto" || task.verify === "human") &&
-    (task.dispatch_hold === undefined || typeof task.dispatch_hold === "boolean") &&
-    (task.priority === undefined || typeof task.priority === "number");
-}
-
-function isParsedPlanSnapshot(value: unknown): value is Plan {
-  try {
-    if (value === null || typeof value !== "object") return false;
-    const plan = value as Plan;
-    if (!Array.isArray(plan.tasks) || !(plan.byId instanceof Map) || plan.byId.size !== plan.tasks.length) return false;
-    // A manually constructed snapshot can bypass parse-time constraints such as not_before and precondition.
-    // Revalidate a detached serialization through the canonical plan parser before trusting any task.
-    const serializedTasks = JSON.stringify(plan.tasks);
-    if (typeof serializedTasks !== "string" || parseTasksFromYaml(serializedTasks, "secondary catalog shadow snapshot").length !== plan.tasks.length) return false;
-    const seen = new Set<string>();
-    for (const value of plan.tasks) {
-      if (!isParsedPlanTask(value)) return false;
-      const task = value;
-      if (seen.has(task.id) || plan.byId.get(task.id) !== task) return false;
-      seen.add(task.id);
-    }
-    for (const [id, task] of plan.byId) {
-      if (typeof id !== "string" || !seen.has(id) || task?.id !== id) return false;
-    }
-    return true;
-  } catch (error: unknown) {
-    // A hostile snapshot getter/proxy is malformed; never expose its value or partially trust it.
-    void error;
-    return false;
-  }
-}
-
-type SecondaryComposition =
-  | { outcome: "ok"; plan: Plan; secondaryIds: ReadonlySet<string> }
-  | { outcome: "malformed" | "duplicate_task_id" | "invalid_cross_catalog_dependency"; taskId?: string };
-
-/** One atomic graph rule shared by observation and explicit live selection. */
-function composeSecondaryPlan(primary: Plan, secondary: Plan): SecondaryComposition {
-  if (!isParsedPlanSnapshot(primary) || !isParsedPlanSnapshot(secondary)) return { outcome: "malformed" };
-  const primaryIds = new Set(primary.tasks.map(task => task.id));
-  const duplicate = secondary.tasks.find(task => primaryIds.has(task.id));
-  if (duplicate) return { outcome: "duplicate_task_id", taskId: duplicate.id };
-  const secondaryIds = new Set(secondary.tasks.map(task => task.id));
-  if (primary.tasks.some(task => task.depends_on.some(id => secondaryIds.has(id))) ||
-    secondary.tasks.some(task => task.depends_on.some(id => !primaryIds.has(id) && !secondaryIds.has(id)))) {
-    return { outcome: "invalid_cross_catalog_dependency" };
-  }
-  return { outcome: "ok", secondaryIds, plan: {
-    tasks: [...primary.tasks, ...secondary.tasks], byId: new Map([...primary.byId, ...secondary.byId]),
-  } };
 }
 
 /**
