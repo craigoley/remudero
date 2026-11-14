@@ -17,6 +17,7 @@ import { defaultIsPidAlive } from "./drain-lock.js";
 import { RmdError } from "./errors.js";
 import { brokerGhRead, ghBrokerClientSpawn, ghBrokerRouteFor, type GhBrokerClass, type GhBrokerResult } from "./gh-read-broker-client.js";
 import { refreshInstallationToken } from "./github-app.js";
+import { createInstallationBudget, type InstallationBudget } from "./github-installation-budget.js";
 import { ghArgvNeedsNoCredential, githubRepoOfGhArgv, resolveGithubCredential } from "./github-credential.js";
 import { sameHost } from "./host-identity.js";
 import { LIVE_WRITE_SENTINEL_TOKEN, LiveWriteBlockedError } from "./live-write-guard.js";
@@ -273,7 +274,9 @@ export function ghJson(
   const out = exec(spawned.file, spawned.args, exec === execFileSync ? withGhCredentialEnv(spawned.file, spawned.args, execOpts) : execOpts);
   if (!isApiCall) return parseGhJsonBody(args, out);
   const { headers, body } = splitGhHeaderBlock(out, args.includes("--slurp"));
-  if (onRateLimit) onRateLimit(parseGhRateLimitHeaders(headers));
+  const reading = parseGhRateLimitHeaders(headers);
+  githubInstallationBudget().record(reading);
+  if (onRateLimit) onRateLimit(reading);
   return parseGhJsonBody(args, body);
 }
 
@@ -394,7 +397,9 @@ export async function ghJsonAsync(
   const stdout = await ghStdoutAsync(args, execArgs, execAsync, readOpts);
   if (!withHeaders) return parseGhJsonBody(args, stdout);
   const { headers, body } = splitGhHeaderBlock(stdout, args.includes("--slurp"));
-  onRateLimit(parseGhRateLimitHeaders(headers));
+  const reading = parseGhRateLimitHeaders(headers);
+  githubInstallationBudget().record(reading);
+  onRateLimit(reading);
   return parseGhJsonBody(args, body);
 }
 
@@ -562,6 +567,17 @@ export class GhPaceFloorStandDownError extends Error {
   }
 }
 
+let processInstallationBudget: InstallationBudget = createInstallationBudget({ consumers: undefined, clock: systemClock });
+
+/** W1-T12553: the one installation budget every pacer in this process reads. */
+export function githubInstallationBudget(): InstallationBudget {
+  return processInstallationBudget;
+}
+
+export function configureGithubInstallationBudget(budget: InstallationBudget | undefined): void {
+  processInstallationBudget = budget ?? createInstallationBudget({ consumers: undefined, clock: systemClock });
+}
+
 export interface GhCallPacer {
   wait(): void;
   recordResult(rateLimited: boolean, budget?: GhBudgetReading): void;
@@ -605,20 +621,35 @@ export function createGhCallPacer(
   return {
     wait() {
       takeStandDown();
+      const budget = githubInstallationBudget();
+      const admit = budget.admit();
+      if (!admit.ok) {
+        budget.noteThrottle(admit.reason);
+        throw new GhPaceFloorStandDownError(admit.reading);
+      }
       if (lastCallAt !== undefined) {
         const remaining = gapMs - (now() - lastCallAt);
         if (remaining > 0) gapSleepSync(remaining);
       }
       lastCallAt = now();
+      budget.noteRead();
     },
     async waitAsync() {
       takeStandDown();
+      const budget = githubInstallationBudget();
+      const admit = budget.admit();
+      if (!admit.ok) {
+        budget.noteThrottle(admit.reason);
+        await sleep(Math.max(0, admit.waitUntil * 1000 - now()));
+      }
+      budget.noteRead();
       const remaining = lastCallAt === undefined ? 0 : gapMs - (now() - lastCallAt);
       // The slot is claimed before the timer, so a second waiter queues behind it rather than beside it.
       lastCallAt = now() + Math.max(0, remaining);
       if (remaining > 0) await sleep(remaining);
     },
     recordResult(rateLimited, budget) {
+      if (rateLimited) githubInstallationBudget().noteThrottle("refused");
       const lowWater = budget !== undefined && budget.limit > 0 && budget.remaining <= budget.limit * lowWaterFraction;
       gapMs = rateLimited || lowWater ? rateLimitGapMs : minGapMs;
       standDown = budget !== undefined && budget.limit > 0 && budget.remaining <= budget.limit * floorFraction ? budget : undefined;

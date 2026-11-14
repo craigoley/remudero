@@ -19,7 +19,10 @@ import { execFileSync } from "node:child_process";
 import { execFileLoopBounded } from "../../lib/loop-bounded-child.js";
 import { GATEWAY_FETCH_TIMEOUT_MS } from "../../lib/git-fetch-retry.js";
 import { productionDispatchBreakJudge, productionFixProgressJudge } from "../../lib/sweep.js";
-import { ghExec, ghJsonAsync, ghTextAsync } from "../../lib/github-transport.js";
+import { configureGithubInstallationBudget, ghExec, ghJsonAsync, ghTextAsync } from "../../lib/github-transport.js";
+import { createInstallationBudget } from "../../lib/github-installation-budget.js";
+import { DEFAULT_HOST_INSTANCE_REGISTRY_PATH, installationConsumers } from "../../lib/instance-registry.js";
+import { GH_APP_INSTALLATION_ID_ENV } from "../../lib/github-app.js";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { homedir, hostname } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
@@ -58,7 +61,7 @@ import { daemonInstanceRegistryPath } from "../../lib/deployer.js";
 import { DEPENDABOT_REPAIR_SNAPSHOT_MAX_AGE_MS } from "../../lib/dep-review.js";
 import { withEscalationSpoolDrain } from "../../lib/host-escalation-spool.js";
 import { instanceMode, readInstanceRegistryText } from "../../lib/instance-mode.js";
-import { instanceRegistryRuntimePresent, ledgerSelectedRegistryReadTimeouts, selectedInstanceRegistryEnvPath, withInstanceRegistryRuntime } from "../../lib/instance-registry-selection.js";
+import { instanceRegistryRuntimePresent, ledgerSelectedRegistryReadTimeouts, runtimeInstanceRegistryText, selectedInstanceRegistryEnvPath, withInstanceRegistryRuntime } from "../../lib/instance-registry-selection.js";
 import { escalate, escalateWithJudge, realEscalationJudge, ghIssueGateway, ghIssueGatewayAsync, type Escalation, type EscalationJudgeVerdict } from "../../lib/escalate.js";
 import { createGhCallPacer } from "../../lib/open-prs-rest.js";
 import { buildMainHealthRung } from "../../lib/main-health-rung.js";
@@ -1052,6 +1055,7 @@ export async function daemonCommand(
     onMainEntryStep?.(step);
   };
   ledgerSelectedRegistryReadTimeouts(log);
+  startDaemonInstallationBudget(() => daemonInstallationRegistry(repoRoot), process.env, log);
   // bundlemain: which entry this main started from (bin/rmd's choice), and a bundled main's first tick settles it.
   onMainEntryStep = startMainEntryWatch({ log, root: daemonModuleRepoDir });
   // W1-T9065: the lane's approve and the responder's reframe run from a tree at origin/main.
@@ -2696,4 +2700,56 @@ export async function daemonCommand(
       await stopReadPlane().catch((error: unknown) => log("daemon.cleanup_failed", { resource: "read_plane", error: String(error) }));
     }
   }
+}
+
+export const GITHUB_BUDGET_CONFIGURED_STEP = "github.budget.configured";
+
+/** W1-T12553: the registry that names this host's installations: the selected copy, the host copy, then the checkout's. */
+export function daemonInstallationRegistry(repoRoot: string): { text: string; source: string } | undefined {
+  const selected = runtimeInstanceRegistryText();
+  if (selected !== undefined) return { text: selected, source: "selected" };
+  try {
+    return { text: readFileSync(DEFAULT_HOST_INSTANCE_REGISTRY_PATH, "utf8"), source: DEFAULT_HOST_INSTANCE_REGISTRY_PATH };
+  } catch {
+    // No host copy (a container): the checkout's registry below is the next source, so this does not throw.
+  }
+  const text = readInstanceRegistryText(repoRoot);
+  return text === undefined ? undefined : { text, source: daemonInstanceRegistryPath(repoRoot) };
+}
+
+/**
+ * W1-T12553 — give this daemon its share of the GitHub App installation it shares with the other
+ * instances and hand runs. Every pacer in the process reads the budget set here. No installation id,
+ * an unreadable registry or no instance on the installation sets no budget, and the row says why.
+ */
+export function startDaemonInstallationBudget(
+  readRegistry: () => { text: string; source: string } | undefined,
+  env: NodeJS.ProcessEnv,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  clock: Clock = systemClock,
+): void {
+  const installationId = env[GH_APP_INSTALLATION_ID_ENV]?.trim();
+  const instance = env.RMD_INSTANCE_NAME?.trim() || "unknown";
+  const unset = (reason: string, extra: Record<string, unknown> = {}): void => {
+    configureGithubInstallationBudget(undefined);
+    log(GITHUB_BUDGET_CONFIGURED_STEP, { outcome: "unconfigured", instance, reason, ...extra });
+  };
+  if (!installationId) return unset("no_installation_id");
+  let read: { text: string; source: string } | undefined;
+  let consumers: number | undefined;
+  try {
+    read = readRegistry();
+    consumers = read === undefined ? undefined : installationConsumers(read.text, installationId);
+  } catch (err) {
+    return unset("registry_unreadable", { installation_id: installationId, error: err instanceof Error ? err.message : String(err) });
+  }
+  if (read === undefined) return unset("registry_unreadable", { installation_id: installationId });
+  if (consumers === undefined) return unset("no_instance_on_installation", { installation_id: installationId, source: read.source });
+  configureGithubInstallationBudget(createInstallationBudget({
+    consumers,
+    instance,
+    clock,
+    onThrottle: ({ step, ...row }) => log(step, row),
+  }));
+  log(GITHUB_BUDGET_CONFIGURED_STEP, { outcome: "configured", instance, installation_id: installationId, consumers, source: read.source });
 }
