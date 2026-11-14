@@ -477,6 +477,7 @@ export function startInstallationTokenRefresh(opts: {
   const setTimer = opts.setTimer ?? ((fn, ms) => setTimeout(fn, ms));
   const now = opts.now ?? Date.now;
   let lastSuccessfulExpiresAtMs: number | undefined;
+  let immediateFailureRetryUsed = false;
   let stopped = false;
   let timer: { unref?: () => void } | undefined;
   let dueAt = now();
@@ -490,6 +491,13 @@ export function startInstallationTokenRefresh(opts: {
     dueAt = now() + delay;
     timer = setTimer(tick, delay);
     timer.unref?.();
+  };
+  const failedRefreshDelay = (): number => {
+    if (immediateFailureRetryUsed) return REFRESH_FAILURE_RETRY_MS;
+    const delay = nextFailedRefreshDelayMs(lastSuccessfulExpiresAtMs, now());
+    // A stale expiry permits one urgent attempt, never an unbounded zero-delay loop.
+    if (delay === 0) immediateFailureRetryUsed = true;
+    return delay;
   };
   const settled = (): void => {
     cycles.push(Math.max(0, now() - dueAt));
@@ -518,11 +526,11 @@ export function startInstallationTokenRefresh(opts: {
         if (result.ok && result.expiresAtMs !== undefined) {
           lastSuccessfulExpiresAtMs = result.expiresAtMs;
           failures = 0;
+          immediateFailureRetryUsed = false;
           rearm(nextRefreshDelayMs(result.expiresAtMs, now(), refreshLeadMs(cycles)));
           return result;
         }
-        // Once the loop has a retained expiry, failure retries must leave room for one full exchange.
-        rearm(nextFailedRefreshDelayMs(lastSuccessfulExpiresAtMs, now()));
+        rearm(failedRefreshDelay());
         warnIfNearExpiry(result.reason);
         return result;
       },
@@ -533,7 +541,7 @@ export function startInstallationTokenRefresh(opts: {
         // depend on a second write to the filesystem that just failed. The explanatory write
         // below is best-effort and guarded: if it throws too, that is swallowed.
         settled();
-        rearm(nextFailedRefreshDelayMs(lastSuccessfulExpiresAtMs, now()));
+        rearm(failedRefreshDelay());
         try {
           opts.log?.(TOKEN_REFRESH_FAILED_STEP, {
             reason: `refresh threw: ${err instanceof Error ? err.message : String(err)}`,
