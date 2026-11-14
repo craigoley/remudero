@@ -14731,6 +14731,13 @@ export function fleetWithheldStageMs(rows: ReadonlyArray<Record<string, unknown>
   return held;
 }
 
+/** W1-T12542 — the ts of the stage's last ended fix round: its newest `fix.dispatch` or pushed `fix.done` row. */
+function lastFixRoundEndedAt(stageRows: ReadonlyArray<Record<string, unknown>>): string | undefined {
+  return stageRows.filter(row => row.step === "fix.dispatch" || (row.step === "fix.done" && typeof row.pushed_head_sha === "string"))
+    .map(row => String(row.ts)).filter(ts => Number.isFinite(Date.parse(ts)))
+    .sort((a, b) => Date.parse(a) - Date.parse(b)).at(-1);
+}
+
 /** PR 14405 and its follow-up: preservation failures can be revalidated by the same helper.
  *  A failed stale-dirty reset waits for a new claim attempt after backoff; saving bytes again
  *  cannot prove that the reset will succeed. */
@@ -19792,9 +19799,12 @@ export async function runSweep(
       (fixSeedRead(ledgerLines, pr, deps.runId)?.kind ?? "live") === "live" &&
       ledgerLines.some(row => row.step === "sweep.disposed" && row.pr_number === pr.prNumber && row.acted === true &&
         row.head_sha === pr.headSha && Date.parse(String(row.ts)) >= since);
-    if ((fields.blocker === "conflict" || fields.blocker === "own-red") &&
-        (repairStarted || roundInFlight || stageRows.some(row => row.step === "fix.dispatch" ||
-          (row.step === "fix.done" && typeof row.pushed_head_sha === "string")) ||
+    // W1-T12542: an ended round silences the backstop only while its quiet time since, less held time, is in bound.
+    const lastRoundEnd = fields.blocker === "conflict" || fields.blocker === "own-red" ? lastFixRoundEndedAt(stageRows) : undefined;
+    const lastRoundEndMs = Date.parse(String(lastRoundEnd));
+    const recentRound = lastRoundEnd !== undefined && (!bound || now - lastRoundEndMs -
+      fleetWithheldStageMs(stageRows.filter(row => Date.parse(String(row.ts)) >= lastRoundEndMs), now) <= bound.minutes * 60_000);
+    if ((fields.blocker === "conflict" || fields.blocker === "own-red") && (repairStarted || roundInFlight || recentRound ||
           (priorBlockerByPr.get(pr.prNumber)?.blocker === fields.blocker &&
             ledgerLines.findLast(row => row.step === "sweep.disposed" && row.pr_number === pr.prNumber)?.head_sha !== pr.headSha))) return;
     const signatureOf = (reason: string): string => reason
@@ -19812,7 +19822,8 @@ export async function runSweep(
     const repeated = [...repeats].filter(([, count]) => count > 1).sort((a, b) => b[1] - a[1])[0];
     const repeatDiagnosis = repeated ? `repeat: ${JSON.stringify(repeated[0])} x${repeated[1]}` : undefined;
     const boundFields = { ...(ownerless ? { owner: "none" } : { bound_minutes: bound?.minutes, bound_kind: bound?.kind }),
-      ...(stageHistoryError ? { stage_history_error: stageHistoryError } : {}) };
+      ...(stageHistoryError ? { stage_history_error: stageHistoryError } : {}),
+      ...(lastRoundEnd === undefined ? {} : { last_fix_round_ended_at: lastRoundEnd }) };
     const recordStuck = (row: Record<string, unknown> & { diagnosis: string }): void => {
       record("pr.stuck", row);
       stuckStages.set(key, row);
@@ -19953,7 +19964,8 @@ export async function runSweep(
     const reason = `PR stage stalled: #${pr.prNumber} ${pr.prUrl} — ${fields.blocker} for ` +
       `${Math.floor(fields.blocker_age_ms / 60_000)} minutes ` +
       `${ownerless ? "(owner: none)" : `(BACKSTOP ${bound?.minutes})`}; since ${fields.blocker_since}; DIAGNOSIS: ${diagnosis}` +
-      (heldMs > 0 ? `; the fleet itself withheld the repair for ${Math.floor(heldMs / 60_000)} of those minutes` : "");
+      (heldMs > 0 ? `; the fleet itself withheld the repair for ${Math.floor(heldMs / 60_000)} of those minutes` : "") +
+      (lastRoundEnd === undefined ? "" : `; the last fix round ended at ${lastRoundEnd}`);
     const row = { pr_number: pr.prNumber, ...fields, diagnosis, ...boundFields,
       held_ms: heldMs, ...escalationFields };
     recordStuck(row);
