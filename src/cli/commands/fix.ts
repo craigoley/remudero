@@ -2693,6 +2693,7 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
     const holdHeadSha = prNumber === undefined ? review.headSha : conflictRoundHeldHead(
       { taskId: opts.taskId, prNumber, prUrl: opts.prUrl, headSha: review.headSha },
       [...(deps.ledgerLines ?? (() => readLedgerLines(deps.ledgerPath)))(), ...roundRows],
+      deps.ledgerPath,
     );
     let preStrikeStandDown = await fixRungStandDownReason(
       deps.readLiveState,
