@@ -115,6 +115,8 @@ export const READ_MODEL_ORACLE_CHILD_STEP = "read_model.oracle_child_exited";
  * 0.6-1.4 s/instance per generation and nav-badge ~130 ms idle: unbudgeted ticks took 2-4 s.
  */
 export const READ_MODEL_VIEW_SHARE = 0.4;
+/** BACKSTOP: sample the first would-be skip and every twentieth thereafter to detect missing inputs. */
+export const READ_MODEL_SKIP_AUDIT_EVERY = 20;
 /**
  * {@link ReadModelView.readPaced}: after this unread window, each finished build doubles the wait;
  * a read restores cost / share cadence (stale units run next tick). MEASURED 2026-10-06 20:25Z to
@@ -296,6 +298,8 @@ export interface ReadModelView {
   ledgerReads?(db: ReadModelDb): string | null;
   /** What reuse fingerprints instead of `ledgerReads` when the two differ; it never stamps a source's asOf. */
   digestReads?(db: ReadModelDb): string | null;
+  /** All body and source inputs; undefined means this call cannot certify reuse. */
+  inputsFingerprint?(ctx: ReadModelViewContext): string | undefined;
   /** Work ahead of `materialize`, one bounded step per `more()`; false while some remains, and no body is built before it is done. */
   prepare?(ctx: ReadModelViewContext, more: () => boolean): boolean;
   stages?(ctx: ReadModelViewContext): Record<string, number> | undefined;
@@ -887,6 +891,8 @@ interface ViewUnit {
   lastBuiltAt?: number;
   lastInputDigest?: InputDigest;
   builtKeys?: string[];
+  skipCandidates?: number;
+  skipMismatch?: true;
 }
 
 /** A unit's inputs as named parts, in the order a moved part is reported; two digests are equal when every part is. */
@@ -1571,11 +1577,11 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
     return finished + waitMs * unit.stretch;
   }
 
-  function inputDigest(ctx: ReadModelViewContext, readAsOf: Map<string, string | null> | undefined): InputDigest | undefined {
-    if (!readAsOf || readAsOf.size === 0 || !ctx.sourceStore) return undefined;
+  function inputDigest(ctx: ReadModelViewContext, readAsOf: Map<string, string | null> | undefined, view: ReadModelView): InputDigest | undefined {
+    if ((!view.inputsFingerprint && (!readAsOf || readAsOf.size === 0)) || !ctx.sourceStore) return undefined;
     const stores = [...new Set([ctx.sourceStore, ...ctx.instances.flatMap(({ db }) => db ? [db] : [])])];
-    const generations = stores.map(db => [db.path, fileIno(db.path), db.meta("generation")]);
-    if (generations.some(([, ino, generation]) => ino === undefined || generation === undefined || !/^\d+$/.test(generation))) return undefined;
+    const generations = stores.map(db => [db.path, fileIno(db.path), view.inputsFingerprint ? undefined : db.meta("generation")]);
+    if (generations.some(([, ino, generation]) => ino === undefined || !view.inputsFingerprint && (generation === undefined || !/^\d+$/.test(generation)))) return undefined;
     if (ctx.instances.some(({ db, state }) => !db || state.reason || state.failures > 0 || state.lease !== "held")) return undefined;
     const plans = ctx.instances.map(({ state }) => {
       const path = opts.instances.find(instance => instance.name === state.instance)?.planPath;
@@ -1584,32 +1590,47 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
       if (!pin) statSync(path); // An unreadable plan is not evidence of unchanged inputs.
       return [path, pin || planFilesIdentity(path)];
     });
+    if (view.inputsFingerprint) {
+      const inputs = view.inputsFingerprint(ctx);
+      if (inputs === undefined) return undefined;
+      const ownership = stores.map(db => {
+        const slot = slots.find(slot => slot.db === db);
+        const lease = db.prepare("SELECT holder, expires_ms FROM lease WHERE name = ?").get(PROJECTOR_LEASE_NAME);
+        if (!slot || slot.state.reason || slot.state.failures > 0 || slot.state.lease !== "held" || !slot.lease || !lease || lease.holder !== slot.lease.holder || Number(lease.expires_ms) <= ctx.now) return undefined;
+        return [slot.state.instance, slot.state.lease, slot.state.heldBy, lease.holder];
+      });
+      if (ownership.some(state => state === undefined)) return undefined;
+      const state = [generations.map(([path, ino]) => [path, ino]), ownership];
+      return Object.entries({ inputs, plan: plans, state, switches: ctx.switches, shadow: ctx.shadow })
+        .map(([part, value]) => [part, JSON.stringify(value) ?? "null"] as const);
+    }
     const snapshots = ctx.sourceStore.prepare("SELECT instance, name, as_of, error, error_ms FROM source_snapshot ORDER BY instance, name").all();
     if (snapshots.some(snapshot => snapshot.error !== null)) return undefined;
     // Status reads these alongside generation. Quarantined diagnostics can leave generation unchanged.
     const states = ctx.instances.map(({ state, db }) => [state.instance, state.generation, state.lease, state.heldBy,
       Number(db!.prepare("SELECT count(*) AS n FROM quarantine").get()?.n ?? 0)]);
-    const parts = { ledger: Array.from(readAsOf), plan: plans, generation: generations, state: states, snapshot: snapshots, switches: ctx.switches, shadow: ctx.shadow };
+    const parts = { ledger: Array.from(readAsOf!), plan: plans, generation: generations, state: states, snapshot: snapshots, switches: ctx.switches, shadow: ctx.shadow };
     return Object.entries(parts).map(([part, value]) => [part, JSON.stringify(value) ?? "null"] as const);
   }
 
   /** File-backed and other undeclared sources need their producer; a ledger declaration cannot verify them. */
-  function reusableSources(unit: ViewUnit, ctx: ReadModelViewContext): boolean {
+  function reusableSources(unit: ViewUnit, ctx: ReadModelViewContext, declared: boolean): boolean {
     return unit.builtKeys !== undefined && unit.builtKeys.length > 0 && unit.builtKeys.every(id => {
       const entry = latest.get(id);
       return entry !== undefined && entry.body.sources.every(source => source.state === "fresh" &&
-        (ctx.instances.some(({ state }) => source.name === `${LEDGER_SOURCE_PREFIX}${state.instance}`) || ctx.instances.some(({ state }) =>
+        (declared ? source.name.startsWith(LEDGER_SOURCE_PREFIX) || judgeSource(source, ctx.now).state === "fresh" :
+          ctx.instances.some(({ state }) => source.name === `${LEDGER_SOURCE_PREFIX}${state.instance}`) || ctx.instances.some(({ state }) =>
           source.name === `plan:${state.instance}` && opts.instances.some(instance => instance.name === state.instance && instance.planPath !== undefined))));
     });
   }
 
-  function restamp(unit: ViewUnit, ctx: ReadModelViewContext, readAsOf: Map<string, string | null> | undefined): void {
+  function restamp(unit: ViewUnit, ctx: ReadModelViewContext, readAsOf: Map<string, string | null> | undefined, declared: boolean): void {
     for (const id of unit.builtKeys!) {
       const entry = latest.get(id)!;
       const sources = entry.body.sources.map(source => {
         const instance = ctx.instances.find(({ state }) => source.name === `${LEDGER_SOURCE_PREFIX}${state.instance}`);
         return instance ? { ...ledgerSource(instance.state, ctx.now), ...(readAsOf?.has(source.name) ? { asOf: readAsOf.get(source.name)! } : {}) }
-          : { ...source, asOf: fixedClock(ctx.now).iso() };
+          : declared ? source : { ...source, asOf: fixedClock(ctx.now).iso() };
       });
       publishEntry({ ...entry, body: { ...entry.body, sources, asOf: oldestAsOf(sources) } });
     }
@@ -1640,24 +1661,45 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
         const read = live.ledgerReads;
         const readAsOf = read ? new Map(scoped.instances.map(({ state, db }) =>
           [`${LEDGER_SOURCE_PREFIX}${state.instance}`, db ? read(db) : null])) : undefined;
-        const reusable = reusableSources(unit, scoped);
-        const fingerprint = live.digestReads;
+        const declared = live.inputsFingerprint !== undefined;
+        const reusable = reusableSources(unit, scoped, declared);
+        const fingerprint = declared ? undefined : live.digestReads;
         const digestAsOf = fingerprint ? new Map(scoped.instances.map(({ state, db }) =>
           [`${LEDGER_SOURCE_PREFIX}${state.instance}`, db ? fingerprint(db) : null])) : readAsOf;
-        try { if (unit.builtKeys === undefined || reusable) digest = inputDigest(scoped, digestAsOf); }
+        try { if (unit.builtKeys === undefined || reusable) digest = inputDigest(scoped, digestAsOf, live); }
         catch (error) { log("read_model.view_digest_unreadable", { ...named, error: (error as Error).message }); }
-        why = notSkippedReason(unit, digestAsOf !== undefined, reusable, digest);
+        why = unit.skipMismatch ? "mismatch" : notSkippedReason(unit, declared || digestAsOf !== undefined, reusable, digest);
+        if (declared && digest === undefined && why === "unreadable") why = "inputs";
+        let audit = false;
+        if (why === undefined && declared) {
+          audit = (unit.skipCandidates ?? 0) % READ_MODEL_SKIP_AUDIT_EVERY === 0;
+          unit.skipCandidates = (unit.skipCandidates ?? 0) + 1;
+          if (audit) why = "audit";
+        }
         if (why === undefined) {
-          restamp(unit, scoped, readAsOf);
+          restamp(unit, scoped, readAsOf, declared);
           skipped = true;
         } else {
-          for (const { key, data, sources } of live.materialize(scoped)) {
+          const bodies = live.materialize(scoped);
+          if (audit) {
+            const expected = new Map((unit.builtKeys ?? []).map(id => [id, latest.get(id)?.etag]));
+            const actual = new Map(bodies.map(({ key, data, sources }) => [`${view.name}\u0000${key}`,
+              viewEtag(view.name, live!.version, sources.some(source => source.state !== "fresh"), data)]));
+            const differingKeys = [...new Set([...expected.keys(), ...actual.keys()])]
+              .filter(id => expected.get(id) !== actual.get(id)).length;
+            if (differingKeys > 0) {
+              unit.skipMismatch = true;
+              log("read_model.view_skip_mismatch", { ...named, differing_keys: differingKeys });
+            }
+          }
+          for (const { key, data, sources } of bodies) {
             yielded++;
             const stamped = readAsOf ? sources.map((source) => readAsOf.has(source.name)
               ? { ...source, asOf: readAsOf.get(source.name)! } : source) : sources;
             publish(view.name, live.version, key, data, stamped, generation, buildStartedMs, live.qualificationGeneration);
             builtKeys.push(`${view.name}\u0000${key}`);
           }
+          if (declared) for (const id of unit.builtKeys ?? []) if (!builtKeys.includes(id)) drop(view.name, id.slice(view.name.length + 1));
         }
       }
       succeeded = ready && yielded > 0;

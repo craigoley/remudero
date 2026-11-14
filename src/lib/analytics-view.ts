@@ -157,6 +157,16 @@ export const ANALYTICS_SOURCE_NAMES: readonly string[] = [ANALYTICS_SOURCE_CONSO
 /** A snapshot older than two refresh cycles plus a timed-out scan has missed a refresh (the nav badge's bound). */
 export const ANALYTICS_STALE_AFTER_MS = 2 * ANALYTICS_REFRESH_INTERVAL_MS + ANALYTICS_REFRESH_TIMEOUT_MS;
 
+/** Snapshot metadata and clock comparisons, read through the (instance, name) primary key; never parse bodies. */
+export function snapshotInputs(db: ReadModelDb, instance: string, names: readonly string[], now: number): unknown[] {
+  const read = db.prepare("SELECT as_of, error, error_ms FROM source_snapshot WHERE instance = ? AND name = ?");
+  return names.map(name => {
+    const row = read.get(instance, name);
+    const at = row?.as_of === null || row?.as_of === undefined ? Number.NaN : Date.parse(String(row.as_of));
+    return [name, row ?? null, now < at, now - at > ANALYTICS_STALE_AFTER_MS];
+  });
+}
+
 /** What one instance's `console-v1` row holds: the projection, and the terms a cross-instance merge needs. */
 export interface AnalyticsConsoleSource {
   gardenerSpendSource?: GardenerSpendSource;
@@ -367,7 +377,8 @@ export function createAnalyticsView(opts: { modelApprovalConfig?: HostModelAppro
   name: string;
   version: number;
   snapshotSourced: true;
-  materialize(ctx: { now: number; instances: ReadonlyArray<{ state: { instance: string }; db?: ReadModelDb }> }): Array<{ key: string; data: AnalyticsViewData; sources: ViewSource[] }>;
+  inputsFingerprint(ctx: { now: number; sourceStore?: ReadModelDb; instances: ReadonlyArray<{ state: { instance: string }; db?: ReadModelDb }> }): string | undefined;
+  materialize(ctx: { now: number; sourceStore?: ReadModelDb; instances: ReadonlyArray<{ state: { instance: string }; db?: ReadModelDb }> }): Array<{ key: string; data: AnalyticsViewData; sources: ViewSource[] }>;
 } {
   const parsed = new WeakMap<ReadModelDb, Map<string, { asOf: string; console: AnalyticsConsoleSource; detailsKey?: string; details?: AnalyticsDetails }>>();
   const gardenerParsed = new WeakMap<ReadModelDb, Map<string, { asOf: string; repository?: string; source?: GardenerSpendSource; error?: string }>>();
@@ -375,8 +386,18 @@ export function createAnalyticsView(opts: { modelApprovalConfig?: HostModelAppro
     name: ANALYTICS_VIEW_NAME,
     version: ANALYTICS_VIEW_VERSION,
     snapshotSourced: true,
-    materialize: ({ now, instances }) => {
-      const db = instances[0]?.db;
+    // Four snapshot states, freshness thresholds and loaded approval config. Repository-flow refusals stamp now.
+    inputsFingerprint: ({ now, sourceStore, instances }) => {
+      const db = sourceStore ?? instances[0]?.db;
+      if (!db) return undefined;
+      const held = parsed.get(db);
+      if (!held || [...held.values()].some(snapshot => snapshot.console.repositoryFlow !== undefined)) return undefined;
+      return JSON.stringify([instances.map(({ state }) => [state.instance, snapshotInputs(db, state.instance,
+        [...ANALYTICS_SOURCE_NAMES, GARDENER_SPEND_SOURCE_NAME], now)]), opts.modelApprovalConfig,
+        opts.modelApprovalConfig ? now < Date.parse(opts.modelApprovalConfig.capturedAt ?? "") : false]);
+    },
+    materialize: ({ now, sourceStore, instances }) => {
+      const db = sourceStore ?? instances[0]?.db;
       if (db === undefined) return [];
       const states = sourceSnapshotStates(db, ANALYTICS_SOURCE_CONSOLE_V1);
       const signalStates = sourceSnapshotStates(db, ANALYTICS_SOURCE_SIGNALS);

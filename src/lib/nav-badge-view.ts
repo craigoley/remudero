@@ -545,17 +545,18 @@ export function startNavBadgeSourcePublisher(opts: Parameters<typeof createNavBa
 
 /** A file read again only when its mtime moves. */
 export function readOnMtimeChange<T>(read: (path: string) => T): (path: string) => T | undefined {
-  let last: { path: string; mtimeMs: number; value: T } | undefined;
+  let last: { path: string; identity: string; value: T } | undefined;
   return (path) => {
-    let mtimeMs: number;
+    let identity: string;
     try {
-      mtimeMs = statSync(path).mtimeMs;
+      const st = statSync(path, { bigint: true });
+      identity = [st.dev, st.ino, st.size, st.mtimeNs, st.ctimeNs].join(":");
     } catch {
       // deliberate: an absent input is cold, and each reader turns that into its own reason.
       last = undefined;
       return undefined;
     }
-    if (last?.path !== path || last.mtimeMs !== mtimeMs) last = { path, mtimeMs, value: read(path) };
+    if (last?.path !== path || last.identity !== identity) last = { path, identity, value: read(path) };
     return last.value;
   };
 }
@@ -581,6 +582,7 @@ function operatorAgentFacts(folds: AgentFolds, slot: AgentFoldSlot): readonly Op
 export function createNavBadgeReadModelView<S extends { instance: string; tickedAt?: number }>(ledgerSource: (state: S, now: number) => ViewSource, foldChunk?: number): {
   name: string;
   version: number;
+  inputsFingerprint(ctx: { now: number; instances: ReadonlyArray<{ state: S; db?: ReadModelDb; lease?: ReadModelLease }> }): string | undefined;
   prepare(ctx: { instances: ReadonlyArray<{ state: S; db?: ReadModelDb; lease?: ReadModelLease }> }, more: () => boolean): boolean;
   materialize(ctx: { now: number; instances: ReadonlyArray<{ state: S; db?: ReadModelDb; lease?: ReadModelLease }> }): Array<{ key: string; data: NavBadgeData; sources: ViewSource[] }>;
 } {
@@ -588,9 +590,32 @@ export function createNavBadgeReadModelView<S extends { instance: string; ticked
   const foldSlot = (instance: string, db: ReadModelDb, lease: ReadModelLease | undefined): AgentFoldSlot => ({ instance, db, ...(lease ? { lease } : {}) });
   const sourcesFile = readOnMtimeChange(readNavBadgeSources);
   const classification = readOnMtimeChange((path) => readClassificationSnapshot(dirname(path)));
+  let observed: { published?: NavBadgeSources; classified?: Classification } = {};
+  const fileIdentity = (path: string): unknown => {
+    try {
+      const st = statSync(path, { bigint: true });
+      return [path, st.dev, st.ino, st.size, st.mtimeNs, st.ctimeNs].map(String);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return [path, "absent"];
+      throw error;
+    }
+  };
   return {
     name: NAV_BADGE_VIEW_NAME,
     version: NAV_BADGE_VIEW_VERSION,
+    // Panel facts/readiness, sidecar and classification identities, and both snapshots' stale comparisons.
+    inputsFingerprint: ({ now, instances }) => {
+      const dbPath = instances.find(slot => slot.db)?.db?.path;
+      if (!dbPath) return undefined;
+      return JSON.stringify([fileIdentity(join(readModelSidecarDir(dirname(dbPath)), NAV_BADGE_SOURCES_FILE)),
+        observed.published ? fileIdentity(classificationSnapshotPath(observed.published.inboxStateDir)) : null,
+        observed.published?.instances.map(i => [i.instanceId, sourceAge(i.analytics?.asOf ?? null, now, ANALYTICS_STALE_AFTER_MS)]),
+        sourceAge(observed.classified?.generatedAt ?? null, now, INBOX_STALE_AFTER_MS),
+        instances.map(({ state, db }) => [state.instance, state.tickedAt !== undefined, db ? Number(db.prepare(
+          "SELECT coalesce(max(seq), 0) AS seq FROM fact INDEXED BY fact_step WHERE step >= 'panel.' AND step < 'panel/'"
+        ).get()?.seq) : null]),
+      ]);
+    },
     /** Folds each projected instance's fact delta one chunk per step, so a cold fold is never one unit. */
     prepare: ({ instances }, more) => {
       for (const { state, db, lease } of instances) {
@@ -615,6 +640,7 @@ export function createNavBadgeReadModelView<S extends { instance: string; ticked
         },
       }));
       const classified = published ? classification(classificationSnapshotPath(published.inboxStateDir)) : undefined;
+      observed = { published, classified };
       const body = (selected: readonly InstanceInputs[]): { data: NavBadgeData; sources: ViewSource[] } => {
         const sources: ViewSource[] = [];
         const agent = published
