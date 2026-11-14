@@ -136,6 +136,7 @@ import {
   type WorkerEditCommit,
   type RequiredCompanion,
   type PublishAbandonedFixOwnerAheadDeps,
+  type FixRoundYield,
 } from "./cli/commands/run-task-verb.js";
 export { IMPLEMENT_REFUSAL_REPORT_CONTRACT, IMPLEMENT_WAIT_TARGET_CONTRACT, RUN_BRANCH_FILED_FORM, RUN_BRANCH_UNFILED_FORM, WORKER_ACTIVITY_LEDGER_STEP, WORKER_RUNAWAY_TURNS_LEDGER_STEP, FALLBACK_PUSH_EVIDENCE_ABSENT, ALREADY_SATISFIED_VERIFY_ATTEMPTS, ImplementBudgetBreach, PLAN_RECORD_ABSENT, RECON_MAX_TURNS, ManagedCheckoutRefreshRefusedError };
 export type { WorkerStateSensor, SyncedPlan, BoundaryCheckpointRestore, AddedTestsAtHead, PrHeadGateway, OwnershipVerdict, RemotePresenceProbeFailure, FallbackPushCause, PollDeps, PrOpenHandoffDeclineReason, ExternalWaitFreshness, CiGateOutcome, ReviewRunResult, FixRungOutcome, LiveHeadResult, WorktreeSnapshot, FixRebaseMergeFacts, FixRoundCommit, ReadFixRoundCommits, WorkerErrorVerdict, NoPrVerdict, AlreadySatisfiedClaim, AlreadySatisfiedRefusal, AlreadySatisfiedResolution, AlreadySatisfiedVerdict, ReconArtifact, ProbeKeyInputs, ProbeProof, ProbeVerdictCache, RunTaskContext, ManagedCheckoutRefresh, SourceSizeGatePostureResult, RunErrorCause, CensusPushRefusal, CensusChildResult, CensusChildRunner, FixRoundPushReceipt, CoveragePrecheck, CoverageRunResult, CoveragePrecheckPorts, CensusPushRungOutcome, MaterializationErrorClass, MaterializationFailure, WorkerEditCommit, RequiredCompanion, PublishAbandonedFixOwnerAheadDeps };
@@ -199,6 +200,7 @@ import { retryWhileLockBusy } from "./lib/lock-busy-retry.js";
 import { loadProposalRecords } from "./lib/plan-proposals.js";
 import { retryPollRead } from "./lib/poll-read-retry.js";
 import { recyclePauseDetail } from "./lib/recycle-yield.js";
+import { DEFAULT_POLL_INTERVAL_MS } from "./lib/poll-interval.js";
 import { decideFreshnessRestart } from "./lib/deploy-judge.js";
 import {
   appendCaptureSurfaceFireHistory,
@@ -8328,6 +8330,16 @@ async function spawnFixWorkerBounded(
   // a different population). Every real call site now threads that row explicitly; this default
   // fires only for a caller (test or otherwise) that supplies no `deps.spawnWallClockBoundMs`.
   const boundMs = deps.spawnWallClockBoundMs ?? DEFAULT_FIX_SPAWN_WALL_CLOCK_BOUND_MS;
+  // W1-T8141: a strike's spawn yields to a pending recycle; its work is kept against the head the round started from.
+  const yieldRoot = ctx.fixRound && ctx.snapshot?.headSha ? args.config?.root : undefined;
+  let startSha: string | undefined;
+  if (yieldRoot) {
+    try {
+      startSha = (await hostWorktreeGitAsync(args.cwd, ["rev-parse", "HEAD"])).trim();
+    } catch (error) {
+      deps.log("fix.round_yield_unwatched", { run_id: ctx.runId, task_id: ctx.taskId, reason: String((error as Error)?.message ?? error) });
+    }
+  }
   const startedAt = Date.now();
   const spawnStop = new AbortController();
   const spawnPromise = deps.spawn({ ...args, signal: AbortSignal.any([spawnStop.signal, ...(args.signal ? [args.signal] : [])]) });
@@ -8344,8 +8356,20 @@ async function spawnFixWorkerBounded(
           () => new Promise<never>(() => {}),
         )
       : new Promise<never>(() => {});
+  const recycled = yieldRoot && startSha ? watchFixRoundRecycle(yieldRoot, watchStop.signal) : new Promise<never>(() => {});
   try {
-    const winner = await Promise.race([spawnPromise, bound, superseded]);
+    let winner = await Promise.race([spawnPromise, bound, superseded, recycled]);
+    if (winner !== "abandoned" && "recycle" in winner) {
+      // The worker's own abort path stops it; the wall-clock bound still holds while it stops.
+      spawnStop.abort();
+      const settled = await Promise.race([spawnPromise.then((result) => ({ result }), (error: unknown) => ({ error })), bound]);
+      if (settled !== "abandoned" && ctx.fixRound && ctx.snapshot && startSha) {
+        const costUsd = "result" in settled ? settled.result.costUsd : 0;
+        const yielded = await keepYieldedFixRound(deps.log, args.cwd, ctx.fixRound, ctx.snapshot.headSha, startSha, winner.recycle, costUsd);
+        return { kind: "yielded", elapsedMs: systemClock.now() - startedAt, yielded };
+      }
+      winner = "abandoned";
+    }
     if (winner === "abandoned" || "superseded" in winner) {
       const elapsedMs = Date.now() - startedAt;
       if (winner === "abandoned") {
@@ -8397,6 +8421,58 @@ async function spawnFixWorkerBounded(
     if (timer) clearTimeout(timer);
     watchStop.abort();
   }
+}
+
+/** W1-T8141: resolves with the recycle PAUSE detail once one is pending, at the supersession watch's cadence. */
+function watchFixRoundRecycle(root: string, signal: AbortSignal): Promise<{ recycle: string }> {
+  return new Promise((resolve) => {
+    const timer = setInterval(() => {
+      let recycle: string | undefined;
+      try {
+        recycle = recyclePauseDetail(root);
+      } catch {
+        return; // an unreadable PAUSE is no recycle yet; the next poll reads it again
+      }
+      if (!recycle) return;
+      clearInterval(timer);
+      resolve({ recycle });
+    }, DEFAULT_POLL_INTERVAL_MS);
+    signal.addEventListener("abort", () => clearInterval(timer), { once: true });
+  });
+}
+
+/** W1-T8141: keep a yielded fix round's whole worktree in a recovery ref, reset it to the round's start head, and
+ *  write the rows that offer the ref to the next round. Nothing is pushed. A failure resets nothing. */
+async function keepYieldedFixRound(
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  cwd: string,
+  fixRound: { prUrl: string; branch: string },
+  headSha: string,
+  startSha: string,
+  recycle: string,
+  costUsd: number,
+): Promise<FixRoundYield> {
+  const prNumber = prNumberFromRef(fixRound.prUrl);
+  const row = { pr_url: fixRound.prUrl, pr_number: prNumber ?? null, branch: fixRound.branch, trigger: "recycle", detail: recycle,
+    head_sha: headSha, start_sha: startSha, pushed: false, strike_spent: false };
+  let kept: { recoveryRef?: string; indexRecoveryRef?: string; paths: string[] };
+  try {
+    kept = await runStepsAsync(keepYieldedFixWorkSteps(hostWorktreeGitAsync, cwd, fixRound.branch, startSha));
+  } catch (error) {
+    const keepError = capStderrExcerpt(String((error as Error)?.message ?? error), STDERR_EXCERPT_CAP);
+    log("fix.round_yielded", { ...row, recovery_ref: null, index_recovery_ref: null, paths: [], keep_error: keepError });
+    return { trigger: "recycle", detail: recycle, paths: [], costUsd, keepError };
+  }
+  log("fix.round_yielded", { ...row, recovery_ref: kept.recoveryRef ?? null, index_recovery_ref: kept.indexRecoveryRef ?? null, paths: kept.paths });
+  // The next round is offered the worktree's ref; with no worktree change, the staged work's ref.
+  const offered = kept.recoveryRef ?? kept.indexRecoveryRef;
+  if (offered && prNumber !== undefined) {
+    log("sweep.fix.owner_residue_preserved", { pr_number: prNumber, branch: fixRound.branch, head_sha: headSha, worktree_path: cwd,
+      local_sha_prefix: startSha.slice(0, 12), staged_paths: kept.paths.slice(0, FIX_OWNER_RESIDUE_PATH_BOUND),
+      staged_more: Math.max(0, kept.paths.length - FIX_OWNER_RESIDUE_PATH_BOUND), recovery_ref: offered.slice(0, 512),
+      preserved_at: systemClock.iso(), source: "fix.round_yielded" });
+  }
+  return { trigger: "recycle", detail: recycle, costUsd, ...kept };
 }
 
 // W1-T2403 — THE RETRIGGER-SHAPED FIX OUTCOME, ACCOUNTED SEPARATELY FROM A STRIKE
@@ -31421,6 +31497,44 @@ function* preserveTrackedDirtyPatchSteps(git: ReviewRecoveryGit, repoDir: string
     throw new Error(`dirty recovery ref ${recoveryRef} is not the expected immutable commit`);
   }
   return recoveryRef;
+}
+
+/** W1-T8141: the whole worktree against `startSha` (worker commits, index, edits, new files) as one recovery ref, built
+ *  the way the ref's own tree check builds the owner tree; only a verified ref lets the reset run. The worktree
+ *  snapshot reads each file's bytes on disk, so staged content that the disk no longer shows (a file staged as B and
+ *  then edited back to A) is in no worktree tree. When the real index differs from the worktree, the index is kept
+ *  too, in a second recovery ref with its own tree check, before anything is reset. */
+function* keepYieldedFixWorkSteps(git: ReviewRecoveryGit, cwd: string, branch: string, startSha: string): Steps<{ recoveryRef?: string; indexRecoveryRef?: string; paths: string[] }> {
+  let patch = "";
+  let paths: string[] = [];
+  const worktreeTree = yield* temporaryIndexTreeSteps(git, cwd, startSha, function* (env): Steps<void> {
+    const tracked = yield* step(() => git(cwd, ["ls-files", "--cached", "-z"], { maxBuffer: 1 << 26 }));
+    if (tracked.length > 0) yield* step(() => git(cwd, ["--literal-pathspecs", "add", "--force", "--all", "--pathspec-from-file=-", "--pathspec-file-nul"], {
+      env, input: tracked, maxBuffer: 1 << 26 }));
+    yield* step(() => git(cwd, ["add", "-A"], { env }));
+    patch = yield* step(() => git(cwd, ["diff", "--cached", "--binary", "--no-ext-diff", startSha], { env, maxBuffer: 1 << 26 }));
+    paths = nulPaths(yield* step(() => git(cwd, ["diff", "--cached", "--name-only", "-z", startSha], { env })));
+  });
+  // The real index, read and never changed: `write-tree` only writes objects. An index with a conflict fails here,
+  // and a failure resets nothing.
+  const indexTree = (yield* step(() => git(cwd, ["write-tree"]))).trim();
+  let indexRecoveryRef: string | undefined;
+  if (indexTree !== worktreeTree) {
+    // A staged path whose worktree bytes differ from its staged bytes: only the index holds that content.
+    const staged = nulPaths(yield* step(() => git(cwd, ["diff-tree", "-r", "--name-only", "-z", startSha, indexTree], { maxBuffer: 1 << 26 })));
+    const apart = new Set(nulPaths(yield* step(() => git(cwd, ["diff-tree", "-r", "--name-only", "-z", indexTree, worktreeTree], { maxBuffer: 1 << 26 }))));
+    if (staged.some((path) => apart.has(path))) {
+      const indexPatch = yield* step(() => git(cwd, ["diff", "--binary", "--no-ext-diff", startSha, indexTree], { maxBuffer: 1 << 26 }));
+      indexRecoveryRef = yield* preserveTrackedDirtyPatchSteps(git, cwd, cwd, branch, startSha, indexPatch, {}, function* (): Steps<string> {
+        return indexTree;
+      });
+      paths = [...new Set([...paths, ...staged])];
+    }
+  }
+  const recoveryRef = patch.length > 0 ? yield* preserveTrackedDirtyPatchSteps(git, cwd, cwd, branch, startSha, patch, {}) : undefined;
+  yield* step(() => git(cwd, ["reset", "--hard", startSha]));
+  yield* step(() => git(cwd, ["clean", "-fd"]));
+  return { ...(recoveryRef ? { recoveryRef } : {}), ...(indexRecoveryRef ? { indexRecoveryRef } : {}), paths };
 }
 
 // W1-T3822 — the tracked-only diff is durably captured by `preserveTrackedDirtyFixOwner` above,
