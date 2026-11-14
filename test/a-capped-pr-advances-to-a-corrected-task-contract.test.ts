@@ -9,9 +9,7 @@
  * The head contract is read by the production reader over a real git repository.
  */
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 
@@ -25,6 +23,7 @@ import {
   type OpenPrView,
   type SweepDeps,
 } from "#test/helpers/sweep-test.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 const ID = "W1-T9830";
 const NOW = Date.parse("2026-09-20T01:10:00.000Z");
@@ -36,21 +35,20 @@ const NEW_PROOF = 'grep: cwd: join(root, "worktree") in src/lib/example.ts';
 const HEAD_TASK = { id: ID, files: FILES, acceptance: [{ claim: CLAIM, proof: OLD_PROOF }] };
 const MAIN_TASK = { id: ID, files: FILES, acceptance: [{ claim: CLAIM, proof: NEW_PROOF }] };
 
-/** A real repository whose one commit holds the task record the PR head carries. */
-function headRepo(t: TestContext): { dir: string; headSha: string } {
-  const dir = mkdtempSync(join(tmpdir(), "rmd-w1t3830-"));
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
-  const git = (args: string[]) => execFileSync("git", ["-C", dir, ...args], { encoding: "utf8", stdio: "pipe" });
-  git(["init", "--quiet", "-b", "main"]);
+/** A real repository whose last commit holds the task record the PR head carries. */
+function committedHead(t: TestContext): { dir: string; headSha: string } {
+  const repo = gitRepo({ kind: "w1t3830" });
+  t.after(() => repo.cleanup());
+  const dir = repo.dir;
   mkdirSync(join(dir, "plan", "tasks.d"), { recursive: true });
   writeFileSync(join(dir, "plan", "tasks.yaml"), [
     `- id: ${ID}`, "  title: the capped fixture task", "  repo: remudero", "  type: implement", "  depends_on: []",
     "  verify: auto", "  status: queued", "  attempts: 0", `  files: [${FILES.join(", ")}]`, "  acceptance:",
     `    - claim: "${CLAIM}"`, `      proof: "${OLD_PROOF}"`, "",
   ].join("\n"));
-  git(["add", "-A"]);
-  git(["-c", "user.email=fixture@example.invalid", "-c", "user.name=Fixture", "commit", "--quiet", "-m", "head"]);
-  return { dir, headSha: git(["rev-parse", "HEAD"]).trim() };
+  repo.git("add", "-A");
+  repo.git("commit", "--quiet", "-m", "head");
+  return { dir, headSha: repo.git("rev-parse", "HEAD") };
 }
 
 function cappedView(headSha: string, over: Partial<OpenPrView> = {}): OpenPrView {
@@ -82,7 +80,7 @@ function harness(dir: string, mainRevision: string | undefined, over: Partial<Sw
 }
 
 test("W1-T3830 criterion 1: a capped PR whose main task contract differs from its head contract is selected once for branch advance", async (t) => {
-  const { dir, headSha } = headRepo(t);
+  const { dir, headSha } = committedHead(t);
   assert.deepEqual(await readTaskContractAtHeadViaGit(dir, cappedView(headSha)), { revision: taskContractRevision(HEAD_TASK) },
     "the production reader resolves the contract committed at the head");
 
@@ -102,7 +100,7 @@ test("W1-T3830 criterion 1: a capped PR whose main task contract differs from it
 });
 
 test("W1-T3830 criterion 2: an unchanged contract, an unrelated plan amendment, an unreadable head contract, and a draft or in-flight PR cannot trigger the task-contract branch advance", async (t) => {
-  const { dir, headSha } = headRepo(t);
+  const { dir, headSha } = committedHead(t);
 
   const unchanged = harness(dir, taskContractRevision(HEAD_TASK));
   await unchanged.run([cappedView(headSha)]);
