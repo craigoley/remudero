@@ -288,6 +288,7 @@ test("W1-T1268: gitDispatchClaimReserver (the lib-level factory) is the SAME sha
       if (args[0] === "hash-object") return { status: 0, stdout: "4b825dc642cb6eb9a060e54bf8d69288fbee4904\n", stderr: "" };
       if (args[0] === "commit-tree") return { status: 0, stdout: "a".repeat(40) + "\n", stderr: "" };
       if (args[0] === "push") return { status: 0, stdout: "", stderr: "" };
+      if (args[0] === "ls-remote") return { status: 0, stdout: "", stderr: "" }; // W1-T12525: the claim ref is free
       return { status: 1, stdout: "", stderr: "" };
     },
   });
