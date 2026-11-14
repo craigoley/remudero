@@ -1,0 +1,61 @@
+- id: W1-T12546
+  title: "A sweep fix round re-reads a moved head and adopts it instead of declining its checkout claim"
+  repo: remudero
+  depends_on: []
+  priority: 1.1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # a fix dispatch continues at a head the sweep did not judge; it continues only with fresh exact-head evidence, and every write-time fence runs at the new head
+  origin: "operator-session#flow-ledger-research-2026-11-13"
+  plan_refs:
+    - W1-T177
+    - W1-T4460
+    - W1-T11168
+    - W1-T11010
+    - W1-T12545
+  files:
+    - src/lib/sweep.ts
+    - src/cli/commands/fix.ts
+    - src/lib/ledger-steps.ts
+    - test/sweep/a-sweep-fix-round-adopts-a-moved-head.test.ts
+    - test/reviews-and-detached-actions-run-as-run-children.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "invariant:fix-acts-on-exact-head-evidence — When the sweep's fresh head read gives a head other than the one it judged, the dispatch re-reads that PR at the new head. If the PR is open and still fixable there with readable exact-head evidence, the dispatch continues at the new head with that evidence and logs sweep.fix.head_adopted. It writes no sweep.fix.checkout_claim_declined row with head_identity_changed"
+      kind: guard
+      proof: "grep: W1-T12546 criterion 1 in test/sweep/a-sweep-fix-round-adopts-a-moved-head.test.ts"
+    - claim: "When the new head is not fixable yet (checks pending or green, or its evidence cannot be read), the dispatch logs sweep.fix.head_moved_deferred with the reason and takes no claim. The deferral is not a claim decline and does not count toward the claim-decline backstop"
+      proof: "grep: W1-T12546 criterion 2 in test/sweep/a-sweep-fix-round-adopts-a-moved-head.test.ts"
+    - claim: "An unreadable head identity still declines with head_identity_unreadable, as today"
+      proof: "grep: W1-T12546 criterion 3 in test/sweep/a-sweep-fix-round-adopts-a-moved-head.test.ts"
+    - claim: "A rung whose published branch advanced to a descendant of the round's head before the worker started re-reads the required checks at the published head. Red with readable failures: the round adopts that head and its failures and continues. Pending, green or unreadable: it stands down at rung.evidence_head as today"
+      proof: "grep: W1-T12546 criterion 4 in test/sweep/a-sweep-fix-round-adopts-a-moved-head.test.ts"
+    - claim: "An adopted head runs every write-time fence the original head runs: the live-state preflight, the creditable-head check, the branch claim and its identity checks"
+      proof: "grep: W1-T12546 criterion 5 in test/sweep/a-sweep-fix-round-adopts-a-moved-head.test.ts"
+    - claim: "The sweep adopts a moved fix head through one named helper"
+      proof: "grep: adoptMovedFixHead( in src/lib/sweep.ts"
+  rationale: |
+    WHY: a head can move between the sweep's read and its fix dispatch: an update-branch, a fix push, or a fleet bot commit. Today each such move ends the dispatch, and the PR waits for the next pass to judge the new head from the start.
+    OBSERVED in the 48 h ledger research (2026-11-11 21:45Z to 2026-11-13 21:45Z): 17 checkout claim declines with head_identity_changed, 8 head-moved outcomes, and 10 rounds stood down because the branch advanced before the worker started.
+    READ 2026-11-13 at origin/main d41354cdd:
+    - src/lib/sweep.ts:4225-4228 `declineClaim` logs sweep.fix.checkout_claim_declined and returns a claim decline. :4278-4280 declines with head_identity_changed when the fresh `pr view` head (`headRefOid`) differs from `pr.headSha`. The same read already returns `headRefName`, `body` and `files` (:4262-4269).
+    - :4275-4277 declines with head_identity_unreadable when the head read fails. That stays.
+    - src/cli/commands/fix.ts:4246-4259: when `fixRoundBaseHead` (src/lib/fix-round-base.ts:25-46) finds the branch advanced and the published head differs from the round's head, the rung stands down at rung.evidence_head ("published branch advanced from ... before the worker started; the ordinary sweep must read fresh exact-head failure evidence").
+    - sweep.ts:14674-14680 renders a claim decline as "fix dispatch declined at the checkout claim (registered worktree owner, ...)", which names a worktree owner even when the cause is a moved head.
+    RELATED: W1-T11010 (queued) is a fix-lane gardener filing for the rung.evidence_head stand-down. It lists only a test-placement table and a test file, so it cannot change the rung; this task changes the rung. W1-T11168 (merged) made held fix dispatches lift when their cause clears; a moved head is not a hold. W1-T12545 (filed with this one) adopts a moved head inside a fix child that carries conflict evidence.
+  design: |
+    1. In src/lib/sweep.ts add `adoptMovedFixHead(pr, headRef, reads)`. It takes the judged PR view, the fresh head read and the pass's readers for one PR. It reads the PR at the new head (state, merge state, required check rollup) and derives the same fixable evidence the pass derives. It returns `{ adopted: OpenPrView, evidence }` or `{ deferred: reason }`.
+    2. At sweep.ts:4278-4280 call it instead of declining. On adoption, log `sweep.fix.head_adopted { pr_number, from_head, to_head }` and continue the dispatch with the adopted view, so the creditable-head check, the task resolution and the branch claim run at the new head. On deferral, log `sweep.fix.head_moved_deferred { pr_number, from_head, to_head, reason }` and return without a claim decline.
+    3. In src/cli/commands/fix.ts at :4253-4259, when the published head descends from the round's head, read the required check rollup at the published head with the rung's existing CI reader. Red with readable failures: log `fix.evidence_head_adopted`, replace the round's failures and head, and continue. Otherwise stand down as today.
+    4. Declare the three new steps in src/lib/ledger-steps.ts. Run test/sweep/compress-src-lib-sweep-ts.test.ts; add no net comment lines to sweep.ts.
+    INVARIANT fix-acts-on-exact-head-evidence: a fix round acts only on failure evidence read at the head it will push onto; a moved head is adopted only with evidence read at that head.
+    5. Only failure evidence that can be read again at the new head is adopted: CI failure evidence. A dispatch that carries review, conflict, gate-remedy or proof evidence defers with reason evidence_not_ci, because that evidence was judged at the old head. A deferral returns a dispatch that was not accepted: no strike and no claim decline. The detached fix child then ends with no worker instead of failing at the checkout claim; test/reviews-and-detached-actions-run-as-run-children.test.ts expects that for its moved head.
+    NOT IN SCOPE: an unreadable head read; a head that does not descend from the judged head inside the rung (it still stands down); the fix child's recheck (W1-T12545); the claim-decline backstop's count.
+  falsifier: |
+    Decline on every moved head and criterion 1 must fail. Count a deferral as a claim decline and criterion 2 must fail. Adopt a published head whose checks are pending and criterion 4 must fail. Skip the branch claim for an adopted head and criterion 5 must fail. Restore and require all to pass.
+  note: |
+    Id reserved for run-unfiled-1794610450000 with ~/rmd-work/bin/reserve-id.sh. The fleet builds it.
+    The builder runs `rmd test-place` on the real test and amends the path if it moves.

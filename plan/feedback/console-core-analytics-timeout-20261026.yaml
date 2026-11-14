@@ -52,10 +52,11 @@ attachments:
   - https://github.com/craigoley/remudero/blob/8c1ad448ebd5cd8cb82bd65af54eec9c8ce27277/src/lib/read-model-slow-lane.ts
   - https://github.com/craigoley/remudero/blob/8c1ad448ebd5cd8cb82bd65af54eec9c8ce27277/src/lib/analytics-view.ts
 origin: repair#console-core-analytics-timeout
-status: new
+status: grilling
 reply_to: null
 proposal_pr: null
 summary: null
 expansion: null
 submission_key: console-followup:35a412e3-c31c-44bd-b5bc-a2286d8373cb
 thread_id: null
+answered_by: null

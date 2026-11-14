@@ -1,0 +1,65 @@
+- id: W1-T12542
+  title: "The stall backstop re-arms when no new fix round has started within its bound since the last round ended"
+  repo: remudero
+  depends_on: []
+  priority: 1.4
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the stage-stall report can fire on own-red and conflict stages that it keeps silent today; it files at most one report per PR, head and blocker per renotify window
+  origin: "operator-session#flow-ledger-research-2026-11-13"
+  plan_refs:
+    - W1-T9433
+    - W1-T9971
+    - W1-T10736
+    - W1-T11032
+  files:
+    - src/lib/sweep.ts
+    - test/sweep/the-stall-backstop-re-arms-when-no-new-fix-round-has-started.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "invariant:stalled-repair-is-reported — An own-red or conflict stage whose last fix.dispatch or pushed fix.done ended more than the stage's bound ago, with no round in flight and no newer round, gets a pr.stuck report. The report names the end time of the last round"
+      kind: guard
+      proof: "grep: W1-T12542 criterion 1 in test/sweep/the-stall-backstop-re-arms-when-no-new-fix-round-has-started.test.ts"
+    - claim: "A stage whose last round ended within the bound, or that has a round in flight (a live detached owner or a dispatched seed whose rung has not ended), stays silent as today"
+      proof: "grep: W1-T12542 criterion 2 in test/sweep/the-stall-backstop-re-arms-when-no-new-fix-round-has-started.test.ts"
+    - claim: "The quiet time since the last round excludes the time the fleet held the stage, by the same fleetWithheldStageMs reading the backstop uses"
+      proof: "grep: W1-T12542 criterion 3 in test/sweep/the-stall-backstop-re-arms-when-no-new-fix-round-has-started.test.ts"
+    - claim: "A re-armed stage reports once per PR, head and blocker within STAGE_STALL_RENOTIFY_MS, as every stage-stall report does"
+      proof: "grep: W1-T12542 criterion 4 in test/sweep/the-stall-backstop-re-arms-when-no-new-fix-round-has-started.test.ts"
+    - claim: "The sweep reads the end of the last fix round through one function"
+      proof: "grep: lastFixRoundEndedAt( in src/lib/sweep.ts"
+  rationale: |
+    WHY: the stage-stall backstop is the alarm for a PR that the fleet stopped repairing. Today one fix round anywhere in a
+    stage silences it for the rest of the stage. A PR that got one round and then nothing is never reported.
+    OBSERVED in the 48 h ledger research (2026-11-11 21:45Z to 2026-11-13 21:45Z): 42 stalled episodes lasted more than
+    1 hour. 21 of them had no fix round in their first hour, and 13 never had a fix round.
+    READ 2026-11-13 at origin/main d41354cdd:
+    - src/lib/sweep.ts:7411-7417 sets the bounds: own-red 45 minutes, conflict 30, awaiting-review 30.
+    - src/lib/sweep.ts:19772-19773 reads the time the fleet held the stage (`fleetWithheldStageMs`) and returns while the
+      stage is younger than its bound.
+    - src/lib/sweep.ts:19786-19790 returns (no report) for an own-red or conflict stage when a repair started this pass,
+      a round is in flight, or ANY `fix.dispatch` or pushed `fix.done` row exists since the stage began. Nothing compares
+      that row's time with now.
+    - src/lib/sweep.ts:19763-19767 already limits reports to one per PR, head and blocker per STAGE_STALL_RENOTIFY_MS.
+    - W1-T10736 (queued) makes the stage clock exclude paused, held and down time. It does not change which rows silence
+      the report. W1-T11032 (queued) is a machine stub for the own-red cost class with no design. This task changes the
+      silence rule itself: an old round no longer silences the backstop.
+  design: |
+    INVARIANT stalled-repair-is-reported: an own-red or conflict stage with no fix round in flight and no round ended within
+    its bound reaches the stage-stall report.
+    1. In src/lib/sweep.ts add `lastFixRoundEndedAt(stageRows)`. It returns the newest ts of a `fix.dispatch` row or of a
+       `fix.done` row with a `pushed_head_sha`, or undefined.
+    2. At :19786, keep the silence for `repairStarted` and `roundInFlight`. Replace the "any row since the stage began" test
+       with: the last round ended less than the stage's bound ago, after subtracting the held time of the rows since that
+       end (`fleetWithheldStageMs` on those rows). Keep the head-moved arm as it is.
+    3. When the report fires on this path, add `last_fix_round_ended_at` to the pr.stuck row and to the shown reason.
+    NOT IN SCOPE: the bounds themselves; the stage clock of W1-T10736; what the stall report does after it is filed.
+  falsifier: |
+    Restore the "any row since the stage began" test and criterion 1 must fail. Drop the in-flight arm and criterion 2 must
+    fail. Ignore held time and criterion 3 must fail. Restore and require all to pass.
+  note: |
+    Id reserved for run-unfiled-1794610450000 with ~/rmd-work/bin/reserve-id.sh. The fleet builds it.
+    src/lib/sweep.ts is over 29,000 lines: the builder runs `npm run census:source-size` and adds as few lines as it can.
