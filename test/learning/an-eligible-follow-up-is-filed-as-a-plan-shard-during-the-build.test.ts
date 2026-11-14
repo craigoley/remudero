@@ -13,6 +13,10 @@ import { parseAcceptanceBlock, parseWhitelistedProof } from "#src/lib/review.js"
 import { mineFollowups, retireSettledFollowups, routeFollowupsToRegistry, type FollowupCandidate, type FollowupRouteOutcome } from "#src/lib/retro.js";
 import { stripMintedFollowupAffix } from "#src/lib/followup-dedup-census.js";
 import type { Proposal } from "#src/lib/inbox.js";
+import type { Config } from "#src/lib/config.js";
+import type { WorkerResult } from "#src/lib/worker.js";
+import { captureWorktreeSnapshotViaGit, runFixRung } from "#test/helpers/run-task-test.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 const headSha = "a".repeat(40);
 const candidate: FollowupCandidate = { entryId: "run:timestamp:0", taskId: "W1-T12117", runId: "run",
@@ -345,4 +349,42 @@ test("a batch the ratifier does not file is refused as batch-not-filed and recor
   assert.deepEqual(result.filed, []);
   assert.deepEqual(result.refused, [{ entryId: candidate.entryId, reason: "batch-not-filed" }]);
   assert.deepEqual(rows, [{ step: "followup.file_refused", entry_id: candidate.entryId, reason: "batch-not-filed" }]);
+});
+
+test("a fix round's follow-up carries the head of the checkout the fix round used", async () => {
+  const repo = gitRepo({ kind: "fix-round-followup-head" });
+  try {
+    writeFileSync(join(repo.dir, "feature.ts"), "export const value = 1;\n");
+    repo.git("add", "feature.ts"); repo.git("commit", "-q", "-m", "seed feature");
+    const head = repo.git("rev-parse", "HEAD");
+    const rows: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+    const review = { state: "failure" as const, headSha: head, reviewerOutcome: "success", criteria: [], testTheater: false,
+      summary: "fixture", floorDegraded: false, capped: false, keywordOnly: false, planOnly: false };
+    const worker: WorkerResult = {
+      sessionId: "fixture", costUsd: 0, numTurns: 0, blocks: [], stderr: "", subtype: "success",
+      text: "## Follow-ups\ntask: carry the sweep checkout head on a fix-round follow-up\n",
+      isError: false, apiError: false, permissionDenials: [], childEnvKeys: [], model: "fixture", effort: "fixture",
+      tokens: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 }, modelUsage: {}, compactionEvents: [], qualitySuspect: false,
+    };
+    await runFixRung({
+      taskId: "W1-T12117", runId: "W1-T12117-FIX-HEAD-1", task: { id: "W1-T12117", title: "fixture repair" },
+      prUrl: "https://github.com/fixture/repo/pull/1", branch: "run-W1-T12117-FIX-HEAD-1", worktreePath: repo.dir,
+      initialSessionId: "fixture", mount: { model: "fixture", effort: "medium", maxTurns: 2, contextBudget: 1_000 },
+      settingsFile: join(repo.dir, "settings.json"), config: {} as Config, budgetUsd: 0, strikeCap: 1,
+      reviewBase: { owner: "fixture", repo: "repo", headCheckoutDir: repo.dir, reviewerMount: { model: "fixture", effort: "medium", maxTurns: 2, contextBudget: 1_000 } },
+      initialReview: review, ciFailures: [{ name: "check-a", logTail: "fixture attributable failure" }],
+      deps: {
+        spawn: async () => worker,
+        waitForCiGreen: async () => "red", fetchCiFailures: async () => [{ name: "check-a", logTail: "fixture attributable failure" }],
+        runReview: async () => review, push: () => {},
+        issues: { create: () => "https://github.com/fixture/repo/issues/1", listOpen: () => [] },
+        ledgerPath: join(repo.dir, ".git/fixture-ledger.ndjson"), log: (step, extra) => { rows.push({ step, extra }); }, say: () => {},
+        account: r => r, readLiveState: async () => ({ ok: true, state: "OPEN" }),
+        captureWorktreeSnapshot: async path => captureWorktreeSnapshotViaGit(path),
+      },
+    });
+    const harvested = rows.filter(row => row.step === "report.followups");
+    assert.equal(harvested.length, 1, "the fix round harvests its follow-up once");
+    assert.equal(harvested[0]!.extra?.head_sha, head, "the row carries the fix round's own checkout head");
+  } finally { repo.cleanup(); }
 });
