@@ -9,7 +9,8 @@ import { inspect } from "node:util";
 import { findTaskInCatalogs, opsPlanForLookup } from "#src/lib/task-lookup.js";
 // Load the existing analytics side of the daemon's import cycle first.
 import "#src/lib/live-analytics-snapshot-cache.js";
-import { runDaemon, type DaemonDeps } from "#src/lib/daemon.js";
+import { runDaemon, compareSecondaryCatalogShadow, type DaemonDeps, type OpsTaskDispatchRead } from "#src/lib/daemon.js";
+import { opsCatalogShadowFeed } from "#src/cli/commands/daemon.js";
 import { createDaemonMemoryGovernor } from "#src/lib/daemon-memory-policy.js";
 import { OpsCatalogAuthMissingError, type OpsCatalogApi } from "#src/lib/ops-catalog-source.js";
 import type { Plan } from "#src/lib/plan.js";
@@ -21,7 +22,7 @@ import { daemonCommand } from "#test/helpers/run-task-daemon.js";
 import { runTask } from "#test/helpers/run-task-test.js";
 import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
 import { projectPlan, type GitHub } from "#src/lib/status.js";
-import { loadPlan } from "#src/lib/plan.js";
+import { loadPlan, mergePlanBlobs } from "#src/lib/plan.js";
 
 type CommandDeps = NonNullable<Parameters<typeof daemonCommand>[1]>;
 type Row = { step: string; data: Record<string, unknown> };
@@ -41,6 +42,9 @@ interface Scenario {
   realClaims?: boolean;
   realWorkerDependency?: boolean;
   lookupPrivacy?: boolean;
+  selectionRecord?: Record<string, unknown>;
+  coreRefusal?: "throw" | "missing-plan" | "unreadable" | "public-revision" | "ops-revision" | "identity";
+  throwingHoldLog?: boolean;
   mergedIds?: string[];
   expireAfterWarm?: boolean;
   selectionAtAdmission?: "off" | "changed" | "unreadable";
@@ -57,7 +61,7 @@ async function selectedRun(enabled: unknown, scenario: Scenario = {}): Promise<{
   mkdirSync(join(root, "state"), { recursive: true });
   mkdirSync(join(home, ".config", "remudero"), { recursive: true });
   writeFileSync(join(home, ".config", "remudero", "config.json"), JSON.stringify({ root, claudeBin: "/bin/false" }));
-  writeFileSync(join(root, "state", "plan-destination.json"), JSON.stringify({ repository: REPOSITORY, kinds: [], dispatch_ops_tasks: enabled }));
+  writeFileSync(join(root, "state", "plan-destination.json"), JSON.stringify(scenario.selectionRecord ?? { repository: REPOSITORY, kinds: [], dispatch_ops_tasks: enabled }));
   const primary = gitRepo({ kind: "ops-dispatch-public" });
   const origin = gitRepo({ bare: true, kind: "ops-dispatch-public-origin" });
   const secondary = gitRepo({ kind: "ops-dispatch-private" });
@@ -242,6 +246,20 @@ async function selectedRun(enabled: unknown, scenario: Scenario = {}): Promise<{
       } : undefined;
       paused = scenario.ownerHold === "pause";
       stopped = scenario.ownerHold === "stop";
+      const refusalRead = scenario.coreRefusal ? (publicPlan: Plan): OpsTaskDispatchRead => {
+        const current = wired.readOpsTaskDispatch!(publicPlan);
+        assert.equal(current.outcome, "selected", "positive control: real pinned input is healthy before the boundary fault");
+        if (current.outcome !== "selected") throw new Error("fixture source was not ready");
+        switch (scenario.coreRefusal) {
+          case "throw": throw new Error(PRIVATE);
+          case "missing-plan": return { ...current, source: { ...current.source, outcome: "ok", plan: undefined } };
+          case "unreadable": return { ...current, source: { outcome: "unreadable" } };
+          case "public-revision": return { ...current, publicCommit: "invalid" };
+          case "ops-revision": return { ...current, source: { ...current.source, opsCommit: "invalid" } };
+          case "identity": return { ...current, source: { ...current.source, identityDigest: "invalid" } };
+        }
+        throw new Error("fixture refusal case missing");
+      } : undefined;
       await runDaemon(loopPlan, {
         refreshMerged: () => id => merged.has(id), targetRepo: "remudero",
         runOne: async id => { const result = await wired.runOne(id); merged.add(id); return result; },
@@ -249,6 +267,7 @@ async function selectedRun(enabled: unknown, scenario: Scenario = {}): Promise<{
         checkStop: () => stopped ? "fixture owner stop" : undefined,
         sleep: async () => { if (paused) stopped = true; await delay(1); }, log: (step, data = {}) => {
           rows.push({ step, data });
+          if (scenario.throwingHoldLog && step === "dispatch.ops_catalog_held") throw new Error(PRIVATE);
           if (scenario.refillWhilePublicRuns && step === "dispatch.lane_refill_held") releasePublic.resolve();
         },
         memoryGovernor: createDaemonMemoryGovernor({ read: () => ({ rss_bytes: 1 }), setFlags: () => {}, heapUsed: () => 1 }),
@@ -257,6 +276,7 @@ async function selectedRun(enabled: unknown, scenario: Scenario = {}): Promise<{
         ...Object.fromEntries(LIVE_SEAMS.filter(key => key in wired).map(key => [key, (wired as unknown as Record<string, unknown>)[key]])),
         ...(reverseRead ? { readOpsTaskDispatch: reverseRead } : {}),
         ...(admissionRead ? { readOpsTaskDispatch: admissionRead } : {}),
+        ...(refusalRead ? { readOpsTaskDispatch: refusalRead } : {}),
       }, { max: scenario.reversePublicEdge ? 2 : 3, ...(scenario.refillWhilePublicRuns ? { laneCount: 2 } : {}) });
       return { attempted: [], merged: [], stopReason: "stopped", costUsd: 0, ticks: 0 };
     },
@@ -376,6 +396,43 @@ test("owner STOP and PAUSE outrank a selected private catalog without starting a
     assert.equal(result.claims.length, 0);
     if (ownerHold === "pause") assert.ok(result.rows.some(row => row.step === "daemon.pause"));
   }
+});
+
+test("W1-T12209 criterion 5: incomplete identities and throwing readers or diagnostics never authorize ops", async () => {
+  for (const coreRefusal of ["throw", "missing-plan", "unreadable", "public-revision", "ops-revision", "identity"] as const) {
+    const result = await selectedRun(true, { coreRefusal, throwingHoldLog: coreRefusal === "throw" });
+    assert.deepEqual(result.ran, ["PUB-A", "PUB-B", "PUB-C"], coreRefusal);
+    assert.equal(result.rows.filter(row => row.step === "dispatch.ops_catalog_held").length, 1, "an unchanged refusal is deduplicated even if its diagnostic throws");
+    assert.doesNotMatch(JSON.stringify(result.rows), new RegExp(PRIVATE));
+  }
+});
+
+test("W1-T12209 criterion 5: invalid named repository refuses before any private GET", async () => {
+  const result = await selectedRun(true, { selectionRecord: { repository: "not a repository", kinds: [], dispatch_ops_tasks: true } });
+  assert.deepEqual(result.ran, ["PUB-A", "PUB-B", "PUB-C"]);
+  assert.deepEqual(result.reads, []);
+  assert.ok(result.rows.some(row => row.step === "dispatch.ops_catalog_held" && row.data.outcome === "selection_unreadable"));
+});
+
+test("W1-T12209 criterion 5: rejected refresh remains unreadable using the real default clock", async () => {
+  const feed = opsCatalogShadowFeed({ refresh: async () => { throw new Error(PRIVATE); } });
+  assert.equal(feed.current(), undefined);
+  await delay(0);
+  assert.deepEqual(feed.forDispatch(), { outcome: "unreadable" });
+  assert.doesNotMatch(JSON.stringify(feed.forDispatch()), new RegExp(PRIVATE));
+});
+
+test("W1-T12209 criterion 6: public shadow value context is measured and failed comparison stays unknown", () => {
+  const primary = mergePlanBlobs([{ label: "public fixture", text: publicYaml }]);
+  const secondary = mergePlanBlobs([{ label: "private fixture", text: opsYaml }]);
+  const context = { scoreByClass: new Map<string, number>(), openDependentFanoutByTaskId: new Map<string, number>() };
+  const healthy = compareSecondaryCatalogShadow(primary, secondary, undefined, () => false, 1, { dispatchValueContext: context });
+  assert.equal(healthy?.outcome, "compared");
+  assert.equal(healthy.primary_candidate_count, 1);
+  const refused = compareSecondaryCatalogShadow(primary, secondary, undefined, () => { throw new Error(PRIVATE); }, 1, { dispatchValueContext: context });
+  assert.deepEqual(refused, { outcome: "comparison_failed", basis: "cached_projection", primary_candidate_count: null,
+    combined_candidate_count: null, secondary_candidate_count: null, displaced_primary_count: null });
+  assert.doesNotMatch(JSON.stringify(refused), new RegExp(PRIVATE));
 });
 
 test("only a literal true host flag may enable private dispatch", async () => {
