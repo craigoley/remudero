@@ -19,6 +19,7 @@
     - src/lib/queue-judge-gardener.ts
     - src/lib/daemon.ts
     - test/dispatch/released-machine-tasks-get-a-share-of-dispatch-while-the-queue-judge-is-unavailable.test.ts
+    - "src/lib/ledger.ts"
   status: queued
   attempts: 0
   acceptance:
