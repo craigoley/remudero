@@ -1,3 +1,4 @@
+import { attributeAttemptOutcome } from "#src/lib/attempt-outcome-attribution.js";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -29,7 +30,7 @@ test("daily trial effort evidence counts matching attempt and verdict snapshots 
     receipt("1", [effort("high", 2)]), receipt("1", [effort("high", 2)], "verdict"),
     receipt("2", [effort(null, 3, "chat-completions", "parameter-omitted")]), receipt("3", []),
     { ts: "2026-10-08T10:01:00Z", step: "worker.attempt", selection_assignment_id: "a-4", effort: "high" }];
-  const report = evaluateRoutingExperiment(rows, epoch, "2026-10-08");
+  const report = evaluateRoutingExperiment(rows, epoch, "2026-10-08", attributeAttemptOutcome);
   const observed = report.arms.find(arm => arm.arm === "sol61")!.requestEffortEvidence;
   assert.equal(observed.state, "partial");
   assert.equal(observed.assignments, 4);
@@ -42,7 +43,7 @@ test("daily trial effort evidence counts matching attempt and verdict snapshots 
   assert.equal(observed.parameterUnreadableRequests, 0);
   assert.equal(observed.providerEffectiveEffort, null);
   assert.equal(report.sufficient, false);
-  const noEvidence = evaluateRoutingExperiment([assignment("1")], epoch, "2026-10-08").arms.find(arm => arm.arm === "sol61")!.requestEffortEvidence;
+  const noEvidence = evaluateRoutingExperiment([assignment("1")], epoch, "2026-10-08", attributeAttemptOutcome).arms.find(arm => arm.arm === "sol61")!.requestEffortEvidence;
   assert.equal(noEvidence.state, "unavailable");
   assert.equal(noEvidence.attemptedRequests, null);
 });
@@ -52,7 +53,7 @@ test("trial effort evidence refuses invalid and conflicting receipts instead of 
     receipt("1", [effort("high")]), receipt("1", [effort("low")], "verdict"),
     receipt("1", [effort("high")], "worker.done"), receipt("2", [{ ...effort(), requests: -1 }]),
     receipt("3", [effort(null, 1, "foundry-messages", "parameter-unreadable")]), receipt("4", [])];
-  const result = evaluateRoutingExperiment(rows, epoch, "2026-10-08").arms.find(arm => arm.arm === "sol61")!.requestEffortEvidence;
+  const result = evaluateRoutingExperiment(rows, epoch, "2026-10-08", attributeAttemptOutcome).arms.find(arm => arm.arm === "sol61")!.requestEffortEvidence;
   assert.equal(result.conflictingAssignments, 1);
   assert.equal(result.invalidAssignments, 1);
   assert.equal(result.reportedAssignments, 2);

@@ -1,0 +1,75 @@
+- id: W1-T12541
+  title: "A merge-conflict round never asks the CI progress judge, and an unavailable verdict never stops a conflict round"
+  repo: remudero
+  depends_on: []
+  priority: 1.4
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # changes when the fix rung asks its progress judge; only rounds in merge-conflict mode change, and a repeated conflict at one head, base and file set still escalates
+  origin: "operator-session#flow-ledger-research-2026-11-13"
+  plan_refs:
+    - W1-T10039
+    - W1-T7096
+    - W1-T9297
+    - W1-T11172
+  files:
+    - src/cli/commands/fix.ts
+    - src/lib/fix-progress-judge.ts
+    - test/fix-lane/a-merge-conflict-round-never-asks-the-ci-progress-judge.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "A fix round in merge-conflict mode on a PR with earlier CI or review rounds does not call the progress judge. The round continues, and its fix.progress_judged row records judge_skipped conflict-round"
+      proof: "grep: W1-T12541 criterion 1 in test/fix-lane/a-merge-conflict-round-never-asks-the-ci-progress-judge.test.ts"
+    - claim: "A merge-conflict round never ends handed_off on an unavailable verdict: a judge that answers nothing, an unparseable answer, or a harness answer with no off-host proof leaves the conflict round running"
+      proof: "grep: W1-T12541 criterion 2 in test/fix-lane/a-merge-conflict-round-never-asks-the-ci-progress-judge.test.ts"
+    - claim: "invariant:conflict-rounds-are-judged-by-conflict-facts — Two conflict rounds at the same head, the same base and the same conflicted file set that each ended with no pushed head give an escalate verdict with loop conflict. A new base or a different file set gives continue"
+      kind: guard
+      proof: "grep: W1-T12541 criterion 3 in test/fix-lane/a-merge-conflict-round-never-asks-the-ci-progress-judge.test.ts"
+    - claim: "A round that is not in merge-conflict mode asks the progress judge exactly as before, and its unavailable verdict still hands the round off"
+      proof: "grep: W1-T12541 criterion 4 in test/fix-lane/a-merge-conflict-round-never-asks-the-ci-progress-judge.test.ts"
+    - claim: "The fix rung decides a conflict round's progress through one pure function"
+      proof: "grep: conflictRoundProgressVerdict( in src/cli/commands/fix.ts"
+  rationale: |
+    WHY: a merge-conflict round repairs a merge, not a CI failure. The fix rung still asks the CI progress judge after every
+    round once a PR has any earlier round, and it hands the round off when the judge gives no usable answer. So a conflict
+    that a merge round could fix stays open while the judge fails.
+    OBSERVED in the 48 h ledger research (2026-11-11 21:45Z to 2026-11-13 21:45Z): on #18250, 12 of 13 fix child runs ended
+    on an unavailable verdict: "absent or unparseable fix progress verdict" or "harness judgment lacks corroborating
+    off-host proof results". About 8 PR-hours were lost to conflict rounds stopped this way.
+    READ 2026-11-13 at origin/main d41354cdd:
+    - src/cli/commands/fix.ts:2963 asks the judge after a round when the round wrote fix.dispatch or fix.retrigger. :2966
+      passes the CI failures (`ciFailures: currentCiFailures`) even in merge-conflict mode. Only `currentRed` (:2967-2969)
+      names the conflict, as `conflict:<path>`. :2986 returns `handed_off` on an `unavailable` verdict.
+    - src/cli/commands/fix.ts:2599-2625 (`consultAtSite`) builds the same input, and :2642 also hands off on unavailable.
+    - src/lib/fix-progress-judge.ts:553 `firstFixRoundVerdict` skips the judge only when the input has no round, no spent
+      strike and no parked reason (W1-T10039). :609 applies it only with `firstRound`. A PR with earlier CI or review rounds
+      therefore always reaches the judge.
+    - src/lib/fix-progress-judge.ts:522 fills `failureEvidence` from the CI failures (`failureEvidenceOf`, :121), so the
+      judge reads a CI failure, not the conflict. :566 returns unavailable on a harness answer with no off-host proof, and
+      :575 on an absent or unparseable answer.
+    - W1-T10039 (merged) skips the judge only on a PR's first round. This task covers every later round in merge-conflict
+      mode. W1-T11172 (queued) is a conflict gardener that acts after the sweep has left a conflict stuck; it does not
+      change the fix rung's judge call. W1-T11062 (blocked) is a machine stub for the conflict cost class.
+  design: |
+    INVARIANT conflict-rounds-are-judged-by-conflict-facts: a round in merge-conflict mode is continued or escalated only on
+    facts about the conflict (head, base, conflicted files, pushed heads), never on a CI progress verdict.
+    1. In src/lib/fix-progress-judge.ts add `conflictRoundProgressVerdict(input, ledger)`. It is pure. It reads the
+       merge-conflict fix.dispatch and fix.done rows for this PR and head. It returns `{ verdict: "continue", reason,
+       judge_skipped: "conflict-round" }` unless two earlier conflict rounds at the same head, base sha and sorted conflicted
+       file set each ended with no pushed head. Then it returns `{ verdict: "escalate", loop: "conflict", reason }` that
+       names both rounds.
+    2. In src/cli/commands/fix.ts, at the post-round judge call (:2963) and in `consultAtSite` (:2599), when
+       `currentMergeConflict !== undefined`, call `conflictRoundProgressVerdict` instead of `resolveFixProgress`. Log the
+       same fix.progress_judged row with `judge_skipped: "conflict-round"`. The unavailable branch is not reachable for a
+       conflict round.
+    3. Rounds not in merge-conflict mode keep today's path unchanged.
+    NOT IN SCOPE: the judge's prompt and model; the first-round skip of W1-T10039; how the sweep picks a conflict round;
+    the conflict gardener of W1-T11172.
+  falsifier: |
+    Call resolveFixProgress for a conflict round and criteria 1 and 2 must fail. Drop the same-base check and criterion 3
+    must fail. Route non-conflict rounds through the new function and criterion 4 must fail. Restore and require all to pass.
+  note: |
+    Id reserved for run-unfiled-1794610450000 with ~/rmd-work/bin/reserve-id.sh. The fleet builds it.

@@ -65,3 +65,8 @@ test("releaseAuthorsFromLedger is not exported from drain", async () => {
   const module = await import("#src/lib/drain.js");
   assert.equal(Object.hasOwn(module, "releaseAuthorsFromLedger"), false);
 });
+
+test("directMergeAdmissionsClosed is not exported from arm-auto-merge", async () => {
+  const module = await import("#src/lib/arm-auto-merge.js");
+  assert.equal(Object.hasOwn(module, "directMergeAdmissionsClosed"), false);
+});
