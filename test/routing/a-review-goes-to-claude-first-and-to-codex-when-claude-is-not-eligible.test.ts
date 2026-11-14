@@ -1,3 +1,4 @@
+import { attributeAttemptOutcome } from "#src/lib/attempt-outcome-attribution.js";
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -294,7 +295,7 @@ test("W1-T12172 criterion 4: the assignment row still records the arm the live e
     const rows = [[sol, crossed], [sonnet, kept]].map(([taskId, assignment], index) => ({
       ts: `2026-11-10T19:0${index}:00Z`, task_id: taskId, step: "worker.assignment", worker_assignment: assignment,
     }));
-    const report = evaluateRoutingExperiment(rows, EXPERIMENT, "2026-11-10");
+    const report = evaluateRoutingExperiment(rows, EXPERIMENT, "2026-11-10", attributeAttemptOutcome);
     assert.equal(report.assignments, 2);
     assert.equal(report.crossoverTasks, 1);
     assert.deepEqual(report.arms.map((arm) => [arm.arm, arm.tasks]), [["sonnet", 1], ["sol61", 1]]);
