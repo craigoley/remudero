@@ -141,9 +141,11 @@ test("W1-T12525 criterion 4: against a real origin that holds the ref, the real 
 /** The content gates hooks/pre-push runs, each by its script name. */
 const GATES = [
   "rule15-precheck.mjs", "rule25-precheck.mjs", "ci-control-plane-precheck.mjs", "test-tier-manifest.mjs",
-  "census-precheck.mjs", "lint-plan-precheck.mjs", "head-identity-gate.mjs", "worker-branch-shape.mjs",
-  "proof-resolve-precheck.mjs",
+  "head-identity-gate.mjs", "worker-branch-shape.mjs", "proof-resolve-precheck.mjs",
 ];
+// W1-T12510 moved these checks to CI. Older branch hooks still invoke them before the merge.
+const CI_GATES = ["census-precheck.mjs", "lint-plan-precheck.mjs"];
+const CI_DELEGATION = "pre-push: census suites and plan lint run in CI (ci.yml ci-shard and lint-plan, aggregated by ci-gate)";
 
 test("W1-T12525 criterion 5: hooks/pre-push with an empty stdin still runs every content gate", async (t) => {
   for (const route of ["own", "harness"] as const) await t.test(route, (t) => {
@@ -156,7 +158,7 @@ test("W1-T12525 criterion 5: hooks/pre-push with an empty stdin still runs every
     mkdirSync(join(gateRoot, "hooks"));
     mkdirSync(join(tree, "bin"));
     const log = join(tree, "gate.log");
-    for (const gate of GATES) {
+    for (const gate of [...GATES, ...CI_GATES]) {
       writeFileSync(join(gateRoot, "scripts", gate), "");
     }
     // Record direct scripts and the harness route's inline imports without starting gate runtimes.
@@ -164,7 +166,7 @@ test("W1-T12525 criterion 5: hooks/pre-push with an empty stdin still runs every
     const node = join(tree, "bin", "node");
     writeFileSync(node, `#!/bin/sh
 for arg do
-  for gate in ${GATES.join(" ")}; do
+  for gate in ${[...GATES, ...CI_GATES].join(" ")}; do
     case "$arg" in
       */scripts/"$gate"|*'at("/scripts/'"$gate"'")'*)
         printf '%s\\n' "$gate" >> "$GATE_LOG"; exit 1 ;;
@@ -182,6 +184,8 @@ exit 1
     assert.equal(res.error, undefined);
     const ran = existsSync(log) ? readFileSync(log, "utf8").split("\n").filter(Boolean) : [];
     for (const gate of GATES) assert.ok(ran.includes(gate), `${gate} must still run on an empty stdin (ran: ${ran.join(", ")})`);
+    for (const gate of CI_GATES) assert.ok(ran.includes(gate) || res.stderr.includes(CI_DELEGATION),
+      `${gate} must run or explicitly name its CI replacement (ran: ${ran.join(", ")}; stderr: ${res.stderr})`);
     assert.equal(res.status, 1, "the recording gates refuse, so the hook refuses as before");
     assert.doesNotMatch(res.stderr, /dispatch-claim-only/, "an empty stdin never takes the claim fast path");
   });
