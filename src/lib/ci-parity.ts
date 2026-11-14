@@ -119,12 +119,8 @@ function localMergeFailureDetail(result: ReturnType<typeof localMergeSpawn>): st
   return (text || result.error?.message || `exit ${String(result.status)}`).slice(-1_024);
 }
 
-/**
- * Materialise the observed PR head in a throwaway clone, prove both refs still equal the snapshot,
- * merge the observed main tip without committing, then run ONE declared bounded command. The clone
- * (rather than a worktree under `repoRoot`) keeps temporary refs, merge state, and cleanup away from
- * the daemon's shared checkout. Every non-pass result declines the redrive.
- */
+/** In an isolated clone, verify observed head/main SHAs, merge without committing, and run one
+ * declared bounded command. Keep refs and cleanup away from the daemon; any non-pass declines redrive. */
 export function runIsolatedLocalMergeRoute(
   repoRoot: string,
   input: { prNumber: number; headSha: string; mainSha: string; route: LocalMergeCheckRoute },
@@ -178,10 +174,8 @@ export function coverageShardConcurrency(cpuCount: number = availableParallelism
   return Math.max(1, Math.min(CI_COVERAGE_SHARD_COUNT, finite));
 }
 
-/** The isolated supervisor for {@link runBoundedSuite}. It imports the established detached-group
- * spawn and negative-pgid SIGKILL helpers instead of copying either mechanism into ci-parity. The
- * parent stays synchronous (as the preflight API requires); this child owns the timer so it can
- * kill the group while the parent is waiting. */
+/** The child owns the timer while the synchronous parent waits; reuse worker-containment's
+ * detached spawn and negative-pgid SIGKILL so timeout kills the entire group. */
 function boundedSuiteSupervisorProgram(workerContainmentUrl: string): string {
   return [
     'import { writeFileSync } from "node:fs";',
@@ -246,13 +240,8 @@ export interface BoundedSuiteRunResult {
   timeout?: { label: string; lastOutput: string };
 }
 
-/**
- * Run a full suite under a hard wall-clock ceiling without changing the synchronous preflight
- * contract. The supervisor starts the actual suite with `spawnDetachedGroup`, then uses that
- * module's `killProcessGroup` on timeout; therefore a descendant cannot survive after its direct
- * parent is killed. A timeout flag is a file rather than an exit-code convention, so a healthy
- * command that itself exits 124 is never misclassified as a timeout.
- */
+/** Bound a synchronous suite via the supervisor's process-group kill. A file records timeout:
+ * exit 124 alone is not evidence, since a healthy command may return it. */
 export function runBoundedSuite(file: string, args: string[], opts: BoundedSuiteRunOptions): BoundedSuiteRunResult {
   const timeoutDir = mkdtempSync(join(tmpdir(), "rmd-bounded-suite-"));
   const timeoutFile = join(timeoutDir, "timeout.json");
@@ -336,9 +325,8 @@ export interface CiParityStepResult {
 
 /** BACKSTOP: the durable summary must not grow with an unbounded child stdout stream. */
 export const MAX_RETAINED_SUCCESS_OUTPUT_CHARS = 65_536;
-/** Keep the verdict in gitignored <repoRoot>/coverage/ so it survives container removal.
- * Two eight-minute verdicts were lost before they could be read. Never use the ledger (no decision)
- * or config.root (loadConfig requires claude). Record: docs/forensics/ci-parity.md. */
+/** Persist verdicts in gitignored coverage/, never the ledger (no decision) or config.root
+ * (requires claude). Lost-run evidence: docs/forensics/ci-parity.md. */
 export function preflightSummaryPath(repoRoot: string): string {
   return join(repoRoot, "coverage", "preflight-summary.json");
 }
@@ -361,8 +349,7 @@ export interface PreflightSummary {
   runContext?: RunContext;
 }
 
-/** Build the durable summary. PURE, and never conditional on `ok`: a FAILING run's summary is the
- *  wanted one. Why: docs/forensics/ci-parity.md. */
+/** Pure summary builder; retain failures too (docs/forensics/ci-parity.md). */
 export function buildPreflightSummary(input: {
   steps: CiParityStepResult[];
   finishedAt: string;
@@ -445,17 +432,14 @@ export interface PullRequestWorkflowJob {
   job: string;
 }
 
-/** Whether a workflow's `on` declaration includes the pull-request event. Kept structural because
- * GitHub accepts scalar, sequence and mapping spellings for the same event. */
+/** Recognize pull_request in GitHub's scalar, sequence and mapping trigger forms. */
 function runsOnPullRequest(trigger: unknown): boolean {
   if (trigger === "pull_request") return true;
   if (Array.isArray(trigger)) return trigger.includes("pull_request");
   return typeof trigger === "object" && trigger !== null && Object.hasOwn(trigger, "pull_request");
 }
 
-/** Parse every job from supplied standalone workflow texts that fires on `pull_request`.
- * `ci.yml` deliberately remains the owner of {@link parseCiJobNames}, so the old registry and its
- * tests retain their one-file identity while this sibling owns the broader surface. */
+/** Parse standalone pull_request jobs; ci.yml retains its separate {@link parseCiJobNames} registry. */
 export function parsePullRequestWorkflowJobs(workflowTexts: Readonly<Record<string, string>>): PullRequestWorkflowJob[] {
   return Object.entries(workflowTexts)
     .sort(([a], [b]) => a.localeCompare(b))
@@ -469,8 +453,7 @@ export function parsePullRequestWorkflowJobs(workflowTexts: Readonly<Record<stri
     });
 }
 
-/** The production reader for PR-triggered workflows outside ci.yml. Local filesystem only: the
- * parity command gains coverage of the workflow surface without a GitHub request. */
+/** Read PR-triggered workflows outside ci.yml locally, without GitHub requests. */
 function readPullRequestWorkflowJobs(repoRoot: string): PullRequestWorkflowJob[] {
   const workflowsRoot = join(repoRoot, ".github", "workflows");
   const texts: Record<string, string> = {};
@@ -489,9 +472,8 @@ function toolchainFailure(name: string, e: unknown): CiParityStepResult {
   return { name, ok: false, detail: `${name}: FAIL — toolchain unavailable: ${String((e as Error)?.message ?? e)}` };
 }
 
-/** Wraps one job's leaf so a thrown error reports as THIS step's own {@link toolchainFailure} —
- *  never aborting the run, never reading as a pass. `fn`'s `detail` is prefixed with `name:`; a
- *  trigger leaf's `matched` rides through untouched. */
+/** Name the leaf's detail, preserve `matched`, and report throws as this step's toolchain failure
+ * without aborting the other jobs or claiming a pass. */
 function runStep(name: string, fn: () => CiParityLeafResult): CiParityStepResult & { matched?: boolean } {
   try {
     const r = fn();
@@ -512,10 +494,8 @@ function excludedStep(job: string, reason: string): CiParityStepResult {
   return { name, ok: true, detail: `${name}: EXCLUDED — ${reason}` };
 }
 
-/** The suite's per-process temp-dir reaper (W1-T131), REQUIRED on both direct `node --test`
- *  spawns here — neither routes through package.json's protected scripts. TRAP: without it each
- *  local preflight leaked one OS-tmpdir directory per fixture. Must ride AFTER `--import tsx`.
- *  Why: the 53,310-directory ENOSPC — docs/forensics/ci-parity.md (W1-T131). */
+/** REQUIRED after --import tsx on direct node --test spawns: without this reaper, fixtures leaked
+ * 53,310 temp dirs to ENOSPC (W1-T131, docs/forensics/ci-parity.md). */
 const TMP_HYGIENE_IMPORT = "./test/setup/tmp-hygiene.ts";
 
 /** An ordinary leaf: run a command, PASS iff it exits 0, echo its output only on FAIL. */
@@ -527,10 +507,8 @@ export function shellOut(
   opts?: { cwd?: string; input?: string; stream?: boolean; env?: NodeJS.ProcessEnv; retainSuccessOutput?: boolean },
 ): CiParityLeafResult {
   const res = spawn(file, args, opts);
-  // TRAP: a child with NO exit status is not an ordinary failure. DELEGATED to
-  // {@link spawnFailureDetail}, the ONE implementation of that three-state read — a signalled
-  // child reports `status: null` with no error, and a second copy is what drifts.
-  // Why: the ENOBUFS that read as a real red test — docs/forensics/ci-parity.md.
+  // TRAP: status:null may mean a signal without an error; use spawnFailureDetail's three-state read.
+  // ENOBUFS once looked like a real red test (docs/forensics/ci-parity.md).
   const spawnFailed = spawnFailureDetail(label, res);
   if (spawnFailed) return { ok: false, detail: spawnFailed };
   const ok = res.status === 0;
@@ -549,18 +527,15 @@ export function shellOut(
         : {}),
     };
   }
-  // A STREAMED step has no captured text to quote; its output already went to the terminal. Say so,
-  // rather than a `FAIL — <label>` and an empty line — the shape an ENOBUFS once wore.
+  // Streamed output is already on the terminal; name that instead of an empty failure body.
   const captured = (res.stdout + res.stderr).trim();
   const body = opts?.stream ? "(output streamed above as it ran — not re-captured here)" : captured;
   return { ok, detail: `FAIL — ${label}\n${body}` };
 }
 
-/** W1-T8379 — {@link shellOut} for ONE `node --test` run (`args` begins `--test`), JUDGED the way the CI runners
- *  are (scripts/pure-test-pool.mjs): a child that exits 0 passes only when every file its argv names reached its
- *  own summary. A file that calls `process.exit(0)` part-way leaves node exiting 0 with `# tests` still nonzero,
- *  so exit status alone passed it. A nonzero exit keeps shellOut's own reading; the judge's line rides only on
- *  the exit-0 path it overrules, naming the unreported file. */
+/** W1-T8379: judge one node --test run (args starts --test) with scripts/pure-test-pool.mjs.
+ * Even exit 0 with a nonzero # tests count can hide process.exit(0) mid-file: require every named
+ * file's summary. Preserve shellOut's nonzero verdict; on exit 0 name any unreported file. */
 export function judgedTestShellOut(
   spawn: PreflightSpawn,
   label: string,
@@ -586,9 +561,8 @@ export interface JudgedTestRun {
   cleanup(): void;
 }
 
-/** W1-T8379 — `args` (a `node --test` argv run in `cwd`) with scripts/pure-test-pool.mjs's judge inserted. The
- *  files it must hear finish are the ones the argv names; `judge` reads the tally they left (`complete` false, and
- *  `line` naming each UNREPORTED FILE, for a run that stopped before a file's summary) and removes it. */
+/** W1-T8379: insert the pure-test-pool judge into args; require summaries for argv's files.
+ * judge reads/removes the tally and names each UNREPORTED FILE when complete is false. */
 export function prepareJudgedTestRun(args: readonly string[], cwd: string, role: string): JudgedTestRun {
   const judge = loadTestJudge();
   const files = judge.testFilesInArgv(args, cwd);
@@ -663,10 +637,8 @@ function runTriggerScopedJob(
   return [trigger, ...buildFollowUps()];
 }
 
-/** `git fetch origin main` — the merge-base-parity refresh, run ONCE per (spawn, repoRoot) and
- *  reused, so a stale `origin/main` cannot narrow or widen what counts as an added line. The
- *  fetch alone pins nothing: {@link pinnedBase} resolves it to a sha, which is what every diff
- *  site then uses. */
+/** Refresh origin/main once per (spawn, repoRoot), then pin its SHA for every diff consumer;
+ * fetching alone cannot stabilize the added-line set. */
 const originMainRefreshCache = new WeakMap<PreflightSpawn, Map<string, CiParityLeafResult>>();
 function refreshOriginMain(repoRoot: string, spawn: PreflightSpawn): CiParityLeafResult {
   let byRoot = originMainRefreshCache.get(spawn);
@@ -678,18 +650,14 @@ function refreshOriginMain(repoRoot: string, spawn: PreflightSpawn): CiParityLea
   if (cached) return cached;
   const result = shellOut(spawn, "git fetch origin main (merge-base refresh)", "git", ["fetch", "origin", "main"], { cwd: repoRoot });
   byRoot.set(repoRoot, result);
-  // PIN IMMEDIATELY, while the fetched value is still the fetched value. Every second between the
-  // fetch and the resolve is a window in which a sibling can move the ref, so the two belong
-  // together rather than at each diff site.
+  // Pin immediately after fetch: sibling worktrees can move the shared ref before a diff site.
   if (result.ok) pinnedBase(repoRoot, spawn);
   return result;
 }
 
-/** W1-T3017: cache the resolved base SHA per (spawn, repoRoot), never the clone-scoped ref.
- * Memoizing a fetch cannot stop sibling worktrees moving origin/main mid-run and changing coverage's
- * added-line set. test/moving-base-changed-files.test.ts demonstrates this shared-ref trap.
- * Refuse resolution failures; falling back to "origin/main" restores the race precisely when
- * the pin is needed. runPreflightCoverage already refuses failed base refreshes. */
+/** W1-T3017: cache SHA per (spawn, repoRoot), never the moving shared ref; memoizing fetch is
+ * insufficient (test/moving-base-changed-files.test.ts). Refuse resolution/refresh failures:
+ * falling back to origin/main restores the coverage added-line race. */
 export type BasePin = { sha: string } | { failure: string };
 
 const basePinCache = new WeakMap<PreflightSpawn, Map<string, BasePin>>();
@@ -753,12 +721,9 @@ function mergeBaseDiffText(repoRoot: string, spawn: PreflightSpawn): string {
 /** W1-T3013: both coverage modes share this empty-diff refusal so their wording cannot drift. */
 export const EMPTY_DIFF_COVERAGE_REFUSAL = "origin/main...HEAD (freshly refreshed) is an empty diff; there is no diff to assert coverage over";
 
-/** W1-T3013: refuse failed git diffs AND successful empty diffs; neither measures coverage.
- * mergeBaseDiffText returns stdout without checking status. Feeding its empty result to
- * diff-coverage.mjs would vacuously pass. Never retry, synthesize a diff, or fall back to a ref.
- * test/preflight-ci-parity.test.ts requires step details to start ^<name>: (PASS|FAIL|EXCLUDED).
- * This table therefore uses FAIL; runPreflightCoverage's separate pipeline uses REFUSED.
- * Both share EMPTY_DIFF_COVERAGE_REFUSAL's sentence. */
+/** W1-T3013: refuse failed or empty git diffs; unchecked mergeBaseDiffText could vacuously pass.
+ * Never retry, synthesize a diff or fall back to a ref. test/preflight-ci-parity.test.ts pins
+ * PASS|FAIL|EXCLUDED here; coverage's separate pipeline uses REFUSED with the shared sentence. */
 function mergeBaseDiffForCoverage(
   repoRoot: string,
   spawn: PreflightSpawn,
@@ -795,11 +760,9 @@ function changedFilesListPath(repoRoot: string, spawn: PreflightSpawn): string {
   return path;
 }
 
-/** The full-suite-with-coverage leaf — CI's eight instrumented, source-mapped `node --test`
- *  shards, `test/**` excluded from the ratio, merged into one lcov. INVARIANT: shared by BOTH
- *  callers (coverage-ratchet and {@link runPreflightCoverage}), so the expensive invocation cannot
- *  drift the way a hand-copied argv does.
- *  Why: docs/forensics/ci-parity.md. */
+/** Coverage scratch for both coverage-ratchet and runPreflightCoverage's eight source-mapped
+ * shards (test/** excluded), merged into one lcov; share argv to prevent drift.
+ * Evidence: docs/forensics/ci-parity.md. */
 export function coverageScratchDir(repoRoot: string, sameVolume: (a: string, b: string) => boolean = sameDevice): string {
   const name = `rmd-c-${createHash("sha256").update(realpathSync(repoRoot)).digest("hex").slice(0, 12)}`;
   // A nested gate inherits TMPDIR from its caller. Find the same volume root even then.
@@ -808,10 +771,8 @@ export function coverageScratchDir(repoRoot: string, sameVolume: (a: string, b: 
   for (let path = base; path !== dirname(path); path = dirname(path)) {
     if (basename(path) === name) return join(dirname(path), name);
   }
-  // The shard children's TMPDIR is this scratch, and their fixtures bind unix sockets beneath it,
-  // hence MAX_COVERAGE_SCRATCH_PATH. A TMPDIR too long for that (macOS's per-user one) takes the
-  // short /tmp alias of the SAME volume, so the volume and its free-space reserve are unchanged;
-  // one on another volume, or that does not resolve, keeps its base and the length guard refuses it.
+  // Shard fixtures bind unix sockets under TMPDIR: shorten long paths only via a SAME-volume alias
+  // so the reserve stays valid. Unresolvable/other-volume aliases leave the length guard to refuse.
   return shortPathWhenTooLong(join(base, name), (root) => join(root, name),
     (path) => path.length <= MAX_COVERAGE_SCRATCH_PATH, (root) => sameVolume(root, base));
 }
@@ -2869,26 +2830,14 @@ export interface FastGateStep {
   boundMs?: number;
   /** Retain bounded stdout on PASS. Only evidence-producing signals may opt in. */
   retainSuccessOutput?: boolean;
-  /**
-   * W1-T2653 — the path(s) THIS gate's own enforcing job (the ci.yml job named `job`, which may
-   * differ from this entry's local `--fast` `script`) prescribes as its remedy when it refuses —
-   * e.g. the `"path": N` line `source-size-ratchet.mjs` prints for `scripts/source-size-baseline.json`.
-   * Declared here, alongside the entry's own `reason`, so the pairing is a FACT ABOUT THE GATE
-   * rather than a hand-list living inside the scope guard (design note i). Read ONLY by
-   * {@link remedyFilesForFailingChecks} — never consulted for anything else, and never a blanket
-   * scope grant: a remedy file is reachable to a fix rung only while that rung addresses THIS
-   * job's own failure (design note ii), never unconditionally.
-   */
+  /** W1-T2653: remedy paths prescribed by this enforcing `job` (which may differ from local
+   * `script`), paired here with its reason rather than hand-listed in the scope guard (design i).
+   * Only remedyFilesForFailingChecks reads them; grant scope solely for THIS job's current failure,
+   * never unconditionally (design ii). */
   remedyFiles?: readonly string[];
-  /**
-   * W1-T3702 — a repo-relative directory whose ABSENCE means this step is SKIPPED (`ok: true`)
-   * rather than run at all — never failed. The `lint-plan` entry below is the first user: a
-   * checkout with no `plan/` directory (the site/console repos this same table also runs in) has
-   * nothing for it to lint, and a missing input is not that checkout's defect (design note iv).
-   * Read ONLY by {@link runPreflightFast}, checked BEFORE the `scriptNames.has(script)` guard so
-   * an absent directory never even attempts the npm script; every other member leaves this
-   * undefined and runs exactly as before.
-   */
+  /** W1-T3702: runPreflightFast skips (ok:true) when this repo-relative directory is absent,
+   * BEFORE checking scriptNames. E.g. site/console repos without plan/ have nothing to lint
+   * (design iv); undefined retains normal execution. */
   skipWhenAbsent?: string;
 }
 
@@ -3020,27 +2969,16 @@ export const FAST_GATE_STEPS: FastGateStep[] = [
   },
 ];
 
-/** A single declared remedy path, paired with the gate `job` id that declares it — carried
- *  together so a caller (the fix prompt, W1-T2653 design note iii) can name BOTH: which file, and
- *  which gate says so, rather than a bare path a reader has to trace back to its own gate by hand. */
+/** Pair a remedy path with its declaring job so the fix prompt names both (W1-T2653 design iii). */
 export interface RemedyFileForGate {
   path: string;
   job: string;
 }
 
-/**
- * W1-T2653 — the declared remedy file(s) for a set of CURRENTLY FAILING check names, read off
- * {@link FAST_GATE_STEPS}'s own per-entry `remedyFiles` (never a second hand-list, design note i).
- * A check that is not currently failing contributes nothing, even if it declares `remedyFiles` —
- * this is the SCOPING half (design note ii): a strike addressing an unrelated failure must not
- * inherit a remedy that belongs to a gate it is not repairing. Deduplicated by (path, job) pair
- * and sorted for a deterministic result — callers pass this straight to both
- * {@link "../run-task.js".fixRungScopeStandDownReason}'s 4th parameter (flattened to paths) and
- * {@link "../run-task.js".renderFixPrompt}'s GATE REMEDY clause (which needs the job name too).
- *
- * PURE: reads only its own arguments — `steps` defaults to the real {@link FAST_GATE_STEPS} table,
- * overridable so a caller/test never has to mutate module state to exercise this.
- */
+/** W1-T2653: derive remedies only for CURRENTLY FAILING jobs from FAST_GATE_STEPS (design i/ii).
+ * Unrelated failures grant no scope. Return sorted, deduplicated (path, job) pairs for
+ * fixRungScopeStandDownReason's paths and renderFixPrompt's GATE REMEDY clause.
+ * Pure: injected steps replace the default table without mutating module state. */
 export function remedyFilesForFailingChecks(
   failingCheckNames: readonly string[],
   steps: readonly FastGateStep[] = FAST_GATE_STEPS,
@@ -3051,9 +2989,7 @@ export function remedyFilesForFailingChecks(
   for (const step of steps) {
     if (!failing.has(step.job) || !step.remedyFiles) continue;
     for (const path of step.remedyFiles) {
-      // The separator is a NUL written as an ESCAPE, never a raw byte: a raw one in tracked
-      // source trips test/no-raw-nul.test.ts, and it is what makes this harness's grep skip a
-      // whole file silently (CLAUDE.md clause (b)). The value is identical either way.
+      // Escape the NUL: a raw byte makes grep skip this file (CLAUDE.md (b), test/no-raw-nul.test.ts).
       const key = `${step.job}\u0000${path}`;
       if (seen.has(key)) continue;
       seen.add(key);
@@ -3063,16 +2999,9 @@ export function remedyFilesForFailingChecks(
   return out.sort((a, b) => a.path.localeCompare(b.path) || a.job.localeCompare(b.job));
 }
 
-// ── W1-T2523: WHICH CENSUS SUITES DOES A CHANGED PATH JOIN? A REPORT, NEVER A GATE ────────────
-//
-// TRAP: `git grep -l <symbol>` — the caller sweep this repo mandates — is BLIND to a census suite
-// by construction, because such a suite names none of a caller's symbols, only a population and a
-// property asserted over it (CLAUDE.md hazard (j)).
-//
-// INVARIANT — NEVER A GATE. These return data only: no `ok`, no verdict, nothing wireable into a
-// refusal. And never a completeness claim they cannot have — a suite this derivation does not
-// recognise is named in `unknownCoverage`.
-// Why: the sweep this closed — docs/forensics/ci-parity.md (W1-T2523).
+// W1-T2523: census membership is REPORT ONLY, never a gate/verdict or completeness claim.
+// TRAP: git grep -l <symbol> misses suites naming only populations (CLAUDE.md (j)); unrecognized
+// coverage remains in unknownCoverage. Evidence: docs/forensics/ci-parity.md.
 
 /** One recognised census suite; `walks` is the set of tracked-tree prefixes its own sweep is scoped to. */
 interface KnownCensusSuite {
@@ -3081,13 +3010,9 @@ interface KnownCensusSuite {
   readonly walks: readonly string[];
 }
 
-/**
- * W1-T2969 — THE REGISTRY-SHAPED CENSUSES. MEASURED 2026-09-06: of four census-baseline CI failures
- * across #4283 and #4290, the derived half named ONE. The other three each pin a REGISTRY (command
- * names, policy keys, source-text reads) and reference no symbol either diff touched, so the
- * mandated caller sweep was blind to all three. Each walks a population as the derived four do, but
- * none is a fast-gate member and none may become one: that admission is a measured COST decision.
- */
+/** W1-T2969: registry censuses pin command names, policy keys or source-text reads; caller sweeps
+ * missed three of four failures (#4283/#4290). Membership grants no fast-gate admission:
+ * that requires a measured COST decision. */
 const REGISTRY_CENSUS_SUITES: readonly KnownCensusSuite[] = [
   {
     // A fixed list of verb names plus two exact counts; adding a COMMANDS verb moves all three.
@@ -3130,13 +3055,9 @@ const CENSUS_WALKED_POPULATION_SUITES: readonly KnownCensusSuite[] = CENSUS_POPU
   m.walks && m.walks.length > 0 ? [{ job: m.job, testFile: m.testFile, walks: m.walks }] : [],
 );
 
-/**
- * THE MEMBERSHIP SET — WIDER THAN {@link KNOWN_CENSUS_SUITES} AND A SEPARATE SYMBOL, because the two
- * answer different questions: "which suites does this path join" reads THIS, "does this suite carry
- * a verdict row" reads the ADMITTED projection, and `unknownCoverage` comes from THAT. Union them
- * and test/config-reader-seams.test.ts leaves the unknown report holding no verdict row — refused
- * BY NAME by W1-T2809's suite, and by W1-T2523's demanding the exact opposite of anything KNOWN.
- */
+/** Membership is wider than KNOWN_CENSUS_SUITES's admitted/verdict projection. Keep them separate:
+ * unioning them would remove config-reader-seams from unknownCoverage without a verdict row,
+ * violating W1-T2809 and W1-T2523. */
 export const CENSUS_MEMBERSHIP_SUITES: readonly KnownCensusSuite[] = [
   ...CENSUS_WALKED_POPULATION_SUITES,
   ...REGISTRY_CENSUS_SUITES,
@@ -3647,16 +3568,12 @@ export function runPreflightFast(repoRoot: string, deps: PreflightFastDeps = {})
     }));
   });
 
-  // PASS TWO: with every census cost measured on the SAME machine in the SAME run, a runaway is
-  // the entry costing several times the run's TYPICAL (median) entry — a ratio neither a slow
-  // runner nor one accidentally-fast sibling can manufacture (W1-T3408). An entry whose own
-  // command FAILED is left alone. TIERED: a first crossing is re-measured once; only a
-  // SECOND crossing beyond a 10% confirmation margin refuses — a loaded runner crossed by 2%
-  // on PR #6821, and current no-draft census crossed by 0.7–5.7%, with PASSing commands.
-  // W1-T5676: the re-measure is judged against the median-cost entry RE-TIMED back to back with
-  // it, never pass one's median — a reference fixed at pass-one load refused a 4897ms re-measure
-  // against 4884ms on a loaded host (2026-10-04). The median POSITION never crosses: a crossing
-  // entry costs over 4x the median, the entry there at most 2x it.
+  // PASS TWO (W1-T3408): compare successful entries against this run's median, insulating the
+  // ratio from slow hosts and accidentally-fast siblings. Remeasure a crossing once; refuse only
+  // a second crossing beyond the 10% margin (#6821: healthy commands crossed by 0.7–5.7%).
+  // W1-T5676: retime the median-cost reference back to back, never reuse pass-one load
+  // (4897ms vs stale 4884ms falsely refused, 2026-10-04). The median position cannot cross:
+  // its entry costs at most 2x the median while a crossing costs over 4x.
   const threshold = censusRunawayThresholdMs([...censusCosts.values()]);
   if (threshold !== undefined) {
     const byCost = [...censusCosts].sort((a, b) => a[1] - b[1]);
@@ -3705,29 +3622,15 @@ export function runPreflightFast(repoRoot: string, deps: PreflightFastDeps = {})
   };
 }
 
-// ── `rmd preflight --coverage` (W1-T1074) — diff-coverage, at author-time, on its OWN base ────
-//
-// A FOURTH, ADDITIVE mode on the same verb, dedicated to one gate: `scripts/diff-coverage.mjs`,
-// otherwise CI-only and invisible to the author until a push and a CI cycle have gone by. Opt-in
-// and slow BY CONSTRUCTION — it shells the full glob via {@link testWithCoverageLeaf}.
-//
-// INVARIANT — THE RUNNER OWNS THE BASE (design ii). It computes the same refreshed three-dot
-// range `--ci-parity` uses, and REFUSES rather than reports when the inputs cannot support a
-// verdict: an EMPTY diff, or a DIRTY tree in a diffed file (lcov and diff would come from
-// different trees). Both SHORT-CIRCUIT, because this is one linear pipeline.
-//
-// INVARIANT — INSTRUMENTATION IS ASSERTED BEFORE A PASS (design iii). TRAP: `diff-coverage.mjs`
-// reports OK the instant no ADDED line it INSTRUMENTED reads as uncovered, so a changed source
-// file with no `SF:` record makes that OK vacuously true over an empty set.
-//
-// INVARIANT — NO WEAKENING (design vi/vii): nothing exempts an arm or lowers a threshold.
-// Why: the refusals and the vacuous-OK argument — docs/forensics/ci-parity.md (W1-T1074).
+// W1-T1074: opt-in, additive preflight --coverage runs diff-coverage.mjs via the full coverage leaf.
+// INVARIANTS: the runner owns its refreshed three-dot base; EMPTY diffs and DIRTY diffed files
+// short-circuit this linear pipeline (design ii). Require an SF: record for every changed source
+// before PASS: uninstrumented files otherwise vacuously pass (iii). No arm exemptions or lowered
+// thresholds (vi/vii). Evidence: docs/forensics/ci-parity.md.
 
 /** Every path `origin/main...HEAD` touches. The CALLER never supplies this (design ii). */
-// THE IDENTICAL UNCHECKED SHAPE AS `mergeBaseDiffForCoverage`, DELIBERATELY LEFT. This one's
-// caller converts an empty result into the `coverage-mode:diff-scope` refusal, so the path is
-// already fail-closed end to end; checking here would alter a verdict the gate reaches correctly.
-// Noted so the resemblance reads as considered rather than missed (W1-T3013).
+// W1-T3013: deliberately unchecked unlike mergeBaseDiffForCoverage; the caller already refuses
+// empty output as coverage-mode:diff-scope, so this path fails closed end to end.
 function computeChangedFiles(repoRoot: string, spawn: PreflightSpawn): string[] {
   const res = spawn("git", ["diff", "--name-only", `${requirePinnedBase(repoRoot, spawn)}...HEAD`], { cwd: repoRoot });
   return res.stdout
@@ -3811,11 +3714,8 @@ export function runPreflightCoverage(repoRoot: string, deps: PreflightCoverageDe
   steps.push(refresh);
   if (!refresh.ok) return { steps, ok: false };
 
-  // W1-T3017 — A REFUSAL STEP, NOT A THROW. Everything below runs OUTSIDE `runStep`, so a
-  // `requirePinnedBase` throw here would escape this function entirely and crash `preflightCommand`
-  // rather than report. This pipeline's contract is to REFUSE with a named step once a stage cannot
-  // support a trustworthy verdict, and an unresolvable base is exactly such a stage: without it
-  // there is no honest three-dot range to scope coverage over.
+  // W1-T3017: outside runStep, requirePinnedBase would crash preflightCommand. Report a named
+  // refusal instead: an unresolvable base cannot support an honest three-dot coverage range.
   const pin = pinnedBase(repoRoot, spawn);
   if ("failure" in pin) {
     steps.push({

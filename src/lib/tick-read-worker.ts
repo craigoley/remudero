@@ -1,13 +1,9 @@
 import { hydrateDependencyMainIdentitiesSteps } from "./dependency-main-identity.js";
-/**
- * W1-T9722/W1-T4075: narrow entry for the daemon's read-plane worker; run-task.ts re-exports its API.
- * Only a read-plane worker installs the producer at top level. Never import src/run-task.ts,
- * even transitively: it loads the whole CLI into the isolate. Graph and real-worker falsifier:
+/** W1-T9722/W1-T4075: narrow read-plane entry; run-task.ts re-exports it, never import that CLI
+ * transitively. Only read-plane workers install the producer. Graph/worker falsifier:
  * test/the-read-plane-worker-starts-from-a-narrow-entry.test.ts.
- * WORKER_ENTRIES in scripts/build-child-entries.mjs includes this module. startWorker chooses a
- * current bundle under node, otherwise .ts under tsx (W1-T8777/W1-T9370).
- * `read_plane.worker_started` records the chosen entry and isolate footprint.
- */
+ * WORKER_ENTRIES registers it; startWorker selects a current node bundle or tsx .ts entry
+ * (W1-T8777/W1-T9370); read_plane.worker_started records entry and isolate footprint. */
 import { relative } from "node:path";
 import { boundChildByLoopTime } from "./loop-bounded-child.js";
 import { GIT_FETCH_KILL_GRACE_MS } from "./git-fetch-retry.js";
@@ -90,21 +86,15 @@ export function* openPrsWithPostedIdsSteps(owner: string, repo: string, fetch: G
   return prs;
 }
 
-/**
- * Extract only a generator explicitly prescribed by the failing check's own log:
- * `Run 'npm run <name>' and commit the result.` Otherwise return undefined, keeping ordinary
- * test, lint and type failures outside this deterministic repair class (rationale (5a)).
- */
+/** Only the failing log's explicit `Run 'npm run <name>' and commit the result.` qualifies;
+ * ordinary test/lint/type failures remain outside deterministic repair (rationale (5a)). */
 export function remedyGeneratorNamedInLog(logTail: string): string | undefined {
   const m = /Run 'npm run ([\w:@./-]+)' and commit the result\.?/.exec(logTail ?? "");
   return m ? m[1] : undefined;
 }
 
-/**
- * W1-T2733: BACKSTOP on distinct remedies retained from outside the tail; deduplication is the
- * primary control against repetitive logs. {@link allCiFailuresAreGeneratorFixable} needs one
- * remedy per failing check; a larger catalogue is outside the deterministic rung's remit.
- */
+/** W1-T2733: BACKSTOP on distinct off-tail remedies; deduplication is primary.
+ * {@link allCiFailuresAreGeneratorFixable} requires one remedy per failed check. */
 export const MAX_RETAINED_REMEDY_LINES = 5;
 
 /** W1-T2733 — the marker that says these lines did not come from the tail. Present ONLY when
@@ -114,23 +104,16 @@ export const RETAINED_REMEDY_HEADER = "--- generator remedy line(s) retained fro
 /** W1-T3387: the semantic reviewer's hard cap for a PR with no task id (and so no declared `budget_usd`). */
 export const UNTASKED_REVIEW_BUDGET_USD = 15;
 
-/**
- * W1-T3084: reconciliation requires a merge and positive implementation/build evidence.
- * False or unknown evidence alone cannot credit a filing (#4461); align destructive consumers
- * with sweep.ts. Explicit `=== true` states intent, not a stronger guard than truthiness for
- * boolean | undefined. Export the predicate so tests can drive all three values without I/O.
- */
+/** W1-T3084/#4461: require merge plus positive implementation/build evidence, matching sweep.ts's
+ * destructive consumers. Exported for three-value tests; false/unknown cannot credit a filing. */
 export function creditIsReconcilable(c: { merged?: boolean; creditIsImplementation?: boolean; creditHasBuildDiff?: boolean; creditHasOtherBuildMerge?: boolean }): boolean {
   return c.merged === true && (c.creditIsImplementation === true || c.creditHasBuildDiff === true || c.creditHasOtherBuildMerge === true);
 }
 
-/**
- * W1-T2304's board-review rung: the open board as {@link BoardItem}s. PURE mapping; {@link defaultBoardReviewItems} is
- * its one real read. Every absent input fails OPEN: an unknown age is zero, an unreadable rollup is zero red, an
- * unreadable projection is no escalation, and a PR whose task or `origin:` cannot be resolved is not self-produced
- * (W1-T2465), because marking on an uncertain read would hide a real board item from every finding.
- * Why: docs/forensics/tick-read-worker.md#boarditemescalationinfo
- */
+/** W1-T2304: pure BoardItem mapping; {@link defaultBoardReviewItems} performs the read.
+ * Missing inputs fail OPEN: unknown age/red count = zero, unreadable projection = no escalation,
+ * unresolved task/origin = not self-produced (W1-T2465), lest uncertainty hide real findings.
+ * Why: docs/forensics/tick-read-worker.md#boarditemescalationinfo */
 export interface BoardItemEscalationInfo {
   title?: string;
   issueUrl?: string;
@@ -172,9 +155,7 @@ export function boardItemsFromOpenPrs(
   });
 }
 
-/** The three real reads {@link defaultBoardReviewItems} chains, injectable as one bundle so a
- *  test can drive the whole reader over synthetic rows — the same one-seam discipline
- *  {@link PlanLifecycleCountsIo} already follows. */
+/** Injectable read bundle for {@link defaultBoardReviewItems}, like {@link PlanLifecycleCountsIo}. */
 export interface BoardReviewItemsIo {
   fetchOpenPrs?: (owner: string, repo: string) => OpenPrRest[];
   resolveOwnerRepo?: () => { owner: string; repo: string };
@@ -186,12 +167,8 @@ export interface BoardReviewItemsIo {
 /** The synchronous open-PR read {@link defaultBoardReviewItems} defaults to. */
 export const syncBoardReviewOpenPrs = (o: string, r: string): OpenPrRest[] => fetchOpenPrsRest(o, r, ghJson);
 
-/**
- * Board-review's real read, analogous to {@link buildOpenPrViews}. Reuse fetchOpenPrsRest's
- * rollups; the daemon prefetches this per-tick read off the loop (W1-T5481).
- * Never throw: an outage yields no items and decideBoardReviewTrigger's `fire: false`.
- * This report-only rung may miss one period rather than take down the daemon tick.
- */
+/** W1-T5481: daemon-prefetched board read reuses REST rollups, like {@link buildOpenPrViews}.
+ * Never throw: outages yield no items/fire:false, missing a report period rather than a tick. */
 export function defaultBoardReviewItems(config: Config, io: BoardReviewItemsIo = {}): BoardItem[] {
   try {
     const { owner, repo } = (io.resolveOwnerRepo ?? resolveOwnerRepo)();
@@ -205,8 +182,7 @@ export function defaultBoardReviewItems(config: Config, io: BoardReviewItemsIo =
         { ledgerPath: ledgerPathFor(config), github: buildBatchedGithub(owner, repo) },
         join(config.root, "state", "status.json"),
       );
-      // W1-T2453/W1-T2466: reuse the projection's escalation title, URL, verification and openedAt;
-      // boardItemsFromOpenPrs needs no second read.
+      // W1-T2453/W1-T2466: reuse projected escalation title/URL/verification/openedAt; no second read.
       escalations = new Map(
         [...proj.values()]
           .filter((p) => p.needsHuman && p.prNumber !== undefined)
@@ -220,8 +196,7 @@ export function defaultBoardReviewItems(config: Config, io: BoardReviewItemsIo =
             },
           ] as const),
       );
-      // W1-T2465: join the projection's taskId to its own plan without another read.
-      // Missing index/task means not-self-produced; never lose escalations to a throw here.
+      // W1-T2465: join taskId to the same plan; missing index/task means not-self-produced, never throw.
       originByPrNumber = new Map(
         [...proj.values()]
           .filter((p) => p.prNumber !== undefined)
@@ -229,13 +204,11 @@ export function defaultBoardReviewItems(config: Config, io: BoardReviewItemsIo =
           .filter((entry): entry is [number, string] => BOARD_REVIEW_PROPOSAL_ORIGIN_PATTERN.test(entry[1] ?? "")),
       );
     } catch {
-      // The escalation/origin arms degrade to zero rather than taking the whole read down — the
-      // open-PR list is the arm that qualified on 2026-08-26 and it is already in hand.
+      // Escalation/origin failures preserve the open-PR list (qualified 2026-08-26).
     }
     return boardItemsFromOpenPrs(prs, io.now?.() ?? systemClock.date(), escalations, originByPrNumber);
   } catch {
-    // Report-only fail direction: no items means fire:false, costing at most one report period
-    // (minIntervalMinutes). `check` returns the reason for the tick's board_review.skipped row.
+    // No items means fire:false for one minIntervalMinutes; check supplies board_review.skipped's reason.
     return [];
   }
 }
@@ -319,11 +292,9 @@ export function createTickReadProducer(options: TickReadOptions, io: {
       evidence: (url, state, headRefOid) => (state === "MERGED" || state === "CLOSED" ? files : openFiles).evidence!(url, state, headRefOid),
       settle: async () => { await files.settle(); await openFiles.settle(); },
     },
-    // A logical tick clock expires each half once per generation, independent of read duration.
-    // Only cache age uses it; the persisted open snapshot above retains the real clock.
+    // Logical clock expires both halves once per generation; persisted snapshots keep real time.
     now: () => generationClock, ttlMs: 1, mergedTtlMs: 1,
-    // Every read goes through the generation-memoised JSON fetch: the gateway's one `--jq` read
-    // (changed files) is answered by the changed-files cache above and never reaches `exec`.
+    // Generation-memoised JSON fetch; changed-files cache answers the gateway's --jq read before exec.
     exec: (args) => JSON.stringify(fetch(args)),
     commitTrailerIndex: io.commitTrailerIndex ?? (() => buildCommitTrailerIndex({ slug: `${owner}/${repo}`, cwd: checkoutRoot })()),
   });
@@ -420,24 +391,17 @@ export function createTickReadProducer(options: TickReadOptions, io: {
   };
 }
 
-// LiveInflightRun / liveInflightRuns moved to src/lib/report-commands.ts (W1-T2888) — imported/
-// re-exported below.
+// W1-T2888: LiveInflightRun/liveInflightRuns live in report-commands.ts; imported/re-exported below.
 
-/**
- * W1-T1212/#2477: explicit required-context → workflow-file map for the stale-gate discriminator.
- * remudero-review is a commit status, not a workflow check; checksStateFromRollup excludes it too.
- * Unmapped names produce no stale-gate signal. Never guess a workflow or broaden this resolver
- * beyond the filed scope (design note (vi)).
- */
+/** W1-T1212/#2477: explicit stale-gate context→workflow map; unmapped names yield no signal.
+ * Never guess/broaden scope (design vi). remudero-review is a commit status, excluded by
+ * checksStateFromRollup too. */
 const STALE_GATE_WORKFLOW_FILE: Readonly<Record<string, string>> = {
   "ci-gate": ".github/workflows/ci-gate.yml",
 };
 
-/**
- * W1-T1212 (design i): read one blob SHA at one ref through the contents API.
- * Missing file, bad ref or transport failure yields undefined: no stale-gate evidence,
- * never an aborted sweep pass.
- */
+/** W1-T1212 (design i): contents-API blob SHA; missing/bad ref/transport error means unknown,
+ * never stale-gate evidence or an aborted sweep. */
 function blobShaAtRef(owner: string, repo: string, path: string, ref: string): string | undefined {
   try {
     const out = ghExec(["api", `repos/${owner}/${repo}/contents/${path}`, "-f", `ref=${ref}`, "--jq", ".sha"],
@@ -451,11 +415,8 @@ function blobShaAtRef(owner: string, repo: string, path: string, ref: string): s
   }
 }
 
-/**
- * W1-T1212 (design i): compare a red PR's failing-check workflows at its own pull/<n>/merge ref
- * (the pull_request evaluation frozen at synchronize) against current main. Unmapped checks or
- * failed reads on either ref contribute nothing: fail toward not stale.
- */
+/** W1-T1212 (design i): compare failed workflows at pull/<n>/merge (frozen at synchronize)
+ * with current main. Unmapped checks or either unreadable ref fail toward not stale. */
 function staleGateFailureNames(owner: string, repo: string, pr: OpenPrView): string[] {
   const out: string[] = [];
   for (const failure of pr.ciFailures ?? []) {
@@ -468,11 +429,8 @@ function staleGateFailureNames(owner: string, repo: string, pr: OpenPrView): str
   return out;
 }
 
-/**
- * W1-T1212 — {@link SweepDeps.staleGateWorkflowsByPr}'s real wiring. One map entry per
- * checks-red PR that has at least one stale-gate name — every already-green/pending PR costs no
- * `gh api` read at all, keeping this bounded to the population the mechanism actually concerns.
- */
+/** W1-T1212: {@link SweepDeps.staleGateWorkflowsByPr} wiring; only red PRs incur reads,
+ * and only those with stale-gate names get entries. */
 export function buildStaleGateWorkflowsByPr(
   owner: string,
   repo: string,
@@ -487,12 +445,9 @@ export function buildStaleGateWorkflowsByPr(
   return out;
 }
 
-/** PRIMARY CONTROL — the most direct graph evidence the distance-refresh rung may read on one pass.
- * It ignores GitHub's `mergeable_state`: `open-prs-rest.ts` normalizes `behind` to `clean`, and
- * GitHub can report `clean` even when its compare endpoint says main is many commits ahead. Three
- * serial reads every five-minute rotation keep the observation bounded while eventually covering
- * every open, updateable PR.
- */
+/** PRIMARY CONTROL: three serial graph reads per five-minute rotation eventually cover eligible
+ * PRs. Ignore mergeable_state: open-prs-rest.ts normalizes behind→clean, and GitHub's clean
+ * can contradict compare's measured distance. */
 export const DISTANCE_REFRESH_PROBE_LIMIT = 3;
 
 export const DISTANCE_REFRESH_ROTATION_MS = 5 * 60_000;
@@ -504,10 +459,8 @@ export function createDistanceProbeSequence(): () => number {
   return () => window++ * DISTANCE_REFRESH_ROTATION_MS;
 }
 
-/** W1-T3277 — choose a small, fair rotating slice of PRs for direct graph comparison. A draft or
- * conflicted PR cannot reach `update-branch`, so probing it would spend GitHub capacity without
- * creating an admissible candidate. The activity order is stable within a window; the window
- * offset guarantees an unchanged population larger than the cap is not permanently starved. */
+/** W1-T3277: stable activity order plus rotating offset prevents starvation above the cap.
+ * Skip drafts/conflicts: neither can reach update-branch. */
 export function distanceRefreshProbeTargets(
   openPrs: readonly OpenPrView[],
   nowMs: number = systemClock.now(),
@@ -525,11 +478,7 @@ export function distanceRefreshProbeTargets(
   );
 }
 
-/**
- * W1-T3277 — the generic stale-PR distance reader. It deliberately derives freshness from the
- * compare endpoint rather than `mergeable_state`: the latter is a mergeability label, not a
- * graph-distance guarantee. The pure selector in `sweep.ts` receives only measured distances.
- */
+/** W1-T3277: sweep.ts receives measured compare distances, never mergeable_state's labels. */
 /** GitHub's compare endpoint lists at most this many files; a list this long may be cut short. */
 const BASE_COMPARE_FILES_CAP = 300;
 
@@ -581,14 +530,8 @@ function* behindMainByPrSteps(
   return out;
 }
 
-// ── rmd sweep — the level-triggered PR-pipeline reconciler (W1-T77, P22 core) ──
-//
-// The deterministic core (predicate + orchestration + idempotence) lives in
-// lib/sweep.ts and is graded by test/sweep.test.ts over INJECTED deps. This is
-// its real wiring: it BUILDS the observed open-PR state from `gh`/the ledger and
-// supplies the four gated effects (arm / dispatch-fix / close / escalate). The
-// SAME `runSweep` entry point is invoked by `rmd daemon`'s poll loop (see
-// buildSweepHook, wired into DaemonDeps.sweep) — acceptance 4's shared impl.
+// W1-T77/P22: real gh/ledger wiring for sweep.ts's injected, idempotent core (test/sweep.test.ts).
+// Supplies arm/dispatch-fix/close/escalate; daemon's buildSweepHook shares runSweep (acceptance 4).
 
 /** One rollup check entry as `gh pr list --json statusCheckRollup` returns it. */
 export interface RollupCheck {
@@ -630,14 +573,8 @@ export interface RawOpenPr {
   statusCheckRollup?: RollupCheck[];
   /** W1-T528: GitHub's `draft`, carried by `mapRestPr` (lib/open-prs-rest.ts). */
   isDraft?: boolean;
-  /**
-   * W1-T1201 — the PR's creation timestamp, projected onto `OpenPrView.createdAt` below for
-   * `deriveDisposition`'s age clamp. Optional so this type stays satisfied by today's
-   * `mapRestPr` output (lib/open-prs-rest.ts), which does not carry it yet — see that gap named
-   * in this task's own rationale. Wiring a real producer here is a follow-up (`created_at` sits
-   * on the SAME REST row `updated_at` already comes from); until then this is always `undefined`,
-   * the same fail-toward-unclamped default `OpenPrView.createdAt` documents.
-   */
+  /** W1-T1201: projected to OpenPrView.createdAt for deriveDisposition's age clamp.
+   * Optional for REST producers lacking created_at; undefined fails toward unclamped. */
   createdAt?: string;
 }
 
@@ -653,25 +590,15 @@ export function reviewStateFromRollup(rollup: RollupCheck[] | undefined): OpenPr
   return "pending";
 }
 
-/**
- * W1-T2299: produce OpenPrView.reviewVerdictPostedAt from the current remudero-review rollup,
- * reusing reviewStateFromRollup's entry. open-prs-rest.ts maps the commit status's created_at to
- * startedAt (review.ts's postStatus). Missing/undateable evidence means not superseded, fail closed.
- */
+/** W1-T2299: current review rollup's startedAt (REST commit-status created_at) supplies
+ * reviewVerdictPostedAt; missing/undateable evidence fails closed toward not superseded. */
 export function reviewVerdictPostedAtFromRollup(rollup: RollupCheck[] | undefined): string | undefined {
   const r = (rollup ?? []).find((c) => c.context === REVIEW_CTX || c.name === REVIEW_CTX);
   return r?.startedAt;
 }
 
-/**
- * Has the deterministic `rmd review` post already been attempted and refused for this exact
- * task/synthetic key + PR URL + head + body digest? Deliberately not `review.post_failed`
- * (a transient `gh` error, which must keep retrying, never escalate on a
- * mere network hiccup) and NOT `review.posted` (a real post always flips
- * GitHub's live rollup away from "zero runs," so `reviewStateFromRollup`
- * itself carries that outcome on the next read — no ledger check needed).
- * A commit or body edit changes the identity and resets this refusal dedup immediately.
- */
+/** Dedup refusals by task/synthetic key + PR URL + head + body digest; edits reset identity.
+ * Ignore transient review.post_failed (must retry) and review.posted (live rollup carries it). */
 function reviewPostRefusedFor(
   ledger: Array<Record<string, unknown>>,
   taskId: string,
@@ -691,11 +618,9 @@ function reviewPostRefusedFor(
   );
 }
 
-/** Completed review judgments for one exact, current review input. Unlike the historical orphan
- * scan below, this is the retry/backoff counter: only `review.posted` counts, and only when task,
- * PR, head and body digest all match. A refusal did not judge the input; a legacy row without the
- * identity cannot safely block it; and a commit or body edit changes the digest and resets both
- * the count and its clock immediately. */
+/** Current-input retry/backoff facts: count only completed review.posted judgments matching
+ * task/PR/head/body digest. Refusals and identity-less legacy rows cannot block; edits reset
+ * both count and clock. The historical orphan scan below has a different scope. */
 export interface ReviewInputAttemptFacts {
   attempts: number;
   lastAttemptAt?: string;
