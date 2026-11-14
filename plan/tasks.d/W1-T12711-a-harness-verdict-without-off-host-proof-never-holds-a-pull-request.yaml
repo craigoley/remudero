@@ -19,7 +19,15 @@
     - src/lib/fix-progress-judge.ts
     - src/lib/sweep.ts
     - src/lib/ledger-steps.ts
+    - src/lib/ledger.ts
     - test/fix-lane/a-harness-verdict-without-off-host-proof-never-holds-a-pull-request.test.ts
+    - test/a-fix-strike-is-a-round-that-moved-the-head-or-reached-a-verdict.test.ts
+    - test/a-progress-judge-decides-the-next-fix-round.test.ts
+    - test/a-proof-amendment-identity-row-is-not-a-fix-strike.test.ts
+    - test/auto-merge-blocked-codeql-review-thread.test.ts
+    - test/every-fixed-repair-budget-defers-to-the-progress-judge.test.ts
+    - test/sweep/a-fix-progress-verdict-is-not-asked-again-for-an-unchanged-input.test.ts
+    - test/the-fix-progress-judge-sees-the-red-it-rules-on.test.ts
   status: queued
   attempts: 0
   acceptance:
@@ -70,6 +78,13 @@
        rerunFailedChecks dependency once per head and records `fix.progress_rerun`. The next judgment carries the rerun's
        results; when the same checks fail again, the input carries `harnessRefuted: true` and step 1 does not offer harness.
     4. On a second unparseable answer, return continue with judge_skipped `unparseable-twice`.
+    5. The re-ask is opt-in: judgeFixProgress and resolveFixProgress take `{ reask: true }`, and the sweep's fix-strike
+       sites pass it. Other callers (classify, pr-blocker, main-health-rung, the fix rung) keep `unavailable` for a
+       refused answer, so a judge that never answers cannot make their retry loops run without end.
+    6. src/lib/ledger.ts keeps fix.progress_rerun through ledger rotation: the refutation reads it on a later pass.
+    7. Seven existing tests stub a held judgment with a judge that returns no verdict. That answer is now asked again
+       and then decided, so these tests stub a held judgment with a judge that throws, which still holds.
+       test/a-progress-judge-decides-the-next-fix-round.test.ts asserts the re-ask in the same pass instead.
     NOT IN SCOPE: what a round does after many rounds (W1-T12710); the judge's model.
   falsifier: |
     Offer harness on every input and criterion 1 must fail. Hold on the first refused answer and criteria 2 and 5 must fail.
