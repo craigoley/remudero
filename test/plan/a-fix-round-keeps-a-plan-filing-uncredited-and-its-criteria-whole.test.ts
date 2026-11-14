@@ -64,6 +64,15 @@ test("a plan-filing fix round that credits a filed task is refused", () => {
 });
 
 test("a plan-filing fix round that lowers or rewrites the filing's criteria is refused", async (t) => {
+  const call = { claim: "the filing guard is called",
+    proof: "grep: planFilingFixRoundRefusal[(] in src/lib/plan-filing-fix-guard.ts" };
+  const unrelatedCallProof = "grep: import in src/lib/plan-filing-fix-guard.ts";
+  const callInput = input({ priorShards: { [SHARD]: shard([call]) },
+    nextShards: { [SHARD]: shard([{ ...call, proof: unrelatedCallProof }]) } });
+  assert.match(planFilingFixRoundRefusal(callInput)!, /dropped symbol planFilingFixRoundRefusal/);
+  assert.equal(planFilingFixRoundRefusal(input({ priorShards: { [SHARD]: shard([call]) },
+    nextShards: { [SHARD]: shard([{ ...call,
+      proof: "grep: planFilingFixRoundRefusal( in src/lib/plan-filing-fix-guard.ts" }]) } })), undefined);
   const unrelated = "unit test: unrelated existing behavior";
   for (const [acceptance, pattern] of [
     [criteria.slice(0, 1), /criterion count/],

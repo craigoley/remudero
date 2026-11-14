@@ -66,7 +66,8 @@ export function planFilingFixRoundRefusal(input: PlanFilingFixRoundInput): strin
           if (proofText(criterion.proof) && !proofText(proof)) return `${prior.id} criterion ${index + 1} dropped its proof`;
           if (/^grep:/i.test(proofText(criterion.proof))) {
             const replacementSymbols = new Set<string>(proof.match(/[A-Za-z_$][\w$]*/g) ?? []);
-            for (const symbol of (criterion.proof ?? "").matchAll(/([A-Za-z_$][\w$]*)\s*\\?\(/g)) {
+            // BRE spells a literal opening parenthesis as [(]; keep its named call too.
+            for (const symbol of (criterion.proof ?? "").matchAll(/([A-Za-z_$][\w$]*)\s*(?:\\?\(|\[\(\])/g)) {
               if (!replacementSymbols.has(symbol[1])) {
                 return `${prior.id} criterion ${index + 1} dropped symbol ${symbol[1]} from its proof`;
               }
