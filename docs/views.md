@@ -577,6 +577,35 @@ millisecond hops `transportMs`, `fetchMs`, `coreMs`, `applyMs`, `paintMs`, `tota
 `dropped`, and a `console.latency_dropped` row (at most one a minute) carries the count. Schema:
 `ConsoleTelemetryRequest` in `openapi/daemon.yaml`.
 
+## Code health original-source diagnostics
+
+The original SARIF exporter emits bounded structural diagnostics on stdout, separately from
+`code-health-source-v1` metadata. `codeql.extractedFiles` counts the three allowlisted descriptor IDs
+and their direct notification references by language family. It also counts matching descriptors
+with the `successfully-extracted-files` tag, index/component reference fields across sampled
+notifications, and physical artifact-location fields on directly named extracted-file notifications.
+These are field-presence counts, including fields with invalid values, rather than resolved files.
+Driver and extension descriptors and both invocation notification lists share a 20,000-member
+inspection budget with tag and location lists. `truncated` marks members skipped at the limit;
+`malformedLists` and `malformedMembers` identify invalid lists and descriptor/notification members.
+Absent lists contribute no observations. Raw IDs outside the allowlist, paths, messages and security
+contents are omitted.
+
+The allowlist comes from CodeQL's pinned `ea3abbb69c242cf3b92527b56d32fe3eb7c6919b` queries for
+[JavaScript/TypeScript](https://github.com/github/codeql/blob/ea3abbb69c242cf3b92527b56d32fe3eb7c6919b/javascript/ql/src/Diagnostics/ExtractedFiles.ql),
+[Python](https://github.com/github/codeql/blob/ea3abbb69c242cf3b92527b56d32fe3eb7c6919b/python/ql/src/Diagnostics/ExtractedFiles.ql)
+and [Actions](https://github.com/github/codeql/blob/ea3abbb69c242cf3b92527b56d32fe3eb7c6919b/actions/ql/src/Diagnostics/SuccessfullyExtractedFiles.ql).
+Query definitions establish diagnostic identity, but do not establish the production SARIF encoding.
+The tests exercise synthetic shape probes; they are not a production encoding witness.
+
+Until original production descriptor/location encoding and source binding are verified, these
+counters cannot establish measured scope. Expected-file notifications, baseline metrics, result
+locations and extracted-file diagnostics cannot replace explicit `analysisTarget` artifacts in
+the current producer. Missing explicit targets retain partial provenance. The reader continues
+to accept only `explicit-analysis-targets` for quality and `instrumented-source-files` for coverage;
+`codeql-extracted-files` remains unsupported. Structural observations grant no healthy assessment,
+comprehensive security coverage or runtime qualification (W1-T10937).
+
 ## DAILY PR CUTOFF FINDING
 
 **2026-10-29; runtime cause remains unknown; activation is not qualified.** This finding refreshes

@@ -192,8 +192,17 @@ test("Code health exporter keeps original source diagnostics bounded and private
   for (const publicOutput of [result.stdout, result.stderr, JSON.stringify(result.metadata)]) {
     assert.ok(!publicOutput.includes(sentinel)); assert.ok(!publicOutput.includes(secretPath));
   }
-  assert.ok(Buffer.byteLength(result.stdout) < 1024);
-  assert.deepEqual(JSON.parse(result.stdout), {
+  assert.ok(Buffer.byteLength(result.stdout) < 2048);
+  const structure = JSON.parse(result.stdout);
+  assert.deepEqual(structure.codeql.extractedFiles, {
+    descriptors: { javascript: 0, python: 0, actions: 0 }, taggedDescriptors: 0,
+    directNotifications: { javascript: 0, python: 0, actions: 0 },
+    references: { index: 0, toolComponent: 0 },
+    locations: { physical: 0, uri: 0, index: 0, uriBaseId: 0, other: 0 },
+    malformedLists: 0, malformedMembers: 1, truncated: false,
+  });
+  delete structure.codeql.extractedFiles;
+  assert.deepEqual(structure, {
     version: "code-health-original-structure-v1", sourceFormat: "original-sarif", scopeMethod: "explicit-analysis-targets", countLimit: 20_000,
     tool: { codeql: true, semanticVersion: "absent", version: "valid", selected: "version" },
     artifacts: { shape: "array", count: 1, analysisTargets: 1 },
@@ -215,6 +224,110 @@ test("Code health exporter keeps original source diagnostics bounded and private
     assert.equal(diagnostic.codeql.baselineMetrics, Array.isArray(metricResults) ? 20_000 : 0);
     assert.ok(!JSON.stringify(diagnostic).includes(sentinel));
   }
+});
+
+test("Code health extracted-file evidence refuses inferred foreign and incomplete populations", () => {
+  const id = "js/diagnostics/successfully-extracted-files";
+  const sentinel = "PRIVATE_DIAGNOSTIC_SENTINEL";
+  for (const descriptorId of [id, "py/diagnostics/successfully-extracted-files",
+    "actions/diagnostics/successfully-extracted-files", "cli/expected-extracted-files/javascript", "__proto__", "toString", sentinel]) {
+    for (const directoryMode of [false, true]) {
+      const input = originalOutput(), run = input.sarif.runs[0]!;
+      run.artifacts = [];
+      run.tool.driver.notifications = [{ id: descriptorId, properties: { tags: ["successfully-extracted-files"] } }];
+      run.properties.metricResults = [{ baseline: 999, value: 999 }];
+      run.results = [{ locations: [{ physicalLocation: { artifactLocation: { uri: "src/example.ts" } } }] }];
+      Object.assign(run.invocations[0]!, { toolExecutionNotifications: [{ descriptor: { id: descriptorId },
+        message: { text: sentinel }, locations: [{ physicalLocation: { artifactLocation: { uri: `src/${sentinel}.ts` } } }] }] });
+      const result = exportOriginal(input, directoryMode);
+      assert.equal(result.status, 0, result.stderr);
+      assert.equal(result.metadata.state, "partial");
+      assert.deepEqual(result.metadata.scope, { kind: "explicit-analysis-targets", fileCount: 0, hash: null });
+      const counts = JSON.parse(result.stdout).codeql.extractedFiles;
+      const family = descriptorId === id ? "javascript" : descriptorId.startsWith("py/") ? "python" :
+        descriptorId.startsWith("actions/") ? "actions" : null;
+      assert.deepEqual(counts.descriptors, { javascript: Number(family === "javascript"),
+        python: Number(family === "python"), actions: Number(family === "actions") });
+      assert.deepEqual(counts.directNotifications, counts.descriptors);
+      assert.equal(counts.taggedDescriptors, Number(family !== null));
+      assert.equal(counts.locations.physical, Number(family !== null));
+      assert.equal(counts.locations.uri, Number(family !== null));
+      assert.equal(counts.truncated, false);
+      assert.ok(!result.stdout.includes(sentinel));
+      assert.ok(!JSON.stringify(result.metadata).includes(sentinel));
+    }
+  }
+  for (const mutate of [
+    (run: ReturnType<typeof originalOutput>["sarif"]["runs"][number]) => { run.invocations = []; },
+    (run: ReturnType<typeof originalOutput>["sarif"]["runs"][number]) => { run.invocations[0]!.executionSuccessful = false; },
+    (run: ReturnType<typeof originalOutput>["sarif"]["runs"][number]) => {
+      Object.assign(run.invocations[0]!, { toolExecutionNotifications: [{ descriptor: { id }, locations: [] }] });
+    },
+    (run: ReturnType<typeof originalOutput>["sarif"]["runs"][number]) => {
+      Object.assign(run.invocations[0]!, { toolExecutionNotifications: [{ descriptor: { id }, locations: [
+        { physicalLocation: { artifactLocation: { uri: "../escape" } } },
+        { physicalLocation: { artifactLocation: { uri: "%invalid" } } },
+      ] }] });
+    },
+  ]) {
+    const input = originalOutput(), run = input.sarif.runs[0]!;
+    input.analysisSucceeded = false;
+    run.artifacts = [];
+    mutate(run);
+    const result = exportOriginal(input);
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.metadata.state, "partial");
+    assert.deepEqual(result.metadata.scope, { kind: "explicit-analysis-targets", fileCount: 0, hash: null });
+    assert.equal(JSON.parse(result.stdout).codeql.extractedFiles.truncated, false);
+  }
+});
+
+test("Code health extracted-file shape probes are bounded and do not resolve references", () => {
+  const input = originalOutput(), run = input.sarif.runs[0]!;
+  run.artifacts = [];
+  const descriptor = { id: "js/diagnostics/successfully-extracted-files" };
+  Object.assign(run.tool, { extensions: [{ name: "extension", notifications: [descriptor] }] });
+  run.tool.driver.notifications = [descriptor];
+  Object.assign(run.invocations[0]!, { toolExecutionNotifications: [
+    { descriptor: { index: 0, toolComponent: { index: 0 } }, locations: [{ uri: "private" }] },
+    { descriptor, locations: [{ physicalLocation: { artifactLocation: { index: 0, uriBaseId: "private" } } }, { uri: "private" }, null] },
+  ], toolConfigurationNotifications: [{ descriptor, locations: "private" }] });
+  const result = exportOriginal(input), counts = JSON.parse(result.stdout).codeql.extractedFiles;
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.metadata.state, "partial");
+  assert.deepEqual(counts, {
+    descriptors: { javascript: 2, python: 0, actions: 0 }, taggedDescriptors: 0,
+    directNotifications: { javascript: 2, python: 0, actions: 0 },
+    references: { index: 1, toolComponent: 1 },
+    locations: { physical: 1, uri: 0, index: 1, uriBaseId: 1, other: 2 },
+    malformedLists: 1, malformedMembers: 0, truncated: false,
+  });
+  for (const notifications of [[], null, {}, new Array(20_001).fill(descriptor)]) {
+    run.tool.driver.notifications = notifications;
+    const exported = exportOriginal(input), shape = JSON.parse(exported.stdout).codeql.extractedFiles;
+    assert.equal(exported.status, 0, exported.stderr);
+    assert.equal(exported.metadata.state, "partial");
+    assert.equal(shape.truncated, Array.isArray(notifications) && notifications.length > 20_000);
+    assert.equal(shape.malformedLists, Array.isArray(notifications) ? Number(notifications.length === 0) : 2);
+    assert.ok(shape.descriptors.javascript <= 20_000);
+    assert.ok(Buffer.byteLength(exported.stdout) < 2048);
+    assert.ok(!exported.stdout.includes("private"));
+  }
+  const bounded = originalOutput(), source = bounded.sarif.runs[0]!;
+  source.artifacts = [];
+  source.tool.driver.notifications = [descriptor];
+  Object.assign(source.invocations[0]!, { toolExecutionNotifications: [{ descriptor,
+    locations: new Array(20_001).fill({ physicalLocation: { artifactLocation: { uri: "private" } } }) }] });
+  const locations = JSON.parse(exportOriginal(bounded).stdout).codeql.extractedFiles;
+  assert.equal(locations.locations.uri, 19_997, "descriptors, invocations and notifications consume the same budget");
+  assert.equal(locations.truncated, true);
+  source.tool.driver.notifications = [{ ...descriptor, properties: { tags: [
+    ...new Array(20_000).fill("private"), "successfully-extracted-files",
+  ] } }];
+  const tags = JSON.parse(exportOriginal(bounded).stdout).codeql.extractedFiles;
+  assert.equal(tags.taggedDescriptors, 0, "a tag beyond the shared inspection budget is not observed");
+  assert.equal(tags.directNotifications.javascript, 0);
+  assert.equal(tags.truncated, true);
 });
 
 test("Code health exporter preserves source identity refusals and legacy evidence", () => {

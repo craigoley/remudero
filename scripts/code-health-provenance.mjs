@@ -27,6 +27,59 @@ function originalToolVersion(driver) {
   return driver.semanticVersion;
 }
 
+// W1-T10937: shape probes only, pending an original production encoding witness.
+function extractedStructure(run, limit) {
+  const families = () => ({ javascript: 0, python: 0, actions: 0 });
+  const known = new Map([["js/diagnostics/successfully-extracted-files", "javascript"],
+    ["py/diagnostics/successfully-extracted-files", "python"],
+    ["actions/diagnostics/successfully-extracted-files", "actions"]]);
+  const result = { descriptors: families(), taggedDescriptors: 0, directNotifications: families(),
+    references: { index: 0, toolComponent: 0 },
+    locations: { physical: 0, uri: 0, index: 0, uriBaseId: 0, other: 0 },
+    malformedLists: 0, malformedMembers: 0, truncated: false };
+  let remaining = limit;
+  const visit = (list, inspect) => {
+    if (list === undefined) return;
+    if (!Array.isArray(list)) { result.malformedLists++; return; }
+    for (const value of list) {
+      if (remaining === 0) { result.truncated = true; break; }
+      remaining--;
+      inspect(value);
+    }
+  };
+  const descriptors = component => visit(component?.notifications, descriptor => {
+    if (!descriptor || typeof descriptor !== "object" || Array.isArray(descriptor)) { result.malformedMembers++; return; }
+    const key = known.get(descriptor.id);
+    if (key === undefined) return;
+    result.descriptors[key]++;
+    let tagged = false;
+    visit(descriptor.properties?.tags, tag => { if (tag === "successfully-extracted-files") tagged = true; });
+    if (tagged) result.taggedDescriptors++;
+  });
+  descriptors(run.tool.driver);
+  visit(run.tool.extensions, descriptors);
+  const notifications = list => visit(list, notification => {
+    if (!notification || typeof notification !== "object" || Array.isArray(notification)) { result.malformedMembers++; return; }
+    const reference = notification.descriptor;
+    if (reference && Object.hasOwn(reference, "index")) result.references.index++;
+    if (reference && Object.hasOwn(reference, "toolComponent")) result.references.toolComponent++;
+    const key = known.get(reference?.id);
+    if (key === undefined) return;
+    result.directNotifications[key]++;
+    visit(notification.locations, location => {
+      const artifact = location?.physicalLocation?.artifactLocation;
+      if (!artifact || typeof artifact !== "object" || Array.isArray(artifact)) { result.locations.other++; return; }
+      result.locations.physical++;
+      for (const field of ["uri", "index", "uriBaseId"]) if (Object.hasOwn(artifact, field)) result.locations[field]++;
+    });
+  });
+  visit(run.invocations, invocation => {
+    notifications(invocation?.toolExecutionNotifications);
+    notifications(invocation?.toolConfigurationNotifications);
+  });
+  return result;
+}
+
 // W1-T10889: inspect known structures only; baseline/extraction counts never attest measured scope.
 function originalStructure(input) {
   const run = input.sarif.runs[0], driver = run.tool.driver, limit = 20_000;
@@ -48,7 +101,7 @@ function originalStructure(input) {
     codeql: { metricResults: shape(metrics), metricCount: count(metrics),
       baselineMetrics: items(metrics).filter(metric => Number.isFinite(metric?.baseline)).length,
       expectedFileDescriptors: items(driver.notifications).filter(notification => expectedFiles(notification?.id)).length,
-      expectedFileNotifications: notificationCount }
+      expectedFileNotifications: notificationCount, extractedFiles: extractedStructure(run, limit) }
   };
 }
 
