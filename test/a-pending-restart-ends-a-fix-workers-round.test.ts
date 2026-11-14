@@ -11,7 +11,8 @@
  */
 import assert from "node:assert/strict";
 import childProcess from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -77,6 +78,11 @@ function workerResult(runId: string, costUsd = 0): WorkerResult {
     model: "sonnet", effort: "high", tokens: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 },
     modelUsage: {}, compactionEvents: [], qualitySuspect: false,
   };
+}
+
+/** The git blob id of `text`, so a disk check goes through git and not a file read. */
+function blobId(text: string): string {
+  return createHash("sha1").update(`blob ${Buffer.byteLength(text)}\0${text}`).digest("hex");
 }
 
 /** One fix round. `worker` runs as the spawn; it gets the spawn's args and the checkout. */
@@ -289,8 +295,8 @@ test("W1-T8141: a pending recycle ends a fix round and preserves its work", asyn
     assert.equal(reclaimed, 1, "the bound still reclaims the worker");
     assert.equal(co.clone.git("status", "--porcelain"), dirtyBefore, "no reset, even after a late worker exit");
     assert.equal(co.clone.git("show", ":src/a.ts"), "a staged");
-    assert.equal(readFileSync(join(co.clone.dir, "src/b.ts"), "utf8"), "b unstaged\n");
-    assert.equal(readFileSync(join(co.clone.dir, "src/c.ts"), "utf8"), "c new\n");
+    assert.equal(co.clone.git("hash-object", "src/b.ts"), blobId("b unstaged\n"), "the unstaged bytes stay on disk");
+    assert.equal(co.clone.git("hash-object", "src/c.ts"), blobId("c new\n"), "the new file stays on disk");
     assert.equal(co.clone.git("rev-parse", "HEAD"), co.headSha);
     assert.equal(co.origin.git("rev-parse", BRANCH), co.headSha);
     assert.equal(pushes(), 0);

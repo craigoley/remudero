@@ -8478,17 +8478,17 @@ async function keepYieldedFixRound(
   const prNumber = prNumberFromRef(fixRound.prUrl);
   const row = { pr_url: fixRound.prUrl, pr_number: prNumber ?? null, branch: fixRound.branch, trigger: "recycle", detail: recycle,
     head_sha: headSha, start_sha: startSha, pushed: false, strike_spent: false };
-  const failed = (keepError: string): FixRoundYield => {
-    log("fix.round_yielded", { ...row, recovery_ref: null, index_recovery_ref: null, paths: [], keep_error: keepError });
-    return { trigger: "recycle", detail: recycle, paths: [], costUsd, keepError };
-  };
-  if (workerStopError) return failed(workerStopError);
+  if (workerStopError) {
+    log("fix.round_yielded", { ...row, recovery_ref: null, index_recovery_ref: null, paths: [], keep_error: workerStopError });
+    return { trigger: "recycle", detail: recycle, paths: [], costUsd, keepError: workerStopError };
+  }
   let kept: { recoveryRef?: string; indexRecoveryRef?: string; paths: string[] };
   try {
     kept = await runStepsAsync(keepYieldedFixWorkSteps(hostWorktreeGitAsync, cwd, fixRound.branch, startSha));
   } catch (error) {
     const keepError = capStderrExcerpt(String((error as Error)?.message ?? error), STDERR_EXCERPT_CAP);
-    return failed(keepError);
+    log("fix.round_yielded", { ...row, recovery_ref: null, index_recovery_ref: null, paths: [], keep_error: keepError });
+    return { trigger: "recycle", detail: recycle, paths: [], costUsd, keepError };
   }
   log("fix.round_yielded", { ...row, recovery_ref: kept.recoveryRef ?? null, index_recovery_ref: kept.indexRecoveryRef ?? null, paths: kept.paths });
   // Offer both snapshots when staged bytes differ from the disk; otherwise the only ref suffices.
