@@ -74,6 +74,9 @@ function runRung(home: string, mounts: string): { status: number; stdout: string
   const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}no-ledger-stub-`));
   const rec = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}no-ledger-rec-`));
   writeStubs(dir);
+  const config = join(rec, "container-config");
+  mkdirSync(config, { mode: 0o700 });
+  writeFileSync(join(config, "config.json"), '{"workerProviders":["claude"]}\n', { mode: 0o600 });
   const env: NodeJS.ProcessEnv = {
     ...process.env,
     HOME: home,
@@ -82,6 +85,7 @@ function runRung(home: string, mounts: string): { status: number; stdout: string
     STUB_DIR: dir,
     STUB_REPO_ROOT: REPO_ROOT,
     STUB_MOUNTS: mounts,
+    RMD_CONTAINER_CONFIG_DIR: config,
     RMD_GIT_RECLAIM_DIRS: gitRepo({ kind: "no-ledger-reclaim-target" }).dir,
     RMD_AGENT_HISTORY_DIRS: join(home, "no-agent-history"),
   };
