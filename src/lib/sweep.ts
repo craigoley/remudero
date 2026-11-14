@@ -100,7 +100,7 @@ import {
   blockerFields, decideSloRung, judgeSloRebuild, finalBlocker, priorBlockersFromLedger, type PrBlocker, type SloRung,
   securityArmRefusalAtHead, securityHoldReason, securityPolicyCause, type SecurityArmRefusal,
 } from "./pr-blocker.js";
-import { clockFromMillisFn, systemClock, type Clock } from "./clock.js";
+import { clockFromMillisFn, fixedClock, systemClock, type Clock } from "./clock.js";
 import { isWorkerProviderId, type Config, type WorkerProviderId, fixStrikeCap, overflowFallbackRefusal } from "./config.js";
 import { defaultGitCaptureAsync, gitPushEmptyCommit, gitPushRunBranchAsync, worktreePushExec, worktreePushExecAsync, runStepsSync, runStepsAsync, step, type Steps } from "./git-push.js";
 import { ghExec, ghJson, ghJsonAsync, ghTextAsync, GhPaceWouldBlockError, type GhJsonReadOptions } from "./github-transport.js";
@@ -26471,13 +26471,6 @@ async function runSweepLightPassCore(
   // ledger-read-intent: live — this fold reads the live file only, never rotations.
   const readLedger = deps.readLedger ?? readLiveLedgerRows;
   const selectionLedgerLines = readLedger(deps.ledgerPath);
-  let repushedLedgerLines: ReadonlyArray<Record<string, unknown>> = selectionLedgerLines;
-  if (!deps.readLedger) {
-    const history = readLedgerUnionRecordsSync(dirname(deps.ledgerPath), {
-      step: ["sweep.absent_repush", "sweep.review_eligible"], order: "oldest-first", refuseIncomplete: true });
-    if (!history.ok) throw new Error(`repushed-head queue history unavailable: ${history.unread.join(", ")}`);
-    repushedLedgerLines = history.rows;
-  }
   openPrs = openPrs.map(pr => promiseHarvestRetryView(pr, selectionLedgerLines, deps.sampleLoad));
   const selectionPrior = priorActionsFromLedger(selectionLedgerLines, openPrs, deps.sampleLoad);
   openPrs = openPrs.map(pr => completedRefusalRetryView(pr, selectionPrior));
@@ -26517,7 +26510,7 @@ async function runSweepLightPassCore(
   const policySemanticBound = effectiveReviewWidth(deps, policy, queueDepth, now, selectionLedgerLines, activeWorkers);
   const { bound: semanticBound, inFlight: reviewsInFlight } = reviewAdmissionBound(policySemanticBound);
   const unreserved = openPrs.filter((pr) => !lightPassReservedHeads.has(lightPassHeadKey(pr)));
-  const repushedQueuedAt = repushedHeadQueuedAt(repushedLedgerLines);
+  const repushedQueuedAt = repushedHeadQueuedAt(selectionLedgerLines);
   const planBound = planLaneBoundForPass(deps, policy, selectReviewAdmissions(unreserved, policy, now, outcomes, 0, unreserved.length,
     undefined, repushedQueuedAt).planFilings.length, "light");
   const needsPerson = needsPersonPredicate(selectionLedgerLines);
@@ -27120,18 +27113,23 @@ function observeReviewEligibility(
   surface: SweepRepairSurface,
 ): void {
   if (deps.dryRun) return;
-  const observed = new Set(ledgerLines.filter(row => row.step === "sweep.review_eligible")
-    .map(row => row.review_key));
+  const eligibleRows = ledgerLines.filter(row => row.step === "sweep.review_eligible");
+  const observed = new Set(eligibleRows.map(row => row.review_key));
+  const eligibleHeads = new Set(eligibleRows.map(row => `${String(row.pr_number)}@${String(row.head_sha)}`));
+  const queuedAt = repushedHeadQueuedAt(ledgerLines);
   const append = deps.appendLine ?? appendLedger;
   for (const pr of openPrs) {
     const key = reviewOutcomeKeyForPr(pr);
     if (observed.has(key) || !isReviewLaneDisposition(deriveDisposition(pr, policy, now).disposition) ||
         reviewAdmissionOutcomeKnown(pr, outcomes, policy, now)) continue;
+    const head = `${pr.prNumber}@${pr.headSha}`;
+    const queued = queuedAt.get(head);
     append(deps.ledgerPath, {
       run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", step: "sweep.review_eligible",
       pr_number: pr.prNumber, pr_url: pr.prUrl, head_sha: pr.headSha,
       review_key: key, review_input_digest: pr.reviewInputDigest, surface,
       observation_version: 1,
+      ...(queued === undefined ? {} : { queued_at: eligibleHeads.has(head) ? queued : fixedClock(now).iso() }),
     });
     observed.add(key);
   }
@@ -27340,20 +27338,27 @@ export function selectReviewAdmissions(
   return { spawning, planFilings };
 }
 
-/** W1-T12534: `<pr>@<head>` to the first review-eligible ts of a head absent-repush minted, else the mint ts. */
+/** W1-T12534: `<pr>@<head>` of a minted head to its first carried queued_at, else first eligible ts, else mint ts. */
 function repushedHeadQueuedAt(ledgerLines: ReadonlyArray<Record<string, unknown>>): Map<string, string> {
   const minted = new Map<string, string>();
   const eligible = new Map<string, string>();
+  const carried = new Map<string, string>();
+  const isTime = (value: unknown): value is string => typeof value === "string" && !Number.isNaN(Date.parse(value));
   for (const row of ledgerLines) {
-    if (typeof row.ts !== "string" || Number.isNaN(Date.parse(row.ts))) continue;
+    if (!isTime(row.ts)) continue;
     const head = row.step === "sweep.absent_repush" ? row.new_head
       : row.step === "sweep.review_eligible" ? row.head_sha : undefined;
     if (typeof head !== "string") continue;
-    const into = row.step === "sweep.absent_repush" ? minted : eligible;
     const key = `${String(row.pr_number)}@${head}`;
-    if (!into.has(key)) into.set(key, row.ts);
+    if (row.step === "sweep.absent_repush") {
+      if (!minted.has(key)) minted.set(key, row.ts);
+      continue;
+    }
+    if (!eligible.has(key)) eligible.set(key, row.ts);
+    if (isTime(row.queued_at) && !carried.has(key)) carried.set(key, row.queued_at);
   }
-  return new Map([...minted].map(([key, ts]) => [key, eligible.get(key) ?? ts]));
+  return new Map([...new Set([...minted.keys(), ...carried.keys()])]
+    .map((key) => [key, carried.get(key) ?? eligible.get(key) ?? minted.get(key)!]));
 }
 
 /** Number of spawning review candidates before the adaptive admission cut. */
