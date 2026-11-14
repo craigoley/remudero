@@ -167,6 +167,7 @@ test("W1-T12454 criterion 3: an open, missing, dirty, unpushed, locked, open-fil
     file(join(dirty, "notes.txt"), "uncommitted\n");
     const unpushed = worktree(r, "wt-unpushed");
     git(unpushed, "commit", "-q", "--allow-empty", "-m", "never pushed");
+    const unpublishedHead = git(unpushed, "rev-parse", "HEAD");
     const locked = worktree(r, "wt-locked");
     git(r.main, "worktree", "lock", locked);
     const out = pass(r);
@@ -177,6 +178,22 @@ test("W1-T12454 criterion 3: an open, missing, dirty, unpushed, locked, open-fil
     assert.ok(existsSync(join(dirty, "notes.txt")), "the uncommitted file stays");
     assert.match(out, new RegExp(`KEEP ${escape(locked)}: Git worktree is locked`));
     for (const path of [dirty, unpushed, locked]) assert.doesNotMatch(out, new RegExp(`REMOVE ${escape(path)}( |$)`, "m"));
+
+    // Idle payloads and Git HEADs must still keep unpublished work out of preservation and removal.
+    for (const path of [dirty, unpushed]) {
+      rmSync(join(path, "coverage"), { recursive: true, force: true });
+      age(path, 13);
+    }
+    const aged = pass(r);
+    for (const path of [dirty, unpushed]) {
+      assert.ok(existsSync(join(path, "package.json")), `${path}\n${aged}`);
+      assert.ok(listed(r, path), path);
+      const judged = decisions(aged, path);
+      assert.equal(judged.length, 1, aged);
+      assert.match(judged[0]!, /^KEEP /);
+    }
+    assert.equal(readFileSync(join(dirty, "notes.txt"), "utf8"), "uncommitted\n");
+    assert.equal(git(unpushed, "rev-parse", "HEAD"), unpublishedHead);
 
     const mounted = join(r.fx.root, "docker-mounted");
     const held = worktree(r, "wt-held");
@@ -225,10 +242,13 @@ test("W1-T12454 criterion 5: a hand worktree is judged once, by the worktree rul
     // The worktree rules alone: no scratch walk at all.
     const alone = pass(r, { GH_FINISHED: "1 0", RMD_CLEANUP_PRESERVE_ROOTS: r.roots });
     const once = decisions(alone, kept);
-    assert.ok(once.length > 0, alone);
+    assert.equal(once.length, 1, alone);
+    assert.match(once[0]!, new RegExp(`^KEEP ${escape(kept)}: recent or unverified Git HEAD activity`));
     // The scratch walks over the hand root's parent and over the hand root itself add no decision on it.
     const both = pass(r, { GH_FINISHED: "1 0", RMD_CLEANUP_SCRATCH_ROOTS: `${join(r.disk, "rmd")}:${r.hand}` });
-    assert.deepEqual(decisions(both, kept), once, both);
+    const withScratch = decisions(both, kept);
+    assert.equal(withScratch.length, 1, both);
+    assert.deepEqual(withScratch, once, both);
     assert.match(both, new RegExp(`KEEP ${escape(r.hand)}: worktree root; the worktree rules judge its children`));
     assert.match(both, new RegExp(`KEEP ${escape(join(r.disk, "rmd"))}: folder of units kept \\(holds worktree root ${escape(r.hand)}\\)`));
     assert.ok(existsSync(join(kept, "package.json")), both);

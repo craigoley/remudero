@@ -1357,16 +1357,16 @@ preserve_hold() {
 RULING_CHILD=""
 preserve_skip() {
   local p="$1" other
+  worktree_root_of "$p" >/dev/null && return 0
   [ "$p" = "$RULING_CHILD" ] && return 1
   ruling_namespace "$p" && [ -z "$RULING_CHILD" ] && return 0
-  [ "$(worktree_root_of "$p")" != "${p%/}" ] || return 0
   case "${p##*/}" in
     swapfile|lost+found|worktrees|tmp|npm-cache|node-compile-cache|node-v*-linux-x64*|tsx-*|.remudero-coverage|state|docker|containerd|host-cleanup-validation-bundles-*|.incoming-*) return 0 ;;
   esac
   while IFS= read -r other; do
     other="${other%/}"
     [ -n "$other" ] || continue
-    # A folder holding a worktree root is walked child by child (preserve_unit); only the root is skipped.
+    # Walk a folder holding a worktree root; skip the root and its descendants above.
     case "$other" in
       "$p") return 0 ;;
       "$p"/*) [ "$(worktree_root_of "$other")" = "$other" ] || return 0 ;;
