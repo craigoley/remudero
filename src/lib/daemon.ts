@@ -5186,8 +5186,11 @@ export async function runDaemon(
     if (lines === undefined) return undefined;
     const nowMs = daemonClock.now();
     const rows = restartCycleLedgerRows(lines.filter((line) => line.includes("run.start") || line.includes("queue_judge."))).rows;
+    const starts = machineShareStarts(rows, plan.byId, nowMs);
     return {
-      queueJudgeStaleMs: queueJudgeAvailability(rows, nowMs).staleMs, starts: machineShareStarts(rows, plan.byId, nowMs),
+      queueJudgeStaleMs: queueJudgeAvailability(rows, nowMs).staleMs, starts,
+      nowMs: () => daemonClock.now(),
+      recordStart: (task, atMs) => starts.push({ taskId: task.id, authorClass: task.author_class, atMs }),
       onMoved: (task, move) => {
         const signature = `${task.id}:${move.machine_starts}:${move.starts}`;
         if (signature === lastMachineShareSignature) return;
@@ -8606,6 +8609,7 @@ export async function runDaemon(
       laneStartedAtMs.set(task.id, startedAtMs);
       laneCpuTransition(() => laneCpuBuilds.add(task.id), task.id);
       if (poolControl.occupied?.has(task)) return;
+      dispatchOpts.machineShare?.recordStart?.(task, startedAtMs);
       attempted.push(task.id);
       noteBootFirstDispatch({ startedAtMs: daemonClock.now(), admitted: admitted.length });
       if (forcedKick?.taskId === task.id) {

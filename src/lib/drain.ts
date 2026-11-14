@@ -447,11 +447,13 @@ export const QUEUE_JUDGE_STALE_MS = 6 * 60 * 60_000;
 export const MACHINE_SHARE_WINDOW_MS = 24 * 60 * 60_000;
 export const MACHINE_SHARE_STEP = "dispatch.machine_share";
 
-export interface MachineShareStart { taskId: string; authorClass: string | undefined }
+export interface MachineShareStart { taskId: string; authorClass: string | undefined; atMs?: number }
 export interface MachineShareMove { share: number; machine_starts: number; starts: number; queue_judge_stale_ms: number }
 export interface MachineShareInput {
   queueJudgeStaleMs: number | undefined;
   starts: readonly MachineShareStart[];
+  nowMs?: () => number;
+  recordStart?: (task: Task, atMs: number) => void;
   onMoved?: (task: Task, move: MachineShareMove) => void;
 }
 
@@ -462,7 +464,7 @@ export function machineShareStarts(rows: readonly Record<string, unknown>[], tas
     if (r.step !== "run.start" || typeof r.task_id !== "string" || typeof r.ts !== "string") continue;
     const at = Date.parse(r.ts);
     if (!(at <= nowMs && nowMs - at <= MACHINE_SHARE_WINDOW_MS)) continue;
-    starts.push({ taskId: r.task_id, authorClass: tasksById.get(r.task_id)?.author_class });
+    starts.push({ taskId: r.task_id, authorClass: tasksById.get(r.task_id)?.author_class, atMs: at });
   }
   return starts;
 }
@@ -472,8 +474,11 @@ function applyMachineShare(ordered: Task[], opts: NextRunnableOpts): Task[] {
   const input = opts.machineShare;
   const staleMs = input?.queueJudgeStaleMs;
   if (input === undefined || staleMs === undefined || !(staleMs > QUEUE_JUDGE_STALE_MS)) return ordered;
-  const machineStarts = input.starts.filter((s) => s.authorClass === "machine").length;
-  if (input.starts.length > 0 && machineStarts / input.starts.length >= MACHINE_DISPATCH_SHARE) return ordered;
+  const nowMs = input.nowMs?.();
+  const starts = nowMs === undefined ? input.starts : input.starts.filter((s) =>
+    s.atMs === undefined || (s.atMs <= nowMs && nowMs - s.atMs <= MACHINE_SHARE_WINDOW_MS));
+  const machineStarts = starts.filter((s) => s.authorClass === "machine").length;
+  if (starts.length > 0 && machineStarts / starts.length >= MACHINE_DISPATCH_SHARE) return ordered;
   const resumable = opts.resumableTaskIds ?? new Set<string>();
   const machine = ordered.filter((t) => t.author_class === "machine" && !resumable.has(t.id));
   const age = (t: Task) => opts.dispatchValueContext?.costOfDelayInputsByTaskId?.get(t.id)?.filing_age_ms;
@@ -484,7 +489,7 @@ function applyMachineShare(ordered: Task[], opts: NextRunnableOpts): Task[] {
   const lead = ordered.filter((t) => resumable.has(t.id));
   const next = [...lead, pick, ...ordered.filter((t) => t !== pick && !resumable.has(t.id))];
   if (next.some((t, i) => t !== ordered[i])) {
-    input.onMoved?.(pick, { share: MACHINE_DISPATCH_SHARE, machine_starts: machineStarts, starts: input.starts.length, queue_judge_stale_ms: staleMs });
+    input.onMoved?.(pick, { share: MACHINE_DISPATCH_SHARE, machine_starts: machineStarts, starts: starts.length, queue_judge_stale_ms: staleMs });
   }
   return next;
 }

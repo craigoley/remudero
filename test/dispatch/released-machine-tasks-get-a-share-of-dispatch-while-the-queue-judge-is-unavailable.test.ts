@@ -14,12 +14,14 @@ import { after, test } from "node:test";
 
 import { runDaemon, type DaemonDeps } from "#src/lib/daemon.js";
 import type { DispatchScoreInputs, DispatchValueContext } from "#src/lib/dispatch-value.js";
+import { appendLedger, DECISION_RELEVANT_LEDGER_STEPS, ledgerExceedsRotationCeiling, rotateLedger, type LedgerLine } from "#src/lib/ledger.js";
 import {
   MACHINE_DISPATCH_SHARE, MACHINE_SHARE_STEP, QUEUE_JUDGE_STALE_MS, machineShareStarts, nextRunnable, runnableCandidates,
   type MachineShareInput, type MachineShareMove,
 } from "#src/lib/drain.js";
 import { loadPlan, type Plan, type Task } from "#src/lib/plan.js";
 import { QUEUE_JUDGE_SCORECARD_STEP, queueJudgeAvailability } from "#src/lib/queue-judge-gardener.js";
+import { readLedgerLines } from "#src/lib/status.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const HOUR = 3_600_000;
@@ -194,5 +196,61 @@ test("W1-T12551 criterion 5: the daemon gives the selector the judge's staleness
   assert.equal(available.moves.length, 0);
 
   const starts = machineShareStarts(ledger.map((line) => JSON.parse(line) as Record<string, unknown>), plan.byId, NOW);
-  assert.deepEqual(starts, [{ taskId: "W1-T7", authorClass: undefined }, { taskId: "W1-T8", authorClass: undefined }]);
+  assert.deepEqual(starts, [
+    { taskId: "W1-T7", authorClass: undefined, atMs: NOW - 3 * HOUR },
+    { taskId: "W1-T8", authorClass: undefined, atMs: NOW - 2 * HOUR },
+  ]);
+});
+
+test("W1-T12551 falsifier: queue-judge history survives real rotation and refills use starts admitted this tick", async () => {
+  assert.ok(DECISION_RELEVANT_LEDGER_STEPS.has(QUEUE_JUDGE_SCORECARD_STEP));
+  assert.ok(DECISION_RELEVANT_LEDGER_STEPS.has("queue_judge.unavailable"));
+
+  const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1t12551-rotation-`));
+  dirs.push(dir);
+  const ledgerPath = join(dir, "ledger.ndjson");
+  appendLedger(ledgerPath, { run_id: "score", task_id: "W1-T12551", step: QUEUE_JUDGE_SCORECARD_STEP,
+    ts: iso(NOW - 30 * HOUR) } as LedgerLine, { ceilingBytes: Number.MAX_SAFE_INTEGER });
+  appendLedger(ledgerPath, { run_id: "unavailable", task_id: "W1-T12551", step: "queue_judge.unavailable",
+    ts: iso(NOW - 20 * HOUR) } as LedgerLine, { ceilingBytes: Number.MAX_SAFE_INTEGER });
+  for (let n = 0; n < 300; n++) writeFileSync(ledgerPath, `${JSON.stringify({ step: "rotation-noise", marker: "x".repeat(100) })}\n`, { flag: "a" });
+  assert.ok(ledgerExceedsRotationCeiling(ledgerPath, 2_000));
+  assert.equal(rotateLedger(ledgerPath, { ceilingBytes: 2_000 }).rotated, true);
+  const retained = readLedgerLines(ledgerPath);
+  assert.equal(queueJudgeAvailability(retained, NOW).staleMs, 30 * HOUR,
+    "the live-only daemon input still has the last completed pass and later unavailable row after rotation");
+
+  const plan = planOf(
+    shard("W1-T1"), shard("W1-T2", { priority: 2 }),
+    shard("W1-T40", { machine: true, priority: 3 }), shard("W1-T50", { machine: true, priority: 3 }),
+  );
+  const lines = [
+    { ts: iso(NOW - 30 * HOUR), step: QUEUE_JUDGE_SCORECARD_STEP, task_id: "W1-T90" },
+    { ts: iso(NOW - 20 * HOUR), step: "queue_judge.unavailable", task_id: "W1-T90" },
+    { ts: iso(NOW - 3 * HOUR), step: "run.start", task_id: "W1-T7" },
+    { ts: iso(NOW - 2 * HOUR), step: "run.start", task_id: "W1-T8" },
+  ].map((row) => JSON.stringify(row));
+  const spawned: string[] = [];
+  const events: Array<{ step: string; extra: Record<string, unknown> }> = [];
+  let releaseSlowLane: (() => void) | undefined;
+  const slowLane = new Promise<void>((resolve) => { releaseSlowLane = resolve; });
+  let polls = 0;
+  await runDaemon(plan, {
+    refreshMerged: () => () => false,
+    runOne: async (id) => {
+      spawned.push(id);
+      if (id === "W1-T40") await slowLane;
+      return { taskId: id, runId: `${id}-run`, merged: true, costUsd: 0, verdict: "merged" };
+    },
+    sleep: async () => {},
+    checkStop: () => (++polls > 100 ? "test stop" : undefined),
+    log: (step, extra = {}) => {
+      events.push({ step, extra });
+      if (step.startsWith("dispatch.lane_refill")) releaseSlowLane?.();
+    },
+    now: () => new Date(NOW),
+    readLedgerLines: () => lines,
+  } as DaemonDeps, { headroomEnabled: false, laneCount: 2, max: 3 });
+  assert.deepEqual(spawned, ["W1-T40", "W1-T1", "W1-T2"],
+    `at one machine start of four, the refill returns to ordinary dispatch order instead of promoting W1-T50; events=${JSON.stringify(events.filter((e) => e.step.startsWith("dispatch.lane_refill") || e.step === MACHINE_SHARE_STEP))}`);
 });
