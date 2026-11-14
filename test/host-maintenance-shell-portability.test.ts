@@ -208,6 +208,9 @@ function runRung(shell: Shell, opts: { seed: Snap[]; env?: Record<string, string
   const vol = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}shellport-vol-`));
   mkdirSync(join(vol, "state"), { recursive: true });
   writeFileSync(join(vol, "state", "ledger.ndjson"), '{"step":"run.start","task":"W1-T6594"}\n');
+  const config = join(rec, "container-config");
+  mkdirSync(config, { mode: 0o700 });
+  writeFileSync(join(config, "config.json"), "{}\n", { mode: 0o600 });
   const receipt = join(rec, "receipt", "state-snapshot.receipt");
   const env: NodeJS.ProcessEnv = {
     ...process.env,
@@ -218,6 +221,7 @@ function runRung(shell: Shell, opts: { seed: Snap[]; env?: Record<string, string
     STUB_AZ_STATE: state,
     STUB_DISK_ID: DISK_ID,
     RMD_STATE_DIR: vol,
+    RMD_CONTAINER_CONFIG_DIR: config,
     RMD_STATE_OFFHOST: DISK_TARGET,
     RMD_STATE_OFFHOST_AZ: join(dir, "az-fake"),
     RMD_STATE_SNAPSHOT_RECEIPT: receipt,
