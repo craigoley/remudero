@@ -10,7 +10,7 @@
   band_meaning: span
   origin: "operator approval 2026-10-11: follow-ups from the recycle-stall fix (hand PR #10925)"
   plan_refs: [W1-T6362, W1-T5974, W1-T5918, W1-T7697, W1-T7807, W1-T5127, W1-T1046, W1-T9337, W1-T9089, W1-T6434]
-  files: [src/run-task.ts, src/cli/commands/fix.ts, src/cli/commands/run-task-verb.ts, test/a-pending-restart-ends-a-fix-workers-round.test.ts]
+  files: [src/run-task.ts, src/cli/commands/fix.ts, src/cli/commands/run-task-verb.ts, test/a-pending-restart-ends-a-fix-workers-round.test.ts, "src/lib/prompt-render.ts", "src/lib/sweep.ts"]
   status: queued
   priority: 2  # raised 2026-11-11 on the 7-day restart study (36 exits to 2026-11-11): the drain gave up on 20 fix dispatches at a median age of 51 min; was 3
   attempts: 0

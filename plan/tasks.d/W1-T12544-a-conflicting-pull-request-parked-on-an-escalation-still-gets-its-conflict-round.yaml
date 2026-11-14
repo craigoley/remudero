@@ -1,0 +1,71 @@
+- id: W1-T12544
+  title: "A conflicting pull request parked on an escalation still gets its conflict round"
+  repo: remudero
+  depends_on: []
+  priority: 1.1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # a conflict round runs under a design hold or a non-conflict escalation; the hold carries to the merge head, so no code fix round is admitted while the question stays open
+  origin: "operator-session#flow-ledger-research-2026-11-13"
+  plan_refs:
+    - W1-T10339
+    - W1-T11173
+    - W1-T11062
+    - W1-T10709
+    - W1-T11172
+  files:
+    - src/lib/sweep.ts
+    - src/lib/escalate.ts
+    - test/sweep/a-conflicting-pull-request-parked-on-an-escalation-still-gets-its-conflict-round.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "A PR that dispositions conflicted with captured conflict evidence and has a terminal design handoff at its head gets a conflict round. The sweep.disposed row keeps the disposition conflicted and records design_hold_kept true"
+      proof: "grep: W1-T12544 criterion 1 in test/sweep/a-conflicting-pull-request-parked-on-an-escalation-still-gets-its-conflict-round.test.ts"
+    - claim: "An open needs-human escalation whose cause is not conflict, or that names no cause, does not stand down a conflict round at the same head"
+      proof: "grep: W1-T12544 criterion 2 in test/sweep/a-conflicting-pull-request-parked-on-an-escalation-still-gets-its-conflict-round.test.ts"
+    - claim: "invariant:hold-survives-conflict-round — After the conflict round pushes a merge head, the design hold or the escalation still holds at that head: no code fix round is admitted until the question is answered, the contract changes or a later head comes from outside the conflict round"
+      kind: guard
+      proof: "grep: W1-T12544 criterion 3 in test/sweep/a-conflicting-pull-request-parked-on-an-escalation-still-gets-its-conflict-round.test.ts"
+    - claim: "A conflicted PR with no captured conflict evidence, or an open escalation whose cause is conflict, keeps today's hold"
+      proof: "grep: W1-T12544 criterion 4 in test/sweep/a-conflicting-pull-request-parked-on-an-escalation-still-gets-its-conflict-round.test.ts"
+    - claim: "The sweep decides through one function whether a conflict round runs under a hold"
+      proof: "grep: conflictRoundOutranksEscalationHold( in src/lib/sweep.ts"
+  rationale: |
+    WHY: a merge conflict grows with every main commit. A design question or a review question does not stop the PR's
+    branch from needing main. Today the hold that waits for a person also stops the merge round, so the PR goes stale while
+    it waits and needs more work when the answer comes.
+    OBSERVED in the 48 h ledger research (2026-11-11 21:45Z to 2026-11-13 21:45Z): #18033 stayed dirty for 3.6 hours behind a
+    needs-design escalation. #18015 and #18037 stood down on a needs-human escalation while they were conflicted.
+    READ 2026-11-13 at origin/main d41354cdd:
+    - src/lib/sweep.ts:22393-22396 enters the terminal design handoff check for a `conflicted` or `blocked-fixable` PR.
+      :22433 then sets the disposition to `refused-escalate` unless the contract was amended or a main adoption is due, so a
+      conflicted PR gets no conflict round.
+    - src/lib/sweep.ts:22478 holds a stood-down repair as `refused-escalate` unless the hold was the conflict hand-off.
+    - src/lib/escalate.ts:1434 `openEscalationStandDownReason` stands a repair down for any open issue at this head. The
+      duplicate match (src/lib/escalate.ts:1499-1503) vetoes on cause only when both sides name one, so an issue with no
+      Cause line also stands down a conflict round. Only a cleared conflict-evidence cause or a moved base releases it
+      (:1408 `clearedConflictEscalationCause`).
+    - W1-T11062 and W1-T10709 are blocked, not queued. W1-T11172 (queued) is a conflict gardener that acts after the sweep
+      left a conflict stuck; this task lets the sweep run the round itself.
+  design: |
+    INVARIANT hold-survives-conflict-round: a conflict round run under a design hold or an open escalation never admits a
+    code fix round; the hold applies at the merge head the round pushes.
+    1. In src/lib/sweep.ts add `conflictRoundOutranksEscalationHold(pr, hold)`. It is true when the disposition is
+       `conflicted`, `hasCapturedMergeConflictEvidence(pr.mergeConflict)` holds, and the hold is a terminal design handoff
+       or an open escalation whose cause is not `conflict`.
+    2. At :22433 and :22478, when the function is true, keep `conflicted`, dispatch the conflict round, and log
+       `design_hold_kept: true` or `escalation_hold_kept: <issue url>` on sweep.disposed.
+    3. In src/lib/escalate.ts `openEscalationStandDownReason`, take an optional `conflictRound: true`. With it, an issue
+       whose cause is not `conflict` or is absent returns undefined.
+    4. Carry the hold to the merge head: a head whose fix.done row is a conflict round that pushed it from the held head
+       reads the same design handoff and the same open escalation as the held head.
+    NOT IN SCOPE: the conflict gardener; who answers the escalation; how the conflict round resolves files.
+  falsifier: |
+    Leave :22433 unchanged and criterion 1 must fail. Drop the conflictRound option and criterion 2 must fail. Drop the
+    carry to the merge head and criterion 3 must fail. Run the round without captured evidence and criterion 4 must fail.
+    Restore and require all to pass.
+  note: |
+    Id reserved for run-unfiled-1794610450000 with ~/rmd-work/bin/reserve-id.sh. The fleet builds it.

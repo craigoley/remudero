@@ -1,0 +1,67 @@
+- id: W1-T12553
+  title: "The fleet's GitHub App installation stays under its hourly rate limit: each daemon instance gets a read budget and backs off before the installation is exhausted"
+  repo: remudero
+  depends_on: []
+  priority: 1.4
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # every daemon GitHub read waits on the new budget; a wrong share starves an instance, so the budget only ever delays reads, never refuses a write, and an unread budget falls back to today's pacer
+  origin: "operator-session#flow-ledger-research-2026-11-13"
+  plan_refs:
+    - W1-T12531
+    - W1-T1005
+    - W1-T12057
+    - W1-T6591
+    - W1-T9451
+    - W1-T12058
+    - W1-T12188
+  files:
+    - src/lib/github-installation-budget.ts
+    - src/lib/github-transport.ts
+    - src/lib/instance-registry.ts
+    - src/cli/commands/daemon.ts
+    - src/lib/ledger-steps.ts
+    - test/github/the-fleets-app-installation-stays-under-its-hourly-rate-limit.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "The installation budget reads the remaining count, the limit and the reset time from each response's x-ratelimit headers. An instance's read allowance until the reset is the remaining count less the write reserve, divided by the number of consumers that share the installation (the registry instances with the same gh_app_installation_id, plus one share for hand runs)"
+      proof: "grep: W1-T12553 criterion 1 in test/github/the-fleets-app-installation-stays-under-its-hourly-rate-limit.test.ts"
+    - claim: "An instance that has spent its allowance since the latest reading waits for the reset before its next read: the async path awaits a timer and the synchronous path raises the pacer's stand-down error. A newer reading with a larger remaining count gives a new allowance"
+      proof: "grep: W1-T12553 criterion 2 in test/github/the-fleets-app-installation-stays-under-its-hourly-rate-limit.test.ts"
+    - claim: "invariant:writes-keep-their-reserve — reads stop while the remaining count is at or below GITHUB_WRITE_RESERVE_FRACTION of the limit, and a write (a merge, a review post, a comment, a status) never waits on the budget"
+      kind: guard
+      proof: "grep: W1-T12553 criterion 3 in test/github/the-fleets-app-installation-stays-under-its-hourly-rate-limit.test.ts"
+    - claim: "Each throttle writes one github.budget.throttled ledger row per consumer and reset window, with the instance, the remaining count, the limit, the reset time, the allowance and the consumer count. A rate-limit refusal from GitHub also writes the row, with reason refused"
+      proof: "grep: W1-T12553 criterion 4 in test/github/the-fleets-app-installation-stays-under-its-hourly-rate-limit.test.ts"
+    - claim: "With no reading yet, an unreadable registry or no rate-limit headers, the budget gives no allowance limit and the pacer behaves as today. The daemon's start builds the budget from the host registry and every pacer in the process uses it"
+      proof: "grep: W1-T12553 criterion 5 in test/github/the-fleets-app-installation-stays-under-its-hourly-rate-limit.test.ts"
+    - claim: "The transport reads one process-wide installation budget"
+      proof: "grep: githubInstallationBudget( in src/lib/github-transport.ts"
+  rationale: |
+    WHY: the core, console and site daemons share one GitHub App installation (gh_app_id 4648213 in /etc/remudero/daemon-instances.yaml), and hand `rmd review` runs draw on it too. Each process paces itself alone, so together they exhaust the installation's hourly limit. When that happens the core daemon stops sweeping and reviewing.
+    OBSERVED 2026-11-13/14 on the Azure host:
+    - `docker logs remudero-daemon` shows "API rate limit exceeded for installation ID 155256285" 21 times in 4 h. remudero-console-daemon shows it 30 times.
+    - Ledger rate-limit rows by hour: 18h 1, 19h 8, 21h 3, 23h 6, 00h 4.
+    - At 00:06Z the core daemon wrote garden rows but no sweep pass and no review verdict for 60 min ("board gateway: batched issue fetch failed (rate_limit)").
+    - Each daemon ran 5 to 7 gh CLI processes at the same time.
+    READ 2026-11-14 at origin/main 60c8078ce:
+    - src/lib/github-transport.ts:43 `parseGhRateLimitHeaders` already reads x-ratelimit-remaining, -limit and -reset. :574 `createGhCallPacer` widens its gap at a low water of 10% (:547) and stands down at a floor of 2% (:548, :621). It reads one process's view only. It has no idea that other instances spend from the same installation, and it keeps no reserve for writes.
+    - The pacers are separate objects: the board gateway's module default (src/lib/status.ts:4936), the walk pacer (:4803), the daemon's (src/cli/commands/daemon.ts:2449), the run-task board pacer (src/run-task.ts:30131) and the tick-read worker's (src/lib/tick-read-worker.ts:266). Each one sees the shared remaining count fall and none of them knows its share.
+    - src/lib/status.ts:5140-5141 logs board_gateway.issue_fetch_failed with reason rate_limit after the limit is already gone. No row records that a consumer was throttled before that.
+    - src/lib/instance-registry.ts:42 already reads gh_app_id and gh_app_installation_id for each instance, so the number of consumers on one installation is known at start.
+    - W1-T12531 (queued) moves daemon reads from a gh process per call to one in-process client. It cuts the process count, not the number of requests, and gives no instance a share. This task is the budget; it works with either transport. W1-T12188 (queued) gives a hand lane its host's own installation, and W1-T12058 (queued) makes a hand command wait for its read turn; neither splits an installation's budget between daemons. W1-T9451 (queued) is about the Mac read floor.
+  design: |
+    INVARIANT writes-keep-their-reserve: the read budget never delays or refuses a write, and reads stop before the remaining count falls into the write reserve.
+    1. New module src/lib/github-installation-budget.ts. It is pure apart from the clock it takes. `createInstallationBudget({ consumers, writeReserveFraction, clock })` keeps the latest reading (remaining, limit, reset, resource) and the reads this process made since it. `allowance()` is floor((remaining - reserve) / consumers) for the core resource; `admit()` returns `{ ok: true }` or `{ ok: false, waitUntil: reset, reason: "share" | "reserve" }`. `GITHUB_WRITE_RESERVE_FRACTION` starts at 0.1. It must not import the ledger or config: github-transport.ts sits below the ledger (check with depcruise).
+    2. In src/lib/github-transport.ts add `githubInstallationBudget()`, the one process-wide budget, and have `createGhCallPacer`'s `wait`, `waitAsync` and `recordResult` consult it: record each reading's headers, count each read, and, when `admit()` refuses, wait to the reset on the async path or raise `GhPaceFloorStandDownError` on the synchronous path (no sleep on the daemon loop, as W1-T12057 requires). Writes keep their direct path and never call `admit()`.
+    3. Collect throttle rows in the transport as `takeGhPaceLoopWaits` does (one row per consumer and reset window) and let the daemon drain them into the ledger as github.budget.throttled. Declare the step in src/lib/ledger-steps.ts. A GitHub rate-limit refusal (`isGhRateLimitError`) also adds a row with reason refused.
+    4. In src/lib/instance-registry.ts add `installationConsumers(registry, installationId)`: the number of instances with that gh_app_installation_id, plus one share for hand runs. In src/cli/commands/daemon.ts, at start, read the host registry and configure the budget with that count. An unreadable registry configures no budget and logs why.
+    NOT IN SCOPE: moving reads off the gh CLI (W1-T12531); the Mac read broker; caching or coalescing reads; changing the token refresh in src/lib/github-app.ts; the secondary limit.
+  falsifier: |
+    Divide by one consumer and criterion 1 must fail. Let a read pass after the allowance is spent and criterion 2 must fail. Route a write through admit() or let reads run into the reserve and criterion 3 must fail. Drop the throttle row and criterion 4 must fail. Give no allowance limit when the daemon start reads the registry and criterion 5 must fail. Restore and require all to pass.
+  note: |
+    Id reserved for run-unfiled-1794614873000 with ~/rmd-work/bin/reserve-id.sh. The fleet builds it.
+    The builder confirms the share count against /etc/remudero/daemon-instances.yaml on the host (read only) and runs `rmd test-place` on the test path.

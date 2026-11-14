@@ -333,6 +333,11 @@ export function gitDispatchClaimReserver(deps: ClaimGitDeps): DispatchClaimReser
     },
     attempt(taskId, anchor) {
       assertClaimRefPushAllowed(deps.run, dispatchClaimRef(taskId));
+      const refused = claimCheckRefusal(taskId, deps.run(claimCheckArgs(taskId)));
+      if (refused) {
+        lastStderr = refused.stderr;
+        return refused.outcome;
+      }
       const res = deps.run(claimPushArgs(taskId, anchor));
       lastStderr = res.status === 0 ? undefined : res.stderr;
       return claimAttemptOutcome(res);
@@ -441,6 +446,19 @@ export async function renewDispatchClaimAsync(reserver: DispatchClaimReserverAsy
   return reserver.renew ? await reserver.renew(taskId, expect) : { outcome: "unreachable", stderr: "this reserver cannot renew a claim" };
 }
 
+function claimCheckArgs(taskId: string): string[] {
+  return ["ls-remote", "origin", dispatchClaimRef(taskId)];
+}
+
+/** W1-T12525: a held ref is `taken` and a failed read is `unreachable`, both with no push, so no
+ *  pre-push hook runs. `undefined` means the ref is free; the push stays create-only for a race. */
+function claimCheckRefusal(taskId: string, listed: GitAnswer): { outcome: DispatchClaimOutcome; stderr: string } | undefined {
+  if (listed.status !== 0) return { outcome: "unreachable", stderr: listed.stderr };
+  const held = holderFromLsRemote(listed);
+  if (held === undefined) return undefined;
+  return { outcome: "taken", stderr: `origin holds ${dispatchClaimRef(taskId)} at ${held}: not pushed, the push would be rejected` };
+}
+
 function claimPushArgs(taskId: string, anchor: string): string[] {
   return ["push", "origin", `${anchor}:${dispatchClaimRef(taskId)}`];
 }
@@ -530,6 +548,11 @@ export function gitDispatchClaimReserverAsync(deps: ClaimGitDepsAsync): Dispatch
     },
     async attempt(taskId, anchor) {
       await assertClaimRefPushAllowedAsync(deps.run, dispatchClaimRef(taskId));
+      const refused = claimCheckRefusal(taskId, await deps.run(claimCheckArgs(taskId)));
+      if (refused) {
+        lastStderr = refused.stderr;
+        return refused.outcome;
+      }
       const res = await deps.run(claimPushArgs(taskId, anchor));
       lastStderr = res.status === 0 ? undefined : res.stderr;
       return claimAttemptOutcome(res);

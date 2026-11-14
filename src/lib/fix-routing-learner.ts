@@ -48,6 +48,7 @@ export interface FixArmEvidence {
   unattributedExcluded: number;
   /** W1-T6028: rounds whose worker a signal ended with nothing pushed: counted, never pooled into an arm. */
   signalExcluded: number;
+  infrastructureExcluded: number;
   /** W1-T9618: rounds whose commit never reached the remote: a push or credential fault, not the arm's work. */
   pushFailedExcluded: number;
   /** Pooled fix-lane acceptance mean, the prior's centre. */
@@ -74,6 +75,9 @@ function endedBySignalWithNothingPushed(row: Row): boolean {
 /** Fold the ledger's `fix.done` and `fix.ci_not_green` rows into per-(provider, selected_model) evidence. */
 export function fixArmEvidence(rows: readonly Row[], nowMs: number): FixArmEvidence {
   const redShas = new Map<string, Set<string>>();
+  const orphanedAssignments = new Set(rows.filter(row => row.step === "worker.attempt"
+    && row.worker_failure === "orphaned-by-process-exit").flatMap(row =>
+      text(row.selection_assignment_id) ? [text(row.selection_assignment_id)!] : []));
   for (const row of rows) {
     if (row.step !== "fix.ci_not_green") continue;
     const task = text(row.task_id);
@@ -86,6 +90,7 @@ export function fixArmEvidence(rows: readonly Row[], nowMs: number): FixArmEvide
   const byArm = new Map<string, FixArmStats>();
   let unattributedExcluded = 0;
   let signalExcluded = 0;
+  let infrastructureExcluded = 0;
   let pushFailedExcluded = 0;
   for (const row of rows) {
     if (row.step !== "fix.done") continue;
@@ -97,6 +102,10 @@ export function fixArmEvidence(rows: readonly Row[], nowMs: number): FixArmEvide
     }
     if (endedBySignalWithNothingPushed(row)) {
       signalExcluded += 1;
+      continue;
+    }
+    if (orphanedAssignments.has(text(row.selection_assignment_id) ?? "")) {
+      infrastructureExcluded += 1;
       continue;
     }
     if (row.subtype === "push_failed") {
@@ -129,6 +138,7 @@ export function fixArmEvidence(rows: readonly Row[], nowMs: number): FixArmEvide
     arms,
     unattributedExcluded,
     signalExcluded,
+    infrastructureExcluded,
     pushFailedExcluded,
     priorMean: Math.min(Math.max(mean, PRIOR_MEAN_EPSILON), 1 - PRIOR_MEAN_EPSILON),
     priorWeight: FIX_ROUTING_PRIOR_WEIGHT,
@@ -166,6 +176,7 @@ export interface FixRoutingWeights {
   nEffMin: number;
   unattributedExcluded: number;
   signalExcluded: number;
+  infrastructureExcluded: number;
   halfLifeMs: number;
 }
 
@@ -239,6 +250,7 @@ export function fixRoutingWeights(
     nEffMin,
     unattributedExcluded: evidence.unattributedExcluded,
     signalExcluded: evidence.signalExcluded,
+    infrastructureExcluded: evidence.infrastructureExcluded,
     halfLifeMs: evidence.halfLifeMs,
   };
 }
@@ -275,6 +287,7 @@ export function fixRoutingDecisionFields(input: {
     n_eff_min: weights.nEffMin,
     unattributed_excluded: weights.unattributedExcluded,
     signal_excluded: weights.signalExcluded,
+    infrastructure_excluded: weights.infrastructureExcluded,
     half_life_ms: weights.halfLifeMs,
     arms: weights.arms.map((arm) => {
       const serves = arm.draw !== null && weights.preferredModel[arm.provider] === arm.model;
@@ -323,7 +336,7 @@ export async function readFixRoutingRows(
   stateDir: string,
   nowMs: number,
   read: (stateDir: string, since: string) => Promise<Row[]> = (dir, since) =>
-    readLedgerUnionRecords(dir, { since, step: ["fix.done", "fix.ci_not_green"] }),
+    readLedgerUnionRecords(dir, { since, step: ["fix.done", "fix.ci_not_green", "worker.attempt"] }),
 ): Promise<Row[]> {
   const cached = evidenceCache.get(stateDir);
   if (cached && nowMs - cached.at < EVIDENCE_TTL_MS) return cached.rows;

@@ -1,0 +1,58 @@
+- id: W1-T12547
+  title: "The flow garden reports the age of every open red or conflicting pull request and the delay to its first and latest fix round, and files a remedy past 60 minutes"
+  repo: remudero
+  depends_on: []
+  priority: 1.2
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # a new report row and one more filing cause in the daily flow pass; it reads the census and ledger the pass already reads and acts on no pull request
+  origin: "operator-session#flow-ledger-research-2026-11-13"
+  plan_refs:
+    - W1-T5904
+    - W1-T11025
+    - W1-T11032
+    - W1-T12542
+    - W1-T12548
+  files:
+    - src/lib/flow-gardener.ts
+    - src/lib/ledger-steps.ts
+    - test/gardeners/the-flow-garden-reports-open-red-and-conflicting-pull-request-repair-delays.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "For each open pull request in a complete census whose checks read FAILURE or ERROR, or whose mergeability reads CONFLICTING, the daily flow pass writes one flow.open_repair_ages entry with the pull request number, the kind (red, conflict or both), its open age, the delay from open to its first fix round, and the time since its latest fix round ended. A pull request with no fix round has a null first-round delay and the reason no_round_yet"
+      proof: "grep: W1-T12547 criterion 1 in test/gardeners/the-flow-garden-reports-open-red-and-conflicting-pull-request-repair-delays.test.ts"
+    - claim: "invariant:unread-is-not-zero — Fix rounds join a pull request by the task id of its run branch and by pr_number. A pull request opened before the ledger read began, with no fix row in the read, reads unread for its fix-round figures, never zero"
+      kind: guard
+      proof: "grep: W1-T12547 criterion 2 in test/gardeners/the-flow-garden-reports-open-red-and-conflicting-pull-request-repair-delays.test.ts"
+    - claim: "When an open red or conflicting pull request has waited longer than FLOW_OPEN_REPAIR_WAIT_BOUND_MS (60 minutes) since the later of its open time and its latest fix round's end, the pass files one remedy task through the existing filing path with origin flow-regression:open-repair-wait. It files it once while open and inside FLOW_FILINGS_PER_DAY_MAX"
+      proof: "grep: W1-T12547 criterion 3 in test/gardeners/the-flow-garden-reports-open-red-and-conflicting-pull-request-repair-delays.test.ts"
+    - claim: "An unread, incomplete or stale census, or an incomplete ledger read, writes flow.open_repair_ages with status UNKNOWN and its reason, and files nothing"
+      proof: "grep: W1-T12547 criterion 4 in test/gardeners/the-flow-garden-reports-open-red-and-conflicting-pull-request-repair-delays.test.ts"
+    - claim: "The flow report file lists each open red or conflicting pull request with its open age and its fix-round delays, oldest first"
+      proof: "grep: W1-T12547 criterion 5 in test/gardeners/the-flow-garden-reports-open-red-and-conflicting-pull-request-repair-delays.test.ts"
+    - claim: "The flow pass computes the open repair ages through one named function"
+      proof: "grep: openRepairAges( in src/lib/flow-gardener.ts"
+  rationale: |
+    WHY: the flow garden measures merged pull requests only. A pull request that stays red or conflicting with no fix round is invisible to it until it merges, and the PR-hours it loses are counted only after the fact. The stall backstop (sweep.ts) and the fix-lane gardener act on single causes; nothing reports how long open red and conflicting work waits for a round.
+    OBSERVED in the 48 h ledger research (2026-11-11 21:45Z to 2026-11-13 21:45Z): 42 stalled episodes lasted more than 1 h, 21 of them had no fix round in their first hour, and 13 never had one (the same research as W1-T12542).
+    READ 2026-11-13 at origin/main d41354cdd:
+    - src/lib/flow-gardener.ts:1-11 and :803 `runFlowGardener`: once a UTC day it measures PRs merged in the last 24 h per class and stage (FLOW_STAGES, :41), writes flow.report and files one task per regressed stage (`fileRegressions`, :897-946; FLOW_FILINGS_PER_DAY_MAX 2, :52).
+    - :661 `openQueueShadow` reads the open census, but only for arrivals, drain, review wait, merge-preflight refusal age, ready-to-merge age and open age. It is shadow-only (`mode: "shadow"`, `action: "none"`) and files nothing. It ignores red checks and conflicts except to rule a PR not ready (:704-705).
+    - The census already carries `checksState` and `mergeable` per open PR (FlowOpenQueuePr, :405-412; read at :312-359), and the ledger read already keeps fix.dispatch and fix.done rows (:85, :489-490). So no new GitHub read is needed.
+    RELATED: W1-T11025 and W1-T11032 (queued) are remedy filings for one blocker cause each; this task reports every open red or conflicting PR and files one remedy for the waiting itself. W1-T12542 (filed with this one) re-arms the stall backstop that should start the round; this task measures whether rounds start. W1-T12548 (filed with this one) changes how flow-remedy picks causes.
+  design: |
+    1. In src/lib/flow-gardener.ts add `openRepairAges(census, rows, nowMs, ledgerFromMs)`. For each open PR with checksState FAILURE or ERROR, or mergeable CONFLICTING, compute: kind; open age; first fix round (the first fix.dispatch row for the PR after it opened); latest fix round end (the last fix.done row, else the last fix.dispatch); wait = now minus the later of open time and latest round end. Join by the task id parsed from the run branch (`run-<id>-<ms>`) and by pr_number. A PR opened before `ledgerFromMs` with no fix row in the read gets `unread`.
+    2. Add `FLOW_OPEN_REPAIR_WAIT_BOUND_MS = 60 * MIN_MS`. In `runFlowGardener`, after the census read, log `flow.open_repair_ages { status, reason, prs: [...] }`. With an unread, incomplete or stale census (the same tests `openQueueShadow` applies), log status UNKNOWN and skip step 3.
+    3. When any PR waits past the bound, file one remedy through `fileRegressions`' existing guards (open follow-up check, daily cap, mint timeout) with the key `open-repair-wait`, so its origin is `flow-regression:open-repair-wait`. Its rationale lists the waiting PRs, oldest first, with their figures.
+    4. Add a section to the flow report markdown with the same list.
+    5. Declare `flow.open_repair_ages` in src/lib/ledger-steps.ts.
+    INVARIANT unread-is-not-zero: a figure the pass could not read is reported as unread, never as zero, and never qualifies a pull request for the remedy.
+    NOT IN SCOPE: running the pass more than once a day; any action on a pull request; the open queue shadow's figures; flow-remedy's cause ladder (W1-T12548).
+  falsifier: |
+    Leave a conflicting PR out of the list and criterion 1 must fail. Read a PR older than the ledger read as zero rounds and criterion 2 must fail. File a second remedy while one is open and criterion 3 must fail. File on an incomplete census and criterion 4 must fail. Restore and require all to pass.
+  note: |
+    Id reserved for run-unfiled-1794610450000 with ~/rmd-work/bin/reserve-id.sh. The fleet builds it.
+    The builder runs `rmd test-place` on the real test and amends the path if it moves.
