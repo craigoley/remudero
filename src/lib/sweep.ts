@@ -1,5 +1,6 @@
 import { hasNonBotAuthor, namePathLanding, type DependencyMainIdentity } from "./dependency-main-identity.js";
 import { findTaskInCatalogs, type TaskLookupOptions, type TaskLookupResult } from "./task-lookup.js";
+import { planDestinationRepository } from "./plan-destination.js";
 import { decideLoopOutcome } from "./loop-decision.js";
 import { CI_REFRESH_GUARD_VERSION } from "./ci-refresh-prevention.js";
 import { createSelectedModeQualification, observeSelectedMode, readInstanceRegistryText } from "./instance-mode.js";
@@ -2803,6 +2804,16 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   // W1-T4460 (design ii): the real default reads this repo's OWN plan fresh off disk, swallowing a
   // read failure (an unreadable plan on this one opportunistic re-read is never this dispatch's
   // reason to throw — `fixRungTaskWithPlanReload` already degrades to the stale `plan` on `undefined`).
+  /** W1-T12215: which catalog holds a task, and the ops checkout and repository while the host file names one.
+   *  With no host file there is no ops binding and the lookup reads only the public plan. A test's injected
+   *  `ghJsonImpl` also answers the lookup's reads of the ops catalog. */
+  const taskHolderFor = () => {
+    const stateDir = join(config.root, "state");
+    const named = planDestinationRepository(stateDir);
+    const ops = named.outcome === "named" ? { dir: named.checkoutDir, owner: named.owner, repo: named.repo } : undefined;
+    const api = deps.ghJsonImpl ? async (path: string) => ghJsonForBuild(["api", path]) : undefined;
+    return { ops, find: (taskId: string, from: Plan) => findTaskInCatalogs(taskId, { byId: from.byId, stateDir, ...(api ? { api } : {}) }) };
+  };
   const reloadPlanForFix: () => Plan | undefined =
     reloadPlanForFixImpl ??
     (() => {
@@ -5340,26 +5351,38 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
       const results: RefusalAmendmentResult[] = [];
       // W1-T12199: amendments land through the sealed task-file landing. A test's injected git and gh
       // carry the landing too, so it never runs a real child against the checkout the test runs in.
-      const landingOpts: LandTaskFilesOpts = {
+      const landingOptsFor = (dir: string, target: { owner: string; repo: string }): LandTaskFilesOpts => ({
         stateRoot: config.root,
-        targetRepository: { owner, repo },
+        targetRepository: target,
         log,
-        planPrPreflight: (sha, pr) => planPrPreflightImpl(repoDir, sha, pr, { log }),
-        ...(deps.planRepairGitImpl ? { git: (args: string[]) => planRepairGit("git", ["-C", repoDir, ...args]) } : {}),
+        planPrPreflight: (sha, pr) => planPrPreflightImpl(dir, sha, pr, { log }),
+        ...(deps.planRepairGitImpl ? { git: (args: string[]) => planRepairGit("git", ["-C", dir, ...args]) } : {}),
         ...(deps.ghJsonImpl ? { gh: (args: string[]) => {
           const out = ghJsonForBuild(args);
           return typeof out === "string" ? out : JSON.stringify(out);
         } } : {}),
-      };
+      });
+      const landingOpts = landingOptsFor(repoDir, { owner, repo });
+      // W1-T12215: a task the ops catalog holds is amended in the ops checkout, through the ops repository's landing.
+      const holder = taskHolderFor();
+      const opsLandingOpts = holder.ops === undefined ? undefined : landingOptsFor(holder.ops.dir, holder.ops);
       const stagedFor = new Map<string, string>();
       const currentPlan = candidates.length > 0 ? reloadPlanForFix() ?? plan : plan;
       for (const c of candidates) {
-        const task = currentPlan.byId.get(c.taskId);
         const base = { taskId: c.taskId, sourceRunId: c.runId, classes: c.refusals.map((r) => r.refusalClass) };
+        const found = await holder.find(c.taskId, currentPlan);
+        if (found.outcome === "unreadable") {
+          results.push({ ...base, outcome: "lookup_unreadable", reason: found.reason });
+          continue;
+        }
+        const task = found.task;
         if (!task || !taskAwaitsAmendment(task)) {
           results.push({ ...base, outcome: "task_closed" });
           continue;
         }
+        const at = found.catalog === "ops" && holder.ops !== undefined
+          ? { ...holder.ops, landing: opsLandingOpts! }
+          : { dir: repoDir, owner, repo, landing: landingOpts };
         try {
           holdTaskForRefusal(join(config.root, "state"), task, c.refusals, c.runId, c.contractRevision);
         } catch (e) {
@@ -5367,20 +5390,20 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         }
         results.push(
           await draftRefusalAmendment(c, {
-            readShard: (taskId) => readTaskShard(repoDir, taskId),
+            readShard: (taskId) => readTaskShard(at.dir, taskId),
             // W1-T12199: an amendment that waits, or that the open landing PR carries, is found by its staged
             // file. The per-task branch is still read for an amendment opened before this landing.
             probeExisting: (branch) => {
-              const relPath = readTaskShard(repoDir, c.taskId)?.relPath;
+              const relPath = readTaskShard(at.dir, c.taskId)?.relPath;
               const waiting = relPath === undefined ? undefined : stagedTaskFiles(config.root).find((f) => f.relPath === relPath);
-              return waiting ? { ...(waiting.prUrl ? { prUrl: waiting.prUrl } : {}) } : probeExistingPlanPr(ghJsonForBuild, owner, repo, branch);
+              return waiting ? { ...(waiting.prUrl ? { prUrl: waiting.prUrl } : {}) } : probeExistingPlanPr(ghJsonForBuild, at.owner, at.repo, branch);
             },
             nowIso: () => clockFromMillisFn(nowMsImpl).iso(),
             openAmendmentPr: async (input) => {
               const landing = await landTaskFilesAsync(
-                repoDir,
+                at.dir,
                 [{ relPath: input.shardRelPath, content: input.amendedText, claim: input.claim, proof: input.proof }],
-                { ...landingOpts, stageOnly: true, lane: "refusal_amendment" },
+                { ...at.landing, stageOnly: true, lane: "refusal_amendment" },
               );
               const refusal = landing.refused[0];
               // A check that ran out of its budget is no refusal: `plan_pr.preflight_timed_out` records it,
@@ -5399,20 +5422,25 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
               }
               if (refusal) throw new Error(refusal.reason);
               if (landing.error) throw new Error(landing.error);
-              stagedFor.set(c.taskId, input.shardRelPath);
+              stagedFor.set(c.taskId, `${at.owner}/${at.repo}\u0000${input.shardRelPath}`);
               return {};
             },
           }),
         );
       }
-      // One landing call per pass: the amendments of this pass share one pull request, and a file that
-      // waited behind a merged landing goes into the next one with no new refusal.
-      const landed = await landTaskFilesAsync(repoDir, [], landingOpts);
-      if (landed.error) log("sweep.task_files_landing.error", { error: landed.error, waiting: landed.waiting });
+      // One landing call per pass and repository: the amendments of this pass share one pull request in each
+      // repository, and a file that waited behind a merged landing goes into the next one with no new refusal.
+      const landed = new Map<string, Awaited<ReturnType<typeof landTaskFilesAsync>>>();
+      for (const [dir, opts] of [[repoDir, landingOpts], ...(holder.ops ? [[holder.ops.dir, opsLandingOpts!]] : [])] as Array<[string, LandTaskFilesOpts]>) {
+        const one = await landTaskFilesAsync(dir, [], opts);
+        if (one.error) log("sweep.task_files_landing.error", { error: one.error, waiting: one.waiting });
+        landed.set(`${opts.targetRepository!.owner}/${opts.targetRepository!.repo}`, one);
+      }
       return results.map((r) => {
-        const relPath = r.outcome === "waiting" ? stagedFor.get(r.taskId) : undefined;
-        return relPath !== undefined && landed.prUrl !== undefined && landed.landed.includes(relPath)
-          ? { ...r, outcome: "drafted" as const, prUrl: landed.prUrl }
+        const [key, relPath] = (r.outcome === "waiting" ? stagedFor.get(r.taskId) : undefined)?.split("\u0000") ?? [];
+        const one = key === undefined ? undefined : landed.get(key);
+        return relPath !== undefined && one?.prUrl !== undefined && one.landed.includes(relPath)
+          ? { ...r, outcome: "drafted" as const, prUrl: one.prUrl }
           : r;
       });
     },
@@ -5714,20 +5742,6 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
       const taskId = pr.taskId;
       const proof0 = evidence.proofs[0];
       if (!taskId || !proof0) return;
-      let shardRelPath: string | undefined;
-      try {
-        shardRelPath = readdirSync(join(repoDir, "plan", "tasks.d"))
-          .filter((f) => isTaskShardName(f, taskId) && /\.ya?ml$/.test(f))
-          .map((f) => join("plan", "tasks.d", f))[0];
-      } catch {
-        /* the shard directory is unreadable — fall through to the monolith below */
-      }
-      if (!shardRelPath) {
-        const monolith = join(repoDir, "plan", "tasks.yaml");
-        if (existsSync(monolith) && readFileSync(monolith, "utf8").includes(`id: ${taskId}\n`)) {
-          shardRelPath = "plan/tasks.yaml";
-        }
-      }
       const planRepairLog = (outcome: string, extra: Record<string, unknown> = {}) =>
         log(PLAN_REPAIR_DISPATCH_STEP, {
           task_id: taskId,
@@ -5738,22 +5752,44 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
           progress_approach: evidence.progressApproach,
           ...extra,
         });
+      // W1-T12215: the repair edits the task file in the repository that holds it. An unreadable lookup opens nothing.
+      const holder = taskHolderFor();
+      const found = await holder.find(taskId, plan);
+      if (found.outcome === "unreadable") {
+        planRepairLog("lookup_unreadable", { reason: found.reason });
+        return false;
+      }
+      const at = found.catalog === "ops" && holder.ops !== undefined ? holder.ops : { dir: repoDir, owner, repo };
+      let shardRelPath: string | undefined;
+      try {
+        shardRelPath = readdirSync(join(at.dir, "plan", "tasks.d"))
+          .filter((f) => isTaskShardName(f, taskId) && /\.ya?ml$/.test(f))
+          .map((f) => join("plan", "tasks.d", f))[0];
+      } catch {
+        /* the shard directory is unreadable — fall through to the monolith below */
+      }
+      if (!shardRelPath) {
+        const monolith = join(at.dir, "plan", "tasks.yaml");
+        if (existsSync(monolith) && readFileSync(monolith, "utf8").includes(`id: ${taskId}\n`)) {
+          shardRelPath = "plan/tasks.yaml";
+        }
+      }
       if (!shardRelPath) {
         planRepairLog("no_shard");
         return true;
       }
       const branch = `plan-repair/${taskId}`;
       try {
-        planRepairGit("git", ["-C", repoDir, "fetch", "origin", "--quiet"]);
+        planRepairGit("git", ["-C", at.dir, "fetch", "origin", "--quiet"]);
       } catch {
         /* best-effort — a stale local view still lets the probe below run */
       }
-      const existing = probeExistingPlanPr(ghJsonForBuild, owner, repo, branch);
+      const existing = probeExistingPlanPr(ghJsonForBuild, at.owner, at.repo, branch);
       if (existing) {
         planRepairLog("deduped", { plan_repair_pr: existing.prUrl });
         return true;
       }
-      const original = readFileSync(join(repoDir, shardRelPath), "utf8");
+      const original = readFileSync(join(at.dir, shardRelPath), "utf8");
       const marker =
         `sweep-flagged proof — an Architect must correct this criterion's ` +
         `proof; W1-T3390 plan-only repair rung, PR #${pr.prNumber}, ${new Date(nowMsImpl()).toISOString()}`;
@@ -5772,11 +5808,11 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         // left over from an earlier, uncleaned attempt is dropped first — best-effort, since a
         // branch still checked out elsewhere fails closed exactly as the prior `-B` did.
         try {
-          planRepairGit("git", ["-C", repoDir, "branch", "-D", branch]);
+          planRepairGit("git", ["-C", at.dir, "branch", "-D", branch]);
         } catch {
           /* no stale local branch to clear — the common case */
         }
-        worktreeAddForBuild(repoDir, worktreePath, branch, "origin/main", { log });
+        worktreeAddForBuild(at.dir, worktreePath, branch, "origin/main", { log });
         writeFileSync(join(worktreePath, shardRelPath), flagged);
         planRepairGit("git", ["-C", worktreePath, "add", shardRelPath]);
         const commitMessage = buildPlanPrCommitMessage({
@@ -5807,7 +5843,8 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
           proofCwd: worktreePath,
         });
         // W1-T5405: the verdict rides this rung's ONE dispatch row, so a refusal spends a MAX_PLAN_REPAIR_STRIKES strike.
-        const verdict = await planPrPreflightImpl(worktreePath, headSha, { title, body }, { log });
+        // W1-T12215: an ops tree is checked with the public code (W1-T12205).
+        const verdict = await planPrPreflightImpl(worktreePath, headSha, { title, body, ...(at.dir === repoDir ? {} : { codeRoot: repoDir }) }, { log });
         const preflightRow = verdict.unreadable.length > 0 ? { preflight_unreadable: verdict.unreadable } : {};
         if (!planPrPreflightAllows(verdict, { lane: "plan_repair", branch })) {
           // A check that ran out of its budget spends no strike: recorded as such, and the next pass asks again.
@@ -5820,7 +5857,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         }
         await gitPushRunBranchForBuild(worktreePath, { stdio: "ignore", expectedHeadSha: headSha });
         assertLiveWriteAllowed("gh-pr-create", `opening the plan-only repair PR for ${taskId}'s shard`);
-        const created = createPlanPrRest(ghJsonForBuild, owner, repo, { title, body, head: branch, base: "main" });
+        const created = createPlanPrRest(ghJsonForBuild, at.owner, at.repo, { title, body, head: branch, base: "main" });
         planRepairLog("dispatched", { plan_repair_pr: created.prUrl, shard_path: shardRelPath, ...preflightRow });
         return true;
       } catch (e) {
@@ -5829,7 +5866,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
       } finally {
         if (worktreePath) {
           try {
-            worktreeRemoveForBuild(repoDir, worktreePath);
+            worktreeRemoveForBuild(at.dir, worktreePath);
           } catch {
             /* best-effort cleanup */
           }
@@ -21174,8 +21211,8 @@ export async function runSweep(
       }
       {
         for (const r of await deps.draftRefusalAmendments(candidates)) {
-          if (r.outcome === "error") {
-            log("sweep.refusal_amendment.error", { task_id: r.taskId, error: r.error });
+          if (r.outcome === "error" || r.outcome === "lookup_unreadable") {
+            log("sweep.refusal_amendment.error", r.outcome === "error" ? { task_id: r.taskId, error: r.error } : { task_id: r.taskId, outcome: r.outcome, reason: r.reason });
             continue;
           }
           appendLine(deps.ledgerPath, {

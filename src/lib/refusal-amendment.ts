@@ -380,6 +380,8 @@ export type RefusalAmendmentOutcome =
   | "text_drift"
   | "already_flagged"
   | "task_closed"
+  /** W1-T12215: the lookup of both catalogs is unreadable, so no amendment opens; the next pass asks again. */
+  | "lookup_unreadable"
   | "error";
 
 export interface RefusalAmendmentResult {
@@ -389,6 +391,8 @@ export interface RefusalAmendmentResult {
   readonly prUrl?: string;
   readonly classes: readonly CriterionRefusalClass[];
   readonly error?: string;
+  /** W1-T12215: the outcome code of an unreadable lookup, for example `destination-unreadable`. */
+  readonly reason?: string;
 }
 
 /** The stable per-task branch: a second draft before the first PR lands DEDUPES on it. */
