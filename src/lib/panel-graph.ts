@@ -1,11 +1,8 @@
 import { INBOX_VERBS, validatedInboxAction, type InboxVerbActions, type InboxVerbActor, type InboxVerbName, type InboxVerbRespond } from "./inbox-verdict-command.js";
 import { readInboxGardenerStore, inboxGardenerPath, inboxRetirementFor, inboxOperatorIntent } from "./inbox-retirement.js";
-/**
- * Control-panel plan→task→PR routes (MASTER-PLAN §7B), reached through the api-client (§7A).
- * Reuse feedback.ts, trace.ts and drain.ts; the daemon remains the sole durable writer.
- * `replyTo` files a fresh feedback entry through the ordinary pipeline. Re-prioritization
- * has no plan-schema support here. Route rationale and history: docs/forensics/panel-graph.md.
- */
+/** Control-panel plan→task→PR routes (MASTER-PLAN §7B, api-client §7A).
+ * Reuse feedback/trace/drain; only the daemon writes durably. `replyTo` files fresh feedback;
+ * re-prioritization has no schema support. History: docs/forensics/panel-graph.md. */
 
 import { readPage, readPageRequest, readSnapshotCursor, snapshotCursor, type ReadPageRequest } from "./read-page.js";
 import { adoptionFindingGone, adoptionLatestPath, readAdoptionLatest } from "./measurement-cadence.js";
@@ -179,18 +176,16 @@ export interface PanelGraphDeps {
   /** The status-derivation gateway (status.ts's `GitHub`) — a different shape from `github`
    *  above; backs the drain-preview and plan-view merged-set derivation. */
   statusGithub: GitHub;
-  /** config.root, where inbox state (W1-T110) lives — distinct from `root` (the repo checkout)
-   *  above, the same split lib/serve.ts's `fleetControlRoot` documents.
-   *  Why: the config-vs-repo split this once confused — docs/forensics/panel-graph.md */
+  /** config.root holds inbox state (W1-T110); `root` holds the checkout. See serve.ts's
+   * `fleetControlRoot` and docs/forensics/panel-graph.md for the split's history. */
   inboxRoot: string;
   /** W1-T8831: the instant archive and snooze are stamped and judged against; defaults to the system clock. */
   inboxClock?: Clock;
   /** The detached-CLI gateway (W1-T193) POST /v1/inbox/approve and /reframe hand off to; see
    *  {@link RatifyCliGateway}. */
   ratify: RatifyCliGateway;
-  /** Best-effort git-land after POST /v1/feedback/decision writes a status flip (W1-T191).
-   *  Omitted in tests; production always passes `{}`.
-   *  Why: what a missed land does to checkCliFreshness — docs/forensics/panel-graph.md */
+  /** Best-effort decision git-land (W1-T191): omitted in tests, `{}` in production.
+   * Missed-land/checkCliFreshness history: docs/forensics/panel-graph.md. */
   feedbackLand?: LandFeedbackOpts;
   /** The feedback-expansion rung POST /v1/feedback/preview calls (W1-T350). `undefined` makes
    *  the route resolve `{ expansion: null }` — the same fail-open degrade an outage produces. */
@@ -213,12 +208,9 @@ export interface PanelGraphDeps {
 
 // ── GET /v1/feedback — the inbox list ───────────────────────────────────────
 
-/**
- * A reconciled {@link FeedbackEntry} as GET /v1/feedback returns it. `unverified`, `discharged`/
- * `dischargeUndecidable` (W1-T1257) and `landing`/`landingUnknown` (W1-T5524) are read-time-only, never
- * written to `plan/feedback/<id>.yaml` — present only when set, layered after this reconcile. Only
- * `landing` changes `status`: a queued entry reads its queued record's (W1-T5627).
- */
+/** GET /v1/feedback's reconciled entry. Optional `unverified`, discharge (W1-T1257) and landing
+ * (W1-T5524) flags are read-time overlays, never persisted to feedback YAML. Only `landing`
+ * changes `status`, projecting the queued record's status (W1-T5627). */
 export type ReconciledFeedbackEntry = FeedbackEntry & {
   unverified?: true;
   discharged?: true;
@@ -227,12 +219,9 @@ export type ReconciledFeedbackEntry = FeedbackEntry & {
   landingUnknown?: true;
 };
 
-/**
- * W1-T257: a merged `proposal_pr` projects `proposed` as `accepted` via the shared batched
- * `statusGithub`, preventing stuck NEEDS ME entries. GETs write nothing;
- * {@link reconcileFeedbackEntries} persists. Missing/open/closed-unmerged PRs leave status alone;
- * `readFailed()` also preserves it, adding `unverified: true`. See docs/forensics/panel-graph.md.
- */
+/** W1-T257: batched `statusGithub` projects merged proposal PRs from proposed to accepted;
+ * other PR states preserve status, and `readFailed()` adds `unverified: true`. GETs never write;
+ * {@link reconcileFeedbackEntries} persists. History: docs/forensics/panel-graph.md. */
 export function projectReconciledFeedback(entries: readonly FeedbackEntry[], statusGithub: GitHub): ReconciledFeedbackEntry[] {
   return entries.map((entry): ReconciledFeedbackEntry => {
     if (entry.status !== "proposed" || !entry.proposal_pr) return entry;
@@ -243,18 +232,13 @@ export function projectReconciledFeedback(entries: readonly FeedbackEntry[], sta
   });
 }
 
-/**
- * {@link projectReconciledFeedback}, persisted: each entry it reads `accepted` is written so. The ONE
- * writer is serve's slow lane (arch Phase 4 P4-T07, {@link acceptMergedFeedback}), never a GET, so
- * the flip happens with no reader and concurrent reads never race to land it.
- */
+/** Persist {@link projectReconciledFeedback}'s accepted entries only from serve's slow lane
+ * (P4-T07, {@link acceptMergedFeedback}); GETs cannot race to land the flip. */
 export function reconcileFeedbackEntries(
   root: string,
   entries: FeedbackEntry[],
   statusGithub: GitHub,
-  // Fires inside the long-lived `rmd serve` process whenever a proposal PR merges — omitting a
-  // land here left a tracked modification in `root` that starved deploys (#966).
-  // Why: the incident — docs/forensics/panel-graph.md
+  // Land inside serve: leaving `root` dirty starved deploys (#966; docs/forensics/panel-graph.md).
   land?: LandFeedbackOpts,
 ): ReconciledFeedbackEntry[] {
   return projectReconciledFeedback(entries, statusGithub).map((projected, i) =>
@@ -915,18 +899,10 @@ export function buildDrainPreviewRoute(deps: PanelGraphDeps, readPlanSnapshot?: 
   };
 }
 
-// ── GET /v1/plan/view — progress (done/in-flight/queued) + frontier (W1-T315) ─────────────────
-//
-// Progress derives from the same GitHub-derived projection GET /v1/drain/preview and GET
-// /v1/status use — done counts off that projection, never off the decorative `status:` field,
-// which can say `queued` after the PR has merged. An unreadable gateway never renders a zero:
-// the last observed reading rides forward, stamped unknown with its age.
-//
-// Frontier binds drain.ts's own `runnableCandidates`, the dispatcher's exact selector, rather
-// than re-deriving order/eligibility here. A held task renders as held, with the reason the same
-// predicate produced, never omitted. Out of scope: live run/daemon/deploy state (the Now tab)
-// and any write action on a frontier row — this view only renders, never dispatches.
-// Why: the merged-vs-status incident and the design notes — docs/forensics/panel-graph.md
+// GET /v1/plan/view (W1-T315): progress uses the GitHub projection shared by drain-preview/status,
+// never decorative plan `status:`. On read failure, carry the last reading as unknown with its age.
+// Frontier uses drain.ts's `runnableCandidates`; held tasks retain the selector's reason.
+// Read-only: no dispatch or Now-tab run/daemon/deploy state. History: docs/forensics/panel-graph.md.
 
 /** Aggregate task counts for the workstream, derived from GitHub — never from the plan's own
  *  decorative `status:` field (see this section's header). */
@@ -2336,13 +2312,9 @@ export const INBOX_CLASSIFY_SLICE = 10;
 
 const yieldToEventLoop = (): Promise<void> => new Promise((resolve) => setImmediate(resolve));
 
-/**
- * {@link classifyAllProposalsMemo} for the CACHED GET /v1/inbox refresh: a recompute classifies
- * {@link INBOX_CLASSIFY_SLICE} proposals at a time and yields between slices, so every other route keeps answering
- * while it runs and the console's cached-read wrapper serves the previous body. MEASURED on a 700-proposal fixture
- * with every anchor distinct: a cold commit was a single ~5 s block. A second caller over the same inputs awaits the
- * running refresh rather than starting its own.
- */
+/** Cached GET /v1/inbox refresh: yield every {@link INBOX_CLASSIFY_SLICE} proposals while reads
+ * serve the prior body; concurrent callers share the refresh. A cold 700-distinct-anchor fixture
+ * blocked for ~5 s without slicing. See {@link classifyAllProposalsMemo}. */
 export async function classifyAllProposalsSliced(
   deps: PanelGraphDeps,
   readPlanSnapshot?: () => Plan,
@@ -2822,17 +2794,9 @@ export function inboxLanes(classified: Pick<ClassifiedInbox, "proposals" | "clas
     fleet: project(fleet), archived: project(archived), snoozed: project(snoozed), kept: project(kept), counts, humanGates };
 }
 
-/**
- * GET /v1/inbox — read-scoped. The ratification inbox's (W1-T110) ready and drafting tiers,
- * computed the way `rmd inbox` prints them, for the shell's NEEDS ME section. Deferred-with-
- * trigger proposals are never returned — only what is actionable or in-progress is surfaced.
- * Not-ready proposals (W1-T2604) ride along in `notReady` (see {@link InboxNotReadyItem});
- * Ratified/retired proposals stay excluded from every array. DECLINED ones are returned in their
- * own `declined` array (W1-T3408): `POST /v1/inbox/restore` shipped with no way to learn its own
- * argument, because a declined proposal was invisible here — a write route whose parameter cannot
- * be discovered is a mechanism nobody can reach. `rmd approve`/`reframe`/`decline` are wired from
- * the card below, over the same write-token scope every write uses.
- */
+/** GET /v1/inbox (W1-T110): read-scoped ready/drafting tiers as in `rmd inbox`, plus `notReady`
+ * (W1-T2604, {@link InboxNotReadyItem}); exclude ratified/retired proposals. Expose `declined`
+ * (W1-T3408) so restore arguments remain discoverable. Card actions use the shared write-token scope. */
 /** Read-only qualification of maintained source evidence; never starts classification or history IO. */
 function qualifyMaintainedInbox(deps: PanelGraphDeps): ReturnType<NonNullable<Route["cacheQualification"]>> {
   if (!deps.inboxFromSlowLane) return undefined;
@@ -3331,19 +3295,14 @@ export function inboxThreadListSources(deps: PanelGraphDeps, readPlanSnapshot?: 
   };
 }
 
-/** GET /v1/inbox/threads — the operator's threads: headline, first line of the latest message, who
- *  it is waiting on, last activity, message count and unread. Waiting-on-you first.
- *
- *  W1-T5269: answered from the maintained projection (inbox-thread-list-view.ts), never by awaiting a
- *  fleet-wide classification. The legacy `{ threads }` body is sent only for rows whose classification
- *  is source-verified fresh; a stale list needs `?qualified=1` (the body then names its source), and
- *  anything else is an explicit 503 — an old client must not mistake stale rows for verified ones. */
+/** GET /v1/inbox/threads: headline, latest message preview, waiting-on, activity, count and unread;
+ * waiting-on-you first. W1-T5269: read the maintained projection, never await fleet classification.
+ * Legacy `{ threads }` requires source-verified fresh rows; stale rows require `?qualified=1`
+ * with source qualification. Otherwise 503, so old clients cannot mistake stale rows for fresh. */
 export function buildInboxThreadsRoute(deps: PanelGraphDeps, readPlanSnapshot?: () => Plan, opts: { waitMs?: number; warm?: boolean } = {}): Route {
   const view = createInboxThreadListView(inboxThreadListSources(deps, readPlanSnapshot), opts.waitMs === undefined ? {} : { waitMs: opts.waitMs });
-  // Building a route must stay inert: panel routes are constructed by every harness that wires the graph, and a
-  // fleet-wide classification started at build time ran (and hung a coverage shard) in processes that never
-  // serve a request. The cadence is armed by the first read instead, so only a process that serves the Inbox
-  // keeps its classification warm. A failed warm is the next read's problem, not a crash.
+  // Keep construction inert: build-time classification hung a coverage shard without any request.
+  // Arm warming on the first read; warm failures surface on the next read rather than crashing.
   let warmArmed = opts.warm === false;
   return {
     method: "GET",
@@ -3522,15 +3481,10 @@ export function buildInboxThreadReadRoute(deps: PanelGraphDeps): Route {
   };
 }
 
-// ── POST /v1/inbox/approve, POST /v1/inbox/reframe — the operator's ratification bit, wired
-// through the write-token API from the card (W1-T193, MASTER-PLAN P25 ii-iii) ───────────────
+// Write-token approve/reframe hand-offs (W1-T193, MASTER-PLAN P25 ii-iii).
 
-/**
- * `rmd approve`/`rmd reframe` drive a multi-minute pipeline (push, `gh pr create`, CI, review,
- * auto-merge). Blocking an HTTP response on that risks a request that never returns, so this
- * gateway spawns the real CLI as a detached, unref'd child — reusing the already-tested flow.
- * The response confirms only a hand-off; the resulting PR surfaces via the console's own polling.
- */
+/** Detached, unref'd real CLI hand-off: approve/reframe's push/PR/CI/review pipeline takes minutes.
+ * HTTP confirms only the hand-off; console polling discovers the resulting PR. */
 export interface RatifyCliGateway {
   /** Available only with the owned fresh-source runner; never falls back to an unowned child. */
   improvement?(target: { operationId: string; stateDir: string; repoRoot: string }): Promise<RatifyCliHandoff>;
@@ -3672,12 +3626,9 @@ function validateApproveProposal(body: unknown): { error: string } | ApproveProp
   return { proposalId: body.proposalId };
 }
 
-/**
- * POST /v1/inbox/approve — write-scoped. Re-classifies the proposal live and refuses with 409
- * anything not currently ready, naming why ({@link refusalReason}) — server-side, since a race
- * between the last poll and the click is otherwise possible. A ready proposal hands off to
- * {@link RatifyCliGateway.approve}. Ledgers `panel.proposal_approve_requested` immediately.
- */
+/** Write-scoped approve: classify live to avoid poll/click races; 409 with {@link refusalReason}
+ * unless ready. Hand off to {@link RatifyCliGateway.approve} and ledger
+ * `panel.proposal_approve_requested` immediately. */
 export function buildApproveProposalRoute(deps: PanelGraphDeps): Route {
   return buildInboxVerbRoute("approve", deps);
 }
@@ -3694,12 +3645,9 @@ function validateReframeProposal(body: unknown): { error: string } | ReframeProp
   return { proposalId: body.proposalId, feedback: body.feedback };
 }
 
-/**
- * POST /v1/inbox/reframe — write-scoped. Captures the operator's feedback verbatim and hands off
- * to {@link RatifyCliGateway.reframe}. Valid for any proposal in the active registry regardless
- * of classification — reframe is feedback, never a ratification, and carries no readiness
- * precondition. Ledgers `panel.proposal_reframe_requested` (with the feedback text) immediately.
- */
+/** Write-scoped reframe: verbatim operator feedback to {@link RatifyCliGateway.reframe} for any
+ * active proposal, without a readiness gate or ratification. Ledger
+ * `panel.proposal_reframe_requested` with the feedback immediately. */
 export function buildReframeProposalRoute(deps: PanelGraphDeps): Route {
   return buildInboxVerbRoute("reframe", deps);
 }
@@ -3739,23 +3687,16 @@ export function buildKeepProposalRoute(deps: PanelGraphDeps): Route {
   return buildInboxVerbRoute("keep", deps);
 }
 
-/**
- * POST /v1/inbox/archive — write-scoped, LOW. Sets the item aside (`archived: true`) or brings it back
- * (`false`) without changing the proposal's state: approve, decline and restore still work on it, and acting
- * on it un-archives it. 404 for a proposal not in the active registry. Idempotent; ledgers `inbox.archived`.
- * The mark is in `state/inbox-triage.json` (ledger compaction cannot shed it) and shows in the `archived`
- * section from the slow lane's next pass.
- */
+/** Write-scoped LOW archive: idempotently set/clear `archived`, never proposal state; actions still
+ * work and un-archive it. Unknown active id: 404. Ledger `inbox.archived`; retain the mark in
+ * `state/inbox-triage.json` across compaction. The next slow-lane pass renders it. */
 export function buildArchiveProposalRoute(deps: PanelGraphDeps): Route {
   return buildInboxVerbRoute("archive", deps);
 }
 
-/**
- * POST /v1/inbox/snooze — write-scoped, LOW. Hides the item until `until` (RFC 3339 UTC, in the future), or
- * wakes it now with `null`. 404 for an unknown proposal, 400 for a time that is not in the future. The view
- * holds no clock: the slow lane's pass judges the stored instant, so a snooze comes due by re-emitting the pages
- * ({@link nextInboxSnoozeWake} names when). Idempotent; ledgers `inbox.snoozed`.
- */
+/** Write-scoped LOW snooze: future RFC 3339 UTC `until`, or null to wake. Unknown id: 404;
+ * nonfuture time: 400. Idempotent; ledger `inbox.snoozed`. Only the slow-lane pass judges time
+ * and re-emits pages when due ({@link nextInboxSnoozeWake}); the view holds no clock. */
 export function buildSnoozeProposalRoute(deps: PanelGraphDeps): Route {
   return buildInboxVerbRoute("snooze", deps);
 }
@@ -3802,14 +3743,10 @@ function proposalVerdictResponse(
   respond(200, { ok: true, proposalId: input.proposalId, ...(kind === "decline" ? { declined: true } : { restored: true }) });
 }
 
-/**
- * POST /v1/inbox/decline: write-scoped operator decision, never inferred from proposal prose.
- * W1-T2604 avoids approving unwanted tasks just to remove an ask. Retain the registry entry
- * (like `retired`, W1-T2451); check its receipt before other predicates. W1-T3407:
- * {@link buildRestoreProposalRoute} reverses it, latest wins. Any active proposal except ratified
- * or already declined is eligible. No task/branch or {@link RatifyCliGateway} call.
- * P19-shaped silent-drop history: docs/forensics/panel-graph.md.
- */
+/** Write-scoped decline (W1-T2604): explicit operator decision, never inferred from prose.
+ * Retain the registry entry (W1-T2451); check its receipt first. Restore reverses it, latest wins
+ * (W1-T3407). Any active nonratified, nondeclined proposal qualifies; no task/branch/gateway call.
+ * P19 silent-drop history: docs/forensics/panel-graph.md. */
 export function buildDeclineProposalRoute(deps: PanelGraphDeps): Route {
   return buildInboxVerbRoute("decline", deps);
 }
@@ -3821,13 +3758,9 @@ export function buildRestoreProposalRoute(deps: PanelGraphDeps): Route {
   return buildInboxVerbRoute("restore", deps);
 }
 
-// ── POST /v1/policy/daily-cost-ceiling, POST /v1/policy/daily-cost-ceiling/clear ────────────
-// The operator's own write control over the daily-cost-ceiling override (W1-T364), gated on
-// the effective ceiling resolving fresh every tick (W1-T363) — a write here takes effect on the
-// daemon's next tick, no restart required. Neither handler duplicates the store's bounds check:
-// a `PolicyError` maps straight to a 400. `deps.root` (never `inboxRoot`) is the same root every
-// other route in this module already uses.
-// Why: the operator-ruling and pre-W1-T363 history — docs/forensics/panel-graph.md
+// Daily-cost-ceiling set/clear (W1-T364): operator writes take effect next tick (W1-T363), no restart.
+// Use `deps.root`, never `inboxRoot`; the store owns bounds checks, PolicyError maps to 400.
+// Operator-ruling/pre-W1-T363 history: docs/forensics/panel-graph.md.
 
 interface SetDailyCostCeilingInput {
   usd: number;
@@ -3839,12 +3772,8 @@ function validateSetDailyCostCeiling(body: unknown): { error: string } | SetDail
   return { usd: body.usd };
 }
 
-/**
- * Ledgers the who/from/to/effective audit trail for one console write to the ceiling override
- * (W1-T333), shared by the set and clear handlers so the two routes can never record it two
- * different ways. `fromUsd` is the effective value immediately before this write, never the raw
- * override-file content, so a fallback-from-malformed read still records an accurate "from".
- */
+/** Shared set/clear who/from/to/effective audit (W1-T333). `fromUsd` is the prior effective value,
+ * never raw override content, preserving an accurate "from" even after malformed-file fallback. */
 function ledgerCeilingAudit(deps: Pick<PanelGraphDeps, "ledgerPath">, req: IncomingMessage, fromUsd: number, toUsd: number, effectiveUsd: number): void {
   appendDailyCostCeilingOverrideAudit(deps.ledgerPath, {
     runId: `CEILING-${Date.now()}`,
@@ -3862,12 +3791,8 @@ function ceilingPolicy(deps: Pick<PanelGraphDeps, "policy">): Policy {
   return deps.policy ?? loadDefaultPolicy();
 }
 
-/**
- * POST /v1/policy/daily-cost-ceiling — write-scoped. Sets the override to `{usd}` via the
- * store's own writer, which validates bounds and refuses out-of-range at write time (this route
- * adds no bounds check of its own). Responds with the resolved effective ceiling, never the raw
- * input echoed back, so a write the store could not honor is never misreported as taken hold.
- */
+/** Write-scoped ceiling `{usd}`: the store validates bounds. Return the resolved effective
+ * ceiling, never echo raw input as though an unhonored write took hold. */
 export function buildSetDailyCostCeilingRoute(deps: PanelGraphDeps): Route {
   return {
     method: "POST",
@@ -3895,12 +3820,8 @@ export function buildSetDailyCostCeilingRoute(deps: PanelGraphDeps): Route {
   };
 }
 
-/**
- * POST /v1/policy/daily-cost-ceiling/clear — write-scoped, no body required. Clears
- * `state/DAILY_COST_CEILING_OVERRIDE` via the store's own `clearDailyCostCeilingOverride`
- * (idempotent — clearing an already-absent override is not an error), reverting the effective
- * ceiling to the committed `plan/policy.yaml` default.
- */
+/** Write-scoped, bodyless clear via `clearDailyCostCeilingOverride`: idempotently remove
+ * `state/DAILY_COST_CEILING_OVERRIDE`, reverting to the committed `plan/policy.yaml` default. */
 export function buildClearDailyCostCeilingRoute(deps: PanelGraphDeps): Route {
   return {
     method: "POST",
