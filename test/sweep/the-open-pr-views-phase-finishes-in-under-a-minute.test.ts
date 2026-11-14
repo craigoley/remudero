@@ -155,6 +155,15 @@ test("W1-T12530 criterion 1: the light pass timing row names the time of each vi
     }
     assert.ok(gh.calls().some((call) => call.includes(`repos/o/${repo}/pulls/1253001`)), "positive control: the own read ran");
   } finally {
+    // A posted review frees a lane, and its refill reads the views after the hook returns. Its paced reads wait
+    // 1.5 s with no `gh` call open, so wait until none is open and none starts for 2 s before PATH is restored.
+    for (let quiet = 0, rounds = 0; quiet < 40 && rounds < 600; rounds++) {
+      const before = gh.events().length;
+      await sleep(50);
+      const after = gh.events();
+      const open = after.filter((e) => e.phase === "start").length - after.filter((e) => e.phase === "end").length;
+      quiet = open === 0 && after.length === before ? quiet + 1 : 0;
+    }
     for (const [key, value] of oldEnv) {
       if (value === undefined) delete process.env[key]; else process.env[key] = value;
     }
