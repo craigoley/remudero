@@ -1,30 +1,33 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { parse, stringify } from "yaml";
 import { fileEligibleFollowups, followupFilingPresentation, followupProvenance, selectFileableFollowups } from "#src/lib/followup-filing.js";
-import { fileRatificationBatch, inboxDraftExampleFragmentYaml, type DraftRungOutcome } from "#src/lib/inbox.js";
+import { approveBatch, fileRatificationBatch, inboxDraftExampleFragmentYaml, materializeDraftTaskIds, type DraftRungOutcome } from "#src/lib/inbox.js";
+import { buildPlanPrBody, filingAcceptanceCriteria } from "#src/lib/plan-pr-emitter.js";
+import { armAutoMerge, type ArmDeps } from "#src/lib/arm-auto-merge.js";
+import { parseAcceptanceBlock, parseWhitelistedProof } from "#src/lib/review.js";
 import { mineFollowups, retireSettledFollowups, routeFollowupsToRegistry, type FollowupCandidate, type FollowupRouteOutcome } from "#src/lib/retro.js";
 
 const headSha = "a".repeat(40);
 const candidate: FollowupCandidate = { entryId: "run:timestamp:0", taskId: "W1-T12117", runId: "run",
   prUrl: "https://github.com/craigoley/remudero/pull/18415", headSha, type: "task",
-  text: 'Preserve the concrete follow-up: "quotes" and YAML punctuation.\nKeep this second line.' };
+  text: 'Preserve NEW-1, NEW-10 and NEW-1A: "quotes" and YAML punctuation.\nKeep NEW-1 on this second line.' };
 const routed = (c = candidate): FollowupRouteOutcome => ({ candidate: c, routed: true, proposalId: `followup:${c.entryId}` });
 const origin = `followup#${candidate.entryId}`;
 const source = { id: candidate.taskId, origin: "architect", risk: "low" as const };
 
 function draft(c = candidate): DraftRungOutcome {
   const task = parse(inboxDraftExampleFragmentYaml())[0];
-  task.id = "W1-T5507";
   task.verify = "human";
   task.origin = `followup#${c.entryId}`;
   task.rationale = followupProvenance(c);
   return { ok: true, proposalId: `followup:${c.entryId}`, candidate: {
     proposalId: `followup:${c.entryId}`, fragmentYaml: stringify([task]),
-    stampLine: `- followup:${c.entryId} (plan) — RATIFIED 2026-11-14 -> W1-T5507.`, anchorFingerprint: "",
+    stampLine: `- followup:${c.entryId} (plan) — RATIFIED 2026-11-14 -> NEW-1.`, anchorFingerprint: "",
   } };
 }
 
@@ -41,26 +44,90 @@ test("an eligible task or research follow-up is filed as one plan-only shard wit
       const result = await fileEligibleFollowups([routed(c)], {
         planOnMain: [source], openPrOrigins: new Set(), ratifiedIds: new Set(),
         draft: async proposals => { assert.ok(proposals[0].summary.includes(headSha)); return [draft(c)]; },
-        fileBatch: async (payloads, onFiled) => {
+        fileBatch: async (payloads, onFiled, finalize) => {
           calls++;
-          const filed = fileRatificationBatch(root, payloads, p => p,
-            { mkdirSync, writeFileSync, readFileSync }, join, new Set(["remudero"]));
+          let branches = 0, prs = 0, reservations = 0;
+          let filed!: ReturnType<typeof fileRatificationBatch>;
+          const approved = approveBatch(payloads.map(p => ({ proposalId: p.proposalId,
+            state: "ready", reasons: [], draft: { ...p, anchorFingerprint: "" } })), "# Plan\n", {
+            createRatificationBranch(accepted) {
+              branches++;
+              filed = fileRatificationBatch(root, accepted, p => {
+                const materialized = materializeDraftTaskIds(p, {
+                  mint: () => ({ n: 20001, degraded: [] }),
+                  reserveBlock: (start, count) => {
+                    reservations++;
+                    assert.equal(count, 1);
+                    return { ids: [start] };
+                  },
+                });
+                assert.ok(materialized.ok);
+                assert.deepEqual(materialized.ids, ["W1-T20001"]);
+                return finalize({ proposalId: p.proposalId, ...materialized });
+              }, { mkdirSync, writeFileSync, readFileSync }, join, new Set(["remudero"]));
+              return "run-APPROVE-BATCH-fixture";
+            },
+            openPlanPr(branch, proposalIds) {
+              prs++;
+              assert.equal(branch, "run-APPROVE-BATCH-fixture");
+              const presentation = followupFilingPresentation(proposalIds, payloads.map(p => p.stampLine));
+              const criteria = filingAcceptanceCriteria(filed.filedIds, filed.writtenPaths);
+              let proofs = 0;
+              const body = buildPlanPrBody({ intro: presentation.intro, criteria,
+                changedFiles: filed.writtenPaths, baseRef: "fixture-base", proofCheck: proof => {
+                  proofs++;
+                  const parsed = parseWhitelistedProof(proof);
+                  assert.ok(parsed && parsed.kind === "grep");
+                  assert.ok(filed.writtenPaths.includes(parsed.args[3]));
+                  assert.match(execFileSync(parsed.command, parsed.args, { cwd: root, encoding: "utf8" }), /id: W1-T20001/);
+                  return 0;
+                } });
+              assert.equal(proofs, 1);
+              assert.deepEqual(parseAcceptanceBlock(body), criteria);
+              assert.match(criteria[0].claim, /filed as a well-formed plan task shard/);
+              assert.doesNotMatch(presentation.commitMessage + body, /^Remudero-Task:/m);
+              assert.match(presentation.title, /^chore\(plan\): file 1 follow-up proposals$/);
+              return "https://github.com/craigoley/remudero/pull/20000";
+            },
+          }, { ledgerPath: join(root, "ledger.ndjson"), runId: "filing-run" });
+          assert.ok(approved.ok);
+          assert.deepEqual([branches, prs, reservations], [1, 1, 1]);
           assert.equal(filed.writtenPaths.length, 1);
           assert.ok(filed.writtenPaths.every(p => p.startsWith("plan/tasks.d/")));
           const shard = parse(readFileSync(join(root, filed.writtenPaths[0]), "utf8"))[0];
+          assert.equal(shard.id, "W1-T20001");
           assert.equal(shard.origin, origin);
           assert.equal(shard.verify, "human");
-          assert.equal(shard.rationale, followupProvenance(c));
+          assert.equal(shard.rationale,
+            `Source task: ${c.taskId}; PR: ${c.prUrl}; head: ${headSha}; run: ${c.runId}\n${c.text}`);
           assert.ok(shard.rationale.includes(c.text));
-          const receipt = { prUrl: "https://github.com/craigoley/remudero/pull/20000", proposalIds: payloads.map(p => p.proposalId) };
-          const presentation = followupFilingPresentation(receipt.proposalIds, payloads.map(p => p.stampLine));
-          assert.doesNotMatch(presentation.commitMessage + presentation.intro, /^Remudero-Task:/m);
-          assert.match(presentation.intro, /ordinary plan-PR CI and semantic review gates/);
-          assert.match(presentation.title, /^chore\(plan\): file 1 follow-up proposals$/);
-          if (type === "task") {
-            onFiled(receipt);
-            assert.ok(rows.some(r => r.step === "followup.filed"), "the receipt precedes waiting for plan-PR gates");
+          const receipt = { prUrl: approved.prUrl, proposalIds: approved.accepted.map(p => p.proposalId) };
+          onFiled(receipt);
+          assert.ok(rows.some(r => r.step === "followup.filed"), "the receipt precedes waiting for plan-PR gates");
+          const filingHead = "b".repeat(40), writes: string[] = [];
+          let checksGreen = false;
+          const gate: ArmDeps = {
+            headSha: () => filingHead, ledgerLines: () => rows,
+            readPlanTouch: () => "touched",
+            readMergeFacts: () => ({ mergeable: "MERGEABLE", mergeableState: "blocked", behindBy: 0 }),
+            updateBranch: () => assert.fail("the current plan branch needs no refresh"),
+            readChecksGreenReviewed: (url, sha) => {
+              assert.equal(url, receipt.prUrl); assert.equal(sha, filingHead); return checksGreen;
+            },
+            armAuto: () => assert.fail("ordinary plan PRs must not be armed while gates are pending"),
+            mergeDirect: url => { writes.push(url); }, disableAuto: () => assert.fail("no standing arm"), say: () => {},
+          };
+          const tryMerge = () => armAutoMerge(receipt.prUrl, "PR-20000", gate);
+          assert.equal(tryMerge(), "ledger-refused");
+          for (const [state, sha] of [["success", headSha], ["failure", filingHead], ["success", filingHead]] as const) {
+            rows.push({ step: "review.posted", task_id: "PR-20000", pr_url: receipt.prUrl,
+              context: "remudero-review", state, head_sha: sha });
+            assert.equal(tryMerge(), state === "success" && sha === filingHead ? "plan-pr-held" : "ledger-refused");
+            assert.deepEqual(writes, []);
           }
+          checksGreen = true;
+          assert.equal(tryMerge(), "direct-merged");
+          assert.deepEqual(writes, [receipt.prUrl]);
           return receipt;
         },
         log: (step, extra) => rows.push({ step, ...extra }),
@@ -73,6 +140,40 @@ test("an eligible task or research follow-up is filed as one plan-only shard wit
         filing_pr: "https://github.com/craigoley/remudero/pull/20000" });
     } finally { rmSync(root, { recursive: true, force: true }); }
   }
+});
+
+test("a materialized follow-up is revalidated before any shard is published", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-followup-final-validation-"));
+  try {
+    mkdirSync(join(root, "src/lib"), { recursive: true });
+    writeFileSync(join(root, "src/lib/plan.ts"), "");
+    writeFileSync(join(root, "MASTER-PLAN.md"), "# Plan\n");
+    for (const [reason, change] of [
+      ["empty-files", (t: any) => { t.files = []; }],
+      ["unsupported-proof", (t: any) => { t.acceptance[0].proof = "manual inspection"; }],
+      ["over-risk-band", (t: any) => { t.files = ["deploy/Dockerfile"]; }],
+    ] as const) {
+      const rows: Record<string, unknown>[] = [], writes: string[] = [];
+      await assert.rejects(fileEligibleFollowups([routed()], {
+        planOnMain: [source], openPrOrigins: new Set(), ratifiedIds: new Set(), draft: async () => [draft()],
+        fileBatch: async (payloads, _onFiled, finalize) => {
+          fileRatificationBatch(root, payloads, p => {
+            const materialized = materializeDraftTaskIds(p, {
+              mint: () => ({ n: 20001, degraded: [] }), reserveBlock: start => ({ ids: [start] }),
+            });
+            assert.ok(materialized.ok);
+            const tasks = parse(materialized.fragmentYaml);
+            change(tasks[0]);
+            return finalize({ ...p, ...materialized, fragmentYaml: stringify(tasks) });
+          }, { readFileSync, mkdirSync: path => { writes.push(path); },
+            writeFileSync: path => { writes.push(path); } }, join, new Set(["remudero"]));
+          assert.fail("a rejected final shard must not reach PR creation");
+        }, log: (step, extra) => rows.push({ step, ...extra }),
+      }), new RegExp(reason));
+      assert.deepEqual(writes, []);
+      assert.deepEqual(rows, [{ step: "followup.file_refused", entry_id: candidate.entryId, reason }]);
+    }
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
 test("an action or already-handled follow-up is never filed", async () => {

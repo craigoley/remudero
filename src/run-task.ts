@@ -1,5 +1,5 @@
 import { isImprovementBoundProposal, isReviewedImprovementDraft, runImprovementAction, type ImprovementPlanReceipt } from "./lib/improvement-thread.js";
-import { fileEligibleFollowups, followupFilingPresentation } from "./lib/followup-filing.js";
+import { fileEligibleFollowups, followupFilingPresentation, type FollowupFinalizer } from "./lib/followup-filing.js";
 import { findTaskInCatalogs, catalogTaskContract, type TaskLookupOptions } from "./lib/task-lookup.js";
 import type { OpsCatalogApi } from "./lib/ops-catalog-source.js";
 import { operatorReleaseContractChanged, operatorReleasePin, qualifyReleaseEvidence, readReleaseLedgerLines, releaseContractPins, type ReleaseEvidence } from "./lib/operator-release.js";
@@ -23815,10 +23815,10 @@ async function retroCommand(
           return row?.risk === "low" || row?.risk === "medium" || row?.risk === "high" ? row.risk : undefined;
         },
         draft: proposals => draftProposalBatch(proposals, config, owner, repo, `FOLLOWUP-${nextLaneEpochMs()}`, filingLog),
-        fileBatch: async (payloads, onFiled) => {
+        fileBatch: async (payloads, onFiled, finalize) => {
           let receipt: { prUrl: string; proposalIds: string[] } | undefined;
           try {
-            await approveBatchCommand(payloads.map(p => p.proposalId), { config, automaticFollowups: payloads,
+            await approveBatchCommand(payloads.map(p => p.proposalId), { config, automaticFollowups: { payloads, finalize },
               onFiled: result => {
                 receipt = { prUrl: result.prUrl, proposalIds: result.accepted.map(p => p.proposalId) };
                 onFiled(receipt);
@@ -39465,7 +39465,7 @@ export async function approveCommand(
 async function approveBatchCommand(
   rest: string[],
   deps: { config?: Config; gateway?: RatifyGateway; batchGateway?: RatifyBatchGateway;
-    automaticFollowups?: RatificationPayload[];
+    automaticFollowups?: { payloads: RatificationPayload[]; finalize: FollowupFinalizer };
     onFiled?: (result: Extract<BatchApproveResult, { ok: true }>) => void;
   } = {},
 ): Promise<number> {
@@ -39478,7 +39478,7 @@ async function approveBatchCommand(
   const registryPath = join(config.root, "state", "inbox-proposals.json");
   const { owner, repo } = instancePlan.target ?? resolveOwnerRepo();
 
-  const { found, unknown } = loadProposalsForRatify(proposalIds, plan, ledgerPath, owner, repo, config, deps.automaticFollowups);
+  const { found, unknown } = loadProposalsForRatify(proposalIds, plan, ledgerPath, owner, repo, config, deps.automaticFollowups?.payloads);
   if (found.some(row => row.proposal.improvement !== undefined)) {
     console.error("rmd approve: improvement drafts must be reviewed and filed individually through their bound saved conversation");
     return 1;
@@ -39592,7 +39592,8 @@ async function approveBatchCommand(
             throw new Error(`rmd approve: refusing to materialize task id(s) for ${payload.proposalId} — ${materialized.reason}`);
           }
           log("approve.id_materialized", { proposal_id: payload.proposalId, ids: materialized.ids });
-          return { proposalId: payload.proposalId, fragmentYaml: materialized.fragmentYaml, stampLine: materialized.stampLine };
+          const filedPayload = { proposalId: payload.proposalId, fragmentYaml: materialized.fragmentYaml, stampLine: materialized.stampLine };
+          return deps.automaticFollowups ? deps.automaticFollowups.finalize(filedPayload) : filedPayload;
         },
         { mkdirSync, writeFileSync, readFileSync },
         join,

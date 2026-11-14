@@ -1,4 +1,4 @@
-import { parse } from "yaml";
+import { parse, stringify } from "yaml";
 import { DAEMON_DRAFT_BATCH_CAP, planRatificationBatch, type DraftRungOutcome,
   type InboxClassification, type Proposal, type RatificationPayload } from "./inbox.js";
 import { machineShardRisk } from "./machine-filing.js";
@@ -10,6 +10,7 @@ import { buildPlanPrCommitMessage } from "./plan-pr-emitter.js";
 type Routed = Extract<FollowupRouteOutcome, { routed: true }>;
 type Refusal = { entryId: string; reason: string };
 type FilingReceipt = { prUrl: string; proposalIds: string[] };
+export type FollowupFinalizer = (payload: RatificationPayload) => RatificationPayload;
 interface SelectionFacts {
   planOnMain: readonly Pick<Task, "id" | "origin" | "risk">[];
   openPrOrigins: ReadonlySet<string>;
@@ -73,7 +74,8 @@ function draftRefusal(fragment: string, c: FollowupCandidate, sourceRisk: TaskRi
 export interface FollowupFilingDeps extends SelectionFacts {
   sourceRisk?: (candidate: FollowupCandidate) => TaskRisk | undefined;
   draft: (proposals: Proposal[]) => Promise<DraftRungOutcome[]>;
-  fileBatch: (payloads: RatificationPayload[], onFiled: (receipt: FilingReceipt) => void) => Promise<FilingReceipt | undefined>;
+  fileBatch: (payloads: RatificationPayload[], onFiled: (receipt: FilingReceipt) => void,
+    finalize: FollowupFinalizer) => Promise<FilingReceipt | undefined>;
   log: (step: string, extra: Record<string, unknown>) => void;
 }
 
@@ -124,7 +126,26 @@ export async function fileEligibleFollowups(outcomes: readonly FollowupRouteOutc
         head_sha: c.headSha, run_id: c.runId, filing_pr: receipt.prUrl });
     }
   };
-  const result = await deps.fileBatch(plan.accepted, recordFiled);
+  const finalize: FollowupFinalizer = payload => {
+    const original = plan.accepted.find(p => p.proposalId === payload.proposalId);
+    const c = eligible.find(o => o.proposalId === payload.proposalId)?.candidate;
+    if (!original || !c) throw new Error(`unknown follow-up proposal: ${payload.proposalId}`);
+    const tasks = parse(payload.fragmentYaml);
+    if (Array.isArray(tasks) && tasks.length === 1 && tasks[0] && typeof tasks[0] === "object") {
+      const source = parse(original.fragmentYaml)[0];
+      // ID substitution also rewrites prose. Restore the validated source identity and words.
+      tasks[0].rationale = source.rationale;
+      tasks[0].origin = source.origin;
+      payload = { ...payload, fragmentYaml: stringify(tasks) };
+    }
+    const reason = draftRefusal(payload.fragmentYaml, c, risks.get(c.entryId)!);
+    if (reason) {
+      deps.log("followup.file_refused", { entry_id: c.entryId, reason });
+      throw new Error(`follow-up ${c.entryId}: ${reason}`);
+    }
+    return payload;
+  };
+  const result = await deps.fileBatch(plan.accepted, recordFiled, finalize);
   if (!result) {
     for (const p of plan.accepted) {
       const entryId = eligible.find(o => o.proposalId === p.proposalId)!.candidate.entryId;
