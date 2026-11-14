@@ -2295,6 +2295,15 @@ components:
         risk:
           type: string
           enum: [low, medium, high]
+        catalog:
+          type: string
+          enum: [ops]
+          description: Present only for a task held in the ops catalog.
+        acceptance:
+          type: array
+          description: The operator-approved public acceptance claims and proofs; other private task fields are withheld.
+          items:
+            $ref: "#/components/schemas/AcceptanceCriterion"
         lastActivityAt:
           type: string
           format: date-time
@@ -2423,6 +2432,19 @@ components:
               type: number
               minimum: 0
 
+    OpsCatalogState:
+      description: An unreadable ops catalog is explicit unknown, never a healthy zero count. No private repository identity is exposed.
+      oneOf:
+        - type: object
+          required: [outcome, taskCount]
+          properties:
+            outcome: {type: string, enum: [ok]}
+            taskCount: {type: integer, minimum: 0}
+        - type: object
+          required: [outcome, reason]
+          properties:
+            outcome: {type: string, enum: [unreadable]}
+            reason: {type: string}
     StatusSnapshot:
       type: object
       description: >
@@ -2433,6 +2455,13 @@ components:
         - generated_at
         - tasks
       properties:
+        opsCatalog:
+          allOf:
+            - $ref: "#/components/schemas/OpsCatalogState"
+            - type: object
+              required: [observedAt]
+              properties:
+                observedAt: {type: string, format: date-time}
         generated_at:
           type: string
         tasks:
@@ -12337,6 +12366,8 @@ components:
               type: object
               required: [counts, spendTodayUsd, taskProjection, tasks, groups]
               properties:
+                opsCatalog:
+                  $ref: "#/components/schemas/OpsCatalogState"
                 counts:
                   type: object
                   required: [running, queued, blocked]
@@ -12681,7 +12712,18 @@ components:
         taskId: {type: string}
         title: {type: string}
         status: {type: string}
-        risk: {type: string}
+        risk:
+          type: string
+          description: Existing public risk, or the literal withheld for an ops task; never its private risk band.
+        catalog:
+          type: string
+          enum: [ops]
+          description: Present only for a task held in the ops catalog.
+        acceptance:
+          type: array
+          description: The operator-approved public acceptance claims and proofs; other private task fields are withheld.
+          items:
+            $ref: "#/components/schemas/AcceptanceCriterion"
         lastActivityAt: {type: string}
         prUrl: {type: string}
         prNumber: {type: integer}
