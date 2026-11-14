@@ -93,21 +93,28 @@ test("W1-T12535 criterion 1: a refill held at bound 0 writes one bound_zero row 
   assert.equal(inFlightReviewCount(), 0);
 });
 
-test("W1-T12535 criterion 2: a tail held at bound 0 refills when a lane of another pass frees", async () => {
+test("W1-T12535 criterion 2: a tail held at bound 0 retries consecutive releases from another pass", async () => {
   const h = harness();
   try {
     h.setWidth(2);
     await runSweepLightPass([pr(1), pr(2), pr(4)], h.deps, fourLanes);
     await eventually(() => h.started.length === 2, "pass A did not admit two reviews");
-    h.setWidth(3);
-    await runSweepLightPass([pr(5)], h.deps, fourLanes);
-    await eventually(() => h.started.includes(5), "pass B did not admit its review");
+    h.setWidth(4);
+    await runSweepLightPass([pr(5), pr(7)], h.deps, fourLanes);
+    await eventually(() => h.started.includes(5) && h.started.includes(7), "pass B did not admit its reviews");
     h.setWidth(2);
     h.hold(1).resolve();
     await eventually(() => h.boundZero().length === 1, "pass A's refill was not held at bound 0");
     assert.equal(h.started.includes(4), false);
-    // Pass A holds no lane that frees here: only pass B's review ends.
+    // Pass A's remaining review stays held through both external releases.
+    const selectionsBeforeRelease = h.depths.length;
     h.hold(5).resolve();
+    await eventually(() => h.depths.length > selectionsBeforeRelease, "the first external release did not retry");
+    await quiet();
+    assert.equal(h.started.includes(4), false, "the first retry must still respect bound 0");
+    assert.equal(inFlightReviewCount(), 2);
+    assert.equal(h.boundZero().length, 1, "consecutive holds write only one row");
+    h.hold(7).resolve();
     await eventually(() => h.started.includes(4), "a lane another pass freed did not retry the held tail");
     assert.deepEqual(h.rows.filter((r) => r.step === "sweep.review_refilled").map((r) => r.pr_number), [4]);
   } finally {

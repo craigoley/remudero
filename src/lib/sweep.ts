@@ -26012,8 +26012,9 @@ export function reportReviewPhase(phase: string): void {
 }
 const reviewSlotWaiters = new Set<() => void>();
 const releaseReviewSlot = (): void => {
-  for (const wake of [...reviewSlotWaiters]) wake();
+  const waiters = [...reviewSlotWaiters];
   reviewSlotWaiters.clear();
+  for (const wake of waiters) wake();
 };
 const inFlightNote = (inFlight: number): string => (inFlight > 0 ? `, in-flight ${inFlight}` : "");
 // Closed by `drainInFlightReviews` (an exit), reopened by the next light pass.
