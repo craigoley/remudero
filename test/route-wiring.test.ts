@@ -652,6 +652,24 @@ test("W1-T10613: POST /v1/products/repository is high tier, confirmed, and journ
   } finally { process.env.PATH = originalPath; }
 });
 
+test("W1-T11196: GET /v1/products/runner-config-preview is registered with verified owner reads", async () => {
+  await withProductionServer(async h => {
+    const headers = { authorization: `Bearer ${WRITE_TOKEN}`, "content-type": "application/json", [OPERATOR_SESSION_HEADER]: h.operatorSession! };
+    const saved = await fetch(`${h.base}/v1/products`, { method: "POST", headers, body: JSON.stringify({ version: "product-intent-v1",
+      requestId: "wiring-runner-preview", expectedRevision: 0, brief: { idea: "runner preview wiring" } }) });
+    const { receipt } = await saved.json() as { receipt: { productId: string } };
+    const url = `${h.base}/v1/products/runner-config-preview?productId=${receipt.productId}&expectedRevision=1&expectedObjectiveRevision=1`;
+    assert.equal((await fetch(url, { headers: { authorization: `Bearer ${READ_TOKEN}` } })).status, 403);
+    const before = readdirSync(h.fleetRoot, { recursive: true }).sort();
+    const preview = await fetch(url, { headers: { authorization: `Bearer ${READ_TOKEN}`, [OPERATOR_SESSION_HEADER]: h.operatorSession! } });
+    assert.equal(preview.status, 200);
+    assert.equal((await preview.json()).state, "repository_missing");
+    assert.equal(preview.headers.get("cache-control"), "private, no-store");
+    assert.deepEqual(readdirSync(h.fleetRoot, { recursive: true }).sort(), before);
+    assert.equal(readFileSync(h.ledgerPath, "utf8"), "");
+  }, true);
+});
+
 test("W1-T10726: GET /v1/products/repository-preview is verified-operator read-only over the fleet root", async () => {
   const shim = ghShim([{ when: "api repos/craigoley/wreckterra", stdout: JSON.stringify({ id: 1432832754, name: "wreckterra",
     owner: { login: "craigoley" }, private: false, default_branch: "main" }) }, { when: "api user", stdout: JSON.stringify({ login: "craigoley" }) }]);
