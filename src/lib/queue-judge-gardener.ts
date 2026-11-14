@@ -419,14 +419,14 @@ export interface MoveRefusal { id: string; reason: string }
  * own row. A pinned priority is never moved to a larger number and nothing may sit below the smallest operator pin:
  * those proposals become escalations, never writes.
  */
-export function checkMoves(moves: readonly JudgeMove[], packs: ReadonlyMap<string, EvidencePack>): { accepted: QueueJudgeAction[]; refused: MoveRefusal[]; escalate: QueueJudgeAction[] } {
+export function checkMoves(moves: readonly JudgeMove[], packs: ReadonlyMap<string, EvidencePack>, judged: ReadonlyMap<string, EvidencePack> = packs): { accepted: QueueJudgeAction[]; refused: MoveRefusal[]; escalate: QueueJudgeAction[] } {
   const accepted: QueueJudgeAction[] = [], escalate: QueueJudgeAction[] = [], refused: MoveRefusal[] = [];
   const pins = [...packs.values()].filter((p) => p.pinned && p.priority !== null).map((p) => p.priority!);
   const floor = pins.length > 0 ? Math.min(...pins) : undefined;
   const seen = new Set<string>();
   for (const m of moves) {
     const refuse = (reason: string): void => void refused.push({ id: m.id, reason });
-    const pack = packs.get(m.id);
+    const pack = judged.get(m.id);
     if (!pack) { refuse("unknown id: not a queued task in this pass"); continue; }
     if (seen.has(m.id)) { refuse("proposed twice"); continue; }
     seen.add(m.id);
@@ -843,7 +843,7 @@ export async function queueJudgeInventory(sources: QueueJudgeSources, deps: Pick
   const proposed = reading.moves;
   const malformed = reading.malformedRows.map((r) => ({ id: r.id, reason: `malformed row ${r.index}: ${r.field}` }));
   for (const r of malformed) deps.log("queue_judge.row_refused", { ...(r.id !== undefined ? { task_id: r.id } : {}), reason: r.reason });
-  const checked = checkMoves(proposed, judged);
+  const checked = checkMoves(proposed, packs, judged);
   for (const r of checked.refused) deps.log("queue_judge.row_refused", { task_id: r.id, reason: r.reason });
   if (proposed.length + malformed.length > 0 && checked.accepted.length + checked.escalate.length === 0 && checked.refused.length === proposed.length) {
     deps.log(UNAVAILABLE_STEP, { reason: `every proposed row was refused: ${[...malformed.map((r) => `${r.id ?? "?"}: ${r.reason}`), ...checked.refused.map((r) => `${r.id}: ${r.reason}`)].join("; ")}` });

@@ -219,3 +219,35 @@ test("W1-T12549 criterion 4: an unknown window falls back to the smallest declar
   assert.equal(queueJudgeRouteWindow({ model: "haiku", effort: "low", provider: "claude" }, mounts.capabilities).tokens, undefined);
 });
 
+test("W1-T12549 criterion 4: an omitted priority-2 pin still makes a visible task's 2 -> 1 move escalate", async (t) => {
+  for (const pinned of [false, true]) {
+    const prompts: string[] = [], escalations: string[] = [];
+    const move = (id: string, priority: number) => ({ id, priority, reason: "waiting costs the queue", evidence: ["age"], expected_cost_of_delay: 1,
+      expected_outcome: { unblocks_tasks: [], ends_incidents: [], unsticks_prs: [], starts_within: 2 } });
+    const w = queueWorld(t, [["W1-T1", 2, "visible task"], ["W1-T2", 2, "x".repeat(9_000)]], async (prompt) => {
+      prompts.push(prompt);
+      return JSON.stringify({ moves: [move("W1-T1", 1), move("W1-T2", 3)] });
+    }, () => ({ tokens: OPENWEIGHT_MAX_COMPLETION_TOKENS + 2_000, model: "tiny-window" }));
+    w.sources.filingDates = () => new Map([["W1-T1", NOW - 86_400_000], ["W1-T2", NOW - 86_400_000]]);
+    if (pinned) writeFileSync(join(w.deps.repoRoot, "plan/tasks.d/W1-T2.yaml"),
+      w.read("W1-T2").replace("  priority: 2", "  priority: 2  # operator-2026-11-14: protective pin"));
+    w.deps.escalate = (e) => { escalations.push(e.summary); return "https://example.test/issues/1"; };
+    const before = w.read("W1-T2");
+    await runGardenAsync(queueJudgeGardenSpec(w.deps, w.sources), w.deps);
+    const asked = prompts[0]!.split("\n").filter((l) => l.startsWith('{"id":')).map((l) => JSON.parse(l).id);
+    assert.deepEqual(asked, ["W1-T1"], "the omitted pin's evidence stays outside the prompt");
+    assert.deepEqual(w.logs.filter((l) => l.step === "queue_judge.packs_left_out").map((l) => l.extra.task_ids), [["W1-T2"]]);
+    assert.ok(w.logs.some((l) => l.step === "queue_judge.row_refused" && l.extra.task_id === "W1-T2"), "even an omitted pin cannot be judged");
+    assert.equal(w.read("W1-T2"), before);
+    if (pinned) {
+      assert.equal(escalations.length, 1);
+      assert.match(escalations[0]!, /2 -> 1 on W1-T1.*more urgent than your smallest pin/);
+      assert.match(w.read("W1-T1"), /^ {2}priority: 2$/m);
+      assert.ok(!w.logs.some((l) => l.step === "queue_judge.prediction"), "an escalated move creates no prediction");
+    } else {
+      assert.deepEqual(escalations, [], "without a pin the same move remains allowed");
+      assert.match(w.read("W1-T1"), /^ {2}priority: 1 {2}# queue-judge-/m);
+    }
+  }
+});
+
