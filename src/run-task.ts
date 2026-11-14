@@ -1316,6 +1316,7 @@ import {
   type LedgerGrepFsDeps,
 } from "./lib/ledger-grep.js";
 import { routingAbCommand } from "./lib/routing-experiments.js";
+import { attributeAttemptOutcome } from "./lib/attempt-outcome-attribution.js";
 import { recordRoutingExperimentResults } from "./lib/routing-experiment-result.js";
 import { askDecisionModel, decisionsCommand } from "./lib/decision-model.js";
 import {
@@ -34165,6 +34166,8 @@ interface LightPassReadPorts {
   effects?: (deps: Parameters<typeof buildSweepEffects>[0]) => SweepDeps;
   readCompare?: (args: string[]) => Promise<unknown>;
   clock?: Pick<Clock, "now">;
+  /** W1-T12357: the daemon's sweep tick bound; absent, the default policy's. */
+  sweepWallClockBoundMs?: number;
 }
 
 /** W1-T11293: the light pass reads every READY PR's distance; the reader lives in src/lib/light-pass-compare.ts. */
@@ -44013,7 +44016,7 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
     undefined,
     (dir, sinceMs, login) => ghBrokerLoginStatus(dir, sinceMs, { login }),
   )],
-  ["routing-ab", async (rest) => await routingAbCommand(rest)],
+  ["routing-ab", async (rest) => await routingAbCommand(rest, { classifyAttempt: attributeAttemptOutcome })],
   ["decisions", async (rest) => await decisionsCommand(rest, (config, request) => askDecisionModel(config, request), { repoRoot })],
   ["progress-watchdog", (rest) => progressWatchdogCommand(rest)],
   ["live-edits", async (rest) => await liveEditsCommand(rest)],

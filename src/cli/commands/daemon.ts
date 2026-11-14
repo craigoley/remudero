@@ -16,6 +16,7 @@ import { judgeCiEscalation, productionCiJudgePorts, singleFlightCiJudge, withCiJ
 import { recyclePauseDetail } from "../../lib/recycle-yield.js";
 import { judgeDiskHeadroom, readDiskFreeBytes } from "../../lib/doctor.js";
 import { execFileSync } from "node:child_process";
+import { createHash, randomUUID } from "node:crypto";
 import { execFileLoopBounded } from "../../lib/loop-bounded-child.js";
 import { GATEWAY_FETCH_TIMEOUT_MS } from "../../lib/git-fetch-retry.js";
 import { productionDispatchBreakJudge, productionFixProgressJudge } from "../../lib/sweep.js";
@@ -24,10 +25,17 @@ import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { homedir, hostname } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { loadConfig, providerRoutingOwnsHeadroom, resolveHeadroomEnabled, workerHomeDir, type Config } from "../../lib/config.js";
+import { configPath, isWorkerProviderId, loadConfig, providerRoutingOwnsHeadroom, resolveHeadroomEnabled, workerHomeDir, type Config } from "../../lib/config.js";
+import { cashDeploymentTarget } from "../../lib/config-schema.js";
 import { ledgerPathFor } from "../../lib/ledger-path.js";
 import { daemonCrashSentinel, escalateCrashLoop, escalateDiskHeadroomBreach, escalateHeadroomParkCeiling, escalateHeadroomReserve, escalateQuotaExhaustion, escalateReplayStranded, escalateStarvation, escalateStarvationCleared } from "../../lib/escalation-catalogue.js";
-import { resolveProviderRoutingPolicy } from "../../lib/provider-routing-policy.js";
+import { lostWorkerProviders, resolveProviderRoutingPolicy, type EffectiveProviderRoutingPolicy } from "../../lib/provider-routing-policy.js";
+import {
+  FOUNDRY_CLAUDE_API_KEY_ENV,
+  FOUNDRY_CLAUDE_ENDPOINT_ENV,
+  FOUNDRY_CLAUDE_PRICES,
+  OPENWEIGHT_PRICES,
+} from "../../lib/worker-provider.js";
 import { writeProviderRoutingStatus, type ProviderRoutingWriteInput } from "../../lib/provider-routing-status.js";
 import { readFileIfExists } from "../../lib/fs-race-safe.js";
 import { mergedInLastDayAsync } from "../../lib/fleet-lane.js";
@@ -70,7 +78,7 @@ import { appendLedger, markDaemonProcessActor } from "../../lib/ledger.js";
 import { clockFromMillisFn, fixedClock, systemClock, type Clock } from "../../lib/clock.js";
 import { getHeapStatistics } from "node:v8";
 import { sweepInflightLocksWithReceipts } from "../../lib/benchmark-run.js";
-import { ledgerMemoHolders } from "../../lib/ledger-union.js";
+import { ledgerMemoHolders, readLedgerUnionRecordsSync } from "../../lib/ledger-union.js";
 import { childMeasurementCadenceSpawn, measurementCadenceChildRunner } from "../../lib/measurement-cadence.js";
 import { loadPlan, type Plan } from "../../lib/plan.js";
 import { PLAN_DESTINATION_KINDS, planDestinationRepository, resolvePlanDestination, type PlanDestinationRepository } from "../../lib/plan-destination.js";
@@ -142,6 +150,221 @@ export function daemonImprovementActionDeps(stateDir: string, gateway: RatifyCli
       return gateway.improvement(target);
     },
   };
+}
+
+async function reachableCashDeployments(config: Config, priorDeployments: string[] = []): Promise<{
+  deployments: string[]; unreadableDeployments: string[]; confirmedAbsentDeployments: string[]; errors: string[];
+}> {
+  const deployments: string[] = [];
+  const unreadableDeployments = new Set<string>();
+  const confirmedAbsentDeployments = new Set<string>();
+  const errors = new Set<string>();
+  const priorOpenWeightDeployments = priorDeployments.filter((name) => !Object.hasOwn(FOUNDRY_CLAUDE_PRICES, name));
+  const candidates = [...new Set([...(config.workerProviders?.cashEndpoint ?? config.workerProviders?.openweightEndpoint
+    ? Object.keys(OPENWEIGHT_PRICES) : []),
+    ...Object.keys(config.workerProviders?.cashDeploymentEndpoints ?? {}), ...priorOpenWeightDeployments])];
+  // PRIMARY CONTROL: all account controls and deployment checks share one startup deadline.
+  const signal = AbortSignal.timeout(GATEWAY_FETCH_TIMEOUT_MS);
+  const controls = new Map<string, Promise<boolean>>();
+  const probe = async (endpoint: string, key: string, name: string) => {
+    const base = endpoint.endsWith("/") ? endpoint : `${endpoint}/`;
+    const url = new URL(`openai/deployments/${encodeURIComponent(name)}/chat/completions?api-version=2024-10-21`, base);
+    // Missing required inference input: routing/validation only, never a completion request.
+    const response = await fetch(url, { method: "POST", headers: { "api-key": key, "Content-Type": "application/json" },
+      body: JSON.stringify({ messages: [] }), signal });
+    if (response.status !== 400 && response.status !== 404) {
+      throw new Error(`deployment check returned HTTP ${response.status}`);
+    }
+    const payload = await response.json() as { error?: { code?: string; param?: string; message?: string } };
+    return { status: response.status, error: payload.error };
+  };
+  await Promise.all(candidates.map(async (name) => {
+    const target = cashDeploymentTarget(config, name);
+    if (!target.ok) {
+      if (target.reason === "no-endpoint") confirmedAbsentDeployments.add(name);
+      else unreadableDeployments.add(name);
+      errors.add(`cash deployment ${name}: ${target.reason}${"keyEnv" in target ? ` (${target.keyEnv})` : ""}`);
+      return;
+    }
+    try {
+      const account = JSON.stringify([target.endpoint, target.keyEnv]);
+      let control = controls.get(account);
+      if (!control) {
+        control = probe(target.endpoint, target.key, `rmd-absent-${randomUUID()}`).then((reply) =>
+          reply.status === 404 && reply.error?.code === "DeploymentNotFound");
+        controls.set(account, control);
+      }
+      if (!await control) throw new Error("account cannot distinguish an absent deployment from request validation");
+      const reply = await probe(target.endpoint, target.key, name);
+      if (reply.status === 404 && reply.error?.code === "DeploymentNotFound") {
+        confirmedAbsentDeployments.add(name);
+        return;
+      }
+      if (reply.status === 400 && (reply.error?.code === "OperationNotSupported" ||
+        reply.error?.param === "messages" || /messages/i.test(reply.error?.message ?? ""))) {
+        deployments.push(name);
+        return;
+      }
+      throw new Error(`deployment check returned HTTP ${reply.status} (${reply.error?.code ?? "unknown error"})`);
+    } catch (error) {
+      const reason = String(error);
+      unreadableDeployments.add(name);
+      errors.add(`cash deployment ${name}: ${reason}`);
+    }
+  }));
+
+  // Foundry Claude has a separate Anthropic protocol endpoint and credential pair. Its supported
+  // deployments never appear in the OpenAI-compatible mounts or account catalog, so probe them
+  // with an empty messages list (validation only, no completion or charge).
+  const foundryEndpoint = process.env[FOUNDRY_CLAUDE_ENDPOINT_ENV];
+  const foundryKey = process.env[FOUNDRY_CLAUDE_API_KEY_ENV];
+  if (foundryEndpoint || foundryKey) {
+    if (!foundryEndpoint || !foundryKey) {
+      for (const name of Object.keys(FOUNDRY_CLAUDE_PRICES)) unreadableDeployments.add(name);
+      errors.add(`Foundry Claude cash requires both ${FOUNDRY_CLAUDE_ENDPOINT_ENV} and ${FOUNDRY_CLAUDE_API_KEY_ENV}`);
+    } else {
+      try {
+        const base = new URL(foundryEndpoint);
+        if (base.protocol !== "https:" || base.pathname.replace(/\/$/, "") !== "/anthropic" || base.search || base.hash) {
+          throw new Error("Foundry Claude requires an HTTPS /anthropic base endpoint");
+        }
+        const url = new URL("v1/messages", `${base.toString().replace(/\/$/, "")}/`);
+        const probeFoundry = async (model: string) => {
+          const response = await fetch(url, {
+            method: "POST",
+            headers: { "content-type": "application/json", "x-api-key": foundryKey, "anthropic-version": "2023-06-01" },
+            body: JSON.stringify({ model, messages: [], max_tokens: 1 }),
+            signal,
+          });
+          const payload = await response.json() as { error?: { code?: string; type?: string; message?: string } };
+          return { status: response.status, error: payload.error };
+        };
+        const control = await probeFoundry(`rmd-absent-${randomUUID()}`);
+        const controlConfirmsAbsence = control.status === 404 &&
+          (control.error?.code === "DeploymentNotFound" || control.error?.type === "not_found_error");
+        for (const name of Object.keys(FOUNDRY_CLAUDE_PRICES).sort()) {
+          try {
+            if (!controlConfirmsAbsence) {
+              throw new Error("Foundry account cannot distinguish an absent deployment from request validation");
+            }
+            const reply = await probeFoundry(name);
+            if (reply.status === 404 && (reply.error?.code === "DeploymentNotFound" || reply.error?.type === "not_found_error")) {
+              confirmedAbsentDeployments.add(name);
+              continue;
+            }
+            if (reply.status === 400 && /messages/i.test(reply.error?.message ?? "")) {
+              deployments.push(name);
+              continue;
+            }
+            throw new Error(`Foundry deployment check returned HTTP ${reply.status} (${reply.error?.code ?? reply.error?.type ?? "unknown error"})`);
+          } catch (error) {
+            const reason = String(error);
+            unreadableDeployments.add(name);
+            errors.add(`Foundry Claude deployment ${name}: ${reason}`);
+          }
+        }
+      } catch (error) {
+        const reason = String(error);
+        for (const name of Object.keys(FOUNDRY_CLAUDE_PRICES)) unreadableDeployments.add(name);
+        errors.add(`Foundry Claude endpoint: ${reason}`);
+      }
+    }
+  }
+  return {
+    deployments: deployments.sort(),
+    unreadableDeployments: [...unreadableDeployments].sort(),
+    confirmedAbsentDeployments: [...confirmedAbsentDeployments].sort(),
+    errors: [...errors].sort(),
+  };
+}
+
+export async function recordWorkerProvidersAtStart(opts: {
+  config: Config;
+  policy: EffectiveProviderRoutingPolicy;
+  at: string;
+  log: (step: string, extra: Record<string, unknown>) => void;
+  raise: (escalation: Escalation) => string | Promise<string>;
+}): Promise<void> {
+  const step = "daemon.worker_providers";
+  const enabled = [...new Set(opts.policy.committed.enabledProviders)].sort();
+  const file = configPath();
+  let previous: Record<string, unknown> | undefined;
+  let comparisonReason: string | undefined;
+  try {
+    const read = readLedgerUnionRecordsSync(dirname(ledgerPathFor(opts.config)), {
+      step: "daemon.worker_providers", refuseIncomplete: true, liveFirst: true, order: "newest-first",
+      satisfied: (seen) => seen.has(step),
+    });
+    if (!read.ok || read.torn || read.unclassified.length) {
+      throw new Error(`provider startup history unreadable: ${[...read.unread, ...read.unclassified].join(", ")}; torn=${read.torn}`);
+    }
+    previous = read.rows.filter((row) => row.step === step).sort((a, b) => Date.parse(String(b.ts)) - Date.parse(String(a.ts)))[0];
+    const previousCashUnreadableValid = previous?.cash_unreadable_deployments === undefined ||
+      (Array.isArray(previous.cash_unreadable_deployments) && previous.cash_unreadable_deployments.every((name) => typeof name === "string"));
+    if (previous && (typeof previous.ts !== "string" || !Number.isFinite(Date.parse(previous.ts)) ||
+      !Array.isArray(previous.enabled_providers) || !previous.enabled_providers.every(isWorkerProviderId) ||
+      !Array.isArray(previous.cash_deployments) || !previous.cash_deployments.every((name) => typeof name === "string") ||
+      !previousCashUnreadableValid)) {
+      throw new Error("provider startup history contains a malformed snapshot");
+    }
+  } catch (error) {
+    previous = undefined;
+    const reason = String(error);
+    comparisonReason = reason;
+  }
+  let cash: string[] = [];
+  let cashUnreadable: string[] = [];
+  let cashConfirmedAbsent: string[] = [];
+  const cashErrors: string[] = [];
+  if (enabled.includes("cash")) {
+    // New partial snapshots still carry positively confirmed reachable IDs in cash_deployments;
+    // only legacy unreadable rows lack the unreadable-list field that distinguishes this contract.
+    const previousCashComparable = previous?.cash_read === "readable" ||
+      Array.isArray(previous?.cash_unreadable_deployments);
+    const priorCash = previousCashComparable && Array.isArray(previous?.cash_deployments)
+      ? previous.cash_deployments as string[] : [];
+    const reading = await reachableCashDeployments(opts.config, priorCash);
+    cash = reading.deployments;
+    cashUnreadable = reading.unreadableDeployments;
+    cashConfirmedAbsent = reading.confirmedAbsentDeployments;
+    cashErrors.push(...reading.errors);
+  }
+  const comparison = comparisonReason ? "skipped" : previous ? "compared" : "first-start";
+  opts.log(step, { ts: opts.at, config_file: file, enabled_providers: enabled,
+    cash_deployments: cash, cash_read: cashErrors.length ? "unreadable" : "readable",
+    cash_unreadable_deployments: cashUnreadable,
+    cash_confirmed_absent_deployments: cashConfirmedAbsent,
+    ...(cashErrors.length ? { cash_read_error: cashErrors.join("; ") } : {}),
+    comparison, ...(comparisonReason ? { comparison_reason: comparisonReason } : {}),
+  });
+  if (!previous) return;
+  const earlier = previous.enabled_providers as string[];
+  const lost = lostWorkerProviders(earlier, enabled);
+  const previousCashComparable = previous.cash_read === "readable" ||
+    Array.isArray(previous.cash_unreadable_deployments);
+  if (previousCashComparable) {
+    lost.push(...lostWorkerProviders(previous.cash_deployments as string[], cash)
+      .map((name) => `cash:${name}`));
+  }
+  if (lost.length === 0) return;
+  const priorSet = [...earlier, ...(previous.cash_deployments as string[]).map((name) => `cash:${name}`)].sort();
+  const key = createHash("sha256").update(JSON.stringify([priorSet, lost.sort()])).digest("hex");
+  const restore = "Restore the provider configuration";
+  try {
+    await opts.raise({ class: "MANUAL", taskId: `DAEMON-PROVIDERS:${key}`,
+      summary: `Worker providers lost at startup: ${lost.join(", ")}`,
+      detail: `Lost: ${lost.join(", ")}. Config file: ${file}. Last start with these providers: ${previous.ts}. ` +
+        "An intentional removal also raises this escalation; close it if the removal was intended.",
+      options: [
+        { label: restore, detail: `Check ${file} and restore the missing providers and cash deployment access.`, kind: { type: "operator-only" } },
+        { label: "Confirm the intentional removal", detail: "Close this escalation if the smaller provider set was intended.", kind: { type: "operator-only" } },
+      ],
+      recommendation: restore,
+      consequence: "The daemon continues with fewer worker providers until configuration or access is restored.",
+    });
+  } catch (error) {
+    opts.log("daemon.worker_providers_escalation_failed", { reason: String(error), lost_providers: lost });
+  }
 }
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export type HostValue = any;
@@ -1481,6 +1704,8 @@ export async function daemonCommand(
   if (bootProviderRoutingPolicy.fallback) {
     log("daemon.provider_routing_policy_fallback", { reason: bootProviderRoutingPolicy.fallback.reason });
   }
+  await recordWorkerProvidersAtStart({ config, policy: bootProviderRoutingPolicy,
+    at: clockFromMillisFn(deps.now).iso(), log, raise: raiseDuplicate });
   try {
     (deps.writeProviderRoutingStatus ?? writeProviderRoutingStatus)(config.root, {
       state: "not-probed",
@@ -2493,7 +2718,8 @@ export async function daemonCommand(
           () => activePlanRef.current,
           // A run in flight starves the full sweep, so the light pass also watches main.
           mainHealthRung,
-          { openPrViews: servedOpenPrViews(() => tickReadGeneration, () => tickReadStartedAtMs) },
+          { openPrViews: servedOpenPrViews(() => tickReadGeneration, () => tickReadStartedAtMs),
+            sweepWallClockBoundMs: opts.sweepWallClockBoundMs },
         ),
         // W1-T7734: the idle sleep runs the light pass while review demand waits, at a cadence the sweep
         // derives from observed review duration and head churn. Reads the sweep's in-process memo only.
