@@ -1,4 +1,5 @@
 import { settledSpansByClass } from "./cost-anomaly.js";
+import { restartCycleLedgerRows, restartCycleRow } from "./restart-cycle.js";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 import type { LedgerRecord } from "./retro.js";
@@ -4351,6 +4352,24 @@ export async function runDaemon(
   opts: DaemonOpts = {},
 ): Promise<DaemonSummary> {
   openDirectMergeAdmissions();
+  // Pending cycle consumers share one tick read, including failures and freshness scoring.
+  const ledgerReader = deps.readLedgerLines;
+  let tickLedgerActive = false;
+  let tickLedger: { lines: readonly string[] } | { error: unknown } | undefined;
+  if (ledgerReader) deps = new Proxy(deps, {
+    get(target, property, receiver) {
+      if (property !== "readLedgerLines") return Reflect.get(target, property, receiver);
+      return () => {
+        if (!tickLedgerActive) return ledgerReader();
+        if (tickLedger === undefined) {
+          try { tickLedger = { lines: ledgerReader() }; }
+          catch (reason) { tickLedger = { error: reason }; }
+        }
+        if ("error" in tickLedger) throw tickLedger.error;
+        return tickLedger.lines;
+      };
+    },
+  });
   const pollIntervalMs = opts.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
   // W1-T1044: see DaemonOpts.sweepWallClockBoundMs's own doc — POLICY DATA (rule 2), threaded
   // by the real `rmd daemon` entry, defaulted here for a direct/test caller that omits it.
@@ -4717,6 +4736,31 @@ export async function runDaemon(
   // survives the very process replacement it caused (design v); updated once per tick below from
   // that tick's own `sweepCycleOutcome.reviewerCodeStale` reading.
   const bootLedgerLines = deps.readLedgerLines?.() ?? [];
+  const restartLedger = restartCycleLedgerRows(bootLedgerLines);
+  const restartBoots = restartLedger.rows.filter(row => row.step === "daemon.boot" && typeof row.ts === "string")
+    .map(row => Date.parse(String(row.ts))).filter(Number.isFinite).sort((a, b) => a - b);
+  const restartStartedAtMs = restartBoots.at(-1) ?? clockFromDateFn(deps.now).now();
+  const recordedRestartStarts = new Set(restartLedger.rows.filter(row => row.step === "daemon.restart_cycle")
+    .map(row => Date.parse(String(row.started_at))));
+  for (const started of restartBoots.slice(1, -1)) {
+    if (recordedRestartStarts.has(started)) continue;
+    const cycle = restartCycleRow(restartLedger.rows, started);
+    if (cycle) { log("daemon.restart_cycle", { ...cycle }); recordedRestartStarts.add(started); }
+  }
+  let restartCyclePending = !recordedRestartStarts.has(restartStartedAtMs) &&
+    restartCycleRow(restartLedger.rows, restartStartedAtMs) !== null;
+  const observeRestartCycle = (): void => {
+    if (!restartCyclePending || !deps.readLedgerLines) return;
+    try {
+      const lines = deps.readLedgerLines();
+      const ledger = restartCycleLedgerRows(lines);
+      if (ledger.errors.length) log("daemon.restart_cycle_unreadable", { errors: ledger.errors });
+      const cycle = restartCycleRow(ledger.rows, restartStartedAtMs);
+      if (cycle?.first_verdict_at) { log("daemon.restart_cycle", { ...cycle }); restartCyclePending = false; }
+    } catch (error) {
+      log("daemon.restart_cycle_unreadable", { error: String(error) });
+    }
+  };
   deps.bootPhases?.mark("loop_ledger_read");
   const measuredRuns: MeasuredRun[] = [];
   const runLengths = dispatchRunHistory(bootLedgerLines, measuredRuns);
@@ -5329,6 +5373,7 @@ export async function runDaemon(
     freshnessHeld = coalesced.action === "hold";
     log(FRESHNESS_DECISION_STEP, {
       action,
+      stale_since_ms: staleAtMs,
       busy,
       busy_reasons: busyReasons,
       background,
@@ -5559,6 +5604,11 @@ export async function runDaemon(
         [abandoned, abandonedReviews, unresolvedMerges] = await Promise.all([
           drainDetached(detachedBoundMs),
           drainInFlightReviews({ boundMs: reviewBoundMs, onWait: observation.watch,
+            onAbandon: (item, ageMs) => log("daemon.in_flight_review_abandoned", {
+              kind: item.kind, ...(item.task_id === undefined ? {} : { task_id: item.task_id }),
+              ...(item.pr === undefined ? {} : { pr: item.pr }), admitted_at_ms: item.admitted_at_ms, age_ms: ageMs,
+              bound_ms: reviewBoundMs,
+            }),
             closeRefills: pass?.overlapped !== true && placements.review?.placement !== "child" }),
           drainDirectMergeOperations({ boundMs: detachedBoundMs, onWait: (operation) => observation.watch(directMergeRestartItem(operation)) }),
           pass?.overlapped ? pass.settled : undefined,
@@ -5573,7 +5623,11 @@ export async function runDaemon(
         const boundMs = Math.max(0, deadlineMs - daemonClock.now());
         [abandoned, abandonedReviews] = await Promise.all([
           pass?.overlapped ? drainDetached(boundMs) : Promise.resolve(abandoned),
-          drainInFlightReviews({ boundMs, onWait: observation.watch, closeRefills: placements.review?.placement !== "child" }),
+          drainInFlightReviews({ boundMs, onWait: observation.watch,
+            onAbandon: (item, ageMs) => log("daemon.in_flight_review_abandoned", {
+              kind: item.kind, ...(item.task_id === undefined ? {} : { task_id: item.task_id }),
+              ...(item.pr === undefined ? {} : { pr: item.pr }), admitted_at_ms: item.admitted_at_ms, age_ms: ageMs, bound_ms: boundMs,
+            }), closeRefills: placements.review?.placement !== "child" }),
         ]);
       }
       if (unresolvedMerges.length > 0) cancelUnsubmittedDirectMerges();
@@ -6731,6 +6785,8 @@ export async function runDaemon(
 
   const tickMemory = { sampled: false };
   for (;;) {
+    tickLedgerActive = restartCyclePending;
+    tickLedger = undefined;
     // The liveness tick: the one row this loop writes unconditionally, every iteration, on every path below.
     // Every other daemon-prefixed step is either boot-time and one-shot, or confined to the three windows the
     // in-flight ticker runs in. Measured: the prefix went silent for 102.5 minutes on 2026-08-23 while the
@@ -6739,6 +6795,7 @@ export async function runDaemon(
     // no row has within one poll interval; a throwing sampler rides it as mem_telemetry, never escapes it.
     log("daemon.tick", { poll_interval_ms: pollIntervalMs, ...tickMemorySample(deps, daemonClock.now(), pollIntervalMs, tickMemory) });
     deps.bootPhases?.firstTick(log);
+    observeRestartCycle();
     recordNearLimitHeapSample(deps, "tick");
     if (tickMemory.sampled) startMemoryReadAfterRow(deps, log);
     const tickStartedAtMs = daemonClock.now();
@@ -8460,7 +8517,10 @@ export async function runDaemon(
       if (freshness.stale && decideFreshness(freshness, inFlightTasks.size) === "restart") decideRestart(freshness);
       wakeParkedLanes();
     };
-    const onDispatchTick = checkFreshness || (deps.reloadPlan && deps.sweepLight) ? (): void | Promise<void> => {
+    const onDispatchTick = checkFreshness || restartCyclePending || (deps.reloadPlan && deps.sweepLight) ? (): void | Promise<void> => {
+      tickLedgerActive = restartCyclePending;
+      tickLedger = undefined;
+      observeRestartCycle();
       wakeParkedLanes();
       if (inFlightTasks.size === 0 || deps.checkPause?.()) return;
       // W1-T11327: a requested restart releases child lanes and awaits in-process ones, as a decided restart does.

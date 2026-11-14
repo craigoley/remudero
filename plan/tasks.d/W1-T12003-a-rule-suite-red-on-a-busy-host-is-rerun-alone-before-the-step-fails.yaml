@@ -17,7 +17,7 @@
   files:
     - scripts/list-rule-suites.mjs
     - test/ci/a-rule-suite-red-on-a-busy-host-is-rerun-alone-before-the-step-fails.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "A suite that fails in the concurrent pass is rerun once alone after the pass ends, and when it passes alone the step passes and prints one RERUN-GREEN line naming the suite"
