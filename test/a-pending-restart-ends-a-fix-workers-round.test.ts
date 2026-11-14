@@ -11,14 +11,15 @@
  */
 import assert from "node:assert/strict";
 import childProcess from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
-import { runFixRung } from "#test/helpers/run-task-test.js";
+import { fixBranchClaimKey, runFixRung } from "#test/helpers/run-task-test.js";
 import { originWithClone, type GitRepo } from "#test/helpers/git-repo.js";
-import { fixRoundTally, readPreservedOwnerPatch } from "#src/lib/sweep.js";
+import { fixRoundBranchClaim, fixRoundTally, readPreservedOwnerPatch } from "#src/lib/sweep.js";
+import { acquireInflightLock } from "#src/lib/inflight-lock.js";
 import { pauseFilePath, requestPause } from "#src/lib/fleet-control.js";
 import { DEFAULT_POLL_INTERVAL_MS } from "#src/lib/poll-interval.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
@@ -80,7 +81,10 @@ function workerResult(runId: string, costUsd = 0): WorkerResult {
 
 /** One fix round. `worker` runs as the spawn; it gets the spawn's args and the checkout. */
 async function fixRound(t: TestContext, co: Checkout, runId: string,
-  worker: (args: SpawnWorkerArgs) => Promise<WorkerResult>, extra: { priorPartialWork?: ReturnType<typeof readPreservedOwnerPatch> } = {}) {
+  worker: (args: SpawnWorkerArgs) => Promise<WorkerResult>, extra: {
+    priorPartialWork?: ReturnType<typeof readPreservedOwnerPatch>;
+    deps?: Pick<Parameters<typeof runFixRung>[0]["deps"], "spawnWallClockBoundMs" | "reclaimWorker" | "branchClaim">;
+  } = {}) {
   const rows: Row[] = [];
   let pushes = 0;
   const mount: Mount = { model: "sonnet", effort: "high", maxTurns: 20, contextBudget: 120000 };
@@ -106,6 +110,7 @@ async function fixRound(t: TestContext, co: Checkout, runId: string,
       ledgerPath: join(co.root, "ledger.ndjson"), log: (step, fields) => rows.push({ step, task_id: TASK, ...(fields ?? {}) }),
       readHeadShaForProvenance: () => co.headSha,
       say: () => {}, account: (result) => result,
+      ...extra.deps,
     },
   });
   return { outcome, rows, pushes: () => pushes };
@@ -240,6 +245,70 @@ test("W1-T8141: a pending recycle ends a fix round and preserves its work", asyn
     const offered = readPreservedOwnerPatch({ repoDir: co.clone.dir, prNumber: PR_NUMBER, headSha: co.headSha, ledgerLines: rows });
     assert.equal(offered?.recoveryRef, indexRef, "the next round is offered the staged work");
     assert.match(offered!.excerpt, /a staged/);
+  });
+
+  await t.test("cancellation outlasting the bound retains the worktree for dead-owner recovery", async (t) => {
+    onlyGitRuns(t);
+    t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+    const co = checkout(t);
+    requestPause(co.root, RECYCLE_REASON);
+    const claimDir = join(co.root, "state", "inflight");
+    const key = fixBranchClaimKey("acme", "remudero", BRANCH);
+    const lock = acquireInflightLock(claimDir, key, { run_id: "FIX-CLAIM" });
+    const claim = fixRoundBranchClaim(lock, () => "test: no second round");
+    t.after(() => claim.release());
+    let started!: () => void;
+    let aborted!: () => void;
+    let finish!: () => void;
+    const ready = new Promise<void>((resolve) => { started = resolve; });
+    const cancelled = new Promise<void>((resolve) => { aborted = resolve; });
+    let reclaimed = 0;
+    const round = fixRound(t, co, "DAEMON-1", async (args) => {
+      writeFileSync(join(co.clone.dir, "src/a.ts"), "a staged\n");
+      co.clone.git("add", "src/a.ts");
+      writeFileSync(join(co.clone.dir, "src/b.ts"), "b unstaged\n");
+      writeFileSync(join(co.clone.dir, "src/c.ts"), "c new\n");
+      args.signal!.addEventListener("abort", aborted, { once: true });
+      started();
+      await new Promise<void>((resolve) => { finish = resolve; });
+      throw Object.assign(new Error("worker stopped late"), { name: "AbortError" });
+    }, { deps: {
+      spawnWallClockBoundMs: DEFAULT_POLL_INTERVAL_MS * 2,
+      reclaimWorker: () => { reclaimed++; }, branchClaim: claim,
+    } });
+    await ready;
+    const dirtyBefore = co.clone.git("status", "--porcelain");
+    t.mock.timers.tick(DEFAULT_POLL_INTERVAL_MS);
+    await cancelled;
+    t.mock.timers.tick(DEFAULT_POLL_INTERVAL_MS);
+    const { outcome, rows, pushes } = await round;
+    finish();
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(outcome.outcome, "stood_down", "the timed-out cancellation is still a yield");
+    assert.ok(outcome.retainWorktree, "the sweep must keep work that could not be safely preserved");
+    assert.equal(reclaimed, 1, "the bound still reclaims the worker");
+    assert.equal(co.clone.git("status", "--porcelain"), dirtyBefore, "no reset, even after a late worker exit");
+    assert.equal(co.clone.git("show", ":src/a.ts"), "a staged");
+    assert.equal(readFileSync(join(co.clone.dir, "src/b.ts"), "utf8"), "b unstaged\n");
+    assert.equal(readFileSync(join(co.clone.dir, "src/c.ts"), "utf8"), "c new\n");
+    assert.equal(co.clone.git("rev-parse", "HEAD"), co.headSha);
+    assert.equal(co.origin.git("rev-parse", BRANCH), co.headSha);
+    assert.equal(pushes(), 0);
+    assert.equal(outcome.strikes, 0);
+    assert.equal(rows.some((row) => row.step === "fix.dispatch"), false);
+    assert.equal(rows.some((row) => row.step === "sweep.fix.owner_residue_preserved"), false, "no unproven recovery claim");
+    const yielded = rows.find((row) => row.step === "fix.round_yielded")!;
+    assert.equal(yielded.pr_number, PR_NUMBER);
+    assert.equal(yielded.trigger, "recycle");
+    assert.equal(yielded.recovery_ref, null);
+    assert.match(String(yielded.keep_error), /worker.*stop.*bound/);
+    const done = rows.filter((row) => row.step === "fix.done");
+    assert.equal(done.length, 1);
+    assert.equal(done[0]!.subtype, "round_yielded");
+    assert.equal(done[0]!.branch_claim_run_id, "FIX-CLAIM");
+    assert.equal(existsSync(lock.path), false, "the recycle drain sees the branch claim released");
+    const successor = acquireInflightLock(claimDir, key, { run_id: "NEXT-ROUND" });
+    successor.release();
   });
 });
 
