@@ -112,6 +112,29 @@ test("native Semgrep installs into a fresh environment then verifies offline has
   assert.doesNotMatch(run, /install-semgrep-pro|sudo|docker|uv tool|pipx|curl/);
 });
 
+test("W1-T12492 criterion 2 native install preserves qualification controls", () => {
+  const build = parseLock(read(buildPath));
+  const runtime = parseLock(read(runtimePath));
+  assert.deepEqual(build.get("setuptools"), {
+    version: "84.1.0",
+    sha256: "5231689c6ac8156cd155cfb98c3fd6fb252c3e7e9bd3d78b64d3c55f132624c9",
+  });
+  for (const [name, version] of [
+    ["opentelemetry-api", "1.37.0"],
+    ["opentelemetry-exporter-otlp-proto-common", "1.37.0"],
+    ["opentelemetry-exporter-otlp-proto-http", "1.37.0"],
+    ["opentelemetry-instrumentation", "0.58b0"],
+    ["opentelemetry-instrumentation-requests", "0.58b0"],
+    ["opentelemetry-instrumentation-threading", "0.58b0"],
+    ["opentelemetry-proto", "1.37.0"],
+    ["opentelemetry-sdk", "1.37.0"],
+    ["opentelemetry-semantic-conventions", "0.58b0"],
+    ["opentelemetry-util-http", "0.58b0"],
+  ]) assert.equal(runtime.get(name!)!.version, version);
+  assert.equal(step("Install hash-locked Community Edition")["continue-on-error"], undefined);
+  assert.equal(step("Qualify native engine, baseline and invalid-rule refusal")["continue-on-error"], undefined);
+});
+
 test("native Semgrep preserves Scan permissions, events, bounded execution and advisory findings", () => {
   const doc = load();
   const job = doc.jobs.semgrep!;

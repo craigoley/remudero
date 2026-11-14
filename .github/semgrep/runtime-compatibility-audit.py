@@ -36,7 +36,7 @@ from types import SimpleNamespace
 
 APPROVED_TOOLS = {
     "pip": ("26.2.1", "71138adf1f4ca900cdb7d289c21b7494329f2332b6d85f0e1c42108c0384ed3e"),
-    "setuptools": ("84.0.0", "51a52592b3b99e102b609654876bd65f19f999935166d1352678931132b0c670"),
+    "setuptools": ("84.1.0", "5231689c6ac8156cd155cfb98c3fd6fb252c3e7e9bd3d78b64d3c55f132624c9"),
     "packaging": ("26.3", "d7193f7c8e4e93f444fde0262bf90af30e16fa0ad0ad44cb553c87339b23cd1c"),
     "wheel": ("0.48.0", "3217dcc807155e45db462d7ef2431f5ddda0d7273b700d05a67b271ceb1287ab"),
 }
@@ -76,7 +76,7 @@ APPROVED_SPECIAL_MEMBERS = {
     ("opentelemetry-instrumentation", "0.58b0", "50f97ac03100676c9f7fc28197f8240c7290ca1baa12da8bfbb9a1de4f34cc45"): {
         "opentelemetry/instrumentation/auto_instrumentation/sitecustomize.py": (673, "ddcfb83130a15563be3e97502e92073e9d0cf69643aa73c410dfa3721eafe265"),
     },
-    ("setuptools", "84.0.0", "51a52592b3b99e102b609654876bd65f19f999935166d1352678931132b0c670"): {
+    ("setuptools", "84.1.0", "5231689c6ac8156cd155cfb98c3fd6fb252c3e7e9bd3d78b64d3c55f132624c9"): {
         "setuptools/_vendor/importlib_metadata-8.7.1.dist-info/licenses/LICENSE": (10278, "458502e12d97bbf64438606a20044aa85eb05fb0a8a807bb35dbec253fd1fc04"),
         "setuptools/_vendor/jaraco_context-6.1.0.dist-info/licenses/LICENSE": (1076, "9755a18519666e5f0f4cae3daad3d7012bcae48a600b31237d75e9fe134e6683"),
         "setuptools/_vendor/jaraco_functools-4.4.0.dist-info/licenses/LICENSE": (1076, "5a57cb4db85e2a2dd88c290628908add57e3451449e0a9a71fdfb38776fd759d"),
@@ -164,7 +164,7 @@ APPROVED_SPECIAL_MEMBERS = {
 AUDIT_TEST_SOURCES = {
     "runtime_audit_metadata_tests.py": "9eb898e30ab9fd3fc0a96eebe626cdba96bcca2512ff27e5b88880da0f3b4737",
     "runtime_audit_test_fixtures.py": "66d2d91312ab5006bef72ef6ab2daa2ea8816870e7c6f740ca296d428d58190d",
-    "test_runtime_compatibility_audit.py": "4ca34ad14044c89eef7275ae16f4163fa2c434c57fe658867a741ff043080284",
+    "test_runtime_compatibility_audit.py": "8bd5e537eb8048b10b48684023f492c1d7719da3786403f7c9d1732f29c15280",
     "runtime_source_recipe.py": "6d1d2cc20e1a2fe225f913d9df815771b4e047c872bdaabbb59eceea52bcb35d",
     "prepare-source-build.py": "96eb19457f4799979e691459ad19ba761ab498d6576470db7c77eb5708171274",
     "source-build-policy.json": "5cf435e3bb81a52e1583ea00008d0e46a3c0ec64d920fe6720d59f88870bd83a",
