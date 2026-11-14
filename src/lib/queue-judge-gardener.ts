@@ -53,22 +53,19 @@ export const QUEUE_JUDGE_AVAILABILITY_STEPS = [QUEUE_JUDGE_SCORECARD_STEP, UNAVA
 
 export interface QueueJudgeAvailability { lastCompletedAt: string | undefined; staleMs: number | undefined }
 
-/** W1-T12551: the time since the queue judge last completed a pass, while it is failing (an unavailable row is
- *  newer than that pass). With no completed pass in the rows, the time since its first unavailable row. A judge
- *  whose newest pass completed, or with no rows, gives staleMs undefined: a quiet, working judge is not stale. */
+/** W1-T12551: the time since the queue judge last completed a pass. An unavailable row is never a completed pass.
+ *  With no completed pass in the rows, the time since its first unavailable row; with no rows, undefined. */
 export function queueJudgeAvailability(records: readonly Row[], nowMs: number): QueueJudgeAvailability {
-  let completed: number | undefined, firstUnavailable: number | undefined, lastUnavailable: number | undefined;
+  let completed: number | undefined, firstUnavailable: number | undefined;
   let lastCompletedAt: string | undefined;
   for (const r of records) {
     const at = typeof r.ts === "string" ? Date.parse(r.ts) : Number.NaN;
     if (!Number.isFinite(at) || at > nowMs) continue;
     if (r.step === QUEUE_JUDGE_SCORECARD_STEP && (completed === undefined || at > completed)) { completed = at; lastCompletedAt = r.ts as string; }
-    if (r.step !== UNAVAILABLE_STEP) continue;
-    if (firstUnavailable === undefined || at < firstUnavailable) firstUnavailable = at;
-    if (lastUnavailable === undefined || at > lastUnavailable) lastUnavailable = at;
+    if (r.step === UNAVAILABLE_STEP && (firstUnavailable === undefined || at < firstUnavailable)) firstUnavailable = at;
   }
-  const failing = lastUnavailable !== undefined && (completed === undefined || lastUnavailable > completed);
-  return { lastCompletedAt, staleMs: failing ? nowMs - (completed ?? firstUnavailable!) : undefined };
+  const since = completed ?? firstUnavailable;
+  return { lastCompletedAt, staleMs: since === undefined ? undefined : nowMs - since };
 }
 
 /** The queue judge's own rows are read without a window: a prediction is scored whenever its task resolves. */

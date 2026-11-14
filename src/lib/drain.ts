@@ -10,6 +10,7 @@ import { headroomExhausted, UNREADABLE_DEGRADED_LIMIT } from "./headroom.js";
 import type { UsageSnapshot } from "./headroom.js";
 import type { CostGovernorResult, MemoryGovernorResult, QueueGovernorResult } from "./sweep.js";
 import { checkDispatchGovernors, checkNewBuildReservation, consultMemoryReads, governorDeferPayload, newBuildReservationPayload, type DispatchGovernorDeps, type DispatchGovernorVerdict, type MemoryReadHold, type MemoryReadTracker, type NewBuildReservationVerdict } from "./dispatch-governor.js";
+import { MAX_RETAINED_LINES_PER_STEP } from "./ledger.js";
 import { RELEASE_LEDGER_STEP, unmetDependencies, unmetTaskPrecondition, type Plan, type Task, type TaskPreconditionOptions, type UnmetTaskPrecondition } from "./plan.js";
 import {
   NO_OBSERVED_SCOPE,
@@ -451,29 +452,36 @@ export interface MachineShareStart { taskId: string; authorClass: string | undef
 export interface MachineShareMove { share: number; machine_starts: number; starts: number; queue_judge_stale_ms: number }
 export interface MachineShareInput {
   queueJudgeStaleMs: number | undefined;
-  starts: readonly MachineShareStart[];
+  /** Undefined when the rows may not hold every start in the window: the share is then unknown and not applied. */
+  starts: readonly MachineShareStart[] | undefined;
   onMoved?: (task: Task, move: MachineShareMove) => void;
 }
 
-/** The run starts in the trailing {@link MACHINE_SHARE_WINDOW_MS}, each with its task's author class. */
-export function machineShareStarts(rows: readonly Record<string, unknown>[], tasksById: ReadonlyMap<string, Task>, nowMs: number): MachineShareStart[] {
+/** The run starts in the trailing {@link MACHINE_SHARE_WINDOW_MS}, each with its task's author class. Rotation keeps
+ *  only the newest {@link MAX_RETAINED_LINES_PER_STEP} starts, so when the rows hold that many and none is older
+ *  than the window, older starts in the window may be gone: the result is undefined, not a partial count. */
+export function machineShareStarts(rows: readonly Record<string, unknown>[], tasksById: ReadonlyMap<string, Task>, nowMs: number): MachineShareStart[] | undefined {
   const starts: MachineShareStart[] = [];
+  let total = 0, reachesWindowStart = false;
   for (const r of rows) {
     if (r.step !== "run.start" || typeof r.task_id !== "string" || typeof r.ts !== "string") continue;
     const at = Date.parse(r.ts);
+    total++;
+    if (nowMs - at > MACHINE_SHARE_WINDOW_MS) reachesWindowStart = true;
     if (!(at <= nowMs && nowMs - at <= MACHINE_SHARE_WINDOW_MS)) continue;
     starts.push({ taskId: r.task_id, authorClass: tasksById.get(r.task_id)?.author_class });
   }
-  return starts;
+  return reachesWindowStart || total < MAX_RETAINED_LINES_PER_STEP ? starts : undefined;
 }
 
 /** INVARIANT the-share-never-grants-eligibility: `ordered` is already the eligible set, and only its order changes. */
 function applyMachineShare(ordered: Task[], opts: NextRunnableOpts): Task[] {
   const input = opts.machineShare;
   const staleMs = input?.queueJudgeStaleMs;
-  if (input === undefined || staleMs === undefined || !(staleMs > QUEUE_JUDGE_STALE_MS)) return ordered;
-  const machineStarts = input.starts.filter((s) => s.authorClass === "machine").length;
-  if (input.starts.length > 0 && machineStarts / input.starts.length >= MACHINE_DISPATCH_SHARE) return ordered;
+  const starts = input?.starts;
+  if (input === undefined || starts === undefined || staleMs === undefined || !(staleMs > QUEUE_JUDGE_STALE_MS)) return ordered;
+  const machineStarts = starts.filter((s) => s.authorClass === "machine").length;
+  if (starts.length > 0 && machineStarts / starts.length >= MACHINE_DISPATCH_SHARE) return ordered;
   const resumable = opts.resumableTaskIds ?? new Set<string>();
   const machine = ordered.filter((t) => t.author_class === "machine" && !resumable.has(t.id));
   const age = (t: Task) => opts.dispatchValueContext?.costOfDelayInputsByTaskId?.get(t.id)?.filing_age_ms;
@@ -484,7 +492,7 @@ function applyMachineShare(ordered: Task[], opts: NextRunnableOpts): Task[] {
   const lead = ordered.filter((t) => resumable.has(t.id));
   const next = [...lead, pick, ...ordered.filter((t) => t !== pick && !resumable.has(t.id))];
   if (next.some((t, i) => t !== ordered[i])) {
-    input.onMoved?.(pick, { share: MACHINE_DISPATCH_SHARE, machine_starts: machineStarts, starts: input.starts.length, queue_judge_stale_ms: staleMs });
+    input.onMoved?.(pick, { share: MACHINE_DISPATCH_SHARE, machine_starts: machineStarts, starts: starts.length, queue_judge_stale_ms: staleMs });
   }
   return next;
 }

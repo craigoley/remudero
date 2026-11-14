@@ -18,6 +18,7 @@ import {
   MACHINE_DISPATCH_SHARE, MACHINE_SHARE_STEP, QUEUE_JUDGE_STALE_MS, machineShareStarts, nextRunnable, runnableCandidates,
   type MachineShareInput, type MachineShareMove,
 } from "#src/lib/drain.js";
+import { MAX_RETAINED_LINES_PER_STEP } from "#src/lib/ledger.js";
 import { loadPlan, type Plan, type Task } from "#src/lib/plan.js";
 import { QUEUE_JUDGE_SCORECARD_STEP, queueJudgeAvailability } from "#src/lib/queue-judge-gardener.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
@@ -88,7 +89,11 @@ test("W1-T12551 criterion 1: availability is the time since the last completed p
 
   const working = queueJudgeAvailability([...rows, { ts: iso(NOW - HOUR / 2), step: QUEUE_JUDGE_SCORECARD_STEP }], NOW);
   assert.equal(working.lastCompletedAt, iso(NOW - HOUR / 2));
-  assert.equal(working.staleMs, undefined, "a judge whose newest pass completed is not stale");
+  assert.equal(working.staleMs, HOUR / 2, "a pass that completed half an hour ago gives half an hour");
+
+  const quiet = queueJudgeAvailability([rows[0]!], NOW);
+  assert.deepEqual(quiet, { lastCompletedAt: iso(NOW - 10 * HOUR), staleMs: 10 * HOUR },
+    "with no unavailable row, a pass ten hours ago still gives ten hours");
   assert.equal(queueJudgeAvailability([], NOW).staleMs, undefined, "no rows is unknown, never stale");
 });
 
@@ -134,6 +139,23 @@ test("W1-T12551 criterion 3: with the judge available, or machine starts at the 
     assert.equal(nextRunnable(plan, notMerged, { machineShare: share })?.id, "W1-T1");
     assert.equal(moves, 0);
   }
+  assert.deepEqual(ids(runnableCandidates(plan, notMerged, 3, { machineShare: stale({ starts: undefined }) })), today,
+    "starts the rows may not hold in full leave today's order");
+
+  // Rotation keeps the newest MAX_RETAINED_LINES_PER_STEP starts: 100 machine starts then 200 operator starts in the
+  // window leave 200 operator rows. The share is then unknown, so the order stays today's.
+  const startRow = (i: number, taskId: string) => ({ ts: iso(NOW - 20 * HOUR + i * 60_000), step: "run.start", task_id: taskId });
+  const machinePlan = planOf(shard("W1-T1"), shard("W1-T40", { machine: true, priority: 3 }));
+  const full = [...Array.from({ length: 100 }, (_, i) => startRow(i, "W1-T40")), ...Array.from({ length: 200 }, (_, i) => startRow(100 + i, "W1-T1"))];
+  const older = { ts: iso(NOW - 30 * HOUR), step: "run.start", task_id: "W1-T1" };
+  assert.equal(machineShareStarts([older, ...full], machinePlan.byId, NOW)?.filter((s) => s.authorClass === "machine").length, 100,
+    "with a start older than the window, every start in it is counted");
+  const retained = full.slice(-MAX_RETAINED_LINES_PER_STEP);
+  assert.equal(machineShareStarts(retained, machinePlan.byId, NOW), undefined, "a capped window is not counted as 0% machine");
+  assert.equal(nextRunnable(machinePlan, notMerged, { machineShare: stale({ starts: machineShareStarts(retained, machinePlan.byId, NOW) }) })?.id, "W1-T1");
+  const reachesBack = [older, ...retained.slice(1)];
+  assert.equal(machineShareStarts(reachesBack, machinePlan.byId, NOW)?.length, MAX_RETAINED_LINES_PER_STEP - 1,
+    "a start older than the window shows the window is held in full");
 });
 
 // ── 4. invariant: the share never grants eligibility ───────────────────────────────────────────────────────────
@@ -192,6 +214,12 @@ test("W1-T12551 criterion 5: the daemon gives the selector the judge's staleness
   const available = await drive([...ledger, JSON.stringify({ ts: iso(NOW - HOUR), step: QUEUE_JUDGE_SCORECARD_STEP })]);
   assert.deepEqual(available.spawned, ["W1-T1"], "a working judge leaves today's order");
   assert.equal(available.moves.length, 0);
+
+  const capped = Array.from({ length: MAX_RETAINED_LINES_PER_STEP }, (_, i) =>
+    JSON.stringify({ ts: iso(NOW - 10 * HOUR + i * 60_000), step: "run.start", task_id: "W1-T7" }));
+  const unknownShare = await drive([...ledger.slice(0, 2), ...capped]);
+  assert.deepEqual(unknownShare.spawned, ["W1-T1"], "a capped start window leaves today's order");
+  assert.equal(unknownShare.moves.length, 0);
 
   const starts = machineShareStarts(ledger.map((line) => JSON.parse(line) as Record<string, unknown>), plan.byId, NOW);
   assert.deepEqual(starts, [{ taskId: "W1-T7", authorClass: undefined }, { taskId: "W1-T8", authorClass: undefined }]);
