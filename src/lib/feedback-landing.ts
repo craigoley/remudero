@@ -2583,11 +2583,15 @@ const greenTaskFileTrees = new Set<string>();
 
 type SetAsideIdRelease = { reserved_id?: string; id_release: ReservationReleaseOutcome | "kept_other_holder" | "kept_main_holds_path" | "no_id" };
 
+function taskIdOfTaskFileText(text: string): string | undefined {
+  return /^\s*(?:-\s+)?id:\s*["']?(W1-T\d+)["']?\s*$/m.exec(text)?.[1];
+}
+
 /** W1-T12410: free the id of a new task file the landing sets aside. Only a reservation the landing branch holds goes. */
 async function releaseSetAsideTaskIdAsync(
   gitAsync: GitExecAsync, text: string, landingBranch: string, reason: string, lane: string, log: LandTaskFilesOpts["log"],
 ): Promise<SetAsideIdRelease> {
-  const taskId = /^\s*(?:-\s+)?id:\s*["']?(W1-T\d+)["']?\s*$/m.exec(text)?.[1];
+  const taskId = taskIdOfTaskFileText(text);
   if (taskId === undefined) return { id_release: "no_id" };
   const run = async (args: string[]) => {
     try {
@@ -2661,6 +2665,18 @@ function* taskFilesLandingSteps(
         return null; // main does not hold the path
       }
     };
+    /** Whether a file on main other than `relPath` holds the id that `text` files. An unreadable search says yes. */
+    const otherMainFileHoldsId = function* (text: string, relPath: string): Generator<LandingAsk, boolean, AskReply> {
+      const id = taskIdOfTaskFileText(text);
+      if (id === undefined) return true;
+      try {
+        const hits = yield* net.git(["grep", "-l", "-E", `^[[:space:]]*(-[[:space:]]+)?id:[[:space:]]*["']?${id}["']?[[:space:]]*$`, yield* freshMain(), "--", "plan"]);
+        return hits.split("\n").map((l) => l.trim()).filter((l) => l !== "").some((l) => l.slice(l.indexOf(":") + 1) !== relPath);
+      } catch (e) {
+        // git grep exits 1 for no match; any other failure is unreadable, and unreadable keeps the id.
+        return (e as { code?: unknown; status?: unknown }).code !== 1 && (e as { status?: unknown }).status !== 1;
+      }
+    };
     const treeOf = function* (files: ReadonlyArray<{ relPath: string; blob: string }>): Generator<LandingAsk, string, AskReply> {
       yield* net.git(["read-tree", yield* freshMain()], { env });
       for (const f of files) yield* net.git(["update-index", "--add", "--cacheinfo", `100644,${f.blob},${f.relPath}`], { env });
@@ -2724,9 +2740,9 @@ function* taskFilesLandingSteps(
     for (const input of inputs) {
       const { relPath, content, claim, proof } = input;
       let baseBlob: string | null | undefined;
-      const refuse = function* (reason: string, extra: Partial<TaskFileRefusal> = {}): Generator<LandingAsk, void, AskReply> {
+      const refuse = function* (reason: string, extra: Partial<TaskFileRefusal> = {}, mainHoldsBytes = false): Generator<LandingAsk, void, AskReply> {
         let idRelease: SetAsideIdRelease | undefined;
-        if (baseBlob === null && input.newFile === true && extra.timedOut !== true && !existsSync(join(taskFilesPendingRoot(stateRoot), relPath))) {
+        if ((baseBlob === null || mainHoldsBytes) && input.newFile === true && extra.timedOut !== true && !existsSync(join(taskFilesPendingRoot(stateRoot), relPath))) {
           idRelease = JSON.parse((yield {
             run: () => { throw new Error("the task-file landing releases an id only under the async driver"); },
             runAsync: async () => JSON.stringify(await releaseSetAsideTaskIdAsync(opts.gitAsync!, content, kind.branch, reason, lane, opts.log)),
@@ -2763,7 +2779,9 @@ function* taskFilesLandingSteps(
       writeFileSync(tmpFile, content);
       const blob = (yield* net.git(["hash-object", "-w", tmpFile], { env })).trim();
       if (blob === baseBlob) {
-        yield* refuse(`origin/main already holds these bytes at ${relPath}`);
+        // W1-T12456: main already carries the id in this very file, so its reservation is dead weight —
+        // unless a different file on main also holds the id, which is then not ours to free.
+        yield* refuse(`origin/main already holds these bytes at ${relPath}`, {}, !(yield* otherMainFileHoldsId(content, relPath)));
         continue;
       }
       const verdict = yield* verdictOf([{ relPath, blob, claim, proof }]);

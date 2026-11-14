@@ -163,15 +163,19 @@ test("W1-T12456 criterion 4: landing refusals and the gardener row retain reserv
   assert.equal(again.refused[0]?.id_release, "already_absent");
 });
 
-test("a new-file input whose bytes main already holds keeps the reservation under the design's main-path guard", async (t) => {
+test("W1-T12456 criterion 2: bytes origin/main already holds release the id when no other file holds it", async (t) => {
   const w = world(t);
-  const id = "W1-T95031";
-  const sha = w.anchor(id, await taskFilesLandingBranchAsync(TARGET));
-  w.commit({ [pathOf(id)]: shard(id) });
-  const result = await w.land([input(id)]);
+  const branch = await taskFilesLandingBranchAsync(TARGET);
+  const id = "W1-T95031", shared = "W1-T95032";
+  w.anchor(id, branch);
+  w.anchor(shared, branch);
+  w.commit({ [pathOf(id)]: shard(id), [pathOf(shared)]: shard(shared), "plan/tasks.d/duplicate-holder.yaml": shard(shared, "dup") });
+  const result = await w.land([input(id), input(shared)]);
   assert.match(result.refused[0]!.reason, /origin\/main already holds these bytes/);
-  assert.equal(w.refSha(id), sha);
-  assert.equal(result.refused[0]?.id_release, undefined);
+  assert.deepEqual([result.refused[0]?.reserved_id, result.refused[0]?.id_release], [id, "released"]);
+  assert.equal(w.refSha(id), "");
+  assert.equal(result.refused[1]?.id_release, undefined, "another file on main holds the id, so it is kept");
+  assert.notEqual(w.refSha(shared), "");
 });
 
 test("refusing different bytes for a new file already in the staging queue keeps its reservation", async (t) => {
