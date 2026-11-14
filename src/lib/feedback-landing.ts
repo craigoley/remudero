@@ -2670,7 +2670,7 @@ function* taskFilesLandingSteps(
       const id = taskIdOfTaskFileText(text);
       if (id === undefined) return true;
       try {
-        const hits = yield* net.git(["grep", "-l", "-E", `^[[:space:]]*(-[[:space:]]+)?id:[[:space:]]*["']?${id}["']?[[:space:]]*$`, yield* freshMain(), "--", "plan"]);
+        const hits = yield* net.git(["grep", "-l", "-E", `^[[:space:]]*(-[[:space:]]+)?id:[[:space:]]*["']?${id}["']?[[:space:]]*$`, yield* freshMain(), "--", relative(root, resolveRepoLayout(root).planDir)]);
         return hits.split("\n").map((l) => l.trim()).filter((l) => l !== "").some((l) => l.slice(l.indexOf(":") + 1) !== relPath);
       } catch (e) {
         // git grep exits 1 for no match; any other failure is unreadable, and unreadable keeps the id.

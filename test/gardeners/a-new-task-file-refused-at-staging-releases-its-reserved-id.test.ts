@@ -25,7 +25,7 @@ const input = (id: string): TaskFileInput => ({
 });
 type Row = { step: string } & Record<string, unknown>;
 
-function world(t: TestContext) {
+function world(t: TestContext, planDir = "plan") {
   const stateRoot = mkdtempSync(join(tmpdir(), "rmd-w1-t12456-"));
   const origin = gitRepo({ scope: t, bare: true, kind: "staging-origin" });
   const author = gitRepo({ scope: t, cloneFrom: origin.dir, kind: "staging-author" });
@@ -38,7 +38,10 @@ function world(t: TestContext) {
     author.git("commit", "--quiet", "-m", "chore: seed fixture");
     author.git("push", "--quiet", "origin", "HEAD:refs/heads/main");
   };
-  commit({ "plan/tasks.yaml": "[]\n", [pathOf("W1-T90001")]: shard("W1-T90001"), "world.txt": stateRoot });
+  commit({
+    [`${planDir}/tasks.yaml`]: "[]\n", [`${planDir}/tasks.d/W1-T90001-fixture.yaml`]: shard("W1-T90001"), "world.txt": stateRoot,
+    ...(planDir === "plan" ? {} : { ".remudero/layout.json": JSON.stringify({ planDir }) }),
+  });
   const repo = gitRepo({ scope: t, cloneFrom: origin.dir, kind: "staging-repo" });
   repo.git("config", "user.name", GIT_REPO_FIXTURE_IDENTITY.name);
   repo.git("config", "user.email", GIT_REPO_FIXTURE_IDENTITY.email);
@@ -188,4 +191,53 @@ test("refusing different bytes for a new file already in the staging queue keeps
   assert.deepEqual(result.waiting, [pathOf(id)]);
   assert.equal(w.refSha(id), sha);
   assert.equal(result.refused[0]?.id_release, undefined);
+});
+
+test("W1-T12456 criterion 2: a relocated plan keeps an id held by another file", async (t) => {
+  const w = world(t, "roadmap");
+  const branch = await taskFilesLandingBranchAsync(TARGET);
+  const sole = "W1-T95051", shared = "W1-T95052";
+  const relocated = (id: string): TaskFileInput => ({ ...input(id), relPath: `roadmap/tasks.d/${id}-fixture.yaml` });
+  w.anchor(sole, branch);
+  const sharedSha = w.anchor(shared, branch);
+  w.commit({
+    [relocated(sole).relPath]: shard(sole), [relocated(shared).relPath]: shard(shared),
+    "roadmap/tasks.yaml": shard(shared, "another holder outside tasks.d"),
+  });
+  const result = await w.land([relocated(sole), relocated(shared)]);
+  assert.deepEqual(result.refused.map((r) => r.path), [relocated(sole).relPath, relocated(shared).relPath]);
+  for (const refusal of result.refused) assert.match(refusal.reason, /origin\/main already holds these bytes/);
+  assert.deepEqual([result.refused[0]?.reserved_id, result.refused[0]?.id_release], [sole, "released"]);
+  assert.equal(w.refSha(sole), "", "the relocated plan is searched and its sole holder may release");
+  assert.equal(result.refused[1]?.id_release, undefined);
+  assert.equal(w.refSha(shared), sharedSha, "another file in the configured plan keeps the reservation");
+});
+
+test("W1-T12456 criterion 2: a failed holder search distinguishes no matches from unreadable main", async (t) => {
+  for (const [name, error, releases] of [
+    ["exit code 1", { code: 1 }, true],
+    ["exit status 1", { status: 1 }, true],
+    ["unreadable tree", { code: 128 }, false],
+  ] as const) {
+    await t.test(name, async (t) => {
+      const w = world(t);
+      const id = "W1-T95061";
+      const sha = w.anchor(id, await taskFilesLandingBranchAsync(TARGET));
+      w.commit({ [pathOf(id)]: shard(id) });
+      let searches = 0;
+      w.options.gitAsync = async (args, opts) => {
+        if (args[0] === "grep") {
+          searches++;
+          throw Object.assign(new Error(name), error);
+        }
+        return execFileSync("git", ["-C", w.repo.dir, ...args], { encoding: "utf8", env: opts?.env ?? process.env, stdio: "pipe" });
+      };
+      const result = await w.land([input(id)]);
+      assert.equal(searches, 1);
+      assert.equal(result.refused.length, 1);
+      assert.match(result.refused[0]!.reason, /origin\/main already holds these bytes/);
+      assert.equal(result.refused[0]?.id_release, releases ? "released" : undefined);
+      assert.equal(w.refSha(id), releases ? "" : sha);
+    });
+  }
 });
