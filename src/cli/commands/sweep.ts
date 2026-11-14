@@ -75,6 +75,7 @@ export interface SweepCommandHost {
   readonly dispatchFixPreflightStandDown: HostFn;
   readonly ghLiveStateAsync: HostFn;
   readonly resolveFixRungTaskContractAtHeadAsync: HostFn;
+  readonly taskContractAdvanceAtHead: HostFn;
   readonly createFixRungWorktreeWithToolchain: HostFn;
   readonly captureWorktreeSnapshotViaGit: HostFn;
   readonly writeFixCensusSnapshotAsync: HostFn;
@@ -221,7 +222,7 @@ export function buildSweepEffects(
     removeAbandonedFixWorktreeOwner, publishAbandonedFixOwnerAhead, preserveAbandonedFixOwnerDivergence,
     preserveOrDiscardFixOwnerResidue, preserveStagedFixOwnerResidue, preserveAndClearUntrackedFixOwner,
     preserveStaleDirtyFixOwner, clearStaleDirtyFixOwner, resetTrackedDirtyFixOwner,
-    depReviewCommand, dispatchFixPreflightStandDown, ghLiveStateAsync, resolveFixRungTaskContractAtHeadAsync,
+    depReviewCommand, dispatchFixPreflightStandDown, ghLiveStateAsync, resolveFixRungTaskContractAtHeadAsync, taskContractAdvanceAtHead,
     createFixRungWorktreeWithToolchain, captureWorktreeSnapshotViaGit, writeFixCensusSnapshotAsync,
     runPlanScopedFixRound, materializePlanRoundWorktree, pushSweepFixRound,
     buildFixRungDispatchArgs, openTaskIdsFromPlan, waitForCiGreen, restRollupFor,
@@ -622,6 +623,9 @@ export function buildSweepEffects(
     ghLiveStateImpl: ghLiveStateAsync,
     fixRungTaskForImpl: fixRungTaskFor,
     resolveTaskContractAtHeadImpl: resolveFixRungTaskContractAtHeadAsync,
+    ...(taskContractAdvanceAtHead === undefined ? {} : {
+      readTaskContractAdvanceAtHeadImpl: (pr: { prNumber: number; headSha: string; taskId?: string }) =>
+        taskContractAdvanceAtHead(reviewRepoDir, pr) }),
     createFixRungWorktreeImpl: createFixRungWorktreeWithToolchain,
     captureWorktreeSnapshotImpl: captureWorktreeSnapshotViaGit,
     runFixRungImpl: (opts) => {
