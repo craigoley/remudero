@@ -100,18 +100,13 @@ import {
 } from "./verify-human-judge.js";
 
 /**
- * W1-T1259: host-side measurement cadence; CLI dispatch lives in `src/run-task.ts`.
- * `daemonCommand` wires the poll loop's injected `decideMeasurementCadence` hook.
- *
- * INVARIANT: the default cadence writes nothing. Escalation is opt-in, via
- * `escalateRepeatingRules` and `updateProposalRegistry`; results are measured or refused, never bare rates.
- *
- * W1-T3082: `classifyVerdictDrift`/`escalateVerdictCalibrationDrift` propose once per drifted class
- * through `updateProposalRegistry` when `opts.escalate` is on. Per-class drift/within-bands rows
- * also require caller-supplied `opts.writeLedgerLine`; omission writes no ledger rows.
- *
- * FALSIFIER: test/measurement-cadence.test.ts and the per-verb suites below. Why:
- * docs/forensics/measurement-cadence.md#module-header.
+ * W1-T1259: host cadence; `src/run-task.ts` wires CLI dispatch and the daemon poll hook.
+ * INVARIANT: defaults write nothing; opt-in escalation uses `escalateRepeatingRules` and
+ * `updateProposalRegistry`. Results are measured or refused, never bare rates.
+ * W1-T3082: `opts.escalate` permits one proposal per drifted class; per-class drift/within-bands
+ * ledger rows additionally require `opts.writeLedgerLine`.
+ * FALSIFIER: test/measurement-cadence.test.ts and per-verb suites below.
+ * Why: docs/forensics/measurement-cadence.md#module-header.
  */
 
 // ── The pacing bound (mirrors lib/auto-triage.ts's marker+interval+cap shape exactly) ─────────
@@ -120,13 +115,11 @@ export interface MeasurementCadencePolicy {
   enabled: boolean;
   minIntervalMinutes: number;
   maxPerDay: number;
-  /** DEFAULT OFF — gates only whether escalation drafts promote-to-instrument proposals; the
-   *  report-only readers ignore it. */
+  /** DEFAULT OFF: gates promote-to-instrument proposals; report-only readers ignore it. */
   escalate: boolean;
 }
 
-/** Marker recording the last fire, so the interval and cap survive a restart — same shape as
- *  `lib/auto-triage.ts`'s `AutoTriageMarker`. */
+/** Restart-safe interval/cap marker, matching `lib/auto-triage.ts`'s `AutoTriageMarker`. */
 export interface MeasurementCadenceMarker {
   /** ISO timestamps of recent fires, newest last. Trimmed to the rolling window by the writer. */
   fires: string[];
@@ -141,8 +134,7 @@ export function measurementCadenceMarkerPath(root: string): string {
   return join(root, "state", "last-measurement-cadence.json");
 }
 
-/** Reads the marker; a malformed file resolves `corrupt`, never `absent`, so the caller fails
- *  closed instead of re-authorizing unbounded ticks on corruption. */
+/** Malformed markers resolve `corrupt`, never `absent`: fail closed against unbounded ticks. */
 export function readMeasurementCadenceMarker(path: string): MeasurementCadenceMarkerResolution {
   if (!existsSync(path)) return { kind: "absent" };
   try {
@@ -164,9 +156,8 @@ export function recordMeasurementCadenceFire(path: string, at: Date, windowMs: n
       ? prior.marker.fires.filter((f) => at.getTime() - Date.parse(f) < windowMs && !Number.isNaN(Date.parse(f)))
       : [];
   const marker: MeasurementCadenceMarker = { fires: [...kept, at.toISOString()] };
-  // The directory is created here, not assumed — a write into an absent `state/` throws ENOENT
-  // before the marker lands, so an absent marker reads as "no prior fire" and the cadence fires
-  // every tick forever. Why: docs/forensics/measurement-cadence.md#recordmeasurementcadencefire.
+  // Create state/ or ENOENT leaves no marker and fires every tick.
+  // Why: docs/forensics/measurement-cadence.md#recordmeasurementcadencefire.
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, JSON.stringify(marker, null, 2));
   return marker;
@@ -182,8 +173,7 @@ export type MeasurementCadenceDecision = { fire: true; reason: string } | { fire
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
-/** Decides whether the cadence fires this tick. Pure, paced by two independent bounds — never
- *  the raw poll interval — `minIntervalMinutes` and `maxPerDay`, `decideAutoTriage`'s shape. */
+/** Pure pacing: independent `minIntervalMinutes` and `maxPerDay` bounds, like `decideAutoTriage`. */
 export function decideMeasurementCadence(i: MeasurementCadenceInputs): MeasurementCadenceDecision {
   if (!i.policy.enabled) {
     return { fire: false, reason: "measurement cadence disabled (policy.measurementCadence.enabled=false)" };
@@ -220,8 +210,7 @@ export function decideMeasurementCadence(i: MeasurementCadenceInputs): Measureme
   };
 }
 
-/** The rung's real decision, mirroring `src/run-task.ts`'s `autoTriageCheck` shape; `root`/
- *  `policy` come from the caller. */
+/** Caller-supplied root/policy, matching `src/run-task.ts`'s `autoTriageCheck` shape. */
 export function measurementCadenceCheck(opts: {
   root: string;
   policy: MeasurementCadencePolicy;
@@ -257,8 +246,7 @@ export interface VerdictCalibrationCadenceResult extends MeasurementCadenceVerbS
   blockedCiCount?: number;
   blocked_ci_share?: number | null;
   delta_vs_previous?: number | null;
-  /** W1-T3082: true only when escalation drafted a drift proposal. Optional for older fixtures;
-   *  same meaning as {@link RuleEfficacyCadenceResult.escalated}. */
+  /** W1-T3082: true only for a drafted drift proposal; optional for older fixtures. */
   escalated?: boolean;
   escalatedProposalIds?: string[];
   /** Classes `classifyVerdictDrift` judged drifted, even in report-only mode; empty on a clean pass. */
@@ -271,22 +259,18 @@ export interface AutonomyRateCadenceResult extends MeasurementCadenceVerbStatus 
   delta_vs_previous?: number | null;
 }
 
-/** W1-T2659's wipe-test cadence row — same cadence bound shape as CI-learning, without
- *  measurementCadence's `escalate` flag because this rung runs workers, it never files report
- *  proposals. */
+/** W1-T2659: CI-learning pacing shape; no `escalate` because wipe-test runs workers, not proposals. */
 export interface WipeTestCadencePolicy {
   enabled: boolean;
   minIntervalMinutes: number;
   maxPerDay: number;
-  /** W1-T4092: the share of pacing slots ablated for a factor at its neutral weight — see
-   *  {@link wipeTestFactorShares}. */
+  /** W1-T4092: neutral-weight ablation share; see {@link wipeTestFactorShares}. */
   baseShare: number;
   /** W1-T4092: a factor's turns interval half-width at or under which it counts as settled. */
   settledHalfWidthTurns: number;
 }
 
-/** Wipe-test's OWN fire marker. A short interval here must never throttle measurement, digest,
- *  board-review, or CI-learning rungs. */
+/** Independent wipe-test marker: its interval must never throttle other rungs. */
 export function wipeTestCadenceMarkerPath(root: string): string {
   return join(root, "state", "last-wipe-test-cadence.json");
 }
@@ -358,8 +342,7 @@ export interface RevertRecallCadenceResult extends MeasurementCadenceVerbStatus 
 
 export type AdoptionShape = "symbol-no-caller" | "field-no-writer" | "script-no-invoker" | "gate-no-subject";
 
-/** Every {@link AdoptionShape}, as a value — {@link adoptionShapeOf} validates an id's shape
- *  segment against this rather than trusting its regex alone. */
+/** {@link adoptionShapeOf} validates against these shapes, beyond its regex. */
 export const ADOPTION_SHAPES: readonly AdoptionShape[] = [
   "symbol-no-caller",
   "field-no-writer",
@@ -374,16 +357,13 @@ export interface AdoptionFinding {
   mechanism: string;
   /** Repo-relative path this mechanism is defined in (or lives at, for a script). */
   definedIn: string;
-  /** ISO date this mechanism shipped, so a count beside it reads as a backlog, never a false
-   *  failure. `"unknown"` only when the git read itself failed. */
+  /** ISO ship date distinguishes backlog from failure; `"unknown"` means the git read failed. */
   shippedAt: string;
   detail: string;
 }
 
-/** One shape-4 (gate-with-no-subject) predicate — hand-written, since "is this field ever true"
- *  has no generic query. `ledgerLinePattern` bounds the ledger read to the step carrying
- *  `field`; a line that doesn't parse or lacks it sits outside the population, never a false
- *  positive. */
+/** Hand-written shape-4 predicate: no generic query proves "ever true". `ledgerLinePattern`
+ * bounds the step; unparseable rows or rows lacking `field` are outside the population. */
 export interface AdoptionShape4Predicate {
   id: string;
   mechanism: string;
@@ -394,9 +374,8 @@ export interface AdoptionShape4Predicate {
   detail: string;
 }
 
-/** The declared shape-4 population: the containment credential arms, present on every
- *  `containment.probe` row and true on none. Bump {@link ADOPTION_SHAPE4_LIST_LAST_EDITED}
- *  whenever this list changes. */
+/** Shape-4 population: containment credential arms, present on every probe and true on none.
+ * Bump {@link ADOPTION_SHAPE4_LIST_LAST_EDITED} whenever this list changes. */
 export const ADOPTION_SHAPE4_PREDICATES: readonly AdoptionShape4Predicate[] = [
   {
     id: "credential_expired",
@@ -418,8 +397,7 @@ export const ADOPTION_SHAPE4_PREDICATES: readonly AdoptionShape4Predicate[] = [
   },
 ];
 
-/** {@link ADOPTION_SHAPE4_PREDICATES}'s last-edit date, printed beside every report so a stale
- *  list is visible rather than read as a clean result. Bump by hand when the list changes. */
+/** Printed to expose stale predicates; bump by hand when {@link ADOPTION_SHAPE4_PREDICATES} changes. */
 export const ADOPTION_SHAPE4_LIST_LAST_EDITED = "2026-08-25";
 
 export interface AdoptionReportResult {
@@ -435,9 +413,7 @@ export interface AdoptionReportResult {
 
 const ADOPTION_SKIP_DIR_NAMES = new Set(["node_modules", ".git", "dist", "build", "coverage"]);
 
-/** Recursively lists every file under `root`/`rel` as repo-relative POSIX paths. Missing roots
- *  are silently skipped, same discipline as `reachability.ts`'s own walker (duplicated here
- *  rather than imported, since that walker isn't exported). */
+/** Repo-relative POSIX file walk; skips missing roots like `reachability.ts`'s unexported walker. */
 function walkAdoptionFiles(root: string, rel: string, out: string[]): void {
   let entries;
   try {
@@ -476,9 +452,8 @@ function isAdoptionSourcePath(path: string): boolean {
   return /^src\/.+\.(?:[cm]?[jt]s|[jt]sx)$/.test(path);
 }
 
-/** Remove comments without mistaking a marker embedded in a quoted value for a comment.
- *  `eraseStrings` gives call detection an executable-token view: a symbol quoted in prose or
- *  data cannot become a caller. Template contents are conservatively erased as one value. */
+/** Preserve quoted comment markers; `eraseStrings` prevents data/prose from becoming callers.
+ * Templates are conservatively erased as one value. */
 function stripAdoptionText(text: string, eraseStrings: boolean): string {
   const out: string[] = [];
   for (let i = 0; i < text.length;) {
@@ -573,12 +548,9 @@ function reachableAdoptionSources(corpus: AdoptionCorpusFile[]): {
   const sourceRels = new Set(sourceFiles.map((file) => file.rel));
   const imports = new Map(sourceFiles.map((file) => [file.rel, importsInAdoptionSource(file.rel, file.text, sourceRels)]));
   const executableText = new Map(sourceFiles.map((file) => [file.rel, stripAdoptionText(file.text, true)]));
-  // A plain identifier reference check (used for a value constant, below) must not count the
-  // import clause itself — the imported name is always lexically present there, so leaving it
-  // in would make every import self-adopt regardless of whether the module ever reads the value.
-  // Blank the import statement BEFORE string-erasure — erasure removes the quote characters this
-  // pattern needs to find the `from "..."` clause in the first place. Mirrors the import-line
-  // shape `importsInAdoptionSource` parses, kept local rather than shared (both are one line).
+  // Imports must not count as references or every imported constant self-adopts.
+  // Blank imports BEFORE string erasure removes the `from "..."` quotes this pattern needs.
+  // Matches `importsInAdoptionSource`'s import shape.
   const importStatementPattern = /^[ \t]*import[ \t]+(?!type\b)([\s\S]*?)[ \t]+from[ \t]+["']([^"']+)["'];?/gm;
   const executableTextWithoutImports = new Map(
     sourceFiles.map((file) => {
@@ -588,9 +560,8 @@ function reachableAdoptionSources(corpus: AdoptionCorpusFile[]): {
     }),
   );
   const reachable = new Set<string>();
-  // Synthetic and partially checked-out repositories may not carry the CLI root. They can still
-  // prove a real cross-file call, but cannot support a negative claim about a module's reachability;
-  // preserve that established fallback only when the root is absent.
+  // Without a CLI root, fixtures can prove cross-file calls but not negative reachability.
+  // Preserve the all-source fallback only when that root is absent.
   const pending = sourceRels.has("src/run-task.ts") ? ["src/run-task.ts"] : [...sourceRels];
   while (pending.length) {
     const current = pending.pop()!;
@@ -601,9 +572,8 @@ function reachableAdoptionSources(corpus: AdoptionCorpusFile[]): {
   return { reachable, imports, executableText, executableTextWithoutImports };
 }
 
-/** Reads every candidate file once — `src/`, `scripts/`, `bin/`, `test/` — so a reachability
- *  check is a regex test over an already-loaded string, never a repeat disk read per candidate.
- *  Why: docs/forensics/measurement-cadence.md#buildadoptioncorpus (read-once timing). */
+/** Read src/scripts/bin/test once; reachability checks reuse loaded strings.
+ * Why: docs/forensics/measurement-cadence.md#buildadoptioncorpus (read-once timing). */
 function buildAdoptionCorpus(checkoutDir: string): AdoptionCorpusFile[] {
   const rels: string[] = [];
   for (const root of ["src", "scripts", "bin", "test"]) walkAdoptionFiles(checkoutDir, root, rels);
@@ -618,9 +588,7 @@ function buildAdoptionCorpus(checkoutDir: string): AdoptionCorpusFile[] {
   return out;
 }
 
-/** Default ship-date resolver: a real `git log` read, injectable only for tests. `needle` given
- *  ⇒ pickaxe search for the oldest commit introducing that string; omitted ⇒ the file's own
- *  oldest add event (correct for a script, since the file IS the mechanism). */
+/** Injectable git resolver: oldest pickaxe hit with `needle`, else oldest file-add event. */
 function defaultAdoptionShipDate(checkoutDir: string, file: string, needle?: string): string {
   try {
     const out = execFileSync("git", adoptionShipDateArgs(file, needle), { cwd: checkoutDir, encoding: "utf8", maxBuffer: 1 << 24 });
@@ -643,9 +611,8 @@ function oldestAdoptionShipDate(out: string): string {
 
 const execFileAsync = promisify(execFile);
 
-/** {@link defaultAdoptionShipDate}'s same `git log`, awaited — the daemon's lookup. Each pickaxe
- *  costs ~0.36 s on the fleet host, and 2,377 of them run synchronously blocked the event loop
- *  for 862 s (2026-09-24). A failed read is "unknown", exactly as the sync resolver says. */
+/** Await {@link defaultAdoptionShipDate}'s git lookup; failures remain "unknown".
+ * Sync pickaxes blocked the loop for 862 s (2,377 × ~0.36 s, 2026-09-24). */
 async function defaultAdoptionShipDateAsync(checkoutDir: string, file: string, needle?: string): Promise<string> {
   try {
     const { stdout } = await execFileAsync("git", adoptionShipDateArgs(file, needle), { cwd: checkoutDir, encoding: "utf8", maxBuffer: 1 << 24 });
@@ -719,10 +686,8 @@ function scanUnadoptedSymbols(
   return findings;
 }
 
-/** SHAPE 2 — field with no writer. Scans every optional field (`name?:`) on `src/lib/plan.ts`'s
- *  `Task` interface and reports one with zero raw `<field>:` key hits across `plan/`. A required
- *  field never appears here — every parsed task carries it, so its hit count is never zero.
- *  Why: docs/forensics/measurement-cadence.md#scanunadoptedfields (control measurement). */
+/** SHAPE 2: optional `Task` fields with zero raw `<field>:` keys across plan/.
+ * Required fields always have hits. Why: docs/forensics/measurement-cadence.md#scanunadoptedfields. */
 function scanUnadoptedFields(
   checkoutDir: string,
   shipDateFor: (checkoutDir: string, file: string, needle?: string) => string,
@@ -768,10 +733,8 @@ function scanUnadoptedFields(
   return findings;
 }
 
-/** SHAPE 3 — script with no invoker. Scans every `scripts/**` file and reports one with zero
- *  references across the three surfaces a script can be reached from: a `.github/workflows/*`
- *  step, `package.json`, or a `src/**` spawn.
- *  Why: docs/forensics/measurement-cadence.md#scanunadoptedscripts (the control measurement). */
+/** SHAPE 3: scripts without workflow/package/src invokers, extended by W1-T3383 below.
+ * Why: docs/forensics/measurement-cadence.md#scanunadoptedscripts (control measurement). */
 function scanUnadoptedScripts(
   checkoutDir: string,
   corpus: AdoptionCorpusFile[],
@@ -798,25 +761,11 @@ function scanUnadoptedScripts(
   const srcTexts = corpus.filter((f) => f.rel.startsWith("src/")).map((f) => f.text);
 
   // W1-T3383 — THE TWO INVOKER SURFACES THIS SCAN COULD NOT SEE.
-  //
-  // (a) scripts/ ITSELF. A shared scripts/lib/*.mjs module is imported only by sibling scripts, and
-  //     none of the three surfaces above can see that, so it read as permanently unadopted however
-  //     many callers it had. MEASURED 2026-09-11: scripts/lib/git.mjs had 15 importers,
-  //     scripts/lib/repo-root.mjs 12, scripts/test-duration-reporter.mjs 2 — all three reported.
-  //
-  // (b) plan/claims.yaml. Its rows carry an `assertion:` that RUNS a script on every PR through a
-  //     required check — `node --import tsx scripts/plan-state-claims.mjs` is the live invocation of
-  //     the very script this scan reported as having no adopter.
-  //
-  // A QUOTED PATH SPECIFIER, NOT A BARE BASENAME, and executable files only. Both narrowings are
-  // load-bearing and were measured, not assumed:
-  //   - scripts/comment-load-baseline.json is DATA that lists every script by path; counting it as
-  //     an invoker marked the ENTIRE corpus adopted and left this scan asserting nothing.
-  //   - scripts/diff-coverage.mjs mentions scripts/console-live-review.mjs in a DOC COMMENT; a bare
-  //     basename match reads that prose as an invocation, the same "a mention is not a caller"
-  //     defect the symbol scan carries.
-  // With both narrowings the reported set goes 11 -> 4 on this checkout, and the 4 that remain were
-  // each confirmed to have no invoker at all.
+  // Include sibling-script imports and plan/claims.yaml assertions as invokers.
+  // Require quoted path specifiers in executable files: baseline JSON falsely adopted the
+  // whole corpus; bare basenames counted doc-comment mentions as calls.
+  // Measured 2026-09-11: these constraints reduced 11 findings to 4 confirmed uninvoked scripts.
+  // Historical importer counts and examples: W1-T12387 review record.
   const invokerScriptTexts = new Map<string, string>();
   for (const rel of scriptRels) {
     if (!/\.(mjs|cjs|js|ts)$/.test(rel)) continue;
@@ -838,8 +787,7 @@ function scanUnadoptedScripts(
     if (!/\.(mjs|cjs|js|ts)$/.test(rel)) continue;
     const base = rel.slice(rel.lastIndexOf("/") + 1);
     const re = new RegExp(escapeAdoptionRegExp(base));
-    // A path specifier ending in this basename, inside quotes — an import, a require, or a quoted
-    // command string. `rel !== r` because a script's own text necessarily names itself.
+    // Quoted import/require/command path; exclude self-references with `rel !== r`.
     const specifier = new RegExp(`["'\`](?:[^"'\`]*/)?${escapeAdoptionRegExp(base)}["'\`]`);
     const invokedByScript = [...invokerScriptTexts].some(([r, t]) => r !== rel && specifier.test(t));
     const invokedByClaim = specifier.test(planClaimsText) || re.test(planClaimsText);
@@ -862,10 +810,8 @@ function scanUnadoptedScripts(
   return findings;
 }
 
-/** SHAPE 4 — gate with no subject, over the declared {@link ADOPTION_SHAPE4_PREDICATES} list.
- *  Reads the ledger union once per `ledgerLinePattern`, then counts lines where `field` is
- *  present vs true — presence is the control: a predicate that never sees its field is
- *  unmeasurable, named rather than read as adopted. */
+/** SHAPE 4: one union read per pattern over {@link ADOPTION_SHAPE4_PREDICATES}.
+ * Field presence controls true-counts; unseen fields are named unmeasurable, never adopted. */
 function scanShape4Gates(
   stateDir: string,
   ledgerUnion: (stateDir: string, pattern: RegExp) => LedgerUnionResult,
@@ -914,8 +860,7 @@ function scanShape4Gates(
   return { findings, unmeasurable };
 }
 
-/** The fourth verb's entry point. Static scans (shapes 1-3) run only when `checkoutDir` is
- *  supplied, else skipped rather than faked clean; shape 4 always runs off `stateDir` alone. */
+/** Shapes 1-3 require `checkoutDir` or are skipped, never faked clean; shape 4 needs only `stateDir`. */
 function runAdoptionReport(opts: {
   checkoutDir?: string;
   stateDir: string;
@@ -940,23 +885,16 @@ function runAdoptionReport(opts: {
 }
 
 // ── The verb census: a sixth verb (W1-T2485) ───────────────────────────────────────────────
-// `lib/emissions.ts` answers "which CLI verb wrote no ledger line" but only when an operator
-// types the command; this puts it on the same cadence, unchanged.
-//
-// A REPORT, NEVER A MINTER: a silent verb has three remedies (wire it, delete it, allowlist it),
-// so nothing here calls a minter. `EMISSIONS_ALLOWLIST` is reused, never re-declared.
-// Unmeasurable verbs (no attributable prefix) are named, never folded into "silent".
+// Schedule `lib/emissions.ts` unchanged. REPORT, NEVER A MINTER: silent verbs may need wiring,
+// deletion or allowlisting. Reuse `EMISSIONS_ALLOWLIST`; name unmeasurable verbs apart from silent.
 // Why: docs/forensics/measurement-cadence.md#the-verb-census (the corpus-gap incident).
 
 export interface VerbCensusCadenceResult extends MeasurementCadenceVerbStatus {
-  /** Verbs with an attributable ledger prefix this run — the population this instrument can
-   *  measure at all. */
+  /** Measurable population: verbs with an attributable ledger prefix. */
   measurableCount: number;
-  /** Declared CLI verbs with no attributable prefix — reported apart from `silentCount`,
-   *  never folded in. */
+  /** No attributable prefix; always separate from `silentCount`. */
   unmeasurableCount: number;
-  /** Of `measurableCount`, verbs with zero ledger lines, excluding every verb
-   *  `EMISSIONS_ALLOWLIST` already excuses. */
+  /** Measurable verbs with zero ledger lines, excluding `EMISSIONS_ALLOWLIST`. */
   silentCount: number;
   /** `silentCount`'s own membership — a reader chasing which verb needs a decision reads this. */
   silentVerbs: string[];
@@ -1050,21 +988,17 @@ export function runCoverageImprovementCadence(opts: CoverageImprovementCadenceOp
 
 const VERB_CENSUS_SKIP_DIR_NAMES = new Set(["node_modules", ".git", "dist", "build", "coverage"]);
 
-/** The one `readdirSync` {@link walkVerbCensusSources} calls, injectable so its unreadable-
- *  subtree arm is testable (see docs/forensics/measurement-cadence.md#verbcensusreaddir).
- *  Optional and last, so every existing caller stays byte-identical. */
+/** Injectable unreadable-subtree seam for {@link walkVerbCensusSources}.
+ * Why: docs/forensics/measurement-cadence.md#verbcensusreaddir. */
 type VerbCensusReaddir = typeof readdirSync;
 
-/** Every `.ts` file's text under `<checkoutDir>/src`, recursively — the same corpus `rmd
- *  emissions` reads, reproduced here rather than imported: `src/lib` never imports from
- *  `src/run-task.ts` (`.dependency-cruiser.cjs`'s `lib-no-spike-or-cli` rule). */
+/** Recursively read src's `.ts` corpus like `rmd emissions`; `lib-no-spike-or-cli` forbids CLI imports. */
 function walkVerbCensusSources(dir: string, out: string[], readdir: VerbCensusReaddir = readdirSync): void {
   let entries;
   try {
     entries = readdir(dir, { withFileTypes: true });
   } catch {
-    // unreadable subtree (permission denied, vanished mid-walk) — skipped, never the reason the
-    // WHOLE census refuses; same posture as the per-file catch just below.
+    // Skip unreadable subtrees like unreadable files; neither refuses the whole census.
     return;
   }
   for (const e of entries) {
@@ -1086,9 +1020,8 @@ function escapeVerbCensusRegExp(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-/** The verb census's entry point, called twice: inside {@link runMeasurementCadenceReport} and
- *  by `src/run-task.ts`'s digest cadence, which re-reads fresh on its own interval. INVARIANT:
- *  `checkoutDir` absent, or the ledger union incomplete, refuses rather than faking "0 silent". */
+/** Called by {@link runMeasurementCadenceReport} and the CLI's independently paced digest.
+ * INVARIANT: missing `checkoutDir` or incomplete ledger union refuses, never fakes "0 silent". */
 export function runVerbCensus(opts: {
   checkoutDir?: string;
   stateDir: string;
@@ -1123,8 +1056,7 @@ export function runVerbCensus(opts: {
   try {
     verbs = deriveCliVerbs(runTaskSource);
   } catch (e) {
-    // reshaped COMMANDS array (renamed/no closing `] as const;`) — deriveCliVerbs's own thrown
-    // reason IS the refusal text, surfaced verbatim rather than reworded.
+    // Surface deriveCliVerbs's reshaped-COMMANDS refusal verbatim.
     return refuse(String((e as Error)?.message ?? e));
   }
 
@@ -1271,27 +1203,20 @@ export function adoptionShapeOf(proposalId: string): AdoptionShape | undefined {
   return ADOPTION_SHAPES.includes(shape as AdoptionShape) ? (shape as AdoptionShape) : undefined;
 }
 
-/** `<stateDir>/adoption-latest.json` — a STABLE path overwritten each fire, never an accumulating
- *  pile, exactly as `board-review-latest.json` is. The artifact answers "what did the last scan
- *  see"; history stays in the cadence ledger row. */
+/** Stable last-scan artifact, overwritten each fire like board-review-latest.json; history stays in ledger. */
 export function adoptionLatestPath(stateDir: string): string {
   return join(stateDir, "adoption-latest.json");
 }
 
-/** Reads {@link adoptionLatestPath}'s record, or `undefined` when it is absent, unreadable or does
- *  not parse as one. NEVER THROWS AND NEVER GUESSES: every failure is the same "no opinion" that
- *  {@link adoptionFindingGone} turns into "nothing retires", because the alternative — treating an
- *  unreadable measurement as an empty finding set — retires the entire backlog at once. */
+/** Read {@link adoptionLatestPath}; absent/unreadable/invalid means `undefined`, never throws.
+ * {@link adoptionFindingGone} treats that as "nothing retires", not an empty finding set. */
 export function readAdoptionLatest(path: string): AdoptionLatest | undefined {
   let parsed: unknown;
   try {
     parsed = JSON.parse(readFileSync(path, "utf8"));
   } catch {
-    // DELIBERATE, and the erasure is the correct answer here: absent, unreadable and malformed all
-    // mean the same thing to this reader — there is no measurement to retire anything against. The
-    // distinction would be actionable only if a present-but-corrupt record deserved a louder fate
-    // than a missing one, and it does not: both must yield "no opinion", because the alternative is
-    // retiring the entire adoption backlog on a file that could not be read.
+    // DELIBERATE: absent, unreadable and malformed all mean no measurement for retirement.
+    // Returning empty findings instead would retire the entire backlog.
     return undefined;
   }
   if (typeof parsed !== "object" || parsed === null) return undefined;
@@ -1309,16 +1234,13 @@ export interface AdoptionMintCadenceResult {
   /** `"clear"`: no mintable finding this fire — a measured absence, never a bare zero.
    *  `"backlog"`: at least one exists (idempotent by id). */
   status: "clear" | "backlog";
-  /** Proposal ids ACTUALLY written this fire, oldest-shipped-mechanism first, capped at
-   *  {@link ADOPTION_MINT_CEILING}. */
+  /** Actually written, oldest-shipped-first, capped at {@link ADOPTION_MINT_CEILING}. */
   mintedProposalIds: string[];
   /** Every new finding the ceiling excluded, named rather than dropped, oldest-shipped-first. */
   excludedMechanisms: string[];
 }
 
-/** Mints one bounded, exactly-deduped proposal per unadopted mechanism (shapes 1-3 only), through
- *  {@link updateProposalRegistry} — never a hand-rolled write. Ordered oldest-`shippedAt`-first;
- *  idempotent by id. */
+/** Mint shapes 1-3 through {@link updateProposalRegistry}: bounded, idempotent, oldest-shipped-first. */
 export function mintAdoptionProposals(
   findings: AdoptionFinding[],
   registryPath: string,
@@ -1369,48 +1291,36 @@ export function mintAdoptionProposals(
 }
 
 // ── proof-queue-audit's offenders — a second producer into the same minter, never a second rung.
-// `proofQueueAudit` names every open task's proof that can never resolve, but only runs when a
-// human types the CLI command. An offender row carries what an EvidenceAnchor needs with no
-// invention: `proof` becomes `pattern`, the task's plan record becomes `path`.
+// Schedule `proofQueueAudit` offenders: `proof` becomes anchor `pattern`, the plan record its `path`.
 // Why: docs/forensics/measurement-cadence.md#proof-queue-audits-offenders (the measured backlog).
 
-/** The primary key: THE TASK, never a similarity score and no longer a criterion index (W1-T3385b).
- *  A fixed task stops being proposed because {@link proofQueueAudit} simply stops naming it.
- *
- *  ONE TASK IS ONE ASK. Keying on taskId+criterionIndex minted one operator decision PER CRITERION:
- *  MEASURED 2026-09-11, 58 open proposals stood for 23 tasks, and W1-T965 alone held SEVEN whose
- *  drafts proposed different and sometimes contradictory remedies for one record. An operator
- *  repairing a shard's proofs opens the file once; the queue asked them to decide seven times. */
+/** W1-T3385b: ONE TASK IS ONE ASK, keyed by task rather than criterion or similarity.
+ * Fixed tasks vanish from {@link proofQueueAudit}. Per-criterion keys produced 58 asks for 23 tasks
+ * (2026-09-11); W1-T965's seven conflicting asks are retained in the W1-T12387 review record. */
 export function proofDebtProposalId(o: Pick<ProofQueueAuditOffender, "taskId">): string {
   return `proof-debt:${o.taskId}`;
 }
 
-/** `W<workstream>-T<ordinal>` parses into its numeric parts — ascending id is filing order.
- *  Orders offender rows oldest-filed-first so a newer finding can't starve the queue; an id
- *  that doesn't parse sorts last, never throws. */
+/** Numeric filing order prevents starvation; unparseable ids sort last without throwing. */
 function proofDebtFilingOrdinal(id: string): { workstream: number; ordinal: number } {
   const m = /^W(\d+)-T(\d+)/.exec(id);
   if (!m) return { workstream: Number.MAX_SAFE_INTEGER, ordinal: Number.MAX_SAFE_INTEGER };
   return { workstream: Number(m[1]), ordinal: Number(m[2]) };
 }
 
-/** One proof-debt mint pass's outcome — same shape as {@link AdoptionMintCadenceResult},
- *  named separately since the two producers key their candidates differently. */
+/** Like {@link AdoptionMintCadenceResult}, but proof-debt keys differ. */
 export interface ProofDebtMintCadenceResult {
   /** `"clear"`: no mintable candidate this fire — a measured absence, never a bare zero.
    *  `"backlog"`: at least one candidate exists (idempotent by id). */
   status: "clear" | "backlog";
-  /** Proposal ids actually written this fire, oldest-filed-first, capped at the same
-   *  {@link ADOPTION_MINT_CEILING} {@link mintAdoptionProposals} enforces. */
+  /** Actually written, oldest-filed-first, capped at {@link ADOPTION_MINT_CEILING}. */
   mintedProposalIds: string[];
-  /** Every new offender the ceiling excluded this fire, named rather than dropped —
-   *  oldest-filed-first, same discipline as {@link AdoptionMintCadenceResult.excludedMechanisms}. */
+  /** Every ceiling-excluded offender, named oldest-filed-first like adoption exclusions. */
   excludedOffenders: string[];
 }
 
-/** Mints one bounded, exactly-deduped proposal per unresolvable-proof offender, through the same
- *  {@link updateProposalRegistry} writer {@link mintAdoptionProposals} uses. `shardPathFor` is
- *  injected so an unresolvable task id is simply never minted; idempotent by id. */
+/** Bounded, idempotent proof-debt minting through {@link updateProposalRegistry}.
+ * Unresolvable `shardPathFor` ids are never minted. */
 export function mintProofDebtProposals(
   offenders: readonly ProofQueueAuditOffender[],
   shardPathFor: (taskId: string) => string | undefined,
@@ -1443,8 +1353,7 @@ export function mintProofDebtProposals(
       const additions: Proposal[] = [];
       mintedProposalIds = [];
       excludedOffenders = [];
-      // W1-T3385b — GROUPED BY TASK, in the order already established above, so one record's
-      // criteria arrive as ONE ask carrying every criterion as its own evidence anchor.
+      // W1-T3385b: one ordered ask per task, retaining every criterion's evidence anchor.
       const byTask = new Map<string, { shardPath: string; rows: ProofQueueAuditOffender[] }>();
       for (const { o, shardPath } of ordered) {
         const seen = byTask.get(o.taskId);
@@ -1458,10 +1367,8 @@ export function mintProofDebtProposals(
           excludedOffenders.push(taskId); // named, never dropped
           continue;
         }
-        // ONE ANCHOR PER CRITERION, not one for the group: the anchor set is what
-        // `classifyProposal` re-greps, so keeping them separate means repairing ONE criterion
-        // drifts the evidence and forces a redraft of the remaining ask, rather than leaving a
-        // stale proposal standing on a proof that has since been fixed.
+        // ONE ANCHOR PER CRITERION: `classifyProposal` re-greps each, so fixing any criterion
+        // drifts the evidence and redrafts the remaining ask instead of retaining a stale proof.
         const anchors: EvidenceAnchor[] = rows.map((o) => ({
           description: `${o.taskId} criterion ${o.criterionIndex} (${o.cause}) still cannot resolve its own proof`,
           pattern: o.proof,
@@ -1505,8 +1412,7 @@ export interface PlanReconcileHeld {
   rule: string;
 }
 
-/** {@link planReconcileCadence}'s input. `land` is the ONLY way this function can affect the
- *  repository, and it is called ONLY at or above the threshold. */
+/** `land` is the sole repository-write seam, called only at or above the threshold. */
 export interface PlanReconcileCadenceOpts {
   /** Every shard's id and current text, exactly as `reconcilePlan` takes them. */
   shards: ReadonlyArray<{ readonly taskId: string; readonly text: string }>;
@@ -1525,8 +1431,7 @@ export function planReconcileCadence(opts: PlanReconcileCadenceOpts): PlanReconc
   if (taskIds.length === 0) {
     return { drift: 0, taskIds, status: "clear", threshold: opts.threshold };
   }
-  // Below the threshold, or with no landing seam wired, this reports and touches nothing. An
-  // absent `land` is report-only BY CONSTRUCTION rather than by a caller remembering.
+  // Below threshold or without `land`, report-only by construction.
   if (taskIds.length < opts.threshold || opts.land === undefined) {
     return { drift: taskIds.length, taskIds, status: "reported", threshold: opts.threshold };
   }
@@ -1587,9 +1492,7 @@ export function planReconcileLintHold(lint: PlanReconcileLint = lintAsTheShardCe
   };
 }
 
-/** W1-T3970: adapt the production shard/credit readers to the pure cadence reducer. The caller
- * owns the landing bridge; this adapter only maps task ids back to repo-relative shard paths and
- * carries the one credit projection into the reducer. */
+/** W1-T3970: map production shards/credits to the reducer and repo-relative paths to caller-owned landing. */
 export function buildPlanReconcileCadenceInput(deps: PlanReconcileCadenceInputOptions): PlanReconcileCadenceOpts {
   const records = [...deps.readShards()];
   const byId = new Map(records.map((record) => [record.taskId, record.path]));

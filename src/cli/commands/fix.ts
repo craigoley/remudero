@@ -30,8 +30,9 @@ import { escalateWithJudge, escalationCause, realEscalationJudge, escalationHead
 import { fetchSinglePrRest, codeqlCheckFailed, hydrateCodeqlHeadAlertsSteps, CODEQL_CHECK_NAME, type GhApiFetcher } from "../../lib/open-prs-rest.js";
 import { remedyFilesForFailingChecks, type RemedyFileForGate } from "../../lib/ci-parity.js";
 import { isInPlanScope } from "../../lib/plan-architect.js";
+import { planFilingFixRoundRefusal, readPlanFilingFixRoundInput } from "../../lib/plan-filing-fix-guard.js";
 import { createPlanPrRest, probeExistingPlanPr } from "../../lib/plan-pr-emitter.js";
-import { findTaskShard, parseProofAmendmentProposal, requestProofAmendment, requestScopeAmendment, isUngrantableInstrumentPath, saveScopeAmendmentWork, restoreScopeAmendmentWork, type ScopeAmendmentOutcome, type ProofAmendmentOutcome } from "../../lib/proof-amendment.js";
+import { findTaskShard, parseProofAmendmentProposal, requestProofAmendment, requestScopeAmendment, isUngrantableInstrumentPath, SCOPE_AMENDMENT_RETRYABLE_REFUSALS, saveScopeAmendmentWork, restoreScopeAmendmentWork, type ScopeAmendmentOutcome, type ProofAmendmentOutcome } from "../../lib/proof-amendment.js";
 import { appendLedger, isSpawnInfraBlockedError, LEDGER_COST_TAG_INFRA } from "../../lib/ledger.js";
 import { systemClock } from "../../lib/clock.js";
 import { observeFeedbackInputs, type AdmissionObserver } from "../../lib/contributor-admission.js";
@@ -2240,9 +2241,27 @@ export async function refreshInheritedCensusRefusal(input: InheritedCensusRefres
   }
 }
 
+/** W1-T12546: red failures read at a published head this rung's worktree already holds, or undefined. */
+async function adoptableEvidenceHead(prUrl: string, head: string, readHead: () => Promise<string | undefined>,
+  requiredContexts: Iterable<string> | undefined,
+  deps: Pick<Parameters<RunTaskCommandHost["runFixRung"]>[0]["deps"], "readCiRollup" | "fetchCiFailures" | "log">,
+): Promise<CiFailure[] | undefined> {
+  if (!deps.readCiRollup || !deps.fetchCiFailures) return undefined;
+  try {
+    if (checksStateFromRollup(await deps.readCiRollup(prUrl), requiredContexts) !== "red") return undefined;
+    const failures = await deps.fetchCiFailures(prUrl, head);
+    const after = await readHead();
+    return failures.length > 0 && after === head ? failures : undefined;
+  } catch (e) {
+    deps.log("fix.evidence_head_unread", { head_sha: head, reason: `published head checks unreadable: ${String((e as Error)?.message ?? e)}` });
+    return undefined;
+  }
+}
+
 export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung"]>[0] & {
   workerProofIo?: Parameters<typeof runWorkerAcceptanceProofs>[1];
   hostedProofReader?: HostedFixProofReader;
+  requiredContexts?: Iterable<string>;
   pendingAnswer?: OpenPrView["pendingAnswer"];
   /** W1-T10339: digest of the PR body a TASKLESS PR was dispatched on — an input every stand-down records. */
   prBodySha256?: string;
@@ -2415,6 +2434,7 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
   // persistent CI/local environment mismatch (never observed, guarded anyway) can spend spinning
   // this rung without ever reaching a worker that could actually diagnose it.
   let generatorFixAttempts = 0;
+  let evidenceHeadAdopted = false; // W1-T12546: one published-head adoption per rung invocation.
   const GENERATOR_FIX_ATTEMPT_CAP = 2;
   // W1-T1279: every check name EVER observed red across this rung's strikes — the trajectory
   // input for the exhaustion escalation's own detail text (renderCiTrajectoryLine, above).
@@ -2483,7 +2503,7 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
   const unfiledScope = opts.taskId === `PR-${prNumber}` && (branchTaskId === undefined || branchTaskId === UNFILED_RUN_SENTINEL);
   const unfiledGrantNow = async () => unfiledScope && prNumber !== undefined
     ? unfiledScopeGrant(deps.ledgerLines ? deps.ledgerLines() : await readFixScopeHistory(deps.ledgerPath, prNumber), { prNumber }) : undefined;
-  const amendScope = async (paths: string[], changedPaths: string[], headSha: string, saveWork = false): Promise<ScopeAmendmentOutcome> => {
+  const amendScope = async (paths: string[], changedPaths: string[], headSha: string, saveWork = false, extra: { retry?: 1 } = {}): Promise<ScopeAmendmentOutcome> => {
     let outcome: ScopeAmendmentOutcome;
     try {
       const body = await (deps.fetchPrBody ?? host.fetchPrBodyViaGh)(opts.prUrl);
@@ -2511,7 +2531,7 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
       }
     }
     if (outcome.kind !== "amendment_merged") deps.log("fix.scope_amendment", { outcome: outcome.kind, ...outcome, paths, head_sha: headSha,
-      pr_number: prNumber, amendment_url: "amendmentUrl" in outcome ? outcome.amendmentUrl : undefined, ...recovery });
+      pr_number: prNumber, amendment_url: "amendmentUrl" in outcome ? outcome.amendmentUrl : undefined, ...recovery, ...extra });
     return outcome;
   };
   const scopeWork = (paths: string[], amendmentNumber: number) => ({ root: opts.config.root,
@@ -2542,9 +2562,23 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
       return await opts.ownedConflictPushGuard!.verifyOwnership();
     },
   };
+  const filingRoundRefusal = async (priorHead: string, nextHead: string | undefined): Promise<string | undefined> => {
+    if (baselineDiffFiles === undefined) return undefined;
+    if (baselineDiffFiles.length === 0 || !baselineDiffFiles.every(isInPlanScope)) return undefined;
+    if (nextHead === undefined || nextHead.trim() === "") return "unreadable plan filing nextHead; cannot verify the round before push";
+    return planFilingFixRoundRefusal(await readPlanFilingFixRoundInput(
+      baselineDiffFiles, priorHead, nextHead,
+      args => (deps.scopeAmendmentGit ?? hostWorktreeGitAsync)(opts.worktreePath, args, { maxBuffer: 1 << 26 })));
+  };
   const landRoundPush = async (push: () => unknown, headSha: string | undefined, site: string): Promise<FixRungOutcome | "refused" | undefined> => {
     roundPushFailure = undefined;
     roundPushReceipt = undefined;
+    const filingRefusal = await filingRoundRefusal(review.headSha, headSha);
+    if (filingRefusal) {
+      deps.log("fix.commit_refused", { site, head_sha: review.headSha, reason: filingRefusal });
+      deps.log("fix.done", { site, head_sha: review.headSha, subtype: "commit_refused" });
+      return { outcome: "stood_down", review, strikes, retriggers, reason: filingRefusal, standDownReason: filingRefusal };
+    }
     try {
       const pushed = await push();
       if (isFixRoundPushReceipt(pushed)) roundPushReceipt = pushed;
@@ -4292,6 +4326,19 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
         reason: "remote branch head read failed; no published advance was established" }); }
       // A retained unpublished commit is still this round's existing recovery input, not proof the PR moved.
       if (publishedHead !== undefined && publishedHead !== priorHeadSha) {
+        const adopted = !evidenceHeadAdopted && priorCiFailures !== undefined && publishedHead === roundBase.baseSha
+          ? await adoptableEvidenceHead(opts.prUrl, publishedHead,
+            () => (deps.readRemoteBranchHead ?? lsRemoteBranchHead)(opts.worktreePath, opts.branch),
+            opts.requiredContexts ?? ghRequiredStatusCheckContexts(opts.reviewBase.owner, opts.reviewBase.repo), deps) : undefined;
+        if (adopted) {
+          evidenceHeadAdopted = true;
+          deps.log("fix.evidence_head_adopted", { head_sha: priorHeadSha, current_head_sha: publishedHead,
+            red_checks: [...new Set(adopted.map((f) => f.name))] });
+          currentCiFailures = adopted;
+          for (const f of adopted) everRedCiCheckNames.add(f.name);
+          review = { ...review, headSha: publishedHead };
+          continue;
+        }
         const reason = `published branch advanced from ${priorHeadSha} to ${publishedHead} before the worker started; the ordinary sweep must read fresh exact-head failure evidence`;
         deps.log("fix.evidence_head_superseded", { head_sha: priorHeadSha, current_head_sha: publishedHead, worktree_head_sha: roundBase.baseSha, reason });
         deps.log("fix.stood_down", { head_sha: priorHeadSha, current_head_sha: publishedHead, site: "rung.evidence_head", reason });
@@ -4559,14 +4606,21 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
     // is filed against (DAEMON-1788016810368 / PR #3261 — the worktree's local ref reset back
     // to origin's tip between commit and push) can happen. Threaded to `deps.push` below so
     // `gitPushRunBranch`'s post-condition re-reads HEAD immediately before pushing and raises
-    // if it no longer matches this snapshot, instead of silently pushing zero refs. Best-effort:
-    // an unreadable HEAD here just means this round's push runs without the guard — the same
-    // fail-open discipline every other optional read in this rung already takes.
+    // if it no longer matches this snapshot, instead of silently pushing zero refs. A plan filing
+    // refuses an unreadable result head below, because its commits and criteria must be verified.
     let expectedHeadShaForPush = harnessCommittedSha;
     try {
       expectedHeadShaForPush ??= hostWorktreeGit(opts.worktreePath, ["rev-parse", "HEAD"]).trim();
     } catch {
       // best-effort — see comment above.
+    }
+
+    const filingRefusal = await filingRoundRefusal(priorHeadSha, expectedHeadShaForPush);
+    if (filingRefusal) {
+      deps.log("fix.commit_refused", { round_id: roundId, head_sha: priorHeadSha, reason: filingRefusal });
+      deps.log("fix.done", { round_id: roundId, head_sha: priorHeadSha, subtype: "commit_refused" });
+      deps.branchClaim?.release();
+      return { outcome: "stood_down", review, strikes, retriggers, reason: filingRefusal, standDownReason: filingRefusal };
     }
 
     // A worker DEMONSTRABLY ran (spawn returned rather than throwing) — only now is this round
@@ -4930,6 +4984,7 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
         return { outcome: "stood_down", review, strikes, retriggers, reason, standDownReason: reason, issueUrl };
       }
       let amendment: ScopeAmendmentOutcome;
+      let scopeAsks = 0;
       const readWorkerChanged = (): string[] => {
         const changed = host.workerChangedPaths(hostWorktreeGit(opts.worktreePath, ["status", "--porcelain", "-z", host.GIT_UNTRACKED_FILES_ALL]));
         if (roundStartSha) changed.push(...hostWorktreeGit(opts.worktreePath, ["diff", "--name-only", "-z", roundStartSha, "HEAD"]).split("\0").filter(Boolean));
@@ -4948,11 +5003,20 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
         deps.log("fix.scope_amendment", { outcome: amendment.kind, ...amendment, paths: fixAction.paths, head_sha: priorHeadSha,
           pr_number: prNumber, main_sha: mainTip.status === 0 ? mainTip.stdout.trim() : undefined,
           changed_paths: changed && fixAction.paths.filter((path) => changed.includes(path)), changed_paths_error: "error" in read ? read.error : undefined });
-      } else try {
-        amendment = await amendScope(fixAction.paths, readWorkerChanged(), priorHeadSha, true);
-      } catch (error) {
-        amendment = { kind: "refused", reason: "worker-diff-unreadable", detail: String(error) };
-        deps.log("fix.scope_amendment", { outcome: amendment.kind, ...amendment, paths: fixAction.paths, head_sha: priorHeadSha });
+      } else {
+        const ask = async (extra: { retry?: 1 }): Promise<ScopeAmendmentOutcome> => {
+          scopeAsks++;
+          try {
+            return await amendScope(fixAction.paths, readWorkerChanged(), priorHeadSha, true, extra);
+          } catch (error) {
+            const refused = { kind: "refused" as const, reason: "worker-diff-unreadable", detail: String(error) };
+            deps.log("fix.scope_amendment", { outcome: refused.kind, ...refused, paths: fixAction.paths, head_sha: priorHeadSha, ...extra });
+            return refused;
+          }
+        };
+        amendment = await ask({});
+        // W1-T12543: a refusal a fresh read can clear is asked once more before this round refuses its commit.
+        if (amendment.kind === "refused" && SCOPE_AMENDMENT_RETRYABLE_REFUSALS.has(amendment.reason)) amendment = await ask({ retry: 1 });
       }
       if (amendment.kind !== "refused") {
         logFixDone(undefined, "scope_amendment_pending");
@@ -4961,6 +5025,7 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
       deps.log("fix.commit_refused", { round_id: roundId, strike: attempt, round, head_sha: priorHeadSha,
         reason: `non-test paths need scope (${amendment.reason}: ${amendment.detail})`,
         scope_amendment_detail: `NEEDS_SCOPE ${fixAction.paths.join(",")}`,
+        scope_amendment_refusal: amendment.reason, scope_amendment_refusal_detail: amendment.detail, scope_amendment_asks: scopeAsks,
         fix_outcome: fixOutcome?.kind });
       if (harnessCommitCount > 0) {
         let landing: FixRoundLanding | undefined;
@@ -4979,8 +5044,10 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
           test_files: [], matching_base_files: scopeMainOwned, method: "merge", reason: "scope-main-owned" };
         try {
           const updated = await deps.updateBranch(prNumber);
-          if (updated.ok) deps.log("fix.base_refreshed", refresh);
-          else deps.log("fix.base_refresh_failed", { ...refresh, error: updated.error ?? "no error reported" });
+          if (updated.ok) {
+            deps.log("fix.base_refreshed", { ...refresh, scope_amendment_after_refresh: fixAction.paths });
+            return { outcome: "stood_down", review, strikes, retriggers, reason: "scope_amendment_after_refresh" };
+          } else deps.log("fix.base_refresh_failed", { ...refresh, error: updated.error ?? "no error reported" });
         } catch (error) {
           deps.log("fix.base_refresh_failed", { ...refresh, error: String(error) });
         }
