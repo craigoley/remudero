@@ -16843,7 +16843,7 @@ function conflictRoundOutranksEscalationHold(
     (hold.kind === "design" || hold.cause !== "conflict");
 }
 
-function conflictRoundHeldHead(pr: Pick<OpenPrView, "taskId" | "prNumber" | "prUrl" | "headSha">,
+export function conflictRoundHeldHead(pr: Pick<OpenPrView, "taskId" | "prNumber" | "prUrl" | "headSha">,
   lines: ReadonlyArray<Record<string, unknown>>): string {
   const key = fixLedgerTaskIdFor(pr);
   const seen = new Set([pr.headSha]);

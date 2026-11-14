@@ -4,7 +4,7 @@ import { planDestinationRepository } from "../../lib/plan-destination.js";
 import type { RunTaskCommandHost, GitRunner, CiGateOutcome, ReviewRunResult, FixRungOutcome, LiveHeadResult, WorktreeSnapshot, FixRebaseMergeFacts, FixRoundCommit, CensusPushRefusal, FixRoundPushReceipt } from "./run-task-verb.js";
 import { buildBaseProofDir, releaseBaseProofDir, type BaseProofDir } from "../../lib/check-proof.js";
 import { judgeFixProgress, resolveFixProgress, type FixProgressJudge, type FixProgressVerdict, type FixProgressWorkerProofResult, reviewerProofFailures, unfiledScopeGrant, UNFILED_SCOPE_GRANT_ANSWER } from "../../lib/fix-progress-judge.js";
-import { buildFixProgressInputWithHostedProofs, readHostedFixProofResults, type HostedFixProofReader } from "../../lib/sweep.js";
+import { buildFixProgressInputWithHostedProofs, conflictRoundHeldHead, readHostedFixProofResults, type HostedFixProofReader } from "../../lib/sweep.js";
 import { parseWhitelistedProof, execWhitelistedProofAsync, proofChildCommand, buildProofEnv, type AsyncProofSpawner } from "../../lib/review.js";
 import { execFileLoopBounded } from "../../lib/loop-bounded-child.js";
 import { BASE_REPRODUCTION_MAX_FILES, boundedBaseProbeReason, baseReproductionFiles, decideBaseReproduction, type BaseProbeResult } from "../../lib/base-reproduction.js";
@@ -2689,6 +2689,11 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
           return undefined;
         })
         : undefined;
+    // W1-T12544: this invocation's own conflict push carries the hold too, before the sweep runs again.
+    const holdHeadSha = prNumber === undefined ? review.headSha : conflictRoundHeldHead(
+      { taskId: opts.taskId, prNumber, prUrl: opts.prUrl, headSha: review.headSha },
+      [...(deps.ledgerLines ?? (() => readLedgerLines(deps.ledgerPath)))(), ...roundRows],
+    );
     let preStrikeStandDown = await fixRungStandDownReason(
       deps.readLiveState,
       opts.prUrl,
@@ -2716,9 +2721,10 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
       // behaves exactly as it did before this task — every strike still spends.
       deps.issues.listOpen
         ? {
-            headSha: review.headSha,
-            key: fixEscalationDedupKey(opts.taskId, opts.prUrl, review.headSha,
+            headSha: holdHeadSha,
+            key: { ...fixEscalationDedupKey(opts.taskId, opts.prUrl, holdHeadSha,
               currentMergeConflict !== undefined, noReviewYet, currentContractRevision),
+              ...(holdHeadSha !== review.headSha ? { cause: undefined } : {}) },
             find: (key: EscalationDedupKey) => findDuplicateEscalation(key, { issues: deps.issues }),
             pendingAnswer: opts.pendingAnswer ?? (opts.constraint !== undefined ? {} : undefined),
             redCheckNames: noReviewYet ? currentCiFailures?.map(f => f.name) : undefined,
@@ -3990,10 +3996,10 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
     // W1-T10339: a handoff is reused only while the inputs it read stand — an amended contract or an edited (taskless)
     // PR body at the same head gets a real round. A row from before those fields existed keeps the head-only reuse.
     const priorDesign = roundLedger.find((row) =>
-      row.step === "fix.needs_design" && row.task_id === opts.taskId && row.head_sha === priorHeadSha &&
+      row.step === "fix.needs_design" && row.task_id === opts.taskId && row.head_sha === holdHeadSha &&
       !(typeof row.contract_revision === "string" && row.contract_revision !== currentContractRevision) &&
       !(typeof row.read_body_sha256 === "string" && opts.prBodySha256 !== undefined && row.read_body_sha256 !== opts.prBodySha256));
-    if (priorDesign) {
+    if (priorDesign && !hasCapturedMergeConflictEvidence(currentMergeConflict)) {
       const reason = String(priorDesign.reason);
       const escalated = roundLedger.findLast((row) => row.step === "fix.stood_down" && row.site === "rung.needs_design" &&
         row.task_id === opts.taskId && row.head_sha === priorHeadSha && typeof row.issue_url === "string");
