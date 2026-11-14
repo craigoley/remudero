@@ -125,6 +125,9 @@ function runRung(
   const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}snapshot-stub-`));
   const rec = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}snapshot-rec-`));
   writeStubs(dir);
+  const config = join(rec, "container-config");
+  mkdirSync(config, { mode: 0o700 });
+  writeFileSync(join(config, "config.json"), '{"workerProviders":["claude"]}\n', { mode: 0o600 });
   for (const [name, body] of Object.entries(extraStubs)) writeFileSync(join(dir, name), body, { mode: 0o755 });
   // A real git reclaim target, so section 4a's all-miss refusal cannot redden a run for a reason
   // these tests are not about.
@@ -140,6 +143,7 @@ function runRung(
       STUB_MODE: mode,
       STUB_REPO_ROOT: REPO_ROOT,
       RMD_STATE_DIR: vol,
+      RMD_CONTAINER_CONFIG_DIR: config,
       RMD_GIT_RECLAIM_DIRS: gitTarget.dir,
       RMD_AGENT_HISTORY_DIRS: join(vol, "no-agent-history"),
       ...extraEnv,
