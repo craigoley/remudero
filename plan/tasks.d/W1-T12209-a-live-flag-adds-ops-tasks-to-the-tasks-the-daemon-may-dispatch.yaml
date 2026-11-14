@@ -18,6 +18,8 @@
   files:
     - src/lib/daemon.ts
     - src/cli/commands/daemon.ts
+    - src/lib/task-lookup.ts
+    - src/cli/commands/run-task-verb.ts
     - test/daemon/a-live-flag-adds-ops-tasks-to-the-tasks-the-daemon-may-dispatch.test.ts
   status: queued
   attempts: 0
