@@ -6,7 +6,7 @@
  * file, and whether FAST_GATE_STEPS already declares that remedy.
  */
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -18,6 +18,7 @@ import {
   runFixRung,
 } from "#test/helpers/run-task-test.js";
 import { remedyFilesForFailingChecks } from "#src/lib/ci-parity.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 import type { IssueGateway, OpenIssue } from "#src/lib/escalate.js";
 import type { Config } from "#src/lib/config.js";
 import type { Mount } from "#src/lib/mounts.js";
@@ -166,14 +167,20 @@ test("acceptance 2: an ordinary out-of-scope path keeps the generic stand-down r
   assert.equal(withUnrelatedFailure.gateRemedyDeadlock, undefined);
 });
 
-test("acceptance 3: the scope escalation names the gate, file, and existing declaring entry", async () => {
+test("acceptance 3: the scope escalation names the gate, file, and existing declaring entry", async (t) => {
+  const repo = gitRepo({ scope: t });
+  mkdirSync(join(repo.dir, "plan/tasks.d"), { recursive: true });
+  writeFileSync(join(repo.dir, PLAN_FILE), "# existing plan maintenance\n");
+  repo.git("add", "."); repo.git("commit", "-m", "chore(plan): seed maintenance");
+  repo.git("update-ref", "refs/remotes/origin/main", "HEAD");
   const spawnCalls: SpawnWorkerArgs[] = [];
   const issues = fakeIssueStore();
   const logs: Array<{ step: string; extra?: Record<string, unknown> }> = [];
-  const failing = fakeReview("failure", [criterion({ claim: "comment load is green", met: false, reason: "red" })]);
+  const failing = fakeReview("failure", [criterion({ claim: "comment load is green", met: false, reason: "red" })], repo.git("rev-parse", "HEAD"));
 
   const outcome = await runFixRung({
     ...fixRungBaseOpts({ id: "W1-T2654X", title: "fix plan-only comment load", files: [PLAN_FILE] }),
+    worktreePath: repo.dir,
     strikeCap: 3,
     initialReview: failing,
     ciFailures: [commentLoadFailure()],

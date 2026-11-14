@@ -1,6 +1,7 @@
 // @source-text-subject: containment.ts comment compression preserves pre-compression executable code.
 // @census-reads: src/lib/containment.ts
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -57,4 +58,25 @@ test("W1-T11042: comment compression preserves executable code", () => {
     "all PR-base executable tokens, literals and line-break boundaries must remain unchanged");
   assert.ok(comments < countCommentLines(before, "src/lib/containment.ts").comments,
     "comment lines decrease from the PR base");
+});
+
+test("W1-T12411: comment compression preserves executable code", () => {
+  const path = "src/lib/containment.ts";
+  const source = readFileSync(join(REPO_ROOT, path), "utf8");
+  let before = compressionPinBase(path, import.meta.url);
+  if (before === undefined) {
+    // This task extends an existing pin file; the helper activates only for added files.
+    // Compare only while this proof is being introduced, leaving later feature edits free.
+    const git = (...args: string[]) => execFileSync("git", args, { cwd: REPO_ROOT, encoding: "utf8" });
+    const base = git("merge-base", "origin/main", "HEAD").trim();
+    const diff = git("diff", base, "--", "test/worker/sandbox/compress-src-lib-containment-ts.test.ts");
+    if (!diff.includes('+test("W1-T12411: comment compression preserves executable code"')) return;
+    before = git("show", `${base}:${path}`);
+  }
+  assertSameTokens(executableTokens(source), executableTokens(before),
+    "executable tokens, literals and line-break boundaries must remain unchanged");
+  const oldComments = countCommentLines(before, path).comments;
+  const comments = countCommentLines(source, path).comments;
+  assert.ok(comments < oldComments,
+    `expected a real reduction from ${oldComments} comment lines, observed ${comments}`);
 });
