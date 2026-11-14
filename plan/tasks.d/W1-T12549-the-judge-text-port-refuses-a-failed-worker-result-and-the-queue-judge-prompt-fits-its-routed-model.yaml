@@ -15,7 +15,10 @@
   files:
     - src/lib/issue-revalidation-garden.ts
     - src/lib/queue-judge-gardener.ts
+    - src/run-task.ts
     - test/gardeners/the-judge-text-port-refuses-a-failed-worker-result.test.ts
+    - test/the-issue-revalidation-garden-re-judges-every-open-issue.test.ts
+    - test/gardeners/the-queue-judge-re-ranks-queued-tasks-by-measured-cost-of-delay.test.ts
   status: queued
   attempts: 0
   acceptance:
@@ -26,10 +29,10 @@
       proof: "grep: W1-T12549 criterion 2 in test/gardeners/the-judge-text-port-refuses-a-failed-worker-result.test.ts"
     - claim: "When the judge's worker fails, the queue judge logs queue_judge.unavailable with the reason \"judge spawn failed: worker result failed (<subtype>)\", never \"malformed judge answer\" with answer_chars 0"
       proof: "grep: W1-T12549 criterion 3 in test/gardeners/the-judge-text-port-refuses-a-failed-worker-result.test.ts"
-    - claim: "The queue-judge prompt is at most QUEUE_JUDGE_PROMPT_MAX_CHARS. Evidence packs that do not fit are left out by their current priority, highest number first, and the pass logs how many it left out"
+    - claim: "The queue-judge prompt bound follows the context window of the model the route picks for the judge's mount: the window, less the reply reserve, times a characters-per-token estimate. A small-window route leaves evidence packs out by their current priority, highest number first, and the pass logs how many it left out; a large-window route leaves none out. An unknown window falls back to the smallest declared window, and the pass logs which source set the bound"
       proof: "grep: W1-T12549 criterion 4 in test/gardeners/the-judge-text-port-refuses-a-failed-worker-result.test.ts"
-    - claim: "The queue judge declares its prompt bound"
-      proof: "grep: QUEUE_JUDGE_PROMPT_MAX_CHARS in src/lib/queue-judge-gardener.ts"
+    - claim: "The queue judge sizes its prompt bound from the routed model's window, not a fixed number"
+      proof: "grep: queueJudgePromptBound in src/lib/queue-judge-gardener.ts"
   rationale: |
     WHY: the queue judge has not re-ranked the queue since 2026-11-12 12:06Z. Every pass reads an empty answer and calls it malformed. The real cause is that the worker attempt failed, and the port hides that.
     OBSERVED in the 48 h ledger research (2026-11-11 21:45Z to 2026-11-13 21:45Z):
@@ -45,11 +48,12 @@
     INVARIANT a-failed-judge-result-is-not-an-answer: a worker result that failed is never read as a judge answer, so no garden closes, comments on, converts or re-ranks anything on it.
     1. In src/lib/issue-revalidation-garden.ts, after the spend is recorded and before :1083, throw `JudgeWorkerFailedError` (exported) when `result.isError`, `result.apiError`, or `result.subtype !== "success"`. Its message is "worker result failed (<subtype>)".
     2. The queue judge's existing catch at :763 then logs "judge spawn failed: worker result failed (<subtype>)". In the issue-revalidation garden the throw leaves `judge` (src/lib/issue-revalidation-garden.ts:962-973) before it parses; the builder checks that a thrown judge closes, comments on and converts no issue, and makes it so if not.
-    3. In src/lib/queue-judge-gardener.ts add `QUEUE_JUDGE_PROMPT_MAX_CHARS`. Size it from the measured prompt of the last good pass and state the number and its source in a comment. Build the prompt from the packs in priority order (lowest number first) and stop adding packs when the next would pass the bound. Log `queue_judge.packs_left_out` with the count. A left-out pack is not judged this pass.
+    3. No fixed ceiling: in src/lib/queue-judge-gardener.ts the prompt bound follows the context window of the model the route picks. `queueJudgeRouteWindow` reads the route's first choice for the judge's cash mount (`selectOpenWeightModel` with no prompt size) and its window (`openWeightEffectiveWindow`); `queueJudgePromptBound` takes that window, less `OPENWEIGHT_MAX_COMPLETION_TOKENS`, times a characters-per-token estimate. When the window is unknown (a mount that is not cash, an undeclared window, an unreadable route) it uses the smallest declared window. Each asked pass logs `queue_judge.prompt_bound` with the source of the bound. src/run-task.ts `queueJudgeRunTaskPorts` gives the queue judge a `promptWindow` port from the mounts file. Build the prompt from the packs in priority order (lowest number first) and stop adding packs when the next would pass the bound. Log `queue_judge.packs_left_out` with the count. A left-out pack is not judged this pass.
+    5. Existing tests that fake a failed or partial worker result through the port change with it: the money test now expects a rejection for an interrupted result and for a result with no subtype (its spend row is still asserted), and the tool-less spawn fakes in both test files return `subtype: "success"`.
     4. The test drives `queueJudgeGardenSpec` through a garden pass with the production `issueRevalidationJudgeText` and a fake `spawn` that returns a failed result.
     NOT IN SCOPE: the model route or mount; the cash provider's failure; the queue judge's scoring and bounds.
   falsifier: |
-    Return the failed result's text again and criteria 1 and 3 must fail. Throw on a successful result and criterion 2 must fail. Remove the prompt bound and criterion 4 must fail. Restore and require all to pass.
+    Return the failed result's text again and criteria 1 and 3 must fail. Throw on a successful result and criterion 2 must fail. Remove the prompt bound, or size it from a fixed number, and criterion 4 must fail. Restore and require all to pass.
   note: |
     Id reserved for run-unfiled-1794610450000 with ~/rmd-work/bin/reserve-id.sh. The fleet builds it.
     The success false reading of the worker results comes from the research brief; the ledger rows above show only the spend and the empty answer. The builder confirms the failed result's subtype from the worker's result row before sizing the bound.
