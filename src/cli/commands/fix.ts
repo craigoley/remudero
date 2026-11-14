@@ -30,6 +30,7 @@ import { escalateWithJudge, escalationCause, realEscalationJudge, escalationHead
 import { fetchSinglePrRest, codeqlCheckFailed, hydrateCodeqlHeadAlertsSteps, CODEQL_CHECK_NAME, type GhApiFetcher } from "../../lib/open-prs-rest.js";
 import { remedyFilesForFailingChecks, type RemedyFileForGate } from "../../lib/ci-parity.js";
 import { isInPlanScope } from "../../lib/plan-architect.js";
+import { planFilingFixRoundRefusal, readPlanFilingFixRoundInput } from "../../lib/plan-filing-fix-guard.js";
 import { createPlanPrRest, probeExistingPlanPr } from "../../lib/plan-pr-emitter.js";
 import { findTaskShard, parseProofAmendmentProposal, requestProofAmendment, requestScopeAmendment, isUngrantableInstrumentPath, saveScopeAmendmentWork, restoreScopeAmendmentWork, type ScopeAmendmentOutcome, type ProofAmendmentOutcome } from "../../lib/proof-amendment.js";
 import { appendLedger, isSpawnInfraBlockedError, LEDGER_COST_TAG_INFRA } from "../../lib/ledger.js";
@@ -2542,9 +2543,23 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
       return await opts.ownedConflictPushGuard!.verifyOwnership();
     },
   };
+  const filingRoundRefusal = async (priorHead: string, nextHead: string | undefined): Promise<string | undefined> => {
+    if (baselineDiffFiles === undefined) return undefined;
+    if (baselineDiffFiles.length === 0 || !baselineDiffFiles.every(isInPlanScope)) return undefined;
+    if (nextHead === undefined || nextHead.trim() === "") return "unreadable plan filing nextHead; cannot verify the round before push";
+    return planFilingFixRoundRefusal(await readPlanFilingFixRoundInput(
+      baselineDiffFiles, priorHead, nextHead,
+      args => (deps.scopeAmendmentGit ?? hostWorktreeGitAsync)(opts.worktreePath, args, { maxBuffer: 1 << 26 })));
+  };
   const landRoundPush = async (push: () => unknown, headSha: string | undefined, site: string): Promise<FixRungOutcome | "refused" | undefined> => {
     roundPushFailure = undefined;
     roundPushReceipt = undefined;
+    const filingRefusal = await filingRoundRefusal(review.headSha, headSha);
+    if (filingRefusal) {
+      deps.log("fix.commit_refused", { site, head_sha: review.headSha, reason: filingRefusal });
+      deps.log("fix.done", { site, head_sha: review.headSha, subtype: "commit_refused" });
+      return { outcome: "stood_down", review, strikes, retriggers, reason: filingRefusal, standDownReason: filingRefusal };
+    }
     try {
       const pushed = await push();
       if (isFixRoundPushReceipt(pushed)) roundPushReceipt = pushed;
@@ -4540,14 +4555,21 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
     // is filed against (DAEMON-1788016810368 / PR #3261 — the worktree's local ref reset back
     // to origin's tip between commit and push) can happen. Threaded to `deps.push` below so
     // `gitPushRunBranch`'s post-condition re-reads HEAD immediately before pushing and raises
-    // if it no longer matches this snapshot, instead of silently pushing zero refs. Best-effort:
-    // an unreadable HEAD here just means this round's push runs without the guard — the same
-    // fail-open discipline every other optional read in this rung already takes.
+    // if it no longer matches this snapshot, instead of silently pushing zero refs. A plan filing
+    // refuses an unreadable result head below, because its commits and criteria must be verified.
     let expectedHeadShaForPush = harnessCommittedSha;
     try {
       expectedHeadShaForPush ??= hostWorktreeGit(opts.worktreePath, ["rev-parse", "HEAD"]).trim();
     } catch {
       // best-effort — see comment above.
+    }
+
+    const filingRefusal = await filingRoundRefusal(priorHeadSha, expectedHeadShaForPush);
+    if (filingRefusal) {
+      deps.log("fix.commit_refused", { round_id: roundId, head_sha: priorHeadSha, reason: filingRefusal });
+      deps.log("fix.done", { round_id: roundId, head_sha: priorHeadSha, subtype: "commit_refused" });
+      deps.branchClaim?.release();
+      return { outcome: "stood_down", review, strikes, retriggers, reason: filingRefusal, standDownReason: filingRefusal };
     }
 
     // A worker DEMONSTRABLY ran (spawn returned rather than throwing) — only now is this round
