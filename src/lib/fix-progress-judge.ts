@@ -556,6 +556,52 @@ export function firstFixRoundVerdict(input: FixProgressInput):
   return { verdict: "continue", reason: FIRST_FIX_ROUND_UNJUDGED_REASON, judge_skipped: "first-round" };
 }
 
+/** W1-T12541: why a merge-conflict round was not shown to the progress judge. */
+export const CONFLICT_ROUND_UNJUDGED_REASON =
+  "merge-conflict round: decided on the conflict's head, base and files, not on a CI progress verdict";
+
+/** The conflict facts one merge-conflict round is decided on. */
+export interface ConflictRoundFacts {
+  taskId?: string; prNumber?: number; headSha: string; baseSha?: string; conflictedFiles: readonly string[];
+}
+
+/**
+ * W1-T12541: a merge-conflict round's progress, from conflict facts only. PURE. `escalate` with loop `conflict` when
+ * two earlier merge-conflict rounds at this head, this base and this sorted conflicted file set each ended with no
+ * pushed head on the PR; else `continue`. A round sent at the PR's current head that has ended left the PR at that
+ * head, so whatever it pushed did not reach the PR. An unknown base matches only another unknown base.
+ */
+export function conflictRoundProgressVerdict(input: ConflictRoundFacts, ledger: readonly Record<string, unknown>[]):
+  | { verdict: "continue"; reason: string; judge_skipped: "conflict-round" }
+  | { verdict: "escalate"; loop: "conflict"; reason: string; judge_skipped: "conflict-round" } {
+  const files = JSON.stringify(sorted([...input.conflictedFiles]));
+  const base = input.baseSha ?? null;
+  const dispatched = new Map<string, string | undefined>();
+  const stuck: { id: string; reason?: string }[] = [];
+  for (const row of ledger) {
+    const rowPr = rowPrNumber(row);
+    if (input.taskId !== undefined ? row.task_id !== input.taskId : rowPr !== input.prNumber) continue;
+    if (rowPr !== undefined && input.prNumber !== undefined && rowPr !== input.prNumber) continue;
+    const id = stringValue(row.round_id);
+    if (id === undefined || row.head_sha !== input.headSha) continue;
+    if (row.step === "fix.dispatch" && row.mode === "merge-conflict") {
+      const rowFiles = Array.isArray(row.conflicted_files) ? row.conflicted_files.filter((p): p is string => typeof p === "string") : [];
+      if ((stringValue(row.base_sha) ?? null) === base && JSON.stringify(sorted(rowFiles)) === files)
+        dispatched.set(id, dispatched.get(id) ?? stringValue(row.reason));
+    } else if (row.step === "fix.commit_refused" && dispatched.has(id)) {
+      dispatched.set(id, dispatched.get(id) ?? stringValue(row.reason));
+    } else if (row.step === "fix.done" && dispatched.has(id) && !stuck.some(r => r.id === id)) {
+      stuck.push({ id, reason: dispatched.get(id) });
+    }
+  }
+  if (stuck.length < 2) return { verdict: "continue", reason: CONFLICT_ROUND_UNJUDGED_REASON, judge_skipped: "conflict-round" };
+  const [a, b] = stuck.slice(-2);
+  const named = (r: { id: string; reason?: string }) => r.reason ? `${r.id} (${r.reason})` : r.id;
+  return { verdict: "escalate", loop: "conflict", judge_skipped: "conflict-round",
+    reason: `merge-conflict rounds ${named(a)} and ${named(b)} each ended with the PR still at head ${input.headSha}, ` +
+      `base ${input.baseSha ?? "unknown"} and conflicted files ${sorted([...input.conflictedFiles]).join(", ")}` };
+}
+
 export async function judgeFixProgress(input: FixProgressInput, judge?: FixProgressJudge): Promise<FixProgressResult> {
   if (!judge && !input.signals.offHostPass) return { verdict: "unavailable", reason: "fix progress judge is not wired" };
   try {
