@@ -8370,7 +8370,7 @@ async function spawnFixWorkerBounded(
           () => new Promise<never>(() => {}),
         )
       : new Promise<never>(() => {});
-  const recycled = yieldRoot && startSha ? watchFixRoundRecycle(yieldRoot, watchStop.signal, deps.log) : new Promise<never>(() => {});
+  const recycled = yieldRoot && startSha ? watchFixRoundRecycle(yieldRoot, watchStop.signal) : new Promise<never>(() => {});
   let pendingRecycle: string | undefined;
   try {
     let winner = await Promise.race([spawnPromise, bound, superseded, recycled]);
@@ -8446,22 +8446,13 @@ async function spawnFixWorkerBounded(
 }
 
 /** W1-T8141: resolves with the recycle PAUSE detail once one is pending, at the supersession watch's cadence. */
-function watchFixRoundRecycle(
-  root: string,
-  signal: AbortSignal,
-  log: (step: string, extra?: Record<string, unknown>) => void,
-): Promise<{ recycle: string }> {
-  let unreadableReported = false;
+function watchFixRoundRecycle(root: string, signal: AbortSignal): Promise<{ recycle: string }> {
   return new Promise((resolve) => {
     const timer = setInterval(() => {
       let recycle: string | undefined;
       try {
         recycle = recyclePauseDetail(root);
-      } catch (error) {
-        if (!unreadableReported) {
-          log("fix.round_recycle_probe_failed", { root, error: String((error as Error)?.message ?? error) });
-          unreadableReported = true;
-        }
+      } catch {
         return; // an unreadable PAUSE is no recycle yet; the next poll reads it again
       }
       if (!recycle) return;
@@ -8487,19 +8478,18 @@ async function keepYieldedFixRound(
   const prNumber = prNumberFromRef(fixRound.prUrl);
   const row = { pr_url: fixRound.prUrl, pr_number: prNumber ?? null, branch: fixRound.branch, trigger: "recycle", detail: recycle,
     head_sha: headSha, start_sha: startSha, pushed: false, strike_spent: false };
-  const failed = (keepError: string): FixRoundYield => {
-    log("fix.round_yielded", { ...row, recovery_ref: null, index_recovery_ref: null, paths: [], keep_error: keepError,
-      ...(workerStopError ? { preservation_deferred: true, retain_worktree: true } : {}) });
-    return { trigger: "recycle", detail: recycle, paths: [], costUsd, keepError };
-  };
-  if (workerStopError) return failed(workerStopError);
+  if (workerStopError) {
+    log("fix.round_yielded", { ...row, recovery_ref: null, index_recovery_ref: null, paths: [], keep_error: workerStopError,
+      preservation_deferred: true, retain_worktree: true });
+    return { trigger: "recycle", detail: recycle, paths: [], costUsd, keepError: workerStopError };
+  }
   let kept: { recoveryRef?: string; indexRecoveryRef?: string; paths: string[] };
   try {
     kept = await runStepsAsync(keepYieldedFixWorkSteps(hostWorktreeGitAsync, cwd, fixRound.branch, startSha));
   } catch (error) {
     const keepError = capStderrExcerpt(String((error as Error)?.message ?? error), STDERR_EXCERPT_CAP);
-    log("fix.round_preservation_failed", { branch: fixRound.branch, head_sha: headSha, start_sha: startSha, error: keepError });
-    return failed(keepError);
+    log("fix.round_yielded", { ...row, recovery_ref: null, index_recovery_ref: null, paths: [], keep_error: keepError });
+    return { trigger: "recycle", detail: recycle, paths: [], costUsd, keepError };
   }
   log("fix.round_yielded", { ...row, recovery_ref: kept.recoveryRef ?? null, index_recovery_ref: kept.indexRecoveryRef ?? null, paths: kept.paths });
   // Offer both snapshots when staged bytes differ from the disk; otherwise the only ref suffices.
