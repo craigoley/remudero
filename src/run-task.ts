@@ -1314,6 +1314,7 @@ import {
   type LedgerGrepFsDeps,
 } from "./lib/ledger-grep.js";
 import { routingAbCommand } from "./lib/routing-experiments.js";
+import { attributeAttemptOutcome } from "./lib/attempt-outcome-attribution.js";
 import { recordRoutingExperimentResults } from "./lib/routing-experiment-result.js";
 import { askDecisionModel, decisionsCommand } from "./lib/decision-model.js";
 import {
@@ -43938,7 +43939,7 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
     undefined,
     (dir, sinceMs, login) => ghBrokerLoginStatus(dir, sinceMs, { login }),
   )],
-  ["routing-ab", async (rest) => await routingAbCommand(rest)],
+  ["routing-ab", async (rest) => await routingAbCommand(rest, { classifyAttempt: attributeAttemptOutcome })],
   ["decisions", async (rest) => await decisionsCommand(rest, (config, request) => askDecisionModel(config, request), { repoRoot })],
   ["progress-watchdog", (rest) => progressWatchdogCommand(rest)],
   ["live-edits", async (rest) => await liveEditsCommand(rest)],
