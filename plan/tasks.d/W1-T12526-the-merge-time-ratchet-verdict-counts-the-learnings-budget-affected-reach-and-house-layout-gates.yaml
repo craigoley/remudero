@@ -44,6 +44,8 @@
       proof: "grep: W1-T12526 criterion 6 in test/gardeners/the-merge-time-verdict-counts-learnings-reach-and-house-layout.test.ts"
     - claim: "invariant:no-clean-without-count — a counter that throws or a tree it cannot read gives `unread` for that gate, never `clean`"
       proof: "grep: W1-T12526 criterion 7 in test/gardeners/the-merge-time-verdict-counts-learnings-reach-and-house-layout.test.ts"
+    - claim: "Source-size follows the W1-T2734 default advisory contract: source line growth and historical size ceilings alone produce no crossing, stale-lowering or update-branch request; source-size is explicitly named advisory and uncounted. Genuine enforced-gate collisions still hold, and unread measurements stay unread"
+      proof: "grep: W1-T12526 criterion 8 in test/gardeners/the-merge-time-verdict-counts-learnings-reach-and-house-layout.test.ts"
   rationale: |
     W1-T12509 counts five recorded-count gates at merge time. It left three uncounted, each with a reason, and its
     note asks for this follow-up. Until they are counted, two pull requests can each pass one of them on their own
@@ -88,6 +90,12 @@
     6. Existing tests outside the first list change with it. The W1-T12509 suite pins the counted and uncounted lists,
        and asserts that house-layout is uncounted. Two census-precheck suites copy scripts/house-layout-census.mjs into
        a fixture by name, so they also copy scripts/house-layout-split-table.json.
+    7. Preserve the ratified W1-T2734 default policy in the merged-tree judge. Source-size-signal is
+       advisory, not a recorded-ceiling correctness gate. Name source-size advisory/uncounted and do
+       not use its historical JSON baseline to hold or refresh an ordinary feature pull request.
+       Leave scripts/source-size-ratchet.mjs and its explicit legacy --baseline mode unchanged.
+       Preserve all actual enforced counters, real collision holds, unread outcomes and the 48 MiB
+       population read bound. Do not turn the observed unread population into a clean measurement.
     INVARIANT no-clean-without-count: a gate is reported clean only when it was counted on both trees; every other
     answer is `unread` or a named uncounted gate.
     NOT IN SCOPE: comment-load, coverage and mutation; any baseline value; the callers of the verdict.
@@ -95,6 +103,8 @@
     Leave one of the three gates out of COUNTED_RATCHET_GATES and its criterion test must fail. Put the split-table
     path strings back in the census module and criterion 6 must fail. Report `clean` when a counter throws and
     criterion 7 must fail. Restore and require all seven to pass.
+    Reinstate source-size legacy-ceiling blocking and criterion 8 must fail; restore the advisory
+    classification and require all eight criteria, without raising any baseline or read bound.
   note: |
     Id W1-T12526 reserved for run-unfiled-1794594748000 with ~/rmd-work/bin/reserve-id.sh.
     W1-T12509 was not merged when this was filed (no Remudero-Task trailer on main; refs/rmd-dispatch/W1-T12509 held).
