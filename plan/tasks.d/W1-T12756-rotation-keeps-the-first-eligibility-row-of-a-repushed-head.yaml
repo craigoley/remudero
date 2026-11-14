@@ -1,0 +1,50 @@
+- id: W1-T12756
+  title: "Ledger rotation keeps the first eligibility row of a head that absent-repush minted"
+  repo: remudero
+  depends_on:
+    - W1-T12534
+  priority: 1.0
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: low # rotation keeps at most 200 more sweep.review_eligible rows; no reader changes
+  band_meaning: blast-radius
+  origin: operator-session#review-admission-order-2026-11-14
+  plan_refs:
+    - W1-T12534
+    - W1-T2426
+  files:
+    - src/lib/ledger.ts
+    - test/ledger/rotation-keeps-the-first-eligibility-row-of-a-repushed-head.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "When rotation caps sweep.review_eligible rows, it keeps the first sweep.review_eligible row of every pr@head that a kept sweep.absent_repush row names as new_head, so a light pass after the rotation keys that head by the same time as before it"
+      proof: "unit test: test/ledger/rotation-keeps-the-first-eligibility-row-of-a-repushed-head.test.ts"
+    - claim: "invariant:cap-unchanged-for-other-heads — a sweep.review_eligible row for a head that no kept sweep.absent_repush row names is capped exactly as on origin/main, and the rows kept on purpose never exceed the number of kept sweep.absent_repush rows"
+      proof: "grep: W1-T12756 criterion 2 in test/ledger/rotation-keeps-the-first-eligibility-row-of-a-repushed-head.test.ts"
+  rationale: |
+    W1-T12534 keys a head that sweep.absent_repush minted by the ts of its first sweep.review_eligible row, read from
+    the live ledger only. Rotation keeps the newest MAX_RETAINED_LINES_PER_STEP (200) rows of each retained step
+    (src/lib/ledger.ts, rotateLedger PASS 4). On the Azure ledger, 2026-11-14 23:40Z, the live file held 207
+    sweep.review_eligible rows back to 12:28Z and 26 sweep.absent_repush rows back to 2026-11-13 19:56Z. So the
+    eligibility row leaves the live file first, and the head's key falls back from its eligibility time to its mint
+    time. If the head is observed again under a new review key, a later eligibility row becomes the first one and
+    the key moves again. The review of #18533 found this path four times.
+  design: |
+    1. In rotateLedger PASS 4, before the sweep.review_eligible group is capped, collect `<pr_number>@<new_head>` of
+       every sweep.absent_repush row that the pass keeps. From the sweep.review_eligible rows the cap would drop, keep
+       the first row (file order) for each collected key. Keep file order as the pass already does.
+    2. Count the kept rows in the rotation's archived-line count the same way as other kept rows.
+    3. Change no reader. W1-T12534's fold then finds the same first row after rotation.
+    INVARIANT cap-unchanged-for-other-heads: rows for heads that no kept sweep.absent_repush row names are capped as
+    on origin/main, and the extra rows are at most one per kept sweep.absent_repush row.
+    NOT IN SCOPE: keeping a sweep.absent_repush row longer than its own cap; changing the 200-row cap.
+  falsifier: |
+    Remove the keep in design 1 and criterion 1 must fail (the head's key moves to its mint time after rotation).
+    Keep every dropped sweep.review_eligible row and criterion 2 must fail. Restore and both must pass.
+  note: |
+    Id W1-T12756 reserved for run-unfiled-1794699874000 with ~/rmd-work/bin/reserve-id.sh. Filed with the second
+    amendment of W1-T12534, which moved this rotation part of its criterion 4 here. depends_on holds it until
+    W1-T12534 merges.
