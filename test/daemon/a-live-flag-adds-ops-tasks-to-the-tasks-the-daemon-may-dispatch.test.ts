@@ -259,7 +259,7 @@ async function selectedRun(enabled: unknown, scenario: Scenario = {}): Promise<{
 }
 
 test("W1-T12209 criterion 2: the real task runner retains an already-merged ops prerequisite", async () => {
-  const yaml = (id: string, depends: string[]) => `- id: ${id}\n  title: fixture private dependency\n  repo: remudero\n  type: implement\n  verify: auto\n  risk: medium\n  priority: 0\n  depends_on: ${JSON.stringify(depends)}\n  files: [src/fixture.ts]\n  acceptance:\n    - claim: fixture behavior exists\n      proof: "grep: fixtureBehavior in src/fixture.ts"\n`;
+  const yaml = (id: string, depends: string[]) => `- id: ${id}\n  title: fixture private dependency\n  repo: remudero\n  type: implement\n  verify: auto\n  origin: test#W12209-private-prerequisite\n  risk: medium\n  priority: 0\n  depends_on: ${JSON.stringify(depends)}\n  files: [src/fixture.ts]\n  acceptance:\n    - claim: fixture behavior exists\n      proof: "grep: fixtureBehavior in src/fixture.ts"\n`;
   const result = await selectedRun(true, { realWorkerDependency: true, mergedIds: ["W1-T900091"],
     opsText: yaml("W1-T900091", []) + yaml("W1-T900092", ["W1-T900091"]) });
   assert.equal(result.ran[0], "W1-T900092", JSON.stringify(result.rows));
