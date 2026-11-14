@@ -3328,7 +3328,8 @@ export function routeFollowupsToRegistry(harvest: FollowupHarvest, deps: Followu
           id: followupProposalId(c),
           summary:
             `follow-up harvest [${c.type}]: ${c.text} — from ${c.taskId} (run ${c.runId}` +
-            `${c.prUrl ? `, ${c.prUrl}` : ""}${c.headSha ? `, head ${c.headSha}` : ""})` + FOLLOWUP_FILING_FALLBACK,
+            `${c.prUrl ? `, ${c.prUrl}` : ""}${c.headSha ? `, head ${c.headSha}` : ""})` +
+            (c.prUrl || c.headSha ? FOLLOWUP_FILING_FALLBACK : ""),
           // Stated, never synthesized — see this function's own doc for why a fabricated
           // git-grep pattern would be worse than an honest empty set.
           evidenceAnchors: [] as EvidenceAnchor[],

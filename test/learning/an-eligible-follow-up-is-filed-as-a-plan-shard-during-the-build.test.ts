@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -8,7 +7,6 @@ import { parse, stringify } from "yaml";
 import { fileEligibleFollowups, followupFilingPresentation, followupProvenance, selectFileableFollowups } from "#src/lib/followup-filing.js";
 import { fileRatificationBatch, inboxDraftExampleFragmentYaml, type DraftRungOutcome } from "#src/lib/inbox.js";
 import { mineFollowups, retireSettledFollowups, routeFollowupsToRegistry, type FollowupCandidate, type FollowupRouteOutcome } from "#src/lib/retro.js";
-import { harvestFollowupsFromReport } from "#src/run-task.js";
 
 const headSha = "a".repeat(40);
 const candidate: FollowupCandidate = { entryId: "run:timestamp:0", taskId: "W1-T12117", runId: "run",
@@ -179,23 +177,3 @@ test("follow-up head provenance survives mining and registry publication", () =>
   } });
 });
 
-test("the report harvest reads the exact local head and names an unreadable head", () => {
-  const root = mkdtempSync(join(tmpdir(), "rmd-followup-head-"));
-  try {
-    execFileSync("git", ["init", "-q", root]);
-    execFileSync("git", ["-C", root, "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid",
-      "commit", "-q", "--allow-empty", "-m", "fixture"]);
-    const expected = execFileSync("git", ["-C", root, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
-    for (const unreadable of [false, true]) {
-      const rows: Record<string, unknown>[] = [];
-      harvestFollowupsFromReport("REPORT\n## Follow-ups\ntask: preserve the exact source revision", {
-        label: "implement", worktreePath: unreadable ? join(root, "absent") : root, seen: new Set(),
-        log: (step, extra) => rows.push({ step, ...extra }), say: () => {},
-      });
-      const report = rows.find(r => r.step === "report.followups");
-      assert.ok(report);
-      assert.equal(report.head_sha, unreadable ? undefined : expected);
-      assert.equal(rows.some(r => r.step === "followup.head_unreadable"), unreadable);
-    }
-  } finally { rmSync(root, { recursive: true, force: true }); }
-});

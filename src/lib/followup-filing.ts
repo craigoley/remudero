@@ -54,7 +54,10 @@ export function followupFilingPresentation(proposalIds: readonly string[], stamp
 function draftRefusal(fragment: string, c: FollowupCandidate, sourceRisk: TaskRisk): string | undefined {
   let tasks: unknown;
   try { tasks = parse(fragment); }
-  catch (error) { return `unparseable-draft: ${String(error)}`; }
+  catch (error) {
+    const reason = `unparseable-draft: ${String(error)}`;
+    return reason;
+  }
   if (!Array.isArray(tasks) || tasks.length !== 1 || !tasks[0] || typeof tasks[0] !== "object") return "expected-one-shard";
   const task = tasks[0];
   if (!Array.isArray(task.files) || task.files.length === 0 || task.files.some((p: unknown) => typeof p !== "string" || !p.trim())) return "empty-files";
