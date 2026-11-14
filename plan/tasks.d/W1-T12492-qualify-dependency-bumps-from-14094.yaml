@@ -11,6 +11,14 @@
   files:
     - .github/semgrep/build-requirements.txt
     - .github/semgrep/requirements.txt
+    - .github/semgrep/runtime-compatibility-audit.py
+    - .github/semgrep/runtime_audit_metadata_tests.py
+    - .github/semgrep/runtime_audit_test_fixtures.py
+    - .github/semgrep/source-runtime-qualification.py
+    - .github/semgrep/test_runtime_compatibility_audit.py
+    - .github/semgrep/test_source_runtime_qualification.py
+    - .github/workflows/semgrep-runtime-compatibility.yml
+    - test/semgrep-artifact-audit-ci-contract.test.ts
     - test/semgrep-native-install.test.ts
     - test/review/semgrep-dependency-bumps-14094.test.ts
   status: queued
@@ -24,7 +32,9 @@
     be declined; W1-T9979 governs qualification of this security scanner closure.
     The runtime lock retains SDK/exporters 1.37.0 and instrumentation 0.58b0,
     so an isolated API move cannot be assumed compatible. Current remote PR
-    state and consumer package metadata were not verified in this intake.
+    state and consumer package metadata were not verified in this intake. The
+    operator's 2026-11-14 follow-up authorized the separately governed trusted
+    policy amendment after PR #18405 remained blocked on setuptools policy.
   design: |
     Prior-behavior inventory: the scanner uses exact hash locks, an audited source
     recipe and a distinct Semgrep wheel; fresh installation, offline closure audit,
@@ -46,24 +56,43 @@
     A compatible independent setuptools move may proceed only with its own evidence;
     identify precisely which PR hunks are carried and which remain refused, so a
     partial bump is never reported as superseding the entire Dependabot PR.
-    For compatible targets, update the two hash locks with verified artifact hashes
-    and companion assertions. Preserve W1-T9979's audited source recipe, distinct
-    Semgrep wheel, qualification and security controls. Exercise the maintained
-    fresh-environment install, offline hash/closure audit, ordinary pip check,
-    installed identities and Scan controls before claiming compatibility. If the
-    existing governed qualification cannot accept the proposed closure, stop with
-    evidence and request a separately governed amendment rather than changing the
-    trusted auditor, recipe, workflows, baselines or gates within this task.
+    OPERATOR-AUTHORIZED AMENDMENT (2026-11-14): the existing qualification rejected
+    setuptools 84.1.0 because its trust policy has no reviewed artifact admission,
+    and the proposed lock line carries multiple hashes although this lock grammar
+    intentionally permits one exact artifact. This amendment separately governs
+    the narrow trust-policy update needed to qualify setuptools 84.1.0: admit only
+    the exact reviewed wheel digest and required artifact-member policy, keep one
+    SHA-256 per lock line, and update the pinned auditor digest / controller checks
+    and their regression tests. Do not generalize the parser, admit an sdist, add a
+    name-only or version-only allowance, relax any source/build/scan gate, or alter
+    the Semgrep source recipe. The OpenTelemetry API move to 1.45.2 (the current
+    version proposed by PR #18405) remains refused:
+    keep the full 1.37.0 family because Semgrep 1.181.0 requires API ~=1.37.0 and
+    the pinned SDK requires API ==1.37.0. For the compatible setuptools-only
+    closure, exercise the maintained fresh-environment install, offline
+    hash/closure audit, ordinary pip check, installed identities and Scan controls
+    before claiming compatibility. Only after these proofs pass, append a new
+    repair commit to PR #18405's existing branch with the required
+    `Remudero-Task: PR-18405` trailer so head identity and hosted checks rerun; do
+    not amend, force-push, or close the bot PR. Preserve all other exact-artifact,
+    provenance and source-qualification controls.
     Add a focused regression in the computed test folder using package aliases and
     the shared root helper; assert the adopted versions and artifact hashes against
     reviewed evidence, alongside the existing native installation suite. Preserve
     actual native qualification receipts; mocked or syntactic lock tests alone do
-    not prove compatibility. Do not edit, push to or close Dependabot PRs.
+    not prove compatibility. The native install test must include the exact title
+    `W1-T12492 criterion 2 native install preserves qualification controls` so the
+    guard remains explicitly bound to this task. The only Dependabot write allowed by this amendment
+    is the append-only PR #18405 repair commit above, and only after the maintained
+    qualification succeeds.
   acceptance:
     - claim: Every adopted target has its reviewed version and artifact hash in the appropriate lock, with incompatible targets explicitly refused rather than forced through consumer changes
       proof: "unit test: test/review/semgrep-dependency-bumps-14094.test.ts"
     - claim: "invariant:native-qualification — The updated closure retains exact hash locks and all native Semgrep installation and qualification controls, including fail-closed handling of incompatible or unknown closure evidence"
       proof: "unit test: test/semgrep-native-install.test.ts"
+      kind: guard
+    - claim: The native install suite carries the task-specific title for criterion 2
+      proof: "grep: W1-T12492 criterion 2 native install preserves qualification controls in test/semgrep-native-install.test.ts"
   falsifier: |
     For each adopted bump restore the prior version or substitute an incorrect
     artifact hash and show the focused regression fails, then restore and show
