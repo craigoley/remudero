@@ -517,7 +517,14 @@ function startSocketThread(socketPath: string, log: DaemonLog, threadUrl: URL, i
   });
 }
 
-/** The run directory owns this socket; an overlong path refuses rather than escaping that directory. */
+export function runChildGitCredentialSocketPath(runDir: string): string {
+  const resolved = resolve(runDir);
+  const name = `rmd-rc-${createHash("sha256").update(resolved).digest("hex").slice(0, 12)}`;
+  return shortPathWhenTooLong(join(resolved, "git.sock"), (root) => join(root, name, "git.sock"),
+    (path) => Buffer.byteLength(path) <= MAX_UNIX_SOCKET_PATH_BYTES, existsSync);
+}
+
+/** A child owns its socket, with a private short directory when its run directory is too deep. */
 export async function startRunChildGitCredentialSocket(opts: {
   runDir: string;
   log: DaemonLog;
@@ -526,17 +533,28 @@ export async function startRunChildGitCredentialSocket(opts: {
   /** W1-T11851: the thread mints as this App identity, carried in workerData, not the env. */
   identity?: HostAppIdentity;
 }): Promise<CredentialHelperSocketHandle> {
-  const socketPath = join(resolve(opts.runDir), "git.sock");
+  const socketPath = runChildGitCredentialSocketPath(opts.runDir);
   if (Buffer.byteLength(socketPath) > MAX_UNIX_SOCKET_PATH_BYTES) {
     throw new Error("run credential socket path exceeds the unix socket limit");
   }
+  const outsideRun = socketPath !== join(resolve(opts.runDir), "git.sock");
+  let ownsShortDir = false;
   let handle: CredentialHelperSocketHandle | undefined;
   const close = async (): Promise<void> => {
     try { await handle?.close(); }
-    finally { rmSync(socketPath, { force: true }); }
+    finally {
+      if (!outsideRun || ownsShortDir) rmSync(socketPath, { force: true });
+      if (ownsShortDir) rmdirSync(dirname(socketPath));
+    }
   };
   try {
     chmodSync(opts.runDir, 0o700);
+    if (outsideRun) {
+      mkdirSync(dirname(socketPath), { recursive: true, mode: 0o700 });
+      if (!ownedSocketDir(dirname(socketPath))) throw new Error(`${dirname(socketPath)} is not a directory this child owns`);
+      ownsShortDir = true;
+      chmodSync(dirname(socketPath), 0o700);
+    }
     handle = opts.mint
       ? await startCredentialHelperSocket({ socketPath, mint: opts.mint, log: (row) => opts.log(row.step, rowFields(row)) })
       : await startSocketThread(socketPath, opts.log, opts.threadUrl ?? bundledWorkerUrl(import.meta.url), opts.identity);

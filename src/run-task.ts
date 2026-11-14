@@ -34110,6 +34110,8 @@ interface LightPassReadPorts {
   effects?: (deps: Parameters<typeof buildSweepEffects>[0]) => SweepDeps;
   readCompare?: (args: string[]) => Promise<unknown>;
   clock?: Pick<Clock, "now">;
+  /** W1-T12357: the daemon's sweep tick bound; absent, the default policy's. */
+  sweepWallClockBoundMs?: number;
 }
 
 /** W1-T11293: the light pass reads every READY PR's distance; the reader lives in src/lib/light-pass-compare.ts. */
