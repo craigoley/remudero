@@ -141,7 +141,7 @@ test(`W1-T12175 criterion 2: a lost ${removal} escalates with unchanged two-acco
 });
 }
 
-test("a definite deployment loss still escalates when another cash deployment is unreadable", async (t) => {
+test("W1-T12175 criterion 2: one escalation includes absent and unreadable prior deployments", async (t) => {
   const f = fixture(t);
   const endpointA = "https://account-a.openai.azure.com";
   const endpointB = "https://account-b.openai.azure.com";
@@ -178,7 +178,7 @@ test("a definite deployment loss still escalates when another cash deployment is
   assert.deepEqual(current.cash_unreadable_deployments, ["deployment-b"]);
   assert.equal(f.alerts.length, 1);
   assert.ok(f.alerts[0].detail.includes("cash:deployment-a"));
-  assert.ok(!f.alerts[0].detail.includes("cash:deployment-b"));
+  assert.ok(f.alerts[0].detail.includes("cash:deployment-b"));
   assert.ok(f.alerts[0].detail.includes(configPath()));
   assert.ok(f.alerts[0].detail.includes(previous));
 });
@@ -344,31 +344,102 @@ test("an escalation transport failure is reported and startup completes", async 
   assert.deepEqual(failed.lost_providers, ["codex"]);
 });
 
-test("an unreadable cash account does not masquerade as lost deployments", async (t) => {
+test("W1-T12175 criterion 2: an unreadable cash account escalates previously reachable deployments", async (t) => {
   const f = fixture(t);
   const config = { workerProviders: { enabled: ["claude", "cash"] as ("claude" | "cash")[],
     cashEndpoint: "https://fixture.openai.azure.com" } };
-  await f.start(config, ["deployment-a"]);
+  const previous = await f.start(config, ["deployment-a"]);
   t.mock.property(process, "env", { ...process.env, RMD_OPENWEIGHT_API_KEY: "fixture-key" });
   t.mock.method(globalThis, "fetch", async () => new Response("offline", { status: 503 }));
   await f.start(config);
   assert.equal(f.rows().at(-1)?.cash_read, "unreadable");
   assert.match(String(f.rows().at(-1)?.cash_read_error), /503/);
-  assert.equal(f.alerts.length, 0);
+  assert.equal(f.alerts.length, 1);
+  for (const text of ["cash:deployment-a", configPath(), previous]) assert.ok(f.alerts[0].detail.includes(text));
 });
 
 test("a validation response also returned for absent deployments is not reachability evidence", async (t) => {
   const f = fixture(t);
   const config = { workerProviders: { enabled: ["claude", "cash"] as ("claude" | "cash")[],
     cashEndpoint: "https://fixture.openai.azure.com" } };
-  await f.start(config, ["deployment-a"]);
+  const previous = await f.start(config, ["deployment-a"]);
   t.mock.property(process, "env", { ...process.env, RMD_OPENWEIGHT_API_KEY: "fixture-key" });
   t.mock.method(globalThis, "fetch", async () => Response.json({ error: { param: "messages" } }, { status: 400 }));
   await f.start(config);
   assert.equal(f.rows().at(-1)?.cash_read, "unreadable");
   assert.match(String(f.rows().at(-1)?.cash_read_error), /cannot distinguish an absent deployment/);
   assert.deepEqual(f.rows().at(-1)?.cash_deployments, []);
+  assert.equal(f.alerts.length, 1);
+  for (const text of ["cash:deployment-a", configPath(), previous]) assert.ok(f.alerts[0].detail.includes(text));
+});
+
+for (const credential of [undefined, "", "rejected"] as const) {
+test(`W1-T12175 criterion 2: cash credential ${credential === undefined ? "removal" : credential || "emptying"} raises one loss escalation`, async (t) => {
+  const f = fixture(t);
+  const keyEnv = "RMD_CASH_FIXTURE_API_KEY";
+  t.mock.property(process, "env", { ...process.env, [keyEnv]: "fixture-key" });
+  const transport = t.mock.method(globalThis, "fetch", async (url: string | URL | Request) =>
+    process.env[keyEnv] === "rejected" ? new Response("unauthorized", { status: 401 }) :
+      deploymentReply(url, ["deployment-a", "deployment-b"]));
+  const config = { workerProviders: { enabled: ["claude", "cash"] as ("claude" | "cash")[], cashDeploymentEndpoints: {
+    "deployment-a": { endpoint: "https://fixture.openai.azure.com", keyEnv },
+    "deployment-b": { endpoint: "https://fixture.openai.azure.com", keyEnv },
+  } } };
+  const previous = await f.start(config);
+  assert.deepEqual(f.rows().at(-1)?.cash_deployments, ["deployment-a", "deployment-b"]);
   assert.equal(f.alerts.length, 0);
+  const priorRequests = transport.mock.callCount();
+  if (credential === undefined) delete process.env[keyEnv];
+  else process.env[keyEnv] = credential;
+  await f.start(config);
+  const current = f.rows().at(-1)!;
+  assert.deepEqual(current.enabled_providers, ["cash", "claude"]);
+  assert.deepEqual(current.cash_deployments, []);
+  assert.deepEqual(current.cash_unreadable_deployments, ["deployment-a", "deployment-b"]);
+  assert.equal(current.cash_read, "unreadable");
+  assert.match(String(current.cash_read_error), credential === "rejected" ? /HTTP 401/ : /no-key/);
+  assert.equal(current.comparison, "compared");
+  assert.equal(f.alerts.length, 1);
+  for (const text of ["cash:deployment-a", "cash:deployment-b", configPath(), previous]) {
+    assert.ok(f.alerts[0].detail.includes(text), `${text}: ${f.alerts[0].detail}`);
+  }
+  assert.match(f.alerts[0].detail, /intentional/i);
+  await f.start(config);
+  await f.start(config);
+  assert.equal(f.alerts.length, 1);
+  if (credential !== "rejected") assert.equal(transport.mock.callCount(), priorRequests);
+});
+}
+
+test("W1-T12175 criterion 2: losing the Foundry credential escalates every previously reachable deployment", async (t) => {
+  const f = fixture(t);
+  const names = Object.keys(FOUNDRY_CLAUDE_PRICES).sort();
+  t.mock.property(process, "env", { ...process.env,
+    [FOUNDRY_CLAUDE_API_KEY_ENV]: "fixture-foundry-key",
+    [FOUNDRY_CLAUDE_ENDPOINT_ENV]: "https://fixture.foundry.azure.com/anthropic" });
+  const transport = t.mock.method(globalThis, "fetch", async (_url: unknown, init?: RequestInit) => {
+    const body = JSON.parse(String(init?.body)) as { model: string };
+    return body.model.startsWith("rmd-absent-")
+      ? Response.json({ error: { type: "not_found_error" } }, { status: 404 })
+      : Response.json({ error: { message: "messages must not be empty" } }, { status: 400 });
+  });
+  const config = { workerProviders: { enabled: ["claude", "cash"] as ("claude" | "cash")[] } };
+  const previous = await f.start(config);
+  assert.deepEqual(f.rows().at(-1)?.cash_deployments, names);
+  assert.equal(f.alerts.length, 0);
+  const priorRequests = transport.mock.callCount();
+  delete process.env[FOUNDRY_CLAUDE_API_KEY_ENV];
+  await f.start(config);
+  assert.deepEqual(f.rows().at(-1)?.cash_deployments, []);
+  assert.deepEqual(f.rows().at(-1)?.cash_unreadable_deployments, names);
+  assert.equal(f.rows().at(-1)?.comparison, "compared");
+  assert.equal(f.alerts.length, 1);
+  for (const text of [...names.map((name) => `cash:${name}`), configPath(), previous]) {
+    assert.ok(f.alerts[0].detail.includes(text), `${text}: ${f.alerts[0].detail}`);
+  }
+  await f.start(config);
+  assert.equal(f.alerts.length, 1);
+  assert.equal(transport.mock.callCount(), priorRequests);
 });
 
 test("Foundry Claude deployments are probed through the Anthropic adapter and losses escalate", async (t) => {

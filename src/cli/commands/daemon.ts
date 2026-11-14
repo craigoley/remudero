@@ -343,9 +343,8 @@ export async function recordWorkerProvidersAtStart(opts: {
   const previousCashComparable = previous.cash_read === "readable" ||
     Array.isArray(previous.cash_unreadable_deployments);
   if (previousCashComparable) {
-    const unreadable = new Set(cashUnreadable);
     lost.push(...lostWorkerProviders(previous.cash_deployments as string[], cash)
-      .filter((name) => !unreadable.has(name)).map((name) => `cash:${name}`));
+      .map((name) => `cash:${name}`));
   }
   if (lost.length === 0) return;
   const priorSet = [...earlier, ...(previous.cash_deployments as string[]).map((name) => `cash:${name}`)].sort();
