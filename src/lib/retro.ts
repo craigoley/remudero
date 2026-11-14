@@ -3202,8 +3202,6 @@ export function followupProposalId(candidate: FollowupCandidate): string {
   return `followup:${candidate.entryId}`;
 }
 
-const FOLLOWUP_FILING_FALLBACK = "; kept for the operator: automatic filing refused it)";
-
 /** Route harvested follow-ups through inbox.ts's single writer, `updateProposalRegistry`.
  * Named refusal arms: title-dedup (harvest), type-not-plan-shaped ({@link FOLLOWUP_TYPE_ROUTES}),
  * settled-question (before drafting; W1-T2645), self-referential (W1-T2617), dispatch-only (W1-T2613).
@@ -3406,22 +3404,6 @@ export interface FollowupRegistryDeps {
   ) => Proposal[] | null;
 }
 
-/** Mark the routed follow-ups automatic filing refused, so a source merge never retires them.
- *  The mark sits inside the referent's parentheses, so the summary parsers still read it. */
-export function keepRefusedFollowupsForOperator(entryIds: readonly string[], deps: FollowupRegistryDeps): string[] {
-  const ids = new Set(entryIds.map(entryId => `followup:${entryId}`));
-  const marked: string[] = [];
-  (deps.updateRegistry ?? updateProposalRegistry)(deps.registryPath, (current) => {
-    const next = current.map(p => {
-      if (!ids.has(p.id) || !p.summary.endsWith(")") || p.summary.endsWith(FOLLOWUP_FILING_FALLBACK)) return p;
-      marked.push(p.id);
-      return { ...p, summary: p.summary.slice(0, -1) + FOLLOWUP_FILING_FALLBACK };
-    });
-    return marked.length > 0 ? next : null;
-  });
-  return marked;
-}
-
 /** Retire every routed follow-up whose originating task has merged — the missing counterpart to
  *  the append-only write. Unlike board-review's retirement this ACTUALLY REMOVES the entry,
  *  because the measured growth is a registry-SIZE problem. `"unreadable"` retires nothing. */
@@ -3434,8 +3416,6 @@ export function retireSettledFollowups(read: FollowupReferentRead, deps: Followu
   updateRegistry(deps.registryPath, (current) => {
     const settled: FollowupRetireOutcome[] = [];
     for (const p of current) {
-      // The source merging cannot settle a draft refused by automatic filing. Keep its operator fallback.
-      if (p.id.startsWith("followup:") && p.summary.endsWith(FOLLOWUP_FILING_FALLBACK)) continue;
       const taskId = followupOriginatingTaskId(p);
       if (taskId === undefined) continue;
       // W1-T3524: a PR referent settles on the PR having MERGED — the same signal, and the same

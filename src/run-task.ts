@@ -1161,7 +1161,6 @@ import {
   type RetroLedgerRead,
   escalateRetroPublicationFailure,
   retireSettledFollowups,
-  keepRefusedFollowupsForOperator,
   type FollowupReferentRead,
   runlessMergesSince,
   saveMarker,
@@ -23803,7 +23802,6 @@ async function retroCommand(
       log: (step, detail) => appendLedger(ledgerPath, { run_id: `RETRO-${retroReadStartedMs}`, task_id: "RETRO", step, ...detail }),
     }));
   if (followupOutcomes.length > 0) {
-    const refusedFollowups: string[] = [];
     const filingLog = (step: string, extra: Record<string, unknown> = {}) =>
       appendLedger(ledgerPath, { run_id: `RETRO-${retroReadStartedMs}`, task_id: "RETRO", step, ...extra });
     try {
@@ -23824,7 +23822,7 @@ async function retroCommand(
       const receipts = readLedgerLines(ledgerPath);
       const ratifiedIds = new Set(followupOutcomes.filter(o => o.routed && isRatifiedInLedger(receipts, o.proposalId))
         .map(o => o.routed ? o.proposalId : ""));
-      const filing = await fileEligibleFollowups(followupOutcomes, {
+      await fileEligibleFollowups(followupOutcomes, {
         planOnMain: planOnMain.tasks, openPrOrigins, ratifiedIds, log: filingLog,
         sourceRisk: c => {
           const row = receipts.findLast(r => r.step === "run.start" && r.run_id === c.runId);
@@ -23847,19 +23845,10 @@ async function retroCommand(
           return receipt;
         },
       });
-      const handled = new Set(["already-ratified", "already-filed-origin", "duplicate-entry", "human-owned-action"]);
-      refusedFollowups.push(...filing.refused.filter(r => !handled.has(r.reason)).map(r => r.entryId));
     } catch (error) {
       for (const outcome of followupOutcomes) if (outcome.routed) {
-        refusedFollowups.push(outcome.candidate.entryId);
         filingLog("followup.file_refused", { entry_id: outcome.candidate.entryId, reason: `filing-unreadable: ${String(error)}` });
       }
-    }
-    try {
-      const kept = keepRefusedFollowupsForOperator(refusedFollowups, { registryPath: followupRegistryPath });
-      if (kept.length > 0) filingLog("followup.kept_for_operator", { proposal_ids: kept.slice(0, 20), count: kept.length });
-    } catch (error) {
-      filingLog("followup.keep_unwritten", { reason: String(error), entry_ids: refusedFollowups.slice(0, 20) });
     }
   }
 
