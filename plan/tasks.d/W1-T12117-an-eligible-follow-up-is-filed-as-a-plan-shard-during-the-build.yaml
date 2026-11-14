@@ -16,6 +16,7 @@
     - src/lib/retro.ts
     - src/run-task.ts
     - test/an-eligible-follow-up-is-filed-as-a-plan-shard-during-the-build.test.ts
+    - "src/lib/config-gardener.ts"
   status: queued
   attempts: 0
   acceptance:
