@@ -368,6 +368,25 @@ const SEED_ROWS: readonly SeedRow[] = [
     writer: ["runFlowGardener"],
     outcomes: ["OBSERVED", "UNKNOWN"],
   },
+  {
+    step: "serve.checkout_advanced",
+    meaning:
+      "Serve moved its own clean checkout forward to origin/main in place, with no write in flight, " +
+      "instead of asking for a handoff. Every changed path was one serve reads per request (plan/feedback/) " +
+      "or never loads, so the running generation and its warm read model stay. The row names the old " +
+      "and new sha and the changed paths.",
+    writer: ["gateStaleCodeExit"],
+    outcomes: ["advanced"],
+  },
+  {
+    step: "serve.checkout_advance_refused",
+    meaning:
+      "Serve tried to move its checkout forward in place and could not: the checkout moved, became " +
+      "dirty, or git refused the checkout. The row names the reason. The next check of the same clean " +
+      "advance asks for a handoff instead, as a code change does.",
+    writer: ["gateStaleCodeExit"],
+    outcomes: ["moved", "dirty", "git_refused"],
+  },
 ];
 
 /** THE REGISTRY — every step this task has decoded so far, `family` derived from `step` (never
