@@ -22,7 +22,7 @@
     - deploy/rmd-host-cleanup.sh
     - test/host-units-install.test.ts
     - test/deploy/the-host-janitor-retires-finished-hand-worktrees-on-the-scratch-disk.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "The installed janitor schedule names `/mnt/scratch/rmd/hand` as a worktree root beside `/mnt/scratch/worktrees` and `~/rmd-work`, and a host whose `RMD_CLEANUP_WORKTREE_ROOTS` is set keeps its own value"

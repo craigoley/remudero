@@ -18,7 +18,7 @@
   files:
     - src/lib/review-capacity.ts
     - test/review/review-width-returns-to-base-when-the-cpu-pressure-is-not-reviews-own.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "With CPU PSI full above the low watermark but not over what the weight share predicts, memory PSI quiet, more PRs queued than the width, and the host load less the review lane's CPU-phase children above the core count, a width shed to 1 returns to base (or to the room the host worker budget leaves) in one sample, with reason cpu-pressure-not-review"
