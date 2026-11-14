@@ -15,6 +15,8 @@ import { installFixtureDuGuard } from "#test/helpers/fixture-du.js";
 
 const repo = fileURLToPath(new URL("../", import.meta.url));
 const reason = 'AADSTS700082: session expired; run "az login"\nrequest id: a\\b; path: c:\\new\\tfile';
+const classifiedReason = "managed identity unavailable: Azure session expired; run az login (exit 1); "
+  + "stored login failed (exit 1) for fixture-registry: Azure session expired; run az login";
 
 function fixture(t: TestContext) {
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}acr-login-`));
@@ -106,22 +108,27 @@ test("W1-T5319: serve-container logs in to the registry before its preflight pul
 test("W1-T5319: a failed serve login refuses before pull or replacement", (t) => {
   const f = fixture(t);
   const result = f.run("deploy/serve-container.sh", ["--replace"], { AZ_RESULT: "1" });
-  assertExit("deploy/serve-container.sh", result, 1);
-  assert.ok(result.stderr.includes(reason));
+  assertExit("deploy/serve-container.sh", result, 1, result.stderr);
+  assert.ok(result.stderr.includes(classifiedReason));
+  assert.ok(!result.stderr.includes(reason), "raw Azure diagnostics stay private");
   assert.equal(f.calls().some((c) => /^docker (pull|stop|rm|run) /.test(c)), false);
   const dry = f.run("deploy/serve-container.sh", ["--dry-run"], { AZ_RESULT: "1" });
   assertExit("deploy/serve-container.sh", dry, 0, dry.stderr);
-  assert.equal(f.calls().filter((c) => c.startsWith("az ")).length, 1);
+  assert.deepEqual(f.calls().filter((c) => c.startsWith("az ")), [
+    "az login --identity --output none", "az acr login -n fixture-registry",
+  ]);
 });
 
 test("W1-T5319: the refresh records a failed az acr login with its reason", (t) => {
   const f = fixture(t);
   const result = f.run("deploy/acr-login.sh", ["--refresh"], { AZ_RESULT: "1" });
   assertExit("deploy/acr-login.sh", result, 1, result.stderr);
-  assert.ok(result.stderr.includes(reason));
+  assert.ok(result.stderr.includes(classifiedReason));
+  assert.ok(!result.stderr.includes(reason), "raw Azure diagnostics stay private");
   const record = JSON.parse(readFileSync(join(f.state, "acr-login.json"), "utf8"));
   assert.equal(record.result, "failed");
-  assert.equal(record.reason, reason);
+  assert.equal(record.reason, classifiedReason);
+  assert.equal(record.method, "none");
   assert.equal(record.registry, "fixture-registry");
   assert.ok(Number.isFinite(Date.parse(record.ts)));
   const beat = f.run("scripts/fleet-heartbeat.sh");
@@ -129,7 +136,7 @@ test("W1-T5319: the refresh records a failed az acr login with its reason", (t) 
   const payload = parseHeartbeatPayload(beat.stdout);
   assert.equal(payload.acr_login_result, "failed");
   assert.equal(payload.acr_login_ts, record.ts);
-  assert.equal(payload.acr_login_reason, reason.replace(/\n/g, " "));
+  assert.equal(payload.acr_login_reason, classifiedReason);
   assert.equal(payload.acr_login_registry, "fixture-registry");
 });
 

@@ -1059,12 +1059,16 @@ test("private registry selection defaults and falsifiers forbid live effects: re
     try {
       const result = fixture.run(mode, serve);
       assert.equal(result.status, 2, `${mode}: ${result.stderr}`);
-      assert.ok(result.calls.some(c => isRun(c) && c.argv.includes("--rm")), "the real bounded probe ran");
+      const imageProbeIndex = result.calls.findIndex(c => isRun(c) && c.argv.includes("--rm"));
+      assert.ok(imageProbeIndex >= 0, "the real bounded probe ran");
       assert.equal(result.calls.some(c => isStop(c) || isRm(c) || (isRun(c) && c.argv.includes("-d"))), false,
         "an unqualified physical mapping or failed reader cannot reach replacement effects");
       assert.equal(result.calls.some(c => c.bin === "forbidden"), false, "GitHub, git, service and installer effects stay trapped");
-      assert.ok(result.calls.filter(c => c.bin === "az").every(c => c.argv.join(" ") === "acr login -n test-registry"),
-        "only the contained synthetic login transport may run before the image probe");
+      const azCalls = result.calls.map((call, index) => ({ call, index })).filter(({ call }) => call.bin === "az");
+      assert.deepEqual(azCalls.map(({ call }) => call.argv.join(" ")),
+        ["login --identity --output none", "acr login -n test-registry"],
+        "only the contained managed-identity and registry login transports may run");
+      assert.ok(azCalls.every(({ index }) => index < imageProbeIndex), "Azure authentication completes before the image probe");
       assert.equal((result.stdout + result.stderr).includes(fixture.root), false);
       assert.equal(existsSync(join(fixture.root, "state/state/PAUSE")), false);
     } finally { fixture.cleanup(); }
