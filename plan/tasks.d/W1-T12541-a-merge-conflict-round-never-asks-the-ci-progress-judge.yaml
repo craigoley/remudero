@@ -18,6 +18,7 @@
     - src/cli/commands/fix.ts
     - src/lib/fix-progress-judge.ts
     - test/fix-lane/a-merge-conflict-round-never-asks-the-ci-progress-judge.test.ts
+    - test/a-refused-merge-start-escalates-in-the-same-rung.test.ts
   status: queued
   attempts: 0
   acceptance:
@@ -66,6 +67,14 @@
        same fix.progress_judged row with `judge_skipped: "conflict-round"`. The unavailable branch is not reachable for a
        conflict round.
     3. Rounds not in merge-conflict mode keep today's path unchanged.
+    4. The merge-conflict fix.dispatch rows record `base_sha` (the base the sweep read, `opts.baseSha`) when it is
+       known, so step 1 can compare bases. An unknown base matches only another unknown base.
+    5. The former-bound stand-in (the test fixture used when no judge is wired) keeps its path: it never answers
+       unavailable, and production always wires a judge.
+    6. test/a-refused-merge-start-escalates-in-the-same-rung.test.ts asserted that the CI progress judge's verdict
+       decides merge-refusal rounds (a change of approach past two refusals, a hand-off on an unavailable answer).
+       Its cases now assert the conflict-fact verdict: two refused rounds at one head, base and file set escalate
+       with loop conflict, and the judge is not asked.
     NOT IN SCOPE: the judge's prompt and model; the first-round skip of W1-T10039; how the sweep picks a conflict round;
     the conflict gardener of W1-T11172.
   falsifier: |
