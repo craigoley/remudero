@@ -100,8 +100,6 @@ import {
 import { taskCardRuns } from "./task-card.js";
 import { colourEnabled, paint, sectionRule } from "./tty.js";
 
-// ── The model ────────────────────────────────────────────────────────────────────────────────
-
 export type ServiceName = "daemon" | "serve" | "deploy-supervisor";
 
 export type LivenessSensor = "launchd" | "process-table";

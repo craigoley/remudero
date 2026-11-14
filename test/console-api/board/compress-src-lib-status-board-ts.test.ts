@@ -13,11 +13,11 @@ import { REPO_ROOT } from "#test/helpers/repo-root.js";
 // Comment floor from df6fdb07b0941efc1afb07eb6b8227c4042377c3 before compression.
 const BEFORE = { comments: 666 };
 
-function commentLines(text: string): number {
+export function commentLines(text: string): number {
   return text.split("\n").filter(line => /^(?:\/\/|\/\*|\*)/.test(line.trim())).length;
 }
 
-function executableTokens(source: string): Array<[number, string]> {
+export function executableTokens(source: string): Array<[number, string]> {
   const scanner = createScanner(true, undefined, source);
   const tokens: Array<[number, string]> = [];
   const braces: number[] = [];
@@ -47,7 +47,7 @@ function executableDigest(source: string): string {
   return createHash("sha256").update(JSON.stringify(executableTokens(source))).digest("hex");
 }
 
-function emittedDigest(source: string): string {
+export function emittedDigest(source: string): string {
   const { code } = transformSync(source, { loader: "ts", format: "esm", legalComments: "none", minifyWhitespace: true });
   return createHash("sha256").update(code).digest("hex");
 }
@@ -71,13 +71,3 @@ test("W1-T11016: comment compression preserves executable code", () => {
   assert.ok(comments < commentLines(before), "comment lines decrease from the PR base");
 });
 
-// Measured before this compression at a82b5df97; comment count, not an executable digest.
-test("W1-T12405: comment compression preserves executable code", () => {
-  const source = readFileSync(join(REPO_ROOT, "src/lib/status-board.ts"), "utf8");
-  assert.ok(commentLines(source) < 645, "comment lines decrease from the pre-compression source (645)");
-  const before = compressionPinBase("src/lib/status-board.ts", import.meta.url);
-  if (before === undefined) return;
-  assertSameTokens(executableTokens(source), executableTokens(before), "executable tokens survive compression");
-  assert.equal(emittedDigest(source), emittedDigest(before), "emitted JavaScript and ASI behavior survive");
-  assert.ok(commentLines(source) < commentLines(before), "comment lines decrease from the PR base");
-});
