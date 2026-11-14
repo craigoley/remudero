@@ -3202,7 +3202,7 @@ export function followupProposalId(candidate: FollowupCandidate): string {
   return `followup:${candidate.entryId}`;
 }
 
-const FOLLOWUP_FILING_FALLBACK = "\nFiling: automatic, with operator fallback if refused.";
+const FOLLOWUP_FILING_FALLBACK = "; kept for the operator: automatic filing refused it)";
 
 /** Route harvested follow-ups through inbox.ts's single writer, `updateProposalRegistry`.
  * Named refusal arms: title-dedup (harvest), type-not-plan-shaped ({@link FOLLOWUP_TYPE_ROUTES}),
@@ -3288,8 +3288,7 @@ export function routeFollowupsToRegistry(harvest: FollowupHarvest, deps: Followu
           id: followupProposalId(c),
           summary:
             `follow-up harvest [${c.type}]: ${c.text} — from ${c.taskId} (run ${c.runId}` +
-            `${c.prUrl ? `, ${c.prUrl}` : ""}${c.headSha ? `, head ${c.headSha}` : ""})` +
-            (c.prUrl || c.headSha ? FOLLOWUP_FILING_FALLBACK : ""),
+            `${c.prUrl ? `, ${c.prUrl}` : ""}${c.headSha ? `, head ${c.headSha}` : ""})`,
           // Stated, never synthesized — see this function's own doc for why a fabricated
           // git-grep pattern would be worse than an honest empty set.
           evidenceAnchors: [] as EvidenceAnchor[],
@@ -3405,6 +3404,22 @@ export interface FollowupRegistryDeps {
     update: (current: Proposal[]) => Proposal[] | null,
     opts?: UpdateProposalRegistryOpts,
   ) => Proposal[] | null;
+}
+
+/** Mark the routed follow-ups automatic filing refused, so a source merge never retires them.
+ *  The mark sits inside the referent's parentheses, so the summary parsers still read it. */
+export function keepRefusedFollowupsForOperator(entryIds: readonly string[], deps: FollowupRegistryDeps): string[] {
+  const ids = new Set(entryIds.map(entryId => `followup:${entryId}`));
+  const marked: string[] = [];
+  (deps.updateRegistry ?? updateProposalRegistry)(deps.registryPath, (current) => {
+    const next = current.map(p => {
+      if (!ids.has(p.id) || !p.summary.endsWith(")") || p.summary.endsWith(FOLLOWUP_FILING_FALLBACK)) return p;
+      marked.push(p.id);
+      return { ...p, summary: p.summary.slice(0, -1) + FOLLOWUP_FILING_FALLBACK };
+    });
+    return marked.length > 0 ? next : null;
+  });
+  return marked;
 }
 
 /** Retire every routed follow-up whose originating task has merged — the missing counterpart to
