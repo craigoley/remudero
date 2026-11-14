@@ -28169,7 +28169,11 @@ function* landSealedTaskFiles(opts: GardenCheckoutOpts, paths: readonly string[]
   // W1-T12222: a file that is in the queue keeps the ids of its land, so a partly refused land of new files waits.
   const partly = opts.taskFilesOnly === true && paths.some((p) => result.landed.includes(p) || result.waiting.includes(p));
   const outcome = result.prUrl !== undefined && carried ? "opened" : queued || partly ? "waiting" : "not_landed";
-  const refused = [...result.refused, ...result.setAside].filter((r) => paths.includes(r.path)).map((r) => ({ path: r.path, reason: r.reason }));
+  const refused = [...result.refused, ...result.setAside].filter((r) => paths.includes(r.path)).map((r) => ({
+    path: r.path, reason: r.reason,
+    ...(r.reserved_id === undefined ? {} : { reserved_id: r.reserved_id }),
+    ...(r.id_release === undefined ? {} : { id_release: r.id_release }),
+  }));
   opts.log(`${opts.name}.garden_sealed_landing`, { outcome, paths, pr_url: outcome === "opened" ? result.prUrl : null, ...(refused.length ? { refused } : {}), ...(result.error ? { error: result.error } : {}) });
   if (outcome === "opened") return result.prUrl;
   if (outcome === "waiting") return { waiting: { paths: paths.filter((p) => result.landed.includes(p) || result.waiting.includes(p)), stateRoot: opts.taskFilesLanding!.stateRoot, ...(opts.taskFilesOnly === true ? { filed: true as const } : {}) } };
