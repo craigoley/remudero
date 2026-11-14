@@ -3881,7 +3881,10 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
     // being sent to resolve — BEFORE `review` is reassigned to this round's freshly computed verdict, so
     // `detectReviewFalseBlock` (after the review call, below) can tell a byte-identical re-block apart from real
     // progress. Keyed on the SAME worker-visible unmet set the fix rung actually dispatches (W1-T166).
-    const priorHeadSha = review.headSha;
+    // A landed push can leave merge mode active when CI times out. The next conflict round
+    // targets the head the gate observed, even though no new review updated review.headSha.
+    // Use that same head for the round's dispatch and completion rows as for its verdict.
+    const priorHeadSha = currentMergeConflict !== undefined ? currentPinnedSha ?? review.headSha : review.headSha;
     const roundLedger = (deps.ledgerLines ?? (() => readLedgerLines(deps.ledgerPath)))();
     const refutedFlake = flakeClaimsForHead(roundLedger, opts.taskId, priorHeadSha, prNumber).length > 0;
     const pendingScope = roundLedger.findLast((row) => row.step === "fix.scope_amendment" &&

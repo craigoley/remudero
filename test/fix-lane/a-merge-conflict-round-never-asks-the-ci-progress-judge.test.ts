@@ -156,25 +156,34 @@ describe("test/fix-lane/a-merge-conflict-round-never-asks-the-ci-progress-judge.
     });
   });
 
-  test("W1-T12541 criterion 3: a landed push observed by CI timeout prevents an old-head conflict loop", () =>
+  test("W1-T12541 criterion 3: two merge refusals after a landed push and CI timeout escalate at the new head", () =>
     withTempDir("w1-t12541-landed-timeout", async (root) => {
       const f = fixture(root, async () => ({ verdict: "escalate", loop: "ci", reason: "should not be asked" }));
-      f.run.deps.ledgerLines = () => [...EARLIER, ...conflictRound("prior-refusal", HEAD, "base-1", ["conflict.txt"]), ...f.rows];
       f.run.deps.harnessCommitForShellLessWorker = (input) => { input.onCommit?.("new-head"); return 1; };
       let mergeStarts = 0;
-      f.run.deps.startShellLessMergeConflictMerge = () => ++mergeStarts === 2
+      f.run.deps.startShellLessMergeConflictMerge = () => [2, 3].includes(++mergeStarts)
         ? { started: false, reason: "fetch of origin main failed" } : { started: true };
       let ciReads = 0;
       f.run.deps.waitForCiGreen = async () => ++ciReads === 1
         ? { state: "timeout", sha: "new-head" } : "green";
 
       const outcome = await runFixRung(f.run);
-      assert.equal(outcome.outcome, "fixed", outcome.reason);
-      assert.equal(mergeStarts, 3, "one refusal follows the landed push, then another round can proceed");
+      assert.equal(outcome.outcome, "escalated", outcome.reason);
+      assert.match(outcome.reason, /fix progress loop: conflict/);
+      assert.equal(mergeStarts, 3, "the landed push is followed by exactly two refused merge starts");
       assert.equal(f.rows.find((row) => row.step === "fix.done" && row.pushed_head_sha === "new-head")?.head_sha, HEAD);
       assert.equal(f.judged.length, 0);
-      assert.equal(progressRows(f.rows).filter((row) => row.head_sha === "new-head" && row.verdict === "continue").length, 2);
-      assert.equal(progressRows(f.rows).some((row) => row.verdict === "escalate"), false);
+      const refusals = f.rows.filter((row) => row.step === "fix.dispatch" && row.reason === "fetch of origin main failed");
+      assert.equal(refusals.length, 2);
+      assert.deepEqual(refusals.map((row) => row.head_sha), ["new-head", "new-head"]);
+      assert.deepEqual(refusals.map((row) => row.base_sha), ["base-1", "base-1"]);
+      assert.deepEqual(f.rows.filter((row) => row.step === "fix.done" && row.subtype === "commit_refused")
+        .map((row) => row.head_sha), ["new-head", "new-head"]);
+      const escalated = progressRows(f.rows).find((row) => row.verdict === "escalate");
+      assert.equal(escalated?.head_sha, "new-head");
+      assert.equal(escalated?.loop, "conflict");
+      assert.equal(escalated?.judge_skipped, "conflict-round");
+      assert.ok(refusals.every((row) => String(escalated?.reason).includes(String(row.round_id))));
     }));
 
   test("W1-T12541 criterion 4: a round outside merge-conflict mode asks the judge as before, and its unavailable verdict hands off", () =>
