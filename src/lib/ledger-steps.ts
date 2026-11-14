@@ -307,11 +307,11 @@ const SEED_ROWS: readonly SeedRow[] = [
     // W1-T12553: the daemon instances and hand runs share one GitHub App installation.
     step: "github.budget.throttled",
     meaning:
-      "This daemon instance held back its GitHub reads, at most once per reset window and reason. " +
+      "This daemon instance held back its GitHub reads, at most once per consumer and reset window. " +
       "\"share\": it spent its allowance, the remaining count less the write reserve divided by the " +
       "consumers on the installation. \"reserve\": the remaining count is in the write reserve. " +
       "\"refused\": GitHub refused a read for its rate limit. Writes never wait on this budget.",
-    writer: ["startDaemonInstallationBudget"],
+    writer: ["daemonCommand"],
     outcomes: ["share", "reserve", "refused"],
   },
   {

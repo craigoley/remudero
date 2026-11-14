@@ -65,14 +65,33 @@ export interface InstallationBudget {
   admit(): InstallationBudgetAdmit;
   /** Count one read against the allowance of the latest reading. */
   noteRead(): void;
+  /** Admit and count a transport read as one atomic operation across the daemon's threads. */
+  claimRead(): InstallationBudgetAdmit;
   /** A refusal, either ours (`admit` said no) or GitHub's (a rate-limit error). Adds at most one row per window. */
   noteThrottle(reason: "share" | "reserve" | "refused"): void;
   /** The allowance of the latest reading, or undefined when there is no limit. */
   allowance(): number | undefined;
+  /** Drain throttle evidence recorded by any thread sharing this budget. */
+  takeThrottleRows(): GithubBudgetThrottledRow[];
 }
 
 /** The throttle-row windows kept for de-duplication; older windows are dropped. */
 const KEPT_WINDOWS = 8;
+
+/** Shared with the daemon's read worker through its existing input. All fields are guarded by slot 0. */
+export function createInstallationBudgetState(): SharedArrayBuffer {
+  return new SharedArrayBuffer(BigInt64Array.BYTES_PER_ELEMENT * 12);
+}
+
+const enum Slot {
+  Lock, Remaining, Limit, Reset, Reads, ThrottleReset, ThrottleReason,
+  Pending, RowRemaining, RowLimit, RowAllowance, RowConsumers,
+}
+
+function withState<T>(state: BigInt64Array, fn: () => T): T {
+  while (Atomics.compareExchange(state, Slot.Lock, 0n, 1n) !== 0n) { /* short critical section */ }
+  try { return fn(); } finally { Atomics.store(state, Slot.Lock, 0n); }
+}
 
 export function createInstallationBudget(opts: {
   consumers: number | undefined;
@@ -81,6 +100,7 @@ export function createInstallationBudget(opts: {
   clock: Clock;
   /** Where each throttle row goes: the daemon writes it to the ledger. */
   onThrottle?: (row: GithubBudgetThrottledRow) => void;
+  sharedState?: SharedArrayBuffer;
 }): InstallationBudget {
   const consumers = opts.consumers !== undefined && Number.isInteger(opts.consumers) && opts.consumers > 0
     ? opts.consumers : undefined;
@@ -89,15 +109,37 @@ export function createInstallationBudget(opts: {
   let latest: InstallationBudgetReading | undefined;
   let reads = 0;
   const windows: string[] = [];
+  const shared = opts.sharedState === undefined ? undefined : new BigInt64Array(opts.sharedState);
+
+  const snapshot = (): { reading: InstallationBudgetReading | undefined; reads: number } => {
+    if (shared === undefined) return { reading: latest, reads };
+    return withState(shared, () => ({
+      reading: shared[Slot.Limit] > 0n ? {
+        remaining: Number(shared[Slot.Remaining]), limit: Number(shared[Slot.Limit]),
+        reset: Number(shared[Slot.Reset]), resource: BUDGET_RESOURCE,
+      } : undefined,
+      reads: Number(shared[Slot.Reads]),
+    }));
+  };
 
   const current = (): InstallationBudgetReading | undefined => {
-    if (latest === undefined) return undefined;
+    const reading = snapshot().reading;
+    if (reading === undefined) return undefined;
     // A reading whose reset has passed says nothing about the new window.
-    return latest.reset * 1000 > opts.clock.now() ? latest : undefined;
+    return reading.reset * 1000 > opts.clock.now() ? reading : undefined;
   };
   const reserveOf = (reading: InstallationBudgetReading): number => Math.ceil(reading.limit * reserveFraction);
   const allowanceOf = (reading: InstallationBudgetReading, shares: number): number =>
     Math.max(0, Math.floor((reading.remaining - reserveOf(reading)) / shares));
+  const decision = (reading: InstallationBudgetReading | undefined, spent: number): InstallationBudgetAdmit => {
+    if (consumers === undefined || reading === undefined || reading.reset * 1000 <= opts.clock.now()) return { ok: true };
+    const allowance = allowanceOf(reading, consumers);
+    if (reading.remaining <= reserveOf(reading)) {
+      return { ok: false, waitUntil: reading.reset, reason: "reserve", reading, allowance, reads: spent };
+    }
+    if (spent >= allowance) return { ok: false, waitUntil: reading.reset, reason: "share", reading, allowance, reads: spent };
+    return { ok: true };
+  };
 
   return {
     consumers,
@@ -106,29 +148,71 @@ export function createInstallationBudget(opts: {
       if (remaining === undefined || limit === undefined || reset === undefined) return;
       if (!Number.isFinite(remaining) || !Number.isFinite(limit) || !Number.isFinite(reset) || limit <= 0) return;
       if ((resource ?? BUDGET_RESOURCE) !== BUDGET_RESOURCE) return;
-      latest = { remaining, limit, reset, resource: resource ?? BUDGET_RESOURCE };
-      reads = 0;
+      if (shared === undefined) {
+        latest = { remaining, limit, reset, resource: resource ?? BUDGET_RESOURCE };
+        reads = 0;
+      } else withState(shared, () => {
+        shared[Slot.Remaining] = BigInt(Math.trunc(remaining));
+        shared[Slot.Limit] = BigInt(Math.trunc(limit));
+        shared[Slot.Reset] = BigInt(Math.trunc(reset));
+        shared[Slot.Reads] = 0n;
+      });
     },
     admit() {
-      const reading = current();
-      if (consumers === undefined || reading === undefined) return { ok: true };
-      const allowance = allowanceOf(reading, consumers);
-      if (reading.remaining <= reserveOf(reading)) {
-        return { ok: false, waitUntil: reading.reset, reason: "reserve", reading, allowance, reads };
-      }
-      if (reads >= allowance) return { ok: false, waitUntil: reading.reset, reason: "share", reading, allowance, reads };
-      return { ok: true };
+      const state = snapshot();
+      return decision(state.reading, state.reads);
     },
     noteRead() {
-      if (consumers !== undefined && current() !== undefined) reads += 1;
+      if (consumers !== undefined && current() !== undefined) {
+        if (shared === undefined) reads += 1;
+        else Atomics.add(shared, Slot.Reads, 1n);
+      }
+    },
+    claimRead() {
+      if (shared === undefined) {
+        const admitted = decision(latest, reads);
+        if (admitted.ok && consumers !== undefined && current() !== undefined) reads += 1;
+        return admitted;
+      }
+      return withState(shared, () => {
+        const reading = shared[Slot.Limit] > 0n ? {
+          remaining: Number(shared[Slot.Remaining]), limit: Number(shared[Slot.Limit]),
+          reset: Number(shared[Slot.Reset]), resource: BUDGET_RESOURCE,
+        } : undefined;
+        const admitted = decision(reading, Number(shared[Slot.Reads]));
+        if (admitted.ok && consumers !== undefined && reading !== undefined && reading.reset * 1000 > opts.clock.now()) {
+          shared[Slot.Reads] += 1n;
+        }
+        return admitted;
+      });
     },
     noteThrottle(reason) {
       if (consumers === undefined) return;
       const reading = current();
-      const window = `${reason === "refused" ? "refused" : "throttled"}:${reading?.reset ?? "unknown"}`;
-      if (windows.includes(window)) return;
-      windows.push(window);
-      if (windows.length > KEPT_WINDOWS) windows.shift();
+      const window = `${reading?.reset ?? "unknown"}`;
+      if (shared === undefined) {
+        if (windows.includes(window)) return;
+        windows.push(window);
+        if (windows.length > KEPT_WINDOWS) windows.shift();
+      } else {
+        const newRow = withState(shared, () => {
+          const key = BigInt(reading?.reset ?? -1);
+          if (shared[Slot.ThrottleReason] !== 0n && shared[Slot.ThrottleReset] === key) {
+            // The ledger has not drained this row yet: preserve the stronger GitHub refusal.
+            if (reason === "refused" && shared[Slot.Pending] === 1n) shared[Slot.ThrottleReason] = 3n;
+            return false;
+          }
+          shared[Slot.ThrottleReset] = key;
+          shared[Slot.ThrottleReason] = BigInt(reason === "share" ? 1 : reason === "reserve" ? 2 : 3);
+          shared[Slot.RowRemaining] = BigInt(reading?.remaining ?? -1);
+          shared[Slot.RowLimit] = BigInt(reading?.limit ?? -1);
+          shared[Slot.RowAllowance] = BigInt(reading === undefined ? -1 : allowanceOf(reading, consumers));
+          shared[Slot.RowConsumers] = BigInt(consumers);
+          shared[Slot.Pending] = 1n;
+          return true;
+        });
+        if (!newRow) return;
+      }
       const row: GithubBudgetThrottledRow = {
         step: GITHUB_BUDGET_THROTTLED_STEP,
         instance,
@@ -146,6 +230,25 @@ export function createInstallationBudget(opts: {
     allowance() {
       const reading = current();
       return consumers === undefined || reading === undefined ? undefined : allowanceOf(reading, consumers);
+    },
+    takeThrottleRows() {
+      if (shared === undefined) return [];
+      return withState(shared, () => {
+        if (shared[Slot.Pending] === 0n) return [];
+        shared[Slot.Pending] = 0n;
+        const reset = Number(shared[Slot.ThrottleReset]);
+        const remaining = Number(shared[Slot.RowRemaining]);
+        const limit = Number(shared[Slot.RowLimit]);
+        const allowance = Number(shared[Slot.RowAllowance]);
+        return [{
+          step: GITHUB_BUDGET_THROTTLED_STEP, instance,
+          reason: shared[Slot.ThrottleReason] === 1n ? "share" as const : shared[Slot.ThrottleReason] === 2n ? "reserve" as const : "refused" as const,
+          consumers: Number(shared[Slot.RowConsumers]),
+          ...(remaining < 0 ? {} : {
+            remaining, limit, reset: clockFromMillisFn(() => reset * 1000).iso(), allowance,
+          }),
+        }];
+      });
     },
   };
 }

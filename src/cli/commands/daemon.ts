@@ -19,8 +19,8 @@ import { execFileSync } from "node:child_process";
 import { execFileLoopBounded } from "../../lib/loop-bounded-child.js";
 import { GATEWAY_FETCH_TIMEOUT_MS } from "../../lib/git-fetch-retry.js";
 import { productionDispatchBreakJudge, productionFixProgressJudge } from "../../lib/sweep.js";
-import { configureGithubInstallationBudget, ghExec, ghJsonAsync, ghTextAsync } from "../../lib/github-transport.js";
-import { createInstallationBudget } from "../../lib/github-installation-budget.js";
+import { configureGithubInstallationBudget, ghExec, ghJsonAsync, ghTextAsync, takeGithubBudgetThrottles } from "../../lib/github-transport.js";
+import { createInstallationBudget, createInstallationBudgetState } from "../../lib/github-installation-budget.js";
 import { DEFAULT_HOST_INSTANCE_REGISTRY_PATH, installationConsumers } from "../../lib/instance-registry.js";
 import { GH_APP_INSTALLATION_ID_ENV } from "../../lib/github-app.js";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
@@ -1050,6 +1050,9 @@ export async function daemonCommand(
   let lastReadPlaneStep: string | undefined;
   let onMainEntryStep: ((step: string) => void) | undefined;
   const log = (step: string, extra: Record<string, unknown> = {}) => {
+    for (const { step: budgetStep, ...budgetRow } of takeGithubBudgetThrottles()) {
+      appendLedger(ledgerPath, { run_id: runId, task_id: "DAEMON", step: budgetStep, lane: "daemon", ...budgetRow });
+    }
     lastReadPlaneStep = step;
     appendLedger(ledgerPath, { run_id: runId, task_id: "DAEMON", step, lane: "daemon", ...extra });
     onMainEntryStep?.(step);
@@ -1350,7 +1353,10 @@ export async function daemonCommand(
   }
   // W1-T12239: the first tick's read needs only the token and the plan, so it starts here, before the lifetime
   // history, the lock and the adoption. The outer finally stops a plane that the cleanup list never took.
-  const readOptions: TickReadOptions = { owner: target.owner, repo: target.repo, config, ledgerPath, checkoutRoot: targetCheckoutRoot };
+  const readOptions: TickReadOptions = {
+    owner: target.owner, repo: target.repo, config, ledgerPath, checkoutRoot: targetCheckoutRoot,
+    ... (daemonInstallationBudgetInput === undefined ? {} : { githubInstallationBudget: daemonInstallationBudgetInput }),
+  };
   let inlineProducer: ReturnType<typeof tickReadProducer> | undefined;
   const readPlane = deps.githubFactory ? undefined : (deps.startReadPlane ?? startReadPlane)({
     // W1-T9722: the worker starts from the narrow tick-read entry (a current bundle when one is vouched for).
@@ -2704,6 +2710,13 @@ export async function daemonCommand(
 
 export const GITHUB_BUDGET_CONFIGURED_STEP = "github.budget.configured";
 
+let daemonInstallationBudgetInput: { state: SharedArrayBuffer; consumers: number; instance: string } | undefined;
+
+/** The daemon sends the same atomic budget to its read worker in the existing worker input. */
+export function daemonInstallationBudgetWorkerInput(): typeof daemonInstallationBudgetInput {
+  return daemonInstallationBudgetInput;
+}
+
 /** W1-T12553: the registry that names this host's installations: the selected copy, the host copy, then the checkout's. */
 export function daemonInstallationRegistry(repoRoot: string): { text: string; source: string } | undefined {
   const selected = runtimeInstanceRegistryText();
@@ -2731,6 +2744,7 @@ export function startDaemonInstallationBudget(
   const installationId = env[GH_APP_INSTALLATION_ID_ENV]?.trim();
   const instance = env.RMD_INSTANCE_NAME?.trim() || "unknown";
   const unset = (reason: string, extra: Record<string, unknown> = {}): void => {
+    daemonInstallationBudgetInput = undefined;
     configureGithubInstallationBudget(undefined);
     log(GITHUB_BUDGET_CONFIGURED_STEP, { outcome: "unconfigured", instance, reason, ...extra });
   };
@@ -2745,11 +2759,13 @@ export function startDaemonInstallationBudget(
   }
   if (read === undefined) return unset("registry_unreadable", { installation_id: installationId });
   if (consumers === undefined) return unset("no_instance_on_installation", { installation_id: installationId, source: read.source });
+  const state = createInstallationBudgetState();
+  daemonInstallationBudgetInput = { state, consumers, instance };
   configureGithubInstallationBudget(createInstallationBudget({
     consumers,
     instance,
     clock,
-    onThrottle: ({ step, ...row }) => log(step, row),
+    sharedState: state,
   }));
   log(GITHUB_BUDGET_CONFIGURED_STEP, { outcome: "configured", instance, installation_id: installationId, consumers, source: read.source });
 }
