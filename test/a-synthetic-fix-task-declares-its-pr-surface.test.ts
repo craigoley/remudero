@@ -32,6 +32,7 @@ async function fixRound(t: TestContext, options: {
   const rows: Array<{ step: string } & Record<string, unknown>> = [];
   const calls = { spawn: 0, commit: 0, push: 0, account: 0, ci: 0, review: 0 };
   const gitCalls: string[][] = [];
+  const evidenceCalls: string[][] = [];
   let declaredPaths: readonly string[] = [];
   let undeclared: readonly string[] = [];
   let diffReads = 0;
@@ -74,6 +75,13 @@ async function fixRound(t: TestContext, options: {
       say: () => {}, account: (result) => { calls.account++; return result; },
       readHeadShaForProvenance: () => "head-a", commitsAhead: () => 0,
       worktreeHasUncommittedChanges: () => false,
+      scopeAmendmentGit: async (_worktree, args) => {
+        evidenceCalls.push([...args]);
+        if (args.join(" ") === "ls-tree -r --name-only origin/main") return options.changedPaths.join("\n");
+        if (args.join(" ") === "rev-list head-a..head-b") return "head-b";
+        if (args.join(" ") === "show -s --format=%B head-b") return "fix(src): repair the check";
+        throw new Error(`fixture: unexpected evidence read ${args.join(" ")}`);
+      },
       harnessCommitForShellLessWorker: (input) => {
         declaredPaths = input.declaredPaths;
         const committed = commitWorkerEdits(root, declaredPaths, "fix(src): repair the check", {
@@ -87,11 +95,12 @@ async function fixRound(t: TestContext, options: {
         undeclared = committed.undeclared;
         if (!committed.committed) input.onRefusal?.(committed.reason!, committed.undeclared);
         calls.commit += Number(committed.committed);
+        if (committed.sha) input.onCommit?.(committed.sha, committed.undeclared);
         return Number(committed.committed);
       },
     },
   });
-  return { task, outcome, calls, rows, declaredPaths, undeclared, gitCalls };
+  return { task, outcome, calls, rows, declaredPaths, undeclared, gitCalls, evidenceCalls };
 }
 
 test("W1-T4074: a PR-N fix commits a change to a file the PR already touches", async (t) => {
@@ -118,8 +127,14 @@ test("W1-T4074: a retro PR fix declares the retro lane files", async (t) => {
     await t.test(branch, async (t) => {
       const result = await fixRound(t, { branch, changedPaths: ["MASTER-PLAN.md"], edits: ["MASTER-PLAN.md"], failingGate: false });
       assert.deepEqual([...new Set(result.declaredPaths)], ["MASTER-PLAN.md"]);
-      assert.equal(result.outcome.outcome, "fixed");
+      assert.equal(result.outcome.outcome, "fixed", result.outcome.standDownReason);
       assert.equal(result.calls.commit, 1);
+      assert.equal(result.calls.push, 1);
+      assert.deepEqual([...new Map(result.evidenceCalls.map(args => [args.join(" "), args])).values()], [
+        ["ls-tree", "-r", "--name-only", "origin/main"],
+        ["rev-list", "head-a..head-b"],
+        ["show", "-s", "--format=%B", "head-b"],
+      ]);
     });
   }
 });
