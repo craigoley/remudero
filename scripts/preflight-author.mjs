@@ -329,23 +329,30 @@ function stagePassedAndMeasured(step, previous) {
     summary?.pass > 0 && summary.fail === 0 && summary.cancelled === 0;
 }
 
-/** A refused run may still have a reusable prefix when it stopped at a failed stage or suite admission. */
-function refusedAfterReusablePrefix(previous) {
+/** A stage failure or admission refusal does not invalidate the stages measured before it. */
+function stoppedAtStageOrAdmission(previous) {
   const steps = previous.steps;
-  if (previous.verdict !== 'refused' || typeof previous.error !== 'string' || !Array.isArray(steps) || steps.length === 0) return false;
+  if (typeof previous.error !== 'string' || !Array.isArray(steps) || steps.length === 0) return false;
+  if (previous.verdict === 'over-capacity') {
+    const capacity = previous.hostCapacity?.at(-1);
+    return capacity?.state === 'not-run' && typeof capacity.stage === 'string' &&
+      previous.error.startsWith(`Mac author capacity NOT_RUN before ${capacity.stage}: `);
+  }
+  if (previous.verdict !== 'refused') return false;
   if (steps.at(-1)?.ok === false) return true;
+  const staticNote = previous.staticAdmission?.note;
+  if (previous.staticAdmission?.outcome === 'slot' && typeof staticNote === 'string' &&
+      previous.error === `author static stage NOT_RUN (${staticNote})`) return true;
   const slotNote = previous.testSlot?.note;
   return previous.error === `author preflight NOT_RUN (${slotNote})` && typeof slotNote === 'string' &&
-    slotNote.startsWith('NOT_RUN:') && steps.some((step) => step.name === 'census-precheck') &&
-    steps.some((step) => step.name === 'static-preflight') && !steps.some((step) => step.name.startsWith('affected-tests')) &&
-    steps.every((step) => stagePassedAndMeasured(step, previous));
+    slotNote.startsWith('NOT_RUN:');
 }
 
 /**
  * W1-T12166 — the stages of the last receipt of this checkout that a new run need not run again.
  * OBSERVED 2026-11-10..13: 11 Azure preflights failed only on suites that pass alone, and each second run
  * repeated 15 to 20 minutes of census and static work on the same commit.
- * RULE: reuse only when the last run completed or refused after a recorded failed stage or at suite admission, its dependency record
+ * RULE: reuse only when the last run completed or stopped at a failed stage or admission, its dependency record
  * did not change while it ran, and the head, base, Node version, dependency record and selection are all the
  * same. Reuse the stages in their order and stop at the first one that failed, did not run or was not measured:
  * every later stage runs.
@@ -354,7 +361,7 @@ export function reusableAuthorStages(previous, current) {
   const none = (reason) => ({ state: 'none', reason, stages: [] });
   if (!previous || previous.unreadable) return none(`no readable last receipt (${previous?.unreadable ?? 'absent'})`);
   if (typeof previous.startedAt !== 'string') return none('the last receipt names no run start time');
-  const stageRefusal = refusedAfterReusablePrefix(previous);
+  const stageRefusal = stoppedAtStageOrAdmission(previous);
   if (previous.dryRun !== false || (previous.error !== undefined && !stageRefusal) ||
       (!['passed', 'failed', 'over-capacity'].includes(previous.verdict) && !stageRefusal)) {
     return none(`the last run ended ${previous.verdict ?? 'running'}${previous.error ? `: ${previous.error}` : ''}`);

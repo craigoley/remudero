@@ -6,6 +6,9 @@ import { after, test } from "node:test";
 
 // @ts-ignore the executable .mjs module has no declaration file.
 import * as authorModule from "#scripts/preflight-author.mjs";
+// @ts-ignore the executable .mjs module has no declaration file.
+import { MacAuthorCapacityRefusal } from "#scripts/lib/mac-author-admission.mjs";
+import type { TestSlotOptions } from "#src/lib/test-slot.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
 import { REPO_ROOT as ROOT } from "#test/helpers/repo-root.js";
@@ -16,7 +19,7 @@ type Step = { name: string; ok: boolean; exitCode?: number | null; startedAt?: s
 type Receipt = Record<string, unknown> & { verdict: string; startedAt: string; steps: Step[]; suites: string[];
   pushEligible: boolean; pushEligibleReason: string; stageReuse?: { state: string; reason: string; reused: string[] } };
 const author = authorModule as unknown as {
-  main: (argv: string[], deps: { root: string; select?: () => unknown; host?: () => unknown; enqueueTestSlot?: () => unknown }) => number;
+  main: (argv: string[], deps: RunDependencies & { root: string; select?: () => unknown; host?: () => unknown }) => number;
   reusableAuthorStages: (previous: unknown, current: unknown) => { state: string; reason: string; stages: Step[] };
   authorPushEligibility: (receipt: unknown) => { pushEligible: boolean; pushEligibleReason: string };
 };
@@ -98,12 +101,13 @@ function fixture(opts: { otherCostMs?: number; docsInput?: boolean } = {}) {
 }
 
 type Fixture = ReturnType<typeof fixture>;
+type RunDependencies = { enqueueTestSlot?: () => unknown; testSlot?: TestSlotOptions; admitHost?: (stage: string) => unknown };
 const select = () => ({ fullRun: false, suites: ["test/leaf.test.ts", "test/other.test.ts"], reasons: ["fixture"], recentOnly: { floor: [] } });
 const host = () => ({ cores: 8, load1: 0, headroomBytes: 8 * 1024 ** 3 });
 const HUGE = 10 * 60 * 60 * 1000;
 
 /** One real author run: which stages ran (from their own log lines), what main returned and the receipt it wrote. */
-function run(f: Fixture, red: string[] = [], deps: { enqueueTestSlot?: () => unknown } = {}) {
+function run(f: Fixture, red: string[] = [], deps: RunDependencies = {}) {
   rmSync(f.red, { recursive: true, force: true });
   mkdirSync(f.red);
   for (const stage of red) writeFileSync(join(f.red, stage), "");
@@ -143,6 +147,42 @@ test("W1-T12166 criterion 1: a second run on the same head, base, node, dependen
   assert.equal(second.status, 0);
   assert.deepEqual(second.receipt.stageReuse?.reused, ["census-precheck", "static-preflight"]);
 });
+
+for (const refusal of ["static admission", "Mac capacity"] as const) {
+  test(`W1-T12166 criterion 1: a ${refusal} refusal preserves the measured prefix for the next run`, () => {
+    const f = fixture();
+    const deps: RunDependencies = refusal === "static admission"
+      ? { testSlot: { privateParentPolicy: "require-entry-protection" } }
+      : { admitHost: (stage) => { throw new MacAuthorCapacityRefusal(stage,
+        { state: "not-run", platform: "darwin", reasons: ["fixture capacity unavailable"] }); } };
+    const first = run(f, [], deps);
+    assert.equal(first.status, refusal === "static admission" ? 1 : 3);
+    assert.equal(first.receipt.verdict, refusal === "static admission" ? "refused" : "over-capacity");
+    assert.match(String(first.receipt.error), refusal === "static admission"
+      ? /^author static stage NOT_RUN/ : /^Mac author capacity NOT_RUN before static-preflight:/);
+    assert.deepEqual(first.ran, ["census"], "admission refused before static or tests ran");
+    assert.equal(first.receipt.pushEligible, false);
+    const provenance = first.receipt.dependencyProvenance as { before: unknown; after: unknown };
+    assert.deepEqual(provenance.after, provenance.before);
+    for (const field of ["headSha", "baseSha", "node", "selection", "suites"]) {
+      assert.deepEqual(author.reusableAuthorStages(first.receipt, { ...first.receipt, [field]: null }).stages, [], field);
+    }
+    assert.deepEqual(author.reusableAuthorStages({ ...first.receipt,
+      dependencyProvenance: { before: provenance.before, after: { state: "absent" } } }, first.receipt).stages, []);
+
+    const stillRefused = run(f, [], deps);
+    assert.deepEqual(stillRefused.ran, [], "a second refusal retains the measured census without rerunning it");
+    assert.equal(stillRefused.receipt.pushEligible, false);
+    const second = run(f);
+    assert.deepEqual(second.receipt.stageReuse?.reused, ["census-precheck"]);
+    assert.deepEqual(second.ran, ["static", "tests"], "the first unrun stage and every later stage run");
+    assert.deepEqual(names(second.receipt), [["census-precheck", true, true], ["static-preflight", true, false], ["affected-tests", true, false]]);
+    assert.equal(step(second.receipt, "census-precheck")?.reused?.runStartedAt, first.receipt.startedAt);
+    assert.equal(second.receipt.verdict, "passed");
+    assert.equal(second.status, 0);
+    assert.equal(second.receipt.pushEligible, true, second.receipt.pushEligibleReason);
+  });
+}
 
 test("W1-T12166 criterion 2: the new receipt marks each reused stage as reused and names the time of the run that measured it", () => {
   const { first, second } = flakeThenGreen();
