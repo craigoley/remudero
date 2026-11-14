@@ -25,7 +25,8 @@ import { loadPlan, type Plan, type Task } from "#src/lib/plan.js";
 import { QUEUE_JUDGE_SCORECARD_STEP, queueJudgeAvailability } from "#src/lib/queue-judge-gardener.js";
 import { readLedgerLines } from "#src/lib/status.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
-import type { RunResult } from "#src/run-task.js";
+
+type RunResult = Awaited<ReturnType<NonNullable<DaemonDeps["runOne"]>>>;
 
 const HOUR = 3_600_000;
 const NOW = Date.parse("2026-11-13T12:00:00.000Z");
