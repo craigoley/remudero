@@ -376,7 +376,7 @@ import { reconcileManagedImprovementEffects } from "./lib/opportunity-outcomes.j
 import { classifyGardenerStep, productionGardenerOverseerPorts, runGardenerOverseer } from "./lib/gardener-overseer.js";
 import { planGardenSpec } from "./lib/plan-gardener.js";
 import { backlogGardenSpec } from "./lib/backlog-gardener.js";
-import { queueJudgeGardenSpec, type QueueJudgeSources } from "./lib/queue-judge-gardener.js";
+import { queueJudgeGardenSpec, queueJudgeRouteWindow, type QueueJudgeSources } from "./lib/queue-judge-gardener.js";
 import { redesignGardenSpec } from "./lib/redesign-gardener.js";
 import { SCOUT_WINDOW_MS, scoutGardenSpec } from "./lib/scout-gardener.js";
 import { gateGardenSpec, loadGateProbes } from "./lib/gate-gardener.js";
@@ -28330,11 +28330,15 @@ export function issueRevalidationRunTaskPorts(
 export function queueJudgeRunTaskPorts(
   ctx: { owner: string; repo: string; repoRoot: string; stateDir: string; root: string; log: (step: string, extra?: Record<string, unknown>) => void },
   seams: { spawn?: Parameters<typeof issueRevalidationJudgeText>[0]["spawn"]; openBoard?: typeof readOpenBoardSnapshot } = {},
-): Pick<QueueJudgeSources, "judgeText" | "openPrNumbers"> {
+): Pick<QueueJudgeSources, "judgeText" | "openPrNumbers" | "promptWindow"> {
   const { owner, repo, repoRoot, stateDir, root, log } = ctx;
   const judge = issueRevalidationRunTaskPorts({ owner, repo, repoRoot, stateDir, log }, { spawn: seams.spawn });
   return {
     judgeText: (prompt) => judge.judgeText(prompt, 0),
+    promptWindow: () => {
+      const mounts = loadMounts(mountsPath(repoRoot));
+      return queueJudgeRouteWindow(mounts.escalation_judge ?? resolveRiskJudgeMount(mounts), mounts.capabilities);
+    },
     openPrNumbers: () => {
       const open = (seams.openBoard ?? readOpenBoardSnapshot)(root, owner, repo);
       if (!open.ok) throw new Error(`queue judge: the open-PR snapshot is unavailable (${open.reason})`);

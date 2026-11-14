@@ -468,13 +468,16 @@ test("W1-T9925: the daemon's ports judge on the escalation mount and read the op
   const spawned: Array<Record<string, unknown>> = [];
   let board: ReturnType<typeof readOpenBoardSnapshot> = { ok: true, snapshot: { repository: "acme/remudero", savedAt: iso(NOW), rows: [{ number: 41 }, { number: 42 }] } } as never;
   const ports = queueJudgeRunTaskPorts({ owner: "acme", repo: "remudero", repoRoot: process.cwd(), stateDir, root: stateDir, log: () => {} }, {
-    spawn: (async (args: Record<string, unknown>) => { spawned.push(args); return { text: '{"moves":[]}' }; }) as never,
+    spawn: (async (args: Record<string, unknown>) => { spawned.push(args); return { text: '{"moves":[]}', subtype: "success" }; }) as never,
     openBoard: () => board,
   });
   assert.equal(await ports.judgeText("the prompt"), '{"moves":[]}');
   assert.deepEqual(spawned[0]!.tools, [], "the judge is tool-less");
   assert.equal(spawned[0]!.prompt, "the prompt");
   assert.deepEqual([...ports.openPrNumbers()].sort(), [41, 42]);
+  // W1-T12549: the prompt bound follows the window of the deployment the route picks for the judge's mount.
+  const window = ports.promptWindow();
+  assert.equal(typeof window.tokens, "number", JSON.stringify(window));
   board = { ok: false, reason: "open snapshot is incomplete" };
   assert.throws(() => ports.openPrNumbers(), /open-PR snapshot is unavailable \(open snapshot is incomplete\)/);
 });
