@@ -55,10 +55,11 @@ attachments:
   - https://github.com/craigoley/remudero-console/blob/0dfef7307612b2b5bd417ac4a43b4aaef341baf1/app/inbox/_components/ThreadMailbox.tsx
   - https://github.com/craigoley/remudero-console/blob/0dfef7307612b2b5bd417ac4a43b4aaef341baf1/tests/unit/inbox-evidence-repository-scope.test.tsx
 origin: repair#console-inbox-foreign-evidence
-status: new
+status: rejected
 reply_to: null
 proposal_pr: null
 summary: null
 expansion: null
 submission_key: console-followup:inbox-foreign-evidence:20261027-v1
 thread_id: null
+answered_by: null
