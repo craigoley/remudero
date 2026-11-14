@@ -2975,7 +2975,7 @@ export function startDaemonInstallationBudget(
   const named = env.RMD_INSTANCE_NAME?.trim();
   let instance = named || "unknown";
   let instanceReason = "no_registry";
-  const who = (): Record<string, unknown> => instance === "unknown" ? { instance, instance_reason: instanceReason } : { instance };
+  const who = (): Record<string, unknown> => !named && instance === "unknown" ? { instance, instance_reason: instanceReason } : { instance };
   const unset = (reason: string, extra: Record<string, unknown> = {}): void => {
     daemonInstallationBudgetInput = undefined;
     configureGithubInstallationBudget(undefined);

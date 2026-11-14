@@ -106,9 +106,26 @@ test("W1-T12670 criterion 3: with no RMD_INSTANCE_NAME the instance is the one l
   assert.equal(several?.instance, "unknown");
   assert.equal(several?.instance_reason, "several_registry_matches");
 
-  const named = configuredRow(checkout, { GH_APP_INSTALLATION_ID: INSTALLATION, RMD_INSTANCE_NAME: "site" });
-  assert.equal(named?.instance, "site", "RMD_INSTANCE_NAME wins over the repo match");
-  assert.equal("instance_reason" in (named ?? {}), false);
+  for (const instance of ["site", "unknown"]) {
+    const env = { GH_APP_INSTALLATION_ID: INSTALLATION, RMD_INSTANCE_NAME: instance };
+    assert.deepEqual(configuredRow(checkout, env), {
+      outcome: "configured", instance, installation_id: INSTALLATION, consumers: 4, source: "checkout",
+    }, "RMD_INSTANCE_NAME wins over the repo match without adding instance_reason");
+    assert.deepEqual(configuredRow(checkout, { RMD_INSTANCE_NAME: instance }), {
+      outcome: "unconfigured", instance, reason: "no_installation_id",
+    });
+    assert.deepEqual(configuredRow(() => undefined, env), {
+      outcome: "unconfigured", instance, reason: "registry_unreadable", installation_id: INSTALLATION,
+    });
+    assert.deepEqual(configuredRow(() => { throw new Error("registry denied"); }, env), {
+      outcome: "unconfigured", instance, reason: "registry_unreadable",
+      installation_id: INSTALLATION, error: "registry denied",
+    });
+    assert.deepEqual(configuredRow(() => ({ text: OMITTED_IDS, source: "selected" }), env), {
+      outcome: "unconfigured", instance, reason: "no_instance_on_installation",
+      installation_id: INSTALLATION, source: "selected",
+    });
+  }
 });
 
 test("W1-T12670 criterion 4: omitted installation ids count only on the checkout fallback, and only as more consumers", () => {
