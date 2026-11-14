@@ -122,7 +122,7 @@ test("W1-T12548 criterion 4: an own-red episode open longer than FLOW_OWN_RED_OP
   assert.equal(alone.eligible, true, "no cleared episode is needed");
 });
 
-test("W1-T12548 criterion 5: a garden pass whose costliest eligible cause is owned by NONE files the next cause", (t) => {
+test("W1-T12548 follow-up: a garden pass skips eight unfileable causes and files the ninth cause it can file", (t) => {
   const redChecks = ["ci-shard", "mutation-ratchet", "lint-plan", "coverage-ratchet", "acceptance-author-gate", "rule-checks", "test-slow", "security-merge-policy"];
   const unownedCauses = redChecks.flatMap((check, index) => {
     const reason = `plan-only PR is red on ${check}`;
