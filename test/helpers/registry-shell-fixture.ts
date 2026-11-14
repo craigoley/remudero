@@ -40,6 +40,8 @@ export function registryShellFixture(t: { after(fn: () => void): void }) {
   const bin = join(root, "transports"), state = join(root, "state-root"), output = join(root, "output");
   for (const dir of [bin, output, join(state, "state"), join(state, "daemon-install", ".git"),
     join(state, "remudero", ".git"), join(root, "home"), join(root, "cgroups")]) mkdirSync(dir, { recursive: true });
+  mkdirSync(join(root, "config"), { mode: 0o700 });
+  writeFileSync(join(root, "config/config.json"), '{"workerProviders":["claude"]}\n', { mode: 0o600 });
   // The maintained script directory is used verbatim. No production state or real git is reachable.
   symlinkSync(join(REPO_ROOT, "deploy"), join(state, "daemon-install", "deploy"));
   writeFileSync(join(state, "state", "ledger.ndjson"), '{"step":"daemon.idle","ts":"2026-10-29T00:00:00Z"}\n');
@@ -124,7 +126,7 @@ if (bin === "docker") {
     if (args.includes("--entrypoint") && args[args.indexOf("--entrypoint") + 1] === "node") {
       const backupMount = args.find(a => a.endsWith(":/rmd-snapshot/backups"));
       if (!backupMount) process.exit(96);
-      const archive = "state-backup.2026-10-30T00-00-00-000Z";
+      const archive = "state-backup." + new Date().toISOString().replace(/[:.]/g, "-");
       const dir = path.join(backupMount.slice(0, -":/rmd-snapshot/backups".length), archive);
       fs.mkdirSync(dir, {recursive:true}); fs.writeFileSync(path.join(dir, "ledger.ndjson"), "fixture\n");
       out("RMD_STATE_SNAPSHOT " + archive + " 1 0 0 0");
