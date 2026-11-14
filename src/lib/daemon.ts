@@ -83,6 +83,7 @@ import {
   type TargetJobRecord,
   type TargetJobStatus,
   machineShareStarts,
+  MACHINE_SHARE_WINDOW_MS,
   MACHINE_SHARE_STEP,
   type MachineShareInput,
   type MachineShareStart,
@@ -173,7 +174,7 @@ import type { GithubPostureFinding } from "./github-posture.js";
 import { clockFromDateFn, clockFromIsoFn, fixedClock, loopAvailableDeadline, systemClock, type Clock } from "../lib/clock.js";
 import { createNearLimitHeapTelemetry, NEAR_HEAP_FILE, type NearLimitHeapTelemetry, type NearLimitSample } from "./daemon-heap-near-limit.js";
 import { createHeapAdmissionHold, type HeapAdmissionHoldLatch, type HeapAdmissionHoldMode, type HeapHoldTrace } from "./daemon-heap-admission-hold.js";
-import { readLedgerUnionRecordsSync } from "./ledger-union.js";
+import { createLedgerRotationMemo, readLedgerUnionRecordsMemoized, readLedgerUnionRecordsSync } from "./ledger-union.js";
 import { reportRetirableWorktrees, type WorktreeRetireOptions } from "./worktree-retire.js";
 import { createGateObservationState, observeGate } from "./gate-observations.js";
 import { getHeapStatistics } from "node:v8";
@@ -5183,13 +5184,28 @@ export async function runDaemon(
   let lastOverlapShadowSignature = "[]";
   let lastSecondaryCatalogShadowSignature: string | undefined;
   let lastMachineShareSignature: string | undefined;
-  const machineShareFor = (plan: Plan, lines: readonly string[] | undefined, startedSince: readonly MachineShareStart[] = []): MachineShareInput | undefined => {
+  const machineShareStateDir = deps.fleetLane?.stateDir ?? deps.plainBackfill?.stateDir;
+  const machineShareRotations = createLedgerRotationMemo((rows) => rows.filter((row) => row.step === "run.start"), { pattern: /run\.start/ });
+  const machineShareRowsFor = async (lines: readonly string[] | undefined): Promise<readonly Record<string, unknown>[] | undefined> => {
     if (lines === undefined) return undefined;
-    const nowMs = daemonClock.now();
     const rows = restartCycleLedgerRows(lines.filter((line) => line.includes("run.start") || line.includes("queue_judge."))).rows;
+    if (machineShareStateDir === undefined) return rows;
+    const read = await readLedgerUnionRecordsMemoized(machineShareStateDir, machineShareRotations, {
+      step: ["run.start"], sinceTs: fixedClock(daemonClock.now() - MACHINE_SHARE_WINDOW_MS).iso(),
+      refuseIncomplete: true, readLiveRecords: () => rows,
+    });
+    if (!read.ok) {
+      log("dispatch.machine_share_unreadable", { unread: read.unread });
+      return undefined;
+    }
+    return [...rows.filter((row) => row.step !== "run.start"), ...read.rows];
+  };
+  const machineShareFor = (plan: Plan, rows: readonly Record<string, unknown>[] | undefined, startedSince: readonly MachineShareStart[] = []): MachineShareInput | undefined => {
+    if (rows === undefined) return undefined;
+    const nowMs = daemonClock.now();
     const starts = machineShareStarts(rows, plan.byId, nowMs);
     return {
-      queueJudgeStaleMs: queueJudgeAvailability(rows, nowMs).staleMs, starts: starts && [...starts, ...startedSince],
+      queueJudgeStaleMs: queueJudgeAvailability(rows, nowMs).staleMs, starts: [...starts, ...startedSince],
       onMoved: (task, move) => {
         const signature = `${task.id}:${move.machine_starts}:${move.starts}`;
         if (signature === lastMachineShareSignature) return;
@@ -7708,13 +7724,14 @@ export async function runDaemon(
         tickRunBranchListing, readRunBranchEvidence(), resumableHandoffs,
         lazyClosedUnmerged(deps.readClosedRunBranchPrs),
       );
+      const tickMachineShareRows = await machineShareRowsFor(tickLedgerLines);
       const dispatchOpts: NextRunnableOpts = {
       onPassedOver: observePassedOver("tick"),
       priorityBackfill,
       onDeferredForPriority: logPriorityDeferral,
       onPriorityReservationReleased: logPriorityRelease,
       dispatchValueContext: deps.buildDispatchValueContext?.(planForBatch, isMerged),
-      machineShare: machineShareFor(planForBatch, tickLedgerLines),
+      machineShare: machineShareFor(planForBatch, tickMachineShareRows),
       beginSelectionPass: deps.beginSelectionPass,
       isOpenPr: deps.isOpenPr,
       // A run the harness yielded before its PR is walked ahead of fresh starts, so a yield never costs its queue place.
@@ -8413,7 +8430,7 @@ export async function runDaemon(
             ...dispatchOpts,
             ...runBranchDispatchOpts(runBranchState, planOnlyReceiptsThisTick, log, reportedRunBranchReleases),
             dispatchValueContext: deps.buildDispatchValueContext?.(snapshot.plan, snapshot.isMerged),
-            machineShare: machineShareFor(snapshot.plan, tickLedgerLines, phaseStarts),
+            machineShare: machineShareFor(snapshot.plan, tickMachineShareRows, phaseStarts),
             // Re-read at each refill: a lane that settled since the tick began may have written or spent a receipt.
             resumableTaskIds: new Set(resumableHandoffs.keys()),
             excludeIds: new Set([...(dispatchOpts.excludeIds ?? []), ...pendingMergedCredit, ...passIds,

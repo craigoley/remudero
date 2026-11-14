@@ -10,7 +10,6 @@ import { headroomExhausted, UNREADABLE_DEGRADED_LIMIT } from "./headroom.js";
 import type { UsageSnapshot } from "./headroom.js";
 import type { CostGovernorResult, MemoryGovernorResult, QueueGovernorResult } from "./sweep.js";
 import { checkDispatchGovernors, checkNewBuildReservation, consultMemoryReads, governorDeferPayload, newBuildReservationPayload, type DispatchGovernorDeps, type DispatchGovernorVerdict, type MemoryReadHold, type MemoryReadTracker, type NewBuildReservationVerdict } from "./dispatch-governor.js";
-import { MAX_RETAINED_LINES_PER_STEP } from "./ledger.js";
 import { RELEASE_LEDGER_STEP, unmetDependencies, unmetTaskPrecondition, type Plan, type Task, type TaskPreconditionOptions, type UnmetTaskPrecondition } from "./plan.js";
 import {
   NO_OBSERVED_SCOPE,
@@ -442,21 +441,16 @@ export interface MachineShareInput {
   onMoved?: (task: Task, move: MachineShareMove) => void;
 }
 
-/** The run starts in the trailing {@link MACHINE_SHARE_WINDOW_MS}, each with its task's author class. Rotation keeps
- *  only the newest {@link MAX_RETAINED_LINES_PER_STEP} starts, so when the rows hold that many and none is older
- *  than the window, older starts in the window may be gone: the result is undefined, not a partial count. */
-export function machineShareStarts(rows: readonly Record<string, unknown>[], tasksById: ReadonlyMap<string, Task>, nowMs: number): MachineShareStart[] | undefined {
+/** The caller supplies complete start evidence, including rotations; count every start in the trailing window. */
+export function machineShareStarts(rows: readonly Record<string, unknown>[], tasksById: ReadonlyMap<string, Task>, nowMs: number): MachineShareStart[] {
   const starts: MachineShareStart[] = [];
-  let total = 0, reachesWindowStart = false;
   for (const r of rows) {
     if (r.step !== "run.start" || typeof r.task_id !== "string" || typeof r.ts !== "string") continue;
     const at = Date.parse(r.ts);
-    total++;
-    if (nowMs - at > MACHINE_SHARE_WINDOW_MS) reachesWindowStart = true;
     if (!(at <= nowMs && nowMs - at <= MACHINE_SHARE_WINDOW_MS)) continue;
     starts.push({ taskId: r.task_id, authorClass: tasksById.get(r.task_id)?.author_class, atMs: at });
   }
-  return reachesWindowStart || total < MAX_RETAINED_LINES_PER_STEP ? starts : undefined;
+  return starts;
 }
 
 /** INVARIANT the-share-never-grants-eligibility: `ordered` is already the eligible set, and only its order changes. */

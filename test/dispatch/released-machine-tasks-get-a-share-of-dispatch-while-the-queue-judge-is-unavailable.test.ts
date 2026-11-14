@@ -25,6 +25,7 @@ import { loadPlan, type Plan, type Task } from "#src/lib/plan.js";
 import { QUEUE_JUDGE_SCORECARD_STEP, queueJudgeAvailability } from "#src/lib/queue-judge-gardener.js";
 import { readLedgerLines } from "#src/lib/status.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { writeLedger } from "#test/helpers/ledger-fixture.js";
 
 type RunResult = Awaited<ReturnType<NonNullable<DaemonDeps["runOne"]>>>;
 
@@ -125,6 +126,23 @@ test("W1-T12551 criterion 2: a stale judge and machine starts below the share pu
   assert.equal(nextRunnable(plan, notMerged, { machineShare: stale({ starts: [] }) })?.id, "W1-T40", "no starts is below the share");
 });
 
+for (const count of [199, 200]) {
+  test(`W1-T12551 criterion 2: ${count} operator starts and zero machine starts still promote the longest wait`, () => {
+    const plan = planOf(shard("W1-T1"), shard("W1-T40", { machine: true, priority: 3 }), shard("W1-T50", { machine: true, priority: 3 }));
+    const rows = Array.from({ length: count }, (_, i) => ({
+      ts: iso(NOW - 10 * HOUR + i * 60_000), step: "run.start", task_id: "W1-T1", run_id: `operator-${i}`,
+    }));
+    const starts = machineShareStarts(rows, plan.byId, NOW);
+    assert.equal(starts?.length, count, "complete trailing-day evidence has no throughput cutoff");
+    const context = ages([["W1-T40", 2 * HOUR], ["W1-T50", 30 * HOUR]]);
+    assert.deepEqual(ids(runnableCandidates(plan, notMerged, 3, {
+      machineShare: stale({ starts }), dispatchValueContext: context,
+    })), ["W1-T50", "W1-T1", "W1-T40"]);
+    assert.equal(nextRunnable(plan, notMerged, { machineShare: stale({ starts }) })?.id, "W1-T40",
+      "without measured ages, the oldest machine id leads");
+  });
+}
+
 // ── 3. otherwise the order is unchanged ─────────────────────────────────────────────────────────────────────────
 
 test("W1-T12551 criterion 3: with the judge available, or machine starts at the share, the order is today's", () => {
@@ -147,20 +165,15 @@ test("W1-T12551 criterion 3: with the judge available, or machine starts at the 
   assert.deepEqual(ids(runnableCandidates(plan, notMerged, 3, { machineShare: stale({ starts: undefined }) })), today,
     "starts the rows may not hold in full leave today's order");
 
-  // Rotation keeps the newest MAX_RETAINED_LINES_PER_STEP starts: 100 machine starts then 200 operator starts in the
-  // window leave 200 operator rows. The share is then unknown, so the order stays today's.
   const startRow = (i: number, taskId: string) => ({ ts: iso(NOW - 20 * HOUR + i * 60_000), step: "run.start", task_id: taskId });
   const machinePlan = planOf(shard("W1-T1"), shard("W1-T40", { machine: true, priority: 3 }));
   const full = [...Array.from({ length: 100 }, (_, i) => startRow(i, "W1-T40")), ...Array.from({ length: 200 }, (_, i) => startRow(100 + i, "W1-T1"))];
   const older = { ts: iso(NOW - 30 * HOUR), step: "run.start", task_id: "W1-T1" };
-  assert.equal(machineShareStarts([older, ...full], machinePlan.byId, NOW)?.filter((s) => s.authorClass === "machine").length, 100,
-    "with a start older than the window, every start in it is counted");
-  const retained = full.slice(-MAX_RETAINED_LINES_PER_STEP);
-  assert.equal(machineShareStarts(retained, machinePlan.byId, NOW), undefined, "a capped window is not counted as 0% machine");
-  assert.equal(nextRunnable(machinePlan, notMerged, { machineShare: stale({ starts: machineShareStarts(retained, machinePlan.byId, NOW) }) })?.id, "W1-T1");
-  const reachesBack = [older, ...retained.slice(1)];
-  assert.equal(machineShareStarts(reachesBack, machinePlan.byId, NOW)?.length, MAX_RETAINED_LINES_PER_STEP - 1,
-    "a start older than the window shows the window is held in full");
+  const starts = machineShareStarts([older, ...full], machinePlan.byId, NOW);
+  assert.equal(starts.length, 300, "all trailing starts count; the older start does not");
+  assert.equal(starts.filter((s) => s.authorClass === "machine").length, 100);
+  assert.equal(nextRunnable(machinePlan, notMerged, { machineShare: stale({ starts }) })?.id, "W1-T1",
+    "100 machine starts of 300 meet the share");
 });
 
 // ── 4. invariant: the share never grants eligibility ───────────────────────────────────────────────────────────
@@ -193,7 +206,7 @@ test("W1-T12551 criterion 5: the daemon gives the selector the judge's staleness
     { ts: iso(NOW - 2 * HOUR), step: "run.start", task_id: "W1-T8" },
     { ts: iso(NOW - 48 * HOUR), step: "run.start", task_id: "W1-T40" },
   ].map((row) => JSON.stringify(row));
-  const drive = async (lines: readonly string[]) => {
+  const drive = async (lines: readonly string[], stateDir?: string) => {
     const spawned: string[] = [];
     const rows: Array<{ step: string; extra: Record<string, unknown> }> = [];
     let polls = 0;
@@ -205,8 +218,10 @@ test("W1-T12551 criterion 5: the daemon gives the selector the judge's staleness
       log: (step, extra = {}) => rows.push({ step, extra }),
       now: () => new Date(NOW),
       readLedgerLines: () => lines,
+      ...(stateDir === undefined ? {} : { plainBackfill: { stateDir, readProposals: () => [] } }),
     } as DaemonDeps, { headroomEnabled: false, max: 1 });
-    return { spawned, moves: rows.filter((r) => r.step === MACHINE_SHARE_STEP).map((r) => r.extra) };
+    return { spawned, moves: rows.filter((r) => r.step === MACHINE_SHARE_STEP).map((r) => r.extra),
+      unreadable: rows.filter((r) => r.step === "dispatch.machine_share_unreadable") };
   };
 
   const unavailable = await drive(ledger);
@@ -220,11 +235,69 @@ test("W1-T12551 criterion 5: the daemon gives the selector the judge's staleness
   assert.deepEqual(available.spawned, ["W1-T1"], "a working judge leaves today's order");
   assert.equal(available.moves.length, 0);
 
-  const capped = Array.from({ length: MAX_RETAINED_LINES_PER_STEP }, (_, i) =>
-    JSON.stringify({ ts: iso(NOW - 10 * HOUR + i * 60_000), step: "run.start", task_id: "W1-T7" }));
-  const unknownShare = await drive([...ledger.slice(0, 2), ...capped]);
-  assert.deepEqual(unknownShare.spawned, ["W1-T1"], "a capped start window leaves today's order");
+  for (const count of [199, 200]) {
+    const complete = Array.from({ length: count }, (_, i) =>
+      JSON.stringify({ ts: iso(NOW - 10 * HOUR + i * 60_000), step: "run.start", task_id: "W1-T7", run_id: `operator-${i}` }));
+    const belowShare = await drive([...ledger.slice(0, 2), ...complete]);
+    assert.deepEqual(belowShare.spawned, ["W1-T40"], `${count} starts do not disable the share`);
+    assert.equal(belowShare.moves[0]?.starts, count);
+  }
+
+  for (const [machineStarts, operatorCount] of [[0, 200], [50, 200], [100, 300], [100, 200]]) {
+    const startRow = (i: number, machine: boolean) => ({
+      ts: iso(NOW - 20 * HOUR + i * 60_000), step: "run.start", task_id: machine ? "W1-T40" : "W1-T7", run_id: `start-${i}`,
+    });
+    const history = [
+      ...ledger.slice(0, 2).map((line) => JSON.parse(line)),
+      ...Array.from({ length: machineStarts }, (_, i) => startRow(i, true)),
+      ...Array.from({ length: operatorCount }, (_, i) => startRow(machineStarts + i, false)),
+    ];
+    const fixture = writeLedger(history);
+    dirs.push(fixture.dir);
+    fixture.append(Array.from({ length: 100 }, () => ({ step: "rotation-noise", marker: "x".repeat(2_000) })));
+    assert.equal(rotateLedger(fixture.path, { ceilingBytes: 100_000, now: () => new Date(NOW) }).rotated, true);
+    const live = readLedgerLines(fixture.path);
+    const liveStarts = machineShareStarts(live, plan.byId, NOW);
+    assert.ok(liveStarts.length <= MAX_RETAINED_LINES_PER_STEP);
+    assert.equal(liveStarts.filter((s) => s.authorClass === "machine").length, 0,
+      "positive control: the live tail alone lost all earlier machine starts");
+    const recovered = await drive(live.map((row) => JSON.stringify(row)), fixture.dir);
+    const belowShare = machineStarts / (machineStarts + operatorCount) < MACHINE_DISPATCH_SHARE;
+    assert.deepEqual(recovered.spawned, [belowShare ? "W1-T40" : "W1-T1"],
+      "the complete rotated window decides the share");
+    assert.equal(recovered.unreadable.length, 0);
+    if (belowShare) {
+      assert.equal(recovered.moves[0]?.starts, machineStarts + operatorCount, "archive replays of live rows count once");
+      assert.equal(recovered.moves[0]?.machine_starts, machineStarts);
+    } else assert.equal(recovered.moves.length, 0, "starts at or above the share preserve ordering after rotation");
+  }
+
+  const archivedMachines = Array.from({ length: 50 }, (_, i) => ({
+    ts: iso(NOW - 20 * HOUR + i * 60_000), step: "run.start", task_id: "W1-T40", run_id: `machine-${i}`,
+  }));
+  const liveOperators = Array.from({ length: 200 }, (_, i) => ({
+    ts: iso(NOW - 10 * HOUR + i * 60_000), step: "run.start", task_id: "W1-T7", run_id: `operator-${i}`,
+  }));
+  const mixed = writeLedger([...ledger.slice(0, 2).map((line) => JSON.parse(line)), ...liveOperators], {
+    rotations: [
+      { at: iso(NOW - 15 * HOUR), gz: true, rows: [...archivedMachines,
+        { ts: iso(NOW - 25 * HOUR), step: "run.start", task_id: "W1-T40", run_id: "expired" }] },
+      { at: iso(NOW - HOUR), gz: false, rows: [...archivedMachines, ...liveOperators] },
+    ],
+  });
+  dirs.push(mixed.dir);
+  const mixedShare = await drive(readLedgerLines(mixed.path).map((row) => JSON.stringify(row)), mixed.dir);
+  assert.deepEqual(mixedShare.spawned, ["W1-T40"]);
+  assert.equal(mixedShare.moves[0]?.starts, 250, "plain, gzip and live replays count once and expired starts stay out");
+  assert.equal(mixedShare.moves[0]?.machine_starts, 50, "the gzip archive's machine starts are included");
+
+  const broken = writeLedger(ledger.slice(0, 2).map((line) => JSON.parse(line)));
+  dirs.push(broken.dir);
+  writeFileSync(join(broken.dir, "ledger.2026-11-13T11-00-00-000Z.ndjson.gz"), "invalid gzip");
+  const unknownShare = await drive(readLedgerLines(broken.path).map((row) => JSON.stringify(row)), broken.dir);
+  assert.deepEqual(unknownShare.spawned, ["W1-T1"], "unreadable archive evidence leaves ordinary ordering");
   assert.equal(unknownShare.moves.length, 0);
+  assert.equal(unknownShare.unreadable.length, 1, "incomplete evidence is reported, never counted as zero starts");
 
   const starts = machineShareStarts(ledger.map((line) => JSON.parse(line) as Record<string, unknown>), plan.byId, NOW);
   assert.deepEqual(starts, [
