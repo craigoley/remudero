@@ -344,6 +344,9 @@ test("the state volume's own files are untouched by a run that also reclaims age
   mkdirSync(join(state, "state"), { recursive: true });
   const ledger = join(state, "state", "ledger.ndjson");
   writeFileSync(ledger, "old ledger row\n");
+  const config = join(rec, "container-config");
+  mkdirSync(config, { mode: 0o700 });
+  writeFileSync(join(config, "config.json"), "{}\n", { mode: 0o600 });
   const old = new Date(Date.now() - 90 * DAYS);
   utimesSync(ledger, old, old);
   writeDockerStub(dir);
@@ -356,12 +359,13 @@ test("the state volume's own files are untouched by a run that also reclaims age
       STUB_REC: rec,
       STUB_MODE: "good",
       RMD_STATE_DIR: state,
+      RMD_CONTAINER_CONFIG_DIR: config,
       RMD_GIT_RECLAIM_DIRS: gitTarget.dir,
       RMD_CODEX_DIR: codex.dir,
       RMD_CLAUDE_DIR: claude.dir,
     },
   });
-  assert.equal(r.status, 0);
+  assert.equal(r.status, 0, r.stderr);
   assert.ok(existsSync(ledger), "the ledger must survive even though it is far older than the age tier");
   assert.equal(readFileSync(ledger, "utf8"), "old ledger row\n", "and its content must be untouched");
 });
