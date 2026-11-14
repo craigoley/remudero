@@ -19,7 +19,7 @@
     - test/live-write-guard.test.ts
     - test/the-dispatch-claim-runs-git-off-the-daemon-loop.test.ts
     - test/dispatch-claim.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "When `git ls-remote origin refs/rmd-dispatch/<id>` names a holder, the sync and the async reserver's `attempt` return `taken` and run no `git push`. The refusal names the holder's anchor"

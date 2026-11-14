@@ -12,7 +12,7 @@
   origin: operator-followup#capacity-aware-full-fallback-assertion
   files:
     - test/a-full-fallback-author-selection-is-never-run-whole.test.ts
-  status: queued
+  status: merged
   attempts: 0
   budget_usd: 2.00
   rationale: |

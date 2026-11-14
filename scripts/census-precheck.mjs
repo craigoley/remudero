@@ -1334,6 +1334,11 @@ export const PRECHECK_PATH_TRIGGERED_SUITES = [
       "src/lib/compaction.ts", "test/rules/compress-src-lib-compaction-ts.test.ts",
     ].includes(p)),
     remedy: "keep compaction.ts executable tokens and emitted JavaScript identical to the PR base" },
+  { testFile: "test/rules/compress-src-lib-status-ts-w1-t12285.test.ts",
+    trigger: ({ changed }) => changed.some((p) => [
+      "src/lib/status.ts", "test/rules/compress-src-lib-status-ts-w1-t12285.test.ts",
+    ].includes(p)),
+    remedy: "keep status.ts executable tokens and emitted JavaScript identical to the PR base while reducing comments" },
   { testFile: "test/rules/every-applies-to-skill-is-selectable-and-bounded.test.ts", gitFree: true,
     trigger: ({ changed }) => changed.length > 0,
     remedy: "run the approved-skill conformance census over the current tracked-file match domain" },

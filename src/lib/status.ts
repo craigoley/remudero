@@ -2,8 +2,7 @@ import { execFileSync } from "node:child_process";
 import { ghExec, ghExecFile, ghTextAsync } from "./github-transport.js";
 import { DEFAULT_GH_CALL_TIMEOUT_MS, createNonBlockingGhCallPacer, parseGhRateLimitHeaders, splitGhHeaderBlock, type GhRateLimitReading } from "./github-transport.js";
 import type { WarmRefreshOutcome, WarmRefreshTelemetry } from "./github-refresh-pacer.js";
-// W1-T2440: `runPrewarmWorker` isolates synchronous reads from `/v1/status`; this module loads twice.
-// `isMainThread`/`workerData` gate the worker branch near `buildBatchedGithub`.
+// W1-T2440: runPrewarmWorker loads this module twice; isMainThread/workerData gate off-loop reads.
 import { Worker, isMainThread, parentPort, workerData } from "node:worker_threads";
 // Use default-export property access at call time: named bindings defeat spies (W1-T115; docs/forensics/status.md).
 import fs from "node:fs";
@@ -62,8 +61,7 @@ function statusCatalogContext(outcome: CatalogStatusContext["outcome"], plan: Pl
   })) as CatalogStatusContext;
 }
 
-/** One pinned catalog observation and one canonical lookup corroboration, not a whole read per task.
- * The second reader still performs its own mutable-ref checks; no freshness response is cached here. */
+/** Pin one catalog snapshot; canonical lookups still check mutable refs without caching freshness. */
 export async function readCatalogStatusContext(publicPlan: Plan, stateDir: string,
   api?: OpsCatalogApi): Promise<CatalogStatusContext> {
   const destination = planDestinationRepository(stateDir);
@@ -94,16 +92,12 @@ export async function readCatalogStatusContext(publicPlan: Plan, stateDir: strin
   return statusCatalogContext("ok", plan, resolvedOps, destination, snapshot.binding.commit);
 }
 
-/**
- * Derive merge-state from GitHub; cache in state/status.json, never plan/tasks.yaml's decorative `status:`.
- * Precedence (MASTER-PLAN v2.1): `correction.provenance`; (a) `pr.opened`; (b) `pr:`;
- * (b2) `manual.completed`; (c) anchored `Remudero-Task:` trailer. First merged credit wins.
- * Check every rung for merged credit before accepting an open-PR ledger claim (W1-T116).
- * Order prevents the W1-T1 149x storm and W1-T20c false credits; docs/forensics/status.md.
- */
+/** GitHub-derived merge-state, cached in state/status.json; YAML status is decorative.
+ * Precedence (MASTER-PLAN v2.1): correction.provenance, pr.opened, pr:, manual.completed,
+ * anchored Remudero-Task trailer. First merged credit wins; check all rungs before open claims
+ * (W1-T116). Order prevents W1-T1's 149x storm/W1-T20c false credits; docs/forensics/status.md. */
 
-/** Never conflate absent evidence (`none`) with failed reads (`throttled`): W1-T119/W1-T1029;
- *  false `none` mis-filed W1-T116 as not-merged. */
+/** Absent evidence (`none`) differs from failed reads (`throttled`): W1-T119/W1-T1029/W1-T116. */
 export type StatusSource =
   | "ledger"
   | "pr-field"
@@ -118,14 +112,10 @@ export type StatusSource =
  *  `not_yet_collected` marks a cold cache, not a transport failure (W1-T3925). */
 export type GhFailureReason = "rate_limit" | "auth" | "transport" | "buffer_overflow" | "unknown" | "not_yet_collected";
 
-/** The states {@link GitHub.readFailed}/{@link GitHub.readFailureReason} cannot express (W1-T2219): a boolean
- *  plus a reason cannot tell "not attempted" or "in flight" from a confirmed-clean read. */
+/** W1-T2219: distinguish not-attempted/in-flight from a confirmed-clean read beyond the failure pair. */
 export type GhReadState = "not_attempted" | "in_flight" | "ok" | "failed";
 
-/**
- * Shared pure failure classifier. Check ENOBUFS first: Node kills an overflowing child before stderr exists.
- * Classifying it as unknown hid the 2026-07-20 outage.
- */
+/** Check ENOBUFS before stderr: Node kills overflowing children before stderr exists (2026-07-20 outage). */
 export function classifyGhFailure(
   status: number | null | undefined,
   stderr: string | null | undefined,
@@ -149,11 +139,8 @@ export function isGhRateLimitError(err: unknown): boolean {
   return classifyGhFailure(e?.status, e?.stderr != null ? String(e.stderr) : undefined, e?.code) === "rate_limit";
 }
 
-/**
- * Bound each synchronous `gh` call: an unlogged hang blocks the daemon. Fits inside the poll interval
- * without killing healthy calls; callers degrade on timeout. Unbounded sweep: 10:57-11:54,
- * docs/forensics/status.md.
- */
+/** Bound synchronous gh calls within the poll interval; degrade on timeout to avoid daemon hangs.
+ * Unbounded sweep: 10:57-11:54, docs/forensics/status.md. */
 export const GH_CALL_TIMEOUT_MS = DEFAULT_GH_CALL_TIMEOUT_MS;
 
 /** A PR's identity + GitHub merge state, as seen by the {@link GitHub} gateway. */
@@ -176,8 +163,7 @@ export interface PrRef {
 /** Ledger phases, each mapping to a run-task.ts step (MASTER-PLAN §7/§9, W1-T155). */
 export type Phase = "recon" | "implement" | "review" | "fix-rung";
 
-/** A bounded operator-facing description of the worker currently attached to a task. Raw
- *  prompts, tool arguments, and tool output deliberately do not cross this contract. */
+/** Bounded worker description; excludes raw prompts, tool arguments and output. */
 export type WorkerRole = "recon" | "implementer" | "reviewer" | "fixer" | "triage" | "retro" | "unknown";
 export type WorkerActivityKind = "working" | "tool-executing" | "message";
 export interface WorkerTelemetry {
@@ -210,8 +196,7 @@ export interface StatusProjection {
   uncreditedBuild?: UncreditedBuildWarning;
   /** W1-T2397 — AN OPEN, UNMERGED BUILD ON ANOTHER BRANCH. A REPORT ONLY: see {@link openSiblingBuild}. */
   openSiblingBuild?: OpenSiblingBuild;
-  /** Keep {@link TaskStatus}'s closed set for daemon.ts `reconstructOrphan` and openapi/daemon.yaml;
-   *  finer taxonomy uses sparse fields (W1-T155). */
+  /** Keep TaskStatus closed for reconstructOrphan/OpenAPI; sparse fields refine it (W1-T155). */
   status: TaskStatus;
   /** The single fact dependency-gating cares about: has this task landed? */
   merged: boolean;
@@ -238,8 +223,7 @@ export interface StatusProjection {
   /** W1-T1240: open-PR-only liveness, without heartbeat/lock, means "NOT EVIDENCED", never "dead".
    *  Trap: W1-T314 showed `running, 10h25m, $27.75` ten hours after refusal. */
   processUnevidenced?: true;
-  /** W1-T2970 — an operator ruling SUBTRACTED this task's credit, with the reason that ruling gave.
-   *  Present only when a row refused the pairing; its absence means no override applied. */
+  /** W1-T2970: operator's reason for subtracting this pairing's credit; absent when no override applied. */
   creditOverride?: { reason: string; pr: number };
   /** An OPEN escalation no LATER `run.start` has superseded. Omitted, not `false`, once superseded or merged. */
   needsHuman?: true;
@@ -262,15 +246,13 @@ export interface StatusProjection {
   indeterminate?: true;
   /** The CLASSIFIED reason behind an `indeterminate` projection (W1-T119) — throttle, auth-expiry or outage. */
   unavailableReason?: GhFailureReason;
-  /** MONOTONIC UNDER DARKNESS (W1-T179): precedence fields carried forward because this cycle's read failed.
-   *  The stamp is the START of the current unbroken run of failures; only a successful read clears it.
-   *  Why: the 12:24->12:58 fail-open regressed credited tasks to `queued` */
+  /** MONOTONIC UNDER DARKNESS (W1-T179): carry precedence through failed reads; stamp the first failure
+   *  until success clears it. The 12:24->12:58 fail-open regressed credited tasks to queued. */
   githubUnobservableSince?: string;
   /** LIVENESS BOUND (W1-T179): DISPATCHED with no terminal verdict, and neither an open PR nor activity within
    *  the bound backs it up — a crashed worker's stale trace. Why: the W1-T1 27h21m spin-loop fixture */
   orphaned?: true;
-  /** W1-T485: NOT merged, yet one of this task's own proof symbols shipped to a declared path under ANOTHER
-   *  task's trailer. AN OBSERVATION, NEVER A VERDICT: `merged`/`status`/`source` are untouched beside it. */
+  /** W1-T485: own proof shipped under another task's trailer; observation leaves merged/status/source untouched. */
   supersededBy?: SupersessionEvidence;
   /** W1-T507: unmerged `verify: human` excludes machine dispatch; {@link deriveStatus} sets it for all callers.
    *  Using `needsHuman` instead would render an affordance with nothing to click. */
@@ -280,26 +262,22 @@ export interface StatusProjection {
   singlePathCredit?: true;
 }
 
-/** The GitHub queries deriveStatus needs, behind an interface so unit tests can inject fixtures for all three
- *  precedence sources without touching the network. */
+/** Injectable GitHub queries for deriveStatus's precedence sources. */
 export interface GitHub {
   /** Resolve a PR by number or url within the gateway's repo. null if absent. */
   prByRef(ref: string | number): PrRef | null;
   /** Find a MERGED PR whose body contains `Remudero-Task: <taskId>`. null if none. */
   findMergedByTrailer(taskId: string): PrRef | null;
-  /** W1-T441: all anchored-trailer matches, newest-first; null on failure, [] on miss.
-   *  {@link findMergedByTrailer}'s first-only result let CLOSE duplicates displace implementations:
-   *  16/496 trailered ids had multiple PRs; docs/forensics/status.md. */
+  /** W1-T441: all anchored matches, newest-first; null=failure, []=miss. First-only let CLOSE duplicates
+   *  displace implementations (16/496 ids had multiple PRs; docs/forensics/status.md). */
   findMergedByTrailerAll?(taskId: string): PrRef[] | null;
   /** W1-T256: corroborate empty {@link findMergedByTrailer} by run-prefix head, rechecking ownership.
    *  Body-index exit-0 empty is indeterminate; one miss caused four redispatches. null on failure, [] on miss. */
   findMergedByHeadBranch?(taskId: string): PrRef[] | null;
-  /** BATCHED form of {@link findMergedByHeadBranch} (W1-T257): ONE list read carrying every merged PR's head
-   *  ref, matched CLIENT-SIDE. On the STRUCTURED ref, NEVER the body index. null on FAILURE. */
+  /** W1-T257: one merged list, matched client-side on STRUCTURED head refs, never body index; null=failure. */
   listMergedHeadBranches?(): PrRef[] | null;
-  /** W1-T3763: exact anchored-trailer lookup over one snapshot, body first then commit fallback.
-   *  Never re-enter the board index: expiry mid-`projectPlan` otherwise restarts the 15-second cache's read.
-   *  null means unreadable; absent method preserves non-batched per-task lookup. */
+  /** W1-T3763: snapshot lookup, exact body trailer then commit fallback; null=unreadable, absent=per-task.
+   *  Never re-enter the board index: expiry mid-projectPlan restarts its 15-second cache read. */
   mergedTrailerLookup?(): ((taskId: string) => PrRef | null) | null;
   /** W1-T377: open twin of {@link listMergedHeadBranches}; sees PRs whose ledger `pr.opened` never landed.
    *  null on failure, never []; trap: a run rebuilt its own work, docs/forensics/status.md. */
@@ -308,27 +286,23 @@ export interface GitHub {
   headRefName(prUrl: string): string | undefined;
   /** The PR's raw body text, or undefined when unresolvable. Backs rung (c)'s anchored-trailer verify (P16). */
   prBody(prUrl: string): string | undefined;
-  /** W1-T2387: second anchored surface from the same memoized index; exact lines, run-id grammar, fail closed.
-   *  Preserves {@link creditsByAnchoredTrailer}'s strictness. */
+  /** W1-T2387: same memoized index; preserve creditsByAnchoredTrailer's exact lines/run-id grammar, fail closed. */
   creditedByCommitTrailer?(taskId: string, prUrl: string): boolean;
   /** W1-T413: changed paths for rung (c)'s plan-only refusal. undefined means unavailable, not no files:
    *  retain today's answer; absent heads cannot add credit, but withdrawing credit redispatches finished work. */
   changedFiles?(prUrl: string, snapshotPr?: Pick<PrRef, "state" | "headRefOid">): string[] | undefined;
   /** Qualified merged-head evidence, or named unknown; this read never schedules GitHub work. */
   changedFileEvidence?(prUrl: string): ChangedFileEvidence;
-  /** Configured repository and immutable implementation evidence. A cold read may request only the
-   * existing bounded changed-files cache; an absent cache never falls back to synchronous REST. */
+  /** Repository + immutable evidence; cold reads use only bounded changed-files cache, never synchronous REST. */
   implementationCreditEvidence?(prUrl: string): { repository: string; evidence: ChangedFileEvidence };
   /** Is auto-merge already armed on this PR? OPTIONAL (W1-T155); omitted ⇒ fail-soft "not armed". */
   autoMergeArmed?(prUrl: string): boolean;
-  /** OPTIONAL (W1-T154): force this gateway's fetch NOW rather than lazily, so serve boot never pays a cold
-   *  fetch on the request path. Omitted ⇒ a no-op. */
+  /** W1-T154: fetch at boot to spare the request path a cold read; omitted=no-op. */
   warm?(): void;
   /** W1-T4771: serve calls once; never shell gh on the caller thread thereafter. Background refresh serves
    *  held facts stale, missing facts not-yet-collected. Daemon/CLI never call this. */
   serveOffLoop?(): void;
-  /** OPTIONAL (W1-T4771): how old the OLDEST held PR fact is, in ms, or `undefined` when none is held yet.
-   *  Lets a caller serving a stale fact say how stale. */
+  /** W1-T4771: age of OLDEST held PR fact in ms, undefined if none; expose staleness to callers. */
   factsAgeMs?(): number | undefined;
   /** OPTIONAL (W1-T4771): whether a held PR fact is past its TTL, so a caller never labels an overdue fact fresh. */
   factsStale?(): boolean;
@@ -343,8 +317,7 @@ export interface GitHub {
   /** The CLASSIFIED reason the most recent failed read failed (W1-T119); consulted only after `readFailed()`,
    *  absent ⇒ `"unknown"`. NEVER FORCES A FETCH. Scoped to the PR channel; the issue channel has its own. */
   readFailureReason?(): GhFailureReason | undefined;
-  /** W1-T2219: the state the failure pair cannot express — see {@link GhReadState}. Never forces a fetch, and
-   *  sits beside the pair rather than in place of it. */
+  /** W1-T2219: GhReadState supplements the failure pair without fetching. */
   readState?(): GhReadState;
   /** W1-T415: successful but partial ({@link BOARD_MAX_PAGES}); distinct from W1-T119 failure.
    *  Truncation only omits rows: defer in `readFailed()`'s arm, never before credit. */
@@ -356,19 +329,13 @@ export interface GitHub {
   /** W1-T182: live issue state/title. Omitted/null cannot confirm closure: keep `needsHuman`, unverified.
    *  Fail-soft direction is inverted relative to other optional methods. */
   issueByUrl?(url: string): { state: string; title?: string } | null;
-  /** The most recent {@link issueByUrl} read genuinely FAILED — scoped to the independent issue fetch, so the
-   *  two flags never conflate a PR outage with an issue-read outage. */
+  /** Genuine issueByUrl failure; independent of PR-channel outages. */
   issueReadFailed?(): boolean;
-  /** W1-T2219: the CLASSIFIED reason the most recent failed issue fetch failed — classified and logged all
-   *  along, but with no accessor. Absent ⇒ `"unknown"`. */
+  /** W1-T2219: classified reason for last issue-fetch failure; absent="unknown". */
   issueReadFailureReason?(): GhFailureReason | undefined;
-  /**
-   * W1-T914: the `remudero-review` commit-status state for `prUrl`'s CURRENT head — the SAME vocabulary
-   * lib/review.ts posts, off the combined-status endpoint open-prs-rest.ts documents. FOUR ANSWERS THAT MUST
-   * NOT COLLAPSE: `"none"` is a successful read with no entry; `"not-applicable"` (W1-T2235) is a MERGED or
-   * CLOSED row, answered with no call; `undefined` is a read that could not be trusted — collapsing it into
-   * `"none"` renders an outage as a fact about the PR.
-   */
+  /** W1-T914: current-head remudero-review status from combined-status (open-prs-rest.ts/lib/review.ts).
+   * Distinct outcomes: status; "none"=successful absence; "not-applicable"=MERGED/CLOSED, no call
+   * (W1-T2235); undefined=untrusted read. Never render an outage as "none". */
   reviewState?(prUrl: string): "success" | "failure" | "pending" | "none" | "not-applicable" | undefined;
 }
 
@@ -382,89 +349,55 @@ export interface DeriveDeps {
   github: GitHub;
   /** Ledger reader; defaults to reading + parsing NDJSON from disk. */
   readLedger?: LedgerReader;
-  /** W1-T3067 — PR number to the paths its merge commit changed, built ONCE per pass from a local
-   *  `git log origin/main --name-only`. Consulted by the plan-only DIFF refusal so that removing
-   *  the `ownsOwnRunBranch` shortcut costs no network: `deriveStatus` runs once per plan task
-   *  (~1,400 a pass), and a `changedFiles` call each would be 1,400 GitHub requests.
-   *
-   *  ⚠ ABSENT OR EMPTY IS "NO OPINION", NEVER "NOT A FILING". A PR with no entry falls back to the
-   *  existing `deps.github.changedFiles` call, so behaviour outside the scanned window is exactly
-   *  today's. A failed git read must never be able to uncredit the plan. */
+  /** W1-T3067: PR -> merge paths, built once/pass from git log origin/main --name-only for plan-only DIFF
+   *  refusal; avoids ~1,400 changedFiles requests/pass after removing ownsOwnRunBranch's shortcut.
+   *  ABSENT/EMPTY = NO OPINION, never "not a filing": missing entries fall back to github.changedFiles;
+   *  failed git reads must never uncredit the plan. */
   mergedPathsByPr?: ReadonlyMap<number, readonly string[]>;
-  /** R-23: the per-projection {@link LedgerIndex}, built ONCE by {@link projectPlan} and shared by
-   *  every task — the same batch-once shape as the ledger read (W1-T187). Omitted, or built over a
-   *  DIFFERENT array (the identity check catches it), each helper scans as before, so this can only
-   *  change how long a derivation takes, never what it derives. */
+  /** R-23/W1-T187: projectPlan builds one shared LedgerIndex; missing/different-array indexes fall back
+   *  to scanning (identity-checked). Indexing must change cost, never derived results. */
   ledgerIndex?: LedgerIndex;
-  /** TEST-ONLY EQUIVALENCE SEAM (R-23), set by one test and nothing in `src/`: it makes
-   *  {@link projectPlan} skip its index, which is how that test proves the indexed and unindexed
-   *  projections are deep-equal through the PRODUCTION function rather than a copy. */
+  /** TEST-ONLY (R-23): skip projectPlan's index to prove indexed/unindexed equality through production. */
   unindexedForEquivalenceTest?: true;
-  /**
-   * Clock for {@link StatusProjection.elapsedMs} (W1-T155); defaults to `Date.now`.
-   * Injectable so a test can assert an exact elapsed value without a real sleep.
-   */
+  /** W1-T155: elapsedMs clock, default Date.now; inject to assert elapsed time without sleeping. */
   now?: () => number;
-  /** MONOTONIC UNDER DARKNESS (W1-T179): the LAST successfully-observed projection, consulted ONLY
-   *  when this cycle's read failed and no rung resolved anything fresh, so a fetch failure never
-   *  regresses a credited task to `queued`. Omitted ⇒ pre-W1-T179 behaviour. */
+  /** MONOTONIC UNDER DARKNESS (W1-T179): last good projection, consulted only after read failure with no
+   *  fresh rung, preventing credit -> queued regression; omitted=pre-W1-T179 behavior. */
   previousProjection?: (taskId: string) => StatusProjection | undefined;
-  /** Opt-in reuse by {@link projectPlan}, only when the caller proves all inputs unchanged.
-   *  Absent by default; `undefined` always means derive. Incorrect reuse silently stales the board.
-   *  Motivation, 2026-09-15: 1,792 tasks took 1.44s warm per 3s poll; distinct changed tasks:
-   *  1 in 3s, 2 in 60s, 17 in 20 minutes. */
+  /** Opt-in projectPlan reuse only with proven unchanged inputs; undefined=derive. Wrong reuse stales
+   *  the board. 2026-09-15: 1,792 tasks cost 1.44s/3s poll; 1 changed in 3s, 2 in 60s, 17 in 20m. */
   reuseProjection?: (task: Task) => StatusProjection | undefined;
-  /** BATCHED rung (c2) corroboration (W1-T257): a per-task lookup into the index
-   *  {@link projectPlan} fetches ONCE and shares. [] when the batch succeeded with no such branch,
-   *  `null` when the BATCH FAILED — then the per-task method runs, and if that fails too, W1-T119
-   *  defers rather than reporting a false none. Why: five 07-23 GraphQL exhaustions */
+  /** W1-T257: rung (c2) lookup in projectPlan's shared batch; []=confirmed miss, null=batch failure,
+   *  retry per-task then defer on failure (W1-T119). Trap: five 07-23 GraphQL exhaustions. */
   mergedHeadBranches?: (taskId: string) => PrRef[] | null;
-  /** W1-T3763: an exact merged-trailer lookup captured once by {@link projectPlan}. `null` means the
-   *  captured board read failed, so every task keeps the same fail-closed answer without reopening the gateway;
-   *  omission preserves the direct lookup for standalone derivations and non-batched gateways. */
+  /** W1-T3763: projectPlan's pinned exact trailer lookup; null=failed read, fail closed without reopening
+   *  the gateway. Omission preserves standalone/non-batched direct lookup. */
   mergedTrailerLookup?: (taskId: string) => PrRef | null;
-  /** The OPEN twin of {@link DeriveDeps.mergedHeadBranches} (W1-T377), backing the (c3) rung — the
-   *  only thing here that can see an open PR the ledger never recorded. SAME "ABSENT ⇒ SKIP"
-   *  contract: `undefined` falls back per-task, `null` skips the rung so W1-T119 defers rather than
-   *  this rung inventing an absence. */
+  /** W1-T377: open twin for rung (c3), including PRs missing from ledger; undefined=per-task fallback,
+   *  null=skip/defer (W1-T119), never invent an absence. */
   openHeadBranches?: (taskId: string) => PrRef[] | null;
-  /** W1-T3144: observe the complete open-board batch {@link projectPlan} already reads.
-   * `undefined` means the batch read failed; omission means the caller does not need it.
-   * This is a callback rather than a second gateway accessor call so dispatch admission cannot add
-   * another GitHub request or drift onto a different snapshot. W1-T4465: carries the full `PrRef[]`
-   * rather than a bare count, so the queue governor's ownership split (design (i)) can classify
-   * each `headRefName` off the SAME single fetch — never a second `listOpenHeadBranches()` call. */
+  /** W1-T3144/W1-T4465: observe projectPlan's complete open batch; undefined=failed, omitted=unused.
+   *  Full PrRef[] lets admission classify ownership from the SAME snapshot without a second fetch. */
   observeOpenPrCount?: (openPrs: readonly PrRef[] | undefined) => void;
-  /** LIVENESS BOUND (W1-T179): milliseconds of ledger silence a dispatched, unresolved run tolerates
-   *  before it is no longer "running" absent an open PR. Injectable so a test can assert the boundary
-   *  without a real wait. */
+  /** LIVENESS BOUND (W1-T179): tolerated ledger silence for unresolved dispatches absent an open PR; injectable. */
   livenessBoundMs?: number;
-  /** W1-T2392: id -> the merged PRs naming it in prose, built ONCE by {@link projectPlan} from the
-   *  merged list it already fetches. Supplied rather than derived here, because a second batched
-   *  fetch would break W1-T257's own guard, which counts them. Absent ⇒ no warning is ever set. */
+  /** W1-T2392: id -> prose-naming merged PRs, built once from projectPlan's existing list (W1-T257 counts
+   *  fetches; never add a second). Absent=no warning. */
   proseNamedTaskIds?: Map<string, UncreditedBuildWarning[]>;
-  /** THE INFLIGHT-LOCK ANCHOR — the third disjunct beside `hasOpenPr`/`recentActivity`. ABSENT ⇒ SKIP. WHY A
-   *  LOCK AND NOT ANOTHER LEDGER STEP: the liveness bound infers liveness from ledger CHATTER, which a live run
-   *  can stop producing, and terminals cannot cover the gap either, because a dying process writes none. NOT
-   *  TRUSTED ALONE: a lock outlives its process, since the release is in a `finally` and there are NO signal
-   *  handlers in src/, hence the pairing with {@link DeriveDeps.isPidAlive}. Why: 96 of 664 runs have a gap
-   *  longer than the bound */
+  /** INFLIGHT-LOCK ANCHOR: third disjunct beside hasOpenPr/recentActivity; absent=skip. Live runs can fall
+   *  silent (96/664 exceeded bound); dying processes may write no terminal. Locks can outlive finally-only
+   *  release, so NEVER trust alone: pair with isPidAlive (no src/ signal handlers). */
   inflightHolder?: (taskId: string) => { pid: number; host?: string; startedAt?: string } | null;
-  /** Liveness probe for the holder's pid, defaulting to {@link defaultIsPidAlive}. W1-T368: not the WHOLE story
-   *  — the pid space wraps often on the fleet host, so a recycled pid made a dead holder read as live forever.
-   *  It is now run through {@link isHolderStale}, and remains a REASON TO BELIEVE a run is live, never proof,
-   *  which is why it is a third disjunct and not a replacement. */
+  /** Default defaultIsPidAlive; isHolderStale also checks reuse (W1-T368: recycled pid kept dead holder live).
+   *  Evidence of liveness, never proof or a replacement for the other disjuncts. */
   isPidAlive?: (pid: number) => boolean;
   /** Process-start-time probe for the holder's `startedAt` comparison, forwarded to
    *  {@link isHolderStale}. Injectable so a test can assert the pid-reuse arm without a real wrap. */
   getProcessStartTime?: (pid: number) => number | null;
-  /** W1-T485 — OPT-IN, absent by default ON PURPOSE: supplied, {@link projectPlan} asks it for every
-   *  UNMERGED task; omitted, no search runs and the 250ms-polled console pays nothing. See
-   *  {@link buildGitLogSupersessionSearch} for why this is not wired into a hot path. */
+  /** W1-T485: opt-in search per UNMERGED task; omitted=no work on 250ms console hot path.
+   *  See buildGitLogSupersessionSearch. */
   supersessionSearch?: SupersessionSearch;
-  /** W1-T951: where the durable {@link CreditStore} lives, defaulting to
-   *  {@link defaultCreditStorePath}. Injectable so a test, or a caller sharing one store across many
-   *  ledger directories, can point elsewhere. */
+  /** W1-T951: injectable store location, defaultCreditStorePath; permits sharing across ledger directories. */
   creditStorePath?: string;
   /** A whole-plan consumer that already owns its task scope can suppress the independent
    *  taskless-escalation projection. Omitted preserves the normal board projection. */
@@ -477,23 +410,17 @@ export interface DeriveDeps {
   creditOverridePath?: string;
   /** W1-T2970 — test seam: read the override record's text. Production reads the real file. */
   readCreditOverrideFile?: () => string;
-  /** The override record's rows, loaded at most once per {@link projectPlan} pass and shared by every task.
-   *  Absent, each derivation loads the record itself, as a standalone `deriveStatus` does. */
+  /** Override rows shared once/projectPlan pass; absent=load per derivation, as standalone deriveStatus does. */
   creditOverrideRows?: () => readonly CreditOverrideRow[];
   /** Reader for the durable credit store; defaults to {@link loadCreditStore}. Injectable so a test
    *  can hand a canned store directly and prove the resolution never touches `deps.github`. */
   readCreditStore?: () => CreditStore;
-  /** Writer for the durable credit store; defaults to {@link saveCreditStore}. Called whenever a live
-   *  rung finds a credit the store lacks, so a LATER derivation never reads GitHub again.
-   *  {@link projectPlan} overrides it to batch every task's writes into ONE save. */
+  /** Default saveCreditStore: persist newly found credit to spare later GitHub reads; projectPlan batches saves. */
   writeCreditStore?: (store: CreditStore) => void;
 }
 
-/** W1-T2895: keep {@link BoardDeps} beside {@link DeriveDeps}; board.ts re-exports it unchanged.
- *  task-card.ts already imports status.ts for `projectPlan`/`readLedgerLines`; importing this type
- *  from board.ts closes board.ts -> status-board.ts -> task-card.ts -> board.ts.
- *  `.dependency-cruiser.cjs`'s required swc parser counts type edges: cycle-ratchet still found
- *  this ring after six symbol moves removed twelve others. */
+/** W1-T2895: board.ts re-exports BoardDeps here to avoid board -> status-board -> task-card -> board.
+ * SWC/depcruise counts type edges; task-card already imports status for projectPlan/readLedgerLines. */
 export interface BoardDeps extends DeriveDeps {
   plan: Plan;
 }
@@ -503,17 +430,13 @@ export interface BoardDeps extends DeriveDeps {
  *  orders of magnitude, while a slow poll cadence sits inside it. */
 export { DEFAULT_LIVENESS_BOUND_MS };
 
-/** The minimal fs surface {@link readLedgerLines} needs — deliberately ONLY `existsSync` and `readFileSync`,
- *  with no write or copy capability, so an injected fake CANNOT be made to create a temp copy. That proves
- *  STRUCTURALLY that a ledger read never copies the file first (W1-T115). */
+/** W1-T115: readLedgerLines gets only existsSync/readFileSync; no write/copy capability, even in fakes. */
 export interface LedgerFsDeps {
   existsSync: (path: string) => boolean;
   readFileSync: (path: string, encoding: "utf8") => string;
 }
 
-// Property access at call time (see the import comment above), not `{ existsSync,
-// readFileSync }` captured once — that would silently reintroduce the
-// non-interceptable-named-binding problem one indirection later.
+// Access fs properties at call time; capturing bindings defeats spies even through this indirection.
 const realLedgerFs: LedgerFsDeps = {
   existsSync: (path) => fs.existsSync(path),
   readFileSync: (path, encoding) => fs.readFileSync(path, encoding),
@@ -536,13 +459,9 @@ function statusLedgerUnionFsDeps(
   };
 }
 
-// ── W1-T951: DURABLE MERGE CREDIT ───────────────────────────────────────────────────────────
-// DESIGN DECISION (i), RECORDED per the shard's requirement: the durable record belongs at THIS layer,
-// inside `derivePrPrecedence`. Every site that reads `projection.merged` goes through
-// `deriveStatus`/`projectPlan`, neither credit rung persists anything today, and both already live
-// here — so a store here fixes every caller for free, with no wiring changes, and `run-task.ts` stays
-// undeclared as W1-T471 requires.
-// Why: a new module or a ledger step was considered and rejected — docs/forensics/status.md
+// W1-T951 decision (i): persist in derivePrPrecedence; all projection.merged consumers pass through
+// deriveStatus/projectPlan, covering both credit rungs without run-task.ts changes (W1-T471).
+// Rejected new module/ledger step: docs/forensics/status.md.
 
 /** One path's persisted merge credit for a task — see {@link CreditStore}. */
 export interface CreditStoreEntry {
@@ -552,10 +471,8 @@ export interface CreditStoreEntry {
   prState: string;
 }
 
-/** Durable proof that {@link runCreditBackfill} already appended its ledger correction. This is
- * bookkeeping for that writer, NOT a third source of merge credit: {@link deriveStatus} consults
- * only `trailer` and `head-branch` below. PR provenance stays on the receipt so the state remains
- * auditable even after the corresponding ledger row rotates beyond the bounded reader. */
+/** Backfill writer receipt, NOT a third credit source: deriveStatus uses trailer/head-branch only.
+ * Retain PR provenance for audits after the correction rotates beyond the bounded ledger reader. */
 export interface CreditBackfillReceipt {
   source: "sweep.credit_backfill";
   prUrl: string;
@@ -581,12 +498,10 @@ export type CreditStoreTaskRecord = Partial<Record<CreditStoreEntry["source"], C
   correction?: { prUrl: string; prNumber?: number };
 };
 
-/** DELIVERABLE A — the durable, GitHub-independent record of merge credit, keyed by task id then by the path
- *  that credited it, so a caller can tell in O(1) whether credit rests on ONE path or BOTH. */
+/** DELIVERABLE A: GitHub-independent credit by task then source; O(1) single/dual-path lookup. */
 export type CreditStore = Record<string, CreditStoreTaskRecord>;
 
-/** The minimal fs surface the durable credit store needs — the same "inject, or default to a property-accessed
- *  `fs` call" shape {@link LedgerFsDeps} establishes just above, so an external spy observes every real call. */
+/** Injectable credit-store fs; defaults access fs properties at call time so spies observe real calls. */
 export interface CreditStoreFsDeps {
   existsSync: (path: string) => boolean;
   readFileSync: (path: string, encoding: "utf8") => string;
@@ -603,24 +518,15 @@ const realCreditStoreFs: CreditStoreFsDeps = {
   renameSync: (from, to) => fs.renameSync(from, to),
 };
 
-/** Default store location: a sibling of the ledger this call is already scoped to, so the common case needs no
- *  new required `DeriveDeps` field — only a caller sharing one store injects {@link DeriveDeps.creditStorePath}. */
+/** Ledger sibling by default; inject creditStorePath only to share a store across callers. */
 export function defaultCreditStorePath(ledgerPath: string): string {
   return `${dirname(ledgerPath)}/merge-credit.json`;
 }
 
-// ── W1-T2970: THE CREDIT OVERRIDE RECORD — un-crediting without editing history ───────────────
-//
-// Both credit paths READ HISTORY (trailer, and `run-<taskId>-<digits>` head ref), so correcting a
-// task that reads merged-but-never-built meant EDITING A MERGED PULL REQUEST BODY — unreviewably,
-// with no field saying why. This is the reviewable diff that replaces that edit.
-//
-// INVARIANT — SUBTRACT ONLY: a row that GRANTED credit would assert something shipped when no pull
-// request says so (Law 5's laundering shape, reversed). `remove-credit` is the only legal action;
-// anything else is REFUSED BY NAME.
-// INVARIANT — FAIL TOWARD THE STATUS QUO: absent, unreadable or unparseable yields NO rows, so the
-// projection answers as today. The opposite polarity re-dispatches the whole merged backlog on one
-// malformed edit. Full rationale: plan/credit-overrides.yaml's own header.
+// W1-T2970: reviewable credit overrides replace unreasoned edits to merged PR bodies/history.
+// INVARIANT — SUBTRACT ONLY: only remove-credit is legal; refuse grants by name (Law 5).
+// INVARIANT — FAIL TOWARD THE STATUS QUO: absent/unreadable/unparseable means no rows, preventing
+// one malformed edit from redispatching the merged backlog. Rationale: plan/credit-overrides.yaml.
 
 /** One operator ruling that a (task, pull request) credit pairing does not stand. */
 export interface CreditOverrideRow {
@@ -643,9 +549,7 @@ export interface CreditOverrideLoad {
 /** Optional observation of the existing read; ordinary accelerator consumers retain their permissive contract. */
 export type CreditReadState = { state: "present" } | { state: "missing" | "unavailable" | "unreadable" | "corrupt"; reason: string };
 
-/** `<root>/plan/credit-overrides.yaml`, derived from `ledgerPath` as {@link defaultCreditStorePath}
- *  derives its own, so every existing caller consults this with no new required field. Under
- *  `plan/` and not `state/`: the correction must be a diff a reviewer reads. */
+/** Derive <root>/plan/credit-overrides.yaml from ledgerPath for all callers; keep corrections in reviewed plan/. */
 export function defaultCreditOverridePath(ledgerPath: string): string {
   return `${dirname(dirname(ledgerPath))}/plan/credit-overrides.yaml`;
 }

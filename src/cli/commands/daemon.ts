@@ -2728,7 +2728,8 @@ export async function daemonCommand(
           () => activePlanRef.current,
           // A run in flight starves the full sweep, so the light pass also watches main.
           mainHealthRung,
-          { openPrViews: servedOpenPrViews(() => tickReadGeneration, () => tickReadStartedAtMs) },
+          { openPrViews: servedOpenPrViews(() => tickReadGeneration, () => tickReadStartedAtMs),
+            sweepWallClockBoundMs: opts.sweepWallClockBoundMs },
         ),
         // W1-T7734: the idle sleep runs the light pass while review demand waits, at a cadence the sweep
         // derives from observed review duration and head churn. Reads the sweep's in-process memo only.

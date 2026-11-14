@@ -296,7 +296,7 @@ for (const scenario of [
     before: ["first.ts,second.ts", "third.ts"], after: ["first.ts", "second.ts,third.ts"], expectedSpawns: 2,
   },
   {
-    title: "reordering the same conflict files still goes through the judge, not a snapshot stop",
+    title: "reordering the same conflict files is decided on conflict facts, not a snapshot stop",
     before: ["first.ts", "second.ts"], after: ["second.ts", "first.ts"], expectedSpawns: 2,
   },
 ]) {
@@ -335,7 +335,8 @@ for (const scenario of [
       assert.equal(spawns, scenario.expectedSpawns);
       assert.equal(outcome.strikes, scenario.expectedSpawns);
       assert.equal(outcome.outcome, scenario.expectedSpawns === 1 ? "stood_down" : "escalated");
-      assert.match(outcome.reason ?? "", /fixture-selected former ceiling/);
+      // W1-T12541: a conflict round is decided on conflict facts; two rounds left at one head escalate.
+      assert.match(outcome.reason ?? "", /fix progress loop: conflict/);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
