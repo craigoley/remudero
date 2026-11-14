@@ -8,7 +8,7 @@ import { gardenSchedule, issueRevalidationGardenPass, REGISTERED_GARDEN_NAMES, g
 import { overseerStatePath } from "#src/lib/gardener-overseer.js";
 import {
   classifyIssue, decideAction, evidenceNames, ISSUE_REVALIDATION_FAILED_STEP, ISSUE_REVALIDATION_PASS_STEP,
-  ISSUE_REVALIDATION_VERDICT_STEP, issueRevalidationJudgeText, livenessVerdictFromOverseerState, loadIssueRevalidationPolicy,
+  ISSUE_REVALIDATION_VERDICT_STEP, issueRevalidationJudgeText, JudgeWorkerFailedError, livenessVerdictFromOverseerState, loadIssueRevalidationPolicy,
   MAX_ISSUE_REVALIDATION_JUDGES_PER_PASS, openIssuesRestArgs, operatorSpokeLast, parseIssueCommentsRest, parseIssueRevalidationPolicy,
   parseIssueRevalidationVerdict, parseOpenIssuesRest, priorVerdictsFromRows, productionIssueRevalidationPorts, readModelVerdictFromRows,
   READ_MODEL_CLEAN_RUNS, runIssueRevalidationGarden, STILL_TRUE_REFRESH_MS, buildIssueRevalidationPrompt,
@@ -81,7 +81,7 @@ test("W1-T10287: issue revalidation retains each actual attempt before verdict p
       return revalidationMoneyResult({ costUsd: 0.5, subtype: "interrupted", isError: true });
     });
     if (interrupted) await assert.rejects(g.judge("private-prompt", 8), error => error === failure);
-    else assert.equal(await g.judge("private-prompt", 8), "REVALIDATION_VERDICT: unknown");
+    else await assert.rejects(g.judge("private-prompt", 8), JudgeWorkerFailedError, "W1-T12549: a failed result is not an answer");
     assert.deepEqual(g.money().filter(r => r.price_state === "reported").map(r => r.total_cost_usd), interrupted ? [0.125] : [0.125, 0.5]);
     assert.equal(g.requests.length, 1);
     assert.doesNotMatch(JSON.stringify(g.money()), /private-(?:prompt|malformed-result|provider-failure|stderr|session)|ANTHROPIC_API_KEY/);
@@ -130,7 +130,9 @@ test("W1-T10287: issue revalidation preserves reported zero unknown and subscrip
     [{ provider: "codex", costUsd: 0, childEnvKeys: [], notionalCostUsd: 1.5 }, undefined, "subscription"],
   ] as const) {
     const f = revalidationMoneyFixture(t, async () => revalidationMoneyResult(over as Partial<WorkerResult>));
-    await f.judge("p", 1);
+    // W1-T12549: a result with no subtype is not a success, but its spend is still recorded.
+    if ("subtype" in over) await assert.rejects(f.judge("p", 1), JudgeWorkerFailedError);
+    else await f.judge("p", 1);
     const row = f.money()[0];assert.ok(row);
     assert.equal(row.total_cost_usd, price);assert.equal(row.billing_mode, mode);
     assert.equal(row.price_state, price === undefined ? "unknown" : "reported");
@@ -666,7 +668,7 @@ test("the judge spawns once with no tools on the given mount", async () => {
   const seen: Array<Record<string, unknown>> = [];
   const judgeText = issueRevalidationJudgeText({
     mount: { model: "m", effort: "low", maxTurns: 1, provider: "p" } as never, cwd: "/w", settingsFile: "/s.json",
-    spawn: (async (args: Record<string, unknown>) => { seen.push(args); return { text: "REVALIDATION_VERDICT: unknown" }; }) as never,
+    spawn: (async (args: Record<string, unknown>) => { seen.push(args); return { text: "REVALIDATION_VERDICT: unknown", subtype: "success" }; }) as never,
   });
   assert.equal(await judgeText("prompt", 7), "REVALIDATION_VERDICT: unknown");
   assert.deepEqual(seen[0]!.tools, []);
@@ -706,7 +708,7 @@ test("the run-task ports derive referents through the reconciler, load the plan 
   const p = issueRevalidationRunTaskPorts({ owner: "acme", repo: "remudero", repoRoot: process.cwd(), stateDir, log: () => {} }, {
     loadPlan: () => { loads++; return plan; },
     reconcile: { github, evidenceRootFor: () => undefined },
-    spawn: (async (args: Record<string, unknown>) => { spawned.push(args); return { text: "REVALIDATION_VERDICT: unknown" }; }) as never,
+    spawn: (async (args: Record<string, unknown>) => { spawned.push(args); return { text: "REVALIDATION_VERDICT: unknown", subtype: "success" }; }) as never,
   });
   assert.equal(p.hasReferent(issue(1, escalation("BLOCKED", "PR-100"))), true);
   assert.equal(p.hasReferent(issue(2, escalation("BLOCKED", "W1-T1"))), true);
