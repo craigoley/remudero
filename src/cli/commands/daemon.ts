@@ -1986,7 +1986,7 @@ export async function daemonCommand(
         return current.outcome === "on" && current.repository === opsSourceRepository
           ? source.refresh() : Promise.resolve({ outcome: "stale" as const });
       },
-    });
+    }, clockFromMillisFn(deps.now));
     opsShadow?.current();
     const readOpsTaskDispatch = opsSelection.outcome === "off" ? undefined : (publicPlan: Plan): OpsTaskDispatchRead => {
       const current = opsDispatchSelection(join(config.root, "state"));
