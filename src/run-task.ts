@@ -35390,18 +35390,18 @@ async function triageCommandLocked(
   const pruned = pruneStaleRuns(repoDir, worktreesDir(config), { graceMs: DEFAULT_PRUNE_GRACE_MS });
   if (pruned.worktrees.length || pruned.branches.length || pruned.skipped.length) log("worktree.prune", { ...pruned });
   // W1-T12213: a receipt resumes its own public lane. A fresh run with `task` on is cut in the plan destination.
-  const target = publication === undefined ? await openArchitectFilingTarget(config, owner, repo, repoDir, runId, log) : { owner, repo, checkoutDir: repoDir };
-  if ("refused" in target) {
-    log("triage.error", { error: `plan destination refused: ${target.refused}` });
-    say(`triage refused — ${target.refused}`);
+  const filingTarget = publication === undefined ? await openArchitectFilingTarget(config, owner, repo, repoDir, runId, log) : { owner, repo, checkoutDir: repoDir };
+  if ("refused" in filingTarget) {
+    log("triage.error", { error: `plan destination refused: ${filingTarget.refused}` });
+    say(`triage refused — ${filingTarget.refused}`);
     return 1;
   }
-  const view = target.publicView;
-  const { branch, worktreePath } = publication ?? await addLaneWorktree(target.checkoutDir, worktreesDir(config), runId, log)
+  const view = filingTarget.publicView;
+  const { branch, worktreePath } = publication ?? await addLaneWorktree(filingTarget.checkoutDir, worktreesDir(config), runId, log)
     .catch((err: unknown) => { closePublicView(repoDir, view); throw err; }); // W1-T2528
   // The feedback entry, the id mint and the id reservations stay on the public repository.
   const entryRoot = view?.worktreePath ?? worktreePath;
-  const removeLane = (): void => { worktreeRemove(target.checkoutDir, worktreePath); closePublicView(repoDir, view); };
+  const removeLane = (): void => { worktreeRemove(filingTarget.checkoutDir, worktreePath); closePublicView(repoDir, view); };
 
   // W1-T348: the decision-summary rung, resolved ONCE and reused at both sites this run may
   // reach a human/operator — the GRILL escalation below and the proposal write further down.
@@ -35805,7 +35805,7 @@ async function triageCommandLocked(
 
     if (view !== undefined && decision.action === "propose") {
       triagePushed = "unknown";
-      const published = await publishTriageInPlanDestination({ lane: { worktreePath, branch, owner: target.owner, repo: target.repo }, view,
+      const published = await publishTriageInPlanDestination({ lane: { worktreePath, branch, owner: filingTarget.owner, repo: filingTarget.repo }, view,
         publicRepository: { owner, repo }, changedFiles, decision, feedbackId, privateFeedback: feedbackHome.destination !== undefined,
         taskId, stateRoot: join(config.root, "state"), summarizeDeps, log, say });
       triagePushed = published.pushed;
@@ -35950,16 +35950,17 @@ async function triageCommandLocked(
 
     // W1-T12213: a proposal that also changed a public task file has a second pull request. Each one is gated.
     let gatedCode = 0;
-    for (const gatedUrl of [prUrl, ...morePrUrls]) {
-      const ci = ciGateState(await waitForCiGreen(gatedUrl, (s, extra) => log(s, extra)));
+    const prUrls = [prUrl, ...morePrUrls];
+    for (const prUrl of prUrls) {
+      const ci = ciGateState(await waitForCiGreen(prUrl, (s, extra) => log(s, extra)));
       if (ci !== "green") {
-        say(`ci ${ci} — PR left OPEN: ${gatedUrl}`);
+        say(`ci ${ci} — PR left OPEN: ${prUrl}`);
         removeLane();
         return 1;
       }
 
-      const prNum = gatedUrl.match(/\/pull\/(\d+)/)?.[1] ?? gatedUrl;
-      const reviewCode = await reviewCommand(view === undefined ? prNum : gatedUrl);
+      const prNum = prUrl.match(/\/pull\/(\d+)/)?.[1] ?? prUrl;
+      const reviewCode = await reviewCommand(view === undefined ? prNum : prUrl);
       // W1-T230: reviewCommand resolved this PR's task id off its own
       // `Remudero-Task: <taskId>` trailer (ensureTaskTrailer above), so its
       // review.posted ledger line is keyed to the SAME `taskId` armAutoMerge
@@ -35970,15 +35971,15 @@ async function triageCommandLocked(
       // exactly as it is today, never blocking the arm itself.
       let armHeadSha: string | undefined;
       try {
-        armHeadSha = readHeadShaRest(gatedUrl);
+        armHeadSha = readHeadShaRest(prUrl);
       } catch {
         /* best-effort — see the comment above */
       }
-      const armOutcome = armAndLogOutcome(gatedUrl, taskId, log, undefined, undefined, armHeadSha);
+      const armOutcome = armAndLogOutcome(prUrl, taskId, log, undefined, undefined, armHeadSha);
       // W1-T968: the PR — not merely this call — is what the console line answers about; a
       // review-lane arm already ledgered moments earlier on this SAME head must still read as armed.
-      const priorArm = priorArmOnHead(readLedgerLines(ledgerPath), gatedUrl, armHeadSha);
-      say(`triage PR gated — ${armReportPhrase(armOutcome, priorArm)} (review ${reviewCode === 0 ? "success" : "failure"}): ${gatedUrl}`);
+      const priorArm = priorArmOnHead(readLedgerLines(ledgerPath), prUrl, armHeadSha);
+      say(`triage PR gated — ${armReportPhrase(armOutcome, priorArm)} (review ${reviewCode === 0 ? "success" : "failure"}): ${prUrl}`);
       gatedCode = Math.max(gatedCode, reviewCode);
     }
     removeLane();
@@ -36286,15 +36287,15 @@ export async function planCommand(
   if (!planCred.ok) { say(`plan refused — no usable git credential: ${planCred.reason}`); return 1; }
   const credLane = planCred.lane;
   // W1-T12213: with `task` on, the lane is cut in the plan destination, and the worker reads a read-only public view.
-  const target = await openArchitectFilingTarget(config, owner, repo, repoDir, runId, log).catch(async (err: unknown) => { await credLane.close(); throw err; });
-  if ("refused" in target) {
-    log("plan.error", { error: `plan destination refused: ${target.refused}` });
-    say(`plan refused — ${target.refused}`);
+  const filingTarget = await openArchitectFilingTarget(config, owner, repo, repoDir, runId, log).catch(async (err: unknown) => { await credLane.close(); throw err; });
+  if ("refused" in filingTarget) {
+    log("plan.error", { error: `plan destination refused: ${filingTarget.refused}` });
+    say(`plan refused — ${filingTarget.refused}`);
     await credLane.close();
     return 1;
   }
-  const view = target.publicView;
-  const { branch, worktreePath } = await addLaneWorktree(target.checkoutDir, worktreesDir(config), runId, log)
+  const view = filingTarget.publicView;
+  const { branch, worktreePath } = await addLaneWorktree(filingTarget.checkoutDir, worktreesDir(config), runId, log)
     .catch(async (err: unknown) => { closePublicView(repoDir, view); await credLane.close(); throw err; }); // W1-T2528
   // The id mint and the id reservations stay on the public repository.
   const idCwd = view?.worktreePath ?? worktreePath;
@@ -36311,7 +36312,7 @@ export async function planCommand(
   // The managed clone is never wired, so a wired lane gives its ids back from its own worktree BEFORE removing it.
   const removePlanWorktree = (): void => {
     credLane.retire(idCwd, releasePlanHeld);
-    worktreeRemove(target.checkoutDir, worktreePath);
+    worktreeRemove(filingTarget.checkoutDir, worktreePath);
     closePublicView(repoDir, view);
   };
 
@@ -36537,16 +36538,17 @@ export async function planCommand(
     const commitMessage = planCommitMessage({ decision, mode, brief });
     // W1-T12213: a changed file is committed in the repository that holds it, so a proposal can open one pull
     // request in each repository. With no host file there is one side: today's lane in the public repository.
-    const sides = await architectFilingSides({ worktreePath, branch, owner: target.owner, repo: target.repo }, view, changedFiles, { owner, repo });
+    const sides = await architectFilingSides({ worktreePath, branch, owner: filingTarget.owner, repo: filingTarget.repo }, view, changedFiles, { owner, repo });
     const opened: Array<{ prUrl: string; isPublic: boolean }> = [];
     for (const side of sides) {
-      if (view === undefined) applyPlanProposalCommit(side.worktreePath, commitMessage, log);
-      else await commitArchitectSide(side.worktreePath, commitMessage, log);
+      const { worktreePath, branch, owner, repo } = side;
+      if (view === undefined) applyPlanProposalCommit(worktreePath, commitMessage, log);
+      else await commitArchitectSide(worktreePath, commitMessage, log);
       // Build the body only AFTER the shared commit writer has staged the plan sources. The
       // changed-files block is an assertion about the actual commit, not the worker's pre-harness
       // advisory list; constructing it before regeneration would immediately make the PR contradict
       // its own diff whenever the index changes.
-      const planPrFiles = hostWorktreeGit(side.worktreePath, ["diff", "--name-only", worktreeMergeBase(side.worktreePath), "HEAD"], { maxBuffer: 64 * 1024 * 1024 })
+      const planPrFiles = hostWorktreeGit(worktreePath, ["diff", "--name-only", worktreeMergeBase(worktreePath), "HEAD"], { maxBuffer: 64 * 1024 * 1024 })
         .split("\n")
         .map((line) => line.trim())
         .filter(Boolean);
@@ -36556,9 +36558,9 @@ export async function planCommand(
       try {
         planPrBody = buildPlanPrBody({
           intro: `rmd plan --mode=${mode} proposed plan-only changes.\n\nOperator brief\n\n${brief || "(none — whole-plan scope)"}`,
-          criteria: planPrAcceptanceCriteria(reservedIds, planPrFiles, diffSinceMergeBase(side.worktreePath), side.worktreePath),
+          criteria: planPrAcceptanceCriteria(reservedIds, planPrFiles, diffSinceMergeBase(worktreePath), worktreePath),
           changedFiles: planPrFiles,
-          proofCwd: side.worktreePath,
+          proofCwd: worktreePath,
         });
       } catch (err) {
         const reason = String((err as Error)?.message ?? err);
@@ -36569,27 +36571,27 @@ export async function planCommand(
       }
       const pushedBefore = planPushed;
       planPushed = "unknown"; // W1-T9488: a push that throws leaves the branch's ids unknowable
-      await gitPushRunBranchAsync(side.worktreePath);
-      const pushedNow = pushedBranchIds(side.worktreePath, log);
+      await gitPushRunBranchAsync(worktreePath);
+      const pushedNow = pushedBranchIds(worktreePath, log);
       planPushed = pushedBefore === "unknown" || pushedNow === "unknown" ? "unknown" : [...(pushedBefore ?? []), ...(pushedNow ?? [])];
 
       // The title is the SAME header string that just went into the commit, split off
       // its first line — never a second computation (W1-T327 design point ii).
-      const prCreate = ghPrCreateFillCommand(side.worktreePath, side.owner, side.repo, side.branch, commitMessage.split("\n")[0], planPrBody, undefined, { log });
+      const prCreate = ghPrCreateFillCommand(worktreePath, owner, repo, branch, commitMessage.split("\n")[0], planPrBody, undefined, { log });
       let prUrl: string | undefined;
       if (credential.kind === "app") {
-        const write = await plannerPrWriteToken(credential, `${side.owner}/${side.repo}`, opts.prWriteToken);
+        const write = await plannerPrWriteToken(credential, `${owner}/${repo}`, opts.prWriteToken);
         if (!write.ok) {
-          log("plan.pr_write_credential_failed", { branch: side.branch, reason: write.reason });
+          log("plan.pr_write_credential_failed", { branch, reason: write.reason });
           say(`plan PR not opened — ${write.reason}`);
           removePlanWorktree();
           return 1;
         }
         const exec: NonNullable<Parameters<typeof runGhPrCreate>[4]> = opts.prCreateExec ?? execFileSync;
-        prUrl = runGhPrCreate(prCreate, side.branch, log, say,
+        prUrl = runGhPrCreate(prCreate, branch, log, say,
           (file, args, options) => exec(file, args, { ...options, env: { ...process.env, GH_TOKEN: write.token } }), exec).prUrl;
       } else {
-        prUrl = runGhPrCreate(prCreate, side.branch, log, say, opts.prCreateExec).prUrl;
+        prUrl = runGhPrCreate(prCreate, branch, log, say, opts.prCreateExec).prUrl;
       }
       if (!prUrl) {
         log("plan.error", { error: "no PR opened" });
@@ -36599,10 +36601,10 @@ export async function planCommand(
 
       // RUN-OWNERSHIP GUARD (W1-T62 precedent) — before any side effect touches this PR, assert it
       // is actually this plan run's own PR.
-      const ownership = checkPrOwnership(prUrl, side.branch, ghPrHeadGateway(), worker.costUsd, worker.accountLabel);
+      const ownership = checkPrOwnership(prUrl, branch, ghPrHeadGateway(), worker.costUsd, worker.accountLabel);
       if (ownership) {
         log("verdict", ownership.ledger);
-        say(`verdict: pr_attribution_failed — claimed PR ${prUrl} is not this plan run's own branch (${side.branch})`);
+        say(`verdict: pr_attribution_failed — claimed PR ${prUrl} is not this plan run's own branch (${branch})`);
         removePlanWorktree();
         return 1;
       }
