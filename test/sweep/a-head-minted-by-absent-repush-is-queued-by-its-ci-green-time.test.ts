@@ -240,3 +240,38 @@ test("W1-T12534 criterion 3: invalid timestamps and other heads cannot supply a 
   ], 1);
   assert.deepEqual(order, [751, 752, 753]);
 });
+
+test("W1-T12534 criterion 4: a rotation that keeps the head's rows live leaves its key fixed", async () => {
+  const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}repush-live-rotation-`));
+  const ledgerPath = join(dir, "ledger.ndjson");
+  const realLedger = { ledgerPath, appendLine: undefined };
+  // #761 created 09:00, minted 19:00, first eligible 19:10. #762 (19:05) sits between the 19:10 key and
+  // both fallbacks (mint 19:00, createdAt 09:00); #763 (19:20) sits before any later eligibility row.
+  const prs = [pr(761, at("09:00")), pr(762, at("19:05")), pr(763, at("19:20"))];
+  try {
+    writeFileSync(ledgerPath, lines([
+      ...Array.from({ length: MAX_RETAINED_LINES_PER_STEP }, (_, i) => eligible(900 + i, at("18:00"))),
+      repushed(761, at("19:00")),
+      { ...eligible(761, at("19:10")), review_key: "W1-T761@head-761" },
+    ]));
+    assert.deepEqual((await admissionOrder(prs, [], 1, undefined, realLedger)).order, [762, 761, 763]);
+    const rotated = rotateLedger(ledgerPath, {
+      ceilingBytes: statSync(ledgerPath).size - 1, smoothingWindowMs: 0, now: () => new Date(NOW),
+    });
+    assert.equal(rotated.rotated, true);
+    const live = readLedgerLines(ledgerPath);
+    assert.ok(!live.some((row) => row.pr_number === 900), "the rotation archived the oldest other eligibility row");
+    assert.ok(live.some((row) => row.step === "sweep.review_eligible" && row.pr_number === 761), "the head's row is live");
+    assert.deepEqual((await admissionOrder(prs, [], 1, undefined, realLedger)).order, [762, 761, 763],
+      "the key is the first eligibility ts after the rotation");
+    // A verdict and a changed review input at the same head append a later eligibility row; the key stays.
+    const updated = { ...prs[0]!, lastActivityAt: at("20:35"), reviewInputDigest: "after-verdict" };
+    assert.deepEqual((await admissionOrder([updated, prs[1]!, prs[2]!], [], 1, undefined, realLedger)).order, [762, 761, 763]);
+    assert.equal(readLedgerLines(ledgerPath).filter((row) => row.step === "sweep.review_eligible" && row.pr_number === 761)
+      .length, 2, "the update appended a later eligibility row");
+    assert.deepEqual((await admissionOrder([updated, prs[1]!, prs[2]!], [], 1, undefined, realLedger)).order,
+      [762, 761, 763], "the next pass reads the later row and still keys the head by the first one");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
