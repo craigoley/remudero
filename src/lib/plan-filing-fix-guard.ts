@@ -1,4 +1,5 @@
 import { parse } from "yaml";
+import { posix } from "node:path";
 import { isInPlanScope } from "./plan-scope.js";
 
 type FilingTask = { id: string; files: string[]; acceptance: { claim: string; proof?: string }[] };
@@ -73,7 +74,8 @@ export function planFilingFixRoundRefusal(input: PlanFilingFixRoundInput): strin
           }
           if (proof !== criterion.proof && /^unit test:/i.test(proofText(proof))) {
             if (mainTestPaths![proof] === undefined) return `unreadable test paths for ${proof}`;
-            const outside = mainTestPaths![proof].filter(file => !declaredFilesByTask![prior.id].includes(file));
+            const declared = new Set(declaredFilesByTask![prior.id].map(file => posix.normalize(file)));
+            const outside = mainTestPaths![proof].filter(file => !declared.has(posix.normalize(file)));
             if (outside.length) return `${prior.id} criterion ${index + 1} targets existing tests outside declared files: ${outside.join(", ")}`;
           }
         }
@@ -94,7 +96,7 @@ export async function readPlanFilingFixRoundInput(
 ): Promise<PlanFilingFixRoundInput> {
   const input: PlanFilingFixRoundInput = { baselineDiffFiles };
   try {
-    const mainPaths = new Set((await git(["ls-tree", "-r", "--name-only", "origin/main"])).split("\n").filter(Boolean));
+    const mainPaths = new Set((await git(["ls-tree", "-r", "--name-only", "origin/main"])).split("\n").filter(Boolean).map(file => posix.normalize(file)));
     const priorShards: Record<string, string> = {};
     const nextShards: Record<string, string> = {};
     const declaredFilesByTask: Record<string, string[]> = {};
@@ -111,8 +113,9 @@ export async function readPlanFilingFixRoundInput(
         const proof = criterion.proof ?? "";
         const target = /^unit test:\s*(.+)$/i.exec(proofText(proof))?.[1].trim();
         if (!target || mainTestPaths[proof] !== undefined) continue;
-        if (/^test\/\S+\.[cm]?[jt]sx?$/.test(target)) {
-          mainTestPaths[proof] = mainPaths.has(target) ? [target] : [];
+        const canonicalTarget = posix.normalize(target);
+        if (/^test\/\S+\.[cm]?[jt]sx?$/.test(canonicalTarget)) {
+          mainTestPaths[proof] = mainPaths.has(canonicalTarget) ? [canonicalTarget] : [];
         } else {
           let matches: string;
           try {

@@ -2546,8 +2546,7 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
   const filingRoundRefusal = async (priorHead: string, nextHead: string | undefined): Promise<string | undefined> => {
     if (baselineDiffFiles === undefined) return undefined;
     if (baselineDiffFiles.length === 0 || !baselineDiffFiles.every(isInPlanScope)) return undefined;
-    // No new head means no round result to guard: nothing was committed, so nothing can carry a trailer.
-    if (nextHead === undefined || nextHead === priorHead) return undefined;
+    if (nextHead === undefined || nextHead.trim() === "") return "unreadable plan filing nextHead; cannot verify the round before push";
     return planFilingFixRoundRefusal(await readPlanFilingFixRoundInput(
       baselineDiffFiles, priorHead, nextHead,
       args => (deps.scopeAmendmentGit ?? hostWorktreeGitAsync)(opts.worktreePath, args, { maxBuffer: 1 << 26 })));
@@ -4535,9 +4534,8 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
     // is filed against (DAEMON-1788016810368 / PR #3261 — the worktree's local ref reset back
     // to origin's tip between commit and push) can happen. Threaded to `deps.push` below so
     // `gitPushRunBranch`'s post-condition re-reads HEAD immediately before pushing and raises
-    // if it no longer matches this snapshot, instead of silently pushing zero refs. Best-effort:
-    // an unreadable HEAD here just means this round's push runs without the guard — the same
-    // fail-open discipline every other optional read in this rung already takes.
+    // if it no longer matches this snapshot, instead of silently pushing zero refs. A plan filing
+    // refuses an unreadable result head below, because its commits and criteria must be verified.
     let expectedHeadShaForPush = harnessCommittedSha;
     try {
       expectedHeadShaForPush ??= hostWorktreeGit(opts.worktreePath, ["rev-parse", "HEAD"]).trim();

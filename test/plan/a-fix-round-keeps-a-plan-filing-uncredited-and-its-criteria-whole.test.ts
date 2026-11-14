@@ -3,6 +3,8 @@ import { test, type TestContext } from "node:test";
 import { stringify } from "yaml";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import childProcess from "node:child_process";
+import { syncBuiltinESMExports } from "node:module";
 import { planFilingFixRoundRefusal, readPlanFilingFixRoundInput, type PlanFilingFixRoundInput } from "#src/lib/plan-filing-fix-guard.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
 import { runPlanScopedFixRound, runFixRung } from "#test/helpers/run-task-test.js";
@@ -61,7 +63,7 @@ test("a plan-filing fix round that credits a filed task is refused", () => {
   assert.equal(planFilingFixRoundRefusal(input({ newCommitMessages: [{ sha: "other", message: "Remudero-Task: W1-T999" }] })), undefined);
 });
 
-test("a plan-filing fix round that lowers or rewrites the filing's criteria is refused", () => {
+test("a plan-filing fix round that lowers or rewrites the filing's criteria is refused", async (t) => {
   const unrelated = "unit test: unrelated existing behavior";
   for (const [acceptance, pattern] of [
     [criteria.slice(0, 1), /criterion count/],
@@ -83,6 +85,22 @@ test("a plan-filing fix round that lowers or rewrites the filing's criteria is r
   const wrapped = `\`unit test: unrelated existing behavior\``;
   assert.match(planFilingFixRoundRefusal(input({ nextShards: { [SHARD]: shard([{ ...criteria[0], proof: wrapped }, criteria[1]]) },
     mainTestPaths: { [wrapped]: [OTHER] } }))!, /existing.*outside.*declared/);
+  const { repo, write, prior } = filing(t);
+  for (const target of [OTHER, "test//plan/existing.test.ts", "test/plan/./existing.test.ts",
+    "test/plan/../plan/existing.test.ts", "./test/plan/existing.test.ts"]) {
+    write(SHARD, shard([{ ...criteria[0], proof: `unit test: ${target}` }, criteria[1]]));
+    repo.git("add", "."); repo.git("commit", "-m", "fix(plan): replace proof target");
+    const evidence = await readPlanFilingFixRoundInput([SHARD], prior, "HEAD", args => repo.git(...args));
+    assert.match(planFilingFixRoundRefusal(evidence)!, /existing.*outside.*declared/, target);
+  }
+  const explicit = `unit test: ${DECLARED}`;
+  for (const [resolved, declared] of [[DECLARED, "test//plan/future.test.ts"],
+    ["test/plan/./future.test.ts", DECLARED]]) {
+    assert.equal(planFilingFixRoundRefusal(input({
+      nextShards: { [SHARD]: shard([{ ...criteria[0], proof: explicit }, criteria[1]]) },
+      mainTestPaths: { [explicit]: [resolved] }, declaredFilesByTask: { "W1-T12062": [declared] },
+    })), undefined, "equivalent declared paths allow proof-form repair");
+  }
 });
 
 test("unreadable filing evidence refuses rather than treating it as an empty contract", () => {
@@ -163,10 +181,23 @@ test("the plan round refuses appended credit and criterion loss before push or m
 });
 
 test("the code lane refuses both worker and generator filing commits without spending a strike", async (t) => {
-  for (const scenario of ["worker", "generator"] as const) {
+  for (const scenario of ["worker", "generator", "head", "evidence"] as const) {
     const { repo, write, prior } = filing(t);
     const rows: Record<string, unknown>[] = [];
     let pushes = 0;
+    let workerCommitted = false;
+    let headReadFailures = 0;
+    let evidenceReadFailures = 0;
+    const execFileSync = childProcess.execFileSync;
+    const headRead = t.mock.method(childProcess, "execFileSync", (...args: Parameters<typeof execFileSync>) => {
+      if (scenario === "head" && workerCommitted && args[0] === "git" &&
+        args[1]?.slice(-2).join(" ") === "rev-parse HEAD") {
+        headReadFailures++;
+        throw new Error("fixture cannot read result head");
+      }
+      return execFileSync(...args);
+    });
+    syncBuiltinESMExports();
     const review: ReviewVerdict & { headSha: string; reviewerOutcome: string } = { state: "failure", criteria: [], testTheater: false,
       summary: "blocked", floorDegraded: false, capped: false, keywordOnly: false, planOnly: true, headSha: prior, reviewerOutcome: "failure" };
     const result = await runFixRung({
@@ -181,8 +212,10 @@ test("the code lane refuses both worker and generator filing commits without spe
         reviewerMount: { model: "sonnet", effort: "medium", maxTurns: 10, contextBudget: 120000 } },
       deps: {
         spawn: async () => {
-          write(SHARD, shard(criteria.slice(0, 1)));
-          repo.git("add", "."); repo.git("commit", "-m", "fix(plan): remove criterion");
+          write(SHARD, shard(scenario === "head" || scenario === "evidence"
+            ? criteria.map(c => ({ ...c, proof: c.proof.replaceAll("`", "") })) : criteria.slice(0, 1)));
+          repo.git("add", "."); repo.git("commit", "-m", "fix(plan): repair filing proof");
+          workerCommitted = true;
           return { sessionId: "fixture", text: "REPORT\nCOMMIT_MESSAGE: fix(plan): repair proof", blocks: [], stderr: "",
             subtype: "success", isError: false, apiError: false, costUsd: 0, numTurns: 1, permissionDenials: [],
             childEnvKeys: [], model: "sonnet", effort: "medium", tokens: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 },
@@ -192,6 +225,10 @@ test("the code lane refuses both worker and generator filing commits without spe
         runReview: async () => { assert.fail("a refused round never reviews"); },
         fetchPrBody: async () => "## Acceptance\n- filing | grep: id: in plan/tasks.d/",
         fetchPrDiffFiles: async () => [SHARD],
+        ...(scenario === "evidence" ? { scopeAmendmentGit: async () => {
+          evidenceReadFailures++;
+          throw new Error("fixture cannot read filing evidence");
+        } } : {}),
         push: () => { pushes++; },
         issues: { create: () => { assert.fail("no escalation"); }, listOpen: () => [], comment() {} },
         ledgerPath: join(repo.dir, "ledger.ndjson"), log: (step, extra) => rows.push({ step, ...extra }), say() {},
@@ -206,8 +243,13 @@ test("the code lane refuses both worker and generator filing commits without spe
         } : {}),
       },
     });
+    headRead.mock.restore();
+    syncBuiltinESMExports();
     assert.equal(result.outcome, "stood_down");
-    assert.match(result.reason!, scenario === "generator" ? /Remudero-Task: W1-T12062/ : /criterion count/);
+    assert.match(result.reason!, scenario === "generator" ? /Remudero-Task: W1-T12062/ :
+      scenario === "head" ? /unreadable.*nextHead/ : scenario === "evidence" ? /cannot read filing evidence/ : /criterion count/);
+    if (scenario === "head") assert.ok(headReadFailures > 0, "the result head read actually failed");
+    if (scenario === "evidence") assert.ok(evidenceReadFailures > 0, "the filing evidence read actually failed");
     assert.equal(result.strikes, 0); assert.equal(pushes, 0);
     assert.equal(fixRoundTally(rows, "W1-T12062", prior).strikes, 0);
   }
