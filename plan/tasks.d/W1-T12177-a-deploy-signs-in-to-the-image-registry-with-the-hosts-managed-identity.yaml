@@ -39,7 +39,7 @@
     - claim: "When both methods fail, the failure gives the reason of each, and no token appears in the file, in the row or in the output"
       proof: "grep: W1-T12177 criterion 5 in test/deploy/a-deploy-signs-in-to-the-image-registry-with-the-hosts-managed-identity.test.ts"
     - claim: "A private recycle contains only the managed-identity and registry login transports before probing the image, without reaching host replacement effects"
-      proof: "unit test: test/recycle-container.test.ts private registry selection defaults and falsifiers forbid live effects: real image identity and catches"
+      proof: "unit test: private registry selection defaults and falsifiers forbid live effects: real image identity and catches"
   rationale: |
     OBSERVED 2026-11-10 on the Azure host: `deploy.image_auth_refresh` failed until the operator ran `az login` with an authenticator app. The daemon stayed stuck for more than an hour.
     - `rmd_acr_login` in deploy/acr-login.sh runs `az acr login -n <registry>`. That command needs a login that is already on the host.
