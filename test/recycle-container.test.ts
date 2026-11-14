@@ -1053,7 +1053,7 @@ test("private registry selection defaults and falsifiers forbid live effects: re
   }
 });
 
-test("W1-T12177 criterion 7: private registry selection defaults and falsifiers forbid live effects: real image identity and catches", () => {
+test("private registry selection defaults and falsifiers forbid live effects: real image identity and catches", () => {
   for (const serve of [false, true]) for (const mode of ["private-alias", "private-replaced", "private-lost-binding", "private-marker-only", "private-probe-fail"]) {
     const fixture = privateRecyclerFixture();
     try {
