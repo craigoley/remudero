@@ -16844,9 +16844,11 @@ function conflictRoundOutranksEscalationHold(
 }
 
 export function conflictRoundHeldHead(pr: Pick<OpenPrView, "taskId" | "prNumber" | "prUrl" | "headSha">,
-  lines: ReadonlyArray<Record<string, unknown>>, ledgerPath?: string): string {
+  lines: ReadonlyArray<Record<string, unknown>>, ledgerPath?: string,
+  archive?: () => ReadonlyArray<Record<string, unknown>> | undefined): string {
   const key = fixLedgerTaskIdFor(pr);
   const seen = new Set([pr.headSha]);
+  const readArchive = archive ?? (ledgerPath === undefined ? undefined : () => readFixRoundArchiveRows(ledgerPath));
   let history = lines, archiveRead = false;
   for (let head = pr.headSha; ;) {
     const pushedBy = history.findLast(row => (row.step === "fix.done" && row.task_id === key && row.pushed_head_sha === head &&
@@ -16855,9 +16857,9 @@ export function conflictRoundHeldHead(pr: Pick<OpenPrView, "taskId" | "prNumber"
       (row.step === "sweep.conflict_regenerated" && row.pr_number === pr.prNumber && row.new_head_sha === head &&
         row.outcome === "pushed"));
     // Rotation caps the push receipts independently of the held question; a live miss is not an outside head.
-    if (pushedBy === undefined && !archiveRead && ledgerPath !== undefined) {
+    if (pushedBy === undefined && !archiveRead && readArchive !== undefined) {
       archiveRead = true;
-      const archived = readFixRoundArchiveRows(ledgerPath);
+      const archived = readArchive();
       if (archived !== undefined) { history = [...archived, ...lines]; continue; }
     }
     const from = pushedBy?.head_sha;
@@ -20451,6 +20453,14 @@ export async function runSweep(
   const refreshRecords = refreshRecordsFromLedger(ledgerLines);
   const refusedClearances = refusedRefreshClearancesFromLedger(ledgerLines);
   const refreshSteps = ["fix.base_refreshed", BASE_RED_REFRESH_STEP, BASE_FIXED_REFRESH_STEP, REFRESH_CLEARANCE_STEP];
+  // Hold ancestry and refresh clearance share one archive snapshot for this pass.
+  let repairHistory: LedgerUnionRecordRead | undefined;
+  const readRepairHistory = () => repairHistory ??= readLedgerUnionRecordsSync(dirname(deps.ledgerPath), {
+    step: [...refreshSteps, "fix.dispatch", "fix.done", "fix.needs_design", "sweep.conflict_regenerated"], refuseIncomplete: true });
+  const readRepairArchive = () => {
+    const union = readRepairHistory();
+    return union.ok ? union.rows : undefined;
+  };
   const oldestRefreshRow = new Map<string, number>();
   for (const row of ledgerLines) {
     if (typeof row.step !== "string" || !refreshSteps.includes(row.step)) continue;
@@ -20468,8 +20478,8 @@ export async function runSweep(
       refreshHistory.set(pr.prNumber, history);
       return history;
     }
-    const union = resolveLedgerUnion(dirname(deps.ledgerPath), `"pr_number":${pr.prNumber}[,}]`, undefined, { step: refreshSteps });
-    const rows = parseLedger(union.matches.join("\n"));
+    const union = readRepairHistory();
+    const rows = union.rows.filter(row => row.pr_number === pr.prNumber && refreshSteps.includes(String(row.step)));
     const records = refreshRecordsFromLedger(rows).get(pr.prNumber) ?? [];
     refreshRecords.set(pr.prNumber, [...records, ...(refreshRecords.get(pr.prNumber) ?? [])]);
     for (const [key, evidence] of refusedRefreshClearancesFromLedger(rows)) {
@@ -20477,8 +20487,8 @@ export async function runSweep(
     }
     for (const key of baseRedHistoryFromLedger(rows).refreshed) baseRedHistory.refreshed.add(key);
     const unread = [...union.unread, ...(union.unclassified ?? [])];
-    if (!union.ok && unread.length === 0) unread.push(dirname(deps.ledgerPath));
-    const history = { source: !union.ok || unread.length > 0 ? "unreadable" as const : "union" as const, unread };
+    if ((!union.ok || union.archiveCount === 0) && unread.length === 0) unread.push(dirname(deps.ledgerPath));
+    const history = { source: !union.ok || union.archiveCount === 0 || unread.length > 0 ? "unreadable" as const : "union" as const, unread };
     refreshHistory.set(pr.prNumber, history);
     return history;
   };
@@ -22440,12 +22450,12 @@ export async function runSweep(
     let heldEscalationDedup: string | undefined;
     let designHoldKept = false;
     let escalationHoldKept: string | undefined;
-    const holdHead = (disposition === "conflicted" || disposition === "blocked-fixable") ? conflictRoundHeldHead(pr, ledgerLines, deps.ledgerPath) : pr.headSha;
+    const holdHead = (disposition === "conflicted" || disposition === "blocked-fixable") ? conflictRoundHeldHead(pr, ledgerLines, deps.ledgerPath, readRepairArchive) : pr.headSha;
     if ((disposition === "conflicted" || disposition === "blocked-fixable") &&
         !inFlightFixKeys.has(`${fixLedgerTaskIdFor(pr) ?? ""}@${pr.headSha}`) &&
         !dispatchCauseHolds.get(pr.prNumber)) {
       const handoff = terminalFixDesignHandoff(holdHead === pr.headSha ? pr : { ...pr, headSha: holdHead }, ledgerLines,
-        () => readFixRoundArchiveRows(deps.ledgerPath));
+        readRepairArchive);
       if (handoff.kind === "handoff") {
         const held = handoff.producer;
         const recorded = ledgerLines.findLast(row => row.step === "sweep.disposed" && row.pr_number === pr.prNumber &&
