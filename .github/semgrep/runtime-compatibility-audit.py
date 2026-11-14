@@ -40,6 +40,12 @@ APPROVED_TOOLS = {
     "packaging": ("26.3", "d7193f7c8e4e93f444fde0262bf90af30e16fa0ad0ad44cb553c87339b23cd1c"),
     "wheel": ("0.48.0", "3217dcc807155e45db462d7ef2431f5ddda0d7273b700d05a67b271ceb1287ab"),
 }
+APPROVED_TOOL_ARTIFACTS = {
+    "setuptools": frozenset({
+        ("84.0.0", "51a52592b3b99e102b609654876bd65f19f999935166d1352678931132b0c670"),
+        ("84.1.0", "5231689c6ac8156cd155cfb98c3fd6fb252c3e7e9bd3d78b64d3c55f132624c9"),
+    }),
+}
 APPROVED_PEEWEE = ("3.18.3", "62c3d93315b1a909360c4b43c3a573b47557a1ec7a4583a71286df2a28d4b72e")
 MAX_ARCHIVE = 256 << 20
 MAX_EXPANDED = 512 << 20
@@ -76,7 +82,7 @@ APPROVED_SPECIAL_MEMBERS = {
     ("opentelemetry-instrumentation", "0.58b0", "50f97ac03100676c9f7fc28197f8240c7290ca1baa12da8bfbb9a1de4f34cc45"): {
         "opentelemetry/instrumentation/auto_instrumentation/sitecustomize.py": (673, "ddcfb83130a15563be3e97502e92073e9d0cf69643aa73c410dfa3721eafe265"),
     },
-    ("setuptools", "84.0.0", "51a52592b3b99e102b609654876bd65f19f999935166d1352678931132b0c670"): {
+    ("setuptools", "84.1.0", "5231689c6ac8156cd155cfb98c3fd6fb252c3e7e9bd3d78b64d3c55f132624c9"): {
         "setuptools/_vendor/importlib_metadata-8.7.1.dist-info/licenses/LICENSE": (10278, "458502e12d97bbf64438606a20044aa85eb05fb0a8a807bb35dbec253fd1fc04"),
         "setuptools/_vendor/jaraco_context-6.1.0.dist-info/licenses/LICENSE": (1076, "9755a18519666e5f0f4cae3daad3d7012bcae48a600b31237d75e9fe134e6683"),
         "setuptools/_vendor/jaraco_functools-4.4.0.dist-info/licenses/LICENSE": (1076, "5a57cb4db85e2a2dd88c290628908add57e3451449e0a9a71fdfb38776fd759d"),
@@ -161,10 +167,14 @@ APPROVED_SPECIAL_MEMBERS = {
         "setuptools/_vendor/zipp-3.23.0.dist-info/top_level.txt": (5, "8806dda121df686a817d56f65ee47d26a4901c2a0eb0eb46eb2f42fcb4a9a85c"),
     },
 }
+# The 84.0 and 84.1 wheels carry identical approved vendored metadata members;
+# the whole-wheel digest remains distinct and is checked before this lookup.
+APPROVED_SPECIAL_MEMBERS[("setuptools", "84.0.0", "51a52592b3b99e102b609654876bd65f19f999935166d1352678931132b0c670")] = \
+    APPROVED_SPECIAL_MEMBERS[("setuptools", "84.1.0", "5231689c6ac8156cd155cfb98c3fd6fb252c3e7e9bd3d78b64d3c55f132624c9")]
 AUDIT_TEST_SOURCES = {
     "runtime_audit_metadata_tests.py": "9eb898e30ab9fd3fc0a96eebe626cdba96bcca2512ff27e5b88880da0f3b4737",
     "runtime_audit_test_fixtures.py": "66d2d91312ab5006bef72ef6ab2daa2ea8816870e7c6f740ca296d428d58190d",
-    "test_runtime_compatibility_audit.py": "4ca34ad14044c89eef7275ae16f4163fa2c434c57fe658867a741ff043080284",
+    "test_runtime_compatibility_audit.py": "db2e2a219ed1e6de3654ccc0a55565da4c2358e8d835c85f4e5ef094cd21019a",
     "runtime_source_recipe.py": "6d1d2cc20e1a2fe225f913d9df815771b4e047c872bdaabbb59eceea52bcb35d",
     "prepare-source-build.py": "96eb19457f4799979e691459ad19ba761ab498d6576470db7c77eb5708171274",
     "source-build-policy.json": "5cf435e3bb81a52e1583ea00008d0e46a3c0ec64d920fe6720d59f88870bd83a",
@@ -222,6 +232,13 @@ def approved_special_member(name: str, version: str, artifact_sha: str, path: st
     # body or logical destination happens to match an approved member.
     return (expected is not None and expected == (len(data), digest(data)) and
             destination == ("site", *safe_member(path)))
+
+
+def approved_tool_artifact(name: str, version: str, artifact_sha: str) -> bool:
+    approved = APPROVED_TOOL_ARTIFACTS.get(name)
+    if approved is not None:
+        return (version, artifact_sha) in approved
+    return name not in APPROVED_TOOLS or (version, artifact_sha) == APPROVED_TOOLS[name]
 
 
 def _api_from_imported_pip(provenance: dict) -> SimpleNamespace:
@@ -368,8 +385,8 @@ def safe_member(path: str) -> tuple[str, ...]:
 def approved_setuptools_pth(name: str, version: str, artifact_sha: str, archive_path: str) -> bool:
     # Exact whole-artifact digest binds the actual exception bytes; filename alone
     # is never a waiver. No invented .pth content hash before the real wheel is read.
-    return (name, version, artifact_sha, archive_path) == (
-        "setuptools", *APPROVED_TOOLS["setuptools"], "distutils-precedence.pth")
+    return (name == "setuptools" and archive_path == "distutils-precedence.pth" and
+            approved_tool_artifact(name, version, artifact_sha))
 
 
 def _wheel_destination(parts: tuple[str, ...], info_dir: str, name: str) -> tuple[str, ...]:
@@ -390,7 +407,7 @@ def scan_wheel(filename: str, raw: bytes, api) -> dict:
     version, artifact_sha = str(version_obj), digest(raw)
     need(bool(filename_tags.intersection(set(api.sys_tags()))), "WHEEL_TARGET", filename)
     if name in APPROVED_TOOLS:
-        need((version, artifact_sha) == APPROVED_TOOLS[name], "TOOL_ARTIFACT_NOT_APPROVED", name)
+        need(approved_tool_artifact(name, version, artifact_sha), "TOOL_ARTIFACT_NOT_APPROVED", name)
     with zipfile.ZipFile(io.BytesIO(raw)) as archive:
         infos = archive.infolist()
         need(0 < len(infos) <= MAX_MEMBERS, "MEMBER_BOUND", filename)
@@ -522,7 +539,8 @@ def audit_distribution_set(rows: list[dict], api) -> dict:
                 need(root not in sys.stdlib_module_names, "STDLIB_OVERWRITE", root)
                 need(TOOL_ROOT_OWNERS.get(root, name) == name, "TOOL_NAMESPACE_OVERWRITE", root)
                 if root in TOOL_ROOT_OWNERS:
-                    need((row["version"], row["sha256"]) == APPROVED_TOOLS[name], "TOOL_ARTIFACT_NOT_APPROVED", name)
+                    need(approved_tool_artifact(name, row["version"], row["sha256"]),
+                         "TOOL_ARTIFACT_NOT_APPROVED", name)
                 if root in APPROVED_SHARED_NAMESPACES:
                     need(approved_namespace_contributor(row, root, destination), "UNAPPROVED_NAMESPACE_CONTRIBUTOR", root)
                 prior = root_owners.setdefault(root, set())
