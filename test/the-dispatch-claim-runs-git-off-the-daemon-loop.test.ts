@@ -83,7 +83,8 @@ test("a dispatch claim push killed at its bound reads unreachable and the refusa
     const outcome = await reserver.attempt("W1-T9002", "a".repeat(40));
     assert.equal(outcome, "unreachable", "a push that never answered must fail closed, never read as created or taken");
     const stderr = reserver.lastAttemptStderr?.();
-    assert.match(stderr ?? "", /git push timed out after 150ms and was killed\. git said: connecting to origin/);
+    // W1-T12525: the claim reads its ref before it pushes, so the hung git is killed on the ls-remote.
+    assert.match(stderr ?? "", /git ls-remote timed out after 150ms and was killed\. git said: connecting to origin/);
     const decision = decideDispatchClaim(outcome, { taskId: "W1-T9002", stderr });
     assert.equal(decision.proceed, false);
     assert.match(decision.reason, /timed out after 150ms/, "the refusal names the bound, not only the category");

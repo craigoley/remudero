@@ -1,4 +1,5 @@
 import { settledSpansByClass } from "./cost-anomaly.js";
+import { restartCycleLedgerRows, restartCycleRow } from "./restart-cycle.js";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 import type { LedgerRecord } from "./retro.js";
@@ -98,13 +99,11 @@ import { evaluatePauseTier, isRecyclePauseDetail, type PauseTier, type PauseTier
 import { createFleetAccountEpisode, redactedAccountLabel, type FleetAccountDivergence, type FleetAccountPair } from "./account-usage.js";
 import { HEADROOM_LIMIT_PCT, RESET_UNKNOWN, UNREADABLE_DEGRADED_LIMIT } from "./headroom.js";
 import type { UsageSnapshot } from "./headroom.js";
-// Type-only, so no runtime edge is added to daemon-health.ts, which already imports a value from
-// here; a value import would close a real cycle. This module never shells GitHub itself (W1-T372).
+// Type-only: daemon-health.ts imports a value from here; a value edge would cycle (W1-T372).
+// This module never shells GitHub itself.
 import type { GhRateLimitBuckets } from "./daemon-health.js";
 import type { CostGovernorResult, LightPassScopeName, MemoryGovernorResult, QueueGovernorResult } from "./sweep.js";
-// W1-T3691 — a value import (`trackStaleReviewerSkipRecurrence`, `renderHeldReviewQueueBlocker`)
-// alongside the type-only ones above: sweep.ts imports nothing from this module, so this closes
-// no cycle either, same as the value import just below.
+// Value imports are cycle-free: sweep.ts imports nothing from here (W1-T3691, W1-T2744).
 import {
   detectStaleBody,
   trackStaleReviewerSkipRecurrence,
@@ -115,8 +114,7 @@ import {
   type StaleReviewerRecurrenceState,
   type StaleReviewerSkipObservation,
 } from "./sweep.js";
-// A value import, unlike the type-only line above. Safe: sweep.ts imports nothing from this
-// module, so this edge closes no cycle (W1-T2744).
+// The same cycle-free sweep.ts value edge (W1-T2744).
 import {
   adoptChildWork,
   installedDetachedWorkHost,
@@ -144,8 +142,7 @@ import {
   openDirectMergeAdmissions,
   type DirectMergeOperation,
 } from "./arm-auto-merge.js";
-// VALUE import (W1-T342's gate moved to its own pure module so drain.ts can share it — see that
-// module's header for why neither daemon.ts nor sweep.ts could host it). Pure, no filesystem.
+// Pure shared gate; dispatch-governor.ts explains why drain.ts cannot share it from here (W1-T342).
 import { checkDispatchGovernors, checkNewBuildReservation, governorDeferPayload, newBuildReservationPayload, type DispatchGovernorDeps, type DispatchGovernorVerdict, type MemoryReadTracker, type QuietHoursHoldResult } from "./dispatch-governor.js";
 import { assertRunnable, parseTasksFromYaml, PlanError, TASK_RISKS, TASK_STATUSES, TASK_TYPES, TaskAdmissionError, type MergedResolver, type Plan, type Task } from "./plan.js";
 import { resolveReleases, closedUnmergedRunBranchRefs, type DispatchFilterReason, type ReleaseResolution } from "./drain.js";
@@ -166,11 +163,8 @@ import type { OrphanSweepReport } from "./worker-containment.js";
 import type { FeedbackRefusal, LandFeedbackResult, LandingGitMeter } from "./feedback-landing.js";
 // Type-only — github-posture.ts owns this shape; the real read lives in run-task.ts (W1-T1040).
 import type { GithubPostureFinding } from "./github-posture.js";
-// The Clock port (W1-T2897): declared in "../lib/clock" so every reachable-through-lib import
-// still resolves through this same file. `DaemonDeps.now`/`crashLoopCheck.now` keep their legacy
-// `() => Date` / `() => string` shapes (many tests inject those directly), so the adapters below
-// convert them into a `Clock` at the read site instead of forcing every caller to change; the
-// headroom sampler is internal-only, so it is migrated onto `Clock` outright, no adapter needed.
+// Clock adapters preserve DaemonDeps.now's Date and crashLoopCheck.now's string injection shapes.
+// The internal headroom sampler uses Clock directly (W1-T2897).
 import { clockFromDateFn, clockFromIsoFn, fixedClock, loopAvailableDeadline, systemClock, type Clock } from "../lib/clock.js";
 import { createNearLimitHeapTelemetry, NEAR_HEAP_FILE, type NearLimitHeapTelemetry, type NearLimitSample } from "./daemon-heap-near-limit.js";
 import { createHeapAdmissionHold, type HeapAdmissionHoldLatch, type HeapAdmissionHoldMode, type HeapHoldTrace } from "./daemon-heap-admission-hold.js";
@@ -227,10 +221,8 @@ export function startDaemonSreLane(
   };
 }
 
-/** Reason the scheduler loop returned. Every terminal state is one of these. `headroom_exhausted` and `paused` are
- * deliberately absent: both are awaiting-states whose exit the supervisor would relaunch straight back into, so both
- * idle in process instead (W1-T197; 2026-07-22). `stale` has the opposite polarity — it is a request to exit, because
- * a supervisor restart is the only way a long-running daemon gets off the code it loaded at boot (W1-T126). */
+/** Terminal loop states. Headroom exhaustion and pause idle in process to avoid supervisor relaunch
+ * loops (W1-T197; 2026-07-22); stale exits to load newer code through a restart (W1-T126). */
 
 export type DaemonStopReason = "stopped" | "blocked" | "max_reached" | "error" | "stale" | "heap_pressure" | "idle_starved";
 
@@ -613,31 +605,25 @@ const BOOT_GATED_CADENCES = [
   "checkRetroTrigger", "checkWipeTestCadence", "checkAutoTriage",
 ] as const satisfies ReadonlyArray<keyof DaemonDeps>;
 
-/** The exit code a freshness self-restart uses, distinct from a crash's 1 (W1-T490). 75 is
- *  `EX_TEMPFAIL` from sysexits(3), which is what a stale stop is: nothing is wrong, the process
- *  needs newer code. Trap: the value is duplicated in `deploy/entrypoint.sh`, which cannot import
- *  this module. Falsifier: `test/entrypoint-boot.test.ts` fails if the two disagree. Forensics: docs/forensics/daemon.md. */
+/** Freshness restart uses EX_TEMPFAIL (75), distinct from crash 1 (W1-T490).
+ * Keep deploy/entrypoint.sh's duplicate in sync: test/entrypoint-boot.test.ts is the falsifier.
+ * Forensics: docs/forensics/daemon.md. */
 export const DAEMON_EXIT_STALE = 75;
 
-/** The exit code for a completed pass reporting a blocked task, which is news rather than a crash
- *  (W1-T2537). `error` keeps 1 so a genuine crash stays countable against docker's restart budget.
- *  Why: a red board is what produces blocked passes, so the budget was spent fastest when the fleet
- *  was most needed — measured 2026-08-30, 46 minutes exited. Forensics: docs/forensics/daemon.md. */
+/** Blocked passes preserve docker's crash budget; genuine errors keep 1 (W1-T2537).
+ * A red board previously exhausted that budget: docs/forensics/daemon.md (2026-08-30). */
 export const DAEMON_EXIT_BLOCKED = 76;
 
-/** The exit code for a pass killed by an environmental refusal, a third thing that is not a crash (W1-T2546). The
- * decision is delegated to `classifyFailure`, this repo's one failure classifier, so a reworded provider message is a
- * one-place fix and this can only ever narrow what counts as a crash. Forensics: docs/forensics/daemon.md. */
+/** Environmental refusals use classifyFailure's shared classification, preserving the crash budget
+ * (W1-T2546). Forensics: docs/forensics/daemon.md. */
 export const DAEMON_EXIT_ENVIRONMENTAL = 77;
 
 /** A positively empty dedicated queue hands control to the zero-token shell supervisor. */
 export const DAEMON_EXIT_IDLE_STARVED = 78;
 
-/** W1-T3335 — the share of V8's OWN reported heap limit at which restarting beats continuing.
- *  Deliberately a fraction, not a byte count: the limit comes from NODE_OPTIONS and any literal
- *  here would drift out of agreement with it the moment that changed. 0.75 leaves a quarter of the
- *  heap as headroom for the tick that discovers the pressure, which must itself allocate to log
- *  and return. Forensics: docs/forensics/daemon.md. */
+/** Restart at a fraction of V8's reported limit so NODE_OPTIONS changes cannot stale a byte bound.
+ * The remaining quarter lets the detecting tick allocate to log and return (W1-T3335).
+ * Forensics: docs/forensics/daemon.md. */
 export const HEAP_PRESSURE_RESTART_FRACTION = 0.75;
 
 /** W1-T3335: pure pressure decision; returns detail or undefined without allocating a test heap.
@@ -656,57 +642,39 @@ export function heapPressureDetail(
   );
 }
 
-/** V8's live heap accounting. A function rather than an import binding so the daemon's deps can
- *  substitute it without a module mock (Rule 18). */
+/** Injectable V8 heap accounting without a module mock (Rule 18). */
 export function v8HeapStatistics(): { used_heap_size: number; heap_size_limit: number } {
   const s = getHeapStatistics();
   return { used_heap_size: s.used_heap_size, heap_size_limit: s.heap_size_limit };
 }
 
-/** The pure stop-reason to exit-code mapping, extracted so it is unit-testable with no process spawn
- *  (operator ruling, 2026-07-21; Rule 18). Deliberate exits map to 0; every other reason is non-zero
- *  so a supervisor restarts. Trap: neither headroom exhaustion nor pause may reach this function —
- *  each would map to silence or to a relaunch storm (see {@link DaemonStopReason}). Why `stale` has
- *  its own code: docker counts every non-zero exit and cannot read the value, so routine restarts
- *  spent the crash budget and a 2h56m outage followed (W1-T490). Forensics: docs/forensics/daemon.md. */
+/** Pure exit mapping, testable without spawning (operator 2026-07-21; Rule 18).
+ * Deliberate stops use 0; other reasons restart. Pause/headroom must idle instead (DaemonStopReason).
+ * Routine restarts once spent docker's crash budget (W1-T490): docs/forensics/daemon.md. */
 export function daemonExitCode(stopReason: DaemonStopReason): number {
   if (stopReason === "stopped" || stopReason === "max_reached") return 0;
   if (stopReason === "stale") return DAEMON_EXIT_STALE;
-  // W1-T3335: heap pressure maps to the SAME code as `stale` on purpose. Both mean "restart me now,
-  // this is not a crash", and the entrypoint's non-crash arm for 75 already does exactly the right
-  // thing — 5s pause, re-sync, docker's budget untouched. A distinct code would be more honest in
-  // the ENTRYPOINT's log line (it will say "freshness") but needs an entrypoint arm, and that is a
-  // Dockerfile/entrypoint change requiring an IMAGE REBUILD, which no self-sync delivers. The
-  // daemon's own ledger row carries the true reason, so nothing is lost where it is read.
+  // W1-T3335: reuse entrypoint's non-crash 75 arm (5s pause, re-sync, budget untouched).
+  // It logs "freshness"; the ledger retains the true reason. A new arm needs an image rebuild.
   if (stopReason === "heap_pressure") return DAEMON_EXIT_STALE;
-  // `error` deliberately falls through to 1 below, so a genuine crash stays countable against
-  // docker's on-failure budget exactly as it always was (W1-T2537).
+  // Errors fall through to crash exit 1, preserving docker's on-failure budget (W1-T2537).
   if (stopReason === "blocked") return DAEMON_EXIT_BLOCKED;
   if (stopReason === "idle_starved") return DAEMON_EXIT_IDLE_STARVED;
   return 1;
 }
 
-/** The exit code for a whole summary, which is what the real call site has and what
- *  {@link daemonExitCode} deliberately cannot see: the stop detail. A second function rather than a
- *  second parameter, because point-free callers would otherwise be handed an array index as a stop
- *  detail. Fail-closed: anything not positively transient stays `error` (W1-T2546). Forensics: docs/forensics/daemon.md. */
-/** W1-T3310's old pre-push banner match was anchored to avoid matching quoted REFUSED prose.
- * W1-T3319 below replaces it: GitHub read failures carried no hook banner. */
-/** W1-T3319: match drain.ts worker failures by the emitted task prefix AND `Command failed: `.
- * Both worker-failure sites emit `${taskId}: ${message}`; admission/reporting faults include a phase
- * and must keep exit 1. W1-T3310's banner match missed GitHub check-runs read failures.
- * Exported for both-arm negative-reachability fixtures: an unprefixed error must remain fatal.
- * W1-T2546 pins task-prefixed TypeError/AssertionError/SyntaxError as crashes: those indicate RMD
- * defects, whereas spawned command failures belong to the task. The prefix alone is too broad. */
+/** Match task prefix AND `Command failed: `; a prefix alone includes daemon defects (W1-T2546).
+ * Both drain.ts worker-failure sites emit `${taskId}: ${message}`; phase-bearing admission/reporting
+ * faults and unprefixed errors keep exit 1 (both-arm negative-reachability fixtures).
+ * W1-T3319 replaces W1-T3310's anchored banner match, which missed GitHub read failures. */
 export const PER_TASK_FAILURE_RE = /^W\d+-T[0-9A-Za-z]+: Command failed: /;
 
-/** Task failures use blocked exit 76; daemon defects retain crash exit 1 (W1-T3310, W1-T3319).
- * This extends stale/environmental/blocked handling (W1-T490, W1-T2537, W1-T2546): task gate
- * refusals exhausted docker's on-failure:5 budget while dispatch otherwise worked (2026-09-10).
- * Reuse deploy/entrypoint.sh's existing 76 arm; a new code needs an image rebuild to take effect.
- * Exits 75/76/77 still reach docker after 100 bounded in-container retries; the crash budget remains.
- * Order matters: transient classification runs first, so network/rate-limit failures stay 77 even
- * with a gate banner. Unrecognised errors (including credentials/non-fast-forward) keep exit 1. */
+/** Summary classification keeps stop detail separate from daemonExitCode's point-free callers:
+ * a second parameter there would receive an array index (W1-T2546).
+ * Transients take 77 before task failures take 76; daemon defects and unknown errors keep 1.
+ * Reuse entrypoint's 76 arm; a new code needs an image rebuild (W1-T3310, W1-T3319).
+ * Task refusals once spent on-failure:5 (2026-09-10; W1-T490, W1-T2537, W1-T2546).
+ * Exits 75/76/77 still reach docker after 100 bounded retries: docs/forensics/daemon.md. */
 export function daemonExitCodeForSummary(summary: Pick<DaemonSummary, "stopReason" | "stopDetail">): number {
   if (summary.stopReason !== "error") return daemonExitCode(summary.stopReason);
   const detail = summary.stopDetail;
@@ -728,11 +696,9 @@ export interface HeadroomPolicyRule {
 /** A time-to-reset → ceiling curve, DATA rather than a single constant. */
 export type HeadroomPolicy = HeadroomPolicyRule[];
 
-/** The default curve: inside a window's final day the ceiling relaxes to 100%, because headroom
- *  unspent at reset is destroyed; every other day it holds at the operator reserve. Why: on
- *  2026-07-20 the fleet parked about 98 minutes over 56 consecutive exhausted stops, protecting
- *  headroom that expired at the midnight reset regardless (operator ruling, 2026-07-21). The live
- *  curve is `plan/policy.yaml`'s; this literal is the fs-free fallback (W1-T253). Forensics: docs/forensics/daemon.md. */
+/** Final-day headroom expires at reset, so allow 100% then; otherwise hold the operator reserve.
+ * This is plan/policy.yaml's filesystem-free fallback (W1-T253; operator 2026-07-21).
+ * Expiring reserves once parked the fleet: docs/forensics/daemon.md (2026-07-20). */
 export function buildDefaultHeadroomPolicy(holdLimitPct: number = HEADROOM_LIMIT_PCT): HeadroomPolicy {
   return [
     { maxHoursToReset: 24, limitPct: 100 },
@@ -744,10 +710,8 @@ export function buildDefaultHeadroomPolicy(holdLimitPct: number = HEADROOM_LIMIT
  *  hours-to-reset resolves to the last, widest rung: uncertainty is never read as "we must be in
  *  the final day", so the ceiling only relaxes on a confirmed close reset. */
 export function resolveHeadroomLimitPct(hoursToReset: number | null, policy: HeadroomPolicy = buildDefaultHeadroomPolicy()): number {
-  // A reset already in the past is upstream lag, and a negative hours-to-reset would select the laxer
-  // rung. Past-dated and unknown-shaped are the same epistemic state, so they share the strict
-  // fallback. Honest scope: hardening, not a live bug fix — the sole production caller's every branch
-  // rolls forward, so this is unreachable today. Forensics: docs/forensics/daemon.md.
+  // Past resets indicate upstream lag; use the strict unknown fallback, never the relaxed rung.
+  // Hardening: the production caller rolls forward. Forensics: docs/forensics/daemon.md.
   if (hoursToReset === null || !Number.isFinite(hoursToReset) || hoursToReset < 0) {
     return policy[policy.length - 1]?.limitPct ?? HEADROOM_LIMIT_PCT;
   }
@@ -4351,6 +4315,24 @@ export async function runDaemon(
   opts: DaemonOpts = {},
 ): Promise<DaemonSummary> {
   openDirectMergeAdmissions();
+  // Pending cycle consumers share one tick read, including failures and freshness scoring.
+  const ledgerReader = deps.readLedgerLines;
+  let tickLedgerActive = false;
+  let tickLedger: { lines: readonly string[] } | { error: unknown } | undefined;
+  if (ledgerReader) deps = new Proxy(deps, {
+    get(target, property, receiver) {
+      if (property !== "readLedgerLines") return Reflect.get(target, property, receiver);
+      return () => {
+        if (!tickLedgerActive) return ledgerReader();
+        if (tickLedger === undefined) {
+          try { tickLedger = { lines: ledgerReader() }; }
+          catch (reason) { tickLedger = { error: reason }; }
+        }
+        if ("error" in tickLedger) throw tickLedger.error;
+        return tickLedger.lines;
+      };
+    },
+  });
   const pollIntervalMs = opts.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
   // W1-T1044: see DaemonOpts.sweepWallClockBoundMs's own doc — POLICY DATA (rule 2), threaded
   // by the real `rmd daemon` entry, defaulted here for a direct/test caller that omits it.
@@ -4717,6 +4699,31 @@ export async function runDaemon(
   // survives the very process replacement it caused (design v); updated once per tick below from
   // that tick's own `sweepCycleOutcome.reviewerCodeStale` reading.
   const bootLedgerLines = deps.readLedgerLines?.() ?? [];
+  const restartLedger = restartCycleLedgerRows(bootLedgerLines);
+  const restartBoots = restartLedger.rows.filter(row => row.step === "daemon.boot" && typeof row.ts === "string")
+    .map(row => Date.parse(String(row.ts))).filter(Number.isFinite).sort((a, b) => a - b);
+  const restartStartedAtMs = restartBoots.at(-1) ?? clockFromDateFn(deps.now).now();
+  const recordedRestartStarts = new Set(restartLedger.rows.filter(row => row.step === "daemon.restart_cycle")
+    .map(row => Date.parse(String(row.started_at))));
+  for (const started of restartBoots.slice(1, -1)) {
+    if (recordedRestartStarts.has(started)) continue;
+    const cycle = restartCycleRow(restartLedger.rows, started);
+    if (cycle) { log("daemon.restart_cycle", { ...cycle }); recordedRestartStarts.add(started); }
+  }
+  let restartCyclePending = !recordedRestartStarts.has(restartStartedAtMs) &&
+    restartCycleRow(restartLedger.rows, restartStartedAtMs) !== null;
+  const observeRestartCycle = (): void => {
+    if (!restartCyclePending || !deps.readLedgerLines) return;
+    try {
+      const lines = deps.readLedgerLines();
+      const ledger = restartCycleLedgerRows(lines);
+      if (ledger.errors.length) log("daemon.restart_cycle_unreadable", { errors: ledger.errors });
+      const cycle = restartCycleRow(ledger.rows, restartStartedAtMs);
+      if (cycle?.first_verdict_at) { log("daemon.restart_cycle", { ...cycle }); restartCyclePending = false; }
+    } catch (error) {
+      log("daemon.restart_cycle_unreadable", { error: String(error) });
+    }
+  };
   deps.bootPhases?.mark("loop_ledger_read");
   const measuredRuns: MeasuredRun[] = [];
   const runLengths = dispatchRunHistory(bootLedgerLines, measuredRuns);
@@ -5329,6 +5336,7 @@ export async function runDaemon(
     freshnessHeld = coalesced.action === "hold";
     log(FRESHNESS_DECISION_STEP, {
       action,
+      stale_since_ms: staleAtMs,
       busy,
       busy_reasons: busyReasons,
       background,
@@ -5559,6 +5567,11 @@ export async function runDaemon(
         [abandoned, abandonedReviews, unresolvedMerges] = await Promise.all([
           drainDetached(detachedBoundMs),
           drainInFlightReviews({ boundMs: reviewBoundMs, onWait: observation.watch,
+            onAbandon: (item, ageMs) => log("daemon.in_flight_review_abandoned", {
+              kind: item.kind, ...(item.task_id === undefined ? {} : { task_id: item.task_id }),
+              ...(item.pr === undefined ? {} : { pr: item.pr }), admitted_at_ms: item.admitted_at_ms, age_ms: ageMs,
+              bound_ms: reviewBoundMs,
+            }),
             closeRefills: pass?.overlapped !== true && placements.review?.placement !== "child" }),
           drainDirectMergeOperations({ boundMs: detachedBoundMs, onWait: (operation) => observation.watch(directMergeRestartItem(operation)) }),
           pass?.overlapped ? pass.settled : undefined,
@@ -5573,7 +5586,11 @@ export async function runDaemon(
         const boundMs = Math.max(0, deadlineMs - daemonClock.now());
         [abandoned, abandonedReviews] = await Promise.all([
           pass?.overlapped ? drainDetached(boundMs) : Promise.resolve(abandoned),
-          drainInFlightReviews({ boundMs, onWait: observation.watch, closeRefills: placements.review?.placement !== "child" }),
+          drainInFlightReviews({ boundMs, onWait: observation.watch,
+            onAbandon: (item, ageMs) => log("daemon.in_flight_review_abandoned", {
+              kind: item.kind, ...(item.task_id === undefined ? {} : { task_id: item.task_id }),
+              ...(item.pr === undefined ? {} : { pr: item.pr }), admitted_at_ms: item.admitted_at_ms, age_ms: ageMs, bound_ms: boundMs,
+            }), closeRefills: placements.review?.placement !== "child" }),
         ]);
       }
       if (unresolvedMerges.length > 0) cancelUnsubmittedDirectMerges();
@@ -6731,6 +6748,8 @@ export async function runDaemon(
 
   const tickMemory = { sampled: false };
   for (;;) {
+    tickLedgerActive = restartCyclePending;
+    tickLedger = undefined;
     // The liveness tick: the one row this loop writes unconditionally, every iteration, on every path below.
     // Every other daemon-prefixed step is either boot-time and one-shot, or confined to the three windows the
     // in-flight ticker runs in. Measured: the prefix went silent for 102.5 minutes on 2026-08-23 while the
@@ -6739,6 +6758,7 @@ export async function runDaemon(
     // no row has within one poll interval; a throwing sampler rides it as mem_telemetry, never escapes it.
     log("daemon.tick", { poll_interval_ms: pollIntervalMs, ...tickMemorySample(deps, daemonClock.now(), pollIntervalMs, tickMemory) });
     deps.bootPhases?.firstTick(log);
+    observeRestartCycle();
     recordNearLimitHeapSample(deps, "tick");
     if (tickMemory.sampled) startMemoryReadAfterRow(deps, log);
     const tickStartedAtMs = daemonClock.now();
@@ -8460,7 +8480,10 @@ export async function runDaemon(
       if (freshness.stale && decideFreshness(freshness, inFlightTasks.size) === "restart") decideRestart(freshness);
       wakeParkedLanes();
     };
-    const onDispatchTick = checkFreshness || (deps.reloadPlan && deps.sweepLight) ? (): void | Promise<void> => {
+    const onDispatchTick = checkFreshness || restartCyclePending || (deps.reloadPlan && deps.sweepLight) ? (): void | Promise<void> => {
+      tickLedgerActive = restartCyclePending;
+      tickLedger = undefined;
+      observeRestartCycle();
       wakeParkedLanes();
       if (inFlightTasks.size === 0 || deps.checkPause?.()) return;
       // W1-T11327: a requested restart releases child lanes and awaits in-process ones, as a decided restart does.

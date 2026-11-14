@@ -15,7 +15,7 @@
     - test/worker/spawn/codex-bootstrap-resolves-tsx-from-cli-install.test.ts
     - test/worker-provider.test.ts
     - test/codex-capacity-singleflight.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     Settled by lookup: is this already filed or already decided? -> W1-T4590 fixes consumer PR proof

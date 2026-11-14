@@ -28,7 +28,7 @@
     - test/w1-t143-diff-coverage.test.ts
     - test/shadow-instance-safety.test.ts
     - test/the-sre-lane-runs-on-the-primary-instance.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "`rmd pause` with no arguments prints the targeted instance's pause state (paused or not, with reason, actor and expiry when paused) and the fleet-wide hold state, and exits 0"

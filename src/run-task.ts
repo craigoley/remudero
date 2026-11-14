@@ -1,5 +1,6 @@
 import { isImprovementBoundProposal, isReviewedImprovementDraft, runImprovementAction, type ImprovementPlanReceipt } from "./lib/improvement-thread.js";
 import { findTaskInCatalogs, catalogTaskContract, type TaskLookupOptions } from "./lib/task-lookup.js";
+import type { OpsCatalogApi } from "./lib/ops-catalog-source.js";
 import { operatorReleaseContractChanged, operatorReleasePin, qualifyReleaseEvidence, readReleaseLedgerLines, releaseContractPins, type ReleaseEvidence } from "./lib/operator-release.js";
 import {
   buildSweepEffects as buildSweepEffectsFromModule,
@@ -819,6 +820,7 @@ import {
   type LandFeedbackResult,
   type PlanReconcileLand,
   type LandFeedbackOpts,
+  type LandFeedbackAsyncOpts,
   type LandingReviewRequest,
   landTaskFilesAsync,
   stagedTaskFiles,
@@ -1312,6 +1314,7 @@ import {
   type LedgerGrepFsDeps,
 } from "./lib/ledger-grep.js";
 import { routingAbCommand } from "./lib/routing-experiments.js";
+import { attributeAttemptOutcome } from "./lib/attempt-outcome-attribution.js";
 import { recordRoutingExperimentResults } from "./lib/routing-experiment-result.js";
 import { askDecisionModel, decisionsCommand } from "./lib/decision-model.js";
 import {
@@ -1392,7 +1395,7 @@ import {
 } from "./lib/coverage-improvement.js";
 import { mineVerdictRows, verdictCalibrationReport, type UnmeasurableCause } from "./lib/verdict-calibration.js";
 import { mineAutonomyLedgerLines, parseTrailerMerges, zeroTouchMergeRate } from "./lib/autonomy.js";
-import { decideMeasurementCadence, measurementCadenceCheck, ciLearningCadenceCheck, CI_LEARNING_MINT_CEILING, ciLearningLookbackDays, type CiLearningCadencePolicy, type CiLearningCadenceRunResult, measurementCadenceMarkerPath, ciLearningRecordVerdict, ciLearningShardYaml, fileCiLearningShards, mintCiLearningShards, readMeasurementCadenceMarker, recordCiLearningAttempt, recordCiLearningCadenceFire, recordMeasurementCadenceFire, createWipeTestEvidenceReader, wipeTestSlotDraw, recordWipeTestCadenceFire, scheduleWipeTestAblation, renderVerbCensusDigestLine, priorVerifyHumanAgeBandKeys, runMeasurementCadenceReportAsync, runVerbCensus, verifyHumanCadence, wipeTestCadenceCheck, type MeasurementCadenceDecision, buildPlanReconcileCadenceInput, type PlanReconcileCadenceOpts, type PlanReconcileCadenceInputOptions, type PlanReconcileShardRecord, type MeasurementCadenceReportOpts, type MeasurementCadenceRunResult, type VerifyHumanCadenceResult, type WipeTestCadenceDecision, type WipeTestCadencePolicy, type WipeTestCadenceRunResult } from "./lib/measurement-cadence.js";
+import { decideMeasurementCadence, measurementCadenceCheck, ciLearningCadenceCheck, CI_LEARNING_MINT_CEILING, ciLearningLookbackDays, type CiLearningCadencePolicy, type CiLearningCadenceRunResult, measurementCadenceMarkerPath, ciLearningRecordVerdict, ciLearningShardYaml, fileCiLearningShards, mintCiLearningShards, readMeasurementCadenceMarker, recordCiLearningAttempt, recordCiLearningCadenceFire, recordMeasurementCadenceFire, createWipeTestEvidenceReader, wipeTestSlotDraw, recordWipeTestCadenceFire, scheduleWipeTestAblation, renderVerbCensusDigestLine, priorVerifyHumanAgeBandKeys, runMeasurementCadenceReportAsync, runVerbCensus, verifyHumanCadence, wipeTestCadenceCheck, type MeasurementCadenceDecision, buildPlanReconcileCadenceInput, type PlanReconcileHeld, type PlanReconcileCadenceOpts, type PlanReconcileCadenceInputOptions, type PlanReconcileShardRecord, type MeasurementCadenceReportOpts, type MeasurementCadenceRunResult, type VerifyHumanCadenceResult, type WipeTestCadenceDecision, type WipeTestCadencePolicy, type WipeTestCadenceRunResult } from "./lib/measurement-cadence.js";
 import {
   routedModelIdsFromCheckout,
   watchSuccessorModels,
@@ -1468,6 +1471,7 @@ import {
   formatReadIdentity,
   isPathOutsideRoot,
   lintTask,
+  lintPlan,
   promoteIntroducedPlanOnlyDiagnostics,
   planShardSlugCorpus,
   proofGrepUnmatchableViolations,
@@ -1609,7 +1613,7 @@ import {
   type SkillWorkerCapabilityContext,
 } from "./lib/skill-workshop.js";
 import { buildBundle, renderBundle, verifyBundlePolicyProposalsPin } from "./lib/bundle.js";
-import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
+import { parse as parseYaml, parseDocument, isSeq, isMap, isScalar, stringify as stringifyYaml } from "yaml";
 import { ContainmentError, probeContainment, type ProbeExecutor } from "./lib/containment.js";
 import { ProviderCapacityBlockedError, assertOpenWeightToolBoundary, providerEligibility, type ProviderCapacity } from "./lib/worker-provider.js";
 import { IsolationError, probeIsolation, type ProbeExecutor as IsolationProbeExecutor } from "./lib/isolation.js";
@@ -1822,7 +1826,7 @@ import {
   type GithubPostureGateway,
 } from "./lib/github-posture.js";
 import { validateWorkerSettingsFile } from "./lib/settings.js";
-import { buildBatchedGithub, defaultCreditStorePath, loadCreditStore, saveCreditStore, buildCommitTrailerIndex, classifyGhFailure, createDispatchBreakerCache, deriveStatus, dispatchesWithoutNewOwnedPr, evaluateDispatchBreakerCorroboratedDetailed, type LedgerSnapshot, readLedgerSnapshot, type DispatchBreakerDetail, ghGateway, ghRequiredStatusCheckContexts, isGhRateLimitError, effectiveLifetimeDispatches, hasRepeatedTaskAttributableLifetimeDispatches, orphanedRunIds, streakRefusal, taskAttributableLifetimeDispatches, type LifetimeDispatchTally, projectPlan, readLedgerLines, type DeriveDeps, type GitHub, type GhFailureReason, preferImplementingPr, type PrRef, type BatchedPr, type OpenSiblingBuild, type StatusProjection, planBranchReap, type BranchFacts, type BranchReapPlan, BRANCH_REAP_REASON_LABEL, readLedgerUnionBounded, taskIdFromRunBranch, taskIdFromSlugBranch, readMergeCreditedTaskIds, isMergeCreditLine, readRequiredStatusCheckContexts, readRequiredStatusCheckContextsAsync, persistVerifiedCredit, type ThrownRunVerdictStage, type RefusedRunVerdictStage } from "./lib/status.js";
+import { readCatalogStatusContext, type CatalogStatusContext, buildBatchedGithub, defaultCreditStorePath, loadCreditStore, saveCreditStore, buildCommitTrailerIndex, classifyGhFailure, createDispatchBreakerCache, deriveStatus, dispatchesWithoutNewOwnedPr, evaluateDispatchBreakerCorroboratedDetailed, type LedgerSnapshot, readLedgerSnapshot, type DispatchBreakerDetail, ghGateway, ghRequiredStatusCheckContexts, isGhRateLimitError, effectiveLifetimeDispatches, hasRepeatedTaskAttributableLifetimeDispatches, orphanedRunIds, streakRefusal, taskAttributableLifetimeDispatches, type LifetimeDispatchTally, projectPlan, readLedgerLines, type DeriveDeps, type GitHub, type GhFailureReason, preferImplementingPr, type PrRef, type BatchedPr, type OpenSiblingBuild, type StatusProjection, planBranchReap, type BranchFacts, type BranchReapPlan, BRANCH_REAP_REASON_LABEL, readLedgerUnionBounded, taskIdFromRunBranch, taskIdFromSlugBranch, readMergeCreditedTaskIds, isMergeCreditLine, readRequiredStatusCheckContexts, readRequiredStatusCheckContextsAsync, persistVerifiedCredit, type ThrownRunVerdictStage, type RefusedRunVerdictStage } from "./lib/status.js";
 import { readyDraftPullRequest, withCodeqlAlertEvidence, CODE_SCANNING_FALSE_POSITIVE_STEP, DEFAULT_SWEEP_POLICY, decideRedBaseRefresh, isCiHarnessPath, prAddedLinesFromPullFiles, failingSourceFilesFromCiFailures, failingTestFilesFromCiFailures, projectMergedTaskCandidates, actionableGateFailuresFromReasons, armOutcomeArmed, dispatchFixSpent, checkCostGovernor, checkMemoryGovernor, installedSlackReclaim, reclaimBeforeHold, type SlackReclaim, checkQueueGovernor, productionFixPressure, deriveQueueGovernorTrailingFlow, isFleetOwnedRunBranch, checksStateFromRollup, checksPendingSinceFromRollup, CI_GATE_CHECK_NAME, supersededRedsNowPassing, dedupeRollupByLatestAttempt, deriveDayCostUsd, deriveDayUnpricedRows, deriveDisposition, diffCoverageReport, fixCeilingInForce, fixDispatchBudget, fixRoundTally, buildFixProgressInput, flakeClaimsForHead, isBlockedCi, listRetirableEscalationIssues, listRetirableEscalationIssuesAsync, createEscalationTriageHistoryReader, ESCALATION_TRIAGE_EVIDENCE_SLICE, indexEscalationTriageHistory, type EscalationTriageHistoryReader, type EscalationTriageSlice, logCostGovernorDeferral, logMemoryObservation, logQueueGovernorDeferral, renderClarificationQuestion, renderSweepSummary, type SweepSummary, REQUIRED_CHECK_FAIL, REQUIRED_CHECK_OK, runCreditBackfill, closedPrFromRef, closedPrLookup, runPrTerminalReconcile, type PrTerminalReconcileSummary, runEscalationReconcile, runStaleEscalationRejudge, buildStaleEscalationRejudgePrompt, type StaleEscalationRejudgeCandidate, runPostFixReverification, runSweep, runSweepLightPass, runLightPassReadyRefresh, runLightPassRefreshAdmission, lightPassHeadContractRefresh, runArmedRatchetRejudge, withFullSweepRepairAdmission, redQualityGateNames, stillRedRequiredNames, terminalStateReason, toQuestionEntry, usableInstrumentEntanglementPaths, type ActionableGateFailure, type ArmedStalledPr, type CiFailure, type ClarificationQuestion, type CostGovernorResult, type EscalationReconcileSummary, type FixClass, type FixDispatchEvidence, type FixOwnerResidue, type FixDispatchSnapshot, type FixSuperseded, type LiveStateResult, type MemoryGovernorResult, type MergeConflictEvidence, type OpenPrView, type PlanScopedFixRoundInput, type ReviewDispatchMode, type ReviewReuseInputs, type RollupCheckEntry, type PostFixReverificationSummary, type ProofDiscriminationEvidence, type QueueGovernorResult, type RedBaseRefreshFacts, type PostReviewStallVerdict, type RepairFilingCapture, type Disposition, type SweepDeps, type SweepPolicy, type UpdateBranchOutcome, type UncreditableHeadReason, ABSENT_REPUSH_CAP, DEFAULT_FIX_CLASSES, buildSweepEffects as buildSweepEffectsFromLib, checkJobId, RATIFIED_BASELINE_RATCHET_REPAIRS, currentPlanIneligibilityReason, defaultSweepGhRun, dispatchFixCatchOutcome, discriminateReviewReuse, discriminateReviewReuseAsync, escalationTaskIdFor, fixDispatchErrorClass, fixDispatchSignalDeath, fixHeadAcceptable, fixRungTaskFor, foreignHeadIsStuck, isDispatchedRunBranch, detectPostReviewStall, isCappedReviewOrphanEscalation, proofDiscriminationEvidenceFromCriteria, type ArmAttemptOutcome, type ArmOutcomeName, type BuildSweepEffectsDeps, type MetadataRepairResult, sweepArmTaskId, uncreditableHeadReason, planOnlyRunBranchReceipts, REGENERABLE_ARTIFACT_GENERATORS, ADDITIVE_REGISTRATION_SURFACES, isAdditiveRegistrationChange, type RegistrationChange, repairLadderCommand, trackRepairLadder, riskJudgeHandedOffHead, handedOffHeadJudgmentPool, type HandedOffHeadJudgmentPool, awaitHandedOffHeadJudgments, riskJudgeCodeScanning, hasCapturedMergeConflictEvidence, clearedConflictEscalationCause, type FixRoundBranchClaim, inFlightReviewCount } from "./lib/sweep.js";
 import { sampleDaemonMemory, workerHeapReadings } from "./lib/daemon-memory-telemetry.js";
 import { currentReviewSignal, headLacksOwnTaskRecord, OWN_TASK_RECORD_MISSING_CAUSE, reviewOnlyStandDownReason } from "./lib/sweep.js";
@@ -18555,6 +18559,7 @@ export function creditProjectionWithReadState(
   checkoutRoot = repoRoot,
   creditBuilder: typeof buildCreditCandidates = buildCreditCandidates,
   github?: GitHub,
+  catalogPlan?: Plan,
 ): { ids: Set<string>; unknownReason?: string; boardFloor?: string; unreadPrIds?: Set<string>; windowShort?: readonly string[] } {
   const config = configOverride ?? loadConfig();
   const ledgerPath = ledgerPathFor(config);
@@ -18562,7 +18567,7 @@ export function creditProjectionWithReadState(
   // reaching for the GitHub gateway from an isolated or not-yet-initialized checkout.
   if (!existsSync(ledgerPath)) return { ids: new Set() };
   const self = resolveOwnerRepo();
-  const plan = loadPlan(join(checkoutRoot, "plan", "tasks.yaml"));
+  const plan = catalogPlan ?? loadPlan(join(checkoutRoot, "plan", "tasks.yaml"));
   const gateway = github ?? buildBatchedGithub(self.owner, self.repo);
   const candidates = creditBuilder(self.owner, self.repo, plan, ledgerPath, undefined, gateway);
   const reconcilable = candidates.filter(creditIsReconcilable);
@@ -18582,21 +18587,38 @@ export function creditProjectionWithReadState(
   return projection;
 }
 
-export function defaultCreditedMergedIds(configOverride?: Config, checkoutRoot = repoRoot, creditBuilder: typeof buildCreditCandidates = buildCreditCandidates): Set<string> {
-  return creditProjectionWithReadState(configOverride, checkoutRoot, creditBuilder).ids;
+export function defaultCreditedMergedIds(configOverride?: Config, checkoutRoot = repoRoot,
+  creditBuilder: typeof buildCreditCandidates = buildCreditCandidates, catalogPlan?: Plan): Set<string> {
+  return creditProjectionWithReadState(configOverride, checkoutRoot, creditBuilder, undefined, catalogPlan).ids;
 }
 
 /** W1-T3970: production's adapter keeps the cadence map testable without running the rest of the
  * report. The real hook supplies the real shard reader and landing bridge; focused tests supply
  * the same seams with a synthetic map and prove both the landed and fail-closed arms. */
-export interface PlanReconcileProductionInputOptions extends Omit<PlanReconcileCadenceInputOptions, "land"> {
+export interface PlanReconcileProductionInputOptions extends Omit<PlanReconcileCadenceInputOptions, "land" | "creditedMergedIds"> {
   land?: PlanReconcileLand;
+  creditedMergedIds: (plan?: Plan) => ReadonlySet<string>;
+}
+export interface CatalogPlanReconcileProductionInputOptions extends PlanReconcileProductionInputOptions {
+  stateDir: string;
+  opsApi?: OpsCatalogApi;
+  log?: NonNullable<LandFeedbackAsyncOpts["log"]>;
 }
 
-/** The cadence input plus `settled` (W1-T9695): the hook awaits the landing the sync cadence started. */
-export type PlanReconcileProductionInput = PlanReconcileCadenceOpts & { settled: () => Promise<void> };
+/** The cadence input plus its awaited landing; only a finite catalog outcome is added. */
+export type PlanReconcileProductionInput = PlanReconcileCadenceOpts & {
+  settled: () => Promise<void>;
+  catalogOutcome?: CatalogStatusContext["outcome"];
+};
 
-export function buildPlanReconcileProductionInput(deps: PlanReconcileProductionInputOptions): PlanReconcileProductionInput | undefined {
+export function buildPlanReconcileProductionInput(deps: CatalogPlanReconcileProductionInputOptions): Promise<PlanReconcileProductionInput | undefined>;
+export function buildPlanReconcileProductionInput(deps: PlanReconcileProductionInputOptions): PlanReconcileProductionInput | undefined;
+export function buildPlanReconcileProductionInput(deps: PlanReconcileProductionInputOptions | CatalogPlanReconcileProductionInputOptions): PlanReconcileProductionInput | undefined | Promise<PlanReconcileProductionInput | undefined> {
+  return "stateDir" in deps ? buildCatalogPlanReconcileInput(deps) : buildPublicPlanReconcileInput(deps);
+}
+
+/** The unconfigured path retains the original calls, bytes, threshold and local lint hold. */
+function buildPublicPlanReconcileInput(deps: PlanReconcileProductionInputOptions): PlanReconcileProductionInput | undefined {
   const landing = planReconcileLanding(deps.checkoutRoot, () => ({ targetRepository: resolveOwnerRepo(), landingOwner: "measurement-cadence" }), deps.land);
   try {
     const cadence = buildPlanReconcileCadenceInput({
@@ -18607,10 +18629,162 @@ export function buildPlanReconcileProductionInput(deps: PlanReconcileProductionI
     });
     return { ...cadence, settled: landing.settled };
   } catch {
-    // An unavailable config, plan, ledger or credit projection must not abort the other
-    // measurement-cadence rungs. Omit this optional rung for the tick and retry next time.
+    // An unreadable public projection still omits this optional rung, never reporting a healthy empty pass.
     return undefined;
   }
+}
+
+/** Flip queued status scalars, preserving the catalog bytes except for a proof marker on ambiguous monolith lines. */
+function mergedCatalogStatusBytes(text: string, taskIds: ReadonlySet<string>, monolithic = false): string {
+  const document = parseDocument(text);
+  if (document.errors.length || !isSeq(document.contents)) throw new Error("ops-status-source-malformed");
+  const sourceLines = monolithic ? new Set(text.split("\n")) : undefined;
+  const edits: Array<{ start: number; end: number; text: string }> = [];
+  const seen = new Set<string>();
+  for (const item of document.contents.items) {
+    if (!isMap<unknown, unknown>(item)) throw new Error("ops-status-source-malformed");
+    const id = item.get("id");
+    if (typeof id !== "string" || !taskIds.has(id)) continue;
+    const status = item.get("status", true);
+    if (item.has("retirement") || !isScalar(status) || !status.range || seen.has(id)) {
+      throw new Error("ops-status-source-changed");
+    }
+    const value: unknown = status.value;
+    if (value !== "queued") throw new Error("ops-status-source-changed");
+    const [start, end] = status.range, old = text.slice(start, end);
+    let replacement = old.startsWith('"') ? '"merged"' : old.startsWith("'") ? "'merged'" : "merged";
+    if (monolithic) {
+      // A proof for `status: merged` is ambiguous when another row already has that value. Add a
+      // YAML comment only in that collision case; it keeps the task value unchanged and gives the
+      // landing PR a line that exists only in its candidate tree.
+      const lineStart = text.lastIndexOf("\n", start - 1) + 1;
+      const newline = text.indexOf("\n", end);
+      const lineEnd = newline < 0 ? text.length : newline;
+      const before = text.slice(lineStart, start), after = text.slice(end, lineEnd);
+      const candidate = before + replacement + after;
+      if (sourceLines?.has(candidate)) replacement += ` # plan-reconcile ${id}`;
+    }
+    edits.push({ start, end, text: replacement }); seen.add(id);
+  }
+  if (seen.size !== taskIds.size) throw new Error("ops-status-source-missing-task");
+  for (const edit of edits.sort((a, b) => b.start - a.start)) text = text.slice(0, edit.start) + edit.text + text.slice(edit.end);
+  return text;
+}
+
+async function buildCatalogPlanReconcileInput(deps: CatalogPlanReconcileProductionInputOptions): Promise<PlanReconcileProductionInput | undefined> {
+  if (planDestinationRepository(deps.stateDir).outcome === "off") return buildPublicPlanReconcileInput(deps);
+  let context: CatalogStatusContext;
+  try { context = await readCatalogStatusContext(loadPlan(join(deps.checkoutRoot, "plan", "tasks.yaml")), deps.stateDir, deps.opsApi); }
+  catch (error) { void error; deps.log?.("plan.reconcile.unknown", { reason: "public-source-unreadable" }); return undefined; }
+  if (context.outcome === "off") return buildPublicPlanReconcileInput(deps);
+  const reportUnknown = (outcome: CatalogStatusContext["outcome"]) => {
+    if (outcome !== "ok" && outcome !== "off") deps.log?.("plan.reconcile.unknown", { reason: `ops-${outcome}` });
+  };
+  reportUnknown(context.outcome);
+  let credited: ReadonlySet<string>;
+  try { credited = deps.creditedMergedIds(context.plan); }
+  catch (error) { void error; deps.log?.("plan.reconcile.unknown", { reason: "credit-projection-unreadable" }); return undefined; }
+  const publicInput = buildPublicPlanReconcileInput({ ...deps, creditedMergedIds: () => credited });
+  if (!publicInput) return undefined;
+  const target = context.destination, pin = context.commit, ops = context.opsPlan;
+  if (context.outcome !== "ok" || !target || !pin || !ops || ops.tasks.length === 0) return { ...publicInput, catalogOutcome: context.outcome };
+  const sources = new Map<string, string>(), taskPaths = new Map<string, string>();
+  try {
+    const head = (await hostWorktreeGitAsync(target.checkoutDir, ["rev-parse", "HEAD"])).trim();
+    if (head !== pin) {
+      // The checkout may lag the API-pinned default branch. Fetch objects and the tracking ref without
+      // switching its branch; only proceed when the fetched main is the same commit as the read snapshot.
+      await hostWorktreeGitAsync(target.checkoutDir, ["fetch", "--quiet", "--no-tags", "origin",
+        "+refs/heads/main:refs/remotes/origin/main"]);
+      if ((await hostWorktreeGitAsync(target.checkoutDir, ["rev-parse", "origin/main"])).trim() !== pin) {
+        throw new Error("ops-status-source-moved");
+      }
+    }
+    for (const task of ops.tasks) {
+      const source = task.sourcePath;
+      if (!source || !/^(?:tasks\.yaml|tasks\.d\/[^/]+\.ya?ml)$/.test(source)) throw new Error("ops-status-source-unbound");
+      const path = `plan/${source}`; taskPaths.set(task.id, path);
+      if (!sources.has(path)) sources.set(path, await hostWorktreeGitAsync(target.checkoutDir, ["show", `${pin}:${path}`]));
+    }
+  } catch (error) {
+    // The public group remains valid; catalogOutcome carries the private failure without adding ops rows.
+    void error; reportUnknown("unreadable"); return { ...publicInput, catalogOutcome: "unreadable" };
+  }
+  const pending: Promise<void>[] = [];
+  // Observe rejection immediately, retaining the original promise for the caller's later settlement.
+  const retainSettlement = (result: Promise<void>): void => {
+    pending.push(result); void result.catch(() => {
+      // The observer result is unused. pending retains the original rejection for settled()'s
+      // allSettled and failure propagation; this callback never replaces that promise.
+    });
+  };
+  const opsLanding = planReconcileLanding(target.checkoutDir, () => ({
+    targetRepository: { owner: target.owner, repo: target.repo }, landingOwner: "measurement-cadence", log: deps.log,
+    planPrPreflight: async (sha, pr) => {
+      // A candidate based on a newer main must never overwrite it with bytes read from our older pin.
+      // Later main changes are left to the ordinary three-way PR merge and its required gates.
+      if ((await hostWorktreeGitAsync(target.checkoutDir, ["rev-parse", `${sha}^`])).trim() !== pin) throw new Error("ops-status-source-moved");
+      return planPrPreflightAtCommitAsync(target.checkoutDir, sha, {
+        ...pr,
+        codeRoot: deps.checkoutRoot,
+        bodyProofRoot: "plan",
+      }, { log: deps.log });
+    },
+  }), deps.land);
+  const opsById = ops.byId;
+  return {
+    ...publicInput,
+    catalogOutcome: "ok",
+    // These are reducer rows, not source files or public serializers. Landing reads pinned source bytes above.
+    shards: [...publicInput.shards, ...ops.tasks.map(task => ({ taskId: task.id,
+      text: `- id: ${task.id}\n  status: ${task.status}\n${task.retirement ? "  retirement: retained\n" : ""}` }))],
+    isCreditedMerged: id => credited.has(id),
+    land: writes => {
+      let landed = 0; const held: PlanReconcileHeld[] = [];
+      const pub = writes.filter(write => !opsById.has(write.taskId)), selected = writes.filter(write => opsById.has(write.taskId));
+      try { if (pub.length) {
+        const result = publicInput.land?.(pub);
+        retainSettlement(publicInput.settled());
+        landed += result?.landed ?? pub.length; held.push(...(result?.held ?? []));
+      } } catch (error) {
+        // Preserve the original failure for settled(); the independent ops group still gets its attempt.
+        retainSettlement(Promise.reject(error));
+      }
+      if (selected.length) {
+        try {
+          const only = new Set(selected.map(write => write.taskId));
+          const lint = deps.lint ?? ((plan: Plan, ids: ReadonlySet<string>, root: string) => lintPlan(plan,
+            () => ({ moduleExists: rel => existsSync(join(root, rel)) }), ids));
+          const before = lint(context.plan, only, deps.checkoutRoot);
+          const changed = context.plan.tasks.map(task => only.has(task.id) ? { ...task, status: "merged" as const } : task);
+          const after = lint({ tasks: changed, byId: new Map(changed.map(task => [task.id, task])) }, only, deps.checkoutRoot);
+          const rules = (results: ReturnType<typeof lint>, id: string) => new Set((results.get(id)?.violations ?? []).filter(v => v.severity === "block").map(v => v.check));
+          const landable = selected.filter(write => {
+            const prior = rules(before, write.taskId), gained = [...rules(after, write.taskId)].filter(rule => !prior.has(rule));
+            for (const rule of gained) held.push({ taskId: write.taskId, rule }); return gained.length === 0;
+          });
+          const batch = takePlanReconcileBatch(landable, write => taskPaths.get(write.taskId)!);
+          const byPath = new Map<string, Set<string>>();
+          for (const write of batch) { const path = taskPaths.get(write.taskId)!; const ids = byPath.get(path) ?? new Set<string>(); ids.add(write.taskId); byPath.set(path, ids); }
+          const inputs = [...byPath].map(([relPath, ids]) => ({ relPath,
+            content: mergedCatalogStatusBytes(sources.get(relPath)!, ids, relPath === "plan/tasks.yaml") }));
+          if (inputs.length) {
+            opsLanding.land(inputs); retainSettlement(opsLanding.settled()); landed += batch.length;
+          }
+        } catch (error) {
+          // Preserve the original failure for settled(); already-started public work is not discarded.
+          retainSettlement(Promise.reject(error));
+        }
+      }
+      // Rejections remain awaited alongside the independent group; neither aborts its opportunity to land.
+      return { landed, held };
+    },
+    settled: async () => {
+      const results = await Promise.allSettled([publicInput.settled(), opsLanding.settled(), ...pending]);
+      const failure = results.find((result): result is PromiseRejectedResult => result.status === "rejected");
+      if (failure) throw failure.reason;
+    },
+  };
 }
 
 /** PRIMARY CONTROL: GitHub rejects pull-request diffs above this file count, so reconciliation
@@ -22159,13 +22333,14 @@ export function buildMeasurementCadenceDaemonHooks(deps: {
       // cadence fire, and land through the scratch-index bridge rather than dirtying this daemon
       // checkout. A failed landing throws so the cadence records an error and retries later; it
       // must never report a successful reconciliation on an unlanded PR.
-      const planReconcile = buildPlanReconcileProductionInput({
-        checkoutRoot: repoRoot,
+      const planReconcile = await buildPlanReconcileProductionInput({
+        checkoutRoot: repoRoot, stateDir: join(root, "state"),
+        log: (step, extra = {}) => appendLedger(successorLedgerPath, { run_id: coverageRunId, step, ...extra } as LedgerLine),
         readShards: () => readPlanShards(join(resolveRepoLayout(repoRoot).planDir, "tasks.d")),
         // Keep the cadence's explicit config/root boundary. The hook is testable with an
         // injected Config, and an unattended target must never fall back to the operator's HOME
         // config just because the credit projection is evaluated lazily.
-        creditedMergedIds: deps.creditedMergedIds ?? (() => defaultCreditedMergedIds(configFor(), repoRoot)),
+        creditedMergedIds: deps.creditedMergedIds ?? ((catalogPlan?: Plan) => defaultCreditedMergedIds(configFor(), repoRoot, buildCreditCandidates, catalogPlan)),
         land: deps.planReconcileLand,
       });
       const planReconcileOption =
@@ -43171,6 +43346,7 @@ function commandSyntax(name: string): string {
 // InstallFreshnessDeps consumers below) keeps its import path unchanged. This is a
 // PURE MOVE — the function body and behaviour are byte-identical to the pre-move version.
 import { reconcilePlan, reconcileShardStatus, type ReconcileSummary } from "./lib/plan-reconcile.js";
+import { takePlanReconcileBatch } from "./lib/plan-reconcile-batch.js";
 import { managedCheckoutInstallEscalation, stagedInstall, type StagedInstallFailure } from "./lib/staged-install.js";
 import { hashInstallInputs, installHashMarkerPath } from "./lib/install-hash.js";
 import { isTaskShardName } from "./lib/task-shard-name.js";
@@ -43761,7 +43937,7 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
     undefined,
     (dir, sinceMs, login) => ghBrokerLoginStatus(dir, sinceMs, { login }),
   )],
-  ["routing-ab", async (rest) => await routingAbCommand(rest)],
+  ["routing-ab", async (rest) => await routingAbCommand(rest, { classifyAttempt: attributeAttemptOutcome })],
   ["decisions", async (rest) => await decisionsCommand(rest, (config, request) => askDecisionModel(config, request), { repoRoot })],
   ["progress-watchdog", (rest) => progressWatchdogCommand(rest)],
   ["live-edits", async (rest) => await liveEditsCommand(rest)],
