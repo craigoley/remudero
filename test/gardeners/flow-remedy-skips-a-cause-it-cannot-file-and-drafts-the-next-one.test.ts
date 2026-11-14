@@ -123,7 +123,13 @@ test("W1-T12548 criterion 4: an own-red episode open longer than FLOW_OWN_RED_OP
 });
 
 test("W1-T12548 criterion 5: a garden pass whose costliest eligible cause is owned by NONE files the next cause", (t) => {
-  const h = harness(t, [unowned(1, -3), unowned(1, -1), unowned(1, 0), ownRed(2, -2), ownRed(2, -1), ownRed(2, 0)]);
+  const redChecks = ["ci-shard", "mutation-ratchet", "lint-plan", "coverage-ratchet", "acceptance-author-gate", "rule-checks", "test-slow", "security-merge-policy"];
+  const unownedCauses = redChecks.flatMap((check, index) => {
+    const reason = `plan-only PR is red on ${check}`;
+    const pr = index + 10;
+    return [-24, -12, 0].map(hours => row(pr, hours, "plan-proof-unrunnable", reason, "NONE"));
+  });
+  const h = harness(t, [...unownedCauses, ownRed(2, -2), ownRed(2, -1), ownRed(2, 0)]);
   const result = h.pass();
   assert.equal(result.prUrl, "https://github.com/acme/remudero/pull/7", `the next cause landed (rows: ${h.logs.map(([s]) => s).join(", ")})`);
   assert.equal(h.landed.length, 1);
@@ -132,6 +138,6 @@ test("W1-T12548 criterion 5: a garden pass whose costliest eligible cause is own
   assert.match(text, /fix-lane → src\/lib\/sweep\.ts/);
   assert.equal(h.logs.filter(([step]) => step === "flow-remedy.garden_filing_failed").length, 0);
   const skipped = h.logs.filter(([step]) => step === "flow-remedy.cause_skipped");
-  assert.equal(skipped.length, 1);
-  assert.equal(skipped[0]![1].cause, UNOWNED);
+  assert.equal(skipped.length, 8);
+  assert.equal(skipped.some(([, fields]) => fields.cause === OWN_RED), false);
 });
