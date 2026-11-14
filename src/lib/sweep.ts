@@ -100,7 +100,7 @@ import {
   blockerFields, decideSloRung, judgeSloRebuild, finalBlocker, priorBlockersFromLedger, type PrBlocker, type SloRung,
   securityArmRefusalAtHead, securityHoldReason, securityPolicyCause, type SecurityArmRefusal,
 } from "./pr-blocker.js";
-import { clockFromMillisFn, fixedClock, systemClock, type Clock } from "./clock.js";
+import { clockFromMillisFn, systemClock, type Clock } from "./clock.js";
 import { isWorkerProviderId, type Config, type WorkerProviderId, fixStrikeCap, overflowFallbackRefusal } from "./config.js";
 import { defaultGitCaptureAsync, gitPushEmptyCommit, gitPushRunBranchAsync, worktreePushExec, worktreePushExecAsync, runStepsSync, runStepsAsync, step, type Steps } from "./git-push.js";
 import { ghExec, ghJson, ghJsonAsync, ghTextAsync, GhPaceWouldBlockError, type GhJsonReadOptions } from "./github-transport.js";
@@ -124,7 +124,6 @@ import { buildRiskJudgeSpawnArgs, resolveRiskJudgeMount, scrubRiskJudgeText, run
 import {
   createIncrementalLedgerUnion, createLedgerRotationMemo, createSizedMemo, ledgerRotationDigests, ledgerRotationEntries, ndjsonLines,
   readLedgerUnionRecordsSync, realLedgerFs, resolveLedgerUnion,
-  ledgerRowsForSync,
   type IncrementalUnionPass, type LedgerCorpusEntry, type LedgerGrepFsDeps, type LedgerRotationRecords, type LedgerUnionRecordRead,
 } from "./ledger-union.js";
 import { isMergedLedgerRow, PR_TERMINAL_STEP, prUrlKey } from "./ledger-carry.js";
@@ -26472,14 +26471,7 @@ async function runSweepLightPassCore(
   // ledger-read-intent: live — this fold reads the live file only, never rotations.
   const readLedger = deps.readLedger ?? readLiveLedgerRows;
   const selectionLedgerLines = readLedger(deps.ledgerPath);
-  const queueHistory = deps.readLedger || openPrs.length === 0 ? selectionLedgerLines : (() => {
-    const history = ledgerRowsForSync(dirname(deps.ledgerPath), {
-      prNumbers: openPrs.map((pr) => pr.prNumber), steps: ["sweep.absent_repush", "sweep.review_eligible"],
-    }, { refuseIncomplete: true });
-    if (!history.ok) throw new Error(`repushed-head queue history unreadable: ${history.unread.join(", ")}`);
-    return [...history.rows, ...selectionLedgerLines];
-  })();
-  const repushedQueuedAt = repushedHeadQueuedAt(queueHistory);
+  const repushedQueuedAt = repushedHeadQueuedAt(selectionLedgerLines);
   openPrs = openPrs.map(pr => promiseHarvestRetryView(pr, selectionLedgerLines, deps.sampleLoad));
   const selectionPrior = priorActionsFromLedger(selectionLedgerLines, openPrs, deps.sampleLoad);
   openPrs = openPrs.map(pr => completedRefusalRetryView(pr, selectionPrior));
@@ -27121,23 +27113,18 @@ function observeReviewEligibility(
   surface: SweepRepairSurface,
 ): void {
   if (deps.dryRun) return;
-  const eligibleRows = ledgerLines.filter(row => row.step === "sweep.review_eligible");
-  const observed = new Set(eligibleRows.map(row => row.review_key));
-  const eligibleHeads = new Set(eligibleRows.map(row => `${String(row.pr_number)}@${String(row.head_sha)}`));
-  const queuedAt = repushedHeadQueuedAt(ledgerLines);
+  const observed = new Set(ledgerLines.filter(row => row.step === "sweep.review_eligible")
+    .map(row => row.review_key));
   const append = deps.appendLine ?? appendLedger;
   for (const pr of openPrs) {
     const key = reviewOutcomeKeyForPr(pr);
     if (observed.has(key) || !isReviewLaneDisposition(deriveDisposition(pr, policy, now).disposition) ||
         reviewAdmissionOutcomeKnown(pr, outcomes, policy, now)) continue;
-    const head = `${pr.prNumber}@${pr.headSha}`;
-    const queued = queuedAt.get(head);
     append(deps.ledgerPath, {
       run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", step: "sweep.review_eligible",
       pr_number: pr.prNumber, pr_url: pr.prUrl, head_sha: pr.headSha,
       review_key: key, review_input_digest: pr.reviewInputDigest, surface,
       observation_version: 1,
-      ...(queued === undefined ? {} : { queued_at: eligibleHeads.has(head) ? queued : fixedClock(now).iso() }),
     });
     observed.add(key);
   }
@@ -27352,7 +27339,7 @@ function repushedHeadQueuedAt(ledgerLines: ReadonlyArray<Record<string, unknown>
   const eligible = new Map<string, string>();
   const isTime = (value: unknown): value is string => typeof value === "string" && Number.isFinite(Date.parse(value));
   const first = (values: Map<string, string>, key: string, ts: string): void => {
-    if (!values.has(key) || Date.parse(ts) < Date.parse(values.get(key)!)) values.set(key, ts);
+    if (!values.has(key)) values.set(key, ts);
   };
   for (const row of ledgerLines) {
     if (!isTime(row.ts)) continue;
@@ -27365,7 +27352,6 @@ function repushedHeadQueuedAt(ledgerLines: ReadonlyArray<Record<string, unknown>
       continue;
     }
     first(eligible, key, row.ts);
-    if (isTime(row.queued_at)) first(eligible, key, row.queued_at);
   }
   return new Map([...minted].map(([key, ts]) => [key, eligible.get(key) ?? ts]));
 }

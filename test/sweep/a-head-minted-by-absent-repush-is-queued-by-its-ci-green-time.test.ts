@@ -3,11 +3,12 @@ import { test } from "node:test";
 import { mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { MAX_RETAINED_LINES_PER_STEP, rotateLedger } from "#src/lib/ledger.js";
+import { appendLedger, MAX_RETAINED_LINES_PER_STEP, rotateLedger } from "#src/lib/ledger.js";
+import { fixedClock } from "#src/lib/clock.js";
 import { readLedgerLines } from "#src/lib/status.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import {
-  DEFAULT_SWEEP_POLICY, drainInFlightReviews, runSweepLightPass,
+  DEFAULT_SWEEP_POLICY, drainInFlightReviews, observeLightPassReviewEligibility, runSweep, runSweepLightPass,
   type OpenPrView, type SweepDeps,
 } from "#test/helpers/sweep-test.js";
 
@@ -31,16 +32,24 @@ const repushed = (n: number, ts: string, newHead: unknown = `head-${n}`): Row =>
   ({ ts, step: "sweep.absent_repush", pr_number: n, old_head: `old-${n}`, new_head: newHead });
 const eligible = (n: number, ts: string, head = `head-${n}`): Row =>
   ({ ts, step: "sweep.review_eligible", pr_number: n, head_sha: head, review_key: `${n}@${head}@${ts}` });
+const lines = (rows: Row[]) => rows.map((row) => JSON.stringify({ run_id: "repush-order-test", task_id: "SWEEP", ...row }))
+  .join("\n") + "\n";
 
 /** Runs one light pass at `width`, then frees one lane at a time. Returns the first admissions and the full start order. */
 async function admissionOrder(prs: OpenPrView[], ledger: Row[], width: number, written?: Row[],
   overrides: Partial<SweepDeps> = {}) {
   const releases = new Map<number, () => void>();
   const started: number[] = [];
+  const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}repush-admission-`));
+  const ledgerPath = join(dir, "ledger.ndjson");
+  writeFileSync(ledgerPath, lines(ledger));
   const deps: SweepDeps = {
-    ledgerPath: "/unused", runId: "repush-order-test", now: () => NOW,
-    readLedger: () => ledger, readActiveWorkerCount: () => 0,
-    appendLine: (_path, row) => { written?.push({ ts: new Date(NOW).toISOString(), ...(row as Row) }); },
+    ledgerPath, runId: "repush-order-test", now: () => NOW,
+    readActiveWorkerCount: () => 0,
+    appendLine: (path, row) => {
+      appendLedger(path, row, { clock: fixedClock(NOW) });
+      written?.push({ ts: new Date(NOW).toISOString(), ...(row as Row) });
+    },
     arm: () => {}, close: () => {}, dispatchFix: () => {}, escalate: () => {},
     postReview: async (p) => {
       started.push(p.prNumber);
@@ -61,19 +70,21 @@ async function admissionOrder(prs: OpenPrView[], ledger: Row[], width: number, w
   } finally {
     for (const release of releases.values()) release();
     await drainInFlightReviews({ boundMs: 1000 });
+    rmSync(dir, { recursive: true, force: true });
   }
 }
 
 test("W1-T12534 criterion 1: the 20:41 shape admits the PRs green first and queues the re-pushed heads after them", async () => {
   const prs = [
     pr(18328, at("15:39")), pr(18332, at("15:57")), pr(18343, at("17:23")),
-    pr(18345, at("18:02")), pr(18346, at("18:15")), pr(18348, at("18:40")),
+    pr(18345, at("18:02")), pr(18346, at("18:15")), pr(18348, "2026-11-13T19:59:59.995Z"),
   ];
   const ledger = [
     eligible(18332, at("16:30")), eligible(18345, at("18:30")), eligible(18346, at("18:45")),
-    eligible(18348, at("19:10")),
+    eligible(18348, "2026-11-13T19:59:59.999Z"),
     repushed(18328, "2026-11-13T19:56:42.000Z"), repushed(18343, "2026-11-13T19:58:18.000Z"),
-    eligible(18328, at("20:05")), eligible(18343, at("20:12")),
+    { ...eligible(18328, "2026-11-13T20:00:00.010Z"), queued_at: "2026-11-13T19:59:59.990Z" },
+    { ...eligible(18343, at("20:12")), queued_at: at("20:11") },
   ];
   const { first, order } = await admissionOrder(prs, ledger, 3);
   assert.deepEqual(first, [18332, 18345, 18346], "the pass admits #18332 and the two oldest later PRs");
@@ -119,36 +130,15 @@ test("W1-T12534 criterion 4: a verdict or an update without a new head does not 
   assert.deepEqual(after.order, [701, 702]);
 });
 
-test("W1-T12534 criterion 4: a re-pushed head keeps its key after the ledger cap drops its first rows", async () => {
-  const prs = [pr(711, at("09:00")), pr(712, at("12:00")), pr(713, at("19:20"))];
-  const minted = [repushed(711, at("19:00")), eligible(711, at("19:10"))];
-  const written: Row[] = [];
-  // The pass writes a new eligibility row for each head, as it does after a same-head input update.
-  const before = await admissionOrder(prs, minted, 1, written);
-  assert.deepEqual(before.order, [712, 711, 713]);
-  const rewritten = written.filter((row) => row.step === "sweep.review_eligible");
-  assert.equal(rewritten.find((row) => row.pr_number === 711)?.queued_at, at("19:10"));
-  assert.equal(rewritten.find((row) => row.pr_number === 712)?.queued_at, undefined);
-  // The cap drops the oldest eligibility row; then it drops the absent_repush row too.
-  const firstEligibleDropped = await admissionOrder(prs, [minted[0]!, ...rewritten], 1);
-  assert.deepEqual(firstEligibleDropped.order, [712, 711, 713]);
-});
-
-test("W1-T12534 criterion 4: the first eligibility row of a minted head records its own queued time", async () => {
-  const written: Row[] = [];
-  await admissionOrder([pr(721, at("09:00"))], [repushed(721, at("19:00"))], 1, written);
-  const row = written.find((r) => r.step === "sweep.review_eligible" && r.pr_number === 721);
-  assert.equal(row?.queued_at, new Date(NOW).toISOString());
-});
-
-test("W1-T12534 criterion 4: archive history keeps the key through rotation and a same-head update", async () => {
-  const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}repush-queue-`));
+test("W1-T12534 criterion 3: production selection uses mint fallback, then createdAt when neither row is live", async () => {
+  const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}repush-rotation-`));
   const ledgerPath = join(dir, "ledger.ndjson");
-  const realLedger = { ledgerPath, readLedger: undefined, appendLine: undefined };
+  const realLedger = { ledgerPath, appendLine: undefined };
   const prs = [pr(731, at("09:00")), pr(732, at("19:05")), pr(733, at("18:00"))];
-  const lines = (rows: Row[]) => rows.map((row) => JSON.stringify({ run_id: "repush-order-test", task_id: "SWEEP", ...row }))
-    .join("\n") + "\n";
   try {
+    writeFileSync(ledgerPath, lines([repushed(731, at("19:00"))]));
+    assert.deepEqual((await admissionOrder(prs, [], 1, undefined, realLedger)).order,
+      [733, 731, 732], "without eligibility the selection snapshot uses the mint time");
     writeFileSync(ledgerPath, lines([
       repushed(731, at("19:00")),
       { ...eligible(731, at("19:10")), review_key: "W1-T731@head-731" },
@@ -156,33 +146,97 @@ test("W1-T12534 criterion 4: archive history keeps the key through rotation and 
       ...Array.from({ length: MAX_RETAINED_LINES_PER_STEP }, (_, i) => eligible(800 + i, at("20:00"))),
     ]));
     assert.deepEqual((await admissionOrder(prs, [], 1, undefined, realLedger)).order,
-      [733, 732, 731]);
-    assert.ok(!readLedgerLines(ledgerPath).some((row) => row.step === "sweep.review_eligible" &&
-      row.pr_number === 731 && row.queued_at !== undefined),
-    "the matching production review key suppresses queued_at backfill before rotation");
+      [733, 732, 731], "positive control: both receipts change selection before rotation");
     const rotated = rotateLedger(ledgerPath, {
       ceilingBytes: statSync(ledgerPath).size - 1, smoothingWindowMs: 0, now: () => new Date(NOW),
     });
     assert.equal(rotated.rotated, true);
+    assert.ok(rotated.archivePath);
     const live = readLedgerLines(ledgerPath);
-    assert.ok(!live.some((row) => row.step === "sweep.absent_repush" && row.pr_number === 731),
-      "the mint row left the live ledger");
-    assert.ok(!live.some((row) => row.step === "sweep.review_eligible" && row.ts === at("19:10")),
-      "the first eligibility row left the live ledger");
-    assert.ok(!live.some((row) => row.step === "sweep.review_eligible" && row.pr_number === 731),
-      "no carried row for the matching key survives the cap");
+    assert.ok(!live.some((row) => (row.step === "sweep.absent_repush" || row.step === "sweep.review_eligible") &&
+      row.pr_number === 731), "neither receipt remains in the actual selection ledger");
     assert.deepEqual((await admissionOrder(prs, [], 1, undefined, realLedger)).order,
-      [733, 732, 731], "cap removal alone keeps the first eligibility time");
+      [731, 733, 732], "archive receipts cannot override the neither-row createdAt fallback");
     const updated = { ...prs[0]!, lastActivityAt: at("20:35"), reviewInputDigest: "updated-input" };
     assert.deepEqual((await admissionOrder([updated, prs[1]!, prs[2]!], [], 1, undefined, realLedger)).order,
-      [733, 732, 731], "same-head re-observation keeps the head behind its 19:05 peer");
-    const archivePath = rotated.archivePath;
-    assert.ok(archivePath);
-    assert.ok(archivePath.endsWith(".gz"));
-    writeFileSync(archivePath, "unreadable archive");
-    await assert.rejects(admissionOrder([updated, prs[1]!, prs[2]!], [], 1, undefined, realLedger),
-      /repushed-head queue history unreadable/, "incomplete history must not assign a new key");
+      [731, 733, 732], "an unminted current head still uses createdAt after re-observation");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("W1-T12534 criterion 4: delayed overlapping production observations preserve the first row ts across verdicts", async () => {
+  const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}repush-overlap-`));
+  const ledgerPath = join(dir, "ledger.ndjson");
+  const subject = pr(741, at("09:00"));
+  const peer = pr(742, at("20:00"));
+  const next = pr(743, "2026-11-13T20:05:00.001Z");
+  let appendTime = at("19:59");
+  const deps: SweepDeps = {
+    ledgerPath, runId: "repush-overlap-test", now: () => Date.parse(appendTime),
+    readActiveWorkerCount: () => 0,
+    appendLine: (path, row) => appendLedger(path, row, { clock: fixedClock(Date.parse(appendTime)) }),
+    arm: () => {}, close: () => {}, dispatchFix: () => {}, escalate: () => {}, actionable: () => false,
+  };
+  let release!: () => void;
+  let entered!: () => void;
+  const blocked = new Promise<void>(resolve => { entered = resolve; });
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  let delayed: ReturnType<typeof runSweep> | undefined;
+  try {
+    writeFileSync(ledgerPath, lines([repushed(741, at("19:00"))]));
+    delayed = runSweep([subject, pr(749, at("10:00"), { checksState: "red", priorStrikes: 100 })], {
+      ...deps,
+      fixProgressJudge: async () => {
+        entered();
+        await gate;
+        return { verdict: "continue", reason: "overlap released" };
+      },
+    });
+    await blocked;
+    appendTime = at("20:05");
+    observeLightPassReviewEligibility([subject], deps);
+    const first = readLedgerLines(ledgerPath).filter(row => row.step === "sweep.review_eligible");
+    assert.equal(first.length, 1);
+    assert.equal(first[0]!.ts, at("20:05"));
+    const before = await admissionOrder([subject, peer, next], [], 1, undefined, { ledgerPath });
+    assert.deepEqual(before.order, [742, 741, 743]);
+    appendTime = at("20:30");
+    release();
+    await delayed;
+    const observations = readLedgerLines(ledgerPath).filter(row => row.step === "sweep.review_eligible" && row.pr_number === 741);
+    assert.equal(observations.length, 2, "the full pass observed an older snapshot before awaiting the judge");
+    assert.equal(observations[1]!.surface, "full");
+    assert.equal(observations[1]!.ts, at("20:30"), "the writer timestamps the delayed observation at append time");
+    const updated = { ...subject, lastActivityAt: at("20:35"), reviewInputDigest: "after-verdict" };
+    appendLedger(ledgerPath, {
+      ts: at("20:34"), run_id: deps.runId, task_id: subject.taskId!, step: "review.posted",
+      pr_url: subject.prUrl, headSha: subject.headSha, review_input_digest: "old-input",
+      review_key: "W1-T741@head-741#old-input", verdict: "FAIL",
+    });
+    assert.deepEqual((await admissionOrder([updated, peer, next], [], 1, undefined, { ledgerPath })).order,
+      [742, 741, 743], "the first observation stays between the 20:00 and 20:05:00.001 peers");
+    // Even a stale explicit timestamp appended later cannot replace the first ledger receipt.
+    appendLedger(ledgerPath, {
+      run_id: deps.runId, task_id: subject.taskId!,
+      ...eligible(741, at("19:58")), step: "sweep.review_eligible", queued_at: at("19:57"),
+    });
+    assert.deepEqual((await admissionOrder([updated, peer, next], [], 1, undefined, { ledgerPath })).order, [742, 741, 743]);
+  } finally {
+    release();
+    await delayed;
+    await drainInFlightReviews({ boundMs: 1000 });
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("W1-T12534 criterion 3: invalid timestamps and other heads cannot supply a queue key", async () => {
+  const { order } = await admissionOrder([
+    pr(751, at("09:00")), pr(752, at("10:00")), pr(753, at("19:30")),
+  ], [
+    repushed(751, "invalid"), repushed(751, at("19:00"), null),
+    eligible(751, at("20:30")), repushed(752, at("19:00")),
+    eligible(752, "invalid"), eligible(752, at("20:00"), "old-752"),
+  ], 1);
+  assert.deepEqual(order, [751, 752, 753]);
 });
