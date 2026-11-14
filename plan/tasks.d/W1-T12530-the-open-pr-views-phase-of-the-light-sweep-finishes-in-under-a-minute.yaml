@@ -15,10 +15,13 @@
     - W1-T6247
     - W1-T11149
   files:
+    - test/sweep/a-restart-reads-each-open-pull-request-once-before-the-first-review.test.ts
     - src/lib/tick-read-worker.ts
     - src/lib/sweep.ts
     - src/cli/commands/sweep.ts
     - test/sweep/the-open-pr-views-phase-finishes-in-under-a-minute.test.ts
+    - test/open-pr-views-read-github-and-git-off-the-loop.test.ts
+    - test/dispatch/dependency-main-identity.test.ts
   status: queued
   attempts: 0
   acceptance:
@@ -68,5 +71,16 @@
     Clear the reuse cache before each pass and criterion 2 must fail. Leave the base tip SHA out of the key and criterion 3
     must fail. Await each per-PR read in turn and criterion 4 must fail. Restore and all must pass.
   note: |
+    AMENDED 2026-11-14 (second): the restart test waits out the pacer's gap before it moves the head.
+    Design step 2 gives the light hook's own read a pacer, so a paced read can wait 1.5 s with no gh call open.
+    test/sweep/a-restart-reads-each-open-pull-request-once-before-the-first-review.test.ts takes 250 ms with no call as the
+    end of the last hook's reads. The first hook's refill then reads on against the next shim, and criterion 6 counts its
+    file-list read. The build makes that wait longer than the gap; no assertion changes.
     Id W1-T12530 reserved for run-unfiled-1794597956000 with ~/rmd-work/bin/reserve-id.sh.
     The 5-35 min and 7-27 min figures are the operator session's; the 107-1,619 s recount is from the rows still on the host.
+    AMENDED 2026-11-14: two existing tests own pacer counts that design step 2 changes.
+    Design step 2 sends every per-PR read through the pacer, so the pacer sees more waits in one build.
+    test/open-pr-views-read-github-and-git-off-the-loop.test.ts asserts exactly three pacer sleeps in one build, and that the
+    floor armed by the list's budget reading refuses the next build's list. With more paced reads, the next paced read in the
+    same build takes that refusal. test/dispatch/dependency-main-identity.test.ts asserts exactly nine pacer waits. The build
+    updates these three assertions to the new counts and to the read that now takes the refusal.
