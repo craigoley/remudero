@@ -906,7 +906,7 @@ function wrappedLineSpan(fileText: string, pattern: string): { startLine: number
 }
 
 /** Remove only this task's acceptance block; undefined means not its record. PURE.
- *  Use the YAML list-item id, never files: (Rule 15 forbids auto tasks declaring their record).
+ *  Match the YAML list-item id; files: is not the record's identity.
  *  Under-strip ambiguity: dropping a line can invent a warning. Preserve sibling records. */
 function ownPlanRecordOutsideAcceptance(taskId: string, path: string, fileText: string): string | undefined {
   const isRecord = path === "plan/tasks.yaml" || (path.startsWith("plan/tasks.d/") && /\.ya?ml$/.test(path));
