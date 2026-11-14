@@ -4795,6 +4795,7 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
       label: "fix",
       prUrl: opts.prUrl,
       runId: opts.runId,
+      worktreePath: opts.worktreePath,
       log: deps.log,
       say: deps.say,
     });

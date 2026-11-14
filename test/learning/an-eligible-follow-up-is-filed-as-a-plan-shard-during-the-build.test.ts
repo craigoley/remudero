@@ -278,6 +278,23 @@ test("follow-up head provenance survives mining and registry publication", () =>
   } });
 });
 
+test("a refused follow-up without PR or head provenance keeps its operator fallback", () => {
+  const harvest = mineFollowups([{ step: "report.followups", run_id: "run", task_id: candidate.taskId,
+    ts: "timestamp", entries: [{ type: "task", text: candidate.text }] }]);
+  routeFollowupsToRegistry(harvest, { registryPath: "unused", updateRegistry: (_p, update) => {
+    const proposals = update([])!;
+    assert.ok(proposals[0].summary.endsWith("Filing: automatic, with operator fallback if refused."));
+    const retired = retireSettledFollowups({ kind: "ok", merged: new Set([candidate.taskId]) }, {
+      registryPath: "unused", updateRegistry: (_path, retire) => {
+        assert.equal(retire(proposals), null, "missing PR/head metadata must not discard the refused proposal");
+        return null;
+      },
+    });
+    assert.deepEqual(retired, []);
+    return proposals;
+  } });
+});
+
 
 test("a draft that duplicates a filed shard is skipped by the batch planner and refused with its reason", async () => {
   const d = draft();

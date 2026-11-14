@@ -23820,12 +23820,17 @@ async function retroCommand(
         }
       }
       const receipts = readLedgerLines(ledgerPath);
+      const runStarts = readLedgerUnionRecordsSync(dirname(ledgerPath), {
+        step: "run.start",
+        refuseIncomplete: true,
+      });
+      if (!runStarts.ok) throw new Error(`incomplete run-start ledger union: ${runStarts.unread.join(", ")}`);
       const ratifiedIds = new Set(followupOutcomes.filter(o => o.routed && isRatifiedInLedger(receipts, o.proposalId))
         .map(o => o.routed ? o.proposalId : ""));
       await fileEligibleFollowups(followupOutcomes, {
         planOnMain: planOnMain.tasks, openPrOrigins, ratifiedIds, log: filingLog,
         sourceRisk: c => {
-          const row = receipts.findLast(r => r.step === "run.start" && r.run_id === c.runId);
+          const row = runStarts.rows.findLast(r => r.step === "run.start" && r.run_id === c.runId);
           return row?.risk === "low" || row?.risk === "medium" || row?.risk === "high" ? row.risk : undefined;
         },
         draft: proposals => draftProposalBatch(proposals, config, owner, repo, `FOLLOWUP-${nextLaneEpochMs()}`, filingLog),
