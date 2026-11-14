@@ -9,21 +9,27 @@
  * The head contract is read by the production reader over a real git repository.
  */
 import assert from "node:assert/strict";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 
 import { taskContractRevision } from "#src/lib/escalate.js";
+import type { Config } from "#src/lib/config.js";
 import {
+  buildSweepEffects,
   DEFAULT_SWEEP_POLICY,
+  readTaskContractAdvance,
   readTaskContractAtHeadViaGit,
   refreshOverlapOf,
   runSweep,
   type ArmedStalledPr,
+  type BuildSweepEffectsDeps,
   type OpenPrView,
   type SweepDeps,
 } from "#test/helpers/sweep-test.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
+import { buildSweepEffects as buildEntrypointSweepEffects } from "#test/helpers/run-task-test.js";
 
 const ID = "W1-T9830";
 const NOW = Date.parse("2026-09-20T01:10:00.000Z");
@@ -78,6 +84,54 @@ function harness(dir: string, mainRevision: string | undefined, over: Partial<Sw
   };
   return { rows, updates, logs, headReads, run: (prs: OpenPrView[]) => runSweep(prs, deps, DEFAULT_SWEEP_POLICY) };
 }
+
+function builderDeps(t: TestContext): BuildSweepEffectsDeps {
+  const root = mkdtempSync(join(tmpdir(), "rmd-task-contract-effects-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  return {
+    owner: "craigoley", repo: "remudero", config: { root, claudeBin: "/bin/true" } as Config,
+    ledgerPath: join(root, "ledger.ndjson"), runId: "W1-T3830-effects",
+    plan: { tasks: [], byId: new Map() }, log: () => {}, reviewRunner: async () => 0,
+    issuesImpl: { create: () => "https://github.com/craigoley/remudero/issues/3830" },
+    armSessionPrsOverride: false, spawnWallClockBoundMsOverride: 1,
+  };
+}
+
+test("W1-T3830: the lib effect surface reports an unconfigured head reader as unreadable", async (t) => {
+  const effects = buildSweepEffects(builderDeps(t));
+  assert.ok(effects.readTaskContractAtHead, "the lib always exposes the head-contract read port");
+  const pr = cappedView("a".repeat(40));
+  assert.deepEqual(await effects.readTaskContractAtHead(pr), { unreadable: "task contract head reader unavailable" });
+  const logs: unknown[] = [];
+  const advance = await readTaskContractAdvance([pr], {
+    readTaskContractAtHead: effects.readTaskContractAtHead,
+    readTaskContractRevision: () => taskContractRevision(MAIN_TASK),
+    log: (step, extra) => { logs.push([step, extra]); },
+  });
+  assert.equal(advance.size, 0, "an unconfigured reader cannot qualify a task-contract refresh");
+  assert.deepEqual(logs, [["sweep.task_contract_advance.unreadable", {
+    pr_number: pr.prNumber, head_sha: pr.headSha, reason: "task contract head reader unavailable",
+  }]]);
+});
+
+test("W1-T3830: both effect builders forward the injected head-contract reader", async (t) => {
+  const deps = builderDeps(t);
+  const pr = cappedView("a".repeat(40));
+  for (const build of [buildSweepEffects, buildEntrypointSweepEffects]) {
+    const reads: OpenPrView[] = [];
+    const effects = build({ ...deps, readTaskContractAdvanceAtHeadImpl: async (head) => {
+      reads.push(head);
+      return { revision: taskContractRevision(HEAD_TASK) };
+    } });
+    assert.ok(effects.readTaskContractAtHead);
+    const advance = await readTaskContractAdvance([pr], {
+      readTaskContractAtHead: effects.readTaskContractAtHead,
+      readTaskContractRevision: () => taskContractRevision(MAIN_TASK),
+    });
+    assert.deepEqual(reads, [pr], "the configured reader receives the exact PR head once");
+    assert.deepEqual([...advance], [`${pr.prNumber}@${pr.headSha}`]);
+  }
+});
 
 test("W1-T3830 criterion 1: a capped PR whose main task contract differs from its head contract is selected once for branch advance", async (t) => {
   const { dir, headSha } = committedHead(t);

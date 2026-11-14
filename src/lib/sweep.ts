@@ -2469,6 +2469,7 @@ export const SWEEP_EFFECT_SURFACE = [
   "readFailedRunBase",
   // remudero-console #2035: the task contract an escalated fix-progress latch stands on.
   "readTaskContractRevision",
+  "readTaskContractAtHead",
   "readTaskSemanticRevision",
   "readMergedRatchets", // W1-T9962
   "readOpenEscalations",
@@ -3142,7 +3143,8 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     readHostedProofResults: (headSha, proofs) => readHostedFixProofResults({ owner, repo, headSha, proofs },
       { json: readJsonImpl, text: ghTextAsync }),
     readTaskContractRevision,
-    ...(readTaskContractAdvanceAtHeadImpl === undefined ? {} : { readTaskContractAtHead: readTaskContractAdvanceAtHeadImpl }),
+    readTaskContractAtHead: readTaskContractAdvanceAtHeadImpl ??
+      (async () => ({ unreadable: "task contract head reader unavailable" })),
     readTaskSemanticRevision,
     // W1-T3618: the entrypoint's freshness gate, surfaced so the lib-built and entrypoint-built
     // effect surfaces stay key-identical (W1-T2890).

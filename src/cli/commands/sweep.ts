@@ -188,6 +188,7 @@ export function buildSweepEffects(
   | "escalateInfrastructureCheck"
   | "readCiGateRollup"
   | "reaggregateCiGate"
+  | "readTaskContractAtHead"
   | "readMainTip"
   | "readMainRepair"
   | "readStaleRedWorkflowRuns"
