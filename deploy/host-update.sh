@@ -1051,6 +1051,23 @@ state_snapshot_fail() {
   state_snapshot_failed=1
   if [ -z "${state_snapshot_reason}" ]; then state_snapshot_reason="$1"; fi
 }
+# W1-T12174: config may hold secrets. A fresh private directory prevents destination symlinks;
+# -P also prevents dereferencing a source replaced by a link after the regular-file check.
+snapshot_container_config() (
+  umask 077
+  local dest="$1" file copied
+  [ ! -L "${CONTAINER_CONFIG_DIR}" ] && [ -d "${CONTAINER_CONFIG_DIR}" ] \
+    && [ -r "${CONTAINER_CONFIG_DIR}" ] && [ -x "${CONTAINER_CONFIG_DIR}" ] || return 1
+  mkdir -m 700 -- "${dest}" && chmod 700 -- "${dest}" || return 1
+  for file in "${CONTAINER_CONFIG_DIR}"/* "${CONTAINER_CONFIG_DIR}"/.[!.]* "${CONTAINER_CONFIG_DIR}"/..?*; do
+    [ ! -L "${file}" ] && [ -f "${file}" ] || continue
+    [ -r "${file}" ] || return 1
+    copied="${dest}/${file##*/}"
+    cp -P -- "${file}" "${copied}" || return 1
+    if [ -L "${copied}" ]; then rm -f -- "${copied}"; return 1; fi
+    chmod 600 -- "${copied}" || return 1
+  done
+)
 STATE_SNAPSHOT_ARCHIVES=()
 if [ "${RECLAIM_ONLY}" -eq 1 ]; then
   echo
@@ -1154,6 +1171,12 @@ console.log('RMD_STATE_SNAPSHOT', s.archiveDir.split('/').pop(), s.entries.lengt
     echo "  ${snap_files} file(s): ${snap_linked} rotation(s) hard-linked to the previous archive," \
       "${snap_vanished} removed by a live writer mid-copy, ${snap_trimmed} torn ledger byte(s) left out"
     STATE_SNAPSHOT_ARCHIVES+=("${snap_backups}/${snap_name}")
+    snap_config="${snap_backups}/${snap_name}/container-config"
+    echo "host-update: container config copy — ${snap_config}"
+    if ! snapshot_container_config "${snap_config}" >/dev/null 2>&1; then
+      state_snapshot_fail "host-update: STATE SNAPSHOT CONFIG COPY FAILED — ${CONTAINER_CONFIG_DIR} -> ${snap_config}"
+      continue
+    fi
     # Retention, only after a verified NEW snapshot: keep the newest STATE_BACKUP_KEEP, never the
     # one just written. A failed night expires nothing. Removing an archive only unlinks: a rotation
     # hard-linked into a newer archive keeps its bytes there.
