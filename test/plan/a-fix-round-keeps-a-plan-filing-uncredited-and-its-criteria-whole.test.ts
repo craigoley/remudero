@@ -5,7 +5,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { planFilingFixRoundRefusal, readPlanFilingFixRoundInput, type PlanFilingFixRoundInput } from "#src/lib/plan-filing-fix-guard.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
-import { runPlanScopedFixRound, runFixRung } from "#src/run-task.js";
+import { runPlanScopedFixRound, runFixRung } from "#test/helpers/run-task-test.js";
 import type { Config } from "#src/lib/config.js";
 import type { ReviewVerdict } from "#src/lib/review.js";
 import type { WorkerResult } from "#src/lib/worker.js";
