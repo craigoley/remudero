@@ -1,0 +1,60 @@
+- id: W1-T12706
+  title: "Serve keeps its warm read model across a main advance instead of restarting cold"
+  repo: remudero
+  depends_on: []
+  priority: 1.3
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # serve's restart rule; a missed code change would leave the console on old code, so every path that is not shown to be read per request stays restart-relevant
+  origin: "operator-session#serve-restarts-cold-on-every-main-advance-2026-11-14"
+  plan_refs:
+    - W1-T4463
+    - W1-T4481
+    - W1-T11143
+    - W1-T11933
+  files:
+    - src/lib/serve-restart-relevance.ts
+    - src/lib/serve.ts
+    - src/lib/ledger-steps.ts
+    - test/serve-restarts-only-for-changes-it-loads.test.ts
+    - test/serve/a-feedback-only-advance-keeps-serve-warm.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "Through the production restart decision (the gateway checkout assessment and maybeExit in src/lib/serve.ts), an advance whose only changed paths are under plan/feedback/ (plus paths serve does not load, such as test/ and scripts/) writes no serve.handoff_requested row and keeps the same read model; it writes one row that names the old and new sha and the changed paths"
+      proof: "grep: W1-T12706 criterion 1 in test/serve/a-feedback-only-advance-keeps-serve-warm.test.ts"
+    - claim: "After such an advance, a console read of a plan/feedback/ entry that the advance added or changed answers the new content, not the content at serve's boot sha"
+      proof: "grep: W1-T12706 criterion 2 in test/serve/a-feedback-only-advance-keeps-serve-warm.test.ts"
+    - claim: "invariant:code-still-restarts — an advance that also changes a path under src/, bin/, package.json, package-lock.json, tsconfig.json, settings/, the state dir, or a plan/ path serve reads only at boot (for example plan/policy.yaml) still writes serve.handoff_requested with reason checkout_behind, coalesced by SERVE_HANDOFF_COALESCE_MS as today"
+      kind: guard
+      proof: "grep: W1-T12706 criterion 3 in test/serve/a-feedback-only-advance-keeps-serve-warm.test.ts"
+    - claim: "invariant:uncertain-restarts — an empty, blank or unreadable diff, or a dirty gateway checkout, behaves as today: unreadable and empty still count as relevant, and dirty still never restarts"
+      kind: guard
+      proof: "grep: W1-T12706 criterion 4 in test/serve/a-feedback-only-advance-keeps-serve-warm.test.ts"
+  rationale: |
+    WHY: each serve restart throws away the warm read model and builds it again. Main advances many times an hour, so serve restarts about every 45 minutes, and 7 of 32 restarts in 24 h changed nothing serve loads as code.
+    MEASURED 2026-11-14, read-only, ~/rmd-state2/state/ledger.ndjson plus its rotated archives, 2026-11-13T19:15Z to 2026-11-14T19:15Z:
+    - Restarts: 41 read_model.warm_boot rows (1.7 an hour). 32 are slot handoffs (serve.handoff_done, 1.3 an hour); the other 9 are container starts (the hostname changes, for example 16:10Z and 16:40Z on 2026-11-14), which W1-T11143 covers. Every one of the 54 serve.handoff_requested rows has reason checkout_behind. From 16:04Z to 18:37Z there were 8 warm boots.
+    - Time to warm: serve.handoff_done readyMs median 32.5 s (min 23.7 s, max 234.8 s, n 32); drainMs median 2.0 s; overlap peak 1.4 to 1.8 GB.
+    - Build cost per restart: read_model.view_builds rows. The first 10-minute window after a boot has a median of 26.9 s of view build time (n 37; 124 to 175 builds of the fast read-model lane, plus 14 to 25 s for operator-agent-rows). Later windows have a median of 0.8 s (n 92). So each restart costs about 26 s of extra build time; in 24 h the first windows held 1,034 s in total. The core oracle child also runs at each boot (median 53 s wall). No ledger row carries serve CPU; W1-T11815 (queued) adds thread CPU to view build rows. The 1.7 cores serve used at host load 30 to 45 (operator observation, 2026-11-14) is not explained by these rows alone.
+    - What each handoff changed (git diff --name-only fromSha toSha for each serve.handoff_done): 25 of 32 changed src/; 7 of 32 changed nothing under src/, bin/, package.json, package-lock.json or tsconfig.json. In all 7, the only restart-relevant paths were plan/feedback/ files (for example ff40d5e5f..8c2a56da2 changed only plan/feedback/incident-a41cbb4c43e15842.yaml; 2b359e827..04564ebd2 at 18:37Z changed plan/feedback/ and plan/tasks.d/).
+    WHY checkout_behind FORCES A HANDOFF, READ at origin/main 4d8d0b3a3:
+    - src/lib/serve.ts:1505 sets `restartDue` when the gateway checkout is behind origin/main and `serveRestartRelevant(changedPaths)` is true; maybeExit (:1775-1820) then asks the supervisor for a handoff with reason checkout_behind, at most once per SERVE_HANDOFF_COALESCE_MS (15 min, :1520).
+    - src/lib/serve-restart-relevance.ts:23-28 `serveRestartRelevant` is true for the daemon's MATERIAL_ADVANCE_PATHS (src/lib/self-sync.ts:487: src/, bin/, package.json, package-lock.json, tsconfig.json) and for SERVE_ONLY_RESTART_PATHS: settings/, the state dir and all of plan/ except the paths serve reloads in place (plan/tasks.yaml and plan/tasks.d/, W1-T4481). So any plan/feedback/ change restarts serve.
+    - serve reads plan/feedback/ per request from the checkout on disk (readFeedbackEntry in src/lib/feedback.ts:1106, called from src/lib/panel-graph.ts:507, :731, :740). That is why the rule keeps it restart-relevant: the restart is what brings the checkout forward.
+    NOT WORTH IT, MEASURED: narrowing src/ to serve's module graph. The static import closure of src/lib/serve-supervisor-main.ts holds 714 of 752 src .ts files, and all 25 code handoffs changed a file inside it.
+    CHECKED for overlap: W1-T11143 (queued) moves container replaces for baked runtime source to a handoff; it does not change which advances restart serve. W1-T4058 (queued) is about serve picking up merges at all. W1-T9447 (queued) is about the replace script's wait. None skips a handoff.
+  design: |
+    INVARIANT code-still-restarts: an advance that changes any path serve loads as code, or any plan/ path serve reads only at boot, still hands off as today.
+    INVARIANT uncertain-restarts: an empty, blank or unreadable diff stays relevant, and a dirty checkout never restarts (the entrypoint refuses to sync it).
+    1. Before you change anything, list every plan/ path serve reads and say when it reads it (at boot, or per request from disk). Only a path that serve reads per request from disk may leave the restart rule. Today that is plan/feedback/; if you find another, name its reader in the code beside the entry, as SERVE_PLAN_RELOADABLE_PATHS asks.
+    2. src/lib/serve-restart-relevance.ts: split the rule in two. Keep `serveRestartRelevant` true for code and boot-read paths. Add a per-request list (plan/feedback/) that is not restart-relevant.
+    3. src/lib/serve.ts: when the checkout is behind, clean, and every changed path is either not relevant or on the per-request list, bring the gateway checkout forward in place instead of asking for a handoff. Use the same fast-forward the entrypoint's sync_tree does (deploy/entrypoint-supervise.sh), only with no write in flight (inFlightWrites 0), and write one row (for example serve.checkout_advanced) with fromSha, toSha and the changed paths. Declare the step if the registry needs it. If you find that serve's running code loads files from the gateway checkout (not from its generation slot), so that a fast-forward under it is not safe, stop and report; that changes the task.
+    4. The plan half of such an advance still reloads in place (syncPlan) as today.
+    NOT IN SCOPE: narrowing src/ to serve's module graph (measured above: no gain); container replaces (W1-T11143); the view build summary (W1-T11815).
+  falsifier: |
+    Keep plan/feedback/ in the restart rule: criterion 1 must fail with a serve.handoff_requested row. Skip the in-place fast-forward: criterion 2 must fail with the boot-sha content. Drop src/ or plan/policy.yaml from the rule: criterion 3 must fail. Treat an unreadable diff as not relevant: criterion 4 must fail. Restore and require all four to pass.
+  note: |
+    Id reserved for run-unfiled-1794684218000 with ~/rmd-work/bin/reserve-id.sh.
