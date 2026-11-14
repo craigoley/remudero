@@ -24,6 +24,9 @@
     - test/learnings-budget-ratchet.test.ts
     - test/a-ceiling-is-rejudged-against-current-main-before-a-merge.test.ts
     - test/gardeners/the-merge-time-verdict-counts-learnings-reach-and-house-layout.test.ts
+    - test/gardeners/two-pull-requests-that-cross-a-ceiling-together-are-held-at-merge-time.test.ts
+    - test/census-precheck-counts-the-house-layout-ratchet.test.ts
+    - test/a-census-this-branch-grows-is-refused-before-the-push.test.ts
   status: queued
   attempts: 0
   acceptance:
@@ -82,6 +85,9 @@
     4. Run `npm run census:affected-reach` and depcruise on src/lib/merged-ratchet-verdict.ts after each import.
        If the ring comes back, stop and report the cycle; do not raise the baseline.
     5. Update the W1-T9962 test that pins the counted list.
+    6. Existing tests outside the first list change with it. The W1-T12509 suite pins the counted and uncounted lists,
+       and asserts that house-layout is uncounted. Two census-precheck suites copy scripts/house-layout-census.mjs into
+       a fixture by name, so they also copy scripts/house-layout-split-table.json.
     INVARIANT no-clean-without-count: a gate is reported clean only when it was counted on both trees; every other
     answer is `unread` or a named uncounted gate.
     NOT IN SCOPE: comment-load, coverage and mutation; any baseline value; the callers of the verdict.

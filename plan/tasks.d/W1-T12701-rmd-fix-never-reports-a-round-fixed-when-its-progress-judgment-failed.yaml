@@ -1,0 +1,60 @@
+- id: W1-T12701
+  title: "rmd fix never reports a round fixed when its progress judgment failed and no round ran"
+  repo: remudero
+  depends_on: []
+  priority: 1.3
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # spans the fix verb and the sweep dispatch; the fix verb's outcome and exit code, and the sweep's spent flag for a dispatch that ran no round; no new dispatch, no change to the judge or its gates
+  origin: "operator-session#fix-verb-reports-fixed-on-failed-judgment-2026-11-14"
+  plan_refs:
+    - W1-T7096
+    - W1-T2231
+    - W1-T5919
+  files:
+    - src/cli/commands/fix.ts
+    - src/lib/sweep.ts
+    - test/fix-lane/rmd-fix-never-reports-a-round-fixed-when-its-progress-judgment-failed.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "When runFixRung returns handed_off and this dispatch wrote no fix.dispatch or fix.retrigger row, buildSweepEffects' dispatchFix returns a typed no-round result that carries the rung's reason, and dispatchFixSpent reads it as not spent. A handed_off after a round that wrote fix.dispatch still reads as spent"
+      proof: "grep: W1-T12701 criterion 1 in test/fix-lane/rmd-fix-never-reports-a-round-fixed-when-its-progress-judgment-failed.test.ts"
+    - claim: "Through fixCommand with no deps.route (the real routeFix and buildSweepEffects' own dispatchFix), on a blocked-fixable PR whose fix progress judge throws ProviderCapacityBlockedError, the verb writes fix.refused (never fix.disposed outcome fixed) with refusal progress_judgment_unavailable and the provider error text in provider_cause, and exits 1"
+      proof: "grep: W1-T12701 criterion 2 in test/fix-lane/rmd-fix-never-reports-a-round-fixed-when-its-progress-judgment-failed.test.ts"
+    - claim: "In that run the verb prints one line that says no fix round ran and names the provider cause, and it never prints \"dispatched the fix rung\""
+      proof: "grep: W1-T12701 criterion 3 in test/fix-lane/rmd-fix-never-reports-a-round-fixed-when-its-progress-judgment-failed.test.ts"
+    - claim: "invariant:a-real-round-still-reads-fixed — a verb run whose rung wrote fix.dispatch still disposes outcome fixed, prints \"dispatched the fix rung\" and exits 0, as today"
+      kind: guard
+      proof: "grep: W1-T12701 criterion 4 in test/fix-lane/rmd-fix-never-reports-a-round-fixed-when-its-progress-judgment-failed.test.ts"
+    - claim: "invariant:no-round-is-not-a-claim-decline — in runSweep the typed no-round result sets acted false with the rung's reason as the stand-down, and it never writes a fix_claim_decline hold or a sweep.fix.checkout_claim_declined row"
+      kind: guard
+      proof: "grep: W1-T12701 criterion 5 in test/fix-lane/rmd-fix-never-reports-a-round-fixed-when-its-progress-judgment-failed.test.ts"
+  rationale: |
+    WHY: `rmd fix` told the operator, and the Codex sessions that read its output, that it dispatched a fix round when no round ran. A session takes that line as success and stops looking at the PR.
+    OBSERVED 2026-11-14 in the core ledger (~/rmd-state2/state/ledger.ndjson), run FIX-1794675190690 on #18422 (W1-T12117):
+    - 16:53:54.95Z `sweep.fix.prepare_timing`, `sweep.fix.parallel_attempts_plan`, `sweep.fix.strike_schedule_plan`.
+    - 16:54:16.383Z `fix.progress_judged` site fix-strike, verdict `unavailable`, reason "fix progress judgment failed: ProviderCapacityBlockedError: no configured worker subscription has readable headroom: claude=full (5% remaining), codex=cannot be asked (Codex is enabled but no codex executable is on PATH and workerProviders.codexBin is unset)".
+    - 16:54:17.571Z `fix.disposed` outcome `fixed`, reason "2 unmet criteria — strike 1/2". The run wrote no `fix.dispatch` row. The PR's commits on GitHub end at 7f5960199 (13:53:43Z), so no commit was pushed.
+    - The verb printed "### rmd fix — PR #18422 (W1-T12117): 2 unmet criteria — strike 1/2 — dispatched the fix rung." and exited 0.
+    RELATED, same day: FIX-1794674587002 on #18422 at 16:43:48Z wrote `sweep.fix.checkout_claim_declined` reason inflight_lock_owner and then `fix.disposed` outcome `fixed`. That path is out of scope here (see design), but it shows the same class.
+    READ at origin/main ab2dd5256:
+    - src/cli/commands/fix.ts:3038 the strike loop returns `{ outcome: "handed_off", ... reason: decision.reason }` when the judge is unavailable (and :2688, :2790, :5168, :5490 the same at other sites).
+    - src/lib/sweep.ts:4948 `const rung = await runFixRung(...)`; :5126 reads only `rung?.superseded` and `rung?.retainWorktree`. dispatchFix then returns undefined whatever the rung's outcome was.
+    - src/lib/sweep.ts:14697 `dispatchFixSpent` reads undefined as spent (W1-T2231's "undefined means the pre-existing assumption").
+    - src/cli/commands/fix.ts:1949-1954 `fixDispatchResult` maps spent to outcome "fixed"; :5957 logs `fix.disposed`; :5964-5966 prints "dispatched the fix rung" and returns 0.
+    - src/lib/fix-progress-judge.ts:623 turns the thrown error into reason "fix progress judgment failed: <error>"; src/lib/worker-provider.ts:420 defines ProviderCapacityBlockedError.
+    CHECKED for overlap: no queued task covers this. W1-T11025 and W1-T11146 change what the judge reads, not what the verb reports. W1-T10386 is a code-scanning fix that lands nothing.
+  design: |
+    INVARIANT a-real-round-still-reads-fixed: a dispatch whose rung wrote fix.dispatch keeps today's outcome, text and exit code; only a dispatch that ran no round changes.
+    INVARIANT no-round-is-not-a-claim-decline: the new result is its own type; the claim-decline hold path (W1-T5919) never reads it.
+    1. src/lib/sweep.ts: add `FixRoundNotRun { roundNotRun: true; reason: string }` beside `FixClaimDeclined`, and widen dispatchFix's return type to it. In buildSweepEffects' dispatchFix, read the existing `dispatchStarted` flag (src/lib/sweep.ts:5063 sets it when the rung writes fix.dispatch or fix.retrigger). When `rung.outcome === "handed_off"` and `dispatchStarted` is false, return `{ roundNotRun: true, reason: rung.reason }`. `dispatchFixSpent` returns false for it (the existing `typeof outcome === "object"` arm). At each runSweep call site that reads `fixClaimDeclinedReason`, a no-round result sets acted false and the stand-down to its reason. It writes no claim-decline row.
+    2. src/cli/commands/fix.ts: `fixDispatchResult` maps a no-round result to `{ outcome: "refused", reason: "no fix round ran: " + reason }`. The verb's log row for it is `fix.refused` with `refusal: "progress_judgment_unavailable"` when the reason starts "fix progress judgment failed" or "fix progress judge unavailable", else `refusal: "round_not_run"`, and `provider_cause` with the error text after "failed: ". The existing not-fixable line prints it: "### rmd fix — PR #<n> is not fixable: no fix round ran: <reason>. No spawn." and the verb returns 1.
+    3. Tests: drive fixCommand as test/fix-lane/manual-fix-collects-independent-red-evidence.test.ts does, but with no `route` override, so the real routeFix calls buildSweepEffects' own dispatchFix. Fake only the git, gh and worker seams that the existing buildSweepEffects tests fake (for example test/a-dead-runs-worktree-does-not-block-a-fix-checkout.test.ts). The provider selection must throw ProviderCapacityBlockedError from the judge, the way production did; do not inject a judge result. Read the rows from the ledger file and the printed lines from the console.
+    NOT IN SCOPE: the inflight_lock_owner `return;` at src/lib/sweep.ts:4831 and the other bare `return;` paths of dispatchFix (they feed the sweep's dedup seed, W1-T1127, and need their own measurement); the judge's provider selection; retries.
+  falsifier: |
+    Return undefined again for a handed_off rung with no round: criteria 1, 2 and 3 must fail with outcome fixed and exit 0. Treat every handed_off as not run: criterion 4 must fail. Route the no-round result through the claim-decline path: criterion 5 must fail. Restore and require all to pass.
+  note: |
+    Id reserved for run-unfiled-1794676672000 with ~/rmd-work/bin/reserve-id.sh. Do not run `rmd fix` on a live PR to check this; the test drives the verb in-process.

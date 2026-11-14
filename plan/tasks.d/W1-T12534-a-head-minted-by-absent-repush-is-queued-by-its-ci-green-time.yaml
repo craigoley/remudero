@@ -20,7 +20,7 @@
   status: queued
   attempts: 0
   acceptance:
-    - claim: "With the 20:41 shape (width 3; #18328 created 15:39 and #18343 created 17:23, each with a sweep.absent_repush row whose new_head is its current head and a sweep.review_eligible row for that head after 20:00; #18332 created 15:57 and not re-pushed; three PRs created later whose heads went review-eligible before 20:00), the light pass admits #18332 and the two later PRs, and #18328 then #18343 lead the refill tail"
+    - claim: "With the 20:41 shape (width 3; #18328 created 15:39 and #18343 created 17:23, each with a sweep.absent_repush row whose new_head is its current head and a sweep.review_eligible row for that head after 20:00; #18332 created 15:57 and not re-pushed; three PRs created later whose heads went review-eligible before 20:00), the light pass admits #18332 and the two oldest later PRs, and the refill tail is the third later PR, then #18328, then #18343"
       proof: "grep: W1-T12534 criterion 1 in test/sweep/a-head-minted-by-absent-repush-is-queued-by-its-ci-green-time.test.ts"
     - claim: "invariant:unrepushed-order-unchanged — a head that no sweep.absent_repush row names as new_head keeps the createdAt key, so a pass with no re-pushed head admits exactly what origin/main admits, and equal keys still order by PR number"
       proof: "grep: W1-T12534 criterion 2 in test/sweep/a-head-minted-by-absent-repush-is-queued-by-its-ci-green-time.test.ts"
@@ -77,3 +77,6 @@
     first and criterion 4 must fail. Restore and all must pass.
   note: |
     Id W1-T12534 reserved for run-unfiled-1794603730000 with ~/rmd-work/bin/reserve-id.sh.
+    Amended 2026-11-14: criterion 1 first said #18328 and #18343 lead the refill tail. The third later PR went
+    review-eligible before 20:00, so its createdAt key is before the re-pushed heads' keys (after 20:00) and it
+    leads the tail. The criterion now names the order the design gives.

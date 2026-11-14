@@ -10,7 +10,9 @@ import { approveBatch, draftedShardSlugs, fileRatificationBatch, inboxDraftExamp
 import { buildPlanPrBody, filingAcceptanceCriteria } from "#src/lib/plan-pr-emitter.js";
 import { armAutoMerge, type ArmDeps } from "#src/lib/arm-auto-merge.js";
 import { parseAcceptanceBlock, parseWhitelistedProof } from "#src/lib/review.js";
-import { mineFollowups, retireSettledFollowups, routeFollowupsToRegistry, type FollowupCandidate, type FollowupRouteOutcome } from "#src/lib/retro.js";
+import { keepRefusedFollowupsForOperator, mineFollowups, retireSettledFollowups, routeFollowupsToRegistry, type FollowupCandidate, type FollowupRouteOutcome } from "#src/lib/retro.js";
+import { stripMintedFollowupAffix } from "#src/lib/followup-dedup-census.js";
+import type { Proposal } from "#src/lib/inbox.js";
 
 const headSha = "a".repeat(40);
 const candidate: FollowupCandidate = { entryId: "run:timestamp:0", taskId: "W1-T12117", runId: "run",
@@ -231,6 +233,29 @@ test("an under-specified or over-band follow-up draft is refused with a named re
     log: (step, extra) => rows.push({ step, ...extra }),
   });
   assert.ok(rows.some(r => r.reason === "unreadable-head-sha"));
+  // A refused proposal with neither a head nor a PR URL still stays for the operator after its source merges.
+  let registry: Proposal[] = [];
+  const updateRegistry = (_path: string, update: (current: Proposal[]) => Proposal[] | null) => {
+    const next = update(registry);
+    if (next !== null) registry = next;
+    return next;
+  };
+  const bare = { ...candidate, entryId: "bare:timestamp:0", headSha: undefined, prUrl: undefined };
+  const bareOutcomes = routeFollowupsToRegistry({ candidates: [bare], deduped: [], harvestLines: [] },
+    { registryPath: "unused", updateRegistry, settledQuestions: [] });
+  const bareRows: Record<string, unknown>[] = [];
+  const bareFiling = await fileEligibleFollowups(bareOutcomes, { planOnMain: [source], openPrOrigins: new Set(), ratifiedIds: new Set(),
+    draft: async () => assert.fail("unreadable head reached drafter"),
+    fileBatch: async () => assert.fail("unreadable head reached publisher"),
+    log: (step, extra) => bareRows.push({ step, ...extra }),
+  });
+  assert.ok(bareRows.some(r => r.step === "followup.file_refused" && r.reason === "unreadable-head-sha"));
+  assert.deepEqual(keepRefusedFollowupsForOperator(bareFiling.refused.map(r => r.entryId), { registryPath: "unused", updateRegistry }),
+    [`followup:${bare.entryId}`]);
+  assert.equal(stripMintedFollowupAffix(registry[0].summary), bare.text, "the referent still parses for dedup");
+  const bareRetired = retireSettledFollowups({ kind: "ok", merged: new Set([bare.taskId]) }, { registryPath: "unused", updateRegistry });
+  assert.equal(bareRetired.length, 0);
+  assert.deepEqual(registry.map(p => p.id), [`followup:${bare.entryId}`], "the refused proposal is kept for the operator");
   for (const bound of [100, NaN, Infinity]) {
     assert.equal(selectFileableFollowups(Array.from({ length: 5 }, (_, i) => routed({ ...candidate, entryId: `${i}` })), {
       planOnMain: [source], openPrOrigins: new Set(), ratifiedIds: new Set(), bound,
@@ -265,8 +290,14 @@ test("follow-up head provenance survives mining and registry publication", () =>
     ts: "timestamp", pr_url: candidate.prUrl, head_sha: headSha, entries: [{ type: "task", text: candidate.text }] }]);
   assert.equal(harvest.candidates[0].headSha, headSha);
   routeFollowupsToRegistry(harvest, { registryPath: "unused", updateRegistry: (_p, update) => {
-    const proposals = update([])!;
-    assert.ok(proposals[0].summary.includes(headSha));
+    const routedOnly = update([])!;
+    assert.ok(routedOnly[0].summary.includes(headSha));
+    assert.equal(retireSettledFollowups({ kind: "ok", merged: new Set([candidate.taskId]) }, {
+      registryPath: "unused", updateRegistry: (_path, retire) => retire(routedOnly) }).length, 1,
+    "a routed follow-up that filing never refused still retires when its source merges");
+    let proposals = routedOnly;
+    keepRefusedFollowupsForOperator([candidate.entryId], { registryPath: "unused",
+      updateRegistry: (_path, mark) => { proposals = mark(proposals) ?? proposals; return proposals; } });
     const retired = retireSettledFollowups({ kind: "ok", merged: new Set([candidate.taskId]) }, {
       registryPath: "unused", updateRegistry: (_path, retire) => {
         assert.equal(retire(proposals), null, "a refused draft must keep its operator fallback after the source merges");
@@ -278,23 +309,37 @@ test("follow-up head provenance survives mining and registry publication", () =>
   } });
 });
 
-test("a refused follow-up without PR or head provenance keeps its operator fallback", () => {
+test("an unreadable follow-up head is retained for the operator when its source merges", async () => {
   const harvest = mineFollowups([{ step: "report.followups", run_id: "run", task_id: candidate.taskId,
     ts: "timestamp", entries: [{ type: "task", text: candidate.text }] }]);
-  routeFollowupsToRegistry(harvest, { registryPath: "unused", updateRegistry: (_p, update) => {
-    const proposals = update([])!;
-    assert.ok(proposals[0].summary.endsWith("Filing: automatic, with operator fallback if refused."));
-    const retired = retireSettledFollowups({ kind: "ok", merged: new Set([candidate.taskId]) }, {
-      registryPath: "unused", updateRegistry: (_path, retire) => {
-        assert.equal(retire(proposals), null, "missing PR/head metadata must not discard the refused proposal");
-        return null;
-      },
-    });
-    assert.deepEqual(retired, []);
+  let proposals: Proposal[] = [];
+  const routedOutcomes = routeFollowupsToRegistry(harvest, { registryPath: "unused", updateRegistry: (_p, update) => {
+    proposals = update(proposals) ?? proposals;
     return proposals;
   } });
+  const filing = await fileEligibleFollowups(routedOutcomes, {
+    planOnMain: [source], openPrOrigins: new Set(), ratifiedIds: new Set(),
+    draft: async () => assert.fail("an unreadable source head reached the drafter"),
+    fileBatch: async () => assert.fail("an unreadable source head reached the publisher"),
+    log: () => {},
+  });
+  assert.deepEqual(filing.refused.map(r => r.reason), ["unreadable-head-sha"]);
+  const kept = keepRefusedFollowupsForOperator(filing.refused.map(r => r.entryId), {
+    registryPath: "unused", updateRegistry: (_p, update) => {
+      proposals = update(proposals) ?? proposals;
+      return proposals;
+    },
+  });
+  assert.equal(kept.length, 1);
+  assert.match(proposals[0].summary, /kept for the operator: automatic filing refused it/);
+  const retired = retireSettledFollowups({ kind: "ok", merged: new Set([candidate.taskId]) }, {
+    registryPath: "unused", updateRegistry: (_path, update) => {
+      assert.equal(update(proposals), null, "the refused proposal must survive its source merge");
+      return null;
+    },
+  });
+  assert.deepEqual(retired, []);
 });
-
 
 test("a draft that duplicates a filed shard is skipped by the batch planner and refused with its reason", async () => {
   const d = draft();

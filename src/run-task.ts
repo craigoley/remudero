@@ -377,7 +377,7 @@ import { reconcileManagedImprovementEffects } from "./lib/opportunity-outcomes.j
 import { classifyGardenerStep, productionGardenerOverseerPorts, runGardenerOverseer } from "./lib/gardener-overseer.js";
 import { planGardenSpec } from "./lib/plan-gardener.js";
 import { backlogGardenSpec } from "./lib/backlog-gardener.js";
-import { queueJudgeGardenSpec, type QueueJudgeSources } from "./lib/queue-judge-gardener.js";
+import { queueJudgeGardenSpec, queueJudgeRouteWindow, type QueueJudgeSources } from "./lib/queue-judge-gardener.js";
 import { redesignGardenSpec } from "./lib/redesign-gardener.js";
 import { SCOUT_WINDOW_MS, scoutGardenSpec } from "./lib/scout-gardener.js";
 import { gateGardenSpec, loadGateProbes } from "./lib/gate-gardener.js";
@@ -1161,6 +1161,7 @@ import {
   type RetroLedgerRead,
   escalateRetroPublicationFailure,
   retireSettledFollowups,
+  keepRefusedFollowupsForOperator,
   type FollowupReferentRead,
   runlessMergesSince,
   saveMarker,
@@ -23802,6 +23803,7 @@ async function retroCommand(
       log: (step, detail) => appendLedger(ledgerPath, { run_id: `RETRO-${retroReadStartedMs}`, task_id: "RETRO", step, ...detail }),
     }));
   if (followupOutcomes.length > 0) {
+    const refusedFollowups: string[] = [];
     const filingLog = (step: string, extra: Record<string, unknown> = {}) =>
       appendLedger(ledgerPath, { run_id: `RETRO-${retroReadStartedMs}`, task_id: "RETRO", step, ...extra });
     try {
@@ -23827,7 +23829,7 @@ async function retroCommand(
       if (!runStarts.ok) throw new Error(`incomplete run-start ledger union: ${runStarts.unread.join(", ")}`);
       const ratifiedIds = new Set(followupOutcomes.filter(o => o.routed && isRatifiedInLedger(receipts, o.proposalId))
         .map(o => o.routed ? o.proposalId : ""));
-      await fileEligibleFollowups(followupOutcomes, {
+      const filing = await fileEligibleFollowups(followupOutcomes, {
         planOnMain: planOnMain.tasks, openPrOrigins, ratifiedIds, log: filingLog,
         sourceRisk: c => {
           const row = runStarts.rows.findLast(r => r.step === "run.start" && r.run_id === c.runId);
@@ -23850,10 +23852,19 @@ async function retroCommand(
           return receipt;
         },
       });
+      const handled = new Set(["already-ratified", "already-filed-origin", "duplicate-entry", "human-owned-action"]);
+      refusedFollowups.push(...filing.refused.filter(r => !handled.has(r.reason)).map(r => r.entryId));
     } catch (error) {
-      for (const outcome of followupOutcomes) if (outcome.routed) filingLog("followup.file_refused", {
-        entry_id: outcome.candidate.entryId, reason: `filing-unreadable: ${String(error)}`,
-      });
+      for (const outcome of followupOutcomes) if (outcome.routed) {
+        refusedFollowups.push(outcome.candidate.entryId);
+        filingLog("followup.file_refused", { entry_id: outcome.candidate.entryId, reason: `filing-unreadable: ${String(error)}` });
+      }
+    }
+    try {
+      const kept = keepRefusedFollowupsForOperator(refusedFollowups, { registryPath: followupRegistryPath });
+      if (kept.length > 0) filingLog("followup.kept_for_operator", { proposal_ids: kept.slice(0, 20), count: kept.length });
+    } catch (error) {
+      filingLog("followup.keep_unwritten", { reason: String(error), entry_ids: refusedFollowups.slice(0, 20) });
     }
   }
 
@@ -28417,11 +28428,19 @@ export function issueRevalidationRunTaskPorts(
 export function queueJudgeRunTaskPorts(
   ctx: { owner: string; repo: string; repoRoot: string; stateDir: string; root: string; log: (step: string, extra?: Record<string, unknown>) => void },
   seams: { spawn?: Parameters<typeof issueRevalidationJudgeText>[0]["spawn"]; openBoard?: typeof readOpenBoardSnapshot } = {},
-): Pick<QueueJudgeSources, "judgeText" | "openPrNumbers"> {
+): Pick<QueueJudgeSources, "judgeText" | "openPrNumbers" | "promptWindow"> {
   const { owner, repo, repoRoot, stateDir, root, log } = ctx;
   const judge = issueRevalidationRunTaskPorts({ owner, repo, repoRoot, stateDir, log }, { spawn: seams.spawn });
   return {
     judgeText: (prompt) => judge.judgeText(prompt, 0),
+    promptWindow: () => {
+      try {
+        const mounts = loadMounts(mountsPath(repoRoot));
+        return queueJudgeRouteWindow(mounts.escalation_judge ?? resolveRiskJudgeMount(mounts), mounts.capabilities);
+      } catch (e) {
+        return { tokens: undefined, reason: `the judge mount could not be loaded or resolved (${String((e as Error)?.message ?? e).slice(0, 120)})` };
+      }
+    },
     openPrNumbers: () => {
       const open = (seams.openBoard ?? readOpenBoardSnapshot)(root, owner, repo);
       if (!open.ok) throw new Error(`queue judge: the open-PR snapshot is unavailable (${open.reason})`);
