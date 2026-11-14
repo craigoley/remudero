@@ -303,6 +303,39 @@ const SEED_ROWS: readonly SeedRow[] = [
     writer: ["askDecisionModel"],
     outcomes: ["answered", "refused", "unavailable", "failed"],
   },
+  {
+    // W1-T12546: a fix dispatch whose head moved before the checkout claim.
+    step: "sweep.fix.head_adopted",
+    meaning:
+      "The fresh head read in a fix dispatch found a head other than the one the sweep judged. The PR " +
+      "is open at that head, has no merge conflict, and its checks are red with readable failures, so " +
+      "the dispatch continues at the new head with those failures. Every write-time fence (the live-state " +
+      "preflight, the creditable-head check and the branch claim) runs again at the new head.",
+    writer: ["buildSweepEffects"],
+    outcomes: ["adopted"],
+  },
+  {
+    // W1-T12546: the moved head was not fixable yet, so the dispatch took no claim.
+    step: "sweep.fix.head_moved_deferred",
+    meaning:
+      "The fresh head read in a fix dispatch found a head other than the one the sweep judged, and the " +
+      "new head is not fixable yet. `reason` says why: the evidence is not CI failure evidence, the PR " +
+      "is not open, it moved again, it has a merge conflict, its checks are pending or green, or they " +
+      "cannot be read. No claim is taken and no claim decline is written; the next pass judges the new head.",
+    writer: ["buildSweepEffects"],
+    outcomes: ["evidence_not_ci", "not_open", "head_moved_again", "merge_conflict", "checks_pending", "checks_green", "checks_none", "checks_unreadable", "failures_unreadable", "pr_unreadable"],
+  },
+  {
+    // W1-T12546: the rung adopts a published head instead of standing down at rung.evidence_head.
+    step: "fix.evidence_head_adopted",
+    meaning:
+      "A CI fix round found that the published branch advanced to the head its worktree holds before " +
+      "the worker started. The checks at that head are red with readable failures, so the round takes " +
+      "that head and those failures and builds the prompt again. Once per rung; otherwise it stands down " +
+      "at rung.evidence_head as before.",
+    writer: ["runFixRung"],
+    outcomes: ["adopted"],
+  },
 ];
 
 /** THE REGISTRY — every step this task has decoded so far, `family` derived from `step` (never

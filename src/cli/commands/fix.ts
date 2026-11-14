@@ -2240,6 +2240,22 @@ export async function refreshInheritedCensusRefusal(input: InheritedCensusRefres
   }
 }
 
+/** W1-T12546: red failures read at a published head this rung's worktree already holds, or undefined. */
+async function adoptableEvidenceHead(prUrl: string, head: string, readHead: () => Promise<string | undefined>,
+  deps: Pick<Parameters<RunTaskCommandHost["runFixRung"]>[0]["deps"], "readCiRollup" | "fetchCiFailures" | "log">,
+): Promise<CiFailure[] | undefined> {
+  if (!deps.readCiRollup || !deps.fetchCiFailures) return undefined;
+  try {
+    if (checksStateFromRollup(await deps.readCiRollup(prUrl), undefined) !== "red") return undefined;
+    const failures = await deps.fetchCiFailures(prUrl, head);
+    const after = await readHead();
+    return failures.length > 0 && after === head ? failures : undefined;
+  } catch (e) {
+    deps.log("fix.evidence_head_unread", { head_sha: head, reason: `published head checks unreadable: ${String((e as Error)?.message ?? e)}` });
+    return undefined;
+  }
+}
+
 export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung"]>[0] & {
   workerProofIo?: Parameters<typeof runWorkerAcceptanceProofs>[1];
   hostedProofReader?: HostedFixProofReader;
@@ -2415,6 +2431,7 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
   // persistent CI/local environment mismatch (never observed, guarded anyway) can spend spinning
   // this rung without ever reaching a worker that could actually diagnose it.
   let generatorFixAttempts = 0;
+  let evidenceHeadAdopted = false; // W1-T12546: one published-head adoption per rung invocation.
   const GENERATOR_FIX_ATTEMPT_CAP = 2;
   // W1-T1279: every check name EVER observed red across this rung's strikes — the trajectory
   // input for the exhaustion escalation's own detail text (renderCiTrajectoryLine, above).
@@ -4252,6 +4269,18 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
         reason: "remote branch head read failed; no published advance was established" }); }
       // A retained unpublished commit is still this round's existing recovery input, not proof the PR moved.
       if (publishedHead !== undefined && publishedHead !== priorHeadSha) {
+        const adopted = !evidenceHeadAdopted && priorCiFailures !== undefined && publishedHead === roundBase.baseSha
+          ? await adoptableEvidenceHead(opts.prUrl, publishedHead,
+            () => (deps.readRemoteBranchHead ?? lsRemoteBranchHead)(opts.worktreePath, opts.branch), deps) : undefined;
+        if (adopted) {
+          evidenceHeadAdopted = true;
+          deps.log("fix.evidence_head_adopted", { head_sha: priorHeadSha, current_head_sha: publishedHead,
+            red_checks: [...new Set(adopted.map((f) => f.name))] });
+          currentCiFailures = adopted;
+          for (const f of adopted) everRedCiCheckNames.add(f.name);
+          review = { ...review, headSha: publishedHead };
+          continue;
+        }
         const reason = `published branch advanced from ${priorHeadSha} to ${publishedHead} before the worker started; the ordinary sweep must read fresh exact-head failure evidence`;
         deps.log("fix.evidence_head_superseded", { head_sha: priorHeadSha, current_head_sha: publishedHead, worktree_head_sha: roundBase.baseSha, reason });
         deps.log("fix.stood_down", { head_sha: priorHeadSha, current_head_sha: publishedHead, site: "rung.evidence_head", reason });

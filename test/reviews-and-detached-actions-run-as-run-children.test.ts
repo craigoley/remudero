@@ -1186,10 +1186,12 @@ async function proveFreshFixAdmissionAcrossRestart(identity: FixIdentityRead = "
       releaseRead();
       const checkedOut = admission === "admitted" && identity === "readable";
       const succeeded = checkedOut && contract === "readable";
-      assert.equal(await childDone, succeeded ? 0 : 1);
+      // W1-T12546: a moved head with review evidence defers and the child ends with no worker.
+      const deferred = admission === "admitted" && identity === "moved-head";
+      assert.equal(await childDone, succeeded || deferred ? 0 : 1);
       const status = readStatus(children[1]!.dir);
       assert.ok(status.ok);
-      assert.equal(status.value.state, succeeded ? "done" : "failed");
+      assert.equal(status.value.state, succeeded || deferred ? "done" : "failed");
       assert.equal(planReads, 1);
       assert.equal(headReads, admission === "admitted" ? 1 : 0, "the real dispatcher reads its own head identity after admission");
       assert.equal(checkouts, checkedOut ? 1 : 0, "unread or changed identities refuse before the branch checkout");
@@ -1221,12 +1223,18 @@ async function proveFreshFixAdmissionAcrossRestart(identity: FixIdentityRead = "
         assert.equal(status.value.result, undefined, "a refused grant cannot become a success-shaped child result");
         assert.equal(f.rows.some(row => row.step === "sweep.fix.child_refused" && /admission refused/.test(String(row.reason))), true);
       }
-      if (identity !== "readable") {
+      if (deferred) {
+        assert.equal(status.value.failure, undefined, "a deferral is not a claim decline");
+        assert.equal(readLedgerLines(ledgerPathFor(ports.config)).some(row =>
+          row.step === "sweep.fix.head_moved_deferred" && row.from_head === FIX_HEAD && row.to_head === "new-head" &&
+          row.reason === "evidence_not_ci"), true);
+        assert.equal(readLedgerLines(ledgerPathFor(ports.config)).some(row => row.step === "sweep.fix.checkout_claim_declined"), false);
+      } else if (identity !== "readable") {
         assert.equal(status.value.result, undefined, "an unread identity cannot become a successful child");
         assert.match(status.value.failure!.message, identity === "throws" ? /head identity lookup unavailable/ : /declined at the checkout claim/);
         if (identity !== "throws") assert.equal(readLedgerLines(ledgerPathFor(ports.config)).some(row =>
           row.step === "sweep.fix.checkout_claim_declined" && row.head_sha === FIX_HEAD &&
-          row.owner_recovery_reason === (identity === "moved-head" ? "head_identity_changed" : "head_identity_unreadable")), true);
+          row.owner_recovery_reason === "head_identity_unreadable"), true);
       }
       if (contract !== "readable") {
         const reason = contract === "absent" ? /no contract returned/ :
