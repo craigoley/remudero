@@ -26950,6 +26950,8 @@ async function runSweepLightPassCore(
     return false;
   };
   const admitOneRefill = async (): Promise<boolean> => {
+    const epoch = lightPassRefillEpoch;
+    const refillsClosed = (): boolean => lightPassRefillsClosed || epoch !== lightPassRefillEpoch;
     const askedAtAdmit = deps.restartAdmission?.recycleWait === true && recycleRefillDetail() !== undefined;
     if (providerFloorMet || (!askedAtAdmit && deps.restartAdmission?.("review", "light-refill") === false)) return false;
     if (refillHeldForRecycle()) return false;
@@ -26960,7 +26962,7 @@ async function runSweepLightPassCore(
     const free = reviewAdmissionBound(freeWidth);
     if (free.bound === 0) return holdAtBoundZero(freeWidth, free.inFlight, freeWorkers);
     await refreshRefillTail();
-    if (refillHeldForRecycle()) return false;
+    if (refillsClosed() || refillHeldForRecycle()) return false;
     if (refillTail.length === 0) return false;
     const nowMs = deps.now ? deps.now() : systemClock.now();
     const activeWorkers = (deps.readActiveWorkerCount ?? activeWorkerCount)();
@@ -27007,7 +27009,7 @@ async function runSweepLightPassCore(
       return true;
     }
     try {
-      if (refillHeldForRecycle(true)) {
+      if (refillsClosed() || refillHeldForRecycle(true)) {
         unreserve();
         refilledHeads.delete(key);
         refillTail.unshift(next);

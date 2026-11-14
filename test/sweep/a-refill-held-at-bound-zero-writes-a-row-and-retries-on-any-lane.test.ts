@@ -164,6 +164,37 @@ test("W1-T12535 criterion 3: a retried refill admits only above bound 0, skips a
   } finally {
     await closed.finish();
   }
+  const midRead = harness();
+  const readGate = gate();
+  let reads = 0;
+  try {
+    midRead.setWidth(2);
+    const readOpenPrsForRefill = async (): Promise<OpenPrView[]> => {
+      reads++;
+      await readGate.promise;
+      return [pr(3)];
+    };
+    await runSweepLightPass([pr(1), pr(2), pr(3)], { ...midRead.deps, readOpenPrsForRefill }, fourLanes);
+    await eventually(() => midRead.started.length === 2, "pass A did not admit two reviews");
+    midRead.setWidth(4);
+    await runSweepLightPass([pr(5)], midRead.deps, fourLanes);
+    await eventually(() => midRead.started.includes(5), "pass B did not admit its review");
+    midRead.setWidth(2);
+    midRead.hold(1).resolve();
+    await eventually(() => midRead.boundZero().length === 1, "pass A's refill was not held at bound 0");
+    midRead.setWidth(4);
+    midRead.hold(5).resolve();
+    await eventually(() => reads === 1, "the release from another pass did not start a retry");
+    const drained = drainInFlightReviews({ boundMs: 1000 });
+    readGate.resolve();
+    await quiet();
+    assert.equal(midRead.started.includes(3), false, "a retry whose read outlives the close admits nothing");
+    midRead.hold(2).resolve();
+    await drained;
+  } finally {
+    readGate.resolve();
+    await midRead.finish();
+  }
 });
 
 test("W1-T12535 criterion 4: a one-PR pass reports the snapshot's eligible queue depth and admits only its own PR", async () => {
