@@ -6643,10 +6643,10 @@ export async function worktreeRemoveAsync(repoDir: string, worktreePath: string)
   sweepStaleWorkerScratch({ maxAgeMs: DEFAULT_TEARDOWN_SCRATCH_SWEEP_MAX_AGE_MS });
 }
 
-/** W1-T12550: git's "'<path>' is not a working tree" for this path means the tree is already gone. */
+/** W1-T12550: only git's complete absence diagnostic qualifies; a lock reason can quote it. */
 function worktreeAlreadyRemoved(error: unknown, worktreePath: string): boolean {
-  const failure = (error ?? {}) as { stderr?: unknown; message?: unknown };
-  return `${String(failure.stderr ?? "")}\n${String(failure.message ?? "")}`.includes(`'${worktreePath}' is not a working tree`);
+  const failure = (error ?? {}) as { stderr?: unknown };
+  return String(failure.stderr ?? "").trim() === `fatal: '${worktreePath}' is not a working tree`;
 }
 
 function settleRemovedWorktree(worktreePath: string): "already-removed" {

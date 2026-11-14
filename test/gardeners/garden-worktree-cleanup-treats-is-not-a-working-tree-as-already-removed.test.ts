@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, test } from "node:test";
@@ -147,6 +147,32 @@ describe("test/gardeners/garden-worktree-cleanup-treats-is-not-a-working-tree-as
       sync.dispose();
     } finally { f.close(); }
   });
+
+  for (const mode of ["sync", "async"] as const) {
+    test(`W1-T12550 criterion 2: ${mode} production dispose rejects an absence diagnostic inside a lock reason`, async () => {
+      const f = fixture(`locked-${mode}`);
+      try {
+        const ws = mode === "sync" ? gardens.gardenCheckout(f.opts) : await gardens.gardenCheckoutAsync(f.opts);
+        const marker = join(ws.root, "held.txt");
+        writeFileSync(marker, "owned by the lock holder\n");
+        const base = worker.worktreeBasePath(ws.root);
+        const baseContents = readFileSync(base, "utf8");
+        for (const reason of [`'${ws.root}' is not a working tree`, `held\nfatal: '${ws.root}' is not a working tree`]) {
+          f.repo.git("worktree", "lock", "--reason", reason, ws.root);
+          if (mode === "sync") assert.throws(() => ws.dispose(), /locked/);
+          else await assert.rejects(async () => ws.dispose(), /locked/);
+          assert.equal(readFileSync(marker, "utf8"), "owned by the lock holder\n");
+          assert.equal(readFileSync(base, "utf8"), baseContents, "the locked tree's base record is preserved");
+          assert.ok(f.repo.git("worktree", "list", "--porcelain").includes(`worktree ${ws.root}\n`));
+          assert.equal(f.rows.some(([step]) => step === "plan.garden_worktree_already_removed"), false);
+          f.repo.git("worktree", "unlock", ws.root);
+        }
+        await ws.dispose();
+        assert.equal(existsSync(ws.root), false);
+        assert.equal(existsSync(base), false);
+      } finally { f.close(); }
+    });
+  }
 
   type Class = "tend";
   const action: GardenAction<Class> = { class: "tend", target: "change.txt", reason: "fixture" };
