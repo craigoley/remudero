@@ -18,6 +18,8 @@
     - src/lib/routing-experiments.ts
     - src/lib/fix-routing-learner.ts
     - test/routing/an-attempt-ended-by-a-recycle-is-not-counted-against-its-model.test.ts
+    - "scripts/private-routing-daily-review.mjs"
+    - "src/run-task.ts"
   status: queued
   attempts: 0
   acceptance:
@@ -42,6 +44,7 @@
     src/lib/attempt-outcome-attribution.ts imports worker.ts, and worker.ts imports routing-experiments.ts. Do not close that ring: take the classifier as an argument, with the caller passing `attributeAttemptOutcome`.
     W1-T12142 builds its result on this report, so it takes the same exclusion.
     NOT IN SCOPE: fewer recycles, and the classifier's rules.
+    NO-INVARIANTS: the change only moves infrastructure-class attempts into new report fields (infrastructureAttempts, infrastructureOnlyTasks, infrastructureExcluded); every other bucket, legacy receipt and default is unchanged, and the one guarantee that a provider-reply failure still counts against its model is already acceptance criterion 4.
   falsifier: |
     Count an orphaned attempt as a model failure and criterion 1 must fail. Leave out an attempt that failed with a provider reply and criterion 4 must fail. Restore and require all to pass.
   note: |

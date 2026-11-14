@@ -1,0 +1,93 @@
+- id: W1-T12535
+  title: "A refill that admits nothing because the bound is 0 writes a row and retries when any review lane frees"
+  repo: remudero
+  depends_on: []
+  priority: 1.1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: medium # the light pass's refill path and the queue depth its width reads; the admission bound itself is unchanged
+  band_meaning: blast-radius
+  origin: operator-session#review-admission-order-2026-11-13
+  plan_refs:
+    - W1-T11153
+    - W1-T10992
+    - W1-T5931
+    - W1-T11321
+    - W1-T5083
+  files:
+    - src/lib/sweep.ts
+    - src/cli/commands/sweep.ts
+    - test/sweep/a-refill-held-at-bound-zero-writes-a-row-and-retries-on-any-lane.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "When admitOneRefill declines because reviewAdmissionBound(width).bound is 0 with a non-empty refill tail, it writes one sweep.review_refill.bound_zero row with bound, width, in_flight, active_workers and tail_length, once per held spell, not once per call"
+      proof: "grep: W1-T12535 criterion 1 in test/sweep/a-refill-held-at-bound-zero-writes-a-row-and-retries-on-any-lane.test.ts"
+    - claim: "A tail held at bound 0 is retried when a review lane that this pass does not hold frees (a full-pass review or a review child releases its slot), and admits its next PR as soon as the bound is above 0"
+      proof: "grep: W1-T12535 criterion 2 in test/sweep/a-refill-held-at-bound-zero-writes-a-row-and-retries-on-any-lane.test.ts"
+    - claim: "invariant:refill-under-bound — a retried refill admits only while reviewAdmissionBound is above 0, never re-admits a head another pass holds, and stops once refills close or its tail is empty"
+      proof: "grep: W1-T12535 criterion 3 in test/sweep/a-refill-held-at-bound-zero-writes-a-row-and-retries-on-any-lane.test.ts"
+    - claim: "invariant:selection-from-own-prs — a light pass given one PR of a tick whose snapshot holds more eligible spawning candidates hands the selector the snapshot's eligible count as queueDepth, so review.capacity's queue_depth is the full eligible queue; with no snapshot passed it counts the pass's own PRs as today; admission still selects only from the pass's own PRs"
+      proof: "grep: W1-T12535 criterion 4 in test/sweep/a-refill-held-at-bound-zero-writes-a-row-and-retries-on-any-lane.test.ts"
+  rationale: |
+    A light pass's leftover review tail waits up to 15 minutes while review lanes free, because the refill only retries
+    when a lane of its own pass frees, and a decline at bound 0 writes nothing.
+    OBSERVED by the operator session, Azure ledger ~/rmd-state2/state/ledger.ndjson, 2026-11-13:
+    - 20:41:23Z a light pass with queue_depth 12 and width 4 admitted three PRs and left eight CI-green PRs in its tail.
+    - 20:43Z host-worker-budget cut the width to 2 with 6 active workers, so the bound read 0. The refill returned false
+      and wrote no ledger row. The next refills came at 20:58:57Z.
+    - Eligible to admitted: median 0.1 min, p90 27, max 121 (n=166); 37 of 203 eligible heads were never admitted.
+    - Single-PR light passes write review.capacity with a queue_depth over their one PR, so queue_depth 0 rows read as an
+      empty queue while PRs wait.
+    READ at origin/main 0daaf315c:
+    - src/lib/sweep.ts:26137-26142 reviewAdmissionBound(width) returns max(0, min(width - cpuPhaseInFlight,
+      providerBound - inFlight)).
+    - :26806-26822 admitOneRefill re-reads the width with live active workers twice; at :26813 and :26822 a bound of 0
+      returns false with no row. Its other declines write rows: sweep.review_refill_held (recycle, :26800) and
+      sweep.review_refill.skipped.
+    - :26455-26457 onOwnLaneFreed calls refillFreedLanes only from this pass's own releases (:26438, :26536, :26840).
+    - :25952-25956 releaseReviewSlot wakes every waiter in reviewSlotWaiters; it is called by full-pass reviews
+      (:25311, :25318), review children (:18028, :18033, :18085) and the light pass. The full pass waits on that set
+      (:25293); the light refill does not.
+    - :26385 queueDepth = reviewAdmissionQueueDepth(openPrs, ...) (:27220) counts only the pass's own openPrs, and
+      :26396 hands it to effectiveReviewWidth, which hands it to selectAdaptiveReviewWidth (the review.capacity row).
+    - src/cli/commands/sweep.ts:1317 and :1345 split one tick's snapshot (openPrs) into batches, each with its own
+      runSweepLightPass, so a batch can be one PR.
+    CHECKED for overlap: W1-T11885 (queued) records waiting work on the daemon build lane's phase-bound holds, not the
+    review refill. W1-T10316 and W1-T10536 (blocked, machine-filed) ask only that a flow stage recover. W1-T11153,
+    W1-T10992 and W1-T5083 are merged and do not cover these gaps.
+  design: |
+    1. In admitOneRefill, at both bound-0 returns (:26813 and :26822): when refillTail is non-empty, append one row
+       { step: "sweep.review_refill.bound_zero", bound, width, in_flight, active_workers, tail_length } (dry run writes
+       nothing). Latch it per pass, like recycleRefillHeld, and clear the latch when a refill admits, so a held spell
+       writes one row.
+    2. At the same returns, register the pass's retry in the existing reviewSlotWaiters set: one wake function per pass
+       (do not add it again while it is registered) that calls refillFreedLanes when not lightPassRefillsClosed. So the
+       next releaseReviewSlot from any source retries this tail. Do not add a new module-level set.
+    3. A retry goes through admitOneRefill as today: the bound check, refreshRefillTail, the live head read and the
+       lightPassReservedHeads check all still apply. When refills close or the tail is empty, the wake does nothing and is
+       not registered again.
+    4. runSweepLightPass gains one optional dep, snapshotOpenPrs (the tick's whole snapshot). When it is set,
+       queueDepth at :26385 counts reviewAdmissionCandidates over snapshotOpenPrs (the same predicate and outcomes),
+       else over openPrs as today. src/cli/commands/sweep.ts passes `snapshotOpenPrs: openPrs` to both
+       runSweepLightPass calls (:1317, :1345). Admission still selects only from the pass's own PRs.
+    5. Run the existing refill and recycle tests (test/a-freed-review-lane-refills-without-waiting-for-another-pass.test.ts,
+       test/deploy/a-light-pass-refill-admits-no-review-under-a-recycle-pause.test.ts,
+       test/daemon/a-recycle-wait-admits-a-review-that-ends-before-the-wait-does.test.ts, test/sweep-review-admission.test.ts).
+       If one asserts the whole ledger row set or the old queue depth, this task needs an amendment that adds it to files.
+    6. Run test/sweep/compress-src-lib-sweep-ts.test.ts; add as few comments as possible to src/lib/sweep.ts.
+    INVARIANT refill-under-bound: every refill admission is made under reviewAdmissionBound(width).bound > 0, read at the
+    admission.
+    INVARIANT selection-from-own-prs: a light pass admits only PRs from its own openPrs or its refill re-read; the
+    snapshot changes only the queue depth it reports and the selector reads.
+    NOT IN SCOPE: the width the host worker budget allows (W1-T2989), the bound's formula, and the admission order
+    (W1-T12534).
+  falsifier: |
+    Remove the row at :26822 and criterion 1 must fail. Register the retry only on this pass's own releases and criterion 2
+    must fail. Skip the bound check on a retried refill and criterion 3 must fail. Count queueDepth over openPrs even when
+    snapshotOpenPrs is set and criterion 4 must fail. Restore and all must pass.
+  note: |
+    Id W1-T12535 reserved for run-unfiled-1794603730000 with ~/rmd-work/bin/reserve-id.sh.
+    The 20:43 width cut and the 20:58:57 refill time come from the operator session's ledger read.

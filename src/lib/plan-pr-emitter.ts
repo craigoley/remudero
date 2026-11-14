@@ -637,7 +637,15 @@ export function probeExistingPlanPr(fetch: GhApiFetcher, owner: string, repo: st
 // the same rule the hook keeps with its exit 2. Operator and session PRs never pass through here.
 
 /** A preflight reads a plan tree and, optionally, a separately pinned public code tree. */
-export interface PlanPrPreflightInput { cwd: string; title: string; body: string; headRef?: string; codeRoot?: string; }
+export interface PlanPrPreflightInput {
+  cwd: string;
+  title: string;
+  body: string;
+  headRef?: string;
+  codeRoot?: string;
+  /** Check PR-body proofs against the candidate plan checkout when they assert plan-file contents. */
+  bodyProofRoot?: "code" | "plan";
+}
 export interface PlanPrDestinationChecks {
   destinationStateDir?: () => string | undefined;
   publicCodeRoot?: () => string;
@@ -810,6 +818,19 @@ function checkProofLaunchArgv(cwd: string, proof: string, log: CheckProofChildLo
   log("plan_pr.check_proof_child", { kind: launch.kind, reason: launch.reason });
   return launch.argv;
 }
+function runProofInTree(cwd: string, entryRoot: string, proof: string, budgetMs: number,
+  log?: CheckProofChildLog, storeRoot?: string | false): PlanPrPreflightReading {
+  if (!existsSync(join(entryRoot, CHECK_PROOF_CHILD_ENTRY))) return absentFromTree(CHECK_PROOF_CHILD_ENTRY);
+  const args = checkProofLaunchArgv(entryRoot, proof, log, storeRoot);
+  // Reuse the shared sync tree runner so this adds no second sync-spawn path to the daemon census.
+  return runInTree(cwd, join(entryRoot, CHECK_PROOF_CHILD_ENTRY), args, budgetMs);
+}
+async function runProofInTreeAsync(cwd: string, entryRoot: string, proof: string, budgetMs: number,
+  log?: CheckProofChildLog, storeRoot?: string | false): Promise<PlanPrPreflightReading> {
+  if (!existsSync(join(entryRoot, CHECK_PROOF_CHILD_ENTRY))) return absentFromTree(CHECK_PROOF_CHILD_ENTRY);
+  const args = checkProofLaunchArgv(entryRoot, proof, log, storeRoot);
+  return runInTreeAsync(cwd, join(entryRoot, CHECK_PROOF_CHILD_ENTRY), args, budgetMs);
+}
 
 interface PlanLintScriptTools { lintArgvFromPackage(text: string): { args: string[]; base?: string } | undefined; }
 /** Reuse the maintained package-script parser. The precheck wrapper does not forward arbitrary
@@ -845,8 +866,8 @@ const defaultPreflightChecks = {
     return taskIdReading(runInTree(cwd, launch.entry, launch.args, budgetMs));
   },
   shardCensus: (cwd: string, budgetMs: number): PlanPrPreflightReading => runShardCensus(cwd, budgetMs),
-  checkProof: (cwd: string, proof: string, budgetMs: number, log?: CheckProofChildLog, storeRoot?: string | false): ProofCheckStatus =>
-    proofCheckStatus(runInTree(cwd, CHECK_PROOF_CHILD_ENTRY, checkProofLaunchArgv(cwd, proof, log, storeRoot), budgetMs)),
+  checkProof: (cwd: string, proof: string, budgetMs: number, log?: CheckProofChildLog, storeRoot?: string | false, codeRoot?: string): ProofCheckStatus =>
+    proofCheckStatus(runProofInTree(cwd, codeRoot ?? cwd, proof, budgetMs, log, storeRoot)),
 };
 /** A test's stand-ins for any of {@link defaultPreflightChecks}, and for the budget each in-tree check gets. */
 export type PlanPrPreflightChecks = Partial<typeof defaultPreflightChecks> & PlanPrDestinationChecks & { budgetMs?: () => number; log?: CheckProofChildLog; storeRoot?: string | false };
@@ -860,8 +881,8 @@ const defaultPreflightChecksAsync = {
     return taskIdReading(await runInTreeAsync(cwd, launch.entry, launch.args, budgetMs));
   },
   shardCensus: (cwd: string, budgetMs: number): Promise<PlanPrPreflightReading> => runShardCensusAsync(cwd, budgetMs),
-  checkProof: async (cwd: string, proof: string, budgetMs: number, log?: CheckProofChildLog, storeRoot?: string | false): Promise<ProofCheckStatus> =>
-    proofCheckStatus(await runInTreeAsync(cwd, CHECK_PROOF_CHILD_ENTRY, checkProofLaunchArgv(cwd, proof, log, storeRoot), budgetMs)),
+  checkProof: async (cwd: string, proof: string, budgetMs: number, log?: CheckProofChildLog, storeRoot?: string | false, codeRoot?: string): Promise<ProofCheckStatus> =>
+    proofCheckStatus(await runProofInTreeAsync(cwd, codeRoot ?? cwd, proof, budgetMs, log, storeRoot)),
 };
 export type PlanPrPreflightAsyncChecks = Partial<typeof defaultPreflightChecksAsync> & PlanPrDestinationChecks & { budgetMs?: () => number; log?: CheckProofChildLog; storeRoot?: string | false };
 
@@ -972,26 +993,34 @@ function discriminationReading(red: string[], unreadable: string[], timeouts: Pr
 }
 
 /** A PR-body proof is red on any non-pass; a shard's only when it passes at origin/main (a filed task fails at head). */
-function proofDiscrimination(cwd: string, body: string, checkProof: (cwd: string, proof: string) => ProofCheckStatus): PlanPrPreflightReading {
+function proofDiscrimination(
+  cwd: string,
+  body: string,
+  checkProof: (cwd: string, proof: string) => ProofCheckStatus,
+  bodyProofCwd = cwd,
+  shardProofCwd = cwd,
+): PlanPrPreflightReading {
   const red: string[] = [];
   const unreadable: string[] = [];
   const timeouts: ProofTimeouts = { lines: [] };
-  for (const proof of bodyProofsOf(body)) sortBodyProof(proof, checkProof(cwd, proof), red, unreadable, timeouts);
+  for (const proof of bodyProofsOf(body)) sortBodyProof(proof, checkProof(bodyProofCwd, proof), red, unreadable, timeouts);
   const shardProofList = changedShardProofs(cwd);
-  for (const proof of new Set(shardProofList ?? [])) sortShardProof(proof, checkProof(cwd, proof), red, timeouts);
+  for (const proof of new Set(shardProofList ?? [])) sortShardProof(proof, checkProof(shardProofCwd, proof), red, timeouts);
   return discriminationReading(red, unreadable, timeouts, shardProofList);
 }
 async function proofDiscriminationAsync(
   cwd: string,
   body: string,
   checkProof: (cwd: string, proof: string) => Promise<ProofCheckStatus>,
+  bodyProofCwd = cwd,
+  shardProofCwd = cwd,
 ): Promise<PlanPrPreflightReading> {
   const red: string[] = [];
   const unreadable: string[] = [];
   const timeouts: ProofTimeouts = { lines: [] };
-  for (const proof of bodyProofsOf(body)) sortBodyProof(proof, await checkProof(cwd, proof), red, unreadable, timeouts);
+  for (const proof of bodyProofsOf(body)) sortBodyProof(proof, await checkProof(bodyProofCwd, proof), red, unreadable, timeouts);
   const shardProofList = await changedShardProofsAsync(cwd);
-  for (const proof of new Set(shardProofList ?? [])) sortShardProof(proof, await checkProof(cwd, proof), red, timeouts);
+  for (const proof of new Set(shardProofList ?? [])) sortShardProof(proof, await checkProof(shardProofCwd, proof), red, timeouts);
   return discriminationReading(red, unreadable, timeouts, shardProofList);
 }
 
@@ -1069,7 +1098,13 @@ export function planPrPreflight(input: PlanPrPreflightInput, checks: PlanPrPrefl
   };
   read("lint-plan", () => codeRoot === undefined ? d.lintPlan(input.cwd, budgetMs()) : d.lintPlan(input.cwd, budgetMs(), codeRoot));
   read("task-id-existence", () => codeRoot === undefined ? d.taskIdExistence(input.cwd, input.headRef, budgetMs()) : d.taskIdExistence(input.cwd, input.headRef, budgetMs(), codeRoot));
-  read("proof-discrimination", () => proofDiscrimination(input.cwd, input.body, (cwd, proof) => d.checkProof(codeRoot ?? cwd, proof, budgetMs(), checks.log, checks.storeRoot)));
+  read("proof-discrimination", () => proofDiscrimination(
+    input.cwd,
+    input.body,
+    (cwd, proof) => d.checkProof(cwd, proof, budgetMs(), checks.log, checks.storeRoot, codeRoot),
+    input.bodyProofRoot === "plan" ? input.cwd : codeRoot ?? input.cwd,
+    codeRoot ?? input.cwd,
+  ));
   read("pr-title", () => prTitleReading(input.title));
   read("shard-census", () => d.shardCensus(codeRoot ?? input.cwd, budgetMs()));
   return tally.result();
@@ -1103,7 +1138,13 @@ export async function planPrPreflightAsync(
   }
   await read("lint-plan", () => codeRoot === undefined ? d.lintPlan(input.cwd, budgetMs()) : d.lintPlan(input.cwd, budgetMs(), codeRoot));
   await read("task-id-existence", () => codeRoot === undefined ? d.taskIdExistence(input.cwd, input.headRef, budgetMs()) : d.taskIdExistence(input.cwd, input.headRef, budgetMs(), codeRoot));
-  await read("proof-discrimination", () => proofDiscriminationAsync(input.cwd, input.body, (cwd, proof) => d.checkProof(codeRoot ?? cwd, proof, budgetMs(), checks.log, checks.storeRoot)));
+  await read("proof-discrimination", () => proofDiscriminationAsync(
+    input.cwd,
+    input.body,
+    (cwd, proof) => d.checkProof(cwd, proof, budgetMs(), checks.log, checks.storeRoot, codeRoot),
+    input.bodyProofRoot === "plan" ? input.cwd : codeRoot ?? input.cwd,
+    codeRoot ?? input.cwd,
+  ));
   await read("pr-title", () => prTitleReading(input.title));
   await read("shard-census", () => d.shardCensus(codeRoot ?? input.cwd, budgetMs()));
   return tally.result();
