@@ -171,6 +171,7 @@ import {
 } from "./plan.js";
 import {
   defaultCreditStorePath,
+  ghRequiredStatusCheckContexts,
   hasCreditBackfillReceipt,
   loadCreditStore,
   readLedgerLines,
@@ -1633,6 +1634,7 @@ export interface BuildSweepEffectsDeps {
   waitForCiGreenImpl?: SweepRuntimeFn;
   restRollupForImpl?: SweepRuntimeFn;
   fetchCiFailuresImpl?: SweepRuntimeFn;
+  readRequiredContextsImpl?: (owner: string, repo: string) => string[] | undefined;
   runReviewImpl?: SweepRuntimeFn;
   /** W1-T3901 — proof-only reuse worktree seams; production defaults live in run-task.ts and
    * tests replace only the checkout boundaries, never the deterministic proof judge. */
@@ -4283,6 +4285,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
             readPr: async () => deps.ghJsonImpl ? ghJsonForBuild(["api", `repos/${owner}/${repo}/pulls/${pr.prNumber}`])
               : readJsonImpl(["api", `repos/${owner}/${repo}/pulls/${pr.prNumber}`]),
             readRollup: (sha) => restRollupFor(owner, repo, sha, readJsonImpl),
+            readRequiredContexts: () => (deps.readRequiredContextsImpl ?? ghRequiredStatusCheckContexts)(owner, repo),
             readFailures: (rollup) => fetchCiFailures(owner, repo, rollup),
           });
           if ("deferred" in moved) {
@@ -14704,6 +14707,7 @@ export async function adoptMovedFixHead(
   reads: {
     readPr: () => Promise<unknown>;
     readRollup: (sha: string) => Promise<RollupCheckEntry[]>;
+    readRequiredContexts: () => Iterable<string> | undefined | Promise<Iterable<string> | undefined>;
     readFailures: (rollup: RollupCheckEntry[]) => CiFailure[] | Promise<CiFailure[]>;
   },
 ): Promise<MovedFixHeadOutcome> {
@@ -14722,7 +14726,8 @@ export async function adoptMovedFixHead(
   let failures: CiFailure[];
   try {
     const rollup = await reads.readRollup(headRef.headRefOid);
-    const checks = checksStateFromRollup(rollup, undefined);
+    const requiredContexts = await reads.readRequiredContexts();
+    const checks = checksStateFromRollup(rollup, requiredContexts);
     if (checks !== "red") return { deferred: `checks_${checks}` };
     failures = await reads.readFailures(rollup);
   } catch (e) {

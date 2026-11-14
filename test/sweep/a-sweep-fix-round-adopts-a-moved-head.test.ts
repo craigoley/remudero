@@ -26,6 +26,7 @@ const PR_URL = "https://github.com/o/fixture/pull/12546";
 const RED: RollupCheckEntry[] = [{ name: "ci", status: "COMPLETED", conclusion: "FAILURE" }];
 const PENDING: RollupCheckEntry[] = [{ name: "ci", status: "IN_PROGRESS" }];
 const GREEN: RollupCheckEntry[] = [{ name: "ci", status: "COMPLETED", conclusion: "SUCCESS" }];
+const OPTIONAL_RED: RollupCheckEntry[] = [...GREEN, { name: "optional", status: "COMPLETED", conclusion: "FAILURE" }];
 const NEW_FAILURES: CiFailure[] = [{ name: "ci", logTail: "failure read at the new head" }];
 const CI_EVIDENCE: FixDispatchEvidence = { unmetCriteria: [], ciFailures: [{ name: "ci", logTail: "failure read at the old head" }] };
 
@@ -35,6 +36,7 @@ interface World {
   headRefName?: string;
   live?: Record<string, unknown>;
   rollup?: RollupCheckEntry[] | Error;
+  requiredContexts?: string[];
   owner?: string;
 }
 
@@ -79,6 +81,7 @@ function dispatcher(t: TestContext, world: World) {
       if (world.rollup instanceof Error) throw world.rollup;
       return world.rollup ?? RED;
     },
+    readRequiredContextsImpl: () => world.requiredContexts ?? ["ci"],
     fetchCiFailuresImpl: () => NEW_FAILURES,
     runFixRungImpl: async () => ({ outcome: "stood_down", strikes: 0, retriggers: 0 }),
   } as unknown as sweep.BuildSweepEffectsDeps);
@@ -105,6 +108,8 @@ test("W1-T12546 criterion 2: a moved head that is not fixable yet defers with it
   const cases: Array<[World, FixDispatchEvidence, string, number]> = [
     [{ rollup: PENDING }, CI_EVIDENCE, "checks_pending", 1],
     [{ rollup: GREEN }, CI_EVIDENCE, "checks_green", 1],
+    [{ rollup: OPTIONAL_RED }, CI_EVIDENCE, "checks_green", 1],
+    [{ rollup: [{ name: "optional", status: "COMPLETED", conclusion: "FAILURE" }] }, CI_EVIDENCE, "checks_pending", 1],
     [{ rollup: new Error("rollup read failed") }, CI_EVIDENCE, "checks_unreadable: rollup read failed", 1],
     [{ live: { state: "closed", head: { sha: NEW } } }, CI_EVIDENCE, "not_open", 0],
     [{ live: { state: "open", head: { sha: "c".repeat(40) } } }, CI_EVIDENCE, "head_moved_again", 0],
@@ -189,6 +194,7 @@ async function advancedRound(rollup: RollupCheckEntry[] | Error) {
       taskId: TASK, runId: "DAEMON-T12546", task: { id: TASK, title: "moved head" }, prUrl: PR_URL, branch: BRANCH,
       worktreePath: clone.dir, initialSessionId: "implement-session", mount, settingsFile: join(clone.dir, "settings.json"),
       config: { root: clone.dir } as Config, budgetUsd: 5, strikeCap: 1, initialReview: review,
+      ...{ requiredContexts: ["ci"] },
       ciFailures: [{ name: "ci", logTail: "failure read at the old head" }],
       reviewBase: { owner: "o", repo: "fixture", headCheckoutDir: clone.dir, reviewerMount: mount },
       escalationJudge: async () => ({ decision: "deliver", reason: "fixture" }),
@@ -225,7 +231,8 @@ test("W1-T12546 criterion 4: a rung adopts a published head whose checks are red
   assert.doesNotMatch(red.prompts[0]!, /failure read at the old head/);
   assert.deepEqual(steps(red.rows, "fix.dispatch").map((row) => row.head_sha), [red.published]);
 
-  for (const [name, rollup] of [["pending", PENDING], ["green", GREEN], ["unreadable", new Error("rollup unreadable")]] as const) {
+  for (const [name, rollup] of [["pending", PENDING], ["green", GREEN], ["optional red", OPTIONAL_RED],
+    ["unreadable", new Error("rollup unreadable")]] as const) {
     const r = await advancedRound(rollup);
     assert.equal(r.outcome.outcome, "stood_down", `${name}: stands down as before`);
     assert.equal(r.prompts.length, 0, `${name}: no worker runs`);

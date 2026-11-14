@@ -2242,11 +2242,12 @@ export async function refreshInheritedCensusRefusal(input: InheritedCensusRefres
 
 /** W1-T12546: red failures read at a published head this rung's worktree already holds, or undefined. */
 async function adoptableEvidenceHead(prUrl: string, head: string, readHead: () => Promise<string | undefined>,
+  requiredContexts: Iterable<string> | undefined,
   deps: Pick<Parameters<RunTaskCommandHost["runFixRung"]>[0]["deps"], "readCiRollup" | "fetchCiFailures" | "log">,
 ): Promise<CiFailure[] | undefined> {
   if (!deps.readCiRollup || !deps.fetchCiFailures) return undefined;
   try {
-    if (checksStateFromRollup(await deps.readCiRollup(prUrl), undefined) !== "red") return undefined;
+    if (checksStateFromRollup(await deps.readCiRollup(prUrl), requiredContexts) !== "red") return undefined;
     const failures = await deps.fetchCiFailures(prUrl, head);
     const after = await readHead();
     return failures.length > 0 && after === head ? failures : undefined;
@@ -2259,6 +2260,7 @@ async function adoptableEvidenceHead(prUrl: string, head: string, readHead: () =
 export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung"]>[0] & {
   workerProofIo?: Parameters<typeof runWorkerAcceptanceProofs>[1];
   hostedProofReader?: HostedFixProofReader;
+  requiredContexts?: Iterable<string>;
   pendingAnswer?: OpenPrView["pendingAnswer"];
   /** W1-T10339: digest of the PR body a TASKLESS PR was dispatched on — an input every stand-down records. */
   prBodySha256?: string;
@@ -4271,7 +4273,8 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
       if (publishedHead !== undefined && publishedHead !== priorHeadSha) {
         const adopted = !evidenceHeadAdopted && priorCiFailures !== undefined && publishedHead === roundBase.baseSha
           ? await adoptableEvidenceHead(opts.prUrl, publishedHead,
-            () => (deps.readRemoteBranchHead ?? lsRemoteBranchHead)(opts.worktreePath, opts.branch), deps) : undefined;
+            () => (deps.readRemoteBranchHead ?? lsRemoteBranchHead)(opts.worktreePath, opts.branch),
+            opts.requiredContexts ?? ghRequiredStatusCheckContexts(opts.reviewBase.owner, opts.reviewBase.repo), deps) : undefined;
         if (adopted) {
           evidenceHeadAdopted = true;
           deps.log("fix.evidence_head_adopted", { head_sha: priorHeadSha, current_head_sha: publishedHead,
