@@ -1,0 +1,60 @@
+- id: W1-T12551
+  title: "Machine tasks the filing judge released get a share of dispatch while the queue judge is unavailable"
+  repo: remudero
+  depends_on: []
+  priority: 1.0
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # changes dispatch order; a released machine task can now sort ahead of operator work, bounded by a share and only while the queue judge is unavailable
+  origin: "operator-session#flow-ledger-research-2026-11-13"
+  plan_refs:
+    - W1-T9925
+    - W1-T9323
+    - W1-T10028
+    - W1-T12549
+  files:
+    - src/lib/drain.ts
+    - src/lib/queue-judge-gardener.ts
+    - src/lib/daemon.ts
+    - test/dispatch/released-machine-tasks-get-a-share-of-dispatch-while-the-queue-judge-is-unavailable.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "queueJudgeAvailability reads the ledger rows and gives the time since the queue judge's last completed pass. A pass that ended in queue_judge.unavailable does not count as completed"
+      proof: "grep: W1-T12551 criterion 1 in test/dispatch/released-machine-tasks-get-a-share-of-dispatch-while-the-queue-judge-is-unavailable.test.ts"
+    - claim: "While the queue judge has had no completed pass for longer than QUEUE_JUDGE_STALE_MS, and released machine tasks (author_class machine, eligible to dispatch) were fewer than MACHINE_DISPATCH_SHARE of the run starts in the trailing 24 hours, the eligible released machine task that has waited longest sorts first for the next start"
+      proof: "grep: W1-T12551 criterion 2 in test/dispatch/released-machine-tasks-get-a-share-of-dispatch-while-the-queue-judge-is-unavailable.test.ts"
+    - claim: "With the queue judge available, or with machine starts at or above the share, the dispatch order is the same as today's dispatchOrder"
+      proof: "grep: W1-T12551 criterion 3 in test/dispatch/released-machine-tasks-get-a-share-of-dispatch-while-the-queue-judge-is-unavailable.test.ts"
+    - claim: "invariant:the-share-never-grants-eligibility — The share never makes a task eligible: a held, blocked, verify-human or dependency-waiting machine task is not moved, and a resumable task still sorts first"
+      kind: guard
+      proof: "grep: W1-T12551 criterion 4 in test/dispatch/released-machine-tasks-get-a-share-of-dispatch-while-the-queue-judge-is-unavailable.test.ts"
+    - claim: "The daemon's dispatch pass gives nextRunnable the availability and the trailing starts, and logs dispatch.machine_share when the share moves a task"
+      proof: "grep: W1-T12551 criterion 5 in test/dispatch/released-machine-tasks-get-a-share-of-dispatch-while-the-queue-judge-is-unavailable.test.ts"
+    - claim: "The dispatch order declares the machine share"
+      proof: "grep: MACHINE_DISPATCH_SHARE in src/lib/drain.ts"
+  rationale: |
+    WHY: the gardens measure costs and file remedies, and the machine-filing judge releases them, but they are almost never built. The queue judge was meant to move a measured task up the queue. It has not completed a pass since 2026-11-12 12:06Z (see W1-T12549), so nothing moves released machine work.
+    OBSERVED in the ledger research (2026-11-11 21:45Z to 2026-11-13 21:45Z, and 14 days of plan history):
+    - Garden-origin tasks built in 14 days: ci-friction 0 of 33, scout 0 of 16, flow-regression 0 of 5. Read at origin/main d41354cdd, the tasks filed since 2026-10-30 include 28 ci-friction and 16 scout tasks, all queued and none merged.
+    - In the 48 h window, 52 tasks started (run.start). One was a ci-friction task, one a flow-blocker task, one a fix-lane task and two comment-compression tasks. 19 were operator-session tasks and 10 operator tasks; 8 followup tasks at priority 4 started.
+    - 29 `queue_judge.unavailable` rows, all "malformed judge answer" with answer_chars 0.
+    READ 2026-11-13 at origin/main d41354cdd:
+    - src/lib/machine-filing.ts:76 `MACHINE_PRIORITY_BAND` (1 to 4) places machine work inside the operator's band. Queued ci-friction tasks average priority 1.32, so priority alone does not hold them back; the measured cost-of-delay order (src/lib/dispatch-value.ts:430 `dispatchUrgency`, :437 `priorityTiers`) and the stride deal decide.
+    - src/lib/drain.ts:432 `dispatchOrder` sorts by `compareDispatch` (:444) and puts resumable tasks first. :788 `dispatchEligibleCandidates` walks that order once. Nothing in it reads whether the queue judge is working.
+    - src/lib/queue-judge-gardener.ts:49 `UNAVAILABLE_STEP` is the row a failed pass writes; src/run-task.ts:28425 runs the garden.
+    - No queued task gives released machine work a share of dispatch.
+  design: |
+    INVARIANT the-share-never-grants-eligibility: the machine share reorders only tasks that are already eligible; it never dispatches a held, blocked, verify-human or dependency-waiting task.
+    1. In src/lib/queue-judge-gardener.ts export `queueJudgeAvailability(records, nowMs)`. It returns `{ lastCompletedAt, staleMs }` from the queue judge's scorecard rows and its `queue_judge.unavailable` rows.
+    2. In src/lib/drain.ts add `MACHINE_DISPATCH_SHARE = 0.25` and `QUEUE_JUDGE_STALE_MS = 6 * 60 * 60_000`, and an optional `machineShare` input to `NextRunnableOpts` (`{ queueJudgeStaleMs, starts: Array<{ taskId, authorClass }> }`). After eligibility, when the queue judge is stale and machine starts are below the share, move the eligible machine task that has waited longest to the front, behind resumable tasks only.
+    3. In src/lib/daemon.ts build the input from the ledger rows the dispatch pass already reads, and log `dispatch.machine_share` with the moved task, the share and the staleness. Add no net comment lines (the file is at its comment cap).
+    4. Run the comment cap test test/dispatch/compress-src-lib-drain-ts.test.ts and test/daemon/compress-src-lib-daemon-ts.test.ts.
+    NOT IN SCOPE: fixing the queue judge (W1-T12549); the machine-filing judge's release; the cost-of-delay model; operator priorities.
+  falsifier: |
+    Count an unavailable pass as completed and criterion 1 must fail. Remove the move and criterion 2 must fail. Apply the move while the queue judge is available and criterion 3 must fail. Move a blocked machine task and criterion 4 must fail. Restore and require all to pass.
+  note: |
+    Id reserved for run-unfiled-1794610450000 with ~/rmd-work/bin/reserve-id.sh. The fleet builds it.
+    The share and the staleness bound are starting values; the builder states them as constants with this filing's numbers as their source.
