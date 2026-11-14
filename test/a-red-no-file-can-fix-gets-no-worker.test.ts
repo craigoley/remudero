@@ -175,7 +175,7 @@ test("a body red with no safe mechanical repair escalates without writing metada
   assert.equal(writes, 0);
 });
 
-test("a refused report requesting an out-of-scope file routes to a scope amendment", async () => {
+test("a refused report requesting an out-of-scope file waits for its scope amendment", async () => {
   assert.equal(
     scopeAmendmentFromFixReport("REPORT\nREFUSED:\n1. [outside-declared-files] src/lib/needed.ts is needed\n"),
     "src/lib/needed.ts is needed",
@@ -193,10 +193,11 @@ test("a refused report requesting an out-of-scope file routes to a scope amendme
   );
   await runSweep([subject(["ci"])], h.deps, DEFAULT_SWEEP_POLICY);
   assert.deepEqual(h.dispatched, []);
-  assert.equal(h.escalations.length, 1);
-  assert.match(h.escalations[0], /scope amendment.*src\/lib\/needed.ts/);
+  assert.deepEqual(h.escalations, [], "a created amendment is pending, so no human decision is needed yet");
+  assert.ok(h.rows.some((row) => row.step === "sweep.disposed" &&
+    typeof row.stand_down_reason === "string" && row.stand_down_reason.includes("scope amendment")));
   await runSweep([subject(["ci"])], h.deps, DEFAULT_SWEEP_POLICY);
-  assert.equal(h.escalations.length, 1);
+  assert.deepEqual(h.escalations, [], "a second sweep must keep waiting for the amendment");
 });
 
 test("metadata repair refuses every edit it cannot derive safely, naming why", async () => {
