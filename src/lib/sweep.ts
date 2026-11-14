@@ -25714,6 +25714,8 @@ export class LightPassPreReviewTiming {
     "ready_update", "refresh_admission", "armed_ratchet_rejudge",
   ].map((phase) => [phase, 0]));
   readonly compareReads: Array<Record<string, unknown>> = [];
+  /** W1-T12530: the wall time of each open-PR views stage, so the row names the slow one. */
+  readonly openPrViewStagesMs: Record<string, number> = {};
   private readonly scope = new AsyncLocalStorage<boolean>();
   private depth = 0;
   private started = 0;
@@ -25751,7 +25753,7 @@ export class LightPassPreReviewTiming {
     this.hook.disable();
     this.scope.disable();
     return { phase_ms: { ...this.phaseMs }, compare_count: this.compareReads.filter((r) => !r.cache_hit).length,
-      compare_reads: [...this.compareReads], sync_on_loop_ms: this.syncMs };
+      compare_reads: [...this.compareReads], sync_on_loop_ms: this.syncMs, open_pr_view_stages_ms: { ...this.openPrViewStagesMs } };
   }
 }
 
