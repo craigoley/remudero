@@ -18,7 +18,7 @@ const SOURCE_MARK = "the public source the worker reads";
 const OPS = "fixture/remudero-ops";
 
 type Worker = "new" | "both" | "bypass";
-interface Observed { cwdOrigin?: string; viewSource?: string; writeRefused?: boolean; prompt?: string }
+interface Observed { cwdOrigin?: string; viewSource?: string; viewReadOnly?: boolean; prompt?: string }
 
 function publicTask(extra = ""): string {
   return ["- id: W1-T3", "  title: a public task", "  repo: remudero", "  depends_on: []", "  type: implement",
@@ -94,7 +94,7 @@ function fixture(t: TestContext, kinds: string[] | undefined) {
   // The commands read the process-global HOME config, so each one runs in its own Node process. Git, the
   // id reservations and the feedback landing are real. Only the paid worker and gh are fixtures.
   const child = String.raw`
-    import {readFileSync,writeFileSync,mkdirSync,chmodSync} from "node:fs";
+    import {readFileSync,writeFileSync,mkdirSync,statSync} from "node:fs";
     import {join} from "node:path";
     import {execFileSync} from "node:child_process";
     import {planCommand,triageCommand} from "#test/helpers/run-task-test.js";
@@ -115,9 +115,9 @@ function fixture(t: TestContext, kinds: string[] | undefined) {
       const view=/source is at (\S+), at commit ([0-9a-f]{40})/.exec(args.prompt);
       if(view){
         observed.viewSource=readFileSync(join(view[1],SOURCE),"utf8");
-        try{writeFileSync(join(view[1],SOURCE),"overwritten by the worker\n");observed.writeRefused=false;}
-        catch{observed.writeRefused=true;}
-        if(worker==="bypass"){chmodSync(join(view[1],"src"),0o755);chmodSync(join(view[1],SOURCE),0o644);writeFileSync(join(view[1],SOURCE),"overwritten by the worker\n");}
+        // The mode bits, not a refused write: a write is refused for every uid but 0.
+        observed.viewReadOnly=[SOURCE,"src","plan"].every((p)=>(statSync(join(view[1],p)).mode&0o222)===0);
+        if(worker==="bypass")execFileSync("git",["-C",view[1],"commit","--allow-empty","--quiet","-m","the worker wrote here"]);
         if(worker==="both")writeFileSync(join(args.cwd,PUBLIC_TASK),readFileSync(join(view[1],PUBLIC_TASK),"utf8")+"  note: changed by the Architect\n");
       }
       writeFileSync(join(args.cwd,NEW_TASK),task(command==="triage"?"feedback#"+ID:"architect"));
@@ -195,7 +195,7 @@ test("W1-T12213 criterion 3: the worker reads the public source and cannot write
   const f = fixture(t, ["task"]);
   const result = f.run("plan");
   assert.equal(result.observed.viewSource, `export const mark = "${SOURCE_MARK}";\n`, "the worker reads the public source at the pinned commit");
-  assert.equal(result.observed.writeRefused, true, "a write to the public view is refused by the file system");
+  assert.equal(result.observed.viewReadOnly, true, "the public view is read-only while the worker runs");
   assert.match(String(result.observed.prompt), /never write it/);
   const bypass = fixture(t, ["task"]);
   const refused = bypass.run("plan", "bypass");
