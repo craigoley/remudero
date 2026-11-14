@@ -211,7 +211,7 @@ test("the real bundled child starts its socket thread and cleans up before exiti
   assert.equal(existsSync(join(dir, "git.sock")), false);
 });
 
-test("the real socket thread answers and refuses a run directory that cannot bind", async () => {
+test("the real socket thread answers under short and long run directories", async () => {
   const { dir } = fixture();
   const child = await startRunChildGitCredentialSocket({ runDir: dir, log: () => {} });
   try {
@@ -220,7 +220,17 @@ test("the real socket thread answers and refuses a run directory that cannot bin
     await child.close();
   }
   await assert.rejects(startRunChildGitCredentialSocket({ runDir: join(dir, "missing"), log: () => {} }), /ENOENT/);
-  await assert.rejects(startRunChildGitCredentialSocket({ runDir: join(dir, "x".repeat(110)), log: () => {} }), /unix socket limit/);
+  const longDir = join(dir, "x".repeat(110));
+  mkdirSync(longDir);
+  const longChild = await startRunChildGitCredentialSocket({ runDir: longDir, log: () => {} });
+  try {
+    assert.notEqual(dirname(longChild.socketPath), longDir);
+    assert.equal(await request(longChild.socketPath), "", "the fallback still refuses an unconfigured mint");
+  } finally {
+    await longChild.close();
+  }
+  assert.equal(existsSync(longChild.socketPath), false);
+  assert.equal(existsSync(dirname(longChild.socketPath)), false);
 });
 
 test("a task load failure still removes the child's socket before writing failed", async () => {
