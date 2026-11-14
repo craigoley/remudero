@@ -5205,7 +5205,10 @@ export async function runDaemon(
   };
   const opsAdmissionStillCurrent = (task: Task, snapshot: Plan): boolean => {
     const captured = opsDispatchContexts.get(snapshot);
-    if (!captured?.opsIds.has(task.id)) return true;
+    // A plan without a captured ops context is the unchanged public-only selection.
+    // In a captured combined plan, a task outside its ops ID set is still ordinary public work.
+    if (captured === undefined) return true;
+    if (!captured.opsIds.has(task.id)) return true;
     const latest = readOpsDispatch(captured.publicPlan);
     if (latest.outcome === "selected" && latest.source.outcome === "ok" &&
       latest.publicCommit === captured.publicCommit && latest.source.identityDigest === captured.source.identityDigest &&
@@ -8608,7 +8611,8 @@ export async function runDaemon(
       }
       // Recheck only catalog-owned work against its immutable admission snapshot. Public work
       // keeps the legacy path; no run identity or claim is fabricated for a held private task.
-      if (!opsAdmissionStillCurrent(task, refill?.snapshot.plan ?? planForBatch)) return false;
+      const admissionSnapshot = refill === undefined ? planForBatch : refill.snapshot.plan;
+      if (!opsAdmissionStillCurrent(task, admissionSnapshot)) return false;
       const startedAtMs = daemonClock.now();
       // Last admission read: no await or fallible logging between this decision and runOne.
       const reservation = checkNewBuildReservation(deps, task);
