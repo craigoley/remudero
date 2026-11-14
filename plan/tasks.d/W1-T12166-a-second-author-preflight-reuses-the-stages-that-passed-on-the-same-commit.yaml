@@ -18,7 +18,7 @@
   files:
     - scripts/preflight-author.mjs
     - test/ci/a-second-author-preflight-reuses-the-stages-that-passed-on-the-same-commit.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "A preflight finds the last receipt of the same checkout. It does not run again a stage that passed there when the head, the base, the Node version, the dependency record and the selection are the same"
