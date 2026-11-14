@@ -171,6 +171,7 @@ import {
 } from "./plan.js";
 import {
   defaultCreditStorePath,
+  ghRequiredStatusCheckContexts,
   hasCreditBackfillReceipt,
   loadCreditStore,
   readLedgerLines,
@@ -1633,6 +1634,7 @@ export interface BuildSweepEffectsDeps {
   waitForCiGreenImpl?: SweepRuntimeFn;
   restRollupForImpl?: SweepRuntimeFn;
   fetchCiFailuresImpl?: SweepRuntimeFn;
+  readRequiredContextsImpl?: (owner: string, repo: string) => string[] | undefined;
   runReviewImpl?: SweepRuntimeFn;
   /** W1-T3901 — proof-only reuse worktree seams; production defaults live in run-task.ts and
    * tests replace only the checkout boundaries, never the deterministic proof judge. */
@@ -4199,7 +4201,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
       }
     },
 
-    dispatchFix: async (pr, evidence, onPhase, control) => {
+    dispatchFix: async function dispatchFix(pr, evidence, onPhase, control) {
       await observePr(pr, "repair");
       let worktreePath = "";
       let keepWorktree = false;
@@ -4278,7 +4280,20 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
           return declineClaim({ pr_number: pr.prNumber, reason: "head_identity", owner_recovery_reason: "head_identity_unreadable" });
         }
         if (headRef.headRefOid !== pr.headSha) {
-          return declineClaim({ pr_number: pr.prNumber, reason: "head_identity", owner_recovery_reason: "head_identity_changed" });
+          const heads = { pr_number: pr.prNumber, from_head: pr.headSha, to_head: headRef.headRefOid };
+          const moved = await adoptMovedFixHead(pr, { headRefOid: headRef.headRefOid }, evidence, {
+            readPr: async () => deps.ghJsonImpl ? ghJsonForBuild(["api", `repos/${owner}/${repo}/pulls/${pr.prNumber}`])
+              : readJsonImpl(["api", `repos/${owner}/${repo}/pulls/${pr.prNumber}`]),
+            readRollup: (sha) => restRollupFor(owner, repo, sha, readJsonImpl),
+            readRequiredContexts: () => (deps.readRequiredContextsImpl ?? ghRequiredStatusCheckContexts)(owner, repo),
+            readFailures: (rollup) => fetchCiFailures(owner, repo, rollup),
+          });
+          if ("deferred" in moved) {
+            log("sweep.fix.head_moved_deferred", { ...heads, reason: moved.deferred });
+            return false;
+          }
+          log("sweep.fix.head_adopted", heads);
+          return await dispatchFix(moved.adopted, moved.evidence, onPhase, control);
         }
         const realBranch = headRef.headRefName;
         const changedPaths = (headRef.files ?? []).map((f) => f.path);
@@ -14679,6 +14694,50 @@ export function dispatchFixSpent(outcome: boolean | void | FixClaimDeclined): bo
 export interface FixClaimDeclined {
   claimDeclined: true;
   ownerRecoveryReason: string;
+}
+
+export type MovedFixHeadOutcome = { adopted: OpenPrView; evidence: FixDispatchEvidence } | { deferred: string };
+
+const adoptedMovedFixHeads = new WeakSet<OpenPrView>();
+
+export async function adoptMovedFixHead(
+  pr: OpenPrView,
+  headRef: { headRefOid: string },
+  evidence: FixDispatchEvidence,
+  reads: {
+    readPr: () => Promise<unknown>;
+    readRollup: (sha: string) => Promise<RollupCheckEntry[]>;
+    readRequiredContexts: () => Iterable<string> | undefined | Promise<Iterable<string> | undefined>;
+    readFailures: (rollup: RollupCheckEntry[]) => CiFailure[] | Promise<CiFailure[]>;
+  },
+): Promise<MovedFixHeadOutcome> {
+  if (adoptedMovedFixHeads.has(pr)) return { deferred: "head_moved_again" };
+  if (evidence.unmetCriteria.length > 0 || evidence.mergeConflict || (evidence.actionableGateFailures?.length ?? 0) > 0 ||
+      evidence.proofDiscrimination || evidence.instrumentEntangled || evidence.ownedConflictHead ||
+      (evidence.ciFailures?.length ?? 0) === 0) return { deferred: "evidence_not_ci" };
+  let live: { state?: unknown; head?: { sha?: unknown }; mergeable_state?: unknown };
+  try { live = (await reads.readPr() ?? {}) as typeof live; } catch (e) {
+    const reason = `pr_unreadable: ${String((e as Error)?.message ?? e)}`;
+    return { deferred: reason };
+  }
+  if (live.state !== "open") return { deferred: "not_open" };
+  if (live.head?.sha !== headRef.headRefOid) return { deferred: "head_moved_again" };
+  if (live.mergeable_state === "dirty") return { deferred: "merge_conflict" };
+  let failures: CiFailure[];
+  try {
+    const rollup = await reads.readRollup(headRef.headRefOid);
+    const requiredContexts = await reads.readRequiredContexts();
+    const checks = checksStateFromRollup(rollup, requiredContexts);
+    if (checks !== "red") return { deferred: `checks_${checks}` };
+    failures = await reads.readFailures(rollup);
+  } catch (e) {
+    const reason = `checks_unreadable: ${String((e as Error)?.message ?? e)}`;
+    return { deferred: reason };
+  }
+  if (failures.length === 0) return { deferred: "failures_unreadable" };
+  const adopted: OpenPrView = { ...pr, headSha: headRef.headRefOid, checksState: "red", ciFailures: failures };
+  adoptedMovedFixHeads.add(adopted);
+  return { adopted, evidence: { ...evidence, ciFailures: failures } };
 }
 
 function fixClaimDeclinedReason(outcome: boolean | void | FixClaimDeclined): string | undefined {
