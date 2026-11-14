@@ -25,7 +25,7 @@
     - src/lib/analytics-route.ts
     - test/review/recorded-typed-answers-are-scored-per-role-and-model.test.ts
     - test/an-analytics-checkpoint-keeps-folds-not-rows.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "A recorded typed answer is one of four kinds: a distribution over the declared options, a single answer with no distribution, an abstention, or a rejection. A distribution whose sum is outside TYPED_JUDGMENT_SUM_TOLERANCE, or that names an option outside the declared set, is a rejection and is never coerced"

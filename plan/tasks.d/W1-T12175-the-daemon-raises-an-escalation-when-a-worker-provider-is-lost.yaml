@@ -17,7 +17,7 @@
     - src/lib/provider-routing-policy.ts
     - src/cli/commands/daemon.ts
     - test/daemon/the-daemon-raises-an-escalation-when-a-worker-provider-is-lost.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "At each start the daemon writes one row with the worker providers that its config enables and the cash deployments that it can reach"
