@@ -113,6 +113,41 @@ test("W1-T12174 criterion 2: reports each copy path without printing config valu
   assert.ok(!result.out.includes(SECRET));
 });
 
+test("W1-T12174 criterion 1: directory links cannot be hidden by slashes or child components", async (t) => {
+  for (const suffix of ["", "/", "///", "/.", "/nested", "/nested/..", "//nested//"]) {
+    await t.test(`linked config path ending in ${JSON.stringify(suffix)}`, (t) => {
+      const f = fixture(t);
+      const link = join(f.home, "linked config");
+      mkdirSync(join(f.config, "nested"));
+      writeFileSync(join(f.config, "nested/config.json"), SECRET, { mode: 0o644 });
+      symlinkSync(f.config, link);
+      const result = f.run({ RMD_CONTAINER_CONFIG_DIR: `${link}${suffix}` });
+      assert.equal(result.status, 1, result.out);
+      assert.match(result.out, /STATE SNAPSHOT CONFIG COPY FAILED/);
+      assert.ok(!result.out.includes(SECRET));
+      for (const root of f.roots) {
+        assert.equal(readFileSync(join(f.archive(root), "ledger.ndjson"), "utf8"), LEDGER);
+        assert.equal(existsSync(join(f.archive(root), "container-config")), false);
+      }
+      assert.match(readFileSync(f.receipt, "utf8"), /^result=failed\n/);
+      assert.equal(readFileSync(join(f.config, "config.json"), "utf8"), SECRET);
+      assert.equal(statSync(join(f.config, "config.json")).mode & 0o777, 0o644);
+    });
+  }
+});
+
+test("W1-T12174 criterion 1: real config directories accept trailing slashes", (t) => {
+  const f = fixture(t);
+  const result = f.run({ RMD_CONTAINER_CONFIG_DIR: `${f.config}///` });
+  assert.equal(result.status, 0, result.out);
+  for (const root of f.roots) {
+    const copy = join(f.archive(root), "container-config");
+    assert.equal(statSync(copy).mode & 0o777, 0o700);
+    assert.equal(readFileSync(join(copy, "config.json"), "utf8"), SECRET);
+    assert.equal(statSync(join(copy, "config.json")).mode & 0o777, 0o600);
+  }
+});
+
 test("W1-T12174 criterion 3: absent, linked, or unreadable config fails the receipt after state snapshots", async (t) => {
   for (const failure of ["absent", "linked", "unreadable"] as const) await t.test(failure, (t) => {
     const f = fixture(t);

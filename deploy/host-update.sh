@@ -1055,8 +1055,17 @@ state_snapshot_fail() {
 # -P also prevents dereferencing a source replaced by a link after the regular-file check.
 snapshot_container_config() (
   umask 077
-  local dest="$1" file copied
-  [ ! -L "${CONTAINER_CONFIG_DIR}" ] && [ -d "${CONTAINER_CONFIG_DIR}" ] \
+  local dest="$1" file copied component="${CONTAINER_CONFIG_DIR}"
+  # A trailing slash hides a directory link from -L; check every component without it.
+  while [ -n "${component}" ]; do
+    case "${component}" in */) component="${component%/}"; continue ;; esac
+    [ ! -L "${component}" ] || return 1
+    case "${component}" in
+      */*) component="${component%/*}" ;;
+      *) break ;;
+    esac
+  done
+  [ -d "${CONTAINER_CONFIG_DIR}" ] \
     && [ -r "${CONTAINER_CONFIG_DIR}" ] && [ -x "${CONTAINER_CONFIG_DIR}" ] || return 1
   mkdir -m 700 -- "${dest}" && chmod 700 -- "${dest}" || return 1
   for file in "${CONTAINER_CONFIG_DIR}"/* "${CONTAINER_CONFIG_DIR}"/.[!.]* "${CONTAINER_CONFIG_DIR}"/..?*; do
