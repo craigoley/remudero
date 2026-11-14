@@ -18,6 +18,8 @@
   files:
     - src/lib/daemon.ts
     - src/cli/commands/daemon.ts
+    - src/lib/task-lookup.ts
+    - src/cli/commands/run-task-verb.ts
     - test/daemon/a-live-flag-adds-ops-tasks-to-the-tasks-the-daemon-may-dispatch.test.ts
   status: queued
   attempts: 0
@@ -32,7 +34,7 @@
       proof: "grep: W1-T12209 criterion 4 in test/daemon/a-live-flag-adds-ops-tasks-to-the-tasks-the-daemon-may-dispatch.test.ts"
     - claim: "If the ops catalog has any outcome other than `ok`, no ops task is a candidate, the public candidates do not change, and one row names the outcome code"
       proof: "grep: W1-T12209 criterion 5 in test/daemon/a-live-flag-adds-ops-tasks-to-the-tasks-the-daemon-may-dispatch.test.ts"
-    - claim: "With the live flag off, the candidates, the claims, the worker starts and the rows are the same as today, and the shadow comparison still runs"
+    - claim: "invariant:legacy-output — With the live flag off, the candidates, the claims, the worker starts and the rows are the same as today, and the shadow comparison still runs"
       proof: "grep: W1-T12209 criterion 6 in test/daemon/a-live-flag-adds-ops-tasks-to-the-tasks-the-daemon-may-dispatch.test.ts"
     - claim: "The daemon command reads the live flag and passes it to the loop, and the test goes through the daemon command"
       proof: "grep: dispatch_ops_tasks in src/cli/commands/daemon.ts"
@@ -44,6 +46,7 @@
     - This task has the highest risk of the filing. A wrong selection dispatches one task twice or dispatches a task whose dependency is not merged.
     - The live flag is the field `dispatch_ops_tasks` of the host file `<state dir>/plan-destination.json`. If the file is absent, the flag is off and the behaviour is byte-identical to today. The flag is separate from the kinds: it must stay on while any ops task is not merged, also after `task` is removed from the kinds.
   design: |
+    INVARIANT legacy-output: With the live flag off, preserve public candidates, claims, worker starts and rows; keep the existing shadow comparison.
     Compose the candidates from both catalogs with the composer of W1-T11769, and select from the composed plan. Keep its edge rule and its atomic refusal.
     Read the flag in `daemonCommand` and pass it to `runDaemon`. Read the ops catalog only through the shadow source of W1-T11770, off the tick.
     Keep the operator's stop and pause, the governor and every limit on dispatch as they are. An ops task counts against the same limits.

@@ -257,6 +257,7 @@ import {
   cashFallbackRefusal,
   capStderrExcerpt,
   listRegisteredWorktrees,
+  removeRunLock,
   renderWorkerSettings,
   STDERR_EXCERPT_CAP,
   excludeNodeModulesFromGit,
@@ -266,6 +267,7 @@ import {
   worktreeRemoveAsync,
   releaseReviewWorktree,
   worktreesDir,
+  writeRunLock,
   type QuestionEntry,
   type SpawnWorkerArgs,
   type WorkerResult,
@@ -4818,6 +4820,9 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
 
         const dispatchNowMs = nowMsImpl();
         worktreePath = join(worktreesDir(config), `sweep-${task.id}-${dispatchNowMs}`);
+        // W1-T12537: the run lane's lock, before the add, so another run's start-up prune keeps it.
+        mkdirSync(worktreePath, { recursive: true });
+        writeRunLock(worktreePath, { pid: process.pid, run_id: runId, startedAt: clockFromMillisFn(() => dispatchNowMs).iso() });
         try {
           const recoveredHead = await createFixRungWorktree(repoDir, worktreePath, realBranch);
           if (recoveredHead) {
@@ -5131,6 +5136,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
             /* best-effort cleanup */
           }
         }
+        if (worktreePath) removeRunLock(worktreePath);
         // W1-T2609: release the branch claim LAST, on every exit path (return, decline, throw) —
         // symmetric with the worktree cleanup just above, so a lost race or a mid-round crash
         // never strands the claim past this round's own dispatch.
@@ -17969,6 +17975,7 @@ export function inFlightReviewRunsNow(): Promise<void>[] {
  *  awaited, so the drain cannot be extended by new work. Returns how many were still running at the bound. */
 export async function drainInFlightReviews(opts: {
   boundMs: number; onWait?: (item: RestartDrainInventoryEntry) => void;
+  onAbandon?: (item: RestartDrainInventoryEntry, ageMs: number | null) => void;
   /** W1-T9114: `false` when the next review admitted is a run child, which the restart does not wait for. Default: close. */
   closeRefills?: boolean;
 }): Promise<number> {
@@ -17987,7 +17994,15 @@ export async function drainInFlightReviews(opts: {
     clearTimeout(timer);
   }
   const abandoned = running.filter((review) => !settled.has(review));
-  for (const review of abandoned) inFlightReviewStops.get(review)?.abort();
+  for (const review of abandoned) {
+    const registration = inFlightReviewRuns.get(review);
+    if (registration) {
+      const item = reviewRestartItem(review, registration);
+      const ageMs = systemClock.now() - registration.admittedAtMs;
+      opts.onAbandon?.(item, Number.isFinite(ageMs) && ageMs >= 0 ? ageMs : null);
+    }
+    inFlightReviewStops.get(review)?.abort();
+  }
   return abandoned.length;
 }
 

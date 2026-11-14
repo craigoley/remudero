@@ -1,0 +1,77 @@
+- id: W1-T12543
+  title: "A needs-scope fix outcome opens its scope amendment automatically before it asks a human"
+  repo: remudero
+  depends_on: []
+  priority: 1.3
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # a refused scope amendment is retried or follows a base refresh before the fix lane escalates; workflow, instrument and unfiled scope still escalate at once, and the amendment validator is unchanged
+  origin: "operator-session#flow-ledger-research-2026-11-13"
+  plan_refs:
+    - W1-T10900
+    - W1-T9561
+    - W1-T9807
+    - W1-T10339
+    - W1-T10653
+    - W1-T11168
+    - W1-T11025
+  files:
+    - src/cli/commands/fix.ts
+    - src/lib/proof-amendment.ts
+    - test/fix-lane/a-needs-scope-outcome-opens-its-scope-amendment-before-it-asks-a-human.test.ts
+    - "src/lib/sweep.ts"
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "A NEEDS_SCOPE outcome for a filed task whose scope amendment is refused for a retryable reason (scope-amendment-error, worker-diff-unreadable or shard-drifted) asks for the amendment once more in the same round after a fresh read. When the second request creates or resumes the amendment, the round ends awaiting the amendment merge and no escalation is filed"
+      proof: "grep: W1-T12543 criterion 1 in test/fix-lane/a-needs-scope-outcome-opens-its-scope-amendment-before-it-asks-a-human.test.ts"
+    - claim: "A main-owned refusal requests a base refresh of the PR branch and records the paths, so the next round at the refreshed head asks for the amendment again before any escalation"
+      proof: "grep: W1-T12543 criterion 2 in test/fix-lane/a-needs-scope-outcome-opens-its-scope-amendment-before-it-asks-a-human.test.ts"
+    - claim: "invariant:amendment-before-human — The fix lane escalates a NEEDS_SCOPE only after a scope amendment was refused for a reason that is not retryable, or was refused twice, and the escalation names that refusal reason"
+      kind: guard
+      proof: "grep: W1-T12543 criterion 3 in test/fix-lane/a-needs-scope-outcome-opens-its-scope-amendment-before-it-asks-a-human.test.ts"
+    - claim: "Workflow paths, ungrantable instrument paths and an unfiled PR still escalate at once, as today"
+      proof: "grep: W1-T12543 criterion 4 in test/fix-lane/a-needs-scope-outcome-opens-its-scope-amendment-before-it-asks-a-human.test.ts"
+    - claim: "The retryable scope-amendment refusals are one declared set"
+      proof: "grep: SCOPE_AMENDMENT_RETRYABLE_REFUSALS in src/lib/proof-amendment.ts"
+  rationale: |
+    WHY: the fleet can open a scope amendment for a filed task by itself. When that request fails once, the fix lane
+    refuses the commit and the PR goes to a person. A person then waits on a question the fleet could have answered.
+    OBSERVED in the 48 h ledger research (2026-11-11 21:45Z to 2026-11-13 21:45Z): escalation holds cost 47 PR-hours.
+    refused-escalate holds cost 31.4 PR-hours on 20 PRs. "needs-human issue ALREADY OPEN, standing down" cost 15.7
+    PR-hours on 13 PRs. 23 fix rounds ended NEEDS_SCOPE or NEEDS_DESIGN.
+    READ 2026-11-13 at origin/main d41354cdd:
+    - src/cli/commands/fix.ts:2486 `amendScope` asks `requestScopeAmendment` and turns any throw into a refusal
+      `scope-amendment-error`.
+    - src/cli/commands/fix.ts:4841-4889 escalates at once for workflow paths, ungrantable instrument paths and an unfiled PR.
+    - src/cli/commands/fix.ts:4899-4916 sets a `main-owned` refusal or a `worker-diff-unreadable` refusal, or calls
+      `amendScope` once. :4917 ends the round awaiting the amendment when it is created or resumed. Otherwise :4921 logs
+      fix.commit_refused and the round never asks again.
+    - src/lib/proof-amendment.ts:456 and :496 refuse with `shard-not-found` and `shard-drifted`.
+    - src/cli/commands/fix.ts:2071 sends a refused-escalate disposition to `deps.escalate`, and src/lib/escalate.ts:1468
+      then stands every later strike down while that issue is open. src/lib/sweep.ts:16980 refuses to read that stand-down
+      as a hold.
+    - W1-T11168 (merged) lifts a held fix dispatch when its recorded cause clears. W1-T11025 (queued) is a machine stub for
+      the "worker changed nothing" cost class. Neither retries a refused scope amendment.
+    - W1-T10900 (queued) shares src/cli/commands/fix.ts and src/lib/proof-amendment.ts. It drops the scope paths the worker's diff does not touch before amendScope, so a path-not-changed refusal is not retried. This task does something else: it asks again after a refusal that a second ask can grant, and after a base refresh for a main-owned refusal, before the fix lane asks a person. The two change different branches of the same call, so build them one after the other.
+  design: |
+    INVARIANT amendment-before-human: a NEEDS_SCOPE that a scope amendment can grant reaches a person only after the fleet
+    asked for that amendment and was refused for a reason it cannot fix itself.
+    1. In src/lib/proof-amendment.ts export `SCOPE_AMENDMENT_RETRYABLE_REFUSALS`, a ReadonlySet of `scope-amendment-error`,
+       `worker-diff-unreadable` and `shard-drifted`.
+    2. In src/cli/commands/fix.ts, after the amendment at :4899-4916, when the refusal reason is in the set, re-read the
+       worker's changed paths and call `amendScope` once more. Log fix.scope_amendment with `retry: 1`.
+    3. On a `main-owned` refusal, request the base refresh the rung already uses (the update-branch path that logs
+       fix.base_refresh) and end the round with `scope_amendment_after_refresh` and the paths. A later round at the new
+       head asks for the amendment again before it may escalate.
+    4. Add the last refusal reason and its detail to the fix.commit_refused row, so the escalation question names it.
+    NOT IN SCOPE: workflow, instrument and unfiled scope; NEEDS_DESIGN; the amendment validator; how an open escalation is
+    released when the amendment merges (a changed task contract already releases it, src/lib/escalate.ts:1462).
+  falsifier: |
+    Remove the retry and criterion 1 must fail. Skip the base refresh on main-owned and criterion 2 must fail. Escalate on
+    the first retryable refusal and criterion 3 must fail. Retry a workflow path and criterion 4 must fail. Restore and
+    require all to pass.
+  note: |
+    Id reserved for run-unfiled-1794610450000 with ~/rmd-work/bin/reserve-id.sh. The fleet builds it.

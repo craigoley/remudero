@@ -3,7 +3,7 @@ import { findTaskInCatalogs, type TaskLookupOptions, type TaskLookupResult, type
 import { planDestinationRepository } from "../../lib/plan-destination.js";
 import type { RunTaskCommandHost, GitRunner, CiGateOutcome, ReviewRunResult, FixRungOutcome, LiveHeadResult, WorktreeSnapshot, FixRebaseMergeFacts, FixRoundCommit, CensusPushRefusal, FixRoundPushReceipt } from "./run-task-verb.js";
 import { buildBaseProofDir, releaseBaseProofDir, type BaseProofDir } from "../../lib/check-proof.js";
-import { judgeFixProgress, resolveFixProgress, type FixProgressJudge, type FixProgressVerdict, type FixProgressWorkerProofResult, reviewerProofFailures, unfiledScopeGrant, UNFILED_SCOPE_GRANT_ANSWER } from "../../lib/fix-progress-judge.js";
+import { conflictRoundProgressVerdict, judgeFixProgress, resolveFixProgress, type FixProgressJudge, type FixProgressResult, type FixProgressVerdict, type FixProgressWorkerProofResult, reviewerProofFailures, unfiledScopeGrant, UNFILED_SCOPE_GRANT_ANSWER } from "../../lib/fix-progress-judge.js";
 import { buildFixProgressInputWithHostedProofs, readHostedFixProofResults, type HostedFixProofReader } from "../../lib/sweep.js";
 import { parseWhitelistedProof, execWhitelistedProofAsync, proofChildCommand, buildProofEnv, type AsyncProofSpawner } from "../../lib/review.js";
 import { execFileLoopBounded } from "../../lib/loop-bounded-child.js";
@@ -2596,8 +2596,20 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
   const judgeIsStandIn = deps.fixProgressJudge === undefined && !opts.useProductionProgressJudge;
   // `forJudge`: whether a wired judge is shown the site's reason as its parked reason. A reached bound or an
   // unchanged tree is already in the judge's own signals; a false-block finding and merge refusals are not.
-  const consultAtSite = async (parkedReason: string, forJudge = true) => {
+  // W1-T12541: a merge-conflict round is decided on its own conflict facts; it never asks the CI progress judge.
+  const conflictRoundDecision = (persisted: readonly Record<string, unknown>[], site: string) => {
+    // A landed push can be observed by the CI gate even when no review runs (for example on timeout).
+    // In that case review still names the old head, while the gate names the PR's current head.
+    const headSha = currentPinnedSha ?? review.headSha;
+    const decision = conflictRoundProgressVerdict({ taskId: opts.taskId, prNumber, headSha,
+      baseSha: opts.baseSha, conflictedFiles: conflictedFilePaths(currentMergeConflict) ?? [] }, [...persisted, ...roundRows]);
+    deps.log("fix.progress_judged", { pr_number: prNumber, head_sha: headSha, site, ...decision });
+    return decision;
+  };
+  const conflictBaseField = () => currentMergeConflict !== undefined && opts.baseSha !== undefined ? { base_sha: opts.baseSha } : {};
+  const consultAtSite = async (parkedReason: string, forJudge = true): Promise<FixProgressResult> => {
     const persisted = (deps.ledgerLines ?? (() => readLedgerLines(deps.ledgerPath)))();
+    if (currentMergeConflict !== undefined && !judgeIsStandIn) return conflictRoundDecision(persisted, "rung.parked");
     const input = await buildFixProgressInputWithHostedProofs({ taskId: opts.taskId, prNumber,
       ciFailures: currentCiFailures, reviewFailures: currentMergeConflict === undefined && !noReviewYet ? review.criteria : undefined,
       headSha: review.headSha, currentRed: currentMergeConflict !== undefined
@@ -2962,27 +2974,33 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
 
     if (!consultedThisRound && (roundRows.some(row => row.step === "fix.dispatch" || row.step === "fix.retrigger") || !opts.progressDecision)) {
       const persisted = (deps.ledgerLines ?? (() => readLedgerLines(deps.ledgerPath)))();
-      const input = await buildFixProgressInputWithHostedProofs({ taskId: opts.taskId, prNumber,
-      ciFailures: currentCiFailures, reviewFailures: currentMergeConflict === undefined && !noReviewYet ? review.criteria : undefined,
-        headSha: review.headSha,
-        strikesSpent: Math.max(strikes, priorStrikesFor([...persisted, ...roundRows], opts.taskId,
-          strikeRegimeForDispatch(review.criteria), review.headSha)),
-        currentRed: currentMergeConflict !== undefined
-          ? (conflictedFilePaths(currentMergeConflict) ?? []).map(path => `conflict:${path}`)
-          : noReviewYet ? (currentCiFailures ?? []).map(f => f.name)
-          : review.criteria.filter(c => !c.met).map(c => `review:${c.claim}`),
-        ledger: [...persisted.filter(row => !roundRows.some(local => row.step === local.step &&
-          row.round_id === local.round_id && row.head_sha === local.head_sha && row.strike === local.strike)), ...roundRows],
-        operatorAnswer: opts.constraint, formerCeiling: retriggers >= retriggerCap ? retriggerCap : opts.strikeCap,
-        parkedReason: consecutiveMergeRefusalReasons.length > 0
-          ? `Consecutive merge refusals:\n${consecutiveMergeRefusalReasons.join("\n")}` : progressRoundReason }, readHostedProofs);
-      const { decision, receipt } = await resolveFixProgress(input, persisted,
-        { judge: progressJudge, firstRound: true, reviewInputDigest: progressReviewInputDigest,
-          contractRevision: currentContractRevision });
-      deps.log(receipt.step, { pr_number: prNumber, head_sha: review.headSha,
-        site: retriggers >= retriggerCap ? "fix-retrigger" : "fix-strike",
-        parked_reason: input.parkedReason, former_ceiling: input.formerCeiling, red_class: input.redClass,
-        round_count: input.rounds.length, signals: input.signals, ...decision, ...receipt });
+      let decision: FixProgressResult;
+      if (currentMergeConflict !== undefined && !judgeIsStandIn) {
+        decision = conflictRoundDecision(persisted, retriggers >= retriggerCap ? "fix-retrigger" : "fix-strike");
+      } else {
+        const input = await buildFixProgressInputWithHostedProofs({ taskId: opts.taskId, prNumber,
+        ciFailures: currentCiFailures, reviewFailures: currentMergeConflict === undefined && !noReviewYet ? review.criteria : undefined,
+          headSha: review.headSha,
+          strikesSpent: Math.max(strikes, priorStrikesFor([...persisted, ...roundRows], opts.taskId,
+            strikeRegimeForDispatch(review.criteria), review.headSha)),
+          currentRed: currentMergeConflict !== undefined
+            ? (conflictedFilePaths(currentMergeConflict) ?? []).map(path => `conflict:${path}`)
+            : noReviewYet ? (currentCiFailures ?? []).map(f => f.name)
+            : review.criteria.filter(c => !c.met).map(c => `review:${c.claim}`),
+          ledger: [...persisted.filter(row => !roundRows.some(local => row.step === local.step &&
+            row.round_id === local.round_id && row.head_sha === local.head_sha && row.strike === local.strike)), ...roundRows],
+          operatorAnswer: opts.constraint, formerCeiling: retriggers >= retriggerCap ? retriggerCap : opts.strikeCap,
+          parkedReason: consecutiveMergeRefusalReasons.length > 0
+            ? `Consecutive merge refusals:\n${consecutiveMergeRefusalReasons.join("\n")}` : progressRoundReason }, readHostedProofs);
+        const judged = await resolveFixProgress(input, persisted,
+          { judge: progressJudge, firstRound: true, reviewInputDigest: progressReviewInputDigest,
+            contractRevision: currentContractRevision });
+        decision = judged.decision;
+        deps.log(judged.receipt.step, { pr_number: prNumber, head_sha: review.headSha,
+          site: retriggers >= retriggerCap ? "fix-retrigger" : "fix-strike",
+          parked_reason: input.parkedReason, former_ceiling: input.formerCeiling, red_class: input.redClass,
+          round_count: input.rounds.length, signals: input.signals, ...decision, ...judged.receipt });
+      }
       if (decision.verdict === "unavailable") return { outcome: "handed_off", review, strikes, retriggers, reason: decision.reason };
       if (decision.verdict === "escalate") {
         const loop = `fix progress loop: ${decision.loop} — ${decision.reason}`;
@@ -3863,7 +3881,10 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
     // being sent to resolve — BEFORE `review` is reassigned to this round's freshly computed verdict, so
     // `detectReviewFalseBlock` (after the review call, below) can tell a byte-identical re-block apart from real
     // progress. Keyed on the SAME worker-visible unmet set the fix rung actually dispatches (W1-T166).
-    const priorHeadSha = review.headSha;
+    // A landed push can leave merge mode active when CI times out. The next conflict round
+    // targets the head the gate observed, even though no new review updated review.headSha.
+    // Use that same head for the round's dispatch and completion rows as for its verdict.
+    const priorHeadSha = currentMergeConflict !== undefined ? currentPinnedSha ?? review.headSha : review.headSha;
     const roundLedger = (deps.ledgerLines ?? (() => readLedgerLines(deps.ledgerPath)))();
     const refutedFlake = flakeClaimsForHead(roundLedger, opts.taskId, priorHeadSha, prNumber).length > 0;
     const pendingScope = roundLedger.findLast((row) => row.step === "fix.scope_amendment" &&
@@ -4207,7 +4228,7 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
           round_id: refusedRoundId,
           strike: attempt, strike_cap: opts.strikeCap, unmet_count: unmet.length, round, mode: fixMode,
           verdict_regime: verdictRegime, head_sha: priorHeadSha, reason: refusal,
-          conflicted_files: conflictedFilePaths(currentMergeConflict),
+          conflicted_files: conflictedFilePaths(currentMergeConflict), ...conflictBaseField(),
         });
         deps.log("fix.commit_refused", { round_id: refusedRoundId, head_sha: priorHeadSha,
           strike: attempt, mode: fixMode, merge_start_failed: true, reason: refusal });
@@ -4625,7 +4646,7 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
         // the gardener drafts can show the rounds it priced instead of "(none recorded)".
         ci_failures: (currentCiFailures ?? []).map(ciFailureLedgerEntry),
         // W1-T4803: which files conflicted, so the hot-file gardener can rank them by PR minutes.
-        conflicted_files: conflictedFilePaths(currentMergeConflict),
+        conflicted_files: conflictedFilePaths(currentMergeConflict), ...conflictBaseField(),
       });
       if (!harnessCommitRefused) deps.say(
         currentMergeConflict !== undefined

@@ -1,0 +1,69 @@
+- id: W1-T12545
+  title: "A fix child keeps its merge-conflict evidence across adoption and head moves, and never stands down on its own conflict"
+  repo: remudero
+  depends_on: []
+  priority: 1.1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # changes when a fix round stands down on a dirty merge state and when a fix child refuses a moved head; a capture that fails still stands down as today
+  origin: "operator-session#flow-ledger-research-2026-11-13"
+  plan_refs:
+    - W1-T1278
+    - W1-T106
+    - W1-T10787
+    - W1-T11173
+    - W1-T9114
+    - W1-T12497
+    - W1-T11172
+    - W1-T12546
+  files:
+    - src/cli/commands/fix.ts
+    - src/lib/sweep.ts
+    - src/lib/ledger-steps.ts
+    - test/sweep/a-fix-child-keeps-its-merge-conflict-evidence-across-head-moves.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "A fix round outside merge-conflict mode whose merge-facts gate reads CONFLICTING, and whose local scope merge captures unmerged paths, runs its next round in merge-conflict mode with that captured evidence. It writes a fix.merge_mode_reentered row and no fix.stood_down row with CONFLICT_REPAIR_HANDOFF_REASON"
+      proof: "grep: W1-T12545 criterion 1 in test/sweep/a-fix-child-keeps-its-merge-conflict-evidence-across-head-moves.test.ts"
+    - claim: "A round that left merge-conflict mode (fix.merge_mode_cleared) and then reads CONFLICTING again re-enters merge-conflict mode in the same way, so a conflict that main brings back during the rung never ends the rung"
+      proof: "grep: W1-T12545 criterion 2 in test/sweep/a-fix-child-keeps-its-merge-conflict-evidence-across-head-moves.test.ts"
+    - claim: "invariant:conflict-round-needs-captured-evidence — When the local scope merge gives no unmerged paths, or its sides cannot be read, the round stands down with CONFLICT_REPAIR_HANDOFF_REASON exactly as today. Nothing is inferred from a dirty tree"
+      kind: guard
+      proof: "grep: W1-T12545 criterion 3 in test/sweep/a-fix-child-keeps-its-merge-conflict-evidence-across-head-moves.test.ts"
+    - claim: "A fix child whose envelope carries merge-conflict evidence, and whose recheck finds that the head moved, re-reads the merge facts at the live head. Still CONFLICTING: it runs the dispatch at the live head in merge-conflict mode and logs sweep.fix.child_head_adopted. Not conflicting, or unreadable: it refuses as today"
+      proof: "grep: W1-T12545 criterion 4 in test/sweep/a-fix-child-keeps-its-merge-conflict-evidence-across-head-moves.test.ts"
+    - claim: "A fix child without merge-conflict evidence still refuses a moved head, and the recheck's open, merged, retired and context checks run unchanged at the live head"
+      proof: "grep: W1-T12545 criterion 5 in test/sweep/a-fix-child-keeps-its-merge-conflict-evidence-across-head-moves.test.ts"
+    - claim: "The fix child's recheck adopts a moved conflicted head through one named helper"
+      proof: "grep: conflictedChildHeadAdoption( in src/lib/sweep.ts"
+  rationale: |
+    WHY: a conflicted pull request registers no new check runs, so only a merge-conflict round can move it. Today a fix child loses its conflict evidence at two points and the PR waits for a new sweep pass and a new dispatch each time.
+    OBSERVED in the 48 h ledger research (2026-11-11 21:45Z to 2026-11-13 21:45Z), PR #18305:
+    - one fix child was refused because the head moved between the sweep's decision and the child's recheck;
+    - one round stood down with "PR-head task contract unreadable";
+    - one child, adopted after a daemon restart, ran without merge-conflict mode and stood down on CONFLICT_REPAIR_HANDOFF_REASON.
+    READ 2026-11-13 at origin/main d41354cdd:
+    - src/lib/sweep.ts:16957 defines CONFLICT_REPAIR_HANDOFF_REASON. src/cli/commands/fix.ts:1058-1070 returns it when the merge-facts read is CONFLICTING. The caller passes that check only when `currentMergeConflict === undefined` (fix.ts:2701-2705).
+    - fix.ts:2432 seeds `currentMergeConflict` from `opts.mergeConflict`. `leaveMergeMode` (fix.ts:2435, called at :4198 and :5058) clears it once CI can run. After that, a conflict that comes back hits the gate at :1058 and the rung stands down instead of repairing it.
+    - fix.ts:2147 `capturedScopeMergeConflict` already reads the conflict from the unmerged index of the local scope merge. That is the evidence a re-entered conflict round needs.
+    - src/lib/sweep.ts:18209 `recheckFixDispatch` refuses at :18219 when the live head differs from the envelope head ("the PR head moved from ..."). `runFixDispatchChild` (:18244) throws on that refusal, so the child settles as lost. The envelope (FixDispatchEnvelope, :18150) carries `evidence.mergeConflict` (FixDispatchEvidence, :13920), so the child knows the PR was conflicted.
+    - sweep.ts:10096 shows that the sweep reads a CONFLICT_REPAIR_HANDOFF_REASON stand-down as a dirty read of that head (W1-T11173), so each stand-down costs at least one more pass and one more dispatch.
+    - The contract stand-down ("PR-head task contract unreadable", sweep.ts:815 and fix.ts:5296-5298) refuses to fall back to a stale contract by design (W1-T4073). This task does not change it.
+    RELATED: W1-T12497 (queued) re-reads the fleet hold in the same child; it does not touch the head or the conflict evidence. W1-T11172 (queued) is a conflict gardener that acts on PRs the sweep left conflicted; this task keeps the sweep's own fix child from leaving them. W1-T12546 (filed with this one) adopts a moved head at the sweep's checkout claim; this task covers the fix child and the rung.
+  design: |
+    1. In src/cli/commands/fix.ts, where the gate returns CONFLICT_REPAIR_HANDOFF_REASON (the rung's call at :2701-2705), first run the local scope merge capture (`capturedScopeMergeConflict`). With captured evidence, set `currentMergeConflict` to it, log `fix.merge_mode_reentered { site, strike, head_sha, conflicted_files }`, and start the next round in merge-conflict mode. Without captured evidence, stand down as today.
+    2. In src/lib/sweep.ts add `conflictedChildHeadAdoption(envelope, live, readMergeFacts)`. It returns an adopted envelope (live head, same evidence) only when the envelope carries `mergeConflict`, the live PR is open, the live head is readable, and the merge facts at the live head read CONFLICTING. Otherwise it returns undefined.
+    3. In `recheckFixDispatch`, when the head moved, call the helper before refusing. On adoption, run the remaining checks (task merged, retired, context digest) unchanged and return the adopted envelope. `runFixDispatchChild` logs `sweep.fix.child_head_adopted { pr_number, from_head, to_head }` and dispatches with it. The rung's own write-time fences (branch authorship, live head, claim identity) still run at the adopted head.
+    4. Give the child ports a merge-facts reader in src/run-task.ts only if one is not already in reach; prefer the existing `fixRebaseMergeFactsFromRest` reader. If src/run-task.ts must change, amend `files` first.
+    5. Declare `fix.merge_mode_reentered` and `sweep.fix.child_head_adopted` in src/lib/ledger-steps.ts.
+    6. Add no comment lines to src/lib/sweep.ts beyond what test/sweep/compress-src-lib-sweep-ts.test.ts allows; put explanations in the why-file.
+    INVARIANT conflict-round-needs-captured-evidence: a round enters or re-enters merge-conflict mode only with conflict evidence read from an unmerged index or from GitHub's merge facts at that exact head, never from a dirty tree or an older head.
+    NOT IN SCOPE: the PR-head contract stand-down (W1-T4073 refuses a fallback on purpose); a moved head for a child without conflict evidence (W1-T12546 covers the sweep side); the conflict gardener (W1-T11172); the fleet-hold re-reads (W1-T12497).
+  falsifier: |
+    Keep the old gate return and criteria 1 and 2 must fail. Re-enter merge-conflict mode without a captured unmerged path and criterion 3 must fail. Refuse every moved head in the recheck and criterion 4 must fail. Adopt a moved head for a child without conflict evidence and criterion 5 must fail. Restore and require all to pass.
+  note: |
+    Id reserved for run-unfiled-1794610450000 with ~/rmd-work/bin/reserve-id.sh. The fleet builds it.
+    The builder runs `rmd test-place` on the real test and amends the path if it moves.

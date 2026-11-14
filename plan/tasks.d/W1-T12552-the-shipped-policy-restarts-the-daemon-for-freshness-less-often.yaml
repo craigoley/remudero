@@ -1,0 +1,50 @@
+- id: W1-T12552
+  title: "The shipped policy restarts the daemon for freshness less often: the staleness horizon is 4 hours and the minimum lifetime is 3 hours"
+  repo: remudero
+  depends_on: []
+  priority: 1.3
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # two policy values move inside their existing bounds; a running daemon reads them at its next start, and the revert is the old values
+  origin: operator ruling 2026-11-13 (raise freshnessRestart.stalenessHorizonMs to 4 hours and freshnessRestart.minLifetimeMs to 3 hours)
+  plan_refs:
+    - W1-T12228
+    - W1-T9569
+  files:
+    - plan/policy.yaml
+    - test/daemon/the-four-constants-of-the-freshness-restart-are-policy-rows.test.ts
+    - test/daemon/the-shipped-policy-restarts-the-daemon-for-freshness-less-often.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "The shipped plan/policy.yaml loads freshnessRestart.stalenessHorizonMs as 14400000 and freshnessRestart.minLifetimeMs as 10800000, each inside its row's bounds, and scoreLimit and quietWindowMs keep 18 and 600000"
+      proof: "grep: W1-T12552 criterion 1 in test/daemon/the-shipped-policy-restarts-the-daemon-for-freshness-less-often.test.ts"
+    - claim: "The daemon options and the live-edit ladder built from the shipped policy carry the 4-hour staleness horizon and the 3-hour minimum lifetime"
+      proof: "grep: W1-T12552 criterion 2 in test/daemon/the-shipped-policy-restarts-the-daemon-for-freshness-less-often.test.ts"
+    - claim: "invariant:freshness-rows-stay-bounded — the loader refuses a staleness horizon above 14400000 or a minimum lifetime above 21600000, and a policy file with no freshnessRestart block still loads the lifted values of 1 hour and 90 minutes"
+      kind: guard
+      proof: "grep: W1-T12552 criterion 3 in test/daemon/the-shipped-policy-restarts-the-daemon-for-freshness-less-often.test.ts"
+    - claim: "The policy row of the staleness horizon holds the new value"
+      proof: "grep: stalenessHorizonMs: { value: 14400000 in plan/policy.yaml"
+  rationale: |
+    WHY: each daemon restart costs repair work. The boot pass after a restart is review-only: it closes the repair lanes until the boot review settles (src/lib/sweep.ts:15039 `reviewOnlyStandDownReason("boot")`), and the restart kills fix rounds in flight.
+    OBSERVED in the 48 h ledger research (2026-11-11 21:45Z to 2026-11-13 21:45Z): 25 daemon restarts, a median of 2.0 h apart. Each boot pass closed repair lanes, a cost of 13.5 PR-hours on 52 pull requests. Each of the 6 restarts that found a fix round in flight killed that round (6 of 6).
+    READ 2026-11-13 at origin/main d41354cdd:
+    - plan/policy.yaml:1850 `stalenessHorizonMs` is 3600000 (bounds 900000 to 14400000). :1852 `minLifetimeMs` is 5400000 (bounds 0 to 21600000). Both new values are inside the bounds, so no bound changes.
+    - src/cli/commands/daemon.ts:989 hands the rows to the daemon at its start through `freshnessRestartOpts` (:702), and :2249 hands the horizon to the live-edit ladder through `freshnessRestartLadder` (:712). An edit applies at the next daemon start.
+    - src/lib/policy.ts:386-389 pins each row's origin to the kind "lifted". The origins stay as they are: they name the constant each row was lifted from (src/lib/deploy-judge.ts:52 and :474), and the absent-block defaults stay those constants.
+    - test/daemon/the-four-constants-of-the-freshness-restart-are-policy-rows.test.ts:42 and :44 pin the shipped values 3600000 and 5400000 in W1-T12228 criterion 1. They move to the new values.
+    - The same test's W1-T12228 criterion 4 (:166 and :171) reads the shipped rows and starts the lifetime of its quiet-window case and its restart case 2 hours before T0. That is older than 90 minutes but younger than 3 hours, so with the new minimum lifetime both cases hold for `min_lifetime`. The review of #18414 refused a build that read DEFAULT_FRESHNESS_RESTART there instead: criterion 4 then no longer checks the shipped rows (a semantic downgrade).
+  design: |
+    1. In plan/policy.yaml set `freshnessRestart.stalenessHorizonMs.value` to 14400000 and `freshnessRestart.minLifetimeMs.value` to 10800000. Keep each row on one line, with its origin and bounds unchanged. Add one comment line above the block that names the operator ruling of 2026-11-13 and the measurement.
+    2. In the W1-T12228 test, change the two shipped values in criterion 1 to the new values. In criterion 4, keep reading the rows from the shipped policy (`committed().values.freshnessRestart`) and keep every expected decision and reason. Only the timing follows the new policy: start the lifetime of the quiet-window case and of the restart case 4 hours before T0 (`T0 - 4 * HOUR`), older than the 3-hour minimum lifetime, and drop "90 minutes" from the comment of the young case. Change nothing else there.
+    3. Add test/daemon/the-shipped-policy-restarts-the-daemon-for-freshness-less-often.test.ts. It loads the shipped policy with `loadPolicy` (criterion 1), passes the loaded rows to `freshnessRestartOpts` and `freshnessRestartLadder` (criterion 2), and loads a policy with no block through `validatePolicy` (criterion 3).
+    INVARIANT freshness-rows-stay-bounded: every freshnessRestart value stays inside its row's min and max, and an absent block loads the lifted constants.
+    NOT IN SCOPE: the restart score, the quiet window, the constants in src/lib/deploy-judge.ts, the review-only boot pass itself, and the deployer's recycle score.
+  falsifier: |
+    Set stalenessHorizonMs back to 3600000 and criteria 1 and 2 must fail. Set minLifetimeMs to 21600001 and the loader must refuse the policy. Make the absent block load the new values, or let the loader accept 14400001, and criterion 3 must fail. Restore and require all to pass.
+  note: |
+    Id reserved for run-unfiled-1794610450001 with ~/rmd-work/bin/reserve-id.sh. A hand build ships it on a run-W1-T12552 branch after this filing merges.
+    Amended 2026-11-13: design step 2 also lets W1-T12228 criterion 4 move its lifetime start to 4 hours before T0, after the fix round of #18414 stopped for design.
