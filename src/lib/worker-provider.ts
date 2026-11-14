@@ -4210,13 +4210,10 @@ export function openWeightUsageUsd(deployment: string, promptTokens: number, com
     completionTokens * rate.outputUsdPerMillion) / 1_000_000;
 }
 
-/**
- * W1-T5629: the NOTIONAL dollars of one codex session — what its tokens would cost at the routed model's published
- * BASE rate, so a codex row stops reading as free beside Claude's notional price. Never billed: the subscription
- * charges no per-request dollar, so this rides `notional_cost_usd` and `costUsd` stays 0 for every budget and cap.
- * Base rate because the tokens are a SESSION sum, and the long-context tier prices a single request. Codex input
- * includes its cached input. `undefined`, never 0, for a model {@link CODEX_NOTIONAL_PRICES} does not price.
- */
+/** W1-T5629: subscription tokens at the routed model's published BASE rate, never billed.
+ * `notional_cost_usd` carries this; `costUsd` stays 0 for budgets/caps. Session totals cannot
+ * select a per-request long-context tier. Input includes cache reads; unpriced models return
+ * `undefined`, never 0 (see {@link CODEX_NOTIONAL_PRICES}). */
 export function codexNotionalCostUsd(model: string, tokens: { input: number; output: number; cacheRead: number }): number | undefined {
   if (!Object.hasOwn(CODEX_NOTIONAL_PRICES, model)) return undefined;
   const price = CODEX_NOTIONAL_PRICES[model];
@@ -4239,16 +4236,8 @@ export function openWeightAllowancePath(config: Config): string {
   return sharedCashAllowancePath(config) ?? join(config.root, "state", OPENWEIGHT_ALLOWANCE_FILENAME);
 }
 
-/**
- * UTC day key, taken from the {@link Clock} port's own ISO reading rather than from a raw Date
- * constructor.
- *
- * The cap is a CALENDAR-day allowance, so the boundary must not follow the host timezone: two
- * daemons in different zones would otherwise disagree on which day a request spends. Reading the
- * day off `clock.iso()` gets that for free — an ISO-8601 instant is UTC by construction — and keeps
- * this file off the legacy date-construction shape `test/clock-signature-census.test.ts` ratchets
- * down — that census counts the TEXT, so even a comment naming the old shape would raise the row.
- */
+/** UTC calendar day from {@link Clock}.iso(), independent of host timezone.
+ * Avoid raw date construction: test/clock-signature-census.test.ts counts even comment text. */
 export function openWeightUtcDay(atIso: string): string {
   const day = atIso.slice(0, 10);
   if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) {
@@ -4273,14 +4262,8 @@ export function openWeightCommittedUsd(state: OpenWeightAllowanceState): number 
   return Object.values(state.reservations).reduce((total, row) => total + (row.settledUsd ?? row.reservedUsd), 0);
 }
 
-/**
- * A conservative upper bound on what one request can cost, in dollars, BEFORE it is sent.
- *
- * Output is bounded exactly: {@link OPENWEIGHT_MAX_COMPLETION_TOKENS} is the ceiling the adapter
- * itself puts on the wire. Input is bounded by the serialized body's BYTE length, which is a strict
- * over-estimate: no tokenizer emits more tokens than the UTF-8 bytes it consumed, so this can never
- * under-reserve. Over-reserving is the safe direction for a cap — settlement corrects it downward.
- */
+/** Reserve before sending: serialized UTF-8 bytes overestimate input tokens; output is bounded
+ * by {@link OPENWEIGHT_MAX_COMPLETION_TOKENS}. Over-reservation is safe; settlement corrects it. */
 export function openWeightReservationUsd(
   deployment: string,
   requestBodyBytes: number,
@@ -4410,19 +4393,9 @@ export function readOpenWeightAllowance(config: Config,
  *  covers any realistic interleaving; the bound only stops a pathological peer spinning us forever. */
 export const OPENWEIGHT_ALLOWANCE_CAS_ATTEMPTS = 12;
 
-/**
- * Fleet mode holds a SQLite write lock; local mode retains its historical optimistic retry.
- *
- * `writeAtomic`'s `beforeRename` checks for a changed snapshot: the new state is staged in the same
- * directory, then, immediately before the rename commits it, the live file is re-read and compared
- * to the exact bytes this attempt planned from. A peer that committed in that window changes those
- * bytes, the stage is withdrawn, and the whole read-modify-write retries against the peer's
- * committed state. This check alone is not an interprocess CAS; the fleet lock supplies that.
- *
- * Durability across a restart is the file itself: every committed reservation is on disk before the
- * request it pays for is sent, so a process that dies mid-request comes back to a state that still
- * counts that reservation.
- */
+/** Fleet mode holds a SQLite write lock. Local mode stages beside the allowance and retries
+ * when `beforeRename` finds bytes changed since the read; this alone is NOT interprocess CAS.
+ * Reservations reach disk before transport, so restart still counts an interrupted request. */
 function mutateOpenWeightAllowance<T>(
   path: string,
   utcDay: string,
@@ -4461,27 +4434,11 @@ function mutateOpenWeightAllowance<T>(
   }
 }
 
-/**
- * Commit a conservative reservation for ONE outbound request, or refuse it.
- *
- * Called before the transport, never after. On refusal nothing is committed and {@link
- * OpenWeightAllowanceExhaustedError} is thrown by the caller, so no paid request is made.
- */
-/**
- * the cash ceiling for THIS request's UTC day.
- *
- * A plain number is the whole cap, exactly as before. A pair raises it only when the request
- * reached cash because the capacity auction found NO subscription with readable headroom -- the
- * W1-T3692 fallback -- so routine mount-affinity work stays on the lower figure and the higher one
- * is reachable only on a day the subscriptions are genuinely tapped out.
- *
- * IT IS A CEILING, NOT A BUDGET. `squeezed` does not authorise spending more; it stops the cap
- * refusing work on the one day cash is the only thing that can do it.
- *
- * REFUSES A PAIR THAT INVERTS. A `squeezed` below `normal` would mean the squeeze DAY buys less
- * than an ordinary one, which is never what an operator means -- far likelier a transposition, and
- * silently honouring it would cap the fleet hardest exactly when it is most constrained.
- */
+/** Reservations commit before transport; refusal commits nothing and the caller throws
+ * {@link OpenWeightAllowanceExhaustedError} without making a paid request. */
+/** UTC-day cash ceiling, never spending authority. W1-T3692's blocked auction alone selects
+ * `squeezed` when no subscription has readable headroom; routine affinity uses `normal`.
+ * A number applies on every day. Reject an inverted pair: squeeze days must not buy less. */
 export function effectiveCashCapUsd(
   cap: number | { normal: number; squeezed: number } | null | undefined,
   opts: { squeezed?: boolean } = {},
@@ -4805,17 +4762,10 @@ export interface OpenWeightCheckInput {
   platform?: NodeJS.Platform;
 }
 
-/**
- * Environment for a fixed-argv cash check.  The Azure key is deliberately read by the daemon
- * before the tool loop, but a model-selected check must never inherit it (or any other daemon
- * credential) merely because the adapter itself runs in this process.  `HOME` and `TMPDIR` are
- * private per-worker paths, so a check cannot rediscover operator shell state through either.
- *
- * This is intentionally narrower than the Claude/Codex worker environments: the check table has
- * no forge, shell, or network command, and it needs only executable discovery plus locale.  Add a
- * variable here only with a demonstrated fixed-check need; copying `process.env` would turn the
- * adapter boundary into a claim rather than a control.
- */
+/** Fixed checks inherit executable discovery and locale, never daemon credentials (including
+ * the Azure key read before the tool loop). HOME/TMPDIR are private to prevent rediscovery.
+ * The check table has no forge, shell or network command; add env only for a demonstrated
+ * fixed-check need, never by copying process.env or the wider Claude/Codex environments. */
 export function openWeightCheckEnv(workerHome: string, env: NodeJS.ProcessEnv = process.env,
   extra: Record<string, string> = {}): Record<string, string> {
   for (const key of Object.keys(extra)) {
@@ -4842,12 +4792,9 @@ export function openWeightCheckEnv(workerHome: string, env: NodeJS.ProcessEnv = 
   return out;
 }
 
-/**
- * Bubblewrap arguments for a model-selected fixed check. The worktree and isolated worker home
- * are the only application mounts; the host root is NOT mounted at all. A small read-only runtime
- * plus a new network namespace denies both host-secret reads and routes to the daemon, forge, or
- * public network. `argv` is already an internal table entry — never model-supplied text.
- */
+/** Fixed-check bubblewrap mounts only the worktree, private home and read-only runtime,
+ * never the host root. A fresh network namespace denies daemon, forge and public routes.
+ * `argv` comes from the internal table, never model text. */
 export function openWeightCheckSandboxArgv(
   input: Pick<OpenWeightCheckInput, "argv" | "cwd" | "workerHome"> & { platform?: NodeJS.Platform },
 ): string[] {
@@ -4942,24 +4889,12 @@ export class OpenWeightUnlistedCheckError extends RmdError {
   }
 }
 
-/**
- * Argv for one permitted check. EVERY ARGUMENT IS A CONSTANT — the caller chooses a check by NAME
- * and contributes nothing else to the command line.
- *
- * WHY FIXED RATHER THAN SANITIZED. An earlier revision appended model-supplied paths through
- * {@link openWeightContainedPath}, which is real containment: a flag-shaped argument resolves to a
- * file under the worktree and is inert. CodeQL flagged it anyway — "this command line depends on a
- * user-provided value" — and it was right to. Every other `execFileSync` in this repo passes
- * internally-derived arguments; that revision was the FIRST model-derived value to reach a command
- * line, and `.github/codeql/codeql-config.yml` excludes only `test/`, so the repo has no
- * suppression precedent to lean on. A sanitizer the analyser cannot see is a sanitizer the next
- * reader cannot see either.
- *
- * THE COST, STATED: a lane cannot scope `unit_test` to one file. In a tree carrying the selector
- * (W1-T6091) the HARNESS scopes it instead — {@link openWeightUnitTestPlan} appends the suites
- * {@link selectOpenWeightUnitTestSuites} derives from git, never from the model. Consumer trees
- * use changed tests and source basename matches instead. This argv is only the prefix;
- * {@link openWeightUnitTestPlan} must append an explicit suite list before it runs. */
+/** Fixed argv only: the model selects a NAME and supplies no arguments, including paths.
+ * Containment via {@link openWeightContainedPath} did not satisfy CodeQL's command provenance
+ * check; keep arguments internally derived (.github/codeql/codeql-config.yml excludes only tests).
+ * W1-T6091: {@link openWeightUnitTestPlan} must append an explicit harness-selected suite list
+ * from {@link selectOpenWeightUnitTestSuites}; consumer trees use changed tests/basename matches.
+ * This is only the prefix: the model cannot scope unit_test itself. */
 export function openWeightCheckArgv(check: unknown, paths: unknown, cwd?: string): string[] {
   if (typeof check !== "string" || !Object.prototype.hasOwnProperty.call(OPENWEIGHT_CHECKS, check)) {
     throw new OpenWeightUnlistedCheckError(typeof check === "string" ? check : String(check));
@@ -5470,25 +5405,11 @@ export function assertOpenWeightToolBoundary(
   return "cash adapter boundary proved: outside-cwd writes refused; fixed checks require a fresh network namespace";
 }
 
-/**
- * A NON-OPENAI DEPLOYMENT NEEDS NO SECOND SHAPE HERE. W1-T3598 ruled the wider catalog out on the
- * premise that its cheapest non-OpenAI candidate "sits behind the Azure AI Model Inference
- * `/models` route instead and would need an endpoint branch". W1-T3695 re-probed BOTH routes
- * against a live DeepSeek-V4-Flash deployment (non-OpenAI family) on the same account:
- *
- *   POST {endpoint}/models/chat/completions                   -> HTTP 200
- *   POST {endpoint}/openai/deployments/DeepSeek-V4-Flash/...  -> HTTP 200
- *
- * The second IS this function's own path. The deployment answered it unchanged -- tool calls
- * (`finish_reason: tool_calls`), `temperature: 0` (HTTP 200, unlike the gpt-5 family's 400) and
- * `response_format: json_object` all measured clean against it. So this class rides the adapter's existing route
- * with no second endpoint shape required, and the branch W1-T3598 deferred is not needed for it
- * at all.
- *
- * W1-T10855 adds the now-published Azure Retail Prices API rows (read 2026-10-27).
- * The cached-token billing dispute remains: reservations use full input rates until
- * W1-T10858 reconciles an observed invoice. Readiness alone does not add a cash ladder entry.
- */
+/** W1-T3695 falsified W1-T3598's need for a separate non-OpenAI endpoint: DeepSeek-V4-Flash
+ * returned HTTP 200 on both /models/chat/completions and this /openai/deployments/... route,
+ * including tool calls, temperature: 0 and response_format: json_object (unlike gpt-5's 400).
+ * W1-T10855: Azure Retail Prices API rows read 2026-10-27. Reservations retain full input rates
+ * pending W1-T10858's invoice reconciliation; readiness alone never adds a cash ladder entry. */
 function openWeightEndpoint(config: Config, model: string): string {
   // W1-T10837: resolves THIS deployment's own endpoint when `workerProviders.cashDeploymentEndpoints`
   // names it, else W1-T3607's canonical `cashEndpoint` falling back to the deprecated
