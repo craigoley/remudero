@@ -278,6 +278,8 @@ export interface NextRunnableOpts extends TaskPreconditionOptions {
    *  was yielded by the harness before its pull request opened. They are walked ahead of every fresh start, in
    *  their own dispatch order. Ordering only: each still passes the whole eligibility chain. */
   resumableTaskIds?: ReadonlySet<string>;
+  /** W1-T12551: the queue judge's staleness and the trailing starts. Omitted, the order is {@link dispatchOrder}'s. */
+  machineShare?: MachineShareInput;
 
   /** W1-T2675 — a FAILED credit read, which is not the same as "not merged". `deriveStatus`
    *  (status.ts) returns `indeterminate: true` when the GitHub read genuinely failed, and a caller
@@ -436,6 +438,55 @@ export function dispatchOrder(tasks: readonly Task[], context?: DispatchValueCon
   // MEASURED 2026-10-17: W1-T9089 and W1-T9757 yielded at 22:07Z to a restart and re-entered at stride ranks 28
   // and 31, behind a high-fanout family filed four hours earlier, and had no run.start for 6.8 h.
   return [...ordered.filter((t) => resumable.has(t.id)), ...ordered.filter((t) => !resumable.has(t.id))];
+}
+
+/** W1-T12551 starting values from the 2026-11-13 flow-ledger research: 0 of 54 garden-origin tasks built in 14 days,
+ *  and the queue judge without a completed pass since 2026-11-12. The share is of run starts, so it scales with them. */
+export const MACHINE_DISPATCH_SHARE = 0.25;
+export const QUEUE_JUDGE_STALE_MS = 6 * 60 * 60_000;
+export const MACHINE_SHARE_WINDOW_MS = 24 * 60 * 60_000;
+export const MACHINE_SHARE_STEP = "dispatch.machine_share";
+
+export interface MachineShareStart { taskId: string; authorClass: string | undefined }
+export interface MachineShareMove { share: number; machine_starts: number; starts: number; queue_judge_stale_ms: number }
+export interface MachineShareInput {
+  queueJudgeStaleMs: number | undefined;
+  starts: readonly MachineShareStart[];
+  onMoved?: (task: Task, move: MachineShareMove) => void;
+}
+
+/** The run starts in the trailing {@link MACHINE_SHARE_WINDOW_MS}, each with its task's author class. */
+export function machineShareStarts(rows: readonly Record<string, unknown>[], tasksById: ReadonlyMap<string, Task>, nowMs: number): MachineShareStart[] {
+  const starts: MachineShareStart[] = [];
+  for (const r of rows) {
+    if (r.step !== "run.start" || typeof r.task_id !== "string" || typeof r.ts !== "string") continue;
+    const at = Date.parse(r.ts);
+    if (!(at <= nowMs && nowMs - at <= MACHINE_SHARE_WINDOW_MS)) continue;
+    starts.push({ taskId: r.task_id, authorClass: tasksById.get(r.task_id)?.author_class });
+  }
+  return starts;
+}
+
+/** INVARIANT the-share-never-grants-eligibility: `ordered` is already the eligible set, and only its order changes. */
+function applyMachineShare(ordered: Task[], opts: NextRunnableOpts): Task[] {
+  const input = opts.machineShare;
+  const staleMs = input?.queueJudgeStaleMs;
+  if (input === undefined || staleMs === undefined || !(staleMs > QUEUE_JUDGE_STALE_MS)) return ordered;
+  const machineStarts = input.starts.filter((s) => s.authorClass === "machine").length;
+  if (input.starts.length > 0 && machineStarts / input.starts.length >= MACHINE_DISPATCH_SHARE) return ordered;
+  const resumable = opts.resumableTaskIds ?? new Set<string>();
+  const machine = ordered.filter((t) => t.author_class === "machine" && !resumable.has(t.id));
+  const age = (t: Task) => opts.dispatchValueContext?.costOfDelayInputsByTaskId?.get(t.id)?.filing_age_ms;
+  const dated = machine.filter((t) => age(t) !== undefined);
+  const pick = dated.length > 0 ? dated.reduce((a, b) => (age(b)! > age(a)! ? b : a))
+    : [...machine].sort((a, b) => idOrdinal(a.id).workstream - idOrdinal(b.id).workstream || idOrdinal(a.id).ordinal - idOrdinal(b.id).ordinal)[0];
+  if (pick === undefined) return ordered;
+  const lead = ordered.filter((t) => resumable.has(t.id));
+  const next = [...lead, pick, ...ordered.filter((t) => t !== pick && !resumable.has(t.id))];
+  if (next.some((t, i) => t !== ordered[i])) {
+    input.onMoved?.(pick, { share: MACHINE_DISPATCH_SHARE, machine_starts: machineStarts, starts: input.starts.length, queue_judge_stale_ms: staleMs });
+  }
+  return next;
 }
 
 /** Total order. With a ready cost-of-delay context (W1-T9323): stride pass, priority as the first tiebreak,
@@ -791,7 +842,8 @@ function dispatchEligibleCandidates(plan: Plan, isMerged: MergedSet, opts: NextR
   // in the pre-pass order; the fan-out slots are then dealt over the eligible set only and that set is re-sorted.
   // A head-only caller stops at the first eligible task when there are no fan-out slots to redeal (the
   // pre-existing early exit, which keeps later tasks' callbacks silent) and nobody observes the full order.
-  const stopAtFirst = headOnly && stridePassInputs(opts.dispatchValueContext) === undefined && opts.onEligibleOrdered === undefined;
+  const stopAtFirst = headOnly && stridePassInputs(opts.dispatchValueContext) === undefined && opts.onEligibleOrdered === undefined &&
+    opts.machineShare === undefined;
   const eligible: Task[] = [];
   for (const t of dispatchOrder(plan.tasks, opts.dispatchValueContext, opts.resumableTaskIds)) {
     if (isDispatchEligible(plan, t, isMerged, opts)) {
@@ -800,7 +852,7 @@ function dispatchEligibleCandidates(plan: Plan, isMerged: MergedSet, opts: NextR
     }
   }
   const context = redealFanoutOver(opts.dispatchValueContext, new Set(eligible.map((t) => t.id)));
-  const ordered = dispatchOrder(eligible, context, opts.resumableTaskIds);
+  const ordered = applyMachineShare(dispatchOrder(eligible, context, opts.resumableTaskIds), opts);
   opts.onEligibleOrdered?.(ordered, context);
   return ordered;
 }

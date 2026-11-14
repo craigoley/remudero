@@ -82,7 +82,11 @@ import {
   type TargetJobRead,
   type TargetJobRecord,
   type TargetJobStatus,
+  machineShareStarts,
+  MACHINE_SHARE_STEP,
+  type MachineShareInput,
 } from "./drain.js";
+import { queueJudgeAvailability } from "./queue-judge-gardener.js";
 import { preDispatchContractRevision } from "./dispatch-repair.js";
 // Why: drain.ts already owns the overlap partition, so it is reused rather than re-derived (W1-T343).
 import {
@@ -5177,6 +5181,21 @@ export async function runDaemon(
   // The last `dispatch.overlap_shadow` hold set, so an unchanged hold is ledgered once, not once per tick.
   let lastOverlapShadowSignature = "[]";
   let lastSecondaryCatalogShadowSignature: string | undefined;
+  let lastMachineShareSignature: string | undefined;
+  const machineShareFor = (plan: Plan, lines: readonly string[] | undefined): MachineShareInput | undefined => {
+    if (lines === undefined) return undefined;
+    const nowMs = daemonClock.now();
+    const rows = restartCycleLedgerRows(lines.filter((line) => line.includes("run.start") || line.includes("queue_judge."))).rows;
+    return {
+      queueJudgeStaleMs: queueJudgeAvailability(rows, nowMs).staleMs, starts: machineShareStarts(rows, plan.byId, nowMs),
+      onMoved: (task, move) => {
+        const signature = `${task.id}:${move.machine_starts}:${move.starts}`;
+        if (signature === lastMachineShareSignature) return;
+        lastMachineShareSignature = signature;
+        log(MACHINE_SHARE_STEP, { task_id: task.id, ...move });
+      },
+    };
+  };
   // W1-T11768: the one snapshot of an injected ops target; `null` is any refusal (never a partial Plan).
   let opsCatalogShadowPlan: Plan | null | undefined;
   let bootFirstDispatchWritten = false;
@@ -7562,7 +7581,11 @@ export async function runDaemon(
     const mergedTask: MergedResolver = (t) => isMerged(t.id);
     // W1-T10348: the released set, resolved ONCE per tick by the resolver every admission site shares
     // (ledger rows plus operator-releases.json), and handed to the kick, the tick selection and the refill.
-    const tickReleases = resolveReleases(deps, planForBatch);
+    let tickLedgerLines: readonly string[] | undefined;
+    const readTickLedger = deps.readLedgerLines;
+    const tickReleases = resolveReleases({
+      readDurableReleases: deps.readDurableReleases, readLedgerLines: readTickLedger && (() => (tickLedgerLines = readTickLedger())),
+    }, planForBatch);
     if (tickReleases.durableUnreadable !== undefined || tickReleases.ledgerUnreadable !== undefined) {
       log("dispatch.releases_unreadable", {
         ...(tickReleases.ledgerUnreadable !== undefined ? { ledger_error: tickReleases.ledgerUnreadable } : {}),
@@ -7689,6 +7712,7 @@ export async function runDaemon(
       onDeferredForPriority: logPriorityDeferral,
       onPriorityReservationReleased: logPriorityRelease,
       dispatchValueContext: deps.buildDispatchValueContext?.(planForBatch, isMerged),
+      machineShare: machineShareFor(planForBatch, tickLedgerLines),
       beginSelectionPass: deps.beginSelectionPass,
       isOpenPr: deps.isOpenPr,
       // A run the harness yielded before its PR is walked ahead of fresh starts, so a yield never costs its queue place.

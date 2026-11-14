@@ -47,6 +47,29 @@ export const QUEUE_JUDGE_PREDICTION_STEP = "queue_judge.prediction";
 export const QUEUE_JUDGE_OUTCOME_STEP = "queue_judge.outcome";
 const ESCALATED_STEP = "queue_judge.escalated";
 const UNAVAILABLE_STEP = "queue_judge.unavailable";
+/** Written only when the judge answered: a pass that ended in {@link UNAVAILABLE_STEP} throws before it. */
+export const QUEUE_JUDGE_SCORECARD_STEP = "queue_judge.scorecard";
+export const QUEUE_JUDGE_AVAILABILITY_STEPS = [QUEUE_JUDGE_SCORECARD_STEP, UNAVAILABLE_STEP] as const;
+
+export interface QueueJudgeAvailability { lastCompletedAt: string | undefined; staleMs: number | undefined }
+
+/** W1-T12551: the time since the queue judge last completed a pass, while it is failing (an unavailable row is
+ *  newer than that pass). With no completed pass in the rows, the time since its first unavailable row. A judge
+ *  whose newest pass completed, or with no rows, gives staleMs undefined: a quiet, working judge is not stale. */
+export function queueJudgeAvailability(records: readonly Row[], nowMs: number): QueueJudgeAvailability {
+  let completed: number | undefined, firstUnavailable: number | undefined, lastUnavailable: number | undefined;
+  let lastCompletedAt: string | undefined;
+  for (const r of records) {
+    const at = typeof r.ts === "string" ? Date.parse(r.ts) : Number.NaN;
+    if (!Number.isFinite(at) || at > nowMs) continue;
+    if (r.step === QUEUE_JUDGE_SCORECARD_STEP && (completed === undefined || at > completed)) { completed = at; lastCompletedAt = r.ts as string; }
+    if (r.step !== UNAVAILABLE_STEP) continue;
+    if (firstUnavailable === undefined || at < firstUnavailable) firstUnavailable = at;
+    if (lastUnavailable === undefined || at > lastUnavailable) lastUnavailable = at;
+  }
+  const failing = lastUnavailable !== undefined && (completed === undefined || lastUnavailable > completed);
+  return { lastCompletedAt, staleMs: failing ? nowMs - (completed ?? firstUnavailable!) : undefined };
+}
 
 /** The queue judge's own rows are read without a window: a prediction is scored whenever its task resolves. */
 const OWN_STEPS = [QUEUE_JUDGE_PREDICTION_STEP, QUEUE_JUDGE_OUTCOME_STEP, ESCALATED_STEP] as const;
@@ -912,7 +935,7 @@ export function queueJudgeGardenSpec(
         deferred: i.deferred.map((a) => ({ task_id: a.target, class: a.class, expected_cost_of_delay: a.expectedCostOfDelay })),
         bound: i.bound ?? null, records: i.records,
       };
-      if (i.asked) deps.log("queue_judge.scorecard", card);
+      if (i.asked) deps.log(QUEUE_JUDGE_SCORECARD_STEP, card);
       return card;
     },
     apply: (ws, plan, scorecard) => {
