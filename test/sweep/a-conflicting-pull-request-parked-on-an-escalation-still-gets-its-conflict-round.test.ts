@@ -235,13 +235,15 @@ test("W1-T12544 criterion 3: newest-200 retention archives conflict pushes witho
 });
 
 async function activeConflictRung(t: TestContext, hold: "design" | "review" | "ci" | "legacy" | "none", answered = false,
-  heads: { from: string; to: string; prior: Row[] } = { from: HELD_HEAD, to: MERGE_HEAD, prior: [] }) {
+  heads: { from: string; to: string; prior: Row[] } = { from: HELD_HEAD, to: MERGE_HEAD, prior: [] },
+  ci: "green" | "red" | "red-unpinned" = "green") {
   const f = fixture(t, [...heads.prior, ...(hold === "design" ? designRows(systemClock.now(), TASK, PR_URL, heads.from) : [])]);
   const root = dirname(f.deps.ledgerPath);
   const mount: Mount = { model: "sonnet", effort: "medium", maxTurns: 20, contextBudget: 120000 };
   const issues = hold === "none" || hold === "design" ? [] : [openIssue(hold === "legacy" ? undefined : hold, heads.from)];
   const spawned: SpawnWorkerArgs[] = [], rows: Row[] = [];
-  let pushedHead = heads.from, reviews = 0, closed = 0;
+  let pushedHead = heads.from, reviews = 0, closed = 0, ciReads = 0;
+  const minedHeads: Array<string | undefined> = [];
   const args = buildFixRungDispatchArgs({
     task: { id: TASK, title: "conflict round under a hold" }, runId: "ACTIVE-CONFLICT-ROUND", prUrl: PR_URL,
     branch: `run-${TASK}-1794610450000`, worktreePath: join(root, "wt"), mount,
@@ -263,13 +265,25 @@ async function activeConflictRung(t: TestContext, hold: "design" | "review" | "c
       push: () => { pushedHead = heads.to; return { fixRoundPushedHead: heads.to }; },
       readRemoteBranchHead: async () => pushedHead,
       readHeadShaForProvenance: async () => pushedHead,
-      waitForCiGreen: async () => "green" as const,
+      waitForCiGreen: async () => {
+        ciReads++;
+        if (ci !== "green" && ciReads === 1) {
+          if (answered) issues.length = 0;
+          return ci === "red" ? { state: "red" as const, sha: pushedHead } : "red" as const;
+        }
+        return "green" as const;
+      },
+      fetchCiFailures: async (_url: string, sha?: string) => {
+        minedHeads.push(sha);
+        return [{ name: "ci-shard (1/8)", logTail: "not ok 1 - fixture behavior" }];
+      },
       fetchPrBody: async () => "PR body",
       runReview: async () => {
         reviews++;
         if (answered) issues.length = 0;
-        return { ...args.initialReview, headSha: heads.to, state: reviews === 1 ? "failure" as const : "success" as const,
-          criteria: [{ claim: "the review question still needs an answer", met: reviews > 1, reason: "observed failure" }] };
+        const unmet = ci === "green" && reviews === 1;
+        return { ...args.initialReview, headSha: heads.to, state: unmet ? "failure" as const : "success" as const,
+          criteria: [{ claim: "the review question still needs an answer", met: !unmet, reason: "observed failure" }] };
       },
       issues: { listOpen: () => issues, create: () => ISSUE_URL, comment: () => {}, closeWithComment: () => { closed++; } },
       ledgerPath: f.deps.ledgerPath,
@@ -282,8 +296,62 @@ async function activeConflictRung(t: TestContext, hold: "design" | "review" | "c
       readLiveState: async () => ({ ok: true as const, state: "OPEN" as const }),
     },
   } as never);
-  return { f, outcome, spawned, rows, pushedHead, reviews, issues, closed };
+  return { f, outcome, spawned, rows, pushedHead, reviews, issues, closed, minedHeads };
 }
+
+test("W1-T12544 criterion 3: red CI after the active conflict push keeps the hold despite a stale review head", async t => {
+  for (const ci of ["red", "red-unpinned"] as const) {
+    for (const hold of ["design", "review", "ci", "legacy"] as const) {
+      await t.test(`${ci}: ${hold}`, async t => {
+        const r = await activeConflictRung(t, hold, false, undefined, ci);
+        assert.equal(r.pushedHead, MERGE_HEAD);
+        assert.equal(r.reviews, 0, "red CI prevents a review at B, leaving the persisted review at A");
+        assert.equal(r.outcome.review.headSha, HELD_HEAD);
+        assert.deepEqual(r.minedHeads, [ci === "red" ? MERGE_HEAD : undefined], "the red evidence is mined once");
+        assert.equal(r.rows.find(row => row.step === "fix.ci_not_green")!.ci, "red");
+        assert.equal(r.rows.find(row => row.step === "fix.merge_mode_cleared")!.site, "rung.ci_red");
+        assert.deepEqual(r.rows.filter(row => row.step === "fix.dispatch").map(row => row.mode), ["merge-conflict"]);
+        assert.equal(r.rows.find(row => row.step === "fix.done")!.head_sha, HELD_HEAD);
+        assert.equal(r.rows.find(row => row.step === "fix.done")!.pushed_head_sha, MERGE_HEAD);
+        assert.equal(r.spawned.length, 1, "the red merge head admits no ci-log worker");
+        assert.equal(r.outcome.strikes, 1);
+        assert.equal(r.outcome.outcome, hold === "design" ? "needs_design" : "stood_down");
+        assert.match(String(r.outcome.reason), hold === "design" ? new RegExp(DESIGN_REASON) : /ALREADY OPEN/);
+        assert.equal(r.closed, 0);
+        if (hold !== "design") assert.equal(r.issues[0]!.url, ISSUE_URL, "the original question stays open");
+        await runSweep([prAt(r.f.now, MERGE_HEAD, false)], { ...r.f.deps, readOpenEscalations: async () => r.issues });
+        assert.equal(r.f.effects.admissions, 0, "a fresh sweep also holds B with red CI");
+        assert.equal(r.f.effects.evidence.length, 0);
+        assert.equal(r.f.disposed().at(-1)!.hold_head_sha, HELD_HEAD);
+      });
+    }
+  }
+});
+
+test("W1-T12544 criterion 3: red CI after B→C keeps a question introduced at B", async t => {
+  const heads = { from: MERGE_HEAD, to: NEXT_MERGE_HEAD, prior: conflictRoundRows(systemClock.now()) };
+  for (const hold of ["design", "review"] as const) {
+    const r = await activeConflictRung(t, hold, false, heads, "red");
+    assert.equal(r.pushedHead, NEXT_MERGE_HEAD);
+    assert.equal(r.outcome.review.headSha, MERGE_HEAD, "the last review still names B");
+    assert.equal(r.reviews, 0);
+    assert.deepEqual(r.minedHeads, [NEXT_MERGE_HEAD]);
+    assert.deepEqual(r.rows.filter(row => row.step === "fix.dispatch").map(row => row.mode), ["merge-conflict"]);
+    assert.equal(r.spawned.length, 1);
+    assert.equal(r.outcome.outcome, hold === "design" ? "needs_design" : "stood_down");
+    assert.equal(r.closed, 0);
+  }
+});
+
+test("W1-T12544 criterion 3: red CI at the merge head admits a code worker without a hold or after an answer", async t => {
+  for (const answered of [false, true]) {
+    const r = await activeConflictRung(t, answered ? "review" : "none", answered, undefined, "red");
+    assert.equal(r.spawned.length, 2, "control: red CI is actionable when no unanswered question holds it");
+    assert.deepEqual(r.rows.filter(row => row.step === "fix.dispatch").map(row => row.mode), ["merge-conflict", "ci-log"]);
+    assert.equal(r.outcome.outcome, "fixed");
+    assert.equal(r.outcome.review.state, "success");
+  }
+});
 
 test("W1-T12544 criterion 3: the active rung preserves the hold through a conflict push and failed merge-head review", async t => {
   for (const hold of ["design", "review", "ci", "legacy"] as const) {

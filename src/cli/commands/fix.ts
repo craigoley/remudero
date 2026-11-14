@@ -2428,6 +2428,7 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
   // sweep's own resolved head so round 1 is pinned too, then re-pinned by every gate read. It is
   // never independently resolved here — a second read is a second chance to skew.
   let currentPinnedSha: string | undefined = opts.ciEvidenceDisagreement?.sha;
+  let currentPrHeadSha = currentPinnedSha ?? review.headSha;
   // W1-T2551: bounds the generator-fix short-circuit (site `rung.generator_fix`, below) to a
   // SMALL number of attempts per invocation — every attempt already re-verifies the regenerated
   // output against its OWN `:check` before committing anything, but this caps how many rounds a
@@ -2735,10 +2736,11 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
           return undefined;
         })
         : undefined;
-    // W1-T12544: this invocation's own conflict push carries the hold too, before the sweep runs again.
+    // W1-T12544: red CI can leave review at A after our conflict push to B. Trace the hold from
+    // the current PR head, and compare the carried head to that same head when selecting its cause.
     const holdLedgerRows = [...(deps.ledgerLines ?? (() => readLedgerLines(deps.ledgerPath)))(), ...roundRows];
-    const holdHeadSha = prNumber === undefined ? review.headSha : conflictRoundHeldHead(
-      { taskId: opts.taskId, prNumber, prUrl: opts.prUrl, headSha: review.headSha },
+    const holdHeadSha = prNumber === undefined ? currentPrHeadSha : conflictRoundHeldHead(
+      { taskId: opts.taskId, prNumber, prUrl: opts.prUrl, headSha: currentPrHeadSha },
       holdLedgerRows,
       deps.ledgerPath,
       undefined,
@@ -2782,7 +2784,7 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
             headSha: holdHeadSha,
             key: { ...fixEscalationDedupKey(opts.taskId, opts.prUrl, holdHeadSha,
               currentMergeConflict !== undefined, noReviewYet, currentContractRevision),
-              ...(holdHeadSha !== review.headSha ? { cause: undefined } : {}) },
+              ...(holdHeadSha !== currentPrHeadSha ? { cause: undefined } : {}) },
             find: (key: EscalationDedupKey) => findDuplicateEscalation(key, { issues: deps.issues }),
             pendingAnswer: opts.pendingAnswer ?? (opts.constraint !== undefined ? {} : undefined),
             redCheckNames: noReviewYet ? currentCiFailures?.map(f => f.name) : undefined,
@@ -3347,6 +3349,7 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
           const handoff = ciHandoff(gated);
           if (handoff) return handoff;
           currentPinnedSha = ciGateSha(gated) ?? currentPinnedSha;
+          currentPrHeadSha = ciGateSha(gated) ?? generatorResult.commitSha;
           if (deps.fetchCiFailures) {
             try {
               currentCiFailures = await deps.fetchCiFailures(opts.prUrl, ciGateSha(gated));
@@ -4337,6 +4340,7 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
           currentCiFailures = adopted;
           for (const f of adopted) everRedCiCheckNames.add(f.name);
           review = { ...review, headSha: publishedHead };
+          currentPrHeadSha = publishedHead;
           continue;
         }
         const reason = `published branch advanced from ${priorHeadSha} to ${publishedHead} before the worker started; the ordinary sweep must read fresh exact-head failure evidence`;
@@ -5141,6 +5145,7 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
     // W1-T2804: one gate read, one sha, and the miner below is pinned to it — never a second
     // independent head resolution between the two halves of a single decision.
     currentPinnedSha = ciGateSha(ci) ?? currentPinnedSha;
+    currentPrHeadSha = ciGateSha(ci) ?? landing.remoteHead ?? expectedHeadShaForPush ?? currentPrHeadSha;
     if (host.ciGateState(ci) !== "green") {
       deps.log("fix.ci_not_green", { strike: strikes, ci: host.ciGateState(ci), sha: ciGateSha(ci) });
       // W1-T138 (the #303/#305/#292/#315 fix): no review ran for THIS push
@@ -5445,6 +5450,7 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
       openTaskIds: opts.openTaskIds,
     });
     progressReviewInputDigest = reviewInputBody === undefined ? undefined : reviewInputDigest(review.headSha, reviewInputBody);
+    currentPrHeadSha = review.headSha;
     if (review.verdictWithheld) {
       deps.log("fix.stood_down", { site: "rung.reviewer_code_freshness", strikes, reason: review.verdictWithheld });
       return { outcome: "stood_down", review, strikes, retriggers, reason: review.verdictWithheld, standDownReason: review.verdictWithheld };
