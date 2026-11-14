@@ -1348,6 +1348,8 @@ function* gardenPassBody<C extends string, I, A extends GardenAction<C>, W exten
     try {
       const ws = yield* step<W | GardenCheckoutAsync<W>>(() => deps.openWorkspace());
       let unfiled = "the filing ended before its PR opened";
+      // W1-T12550: an opened PR or a landing failure/refusal keeps its outcome over a dispose error.
+      let settled = false;
       try {
         // A spec's apply only writes the tree; landing and disposal stay with the pass, awaited or not.
         const heldIds = yield* step(() => spec.prepare?.(ws as unknown as W, plan, async));
@@ -1369,6 +1371,7 @@ function* gardenPassBody<C extends string, I, A extends GardenAction<C>, W exten
           if (lint) {
             unfiled = `the merged-plan lint refused ${lint.file}: ${lint.message}`;
             // The check working, not a filing failure: no streak, no fingerprint — the next pass rebuilds on fresh main.
+            settled = true;
             deps.log(`${spec.name}.landing_refused`, { file: lint.file, message: lint.message });
             deps.log(`${spec.name}.scorecard`, { ...scorecard, acting: plan.acting, actions: plan.actions.length, pr_url: null, awaiting: state.pending?.prUrl ?? null, landing_refused: true });
             return { ran: true, plan, scorecard };
@@ -1378,14 +1381,21 @@ function* gardenPassBody<C extends string, I, A extends GardenAction<C>, W exten
           // W1-T12221: a wait is a filing in flight, not a failure: no streak, no refused draft, no id released.
           if (isGardenLandWaiting(landed)) waiting = landed.waiting;
           else prUrl = landed;
+          settled = prUrl !== undefined;
           if (prUrl === undefined && waiting === undefined) throw new GardenLandingRefusedError(digest!, "not_opened", `${spec.name} gardener: the landing's PR did not open (plan_pr.preflight_refused or _timed_out names why)`);
         }
       } catch (e) {
+        settled = true;
         unfiled = String((e as Error)?.message ?? e);
         throw e;
       } finally {
         yield* step(() => releaseGardenTaskIds(ws, `${spec.name} gardener: ${unfiled}`, async));
-        yield* step(() => ws.dispose());
+        try {
+          yield* step(() => ws.dispose());
+        } catch (e) {
+          deps.log(`${spec.name}.garden_dispose_failed`, { reason: String((e as Error)?.message ?? e), ...(prUrl ? { pr_url: prUrl } : {}) });
+          if (!settled) throw e;
+        }
       }
     } catch (e) {
       recordGardenMintTimeout(e, spec.name, deps.log);

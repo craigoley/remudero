@@ -6643,6 +6643,39 @@ export async function worktreeRemoveAsync(repoDir: string, worktreePath: string)
   sweepStaleWorkerScratch({ maxAgeMs: DEFAULT_TEARDOWN_SCRATCH_SWEEP_MAX_AGE_MS });
 }
 
+/** W1-T12550: git's "'<path>' is not a working tree" for this path means the tree is already gone. */
+function worktreeAlreadyRemoved(error: unknown, worktreePath: string): boolean {
+  const failure = (error ?? {}) as { stderr?: unknown; message?: unknown };
+  return `${String(failure.stderr ?? "")}\n${String(failure.message ?? "")}`.includes(`'${worktreePath}' is not a working tree`);
+}
+
+function settleRemovedWorktree(worktreePath: string): "already-removed" {
+  removeWorktreeBase(worktreePath);
+  fs.rmSync(worktreePath, { recursive: true, force: true });
+  return "already-removed";
+}
+
+/** {@link worktreeRemove} that tolerates only an absent tree; every other failure still throws. */
+export function worktreeRemoveIfPresent(repoDir: string, worktreePath: string): "removed" | "already-removed" {
+  try {
+    worktreeRemove(repoDir, worktreePath);
+    return "removed";
+  } catch (error) {
+    if (!worktreeAlreadyRemoved(error, worktreePath)) throw error;
+    return settleRemovedWorktree(worktreePath);
+  }
+}
+
+export async function worktreeRemoveIfPresentAsync(repoDir: string, worktreePath: string): Promise<"removed" | "already-removed"> {
+  try {
+    await worktreeRemoveAsync(repoDir, worktreePath);
+    return "removed";
+  } catch (error) {
+    if (!worktreeAlreadyRemoved(error, worktreePath)) throw error;
+    return settleRemovedWorktree(worktreePath);
+  }
+}
+
 /** Summary of what a start-of-run prune reclaimed (ledgered for provenance). */
 export interface PruneSummary {
   worktrees: string[];
