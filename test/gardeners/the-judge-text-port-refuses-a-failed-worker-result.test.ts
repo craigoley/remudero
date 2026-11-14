@@ -52,8 +52,8 @@ test("W1-T12549 criterion 1: a failed worker result throws JudgeWorkerFailedErro
   for (const [over, subtype] of [
     [{ subtype: "openweight_error", isError: true, apiError: true }, "openweight_error"],
     [{ subtype: "error_max_turns", isError: true }, "error_max_turns"],
-    [{ subtype: "success", apiError: true }, "success with an API error"],
-    [{ subtype: "success", isError: true }, "success with an error"],
+    [{ subtype: "success", apiError: true }, "success"],
+    [{ subtype: "success", isError: true }, "success"],
     [{ subtype: "interrupted" }, "interrupted"],
   ] as const) {
     const port = judgePort(t, () => workerResult({ ...over, text: "REVALIDATION_VERDICT: resolved", costUsd: 0.0839 }));
@@ -147,16 +147,24 @@ function queueWorld(t: { after(fn: () => void): void }, tasks: Array<[string, nu
 }
 
 test("W1-T12549 criterion 3: a failed judge worker is logged as an unavailable judge, never as a malformed answer", async (t) => {
-  const port = judgePort(t, () => workerResult({ subtype: "openweight_error", isError: true, apiError: true }));
-  // The production wiring: the queue judge calls the issue-revalidation port with issue number 0.
-  const w = queueWorld(t, [["W1-T1", 2, "task one"], ["W1-T2", 2, "task two"]], (prompt) => port.text(prompt, 0));
-  await assert.rejects(() => runGardenAsync(queueJudgeGardenSpec(w.deps, w.sources), w.deps), QueueJudgeUnavailableError);
-  const unavailable = w.logs.filter((l) => l.step === "queue_judge.unavailable");
-  assert.deepEqual(unavailable.map((l) => l.extra.reason), ["judge spawn failed: worker result failed (openweight_error)"]);
-  assert.equal(unavailable[0]!.extra.worker_subtype, "openweight_error");
-  assert.ok(!w.logs.some((l) => "answer_chars" in l.extra || /malformed|strict JSON/.test(String(l.extra.reason))));
-  assert.equal(port.prompts.length, 1);
-  assert.equal(port.spend().length, 1, "the pass still records what the failed attempt cost");
+  for (const over of [
+    { subtype: "openweight_error", isError: true, apiError: true },
+    { subtype: "success", apiError: true },
+    { subtype: "success", isError: true },
+  ]) {
+    const port = judgePort(t, () => workerResult(over));
+    // The production wiring: the queue judge calls the issue-revalidation port with issue number 0.
+    const w = queueWorld(t, [["W1-T1", 2, "task one"], ["W1-T2", 2, "task two"]], (prompt) => port.text(prompt, 0));
+    const before = [w.read("W1-T1"), w.read("W1-T2")];
+    await assert.rejects(() => runGardenAsync(queueJudgeGardenSpec(w.deps, w.sources), w.deps), QueueJudgeUnavailableError);
+    const unavailable = w.logs.filter((l) => l.step === "queue_judge.unavailable");
+    assert.deepEqual(unavailable.map((l) => l.extra.reason), [`judge spawn failed: worker result failed (${over.subtype})`]);
+    assert.equal(unavailable[0]!.extra.worker_subtype, over.subtype);
+    assert.ok(!w.logs.some((l) => "answer_chars" in l.extra || /malformed|strict JSON/.test(String(l.extra.reason))));
+    assert.deepEqual([w.read("W1-T1"), w.read("W1-T2")], before, "a failed worker cannot re-rank the queue");
+    assert.equal(port.prompts.length, 1);
+    assert.equal(port.spend().length, 1, "the pass still records what the failed attempt cost");
+  }
 });
 
 const LEFT_OUT_MOVE = JSON.stringify({ moves: [{ id: "W1-T100", priority: 0.5, reason: "left out", evidence: ["origin"], expected_cost_of_delay: 1,
@@ -210,3 +218,4 @@ test("W1-T12549 criterion 4: an unknown window falls back to the smallest declar
   assert.equal(typeof routed.tokens, "number", JSON.stringify(routed));
   assert.equal(queueJudgeRouteWindow({ model: "haiku", effort: "low", provider: "claude" }, mounts.capabilities).tokens, undefined);
 });
+

@@ -18,6 +18,7 @@ import {
   QueueJudgeUnavailableError, rankingPath, readRanking, type QueueJudgeSources,
 } from "#src/lib/queue-judge-gardener.js";
 import { queueJudgeRunTaskPorts } from "#src/run-task.js";
+import { OPENWEIGHT_CONTEXT_WINDOWS, OPENWEIGHT_MAX_COMPLETION_TOKENS } from "#src/lib/worker-provider.js";
 
 const NOW = Date.parse("2026-10-26T12:00:00.000Z");
 const HOUR = 3_600_000;
@@ -480,4 +481,23 @@ test("W1-T9925: the daemon's ports judge on the escalation mount and read the op
   assert.equal(typeof window.tokens, "number", JSON.stringify(window));
   board = { ok: false, reason: "open snapshot is incomplete" };
   assert.throws(() => ports.openPrNumbers(), /open-PR snapshot is unavailable \(open snapshot is incomplete\)/);
+});
+
+test("W1-T12549 criterion 4: the production port without mounts.yaml falls back and logs the bound source", async (t) => {
+  const w = world(t, { tasks: [["W1-T1", { priority: "2" }], ["W1-T2", { priority: "2" }]] });
+  assert.equal(existsSync(join(w.root, ".remudero", "mounts.yaml")), false);
+  const ports = queueJudgeRunTaskPorts({ owner: "acme", repo: "remudero", repoRoot: w.root, stateDir: w.stateDir, root: w.root, log: () => {} });
+  const window = ports.promptWindow();
+  assert.equal(window.tokens, undefined);
+  assert.ok("reason" in window);
+  assert.match(window.reason, /the judge mount could not be loaded or resolved .*runner configuration is missing/);
+  await runGardenAsync(queueJudgeGardenSpec(w.deps, { ...w.sources, promptWindow: ports.promptWindow }), w.deps);
+  const smallest = Math.min(...Object.values(OPENWEIGHT_CONTEXT_WINDOWS).map((v) => v.totalTokens));
+  const maxChars = (smallest - OPENWEIGHT_MAX_COMPLETION_TOKENS) * 3;
+  const bound = w.logs.filter((l) => l.step === "queue_judge.prompt_bound");
+  assert.deepEqual(bound.map((l) => [l.extra.source, l.extra.window_tokens, l.extra.max_chars, l.extra.reason]),
+    [["unknown-window-default", smallest, maxChars, window.reason]]);
+  assert.equal(w.calls.judge, 1, "the production window lookup lets the pass reach its judge");
+  assert.ok(w.prompts[0]!.length <= maxChars);
+  assert.equal(w.calls.workspace, 0);
 });

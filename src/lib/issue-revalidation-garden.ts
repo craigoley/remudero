@@ -1003,7 +1003,7 @@ export class JudgeWorkerFailedError extends RmdError {
 function failedResultSubtype(result: WorkerResult): string | undefined {
   if (result.subtype === "success" && !result.isError && !result.apiError) return undefined;
   if (typeof result.subtype !== "string" || result.subtype === "") return "no subtype";
-  return result.subtype !== "success" ? result.subtype : result.apiError ? "success with an API error" : "success with an error";
+  return result.subtype;
 }
 
 /** The existing single judge spawn, with best-effort monetary receipts before parsing can discard a

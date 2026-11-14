@@ -28336,8 +28336,12 @@ export function queueJudgeRunTaskPorts(
   return {
     judgeText: (prompt) => judge.judgeText(prompt, 0),
     promptWindow: () => {
-      const mounts = loadMounts(mountsPath(repoRoot));
-      return queueJudgeRouteWindow(mounts.escalation_judge ?? resolveRiskJudgeMount(mounts), mounts.capabilities);
+      try {
+        const mounts = loadMounts(mountsPath(repoRoot));
+        return queueJudgeRouteWindow(mounts.escalation_judge ?? resolveRiskJudgeMount(mounts), mounts.capabilities);
+      } catch (e) {
+        return { tokens: undefined, reason: `the judge mount could not be loaded or resolved (${String((e as Error)?.message ?? e).slice(0, 120)})` };
+      }
     },
     openPrNumbers: () => {
       const open = (seams.openBoard ?? readOpenBoardSnapshot)(root, owner, repo);
