@@ -9,6 +9,7 @@ import { test, type TestContext } from "node:test";
 import { systemClock } from "#src/lib/clock.js";
 import { openEscalationStandDownReason, type OpenIssue } from "#src/lib/escalate.js";
 import { MAX_RETAINED_LINES_PER_STEP, rotateLedger } from "#src/lib/ledger.js";
+import { readLedgerUnionRecordsSync } from "#src/lib/ledger-union.js";
 import { readLedgerLines } from "#src/lib/status.js";
 import {
   DEFAULT_SWEEP_POLICY, conflictRoundHeldHead, deriveDisposition, runSweep, type FixDispatchEvidence, type OpenPrView, type SweepDeps,
@@ -112,6 +113,32 @@ test("W1-T12544 criterion 1: a design handoff first recorded at B survives an ea
   assert.equal(f.effects.evidence.length, 1, "B receives a conflict worker under its own design hold");
   assert.equal(f.disposed().at(-1)!.design_hold_kept, true);
   assert.equal(f.disposed().at(-1)!.hold_head_sha, undefined, "the hold belongs to current head B, not A");
+});
+
+test("W1-T12544 criterion 1: a recorded needs-design stand-down cannot override the conflict round", async t => {
+  const now = systemClock.now();
+  for (const site of ["rung.needs_design", "rung.empty_review_evidence"]) {
+    const f = fixture(t, [...designRows(now),
+      { step: "fix.stood_down", task_id: TASK, head_sha: HELD_HEAD, read_head_sha: HELD_HEAD,
+        site, reason: DESIGN_REASON, ts: new Date(now - 6000).toISOString(), run_id: "DESIGN-ROUND" },
+      { step: "sweep.disposed", pr_number: 18033, head_sha: HELD_HEAD, disposition: "blocked-fixable",
+        acted: true, run_id: "DESIGN-ROUND", ts: new Date(now - 5500).toISOString() },
+    ]);
+    const summary = await runSweep([prAt(f.now, HELD_HEAD, true)], f.deps);
+    const row = f.disposed().at(-1)!;
+    if (site === "rung.needs_design") {
+      assert.equal(summary.actions[0]!.disposition, "conflicted");
+      assert.equal(f.effects.admissions, 1);
+      assert.equal(f.effects.evidence.length, 1, "the production stand-down still permits one conflict round");
+      assert.deepEqual(f.effects.evidence[0]!.mergeConflict, EVIDENCE);
+      assert.deepEqual([row.disposition, row.design_hold_kept, row.acted], ["conflicted", true, true]);
+      assert.equal(f.effects.escalations.length, 0);
+    } else {
+      assert.equal(summary.actions[0]!.disposition, "refused-escalate", "an unrelated stand-down still holds");
+      assert.equal(f.effects.admissions, 0);
+      assert.equal(f.effects.evidence.length, 0);
+    }
+  }
 });
 
 test("W1-T12544 criterion 2: an open escalation with no cause or another cause does not stand down a conflict round", async t => {
@@ -231,6 +258,47 @@ test("W1-T12544 criterion 3: newest-200 retention archives conflict pushes witho
         assert.equal(f.effects.evidence.length, 1, "control: a later outside head is admitted with the same archives");
       });
     }
+  }
+});
+
+test("W1-T12544 criterion 3: a complete archive keeps the design hold when its live question is absent", async t => {
+  for (const receipt of ["fix.done", "sweep.conflict_regenerated"] as const) {
+    await t.test(receipt, async t => {
+      const now = systemClock.now();
+      const pushRows = receipt === "fix.done" ? conflictRoundRows(now) : [{
+        step: receipt, ts: new Date(now - 4000).toISOString(), pr_number: 18033,
+        head_sha: HELD_HEAD, new_head_sha: MERGE_HEAD, outcome: "pushed",
+      }];
+      const newer = Array.from({ length: MAX_RETAINED_LINES_PER_STEP }, (_, i) =>
+        ["fix.dispatch", "fix.done", "fix.needs_design", "sweep.conflict_regenerated"].map(step => ({
+          step, ts: new Date(now - 3000 + i).toISOString(), task_id: `W1-T${20000 + i}`,
+          pr_number: 20000 + i, run_id: `OTHER-${i}`, head_sha: OUTSIDE_HEAD,
+        }))).flat();
+      const f = fixture(t, [...designRows(now), ...pushRows, ...newer,
+        { step: "cli.invoked", ts: new Date(now).toISOString(), pad: "x".repeat(300_000) }]);
+      const path = f.deps.ledgerPath;
+      assert.equal(rotateLedger(path, { ceilingBytes: 256_000, smoothingWindowMs: 0,
+        now: () => new Date(now) }).rotated, true);
+      const live = readLedgerLines(path);
+      assert.equal(live.filter(row => row.step === "fix.needs_design").length, MAX_RETAINED_LINES_PER_STEP);
+      assert.equal(live.some(row => row.task_id === TASK && row.step === "fix.needs_design"), false,
+        "the held question itself has left the live ledger");
+      const union = readLedgerUnionRecordsSync(dirname(path), {
+        step: ["fix.dispatch", "fix.done", "fix.needs_design", "sweep.conflict_regenerated"], refuseIncomplete: true });
+      assert.equal(union.ok, true, "control: the archive is complete and readable");
+      assert.equal(union.rows.some(row => row.task_id === TASK && row.step === "fix.needs_design" &&
+        row.reason === DESIGN_REASON), true, "control: the archived question is present");
+      assert.equal(conflictRoundHeldHead(prAt(f.now, MERGE_HEAD, false), live, path), HELD_HEAD);
+      const summary = await runSweep([prAt(f.now, MERGE_HEAD, false)], f.deps);
+      assert.equal(summary.actions[0]!.disposition, "refused-escalate");
+      assert.match(summary.actions[0]!.reason, new RegExp(DESIGN_REASON));
+      assert.equal(f.effects.admissions, 0, "an archived unanswered question prevents code admission");
+      assert.equal(f.effects.evidence.length, 0);
+      assert.equal(f.disposed().at(-1)!.hold_head_sha, HELD_HEAD);
+      const outside = await runSweep([prAt(f.now, OUTSIDE_HEAD, false)], f.deps);
+      assert.equal(outside.actions[0]!.disposition, "blocked-fixable");
+      assert.equal(f.effects.evidence.length, 1, "control: the archive does not hold an outside head");
+    });
   }
 });
 

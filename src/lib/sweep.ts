@@ -16896,7 +16896,7 @@ export type TerminalFixDesignHandoff =
 /**
  * W1-T11013 — rotation keeps `fix.needs_design` rows longer than the round's `fix.dispatch`/`fix.done`, so a live-only
  * read of an old round says "unavailable" and the PR holds forever. `archive` supplies the archive∪live rows (or
- * undefined when that corpus is incomplete); it is consulted only after the live read came up unavailable.
+ * undefined when that corpus is incomplete); it also recovers a question that left the live file entirely.
  */
 export function terminalFixDesignHandoff(
   pr: Pick<OpenPrView, "taskId" | "prNumber" | "prUrl" | "headSha">,
@@ -16904,11 +16904,11 @@ export function terminalFixDesignHandoff(
   archive?: () => ReadonlyArray<Record<string, unknown>> | undefined,
 ): TerminalFixDesignHandoff {
   const live = terminalFixDesignHandoffFromLines(pr, lines);
-  if (live.kind !== "unavailable" || archive === undefined) return live;
+  if (live.kind === "handoff" || archive === undefined) return live;
   const union = archive();
   if (union === undefined) return live;
   const resolved = terminalFixDesignHandoffFromLines(pr, [...union, ...lines]);
-  return resolved.kind === "handoff" ? resolved : live;
+  return resolved.kind === "handoff" || live.kind === "none" ? resolved : live;
 }
 
 function conflictRoundOutranksEscalationHold(
@@ -22636,7 +22636,8 @@ export async function runSweep(
         reason = `${reason} — the rung's conflict hand-off at ${held!.hold!.at} was held under main ${heldUnderMain.slice(0, 7)}, and ` +
           `main is now ${mainTipSha!.slice(0, 7)}, so the rung re-reads this head's mergeability (W1-T11173)`;
       }
-      if (held?.kind === "held" && held.hold !== undefined && !conflictHandoff && !conflictHoldReleased) {
+      if (held?.kind === "held" && held.hold !== undefined && !conflictHandoff && !conflictHoldReleased &&
+          !(designHoldKept && held.hold.site === "rung.needs_design")) {
         standDownHold = held.hold;
         heldEscalationAt = held.hold.at;
         disposition = "refused-escalate";
