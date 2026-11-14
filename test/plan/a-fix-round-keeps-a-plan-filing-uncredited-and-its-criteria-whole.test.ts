@@ -87,6 +87,13 @@ test("a plan-filing fix round that lowers or rewrites the filing's criteria is r
   }
   const repaired = criteria.map(c => ({ ...c, proof: c.proof.replaceAll("`", "") }));
   assert.equal(planFilingFixRoundRefusal(input({ nextShards: { [SHARD]: shard(repaired) } })), undefined);
+  const existingTarget = `unit test: ${OTHER}`;
+  const formattedExistingTarget = `unit test: \`${OTHER}\``;
+  assert.equal(planFilingFixRoundRefusal(input({
+    priorShards: { [SHARD]: shard([{ ...criteria[0], proof: existingTarget }, criteria[1]]) },
+    nextShards: { [SHARD]: shard([{ ...criteria[0], proof: formattedExistingTarget }, criteria[1]]) },
+    mainTestPaths: { [formattedExistingTarget]: [OTHER] },
+  })), undefined, "formatting an unchanged existing target is not a repoint");
   const namedTest = "unit test: someSymbol rejects an invalid filing";
   assert.equal(planFilingFixRoundRefusal(input({ nextShards: { [SHARD]: shard([criteria[0], { ...criteria[1], proof: namedTest }]) },
     mainTestPaths: { [namedTest]: [DECLARED] } })), undefined);
@@ -152,6 +159,14 @@ test("the filing reader compares real commits and resolves unrelated existing te
     return repo.git(...args);
   });
   assert.match(planFilingFixRoundRefusal(failedGrep)!, /cannot search tests/);
+  write(SHARD, shard([{ ...criteria[0], proof: `unit test: ${OTHER}` }, criteria[1]]));
+  repo.git("add", "."); repo.git("commit", "-m", "chore(plan): record existing proof target");
+  const existingPrior = repo.git("rev-parse", "HEAD");
+  write(SHARD, shard([{ ...criteria[0], proof: `unit test: \`${OTHER}\`` }, criteria[1]]));
+  repo.git("add", "."); repo.git("commit", "-m", "fix(plan): format existing proof target");
+  const formatted = await readPlanFilingFixRoundInput([SHARD], existingPrior, "HEAD", args => repo.git(...args));
+  assert.equal(planFilingFixRoundRefusal(formatted), undefined,
+    "the reader and guard preserve an existing target through a proof-form repair");
 });
 
 test("a plan-filing fix round that credits a filed task is refused", async (t) => {

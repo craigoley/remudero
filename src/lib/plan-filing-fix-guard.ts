@@ -7,6 +7,12 @@ function proofText(proof: string | undefined): string {
   const text = proof?.trim() ?? "";
   return /^(`+)\s*([\s\S]*?)\s*\1$/.exec(text)?.[2].trim() ?? text;
 }
+function unitTestTarget(proof: string | undefined): string | undefined {
+  const target = /^unit test:\s*(.+)$/i.exec(proofText(proof))?.[1].trim();
+  if (!target) return undefined;
+  const unwrapped = /^(`+)\s*([\s\S]*?)\s*\1$/.exec(target)?.[2].trim() ?? target;
+  return /^(?:\.\/)?test\/\S+\.[cm]?[jt]sx?$/.test(unwrapped) ? posix.normalize(unwrapped) : unwrapped;
+}
 export interface PlanFilingFixRoundInput {
   baselineDiffFiles?: readonly string[];
   introducedTaskIds?: readonly string[];
@@ -73,7 +79,8 @@ export function planFilingFixRoundRefusal(input: PlanFilingFixRoundInput): strin
               }
             }
           }
-          if (proof !== criterion.proof && /^unit test:/i.test(proofText(proof))) {
+          const replacementTarget = unitTestTarget(proof);
+          if (replacementTarget !== undefined && replacementTarget !== unitTestTarget(criterion.proof)) {
             if (mainTestPaths![proof] === undefined) return `unreadable test paths for ${proof}`;
             const declared = new Set(declaredFilesByTask![prior.id].map(file => posix.normalize(file)));
             const outside = mainTestPaths![proof].filter(file => !declared.has(posix.normalize(file)));
@@ -112,7 +119,7 @@ export async function readPlanFilingFixRoundInput(
       }
       for (const task of tasks(nextShards[path])) for (const criterion of task.acceptance) {
         const proof = criterion.proof ?? "";
-        const target = /^unit test:\s*(.+)$/i.exec(proofText(proof))?.[1].trim();
+        const target = unitTestTarget(proof);
         if (!target || mainTestPaths[proof] !== undefined) continue;
         const canonicalTarget = posix.normalize(target);
         if (/^test\/\S+\.[cm]?[jt]sx?$/.test(canonicalTarget)) {
