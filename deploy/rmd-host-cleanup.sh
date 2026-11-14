@@ -471,6 +471,24 @@ is_protected_worktree() {
   return 1
 }
 
+# W1-T12454: a path under a worktree root belongs to the worktree rules, so the scratch walks leave it.
+worktree_root_of() {   # prints the worktree root that is $1 or holds it
+  local p="${1%/}" r
+  while IFS= read -r r; do
+    r="${r%/}"; [ -n "$r" ] || continue
+    case "$p" in "$r"|"$r"/*) printf '%s\n' "$r"; return 0 ;; esac
+  done < <(printf '%s\n' "$WORKTREE_ROOTS" | tr ':' '\n')
+  return 1
+}
+worktree_root_inside() {   # prints a worktree root strictly inside $1
+  local p="${1%/}" r
+  while IFS= read -r r; do
+    r="${r%/}"; [ -n "$r" ] || continue
+    case "$r" in "$p"/*) printf '%s\n' "$r"; return 0 ;; esac
+  done < <(printf '%s\n' "$WORKTREE_ROOTS" | tr ':' '\n')
+  return 1
+}
+
 # One decision per path: keep-with-reason, or remove.
 sweep_path() {
   local p="$1" idle_status seed_reason entries bytes
@@ -1091,12 +1109,17 @@ lender_check() {
   [ -z "$borrowers" ] || { SCRATCH_REASON="lends objects to $borrowers"; return 1; }
 }
 sweep_scratch_unit() {
-  local p="$1" status entries entry repo head bundles bytes seed_reason gitdir hosted
+  local p="$1" status entries entry repo head bundles bytes seed_reason gitdir hosted wt_root
   local IDLE_MINUTES="$SCRATCH_IDLE_MINUTES" SCRATCH_REASON=""
   # Empty when the unit holds no repository: healthy, and it still passes every check below.
   # ${a[@]+...} because Bash before 4.4 calls an empty array unbound under `set -u` (W1-T6594).
   local -a SCRATCH_LIVE_REPOS=()
+  if wt_root="$(worktree_root_of "$p")"; then
+    [ "$wt_root" != "${p%/}" ] || log "KEEP $p: worktree root; the worktree rules judge its children"
+    return
+  fi
   scratch_guard "$p" || return
+  if wt_root="$(worktree_root_inside "$p")"; then log "KEEP $p: holds worktree root $wt_root"; return; fi
   is_worktree_idle "$p"; status=$?
   case "$status" in
     0) ;;
@@ -1334,6 +1357,7 @@ preserve_hold() {
 RULING_CHILD=""
 preserve_skip() {
   local p="$1" other
+  worktree_root_of "$p" >/dev/null && return 0
   [ "$p" = "$RULING_CHILD" ] && return 1
   ruling_namespace "$p" && [ -z "$RULING_CHILD" ] && return 0
   case "${p##*/}" in
@@ -1342,7 +1366,11 @@ preserve_skip() {
   while IFS= read -r other; do
     other="${other%/}"
     [ -n "$other" ] || continue
-    case "$other" in "$p"|"$p"/*) return 0 ;; esac
+    # Walk a folder holding a worktree root; skip the root and its descendants above.
+    case "$other" in
+      "$p") return 0 ;;
+      "$p"/*) [ "$(worktree_root_of "$other")" = "$other" ] || return 0 ;;
+    esac
   done < <(printf '%s\n' "$PRESERVE_ROOTS" "$PRESERVE_ROOT" "$ARCHIVE_ROOT" "$WORKTREE_ARCHIVE_ROOT" "$RETAIN_ROOTS" \
              "$COVERAGE_PATHS" "$LOCK_FILE" | tr ':' '\n')
   return 1
@@ -1500,7 +1528,7 @@ preserve_bundles() {
 # judged on its own, and stays while any child does (operator 2026-10-23).
 preserve_unit() {
   local p="$1" entries bundles status uid found seed_reason entry repo gitdir reg target i bytes copies="" pp
-  local is_repo=0 descend="" protected denied
+  local is_repo=0 descend="" protected denied wt_root
   local IDLE_MINUTES="$SCRATCH_IDLE_MINUTES" SCRATCH_REASON=""
   local -a repos=() heads=() ref_hashes=()
   [ -d "$p" ] && [ ! -L "$p" ] || return 0
@@ -1516,6 +1544,7 @@ preserve_unit() {
   if is_protected_worktree "$p"; then preserve_hold "$p" "protected by janitor configuration"; return; fi
   { [ -e "$p/.git" ] || [ -L "$p/.git" ]; } && is_repo=1
   [ -z "$denied" ] || descend="unreadable path inside ($(printf '%s\n' "$denied" | head -n 1))"
+  if wt_root="$(worktree_root_inside "$p")"; then descend="${descend:-holds worktree root $wt_root}"; fi
   if [ -f "$p/HEAD" ] && [ -d "$p/objects" ] && [ -d "$p/refs" ]; then preserve_hold "$p" "bare repository; Git history retained"; return; fi
   while IFS= read -r protected; do
     protected="${protected%/}"
