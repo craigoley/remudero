@@ -174,9 +174,9 @@ APPROVED_SPECIAL_MEMBER_ALIASES = {
         ("setuptools", "84.0.0", "51a52592b3b99e102b609654876bd65f19f999935166d1352678931132b0c670"),
 }
 AUDIT_TEST_SOURCES = {
-    "runtime_audit_metadata_tests.py": "9abceb4ec758698bc2e0255b97ad35d0685ee014030fd3f5d4c9cf2ce29eca0d",
+    "runtime_audit_metadata_tests.py": "9e1b11d9c4cf7fe3c94f142db108eb337494c91ec0d5f957434c84387da710f3",
     "runtime_audit_test_fixtures.py": "66d2d91312ab5006bef72ef6ab2daa2ea8816870e7c6f740ca296d428d58190d",
-    "test_runtime_compatibility_audit.py": "1f47663f9e61109b51054f24752689f306affb6ad712330de942621a51ac322f",
+    "test_runtime_compatibility_audit.py": "513746b5e50c660f3afa7cbb9a4a704d006dc96c28014e24c35bf82b36fd3a7a",
     "runtime_source_recipe.py": "6d1d2cc20e1a2fe225f913d9df815771b4e047c872bdaabbb59eceea52bcb35d",
     "prepare-source-build.py": "96eb19457f4799979e691459ad19ba761ab498d6576470db7c77eb5708171274",
     "source-build-policy.json": "5cf435e3bb81a52e1583ea00008d0e46a3c0ec64d920fe6720d59f88870bd83a",
@@ -243,6 +243,12 @@ def approved_tool_artifact(name: str, version: str, artifact_sha: str) -> bool:
     if approved is not None:
         return (version, artifact_sha) in approved
     return name not in APPROVED_TOOLS or (version, artifact_sha) == APPROVED_TOOLS[name]
+
+
+def approved_build_tool_lock(pins: dict) -> bool:
+    return (set(pins) == set(APPROVED_TOOLS) and all(
+        pins[name] in APPROVED_TOOL_ARTIFACTS.get(name, {approved})
+        for name, approved in APPROVED_TOOLS.items()))
 
 
 def _api_from_imported_pip(provenance: dict) -> SimpleNamespace:
@@ -616,7 +622,7 @@ def audit_locked_artifacts(build_lock: bytes, runtime_lock: bytes, artifacts: li
         return result
     need(api.pip.__version__ == "26.2.1" and api.provenance["state"] == "PINNED_API_BYTES_VERIFIED", "PINNED_API_REQUIRED", "no host fallback")
     build, runtime = pins(build_lock), pins(runtime_lock)
-    need(build == APPROVED_TOOLS, "BUILD_TOOL_POLICY", "tool pins differ from trusted constants")
+    need(approved_build_tool_lock(build), "BUILD_TOOL_POLICY", "tool pins differ from reviewed artifacts")
     need(runtime.get("peewee") == APPROVED_PEEWEE, "RUNTIME_RECIPE", "Peewee")
     _runtime_recipe(runtime)
     for name in build.keys() & runtime.keys():
@@ -701,8 +707,8 @@ def _locked_inputs(root):
     build = _regular(root / "build-requirements.txt", 131072)
     runtime = _regular(root / "requirements.txt", 131072)
     b, r = _lock_pins(build), _lock_pins(runtime)
-    need(b == APPROVED_TOOLS and r.get("peewee") == APPROVED_PEEWEE,
-         "RECIPE_POLICY", "fixed original build pins, approved Peewee and Semgrep version required")
+    need(approved_build_tool_lock(b) and r.get("peewee") == APPROVED_PEEWEE,
+         "RECIPE_POLICY", "reviewed build pins, approved Peewee and Semgrep version required")
     _runtime_recipe(r)
     need(all(b[n] == r[n] for n in b.keys() & r.keys()), "LOCK_OVERLAP", "tool drift")
     return build, runtime, b | r

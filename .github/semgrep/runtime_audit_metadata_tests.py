@@ -70,6 +70,15 @@ def attach_metadata_cases(case, H):
                 self.p.APPROVED_SPECIAL_MEMBERS = {old: {path: (len(data), self.p.digest(data))}}
                 self.p.APPROVED_SPECIAL_MEMBER_ALIASES = {new: old}
                 self.assertTrue(self.p.approved_special_member(*new, path, data, ("site", *path.split("/"))))
+                old_build = dict(self.p.APPROVED_TOOLS)
+                self.assertTrue(self.p.approved_build_tool_lock(old_build))
+                new_build = dict(old_build)
+                new_build["setuptools"] = new[1:]
+                self.assertTrue(self.p.approved_build_tool_lock(new_build))
+                for pin in (("84.2.0", new[2]), ("84.1.0", "0" * 64)):
+                    rejected = dict(old_build)
+                    rejected["setuptools"] = pin
+                    self.assertFalse(self.p.approved_build_tool_lock(rejected))
             finally:
                 self.p.APPROVED_SPECIAL_MEMBERS = original
                 self.p.APPROVED_SPECIAL_MEMBER_ALIASES = original_aliases
