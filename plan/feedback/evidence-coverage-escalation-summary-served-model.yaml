@@ -4,7 +4,7 @@ raw: >-
   Evidence coverage gap (evidence-coverage-v1, over benchmark-quality-v1): lane
   `escalation-summary`, field `servedModel`.
 
-  Coverage: 646/790 joined worker calls (81.8%) in the trailing 7-day window;
+  Coverage: 650/808 joined worker calls (80.4%) in the trailing 7-day window;
   trailing baseline 99.1% — below it by more than 10.0%.
 
   First seen: 2026-11-11T18:06:47.334Z.
@@ -23,3 +23,59 @@ summary: null
 expansion: null
 submission_key: null
 thread_id: null
+evidence_coverage_revision:
+  version: 1
+  mainSha: 64e89ff8e75f3b974ccaf7806dd58d2bfdfe5158
+  expectedRecord: >
+    id: evidence-coverage-escalation-summary-served-model
+
+    ts: 2026-11-13T22:57:42.074Z
+
+    raw: >-
+      Evidence coverage gap (evidence-coverage-v1, over benchmark-quality-v1): lane
+      `escalation-summary`, field `servedModel`.
+
+      Coverage: 646/790 joined worker calls (81.8%) in the trailing 7-day window;
+      trailing baseline 99.1% — below it by more than 10.0%.
+
+      First seen: 2026-11-11T18:06:47.334Z.
+
+
+      This follow-up never gates a PR or blocks work. Restore the field at the
+      lane's ledger write site (src/lib/benchmark-evidence.ts names what each field
+      reads), or record why this lane legitimately lacks it. The evidence-coverage
+      gardener updates this entry in place while the gap persists.
+    attachments: []
+
+    origin: cli
+
+    status: new
+
+    reply_to: null
+
+    proposal_pr: null
+
+    summary: null
+
+    expansion: null
+
+    submission_key: null
+
+    thread_id: null
+  expectedPlan:
+    plan/tasks.yaml: 4f7b11c7c694a482e077db0e692abc5874cf6611
+    plan/tasks.d: 5a24cf9db945ffa98083612b8448505fe74259c0
+  measurement:
+    lane: escalation-summary
+    field: servedModel
+    observed: 650
+    denominator: 808
+    floor: 0.9
+    baseline: 0.9909584086799277
+    at: 2026-11-14T10:59:21.278Z
+    since: 2026-11-07T10:59:21.278Z
+    line: "Coverage: 650/808 joined worker calls (80.4%) in the trailing 7-day
+      window; trailing baseline 99.1% — below it by more than 10.0%."
+  closure:
+    eligible: false
+    reason: record is open
