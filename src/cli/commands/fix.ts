@@ -2178,7 +2178,9 @@ async function reenteredScopeMergeConflict(
   if (!(await clean())) return { reason: "the worktree is not clean" };
   if ((await git(["rev-parse", "HEAD"])).trim() !== headSha) return { reason: `the worktree is not at ${headSha}` };
   await git(["fetch", "--no-tags", "origin", "main"]);
-  const stopped = await git(["merge", "--no-edit", "--no-commit", "--no-ff", "refs/remotes/origin/main"]).then(() => false, () => true);
+  // A merge needs a committer identity even with --no-commit; a runner without one fails before any conflict.
+  const stopped = await git(["-c", "user.name=remudero trial merge", "-c", "user.email=trial-merge@remudero.invalid",
+    "merge", "--no-edit", "--no-commit", "--no-ff", "refs/remotes/origin/main"]).then(() => false, () => true);
   let evidence: MergeConflictEvidence | undefined;
   try {
     evidence = stopped ? await capturedScopeMergeConflict(git) : undefined;
