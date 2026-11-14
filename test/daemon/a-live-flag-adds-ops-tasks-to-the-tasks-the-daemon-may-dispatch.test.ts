@@ -33,6 +33,9 @@ const publicYaml = ["PUB-A", "PUB-B", "PUB-C"].map((id, i) =>
 const opsYaml = "- id: OPS-T1\n  title: allowed private task title\n  repo: remudero\n  type: implement\n" +
   `  verify: auto\n  priority: 0\n  depends_on: []\n  rationale: ${PRIVATE}\n`;
 const LIVE_SEAMS = ["secondaryCatalogShadowSource", "primaryPlanCommit", "readOpsTaskDispatch"];
+// Flake-screen runs many copies under load; the real CLI child must have time to start
+// before this fixture judges whether the public ref was claimed or refused.
+const CLAIM_CHILD_TIMEOUT_MS = 120_000;
 
 interface Scenario {
   opsText?: string;
@@ -153,7 +156,7 @@ async function selectedRun(enabled: unknown, scenario: Scenario = {}): Promise<{
         const args = ["--import", import.meta.resolve("tsx"), join(REPO_ROOT, "src", "run-task.ts"), "claim", id];
         const ref = `refs/rmd-dispatch/${id}`;
         assert.equal(primary.git("ls-remote", origin.dir, ref), "");
-        const first = spawnSync(process.execPath, args, { cwd: dirname(dirname(target.planPath)), env, encoding: "utf8", timeout: 30_000 });
+        const first = spawnSync(process.execPath, args, { cwd: dirname(dirname(target.planPath)), env, encoding: "utf8", timeout: CLAIM_CHILD_TIMEOUT_MS });
         const firstDiagnostic = JSON.stringify({ status: first.status, signal: first.signal,
           error: first.error?.message, stdout: first.stdout, stderr: first.stderr });
         rows.push({ step: "fixture.claim_child", data: { stage: "primary", diagnostic: firstDiagnostic } });
@@ -168,7 +171,7 @@ async function selectedRun(enabled: unknown, scenario: Scenario = {}): Promise<{
         rival.git("config", "user.name", GIT_REPO_FIXTURE_IDENTITY.name);
         rival.git("config", "user.email", GIT_REPO_FIXTURE_IDENTITY.email);
         const second = rival;
-        const rejected = spawnSync(process.execPath, args, { cwd: second.dir, env, encoding: "utf8", timeout: 30_000, stdio: ["ignore", "pipe", "pipe"] });
+        const rejected = spawnSync(process.execPath, args, { cwd: second.dir, env, encoding: "utf8", timeout: CLAIM_CHILD_TIMEOUT_MS, stdio: ["ignore", "pipe", "pipe"] });
         const rejectedDiagnostic = JSON.stringify({ status: rejected.status, signal: rejected.signal,
           error: rejected.error?.message, stdout: rejected.stdout, stderr: rejected.stderr });
         rows.push({ step: "fixture.claim_child", data: { stage: "rival", diagnostic: rejectedDiagnostic } });
