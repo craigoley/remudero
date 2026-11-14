@@ -22548,10 +22548,10 @@ export async function runSweep(
       if (terminalFixDesignHandoff(atHead, history, readRepairArchive).kind !== "none") return true;
       const key = fixEscalationDedupKey(escalationTaskIdFor(pr), pr.prUrl, head,
         pr.mergeConflict !== undefined, isBlockedCi(pr), undefined);
-      const issue = matchDuplicateEscalation({ ...key, cause: undefined }, openForHead);
-      return openEscalationStandDownReason(head, issue, undefined,
-        { conflictEvidenceCaptured: hasCapturedMergeConflictEvidence(pr.mergeConflict), baseSha: mainTipSha },
-        undefined, pr.pendingAnswer) !== undefined && escalationIssueCause(issue?.body) !== "conflict";
+      return openForHead.some(issue => matchDuplicateEscalation({ ...key, cause: undefined }, [issue]) !== undefined &&
+        openEscalationStandDownReason(head, issue, undefined,
+          { conflictEvidenceCaptured: hasCapturedMergeConflictEvidence(pr.mergeConflict), baseSha: mainTipSha },
+          undefined, pr.pendingAnswer) !== undefined && escalationIssueCause(issue.body) !== "conflict");
     }) : pr.headSha;
     if ((disposition === "conflicted" || disposition === "blocked-fixable") &&
         !inFlightFixKeys.has(`${fixLedgerTaskIdFor(pr) ?? ""}@${pr.headSha}`) &&
@@ -23487,10 +23487,11 @@ export async function runSweep(
               if (issues.length > 0) {
                 const escalationKey = fixEscalationDedupKey(escalationTaskIdFor(pr), pr.prUrl, holdHead,
                   pr.mergeConflict !== undefined, isBlockedCi(pr), deps.readTaskContractRevision?.(escalationTaskIdFor(pr)));
-                const candidate = matchDuplicateEscalation(holdHead === pr.headSha ? escalationKey : { ...escalationKey, cause: undefined }, issues);
-                const openHold = openEscalationStandDownReason(holdHead, candidate, escalationKey.contractRevision,
-                  { conflictEvidenceCaptured: hasCapturedMergeConflictEvidence(pr.mergeConflict), baseSha: mainTipSha },
-                  isBlockedCi(pr) ? redCheckNames(pr) : undefined, pr.pendingAnswer);
+                const holdKey = holdHead === pr.headSha ? escalationKey : { ...escalationKey, cause: undefined };
+                const openHold = issues.filter(issue => matchDuplicateEscalation(holdKey, [issue]) !== undefined)
+                  .map(issue => openEscalationStandDownReason(holdHead, issue, escalationKey.contractRevision,
+                    { conflictEvidenceCaptured: hasCapturedMergeConflictEvidence(pr.mergeConflict), baseSha: mainTipSha },
+                    isBlockedCi(pr) ? redCheckNames(pr) : undefined, pr.pendingAnswer)).find(hold => hold !== undefined);
                 if (openHold) {
                   acted = false;
                   spent = false;

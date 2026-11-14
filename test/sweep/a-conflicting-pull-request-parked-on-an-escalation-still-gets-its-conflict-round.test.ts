@@ -231,6 +231,49 @@ test("W1-T12544 criterion 3: a new hold at B survives the B→C conflict push wi
   }
 });
 
+test("W1-T12544 criterion 3: a cleared conflict escalation cannot mask a surviving review hold", async t => {
+  for (const receipt of ["fix.done", "sweep.conflict_regenerated"] as const) {
+    for (const intermediate of [false, true]) {
+      for (const conflictFirst of [true, false]) {
+        await t.test(`${receipt}: ${intermediate ? "B→C" : "A→B"}: conflict first ${conflictFirst}`, async t => {
+          const now = systemClock.now();
+          const from = intermediate ? MERGE_HEAD : HELD_HEAD;
+          const to = intermediate ? NEXT_MERGE_HEAD : MERGE_HEAD;
+          const conflict = { ...openIssue("conflict", from),
+            body: openIssue("conflict", from).body +
+              `**Raised-by:** conflict-not-admitted\n**Base:** ${HELD_HEAD}\n` };
+          const review = { ...openIssue("review", from), number: 18101,
+            url: "https://github.com/o/r/issues/18101" };
+          const issues = conflictFirst ? [conflict, review] : [review, conflict];
+          const rows = receipt === "fix.done" ? conflictRoundRows(now, "merge-conflict", from, to) : [{
+            step: receipt, ts: new Date(now - 4000).toISOString(), pr_number: 18033,
+            head_sha: from, new_head_sha: to, outcome: "pushed",
+          }];
+          const f = fixture(t, [...(intermediate ? conflictRoundRows(now) : []), ...rows], issues);
+          f.deps.readMainTip = () => OUTSIDE_HEAD;
+          const facts = { conflictEvidenceCaptured: false, baseSha: OUTSIDE_HEAD };
+          assert.equal(openEscalationStandDownReason(from, conflict, undefined, facts), undefined,
+            "control: the conflict issue's recorded base has moved");
+          assert.match(openEscalationStandDownReason(from, review, undefined, facts)!.reason, /18101/,
+            "control: the independent review question is still unanswered");
+          await runSweep([prAt(f.now, to, false)], f.deps);
+          assert.equal(f.effects.admissions, 0, "no code admission while any matching question survives");
+          assert.equal(f.effects.evidence.length, 0);
+          assert.equal(f.disposed().at(-1)!.hold_head_sha, from, "the nearest surviving hold owns the merge head");
+          assert.match(String(f.disposed().at(-1)!.stand_down_reason), /18101/);
+
+          await runSweep([prAt(f.now, OUTSIDE_HEAD, false)], f.deps);
+          assert.equal(f.effects.evidence.length, 1, "control: an outside head is admitted despite both open issues");
+          issues.splice(issues.indexOf(review), 1);
+          await runSweep([prAt(f.now, to, false)], f.deps);
+          assert.equal(f.effects.admissions, 2, "closing the review question releases the merge head");
+          assert.equal(f.effects.evidence.length, 2, "the cleared conflict issue alone does not block code repair");
+        });
+      }
+    }
+  }
+});
+
 test("W1-T12544 criterion 3: newest-200 retention archives conflict pushes without releasing their holds", async t => {
   for (const receipt of ["fix.done", "sweep.conflict_regenerated"] as const) {
     for (const hold of ["design", "review", "ci", "legacy"] as const) {
