@@ -82,6 +82,14 @@ test("unit test: the census refuses each env, chdir, spawn, global, mock, timer 
   }
 });
 
+test("unit test: the daemon heartbeat worker-heap integration runs outside the shared process pool", () => {
+  const synthetic = pool.censusSource(`${PURE}runDaemon(plan, deps); workerHeapReadings({ live });\n`);
+  assert.deepEqual(synthetic, { admitted: false, reasons: ["daemon heartbeat worker-heap integration"] });
+
+  const actual = pool.censusFile("test/the-daemon-heartbeat-names-its-worker-thread-heaps.test.ts", { root: REPO_ROOT });
+  assert.deepEqual(actual, { admitted: false, reasons: ["daemon heartbeat worker-heap integration"] });
+});
+
 test("unit test: a fixture that assigns process.env is never found in the pool (the falsifier)", () => {
   const files = ["test/pure.test.ts", "test/env-writer.test.ts"];
   const source: Record<string, string> = {
