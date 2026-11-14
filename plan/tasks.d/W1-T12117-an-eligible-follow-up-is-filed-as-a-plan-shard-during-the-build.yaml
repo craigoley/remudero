@@ -82,6 +82,16 @@
     6. Tests: an injected ratifier and plan fixtures cover a task follow-up filed with full provenance; an action
        entry untouched; a duplicate by origin, by ledger and by router arm; an empty-files draft; an unreadable
        head; and a second pass that files nothing.
+    7. PRIOR-BEHAVIOR INVENTORY. Output buckets: routeFollowupsToRegistry's proposed and declined buckets and
+       its five refusal arms are untouched; the only change is one optional `headSha` carried into the summary
+       text. Legacy receipts: followup:<entryId> inbox proposals, the ledger approve rows and
+       priorApproveRunBranch are only read, never rewritten, and a pre-existing proposal without a headSha stays
+       valid for `rmd approve`. Defaults: with no eligible candidate, no head or any refusal, the harvest behaves
+       exactly as before and a refused draft stays a proposal. Error and unknown paths: an unreadable head, an
+       unknown type or a failed filing records followup.file_refused and never throws into the harvest. Public
+       side effects: the new followup.filed and followup.file_refused ledger rows and one plan-only filing PR are
+       additions; no existing row, verb, flag or merge gate changes meaning.
+    NO-INVARIANTS: additive filing step; every prior output bucket, legacy receipt, default and error path is unchanged and already covered by the acceptance proofs.
   falsifier: |
     At origin/main, publish a harvest holding one `task:` entry and run a full retro pass with no operator. The
     registry gains `followup:<entryId>` and no shard, PR or approve row exists. If main already files it, close
