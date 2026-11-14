@@ -480,6 +480,14 @@ function prNumberOf(row: Row): number | undefined {
   return undefined;
 }
 
+/** Fix-worker receipts use `repair_pr_url`; operator PR repairs also use `PR-<number>` as their task id. */
+function repairPrNumberOf(row: Row): number | undefined {
+  const url = typeof row.repair_pr_url === "string" ? /\/pull\/([1-9][0-9]*)$/.exec(row.repair_pr_url) : null;
+  const task = typeof row.task_id === "string" ? /^PR-([1-9][0-9]*)$/.exec(row.task_id) : null;
+  const value = Number(url?.[1] ?? task?.[1]);
+  return Number.isSafeInteger(value) && value > 0 ? value : undefined;
+}
+
 /** Every merged PR the rows describe, with what each stage needs. */
 export function flowPrs(rows: readonly Row[]): FlowPr[] {
   const byPr = new Map<number, Row[]>();
@@ -701,7 +709,8 @@ export function openRepairAges(census: FlowOpenQueueRead, rows: readonly Row[], 
     const red = pr.checksState === "FAILURE" || pr.checksState === "ERROR", conflict = pr.mergeable === "CONFLICTING";
     if (!red && !conflict) continue;
     const taskId = /^run-(W[0-9]+-T[0-9]+)-[0-9]+$/.exec(pr.headRefName)?.[1] ?? null;
-    const mine = fixRows.filter((r) => tsOf(r) >= pr.createdAtMs && ((taskId !== null && r.task_id === taskId) || prNumberOf(r) === pr.number));
+    const mine = fixRows.filter((r) => tsOf(r) >= pr.createdAtMs && ((taskId !== null && r.task_id === taskId)
+      || prNumberOf(r) === pr.number || repairPrNumberOf(r) === pr.number));
     const openAge = Math.max(0, nowMs - pr.createdAtMs);
     const kind = red && conflict ? "both" : red ? "red" : "conflict";
     const before = pr.createdAtMs < ledgerFromMs;
@@ -711,8 +720,10 @@ export function openRepairAges(census: FlowOpenQueueRead, rows: readonly Row[], 
       continue;
     }
     const first = mine.find((r) => r.step === "fix.dispatch");
-    // A round still running has not ended: its dispatch is the latest round's mark until its fix.done lands.
-    const latest = mine.length === 0 ? undefined : Math.max(...mine.map(tsOf));
+    // Completed rounds define the latest end, even if a newer round has only dispatched.
+    // With no completed round, the last dispatch is the only round timestamp available.
+    const latestRow = mine.findLast((r) => r.step === "fix.done") ?? mine.findLast((r) => r.step === "fix.dispatch");
+    const latest = latestRow === undefined ? undefined : tsOf(latestRow);
     const wait = Math.max(0, nowMs - Math.max(pr.createdAtMs, latest ?? pr.createdAtMs));
     // Opened before the read: its first round may sit before the read too, so its delay is unread, never a guess.
     const firstRound = before ? "unread" : first === undefined ? "no_round_yet" : undefined;
@@ -1017,7 +1028,8 @@ function openRepairFiling(repair: FlowOpenRepairAges): FlowFiling | undefined {
   const waits = waiting.map((p) => Math.round(p.wait_ms! / MIN_MS));
   const line = (p: FlowOpenRepairAge) => `#${p.pr} (${p.kind}): open ${minutesOf(p.open_age_ms)} min, first fix round ` +
     `${p.first_round === undefined ? `after ${minutesOf(p.first_round_delay_ms)} min` : p.first_round === "unread" ? "unread" : "not yet"}, ` +
-    `waiting ${minutesOf(p.wait_ms)} min`;
+    `waiting ${minutesOf(p.wait_ms)} min, since latest round ` +
+    `${p.since_latest_round_ms === null ? "no round yet" : `${minutesOf(p.since_latest_round_ms)} min`}`;
   return {
     key: OPEN_REPAIR_KEY, prs: waiting.map((p) => p.pr), stem,
     render: (taskId) => {

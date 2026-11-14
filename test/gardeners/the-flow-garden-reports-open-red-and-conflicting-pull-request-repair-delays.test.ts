@@ -29,8 +29,8 @@ const LEDGER_FROM = NOW - 9 * DAY;
 const pr = (number: number, createdAtMs: number, checksState: string, mergeable: string, headRefName = `run-W1-T${number}-1`): FlowOpenQueuePr =>
   ({ number, createdAtMs, updatedAtMs: NOW, headSha: `head-${number}`, headRefName, checksState, mergeable });
 
-/** #505 opened before the ledger read; #501 red with one round; #502 conflicting with none; #503 both, young;
- *  #504 green; #506 red on an operator branch, joined by pr_number. */
+/** #505 opened before the ledger read; #501 red with a completed round and a newer dispatch;
+ *  #502 conflicting with none; #503 both, young; #504 green; #506 red on an operator branch. */
 function openCohort(now = NOW): FlowOpenQueuePr[] {
   return [
     pr(501, now - 3 * HOUR, "FAILURE", "MERGEABLE"),
@@ -48,14 +48,19 @@ function census(over: Partial<FlowOpenQueueRead> = {}, now = NOW): FlowOpenQueue
 
 function fixRows(now = NOW): Array<Record<string, unknown>> {
   return [
-    // #501's round: dispatched an hour after it opened, ended 90 minutes ago. Joined by the run branch's task id.
+    // #501's first round ended 90 minutes ago; the next round only dispatched 10 minutes ago.
+    // The completed round still defines the latest round end. Joined by the run branch's task id.
     { ts: at(now - 2 * HOUR), run_id: "DAEMON-1", task_id: "W1-T501", step: "fix.dispatch", head_sha: "head-501" },
     { ts: at(now - 90 * MIN), run_id: "DAEMON-1", task_id: "W1-T501", step: "fix.done", head_sha: "head-501" },
+    { ts: at(now - 10 * MIN), run_id: "DAEMON-1", task_id: "W1-T501", step: "fix.dispatch", head_sha: "head-501" },
     // A round of another task and a round before #501 opened never count for it.
     { ts: at(now - 100 * MIN), run_id: "DAEMON-1", task_id: "W1-T777", step: "fix.dispatch", head_sha: "head-777" },
     { ts: at(now - 4 * HOUR), run_id: "DAEMON-1", task_id: "W1-T501", step: "fix.dispatch", head_sha: "older-head" },
-    // #506 has no run branch: its round joins by pr_number.
-    { ts: at(now - 20 * MIN), run_id: "DAEMON-1", task_id: "SWEEP", step: "fix.dispatch", pr_number: 506, head_sha: "head-506" },
+    // #506 has no run branch. These are the production fixWorkerReceipt identity fields, with no pr_number.
+    { ts: at(now - 20 * MIN), run_id: "DAEMON-1", task_id: "PR-506", step: "fix.dispatch",
+      repair_pr_url: "https://github.com/acme/remudero/pull/506", repair_round_id: "round-506", head_sha: "head-506" },
+    { ts: at(now - 10 * MIN), run_id: "DAEMON-1", task_id: "PR-506", step: "fix.done",
+      repair_pr_url: "https://github.com/acme/remudero/pull/506", repair_round_id: "round-506", head_sha: "head-506" },
   ];
 }
 
@@ -113,7 +118,9 @@ test("W1-T12547 criterion 1: every open red or conflicting PR gets one row with 
     first_round: "no_round_yet", since_latest_round_ms: null, wait_ms: 2 * HOUR, over_bound: true, reason: "no_round_yet" } satisfies FlowOpenRepairAge);
   assert.equal(rows.get(503)!.kind, "both");
   assert.equal(rows.get(503)!.over_bound, false, "30 minutes is inside the bound");
-  assert.equal(rows.get(506)!.first_round_delay_ms, 20 * MIN, "a PR with no run branch joins its rounds by pr_number");
+  assert.equal(rows.get(506)!.first_round_delay_ms, 20 * MIN, "a PR with no run branch joins production receipt fields");
+  assert.equal(rows.get(506)!.since_latest_round_ms, 10 * MIN);
+  assert.equal(rows.get(506)!.wait_ms, 10 * MIN, "the completed receipt shortens the operator PR's wait");
   assert.equal(rows.get(506)!.task_id, null);
   // Falsifier control: the same census with the conflict cleared has no row for #502.
   const cleared = openRepairAges(census({ open: openCohort().map((p) => p.number === 502 ? { ...p, mergeable: "MERGEABLE" } : p) }), fixRows(), NOW, LEDGER_FROM);
@@ -138,6 +145,13 @@ test("W1-T12547 criterion 2: a PR opened before the ledger read with no fix row 
   assert.equal(known.since_latest_round_ms, 3 * HOUR);
   assert.equal(known.wait_ms, 3 * HOUR);
   assert.equal(known.over_bound, true);
+  const byReceiptUrl = openRepairAges(census(), fixRows().map((r) => r.task_id === "PR-506" ? { ...r, task_id: "unfiled" } : r), NOW, LEDGER_FROM);
+  assert.equal(byPr(byReceiptUrl).get(506)!.wait_ms, 10 * MIN, "repair_pr_url independently joins the production receipt");
+  const byPrTask = openRepairAges(census(), fixRows().map((r) => r.task_id === "PR-506" ? { ...r, repair_pr_url: undefined } : r), NOW, LEDGER_FROM);
+  assert.equal(byPr(byPrTask).get(506)!.wait_ms, 10 * MIN, "a PR-number task identity also joins its receipt");
+  // The numeric PR identity remains a supported join when a fix row supplies it directly.
+  const numbered = openRepairAges(census(), [{ ts: at(NOW - 20 * MIN), step: "fix.dispatch", pr_number: 506 }], NOW, LEDGER_FROM);
+  assert.equal(byPr(numbered).get(506)!.first_round_delay_ms, 20 * MIN);
 });
 
 test("W1-T12547 criterion 3: a wait past 60 minutes files one remedy through the filing path, once while open and inside the daily cap", async (t) => {
@@ -150,6 +164,8 @@ test("W1-T12547 criterion 3: a wait past 60 minutes files one remedy through the
   const shard = readFileSync(join(h.root, h.landed[0]!.paths[0]!), "utf8");
   assert.match(shard, /origin: "flow-regression:open-repair-wait"/);
   assert.match(shard, /#501 \(red\): open 180 min, first fix round after 60 min, waiting 90 min/);
+  assert.match(shard, /#501 \(red\):[^\n]*since latest round 90 min/,
+    "a newer dispatch does not suppress an overdue remedy or overwrite the last completed round");
   assert.match(shard, /#502 \(conflict\): open 120 min, first fix round not yet, waiting 120 min/);
   assert.ok(shard.indexOf("#501 (red)") < shard.indexOf("#502 (conflict)"), "oldest first");
   assert.doesNotMatch(shard, /#503|#505|#506/, "PRs inside the bound and unread PRs are not named");
@@ -210,6 +226,8 @@ test("W1-T12547 criterion 5: the flow report file lists each open red or conflic
   assert.match(md, /## Open red or conflicting pull requests/);
   assert.match(md, /Status OBSERVED \(complete-census\)\. Bound 60 min\./);
   assert.match(md, /\| #501 \| red \| 180 \| 60 \| 90 \| 90 \| yes \|/);
+  assert.match(md, /\| #506 \| red \| 40 \| 20 \| 10 \| 10 \| no \|/,
+    "the report renders the completed receipt's latest-round age");
   assert.match(md, /\| #502 \| conflict \| 120 \| no round yet \| - \| 120 \| yes \|/);
   assert.match(md, /\| #505 \| red \| 14400 \| unread \| unread \| unread \| no \|/);
   const order = [505, 501, 502, 506, 503].map((n) => md.indexOf(`| #${n} |`));
