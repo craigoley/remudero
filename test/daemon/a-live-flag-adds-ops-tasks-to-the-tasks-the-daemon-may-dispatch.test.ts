@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -153,16 +153,30 @@ async function selectedRun(enabled: unknown, scenario: Scenario = {}): Promise<{
         const args = ["--import", import.meta.resolve("tsx"), join(REPO_ROOT, "src", "run-task.ts"), "claim", id];
         const ref = `refs/rmd-dispatch/${id}`;
         assert.equal(primary.git("ls-remote", origin.dir, ref), "");
-        const output = execFileSync(process.execPath, args, { cwd: dirname(dirname(target.planPath)), env, encoding: "utf8", timeout: 30_000 });
-        assert.match(output, /claimed refs\/rmd-dispatch\/OPS-T1/);
-        assert.doesNotMatch(output, new RegExp(PRIVATE));
+        const first = spawnSync(process.execPath, args, { cwd: dirname(dirname(target.planPath)), env, encoding: "utf8", timeout: 30_000 });
+        const firstDiagnostic = JSON.stringify({ status: first.status, signal: first.signal,
+          error: first.error?.message, stdout: first.stdout, stderr: first.stderr });
+        rows.push({ step: "fixture.claim_child", data: { stage: "primary", diagnostic: firstDiagnostic } });
+        assert.equal(first.error, undefined, firstDiagnostic);
+        assert.equal(first.signal, null, firstDiagnostic);
+        assert.equal(first.status, 0, firstDiagnostic);
+        assert.match(first.stdout, /claimed refs\/rmd-dispatch\/OPS-T1/);
+        assert.doesNotMatch(first.stdout, new RegExp(PRIVATE));
         const held = primary.git("ls-remote", origin.dir, ref);
         assert.match(held, /^[a-f0-9]{40}\s+refs\/rmd-dispatch\/OPS-T1$/);
         rival = gitRepo({ cloneFrom: origin.dir, kind: "ops-dispatch-rival" });
         rival.git("config", "user.name", GIT_REPO_FIXTURE_IDENTITY.name);
         rival.git("config", "user.email", GIT_REPO_FIXTURE_IDENTITY.email);
         const second = rival;
-        assert.throws(() => execFileSync(process.execPath, args, { cwd: second.dir, env, encoding: "utf8", timeout: 30_000, stdio: ["ignore", "pipe", "pipe"] }));
+        const rejected = spawnSync(process.execPath, args, { cwd: second.dir, env, encoding: "utf8", timeout: 30_000, stdio: ["ignore", "pipe", "pipe"] });
+        const rejectedDiagnostic = JSON.stringify({ status: rejected.status, signal: rejected.signal,
+          error: rejected.error?.message, stdout: rejected.stdout, stderr: rejected.stderr });
+        rows.push({ step: "fixture.claim_child", data: { stage: "rival", diagnostic: rejectedDiagnostic } });
+        // A startup error or timeout is not evidence that the real claim refused contention.
+        assert.equal(rejected.error, undefined, rejectedDiagnostic);
+        assert.equal(rejected.signal, null, rejectedDiagnostic);
+        assert.equal(rejected.status, 1, rejectedDiagnostic);
+        assert.match(rejected.stderr, /already claimed by another lane/, rejectedDiagnostic);
         const after = primary.git("ls-remote", origin.dir, ref);
         assert.equal(after, held, "the second instance cannot take or replace the public claim");
         const privateRefs = secondary.git("for-each-ref", "--format=%(refname)", "refs/rmd-dispatch");
@@ -369,7 +383,7 @@ test("W1-T12209 criterion 3: a duplicate refuses the ops snapshot and reports th
 
 test("W1-T12209 criterion 4: the actual command worker path reserves the public ref and a rival cannot take it", async () => {
   const result = await selectedRun(true, { realClaims: true });
-  assert.deepEqual(result.ran, ["OPS-T1", "PUB-A", "PUB-B"]);
+  assert.deepEqual(result.ran, ["OPS-T1", "PUB-A", "PUB-B"], JSON.stringify(result.rows));
   assert.equal(result.claims.length, 1);
   assert.equal(result.claims[0]!.task, "OPS-T1");
   assert.equal(result.claims[0]!.unchangedAfterRival, true);
