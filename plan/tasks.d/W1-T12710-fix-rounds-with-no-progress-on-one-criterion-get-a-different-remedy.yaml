@@ -24,6 +24,8 @@
     - src/lib/ledger-steps.ts
     - plan/policy.yaml
     - src/lib/policy.ts
+    - src/lib/ledger.ts
+    - test/policy.test.ts
     - test/fix-lane/fix-rounds-with-no-progress-on-one-criterion-get-a-different-remedy.test.ts
   status: queued
   attempts: 0
@@ -79,6 +81,16 @@
           remedy and escalate once.
     3. plan/policy.yaml and src/lib/policy.ts: `fix.stallRounds` (default 3) and the fix model order.
     4. Declare fix.stall_remedy in src/lib/ledger-steps.ts.
+    5. Settled from the code at origin/main:
+       a. The fix model order names mounts, not models: `fix.modelOrder` lists names from .remudero/mounts.yaml,
+          weakest first, and starts with `fix`. The default is [fix, step_up]. The sweep's fix effect resolves the
+          name to the mount; the fix rung records the requested model as before.
+       b. The existing amendment writer is the refusal-amendment writer (src/lib/refusal-amendment.ts, through
+          SweepDeps.draftRefusalAmendments), with class proof-unexecutable-at-head and the rounds as evidence. A CI
+          check is not an acceptance criterion, so amend-criterion is recorded as skipped for a check name.
+       c. After every remedy was tried, no round runs for that criterion until the operator answers.
+       d. src/lib/ledger.ts keeps fix.stall_remedy through ledger rotation, so the one-question rule survives it.
+       e. test/policy.test.ts lists every top-level policy section and every net-new row, so `fix` joins both lists.
     NOT IN SCOPE: the judge's own verdict parsing (W1-T12711); conflict rounds (W1-T12541).
   falsifier: |
     Count rounds that moved the criterion and criteria 1 and 7 must fail. Keep the same model after the stall and criteria 3
