@@ -89,7 +89,7 @@ test("W1-T12492 lock validator admits the reviewed 84.1.0 wheel and rejects othe
     "print(auditor._locked_inputs(root)[2]['setuptools'])",
   ].join("\n");
   const run = (version: string, digest: string) => spawnSync("python3", [
-    "-I", "-S", "-c", script, source, scratch, runtime, version, digest,
+    "-I", "-S", "-B", "-c", script, source, scratch, runtime, version, digest,
   ], { encoding: "utf8" });
 
   try {
