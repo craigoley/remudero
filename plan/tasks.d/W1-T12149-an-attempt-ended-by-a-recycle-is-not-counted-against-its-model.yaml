@@ -20,7 +20,7 @@
     - test/routing/an-attempt-ended-by-a-recycle-is-not-counted-against-its-model.test.ts
     - "scripts/private-routing-daily-review.mjs"
     - "src/run-task.ts"
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "The experiment report classifies each worker attempt with attributeAttemptOutcome and counts infrastructure attempts apart, for each experiment arm. They are in no success rate and no cost mean"

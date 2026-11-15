@@ -1808,10 +1808,6 @@ export function openDirectMergeAdmissions(): void {
   directMergeAdmissionsClosedBy = undefined;
 }
 
-export function directMergeAdmissionsClosed(): string | undefined {
-  return directMergeAdmissionsClosedBy;
-}
-
 export function directMergeOperationsInFlight(): DirectMergeOperation[] {
   return [...directMergeOperations.values()].map(({ settle: _settle, cancelRequested: _cancel, ...operation }) => operation);
 }

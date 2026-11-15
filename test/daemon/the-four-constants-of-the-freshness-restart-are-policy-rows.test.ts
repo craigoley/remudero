@@ -39,9 +39,9 @@ const sourceCommits = (tag: string, count: number) =>
 test("W1-T12228 criterion 1: the policy file has the block freshnessRestart with four one-line bounded rows", () => {
   const rows: Array<[string, number, string, number, number]> = [
     ["scoreLimit", 18, "DEPLOY_RESTART_SCORE_THRESHOLD", 6, 54],
-    ["stalenessHorizonMs", 3600000, "DEPLOY_RESTART_RATE_CEILING_MS", 900000, 14400000],
+    ["stalenessHorizonMs", 14400000, "DEPLOY_RESTART_RATE_CEILING_MS", 900000, 14400000],
     ["quietWindowMs", 600000, "FRESHNESS_COALESCE_WINDOW_MS", 0, 1800000],
-    ["minLifetimeMs", 5400000, "FRESHNESS_MIN_LIFETIME_MS", 0, 21600000],
+    ["minLifetimeMs", 10800000, "FRESHNESS_MIN_LIFETIME_MS", 0, 21600000],
   ];
   assert.match(POLICY_TEXT, /^freshnessRestart:$/m);
   const policy = committed();
@@ -158,17 +158,17 @@ test("W1-T12228 criterion 4: with the default rows the freshness judge decides a
     const deferred = decide(sourceCommits("low", 1), true, T0, extra);
     assert.equal(deferred.action, "defer");
     assert.equal(deferred.reason, "busy, and pressure 1 (change 1 + staleness 0) < 18: wait for an idle moment");
-    // hold for the minimum lifetime: a restart decision in a lifetime younger than 90 minutes.
+    // hold for the minimum lifetime: a restart decision 1 minute into a lifetime.
     const young = coalesce(enough, T0 + MINUTE, T0, T0 + MINUTE, extraCoalesce);
     assert.equal(young.action, "hold");
     assert.equal(young.reason, judge.MIN_LIFETIME_HOLD);
     // hold for the quiet window: old enough, advance 1 minute ago, stale for 1 minute.
-    const quiet = coalesce(enough, T0 + MINUTE, T0 - 2 * HOUR, T0 + MINUTE, extraCoalesce);
+    const quiet = coalesce(enough, T0 + MINUTE, T0 - 4 * HOUR, T0 + MINUTE, extraCoalesce);
     assert.equal(quiet.action, "hold");
     assert.equal(quiet.reason, "coalescing sha: waiting for a quiet advance window");
     assert.equal(quiet.windowEndsAtMs, T0 + MINUTE + 10 * MINUTE);
     // restart: the quiet window has passed.
-    const restart = coalesce(enough, T0 + 11 * MINUTE, T0 - 2 * HOUR, T0 + MINUTE, extraCoalesce);
+    const restart = coalesce(enough, T0 + 11 * MINUTE, T0 - 4 * HOUR, T0 + MINUTE, extraCoalesce);
     assert.equal(restart.action, "restart");
     assert.equal(restart.reason, "window_quiet");
   }

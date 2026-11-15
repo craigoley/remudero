@@ -310,6 +310,76 @@ export function authorPushEligibility(receipt) {
     ran} of ${selected} suite(s)); ${Math.max(0, selected - ran)} suite(s) are left to the hosted checks`);
 }
 
+/** W1-T12166 — the inputs every stage result depends on. The head names the tree, the rules and this script. */
+export function authorStageReuseKey(receipt) {
+  return { headSha: receipt.headSha ?? null, baseSha: receipt.baseSha ?? null, node: receipt.node ?? null,
+    dependency: receipt.dependencyProvenance?.before ?? null,
+    selection: receipt.selectedArm ?? receipt.selection ?? null, suites: receipt.suites ?? null };
+}
+
+/** Whether one stage of the last receipt passed and was measured. A test stage counts only when every
+ *  selected suite ran and passed: an over-capacity subset is never reused. */
+function stagePassedAndMeasured(step, previous) {
+  if (step.ok !== true || step.notMeasured || step.exitCode !== 0 || step.signal || step.error ||
+      step.diagnostics?.mayBeIncomplete !== false) return false;
+  if (!step.name.startsWith('affected-tests')) return true;
+  const summary = step.testSummary;
+  return step.name === 'affected-tests' && previous.tiered === undefined && previous.partial === undefined &&
+    Array.isArray(previous.suites) && previous.suites.length > 0 && step.judge?.complete === true &&
+    summary?.pass > 0 && summary.fail === 0 && summary.cancelled === 0;
+}
+
+/** A stage failure or admission refusal does not invalidate the stages measured before it. */
+function stoppedAtStageOrAdmission(previous) {
+  const steps = previous.steps;
+  if (typeof previous.error !== 'string' || !Array.isArray(steps) || steps.length === 0) return false;
+  if (previous.verdict === 'over-capacity') {
+    const capacity = previous.hostCapacity?.at(-1);
+    return capacity?.state === 'not-run' && typeof capacity.stage === 'string' &&
+      previous.error.startsWith(`Mac author capacity NOT_RUN before ${capacity.stage}: `);
+  }
+  if (previous.verdict !== 'refused') return false;
+  if (steps.at(-1)?.ok === false) return true;
+  const staticNote = previous.staticAdmission?.note;
+  if (previous.staticAdmission?.outcome === 'slot' && typeof staticNote === 'string' &&
+      previous.error === `author static stage NOT_RUN (${staticNote})`) return true;
+  const slotNote = previous.testSlot?.note;
+  return previous.error === `author preflight NOT_RUN (${slotNote})` && typeof slotNote === 'string' &&
+    slotNote.startsWith('NOT_RUN:');
+}
+
+/**
+ * W1-T12166 — the stages of the last receipt of this checkout that a new run need not run again.
+ * OBSERVED 2026-11-10..13: 11 Azure preflights failed only on suites that pass alone, and each second run
+ * repeated 15 to 20 minutes of census and static work on the same commit.
+ * RULE: reuse only when the last run completed or stopped at a failed stage or admission, its dependency record
+ * did not change while it ran, and the head, base, Node version, dependency record and selection are all the
+ * same. Reuse the stages in their order and stop at the first one that failed, did not run or was not measured:
+ * every later stage runs.
+ */
+export function reusableAuthorStages(previous, current) {
+  const none = (reason) => ({ state: 'none', reason, stages: [] });
+  if (!previous || previous.unreadable) return none(`no readable last receipt (${previous?.unreadable ?? 'absent'})`);
+  if (typeof previous.startedAt !== 'string') return none('the last receipt names no run start time');
+  const stageRefusal = stoppedAtStageOrAdmission(previous);
+  if (previous.dryRun !== false || (previous.error !== undefined && !stageRefusal) ||
+      (!['passed', 'failed', 'over-capacity'].includes(previous.verdict) && !stageRefusal)) {
+    return none(`the last run ended ${previous.verdict ?? 'running'}${previous.error ? `: ${previous.error}` : ''}`);
+  }
+  const record = previous.dependencyProvenance;
+  if (!sameAuthorDependencyProvenance(record?.before, record?.after)) return none('the last run has no unchanged dependency record');
+  const before = authorStageReuseKey(previous), now = authorStageReuseKey(current);
+  const differs = Object.keys(now).find((field) => now[field] === null || JSON.stringify(before[field]) !== JSON.stringify(now[field]));
+  if (differs) return none(`${differs} differs from the last run`);
+  const stages = [];
+  for (const step of previous.steps ?? []) {
+    if (!stagePassedAndMeasured(step, previous)) break;
+    stages.push(step);
+  }
+  return { state: stages.length ? 'reused' : 'none', reason: stages.length ? `same head, base, node, dependency and selection as the run of ${previous.startedAt}`
+    : 'the first stage of the last run did not pass or was not measured', runStartedAt: previous.startedAt, stages };
+}
+
 export function testSummary(output) {
   const fields = ['tests', 'suites', 'pass', 'fail', 'cancelled', 'skipped', 'todo'];
   const summary = Object.fromEntries(fields.map((field) => {
@@ -387,7 +457,7 @@ export function readAuthorProfile(root, path) {
 
 export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
   select = (changed, range) => authorSelection(root, changed, range), host, admitHost = () => undefined,
-  testSlot = {} } = {}) {
+  testSlot = {}, enqueueTestSlot: enqueueSuiteSlot = enqueueTestSlot } = {}) {
   const { values, helpRequested } = parseArgv(argv, {
     'dry-run': { type: 'boolean' },
     deadline: { type: 'string' },
@@ -399,7 +469,12 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
   if (helpRequested) return 0;
   const startedAt = Date.now();
   const receipt = { version: 1, assurance: 'author-only', hostedFullSuiteAndCoverage: 'required-pending',
-    node: process.version, dryRun: Boolean(values['dry-run']), steps: [], suites: [] };
+    startedAt: new Date(startedAt).toISOString(), node: process.version, dryRun: Boolean(values['dry-run']), steps: [], suites: [] };
+  // W1-T12166: the last receipt of this checkout, read before this run replaces it.
+  let previous;
+  try { previous = JSON.parse(readFileSync(join(root, 'coverage/preflight-author.json'), 'utf8')); }
+  catch (error) { previous = { unreadable: String(error.code ?? error.message) }; }
+  let reusable = [];
   let diagnosticsRoot;
   const deadline = values.deadline === undefined ? undefined : Date.parse(values.deadline);
   const run = (file, args, extra = {}) => spawn(file, args, {
@@ -479,6 +554,21 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
     process.stdout.write(replay(stdout.slice(-4096), 'stdout'));
     process.stderr.write(replay(stderr.slice(-4096), 'stderr'));
     if (result.error) console.error(`${name}: ${result.error.code ?? 'spawn-error'}: ${result.error.message}; captured logs may be incomplete`);
+  };
+  /** W1-T12166: take the next reusable stage when it is `name`; any other stage ends reuse for this run. */
+  const reuseStage = (name) => {
+    if (reusable[0]?.name !== name) {
+      reusable = [];
+      return undefined;
+    }
+    const prior = reusable.shift();
+    const reused = prior.reused ?? { runStartedAt: receipt.stageReuse.runStartedAt, measuredAt: prior.startedAt ?? receipt.stageReuse.runStartedAt,
+      durationMs: prior.durationMs ?? null };
+    receipt.steps.push({ ...prior, durationMs: null, reused });
+    receipt.stageReuse.reused.push(name);
+    progress();
+    console.log(`${name}: REUSED; it passed in the run of ${reused.runStartedAt} on the same head, base, node, dependency and selection`);
+    return prior;
   };
   try {
     if ((values.deadline === undefined) !== (values['runtime-profile'] === undefined) ||
@@ -615,12 +705,18 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
           tree: boundContext.source.tree, ownerNonce: boundContext.owner.ownerNonce,
           allocations: Object.keys(boundContext.allocations) };
       };
-      const census = runStep('census-precheck', authorCensusPrecheckArgs(root, receipt.baseSha));
-      receipt.censusFullPass = censusFullPassNote(census);
+      const { stages, ...stageReuse } = reusableAuthorStages(previous, receipt);
+      receipt.stageReuse = { ...stageReuse, reused: [] };
+      reusable = stages;
+      console.log(`stage reuse: ${stageReuse.state}; ${stageReuse.reason}`);
+      // A reused census passed measured: it was never time-bound and its full-pass note is the one it printed.
+      const censusReused = Boolean(reuseStage('census-precheck'));
+      const census = censusReused ? { status: 0 } : runStep('census-precheck', authorCensusPrecheckArgs(root, receipt.baseSha));
+      receipt.censusFullPass = censusReused ? previous.censusFullPass ?? { skipped: false } : censusFullPassNote(census);
       if (receipt.censusFullPass.skipped) console.log(`census full pass SKIPPED - ${receipt.censusFullPass.reliedOn}`);
       const censusTimeBound = censusTimeBoundOnly(census);
       const censusOk = (census.status === 0 || censusTimeBound) && !census.signal && !census.error;
-      report('census-precheck', census, censusOk, censusTimeBound ? { notMeasured: 'time-bound' } : {});
+      if (!censusReused) report('census-precheck', census, censusOk, censusTimeBound ? { notMeasured: 'time-bound' } : {});
       if (censusTimeBound) {
         receipt.censusNotMeasured = { reason: 'time-bound', checkedBy: 'CI' };
         console.log('census suites NOT MEASURED (time bound) — CI runs them');
@@ -630,9 +726,9 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
       if (censusOk) {
         const workflowInputs = authorWorkflowContractInputs(receipt.changedFiles);
         receipt.workflowContractPrecheck = { required: workflowInputs.length > 0, inputs: workflowInputs, suites: [] };
-        if (workflowInputs.length > 0) {
-          const suites = verifiedSuites(root, AUTHOR_WORKFLOW_CONTRACT_SUITES);
-          receipt.workflowContractPrecheck.suites = suites;
+        if (workflowInputs.length > 0) receipt.workflowContractPrecheck.suites = verifiedSuites(root, AUTHOR_WORKFLOW_CONTRACT_SUITES);
+        if (workflowInputs.length > 0 && !reuseStage('workflow-contract-precheck')) {
+          const suites = receipt.workflowContractPrecheck.suites;
           // This fixed, cheap contract runs before any heavy admission or capacity truncation.
           // R-50 walks all workflows, including new names with no literal reader hit.
           const judged = prepareJudgedRun();
@@ -658,6 +754,7 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
           // Execute the SAME governed package commands as hosted docs-index-check,
           // before claiming a heavyweight slot. Never fix generated output inside a gate.
           for (const script of ['docs-index:check', 'docs-index:check-paths']) {
+            if (reuseStage(`docs-index-precheck:${script}`)) continue;
             const name = `docs-index-precheck:${script}`, result = runStep(name, ['run', '--silent', script], 'npm', {}, AUTHOR_DOCS_PRECHECK_MAX_MS);
             const ok = result.status === 0 && !result.signal && !result.error && result.outputComplete !== false;
             report(name, result, ok, { inputs: docsInputs, runtimeBoundMs: AUTHOR_DOCS_PRECHECK_MAX_MS });
@@ -672,7 +769,7 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
         // W1-T11891: no fixed author ceiling. The slot request is the measured pre-admission width (CPU, and
         // memory incl. darwin vm_stat): an unmeasured memory reading asks for one worker, never more.
         const requested = hostBudget((host ?? readHostCapacityInputs)());
-        const queue = enqueueTestSlot(AUTHOR_SUITE_LABEL, { ...testSlot, perFileBytes: TEST_FILE_PEAK_BYTES, maxConcurrency: requested.workers });
+        const queue = enqueueSuiteSlot(AUTHOR_SUITE_LABEL, { ...testSlot, perFileBytes: TEST_FILE_PEAK_BYTES, maxConcurrency: requested.workers });
         receipt.suiteQueue = { ticketed: queue.ticketed, positionAtEnqueue: queue.position ?? null, note: queue.note,
           requestedWorkers: requested.workers, requestedBoundBy: requested.inputs.boundBy };
         // W1-T11915 criterion 4: retain the ticket's arrival identity and add the selection's known price
@@ -718,26 +815,31 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
             if (!decision.fits) throw new Error(`runtime deadline does not fit admitted ${decision.workers}-worker pool: need ${decision.requiredMs}ms, have ${decision.availableMs}ms; expensive phase not started`);
           };
           admitRuntime('before-static', undefined, partial ? partial.suites : receipt.suites);
-          const staticCapacity = admitHost('static-preflight', { selection: receipt.selection, workers: 1 });
+          // W1-T12166: a reused static stage takes no host capacity and no static admission.
+          const staticReused = Boolean(reuseStage('static-preflight'));
+          const staticCapacity = staticReused ? undefined : admitHost('static-preflight', { selection: receipt.selection, workers: 1 });
           if (staticCapacity) (receipt.hostCapacity ??= []).push(staticCapacity);
           // Its record names a cold tsc's peak; the nested typecheck sees this ancestor's record and inherits it.
-          const staticAdmission = admitStaticWork(AUTHOR_STATIC_LABEL, { ...testSlot, memoryBytes: TYPECHECK_COLD_PEAK_BYTES });
+          const staticAdmission = staticReused ? { outcome: 'reused', executionAllowed: true, waitedMs: 0, note: 'static-preflight reused', release() {} }
+            : admitStaticWork(AUTHOR_STATIC_LABEL, { ...testSlot, memoryBytes: TYPECHECK_COLD_PEAK_BYTES });
           receipt.staticAdmission = { outcome: staticAdmission.outcome, waitedMs: staticAdmission.waitedMs, note: staticAdmission.note };
-          let staticOk = false;
+          let staticOk = staticReused;
           let lintOk = true;
           try {
             if (!staticAdmission.executionAllowed) throw new Error(`author static stage NOT_RUN (${staticAdmission.note})`);
-            const staticCommand = lowPriorityCommand(process.execPath, ['--import', 'tsx',
-              join(root, 'src/run-task.ts'), 'preflight', '--from', receipt.baseSha,
-              '--summary-file', join(root, 'coverage/preflight-author-static.json')]);
-            const censusAnswer = { RMD_AUTHOR_CENSUS_ANSWERED: `${receipt.headSha}:${censusTimeBound ? 'time-bound' : 'ok'}` };
-            const staticResult = runStep('static-preflight', staticCommand.args, staticCommand.file, { ...(staticAdmission.childEnvironment ?? {}), ...censusAnswer }, AUTHOR_STEP_RUNTIME_MS);
-            staticOk = staticResult.status === 0 && !staticResult.signal && !staticResult.error;
-            report('static-preflight', staticResult, staticOk, { priority: staticCommand.priority });
+            if (!staticReused) {
+              const staticCommand = lowPriorityCommand(process.execPath, ['--import', 'tsx',
+                join(root, 'src/run-task.ts'), 'preflight', '--from', receipt.baseSha,
+                '--summary-file', join(root, 'coverage/preflight-author-static.json')]);
+              const censusAnswer = { RMD_AUTHOR_CENSUS_ANSWERED: `${receipt.headSha}:${censusTimeBound ? 'time-bound' : 'ok'}` };
+              const staticResult = runStep('static-preflight', staticCommand.args, staticCommand.file, { ...(staticAdmission.childEnvironment ?? {}), ...censusAnswer }, AUTHOR_STEP_RUNTIME_MS);
+              staticOk = staticResult.status === 0 && !staticResult.signal && !staticResult.error;
+              report('static-preflight', staticResult, staticOk, { priority: staticCommand.priority });
+            }
             // An unsuccessful static gate already makes this tree unpublishable. Keep its failed
             // receipt and selected floor, but don't spend another full run on known-doomed tests.
             // W1-T7809: a plan-only selection is plan lint first; a failed lint is as unpublishable as a failed static gate.
-            if (staticOk && receipt.selection === 'plan-only') {
+            if (staticOk && receipt.selection === 'plan-only' && !reuseStage('lint-plan-fast')) {
               const lint = runStep('lint-plan-fast', ['--import', 'tsx', join(root, 'scripts/lint-plan-offline.mjs'),
                 '--base', 'origin/main', '--merge-base'], process.execPath, staticAdmission.childEnvironment ?? {}, AUTHOR_STEP_RUNTIME_MS);
               lintOk = lint.status === 0 && !lint.signal && !lint.error;
@@ -751,113 +853,118 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
             const dependencyAfterStatic=authorDependencyProvenance(root);
             receipt.dependencyProvenance.afterStatic=dependencyAfterStatic;
             if(!sameAuthorDependencyProvenance(dependencyBefore,dependencyAfterStatic))throw new Error('installed dependency donor changed during static validation; tests not started');
-            // W1-T9951: a selection naming no suite leaves the line; one that names suites waits its turn here.
-            if ((partial ? partial.suites : receipt.suites).length === 0) cancelSuites('the selection names no suite');
-            else admitSuites();
-            // W1-T7809: price the selection against what this host can carry NOW, before spending it.
-            // W1-T11891: only a real acquired grant is execution capacity; its width is the measured bound.
-            const slotAcquired = slot?.outcome === 'acquired' && testSlotExecutionAllowed(slot);
-            const legacyBudget = hostBudget((host ?? readHostCapacityInputs)(), { slotConcurrency: slot?.concurrency, slotAcquired });
-            // A deadline without a validated native profile was refused before static work.
-            // Never expand workers or restart the deadline to admit a larger selection.
-            const nativeBudget = runtimeProfile ? deadlineHostBudget(legacyBudget, { deadline, grant: slot?.concurrency }) : legacyBudget;
-            // W1-T9953: a full fallback is priced against the HOST, never the deadline; a deadline may only shrink it.
-            const budget = partial && nativeBudget.budgetMs > legacyBudget.budgetMs ? legacyBudget : nativeBudget;
-            const executionWorkers = budget.workers;
-            receipt.executionWorkers = executionWorkers;
-            reportManifestFallbacks(priced, manifest);
-            const verdict = capacityVerdict(priced, manifest, budget);
-            receipt.capacity = verdict;
-            let ranSuites = receipt.suites;
-            let notRun = false;
-            let partialSentenceAfterRun;
-            if (partial) {
-              // Changed tests, then set-aside readers, then the modelled rest, each cheapest first, within the budget.
-              const subset = fittingSubset(partial.suites, manifest, budget, { changed: partial.tiers.changed,
-                narrow: partial.tiers.setAsideReaders, includeRest: true });
-              receipt.selectedArm = 'full-fallback';
-              receipt.selection = 'over-capacity';
-              const sentence = partialSentence(subset.ran.length, receipt.suites.length, partial.setAside);
-              receipt.partial = { reasons: receipt.reasons, setAside: partial.setAside, tiers: partial.tiers,
-                planned: subset.ran, ran: [], leftToCi: receipt.suites.length, costMs: subset.costMs,
-                ...(partial.unavailable ? { unavailable: partial.unavailable } : {}) };
-              if (subset.ran.length === 0) {
-                notRun = true;
-                receipt.affectedTestsNotRunReason = sentence;
-                console.log(`affected-tests: NOT RUN — ${sentence}`);
-              } else {
-                ranSuites = subset.ran;
-                receipt.tiered = { planned: subset.ran, ran: [], skipped: subset.skipped, costMs: subset.costMs };
-                partialSentenceAfterRun = sentence;
-                console.log(`full-fallback: SELECTED ${subset.ran.length} of ${receipt.suites.length} suite(s); execution pending`);
-              }
-            } else if (!verdict.fits) {
-              const subset = fittingSubset(receipt.suites, manifest, budget, { changed: receipt.changedFiles,
-                narrow: narrow ?? [], includeRest: receipt.selection !== 'full-fallback' });
-              receipt.selectedArm = receipt.selection;
-              receipt.selection = 'over-capacity';
-              const inputs = JSON.stringify(verdict.inputs);
-              if (subset.ran.length === 0) {
-                notRun = true;
-                receipt.affectedTestsNotRunReason = `over capacity: priced ${verdict.costMs}ms of suite work exceeds the host budget ${verdict.budgetMs}ms`;
-                console.log(`affected-tests: NOT RUN — CI is the check (priced ${verdict.costMs}ms for ${verdict.suites} suite(s) > budget ${verdict.budgetMs}ms over ${verdict.workers} worker(s); inputs ${inputs})`);
-              } else {
-                ranSuites = subset.ran;
-                receipt.tiered = { planned: subset.ran, ran: [], skipped: subset.skipped, costMs: subset.costMs };
-                console.log(`affected-tests: over capacity (priced ${verdict.costMs}ms > budget ${verdict.budgetMs}ms; inputs ${inputs}); selected ${subset.ran.length} suite(s) that fit; execution pending, leaving ${subset.skipped.length} to CI: ${subset.skipped.slice(0, 20).join(', ')}${subset.skipped.length > 20 ? ', …' : ''}`);
-              }
-            }
-            if (!notRun && ranSuites.length === 0) {
-              receipt.affectedTestsNotRunReason = 'the plan-only selection named no suite; plan lint is its check';
-              console.log('affected-tests: NOT RUN — the plan-only selection named no suite; lint-plan-fast is the check');
-            } else if (!notRun) {
-            const testsName = receipt.tiered ? 'affected-tests-subset' : 'affected-tests';
-            admitRuntime('before-tests', 0, ranSuites, executionWorkers, slot.concurrency);
-            // An over-capacity subset is sized by the arm it was cut from: a narrow arm's subset is narrower still.
-            // W1-T10947: an explicit bounded profile is priced against the context this slot was bound to.
-            const testCapacity = admitHost('affected-tests', { selection: receipt.selectedArm ?? receipt.selection, workers: executionWorkers,
-              ...(values['author-profile'] === undefined ? {} : { boundedProfile: readAuthorProfile(root, values['author-profile']),
-                context: boundContext ? observeContext() : undefined, bound: boundContext }) });
-            if (testCapacity) (receipt.hostCapacity ??= []).push(testCapacity);
-            // No whole-suite retry or instrumentation. A missing target/summary is a refusal, never green.
-            // The host-wide test slot, its measured CPU/memory grant (no fixed ceiling) and nice (test-slot.ts).
-            slot.refresh();
-            // The suites start only under the very context the slot was bound to; anything else is NOT_RUN.
-            requireNativeContext('start');
-            const hasDurationReporter = existsSync(join(root, 'scripts/test-duration-reporter.mjs'));
-            const durationArgs = !hasDurationReporter ? [] : ['--test-reporter-destination=stdout',
-              `--test-reporter=${join(root, 'scripts/test-duration-reporter.mjs')}`,
-              `--test-reporter-destination=${join(diagnosticsRoot, 'durations.json')}`];
-            // Judged (scripts/pure-test-pool.mjs): a suite whose own child exits 0 part-way is reported
-            // `ok` with a whole summary, so the step passes only when every suite reached its own summary.
-            const judged = prepareJudgedRun();
-            const child = lowPriorityCommand(process.execPath, testRunArgv(judgedNodeTestArgs(authorTestRunnerArgs(boundedNodeTestArgs(['--test', '--test-reporter=tap', ...durationArgs,
-              '--import', 'tsx', '--import', './test/setup/tmp-hygiene.ts', ...ranSuites], root, manifest), ranSuites, manifest), judged.args), executionWorkers));
-            const tests = runStep(testsName, child.args, child.file, judged.env, AUTHOR_STEP_RUNTIME_MS, slot.heartbeat);
-            if (receipt.tiered) receipt.tiered.ran = [...ranSuites];
-            if (receipt.partial) {
-              receipt.partial.ran = [...ranSuites];
-              receipt.partial.leftToCi = receipt.suites.length - ranSuites.length;
-            }
-            if (partialSentenceAfterRun) console.log(partialSentenceAfterRun);
-            const judge = closeJudgedRun(judged, ranSuites, { status: tests.status ?? 1, root, role: testsName, prefix: 'preflight-author' });
-            const testsOk = completeTestResult(tests) && judge.verdict.complete;
-            report(testsName, tests, testsOk, { judge: { complete: judge.verdict.complete, given: judge.verdict.given,
-              reported: judge.verdict.reported, unreported: judge.verdict.missing.slice(0, 20), lastStarted: judge.verdict.lastStarted,
-              exitSite: judge.verdict.exitSite } });
-            receipt.runtimeEvidence = { state: 'not-collected', reason: 'duration reporter unavailable in this root' };
-            if (hasDurationReporter) {
-              if (!testsOk) receipt.runtimeEvidence = { state: 'incomplete', reason: 'affected-tests did not complete successfully' };
-              else {
-                try {
-                  receipt.runtimeEvidence = closedDurationEvidence(root, relative(root, join(diagnosticsRoot, 'durations.json')),
-                    ranSuites, runtimeBindings(root, receipt.headSha, authorEnvironment(process.env)));
-                } catch (error) {
-                  // Timing is diagnostic, never author assurance or a zero-cost success estimate.
-                  receipt.runtimeEvidence = { state: 'unavailable', reason: error.message };
+            // W1-T12166: a test stage that ran every selected suite green on these inputs is not run again.
+            const testsReused = Boolean(reuseStage('affected-tests'));
+            if (testsReused) cancelSuites('affected-tests reused: every selected suite passed in the last run');
+            else {
+              // W1-T9951: a selection naming no suite leaves the line; one that names suites waits its turn here.
+              if ((partial ? partial.suites : receipt.suites).length === 0) cancelSuites('the selection names no suite');
+              else admitSuites();
+              // W1-T7809: price the selection against what this host can carry NOW, before spending it.
+              // W1-T11891: only a real acquired grant is execution capacity; its width is the measured bound.
+              const slotAcquired = slot?.outcome === 'acquired' && testSlotExecutionAllowed(slot);
+              const legacyBudget = hostBudget((host ?? readHostCapacityInputs)(), { slotConcurrency: slot?.concurrency, slotAcquired });
+              // A deadline without a validated native profile was refused before static work.
+              // Never expand workers or restart the deadline to admit a larger selection.
+              const nativeBudget = runtimeProfile ? deadlineHostBudget(legacyBudget, { deadline, grant: slot?.concurrency }) : legacyBudget;
+              // W1-T9953: a full fallback is priced against the HOST, never the deadline; a deadline may only shrink it.
+              const budget = partial && nativeBudget.budgetMs > legacyBudget.budgetMs ? legacyBudget : nativeBudget;
+              const executionWorkers = budget.workers;
+              receipt.executionWorkers = executionWorkers;
+              reportManifestFallbacks(priced, manifest);
+              const verdict = capacityVerdict(priced, manifest, budget);
+              receipt.capacity = verdict;
+              let ranSuites = receipt.suites;
+              let notRun = false;
+              let partialSentenceAfterRun;
+              if (partial) {
+                // Changed tests, then set-aside readers, then the modelled rest, each cheapest first, within the budget.
+                const subset = fittingSubset(partial.suites, manifest, budget, { changed: partial.tiers.changed,
+                  narrow: partial.tiers.setAsideReaders, includeRest: true });
+                receipt.selectedArm = 'full-fallback';
+                receipt.selection = 'over-capacity';
+                const sentence = partialSentence(subset.ran.length, receipt.suites.length, partial.setAside);
+                receipt.partial = { reasons: receipt.reasons, setAside: partial.setAside, tiers: partial.tiers,
+                  planned: subset.ran, ran: [], leftToCi: receipt.suites.length, costMs: subset.costMs,
+                  ...(partial.unavailable ? { unavailable: partial.unavailable } : {}) };
+                if (subset.ran.length === 0) {
+                  notRun = true;
+                  receipt.affectedTestsNotRunReason = sentence;
+                  console.log(`affected-tests: NOT RUN — ${sentence}`);
+                } else {
+                  ranSuites = subset.ran;
+                  receipt.tiered = { planned: subset.ran, ran: [], skipped: subset.skipped, costMs: subset.costMs };
+                  partialSentenceAfterRun = sentence;
+                  console.log(`full-fallback: SELECTED ${subset.ran.length} of ${receipt.suites.length} suite(s); execution pending`);
+                }
+              } else if (!verdict.fits) {
+                const subset = fittingSubset(receipt.suites, manifest, budget, { changed: receipt.changedFiles,
+                  narrow: narrow ?? [], includeRest: receipt.selection !== 'full-fallback' });
+                receipt.selectedArm = receipt.selection;
+                receipt.selection = 'over-capacity';
+                const inputs = JSON.stringify(verdict.inputs);
+                if (subset.ran.length === 0) {
+                  notRun = true;
+                  receipt.affectedTestsNotRunReason = `over capacity: priced ${verdict.costMs}ms of suite work exceeds the host budget ${verdict.budgetMs}ms`;
+                  console.log(`affected-tests: NOT RUN — CI is the check (priced ${verdict.costMs}ms for ${verdict.suites} suite(s) > budget ${verdict.budgetMs}ms over ${verdict.workers} worker(s); inputs ${inputs})`);
+                } else {
+                  ranSuites = subset.ran;
+                  receipt.tiered = { planned: subset.ran, ran: [], skipped: subset.skipped, costMs: subset.costMs };
+                  console.log(`affected-tests: over capacity (priced ${verdict.costMs}ms > budget ${verdict.budgetMs}ms; inputs ${inputs}); selected ${subset.ran.length} suite(s) that fit; execution pending, leaving ${subset.skipped.length} to CI: ${subset.skipped.slice(0, 20).join(', ')}${subset.skipped.length > 20 ? ', …' : ''}`);
                 }
               }
-            }
+              if (!notRun && ranSuites.length === 0) {
+                receipt.affectedTestsNotRunReason = 'the plan-only selection named no suite; plan lint is its check';
+                console.log('affected-tests: NOT RUN — the plan-only selection named no suite; lint-plan-fast is the check');
+              } else if (!notRun) {
+              const testsName = receipt.tiered ? 'affected-tests-subset' : 'affected-tests';
+              admitRuntime('before-tests', 0, ranSuites, executionWorkers, slot.concurrency);
+              // An over-capacity subset is sized by the arm it was cut from: a narrow arm's subset is narrower still.
+              // W1-T10947: an explicit bounded profile is priced against the context this slot was bound to.
+              const testCapacity = admitHost('affected-tests', { selection: receipt.selectedArm ?? receipt.selection, workers: executionWorkers,
+                ...(values['author-profile'] === undefined ? {} : { boundedProfile: readAuthorProfile(root, values['author-profile']),
+                  context: boundContext ? observeContext() : undefined, bound: boundContext }) });
+              if (testCapacity) (receipt.hostCapacity ??= []).push(testCapacity);
+              // No whole-suite retry or instrumentation. A missing target/summary is a refusal, never green.
+              // The host-wide test slot, its measured CPU/memory grant (no fixed ceiling) and nice (test-slot.ts).
+              slot.refresh();
+              // The suites start only under the very context the slot was bound to; anything else is NOT_RUN.
+              requireNativeContext('start');
+              const hasDurationReporter = existsSync(join(root, 'scripts/test-duration-reporter.mjs'));
+              const durationArgs = !hasDurationReporter ? [] : ['--test-reporter-destination=stdout',
+                `--test-reporter=${join(root, 'scripts/test-duration-reporter.mjs')}`,
+                `--test-reporter-destination=${join(diagnosticsRoot, 'durations.json')}`];
+              // Judged (scripts/pure-test-pool.mjs): a suite whose own child exits 0 part-way is reported
+              // `ok` with a whole summary, so the step passes only when every suite reached its own summary.
+              const judged = prepareJudgedRun();
+              const child = lowPriorityCommand(process.execPath, testRunArgv(judgedNodeTestArgs(authorTestRunnerArgs(boundedNodeTestArgs(['--test', '--test-reporter=tap', ...durationArgs,
+                '--import', 'tsx', '--import', './test/setup/tmp-hygiene.ts', ...ranSuites], root, manifest), ranSuites, manifest), judged.args), executionWorkers));
+              const tests = runStep(testsName, child.args, child.file, judged.env, AUTHOR_STEP_RUNTIME_MS, slot.heartbeat);
+              if (receipt.tiered) receipt.tiered.ran = [...ranSuites];
+              if (receipt.partial) {
+                receipt.partial.ran = [...ranSuites];
+                receipt.partial.leftToCi = receipt.suites.length - ranSuites.length;
+              }
+              if (partialSentenceAfterRun) console.log(partialSentenceAfterRun);
+              const judge = closeJudgedRun(judged, ranSuites, { status: tests.status ?? 1, root, role: testsName, prefix: 'preflight-author' });
+              const testsOk = completeTestResult(tests) && judge.verdict.complete;
+              report(testsName, tests, testsOk, { judge: { complete: judge.verdict.complete, given: judge.verdict.given,
+                reported: judge.verdict.reported, unreported: judge.verdict.missing.slice(0, 20), lastStarted: judge.verdict.lastStarted,
+                exitSite: judge.verdict.exitSite } });
+              receipt.runtimeEvidence = { state: 'not-collected', reason: 'duration reporter unavailable in this root' };
+              if (hasDurationReporter) {
+                if (!testsOk) receipt.runtimeEvidence = { state: 'incomplete', reason: 'affected-tests did not complete successfully' };
+                else {
+                  try {
+                    receipt.runtimeEvidence = closedDurationEvidence(root, relative(root, join(diagnosticsRoot, 'durations.json')),
+                      ranSuites, runtimeBindings(root, receipt.headSha, authorEnvironment(process.env)));
+                  } catch (error) {
+                    // Timing is diagnostic, never author assurance or a zero-cost success estimate.
+                    receipt.runtimeEvidence = { state: 'unavailable', reason: error.message };
+                  }
+                }
+              }
+              }
             }
           } else {
             const gate = staticOk ? 'lint-plan-fast' : 'static-preflight';
@@ -882,6 +989,14 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
       : receipt.selection === 'over-capacity' ? 'over-capacity' : 'passed';
   } catch (error) {
     receipt.verdict = error instanceof MacAuthorCapacityRefusal ? 'over-capacity' : 'refused';
+    // A failed early precheck exits before the normal end-of-run provenance read. Record it here so a
+    // later same-input retry can reuse only the measured prefix when the dependency donor stayed stable.
+    if (receipt.dependencyProvenance?.before && receipt.dependencyProvenance.after === undefined) {
+      try { receipt.dependencyProvenance.after = authorDependencyProvenance(root); }
+      catch (provenanceError) {
+        receipt.dependencyProvenance.after = { state: 'unavailable', reason: provenanceError.message };
+      }
+    }
     let refusalLines = [];
     if (error instanceof MacAuthorCapacityRefusal) {
       const { summary, lines } = macAuthorRefusalReport(error.stage, error.admission);

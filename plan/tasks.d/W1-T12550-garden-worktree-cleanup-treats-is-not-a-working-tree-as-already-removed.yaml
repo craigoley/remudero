@@ -1,0 +1,52 @@
+- id: W1-T12550
+  title: "Garden worktree cleanup treats 'is not a working tree' as already removed"
+  repo: remudero
+  depends_on: []
+  priority: 1.0
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # one cleanup step of the garden checkout; it removes nothing new and still throws on every other git failure
+  origin: "operator-session#flow-ledger-research-2026-11-13"
+  plan_refs:
+    - W1-T12221
+    - W1-T12222
+  files:
+    - src/lib/worker.ts
+    - src/run-task.ts
+    - src/lib/gardener.ts
+    - test/gardeners/garden-worktree-cleanup-treats-is-not-a-working-tree-as-already-removed.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "When `git worktree remove` fails with \"is not a working tree\" for the garden checkout's path, the garden checkout's dispose returns without an error, through the production gardenCheckoutAsync and gardenCheckout"
+      proof: "grep: W1-T12550 criterion 1 in test/gardeners/garden-worktree-cleanup-treats-is-not-a-working-tree-as-already-removed.test.ts"
+    - claim: "invariant:only-an-absent-tree-is-tolerated — Every other `git worktree remove` failure (a locked tree, a git error, a timeout) still throws from dispose, so a real leak is still seen"
+      kind: guard
+      proof: "grep: W1-T12550 criterion 2 in test/gardeners/garden-worktree-cleanup-treats-is-not-a-working-tree-as-already-removed.test.ts"
+    - claim: "A garden pass whose landing opened a pull request and whose dispose then fails records the pull request, not garden_filing_failed. The dispose failure is logged as its own row and raises no filing streak"
+      proof: "grep: W1-T12550 criterion 3 in test/gardeners/garden-worktree-cleanup-treats-is-not-a-working-tree-as-already-removed.test.ts"
+    - claim: "A pass that refuses or fails its landing still reports the landing's own reason, not the dispose error"
+      proof: "grep: W1-T12550 criterion 4 in test/gardeners/garden-worktree-cleanup-treats-is-not-a-working-tree-as-already-removed.test.ts"
+    - claim: "The garden checkout removes its worktree through the tolerant removal"
+      proof: "grep: worktreeRemoveIfPresentAsync( in src/run-task.ts"
+  rationale: |
+    WHY: a garden pass that has already done its work fails at the very end, in cleanup. The gardener then counts a failed filing, waits a doubling retry time and raises a streak to a person.
+    OBSERVED in the 48 h ledger research (2026-11-11 21:45Z to 2026-11-13 21:45Z): the ci-friction garden recorded 8 `ci-friction.garden_filing_failed` rows; 6 of the 8 carry "fatal: '<path>' is not a working tree" from `git -C <repo> worktree remove --force /home/node/Remudero/worktrees/ci-friction-garden-<ms>`. The same text failed 3 `machine_judge.failed` rows and 1 `scout.garden_filing_failed` row, and the overseer raised 4 `gardener_overseer.noticed` rows on it (latest 2026-11-13 21:49Z, machine-judge-garden-1794604147259).
+    READ 2026-11-13 at origin/main d41354cdd:
+    - src/run-task.ts:28051 `gardenCheckout` and :28071 `gardenCheckoutAsync` make the checkout at `<worktreesRoot>/<name>-garden-<ms>`. Their `dispose` is `worktreeRemove` (:28067) and `worktreeRemoveAsync` (:28092).
+    - src/lib/worker.ts:6667 `worktreeRemove` and :6683 `worktreeRemoveAsync` run `git worktree remove --force <path>` and throw on any failure. Git says "is not a working tree" when the path is no longer registered: something else (a prune, the janitor, a killed add) has already removed it.
+    - src/lib/gardener.ts:1386-1389: the `finally` runs `ws.dispose()` after the landing. A throw there replaces the pass's result, so a pass that opened its pull request can still be counted as a failed filing at :1390-1404 (`garden_filing_failed`, a new `filingFailures` streak and a retry wait).
+    - No queued task covers this. The worktree retire module (src/lib/worktree-retire.ts) is shadow only and runs no removal.
+  design: |
+    INVARIANT only-an-absent-tree-is-tolerated: dispose tolerates only the "is not a working tree" failure for its own path; every other removal failure still throws.
+    1. In src/lib/worker.ts add `worktreeRemoveIfPresentAsync(repoDir, path)` and its sync sibling. Each calls the existing removal. On a failure whose stderr says "is not a working tree" for that path, it runs `removeWorktreeBase(path)`, removes the directory if it still exists, and returns `"already-removed"`. Any other failure rethrows.
+    2. In src/run-task.ts make both garden checkouts' `dispose` call the new removal.
+    3. In src/lib/gardener.ts, in the pass's `finally`, catch a dispose error. Log `<name>.garden_dispose_failed` with the reason. Rethrow it only when the landing itself did not throw and did not open a pull request; a landed pull request stands, and a landing error keeps its own reason.
+    4. The test drives `gardenCheckoutAsync` on a real repository from test/helpers/git-repo.ts, removes the worktree behind its back, then disposes. It drives one garden pass with a landing that opens a pull request and a dispose that fails.
+    NOT IN SCOPE: the worker's own task worktree cleanup; the janitors; why the path was already gone.
+  falsifier: |
+    Make the tolerant removal rethrow "is not a working tree" and criterion 1 must fail. Make it swallow every error and criterion 2 must fail. Let the dispose error replace a landed result and criterion 3 must fail. Restore and require all to pass.
+  note: |
+    Id reserved for run-unfiled-1794610450000 with ~/rmd-work/bin/reserve-id.sh. The fleet builds it.

@@ -93,6 +93,7 @@ test("DECISION_RELEVANT_LEDGER_STEPS: derived from consumers, not hardcoded — 
     "../src/lib/drain.ts",
     "../src/lib/review.ts",
     "../src/lib/stall-verifier.ts",
+    "../src/lib/restart-cycle.ts",
   ];
 
   // VERIFIED non-deciding despite living in a deciding-reader file: status.ts's

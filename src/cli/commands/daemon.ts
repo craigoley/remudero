@@ -16,18 +16,29 @@ import { judgeCiEscalation, productionCiJudgePorts, singleFlightCiJudge, withCiJ
 import { recyclePauseDetail } from "../../lib/recycle-yield.js";
 import { judgeDiskHeadroom, readDiskFreeBytes } from "../../lib/doctor.js";
 import { execFileSync } from "node:child_process";
+import { createHash, randomUUID } from "node:crypto";
 import { execFileLoopBounded } from "../../lib/loop-bounded-child.js";
 import { GATEWAY_FETCH_TIMEOUT_MS } from "../../lib/git-fetch-retry.js";
 import { productionDispatchBreakJudge, productionFixProgressJudge } from "../../lib/sweep.js";
-import { ghExec, ghJsonAsync, ghTextAsync } from "../../lib/github-transport.js";
+import { configureGithubInstallationBudget, ghExec, ghJsonAsync, ghTextAsync, takeGithubBudgetThrottles } from "../../lib/github-transport.js";
+import { createInstallationBudget, createInstallationBudgetState } from "../../lib/github-installation-budget.js";
+import { DEFAULT_HOST_INSTANCE_REGISTRY_PATH, installationConsumers, registryInstanceForRepo } from "../../lib/instance-registry.js";
+import { GH_APP_INSTALLATION_ID_ENV } from "../../lib/github-app.js";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { homedir, hostname } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { loadConfig, providerRoutingOwnsHeadroom, resolveHeadroomEnabled, workerHomeDir, type Config } from "../../lib/config.js";
+import { configPath, isWorkerProviderId, loadConfig, providerRoutingOwnsHeadroom, resolveHeadroomEnabled, workerHomeDir, type Config } from "../../lib/config.js";
+import { cashDeploymentTarget } from "../../lib/config-schema.js";
 import { ledgerPathFor } from "../../lib/ledger-path.js";
 import { daemonCrashSentinel, escalateCrashLoop, escalateDiskHeadroomBreach, escalateHeadroomParkCeiling, escalateHeadroomReserve, escalateQuotaExhaustion, escalateReplayStranded, escalateStarvation, escalateStarvationCleared } from "../../lib/escalation-catalogue.js";
-import { resolveProviderRoutingPolicy } from "../../lib/provider-routing-policy.js";
+import { lostWorkerProviders, resolveProviderRoutingPolicy, type EffectiveProviderRoutingPolicy } from "../../lib/provider-routing-policy.js";
+import {
+  FOUNDRY_CLAUDE_API_KEY_ENV,
+  FOUNDRY_CLAUDE_ENDPOINT_ENV,
+  FOUNDRY_CLAUDE_PRICES,
+  OPENWEIGHT_PRICES,
+} from "../../lib/worker-provider.js";
 import { writeProviderRoutingStatus, type ProviderRoutingWriteInput } from "../../lib/provider-routing-status.js";
 import { readFileIfExists } from "../../lib/fs-race-safe.js";
 import { mergedInLastDayAsync } from "../../lib/fleet-lane.js";
@@ -47,7 +58,7 @@ import { plannedSequence, runDrain, type DrainDeps, type MergedSet, type OpenPrC
 import { fileTargetJobStore, nativeTargetAdmission, readTargetExecution, type ProductBuildInstances } from "../../lib/product-build.js";
 import { loadManagedRepos } from "../../lib/managed-repos.js";
 import type { RunResult } from "../../lib/run-result.js";
-import { runBoundedTargetJob, type BoundedTargetJobPorts, type BoundedTargetJobOutcome, daemonBoot, daemonExitCodeForSummary, resolveFleetControlHold, runDaemon, readRestartHistoryLines, type BootPhases, type CrashLoopVerdict, type DaemonDeps, type DaemonKick, type DaemonOpts, type DaemonSummary, priorUnrecognisedResetStrings, daemonPushTokenSource, receivePackCredentialProbe } from "../../lib/daemon.js";
+import { runBoundedTargetJob, type BoundedTargetJobPorts, type BoundedTargetJobOutcome, daemonBoot, daemonExitCodeForSummary, resolveFleetControlHold, runDaemon, readRestartHistoryLines, type BootPhases, type CrashLoopVerdict, type DaemonDeps, type OpsTaskDispatchRead, type DaemonKick, type DaemonOpts, type DaemonSummary, priorUnrecognisedResetStrings, daemonPushTokenSource, receivePackCredentialProbe } from "../../lib/daemon.js";
 import { sweepStrandedReviewWorktreesAsync } from "../../lib/review-worktree-reclaim.js";
 import { sweepReclaimableArtifacts } from "../../lib/disk-artifact-reclaim.js";
 import { readGhRateLimitBuckets } from "../../lib/daemon-health.js";
@@ -58,7 +69,7 @@ import { daemonInstanceRegistryPath } from "../../lib/deployer.js";
 import { DEPENDABOT_REPAIR_SNAPSHOT_MAX_AGE_MS } from "../../lib/dep-review.js";
 import { withEscalationSpoolDrain } from "../../lib/host-escalation-spool.js";
 import { instanceMode, readInstanceRegistryText } from "../../lib/instance-mode.js";
-import { instanceRegistryRuntimePresent, ledgerSelectedRegistryReadTimeouts, selectedInstanceRegistryEnvPath, withInstanceRegistryRuntime } from "../../lib/instance-registry-selection.js";
+import { instanceRegistryRuntimePresent, ledgerSelectedRegistryReadTimeouts, runtimeInstanceRegistryText, selectedInstanceRegistryEnvPath, withInstanceRegistryRuntime } from "../../lib/instance-registry-selection.js";
 import { escalate, escalateWithJudge, realEscalationJudge, ghIssueGateway, ghIssueGatewayAsync, type Escalation, type EscalationJudgeVerdict } from "../../lib/escalate.js";
 import { createGhCallPacer } from "../../lib/open-prs-rest.js";
 import { buildMainHealthRung } from "../../lib/main-health-rung.js";
@@ -70,10 +81,10 @@ import { appendLedger, markDaemonProcessActor } from "../../lib/ledger.js";
 import { clockFromMillisFn, fixedClock, systemClock, type Clock } from "../../lib/clock.js";
 import { getHeapStatistics } from "node:v8";
 import { sweepInflightLocksWithReceipts } from "../../lib/benchmark-run.js";
-import { ledgerMemoHolders } from "../../lib/ledger-union.js";
+import { ledgerMemoHolders, readLedgerUnionRecordsSync } from "../../lib/ledger-union.js";
 import { childMeasurementCadenceSpawn, measurementCadenceChildRunner } from "../../lib/measurement-cadence.js";
 import { loadPlan, type Plan } from "../../lib/plan.js";
-import { PLAN_DESTINATION_KINDS, planDestinationRepository, resolvePlanDestination, type PlanDestinationRepository } from "../../lib/plan-destination.js";
+import { PLAN_DESTINATION_KINDS, planDestinationRepository, planDestinationPath, resolvePlanDestination, type PlanDestinationRepository } from "../../lib/plan-destination.js";
 import { readOperatorReleaseRecords } from "../../lib/machine-filing-judge.js";
 import { readReleaseLedgerLines } from "../../lib/operator-release.js";
 import { runnerConfigDigest, terminalPreDispatchRefusalRevisions } from "../../lib/dispatch-repair.js";
@@ -142,6 +153,221 @@ export function daemonImprovementActionDeps(stateDir: string, gateway: RatifyCli
       return gateway.improvement(target);
     },
   };
+}
+
+async function reachableCashDeployments(config: Config, priorDeployments: string[] = []): Promise<{
+  deployments: string[]; unreadableDeployments: string[]; confirmedAbsentDeployments: string[]; errors: string[];
+}> {
+  const deployments: string[] = [];
+  const unreadableDeployments = new Set<string>();
+  const confirmedAbsentDeployments = new Set<string>();
+  const errors = new Set<string>();
+  const priorOpenWeightDeployments = priorDeployments.filter((name) => !Object.hasOwn(FOUNDRY_CLAUDE_PRICES, name));
+  const candidates = [...new Set([...(config.workerProviders?.cashEndpoint ?? config.workerProviders?.openweightEndpoint
+    ? Object.keys(OPENWEIGHT_PRICES) : []),
+    ...Object.keys(config.workerProviders?.cashDeploymentEndpoints ?? {}), ...priorOpenWeightDeployments])];
+  // PRIMARY CONTROL: all account controls and deployment checks share one startup deadline.
+  const signal = AbortSignal.timeout(GATEWAY_FETCH_TIMEOUT_MS);
+  const controls = new Map<string, Promise<boolean>>();
+  const probe = async (endpoint: string, key: string, name: string) => {
+    const base = endpoint.endsWith("/") ? endpoint : `${endpoint}/`;
+    const url = new URL(`openai/deployments/${encodeURIComponent(name)}/chat/completions?api-version=2024-10-21`, base);
+    // Missing required inference input: routing/validation only, never a completion request.
+    const response = await fetch(url, { method: "POST", headers: { "api-key": key, "Content-Type": "application/json" },
+      body: JSON.stringify({ messages: [] }), signal });
+    if (response.status !== 400 && response.status !== 404) {
+      throw new Error(`deployment check returned HTTP ${response.status}`);
+    }
+    const payload = await response.json() as { error?: { code?: string; param?: string; message?: string } };
+    return { status: response.status, error: payload.error };
+  };
+  await Promise.all(candidates.map(async (name) => {
+    const target = cashDeploymentTarget(config, name);
+    if (!target.ok) {
+      if (target.reason === "no-endpoint") confirmedAbsentDeployments.add(name);
+      else unreadableDeployments.add(name);
+      errors.add(`cash deployment ${name}: ${target.reason}${"keyEnv" in target ? ` (${target.keyEnv})` : ""}`);
+      return;
+    }
+    try {
+      const account = JSON.stringify([target.endpoint, target.keyEnv]);
+      let control = controls.get(account);
+      if (!control) {
+        control = probe(target.endpoint, target.key, `rmd-absent-${randomUUID()}`).then((reply) =>
+          reply.status === 404 && reply.error?.code === "DeploymentNotFound");
+        controls.set(account, control);
+      }
+      if (!await control) throw new Error("account cannot distinguish an absent deployment from request validation");
+      const reply = await probe(target.endpoint, target.key, name);
+      if (reply.status === 404 && reply.error?.code === "DeploymentNotFound") {
+        confirmedAbsentDeployments.add(name);
+        return;
+      }
+      if (reply.status === 400 && (reply.error?.code === "OperationNotSupported" ||
+        reply.error?.param === "messages" || /messages/i.test(reply.error?.message ?? ""))) {
+        deployments.push(name);
+        return;
+      }
+      throw new Error(`deployment check returned HTTP ${reply.status} (${reply.error?.code ?? "unknown error"})`);
+    } catch (error) {
+      const reason = String(error);
+      unreadableDeployments.add(name);
+      errors.add(`cash deployment ${name}: ${reason}`);
+    }
+  }));
+
+  // Foundry Claude has a separate Anthropic protocol endpoint and credential pair. Its supported
+  // deployments never appear in the OpenAI-compatible mounts or account catalog, so probe them
+  // with an empty messages list (validation only, no completion or charge).
+  const foundryEndpoint = process.env[FOUNDRY_CLAUDE_ENDPOINT_ENV];
+  const foundryKey = process.env[FOUNDRY_CLAUDE_API_KEY_ENV];
+  if (foundryEndpoint || foundryKey) {
+    if (!foundryEndpoint || !foundryKey) {
+      for (const name of Object.keys(FOUNDRY_CLAUDE_PRICES)) unreadableDeployments.add(name);
+      errors.add(`Foundry Claude cash requires both ${FOUNDRY_CLAUDE_ENDPOINT_ENV} and ${FOUNDRY_CLAUDE_API_KEY_ENV}`);
+    } else {
+      try {
+        const base = new URL(foundryEndpoint);
+        if (base.protocol !== "https:" || base.pathname.replace(/\/$/, "") !== "/anthropic" || base.search || base.hash) {
+          throw new Error("Foundry Claude requires an HTTPS /anthropic base endpoint");
+        }
+        const url = new URL("v1/messages", `${base.toString().replace(/\/$/, "")}/`);
+        const probeFoundry = async (model: string) => {
+          const response = await fetch(url, {
+            method: "POST",
+            headers: { "content-type": "application/json", "x-api-key": foundryKey, "anthropic-version": "2023-06-01" },
+            body: JSON.stringify({ model, messages: [], max_tokens: 1 }),
+            signal,
+          });
+          const payload = await response.json() as { error?: { code?: string; type?: string; message?: string } };
+          return { status: response.status, error: payload.error };
+        };
+        const control = await probeFoundry(`rmd-absent-${randomUUID()}`);
+        const controlConfirmsAbsence = control.status === 404 &&
+          (control.error?.code === "DeploymentNotFound" || control.error?.type === "not_found_error");
+        for (const name of Object.keys(FOUNDRY_CLAUDE_PRICES).sort()) {
+          try {
+            if (!controlConfirmsAbsence) {
+              throw new Error("Foundry account cannot distinguish an absent deployment from request validation");
+            }
+            const reply = await probeFoundry(name);
+            if (reply.status === 404 && (reply.error?.code === "DeploymentNotFound" || reply.error?.type === "not_found_error")) {
+              confirmedAbsentDeployments.add(name);
+              continue;
+            }
+            if (reply.status === 400 && /messages/i.test(reply.error?.message ?? "")) {
+              deployments.push(name);
+              continue;
+            }
+            throw new Error(`Foundry deployment check returned HTTP ${reply.status} (${reply.error?.code ?? reply.error?.type ?? "unknown error"})`);
+          } catch (error) {
+            const reason = String(error);
+            unreadableDeployments.add(name);
+            errors.add(`Foundry Claude deployment ${name}: ${reason}`);
+          }
+        }
+      } catch (error) {
+        const reason = String(error);
+        for (const name of Object.keys(FOUNDRY_CLAUDE_PRICES)) unreadableDeployments.add(name);
+        errors.add(`Foundry Claude endpoint: ${reason}`);
+      }
+    }
+  }
+  return {
+    deployments: deployments.sort(),
+    unreadableDeployments: [...unreadableDeployments].sort(),
+    confirmedAbsentDeployments: [...confirmedAbsentDeployments].sort(),
+    errors: [...errors].sort(),
+  };
+}
+
+export async function recordWorkerProvidersAtStart(opts: {
+  config: Config;
+  policy: EffectiveProviderRoutingPolicy;
+  at: string;
+  log: (step: string, extra: Record<string, unknown>) => void;
+  raise: (escalation: Escalation) => string | Promise<string>;
+}): Promise<void> {
+  const step = "daemon.worker_providers";
+  const enabled = [...new Set(opts.policy.committed.enabledProviders)].sort();
+  const file = configPath();
+  let previous: Record<string, unknown> | undefined;
+  let comparisonReason: string | undefined;
+  try {
+    const read = readLedgerUnionRecordsSync(dirname(ledgerPathFor(opts.config)), {
+      step: "daemon.worker_providers", refuseIncomplete: true, liveFirst: true, order: "newest-first",
+      satisfied: (seen) => seen.has(step),
+    });
+    if (!read.ok || read.torn || read.unclassified.length) {
+      throw new Error(`provider startup history unreadable: ${[...read.unread, ...read.unclassified].join(", ")}; torn=${read.torn}`);
+    }
+    previous = read.rows.filter((row) => row.step === step).sort((a, b) => Date.parse(String(b.ts)) - Date.parse(String(a.ts)))[0];
+    const previousCashUnreadableValid = previous?.cash_unreadable_deployments === undefined ||
+      (Array.isArray(previous.cash_unreadable_deployments) && previous.cash_unreadable_deployments.every((name) => typeof name === "string"));
+    if (previous && (typeof previous.ts !== "string" || !Number.isFinite(Date.parse(previous.ts)) ||
+      !Array.isArray(previous.enabled_providers) || !previous.enabled_providers.every(isWorkerProviderId) ||
+      !Array.isArray(previous.cash_deployments) || !previous.cash_deployments.every((name) => typeof name === "string") ||
+      !previousCashUnreadableValid)) {
+      throw new Error("provider startup history contains a malformed snapshot");
+    }
+  } catch (error) {
+    previous = undefined;
+    const reason = String(error);
+    comparisonReason = reason;
+  }
+  let cash: string[] = [];
+  let cashUnreadable: string[] = [];
+  let cashConfirmedAbsent: string[] = [];
+  const cashErrors: string[] = [];
+  if (enabled.includes("cash")) {
+    // New partial snapshots still carry positively confirmed reachable IDs in cash_deployments;
+    // only legacy unreadable rows lack the unreadable-list field that distinguishes this contract.
+    const previousCashComparable = previous?.cash_read === "readable" ||
+      Array.isArray(previous?.cash_unreadable_deployments);
+    const priorCash = previousCashComparable && Array.isArray(previous?.cash_deployments)
+      ? previous.cash_deployments as string[] : [];
+    const reading = await reachableCashDeployments(opts.config, priorCash);
+    cash = reading.deployments;
+    cashUnreadable = reading.unreadableDeployments;
+    cashConfirmedAbsent = reading.confirmedAbsentDeployments;
+    cashErrors.push(...reading.errors);
+  }
+  const comparison = comparisonReason ? "skipped" : previous ? "compared" : "first-start";
+  opts.log(step, { ts: opts.at, config_file: file, enabled_providers: enabled,
+    cash_deployments: cash, cash_read: cashErrors.length ? "unreadable" : "readable",
+    cash_unreadable_deployments: cashUnreadable,
+    cash_confirmed_absent_deployments: cashConfirmedAbsent,
+    ...(cashErrors.length ? { cash_read_error: cashErrors.join("; ") } : {}),
+    comparison, ...(comparisonReason ? { comparison_reason: comparisonReason } : {}),
+  });
+  if (!previous) return;
+  const earlier = previous.enabled_providers as string[];
+  const lost = lostWorkerProviders(earlier, enabled);
+  const previousCashComparable = previous.cash_read === "readable" ||
+    Array.isArray(previous.cash_unreadable_deployments);
+  if (previousCashComparable) {
+    lost.push(...lostWorkerProviders(previous.cash_deployments as string[], cash)
+      .map((name) => `cash:${name}`));
+  }
+  if (lost.length === 0) return;
+  const priorSet = [...earlier, ...(previous.cash_deployments as string[]).map((name) => `cash:${name}`)].sort();
+  const key = createHash("sha256").update(JSON.stringify([priorSet, lost.sort()])).digest("hex");
+  const restore = "Restore the provider configuration";
+  try {
+    await opts.raise({ class: "MANUAL", taskId: `DAEMON-PROVIDERS:${key}`,
+      summary: `Worker providers lost at startup: ${lost.join(", ")}`,
+      detail: `Lost: ${lost.join(", ")}. Config file: ${file}. Last start with these providers: ${previous.ts}. ` +
+        "An intentional removal also raises this escalation; close it if the removal was intended.",
+      options: [
+        { label: restore, detail: `Check ${file} and restore the missing providers and cash deployment access.`, kind: { type: "operator-only" } },
+        { label: "Confirm the intentional removal", detail: "Close this escalation if the smaller provider set was intended.", kind: { type: "operator-only" } },
+      ],
+      recommendation: restore,
+      consequence: "The daemon continues with fewer worker providers until configuration or access is restored.",
+    });
+  } catch (error) {
+    opts.log("daemon.worker_providers_escalation_failed", { reason: String(error), lost_providers: lost });
+  }
 }
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export type HostValue = any;
@@ -656,20 +882,59 @@ function isOpsCatalogSlug(slug: string): boolean {
  * W1-T11770: the tick reads `current` synchronously and gets the last completed refresh. Each read starts at most one
  * refresh behind it, the W1-T7744 filing-prefetch shape, so a slow or hung read never delays a tick.
  */
-function opsCatalogShadowFeed(source: { refresh(): Promise<OpsCatalogShadowInput> }): { current: () => OpsCatalogShadowInput | undefined } {
+/** BACKSTOP: completed private evidence expires even if a successor refresh hangs. */
+export const OPS_DISPATCH_SOURCE_MAX_AGE_MS = 120_000;
+
+export function opsCatalogShadowFeed(source: { refresh(): Promise<OpsCatalogShadowInput> }, clock: Clock = systemClock): {
+  current(): OpsCatalogShadowInput | undefined;
+  forDispatch(): OpsCatalogShadowInput | undefined;
+} {
   let latest: OpsCatalogShadowInput | undefined;
+  let completedAt: number | undefined;
   let inFlight = false;
   return {
     current: () => {
       if (!inFlight) {
         inFlight = true;
-        // refresh() answers every failure as an outcome; a rejection anyway is read as `unreadable`.
-        void source.refresh().then((input) => { latest = input; }, (error: unknown) => { latest = { outcome: "unreadable" }; void error; })
-          .finally(() => { inFlight = false; });
+        // refresh() answers failure as an outcome; an unexpected rejection remains unreadable.
+        void source.refresh().then((input) => { latest = input; completedAt = clock.now(); }, (error: unknown) => {
+          latest = { outcome: "unreadable" }; completedAt = clock.now(); void error;
+        }).finally(() => { inFlight = false; });
       }
       return latest;
     },
+    forDispatch: () => {
+      if (latest?.outcome !== "ok") return latest;
+      const age = completedAt === undefined ? NaN : clock.now() - completedAt;
+      return !Number.isFinite(age) || age < 0 || age >= OPS_DISPATCH_SOURCE_MAX_AGE_MS ? { outcome: "stale" } : latest;
+    },
   };
+}
+
+type OpsDispatchSelection = { outcome: "off" } | { outcome: "on"; repository: string }
+  | { outcome: "unavailable"; reason: string };
+
+/** Read the new flag, reusing canonical repository validation and refusing a changed file. */
+function opsDispatchSelection(stateDir: string): OpsDispatchSelection {
+  try {
+    const path = planDestinationPath(stateDir), before = readFileIfExists(path);
+    if (before === undefined) return { outcome: "off" };
+    const record: unknown = JSON.parse(before);
+    if (record === null || typeof record !== "object" || Array.isArray(record)) return { outcome: "unavailable", reason: "selection_unreadable" };
+    const flag = (record as Record<string, unknown>).dispatch_ops_tasks;
+    if (flag === undefined || flag === false) return { outcome: "off" };
+    if (flag !== true) return { outcome: "unavailable", reason: "invalid_dispatch_flag" };
+    const named = planDestinationRepository(stateDir);
+    if (before !== readFileIfExists(path)) return { outcome: "unavailable", reason: "selection_changed" };
+    if (named.outcome !== "named" || (record as Record<string, unknown>).repository !== `${named.owner}/${named.repo}`) {
+      return { outcome: "unavailable", reason: "selection_unreadable" };
+    }
+    return { outcome: "on", repository: `${named.owner}/${named.repo}` };
+  } catch (error) {
+    // A local selection failure is UNKNOWN, never a public fallback for a private task.
+    void error;
+    return { outcome: "unavailable", reason: "selection_unreadable" };
+  }
 }
 
 /** W1-T12244: the parts of the time from the process start to the first tick, on the daemon clock. */
@@ -717,7 +982,7 @@ export function freshnessRestartLadder(rows: FreshnessRestartValues): { scoreLim
  *  changed plan, a failed or stale early read, and every later call read again. One `daemon.first_tick_read` row. */
 function firstTickReadOf<I extends { plan: Plan }, T>(
   read: (input: I) => Promise<ReadGeneration<T>>, plan: Plan, log: (step: string, extra?: Record<string, unknown>) => void,
-  clock: Clock,
+  clock: Clock, onEarlyRead: (startedAtMs: number) => void,
 ): (input: I) => Promise<ReadGeneration<T>> {
   const startedAtMs = clock.now();
   let settledAtMs: number | undefined;
@@ -738,6 +1003,7 @@ function firstTickReadOf<I extends { plan: Plan }, T>(
       reason = outcome.reason;
       const fresh = freshReadGeneration(outcome.generation, { consumer: "first_tick_read", clock, log });
       source = fresh ? "early" : reason === undefined ? "early_stale" : "early_failed";
+      if (fresh) onEarlyRead(startedAtMs);
       return fresh ?? await read(input);
     } finally {
       log("daemon.first_tick_read", { source, first_tick_read_ms: clock.now() - askedAtMs,
@@ -1047,11 +1313,15 @@ export async function daemonCommand(
   let lastReadPlaneStep: string | undefined;
   let onMainEntryStep: ((step: string) => void) | undefined;
   const log = (step: string, extra: Record<string, unknown> = {}) => {
+    for (const { step: budgetStep, ...budgetRow } of takeGithubBudgetThrottles()) {
+      appendLedger(ledgerPath, { run_id: runId, task_id: "DAEMON", step: budgetStep, lane: "daemon", ...budgetRow });
+    }
     lastReadPlaneStep = step;
     appendLedger(ledgerPath, { run_id: runId, task_id: "DAEMON", step, lane: "daemon", ...extra });
     onMainEntryStep?.(step);
   };
   ledgerSelectedRegistryReadTimeouts(log);
+  startDaemonInstallationBudget(() => daemonInstallationRegistry(repoRoot), process.env, log, systemClock, `${target.owner}/${target.repo}`);
   // bundlemain: which entry this main started from (bin/rmd's choice), and a bundled main's first tick settles it.
   onMainEntryStep = startMainEntryWatch({ log, root: daemonModuleRepoDir });
   // W1-T9065: the lane's approve and the responder's reframe run from a tree at origin/main.
@@ -1346,7 +1616,10 @@ export async function daemonCommand(
   }
   // W1-T12239: the first tick's read needs only the token and the plan, so it starts here, before the lifetime
   // history, the lock and the adoption. The outer finally stops a plane that the cleanup list never took.
-  const readOptions: TickReadOptions = { owner: target.owner, repo: target.repo, config, ledgerPath, checkoutRoot: targetCheckoutRoot };
+  const readOptions: TickReadOptions = {
+    owner: target.owner, repo: target.repo, config, ledgerPath, checkoutRoot: targetCheckoutRoot,
+    ... (daemonInstallationBudgetInput === undefined ? {} : { githubInstallationBudget: daemonInstallationBudgetInput }),
+  };
   let inlineProducer: ReturnType<typeof tickReadProducer> | undefined;
   const readPlane = deps.githubFactory ? undefined : (deps.startReadPlane ?? startReadPlane)({
     // W1-T9722: the worker starts from the narrow tick-read entry (a current bundle when one is vouched for).
@@ -1359,15 +1632,11 @@ export async function daemonCommand(
   const checkStop = deps.checkStop ?? (() => stopDetail(config.root));
   // A loop that ends before its first read (max 0, or STOP at the start) gets no early read.
   const earlyRead = readTick !== undefined && opts.max !== 0 && !checkStop();
-  // The first tick counts the early read as its own, so the boot review (W1-T12236) takes its views.
-  let earlyReadStartedAtMs = earlyRead ? systemClock.now() : undefined;
+  const tickReadClock = clockFromMillisFn(deps.now);
   const firstTickRead = readTick
-    && (earlyRead ? firstTickReadOf(readTick, plan, log, clockFromMillisFn(deps.now)) : readTick);
-  const tickStartStamp = (): number => {
-    const stamp = earlyReadStartedAtMs ?? systemClock.now();
-    earlyReadStartedAtMs = undefined;
-    return stamp;
-  };
+    && (earlyRead ? firstTickReadOf(readTick, plan, log, tickReadClock, (startedAtMs) => {
+      tickReadStartedAtMs = Math.min(tickReadStartedAtMs ?? startedAtMs, startedAtMs);
+    }) : readTick);
 
   // W1-T414: ONE batched read for this whole `rmd daemon` invocation — see drainCommand's
   // identical wiring/doc just above. Resolved AFTER the `--dry-run` early return above (never
@@ -1481,6 +1750,8 @@ export async function daemonCommand(
   if (bootProviderRoutingPolicy.fallback) {
     log("daemon.provider_routing_policy_fallback", { reason: bootProviderRoutingPolicy.fallback.reason });
   }
+  await recordWorkerProvidersAtStart({ config, policy: bootProviderRoutingPolicy,
+    at: clockFromMillisFn(deps.now).iso(), log, raise: raiseDuplicate });
   try {
     (deps.writeProviderRoutingStatus ?? writeProviderRoutingStatus)(config.root, {
       state: "not-probed",
@@ -1937,9 +2208,30 @@ export async function daemonCommand(
     await dispatchFilingPrefetch.refresh(target.planPath);
     bootPhases.mark("filing_prefetch");
     // W1-T11770: absent the flag, nothing is built, read or passed. Present, the first read starts here, unawaited.
-    const opsShadow = shadowOpsCatalog === undefined ? undefined
-      : opsCatalogShadowFeed(createOpsCatalogShadowSource({ repository: shadowOpsCatalog }, deps.opsCatalogApi));
+    const opsSelection = opsDispatchSelection(join(config.root, "state"));
+    const opsSourceRepository = shadowOpsCatalog ?? (opsSelection.outcome === "on" ? opsSelection.repository : undefined);
+    const source = opsSourceRepository === undefined ? undefined
+      : createOpsCatalogShadowSource({ repository: opsSourceRepository }, deps.opsCatalogApi);
+    const opsShadow = source === undefined ? undefined : opsCatalogShadowFeed(shadowOpsCatalog ? source : {
+      refresh: () => {
+        const current = opsDispatchSelection(join(config.root, "state"));
+        return current.outcome === "on" && current.repository === opsSourceRepository
+          ? source.refresh() : Promise.resolve({ outcome: "stale" as const });
+      },
+    }, clockFromMillisFn(deps.now));
     opsShadow?.current();
+    const readOpsTaskDispatch = opsSelection.outcome === "off" ? undefined : (publicPlan: Plan): OpsTaskDispatchRead => {
+      const current = opsDispatchSelection(join(config.root, "state"));
+      if (current.outcome !== "on") return current;
+      if (!opsShadow || current.repository !== opsSourceRepository) return { outcome: "unavailable", reason: "selection_changed" };
+      opsShadow.current();
+      const input = opsShadow.forDispatch();
+      if (input === undefined) return { outcome: "unavailable", reason: "source_pending" };
+      if (input.outcome !== "ok") return { outcome: "unavailable", reason: input.outcome, source: input };
+      const publicCommit = planReaders.revisions.revisionOf(publicPlan)?.commit;
+      if (publicCommit === undefined) return { outcome: "unavailable", reason: "primary_revision_unknown", source: input };
+      return { outcome: "selected", source: input, publicCommit };
+    };
     const summary = await runDaemonFn(
       plan,
       {
@@ -1948,7 +2240,7 @@ export async function daemonCommand(
         refreshMerged,
         refreshMergedAsync: firstTickRead ? buildDaemonReadRefresher({
           read: firstTickRead, plan: () => activePlanRef.current, previous: () => lastProj,
-          invalidate: () => { tickReadGeneration = undefined; tickReadStartedAtMs = tickStartStamp(); },
+          invalidate: () => { tickReadGeneration = undefined; tickReadStartedAtMs = tickReadClock.now(); },
           publish: (snapshot: ReadGeneration<TickReadFacts>) => {
             tickReadGeneration = snapshot;
             lastProj = new Map(snapshot.facts.projection);
@@ -1969,6 +2261,7 @@ export async function daemonCommand(
           activePlanRef.current = fresh;
           daemonPlanCopies.observe(fresh);
         },
+        ...(readOpsTaskDispatch ? { readOpsTaskDispatch } : {}),
         ...(opsShadow ? {
           secondaryCatalogShadowSource: opsShadow.current,
           primaryPlanCommit: () => planReaders.revisions.revisionOf(activePlanRef.current)?.commit,
@@ -2493,7 +2786,9 @@ export async function daemonCommand(
           () => activePlanRef.current,
           // A run in flight starves the full sweep, so the light pass also watches main.
           mainHealthRung,
-          { openPrViews: servedOpenPrViews(() => tickReadGeneration, () => tickReadStartedAtMs) },
+          { openPrViews: servedOpenPrViews(() => freshReadGeneration(tickReadGeneration,
+              { consumer: "sweep_light", clock: tickReadClock }), () => tickReadStartedAtMs),
+            sweepWallClockBoundMs: opts.sweepWallClockBoundMs },
         ),
         // W1-T7734: the idle sleep runs the light pass while review demand waits, at a cadence the sweep
         // derives from observed review duration and head churn. Reads the sweep's in-process memo only.
@@ -2696,4 +2991,81 @@ export async function daemonCommand(
       await stopReadPlane().catch((error: unknown) => log("daemon.cleanup_failed", { resource: "read_plane", error: String(error) }));
     }
   }
+}
+
+export const GITHUB_BUDGET_CONFIGURED_STEP = "github.budget.configured";
+
+let daemonInstallationBudgetInput: { state: SharedArrayBuffer; consumers: number; instance: string } | undefined;
+
+/** The daemon sends the same atomic budget to its read worker in the existing worker input. */
+export function daemonInstallationBudgetWorkerInput(): typeof daemonInstallationBudgetInput {
+  return daemonInstallationBudgetInput;
+}
+
+type DaemonInstallationRegistryRead = { text: string; source: string; omitsInstallationIds?: boolean };
+
+/**
+ * W1-T12553: use the selected registry or the host copy; an unreadable host must reach startup's log.
+ * W1-T12670: only a missing host file falls back to the checkout's copy, which names no installation IDs.
+ */
+export function daemonInstallationRegistry(repoRoot: string): DaemonInstallationRegistryRead | undefined {
+  const selected = runtimeInstanceRegistryText();
+  if (selected !== undefined) return { text: selected, source: "selected" };
+  try {
+    return { text: readFileSync(DEFAULT_HOST_INSTANCE_REGISTRY_PATH, "utf8"), source: DEFAULT_HOST_INSTANCE_REGISTRY_PATH };
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException | undefined)?.code !== "ENOENT") throw err;
+  }
+  const checkout = join(repoRoot, ".remudero", "daemon-instances.yaml");
+  return { text: readFileSync(checkout, "utf8"), source: checkout, omitsInstallationIds: true };
+}
+
+/**
+ * W1-T12553 — give this daemon its share of the GitHub App installation it shares with the other
+ * instances and hand runs. Every pacer in the process reads the budget set here. No installation id,
+ * an unreadable registry or no instance on the installation sets no budget, and the row says why.
+ */
+export function startDaemonInstallationBudget(
+  readRegistry: () => DaemonInstallationRegistryRead | undefined,
+  env: NodeJS.ProcessEnv,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  clock: Clock = systemClock,
+  targetRepo?: string,
+): void {
+  const installationId = env[GH_APP_INSTALLATION_ID_ENV]?.trim();
+  const named = env.RMD_INSTANCE_NAME?.trim();
+  let instance = named || "unknown";
+  let instanceReason = "no_registry";
+  const who = (): Record<string, unknown> => !named && instance === "unknown" ? { instance, instance_reason: instanceReason } : { instance };
+  const unset = (reason: string, extra: Record<string, unknown> = {}): void => {
+    daemonInstallationBudgetInput = undefined;
+    configureGithubInstallationBudget(undefined);
+    log(GITHUB_BUDGET_CONFIGURED_STEP, { outcome: "unconfigured", ...who(), reason, ...extra });
+  };
+  if (!installationId) return unset("no_installation_id");
+  let read: DaemonInstallationRegistryRead | undefined;
+  let consumers: number | undefined;
+  try {
+    read = readRegistry();
+    if (read !== undefined && !named) {
+      const own = targetRepo === undefined ? { reason: "no_target" } : registryInstanceForRepo(read.text, targetRepo);
+      if ("name" in own) instance = own.name;
+      else instanceReason = own.reason;
+    }
+    consumers = read === undefined ? undefined
+      : installationConsumers(read.text, installationId, { countOmitted: read.omitsInstallationIds === true });
+  } catch (err) {
+    return unset("registry_unreadable", { installation_id: installationId, error: err instanceof Error ? err.message : String(err) });
+  }
+  if (read === undefined) return unset("registry_unreadable", { installation_id: installationId });
+  if (consumers === undefined) return unset("no_instance_on_installation", { installation_id: installationId, source: read.source });
+  const state = createInstallationBudgetState();
+  daemonInstallationBudgetInput = { state, consumers, instance };
+  configureGithubInstallationBudget(createInstallationBudget({
+    consumers,
+    instance,
+    clock,
+    sharedState: state,
+  }));
+  log(GITHUB_BUDGET_CONFIGURED_STEP, { outcome: "configured", ...who(), installation_id: installationId, consumers, source: read.source });
 }

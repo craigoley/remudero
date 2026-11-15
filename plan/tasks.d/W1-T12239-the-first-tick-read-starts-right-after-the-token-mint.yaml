@@ -22,7 +22,7 @@
     - src/lib/daemon.ts
     - test/daemon/the-first-tick-read-starts-right-after-the-token-mint.test.ts
     - test/a-daemon-whose-boot-fails-releases-its-watchers-and-exits.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "`daemonCommand` starts the tick read worker and asks it for the first tick read after the token mint and the plan load, and before the lifetime history, the daemon lock and the adoption of run children. The test holds those steps open and sees the read start"

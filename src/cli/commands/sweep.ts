@@ -1220,6 +1220,8 @@ export function buildSweepLightHook(
     effects?: (deps: Parameters<SweepCommandHost["buildSweepEffects"]>[0]) => SweepDeps;
     readCompare?: (args: string[]) => Promise<unknown>;
     clock?: Pick<Clock, "now">;
+    /** W1-T12357: the daemon's sweep tick bound; absent, the default policy's. */
+    sweepWallClockBoundMs?: number;
   } = {},
 ): (scope?: LightPassScope) => Promise<void> {
   const {
@@ -1241,6 +1243,8 @@ export function buildSweepLightHook(
   }
   const reportPlanFilingClassification = createPlanFilingClassificationTelemetry(log);
   const compares = createLightPassCompareReader(owner, repo, io.readCompare ?? ghJsonAsync);
+  const policy = io.sweepWallClockBoundMs === undefined ? DEFAULT_SWEEP_POLICY
+    : { ...DEFAULT_SWEEP_POLICY, sweepWallClockBoundMs: io.sweepWallClockBoundMs };
   return withMainHealthOnLightPass(async (scope?: LightPassScope) => {
     // W1-T4053: a freshness drain's pass. The fix rung reads closed and the requeue batch never forms,
     // so `post-review` is the only lane left.
@@ -1286,7 +1290,7 @@ export function buildSweepLightHook(
         runId: runId,
         plan: activePlan,
         log: log,
-        policy: DEFAULT_SWEEP_POLICY,
+        policy,
         feedbackLandingStateRoot: config.root,
       }));
       // W1-T1211: ONE read per tick. `readLedgerLines` is the same reader every other rung in this
@@ -1340,14 +1344,14 @@ export function buildSweepLightHook(
           planContextDigestFor: riskJudgePlanContextDigestFor(activePlan),
           ...codeScanningJudgeDeps(owner, repo, config, activePlan, runId, log),
           ...headContractRefresh,
-        }, DEFAULT_SWEEP_POLICY)];
+        }, policy)];
         // W1-T2430: cancelled-only CI has its separate admission and may only requeue that job.
         if (requeueOnlyPrs.length > 0) passes.push(runSweepLightPass(requeueOnlyPrs, {
           ...common,
           actionable: (d) => lightPassActionable(d, fixRungAllowed, true),
           readCiGateRollup: undefined,
           reaggregateCiGate: undefined,
-        }, DEFAULT_SWEEP_POLICY));
+        }, policy));
         await Promise.all(passes);
       };
       const readyNumbers = new Set(readyPrs.map((pr) => pr.prNumber));
@@ -1355,7 +1359,7 @@ export function buildSweepLightHook(
       // Publish ordinary eligibility now. The action batch follows the whole-snapshot refresh
       // decisions, so its ledger rows cannot change which held or armed head gets refreshed.
       const observationLines = timing.run(() => timing.sync("review_eligibility", () => observeLightPassReviewEligibility(
-        ordinaryPrs, { ...effects, ledgerPath, runId }, DEFAULT_SWEEP_POLICY)));
+        ordinaryPrs, { ...effects, ledgerPath, runId }, policy)));
       // Review-lane heads cannot be selected by ready-overlap refresh. A head named in a
       // previous refresh admission, or already armed, stays in the later action batch.
       const admissionWaiters = refreshAdmissionWaiters(observationLines);
@@ -1388,14 +1392,14 @@ export function buildSweepLightHook(
           measuredReadyPrs = readyPrs.filter((pr) => facts.behindMainByPr.has(pr.prNumber));
           if (reviewOnly) {
             // The refresh admission's waiters are refreshed by the ordinary pass's admission, which this pass skips.
-            const { selected, waiting } = selectLightPassReadyOverlap(openPrs, { ...effects, ledgerPath, ...facts }, DEFAULT_SWEEP_POLICY);
+            const { selected, waiting } = selectLightPassReadyOverlap(openPrs, { ...effects, ledgerPath, ...facts }, policy);
             refreshHeld = new Set([...selected.map((c) => c.prNumber),
               ...readyPrs.filter((pr) => waiting.has(`${pr.prNumber}@${pr.headSha}`)).map((pr) => pr.prNumber)]);
           } else {
             readyRefreshed = await runLightPassReadyRefresh(openPrs, {
               ...effects, ledgerPath, runId, ...facts,
               inFlightTaskIds: new Set(inFlightTaskIdsFrom(join(config.root, "state", "inflight"))),
-            }, DEFAULT_SWEEP_POLICY, timing);
+            }, policy, timing);
           }
         }
         const admitted = reviewOnly ? [] : await timing.measure("refresh_admission", () =>

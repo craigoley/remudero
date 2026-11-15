@@ -13,6 +13,7 @@ import { fixedClock, systemClock } from "../src/lib/clock.ts";
 import { ledgerRotationEntries, openLedgerUnion } from "../src/lib/ledger-union.ts";
 import { createLedgerExactDedupe, LedgerExactDedupeLimitError } from "../src/lib/ledger-exact-dedupe.ts";
 import { evaluateRoutingExperiment, ROUTING_EXPERIMENTS } from "../src/lib/routing-experiments.ts";
+import { attributeAttemptOutcome } from "../src/lib/attempt-outcome-attribution.ts";
 import { readRoutingQuarantineResolutions, resolveRoutingQuarantineRow } from "../src/lib/routing-quarantine-resolution.ts";
 
 const DAY = 86_400_000;
@@ -206,7 +207,7 @@ export async function dailyRoutingReview({ sources, outDir, asOf = systemClock.i
       state: quality.state === "unavailable" ? "unavailable" : trialReasons.length ? "observed-partial" : "observed",
       reasons: trialReasons, resolvedIrrelevantFutureRows: quality.routingResolvedFutureRows ?? 0 };
     const reports = ROUTING_EXPERIMENTS.map((experiment) => {
-      const report = evaluateRoutingExperiment(rows, experiment, today);
+      const report = evaluateRoutingExperiment(rows, experiment, today, attributeAttemptOutcome);
       const prior = previous?.sources.find((item) => item.label === source.label)?.reports?.find((item) => item.id === report.id);
       return { ...report, minTasksPerArm: experiment.minTasksPerArm,
         sourceQuality: trialSourceQuality,

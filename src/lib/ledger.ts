@@ -40,9 +40,8 @@ import {
   engineTreePath, isEngineEvidenceName, omitVanishedEngines, stateEntryVanished,
 } from "./state-backup-engine-links.js";
 
-/** Append-only NDJSON ledger (MASTER-PLAN §9). One JSON object per line, keyed by task id; `ts` and
- *  `host` are stamped at write time. Every worker and brain-plane call spreads the same telemetry
- *  shape onto its line via {@link import("./worker.js").workerLedgerFields} (W1-T6). */
+/** Append-only NDJSON keyed by task id (MASTER-PLAN §9); stamp ts/host at write time.
+ * Worker/brain telemetry: {@link import("./worker.js").workerLedgerFields} (W1-T6). */
 export interface LedgerLine {
   run_id: string;
   task_id: string;
@@ -77,29 +76,22 @@ export function appendExternalEffectLedger(
   }, opts);
 }
 
-/** worker.ts ClaudeToolchainBlockedError, duck-typed by tag to keep the "fs + JSON only" contract.
- * The SDK never launched: no worker ran or was billed, so {@link isRealStrike} excludes it.
- * Trap: spawn-ENOENT once cost a strike (W1-T127, #212/#213).
- * See docs/forensics/ledger.md#isspawninfrablockederror and runFixRung. */
+/** Duck-type worker.ts ClaudeToolchainBlockedError to keep the fs + JSON only contract.
+ * No SDK launch, worker or billing: {@link isRealStrike} excludes it. Trap: ENOENT cost a strike
+ * (W1-T127, #212/#213; docs/forensics/ledger.md#isspawninfrablockederror; runFixRung). */
 export function isSpawnInfraBlockedError(err: unknown): err is { reasonClass: "blocked_toolchain"; message: string } {
   return typeof err === "object" && err !== null && (err as { reasonClass?: unknown }).reasonClass === "blocked_toolchain";
 }
 
-// ── W1-T429: task-id-keyed decision reads are repo-blind ────────────────────────────────────
-// Only `run.start` carries a `repo:` dimension, and the fleet's plans share one id scheme, so a
-// second driven repo makes one repo's read count against the other's history of the same id.
+// W1-T429: shared task ids require repo-scoped decisions; only run.start originally carried repo.
 
-/** The one key-renderer every task-id-keyed decision read and write goes through: `<repo>:<task_id>`
- *  when `repo` is known, else the BARE `task_id` (W1-T429 design note i). The bare form is the
- *  deliberate legacy fallback, so a line ledgered before this key existed keeps matching. */
+/** Decision read/write key: <repo>:<task_id>, or bare task_id for legacy rows (W1-T429 note i). */
 export function repoScopedTaskKey(repo: string | undefined, taskId: string): string {
   return repo ? `${repo}:${taskId}` : taskId;
 }
 
-/** True iff `line` records a decision for the same (repo, task_id) pair — the read side of
- *  {@link repoScopedTaskKey}. Lines whose own `repo` differs never match. A line carrying no `repo`
- *  must still be found by a read that knows one, so an upgrade never orphans a dedup marker (design
- *  note iii). Falsifier, both directions: test/ledger-repo-scope.test.ts. */
+/** Match repo/task, rejecting a different repo but accepting legacy repo-less dedup markers.
+ * W1-T429 note iii; falsifier in both directions: test/ledger-repo-scope.test.ts. */
 export function matchesRepoScopedTask(line: { task_id?: unknown; repo?: unknown }, repo: string | undefined, taskId: string): boolean {
   if (typeof line.task_id !== "string") return false;
   const lineRepo = typeof line.repo === "string" ? line.repo : undefined;
@@ -107,9 +99,8 @@ export function matchesRepoScopedTask(line: { task_id?: unknown; repo?: unknown 
   return lineRepo === undefined && line.task_id === taskId;
 }
 
-/** Cost-line tag (W1-T127 design note iii). `"task"` is the implicit attribution for real billed
- *  work; `"infra"` marks a $0 line logged for a spawn-infrastructure refusal, so a per-task rollup
- *  can exclude it while a fleet-health rollup still finds it. See {@link isSpawnInfraBlockedError}. */
+/** W1-T127 note iii: task = billed work; infra = $0 spawn refusal, excluded from task spend
+ * but visible to fleet health. See {@link isSpawnInfraBlockedError}. */
 export const LEDGER_COST_TAG_TASK = "task" as const;
 export const LEDGER_COST_TAG_INFRA = "infra" as const;
 export type LedgerCostTag = typeof LEDGER_COST_TAG_TASK | typeof LEDGER_COST_TAG_INFRA;
@@ -124,15 +115,13 @@ export const FOLLOW_UP_POLICY_STEP = "panel.follow_up_policy";
 
 export const HUMAN_HANDOFF_LEDGER_STEP = "panel.human_handoff";
 
-/** THE #212 CONJUNCTION (W1-T127 design note i): a strike is recorded only where a worker RAN and a
- *  judgment was POSTED. Both halves are asserted, never either, so this cannot degrade to one half
- *  of the conjunction it checks. Pure and total; callers supply what they observed. */
+/** #212 conjunction (W1-T127 note i): strike only if worker RAN AND judgment was POSTED.
+ * Assert both halves; callers supply observations. Pure and total. */
 export function isRealStrike(evidence: { workerRan: boolean; judgmentPosted: boolean }): boolean {
   return evidence.workerRan && evidence.judgmentPosted;
 }
 
-// W1-T2697: stamp the actor at write time from process context, never caller claims or inference.
-// Previously worker, daemon and operator rows were indistinguishable (design note i, plan/tasks.d).
+// W1-T2697 note i: stamp actor from process context at write time, never caller claims/inference.
 /** Who wrote a ledger row, as {@link deriveLedgerActor} derives it. */
 export type LedgerActor = "daemon" | "worker" | "service" | "host_automation" | "test" |
   "operator_human" | "operator_ai" | "unknown" | "operator" | "run_child";
@@ -141,15 +130,13 @@ export function markLedgerProcessActor(actor: "daemon" | "service" | "host_autom
   process.env.REMUDERO_PROCESS_ACTOR = actor;
 }
 
-/** In-process signal the daemon's OWN command sets on itself once, at boot — see
- *  {@link markDaemonProcessActor}. Nothing else ever sets this. */
+/** Set only by the daemon's own boot command via {@link markDaemonProcessActor}. */
 const DAEMON_PROCESS_ACTOR_ENV = "REMUDERO_DAEMON_PROCESS";
 
 export const DAEMON_PID_ENV = "REMUDERO_DAEMON_PID";
 
-/** W1-T9085: mark THIS process as a run child (src/run-child-main.ts): every ledger row it writes from here on reports
- *  `actor: "run_child"` (ADR 0007 A.3). The daemon spawned it, so it inherited the daemon's own marker; that one is dropped.
- *  Returns the call that puts both back. */
+/** W1-T9085: stamp this process's rows as run_child; drop its inherited daemon marker.
+ * Return a restorer for both (src/run-child-main.ts; ADR 0007 A.3). */
 export function markRunChildProcessActor(env: NodeJS.ProcessEnv = process.env): () => void {
   const kind = env.REMUDERO_PROCESS_ACTOR;
   const daemon = env[DAEMON_PROCESS_ACTOR_ENV];
@@ -170,10 +157,8 @@ export function markDaemonProcessActor(): void {
   process.env[DAEMON_PID_ENV] = String(process.pid); // children read the daemon's /proc growth (host-memory-shadow.ts)
 }
 
-/**
- * W1-T4068: tests win over inherited markers; workers win over their spawning service's kind.
- * An operator requires a Claude session marker or a terminal; absence is unknown.
- */
+/** W1-T4068: tests > inherited markers; workers > service kind.
+ * Operator needs a Claude session marker or terminal; otherwise unknown. */
 export function deriveLedgerActor(
   env: NodeJS.ProcessEnv = process.env,
   isTTY: boolean = env === process.env && process.stdin.isTTY === true,
@@ -190,9 +175,8 @@ export function deriveLedgerActor(
 /** Historical `operator` rows remain readable but cannot establish positive operator evidence. */
 export type LedgerRowActor = LedgerActor;
 
-/** Read a parsed ledger line's actor. A missing or malformed `actor` field reports `"unknown"`,
- *  NEVER inferred from any other field on the row — the one read-side rule this task adds.
- *  Falsifier: test/hand-run-census.test.ts. */
+/** Missing/malformed actor is unknown, never inferred from other fields.
+ * Falsifier: test/hand-run-census.test.ts. */
 export function ledgerRowActor(line: { actor?: unknown }): LedgerRowActor {
   switch (line.actor) {
     case "daemon": case "worker": case "service": case "host_automation": case "test":
@@ -252,11 +236,10 @@ export function appendLedger(
   const actor = (opts.actor ?? deriveLedgerActor)();
   if (deriveLedgerActor() === "test" || actor === "test") {
     const outside = (rel: string) => rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel);
-    if (outside(relative(resolve(tmpdir()), resolve(path)))) {
-      throw new Error(`ledger: REFUSED test append outside the temporary root: ${path}`);
-    }
     let ancestor = resolve(path);
     while (!existsSync(ancestor) && dirname(ancestor) !== ancestor) ancestor = dirname(ancestor);
+    // Compare canonical paths: on macOS tmpdir() can spell the same directory as
+    // /var/... while a caller supplies its realpath under /private/var/....
     const rel = relative(realpathSync(tmpdir()), realpathSync(ancestor));
     if (outside(rel)) {
       throw new Error(`ledger: REFUSED test append outside the temporary root: ${path}`);
@@ -301,9 +284,7 @@ export function appendLedger(
     closeSync(fd);
   }
   if (behind.length > 0) reappendBehindSeal(path, behind);
-  // W1-T209: opportunistic, lazy rotation — the only place the ledger grows, so the only place
-  // that needs to notice it has grown past the ceiling. A stat and small sidecar read on each
-  // call; the full read-and-rewrite cost only on the call that crosses the effective ceiling.
+  // W1-T209: check growth here via stat/sidecar; read and rewrite only above the effective ceiling.
   if (ledgerExceedsRotationCeiling(path, opts.ceilingBytes)) {
     rotateLedger(path, { ceilingBytes: opts.ceilingBytes });
   }
@@ -322,14 +303,11 @@ export function appendProducerLedger(
   return identity;
 }
 
-// ── THE ACCOUNT DIMENSION (W1-T268, MASTER-PLAN §9) ─────────────────────────
-// appendLedger only ever appends, so a line written before `account_label` existed can never be
-// retrofitted with one. Any accounting built on the label below has a HARD START DATE and must
-// REFUSE an older line rather than guess (docs/forensics/ledger.md#account_attribution_epoch).
+// W1-T268, MASTER-PLAN §9: append-only rows cannot gain account_label retroactively.
+// REFUSE pre-epoch attribution; never guess (docs/forensics/ledger.md#account_attribution_epoch).
 
-/** THE ACCOUNT ATTRIBUTION EPOCH — the boot that re-provisioned the worker keychain store after the
- *  operator's manual account switch (W1-T265). Every earlier line belongs to the account active
- *  before that switch and none says so. Named so a reader binds to the value, not a copy. */
+/** W1-T265 keychain re-provisioning boot after the manual account switch.
+ * Earlier rows lack attribution; readers must use this shared epoch. */
 export const ACCOUNT_ATTRIBUTION_EPOCH = "2026-07-31T16:39:00.582Z";
 
 /** One account's summed, attributed spend — an entry of {@link AccountSpendSummary.byAccount}. */
@@ -339,11 +317,8 @@ export interface AccountSpendGroup {
   lineCount: number;
 }
 
-/**
- * Spend {@link groupSpendByAccount} REFUSED to attribute to any account, split by why —
- * visible and countable, never silently dropped or silently credited to whichever label
- * happens to be current.
- */
+/** Spend {@link groupSpendByAccount} refused to attribute, counted by reason; never dropped
+ * or credited to the current label. */
 export interface RefusedSpend {
   /** Lines older than {@link ACCOUNT_ATTRIBUTION_EPOCH} (or with no parseable `ts`, which
    *  is treated identically — an unattributable line is never guessed to be recent). */
@@ -472,38 +447,25 @@ export function flagAnomalousLedgerWriters(
   });
 }
 
-/** SIZE CEILING (W1-T209, recon R-9). Below the size a real never-rotated ledger reaches, so one
- *  actually crosses it, and above any single run's appends, so a rotating ledger never thrashes.
- *  Why: the ledger measured at intake (docs/forensics/ledger.md#ledger_rotation_ceiling_bytes). */
+/** W1-T209 recon R-9: above one run's appends, below measured unrotated growth to avoid thrash.
+ * Evidence: docs/forensics/ledger.md#ledger_rotation_ceiling_bytes. */
 export const LEDGER_ROTATION_CEILING_BYTES = 4 * 1024 * 1024; // 4 MiB
 
-/** W1-T4100 — THE SMOOTHING WINDOW. 369 archives in a day (READ 2026-09-23, ~13/hour) is what a
- *  size-only ceiling does under bursty write volume: every append that crosses `ceilingBytes`
- *  rotates again immediately, so a burst of writes multiplies into a burst of archives — each one
- *  more a union read must open. This is the minimum real time between two rotations of the SAME
- *  ledger under ordinary growth: a rotation that would otherwise fire again before the window has
- *  elapsed since the last one instead waits, letting the burst's later writes land in the ALREADY
- *  rotated live file rather than minting a fresh archive each. Five minutes: short enough that a
- *  genuinely steady-state ledger (roughly one rotation every 5-8 real minutes, per the same 2026-
- *  09-23 read) rotates close to its old cadence, long enough that a burst of dozens of crossings
- *  inside a minute collapses to one. See {@link LEDGER_ROTATION_BACKSTOP_MULTIPLIER} for the bound
- *  that keeps this a courtesy, never a way to grow the live file without limit. */
+/** W1-T4100: minimum real interval between ordinary rotations of the SAME ledger.
+ * Bursts stay in the live file; the backstop below still bounds growth. Five minutes preserves
+ * the measured 5–8 minute steady cadence while collapsing sub-minute bursts (2026-09-23:
+ * 369 archives/day, ~13/hour). See {@link LEDGER_ROTATION_BACKSTOP_MULTIPLIER}. */
 export const LEDGER_ROTATION_SMOOTHING_WINDOW_MS = 5 * 60_000;
 
-/** W1-T4100 — THE BACKSTOP. The smoothing window above is a courtesy, never a way to hold the live
- *  ledger past a size this repo has already been burned by keeping in memory whole (see ledger-
- *  compaction-rung.ts's own OOM account of a 4 GB corpus against an 8 GB heap). A live file that
- *  reaches this multiple of `ceilingBytes` rotates immediately regardless of how recently the last
- *  rotation fired — the one case where the window itself would be the defect. */
+/** W1-T4100 backstop: rotate immediately at this ceilingBytes multiple, ignoring smoothing.
+ * Trap: whole-corpus memory exhaustion (ledger-compaction-rung.ts: 4 GB corpus, 8 GB heap). */
 export const LEDGER_ROTATION_BACKSTOP_MULTIPLIER = 4;
 
 /** W1-T4393: least real time since the last archive that measures an append rate; less is a burst. */
 export const LEDGER_ROTATION_MIN_RATE_SAMPLE_MS = 60_000;
 
-/** W1-T2244: the one row an operator produces when they act on a risk-judge escalation instead of
- *  taking its "merge it by hand" escape hatch in silence. Written by `recordRiskOverride`, read
- *  back head-bound by {@link riskOverrideFromLedger} so a record never outlives the diff it judged
- *  (design viii). RECORDING ONLY: nothing here decides dispatch or merge. */
+/** W1-T2244 note viii: recordRiskOverride writes operator action; riskOverrideFromLedger reads
+ * it head-bound so it cannot outlive the judged diff. RECORDING ONLY: no dispatch/merge decision. */
 export const RISK_OVERRIDE_RECORDED_STEP = "panel.risk_override_recorded";
 
 /** Personal-context governance rows are deciding state, not display telemetry. Losing a context
@@ -521,10 +483,8 @@ export const EMERGENCY_STOP_CLEARED_LEDGER_STEP = "panel.emergency_stop_cleared"
 export const OPERATOR_PREFERENCE_PROPOSED_LEDGER_STEP = "panel.operator_preference_proposed";
 export const OPERATOR_PREFERENCE_EVENT_LEDGER_STEP = "panel.operator_preference_event";
 
-/** W1-T2244 (design vii): the two signals an override can carry, OPPOSITE for a calibrator.
- *  `judge_wrong` says the escalation was a miscalibration; `risk_accepted` says it was correct and
- *  the operator knowingly took the cost. One "overridden" flag would collapse both into judge error.
- *  Free text (`reason`) rides alongside, never replacing it. */
+/** W1-T2244 note vii: judge_wrong = miscalibration; risk_accepted = correct, knowingly accepted.
+ * Keep these opposite calibration signals distinct; free-text reason supplements, never replaces. */
 export const RISK_OVERRIDE_REASON_CLASSES = ["judge_wrong", "risk_accepted"] as const;
 export type RiskOverrideReasonClass = (typeof RISK_OVERRIDE_REASON_CLASSES)[number];
 
@@ -533,25 +493,18 @@ export type RiskOverrideReasonClass = (typeof RISK_OVERRIDE_REASON_CLASSES)[numb
 export const RISK_OVERRIDE_DISPOSITIONS = ["merged_by_hand", "redispatched", "abandoned"] as const;
 export type RiskOverrideDisposition = (typeof RISK_OVERRIDE_DISPOSITIONS)[number];
 
-/**
- * Ledger steps a DECIDING reader consults — never a merely-displaying one. Rotation must never
- * archive one away; {@link MAX_RETAINED_LINES_PER_STEP} is their only bound.
- *
- * Trap: for these steps the line IS the bound, so a step that "forgets" is a breaker or a dedup
- * that silently resets. Each entry below names its reader and what losing it would do. Telemetry
- * and display-only reads are archived; operator-visible history lives in
- * {@link RENDER_RELEVANT_LEDGER_STEPS}; `daemon.boot` and `deploy.*` are members but heartbeats,
- * bounded by {@link HEALTH_STEP_RETENTION_WINDOW_MS} instead. Falsifier:
- * test/ledger-rotation.test.ts re-derives this set from every consumer's own source, so treat it,
- * not this comment, as the source of truth. Why: the per-consumer table and the W1-T244 incident —
- * docs/forensics/ledger.md#decision_relevant_ledger_steps.
- */
+/** Deciding readers' steps: retain through rotation, bounded by MAX_RETAINED_LINES_PER_STEP.
+ * Trap: forgetting these rows resets breakers/dedup; entries name readers and consequences.
+ * Display history uses RENDER_RELEVANT_LEDGER_STEPS; daemon.boot/deploy.* heartbeats instead
+ * use HEALTH_STEP_RETENTION_WINDOW_MS. Falsifier/source of truth: test/ledger-rotation.test.ts
+ * derives membership from consumers. W1-T244: docs/forensics/ledger.md#decision_relevant_ledger_steps. */
 export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   "auto_triage.run_failed", // W1-T9853: failedFireBackoff derives the per-entry retry from these rows.
   "retro_triggered", // W1-T9119: the retro cadence reader learns the persistent-deferral interval from these rows.
   "implement.preopen_gate", // preopen-gate.ts counts the fleet streak across rotations.
   "implement.preopen_gate.alert", // preopen-gate.ts dedups raises and clears on recovery.
   "run.start",
+  "daemon.in_flight_review_abandoned", // W1-T12229: restart-cycle recovery needs the pre-cancel review identity and age after rotation.
   "dispatch.claim", // W1-T9001: promise recovery uses the earliest claim to bound its archive read.
   "memory_read.recovered", // W1-T7720: past recovery durations derive the sustained-unreadable bound.
   "sweep.fix.owner_residue_preserved", // W1-T6434: the next fix round reads the preserved patch it names.
@@ -640,6 +593,11 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   "daemon.stop",
   "daemon.stop_drain.completed",
   "daemon.freshness_exit",
+  "daemon.freshness_decision", // restartCycleRow joins the decision and material-change time across lifetimes.
+  "daemon_selfrestart_for_freshness",
+  "daemon.admission_held",
+  "daemon.detached_action_abandoned", // restartCycleRow uses the bounded age after admission cancellation removes the wait row.
+  "daemon.restart_cycle",
   "daemon.freshness_drain.completed",
   "daemon.memory_exit",
   "daemon.memory_drain.completed",
@@ -1041,6 +999,9 @@ function isHealthOrDeployStep(step: string): boolean {
  *  health window here (deployer.ts's own default is 45s), so `assessBootHealth` never loses a line
  *  still inside its window, while a restart storm's boot count stays bounded rather than kept. */
 export const HEALTH_STEP_RETENTION_WINDOW_MS = 15 * 60 * 1000;
+
+/** Each surviving boot run keeps its newest row of these steps: its heap, its heap policy, its GitHub share. */
+const BOOT_LIFETIME_EVIDENCE_STEPS: ReadonlySet<string> = new Set(["daemon.memory", "daemon.memory_policy", "github.budget.configured"]);
 
 /**
  * Rows retained for per-model attribution, not daemon decisions. W1-T3080 needs `implement.done`
@@ -1957,24 +1918,43 @@ function rotateLedgerLocked(
   // ── PASS 2: recency-window bound — health and render steps are heartbeats, not one-shot
   // decisions, so only lines inside their own window are retained; that stops a restart storm's
   // boot spam bloating the core. A line with no parseable `ts` is kept, never guessed away. ────
-  // W1-T3755: retain exactly the newest daemon.boot beyond the health window, not every boot.
+  // W1-T3755: retain the newest daemon.boot beyond the health window; unfinished
+  // restart cycles also need their adjacent boot boundaries until recorded.
   // 2026-09-18: a 00:49 daemon still ran at 06:00; its boot row survived 00:52/01:52 snapshots
   // but vanished by 04:28. readLatestBootSha returned undefined, the board falsely reported STALE
   // and prescribed rmd deploy, which skipped on the same missing row.
   // assessBootHealth needs 45s; readLatestBootSha needs the process lifetime. Do not widen
   // HEALTH_STEP_RETENTION_WINDOW_MS to couple those consumers. Older boots name replaced
-  // processes and must age out, or a restart storm bloats the core again.
+  // processes and must age out once their restart cycles are recorded, or a restart storm bloats the core again.
   // Falsifier: test/the-newest-boot-row-outlives-the-health-window.test.ts.
   const newestBootLine = candidates.reduce<ParsedLedgerLine | undefined>(
     (best, p) =>
       p.step === "daemon.boot" && p.tsMs !== undefined && (best?.tsMs === undefined || p.tsMs > best.tsMs) ? p : best,
     undefined,
   );
+  // An unfinished restart cycle needs its starting boot and the preceding lifetime's
+  // boundary. Keep both until daemon.restart_cycle records that start, even when a
+  // later boot makes them older than the health window.
+  const recordedCycleStarts = new Set(originalOrder.filter((p) => p.step === "daemon.restart_cycle")
+    .map((p) => Date.parse(String(p.json?.started_at ?? ""))).filter(Number.isFinite));
+  const restartBoundaryBoots = new Set<ParsedLedgerLine>();
+  const byTime = originalOrder.filter((p) => p.tsMs !== undefined).sort((a, b) => a.tsMs! - b.tsMs!);
+  let precedingBoot: ParsedLedgerLine | undefined;
+  let precedingExit: ParsedLedgerLine | undefined;
+  for (const p of byTime) {
+    if (["daemon.freshness_exit", "daemon.memory_exit", "daemon.signal_exit", "daemon.stop"].includes(p.step ?? "")) precedingExit = p;
+    if (p.step !== "daemon.boot") continue;
+    if (precedingExit?.step === "daemon.freshness_exit" && !recordedCycleStarts.has(p.tsMs!)) {
+      restartBoundaryBoots.add(p);
+      if (precedingBoot) restartBoundaryBoots.add(precedingBoot);
+    }
+    precedingBoot = p;
+  }
 
   candidates = candidates.filter((p) => {
     if (!p.step) return true;
     if (isModelAttributionStep(p.step)) return true;
-    if (newestBootLine !== undefined && p === newestBootLine) return true;
+    if (p === newestBootLine || restartBoundaryBoots.has(p)) return true;
     const isHealth = isHealthOrDeployStep(p.step);
     const isRender = isRenderRelevantStep(p.step);
     if (!isHealth && !isRender) return true;
@@ -1994,7 +1974,7 @@ function rotateLedgerLocked(
     const run = p.json?.run_id;
     if (typeof run !== "string" || !bootRuns.has(run) || p.tsMs === undefined) continue;
     const evidence = lifetimeEvidence.get(run) ?? new Map<string, ParsedLedgerLine>();
-    for (const key of ["last", ...(p.step === "daemon.memory" || p.step === "daemon.memory_policy" ? [p.step] : [])]) {
+    for (const key of ["last", ...(BOOT_LIFETIME_EVIDENCE_STEPS.has(p.step ?? "") ? [p.step!] : [])]) {
       if ((evidence.get(key)?.tsMs ?? -Infinity) <= p.tsMs) evidence.set(key, p);
     }
     lifetimeEvidence.set(run, evidence);
@@ -2191,16 +2171,11 @@ function rotateLedgerLocked(
   };
 }
 
-// ── W1-T234: STATE BACKUP/RESTORE ORGAN (MASTER-PLAN §10 WS-7) ──────────────────────────────
-// state/ holds the ledger, the run locks, the worker-keychain tokens and the proposals register,
-// and none of it was backed up. It lives here because it reuses this file's atomic-write and
-// dated-archive idiom: a half-written backup must never be mistaken for a whole one. SCOPE (i):
-// back up what is IRREPLACEABLE — only `status.json` is excluded, proven rederivable. VERIFY,
-// DON'T TRUST (ii): `snapshotState` re-lists the STAGED copy from disk before publishing. FAILURE
-// ESCALATES LOUDLY (iv): every failure path throws {@link StateBackupError}, never a logged no-op.
+// W1-T234, MASTER-PLAN §10 WS-7: snapshot irreplaceable state; only status.json is rederivable.
+// Publish atomically after re-listing the staged copy; never accept a partial backup.
+// Every failure throws StateBackupError, never a logged no-op (design i/ii/iv).
 
-/** Loud, typed failure for every state-backup or restore operation — always THROWN, never
- *  swallowed (design note iv). `cause` carries the underlying fs error, so a log keeps its stack. */
+/** Always thrown, never swallowed (W1-T234 note iv); cause preserves the underlying fs stack. */
 export class StateBackupError extends Error {
   constructor(message: string, options?: { cause?: unknown }) {
     super(message, options);
@@ -2208,20 +2183,14 @@ export class StateBackupError extends Error {
   }
 }
 
-/** Relative path (from `state/`) of the ledger this module treats as authoritative-by-name
- *  when verifying a snapshot — mirrors `ledgerPathFor`'s own basename through the shared
- *  filename constant, without depending on run-task.ts (a CLI entrypoint). */
+/** Authoritative ledger path relative to state/, shared with ledgerPathFor without a CLI import. */
 export const STATE_BACKUP_LEDGER_RELPATH = LEDGER_FILENAME;
 
-/** Relative path (from `state/`) of the proposals register this module treats as
- *  authoritative-by-name — mirrors the inbox registry's own basename (run-task.ts:
- *  `join(config.root, "state", "inbox-proposals.json")`), the file this task's rationale
- *  names as having gained nine entries (P37-P45) that exist on exactly one disk. */
+/** Authoritative proposals path relative to state/; mirrors run-task.ts's inbox registry.
+ * W1-T234: P37–P45 existed on only one disk. */
 export const STATE_BACKUP_PROPOSALS_REGISTER_RELPATH = "inbox-proposals.json";
 
-/** Relative paths under `state/` excluded from every snapshot because they are cheaply rederivable,
- *  not because they merely look unimportant. `status.json` is the only entry: W1-T234's rationale
- *  states outright that it is rederivable and does not matter. */
+/** Only proven rederivable state/ paths are excluded: status.json (W1-T234 rationale). */
 export const STATE_BACKUP_EXCLUDED_RELPATHS: ReadonlySet<string> = new Set(["status.json"]);
 
 /** One completed snapshot. */
@@ -2300,9 +2269,7 @@ function listStateFiles(root: string, excluded: ReadonlySet<string> = new Set(),
   return out.sort();
 }
 
-/** Copies `relPaths` from `srcRoot` to `dstRoot`, creating destination directories as needed and
- *  preserving each file's permission bits, best-effort. The service-token files under `state/` are
- *  0600 by design, and a backup that widened them on restore would be a regression. */
+/** Copy relPaths, creating parents and preserving modes best-effort; state/ tokens need 0600. */
 function copyStateFiles(srcRoot: string, dstRoot: string, relPaths: readonly string[]): void {
   for (const rel of relPaths) {
     copyOneStateFile(join(srcRoot, rel), join(dstRoot, rel), statSync(join(srcRoot, rel)).mode);
@@ -2411,13 +2378,10 @@ function datedStateBackupDir(backupsRoot: string, now: Date): string {
   return join(backupsRoot, `state-backup.${stamp}`);
 }
 
-/**
- * Snapshots `stateDir` into a dated directory under `backupsRoot` (never inside `stateDir`): staged,
- * verified from disk, then renamed. Throws {@link StateBackupError} on an empty copy, a lost ledger or
- * proposals register, or an unparseable ledger line; `opts.copy` only makes the lost-file arm falsifiable.
- * LIVE-SAFE (W1-T5545): runs with the fleet up; a mid-copy rotation is chased by re-listing, and only a
- * race outlasting the bound refuses.
- */
+/** Stage, verify from disk, then rename under backupsRoot, never inside stateDir.
+ * Throw StateBackupError for empty copies, lost ledger/proposals, or malformed ledger lines;
+ * opts.copy exposes the lost-file arm. W1-T5545: re-list to chase live rotations, refusing only
+ * races outlasting the bound. */
 export function snapshotState(stateDir: string, backupsRoot: string, opts: SnapshotStateOptions = {}): StateBackupSnapshot {
   const now = opts.now ?? systemClock.date;
   const attempts = opts.maxRaceAttempts ?? STATE_BACKUP_MAX_RACE_ATTEMPTS;
@@ -2483,11 +2447,9 @@ export function snapshotState(stateDir: string, backupsRoot: string, opts: Snaps
   }
 }
 
-/** Restores every file under a snapshot directory into `targetStateDir` byte-for-byte, permission
- *  bits preserved best-effort. THE RESTORE IS A VERB, NOT A RUNBOOK PARAGRAPH (design note iii):
- *  this is the one command an operator runs mid-incident. Refuses — throwing
- *  {@link StateBackupError} — an absent or empty archive rather than no-op'ing over a live dir.
- *  Engine links are returned as requiring dependency reconstruction; no install is attempted. */
+/** Restore snapshot bytes to targetStateDir, modes best-effort (W1-T234 note iii).
+ * Throw StateBackupError for absent/empty archives. Return engine links needing dependency
+ * reconstruction; never install here. */
 export function restoreState(archiveDir: string, targetStateDir: string): { reconstructionRequired: string[] } {
   try {
     if (!existsSync(archiveDir)) {
@@ -2513,15 +2475,8 @@ export function restoreState(archiveDir: string, targetStateDir: string): { reco
   }
 }
 
-/**
- * W1-T2383 — IS THIS `run.start` A QUEUE DISPATCH, OR A LANE RUN? Until this task every `run.start`
- * row was an implement dispatch, so the two were the same fact and three readers were written on
- * that identity. Adding rows for the triage and retro lanes separates them, and this states the
- * separation ONCE rather than re-deriving it at each reader. TRUE for an implement dispatch, and
- * for a row declaring no `type` at all, because the pre-schema rows were all implement dispatches;
- * FALSE only for a row that positively declares another lane. Why: the three readers that need it,
- * and what each would get wrong (W1-T2383; docs/forensics/ledger.md#isqueuedispatchrunstart).
- */
+/** W1-T2383: implement or legacy untyped run.start = queue dispatch; explicit other lane = false.
+ * Shared by three readers; rationale: docs/forensics/ledger.md#isqueuedispatchrunstart. */
 export function isQueueDispatchRunStart(line: Record<string, unknown>): boolean {
   if (line.step !== "run.start") return false;
   const type = line.type;

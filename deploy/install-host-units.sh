@@ -2137,8 +2137,10 @@ if [ -n "$CLEANUP_PATH" ]; then
   # Include the service user's disposable worktree root in the same guarded six-hour janitor.
   # It is separate from /mnt/scratch/worktrees, and omitting it left stale linked trees in rmd-work
   # accumulating indefinitely. Keep the roots overrideable for hosts with a different layout.
-  CLEANUP_WORKTREE_ROOTS="${RMD_CLEANUP_WORKTREE_ROOTS-/mnt/scratch/worktrees:/home/${SERVICE_USER}/rmd-work}"
-  CLEANUP_LIVE_CHECKOUTS="${RMD_CLEANUP_LIVE_CHECKOUTS-/home/${SERVICE_USER}/rmd-mint:/home/${SERVICE_USER}/rmd-op}"
+  # W1-T12454: the hand lane makes its worktrees under /mnt/scratch/rmd/hand. Its shared reservation
+  # checkout wt-reserve sits there too, so it is a live checkout and never swept.
+  CLEANUP_WORKTREE_ROOTS="${RMD_CLEANUP_WORKTREE_ROOTS-/mnt/scratch/worktrees:/home/${SERVICE_USER}/rmd-work:/mnt/scratch/rmd/hand}"
+  CLEANUP_LIVE_CHECKOUTS="${RMD_CLEANUP_LIVE_CHECKOUTS-/home/${SERVICE_USER}/rmd-mint:/home/${SERVICE_USER}/rmd-op:/mnt/scratch/rmd/hand/wt-reserve}"
   checkout_git() {
     if [ "$(id -un)" = "$SERVICE_USER" ]; then git -C "$@"
     else sudo -n -u "$SERVICE_USER" git -C "$@"; fi
@@ -2146,6 +2148,11 @@ if [ -n "$CLEANUP_PATH" ]; then
   while IFS= read -r live_checkout; do
     [ -n "$live_checkout" ] || continue
     checkout_git "$live_checkout" rev-parse --git-dir >/dev/null 2>&1 || continue
+    # A linked worktree takes its hooks and config from its main checkout; setting core.hooksPath
+    # here would change that other checkout (W1-T12454: wt-reserve is a worktree of a shared one).
+    live_git_dir=$(checkout_git "$live_checkout" rev-parse --absolute-git-dir 2>/dev/null) || continue
+    live_common_dir=$(checkout_git "$live_checkout" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || continue
+    [ "$live_git_dir" = "$live_common_dir" ] || continue
     if hooks_path=$(checkout_git "$live_checkout" config --path --get core.hooksPath 2>/dev/null); then
       :
     else

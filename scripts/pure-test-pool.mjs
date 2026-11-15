@@ -67,6 +67,12 @@ export const POOL_REFUSALS = [
     pattern:
       /\bprocess\s*\.\s*(?:on|once|off|addListener|prependListener|prependOnceListener|removeListener|removeAllListeners|setUncaughtExceptionCaptureCallback|setSourceMapsEnabled|umask|exit|abort|kill|emitWarning)\s*\(/,
   },
+  {
+    // runDaemon's in-flight ticker is process-wide. Keep the integration that also drives the
+    // worker-heap book in its own test process so the full suite cannot inherit or contend for it.
+    name: "daemon heartbeat worker-heap integration",
+    pattern: /(?=[\s\S]*\brunDaemon\s*\()(?=[\s\S]*\bworkerHeapReadings\s*\()/,
+  },
 ];
 
 /**

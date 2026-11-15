@@ -1,13 +1,15 @@
 // @source-text-subject: compare daemon.ts's executable text and comment volume before/after compression.
 // @census-reads: src/lib/daemon.ts
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
 import { transformSync } from "esbuild";
+import { parse } from "@babel/parser";
 import { stripComments } from "#src/lib/test-placement.js";
-import { compressionPinBase } from "#test/helpers/compression-pin.js";
+import { assertSameTokens, compressionPinBase } from "#test/helpers/compression-pin.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 // This executable script has no declaration file; load its real export with an explicit type.
@@ -29,6 +31,46 @@ function emittedDigest(source: string): string {
   const { code } = transformSync(source, { loader: "ts", format: "esm", legalComments: "none" });
   return createHash("sha256").update(code).digest("hex");
 }
+
+function executableTokens(source: string) {
+  const parsed = parse(source, {
+    sourceType: "module", plugins: ["typescript"], tokens: true, attachComment: false,
+  });
+  return parsed.tokens!.filter(token => typeof token.type !== "string")
+    .map(token => [token.type.label, source.slice(token.start, token.end)]);
+}
+
+test("W1-T12263: comment compression preserves executable code", (t) => {
+  const sourcePath = "src/lib/daemon.ts";
+  const source = readFileSync(join(REPO_ROOT, sourcePath), "utf8");
+  let before = compressionPinBase(sourcePath, import.meta.url);
+  if (before === undefined) {
+    // This file already has a pin: retire this comparison once its own title reaches main.
+    const git = (args: string[]) => {
+      const result = spawnSync("git", args, {
+        cwd: REPO_ROOT, encoding: "utf8", maxBuffer: 16 * 1024 * 1024,
+      });
+      assert.equal(result.status, 0, `git ${args[0]} failed: ${result.error ?? result.stderr}`);
+      return result.stdout;
+    };
+    const base = git(["merge-base", "origin/main", "HEAD"]).trim();
+    if (git(["show", `${base}:test/daemon/compress-src-lib-daemon-ts.test.ts`]).includes(
+      "W1-T12263: comment compression preserves executable code")) return;
+    before = git(["show", `${base}:${sourcePath}`]);
+  }
+  assertSameTokens(executableTokens(source), executableTokens(before),
+    "all executable tokens, including types and literal contents, match the PR base");
+  assert.equal(executableDigest(source), executableDigest(before), "non-comment code lines match");
+  assert.equal(emittedDigest(source), emittedDigest(before), "emitted JavaScript and ASI match");
+  const previous = countCommentLines(before, sourcePath).comments;
+  const comments = countCommentLines(source, sourcePath).comments;
+  t.diagnostic(`comment lines: ${previous} -> ${comments}`);
+  assert.ok(previous > 0 && comments > 0, "both measurements see comments");
+  assert.ok(comments < previous, `comment lines decrease: ${comments} >= ${previous}`);
+  const bytes = (text: string) => parse(text, { sourceType: "module", plugins: ["typescript"] })
+    .comments!.reduce((sum, comment) => sum + Buffer.byteLength(comment.value), 0);
+  assert.ok(bytes(source) < bytes(before), "comment bytes decrease too; rewrapping is insufficient");
+});
 
 test("W1-T10871: comment compression preserves executable code", () => {
   const source = readFileSync(join(REPO_ROOT, "src/lib/daemon.ts"), "utf8");

@@ -159,6 +159,8 @@ export interface ExperimentArmReport {
   arm: string;
   provider: WorkerProviderId;
   tasks: number;
+  infrastructureAttempts: number;
+  infrastructureOnlyTasks: number;
   merged: number;
   mergeRate: number | null;
   meanFixDispatches: number | null;
@@ -217,12 +219,15 @@ function tokenTotal(value: unknown): number | undefined {
 }
 
 /** One pass over ledger rows: tagged assignments, their receipts, fix dispatches and merges per task. */
-export function evaluateRoutingExperiment(rows: Iterable<Row>, experiment: RoutingExperiment, today: string): ExperimentReport {
+export function evaluateRoutingExperiment(
+  rows: Iterable<Row>, experiment: RoutingExperiment, today: string,
+  classifyAttempt: RoutingAbCommandOpts["classifyAttempt"],
+): ExperimentReport {
   const firstArm = new Map<string, { arm: string; provider: WorkerProviderId; ts: string }>();
   const armsSeen = new Map<string, Set<string>>();
   const crossed = new Set<string>();
   const assignmentTask = new Map<string, string>();
-  const receipts = new Map<string, { minutes?: number; tokens?: number; cost?: number; notionalCost?: number | null; billingMode?: "api" | "subscription"; attempted?: true; servedModel?: string; success?: boolean; requestEfforts?: CashRequestEffortEvidence }>();
+  const receipts = new Map<string, { attribution?: ReturnType<RoutingAbCommandOpts["classifyAttempt"]>; minutes?: number; tokens?: number; cost?: number; notionalCost?: number | null; billingMode?: "api" | "subscription"; attempted?: true; servedModel?: string; success?: boolean; requestEfforts?: CashRequestEffortEvidence }>();
   const excludedAssignments = { genericUnit: 0, changedTreatment: 0, unverifiedTreatment: 0 };
   const merges: Array<{ task: string; ts: string }> = [];
   const fixes: Array<{ task: string; ts: string }> = [];
@@ -268,7 +273,7 @@ export function evaluateRoutingExperiment(rows: Iterable<Row>, experiment: Routi
       const duration = num(row.worker_duration_ms);
       receipts.set(receiptId, {
         ...prior,
-        ...(step === "worker.attempt" ? { attempted: true as const } : {}),
+        ...(step === "worker.attempt" ? { attempted: true as const, attribution: classifyAttempt(row) } : {}),
         ...(duration !== undefined ? { minutes: duration / 60_000 } : {}),
         ...(tokenTotal(row.tokens) !== undefined ? { tokens: tokenTotal(row.tokens) } : {}),
         ...(cost(row.total_cost_usd) !== undefined ? { cost: cost(row.total_cost_usd) }
@@ -281,22 +286,34 @@ export function evaluateRoutingExperiment(rows: Iterable<Row>, experiment: Routi
       });
     }
   }
+  const taskAssignments = new Map<string, string[]>();
+  for (const [id, task] of assignmentTask) {
+    const ids = taskAssignments.get(task) ?? [];
+    ids.push(id);
+    taskAssignments.set(task, ids);
+  }
+  const infrastructureOnly = new Set([...taskAssignments].filter(([, ids]) =>
+    ids.every(id => receipts.get(id)?.attribution?.outcome === "infrastructure")).map(([task]) => task));
   const arms = (Object.entries(experiment.arms) as Array<[WorkerProviderId, string]>).map(([provider, arm]): ExperimentArmReport => {
-    const tasks = [...firstArm.entries()].filter(([, first]) => first.arm === arm);
+    const assignedTasks = [...firstArm.entries()].filter(([, first]) => first.arm === arm);
+    const tasks = assignedTasks.filter(([task]) => !infrastructureOnly.has(task));
     const since = new Map(tasks.map(([task, first]) => [task, first.ts]));
     const merged = new Set(merges.filter((merge) => since.has(merge.task) && merge.ts >= since.get(merge.task)!).map((merge) => merge.task));
     const fixCounts = tasks.map(([task, first]) => fixes.filter((fix) => fix.task === task && fix.ts >= first.ts).length);
     const armAssignments = [...assignmentTask.entries()]
-      .filter(([, task]) => since.has(task))
+      .filter(([, task]) => firstArm.get(task)?.arm === arm)
       .map(([id]) => receipts.get(id));
-    const armReceipts = armAssignments
+    const allReceipts = armAssignments
       .filter((receipt): receipt is NonNullable<typeof receipt> => receipt !== undefined);
+    const armReceipts = allReceipts.filter(receipt => receipt.attribution?.outcome !== "infrastructure");
     const priced = (receipt: NonNullable<typeof armAssignments[number]>) => receipt.billingMode === "subscription"
       ? receipt.notionalCost === null ? undefined : receipt.notionalCost ?? receipt.cost : receipt.cost;
     return {
       arm,
       provider,
       tasks: tasks.length,
+      infrastructureAttempts: allReceipts.length - armReceipts.length,
+      infrastructureOnlyTasks: assignedTasks.length - tasks.length,
       merged: merged.size,
       mergeRate: tasks.length === 0 ? null : merged.size / tasks.length,
       meanFixDispatches: mean(fixCounts),
@@ -309,10 +326,10 @@ export function evaluateRoutingExperiment(rows: Iterable<Row>, experiment: Routi
       requestEffortEvidence: summarizeCashRequestEfforts(armAssignments.map(receipt => receipt?.requestEfforts)),
       receiptCoverage: {
         assignments: armAssignments.length,
-        terminalAssignments: armReceipts.length,
-        costKnownAssignments: armReceipts.filter((receipt) => priced(receipt) !== undefined && receipt.billingMode !== undefined).length,
-        servedModelKnownAssignments: armReceipts.filter((receipt) => receipt.servedModel !== undefined).length,
-        outcomeKnownAssignments: armReceipts.filter((receipt) => receipt.success !== undefined).length,
+        terminalAssignments: allReceipts.length,
+        costKnownAssignments: allReceipts.filter((receipt) => priced(receipt) !== undefined && receipt.billingMode !== undefined).length,
+        servedModelKnownAssignments: allReceipts.filter((receipt) => receipt.servedModel !== undefined).length,
+        outcomeKnownAssignments: allReceipts.filter((receipt) => receipt.success !== undefined).length,
       },
     };
   });
@@ -335,6 +352,7 @@ export function evaluateRoutingExperiment(rows: Iterable<Row>, experiment: Routi
 }
 
 export interface RoutingAbCommandOpts {
+  classifyAttempt: (row: Readonly<Row>) => { outcome: string; signal: string };
   stateDir?: string;
   readRows?: (stateDir: string) => Promise<Row[]>;
   today?: string;
@@ -342,7 +360,7 @@ export interface RoutingAbCommandOpts {
 }
 
 /** `rmd routing-ab [--json]`: every live experiment's arms, read over the whole ledger union. */
-export async function routingAbCommand(rest: string[], opts: RoutingAbCommandOpts = {}): Promise<number> {
+export async function routingAbCommand(rest: string[], opts: RoutingAbCommandOpts): Promise<number> {
   const print = opts.print ?? ((line: string) => console.log(line));
   const unknown = rest.filter((arg) => arg !== "--json");
   if (unknown.length > 0) {
@@ -352,7 +370,7 @@ export async function routingAbCommand(rest: string[], opts: RoutingAbCommandOpt
   const stateDir = opts.stateDir ?? join(loadConfig().root, "state");
   const rows = await (opts.readRows ?? ((dir: string) => readLedgerUnionRecords(dir)))(stateDir);
   const today = opts.today ?? systemClock.iso().slice(0, 10);
-  const reports = ROUTING_EXPERIMENTS.map((experiment) => evaluateRoutingExperiment(rows, experiment, today));
+  const reports = ROUTING_EXPERIMENTS.map((experiment) => evaluateRoutingExperiment(rows, experiment, today, opts.classifyAttempt));
   if (rest.includes("--json")) {
     print(JSON.stringify({ stateDir, rowsRead: rows.length, reports }));
     return 0;
@@ -368,7 +386,8 @@ export async function routingAbCommand(rest: string[], opts: RoutingAbCommandOpt
           `${fmt(arm.meanFixDispatches)} fix dispatches/task, ${fmt(arm.medianWorkerMinutes)} min median, ` +
           `${fmt(arm.meanTokens, 1, "", 0)} tokens, $${fmt(arm.meanCashCostUsd, 1, "", 2)} cash, ` +
           `$${fmt(arm.meanNotionalCostUsd, 1, "", 2)} notional (${arm.costMissingAssignments} cost missing, ` +
-          `${arm.nonStarterAssignments} without attempt receipt)`,
+          `${arm.nonStarterAssignments} without attempt receipt); ` +
+          `${arm.infrastructureAttempts} infrastructure attempts, ${arm.infrastructureOnlyTasks} infrastructure-only tasks excluded`,
       );
     }
   }

@@ -14,7 +14,7 @@
     - src/lib/review-capacity.ts
     - src/lib/sweep.ts
     - test/review/the-host-worker-budget-counts-only-workers-that-use-local-cpu.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "With 8 active workers of which 3 are reviews in their provider phase, a host worker budget of 8 and base width 4, the review width is judged against 5 local-CPU workers: the host-worker-budget arm does not fire and restoreBase leaves room for 3 lanes"
@@ -67,12 +67,14 @@
        room, the shed's roomNow, and reviewPressureSource's fleet-budget test. The learned lane bound (laneCpuBound) uses it
        too, since it is a CPU bound.
     3. In the sweep adapter (src/lib/sweep.ts:3145), read reviewPhaseSplit(policy.reviewLanes).judgePhaseInFlight before the
-       selection and pass it as providerPhaseWorkers. Absent (an injected activeWorkers in a test), pass nothing.
+       selection and pass it as providerPhaseWorkers on every call. The production callers pass activeWorkers too: runSweep
+       reads it through readActiveWorkerCount (src/lib/sweep.ts:20239, :26451, :26867, :26874), so an injected activeWorkers
+       does not mean a test. A test that injects activeWorkers and has no review in its provider phase passes a count of 0.
     4. Add local_cpu_workers to the review.capacity row; active_workers keeps its meaning (all workers).
     INVARIANT budget-never-below-origin: with providerPhaseWorkers absent or 0, every decision equals origin/main's.
     INVARIANT local-count-bounded: localCpuWorkers is never below 0 and never above activeWorkers.
     NOT IN SCOPE: the budget's value (8 stays); fix capacity (src/lib/sweep.ts:18659) and the focus gardener, which read the
     same budget; whether build workers waiting on the model can be counted.
   falsifier: |
-    Pass activeWorkers unchanged to the budget arms and criterion 1 must fail. Let localCpuWorkers go negative and criterion 2
+    Pass activeWorkers unchanged to the budget arms and criterion 1 must fail. Let localCpuWorkers go negative and criterion 4
     must fail. Drop the adapter's providerPhaseWorkers and criterion 3 must fail. Restore and all must pass.

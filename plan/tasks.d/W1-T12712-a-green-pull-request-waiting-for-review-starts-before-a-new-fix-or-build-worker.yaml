@@ -1,0 +1,91 @@
+- id: W1-T12712
+  title: "A green pull request waiting for review gets the next free worker before a new fix or build worker starts"
+  repo: remudero
+  depends_on: [W1-T2989]
+  priority: 1.3
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the order in which fix, build and review workers take the shared host worker budget; the budget is unchanged
+  band_meaning: blast-radius
+  origin: "operator-session#stuck-pr-root-causes-2026-11-14"
+  plan_refs:
+    - W1-T2989
+    - W1-T12535
+    - W1-T12534
+    - W1-T12529
+    - W1-T3209
+  files:
+    - src/lib/review-precedence.ts
+    - src/lib/sweep.ts
+    - src/lib/daemon.ts
+    - src/lib/ledger-steps.ts
+    - test/review/a-green-pull-request-waiting-for-review-starts-before-a-new-worker.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "reviewPrecedence returns yield when a green head has waited for review longer than one sweep cadence and the review width decision's reason is host-worker-budget; it returns proceed otherwise"
+      proof: "grep: W1-T12712 criterion 1 in test/review/a-green-pull-request-waiting-for-review-starts-before-a-new-worker.test.ts"
+    - claim: "While reviewPrecedence yields, the sweep's fix dispatch and the daemon's build dispatch do not start a new worker; each writes one sweep.budget_yield row per held spell with the waiting heads and the lane that yielded"
+      proof: "grep: W1-T12712 criterion 2 in test/review/a-green-pull-request-waiting-for-review-starts-before-a-new-worker.test.ts"
+    - claim: "invariant:no-starvation — a fix or build dispatch that yielded starts on the first pass in which no green head has waited longer than the cadence"
+      kind: guard
+      proof: "grep: W1-T12712 criterion 3 in test/review/a-green-pull-request-waiting-for-review-starts-before-a-new-worker.test.ts"
+    - claim: "invariant:in-flight-untouched — a worker already running is never stopped or paused by the precedence"
+      kind: guard
+      proof: "grep: W1-T12712 criterion 4 in test/review/a-green-pull-request-waiting-for-review-starts-before-a-new-worker.test.ts"
+    - claim: "With no review waiting, every fix and build dispatch decision equals origin/main's"
+      proof: "grep: W1-T12712 criterion 5 in test/review/a-green-pull-request-waiting-for-review-starts-before-a-new-worker.test.ts"
+    - claim: "The sweep's light and full fix admissions call the precedence"
+      proof: "grep: yieldingFixClaim( in src/lib/sweep.ts"
+    - claim: "The daemon's worker admission hold calls the precedence for the build dispatch"
+      proof: "grep: reviewPrecedenceHold( in src/lib/daemon.ts"
+  rationale: |
+    WHY: a green pull request is one review away from merge. Today a fix or build worker that starts first takes the budget
+    lane, and the green pull request waits.
+    MEASURED read-only on the Azure host, ledger and rotated archives 2026-11-11 20:25Z to 2026-11-14 20:25Z:
+    - 709 heads became review-eligible; 585 got a posted verdict. Eligible to posted: p50 0.13 h, p90 1.06 h, max 3.77 h.
+      By day, p50 0.06, 0.08, 0.13, 0.26 h and p90 0.15, 0.55, 1.23, 1.21 h: the wait is growing.
+    - 839 review.capacity rows. Width was 1 to 4 (base 4, max 8) and never above base: 0 rows.
+    - In the 277 rows with a review queue of 3 or more: mean width 2.7, mean active workers 5.1, of which 1.7 reviews
+      (cpu_phase_in_flight plus judge_phase_in_flight) and 3.4 other workers. Reason host-worker-budget in 154 of 277.
+    - Reasons over all rows: backlog-not-sustained 391, host-worker-budget 341, healthy-window 37, review-history-insufficient
+      22, cpu-pressure 21, cpu-pressure-not-review 19. Queue depth reached an hourly mean of 9.5 on 2026-11-14 19Z.
+    READ at origin/main 5d1670adc:
+    - src/lib/review-capacity.ts:567-572: the host-worker-budget arm compares all active workers plus one to the budget, and
+      restoreBase (:405) leaves only budget minus active workers.
+    - Fix capacity (src/lib/sweep.ts, the fix_capacity row) and the daemon's build dispatch take lanes from the same budget
+      first come, first served.
+    OPEN RELATED WORK, not duplicated: W1-T2989 (#18501) counts only local-CPU workers against the budget, so reviews waiting
+    on the model stop counting; W1-T12535 (#18515) retries a refill held at bound 0; W1-T12534 (#18533) queues a head by its
+    CI-green time; W1-T12529 (merged) restores base width under CPU pressure that is not review's. None of them decides who
+    gets a freed lane when a review and a new fix or build both want it.
+  design: |
+    INVARIANT no-starvation: precedence holds a new fix or build only while a green head waits longer than one cadence.
+    INVARIANT in-flight-untouched: running workers are never stopped.
+    The budget value does not change. This orders who starts next; it adds no limit.
+    1. src/lib/review-precedence.ts (new): export pure `reviewPrecedence({ waitingGreenHeads, cadenceMs, nowMs, widthReason })`.
+       It returns yield or proceed. reviewPrecedence lives in a new module because review-capacity.ts is over its
+       source-size ceiling and W1-T2989 changes it; the new module leaves that file unchanged.
+       The module also reads the inputs: a waiting green head is a green head whose newest sweep.disposed row has
+       blocker awaiting-review at the same head (its blocker_since is when the wait began), and the width reason is
+       the reason of the newest review.capacity row. The sweep records each pass's reading in the module, and the
+       daemon's build dispatch decides on the newest reading. A reading older than two cadences holds nothing.
+    2. src/lib/sweep.ts: before the fix lane admits a new round, read the last width decision and the waiting green heads
+       (the review queue the light pass already holds) and call reviewPrecedence. On yield, do not start the round; write
+       sweep.budget_yield once per held spell. A fix round for a pull request whose own red blocks its review is not held:
+       that pull request is not waiting for review.
+    3. src/lib/daemon.ts: the build dispatch makes the same call before it starts a worker. Add no comment lines to
+       daemon.ts (it is at its comment cap); explanations go in the why-file. The call sits in the worker admission
+       hold as a REVIEW hold, read only by the dispatch and lane-refill surfaces; intake, retro, triage and the
+       wipe test are never held.
+    4. Declare sweep.budget_yield in src/lib/ledger-steps.ts.
+    Build after W1-T2989, which changes the same budget arithmetic.
+    NOT IN SCOPE: the budget value; review width growth above base; provider-phase counting (W1-T2989).
+  falsifier: |
+    Return proceed always and criteria 1 and 2 must fail. Hold dispatch after the wait clears and criterion 3 must fail.
+    Stop a running worker and criterion 4 must fail. Change a decision with no review waiting and criterion 5 must fail.
+    Restore and all must pass.
+  note: |
+    Id reserved for run-unfiled-1794689039000 with ~/rmd-work/bin/reserve-id.sh. The fleet builds it.

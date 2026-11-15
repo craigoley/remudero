@@ -64,6 +64,22 @@ test("W1-T10931: comment compression preserves executable code", () => {
     "comment lines decrease from the PR base");
 });
 
+test("W1-T12312: comment compression preserves executable code", () => {
+  const source = readFileSync(join(REPO_ROOT, "src/lib/retro.ts"), "utf8");
+  const { comments } = countCommentLines(source, "src/lib/retro.ts");
+  // The companion pin was added with this regression, so the shared helper compares this PR
+  // against its merge base without constraining later feature edits to retro.ts.
+  const pin = new URL("./compress-src-lib-retro-ts-w1-t12312.pin.ts", import.meta.url).href;
+  const before = compressionPinBase("src/lib/retro.ts", pin);
+  if (before === undefined) return;
+  assertSameTokens(executableTokens(source), executableTokens(before),
+    "all PR-base executable tokens, literals and line-break boundaries must remain unchanged");
+  assert.equal(emittedDigest(source), emittedDigest(before),
+    "emitted JavaScript must preserve newline-sensitive behavior");
+  assert.ok(comments < countCommentLines(before, "src/lib/retro.ts").comments,
+    "comment lines decrease from the PR base");
+});
+
 test("retro compression fingerprint distinguishes comments from executable literals", () => {
   const fixture = 'const re = /https?:\\/\\//; const s = "// kept"; const t = `/* ${`// ${1}`} */`;';
   const tokens = executableTokens(fixture);
