@@ -21,7 +21,7 @@
     - test/gardeners/flow-remedy-skips-a-cause-it-cannot-file-and-drafts-the-next-one.test.ts
     - test/the-flow-gardener-files-a-remedy-for-the-costliest-unowned-blocker.test.ts
     - test/admission-pr-flow-gardening.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "invariant:a-skipped-cause-is-recorded — When the first draftable cause has no declared owner module (the \"declared owner NONE names no module\" refusal), the ladder records it as skipped with that reason and the pass drafts the next draftable cause among the candidates"

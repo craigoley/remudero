@@ -17,7 +17,7 @@
   files:
     - src/cli/commands/daemon.ts
     - test/daemon/the-first-tick-counts-the-early-tick-read-as-its-own.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "When the first tick takes the early tick read (`daemon.first_tick_read` with `source: early`), the boot light pass is served the open pull request views of that read and does not read GitHub itself (`views_source: tick_read` on its `sweep_light.pre_review_timing` row)"
