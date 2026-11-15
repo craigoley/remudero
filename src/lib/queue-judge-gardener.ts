@@ -14,6 +14,9 @@ import {
 import { medianMs } from "./gardener-runtime.js";
 import { readMainHistory, type MainCommit } from "./hot-file-gardener.js";
 import { readIncidentLifecycleStore, type IncidentLifecycleRecord } from "./incident-lifecycle.js";
+import { JudgeWorkerFailedError } from "./issue-revalidation-garden.js";
+import type { CapabilityLadder, Mount } from "./mounts.js";
+import { OPENWEIGHT_CONTEXT_WINDOWS, OPENWEIGHT_MAX_COMPLETION_TOKENS, openWeightEffectiveWindow, selectOpenWeightModel } from "./worker-provider.js";
 import { readLedgerUnionRecordsSync } from "./ledger-union.js";
 import { reparkStaleRuling } from "./machine-filing.js";
 import { backlogCitedSteps, backlogLandingGuard } from "./backlog-gardener.js";
@@ -47,6 +50,43 @@ export const QUEUE_JUDGE_PREDICTION_STEP = "queue_judge.prediction";
 export const QUEUE_JUDGE_OUTCOME_STEP = "queue_judge.outcome";
 const ESCALATED_STEP = "queue_judge.escalated";
 const UNAVAILABLE_STEP = "queue_judge.unavailable";
+const PACKS_LEFT_OUT_STEP = "queue_judge.packs_left_out";
+const PROMPT_BOUND_STEP = "queue_judge.prompt_bound";
+
+/**
+ * W1-T12549: characters per token in the judge prompt, a low estimate. From 2026-11-12T12:06Z the fit gate
+ * (4 bytes a token) admitted prompts of about 147,000 real tokens to a 131,072-token window, so this
+ * JSON-dense prompt holds nearer 3.3 characters a token.
+ */
+const QUEUE_JUDGE_CHARS_PER_TOKEN = 3;
+
+/** The window of the model the route picks for the judge's mount, or why it is unknown. */
+export type QueueJudgeRouteWindow = { tokens: number; model: string } | { tokens: undefined; reason: string };
+
+/** The route's first choice for a cash mount: the first ready deployment of its capability row. */
+export function queueJudgeRouteWindow(mount: Pick<Mount, "model" | "effort" | "provider">, capabilities: CapabilityLadder | undefined): QueueJudgeRouteWindow {
+  if (mount.provider !== "cash") return { tokens: undefined, reason: `the judge mount's provider is ${mount.provider ?? "unset"}, not cash` };
+  try {
+    const { model } = selectOpenWeightModel(capabilities, mount.model, mount.effort);
+    const tokens = openWeightEffectiveWindow(model);
+    return tokens === undefined ? { tokens: undefined, reason: "the routed deployment declares no context window" } : { tokens, model };
+  } catch (e) {
+    return { tokens: undefined, reason: `the route could not be read (${String((e as Error)?.message ?? e).slice(0, 120)})` };
+  }
+}
+
+/**
+ * W1-T12549, PRIMARY CONTROL: the prompt bound follows the routed model's window, less the reply reserve,
+ * times {@link QUEUE_JUDGE_CHARS_PER_TOKEN}. An unknown window falls back to the smallest declared one.
+ */
+export function queueJudgePromptBound(window: QueueJudgeRouteWindow): { maxChars: number; windowTokens: number; source: "route-window" | "unknown-window-default"; model?: string; reason?: string } {
+  const smallest = Math.min(...Object.values(OPENWEIGHT_CONTEXT_WINDOWS).map((w) => w.totalTokens));
+  const windowTokens = window.tokens ?? smallest;
+  const maxChars = Math.max(0, windowTokens - OPENWEIGHT_MAX_COMPLETION_TOKENS) * QUEUE_JUDGE_CHARS_PER_TOKEN;
+  return window.tokens !== undefined
+    ? { maxChars, windowTokens, source: "route-window", model: window.model }
+    : { maxChars, windowTokens, source: "unknown-window-default", reason: window.reason };
+}
 
 /** The queue judge's own rows are read without a window: a prediction is scored whenever its task resolves. */
 const OWN_STEPS = [QUEUE_JUDGE_PREDICTION_STEP, QUEUE_JUDGE_OUTCOME_STEP, ESCALATED_STEP] as const;
@@ -116,6 +156,8 @@ export interface EvidencePack {
 }
 
 export interface QueueJudgeSources {
+  /** W1-T12549: the context window of the model the route picks for the judge, which sizes the prompt. */
+  promptWindow: () => QueueJudgeRouteWindow;
   repoRoot: string;
   stateDir: string;
   clock: Clock;
@@ -377,14 +419,14 @@ export interface MoveRefusal { id: string; reason: string }
  * own row. A pinned priority is never moved to a larger number and nothing may sit below the smallest operator pin:
  * those proposals become escalations, never writes.
  */
-export function checkMoves(moves: readonly JudgeMove[], packs: ReadonlyMap<string, EvidencePack>): { accepted: QueueJudgeAction[]; refused: MoveRefusal[]; escalate: QueueJudgeAction[] } {
+export function checkMoves(moves: readonly JudgeMove[], packs: ReadonlyMap<string, EvidencePack>, judged: ReadonlyMap<string, EvidencePack> = packs): { accepted: QueueJudgeAction[]; refused: MoveRefusal[]; escalate: QueueJudgeAction[] } {
   const accepted: QueueJudgeAction[] = [], escalate: QueueJudgeAction[] = [], refused: MoveRefusal[] = [];
   const pins = [...packs.values()].filter((p) => p.pinned && p.priority !== null).map((p) => p.priority!);
   const floor = pins.length > 0 ? Math.min(...pins) : undefined;
   const seen = new Set<string>();
   for (const m of moves) {
     const refuse = (reason: string): void => void refused.push({ id: m.id, reason });
-    const pack = packs.get(m.id);
+    const pack = judged.get(m.id);
     if (!pack) { refuse("unknown id: not a queued task in this pass"); continue; }
     if (seen.has(m.id)) { refuse("proposed twice"); continue; }
     seen.add(m.id);
@@ -635,6 +677,23 @@ export async function gitFilingDates(repoRoot: string): Promise<Map<string, numb
 
 // ── prompt ───────────────────────────────────────────────────────────────────────────────────────────────────────
 
+const packLine = (p: EvidencePack): string => JSON.stringify({ id: p.id, title: p.title, priority: p.priority, pinned: p.pinned, facts: p.facts.map((f) => ({ ref: f.ref, text: f.text, source: f.source })) });
+
+/** The packs one prompt can hold: lowest priority number first, stopping at the first that would pass the bound. */
+function fitJudgePrompt(packs: readonly EvidencePack[], records: readonly ClassRecordReport[], bound: BoundReport, maxChars: number): { prompt: string; kept: EvidencePack[]; leftOut: EvidencePack[] } {
+  const rank = (p: EvidencePack): number => p.priority ?? Number.POSITIVE_INFINITY;
+  const byPriority = [...packs].sort((a, b) => rank(a) - rank(b));
+  let chars = judgePrompt([], records, bound).length, n = 0;
+  for (; n < byPriority.length; n++) {
+    const next = chars + 1 + packLine(byPriority[n]!).length;
+    if (next > maxChars) break;
+    chars = next;
+  }
+  const keep = new Set(byPriority.slice(0, n));
+  const kept = packs.filter((p) => keep.has(p));
+  return { prompt: judgePrompt(kept, records, bound), kept, leftOut: byPriority.slice(n) };
+}
+
 export function judgePrompt(packs: readonly EvidencePack[], records: readonly ClassRecordReport[], bound: BoundReport): string {
   const record = records.map((r) => `${r.class}: ${r.hits} hit(s), ${r.misses} miss(es), ${r.notRanking} not_ranking; posterior mean ${r.mean.toFixed(2)} against the prior ${r.priorMean.toFixed(2)}; allowance ${r.allowance}${r.shadow ? "; in shadow (no PR opens until hits earn it back)" : ""}`).join("\n");
   return [
@@ -653,7 +712,7 @@ export function judgePrompt(packs: readonly EvidencePack[], records: readonly Cl
     'Answer with ONE JSON object and nothing else: {"moves":[{"id":"<task id>","priority":<number>,"reason":"<one line>","evidence":["<ref>",...],"expected_cost_of_delay":<number >= 0>,"expected_outcome":{"unblocks_tasks":["<dependent id from this task\'s dependents fact>"],"ends_incidents":["<incident fingerprint>"],"unsticks_prs":[<pr number>],"starts_within":<hours until it starts, > 0>}}]}. An empty list is a valid answer.',
     "",
     "QUEUED TASKS, one JSON object per line:",
-    ...packs.map((p) => JSON.stringify({ id: p.id, title: p.title, priority: p.priority, pinned: p.pinned, facts: p.facts.map((f) => ({ ref: f.ref, text: f.text, source: f.source })) })),
+    ...packs.map(packLine),
   ].join("\n");
 }
 
@@ -757,11 +816,23 @@ export async function queueJudgeInventory(sources: QueueJudgeSources, deps: Pick
   }
   if (packs.size === 0) return { ...emptyInventory("empty-queue", plan.open.length), scored, records };
 
+  const promptBound = queueJudgePromptBound(sources.promptWindow());
+  const fit = fitJudgePrompt([...packs.values()], records, bound, promptBound.maxChars);
+  deps.log(PROMPT_BOUND_STEP, { max_chars: promptBound.maxChars, window_tokens: promptBound.windowTokens, reply_reserve_tokens: OPENWEIGHT_MAX_COMPLETION_TOKENS,
+    chars_per_token: QUEUE_JUDGE_CHARS_PER_TOKEN, source: promptBound.source, ...(promptBound.model ? { model: promptBound.model } : {}), ...(promptBound.reason ? { reason: promptBound.reason } : {}), prompt_chars: fit.prompt.length });
+  if (fit.leftOut.length > 0) {
+    deps.log(PACKS_LEFT_OUT_STEP, { left_out: fit.leftOut.length, kept: fit.kept.length, prompt_chars: fit.prompt.length, max_chars: promptBound.maxChars, task_ids: fit.leftOut.map((p) => p.id) });
+  }
+  if (fit.kept.length === 0) {
+    deps.log(UNAVAILABLE_STEP, { reason: "no evidence pack fits the prompt bound", max_chars: promptBound.maxChars });
+    throw new QueueJudgeUnavailableError("no evidence pack fits the prompt bound");
+  }
+  const judged = new Map(fit.kept.map((p) => [p.id, p]));
   let answer: string;
   try {
-    answer = await sources.judgeText(judgePrompt([...packs.values()], records, bound));
+    answer = await sources.judgeText(fit.prompt);
   } catch (e) {
-    deps.log(UNAVAILABLE_STEP, { reason: `judge spawn failed: ${String((e as Error)?.message ?? e)}` });
+    deps.log(UNAVAILABLE_STEP, { reason: `judge spawn failed: ${String((e as Error)?.message ?? e)}`, ...(e instanceof JudgeWorkerFailedError ? { worker_subtype: e.subtype } : {}) });
     throw new QueueJudgeUnavailableError(`judge spawn failed: ${String((e as Error)?.message ?? e)}`);
   }
   const reading = readQueueJudgeAnswer(answer);
@@ -772,7 +843,7 @@ export async function queueJudgeInventory(sources: QueueJudgeSources, deps: Pick
   const proposed = reading.moves;
   const malformed = reading.malformedRows.map((r) => ({ id: r.id, reason: `malformed row ${r.index}: ${r.field}` }));
   for (const r of malformed) deps.log("queue_judge.row_refused", { ...(r.id !== undefined ? { task_id: r.id } : {}), reason: r.reason });
-  const checked = checkMoves(proposed, packs);
+  const checked = checkMoves(proposed, packs, judged);
   for (const r of checked.refused) deps.log("queue_judge.row_refused", { task_id: r.id, reason: r.reason });
   if (proposed.length + malformed.length > 0 && checked.accepted.length + checked.escalate.length === 0 && checked.refused.length === proposed.length) {
     deps.log(UNAVAILABLE_STEP, { reason: `every proposed row was refused: ${[...malformed.map((r) => `${r.id ?? "?"}: ${r.reason}`), ...checked.refused.map((r) => `${r.id}: ${r.reason}`)].join("; ")}` });
@@ -877,6 +948,7 @@ export function buildQueueJudgeSources(deps: GardenerDeps, overrides: Partial<Qu
     churn: (since) => fsChurn(deps.repoRoot, deps.stateDir, since),
     credited: () => creditedCount(deps.stateDir),
     judgeText: () => Promise.reject(new Error("the queue judge's spawn is not wired")),
+    promptWindow: () => ({ tokens: undefined, reason: "the queue judge's route window is not wired" }),
     ...overrides,
   };
   return sources;

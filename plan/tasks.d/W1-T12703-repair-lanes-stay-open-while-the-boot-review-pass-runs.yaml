@@ -1,0 +1,70 @@
+- id: W1-T12703
+  title: "Repair lanes stay open while the boot review pass runs"
+  repo: remudero
+  depends_on: []
+  priority: 1.4
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # a boot pass can now start fix workers beside the boot reviews and the first full pass; every fix gate (per-head claim, fix capacity, restart latch, progress judgment) is unchanged
+  origin: "operator-session#boot-pass-closes-repair-lanes-2026-11-14"
+  plan_refs:
+    - W1-T5720
+    - W1-T9225
+    - W1-T9569
+    - W1-T8086
+    - W1-T11510
+    - W1-T12238
+  files:
+    - src/lib/daemon.ts
+    - src/lib/sweep.ts
+    - test/daemon/repair-lanes-stay-open-while-the-boot-review-pass-runs.test.ts
+    - test/daemon/a-due-repair-gets-a-turn-between-overlapping-reviews.test.ts
+    - test/a-review-only-light-pass-names-its-scope.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "lightPassFixAdmitted({ reviewOnly: true, scope: \"boot\" }) is true when the restart latch admits fix-dispatch on the light surface, and false when it refuses; pause, drain, idle and interphase-review stay false"
+      proof: "grep: W1-T12703 criterion 1 in test/daemon/repair-lanes-stay-open-while-the-boot-review-pass-runs.test.ts"
+    - claim: "Through the production light hook (buildSweepLightHook) with scope { reviewOnly: true, scope: \"boot\" }, a blocked-fixable PR whose fix round is due and admitted by claimFixAdmission dispatches one fix round in that pass, and a conflicted PR with captured evidence dispatches its conflict round; neither row says \"repair lanes closed\""
+      proof: "grep: W1-T12703 criterion 2 in test/daemon/repair-lanes-stay-open-while-the-boot-review-pass-runs.test.ts"
+    - claim: "invariant:one-round-per-head — when the boot pass and the first full pass both reach the same PR at the same head, exactly one fix.dispatch is written; the other pass writes the existing \"already claimed this pass\" stand-down"
+      kind: guard
+      proof: "grep: W1-T12703 criterion 3 in test/daemon/repair-lanes-stay-open-while-the-boot-review-pass-runs.test.ts"
+    - claim: "invariant:reviews-first — in a boot pass that holds a review-eligible PR and a fix-due PR, the review is admitted (sweep.review_admitted) no later than it is today with the repair lanes closed, and a fix round never takes a review slot"
+      kind: guard
+      proof: "grep: W1-T12703 criterion 4 in test/daemon/repair-lanes-stay-open-while-the-boot-review-pass-runs.test.ts"
+    - claim: "invariant:boot-still-holds-arms — a merge-ready PR in a boot pass is not armed, and its stand-down names the boot review; the pause, drain and idle scopes keep \"repair lanes closed\" text and dispatch nothing"
+      kind: guard
+      proof: "grep: W1-T12703 criterion 5 in test/daemon/repair-lanes-stay-open-while-the-boot-review-pass-runs.test.ts"
+  rationale: |
+    WHY: after each daemon restart the boot pass reads every open PR and holds every due fix round until a later full pass reaches it. Restarts are frequent, so this is a steady tax on repair.
+    MEASURED 2026-11-14 ~17:15Z over the core ledger plus its rotated archives since 2026-11-13T19:00Z (sweep.disposed rows with light_pass_scope boot and "repair lanes closed"; hold = time to that PR's next sweep.disposed row from a non-boot pass):
+    - 2026-11-13T17:00Z to 2026-11-14T17:00Z: 69 stand-downs on 30 PRs over 13 boot passes. Hold median 4.8 min, p90 18.6 min, max 32.6 min; 9.4 PR-hours in total. The next pass acted on 34 of the 69 (5.0 PR-hours of their hold).
+    - 2026-11-14T13:00Z to 17:00Z: 13 stand-downs on 12 PRs over 3 boot passes, 0.64 PR-hours. The live ledger alone shows 6 of them (16:40:56Z to 16:41:24Z, run DAEMON-1794674142339-7, #18514 #18439 #18490 #18499 #18427 #18422); the rest are in the rotated archives.
+    - Earlier research (W1-T12552's rationale, 2026-11-11 21:45Z to 11-13 21:45Z) counted 13.5 PR-hours on 52 PRs in 48 h.
+    WHAT THE BOOT PASS PROTECTS, READ at origin/main ab2dd5256:
+    - src/lib/daemon.ts:7005-7012 tick 1 starts the boot review as `{ reviewOnly: true, scope: "boot" }` and does not await it, so "a slow review must not serialize the background full sweep, or dispatch, behind it". W1-T5720 made the boot review-only so reviews come first after a restart (its rationale: first review.posted a median 15.1 min after daemon.boot). Its design orders reviews before the tick-1 cadences; it names no reason to hold fix rounds. W1-T9225's rationale says the same.
+    - src/lib/daemon.ts:2383-2385 `lightPassFixAdmitted` is false for every review-only scope. The comment above it (W1-T4053) gives the reason for the drain: a fix admitted there "would detach one more action into the very drain it runs beside". That reason does not apply to a boot, which has no drain.
+    - src/lib/daemon.ts:2391 `lightPassArmAdmitted`: the operator ruling of 2026-11-06 (W1-T11510) keeps arming closed on pause, drain, boot and idle. That ruling covers arming only.
+    - src/run-task.ts:33994-34003 `lightPassActionable`: on an ordinary light pass, fix and conflict rounds already take `runSweep`'s per-claim fix-capacity admission (claimFixAdmission after the per-head claimFixDispatch mutex, W1-T8086). That is the gate that bounds worker spend.
+    - The first full pass runs beside the boot review and dispatches fix rounds through the same admission; for example it acted on #18427 at 16:46:35Z, 5.2 min after the boot pass held it.
+    - src/lib/sweep.ts:15109-15122 `reviewOnlyStandDownReason` writes "review-only <scope> pass: repair lanes closed until <end>" for every lane the pass closes.
+    So the boot pass protects two things: reviews first, and no arming during boot. Neither needs the fix lanes closed; fix spend is already bounded by the claim and capacity admission.
+    NOT ESTABLISHED: whether a fix dispatch reads a dispatch claim (refs/rmd-dispatch) before the start-claim sweep settles. W1-T12238 makes the first dispatch selection await `claimSweepSettled`; the boot review starts before that point. The builder must check this; if a fix dispatch reads a claim, the boot pass's fix lane also awaits `claimSweepSettled`.
+    CHECKED for overlap: W1-T11027 (queued) admits fix rounds on light passes while the focus gardener holds dispatch, and explicitly keeps boot and drain closed; this task is the boot case. W1-T11171 (merged) ranks conflict rounds on ordinary light passes. W1-T12552 (merged) only restarts less often.
+  design: |
+    INVARIANT one-round-per-head: the boot pass admits a fix only through runSweep's existing per-head claimFixDispatch mutex and claimFixAdmission, so it and the full pass never start two rounds on one head.
+    INVARIANT reviews-first: the boot pass admits its reviews in the same order and at the same point as today; fix rounds are admitted after them and never take a review slot.
+    INVARIANT boot-still-holds-arms: arming stays closed on a boot pass (operator ruling 2026-11-06); pause, drain and idle keep every repair lane closed.
+    1. src/lib/daemon.ts `lightPassFixAdmitted`: admit the boot scope as `lightPassArmAdmitted` admits interphase-review, an allowlist of one: `scope?.reviewOnly !== true || scope.scope === "boot"`, and then the restart latch as today. Add no comment lines (daemon.ts is at its comment cap; run test/daemon/compress-src-lib-daemon-ts.test.ts).
+    2. src/cli/commands/sweep.ts needs no change: it already reads `lightPassFixAdmitted(scope)` (:1299) into `fixRungAllowed` and `lightPassActionable`. If the builder finds the boot pass's requeue batch, refresh admission or head-contract refresh are needed for a fix round to start (sweep.ts :1315, :1405-1410 skip them on review-only), stop and report; that widens the scope.
+    3. src/lib/sweep.ts: the boot scope's stand-down text no longer says "repair lanes closed": `LIGHT_PASS_SCOPE_ENDS` stays, and `reviewOnlyStandDownReason("boot")` reads "review-only boot pass: arming and closing wait until the boot review settles". Other scopes keep their text.
+    4. Check the claim-sweep question above before you change anything, and say what you found in the PR body.
+    5. Update the two tests that pin boot's closed repair lanes (test/daemon/a-due-repair-gets-a-turn-between-overlapping-reviews.test.ts, test/a-review-only-light-pass-names-its-scope.test.ts) to the new rule, keeping their pause, drain, idle and interphase cases.
+    NOT IN SCOPE: arming on boot; the drain, pause and idle scopes; restart frequency (W1-T12552); W1-T11027's focus case.
+  falsifier: |
+    Restore `scope?.reviewOnly !== true` alone: criteria 1 and 2 must fail with "repair lanes closed until the boot review settles". Admit arming on boot too: criterion 5 must fail. Bypass claimFixDispatch for the boot pass: criterion 3 must fail with two fix.dispatch rows. Restore and require all to pass.
+  note: |
+    Id reserved for run-unfiled-1794676672000 with ~/rmd-work/bin/reserve-id.sh. Tests that read Linux /proc or the host boot time stay on the Azure lane until W1-T12528 merges.

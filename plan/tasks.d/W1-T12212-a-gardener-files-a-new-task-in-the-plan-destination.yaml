@@ -16,6 +16,7 @@
     - W1-T5348
   files:
     - src/run-task.ts
+    - src/lib/feedback-landing.ts
     - test/gardeners/a-gardener-files-a-new-task-in-the-plan-destination.test.ts
   status: queued
   attempts: 0
@@ -30,6 +31,9 @@
       proof: "grep: W1-T12212 criterion 4 in test/gardeners/a-gardener-files-a-new-task-in-the-plan-destination.test.ts"
     - claim: "With no host file, each gardener gets the same checkout and makes the same calls as today"
       proof: "grep: W1-T12212 criterion 5 in test/gardeners/a-gardener-files-a-new-task-in-the-plan-destination.test.ts"
+    - claim: "invariant:one-queue-per-repository — the queue of the shared landing keeps each task file with the repository it was staged for: a landing for one repository never carries or sets aside a file that waits for the other"
+      kind: guard
+      proof: "grep: W1-T12212 criterion 7 in test/gardeners/a-gardener-files-a-new-task-in-the-plan-destination.test.ts"
     - claim: "The test goes through `daemonGardenWorkspace`, the production caller that builds the checkout of each registered gardener"
       proof: "grep: W1-T12212 criterion 6 in test/gardeners/a-gardener-files-a-new-task-in-the-plan-destination.test.ts"
   rationale: |
@@ -43,6 +47,20 @@
     In `daemonGardenWorkspace` and the other call sites, call `resolvePlanDestination("task")` when the gardener files a new task, and pass its checkout, owner and name.
     A gardener knows whether it adds or changes a file only when it lands. So choose the repository in the land step: all paths new and under plan/tasks.d go to the destination; a changed file goes to the repository that holds it; a mix is refused with a message.
     The preflight takes the code root from the earlier task of this filing.
+    The shared landing keeps one queue of staged task files under the state root for every repository. A landing call for
+    the destination would read the files that wait for the public repository: a new public file would land in the
+    destination, and a public edit would be set aside because the destination's main does not hold it. The reverse call
+    would push a new ops file to the public repository. So the queue keeps each file with the repository it was staged
+    for, and a landing call lands, waits on or sets aside only the files of its own repository. A file staged before
+    this change names no repository; it belongs to every repository except the named destination, because no landing
+    went to the destination before this task.
+    INVARIANT one-queue-per-repository: a landing call reads, lands, waits on or sets aside only the staged task files
+    that were staged for its own repository.
     NOT IN SCOPE: the gardener modules themselves. Each one takes its checkout as an argument.
   falsifier: |
-    Push a new task file to the public repository with the kind on and criterion 1 must fail. Move a changed task file to the destination and criterion 2 must fail. Send a docs change to the destination and criterion 3 must fail. Restore and require all six to pass.
+    Push a new task file to the public repository with the kind on and criterion 1 must fail. Move a changed task file to the destination and criterion 2 must fail. Send a docs change to the destination and criterion 3 must fail. Let a landing read every staged file whatever its repository and criterion 7 must fail. Restore and require all seven to pass.
+  note: |
+    AMENDED 2026-11-14: the shared landing for task files keeps one queue per repository.
+    The landing of W1-T12199 stages every file under one directory of the state root and a landing call reads all of it.
+    With a second repository, a call for one repository would carry, or set aside, the files that wait for the other.
+    A new ops file could reach the public repository. The task now lists src/lib/feedback-landing.ts and criterion 7.

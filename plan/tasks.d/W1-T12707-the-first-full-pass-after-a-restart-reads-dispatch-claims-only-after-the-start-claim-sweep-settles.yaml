@@ -1,0 +1,48 @@
+- id: W1-T12707
+  title: "The first full pass after a restart reads dispatch claims only after the start-claim sweep settles"
+  repo: remudero
+  depends_on: []
+  priority: 0.8
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: medium # the full pass may start later after a boot; dispatch already waits on the same promise, so no new wait is added to the dispatch path
+  origin: "operator-session#first-full-pass-reads-claims-before-the-claim-sweep-2026-11-14"
+  plan_refs:
+    - W1-T10896
+    - W1-T11170
+    - W1-T12238
+    - W1-T12703
+  files:
+    - src/lib/daemon.ts
+    - test/daemon/the-first-full-pass-after-a-restart-reads-dispatch-claims-only-after-the-start-claim-sweep-settles.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "With the start-claim sweep still pending, the daemon's first full pass (each production start site that calls runGatedSweep: the tick, the recycle-pause tick and the retrigger) does not call deps.sweep; once claimSweepSettled settles, it calls it in the same or the next tick"
+      proof: "grep: W1-T12707 criterion 1 in test/daemon/the-first-full-pass-after-a-restart-reads-dispatch-claims-only-after-the-start-claim-sweep-settles.test.ts"
+    - claim: "A dead dispatch claim from this host's previous run, which the start-claim sweep ends, is not read as held by the first full pass's conflict ownership read (readConflictOwnership through readSessionOwnershipViaGit)"
+      proof: "grep: W1-T12707 criterion 2 in test/daemon/the-first-full-pass-after-a-restart-reads-dispatch-claims-only-after-the-start-claim-sweep-settles.test.ts"
+    - claim: "invariant:a-failed-sweep-does-not-hold-the-pass — a start-claim sweep that fails (dispatch.claim_sweep_failed) still lets the first full pass start, as it lets dispatch start today"
+      kind: guard
+      proof: "grep: W1-T12707 criterion 3 in test/daemon/the-first-full-pass-after-a-restart-reads-dispatch-claims-only-after-the-start-claim-sweep-settles.test.ts"
+  rationale: |
+    WHY: the first full pass after a restart can read a dead dispatch claim from before the restart as live. A conflict round on an operator-session branch then reads the branch as held and does nothing.
+    FOUND by the W1-T12703 builder (#18543, open), READ at origin/main 4d8d0b3a3:
+    - src/cli/commands/daemon.ts:1694-1705 starts the start-claim sweep (bootSweepDispatchClaimsAsync, W1-T10896), which ends this host's pre-restart claims, and does not wait for it (W1-T12238). It passes the promise on as claimSweepSettled (:2178).
+    - src/lib/daemon.ts:7557 makes dispatch wait for claimSweepSettled. W1-T12703 (#18543) makes the boot light pass's fix lane wait for it too.
+    - The full pass does not wait. src/lib/daemon.ts:7030-7033 starts it in tick 1 through runGatedSweep (:3385), before :7557. Two more sites start it the same way: the recycle-pause tick (:6894) and the retrigger (:3276).
+    - In that pass, src/lib/sweep.ts:22152 reads conflict ownership for an operator-session head through deps.readConflictOwnership, which is readSessionOwnershipViaGit (:5389). It reads refs/rmd-dispatch claims; a claim renewed within its median gap reads "held" (`sessionBranchUnheld`, about :10755-10792), and a held verdict writes nothing and dispatches no round.
+    MEASURED 2026-11-14, read-only, ~/rmd-state2/state/ledger.ndjson plus its rotated archives from 2026-11-07T07:33Z: no case found. There are 0 sweep.owned_conflict.* rows and 0 sweep.conflict_regenerated rows, so no owned conflict round on any operator-session branch ran or escalated in that week, after a boot or otherwise. A held verdict writes no row, so the ledger cannot show a held case directly; 0 is a lower bound. Boots take 100 to 178 s before tick 1 (daemon.boot_phases total_ms, 2026-11-14), so the sweep usually settles first. This is an ordering gap, not a measured loss, hence priority 0.8.
+    CHECKED for overlap: W1-T12703 (queued, #18543 open) gates only the boot light pass. W1-T12528 (queued) injects the boot probe. W1-T8176 (queued) releases a claim when a boot reaps a dead run's lock. None gates the full pass.
+  design: |
+    INVARIANT a-failed-sweep-does-not-hold-the-pass: the wait reuses claimSweepSettled, which already resolves on failure (its catch logs dispatch.claim_sweep_failed), so the full pass waits no longer than dispatch does.
+    1. src/lib/daemon.ts runGatedSweep (:3385): before it calls deps.sweep, await deps.claimSweepSettled when it is set. That one place covers all three start sites. Add no comment lines (daemon.ts is at its comment cap; run test/daemon/compress-src-lib-daemon-ts.test.ts).
+    2. Check that the wait does not hold the tick: the tick adopts runGatedSweep's promise and does not await it (W1-T4998), so a pending sweep must not delay dispatch or the light pass. If it does, stop and report.
+    NOT IN SCOPE: the boot light pass (W1-T12703); how long the claim sweep takes; the renewal interval rule in sessionBranchUnheld.
+    The test drives the real start-claim sweep path, which reads the host boot time: run it on the Azure lane until W1-T12528 merges.
+  falsifier: |
+    Remove the await: criteria 1 and 2 must fail (deps.sweep called while the sweep is pending; the dead claim reads held). Make a failed sweep reject the wait: criterion 3 must fail. Restore and require all three to pass.
+  note: |
+    Id reserved for run-unfiled-1794684218000 with ~/rmd-work/bin/reserve-id.sh.
