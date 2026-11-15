@@ -119,9 +119,12 @@ export function yieldingFixClaim<P extends { prNumber: number }>(surface: string
 
 /** The daemon's build dispatch: a `REVIEW` hold for a new batch or lane refill while the newest sweep reading yields.
  *  A reading older than two cadences is not evidence of a wait: it holds nothing. Other surfaces are never held. */
-export function reviewPrecedenceHold(surface: string, nowMs: number, cadenceMs: number, log?: Log):
+export function reviewPrecedenceHold(surface: string, now: number | (() => number), cadenceMs: number, log?: Log):
   { control: "REVIEW"; detail: string; reason: string } | undefined {
   if (surface !== "dispatch" && surface !== "lane-refill") return undefined;
+  // No sweep reading yet: nothing waits, and the injected clock is not advanced by a question that has no answer.
+  if (latestReading === undefined) return undefined;
+  const nowMs = typeof now === "function" ? now() : now;
   const fresh = latestReading !== undefined && nowMs - latestReading.atMs <= 2 * cadenceMs;
   const reading = fresh ? latestReading! : { atMs: nowMs, heads: [], widthReason: undefined };
   const precedence = decideReviewPrecedence("build", surface, reading, nowMs, cadenceMs, log);

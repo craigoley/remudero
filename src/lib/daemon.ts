@@ -5984,7 +5984,7 @@ export async function runDaemon(
   const holdWorkerAdmission = (surface: string): (WorkerAdmissionHold & { reason: string }) | undefined => {
     const sample = recordNearLimitHeapSample(deps, `admission:${surface}`);
     const hold = deps.workerAdmissionHold?.();
-    if (!hold) return heapWorkerAdmissionHold(deps, surface, sample, log) ?? reviewPrecedenceHold(surface, daemonClock.now(), pollIntervalMs, log);
+    if (!hold) return heapWorkerAdmissionHold(deps, surface, sample, log) ?? reviewPrecedenceHold(surface, () => daemonClock.now(), pollIntervalMs, log);
     const reason = `fleet ${hold.control} hold: ${hold.detail}`;
     log("daemon.admission_held", { surface, control: hold.control, detail: hold.detail, reason });
     return { ...hold, reason };
