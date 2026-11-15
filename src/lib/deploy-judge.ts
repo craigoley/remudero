@@ -521,8 +521,8 @@ export function coalesceFreshnessRestart(input: {
 /** W1-T12231: the share of the score limit at which a busy daemon starts to treat its freshness restart as likely.
  *  Mirrors `plan/policy.yaml` `freshnessRestart.likelyFraction`. */
 export const FRESHNESS_LIKELY_FRACTION = 0.5;
-/** W1-T12231: the latest a freshness drain's time limit may be after the restart decision.
- *  Mirrors `plan/policy.yaml` `freshnessRestart.maxDrainWaitMs`. */
+/** BACKSTOP: W1-T12231 — the latest a freshness drain's time limit may be after the restart decision, however long
+ *  the work in flight is predicted to run. Mirrors `plan/policy.yaml` `freshnessRestart.maxDrainWaitMs`. */
 export const FRESHNESS_MAX_DRAIN_WAIT_MS = 30 * 60_000;
 
 /**
