@@ -845,13 +845,23 @@ function parseLedgerRow(line: string): { kind: "row"; row: Record<string, unknow
   }
 }
 
+/** W1-T12528: the host the boot sweep judges its same-host claims on — the only place it reads the real host. */
+export const realBootSweepHostProbe: NonNullable<BootSweepInputs["hostProbe"]> = {
+  hostname: () => hostname(),
+  namespaceBootMs: () => readNamespaceBootMs(),
+  pidPresent: (pid) => pidIsPresent(pid),
+};
+
 /** W1-T10896: the same-host probe runTask's `taken` arm builds, for a sweep meeting a claim it does not own.
- *  An unreadable namespace boot declines to the operator arm, as it does there. */
-export function sameHostLivenessProbe(localHost: string): (anchor: ClaimAnchorIdentity) => ClaimantLivenessProbe | undefined {
+ *  An unknown namespace boot declines to the operator arm, as it does there. */
+export function sameHostLivenessProbe(
+  host: NonNullable<BootSweepInputs["hostProbe"]>,
+): (anchor: ClaimAnchorIdentity) => ClaimantLivenessProbe | undefined {
+  const localHost = host.hostname();
   return (anchor) => {
-    const namespaceBootMs = readNamespaceBootMs();
+    const namespaceBootMs = host.namespaceBootMs();
     if (namespaceBootMs === undefined) return undefined;
-    return { localHost, namespaceBootMs, namespaceBootIso: fixedClock(namespaceBootMs).iso(), pidPresent: pidIsPresent(anchor.pid) };
+    return { localHost, namespaceBootMs, namespaceBootIso: fixedClock(namespaceBootMs).iso(), pidPresent: host.pidPresent(anchor.pid) };
   };
 }
 
@@ -1012,7 +1022,8 @@ export function releaseReplacedContainerClaims(
 }
 
 export interface BootSweepInputs {
-  localHost: string;
+  /** W1-T12528: hostname, namespace boot and pid presence; absent ⇒ {@link realBootSweepHostProbe}. */
+  hostProbe?: { hostname(): string; namespaceBootMs(): number | undefined; pidPresent(pid: number): boolean };
   lockHeldSinceMs: number;
   lockHeldSinceIso: string;
   stateDir: string;
@@ -1021,12 +1032,14 @@ export interface BootSweepInputs {
 
 /** The boot sweep's ledger reads; an in-place restart keeps the hostname, so only the same-host arm can judge its claims. */
 function bootSweepReads(i: BootSweepInputs): BootSweepProbeInputs & { runState: RestartOrphanReads["runState"] } {
+  const host = i.hostProbe ?? realBootSweepHostProbe;
+  const livenessProbe = sameHostLivenessProbe(host);
   return {
-    localHost: i.localHost,
+    localHost: host.hostname(),
     lockHeldSinceMs: i.lockHeldSinceMs,
     lockHeldSinceIso: i.lockHeldSinceIso,
     findMintRow: (taskId, anchor) => findClaimMintRow(i.stateDir, taskId, anchor),
-    livenessProbe: sameHostLivenessProbe(i.localHost),
+    livenessProbe,
     runState: (runId, anchor) => readRunLedgerState(i.stateDir, runId, anchor),
   };
 }

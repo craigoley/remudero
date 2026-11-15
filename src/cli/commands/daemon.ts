@@ -10,7 +10,7 @@ import type { RatifyCliGateway } from "../../lib/panel-graph.js";
  */
 import type { tickReadProducer, TickReadFacts, TickReadRequest } from "../../lib/tick-read-worker.js";
 import { registeredGardenEnabled, registeredGardenTargetArgs } from "../../lib/garden-registry.js";
-import { startReadPlane, startReadPlaneTelemetry, onePassPerGeneration, freshReadGeneration, type ReadGeneration } from "../../lib/read-plane.js";
+import { startReadPlane, startReadPlaneTelemetry, onePassPerGeneration, freshReadGeneration, joinableRead, keepLastServe, type ReadGeneration } from "../../lib/read-plane.js";
 import { remeasureSettledGoals, withGoalRemeasurement } from "../../lib/goals.js";
 import { judgeCiEscalation, productionCiJudgePorts, singleFlightCiJudge, withCiJudgeAfterSweep, type CiJudgeIo } from "../../lib/ci-escalation-judge.js";
 import { recyclePauseDetail } from "../../lib/recycle-yield.js";
@@ -21,8 +21,8 @@ import { execFileLoopBounded } from "../../lib/loop-bounded-child.js";
 import { GATEWAY_FETCH_TIMEOUT_MS } from "../../lib/git-fetch-retry.js";
 import { productionDispatchBreakJudge, productionFixProgressJudge } from "../../lib/sweep.js";
 import { configureGithubInstallationBudget, ghExec, ghJsonAsync, ghTextAsync, takeGithubBudgetThrottles } from "../../lib/github-transport.js";
-import { createInstallationBudget, createInstallationBudgetState } from "../../lib/github-installation-budget.js";
-import { DEFAULT_HOST_INSTANCE_REGISTRY_PATH, installationConsumers } from "../../lib/instance-registry.js";
+import { createInstallationBudget, createInstallationBudgetState, type InstallationBudgetThreadInput } from "../../lib/github-installation-budget.js";
+import { DEFAULT_HOST_INSTANCE_REGISTRY_PATH, installationConsumers, registryInstanceForRepo } from "../../lib/instance-registry.js";
 import { GH_APP_INSTALLATION_ID_ENV } from "../../lib/github-app.js";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { homedir, hostname } from "node:os";
@@ -58,7 +58,7 @@ import { plannedSequence, runDrain, type DrainDeps, type MergedSet, type OpenPrC
 import { fileTargetJobStore, nativeTargetAdmission, readTargetExecution, type ProductBuildInstances } from "../../lib/product-build.js";
 import { loadManagedRepos } from "../../lib/managed-repos.js";
 import type { RunResult } from "../../lib/run-result.js";
-import { runBoundedTargetJob, type BoundedTargetJobPorts, type BoundedTargetJobOutcome, daemonBoot, daemonExitCodeForSummary, resolveFleetControlHold, runDaemon, readRestartHistoryLines, type BootPhases, type CrashLoopVerdict, type DaemonDeps, type DaemonKick, type DaemonOpts, type DaemonSummary, priorUnrecognisedResetStrings, daemonPushTokenSource, receivePackCredentialProbe } from "../../lib/daemon.js";
+import { runBoundedTargetJob, type BoundedTargetJobPorts, type BoundedTargetJobOutcome, daemonBoot, daemonExitCodeForSummary, resolveFleetControlHold, runDaemon, readRestartHistoryLines, type BootPhases, type CrashLoopVerdict, type DaemonDeps, type OpsTaskDispatchRead, type DaemonKick, type DaemonOpts, type DaemonSummary, priorUnrecognisedResetStrings, daemonPushTokenSource, receivePackCredentialProbe } from "../../lib/daemon.js";
 import { sweepStrandedReviewWorktreesAsync } from "../../lib/review-worktree-reclaim.js";
 import { sweepReclaimableArtifacts } from "../../lib/disk-artifact-reclaim.js";
 import { readGhRateLimitBuckets } from "../../lib/daemon-health.js";
@@ -84,7 +84,7 @@ import { sweepInflightLocksWithReceipts } from "../../lib/benchmark-run.js";
 import { ledgerMemoHolders, readLedgerUnionRecordsSync } from "../../lib/ledger-union.js";
 import { childMeasurementCadenceSpawn, measurementCadenceChildRunner } from "../../lib/measurement-cadence.js";
 import { loadPlan, type Plan } from "../../lib/plan.js";
-import { PLAN_DESTINATION_KINDS, planDestinationRepository, resolvePlanDestination, type PlanDestinationRepository } from "../../lib/plan-destination.js";
+import { PLAN_DESTINATION_KINDS, planDestinationRepository, planDestinationPath, resolvePlanDestination, type PlanDestinationRepository } from "../../lib/plan-destination.js";
 import { readOperatorReleaseRecords } from "../../lib/machine-filing-judge.js";
 import { readReleaseLedgerLines } from "../../lib/operator-release.js";
 import { runnerConfigDigest, terminalPreDispatchRefusalRevisions } from "../../lib/dispatch-repair.js";
@@ -92,7 +92,10 @@ import { loadMounts, mountsPath } from "../../lib/mounts.js";
 import { loadPolicy, policyPath, type FreshnessRestartValues } from "../../lib/policy.js";
 import { refreshReviewPublisherToken as refreshInstallationToken } from "../../lib/review.js";
 import { feedbackStatusOnMain } from "../../lib/auto-triage.js";
-import { bootSweepDispatchClaimsAsync, dispatchClaimRef, releaseLandedDispatchClaims, claimMintedByRerun, type DispatchClaimReserverAsync } from "../../lib/dispatch-claim.js";
+import {
+  bootSweepDispatchClaimsAsync, dispatchClaimRef, realBootSweepHostProbe, releaseLandedDispatchClaims, claimMintedByRerun,
+  type BootSweepInputs, type DispatchClaimReserverAsync,
+} from "../../lib/dispatch-claim.js";
 import { loadCreditStore, saveCreditStore, recordCredit, refusesAsPlanOnly, buildCommitTrailerIndex, projectPlan, independentBlockReleasesFrom, readLedgerLines, readLedgerSnapshot, buildLedgerIndex, createDispatchBreakerCache, evaluateDispatchBreakerCorroboratedDetailed, hasRepeatedTaskAttributableLifetimeDispatches, type LedgerLines, type LedgerSnapshot, type DispatchBreakerDetail, type GitHub, type PrRef, type StatusProjection, taskIdFromRunBranch } from "../../lib/status.js";
 import { DEFAULT_SWEEP_POLICY, productionFixPressure, readIdleLightCadence, readObservedReviewMedianMs, type OpenPrView } from "../../lib/sweep.js";
 import { startMainEntryWatch } from "../../lib/main-entry.js";
@@ -103,7 +106,7 @@ import { readHeapAdmissionHoldMode } from "../../lib/daemon-heap-admission-hold.
 import { applyDaemonMemoryPolicy, createDaemonMemoryGovernor, createDaemonSlackReclaimer, installDaemonSlackReclaimer, readDaemonMemoryPolicy } from "../../lib/daemon-memory-policy.js";
 import { workerThreads } from "../../lib/worker-heaps.js";
 import { readCiGateRequiredChecks } from "../../lib/ci-gate-required.js";
-import { resolveClaudeExecutable, claudeExecutableCache } from "../../lib/worker.js";
+import { resolveClaudeExecutable, claudeExecutableCache, taskInputAnswer } from "../../lib/worker.js";
 import { defaultInstance, memoryStoreReadFailure, readMemoryLedger, sweepMemoryReservations } from "../../lib/host-memory-ledger.js";
 import { type DispatchGovernorDeps } from "../../lib/dispatch-governor.js";
 import { focusGateFor } from "../../lib/focus-gardener.js";
@@ -882,20 +885,59 @@ function isOpsCatalogSlug(slug: string): boolean {
  * W1-T11770: the tick reads `current` synchronously and gets the last completed refresh. Each read starts at most one
  * refresh behind it, the W1-T7744 filing-prefetch shape, so a slow or hung read never delays a tick.
  */
-function opsCatalogShadowFeed(source: { refresh(): Promise<OpsCatalogShadowInput> }): { current: () => OpsCatalogShadowInput | undefined } {
+/** BACKSTOP: completed private evidence expires even if a successor refresh hangs. */
+export const OPS_DISPATCH_SOURCE_MAX_AGE_MS = 120_000;
+
+export function opsCatalogShadowFeed(source: { refresh(): Promise<OpsCatalogShadowInput> }, clock: Clock = systemClock): {
+  current(): OpsCatalogShadowInput | undefined;
+  forDispatch(): OpsCatalogShadowInput | undefined;
+} {
   let latest: OpsCatalogShadowInput | undefined;
+  let completedAt: number | undefined;
   let inFlight = false;
   return {
     current: () => {
       if (!inFlight) {
         inFlight = true;
-        // refresh() answers every failure as an outcome; a rejection anyway is read as `unreadable`.
-        void source.refresh().then((input) => { latest = input; }, (error: unknown) => { latest = { outcome: "unreadable" }; void error; })
-          .finally(() => { inFlight = false; });
+        // refresh() answers failure as an outcome; an unexpected rejection remains unreadable.
+        void source.refresh().then((input) => { latest = input; completedAt = clock.now(); }, (error: unknown) => {
+          latest = { outcome: "unreadable" }; completedAt = clock.now(); void error;
+        }).finally(() => { inFlight = false; });
       }
       return latest;
     },
+    forDispatch: () => {
+      if (latest?.outcome !== "ok") return latest;
+      const age = completedAt === undefined ? NaN : clock.now() - completedAt;
+      return !Number.isFinite(age) || age < 0 || age >= OPS_DISPATCH_SOURCE_MAX_AGE_MS ? { outcome: "stale" } : latest;
+    },
   };
+}
+
+type OpsDispatchSelection = { outcome: "off" } | { outcome: "on"; repository: string }
+  | { outcome: "unavailable"; reason: string };
+
+/** Read the new flag, reusing canonical repository validation and refusing a changed file. */
+function opsDispatchSelection(stateDir: string): OpsDispatchSelection {
+  try {
+    const path = planDestinationPath(stateDir), before = readFileIfExists(path);
+    if (before === undefined) return { outcome: "off" };
+    const record: unknown = JSON.parse(before);
+    if (record === null || typeof record !== "object" || Array.isArray(record)) return { outcome: "unavailable", reason: "selection_unreadable" };
+    const flag = (record as Record<string, unknown>).dispatch_ops_tasks;
+    if (flag === undefined || flag === false) return { outcome: "off" };
+    if (flag !== true) return { outcome: "unavailable", reason: "invalid_dispatch_flag" };
+    const named = planDestinationRepository(stateDir);
+    if (before !== readFileIfExists(path)) return { outcome: "unavailable", reason: "selection_changed" };
+    if (named.outcome !== "named" || (record as Record<string, unknown>).repository !== `${named.owner}/${named.repo}`) {
+      return { outcome: "unavailable", reason: "selection_unreadable" };
+    }
+    return { outcome: "on", repository: `${named.owner}/${named.repo}` };
+  } catch (error) {
+    // A local selection failure is UNKNOWN, never a public fallback for a private task.
+    void error;
+    return { outcome: "unavailable", reason: "selection_unreadable" };
+  }
 }
 
 /** W1-T12244: the parts of the time from the process start to the first tick, on the daemon clock. */
@@ -1035,6 +1077,7 @@ export async function daemonCommand(
     /** Best-effort boot projection for provider routing; production writes one bounded state file. */
     writeProviderRoutingStatus?: (root: string, input: ProviderRoutingWriteInput) => void;
     bootClaimReserver?: DispatchClaimReserverAsync;
+    hostProbe?: BootSweepInputs["hostProbe"];
     tickClaimReserver?: DispatchClaimReserverAsync;
     /** Opt-in NEW-build reservation reader; production uses the private-dir environment adapter. */
     checkHeavyNewBuild?: DispatchGovernorDeps["checkHeavyNewBuild"];
@@ -1282,7 +1325,7 @@ export async function daemonCommand(
     onMainEntryStep?.(step);
   };
   ledgerSelectedRegistryReadTimeouts(log);
-  startDaemonInstallationBudget(() => daemonInstallationRegistry(repoRoot), process.env, log);
+  startDaemonInstallationBudget(() => daemonInstallationRegistry(repoRoot), process.env, log, systemClock, `${target.owner}/${target.repo}`, opts.pollIntervalMs);
   // bundlemain: which entry this main started from (bin/rmd's choice), and a bundled main's first tick settles it.
   onMainEntryStep = startMainEntryWatch({ log, root: daemonModuleRepoDir });
   // W1-T9065: the lane's approve and the responder's reframe run from a tree at origin/main.
@@ -1589,7 +1632,8 @@ export async function daemonCommand(
   });
   let readPlaneStopped: Promise<void> | undefined;
   const stopReadPlane = (): Promise<void> => (readPlaneStopped ??= readPlane?.stop() ?? Promise.resolve());
-  const readTick = readPlane && planReaders.tickRead(readPlane.read);
+  // W1-T12754: a full pass that misses the published generation joins the tick's read in flight.
+  const readTick = readPlane && joinableRead(planReaders.tickRead(readPlane.read), clockFromMillisFn(deps.now));
   const checkStop = deps.checkStop ?? (() => stopDetail(config.root));
   // A loop that ends before its first read (max 0, or STOP at the start) gets no early read.
   const earlyRead = readTick !== undefined && opts.max !== 0 && !checkStop();
@@ -1693,7 +1737,7 @@ export async function daemonCommand(
   // W1-T12238: the boot does not wait for it; the first dispatch selection and the lock release do.
   const claimSweepSettled: Promise<void> = (async () => {
     await bootSweepDispatchClaimsAsync(deps.bootClaimReserver ?? dispatchClaimReserverAsyncFor(join(config.root, "repos", target.repo)), {
-      localHost: hostname(),
+      hostProbe: deps.hostProbe ?? realBootSweepHostProbe,
       lockHeldSinceMs: bootClaimLock.now(),
       lockHeldSinceIso: bootClaimLock.iso(),
       stateDir: dirname(ledgerPath),
@@ -2169,9 +2213,30 @@ export async function daemonCommand(
     await dispatchFilingPrefetch.refresh(target.planPath);
     bootPhases.mark("filing_prefetch");
     // W1-T11770: absent the flag, nothing is built, read or passed. Present, the first read starts here, unawaited.
-    const opsShadow = shadowOpsCatalog === undefined ? undefined
-      : opsCatalogShadowFeed(createOpsCatalogShadowSource({ repository: shadowOpsCatalog }, deps.opsCatalogApi));
+    const opsSelection = opsDispatchSelection(join(config.root, "state"));
+    const opsSourceRepository = shadowOpsCatalog ?? (opsSelection.outcome === "on" ? opsSelection.repository : undefined);
+    const source = opsSourceRepository === undefined ? undefined
+      : createOpsCatalogShadowSource({ repository: opsSourceRepository }, deps.opsCatalogApi);
+    const opsShadow = source === undefined ? undefined : opsCatalogShadowFeed(shadowOpsCatalog ? source : {
+      refresh: () => {
+        const current = opsDispatchSelection(join(config.root, "state"));
+        return current.outcome === "on" && current.repository === opsSourceRepository
+          ? source.refresh() : Promise.resolve({ outcome: "stale" as const });
+      },
+    }, clockFromMillisFn(deps.now));
     opsShadow?.current();
+    const readOpsTaskDispatch = opsSelection.outcome === "off" ? undefined : (publicPlan: Plan): OpsTaskDispatchRead => {
+      const current = opsDispatchSelection(join(config.root, "state"));
+      if (current.outcome !== "on") return current;
+      if (!opsShadow || current.repository !== opsSourceRepository) return { outcome: "unavailable", reason: "selection_changed" };
+      opsShadow.current();
+      const input = opsShadow.forDispatch();
+      if (input === undefined) return { outcome: "unavailable", reason: "source_pending" };
+      if (input.outcome !== "ok") return { outcome: "unavailable", reason: input.outcome, source: input };
+      const publicCommit = planReaders.revisions.revisionOf(publicPlan)?.commit;
+      if (publicCommit === undefined) return { outcome: "unavailable", reason: "primary_revision_unknown", source: input };
+      return { outcome: "selected", source: input, publicCommit };
+    };
     const summary = await runDaemonFn(
       plan,
       {
@@ -2201,6 +2266,7 @@ export async function daemonCommand(
           activePlanRef.current = fresh;
           daemonPlanCopies.observe(fresh);
         },
+        ...(readOpsTaskDispatch ? { readOpsTaskDispatch } : {}),
         ...(opsShadow ? {
           secondaryCatalogShadowSource: opsShadow.current,
           primaryPlanCommit: () => planReaders.revisions.revisionOf(activePlanRef.current)?.commit,
@@ -2222,6 +2288,7 @@ export async function daemonCommand(
         // W1-T988: the target this daemon already resolved and already ledgers as `daemon.target`'s
         // `repo:` field — the SAME value, never a second resolution that could drift from it.
         targetRepo: target.repo,
+        taskInputAnswer: (taskId) => taskInputAnswer(effectiveRepoRoot, taskId),
         // W1-T9680: a worker push's token — the credential socket's own scoped mint, else the ambient GH_TOKEN.
         probeFleetPushCredential: receivePackCredentialProbe({ originUrl: `https://github.com/${target.owner}/${target.repo}.git`,
           token: daemonPushTokenSource(`${target.owner}/${target.repo}`, gitCredentialSocket ? (deps.gitCredentialMint ?? realScopedMint(log)) : undefined) }),
@@ -2699,9 +2766,9 @@ export async function daemonCommand(
           ghEscalationAnswerGateway(target.owner, target.repo, undefined, config.operatorGithubLogins,
             config.contributorAdmission === undefined ? undefined : { settings: config.contributorAdmission }),
           gitCredentialSocket?.socketPath,
-          servedTickRead(onePassPerGeneration(() => tickReadGeneration, readTick,
+          keepLastServe(onePassPerGeneration(() => tickReadGeneration, readTick,
             () => ({ plan: activePlanRef.current, previousProjection: lastProj ? [...lastProj] : undefined }), { log }),
-            () => tickReadGeneration),
+            (fullPass) => servedTickRead(fullPass, () => tickReadGeneration)),
           target.isSelf ? { root: repoRoot, inboxRoot: config.root, feedbackLand: {} } : undefined,
         ),
         // W1-T254 (the #707 fix): the restricted light-sweep ticker — ticks ONLY
@@ -2934,18 +3001,29 @@ export async function daemonCommand(
 
 export const GITHUB_BUDGET_CONFIGURED_STEP = "github.budget.configured";
 
-let daemonInstallationBudgetInput: { state: SharedArrayBuffer; consumers: number; instance: string } | undefined;
+let daemonInstallationBudgetInput: InstallationBudgetThreadInput | undefined;
 
 /** The daemon sends the same atomic budget to its read worker in the existing worker input. */
 export function daemonInstallationBudgetWorkerInput(): typeof daemonInstallationBudgetInput {
   return daemonInstallationBudgetInput;
 }
 
-/** W1-T12553: use the selected registry or the host copy; an unreadable host must reach startup's log. */
-export function daemonInstallationRegistry(_repoRoot: string): { text: string; source: string } | undefined {
+type DaemonInstallationRegistryRead = { text: string; source: string; omitsInstallationIds?: boolean };
+
+/**
+ * W1-T12553: use the selected registry or the host copy; an unreadable host must reach startup's log.
+ * W1-T12670: only a missing host file falls back to the checkout's copy, which names no installation IDs.
+ */
+export function daemonInstallationRegistry(repoRoot: string): DaemonInstallationRegistryRead | undefined {
   const selected = runtimeInstanceRegistryText();
   if (selected !== undefined) return { text: selected, source: "selected" };
-  return { text: readFileSync(DEFAULT_HOST_INSTANCE_REGISTRY_PATH, "utf8"), source: DEFAULT_HOST_INSTANCE_REGISTRY_PATH };
+  try {
+    return { text: readFileSync(DEFAULT_HOST_INSTANCE_REGISTRY_PATH, "utf8"), source: DEFAULT_HOST_INSTANCE_REGISTRY_PATH };
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException | undefined)?.code !== "ENOENT") throw err;
+  }
+  const checkout = join(repoRoot, ".remudero", "daemon-instances.yaml");
+  return { text: readFileSync(checkout, "utf8"), source: checkout, omitsInstallationIds: true };
 }
 
 /**
@@ -2954,36 +3032,42 @@ export function daemonInstallationRegistry(_repoRoot: string): { text: string; s
  * an unreadable registry or no instance on the installation sets no budget, and the row says why.
  */
 export function startDaemonInstallationBudget(
-  readRegistry: () => { text: string; source: string } | undefined,
+  readRegistry: () => DaemonInstallationRegistryRead | undefined,
   env: NodeJS.ProcessEnv,
   log: (step: string, extra?: Record<string, unknown>) => void,
   clock: Clock = systemClock,
+  targetRepo?: string,
+  maxWaitMs?: number,
 ): void {
   const installationId = env[GH_APP_INSTALLATION_ID_ENV]?.trim();
-  const instance = env.RMD_INSTANCE_NAME?.trim() || "unknown";
+  const named = env.RMD_INSTANCE_NAME?.trim();
+  let instance = named || "unknown";
+  let instanceReason = "no_registry";
+  const who = (): Record<string, unknown> => !named && instance === "unknown" ? { instance, instance_reason: instanceReason } : { instance };
   const unset = (reason: string, extra: Record<string, unknown> = {}): void => {
     daemonInstallationBudgetInput = undefined;
     configureGithubInstallationBudget(undefined);
-    log(GITHUB_BUDGET_CONFIGURED_STEP, { outcome: "unconfigured", instance, reason, ...extra });
+    log(GITHUB_BUDGET_CONFIGURED_STEP, { outcome: "unconfigured", ...who(), reason, ...extra });
   };
   if (!installationId) return unset("no_installation_id");
-  let read: { text: string; source: string } | undefined;
+  let read: DaemonInstallationRegistryRead | undefined;
   let consumers: number | undefined;
   try {
     read = readRegistry();
-    consumers = read === undefined ? undefined : installationConsumers(read.text, installationId);
+    if (read !== undefined && !named) {
+      const own = targetRepo === undefined ? { reason: "no_target" } : registryInstanceForRepo(read.text, targetRepo);
+      if ("name" in own) instance = own.name;
+      else instanceReason = own.reason;
+    }
+    consumers = read === undefined ? undefined
+      : installationConsumers(read.text, installationId, { countOmitted: read.omitsInstallationIds === true });
   } catch (err) {
     return unset("registry_unreadable", { installation_id: installationId, error: err instanceof Error ? err.message : String(err) });
   }
   if (read === undefined) return unset("registry_unreadable", { installation_id: installationId });
   if (consumers === undefined) return unset("no_instance_on_installation", { installation_id: installationId, source: read.source });
   const state = createInstallationBudgetState();
-  daemonInstallationBudgetInput = { state, consumers, instance };
-  configureGithubInstallationBudget(createInstallationBudget({
-    consumers,
-    instance,
-    clock,
-    sharedState: state,
-  }));
-  log(GITHUB_BUDGET_CONFIGURED_STEP, { outcome: "configured", instance, installation_id: installationId, consumers, source: read.source });
+  daemonInstallationBudgetInput = { state, consumers, instance, ...(maxWaitMs === undefined ? {} : { maxWaitMs }) };
+  configureGithubInstallationBudget(createInstallationBudget({ consumers, instance, clock, sharedState: state, maxWaitMs }));
+  log(GITHUB_BUDGET_CONFIGURED_STEP, { outcome: "configured", ...who(), installation_id: installationId, consumers, source: read.source });
 }

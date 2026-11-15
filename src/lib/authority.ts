@@ -217,6 +217,19 @@ export const AUTHORITY_TABLE: readonly AuthorityRow[] = [
       "armAutoMerge) already decided to attempt the arm; this fallback adds no gate of its own. No --delete-branch.",
   },
   {
+    id: "light-pass-merge-at-list-head",
+    action: "merge a PR directly over REST from a light pass deciding on its last good open-PR list, naming the list's head as expectedHead",
+    module: "src/lib/light-pass-open-pr-list.ts",
+    symbol: "mergeAtListHead",
+    boundary: "gh-pr-merge",
+    gate: "sweep-rung",
+    ledgerSteps: ["sweep_light.views_fallback"],
+    verb: "rmd sweep (light pass on a fallback open-PR list)",
+    note:
+      "W1-T12755: reached only through the arm path's direct-merge fallback, after assertLiveWriteAllowed and the operator merge-hold check. " +
+      "A PR absent from the list is refused, and GitHub refuses the merge when the head moved past the list's head.",
+  },
+  {
     id: "update-branch-on-arm",
     action: "REST PUT a PR's `update-branch` endpoint to bring a mergeable-but-behind head current before merging",
     module: "src/lib/arm-auto-merge.ts",

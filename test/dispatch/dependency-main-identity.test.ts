@@ -145,7 +145,7 @@ test("default async open-PR producer yields and paces actual dependency identity
     });
     assert.equal(views.length, 1); assert.equal(views[0].dependencyMainIdentity?.state, "identical");
     assert.deepEqual(views[0].changedFiles, ["package.json", "package-lock.json"]);
-    assert.equal(waits, 9, "enumeration plus eight identity reads all use shared asynchronous pacing");
+    assert.equal(waits, 13, "enumeration, two rollup reads, the file and merge-state reads and eight identity reads all use shared asynchronous pacing");
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
