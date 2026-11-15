@@ -141,7 +141,8 @@ export function machineShardLintRefusal(text: string, source: string): string | 
     const blocks = lint.violations.filter((v) => v.severity === "block").map((v) => v.check);
     return blocks.length === 0 ? undefined : blocks.join(", ");
   } catch (e) {
-    return `unparseable: ${(e as Error).message}`;
+    const reason = `unparseable: ${(e as Error).message}`;
+    return reason;
   }
 }
 
