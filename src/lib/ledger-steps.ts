@@ -365,6 +365,20 @@ const SEED_ROWS: readonly SeedRow[] = [
     outcomes: ["adopted"],
   },
   {
+    // W1-T12714: no needs-design report ends a pass with only a hold.
+    step: "fix.needs_design_routed",
+    meaning:
+      "A fix round answered NEEDS_DESIGN and the fix lane sorted its report into one kind and took that " +
+      "kind's remedy in the same round. environment: the round runs again on a fresh worker, and the first " +
+      "such round in a rung is refunded. capability: the action the round could not take runs through its " +
+      "owner (a body repair, the harness commit, a remote id reservation, or an amendment for a plan edit). contract: an " +
+      "acceptance amendment is proposed and the head waits on it. design: the head is held and a person is " +
+      "asked once. `kind`, `capability` and `remedy` name what happened. `reserved_task_id` records the id " +
+      "passed to the next worker's prompt; a reservation failure records `outcome: refused` and its reason.",
+    writer: ["runFixRung"],
+    outcomes: ["redispatch-fresh-worker", "redispatch", "body-repair", "harness-commit", "id-reservation", "amendment-proposed", "escalate"],
+  },
+  {
     // W1-T12553: the daemon instances and hand runs share one GitHub App installation.
     step: "github.budget.throttled",
     meaning:

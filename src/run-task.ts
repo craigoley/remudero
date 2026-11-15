@@ -5590,13 +5590,14 @@ export async function repairPrMetadata(
   checks: readonly string[],
   write: (url: string, fields: { title?: string; body?: string }) => void =
     (url, fields) => { ghExec(prMetadataRestArgs(url, fields), { stdio: "pipe" }); },
-  read: (url: string) => { title?: string; body?: string } = (url) => {
+  read: (url: string) => { title?: string; body?: string; base?: { ref?: string } } = (url) => {
     const target = prUrlTarget(url);
     if (!target) throw new Error(`metadata read: cannot resolve PR URL ${JSON.stringify(url)}`);
-    return ghJson(["api", `repos/${target.owner}/${target.repo}/pulls/${target.number}`]) as { title?: string; body?: string };
+    return ghJson(["api", `repos/${target.owner}/${target.repo}/pulls/${target.number}`]) as { title?: string; body?: string; base?: { ref?: string } };
   },
-  /** W1-T5544: the task criteria the gate itself resolves for this body at the PR head (`[]` = unreadable or untrailered). */
-  planCriteriaAtHead: (body: string, headSha: string) => readonly AcceptanceCriterion[] = planCriteriaAtHeadForRepair,
+  /** W1-T12791: the task criteria the gate resolves for this body, in the merge of the head into `baseRef` (`[]` = no cure). */
+  planCriteriaAtHead: (body: string, headSha: string, baseRef?: string) =>
+    readonly AcceptanceCriterion[] | Promise<readonly AcceptanceCriterion[]> = planCriteriaAtMergeForRepair,
   /** The test files this PR head ADDS against main — absent at base, so a `unit test:` on one cannot pass there. */
   addedTestsAtHead: (headSha: string) => AddedTestsAtHead = addedTestFilesAtHead,
 ): Promise<MetadataRepairResult> {
@@ -5627,7 +5628,7 @@ export async function repairPrMetadata(
     // W1-T5544: the two gate-refusal cures apply ONLY while acceptance-author-gate is itself red — a
     // proof-discrimination-only red is never cured by rewriting a body that gate does not read.
     const gateRed = checks.includes("acceptance-author-gate");
-    const planCriteria = gateRed && pr.headSha ? planCriteriaAtHead(live.body, pr.headSha) : [];
+    const planCriteria = gateRed && pr.headSha ? await planCriteriaAtHead(live.body, pr.headSha, live.base?.ref) : [];
     // Never the generic grep of a function main already has: proof-discrimination reads it executed_stale, so the
     // "repair" was a guaranteed red (#10404, #10413). Only a proof derived from a test the diff ADDS misses at base.
     const added: AddedTestsAtHead = pr.headSha ? addedTestsAtHead(pr.headSha) : { kind: "unreadable", reason: "no PR head sha" };
@@ -5661,25 +5662,65 @@ export async function repairPrMetadata(
 }
 
 /**
- * W1-T5544: the production `planCriteriaAtHead` for {@link repairPrMetadata} reuses the fix rung's head-bound
- * task contract, pinned to the supplied PR head without a REST read. The head commit is fetched
- * once if it is not local; a head that cannot be read yields `[]` (no divergence cure), never a guessed plan.
+ * W1-T12791: the production `planCriteriaAtHead` for {@link repairPrMetadata}. It reads the plan the gate reads: the
+ * tree that merges the PR head into its base, wrapped in a local commit with no ref (the gate checks out that merge).
+ * A base that cannot be fetched, or a conflict, reads the head's plan. An unreadable head yields `[]`, never a guess.
  */
-export function planCriteriaAtHeadForRepair(body: string, headSha: string, cwd: string = process.cwd()): readonly AcceptanceCriterion[] {
+export async function planCriteriaAtMergeForRepair(
+  body: string,
+  headSha: string,
+  baseRef: string | undefined,
+  cwd: string = process.cwd(),
+): Promise<readonly AcceptanceCriterion[]> {
   const taskId = extractTaskTrailerId(body);
   if (taskId === undefined) return [];
+  let top: string;
   try {
-    hostWorktreeGitAtTopLevel(cwd, ["cat-file", "-e", `${headSha}^{commit}`]);
-  } catch {
-    // The head object is not local yet (a branch pushed since the last fetch): ask origin for it once.
+    top = await repairCheckoutTopLevel(cwd);
     try {
-      hostWorktreeGitAtTopLevel(cwd, ["fetch", "--quiet", "origin", headSha], { timeout: 60_000 });
+      await hostWorktreeGitAsync(top, ["cat-file", "-e", `${headSha}^{commit}`]);
     } catch {
-      // Unreadable head means unreadable plan: no divergence cure, and the escalation still carries its reason.
-      return [];
+      // The head object is not local yet (a branch pushed since the last fetch): ask origin for it once.
+      await hostWorktreeGitAsync(top, ["fetch", "--quiet", "--no-tags", "origin", headSha], { timeout: 60_000 });
+    }
+  } catch (error) {
+    void error; // An unreadable head means an unreadable plan: no cure, and the escalation still carries its reason.
+    return [];
+  }
+  const at = (await mergeCommitForRepair(top, headSha, baseRef)) ?? headSha;
+  return (await resolveFixRungTaskContractAtHeadAsync("", taskId, top, () => at))?.criteria ?? [];
+}
+
+/** The local merge commit of `headSha` into origin's `baseRef`, or undefined when the base or the merge is unreadable. */
+async function mergeCommitForRepair(top: string, headSha: string, baseRef: string | undefined): Promise<string | undefined> {
+  if (baseRef === undefined || !/^[A-Za-z0-9._/-]+$/.test(baseRef) || baseRef.includes("..")) return undefined;
+  const tracking = `refs/remotes/origin/${baseRef}`;
+  try {
+    await hostWorktreeGitAsync(top, ["fetch", "--quiet", "--no-tags", "origin", `+refs/heads/${baseRef}:${tracking}`], { timeout: 60_000 });
+    const base = (await hostWorktreeGitAsync(top, ["rev-parse", "--verify", `${tracking}^{commit}`])).trim();
+    const tree = (await hostWorktreeGitAsync(top, ["merge-tree", "--write-tree", "--no-messages", base, headSha])).trim();
+    const message = "rmd: the merge acceptance-author-gate checks out";
+    return (await hostWorktreeGitAsync(top, ["commit-tree", "--no-gpg-sign", tree, "-p", base, "-p", headSha, "-m", message],
+      { env: DIRTY_FIX_OWNER_RECOVERY_IDENTITY })).trim();
+  } catch (error) {
+    void error; // A failed fetch, or a conflict (merge-tree exits 1), reads the head's plan, as before W1-T12791.
+    return undefined;
+  }
+}
+
+/** The pinned top level at or above `dir`, through the async leaf (the walk {@link hostWorktreeGitAtTopLevel} makes). */
+async function repairCheckoutTopLevel(dir: string): Promise<string> {
+  const log = (step: string, extra: Record<string, unknown>) => {
+    if (extra.observed !== "<absent>") console.error(JSON.stringify({ event: step, ...extra }));
+  };
+  for (let at = resolve(dir); ; at = dirname(at)) {
+    try {
+      await hostWorktreeGitAsync(at, ["rev-parse", "--git-dir"], { log });
+      return at;
+    } catch (error) {
+      if (!(error instanceof WorktreePointerRefusedError) || error.observed !== "<absent>" || dirname(at) === at) throw error;
     }
   }
-  return resolveFixRungTaskContractAtHead("", taskId, cwd, () => headSha)!.criteria;
 }
 
 
