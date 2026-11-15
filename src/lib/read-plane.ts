@@ -389,28 +389,116 @@ export function revisionedProducer<P, R, I extends { plan: P }, O extends { plan
   };
 }
 
+/** W1-T12754: why a full pass was not served the published generation. */
+export type TickReadMiss = "consumed" | "stale" | "unpublished" | "no_plane";
+
+/** W1-T12754: how the last full pass got its facts, for its `sweep.full_prelude` row. `waitMs` is the time it
+ *  waited for a read that started before its own; `publishedAtMs` dates a joined generation. */
+export interface FullPassServe {
+  source: "served" | "joined" | "own_read" | "none";
+  miss?: TickReadMiss;
+  waitMs?: number;
+  publishedAtMs?: number;
+}
+
+/** W1-T12754: the read a {@link joinableRead} has in flight, read-only: when it was requested and its settling promise. */
+export interface InFlightRead<T> {
+  readonly requestedAtMs: number;
+  readonly settled: Promise<ReadGeneration<T>>;
+}
+
+export type JoinableRead<I, T> = ((input: I) => Promise<ReadGeneration<T>>) & { inFlight(): InFlightRead<T> | undefined };
+
+/** W1-T12754: the same read, naming the read it has in flight so a full pass can wait for it instead of queueing its
+ *  own behind it. The plane runs reads one after another, so the in-flight read is the newest one requested. */
+export function joinableRead<I, T>(read: (input: I) => Promise<ReadGeneration<T>>, clock: Pick<Clock, "now"> = systemClock):
+  JoinableRead<I, T> {
+  let flight: InFlightRead<T> | undefined;
+  return Object.assign((input: I) => {
+    const requestedAtMs = clock.now();
+    const settled = read(input);
+    const mine = { requestedAtMs, settled };
+    flight = mine;
+    const clear = () => { if (flight === mine) flight = undefined; };
+    settled.then(clear, clear);
+    return settled;
+  }, { inFlight: () => flight });
+}
+
 /** A published generation answers ONE consumer pass. The daemon publishes one only at the top of
  * a tick, and a dispatch phase can hold the loop for an hour while the full sweep is retriggered;
  * reusing it there disposed merged PRs and dead heads (DAEMON-1791151532775, 2026-10-04). A later
  * pass reads its own generation, unpublished, and so does the first pass once the published one is
  * past {@link TICK_READ_MAX_AGE_MS}. Unpublished, or no plane to read: undefined, which leaves the
- * consumer on its own live read. */
+ * consumer on its own live read. W1-T12754: a pass that misses a consumed or stale generation while
+ * a {@link joinableRead} has a read in flight that no full pass has taken waits for that read and is
+ * served it, unless it was requested more than the age bound before it settled. `lastServe` names how
+ * the last pass got its facts. */
 export function onePassPerGeneration<I, T>(
   current: () => ReadGeneration<T> | undefined,
-  read: ((input: I) => Promise<ReadGeneration<T>>) | undefined,
+  read: ((input: I) => Promise<ReadGeneration<T>>) & { inFlight?: () => InFlightRead<T> | undefined } | undefined,
   input: () => I,
   bound: Omit<TickReadAgeBound, "consumer"> = {},
-): () => Promise<T | undefined> {
-  let consumed: number | undefined;
-  return async () => {
-    const published = current();
-    if (published && published.generation !== consumed) {
-      consumed = published.generation;
-      if (freshReadGeneration(published, { consumer: "full_sweep", ...bound })) return published.facts;
-    }
-    if (!published || !read) return undefined;
-    return (await read(input())).facts;
+): (() => Promise<T | undefined>) & { lastServe(): FullPassServe | undefined } {
+  // Every generation a full pass took, published or joined; the newest few are enough to refuse a repeat.
+  const consumed = new Set<number>();
+  const consume = (generation: number) => {
+    consumed.add(generation);
+    if (consumed.size > 16) consumed.delete(consumed.values().next().value!);
   };
+  const taken = new WeakSet<Promise<ReadGeneration<T>>>();
+  const clock = bound.clock ?? systemClock;
+  let last: FullPassServe | undefined;
+  const serve = async (): Promise<T | undefined> => {
+    const published = current();
+    let miss: TickReadMiss = published ? "consumed" : "unpublished";
+    if (published && !consumed.has(published.generation)) {
+      consume(published.generation);
+      if (freshReadGeneration(published, { consumer: "full_sweep", ...bound })) {
+        last = { source: "served" };
+        return published.facts;
+      }
+      miss = "stale";
+    }
+    if (!published || !read) {
+      last = { source: "none", miss: read ? miss : "no_plane" };
+      return undefined;
+    }
+    const startedAtMs = clock.now();
+    let waitMs = 0;
+    const flight = read.inFlight?.();
+    if (flight && !taken.has(flight.settled)) {
+      taken.add(flight.settled);
+      const joined = await flight.settled.catch((error: unknown) => {
+        // Reason: a failed in-flight read leaves this pass on its own read below, with its miss reason.
+        void error;
+        return undefined;
+      });
+      waitMs = clock.now() - startedAtMs;
+      if (joined) {
+        consume(joined.generation);
+        if ((joined.settledAtMs ?? clock.now()) - flight.requestedAtMs <= (bound.maxAgeMs ?? TICK_READ_MAX_AGE_MS)) {
+          last = { source: "joined", miss, waitMs, publishedAtMs: joined.publishedAtMs };
+          return joined.facts;
+        }
+        miss = "stale";
+      }
+    }
+    const requestedAtMs = clock.now();
+    const own = read(input());
+    taken.add(own);
+    const generation = await own;
+    last = { source: "own_read", miss, waitMs: waitMs + Math.max(0, generation.publishedAtMs - requestedAtMs) };
+    return generation.facts;
+  };
+  return Object.assign(serve, { lastServe: () => last });
+}
+
+/** W1-T12754: `stamp` (the daemon's servedTickRead) over a full-pass read, keeping that read's `lastServe`. */
+export function keepLastServe<F extends () => Promise<unknown>, G extends object>(
+  fullPass: F & { lastServe(): FullPassServe | undefined }, stamp: (serve: F) => G,
+): G & { lastServe(): FullPassServe | undefined } {
+  return Object.assign(stamp(fullPass), { lastServe: fullPass.lastServe });
 }
 
 export function startReadPlane<I, O>(options: {

@@ -1,0 +1,88 @@
+- id: W1-T12823
+  title: "The Semgrep runtime auditor lock policy admits the reviewed setuptools 84.1.0 pin"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # changes the trusted runtime auditor and its pinned digest; the lock policy admits one more exact pin and nothing else
+  origin: "operator-session#dependabot-18405-lock-policy-2026-11-15"
+  plan_refs:
+    - W1-T12716
+    - W1-T12492
+  files:
+    - .github/semgrep/runtime-compatibility-audit.py
+    - .github/semgrep/runtime_audit_metadata_tests.py
+    - .github/semgrep/source-runtime-qualification.py
+    - .github/semgrep/test_runtime_compatibility_audit.py
+    - .github/workflows/semgrep-runtime-compatibility.yml
+    - test/semgrep-artifact-audit-ci-contract.test.ts
+    - test/review/semgrep-setuptools-trust-before-lock-12716.test.ts
+    - test/review/semgrep-setuptools-lock-policy-12823.test.ts
+  status: blocked
+  retirement: retired  # superseded by W1-T12492 (#18656): its auditor checks each build tool pin as an exact reviewed pair in both lock-policy checks
+  superseded_by: W1-T12492
+  attempts: 0
+  acceptance:
+    - claim: "invariant:exact-lock-trust — the auditor's lock policy (_locked_inputs and audit_locked_artifacts) admits a build lock whose setuptools pin is 84.0.0 with sha256 51a52592...c670 or 84.1.0 with sha256 5231689c...24c9, and refuses any other setuptools version or digest, a missing or extra tool, and any change to the pip, packaging or wheel pins"
+      kind: guard
+      proof: "grep: W1-T12823 criterion 1 in test/review/semgrep-setuptools-lock-policy-12823.test.ts"
+    - claim: "invariant:main-lock-stays-admitted — the committed build lock on main (setuptools 84.0.0) and the same lock with the 84.1.0 line from PR #18405 both pass the download-phase lock policy of the committed auditor"
+      kind: guard
+      proof: "grep: W1-T12823 criterion 2 in test/review/semgrep-setuptools-lock-policy-12823.test.ts"
+    - claim: "The workflow's AUDITOR_SHA256 and the source qualifier's runtime-compatibility-audit.py digest both equal the SHA-256 of the committed auditor"
+      proof: "grep: W1-T12823 criterion 3 in test/review/semgrep-setuptools-lock-policy-12823.test.ts"
+  rationale: |
+    WHY: Dependabot PR #18405 still cannot merge after W1-T12716 (#18607).
+    At #18405 head dc3685865 (main merged in, main's trusted auditor 6efd17b6...5cec), the semgrep-runtime-compatibility
+    job fails in its download phase, and security-merge-policy reports semgrep-runtime-incompatible-or-install-failed:
+      runtime-compatibility-audit.py line 704, _locked_inputs:
+      AuditBlocked: RECIPE_POLICY: fixed original build pins, approved Peewee and Semgrep version required
+    W1-T12716 admitted the 84.1.0 wheel where wheels are scanned (scan_wheel, audit_distribution_set,
+    approved_setuptools_pth), but two lock-policy checks still compare the whole build lock to the single-pair
+    APPROVED_TOOLS map, which holds setuptools 84.0.0 only:
+    - _locked_inputs: need(b == APPROVED_TOOLS and ..., "RECIPE_POLICY", ...)
+    - audit_locked_artifacts: need(build == APPROVED_TOOLS, "BUILD_TOOL_POLICY", ...)
+    So the download phase refuses the 84.1.0 lock before any download. W1-T12716 criterion 3 tested the wheel scan,
+    not the lock policy.
+    The lock on #18405 is correct: PyPI publishes sha256 5231689c6ac8156cd155cfb98c3fd6fb252c3e7e9bd3d78b64d3c55f132624c9
+    for setuptools-84.1.0-py3-none-any.whl, which is the lock's hash and the pair W1-T12716 admits.
+    The merge policy requires main's trusted workflow and auditor bytes on a PR that changes a runtime lock, so this
+    change must land on main first, in a PR that changes no lock, as W1-T12716 did.
+    Checked on a scratch copy of the auditor: with the two checks below, the #18405 lock passes the policy and a
+    wrong 84.1.0 digest is still refused.
+  design: |
+    INVARIANT exact-lock-trust: the build lock policy admits each tool only as an exact (version, SHA-256) pair that
+    approved_tool_artifact admits; the tool name set stays exactly APPROVED_TOOLS's keys; no name-only or version-only
+    admission; the lock grammar keeps one hash per line.
+    INVARIANT main-lock-stays-admitted: main's build lock pins 84.0.0 until #18405 merges, so the policy must admit
+    both exact pins in the meantime.
+    1. runtime-compatibility-audit.py: add approved_build_tools(pins) that returns True only when
+       pins.keys() == APPROVED_TOOLS.keys() and approved_tool_artifact(name, version, sha) holds for every pin.
+       Use it in _locked_inputs (in place of b == APPROVED_TOOLS) and in audit_locked_artifacts (in place of
+       build == APPROVED_TOOLS). Keep the error codes RECIPE_POLICY and BUILD_TOOL_POLICY. Do not change
+       APPROVED_TOOLS, APPROVED_TOOL_ARTIFACTS or the pip bootstrap pin.
+    2. Update AUDIT_TEST_SOURCES digests, source-runtime-qualification.py's auditor digest and the workflow's
+       AUDITOR_SHA256.
+    3. Python unit tests: both locks admitted by both checks; a wrong 84.1.0 digest, 84.2.0, a missing tool, an extra
+       tool and a changed pip pin refused.
+    4. A focused TypeScript test (#test/helpers/repo-root.js) runs the committed auditor with python3 -I -S on a temp
+       root holding main's locks and the 84.1.0 variant, and asserts criteria 1 to 3 on its behaviour, not its text.
+    Do not edit either lock and do not touch W1-T12492's test files.
+    NOT IN SCOPE: the lock move (W1-T12492 on #18405); any change to the merge policy.
+  falsifier: |
+    Revert _locked_inputs to b == APPROVED_TOOLS: criterion 2 must fail on the 84.1.0 lock. Make approved_build_tools
+    compare versions only: criterion 1 must fail on the wrong digest. Change one auditor byte without updating
+    AUDITOR_SHA256: criterion 3 must fail. Restore and require all to pass.
+  note: |
+    Id reserved for run-unfiled-1794724955000 with ~/rmd-work/bin/reserve-id.sh.
+    CLOSED UNBUILT 2026-11-15, superseded by W1-T12492 (#18656, "validate reviewed setuptools lock pins",
+    merged as 4ac845f88). Read-only check of .github/semgrep/runtime-compatibility-audit.py on origin/main:
+    - approved_build_tool_pins(build) holds only when the tool names equal APPROVED_TOOLS's keys and
+      approved_tool_artifact admits every (version, sha256) pin. approved_tool_artifact admits setuptools
+      84.0.0 and 84.1.0 from APPROVED_TOOL_ARTIFACTS, each as one exact pair.
+    - _locked_inputs uses it for RECIPE_POLICY, and audit_locked_artifacts uses it for BUILD_TOOL_POLICY.
+      Neither compares the whole lock to APPROVED_TOOLS any more.
+    - That is design steps 1 and 2 of this task. The duplicate build, #18681, was closed unmerged.
+    Nothing remains to build.

@@ -1,0 +1,103 @@
+- id: W1-T12954
+  title: "The sweep reads its fix-round history and the retro trigger finds merged trailers without blocking the daemon loop"
+  repo: remudero
+  depends_on:
+    - W1-T12753
+  priority: 1.5
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the conflict round and the design handoff read this history on every full pass; a lost row would release or hold the wrong head
+  origin: "operator-session#daemon-loop-lag-2026-11-15"
+  plan_refs:
+    - W1-T12753
+    - W1-T12544
+    - W1-T11013
+    - W1-T2387
+    - W1-T441
+  files:
+    - src/lib/sweep.ts
+    - src/lib/status.ts
+    - src/lib/ledger-union.ts
+    - test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts
+    - test/sweep/the-sweep-reads-its-fix-round-history-without-blocking-the-loop.test.ts
+    - test/a-merged-trailer-lookup-reads-an-index-built-once.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "runSweep reads the fix-round history for the conflict round and the terminal design handoff (the rows readRepairHistory reads today) before its PR walk, through an awaited reader that keeps a rotation memo across passes: on a ledger directory of at least 50 MB of rotations, a 50 ms timer started before the pass fires at least once in every 500 ms of the read"
+      proof: "grep: W1-T12954 criterion 1 in test/sweep/the-sweep-reads-its-fix-round-history-without-blocking-the-loop.test.ts"
+    - claim: "invariant:same-rows — for the same ledger directory, conflictRoundHeldHead and terminalFixDesignHandoff get the same rows in the same order as from today's readLedgerUnionRecordsSync call, and an incomplete corpus still gives undefined (refuseIncomplete), so a pass holds and releases the same heads"
+      kind: guard
+      proof: "grep: W1-T12954 criterion 2 in test/sweep/the-sweep-reads-its-fix-round-history-without-blocking-the-loop.test.ts"
+    - claim: "A second pass over the same rotations parses only the live file and any rotation cut since the first pass"
+      proof: "grep: W1-T12954 criterion 3 in test/sweep/the-sweep-reads-its-fix-round-history-without-blocking-the-loop.test.ts"
+    - claim: "The batched gateway's findMergedByTrailer and findMergedByTrailerAll answer from a trailer index built once for each merged index, not from a new regular expression over every merged PR body for each call: 500 lookups over 14,000 merged PRs make one pass over the bodies"
+      proof: "grep: W1-T12954 criterion 4 in test/a-merged-trailer-lookup-reads-an-index-built-once.test.ts"
+    - claim: "invariant:same-trailer-answers — the index gives the same PR as today for every task id: the newest merged PR whose body has the anchored line Remudero-Task: <id>, null on a failed fetch (W1-T119), and the commit-trailer fallback when the body search found nothing (W1-T2387)"
+      kind: guard
+      proof: "grep: W1-T12954 criterion 5 in test/a-merged-trailer-lookup-reads-an-index-built-once.test.ts"
+    - claim: "invariant:census-only-falls — the synchronous-ledger-scan census row that W1-T12753 records for the sweep's walk function drops by the converted call, and no row rises"
+      kind: guard
+      proof: "grep: W1-T12954 criterion 6 in test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts"
+    - claim: "The batched gateway builds the trailer index"
+      proof: "grep: mergedTrailerIndex( in src/lib/status.ts"
+  rationale: |
+    WHY: since W1-T12544 merged (2026-11-15 13:34Z), the core daemon's sweep blocks its event loop for minutes on
+    one synchronous read of every ledger rotation. And once a day the retro trigger blocks it for about a minute
+    matching one regular expression per run against every merged PR body.
+    MEASURED, core ledger (~/rmd-state2/state), 2026-11-14 18:15Z to 2026-11-15 18:16Z, 90
+    daemon.loop_stall_profile rows:
+    - 20 rows name runSweep in top_inclusive. In 15 of them the stack is runSweep -> conflictRoundHeldHead ->
+      terminalFixDesignHandoff -> readLedgerUnionRecordsSync, with parseObject under scanLedgerBuffer as the top
+      self frame. Those 15 rows have 3,845 s of loop lag; the union read alone is 1,364 s of profiled time, and
+      its longest single read is 354 s (17:12:32Z). The first is at 14:50:12Z, 76 minutes after W1-T12544 merged.
+    - The other 5 runSweep rows name listFeedback (captureRepairFeedbackWithPriorVerdict) or readMergedPlan.
+    - One row (03:20:06Z, lag 109 s) names retroTriggerPrelude -> shippedSince -> findMergedByTrailer, 58.6 s,
+      whose top self frames are one RegExp per task id ("^Remudero-Task:\s*W1-T11195\s*$" and others).
+    - sweep.full_prelude stage times (wall time, awaits included; 40 passes): ledger_fold median 7.3 s, p90 74 s,
+      max 191 s; anomaly_sentinels median 27 ms, p90 301 ms, max 125 s (one pass). No profile row names a
+      function of either stage, so this task does not move them; see the falsifier.
+    - docker stats at 18:20Z: remudero-daemon at 186% CPU.
+    READ at origin/main 57ca3bba9:
+    - src/lib/sweep.ts:20819 readRepairHistory is readLedgerUnionRecordsSync over fix.dispatch, fix.retrigger,
+      fix.done, fix.needs_design and sweep.conflict_regenerated with refuseIncomplete, read once a pass and lazily
+      from the PR walk (sweep.ts:22816 and :22830).
+    - src/lib/ledger-union.ts:835 readLedgerUnionRecords streams the union asynchronously; :1832
+      readLedgerUnionRecordsMemoized keeps parsed rotations in a memo across passes but parses synchronously.
+    - src/lib/status.ts:5562 findMergedByTrailer builds a new RegExp for each call and tests it against
+      index().mergedNewestFirst; findMergedByTrailerAll filters the same list. retroTriggerPrelude calls
+      shippedSince (src/lib/retro.ts:779), which calls it once for each candidate run.
+    SCOPE: W1-T12753 (in build) moves the lifetime-pressure route and idCitedInSrc off the loop and adds the
+    synchronous-ledger-scan census. This task touches neither src/run-task.ts nor W1-T12753's new test files. It
+    depends on W1-T12753 only to lower the census row that W1-T12753 records for this sweep read.
+    FALSIFIER: if, after this lands, sweep.full_prelude still shows ledger_fold above 60 s at p90 while no stall
+    profile names readLedgerUnionRecordsSync under runSweep, the ledger_fold stage's own folds block the loop and
+    need their own task; if stall rows still name conflictRoundHeldHead, the read is still synchronous.
+  design: |
+    INVARIANT same-rows: the awaited read returns what readLedgerUnionRecordsSync returns today for the same
+    directory and options, in the same order; an incomplete corpus gives undefined as today.
+    INVARIANT same-trailer-answers: the index is a cache of today's answer, built from the same list.
+    INVARIANT census-only-falls: the sweep's synchronous-ledger-scan census row only drops; no row rises.
+    1. src/lib/sweep.ts: before the PR walk, read the readRepairHistory steps through the async union stream
+       (openLedgerUnion, src/lib/ledger-union.ts:835), which yields to the loop, with the same completeness answer
+       as refuseIncomplete. Keep each rotation's parsed rows in a module-level memo (one per ledger directory),
+       as readLedgerUnionRecordsMemoized does for the synchronous reader; that function itself parses
+       synchronously, so it is not enough alone. Give readRepairArchive the result. Only a pass with a holdable
+       PR (conflicted or blocked-fixable) reads.
+    2. src/lib/status.ts: add mergedTrailerIndex(list), a Map from task id to the merged PRs whose body carries
+       the anchored trailer line, newest first, built once for each index() result. findMergedByTrailer and
+       findMergedByTrailerAll read it.
+    3. test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts: lower the sweep's row only.
+    4. Add the two focused test files.
+    NOT IN SCOPE: openEscalationSince's union read (sweep.ts:20067), the ledger_fold and anomaly_sentinels folds,
+    listFeedback, readMergedPlan, src/run-task.ts.
+  falsifier: |
+    Call readLedgerUnionRecordsSync again for readRepairHistory: criterion 1 must fail. Drop refuseIncomplete:
+    criterion 2 must fail. Clear the memo between passes: criterion 3 must fail. Build the index on every call:
+    criterion 4 must fail. Return the oldest trailer PR: criterion 5 must fail. Restore and require all to pass.
+  note: |
+    Id reserved for run-unfiled-1794767168000 with ~/rmd-work/bin/reserve-id.sh.
+    The stall figures can be read again from daemon.loop_stall_profile rows (top_inclusive, sync_spawn_by_caller)
+    and sweep.full_prelude rows (stages).

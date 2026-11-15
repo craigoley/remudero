@@ -17,7 +17,7 @@
     - src/run-task.ts
     - src/lib/gardener.ts
     - test/gardeners/garden-worktree-cleanup-treats-is-not-a-working-tree-as-already-removed.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "When `git worktree remove` fails with \"is not a working tree\" for the garden checkout's path, the garden checkout's dispose returns without an error, through the production gardenCheckoutAsync and gardenCheckout"

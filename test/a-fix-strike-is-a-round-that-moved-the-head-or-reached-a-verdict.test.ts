@@ -85,11 +85,11 @@ test("W1-T5542: incomplete legacy history reaches the judge while identified rou
     assert.equal(input.strikesSpent, 2);
     assert.equal(input.rounds.length, 2);
     assert.equal(input.signals.incompleteRounds, 2);
-    return undefined;
+    throw new Error("progress provider offline");
   });
   assert.equal(judgments, 1);
   assert.equal(heldLegacy.dispatched, 0, "an unavailable judgment holds incomplete legacy evidence");
-  assert.match(String(heldLegacy.disposed?.stand_down_reason), /absent or unparseable fix progress verdict/);
+  assert.match(String(heldLegacy.disposed?.stand_down_reason), /fix progress judgment failed/);
   assert.equal(sweep.fixRoundTally(legacy, TASK, "other-head").strikes, 0);
   assert.equal(sweep.fixRoundTally(legacy.map((row) => ({ ...row, verdict_regime: "keyword_only" })), TASK, HEAD, "executed").strikes, 0);
   assert.equal(sweep.fixRoundTally(legacy.map((row) => ({ ...row, kind: "proof_amendment" })), TASK, HEAD).strikes, 0);

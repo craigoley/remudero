@@ -3,8 +3,9 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: auto
-  risk: low
+  verify: human
+  risk: high  # Rule 19 span: widened to fix, prompt-render by a scope amendment for #18679
+  band_meaning: span
   priority: 1.3
   # refusal-amendment (W1-T10661, run DAEMON-1793261281327@f4a25ce82040a489db41686f92b9c233cc6eaf94, 2026-10-29T11:03:31.670Z): the worker refused criterion 1 [outside-declared-files] — proposed widen-files: widen `files:` to cover the paths the change needs, or narrow the criteria to the declared files
   #   worker evidence: The declared renderer cannot enforce report publication or prevent fix dispatch when proofs are omitted.
@@ -16,6 +17,10 @@
   files:
     - src/lib/prompt-render.ts
     - test/worker/check-body-coverage.test.ts
+    - "src/cli/commands/fix.ts"
+  design: |
+    NO-INVARIANTS: This amendment changes only the plan record's scope, risk and verification routing; it changes no production implementation or runtime contract.
+    Prior-behavior inventory: existing output buckets, legacy receipts, defaults, error/unknown paths, and public side effects of the check:body-coverage and fix flows remain unchanged. The amendment only records where the existing task may work and returns its updated machine-authored record to the judge.
   acceptance:
     - claim: "a recorded check:body-coverage round, replayed through the real code path in src/lib/prompt-render.ts, is prevented or self-healed without dispatching a fix round"
       proof: "unit test: test/worker/check-body-coverage.test.ts"
@@ -52,11 +57,3 @@
     is stale once the claim changes); the judge's ruling, not this edit, releases it.
     The proof moves from the title form "unit test: W1-T10661: check:body-coverage is prevented, not retried" to the path form of the task's own
     test file, because that title resolves to no test on main and lint refuses an edited shard that names it.
-  risk_ruling:
-    verdict: "rule-3-low-privilege"
-    action: proceed
-    confidence: 1
-    reasons:
-      - "rule 3 (live and low-privilege): the symptom is live, 3 occurrence(s) across 7 day(s), last seen 2026-10-28T04:44:19.927Z, and the record declares no privileged path"
-    judged_at: "2026-10-30T01:13:54.597Z"
-    pin: "4c18736cf695d25c26a095a45ef209358e3fdb364baba0a3f569699e161c1c5e"

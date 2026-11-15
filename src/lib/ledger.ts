@@ -504,6 +504,8 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   "implement.preopen_gate", // preopen-gate.ts counts the fleet streak across rotations.
   "implement.preopen_gate.alert", // preopen-gate.ts dedups raises and clears on recovery.
   "run.start",
+  "queue_judge.scorecard", // W1-T12551: the machine dispatch share reads the last completed queue-judge pass.
+  "queue_judge.unavailable", // W1-T12551: and the unavailable passes after it.
   "daemon.in_flight_review_abandoned", // W1-T12229: restart-cycle recovery needs the pre-cancel review identity and age after rotation.
   "dispatch.claim", // W1-T9001: promise recovery uses the earliest claim to bound its archive read.
   "memory_read.recovered", // W1-T7720: past recovery durations derive the sustained-unreadable bound.
@@ -725,7 +727,9 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   // W1-T4207: `lastCommitRefusalPromptLines` (run-task.ts) reads its `subtype` to name the last refused paths.
   "fix.done",
   "fix.progress_judged", // the sweep labels each judged PR from its newest judgement; rotated away, the label reverts to the stale strike ratio.
+  "fix.stall_remedy", // W1-T12710: the remedies a stalled criterion had; the operator is asked once.
   "fix.progress_reused", // fixSeedRead distinguishes reused judgment metadata from an owning worker rung.
+  "fix.progress_rerun", // W1-T12711: the once-per-head rerun and its red mark a harness claim refuted at that head.
   "fix.needs_design", // W1-T5532: preserve the explicit hand-off for the next fix-lane decision.
   "fix.contract_hold", // The sweep compares the actual refused head contract with the approved amendment.
   "fix.scope_amendment", // W1-T5534: runFixRung and lookupIdentity resume pending amendments after rotation.

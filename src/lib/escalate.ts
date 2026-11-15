@@ -1278,6 +1278,10 @@ export function escalationHeadSha(body: string | undefined): string | undefined 
   return HEAD_SHA_LINE_RE.exec(body ?? "")?.[1];
 }
 
+export function escalationIssueCause(body: string | undefined): string | undefined {
+  return CAUSE_LINE_RE.exec(normalizeCandidateBody(body ?? ""))?.[1];
+}
+
 /** The `**Task:** <id>` an already-open issue's body carries, or `undefined` (W1-T4471) — via the
  *  SAME {@link TASK_LINE_RE} dedup matches on, so lib/escalation-answers.ts reuses one parser. */
 export function escalationTaskId(body: string | undefined): string | undefined {
@@ -1386,12 +1390,13 @@ export function fixEscalationDedupKey(
 }
 
 /** A duplicate may refuse a repair only when it positively names this head. A changed recorded
- * contract, cleared conflict, or unspent operator answer releases the same question in both lanes. */
+ * contract, cleared conflict, or unspent operator answer releases the same question in both lanes.
+ * W1-T12544: a conflict round (`conflictRound`) is held only by an issue whose cause is the conflict. */
 export function openEscalationStandDownReason(
   headSha: string,
   candidate: OpenIssue | undefined,
   currentContractRevision?: string,
-  current?: { conflictEvidenceCaptured: boolean; baseSha?: string },
+  current?: { conflictEvidenceCaptured: boolean; baseSha?: string; conflictRound?: true },
   redCheckNames?: readonly string[],
   pendingAnswer?: { spent?: true },
 ): { reason: string } | undefined {
@@ -1409,6 +1414,7 @@ export function openEscalationStandDownReason(
   // push whose issue has not been filed yet — in both, the failure direction of guessing wrong is
   // "stop fixing things", so both fail open.
   if (candidateHead === undefined || candidateHead !== headSha) return undefined;
+  if (current?.conflictRound && escalationIssueCause(candidate.body) !== "conflict") return undefined;
   const candidateRevision = escalationContractRevision(candidate.body);
   // W1-T3579: a genuine disagreement between the RECORDED and CURRENT contract revision means the
   // question this issue asked has since changed underneath it — re-admit rather than stand down.
@@ -1471,14 +1477,19 @@ export function matchDuplicateEscalation(e: EscalationDedupKey, open: OpenIssue[
  *  INVARIANT: unreadability must never manufacture a fix stand-down. Issue creation instead uses
  *  {@link lookupDuplicateEscalation}, which distinguishes unreadability from no match. */
 export function findDuplicateEscalation(e: EscalationDedupKey, deps: Pick<EscalateDeps, "issues">): OpenIssue | undefined {
-  if (!deps.issues.listOpen) return undefined;
+  return findDuplicateEscalations(e, deps)[0];
+}
+
+/** All matching probe candidates: a released question must not mask an independent open hold. */
+export function findDuplicateEscalations(e: EscalationDedupKey, deps: Pick<EscalateDeps, "issues">): OpenIssue[] {
+  if (!deps.issues.listOpen) return [];
   let open: OpenIssue[];
   try {
     open = deps.issues.listOpen(NEEDS_HUMAN_LABEL);
   } catch {
-    return undefined; // best-effort dedup: a failed read must never block the PROBE itself
+    return []; // best-effort dedup: a failed read must never block the PROBE itself
   }
-  return matchDuplicateEscalation(e, open);
+  return open.filter(issue => matchDuplicateEscalation(e, [issue]) !== undefined);
 }
 
 /** W1-T2912: unreadable is distinct from no match. Otherwise a REST-read outage with working
