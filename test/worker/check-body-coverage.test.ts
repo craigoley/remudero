@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
-import { deriveFixMode, selfHealBodyCoverage } from "#src/lib/prompt-render.js";
+import { deriveFixMode, renderFixPrompt, selfHealBodyCoverage } from "#src/lib/prompt-render.js";
 import { runFixRung, type FixCommandHost } from "#src/cli/commands/fix.js";
 import type { Config } from "#src/lib/config.js";
 import type { ReviewVerdict } from "#src/lib/review.js";
@@ -126,4 +126,11 @@ test("body repair declines real proof failures, CI red and already reported clai
     unmetCriteria: [{ ...unmet[0], proof: "unresolved prose" }] } }, ""), undefined);
   assert.equal(selfHealBodyCoverage(evidence, `${unmet[0].claim}\n${unmet[0].proof}`), undefined);
   assert.ok(selfHealBodyCoverage(evidence, unmet[0].proof)?.includes(unmet[0].claim));
+});
+
+test("W1-T10661: renderFixPrompt gives a body-coverage round a paste-ready Acceptance block naming each unmet claim and proof", () => {
+  const prompt = renderFixPrompt({ task: { id: "W1-T10511", title: "login" }, round: 1, branch: "run-W1-T10511-1", evidence });
+  assert.match(prompt, /MODE: body-coverage/);
+  assert.ok(prompt.includes("Paste-ready PR body Acceptance block"), "the prompt carries the paste-ready block");
+  assert.ok(prompt.includes(`- Criterion 1: ${unmet[0].claim} — proven by ${unmet[0].proof}`), "the block names the claim and its proof verbatim");
 });
