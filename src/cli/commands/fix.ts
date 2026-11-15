@@ -26,7 +26,7 @@ import { conflictedFilePaths } from "../../lib/hot-file-gardener.js";
 import { billingMode } from "../../lib/env.js";
 import { FIX_MODE_RULES, deriveFixMode, fixScopeRegime, outOfDeclaredScopeFiles, renderFixPrompt, renderPrerequisitePrPrompt, sameHeadReviewUnmet, type FixEvidence, type FixReviewFinding } from "../../lib/prompt-render.js";
 import { bakedClosureCatalogDetails } from "../../lib/baked-closure-catalog.js";
-import { escalateWithJudge, escalationCause, realEscalationJudge, escalationHeadSha, openEscalationStandDownReason, fixEscalationDedupKey, findDuplicateEscalation, taskContractRevision, taskSemanticRevision, type Escalation, type EscalationDedupKey, type IssueGateway, type OpenIssue } from "../../lib/escalate.js";
+import { escalateWithJudge, escalationCause, realEscalationJudge, escalationHeadSha, openEscalationStandDownReason, fixEscalationDedupKey, findDuplicateEscalations, taskContractRevision, taskSemanticRevision, type Escalation, type EscalationDedupKey, type IssueGateway, type OpenIssue } from "../../lib/escalate.js";
 import { fetchSinglePrRest, codeqlCheckFailed, hydrateCodeqlHeadAlertsSteps, CODEQL_CHECK_NAME, type GhApiFetcher } from "../../lib/open-prs-rest.js";
 import { remedyFilesForFailingChecks, type RemedyFileForGate } from "../../lib/ci-parity.js";
 import { isInPlanScope } from "../../lib/plan-architect.js";
@@ -1001,7 +1001,7 @@ async function fixRungStandDownReason(
    * (`key`), the head it would be filed against (`headSha`), and the finder that answers whether
    * such an issue is already open. `find` is INJECTED rather than called here so this function
    * stays free of the issue gateway, the same seam `readRollup`/`readMergeFacts` above already
-   * use; the caller wires it to {@link findDuplicateEscalation} itself, never a second matcher.
+   * use; the caller wires it to {@link findDuplicateEscalations} itself, never a second matcher.
    * Omitted (a gateway with no `listOpen`, or any site other than `rung.strike`) skips this check
    * entirely — fail open, exactly like every other optional reason source here.
    *
@@ -1017,7 +1017,7 @@ async function fixRungStandDownReason(
   openEscalation?: {
     headSha: string;
     key: EscalationDedupKey;
-    find: (key: EscalationDedupKey) => OpenIssue | undefined;
+    find: (key: EscalationDedupKey) => readonly OpenIssue[];
     redCheckNames?: readonly string[];
     pendingAnswer?: { spent?: true };
     current?: { conflictEvidenceCaptured: boolean; baseSha?: string; conflictRound?: true };
@@ -1102,33 +1102,27 @@ async function fixRungStandDownReason(
   if (foreignTree) { const foreign = foreignTreeStandDownReason(foreignTree); if (foreign) return { reason: foreign.reason, foreignTree: foreign }; }
 
   if (openEscalation) {
-    // NO try/catch HERE, DELIBERATELY: the fail-open contract has exactly ONE owner, and it is
-    // `findDuplicateEscalation` itself — "best-effort dedup: a failed read must never block the
-    // escalation itself" is its own doc, and it swallows a throwing `listOpen` into `undefined`
-    // before this ever sees it. A second catch around it would be an arm no production path can
-    // reach (measured: `diff-coverage` flagged it as an added line with zero covering tests) and
-    // a second, silently-drifting statement of the same guarantee.
-    const candidate = openEscalation.find(openEscalation.key);
-    const alreadyAsked = openEscalationStandDownReason(
-      openEscalation.headSha,
-      candidate,
-      // W1-T3579: read straight off the SAME key the probe/producer both build below — never a
-      // second computation — so the comparison and the dedup key can never disagree about which
-      // revision "current" names.
-      openEscalation.key.contractRevision,
-      openEscalation.current,
-      openEscalation.redCheckNames,
-      openEscalation.pendingAnswer,
-    );
-    if (alreadyAsked) {
-      log("fix.contract_hold", { kind: "open-escalation", pr_url: prUrl, head_sha: openEscalation.headSha,
-        contract_revision: openEscalation.key.contractRevision, issue_url: candidate?.url });
-      return alreadyAsked;
+    // The probe owns fail-open issue reads. Evaluate every match: a released question whose
+    // close fails must not hide another unanswered question at the same held head.
+    for (const candidate of openEscalation.find(openEscalation.key)) {
+      const alreadyAsked = openEscalationStandDownReason(
+        openEscalation.headSha,
+        candidate,
+        openEscalation.key.contractRevision,
+        openEscalation.current,
+        openEscalation.redCheckNames,
+        openEscalation.pendingAnswer,
+      );
+      if (alreadyAsked) {
+        log("fix.contract_hold", { kind: "open-escalation", pr_url: prUrl, head_sha: openEscalation.headSha,
+          contract_revision: openEscalation.key.contractRevision, issue_url: candidate.url });
+        return alreadyAsked;
+      }
+      const clearedCause = escalationHeadSha(candidate.body) === openEscalation.headSha && openEscalation.current
+        ? clearedConflictEscalationCause(candidate.body, openEscalation.current)
+        : undefined;
+      if (clearedCause) openEscalation.resolve?.(candidate, clearedCause);
     }
-    const clearedCause = candidate && escalationHeadSha(candidate.body) === openEscalation.headSha && openEscalation.current
-      ? clearedConflictEscalationCause(candidate.body, openEscalation.current)
-      : undefined;
-    if (candidate && clearedCause) openEscalation.resolve?.(candidate, clearedCause);
   }
 
   return undefined;
@@ -2750,10 +2744,10 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
         if (history.some(row => row.step === "fix.needs_design" && row.task_id === opts.taskId &&
             row.head_sha === head && !(typeof row.contract_revision === "string" && row.contract_revision !== currentContractRevision))) return true;
         const key = fixEscalationDedupKey(opts.taskId, opts.prUrl, head, false, noReviewYet, currentContractRevision);
-        const issue = findDuplicateEscalation({ ...key, cause: undefined }, { issues: deps.issues });
-        return openEscalationStandDownReason(head, issue, currentContractRevision,
-          { conflictEvidenceCaptured: hasCapturedMergeConflictEvidence(currentMergeConflict), baseSha: opts.baseSha },
-          undefined, opts.pendingAnswer) !== undefined;
+        return findDuplicateEscalations({ ...key, cause: undefined }, { issues: deps.issues }).some(issue =>
+          openEscalationStandDownReason(head, issue, currentContractRevision,
+            { conflictEvidenceCaptured: hasCapturedMergeConflictEvidence(currentMergeConflict), baseSha: opts.baseSha },
+            undefined, opts.pendingAnswer) !== undefined);
       },
     );
     let preStrikeStandDown = await fixRungStandDownReason(
@@ -2779,7 +2773,7 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
       // keyed on, so probe and producer can never disagree about which issue is the duplicate.
       // `summary` carries `opts.prUrl` because the dedup key's PR dimension is scraped out of the
       // summary/detail TEXT (`extractPrRef`), never passed as a field. A gateway with no
-      // `listOpen` makes `findDuplicateEscalation` return `undefined` for every key, so this site
+      // `listOpen` makes `findDuplicateEscalations` return an empty list for every key, so this site
       // behaves exactly as it did before this task — every strike still spends.
       deps.issues.listOpen
         ? {
@@ -2787,7 +2781,7 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
             key: { ...fixEscalationDedupKey(opts.taskId, opts.prUrl, holdHeadSha,
               currentMergeConflict !== undefined, noReviewYet, currentContractRevision),
               ...(holdHeadSha !== currentPrHeadSha ? { cause: undefined } : {}) },
-            find: (key: EscalationDedupKey) => findDuplicateEscalation(key, { issues: deps.issues }),
+            find: (key: EscalationDedupKey) => findDuplicateEscalations(key, { issues: deps.issues }),
             pendingAnswer: opts.pendingAnswer ?? (opts.constraint !== undefined ? {} : undefined),
             redCheckNames: noReviewYet ? currentCiFailures?.map(f => f.name) : undefined,
             current: { conflictEvidenceCaptured: hasCapturedMergeConflictEvidence(currentMergeConflict), baseSha: opts.baseSha,

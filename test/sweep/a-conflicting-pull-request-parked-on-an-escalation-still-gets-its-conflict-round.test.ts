@@ -397,21 +397,24 @@ test("W1-T12544 criterion 3: a design question that retention archived still hol
 
 async function activeConflictRung(t: TestContext, hold: "design" | "review" | "ci" | "legacy" | "none", answered = false,
   heads: { from: string; to: string; prior: Row[] } = { from: HELD_HEAD, to: MERGE_HEAD, prior: [] },
-  ci: "green" | "red" | "red-unpinned" = "green", archived = false) {
+  ci: "green" | "red" | "red-unpinned" = "green", archived = false,
+  openEscalations?: { issues: OpenIssue[]; closeFails: boolean; baseSha: string }) {
   const f = fixture(t, [...heads.prior, ...(hold === "design" ? designRows(systemClock.now(), TASK, PR_URL, heads.from) : []),
     ...(archived ? archivingRows(systemClock.now()) : [])]);
   if (archived) assert.equal(rotateLedger(f.deps.ledgerPath, { ceilingBytes: 256_000, smoothingWindowMs: 0 }).rotated, true);
   const root = dirname(f.deps.ledgerPath);
   const mount: Mount = { model: "sonnet", effort: "medium", maxTurns: 20, contextBudget: 120000 };
-  const issues = hold === "none" || hold === "design" ? [] : [openIssue(hold === "legacy" ? undefined : hold, heads.from)];
+  const issues = openEscalations?.issues ??
+    (hold === "none" || hold === "design" ? [] : [openIssue(hold === "legacy" ? undefined : hold, heads.from)]);
   const spawned: SpawnWorkerArgs[] = [], rows: Row[] = [];
+  const closeAttempts: string[] = [];
   let pushedHead = heads.from, reviews = 0, closed = 0, ciReads = 0;
   const minedHeads: Array<string | undefined> = [];
   const args = buildFixRungDispatchArgs({
     task: { id: TASK, title: "conflict round under a hold" }, runId: "ACTIVE-CONFLICT-ROUND", prUrl: PR_URL,
     branch: `run-${TASK}-1794610450000`, worktreePath: join(root, "wt"), mount,
     settingsFile: join(root, "settings.json"), config: { root } as Config, budgetUsd: 5, strikeCap: 3,
-    evidence: { unmetCriteria: [], mergeConflict: EVIDENCE }, pr: { headSha: heads.from },
+    evidence: { unmetCriteria: [], mergeConflict: EVIDENCE, baseSha: openEscalations?.baseSha }, pr: { headSha: heads.from },
     reviewBase: { owner: "o", repo: "r", headCheckoutDir: join(root, "wt"), reviewerMount: mount },
   });
   const outcome = await runFixRung({ ...args,
@@ -448,7 +451,11 @@ async function activeConflictRung(t: TestContext, hold: "design" | "review" | "c
         return { ...args.initialReview, headSha: heads.to, state: unmet ? "failure" as const : "success" as const,
           criteria: [{ claim: "the review question still needs an answer", met: !unmet, reason: "observed failure" }] };
       },
-      issues: { listOpen: () => issues, create: () => ISSUE_URL, comment: () => {}, closeWithComment: () => { closed++; } },
+      issues: { listOpen: () => issues, create: () => ISSUE_URL, comment: () => {}, closeWithComment: (url: string) => {
+        closeAttempts.push(url);
+        if (openEscalations?.closeFails) throw new Error("HTTP 502: conflict issue close failed");
+        closed++;
+      } },
       ledgerPath: f.deps.ledgerPath,
       log: (step: string, extra?: Record<string, unknown>) => {
         const row = { ts: new Date().toISOString(), run_id: "ACTIVE-CONFLICT-ROUND", task_id: TASK, step, ...extra };
@@ -459,8 +466,56 @@ async function activeConflictRung(t: TestContext, hold: "design" | "review" | "c
       readLiveState: async () => ({ ok: true as const, state: "OPEN" as const }),
     },
   } as never);
-  return { f, outcome, spawned, rows, pushedHead, reviews, issues, closed, minedHeads };
+  return { f, outcome, spawned, rows, pushedHead, reviews, issues, closed, minedHeads, closeAttempts };
 }
+
+test("W1-T12544 criterion 3: the active rung keeps every unanswered hold when closing a cleared conflict issue fails", async t => {
+  for (const heads of [
+    { from: HELD_HEAD, to: MERGE_HEAD, prior: [] },
+    { from: MERGE_HEAD, to: NEXT_MERGE_HEAD, prior: conflictRoundRows(systemClock.now()) },
+  ]) {
+    for (const conflictFirst of [true, false]) {
+      for (const ci of ["green", "red"] as const) {
+        await t.test(`${heads.from === HELD_HEAD ? "A→B" : "B→C"}: conflict first ${conflictFirst}: ${ci}`, async t => {
+          const conflict = { ...openIssue("conflict", heads.from), body: openIssue("conflict", heads.from).body +
+            `**Raised-by:** conflict-not-admitted\n**Base:** ${HELD_HEAD}\n` };
+          const review = { ...openIssue("review", heads.from), number: 18101, url: "https://github.com/o/r/issues/18101" };
+          const issues = conflictFirst ? [conflict, review] : [review, conflict];
+          assert.equal(openEscalationStandDownReason(heads.from, conflict, undefined,
+            { conflictEvidenceCaptured: false, baseSha: OUTSIDE_HEAD }), undefined,
+            "control: the conflict issue stays cleared after conflict mode ends");
+          const r = await activeConflictRung(t, "review", false, heads, ci, false,
+            { issues, closeFails: true, baseSha: OUTSIDE_HEAD });
+          assert.equal(r.pushedHead, heads.to, "the conflict round pushes the merge head in this invocation");
+          assert.equal(r.rows.find(row => row.step === "fix.done")!.pushed_head_sha, heads.to);
+          assert.deepEqual(r.rows.filter(row => row.step === "fix.dispatch").map(row => row.mode), ["merge-conflict"],
+            "the failed close cannot admit reviewer-unmet or ci-log after the conflict push");
+          assert.equal(r.outcome.review.headSha, ci === "green" ? heads.to : heads.from);
+          assert.equal(r.reviews, ci === "green" ? 1 : 0);
+          assert.ok(r.closeAttempts.length > 0, "the cleared conflict issue's close was attempted");
+          assert.ok(r.closeAttempts.every(url => url === conflict.url), "the review issue is never closed");
+          assert.equal(r.closed, 0);
+          assert.equal(r.issues.includes(review), true, "the review question remains unanswered");
+          const failedClose = r.rows.find(row => row.step === "escalation.superseded" && row.delivered === false)!;
+          assert.match(String(failedClose.failure), /HTTP 502/);
+          assert.equal(r.spawned.length, 1);
+          assert.equal(r.outcome.strikes, 1);
+          assert.equal(r.outcome.outcome, "stood_down");
+          assert.match(String(r.outcome.reason), /ALREADY OPEN.*18101/);
+          assert.equal(r.rows.find(row => row.step === "fix.contract_hold")!.issue_url, review.url);
+
+          const released = await activeConflictRung(t, "none", false, heads, ci, false,
+            { issues: [conflict], closeFails: true, baseSha: OUTSIDE_HEAD });
+          assert.deepEqual(released.rows.filter(row => row.step === "fix.dispatch").map(row => row.mode),
+            ["merge-conflict", ci === "green" ? "reviewer-unmet" : "ci-log"],
+            "control: removing the review issue admits code despite the remaining cleared conflict issue");
+          assert.equal(released.spawned.length, 2);
+          assert.equal(released.outcome.outcome, "fixed");
+        });
+      }
+    }
+  }
+});
 
 test("W1-T12544 criterion 3: red CI after the active conflict push keeps the hold despite a stale review head", async t => {
   for (const ci of ["red", "red-unpinned"] as const) {

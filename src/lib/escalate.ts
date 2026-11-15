@@ -1528,14 +1528,19 @@ export function matchDuplicateEscalation(e: EscalationDedupKey, open: OpenIssue[
  *  INVARIANT: unreadability must never manufacture a fix stand-down. Issue creation instead uses
  *  {@link lookupDuplicateEscalation}, which distinguishes unreadability from no match. */
 export function findDuplicateEscalation(e: EscalationDedupKey, deps: Pick<EscalateDeps, "issues">): OpenIssue | undefined {
-  if (!deps.issues.listOpen) return undefined;
+  return findDuplicateEscalations(e, deps)[0];
+}
+
+/** All matching probe candidates: a released question must not mask an independent open hold. */
+export function findDuplicateEscalations(e: EscalationDedupKey, deps: Pick<EscalateDeps, "issues">): OpenIssue[] {
+  if (!deps.issues.listOpen) return [];
   let open: OpenIssue[];
   try {
     open = deps.issues.listOpen(NEEDS_HUMAN_LABEL);
   } catch {
-    return undefined; // best-effort dedup: a failed read must never block the PROBE itself
+    return []; // best-effort dedup: a failed read must never block the PROBE itself
   }
-  return matchDuplicateEscalation(e, open);
+  return open.filter(issue => matchDuplicateEscalation(e, [issue]) !== undefined);
 }
 
 /** W1-T2912: unreadable is distinct from no match. Otherwise a REST-read outage with working
