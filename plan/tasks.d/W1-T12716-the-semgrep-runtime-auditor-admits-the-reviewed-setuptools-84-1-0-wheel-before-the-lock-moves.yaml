@@ -21,7 +21,7 @@
     - .github/workflows/semgrep-runtime-compatibility.yml
     - test/semgrep-artifact-audit-ci-contract.test.ts
     - test/review/semgrep-setuptools-trust-before-lock-12716.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "invariant:exact-artifact-trust — the runtime auditor admits exactly two setuptools wheels, 84.0.0 with sha256 51a52592...c670 and 84.1.0 with sha256 5231689c...24c9, and refuses any other version, any other digest, another owner name and a data-path alias for the .pth exception"
