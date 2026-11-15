@@ -1247,7 +1247,7 @@ export function buildSweepLightHook(
   const policy = io.sweepWallClockBoundMs === undefined ? DEFAULT_SWEEP_POLICY
     : { ...DEFAULT_SWEEP_POLICY, sweepWallClockBoundMs: io.sweepWallClockBoundMs };
   // W1-T12755: the last good open-PR list, kept for this hook's lifetime.
-  const openPrList = createLightPassOpenPrList<OpenPrView>({ clock: io.clock ?? systemClock, log, runId,
+  const openPrList: ReturnType<typeof createLightPassOpenPrList<OpenPrView>> = createLightPassOpenPrList({ clock: io.clock ?? systemClock, log, runId,
     deadlineMs: LIGHT_PASS_VIEWS_DEADLINE_MS, maxAgeMs: LIGHT_PASS_VIEWS_FALLBACK_MAX_AGE_MS });
   return withMainHealthOnLightPass(async (scope?: LightPassScope) => {
     // W1-T4053: a freshness drain's pass. The fix rung reads closed and the requeue batch never forms,
