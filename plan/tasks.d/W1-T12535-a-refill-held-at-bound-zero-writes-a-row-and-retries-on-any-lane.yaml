@@ -20,7 +20,7 @@
     - src/lib/sweep.ts
     - src/cli/commands/sweep.ts
     - test/sweep/a-refill-held-at-bound-zero-writes-a-row-and-retries-on-any-lane.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "When admitOneRefill declines because reviewAdmissionBound(width).bound is 0 with a non-empty refill tail, it writes one sweep.review_refill.bound_zero row with bound, width, in_flight, active_workers and tail_length, once per held spell, not once per call"
