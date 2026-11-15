@@ -68,6 +68,7 @@ import {
   disarmAutoMerge,
   logArmAttribution,
   mergeDirectViaRestAsync,
+  mergeTargetFromPrUrl,
   assertOperatorMergeUnheld,
   readHeadShaRest as readArmHeadShaRest,
   readArmTimeline,
@@ -18301,9 +18302,39 @@ export interface FixDispatchChildPorts {
   log: (step: string, extra?: Record<string, unknown>) => void;
   /** The phase sink: the owned run's `status.json`, so a fix's admission, worker and CI wait stay visible to the adopting daemon. */
   onPhase?: (phase: string) => void;
+  /** W1-T12545: merge facts with their response's head SHA. Absent, the child reads fresh REST facts. */
+  readMergeFacts?: (prUrl: string) => Promise<{ mergeable?: string; headSha?: string }>;
 }
 
-export type FixDispatchRecheckPorts = Pick<FixDispatchChildPorts, "readLivePr" | "readTask" | "hold">;
+export type FixDispatchRecheckPorts = Pick<FixDispatchChildPorts, "readLivePr" | "readTask" | "hold" | "readMergeFacts">;
+
+/** W1-T12545: the envelope at the live head, only for a conflicted decision whose PR still reads CONFLICTING there. */
+export async function conflictedChildHeadAdoption(
+  envelope: FixDispatchEnvelope, live: { state: string; merged?: boolean; headSha?: string },
+  readMergeFacts: NonNullable<FixDispatchChildPorts["readMergeFacts"]>,
+): Promise<FixDispatchEnvelope | undefined> {
+  if (envelope.evidence.mergeConflict === undefined || live.merged === true || live.state.toLowerCase() !== "open" ||
+      !live.headSha || live.headSha === envelope.pr.headSha) return undefined;
+  const facts = await readMergeFacts(envelope.pr.prUrl).catch((error: unknown) => ({ mergeable: undefined, headSha: undefined, unreadable: String(error) }));
+  if (facts.mergeable !== "CONFLICTING" || facts.headSha !== live.headSha) return undefined;
+  return { ...envelope, pr: { ...envelope.pr, headSha: live.headSha } };
+}
+
+export async function childMergeFacts(
+  prUrl: string,
+  readJson: typeof ghJsonAsync = ghJsonAsync,
+): Promise<{ mergeable?: string; headSha?: string }> {
+  const target = mergeTargetFromPrUrl(prUrl);
+  if (!target) return {};
+  const pr = await readJson(["api", `repos/${target.owner}/${target.repo}/pulls/${target.prNumber}`], undefined, undefined, { fresh: true }) as {
+    head?: { sha?: unknown }; mergeable?: unknown; mergeable_state?: unknown;
+  } | undefined;
+  return {
+    headSha: typeof pr?.head?.sha === "string" ? pr.head.sha : undefined,
+    mergeable: pr?.mergeable === false || pr?.mergeable_state === "dirty" ? "CONFLICTING" :
+      pr?.mergeable === true ? "MERGEABLE" : "UNKNOWN",
+  };
+}
 
 /**
  * W1-T9114 — THE CHILD'S RECHECK, run before it takes its own claim: the fleet hold, the PR's current state and head, and the
@@ -18312,7 +18343,7 @@ export type FixDispatchRecheckPorts = Pick<FixDispatchChildPorts, "readLivePr" |
  */
 export async function recheckFixDispatch(
   envelope: FixDispatchEnvelope, ports: FixDispatchRecheckPorts,
-): Promise<{ ok: true } | { ok: false; reason: string }> {
+): Promise<{ ok: true; adopted?: FixDispatchEnvelope } | { ok: false; reason: string }> {
   const refuse = (reason: string) => ({ ok: false as const, reason });
   try {
     const hold = ports.hold();
@@ -18320,7 +18351,12 @@ export async function recheckFixDispatch(
     const live = await ports.readLivePr(envelope.pr.prUrl);
     if (live === undefined) return refuse("the PR's live state could not be read");
     if (live.merged === true || live.state.toLowerCase() !== "open") return refuse(`the PR is no longer open (${live.merged === true ? "merged" : live.state})`);
-    if (live.headSha !== envelope.pr.headSha) return refuse(`the PR head moved from ${envelope.pr.headSha} to ${live.headSha ?? "an unreadable head"}`);
+    let adopted: FixDispatchEnvelope | undefined;
+    if (live.headSha !== envelope.pr.headSha) {
+      adopted = await conflictedChildHeadAdoption(envelope, live, ports.readMergeFacts ?? childMergeFacts);
+      if (adopted !== undefined && (await ports.readLivePr(envelope.pr.prUrl))?.headSha !== adopted.pr.headSha) adopted = undefined;
+      if (adopted === undefined) return refuse(`the PR head moved from ${envelope.pr.headSha} to ${live.headSha ?? "an unreadable head"}`);
+    }
     const taskId = envelope.pr.taskId;
     if (taskId !== undefined) {
       const task = ports.readTask(taskId);
@@ -18330,7 +18366,7 @@ export async function recheckFixDispatch(
         return refuse(`task ${taskId}'s canonical context changed since the sweep decided`);
       }
     }
-    return { ok: true };
+    return adopted === undefined ? { ok: true } : { ok: true, adopted };
   } catch (error) {
     const reason = `the recheck could not read its evidence (${String((error as Error)?.message ?? error)})`;
     return refuse(reason);
@@ -18346,12 +18382,16 @@ export async function recheckFixDispatch(
  * lost, never as success), not a quiet return.
  */
 export async function runFixDispatchChild(inputs: Record<string, unknown>, deps: FixDispatchChildPorts): Promise<void> {
-  const envelope = readFixDispatchEnvelope(inputs.envelope);
-  if (envelope === undefined) throw new Error("fix dispatch refused: the spec carries no readable decision envelope");
-  const rechecked = await recheckFixDispatch(envelope, deps);
+  const decided = readFixDispatchEnvelope(inputs.envelope);
+  if (decided === undefined) throw new Error("fix dispatch refused: the spec carries no readable decision envelope");
+  const rechecked = await recheckFixDispatch(decided, deps);
   if (!rechecked.ok) {
-    deps.log("sweep.fix.child_refused", { pr_number: envelope.pr.prNumber, head_sha: envelope.pr.headSha, reason: rechecked.reason });
+    deps.log("sweep.fix.child_refused", { pr_number: decided.pr.prNumber, head_sha: decided.pr.headSha, reason: rechecked.reason });
     throw new Error(`fix dispatch refused: ${rechecked.reason}`);
+  }
+  const envelope = rechecked.adopted ?? decided;
+  if (rechecked.adopted) {
+    deps.log("sweep.fix.child_head_adopted", { pr_number: decided.pr.prNumber, from_head: decided.pr.headSha, to_head: envelope.pr.headSha });
   }
   const refuseOnHold = (step: string): void => {
     let hold: string | undefined;
