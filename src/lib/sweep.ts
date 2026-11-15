@@ -15133,6 +15133,7 @@ const LIGHT_PASS_SCOPE_ENDS: Readonly<Record<LightPassScopeName, string>> = {
 
 /** W1-T9569: the stand-down a review-only pass writes for a lane it closed, naming its scope and its end. */
 export function reviewOnlyStandDownReason(scope: LightPassScopeName): string {
+  if (scope === "boot") return `review-only boot pass: arming and closing wait until ${LIGHT_PASS_SCOPE_ENDS.boot}`;
   return `review-only ${scope} pass: repair lanes closed until ${LIGHT_PASS_SCOPE_ENDS[scope]}`;
 }
 

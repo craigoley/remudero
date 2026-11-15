@@ -55,7 +55,12 @@ const VALID_LIFECYCLES = new Set(["active", "superseded", "quarantined", "contes
  * `lifecycle` defaults to "active" (same default as src/lib/learnings.ts).
  */
 export function loadShardEntries(path) {
-  const text = readFileSync(path, "utf8");
+  return parseShardEntries(readFileSync(path, "utf8"), path);
+}
+
+/** W1-T12526: the parse {@link loadShardEntries} runs, over shard text from any tree (the merge-time
+ *  verdict reads it from git blobs). `path` names the shard in each error. */
+export function parseShardEntries(text, path) {
   const doc = parseYaml(text);
   if (doc === null || doc === undefined) return [];
   if (!Array.isArray(doc)) {
@@ -94,12 +99,22 @@ export function loadShardEntries(path) {
  * corpus yet, same convention as src/lib/learnings.ts).
  */
 export function loadCorpus(dir) {
-  const sources = learningsSourceFiles(dir);
-  const entries = [];
-  for (const { filename } of sources) {
-    entries.push(...loadShardEntries(join(dir, filename)));
-  }
-  return entries;
+  return corpusFromTexts(learningsSourceFiles(dir).map(({ filename }) => {
+    const path = join(dir, filename);
+    return [path, readFileSync(path, "utf8")];
+  }));
+}
+
+/** W1-T12526: the corpus from shard texts already read, in path order: what {@link loadCorpus} sums. */
+export function corpusFromTexts(texts) {
+  const sorted = [...texts].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+  return sorted.flatMap(([path, text]) => parseShardEntries(text, path));
+}
+
+/** W1-T12526: the shard paths in a repo-relative listing, by the rule learningsSourceFiles reads a
+ *  directory with: `learnings/*.yaml`, and `learnings/<name>.d/*.yaml`. */
+export function shardPathsInListing(paths) {
+  return paths.filter((p) => /^learnings\/[^/]+\.yaml$/.test(p) || /^learnings\/[^/]+\.d\/[^/]+\.yaml$/.test(p)).sort();
 }
 
 /**
