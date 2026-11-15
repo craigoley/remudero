@@ -37,6 +37,8 @@
       proof: "grep: W1-T12755 criterion 5 in test/sweep/a-light-pass-decides-from-its-last-good-open-pr-list-when-the-read-fails.test.ts"
     - claim: "Through buildSweepLightHook with the real buildOpenPrViewsAsync and a gh shim (test/helpers/gh-shim.ts) that answers pulls?state=open with HTTP 403 rate limit exceeded, nothing injected in place of the fallback, the second pass admits the review"
       proof: "grep: W1-T12755 criterion 6 in test/sweep/a-light-pass-decides-from-its-last-good-open-pr-list-when-the-read-fails.test.ts"
+    - claim: "The light pass builds its last good open-PR list through the new module: buildSweepLightHook calls createLightPassOpenPrList"
+      proof: "grep: createLightPassOpenPrList( in src/cli/commands/sweep.ts"
   rationale: |
     WHY: when the light pass cannot read or waits long on the open-PR list, it makes no review or merge decision in that pass. The list read is often slow or rate-limited, so whole hours pass with almost no light-pass decisions.
     OBSERVED on the Azure host core ledger, window 2026-11-12T22:35Z to 2026-11-14T22:35Z:
