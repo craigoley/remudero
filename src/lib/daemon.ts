@@ -2361,6 +2361,7 @@ export interface LightPassScope {
   /** W1-T9808: present only while a restart is latched; the pass asks it before each review or fix it admits. */
   readonly admit?: RestartAdmission;
   readonly claimSweepPending?: () => boolean;
+  readonly waitForClaimSweep?: () => Promise<void>;
   readonly observeRepairTurn?: (observation: RepairTurnObservation) => void;
 }
 
@@ -7012,10 +7013,11 @@ export async function runDaemon(
       let claimSweepPending = deps.claimSweepSettled !== undefined;
       const claimSweepDone = () => { claimSweepPending = false; };
       void deps.claimSweepSettled?.then(claimSweepDone, claimSweepDone);
+      const waitForClaimSweep = async () => { await deps.claimSweepSettled?.catch(() => undefined); };
       void (async () => {
         try {
           await deps.sweepLight?.(heapHeldLightPass(deps, log,
-            { reviewOnly: true, scope: "boot", claimSweepPending: () => claimSweepPending }));
+            { reviewOnly: true, scope: "boot", claimSweepPending: () => claimSweepPending, waitForClaimSweep }));
         } catch (e) {
           log("daemon.sweep_light.failed", { phase: "boot", error: String((e as Error)?.message ?? e) });
         } finally {

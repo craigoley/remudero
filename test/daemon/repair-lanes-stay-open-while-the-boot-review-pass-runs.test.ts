@@ -18,9 +18,8 @@ import { join } from "node:path";
 import { test } from "node:test";
 
 import {
-  lightPassArmAdmitted, lightPassFixAdmitted, runDaemon, type LightPassScope, type RestartAdmission,
+  lightPassArmAdmitted, lightPassFixAdmitted, type LightPassScope, type RestartAdmission,
 } from "#src/lib/daemon.js";
-import { loadPlanFromYaml } from "#src/lib/plan.js";
 import {
   drainDetachedSweepActions, reviewOnlyStandDownReason, runSweep, type LightPassScopeName, type OpenPrView,
   type SweepDeps,
@@ -61,7 +60,10 @@ function unreviewedPr(prNumber: number): OpenPrView {
 }
 
 /** The production light hook over `prs`, with every effect recorded in one ordered event list. */
-function fixture(prs: OpenPrView[], opts: { holdFix?: Promise<void> } = {}) {
+function fixture(prs: OpenPrView[], opts: {
+  holdFix?: Promise<void>;
+  readReviewReuseReach?: NonNullable<SweepDeps["readReviewReuseReach"]>;
+} = {}) {
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}t12703-`));
   const shim = ghShim([{ when: "", stdout: "[]" }]);
   const keys = ["PATH", "RMD_GH_CACHE_HOME", "RMD_GH_TRANSPORT_FLOOR", "RMD_GH_SHARED_READ_GAP_MS"] as const;
@@ -105,6 +107,7 @@ function fixture(prs: OpenPrView[], opts: { holdFix?: Promise<void> } = {}) {
     readBranchProtectionStrict: async () => false,
     updateBranch: () => "updated",
   };
+  if (opts.readReviewReuseReach) effects.readReviewReuseReach = opts.readReviewReuseReach;
   const io: NonNullable<Parameters<typeof buildSweepLightHook>[12]> = {
     openPrViews: async () => prs,
     effects: () => effects,
@@ -244,41 +247,56 @@ test("W1-T12703 criterion 5: a boot pass still holds arms, and pause drain and i
   }
 });
 
-test("W1-T12703: the boot pass opens its fix lanes only after the start-claim sweep settles", async () => {
+test("W1-T12703: a due boot fix starts after the start-claim sweep settles in the production hook", async () => {
   let settleClaims!: () => void;
-  const claimSweepSettled = new Promise<void>((resolve) => { settleClaims = resolve; });
-  const seen: Array<{ before: boolean; after: boolean; scope: LightPassScope | undefined }> = [];
+  let claimSweepPending = true;
+  const claimSweepSettled = new Promise<void>((resolve) => {
+    settleClaims = () => { claimSweepPending = false; resolve(); };
+  });
   const tick = (): Promise<void> => new Promise((resolve) => setImmediate(resolve));
-  const merged = new Set<string>();
-  await runDaemon(loadPlanFromYaml(`
-- id: A
-  title: a
-  repo: remudero
-  type: implement
-  depends_on: []
-  status: queued
-`, "t12703"), {
-    refreshMerged: () => (id) => merged.has(id),
-    runOne: async (id) => {
-      merged.add(id);
-      return { taskId: id, runId: `${id}-run`, merged: true, costUsd: 0.5, verdict: "merged" };
-    },
-    sweep: async () => {},
-    sweepLight: async (scope) => {
-      const before = lightPassFixAdmitted(scope);
-      settleClaims();
-      await tick();
-      seen.push({ before, after: lightPassFixAdmitted(scope), scope });
-    },
-    claimSweepSettled,
-    gardens: [() => ({ stop: () => {} })],
-    checkStop: () => undefined,
-    checkPause: () => undefined,
-    sleep: async () => { await tick(); },
-    log: () => {},
-  }, { max: 1, pollIntervalMs: 5, bootCadenceGateBoundMs: 60_000, sweepWallClockBoundMs: 60_000 });
-  const boot = seen.find((s) => s.scope?.scope === "boot");
-  assert.ok(boot, "positive control: the boot review ran");
-  assert.equal(boot.before, false, "a fix lane that may read a dispatch claim waits for the claim sweep");
-  assert.equal(boot.after, true, "the settled claim sweep opens the boot pass's fix lanes");
+  const red = ownRedPr(1270341);
+  const f = fixture([red]);
+  try {
+    const pass = f.hook({ ...BOOT, claimSweepPending: () => claimSweepPending,
+      waitForClaimSweep: async () => claimSweepSettled });
+    await tick();
+    assert.equal(f.events.some((event) => event.startsWith("fix_admission:")), false,
+      "the pass does not take fix admission while the start-claim sweep is pending");
+    settleClaims();
+    await pass;
+    await drainDetachedSweepActions();
+    assert.deepEqual(f.fixes, [red.prNumber], "the due fix starts in the same boot pass after settlement");
+  } finally { settleClaims(); f.cleanup(); }
+});
+
+test("W1-T12703: the boot pass admits its review before a due fix when review-reuse evidence is slow", async () => {
+  let releaseReach!: () => void;
+  const reach = new Promise<void>((resolve) => { releaseReach = resolve; });
+  const review = openPr(1270342, {
+    reviewState: "none", reviewOrphanedByPush: true,
+    reviewedOwnDiffDigest: "same-diff", currentOwnDiffDigest: "same-diff",
+    reviewedMergeBaseSha: "old-base", currentMergeBaseSha: "new-base", reviewedHeadSha: "head-1270342",
+    reviewedContractDigest: "same-contract", currentContractDigest: "same-contract",
+  });
+  const red = ownRedPr(1270343);
+  const f = fixture([review, red], { readReviewReuseReach: async () => {
+    await reach;
+    return { mainChangedFiles: ["docs/unrelated.md"], prFiles: [FILE], proofTargetPaths: [],
+      proofTestFiles: [], closure: new Map() };
+  } });
+  try {
+    const pass = f.hook({ ...BOOT, waitForClaimSweep: async () => {} });
+    const tick = (): Promise<void> => new Promise((resolve) => setImmediate(resolve));
+    for (let i = 0; i < 20 && !f.events.some((event) => event.startsWith("fix_admission:")); i++) await tick();
+    assert.equal(f.events.some((event) => event.startsWith("fix_admission:")), false,
+      "the fix waits while the selected review is still deciding its reuse mode");
+    releaseReach();
+    await pass;
+    await drainDetachedSweepActions();
+    const reviewAt = f.events.findIndex((event) => event.startsWith("review_admitted:"));
+    const fixAt = f.events.findIndex((event) => event.startsWith("fix_admission:"));
+    assert.ok(reviewAt >= 0, `positive control: the production hook admitted the review: ${JSON.stringify({ events: f.events, rows: f.rows })}`);
+    assert.ok(fixAt > reviewAt, `the review is admitted first: ${JSON.stringify(f.events)}`);
+    assert.deepEqual(f.fixes, [red.prNumber]);
+  } finally { releaseReach(); f.cleanup(); }
 });
