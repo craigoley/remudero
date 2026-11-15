@@ -191,9 +191,13 @@ test("W1-T9102: unreadable file history uses the named prior and reports the rea
 test("W1-T9102: a real test file child's kernel peak is learned through a reservation's default sampler", async (t) => {
   const fx = fixture(t);
   const file = join(fx.dir, "real.test.mjs");
+  const ackFile = join(fx.dir, "reservation-bound");
   writeFileSync(file, 'import { test } from "node:test";\ntest("real peak", async () => {\n' +
-    'console.log("file-peak-ready");\nawait new Promise(resolve => setTimeout(resolve, 500));\n});\n');
-  const env: NodeJS.ProcessEnv = { ...process.env, NODE_V8_COVERAGE: undefined };
+    'console.log("file-peak-ready");\n' +
+    'const { existsSync } = await import("node:fs");\n' +
+    'await new Promise(resolve => { const timer = setInterval(() => { if (existsSync(process.env.RMD_PEAK_ACK_FILE)) { clearInterval(timer); resolve(); } }, 10); });\n' +
+    '});\n');
+  const env: NodeJS.ProcessEnv = { ...process.env, NODE_V8_COVERAGE: undefined, RMD_PEAK_ACK_FILE: ackFile };
   delete env.NODE_TEST_CONTEXT;
   const child = spawn(process.execPath, ["--test", "--test-concurrency=1", "--import", "tsx",
     "--import", "./test/setup/tmp-hygiene.ts", file], { env, stdio: ["ignore", "pipe", "pipe"] });
@@ -212,6 +216,7 @@ test("W1-T9102: a real test file child's kernel peak is learned through a reserv
     store: fx.store, ledger: { location: () => ({ dir: join(fx.dir, "ledger"), scope: "local" }), log: () => {} },
   });
   reservation.bindRoot(child.pid!);
+  writeFileSync(ackFile, "bound");
   reservation.releaseOccupancy();
   const [code] = await exited;
   assert.equal(code, 0);
