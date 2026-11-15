@@ -517,3 +517,40 @@ export function coalesceFreshnessRestart(input: {
   }
   return { action: "hold", reason: `coalescing ${input.newSha}: waiting for a quiet advance window`, heldMs, windowEndsAtMs };
 }
+
+/** W1-T12231: the share of the score limit at which a busy daemon starts to treat its freshness restart as likely.
+ *  Mirrors `plan/policy.yaml` `freshnessRestart.likelyFraction`. */
+export const FRESHNESS_LIKELY_FRACTION = 0.5;
+/** W1-T12231: the latest a freshness drain's time limit may be after the restart decision.
+ *  Mirrors `plan/policy.yaml` `freshnessRestart.maxDrainWaitMs`. */
+export const FRESHNESS_MAX_DRAIN_WAIT_MS = 30 * 60_000;
+
+/**
+ * W1-T12231 — when a busy daemon's freshness restart is likely. With no further advance only the staleness pressure
+ * grows, by the rule {@link decideFreshnessRestart} applies, so the pressure reaches the score limit at a known
+ * moment. `timeToRestartMs` is the time from `nowMs` to that moment, and never earlier than the end of the minimum
+ * lifetime, which holds every restart this function predicts.
+ */
+export function timeToLikelyFreshnessRestart(input: {
+  /** The change pressure: the summed weight of the advances scored this lifetime. */
+  weight: number;
+  staleSinceMs: number;
+  nowMs: number;
+  threshold?: RecordedDeployRestartThreshold;
+  ageHorizonMs?: number;
+  lifetimeStartedAtMs: number;
+  minLifetimeMs?: number;
+}): { pressure: number; timeToRestartMs: number } {
+  const limit = (input.threshold ?? DEPLOY_RESTART_SCORE_THRESHOLD).value;
+  const horizonMs = input.ageHorizonMs ?? DEPLOY_RESTART_RATE_CEILING_MS;
+  const weight = Number.isFinite(input.weight) ? Math.max(0, input.weight) : 0;
+  const agePressure = Math.floor((limit * Math.max(0, input.nowMs - input.staleSinceMs)) / horizonMs);
+  const needed = Math.max(0, limit - weight);
+  // The smallest stale age whose staleness pressure, floored as the decision floors it, reaches `needed`.
+  const reachedAtMs = needed === 0 ? input.nowMs : input.staleSinceMs + Math.ceil((needed * horizonMs) / limit);
+  const lifetimeEndsAtMs = input.lifetimeStartedAtMs + (input.minLifetimeMs ?? FRESHNESS_MIN_LIFETIME_MS);
+  return {
+    pressure: weight + agePressure,
+    timeToRestartMs: Math.max(0, reachedAtMs - input.nowMs, lifetimeEndsAtMs - input.nowMs),
+  };
+}

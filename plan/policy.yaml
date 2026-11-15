@@ -1867,8 +1867,15 @@ pausePolicy:
 #   minLifetimeMs: how long a daemon lifetime runs before a freshness restart may take it (operator ruling 2026-10-17).
 # W1-T12552 (operator ruling 2026-11-13): horizon 1 h -> 4 h, lifetime 90 min -> 3 h. In 48 h, 25 restarts (median 2.0 h
 # apart); each boot pass is review-only and closes repair lanes (13.5 PR-hours on 52 PRs), and kills rounds (6 of 6).
+# W1-T12231: two net-new rows. The 0.5 and 30 minutes are starting values; judge them on `daemon.restart_cycle` rows.
+#   likelyFraction: at this share of scoreLimit the restart is likely, so a review or fix round that cannot end before
+#     the predicted restart plus maxDrainWaitMs is held before the decision. A build run is never held by it.
+#   maxDrainWaitMs: the latest the drain's time limit, derived from the work in flight, may be after the decision
+#     (min 559000, today's sweepWallClockBoundMs).
 freshnessRestart:
   scoreLimit: { value: 18, origin: "lifted:src/lib/deploy-judge.ts (DEPLOY_RESTART_SCORE_THRESHOLD)", min: 6, max: 54 }
   stalenessHorizonMs: { value: 14400000, origin: "lifted:src/lib/deploy-judge.ts (DEPLOY_RESTART_RATE_CEILING_MS)", min: 900000, max: 14400000 }
   quietWindowMs: { value: 600000, origin: "lifted:src/lib/deploy-judge.ts (FRESHNESS_COALESCE_WINDOW_MS)", min: 0, max: 1800000 }
   minLifetimeMs: { value: 10800000, origin: "lifted:src/lib/deploy-judge.ts (FRESHNESS_MIN_LIFETIME_MS)", min: 0, max: 21600000 }
+  likelyFraction: { value: 0.5, origin: "net-new", min: 0.25, max: 0.9 }
+  maxDrainWaitMs: { value: 1800000, origin: "net-new", min: 559000, max: 3600000 }
