@@ -1972,6 +1972,7 @@ export async function runDrain(plan: Plan, deps: DrainDeps, opts: DrainOpts = {}
       beginSelectionPass: deps.beginSelectionPass,
       clock: deps.clock,
       readPrecondition: deps.readPrecondition,
+      inputAnswer: deps.inputAnswer,
       onPreconditionUnmet: (task, unmet) => log("dispatch.precondition_unmet", { task: task.id, ...unmet }),
       dispatchValueContext: deps.buildDispatchValueContext?.(plan, isMerged),
       // W1-T3216: the released set, resolved once per pass above — forwarded at BOTH skipOpts
@@ -2484,6 +2485,7 @@ async function runDrainLanes(plan: Plan, deps: DrainDeps, opts: DrainOpts): Prom
       beginSelectionPass: deps.beginSelectionPass,
       clock: deps.clock,
       readPrecondition: deps.readPrecondition,
+      inputAnswer: deps.inputAnswer,
       onPreconditionUnmet: (task, unmet) => log("dispatch.precondition_unmet", { task: task.id, ...unmet }),
       dispatchValueContext: deps.buildDispatchValueContext?.(plan, isMerged),
       // W1-T3216: the released set, resolved once per pass above — forwarded at BOTH skipOpts
