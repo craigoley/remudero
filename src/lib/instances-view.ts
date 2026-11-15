@@ -19,7 +19,8 @@
  * view serves. Until then it keeps its own computation, {@link legacyRegistryBody}, which is also this
  * view's shadow side. `data` carries no clock: `liveness.since` is a row's own time, stable while down.
  */
-import { closeSync, existsSync, fstatSync, openSync, readFileSync } from "node:fs";
+import { closeSync, existsSync, fstatSync, lstatSync, openSync, readFileSync, statSync } from "node:fs";
+import { join } from "node:path";
 import { fixedClock } from "./clock.js";
 import { QUIET_PULSE_BOUND_MS, STALE_HEARTBEAT_POLL_MULTIPLE } from "./fleet-liveness.js";
 import {
@@ -32,7 +33,7 @@ import {
   type RegistryDrift,
   type RegistryProjection,
 } from "./instance-registry.js";
-import { instanceInboxCapabilities, observeInstanceInboxContract, type InstanceInboxContractState } from "./instance-inbox-contract.js";
+import { INBOX_CONTRACT_MARKER, instanceInboxCapabilities, observeInstanceInboxContract, type InstanceInboxContractState } from "./instance-inbox-contract.js";
 import { SLOW_LANE_STORE_BUDGET_MS } from "./view-freshness.js";
 import { DEFAULT_POLL_INTERVAL_MS } from "./poll-interval.js";
 import type { ReadModelDb } from "./read-model-db.js";
@@ -201,6 +202,7 @@ export function createInstancesView<S extends ProjectedState>(opts: InstancesVie
   version: number;
   qualificationGeneration: string;
   ledgerReads(db: ReadModelDb): string | null;
+  inputsFingerprint(ctx: { now: number; instances: ReadonlyArray<{ state: S; db?: ReadModelDb; lease?: unknown }> }): string;
   materialize(ctx: { now: number; instances: ReadonlyArray<{ state: S; db?: ReadModelDb; lease?: unknown }> }): Array<{ key: string; data: InstancesData; sources: ViewSource[] }>;
   legacy(key: string, now: number, data: unknown): ShadowLegacy | undefined;
 } {
@@ -217,10 +219,27 @@ export function createInstancesView<S extends ProjectedState>(opts: InstancesVie
     const host = readFile(opts.hostPath);
     return host.ok ? host.text : undefined;
   };
+  const identity = (path: string | undefined, noFollow = false): unknown => {
+    if (path === undefined) return null;
+    try {
+      const st = noFollow ? lstatSync(path, { bigint: true }) : statSync(path, { bigint: true });
+      return [st.dev, st.ino, st.size, st.mtimeNs, st.ctimeNs].map(String);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+      throw error;
+    }
+  };
   return {
     name: INSTANCES_VIEW_NAME,
     version: INSTANCES_VIEW_VERSION,
     qualificationGeneration: INSTANCES_QUALIFICATION_GENERATION,
+    // Heartbeats/liveness, registries, mounts, contract identities, ownership/generation evidence and stamp budget.
+    inputsFingerprint: ({ now, instances }) => JSON.stringify([
+      identity(opts.repoPath), identity(opts.hostPath), Math.floor(now / SLOW_LANE_STORE_BUDGET_MS),
+      opts.instances.map(i => [i.name, mounted(i.ledgerDir), identity(join(i.ledgerDir, INBOX_CONTRACT_MARKER), true)]),
+      instances.map(({ state, db, lease }) => [state.instance, state.generation, lease !== undefined,
+        db?.prepare("SELECT last_ms FROM instance_heartbeat WHERE k = 'daemon'").get() ?? null, instanceLiveness(db, now)]),
+    ]),
     ledgerReads: (db) => {
       const beat = db.prepare("SELECT last_ms FROM instance_heartbeat WHERE k = 'daemon'").get();
       return beat ? fixedClock(Number(beat.last_ms)).iso() : null;
