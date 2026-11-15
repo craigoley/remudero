@@ -164,7 +164,9 @@ LSOF_ERR=$(mktemp "${TMPDIR:-/tmp}/tmp-reclaim-lsof.XXXXXX") || { echo 'lsof std
 trap 'rm -f "$LSOF_ERR"' EXIT
 # Names that long-running host services own. Extend per account, one shell glob per line,
 # in ~/.config/remudero/tmp-reclaim-keep (or RMD_RECLAIM_KEEP_FILE).
-KEEP_NAMES=('openclaw*' 'ollama*')
+# `rmd-test-slots` is the shared slot folder of src/lib/test-slot.ts: its holders mark use with
+# `slot-<n>.json` records, never a lock or pid file, so its name alone must hold it.
+KEEP_NAMES=('openclaw*' 'ollama*' 'rmd-test-slots')
 KEEP_FILE="${RMD_RECLAIM_KEEP_FILE:-$HOME/.config/remudero/tmp-reclaim-keep}"
 if [ -f "$KEEP_FILE" ]; then
   while IFS= read -r keep_name || [ -n "$keep_name" ]; do
@@ -179,7 +181,7 @@ elif [ "$(uname)" = Darwin ]; then
 else
   TSX_TMP_ROOT="/tmp"
 fi
-TSX_PRUNED_N=0; TSX_SKIPPED=0
+TSX_PRUNED_N=0; TSX_SKIPPED=0; ENTRY_GONE_K=''
 del_k=0; del_n=0; risky=(); risky_n=0
 session_del_k=0; session_del_n=0; session_file_n=0; session_file_k=0
 RECEIPT_GUARD="$SEED_GUARD_DIR/workspace-retirement-guard.sh"
@@ -670,10 +672,67 @@ process_tmp_entry() {
   fi
   del_k=$(( del_k + ${k:-0} )); del_n=$(( del_n + 1 ))
   if [ "$APPLY" = 1 ]; then
-    if ! rm -rf "$path"; then report_risk 'delete failed/incomplete' "$ROOT_REAL/${path#./}"; fi
+    if ! rm -rf "$path"; then report_risk 'delete failed/incomplete' "$ROOT_REAL/${path#./}"; else ENTRY_GONE_K=$k; fi
   else
-    printf 'WOULD DELETE %s (%s KiB)\n' "$ROOT_REAL/${path#./}" "$k"
+    printf 'WOULD DELETE %s (%s KiB)\n' "$ROOT_REAL/${path#./}" "$k"; ENTRY_GONE_K=$k
   fi
+}
+
+# W1-T12257: every session of the account and macOS write to the temp folder of the account
+# (TMPDIR, or `getconf DARWIN_USER_TEMP_DIR`), so the janitor owns a declared list of names there,
+# never the folder. The patterns are the two prefixes of isRmdOwnedTempName (src/lib/tmp.ts).
+USER_TMP_PATTERNS=('rmd-*' 'remudero-*')
+# A name that ends in `-` or `.` and six letters or digits has the shape of a mkdtemp name.
+MKDTEMP_NAME_RE='^(.+)[-.][A-Za-z0-9]{6}$'
+
+# Print a reason and return success when the fleet entry "$1" holds a lock file, a pid file or a
+# socket: a process may come back to it, so its age alone cannot release it.
+fleet_entry_coordination_risk() {
+  local found status
+  found=$(find "$1" -xdev \( -name '*.lock' -o -name '*.pid' -o -name '*.sock' -o -type s \) -print -quit 2>/dev/null); status=$?
+  [ "$status" -eq 0 ] || { echo 'coordination file scan unavailable'; return 0; }
+  [ -z "$found" ] || { echo "holds a lock file, pid file or socket: $found"; return 0; }
+  return 1
+}
+
+# Judge each direct child of the account temp folder whose name matches USER_TMP_PATTERNS with the
+# entry function of the main root, and only count, never open, a mkdtemp-shaped name of another
+# prefix. Print one `leftover` line for each fleet stem and one `unowned` line for each other stem.
+sweep_user_tmp_fleet_entries() {
+  local p name stem pattern matched why here saved_root="$ROOT_REAL" records='' unowned=''
+  # The main loop has already judged every entry of this folder.
+  [ "$TMP_REAL" != "$ROOT_REAL" ] || return 0
+  here=$(pwd -P)
+  cd "$TMP_REAL" || { report_risk 'account temp folder unavailable' "$TMP_REAL"; return 0; }
+  ROOT_REAL="$TMP_REAL"
+  for p in ./*; do
+    name=${p#./}
+    matched=0
+    for pattern in "${USER_TMP_PATTERNS[@]}"; do
+      # shellcheck disable=SC2254 # the patterns are globs by design
+      case "$name" in $pattern) matched=1; break ;; esac
+    done
+    if [[ $name =~ $MKDTEMP_NAME_RE ]]; then stem=${BASH_REMATCH[1]}; else stem=$name; fi
+    # A stem is one field of one line in the tallies below.
+    stem=${stem//[[:cntrl:]]/?}
+    if [ "$matched" = 0 ]; then
+      [ "$stem" = "$name" ] || unowned+="$stem"$'\n'
+      continue
+    fi
+    ENTRY_GONE_K=''
+    # An entry of another owner goes to process_tmp_entry, which reports its owner unopened.
+    if [ "$(owner "./$name" 2>/dev/null)" = "$ME" ] && why=$(fleet_entry_coordination_risk "./$name"); then
+      report_risk "$why" "$TMP_REAL/$name"
+    else
+      process_tmp_entry "./$name"
+    fi
+    records+="$stem"$'\t'"${ENTRY_GONE_K:-x}"$'\n'
+  done
+  ROOT_REAL="$saved_root"
+  cd "$here" || exit 1
+  printf '%s' "$records" | LC_ALL=C awk -F '\t' 'NF == 2 { seen[$1] = 1; if ($2 != "x") { n[$1]++; b[$1] += $2 * 1024 } }
+    END { for (s in seen) printf "leftover stem=%s removed=%d bytes=%.0f\n", s, n[s], b[s] }' | LC_ALL=C sort
+  printf '%s' "$unowned" | LC_ALL=C awk 'NF { n[$0]++ } END { for (s in n) printf "unowned stem=%s left=%d\n", s, n[s] }' | LC_ALL=C sort
 }
 
 # Session scratch also judges regular leaves individually in mixed-age trees.
@@ -823,6 +882,7 @@ if [ -n "$TMP_REAL" ] && [ "$TMP_REAL" != "$ROOT_REAL" ]; then
   done
   if [ "$TSX_ONLY" = 0 ]; then
     prune_node_compile_cache "$TMP_REAL/node-compile-cache"
+    sweep_user_tmp_fleet_entries
   fi
 fi
 
