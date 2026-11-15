@@ -1,0 +1,111 @@
+- id: W1-T12709
+  title: "A pull request that needs operator input is fixed, split or rebuilt, and is never parked on a needs-human escalation"
+  repo: remudero
+  depends_on: [W1-T12715]
+  priority: 1.5
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # replaces the needs-human stand-down for open pull requests; host, deploy and feedback escalations are unchanged
+  band_meaning: blast-radius
+  origin: "operator-session#stuck-pr-root-causes-2026-11-14"
+  plan_refs:
+    - W1-T12715
+    - W1-T12543
+    - W1-T12544
+    - W1-T12710
+    - W1-T12714
+    - W1-T10653
+    - W1-T10990
+    - W1-T12046
+    - W1-T78
+  files:
+    - src/lib/parked-pr-remedy.ts
+    - src/lib/sweep.ts
+    - src/lib/escalate.ts
+    - src/cli/commands/fix.ts
+    - src/lib/feedback-landing.ts
+    - src/lib/ledger-steps.ts
+    - test/sweep/a-pull-request-that-needs-operator-input-is-never-parked.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "For an open pull request whose fix lane would stand down on an open needs-human escalation, and whose unmet criteria a fix round or a scope or acceptance amendment can act on, the sweep dispatches that remedy on the pull request and does not stand down"
+      proof: "grep: W1-T12709 criterion 1 in test/sweep/a-pull-request-that-needs-operator-input-is-never-parked.test.ts"
+    - claim: "When only some unmet criteria need operator input, the remedy files one follow-up task with a needs_input question for those criteria, opens an acceptance amendment that moves them to that task, and the pull request goes on to review and merge without them"
+      proof: "grep: W1-T12709 criterion 2 in test/sweep/a-pull-request-that-needs-operator-input-is-never-parked.test.ts"
+    - claim: "When no part of the pull request can merge without the input, the remedy closes the pull request with a comment, and files a held rebuild task whose needs_input names the exact input and whose rationale carries the closed pull request's findings"
+      proof: "grep: W1-T12709 criterion 3 in test/sweep/a-pull-request-that-needs-operator-input-is-never-parked.test.ts"
+    - claim: "invariant:no-parked-pr — no open pull request has a sweep.disposed row with blocker escalated, or a refused-escalate disposition, for longer than one sweep pass without a parked_pr.remedy row naming fix-on-pr, split-follow-up or close-and-rebuild"
+      kind: guard
+      proof: "grep: W1-T12709 criterion 4 in test/sweep/a-pull-request-that-needs-operator-input-is-never-parked.test.ts"
+    - claim: "invariant:one-question — for one pull request and one cause, the remedy files at most one held task, and a later pass reuses it"
+      kind: guard
+      proof: "grep: W1-T12709 criterion 5 in test/sweep/a-pull-request-that-needs-operator-input-is-never-parked.test.ts"
+    - claim: "A stage-stall or clarification escalation for an open pull request is not opened as a needs-human issue: the parked_pr.remedy row carries its text instead"
+      proof: "grep: W1-T12709 criterion 6 in test/sweep/a-pull-request-that-needs-operator-input-is-never-parked.test.ts"
+    - claim: "Plan-only filings get the same remedy: a plan-only pull request red on a plan gate is not held behind plan-proof-unrunnable"
+      proof: "grep: W1-T12709 criterion 7 in test/sweep/a-pull-request-that-needs-operator-input-is-never-parked.test.ts"
+    - claim: "The sweep calls parkedPrRemedy where it would set a refused-escalate disposition for an open pull request"
+      proof: "grep: parkedPrRemedy( in src/lib/sweep.ts"
+  rationale: |
+    WHY: the operator ruled on 2026-11-14: "The console is still not fully functional, so the escalations don't make it
+    through to me. I also hate the idea of stuck PRs waiting on me in the inbox. I would rather immediately update the PR to
+    fix the concerns and get it through, file follow up tasks that can be in my inbox and held from a build, or worst case,
+    close the PR and file a rebuild with the input needed from me and it held."
+    MEASURED read-only on the Azure host, ledger and rotated archives 2026-11-11 20:25Z to 2026-11-14 20:25Z, and GitHub:
+    - 106 needs-human issues named an open pull request, on 66 pull requests. While an issue and its pull request were both
+      open: 390.5 PR-hours (union per pull request). 33 pull requests were held 4 h or more. 63 were [MANUAL] "PR stage
+      stalled" clarifications and 43 [BLOCKED].
+    - Ledger dispositions: 45 pull requests sat in refused-escalate or with blocker escalated for 87.9 PR-hours
+      (plan-proof-unrunnable 48.9, escalated 38.9). Top: #18347 20.4 h and #18436 14.7 h (plan-only filings the code fix
+      lane "cannot stage"), #18033 11.9 h (fix needs design).
+    - Open now: #18449 (issue #18460, 14.8 h), #18343 (#18463, 13.6 h), #18422 (#18470, 13.2 h), #18405 (#18412, 20.2 h),
+      #18508 (#18529 and #18559), #18536 (#18553). #18305 waited 28.8 h behind #18326 and merged at 20:21Z; the issue
+      is still open.
+    - Earlier evidence: escalation holds cost 47 PR-hours from 2026-11-11 to 2026-11-13 (W1-T12543's rationale); #18428
+      held #18414 for 3.8 h.
+    - The held-escalation rebuild (src/lib/sweep.ts:22600, HELD_ESCALATION_SLO_MS 6 h) fired once (sweep.slo_rung rebuild,
+      2026-11-13T03:27Z). It skips plan filings and any pull request with a pending answer (:22605).
+    READ at origin/main 5d1670adc:
+    - src/lib/escalate.ts:1390 openEscalationStandDownReason stands every later strike down while the issue is open.
+    - src/lib/sweep.ts:22571-22597 turns a held stand-down, and an open escalation past the SLO, into refused-escalate.
+    - src/lib/sweep.ts:3839 is the W1-T78 clarification-question rung that opens the [MANUAL] stage-stall issue.
+    - src/lib/feedback-landing.ts:1481 landFeedback is the fleet's path to land new task files on main.
+    RELATED, not duplicated: W1-T12543 (merged: a refused scope amendment is asked again before a person), W1-T12544 (#18449:
+    a conflict round runs under an escalation hold), W1-T12710 (a different remedy after rounds with no progress),
+    W1-T12714 (needs-design kinds), W1-T12046 (one escalation per shared cause), W1-T10990 (observe only).
+  design: |
+    INVARIANT no-parked-pr: an open pull request is never left with "a person must answer" as its only next action. Each
+    pass gives it one of three remedies.
+    INVARIANT one-question: one held task per pull request and cause.
+    1. New pure module src/lib/parked-pr-remedy.ts: `parkedPrRemedy(facts)` where facts are the unmet criteria (each with
+       the reason it is unmet and whether it needs operator input), the red checks, and whether the pull request is a plan
+       filing. It returns, in this order:
+       a. `fix-on-pr`: at least one unmet criterion or red check that a fix round, a scope amendment (W1-T12543's path) or
+          an acceptance amendment can act on. The sweep dispatches that remedy.
+       b. `split-follow-up`: the criteria that need input are a strict subset. File one follow-up task (the criteria
+          verbatim, a needs_input question from W1-T12715, source_pr), and open an acceptance amendment of the pull
+          request's task that moves those criteria to the follow-up. The pull request then merges on the rest.
+       c. `close-and-rebuild`: nothing can merge without the input. Close the pull request with a comment that links the
+          rebuild task. File the rebuild task with needs_input naming the exact input, the pull request's findings in its
+          rationale, and the same files and criteria.
+       It never returns "wait".
+    2. src/lib/sweep.ts and src/lib/escalate.ts: where openEscalationStandDownReason or the held stand-down at :22571 would
+       set refused-escalate for an open pull request, call parkedPrRemedy and act on it. Write one `parked_pr.remedy` row
+       (pr, head, cause, remedy, held task id if any). Declare the step in src/lib/ledger-steps.ts.
+    3. The W1-T78 rung does not open a needs-human issue for an open pull request. The question goes into the held task's
+       needs_input, which W1-T12715 shows in the inbox. Host, deploy, feedback and plan-clarify escalations are unchanged.
+    4. Plan-only filings take the same path, so plan-proof-unrunnable no longer holds them.
+    5. The held task is filed through landFeedback (src/lib/feedback-landing.ts:1481) with an id reserved the usual way.
+       A later pass finds it by (pr, cause) in parked_pr.remedy rows and does not file another.
+    NOT IN SCOPE: closing old needs-human issues (a separate sweep can close those whose pull request merged); the dispatch
+    hold itself (W1-T12715).
+  falsifier: |
+    Keep the stand-down and criteria 1 and 4 must fail. File the follow-up without the amendment and criterion 2 must fail.
+    Close without filing the rebuild and criterion 3 must fail. File a second held task on the next pass and criterion 5
+    must fail. Let the W1-T78 rung open its issue and criterion 6 must fail. Skip plan filings and criterion 7 must fail.
+    Restore and all must pass.
+  note: |
+    Id reserved for run-unfiled-1794689039000 with ~/rmd-work/bin/reserve-id.sh. Build after W1-T12715. The fleet builds it.

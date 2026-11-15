@@ -1,0 +1,83 @@
+- id: W1-T12714
+  title: "A needs-design fix outcome is sorted by its kind and gets that kind's remedy at once, never a design hold"
+  repo: remudero
+  depends_on: []
+  priority: 1.2
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # replaces the design hold at one head with a routed remedy; a real design question still reaches the operator
+  band_meaning: blast-radius
+  origin: "operator-session#stuck-pr-root-causes-2026-11-14"
+  plan_refs:
+    - W1-T12709
+    - W1-T12543
+    - W1-T10591
+    - W1-T10608
+    - W1-T9306
+    - W1-T5532
+  files:
+    - src/cli/commands/fix.ts
+    - src/lib/sweep.ts
+    - src/lib/refusal-amendment.ts
+    - src/lib/ledger-steps.ts
+    - test/fix-lane/a-needs-design-outcome-is-sorted-by-kind-and-gets-its-remedy.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "classifyNeedsDesign sorts a NEEDS_DESIGN report into exactly one of environment, capability, contract or design; a report it cannot sort is design"
+      proof: "grep: W1-T12714 criterion 1 in test/fix-lane/a-needs-design-outcome-is-sorted-by-kind-and-gets-its-remedy.test.ts"
+    - claim: "environment (the worker's sandbox or a tool failed to start) dispatches the same round again on a fresh worker, does not count as a spent round, and writes no design hold"
+      proof: "grep: W1-T12714 criterion 2 in test/fix-lane/a-needs-design-outcome-is-sorted-by-kind-and-gets-its-remedy.test.ts"
+    - claim: "capability (the remedy needs an action the round cannot take: a pull request body edit, a commit message rewrite, a task id reservation or a plan edit) runs that action through the harness path that owns it, and the next round starts on its result"
+      proof: "grep: W1-T12714 criterion 3 in test/fix-lane/a-needs-design-outcome-is-sorted-by-kind-and-gets-its-remedy.test.ts"
+    - claim: "contract (a criterion conflicts with the task's design or with another task's test) opens an acceptance amendment proposal through the refusal amendment writer"
+      proof: "grep: W1-T12714 criterion 4 in test/fix-lane/a-needs-design-outcome-is-sorted-by-kind-and-gets-its-remedy.test.ts"
+    - claim: "design hands over to the W1-T12709 split path; until W1-T12709 merges it escalates once, as today"
+      proof: "grep: W1-T12714 criterion 5 in test/fix-lane/a-needs-design-outcome-is-sorted-by-kind-and-gets-its-remedy.test.ts"
+    - claim: "invariant:every-needs-design-has-a-next-action — each fix.needs_design row is followed in the same pass by one fix.needs_design_routed row naming its kind and a remedy that is not a wait"
+      kind: guard
+      proof: "grep: W1-T12714 criterion 6 in test/fix-lane/a-needs-design-outcome-is-sorted-by-kind-and-gets-its-remedy.test.ts"
+  rationale: |
+    WHY: #18508 shows "fix needs design at this exact head". The fix lane then holds the pull request at that head. Most
+    reports so labeled are not design questions.
+    MEASURED read-only on the Azure host, ledger and rotated archives 2026-11-11 20:25Z to 2026-11-14 20:25Z:
+    - 33 fix.needs_design rows and 26 fix.done NEEDS_DESIGN outcomes, on 11 pull requests and 18 heads.
+    - The next action at a needs-design head: a clarification question 14 times, a dispatch on a new head 2, nothing 2.
+    - From the first needs-design to merge or close: 53.0 PR-hours (#18033 14.3, #18060 9.5, #18039 6.8, #18398 5.6,
+      #18414 3.9, #18321 3.8). #18508 is open, with needs-human issues #18529 and #18559.
+    - The reports, read one by one. Only #18508 (the cause is unknown) and #18398 (a criterion conflicts with a design item)
+      are design questions. The rest:
+      environment: #18060 three heads, "Not a design blocker: the sandbox failed to start";
+      capability: #18039 "this no-shell round has no gh or REST access" to fix the body, #18436 "commit-metadata rewrite is
+      prohibited", #18310 "this round prohibits plan changes", #18347 "renumbering needs a reserved ID";
+      contract: #18033 three heads (a stale file-path proof needs a parent-owned amendment), #18414 two heads and #18321
+      (criteria conflict with another task's test or a deferred task).
+    READ at origin/main 5d1670adc:
+    - src/lib/sweep.ts:22531-22533 writes the "fix needs design at this exact head" hold; :16926 keys it on the head, so
+      it lifts only when the head moves.
+    - src/lib/redesign-gardener.ts:44 reads the same hold. In the window it judged 4 times and its filing failed 13 times
+      (redesign.garden_filing_failed: "the landing's PR did not open").
+    RELATED: W1-T12543 (merged) does this for NEEDS_SCOPE. W1-T10591 is a machine stub (verify human, no design) for the
+    same cost class; this task gives it a design. W1-T10608 and W1-T9306 are earlier needs-design work.
+  design: |
+    INVARIANT every-needs-design-has-a-next-action: a needs-design outcome never ends a pass with only a hold.
+    1. src/cli/commands/fix.ts: export `classifyNeedsDesign(report)`. It is a fixed-option judge over the worker's report
+       with the four kinds and their definitions above, through the same judge route the fix lane already uses. An
+       unparseable or unknown answer is design.
+    2. src/lib/sweep.ts, at the hold (:22531): route by kind and write `fix.needs_design_routed` (pr, head, kind, remedy):
+       a. environment: re-dispatch the round on a fresh worker; the strike is refunded (fix.strike_refunded exists).
+       b. capability: run the named action through its owner. Body edit: the light pass's body repair. Commit message:
+          the harness's commit path. Id: the reservation path. Plan edit: an amendment branch through
+          src/lib/refusal-amendment.ts. The next round runs on the result.
+       c. contract: an acceptance amendment proposal through src/lib/refusal-amendment.ts with the report as evidence.
+       d. design: W1-T12709's split path.
+    3. Declare fix.needs_design_routed in src/lib/ledger-steps.ts.
+    NOT IN SCOPE: NEEDS_SCOPE (W1-T12543); the redesign gardener's landing failures.
+  falsifier: |
+    Classify everything as design and criteria 1 to 4 must fail. Keep the hold for environment and criterion 2 must fail.
+    Write a hold with no routed row and criterion 6 must fail. Escalate design twice and criterion 5 must fail. Restore and
+    all must pass.
+  note: |
+    Id reserved for run-unfiled-1794689039000 with ~/rmd-work/bin/reserve-id.sh. The fleet builds it.
