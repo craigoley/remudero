@@ -205,7 +205,8 @@ test("W1-T6591: the async list read awaits the pacer and backs off a rate limit"
   });
   assert.equal(views.length, 3, "positive control: the retried list was built");
   assert.equal(listReads, 2, "the rate-limited list read was retried once");
-  assert.equal(sleeps.length, 3, `the gap, the backoff and the widened gap were awaited: ${sleeps.join(", ")}`);
+  // W1-T12530: every per-PR read now waits on the pacer too, so more sleeps follow these three.
+  assert.ok(sleeps.length >= 3, `the gap, the backoff and the widened gap were awaited: ${sleeps.join(", ")}`);
   assert.equal(sleeps[0], 1_000, "the first read waited out the pacer's gap");
   assert.ok(sleeps[1] >= 2_000 && sleeps[1] <= 2_500, `the backoff honoured Retry-After: ${sleeps[1]}`);
   assert.ok(sleeps[2] > 1_000, `the retry waited the widened rate-limit gap: ${sleeps[2]}`);
@@ -213,13 +214,17 @@ test("W1-T6591: the async list read awaits the pacer and backs off a rate limit"
 
 test("W1-T6591: the async list read's budget reading arms the pacer's floor", async () => {
   const pacer = createGhCallPacer({ sleepSync: () => { throw new Error("a blocking sleep on the event loop"); }, sleep: async () => {} });
+  const reads: string[] = [];
   const fetchAsync = async (args: string[], onRateLimit?: (reading: { remaining?: number; limit?: number; resource?: string }) => void) => {
+    reads.push(args[1] ?? "");
     if (args.some((arg) => arg.includes("state=open"))) onRateLimit?.({ remaining: 10, limit: 5_000, resource: "core" });
     return answer(args);
   };
   const views = await buildOpenPrViewsAsync(O, R, ledgerFile(), { ...base, pacer, fetchAsync, fetchCiFailureEvidence: () => EVIDENCE });
   assert.equal(views.length, 3, "positive control: the first pass read the list");
-  await assert.rejects(buildOpenPrViewsAsync(O, R, ledgerFile(), { ...base, pacer, fetchAsync }), /stood down/);
+  // W1-T12530: the next paced read, the first PR's file list, stands down unsent; the build goes on.
+  assert.equal(reads.filter((path) => path.includes("/pulls/1/files")).length, 0, reads.join(" "));
+  assert.ok(reads.some((path) => path.includes("/pulls/2/files")), "positive control: the next reads were sent");
 });
 
 test("W1-T6591: the read plane paces its open-PR list on its pacer", async () => {

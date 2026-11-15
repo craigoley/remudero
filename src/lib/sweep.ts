@@ -10,7 +10,8 @@ import { selectedInstanceRegistryEnvPath } from "./instance-registry-selection.j
 import { buildFixProgressInput as buildBaseFixProgressInput, fixRedClass, resolveFixProgress, parseFixProgressVerdict, scopeEscalationStandDown,
   type FixProgressWitness, type FixProgressHostedProofResult,
   type FixProgressInput, type FixProgressJudge, type FixProgressResult, type FixProgressVerdict,
-  sameCriterionStall, nextStallRemedy, stallRemedyRows, failedApproaches, rowPrNumber, type StallRemedy } from "./fix-progress-judge.js";
+  sameCriterionStall, nextStallRemedy, stallRemedyRows, failedApproaches, rowPrNumber, type StallRemedy,
+  type FixProgressReaskResult } from "./fix-progress-judge.js";
 import type { DispatchBreakJudge } from "./stall-verifier.js";
 import { readCiGateRequiredChecks } from "./ci-gate-required.js";
 import { createHeadRehomePorts, headIdentityRed, headRehomePlan, type HeadRehomePorts } from "./head-rehome.js";
@@ -224,6 +225,7 @@ import {
   REVIEW_REQUEUED_STEP,
   REVIEWER_CODE_ADVANCED,
   reviewerCodeAdvanceNames,
+  resolvePlanCriteriaAtHeadAsync,
   UNFILED_RUN_SENTINEL,
   unknownReservationReads,
 } from "./review.js";
@@ -292,6 +294,7 @@ import {
   buildEscalationJudgePrompt,
   escalationCause,
   escalationHeadSha,
+  escalationIssueCause,
   fixEscalationDedupKey,
   matchDuplicateEscalation,
   openEscalationStandDownReason,
@@ -1626,6 +1629,8 @@ export interface BuildSweepEffectsDeps {
     taskId: string,
     repoDir: string,
   ) => PlanCriteriaAtHeadResult | undefined | Promise<PlanCriteriaAtHeadResult | undefined>;
+  /** W1-T3830: production wires {@link readTaskContractAtHeadViaGit} over the sweep's repo checkout. */
+  readTaskContractAdvanceAtHeadImpl?: SweepDeps["readTaskContractAtHead"];
   /** W1-T6434: reads a dead owner's preserved patch for the next round. Default: {@link readPreservedOwnerPatch}. */
   readPreservedOwnerPatchImpl?: typeof readPreservedOwnerPatch;
   createFixRungWorktreeImpl?: SweepRuntimeFn;
@@ -2471,6 +2476,7 @@ export const SWEEP_EFFECT_SURFACE = [
   "readFailedRunBase",
   // remudero-console #2035: the task contract an escalated fix-progress latch stands on.
   "readTaskContractRevision",
+  "readTaskContractAtHead",
   "readTaskSemanticRevision",
   "readMergedRatchets", // W1-T9962
   "readOpenEscalations",
@@ -2486,12 +2492,16 @@ export function productionFixProgressJudge(opts: {
     const args = buildRiskJudgeSpawnArgs({ input: {
       change: { description: "fix progress" }, gatesState: {}, planContext: { taskId: input.taskId },
     }, mount, cwd: opts.cwd, settingsFile: opts.settingsFile });
+    const harnessOffered = input.signals.offHostPass === true && input.harnessRefuted !== true;
     const prompt = [
       "Judge whether another fix round is justified. Return only FIX_PROGRESS: followed by a JSON object.",
-      "Schema: {verdict: continue | change-approach | escalate | harness, reason: string, approach?: string, loop?: string}.",
+      `Schema: {verdict: continue | change-approach | escalate${harnessOffered ? " | harness" : ""}, reason: string, approach?: string, loop?: string}.`,
       "change-approach requires concrete approach text; escalate requires a named loop, not a round count.",
-      "offHostPass means the persisted reviewer proof passed on the worker and exact-head hosted CI. " +
-        "Consider harness with offHostPassEvidence and the recorded review load; harness escalates without dispatching another round.",
+      harnessOffered ? "offHostPass means the persisted reviewer proof passed on the worker and exact-head hosted CI. " +
+        "Consider harness with offHostPassEvidence and the recorded review load; harness escalates without dispatching another round."
+        : input.harnessRefuted ? "harness is not offered: a rerun of the failed checks at this head reproduced the same red"
+        : "harness is not offered: no reviewer-only failure persisted, so there is no off-host proof pass to weigh",
+      ...(input.reaskReason ? [`This is the second ask in this pass: ${input.reaskReason}. Answer with an offered verdict.`] : []),
       "Require stronger evidence of progress as the round count grows. There is no hard round ceiling.",
       "Pre-signals are evidence, never automatic decisions. A shrinking red set can justify further rounds.",
       "Consider no-op/refused rounds, repeated diffs and red sets, oscillation, operator answers and parked reasons.",
@@ -2523,6 +2533,26 @@ export function productionFixProgressJudge(opts: {
   };
   PRODUCTION_FIX_PROGRESS_JUDGES.add(judge);
   return judge;
+}
+
+/** W1-T12711: a second uncorroborated harness answer reruns this head's failed checks once; the next pass judges their red. */
+async function rerunChecksForHarness(pr: OpenPrView, input: FixProgressInput, decision: FixProgressReaskResult,
+  deps: Pick<SweepDeps, "rerunFailedChecks" | "ledgerPath" | "runId" | "dryRun" | "appendLine">, ledger: readonly Record<string, unknown>[],
+): Promise<FixProgressReaskResult> {
+  if (decision.verdict !== "rerun-checks") return decision;
+  const proceed = (skip: "harness-rerun-spent" | "harness-rerun-unavailable", why: string): FixProgressReaskResult =>
+    ({ verdict: "continue", reask: 1, judge_skipped: skip, reason: `${decision.reason}; ${why}, so the round runs` });
+  if (ledger.some(row => row.step === "fix.progress_rerun" && rowPrNumber(row) === pr.prNumber && row.head_sha === pr.headSha))
+    return proceed("harness-rerun-spent", "the failed checks were already rerun once at this head");
+  if (!deps.rerunFailedChecks || deps.dryRun) return proceed("harness-rerun-unavailable", "no check rerun is wired");
+  const rerun = await deps.rerunFailedChecks(pr).catch((error: unknown) =>
+    ({ outcome: "unavailable" as const, runIds: [] as number[], reason: String((error as Error)?.message ?? error) }));
+  (deps.appendLine ?? appendLedger)(deps.ledgerPath, { run_id: deps.runId, task_id: escalationTaskIdFor(pr), step: "fix.progress_rerun",
+    pr_number: pr.prNumber, head_sha: pr.headSha, red: input.currentRed, outcome: rerun.outcome, run_ids: rerun.runIds,
+    ...(rerun.reason ? { reason: rerun.reason } : {}) });
+  if (rerun.outcome === "unavailable") return proceed("harness-rerun-unavailable", `the rerun was unavailable: ${rerun.reason}`);
+  return { ...decision, reason: `${decision.reason}; failed checks ${rerun.outcome === "rerun" ? `rerun (runs ${rerun.runIds.join(", ")})`
+    : "not rerun: the head moved"}; the next pass judges the new results` };
 }
 
 /** W1-T7742: {@link productionFixProgressJudge}'s prompt for a tripped dispatch breaker (stall-verifier.ts's judgeDispatchBreak). */
@@ -2646,6 +2676,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   | "readArmTimeline"
   | "readActionsStatusSummary"
   | "readTaskContractRevision"
+  | "readTaskContractAtHead"
   | "readTaskSemanticRevision"
   | "readMergedRatchets"
   | "readOpenEscalations"
@@ -2702,6 +2733,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     fixRungTaskForImpl: fixRungTaskForForBuild = fixRungTaskFor,
     reloadPlanForFixImpl,
     resolveTaskContractAtHeadImpl,
+    readTaskContractAdvanceAtHeadImpl,
     readPreservedOwnerPatchImpl = readPreservedOwnerPatch,
     createFixRungWorktreeImpl: createFixRungWorktree = requiredSweepRuntime("createFixRungWorktreeImpl"),
     captureWorktreeSnapshotImpl: captureWorktreeSnapshotViaGit = requiredSweepRuntime("captureWorktreeSnapshotImpl"),
@@ -3142,6 +3174,8 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     readHostedProofResults: (headSha, proofs) => readHostedFixProofResults({ owner, repo, headSha, proofs },
       { json: readJsonImpl, text: ghTextAsync }),
     readTaskContractRevision,
+    readTaskContractAtHead: readTaskContractAdvanceAtHeadImpl ??
+      (async () => ({ unreadable: "task contract head reader unavailable" })),
     readTaskSemanticRevision,
     // W1-T3618: the entrypoint's freshness gate, surfaced so the lib-built and entrypoint-built
     // effect surfaces stay key-identical (W1-T2890).
@@ -12827,7 +12861,8 @@ export interface ArmedStalledPr {
     | "ready-overlap"
     | "ready-unknown"
     | "refresh-request" // W1-T7735: a paced board-wide request, consumed one per pass
-    | "ratchet-collision"; // W1-T9962
+    | "ratchet-collision" // W1-T9962
+    | "task-contract"; // W1-T3830
   /** W1-T5696: the main-side files that made a distance refresh worth its CI run and re-review. */
   matchingBaseFiles?: readonly string[];
 }
@@ -12984,6 +13019,64 @@ export function openPrsBehindMain(
   return out;
 }
 
+/** W1-T3830 — a capped PR whose head carries an older task contract than main. Only update-branch brings the
+ *  corrected contract into the head. `advance` holds the `pr@head` keys {@link readTaskContractAdvance} found. */
+export function cappedTaskContractAdvance(prs: readonly OpenPrView[], advance: ReadonlySet<string>): ArmedStalledPr[] {
+  return prs.filter((pr) => advance.has(`${pr.prNumber}@${pr.headSha}`) && pr.isDraft !== true &&
+    pr.mergeState !== "dirty" && pr.mergeable !== false && isCappedArmEscalation(pr))
+    .map((pr): ArmedStalledPr => ({ prNumber: pr.prNumber, prUrl: pr.prUrl,
+      ...(pr.taskId === undefined ? {} : { taskId: pr.taskId }), headSha: pr.headSha, updateReason: "task-contract" }));
+}
+
+/** W1-T3830 — the task contract revision committed at a PR's head, read with awaited git. A failed fetch,
+ *  a plan divergence or a task absent at the head is unreadable. */
+export async function readTaskContractAtHeadViaGit(
+  repoDir: string,
+  pr: Pick<OpenPrView, "prNumber" | "headSha" | "taskId">,
+): Promise<{ revision: string } | { unreadable: string }> {
+  if (pr.taskId === undefined) return { unreadable: "no task id" };
+  const present = await hostWorktreeGitAsync(repoDir, ["cat-file", "-e", `${pr.headSha}^{commit}`]).then(() => true, () => false);
+  if (!present) {
+    try {
+      await hostWorktreeGitAsync(repoDir, ["fetch", "--no-tags", "origin", `refs/pull/${pr.prNumber}/head`], { maxBuffer: 1 << 26 });
+    } catch (error) {
+      return { unreadable: `head fetch failed: ${String((error as Error)?.message ?? error)}` };
+    }
+  }
+  const head = await resolvePlanCriteriaAtHeadAsync(`Remudero-Task: ${pr.taskId}`, repoDir, "plan/tasks.yaml", pr.headSha);
+  if (head.divergence) return { unreadable: head.divergence.reason };
+  if (head.taskDeclaredFiles === undefined && head.criteria.length === 0) return { unreadable: `task ${pr.taskId} absent at head` };
+  return { revision: taskContractRevision({ id: pr.taskId, files: head.taskDeclaredFiles, acceptance: head.criteria }) };
+}
+
+/** W1-T3830 — reads the head contract of capped PRs only. An unreadable head or main contract is logged
+ *  and never counts as a difference; a head already spent on an update is not read again. */
+export async function readTaskContractAdvance(
+  prs: readonly OpenPrView[],
+  deps: Pick<SweepDeps, "readTaskContractAtHead" | "readTaskContractRevision" | "log">,
+  spentHeads: ReadonlySet<string> = new Set(),
+): Promise<Set<string>> {
+  const advance = new Set<string>();
+  const readAtHead = deps.readTaskContractAtHead;
+  if (readAtHead === undefined) return advance;
+  for (const pr of prs) {
+    const key = `${pr.prNumber}@${pr.headSha}`;
+    if (pr.taskId === undefined || pr.isDraft === true || !isCappedArmEscalation(pr) || spentHeads.has(key)) continue;
+    let current: string | undefined;
+    let head: { revision: string } | { unreadable: string };
+    try {
+      current = deps.readTaskContractRevision?.(pr.taskId);
+      head = current === undefined ? { unreadable: "task contract on main unreadable" } : await readAtHead(pr);
+    } catch (error) {
+      head = { unreadable: String((error as Error)?.message ?? error) };
+    }
+    if ("unreadable" in head) {
+      deps.log?.("sweep.task_contract_advance.unreadable", { pr_number: pr.prNumber, head_sha: pr.headSha, reason: head.unreadable });
+    } else if (head.revision !== current) advance.add(key);
+  }
+  return advance;
+}
+
 /* W1-T3980 — AN ARMED PR WITH EVERY REQUIRED CONTEXT GREEN CAN STILL NEVER MERGE. GitHub reports
  * `mergeable === true` and raw `mergeable_state === "blocked"` when branch protection requires
  * conversation resolution and one CodeQL review thread is open (console #1579 on 2026-09-21,
@@ -13133,12 +13226,14 @@ export function selectUpdateBranchDecision(
   ready?: ReadyRefreshFacts,
   /** W1-T7735: the value test; a candidate it refuses is never selected, nor held as the pending guard. */
   admit?: (candidate: ArmedStalledPr, view: OpenPrView) => boolean,
+  taskContractAdvance: ReadonlySet<string> = new Set(),
 ): { target: ArmedStalledPr | undefined; pendingGuard?: ArmedStalledPr; dependabotDeferred?: ArmedStalledPr[] } {
   // W1-T1212: the UNION of two disjoint-by-construction predicates, never a widening of either. A
   // PR named by both contributes ONE candidate; the first writer wins, and which shape wins
   // carries no meaning the comparator below reads.
   const combined = new Map<number, ArmedStalledPr>();
   for (const c of [
+    ...cappedTaskContractAdvance(prs, taskContractAdvance),
     ...armedButStalled(prs),
     ...redPrWithStaleGate(prs, staleGateWorkflowsByPr, updatedForWorkflow),
     ...openPrsBehindMain(prs, behindMainByPr, policy, queuedPrNumbers, baseChangedFilesByPr, ready),
@@ -13183,7 +13278,8 @@ export function refreshOverlapOf(
   view: Pick<OpenPrView, "changedFiles">,
   base: BaseChangedFiles | undefined,
 ): { overlap: RefreshOverlap; files: string[]; repairNeeded: boolean } {
-  const repairNeeded = candidate.updateReason === "stale-gate" || candidate.updateReason === "stale-blocked";
+  const repairNeeded = candidate.updateReason === "stale-gate" || candidate.updateReason === "stale-blocked" ||
+    candidate.updateReason === "task-contract";
   const reach = [...(candidate.matchingBaseFiles ?? [])];
   if (base === undefined || base.truncated || view.changedFiles === undefined) return { overlap: "ambiguous", files: reach, repairNeeded };
   const own = new Set(view.changedFiles);
@@ -15262,6 +15358,8 @@ export interface SweepDeps {
    *  a different one means the plan was amended under it (remudero-console #2035). Omitted: the latch
    *  holds on its input key alone, as before. */
   readTaskContractRevision?: (taskId: string) => string | undefined;
+  /** W1-T3830: the task contract revision committed at a capped PR's head, or why it is unreadable. */
+  readTaskContractAtHead?: (pr: OpenPrView) => Promise<{ revision: string } | { unreadable: string }>;
   readTaskSemanticRevision?: (taskId: string) => string | undefined;
   headContractRefreshFor?: (pr: OpenPrView) => SweepDeps["updateBranch"];
   /** Complete scoped hold evidence only for the selected light-pass contract capability. */
@@ -17026,7 +17124,7 @@ export type TerminalFixDesignHandoff =
 /**
  * W1-T11013 — rotation keeps `fix.needs_design` rows longer than the round's `fix.dispatch`/`fix.done`, so a live-only
  * read of an old round says "unavailable" and the PR holds forever. `archive` supplies the archive∪live rows (or
- * undefined when that corpus is incomplete); it is consulted only after the live read came up unavailable.
+ * undefined when that corpus is incomplete); it also recovers a question that left the live file entirely.
  */
 export function terminalFixDesignHandoff(
   pr: Pick<OpenPrView, "taskId" | "prNumber" | "prUrl" | "headSha">,
@@ -17034,17 +17132,61 @@ export function terminalFixDesignHandoff(
   archive?: () => ReadonlyArray<Record<string, unknown>> | undefined,
 ): TerminalFixDesignHandoff {
   const live = terminalFixDesignHandoffFromLines(pr, lines);
-  if (live.kind !== "unavailable" || archive === undefined) return live;
+  if (live.kind === "handoff" || archive === undefined) return live;
   const union = archive();
   if (union === undefined) return live;
   const resolved = terminalFixDesignHandoffFromLines(pr, [...union, ...lines]);
-  return resolved.kind === "handoff" ? resolved : live;
+  return resolved.kind === "handoff" || live.kind === "none" ? resolved : live;
+}
+
+function conflictRoundOutranksEscalationHold(
+  pr: { disposition: Disposition; mergeConflict?: MergeConflictEvidence },
+  hold: { kind: "design" } | { kind: "escalation"; cause: string | undefined },
+): boolean {
+  return pr.disposition === "conflicted" && hasCapturedMergeConflictEvidence(pr.mergeConflict) &&
+    (hold.kind === "design" || hold.cause !== "conflict");
+}
+
+export function conflictRoundHeldHead(pr: Pick<OpenPrView, "taskId" | "prNumber" | "prUrl" | "headSha">,
+  lines: ReadonlyArray<Record<string, unknown>>, ledgerPath?: string,
+  archive?: () => ReadonlyArray<Record<string, unknown>> | undefined,
+  holdsAtHead?: (headSha: string, history: ReadonlyArray<Record<string, unknown>>) => boolean): string {
+  const key = fixLedgerTaskIdFor(pr);
+  const seen = new Set([pr.headSha]);
+  const readArchive = archive ?? (ledgerPath === undefined ? undefined : () => readFixRoundArchiveRows(ledgerPath));
+  let history = lines, archiveRead = false;
+  for (let head = pr.headSha; ;) {
+    // A new question can arrive after an earlier conflict push. The nearest held head owns the
+    // question carried by the next push; walking unconditionally to the oldest ancestor loses it.
+    if (holdsAtHead?.(head, history)) return head;
+    // Rotation also archives an ancestor's own question, so an ancestor is read with the archive before it is released.
+    if (head !== pr.headSha && !archiveRead && readArchive !== undefined) {
+      archiveRead = true;
+      const archived = readArchive();
+      if (archived !== undefined) { history = [...archived, ...lines]; continue; }
+    }
+    const pushedBy = history.findLast(row => (row.step === "fix.done" && row.task_id === key && row.pushed_head_sha === head &&
+        typeof row.round_id === "string" && history.some(start => (start.step === "fix.dispatch" || start.step === "fix.retrigger") &&
+          start.task_id === key && start.round_id === row.round_id && start.head_sha === row.head_sha && start.mode === "merge-conflict")) ||
+      (row.step === "sweep.conflict_regenerated" && row.pr_number === pr.prNumber && row.new_head_sha === head &&
+        row.outcome === "pushed"));
+    // Rotation caps the push receipts independently of the held question; a live miss is not an outside head.
+    if (pushedBy === undefined && !archiveRead && readArchive !== undefined) {
+      archiveRead = true;
+      const archived = readArchive();
+      if (archived !== undefined) { history = [...archived, ...lines]; continue; }
+    }
+    const from = pushedBy?.head_sha;
+    if (typeof from !== "string" || seen.has(from)) return head;
+    seen.add(from);
+    head = from;
+  }
 }
 
 /** The production `archive` reader: the fix-round rows across rotations and the live file, or undefined if incomplete. */
 function readFixRoundArchiveRows(ledgerPath: string): ReadonlyArray<Record<string, unknown>> | undefined {
   const read = readLedgerUnionRecordsSync(dirname(ledgerPath), {
-    step: ["fix.dispatch", "fix.done", "fix.needs_design"], refuseIncomplete: true });
+    step: ["fix.dispatch", "fix.retrigger", "fix.done", "fix.needs_design", "sweep.conflict_regenerated"], refuseIncomplete: true });
   return read.ok ? read.rows : undefined;
 }
 
@@ -20347,15 +20489,15 @@ export async function runSweep(
         currentRed: [...redCheckNames(pr).filter(r => !r.startsWith("review:")), ...pr.unmetCriteria.map(c => `review:${c.claim}`)],
         ledger: ledgerLines, operatorAnswer: pr.pendingAnswer?.constraint,
         formerCeiling: pr.repeatedFixRefusal !== undefined ? 2 : fixCeilingInForce(pr, policy.strikeCap, policy.clarify), parkedReason }, deps.readHostedProofResults);
-      const judgeAndRecord = async () => {
+      const judgeAndRecord = async (): Promise<FixProgressReaskResult> => {
         const { decision: result, receipt } = await resolveFixProgress(input, ledgerLines,
-          { ...progressWitness(pr), judge: progressJudge, firstRound: true });
+          { ...progressWitness(pr), judge: progressJudge, firstRound: true, reask: true });
         appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: escalationTaskIdFor(pr),
           pr_number: pr.prNumber, head_sha: pr.headSha,
           site: pr.repeatedFixRefusal !== undefined ? "refused-twice" : "fix-strike",
           parked_reason: input.parkedReason, former_ceiling: input.formerCeiling, red_class: input.redClass,
           round_count: input.rounds.length, signals: input.signals, ...pendingChecksField(input), ...failureEvidenceField(input), ...result, ...receipt });
-        return result;
+        return rerunChecksForHarness(pr, input, result, deps, ledgerLines);
       };
       const result = await judgeWithMemoryWait(pr, judgeAndRecord, progressMemoryWait);
       if (result.verdict === "escalate") {
@@ -20672,6 +20814,14 @@ export async function runSweep(
   const refreshRecords = refreshRecordsFromLedger(ledgerLines);
   const refusedClearances = refusedRefreshClearancesFromLedger(ledgerLines);
   const refreshSteps = ["fix.base_refreshed", BASE_RED_REFRESH_STEP, BASE_FIXED_REFRESH_STEP, REFRESH_CLEARANCE_STEP];
+  // Hold ancestry and refresh clearance share one archive snapshot for this pass.
+  let repairHistory: LedgerUnionRecordRead | undefined;
+  const readRepairHistory = () => repairHistory ??= readLedgerUnionRecordsSync(dirname(deps.ledgerPath), {
+    step: [...refreshSteps, "fix.dispatch", "fix.retrigger", "fix.done", "fix.needs_design", "sweep.conflict_regenerated"], refuseIncomplete: true });
+  const readRepairArchive = () => {
+    const union = readRepairHistory();
+    return union.ok ? union.rows : undefined;
+  };
   const oldestRefreshRow = new Map<string, number>();
   for (const row of ledgerLines) {
     if (typeof row.step !== "string" || !refreshSteps.includes(row.step)) continue;
@@ -20689,8 +20839,8 @@ export async function runSweep(
       refreshHistory.set(pr.prNumber, history);
       return history;
     }
-    const union = resolveLedgerUnion(dirname(deps.ledgerPath), `"pr_number":${pr.prNumber}[,}]`, undefined, { step: refreshSteps });
-    const rows = parseLedger(union.matches.join("\n"));
+    const union = readRepairHistory();
+    const rows = union.rows.filter(row => row.pr_number === pr.prNumber && refreshSteps.includes(String(row.step)));
     const records = refreshRecordsFromLedger(rows).get(pr.prNumber) ?? [];
     refreshRecords.set(pr.prNumber, [...records, ...(refreshRecords.get(pr.prNumber) ?? [])]);
     for (const [key, evidence] of refusedRefreshClearancesFromLedger(rows)) {
@@ -20698,8 +20848,8 @@ export async function runSweep(
     }
     for (const key of baseRedHistoryFromLedger(rows).refreshed) baseRedHistory.refreshed.add(key);
     const unread = [...union.unread, ...(union.unclassified ?? [])];
-    if (!union.ok && unread.length === 0) unread.push(dirname(deps.ledgerPath));
-    const history = { source: !union.ok || unread.length > 0 ? "unreadable" as const : "union" as const, unread };
+    if ((!union.ok || union.archiveCount === 0) && unread.length === 0) unread.push(dirname(deps.ledgerPath));
+    const history = { source: !union.ok || union.archiveCount === 0 || unread.length > 0 ? "unreadable" as const : "union" as const, unread };
     refreshHistory.set(pr.prNumber, history);
     return history;
   };
@@ -22659,10 +22809,25 @@ export async function runSweep(
     let standDownHold: { site: string; reason: string; at?: string } | undefined;
     let heldEscalationAt: string | undefined;
     let heldEscalationDedup: string | undefined;
+    let designHoldKept = false;
+    let escalationHoldKept: string | undefined;
+    const holdable = disposition === "conflicted" || disposition === "blocked-fixable";
+    const openForHead = holdable && !deps.dryRun ? await readOpenEscalations() : [];
+    const holdHead = holdable ? conflictRoundHeldHead(pr, ledgerLines, deps.ledgerPath, readRepairArchive, (head, history) => {
+      const atHead = head === pr.headSha ? pr : { ...pr, headSha: head };
+      if (terminalFixDesignHandoff(atHead, history, readRepairArchive).kind !== "none") return true;
+      const key = fixEscalationDedupKey(escalationTaskIdFor(pr), pr.prUrl, head,
+        pr.mergeConflict !== undefined, isBlockedCi(pr), undefined);
+      return openForHead.some(issue => matchDuplicateEscalation({ ...key, cause: undefined }, [issue]) !== undefined &&
+        openEscalationStandDownReason(head, issue, undefined,
+          { conflictEvidenceCaptured: hasCapturedMergeConflictEvidence(pr.mergeConflict), baseSha: mainTipSha },
+          isBlockedCi(pr) ? redCheckNames(pr) : undefined, pr.pendingAnswer) !== undefined && escalationIssueCause(issue.body) !== "conflict");
+    }) : pr.headSha;
     if ((disposition === "conflicted" || disposition === "blocked-fixable") &&
         !inFlightFixKeys.has(`${fixLedgerTaskIdFor(pr) ?? ""}@${pr.headSha}`) &&
         !dispatchCauseHolds.get(pr.prNumber)) {
-      const handoff = terminalFixDesignHandoff(pr, ledgerLines, () => readFixRoundArchiveRows(deps.ledgerPath));
+      const handoff = terminalFixDesignHandoff(holdHead === pr.headSha ? pr : { ...pr, headSha: holdHead }, ledgerLines,
+        readRepairArchive);
       if (handoff.kind === "handoff") {
         const held = handoff.producer;
         const recorded = ledgerLines.findLast(row => row.step === "sweep.disposed" && row.pr_number === pr.prNumber &&
@@ -22693,21 +22858,27 @@ export async function runSweep(
             ? { standingOn: semanticStandingOn, observed: semanticCurrent } : undefined;
           const amended = current !== undefined && standingOn !== undefined &&
             (current !== standingOn || semantic !== undefined && semantic.standingOn !== semantic.observed);
-          const behindBy = deps.behindMainByPr?.get(pr.prNumber);
-          const mainAdoptionDecision = amended ? "contract-amended" : designMainAdoptionSpent ? "pass-budget-spent" :
-            designHoldMainAdoptionDecision(pr, ledgerLines, behindBy, mainTipSha, deps.updateBranch !== undefined);
-          const mainAdoption = mainAdoptionDecision === "due";
-          terminalDesignHold = { amended, mainAdoptionDecision, ...(mainAdoption ? { mainAdoption: true as const } : {}),
-            revision: standingOn ?? current, observedRevision: current, semantic, roundId: handoff.roundId };
-          disposition = amended || mainAdoption ? "blocked-fixable" : "refused-escalate";
-          reason = amended ? "task contract amended under this terminal design handoff — adopting main before any fix admission"
-            : mainAdoption ? `fix needs design at this exact head (round ${handoff.roundId}), which is ${behindBy} commit(s) ` +
-              `behind main — taking main into the branch once before a person is asked: ${handoff.reason}`
-            : `fix needs design at this exact head (round ${handoff.roundId}) — ${handoff.reason}`;
-          if (mainAdoption) designMainAdoptionSpent = true;
-          if (!amended && !mainAdoption) {
-            ruleBlockerByIndex.set(prIndex, "escalated");
-            heldEscalationAt = typeof handoff.producer.ts === "string" ? handoff.producer.ts : undefined;
+          if (!amended && conflictRoundOutranksEscalationHold({ disposition, mergeConflict: pr.mergeConflict }, { kind: "design" })) {
+            designHoldKept = true;
+            reason = `fix needs design at ${holdHead.slice(0, 7)} (round ${handoff.roundId}), but the merge conflict is not that ` +
+              `question — the conflict round runs, and the design hold still applies at the head it pushes: ${handoff.reason}`;
+          } else {
+            const behindBy = deps.behindMainByPr?.get(pr.prNumber);
+            const mainAdoptionDecision = amended ? "contract-amended" : designMainAdoptionSpent ? "pass-budget-spent" :
+              designHoldMainAdoptionDecision(pr, ledgerLines, behindBy, mainTipSha, deps.updateBranch !== undefined);
+            const mainAdoption = mainAdoptionDecision === "due";
+            terminalDesignHold = { amended, mainAdoptionDecision, ...(mainAdoption ? { mainAdoption: true as const } : {}),
+              revision: standingOn ?? current, observedRevision: current, semantic, roundId: handoff.roundId };
+            disposition = amended || mainAdoption ? "blocked-fixable" : "refused-escalate";
+            reason = amended ? "task contract amended under this terminal design handoff — adopting main before any fix admission"
+              : mainAdoption ? `fix needs design at this exact head (round ${handoff.roundId}), which is ${behindBy} commit(s) ` +
+                `behind main — taking main into the branch once before a person is asked: ${handoff.reason}`
+              : `fix needs design at this exact head (round ${handoff.roundId}) — ${handoff.reason}`;
+            if (mainAdoption) designMainAdoptionSpent = true;
+            if (!amended && !mainAdoption) {
+              ruleBlockerByIndex.set(prIndex, "escalated");
+              heldEscalationAt = typeof handoff.producer.ts === "string" ? handoff.producer.ts : undefined;
+            }
           }
         }
       } else if (handoff.kind === "unavailable") {
@@ -22741,13 +22912,27 @@ export async function runSweep(
         reason = `${reason} — the rung's conflict hand-off at ${held!.hold!.at} was held under main ${heldUnderMain.slice(0, 7)}, and ` +
           `main is now ${mainTipSha!.slice(0, 7)}, so the rung re-reads this head's mergeability (W1-T11173)`;
       }
-      if (held?.kind === "held" && held.hold !== undefined && !conflictHandoff && !conflictHoldReleased) {
+      if (held?.kind === "held" && held.hold !== undefined && !conflictHandoff && !conflictHoldReleased &&
+          !(designHoldKept && held.hold.site === "rung.needs_design")) {
         standDownHold = held.hold;
         heldEscalationAt = held.hold.at;
         disposition = "refused-escalate";
         reason = `fix stood down at ${held.hold.site} and nothing it read has changed (head ${pr.headSha.slice(0, 7)}, task contract` +
           `${standDownBodySha === undefined ? "" : ", PR body"}) — no worker is dispatched until one does: ${held.hold.reason}`;
         ruleBlockerByIndex.set(prIndex, "escalated");
+      }
+    }
+    if (disposition === "conflicted" && hasCapturedMergeConflictEvidence(pr.mergeConflict) && !deps.dryRun) {
+      const key = fixEscalationDedupKey(escalationTaskIdFor(pr), pr.prUrl, pr.headSha, true, isBlockedCi(pr),
+        deps.readTaskContractRevision?.(escalationTaskIdFor(pr)));
+      const open = matchDuplicateEscalation({ ...key, cause: undefined }, await readOpenEscalations());
+      if (open !== undefined && openEscalationStandDownReason(pr.headSha, open, key.contractRevision,
+        { conflictEvidenceCaptured: true, baseSha: mainTipSha }, undefined, pr.pendingAnswer) !== undefined &&
+        conflictRoundOutranksEscalationHold({ disposition, mergeConflict: pr.mergeConflict },
+          { kind: "escalation", cause: escalationIssueCause(open.body) })) {
+        escalationHoldKept = open.url;
+        reason = `${reason} — the open escalation ${open.url} is not about the merge conflict, so the conflict round runs, ` +
+          "and the escalation still applies at the head it pushes";
       }
     }
     // W1-T10653: an already-open-escalation stand-down is not a hold, so it never reached the SLO below; once it has aged past
@@ -23178,6 +23363,9 @@ export async function runSweep(
     if (standDownHold) extraDisposedFields = { ...extraDisposedFields, stand_down_hold: true, stand_down_site: standDownHold.site,
       ...(standDownHold.site === "rung.strike" && standDownHold.reason === CONFLICT_REPAIR_HANDOFF_REASON && mainTipSha !== undefined
         ? { stand_down_at: standDownHold.at, stand_down_main_sha: mainTipSha } : {}) };
+    if (designHoldKept) extraDisposedFields = { ...extraDisposedFields, design_hold_kept: true };
+    if (escalationHoldKept !== undefined) extraDisposedFields = { ...extraDisposedFields, escalation_hold_kept: escalationHoldKept };
+    if (holdHead !== pr.headSha) extraDisposedFields = { ...extraDisposedFields, hold_head_sha: holdHead };
     if (terminalDesignHold) extraDisposedFields = { ...extraDisposedFields, needs_design_hold: true, needs_design_round_id: terminalDesignHold.roundId,
       design_hold_main_adoption_decision: terminalDesignHold.mainAdoptionDecision,
       ...(terminalDesignHold.revision === undefined ? {} : { progress_contract_revision: terminalDesignHold.revision }),
@@ -23568,12 +23756,13 @@ export async function runSweep(
             case "blocked-fixable": {
               const issues = await readOpenEscalations();
               if (issues.length > 0) {
-                const escalationKey = fixEscalationDedupKey(escalationTaskIdFor(pr), pr.prUrl, pr.headSha,
+                const escalationKey = fixEscalationDedupKey(escalationTaskIdFor(pr), pr.prUrl, holdHead,
                   pr.mergeConflict !== undefined, isBlockedCi(pr), deps.readTaskContractRevision?.(escalationTaskIdFor(pr)));
-                const candidate = matchDuplicateEscalation(escalationKey, issues);
-                const openHold = openEscalationStandDownReason(pr.headSha, candidate, escalationKey.contractRevision,
-                  { conflictEvidenceCaptured: hasCapturedMergeConflictEvidence(pr.mergeConflict), baseSha: mainTipSha },
-                  isBlockedCi(pr) ? redCheckNames(pr) : undefined, pr.pendingAnswer);
+                const holdKey = holdHead === pr.headSha ? escalationKey : { ...escalationKey, cause: undefined };
+                const openHold = issues.filter(issue => matchDuplicateEscalation(holdKey, [issue]) !== undefined)
+                  .map(issue => openEscalationStandDownReason(holdHead, issue, escalationKey.contractRevision,
+                    { conflictEvidenceCaptured: hasCapturedMergeConflictEvidence(pr.mergeConflict), baseSha: mainTipSha },
+                    isBlockedCi(pr) ? redCheckNames(pr) : undefined, pr.pendingAnswer)).find(hold => hold !== undefined);
                 if (openHold) {
                   acted = false;
                   spent = false;
@@ -23694,18 +23883,18 @@ export async function runSweep(
                   if (amended !== undefined) standDownReason = amended;
                   return false;
                 }
-                const result = await judgeWithMemoryWait<FixProgressResult>(pr, async () => {
+                const result = await judgeWithMemoryWait<FixProgressReaskResult>(pr, async () => {
                   const { decision: result, receipt } = await resolveFixProgress(input, ledgerLines,
-                    { ...progressWitness(pr), judge: progressJudge, firstRound: true });
+                    { ...progressWitness(pr), judge: progressJudge, firstRound: true, reask: true });
                   appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: escalationTaskIdFor(pr),
                     pr_number: pr.prNumber, head_sha: pr.headSha,
                     site: progressParkedReason?.split(":")[0] ?? "fix-strike",
                     parked_reason: input.parkedReason, former_ceiling: input.formerCeiling,
                     red_class: input.redClass, round_count: input.rounds.length, signals: input.signals,
                     ...pendingChecksField(input), ...failureEvidenceField(input), ...result, ...receipt });
-                  return result;
+                  return rerunChecksForHarness(pr, input, result, deps, ledgerLines);
                 }, progressMemoryWait);
-                if (result.verdict === "unavailable") {
+                if (result.verdict === "unavailable" || result.verdict === "rerun-checks") {
                   pr.progressContinue = { reason: result.reason, unavailable: true };
                   acted = false;
                   standDownReason = result.reason;
@@ -25722,6 +25911,7 @@ export async function runSweep(
       spentHeads: spentRefreshHeads,
       readSource: deps.readPrFileSource,
     };
+    const taskContractAdvance = await readTaskContractAdvance(refreshPrs, deps, spentRefreshHeads);
     // W1-T5903: a behind-main candidate whose base requires a merge queue stands down; ONE
     // `sweep.update_branch.skipped_queue` row per PR and head names it. A queue read that throws
     // reads as "no queue", so the pre-queue refresh is unchanged.
@@ -25767,6 +25957,7 @@ export async function runSweep(
       readyFacts,
       // W1-T7735: a candidate the value test skips is never selected.
       (c, view) => valueGate.admit(c, view),
+      taskContractAdvance,
     );
     let target = decision.target;
     const pendingGuard = decision.pendingGuard;
@@ -25899,6 +26090,8 @@ export class LightPassPreReviewTiming {
     "ready_update", "refresh_admission", "armed_ratchet_rejudge",
   ].map((phase) => [phase, 0]));
   readonly compareReads: Array<Record<string, unknown>> = [];
+  /** W1-T12530: the wall time of each open-PR views stage, so the row names the slow one. */
+  readonly openPrViewStagesMs: Record<string, number> = {};
   private readonly scope = new AsyncLocalStorage<boolean>();
   private depth = 0;
   private started = 0;
@@ -25936,7 +26129,7 @@ export class LightPassPreReviewTiming {
     this.hook.disable();
     this.scope.disable();
     return { phase_ms: { ...this.phaseMs }, compare_count: this.compareReads.filter((r) => !r.cache_hit).length,
-      compare_reads: [...this.compareReads], sync_on_loop_ms: this.syncMs };
+      compare_reads: [...this.compareReads], sync_on_loop_ms: this.syncMs, open_pr_view_stages_ms: { ...this.openPrViewStagesMs } };
   }
 }
 
