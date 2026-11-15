@@ -27,7 +27,7 @@ import { billingMode } from "../../lib/env.js";
 import { FIX_MODE_RULES, deriveFixMode, fixScopeRegime, outOfDeclaredScopeFiles, renderFixPrompt, renderPrerequisitePrPrompt, sameHeadReviewUnmet, type FixEvidence, type FixReviewFinding } from "../../lib/prompt-render.js";
 import { bakedClosureCatalogDetails } from "../../lib/baked-closure-catalog.js";
 import { escalateWithJudge, escalationCause, realEscalationJudge, escalationHeadSha, openEscalationStandDownReason, fixEscalationDedupKey, findDuplicateEscalations, taskContractRevision, taskSemanticRevision, type Escalation, type EscalationDedupKey, type IssueGateway, type OpenIssue } from "../../lib/escalate.js";
-import { fetchSinglePrRest, codeqlCheckFailed, hydrateCodeqlHeadAlertsSteps, CODEQL_CHECK_NAME, type GhApiFetcher } from "../../lib/open-prs-rest.js";
+import { fetchSinglePrRest, codeqlCheckFailed, hydrateCodeqlHeadAlertsSteps, CODEQL_CHECK_NAME, createPlanFilingFileCache, hydratePlanFilingFilesSteps, type GhApiFetcher } from "../../lib/open-prs-rest.js";
 import { remedyFilesForFailingChecks, type RemedyFileForGate } from "../../lib/ci-parity.js";
 import { isInPlanScope } from "../../lib/plan-architect.js";
 import { planFilingFixRoundRefusal, readPlanFilingFixRoundInput } from "../../lib/plan-filing-fix-guard.js";
@@ -66,7 +66,7 @@ import { repoRoot, resolveOwnerRepo } from "../../lib/repo-location.js";
 import { refusalExcerptFromFixReport } from "../../lib/refusal-amendment.js";
 import { flagValue, unknownArgError } from "../../lib/cli-args.js";
 import { reviewTaskIdFromBody } from "../../lib/report-commands.js";
-import { type RawOpenPr, type StrikeRegime, currentStrikeRegimeFor, deriveStrikeHistory, fetchCiFailures, priorStrikesFor, remedyGeneratorNamedInLog, reviewStateFromRollup, reviewSummaryFromLedger, reviewVerdictPostedAtFromRollup, unmetFromLedger } from "../../lib/tick-read-worker.js";
+import { type RawOpenPr, type StrikeRegime, classifyPlanFiling, currentStrikeRegimeFor, deriveStrikeHistory, fetchCiFailures, isPlanOnlyFilingPr, priorStrikesFor, remedyGeneratorNamedInLog, resolveReviewTaskId, reviewStateFromRollup, reviewSummaryFromLedger, reviewVerdictPostedAtFromRollup, unmetFromLedger } from "../../lib/tick-read-worker.js";
 
 // Functions kept in the entrypoint arrive through this seam, as in DaemonCommandHost.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -4366,12 +4366,30 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
         runId: opts.runId,
         taskId: opts.taskId,
         snapshot: { headSha: priorHeadSha, failingChecks: (priorCiFailures ?? []).map((f) => f.name) },
+        fixRound: { prUrl: opts.prUrl, branch: opts.branch },
       }), deps.log);
       if (spawnOutcome.kind === "superseded") {
         const s = spawnOutcome.superseded;
         const reason = `fix superseded (${s.condition}): ${s.oldHead.slice(0, 12)} -> ${s.newHead.slice(0, 12)}`;
         deps.say(`fix rung: STOPPED strike ${attempt}/${opts.strikeCap} — ${reason}: ${opts.prUrl}`);
         return { outcome: "stood_down", review, strikes, retriggers, reason, standDownReason: reason, superseded: s };
+      }
+      if (spawnOutcome.kind === "yielded") {
+        // W1-T8141: a pending recycle ended the round; spawnFixWorkerBounded kept the work. No fix.dispatch, no strike.
+        const y = spawnOutcome.yielded;
+        deps.log("fix.done", { ...fixReceipt.joinFields(), round_id: roundId, head_sha: priorHeadSha,
+          ...(deps.branchClaim ? { branch_claim_run_id: deps.branchClaim.id() } : {}),
+          strike: attempt, round, subtype: "round_yielded", trigger: y.trigger, recovery_ref: y.recoveryRef ?? null,
+          index_recovery_ref: y.indexRecoveryRef ?? null,
+          cost_usd: y.costUsd, elapsed_ms: spawnOutcome.elapsedMs });
+        deps.branchClaim?.release();
+        const kept = [y.recoveryRef && `work kept at ${y.recoveryRef}`, y.indexRecoveryRef && `staged work kept at ${y.indexRecoveryRef}`]
+          .filter(Boolean).join(", ");
+        const reason = `fix round yielded to a pending ${y.trigger}: ${kept
+          || (y.keepError ? `work left in the worktree (${y.keepError})` : "no work to keep")}`;
+        deps.say(`fix rung: strike ${attempt}/${opts.strikeCap} YIELDED, no strike spent — ${reason}: ${opts.prUrl}`);
+        return { outcome: "stood_down", review, strikes, retriggers, reason, standDownReason: reason,
+          ...(y.keepError ? { retainWorktree: reason } : {}) };
       }
       if (spawnOutcome.kind === "abandoned") {
         deps.say(
@@ -5868,7 +5886,17 @@ export async function fixCommand(
   }
 
   const ledger = readLedgerLines(ledgerPath);
-  const taskId = reviewTaskIdFromBody(raw.body ?? "");
+  // W1-T12702: the sweep's resolver. Only a PR whose run branch alone names its task needs the changed-path read.
+  const body = raw.body ?? "";
+  const branchOnly = reviewTaskIdFromBody(body) === undefined && resolveReviewTaskId(body, raw.headRefName, false) !== undefined;
+  const emitterFiling = isPlanOnlyFilingPr(ledger, raw.url);
+  const changedPaths = branchOnly && !emitterFiling
+    ? (await runStepsAsync(hydratePlanFilingFilesSteps(owner, repo, [{ number: raw.number, headRefOid: raw.headRefOid }],
+      deps.fetch ?? ((args, onRateLimit) => ghJsonAsync(args, undefined, onRateLimit)), createPlanFilingFileCache(), { missCap: 1 })))
+      .get(raw.number)
+    : undefined;
+  const planOnlyFiling = branchOnly && classifyPlanFiling(emitterFiling, changedPaths).isPlanFiling;
+  const taskId = resolveReviewTaskId(body, raw.headRefName, planOnlyFiling);
   const reviewState = reviewStateFromRollup(raw.statusCheckRollup);
   // W1-T2299: same producer as buildOpenPrViews above — see OpenPrView.reviewVerdictPostedAt's doc.
   const reviewVerdictPostedAt = reviewVerdictPostedAtFromRollup(raw.statusCheckRollup);
