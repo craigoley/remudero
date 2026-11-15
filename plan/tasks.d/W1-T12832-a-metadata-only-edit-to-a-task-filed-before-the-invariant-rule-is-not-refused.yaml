@@ -16,6 +16,7 @@
   files:
     - src/run-task.ts
     - src/lib/task-linter.ts
+    - test/lint-plan-fast-scopes-to-the-merge-base.test.ts
     - test/plan/a-metadata-only-edit-to-a-task-filed-before-the-invariant-rule-is-not-refused.test.ts
   status: queued
   attempts: 0
@@ -46,6 +47,7 @@
     2. Set requireDesignInvariantDeclaration to designContractChanged(...) OR "the new design carries an INVARIANT or NO-INVARIANTS line". A task that declares is then always checked in full, and a task that never declared is asked only when its contract text is authored in this diff.
     3. Keep invariantSlugViolations itself unchanged apart from any helper it needs to expose; do not change the whole-plan pass or dispatch.
     INVARIANT new-and-reauthored-tasks-still-declare: a new task and any task whose design or acceptance text changed in the diff is refused without a declaration exactly as today; the narrowing applies only to a record whose design and acceptance are identical to the base.
+    The existing W1-T11746 fixture in test/lint-plan-fast-scopes-to-the-merge-base.test.ts changes only a note and expects a refusal; its edit must author a design that declares neither form so it keeps proving the refusal.
     NOT IN SCOPE: making machine generators declare invariants (W1-T12833), backfilling declarations into old shards, and any other lint check's base comparison.
   falsifier: |
     Force the option true and criterion 1 must fail. Force it false for a new task or a task with an edited claim and criterion 2 must fail. Skip the full check for a declaring task and criterion 3 must fail. Restore and all pass.
