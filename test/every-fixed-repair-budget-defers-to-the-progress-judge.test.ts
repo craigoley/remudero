@@ -140,7 +140,7 @@ describe("test/every-fixed-repair-budget-defers-to-the-progress-judge.test.ts", 
     const judgments: Parameters<FixProgressJudge>[0][] = [];
     const f = fixture(rows, async facts => {
       judgments.push(facts);
-      return undefined;
+      throw new Error("progress provider offline");
     });
     await runSweep([pr({ taskId: "unfiled", headRefName: "run-unfiled-123", priorStrikes: 2 })], f.deps);
     assert.equal(judgments.length, 1);

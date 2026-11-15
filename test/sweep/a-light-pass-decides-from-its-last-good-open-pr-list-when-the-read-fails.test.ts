@@ -17,7 +17,7 @@ import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { test } from "node:test";
 
-import { DEFAULT_GH_CALL_TIMEOUT_MS } from "#src/lib/github-transport.js";
+import { createGhCallPacer, DEFAULT_GH_CALL_TIMEOUT_MS, DEFAULT_GH_REFUSAL_BACKOFF_FLOOR_MS } from "#src/lib/github-transport.js";
 import { appendLedger } from "#src/lib/ledger.js";
 import {
   createLightPassOpenPrList,
@@ -105,16 +105,22 @@ function fixture() {
     readMainTip: async () => "main-1",
   };
   let serve: (() => Promise<OpenPrView[]>) | undefined;
+  // The pacer's rate-limit backoff is production's (a 60 s floor between retries); only its timer is the test's,
+  // so a 403 on the list read resolves at once and the sleeps it asked for are kept to assert on.
+  const backoffSleeps: number[] = [];
+  const pacer = createGhCallPacer({ minGapMs: 0, rateLimitGapMs: 0, sleep: async (ms) => { backoffSleeps.push(ms); } });
+  // A variable, not a literal: the hook reads `pacer` from its ports, and run-task's port type does not name it.
+  const ports = {
+    effects: (deps: (typeof effectsDeps)[number]) => { effectsDeps.push(deps); return effects; },
+    readCompare: async () => ({ ahead_by: 0, files: [] }),
+    openPrViews: () => serve?.(),
+    clock: { now: () => nowMs },
+    pacer,
+  };
   const hook = () => buildSweepLightHook("o", repo, { root } as never, effects.ledgerPath, "T12755", NO_PLAN,
-    (step, extra) => { logs.push({ step, ...extra }); }, undefined, () => false, () => NO_PLAN, undefined, undefined,
-    {
-      effects: (deps) => { effectsDeps.push(deps); return effects; },
-      readCompare: async () => ({ ahead_by: 0, files: [] }),
-      openPrViews: () => serve?.(),
-      clock: { now: () => nowMs },
-    });
+    (step, extra) => { logs.push({ step, ...extra }); }, undefined, () => false, () => NO_PLAN, undefined, undefined, ports);
   const steps = (step: string) => logs.filter((row) => row.step === step);
-  return { root, repo, logs, posted, rows, live, effects, effectsDeps, hook, steps, useShim,
+  return { root, repo, logs, posted, rows, live, effects, effectsDeps, hook, steps, useShim, backoffSleeps,
     serveViews: (views: OpenPrView[]) => { serve = async () => structuredClone(views); },
     serveError: (error: Error) => { serve = async () => { throw error; }; },
     ownRead: () => { serve = undefined; },
@@ -309,6 +315,8 @@ test("W1-T12755 criterion 6: through the real list read, a 403 rate limit on the
     await hook();
     assert.equal(f.steps("sweep_light.error").length, 0, JSON.stringify(f.logs));
     assert.equal(f.steps("sweep_light.views_fallback")[0]?.reason, "rate_limited", JSON.stringify(f.logs));
+    assert.ok(f.backoffSleeps.length > 0 && f.backoffSleeps.every((ms) => ms >= DEFAULT_GH_REFUSAL_BACKOFF_FLOOR_MS),
+      `the pacer's own refusal backoff ran, on the test's timer: ${JSON.stringify(f.backoffSleeps)}`);
     assert.deepEqual(f.posted, [{ prNumber: 1275561, headSha: "head-live" }]);
     assert.deepEqual(f.steps("sweep_light.pre_review_timing").map((row) => row.views_source), ["own_read", "fallback"]);
   } finally { await f.cleanup(); }
