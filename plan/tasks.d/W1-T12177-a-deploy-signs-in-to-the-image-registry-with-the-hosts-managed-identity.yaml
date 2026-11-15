@@ -20,10 +20,9 @@
     - test/deploy/a-deploy-signs-in-to-the-image-registry-with-the-hosts-managed-identity.test.ts
     - test/every-recycle-names-who-invoked-it.test.ts
     - test/image-drift-recycles-itself.test.ts
-    - test/recycle-container.test.ts
     - test/worker/selected-registry-child-consumers.test.ts
     - test/w1-t5319-the-acr-login-refreshes-itself-and-escalates-when-it-cannot.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "invariant:identity-config-isolation — the managed-identity attempt uses a temporary Azure CLI config and leaves the person's stored account untouched"
