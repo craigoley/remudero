@@ -5131,6 +5131,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
           },
         });
         keepWorktree = rung?.superseded !== undefined || rung?.retainWorktree !== undefined;
+        if (rung?.outcome === "handed_off" && !dispatchStarted) return { roundNotRun: true, reason: rung.reason };
       } catch (e) {
         // W1-T2402: a signal-terminated spawn (this fleet's own `killProcessGroup`/forced-deploy/
         // wall-clock-reclaim paths, or a genuine host OOM — indistinguishable by signal alone, see
@@ -14706,7 +14707,7 @@ export function armOutcomeArmed(outcome: ArmOutcomeName | void): boolean {
 /** W1-T2231 — the SAME "undefined means the pre-existing assumption" idiom {@link armOutcomeArmed}
  *  establishes for `deps.arm`, applied to `deps.dispatchFix`. A `false` return is the ONLY signal
  *  that stands a dispatch's `spent` field down; `undefined` and `true` both read as spent. */
-export function dispatchFixSpent(outcome: boolean | void | FixClaimDeclined): boolean {
+export function dispatchFixSpent(outcome: FixDispatchOutcome): boolean {
   if (outcome === undefined) return true;
   if (typeof outcome === "object") return false;
   return outcome;
@@ -14716,6 +14717,20 @@ export function dispatchFixSpent(outcome: boolean | void | FixClaimDeclined): bo
 export interface FixClaimDeclined {
   claimDeclined: true;
   ownerRecoveryReason: string;
+}
+
+/** W1-T12701 — the rung handed off before any fix.dispatch or fix.retrigger row: no round ran. Not a claim decline. */
+export interface FixRoundNotRun {
+  roundNotRun: true;
+  reason: string;
+}
+
+export type FixDispatchOutcome = boolean | void | FixClaimDeclined | FixRoundNotRun;
+
+/** W1-T12701 — the stand-down for a dispatch that ran no round, or undefined. */
+export function fixRoundNotRunReason(outcome: FixDispatchOutcome): string | undefined {
+  if (typeof outcome !== "object" || !("roundNotRun" in outcome)) return undefined;
+  return `no fix round ran: ${outcome.reason}`;
 }
 
 export type MovedFixHeadOutcome = { adopted: OpenPrView; evidence: FixDispatchEvidence } | { deferred: string };
@@ -14762,8 +14777,8 @@ export async function adoptMovedFixHead(
   return { adopted, evidence: { ...evidence, ciFailures: failures } };
 }
 
-function fixClaimDeclinedReason(outcome: boolean | void | FixClaimDeclined): string | undefined {
-  if (typeof outcome !== "object") return undefined;
+function fixClaimDeclinedReason(outcome: FixDispatchOutcome): string | undefined {
+  if (typeof outcome !== "object" || !("claimDeclined" in outcome)) return undefined;
   return `fix dispatch declined at the checkout claim (registered worktree owner, ${outcome.ownerRecoveryReason}) — ` +
     "no worker spawned and no strike spent; the next pass re-attempts the claim";
 }
@@ -15278,7 +15293,7 @@ export interface SweepDeps {
     evidence: FixDispatchEvidence,
     onPhase?: DetachedFixPhaseObserver,
     control?: DetachedFixControl,
-  ) => boolean | void | FixClaimDeclined | Promise<boolean | void | FixClaimDeclined>;
+  ) => FixDispatchOutcome | Promise<FixDispatchOutcome>;
   /** W1-T3390 — dispatched once a capped verdict's non-discriminating proofs exhaust
    *  `dispatchFix`'s body-repair budget — the shard's OWN text is wrong, and Standing rule 15's
    *  `criterionFieldTampered` (review.ts) refuses a non-plan-only diff (any body repair) touching
@@ -23306,7 +23321,7 @@ export async function runSweep(
                 }
                 const fixOutcome = await fixClaim.run(() => deps.dispatchFix(pr, fixEvidence));
                 if (fixOutcome !== undefined) spent = dispatchFixSpent(fixOutcome);
-                const declinedReason = fixClaimDeclinedReason(fixOutcome);
+                const declinedReason = fixClaimDeclinedReason(fixOutcome) ?? fixRoundNotRunReason(fixOutcome);
                 if (declinedReason) [acted, standDownReason] = [false, declinedReason];
                 break;
               }
@@ -24441,7 +24456,7 @@ export async function runSweep(
               }
               const dispatchOutcome = await fixClaim.run(() => deps.dispatchFix(pr, fixEvidence));
               if (dispatchOutcome !== undefined) spent = dispatchFixSpent(dispatchOutcome);
-              const declinedReason = fixClaimDeclinedReason(dispatchOutcome);
+              const declinedReason = fixClaimDeclinedReason(dispatchOutcome) ?? fixRoundNotRunReason(dispatchOutcome);
               if (declinedReason) [acted, standDownReason] = [false, declinedReason];
               break;
             }
@@ -24653,7 +24668,8 @@ export async function runSweep(
               }
               const conflictedDispatchOutcome = await conflictedFixClaim.run(ownedDispatch());
               if (conflictedDispatchOutcome !== undefined) spent = dispatchFixSpent(conflictedDispatchOutcome);
-              const conflictedDeclinedReason = fixClaimDeclinedReason(conflictedDispatchOutcome);
+              const conflictedDeclinedReason = fixClaimDeclinedReason(conflictedDispatchOutcome) ??
+                fixRoundNotRunReason(conflictedDispatchOutcome);
               if (conflictedDeclinedReason) [acted, standDownReason] = [false, conflictedDeclinedReason];
               break;
             }
