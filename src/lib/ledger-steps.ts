@@ -82,6 +82,12 @@ type SeedRow = Omit<LedgerStepRow, "family">;
 // `src/lib/review.ts`, `src/lib/sweep.ts` and `src/lib/panel-actions.ts` at 2026-09-07.
 const SEED_ROWS: readonly SeedRow[] = [
   {
+    step: "sweep_light.views_fallback",
+    meaning: "A light pass could not use a fresh open-PR list: the read failed, was rate-limited or had not settled after 60 s. With a last good list younger than its age limit, the pass decides from that list, reads each head again at act time and stands a moved or unreadable head down. With no such list, the pass decides nothing, as before.",
+    writer: ["createLightPassOpenPrList"],
+    outcomes: ["rate_limited", "read_failed", "slow_read", "no_snapshot", "snapshot_too_old"],
+  },
+  {
     step: "routing.experiment.result",
     meaning: "A daily intention-to-treat routing experiment result, with separate pipeline metrics, task-cluster bootstrap intervals, the decision rule and sample requirement. Missing outcomes remain counted. Terminal results are preserved; the result changes no routing.",
     writer: ["recordRoutingExperimentResults"],
@@ -369,6 +375,17 @@ const SEED_ROWS: readonly SeedRow[] = [
       "minutes files one remedy task with origin flow-regression:open-repair-wait.",
     writer: ["runFlowGardener"],
     outcomes: ["OBSERVED", "UNKNOWN"],
+  },
+  {
+    // W1-T12712: a green pull request waiting for review starts before a new fix or build worker.
+    step: "sweep.budget_yield",
+    meaning:
+      "A new fix round (lane \"fix\") or build lane (lane \"build\") did not start, because the review width " +
+      "was held at host-worker-budget and a green head had waited for review longer than one sweep cadence. " +
+      "One row per held spell: `waiting_heads` names the heads that waited and `oldest_wait_ms` the longest wait. " +
+      "No running worker is stopped and the budget is unchanged; the held work starts once no such head waits.",
+    writer: ["decideReviewPrecedence"],
+    outcomes: ["fix", "build"],
   },
 ];
 
