@@ -1221,6 +1221,8 @@ export function buildSweepLightHook(
     effects?: (deps: Parameters<SweepCommandHost["buildSweepEffects"]>[0]) => SweepDeps;
     readCompare?: (args: string[]) => Promise<unknown>;
     clock?: Pick<Clock, "now">;
+    /** W1-T12530: the pacer the list reads share; absent, the hook's own. A test gives one whose backoff does not wait. */
+    pacer?: GhCallPacer;
     /** W1-T12357: the daemon's sweep tick bound; absent, the default policy's. */
     sweepWallClockBoundMs?: number;
   } = {},
@@ -1245,7 +1247,7 @@ export function buildSweepLightHook(
   const reportPlanFilingClassification = createPlanFilingClassificationTelemetry(log);
   // W1-T12530: per-PR stage answers kept across light passes, and the pacer their concurrent reads share.
   const stageReuse = createOpenPrStageReuse();
-  const viewsPacer = createGhCallPacer();
+  const viewsPacer = io.pacer ?? createGhCallPacer();
   const compares = createLightPassCompareReader(owner, repo, io.readCompare ?? ghJsonAsync);
   const policy = io.sweepWallClockBoundMs === undefined ? DEFAULT_SWEEP_POLICY
     : { ...DEFAULT_SWEEP_POLICY, sweepWallClockBoundMs: io.sweepWallClockBoundMs };
