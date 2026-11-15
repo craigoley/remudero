@@ -360,7 +360,7 @@ export function ladderOf(kind: LadderKind, episodes: Episode[], records: readonl
       && !closedUnmerged.has(Number(/(\d+)$/.exec(r.pr_url)![1])))
     .map(r => (r.next as { origin?: string } | undefined)?.origin).filter((s): s is string => typeof s === "string"));
   const escalated = new Set(records.filter(r => r.step === kind.escalatedStep && typeof r.issue_url === "string").map(r => r.origin));
-  for (const price of candidates.slice(0, 8)) {
+  for (const price of candidates) {
     const mine = tasks.filter(t => parseOrigin(kind, t.origin)?.[1] === price.key);
     const top = [...mine].sort((a, b) => Number(parseOrigin(kind, b.origin)?.[2] ?? 1) - Number(parseOrigin(kind, a.origin)?.[2] ?? 1))[0];
     let rung = top ? Number(parseOrigin(kind, top.origin)?.[2] ?? 1) : 1;

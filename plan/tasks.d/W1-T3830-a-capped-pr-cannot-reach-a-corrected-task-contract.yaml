@@ -11,7 +11,7 @@
   origin: "recon#pr-6153-capped-contract-amendment-2026-09-20"
   plan_refs: ["W1-T77", "W1-T78", "W1-T100", "W1-T150", "W1-T168", "W1-T3579", "W1-T3306", "W1-T3817"]
   priority: 5  # queue-judge-2026-10-30: No dependents or incidents, lower priority to reflect low delay cost.
-  status: queued
+  status: merged
   # queue judge: priority=5 evidence=043c8d19ed27b043
   attempts: 0
   rationale: |

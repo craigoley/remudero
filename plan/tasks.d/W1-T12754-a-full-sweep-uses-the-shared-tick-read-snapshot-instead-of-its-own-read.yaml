@@ -19,7 +19,7 @@
     - src/cli/commands/sweep.ts
     - test/a-stale-tick-read-generation-is-never-served.test.ts
     - test/daemon/a-full-sweep-joins-the-tick-read-already-in-flight.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "Each sweep.full_prelude row whose tick_read_source is not served names why the published generation was not used: tick_read_miss is one of consumed (an earlier full pass used it), stale (older than its age bound), unpublished (no generation yet) or no_plane, and tick_read_wait_ms is the time the pass waited for a read that started before its own"
