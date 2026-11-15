@@ -212,6 +212,7 @@ test("W1-T9102: a real child stays live until reservation sampling is bound", as
     child.on("error", reject);
     child.on("exit", () => { if (!output.includes("file-peak-ready")) reject(new Error(`fixture exited before ready: ${output}`)); });
   });
+  assert.equal(child.exitCode, null, "the ready child stays live for the sampling handoff");
   const reservation = openLearnedReservation({ workerClass: "test" }, {
     store: fx.store, ledger: { location: () => ({ dir: join(fx.dir, "ledger"), scope: "local" }), log: () => {} },
   });
