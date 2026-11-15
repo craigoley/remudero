@@ -7,11 +7,11 @@ raw: >-
   OBSERVED in craigoley/deals-watch#5, as reported by the session that fixed it
   (this session could not read that repository). A store's product JSON endpoint
   stopped returning the per-variant availability field. The reader coerced the
-  missing value to false ("sold out"), so a back-in-stock watcher saw nothing for
-  five days. Its tests stayed green because they mocked the fetch. The remedy
-  there: a field missing from an external payload is an error with a nonzero
-  exit, never a default value; and contract tests run against recorded real
-  payloads.
+  missing value to false ("sold out"), so a back-in-stock watcher saw nothing
+  for five days. Its tests stayed green because they mocked the fetch. The
+  remedy there: a field missing from an external payload is an error with a
+  nonzero exit, never a default value; and contract tests run against recorded
+  real payloads.
 
   WHAT REMUDERO ALREADY HAS (OBSERVED). The principle is applied site by site.
   src/lib/open-prs-rest.ts leaves draft undefaulted (W1-T528: "?? false" would
@@ -47,10 +47,11 @@ raw: >-
   loosening and no new provider or model calls to manufacture fixtures.
 attachments: []
 origin: cli
-status: new
+status: proposed
 reply_to: null
 proposal_pr: null
 summary: null
 expansion: null
 submission_key: cross-repo-automation:external-payload-contracts:20261029
 thread_id: null
+answered_by: null
