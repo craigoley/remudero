@@ -61,7 +61,12 @@ export interface InstallationBudgetThreadInput {
   state: SharedArrayBuffer;
   consumers: number;
   instance: string;
+  /** W1-T12820: the longest wait for a reset; a worker thread stands down past it, as the daemon does. */
+  maxWaitMs?: number;
 }
+
+/** A refused admission: what {@link InstallationBudget.resetWaitMs} is asked about. */
+export type InstallationBudgetRefusal = Extract<InstallationBudgetAdmit, { ok: false }>;
 
 export interface InstallationBudget {
   /** The number of consumers that share the installation; undefined means no allowance limit. */
@@ -82,6 +87,12 @@ export interface InstallationBudget {
   takeThrottleRows(): GithubBudgetThrottledRow[];
   /** W1-T12555: the state a worker thread joins; undefined for an unconfigured or unshared budget. */
   threadInput(): InstallationBudgetThreadInput | undefined;
+  /**
+   * W1-T12820: how long a refused read waits for its reset: at least 1 ms, or undefined when the reset is
+   * further away than the wait bound, so the read stands down and the caller's pass goes on without it.
+   * With no bound the wait is the whole reset window, as before.
+   */
+  resetWaitMs(refusal: InstallationBudgetRefusal): number | undefined;
 }
 
 /** The throttle-row windows kept for de-duplication; older windows are dropped. */
@@ -110,7 +121,9 @@ function withState<T>(state: BigInt64Array, fn: () => T): T {
 
 /** W1-T12555: the budget a worker thread asks, on the same atomic state as the thread that started it. */
 export function installationBudgetForThread(input: InstallationBudgetThreadInput, clock: Clock): InstallationBudget {
-  return createInstallationBudget({ consumers: input.consumers, instance: input.instance, clock, sharedState: input.state });
+  return createInstallationBudget({
+    consumers: input.consumers, instance: input.instance, clock, sharedState: input.state, maxWaitMs: input.maxWaitMs,
+  });
 }
 
 export function createInstallationBudget(opts: {
@@ -121,9 +134,13 @@ export function createInstallationBudget(opts: {
   /** Where each throttle row goes: the daemon writes it to the ledger. */
   onThrottle?: (row: GithubBudgetThrottledRow) => void;
   sharedState?: SharedArrayBuffer;
+  /** W1-T12820: the longest a refused read waits for its reset; the daemon sets its poll interval. */
+  maxWaitMs?: number;
 }): InstallationBudget {
   const consumers = opts.consumers !== undefined && Number.isInteger(opts.consumers) && opts.consumers > 0
     ? opts.consumers : undefined;
+  const maxWaitMs = opts.maxWaitMs !== undefined && Number.isFinite(opts.maxWaitMs) && opts.maxWaitMs >= 0
+    ? opts.maxWaitMs : undefined;
   const reserveFraction = opts.writeReserveFraction ?? GITHUB_WRITE_RESERVE_FRACTION;
   const instance = opts.instance ?? "unknown";
   let latest: InstallationBudgetReading | undefined;
@@ -284,7 +301,11 @@ export function createInstallationBudget(opts: {
     },
     threadInput() {
       return opts.sharedState === undefined || consumers === undefined
-        ? undefined : { state: opts.sharedState, consumers, instance };
+        ? undefined : { state: opts.sharedState, consumers, instance, ...(maxWaitMs === undefined ? {} : { maxWaitMs }) };
+    },
+    resetWaitMs(refusal) {
+      const waitMs = Math.max(1, refusal.waitUntil * 1000 - opts.clock.now());
+      return maxWaitMs === undefined || waitMs <= maxWaitMs ? waitMs : undefined;
     },
     takeThrottleRows() {
       if (shared === undefined) return pending.splice(0);
