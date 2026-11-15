@@ -19188,8 +19188,13 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
   const checkoutRoot = deps.repoRoot ?? resolve(flagValue(rest, "--repo-root") ?? repoRoot);
   // W1-T12171: the checkout that holds the code a task names. Without the option it is the plan's own checkout.
   const codeRootArg = flagValue(rest, "--code-root");
-  // W1-T12216: in a checkout of the plan destination, the code root is the public checkout with no added option.
-  const codeRootSelected = codeRootArg ?? planDestinationWorkingCheckout(checkoutRoot, instanceStateDir())?.publicCheckout;
+  // Only a usable configured root can select a destination. The existing dependency-credit guard below
+  // reports an unreadable config as named UNKNOWN evidence instead of this optional lookup throwing first.
+  const destinationRoot = codeRootArg === undefined ? existingCliRootWithoutConfig() : undefined;
+  const destinationStateDir = destinationRoot?.state === "present" && typeof destinationRoot.root === "string" &&
+    destinationRoot.root.trim().length > 0 && isAbsolute(destinationRoot.root) && !destinationRoot.root.includes("\0")
+    ? join(destinationRoot.root, "state") : undefined;
+  const codeRootSelected = codeRootArg ?? planDestinationWorkingCheckout(checkoutRoot, destinationStateDir)?.publicCheckout;
   const codeRoot = codeRootSelected !== undefined ? resolve(codeRootSelected) : checkoutRoot;
   let localRepoName: string | undefined;
   try { localRepoName = resolveOwnerRepoAt(codeRoot).repo; } catch { /* no origin identity: preserve existing lint behavior */ }
