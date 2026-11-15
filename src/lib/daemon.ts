@@ -3426,8 +3426,9 @@ async function runGatedSweep(
       const hold = deps.workerAdmissionHold?.() ?? (recyclePause ? resolveFleetControlHold(deps) : undefined);
       const heap = hold ? undefined : heapWorkerAdmissionHold(deps, "full-sweep", sample, log);
       if (heap) return heap.reason;
-      if (!hold) return kind === undefined && latchedAdmission?.()?.("fix-dispatch", "full-sweep") === false
-        ? "restart latched: a fix round would outlast the time left in the restart's drain" : undefined;
+      const admission = kind === undefined && !hold ? latchedAdmission?.() : undefined;
+      if (!hold) return admission?.("fix-dispatch", "full-sweep") === false
+        ? admission.heldBy ?? "restart latched: a fix round would outlast the time left in the restart's drain" : undefined;
       const reason = `fleet ${hold.control} hold: ${hold.detail}`;
       log("daemon.admission_held", { surface: "full-sweep", control: hold.control, detail: hold.detail, reason });
       return reason;
@@ -5604,7 +5605,11 @@ export async function runDaemon(
     log("daemon.admission_held", { surface, kind, reason: "restart latched", time_left_ms: Math.max(0, leftMs), measured_length_ms: lengthMs });
     return false;
   };
-  const latchedAdmission = (): RestartAdmission | undefined => restartWindow || restartLikely() ? restartAdmission : undefined;
+  const likelyAdmission: RestartAdmission = Object.assign(
+    (...args: Parameters<RestartAdmission>) => restartAdmission(...args),
+    { heldBy: "restart likely, and the work would outlast the predicted restart and its drain" });
+  const latchedAdmission = (): RestartAdmission | undefined =>
+    restartWindow ? restartAdmission : restartLikely() ? likelyAdmission : undefined;
   let sweepEndedEarly = false;
   const sweepStopsForRestart = (): boolean => {
     const stop = restartWindow !== undefined || preparedFreshnessExit !== undefined;

@@ -402,8 +402,8 @@ const EXPECTED_ORIGIN_KIND: Record<string, PolicyOriginKind> = {
   "freshnessRestart.stalenessHorizonMs": "lifted",
   "freshnessRestart.quietWindowMs": "lifted",
   "freshnessRestart.minLifetimeMs": "lifted",
-  "freshnessRestart.likelyFraction": "net-new",
-  "freshnessRestart.maxDrainWaitMs": "net-new",
+  "freshnessRestart.likelyFraction": "lifted",
+  "freshnessRestart.maxDrainWaitMs": "lifted",
 };
 
 /**
