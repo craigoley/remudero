@@ -14,7 +14,7 @@
     - src/lib/review-capacity.ts
     - src/lib/sweep.ts
     - test/review/the-host-worker-budget-counts-only-workers-that-use-local-cpu.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "With 8 active workers of which 3 are reviews in their provider phase, a host worker budget of 8 and base width 4, the review width is judged against 5 local-CPU workers: the host-worker-budget arm does not fire and restoreBase leaves room for 3 lanes"

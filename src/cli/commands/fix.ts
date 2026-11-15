@@ -27,7 +27,7 @@ import { billingMode } from "../../lib/env.js";
 import { FIX_MODE_RULES, deriveFixMode, fixScopeRegime, outOfDeclaredScopeFiles, renderFixPrompt, renderPrerequisitePrPrompt, sameHeadReviewUnmet, type FixEvidence, type FixReviewFinding } from "../../lib/prompt-render.js";
 import { bakedClosureCatalogDetails } from "../../lib/baked-closure-catalog.js";
 import { escalateWithJudge, escalationCause, realEscalationJudge, escalationHeadSha, openEscalationStandDownReason, fixEscalationDedupKey, findDuplicateEscalation, taskContractRevision, taskSemanticRevision, type Escalation, type EscalationDedupKey, type IssueGateway, type OpenIssue } from "../../lib/escalate.js";
-import { fetchSinglePrRest, codeqlCheckFailed, hydrateCodeqlHeadAlertsSteps, CODEQL_CHECK_NAME, type GhApiFetcher } from "../../lib/open-prs-rest.js";
+import { fetchSinglePrRest, codeqlCheckFailed, hydrateCodeqlHeadAlertsSteps, CODEQL_CHECK_NAME, createPlanFilingFileCache, hydratePlanFilingFilesSteps, type GhApiFetcher } from "../../lib/open-prs-rest.js";
 import { remedyFilesForFailingChecks, type RemedyFileForGate } from "../../lib/ci-parity.js";
 import { isInPlanScope } from "../../lib/plan-architect.js";
 import { planFilingFixRoundRefusal, readPlanFilingFixRoundInput } from "../../lib/plan-filing-fix-guard.js";
@@ -66,7 +66,7 @@ import { repoRoot, resolveOwnerRepo } from "../../lib/repo-location.js";
 import { refusalExcerptFromFixReport } from "../../lib/refusal-amendment.js";
 import { flagValue, unknownArgError } from "../../lib/cli-args.js";
 import { reviewTaskIdFromBody } from "../../lib/report-commands.js";
-import { type RawOpenPr, type StrikeRegime, currentStrikeRegimeFor, deriveStrikeHistory, fetchCiFailures, priorStrikesFor, remedyGeneratorNamedInLog, reviewStateFromRollup, reviewSummaryFromLedger, reviewVerdictPostedAtFromRollup, unmetFromLedger } from "../../lib/tick-read-worker.js";
+import { type RawOpenPr, type StrikeRegime, classifyPlanFiling, currentStrikeRegimeFor, deriveStrikeHistory, fetchCiFailures, isPlanOnlyFilingPr, priorStrikesFor, remedyGeneratorNamedInLog, resolveReviewTaskId, reviewStateFromRollup, reviewSummaryFromLedger, reviewVerdictPostedAtFromRollup, unmetFromLedger } from "../../lib/tick-read-worker.js";
 
 // Functions kept in the entrypoint arrive through this seam, as in DaemonCommandHost.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -2171,6 +2171,29 @@ async function capturedScopeMergeConflict(
   return hasCapturedMergeConflictEvidence(evidence) ? evidence : undefined;
 }
 
+/** W1-T12545: a trial merge of main at `headSha`, read from its unmerged index and aborted; never a dirty tree. */
+async function reenteredScopeMergeConflict(
+  git: (args: string[]) => Promise<string>, headSha: string, untrackedAll: string,
+): Promise<{ evidence: MergeConflictEvidence } | { reason: string }> {
+  const clean = async () => !(await git(["status", "--porcelain", "-z", untrackedAll])).trim();
+  if (!(await clean())) return { reason: "the worktree is not clean" };
+  if ((await git(["rev-parse", "HEAD"])).trim() !== headSha) return { reason: `the worktree is not at ${headSha}` };
+  await git(["fetch", "--no-tags", "origin", "main"]);
+  // A merge needs a committer identity even with --no-commit; a runner without one fails before any conflict.
+  const stopped = await git(["-c", "user.name=remudero trial merge", "-c", "user.email=trial-merge@remudero.invalid",
+    "merge", "--no-edit", "--no-commit", "--no-ff", "refs/remotes/origin/main"]).then(() => false, () => true);
+  let evidence: MergeConflictEvidence | undefined;
+  try {
+    evidence = stopped ? await capturedScopeMergeConflict(git) : undefined;
+  } finally {
+    if (await git(["rev-parse", "-q", "--verify", "MERGE_HEAD"]).then(() => true, () => false)) await git(["merge", "--abort"]);
+  }
+  if ((await git(["rev-parse", "HEAD"])).trim() !== headSha || !(await clean())) {
+    throw new Error(`the worktree did not return to ${headSha} after the trial merge`);
+  }
+  return evidence ? { evidence } : { reason: "the trial merge of main left no unmerged paths" };
+}
+
 type InheritedCensusRefreshInput = {
   root: string; worktreePath: string; branch: string; prUrl: string; prNumber: number;
   snapshotPath: string; context: Extract<NonNullable<CensusPushRefusal["inheritedMain"]>, { state: "inherited" }>;
@@ -2781,6 +2804,22 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
     // "prior capture was unreadable" contract {@link unchangedTreeStandDownReason} reads.
     if (deps.captureWorktreeSnapshot) {
       lastGateSnapshot = currentTreeSnapshot ? { gateKey, snapshot: currentTreeSnapshot } : undefined;
+    }
+    if (preStrikeStandDown?.reason === CONFLICT_REPAIR_HANDOFF_REASON && currentMergeConflict === undefined) {
+      const conflictHead = currentPinnedSha ?? review.headSha;
+      const captured = await reenteredScopeMergeConflict((args) => (deps.scopeAmendmentGit ?? hostWorktreeGitAsync)(
+        opts.worktreePath, args, { maxBuffer: 1 << 26 }), conflictHead, host.GIT_UNTRACKED_FILES_ALL)
+        .catch((error: unknown) => {
+          const reason = String((error as Error)?.message ?? error);
+          deps.log("fix.gate_read_error", { site: "rung.strike", strike: strikes + 1, read: "scope_merge_conflict", error: reason });
+          return { reason };
+        });
+      if ("evidence" in captured) {
+        currentMergeConflict = captured.evidence;
+        deps.log("fix.merge_mode_reentered", { site: "rung.strike", strike: strikes + 1, head_sha: conflictHead,
+          conflicted_files: conflictedFilePaths(currentMergeConflict) });
+        continue;
+      }
     }
     // W1-T7096: an unchanged tree is a loop SIGNAL — the progress judge decides whether it stops the rung.
     // A wired judge reads the unchanged tree from its own signals; only the stand-in stands down on it here.
@@ -4342,12 +4381,30 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
         runId: opts.runId,
         taskId: opts.taskId,
         snapshot: { headSha: priorHeadSha, failingChecks: (priorCiFailures ?? []).map((f) => f.name) },
+        fixRound: { prUrl: opts.prUrl, branch: opts.branch },
       }), deps.log);
       if (spawnOutcome.kind === "superseded") {
         const s = spawnOutcome.superseded;
         const reason = `fix superseded (${s.condition}): ${s.oldHead.slice(0, 12)} -> ${s.newHead.slice(0, 12)}`;
         deps.say(`fix rung: STOPPED strike ${attempt}/${opts.strikeCap} — ${reason}: ${opts.prUrl}`);
         return { outcome: "stood_down", review, strikes, retriggers, reason, standDownReason: reason, superseded: s };
+      }
+      if (spawnOutcome.kind === "yielded") {
+        // W1-T8141: a pending recycle ended the round; spawnFixWorkerBounded kept the work. No fix.dispatch, no strike.
+        const y = spawnOutcome.yielded;
+        deps.log("fix.done", { ...fixReceipt.joinFields(), round_id: roundId, head_sha: priorHeadSha,
+          ...(deps.branchClaim ? { branch_claim_run_id: deps.branchClaim.id() } : {}),
+          strike: attempt, round, subtype: "round_yielded", trigger: y.trigger, recovery_ref: y.recoveryRef ?? null,
+          index_recovery_ref: y.indexRecoveryRef ?? null,
+          cost_usd: y.costUsd, elapsed_ms: spawnOutcome.elapsedMs });
+        deps.branchClaim?.release();
+        const kept = [y.recoveryRef && `work kept at ${y.recoveryRef}`, y.indexRecoveryRef && `staged work kept at ${y.indexRecoveryRef}`]
+          .filter(Boolean).join(", ");
+        const reason = `fix round yielded to a pending ${y.trigger}: ${kept
+          || (y.keepError ? `work left in the worktree (${y.keepError})` : "no work to keep")}`;
+        deps.say(`fix rung: strike ${attempt}/${opts.strikeCap} YIELDED, no strike spent — ${reason}: ${opts.prUrl}`);
+        return { outcome: "stood_down", review, strikes, retriggers, reason, standDownReason: reason,
+          ...(y.keepError ? { retainWorktree: reason } : {}) };
       }
       if (spawnOutcome.kind === "abandoned") {
         deps.say(
@@ -4791,13 +4848,15 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
 
     // The fix rung's own footer carries the same '## Follow-ups' invitation (renderFixPrompt
     // above); PR provenance included (the fix rung always has one).
-    host.harvestFollowupsFromReport(workerTranscript(fixResult), {
+    const harvestContext = {
       label: "fix",
       prUrl: opts.prUrl,
       runId: opts.runId,
+      worktreePath: opts.worktreePath,
       log: deps.log,
       say: deps.say,
-    });
+    };
+    host.harvestFollowupsFromReport(workerTranscript(fixResult), harvestContext);
 
     if (fixAction.kind === "verify-base") {
       const files = baseReproductionFiles(priorCiFailures ?? []);
@@ -5840,7 +5899,17 @@ export async function fixCommand(
   }
 
   const ledger = readLedgerLines(ledgerPath);
-  const taskId = reviewTaskIdFromBody(raw.body ?? "");
+  // W1-T12702: the sweep's resolver. Only a PR whose run branch alone names its task needs the changed-path read.
+  const body = raw.body ?? "";
+  const branchOnly = reviewTaskIdFromBody(body) === undefined && resolveReviewTaskId(body, raw.headRefName, false) !== undefined;
+  const emitterFiling = isPlanOnlyFilingPr(ledger, raw.url);
+  const changedPaths = branchOnly && !emitterFiling
+    ? (await runStepsAsync(hydratePlanFilingFilesSteps(owner, repo, [{ number: raw.number, headRefOid: raw.headRefOid }],
+      deps.fetch ?? ((args, onRateLimit) => ghJsonAsync(args, undefined, onRateLimit)), createPlanFilingFileCache(), { missCap: 1 })))
+      .get(raw.number)
+    : undefined;
+  const planOnlyFiling = branchOnly && classifyPlanFiling(emitterFiling, changedPaths).isPlanFiling;
+  const taskId = resolveReviewTaskId(body, raw.headRefName, planOnlyFiling);
   const reviewState = reviewStateFromRollup(raw.statusCheckRollup);
   // W1-T2299: same producer as buildOpenPrViews above — see OpenPrView.reviewVerdictPostedAt's doc.
   const reviewVerdictPostedAt = reviewVerdictPostedAtFromRollup(raw.statusCheckRollup);

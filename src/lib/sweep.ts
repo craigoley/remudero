@@ -68,6 +68,7 @@ import {
   disarmAutoMerge,
   logArmAttribution,
   mergeDirectViaRestAsync,
+  mergeTargetFromPrUrl,
   assertOperatorMergeUnheld,
   readHeadShaRest as readArmHeadShaRest,
   readArmTimeline,
@@ -241,6 +242,7 @@ import type {
 import { DEP_REVIEW_ENGINE_REVISION, depReviewRowEngineRevision, isDependabotAuthor, dependabotOwnRedSignal, dependabotReviewArgs, dependabotRefreshVerdict, type DependabotOwnRedSignal, type DependabotRefreshVerdict } from "./dep-review.js";
 import { parseLedger } from "./retro.js";
 import { readReviewHostObservation, selectRuntimeReviewWidth } from "./review-capacity.js";
+import { yieldingFixClaim } from "./review-precedence.js";
 import {
   capacityDecisionText,
   publishReviewDemand,
@@ -389,6 +391,8 @@ export interface PriorPartialWork {
   /** Size-capped, secret-scrubbed diff text read from the recovery ref. */
   excerpt: string;
   excerptTruncated: boolean;
+  /** A distinct index snapshot when the worktree no longer holds the staged bytes. */
+  indexPatch?: { recoveryRef: string; excerpt: string; excerptTruncated: boolean };
 }
 // Re-exported so existing `import type { … } from "./sweep.js"` call sites keep working.
 export type { ConflictFileDiff, MergeConflictEvidence, MergeState } from "./merge-state.js";
@@ -3151,6 +3155,8 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         root: config.root,
         queueDepth,
         activeWorkers: activeWorkers ?? activeWorkerCount(),
+        // W1-T2989: reviews waiting on the provider use no local CPU, so the host worker budget does not count them.
+        providerPhaseWorkers: reviewPhaseSplit(policy.reviewLanes).judgePhaseInFlight,
         nowMs,
         ledgerLines,
         policy: policy.reviewCapacity,
@@ -6867,7 +6873,7 @@ export function prAddedLinesFromPullFiles(pages: unknown): Record<string, number
 }
 
 /** The sources {@link CiFailure.logTail} can come from, in preference order. */
-export type CiTailSource = "log" | "annotations";
+export type CiTailSource = "log" | "annotations" | "check-output";
 
 /** The outcome of the annotation fallback, recorded rather than folded into the log's own cause. */
 export type CiAnnotationFallback =
@@ -6882,22 +6888,17 @@ export type CiAnnotationFallback =
   | { outcome: "skipped-limit" }
   | { outcome: "failed"; detail: string };
 
-/** The closed set of reasons a log tail came back empty — a NAMED outcome, never an absence.
- *  `no-job-id`: no Actions job id, so no read was attempted. `fetch-failed`: a read failed, `detail`
- *  carrying the observed error. `empty-log`: the read SUCCEEDED and the job printed nothing.
- *  MAX_CI_LOG_FAILURE_DETAIL is a BACKSTOP on that `detail`, not a primary control — what the fix
- *  prompt renders is — set far above any observed message, so a truncation is itself evidence. */
+/** Why a log tail came back empty, always named: `no-job-id` (no read attempted), `fetch-failed` (`detail` is the
+ *  error; this BACKSTOP bounds it), `empty-log` (the job printed nothing), `deferred` (W1-T12713: retried at `until`). */
 export const MAX_CI_LOG_FAILURE_DETAIL = 500;
 
 export type CiLogUnavailableCause =
   | { kind: "no-job-id" }
   | { kind: "fetch-failed"; detail: string }
-  | { kind: "empty-log" };
+  | { kind: "empty-log" }
+  | { kind: "deferred"; cause: "rate-limit" | "transient"; until: string; detail: string };
 
-/**
- * One sentence naming why a log tail is missing, for BOTH consumers — run-task.ts's fix prompt and
- * this module's own escalation text — so the two can never describe the same cause differently.
- */
+/** One sentence naming why a log tail is missing, shared by the fix prompt and the escalation text so they agree. */
 export function describeCiLogUnavailable(cause: CiLogUnavailableCause): string {
   switch (cause.kind) {
     case "no-job-id":
@@ -6906,6 +6907,7 @@ export function describeCiLogUnavailable(cause: CiLogUnavailableCause): string {
       return `log NOT read: the log fetch was attempted and FAILED (${cause.detail})`;
     case "empty-log":
       return "log read successfully, but the job printed no failing output";
+    case "deferred": return `log read deferred (${cause.cause}, retry at ${cause.until})`;
   }
 }
 
@@ -13746,7 +13748,8 @@ const PRESERVED_PATCH_WITHHELD_PATHSPECS = [
 /**
  * W1-T6434 — the preserved fix-owner patch for THIS PR at THIS head, as bounded prompt evidence.
  * Reads the newest `sweep.fix.owner_residue_preserved` row (W1-T6362) whose `pr_number` and
- * `head_sha` both match, then the recovery ref's own diff against its parent (the owner's HEAD). The
+ * `head_sha` both match, then each recovery ref's diff against its parent (the owner's HEAD), including
+ * the separate index snapshot when staged bytes differ from disk. Both refs must be readable. The
  * excerpt is scrubbed BEFORE it is capped, so a credential cut at the boundary cannot survive as a
  * fragment. No matching row, a ref outside the recovery namespace, or an unreadable ref returns
  * `undefined` (the last reported through `onUnreadable`): the prompt then renders as it always did.
@@ -13764,29 +13767,38 @@ export function readPreservedOwnerPatch(args: {
   );
   if (!row) return undefined;
   const recoveryRef = typeof row.recovery_ref === "string" ? row.recovery_ref : "";
-  if (!recoveryRef.startsWith(PRESERVED_PATCH_REF_PREFIX) || /[\s\0]/.test(recoveryRef)) {
-    args.onUnreadable?.({ reason: "recovery_ref is outside the recovery namespace" });
-    return undefined;
-  }
+  const indexRef = typeof row.index_recovery_ref === "string" ? row.index_recovery_ref : "";
+  const refs = indexRef && indexRef !== recoveryRef ? [recoveryRef, indexRef] : [recoveryRef];
   const git = args.git ?? ((dir: string, argv: string[]) => hostWorktreeGit(dir, argv, { maxBuffer: 1 << 24 }));
-  let diff: string;
+  const patches: NonNullable<PriorPartialWork["indexPatch"]>[] = [];
+  for (const ref of refs) {
+    if (!ref.startsWith(PRESERVED_PATCH_REF_PREFIX) || /[\s\0]/.test(ref)) {
+      args.onUnreadable?.({ reason: "recovery_ref is outside the recovery namespace" });
+      return undefined;
+    }
+  }
   try {
-    git(args.repoDir, ["rev-parse", "--verify", "--quiet", `${recoveryRef}^{commit}`]);
-    diff = git(args.repoDir, [
-      "diff", "--no-ext-diff", "--no-textconv", "--no-color", `${recoveryRef}^`, recoveryRef, "--", ".", ...PRESERVED_PATCH_WITHHELD_PATHSPECS,
-    ]);
+    for (const ref of refs) {
+      git(args.repoDir, ["rev-parse", "--verify", "--quiet", `${ref}^{commit}`]);
+      const diff = git(args.repoDir, [
+        "diff", "--no-ext-diff", "--no-textconv", "--no-color", `${ref}^`, ref, "--", ".", ...PRESERVED_PATCH_WITHHELD_PATHSPECS,
+      ]);
+      const scrubbed = scrubRiskJudgeText(diff).text;
+      patches.push({ recoveryRef: ref, excerpt: scrubbed.slice(0, PRIOR_PARTIAL_WORK_EXCERPT_CAP),
+        excerptTruncated: scrubbed.length > PRIOR_PARTIAL_WORK_EXCERPT_CAP });
+    }
   } catch (e) {
     args.onUnreadable?.({ reason: capStderrExcerpt(String((e as Error)?.message ?? e), STDERR_EXCERPT_CAP) });
     return undefined;
   }
-  const scrubbed = scrubRiskJudgeText(diff).text;
   const stagedPaths = Array.isArray(row.staged_paths) ? row.staged_paths.filter((p): p is string => typeof p === "string") : [];
   return {
     recoveryRef,
     stagedPaths,
     ...(typeof row.staged_more === "number" && row.staged_more > 0 ? { stagedMore: row.staged_more } : {}),
-    excerpt: scrubbed.slice(0, PRIOR_PARTIAL_WORK_EXCERPT_CAP),
-    excerptTruncated: scrubbed.length > PRIOR_PARTIAL_WORK_EXCERPT_CAP,
+    excerpt: patches[0]!.excerpt,
+    excerptTruncated: patches[0]!.excerptTruncated,
+    ...(patches[1] ? { indexPatch: patches[1] } : {}),
   };
 }
 
@@ -15118,6 +15130,7 @@ const LIGHT_PASS_SCOPE_ENDS: Readonly<Record<LightPassScopeName, string>> = {
 
 /** W1-T9569: the stand-down a review-only pass writes for a lane it closed, naming its scope and its end. */
 export function reviewOnlyStandDownReason(scope: LightPassScopeName): string {
+  if (scope === "boot") return `review-only boot pass: arming and closing wait until ${LIGHT_PASS_SCOPE_ENDS.boot}`;
   return `review-only ${scope} pass: repair lanes closed until ${LIGHT_PASS_SCOPE_ENDS[scope]}`;
 }
 
@@ -15399,9 +15412,10 @@ export interface SweepDeps {
   /** W1-T11153: the open-PR reader the light pass started from, re-read when a freed lane refills so a PR that
    *  became eligible after the pass-start snapshot is ordered by its own admission key. Absent: the snapshot. */
   readOpenPrsForRefill?: () => Promise<OpenPrView[]>;
-  /** W1-T5749 — head-only guard fallback when readLiveStateAtAct is omitted. A changed head
-   *  stands down as `sweep.head_moved`; an undefined (unreadable) head leaves the act unchanged. */
+  /** W1-T5749 — head-only guard fallback when readLiveStateAtAct is omitted: a changed head stands down as `sweep.head_moved`, an unreadable one acts. */
   readLiveHeadSha?: (pr: OpenPrView) => string | undefined | Promise<string | undefined>;
+  /** W1-T12755: a light pass on its last good open-PR list reads every lane's head at act time, not only an arm's. */
+  guardEveryHeadAtAct?: boolean;
   /** W1-T7734 — THE SAME-PASS RE-READ. When the act-time guard catches a moved head, this reads THAT ONE
    *  PR again (the PR plus its status rollup, through the caller's `GhCallPacer`) and returns its rebuilt
    *  view; the walk then re-derives and acts on it in this pass instead of standing down for a whole tick.
@@ -18288,9 +18302,39 @@ export interface FixDispatchChildPorts {
   log: (step: string, extra?: Record<string, unknown>) => void;
   /** The phase sink: the owned run's `status.json`, so a fix's admission, worker and CI wait stay visible to the adopting daemon. */
   onPhase?: (phase: string) => void;
+  /** W1-T12545: merge facts with their response's head SHA. Absent, the child reads fresh REST facts. */
+  readMergeFacts?: (prUrl: string) => Promise<{ mergeable?: string; headSha?: string }>;
 }
 
-export type FixDispatchRecheckPorts = Pick<FixDispatchChildPorts, "readLivePr" | "readTask" | "hold">;
+export type FixDispatchRecheckPorts = Pick<FixDispatchChildPorts, "readLivePr" | "readTask" | "hold" | "readMergeFacts">;
+
+/** W1-T12545: the envelope at the live head, only for a conflicted decision whose PR still reads CONFLICTING there. */
+export async function conflictedChildHeadAdoption(
+  envelope: FixDispatchEnvelope, live: { state: string; merged?: boolean; headSha?: string },
+  readMergeFacts: NonNullable<FixDispatchChildPorts["readMergeFacts"]>,
+): Promise<FixDispatchEnvelope | undefined> {
+  if (envelope.evidence.mergeConflict === undefined || live.merged === true || live.state.toLowerCase() !== "open" ||
+      !live.headSha || live.headSha === envelope.pr.headSha) return undefined;
+  const facts = await readMergeFacts(envelope.pr.prUrl).catch((error: unknown) => ({ mergeable: undefined, headSha: undefined, unreadable: String(error) }));
+  if (facts.mergeable !== "CONFLICTING" || facts.headSha !== live.headSha) return undefined;
+  return { ...envelope, pr: { ...envelope.pr, headSha: live.headSha } };
+}
+
+export async function childMergeFacts(
+  prUrl: string,
+  readJson: typeof ghJsonAsync = ghJsonAsync,
+): Promise<{ mergeable?: string; headSha?: string }> {
+  const target = mergeTargetFromPrUrl(prUrl);
+  if (!target) return {};
+  const pr = await readJson(["api", `repos/${target.owner}/${target.repo}/pulls/${target.prNumber}`], undefined, undefined, { fresh: true }) as {
+    head?: { sha?: unknown }; mergeable?: unknown; mergeable_state?: unknown;
+  } | undefined;
+  return {
+    headSha: typeof pr?.head?.sha === "string" ? pr.head.sha : undefined,
+    mergeable: pr?.mergeable === false || pr?.mergeable_state === "dirty" ? "CONFLICTING" :
+      pr?.mergeable === true ? "MERGEABLE" : "UNKNOWN",
+  };
+}
 
 /**
  * W1-T9114 — THE CHILD'S RECHECK, run before it takes its own claim: the fleet hold, the PR's current state and head, and the
@@ -18299,7 +18343,7 @@ export type FixDispatchRecheckPorts = Pick<FixDispatchChildPorts, "readLivePr" |
  */
 export async function recheckFixDispatch(
   envelope: FixDispatchEnvelope, ports: FixDispatchRecheckPorts,
-): Promise<{ ok: true } | { ok: false; reason: string }> {
+): Promise<{ ok: true; adopted?: FixDispatchEnvelope } | { ok: false; reason: string }> {
   const refuse = (reason: string) => ({ ok: false as const, reason });
   try {
     const hold = ports.hold();
@@ -18307,7 +18351,12 @@ export async function recheckFixDispatch(
     const live = await ports.readLivePr(envelope.pr.prUrl);
     if (live === undefined) return refuse("the PR's live state could not be read");
     if (live.merged === true || live.state.toLowerCase() !== "open") return refuse(`the PR is no longer open (${live.merged === true ? "merged" : live.state})`);
-    if (live.headSha !== envelope.pr.headSha) return refuse(`the PR head moved from ${envelope.pr.headSha} to ${live.headSha ?? "an unreadable head"}`);
+    let adopted: FixDispatchEnvelope | undefined;
+    if (live.headSha !== envelope.pr.headSha) {
+      adopted = await conflictedChildHeadAdoption(envelope, live, ports.readMergeFacts ?? childMergeFacts);
+      if (adopted !== undefined && (await ports.readLivePr(envelope.pr.prUrl))?.headSha !== adopted.pr.headSha) adopted = undefined;
+      if (adopted === undefined) return refuse(`the PR head moved from ${envelope.pr.headSha} to ${live.headSha ?? "an unreadable head"}`);
+    }
     const taskId = envelope.pr.taskId;
     if (taskId !== undefined) {
       const task = ports.readTask(taskId);
@@ -18317,7 +18366,7 @@ export async function recheckFixDispatch(
         return refuse(`task ${taskId}'s canonical context changed since the sweep decided`);
       }
     }
-    return { ok: true };
+    return adopted === undefined ? { ok: true } : { ok: true, adopted };
   } catch (error) {
     const reason = `the recheck could not read its evidence (${String((error as Error)?.message ?? error)})`;
     return refuse(reason);
@@ -18333,12 +18382,16 @@ export async function recheckFixDispatch(
  * lost, never as success), not a quiet return.
  */
 export async function runFixDispatchChild(inputs: Record<string, unknown>, deps: FixDispatchChildPorts): Promise<void> {
-  const envelope = readFixDispatchEnvelope(inputs.envelope);
-  if (envelope === undefined) throw new Error("fix dispatch refused: the spec carries no readable decision envelope");
-  const rechecked = await recheckFixDispatch(envelope, deps);
+  const decided = readFixDispatchEnvelope(inputs.envelope);
+  if (decided === undefined) throw new Error("fix dispatch refused: the spec carries no readable decision envelope");
+  const rechecked = await recheckFixDispatch(decided, deps);
   if (!rechecked.ok) {
-    deps.log("sweep.fix.child_refused", { pr_number: envelope.pr.prNumber, head_sha: envelope.pr.headSha, reason: rechecked.reason });
+    deps.log("sweep.fix.child_refused", { pr_number: decided.pr.prNumber, head_sha: decided.pr.headSha, reason: rechecked.reason });
     throw new Error(`fix dispatch refused: ${rechecked.reason}`);
+  }
+  const envelope = rechecked.adopted ?? decided;
+  if (rechecked.adopted) {
+    deps.log("sweep.fix.child_head_adopted", { pr_number: decided.pr.prNumber, from_head: decided.pr.headSha, to_head: envelope.pr.headSha });
   }
   const refuseOnHold = (step: string): void => {
     let hold: string | undefined;
@@ -20328,7 +20381,7 @@ export async function runSweep(
           waitSinceMs: (pr) => waitSinceMs(pr, false),
         });
   const fixCapacityReleases = new Map<number, () => void>();
-  const capacityClaim = deps.claimFixAdmission ?? fullRepairAdmission?.claim;
+  const capacityClaim = deps.claimFixAdmission ?? yieldingFixClaim("full", fullRepairAdmission?.claim, ledgerLines, now, log, fullReviewCandidates ?? [], fullReviewQueue);
   const claimFixAdmission = capacityClaim ? (pr: OpenPrView) => {
     const claim = capacityClaim(pr);
     if (claim.admitted && claim.release) fixCapacityReleases.set(pr.prNumber, claim.release);
@@ -23118,10 +23171,9 @@ export async function runSweep(
       } else {
         try {
           // W1-T5749: the snapshot can outlive its head (#9138 armed, #9155 escalated on dead heads).
-          // W1-T5922: a light pass reads the live head for its arm only; its other lanes are unchanged.
+          // W1-T5922: a light pass reads the live head for its arm only (W1-T12755: every lane on a last good list).
           // W1-T7734: a view read during this pass (the re-derive below) needs no second live read.
-          const guardHead = !rederivedIndices.has(prIndex) &&
-            (deps.repairAdmissionSurface !== "light" || disposition === "mergeable");
+          const guardHead = !rederivedIndices.has(prIndex) && (deps.repairAdmissionSurface !== "light" || disposition === "mergeable" || deps.guardEveryHeadAtAct === true);
           const liveAtAct = guardHead ? await deps.readLiveStateAtAct?.(pr) : undefined;
           const liveHead = !guardHead ? undefined : deps.readLiveStateAtAct
             ? liveAtAct?.headSha : await deps.readLiveHeadSha?.(pr);
@@ -24085,6 +24137,9 @@ export async function runSweep(
                   break;
                 }
               }
+              const logHolds = ciFailuresForFix.flatMap((f) => f.logUnavailable?.kind === "deferred" && Date.parse(f.logUnavailable.until) > now // expiring-fixture: exempt -- W1-T12713 runtime retry time, no blind round before it
+                ? [`${f.name}: ${describeCiLogUnavailable(f.logUnavailable)}`] : []);
+              if (logHolds.length > 0) { acted = false; standDownReason = `${logHolds.join("; ")} — no fix strike`; break; }
               // W1-T8041: no requeue arm took this pass, so an unavailable rerun stands down exactly as it did before.
               if (unavailableRerunStandDown !== undefined) {
                 standDownReason = unavailableRerunStandDown;
@@ -26471,6 +26526,7 @@ async function runSweepLightPassCore(
   // ledger-read-intent: live — this fold reads the live file only, never rotations.
   const readLedger = deps.readLedger ?? readLiveLedgerRows;
   const selectionLedgerLines = readLedger(deps.ledgerPath);
+  const repushedQueuedAt = repushedHeadQueuedAt(selectionLedgerLines);
   openPrs = openPrs.map(pr => promiseHarvestRetryView(pr, selectionLedgerLines, deps.sampleLoad));
   const selectionPrior = priorActionsFromLedger(selectionLedgerLines, openPrs, deps.sampleLoad);
   openPrs = openPrs.map(pr => completedRefusalRetryView(pr, selectionPrior));
@@ -26510,10 +26566,11 @@ async function runSweepLightPassCore(
   const policySemanticBound = effectiveReviewWidth(deps, policy, queueDepth, now, selectionLedgerLines, activeWorkers);
   const { bound: semanticBound, inFlight: reviewsInFlight } = reviewAdmissionBound(policySemanticBound);
   const unreserved = openPrs.filter((pr) => !lightPassReservedHeads.has(lightPassHeadKey(pr)));
-  const planBound = planLaneBoundForPass(deps, policy, selectReviewAdmissions(unreserved, policy, now, outcomes, 0, unreserved.length)
-    .planFilings.length, "light");
+  const planBound = planLaneBoundForPass(deps, policy, selectReviewAdmissions(unreserved, policy, now, outcomes, 0, unreserved.length,
+    undefined, repushedQueuedAt).planFilings.length, "light");
   const needsPerson = needsPersonPredicate(selectionLedgerLines);
-  const selected = selectReviewAdmissions(unreserved, policy, now, outcomes, semanticBound, planBound.available, needsPerson);
+  const selected = selectReviewAdmissions(unreserved, policy, now, outcomes, semanticBound, planBound.available, needsPerson,
+    repushedQueuedAt);
   recordReviewOrderShadow(deps, selectionLedgerLines, reviewAdmissionCandidates(unreserved, policy, now, outcomes),
     selected.spawning, now, semanticBound);
   const latchHeld = new Set<number>();
@@ -26532,7 +26589,7 @@ async function runSweepLightPassCore(
   // admits the next of them at once (`refillFreedLanes` below) instead of idling until another pass.
   const refillTail = selectReviewAdmissions(
     openPrs.filter((pr) => !spawningNumbers.has(pr.prNumber) && !lightPassReservedHeads.has(lightPassHeadKey(pr))),
-    policy, now, outcomes, openPrs.length, undefined, needsPerson,
+    policy, now, outcomes, openPrs.length, undefined, needsPerson, repushedQueuedAt,
   ).spawning;
   let refillArmed = false;
   // W1-T2584 parity: provider capacity is account-wide, so a pass whose review met the gh budget
@@ -26658,11 +26715,10 @@ async function runSweepLightPassCore(
   // pass still reconciles every PR concurrently; only the expensive fix-dispatch spending point
   // claims from this shared pool. `activeWorkerCount` is the same process-wide counter the adaptive
   // review controller reads, and selected spawning reviews reserve their width before fixes race.
-  const hostWorkerBudget = policy.reviewCapacity.hostWorkerBudget;
   const repairAdmission = createSweepFixAdmissionController({
     surface: "light",
     queueDepth,
-    hostWorkerBudget,
+    hostWorkerBudget: policy.reviewCapacity.hostWorkerBudget,
     activeWorkers,
     readActiveWorkers: deps.fixProgressJudge || deps.readFixPressure ? deps.readActiveWorkerCount ?? activeWorkerCount : undefined,
     readPressure: deps.readFixPressure ?? (deps.fixProgressJudge
@@ -26672,7 +26728,7 @@ async function runSweepLightPassCore(
     ...productionFixAdmissionReaders(deps),
     log: deps.log,
   });
-  const claimFixAdmission = deps.claimFixAdmission ?? repairAdmission.claim;
+  const claimFixAdmission = yieldingFixClaim("light", deps.claimFixAdmission ?? repairAdmission.claim, selectionLedgerLines, now, deps.log, refillTail);
   const selectedNumbers = new Set<number>([
     ...spawning.map((p) => p.prNumber),
     ...planFilings.map((p) => p.prNumber),
@@ -26894,7 +26950,7 @@ async function runSweepLightPassCore(
     refillTail.splice(0, refillTail.length, ...selectReviewAdmissions(
       freshViews.filter((pr) => !spawningNumbers.has(pr.prNumber) && !refilledHeads.has(lightPassHeadKey(pr)) &&
         !lightPassReservedHeads.has(lightPassHeadKey(pr))),
-      policy, refillViewReadAtMs, outcomes, freshViews.length, undefined, needsPerson,
+      policy, refillViewReadAtMs, outcomes, freshViews.length, undefined, needsPerson, repushedQueuedAt,
     ).spawning);
   };
   let recycleRefillHeld = false;
@@ -27300,6 +27356,7 @@ export function selectReviewAdmissions(
   reviewWidth: number = Math.max(1, policy.reviewLanes),
   planLaneWidth: number = derivePlanLaneBound(undefined, policy, 0).available,
   needsPerson?: (pr: OpenPrView) => boolean,
+  repushedQueuedAt?: ReadonlyMap<string, string>,
 ): { spawning: OpenPrView[]; planFilings: OpenPrView[] } {
   // W1-T2583: selection and execution must agree on outcome-keyed eligibility, so the caller folds
   // both sets once from the same reader `runSweep` uses and filters here before either lane ranks.
@@ -27315,8 +27372,8 @@ export function selectReviewAdmissions(
     const ga = needsPerson?.(a) === true ? 1 : 0;
     const gb = needsPerson?.(b) === true ? 1 : 0;
     if (ga !== gb) return ga - gb;
-    const ka = Date.parse(reviewAdmissionKey(a));
-    const kb = Date.parse(reviewAdmissionKey(b));
+    const ka = Date.parse(repushedQueuedAt?.get(`${a.prNumber}@${a.headSha}`) ?? reviewAdmissionKey(a));
+    const kb = Date.parse(repushedQueuedAt?.get(`${b.prNumber}@${b.headSha}`) ?? reviewAdmissionKey(b));
     const aa = Number.isNaN(ka) ? -Infinity : now - ka;
     const ab = Number.isNaN(kb) ? -Infinity : now - kb;
     return ab !== aa ? ab - aa : a.prNumber - b.prNumber;
@@ -27328,6 +27385,29 @@ export function selectReviewAdmissions(
 
   const spawning = [...rest].sort(oldestFirst).slice(0, Math.max(0, reviewWidth));
   return { spawning, planFilings };
+}
+
+/** W1-T12534: `<pr>@<head>` of a minted head to its first eligible time, else its mint time. */
+function repushedHeadQueuedAt(ledgerLines: ReadonlyArray<Record<string, unknown>>): Map<string, string> {
+  const minted = new Map<string, string>();
+  const eligible = new Map<string, string>();
+  const isTime = (value: unknown): value is string => typeof value === "string" && Number.isFinite(Date.parse(value));
+  const first = (values: Map<string, string>, key: string, ts: string): void => {
+    if (!values.has(key)) values.set(key, ts);
+  };
+  for (const row of ledgerLines) {
+    if (!isTime(row.ts)) continue;
+    const head = row.step === "sweep.absent_repush" ? row.new_head
+      : row.step === "sweep.review_eligible" ? row.head_sha : undefined;
+    if (typeof head !== "string") continue;
+    const key = `${String(row.pr_number)}@${head}`;
+    if (row.step === "sweep.absent_repush") {
+      first(minted, key, row.ts);
+      continue;
+    }
+    first(eligible, key, row.ts);
+  }
+  return new Map([...minted].map(([key, ts]) => [key, eligible.get(key) ?? ts]));
 }
 
 /** Number of spawning review candidates before the adaptive admission cut. */
