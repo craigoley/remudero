@@ -17,7 +17,7 @@
   files:
     - src/lib/plan-pr-merge-safety.ts
     - test/plan/a-merge-safety-check-fetches-a-plan-blob-that-its-clone-lacks.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "When the batch read reports that the clone lacks an object of the merged plan, the check fetches the missing object ids from origin once and reads the merged plan again. The reading loads when the second read succeeds"

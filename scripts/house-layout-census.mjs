@@ -4,7 +4,7 @@
  * hooks/pre-push. Importing a `node:test` file runs its tests, and W1-T3225 removed the runner
  * from that hook. The suite imports these and keeps its merge-base-relative assertion.
  */
-import { readdirSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
 
@@ -41,18 +41,16 @@ export function houseLiteralCounts(contents) {
 
 // W1-T9332 structural split exception; application requires an explicit operator ruling.
 // The physical-file scanner above is unchanged. Only this pair and these observed tokens qualify.
-const RUN_TASK_LAYOUT_SPLIT = { old: "src/run-task.ts", moved: "src/cli/commands/run-task-verb.ts" };
-const RUN_TASK_LAYOUT_SPLIT_LITERALS = ["plan/tasks.d", "MASTER-PLAN.md", ".remudero/", "learnings/"];
+// W1-T12526: the table is data, so this module names no source path an import graph reads as an edge.
+const SPLIT_TABLE = JSON.parse(readFileSync(new URL("./house-layout-split-table.json", import.meta.url), "utf8"));
+const RUN_TASK_LAYOUT_SPLIT = { old: SPLIT_TABLE.runTaskSplit.old, moved: SPLIT_TABLE.runTaskSplit.moved };
+const RUN_TASK_LAYOUT_SPLIT_LITERALS = SPLIT_TABLE.runTaskSplit.literals;
 
 /** One physical duplicate per conserved token; readers supply complete merge-base/head maps.
  * An unreadable base entry must remain present (with a non-string value), never look absent. */
 // Exact post-merge restoration of W1-T9338's approved source comment. These source hashes
 // bind the complete before/after module; no other source byte or owner can change under it.
-const SWEEP_RESTORATION = {
-  path: "src/cli/commands/sweep.ts",
-  before: "9e4c57e7a16a1adca59fde97f35c36baef713655e49c5211dfa6c90f5dbb1b87",
-  after: "d8d16e2c1376d6080ddf1128c3d3777f63551e8c1fb3b5f266c36b538c90ef3f",
-};
+const SWEEP_RESTORATION = SPLIT_TABLE.sweepRestoration;
 function qualifiedSweepCommentRestoration(base, current) {
   if (base.size !== current.size || typeof base.get(RUN_TASK_LAYOUT_SPLIT.old) !== "string") return false;
   if (!base.get(RUN_TASK_LAYOUT_SPLIT.old).includes(".remudero/")) return false;

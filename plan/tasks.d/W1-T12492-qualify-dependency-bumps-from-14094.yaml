@@ -92,7 +92,7 @@
     - claim: Every adopted target has its reviewed version and artifact hash in the appropriate lock, with incompatible targets explicitly refused rather than forced through consumer changes
       proof: "unit test: test/review/semgrep-dependency-bumps-14094.test.ts"
     - claim: "invariant:native-qualification — The updated closure retains exact hash locks and all native Semgrep installation and qualification controls, including fail-closed handling of incompatible or unknown closure evidence"
-      proof: "unit test: test/semgrep-native-install.test.ts"
+      proof: "unit test: W1-T12492 criterion 2 native install preserves qualification controls"
       kind: guard
     - claim: The native install suite carries the task-specific title for criterion 2
       proof: "grep: W1-T12492 criterion 2 native install preserves qualification controls in test/semgrep-native-install.test.ts"

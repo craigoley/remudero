@@ -136,7 +136,8 @@ export function createCiIncidentState(): CiIncidentState {
 }
 
 /** Read the raw log for a check-run/job id. Missing repository metadata is known-unavailable,
- *  rather than an invitation to guess a repository; transport failures fail soft and stay visible. */
+ *  rather than an invitation to guess a repository; transport failures fail soft and stay visible.
+ *  W1-T12713: a log GitHub does not hold (HTTP 404) is read from the check run's own output instead. */
 export async function readCiIncidentJobLog(
   repository: string,
   jobId: number,
@@ -151,15 +152,79 @@ export async function readCiIncidentJobLog(
       timeout: 30_000,
     });
   } catch (error) {
+    const failure = classifyLogFetchFailure(error);
+    let outputError: string | undefined;
+    if (failure.kind === "absent") {
+      try {
+        const output = await readCheckRunOutputAsync(repository, jobId);
+        if (output.trim() !== "") return output;
+      } catch (readError) {
+        // Not rethrown: the unreadable row below names this error beside the log's own failure.
+        outputError = String((readError as Error)?.message ?? readError);
+      }
+    }
     if (log) {
       log("serve.ci_incidents.job_log_unreadable", {
         reason: String((error as Error)?.message ?? error),
         repository,
         jobId,
+        ...(failure.kind === "unknown" ? {} : { cause: failure.kind }),
+        ...(outputError === undefined ? {} : { check_output_error: outputError }),
       });
     }
     return "";
   }
+}
+
+// ── (vi) A LOG THAT CANNOT BE READ — W1-T12713: one classification for the fix lane and serve ────
+
+/** Why a job log read failed. `rate-limit` and `transient` clear with time, so the read is retried;
+ *  `absent` never clears (a job with no steps has no log), so the check run's output is read instead;
+ *  `unknown` keeps the behaviour from before this classification. */
+export type LogFetchFailure =
+  | { kind: "rate-limit"; resetAtMs?: number; retryAfterMs?: number }
+  | { kind: "transient" }
+  | { kind: "absent" }
+  | { kind: "unknown" };
+
+export function classifyLogFetchFailure(error: unknown, job?: { steps?: readonly unknown[] }): LogFetchFailure {
+  if (job?.steps !== undefined && job.steps.length === 0) return { kind: "absent" };
+  const e = error as { code?: unknown; message?: unknown; stderr?: unknown } | null | undefined;
+  const message = typeof e?.message === "string" ? e.message : String(error ?? "");
+  const text = `${typeof e?.stderr === "string" ? e.stderr : ""}\n${message}`;
+  const http = Number(/\bHTTP (\d{3})\b/.exec(text)?.[1] ?? Number.NaN);
+  if (http === 429 || ((http === 403 || Number.isNaN(http)) && /rate limit|too many requests/i.test(text))) {
+    const reset = Number(/x-ratelimit-reset\W{0,3}(\d{9,})/i.exec(text)?.[1] ?? Number.NaN);
+    const after = Number(/retry-after\W{0,3}(\d+)/i.exec(text)?.[1] ?? Number.NaN);
+    return { kind: "rate-limit", ...(Number.isFinite(reset) ? { resetAtMs: reset * 1000 } : {}),
+      ...(Number.isFinite(after) ? { retryAfterMs: after * 1000 } : {}) };
+  }
+  if ((http >= 500 && http <= 599) || e?.code === "ETIMEDOUT" || /timed out|\btimeout\b/i.test(message)) return { kind: "transient" };
+  return http === 404 ? { kind: "absent" } : { kind: "unknown" };
+}
+
+/** PRIMARY CONTROL: the first wait after a failed read; each later failure doubles it up to the ceiling. */
+export const LOG_FETCH_BACKOFF_FIRST_MS = 60_000;
+/** BACKSTOP: the longest wait between reads, so a log that becomes readable is read within 15 minutes. */
+export const LOG_FETCH_BACKOFF_MAX_MS = 15 * 60_000;
+
+/** When a read that failed `failures` times in a row is next due: GitHub's own reset time when it gave one. */
+export function logFetchRetryAtMs(failure: LogFetchFailure, failures: number, nowMs: number): number {
+  if (failure.kind === "rate-limit" && failure.resetAtMs !== undefined) return failure.resetAtMs;
+  if (failure.kind === "rate-limit" && failure.retryAfterMs !== undefined) return nowMs + failure.retryAfterMs;
+  return nowMs + Math.min(LOG_FETCH_BACKOFF_MAX_MS, LOG_FETCH_BACKOFF_FIRST_MS * 2 ** Math.max(0, failures - 1));
+}
+
+/** A check run's own output (title, summary, text), the first `maxLines` lines, from its REST JSON. */
+export function checkRunOutputText(json: string, maxLines = 60): string {
+  const output = (JSON.parse(json) as { output?: Record<string, unknown> } | null)?.output ?? {};
+  return [output.title, output.summary, output.text]
+    .filter((part): part is string => typeof part === "string" && part.trim() !== "")
+    .join("\n").split("\n").slice(0, maxLines).join("\n");
+}
+
+export async function readCheckRunOutputAsync(repository: string, checkRunId: string | number, maxLines = 60): Promise<string> {
+  return checkRunOutputText(await ghTextAsync(["api", `repos/${repository}/check-runs/${checkRunId}`]), maxLines);
 }
 
 /** One completed check run — the fields `recordCheckRunOutcome` needs, already extracted (and,

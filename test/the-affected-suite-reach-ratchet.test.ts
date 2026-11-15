@@ -8,6 +8,8 @@ import { test } from "node:test";
 
 import * as selector from "../src/lib/affected-suites.js";
 // @ts-ignore executable census module has no declaration file.
+import { measureReach as measureTree } from "#scripts/affected-reach-count.mjs";
+// @ts-ignore executable census module has no declaration file.
 import { censusSnapshotPaths, readCensusSnapshot } from "../scripts/census-precheck.mjs";
 
 const SNAPSHOT = readCensusSnapshot();
@@ -15,12 +17,6 @@ const ROOT = SNAPSHOT?.root ?? fileURLToPath(new URL("../", import.meta.url));
 const BASELINE = `${ROOT}/scripts/affected-reach-baseline.json`;
 const SUITE = /^test\/.*\.test\.ts$/;
 const CODE = /\.(?:ts|mts|mjs|js|cjs)$/;
-
-interface Graph {
-  dependencies: Map<string, Set<string>>;
-  importers: Map<string, Set<string>>;
-  directImports: Map<string, Set<string>>;
-}
 
 interface Reach {
   importerCount: number;
@@ -37,60 +33,14 @@ interface Baseline extends Reach {
 /** The one resolution the recorded baseline may name: `#` specifiers resolved through package.json `imports`. */
 const RESOLUTION = "package-imports";
 
-function graph(files: ReadonlyMap<string, string>): Graph {
-  assert.ok("buildAffectedSuitesGraph" in selector, "the selector must export its graph builder");
-  // The alias map is the tree's own package.json, the same tree the census reads.
-  return (selector.buildAffectedSuitesGraph as (files: ReadonlyMap<string, string>, extra: string[], aliases: { root: string }) => Graph)(files, [], { root: ROOT });
+/** The selector's graph over this tree's own package.json imports map. */
+function graph(files: ReadonlyMap<string, string>) {
+  return selector.buildAffectedSuitesGraph(files, [], { root: ROOT });
 }
 
-function reachable(start: string, edges: ReadonlyMap<string, ReadonlySet<string>>): Set<string> {
-  const seen = new Set<string>();
-  const queue = [start];
-  for (let i = 0; i < queue.length; i += 1) {
-    const file = queue[i]!;
-    if (seen.has(file)) continue;
-    seen.add(file);
-    queue.push(...(edges.get(file) ?? []));
-  }
-  return seen;
-}
-
-export function measureReach(files: ReadonlyMap<string, string>): Baseline {
-  const { dependencies, importers: reverse, directImports } = graph(files);
-  const suites = [...dependencies.keys()].filter((f) => SUITE.test(f));
-  const modules = [...dependencies.keys()].filter((f) => f.startsWith("src/"));
-  assert.ok(suites.length > 0 && modules.length > 0, "the census needs source modules and suites");
-  const importers = suites.filter((f) => directImports.get(f)?.has("src/run-task.ts")).sort();
-  const reach = modules.map((f) => [...reachable(f, reverse)].filter((p) => SUITE.test(p)).length)
-    .sort((a, b) => a - b);
-  const middle = Math.floor(reach.length / 2);
-  const median = reach.length % 2 === 0 ? (reach[middle - 1]! + reach[middle]!) / 2 : reach[middle]!;
-
-  const seen = new Set<string>();
-  const order: string[] = [];
-  const visit = (file: string) => {
-    if (seen.has(file)) return;
-    seen.add(file);
-    for (const dep of dependencies.get(file) ?? []) visit(dep);
-    order.push(file);
-  };
-  for (const file of dependencies.keys()) visit(file);
-  seen.clear();
-  let largestScc = 0;
-  for (const file of order.reverse()) {
-    if (seen.has(file)) continue;
-    const component = new Set<string>();
-    const queue = [file];
-    for (let i = 0; i < queue.length; i += 1) {
-      const node = queue[i]!;
-      if (seen.has(node)) continue;
-      seen.add(node);
-      component.add(node);
-      queue.push(...(reverse.get(node) ?? []));
-    }
-    largestScc = Math.max(largestScc, component.size);
-  }
-  return { importerCount: importers.length, largestScc, medianReachPercent: median * 100 / suites.length, importers };
+/** The counter in scripts/affected-reach-count.mjs, over this tree's own package.json imports map. */
+function measureReach(files: ReadonlyMap<string, string>): Baseline {
+  return measureTree(files, { root: ROOT }) as Baseline;
 }
 
 export function reachVerdict(actual: Baseline, baseline: Baseline): { refused: string[]; tighter: string[] } {
