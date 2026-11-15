@@ -49,6 +49,8 @@ import {
   workerInstallationScope,
 } from "../src/lib/worker-containment.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { RETRO_SHADOW_OVERRUN_MS } from "#src/lib/daemon.js";
+import { detachedActionInFlight, drainDetachedSweepActions, installDetachedWorkHost } from "#src/lib/sweep.js";
 
 // A small linear-ish plan: A → B → C (chain) + D (independent), all auto.
 const YAML = `
@@ -4347,8 +4349,6 @@ type Row = { step: string; extra: Record<string, unknown> };
 const rowsOf = (rows: Row[], step: string) => rows.filter((r) => r.step === step);
 
 test("W1-T11790 criterion 1: a retro still running past the shadow duration is ledgered exactly once as overrunning with its pid, age and threshold, and keeps running", async () => {
-  const { RETRO_SHADOW_OVERRUN_MS } = await import("#src/lib/daemon.js");
-  const { detachedActionInFlight } = await import("#src/lib/sweep.js");
   const rows: Row[] = [];
   const retro = adoptedRetroChild("retro-c1-run", 4242);
   const clock = retroTickClock(7);
@@ -4380,8 +4380,6 @@ test("W1-T11790 criterion 1: a retro still running past the shadow duration is l
 });
 
 test("W1-T11790 criterion 2: a retro that finishes within the shadow duration produces no overrun row", async () => {
-  const { RETRO_SHADOW_OVERRUN_MS } = await import("#src/lib/daemon.js");
-  const { drainDetachedSweepActions } = await import("#src/lib/sweep.js");
   const rows: Row[] = [];
   let releaseRetro: () => void = () => {};
   const retroBlocked = new Promise<void>((resolve) => { releaseRetro = resolve; });
@@ -4408,8 +4406,6 @@ test("W1-T11790 criterion 2: a retro that finishes within the shadow duration pr
 });
 
 test("W1-T11790 criterion 3: every retro that ends, in time or not, ledgers one retro.duration row with its age in milliseconds and its outcome", async () => {
-  const { RETRO_SHADOW_OVERRUN_MS } = await import("#src/lib/daemon.js");
-  const { drainDetachedSweepActions, installDetachedWorkHost } = await import("#src/lib/sweep.js");
   const rows: Row[] = [];
   // Retro 1, a spawned run child, completes in time; retro 2, in process, overruns and then fails.
   let releaseSpawned: () => void = () => {};
@@ -4466,7 +4462,6 @@ test("W1-T11790 criterion 3: every retro that ends, in time or not, ledgers one 
 });
 
 test("W1-T11790 criterion 4: the overrun and duration rows are observation only; no kill, no admission change and no new gate follows", async () => {
-  const { detachedActionInFlight } = await import("#src/lib/sweep.js");
   const run = async (overrun: boolean) => {
     const rows: Row[] = [];
     const retro = adoptedRetroChild(`retro-c4-${overrun}`, 6262);
