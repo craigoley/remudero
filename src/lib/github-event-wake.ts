@@ -15,8 +15,10 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 import {
   existsSync,
   mkdirSync,
+  readdirSync,
   readFileSync,
   renameSync,
+  statSync,
   unlinkSync,
   watch as fsWatch,
 } from "node:fs";
@@ -346,6 +348,55 @@ export function writeSweepWakeMarkerAtomic(path: string, record: SweepWakeMarker
 
 export async function writeSweepWakeMarkerAtomicAsync(path: string, record: SweepWakeMarker): Promise<void> {
   await writeAtomicAsync(path, JSON.stringify(record));
+}
+
+/**
+ * BACKSTOP: a marker temp file this old belongs to a writer that was killed between its temp write and its rename.
+ * A live write holds its temp for milliseconds; an hour leaves a paused or swapping writer its file.
+ */
+export const SWEEP_WAKE_TEMP_MAX_AGE_MS = 60 * 60_000;
+
+/**
+ * W1-T11983: removes the marker writer's own stale temp files. A write that throws already removes its temp, but a
+ * process killed mid-write cannot: 51 of them sat in the core state directory on 2026-11-10, the oldest from
+ * 2026-10-18, up to eleven from one killed process. Never the marker, a consumer's claim or a young temp.
+ * INVARIANT: never throws; what it removed and what it could not are counted on one `github.wake.temp_swept` row.
+ */
+export function sweepStaleWakeMarkerTemps(
+  root: string,
+  now: number,
+  log: (step: string, extra?: Record<string, unknown>) => void = () => {},
+  unlink: (path: string) => void = unlinkSync,
+): { removed: number; failed: number } {
+  const marker = sweepWakeMarkerPath(root);
+  const prefix = `${basename(marker)}.tmp-`;
+  let removed = 0;
+  let failed = 0;
+  let firstError: string | undefined;
+  const fail = (error: unknown): void => {
+    failed += 1;
+    firstError ??= String((error as Error)?.message ?? error);
+  };
+  let names: string[] = [];
+  try {
+    names = existsSync(dirname(marker)) ? readdirSync(dirname(marker)).filter((name) => name.startsWith(prefix)) : [];
+  } catch (error) {
+    // Counted, never thrown: an unreadable directory is one failure on the temp_swept row below.
+    fail(error);
+  }
+  for (const name of names) {
+    const path = join(dirname(marker), name);
+    try {
+      if (now - statSync(path).mtimeMs <= SWEEP_WAKE_TEMP_MAX_AGE_MS) continue;
+      unlink(path);
+      removed += 1;
+    } catch (error) {
+      // Counted, never thrown: the file stays for the next start and its reason goes on the temp_swept row below.
+      fail(error);
+    }
+  }
+  if (removed > 0 || failed > 0) log("github.wake.temp_swept", { removed, failed, ...(firstError === undefined ? {} : { error: firstError }) });
+  return { removed, failed };
 }
 
 /** `undefined` on any read/parse failure (absent, mid-write, corrupt) — never throws; an
@@ -811,6 +862,7 @@ export function wireSweepWakeToDaemon(
   }
   const timers = options.timers ?? realSweepWakeTimers;
   const now = options.now ?? Date.now;
+  sweepStaleWakeMarkerTemps(root, now(), log);
   const checkSettleMs = options.checkSettleMs ?? 0;
   const signal = createSweepWakeSignal(false, timers);
   let checkSettleTimer: unknown | undefined;

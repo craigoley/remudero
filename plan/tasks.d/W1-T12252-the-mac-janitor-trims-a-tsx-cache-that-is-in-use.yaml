@@ -1,0 +1,74 @@
+- id: W1-T12252
+  title: "The Mac janitor trims the tsx cache while a tsx process runs"
+  repo: remudero
+  depends_on: []
+  priority: 0.9
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # a deletion rule of the scheduled janitor on every Mac account; a wrong rule removes a file that a process needs
+  band_meaning: blast-radius
+  origin: operator-session#janitor-disk-waste-2026-11-11
+  plan_refs:
+    - W1-T11461
+    - W1-T8863
+    - W1-T7729
+  files:
+    - deploy/mac/tmp-reclaim.sh
+    - deploy/mac/JANITOR.md
+    - test/deploy/the-mac-janitor-trims-a-tsx-cache-that-is-in-use.test.ts
+    - test/the-mac-reclaims-its-own-scratch.test.ts
+  status: merged
+  attempts: 0
+  acceptance:
+    - claim: "When a process holds one file open inside a tsx cache, a pass removes every other cache file that has not changed for six hours"
+      proof: "grep: W1-T12252 criterion 1 in test/deploy/the-mac-janitor-trims-a-tsx-cache-that-is-in-use.test.ts"
+    - claim: "A cache file that a process holds open stays. A `<pid>.pipe` socket stays. A file whose modification time or change time is inside the six hours stays"
+      proof: "grep: W1-T12252 criterion 2 in test/deploy/the-mac-janitor-trims-a-tsx-cache-that-is-in-use.test.ts"
+    - claim: "The pass holds the whole cache when it cannot read the process list or the open files, when a process has its working directory inside the cache, or when a process command names the cache"
+      proof: "grep: W1-T12252 criterion 3 in test/deploy/the-mac-janitor-trims-a-tsx-cache-that-is-in-use.test.ts"
+    - claim: "A symlink inside the cache that points outside the cache holds the whole cache. The pass never removes the file that the symlink points to"
+      proof: "grep: W1-T12252 criterion 4 in test/deploy/the-mac-janitor-trims-a-tsx-cache-that-is-in-use.test.ts"
+    - claim: "A dry run prints the count and the bytes of the files that would go, and removes nothing"
+      proof: "grep: W1-T12252 criterion 5 in test/deploy/the-mac-janitor-trims-a-tsx-cache-that-is-in-use.test.ts"
+    - claim: "An applied pass prints one line for each cache with the count of the files it removed and the bytes it freed"
+      proof: "grep: W1-T12252 criterion 6 in test/deploy/the-mac-janitor-trims-a-tsx-cache-that-is-in-use.test.ts"
+    - claim: "The scheduled janitor reaches the rule through its cache-only call: with one held file in the cache, `remudero-janitor.sh --apply` removes the other files and copies the line of criterion 6 to its decision receipt"
+      proof: "grep: W1-T12252 criterion 7 in test/deploy/the-mac-janitor-trims-a-tsx-cache-that-is-in-use.test.ts"
+  rationale: |
+    OBSERVED 2026-11-11 on the Mac agent account: the tsx cache in the temp folder of the account grew to 7.4 GB, and the scheduled janitor removed nothing from it.
+    - `$(getconf DARWIN_USER_TEMP_DIR)/tsx-502` was 7.4 GB at 03:20Z. A person removed the files of more than two hours. That freed 6.4 GB, and free disk went from 20 to 27 GiB.
+    - The scheduled temp cleaner ran at 02:39Z and at 03:17Z. Both times it printed `tsx files pruned: 0, skipped caches=1`.
+    - Its report of kept paths, written at 03:17:52Z, gives the reason for that cache: `TSX cache open file or lsof scan uncertain`.
+    - The same cleaner removed 1,825 files at 00:18Z and 1,010 files at 01:23Z. So the age rule works when no process holds a file in the cache.
+    - The author preflight refuses to run below 20 GiB of free disk. It refused twice that night, at 01:03Z and at 03:15Z.
+    READ at origin/main 3c6e5e476.
+    - `prune_tsx_cache` (deploy/mac/tmp-reclaim.sh:420) calls `path_is_live_or_unknown` on the cache directory. That function runs `lsof +D` on the directory. One open file holds the whole cache.
+    - Each running tsx process keeps a `<pid>.pipe` socket in the cache. A hand lane runs tsx for most of the day, so the hold is almost permanent on this account.
+    - The Azure host janitor decided the other way on 2026-10-06. The comment above `prune_tsx_cache` in deploy/rmd-host-cleanup.sh says: tsx reads a cache file and closes it, and a missing file is a cache miss.
+    - The Azure rule works. On 2026-11-10 its pass printed `pruned 7504 stale tsx cache files (203735040 bytes)`. `/tmp/tsx-1000` was 776 MB on 2026-11-11. No task is filed for Azure.
+    SETTLED by lookup: can each worktree have its own cache, so that the cache goes with the worktree? No.
+    - package.json asks for tsx ^4.23.15, and 4.23.15 is installed. Its dist files read three variables: TSX_DISABLE_CACHE, TSX_TSCONFIG_PATH and TSX_DEBUG. None sets the cache directory.
+    - deploy/install-host-units.sh:926 records the same: tsx writes to `os.tmpdir()/tsx-<uid>` and has no setting for the cache directory.
+    - Only TMPDIR moves the cache. TMPDIR also moves every other temp file and makes socket paths longer. W1-T9956 and W1-T12138 record failures from a long TMPDIR.
+    - A cache file name is a number and a hash of 40 characters. The name does not say which worktree wrote the file. So the janitor can trim by age only.
+    CHECKED for overlap: W1-T11461 (merged) made the cache-only pass visit the temp folder of the account. W1-T11938 (queued) is about the Node compile cache, not the tsx cache.
+  design: |
+    Change `prune_tsx_cache` in deploy/mac/tmp-reclaim.sh. Change nothing else in the file.
+    - Keep these holds for the whole cache: an unreadable process list, an unreadable `lsof` result, a working directory inside the cache, and a process command that names the cache.
+    - Replace the hold for "any open file under the cache". Read the open files under the cache once, with the `lsof +D` call of today. Then remove each file that passes the age rule and is not in that list.
+    - Keep the age rule: six hours for the modification time and for the change time. The operator set six hours as the one retention time on 2026-11-04.
+    - Keep the strict checks: the owner, the name shape of a cache file, the `<pid>.pipe` sockets, Git data, seed data and the keep names.
+    - Measure the bytes of the files before the delete, with one `find ... -exec du -k` call, as the Azure rule does. Print `pruned tsx cache files=<n> bytes=<b>` and `would prune tsx cache files=<n> bytes=<b>`.
+    - Read the open files again just before the delete, as today.
+    test/the-mac-reclaims-its-own-scratch.test.ts asserts the hold of today at lines 240 and 365. Change those two assertions to the new rule. Its test at line 616 (a working directory inside the cache) stays as it is.
+    test/workspace-retirement-safety.test.ts uses the text of the hold as fixture input only. It needs no change.
+    NOT IN SCOPE: the six hours, the Node compile cache, the Azure janitor, and the installed copy of the script. The owner of each account installs the new copy with deploy/mac/install-janitor.sh.
+  falsifier: |
+    Hold the whole cache for one open file and criterion 1 must fail. Remove a file that a process holds open and criterion 2 must fail. Go on after an unreadable `lsof` result and criterion 3 must fail. Follow the symlink and criterion 4 must fail. Remove a file in a dry run and criterion 5 must fail. Restore and require all seven to pass.
+  note: |
+    Host and account: every Mac account that schedules the temp cleaner. On the agent account it runs each hour at minute 17 from `~/Library/Application Support/remudero/tmp-reclaim.sh`.
+    Owner of the path: the account that runs the pass. The pass removes only files that this account owns.
+    Never removed: the cache directory, a `<pid>.pipe` socket, a file that a process holds open, and anything that is not a cache file.
+    A trimmed file costs one compile when tsx needs it again. tsx does not write a file again when it reads it, so a file in daily use is also trimmed after six hours.

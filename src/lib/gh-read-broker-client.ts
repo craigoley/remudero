@@ -190,11 +190,37 @@ export async function brokerGhRead(
 const CLIENT_MAIN = fileURLToPath(new URL("../gh-read-broker-client-main.ts", import.meta.url));
 
 /**
+ * W1-T11741: the resolve hook a client child with NO tsx loader registers. The sources import each other as
+ * `./x.js` (the nodenext spelling) and only a TypeScript loader maps that to `./x.ts`; plain Node 24 strips the
+ * types of a `.ts` file but then fails ERR_MODULE_NOT_FOUND on the first sibling import. The hook retries a
+ * relative `.js` miss as `.ts`, which is the one thing the child needs, and nothing else.
+ */
+const JS_AS_TS_RESOLVE_HOOK =
+  'export async function resolve(s,c,next){try{return await next(s,c)}catch(e){' +
+  'if(e&&e.code==="ERR_MODULE_NOT_FOUND"&&/^\\.{1,2}\\//.test(s)&&s.endsWith(".js"))return next(s.slice(0,-3)+".ts",c);throw e}}';
+
+/** The `--import` argument that registers {@link JS_AS_TS_RESOLVE_HOOK} in a child started without a loader. */
+export const NO_LOADER_PRELOAD = `data:text/javascript,${encodeURIComponent(
+  `import{register}from"node:module";register("data:text/javascript,"+encodeURIComponent(${JSON.stringify(JS_AS_TS_RESOLVE_HOOK)}))`,
+)}`;
+
+/**
  * The SYNCHRONOUS form, for the transport's sync read paths: the file and argv to spawn IN PLACE OF
  * `gh`. The client entry answers exactly as `gh` would — its stdout, its stderr, its exit code — so a
  * sync path keeps its one synchronous spawn and only changes what it spawns. If the broker cannot be
  * reached, the entry runs `gh` itself.
+ *
+ * W1-T11741: a parent whose `execArgv` carries no loader flag (the bundled daemon's is empty) has no tsx
+ * to forward, so the child gets {@link NO_LOADER_PRELOAD} instead and runs under plain Node. `execArgv` is
+ * a seam for the test that proves it; callers pass nothing.
  */
-export function ghBrokerClientSpawn(socketPath: string, args: readonly string[], cls: GhBrokerClass): { file: string; args: string[] } {
-  return { file: process.execPath, args: [...loaderExecArgv(process.execArgv), CLIENT_MAIN, socketPath, cls, ...args] };
+export function ghBrokerClientSpawn(
+  socketPath: string,
+  args: readonly string[],
+  cls: GhBrokerClass,
+  execArgv: readonly string[] = process.execArgv,
+): { file: string; args: string[] } {
+  const loader = loaderExecArgv(execArgv);
+  const preload = loader.length > 0 ? loader : ["--import", NO_LOADER_PRELOAD];
+  return { file: process.execPath, args: [...preload, CLIENT_MAIN, socketPath, cls, ...args] };
 }

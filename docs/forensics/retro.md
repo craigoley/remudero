@@ -3706,3 +3706,7 @@ Design facts a reader of the two tables needs:
   cycle advances every streak by one; a fire resets that guard to 0.
 - **The ledger line `retro.closure_by_class`** is emitted beside `retro.start`, on the real run
   only (`--dry-run` returns before either), carrying `since` and the rows.
+
+## W1-T11308 — follow-up harvest corpus decision closed (2026-11-11)
+
+The follow-up harvest corpus decision is closed: the union read and the rotation-carry both shipped, so `src/lib/ledger.ts` needs no further scope. OBSERVED at HEAD `8f7a27ec3`: the archive∪live ledger union read for the follow-up harvest is documented at `src/lib/ledger.ts:1227` (W1-T1013 comment), shipped in `e7ee56583` (`Remudero-Task: W1-T1013`); the rotation-carry of the harvest steps `report.followups` and `followup.harvested` is pinned in the retained-steps set (`src/lib/ledger.ts:975-976`), shipped in `0b333622a` (W1-T964). The follow-up `followup:W1-T11013-1793711457874` asked for a choice between the two; both were taken, so the choice is closed and no `files:` addition to `src/lib/ledger.ts` is needed.

@@ -19,7 +19,7 @@
     - test/learning/a-plan-only-retro-runs-the-author-plan-only-suites.test.ts
     - test/learning/scout-retro-preflight-failed.test.ts
     - test/deploy-run-freshness-exempt.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: When the retro's changed paths classify PLAN_ONLY, runRetroPrepublishPreflight enumerates its suites with diff-class's --list-plan-only-suites over the same changed-file list and runs exactly those, its ledgered selection reading mode plan-only with the selected count and the plan-reading count it replaced; a DOCS_ONLY or SOURCE diff, an unreadable change list or a failed plan-only listing keep today's plan-reading enumeration

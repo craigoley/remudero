@@ -1,0 +1,52 @@
+- id: W1-T12163
+  title: "A test that runs the daemon loop reads no memory figure from its host"
+  repo: remudero
+  depends_on: []
+  priority: 1.2
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # one helper and six test files; no production code changes
+  band_meaning: span
+  origin: operator-session#follow-ups-2026-11-10
+  plan_refs:
+    - W1-T11768
+    - W1-T11769
+  files:
+    - test/helpers/daemon-host-pins.ts
+    - test/daemon.test.ts
+    - test/github/ops-catalog-source-redaction-read-only.test.ts
+    - test/daemon/ops-catalog-shadow-dependencies.test.ts
+    - test/daemon/ops-catalog-shadow-effects.test.ts
+    - test/daemon/ops-catalog-shadow-revision.test.ts
+    - test/daemon/a-test-that-runs-the-daemon-loop-reads-no-memory-figure-from-its-host.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "One helper returns the daemon dependencies that fix every host reading of the loop: the memory governor, the heap statistics, the clock and the boot checkout flag"
+      proof: "grep: W1-T12163 criterion 1 in test/daemon/a-test-that-runs-the-daemon-loop-reads-no-memory-figure-from-its-host.test.ts"
+    - claim: "A daemon loop that runs with the helper gives the same ledger when the process memory, the cgroup memory files and the heap statistics of the host change"
+      proof: "grep: W1-T12163 criterion 2 in test/daemon/a-test-that-runs-the-daemon-loop-reads-no-memory-figure-from-its-host.test.ts"
+    - claim: "A census counts the test files that call runDaemon with neither the helper nor a memory governor of their own. The count may only go down from the measured count"
+      proof: "grep: W1-T12163 criterion 3 in test/daemon/a-test-that-runs-the-daemon-loop-reads-no-memory-figure-from-its-host.test.ts"
+    - claim: "test/daemon.test.ts passes the helper to its runDaemon calls"
+      proof: "grep: hostIndependentDaemonDeps( in test/daemon.test.ts"
+    - claim: "The daemon cases of the ops catalog suite pass the helper"
+      proof: "grep: hostIndependentDaemonDeps( in test/github/ops-catalog-source-redaction-read-only.test.ts"
+  rationale: |
+    OBSERVED 2026-11-10: the proof run of pull request #17671 (W1-T11769) failed in the fleet's container because a test crossed the memory limit of its host.
+    - `runDaemon` in src/lib/daemon.ts takes `deps.memoryGovernor ?? createDaemonMemoryGovernor({})`. The default reads the process memory, /proc/self/status and the cgroup files memory.high and memory.max.
+    - In the fleet's container a test process of 250 to 380 MB can cross a tier of the governor, or exit, in the middle of a case.
+    - The three test/daemon/ops-catalog-shadow-*.test.ts files now fix these readings in a local `hostPins` function. Each file has its own copy.
+    - Still not fixed: test/daemon.test.ts (99 runDaemon calls) and the W1-T11768 daemon cases in test/github/ops-catalog-source-redaction-read-only.test.ts.
+    - Counted by grep at main 7fbfd3ae8: 211 test files call `runDaemon(`, and 200 of them pass no `memoryGovernor`.
+  design: |
+    Move `hostPins` from test/daemon/ops-catalog-shadow-revision.test.ts to test/helpers/daemon-host-pins.ts as `hostIndependentDaemonDeps()`. The three shadow suites import it.
+    Spread it into the dependencies of each runDaemon call in test/daemon.test.ts and in the daemon cases of the ops catalog suite. A case that tests the governor keeps its own.
+    The census reads the test tree as text. Its baseline is the measured count of files after this change, written in the new test with the date.
+    NOT IN SCOPE: the production default in src/lib/daemon.ts, and the other test files. The census names them, and later tasks lower the count.
+  falsifier: |
+    Remove the memory governor from the helper and criterion 2 must fail. Add a test file that calls runDaemon with no governor and criterion 3 must fail. Restore and require all to pass.
+  note: |
+    The other files can move in groups by folder. The census makes each group a small, safe change.

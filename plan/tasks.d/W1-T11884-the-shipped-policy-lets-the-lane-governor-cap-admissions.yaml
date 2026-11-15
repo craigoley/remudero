@@ -16,14 +16,17 @@
     - plan/policy.yaml
     - test/daemon/the-shipped-policy-lets-the-lane-governor-cap-admissions.test.ts
     - test/the-build-lane-count-follows-the-memory-governor.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: The shipped plan/policy.yaml reads sweep.laneGovernor.mode as enforce, and an absent or unreadable mode still reads shadow
       proof: "unit test: test/daemon/the-shipped-policy-lets-the-lane-governor-cap-admissions.test.ts"
-    - claim: The row's comment records the 2026-11-09 operator ruling that switched the governor to enforce
-      proof: "grep: ENFORCE SINCE in plan/policy.yaml"
+    - claim: The shipped-policy test names the enforce reading of the lane governor in its title
+      proof: "grep: reads the lane governor as enforce in test/daemon/the-shipped-policy-lets-the-lane-governor-cap-admissions.test.ts"
   rationale: |
+    Amended 2026-11-11: the second criterion asked for a marker in the row's comment. The proof gate reads a match that
+    sits only in a comment as proving nothing, so the criterion could never pass. The comment still records the
+    2026-11-09 operator ruling; the shipped-policy test is the proof that the governor enforces.
     OBSERVED 2026-11-09 (Azure ledger union, 550 `dispatch.lane_target` rows, 2026-11-05 to 2026-11-09): the governor ran in shadow and would have capped new admissions below the fixed 3 lanes in 71 readings (13%): target 1 in 42 and target 2 in 29. Builds were in flight at 3 or more in only 17 readings (3%). Enforcing would therefore have cost almost no throughput and shed work in exactly the readings the host was short of memory or CPU (bindings: host 187, cpu 141, container 113, growth 103). The latest reading, 2026-11-09 15:36Z, was target 1, bound by host, while the host ran at load 75 on 8 cores.
     - The policy row documents the switch: "Switching to enforce is an operator ruling made by editing this row... it still sizes the pool, so enforce can only lower it." Retiring the fixed lane count is ADR 0007 decision C's later step 4, not this task.
     - CORRECTION recorded with this filing: an earlier session note said enforce would remove the fixed 3 lanes. It does not: it only caps below it. The idle data (lanes idle 56% of capacity, 0 to 2 builds in flight) shows the fixed count is not what limits throughput.

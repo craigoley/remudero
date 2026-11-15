@@ -20,17 +20,22 @@
  *        suite never observes a fixture's temporary mutation.
  */
 import assert from "node:assert/strict";
-import { readFileSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { copyFileSync, cpSync, readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { after, test } from "node:test";
 
 import { statusFlipOnlyTaskIds, STATUS_LINE_RE } from "../src/lib/task-linter.js";
 import { lintPlanCommand } from "../src/run-task.js";
-import { isolatedCheckout } from "./helpers/isolated-checkout.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
-const FIXTURE_CHECKOUT = isolatedCheckout(REPO_ROOT);
+const fixture = gitRepo({ kind: "status-flip" });
+const fixturePath = "test/fixtures/live-plan-writers/status-flip";
+cpSync(join(REPO_ROOT, fixturePath), join(fixture.dir, fixturePath), { recursive: true });
+copyFileSync(join(REPO_ROOT, "test/a-status-flip-is-not-a-task-edit.test.ts"), join(fixture.dir, "test/a-status-flip-is-not-a-task-edit.test.ts"));
+fixture.git("add", "test");
+fixture.git("commit", "-qm", "seed status-flip fixtures");
+const FIXTURE_CHECKOUT = { root: fixture.dir, cleanup: () => fixture.cleanup() };
 const FIXTURE_PLAN = join(FIXTURE_CHECKOUT.root, "test", "fixtures", "live-plan-writers", "status-flip", "tasks.yaml");
 const FIXTURE_DIR = join(FIXTURE_CHECKOUT.root, "test", "fixtures", "live-plan-writers", "status-flip", "tasks.d");
 

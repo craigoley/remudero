@@ -202,7 +202,12 @@ test("a read reaches both view lanes from the projector thread", async (t) => {
   const workerUrl = moduleFile(t, "paced-lanes", `import { parentPort, workerData } from "node:worker_threads";
 import { appendFileSync } from "node:fs";
 const lane = workerData.lane;
-parentPort.on("message", (msg) => appendFileSync(${JSON.stringify(inputs)}, lane + ":" + msg.type + (msg.type === "read" ? ":" + msg.path : "") + "\\n"));
+// The teardown's own "stop" must not be recorded: this stub outlives close() until it is terminated, so
+// an append for it would race the fixture directory's removal (ENOTEMPTY).
+parentPort.on("message", (msg) => {
+  if (msg.type === "stop") return;
+  appendFileSync(${JSON.stringify(inputs)}, lane + ":" + msg.type + (msg.type === "read" ? ":" + msg.path : "") + "\\n");
+});
 if (lane === "fast") parentPort.postMessage({ type: "view_lane", view: "now", instance: "core", heavy: true, dueAt: 0, costMs: 2_700 });
 setInterval(() => {}, 1000);
 `);

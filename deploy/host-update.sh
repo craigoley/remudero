@@ -176,7 +176,18 @@ STATE_BACKUP_DIR="${RMD_STATE_BACKUP_DIR:-${STATE_DIR}/state-backups}"
 # and `assertWorkerCredentialFile`'s own comment names the assumption that breaks: "An EXPIRED token
 # is reported and allowed through: there is nothing to re-provision from on this platform, the CLI
 # maintains its own refresh." Mount the directory read-write and the refresh works.
-CRED_DIR="${RMD_CLAUDE_DIR:-${HOME:-/root}/.claude}"
+# W1-T12360: the same derivation recycle-container.sh and serve-container.sh source.
+CLAUDE_DIRECTORY_FILE="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd)/claude-directory.sh" || true
+[ -r "${CLAUDE_DIRECTORY_FILE}" ] || CLAUDE_DIRECTORY_FILE="${PWD}/deploy/claude-directory.sh"
+if [ ! -r "${CLAUDE_DIRECTORY_FILE}" ]; then
+  echo "host-update: REFUSING — no deploy/claude-directory.sh beside this script or under ${PWD}." >&2
+  exit 2
+fi
+# shellcheck source=./claude-directory.sh
+source "${CLAUDE_DIRECTORY_FILE}"
+CRED_DIR="$(claude_host_directory)"
+CLAUDE_ACCOUNT_FILE="$(claude_host_account_file)"
+CLAUDE_ACCOUNT_MOUNT_DEST="/home/node/.rmd-claude-account.json"
 # The container-side path the credential must land on: `config.root` derives from HOME (Dockerfile
 # REQ 10), so the worker home's `.claude` symlink grant resolves to exactly this.
 CRED_MOUNT_DEST="/home/node/.claude"
@@ -286,6 +297,12 @@ if [ "${PRINT_DAEMON_RUN}" -eq 1 ]; then
   else
     echo "host-update: NOTE — no Codex home at ${CODEX_DIR}; the printed daemon stays Claude-only." >&2
     echo "  Authenticate it first or set RMD_CODEX_DIR; no empty root-owned bind directory will be created." >&2
+  fi
+  CLAUDE_ACCOUNT_MOUNT_LINE=""
+  if [ -f "${CLAUDE_ACCOUNT_FILE}" ]; then
+    printf -v CLAUDE_ACCOUNT_MOUNT_LINE '    -v %s:%s:ro \\\n' "${CLAUDE_ACCOUNT_FILE}" "${CLAUDE_ACCOUNT_MOUNT_DEST}"
+  else
+    echo "host-update: NOTE — no Claude account file at ${CLAUDE_ACCOUNT_FILE}; printing the daemon without an account file mount" >&2
   fi
   CONTAINER_CONFIG_MOUNT_LINE=""
   if [ -d "${CONTAINER_CONFIG_DIR}" ]; then
@@ -522,7 +539,7 @@ ${SCRATCH_MKDIR_LINE}
     -e RMD_INSTANCE_REGISTRY_FILE_BINDING \\
 ${CODEX_MOUNT_LINE}${CODEX_SESSIONS_LINE}${CONTAINER_CONFIG_MOUNT_LINE}    -v ${STATE_DIR}:${STATE_MOUNT_DEST} \\
     -v ${CRED_DIR}:${CRED_MOUNT_DEST} \\
-${DAEMON_SCRATCH_LINES}    ${REF} \\
+${CLAUDE_ACCOUNT_MOUNT_LINE}${DAEMON_SCRATCH_LINES}    ${REF} \\
     ./bin/rmd daemon --repo ${DAEMON_REPO} --allow-self-target
 
   # THE CONSOLE, IF WANTED, IS A SEPARATE CONTAINER WITH A DIFFERENT POLICY. serve returns 0 on a
@@ -887,8 +904,9 @@ LIVE="$(fleet_containers)"
 if [ -n "${LIVE}" ] && [ "${RECLAIM_ONLY}" -eq 1 ]; then
   echo "host-update: fleet container(s) RUNNING — proceeding anyway under --reclaim-only"
   printf '%s\n' "${LIVE}" | sed 's/^/  /'
-  echo "  Only image and build-cache prunes run in this mode; a running container's own image is"
-  echo "  referenced and therefore untouchable, and 'docker container prune' is not run at all."
+  echo "  Image and build-cache prunes run; a running container's own image is referenced and"
+  echo "  therefore untouchable, and 'docker container prune' is not run at all. The git rung runs"
+  echo "  only 'git maintenance' in an idle checkout, and the history rung keeps every open file."
 elif [ -n "${LIVE}" ]; then
   echo "host-update: REFUSING — a fleet container is RUNNING." >&2
   printf '%s\n' "${LIVE}" | sed 's/^/  /' >&2
@@ -906,7 +924,7 @@ elif [ -n "${LIVE}" ]; then
   echo "  and SURVIVES removal — you do not have to choose between the result and the disk." >&2
   exit 1
 fi
-echo "host-update: no fleet container running"
+[ -n "${LIVE}" ] || echo "host-update: no fleet container running"
 
 # ── 2. AUTHENTICATE BEFORE DESTROYING ANYTHING ───────────────────────────────────────────────
 # W1-T2725: skipped under --reclaim-only. The login exists to bound the imageless window before a
@@ -1033,6 +1051,32 @@ state_snapshot_fail() {
   state_snapshot_failed=1
   if [ -z "${state_snapshot_reason}" ]; then state_snapshot_reason="$1"; fi
 }
+# W1-T12174: config may hold secrets. A fresh private directory prevents destination symlinks;
+# -P also prevents dereferencing a source replaced by a link after the regular-file check.
+snapshot_container_config() (
+  umask 077
+  local dest="$1" file copied component="${CONTAINER_CONFIG_DIR}"
+  # A trailing slash hides a directory link from -L; check every component without it.
+  while [ -n "${component}" ]; do
+    case "${component}" in */) component="${component%/}"; continue ;; esac
+    [ ! -L "${component}" ] || return 1
+    case "${component}" in
+      */*) component="${component%/*}" ;;
+      *) break ;;
+    esac
+  done
+  [ -d "${CONTAINER_CONFIG_DIR}" ] \
+    && [ -r "${CONTAINER_CONFIG_DIR}" ] && [ -x "${CONTAINER_CONFIG_DIR}" ] || return 1
+  mkdir -m 700 -- "${dest}" && chmod 700 -- "${dest}" || return 1
+  for file in "${CONTAINER_CONFIG_DIR}"/* "${CONTAINER_CONFIG_DIR}"/.[!.]* "${CONTAINER_CONFIG_DIR}"/..?*; do
+    [ ! -L "${file}" ] && [ -f "${file}" ] || continue
+    [ -r "${file}" ] || return 1
+    copied="${dest}/${file##*/}"
+    cp -P -- "${file}" "${copied}" || return 1
+    if [ -L "${copied}" ]; then rm -f -- "${copied}"; return 1; fi
+    chmod 600 -- "${copied}" || return 1
+  done
+)
 STATE_SNAPSHOT_ARCHIVES=()
 if [ "${RECLAIM_ONLY}" -eq 1 ]; then
   echo
@@ -1136,6 +1180,12 @@ console.log('RMD_STATE_SNAPSHOT', s.archiveDir.split('/').pop(), s.entries.lengt
     echo "  ${snap_files} file(s): ${snap_linked} rotation(s) hard-linked to the previous archive," \
       "${snap_vanished} removed by a live writer mid-copy, ${snap_trimmed} torn ledger byte(s) left out"
     STATE_SNAPSHOT_ARCHIVES+=("${snap_backups}/${snap_name}")
+    snap_config="${snap_backups}/${snap_name}/container-config"
+    echo "host-update: container config copy — ${snap_config}"
+    if ! snapshot_container_config "${snap_config}" >/dev/null 2>&1; then
+      state_snapshot_fail "host-update: STATE SNAPSHOT CONFIG COPY FAILED — ${CONTAINER_CONFIG_DIR} -> ${snap_config}"
+      continue
+    fi
     # Retention, only after a verified NEW snapshot: keep the newest STATE_BACKUP_KEEP, never the
     # one just written. A failed night expires nothing. Removing an archive only unlinks: a rotation
     # hard-linked into a newer archive keeps its bytes there.
@@ -1387,16 +1437,20 @@ fi
 # TRAP: a `.git/gc.log` makes git decline automatic gc FOREVER (git-gc(1)) — it never retries, so the
 # objects behind it are never reclaimed by anything except this rung.
 #
-# INVARIANT: refuse outright while any fleet container is LIVE, naming the holder. `git gc` can prune
-# objects a live lane still needs; the docker prune above has no such hazard, which is why it may run
-# while up and this may not. Report bytes per checkout, never one sum — a combined "0B" cannot
+# W1-T12495 — INVARIANT no-prune-beside-a-live-fleet. `git gc` can prune objects a live lane still
+# needs, so while any fleet container is LIVE this rung never runs `git gc` or a prune. It judges
+# each checkout alone: a git directory (linked worktrees' included) with a lock file, gc.pid, or a
+# file written in the last 30 minutes is kept with its reason. An idle one gets only `git maintenance
+# run` with the loose-objects, incremental-repack and pack-refs tasks, which prune no unreachable
+# object (git-maintenance(1)). Report bytes per checkout, never one sum — a combined "0B" cannot
 # distinguish "nothing to do" from "nothing to do HERE, and a gigabyte elsewhere".
 #
 # NEVER STATE CLEANING: this reads, writes and measures nothing under `${STATE_DIR}/state` — the
 # ledger, run locks and service tokens the file header protects are untouched.
 #
-# FALSIFIER: remove the live-worker refusal and the fixture's gc.log is cleared beside a live
-# container; collapse the per-checkout report into one total and the split assertion fails.
+# FALSIFIER: skip the idle proof, or run `git gc` beside a live container, and
+# test/deploy/the-nightly-reclaim-reaches-the-root-disk-while-the-fleet-runs.test.ts fails; collapse
+# the per-checkout report into one total and the split assertion fails.
 #
 # Why: docs/forensics/host-update.md — the 2026-09-15 measurement (985 MiB, 53,380 loose objects,
 # root at 85%), the 2026-09-16 outage it corroborates, and the rejected alternatives.
@@ -1409,60 +1463,89 @@ fi
 # it stayed 0, so an all-miss is distinguishable from a real reclaim that simply had nothing to
 # free. A single target reached is enough to succeed — this is about reaching NOTHING, never about
 # freeing nothing.
+# <git dir>: print why the checkout must be kept beside a live fleet, or nothing when it is idle.
+git_reclaim_kept_reason() {
+  local found
+  if ! found="$(find "$1" \( -name '*.lock' -o -name gc.pid \) -print -quit 2>/dev/null)"; then
+    echo "idle-check-failed: its git directory could not be read in full"; return
+  fi
+  if [ -n "${found}" ]; then echo "git-lock: ${found#"$1"/} is present"; return; fi
+  if ! found="$(find "$1" -mmin -30 -print -quit 2>/dev/null)"; then
+    echo "idle-check-failed: its git directory could not be read in full"; return
+  fi
+  [ -z "${found}" ] || echo "recent-write: ${found#"$1"/} was written in the last 30 minutes"
+}
 if [ "${RECLAIM_ONLY}" -eq 1 ]; then
   echo
-  if [ -n "${LIVE}" ]; then
-    echo "host-update: REFUSING git object reclaim — a fleet container is RUNNING." >&2
-    printf '%s\n' "${LIVE}" | sed 's/^/  /' >&2
-    echo "  'git gc' can prune objects a live lane still needs, which the docker image/build prune" >&2
-    echo "  above cannot do even while up. No checkout below was touched." >&2
-  else
-    # W1-T9617: the daemon's checkout is the one its next launch binds — on scratch when the hot
-    # checkouts moved it (deploy/scratch-mounts.sh), never the stale copy left on the state disk.
-    RECLAIM_DAEMON_CHECKOUT="${STATE_DIR}/remudero"
-    RECLAIM_SCRATCH_LIB="$(dirname "$0")/scratch-mounts.sh"
-    [ -r "${RECLAIM_SCRATCH_LIB}" ] || RECLAIM_SCRATCH_LIB="/usr/local/bin/rmd-scratch-mounts"
-    if [ -r "${RECLAIM_SCRATCH_LIB}" ]; then
-      RECLAIM_DAEMON_CHECKOUT="$(. "${RECLAIM_SCRATCH_LIB}" && scratch_daemon_checkout "${STATE_DIR}" remudero-daemon)" ||
-        RECLAIM_DAEMON_CHECKOUT="${STATE_DIR}/remudero"
+  # W1-T9617: the daemon's checkout is the one its next launch binds — on scratch when the hot
+  # checkouts moved it (deploy/scratch-mounts.sh), never the stale copy left on the state disk.
+  RECLAIM_DAEMON_CHECKOUT="${STATE_DIR}/remudero"
+  RECLAIM_SCRATCH_LIB="$(dirname "$0")/scratch-mounts.sh"
+  [ -r "${RECLAIM_SCRATCH_LIB}" ] || RECLAIM_SCRATCH_LIB="/usr/local/bin/rmd-scratch-mounts"
+  if [ -r "${RECLAIM_SCRATCH_LIB}" ]; then
+    RECLAIM_DAEMON_CHECKOUT="$(. "${RECLAIM_SCRATCH_LIB}" && scratch_daemon_checkout "${STATE_DIR}" remudero-daemon)" ||
+      RECLAIM_DAEMON_CHECKOUT="${STATE_DIR}/remudero"
+  fi
+  IFS=':' read -r -a GIT_RECLAIM_DIRS <<<"${RMD_GIT_RECLAIM_DIRS:-${RECLAIM_DAEMON_CHECKOUT}:${RMD_OP_DIR}}"
+  git_reclaim_reached=0
+  for gdir in "${GIT_RECLAIM_DIRS[@]}"; do
+    [ -n "${gdir}" ] || continue
+    if [ ! -d "${gdir}/.git" ]; then
+      sib_git="$(find_sibling_with_marker "$(dirname "${gdir}")" "$(basename "${gdir}")/.git")"
+      if [ -n "${sib_git}" ]; then
+        echo "host-update: WARNING — git reclaim target ${gdir} has no .git, but" >&2
+        echo "  $(dirname "${sib_git}") does. Set RMD_GIT_RECLAIM_DIRS if that is the volume you mean." >&2
+      else
+        echo "host-update: WARNING — git reclaim target ${gdir} has no .git; skipping." >&2
+      fi
+      continue
     fi
-    IFS=':' read -r -a GIT_RECLAIM_DIRS <<<"${RMD_GIT_RECLAIM_DIRS:-${RECLAIM_DAEMON_CHECKOUT}:${RMD_OP_DIR}}"
-    git_reclaim_reached=0
-    for gdir in "${GIT_RECLAIM_DIRS[@]}"; do
-      [ -n "${gdir}" ] || continue
-      if [ ! -d "${gdir}/.git" ]; then
-        sib_git="$(find_sibling_with_marker "$(dirname "${gdir}")" "$(basename "${gdir}")/.git")"
-        if [ -n "${sib_git}" ]; then
-          echo "host-update: WARNING — git reclaim target ${gdir} has no .git, but" >&2
-          echo "  $(dirname "${sib_git}") does. Set RMD_GIT_RECLAIM_DIRS if that is the volume you mean." >&2
-        else
-          echo "host-update: WARNING — git reclaim target ${gdir} has no .git; skipping." >&2
-        fi
+    git_reclaim_reached=1
+    gc_log="${gdir}/.git/gc.log"
+    had_gc_log="(no gc.log)"
+    [ -f "${gc_log}" ] && had_gc_log="(gc.log present — auto-gc has been declining forever)"
+    if [ -n "${LIVE}" ]; then
+      kept_reason="$(git_reclaim_kept_reason "${gdir}/.git")"
+      if [ -n "${kept_reason}" ]; then
+        echo "host-update: git reclaim — ${gdir}: kept — ${kept_reason}; a fleet container is RUNNING"
         continue
       fi
-      git_reclaim_reached=1
-      gc_log="${gdir}/.git/gc.log"
-      had_gc_log="(no gc.log)"
-      [ -f "${gc_log}" ] && had_gc_log="(gc.log present — auto-gc has been declining forever)"
       if [ "${DRY_RUN}" -eq 1 ]; then
-        echo "host-update: git reclaim (DRY RUN) — ${gdir}: would remove gc.log and run 'git gc' ${had_gc_log}"
+        echo "host-update: git reclaim (DRY RUN) — ${gdir}: would run 'git maintenance' (no gc, no prune) beside a live fleet container ${had_gc_log}"
         continue
       fi
       before_kb="$(git_dir_kb "${gdir}/.git")"
-      rm -f "${gc_log}"
       gc_status=0
-      git -C "${gdir}" gc --quiet 2>&1 | sed 's/^/  /' || gc_status=1
+      git -C "${gdir}" maintenance run --quiet --task=loose-objects --task=incremental-repack --task=pack-refs 2>&1 |
+        sed 's/^/  /' || gc_status=1
       after_kb="$(git_dir_kb "${gdir}/.git")"
       freed_kb=$((before_kb - after_kb))
       [ "${freed_kb}" -lt 0 ] && freed_kb=0
       if [ "${gc_status}" -eq 0 ]; then
-        echo "host-update: git reclaim — ${gdir}: freed $(human_kb "${freed_kb}") ${had_gc_log}"
+        echo "host-update: git reclaim — ${gdir}: freed $(human_kb "${freed_kb}") with 'git maintenance' beside a live fleet container; no gc, no prune ${had_gc_log}"
       else
-        echo "host-update: git reclaim — ${gdir}: 'git gc' FAILED; gc.log was still removed so the" >&2
-        echo "  next auto-gc can retry on its own. ${had_gc_log}" >&2
+        echo "host-update: git reclaim — ${gdir}: 'git maintenance' FAILED beside a live fleet container; nothing was pruned. ${had_gc_log}" >&2
       fi
-    done
-  fi
+      continue
+    fi
+    if [ "${DRY_RUN}" -eq 1 ]; then
+      echo "host-update: git reclaim (DRY RUN) — ${gdir}: would remove gc.log and run 'git gc' ${had_gc_log}"
+      continue
+    fi
+    before_kb="$(git_dir_kb "${gdir}/.git")"
+    rm -f "${gc_log}"
+    gc_status=0
+    git -C "${gdir}" gc --quiet 2>&1 | sed 's/^/  /' || gc_status=1
+    after_kb="$(git_dir_kb "${gdir}/.git")"
+    freed_kb=$((before_kb - after_kb))
+    [ "${freed_kb}" -lt 0 ] && freed_kb=0
+    if [ "${gc_status}" -eq 0 ]; then
+      echo "host-update: git reclaim — ${gdir}: freed $(human_kb "${freed_kb}") ${had_gc_log}"
+    else
+      echo "host-update: git reclaim — ${gdir}: 'git gc' FAILED; gc.log was still removed so the" >&2
+      echo "  next auto-gc can retry on its own. ${had_gc_log}" >&2
+    fi
+  done
 fi
 
 # ── 4b. AGENT HISTORY RECLAIM (W1-T3626) — the LARGER share of the disk this host fills on ────────
@@ -1479,9 +1562,13 @@ fi
 # own report is never summed: one number cannot distinguish "nothing old on THIS tree" from
 # "nothing old here, and a gigabyte on the other one".
 #
-# INVARIANT: refuse outright while any fleet container is LIVE, naming the holder, reusing section
-# 1's `LIVE` detection exactly as section 4a does — a running lane may still be writing the very
-# session/thread file this would remove.
+# W1-T12495 — BESIDE A LIVE FLEET (section 1's `LIVE`), EACH FILE PROVES ITSELF CLOSED. A running
+# lane may still write the very session/thread file this would remove. So the rung reads one lsof
+# list of the open files of this user (the fleet containers run as the same uid; a container that
+# does not makes the list incomplete), maps each container path to its host path by the containers'
+# mount sources, and keeps an old file a process holds open (`open-by-process`). A list it cannot
+# read in full removes nothing (`open-check-unreadable`, verdict REFUSED). No database is compacted
+# beside a live fleet; its free pages are reported as `live-fleet-container`.
 #
 # NEVER STATE CLEANING: this reclaim never reads STATE_DIR state — it only ever walks ${CODEX_DIR}
 # and ${CRED_DIR}/projects (or RMD_AGENT_HISTORY_DIRS's override), never ${STATE_DIR}, so the
@@ -1494,20 +1581,27 @@ fi
 # in-flight session. So after the age sweep, each tree's IN-TIER real SQLite files (checked by the
 # file header, never the name) are COMPACTED IN PLACE — `wal_checkpoint(TRUNCATE)` + `VACUUM`, which
 # releases the free pages the owning tool's own deletes left inside the file and keeps every row.
-# This runs only in the window the LIVE refusal already names as safe (no fleet container up), with
-# busy_timeout=0 so a writer the refusal cannot see makes it fail rather than wait, and only when
+# This runs only when no fleet container is up, with
+# busy_timeout=0 so a writer the LIVE check cannot see makes it fail rather than wait, and only when
 # the file's filesystem has twice its size free (VACUUM writes a full copy). The engine is `sqlite3`
 # on PATH, else `node` with node:sqlite; RMD_AGENT_HISTORY_SQLITE_ENGINE=sqlite3|node|none pins it.
 #
 # AND EVERY TREE SAYS WHAT IT COULD NOT REACH, AND WHY: `could not reach <bytes> — reason: <r>`, one
 # line per reason — within-age-tier, live-rows (still held by rows the owning tool keeps),
-# no-sqlite-engine, insufficient-free-space, compaction-failed, and live-fleet-container when the
-# refusal holds. A refusal is a refusal, not a run with nothing to do: section 4c prints the closing
-# verdict `agent history reclaim: REFUSED` or `COMPLETED`. The exit code stays 0 on a refusal, on
-# purpose — this fleet is always up, so a non-zero refusal would fail every nightly and bury the
+# no-sqlite-engine, insufficient-free-space, compaction-failed, live-fleet-container, open-by-process
+# and open-check-unreadable. A refusal is a refusal, not a run with nothing to do: section 4c prints
+# the closing verdict `agent history reclaim: REFUSED` or `COMPLETED`. The exit code stays 0 on a
+# refusal, on purpose — this fleet is always up, so a non-zero refusal would fail every nightly and bury the
 # snapshot alarm (W1-T5545) under a permanent false one.
 #
-# FALSIFIER: remove the live-worker refusal and a fixture's old file is reclaimed beside a live
+# W1-T12409 — THE AGE SWEEP REMOVES HISTORY ONLY. The Codex home also holds the Codex login
+# (auth.json), its config, installation_id, the installed CLI (packages/) and work checkouts. In
+# the Codex home the sweep removes old files only under its history folders; in every tree it never
+# removes auth.json, .credentials.json, installation_id or a *.toml file. The old files it keeps
+# are reported as `never-removed`. Under a test process (NODE_TEST_CONTEXT) a tree that comes from
+# HOME is skipped, so no test run walks or prunes the real home (the scratch-mounts.sh rule).
+#
+# FALSIFIER: skip the open-file check and a fixture's open old file is reclaimed beside a live
 # container; collapse the per-tree report into one total and the split assertion fails. Sweep by
 # mtime alone, or report only bytes freed, and test/agent-history-reclaim-reaches-the-bulk.test.ts
 # fails against a real SQLite fixture whose mtime is always current.
@@ -1516,6 +1610,16 @@ if [ "${RECLAIM_ONLY}" -eq 1 ]; then
   echo
   AGENT_HISTORY_MAX_AGE_DAYS="${RMD_AGENT_HISTORY_MAX_AGE_DAYS:-14}"
   IFS=':' read -r -a AGENT_HISTORY_DIRS <<<"${RMD_AGENT_HISTORY_DIRS:-${CODEX_DIR}:${CRED_DIR}/projects}"
+  if [ -n "${NODE_TEST_CONTEXT:-}" ] && [ -z "${RMD_AGENT_HISTORY_DIRS:-}" ]; then
+    if [ -z "${RMD_CODEX_DIR:-}" ]; then
+      echo "host-update: agent history reclaim — ${CODEX_DIR}: skipped — a test process never walks the agent history under HOME; set RMD_CODEX_DIR"
+      AGENT_HISTORY_DIRS[0]=""
+    fi
+    if [ -z "${RMD_CLAUDE_DIR:-}" ]; then
+      echo "host-update: agent history reclaim — ${CRED_DIR}/projects: skipped — a test process never walks the agent history under HOME; set RMD_CLAUDE_DIR"
+      AGENT_HISTORY_DIRS[1]=""
+    fi
+  fi
   # `find -printf` is GNU-only. BSD find has the same `-print0` primitive, so keep the traversal
   # portable and ask the host's `stat` for the two metadata fields separately. The format is probed
   # once per tree: GNU stat accepts `-c`; BSD stat accepts `-f`.
@@ -1545,172 +1649,266 @@ if [ "${RECLAIM_ONLY}" -eq 1 ]; then
   agent_history_unreached() {
     echo "host-update: agent history reclaim${2} — ${1}: could not reach $(human_kb $(($3 / 1024))) — reason: ${4} (${5} file(s)); ${6}"
   }
-  if [ -n "${LIVE}" ]; then
-    echo "host-update: REFUSING agent history reclaim — a fleet container is RUNNING." >&2
-    printf '%s\n' "${LIVE}" | sed 's/^/  /' >&2
-    echo "  a running lane may still be writing the very session/thread file this would remove." >&2
-    echo "  No file under any configured tree was touched." >&2
-    agent_history_verdict=refused
-    for rdir in "${AGENT_HISTORY_DIRS[@]}"; do
-      [ -n "${rdir}" ] && [ -d "${rdir}" ] || continue
-      agent_history_probe_stat "${rdir}"
-      refused_bytes=0
-      refused_files=0
-      while IFS= read -r -d '' path; do
-        metadata="$(agent_history_file_metadata "${path}")" || continue
-        refused_bytes=$((refused_bytes + ${metadata#* }))
-        refused_files=$((refused_files + 1))
-      done < <(find "${rdir}" -type f -print0 2>/dev/null)
-      agent_history_unreached "${rdir}" " REFUSED" "${refused_bytes}" live-fleet-container "${refused_files}" \
-        "a fleet container is RUNNING, so nothing under this tree was removed or compacted"
-    done
-  else
-    agent_history_verdict=completed
-    [ "${DRY_RUN}" -eq 1 ] && agent_history_verdict=dry-run
-    AGENT_HISTORY_SQLITE_ENGINE="${RMD_AGENT_HISTORY_SQLITE_ENGINE:-auto}"
-    if [ "${AGENT_HISTORY_SQLITE_ENGINE}" = "auto" ]; then
-      AGENT_HISTORY_SQLITE_ENGINE=none
-      if command -v sqlite3 >/dev/null 2>&1; then
-        AGENT_HISTORY_SQLITE_ENGINE=sqlite3
-      elif command -v node >/dev/null 2>&1 && node --no-warnings -e "require('node:sqlite')" >/dev/null 2>&1; then
-        AGENT_HISTORY_SQLITE_ENGINE=node
-      fi
+  AGENT_HISTORY_CODEX_HISTORY=(sessions archived_sessions log shell_snapshots)
+  AGENT_HISTORY_KEPT_N=0
+  AGENT_HISTORY_HELD_N=0
+  # <tree>: the old files the age sweep may remove, NUL-separated.
+  agent_history_old_removable() {
+    local sub found=0
+    local -a roots
+    roots=("$1")
+    if [ "${1%/}" = "${CODEX_DIR%/}" ]; then
+      for sub in "${AGENT_HISTORY_CODEX_HISTORY[@]}"; do
+        if [ -d "$1/${sub}" ]; then roots[found]="$1/${sub}"; found=$((found + 1)); fi
+      done
+      [ "${found}" -gt 0 ] || return 0
     fi
-    case "${AGENT_HISTORY_SQLITE_ENGINE}" in
-      sqlite3|node|none) ;;
-      *) echo "host-update: WARNING — RMD_AGENT_HISTORY_SQLITE_ENGINE='${AGENT_HISTORY_SQLITE_ENGINE}' is not sqlite3|node|none; compacting nothing." >&2
-         AGENT_HISTORY_SQLITE_ENGINE=none ;;
+    find "${roots[@]}" -type f -mtime "+${AGENT_HISTORY_MAX_AGE_DAYS}" ! -name auth.json ! -name .credentials.json \
+      ! -name installation_id ! -name '*.toml' -print0 2>/dev/null
+  }
+  # <tree> <label>: name, on one line, the old files the age sweep may not remove.
+  agent_history_report_kept() {
+    local path m all_n=0 all_b=0 rm_n=0 rm_b=0
+    while IFS= read -r -d '' path; do
+      m="$(agent_history_file_metadata "${path}")" || continue
+      all_n=$((all_n + 1)); all_b=$((all_b + ${m#* }))
+    done < <(find "$1" -type f -mtime "+${AGENT_HISTORY_MAX_AGE_DAYS}" -print0 2>/dev/null)
+    while IFS= read -r -d '' path; do
+      m="$(agent_history_file_metadata "${path}")" || continue
+      rm_n=$((rm_n + 1)); rm_b=$((rm_b + ${m#* }))
+    done < <(agent_history_old_removable "$1")
+    AGENT_HISTORY_KEPT_N=$((all_n - rm_n))
+    [ "${AGENT_HISTORY_KEPT_N}" -eq 0 ] || agent_history_unreached "$1" "$2" $((all_b - rm_b)) never-removed "${AGENT_HISTORY_KEPT_N}" \
+      "older than ${AGENT_HISTORY_MAX_AGE_DAYS}d, but a login or config file, or outside the Codex history folders; never removed"
+  }
+  agent_history_verdict=completed
+  [ "${DRY_RUN}" -eq 1 ] && agent_history_verdict=dry-run
+  # W1-T12495: the open files of this user, read once with lsof (deploy/rmd-host-cleanup.sh's
+  # is_open), each container path also mapped to its host path. AGENT_HISTORY_OPEN_STATE is ok or
+  # unreadable; AGENT_HISTORY_OPEN_WHY names why.
+  AGENT_HISTORY_OPEN_STATE=""
+  AGENT_HISTORY_OPEN_WHY=""
+  AGENT_HISTORY_OPEN_LIST=""
+  agent_history_read_open() {
+    local uid out id info user mounts=""
+    [ -z "${AGENT_HISTORY_OPEN_STATE}" ] || return 0
+    AGENT_HISTORY_OPEN_STATE=unreadable
+    uid="$(id -u)"
+    if ! command -v lsof >/dev/null 2>&1; then AGENT_HISTORY_OPEN_WHY="lsof is not installed"; return 0; fi
+    while read -r id _; do
+      [ -n "${id}" ] || continue
+      if ! info="$(docker inspect --format '{{.Config.User}}{{range .Mounts}}|{{.Source}}>{{.Destination}}{{end}}' "${id}" 2>/dev/null)"; then
+        AGENT_HISTORY_OPEN_WHY="docker inspect of fleet container ${id} failed"; return 0
+      fi
+      user="${info%%|*}"; user="${user%%:*}"
+      if [ "${uid}" != 0 ] && [ "${user}" != "${uid}" ]; then
+        AGENT_HISTORY_OPEN_WHY="fleet container ${id} runs as '${user:-root}', not uid ${uid}, so lsof cannot see its open files"; return 0
+      fi
+      case "${info}" in *"|"*) mounts="${mounts}${info#*|}|" ;; esac
+    done <<<"${LIVE}"
+    if [ "${uid}" = 0 ]; then
+      out="$(lsof -Fn 2>/dev/null)" || { AGENT_HISTORY_OPEN_WHY="lsof failed"; return 0; }
+    else
+      out="$(lsof -u "${uid}" -Fn 2>/dev/null)" || { AGENT_HISTORY_OPEN_WHY="lsof failed"; return 0; }
+    fi
+    case "${out}" in
+      *"Permission denied"*) AGENT_HISTORY_OPEN_WHY="lsof returned incomplete visibility (Permission denied)"; return 0 ;;
     esac
-    AGENT_HISTORY_NODE_SQLITE="const { DatabaseSync } = require('node:sqlite');
+    AGENT_HISTORY_OPEN_LIST="$(printf '%s\n' "${out}" | awk -v m="${mounts}" '
+      BEGIN { n = split(m, ms, "|"); for (i = 1; i <= n; i++) { k = index(ms[i], ">"); if (k > 1) { src[i] = substr(ms[i], 1, k - 1); dst[i] = substr(ms[i], k + 1) } } }
+      /^n/ { p = substr($0, 2); print p
+        for (i in dst) if (dst[i] != "" && (p == dst[i] || index(p, dst[i] "/") == 1)) print src[i] substr(p, length(dst[i]) + 1) }')"
+    AGENT_HISTORY_OPEN_STATE=ok
+  }
+  # <file>: held open, by its own path or its physical one?
+  agent_history_is_open() {
+    local dir
+    dir="$(cd "$(dirname "$1")" 2>/dev/null && pwd -P)" || dir="$(dirname "$1")"
+    grep -Fxq -e "$1" -e "${dir}/$(basename "$1")" <<<"${AGENT_HISTORY_OPEN_LIST}"
+  }
+  AGENT_HISTORY_SQLITE_ENGINE="${RMD_AGENT_HISTORY_SQLITE_ENGINE:-auto}"
+  if [ "${AGENT_HISTORY_SQLITE_ENGINE}" = "auto" ]; then
+    AGENT_HISTORY_SQLITE_ENGINE=none
+    if command -v sqlite3 >/dev/null 2>&1; then
+      AGENT_HISTORY_SQLITE_ENGINE=sqlite3
+    elif command -v node >/dev/null 2>&1 && node --no-warnings -e "require('node:sqlite')" >/dev/null 2>&1; then
+      AGENT_HISTORY_SQLITE_ENGINE=node
+    fi
+  fi
+  case "${AGENT_HISTORY_SQLITE_ENGINE}" in
+    sqlite3|node|none) ;;
+    *) echo "host-update: WARNING — RMD_AGENT_HISTORY_SQLITE_ENGINE='${AGENT_HISTORY_SQLITE_ENGINE}' is not sqlite3|node|none; compacting nothing." >&2
+       AGENT_HISTORY_SQLITE_ENGINE=none ;;
+  esac
+  AGENT_HISTORY_NODE_SQLITE="const { DatabaseSync } = require('node:sqlite');
 const [mode, file] = process.argv.slice(1);
 try {
-  if (mode === 'measure') {
-    const db = new DatabaseSync(file, { readOnly: true });
-    const pageSize = db.prepare('PRAGMA page_size').get().page_size;
-    const free = db.prepare('PRAGMA freelist_count').get().freelist_count;
-    db.close();
-    console.log(pageSize * free);
-  } else {
-    const db = new DatabaseSync(file);
-    db.exec('PRAGMA busy_timeout=0');
-    if (db.prepare('PRAGMA wal_checkpoint(TRUNCATE)').get().busy) throw new Error('database is busy (WAL checkpoint)');
-    db.exec('VACUUM');
-    db.prepare('PRAGMA wal_checkpoint(TRUNCATE)').get();
-    db.close();
-  }
+if (mode === 'measure') {
+  const db = new DatabaseSync(file, { readOnly: true });
+  const pageSize = db.prepare('PRAGMA page_size').get().page_size;
+  const free = db.prepare('PRAGMA freelist_count').get().freelist_count;
+  db.close();
+  console.log(pageSize * free);
+} else {
+  const db = new DatabaseSync(file);
+  db.exec('PRAGMA busy_timeout=0');
+  if (db.prepare('PRAGMA wal_checkpoint(TRUNCATE)').get().busy) throw new Error('database is busy (WAL checkpoint)');
+  db.exec('VACUUM');
+  db.prepare('PRAGMA wal_checkpoint(TRUNCATE)').get();
+  db.close();
+}
 } catch (e) { console.error(String(e && e.message || e).split('\n')[0]); process.exit(1); }"
-    # <measure|compact> <db>: measure prints the free-page bytes; compact prints nothing on success.
-    # Either prints one reason line on failure.
-    agent_history_sqlite() {
-      local out
-      if [ "${AGENT_HISTORY_SQLITE_ENGINE}" = "node" ]; then
-        SQLITE_TMPDIR="$(dirname "$2")" node --no-warnings -e "${AGENT_HISTORY_NODE_SQLITE}" "$1" "$2" 2>&1 </dev/null
-        return
+  # <measure|compact> <db>: measure prints the free-page bytes; compact prints nothing on success.
+  # Either prints one reason line on failure.
+  agent_history_sqlite() {
+    local out
+    if [ "${AGENT_HISTORY_SQLITE_ENGINE}" = "node" ]; then
+      SQLITE_TMPDIR="$(dirname "$2")" node --no-warnings -e "${AGENT_HISTORY_NODE_SQLITE}" "$1" "$2" 2>&1 </dev/null
+      return
+    fi
+    if [ "$1" = "measure" ]; then
+      out="$(sqlite3 -readonly -batch "$2" 'PRAGMA page_size;' 'PRAGMA freelist_count;' 2>&1 </dev/null)" || { printf '%s\n' "${out}" | head -1; return 1; }
+      printf '%s\n' "${out}" | awk 'NR == 1 { p = $1 } NR == 2 { f = $1 } END { if (p !~ /^[0-9]+$/ || f !~ /^[0-9]+$/) exit 1; print p * f }'
+      return
+    fi
+    out="$(SQLITE_TMPDIR="$(dirname "$2")" sqlite3 -batch -bail "$2" 'PRAGMA busy_timeout=0;' \
+      'PRAGMA wal_checkpoint(TRUNCATE);' 'VACUUM;' 'PRAGMA wal_checkpoint(TRUNCATE);' 2>&1 </dev/null)" || { printf '%s\n' "${out}" | head -1; return 1; }
+    if printf '%s\n' "${out}" | grep -q '^1|'; then echo "database is busy (WAL checkpoint)"; return 1; fi
+  }
+  # Section 4b's second pass over one tree: compact its in-tier SQLite files and say, per reason,
+  # what it could not reach. Runs after the age sweep, so what is left is in the tier by definition.
+  agent_history_compact_tree() {
+    local tree="$1" path held after freed avail_kb out label=""
+    local done_n=0 done_b=0 tier_b=0 tier_n=0 rows_b=0 rows_n=0 eng_b=0 eng_n=0 space_b=0 space_n=0 fail_b=0 fail_n=0 fail_why=""
+    local live_b=0 live_n=0
+    [ "${DRY_RUN}" -eq 1 ] && label=" (DRY RUN)"
+    while IFS= read -r -d '' path; do
+      case "${path}" in
+        *-wal|*-shm|*-journal) if agent_history_is_sqlite "${path%-*}"; then continue; fi ;;
+      esac
+      held="$(agent_history_held_bytes "${path}")"
+      if ! agent_history_is_sqlite "${path}"; then
+        tier_b=$((tier_b + held)); tier_n=$((tier_n + 1)); continue
       fi
-      if [ "$1" = "measure" ]; then
-        out="$(sqlite3 -readonly -batch "$2" 'PRAGMA page_size;' 'PRAGMA freelist_count;' 2>&1 </dev/null)" || { printf '%s\n' "${out}" | head -1; return 1; }
-        printf '%s\n' "${out}" | awk 'NR == 1 { p = $1 } NR == 2 { f = $1 } END { if (p !~ /^[0-9]+$/ || f !~ /^[0-9]+$/) exit 1; print p * f }'
-        return
+      if [ "${AGENT_HISTORY_SQLITE_ENGINE}" = "none" ]; then
+        eng_b=$((eng_b + held)); eng_n=$((eng_n + 1)); continue
       fi
-      out="$(SQLITE_TMPDIR="$(dirname "$2")" sqlite3 -batch -bail "$2" 'PRAGMA busy_timeout=0;' \
-        'PRAGMA wal_checkpoint(TRUNCATE);' 'VACUUM;' 'PRAGMA wal_checkpoint(TRUNCATE);' 2>&1 </dev/null)" || { printf '%s\n' "${out}" | head -1; return 1; }
-      if printf '%s\n' "${out}" | grep -q '^1|'; then echo "database is busy (WAL checkpoint)"; return 1; fi
-    }
-    # Section 4b's second pass over one tree: compact its in-tier SQLite files and say, per reason,
-    # what it could not reach. Runs after the age sweep, so what is left is in the tier by definition.
-    agent_history_compact_tree() {
-      local tree="$1" path held after freed avail_kb out label=""
-      local done_n=0 done_b=0 tier_b=0 tier_n=0 rows_b=0 rows_n=0 eng_b=0 eng_n=0 space_b=0 space_n=0 fail_b=0 fail_n=0 fail_why=""
-      [ "${DRY_RUN}" -eq 1 ] && label=" (DRY RUN)"
-      while IFS= read -r -d '' path; do
-        case "${path}" in
-          *-wal|*-shm|*-journal) if agent_history_is_sqlite "${path%-*}"; then continue; fi ;;
-        esac
-        held="$(agent_history_held_bytes "${path}")"
-        if ! agent_history_is_sqlite "${path}"; then
-          tier_b=$((tier_b + held)); tier_n=$((tier_n + 1)); continue
-        fi
-        if [ "${AGENT_HISTORY_SQLITE_ENGINE}" = "none" ]; then
-          eng_b=$((eng_b + held)); eng_n=$((eng_n + 1)); continue
-        fi
-        if [ "${DRY_RUN}" -eq 1 ]; then
-          if ! out="$(agent_history_sqlite measure "${path}")"; then
-            fail_b=$((fail_b + held)); fail_n=$((fail_n + 1)); [ -n "${fail_why}" ] || fail_why="${path}: ${out}"; continue
-          fi
-          [ "${out}" -le "${held}" ] || out="${held}"
-          echo "  would compact ${path}: $(human_kb $((out / 1024))) of $(human_kb $((held / 1024))) is free pages"
-          done_n=$((done_n + 1)); done_b=$((done_b + out)); rows_b=$((rows_b + held - out)); rows_n=$((rows_n + 1))
-          continue
-        fi
-        avail_kb="$(df -Pk "$(dirname "${path}")" 2>/dev/null | awk 'NR == 2 { print $4 }')"
-        if ! [ "${avail_kb:-0}" -ge $((2 * held / 1024 + 1)) ] 2>/dev/null; then
-          space_b=$((space_b + held)); space_n=$((space_n + 1)); continue
-        fi
-        if ! out="$(agent_history_sqlite compact "${path}")"; then
+      if [ "${DRY_RUN}" -eq 1 ] || [ -n "${LIVE}" ]; then
+        if ! out="$(agent_history_sqlite measure "${path}")"; then
           fail_b=$((fail_b + held)); fail_n=$((fail_n + 1)); [ -n "${fail_why}" ] || fail_why="${path}: ${out}"; continue
         fi
-        after="$(agent_history_held_bytes "${path}")"
-        freed=$((held - after)); [ "${freed}" -ge 0 ] || freed=0
-        echo "  compacted ${path}: $(human_kb $((held / 1024))) -> $(human_kb $((after / 1024))), freed $(human_kb $((freed / 1024)))"
-        done_n=$((done_n + 1)); done_b=$((done_b + freed)); rows_b=$((rows_b + after)); rows_n=$((rows_n + 1))
-      done < <(find "${tree}" -type f ! -mtime "+${AGENT_HISTORY_MAX_AGE_DAYS}" -print0 2>/dev/null)
-      if [ "${done_n}" -gt 0 ]; then
-        if [ "${DRY_RUN}" -eq 1 ]; then
-          echo "host-update: agent history reclaim (DRY RUN) — ${tree}: would compact ${done_n} live database(s) in place, freeing up to $(human_kb $((done_b / 1024))); nothing changed"
-        else
-          echo "host-update: agent history reclaim — ${tree}: compacted ${done_n} live database(s) in place, freed $(human_kb $((done_b / 1024)))"
+        [ "${out}" -le "${held}" ] || out="${held}"
+        if [ -n "${LIVE}" ]; then
+          live_b=$((live_b + out)); live_n=$((live_n + 1)); rows_b=$((rows_b + held - out)); rows_n=$((rows_n + 1))
+          continue
         fi
-      fi
-      [ "${tier_n}" -eq 0 ] || agent_history_unreached "${tree}" "${label}" "${tier_b}" within-age-tier "${tier_n}" "younger than ${AGENT_HISTORY_MAX_AGE_DAYS}d and not a database; kept by the age tier"
-      [ "${rows_n}" -eq 0 ] || agent_history_unreached "${tree}" "${label}" "${rows_b}" live-rows "${rows_n}" "held by rows the owning tool still keeps; only its own retention can release them"
-      [ "${eng_n}" -eq 0 ] || agent_history_unreached "${tree}" "${label}" "${eng_b}" no-sqlite-engine "${eng_n}" "live SQLite database(s), and no sqlite3 (or node with node:sqlite) on this host to compact them"
-      [ "${space_n}" -eq 0 ] || agent_history_unreached "${tree}" "${label}" "${space_b}" insufficient-free-space "${space_n}" "VACUUM needs twice the file's size free on its filesystem"
-      [ "${fail_n}" -eq 0 ] || agent_history_unreached "${tree}" "${label}" "${fail_b}" compaction-failed "${fail_n}" "${fail_why}"
-      if [ $((tier_n + rows_n + eng_n + space_n + fail_n)) -eq 0 ]; then
-        echo "host-update: agent history reclaim${label} — ${tree}: could not reach 0.0KB — every byte was in scope"
-      fi
-    }
-    for hdir in "${AGENT_HISTORY_DIRS[@]}"; do
-      [ -n "${hdir}" ] || continue
-      if [ ! -d "${hdir}" ]; then
-        echo "host-update: agent history reclaim — ${hdir}: no such directory, skipping"
+        echo "  would compact ${path}: $(human_kb $((out / 1024))) of $(human_kb $((held / 1024))) is free pages"
+        done_n=$((done_n + 1)); done_b=$((done_b + out)); rows_b=$((rows_b + held - out)); rows_n=$((rows_n + 1))
         continue
       fi
-      agent_history_probe_stat "${hdir}"
+      avail_kb="$(df -Pk "$(dirname "${path}")" 2>/dev/null | awk 'NR == 2 { print $4 }')"
+      if ! [ "${avail_kb:-0}" -ge $((2 * held / 1024 + 1)) ] 2>/dev/null; then
+        space_b=$((space_b + held)); space_n=$((space_n + 1)); continue
+      fi
+      if ! out="$(agent_history_sqlite compact "${path}")"; then
+        fail_b=$((fail_b + held)); fail_n=$((fail_n + 1)); [ -n "${fail_why}" ] || fail_why="${path}: ${out}"; continue
+      fi
+      after="$(agent_history_held_bytes "${path}")"
+      freed=$((held - after)); [ "${freed}" -ge 0 ] || freed=0
+      echo "  compacted ${path}: $(human_kb $((held / 1024))) -> $(human_kb $((after / 1024))), freed $(human_kb $((freed / 1024)))"
+      done_n=$((done_n + 1)); done_b=$((done_b + freed)); rows_b=$((rows_b + after)); rows_n=$((rows_n + 1))
+    done < <(find "${tree}" -type f ! -mtime "+${AGENT_HISTORY_MAX_AGE_DAYS}" -print0 2>/dev/null)
+    if [ "${done_n}" -gt 0 ]; then
       if [ "${DRY_RUN}" -eq 1 ]; then
-        would_bytes=0
+        echo "host-update: agent history reclaim (DRY RUN) — ${tree}: would compact ${done_n} live database(s) in place, freeing up to $(human_kb $((done_b / 1024))); nothing changed"
+      else
+        echo "host-update: agent history reclaim — ${tree}: compacted ${done_n} live database(s) in place, freed $(human_kb $((done_b / 1024)))"
+      fi
+    fi
+    [ "${tier_n}" -eq 0 ] || agent_history_unreached "${tree}" "${label}" "${tier_b}" within-age-tier "${tier_n}" "younger than ${AGENT_HISTORY_MAX_AGE_DAYS}d and not a database; kept by the age tier"
+    [ "${rows_n}" -eq 0 ] || agent_history_unreached "${tree}" "${label}" "${rows_b}" live-rows "${rows_n}" "held by rows the owning tool still keeps; only its own retention can release them"
+    [ "${eng_n}" -eq 0 ] || agent_history_unreached "${tree}" "${label}" "${eng_b}" no-sqlite-engine "${eng_n}" "live SQLite database(s), and no sqlite3 (or node with node:sqlite) on this host to compact them"
+    [ "${space_n}" -eq 0 ] || agent_history_unreached "${tree}" "${label}" "${space_b}" insufficient-free-space "${space_n}" "VACUUM needs twice the file's size free on its filesystem"
+    [ "${fail_n}" -eq 0 ] || agent_history_unreached "${tree}" "${label}" "${fail_b}" compaction-failed "${fail_n}" "${fail_why}"
+    [ "${live_n}" -eq 0 ] || agent_history_unreached "${tree}" "${label}" "${live_b}" live-fleet-container "${live_n}" \
+      "free pages inside live database(s); a fleet container is RUNNING, so no database was compacted"
+    if [ $((tier_n + rows_n + eng_n + space_n + fail_n + live_n + AGENT_HISTORY_KEPT_N + AGENT_HISTORY_HELD_N)) -eq 0 ] &&
+      [ "${AGENT_HISTORY_OPEN_STATE}" != unreadable ]; then
+      echo "host-update: agent history reclaim${label} — ${tree}: could not reach 0.0KB — every byte was in scope"
+    fi
+  }
+  for hdir in "${AGENT_HISTORY_DIRS[@]}"; do
+    [ -n "${hdir}" ] || continue
+    if [ ! -d "${hdir}" ]; then
+      echo "host-update: agent history reclaim — ${hdir}: no such directory, skipping"
+      continue
+    fi
+    agent_history_probe_stat "${hdir}"
+    AGENT_HISTORY_HELD_N=0
+    held_bytes=0
+    if [ -n "${LIVE}" ]; then
+      agent_history_read_open
+      if [ "${AGENT_HISTORY_OPEN_STATE}" != ok ]; then
+        [ "${DRY_RUN}" -eq 1 ] || agent_history_verdict=refused
+        unread_bytes=0
         while IFS= read -r -d '' path; do
           metadata="$(agent_history_file_metadata "${path}")" || continue
-          file_size="${metadata#* }"
-          would_bytes=$((would_bytes + file_size))
-        done < <(find "${hdir}" -type f -mtime "+${AGENT_HISTORY_MAX_AGE_DAYS}" -print0 2>/dev/null)
-        would_kb=$((would_bytes / 1024))
-        echo "host-update: agent history reclaim (DRY RUN) — ${hdir}: would free $(human_kb "${would_kb:-0}") across files older than ${AGENT_HISTORY_MAX_AGE_DAYS}d; nothing removed"
+          unread_bytes=$((unread_bytes + ${metadata#* }))
+          AGENT_HISTORY_HELD_N=$((AGENT_HISTORY_HELD_N + 1))
+        done < <(agent_history_old_removable "${hdir}")
+        echo "host-update: agent history reclaim — ${hdir}: removed nothing — ${AGENT_HISTORY_OPEN_WHY}"
+        agent_history_unreached "${hdir}" "" "${unread_bytes}" open-check-unreadable "${AGENT_HISTORY_HELD_N}" \
+          "a fleet container is RUNNING and the list of open files could not be read in full, so no file was proved closed"
+        agent_history_report_kept "${hdir}" ""
         agent_history_compact_tree "${hdir}"
         continue
       fi
-      freed_bytes=0
-      removed=0
-      while IFS=$'\t' read -r _mtime size path; do
-        [ -n "${path}" ] || continue
-        if rm -f -- "${path}"; then
-          freed_bytes=$((freed_bytes + size))
-          removed=$((removed + 1))
-          echo "  removed ${path}"
+    fi
+    if [ "${DRY_RUN}" -eq 1 ]; then
+      would_bytes=0
+      while IFS= read -r -d '' path; do
+        metadata="$(agent_history_file_metadata "${path}")" || continue
+        file_size="${metadata#* }"
+        if [ -n "${LIVE}" ] && agent_history_is_open "${path}"; then
+          held_bytes=$((held_bytes + file_size)); AGENT_HISTORY_HELD_N=$((AGENT_HISTORY_HELD_N + 1)); continue
         fi
-      done < <(
-        find "${hdir}" -type f -mtime "+${AGENT_HISTORY_MAX_AGE_DAYS}" -print0 2>/dev/null |
-          while IFS= read -r -d '' path; do
-            metadata="$(agent_history_file_metadata "${path}")" || continue
-            printf '%s\t%s\t%s\n' "${metadata%% *}" "${metadata#* }" "${path}"
-          done |
-          sort -n
-      )
-      freed_kb=$((freed_bytes / 1024))
-      echo "host-update: agent history reclaim — ${hdir}: freed $(human_kb "${freed_kb}") across ${removed} file(s) older than ${AGENT_HISTORY_MAX_AGE_DAYS}d, oldest first"
+        would_bytes=$((would_bytes + file_size))
+      done < <(agent_history_old_removable "${hdir}")
+      would_kb=$((would_bytes / 1024))
+      echo "host-update: agent history reclaim (DRY RUN) — ${hdir}: would free $(human_kb "${would_kb:-0}") across files older than ${AGENT_HISTORY_MAX_AGE_DAYS}d; nothing removed"
+      [ "${AGENT_HISTORY_HELD_N}" -eq 0 ] || agent_history_unreached "${hdir}" " (DRY RUN)" "${held_bytes}" open-by-process \
+        "${AGENT_HISTORY_HELD_N}" "older than ${AGENT_HISTORY_MAX_AGE_DAYS}d, but a process holds it open; kept"
+      agent_history_report_kept "${hdir}" " (DRY RUN)"
       agent_history_compact_tree "${hdir}"
-    done
-  fi
+      continue
+    fi
+    freed_bytes=0
+    removed=0
+    while IFS=$'\t' read -r _mtime size path; do
+      [ -n "${path}" ] || continue
+      if [ -n "${LIVE}" ] && agent_history_is_open "${path}"; then
+        held_bytes=$((held_bytes + size)); AGENT_HISTORY_HELD_N=$((AGENT_HISTORY_HELD_N + 1)); continue
+      fi
+      if rm -f -- "${path}"; then
+        freed_bytes=$((freed_bytes + size))
+        removed=$((removed + 1))
+        echo "  removed ${path}"
+      fi
+    done < <(
+      agent_history_old_removable "${hdir}" |
+        while IFS= read -r -d '' path; do
+          metadata="$(agent_history_file_metadata "${path}")" || continue
+          printf '%s\t%s\t%s\n' "${metadata%% *}" "${metadata#* }" "${path}"
+        done |
+        sort -n
+    )
+    freed_kb=$((freed_bytes / 1024))
+    echo "host-update: agent history reclaim — ${hdir}: freed $(human_kb "${freed_kb}") across ${removed} file(s) older than ${AGENT_HISTORY_MAX_AGE_DAYS}d, oldest first"
+    [ "${AGENT_HISTORY_HELD_N}" -eq 0 ] || agent_history_unreached "${hdir}" "" "${held_bytes}" open-by-process \
+      "${AGENT_HISTORY_HELD_N}" "older than ${AGENT_HISTORY_MAX_AGE_DAYS}d, but a process holds it open; kept"
+    agent_history_report_kept "${hdir}" ""
+    agent_history_compact_tree "${hdir}"
+  done
 fi
 
 # ── 4c. RECLAIM-ONLY STOPS HERE (W1-T2725) ───────────────────────────────────────────────────
@@ -1731,8 +1929,9 @@ if [ "${RECLAIM_ONLY}" -eq 1 ]; then
   # W1-T3676: section 4b's verdict, so a refusal never reads as a clean run with nothing to do.
   case "${agent_history_verdict}" in
     refused)
-      echo "host-update: agent history reclaim: REFUSED — a fleet container was RUNNING, so nothing under any tree"
-      echo "  was removed or compacted. This is NOT a clean nothing-to-do run: the per-tree 'could not reach'"
+      echo "host-update: agent history reclaim: REFUSED — a fleet container was RUNNING and the list of open files"
+      echo "  could not be read in full, so the age sweep removed nothing and no database was compacted."
+      echo "  This is NOT a clean nothing-to-do run: the per-tree 'could not reach'"
       echo "  lines above name what each tree still holds." ;;
     completed) echo "host-update: agent history reclaim: COMPLETED — see the per-tree 'freed' and 'could not reach' lines above." ;;
     dry-run) echo "host-update: agent history reclaim: DRY RUN — nothing was removed or compacted." ;;
@@ -1769,8 +1968,8 @@ if [ "${RECLAIM_ONLY}" -eq 1 ]; then
   fi
   # W1-T3682: a git object reclaim that reached none of its named targets must not report the same
   # exit code as a clean run. `git_reclaim_reached` is set inside section 4a's loop and left unset
-  # whenever that loop never ran (RECLAIM_ONLY=0, unreachable here) or never entered it (the LIVE
-  # refusal) — `:-1` treats either of those as "not applicable", never as a false all-miss. The
+  # whenever that loop never ran (RECLAIM_ONLY=0, unreachable here); beside a live fleet the exit
+  # stays as before W1-T12495 — neither case is read as a false all-miss. The
   # docker/image/build prune and agent-history reclaim above still ran and are still reported; only
   # the verdict for THIS mode's exit code changes, so a monitor watching the exit code (rather than
   # reading output) still catches the all-miss.

@@ -11,7 +11,7 @@ import { digest, RUNTIME_PROFILE_FORMAT, runtimeBindings, runtimeSamples, readRu
 import { REPO_ROOT } from './lib/repo-root.mjs';
 import { isMainModule, parseArgv } from './lib/argv.mjs';
 
-export function calibrateAuthorRuntime({ root = REPO_ROOT } = {}) {
+export function calibrateAuthorRuntime({ root = REPO_ROOT, acquireSlot = acquireTestSlot } = {}) {
   const env = authorEnvironment(process.env), head = sourceHead(root);
   const clean = () => {
     const result = spawnSync('git', ['status', '--porcelain'], { cwd: root, env, encoding: 'utf8' });
@@ -30,10 +30,12 @@ export function calibrateAuthorRuntime({ root = REPO_ROOT } = {}) {
   const dir = mkdtempSync(join(root, 'coverage/rmd-native-runtime-'));
   const paths = { stdout: join(dir, 'sample.stdout.log'), stderr: join(dir, 'sample.stderr.log'),
     native: join(dir, 'sample.native-result.json'), durations: join(dir, 'durations.json') };
-  const slot = acquireTestSlot('native-author-runtime:sample');
+  const slot = acquireSlot('native-author-runtime:sample');
   try {
     if (!testSlotExecutionAllowed(slot) || !['acquired', 'inherited'].includes(slot.outcome)) throw new Error('calibration requires an admitted host-wide slot');
-    const concurrency = Math.min(4, slot.concurrency);
+    // W1-T11891: the sample width is the admitted grant itself; no fixed ceiling narrows it.
+    const concurrency = slot.concurrency;
+    if (!Number.isSafeInteger(concurrency) || concurrency < 1) throw new Error('calibration requires an admitted host-wide slot');
     const command = lowPriorityCommand(process.execPath, testRunArgv(['--test', '--test-reporter=tap',
       '--test-reporter-destination=stdout', `--test-reporter=${join(root, 'scripts/test-duration-reporter.mjs')}`,
       `--test-reporter-destination=${paths.durations}`, '--import', 'tsx', '--import', './test/setup/tmp-hygiene.ts', ...samples], concurrency));
@@ -43,7 +45,7 @@ export function calibrateAuthorRuntime({ root = REPO_ROOT } = {}) {
     clean();
     const durations = JSON.parse(readFileSync(paths.durations, 'utf8'));
     const profile = { format: RUNTIME_PROFILE_FORMAT, at: new Date().toISOString(), bindings,
-      samples, concurrency, slot: { outcome: slot.outcome, note: slot.note }, files: durations.files,
+      samples, concurrency, slot: { outcome: slot.outcome, concurrency: slot.concurrency, note: slot.note }, files: durations.files,
       artifacts: Object.entries(paths).map(([name, path]) => ({ name, path: relative(root, path),
         bytes: readFileSync(path).length, sha256: digest(readFileSync(path)) })),
       assurance: 'runtime-sample-only', author: 'not-proven', sourceChanged: false };

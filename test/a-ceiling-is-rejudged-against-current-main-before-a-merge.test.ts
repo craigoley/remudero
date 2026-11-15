@@ -15,6 +15,7 @@ import { attemptArm, logArmAttribution, readMergedRatchetsAsync, type ArmDeps } 
 import { runStepsSync } from "#src/lib/git-push.js";
 import {
   CLOCK_SCOPE_RE,
+  COUNTED_RATCHET_GATES,
   judgeMergedRatchets,
   readMergedRatchetInputsSteps,
   type MergedRatchetInputs,
@@ -83,13 +84,15 @@ function judgeOwnTree(repo: GitRepo, base: string, head: string): MergedRatchetJ
   const read = (rev: string) => (path: string) => (repo.git("ls-tree", "--name-only", rev, "--", path) ? repo.git("show", `${rev}:${path}`) : null);
   const changed = repo.git("diff", "--name-only", base, head).split("\n").filter(Boolean);
   const measuredFiles = repo.git("ls-tree", "-r", "--name-only", head, "--", "src", "scripts").split("\n").filter(Boolean);
-  return judgeMergedRatchets({ mainSha: base, headSha: head, changed, measuredFiles, readMerged: read(head), readMain: read(base) });
+  const populationFiles = repo.git("ls-tree", "-r", "--name-only", head, "--", "src", "test").split("\n").filter(Boolean);
+  return judgeMergedRatchets({ mainSha: base, headSha: head, changed, measuredFiles, populationFiles, readMerged: read(head), readMain: read(base) });
 }
 
 function memoryInputs(merged: { count: number; row: number }, main: { count: number; row: number }): MergedRatchetInputs {
   const text = (n: number) => `${Array.from({ length: n }, (_, i) => `Date.now(); // l${i}`).join("\n")}\n`;
   const tree = (s: { count: number; row: number }) => (p: string) => (p === FILE ? text(s.count) : p === BASELINE ? JSON.stringify({ [FILE]: { dateNow: s.row, legacy: 0, newDate: 0 } }) : null);
-  return { mainSha: "main-sha", headSha: "head-sha", changed: [FILE, BASELINE], measuredFiles: [FILE, BASELINE], readMerged: tree(merged), readMain: tree(main) };
+  return { mainSha: "main-sha", headSha: "head-sha", changed: [FILE, BASELINE], measuredFiles: [FILE, BASELINE], populationFiles: [FILE],
+    readMerged: tree(merged), readMain: tree(main) };
 }
 
 const CROSSING = judgeMergedRatchets(memoryInputs({ count: N + 2, row: N + 1 }, { count: N + 1, row: N + 1 }));
@@ -129,7 +132,7 @@ test("W1-T9962: the three-merge replay still protects counted clock signatures a
     assert.equal(judgeOnto(fx, n, base).verdict, "clean", `#${n} on its own base`);
     const own = judgeOwnTree(fx.origin, base, head);
     assert.equal(own.verdict, "clean", `#${n}'s own tree`);
-    assert.deepEqual(own.counted, ["clock-signature"]);
+    assert.deepEqual(own.counted, [...COUNTED_RATCHET_GATES]);
   }
 });
 
@@ -190,7 +193,7 @@ test("W1-T9962: a ceiling lowered on a stale base is re-derived against current 
   const clockTree = (row: number) => (p: string) => p === clockBaseline ? JSON.stringify({ "src/lib/x.ts": { dateNow: row }, "test/x.test.ts": { dateNow: 0 } })
     : p === "src/lib/x.ts" || p === "test/x.test.ts" ? twice : null;
   const clock = judgeMergedRatchets({ mainSha: "m", headSha: "h", changed: ["src/lib/x.ts", "test/x.test.ts"], measuredFiles: [],
-    readMerged: clockTree(1), readMain: clockTree(2) });
+    populationFiles: ["src/lib/x.ts"], readMerged: clockTree(1), readMain: clockTree(2) });
   assert.equal(CLOCK_SCOPE_RE.test("test/x.test.ts"), false);
   assert.equal(CLOCK_SCOPE_RE.test("src/lib/x.ts"), true);
   assert.deepEqual(clock.rows.map((r) => [r.gate, r.path, r.field, r.verdict, r.merged, r.prCeiling, r.mainCeiling, r.rederived]),
@@ -273,7 +276,7 @@ test("W1-T9962: a ratchet counter that throws, or a blob read that fails, is unr
     readMerged: () => { throw new Error("counter blew up"); }, readMain: () => null });
   assert.equal(counter.verdict, "unread");
   assert.deepEqual(counter.rows, []);
-  assert.match(counter.reason ?? "", /a ratchet counter threw: counter blew up/);
+  assert.match(counter.reason ?? "", /^clock-signature: a ratchet counter threw: counter blew up/);
 
   const sha = (c: string) => c.repeat(40);
   let fetched = "";
@@ -360,7 +363,7 @@ test("W1-T9962: a clean merge arms as today, an unreadable merge records unread,
   for (const j of [CLEAN, unread.ratchetJudge!]) {
     assert.ok(j.uncounted.some((g) => g.gate === "coverage" && g.class === "run-derived"));
     assert.ok(j.uncounted.some((g) => g.gate === "mutation" && g.class === "run-derived"));
-    assert.ok(j.uncounted.some((g) => g.gate === "source-size" && g.class === "delta-only"));
+    assert.ok(j.uncounted.some((g) => g.gate === "learnings-budget" && g.class === "needs-worktree"));
   }
   assert.ok((decided?.uncounted_gates as string[]).includes("coverage:run-derived"));
 });

@@ -14,7 +14,7 @@
   files:
     - test/a-changed-resource-policy-reaches-a-running-container.test.ts
     - test/deploy/the-resource-policy-suite-is-independent-of-its-host.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: The drift reader under test reads the fixture's meminfo and recorded peaks rather than the host's, so "the recycle reason names each drifted limit as expected and actual" gets the same numbers on any host

@@ -7,7 +7,7 @@
   principles: {tdd: strict}
   risk: high
   priority: 1
-  status: queued
+  status: merged
   attempts: 0
   note: "Reserved from the operator checkout on codex/operator-pr-flow-20261108; subject sweep found zero matches on main and each of the four open PR heads observed 2026-11-08."
   origin: "operator request 2026-11-08: fix PR #17348 and prevent already-complete triage PRs from becoming stuck"

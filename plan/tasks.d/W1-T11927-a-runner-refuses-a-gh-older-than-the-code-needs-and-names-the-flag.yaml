@@ -1,0 +1,37 @@
+- id: W1-T11927
+  title: The oldest gh version the code needs is declared once and every runner, on the host or in a container, checks it before it spends work, failing with the version it found and the flag that needs more
+  repo: remudero
+  depends_on:
+    - W1-T11926
+  priority: 1.3
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: medium # one concern: a declared minimum and one check of it; no gh call, flag or credential changes
+  origin: operator-session#github-access-1109
+  plan_refs:
+    - W1-T236
+  files:
+    - src/lib/github-transport.ts
+    - test/a-runner-refuses-a-gh-older-than-the-code-needs-and-names-the-flag.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: A single declared minimum gh version, with the flag that needs it recorded beside it, is compared with the installed version before the first gh call of a runner, and an older gh fails the runner with both versions and the flag named
+      proof: "unit test: test/a-runner-refuses-a-gh-older-than-the-code-needs-and-names-the-flag.test.ts"
+    - claim: An installed version at or above the minimum, or an unreadable version string, never blocks a runner; the unreadable case is recorded as unknown, not as old
+      proof: "grep: W1-T11927 criterion 2 in test/a-runner-refuses-a-gh-older-than-the-code-needs-and-names-the-flag.test.ts"
+    - claim: The check runs once per process and adds no gh call beyond the version read
+      proof: "grep: W1-T11927 criterion 3 in test/a-runner-refuses-a-gh-older-than-the-code-needs-and-names-the-flag.test.ts"
+  rationale: |
+    OBSERVED 2026-11-09: a review run on the Azure host died on "unknown flag: --slurp". The host has gh 2.45.0 and the daemon container 2.63.2; the code had begun using --slurp for the status history read. The code has since been fixed (c18574b948 reads page by page), but nothing stops the next flag from doing the same, and the failure surfaced as a stuck pending check on a PR, not as a version problem.
+    - A declared minimum turns a drift between hosts into one named refusal at the start of a run.
+  design: |
+    - Declare the minimum beside the transport and name the flag that set it. Read `gh --version` once per process.
+    - NOT IN SCOPE: upgrading gh anywhere, the credential resolver (its own task), and what any gh call does.
+  falsifier: |
+    Compare strings instead of versions (2.9 against 2.45): criterion 1 must fail. Block on an unreadable version: criterion 2 must fail. Read the version on every call: criterion 3 must fail. Restore and require all three.
+  note: |
+    reservation hand-off: run-unfiled-1794267225693
+    Success is no stuck check traced to a gh flag the host does not have.

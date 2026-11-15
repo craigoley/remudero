@@ -10,7 +10,7 @@
   risk: high
   band_meaning: span
   origin: operator-request#wreckterra-console-product-2026-10-25
-  status: queued
+  status: merged
   attempts: 0
   depends_on:
     - W1-T10614

@@ -1,0 +1,47 @@
+- id: W1-T12150
+  title: "Effort is an experiment arm for the balanced Codex model"
+  repo: remudero
+  depends_on: []
+  priority: 1.3
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the effort a Codex build worker runs at, on half of the tasks the experiment takes
+  band_meaning: blast-radius
+  origin: operator-session#model-choice-2026-11-10
+  plan_refs:
+    - W1-T5450
+    - W1-T10842
+    - W1-T4617
+  files:
+    - src/lib/routing-experiments.ts
+    - src/lib/worker.ts
+    - test/routing/effort-is-an-experiment-arm-for-the-balanced-codex-model.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "An experiment compares gpt-6.1-sol at medium effort with gpt-6.1-sol at high effort on build work. The task alone fixes the arm, so a retry never draws again"
+      proof: "grep: W1-T12150 criterion 1 in test/routing/effort-is-an-experiment-arm-for-the-balanced-codex-model.test.ts"
+    - claim: "A Codex build assignment in the experiment runs at the assigned effort and records the experiment id, the assigned effort and its probability"
+      proof: "grep: W1-T12150 criterion 2 in test/routing/effort-is-an-experiment-arm-for-the-balanced-codex-model.test.ts"
+    - claim: "The effort draw is independent of the provider draw, and an assignment that Claude serves is in no effort arm"
+      proof: "grep: W1-T12150 criterion 3 in test/routing/effort-is-an-experiment-arm-for-the-balanced-codex-model.test.ts"
+    - claim: "rmd routing-ab reports each effort arm with its number of tasks"
+      proof: "grep: W1-T12150 criterion 4 in test/routing/effort-is-an-experiment-arm-for-the-balanced-codex-model.test.ts"
+  rationale: |
+    MEASURED 2026-11-10 in the core instance's ledger, 2026-10-27 to 2026-11-10: gpt-6.1-sol build attempts succeeded in 83.3% of 84 at medium effort. At high effort they succeeded in 60.1% of 218.
+    - The comparison is observational. The mounts table sends harder tasks to high effort, and 71 of the failed high attempts were container recycles (W1-T12149).
+    - So the numbers cannot say which effort is better. Only a random split on the same kind of task can.
+    - Every experiment in src/lib/routing-experiments.ts compares two providers. `RoutingExperiment.arms` maps a provider to a label, so it cannot hold two efforts of one model.
+    - W1-T5450 files the same question for the Opus model. No task files it for Codex.
+  design: |
+    Add an effort experiment shape beside the provider shape: one provider, one model, two efforts, one type of work. Reuse `experimentArmForTask` with its own draw point, so the effort draw does not depend on the provider draw.
+    Apply the assigned effort where the selected effort is set, in `workerSelectionAssignment` in src/lib/worker.ts. Only tasks whose mount gives gpt-6.1-sol at high effort for build work join.
+    Give the experiment a decision rule in the form W1-T12142 defines, if that task has merged. If not, set `minTasksPerArm` and a stop date.
+    Where W1-T5450 has merged first, extend its shape and do not add a second one.
+    NOT IN SCOPE: effort for fix and review work, and any change to the mounts table.
+  falsifier: |
+    Key the draw on the attempt and criterion 1 must fail. Put a Claude assignment in an effort arm and criterion 3 must fail. Restore and require all to pass.
+  note: |
+    Medium effort costs less for each attempt. If it also merges more often, the table change is W1-T12143's to propose.

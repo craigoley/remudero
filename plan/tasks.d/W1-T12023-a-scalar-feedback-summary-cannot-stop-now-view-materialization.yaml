@@ -1,0 +1,68 @@
+- id: W1-T12023
+  title: A persisted scalar feedback summary remains visible as question context and cannot stop the now view from materializing
+  repo: remudero
+  depends_on: []
+  priority: 0.6
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  budget_usd: 5
+  risk: high # shared human-gate formatter feeds both feedback gates and legacy grill decisions
+  band_meaning: span
+  origin: operator approval 2026-11-10 of two paths and combined USD 10.10
+  plan_refs:
+    - W1-T11459
+  files:
+    - src/lib/human-gate.ts
+    - test/human-gate-feedback.test.ts
+  status: merged
+  attempts: 0
+  acceptance:
+    - claim: A persisted scalar summary read by the real feedback reader reaches both grill decisions and feedback gates, retaining raw and scalar text, the subject identity and the answer resolution verb
+      proof: "grep: W1-T12023 criterion 1 in test/human-gate-feedback.test.ts"
+    - claim: A real createNowView fixture containing that unresolved scalar-summary entry materializes a current body with its question and gate rather than throwing the map exception
+      proof: "grep: W1-T12023 criterion 2 in test/human-gate-feedback.test.ts"
+    - claim: Structured and absent summaries keep their exact existing question context, and the scalar compatibility path does not relabel unknown feedback evidence as verified
+      proof: "grep: W1-T12023 criterion 3 in test/human-gate-feedback.test.ts"
+  rationale: |
+    OBSERVED 2026-11-10 on Azure Serve: eight read_model.now_view_failed rows at
+    05:06-05:17Z carry Cannot read properties of undefined (reading map).
+    The real listFeedback reader and landing overlay retain 823 entries, including
+    one unresolved grilling incident whose summary is a string. It has no proposal
+    PR; pure reconciliation retains it without a GitHub read. Calling the exported
+    feedbackQuestionContext and projectFeedbackGates on it reproduces that exception.
+    The mapped instance=core now API serves Nov6 source timestamps while status is fresh.
+    Mechanism: human-gate.ts feedbackQuestionContext assumes every truthy summary has
+    options.map. The reader does not validate or normalize this persisted summary.
+    A structured-input control preserves the same raw and summary text and produces
+    its answer gate; this is diagnostic evidence, not source qualification or proof
+    that every frontend timeout has this cause.
+    Before filing, main 4a5d3a2d and all seven captured open PR head trees retained
+    the unguarded formatter and contained no scalar/string-summary subject task.
+  design: |
+    In the shared feedbackQuestionContext formatter, preserve a string summary as
+    plain text before the existing structured-summary branch. Keep raw question
+    context and structured option labels/consequences unchanged. Use no new imports
+    in the formatter. Do not coerce malformed object summaries to empty options.
+    Append regressions only to the existing human-gate-feedback test: exercise the
+    real persisted-entry reader, both exported production consumers, and a real
+    createNowView materialization with synthetic incident text. Preserve every
+    existing test input, assertion, expected value, timeout, title and skip.
+    Existing source-unavailable and uncalibrated evidence must retain their state.
+    Do not edit feedback records, statuses, answer routes, gate classification/count
+    policy, credentials, providers, registry policy, pacing or runtime configuration.
+  falsifier: |
+    Remove only the scalar compatibility branch and the persisted scalar-reader
+    and real now-view regressions must fail with the map exception. Restore it and
+    require them to pass; structured and absent-summary controls must remain exact.
+  note: |
+    Reserved from the Azure operator checkout with next-task-id on
+    codex/plan-scalar-summary-1794300931573; actual HELD id W1-T12023.
+    Operator authority is exactly these two paths and combined USD 10.10:
+    one source build up to USD 5, one normal review up to USD 5, and a possible
+    shadow call up to USD 0.10. No additional paid retry or scope is authorized.
+    Implementation waits for normal plan merge, fresh ownership, merge credit,
+    source history, duplicate and runnableCandidates checks. Preserve live owners,
+    normal author/hosted/native gates, engine-pruning STOP and all runtime holds.
+    No manual review status, arming, approval, merge, restart or recycle is included.

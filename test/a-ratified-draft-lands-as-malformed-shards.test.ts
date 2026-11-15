@@ -37,6 +37,8 @@ const malformed = (id: string, title: string): string =>
     "  repo: master-plan",
     "  depends_on: []",
     "  type: implement",
+    "  design: |",
+    "    NO-INVARIANTS: synthetic lint fixture with no inherited behavior to preserve",
     "  verify:",
     '    proof: "grep: MASTER-PLAN.md contains an open ratification candidate for §7/P25; skeleton task created"',
     "  risk: low",

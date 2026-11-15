@@ -14,7 +14,7 @@
   files:
     - src/run-task.ts
     - test/worker/run-task/a-declared-path-git-ignores-is-a-named-commit-refusal.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: When the only files a worker wrote are declared paths that .gitignore hides, commitWorkerEdits refuses with a reason naming each ignored declared path and the ignore rule that hides it, never "the worker changed nothing"

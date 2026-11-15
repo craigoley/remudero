@@ -175,11 +175,21 @@ test("W1-T4838: draftRefusalAmendment opens one plan-only PR and dedupes on the 
 
 // ── the sweep wiring, real effect over injected git/gh seams ────────────────────────────────────
 
+/** W1-T12199: the git the sealed task-file landing reads. A tree is named after its fixture root and its main, so no verdict is shared between tests. */
+function landingFixtureGit(root: string, mainSha: string, commitSha: string, args: readonly string[]): string {
+  if (args.includes("rev-parse")) return `${args.at(-1) === "origin/main" ? mainSha : args.at(-1)!.includes(":") ? "ba5eb10b" : commitSha}\n`;
+  if (args.includes("hash-object")) return "a3e9dedb10b\n";
+  if (args.includes("write-tree")) return `tree-of-${root}-on-${mainSha}\n`;
+  if (args.includes("commit-tree")) return `${commitSha}\n`;
+  return "";
+}
+
 function effectsFixture(task: Task) {
   const root = mkdtempSync(join(tmpdir(), "rmd-refusal-amend-repo-"));
   mkdirSync(join(root, "plan", "tasks.d"), { recursive: true });
   writeFileSync(join(root, "plan", "tasks.d", `${TASK}-fixture.yaml`), SHARD);
   const ghCalls: string[][] = [];
+  const landingPrs: string[] = [];
   const worktreeAdds: string[] = [];
   const writes: Array<{ path: string; text: string }> = [];
   const logged: string[] = [];
@@ -192,7 +202,7 @@ function effectsFixture(task: Task) {
     plan: planOf(task),
     log: (step) => logged.push(step),
     nowMsImpl: () => Date.now(),
-    planRepairGitImpl: (_file, args) => (args.includes("rev-parse") ? "amendsha0123\n" : ""),
+    planRepairGitImpl: (_file, args) => landingFixtureGit(root, "mainsha0123", "amendsha0123", args),
     worktreeAddImpl: (_repoDir, worktreePath, branch) => {
       worktreeAdds.push(branch);
       mkdirSync(join(worktreePath, "plan", "tasks.d"), { recursive: true });
@@ -201,6 +211,12 @@ function effectsFixture(task: Task) {
     worktreeRemoveImpl: () => {},
     ghJsonImpl: (args) => {
       ghCalls.push(args);
+      // W1-T12199: the landing lists the open pull requests of its branch, then creates one.
+      if (args[0] === "pr" && args[1] === "list") return landingPrs.map((url) => ({ url }));
+      if (args[0] === "pr" && args[1] === "create") {
+        landingPrs.push("https://github.com/acme/remudero/pull/9004");
+        return "https://github.com/acme/remudero/pull/9004";
+      }
       return args.includes("--method") ? { html_url: "https://github.com/acme/remudero/pull/9003", number: 9003 } : [];
     },
     buildPlanPrBodyImpl: (opts) => {
@@ -238,11 +254,13 @@ test("W1-T4838: a categorized refusal holds the task and drafts one amendment", 
 
   await withLiveWritesAllowed(() => runSweep([], deps));
 
-  // ONE amendment PR: a probe then a create, on the stable per-task branch.
-  assert.deepEqual(f.worktreeAdds, [`refusal-amendment/${TASK}`]);
-  assert.equal(f.ghCalls.filter((c) => c.includes("--method")).length, 1, "exactly one PR is created");
-  const body = f.writes.map((w) => w.text).join("\n");
-  assert.match(body, /No headline at this checkout/, "the worker's evidence is quoted in the PR");
+  // ONE pull request carries the amendment: the sealed task-file landing (W1-T12199), which cuts no worktree.
+  assert.deepEqual(f.worktreeAdds, []);
+  assert.equal(f.ghCalls.filter((c) => c[1] === "create").length, 1, "exactly one PR is created");
+  const staged = readFileSync(join(f.root, "state", "task-files-landing-pending", "plan", "tasks.d", `${TASK}-fixture.yaml`), "utf8");
+  const created = f.ghCalls.find((c) => c[1] === "create")!;
+  const body = `${staged}\n${created[created.indexOf("--body") + 1]}`;
+  assert.match(body, /No headline at this checkout/, "the worker's evidence is quoted in the amended task file the PR carries");
   assert.doesNotMatch(body, /Remudero-Task: /, "the amendment must not carry a trailer that would mark the task done");
 
   // THE HOLD: the daemon's existing terminal pre-dispatch record now covers this task's contract.
@@ -260,7 +278,7 @@ test("W1-T4838: a categorized refusal holds the task and drafts one amendment", 
   assert.equal(recorded[0]!.outcome, "drafted");
   assert.equal(recorded[0]!.source_run_id, RUN);
   await withLiveWritesAllowed(() => runSweep([], deps));
-  assert.equal(f.ghCalls.filter((c) => c.includes("--method")).length, 1, "a second pass drafts nothing more");
+  assert.equal(f.ghCalls.filter((c) => c[1] === "create").length, 1, "a second pass drafts nothing more");
   assert.equal(logRows(path).filter((r) => r.step === REFUSAL_AMENDMENT_STEP).length, 1);
 });
 
@@ -273,8 +291,9 @@ test("W1-T4838: an uncategorized no_pr keeps the retry path", async () => {
   }
   const f = effectsFixture(task);
   let called = 0;
+  // W1-T12199: the effect also runs with no candidate, to land a task file that waits.
   const spy: SweepDeps["draftRefusalAmendments"] = async (c) => {
-    called++;
+    if (c.length > 0) called++;
     return f.effects.draftRefusalAmendments!(c);
   };
 
@@ -323,15 +342,16 @@ test("W1-T4838: a hold that cannot be written is logged and the amendment is sti
   const path = freshLogFile();
   appendLedger(path, verdictRow());
   const f = effectsFixture(task);
-  // `state` is a FILE, so the hold record's directory cannot be created — the hold write throws.
-  writeFileSync(join(f.root, "state"), "not a directory");
+  // The hold record's own path is a DIRECTORY, so the hold write throws. The rest of `state` stays writable,
+  // because the amendment waits there for its landing (W1-T12199).
+  mkdirSync(join(f.root, "state", "dispatch-repair", `${TASK}.json`), { recursive: true });
 
   await withLiveWritesAllowed(() =>
     runSweep([], sweepDeps(path, { draftRefusalAmendments: f.effects.draftRefusalAmendments })),
   );
 
   assert.ok(f.logged.includes("sweep.refusal_amendment.hold_failed"), "the failed hold is logged, not swallowed");
-  assert.equal(f.ghCalls.filter((c) => c.includes("--method")).length, 1, "the amendment PR is still opened");
+  assert.equal(f.ghCalls.filter((c) => c[1] === "create").length, 1, "the amendment PR is still opened");
   assert.equal(logRows(path).filter((r) => r.step === REFUSAL_AMENDMENT_STEP)[0]?.outcome, "drafted");
 });
 

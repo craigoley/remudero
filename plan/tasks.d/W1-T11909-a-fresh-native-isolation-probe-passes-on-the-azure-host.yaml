@@ -11,7 +11,7 @@
   plan_refs: [W1-T17, W1-T11693, W1-T11908, W1-T11891, W1-T5346]
   files:
     - docs/forensics/worker-bash-snapshot-isolation-on-azure.md
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     Native run W1-T11891-1794252506105 failed closed in isolation_probe with 0 aliases and the six gawk* functions from

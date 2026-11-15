@@ -11,8 +11,8 @@
  * recovery ref whose tree is proven equal to the owner's index before anything is reset. So a dead
  * owner's staged-only residue at the current head is now preserved, receipted as
  * `sweep.fix.owner_residue_preserved`, reset, removed and reclaimed in the same pass. A LIVE owner
- * is never touched, and a preserve that fails is still declined by name, head-stamped, and
- * escalated once at the backstop. Every fixture is a REAL git repository.
+ * is never touched, and a preserve that fails is still declined by name and head-stamped.
+ * Every fixture is a REAL git repository.
  */
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
@@ -31,7 +31,7 @@ import {
   resetTrackedDirtyFixOwner,
   type BuildSweepEffectsDeps,
 } from "#src/run-task.js";
-import { DEFAULT_SWEEP_POLICY, FIX_CLAIM_DECLINE_BACKSTOP, runSweep, type OpenPrView } from "#test/helpers/sweep-test.js";
+import { DEFAULT_SWEEP_POLICY, runSweep, type OpenPrView } from "#test/helpers/sweep-test.js";
 import { readLedgerLines } from "#src/lib/status.js";
 import { ghShim } from "#test/helpers/gh-shim.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
@@ -289,7 +289,7 @@ test("W1-T6362: a LIVE owner's staged work at the current head is never touched"
   }
 });
 
-test("W1-T6362: a failed preserve at the current head is still declined by name, head-stamped, and escalated once naming the worktree and paths", async () => {
+test("W1-T6362: a failed preserve at the current head remains named and waits for its next retry", async () => {
   const f = fixture("1791480000003");
   try {
     const prHead = f.ownerSha;
@@ -304,7 +304,7 @@ test("W1-T6362: a failed preserve at the current head is still declined by name,
     };
     await withGh(f, prHead, async () => {
       const effects = effectsFor(f, prHead, logs, order, { preserveStaged, ledgerPath });
-      for (let i = 0; i < FIX_CLAIM_DECLINE_BACKSTOP + 2; i++) {
+      for (let i = 0; i < 5; i++) {
         await runSweep([view(prHead)], {
           arm: () => {},
           close: () => {},
@@ -318,17 +318,14 @@ test("W1-T6362: a failed preserve at the current head is still declined by name,
     });
 
     const declines = steps(logs, "sweep.fix.checkout_claim_declined");
-    assert.equal(declines.length, FIX_CLAIM_DECLINE_BACKSTOP, "every pass below the backstop re-attempts, then the sweep stands down");
+    assert.equal(declines.length, 1, "the failed preservation waits for backoff before another attempt");
     for (const d of declines) {
       assert.equal(d.extra?.owner_recovery_reason, "owner_staged_residue_preserve_failed");
       assert.equal(d.extra?.head_sha, prHead, "the decline names its head, so the backstop counts it");
       assert.deepEqual(d.extra?.staged_paths, [STAGED]);
       assert.match(String(d.extra?.error), /recovery ref write refused/);
     }
-    assert.equal(escalations.length, 1, "escalated exactly once, not declined silently on every pass");
-    for (const named of [`#${PR}`, realpathOf(f.ownerPath), "owner_staged_residue_preserve_failed", STAGED]) {
-      assert.ok(escalations[0].includes(named), `the escalation names ${named}: ${escalations[0]}`);
-    }
+    assert.equal(escalations.length, 0, "an unavailable judge does not escalate by count");
     assert.equal(order.includes("reset"), false, "an unpreserved residue is never reset");
     assert.equal(steps(logs, "sweep.fix.owner_residue_preserved").length, 0);
     assert.equal(steps(logs, "fix.dispatch").length, 0);

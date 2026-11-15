@@ -34,7 +34,7 @@
     - test/a-governor-that-sheds-must-recover.test.ts
     - test/review-widener-judges-provider-age-by-the-daemon-cadence.test.ts
     - test/review-widening-survives-a-quiet-provider-snapshot.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: laneTarget's CPU bound is the host's CPU less its measured non-lane baseline, divided by the CPU-seconds per lane that each lane class has been measured to use (cgroup cpu.stat usage_usec deltas); an unread or unlearned input keeps today's cap at the CPU count

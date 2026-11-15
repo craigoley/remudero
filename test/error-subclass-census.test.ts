@@ -1,3 +1,4 @@
+// @census-reads: src/ scripts/error-subclass-baseline.json test/error-subclass-census.test.ts — src error classes, the ceiling, itself.
 // test/error-subclass-census.test.ts — W1-T2901: hold the direct-`Error`-subclass population at
 // its recorded ceiling while the shared envelope (src/lib/errors.ts's `RmdError`) is adopted one
 // class at a time, instead of migrating all of them in one high-risk sweep.

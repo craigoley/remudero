@@ -8,7 +8,7 @@
   budget_usd: 30
   verify: auto
   risk: high
-  status: queued
+  status: merged
   attempts: 0
   author_class: machine
   origin: "feedback#fb-1793059243092-5bfa75"

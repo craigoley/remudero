@@ -7,7 +7,7 @@
   risk: high
   band_meaning: blast-radius
   priority: 1.43
-  status: queued
+  status: merged
   attempts: 0
   author_class: machine
   origin: "ci-friction:check:test:test/the-deploy-tick-runs-current-deploy-code-without-tripping-its-guard.test.ts:flaky"

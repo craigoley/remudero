@@ -357,7 +357,8 @@ export function insertRefusalAmendment(shardText: string, taskId: string, commen
 /** Every seam {@link draftRefusalAmendment} touches, so the unit tests need no git, gh or disk. */
 export interface RefusalAmendmentIo {
   readonly readShard: (taskId: string) => { relPath: string; text: string } | undefined;
-  readonly probeExisting: (branch: string) => { prUrl: string } | undefined;
+  /** W1-T12199: an amendment that waits for its landing has no pull request yet. */
+  readonly probeExisting: (branch: string) => { prUrl?: string } | undefined;
   readonly openAmendmentPr: (input: {
     branch: string;
     shardRelPath: string;
@@ -367,12 +368,13 @@ export interface RefusalAmendmentIo {
     prIntro: string;
     claim: string;
     proof: string;
-  }) => { prUrl: string } | Promise<{ prUrl: string }>;
+  }) => { prUrl?: string } | Promise<{ prUrl?: string }>;
   readonly nowIso: () => string;
 }
 
 export type RefusalAmendmentOutcome =
   | "drafted"
+  | "waiting"
   | "deduped"
   | "no_shard"
   | "text_drift"
@@ -433,10 +435,19 @@ export async function draftRefusalAmendment(
       claim: `the shard records the worker's refusal of ${taskId} and the amendment it implies`,
       proof: `grep: refusal-amendment (${taskId} in ${shard.relPath}`,
     });
-    return { ...base, outcome: "drafted", prUrl: created.prUrl };
+    return created.prUrl ? { ...base, outcome: "drafted", prUrl: created.prUrl } : { ...base, outcome: "waiting" };
   } catch (e) {
     return { ...base, outcome: "error", error: String((e as Error)?.message ?? e) };
   }
+}
+
+/** W1-T12199: what the escalation triage reports for a proof amendment: its PR, or that it waits for the next task-file landing. */
+export function planAmendmentReceipt(taskId: string, result: { outcome: string; prUrl?: string } | undefined): string {
+  if (result?.prUrl) return `${result.prUrl} proposes the proof amendment; decline the PR to undo`;
+  if (result?.outcome === "waiting") {
+    return `the proof amendment for ${taskId} waits for the next landing pull request of task files; remove its staged file to undo`;
+  }
+  throw new Error(`amendment not opened: ${result?.outcome ?? "unavailable"}`);
 }
 
 /** Read the task's shard file (or the monolith) from `repoDir`, both located through

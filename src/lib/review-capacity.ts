@@ -79,6 +79,9 @@ export interface ReviewCapacityObservation {
   nowMs: number;
   queueDepth: number;
   activeWorkers: number;
+  /** W1-T2989 — active workers known to wait on the model provider (reviews in their provider phase). They use no local CPU,
+   *  so the host worker budget does not count them. Absent or 0: every worker counts. */
+  providerPhaseWorkers?: number;
   memAvailableMib?: number;
   cpuPsiSomeAvg10Pct?: number;
   /** W1-T2985 — PSI `full`: the starvation signal the CPU shed decides on. */
@@ -154,6 +157,8 @@ export type ReviewCapacityReason =
    *  from `telemetry-unavailable`, which means the host itself could not be read. */
   | "provider-telemetry-unavailable"
   | "backlog-not-sustained"
+  /** W1-T12529 — PSI is not calm, but the run queue less review's CPU-phase children still exceeds the cores: base restored. */
+  | "cpu-pressure-not-review"
   | "host-worker-budget"
   | "provider-headroom"
   | "review-history-insufficient"
@@ -166,6 +171,8 @@ export interface ReviewCapacityEvidence {
   baseWidth: number;
   maxWidth: number;
   activeWorkers: number;
+  /** W1-T2989 — the workers the host worker budget judged: active workers less those waiting on the provider. */
+  localCpuWorkers: number;
   healthySamples: number;
   memAvailableMib?: number;
   cpuPsiSomeAvg10Pct?: number;
@@ -224,11 +231,11 @@ const PRESSURE_REASONS: ReadonlySet<ReviewCapacityReason> = new Set([
 
 /** Attribution only. Nothing branches on it: the host is shed whoever loads it. */
 export function reviewPressureSource(
-  observation: Pick<ReviewCapacityObservation, "activeWorkers" | "hostLoad1" | "hostCpuCount">,
+  observation: Pick<ReviewCapacityObservation, "activeWorkers" | "providerPhaseWorkers" | "hostLoad1" | "hostCpuCount">,
   hostWorkerBudget: number,
 ): ReviewPressureSource {
   const active = Math.max(0, Math.trunc(observation.activeWorkers));
-  if (active >= hostWorkerBudget) return "fleet-budget";
+  if (Math.max(0, Math.trunc(localCpuWorkers(observation))) >= hostWorkerBudget) return "fleet-budget";
   if (!finite(observation.hostLoad1) || !finite(observation.hostCpuCount)) return "unknown";
   return observation.hostLoad1 > observation.hostCpuCount + active ? "host-load" : "fleet-load";
 }
@@ -260,6 +267,12 @@ function clampedWidth(value: number, bounds: ReviewCapacityBounds): number {
 
 function finite(value: number | undefined): value is number {
   return typeof value === "number" && Number.isFinite(value);
+}
+
+/** W1-T2989 — the active workers that use local CPU, never below 0 nor above activeWorkers. No count: activeWorkers itself. */
+function localCpuWorkers(observation: Pick<ReviewCapacityObservation, "activeWorkers" | "providerPhaseWorkers">): number {
+  const waiting = finite(observation.providerPhaseWorkers) ? Math.max(0, Math.trunc(observation.providerPhaseWorkers)) : 0;
+  return waiting === 0 ? observation.activeWorkers : Math.max(0, observation.activeWorkers - waiting);
 }
 
 /** W1-T3031 — the names of whichever host readings are non-finite, in the fixed order
@@ -346,6 +359,7 @@ export function selectAdaptiveReviewWidth(
   let healthySamples = Math.max(0, Math.trunc(prior.healthySamples));
   let lastHealthySampleAtMs = prior.lastHealthySampleAtMs;
   let reason: ReviewCapacityReason = "backlog-not-sustained";
+  const localWorkers = localCpuWorkers(observation);
   const readingNow = finite(observation.cpuPsiFullAvg10Pct) ? observation.cpuPsiFullAvg10Pct : undefined;
   const pressureSource = reviewPressureSource(observation, policy.hostWorkerBudget);
   const settleMs = finite(observation.settlements.cpuPhaseMs) && observation.settlements.cpuPhaseMs > 0
@@ -371,7 +385,7 @@ export function selectAdaptiveReviewWidth(
   // the SAME path as a PSI shed, so W1-T11150's record, effect check, suspension and proportional restore treat it like
   // any shed. Its corroboration and its effect check read PSI, so it too waits for a read share.
   const overLearnedCapacity = shareKnown && readingNow !== undefined && readingNow > policy.cpuPsiLowPct &&
-    finite(observation.laneCpuBound) && observation.activeWorkers + effectiveWidth > observation.laneCpuBound;
+    finite(observation.laneCpuBound) && localWorkers + effectiveWidth > observation.laneCpuBound;
   const cpuOverloaded = cpu.tier === "shed" || overLearnedCapacity;
   const cpuCalm = cpu.calm;
 
@@ -400,9 +414,14 @@ export function selectAdaptiveReviewWidth(
     (finite(observation.memoryPsiSomeAvg10Pct) && observation.memoryPsiSomeAvg10Pct > policy.memoryPsiLowPct);
   // Back to base in one sample, never past what the host worker budget leaves room for, and never
   // above base: lanes above it stay earned by the healthy window below.
+  // W1-T12529 — the pressure is not review's own: without review's CPU-phase children the run queue still exceeds the cores.
+  const notReviewsCpu = shareKnown &&
+    finite(observation.memoryPsiSomeAvg10Pct) && observation.memoryPsiSomeAvg10Pct <= policy.memoryPsiLowPct &&
+    finite(observation.reviewCpuChildren) && finite(observation.hostLoad1) && finite(observation.hostCpuCount) &&
+    observation.hostCpuCount > 0 && observation.hostLoad1 - observation.reviewCpuChildren > observation.hostCpuCount;
   const restoreBase = (): void => {
-    if (!psiCalm || effectiveWidth >= baseWidth) return;
-    const room = Math.trunc(policy.hostWorkerBudget) - Math.max(0, Math.trunc(observation.activeWorkers));
+    if (!(psiCalm || notReviewsCpu) || effectiveWidth >= baseWidth) return;
+    const room = Math.trunc(policy.hostWorkerBudget) - Math.max(0, Math.trunc(localWorkers));
     effectiveWidth = Math.max(effectiveWidth, Math.min(baseWidth, room));
   };
 
@@ -414,7 +433,7 @@ export function selectAdaptiveReviewWidth(
     suspended = undefined; // the source changed, the lane's own CPU share rose, or the pressure ended
   }
   const band = cpuNoiseBand(cpuReadings, (shed?.atMs ?? observation.nowMs) - settleMs);
-  const roomNow = Math.trunc(policy.hostWorkerBudget) - Math.max(0, Math.trunc(observation.activeWorkers));
+  const roomNow = Math.trunc(policy.hostWorkerBudget) - Math.max(0, Math.trunc(localWorkers));
   if (shed && shed.effect === "pending" && shareKnown && readingNow !== undefined && observation.nowMs - shed.atMs >= settleMs) {
     if (shed.reading - readingNow > band) {
       shed.effect = "effective";
@@ -501,7 +520,7 @@ export function selectAdaptiveReviewWidth(
     healthySamples = 0;
     lastHealthySampleAtMs = undefined;
     reason = "review-latency-expanded";
-  } else if (observation.activeWorkers + effectiveWidth > policy.hostWorkerBudget) {
+  } else if (localWorkers + effectiveWidth > policy.hostWorkerBudget) {
     directPressure("host-worker-budget");
   } else {
     // W1-T2987 — THE TWO TELEMETRY SOURCES ARE SEPARATE, BECAUSE THEIR ABSENCES MEAN DIFFERENT
@@ -559,7 +578,7 @@ export function selectAdaptiveReviewWidth(
       healthySamples = 0;
       lastHealthySampleAtMs = undefined;
       reason = "backlog-not-sustained";
-    } else if (observation.activeWorkers + Math.min(maxWidth, effectiveWidth + 1) > policy.hostWorkerBudget) {
+    } else if (localWorkers + Math.min(maxWidth, effectiveWidth + 1) > policy.hostWorkerBudget) {
       restoreBase();
       healthySamples = 0;
       lastHealthySampleAtMs = undefined;
@@ -570,7 +589,8 @@ export function selectAdaptiveReviewWidth(
     ) {
       healthySamples = 0;
       lastHealthySampleAtMs = undefined;
-      reason = "backlog-not-sustained";
+      reason = notReviewsCpu ? "cpu-pressure-not-review" : "backlog-not-sustained";
+      restoreBase();
     } else if (
       observation.provider.headroomPct! < observation.provider.reservePct! + policy.providerAllowancePct
     ) {
@@ -608,6 +628,7 @@ export function selectAdaptiveReviewWidth(
     baseWidth,
     maxWidth,
     activeWorkers: Math.max(0, Math.trunc(observation.activeWorkers)),
+    localCpuWorkers: Math.max(0, Math.trunc(localWorkers)),
     healthySamples,
     ...(finite(observation.memAvailableMib) ? { memAvailableMib: observation.memAvailableMib } : {}),
     ...(finite(observation.cpuPsiSomeAvg10Pct) ? { cpuPsiSomeAvg10Pct: observation.cpuPsiSomeAvg10Pct } : {}),
@@ -907,6 +928,8 @@ export interface RuntimeReviewCapacityInput extends ReviewCapacityBounds {
   root: string;
   queueDepth: number;
   activeWorkers: number;
+  /** W1-T2989 — active workers waiting on the model provider; the sweep passes reviewPhaseSplit's judge-phase count. */
+  providerPhaseWorkers?: number;
   nowMs: number;
   ledgerLines: ReadonlyArray<Record<string, unknown>>;
   policy: ReviewCapacityPolicy;
@@ -934,6 +957,7 @@ export function selectRuntimeReviewWidth(input: RuntimeReviewCapacityInput): num
     nowMs: input.nowMs,
     queueDepth: input.queueDepth,
     activeWorkers: input.activeWorkers,
+    ...(finite(input.providerPhaseWorkers) ? { providerPhaseWorkers: input.providerPhaseWorkers } : {}),
     ...readReviewHostObservation(),
     ...(weightShare !== undefined ? { cpuWeightShare: weightShare } : {}),
     ...((input.laneCpuBound ?? publishedLaneCpuBound()) !== undefined ? { laneCpuBound: input.laneCpuBound ?? publishedLaneCpuBound() } : {}),
@@ -955,6 +979,7 @@ export function selectRuntimeReviewWidth(input: RuntimeReviewCapacityInput): num
       base_width: result.decision.evidence.baseWidth,
       max_width: result.decision.evidence.maxWidth,
       active_workers: result.decision.evidence.activeWorkers,
+      local_cpu_workers: result.decision.evidence.localCpuWorkers,
       healthy_samples: result.decision.evidence.healthySamples,
       mem_available_mib: result.decision.evidence.memAvailableMib ?? null,
       cpu_psi_some_avg10_pct: result.decision.evidence.cpuPsiSomeAvg10Pct ?? null,
@@ -991,6 +1016,7 @@ export function selectRuntimeReviewWidth(input: RuntimeReviewCapacityInput): num
       review_latency_ratio: result.decision.evidence.reviewLatencyRatio ?? null,
       host_load1: result.decision.evidence.hostLoad1 ?? null,
       host_cpu_count: result.decision.evidence.hostCpuCount ?? null,
+      review_cpu_children: observation.reviewCpuChildren ?? null,
       pressure_source: result.decision.evidence.pressureSource ?? null,
       // W1-T11150 — the CPU shed's own measured effect, so every shed is auditable from the ledger.
       shed_effect: result.decision.evidence.shedEffect ?? null,

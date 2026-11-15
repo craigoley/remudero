@@ -1,3 +1,4 @@
+// @census-reads: src/ scripts/ test/rules/scout-config-gardener-failed.test.ts — the config gardener, the child-entry builder, itself.
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { cpSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";

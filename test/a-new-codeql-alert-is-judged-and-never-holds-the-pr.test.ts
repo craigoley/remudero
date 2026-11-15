@@ -664,7 +664,7 @@ test("scanner spent-rung acknowledgment binds task head and owner and never call
   }
 });
 
-test("scanner retry preserves ordinary admission and repeated pre-worker failure backstops", async () => {
+test("scanner retry preserves ordinary admission and repeated pre-worker failures use judge-backed retry holds", async () => {
   for (const over of [
     { workerAdmissionHold: () => "fleet STOP" },
     { claimFixAdmission: () => ({ admitted: false as const, reason: "no capacity" }) },
@@ -685,7 +685,7 @@ test("scanner retry preserves ordinary admission and repeated pre-worker failure
         pr_number: N, reason: "registered_worktree_owner", owner_recovery_reason: "unknown", error: "pre-worker failure" }));
       await sweepModule.runSweep([pr()], h.deps);
       assert.equal(h.fixes.length, 0, "ordinary existing backstop refuses another attempt");
-      assert.equal(h.escalated.length, 1);
+      assert.equal(h.escalated.length, 0, "a count of failures alone does not escalate");
       assert.equal(h.armed.length, 0);
     } finally { rmSync(h.dir, { recursive: true, force: true }); }
   }

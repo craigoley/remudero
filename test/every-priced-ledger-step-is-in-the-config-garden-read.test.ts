@@ -1,4 +1,4 @@
-// @census-reads: src/
+// @census-reads: src/ test/every-priced-ledger-step-is-in-the-config-garden-read.test.ts
 // @source-text-subject: this census's subject is the ledger writes in src/ — it reads each source file's text
 // to find every step written with `pr_url` or `cost_usd`, the way the spend-role census finds cost rows.
 import assert from "node:assert/strict";
@@ -91,6 +91,7 @@ const EXEMPT: Readonly<Record<string, string>> = {
   "sweep.red_base_refresh.error": A_LANE_RUN_ID,
   "sweep.review_admitted": A_LANE_RUN_ID,
   "sweep.review_eligible": A_LANE_RUN_ID,
+  "sweep.review_requeued": A_LANE_RUN_ID, // W1-T11847: the reviewer-code requeue names pr_url, under the sweep pass's run_id
   "sweep.review_reuse_unreadable": A_LANE_RUN_ID, // the hydration receipt's own sweep-review-reuse- run id has no run.start
   "sweep.reviewer_freshness_probe": A_LANE_RUN_ID, // W1-T5771: the freshness re-probe, under SWEEP-/DAEMON- run ids
   "sweep.stale_red_redrive.attempted": A_LANE_RUN_ID,
@@ -109,6 +110,9 @@ const EXEMPT: Readonly<Record<string, string>> = {
   "daemon.block.parked": A_LANE_RUN_ID,
   "daemon.block.rearmed": A_LANE_RUN_ID,
   "daemon.blocked": A_LANE_RUN_ID,
+  // W1-T11503: the freshness exit's unresolved direct-merge receipt, written by the daemon's own emitLog under its
+  // DAEMON- lane run_id (never a worker run's), so no worker run's pricing or credit can read it.
+  "daemon.direct_merge_unresolved": A_LANE_RUN_ID,
   "feedback.landing_review.failed": A_LANE_RUN_ID,
   "drain.blocked": A_LANE_RUN_ID,
   "drain.continued": A_LANE_RUN_ID,
@@ -243,8 +247,11 @@ function srcTree(dir: string, out = new Map<string, string>()): Map<string, stri
 let scanned: Map<string, Set<string>> | undefined;
 const srcPricedSteps = (): Map<string, Set<string>> => (scanned ??= stepsWrittenWithAPrice(srcTree("src")));
 
-test("test/every-priced-ledger-step-is-in-the-config-garden-read.test.ts: every ledger step written with pr_url or cost_usd is in CONFIG_GARDEN_LEDGER_STEPS or a reasoned exemption", () => {
+test("W1-T11503 criterion 3: the priced-step census accounts for the direct-merge receipt", () => {
   const found = srcPricedSteps();
+  assert.ok(found.has("daemon.direct_merge_unresolved"), "the census finds the freshness exit's direct-merge receipt");
+  assert.equal(EXEMPT["daemon.direct_merge_unresolved"], A_LANE_RUN_ID,
+    "the daemon's direct-merge receipt has its reasoned lane-run exemption");
   // Positive control: the known members, and one step per idiom, so a scanner that finds nothing fails.
   for (const known of ["pr.opened", "implement.done", "cost.anomaly", "verdict.merged", "refusal_amendment.drafted"]) {
     assert.ok(found.has(known), `the census reads ${known} out of src`);

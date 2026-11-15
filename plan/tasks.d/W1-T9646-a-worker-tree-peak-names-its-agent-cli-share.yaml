@@ -11,7 +11,7 @@
   origin: "operator ask 2026-10-15: review five agent and skill catalogs for innovation, leaning into automation and self-improvement (MASTER-PLAN §4G)"
   plan_refs: [W1-T9080, W1-T9102, W1-T8879]
   files: [src/lib/host-memory-learning.ts, test/a-worker-tree-peak-names-its-agent-cli-share.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

@@ -10,7 +10,7 @@
   dispatch_hold: true
   risk: high
   band_meaning: span
-  status: queued
+  status: merged
   attempts: 0
   author_class: machine
   origin: "feedback-hand-route-lifecycle:issue-12899-source-qualified-20261025"

@@ -68,7 +68,7 @@ class Refusal extends RmdError {
 const AUTH_DIAGNOSTIC = /^(?:gh: )?(?:To get started with GitHub CLI, please run:|To use GitHub CLI in a GitHub Actions workflow, set the GH_TOKEN environment variable\.)/m;
 const HTTP_DIAGNOSTIC = /^(?:HTTP (\d{3})(?:[ \t:]|$)|gh: [^\r\n]*?\(HTTP (\d{3})\))/m;
 const execFileAsync = promisify(execFile);
-const snapshotStore = createPlanRevisionStore({ strict: true, yamlLogLevel: "error" });
+const snapshotStore = createPlanRevisionStore({ strict: true, yamlLogLevel: "error", dependencyMode: "preserve-external" });
 
 /** Private handles remain available to the shadow composer, but ordinary logging cannot traverse them. */
 function privateHandles<T extends object>(summary: T, handles: object): T {
@@ -254,7 +254,7 @@ export function createOpsCatalogShadowSource(
   api: OpsCatalogApi = defaultOpsCatalogApi(),
 ): { refresh(): Promise<OpsCatalogShadowInput> } {
   let everOk = false;
-  const store = createPlanRevisionStore({ strict: true, retainLatest: true, yamlLogLevel: "error" });
+  const store = createPlanRevisionStore({ strict: true, retainLatest: true, yamlLogLevel: "error", dependencyMode: "preserve-external" });
   return {
     async refresh() {
       const snap = await readSnapshot(target, api, store);

@@ -77,7 +77,7 @@ test('evidence policy cannot target Git, dependency payloads or Codex sessions',
   }
 });
 test('evidence root refuses symlinked roots and never recursively enters checkouts', t => {
-  const dir = fixture(t), source = join(dir, 'source'), link = join(dir, 'link'); mkdirSync(source); symlinkSync(source, link);
+  const dir = fixture(t), source = join(dir, 'source'), link = join(dir, 'link'); mkdirSync(source, { mode: 0o700 }); symlinkSync(source, link);
   assert.throws(() => compactEvidenceRoot(link), /unverified-evidence-root/);
   mkdirSync(join(source, 'nested')); writeFileSync(join(source, 'nested/closed.log'), 'retained', { mode: 0o600 });
   assert.equal(compactEvidenceRoot(source).entries.length, 0);

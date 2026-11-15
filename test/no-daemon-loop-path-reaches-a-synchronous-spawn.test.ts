@@ -266,7 +266,7 @@ const SYNC_SPAWN_LOOP_BASELINE: Readonly<Record<string, number>> = {
   taskIdOwnershipFindings: 1,
   taskIdsEverFiled: 1,
   testSlotProcessFacts: 1,
-  triageCommandLocked: 3,
+  triageCommandLocked: 2,
   vetPinnedConfig: 1,
   worktreeAdd: 5,
   worktreePushExec: 1,

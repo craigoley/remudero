@@ -1,0 +1,93 @@
+- id: W1-T12119
+  title: "A MANAGED CLONE WITH MISSING OBJECTS IS NAMED BY REF AND REPAIRED ADDITIVELY BEFORE A LANE BORROWS IT, NEVER PRUNED OR REPLACED — the Azure planner clone had missing objects and broken links; a restricted additive fetch restored fetch, but a connectivity fsck still reports 23 missing objects while a separate healthy clone is clean, and nothing in the fleet names which refs reach them or repairs them without a person"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: high  # Rule 19: one concern (a store's object integrity before borrow, and its additive-only repair); a new module plus the managed-checkout refresh call site
+  band_meaning: span
+  priority: 2
+  origin: architect
+  plan_refs: [W1-T10750, W1-T9670, W1-T9651, W1-T3116, W1-T4022, W1-T10256]
+  files:
+    - src/lib/clone-integrity.ts
+    - src/cli/commands/run-task-verb.ts
+    - test/a-clone-with-missing-objects-is-named-and-repaired-additively.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "cloneIntegrityPreflight runs a bounded connectivity-only, no-dangling, name-objects fsck and returns clean, missing (each missing object's id, type and the ref-relative name that reaches it, grouped by affected ref and by live worktree) or unreadable with git's own words; a fixture clone with a deleted loose blob reports that blob under the ref that reaches it"
+      proof: "unit test: cloneIntegrityPreflight names a deleted loose blob under the ref that reaches it"
+    - claim: "the repair refetches only the affected remote-tracking refs with maintenance and auto gc disabled and no prune, never updates a local branch, a checked-out ref or a claimed worktree's ref, re-runs the preflight, and records before and after missing counts; an object still missing after refetch is reported, not repaired by any other means"
+      proof: "unit test: repairMissingObjects refetches only affected refs additively and reports the after-count"
+    - claim: "no path in the module prunes, gcs, repacks with delete, removes alternates or refs, prunes worktrees, re-clones or replaces an object store; a store still missing objects escalates once per store path with the census of mounting instances, live worktrees and inflight claims, and replacement stays an operator action"
+      proof: "unit test: no clone-integrity path prunes or replaces a store and a still-missing store escalates once"
+    - claim: "the managed-checkout refresh runs the preflight before a lane borrows the store"
+      proof: "grep: cloneIntegrityPreflight( in src/cli/commands/run-task-verb.ts"
+  rationale: |
+    THE INCIDENT (operator brief, run PLAN-expand-1794323791989; not re-measured from this worktree, which has no
+    shell). The Azure planner clone had missing objects and broken links. A restricted additive fetch restored
+    fetch, but a connectivity fsck still reports 23 missing objects. A separate healthy clone is clean. Which refs
+    reach the 23, and whether any live worktree or claim depends on them, is not recorded anywhere.
+
+    RESEARCH.
+    - https://git-scm.com/docs/git-fsck: `--connectivity-only` checks that every object referenced by a reachable
+      tag, commit or tree is present, without reading blobs. `--name-objects` names each reachable object by how it
+      is reachable (for example `HEAD@{1234567890}~25^2:src/`), which is the ref attribution this task needs.
+      `--no-dangling` drops the dangling noise. A missing object prints as `missing <type> <object>`.
+    - https://git-scm.com/docs/git-fetch: git keeps data unless it is explicitly thrown away, and fetch prunes only
+      with --prune or fetch.prune / remote.<name>.prune. `--refetch` fetches all objects as a fresh clone would,
+      without negotiating away objects the client believes it has. That matters here: an ordinary fetch will not
+      resend an object the local refs already claim. The same page says automatic post-fetch maintenance
+      consolidates packs after a refetch, so the repair must disable auto maintenance and auto gc on that call.
+
+    READ in this worktree:
+    - refreshManagedCheckout (src/cli/commands/run-task-verb.ts) holds the managed-checkout lock and refreshes the
+      store before a lane borrows it. It checks no object integrity.
+    - src/lib/object-reaper.ts is the maintenance controller (W1-T3116, W1-T10750). Its MAINTENANCE_PROCESS scan
+      and W1-T10750's owner-gone evidence (every mounting container, boot receipts) are the owner census this
+      task reuses for its escalation. It adds no second census.
+
+    Settled by lookup: is this already filed or already decided? -> No. W1-T10750 (queued) makes maintenance
+    escalation self-healing and reclaims stale locks and tmp packs. W1-T9670 (merged) carries git's stderr for an
+    unreadable merged plan. W1-T10256 (merged) repairs a broken alternates entry on the Mac janitor and uses
+    fsck only as a re-probe. W1-T4022 (merged) is the object reaper. None detects missing objects in a managed
+    store, names their refs, or refetches them (plan/tasks.d/W1-T10750-*, W1-T9670-*, W1-T10256-*, W1-T4022-*).
+    Settled by lookup: may rmd prune or rewrite a shared store? -> No. W1-T3116 (iii)/(iv) forbid raw gc, prune
+    and --prune=now, and W1-T10750 requires owner-gone evidence across every mounting instance before removing
+    anything. Replacement or re-clone is therefore out of scope and stays an operator action.
+    Settled by lookup: how is the fsck child bounded? -> By W1-T9651's loop-available bound, not a wall-clock
+    execFile timeout. This task adds no new timer.
+  design: |
+    MEASURE FIRST, read-only, on the Azure planner clone, and put the result in the PR body: the 23 `missing` lines
+    from `git fsck --connectivity-only --no-dangling --name-objects`; the refs and live worktrees they resolve to;
+    whether the store has objects/info/alternates; and whether each id exists in the healthy clone
+    (`git cat-file -e`). Do not pick the repair's ref set before reading that.
+
+    1. src/lib/clone-integrity.ts (new). cloneIntegrityPreflight(gitDir, { runGit }) parses `missing` and
+       `broken link` lines with their names into {oid, type, name, ref}. It cross-references
+       `git worktree list --porcelain` and the inflight claims under <config.root>/state/inflight. A non-zero
+       exit with no parseable lines returns unreadable with the stderr tail. It never returns clean on doubt.
+    2. repairMissingObjects(result, deps) refetches only the affected `refs/remotes/origin/*` refs, using
+       `git -c maintenance.auto=false -c gc.auto=0 fetch --no-prune --refetch origin <refspecs>`. It then re-runs
+       the preflight and ledgers clone_integrity.repaired {store, before, after, refs}. Objects reachable only from
+       local branches, worktree HEADs or claims are reported and never touched.
+    3. Still missing: one clone_integrity.escalate per store path through the escalate.ts gateway. It names the
+       missing ids, their refs, and W1-T10750's owner census (mounting instances, live worktrees, inflight claims).
+       Re-escalation never duplicates the issue. HOLD, NOT A DEPENDENCY: if W1-T10750's census has not landed,
+       the escalation lists the census inputs it could read and marks the rest unread. Steps 1, 2 and 4 do not
+       need the census.
+    4. refreshManagedCheckout calls the preflight under its existing lock. clean -> unchanged. missing -> the
+       repair runs, then a lane whose needed ref (origin/main or its run branch) is still affected defers with
+       the reason. Other lanes proceed with the reading in their row. unreadable -> defer, never borrow blind.
+    5. Tests over a real fixture repo (repo gitRepo helpers): delete one reachable loose blob, then assert the
+       named report, an injected refetch argv carrying `--refetch`, `--no-prune` and both `-c` keys, and the
+       after-count. Also cover a local-only missing object reported without repair, the escalation, and a source
+       scan finding none of prune, `gc`, `repack -d`, `worktree prune` or `clone` in the module.
+  falsifier: |
+    At origin/main, delete one reachable blob in a managed-checkout fixture and run refreshManagedCheckout: it
+    refreshes and a lane borrows the store with no integrity row. If main already names the missing object
+    before borrow, close this task. Mutation: drop `--refetch` from the repair argv, and the fixture's object stays
+    missing after an ordinary fetch, so the after-count assertion fails.

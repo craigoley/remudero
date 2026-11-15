@@ -23,9 +23,11 @@ export interface PlanRevisionStore {
 /** A plan is frozen, so a reader that mutates it throws instead of changing every reader's plan, and held weakly, so
  *  one no reader holds is released; `retainLatest` keeps the newest for a reader holding nothing between requests. */
 export function createPlanRevisionStore(
-  opts: { retainLatest?: boolean; strict?: boolean; yamlLogLevel?: DocumentOptions["logLevel"] } = {},
+  opts: { retainLatest?: boolean; strict?: boolean; yamlLogLevel?: DocumentOptions["logLevel"]; dependencyMode?: "preserve-external" } = {},
 ): PlanRevisionStore {
   const blobCache = new PlanBlobCache();
+  // Bind the mode to this store, never an individual revision or the shared blob cache.
+  const dependencyMode = opts.dependencyMode;
   const held = new Map<string, WeakRef<Plan>>();
   const meta = new WeakMap<Plan, { revision: PlanRevision; quarantined: QuarantinedTask[] }>();
   const released = new FinalizationRegistry<string>((key) => {
@@ -49,8 +51,8 @@ export function createPlanRevisionStore(
     adopt: (revision, blobs) => {
       const already = hit(revision.key);
       if (already) return already;
-      const read = opts.strict
-        ? { plan: mergePlanBlobs(blobs, opts.yamlLogLevel === undefined ? undefined : { logLevel: opts.yamlLogLevel }), quarantined: [] }
+      const read = opts.strict || dependencyMode === "preserve-external"
+        ? { plan: mergePlanBlobs(blobs, opts.yamlLogLevel === undefined ? undefined : { logLevel: opts.yamlLogLevel }, { dependencyMode }), quarantined: [] }
         : mergePlanBlobsQuarantiningDuplicates(blobs, blobCache);
       parsed++;
       freezeReadGeneration(read.plan);

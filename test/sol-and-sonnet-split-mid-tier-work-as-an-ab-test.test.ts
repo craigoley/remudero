@@ -1,3 +1,4 @@
+import { attributeAttemptOutcome } from "#src/lib/attempt-outcome-attribution.js";
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -123,7 +124,7 @@ const ROWS = [
 ];
 
 test("the evaluator compares merge rate fix strikes time and cost per arm", () => {
-  const report = evaluateRoutingExperiment(ROWS, SOL_VS_SONNET, "2026-09-30");
+  const report = evaluateRoutingExperiment(ROWS, SOL_VS_SONNET, "2026-09-30", attributeAttemptOutcome);
   assert.equal(report.assignments, 5, "an untagged assignment is not in the experiment");
   assert.equal(report.mixedTasks, 1);
   assert.equal(report.revisitDue, false);
@@ -142,6 +143,8 @@ test("the evaluator compares merge rate fix strikes time and cost per arm", () =
     meanNotionalCostUsd: 5,
     costMissingAssignments: 0,
     nonStarterAssignments: 1,
+    infrastructureAttempts: 0,
+    infrastructureOnlyTasks: 0,
     receiptCoverage: { assignments: 2, terminalAssignments: 2, costKnownAssignments: 2,
       servedModelKnownAssignments: 0, outcomeKnownAssignments: 0 },
     requestEffortEvidence: {
@@ -166,22 +169,22 @@ test("the evaluator compares merge rate fix strikes time and cost per arm", () =
   assert.equal(sol?.meanFixDispatches, 0, "a fix dispatched before the task joined the experiment is not the arm's");
   assert.equal(sol?.medianWorkerMinutes, 5);
   const small: RoutingExperiment = { ...SOL_VS_SONNET, minTasksPerArm: 2 };
-  assert.equal(evaluateRoutingExperiment(ROWS, small, "2026-10-08").sufficient, true);
-  assert.equal(evaluateRoutingExperiment(ROWS, small, "2026-10-08").revisitDue, true);
+  assert.equal(evaluateRoutingExperiment(ROWS, small, "2026-10-08", attributeAttemptOutcome).sufficient, true);
+  assert.equal(evaluateRoutingExperiment(ROWS, small, "2026-10-08", attributeAttemptOutcome).revisitDue, true);
 });
 
 test("rmd routing-ab prints each arm and refuses an unknown flag", async () => {
   const lines: string[] = [];
   const readRows = async () => ROWS;
-  assert.equal(await routingAbCommand([], { stateDir: "/state", readRows, today: "2026-10-09", print: (line) => lines.push(line) }), 0);
+  assert.equal(await routingAbCommand([], { classifyAttempt: attributeAttemptOutcome, stateDir: "/state", readRows, today: "2026-10-09", print: (line) => lines.push(line) }), 0);
   assert.match(lines[0]!, /\/state \(16 ledger rows read\)/);
   assert.match(lines[1]!, /^sol-vs-sonnet: insufficient sample; 5 assignments, 1 tasks in both arms, 0 crossover tasks; 0 generic units, 0 changed treatments and 0 unverified treatments excluded; revisit 2026-10-08 \(DUE\)$/);
   assert.match(lines[2]!, /sonnet \(claude\): 2 tasks, 1 merged \(50\.0%\), 1\.0 fix dispatches\/task, 15\.0 min median, 2400 tokens, \$n\/a cash, \$5\.00 notional \(0 cost missing, 1 without attempt receipt\)/);
   const json: string[] = [];
-  assert.equal(await routingAbCommand(["--json"], { stateDir: "/state", readRows, today: "2026-09-25", print: (line) => json.push(line) }), 0);
+  assert.equal(await routingAbCommand(["--json"], { classifyAttempt: attributeAttemptOutcome, stateDir: "/state", readRows, today: "2026-09-25", print: (line) => json.push(line) }), 0);
   assert.equal(JSON.parse(json[0]!).reports[0].arms[1].arm, "sol");
   const bad: string[] = [];
-  assert.equal(await routingAbCommand(["--csv"], { readRows, print: (line) => bad.push(line) }), 2);
+  assert.equal(await routingAbCommand(["--csv"], { classifyAttempt: attributeAttemptOutcome, readRows, print: (line) => bad.push(line) }), 2);
   assert.match(bad[0]!, /unknown: --csv/);
 });
 
@@ -197,7 +200,7 @@ test("rmd routing-ab reads the real ledger union under the configured root by de
     writeFileSync(join(root, "state", "ledger.2026-09-24T00-00-00-000Z.ndjson.gz"), gzipSync(ROWS.slice(6).map((row) => JSON.stringify(row)).join("\n") + "\n"));
     process.env.HOME = home;
     const out: string[] = [];
-    assert.equal(await routingAbCommand(["--json"], { print: (line) => out.push(line) }), 0);
+    assert.equal(await routingAbCommand(["--json"], { classifyAttempt: attributeAttemptOutcome, print: (line) => out.push(line) }), 0);
     const parsed = JSON.parse(out[0]!);
     assert.equal(parsed.stateDir, join(root, "state"));
     assert.equal(parsed.rowsRead, ROWS.length, "both the live file and the gzipped rotation are read");

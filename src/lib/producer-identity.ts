@@ -110,6 +110,7 @@ export const PRODUCER_IDENTITIES: Readonly<Record<string, ProducerIdentity>> = O
   "field-trials-refresh": producer("field-trials-refresh", "Field Trials Refresh"),
   "RECOVERY-REFS": producer("recovery-refs", "Recovery Refs"),
   HARNESS: producer("harness", "Harness Child Launch"),
+  DECISIONS: producer("decisions", "Decision Models"),
 });
 
 /**

@@ -19,7 +19,7 @@
     - src/cli/commands/daemon.ts
     - src/lib/sweep.ts
     - test/daemon/a-breaker-is-re-judged-when-main-changes-what-its-failures-named.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: A settled escalate ruling is asked again once main changes an implicated path, the judge is told which paths changed, an unchanged main never re-asks, and a continue ruling resets the breaker

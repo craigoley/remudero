@@ -19,6 +19,12 @@ import {
 } from "./worker-provider.js";
 
 export const PROVIDER_ROUTING_POLICY_VERSION = 2;
+
+export function lostWorkerProviders(previous: readonly string[], current: readonly string[]): string[] {
+  const available = new Set(current);
+  return [...new Set(previous)].filter((provider) => !available.has(provider)).sort();
+}
+
 const LEGACY_PROVIDER_ROUTING_POLICY_VERSION = 1;
 /** BACKSTOP: ordinary records are under 1 KiB; this caps hostile/corrupt state before parsing. */
 export const MAX_PROVIDER_ROUTING_POLICY_BYTES = 16 * 1024;
@@ -452,16 +458,30 @@ export function resolveProviderRoutingPolicy(
   };
 }
 
-/** An operator's explicit preference wins; only an `automatic` policy takes the capability's own. */
+/**
+ * An operator's explicit preference wins; only an `automatic` policy takes a declared one. W1-T12172: the worker
+ * role's preference is applied before the capability's, so one role can prefer a provider while the other roles
+ * that share its capability stay in the headroom auction.
+ */
 export function policyForCapability(
   policy: EffectiveProviderRoutingPolicy,
   capability: string | undefined,
   preferences: Record<string, WorkerProviderId> | undefined,
-): { policy: EffectiveProviderRoutingPolicy; capabilityPreference?: { capability: string; provider: WorkerProviderId } } {
-  const provider = capability === undefined ? undefined : preferences?.[capability];
-  if (policy.preference !== "automatic" || provider === undefined || !policy.routableProviders.includes(provider)) {
-    return { policy };
+  role?: { role: string | undefined; preferences: Readonly<Record<string, WorkerProviderId | undefined>> | undefined },
+): {
+  policy: EffectiveProviderRoutingPolicy;
+  capabilityPreference?: { capability: string; provider: WorkerProviderId };
+  rolePreference?: { role: string; provider: WorkerProviderId };
+} {
+  if (policy.preference !== "automatic") return { policy };
+  const roleName = role?.role;
+  const roleProvider = roleName !== undefined && role?.preferences && Object.hasOwn(role.preferences, roleName)
+    ? role.preferences[roleName] : undefined;
+  if (roleName !== undefined && roleProvider !== undefined && policy.routableProviders.includes(roleProvider)) {
+    return { policy: { ...policy, preference: roleProvider }, rolePreference: { role: roleName, provider: roleProvider } };
   }
+  const provider = capability === undefined ? undefined : preferences?.[capability];
+  if (provider === undefined || !policy.routableProviders.includes(provider)) return { policy };
   return { policy: { ...policy, preference: provider }, capabilityPreference: { capability: capability!, provider } };
 }
 

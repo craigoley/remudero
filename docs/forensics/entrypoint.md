@@ -11,6 +11,8 @@ pointer wherever the history mattered.
 rebuilds the image (CLAUDE.md, "CI and merging").
 
 Line numbers below are positions in `deploy/entrypoint.sh` at the merge base of the compaction PR.
+Since W1-T12240 the loop that starts and restarts the daemon, and the sections below about it, live
+in `deploy/entrypoint-supervise.sh` (see [The second stage](#the-second-stage)).
 
 ## The file header
 
@@ -638,3 +640,50 @@ BELOW" comment immediately above the main loop's `if [ -n "$signal_forwarded" ]`
 compacted — `test/an-operator-stop-is-undone-by-the-restart-policy.test.ts`'s `mutate()` helper
 matches that exact block (comment and code together) as a unique substring to build its mutant, so
 it stays byte-identical to `origin/main`.
+
+## The second stage
+
+W1-T12240. The entrypoint has two parts. The first part stays in `deploy/entrypoint.sh`: the git
+identity, the credential helper, the check that the state is writable, the clone or `sync_tree`,
+the bootstrap install and the restart throttle. The second part is the loop that starts the daemon,
+records its exit and restarts it after the exit codes 75 to 78. It lives in
+`deploy/entrypoint-supervise.sh`.
+
+Why. A fix to the loop used to reach the daemon only through a new image and a recycle. From
+2026-10-28 to 2026-11-10 the file changed twice, both times in the loop. The recycle that brought
+the fix of W1-T12031 took 3,150 s, and for 2,970 s of that the instance was paused. A freshness
+restart happens about five times a day, and `sync_tree` already runs before each one, so a file that
+the entrypoint reads from the checkout is new at the next one.
+
+How the entrypoint chooses the file:
+
+1. After the first sync, the checkout copy `$TREE/deploy/entrypoint-supervise.sh` runs when it is
+   a tracked file with no local changes and `bash -n` accepts it.
+2. Otherwise the image copy runs: `/usr/local/lib/rmd/entrypoint-supervise.sh`, which
+   `deploy/Dockerfile` copies in. When the entrypoint itself runs from a checkout (the tests do
+   this), the copy beside it stands in for the image copy. The entrypoint writes one log line and
+   one `entrypoint.supervise_fallback` row with the reason.
+3. The file is sourced, so it sees every function and variable of the first part. Bash reads a
+   sourced file whole before it runs it, so a later sync that changes the file on disk does not
+   change the loop that already runs.
+4. If the checkout copy exits non-zero before it starts the daemon once, an `EXIT` trap re-runs the
+   entrypoint (same process, `exec`) with the image copy and writes the fallback row. The checksum
+   of the failed copy is kept, so the loop does not switch back to that same file.
+
+After `sync_tree` for a freshness, blocked or environmental restart, the loop compares the checksum
+of the checkout copy with the checksum of the file that runs. If they differ and the checkout copy
+passes the checks of step 1, the loop puts its three counters in `RMD_SUPERVISE_*_RESTARTS` and
+`exec`s the entrypoint again with `RMD_SUPERVISE_RESUME=1`. That marker skips the first sync, because
+the loop synced just before. The process id stays the same, so tini still sends its signals to it.
+The new loop reads the counters and removes them from the environment.
+
+What is safe to run. The checkout is the tree that the daemon already runs its own source from.
+`sync_tree` refuses a tree with changed tracked files, and step 1 refuses a supervise file with
+local changes, so the file that runs is a file of a commit on `REF`.
+
+Not a baked path. `deploy/entrypoint-supervise.sh` is not in `BAKED_PATHS`
+(src/lib/image-drift.ts), `IMAGE_BAKED_PATHS` (src/lib/deploy-judge.ts) or the image build trigger.
+The image copy is a fallback and may be older than main; a change to it does not need an image.
+The first part is still baked: a change to `deploy/entrypoint.sh` still needs an image and a
+recycle. The change that brought the second stage needed one recycle itself.
+

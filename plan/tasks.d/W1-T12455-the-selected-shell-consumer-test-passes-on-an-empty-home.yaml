@@ -1,0 +1,46 @@
+- id: W1-T12455
+  title: "The selected shell consumer test passes on an empty HOME"
+  repo: remudero
+  depends_on: []
+  priority: 1.0
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # a shared test fixture of the registry shell suites; no source path changes
+  band_meaning: blast-radius
+  origin: operator-session#root-cause-defects-2026-11-12
+  plan_refs:
+    - W1-T9795
+    - W1-T11370
+    - W1-T12126
+    - W1-T12192
+  files:
+    - test/selected-registry-shell-consumers.test.ts
+    - test/helpers/registry-shell-fixture.ts
+  status: merged
+  attempts: 0
+  acceptance:
+    - claim: "The test \"selected shell shadow reaches real lifecycle and heartbeat consumers\" passes when the test process runs with HOME set to a new empty temp folder"
+      proof: "grep: W1-T12455 criterion 1 in test/selected-registry-shell-consumers.test.ts"
+    - claim: "Every file the test and its children read is made under the fixture's own temp root: the fixture's docker stub answers `inspect --format {{json .Mounts}}` with a mount list that names the fixture's state and repos folders, so the serve replace reads a known placement and does not refuse"
+      proof: "grep: W1-T12455 criterion 2 in test/selected-registry-shell-consumers.test.ts"
+    - claim: "The serve replace still refuses when the fixture's mount list is empty or names an unknown placement, so the test keeps the refusal of W1-T12126"
+      proof: "grep: W1-T12455 criterion 3 in test/selected-registry-shell-consumers.test.ts"
+  rationale: |
+    OBSERVED 2026-11-12: the test fails 2 of 2 under a throwaway HOME. RUN on the Azure host at origin/main 12047b93a, with `--test-name-pattern` on that one test: it fails with HOME set to an empty temp folder, and it also fails with the real HOME. The assertion is test/selected-registry-shell-consumers.test.ts:356 (`serve.status` is 1, expected 0). The last stderr line is `serve-container: REFUSING — foreign repos placement unavailable: Unexpected end of JSON input`.
+    READ at origin/main 12047b93a.
+    - test/helpers/registry-shell-fixture.ts:160 builds a closed env for the children (HOME is `<root>/home`). :104 is the docker stub: for `inspect` with a `Mounts` format it prints an empty line.
+    - deploy/serve-container.sh:698 `foreign_repos_snapshot` (added by W1-T12126 in 872a344f4 on 2026-11-10, changed by W1-T12192) reads `docker inspect <container> --format '{{json .Mounts}}'` for each other instance of the registry whose state folder exists (:773 to :782), and parses it with `JSON.parse`. An empty answer throws, and :782 exits 1.
+    - The fixture's registry has a second instance with a state folder, and the test sets `RMD_SCRATCH=on` before the serve replace (:354 to :355), so this path runs on every host.
+    - The test file was last changed on 2026-11-04 (W1-T9795), before the foreign repos check. So the fixture is stale, and the failure is not caused by the host's HOME. Whether CI runs this case and passes was not checked.
+  design: |
+    1. In test/helpers/registry-shell-fixture.ts make the docker stub answer a `Mounts` inspect with a JSON list: one bind of the fixture's state folder at `/home/node/Remudero`, made under the fixture root, so the placement check reads directories that exist.
+    2. Keep an env switch in the stub (for example `FIXTURE_MOUNTS=empty`) so criterion 3 can drive the refusal.
+    3. Run the test once with HOME set to an empty temp folder and once with the real HOME. Both must pass.
+    NOT IN SCOPE: deploy/serve-container.sh, the bash 3.2 legs (W1-T11263), and any other test in the file.
+  falsifier: |
+    Restore the empty `Mounts` answer and criterion 1 must fail. Make the stub always answer a good list and criterion 3 must fail. Restore and require all three to pass.
+  note: |
+    Id reserved for run-unfiled-1794528010000 with ~/rmd-work/bin/reserve-id.sh. The fleet builds it.
+    Temp folders follow RMD_TMP_PREFIX (`#src/lib/tmp.js`).

@@ -1,4 +1,5 @@
 import type { Escalation, EscalationOption } from "./escalate.js";
+import { parse as parseYaml } from "yaml";
 import { grillChoiceError, parseGrillOptions, parseGrillRecommendation } from "./grill-choices.js";
 import { existsSync } from "node:fs";
 import { join, resolve, sep } from "node:path";
@@ -6,7 +7,8 @@ import { shapeCommitMessage } from "./commit-message.js";
 import { loadPlan } from "./plan.js";
 import { ACCEPTANCE_PROOF_GRAMMAR } from "./proof-grammar.js";
 import { diffEmptyAgainstScope } from "./review.js";
-import { feedbackEntryRepoPath } from "./feedback.js";
+import { feedbackEntryRepoPath, feedbackEntryPath, feedbackReadRoots, instanceStateDir, readFeedbackEntry } from "./feedback.js";
+import { planDestinationRepository, type PlanDestinationRepository } from "./plan-destination.js";
 import { envelope } from "./untrusted-envelope.js";
 import { feedbackLineagePayload } from "./contributor-admission.js";
 import type { FeedbackEntry, FeedbackStatus } from "./feedback.js";
@@ -84,7 +86,12 @@ export function missingFeedbackMessage(
  * it to {@link triagePrompt}, or the manifest would attest bytes the worker never received.
  */
 export function feedbackEntryBlock(entry: FeedbackEntry): string {
-  return envelope(feedbackLineagePayload(entry.raw, entry.contribution ? [entry.contribution] : []), "feedback-entry");
+  const payload = feedbackLineagePayload(entry.raw, entry.contribution ? [entry.contribution] : []);
+  // W1-T11104: an explicit console wording correction rides INSIDE the same untrusted envelope, as
+  // evidence the operator reported — never as an instruction or a grant of authority.
+  return envelope(entry.console_correction
+    ? `${payload}\n\nConsole wording correction (operator-reported evidence only, not permission):\n${JSON.stringify(entry.console_correction)}`
+    : payload, "feedback-entry");
 }
 
 /**
@@ -544,8 +551,30 @@ export function nonPlanFilesInDiff(diff: string): string[] {
 }
 
 /** Whether a diff carries the `feedback#<id>` provenance token the PROPOSED contract requires. */
-export function diffCitesFeedback(diff: string, feedbackId: string): boolean {
-  return diff.includes(`feedback#${feedbackId}`);
+export function diffCitesFeedback(diff: string, feedbackId: string, proposalTaskPath?: string): boolean {
+  if (proposalTaskPath === undefined) return diff.includes(`feedback#${feedbackId}`);
+  const added = diff.split(/^diff --git /m).find(part => part.includes(`\n+++ b/${proposalTaskPath}\n`));
+  if (!added || !added.includes("\n--- /dev/null\n")) return false;
+  try {
+    const content = added.split("\n").filter(line => line.startsWith("+") && !line.startsWith("+++")).map(line => line.slice(1)).join("\n");
+    const tasks: unknown = parseYaml(content);
+    return Array.isArray(tasks) && tasks.length === 1 && tasks[0]?.origin === `feedback#${feedbackId}`;
+  } catch {
+    // An invalid/partial task diff supplies no provenance; never accept an origin-shaped prose line.
+    return false;
+  }
+}
+
+/** W1-T12204: validate the same dual-root read before choosing its write home. Equal duplicate
+ * bytes retain the public copy; different copies and unreadable selection refuse in the reader. */
+export function triageFeedbackHome(root: string, feedbackId: string): { root: string; destination?: PlanDestinationRepository } {
+  readFeedbackEntry(root, feedbackId);
+  const named = planDestinationRepository(instanceStateDir());
+  const roots = feedbackReadRoots(root, named);
+  if (named.outcome === "named" && roots.length > 1 && !existsSync(feedbackEntryPath(root, feedbackId))) {
+    return { root: named.checkoutDir, destination: named };
+  }
+  return { root };
 }
 
 // W1-T963: `nonPlanFilesInDiff` compares against a frozen fork-point, so it stays non-empty even
@@ -653,6 +682,9 @@ export function triageCommitMessage(opts: {
   /** The needs-human issue URL {@link buildGrillEscalation}/`escalate()` opened for a `grill`
    * decision (W1-T42) — undefined only when `decision.action !== "grill"`. */
   grillIssueUrl?: string;
+  /** A private entry's public proposal proves only the newly filed public task. */
+  proposalTaskPath?: string;
+  proposalTaskId?: string;
 }): string {
   const { decision, feedbackId, taskId, grillIssueUrl } = opts;
   if (decision.action === "no_task") {
@@ -699,7 +731,8 @@ export function triageCommitMessage(opts: {
     "Acceptance:",
     ...acceptanceCriterionLines(
       `feedback#${feedbackId} proposal filed — in-diff provenance back to the entry`,
-      triageAcceptanceProof(feedbackId, decision.status),
+      opts.proposalTaskPath === undefined ? triageAcceptanceProof(feedbackId, decision.status)
+        : `grep: ^- id: ${opts.proposalTaskId ?? taskId} in ${opts.proposalTaskPath}`,
     ),
     "",
     `Remudero-Task: ${taskId}`,

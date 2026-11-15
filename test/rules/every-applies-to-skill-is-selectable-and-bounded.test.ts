@@ -1,3 +1,4 @@
+// @census-reads: .claude/skills/ settings/worker.json src/ package.json test/helpers/repo-root.ts test/rules/every-applies-to-skill-is-selectable-and-bounded.test.ts — the approved skills, the worker allowlist, the selector and lanes it imports, itself.
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";

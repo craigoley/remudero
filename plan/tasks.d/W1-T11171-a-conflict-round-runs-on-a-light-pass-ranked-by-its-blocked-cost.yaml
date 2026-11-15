@@ -19,7 +19,7 @@
   files:
     - src/lib/sweep.ts
     - test/sweep/a-conflict-round-runs-on-a-light-pass-ranked-by-its-blocked-cost.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: On a light pass (the actionable gate that admits only post-review today), a conflicted PR whose resolution needs no worker (the registry regenerator, and any no-worker conflict arm the sweep has) acts in that pass under its own leases and its per-head-and-main receipt, and a conflict that needs a worker round still reads "deferred to full sweep (light pass)" with nothing spawned

@@ -11,7 +11,7 @@
   origin: "follow-up to the W1-T9649 outcome-fold change; preserve historical counts for receipts written before lineage_key existed"
   plan_refs: [W1-T9649]
   files: [src/lib/review-finding-outcomes.ts, test/a-review-finding-is-tracked-across-rounds.test.ts, test/review-finding-outcomes.test.ts]
-  status: queued
+  status: merged
   priority: 3
   attempts: 0
   rationale: |

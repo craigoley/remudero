@@ -17,7 +17,7 @@
     - src/lib/drain.ts
     - src/lib/run-child-contract.ts
     - test/dispatch/a-spawn-overflow-or-pidless-spawn-ends-its-lane-not-the-drain.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: A lane rejected with a spawn output overflow (an Error whose code is ENOBUFS from spawnSync or execFileSync) or a spawnDetachedGroup no-pid failure ends only that lane, as drain.lane_failed with class spawn_output_overflow or spawn_no_pid, in both the parallel settle path and the single-lane runOne path, and the drain goes on

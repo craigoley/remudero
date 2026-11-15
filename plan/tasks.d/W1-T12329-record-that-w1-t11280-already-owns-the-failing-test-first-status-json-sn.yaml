@@ -1,0 +1,23 @@
+- id: W1-T12329
+  title: Record that W1-T11280 already owns the failing-test-first status JSON snapshot cache work
+  repo: remudero
+  depends_on:
+    - W1-T11280
+  type: implement
+  verify: auto
+  risk: low
+  status: queued
+  attempts: 0
+  files:
+    - plan/tasks.d/W1-T11280-reuse-the-persisted-github-snapshot-in-status-json-reads.yaml
+  acceptance:
+    - claim: the W1-T11280 shard records that its follow-up harvest on strict TDD ordering was settled as already covered by its own design item 4
+      proof: "grep: follow-up harvest settled as already covered in plan/tasks.d/W1-T11280-reuse-the-persisted-github-snapshot-in-status-json-reads.yaml"
+  origin: architect
+  rationale: >-
+    From the 2026-11-11 follow-up on W1-T11280-1794402165543, ratified via rmd approve:
+  
+    follow-up harvest [task]: write the failing `W1-T11280` regressions first in
+    `test/status-json-deadline.test.ts` (fresh snapshot is reused, and missing, stale, truncated,
+    unreadable and remote-ref-failure each yield `unavailable`), then add `snapshotCache` to the
+    JSON-mode call. The record requires strict TDD. — from W1-T11280 (run W1-T11280-1794402165543)

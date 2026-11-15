@@ -1,10 +1,12 @@
 import { createHash } from "node:crypto";
+import { findTaskInCatalogs, catalogTaskContract, type TaskLookupOptions } from "../../lib/task-lookup.js";
 import type { WorkerStreamEvent } from "../../lib/worker.js";
 import type { GhApiFetcher } from "../../lib/open-prs-rest.js";
 import { type WorkerStateSensor, type ReviewRunResult, type MaterializationErrorClass, type MaterializationFailure, type CensusChildResult } from "./run-task-verb.js";
 import { buildBaseProofDirAsync, hostWorktreeGitAtTopLevel, type BaseProofDir } from "../../lib/check-proof.js";
 import { execFileSync, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { homedir } from "node:os";
 import { checksStateFromRollup, currentReviewSignal, reportReviewPhase, withheldReviewRefusalRow, readHostedFixProofResults, type HostedFixProofReader } from "../../lib/sweep.js";
 import { parseWhitelistedProof, resolveProofTestPath, resolveNameFilteredCandidatesAsync } from "../../lib/review.js";
 import { extractReviewFindings, recordReviewFindings, type FindingCapture } from "../../lib/review-findings.js";
@@ -34,7 +36,7 @@ import { visibleCriteria, type AcceptanceCriterion, DEFAULT_RISK, type TaskRisk 
 import { loadMounts, mountsPath, resolveMount, type Mount } from "../../lib/mounts.js";
 import { resolveRiskJudgeMount } from "../../lib/risk-judge.js";
 import { runShadowJudge, SHADOW_JUDGE_MAX_BUDGET_USD } from "../../lib/shadow-judge.js";
-import { REVIEW_CONTEXT, REVIEW_ENGINE_REVISION, applyVerdictStability, applyReviewStatusHistoryGuard, readReviewStatusHistory, type ReviewStatusHistoryReader, buildReviewPrompt, reviewScopeContext, cappedAnnotation, cappedOverrideFromLedger, cappedWordingApplies, decideAutoMergeArm, fetchPrLifecycle, fetchPrLifecycleAsync, floorDegradedAnnotation, judgeRubric, rubricAdvisorySection, scopeAdvisorySection, inverseScopeAdvisorySection, unwiredExportAdvisorySection, keywordOnlyAnnotation, parseAcceptanceBlock, parseReviewerUnable, parseReviewerVerdictClauses, parseReviewerVerdicts, postReviewCommentGuarded, postReviewPending, postReviewStatus, postReviewStatusGuarded, readReviewStatusEntry, reviewStatusEntryFromCombined, priorReviewVerdictFromLedger, reviewLedgerKeyFor, UNFILED_RUN_SENTINEL, planOnlyDiff, reviewerOutcome, reviewerRerunDecision, reviewerVerdictContract, reviewEvidenceStrength, claimReviewDecision, reviewDecisionDigest, preparePromisedReviewDecision, reviewTaskIdEvidenceAsync, reviewContractDigest, reviewTaskNarrative, type ReviewTaskNarrativeInput, reviewInputDigest, reviewLedgerLegibilityFields, reviewLedgerReasons, unmetReviewCriteria, resolvePlanCriteriaAtHeadAsync, type PlanCriteriaAtHeadDivergence, type ReviewVerdict, type PlanLintOutcome, type ReviewEvaluatorProvenance, type ReviewStatusHistory, type PriorReproducedReviewFailure } from "../../lib/review.js";
+import { REVIEW_CONTEXT, REVIEW_ENGINE_REVISION, settleReviewOutboxEntry, applyVerdictStability, applyReviewStatusHistoryGuard, readReviewStatusHistory, type ReviewStatusHistoryReader, buildReviewPrompt, reviewScopeContext, reviewPlacementAdmitted, cappedAnnotation, cappedOverrideFromLedger, cappedWordingApplies, decideAutoMergeArm, fetchPrLifecycle, fetchPrLifecycleAsync, floorDegradedAnnotation, judgeRubric, rubricAdvisorySection, scopeAdvisorySection, inverseScopeAdvisorySection, unwiredExportAdvisorySection, keywordOnlyAnnotation, parseAcceptanceBlock, parseReviewerUnable, parseReviewerVerdictClauses, parseReviewerVerdicts, postReviewCommentGuarded, postReviewPending, postReviewStatus, postReviewStatusGuarded, reviewDescriptionWithCodeProvenance, readReviewStatusEntry, reviewStatusEntryFromCombined, priorReviewVerdictFromLedger, reviewLedgerKeyFor, UNFILED_RUN_SENTINEL, planOnlyDiff, reviewerOutcome, reviewerRerunDecision, reviewerVerdictContract, reviewEvidenceStrength, claimReviewDecision, preparePromisedReviewDecision, reviewTaskIdEvidenceAsync, reviewContractDigest, reviewTaskNarrative, type ReviewTaskNarrativeInput, reviewInputDigest, reviewLedgerLegibilityFields, reviewLedgerReasons, unmetReviewCriteria, resolvePlanCriteriaAtHeadAsync, type PlanCriteriaAtHeadDivergence, type ReviewVerdict, type PlanLintOutcome, type ReviewEvaluatorProvenance, type ReviewStatusHistory, type PriorReproducedReviewFailure } from "../../lib/review.js";
 import { resolveReviewProviderProvenance, reviewProviderProvenanceLedgerFields } from "../../lib/review-provider-provenance.js";
 import { validateWorkerSettingsFile } from "../../lib/settings.js";
 import { readLedgerLines, readRequiredStatusCheckContextsAsync } from "../../lib/status.js";
@@ -107,6 +109,39 @@ export function reviewOptionsFromFlags(host: ReviewCommandHost, rest: string[]):
     ...(planLintRetryHead !== undefined && /^[a-f0-9]{40}$/i.test(planLintRetryHead) ? { planLintRetryHead } : {}),
     ...(excludeProviders.length ? { excludeProviders } : {}),
   };
+}
+
+export const REVIEW_EXIT_CAUSE_FLAG = "--exit-cause-file";
+const REVIEW_EXIT_STEPS = ["view", "setup", "materialize", "review", "publish"] as const;
+export const REVIEW_EXIT_CAUSES = [
+  "repo-unresolvable", "closed-before-review", "subject-refused", "task-narrative-unavailable",
+  "task-metadata-unavailable", "semantic-setup-unavailable", "own-task-record-missing",
+  "shadow-verdict-withheld", "replayed-verdict-withheld", "verdict-not-posted",
+  "verdict-failure", "verdict-pending", "verdict-not-success",
+  ...REVIEW_EXIT_STEPS.map((step) => `threw-in-${step}` as const),
+] as const;
+export type ReviewExitCause = (typeof REVIEW_EXIT_CAUSES)[number];
+type ReviewExit = { step: (typeof REVIEW_EXIT_STEPS)[number]; as: (cause: ReviewExitCause) => void };
+
+function writeReviewExitCause(rest: string[], cause: ReviewExitCause, error?: unknown): void {
+  const path = flagValue(rest, REVIEW_EXIT_CAUSE_FLAG);
+  if (path === undefined) return;
+  const errorClass = error === undefined ? "" : `\t${error instanceof Error ? error.constructor.name : typeof error}`;
+  try {
+    writeFileSync(path, `${cause}${errorClass}\n`);
+  } catch (e) {
+    console.error(`rmd review: exit cause ${cause} was not written: ${String((e as Error)?.message ?? e)}`);
+  }
+}
+
+async function reportingReviewExit(rest: string[], run: (exit: ReviewExit) => Promise<number>): Promise<number> {
+  const exit: ReviewExit = { step: "view", as: (cause) => writeReviewExitCause(rest, cause) };
+  try {
+    return await run(exit);
+  } catch (error) {
+    writeReviewExitCause(rest, `threw-in-${exit.step}`, error);
+    throw error;
+  }
 }
 
 /**
@@ -481,6 +516,14 @@ export async function reviewHostedCiFileEvidence(
   }
 }
 
+// Project at the final write: status guards may replace a description with a private failure reason.
+function catalogReviewPoster(catalog: "public" | "ops" | undefined, post: typeof postReviewStatus, codeSha?: string): typeof postReviewStatus {
+  return catalog !== "ops" ? post : async options => {
+    const description = `remudero-review: ${options.state} — detailed evidence retained on host`;
+    await post({ ...options, description: codeSha ? reviewDescriptionWithCodeProvenance(description, codeSha) : description });
+  };
+}
+
 export async function runReview(host: ReviewCommandHost, args: {
   owner: string;
   repo: string;
@@ -494,7 +537,7 @@ export async function runReview(host: ReviewCommandHost, args: {
   runtimeImageSha?: string | null;
   /** `files` (W1-T322): the task's declared scope — see {@link "../../lib/review.js".ReviewEvidence.taskDeclaredFiles}'s
    *  doc. Every real caller already passes the full plan `Task`, so this widens for free. */
-  task: { id: string; acceptance?: AcceptanceCriterion[]; files?: string[]; risk?: TaskRisk; budget_usd?: number; sourcePath?: string } & ReviewTaskNarrativeInput;
+  task: { catalog?: "public" | "ops"; id: string; acceptance?: AcceptanceCriterion[]; files?: string[]; risk?: TaskRisk; budget_usd?: number; sourcePath?: string } & ReviewTaskNarrativeInput;
   /** W1-T3704 (completed here) — injectable producer for the review-reuse pair recorded on this verdict's
    *  `review.posted` line (`own_diff_digest`/`merge_base_sha`). Production omits it and gets one
    *  best-effort REST compare against `main`; a test supplies a stub so it never reaches the
@@ -767,7 +810,7 @@ export async function runReview(host: ReviewCommandHost, args: {
   }
   if (diffOutcome.source === "local") log("review.diff_local_fallback", { pr_url: prUrl, head_sha: headSha });
   const diff = diffOutcome.diff;
-  const scopeContext = reviewScopeContext(diff, task.files);
+  const scopeContext = reviewScopeContext(diff, task.files, reviewPlacementAdmitted(diff, args.headCheckoutDir, task.files, task.acceptance ?? []));
   const criteria = task.acceptance ?? [];
   const taskIdEvidence = await reviewTaskIdEvidenceAsync(diff, args.headRefName, args.headCheckoutDir);
   const ownership = taskIdEvidence.ownership;
@@ -1344,7 +1387,8 @@ export async function runReview(host: ReviewCommandHost, args: {
   const poster = failureRecordingPoster();
   const publishingState = verdict.state;
   const posted = await postReviewStatusGuarded({
-    post: poster.post,
+    post: catalogReviewPoster(task.catalog, poster.post, reviewerCodeFreshness?.status === "fresh" ? reviewerCodeFreshness.codeSha : undefined),
+    outboxBeforePost: true,
     owner,
     repo,
     sha: headSha,
@@ -1369,7 +1413,7 @@ export async function runReview(host: ReviewCommandHost, args: {
     reviewerCodeFreshness,
     fetchLifecycle: () => fetchPrLifecycleAsync(prUrl),
     readRequiredContexts: readRequiredStatusCheckContextsAsync,
-    cannotEvaluateEscalation: (e, issues) => tryEscalate(e, { issues: issues ?? ghIssueGateway(owner, repo), ledgerPath: args.ledgerPath, runId: args.runId }),
+    cannotEvaluateEscalation: (e, issues) => tryEscalate(task.catalog === "ops" ? { ...e, detail: "Review cannot evaluate this head; detailed evidence is retained on the host." } : e, { issues: issues ?? ghIssueGateway(owner, repo), ledgerPath: args.ledgerPath, runId: args.runId }),
   });
   phases.post = systemClock.now();
   // W1-T11151: `posted` releases admission once the outcome is terminal: posted, refused (review.post_refused) or a
@@ -1532,6 +1576,7 @@ export async function runReview(host: ReviewCommandHost, args: {
     changeset_fence_unbalanced_at_eof: verdict.changesetFenceUnbalancedAtEof ?? null,
   };
   log("review.posted", reviewPostedRow);
+  if (inputDigest !== undefined) settleReviewOutboxEntry(args.ledgerPath, prUrl, inputDigest);
   recordReplay(replayDecision);
   // W1-T322 (SHIPS-UNWIRED advisory floor): ADVISORY ONLY — ledgered here, never consulted by the
   // verdict/arm decision above or below. One `review.unwired_advisory` line per reason code (see
@@ -1643,7 +1688,11 @@ export async function runReview(host: ReviewCommandHost, args: {
   if (unwiredSection) parts.push(unwiredSection);
   if (inverseScopeSection) parts.push(inverseScopeSection);
   if (parts.length === 0) parts.push(`**remudero-review=${verdict.state}** — ${verdict.summary}`);
-  const body = parts.join("\n\n---\n\n");
+  // Ops publication permits only acceptance text; derived reasons, proof output and scope stay local.
+  const body = task.catalog === "ops"
+    ? `**remudero-review=${verdict.state}** — detailed evidence retained on host\n\n` +
+      visibleCriteria(task.acceptance ?? []).map(criterion => `- ${criterion.claim}`).join("\n")
+    : parts.join("\n\n---\n\n");
   postReviewCommentGuarded(prUrl, body, { commitSha: headSha });
   // W1-T63/P10-a: the console summary distinguishes a completed review from a
   // floor-only one (reviewer never attempted, or attempted but walled/failed).
@@ -1775,11 +1824,14 @@ export function reviewLedgerReasonFields(args: {
  * be a brand-new, never-invoked-under-test line this same gate would then flag).
  */
 export interface ReviewCommandDeps {
+  taskLookup?: TaskLookupOptions;
   disarm?: (prUrl: string) => DisarmOutcome | void;
   onPhase?: (phase: string) => void;
   planLintRetryHead?: string;
   /** Bounded admission identity, separate from the existing worker/run and ownership conventions. */
   reviewAttemptId?: string;
+  /** Test-only path for start-phase rows emitted before config is available or when its ledger is unreadable. */
+  startPhasesLedgerPath?: string;
   contributorAdmission?: AdmissionObserver;
   fetchView?: (args: string[]) => unknown;
   /** Shared status/review history reader, injectable so command tests stay offline. */
@@ -1992,8 +2044,16 @@ export async function withMaterializedWorktree<T>(
   }
 }
 
-export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest: string[] = [], deps: ReviewCommandDeps = {}): Promise<number> {
+export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest: string[] = [], deps: ReviewCommandDeps = {}, exit?: ReviewExit): Promise<number> {
+  if (exit === undefined) return reportingReviewExit(rest, (opened) => reviewCommand(host, prArg, rest, deps, opened));
   const { acceptedReviewAttemptId, materializeReviewWorktree, realDeps, reviewPostedDescription } = host;
+  // W1-T11261: time every step before the first ledger row; a step that throws still records its elapsed time and error class.
+  const commandStartedAt = systemClock.now();
+  const startPhases: Record<string, unknown> = {};
+  const recordStartPhase = (name: string, startedAt: number, error?: unknown): void => {
+    startPhases[`${name}_ms`] = systemClock.now() - startedAt;
+    if (error !== undefined) startPhases[`${name}_error`] = error instanceof Error ? error.constructor.name : typeof error;
+  };
   deps = { ...reviewOptionsFromFlags(host, rest), ...deps };
   const {
     fetchView,
@@ -2039,6 +2099,7 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
   }
   if (defaultsFailure && !(flagValue(rest, "--repo") ?? "").includes("/")) {
     console.error(`rmd review: ${defaultsFailure.message}`);
+    exit.as("repo-unresolvable");
     return 1;
   }
   const selfTarget = defaults ?? { owner: "", repo: "" };
@@ -2050,6 +2111,7 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
   // fields, so nothing downstream of `body` can tell which transport served it.
   const args = reviewViewArgs(owner, repo, prArg);
   const raw = await (deps.fetchView ?? ghJsonAsync)(args);
+  exit.step = "setup";
   // The sweep's open-PR snapshot can age while earlier reviews run. The numeric arm already
   // fetched the live REST row, so decline a closed PR before fetching its head or building a
   // worktree. The guarded poster still makes the final lifecycle check for an in-flight close.
@@ -2062,6 +2124,7 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
       head_sha: closed.head?.sha, merged: typeof closed.merged_at === "string",
     });
     console.log(`rmd review: PR #${prArg} closed before review; no verdict posted`);
+    exit.as("closed-before-review");
     return 2;
   }
   const view = (reviewPrNumber(prArg) !== undefined ? mapRestPr(raw as RestPullRow) : raw) as {
@@ -2073,10 +2136,54 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
   };
   let body = view.body ?? "";
   const reportBody = body;
+  const runId = `review-PR${view.number}-${Date.now()}`;
+  const reviewAttemptId = acceptedReviewAttemptId(deps.reviewAttemptId, view.number);
+  const shadow = rest.includes(REVIEWER_SHADOW_FLAG);
+  const startPhasesStep = reviewerShadowStep("review.start_phases", shadow);
   const inputDigest = reviewInputDigest(view.headRefOid, body);
-  const config = loadConfigDep();
+  const fallbackStartPhasesLedgerPath = deps.startPhasesLedgerPath ?? ledgerPathFor({ root: join(homedir(), "Remudero") });
+  let startPhasesRowWritten = false;
+  const writeStartPhases = (path: string, taskId: string): void => {
+    if (startPhasesRowWritten) return;
+    const row = {
+      run_id: runId, task_id: taskId, step: startPhasesStep, lane: "review",
+      ...(reviewAttemptId === undefined ? {} : { review_attempt_id: reviewAttemptId, review_input_digest: inputDigest }),
+      head_sha: view.headRefOid, total_ms: systemClock.now() - commandStartedAt, ...startPhases,
+      ...reviewerHealthRowFields("review.start_phases", flagValue(rest, REVIEWER_INCIDENT_FLAG)),
+    };
+    try {
+      appendLedger(path, row);
+    } catch (error) {
+      if (path === fallbackStartPhasesLedgerPath) throw error;
+      appendLedger(fallbackStartPhasesLedgerPath, row);
+    }
+    startPhasesRowWritten = true;
+  };
+  const startPhaseHandlers = <T>(name: string, startedAt: number, path: string, taskId: string): [(value: T) => T, (error: unknown) => never] => [
+    value => { recordStartPhase(name, startedAt); return value; },
+    error => { recordStartPhase(name, startedAt, error ?? "thrown"); writeStartPhases(path, taskId); throw error; },
+  ];
+  const configLoadStartedAt = systemClock.now();
+  let config: Config;
+  try {
+    config = loadConfigDep();
+    recordStartPhase("config_load", configLoadStartedAt);
+  } catch (e) {
+    recordStartPhase("config_load", configLoadStartedAt, e ?? "thrown");
+    writeStartPhases(fallbackStartPhasesLedgerPath, `PR-${view.number}`);
+    throw e;
+  }
   const ledgerPath = ledgerPathFor(config);
-  const reviewLedger = readLedgerLines(ledgerPath);
+  const ledgerReadStartedAt = systemClock.now();
+  let reviewLedger: ReturnType<typeof readLedgerLines>;
+  try {
+    reviewLedger = readLedgerLines(ledgerPath);
+    recordStartPhase("ledger_read", ledgerReadStartedAt);
+  } catch (e) {
+    recordStartPhase("ledger_read", ledgerReadStartedAt, e ?? "thrown");
+    writeStartPhases(ledgerPath, `PR-${view.number}`);
+    throw e;
+  }
 
   // Criteria: task trailer → tasks.yaml; else the PR body's Acceptance: block.
   let criteria: AcceptanceCriterion[] = [];
@@ -2087,10 +2194,7 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
     planOnlyFiling ?? isPlanOnlyFilingPr(reviewLedger, view.url),
   );
   const reviewKey = reviewLedgerKeyFor(taskId, view.number);
-  const runId = `review-PR${view.number}-${Date.now()}`;
-  const reviewAttemptId = acceptedReviewAttemptId(deps.reviewAttemptId, view.number);
   // W1-T10269: a shadow review publishes nothing and its rows are renamed; every terminal row names the judging code's sha.
-  const shadow = rest.includes(REVIEWER_SHADOW_FLAG);
   const log = (step: string, extra: Record<string, unknown> = {}) =>
     appendLedger(ledgerPath, { run_id: runId, task_id: reviewKey, step: reviewerShadowStep(step, shadow), lane: "review",
       ...(reviewAttemptId === undefined ? {} : { review_attempt_id: reviewAttemptId, review_input_digest: inputDigest }), ...extra,
@@ -2125,6 +2229,7 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
       `rmd review: REFUSED — ${subjectCheckout.message}. No status was posted on the PR; ` +
         `run the review where ${owner}/${repo} is checked out (that repo's own daemon reviews it).`,
     );
+    exit.as("subject-refused");
     return 1;
   }
   const subjectRepoDir = subjectCheckout.repoDir;
@@ -2142,6 +2247,7 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
   // task's declared scope — an advisory-only input judgeReview needs. Stays `undefined` on ANY
   // read/parse failure (see the catch below), exactly like `criteria` degrading to the body's
   // Acceptance: block — never a reason to fail the review.
+  let taskCatalog: "public" | "ops" | undefined;
   let taskDeclaredFiles: string[] | undefined;
   let taskRisk: TaskRisk | undefined;
   let taskBudgetUsd: number | undefined;
@@ -2179,20 +2285,29 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
   // returned: `materializeReviewWorktree` re-runs the same fetch below and reports a genuine
   // outage through its own `fetch-failure` class, which is the degradation path this command
   // already has. Failing here instead would invent a second one for the same condition.
+  const fetchHeadStartedAt = systemClock.now();
   try {
     await fetchHead(subjectRepoDir, view.number, view.headRefOid);
+    recordStartPhase("fetch_head", fetchHeadStartedAt);
   } catch (e) {
+    recordStartPhase("fetch_head", fetchHeadStartedAt, e ?? "thrown");
     void e;
     // Swallowed on purpose — see above. The materializer's own fetch names a real outage.
   }
   let resolverDivergence: PlanCriteriaAtHeadDivergence | undefined;
   let ownTaskRecordMissing = false, headTaskResolved = false;
+  let publicTaskAbsent = false;
   // W1-T2846: a fleet PR can lose its trailer while retaining the task-bearing run branch.
   // Give the existing exact-trailer criteria resolver only the recovered identity it needs;
   // `reportBody` still carries the real PR body unchanged to the fallback and reviewer below.
   if (taskId && !reviewTaskIdFromBody(body)) body = `Remudero-Task: ${taskId}`;
+  const headCriteriaStartedAt = systemClock.now();
+  const [recordHeadSuccess, recordHeadFailure] = startPhaseHandlers<Awaited<ReturnType<typeof resolvePlanCriteriaAtHeadAsync>>>(
+    "head_criteria", headCriteriaStartedAt, ledgerPath, reviewKey,
+  );
   if (taskId) {
-    const resolved = await resolvePlanCriteriaAtHeadAsync(body, subjectRepoDir, "plan/tasks.yaml", view.headRefOid);
+    const resolved = await resolvePlanCriteriaAtHeadAsync(body, subjectRepoDir, "plan/tasks.yaml", view.headRefOid)
+      .then(recordHeadSuccess, recordHeadFailure);
     criteria = resolved.criteria;
     if (resolved.source) source = resolved.source;
     taskDeclaredFiles = resolved.taskDeclaredFiles;
@@ -2205,8 +2320,42 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
     // origin/main HAS qualifies; one absent from both, or a TRIAGE-/main-repair/unfiled identity, keeps today's path.
     if (taskId !== UNFILED_RUN_SENTINEL && resolved.divergence === undefined && resolved.criteria.length === 0 &&
       resolved.taskRisk === undefined && resolved.taskBudgetUsd === undefined) {
-      const atMain = await resolvePlanCriteriaAtHeadAsync(body, subjectRepoDir, "plan/tasks.yaml", "origin/main");
+      const mainCriteriaStartedAt = systemClock.now();
+      const [recordMainSuccess, recordMainFailure] = startPhaseHandlers<Awaited<ReturnType<typeof resolvePlanCriteriaAtHeadAsync>>>(
+        "main_criteria", mainCriteriaStartedAt, ledgerPath, reviewKey,
+      );
+      const atMain = await resolvePlanCriteriaAtHeadAsync(body, subjectRepoDir, "plan/tasks.yaml", "origin/main")
+        .then(recordMainSuccess, recordMainFailure);
       ownTaskRecordMissing = headLacksOwnTaskRecord(resolved, atMain);
+      publicTaskAbsent = atMain.divergence === undefined && atMain.criteria.length === 0 &&
+        atMain.taskDeclaredFiles === undefined && atMain.taskRisk === undefined && atMain.taskBudgetUsd === undefined;
+    }
+  }
+  if (taskId && publicTaskAbsent) {
+    const found = await findTaskInCatalogs(taskId, {
+      ...deps.taskLookup, stateDir: join(config.root, "state"), byId: new Map(),
+    });
+    if (found.outcome === "unreadable") {
+      log("review.catalog.unreadable", { reason: found.reason });
+      console.error("rmd review: task catalog unreadable; no body fallback or review effect");
+      exit.as("task-metadata-unavailable");
+      return 2;
+    }
+    if (found.outcome === "found") {
+      const contract = catalogTaskContract(found);
+      taskCatalog = found.catalog;
+      if (contract.criteria.length === 0) {
+        console.error("rmd review: catalog task has no acceptance criteria; no body fallback or review effect");
+        exit.as("task-metadata-unavailable");
+        return 2;
+      }
+      criteria = contract.criteria;
+      taskDeclaredFiles = contract.taskDeclaredFiles;
+      taskRisk = contract.taskRisk;
+      taskBudgetUsd = contract.taskBudgetUsd;
+      taskNarrative = contract.taskNarrative ?? {};
+      source = contract.source ?? source;
+      headTaskResolved = true;
     }
   }
   if (criteria.length === 0) {
@@ -2217,6 +2366,7 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
     }
   }
 
+  writeStartPhases(ledgerPath, reviewKey);
   const provenanceKey = { taskId: reviewKey, prUrl: view.url, headSha: view.headRefOid };
   const provenance = resolveReviewProviderProvenance(reviewLedger, provenanceKey);
   log("review.provider_provenance", reviewProviderProvenanceLedgerFields(provenance, provenanceKey));
@@ -2242,6 +2392,7 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
     recordSetupReplay(unavailableInput, classifyReviewOutcome(unavailableInput));
     log("review.reviewer.skipped", { reason: "head-task-narrative-unavailable", head_sha: view.headRefOid, pr_url: view.url });
     console.error("rmd review: head task design or amendment unavailable; no pending status, verdict or merge effect");
+    exit.as("task-narrative-unavailable");
     return 2;
   }
   const setupDecision = classifyReviewOutcome(replaySetupInput);
@@ -2268,6 +2419,7 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
         recordSetupReplay(replaySetupInput, setupDecision);
         log("review.semantic_setup_refused", { reason: "head-task-metadata-unavailable", head_sha: view.headRefOid, pr_url: view.url });
         console.error("rmd review: semantic review unavailable (head task metadata); no pending status, verdict or merge effect");
+        exit.as("task-metadata-unavailable");
         return 2;
       }
     } else {
@@ -2294,6 +2446,7 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
         // runReview can auto-arm. Refuse before either pending poster or materializer runs.
         log("review.semantic_setup_refused", { reason: "semantic-setup-unavailable", head_sha: view.headRefOid, pr_url: view.url });
         console.error("rmd review: semantic setup unavailable; no pending status, verdict or merge effect");
+        exit.as("semantic-setup-unavailable");
         return 2;
       }
     }
@@ -2364,6 +2517,7 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
       `rmd review PR #${view.number}: ${taskId} has no record at head ${view.headRefOid.slice(0, 7)} but origin/main has it ` +
         `(${OWN_TASK_RECORD_MISSING_CAUSE}) — pending; refresh the branch from main, then re-review`,
     );
+    exit.as("own-task-record-missing");
     return 2;
   }
 
@@ -2374,6 +2528,7 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
   // review falls back to keyword-only — EXPLICITLY marked (criterion 5),
   // never silently, and (W1-T233) the console line below now NAMES why,
   // instead of a bare "unavailable" with the real reason thrown away.
+  exit.step = "materialize";
   const materializeStartedMs = systemClock.now();
   const materialized = await materialize(config, subjectRepoDir, view.number, view.headRefOid);
   if (materialized.worktreePath === undefined) {
@@ -2401,6 +2556,7 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
   // head goes first and the base follows on every exit path too; a grep tree is
   // deleted there the same way, and a blob-only fallback dir is not a worktree and
   // is left to the boot sweep (src/lib/tmp.ts) exactly as before.
+  exit.step = "review";
   let verdict = await withMaterialized(
     baseProof?.baseIsCheckout || baseProof?.baseIsGrepTree ? baseProof.baseCheckoutDir : undefined,
     subjectRepoDir,
@@ -2417,6 +2573,7 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
           headRefName: view.headRefName,
           task: {
             id: reviewKey,
+            catalog: taskCatalog,
             acceptance: criteria,
             files: taskDeclaredFiles,
             risk: taskRisk,
@@ -2463,6 +2620,8 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
     baseProof?.baseIsGrepTree ? (_repo, tree) => rmSync(tree, { recursive: true, force: true }) : undefined,
   );
   // W1-T10269: a shadow review ends at its verdict: no restore, no status, no comment, no arm.
+  exit.step = "publish";
+  if (shadow && verdict.verdictWithheld) exit.as("shadow-verdict-withheld");
   if (shadow) return verdict.verdictWithheld ? 2 : 0;
 
   // A final review decision is immutable, but GitHub's commit status is last-write-wins. A stale
@@ -2470,11 +2629,13 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
   // restore the already-judged terminal status instead of reporting a success that GitHub cannot see.
   let replayStatusAction: "restored" | "confirmed" | undefined;
   if (verdict.decisionDisposition === "replayed" && verdict.reviewDecisionDigest) {
+    if (verdict.verdictWithheld) exit.as("replayed-verdict-withheld");
     if (verdict.verdictWithheld) return 2;
     const restorePoster = failureRecordingPoster();
     const restoringState = verdict.state;
+    const restoringFreshness = await publicationFreshness();
     const restored = await postStatusDep({
-      post: restorePoster.post,
+      post: catalogReviewPoster(taskCatalog, restorePoster.post, restoringFreshness.status === "fresh" ? restoringFreshness.codeSha : undefined),
       owner, repo, sha: view.headRefOid, state: verdict.state, verdict,
       readReviewStatusHistory: deps.readReviewStatusHistory,
       description: reviewPostedDescription(verdict),
@@ -2482,13 +2643,13 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
       ledgerPath, runId, prUrl: view.url, reviewInputDigest: inputDigest,
       reviewDecisionDigest: verdict.reviewDecisionDigest,
       reviewEngineRevision: REVIEW_ENGINE_REVISION,
-      reviewerCodeFreshness: await publicationFreshness(),
+      reviewerCodeFreshness: restoringFreshness,
       fetchLifecycle: () => fetchPrLifecycle(view.url),
       fetchCurrentStatus: () => reviewStatusEntryFromCombined(fetchView(combinedStatusRestArgs(owner, repo, view.headRefOid)))?.state,
       fetchCurrentStatusEntry: () => readReviewStatusEntry(owner, repo, view.headRefOid, deps.fetchView),
       fetchPublisher: deps.fetchView,
       readRequiredContexts: readRequiredStatusCheckContextsAsync,
-      cannotEvaluateEscalation: (e, issues) => tryEscalate(e, { issues: issues ?? ghIssueGateway(owner, repo), ledgerPath, runId }),
+      cannotEvaluateEscalation: (e, issues) => tryEscalate(taskCatalog === "ops" ? { ...e, detail: "Review cannot evaluate this head; detailed evidence is retained on the host." } : e, { issues: issues ?? ghIssueGateway(owner, repo), ledgerPath, runId }),
     });
     verdict.reviewDecisionDigest = restored.effectiveReviewDecisionDigest ?? verdict.reviewDecisionDigest;
     if (restored.effectiveVerdict) verdict = { ...verdict, ...restored.effectiveVerdict, state: restored.effectiveState ?? restored.effectiveVerdict.state };
@@ -2532,6 +2693,7 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
       // degraded one, and saying "not certified" here contradicts the status posted seconds ago.
       (cappedWordingApplies(verdict) ? " — CAPPED: not certified (0 proofs executed)" : ""),
   );
+  if (verdict.verdictWithheld) exit.as("verdict-not-posted");
   if (verdict.verdictWithheld) return 2;
 
   if (verdict.criteria.some((criterion) => !criterion.met) && planTreeIsBehindMain(host, source, subjectRepoDir)) {
@@ -2579,6 +2741,7 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
     );
   }
 
+  if (verdict.state !== "success") exit.as(REVIEW_EXIT_CAUSES.find((cause) => cause === `verdict-${verdict.state}`) ?? "verdict-not-success");
   return verdict.state === "success" ? 0 : 1;
 }
 

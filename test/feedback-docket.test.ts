@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -16,6 +16,25 @@ import {
 } from "../src/lib/feedback-docket.js";
 import { appendLedger } from "../src/lib/ledger.js";
 import { parseProposalRegistry } from "../src/lib/inbox.js";
+import { stringify as stringifyYaml } from "yaml";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
+import { consoleCorrectionSubmissionKey, type ConsoleCorrection, type CorrectionEvidence, type CorrectionSymptom } from "#src/lib/console-feedback.js";
+
+// A correction as the console route captures it: bound thread, native key and console origin.
+function evidence(o: { id: string; ts?: string; symptom?: CorrectionSymptom; version?: string; cls?: string; issue?: number; revision?: string;
+  before?: string; after?: string; text?: string; replayCaseIds?: string[]; forgeKey?: boolean }): CorrectionEvidence {
+  const threadId = `thread:W1-T${o.issue ?? 1}::${o.cls ?? "MANUAL"}::-::-`;
+  const issueUrl = `https://github.com/craigoley/remudero/issues/${o.issue ?? 1}`;
+  const revision = o.revision ?? "a".repeat(64);
+  const correction: ConsoleCorrection = {
+    kind: "wording_correction", version: 1, symptom: o.symptom ?? "stale_read", issue_url: issueUrl, repository: "craigoley/remudero",
+    thread_id: threadId, intent_id: `intent-${o.id}`, conversation_revision: revision, source_revision: "b".repeat(64),
+    rendered_version: o.version ?? "tmpl-v1", rendered_digest: null, before: o.before ?? "Status is current.",
+    after: o.after ?? "This status is 3 hours old.", replay_case_ids: o.replayCaseIds ?? [], context: "operator_reported",
+  };
+  return { feedbackId: o.id, ts: o.ts ?? "2026-11-10T10:00:00.000Z", raw: o.text ?? "Say how old the status is.", origin: "ui", threadId,
+    submissionKey: o.forgeKey ? "forged" : consoleCorrectionSubmissionKey(threadId, correction.intent_id, issueUrl, revision), correction };
+}
 
 function tmp(prefix: string): string {
   return mkdtempSync(join(tmpdir(), prefix));
@@ -65,9 +84,9 @@ test("buildFeedbackDocket: normalizes all five surfaces to {source, ts, verbatim
   assert.equal(docket.items.length, 5, "exactly one item per surface, no leakage from unrelated steps");
   assert.deepEqual(
     docket.countsBySource,
-    { reframe: 1, operator_feedback: 1, rejected_feedback: 1, question_answer: 1, operator_note: 1 },
+    { reframe: 1, operator_feedback: 1, rejected_feedback: 1, question_answer: 1, operator_note: 1, console_correction: 0 },
   );
-  assert.deepEqual(docket.emptySources, [], "nothing is empty when every surface has one item");
+  assert.deepEqual(docket.emptySources, ["console_correction"], "the sixth surface is named empty, never omitted");
   assert.deepEqual(
     docket.items.map((i) => i.referent),
     ["Rule-A", "Rule-B", "Rule-C", "Rule-D", "Rule-E"],
@@ -88,7 +107,7 @@ test("buildFeedbackDocket: EMPTY SOURCES ARE NAMED, not silently omitted", () =>
   assert.deepEqual(docket.countsBySource.rejected_feedback, 1);
   assert.deepEqual(
     [...docket.emptySources].sort(),
-    ["operator_feedback", "operator_note", "question_answer", "reframe"].sort(),
+    ["console_correction", "operator_feedback", "operator_note", "question_answer", "reframe"].sort(),
     "a docket that omits a silent channel reads as coverage — every empty source is named",
   );
 });
@@ -161,7 +180,7 @@ test("THE FALSIFIER: three reframes indicting the same rule yield exactly ONE pr
 test("THE FALSIFIER: an empty window files no proposal (the no-op path is first-class)", () => {
   const docket = buildFeedbackDocket(emptyInputs());
   assert.equal(docket.items.length, 0);
-  assert.deepEqual(docket.emptySources, ["reframe", "operator_feedback", "rejected_feedback", "question_answer", "operator_note"]);
+  assert.deepEqual(docket.emptySources, ["reframe", "operator_feedback", "rejected_feedback", "question_answer", "operator_note", "console_correction"]);
 
   const result = synthesizeFeedbackDocketProposal(docket);
   assert.deepEqual(result, { kind: "empty" }, "an unconditional weekly emitter fails this");
@@ -432,6 +451,85 @@ test("runFeedbackDocketRung: a marker-write failure is caught, ledgers feedback_
     assert.equal(lines.filter((l) => l.step === "feedback_docket.error").length, 1, "the failure is ledgered, not swallowed silently");
   } finally {
     rmSync(instanceRoot, { force: true });
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+// ── W1-T11104: explicit console corrections ride the SAME docket, rung and proposal path ─────
+
+const correctionEntry = (e: CorrectionEvidence, status = "new") => stringifyYaml({
+  id: e.feedbackId, ts: e.ts, raw: e.raw, attachments: [], origin: e.origin, status, proposal_pr: null,
+  thread_id: e.threadId, submission_key: e.submissionKey, console_correction: e.correction,
+});
+
+test("buildFeedbackDocket projects verified console corrections into one candidate and reports forged ones as unverified", () => {
+  const a = evidence({ id: "fb-a", ts: "2026-08-02T00:00:00.000Z", issue: 21 });
+  const b = evidence({ id: "fb-b", ts: "2026-08-03T00:00:00.000Z", issue: 22, after: "A different wording." });
+  const forged = evidence({ id: "fb-f", ts: "2026-08-04T00:00:00.000Z", issue: 23, forgeKey: true });
+  const docket = buildFeedbackDocket({ ...emptyInputs(), consoleCorrections: [a, b, forged] });
+  assert.equal(docket.countsBySource.console_correction, 2, "only verified evidence is counted as an item");
+  assert.deepEqual(docket.consoleCorrection.candidates.map((c) => c.observation_count), [2]);
+  assert.deepEqual(docket.consoleCorrection.unverified.map((u) => u.feedback_id), ["fb-f"]);
+  assert.equal(docket.emptySources.includes("console_correction"), false);
+
+  const result = synthesizeFeedbackDocketProposal(docket);
+  assert.equal(result.kind, "proposal");
+  if (result.kind !== "proposal") return;
+  assert.match(result.referent, /^console-correction:stale_read:MANUAL:tmpl-v1$/);
+  assert.match(result.candidate.summary, /Console wording correction candidate \(2 observation/);
+  assert.match(result.candidate.summary, /issues\/21/);
+  assert.match(result.candidate.summary, /issues\/22/);
+  assert.match(result.candidate.summary, /corrections CONFLICT/);
+  assert.match(result.candidate.summary, /fb-f \(.*no matching native capture receipt/);
+  assert.doesNotMatch(result.candidate.summary, /never src\//, "a correction targets a fixture or template, not the generic closed set");
+  assert.equal(result.candidate.evidenceAnchors[0]?.path, "src/lib/console-feedback.ts");
+
+  // Only unverified evidence: nothing is synthesized, and the source is not reported empty.
+  const onlyForged = buildFeedbackDocket({ ...emptyInputs(), consoleCorrections: [forged] });
+  assert.equal(onlyForged.items.length, 0);
+  assert.equal(onlyForged.emptySources.includes("console_correction"), false);
+  assert.deepEqual(synthesizeFeedbackDocketProposal(onlyForged), { kind: "empty" });
+});
+
+test("runFeedbackDocketRung carries console correction metadata from feedback entries into one candidate", async () => {
+  const { runFeedbackDocketRung } = await import("../src/run-task.js");
+  const instanceRoot = tmp("rmd-fd-instance-");
+  const repo = tmp("rmd-fd-repo-");
+  try {
+    const feedbackDir = join(repo, "plan", "feedback");
+    mkdirSync(feedbackDir, { recursive: true });
+    const entries = [
+      evidence({ id: "fb-1", ts: "2026-08-04T00:00:00.000Z", issue: 31, replayCaseIds: ["stale-read"] }),
+      evidence({ id: "fb-2", ts: "2026-08-05T00:00:00.000Z", issue: 32 }),
+      evidence({ id: "fb-3", ts: "2026-08-06T00:00:00.000Z", issue: 33, forgeKey: true }),
+    ];
+    for (const e of entries) writeFileSync(join(feedbackDir, `${e.feedbackId}.yaml`), correctionEntry(e));
+    // The rung reads the versioned curated packets from the checkout it was given.
+    mkdirSync(join(repo, "test", "fixtures"), { recursive: true });
+    copyFileSync(join(REPO_ROOT, "test", "fixtures", "console-feedback-replays.json"), join(repo, "test", "fixtures", "console-feedback-replays.json"));
+    // A REJECTED entry carrying a correction is not reduced to its raw text by the rung's projection.
+    const rejected = evidence({ id: "fb-4", ts: "2026-08-06T12:00:00.000Z", issue: 34 });
+    writeFileSync(join(feedbackDir, "fb-4.yaml"), correctionEntry(rejected, "rejected"));
+
+    const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
+    const log = (step: string, extra: Record<string, unknown> = {}) => lines.push({ step, extra });
+    const outcome = runFeedbackDocketRung({ root: instanceRoot } as never, join(instanceRoot, "state", "ledger.ndjson"), "run-1", log,
+      { root: repo, now: () => new Date("2026-08-10T00:00:00.000Z") });
+    assert.equal(outcome.fired, true);
+    const published = lines.find((l) => l.step === "feedback_docket.published")!;
+    assert.equal(published.extra.console_correction_candidates, 1);
+    assert.equal(published.extra.console_correction_unverified, 1);
+    const { readFileSync } = await import("node:fs");
+    const proposals = parseProposalRegistry(readFileSync(join(instanceRoot, "state", "inbox-proposals.json"), "utf8"));
+    assert.equal(proposals.length, 1);
+    assert.match(proposals[0].summary, /Console wording correction candidate \(3 observation/, "two captured and one rejected entry share one candidate");
+    for (const issue of ["31", "32", "34"]) assert.match(proposals[0].summary, new RegExp(`issues/${issue}\\b`));
+    assert.doesNotMatch(proposals[0].summary, /issues\/33\b/, "the forged entry is not cited as evidence");
+    assert.match(proposals[0].summary, /packets: curated/, "the curated packet file is loaded by the rung");
+    assert.match(proposals[0].summary, /expected facts: last checked at 09:30 UTC; 3 hours old/);
+    assert.match(proposals[0].summary, /forbidden actions: approve; merge/);
+  } finally {
+    rmSync(instanceRoot, { recursive: true, force: true });
     rmSync(repo, { recursive: true, force: true });
   }
 });

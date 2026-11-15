@@ -7,6 +7,7 @@ import type { Clock } from "../src/lib/clock.js";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { hostIndependentPolicyEnv } from "./helpers/host-independent-policy-env.js";
 import {
   buildDaemonHealthRoute,
   createEventLoopLagMonitor,
@@ -17,7 +18,8 @@ import {
 
 // W1-T4102 — MEASURED 2026-09-23: one worker's four parallel coverage suites swapped
 // remudero-serve out and every console tab timed out. The fix is the containers' cgroups: serve's
-// memory is protected and its CPU weight is above every build daemon, and each build daemon has a
+// memory is protected and its CPU weight is at least every build daemon's (equal by default since
+// W1-T12532), and each build daemon has a
 // memory ceiling that leaves serve's reserve free. These tests run the real launchers against a
 // fake `docker` that records its argv, and a fake /proc/meminfo.
 
@@ -88,6 +90,7 @@ function recycle(hostMib: number | undefined): { args: string[]; output: string 
       encoding: "utf8",
       env: {
         ...process.env,
+        ...hostIndependentPolicyEnv(root),
         PATH: `${bin}:${process.env.PATH ?? ""}`,
         GH_TOKEN: "test-token",
         RMD_TEST_CALLS: calls,
@@ -122,6 +125,7 @@ function serveDryRun(env: Record<string, string> = {}): { status: number | null;
       encoding: "utf8",
       env: {
         ...process.env,
+        ...hostIndependentPolicyEnv(root),
         PATH: `${bin}:${process.env.PATH ?? ""}`,
         GH_TOKEN: "test-token",
         RMD_TEST_CALLS: join(root, "calls.tsv"),
@@ -141,7 +145,7 @@ function serveDryRun(env: Record<string, string> = {}): { status: number | null;
 
 const shares = (args: readonly string[]) => Number(args.find((a) => a.startsWith("--cpu-shares="))?.split("=")[1]);
 
-test("W1-T4102: serve is launched with protected memory and a higher cpu weight than the daemons", () => {
+test("W1-T4102, W1-T12532 criterion 2: serve is launched with protected memory and at least the daemons' cpu weight", () => {
   const serve = serveDryRun();
   assert.equal(serve.status, 0, serve.out);
   const line = serve.out.split("\n").find((l) => l.includes("docker run -d --name remudero-serve")) ?? "";
@@ -152,7 +156,15 @@ test("W1-T4102: serve is launched with protected memory and a higher cpu weight 
   assert.ok(!serveArgs.some((a) => a.startsWith("--memory-reservation")), `no ineffective memory.low: ${line}`);
   assert.ok(serveArgs.some((a) => a.startsWith("--annotation=org.systemd.property.MemoryHigh=")), `serve's share is its memory.high: ${line}`);
   const build = recycle(HOST_MIB).args;
-  assert.ok(shares(serveArgs) > shares(build), `serve ${shares(serveArgs)} must outweigh a build daemon ${shares(build)}`);
+  assert.ok(shares(serveArgs) >= shares(build), `serve ${shares(serveArgs)} is never below a build daemon ${shares(build)}`);
+  assert.equal(shares(serveArgs), shares(build), "by default serve's weight equals a build daemon's");
+  assert.equal(shares(serveArgs), 512);
+});
+
+test("W1-T12532 criterion 3: an operator-set RMD_SERVE_CPU_SHARES still sets serve's --cpu-shares", () => {
+  const { args, out } = serveRunArgs({ RMD_SERVE_CPU_SHARES: "4096" });
+  assert.equal(shares(args), 4096, `the operator's value reaches docker run: ${args.join(" ")}`);
+  assert.match(out, /resource policy — serve: cpu-shares 4096,/);
 });
 
 function serveRunArgs(env: Record<string, string> = {}): { args: string[]; out: string } {
@@ -174,7 +186,7 @@ test("serve is launched with a memory ceiling that bounds a leak and leaves room
   const { args, out } = serveRunArgs();
   assert.ok(args.includes(`--memory=${SERVE_SHARE_MIB}m`), `serve's share of the shared host budget (W1-T11130): ${args.join(" ")}`);
   assert.ok(args.some((a) => a.startsWith("--memory-swap=")), "room to swap before the kernel kills anything");
-  assert.ok(!args.some((a) => a.startsWith("--cpus=")), "no CPU quota by default — the weight already wins contention");
+  assert.ok(!args.some((a) => a.startsWith("--cpus=")), "no CPU quota by default — serve competes by weight only");
   assert.match(out, new RegExp(`memory ceiling ${SERVE_SHARE_MIB} MiB \\(\\+\\d+ MiB swap\\) from memory\\.max ${SERVE_SHARE_MIB} MiB = shared budget`));
 });
 
@@ -191,7 +203,7 @@ test("operator ruling 2026-10-19: serve runs the semi-space flag and the glibc m
   const env = args.flatMap((a, i) => (args[i - 1] === "-e" ? [a] : []));
   assert.deepEqual(env.filter((e) => e.startsWith("NODE_OPTIONS=")), ["NODE_OPTIONS=--max-semi-space-size=16"]);
   assert.deepEqual(env.filter((e) => e.startsWith("GLIBC_TUNABLES=")), ["GLIBC_TUNABLES=glibc.malloc.arena_max=2:glibc.malloc.trim_threshold=131072"]);
-  assert.match(out, /resource policy — serve: cpu-shares 4096, no memory\.low, NODE_OPTIONS --max-semi-space-size=16, GLIBC_TUNABLES glibc\.malloc\.arena_max=2/);
+  assert.match(out, /resource policy — serve: cpu-shares 512, no memory\.low, NODE_OPTIONS --max-semi-space-size=16, GLIBC_TUNABLES glibc\.malloc\.arena_max=2/);
 });
 
 test("operator ruling 2026-10-19: the policy merges its semi-space flag into any NODE_OPTIONS exactly once", () => {
@@ -215,8 +227,8 @@ test("operator ruling 2026-10-19: the rollback lever — emptied ruled values ad
   ].join("\n"), "p", join(REPO_ROOT, "deploy", "resource-policy.sh")], { encoding: "utf8", env: { ...process.env, RMD_MEMINFO_PATH: "/nonexistent" } });
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stdout, /^merge=\[--max-old-space-size=8192\]$/m, "the heap ceiling alone, no trailing space");
-  assert.match(r.stdout, /^serve=--cpu-shares=4096 --memory=7680m --memory-swap=9728m$/m, "no -e at all");
-  assert.match(r.stdout, /^note=serve: cpu-shares 4096, no memory\.low, NODE_OPTIONS none, GLIBC_TUNABLES none/m);
+  assert.match(r.stdout, /^serve=--cpu-shares=512 --memory=7680m --memory-swap=9728m$/m, "no -e at all");
+  assert.match(r.stdout, /^note=serve: cpu-shares 512, no memory\.low, NODE_OPTIONS none, GLIBC_TUNABLES none/m);
   assert.match(r.stdout, /^build=--cpu-shares=512$/m);
 });
 

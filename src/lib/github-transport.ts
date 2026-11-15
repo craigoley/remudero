@@ -8,14 +8,18 @@ import {
   writeFileSync,
 } from "node:fs";
 import { hostname, tmpdir } from "node:os";
-import { basename, dirname, isAbsolute, join, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, sep } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
+import { fileURLToPath } from "node:url";
+import { workerData } from "node:worker_threads";
 
 import { clockFromMillisFn, loopAvailableDeadline, systemClock } from "./clock.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
 import { RmdError } from "./errors.js";
 import { brokerGhRead, ghBrokerClientSpawn, ghBrokerRouteFor, type GhBrokerClass, type GhBrokerResult } from "./gh-read-broker-client.js";
 import { refreshInstallationToken } from "./github-app.js";
+import { createInstallationBudget, type InstallationBudget, type GithubBudgetThrottledRow } from "./github-installation-budget.js";
+import { ghArgvNeedsNoCredential, githubRepoOfGhArgv, resolveGithubCredential } from "./github-credential.js";
 import { sameHost } from "./host-identity.js";
 import { LIVE_WRITE_SENTINEL_TOKEN, LiveWriteBlockedError } from "./live-write-guard.js";
 
@@ -146,6 +150,30 @@ export function refuseSentinelGhToken(file: string, args: readonly string[], env
   );
 }
 
+/**
+ * W1-T11926: the environment for one `gh` child, with the credential the resolver picked. Every spawn
+ * of `gh` in this module calls this, so no call bypasses the resolver. It returns `env` itself when
+ * the ambient token or gh's stored login answers. A process that carries the test-runner token is
+ * left alone, and so is a file that is not `gh`. A call with no credential throws before it spawns,
+ * unless it needs none or `gh` is a test's own stub.
+ */
+function ghCredentialEnv(file: string, args: readonly string[], env: NodeJS.ProcessEnv | undefined): NodeJS.ProcessEnv | undefined {
+  const base = env ?? process.env;
+  if (basename(file) !== "gh" || base.GH_TOKEN === LIVE_WRITE_SENTINEL_TOKEN || base.GITHUB_TOKEN === LIVE_WRITE_SENTINEL_TOKEN) return env;
+  return resolveGithubCredential({
+    env: base,
+    repo: githubRepoOfGhArgv(args),
+    operation: `gh ${args.slice(0, 2).join(" ")}`,
+    mayRunWithout: () => ghArgvNeedsNoCredential(args) || resolvesToTmpdirStub(file, base),
+  }).childEnv(env);
+}
+
+/** `opts` with the child's credential environment. It is `opts` itself when nothing changes. */
+function withGhCredentialEnv<T extends { env?: NodeJS.ProcessEnv }>(file: string, args: readonly string[], opts: T): T {
+  const env = ghCredentialEnv(file, args, opts.env);
+  return env === opts.env ? opts : { ...opts, env };
+}
+
 // W1-T10279: a live Mac broker paces reads from GitHub headers instead of the 180 s floor.
 // Writes and budget probes stay direct; without a broker, reads retain the floor.
 
@@ -153,7 +181,14 @@ export function refuseSentinelGhToken(file: string, args: readonly string[], env
  * This module owns every `gh` spawn (gh-transport census). */
 export function ghRunForBroker(args: string[], opts: { cwd?: string; maxBuffer: number }): Promise<{ stdout: string; stderr: string; exitCode: number }> {
   return new Promise((resolve) => {
-    execFile("gh", args, { cwd: opts.cwd, encoding: "utf8", maxBuffer: opts.maxBuffer, timeout: DEFAULT_GH_CALL_TIMEOUT_MS }, (err, stdout, stderr) => {
+    let env: NodeJS.ProcessEnv | undefined;
+    try {
+      env = ghCredentialEnv("gh", args, undefined);
+    } catch (err) {
+      // W1-T11926: the broker's caller reads a failed call from stderr, so the named sources go there.
+      return resolve({ stdout: "", stderr: (err as Error).message, exitCode: 1 });
+    }
+    execFile("gh", args, { cwd: opts.cwd, encoding: "utf8", maxBuffer: opts.maxBuffer, timeout: DEFAULT_GH_CALL_TIMEOUT_MS, env }, (err, stdout, stderr) => {
       const code = (err as { code?: unknown } | null)?.code;
       resolve({ stdout: String(stdout ?? ""), stderr: String(stderr ?? ""), exitCode: err ? (typeof code === "number" ? code : 1) : 0 });
     });
@@ -200,19 +235,39 @@ async function ghBrokeredAsync(args: readonly string[], readOpts: GhJsonReadOpti
 export function ghExec(args: string[], opts: ExecFileSyncOptionsWithStringEncoding): string;
 export function ghExec(args: string[], opts?: ExecFileSyncOptions): Buffer;
 export function ghExec(args: string[], opts: ExecFileSyncOptions = {}): string | Buffer {
+  admitInstallationReadSync(args);
   // W1-T10279: with a live broker the same one spawn runs the broker client in place of `gh`, unfloored.
   const socket = ghBrokerSocketFor(args, opts.env, typeof opts.cwd === "string" ? opts.cwd : undefined);
   // W1-T3297: otherwise this overload spawns the real `gh`, so the cadence floor applies.
   if (socket === undefined) applyGhReadCadence(args);
   const spawned = socket === undefined ? { file: "gh", args } : ghBrokerClientSpawn(socket, args, ghBrokerClassOf(opts.env));
-  return ghExecFile(spawned.file, spawned.args, opts) as string | Buffer;
+  refuseSentinelGhToken(spawned.file, spawned.args, opts.env);
+  try {
+    const out = execFileSync(spawned.file, spawned.args,
+      ghOptionsWithDefaultTimeout(withGhCredentialEnv(spawned.file, spawned.args, opts))) as string | Buffer;
+    if (args[0] === "api" && args.includes("-i")) {
+      githubInstallationBudget().record(parseGhRateLimitHeaders(splitGhHeaderBlock(String(out), args.includes("--slurp")).headers));
+    }
+    return out;
+  } catch (err) { noteInstallationRefusal(err); throw err; }
 }
 
 export function ghExecFile(file: string, args: string[], opts: ExecFileSyncOptionsWithStringEncoding): string;
 export function ghExecFile(file: string, args: string[], opts?: ExecFileSyncOptions): Buffer;
 export function ghExecFile(file: string, args: string[], opts: ExecFileSyncOptions = {}): string | Buffer {
+  if (basename(file) === "gh") admitInstallationReadSync(args);
+  const isGh = basename(file) === "gh";
   refuseSentinelGhToken(file, args, opts.env);
-  return execFileSync(file, args, ghOptionsWithDefaultTimeout(opts)) as string | Buffer;
+  try {
+    const out = execFileSync(file, args, ghOptionsWithDefaultTimeout(withGhCredentialEnv(file, args, opts))) as string | Buffer;
+    if (isGh && args[0] === "api" && args.includes("-i")) {
+      githubInstallationBudget().record(parseGhRateLimitHeaders(splitGhHeaderBlock(String(out), args.includes("--slurp")).headers));
+    }
+    return out;
+  } catch (err) {
+    if (isGh) noteInstallationRefusal(err);
+    throw err;
+  }
 }
 
 export function ghJson(
@@ -221,12 +276,13 @@ export function ghJson(
   exec: (
     file: string,
     execArgs: string[],
-    opts: { encoding: "utf8"; maxBuffer: number; timeout: number; killSignal?: NodeJS.Signals | number },
+    opts: { encoding: "utf8"; maxBuffer: number; timeout: number; killSignal?: NodeJS.Signals | number; env?: NodeJS.ProcessEnv },
   ) => string = execFileSync,
 ): unknown {
   // W1-T3297: injected exec reaches no network and must not spend a shared window.
   const isApiCall = args[0] === "api";
-  const execArgs = isApiCall ? [...args, "-i"] : args;
+  const execArgs = isApiCall && !args.includes("-i") ? [...args, "-i"] : args;
+  admitInstallationReadSync(args);
   let spawned = { file: "gh", args: execArgs };
   if (exec === execFileSync) {
     refuseSentinelGhToken("gh", args, undefined);
@@ -234,15 +290,21 @@ export function ghJson(
     if (socket === undefined) applyGhReadCadence(args);
     else spawned = ghBrokerClientSpawn(socket, execArgs, ghBrokerClassOf(undefined));
   }
-  const out = exec(spawned.file, spawned.args, {
-    encoding: "utf8",
-    maxBuffer: DEFAULT_GH_MAX_BUFFER,
-    timeout: DEFAULT_GH_CALL_TIMEOUT_MS,
-    killSignal: DEFAULT_GH_SYNC_KILL_SIGNAL,
-  });
+  const execOpts: { encoding: "utf8"; maxBuffer: number; timeout: number; killSignal: NodeJS.Signals; env?: NodeJS.ProcessEnv } =
+    { encoding: "utf8", maxBuffer: DEFAULT_GH_MAX_BUFFER, timeout: DEFAULT_GH_CALL_TIMEOUT_MS, killSignal: DEFAULT_GH_SYNC_KILL_SIGNAL };
+  // W1-T11926: only the real spawn takes a credential. An injected exec reaches no network.
+  let out: string;
+  try {
+    out = exec(spawned.file, spawned.args, exec === execFileSync ? withGhCredentialEnv(spawned.file, spawned.args, execOpts) : execOpts);
+  } catch (err) {
+    noteInstallationRefusal(err);
+    throw err;
+  }
   if (!isApiCall) return parseGhJsonBody(args, out);
   const { headers, body } = splitGhHeaderBlock(out, args.includes("--slurp"));
-  if (onRateLimit) onRateLimit(parseGhRateLimitHeaders(headers));
+  const reading = parseGhRateLimitHeaders(headers);
+  githubInstallationBudget().record(reading);
+  if (onRateLimit) onRateLimit(reading);
   return parseGhJsonBody(args, body);
 }
 
@@ -252,7 +314,7 @@ const execFileAsync = (
   file: string,
   args: readonly string[],
   opts: { encoding: BufferEncoding; maxBuffer: number; timeout: number; env?: NodeJS.ProcessEnv },
-): Promise<{ stdout: string; stderr: string }> => execFileLoopBounded(file, args, opts);
+): Promise<{ stdout: string; stderr: string }> => execFileLoopBounded(file, args, withGhCredentialEnv(file, args, opts));
 
 export type GhAsyncExecutor = typeof execFileAsync;
 
@@ -358,12 +420,14 @@ export async function ghJsonAsync(
   onRateLimit?: (reading: GhRateLimitReading) => void,
   readOpts: GhJsonReadOptions = {},
 ): Promise<unknown> {
-  const withHeaders = onRateLimit !== undefined && args[0] === "api";
-  const execArgs = withHeaders ? [...args, "-i"] : args;
+  const withHeaders = args[0] === "api" && (onRateLimit !== undefined || githubInstallationBudget().consumers !== undefined || args.includes("-i"));
+  const execArgs = withHeaders && !args.includes("-i") ? [...args, "-i"] : args;
   const stdout = await ghStdoutAsync(args, execArgs, execAsync, readOpts);
   if (!withHeaders) return parseGhJsonBody(args, stdout);
   const { headers, body } = splitGhHeaderBlock(stdout, args.includes("--slurp"));
-  onRateLimit(parseGhRateLimitHeaders(headers));
+  const reading = parseGhRateLimitHeaders(headers);
+  githubInstallationBudget().record(reading);
+  onRateLimit?.(reading);
   return parseGhJsonBody(args, body);
 }
 
@@ -378,18 +442,22 @@ async function ghStdoutAsync(args: string[], execArgs: string[], execAsync: type
     DEFAULT_GH_CALL_TIMEOUT_MS,
   )).stdout;
   // Only real transport coalesces; injected executors may have independent side effects.
-  if (execAsync !== execFileAsync) return run();
+  if (execAsync !== execFileAsync) {
+    await admitInstallationReadAsync(args);
+    try { return await run(); } catch (err) { noteInstallationRefusal(err); throw err; }
+  }
   const key = ghArgsAreCoalescibleRead(args) ? `${readOpts.fresh === true ? "fresh:" : ""}${JSON.stringify(execArgs)}` : undefined;
   const existing = key === undefined ? undefined : asyncReadInFlight.get(key) as Promise<string> | undefined;
   if (existing) return existing;
   const request = (async (): Promise<string> => {
+    await admitInstallationReadAsync(args);
     // Async CI/review polls must share ghJson/ghExec's floor to prevent rapid read bursts.
     refuseSentinelGhToken("gh", args, undefined);
     const brokered = await ghBrokeredAsync(execArgs, readOpts);
     if (brokered !== undefined) return brokered;
     await applyGhReadCadenceAsync(args);
     return run();
-  })();
+  })().catch((err: unknown) => { noteInstallationRefusal(err); throw err; });
   if (key === undefined) return request;
   asyncReadInFlight.set(key, request);
   try {
@@ -416,20 +484,30 @@ export async function ghTextAsync(
     const { stdout } = await withGhKillEscalation(execAsync("gh", args, execOpts), args, timeout);
     return stdout;
   };
+  const rememberHeaders = (stdout: string): string => {
+    if (args[0] === "api" && args.includes("-i")) {
+      githubInstallationBudget().record(parseGhRateLimitHeaders(splitGhHeaderBlock(stdout, args.includes("--slurp")).headers));
+    }
+    return stdout;
+  };
 
   // An injected executor is an offline seam; only the real `gh` process spends cadence and joins
   // same-request reads. Prefix the key so a concurrent JSON reader can never receive raw text.
-  if (execAsync !== execFileAsync) return read();
+  if (execAsync !== execFileAsync) {
+    await admitInstallationReadAsync(args);
+    try { return rememberHeaders(await read()); } catch (err) { noteInstallationRefusal(err); throw err; }
+  }
   const key = env === undefined && ghArgsAreCoalescibleRead(args) ? `text:${opts.fresh === true ? "fresh:" : ""}${JSON.stringify(args)}:${maxBuffer}:${timeout}` : undefined;
   const existing = key === undefined ? undefined : asyncReadInFlight.get(key) as Promise<string> | undefined;
   if (existing) return existing;
   const request = (async (): Promise<string> => {
+    await admitInstallationReadAsync(args);
     refuseSentinelGhToken("gh", args, env);
     const brokered = await ghBrokeredAsync(args, opts, env);
-    if (brokered !== undefined) return brokered;
+    if (brokered !== undefined) return rememberHeaders(brokered);
     await applyGhReadCadenceAsync(args);
-    return read();
-  })();
+    return rememberHeaders(await read());
+  })().catch((err: unknown) => { noteInstallationRefusal(err); throw err; });
   if (key === undefined) return request;
   asyncReadInFlight.set(key, request);
   try {
@@ -452,6 +530,7 @@ export async function ghLinesAsync(
   opts: { timeout?: number } = {},
 ): Promise<void> {
   const timeout = opts.timeout ?? DEFAULT_GH_CALL_TIMEOUT_MS;
+  await admitInstallationReadAsync(args);
   refuseSentinelGhToken("gh", args, undefined);
   const brokered = await ghBrokeredAsync(args);
   if (brokered !== undefined) {
@@ -460,7 +539,7 @@ export async function ghLinesAsync(
     return;
   }
   await applyGhReadCadenceAsync(args);
-  const child = spawn("gh", args, { stdio: ["ignore", "pipe", "pipe"] });
+  const child = spawn("gh", args, { stdio: ["ignore", "pipe", "pipe"], env: ghCredentialEnv("gh", args, undefined) });
   // Not spawn's own `timeout`: a child that never started never exits, and that timer then holds the process open.
   // W1-T9651: bounded by loop-available time, so a held loop never kills a log that already finished.
   const bound = boundChildByLoopTime(child, timeout);
@@ -499,7 +578,8 @@ export async function ghLinesAsync(
     });
   }) as Promise<{ stdout: string; stderr: string }> & { child?: typeof child };
   read.child = child;
-  await withGhKillEscalation(read, args, timeout);
+  try { await withGhKillEscalation(read, args, timeout); }
+  catch (err) { noteInstallationRefusal(err); throw err; }
 }
 
 export const DEFAULT_GH_PACE_MIN_GAP_MS = 1_500;
@@ -531,6 +611,69 @@ export class GhPaceFloorStandDownError extends Error {
   }
 }
 
+let processInstallationBudget: InstallationBudget | undefined;
+
+function workerInstallationBudget(): InstallationBudget | undefined {
+  const config = (workerData as { input?: { githubInstallationBudget?: {
+    state: SharedArrayBuffer; consumers: number; instance: string;
+  } } } | undefined)?.input?.githubInstallationBudget;
+  if (config?.state === undefined) return undefined;
+  return createInstallationBudget({
+    consumers: config.consumers, instance: config.instance, clock: systemClock, sharedState: config.state,
+  });
+}
+
+/** W1-T12553: the one installation budget every pacer in this process reads. */
+export function githubInstallationBudget(): InstallationBudget {
+  return processInstallationBudget ??= workerInstallationBudget() ?? createInstallationBudget({ consumers: undefined, clock: systemClock });
+}
+
+export function configureGithubInstallationBudget(budget: InstallationBudget | undefined): void {
+  processInstallationBudget = budget ?? createInstallationBudget({ consumers: undefined, clock: systemClock });
+}
+
+/** The daemon drains rows that either its own thread or its read worker recorded. */
+export function takeGithubBudgetThrottles(): GithubBudgetThrottledRow[] {
+  return githubInstallationBudget().takeThrottleRows();
+}
+
+function installationCoreRead(args: readonly string[]): boolean {
+  return !ghArgvIsWrite(args) && !ghArgvIsCadenceExempt(args) && ghArgvBucketHint(args) === undefined &&
+    (args[0] !== "api" || parseGhApiArgv(args).endpoint !== "graphql");
+}
+
+function admitInstallationReadSync(args: readonly string[]): void {
+  if (!installationCoreRead(args)) return;
+  const budget = githubInstallationBudget();
+  const admitted = budget.claimRead();
+  if (!admitted.ok) {
+    budget.noteThrottle(admitted.reason);
+    throw new GhPaceFloorStandDownError(admitted.reading);
+  }
+}
+
+async function admitInstallationReadAsync(args: readonly string[]): Promise<void> {
+  if (!installationCoreRead(args)) return;
+  const budget = githubInstallationBudget();
+  for (;;) {
+    const admitted = budget.claimRead();
+    if (admitted.ok) return;
+    budget.noteThrottle(admitted.reason);
+    await defaultTimerSleep(Math.max(1, admitted.waitUntil * 1000 - systemClock.now()));
+  }
+}
+
+function noteInstallationRefusal(err: unknown): void {
+  const failure = err as { stdout?: string | Buffer; stderr?: string | Buffer } | null | undefined;
+  if (failure?.stdout !== undefined) {
+    const stdout = String(failure.stdout);
+    githubInstallationBudget().record(parseGhRateLimitHeaders(splitGhHeaderBlock(stdout, stdout.startsWith("[")).headers));
+  }
+  // The transport cannot import status.ts without a dependency cycle; match its primary-limit signal.
+  const text = failure?.stderr === undefined ? (err instanceof Error ? err.message : String(err)) : String(failure.stderr);
+  if (/rate limit|quota/i.test(text)) githubInstallationBudget().noteThrottle("refused");
+}
+
 export interface GhCallPacer {
   wait(): void;
   recordResult(rateLimited: boolean, budget?: GhBudgetReading): void;
@@ -557,7 +700,10 @@ export function createGhCallPacer(
   const lowWaterFraction = opts.lowWaterFraction ?? DEFAULT_GH_PACE_LOW_WATER_FRACTION;
   const floorFraction = opts.floorFraction ?? DEFAULT_GH_PACE_FLOOR_FRACTION;
   const now = opts.now ?? systemClock.now;
-  const sleepSync = loopSafeGhSleep(opts.sleepSync ?? defaultBlockingSleepSync);
+  const blockingSleep = opts.sleepSync ?? defaultBlockingSleepSync;
+  const sleepSync = loopSafeGhSleep(blockingSleep);
+  // W1-T12057: only the gap wait may sleep on the daemon loop, and only up to this pacer's normal gap.
+  const gapSleepSync = loopSafeGhSleep(blockingSleep, minGapMs);
   const sleep = opts.sleep ?? defaultTimerSleep;
   let lastCallAt: number | undefined;
   let gapMs = minGapMs;
@@ -571,20 +717,33 @@ export function createGhCallPacer(
   return {
     wait() {
       takeStandDown();
+      const budget = githubInstallationBudget();
+      const admit = budget.admit();
+      if (!admit.ok) {
+        budget.noteThrottle(admit.reason);
+        throw new GhPaceFloorStandDownError(admit.reading);
+      }
       if (lastCallAt !== undefined) {
         const remaining = gapMs - (now() - lastCallAt);
-        if (remaining > 0) sleepSync(remaining);
+        if (remaining > 0) gapSleepSync(remaining);
       }
       lastCallAt = now();
     },
     async waitAsync() {
       takeStandDown();
+      const budget = githubInstallationBudget();
+      const admit = budget.admit();
+      if (!admit.ok) {
+        budget.noteThrottle(admit.reason);
+        await sleep(Math.max(0, admit.waitUntil * 1000 - now()));
+      }
       const remaining = lastCallAt === undefined ? 0 : gapMs - (now() - lastCallAt);
       // The slot is claimed before the timer, so a second waiter queues behind it rather than beside it.
       lastCallAt = now() + Math.max(0, remaining);
       if (remaining > 0) await sleep(remaining);
     },
     recordResult(rateLimited, budget) {
+      if (rateLimited) githubInstallationBudget().noteThrottle("refused");
       const lowWater = budget !== undefined && budget.limit > 0 && budget.remaining <= budget.limit * lowWaterFraction;
       gapMs = rateLimited || lowWater ? rateLimitGapMs : minGapMs;
       standDown = budget !== undefined && budget.limit > 0 && budget.remaining <= budget.limit * floorFraction ? budget : undefined;
@@ -628,10 +787,50 @@ export function withSynchronousGhDelivery<T>(fn: () => T): T {
   return ghLoopHost.run(false, fn);
 }
 
-function loopSafeGhSleep(sleep: (ms: number) => void): (ms: number) => void {
+export const GH_PACE_LOOP_WAIT_STEP = "github.pace.loop_wait";
+
+export interface GhPaceLoopWaitRow {
+  step: typeof GH_PACE_LOOP_WAIT_STEP;
+  wait_ms: number;
+  /** The first stack frame outside this file, as `file:line` relative to the repository. */
+  call_site: string;
+  /** W1-T12123: set when the read went ahead without the cadence lock, with the reason. */
+  lock?: "own-async-read";
+}
+
+const ghPaceLoopWaits: GhPaceLoopWaitRow[] = [];
+
+/** W1-T12057: one row for each wait slept on the daemon loop since the previous call, then reset.
+ *  This module cannot import the ledger, so the daemon drains these rows every tick and appends them.
+ *  Rows are kept only inside the daemon's loop scope, so a process that never drains never holds any. */
+export function takeGhPaceLoopWaits(): GhPaceLoopWaitRow[] {
+  return ghPaceLoopWaits.splice(0);
+}
+
+const GH_TRANSPORT_FILE = fileURLToPath(import.meta.url);
+
+function ghCallSiteOutsideTransport(): string {
+  const limit = Error.stackTraceLimit;
+  Error.stackTraceLimit = Infinity;
+  const stack = new Error().stack ?? "";
+  Error.stackTraceLimit = limit;
+  for (const line of stack.split("\n")) {
+    const frame = /((?:file:\/\/)?\/[^\s()]+):(\d+):\d+\)?$/.exec(line);
+    if (!frame) continue;
+    const file = frame[1].startsWith("file://") ? fileURLToPath(frame[1]) : frame[1];
+    if (file !== GH_TRANSPORT_FILE) return `${relative(join(dirname(GH_TRANSPORT_FILE), "..", ".."), file)}:${frame[2]}`;
+  }
+  return "unknown";
+}
+
+/** W1-T12057: on the daemon loop a wait of at most `normalGapMs` is slept and leaves one row, because
+ *  the gh call that follows blocks the loop for longer. A longer wait, or any wait with no gap given, throws. */
+function loopSafeGhSleep(sleep: (ms: number) => void, normalGapMs?: number): (ms: number) => void {
   return (ms) => {
-    if (ms > 0 && ghLoopHost.getStore() === true) throw new GhPaceWouldBlockError(ms);
+    const onLoop = ms > 0 && ghLoopHost.getStore() === true;
+    if (onLoop && (normalGapMs === undefined || ms > normalGapMs)) throw new GhPaceWouldBlockError(ms);
     sleep(ms);
+    if (onLoop) ghPaceLoopWaits.push({ step: GH_PACE_LOOP_WAIT_STEP, wait_ms: ms, call_site: ghCallSiteOutsideTransport() });
   };
 }
 
@@ -1416,6 +1615,8 @@ function withGhCadenceLock<T>(stampPath: string, sleepSync: (ms: number) => void
  *  this in-process queue for its whole wait, so the process's reads keep their order, while it holds
  *  the cross-process FILE lock only for each short turn. */
 const ghCadenceAsyncQueue = new Map<string, Promise<void>>();
+/** W1-T12123: the stamps whose file lock this process's own async read holds right now. */
+const ghCadenceOwnAsyncLocks = new Set<string>();
 
 async function withGhCadenceQueueAsync<T>(stampPath: string, fn: () => Promise<T>): Promise<T> {
   const prior = ghCadenceAsyncQueue.get(stampPath) ?? Promise.resolve();
@@ -1444,6 +1645,7 @@ async function withGhCadenceLockAsync<T>(stampPath: string, sleep: (ms: number) 
       for (let step = tryGhCadenceLock(lockPath, startedAt); step !== "give-up"; step = tryGhCadenceLock(lockPath, startedAt)) {
         if (step === "locked") {
           locked = true;
+          ghCadenceOwnAsyncLocks.add(stampPath);
           break;
         }
         if (step === "wait") await sleep(GH_CADENCE_LOCK_WAIT_MS);
@@ -1453,6 +1655,7 @@ async function withGhCadenceLockAsync<T>(stampPath: string, sleep: (ms: number) 
     }
     return await fn();
   } finally {
+    if (locked) ghCadenceOwnAsyncLocks.delete(stampPath);
     releaseGhCadenceLock(lockPath, locked);
   }
 }
@@ -1476,6 +1679,8 @@ interface GhReadCadencePlan {
   /** `undefined`: writes, budget probes, and calls without a usable cache path need no shared
    *  coordination, so no lock, gap or stamp. */
   coordinatedStampPath: string | undefined;
+  /** The longest shared-gap wait this read can be given. */
+  sharedReadGapMs: number;
   sharedGapRemainingMs(stampPath: string): number;
   stampAfterGap(stampPath: string): void;
   /** Removes this read's ticket: an admitted, refused or interrupted waiter never holds the queue. */
@@ -1633,6 +1838,7 @@ function planGhReadCadence(args: readonly string[], deps: GhReadCadenceDeps): Gh
     floorWaitRemainingMs: () => (waiter ? floorRemainingAt(now()) : 0),
     mustWait: () => waiter,
     coordinatedStampPath: isWrite || isExempt ? undefined : stampPath,
+    sharedReadGapMs,
     sharedGapRemainingMs: (path) => {
       // The 180-second floor is intentionally advisory for daemon multi-read sweeps. A bounded
       // shared gap still protects the secondary limiter across sibling processes without making a
@@ -1715,17 +1921,28 @@ export function applyGhReadCadence(args: readonly string[], deps: GhReadCadenceD
     plan.stampAfterGap(stampPath);
     return decision;
   }
-  const sleepSync = loopSafeGhSleep(deps.sleepSync ?? defaultBlockingSleepSync);
+  const blockingSleep = deps.sleepSync ?? defaultBlockingSleepSync;
+  // W1-T12123: on the daemon loop a wait of at most the shared read gap is slept. A longer wait is refused.
+  const sleepSync = loopSafeGhSleep(blockingSleep, plan.sharedReadGapMs);
+  // W1-T12057: a lock wait may sleep on the daemon loop, because tryGhCadenceLock already bounds the total.
+  const lockSleepSync = loopSafeGhSleep(blockingSleep, GH_CADENCE_LOCK_MAX_WAIT_MS);
+  // W1-T12123: this process's own async read holds the lock and needs the loop to release it.
+  // The loop read does not wait for that lock. It takes its turn without it, as a give-up does.
+  const ownAsyncLock = ghLoopHost.getStore() === true && ghCadenceOwnAsyncLocks.has(stampPath);
   let decision: GhReadCadenceDecision | undefined;
+  const turn = (): number => {
+    decision ??= plan.evaluate();
+    return ghReadCadenceTurn(plan, stampPath, sleepSync);
+  };
   try {
     let waitMs: number;
     do {
-      waitMs = withGhCadenceLock(stampPath, sleepSync, () => {
-        decision ??= plan.evaluate();
-        return ghReadCadenceTurn(plan, stampPath, sleepSync);
-      });
+      waitMs = ownAsyncLock ? turn() : withGhCadenceLock(stampPath, lockSleepSync, turn);
       if (waitMs > 0) sleepSync(waitMs);
     } while (waitMs > 0);
+    if (ownAsyncLock) {
+      ghPaceLoopWaits.push({ step: GH_PACE_LOOP_WAIT_STEP, wait_ms: 0, call_site: ghCallSiteOutsideTransport(), lock: "own-async-read" });
+    }
     return decision!;
   } finally {
     plan.leaveQueue();

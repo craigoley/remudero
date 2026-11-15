@@ -132,7 +132,7 @@ export function feedbackHasAnswer(entry: FeedbackEntry, entries: readonly Feedba
 
 export function feedbackQuestionContext(entry: FeedbackEntry): string {
   const summary = entry.summary;
-  return [typeof entry.raw === "string" ? entry.raw : "", ...(summary ? [summary.headline, summary.what_happened, summary.decision, ...summary.options.map((o) => `${o.label}: ${o.consequence}`)] : [])].filter(Boolean).join("\n\n");
+  return [typeof entry.raw === "string" ? entry.raw : "", ...(typeof summary === "string" ? [summary] : summary ? [summary.headline, summary.what_happened, summary.decision, ...summary.options.map((o) => `${o.label}: ${o.consequence}`)] : [])].filter(Boolean).join("\n\n");
 }
 
 export interface FeedbackGateSource extends HumanGateSource {

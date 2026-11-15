@@ -36,10 +36,15 @@
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
+import {
+  consoleCorrectionCandidates, consoleCorrectionReferent, renderConsoleCorrectionCandidate, verifyCaptureReceipt,
+  type ConsoleCorrectionProjection, type CorrectionEvidence, type ReplayPacket,
+} from "./console-feedback.js";
 
-// ── The five capture surfaces ────────────────────────────────────────────────────────────────
+// ── The six capture surfaces ────────────────────────────────────────────────────────────────
 
-export type DocketSource = "reframe" | "operator_feedback" | "rejected_feedback" | "question_answer" | "operator_note";
+export type DocketSource =
+  | "reframe" | "operator_feedback" | "rejected_feedback" | "question_answer" | "operator_note" | "console_correction";
 
 export const DOCKET_SOURCES: readonly DocketSource[] = [
   "reframe",
@@ -47,6 +52,7 @@ export const DOCKET_SOURCES: readonly DocketSource[] = [
   "rejected_feedback",
   "question_answer",
   "operator_note",
+  "console_correction",
 ];
 
 /** One human-feedback item, normalized to the same shape regardless of which surface produced
@@ -57,6 +63,9 @@ export interface DocketItem {
   ts: string;
   verbatim: string;
   referent: string;
+  /** W1-T11104: the explicit console correction this item carries, when it has one. Metadata is
+   *  carried, never reduced to the raw text it came with. */
+  correction?: CorrectionEvidence;
 }
 
 export interface FeedbackDocketWindow {
@@ -71,8 +80,12 @@ export interface FeedbackDocket {
   /** Every windowed item across all five surfaces, oldest first. */
   items: DocketItem[];
   countsBySource: Record<DocketSource, number>;
-  /** Sources with ZERO items in this window — named, not silently omitted (design i). */
+  /** Sources with ZERO items in this window — named, not silently omitted (design i). A source
+   *  holding only UNVERIFIED evidence is not named here: unverified is not empty. */
   emptySources: DocketSource[];
+  /** W1-T11104: deduplicated replay candidates projected from verified console corrections, plus
+   *  the evidence that lacked a matching native capture receipt. */
+  consoleCorrection: ConsoleCorrectionProjection;
 }
 
 /** Already-read, unnormalized records for each surface — the caller (run-task.ts's rung) does
@@ -81,7 +94,11 @@ export interface FeedbackDocket {
  *  same append-only ledger (`lib/ledger.ts`). */
 export interface RawFeedbackDocketInputs {
   ledgerLines: ReadonlyArray<Record<string, unknown>>;
-  rejectedFeedback: ReadonlyArray<{ id: string; ts: string; raw: string }>;
+  rejectedFeedback: ReadonlyArray<{ id: string; ts: string; raw: string; correction?: CorrectionEvidence }>;
+  /** W1-T11104: captured, not-rejected feedback entries that carry an explicit console correction. */
+  consoleCorrections?: ReadonlyArray<CorrectionEvidence>;
+  /** Curated replay packets, when the caller could load them; absent is reported as unverified. */
+  replayPackets?: ReadonlyArray<ReplayPacket>;
   questionLines: ReadonlyArray<Record<string, unknown>>;
   operatorNotes: ReadonlyArray<{ ts: string; taskId: string; note: string }>;
   window: FeedbackDocketWindow;
@@ -146,8 +163,20 @@ function rejectedFeedbackItems(entries: RawFeedbackDocketInputs["rejectedFeedbac
     source: "rejected_feedback" as const,
     ts: e.ts,
     verbatim: e.raw,
-    referent: extractReferent(e.raw, e.id),
+    referent: e.correction && verifyCaptureReceipt(e.correction).verified
+      ? consoleCorrectionReferent(e.correction.correction)
+      : extractReferent(e.raw, e.id),
+    ...(e.correction ? { correction: e.correction } : {}),
   }));
+}
+
+function consoleCorrectionItems(entries: ReadonlyArray<CorrectionEvidence>): DocketItem[] {
+  return entries
+    .filter((e) => verifyCaptureReceipt(e).verified)
+    .map((e) => ({
+      source: "console_correction" as const, ts: e.ts, verbatim: e.raw,
+      referent: consoleCorrectionReferent(e.correction), correction: e,
+    }));
 }
 
 function questionAnswerItems(lines: ReadonlyArray<Record<string, unknown>>): DocketItem[] {
@@ -182,20 +211,29 @@ export function buildFeedbackDocket(inputs: RawFeedbackDocketInputs): FeedbackDo
     rejected_feedback: rejectedFeedbackItems(inputs.rejectedFeedback),
     question_answer: questionAnswerItems(inputs.questionLines),
     operator_note: operatorNoteItems(inputs.operatorNotes),
+    console_correction: consoleCorrectionItems(inputs.consoleCorrections ?? []),
   };
 
   const countsBySource = {} as Record<DocketSource, number>;
-  const emptySources: DocketSource[] = [];
   const items: DocketItem[] = [];
   for (const source of DOCKET_SOURCES) {
     const windowed = bySource[source].filter((item) => isInWindow(item.ts, inputs.window));
     countsBySource[source] = windowed.length;
-    if (windowed.length === 0) emptySources.push(source);
     items.push(...windowed);
   }
   items.sort((a, b) => (a.ts < b.ts ? -1 : a.ts > b.ts ? 1 : 0));
 
-  return { window: inputs.window, items, countsBySource, emptySources };
+  // The ONE projection of explicit console corrections into replay candidates (W1-T11104). It reads
+  // every windowed correction-bearing item, rejected or not, so none is dropped by its source.
+  const windowedEvidence = [
+    ...(inputs.consoleCorrections ?? []).filter((e) => isInWindow(e.ts, inputs.window)),
+    ...items.flatMap((item) => (item.source === "rejected_feedback" && item.correction ? [item.correction] : [])),
+  ];
+  const consoleCorrection = consoleCorrectionCandidates(windowedEvidence, { packets: inputs.replayPackets });
+  const emptySources = DOCKET_SOURCES.filter((source) =>
+    countsBySource[source] === 0 && !(source === "console_correction" && consoleCorrection.unverified.length > 0));
+
+  return { window: inputs.window, items, countsBySource, emptySources, consoleCorrection };
 }
 
 // ── Synthesis: at most ONE inbox proposal per cycle (design ii, v) ─────────────────────────
@@ -274,14 +312,28 @@ export function synthesizeFeedbackDocketProposal(
   const id = idFor(winnerReferent, docket.window);
   const quotes = winnerItems.map((i) => `- [${i.source} ${i.ts}] ${i.verbatim}`).join("\n");
 
+  // A console correction cluster carries its own bounded candidate: source links, replay input,
+  // expected facts/unknowns, allowed/forbidden actions and the fixture/template change it proposes.
+  const consoleCandidate = docket.consoleCorrection.candidates.find((c) => c.key === winnerReferent);
+  const unverifiedNote = consoleCandidate && docket.consoleCorrection.unverified.length > 0
+    ? `\nUnverified console correction evidence (no matching native capture receipt; not counted above): ` +
+      docket.consoleCorrection.unverified.map((u) => `${u.feedback_id} (${u.reasons.join("; ")})`).join(", ")
+    : "";
+  const target = consoleCandidate
+    ? "Target artifact (console correction): a replay fixture or rendered template only — never CLAUDE.md or operational policy; the normal pipeline reviews any patch.\n"
+    : "Target artifact (v0, closed set): a CLAUDE.md rule, a learnings/ entry, or a review-rubric " +
+      "line — never src/, never a plan shard, never MASTER-PLAN prose.\n";
+
   const candidate: DocketProposalCandidate = {
     id,
     summary:
       `Feedback docket ${docket.window.sinceIso}..${docket.window.untilIso}: ${winnerItems.length} item(s) indict "${winnerReferent}".\n` +
-      "Target artifact (v0, closed set): a CLAUDE.md rule, a learnings/ entry, or a review-rubric " +
-      "line — never src/, never a plan shard, never MASTER-PLAN prose.\n" +
-      `Docket excerpt (verbatim, cited):\n${quotes}`,
-    evidenceAnchors: [{ description: `"${winnerReferent}" is still an open referent`, pattern: winnerReferent }],
+      target +
+      `Docket excerpt (verbatim, cited):\n${quotes}` +
+      (consoleCandidate ? `\n${renderConsoleCorrectionCandidate(consoleCandidate)}${unverifiedNote}` : ""),
+    evidenceAnchors: consoleCandidate
+      ? [{ description: "the console wording-correction capability is still served", pattern: "CONSOLE_CORRECTION_KIND", path: "src/lib/console-feedback.ts" }]
+      : [{ description: `"${winnerReferent}" is still an open referent`, pattern: winnerReferent }],
   };
 
   return { kind: "proposal", candidate, referent: winnerReferent, consumed: winnerItems };

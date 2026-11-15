@@ -397,5 +397,5 @@ test("unavailable reviewer provenance remains unknown and cannot enter a replay 
   assert.ok(f.publication.some(r => r.step === "review.post_refused" && r.reviewer_code_freshness === "unreadable"));
   assert.equal(recorded[0]!.reviewer_code_sha, null);
   assert.equal(f.arms, 0);
-  assert.throws(() => derive(recorded), /invalid review replay row field: reviewer_code_sha/);
+  assert.throws(() => derive(recorded), /empty review replay sample: no attributable ledger inputs/);
 });

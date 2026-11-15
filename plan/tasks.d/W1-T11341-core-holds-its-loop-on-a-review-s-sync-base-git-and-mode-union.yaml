@@ -26,7 +26,7 @@
     - test/base-blob-read-failure.test.ts
     - test/review/an-in-process-review-builds-its-base-proof-off-the-loop.test.ts
     - test/worker/a-review-spawn-decides-its-mode-without-re-reading-the-union.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: The review command builds its base-proof directory with awaited git (the existing detachedAsync shape of buildBaseProofDir, or an async builder), so a timer scheduled while that git runs fires before the git child exits

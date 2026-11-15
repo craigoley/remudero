@@ -15,7 +15,7 @@
   files:
     - src/lib/retro-preflight.ts
     - test/learning/a-retro-preflight-beats-the-slot-it-holds.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: While runRetroPrepublishPreflight's suite run holds its test slot, the slot's heartbeatAt advances on the slot's recorded cadence (startTestSlotHeartbeat), and the heartbeat stops and withdraws its cadence when the run ends by pass, failure, timeout or spawn error, before the slot is released

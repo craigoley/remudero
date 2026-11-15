@@ -30,13 +30,15 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
-import { fileURLToPath } from "node:url";
-import { test } from "node:test";
+import { after, test } from "node:test";
 
 import { lintPlanCommand } from "#src/run-task.js";
 import { fakeGitHub } from "#test/helpers/fake-github.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const FIXTURE_REPO = gitRepo({ kind: "base-lint-attribution" });
+const REPO_ROOT = FIXTURE_REPO.dir;
+after(() => FIXTURE_REPO.cleanup());
 
 /**
  * W1-T2995 — every call below is `--base` mode, so `lintPlanCommand` enters its status and
@@ -61,6 +63,7 @@ const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
  * already resolved for these fixture-only ids (neither ever had a real PR).
  */
 const LINT_DEPS: Parameters<typeof lintPlanCommand>[1] = {
+  repoRoot: REPO_ROOT,
   loadConfig: (() => ({ root: "/synthetic" })) as never,
   resolveOwnerRepo: (() => ({ owner: "o", repo: "r" })) as never,
   ghGateway: (() => ({})) as never,
@@ -168,6 +171,8 @@ const LANDMINE_TASK = (title: string, proof: string) =>
     `  repo: remudero`,
     `  depends_on: []`,
     `  type: implement`,
+    `  design: |`,
+    `    NO-INVARIANTS: synthetic lint fixture with no inherited behavior to preserve`,
     `  verify: human`,
     `  risk: high`,
     `  status: queued`,
@@ -188,6 +193,8 @@ const CLEAN_TASK = (title: string, proof: string) =>
     `  repo: remudero`,
     `  depends_on: []`,
     `  type: implement`,
+    `  design: |`,
+    `    NO-INVARIANTS: synthetic lint fixture with no inherited behavior to preserve`,
     `  verify: human`,
     `  risk: high`,
     `  status: queued`,
@@ -421,6 +428,7 @@ test("no run without --base performs a second lint pass: the annotation never ap
     let code: number;
     try {
       code = await lintPlanCommand(["--plan", planPath], {
+        repoRoot: REPO_ROOT,
         offline: true,
         ghGateway: (owner, repo) => {
           gatewaysBuilt.push(`${owner}/${repo}`);
@@ -465,6 +473,7 @@ test("W1-T2995: the base-lint fixture completes without a file-scope hang", asyn
   // means no host process is spawned to hang on.
   const seen: string[] = [];
   const spied: Parameters<typeof lintPlanCommand>[1] = {
+    repoRoot: REPO_ROOT,
     loadConfig: (() => {
       seen.push("loadConfig");
       return { root: "/synthetic" };

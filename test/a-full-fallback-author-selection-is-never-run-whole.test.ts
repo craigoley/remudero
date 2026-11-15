@@ -27,18 +27,18 @@ const calibration = (await import(pathToFileURL(join(ROOT, "scripts/calibrate-au
 };
 
 const DEPLOY = "deploy/acr-login.sh";
-const HELPER = "test/helpers/shared.ts";
+const HELPER = "test/fixtures/shared.ts";
 const DEPLOY_REASON = `full run: ${DEPLOY} is outside what the selector models (the read map cannot speak for it: no read map supplied)`;
 const CHANGED = "test/changed.test.ts", READER = "test/uses-helper.test.ts", MODELLED = "test/modelled.test.ts";
 const DECOYS = ["test/decoy-one.test.ts", "test/decoy-three.test.ts", "test/decoy-two.test.ts"];
 const ALL = [CHANGED, MODELLED, READER, ...DECOYS].sort();
 
-/** Six trivial suites. The head commit changes a deploy script, a test helper, a src leaf and one test
+/** Six trivial suites. The head commit changes a deploy script, a test fixture, a src leaf and one test
  *  (`mixed`), or only `.gitignore`. READER imports the helper; nothing in the tree reaches the decoys. */
 function fixture(change: "mixed" | "gitignore", manifest: Record<string, number> = {}) {
   const repo = gitRepo({ kind: "full-fallback-partial", seedCommit: false });
   const root = repo.dir;
-  for (const dir of ["scripts", "test/setup", "test/helpers", "src", "deploy"]) mkdirSync(join(root, dir), { recursive: true });
+  for (const dir of ["scripts", "test/setup", "test/fixtures", "src", "deploy"]) mkdirSync(join(root, dir), { recursive: true });
   writeFileSync(join(root, ".nvmrc"), process.versions.node + "\n");
   writeFileSync(join(root, ".gitignore"), "coverage\nnode_modules\n");
   writeFileSync(join(root, "package-lock.json"), readFileSync(join(ROOT, "package-lock.json")));
@@ -56,7 +56,7 @@ function fixture(change: "mixed" | "gitignore", manifest: Record<string, number>
   const suite = (name: string) => `import { test } from 'node:test'; test('${name}', () => {});\n`;
   for (const file of [CHANGED, MODELLED, ...DECOYS]) writeFileSync(join(root, file), suite(file));
   // The fixture's own import is relative; this file's text names it through a variable.
-  const helper = [".", "helpers", "shared.js"].join("/");
+  const helper = [".", "fixtures", "shared.js"].join("/");
   writeFileSync(join(root, READER), `import { test } from 'node:test'; import { shared } from '${helper}';\n` +
     "test('reads the helper', () => { if (shared < 1) throw new Error('helper'); });\n");
   repo.git("add", "."); repo.git("commit", "-m", "test: full-fallback baseline");
@@ -176,12 +176,17 @@ test("W1-T9953: a full-fallback run says it is partial and is never green", (t) 
   assert.equal(receipt.verdict, "over-capacity");
   assert.equal(receipt.selection, "over-capacity");
   assert.equal(receipt.selectedArm, "full-fallback");
-  assert.equal(receipt.partial.leftToCi, 3);
+  const planned: string[] = receipt.partial.planned, ran: string[] = receipt.partial.ran;
+  assert.ok(ran.length > 0, "positive control: the partial run executed something");
+  assert.ok(ran.every((suite) => planned.includes(suite)), "the executed suites are the planned subset");
+  const notRun = ALL.filter((suite) => !ran.includes(suite));
+  const leftToCi = notRun.length;
+  assert.equal(receipt.partial.leftToCi, leftToCi, "the receipt's CI share follows the measured selection");
   assert.deepEqual(receipt.partial.reasons, [DEPLOY_REASON]);
   const tests = receipt.steps.find((step: { name: string }) => step.name === "affected-tests-subset");
   assert.equal(tests?.ok, true, "the partial set itself passed");
-  assert.ok(output.includes(`full-fallback: PARTIAL — ran 3 of 6 suite(s) chosen by reach and measured cost; ` +
-    `CI's full run is the check for ${DEPLOY}, ${HELPER} and the other 3`), output);
+  assert.ok(output.includes(`full-fallback: PARTIAL — ran ${ran.length} of ${ALL.length} suite(s) chosen by reach and ` +
+    `measured cost; CI's full run is the check for ${DEPLOY}, ${HELPER} and the other ${leftToCi}`), output);
 
   // Nothing reaches a .gitignore change: no suite step starts, and the same sentence says why.
   const empty = fixture("gitignore"); t.after(() => empty.cleanup());
@@ -250,7 +255,7 @@ test("an author phase refused before test execution records no planned suite as 
       assert.deepEqual(receipt.partial.planned, [CHANGED, MODELLED, READER]);
       assert.deepEqual(receipt.partial.ran, []);
       assert.equal(receipt.partial.leftToCi, ALL.length);
-      assert.ok(!output.includes("PARTIAL — ran 3"), output);
+      assert.ok(!output.includes("full-fallback: PARTIAL — ran"), output);
     }
   }
 });

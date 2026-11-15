@@ -455,6 +455,8 @@ export function backlogGardenSpec(
       const landed = plan.actions.filter((a) => paths.includes(shards.get(a.target) ?? ""));
       return {
         paths,
+        // W1-T12221: the queue judge reads `backlog.scorecard` rows by `pr_url`, so this land keeps its own PR.
+        sealedLanding: false,
         title: `chore(plan): backlog gardener proposes ${plan.acting[0]} for ${landed.length} task(s)`,
         body: ["The backlog gardener (W1-T4941) proposes these plan-only changes. Close this PR to decline them.", "", ...landed.map((a) => `- **${a.target}**: ${a.disposition.kind === "band" ? `band ${a.disposition.band}` : a.disposition.retirement}. ${a.reason} Evidence: ${describe(a.evidence)}. Shard: \`${shards.get(a.target)}\`.`), "", "## Acceptance", ...landed.map((a) => `- claim: ${a.target} carries the proposed backlog decision\n  proof: grep: # backlog gardener: ${a.disposition.kind === "band" ? `band=${a.disposition.band}` : "retirement"} evidence=${a.evidence.signature} in ${shards.get(a.target)}`)].join("\n"),
       };

@@ -15,7 +15,7 @@
   files:
     - src/lib/worker-provider.ts
     - test/deploy/a-private-registry-codex-profile-can-start-its-own-sandbox.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: For reader, writer and review intents, a working directory that is not a git checkout root (no .git entry) gets no deny on its parent in either profile surface, and the root deny stays; a git checkout root still gets W1-T11550's parent deny

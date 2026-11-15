@@ -1,16 +1,52 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { join } from "node:path";
 import { setImmediate as flush } from "node:timers/promises";
-import { test } from "node:test";
+import { test, type TestContext } from "node:test";
 import {
   CHECKPOINT_HANDOFF_REASONS, handoffReceiptsToCarry, pendingWorkerBoundaryHandoffs,
   runBranchDispatchOpts, runBranchStateFrom, runDaemon, type DaemonDeps,
 } from "#src/lib/daemon.js";
+import { gitDispatchClaimReserver, type DispatchClaimReserver } from "#src/lib/dispatch-claim.js";
 import { loadPlanFromYaml } from "#src/lib/plan.js";
 import type { RunResult } from "#src/lib/run-result.js";
+import { GIT_REPO_FIXTURE_IDENTITY } from "#test/helpers/git-repo.js";
 import {
   TASK as ORPHAN_TASK, RUN_ID, BRANCH as ORPHAN_BRANCH, HEAD as ORPHAN_HEAD,
   MINT_ISO, DEAD_PID, LOCAL, anchorMessage, orphanRunRows, fakeReserver, instance, gitRemote, orphanVerdicts,
 } from "#test/helpers/restart-orphan.js";
+
+// Git's repository variables override cwd. An inherited GIT_DIR (a git hook sets one) points every git read
+// at that checkout's origin, so the boot sweep would read, and drop, the real origin's claims.
+const GIT_REPOSITORY_ENV = [
+  "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_PREFIX", "GIT_OBJECT_DIRECTORY",
+  "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_COMMON_DIR", "GIT_NAMESPACE", "GIT_CONFIG",
+  "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT",
+];
+
+/** The daemon's git reserver, reading only the fixture client's own `origin`. */
+function fixtureReserver(clientDir: string): DispatchClaimReserver {
+  return gitDispatchClaimReserver({ run: (args) => {
+    const env: NodeJS.ProcessEnv = {
+      ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null",
+      GIT_AUTHOR_NAME: GIT_REPO_FIXTURE_IDENTITY.name, GIT_COMMITTER_NAME: GIT_REPO_FIXTURE_IDENTITY.name,
+      GIT_AUTHOR_EMAIL: GIT_REPO_FIXTURE_IDENTITY.email, GIT_COMMITTER_EMAIL: GIT_REPO_FIXTURE_IDENTITY.email,
+    };
+    for (const key of GIT_REPOSITORY_ENV) delete env[key];
+    const r = spawnSync("git", args, { cwd: clientDir, env, encoding: "utf8", timeout: 10_000 });
+    return { status: r.status ?? 128, stdout: r.stdout, stderr: r.stderr };
+  } });
+}
+
+/** Points this process's git environment at `checkout` until the test ends, as a git hook does. */
+function inheritGitDir(t: TestContext, checkout: string): void {
+  const saved = process.env.GIT_DIR;
+  process.env.GIT_DIR = join(checkout, ".git");
+  t.after(() => {
+    if (saved === undefined) delete process.env.GIT_DIR;
+    else process.env.GIT_DIR = saved;
+  });
+}
 
 const TASK = "W1-T8133";
 const BRANCH = `run-${TASK}-1791807256528`;
@@ -124,7 +160,7 @@ test("W1-T10896: the daemon resumes only the exact orphaned head", (t) => {
   const node = instance(t, orphanRunRows());
   assert.equal(blocked(node.rawLines()), true, "before the boot sweep the pushed branch blocks dispatch");
 
-  node.boot(origin.reserver);
+  node.boot(fixtureReserver(origin.client.dir));
   assert.equal(origin.claimTip(), "", "the dead claim is dropped from origin");
   const verdict = orphanVerdicts(node.rows())[0]!;
   assert.equal(CHECKPOINT_HANDOFF_REASONS.has(String(verdict.reason)), true, "its reason is a checkpoint handoff reason");
@@ -151,3 +187,17 @@ test("W1-T10896: a run that already opened its PR gets the verdict without a res
   assert.equal(pendingWorkerBoundaryHandoffs(node.rawLines()).get(ORPHAN_TASK), undefined);
 });
 
+
+test("W1-T12162 criterion 1: a claim ref on the real origin does not change the boot sweep's result", (t) => {
+  // `real` stands for the checkout the suite runs in: its origin holds the same task's dead claim.
+  const real = gitRemote(t);
+  inheritGitDir(t, real.client.dir);
+  const origin = gitRemote(t);
+  const node = instance(t, orphanRunRows());
+  node.boot(fixtureReserver(origin.client.dir));
+  assert.equal(origin.claimTip(), "", "the fixture's dead claim is dropped from the fixture remote");
+  assert.match(real.claimTip(), /refs\/rmd-dispatch\/W1-T10838$/, "the real origin's claim is not read or dropped");
+  const verdict = orphanVerdicts(node.rows())[0]!;
+  assert.equal(verdict.branch, ORPHAN_BRANCH);
+  assert.equal(verdict.head_sha, origin.head, "the receipt names the fixture remote's pushed head");
+});

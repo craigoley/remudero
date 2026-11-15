@@ -16,7 +16,7 @@
   files:
     - src/lib/clock.ts
     - test/infra/a-loop-available-deadline-expires-on-a-loop-held-at-every-firing.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: A loop-available deadline whose every firing lands late by a twentieth of its budget or more still calls onExpire, once the grace it has granted for loop-held time has reached its own budget

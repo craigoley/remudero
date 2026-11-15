@@ -1,3 +1,4 @@
+import { attributeAttemptOutcome } from "#src/lib/attempt-outcome-attribution.js";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
@@ -34,16 +35,16 @@ function fixture() {
 test("Sol 6.1 review is due every day before October 16 without lowering the sample minimum", async () => {
   for (const experiment of ROUTING_EXPERIMENTS.filter((item) => item.id.startsWith("sol61-"))) {
     for (const day of ["2026-10-02", "2026-10-03", "2026-10-04"]) {
-      const report = evaluateRoutingExperiment([], experiment, day);
+      const report = evaluateRoutingExperiment([], experiment, day, attributeAttemptOutcome);
       assert.equal(report.reviewCadence, "daily"); assert.equal(report.revisitDue, true);
       assert.equal(report.nextReviewOn, `2026-10-0${Number(day.slice(-1)) + 1}`);
       assert.equal(report.sufficient, false); assert.equal(experiment.minTasksPerArm, 20);
     }
-    const early = evaluateRoutingExperiment([], experiment, "2026-10-01");
+    const early = evaluateRoutingExperiment([], experiment, "2026-10-01", attributeAttemptOutcome);
     assert.equal(early.revisitDue, false); assert.equal(early.nextReviewOn, "2026-10-02");
   }
   const lines: string[] = [];
-  await routingAbCommand([], { stateDir: "/unused/state", readRows: async () => [], today: "2026-10-02", print: (line) => lines.push(line) });
+  await routingAbCommand([], { classifyAttempt: attributeAttemptOutcome, stateDir: "/unused/state", readRows: async () => [], today: "2026-10-02", print: (line) => lines.push(line) });
   assert.ok(lines.some((line) => line.includes("daily provisional review; next 2026-10-03")));
 });
 
@@ -75,7 +76,7 @@ test("negative trial costs remain missing while a measured zero cash cost is ret
     { step: "worker.attempt", selection_assignment_id: "a-1", total_cost_usd: -1, cost_usd: -2, billing_mode: "api" },
     { step: "worker.attempt", selection_assignment_id: "a-2", total_cost_usd: 0, billing_mode: "api" },
     { step: "worker.attempt", selection_assignment_id: "a-3", total_cost_usd: -1, cost_usd: 0.2, billing_mode: "subscription" },
-  ], epoch, "2026-10-02");
+  ], epoch, "2026-10-02", attributeAttemptOutcome);
   const arm = report.arms.find(item => item.arm === "sol61")!;
   assert.equal(arm.meanCashCostUsd, 0);
   assert.equal(arm.meanNotionalCostUsd, 0.2);
@@ -305,7 +306,7 @@ test("daily trial costing preserves explicit subscription notional across a zero
   const report = evaluateRoutingExperiment([assignment("1"),
     { step: "worker.attempt", selection_assignment_id: "a-1", notional_cost_usd: 0.75, billing_mode: "subscription" },
     { step: "verdict", selection_assignment_id: "a-1", total_cost_usd: 0, success: true },
-  ], epoch, "2026-10-02");
+  ], epoch, "2026-10-02", attributeAttemptOutcome);
   const arm = report.arms.find(item => item.arm === "sol61")!;
   assert.equal(arm.meanNotionalCostUsd, 0.75);
   assert.equal(arm.meanCashCostUsd, null);
@@ -313,7 +314,7 @@ test("daily trial costing preserves explicit subscription notional across a zero
   assert.equal(arm.receiptCoverage.costKnownAssignments, 1);
   const invalid = evaluateRoutingExperiment([assignment("1"),
     { step: "worker.attempt", selection_assignment_id: "a-1", notional_cost_usd: -1, total_cost_usd: 0, billing_mode: "subscription" },
-  ], epoch, "2026-10-02").arms.find(item => item.arm === "sol61")!;
+  ], epoch, "2026-10-02", attributeAttemptOutcome).arms.find(item => item.arm === "sol61")!;
   assert.equal(invalid.meanNotionalCostUsd, null);
   assert.equal(invalid.costMissingAssignments, 1);
 });

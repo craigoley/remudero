@@ -1,0 +1,71 @@
+- id: W1-T12507
+  title: "The author preflight never runs every suite: a path the selector cannot model, or an input it cannot read, gives a bounded set of the changed tests, the path's readers and main's recent failures, and the receipt names what CI owns"
+  repo: remudero
+  depends_on:
+    - W1-T12505
+  priority: 1.3
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the author entry's widest arm; a bounded set that drops a reader passes a run CI must then fail
+  band_meaning: blast-radius
+  origin: operator-session#checking-off-the-author-path-2026-11-13
+  plan_refs:
+    - W1-T9953
+    - W1-T6084
+    - W1-T12505
+    - W1-T12506
+  files:
+    - scripts/preflight-author.mjs
+    - doctrine/before-you-push/preflight-before-first-push.md
+    - test/ci/the-author-selection-never-runs-every-suite-and-names-what-ci-owns.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "When the selector answers a full run because a changed path is not modelled, the author receipt selection is `bounded-fallback`, never `full-fallback`. Its suites are the changed tests, the suites that import, name or (with a usable read map) read each set-aside path, the selection for the modelled rest, and main's recent failures. No run lists every test file"
+      proof: "grep: W1-T12507 criterion 1 in test/ci/the-author-selection-never-runs-every-suite-and-names-what-ci-owns.test.ts"
+    - claim: "When the selector cannot read its input (the `affectedSelectionOrFull` catch), the selection is the same bounded set over the inputs that could be read, and the receipt names each input that could not be read"
+      proof: "grep: W1-T12507 criterion 2 in test/ci/the-author-selection-never-runs-every-suite-and-names-what-ci-owns.test.ts"
+    - claim: "The bounded set runs within the author budget (AUTHOR_WALL_SHARE), ordered by reach as `fittingSubset` (scripts/preflight-author.mjs:144) orders it. The receipt has a `ciOwns` field that names each set-aside path and the count of suites left to CI, and the console prints one line with the same facts"
+      proof: "grep: W1-T12507 criterion 3 in test/ci/the-author-selection-never-runs-every-suite-and-names-what-ci-owns.test.ts"
+    - claim: "When main's recent failures cannot be read, the bounded set is built without them and the receipt names that reason. A bounded set that is empty after every arm refuses, as an empty floor refuses today"
+      proof: "grep: W1-T12507 criterion 4 in test/ci/the-author-selection-never-runs-every-suite-and-names-what-ci-owns.test.ts"
+    - claim: "invariant:ci-keeps-the-full-run — the shared selector (src/lib/affected-suites.ts) still answers a full run for an unmodelled path; only the author entry bounds it, so ci.yml and the daemon's build lane select as before"
+      proof: "grep: W1-T12507 criterion 5 in test/ci/the-author-selection-never-runs-every-suite-and-names-what-ci-owns.test.ts"
+  rationale: |
+    The operator asked that no author run use "all tests" as a fallback. CI runs the full suite on every pull request
+    anyway, hours sooner than a full local run can finish on the shared host.
+    READ at origin/main 6cf453f7a:
+    - scripts/preflight-author.mjs:575 a `full-fallback` selection lists every test file (`listTestFiles(root)`).
+    - :168 `fullFallbackPartialSet` (W1-T9953) then cuts that list to the changed tests, the import-graph readers of the
+      set-aside files and the modelled rest. A deploy/ script, a json file, a .remudero file or a hook has no importers, so
+      for those paths the set-aside readers are always empty. Recent failures are not in the set.
+    - src/lib/affected-suites.ts:1001 `affectedSelectionOrFull` answers a full run when its input cannot be read.
+    - `AffectedSuitesInput.recentFailures` (:88) has no producer under src/, scripts/ or bin/.
+    - :41 AUTHOR_WALL_SHARE is 1/16 of the step runtime.
+    MEASURED by the operator session over about four days: 22 author full fallbacks and 49 over-capacity runs. The median
+    narrow set was 843 suites against a budget of about 900 s.
+    CHECKED for overlap: W1-T9953 is merged and keeps the full-fallback label and listing. W1-T11850 (queued) shares census
+    work between identical runs. No open pull request files a task on this subject.
+  design: |
+    1. In scripts/preflight-author.mjs, a `fullRun` selection becomes `bounded-fallback`. Build its suites from
+       `fullFallbackPartialSet` and add, for each set-aside path: the suites whose text names it, and `readMapReaders` when the
+       read map (W1-T12505) is usable.
+    2. Add main's recent failures: the suites that failed on main's last 10 completed ci.yml runs, read the way
+       src/lib/selector-shadow-gardener.ts reads main failures, bounded to 30 s. An unreadable read is a named reason.
+    3. For an unreadable selector input, build the same set from the parts that could be read, and name each part that could not.
+    4. Run the set through the existing budget and `fittingSubset` order. Write `ciOwns: { paths, suitesLeft }` on the
+       receipt. `authorPushEligibility` treats `bounded-fallback` as it treats an over-capacity run today.
+    5. Leave `selectAffectedSuites` and `affectedSelectionOrFull` unchanged.
+    6. Update the doctrine sentence that says unknown and empty-floor changes fall back to every suite.
+    INVARIANT ci-keeps-the-full-run: the shared selector still answers a full run for an unmodelled path; only the author
+    entry bounds it.
+    NOT IN SCOPE: modelling more paths (W1-T12506); the impact arm.
+  falsifier: |
+    Keep `listTestFiles` for the fallback and criterion 1 must fail. Drop the named-path readers and criterion 1 must fail for a
+    hook path. Treat an unreadable recent-failure read as empty with no reason and criterion 4 must fail. Change the shared
+    selector and criterion 5 must fail. Restore and require all five to pass.
+  note: |
+    Id W1-T12507 reserved for run-unfiled-1794582098000 with ~/rmd-work/bin/reserve-id.sh.
+    Depends on W1-T12505 for the read map readers; without a usable map the set is built without them.

@@ -16,7 +16,7 @@
     - src/cli/commands/fix.ts
     - test/routing/inbox-and-fix-rows-name-the-model-that-served-them.test.ts
     - "src/run-task.ts"
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-10-27, read-only, host ledger union 2026-09-27..2026-10-27 at origin/main aa90fdc44:

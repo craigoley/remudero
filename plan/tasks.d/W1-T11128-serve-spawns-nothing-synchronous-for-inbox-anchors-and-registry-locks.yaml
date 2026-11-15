@@ -21,7 +21,7 @@
     - test/inbox/serve-spawns-nothing-synchronous-for-inbox-anchors-and-registry-locks.test.ts
     - "src/lib/panel-graph.ts"
     - "src/lib/report-commands.ts"
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: A served inbox render (the inbox view's registry prune and the status board's INBOX anchor check) reaches no synchronous child_process call; it uses updateProposalRegistryAsync and gitGrepAnchorTrueAsync, with the same results, deadline and refusal words

@@ -20,7 +20,7 @@
     - src/lib/required-semantic-review.ts
     - test/review/a-reviewer-that-could-not-inspect-is-cannot-evaluate-not-a-fail.test.ts
     - test/prompt-contracts-name-the-commit-contract.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: A reviewer verdict line in the UNABLE form never downgrades a criterion; a criterion whose proof executed and passed keeps its floor verdict and is marked reviewer-unavailable

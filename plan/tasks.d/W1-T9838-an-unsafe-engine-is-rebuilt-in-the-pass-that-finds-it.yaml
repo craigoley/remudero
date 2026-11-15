@@ -13,7 +13,7 @@
   files:
     - src/lib/engine-tree.ts
     - test/an-unsafe-engine-is-rebuilt-in-the-pass-that-finds-it.test.ts
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

@@ -11,7 +11,7 @@
   budget_usd: 12
   author_class: machine
   origin: "cockpit-test-integrity: Effects PR14986 left a computed production import outside literal dependency accounting"
-  status: queued
+  status: merged
   attempts: 0
   depends_on: [W1-T10562]
   plan_refs: [W1-T10561, W1-T10562]

@@ -17,7 +17,7 @@
     - scripts/list-rule-suites.mjs
     - src/lib/test-slot.ts
     - test/ci/rule-suite-concurrency-follows-host-pressure.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: The concurrency of the rule-suite run is computed from pressure (PSI or load average) injected as a fake, rising when the host is idle and falling when it is busy

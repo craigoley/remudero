@@ -11,7 +11,7 @@
   plan_refs: [W1-T10269, W1-T228]
   files: [src/lib/reviewer-health.ts, src/run-task.ts, test/review/a-reopened-reviewer-regression-reattributes-its-blame.test.ts, test/review/a-reviewer-regression-heals-itself.test.ts]
   priority: 3
-  status: queued
+  status: merged
   # backlog gardener: band=3 evidence=01e5282e872c7818
   # backlog gardener: placed=2026-11-06T03:53:33.122Z
   attempts: 0

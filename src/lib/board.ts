@@ -34,6 +34,8 @@ import { buildRecapEvents, type RecapEvent } from "./recap.js";
 import { computeGlanceSpend, type GlanceSpend } from "./glance.js";
 import { deriveBlockedPrSections, type BlockedPrBlocker, type MergeHeldRow } from "./status-board.js";
 import { liveRunSpendByTask, subscribeStatusStream } from "./status-stream-publisher.js";
+import { serveBoardCatalogs, publicOpsTaskFields, type BoardCatalogContext, type BoardCatalogSummary } from "./serve-plan-reload.js";
+import type { AcceptanceCriterion } from "./plan.js";
 
 // Keep the live consumer's boundary visible to the ledger render-retention census.
 const OPERATOR_ACTION_STEPS = new Set(["console.kick_refused", "console.kick_dispatched"]);
@@ -48,7 +50,9 @@ export const DEFAULT_POLL_MS = 250;
  */
 export interface BoardRow extends StatusProjection {
   title: string;
-  risk: TaskRisk;
+  risk?: TaskRisk;
+  catalog?: "public" | "ops";
+  acceptance?: AcceptanceCriterion[];
   /** ISO-8601 `ts` of the last ledger line naming this task; absent when the task has no ledger line at all. */
   lastActivityAt?: string;
   /** Live accumulated spend (W1-T184): `cost_usd` summed over `implement.done`/`fix.done` lines
@@ -87,6 +91,7 @@ export interface CountSummary {
 }
 
 export interface BoardSnapshot {
+  opsCatalog?: BoardCatalogSummary;
   /** The one server clock this snapshot is "as of" — every header freshness chip keys on this. */
   generated_at: string;
   /** True iff the GitHub read backing merge-state was unreachable this snapshot (fb-…c124f9). */
@@ -141,6 +146,8 @@ export interface PrQueueSnapshot {
 }
 
 interface BoardComputeOptions {
+  /** Captured private input for one materialized body; null deliberately means no overlay. */
+  catalog?: BoardCatalogContext | null;
   lastGoodPrQueueAt?: string;
   /** A cache-key read handed into the projection so one snapshot uses one immutable open index. */
   prQueueIndex?: PrQueueIndexRead;
@@ -397,14 +404,20 @@ export function computeBoardSnapshot(deps: BoardDeps, options: BoardComputeOptio
     writeCreditStore: SERVE_KEEPS_CREDITS_IN_MEMORY,
     ...(options.reuseProjection ? { reuseProjection: options.reuseProjection } : {}),
   };
-  const byId = projectPlan(deps.plan, effectiveDeps);
+  const catalog = options.catalog === undefined ? serveBoardCatalogs(deps) : options.catalog ?? undefined;
+  const plan = catalog?.plan ?? deps.plan;
+  const byId = projectPlan(plan, effectiveDeps);
   options.captureProjections?.(byId);
   const lastActivity = lastActivityByTask(lines);
   const liveSpend = liveRunSpendByTask(lines, [...byId.values()].filter((p) => p.phase).map((p) => p.taskId));
   const tasks: BoardRow[] = [...byId.values()].map((p) => {
     // Task-less escalations have no plan Task: fall back to their title/id and default risk
     // rather than crashing the snapshot with a non-null assertion (W1-T283).
-    const task = deps.plan.byId.get(p.taskId);
+    const task = plan.byId.get(p.taskId);
+    if (task !== undefined && catalog?.opsIds.has(task.id)) {
+      return { ...publicOpsTaskFields(task), status: p.status, merged: p.merged, source: p.source,
+        ...(p.indeterminate ? { indeterminate: true as const, unavailableReason: p.unavailableReason } : {}) };
+    }
     const row: BoardRow = {
       ...p,
       title: task ? task.title : (p.escalationTitle ?? p.taskId),
@@ -435,6 +448,9 @@ export function computeBoardSnapshot(deps: BoardDeps, options: BoardComputeOptio
   const githubFactsAgeMs = safeFactsAgeMs(effectiveDeps.github);
   return {
     generated_at: generatedAt,
+    ...(catalog === undefined ? {} : { opsCatalog: catalog.outcome === "ok"
+      ? { outcome: "ok" as const, observedAt: catalog.observedAt, taskCount: catalog.taskCount }
+      : { outcome: "unreadable" as const, observedAt: catalog.observedAt, reason: catalog.reason } }),
     github_unreachable,
     ...(githubFactsAgeMs !== undefined ? { github_facts_age_ms: githubFactsAgeMs, github_facts_status: safeFactsStale(effectiveDeps.github) ? "stale" : "fresh" } : {}),
     counts: summarizeCounts(tasks, github_unreachable),
@@ -700,7 +716,7 @@ export function decisionKey(fp: DecisionFingerprint): string {
 }
 
 export function createBoardSnapshotCache(): BoardSnapshotCache {
-  let cached: { plan: Plan; decisionKey: string; ghFailed: boolean; ghTruncated: boolean; prQueueIndexKey: string; snapshot: BoardSnapshot } | undefined;
+  let cached: { plan: Plan; catalog: BoardCatalogContext | undefined; decisionKey: string; ghFailed: boolean; ghTruncated: boolean; prQueueIndexKey: string; snapshot: BoardSnapshot } | undefined;
   let lastGoodPrQueueAt: string | undefined;
   // Fold only appended rows across requests, never the whole ledger (W1-T2919).
   let fingerprint: DecisionFingerprint = EMPTY_DECISION_FINGERPRINT;
@@ -713,6 +729,7 @@ export function createBoardSnapshotCache(): BoardSnapshotCache {
   const tail = createLedgerTailCache();
   return {
     get(deps: BoardDeps): BoardSnapshot {
+      const catalog = serveBoardCatalogs(deps);
       const readLedger = deps.readLedger ?? ((path: string) => readLedgerTail(path, tail));
       const lines = readLedger(deps.ledgerPath);
       fingerprint = foldDecisionFingerprint(lines, fingerprint);
@@ -725,6 +742,7 @@ export function createBoardSnapshotCache(): BoardSnapshotCache {
       if (
         cached &&
         cached.plan === deps.plan &&
+        cached.catalog === catalog &&
         cached.decisionKey === key &&
         cached.ghFailed === ghFailed &&
         cached.ghTruncated === ghTruncated &&
@@ -733,7 +751,7 @@ export function createBoardSnapshotCache(): BoardSnapshotCache {
       // Index, health or truncation changes re-derive the whole plan.
       const gatewayKey = prQueueIndexKey + "|" + ghFailed + "|" + ghTruncated;
       taskFingerprints = foldTaskFingerprints(lines, taskFingerprints);
-      if (heldGatewayKey !== gatewayKey || cached?.plan !== deps.plan) {
+      if (heldGatewayKey !== gatewayKey || cached?.plan !== deps.plan || cached?.catalog !== catalog) {
         // A new gateway key or plan invalidates every held projection.
         projectionByTask.clear();
         heldGatewayKey = gatewayKey;
@@ -758,7 +776,7 @@ export function createBoardSnapshotCache(): BoardSnapshotCache {
         },
       );
       if (snapshot.prQueue.complete) lastGoodPrQueueAt = snapshot.generated_at;
-      cached = { plan: deps.plan, decisionKey: key, ghFailed, ghTruncated, prQueueIndexKey, snapshot };
+      cached = { plan: deps.plan, catalog, decisionKey: key, ghFailed, ghTruncated, prQueueIndexKey, snapshot };
       return snapshot;
     },
   };

@@ -658,6 +658,47 @@ num_or_unknown() { case "$1" in ''|*[!0-9]*) printf 'unknown' ;; *) printf '%s' 
 
 ROOT_FS_TOTAL_KB="$(num_or_unknown "$(df_field / 2)")"
 
+# W1-T12253: mirror the host janitor's marks by device; unreadable sizes cannot imply zero reserve.
+volume_reserve_kb() {
+  local total="$1" device="$2" marks="$WATCH_FS" entry path mark pct free kb candidate reserve="unknown" root_watched=no
+  case "$total" in ''|*[!0-9]*|?????????????????*) printf unknown; return ;; esac
+  [ "$total" -gt 0 ] && [ "$device" != unknown ] || { printf unknown; return; }
+  for entry in $marks; do [ "${entry%:*}" = / ] && root_watched=yes; done
+  [ "$root_watched" = yes ] || marks="/:$HIGH_WATER $marks"
+  for entry in $marks; do
+    path="${entry%:*}"; mark="${entry##*:}"; pct="${mark%%/*}"; free=""
+    case "$entry" in *:*) ;; *) printf unknown; return ;; esac
+    case "$mark" in */*) free="${mark#*/}" ;; esac
+    case "$pct" in ''|*[!0-9]*|????*) printf unknown; return ;; esac
+    case "$free" in '' ) ;; *[!0-9KMGT]*|[KMGT]*|*[KMGT]?*) printf unknown; return ;; esac
+    kb="${free%[KMGT]}"
+    case "$kb" in ????????????????*) printf unknown; return ;; esac
+    pct=$((10#$pct)); kb=$((10#${kb:-0}))
+    [ -n "$path" ] && [ "$pct" -le 100 ] || { printf unknown; return; }
+    case "$free" in
+      *M) kb=$((kb * 1024)) ;; *G) kb=$((kb * 1048576)) ;; *T) kb=$((kb * 1073741824)) ;;
+    esac
+    [ "$(df_field "$path" 1)" = "$device" ] || continue
+    candidate=$((10#$total * (100 - pct) / 100))
+    [ "$kb" -le "$candidate" ] || candidate="$kb"
+    if [ "$reserve" = unknown ] || [ "$candidate" -gt "$reserve" ]; then reserve="$candidate"; fi
+  done
+  printf '%s' "$reserve"
+}
+ROOT_FS_RESERVE_KB=unknown; STATE_FS_RESERVE_KB=unknown
+if [ "$(uname -s 2>/dev/null)" = Linux ]; then
+  HIGH_WATER="${HIGH_WATER:-85}"
+  WATCH_FS="${RMD_CLEANUP_WATCH_FS-/mnt/rmd:85 /mnt/scratch:90/40G}"
+  ROOT_FS_RESERVE_KB="$(volume_reserve_kb "$ROOT_FS_TOTAL_KB" "$ROOT_FS_DEVICE")"
+  STATE_FS_TOTAL_KB="$(num_or_unknown "$(df_field "$RMD_ROOT" 2)")"
+  STATE_FS_RESERVE_KB="$(volume_reserve_kb "$STATE_FS_TOTAL_KB" "$STATE_FS_DEVICE")"
+fi
+STATE_FS_RESERVE_LINE=""
+if [ "$STATE_FS_DEVICE" != "$ROOT_FS_DEVICE" ] || [ "$STATE_FS_DEVICE" = unknown ]; then
+  STATE_FS_RESERVE_LINE="
+state_fs_reserve_kb=${STATE_FS_RESERVE_KB}"
+fi
+
 # Free inodes on `/`: the column is found by its HEADER (`IFree` on Linux, `ifree` on macOS) because
 # the column position differs between the two. A filesystem that reports no inode table (`-`) is
 # `unknown`.
@@ -1553,9 +1594,10 @@ ledger_state=${LEDGER_STATE}
 ledger_bytes=${LEDGER_BYTES}
 disk_free_kb=${DISK_FREE_KB}
 state_fs_device=${STATE_FS_DEVICE}
-state_fs_free_kb=${DISK_FREE_KB}
+state_fs_free_kb=${DISK_FREE_KB}${STATE_FS_RESERVE_LINE}
 root_fs_device=${ROOT_FS_DEVICE}
 root_fs_free_kb=${ROOT_FS_FREE_KB}
+root_fs_reserve_kb=${ROOT_FS_RESERVE_KB}
 scratch_fs_device=${SCRATCH_FS_DEVICE}
 scratch_fs_free_kb=${SCRATCH_FS_FREE_KB}
 disk_min_free_kb=${DISK_MIN_FREE_KB}

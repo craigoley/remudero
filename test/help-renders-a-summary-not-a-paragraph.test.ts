@@ -165,7 +165,7 @@ test("pr-state help and argument validation dispatch before CLI housekeeping", a
 // inventory for a preflight argv in the pr-state dispatch test above.
 const BASELINE_COMMAND_NAMES = [
   "alert-fix", "approve", "authority", "autonomy-rate", "away", "benchmark-aa", "benchmark-paid-pilot", "board", "bundle", "caller-sweep", "case-file", "check-acceptance", "check-proof",
-  "census-membership", "ci-failures", "ci-learning", "claim", "correct", "coverage-improve", "daemon", "daemon-plist", "decline", "dep-review",
+  "census-membership", "ci-failures", "ci-learning", "claim", "correct", "coverage-improve", "daemon", "daemon-plist", "decisions", "decline", "dep-review",
   "deploy", "deploy-plist", "deploy-run", "digest", "digest-plist", "doctor", "down", "drain",
   "emissions", "escalate", "feedback", "feedback-reconcile", "field-trials", "fix", "hand-runs",
   "hand-worktree",

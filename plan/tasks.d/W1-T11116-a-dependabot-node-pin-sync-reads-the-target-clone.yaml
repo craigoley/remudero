@@ -15,7 +15,7 @@
   files:
     - src/run-task.ts
     - test/daemon/a-dependabot-node-pin-sync-reads-the-target-clone.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: The node-pin IO runs in repos/<repo> under the state root and reads a Dependabot head's .nvmrc there, while the state root itself, which is not a git checkout, reads nothing

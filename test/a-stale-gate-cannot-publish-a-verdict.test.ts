@@ -236,7 +236,8 @@ test("W1-T3337: an immaterial advance still publishes and makes the reviewer's l
     });
     assert.equal(result.posted, true);
     assert.deepEqual(posted.map((entry) => entry.state), ["failure"]);
-    assert.match(posted[0]?.description ?? "", new RegExp(`\\[review code ${OLD.slice(0, 12)}\\]$`));
+    // W1-T11847: the full sha, so a reader can judge the reviewer code; a 12-character prefix is incomplete evidence.
+    assert.match(posted[0]?.description ?? "", new RegExp(`\\[review code ${OLD}\\]$`));
     assert.ok((posted[0]?.description?.length ?? Infinity) <= 140, "the provenance must survive GitHub's status-description cap");
   } finally {
     rmSync(root, { recursive: true, force: true });

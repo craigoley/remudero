@@ -28,7 +28,7 @@
     - test/infra/bounded-target-job.test.ts
     - test/infra/product-build.test.ts
     - "src/cli/commands/run-task-verb.ts"
-  status: queued
+  status: merged
   attempts: 0
   rationale: >-
     Functional prerequisite for W1-T10618 (Core18). Its worker refused criterion

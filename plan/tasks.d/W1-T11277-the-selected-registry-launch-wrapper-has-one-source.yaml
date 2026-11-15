@@ -16,7 +16,7 @@
     - src/lib/deployer.ts
     - src/lib/selected-registry-consumers.ts
     - test/deploy/the-selected-registry-launch-wrapper-has-one-source.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: deployer.ts and selected-registry-consumers.ts both take the selected-registry launch wrapper from one exported constant, and a test drives the adapter with the exact command line deployer.ts builds, so the two cannot drift apart

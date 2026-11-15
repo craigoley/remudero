@@ -24,7 +24,7 @@
     - deploy/install-host-units.sh
     - src/lib/baked-runtime-inputs.ts
     - .github/workflows/acr-build.yml
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: ledgerRowsFor returns exactly the rows a full union read filtered to the same task ids, PR numbers, steps and since would return, while opening only the archives whose key manifest holds one of the requested keys inside the window, plus the live file

@@ -918,6 +918,7 @@ test("W1-T10823: the served plan proposal reaches the maintained native handoff;
   git("config", "user.name", "Product route fixture");
   git("config", "user.email", "product-route@example.test");
   git("remote", "add", "origin", "https://github.com/craigoley/wreckterra.git");
+  commitRunnerConfig(checkout, VALID_MOUNTS);
   const head = git("rev-parse", "HEAD");
   const shim = ghShim([
     { when: "commits/main", stdout: JSON.stringify({ sha: head }) },
@@ -1022,6 +1023,87 @@ setTimeout(() => {
   assert.ok(!shim.calls().some((call) => call.includes("-X POST")));
 });
 
+/** This repository's own validated runner configuration, the table a real product target commits. */
+const VALID_MOUNTS = readFileSync(join(REPO_ROOT, ".remudero", "mounts.yaml"), "utf8");
+/** Commit `.remudero/mounts.yaml` into a target checkout with a fixture-local identity. */
+function commitRunnerConfig(checkout: string, text: string) {
+  const git = (...args: string[]) => execFileSync("git", ["-C", checkout, ...args], { encoding: "utf8", env: { ...process.env,
+    GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null", GIT_AUTHOR_NAME: "Product route fixture",
+    GIT_AUTHOR_EMAIL: "product-route@example.test", GIT_COMMITTER_NAME: "Product route fixture",
+    GIT_COMMITTER_EMAIL: "product-route@example.test" }, stdio: ["ignore", "pipe", "pipe"] }).trim();
+  mkdirSync(join(checkout, ".remudero"), { recursive: true });
+  writeFileSync(join(checkout, ".remudero", "mounts.yaml"), text);
+  git("add", ".remudero/mounts.yaml");
+  git("commit", "-qm", "chore: target runner configuration");
+  return git("rev-parse", "HEAD");
+}
+
+test("W1-T11195: a served plan proposal for a target without valid runner configuration refuses a named 409 before any journal or handoff", async (t) => {
+  for (const [name, table, code] of [["missing", undefined, "runner_config_missing"], ["invalid", "- not a mounts mapping\n", "runner_config_invalid"]] as const) {
+    await t.test(name, async (t) => {
+      const root = ownedFixtureDir(t, "product-plan-config-http").dir;
+      const repoRoot = join(root, "immutable-generation", "remudero");
+      const stateBase = join(root, "instances");
+      const checkout = join(stateBase, "arcade", "repos", "wreckterra");
+      mkdirSync(join(stateBase, "arcade", "repos"), { recursive: true });
+      mkdirSync(join(stateBase, "arcade", "state"), { recursive: true });
+      renameSync(gitRepo({ scope: t }).dir, checkout);
+      execFileSync("git", ["-C", checkout, "remote", "add", "origin", "https://github.com/craigoley/wreckterra.git"]);
+      const head = table === undefined ? execFileSync("git", ["-C", checkout, "rev-parse", "HEAD"], { encoding: "utf8" }).trim()
+        : commitRunnerConfig(checkout, table);
+      // A dirty working-tree table is not the committed head's configuration.
+      if (table === undefined) {
+        mkdirSync(join(checkout, ".remudero"));
+        writeFileSync(join(checkout, ".remudero", "mounts.yaml"), VALID_MOUNTS);
+      }
+      const shim = ghShim([
+        { when: "commits/main", stdout: JSON.stringify({ sha: head }) },
+        { when: `contents?ref=${head}`, stdout: JSON.stringify([{ name: "src" }]) },
+        { when: "contents/plan/tasks.d?", stdout: JSON.stringify([{ name: "WRECK-T1-first.yaml" }]) },
+        { when: "api repos/craigoley/wreckterra", stdout: JSON.stringify({ id: WRECKTERRA_ID, name: "wreckterra",
+          owner: { login: "craigoley" }, private: false, default_branch: "main" }) },
+      ]);
+      const originalPath = process.env.PATH;
+      process.env.PATH = `${shim.dir}:${originalPath}`;
+      t.after(() => { process.env.PATH = originalPath; rmSync(shim.dir, { recursive: true, force: true }); });
+      mkdirSync(join(repoRoot, ".remudero"), { recursive: true });
+      writeFileSync(join(repoRoot, ".remudero/managed-repos.json"), JSON.stringify({ repos: ["craigoley/wreckterra"] }));
+      const registryPath = join(repoRoot, ".remudero", "daemon-instances.yaml");
+      writeFileSync(registryPath, "instances:\n  core:\n    github_repo: craigoley/remudero\n  arcade:\n    github_repo: craigoley/wreckterra\n");
+      const ledgerPath = join(root, "state/ledger.ndjson");
+      mkdirSync(join(root, "state"), { recursive: true });
+      writeFileSync(ledgerPath, "");
+      let started = 0;
+      const gateway = ratifyCliGateway(repoRoot, join(root, "logs"), { ledgerPath, freshTree: () => { started += 1; throw new Error("no plan child may start"); } });
+      const panelGraph = { root: repoRoot, planPath: join(root, "plan/tasks.yaml"), ledgerPath, github: { prView: () => null }, statusGithub: fakeGitHub(), ratify: gateway };
+      const app = createService({ tokens: { read: "fixture-read", write: "fixture-write" }, operatorSession: identity,
+        routes: [...assembled(root), ...assembled(root, "/v1/products/case", { panelGraph, instances: { registryPath, stateBase } })] });
+      await new Promise<void>((resolve) => app.listen(0, "127.0.0.1", resolve));
+      t.after(() => new Promise<void>((resolve, reject) => app.close((error) => error ? reject(error) : resolve())));
+      const base = `http://127.0.0.1:${(app.address() as AddressInfo).port}`;
+      const send = async (body: unknown) => {
+        const response = await fetch(`${base}/v1/products/case`, { method: "POST", headers: { authorization: "Bearer fixture-write",
+          "x-test-session": "alice", "content-type": "application/json" }, body: JSON.stringify(body) });
+        const reply = await response.json() as { error?: string; productId: string; planOperation?: unknown };
+        assert.deepEqual(violations(reply, declaredBody("/v1/products/case", "POST", response.status)), [], "the refusal matches its declared contract");
+        return { status: response.status, body: reply };
+      };
+      const saved = await send({ version: "product-case-v1", action: "import", command });
+      const productId = saved.body.productId;
+      assert.equal((await send({ version: "product-case-v1", action: "adopt", command: adopt(productId) })).status, 200);
+      const journals = join(root, "state", "products", "v1", "plan-operations");
+      const refused = await send({ version: "product-case-v1", action: "propose", command: { requestId: "config-propose-0001", productId,
+        expectedRevision: 2, expectedObjectiveRevision: 1 } });
+      assert.deepEqual([refused.status, refused.body.error], [409, code], "a named recoverable state, never a generic unavailable");
+      assert.equal(refused.body.planOperation, undefined);
+      assert.ok(!existsSync(journals) || readdirSync(journals).every((entry) => !entry.endsWith(".json")), "no operation journal was written");
+      assert.equal(readFileSync(ledgerPath, "utf8"), "", "no handoff row reached the ledger");
+      assert.equal(started, 0, "no native plan child started");
+      assert.ok(!shim.calls().some((call) => call.includes("-X POST")));
+    });
+  }
+});
+
 async function ownedServedPlan(t: TestContext) {
   const closures: Array<() => void | Promise<void>> = [];
   const scope = { after: (close: () => void | Promise<void>) => { closures.unshift(close); } };
@@ -1079,6 +1161,7 @@ setTimeout(() => process.exit(2), 30000).unref();
   mkdirSync(join(root, "repos"));
   renameSync(target.dir, checkout);
   seed.git("-C", checkout, "remote", "add", "origin", "https://github.com/craigoley/wreckterra.git");
+  commitRunnerConfig(checkout, VALID_MOUNTS);
   const targetHead = seed.git("-C", checkout, "rev-parse", "HEAD");
   const shim = ghShim([
     { when: "commits/main", stdout: JSON.stringify({ sha: targetHead }) },

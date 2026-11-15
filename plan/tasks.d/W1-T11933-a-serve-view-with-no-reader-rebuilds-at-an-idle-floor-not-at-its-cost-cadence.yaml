@@ -18,7 +18,7 @@
   files:
     - src/lib/read-model-worker.ts
     - test/lib/an-idle-serve-view-rebuilds-at-its-idle-floor.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: A view with no read for longer than the idle window rebuilds no more often than once per idle floor, so its build count over ten fake-clock minutes drops at least tenfold against today

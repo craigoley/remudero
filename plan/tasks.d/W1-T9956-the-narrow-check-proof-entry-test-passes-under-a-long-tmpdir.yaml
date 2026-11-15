@@ -12,7 +12,7 @@
   plan_refs: [W1-T7728, W1-T8775]
   files:
     - test/a-check-proof-child-loads-a-narrow-entry.test.ts
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

@@ -1,0 +1,37 @@
+- id: W1-T12223
+  title: "Map the ledger-step registry in the ledger forensics page: DECISION_RELEVANT, RENDER_RELEVANT and MODEL_ATTRIBUTION sets in src/lib/ledger.ts"
+  repo: remudero
+  depends_on: []
+  type: recon
+  verify: human
+  risk: low
+  status: queued
+  attempts: 0
+  files:
+    - docs/forensics/ledger.md
+    - src/lib/ledger.ts
+  acceptance:
+    - claim: docs/forensics/ledger.md names the three step sets in src/lib/ledger.ts and the membership rule for which set a new step joins
+      proof: "demonstration: the ledger forensics page lists DECISION_RELEVANT_LEDGER_STEPS, RENDER_RELEVANT_LEDGER_STEPS and MODEL_ATTRIBUTION_LEDGER_STEPS, each with its membership rule"
+    - claim: the page records that review.provider_provenance is already a DECISION_RELEVANT_LEDGER_STEPS member with its W1-T10221 reader, and that a literal grep of the tree missed it while a read of src/lib/ledger.ts finds it
+      proof: "demonstration: the page cites src/lib/ledger.ts for that membership and records the grep miss as a tooling note"
+  origin: followup:W1-T11261-1794331705830:2026-11-10T17:32:50.151Z:0
+  rationale: >-
+    From the 2026-11-10 follow-up on W1-T11261-1794331705830, ratified via rmd approve:
+  
+    follow-up harvest [research]: locate the ledger-step registry (grep a known step such as
+    `review.provider_provenance` across `src/`), because the design says to register the new step
+    wherever ledger steps are declared. — from W1-T11261 (run W1-T11261-1794331705830)
+  risk_ruling:
+    verdict: "low"
+    action: escalate
+    confidence: 0.85
+    reasons:
+      - "The description frames a documentation-only recon task, with acceptance criteria that call only for writing to docs/forensics/ledger.md."
+      - "Nothing in the description or files list touches secrets, auth, permissions, deletion, merge/deploy/review policy, or irreversible actions, and no operator-only decision is requested."
+      - "The findings can be verified by reading src/lib/ledger.ts, and both declared files exist at the base."
+      - "The gates state is clean: author class is operator, and the family track record is strong (25 merged, Beta mean 0.88)."
+      - "src/lib/ledger.ts is declared as touched despite the recon framing, and no actual change view was supplied, so I cannot confirm it is read-only. CI and review would still apply."
+      - "the judge said proceed, but W1-T12223: at verify: auto it fails lint (proof-dialect)"
+    judged_at: "2026-11-11T02:59:41.121Z"
+    pin: "1ac504a251de80c15a3787ec3a2234cd47fcef36df40ddd929ccef210f94a26f"

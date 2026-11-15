@@ -91,8 +91,8 @@ function sink() {
 test("the mapper reads five_hour into the session window and model_scoped labels as DATA", () => {
   const snap = usageSnapshotFromSdk(READING)!;
   assert.equal(snap.billingMode, "subscription");
-  assert.equal(snap.session.percentUsed, 18);
-  assert.equal(snap.session.resetsAt, "2026-08-12T17:00:00Z");
+  assert.equal(snap.session?.percentUsed, 18);
+  assert.equal(snap.session?.resetsAt, "2026-08-12T17:00:00Z");
   // The server-supplied label, never hardcoded — the same data-not-literal discipline parseUsage has.
   assert.equal(snap.weekly.find((w) => w.label === "Fable")?.percentUsed, 31);
 });
@@ -166,7 +166,7 @@ test("THE LAW, ASSERTED DIRECTLY: no unreadable state ever yields a 0%-used snap
 
 test("a healthy reading maps and the probe tears the session down", async () => {
   const q = fakeQuery({ usage: async () => READING });
-  assert.equal((await readUsageSnapshotViaSdk(q.fn, () => {}, SDK_CONTEXT))?.session.percentUsed, 18);
+  assert.equal((await readUsageSnapshotViaSdk(q.fn, () => {}, SDK_CONTEXT))?.session?.percentUsed, 18);
   assert.equal(q.calls.returned, 1, "the probe session is closed, not left open");
 });
 
@@ -194,7 +194,7 @@ test("the SDK usage reader forwards Linux credential context without reading the
       return: async () => { closed++; },
     };
   }, () => {}, SDK_CONTEXT);
-  assert.equal(result?.session.percentUsed, 18);
+  assert.equal(result?.session?.percentUsed, 18);
   assert.equal(closed, 1);
 });
 
@@ -208,7 +208,7 @@ test("the CLI probe still runs when the SDK path yields nothing", async () => {
     viaCli: () => { cliRan++; return cliSnap; },
   });
   assert.equal(cliRan, 1, "the working path is retained, not replaced");
-  assert.equal(out?.session.percentUsed, 42);
+  assert.equal(out?.session?.percentUsed, 42);
 });
 
 test("the SDK is PREFERRED — a successful SDK read means the CLI is never spawned", async () => {
@@ -217,7 +217,7 @@ test("the SDK is PREFERRED — a successful SDK read means the CLI is never spaw
     viaSdk: async () => ({ billingMode: "subscription", session: { percentUsed: 7 }, weekly: [] }),
     viaCli: () => { cliRan++; return undefined; },
   });
-  assert.equal(out?.session.percentUsed, 7);
+  assert.equal(out?.session?.percentUsed, 7);
   assert.equal(cliRan, 0, "no CLI spawn when the SDK answered");
 });
 
@@ -245,7 +245,7 @@ test("a THROW while opening the session falls back to the CLI rather than breaki
     viaCli: () => { cliRan++; return { billingMode: "unknown", session: { percentUsed: 3 }, weekly: [] }; },
   });
   assert.equal(cliRan, 1, "an experimental source must not take down a drain the CLI could serve");
-  assert.equal(out?.session.percentUsed, 3);
+  assert.equal(out?.session?.percentUsed, 3);
 });
 
 test("but the LIVE-SPAWN GUARD is re-thrown, never swallowed into a silent fallback", async () => {

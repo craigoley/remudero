@@ -6,8 +6,10 @@
  * 18,250. #12388 had lowered the row on a stale base, so main's own row was lowered under it.
  *
  * {@link judgeMergedRatchets} is pure over two readers: the merge-tree of (main tip, PR head) and
- * main's tip. It counts with each gate's own counter (scripts/comment-load-ratchet.mjs,
- * scripts/clock-signature-ratchet.mjs), never a copy, and names every gate it does not count.
+ * main's tip. It counts with each gate's own counter (the scripts/ modules imported below), never a
+ * copy, and names every gate it does not count. W1-T12509: every recorded-count gate whose counter
+ * reads text is counted, not only clock-signature. A gate whose scope and baseline the merge does not
+ * land holds the same blobs on both trees, so its two counts are equal and it is counted without a read.
  * {@link readMergedRatchetInputsSteps} is the I/O: merge-tree and blob reads in the managed clone,
  * no worktree, no npm and no CI run.
  */
@@ -18,12 +20,24 @@ import type { PlanSafetyGit, PlanSafetyGitResult } from "./plan-pr-merge-safety.
 import { MEASURED_ROOTS } from "../../scripts/comment-load-ratchet.mjs";
 // @ts-expect-error a plain .mjs script with no declaration file, as src/lib/plan-index.ts imports its sibling.
 import { DEFAULT_BASELINE_RELATIVE_PATH as CLOCK_BASELINE, readBaseline as readClockBaseline, scanClockSignaturesFromText } from "../../scripts/clock-signature-ratchet.mjs";
+// @ts-expect-error a plain .mjs script with no declaration file, as src/lib/plan-index.ts imports its sibling.
+import { DEFAULT_BASELINE_RELATIVE_PATH as SOURCE_SIZE_BASELINE, ceilingFor, countLines, readBaseline as readSourceSizeBaseline } from "../../scripts/source-size-ratchet.mjs";
+// @ts-expect-error a plain .mjs script with no declaration file, as src/lib/plan-index.ts imports its sibling.
+import { FIXTURE_COPY_CENSUS_FILENAME, FIXTURE_COPY_EXCLUDED_DIR, FIXTURE_COPY_SIGNATURES, countFixtureCopiesInTexts } from "../../scripts/fixture-copy-census.mjs";
+// @ts-expect-error a plain .mjs script with no declaration file, as src/lib/plan-index.ts imports its sibling.
+import { DEPS_INTERFACE_BASELINE, DEPS_INTERFACE_CEILING_KEYS, depsInterfaceCounts } from "../../scripts/deps-interface-census.mjs";
+// @ts-expect-error a plain .mjs script with no declaration file, as src/lib/plan-index.ts imports its sibling.
+import { evaluateRatchet as evaluateClaudeMdCap, foldDebtCeiling } from "../../scripts/claude-md-budget-ratchet.mjs";
 
 export type MergedRatchetVerdictName = "clean" | "crossing" | "stale-lowering" | "unread";
 
+export const COUNTED_RATCHET_GATES = ["clock-signature", "source-size", "fixture-copy", "deps-interface", "claude-md-budget"] as const;
+
+export type CountedRatchetGate = (typeof COUNTED_RATCHET_GATES)[number];
+
 /** One count over its ceiling on the merged tree. `prCeiling` is the row as the merge lands it. */
 export interface MergedRatchetRow {
-  gate: "comment-load" | "clock-signature";
+  gate: "comment-load" | CountedRatchetGate;
   path: string;
   field?: string;
   verdict: "crossing" | "stale-lowering";
@@ -37,23 +51,17 @@ export interface MergedRatchetRow {
 /** A gate this judge does not count, and why: never read as clean. */
 export interface UncountedRatchetGate {
   gate: string;
-  class: "run-derived" | "delta-only" | "population" | "advisory";
+  class: "run-derived" | "advisory" | "needs-worktree" | "test-suite-counter" | "import-ring";
+  reason?: string;
 }
-
-export const COUNTED_RATCHET_GATES = ["clock-signature"] as const;
 
 export const UNCOUNTED_RATCHET_GATES: readonly UncountedRatchetGate[] = [
   { gate: "comment-load", class: "advisory" },
   { gate: "coverage", class: "run-derived" },
   { gate: "mutation", class: "run-derived" },
-  { gate: "source-size", class: "delta-only" },
-  // Whole-population counts: each needs every file's text on both trees, not only the changed paths.
-  { gate: "fixture-copy", class: "population" },
-  { gate: "house-layout", class: "population" },
-  { gate: "deps-interface", class: "population" },
-  { gate: "affected-reach", class: "population" },
-  { gate: "learnings-budget", class: "population" },
-  { gate: "claude-md-budget", class: "population" },
+  { gate: "learnings-budget", class: "needs-worktree", reason: "its counter (loadCorpus, loadShardEntries) reads shard files from a directory on disk" },
+  { gate: "affected-reach", class: "test-suite-counter", reason: "its counter (measureReach) lives in a test suite, which runs when imported" },
+  { gate: "house-layout", class: "import-ring", reason: "its census module names the run-task and sweep command files as paths, so importing it here closes an import ring through the sweep" },
 ];
 
 export interface MergedRatchetJudgement {
@@ -100,13 +108,40 @@ export type MergedRatchetInputs =
       measuredFiles: string[];
       readMerged: (path: string) => string | null;
       readMain: (path: string) => string | null;
+      /** The paths whose blob differs between main's tip and the merged tree. Absent: `changed`. */
+      landing?: string[];
+      /** The merged tree's files in the population gates' scope; both readers serve each one. */
+      populationFiles?: string[];
+      /** Why the population could not be read: each population gate the merge touches is then unread. */
+      populationUnread?: string;
     }
   | { upToDate: true; mainSha: string; headSha: string }
   | { error: string; mainSha?: string; headSha?: string };
 
+type TreeInputs = Extract<MergedRatchetInputs, { changed: string[] }>;
+
 /** The clock-signature census's own scope: a src TypeScript file. */
 export const CLOCK_SCOPE_RE = /^src\/.+\.ts$/;
 const CLOCK_FIELDS = ["legacy", "dateNow", "newDate"] as const;
+const CLAUDE_MD = "CLAUDE.md";
+const CLAUDE_MD_BASELINE = "scripts/claude-md-budget-baseline.json";
+const FIXTURE_COPY_BASELINE = "scripts/fixture-copy-baseline.json";
+/** The most population bytes one judgement reads from main's tip: under the 64 MiB stdout cap of one git call. */
+const POPULATION_BYTES_BOUND = 48 * 1024 * 1024;
+
+/** The fixture-copy census's own population: every test/**\/*.test.ts but test/fixtures/** and the census suite. */
+function isFixtureCopyPath(path: string): boolean {
+  return path.startsWith("test/") && path.endsWith(".test.ts") && !path.startsWith(`test/${FIXTURE_COPY_EXCLUDED_DIR}/`) &&
+    path.slice(path.lastIndexOf("/") + 1) !== FIXTURE_COPY_CENSUS_FILENAME;
+}
+
+/** The population roots a landing diff makes the judge count: src for deps-interface, test for fixture-copy. */
+function populationRoots(landing: readonly string[]): Array<"src" | "test"> {
+  const roots: Array<"src" | "test"> = [];
+  if (landing.some((p) => CLOCK_SCOPE_RE.test(p)) || landing.includes(DEPS_INTERFACE_BASELINE)) roots.push("src");
+  if (landing.some(isFixtureCopyPath) || landing.includes(FIXTURE_COPY_BASELINE)) roots.push("test");
+  return roots;
+}
 
 /** One count's verdict. Over the merged row but within main's: the PR's row was lowered on a stale
  *  base. Over main's too: a crossing, unless main already carried it and this merge grew nothing. */
@@ -121,7 +156,13 @@ function baselineOf<T>(text: string | null, parse: (t: string, p: string) => T, 
   return text === null ? {} : parse(text, path);
 }
 
-function clockRows(input: Extract<MergedRatchetInputs, { changed: string[] }>): MergedRatchetRow[] {
+const parseJson = (text: string): Record<string, unknown> => JSON.parse(text) as Record<string, unknown>;
+
+function landingOf(input: TreeInputs): string[] {
+  return input.landing ?? input.changed;
+}
+
+function clockRows(input: TreeInputs): MergedRatchetRow[] {
   type ClockRow = Partial<Record<(typeof CLOCK_FIELDS)[number], number>>;
   const merged = baselineOf(input.readMerged(CLOCK_BASELINE), readClockBaseline, CLOCK_BASELINE) as Record<string, ClockRow>;
   const main = baselineOf(input.readMain(CLOCK_BASELINE), readClockBaseline, CLOCK_BASELINE) as Record<string, ClockRow>;
@@ -144,21 +185,138 @@ function clockRows(input: Extract<MergedRatchetInputs, { changed: string[] }>): 
   return rows;
 }
 
+/** Per-file line ceilings (scripts/source-size-ratchet.mjs): each src file the merge lands, and every row when it lands the baseline. */
+function sourceSizeRows(input: TreeInputs): MergedRatchetRow[] {
+  const landing = landingOf(input);
+  const merged = baselineOf(input.readMerged(SOURCE_SIZE_BASELINE), readSourceSizeBaseline, SOURCE_SIZE_BASELINE) as Record<string, number>;
+  const main = baselineOf(input.readMain(SOURCE_SIZE_BASELINE), readSourceSizeBaseline, SOURCE_SIZE_BASELINE) as Record<string, number>;
+  const paths = new Set(landing.filter((p) => CLOCK_SCOPE_RE.test(p)));
+  if (landing.includes(SOURCE_SIZE_BASELINE)) for (const key of Object.keys(merged)) paths.add(key);
+  const rows: MergedRatchetRow[] = [];
+  for (const path of [...paths].sort()) {
+    const prCeiling = merged[path];
+    const text = input.readMerged(path);
+    // A file with no row is new to the gate, which records it at its bucket: nothing to cross.
+    if (prCeiling === undefined || text === null) continue;
+    const lines: number = countLines(text);
+    const mainText = input.readMain(path);
+    const mainLines: number = mainText === null ? 0 : countLines(mainText);
+    const mainCeiling = main[path] ?? (ceilingFor(mainLines) as number);
+    const verdict = judgeCount(lines, prCeiling, mainLines, mainCeiling);
+    if (verdict) rows.push({ gate: "source-size", path, verdict, merged: lines, mainCeiling, prCeiling, rederived: ceilingFor(lines) as number });
+  }
+  return rows;
+}
+
+/** Both trees' texts over one population scope. Main's set is the merged listing with each landed path read at main instead.
+ *  With no population listing, `measuredFiles` (the merged tree's listing of MEASURED_ROOTS) lists a scope under one of those roots. */
+function populationTexts(input: TreeInputs, root: "src" | "test", inScope: (path: string) => boolean): { merged: Map<string, string>; main: Map<string, string> } | { reason: string } {
+  if (input.populationUnread !== undefined) return { reason: `the tree could not be read: ${input.populationUnread}` };
+  const listing = input.populationFiles ?? ((MEASURED_ROOTS as string[]).includes(root) ? input.measuredFiles : undefined);
+  if (listing === undefined) return { reason: `the tree could not be read: no listing of ${root}/ was read` };
+  const merged = new Map<string, string>();
+  const main = new Map<string, string>();
+  for (const path of new Set([...listing, ...landingOf(input)])) {
+    if (!inScope(path)) continue;
+    const m = input.readMerged(path);
+    if (m !== null) merged.set(path, m);
+    const b = input.readMain(path);
+    if (b !== null) main.set(path, b);
+  }
+  return { merged, main };
+}
+
+/** One row per recorded field whose merged count crosses: `counts` are the gate's own counter's output on each tree. */
+function recordedFieldRows(gate: CountedRatchetGate, baselinePath: string, input: TreeInputs, fields: ReadonlyArray<[count: string, key: string]>,
+  merged: Record<string, number>, main: Record<string, number>): MergedRatchetRow[] {
+  const prBaseline = baselineOf(input.readMerged(baselinePath), parseJson, baselinePath) as Record<string, unknown>;
+  const mainBaseline = baselineOf(input.readMain(baselinePath), parseJson, baselinePath) as Record<string, unknown>;
+  const rows: MergedRatchetRow[] = [];
+  for (const [count, key] of fields) {
+    const prCeiling = typeof prBaseline[key] === "number" ? (prBaseline[key] as number) : undefined;
+    if (prCeiling === undefined) continue;
+    const mainCeiling = typeof mainBaseline[key] === "number" ? (mainBaseline[key] as number) : Infinity;
+    const verdict = judgeCount(merged[count]!, prCeiling, main[count]!, mainCeiling);
+    if (verdict) rows.push({ gate, path: baselinePath, field: key, verdict, merged: merged[count]!, mainCeiling, prCeiling, rederived: merged[count]! });
+  }
+  return rows;
+}
+
+type GateResult = MergedRatchetRow[] | { reason: string };
+
+function fixtureCopyRows(input: TreeInputs): GateResult {
+  const landing = landingOf(input);
+  if (!landing.some(isFixtureCopyPath) && !landing.includes(FIXTURE_COPY_BASELINE)) return [];
+  const texts = populationTexts(input, "test", isFixtureCopyPath);
+  if ("reason" in texts) return texts;
+  const count = (m: Map<string, string>) => countFixtureCopiesInTexts([...m].map(([p, t]) => [p.slice("test/".length), t])) as Record<string, number>;
+  const fields = (FIXTURE_COPY_SIGNATURES as string[]).map((s): [string, string] => [s, s]);
+  return recordedFieldRows("fixture-copy", FIXTURE_COPY_BASELINE, input, fields, count(texts.merged), count(texts.main));
+}
+
+function depsInterfaceRows(input: TreeInputs): GateResult {
+  const landing = landingOf(input);
+  if (!landing.some((p) => CLOCK_SCOPE_RE.test(p)) && !landing.includes(DEPS_INTERFACE_BASELINE)) return [];
+  const texts = populationTexts(input, "src", (p) => CLOCK_SCOPE_RE.test(p));
+  if ("reason" in texts) return texts;
+  const fields = Object.entries(DEPS_INTERFACE_CEILING_KEYS as Record<string, string>);
+  const count = (m: Map<string, string>) => depsInterfaceCounts(m.values()) as Record<string, number>;
+  return recordedFieldRows("deps-interface", DEPS_INTERFACE_BASELINE, input, fields, count(texts.merged), count(texts.main));
+}
+
+/** The byte count past which scripts/claude-md-budget-ratchet.mjs stops a change rather than filing a fold: the fold-debt ceiling, never under the cap. */
+function claudeMdStopsPast(baseline: Record<string, unknown>): number | undefined {
+  evaluateClaudeMdCap(0, baseline); // the gate's own check of its cap: a cap that is not a number throws
+  if (typeof baseline.capBytes !== "number") return undefined;
+  const fold = foldDebtCeiling(baseline) as number | null;
+  return Math.max(baseline.capBytes, fold ?? baseline.capBytes);
+}
+
+function claudeMdRows(input: TreeInputs): MergedRatchetRow[] {
+  const landing = landingOf(input);
+  if (!landing.includes(CLAUDE_MD) && !landing.includes(CLAUDE_MD_BASELINE)) return [];
+  const prCeiling = claudeMdStopsPast(baselineOf(input.readMerged(CLAUDE_MD_BASELINE), parseJson, CLAUDE_MD_BASELINE));
+  const text = input.readMerged(CLAUDE_MD);
+  if (prCeiling === undefined || text === null) return [];
+  const bytes = Buffer.byteLength(text, "utf8");
+  const mainText = input.readMain(CLAUDE_MD);
+  const mainBytes = mainText === null ? 0 : Buffer.byteLength(mainText, "utf8");
+  const mainCeiling = claudeMdStopsPast(baselineOf(input.readMain(CLAUDE_MD_BASELINE), parseJson, CLAUDE_MD_BASELINE)) ?? Infinity;
+  const verdict = judgeCount(bytes, prCeiling, mainBytes, mainCeiling);
+  return verdict ? [{ gate: "claude-md-budget", path: CLAUDE_MD, verdict, merged: bytes, mainCeiling, prCeiling, rederived: bytes }] : [];
+}
+
+const GATE_ROWS: Record<CountedRatchetGate, (input: TreeInputs) => GateResult> = {
+  "clock-signature": clockRows,
+  "source-size": sourceSizeRows,
+  "fixture-copy": fixtureCopyRows,
+  "deps-interface": depsInterfaceRows,
+  "claude-md-budget": claudeMdRows,
+};
+
 /** The ONE verdict the arm, the direct merge and the armed re-judge consult. A read or counter that
- *  fails is `unread`, never `clean`: the caller proceeds as before with the reason on its row. */
+ *  fails is `unread` for that gate, never `clean`: a crossing elsewhere still holds, and otherwise the
+ *  caller proceeds as before with the reason on its row. */
 export function judgeMergedRatchets(input: MergedRatchetInputs): MergedRatchetJudgement {
   const shas = { ...(input.mainSha !== undefined ? { mainSha: input.mainSha } : {}), ...(input.headSha !== undefined ? { headSha: input.headSha } : {}) };
   const base = { counted: [] as string[], uncounted: [...UNCOUNTED_RATCHET_GATES], ...shas };
   if ("error" in input) return { verdict: "unread", rows: [], ...base, reason: input.error };
   if ("upToDate" in input) return { verdict: "clean", rows: [], ...base, reason: "behind_by 0: the merged tree is the head its CI counted" };
-  let rows: MergedRatchetRow[];
-  try {
-    rows = clockRows(input);
-  } catch (e) {
-    return { verdict: "unread", rows: [], ...base, reason: `a ratchet counter threw: ${String((e as Error)?.message ?? e)}` };
+  const rows: MergedRatchetRow[] = [];
+  const counted: string[] = [];
+  const unread: string[] = [];
+  for (const gate of COUNTED_RATCHET_GATES) {
+    let result: GateResult;
+    try {
+      result = GATE_ROWS[gate](input);
+    } catch (e) {
+      result = { reason: `a ratchet counter threw: ${String((e as Error)?.message ?? e)}` };
+    }
+    if ("reason" in result) unread.push(`${gate}: ${result.reason}`);
+    else { rows.push(...result); counted.push(gate); }
   }
-  const verdict = rows.some((r) => r.verdict === "crossing") ? "crossing" : rows.length > 0 ? "stale-lowering" : "clean";
-  return { verdict, rows, ...base, counted: [...COUNTED_RATCHET_GATES] };
+  const verdict = rows.some((r) => r.verdict === "crossing") ? "crossing" : rows.length > 0 ? "stale-lowering" : unread.length > 0 ? "unread" : "clean";
+  return { verdict, rows, ...base, counted, ...(unread.length > 0 ? { reason: unread.join("; ") } : {}) };
 }
 
 /** Whether a verdict holds the arm or the merge and asks for a refresh. */
@@ -166,13 +324,20 @@ export function ratchetVerdictHolds(judgement: Pick<MergedRatchetJudgement, "ver
   return judgement?.verdict === "crossing" || judgement?.verdict === "stale-lowering";
 }
 
-/** The paths the judge will read on either tree, so the I/O reads them in one batch per tree. */
-export function mergedRatchetReadSet(changed: readonly string[], baselines: ReadonlyArray<string | null>): string[] {
-  const paths = new Set([...changed, CLOCK_BASELINE]);
-  const baselineChanged = changed.includes(CLOCK_BASELINE);
-  if (baselineChanged) {
+/** The baselines whose rows name paths: when one changes, every path it names is read on both trees.
+ *  Clock-signature reads its rows when either side changed it; source-size only when the merge lands it. */
+const PATH_KEYED_BASELINES = [CLOCK_BASELINE, SOURCE_SIZE_BASELINE] as string[];
+const SINGLE_FILE_READS = [FIXTURE_COPY_BASELINE, DEPS_INTERFACE_BASELINE, CLAUDE_MD, CLAUDE_MD_BASELINE];
+
+/** The paths the judge will read on either tree, so the I/O reads them in one batch per tree.
+ *  `baselines` holds each path-keyed baseline's text on the two trees. */
+export function mergedRatchetReadSet(changed: readonly string[], baselines: ReadonlyMap<string, ReadonlyArray<string | null>>,
+  landing: readonly string[] = changed): string[] {
+  const paths = new Set([...changed, ...PATH_KEYED_BASELINES, ...SINGLE_FILE_READS]);
+  for (const [baseline, texts] of baselines) {
+    if (!(baseline === CLOCK_BASELINE ? changed : landing).includes(baseline)) continue;
     // A baseline that does not parse throws here, and the read that called this rules it unread.
-    for (const text of baselines) if (text !== null) for (const key of Object.keys(JSON.parse(text) as object)) if (key !== "_comment") paths.add(key);
+    for (const text of texts) if (text !== null) for (const key of Object.keys(JSON.parse(text) as object)) if (key !== "_comment") paths.add(key);
   }
   return [...paths].sort();
 }
@@ -194,6 +359,22 @@ export function parseBlobBatchAllowingMissing(raw: string, paths: readonly strin
     off += size + 1;
   }
   return out;
+}
+
+/** `git ls-tree -r -l -z` rows in the population scope: regular blobs only, as the census walks see them. */
+function parsePopulationListing(raw: string): { paths: string[]; bytes: number } | { error: string } {
+  const paths: string[] = [];
+  let bytes = 0;
+  for (const record of raw.split("\0")) {
+    if (record === "") continue;
+    const m = /^(\d+) (\w+) [0-9a-f]+ +(\d+|-)\t(.+)$/s.exec(record);
+    if (!m) return { error: `git ls-tree -l printed a row it could not parse: ${record.slice(0, 120)}` };
+    const [, mode, type, size, path] = m as unknown as [string, string, string, string, string];
+    if (type !== "blob" || mode === "120000" || !(CLOCK_SCOPE_RE.test(path) || isFixtureCopyPath(path))) continue;
+    paths.push(path);
+    bytes += Number(size);
+  }
+  return { paths, bytes };
 }
 
 function* git(run: PlanSafetyGit, args: readonly string[], stdin?: string): Steps<PlanSafetyGitResult> {
@@ -237,10 +418,11 @@ export function* readMergedRatchetInputsSteps(
     const tree = merged.stdout.split("\n")[0]?.trim() ?? "";
     if (merged.status !== 0 || !/^[0-9a-f]{40,64}$/.test(tree)) return { error: failed("git merge-tree", merged), mainSha, headSha };
     const changed = new Set<string>();
+    const landing = new Set<string>();
     for (const [from, to] of [[mainSha, tree], [mb, mainSha]] as const) {
       const diff = yield* git(run, ["diff", "--name-only", "--no-renames", from, to]);
       if (diff.status !== 0) return { error: failed("git diff --name-only", diff), mainSha, headSha };
-      for (const p of diff.stdout.split("\n")) if (p.trim()) changed.add(p.trim());
+      for (const p of diff.stdout.split("\n")) if (p.trim()) { changed.add(p.trim()); if (from === mainSha) landing.add(p.trim()); }
     }
     const listing = yield* git(run, ["ls-tree", "-r", "--name-only", tree, "--", ...MEASURED_ROOTS]);
     if (listing.status !== 0) return { error: failed("git ls-tree", listing), mainSha, headSha };
@@ -250,16 +432,36 @@ export function* readMergedRatchetInputsSteps(
       if (res.status !== 0) throw new Error(failed("git cat-file --batch", res));
       return parseBlobBatchAllowingMissing(res.stdout, paths);
     };
-    const baselinePaths = [CLOCK_BASELINE];
-    const baselines = [...(yield* readBatch(tree, baselinePaths)).values(), ...(yield* readBatch(mainSha, baselinePaths)).values()];
-    const paths = mergedRatchetReadSet([...changed], baselines);
+    const mergedKeyed = yield* readBatch(tree, PATH_KEYED_BASELINES);
+    const mainKeyed = yield* readBatch(mainSha, PATH_KEYED_BASELINES);
+    const baselines = new Map(PATH_KEYED_BASELINES.map((p) => [p, [mergedKeyed.get(p) ?? null, mainKeyed.get(p) ?? null]] as const));
+    const paths = mergedRatchetReadSet([...changed], baselines, [...landing]);
+    // The population gates read every file in their scope, but only when the merge lands one: an
+    // unchanged file is the same blob on both trees, so it is read once, at main.
+    let population: { populationFiles: string[] } | { populationUnread: string } | Record<string, never> = {};
+    let mainOnly: string[] = [];
+    const roots = populationRoots([...landing]);
+    if (roots.length > 0) {
+      const sized = yield* git(run, ["ls-tree", "-r", "-l", "-z", tree, "--", ...roots]);
+      const parsed = sized.status === 0 ? parsePopulationListing(sized.stdout) : { error: failed("git ls-tree -l", sized) };
+      if ("error" in parsed) population = { populationUnread: parsed.error };
+      else if (parsed.bytes > POPULATION_BYTES_BOUND) population = { populationUnread: `the ${roots.join(" and ")} population is ${parsed.bytes} bytes, past the ${POPULATION_BYTES_BOUND}-byte bound` };
+      else {
+        population = { populationFiles: parsed.paths };
+        const readSet = new Set(paths);
+        mainOnly = parsed.paths.filter((p) => !readSet.has(p));
+      }
+    }
     const mergedBlobs = yield* readBatch(tree, paths);
-    const mainBlobs = yield* readBatch(mainSha, paths);
+    const mainBlobs = yield* readBatch(mainSha, [...paths, ...mainOnly]);
+    const sameOnBoth = new Set(mainOnly);
     const reader = (blobs: Map<string, string | null>) => (path: string): string | null => {
-      if (!blobs.has(path)) throw new Error(`${path} was not in the read set`);
-      return blobs.get(path)!;
+      if (blobs.has(path)) return blobs.get(path)!;
+      if (sameOnBoth.has(path)) return mainBlobs.get(path)!;
+      throw new Error(`${path} was not in the read set`);
     };
-    return { mainSha, headSha, changed: [...changed].sort(), measuredFiles, readMerged: reader(mergedBlobs), readMain: reader(mainBlobs) };
+    return { mainSha, headSha, changed: [...changed].sort(), measuredFiles, readMerged: reader(mergedBlobs), readMain: reader(mainBlobs),
+      landing: [...landing].sort(), ...population };
   } catch (e) {
     // the failure is the reading: the judge rules it unread, and the arm proceeds as before with it named.
     return { error: String((e as Error)?.message ?? e) };

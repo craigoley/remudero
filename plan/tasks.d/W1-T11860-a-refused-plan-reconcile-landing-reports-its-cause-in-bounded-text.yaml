@@ -15,7 +15,7 @@
   files:
     - src/lib/feedback-landing.ts
     - test/plan/a-refused-plan-reconcile-landing-reports-its-cause-in-bounded-text.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: A refused landing's thrown message is at most 1,000 characters, keeps the start of the refusal and its last 600 characters, and says how many characters it dropped

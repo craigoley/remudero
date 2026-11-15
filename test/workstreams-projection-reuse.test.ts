@@ -253,7 +253,7 @@ test("the view counts what each build reused and audits its reuse on a cadence",
   const instances = [{ name: "core", ledgerDir: stateDir, repo: REPO, planPath }];
   const clock = movingClock(NOW);
   const rows: Array<[string, Record<string, unknown>]> = [];
-  const view = createWorkstreamsView<ReadModelInstanceState>({ instances, ledgerSource, clock, log: (step, extra) => rows.push([step, extra]) });
+  const view = createWorkstreamsView<ReadModelInstanceState>({ instances, ledgerSource, clock, builtRowWindowMs: 0, log: (step, extra) => rows.push([step, extra]) });
   switchViewsOn(stateDir, [WORKSTREAMS_VIEW_NAME]);
   const ticker = createReadModelTicker({ stateDir, instances, views: [view], clock, holder: "workstreams-reuse-test", oracle: "off", post: () => {} });
   onReadModelClose(t, () => ticker.release());
@@ -269,7 +269,7 @@ test("the view counts what each build reused and audits its reuse on a cadence",
   insert(NOW + 1_000);
   const built = rows.filter(([step]) => step === "workstreams.built").map(([, extra]) => extra);
   assert.equal(built.length, 2, JSON.stringify(rows));
-  assert.deepEqual(built[0], { instances: 1, reused: 0, derived: TASKS.length });
+  assert.deepEqual(built[0], { instances: 1, builds: 1, reused: 0, derived: TASKS.length });
   assert.equal(built[1]!.reused, TASKS.length - 1, "B's own row re-derives B alone");
   assert.equal(rows.filter(([step]) => step === "workstreams.reuse_audit").length, 0, "control: no audit inside its cadence");
   insert(NOW + WORKSTREAMS_REUSE_AUDIT_MS + 5_000);

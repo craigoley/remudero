@@ -21,7 +21,7 @@
     - src/run-task.ts
     - test/worker/a-review-slot-is-released-when-its-verdict-posts.test.ts
     - "src/cli/commands/sweep.ts"
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: Once a review has written its terminal outcome (review.posted or review.post_refused), it reports a posted phase, in process and as a run child (through the owned status.json the daemon's child registry reads), and reviewAdmissionBound stops counting it from that moment, while the review's mutex key stays held until the run settles so the same head is not re-admitted

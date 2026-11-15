@@ -17,7 +17,7 @@
     - src/lib/descendant-memory-bound.ts
     - src/lib/host-memory-learning.ts
     - test/memory/a-worker-descendant-over-its-memory-bound-is-stopped.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: While a learned reservation's tree is sampled, a non-root member whose VmRSS exceeds DESCENDANT_RSS_BOUND_MIB (8192) is sent SIGKILL only after a fresh read of its start time still matches the sampled one. One worker.descendant_memory_killed row records the pid, rss_mib, bound_mib, worker class, reservation id and the member's test file when known. A tracked root, a member at or under the bound and a member whose start time changed are never signalled.

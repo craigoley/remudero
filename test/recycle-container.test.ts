@@ -1059,12 +1059,16 @@ test("private registry selection defaults and falsifiers forbid live effects: re
     try {
       const result = fixture.run(mode, serve);
       assert.equal(result.status, 2, `${mode}: ${result.stderr}`);
-      assert.ok(result.calls.some(c => isRun(c) && c.argv.includes("--rm")), "the real bounded probe ran");
+      const imageProbeIndex = result.calls.findIndex(c => isRun(c) && c.argv.includes("--rm"));
+      assert.ok(imageProbeIndex >= 0, "the real bounded probe ran");
       assert.equal(result.calls.some(c => isStop(c) || isRm(c) || (isRun(c) && c.argv.includes("-d"))), false,
         "an unqualified physical mapping or failed reader cannot reach replacement effects");
       assert.equal(result.calls.some(c => c.bin === "forbidden"), false, "GitHub, git, service and installer effects stay trapped");
-      assert.ok(result.calls.filter(c => c.bin === "az").every(c => c.argv.join(" ") === "acr login -n test-registry"),
-        "only the contained synthetic login transport may run before the image probe");
+      const azCalls = result.calls.map((call, index) => ({ call, index })).filter(({ call }) => call.bin === "az");
+      assert.deepEqual(azCalls.map(({ call }) => call.argv.join(" ")),
+        ["login --identity --output none", "acr login -n test-registry"],
+        "only the contained managed-identity and registry login transports may run");
+      assert.ok(azCalls.every(({ index }) => index < imageProbeIndex), "Azure authentication completes before the image probe");
       assert.equal((result.stdout + result.stderr).includes(fixture.root), false);
       assert.equal(existsSync(join(fixture.root, "state/state/PAUSE")), false);
     } finally { fixture.cleanup(); }
@@ -2023,6 +2027,36 @@ test("a recycle with scratch off or an unmounted scratch root launches exactly a
   assert.equal(unmounted.status, 0, unmounted.stderr);
   assert.ok(!(unmounted.calls.find(isRun)?.argv ?? []).some((a) => a.includes(scratch.root)), "an unmounted scratch root is never bound");
   assert.match(unmounted.stdout, /scratch mounts NOT USED .* is not a mounted filesystem/);
+});
+
+// ── W1-T12293: the daemon container keeps its Claude account file ───────────────────────────────
+
+const ACCOUNT_SIDE = "/home/node/.rmd-claude-account.json";
+
+test("W1-T12293 criterion 3: a host account file is mounted read-only at the side path, and the runtime contract checks it", (t) => {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}recycle-account-`));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const claude = join(root, "claude");
+  mkdirSync(claude);
+  const account = `${claude}.json`;
+  writeFileSync(account, "{}\n");
+  const run = runRecycle("good", { extraEnv: { RMD_CLAUDE_DIR: claude, STUB_EXTRA_MOUNTS: `${account}\t${ACCOUNT_SIDE}\tfalse` } });
+  assert.equal(run.status, 0, run.stdout + run.stderr);
+  const argv = run.calls.find(isRun)?.argv ?? [];
+  assert.ok(argv.includes(`${account}:${ACCOUNT_SIDE}:ro`), argv.join(" "));
+  assert.ok(argv.includes(`${claude}:/home/node/.claude`), "the directory mount is unchanged");
+  const unbound = runRecycle("good", { extraEnv: { RMD_CLAUDE_DIR: claude } });
+  assert.notEqual(unbound.status, 0, "a container that came up without the account file mount fails the runtime contract");
+  assert.match(unbound.stdout + unbound.stderr, /FAILED RUNTIME CONTRACT/);
+  const writable = runRecycle("good", { extraEnv: { RMD_CLAUDE_DIR: claude, STUB_EXTRA_MOUNTS: `${account}\t${ACCOUNT_SIDE}\ttrue` } });
+  assert.notEqual(writable.status, 0, "a writable account file mount fails the runtime contract");
+});
+
+test("W1-T12293 criterion 4: a host with no account file recycles as before and prints a note", () => {
+  const run = runRecycle("good");
+  assert.equal(run.status, 0, run.stdout + run.stderr);
+  assert.ok(!(run.calls.find(isRun)?.argv ?? []).some((a) => a.includes(ACCOUNT_SIDE)), "no account file mount");
+  assert.match(run.stdout + run.stderr, /NOTE — no Claude account file at \S*claude\.json/);
 });
 
 // ── W1-T4197: a recycle never lifts a pause it did not write ────────────────────────────────────

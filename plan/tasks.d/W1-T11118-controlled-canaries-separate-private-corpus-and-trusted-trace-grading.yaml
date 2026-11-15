@@ -10,7 +10,7 @@
   risk: high
   band_meaning: span
   priority: 2
-  status: queued
+  status: merged
   attempts: 0
   origin: operator-approved-router-evaluation-plan:2026-11-02
   files:

@@ -19,7 +19,7 @@
     - src/lib/sweep.ts
     - src/cli/commands/daemon.ts
     - test/gardeners/the-focus-gardener-holds-new-dispatch-while-the-stuck-stack-is-deep.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "When the queue reading's stuck owned PR count reaches the base WIP limit and stays there for 30 minutes, the focus gardener answers the new-task queue gate with a deferral of tier focus and writes state/FOCUS naming itself and the reading. When the count falls to half the limit or below and stays there for 30 minutes, it clears that file and the gate answers as before. A reading between the two bounds keeps the current state, a reading that flips back before 30 minutes restarts the wait, removing state/FOCUS by hand releases the hold, and the operator's state/QUIET_HOURS file is never written or removed"

@@ -15,7 +15,7 @@
   files:
     - src/lib/serve.ts
     - test/lib/the-incident-invariants-monitor-reads-the-ledger-incrementally.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: A tick reads only the bytes appended after the previous tick offset and evaluates exactly the invariants a full re-tail would

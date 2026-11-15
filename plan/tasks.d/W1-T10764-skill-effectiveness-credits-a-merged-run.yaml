@@ -10,7 +10,7 @@
   band_meaning: blast-radius
   origin: "operator recon 2026-10-26 (H5): `rmd skill effectiveness` on both approved skills"
   files: [src/lib/skill-workshop.ts, test/learning/skill-effectiveness-credits-a-merged-run.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

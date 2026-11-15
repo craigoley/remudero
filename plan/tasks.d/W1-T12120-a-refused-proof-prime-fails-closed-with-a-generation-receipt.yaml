@@ -1,0 +1,167 @@
+- id: W1-T12120
+  title: "A REFUSED PROOF-MODE DEPENDENCY PRIME FAILS CLOSED WITH ONE ACTIONABLE RECEIPT, AND NEVER LETS A PROOF CHILD RUN ON ANOTHER TREE'S node_modules — on Azure `prime --proof` refused the existing generation with \"immutable dependency payload is writable or unverified\", the sweep kept it as referenced by checkout, the managed worktree continued on the stale canonical clone's node_modules and its check-proof children failed to import tsx; a process-scoped recovery generation primed from current main succeeded without touching the old store. Separately, the worktree prime child inherits NODE_OPTIONS=--import=tsx, so it dies ERR_MODULE_NOT_FOUND in a node_modules-empty target before priming, even with a clean RMD_DEPENDENCY_SEED_ROOT, and falls back the same way"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 16.00
+  risk: high  # Rule 19: one concern (what a prime child yields to its caller, and the env it starts in); the seed module's refusal receipt and child env, its CLI and two caller sites, no change to materialization, verification or the sweep's rules
+  band_meaning: span
+  priority: 1
+  origin: architect
+  plan_refs: [W1-T10949, W1-T10739, W1-T11820, W1-T10508, W1-T6124, W1-T4587, W1-T4193, W1-T2777]
+  files:
+    - src/lib/dependency-seeds.ts
+    - scripts/dependency-seeds.mjs
+    - src/lib/review.ts
+    - src/lib/worker.ts
+    - test/a-refused-proof-prime-fails-closed-with-a-generation-receipt.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "when materializeDependencySeed refuses a ready generation, the thrown refusal carries one receipt naming the generation key and seed path, the mode (proof or development), the verifier's reason and the first offending path with its mode and owner uid, every registered consumer with its checkout, mount namespace and whether that checkout's marker still references the generation, the requesting checkout and its run or claim id when the caller supplies one, and a recovery disposition of kept-referenced or kept-unreferenced naming a fresh process-scoped generation root as the recovery; the prime CLI prints that receipt as JSON and exits non-zero"
+      proof: "unit test: a refused ready generation throws one receipt and the prime CLI prints it as JSON"
+    - claim: "a refusal never repairs or deletes the generation: after it, every payload file's bytes and mode, ready.json and the consumers directory are unchanged, and sweepDependencySeeds still keeps it as referenced by checkout; the existing six-hour idle, open-file and zero-reference rules decide its later removal unchanged"
+      proof: "unit test: a refusal leaves the generation byte- and mode-unchanged and the sweep keeps it as referenced"
+    - claim: "a refused proof prime fails closed for proof execution: ensureDeps and ensureDepsAsync return false with the receipt even when no runner path is required, and provisionWorktreeNodeModules ledgers worktree.node_modules with outcome refused and the receipt, and refuses the worktree as blocked_toolchain, instead of letting it fall back to the canonical clone's or install root's node_modules; a prime that succeeds, or an account with no seed root configured, behaves exactly as today"
+      proof: "unit test: a refused proof prime fails closed in ensureDeps and worktree provisioning"
+    - claim: "the review proof priming reads the refusal receipt"
+      proof: "grep: primeRefusalReceipt( in src/lib/review.ts"
+    - claim: "the managed worktree provisioning reads the refusal receipt"
+      proof: "grep: primeRefusalReceipt( in src/lib/worker.ts"
+    - claim: "provisionWorktreeNodeModules starts the dependency-seeds prime child with an environment whose NODE_OPTIONS keeps every other option but carries no --import, --require, --loader or --experimental-loader entry, so under a parent NODE_OPTIONS of --import=tsx it primes a target worktree that has no node_modules from a healthy seed root and the target gains its own node_modules; with that strip removed the same fixture fails ERR_MODULE_NOT_FOUND before prime runs"
+      proof: "unit test: the prime child env strips loader options and primes a node_modules-empty target"
+    - claim: "with a seed root configured, a worktree prime child that fails without a parseable result (a loader or module-resolution failure such as ERR_MODULE_NOT_FOUND, a non-zero exit, a timeout or unparseable stdout) refuses the worktree as blocked_toolchain with a child-failure receipt naming the exit code or signal, the Node error code, the stderr tail, the seed root, the requesting checkout with its run or claim id, and the fresh process-scoped RMD_DEPENDENCY_SEED_ROOT recovery route, and the worktree never links the canonical clone's or install root's node_modules"
+      proof: "unit test: a prime child failure with a seed root configured refuses the worktree with a child-failure receipt"
+    - claim: "the two faults compose without masking each other: under a parent NODE_OPTIONS of --import=tsx and a referenced generation that is writable or unverified, provisioning reports the generation refusal receipt rather than a loader error, leaves that generation byte- and mode-unchanged, and refuses the worktree; the same parent environment pointed at a fresh healthy RMD_DEPENDENCY_SEED_ROOT primes the target's own node_modules, from which a check-proof child resolves tsx"
+      proof: "unit test: a loader fault and a refused generation compose without masking each other"
+    - claim: "the managed worktree provisioning starts its prime child with the cleared loader environment"
+      proof: "grep: seedPrimeChildEnv( in src/lib/worker.ts"
+  rationale: |
+    OBSERVED this run on the Azure host (operator brief, run PLAN-expand-1794329307533; source-based evidence, not
+    a hypothesis). Supported proof-mode priming refused the existing generation with "immutable dependency
+    payload is writable or unverified". The generation sweep kept it because it is referenced by checkouts. The
+    managed worktree then continued on the stale canonical clone's node_modules, and its check-proof children
+    failed to import tsx. A clean process-scoped recovery generation primed from current main succeeded, so the
+    task could proceed without editing the old store.
+
+    OBSERVED, SECOND CAUSE (operator brief, run PLAN-expand-1794329913526; now proven). The plan command launches
+    with NODE_OPTIONS=--import=tsx. provisionWorktreeNodeModules spawns the standalone scripts/dependency-seeds.mjs
+    in the new target worktree without clearing that relative loader. Node tries to resolve tsx from the target
+    before prime has created node_modules and fails ERR_MODULE_NOT_FOUND. This happens even when
+    RMD_DEPENDENCY_SEED_ROOT points at the clean, supported recovery generations. Separately, a direct supported
+    `prime --proof` on the configured store refuses its already referenced generation as writable or unverified.
+    The caller catches either failure and falls back to the stale canonical clone's node_modules, and every exact
+    plan-body proof check exits 1. Both faults are fixed here, because fixing only one still leaves the fallback.
+
+    RESEARCH (https://nodejs.org/api/modules.html#loading-from-node_modules-folders): a bare specifier resolves
+    from the calling module's directory, then each parent's node_modules, up to the filesystem root. A checkout
+    whose own install is missing does not fail to resolve. It silently resolves whatever install a link or an
+    ancestor supplies, which is how a refused prime turns into a stale-tree run rather than a named refusal.
+    RESEARCH (https://nodejs.org/api/cli.html#--importmodule and https://nodejs.org/api/cli.html#node_optionsoptions):
+    `--import` preloads its module at startup under ECMAScript module resolution rules, starting with the ones in
+    NODE_OPTIONS, and NODE_OPTIONS is read before the command line. So an inherited `--import=tsx` runs before
+    dependency-seeds.mjs's first line and resolves bare `tsx` from the child's cwd, the empty target. The script
+    itself needs no preload: it runs under --experimental-strip-types and installs its own hooks with registerHooks.
+
+    READ in this worktree (the call chain):
+    - src/lib/dependency-seeds.ts verifyImmutableGeneration throws the observed string when any payload entry has
+      a write bit, is not a file or directory, or has another owner. Its own header says "Never repair a published
+      seed in place". materializeDependencySeed calls it on the ready generation, and the throw carries only the
+      message: no key, no seed path, no offending path, no mode, no consumer list.
+    - scripts/dependency-seeds.mjs main() catches it and prints only `dependency-seeds: <message>` to stderr, exit 1.
+    - src/lib/review.ts ensureDeps / ensureDepsAsync spawn `prime <cwd> --proof --root <root>`. They swallow the
+      failure as "best-effort priming" and return runnerIsPresent(), which is true whenever no runner path is
+      required. So a refused proof prime reports dependencies as available.
+    - src/lib/worker.ts provisionWorktreeNodeModules catches the prime child's failure. It warns
+      "dependency seed provisioning refused: ..." and returns "failed". recordWorktreeNodeModules refuses only
+      under refuseSamePackageLockfileMismatch. Otherwise finishWorktreeAdd links workspace installs from repoDir
+      (the canonical clone), and the lane continues.
+    - src/lib/worker.ts provisionWorktreeNodeModules calls execFileLoopBounded(process.execPath, [
+      "--experimental-strip-types", <scripts/dependency-seeds.mjs>, "prime", worktreePath, ...]) with
+      `cwd: worktreePath` and no `env`, so the child inherits the parent's NODE_OPTIONS whole.
+    - src/lib/check-proof.ts resolves its child's tsx with createRequire, so a missing or foreign install
+      surfaces as an import failure in the child, not as a provisioning refusal.
+    - sweepDependencySeeds keeps a generation whose consumer's marker references it ("referenced by checkout").
+      That is correct, and this task does not change it.
+
+    Settled by lookup: is this already filed or already decided? -> No. W1-T10949 (merged) made reuse immutable
+    and owner-reclaimed. W1-T10739 (merged) gave a linked host worktree one command to a proof install.
+    W1-T11820 (queued) changes the Linux proof install method to a hardlink farm. W1-T10508 (queued) reclaims dead
+    seed locks. W1-T6124 (merged) sandboxes ensureDeps' install. None makes a refused prime fail closed or names
+    the generation, consumers and recovery (plan/tasks.d/W1-T10949-*, W1-T10739-*, W1-T11820-*, W1-T10508-*,
+    W1-T6124-*).
+    Settled by lookup: is the loader inheritance already stripped somewhere? -> Only on other paths.
+    withoutNodeTestContext in src/run-task.ts and src/lib/ci-parity.ts drops NODE_OPTIONS around test runs, and
+    src/lib/daemon-memory-policy.ts strips only --max-old-space-size. src/lib/review.ts's prime child runs under
+    proofInstallEnv(), whose PROOF_ENV_ALLOWLIST carries no NODE_OPTIONS, so the review path never inherits the
+    loader. The worker.ts prime child is the one spawn with no env, and seedPrimeChildEnv is new.
+    Settled by lookup: may the refusal repair or delete the generation? -> No. verifyImmutableGeneration's header
+    forbids in-place repair, and sweepDependencySeeds removes only after six idle hours, zero references and a
+    clean open-file scan (src/lib/dependency-seeds.ts). The receipt only reports. Removal stays with the sweep.
+    Settled by lookup: is there a recovery that leaves the old store alone? -> Yes.
+    configuredDependencySeedRoot honours an absolute RMD_DEPENDENCY_SEED_ROOT, and the operator's process-scoped
+    generation from current main succeeded this run. The receipt names that route. It does not perform it.
+    Settled by lookup: is a refusal a strike against the task? -> No. WorktreeNodeModulesRefusedError is already
+    reasonClass blocked_toolchain, which daemon.ts's isSpawnInfraBlocked defers without a strike (W1-T4193).
+    Settled by lookup: does failing closed weaken any gate? -> No. A refused worktree runs no proof, so no task,
+    proof or merge gate is bypassed or relaxed. This task changes what a refused prime yields and the env its
+    child starts in, nothing in review verdicts, CI, the acceptance gate or merge arming.
+    Settled by lookup: does this need W1-T11820 first? -> No. Both touch dependency-seeds.ts, so they serialise by
+    file overlap only. One note for whoever builds W1-T11820: materializeDependencySeed calls
+    setWritable(targetStage, true) after the copy. On a hardlink farm that chmods the seed's shared inodes, which
+    is exactly what this receipt's offending-path field would expose.
+  design: |
+    MEASURE FIRST, read-only, on the Azure store, and put the result in the PR body: the refused generation's key;
+    the first writable or foreign-owned path under it with its mode and uid; its consumers/ rows and which
+    checkouts' markers still reference it. Change no byte of that store. Also record the daemon's and the plan
+    command's NODE_OPTIONS, and the stderr of one worktree prime child started under it.
+
+    1. src/lib/dependency-seeds.ts. Add a typed DependencyGenerationRefusedError and primeRefusalReceipt(error).
+       verifyImmutableGeneration records the offending path, mode and uid. materializeDependencySeed wraps a ready
+       generation's refusal with {generation, seed, mode, reason, offending, consumers, requester, disposition}.
+       The consumers come from the same registry and marker reads sweepDependencySeeds already uses.
+       The disposition is kept-referenced when any consumer's marker still names the seed, otherwise
+       kept-unreferenced. Either one names "prime into a fresh absolute RMD_DEPENDENCY_SEED_ROOT" as the recovery.
+       No setWritable, rmSync or rename touches the seed on this path. An unreadable consumer row is listed as
+       unread and is never dropped.
+    2. src/lib/dependency-seeds.ts. Add seedPrimeChildEnv(parent = process.env): a copy of the parent env whose
+       NODE_OPTIONS drops every --import, --require/-r, --loader and --experimental-loader entry (both `=` and the
+       two-word form) and keeps every other option. If nothing remains, the key is deleted. The script needs no
+       preload, so stripping is the anchor. A future caller that does need a preload must pass it as an absolute
+       file URL resolved from the daemon's own install, never a bare specifier.
+    3. scripts/dependency-seeds.mjs prime: on that error it prints the receipt as one JSON object and returns 1.
+       An optional `--requester <run-or-claim-id>` flag passes through. Every other error keeps today's line.
+    4. src/lib/review.ts ensureDeps / ensureDepsAsync: when the prime child's output parses with
+       primeRefusalReceipt, return false and record the receipt where the proof's unavailable reason is
+       reported. The plain-npm path and the "existing node_modules" branches are unchanged. Its child already
+       runs under proofInstallEnv(), so its env is unchanged.
+    5. src/lib/worker.ts provisionWorktreeNodeModules: start the child with `env: seedPrimeChildEnv()`. A parsed
+       generation receipt returns a new "refused" outcome. With a seed root configured, any other child failure
+       (no parseable result, non-zero exit, signal, timeout, unparseable stdout) also returns "refused", carrying a
+       child-failure receipt {kind: child_failed, exit, signal, code, stderr_tail, seed_root, requester, recovery}.
+       Then recordWorktreeNodeModules logs it, carrying the receipt, and throws WorktreeNodeModulesRefusedError for
+       any caller, so the worktree never continues on the canonical clone's or install root's tree. With no seed
+       root configured, linkWorktreeNodeModules runs exactly as today.
+    6. Tests over a fixture store: chmod u+w one payload file of a ready generation with one referencing consumer,
+       then prime --proof a fresh checkout. Assert the receipt fields, the byte- and mode-unchanged store, and the
+       sweep still keeping it as referenced. Then assert ensureDeps returning false, and an injected worktree
+       provisioning returning refused and raising blocked_toolchain. Loader cases: a parent NODE_OPTIONS of
+       `--import=tsx --enable-source-maps` against a node_modules-empty target and a healthy seed root primes
+       the target and keeps the second option; the same case with seedPrimeChildEnv bypassed fails
+       ERR_MODULE_NOT_FOUND and is refused with a child-failure receipt, not linked to the canonical clone; and the
+       composed case (loader plus writable referenced generation) yields the generation receipt. Controls: a
+       healthy generation primes as today, an unset seed root falls back as today, and an unreferenced generation
+       reads kept-unreferenced.
+  falsifier: |
+    At origin/main, make one file of a ready, referenced generation writable and call ensureDeps on a fresh
+    reviewer-owned checkout with no runner path. It returns true with no node_modules, and the prime's stderr
+    names no generation, consumer or recovery. If main already returns false with such a receipt, close this
+    task. Second, at origin/main, run provisionWorktreeNodeModules under NODE_OPTIONS=--import=tsx into a
+    node_modules-empty target with a healthy RMD_DEPENDENCY_SEED_ROOT. The child dies ERR_MODULE_NOT_FOUND, the
+    call returns "failed", and the worktree links the canonical clone's node_modules. If main already primes that
+    target and refuses a failed child, say so in the PR body with the run's output; no criterion is dropped. Mutations: restore the best-effort swallow in ensureDeps, and criterion 3
+    fails. Add a setWritable on the refused seed, and criterion 2's mode assertion fails. Pass process.env instead
+    of seedPrimeChildEnv() to the worker's child, and criterion 6 fails. Map a child failure back to "failed", and
+    criterion 7 fails.

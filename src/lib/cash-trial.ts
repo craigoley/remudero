@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import type { Config } from "./config-schema.js";
 import { fixedClock, systemClock } from "./clock.js";
 import { enabledWorkerProviders } from "./config.js";
+import { effectiveCashCapUsd } from "./worker-provider.js";
 import { ledgerLivePath, readLedgerUnionRawLinesSync, realLedgerFs } from "./ledger-union.js";
 
 /**
@@ -224,8 +225,15 @@ export function decideCashTrial(
   const held = (reason: string): CashTrialDecision => ({ id: CASH_TRIAL_ID, arm: "held", reason });
   if (!policy.enabled) return held("workerProviders.cashTrial.enabled is false");
   if (!enabledWorkerProviders(input.config).includes("cash")) return held("cash is not an enabled worker provider");
-  const cap = input.config.dailyCapUsd;
-  if (typeof cap !== "number") return held("dailyCapUsd is unset, so trial spend would be unbounded");
+  // The trial budgets from the figure of a normal day. A squeeze day does not raise it (W1-T12186).
+  let cap: number | undefined;
+  try {
+    cap = effectiveCashCapUsd(input.config.dailyCapUsd);
+  } catch (err) {
+    // The provider refuses this cap. The trial is held with the provider's own reason.
+    return held(`dailyCapUsd is invalid for a paid trial: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  if (cap === undefined) return held("dailyCapUsd is unset, so trial spend would be unbounded");
   if (!Number.isFinite(cap) || cap <= 0) return held("dailyCapUsd is invalid for a paid trial");
   if (!Number.isFinite(policy.budgetShareOfDailyCap) || policy.budgetShareOfDailyCap <= 0 || policy.budgetShareOfDailyCap > 1 ||
     !Number.isInteger(policy.windowDays) || policy.windowDays <= 0 ||

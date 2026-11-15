@@ -1254,3 +1254,62 @@ test("W1-T3244: an absent status arms unchanged", () => {
     "arm",
   );
 });
+
+test("W1-T12369: depReviewCommand writes the accepted test pin file into its decision row", async () => {
+  const oldSha = "9b3254085494b55a0f7c4c2b3d2d52cc712ce370", newSha = "33d7b85da1a04171e211befe2c739303b9a4c066";
+  const pin = (sha: string) => `  assert.equal(upload.uses, "github/codeql-action/upload-sarif@${sha}");`;
+  const diff = `diff --git a/.github/workflows/semgrep.yml b/.github/workflows/semgrep.yml
+--- a/.github/workflows/semgrep.yml
++++ b/.github/workflows/semgrep.yml
+@@ -120,1 +120,1 @@
+-        uses: github/codeql-action/upload-sarif@${oldSha} # v4.39.1
++        uses: github/codeql-action/upload-sarif@${newSha} # v4.39.3
+diff --git a/test/semgrep-native-install.test.ts b/test/semgrep-native-install.test.ts
+--- a/test/semgrep-native-install.test.ts
++++ b/test/semgrep-native-install.test.ts
+@@ -138,1 +138,1 @@
+-${pin(oldSha)}
++${pin(newSha)}
+`;
+  const r = await driveMigrationDepReview({
+    prNumber: 17928,
+    title: "chore(deps): bump the actions-minor-and-patch group with 3 updates",
+    body: "Updates `github/codeql-action/upload-sarif` from 4.39.1 to 4.39.3",
+    diff,
+    checks: GREEN_CHECKS,
+  });
+  try {
+    assert.equal(r.code, 0);
+    assert.deepEqual(r.statusCalls, ["called"]);
+    assert.deepEqual(r.armCalls, ["called"]);
+    const row = r.ledger.find((line) => line.step === "dep-review.decided");
+    assert.equal(row?.decision, "arm");
+    assert.deepEqual(row?.offendingFiles, []);
+    assert.deepEqual(row?.acceptedPinFiles, [{
+      file: "test/semgrep-native-install.test.ts",
+      pins: [{ dependency: "github/codeql-action/upload-sarif", from: oldSha, to: newSha }],
+    }]);
+    assert.match(String(row?.reason), /test pin edit accepted: test\/semgrep-native-install\.test\.ts/);
+  } finally {
+    rmSync(r.tmp, { recursive: true, force: true });
+  }
+  // The same bump with one extra, non-pin edit in the test file is refused, arms nothing, and the
+  // ledgered row names no accepted file.
+  const refused = await driveMigrationDepReview({
+    prNumber: 17928,
+    title: "chore(deps): bump the actions-minor-and-patch group with 3 updates",
+    body: "Updates `github/codeql-action/upload-sarif` from 4.39.1 to 4.39.3",
+    diff: diff.replace(`+${pin(newSha)}\n`, `+${pin(newSha)} // moved\n`),
+    checks: GREEN_CHECKS,
+  });
+  try {
+    assert.deepEqual(refused.armCalls, []);
+    assert.deepEqual(refused.statusCalls, []);
+    const row = refused.ledger.find((line) => line.step === "dep-review.decided");
+    assert.equal(row?.decision, "refuse");
+    assert.deepEqual(row?.offendingFiles, ["test/semgrep-native-install.test.ts"]);
+    assert.equal(row?.acceptedPinFiles, undefined);
+  } finally {
+    rmSync(refused.tmp, { recursive: true, force: true });
+  }
+});

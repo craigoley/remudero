@@ -14,7 +14,7 @@
   # refusal-amendment (W1-T9338, run DAEMON-1793004859639@bd1bee9288e82a86e43c04c613c04425dcbd6282, 2026-10-26T12:16:13.668Z): the worker refused criterion 2 [contradicts-another-criterion] — proposed re-scope-criteria: reconcile the contradicting criteria — re-scope one so both can hold at once
   #   worker evidence: Complete helper extraction requires changing existing census tests, which design constraint 4 forbids.
   #   this task is held from dispatch until its record changes; an Architect must make the change above
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

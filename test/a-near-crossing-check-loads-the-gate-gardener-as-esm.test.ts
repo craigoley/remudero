@@ -1,3 +1,4 @@
+// @census-reads: scripts/ src/ test/a-near-crossing-check-loads-the-gate-gardener-as-esm.test.ts — every script module and the gate gardener, itself.
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";

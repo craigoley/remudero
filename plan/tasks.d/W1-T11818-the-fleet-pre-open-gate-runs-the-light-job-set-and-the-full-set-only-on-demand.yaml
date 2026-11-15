@@ -18,7 +18,7 @@
     - src/lib/ci-parity.ts
     - src/run-task.ts
     - test/ci/gates/a-pre-open-gate-runs-the-light-job-set-and-the-full-set-only-on-demand.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "`rmd preflight --fast --light` plans every phase and fast job except the jobs in LIGHT_GATE_SKIPPED_JOBS (rule-checks and census-precheck suites), keeps the census counts, and its step log names the light mode and the skipped jobs"

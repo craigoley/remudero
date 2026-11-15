@@ -14,7 +14,7 @@
     - test/the-mac-reclaims-its-own-scratch.test.ts
     - test/host-root-disk-janitor.test.ts
     - test/helpers/host-cleanup-fixture.ts
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

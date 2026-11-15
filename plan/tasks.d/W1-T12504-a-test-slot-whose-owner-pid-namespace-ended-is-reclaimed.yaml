@@ -1,0 +1,123 @@
+- id: W1-T12504
+  title: "A test slot whose owner's pid namespace has ended is reclaimed — a waiter on the same kernel proves the end when the namespace that now carries the recorded id started after the owner, or has no member at all, and never frees a slot on heartbeat age alone"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the release basis for a foreign test-slot record; a wrong "ended" double-books the slot, and a missed one blocks every host preflight
+  band_meaning: blast-radius
+  origin: operator-session#stale-test-slot-2026-11-13
+  plan_refs:
+    - W1-T11809
+    - W1-T11807
+    - W1-T11808
+    - W1-T11810
+    - W1-T9928
+    - W1-T2784
+  files:
+    - src/lib/test-slot.ts
+    - test/ci/suites/a-test-slot-whose-owner-pid-namespace-ended-is-reclaimed.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "A host waiter in the initial pid namespace reads a record with the same boot id, a foreign host, a heartbeat past its bound, and a pidNs that now belongs to a namespace whose init (innermost NSpid 1) started after the record's processStart. The waiter reclaims the slot and logs one `test_slot.reclaimed_quiescent` row with coverage `pid-namespace-ended` and a reason that names both start ticks. The next waiter acquires the slot"
+      proof: "grep: W1-T12504 criterion 1 in test/ci/suites/a-test-slot-whose-owner-pid-namespace-ended-is-reclaimed.test.ts"
+    - claim: "A waiter whose own pid namespace equals the record's pidNs, on a different host name, reclaims the slot in the same way when its own `/proc/1` started after the record's processStart"
+      proof: "grep: W1-T12504 criterion 2 in test/ci/suites/a-test-slot-whose-owner-pid-namespace-ended-is-reclaimed.test.ts"
+    - claim: "A host waiter in the initial pid namespace that reads every `/proc` entry and finds no process in the recorded pid namespace reclaims the slot with coverage `pid-namespace-ended`"
+      proof: "grep: W1-T12504 criterion 3 in test/ci/suites/a-test-slot-whose-owner-pid-namespace-ended-is-reclaimed.test.ts"
+    - claim: "The slot is kept, with the W1-T11809 `test_slot.owner_aged` row and no reclaim, when the namespace init started before or at the record's processStart, when no member is found but any `/proc` entry was unreadable, when the namespace init cannot be read, when the waiter is not in the initial pid namespace and not in the recorded one, when either side has no boot id, and when the record has no `proc:` processStart or no pidNs. The record stays byte-identical"
+      proof: "grep: W1-T12504 criterion 4 in test/ci/suites/a-test-slot-whose-owner-pid-namespace-ended-is-reclaimed.test.ts"
+    - claim: "A record whose heartbeat is inside its bound (TEST_SLOT_SILENT_BEATS times its heartbeatIntervalMs, or TEST_SLOT_LEASE_MS with no cadence) is kept, and the namespace probe is not called, even when the probe would answer ended"
+      proof: "grep: W1-T12504 criterion 5 in test/ci/suites/a-test-slot-whose-owner-pid-namespace-ended-is-reclaimed.test.ts"
+    - claim: "When the record changes between the judgement and the unlink (a new beat or a new owner), the reclaim is refused and the new record stays in place"
+      proof: "grep: W1-T12504 criterion 6 in test/ci/suites/a-test-slot-whose-owner-pid-namespace-ended-is-reclaimed.test.ts"
+    - claim: "invariant:no-reclaim-without-namespace-end — a same-boot foreign test-slot record is reclaimed only on a positive proof that its recorded pid namespace ended; heartbeat age alone never frees it, and a record inside its heartbeat bound is never probed"
+      proof: "grep: W1-T12504 criterion 7 in test/ci/suites/a-test-slot-whose-owner-pid-namespace-ended-is-reclaimed.test.ts"
+  rationale: |
+    OBSERVED 2026-11-13 on the Azure host. /mnt/scratch/rmd/test-slots/slot-1.json was held by
+    `retro-preflight:plan-reading-suites` (src/lib/retro-preflight.ts:623), pid 3687863 on host `25f6d8c3cae6`.
+    That host name was the remudero-daemon container that the 12:07Z recycle removed; `docker ps -a` no longer
+    lists it. The record: bootId a0b7b4ed-... (the host's own boot id), pidNs pid:[4026532399], processStart
+    proc:151980845 (06:23:03Z by btime), startedAt 07:49:22Z, heartbeatAt 08:03:34Z, heartbeatIntervalMs 60000,
+    workIdentity reservation-marker-v1, cgroupScope "/" (not dedicated), ownerUid 1000.
+    Each host preflight printed "test slot 1: retro-preflight:plan-reading-suites (pid 3687863 on 25f6d8c3cae6) is
+    UNKNOWN, aged 6h26m with no beat for 6h12m; missing: host differs: owner pid unprobeable from here; pid namespace
+    differs ..." and `test_slot.waiting` rows. Every host preflight queued behind it for hours. The operator moved
+    the file aside by hand at 14:29:04Z (slot-1.json.stale-20261113T142904Z).
+    The kernel had the proof. At 14:32Z the new remudero-daemon container (d16aeac0a531, created 12:06:56Z) had its
+    init in pid:[4026532399], the SAME namespace id as the record, with start tick 154044175 (12:06:56Z). A pid
+    namespace's members all start after its init, so the owner (start 151980845) was never in that namespace: the
+    kernel reused the id after the old namespace ended. When a pid namespace's init exits, the kernel kills every
+    process in it, nested namespaces included, and no new process can enter it. So the owner's whole tree ended.
+    The host account (uid 1000, initial pid namespace pid:[4026531836]) could read that init's ns link and stat.
+    READ at origin/main 6e6ebd3a0 (src/lib/test-slot.ts):
+    - :1153 `testSlotHolderStale`: a foreign-host or foreign-namespace record with an equal boot id is never stale
+      (W1-T11809). A different boot id is stale. So a same-kernel record whose container was removed is never freed.
+    - :2003 the `isStale` of `reclaimStaleLock`: for a non-local record it returns `pidStale || retainUnknown(held)`
+      (:2028); for a foreign-namespace record with a complete dedicated cgroup identity it runs the W1-T11807 probe
+      and on UNKNOWN returns `retainUnknown` (:2021). `retainUnknown` (:1990) logs `test_slot.owner_aged` once and
+      always returns false.
+    - :1225 `judgeTestSlotHoldAge`: AGED is silence past TEST_SLOT_SILENT_BEATS (3) times the recorded cadence. It is a
+      diagnostic, never a release, and its missing evidence lists only host, pid namespace, boot id and cgroup facts.
+      No probe reads the recorded pid namespace itself.
+    - src/lib/dispatch-claim.ts:613 `readNamespaceBootMs` (W1-T2784) already uses "the anchor predates this pid
+      namespace's own init" as a release basis for dispatch claims. This task applies the same fact to test slots,
+      comparing raw start ticks within one boot, so no clock conversion is needed.
+    WHY HEARTBEAT AGE IS NOT ENOUGH: W1-T11809 retired the heartbeat lease as a release basis on the same kernel. A live
+    owner blocked in a synchronous step stops beating for hours (W1-T9928), and a release on age would double-book the
+    slot. This task keeps that ruling. Age only gates when the probe runs.
+    CHECKED for overlap on origin/main plan/tasks.d (test slot, reclaim, heartbeat, pid namespace, container, owner_aged,
+    judgeTestSlotHoldAge): W1-T11810 (queued) surfaces an aged hold in `rmd doctor` and never clears it. W1-T11811
+    (queued) verifies the W1-T11807 cgroup contract natively and changes no source. W1-T10433 (queued) is a default-off
+    research report on pinned terminal receipts for dedicated scopes. W1-T11807, W1-T11808, W1-T11809, W1-T10251,
+    W1-T10870 and W1-T12295 are merged and none probes the recorded pid namespace. No open pull request adds a plan
+    task on this subject.
+  design: |
+    1. Add `probeRecordedPidNamespace(held, host: ReservedTreeProbeHost = {})` to src/lib/test-slot.ts, returning
+       `ReservedTreeEvidence` with coverage `pid-namespace-ended`. It uses the existing `list` and `read` seams of
+       `ReservedTreeProbeHost`; its defaults read `/proc`. It answers `unknown` with a named reason unless all of these
+       hold: platform linux; record and waiter boot ids both known and equal; `held.pidNs` recorded; `held.processStart`
+       matches `^proc:[0-9]+$`.
+    2. Waiter in the recorded namespace (`/proc/self/ns/pid` equals `held.pidNs`): read field 22 of `/proc/1/stat`
+       (slice after the last ")", as `testSlotProcessFacts` does). Ended when that start is greater than the record's
+       start; live when it is at or below it.
+    3. Waiter in the initial pid namespace (its `/proc/self/status` NSpid line has exactly one field): scan `/proc/<pid>`
+       once, bounded like `probeReservedTree`. Find the member of `held.pidNs` whose NSpid has innermost value 1 and read
+       its start. Ended when that start is greater than the record's start; live when it is at or below it. Ended when no
+       entry is in `held.pidNs` and every entry was read. Unknown when no init was found and any entry was unreadable,
+       vanished mid-read, or the scan passed its bound. Any other waiter is unknown ("waiter is not an ancestor of the
+       recorded pid namespace").
+    4. In `acquireTestSlot`, change only the two `retainUnknown` paths of `isStale` (:2021 and :2028). Compute the hold
+       age first with `judgeTestSlotHoldAge`. When the hold is aged and boot ids are equal, call
+       `opts.pidNamespaceProbe ?? (held => probeRecordedPidNamespace(held))` once per poll. On `ended`, set `quiescent`
+       and return true, so the existing `onReclaim` logs `test_slot.reclaimed_quiescent` with coverage and reason, and
+       the existing `unlinkObservedTestSlot` re-checks the record before the unlink. On `live` or `unknown`, return
+       `retainUnknown(held, evidence.reason)` as today, so the aged row names the probe's reason in missingEvidence.
+       A hold inside its bound never calls the probe.
+    5. Do not change: the local same-namespace pid path, the darwin path (W1-T12295), the private-capacity-v1 recovery
+       (`privateStale`), the W1-T11807 cgroup probe and its `ended` answer, queue tickets, and any constant.
+    6. The test drives `acquireTestSlot` (the production entry) on a temp slot dir with real slot files, and passes
+       `pidNamespaceProbe: held => probeRecordedPidNamespace(held, fakeHost)` so the real probe runs over a fake `/proc`
+       listing. It also calls `probeRecordedPidNamespace` directly for each unknown reason of criterion 4. It builds
+       temp dirs with an `RMD_TMP_PREFIX` prefix, imports through `#src/...`, and does not import `#src/run-task.js`.
+       Put the explanation in the test and the PR body; keep new comment lines in src/lib/test-slot.ts to a few.
+    INVARIANT no-reclaim-without-namespace-end: a same-boot foreign test-slot record is reclaimed only on a positive proof
+    that its recorded pid namespace ended; heartbeat age alone never frees it, and a record inside its heartbeat bound is
+    never probed.
+    NOT IN SCOPE: asking docker or another container runtime whether a container exists (the daemon container has no
+    runtime socket, and a host name is not an identity); a release by heartbeat age; the `rmd doctor` surface (W1-T11810).
+  falsifier: |
+    Make the probe answer ended when the init started before the owner and criterion 4 must fail. Drop the
+    every-entry-read condition from the absence arm and criterion 4 must fail. Call the probe before the age check and
+    criterion 5 must fail. Unlink without the existing re-check and criterion 6 must fail. Remove the new call from
+    `isStale` and criteria 1 to 3 must fail. Restore and require all seven to pass.
+  note: |
+    Id W1-T12504 reserved for run-unfiled-1794580422000 with ~/rmd-work/bin/reserve-id.sh.
+    Kernel facts this rests on: pid_namespaces(7) (when the init of a pid namespace ends, the kernel sends SIGKILL to
+    every process in it, and fork into it fails afterwards) and proc(5) (/proc/<pid>/stat field 22 is the start time in
+    clock ticks since boot; /proc/<pid>/status NSpid lists the pid in each nested namespace). Namespace ids are inode
+    numbers and the kernel reuses them, as this incident shows; the start-tick comparison is what makes reuse safe.

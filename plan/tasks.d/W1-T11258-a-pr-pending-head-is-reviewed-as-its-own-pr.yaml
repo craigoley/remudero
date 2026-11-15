@@ -15,7 +15,7 @@
   files:
     - src/lib/tick-read-worker.ts
     - test/review/a-pr-pending-head-is-reviewed-as-its-own-pr.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: usesUntaskedReviewMetadata returns true for task id PR-pending exactly when the head ref is run-PR-pending-<digits>, so the review applies its untasked risk and budget defaults and posts a verdict; PR-pending on any other head ref, and a W1-T id whose shard does not resolve, still refuse as head-task-metadata-unavailable

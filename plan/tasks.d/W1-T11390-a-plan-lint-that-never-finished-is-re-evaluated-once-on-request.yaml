@@ -15,7 +15,7 @@
     - test/every-priced-ledger-step-is-in-the-config-garden-read.test.ts
     - test/plan-only-review-runs-lint-plan.test.ts
   priority: 3
-  status: queued
+  status: merged
   # backlog gardener: band=3 evidence=038af17a880e6170
   # backlog gardener: placed=2026-11-05T18:26:24.203Z
   attempts: 0

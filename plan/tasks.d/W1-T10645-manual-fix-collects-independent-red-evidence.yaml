@@ -19,7 +19,7 @@
   files:
     - src/cli/commands/fix.ts
     - test/fix-lane/manual-fix-collects-independent-red-evidence.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: >-
     While qualifying the authorized Console product API, manual fix run

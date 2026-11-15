@@ -37,7 +37,7 @@ import { observeSlotCapacity, publishSlotCapacity, retireOwnedSlotCapacity, Slot
 import { acquireSlotMutation, createGuardHolderProbe, slotMutationPending, type GuardHolderEvidence, type OrphanGuardRecovery } from "./test-slot-mutation.js";
 import { observeTestSlotParent } from "./test-slot-parent.js";
 import { describeQueuePosition, estimateQueueEta, readHoldHistory, readTestSlotQueue, recordTestSlotHold, takeTestSlotTicket, testSlotQueueDir,
-  type HoldRecord, type OwnTicket, type QueueEta, type QueueHolderView, type QueuedTicket, type TicketJudge } from "./test-slot-queue.js";
+  type HoldRecord, type OwnTicket, type QueueEta, type QueueHolderView, type QueuedTicket, type TestSlotTicket, type TicketJudge } from "./test-slot-queue.js";
 
 /** Names the slot directory every container and the host share (the scratch mount's bind). */
 export const TEST_SLOT_DIR_ENV = "RMD_TEST_SLOT_DIR";
@@ -55,8 +55,9 @@ export const TEST_RUN_HEADROOM_CORES = 2;
  *  has run longer than a whole local coverage run (~20-40 min at the old concurrency), and then
  *  degrades to concurrency 1 rather than refusing or deadlocking. */
 export const TEST_SLOT_WAIT_BOUND_MS = 45 * 60_000;
-/** BACKSTOP — a holder in ANOTHER container/host cannot be pid-probed; it refreshes its record at
- *  every shard boundary, so a record this stale names a holder that died without releasing. */
+/** A holder in ANOTHER container/host/pid namespace cannot be pid-probed. On one kernel (equal boot ids) a record
+ *  this silent is only AGED — a diagnostic bound, never a release (W1-T11809); it still frees a record only where
+ *  a boot id is missing on either side (macOS), outside the Linux same-kernel seam. */
 export const TEST_SLOT_LEASE_MS = 90 * 60_000;
 const TEST_SLOT_POLL_MS = 5_000;
 /** Covered descendants inherit the existing parent claim, including the reservation nonce and process start. */
@@ -182,6 +183,48 @@ export interface HostLoad {
 
 export function readHostLoad(): HostLoad {
   return { cores: availableParallelism(), load1: loadavg()[0] ?? 0 };
+}
+
+/** One host-pressure reading a run's width follows (W1-T11939); each field is undefined where it could not be read. */
+export interface HostPressure {
+  cores: number;
+  /** PSI `some avg10` of /proc/pressure/cpu: the percent of the last 10 s some runnable task waited for a CPU. */
+  cpuStallPercent?: number;
+  /** The one-minute load average. */
+  load1?: number;
+}
+
+/** The host's CPU pressure now, or undefined when nothing could be read — the caller then keeps its width. */
+export function readHostPressure(read: (path: string) => string = (path) => readFileSync(path, "utf8"),
+  load: () => readonly number[] = loadavg, cores: () => number = availableParallelism): HostPressure | undefined {
+  const count = cores();
+  if (!Number.isFinite(count) || count < 1) return undefined;
+  let cpuStallPercent: number | undefined;
+  try {
+    const some = /^some avg10=(\d+(?:\.\d+)?) /m.exec(read("/proc/pressure/cpu"))?.[1];
+    if (some !== undefined && Number(some) <= 100) cpuStallPercent = Number(some);
+  } catch {
+    // No PSI here (macOS, a kernel without it, a masked /proc): the load average below decides alone.
+  }
+  const load1 = load()[0];
+  const sample: HostPressure = { cores: Math.floor(count) };
+  if (cpuStallPercent !== undefined) sample.cpuStallPercent = cpuStallPercent;
+  if (load1 !== undefined && Number.isFinite(load1) && load1 >= 0) sample.load1 = load1;
+  return sample.cpuStallPercent === undefined && sample.load1 === undefined ? undefined : sample;
+}
+
+/**
+ * How many children a pressure-following run keeps in flight (W1-T11939): the cores the host is not stalling on —
+ * PSI's stall share when it reads, else the load average less this run's own `inFlight` children — never below one,
+ * and with no ceiling but the host's own core count. A missing sample keeps `current` (at least one), never zero.
+ */
+export function pressureWidth(sample: HostPressure | undefined, current: number, inFlight = 0): number {
+  const kept = Math.max(1, Number.isFinite(current) ? Math.floor(current) : 1);
+  if (sample === undefined || !Number.isFinite(sample.cores) || sample.cores < 1) return kept;
+  const cores = Math.floor(sample.cores);
+  if (sample.cpuStallPercent !== undefined) return Math.max(1, Math.floor(cores * (1 - sample.cpuStallPercent / 100)));
+  if (sample.load1 !== undefined) return Math.max(1, Math.floor(cores - Math.max(0, sample.load1 - inFlight)));
+  return kept;
 }
 
 /** An UNSLOTTED caller's share divisor: `RMD_TEST_SLOTS`, else one per four cores, at least one. The slot pool itself
@@ -801,7 +844,8 @@ function parentTestSlotClaim(raw: string, dir: string, requirePrivate: boolean, 
     };
     return { lease: { outcome: "acquired", concurrency: held.concurrency!, waitedMs: 0,
       note: `inherited live parent test slot (${claim.path}); --test-concurrency=${held.concurrency}`,
-      childEnvironment: { [TEST_SLOT_PARENT_ENV]: raw, [TEST_SLOT_DIR_ENV]: dir },
+      childEnvironment: { [TEST_SLOT_PARENT_ENV]: raw, [TEST_SLOT_DIR_ENV]: dir,
+        NODE_COMPILE_CACHE: join(dir, "node-compile-cache") },
       refresh: verifyParent, release: verifyParent } };
   } catch (error) {
     const reason = `unreadable-parent-claim: ${String((error as Error)?.message ?? error)}`;
@@ -1042,6 +1086,10 @@ export interface TestSlotOptions {
   queue?: boolean;
   /** A ticket {@link enqueueTestSlot} already took (W1-T9951): the acquisition waits in ITS place, never a new one. */
   ticket?: OwnTicket;
+  /** The suite work this run was priced at, in ms (the capacity verdict's `costMs`), written on the ticket it takes:
+   *  waiters are admitted cheapest first, each aged by its wait ({@link testSlotAdmissionOrder}). Unset, the run is
+   *  ordered as the median of the priced waiters. A ticket handed in through `ticket` keeps the price it was taken with. */
+  costMs?: number;
   /** The human line a queued waiter prints when where it stands changes; default stderr unless `log` is injected. */
   say?: (line: string) => void;
   /** Which priority binaries exist, for the caller's {@link lowPriorityCommand}. */
@@ -1064,6 +1112,8 @@ export interface TestSlotOptions {
   treeProbe?: (held: TestSlotHolder) => ReservedTreeEvidence;
   /** Exact pinned cgroup evidence for a complete foreign-pid-namespace owner identity. */
   cgroupIdentityProbe?: (held: TestSlotHolder) => ReservedTreeEvidence;
+  /** This waiter's cgroup namespace, named in an aged hold's diagnostic; default {@link readCgroupNamespace}. */
+  cgroupNamespace?: () => string | undefined;
   /** Whether any process holds a mutation guard open; default {@link defaultGuardHolderProbe}. */
   guardProbe?: (guardPath: string, guard: Stats) => GuardHolderEvidence;
 }
@@ -1096,8 +1146,8 @@ function sleepSync(ms: number): void {
 
 /**
  * Is `held` dead? Same host → the shared pid/start-time predicate. Another host or container →
- * its pid means nothing here, so: a different kernel boot id is dead by construction, and
- * otherwise a heartbeat older than {@link TEST_SLOT_LEASE_MS} is a holder that died unreleased.
+ * its pid means nothing here, so: a different kernel boot id is dead by construction; an EQUAL boot id
+ * (same kernel) is never dead by heartbeat age — a live owner blocked for hours stops beating too (W1-T11809).
  * TRAP: isHolderStale alone would call ANY container-id-shaped foreign host stale from inside a
  * container (it assumes an earlier boot of the same cell) — on a shared mount that is a live peer.
  */
@@ -1105,11 +1155,101 @@ function testSlotHolderStale(held: TestSlotHolder, now: number, opts: Required<P
   const myNs = opts.pidNamespace();
   const foreignNs = held.pidNs !== undefined && myNs !== undefined && held.pidNs !== myNs;
   // Same hostname but another pid namespace (two sandboxed workers in one container): the pid probe would read a
-  // live peer as dead, so it is aged like a foreign host's holder — boot id, then lease.
+  // live peer as dead, so it is judged like a foreign host's holder — by boot id.
   if (sameHost(held.host, opts.hostname()) && !foreignNs) return isHolderStale(held, { isPidAlive: opts.isPidAlive, hostname: opts.hostname });
   const mine = opts.bootId();
-  if (held.bootId !== undefined && mine !== undefined && held.bootId !== mine) return true;
+  if (held.bootId !== undefined && mine !== undefined) return held.bootId !== mine;
+  // No boot id on one side (macOS, or a legacy record): outside the Linux same-kernel seam, the lease still frees.
   return now - Date.parse(held.heartbeatAt) > TEST_SLOT_LEASE_MS;
+}
+
+/**
+ * W1-T12295: a same-host, same-uid marker holder on darwin, where no boot id, pid namespace or tree probe exists.
+ * Undefined keeps today's rules. A gone or reused owner pid ends it only once its beat is past the lease.
+ */
+function darwinMarkerOwnerEvidence(held: TestSlotHolder, fileUid: number | undefined, pidStale: boolean, now: number,
+  waiter: { platform: NodeJS.Platform; hostname: string; bootId: string | undefined; pidNs: string | undefined }): ReservedTreeEvidence | undefined {
+  if (waiter.platform !== "darwin" || held.bootId !== undefined || waiter.bootId !== undefined || held.pidNs !== undefined ||
+      waiter.pidNs !== undefined || !sameHost(held.host, waiter.hostname) || held.ownerUid === undefined || held.ownerUid !== fileUid ||
+      held.ownerUid !== process.getuid?.() || !held.processStart || held.ownershipProtocol !== undefined) return undefined;
+  const kept = (reason: string): ReservedTreeEvidence => ({ state: "unknown", coverage: "darwin-owner-pid", reason });
+  if (!pidStale || testSlotProcessFacts(held.pid)?.start === held.processStart) return kept(`owner pid ${held.pid} is alive with its recorded start`);
+  if (!(now - Date.parse(held.heartbeatAt) > TEST_SLOT_LEASE_MS)) return kept(`owner pid ${held.pid} gone; last beat inside the lease, covered work may still run`);
+  return { state: "ended", complete: true, coverage: "darwin-owner-pid", reason: `owner pid ${held.pid} gone or reused; last beat past the lease` };
+}
+
+/** What a waiter (or doctor) knows about itself and the slot it read, for {@link judgeTestSlotHoldAge}. */
+export interface TestSlotWaiterFacts {
+  hostname: string;
+  bootId?: string;
+  pidNs?: string;
+  cgroupNs?: string;
+  slotDir: string;
+  slot: number;
+  /** The W1-T11807 cgroup-identity probe's reason, when that probe ran and could not prove the tree ended. */
+  probeReason?: string;
+}
+
+/** A foreign hold this side cannot observe: AGED once silent past its bound. A diagnostic, never a release. */
+export interface TestSlotHoldAge {
+  aged: boolean;
+  slot: number;
+  holder: string;
+  host: string;
+  ownerUid: number | null;
+  pidNs: { record: string | null; waiter: string | null };
+  cgroupNs: { record: string | null; waiter: string | null };
+  bootIdMatch: boolean | null;
+  startedAt: string;
+  heartbeatAt: string;
+  ageMs: number;
+  silentMs: number;
+  boundMs: number;
+  missingEvidence: string[];
+  /** The W1-T11808 owner-lane command for exactly this reservation. */
+  recoveryCommand: string;
+  /** {@link recoveryCommand} plus where to run it, as one pasteable shell line. */
+  recovery: string;
+}
+
+const shellWord = (value: string): string => /^[A-Za-z0-9_./:@%+=,-]+$/.test(value) ? value : `'${value.replace(/'/g, `'\\''`)}'`;
+const ageText = (ms: number): string => {
+  const minutes = Math.max(0, Math.floor(ms / 60_000));
+  return minutes >= 60 ? `${Math.floor(minutes / 60)}h${minutes % 60}m` : `${minutes}m`;
+};
+
+/**
+ * Judge a hold whose owner this side cannot observe: undefined when the record is local (the pid probe judges it)
+ * or a different boot id proves it ended; otherwise its age, what evidence is missing and the owner-lane recovery.
+ * AGED is silence past {@link TEST_SLOT_SILENT_BEATS} recorded beats, or {@link TEST_SLOT_LEASE_MS} with no cadence.
+ */
+export function judgeTestSlotHoldAge(held: TestSlotHolder, waiter: TestSlotWaiterFacts, now: number): TestSlotHoldAge | undefined {
+  const foreignPidNs = held.pidNs !== undefined && waiter.pidNs !== undefined && held.pidNs !== waiter.pidNs;
+  const foreignHost = !sameHost(held.host, waiter.hostname);
+  if (!foreignHost && !foreignPidNs) return undefined;
+  const bootIdMatch = held.bootId !== undefined && waiter.bootId !== undefined ? held.bootId === waiter.bootId : null;
+  if (bootIdMatch === false) return undefined;
+  const cadence = held.heartbeatIntervalMs;
+  const boundMs = cadence !== undefined && Number.isSafeInteger(cadence) && cadence > 0 ? TEST_SLOT_SILENT_BEATS * cadence : TEST_SLOT_LEASE_MS;
+  const silentMs = now - Date.parse(held.heartbeatAt), ageMs = now - Date.parse(held.startedAt);
+  const scope = held.cgroupScope;
+  const missingEvidence: string[] = [];
+  if (foreignHost) missingEvidence.push("host differs: owner pid unprobeable from here");
+  if (foreignPidNs) missingEvidence.push("pid namespace differs: owner pid unprobeable from here");
+  if (bootIdMatch === null) missingEvidence.push("boot id unknown on one side: same kernel unproven");
+  if (scope?.dev === undefined || scope.ino === undefined || scope.cgroupNs === undefined) missingEvidence.push("no pinned cgroup identity recorded");
+  else if (waiter.cgroupNs !== undefined && scope.cgroupNs !== waiter.cgroupNs) missingEvidence.push("cgroup namespace differs");
+  if (waiter.probeReason !== undefined) missingEvidence.push(`cgroup identity probe: ${waiter.probeReason}`);
+  if (held.ownerUid === undefined) missingEvidence.push("no owner uid recorded");
+  const recoveryCommand = ["node", "--import", "tsx", "scripts/test-slot-owner-release.mjs", "--slot-dir", waiter.slotDir, "--slot", String(waiter.slot),
+    "--nonce", held.ownerNonce ?? "<unrecorded>", "--pid", String(held.pid), "--start", held.processStart ?? "<unrecorded>"].map(shellWord).join(" ");
+  const runAs = `run as uid ${held.ownerUid ?? "<unrecorded>"} inside pid namespace ${held.pidNs ?? "<unrecorded>"}${foreignHost ? ` on ${held.host}` : ""}`;
+  return {
+    aged: !(silentMs <= boundMs), slot: waiter.slot, holder: held.label, host: held.host, ownerUid: held.ownerUid ?? null,
+    pidNs: { record: held.pidNs ?? null, waiter: waiter.pidNs ?? null }, cgroupNs: { record: scope?.cgroupNs ?? null, waiter: waiter.cgroupNs ?? null },
+    bootIdMatch, startedAt: held.startedAt, heartbeatAt: held.heartbeatAt, ageMs, silentMs, boundMs, missingEvidence,
+    recoveryCommand, recovery: `${recoveryCommand} # ${runAs}`,
+  };
 }
 
 /**
@@ -1167,12 +1307,46 @@ function darwinHeadroom(opts: TestSlotOptions): { active: boolean; opts: TestSlo
     opts: { ...opts, memoryHeadroom: () => readMemoryHeadroom(undefined, { platform, vmStat: () => report() }) } };
 }
 
-/** A suite ticket taken ahead of its admission (W1-T9951): it holds its arrival place while other work runs. */
+/** A ticket with the suite work its run was priced at; the queue module writes and reads back every field it is handed. */
+export type PricedTestSlotTicket = TestSlotTicket & { costMs?: number };
+
+/** The price a ticket carries: a finite positive number of ms, or nothing. An unpriced run is never handed a number here. */
+function ticketPrice(costMs: unknown): { costMs?: number } {
+  return typeof costMs === "number" && Number.isFinite(costMs) && costMs > 0 ? { costMs } : {};
+}
+
+/**
+ * The order the live waiters are admitted in, first to last (W1-T11915).
+ *
+ * OBSERVED 2026-11-09: one author preflight of 74 minutes waited 24 of them for a slot, and a plan-only change that
+ * needs a few minutes of suites was refused after 45 minutes behind heavier runs. The queue was strict arrival order,
+ * so a small run paid the whole runtime of every larger run that arrived before it.
+ *
+ * RULE: the lowest `costMs / (1 + waitedMs)` goes first. Cost is the suite work the run was priced at; the wait is this
+ * clock's `now` less the ticket's own `arrivedAt`, and the one is a millisecond of that same clock, there so a wait of
+ * zero divides. Shortest expected job first, each cost divided by its own wait: a run N times costlier than another
+ * goes ahead of it once it has waited N times as long, so a long wait is never passed over for good and no wait
+ * ceiling is involved. A ticket with no price is ordered as the median of the prices the live tickets carry; when none
+ * carries one every cost is the same whichever number stands for it, and the order is the waits alone, which is
+ * arrival order. Equal scores keep arrival order (the ticket names').
+ */
+export function testSlotAdmissionOrder(live: readonly QueuedTicket[], now: number): QueuedTicket[] {
+  const price = (t: QueuedTicket): number | undefined => ticketPrice((t.ticket as PricedTestSlotTicket).costMs).costMs;
+  const priced = live.map(price).filter((ms): ms is number => ms !== undefined).sort((a, b) => a - b);
+  const mid = priced.length >> 1;
+  const median = priced.length === 0 ? 1 : priced.length % 2 === 1 ? priced[mid]! : (priced[mid - 1]! + priced[mid]!) / 2;
+  return live.map(t => ({ t, score: (price(t) ?? median) / (1 + Math.max(0, now - Date.parse(t.ticket.arrivedAt))) }))
+    .sort((a, b) => a.score - b.score || (a.t.name < b.t.name ? -1 : a.t.name > b.t.name ? 1 : 0)).map(scored => scored.t);
+}
+
+/** A suite ticket taken ahead of its admission (W1-T9951): its wait counts from here while other work runs. */
 export interface TestSlotQueueHold {
   ticketed: boolean;
   /** 1-based place in line when the ticket was taken; undefined when no ticket was taken. */
   position?: number;
   note: string;
+  /** Price a ticket already in the line; a missing ticket or a settled hold is left alone. */
+  setPrice(costMs: number | undefined): void;
   /** Wait for a slot in this ticket's place; the ticket is gone once this returns. */
   admit(): TestSlotLease;
   /** Leave the line without ever touching a slot. */
@@ -1180,7 +1354,7 @@ export interface TestSlotQueueHold {
 }
 
 /**
- * Take a FIFO ticket now and admit later, so work that needs no slot runs while the ticket waits. No ticket
+ * Take a ticket now and admit later, so work that needs no slot runs while the ticket waits. No ticket
  * (queue off, a live inherited parent, or the queue unusable) leaves {@link TestSlotQueueHold.admit} as a plain
  * {@link acquireTestSlot}, and the note says which.
  */
@@ -1204,13 +1378,15 @@ export function enqueueTestSlot(label: string, opts: TestSlotOptions = {}): Test
     else {
       const arrivedAt = clock.iso();
       const own = takeTestSlotTicket(dir, { pid, host: host(), bootId: bootId(), pidNs: pidNamespace(), processStart: testSlotProcessFacts(pid)?.start,
-        label, arrivedAt, heartbeatAt: arrivedAt, heartbeatIntervalMs: opts.pollMs ?? TEST_SLOT_POLL_MS });
+        label, arrivedAt, heartbeatAt: arrivedAt, heartbeatIntervalMs: opts.pollMs ?? TEST_SLOT_POLL_MS, ...ticketPrice(opts.costMs) });
       ticket = own;
       const judge: TicketJudge = { now: () => clock.now(), hostname: host, bootId, pidNamespace, isPidAlive, silentBeats: TEST_SLOT_SILENT_BEATS };
-      const ahead = readTestSlotQueue(dir, judge, row => log(JSON.stringify({ ...row, by: label })), own.name).filter(t => t.name < own.name);
+      // W1-T11915: the place reported is the place admission will use, not the arrival place.
+      const order = testSlotAdmissionOrder(readTestSlotQueue(dir, judge, row => log(JSON.stringify({ ...row, by: label })), own.name), clock.now());
+      const ahead = order.slice(0, Math.max(0, order.findIndex(t => t.name === own.name)));
       position = ahead.length + 1;
       note = `ticket ${own.name} at position ${position}`;
-      log(JSON.stringify({ step: "test_slot.enqueued", label, ticket: own.name, position, ahead: ahead.map(t => ({ label: t.ticket.label, pid: t.ticket.pid })) }));
+      log(JSON.stringify({ step: "test_slot.enqueued", label, ticket: own.name, position, ...ticketPrice(opts.costMs), ahead: ahead.map(t => ({ label: t.ticket.label, pid: t.ticket.pid })) }));
     }
   } catch (error) {
     // Cannot queue collapses to today's unqueued polling at admit(); the note names why, never a refusal.
@@ -1225,6 +1401,9 @@ export function enqueueTestSlot(label: string, opts: TestSlotOptions = {}): Test
   };
   return {
     ticketed: ticket !== undefined, position, note,
+    setPrice(costMs: number | undefined): void {
+      if (!settled) ticket?.setPrice(costMs);
+    },
     admit(): TestSlotLease {
       if (settled) throw new Error("test slot ticket already admitted or cancelled");
       settled = true;
@@ -1256,6 +1435,7 @@ function* testSlotPolls(label: string, opts: TestSlotOptions, maximum: number,
   const bootId = opts.bootId ?? (() => readBootId());
   const isPidAlive = opts.isPidAlive ?? defaultIsPidAlive;
   const pidNamespace = opts.pidNamespace ?? (() => readPidNamespace());
+  const cgroupNamespace = opts.cgroupNamespace ?? (() => readCgroupNamespace());
   const privateWriter = opts.ownershipProtocol === "private-capacity-v1";
   const parentPolicy = opts.privateParentPolicy === "require-entry-protection";
   const basePrivate = privateWriter || opts.privateCoordinationRequired === true || parentPolicy;
@@ -1292,9 +1472,10 @@ function* testSlotPolls(label: string, opts: TestSlotOptions, maximum: number,
       return false;
     }
   };
+  const darwinWaiter = () => ({ platform: opts.platform ?? process.platform, hostname: host(), bootId: bootId(), pidNs: pidNamespace() });
   const treeProbe = opts.treeProbe ?? ((held: TestSlotHolder) => probeReservedTree(held, { platform: opts.platform, hostname: host, bootId: bootId(), pidNs: pidNamespace() }));
   const cgroupIdentityProbe = opts.cgroupIdentityProbe ?? ((held: TestSlotHolder) => probeCgroupIdentity(held, {
-    platform: opts.platform, hostname: host, bootId: bootId(), pidNs: pidNamespace(), cgroupNamespace: readCgroupNamespace(), ownerUid: process.getuid?.(),
+    platform: opts.platform, hostname: host, bootId: bootId(), pidNs: pidNamespace(), cgroupNamespace: cgroupNamespace(), ownerUid: process.getuid?.(),
   }));
   const observed = new Set<string>();
   /** One row per distinct observation: a bounded diagnostic, not one per poll. */
@@ -1480,7 +1661,8 @@ function* testSlotPolls(label: string, opts: TestSlotOptions, maximum: number,
     return `memory headroom ${mib(headroom)} MiB < ${mib(need)} MiB for this run and the live holders' peaks`;
   };
   let announced = false;
-  // W1-T9950: a FIFO ticket per waiter, so admission follows arrival. An explicit protected parent gets no new entry.
+  // W1-T9950: a ticket per waiter, so admission follows one shared order rather than whose poll lands first; W1-T11915
+  // makes that order cheapest first, aged by wait. An explicit protected parent gets no new entry.
   const queueEnabled = !parentPolicy && (opts.queue ?? (opts.ticket !== undefined || (opts.dir === undefined && scope !== "test-process")));
   let queueing = queueEnabled, ticket: OwnTicket | undefined = queueEnabled ? opts.ticket : undefined, lastQueued = "";
   const say = opts.say ?? (opts.log ? undefined : (line: string) => void process.stderr.write(`${line}\n`));
@@ -1501,22 +1683,24 @@ function* testSlotPolls(label: string, opts: TestSlotOptions, maximum: number,
     if (!queueing || ticket) return;
     try {
       ticket = takeTestSlotTicket(dir, { pid: opts.pid ?? process.pid, host: host(), bootId: bootId(), pidNs: pidNamespace(), processStart,
-        label, arrivedAt: startedIso, heartbeatAt: clock.iso(), heartbeatIntervalMs: pollMs });
+        label, arrivedAt: startedIso, heartbeatAt: clock.iso(), heartbeatIntervalMs: pollMs, ...ticketPrice(opts.costMs) });
     } catch (error) {
       // Collapses "cannot queue" into today's unqueued polling — never a refusal; queueFailed logs the reason.
       queueFailed(error);
     }
   };
-  /** The live tickets ahead of this waiter (dead ones reaped on the way); joins the line when anyone is in it. */
+  /** The live tickets admitted before this waiter, in {@link testSlotAdmissionOrder} (dead ones reaped on the way);
+   *  joins the line when anyone is in it. A waiter whose own ticket is not in the listing yields to every ticket in it. */
   const queueAhead = (): QueuedTicket[] => {
     if (!queueing) return [];
     try {
       ticket?.beat(clock.iso());
       const live = readTestSlotQueue(dir, judge, row => log(JSON.stringify({ ...row, by: label })), ticket?.name);
       if (!ticket && live.length > 0) joinQueue();
-      const own = ticket?.name;
-      behind = own === undefined ? 0 : live.filter(t => t.name > own).length;
-      return own === undefined ? live : live.filter(t => t.name < own);
+      const order = testSlotAdmissionOrder(live, clock.now()), own = ticket?.name;
+      const at = own === undefined ? -1 : order.findIndex(t => t.name === own);
+      behind = at === -1 ? 0 : order.length - at - 1;
+      return at === -1 ? order : order.slice(0, at);
     } catch (error) {
       // Nobody ahead is NOT claimed: queueFailed logs queue_unavailable and stops queueing for this waiter.
       queueFailed(error);
@@ -1533,10 +1717,13 @@ function* testSlotPolls(label: string, opts: TestSlotOptions, maximum: number,
         const st = lstatSync(path);
         if (st.isFile() && (st.mode & 0o077) === 0) { view.privateSeen = true; view.holders.push({ slot: i }); granted += 1; continue; }
         const held = st.isFile() ? readTestSlotHolder(path, st) : null;
-        if (held?.heartbeatIntervalMs !== undefined || held?.workIdentity !== undefined) view.unproven = true;
+        const marked = held?.heartbeatIntervalMs !== undefined || held?.workIdentity !== undefined;
+        const darwinEnded = judgeOpen && marked && darwinMarkerOwnerEvidence(held!, st.uid, testSlotHolderStale(held!, clock.now(),
+          { hostname: host, bootId, isPidAlive, pidNamespace }), clock.now(), darwinWaiter())?.state === "ended";
+        if (marked && !darwinEnded) view.unproven = true;
         view.holders.push({ slot: i, label: held?.label, pid: held?.pid, elapsedMs: held ? clock.now() - Date.parse(held.startedAt) : undefined });
         // Only a cadence-less dead holder counts as open here; anything needing exact-tree evidence waits for the head.
-        if (judgeOpen && held && !view.unproven && testSlotHolderStale(held, clock.now(), { hostname: host, bootId, isPidAlive, pidNamespace })) view.open += 1;
+        if (judgeOpen && held && (darwinEnded || (!view.unproven && testSlotHolderStale(held, clock.now(), { hostname: host, bootId, isPidAlive, pidNamespace })))) view.open += 1;
         else granted += grantedTo([held ?? {}]);
       } catch (error) {
         // Absent is open; any other failure is a holder we cannot read, reported by name and never counted open.
@@ -1587,6 +1774,7 @@ function* testSlotPolls(label: string, opts: TestSlotOptions, maximum: number,
     for (;;) {
       poll += 1;
       // W1-T9950: only the queue's head — or a waiter with fewer live tickets ahead than open slots — touches a slot.
+      // W1-T11915: "ahead" is the admission order (cheapest first, aged by wait); the open-slot rule is unchanged.
       const ahead = queueAhead();
       const view = ahead.length > 0 ? slotView(true) : undefined;
       const holders: string[] = [];
@@ -1594,7 +1782,7 @@ function* testSlotPolls(label: string, opts: TestSlotOptions, maximum: number,
         // Fail closed while yielding: what this poll saw only adds to what the last admitted poll derived.
         if (view.privateSeen) privateRequired = true;
         if (view.unproven) reservedWorkUnproven = true;
-        holders.push(`queued behind ${ahead.length} earlier waiter(s) with ${view.open} slot(s) open`);
+        holders.push(`queued behind ${ahead.length} waiter(s) admitted first with ${view.open} slot(s) open`);
       } else {
       privateRequired = basePrivate || cleanupIncomplete;
       reservedWorkUnproven = false;
@@ -1667,7 +1855,7 @@ function* testSlotPolls(label: string, opts: TestSlotOptions, maximum: number,
             writeRecord(body);
             removeCapacity = privateWriter ? publishSlotCapacity(path, fd, i, ownedRecord) : undefined;
             const waitedMs = clock.now() - startedAt;
-            if (announced || ticket) log(JSON.stringify({ step: "test_slot.acquired", label, slot: i, waitedMs, dir, ticketed: ticket !== undefined, aheadAtAcquire: ahead.length, concurrency, admission }));
+            if (announced || ticket) log(JSON.stringify({ step: "test_slot.acquired", label, slot: i, waitedMs, dir, ticketed: ticket !== undefined, aheadAtAcquire: ahead.length, ...ticketPrice(opts.costMs), concurrency, admission }));
             const acquiredAt = clock.now();
             let held = true;
             let closed = false;
@@ -1689,7 +1877,7 @@ function* testSlotPolls(label: string, opts: TestSlotOptions, maximum: number,
               outcome: "acquired", executionAllowed: true, concurrency, waitedMs,
               ...((opts.pid ?? process.pid) === process.pid && sameHost(host(), hostname()) && processStart ? {
                 childEnvironment: { [TEST_SLOT_PARENT_ENV]: parentClaim,
-                  [TEST_SLOT_DIR_ENV]: dir },
+                  [TEST_SLOT_DIR_ENV]: dir, NODE_COMPILE_CACHE: join(dir, "node-compile-cache") },
                 ...(privateWriter ? {} : { heartbeat: { path, ownerNonce, pid: process.pid, processStart, host: host(),
                   bootId: ownedRecord.bootId, pidNs: ownedRecord.pidNs, ownerUid: ownedRecord.ownerUid,
                   intervalMs: TEST_SLOT_HEARTBEAT_MS, coverageEnvironment: { [TEST_SLOT_RUN_ENV]: parentClaim } } }),
@@ -1798,10 +1986,26 @@ function* testSlotPolls(label: string, opts: TestSlotOptions, maximum: number,
             break;
           }
           let quiescent: { held: TestSlotHolder; evidence: ReservedTreeEvidence } | undefined;
+          let agedHold: TestSlotHoldAge | undefined;
+          /** W1-T11809: a retained foreign hold aged past its bound is UNKNOWN — one row and one line, never a release. */
+          const retainUnknown = (held: TestSlotHolder, probeReason?: string): false => {
+            agedHold = judgeTestSlotHoldAge(held, { hostname: host(), bootId: bootId(), pidNs: pidNamespace(), cgroupNs: cgroupNamespace(),
+              slotDir: dir, slot: i, probeReason }, clock.now());
+            if (agedHold === undefined || !agedHold.aged) return false; // Local, proven ended, or still within its bound.
+            const key = `aged:${i}:${held.ownerNonce}`;
+            if (observed.has(key)) return false;
+            observeOnce(key, { step: "test_slot.owner_aged", label, ...agedHold,
+              decision: "retained: an aged foreign hold is UNKNOWN, never released by heartbeat age" });
+            (say ?? ((line: string) => void process.stderr.write(`${line}\n`)))(`test slot ${i}: ${agedHold.holder} (pid ${held.pid} on ${agedHold.host}) is UNKNOWN, ` +
+              `aged ${ageText(agedHold.ageMs)} with no beat for ${ageText(agedHold.silentMs)}; missing: ${agedHold.missingEvidence.join("; ")}; ` +
+              `the hold is kept. Recover it from the owner lane: ${agedHold.recovery}`);
+            return false;
+          };
           const reclaim = reclaimStaleLock(path, {
             parseHolder: parseTestSlotHolder,
             isStale: (held) => {
               quiescent = undefined;
+              agedHold = undefined;
               const myNs = pidNamespace();
               const foreignPidNamespace = sameHost(held.host, host()) && held.pidNs !== undefined && myNs !== undefined && held.pidNs !== myNs;
               const scope = held.cgroupScope;
@@ -1814,14 +2018,16 @@ function* testSlotPolls(label: string, opts: TestSlotOptions, maximum: number,
                 observeOnce("cgroup-identity:" + i + ":" + held.ownerNonce + ":" + evidence.state + ":" + evidence.reason, { step: "test_slot.reclaim_withheld", label,
                   slot: i, pid: held.pid, holder: held.label, ownerNonce: held.ownerNonce, processStart: held.processStart,
                   evidence: evidence.state, coverage: evidence.coverage, reason: evidence.reason });
-                return false; // A complete identity never falls through to heartbeat age.
+                // A complete identity never falls through to heartbeat age; only an unobservable tree is UNKNOWN.
+                return evidence.state === "unknown" && retainUnknown(held, evidence.reason);
               }
               const pidStale = testSlotHolderStale(held, clock.now(), { hostname: host, bootId, isPidAlive, pidNamespace });
               const cadence = held.heartbeatIntervalMs;
               const local = sameHost(held.host, host()) && !(held.pidNs !== undefined && myNs !== undefined && held.pidNs !== myNs);
-              // A cadence-less or foreign record keeps today's judgment exactly (pid probe; boot id, then lease).
+              // A cadence-less record keeps the pid probe; a foreign one its boot id (the lease only without one).
               const recordedCadence = cadence !== undefined && Number.isSafeInteger(cadence) && cadence > 0;
-              if ((!recordedCadence && held.workIdentity === undefined) || !local) return pidStale;
+              if (!local) return pidStale || retainUnknown(held);
+              if (!recordedCadence && held.workIdentity === undefined) return pidStale;
               reservedWorkUnproven = true;
               const silentMs = clock.now() - Date.parse(held.heartbeatAt);
               if (recordedCadence && silentMs > TEST_SLOT_SILENT_BEATS * cadence!) {
@@ -1829,11 +2035,12 @@ function* testSlotPolls(label: string, opts: TestSlotOptions, maximum: number,
                   heartbeatAt: held.heartbeatAt, heartbeatIntervalMs: cadence, silentMs, decision: "retained: a missed beat is diagnostic, never quiescence" });
               }
               if (!pidStale) return false;
-              // The owner pid is gone or reused: only exact-tree terminal evidence frees its capacity.
-              const evidence = held.ownerUid === currentStat?.uid && held.ownerUid === process.getuid?.() &&
+              // The owner pid is gone or reused: only exact-tree terminal evidence (darwin: pid and lease) frees its capacity.
+              const evidence = darwinMarkerOwnerEvidence(held, currentStat?.uid, true, clock.now(), darwinWaiter()) ??
+                (held.ownerUid === currentStat?.uid && held.ownerUid === process.getuid?.() &&
                 held.bootId === bootId() && held.pidNs === myNs && testSlotReservationIdentity(held) !== undefined
                 ? observeReservedTree(held, treeProbe)
-                : { state: "unknown" as const, coverage: "none", reason: "owner identity unknown or host/boot/namespace/uid differs" };
+                : { state: "unknown" as const, coverage: "none", reason: "owner identity unknown or host/boot/namespace/uid differs" });
               if (evidence.state === "ended") { quiescent = { held, evidence }; return true; }
               observeOnce(`withheld:${i}:${held.ownerNonce}:${evidence.state}:${evidence.reason}`, { step: "test_slot.reclaim_withheld", label, slot: i,
                 pid: held.pid, holder: held.label, ownerNonce: held.ownerNonce, processStart: held.processStart,
@@ -1862,7 +2069,8 @@ function* testSlotPolls(label: string, opts: TestSlotOptions, maximum: number,
             },
           });
           if (reclaim.outcome === "live") {
-            holders.push(`slot ${i}: pid ${reclaim.holder.pid} on ${reclaim.holder.host} (${reclaim.holder.label})`);
+            const unknown = agedHold?.aged ? ` UNKNOWN (aged ${ageText(agedHold.ageMs)})` : "";
+            holders.push(`slot ${i}: pid ${reclaim.holder.pid} on ${reclaim.holder.host} (${reclaim.holder.label})${unknown}`);
             break;
           }
           } finally {
@@ -2016,7 +2224,8 @@ export function admitStaticWork(label: string, opts: TestSlotOptions & { memoryB
       }
       if (announced) log(JSON.stringify({ step: "test_slot.static_admitted", label, outcome, waitedMs: waited() }));
       return { outcome, executionAllowed: true, waitedMs: waited(), release, note: `${why}${unrecorded ?? ""}`,
-        ...(unrecorded ? {} : { childEnvironment: { [TEST_SLOT_DIR_ENV]: dir } }) };
+        ...(unrecorded ? {} : { childEnvironment: { [TEST_SLOT_DIR_ENV]: dir,
+          NODE_COMPILE_CACHE: join(dir, "node-compile-cache") } }) };
     };
     if (headroom === undefined || Number.isNaN(headroom)) return admit("open", "static admission OPEN: no memory reading on this host");
     if (seen.holders.length === 0 || headroom >= need) {

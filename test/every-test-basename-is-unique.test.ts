@@ -1,3 +1,4 @@
+// @census-reads: test/ src/lib/test-path-resolver.ts — every tracked test path, and the resolver that finds a moved test by basename.
 /**
  * W1-T9860 — a test's unique basename is its identity (operator ruling 5, 2026-10-16). resolveTestPath finds a moved
  * test by its basename, and that is only sound while no two tests share one. This walks every tracked test outside

@@ -1,0 +1,30 @@
+- id: W1-T12441
+  title: "THE SCOUT'S UNCOVERED RECURRING SYMPTOM — redesign.gardener_failed landed 7 ledger rows across the trailing window and no task cites it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: low
+  priority: 3.37
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "scout:redesign.gardener_failed"
+  files:
+    - test/gardeners/scout-redesign-gardener-failed.test.ts
+  acceptance:
+    - claim: "redesign.gardener_failed stops recurring: its cause is fixed rather than its rows hidden"
+      proof: "grep: test(\"W1-T12441: redesign.gardener_failed no longer recurs\" in test/gardeners/scout-redesign-gardener-failed.test.ts"
+  note: "Filed by the scout gardener (W1-T5454). The scout measures this step again once the build merges and credits or debits its class by whether the rows stopped. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person."
+  rationale: |
+    The ledger step redesign.gardener_failed carries a failure shape and landed rows in both halves of the trailing 7 days: 1 in the older half, 6 in the newer.
+    No queued task and no task merged in that window cites this step, and no gardener scorecard prices it.
+    The rows name no file of their own: locate the code that writes this step first, then fix its cause.
+  risk_ruling:
+    verdict: "rule-3-low-privilege"
+    action: proceed
+    confidence: 1
+    reasons:
+      - "rule 3 (live and low-privilege): the symptom is live, 7 occurrence(s) across 7 day(s), last seen 2026-11-10T16:21:14.186Z, and the record declares no privileged path"
+    judged_at: "2026-11-13T02:00:03.953Z"
+    pin: "0631dfb9067b8d62f680cb9ceb3e8ef9000502087167a96e81815fcd85ae0ba4"

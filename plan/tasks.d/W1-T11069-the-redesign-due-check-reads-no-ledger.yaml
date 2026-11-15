@@ -14,7 +14,7 @@
   files:
     - src/lib/redesign-gardener.ts
     - test/gardeners/the-redesign-due-check-reads-no-ledger.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: The redesign garden's cheapFingerprint reads no ledger rows; it keys on the plan's modification times and the hourly ledger bucket, so it is stable within an hour and moves with a new bucket

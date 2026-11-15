@@ -12,7 +12,7 @@
   origin: "operator instruction 2026-10-16: qualify real shell and heartbeat consumers before private ops staging, no live replacement or new schedules"
   plan_refs: [W1-T9435, W1-T9493, W1-T9559, W1-T9571, W1-T9572, W1-T9793, W1-T10573]
   files: [deploy/field-trials-refresh.sh, deploy/host-update.sh, deploy/install-host-units.sh, deploy/recycle-container.sh, deploy/registry-shadow.sh, deploy/serve-container.sh, docs/instance-registry-selection-contract.md, scripts/fleet-heartbeat.sh, src/lib/child-entry-argv.ts, src/lib/repo-location.ts, src/lib/selected-registry-consumers.ts, src/run-task.ts, src/selected-registry-shadow-main.ts, test/a-disk-reclaim-that-refuses-while-the-fleet-is-up-can-never-be-scheduled.test.ts, test/cli-registry-dispatches.test.ts, test/fixtures/selected-registry-old/deploy/field-trials-refresh.sh, test/fixtures/selected-registry-old/deploy/install-host-units.sh, test/fixtures/selected-registry-old/PROVENANCE.json, test/helpers/registry-shell-fixture.ts, test/recycle-container.test.ts, test/selected-registry-shell-consumers.test.ts, test/serve-starts-its-workers-from-current-worker-bundles.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     At actual main ec0eb2ce2, installer/recycler mode grammar is merged, but their

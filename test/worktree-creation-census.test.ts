@@ -1,3 +1,4 @@
+// @census-reads: src/ test/worktree-creation-census.test.ts — every src file's worktree-add site, the registry, itself.
 /**
  * test/worktree-creation-census.test.ts — W1-T2622.
  *

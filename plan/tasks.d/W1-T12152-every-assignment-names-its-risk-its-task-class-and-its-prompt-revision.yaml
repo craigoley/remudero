@@ -1,0 +1,45 @@
+- id: W1-T12152
+  title: "Every assignment names its risk, its task class and its prompt revision"
+  repo: remudero
+  depends_on: []
+  priority: 1.2
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the receipt on every worker.assignment row, written from each pipeline's call site
+  band_meaning: blast-radius
+  origin: operator-session#model-choice-2026-11-10
+  plan_refs:
+    - W1-T11113
+    - W1-T2383
+  files:
+    - src/lib/benchmark-run.ts
+    - src/lib/worker.ts
+    - src/run-task.ts
+    - test/routing/every-assignment-names-its-risk-its-task-class-and-its-prompt-revision.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "An assignment for fix or review work on a pull request with a task records that task's risk and task class, as a build assignment does"
+      proof: "grep: W1-T12152 criterion 1 in test/routing/every-assignment-names-its-risk-its-task-class-and-its-prompt-revision.test.ts"
+    - claim: "An assignment for work with no task records the pipeline and a named reason, never an empty risk"
+      proof: "grep: W1-T12152 criterion 2 in test/routing/every-assignment-names-its-risk-its-task-class-and-its-prompt-revision.test.ts"
+    - claim: "Every assignment records a prompt revision, which is a hash of the prompt template and the tool list the worker is given. Two workers given the same template and tools record the same revision"
+      proof: "grep: W1-T12152 criterion 3 in test/routing/every-assignment-names-its-risk-its-task-class-and-its-prompt-revision.test.ts"
+    - claim: "The hash is taken from the template before task text is filled in, so no task text or secret enters it"
+      proof: "grep: W1-T12152 criterion 4 in test/routing/every-assignment-names-its-risk-its-task-class-and-its-prompt-revision.test.ts"
+  rationale: |
+    MEASURED 2026-11-10 in the core instance's ledger, 2026-10-27 to 2026-11-10, over 16,233 `worker.assignment` rows: risk and task class are absent on 87.9% of them.
+    - `nonDispatchBenchmarkWork` in src/lib/benchmark-run.ts gives every pipeline but build a lane name and no task facts. Fix and review work have a task, and it is not passed.
+    - The prompt, tool and scorer revisions are never pinned. `pinEvidence` writes a named gap for each on every row.
+    - Without risk and class, a comparison of two models cannot be matched on how hard the work was.
+    - Without a prompt revision, a change in a rate cannot be told apart from a change in the prompt.
+  design: |
+    Pass the task's risk and class from the fix and review call sites into the assignment receipt. `ledgerNonDispatchAssignment` in src/run-task.ts already takes a task id, so it can read the task file.
+    Compute the prompt revision where the prompt is rendered, and pass it as `promptRevision` in the stack evidence. `pinEvidence` already has the field.
+    NOT IN SCOPE: the scorer and environment revisions, and the paired-trial checks of W1-T11113.
+  falsifier: |
+    Leave the task out of a review assignment and criterion 1 must fail. Hash the filled prompt and criterion 4 must fail, because two tasks then give two revisions. Restore and require all to pass.
+  note: |
+    W1-T12151 closes the gaps on the attempt row. This task closes the gaps on the assignment row.

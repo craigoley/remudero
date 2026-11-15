@@ -1,3 +1,4 @@
+// @census-reads: src/ test/spend-is-counted-once-at-its-producer.test.ts — every src file's cost-bearing log call, and itself.
 import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";

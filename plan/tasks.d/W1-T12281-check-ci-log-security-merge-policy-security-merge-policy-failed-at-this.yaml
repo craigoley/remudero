@@ -1,0 +1,54 @@
+- id: W1-T12281
+  title: "THE CI FRICTION GARDENER'S COSTLIEST OPEN CAUSE — check:ci-log:security-merge-policy:security-merge-policy-failed-at-this-head-unknown-trusted-ex cost 5.3 PR minute(s) across 3 round(s) on 3 pull request(s)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: low
+  priority: 1.24
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "ci-friction:check:ci-log:security-merge-policy:security-merge-policy-failed-at-this-head-unknown-trusted-ex"
+  files:
+    - src/lib/sweep.ts
+    - test/sweep/check-ci-log-security-merge-policy-security-merge-policy-failed-at-this.test.ts
+  acceptance:
+    - claim: "a recorded check:ci-log:security-merge-policy:security-merge-policy-failed-at-this-head-unknown-trusted-ex round, replayed through the real code path in src/lib/sweep.ts, is prevented or self-healed without dispatching a fix round"
+      proof: "unit test: W1-T12281: CI friction 6990ea84915912ff is prevented, not retried"
+  note: "Filed by the ci-friction gardener (W1-T4435) at rung 1. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. After its build merges, the gardener measures check:ci-log:security-merge-policy:security-merge-policy-failed-at-this-head-unknown-trusted-ex's share of all fix rounds in equal windows before and after; a share that does not fall reopens the cause at rung 2. The regression must replay one recorded round of this cause through the real owner path; the after-window measurement, not the regression, shows the cause's share fell."
+  rationale: |
+    MEASURED by the ci-friction gardener: check:ci-log:security-merge-policy:security-merge-policy-failed-at-this-head-unknown-trusted-ex cost 5.3 PR minute(s) (seven-day half-life) across 3 fix round(s) on 3 pull request(s).
+
+    WHERE IT COMES FROM:
+    - src/lib/sweep.ts: names "security-merge-policy" (4 line(s))
+    - src/lib/dep-review.ts: names "security-merge-policy" (3 line(s))
+
+    RECENT ROUNDS (newest first):
+    - PR #17671 (https://github.com/craigoley/remudero/pull/17671) at 2026-11-10T16:35:44.595Z: ci-log round — security-merge-policy: security-merge-policy failed at this head (unknown: trusted-exact-head-codeql-result-missing); its alerts were not read:
+        log excerpt:
+          | security-merge-policy failed at this head (unknown: trusted-exact-head-codeql-result-missing); its alerts were not read: no open high-severity alert was read for this head (none is open, the read was not due, or it failed)
+    - PR #17669 (https://github.com/craigoley/remudero/pull/17669) at 2026-11-10T16:19:37.614Z: ci-log round — security-merge-policy: security-merge-policy failed at this head (unknown: trusted-exact-head-codeql-result-missing); its alerts were not read:
+        log excerpt:
+          | security-merge-policy failed at this head (unknown: trusted-exact-head-codeql-result-missing); its alerts were not read: no open high-severity alert was read for this head (none is open, the read was not due, or it failed)
+    - PR #14862 (https://github.com/craigoley/remudero/pull/14862) at 2026-10-27T17:07:36.913Z: ci-log round — security-merge-policy: security-merge-policy failed at this head (unknown: trusted-exact-head-codeql-result-missing); its alerts were not read:
+        log excerpt:
+          | security-merge-policy failed at this head (unknown: trusted-exact-head-codeql-result-missing); its alerts were not read: no open high-severity alert was read for this head (none is open, the read was not due, or it failed)
+
+    WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
+    without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
+    share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
+
+    The regression must replay one recorded round above through the real owner path (the code that decides whether a fix round is dispatched or the failure heals), not assert a label, prompt text or report wording.
+    It need not prove the cause never recurs: the after-window measurement decides that, and reopens the cause one rung up if its share does not fall.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.6
+    reasons:
+      - "The declared files are only src/lib/sweep.ts and a new unit test; no workflow, policy, credential or permission file is listed."
+      - "The recorded failure state is \"unknown\", which reads as fail-closed. A remedy such as retrying or waiting for the CodeQL result is plausible, but the description does not say how the change self-heals."
+      - "The acceptance is a replay of a recorded round through the real owner path, and the PR still passes CI and review."
+      - "The security-merge-policy gate is adjacent to the change and no change view was supplied, so I cannot confirm the gate is not loosened; this lowers my confidence."
+    judged_at: "2026-11-11T08:17:25.554Z"
+    pin: "7563b36f8de089be93f07cfbe768d79d417aa8d2c6897037114c7de2ab07c4b1"

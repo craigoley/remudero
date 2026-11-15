@@ -19,10 +19,25 @@ raw: >-
   2026-11-02T08:29:32.579Z through 2026-11-09T08:29:32.579Z; overrides rejected.
 attachments: []
 origin: cli
-status: new
+status: accepted
 reply_to: null
-proposal_pr: null
-summary: null
+proposal_pr: https://github.com/craigoley/remudero/pull/17605
+summary:
+  headline: Review lane is missing servedModel on most worker calls
+  what_happened: Only 16.2% of review-lane worker calls in the past week recorded
+    servedModel, against a 100% baseline. The gap reopened on 2026-11-09, and
+    the coverage gardener will keep updating this entry until it closes.
+  decision: Restore servedModel at the review lane's ledger write site, or record
+    why this lane legitimately lacks it.
+  options:
+    - label: Restore the field
+      consequence: Review-lane calls record servedModel again, and coverage should
+        climb back toward 100%.
+    - label: Record a legitimate exemption
+      consequence: The review lane is excluded from the servedModel coverage check,
+        with the reason documented.
+    - label: Defer
+      consequence: The gap stays open and this entry keeps reappearing until someone acts.
 expansion: null
 submission_key: null
 thread_id: null

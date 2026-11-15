@@ -17,7 +17,7 @@
     - src/lib/sweep.ts
     - src/lib/machine-filing-judge.ts
     - test/triage/a-conflicted-judge-pr-whose-ruled-record-moved-is-withdrawn-not-escalated.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: A conflicted machine-judge plan PR whose ruled record's pin no longer matches origin/main is withdrawn for a re-judge, its PR closed with the stale-ruling comment and the judge's pending state cleared, with no plan-scoped conflict round dispatched and no escalation

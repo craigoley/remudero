@@ -305,6 +305,8 @@ test("the real intake publication writes an agent response on its original escal
   writeFileSync(join(home, ".config", "remudero", "config.json"), JSON.stringify({ root: stateRoot, installRoot: REPO_ROOT, claudeBin: "/usr/bin/true" }));
   const shim = ghShim([
     { when: "pr list", stdout: "[]" }, { when: "issue list", stdout: "[]" },
+    // W1-T12198: the grill status lands through the feedback landing, which opens this pull request.
+    { when: "pr create", stdout: "https://github.com/craigoley/remudero/pull/998" },
     { when: "issue create", stdout: "https://github.com/craigoley/remudero/issues/16231" },
     { when: "/issues?", stdout: "[]" },
     { when: "/pulls?state=open", stdout: "HTTP/2.0 200 OK\r\n\r\n[]" },

@@ -1,0 +1,75 @@
+- id: W1-T12531
+  title: "Daemon GitHub reads share one in-process client instead of a gh process per call"
+  repo: remudero
+  depends_on: []
+  priority: 1.1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # every daemon GitHub read goes through this path; a wrong answer or a lost rate-limit signal reaches every lane
+  band_meaning: blast-radius
+  origin: operator-session#review-capacity-2026-11-13
+  plan_refs:
+    - W1-T11926
+    - W1-T12075
+    - W1-T12272
+    - W1-T10279
+    - W1-T6591
+  files:
+    - src/lib/github-transport.ts
+    - src/lib/github-http-read.ts
+    - test/github/daemon-github-reads-share-one-in-process-client.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "A daemon read through ghJsonAsync of the form `api <path>` (GET, with the -i header form) is answered by one shared in-process HTTP client with keep-alive, starts no child process, and returns the same parsed body and the same rate-limit reading the gh path returns for the same response"
+      proof: "grep: W1-T12531 criterion 1 in test/github/daemon-github-reads-share-one-in-process-client.test.ts"
+    - claim: "invariant:same-read-rules — the in-process read keeps the read rules: with a live read broker the broker answers and no HTTP request is sent; without one applyGhReadCadenceAsync runs before the request; concurrent identical reads share one request"
+      proof: "grep: W1-T12531 criterion 2 in test/github/daemon-github-reads-share-one-in-process-client.test.ts"
+    - claim: "invariant:one-credential-source — the token comes from resolveGithubCredential, the resolver every gh spawn uses; a read with no credential throws before any request, and the sentinel test token is refused as refuseSentinelGhToken refuses it"
+      proof: "grep: W1-T12531 criterion 3 in test/github/daemon-github-reads-share-one-in-process-client.test.ts"
+    - claim: "A primary or secondary rate-limit response (403 or 429, with or without retry-after) raises the same error class and carries the same reading the gh path raises for it, so the pacer and isGhRateLimitError see no difference"
+      proof: "grep: W1-T12531 criterion 4 in test/github/daemon-github-reads-share-one-in-process-client.test.ts"
+    - claim: "Any argument form the client does not parse (a write method, -f/-F fields, --paginate, --jq, a non-api command) still spawns gh exactly as origin/main does"
+      proof: "grep: W1-T12531 criterion 5 in test/github/daemon-github-reads-share-one-in-process-client.test.ts"
+    - claim: "ghStdoutAsync, the production path of every daemon ghJsonAsync read, calls the new client"
+      proof: "grep: githubHttpRead( in src/lib/github-transport.ts"
+  rationale: |
+    Each daemon GitHub read starts its own gh process, and those processes cost the host CPU that reviews and builds need.
+    MEASURED by the operator session on the Azure host, 2026-11-13: 5-7 gh CLI processes run at once, about 2 cores between
+    them. The installation rate limit was hit at 15:00Z and killed 2 post-review runs.
+    READ at origin/main 51e329755, src/lib/github-transport.ts:
+    - :385 ghJsonAsync calls ghStdoutAsync, which runs execAsync("gh", ...) (:403) once per read that the broker (:219
+      ghBrokeredAsync) does not answer. Each read pays a full gh start: a new process, its config read and a new TLS connection.
+    - :330 asyncReadInFlight already coalesces identical concurrent reads, and :1832 applyGhReadCadenceAsync paces them;
+      both sit before the spawn, so an in-process client can keep them by replacing only the spawn.
+    - :152-168 every gh spawn takes its credential from resolveGithubCredential (W1-T11926, src/lib/github-credential.ts).
+    - :43 parseGhRateLimitHeaders reads the same response headers an HTTP client receives directly.
+    W1-T12075 and W1-T12272 (both queued) move every gh call site to that one credential source and ledger a missing one;
+    they keep one gh process per call. This task keeps their credential rule and removes the process for daemon reads.
+    CHECKED for overlap: W1-T10279's broker serves the Mac accounts' reads and stays first in line here; W1-T12530 changes how
+    many reads the open-PR views make, not how each is sent.
+  design: |
+    1. New module src/lib/github-http-read.ts: one shared client, githubHttpRead (node's fetch with a keep-alive agent) that takes an
+       already-parsed read (path, headers wanted) and a token, sends GET https://api.github.com/<path> with the headers gh
+       sends (Accept: application/vnd.github+json; User-Agent: remudero), and returns {status, headers, body}. It must
+       not import the ledger or config (github-transport.ts sits below the ledger; check with depcruise).
+    2. In ghStdoutAsync, after the broker and the cadence step and before the spawn: when the args are an `api <path>` read the
+       client can parse (no method flag other than GET, no -f/-F/--input, no --paginate/--slurp, no --jq/-q/--template, no
+       --hostname), send it through the client with the token resolveGithubCredential picks. With the -i form, rebuild the
+       header block so splitGhHeaderBlock and parseGhRateLimitHeaders read it unchanged. Any other form spawns gh as today.
+    3. Map a non-2xx response to the error the gh path raises for it (same class, same message shape, so isGhRateLimitError
+       and the pacer react the same way).
+    4. The injected-executor seam stays: when execAsync is not the real execFileAsync, the call takes the spawn path, as the
+       coalescing code already does.
+    INVARIANT one-credential-source: the client's token is the one resolveGithubCredential returns for the same argv.
+    INVARIANT same-read-rules: broker first, then the cadence floor, then coalescing, for both the client and the spawn.
+    NOT IN SCOPE: writes, synchronous ghJson/ghExec callers, the broker's own upstream spawn (ghRunForBroker).
+  falsifier: |
+    Route criterion 1's read to the spawn and criterion 1 must fail (a child process starts). Skip applyGhReadCadenceAsync on
+    the client path and criterion 2 must fail. Map a 403 secondary limit to a plain error and criterion 4 must fail. Restore
+    and all must pass.
+  note: |
+    Id W1-T12531 reserved for run-unfiled-1794597956000 with ~/rmd-work/bin/reserve-id.sh.
+    The process and rate-limit figures are the operator session's measurement; they are not stored on main.

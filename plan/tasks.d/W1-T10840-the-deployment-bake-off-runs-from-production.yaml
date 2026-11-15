@@ -18,7 +18,7 @@
     - test/routing/the-deployment-bake-off-runs-from-the-cadence.test.ts
     - "src/lib/worker-provider.ts"
     - "src/lib/worker.ts"
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     VERIFIED ON origin/main 07dbdcc77 (2026-10-27). W1-T4926 (merged) built `findUntrialedModels`,

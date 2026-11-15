@@ -12,6 +12,8 @@ import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const SCRIPT = join(REPO_ROOT, "deploy", "entrypoint.sh");
+/** W1-T12240: the loop, its exit codes and its arms live in the second stage the entrypoint sources. */
+const SUPERVISE = join(REPO_ROOT, "deploy", "entrypoint-supervise.sh");
 
 /**
  * `deploy/entrypoint.sh` IS THE BOOT PATH FOR EVERY CONTAINER RUN — it clones, checks out,
@@ -837,7 +839,7 @@ test("W1-T490: the entrypoint's freshness code is the SAME NUMBER as DAEMON_EXIT
   // the moment the daemon has failed, and the throttle note above records why nothing here may
   // depend on the repo being loadable then. So the constant is written twice and this is what stops
   // the two drifting: a silent drift would restore the whole defect with every unit test green.
-  const script = readFileSync(SCRIPT, "utf8");
+  const script = readFileSync(SUPERVISE, "utf8");
   const m = script.match(/^DAEMON_EXIT_STALE=(\d+)$/m);
   assert.ok(m, "the entrypoint must define DAEMON_EXIT_STALE as a plain assignment this test can read");
   assert.equal(Number(m![1]), DAEMON_EXIT_STALE, "entrypoint and daemon.ts disagree about the freshness exit code");
@@ -847,7 +849,7 @@ test("W1-T490: the entrypoint's freshness code is the SAME NUMBER as DAEMON_EXIT
 });
 
 test("idle_starved: an empty PR board stays quiet, then a new PR wakes within two 300-second pulses", () => {
-  const shellCode = readFileSync(SCRIPT, "utf8").match(/^DAEMON_EXIT_IDLE_STARVED=(\d+)$/m);
+  const shellCode = readFileSync(SUPERVISE, "utf8").match(/^DAEMON_EXIT_IDLE_STARVED=(\d+)$/m);
   assert.equal(Number(shellCode?.[1]), DAEMON_EXIT_IDLE_STARVED, "Node and shell must agree on the idle exit code");
   const origin = makeOrigin();
   mkdirSync(join(origin, "deploy"), { recursive: true });
@@ -1322,7 +1324,7 @@ test("W1-T2537: the entrypoint's blocked code is the SAME NUMBER as DAEMON_EXIT_
   // import src/lib/daemon.ts (it runs at exactly the moment the daemon has stopped), so the
   // constant is written twice. A silent drift here would route a blocked exit down the crash
   // path and restore the whole outage, with every other test green.
-  const script = readFileSync(SCRIPT, "utf8");
+  const script = readFileSync(SUPERVISE, "utf8");
   const m = script.match(/^DAEMON_EXIT_BLOCKED=(\d+)$/m);
   assert.ok(m, "the entrypoint must define DAEMON_EXIT_BLOCKED as a plain assignment this test can read");
   assert.equal(Number(m![1]), DAEMON_EXIT_BLOCKED, "entrypoint and daemon.ts disagree about the blocked exit code");
@@ -1340,7 +1342,7 @@ test("W1-T2537: a blocked exit restarts IN-CONTAINER and never reaches the crash
   // The behavioural half. A blocked stop must take the same in-container path freshness takes —
   // re-sync then loop — so docker's on-failure budget is untouched by a pass that ran to
   // completion.
-  const script = readFileSync(SCRIPT, "utf8");
+  const script = readFileSync(SUPERVISE, "utf8");
   const arm = script.match(/if \[ "\$rc" -eq "\$DAEMON_EXIT_BLOCKED" \][\s\S]*?\n  fi/);
   assert.ok(arm, "the entrypoint must carry a DAEMON_EXIT_BLOCKED arm");
   const body = arm![0];
@@ -1355,7 +1357,7 @@ test("W1-T2537: a blocked exit restarts IN-CONTAINER and never reaches the crash
 test("W1-T2537: a blocked exit past the cap still falls through, so the bound is replaced and not removed", () => {
   // The in-container loop must never become an unbounded one — that would delete the crash-loop
   // bound entirely, which is the objection W1-T490 recorded as STILL BINDING.
-  const script = readFileSync(SCRIPT, "utf8");
+  const script = readFileSync(SUPERVISE, "utf8");
   const armIdx = script.indexOf('if [ "$rc" -eq "$DAEMON_EXIT_BLOCKED" ] && [ "$blocked_restarts" -lt "$BLOCKED_RESTART_MAX" ]');
   const throttleIdx = script.indexOf('sleep "$RESTART_THROTTLE_S"');
   assert.ok(armIdx > 0, "the bounded arm must exist");
@@ -1370,7 +1372,7 @@ test("W1-T2537: a blocked exit past the cap still falls through, so the bound is
 test("W1-T2537: the entrypoint no longer calls a blocked stop a crash", () => {
   // The false equation, in the script's own words: "A crash (`blocked`/`error` => 1) reaches here
   // on its first attempt". `error` is a crash; a completed pass reporting a blocked task is not.
-  const script = readFileSync(SCRIPT, "utf8");
+  const script = readFileSync(SUPERVISE, "utf8");
   assert.doesNotMatch(script, /A crash \(`blocked`\/`error`/, "the comment asserting blocked IS a crash must be gone");
 });
 

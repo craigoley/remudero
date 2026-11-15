@@ -11,6 +11,8 @@ const SHARD = `- id: W9-T1
   title: First repository plan
   repo: remudero
   type: implement
+  design: |
+    NO-INVARIANTS: synthetic lint fixture with no inherited behavior to preserve
   verify: auto
   status: queued
   origin: fixture

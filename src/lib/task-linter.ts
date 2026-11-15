@@ -2,7 +2,7 @@ import { operatorReleaseContractChanged } from "./operator-release.js";
 import { createHash } from "node:crypto";
 import { relative, sep } from "node:path";
 import type { AcceptanceCriterion, MachineFilingAdmissionContext, Plan, Task, TaskStatus } from "./plan.js";
-import { RETIREMENT_REASONS, machineFilingAdmissionViolations, unmetDependencies } from "./plan.js";
+import { PlanError, RETIREMENT_REASONS, machineFilingAdmissionViolations, mergePlanBlobs, unmetDependencies } from "./plan.js";
 import { isInPlanScope } from "./plan-architect.js";
 import {
   isDemonstrationProof,
@@ -95,7 +95,8 @@ export type LintCheck =
   | "shard-shape"
   | "unminted-task-id"
   | "superseded-by"
-  | "doctrine-citation-unresolved";
+  | "doctrine-citation-unresolved"
+  | "design-invariant-proof";
 export type LintSeverity = "block" | "warn";
 
 export interface LintViolation {
@@ -597,9 +598,7 @@ export function proofDialectViolations(task: Task, opts: LintOpts = {}): LintVio
     const trimmed = proof.trim();
     const claimHead = (c.claim ?? "").slice(0, 60);
 
-    // The asymmetry is the dialect's whole safety property, so `opts.proofDialect` cannot demote
-    // it: the warn-only rollout knob covers proofs that FAIL to parse, never one illegal by
-    // construction (W1-T277; see the section comment above).
+    // W1-T277: proofDialect may demote parse failures, never illegal demonstration:auto proofs.
     if (isDemonstrationProof(trimmed)) {
       if (task.verify === "human") return;
       const head = trimmed.slice(0, 80) + (trimmed.length > 80 ? "…" : "");
@@ -632,13 +631,8 @@ export function proofDialectViolations(task: Task, opts: LintOpts = {}): LintVio
     const head = trimmed.slice(0, 80) + (trimmed.length > 80 ? "…" : "");
     let why: string;
     if (isDialectPrefixed(trimmed)) {
-      // W1-T3073: when the shared parser can name WHY it refused, print that sentence rather than
-      // the catch-all below — the author gets the remedy, not a list of things it might have been.
-      // Deliberately the parser's own explainer and not a second interpretation living here.
-      // Only the `unit test:` explainer is consulted here. The `grep:` refusals already reach the
-      // author through this catch-all and through `rmd check-proof`, and swapping their wording is
-      // W1-T3073's scope creep, not its task — test/task-linter.test.ts's near-miss case pins the
-      // existing sentence.
+      // W1-T3073: reuse the parser's unit-test remedy. Keep grep's pinned catch-all wording;
+      // detailed grep refusals also reach authors through `rmd check-proof`.
       why =
         explainUnitTestProofRefusal(trimmed, target) ??
         "dialect-prefixed but refused by parseWhitelistedProof (e.g. a `grep:` proof with no `in <path>` clause, " +
@@ -771,38 +765,20 @@ const BRE_WARNING_REMEDY: Readonly<Record<string, string>> = {
 
 
 // ── GREP-TARGET EXTENSIONLESS-FILE (W1-T3653) ───────────────────────────────
-// {@link grepProofTargetNamesNoFile} (review.ts) approximates "is this path a file" with a pure
-// textual heuristic — the final segment must carry an extension — because the PARSE it backs has no
-// checkout to ask. That heuristic is WRONG for a whole class this repo tracks: `hooks/pre-push`,
-// `hooks/pre-commit`, `hooks/commit-msg`, and any extensionless script under deploy/ are real,
-// tracked FILES with no dot in their name, so a `grep:` proof naming one is refused for reading no
-// file when it plainly does. The fix answers the question git already knows exactly — blob or
-// tree — through an INJECTED reader, so this module stays pure and unit-testable with no reader at
-// all, degrading to the extension heuristic exactly as before (a real directory keeps refusing
-// either way; an absent path now reads as absent, not as a directory, so a typo reads as a typo).
+// An injected blob/tree reader accepts extensionless files (hooks/pre-push, deploy/ scripts).
+// Without checkout facts, retain review.ts's pure has-an-extension heuristic. Directories and
+// absent paths still refuse with distinct remedies (W1-T3653).
 
-/** What an injected {@link LintOpts.grepProofTargetKind} reader reports for a `grep:` proof's
- *  target: a real BLOB (`"file"`, accepted regardless of extension), a real TREE (`"directory"`,
- *  still refused — R-12's case), or nothing at that path at all (`"absent"`, refused with DIFFERENT
- *  wording so a typo never reads as a deliberate directory target). `undefined` from the reader
- *  itself (not this type) means "could not resolve" and degrades to the heuristic below. */
+/** {@link LintOpts.grepProofTargetKind}: file accepts; directory/absent refuse distinctly.
+ *  Reader `undefined` means unresolved, falling back to the extension heuristic. */
 export type GrepProofTargetKind = "file" | "directory" | "absent";
 
-/** Named so the FALLBACK path — no reader injected, or the reader could not resolve this path —
- *  reads as a labelled decision in a grep search rather than an unlabeled `undefined`. This module
- *  runs in contexts with no repo at all (a bare unit test, a plan loaded from text), so the fallback
- *  is not an edge case: it is what runs whenever no checkout-aware caller has wired the reader in. */
+/** Searchable fallback label for callers without checkout facts, including repo-free tests. */
 export const GREP_TARGET_EXTENSIONLESS = "grep-target-extensionless-heuristic";
 
-/** Resolve a `grep:` proof's target path to a refusal message, or `undefined` to accept it —
- *  {@link proofGrepSafetyViolations}'s decision, pulled out so a caller with real git access (a
- *  checkout-aware `readTargetKind`) and a caller with none (`undefined`, every existing test in this
- *  file) both go through ONE function. A `"file"` verdict accepts outright, even extensionless —
- *  that is the whole point (W1-T3653). `"directory"` and `"absent"` both still refuse, so the
- *  check keeps the case R-12 was written for, but with DISTINCT sentences (an absent path is a typo,
- *  a directory is a deliberate but unprovable target). No reader, or a reader that returns
- *  `undefined` for this path (cannot resolve it — e.g. it does not run against a real checkout),
- *  falls back to {@link grepProofTargetNamesNoFile}'s pure has-a-dot heuristic, unchanged. */
+/** Shared target refusal for {@link proofGrepSafetyViolations}; undefined accepts.
+ *  W1-T3653: files accept regardless of extension; directory (R-12) and absent refuse distinctly.
+ *  No reader/unresolved falls back to {@link grepProofTargetNamesNoFile}. */
 export function grepProofTargetRefusal(
   path: string,
   readTargetKind?: (repoRelPath: string) => GrepProofTargetKind | undefined,
@@ -828,22 +804,15 @@ export function proofGrepSafetyViolations(task: Task, opts: LintOpts = {}): Lint
     const proof = typeof c.proof === "string" ? c.proof : "";
     const m = proof.trim().match(/^grep:\s*([\s\S]*)$/i);
     if (!m) continue;
-    // The same split parseDialectGrep uses: an " in " followed by a PATH-LIKE trailing token.
-    // NO FALLBACK TO THE WHOLE BODY: a path-less `grep:` is refused outright by parseDialectGrep,
-    // so it never executes and has no pattern to be unsafe; this check polices only proofs that
-    // RUN. Why: the fallback warned spuriously on W1-T66 and W1-T90.
+    // Match parseDialectGrep's trailing path split. No whole-body fallback: pathless proofs
+    // cannot run; warning on them was spurious (W1-T66, W1-T90).
     const split = m[1].match(/^([\s\S]*?)\s+in\s+(\S*[./]\S*)\s*$/i);
     if (!split) continue;
     const pattern = split[1].trim();
     if (!pattern) continue;
     const where = `criterion ${i + 1} ("${(c.claim ?? "").slice(0, 56)}")`;
-    // (R-12/W1-T3653) A DIRECTORY, or an ABSENT path, is refused at filing time. With no injected
-    // `opts.grepProofTargetKind` reader (every call site here except this task's own test), this is
-    // the SAME rule and sentence `parseDialectGrep` applies at parse — GREP_TARGET_EXTENSIONLESS,
-    // textual, has-a-dot. A checkout-aware caller that DOES inject a reader instead settles the
-    // question exactly: a tracked extensionless file (`hooks/pre-push`) is accepted, and a real
-    // directory or a genuinely absent path is still refused, each with its own sentence, so a typo
-    // reads as a typo rather than as a directory target.
+    // R-12/W1-T3653: checkout facts distinguish extensionless files, directories and typos;
+    // without them, GREP_TARGET_EXTENSIONLESS keeps parseDialectGrep's heuristic and wording.
     const noFile = grepProofTargetRefusal(split[2], opts.grepProofTargetKind);
     if (noFile !== undefined) {
       violations.push({
@@ -870,8 +839,7 @@ export function proofGrepSafetyViolations(task: Task, opts: LintOpts = {}): Lint
           `different matcher and reports a false green.`,
       });
     }
-    // ONE VIOLATION PER DISTINCT CHARACTER, never one aggregate line: `.` and `?` fail in opposite
-    // directions, so a shared sentence could only be vague enough to help with neither.
+    // One remedy per distinct character: `.` and `?` fail in opposite directions.
     for (const ch of warning) {
       violations.push({
         check: "proof-grep-safety",
@@ -886,29 +854,20 @@ export function proofGrepSafetyViolations(task: Task, opts: LintOpts = {}): Lint
 }
 
 // ── PROOF-GREP-UNMATCHABLE (W1-T1225 — a grep: pattern that can NEVER match) ─
-// Nothing at filing time opens the file a `grep:` proof names, so a pattern that cannot match any
-// line of a file already on disk reads identically to a correct forward reference. Two subclasses
-// are POSITIVE detections rather than zeros: the phrase is in the file with a line break inside it,
-// or only under different capitalisation, and a genuine forward reference matches neither probe.
-// It CONSUMES {@link classifyGrepZeroHit} rather than re-deriving that detection, and stays PURE
-// via the injected {@link LintOpts.readGrepProofFile}. WARN, NEVER BLOCK, with no override, and
-// DELIBERATELY NOT folded into {@link lintTask}'s aggregate — it is scoped to ONE call site where
-// the read is bounded by the diff. Why: docs/forensics/task-linter.md#proofgrepunmatchableviolations.
+// Positive line-seam/case-only detections distinguish broken patterns from forward references.
+// Pure via LintOpts.readGrepProofFile; delegate detection to classifyGrepZeroHit. WARN only, no
+// override; excluded from lintTask's aggregate and called only where reads are diff-bounded.
+// Why: docs/forensics/task-linter.md#proofgrepunmatchableviolations.
 
-/** The (pattern, path) a "grep"-kind {@link WhitelistedProof} names, restricted to the DIALECT
- *  shape, which always inserts the `--` argv separator (`args: ["-arn", "--", pattern, path]`).
- *  Mirrors {@link proofScopePath}'s discriminator: the legacy fenced shape carries no separator and
- *  its pattern/path split is not recoverable from `args`, so it is out of scope, never guessed. */
+/** Dialect grep's (pattern, path), identified by `--` as in {@link proofScopePath}.
+ *  Legacy fenced args lack that separator: their split is unrecoverable, never guessed. */
 function proofGrepPatternAndPath(w: WhitelistedProof): { pattern: string; path: string } | undefined {
   if (w.kind !== "grep" || w.args[1] !== "--") return undefined;
   return { pattern: w.args[2], path: w.args[3] };
 }
 
-/** The 0-based raw line index of the first line containing `pattern` case-insensitively — the line
- *  a "case-only" cause's message quotes. A plain substring search, never a regex: the WARN/SILENT
- *  decision already came from {@link classifyGrepZeroHit}, and this only locates which line to show
- *  a human. Returns `undefined` when a literal search cannot re-locate it, so the caller degrades
- *  to a message with no quoted line rather than guessing wrong. */
+/** Locate the 0-based case-only quote with a literal search; classifyGrepZeroHit owns the verdict.
+ *  Undefined omits the quote rather than guessing. */
 function firstLineIndexCaseInsensitive(lines: readonly string[], pattern: string): number | undefined {
   const needle = pattern.toLowerCase();
   for (let i = 0; i < lines.length; i++) {
@@ -917,12 +876,8 @@ function firstLineIndexCaseInsensitive(lines: readonly string[], pattern: string
   return undefined;
 }
 
-/** The 0-based raw line span a "line-seam" phrase straddles. It walks `fileText` once, replicating
- *  the exact collapse `classifyGrepZeroHit`'s `whitespaceNormalised` performs (a newline plus the
- *  following indentation becomes one space), so a literal search lands on the seam the classifier's
- *  BRE match already confirmed. Not a second implementation of the CAUSE decision — only of where
- *  to point a human. Returns `undefined` when the search cannot re-find the span or the match sits
- *  on one physical line; the caller then quotes no lines. */
+/** Locate a 0-based line-seam quote using classifyGrepZeroHit's newline/indent collapse.
+ *  The classifier owns the verdict; absent/single-line literal matches return undefined. */
 function wrappedLineSpan(fileText: string, pattern: string): { startLine: number; endLine: number } | undefined {
   let normalized = "";
   const lineOfChar: number[] = [];
@@ -950,12 +905,9 @@ function wrappedLineSpan(fileText: string, pattern: string): { startLine: number
   return { startLine, endLine };
 }
 
-/** `fileText` with THIS task's own `acceptance:` block removed, or `undefined` when `path` is not
- *  this task's plan record. Ownership is read from the record's own YAML LIST-ITEM id line, never
- *  from `files:`: Rule 15 forbids a `verify: auto` task from declaring its own record, so a
- *  `files:` conjunct would silence this family almost entirely. UNDER-STRIPS on ambiguity — keeping
- *  a line invents no warning, dropping one does — and strips only the ONE record, so the monolith's
- *  several hundred siblings never bleed into each other. PURE. */
+/** Remove only this task's acceptance block; undefined means not its record. PURE.
+ *  Match the YAML list-item id; files: is not the record's identity.
+ *  Under-strip ambiguity: dropping a line can invent a warning. Preserve sibling records. */
 function ownPlanRecordOutsideAcceptance(taskId: string, path: string, fileText: string): string | undefined {
   const isRecord = path === "plan/tasks.yaml" || (path.startsWith("plan/tasks.d/") && /\.ya?ml$/.test(path));
   if (!isRecord) return undefined;
@@ -1777,14 +1729,10 @@ export function proofUnitTestBaseWrapperViolations(task: Task, opts: LintOpts = 
 }
 
 // ── PROOF-TEST-ONLY-DISCRIMINATION (W1-T5662 — a task that changes only test/ cannot fail at base) ──
-// `buildBaseProofDir` (run-task.ts, W1-T3098) copies the diff's ADDED `test/**` files into the
-// merge-base checkout so a `unit test:` proof can run there at all. A task whose `files:` are all
-// under `test/` changes no src, so every `unit test:` proof passes at BOTH trees, grades
-// `executed_stale`, and discriminates nothing. Hit twice in one week: W1-T5527 (#9103) and W1-T5622
-// (#9120) each needed a plan amendment — a `grep:` criterion on the new test file — before the build
-// could go green. WARN across the plan; promoted to BLOCK on a new or changed shard through
-// PLAN_ONLY_NEW_TASK_DIAGNOSTIC_CHECKS. The exits are a `grep:` proof (which misses at base because
-// the file is absent there) or `kind: guard` on the criteria that deliberately preserve behaviour.
+// buildBaseProofDir copies added tests to base (W1-T3098); test-only unit proofs therefore pass
+// both trees as executed_stale. W1-T5527 (#9103), W1-T5622 (#9120) needed grep proofs on new files.
+// WARN; PLAN_ONLY_NEW_TASK_DIAGNOSTIC_CHECKS promotes new/changed shards to BLOCK. Use grep that
+// misses at base, or kind:guard for deliberate preservation criteria.
 
 /** W1-T5662 — a `verify: auto` task whose every non-`plan/` `files:` entry is under `test/` and
  *  whose every judged criterion (not `kind: guard`, no `satisfied_by`) is a `unit test:` proof,
@@ -1856,10 +1804,8 @@ function exactUnitTestTargetPath(proof: string): string | undefined {
 }
 
 // ── SHARED-PROOF (W1-T2967 — one proof cannot answer several claims) ──────────────────────
-// Review asks whether EACH criterion's proof is responsive to THAT claim. When two criteria carry
-// the exact same executable proof, the reviewer is handed the same evidence for different questions,
-// and a path-form `unit test:` proof can also pass at base for every row. This is advisory only:
-// one falsifier can legitimately prove two claims, but the author should make that choice visible.
+// Advisory: identical proofs may not answer distinct claims; path proofs can also pass at base.
+// One falsifier may legitimately prove several claims, but authors should state that choice.
 
 export function sharedProofViolations(task: Task): LintViolation[] {
   const byProof = new Map<string, number[]>();
@@ -1896,26 +1842,14 @@ export function sharedProofViolations(task: Task): LintViolation[] {
 }
 
 // ── UNBOUND-CRITERION (W1-T3217 — file-level proof targets hide sibling gaps) ───────────────
-// A path-form `unit test: test/x.test.ts` proof executes the WHOLE FILE, then review applies that
-// single result to every criterion naming it. So a sibling's passing test can certify a criterion
-// the file never names. This check binds EACH criterion to a title in its named test file by
-// requiring that title to carry this task id plus the criterion index, or an explicit criterion tag.
-// It is warning-first: existing backlog is surfaced, while callers that pass a recorded per-file
-// baseline can block only growth above that baseline.
+// Whole-file proofs can certify unnamed siblings. Bind each criterion to a title carrying task id
+// plus criterion index, or an explicit tag. WARN; supplied per-file baselines block only growth.
 
 export type UnboundCriterionBaseline = Readonly<Record<string, number>>;
 
-// W1-T3217 round 2 (CI hang, no shard printed a summary): the ORIGINAL group here was
-// `(?:\\.|(?!\1)[\s\S])*?` — an escape branch and a "any other char" branch that OVERLAP on
-// every backslash that is not immediately followed by the closing quote, because `[\s\S]` also
-// matches `\`. That overlap is the textbook catastrophic-backtracking shape: an unterminated
-// quote after a long backslash run forces the engine to try exponentially many ways to
-// partition the run between the two branches. Measured locally: 35 backslashes with no closing
-// quote took ~55s on this box; a real fixture or proof-target file with a longer run would hang
-// past any CI timeout with NO summary line printed — exactly the symptom this round's CI log
-// shows on every shard. The fix excludes `\` from the second branch ([^\\] instead of [\s\S]),
-// so the two branches are mutually exclusive on their first character and backtracking stays
-// linear regardless of how many backslashes precede an unterminated string.
+// W1-T3217 round 2: escape/ordinary branches MUST be disjoint. The old [\s\S] ordinary branch
+// also matched backslashes: 35 before an unclosed quote took ~55s and CI hung without summaries.
+// [^\\] excludes them, keeping unterminated-string backtracking linear.
 const TEST_TITLE_PATTERN = /\b(?:test|it)\s*\(\s*(["'`])((?:\\.|(?!\1)[^\\])*?)\1/g;
 
 function decodeTestTitle(raw: string): string {
@@ -2516,12 +2450,9 @@ export function provenanceViolation(task: Task): LintViolation | undefined {
 }
 
 // ── RULING-VERIFY (W1-T326 — a ruling needs an operator, not a grep) ────────
-// A worker's proof that a ruling was WRITTEN is not an operator RATIFYING it. `isDispatchEligible`
-// already refuses any task whose `verify !== "auto"`, so a ruling-shaped task at verify:human
-// simply PARKS until the operator looks; only the rule that puts it there was missing.
-// TRIGGER A ONLY — `files:` contains the exact literal "DECISIONS.md", and a mixed diff still
-// triggers, since that is how the entry rides in unnoticed. TRIGGER B, a ruling-shaped TITLE, is
-// DELIBERATELY NOT SHIPPED: a bare word match misfires on the very task introducing this check.
+// Writing a ruling is not ratification: require verify:human so isDispatchEligible parks it.
+// Trigger only on exact files: DECISIONS.md, including mixed diffs. Title-word triggers misfire
+// on the task introducing this check and are deliberately excluded.
 // Why: docs/forensics/task-linter.md#rulingverifyviolation (W1-T326, #1302/#1303, W1-T353).
 
 /** The exact repo-relative path this repo's decision log lives at — the literal `files:` entry
@@ -2543,25 +2474,14 @@ export function rulingVerifyViolation(task: Task): LintViolation | undefined {
   };
 }
 
-/**
- * W1-T2959 — LAW 5's arm: a MACHINE-CONCLUDED shard may not sit at `verify: auto`. THE PROHIBITION
- * IS ON AN UNMARKED RECORD, NOT ON FILING — a marked record that cannot dispatch itself can neither
- * present itself as ratified nor act on its own conclusion.
- *
- * SAME TRIGGER SHAPE AS {@link rulingVerifyViolation}, for its stated reason: `isDispatchEligible`
- * refuses `verify !== "auto"`, so refusing at auto PARKS the shard until the operator looks.
- *
- * ABSENT `author_class` PASSES, load-bearing rather than lenient: every record predating this field
- * is a person's, so a blanket refusal would block the plan and make this green meaningless.
- * Falsifier: test/a-machine-filed-shard-reads-as-an-operator-ruling.test.ts.
- */
+/** W1-T2959 / Law 5: machine conclusions park at verify:human unless a pinned judge clears them.
+ *  Filing remains legal; unratified dispatch does not. Absent author_class passes: legacy records
+ *  predate machine authorship. Falsifier: test/a-machine-filed-shard-reads-as-an-operator-ruling.test.ts. */
 export function machineAuthorVerifyViolation(task: Task): LintViolation | undefined {
   if (task.author_class !== "machine") return undefined;
   if (task.verify === "human") return undefined;
 
-  // W1-T2977 NARROWS THIS ARM; IT DOES NOT RELAX IT. Every refusal below the operator's ruling
-  // made before still happens — absent, drifted and escalated rulings all block, and only a
-  // `proceed` ruling PINNED to this exact record clears. Absence is never read as a pass.
+  // W1-T2977: only pinned proceed clears; absent, drifted and escalated rulings still block.
   const ruling = task.risk_ruling;
   const unjudged =
     `task ${task.id} is marked author_class: machine at verify:${task.verify} — ` +
@@ -3114,14 +3034,8 @@ export function duplicateTitleViolations(task: Task, opts: LintOpts = {}): LintV
 
 // ── DUPLICATE SURFACE (W1-T2676) ─────────────────────────────────────────────
 //
-// The mint answers "is this NUMBER free". Nothing answered "is this WORK already filed". MEASURED
-// 2026-09-01 in this repo's plan tree: W1-T2589 was filed for work W1-T2581 already covered, its
-// four declared files a STRICT SUBSET of W1-T2581's seven, both queued and both dispatch-eligible,
-// and `lint-plan` said nothing.
-//
-// `duplicate-title` is the near neighbour and it keys on the wrong thing: two shards describing
-// one surface rarely share a title -- these did not. What collides is `files:`, which is also what
-// makes the overlap expensive: two workers editing one surface produce CONFLICTING PRs.
+// 2026-09-01: W1-T2589's four files were a subset of W1-T2581's seven; both dispatchable, lint
+// silent. Different titles hid duplicate work. Compare files: to expose potential PR conflicts.
 
 /** A candidate this task's `files:` is compared against; `merged` is external credit from status.ts. */
 export interface DuplicateSurfaceCorpusEntry {
@@ -3145,19 +3059,10 @@ function duplicateSurfaceEntryIsInert(
   );
 }
 
-/** The smallest OVERLAP this check will call a duplicate.
- *
- *  A SUBSET ALONE IS NOT ENOUGH, and the shard's own falsifier is why: "a pair whose overlap is a
- *  single shared module with different concerns is not reported". A one-file task is a subset of
- *  every task that happens to touch that file -- a wiring task and the module it wires, a filing
- *  and its amendment -- so keying on subset alone would fire on exactly the legitimate overlaps
- *  this check must leave alone. The observed pair was 4-of-7 and clears this comfortably.
- *
- *  MEASURED ON THE OVERLAP, NOT ON THIS TASK'S OWN SIZE. A first draft guarded `task.files.length`
- *  as well; that guard is unreachable, because when this task is the subset the overlap IS its
- *  file list, and when it is the SUPERSET the small side is the other shard's -- which
- *  `task.files.length` cannot see at all. The falsifier matrix caught it: mutating either guard
- *  alone reddened nothing, because each was covering for the other. */
+/** Minimum overlap, not task size: subset alone flags legitimate single-module concerns.
+ *  Falsifier: "a pair whose overlap is a single shared module with different concerns is not
+ *  reported"; observed duplicate was 4-of-7. Do not add a task.files.length guard: it cannot see
+ *  the smaller OTHER shard, and the falsifier matrix found mutually masking redundant guards. */
 export const DUPLICATE_SURFACE_MIN_FILES = 2;
 
 /** Normalised, de-duplicated `files:` set. Paths are compared as written after trimming, because
@@ -3500,6 +3405,11 @@ export function unmintedTaskIdViolations(task: Task, opts: LintOpts = {}): LintV
 }
 
 export interface LintOpts {
+  /** W1-T11746 — require a new/changed implementation task's design to declare `INVARIANT <slug>:` lines
+   *  or `NO-INVARIANTS: <reason>`, with each slug mapped to its own `invariant:<slug>` acceptance claim.
+   *  Set only by the changed-task (`lint-plan --base`) pass; absent ⇒ {@link invariantSlugViolations} is
+   *  silent, so the whole-plan pass and dispatch never refuse the historical population. */
+  requireDesignInvariantDeclaration?: boolean;
   /** Resolved repository name of this checkout; when known, call-site analysis skips tasks
    *  targeting a different repository because their source tree is not present here. */
   localRepoName?: string;
@@ -3729,6 +3639,81 @@ export function doctrineCitationViolations(task: Task, opts: LintOpts = {}): Lin
   }));
 }
 
+// ── DESIGN INVARIANTS NEED THEIR OWN ACCEPTANCE PROOF (W1-T11746) ───────────────────────────────
+// A compatibility guarantee that lives only in design prose can be broken while every acceptance
+// proof stays green (PR #17212). An implementation task declares each guarantee as a design line
+// `INVARIANT <slug>: <statement>` (or the single line `NO-INVARIANTS: <reason>`), and each slug must
+// map to exactly one acceptance claim `invariant:<slug>` carrying its own non-empty proof. This reads
+// only those structured markers — never arbitrary prose, never a keyword count — and only when the
+// changed-task pass sets {@link LintOpts.requireDesignInvariantDeclaration}.
+export const INVARIANT_DECL_RE = /^[ \t]*INVARIANT[ \t]+([a-z0-9][a-z0-9-]*)[ \t]*:[ \t]*(\S.*)$/m;
+export const NO_INVARIANTS_RE = /^[ \t]*NO-INVARIANTS[ \t]*:[ \t]*([^<\s].*)$/m;
+export const INVARIANT_CLAIM_RE = /\binvariant:([a-z0-9][a-z0-9-]*)/;
+
+/** The `invariant:<slug>` and `INVARIANT <slug>:` templates in prose are not declarations: a slug is
+ *  lower-case alphanumerics and hyphens, and a NO-INVARIANTS reason may not open with a `<` placeholder. */
+export function invariantSlugViolations(task: Task, opts: LintOpts = {}): LintViolation[] {
+  if (opts.requireDesignInvariantDeclaration !== true) return [];
+  if (task.type !== "implement") return [];
+  const design = task.design ?? "";
+  const out: LintViolation[] = [];
+  const block = (message: string): void => {
+    out.push({ check: "design-invariant-proof", severity: "block", message: `task ${task.id}: ${message}` });
+  };
+  const declared = [...design.matchAll(new RegExp(INVARIANT_DECL_RE.source, "gm"))].map((m) => m[1]!);
+  const noInvariants = [...design.matchAll(new RegExp(NO_INVARIANTS_RE.source, "gm"))];
+  if (declared.length === 0 && noInvariants.length === 0) {
+    block(
+      "design declares neither `INVARIANT <slug>: <statement>` nor `NO-INVARIANTS: <reason>`; inventory the prior " +
+        "behavior (output buckets, legacy receipts, defaults, error/unknown paths, public side effects) and declare one form",
+    );
+  }
+  if (declared.length > 0 && noInvariants.length > 0) {
+    block("design declares both INVARIANT lines and NO-INVARIANTS; declare exactly one form");
+  }
+  if (noInvariants.length > 1) block("design carries more than one NO-INVARIANTS line; declare it once");
+  const seen = new Set<string>();
+  for (const slug of declared) {
+    if (seen.has(slug)) block(`invariant slug "${slug}" is declared more than once in the design`);
+    seen.add(slug);
+  }
+  const claimsBySlug = new Map<string, number[]>();
+  (task.acceptance ?? []).forEach((criterion, index) => {
+    const slugs = [...new Set([...criterion.claim.matchAll(new RegExp(INVARIANT_CLAIM_RE.source, "g"))].map((m) => m[1]!))];
+    if (slugs.length > 1) {
+      block(`acceptance claim ${index + 1} maps more than one invariant (${slugs.join(", ")}); each slug needs its own claim`);
+    }
+    for (const slug of slugs) claimsBySlug.set(slug, [...(claimsBySlug.get(slug) ?? []), index]);
+  });
+  const proofOwner = new Map<string, string>();
+  for (const [slug, indexes] of claimsBySlug) {
+    if (!seen.has(slug)) {
+      block(`acceptance claim invariant:${slug} has no matching \`INVARIANT ${slug}:\` declaration in the design (orphaned)`);
+      continue;
+    }
+    if (indexes.length > 1) {
+      block(`invariant "${slug}" is mapped by ${indexes.length} acceptance claims; map it exactly once`);
+      continue;
+    }
+    const proof = (task.acceptance![indexes[0]!]!.proof ?? "").trim();
+    if (proof === "") {
+      block(`acceptance claim invariant:${slug} has an empty proof`);
+      continue;
+    }
+    const target = opts.taskRepoOwner === undefined ? undefined : { owner: opts.taskRepoOwner, repo: task.repo };
+    if (!parseWhitelistedProof(proof, target)) {
+      block(`acceptance claim invariant:${slug} needs an executable proof dialect even when satisfied_by supplies prior credit`);
+    }
+    const other = proofOwner.get(proof);
+    if (other !== undefined) block(`invariants "${other}" and "${slug}" share one proof; each needs its own distinct proof`);
+    else proofOwner.set(proof, slug);
+  }
+  for (const slug of seen) {
+    if (!claimsBySlug.has(slug)) block(`invariant "${slug}" has no acceptance claim \`invariant:${slug}\` (missing)`);
+  }
+  return out;
+}
+
 export function lintTask(task: Task, opts: LintOpts = {}): LintResult {
   const violations: LintViolation[] = [];
   const sizing = sizingViolation(task, opts);
@@ -3755,6 +3740,7 @@ export function lintTask(task: Task, opts: LintOpts = {}): LintResult {
   violations.push(...newShardRuleSuiteViolations(task, opts));
   violations.push(...postMergeAmendmentViolations(task, opts));
   violations.push(...blockedDispositionViolations(task, opts));
+  violations.push(...invariantSlugViolations(task, opts));
   violations.push(...blockedRecordUnruledViolations(task));
   violations.push(...callSiteViolations(task, opts));
   violations.push(...monolithFilingViolations(task, opts));
@@ -3967,3 +3953,56 @@ export function formatReadIdentity(absPath: string, raw: string): string {
 /** W1-T3099 — `lint-plan --base` reaches its rule-15 verdict through the SAME function
  *  `rmd preflight` calls. Re-exported, never re-implemented: two copies are two things to drift. */
 export { rule15SplitViolation, RULE_15_SPLIT_REMEDY, type Rule15SplitVerdict } from "./ci-parity.js";
+
+// ── A PLAN APART FROM ITS CODE (W1-T12171) ──────────────────────────────────
+// `lint-plan --code-root <dir>`: the plan lives in one checkout and the code it names in another.
+
+/** Plan files of one checkout: the path relative to the checkout, to the file's text. The monolith comes first. */
+export type PlanFiles = ReadonlyMap<string, string>;
+
+/** The plan in `files`, with `label(rel)` as each task's source path. A dependency may name a task in the
+ *  other plan, so {@link assertDependenciesKnown} judges dependencies against both plans. */
+export function planFromFiles(files: PlanFiles, label: (rel: string) => string): Plan {
+  const blobs = [...files].map(([rel, text]) => ({ label: label(rel), text }));
+  return mergePlanBlobs(blobs, {}, { dependencyMode: "preserve-external" });
+}
+
+/** Refuses a dependency that no plan in `known` holds, with the message `loadPlan` gives. */
+export function assertDependenciesKnown(tasks: readonly Task[], known: ReadonlySet<string>): void {
+  for (const task of tasks) {
+    for (const dep of task.depends_on) {
+      if (!known.has(dep)) throw new PlanError(`task ${task.id}: depends_on unknown task '${dep}'`);
+    }
+  }
+}
+
+/** The tasks whose file has the same bytes as the file at the same path in the code root's plan: moved tasks.
+ *  `root` is the plan checkout that `task.sourcePath` is under. */
+export function movedTaskIds(tasks: readonly Task[], root: string, planFiles: PlanFiles, codeFiles: PlanFiles): Set<string> {
+  const moved = new Set<string>();
+  for (const task of tasks) {
+    if (task.sourcePath === undefined) continue;
+    const rel = relative(root, task.sourcePath);
+    const text = planFiles.get(rel);
+    if (text !== undefined && codeFiles.get(rel) === text) moved.add(task.id);
+  }
+  return moved;
+}
+
+export interface PlanSourceConflict { id: string; planPath: string; codePath: string }
+
+/** The ids that both plans hold with different record bytes, with the path of each record, sorted by id. */
+export function planSourceConflicts(planFiles: PlanFiles, codeFiles: PlanFiles): PlanSourceConflict[] {
+  const records = (files: PlanFiles) => {
+    const byId = new Map<string, { path: string; block: string }>();
+    for (const [path, text] of files) for (const [id, block] of splitTaskRecordBlocks(text)) byId.set(id, { path, block });
+    return byId;
+  };
+  const code = records(codeFiles);
+  const conflicts: PlanSourceConflict[] = [];
+  for (const [id, held] of records(planFiles)) {
+    const other = code.get(id);
+    if (other !== undefined && other.block !== held.block) conflicts.push({ id, planPath: held.path, codePath: other.path });
+  }
+  return conflicts.sort((a, b) => a.id.localeCompare(b.id));
+}

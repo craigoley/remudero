@@ -24,7 +24,7 @@
     - src/lib/hand-run-census.ts
     - src/lib/measurement-cadence.ts
     - test/daemon/the-measurement-cadence-child-never-holds-the-whole-ledger-union.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: Over a fixture ledger union (gzip archives plus a live file, read through the real resolveLedgerUnion) whose rows are mostly not operator rows, censusHandRuns's union reads return only operator rows, while its result, including the refusal text that names the operator row count and the population, is identical to the result at base for the same corpus

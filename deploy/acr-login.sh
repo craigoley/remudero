@@ -1,18 +1,72 @@
 #!/usr/bin/env bash
 # W1-T5319: source for deploy authentication; --refresh also publishes the host's latest result.
 
+rmd_acr_failure_reason() {
+  # Only fixed classifications leave this function; Azure diagnostics can include credentials.
+  local lowered
+  lowered="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"  # bash 3.2 (macOS) has no ${var,,}
+  case "$lowered" in
+    *nameresolutionerror*|*getaddrinfo*|*name\ resolution*|*name\ or\ service\ not\ known*|*failed\ to\ resolve*|*could\ not\ resolve*|*enotfound*)
+      printf 'DNS name resolution failed' ;;
+    *certificate_verify_failed*|*certificate\ verify\ failed*|*sslerror*|*tls*certificate*)
+      printf 'TLS certificate verification failed' ;;
+    *timed\ out*|*timeout*) printf 'request timed out' ;;
+    *connectionerror*|*connection\ refused*|*connection\ reset*|*connection\ aborted*|*network\ is\ unreachable*|*failed\ to\ establish\ a\ new\ connection*)
+      printf 'network connection failed' ;;
+    *aadsts700082*|*expired*) printf 'Azure session expired; run az login' ;;
+    *error*saving*credentials*|*error*storing*credentials*|*docker*permission\ denied*|*permission\ denied*docker*)
+      printf 'local credential store access failed' ;;
+    *permission\ denied*) printf 'permission denied' ;;
+    *denied:\ requested\ access*|*unauthorized*|*forbidden*|*403*|*401*) printf 'registry refused login' ;;
+    *az\ login*) printf 'no Azure session; run az login' ;;
+    *no*identity*|*identity*not*found*|*failed*msi*) printf 'no managed identity found' ;;
+    *) printf 'unclassified Azure CLI failure' ;;
+  esac
+}
+
 rmd_acr_login() {
-  local registry="${1:-${REGISTRY:-synthwatcholey0620}}" output
+  local registry="${1:-${REGISTRY:-synthwatcholey0620}}" output config identity_reason code
   RMD_ACR_LOGIN_REASON=""
+  RMD_ACR_LOGIN_METHOD="none"
   if ! command -v az >/dev/null 2>&1; then
     RMD_ACR_LOGIN_REASON="the Azure CLI is not installed on this host"
     printf 'acr-login: %s\n' "$RMD_ACR_LOGIN_REASON" >&2
     return 127
   fi
-  if output="$(az acr login -n "$registry" 2>&1)"; then
-    return 0
+  identity_reason="managed identity unavailable: could not create an isolated Azure config"
+  if config="$(mktemp -d "${TMPDIR:-/tmp}/rmd-acr-identity.XXXXXX")"; then
+    # Keep identity credentials separate from the host owner's active Azure account (W1-T12177).
+    if output="$(AZURE_CONFIG_DIR="$config" timeout --kill-after=2s 15s az login --identity --output none 2>&1)"; then
+      if output="$(AZURE_CONFIG_DIR="$config" timeout --kill-after=2s 15s az acr login -n "$registry" 2>&1)"; then
+        rm -rf -- "$config"
+        RMD_ACR_LOGIN_METHOD="managed-identity"
+        return 0
+      else
+        code=$?
+        output="$(rmd_acr_failure_reason "$output")"
+        identity_reason="managed identity registry login failed (exit $code) for $registry: $output"
+        case "$output" in
+          'registry refused login')
+            identity_reason="managed identity is missing AcrPull on registry $registry (registry refused login)" ;;
+        esac
+      fi
+    else
+      code=$?
+      identity_reason="managed identity unavailable: $(rmd_acr_failure_reason "$output") (exit $code)"
+      if [ "$code" -eq 124 ] || [ "$code" -eq 137 ]; then
+        identity_reason="managed identity unavailable: Azure login timed out"
+      fi
+    fi
+    rm -rf -- "$config"
   fi
-  RMD_ACR_LOGIN_REASON="${output:-az acr login failed without output}"
+  if output="$(az acr login -n "$registry" 2>&1)"; then
+    RMD_ACR_LOGIN_METHOD="stored-login"
+    return 0
+  else
+    code=$?
+  fi
+  # Emit only classified diagnostics; arbitrary CLI output can contain credentials.
+  RMD_ACR_LOGIN_REASON="$identity_reason; stored login failed (exit $code) for $registry: $(rmd_acr_failure_reason "$output")"
   printf 'acr-login: %s\n' "$RMD_ACR_LOGIN_REASON" >&2
   return 1
 }
@@ -46,8 +100,9 @@ rmd_acr_refresh() {
   mkdir -p "$(dirname "$path")" || return 1
   temp="$(mktemp "${path}.XXXXXX")" || return 1
   ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  if ! printf '{"result":"%s","ts":"%s","registry":%s,"reason":%s}\n' \
-    "$result" "$ts" "$(rmd_acr_json_string "$registry")" "$(rmd_acr_json_string "$RMD_ACR_LOGIN_REASON")" > "$temp"; then
+  if ! printf '{"result":"%s","ts":"%s","registry":%s,"reason":%s,"method":%s}\n' \
+    "$result" "$ts" "$(rmd_acr_json_string "$registry")" "$(rmd_acr_json_string "$RMD_ACR_LOGIN_REASON")" \
+    "$(rmd_acr_json_string "$RMD_ACR_LOGIN_METHOD")" > "$temp"; then
     rm -f "$temp"
     return 1
   fi
@@ -58,6 +113,12 @@ rmd_acr_refresh() {
 if [ "${BASH_SOURCE[0]}" = "$0" ]; then
   case "${1:-}" in
     --refresh) rmd_acr_refresh ;;
+    --probe)
+      status=0
+      rmd_acr_login "${2:-}" || status=$?
+      printf '{"status":%s,"method":%s,"reason":%s}\n' "$status" \
+        "$(rmd_acr_json_string "$RMD_ACR_LOGIN_METHOD")" "$(rmd_acr_json_string "$RMD_ACR_LOGIN_REASON")"
+      ;;
     *) echo 'acr-login: use --refresh, or source this helper and call rmd_acr_login' >&2; exit 2 ;;
   esac
 fi

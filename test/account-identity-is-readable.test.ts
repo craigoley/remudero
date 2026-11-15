@@ -63,10 +63,7 @@ test("W1-T2434: deploy/serve-container.sh wires RMD_ACCOUNT_FILE_PATH to a mount
     /-e "RMD_ACCOUNT_FILE_PATH=\$\{CLAUDE_JSON_MOUNT_DEST\}"/,
     "RMD_ACCOUNT_FILE_PATH is supplied pointing at exactly the mount destination above",
   );
-  // The host-side source is HOME-derived, overridable, and distinct from the credential
-  // DIRECTORY mount (`.claude`) recycle-container.sh already owns for the daemon — this is the
-  // FILE beside it, never folded into that directory's mount.
-  assert.match(sh, /CLAUDE_JSON_PATH="\$\{RMD_CLAUDE_JSON_PATH:-\$\{HOME:-\/root\}\/\.claude\.json\}"/);
+  // W1-T12293: the host-side source comes from deploy/claude-directory.sh; that suite runs it.
 });
 
 test("W1-T2434: an absent host account file is not refused — the mount and env var are only added when the file exists", () => {

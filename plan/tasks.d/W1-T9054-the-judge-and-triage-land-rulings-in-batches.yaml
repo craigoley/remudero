@@ -10,7 +10,7 @@
   band_meaning: span
   origin: "operator session 2026-10-13: gardener loop audit (gardener PR churn)"
   plan_refs: [W1-T8350, W1-T8830]
-  files: [src/lib/machine-filing-judge.ts, src/lib/auto-triage.ts, test/the-judge-and-triage-land-rulings-in-batches.test.ts]
+  files: [src/lib/machine-filing-judge.ts, test/the-judge-and-triage-land-rulings-in-batches.test.ts]
   status: queued
   priority: 2
   attempts: 0
@@ -25,13 +25,13 @@
   design: |
     1. The judge lands when at least 5 rulings are due or the oldest due ruling has waited 6 hours. An escalation the
        silence policy (W1-T9043) must retire is never held past its window.
-    2. A triage outcome that is "no task" or "parked for the grill" adds its commit to the open triage-outcome PR instead
-       of opening a new one. Each entry keeps its own grep proof.
+    2. Amended 2026-11-11: the triage half of this task moved to W1-T12198. That task lands a triage outcome that
+       files no task ("no task" or "parked for the grill") through the feedback landing pull request, so no triage
+       pull request stays open for a later outcome to join. This task now changes the judge only, and
+       src/lib/auto-triage.ts is no longer in its files.
   acceptance:
     - claim: "the judge holds fewer than five due rulings until the oldest has waited six hours"
       proof: "grep: test(\"W1-T9054: the judge holds fewer than five due rulings until the oldest has waited six hours\" in test/the-judge-and-triage-land-rulings-in-batches.test.ts"
-    - claim: "a status-only triage outcome joins the open triage PR instead of opening another"
-      proof: "grep: test(\"W1-T9054: a status-only triage outcome joins the open triage PR\" in test/the-judge-and-triage-land-rulings-in-batches.test.ts"
   falsifier: |
     Make two rulings due, ten minutes apart. At origin/main the judge lands a PR for each; with the change it lands one
     PR for both once the six-hour bound or the fifth ruling arrives.

@@ -13,7 +13,7 @@ import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { prepareWorkerNativeCache } from "./worker-native-cache.js";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { StringDecoder } from "node:string_decoder";
 import { Worker } from "node:worker_threads";
 import {
@@ -750,6 +750,9 @@ export function claudeCapacityFromUsage(
   accountLabel?: string,
 ): ProviderCapacity {
   if (!snapshot) return { provider: "claude", readable: false, windows: [], detail: "capacity unreadable" };
+  if (!snapshot.session) {
+    return claudeCapacityFromUsageCase({ kind: "weekly-only", weekly: snapshot.weekly, billingMode: snapshot.billingMode }, accountLabel);
+  }
   const weeklyWindows = claudeWeeklyWindows(snapshot.weekly);
   const validWeeklyWindows = weeklyWindows.filter(validCapacityWindow);
   return {
@@ -1992,9 +1995,12 @@ export function readCodexRuntimeOffThread(
   return new Promise((resolve) => {
     let probe: Worker;
     try {
+      // W1-T12516: the preload is THIS harness install's tsx, resolved from this module. A bare
+      // `tsx` resolves from the process cwd, which is the target checkout, and that may carry no tsx.
+      const loader = pathToFileURL(createRequire(import.meta.url).resolve("tsx")).href;
       probe = workerFactory(new URL("./codex-capacity-probe.mjs", import.meta.url), {
         workerData: { bin, codexHome: codexHome(config), timeoutMs },
-        execArgv: ["--import", "tsx"],
+        execArgv: ["--import", loader],
       });
     } catch (error) {
       const reason = `app-server probe worker failed to start: ${String((error as Error).message ?? error)}`;
@@ -3807,9 +3813,9 @@ class CashCapacityShortfallFailure extends CashHttpFailure {
 
 /** Operator-approved prospectively: Azure OpenAI throttles are unbilled (Microsoft Q&A 1632971).
  * A model name alone is not provider identity: another HTTPS endpoint keeps conservative charging. */
-function unbilledAzureOpenAi429Policy(model: string, endpoint: string): boolean {
+function unbilledAzureOpenAi429Policy(model: string, endpoint: string, price = openWeightPriceFor(model)): boolean {
   const url = new URL(endpoint);
-  return openWeightPriceFor(model).unbilledAzureOpenAi429 === true && url.protocol === "https:" &&
+  return price.unbilledAzureOpenAi429 === true && url.protocol === "https:" &&
     url.port === "" && (url.hostname.endsWith(".openai.azure.com") || url.hostname.endsWith(".cognitiveservices.azure.com"));
 }
 
@@ -3923,13 +3929,15 @@ function cashAbortable<T>(signal: AbortSignal, run: () => Promise<T>, onLate?: (
 
 /** One unchanged-payload request, bounded across all paid attempts, body reads and server cooldowns. */
 async function cashRequestJson<T>(input: {
-  args: OpenWeightSpawnArgs; deployment: string; source: string; endpoint: string;
+  args: CashTransportOptions; deployment: string; source: string; endpoint: string; outputTokenCeiling?: number;
   body: string; headers: Record<string, string>; next: (checkActive: () => void) => T;
   canContinue: () => boolean; chargeFailure: (error: Error) => void;
   /** Usage belongs to this paid attempt even when fetch or body completion misses the deadline. */
   onEnvelope?: (envelope: unknown, attempt: T) => void;
   /** W1-T10856: sees every response's headers (success or failure) before its status is handled. */
   observeHeaders?: (headers: Headers) => void;
+  /** The deadline or an abort ended this reserved attempt before fetch was called, so nothing was sent. */
+  unsent?: (attempt: T, error: unknown) => void;
 }): Promise<{ envelope: unknown; attempt: T }> {
   const { args } = input;
   const timeoutMs = args.requestTimeoutMs ?? OPENWEIGHT_REQUEST_TIMEOUT_MS;
@@ -3945,15 +3953,19 @@ async function cashRequestJson<T>(input: {
     controller.signal.throwIfAborted();
   };
   const timer = setTimeout(timeout, timeoutMs);
+  let current: T | undefined, dispatched = false;
   try {
     for (;;) {
       checkActive();
       if (runtimeInstanceRegistryPrivateFile() !== undefined) await assertInstanceRegistryRuntimeCurrent();
       const attempt = input.next(checkActive);
+      current = attempt;
+      dispatched = false;
       checkActive();
       try {
         const response = await cashAbortable(controller.signal, () => {
           checkActive();
+          dispatched = true;
           return (args.fetchImpl ?? fetch)(input.endpoint, {
             method: "POST", headers: input.headers, body: input.body, signal: controller.signal,
           });
@@ -3972,8 +3984,9 @@ async function cashRequestJson<T>(input: {
             checkActive();
             // AN OVERSIZED 429 IS NOT TRANSIENT: the same sum the fit gate uses, against the limit this response named.
             if (failure instanceof CashHttpFailure && failure.status === 429 && failure.limitTokens !== undefined) {
-              const need = openWeightEstimatedTokens(Buffer.byteLength(input.body, "utf8")) + OPENWEIGHT_MAX_COMPLETION_TOKENS;
-              if (need > failure.limitTokens) throw new CashCapacityShortfallFailure(input.source, need - OPENWEIGHT_MAX_COMPLETION_TOKENS, failure.limitTokens);
+              const output = input.outputTokenCeiling ?? OPENWEIGHT_MAX_COMPLETION_TOKENS;
+              const need = openWeightEstimatedTokens(Buffer.byteLength(input.body, "utf8")) + output;
+              if (need > failure.limitTokens) throw new CashCapacityShortfallFailure(input.source, need - output, failure.limitTokens);
             }
             throw failure;
           } finally {
@@ -4001,6 +4014,9 @@ async function cashRequestJson<T>(input: {
         await abortableDelay(error.retryAfterMs, undefined, { signal: controller.signal });
       }
     }
+  } catch (error) {
+    if (current !== undefined && !dispatched) input.unsent?.(current, error);
+    throw error;
   } finally {
     clearTimeout(timer);
     args.signal?.removeEventListener("abort", relay);
@@ -4023,6 +4039,120 @@ export function openWeightDeploymentKnownAbsent(deployment: string, nowMs = syst
 
 export function clearOpenWeightAbsence(): void {
   openWeightAbsentUntil.clear();
+}
+
+/** The transport fields {@link cashRequestJson} reads; a worker passes its whole spawn args. */
+type CashTransportOptions = Pick<OpenWeightSpawnArgs, "requestTimeoutMs" | "clock" | "signal" | "fetchImpl" | "streamObserver">;
+
+export type CashRequestOutcome =
+  | { ok: true; envelope: unknown; servedModel: string | undefined; latencyMs: number;
+    reservedUsd: number; settledUsd: number; heldUsd: number }
+  | { ok: false; reason: "budget-refused" | "deployment-absent" | "not-ready" | "timeout" | "aborted" | "http" | "transport";
+    detail: string; latencyMs: number; reservedUsd: number; settledUsd: number; heldUsd: number; status?: number };
+
+/**
+ * W1-T12413: ONE paid cash request for a caller that is not a worker. The same core as a worker
+ * turn: reserve before transport (normal cap only), deadline and abort, 429 retry inside the
+ * deadline, 404 absent mark, instance-registry check, late-receipt settlement. A refusal or a
+ * failure is a result, never a throw.
+ */
+export async function sendCashRequest(config: Config, input: CashTransportOptions & {
+  deployment: string; path: string; body: string; source: string;
+  outputTokenCeiling: number; env?: NodeJS.ProcessEnv;
+  /** W1-T12416: a caller that resolved its own endpoint and key, its own price row and its own
+   *  reading of the reply's usage. Its 404 marks only this endpoint and path absent. */
+  target?: { endpoint: string; key: string }; price?: OpenWeightPrice;
+  usageUsd?: (envelope: unknown) => number | undefined;
+}): Promise<CashRequestOutcome> {
+  const clock = input.clock ?? systemClock;
+  const startedAt = clock.now();
+  let reservedUsd = 0, settledUsd = 0, heldUsd = 0;
+  let pending: CashBudgetAttempt | undefined;
+  const failed = (reason: Extract<CashRequestOutcome, { ok: false }>["reason"], detail: string, status?: number): CashRequestOutcome =>
+    ({ ok: false, reason, detail, latencyMs: clock.now() - startedAt, reservedUsd, settledUsd, heldUsd, ...(status === undefined ? {} : { status }) });
+  if (isFoundryClaudeDeployment(input.deployment)) return failed("not-ready", "a Foundry Claude deployment has its own adapter");
+  const absenceKey = input.target ? `${input.deployment} ${input.target.endpoint} ${input.path}` : input.deployment;
+  if (openWeightDeploymentKnownAbsent(absenceKey, clock.now())) return failed("deployment-absent", `${input.deployment} answered 404 inside ${OPENWEIGHT_ABSENT_TTL_MS}ms`);
+  const target = input.target ? { ok: true as const, ...input.target } : cashDeploymentTarget(config, input.deployment, input.env ?? process.env);
+  if (!target.ok) return failed("not-ready", target.reason === "no-endpoint" ? "no cash endpoint" : `${target.keyEnv} is not set`);
+  const base = URL.parse(target.endpoint.endsWith("/") ? target.endpoint : `${target.endpoint}/`);
+  if (base === null) return failed("not-ready", "cash endpoint must be a valid URL");
+  if (base.protocol !== "https:") return failed("not-ready", "cash endpoint must use https");
+  if (/^[a-z][a-z0-9+.-]*:/i.test(input.path) || /^[\/\\]/.test(input.path) || /[\u0000-\u0020\u007f\\]/.test(input.path))
+    return failed("not-ready", "cash path must be relative to the deployment endpoint");
+  const resolved = new URL(input.path, base);
+  if (resolved.protocol !== "https:" || resolved.origin !== base.origin || !resolved.pathname.startsWith(base.pathname))
+    return failed("not-ready", "cash path must stay under the deployment endpoint");
+  const endpoint = resolved.toString();
+  let azureOpenAi429Unbilled = false;
+  const prefix = `${input.source}-${startedAt}-${randomUUID()}`;
+  const requestBodyBytes = Buffer.byteLength(input.body, "utf8");
+  const usageUsd = input.usageUsd ?? ((envelope: unknown): number | undefined => {
+    const usage = (envelope as { usage?: { input_tokens?: unknown } } | null)?.usage;
+    const responses = usage !== undefined && usage !== null && Object.hasOwn(usage, "input_tokens");
+    return openWeightReceiptUsd(openWeightEnvelopeUsage(envelope, responses), input.deployment, responses);
+  });
+  const settle = (attempt: CashBudgetAttempt, evidence: Omit<CashAccountingEvidence, "identity">): void => {
+    const recorded = attempt.receipt ?? settleOpenWeightBudget(config, { requestId: attempt.requestId, identity: attempt.identity, atIso: attempt.atIso, ...evidence });
+    const charged = recorded?.settledUsd ?? attempt.reservation.reservedUsd;
+    settledUsd += charged;
+    if (recorded?.settledUsd == null) heldUsd += attempt.reservation.reservedUsd;
+  };
+  let attempts = 0;
+  try {
+    azureOpenAi429Unbilled = unbilledAzureOpenAi429Policy(input.deployment, endpoint, input.price);
+    const normalCapUsd = typeof config.dailyCapUsd === "object" ? config.dailyCapUsd?.normal : config.dailyCapUsd;
+    if (normalCapUsd === 0) return failed("budget-refused", "dailyCapUsd normal cap is zero");
+    const { envelope } = await cashRequestJson<CashBudgetAttempt>({
+      args: input, deployment: input.deployment, source: input.source, endpoint, body: input.body,
+      outputTokenCeiling: input.outputTokenCeiling,
+      headers: { "content-type": "application/json", "api-key": target.key },
+      onEnvelope: (envelope, attempt) => {
+        const actualUsd = usageUsd(envelope);
+        if (actualUsd !== undefined && actualUsd <= attempt.reservation.reservedUsd && attempt.receipt === undefined)
+          attempt.receipt = settleOpenWeightBudget(config, { requestId: attempt.requestId, identity: attempt.identity, actualUsd, atIso: attempt.atIso });
+      },
+      canContinue: () => attempts < 2,
+      unsent: (attempt, error) => {
+        if (attempt !== pending) return;
+        settle(attempt, { actualUsd: 0, unbilled: true, reason: `not sent: ${error instanceof Error ? error.message : String(error)}` });
+        pending = undefined;
+      },
+      chargeFailure: (error) => {
+        settle(pending!, { ...(unbilledCashRefusal(error, azureOpenAi429Unbilled) ? { actualUsd: 0, unbilled: true } : {}), reason: error.message });
+        pending = undefined;
+      },
+      next: (checkActive) => {
+        checkActive();
+        const requestId = `${prefix}-${++attempts}`;
+        const identity: CashRequestIdentity = { requestId, attemptId: prefix, provider: "cash", deployment: input.deployment, endpoint: cashEndpointIdentity(endpoint) };
+        const atIso = clock.iso();
+        const reservation = reserveOpenWeightBudget({ ...config, dailyCapUsd: normalCapUsd }, { requestId, identity, deployment: input.deployment,
+          requestBodyBytes, atIso, outputTokenCeiling: input.outputTokenCeiling, ...(input.price ? { price: input.price } : {}) });
+        reservedUsd += reservation.reservedUsd;
+        pending = { requestId, identity, atIso, reservation };
+        return pending;
+      },
+    });
+    const attempt = pending!;
+    pending = undefined;
+    settle(attempt, attempt.receipt ? {}
+      : { reason: usageUsd(envelope) === undefined ? "usage unavailable" : "usage exceeded its conservative reservation" });
+    return { ok: true, envelope, servedModel: cashResponseModel((envelope as { model?: unknown } | null)?.model),
+      latencyMs: clock.now() - startedAt, reservedUsd, settledUsd, heldUsd };
+  } catch (error) {
+    const absent = error instanceof OpenWeightDeploymentNotFoundError;
+    if (absent) markOpenWeightDeploymentAbsent(absenceKey, clock.now());
+    const detail = error instanceof Error ? error.message : String(error);
+    if (pending) settle(pending, { ...(unbilledCashRefusal(error, azureOpenAi429Unbilled) ? { actualUsd: 0, unbilled: true } : {}), reason: detail });
+    if (error instanceof OpenWeightUnpricedDeploymentError) return failed("not-ready", detail);
+    if (error instanceof OpenWeightAllowanceExhaustedError) return failed("budget-refused", detail);
+    if (absent) return failed("deployment-absent", detail, 404);
+    if (error instanceof OpenWeightRequestTimeoutError) return failed("timeout", detail);
+    if (input.signal?.aborted) return failed("aborted", detail);
+    if (error instanceof CashHttpFailure) return failed("http", detail, error.status);
+    return failed("transport", detail);
+  }
 }
 
 /** READY = priced, shaped and context-sized, and not known absent. A successor can lead a ladder row
@@ -4080,13 +4210,10 @@ export function openWeightUsageUsd(deployment: string, promptTokens: number, com
     completionTokens * rate.outputUsdPerMillion) / 1_000_000;
 }
 
-/**
- * W1-T5629: the NOTIONAL dollars of one codex session — what its tokens would cost at the routed model's published
- * BASE rate, so a codex row stops reading as free beside Claude's notional price. Never billed: the subscription
- * charges no per-request dollar, so this rides `notional_cost_usd` and `costUsd` stays 0 for every budget and cap.
- * Base rate because the tokens are a SESSION sum, and the long-context tier prices a single request. Codex input
- * includes its cached input. `undefined`, never 0, for a model {@link CODEX_NOTIONAL_PRICES} does not price.
- */
+/** W1-T5629: subscription tokens at the routed model's published BASE rate, never billed.
+ * `notional_cost_usd` carries this; `costUsd` stays 0 for budgets/caps. Session totals cannot
+ * select a per-request long-context tier. Input includes cache reads; unpriced models return
+ * `undefined`, never 0 (see {@link CODEX_NOTIONAL_PRICES}). */
 export function codexNotionalCostUsd(model: string, tokens: { input: number; output: number; cacheRead: number }): number | undefined {
   if (!Object.hasOwn(CODEX_NOTIONAL_PRICES, model)) return undefined;
   const price = CODEX_NOTIONAL_PRICES[model];
@@ -4109,16 +4236,8 @@ export function openWeightAllowancePath(config: Config): string {
   return sharedCashAllowancePath(config) ?? join(config.root, "state", OPENWEIGHT_ALLOWANCE_FILENAME);
 }
 
-/**
- * UTC day key, taken from the {@link Clock} port's own ISO reading rather than from a raw Date
- * constructor.
- *
- * The cap is a CALENDAR-day allowance, so the boundary must not follow the host timezone: two
- * daemons in different zones would otherwise disagree on which day a request spends. Reading the
- * day off `clock.iso()` gets that for free — an ISO-8601 instant is UTC by construction — and keeps
- * this file off the legacy date-construction shape `test/clock-signature-census.test.ts` ratchets
- * down — that census counts the TEXT, so even a comment naming the old shape would raise the row.
- */
+/** UTC calendar day from {@link Clock}.iso(), independent of host timezone.
+ * Avoid raw date construction: test/clock-signature-census.test.ts counts even comment text. */
 export function openWeightUtcDay(atIso: string): string {
   const day = atIso.slice(0, 10);
   if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) {
@@ -4143,20 +4262,15 @@ export function openWeightCommittedUsd(state: OpenWeightAllowanceState): number 
   return Object.values(state.reservations).reduce((total, row) => total + (row.settledUsd ?? row.reservedUsd), 0);
 }
 
-/**
- * A conservative upper bound on what one request can cost, in dollars, BEFORE it is sent.
- *
- * Output is bounded exactly: {@link OPENWEIGHT_MAX_COMPLETION_TOKENS} is the ceiling the adapter
- * itself puts on the wire. Input is bounded by the serialized body's BYTE length, which is a strict
- * over-estimate: no tokenizer emits more tokens than the UTF-8 bytes it consumed, so this can never
- * under-reserve. Over-reserving is the safe direction for a cap — settlement corrects it downward.
- */
+/** Reserve before sending: serialized UTF-8 bytes overestimate input tokens; output is bounded
+ * by {@link OPENWEIGHT_MAX_COMPLETION_TOKENS}. Over-reservation is safe; settlement corrects it. */
 export function openWeightReservationUsd(
   deployment: string,
   requestBodyBytes: number,
   extraInputTokens = 0,
+  outputTokenCeiling = OPENWEIGHT_MAX_COMPLETION_TOKENS,
+  price: OpenWeightPrice = openWeightPriceFor(deployment),
 ): number {
-  const price = openWeightPriceFor(deployment);
   // `extraInputTokens` is input the request BODY does not contain, and it exists because the
   // byte-bound argument above holds only while the body is the whole input. A server-side tool —
   // `web_search` is the first — makes the provider fetch pages we never sent and bill them as
@@ -4164,7 +4278,7 @@ export function openWeightReservationUsd(
   // reservation silently stops being an upper bound. W1-T3558.
   const inputTokenCeiling = requestBodyBytes + Math.max(0, extraInputTokens);
   const rate = price.longContext && inputTokenCeiling > price.longContext.thresholdInputTokens ? price.longContext : price;
-  return (inputTokenCeiling * (rate.reservationInputUsdPerMillion ?? price.reservationInputUsdPerMillion ?? rate.inputUsdPerMillion) + OPENWEIGHT_MAX_COMPLETION_TOKENS * rate.outputUsdPerMillion) / 1_000_000;
+  return (inputTokenCeiling * (rate.reservationInputUsdPerMillion ?? price.reservationInputUsdPerMillion ?? rate.inputUsdPerMillion) + outputTokenCeiling * rate.outputUsdPerMillion) / 1_000_000;
 }
 
 /** Raised INSTEAD of sending a paid request. It is thrown before the transport, never after, so a
@@ -4279,19 +4393,9 @@ export function readOpenWeightAllowance(config: Config,
  *  covers any realistic interleaving; the bound only stops a pathological peer spinning us forever. */
 export const OPENWEIGHT_ALLOWANCE_CAS_ATTEMPTS = 12;
 
-/**
- * Fleet mode holds a SQLite write lock; local mode retains its historical optimistic retry.
- *
- * `writeAtomic`'s `beforeRename` checks for a changed snapshot: the new state is staged in the same
- * directory, then, immediately before the rename commits it, the live file is re-read and compared
- * to the exact bytes this attempt planned from. A peer that committed in that window changes those
- * bytes, the stage is withdrawn, and the whole read-modify-write retries against the peer's
- * committed state. This check alone is not an interprocess CAS; the fleet lock supplies that.
- *
- * Durability across a restart is the file itself: every committed reservation is on disk before the
- * request it pays for is sent, so a process that dies mid-request comes back to a state that still
- * counts that reservation.
- */
+/** Fleet mode holds a SQLite write lock. Local mode stages beside the allowance and retries
+ * when `beforeRename` finds bytes changed since the read; this alone is NOT interprocess CAS.
+ * Reservations reach disk before transport, so restart still counts an interrupted request. */
 function mutateOpenWeightAllowance<T>(
   path: string,
   utcDay: string,
@@ -4330,27 +4434,11 @@ function mutateOpenWeightAllowance<T>(
   }
 }
 
-/**
- * Commit a conservative reservation for ONE outbound request, or refuse it.
- *
- * Called before the transport, never after. On refusal nothing is committed and {@link
- * OpenWeightAllowanceExhaustedError} is thrown by the caller, so no paid request is made.
- */
-/**
- * the cash ceiling for THIS request's UTC day.
- *
- * A plain number is the whole cap, exactly as before. A pair raises it only when the request
- * reached cash because the capacity auction found NO subscription with readable headroom -- the
- * W1-T3692 fallback -- so routine mount-affinity work stays on the lower figure and the higher one
- * is reachable only on a day the subscriptions are genuinely tapped out.
- *
- * IT IS A CEILING, NOT A BUDGET. `squeezed` does not authorise spending more; it stops the cap
- * refusing work on the one day cash is the only thing that can do it.
- *
- * REFUSES A PAIR THAT INVERTS. A `squeezed` below `normal` would mean the squeeze DAY buys less
- * than an ordinary one, which is never what an operator means -- far likelier a transposition, and
- * silently honouring it would cap the fleet hardest exactly when it is most constrained.
- */
+/** Reservations commit before transport; refusal commits nothing and the caller throws
+ * {@link OpenWeightAllowanceExhaustedError} without making a paid request. */
+/** UTC-day cash ceiling, never spending authority. W1-T3692's blocked auction alone selects
+ * `squeezed` when no subscription has readable headroom; routine affinity uses `normal`.
+ * A number applies on every day. Reject an inverted pair: squeeze days must not buy less. */
 export function effectiveCashCapUsd(
   cap: number | { normal: number; squeezed: number } | null | undefined,
   opts: { squeezed?: boolean } = {},
@@ -4386,6 +4474,10 @@ export function reserveOpenWeightBudget(
     /** Input tokens this request may consume that its body does NOT carry — see
      *  {@link openWeightReservationUsd}. Omitted for an ordinary chat turn. */
     extraInputTokens?: number;
+    /** Output tokens this request may produce; omitted means OPENWEIGHT_MAX_COMPLETION_TOKENS. */
+    outputTokenCeiling?: number;
+    /** The caller's own price row; omitted means the deployment's row in the price table. */
+    price?: OpenWeightPrice;
   },
 ): { reservedUsd: number; committedUsd: number; capUsd: number } {
   if (input.identity && (!validCashIdentity(input.identity) || input.identity.requestId !== input.requestId || input.identity.deployment !== input.deployment)) {
@@ -4398,7 +4490,8 @@ export function reserveOpenWeightBudget(
   const invocationNonce = randomUUID();
   const configuredCapUsd = configuredCashCap(config, input.squeezed);
   const utcDay = openWeightUtcDay(input.atIso);
-  const wantUsd = openWeightReservationUsd(input.deployment, input.requestBodyBytes, input.extraInputTokens ?? 0);
+  const wantUsd = openWeightReservationUsd(input.deployment, input.requestBodyBytes, input.extraInputTokens ?? 0,
+    input.outputTokenCeiling ?? OPENWEIGHT_MAX_COMPLETION_TOKENS, input.price ?? openWeightPriceFor(input.deployment));
   return mutateOpenWeightAllowance(openWeightAllowancePath(config), utcDay, (state) => {
     const limits = cashAllowanceLimits(state, configuredCapUsd, input.deployment, input.squeezed);
     const { capUsd, committedUsd } = limits[0]!;
@@ -4669,17 +4762,10 @@ export interface OpenWeightCheckInput {
   platform?: NodeJS.Platform;
 }
 
-/**
- * Environment for a fixed-argv cash check.  The Azure key is deliberately read by the daemon
- * before the tool loop, but a model-selected check must never inherit it (or any other daemon
- * credential) merely because the adapter itself runs in this process.  `HOME` and `TMPDIR` are
- * private per-worker paths, so a check cannot rediscover operator shell state through either.
- *
- * This is intentionally narrower than the Claude/Codex worker environments: the check table has
- * no forge, shell, or network command, and it needs only executable discovery plus locale.  Add a
- * variable here only with a demonstrated fixed-check need; copying `process.env` would turn the
- * adapter boundary into a claim rather than a control.
- */
+/** Fixed checks inherit executable discovery and locale, never daemon credentials (including
+ * the Azure key read before the tool loop). HOME/TMPDIR are private to prevent rediscovery.
+ * The check table has no forge, shell or network command; add env only for a demonstrated
+ * fixed-check need, never by copying process.env or the wider Claude/Codex environments. */
 export function openWeightCheckEnv(workerHome: string, env: NodeJS.ProcessEnv = process.env,
   extra: Record<string, string> = {}): Record<string, string> {
   for (const key of Object.keys(extra)) {
@@ -4706,12 +4792,9 @@ export function openWeightCheckEnv(workerHome: string, env: NodeJS.ProcessEnv = 
   return out;
 }
 
-/**
- * Bubblewrap arguments for a model-selected fixed check. The worktree and isolated worker home
- * are the only application mounts; the host root is NOT mounted at all. A small read-only runtime
- * plus a new network namespace denies both host-secret reads and routes to the daemon, forge, or
- * public network. `argv` is already an internal table entry — never model-supplied text.
- */
+/** Fixed-check bubblewrap mounts only the worktree, private home and read-only runtime,
+ * never the host root. A fresh network namespace denies daemon, forge and public routes.
+ * `argv` comes from the internal table, never model text. */
 export function openWeightCheckSandboxArgv(
   input: Pick<OpenWeightCheckInput, "argv" | "cwd" | "workerHome"> & { platform?: NodeJS.Platform },
 ): string[] {
@@ -4806,24 +4889,12 @@ export class OpenWeightUnlistedCheckError extends RmdError {
   }
 }
 
-/**
- * Argv for one permitted check. EVERY ARGUMENT IS A CONSTANT — the caller chooses a check by NAME
- * and contributes nothing else to the command line.
- *
- * WHY FIXED RATHER THAN SANITIZED. An earlier revision appended model-supplied paths through
- * {@link openWeightContainedPath}, which is real containment: a flag-shaped argument resolves to a
- * file under the worktree and is inert. CodeQL flagged it anyway — "this command line depends on a
- * user-provided value" — and it was right to. Every other `execFileSync` in this repo passes
- * internally-derived arguments; that revision was the FIRST model-derived value to reach a command
- * line, and `.github/codeql/codeql-config.yml` excludes only `test/`, so the repo has no
- * suppression precedent to lean on. A sanitizer the analyser cannot see is a sanitizer the next
- * reader cannot see either.
- *
- * THE COST, STATED: a lane cannot scope `unit_test` to one file. In a tree carrying the selector
- * (W1-T6091) the HARNESS scopes it instead — {@link openWeightUnitTestPlan} appends the suites
- * {@link selectOpenWeightUnitTestSuites} derives from git, never from the model. Consumer trees
- * use changed tests and source basename matches instead. This argv is only the prefix;
- * {@link openWeightUnitTestPlan} must append an explicit suite list before it runs. */
+/** Fixed argv only: the model selects a NAME and supplies no arguments, including paths.
+ * Containment via {@link openWeightContainedPath} did not satisfy CodeQL's command provenance
+ * check; keep arguments internally derived (.github/codeql/codeql-config.yml excludes only tests).
+ * W1-T6091: {@link openWeightUnitTestPlan} must append an explicit harness-selected suite list
+ * from {@link selectOpenWeightUnitTestSuites}; consumer trees use changed tests/basename matches.
+ * This is only the prefix: the model cannot scope unit_test itself. */
 export function openWeightCheckArgv(check: unknown, paths: unknown, cwd?: string): string[] {
   if (typeof check !== "string" || !Object.prototype.hasOwnProperty.call(OPENWEIGHT_CHECKS, check)) {
     throw new OpenWeightUnlistedCheckError(typeof check === "string" ? check : String(check));
@@ -5334,25 +5405,11 @@ export function assertOpenWeightToolBoundary(
   return "cash adapter boundary proved: outside-cwd writes refused; fixed checks require a fresh network namespace";
 }
 
-/**
- * A NON-OPENAI DEPLOYMENT NEEDS NO SECOND SHAPE HERE. W1-T3598 ruled the wider catalog out on the
- * premise that its cheapest non-OpenAI candidate "sits behind the Azure AI Model Inference
- * `/models` route instead and would need an endpoint branch". W1-T3695 re-probed BOTH routes
- * against a live DeepSeek-V4-Flash deployment (non-OpenAI family) on the same account:
- *
- *   POST {endpoint}/models/chat/completions                   -> HTTP 200
- *   POST {endpoint}/openai/deployments/DeepSeek-V4-Flash/...  -> HTTP 200
- *
- * The second IS this function's own path. The deployment answered it unchanged -- tool calls
- * (`finish_reason: tool_calls`), `temperature: 0` (HTTP 200, unlike the gpt-5 family's 400) and
- * `response_format: json_object` all measured clean against it. So this class rides the adapter's existing route
- * with no second endpoint shape required, and the branch W1-T3598 deferred is not needed for it
- * at all.
- *
- * W1-T10855 adds the now-published Azure Retail Prices API rows (read 2026-10-27).
- * The cached-token billing dispute remains: reservations use full input rates until
- * W1-T10858 reconciles an observed invoice. Readiness alone does not add a cash ladder entry.
- */
+/** W1-T3695 falsified W1-T3598's need for a separate non-OpenAI endpoint: DeepSeek-V4-Flash
+ * returned HTTP 200 on both /models/chat/completions and this /openai/deployments/... route,
+ * including tool calls, temperature: 0 and response_format: json_object (unlike gpt-5's 400).
+ * W1-T10855: Azure Retail Prices API rows read 2026-10-27. Reservations retain full input rates
+ * pending W1-T10858's invoice reconciliation; readiness alone never adds a cash ladder entry. */
 function openWeightEndpoint(config: Config, model: string): string {
   // W1-T10837: resolves THIS deployment's own endpoint when `workerProviders.cashDeploymentEndpoints`
   // names it, else W1-T3607's canonical `cashEndpoint` falling back to the deprecated

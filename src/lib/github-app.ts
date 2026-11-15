@@ -87,6 +87,8 @@ export interface RefreshOptions {
   fetchImpl?: typeof fetch;
   /** Injectable private-key reader — defaults to `readFileSync(path, "utf8")`. */
   readKey?: (path: string) => string;
+  /** The refresh loop's copy of the last key it read. A failed re-read signs with it (2026-11-10). */
+  retainedKey?: { pem?: string };
   /** Log sink — defaults to a no-op. Never receives the key or token (see the file header). */
   log?: (step: string, extra?: Record<string, unknown>) => void;
 }
@@ -227,11 +229,18 @@ export async function refreshInstallationToken(opts: RefreshOptions = {}): Promi
   }
 
   let privateKeyPem: string;
+  let keyReadError: string | undefined;
   try {
     privateKeyPem = readKey(keyPath);
-  } catch {
-    log(TOKEN_REFRESH_FAILED_STEP, { reason: "private key unreadable" });
-    return { ok: false, reason: "private key unreadable" };
+    if (opts.retainedKey) opts.retainedKey.pem = privateKeyPem;
+  } catch (err) {
+    keyReadError = keyReadErrorCode(err);
+    const retained = opts.retainedKey?.pem;
+    if (retained === undefined) {
+      log(TOKEN_REFRESH_FAILED_STEP, { reason: "private key unreadable", error_code: keyReadError });
+      return { ok: false, reason: "private key unreadable" };
+    }
+    privateKeyPem = retained;
   }
 
   let jwt: string;
@@ -298,8 +307,16 @@ export async function refreshInstallationToken(opts: RefreshOptions = {}): Promi
   // The one seam from the file header: every consumer reads process.env at call/spawn time, so
   // this line reaches all three with no call-site change.
   env.GH_TOKEN = body.token;
-  log(TOKEN_REFRESHED_STEP, { installation_id: installationId, expires_at: body.expires_at });
+  log(TOKEN_REFRESHED_STEP, {
+    installation_id: installationId, expires_at: body.expires_at,
+    ...(keyReadError === undefined ? {} : { private_key: "retained", key_read_error: keyReadError }),
+  });
   return { ok: true, expiresAtMs };
+}
+
+function keyReadErrorCode(err: unknown): string {
+  const code = (err as NodeJS.ErrnoException | undefined)?.code;
+  return typeof code === "string" && code !== "" ? code : "unknown";
 }
 
 /** {@link mintScopedToken}'s own ledger steps — kept OUT of {@link TOKEN_REFRESH_REASONS}' closed
@@ -312,6 +329,8 @@ export const SCOPED_TOKEN_MINT_FAILED_STEP = "github_app.scoped_token_mint_faile
 export interface ScopedTokenResult {
   ok: boolean;
   token?: string;
+  permissions?: Record<string, string>;
+  repositories?: string[];
   /** Capped at `now() + ttlMs`, never GitHub's own fixed one-hour expiry alone (W1-T2398's model). */
   expiresAtMs?: number;
   reason?: string;
@@ -393,9 +412,9 @@ export async function mintScopedToken(repo: string, ttlMs: number, opts: Refresh
     log(SCOPED_TOKEN_MINT_FAILED_STEP, { reason: `exchange rejected: ${res.status}` });
     return { ok: false, reason: `exchange rejected: ${res.status}` };
   }
-  let parsed: { token?: string; expires_at?: string };
+  let parsed: { token?: string; expires_at?: string; permissions?: Record<string, string>; repositories?: Array<{ name: string }> };
   try {
-    parsed = (await res.json()) as { token?: string; expires_at?: string };
+    parsed = await res.json() as typeof parsed;
   } catch {
     log(SCOPED_TOKEN_MINT_FAILED_STEP, { reason: "exchange response unparsable" });
     return { ok: false, reason: "exchange response unparsable" };
@@ -411,7 +430,9 @@ export async function mintScopedToken(repo: string, ttlMs: number, opts: Refresh
     now() + ttlMs,
   );
   log(SCOPED_TOKEN_MINTED_STEP, { installation_id: installationId, scoped_repo: repo, expires_at: new Date(cappedExpiry).toISOString() });
-  return { ok: true, token: parsed.token, expiresAtMs: cappedExpiry };
+  return { ok: true, token: parsed.token, expiresAtMs: cappedExpiry,
+    permissions: parsed.permissions,
+    repositories: Array.isArray(parsed.repositories) ? parsed.repositories.map((repository) => repository?.name) : undefined };
 }
 
 /**
@@ -473,6 +494,8 @@ export function startInstallationTokenRefresh(opts: {
   const setTimer = opts.setTimer ?? ((fn, ms) => setTimeout(fn, ms));
   const now = opts.now ?? Date.now;
   let lastSuccessfulExpiresAtMs: number | undefined;
+  let immediateFailureRetryUsed = false;
+  const retainedKey: { pem?: string } = {};
   let stopped = false;
   let timer: { unref?: () => void } | undefined;
   let dueAt = now();
@@ -486,6 +509,13 @@ export function startInstallationTokenRefresh(opts: {
     dueAt = now() + delay;
     timer = setTimer(tick, delay);
     timer.unref?.();
+  };
+  const failedRefreshDelay = (): number => {
+    if (immediateFailureRetryUsed) return REFRESH_FAILURE_RETRY_MS;
+    const delay = nextFailedRefreshDelayMs(lastSuccessfulExpiresAtMs, now());
+    // A stale expiry permits one urgent attempt, never an unbounded zero-delay loop.
+    if (delay === 0) immediateFailureRetryUsed = true;
+    return delay;
   };
   const settled = (): void => {
     cycles.push(Math.max(0, now() - dueAt));
@@ -508,17 +538,17 @@ export function startInstallationTokenRefresh(opts: {
   // The mint-and-rearm body, factored out of `tick` so its promise can be returned to the first
   // caller via `ready`, while every later tick stays fire-and-forget as before.
   const runOnce = (): Promise<RefreshResult> =>
-    Promise.resolve().then(() => refresh({ log: opts.log, env })).then(
+    Promise.resolve().then(() => refresh({ log: opts.log, env, retainedKey })).then(
       (result) => {
         settled();
         if (result.ok && result.expiresAtMs !== undefined) {
           lastSuccessfulExpiresAtMs = result.expiresAtMs;
           failures = 0;
+          immediateFailureRetryUsed = false;
           rearm(nextRefreshDelayMs(result.expiresAtMs, now(), refreshLeadMs(cycles)));
           return result;
         }
-        // Once the loop has a retained expiry, failure retries must leave room for one full exchange.
-        rearm(nextFailedRefreshDelayMs(lastSuccessfulExpiresAtMs, now()));
+        rearm(failedRefreshDelay());
         warnIfNearExpiry(result.reason);
         return result;
       },
@@ -529,7 +559,7 @@ export function startInstallationTokenRefresh(opts: {
         // depend on a second write to the filesystem that just failed. The explanatory write
         // below is best-effort and guarded: if it throws too, that is swallowed.
         settled();
-        rearm(nextFailedRefreshDelayMs(lastSuccessfulExpiresAtMs, now()));
+        rearm(failedRefreshDelay());
         try {
           opts.log?.(TOKEN_REFRESH_FAILED_STEP, {
             reason: `refresh threw: ${err instanceof Error ? err.message : String(err)}`,

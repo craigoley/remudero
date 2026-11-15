@@ -13,7 +13,7 @@
   files:
     - src/lib/task-linter.ts
     - test/a-guard-criterion-silences-the-proof-base-discrimination-warn.test.ts
-  status: queued
+  status: merged
   priority: 2  # a WARN, not a refusal: it costs filers a false alarm on every guard, and teaches them to ignore the row
   attempts: 0
   rationale: |

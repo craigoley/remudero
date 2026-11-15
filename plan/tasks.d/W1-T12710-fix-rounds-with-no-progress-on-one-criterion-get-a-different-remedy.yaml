@@ -1,0 +1,100 @@
+- id: W1-T12710
+  title: "Fix rounds that make no progress on one criterion get a different remedy, never the same round again"
+  repo: remudero
+  depends_on: []
+  priority: 1.45
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # changes what the fix lane dispatches after repeated rounds with no progress; the first rounds are unchanged
+  band_meaning: blast-radius
+  origin: "operator-session#stuck-pr-root-causes-2026-11-14"
+  plan_refs:
+    - W1-T12709
+    - W1-T12711
+    - W1-T12543
+    - W1-T7096
+    - W1-T11037
+    - W1-T11025
+  files:
+    - src/lib/fix-progress-judge.ts
+    - src/lib/sweep.ts
+    - src/cli/commands/fix.ts
+    - src/lib/ledger-steps.ts
+    - plan/policy.yaml
+    - src/lib/policy.ts
+    - src/lib/ledger.ts
+    - test/policy.test.ts
+    - test/fix-lane/fix-rounds-with-no-progress-on-one-criterion-get-a-different-remedy.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "sameCriterionStall counts the completed rounds dispatched against one unmet criterion (claim text, or check name for a CI red) after which that criterion was still unmet with the same failure digest, or the round did not land"
+      proof: "grep: W1-T12710 criterion 1 in test/fix-lane/fix-rounds-with-no-progress-on-one-criterion-get-a-different-remedy.test.ts"
+    - claim: "When the stall count for a criterion reaches fix.stallRounds (policy, default 3), the next action for it is the first remedy not yet tried, in this order: stronger-worker, amend-criterion, operator-input; a fix.stall_remedy row records pr, criterion, remedy and rounds spent"
+      proof: "grep: W1-T12710 criterion 2 in test/fix-lane/fix-rounds-with-no-progress-on-one-criterion-get-a-different-remedy.test.ts"
+    - claim: "A stronger-worker round requests the next model in the policy's fix model order, and its prompt lists every earlier round's diff summary and outcome for that criterion as approaches that did not work; with no stronger model in the policy, the rung is recorded as skipped and the next remedy is taken"
+      proof: "grep: W1-T12710 criterion 3 in test/fix-lane/fix-rounds-with-no-progress-on-one-criterion-get-a-different-remedy.test.ts"
+    - claim: "An amend-criterion remedy opens an acceptance amendment proposal for that criterion through the existing amendment writer, with the rounds' evidence that the criterion cannot be met as written at this head"
+      proof: "grep: W1-T12710 criterion 4 in test/fix-lane/fix-rounds-with-no-progress-on-one-criterion-get-a-different-remedy.test.ts"
+    - claim: "invariant:never-silent-loop — after the stall count is reached, no fix round is dispatched for that criterion with the same requested model and no new remedy"
+      kind: guard
+      proof: "grep: W1-T12710 criterion 5 in test/fix-lane/fix-rounds-with-no-progress-on-one-criterion-get-a-different-remedy.test.ts"
+    - claim: "invariant:one-question — the operator-input remedy is chosen at most once per pull request and criterion, and it hands over to the W1-T12709 split path"
+      kind: guard
+      proof: "grep: W1-T12710 criterion 6 in test/fix-lane/fix-rounds-with-no-progress-on-one-criterion-get-a-different-remedy.test.ts"
+    - claim: "A round that moved the criterion (a new failure digest, or the criterion met) resets its stall count"
+      proof: "grep: W1-T12710 criterion 7 in test/fix-lane/fix-rounds-with-no-progress-on-one-criterion-get-a-different-remedy.test.ts"
+  rationale: |
+    WHY: the fix lane repeats the same kind of round on the same unmet criterion for many hours. The progress judge can say
+    change-approach, but that only adds a line to the next round's prompt. The worker, the model and the remedy stay the same.
+    The operator rule: "We don't want any stuck PRs — that is the worst case."
+    MEASURED read-only on the Azure host, ledger and rotated archives 2026-11-11 20:25Z to 2026-11-14 20:25Z:
+    - 28 pull requests had 4 or more fix rounds dispatched against one unmet criterion: 150 rounds, 216 PR-hours from the
+      first such round to merge, close or now. 24 merged, 4 are still open (#18343, #18449, #18422, #18508).
+    - Round outcomes: FIXED 78 (the worker said fixed; the criterion stayed unmet), NEEDS_SCOPE 35, NOT_LANDED 24,
+      NEEDS_DESIGN 13.
+    - All 150 rounds requested the same worker model.
+    - #18343 (W1-T8141): 12 rounds on "the next fix round is offered the preserved patch" (NEEDS_SCOPE 10), 19.6 PR-hours.
+      #18449 (W1-T12544): 8 rounds on invariant hold-survives-conflict-round, all FIXED, 18 change-approach verdicts, 14 h.
+      #18422 (W1-T12117): 4 rounds on rule-checks, 21 change-approach verdicts, 17.5 h. #18060: 8 rounds on CodeQL alert
+      #1273, 9.7 h.
+    READ at origin/main 5d1670adc:
+    - src/lib/sweep.ts:22335 a change-approach verdict sets only `pr.pendingAnswer.constraint`.
+    - src/lib/sweep.ts:2484-2490 the judge prompt says "There is no hard round ceiling" and asks for stronger evidence as
+      rounds grow, but nothing acts on a stall except escalate, which goes to a person.
+    - src/cli/commands/fix.ts:4373 records requested_model from the round's arguments; the sweep never changes it.
+    RELATED: W1-T12543 (merged) retries a refused scope amendment; W1-T11037 and W1-T11025 are machine stubs with no design.
+  design: |
+    INVARIANT never-silent-loop: a criterion that did not move in fix.stallRounds rounds gets a remedy it has not had yet.
+    INVARIANT one-question: the operator-input remedy is taken once per pull request and criterion.
+    The stall count is a trigger for a different remedy. It stops no work and is not a ceiling.
+    1. src/lib/fix-progress-judge.ts: export pure `sameCriterionStall(rounds, criterionKey)` over the rounds the judge input
+       already holds (redBefore, reviewAfter digests, fixOutcome, landed). Export `nextStallRemedy(tried, policy)`.
+    2. src/lib/sweep.ts: before a fix dispatch for a criterion, compute the stall. At or past the policy value, take the next
+       untried remedy from the fix.stall_remedy rows for this pull request and criterion:
+       a. stronger-worker: dispatch with the next model in the policy's fix model order and a prompt section "Approaches
+          that did not work" built from the earlier rounds' diff_stat and outcome.
+       b. amend-criterion: open an acceptance amendment proposal for that criterion with the existing amendment writer.
+       c. operator-input: hand over to W1-T12709's split path (a held follow-up task). Until W1-T12709 merges, log the
+          remedy and escalate once.
+    3. plan/policy.yaml and src/lib/policy.ts: `fix.stallRounds` (default 3) and the fix model order.
+    4. Declare fix.stall_remedy in src/lib/ledger-steps.ts.
+    5. Settled from the code at origin/main:
+       a. The fix model order names mounts, not models: `fix.modelOrder` lists names from .remudero/mounts.yaml,
+          weakest first, and starts with `fix`. The default is [fix, step_up]. The sweep's fix effect resolves the
+          name to the mount; the fix rung records the requested model as before.
+       b. The existing amendment writer is the refusal-amendment writer (src/lib/refusal-amendment.ts, through
+          SweepDeps.draftRefusalAmendments), with class proof-unexecutable-at-head and the rounds as evidence. A CI
+          check is not an acceptance criterion, so amend-criterion is recorded as skipped for a check name.
+       c. After every remedy was tried, no round runs for that criterion until the operator answers.
+       d. src/lib/ledger.ts keeps fix.stall_remedy through ledger rotation, so the one-question rule survives it.
+       e. test/policy.test.ts lists every top-level policy section and every net-new row, so `fix` joins both lists.
+    NOT IN SCOPE: the judge's own verdict parsing (W1-T12711); conflict rounds (W1-T12541).
+  falsifier: |
+    Count rounds that moved the criterion and criteria 1 and 7 must fail. Keep the same model after the stall and criteria 3
+    and 5 must fail. Pick operator-input twice and criterion 6 must fail. Skip the amendment rung and criterion 4 must fail.
+    Restore and all must pass.
+  note: |
+    Id reserved for run-unfiled-1794689039000 with ~/rmd-work/bin/reserve-id.sh. The fleet builds it.

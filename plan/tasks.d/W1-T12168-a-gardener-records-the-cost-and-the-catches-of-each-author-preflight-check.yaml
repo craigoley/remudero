@@ -1,0 +1,51 @@
+- id: W1-T12168
+  title: "A gardener records the cost and the catches of each author preflight check"
+  repo: remudero
+  depends_on: []
+  priority: 1.3
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # a new gardener, the author script and the command table; it files findings and changes no check
+  band_meaning: span
+  origin: operator-session#follow-ups-2026-11-10
+  plan_refs:
+    - W1-T4115
+    - W1-T4116
+    - W1-T4435
+  files:
+    - src/lib/preflight-check-gardener.ts
+    - src/run-task.ts
+    - scripts/preflight-author.mjs
+    - test/gardeners/a-gardener-records-the-cost-and-the-catches-of-each-author-preflight-check.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "Each author preflight adds one entry for each check to a history file on its host: the check, its time, its result, the head and the selection"
+      proof: "grep: W1-T12168 criterion 1 in test/gardeners/a-gardener-records-the-cost-and-the-catches-of-each-author-preflight-check.test.ts"
+    - claim: "The gardener counts a failure as a catch when the next run of that check passed on a different head. It counts a failure as caused by the host when the next run passed on the same head"
+      proof: "grep: W1-T12168 criterion 2 in test/gardeners/a-gardener-records-the-cost-and-the-catches-of-each-author-preflight-check.test.ts"
+    - claim: "A pass of the gardener writes one row for each check with its runs, its total time, its catches and its host failures over the window"
+      proof: "grep: W1-T12168 criterion 3 in test/gardeners/a-gardener-records-the-cost-and-the-catches-of-each-author-preflight-check.test.ts"
+    - claim: "The gardener files at most one finding in a pass: the check with the most time and no catch in the window. It files none while the window holds too few runs to judge"
+      proof: "grep: W1-T12168 criterion 4 in test/gardeners/a-gardener-records-the-cost-and-the-catches-of-each-author-preflight-check.test.ts"
+    - claim: "A history file that is absent or does not parse is reported as unreadable, and no finding follows"
+      proof: "grep: W1-T12168 criterion 5 in test/gardeners/a-gardener-records-the-cost-and-the-catches-of-each-author-preflight-check.test.ts"
+    - claim: "The command table runs the gardener as it runs the other gardeners"
+      proof: "grep: preflightCheckGardenSpec( in src/run-task.ts"
+  rationale: |
+    MEASURED 2026-11-10 from three receipts on the Mac agent account: the rule-checks step took 124 to 170 seconds of a static stage of 171 to 225 seconds. No record says how often it caught a defect.
+    - The static stage runs 28 checks. Its summary file gives the time of each check (`staticTiming.durationMs`), and nothing keeps that summary after the next run.
+    - The gate gardener (W1-T4116) and the CI friction gardener (W1-T4435) measure the gates of hosted CI: how often each refuses and what a red costs in time. Neither reads an author preflight.
+    - So the operator cannot say which author checks earn their time. The decision to move a check to hosted CI only, or to run it first, is made without numbers.
+  design: |
+    scripts/preflight-author.mjs appends the entries after the static stage and after the tests, to a file beside the census history (`~/.cache/remudero/`). The write never changes the verdict of the run.
+    New module src/lib/preflight-check-gardener.ts exports `preflightCheckGardenSpec`. It follows the shape of `ciFrictionGardenSpec` in src/lib/ci-friction-gardener.ts and runs through `gardenPass` in src/run-task.ts.
+    The finding is a task for a person to judge. The gardener changes no check and no list of checks.
+    The history keeps a fixed number of newest entries for each check, so the file stays small.
+    NOT IN SCOPE: moving, removing or reordering a check, and the gates of hosted CI.
+  falsifier: |
+    Count a failure that passed again on the same head as a catch and criterion 2 must fail. File a finding from an unreadable history and criterion 5 must fail. File two findings in one pass and criterion 4 must fail. Restore and require all to pass.
+  note: |
+    The window and the least number of runs are new numbers. The builder states them in the pull request with the reason.

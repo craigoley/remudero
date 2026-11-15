@@ -15,7 +15,7 @@
     - src/lib/hold-readiness.ts
     - src/cli/commands/daemon.ts
     - test/infra/a-held-task-whose-prerequisites-merged-is-named-for-release.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: A held queued shard reads prerequisites-merged only when every task id it cites has merged credit on origin/main; one pass names each held shard once, an unchanged picture writes no new row, every row is shadow, and an unreadable checkout is reported as unreadable

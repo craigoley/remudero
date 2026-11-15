@@ -17,6 +17,7 @@ import { test } from "node:test";
 
 import { MEMORY_HIGH_ANNOTATION, readResourcePolicyDrift, type ResourcePolicyDrift } from "../src/lib/deployer.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { hostIndependentPolicyEnv } from "./helpers/host-independent-policy-env.js";
 
 const REPO_ROOT = join(import.meta.dirname, "..");
 const TUNER = join(REPO_ROOT, "deploy", "memory-high-tuner.sh");
@@ -249,7 +250,7 @@ test("the drift check treats a learned memory.high as current, and a recycle sta
     mkdirSync(join(root, "cfg", "state"), { recursive: true });
     copyFileSync(join(REPO_ROOT, "deploy", "resource-policy.sh"), join(root, "deploy", "resource-policy.sh"));
     writeFileSync(join(root, "meminfo"), `MemTotal:       ${HOST_KB} kB\n`);
-    const env = { PATH: process.env.PATH, RMD_MEMINFO_PATH: join(root, "meminfo") };
+    const env = { PATH: process.env.PATH, RMD_MEMINFO_PATH: join(root, "meminfo"), ...hostIndependentPolicyEnv(root) };
     // Console's limit is the host less the reserve less the others' peaks: 13940 - (2048 + 2048 + 1024) = 8820.
     seedPeaks(join(root, "cfg"), { "remudero-daemon": 2048, "remudero-serve": 2048, "remudero-site-daemon": 1024 });
     const limits = { Memory: CONSOLE_MAX_MIB * MIB, MemorySwap: (CONSOLE_MAX_MIB + 4096) * MIB, CpuShares: 512, MemoryReservation: 0 };

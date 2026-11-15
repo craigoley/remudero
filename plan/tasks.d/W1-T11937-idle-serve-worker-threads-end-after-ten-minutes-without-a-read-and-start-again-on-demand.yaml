@@ -17,7 +17,7 @@
     - src/lib/read-model-worker.ts
     - src/lib/read-model-slow-lane.ts
     - test/lib/idle-serve-workers-end-and-restart-on-demand.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: A worker thread with no read for the declared idle window ends and releases its heap

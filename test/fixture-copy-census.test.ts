@@ -37,7 +37,9 @@ import {
   FIXTURE_COPY_CENSUS_FILENAME,
   FIXTURE_COPY_SIGNATURES,
   countFixtureCopies as countFixtureCopiesFromRoot,
+  countFixtureCopiesInTexts,
   fixtureCopyViolations,
+  listFixtureCopyFiles,
   // @ts-ignore the executable .mjs module has no declaration file.
 } from "#scripts/fixture-copy-census.mjs";
 
@@ -235,4 +237,59 @@ test("isGhPathShimFile requires BOTH a literal \"gh\" write/chmod AND a PATH men
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+// ── W1-T12322: a fixture directory named gh is not a gh shim ──────────────────────────────────
+
+test("W1-T12322: a fixture directory named gh is not a gh shim", () => {
+  const root = fixtureTree({
+    "fixture-dir-only.test.ts":
+      'const fixture = writeLedger(rows, { dir: ownedFixtureDir(t, "gh").dir });\n' +
+      'writeFileSync(join(fixture.dir, "rows.jsonl"), "");\n' +
+      "process.env.PATH = old;",
+  });
+  try {
+    assert.equal(countFixtureCopies(root).ghPathShimFiles, 0, "the only quoted gh is the fixture-directory name");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("W1-T12322: a hand-built gh shim is still counted beside a fixture directory named gh", () => {
+  const root = fixtureTree({
+    "shim-and-fixture-dir.test.ts":
+      'const scratch = ownedFixtureDir(t, "gh").dir;\n' +
+      'writeFileSync(join(bin, "gh"), "#!/bin/sh\\n", { mode: 0o755 });\n' +
+      "process.env.PATH = `${bin}:${old}`;",
+    "shim-only.test.ts": 'writeFileSync(join(bin, "gh"), "#!/bin/sh\\n");\nchmodSync(join(bin, "gh"), 0o755);\nprocess.env.PATH = bin;',
+  });
+  try {
+    assert.equal(countFixtureCopies(root).ghPathShimFiles, 2, "both files build a real gh shim");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("W1-T12322: the real tree counts the same gh shim files as before", () => {
+  const oldRule = (text: string): boolean => /["']gh["']/.test(text) && /(chmod|writeFileSync)/.test(text) && /PATH/.test(text);
+  const fixtureDirNames = (text: string): number => (text.match(/ownedFixtureDir\(\s*[^,()]+,\s*["']gh["']/g) ?? []).length;
+  const quotedGh = (text: string): number => (text.match(/["']gh["']/g) ?? []).length;
+  const files = listFixtureCopyFiles(REPO_ROOT) as string[];
+  const before: string[] = [];
+  const after: string[] = [];
+  const dropped: string[] = [];
+  for (const name of files) {
+    const text = readFileSync(join(REPO_ROOT, "test", name), "utf8");
+    const counted = (countFixtureCopiesInTexts([[name, text]]) as FixtureCopyCounts).ghPathShimFiles === 1;
+    if (oldRule(text)) before.push(name);
+    if (counted) after.push(name);
+    if (oldRule(text) && !counted) {
+      dropped.push(name);
+      assert.equal(fixtureDirNames(text), quotedGh(text), `${name} drops out, so its every quoted gh must be a fixture-directory name`);
+    }
+  }
+  assert.ok(before.length > 0, "the old rule counts real shims on this tree");
+  assert.deepEqual(after.filter((name) => !before.includes(name)), [], "the new rule counts no file the old rule did not count");
+  assert.equal(after.length + dropped.length, before.length, "every file the old rule counted is still counted or is a fixture-directory case");
+  assert.equal(countFixtureCopies(REPO_ROOT).ghPathShimFiles, after.length);
 });

@@ -191,7 +191,8 @@ test("W1-T1127: a fix dispatch whose own failure is swallowed no longer records 
     // `acted:true` row and `fixRungStalledWithoutNewHead` had nothing of its own to read, so
     // this second pass would have read `alreadyDone: true` forever and dispatchFix would never
     // run again — zero further `sweep.fix.error` rows, silently, on every future pass too.
-    const summary2 = await runSweep([candidate], { ...effects, ledgerPath, runId, log, dryRun: false }, DEFAULT_SWEEP_POLICY);
+    const summary2 = await runSweep([candidate], { ...effects, now: () => Date.now() + 10 * 60_000,
+      ledgerPath, runId, log, dryRun: false }, DEFAULT_SWEEP_POLICY);
     assert.equal(summary2.actions[0].acted, false);
     const lines2 = readLedgerLines(ledgerPath);
     const error2 = lines2.filter((l) => l.step === "sweep.fix.error");

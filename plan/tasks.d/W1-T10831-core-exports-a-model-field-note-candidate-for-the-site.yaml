@@ -9,7 +9,7 @@
   risk: high  # public data: a mis-sized cell or a private identifier in the candidate is a disclosure; the owner review in W1-T10832 is the last gate, not the only one
   band_meaning: blast-radius
   priority: 1  # Craig 2026-10-27: field trials live on the site; this is the missing producer between the private snapshot and the site's importer
-  status: queued
+  status: merged
   attempts: 0
   origin: "filing agent F20, 2026-10-27, on Craig's 2026-10-27 field-trials ask; the site contract read from craigoley/remudero-site main b80fbbb"
   plan_refs: [W1-T4574, W1-T100001, W1-T10830, W1-T10832, W1-T10833, PORTAL-T41, W1-T10875]

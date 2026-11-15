@@ -14,7 +14,7 @@
     - src/run-task.ts
     - test/a-daemon-whose-boot-fails-releases-its-watchers-and-exits.test.ts
     - "src/cli/commands/daemon.ts"
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

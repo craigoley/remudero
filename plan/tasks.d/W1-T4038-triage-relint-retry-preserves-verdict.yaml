@@ -73,7 +73,7 @@
   plan_refs: ["W1-T41", "W1-T2212", "W1-T286"]
   files: [src/lib/relint.ts, src/run-task.ts, test/triage-relint-retry-preserves-verdict.test.ts, "src/lib/task-linter.ts"]
   priority: 3
-  status: queued
+  status: merged
   # backlog gardener: band=3 evidence=2c6644acb293363c
   # backlog gardener: placed=2026-11-04T08:29:31.661Z
   attempts: 0

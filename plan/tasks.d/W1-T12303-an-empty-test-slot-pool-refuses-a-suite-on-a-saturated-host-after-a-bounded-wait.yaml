@@ -1,0 +1,48 @@
+- id: W1-T12303
+  title: "An empty test-slot pool waits on measured host saturation and returns NOT_RUN OVER_CAPACITY at the existing bound instead of running a suite UNSLOTTED"
+  repo: remudero
+  depends_on: [W1-T12004, W1-T12301, W1-T12302]
+  priority: 1.4
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high
+  band_meaning: blast-radius
+  origin: architect
+  plan_refs: [W1-T12004, W1-T12301, W1-T12302, W1-T9952, W1-T9950, W1-T11915, W1-T11891]
+  files:
+    - src/lib/test-slot.ts
+    - test/ci/suites/an-empty-test-slot-pool-refuses-a-suite-on-a-saturated-host-after-a-bounded-wait.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "A healthy empty pool with current readings below every calibrated line admits on the first poll and records its effective capacity basis and available readings"
+      proof: "unit test: W1-T12303 criterion 1: healthy empty pool admits with its measured inputs"
+    - claim: "A saturated empty pool waits only when known headroom is below one worker and a known reading exceeds its calibrated line; at the bound it returns over_capacity, executionAllowed false and NOT_RUN: OVER_CAPACITY, never UNSLOTTED"
+      proof: "unit test: W1-T12303 criterion 2: saturated empty pool returns bounded NOT_RUN over capacity"
+    - claim: "Missing or UNKNOWN pressure, capacity or calibration never causes refusal and each unknown input is named"
+      proof: "unit test: W1-T12303 criterion 3: unknown admission inputs remain visible without refusal"
+    - claim: "Two waiters held by an empty saturated pool keep FIFO order; after recovery the head waiter is admitted first"
+      proof: "unit test: W1-T12303 criterion 4: FIFO waiters resume in order after pressure recovers"
+    - claim: "W1-T12004 static-stage admission is unchanged and never returns the suite-only over_capacity outcome"
+      proof: "unit test: W1-T12303 criterion 5: static-stage admission remains independent"
+    - claim: "A capable host still admits more than four author workers after the empty-pool rule is added"
+      proof: "unit test: W1-T12303 criterion 6: capable hosts are not capped at four workers"
+    - claim: "The empty-pool CPU decision is a named function in the existing test-slot admission module"
+      proof: "grep: emptyPoolCpuShort( in src/lib/test-slot.ts"
+  rationale: |
+    OBSERVED on Azure: load reached 75 to 85 and CPU PSI some avg10 later reached 84 percent while no suite-slot holder was live; nested bwrap tests then timed out on a proof-executor suite that also failed on unchanged origin/main. These attempts are capacity-inconclusive, not branch failures.
+    W1-T12004 covers static stages only, preserves the only-holder admission rule and lists suite admission as out of scope. This task depends on it so the two changes do not edit src/lib/test-slot.ts concurrently.
+    The shared queue in src/lib/test-slot-queue.ts preserves its FIFO/cost ordering. A waiter held here retains its ticket until admission or the existing bound.
+  design: |
+    Add emptyPoolCpuShort in the existing src/lib/test-slot.ts; do not add a source module whose caller is postponed to a later task.
+    Run this judgement only for suite admission when the pool has no other live holder. Use W1-T12301's visible effective capacity and structured readings plus W1-T12302's calibrated lines. Refuse only when known headroom is below one worker AND a known reading exceeds its calibrated line. Unknown readings or lines never count as above. Never use system CPU PSI full.
+    If effective capacity or load normalization is UNKNOWN, keep today's admission behavior and name the unknown input in the note. Require positive current evidence to refuse.
+    While held, keep the existing shared FIFO ticket and report the CPU cause. At TEST_SLOT_WAIT_BOUND_MS return outcome over_capacity with executionAllowed false, note prefix NOT_RUN: OVER_CAPACITY and readings/lines; record test_slot.over_capacity and release the ticket. Never run UNSLOTTED. A wait held by another live holder retains today's wait_bound_exceeded behavior.
+    Add a criterion-specific >4-worker regression to the new suite admission test file. Static-stage acquisition follows W1-T12004 unchanged.
+    NOT IN SCOPE: caller verdict mapping (W1-T12304/W1-T12305), worker ceilings or RMD_TEST_SLOTS.
+  falsifier: |
+    Keep the holders===0 early admission and criterion 2 must fail. Refuse on an unknown reading and criterion 3 must fail. Admit a later ticket before the FIFO head and criterion 4 must fail. Run UNSLOTTED at the bound and criterion 2 must fail. Restore and require all criteria to pass.
+  note: |
+    Filed by PLAN-create-1794411017336 from the reserved ids, in order. Rebase on W1-T12004 before building; both tasks edit src/lib/test-slot.ts.

@@ -1,0 +1,61 @@
+- id: W1-T12532
+  title: "The serve container's CPU weight equals the build daemons' by default"
+  repo: remudero
+  depends_on: []
+  priority: 1.0
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # serve's CPU weight on the next relaunch; equal weight, not lower, so the console is not starved
+  band_meaning: blast-radius
+  origin: operator-session#review-capacity-2026-11-13
+  plan_refs:
+    - W1-T4102
+    - W1-T11129
+  files:
+    - deploy/resource-policy.sh
+    - test/the-console-backend-keeps-its-share-of-the-host.test.ts
+    - test/a-changed-resource-policy-reaches-a-running-container.test.ts
+    - test/a-changed-serve-policy-reaches-the-running-console.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "deploy/resource-policy.sh defaults RMD_SERVE_CPU_SHARES to 512, the same value as RMD_BUILD_CPU_SHARES"
+      proof: "grep: RMD_SERVE_CPU_SHARES:-512 in deploy/resource-policy.sh"
+    - claim: "invariant:serve-not-below-daemons — W1-T4102's serve launch test still passes and now asserts that serve's CPU weight is at least a build daemon's (equal by default), never lower"
+      proof: "grep: W1-T12532 criterion 2 in test/the-console-backend-keeps-its-share-of-the-host.test.ts"
+    - claim: "An operator-set RMD_SERVE_CPU_SHARES still sets serve's --cpu-shares, so the old weight is one environment value away"
+      proof: "grep: W1-T12532 criterion 3 in test/the-console-backend-keeps-its-share-of-the-host.test.ts"
+    - claim: "The drift readers expect 512 for serve, so a serve container launched on the new policy reads no drift and one still on 4096 reads CpuShares drift"
+      proof: "grep: W1-T12532 criterion 4 in test/a-changed-resource-policy-reaches-a-running-container.test.ts"
+  rationale: |
+    Serve's default CPU weight is five times a build daemon's, so serve takes CPU the build and review daemons need.
+    READ at origin/main 51e329755, deploy/resource-policy.sh:30-31: RMD_SERVE_CPU_SHARES defaults to 4096 and
+    RMD_BUILD_CPU_SHARES to 512; :502 passes --cpu-shares=${RMD_SERVE_CPU_SHARES} to serve. On this host's cgroup v2 these map
+    to cpu.weight 303 for serve and 59 for each daemon.
+    MEASURED by the operator session, 2026-11-13: host CPU pressure was about 60% from work that is not review (the daemon
+    4.6 cores, hand lanes, serve). W1-T11129 read the same shape on 2026-10-27: core's PSI full of 36-44 was serve's weight,
+    not core's load. The review.capacity rows of 2026-11-13 carry cpu_weight_share 0.123 for the core daemon.
+    OPERATOR RULING 2026-11-13: lower serve's weight. The operator session set it live to 512 (weight 59) with docker update
+    at 19:45Z. That change does not survive a serve relaunch, which reads this default.
+    W1-T4102 (merged) raised serve's weight so the console would not stall under host load. Its test
+    (test/the-console-backend-keeps-its-share-of-the-host.test.ts:147) asserts serve's weight is greater than a daemon's.
+    Equal weight keeps serve from being starved: under contention it gets the same share as any one daemon, and its memory
+    protection (memory.high) is unchanged.
+    CHECKED: test/a-changed-resource-policy-reaches-a-running-container.test.ts:218 and
+    test/a-changed-serve-policy-reaches-the-running-console.test.ts:37-39 hold 4096 as serve's expected weight.
+  design: |
+    1. Change the default on deploy/resource-policy.sh:30 to 512. Keep the variable, so an operator can set another value.
+    2. In the W1-T4102 test at :147, assert shares(serve) >= shares(build) and shares(serve) === shares(build) by default;
+       rename the test so its title says "at least the daemons' cpu weight" and add the criterion 2 marker.
+    3. Update the expected serve weight in the two drift tests from 4096 to 512 and add a case where a live 4096 reads drift.
+    4. Update the printed note expectations ("serve: cpu-shares 512") in the console test.
+    INVARIANT serve-not-below-daemons: serve's default CPU weight is never lower than a build daemon's.
+    NOT IN SCOPE: the running containers (the operator already set them); memory policy; the console's read budget.
+  falsifier: |
+    Set the default to 256 and criterion 2 must fail. Leave 4096 and criterion 1's grep finds nothing. Ignore the environment
+    value and criterion 3 must fail. Restore and all must pass.
+  note: |
+    Id W1-T12532 reserved for run-unfiled-1794597956000 with ~/rmd-work/bin/reserve-id.sh.
+    The live weight change is the operator session's; it is not on main.

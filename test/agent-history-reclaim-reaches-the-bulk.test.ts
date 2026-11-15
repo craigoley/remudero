@@ -21,7 +21,8 @@ import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
  *
  * So the three claims here, each driven through the REAL script with a stubbed `docker`:
  *   1. every tree reports the bytes it could NOT reach and which reason applies;
- *   2. a live-container refusal reads as REFUSED, never as a completed run with nothing to do;
+ *   2. a refusal reads as REFUSED, never as a completed run with nothing to do (since W1-T12495 a
+ *      live container refuses only when its open files cannot be listed in full);
  *   3. a live SQLite database whose mtime is always current is COMPACTED IN PLACE (WAL checkpoint +
  *      VACUUM), never deleted, and its rows survive.
  *
@@ -45,7 +46,8 @@ function writeDockerStub(dir: string): void {
     '    case "$STUB_MODE" in live) echo c0ffee ;; esac; exit 0 ;;',
     "  inspect)",
     '    case "$STUB_MODE" in',
-    '      live) echo "/ad-hoc|rmd-local:latest|/home/node/Remudero " ;;',
+    // W1-T12495: the open-file check asks for the container's user and mounts.
+    '      live) case "$*" in *Config.User*) echo "$(id -u):$(id -u)|" ;; *) echo "/ad-hoc|rmd-local:latest|/home/node/Remudero " ;; esac ;;',
     "    esac; exit 0 ;;",
     "  image)",
     '    if [ "$2" = "inspect" ]; then exit 0; fi',
@@ -62,6 +64,9 @@ function writeDockerStub(dir: string): void {
   ].join("\n");
   writeFileSync(join(dir, "docker"), docker, { mode: 0o755 });
   chmodSync(join(dir, "docker"), 0o755);
+  // W1-T12495: the open files beside a live fleet come from this `lsof`, never the host's.
+  writeFileSync(join(dir, "lsof"), '#!/usr/bin/env bash\nexit "${STUB_LSOF_RC:-0}"\n', { mode: 0o755 });
+  chmodSync(join(dir, "lsof"), 0o755);
 }
 
 interface Run {
@@ -172,13 +177,11 @@ test("W1-T3676: a refused reclaim is not reported as a clean nothing-to-do run",
   const codex = tree("codex-live");
   const db = liveDatabase(codex);
   const before = statSync(db).size;
-  const live = runReclaim("live", [codex]);
+  const live = runReclaim("live", [codex], { STUB_LSOF_RC: "1" });
   const out = `${live.stdout}\n${live.stderr}`;
-  // Per tree: what it held, and that the reason is the refusal.
-  assert.match(
-    out,
-    new RegExp(`agent history reclaim REFUSED — ${esc(codex)}: could not reach \\S+ — reason: live-fleet-container \\(1 file\\(s\\)\\)`),
-  );
+  // Per tree: that the reason is the refusal, and what the live database holds.
+  assert.match(out, new RegExp(`agent history reclaim — ${esc(codex)}: could not reach \\S+ — reason: open-check-unreadable`));
+  assert.match(out, new RegExp(`agent history reclaim — ${esc(codex)}: could not reach \\S+ — reason: live-fleet-container \\(1 file\\(s\\)\\)`));
   // And the rung's own closing verdict says REFUSED, not COMPLETED.
   assert.match(live.stdout, /host-update: agent history reclaim: REFUSED/);
   assert.doesNotMatch(live.stdout, /host-update: agent history reclaim: COMPLETED/);

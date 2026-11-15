@@ -1,0 +1,42 @@
+- id: W1-T12301
+  title: "The host-wide test-slot observation records allowed CPUs, visible cgroup-v2 quota, load and CPU PSI some as structured author-receipt evidence, with hidden or unreadable quota explicitly UNKNOWN"
+  repo: remudero
+  depends_on: []
+  priority: 1.4
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high
+  band_meaning: span
+  origin: architect
+  plan_refs: [W1-T9952, W1-T12004, W1-T12302]
+  files:
+    - src/lib/test-slot.ts
+    - scripts/preflight-author.mjs
+    - test/ci/suites/the-author-test-slot-receipt-records-effective-cpu-capacity-and-pressure.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "Visible cgroup-v2 cpu.max quotas from the leaf through every visible ancestor cap allowed CPUs; hidden parent quota remains UNKNOWN, never max or zero"
+      proof: "unit test: W1-T12301 criterion 1: visible ancestor quotas cap effective CPU capacity"
+    - claim: "The acquired lease and author receipt preserve structured load per effective core, CPU PSI some, capacity basis and UNKNOWN reasons"
+      proof: "unit test: W1-T12301 criterion 2: author receipt preserves structured CPU observations"
+    - claim: "The existing test-slot module provides the observation used by suite admission"
+      proof: "grep: effectiveCpuCapacity( in src/lib/test-slot.ts"
+  rationale: |
+    Initiative (operator, 2026-11-11): the pressure-aware admission work must calibrate from measurements present on the receipts it classifies.
+    OBSERVED on the 8-vCPU Azure host: load reached 75 to 85 and CPU PSI some avg10 later measured 84 percent while the shared suite-slot directory had no live holder. Nested bwrap tests timed out on a proof-executor suite that also failed on unchanged origin/main; these attempts are capacity-inconclusive, not branch failures.
+    Existing author receipts carry a test-slot note with cores, granted workers, non-test load and headroom, but not a durable structured CPU sample. This task makes the inputs durable before calibration consumes them.
+    availableParallelism() follows allowed CPU affinity but does not account for cgroup quota. The reader considers every visible cgroup-v2 ancestor and labels any hidden or unreadable part UNKNOWN, never unlimited.
+  design: |
+    Add the reader and observation value in the existing src/lib/test-slot.ts module; do not add a new src module whose only importer would be its tests while a later task owns the caller.
+    Read allowed online CPUs and resolve every visible cgroup-v2 cpu.max from the process's cgroup leaf through the visible mount root. Return effectiveCores only when that chain is fully resolved and every quota is either a valid quota/period or max; it is min(allowed CPUs, every valid quota/period). If any required parent or file is hidden, malformed or unreadable, effectiveCores is UNKNOWN, capacityBasis is unknown, and known visible quotas are diagnostic only. Never infer unlimited capacity from a partial chain.
+    Capture load1 from os.loadavg()[0] and system CPU PSI some avg10 from /proc/pressure/cpu when readable, with source, scope and timestamp. Do not read system CPU PSI full. Preserve unsupported or unreadable inputs as UNKNOWN, not zero.
+    Carry the observation on the acquired lease and through scripts/preflight-author.mjs into the existing author receipt's testSlot field. This task adds telemetry only; admission behavior and thresholds stay unchanged.
+    Inject filesystem, affinity, load and pressure readers so tests are host-independent.
+    NOT IN SCOPE: calibration (W1-T12302), applying a calibrated line (W1-T12303), static-stage admission (W1-T12004), or worker caps.
+  falsifier: |
+    Ignore a visible ancestor quota and criterion 1 must fail. Drop structured telemetry before the receipt and criterion 2 must fail. Restore and require both to pass.
+  note: |
+    Filed by PLAN-create-1794411017336 from the reserved ids, in order.

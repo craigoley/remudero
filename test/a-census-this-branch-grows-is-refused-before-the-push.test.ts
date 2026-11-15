@@ -1,17 +1,16 @@
 /**
  * A CENSUS THIS BRANCH GROWS IS REFUSED BEFORE THE PUSH — scripts/census-precheck.mjs, run by
- * hooks/pre-push. It asks the clock-signature, comment-load and fixture-copy censuses their own
- * questions without a test runner (W1-T3225 removed that from the hook), and blocks only growth
- * the branch causes against its merge base.
+ * the author preflight (W1-T12510 took it out of hooks/pre-push; CI's ci-shard runs every census).
+ * It asks the clock-signature, comment-load and fixture-copy censuses their own questions, and
+ * blocks only growth the branch causes against its merge base.
  *
- * The pure cases drive `evaluateCensusPrecheck` over in-memory trees. The last two go through a
- * REAL `git push` from a linked worktree, the way test/the-hook-spawns-no-test-suite.test.ts does,
- * because a hand-invoked hook runs in an environment the fleet never sees.
+ * The pure cases drive `evaluateCensusPrecheck` over in-memory trees. The script cases run the
+ * precheck in a linked worktree whose origin/main is a real fetched remote branch.
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { spawnSync } from "node:child_process";
-import { lstatSync, chmodSync, copyFileSync, mkdirSync, symlinkSync, writeFileSync } from "node:fs";
+import { lstatSync, copyFileSync, mkdirSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -114,10 +113,8 @@ test("census precheck: a clean change, a deleted file and a changed census suite
   assert.deepEqual(evaluate(head, base), []);
 });
 
-/** This repo's real hook and the precheck's scripts, copied into `dir` — plus the node_modules
- *  symlink spawnWorker gives every worktree, and a passing rule15 stub the hook runs first. */
-function installHook(dir: string): void {
-  mkdirSync(join(dir, "hooks"), { recursive: true });
+/** The precheck's scripts, copied into `dir`, plus the node_modules symlink spawnWorker gives every worktree. */
+function installPrecheck(dir: string): void {
   mkdirSync(join(dir, "scripts", "lib"), { recursive: true });
   writeFileSync(join(dir, "package.json"), JSON.stringify({ type: "module" }));
   mkdirSync(join(dir, "src", "lib"), { recursive: true });
@@ -128,8 +125,6 @@ function installHook(dir: string): void {
     `import ${JSON.stringify(pathToFileURL(join(REPO_ROOT, "test/setup/tmp-hygiene.ts")).href)};\n`);
   copyFileSync(join(REPO_ROOT, "src", "lib", "rule-suites.ts"), join(dir, "src", "lib", "rule-suites.ts"));
   copyFileSync(join(REPO_ROOT, "src", "lib", "trust-root-text.ts"), join(dir, "src", "lib", "trust-root-text.ts"));
-  copyFileSync(join(REPO_ROOT, "hooks", "pre-push"), join(dir, "hooks", "pre-push"));
-  chmodSync(join(dir, "hooks", "pre-push"), 0o755);
   for (const script of ["census-precheck.mjs", "clock-signature-ratchet.mjs", "comment-load-ratchet.mjs", "fixture-copy-census.mjs", "house-layout-census.mjs", "deps-interface-census.mjs", "test-repo-root-codemod.mjs", "coverage-session-blanking-check.mjs",
     // The suite child is judged (W1-T8379): the judge and the two files its argv names.
     "pure-test-pool.mjs", "pool-run-marker.mjs", "pool-run-tally.mjs"]) {
@@ -138,7 +133,6 @@ function installHook(dir: string): void {
   for (const lib of ["argv.mjs", "git.mjs", "author-step-capture.mjs", "json-duplicate-keys.mjs", "instrument-surface-census.mjs", "git-spawn-shapes.mjs", "repo-root.mjs", "retained-fixtures.mjs"]) {
     copyFileSync(join(REPO_ROOT, "scripts", "lib", lib), join(dir, "scripts", "lib", lib));
   }
-  writeFileSync(join(dir, "scripts", "rule15-precheck.mjs"), "process.exit(0)\n");
   symlinkSync(join(REPO_ROOT, "node_modules"), join(dir, "node_modules"));
 }
 
@@ -148,8 +142,8 @@ let counter = 0;
 const SKILL_CENSUS = "test/rules/every-applies-to-skill-is-selectable-and-bounded.test.ts";
 const SKILL_CENSUS_STUB = 'import { test } from "node:test"; test("healthy mandatory fixture census", () => {});\n';
 
-/** A linked worktree whose origin/main holds `seed`, with this repo's real hook and precheck
- *  installed through core.hooksPath, and `change` committed on the branch being pushed. */
+/** A linked worktree whose origin/main holds `seed`, with this repo's real precheck installed,
+ *  and `change` committed on the branch; the returned function runs the precheck as the preflight does. */
 function pushFixture(seed: Tree, change: Tree) {
   const remote = gitRepo({ kind: "census-precheck-remote", bare: true });
   const parent = gitRepo({ kind: "census-precheck-parent" });
@@ -160,36 +154,32 @@ function pushFixture(seed: Tree, change: Tree) {
       writeFileSync(join(work.dir, path), text);
     }
   };
-  installHook(work.dir);
+  installPrecheck(work.dir);
   write({ ...seed, [SKILL_CENSUS]: SKILL_CENSUS_STUB });
-  work.git("config", "core.hooksPath", "hooks");
   work.addRemote("origin", remote.dir);
   work.git("add", "-A");
   work.git("commit", "--quiet", "-m", "the base");
-  const push = (armed: boolean) =>
-    spawnSync("git", ["push", "origin", "HEAD:refs/heads/main"], {
-      cwd: work.dir,
-      encoding: "utf8",
-      env: { ...process.env, RMD_PREPUSH_GATES: armed ? "1" : "0" },
-    });
-  assert.equal(push(false).status, 0, "seeding the base push");
+  work.git("push", "--quiet", "origin", "HEAD:refs/heads/main");
   work.git("fetch", "--quiet", "origin");
   write(change);
   work.git("add", "-A");
   work.git("commit", "--quiet", "-m", "the change being pushed");
-  return () => push(true);
+  return () => runPrecheck(work.dir);
 }
 
-test("census precheck: a real git push that grows a clock row is REFUSED by the hook, naming the file", () => {
+function runPrecheck(cwd: string) {
+  return spawnSync(process.execPath, ["scripts/census-precheck.mjs", "--base", "origin/main"], { cwd, encoding: "utf8" });
+}
+
+test("census precheck: a branch that grows a clock row is REFUSED by the script, naming the file", () => {
   const seed = { ...baselines, "src/a.ts": "export const t = Date.now();\n" };
   const push = pushFixture(seed, { "src/a.ts": "export const t = Date.now();\nexport const u = Date.now();\n" });
   const r = push();
   assert.notEqual(r.status, 0, r.stderr);
   assert.match(r.stderr, /clock-signature: src\/a\.ts dateNow 2 > baseline 1/);
-  assert.match(r.stderr, /pre-push REFUSED/);
 });
 
-test("census precheck: a real git push of a clean change passes, and one with no origin/main is named, not blocked", () => {
+test("census precheck: a clean change passes, and a branch with no origin/main is could-not-measure, not a refusal", () => {
   const seed = { ...baselines, "src/a.ts": "export const t = Date.now();\n" };
   const clean = pushFixture(seed, { "src/a.ts": "export const t = Date.now(); // tidy\n" })();
   assert.equal(clean.status, 0, clean.stderr);
@@ -197,18 +187,13 @@ test("census precheck: a real git push of a clean change passes, and one with no
 
   const remote = gitRepo({ kind: "census-precheck-lone-remote", bare: true });
   const lone = gitRepo({ kind: "census-precheck-lone" });
-  installHook(lone.dir);
-  lone.git("config", "core.hooksPath", "hooks");
+  installPrecheck(lone.dir);
   lone.addRemote("origin", remote.dir);
   lone.git("add", "-A");
   lone.git("commit", "--quiet", "-m", "a branch with no origin/main to measure against");
-  const r = spawnSync("git", ["push", "origin", "HEAD:refs/heads/main"], {
-    cwd: lone.dir,
-    encoding: "utf8",
-    env: { ...process.env, RMD_PREPUSH_GATES: "1" },
-  });
-  assert.equal(r.status, 0, r.stderr);
-  assert.match(r.stderr, /census-precheck could not measure — not blocking/);
+  const r = runPrecheck(lone.dir);
+  assert.equal(r.status, 2, r.stderr);
+  assert.match(r.stderr, /census-precheck: could not measure/);
 });
 
 /** A repo on branch `work`, cut from `main` holding `seed`, with `change` committed on top — for
@@ -252,7 +237,7 @@ test("census precheck main(): an unknown base or an unknown flag is 2, could-not
 });
 
 
-test("a real push refuses a newly unblanked child coverage session and accepts effective blanking", () => {
+test("the precheck refuses a newly unblanked child coverage session and accepts effective blanking", () => {
   const bad = "const childEnv = { ...process.env }; delete childEnv.NODE_TEST_CONTEXT;\n";
   const good = bad + "childEnv.NODE_V8_COVERAGE = undefined;\n";
   const guard = `import assert from "node:assert/strict";
@@ -277,7 +262,6 @@ test("the actual classifier sees a complete owned corpus", () => {
   const refused = pushFixture(seed, { "test/child.ts": bad })();
   assert.notEqual(refused.status, 0, refused.stdout + refused.stderr);
   assert.match(refused.stderr, /census-suite: test\/coverage-session-blanking\.test\.ts fails/);
-  assert.match(refused.stderr, /pre-push REFUSED/);
   const accepted = pushFixture(seed, { "test/coverage-session-blanking.test.ts": guard + "\n// a fresh clean measurement\n" })();
   assert.equal(accepted.status, 0, accepted.stderr);
   assert.match(accepted.stdout + accepted.stderr, /census-precheck: OK/);

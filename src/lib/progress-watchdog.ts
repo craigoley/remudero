@@ -37,8 +37,11 @@ export type ProgressWatchdogVerdictAction = ProgressWatchdogAction | typeof REST
 export const RESTART_REQUEST_GRACE_MS = 15 * 60_000;
 /** Steps the verb must read from the ledger union to feed the verdict. */
 export const PROGRESS_WATCHDOG_READ_STEPS: readonly string[] =
-  [...PROGRESS_STEPS, "daemon.paths", "daemon.boot", ...PASS_MARKER_STEPS, LOOP_RESUME_STEP, RESTART_REQUESTED_STEP];
+  [...PROGRESS_STEPS, "daemon.paths", "daemon.boot", "daemon.freshness_exit", "daemon.stop", "daemon.pause",
+    ...PASS_MARKER_STEPS, LOOP_RESUME_STEP, RESTART_REQUESTED_STEP];
 
+/** bound kind: calibrated — W1-T12161: allow five minutes for the entrypoint to restart after a freshness exit. */
+export const FRESHNESS_EXIT_GRACE_MS = 5 * 60_000;
 /** bound kind: calibrated — progress older than this captures a diagnostics bundle (the 45-min and 51-min gaps all pass it). */
 export const STALL_DIAGNOSE_AFTER_MS = 15 * 60_000;
 /** bound kind: calibrated — progress older than this asks for a recycle. */
@@ -353,12 +356,15 @@ export function decideProgressWatchdog(input: ProgressWatchdogInput): ProgressWa
   const { rows, nowMs, openPrCount, openPrCountSource } = input;
   const failedBoots15m = failedBootTimes(rows, nowMs).filter((ms) => nowMs - ms <= CRASH_LOOP_WINDOW_MS).length;
   let newestProgressMs: number | undefined;
+  let newestDaemon: { step: string; ms: number } | undefined;
   let futureStampedSkipped = 0;
   for (const row of rows) {
     const ms = typeof row.step === "string" ? rowMs(row) : undefined;
     if (ms === undefined) continue;
     const counted = PROGRESS_STEPS.has(row.step as string) || row.step === "daemon.boot" || row.step === LOOP_RESUME_STEP;
     if (counted && futureStamped(ms, nowMs)) { futureStampedSkipped += 1; continue; }
+    if ((row.step as string).startsWith("daemon.") && !futureStamped(ms, nowMs)
+      && (newestDaemon === undefined || ms >= newestDaemon.ms)) newestDaemon = { step: row.step as string, ms };
     if (!PROGRESS_STEPS.has(row.step as string)) continue;
     if (newestProgressMs === undefined || ms > newestProgressMs) newestProgressMs = ms;
   }
@@ -376,6 +382,10 @@ export function decideProgressWatchdog(input: ProgressWatchdogInput): ProgressWa
   // W1-T11319: a live recycle's own PAUSE is not evidence of a stalled fleet.
   if (input.liveRecyclePausePid !== undefined) {
     return verdict("IN_RECYCLE", "none", `a live recycle (pid ${input.liveRecyclePausePid}) owns PAUSE; its pause is not a stall`);
+  }
+  if (newestDaemon?.step === "daemon.freshness_exit" && nowMs - newestDaemon.ms > FRESHNESS_EXIT_GRACE_MS) {
+    return verdict("STALLED", "recycle", `daemon stopped for freshness at ${fixedClock(newestDaemon.ms).iso()} ` +
+      `and did not start again within ${FRESHNESS_EXIT_GRACE_MS / 60_000} min`);
   }
   if (failedBoots15m >= CRASH_LOOP_BOOTS) {
     return verdict("CRASH_LOOP", "hold-revive", `${failedBoots15m} boots in 15 min logged daemon.paths and never reached daemon.boot`);

@@ -18,7 +18,7 @@
     - test/daemon/a-slow-crash-loop-is-reported.test.ts
     - "deploy/entrypoint.sh"
     - "src/lib/config-schema.ts"
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: A run of abnormal daemon exits, each ending a process that lived shorter than the instance's learned clean lifetime, raises one crash-loop incident even when no ten-minute window holds six boots

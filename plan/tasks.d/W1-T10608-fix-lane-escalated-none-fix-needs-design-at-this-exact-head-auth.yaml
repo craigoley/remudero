@@ -7,7 +7,7 @@
   risk: high
   band_meaning: blast-radius
   priority: 1.2
-  status: queued
+  status: merged
   attempts: 0
   author_class: machine
   origin: "fix-lane:escalated:none:fix-needs-design-at-this-exact-head-auth"

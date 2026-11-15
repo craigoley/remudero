@@ -48,12 +48,12 @@ test("test/every-view-build-is-counted.test.ts: under-budget builds sum their co
   flushAt(T0 + WINDOW_MS - 1);
   assert.deepEqual(rows(), []);
   flushAt(T0 + WINDOW_MS);
-  assert.deepEqual(rows(), [{ view: "cheap", thread: "projector", calls: 2, builds: 2, ms: 30, maxMs: 20, window: [T0, T0 + WINDOW_MS] }]);
+  assert.deepEqual(rows(), [{ view: "cheap", thread: "projector", calls: 2, builds: 2, ms: 30, maxMs: 20, not_skipped: { no_declaration: 2 }, window: [T0, T0 + WINDOW_MS] }]);
   flushAt(T0 + 2 * WINDOW_MS);
   assert.equal(rows().length, 1, "an idle window writes no row");
   ticker.buildNow("cheap");
   flushAt(T0 + 3 * WINDOW_MS);
-  assert.deepEqual(rows()[1], { view: "cheap", thread: "projector", calls: 1, builds: 1, ms: 20, maxMs: 20, window: [T0 + 2 * WINDOW_MS, T0 + 3 * WINDOW_MS] });
+  assert.deepEqual(rows()[1], { view: "cheap", thread: "projector", calls: 1, builds: 1, ms: 20, maxMs: 20, not_skipped: { no_declaration: 1 }, window: [T0 + 2 * WINDOW_MS, T0 + 3 * WINDOW_MS] });
 });
 
 test("view build tallies include preparation cost, empty calls and failed calls without counting them as bodies", (t) => {
@@ -76,7 +76,7 @@ test("view build tallies include preparation cost, empty calls and failed calls 
   result = "throw";
   ticker.buildNow("staged");
   flushAt(T0 + WINDOW_MS);
-  assert.deepEqual(rows(), [{ view: "staged", thread: "projector", calls: 3, builds: 1, ms: 50, maxMs: 15, window: [T0, T0 + WINDOW_MS] }]);
+  assert.deepEqual(rows(), [{ view: "staged", thread: "projector", calls: 3, builds: 1, ms: 50, maxMs: 15, not_skipped: { no_declaration: 3 }, window: [T0, T0 + WINDOW_MS] }]);
   assert.equal(rows("read_model.materialize_failed").length, 1);
 });
 
@@ -110,9 +110,9 @@ test("view build tallies separate views, instances, threads and lanes and preser
     const thread = viewsOnly ? "views" : "projector";
     const location = { thread, ...(lane ? { lane } : {}) };
     assert.deepEqual(rows(), [
-      { view: "wide", instance: "core", ...location, calls: 1, builds: 1, ms: 10, maxMs: 10, window: [T0, T0 + WINDOW_MS] },
-      { view: "wide", instance: "console", ...location, calls: 1, builds: 1, ms: 20, maxMs: 20, window: [T0, T0 + WINDOW_MS] },
-      { view: "slow", ...location, calls: 1, builds: 1, ms: 150, maxMs: 150, window: [T0, T0 + WINDOW_MS] },
+      { view: "wide", instance: "core", ...location, calls: 1, builds: 1, ms: 10, maxMs: 10, not_skipped: { no_declaration: 1 }, window: [T0, T0 + WINDOW_MS] },
+      { view: "wide", instance: "console", ...location, calls: 1, builds: 1, ms: 20, maxMs: 20, not_skipped: { no_declaration: 1 }, window: [T0, T0 + WINDOW_MS] },
+      { view: "slow", ...location, calls: 1, builds: 1, ms: 150, maxMs: 150, not_skipped: { no_declaration: 1 }, window: [T0, T0 + WINDOW_MS] },
     ]);
     assert.deepEqual(rows("read_model.slow_view"), [{ view: "slow", ms: 150, passMs: 100, thread }]);
   }

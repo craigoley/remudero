@@ -14,7 +14,7 @@
   files:
     - src/lib/read-plane.ts
     - test/console-api/read-model/a-bundled-sync-spawn-names-its-real-caller.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: callerFrame skips its own frames and read-plane's wrappers by function name as well as by file, so a call stack where every frame's file is one bundle (dist/child-entries/run-task.mjs) names the first frame outside read-plane and the leaf frames, never callerFrame or rawCallSites

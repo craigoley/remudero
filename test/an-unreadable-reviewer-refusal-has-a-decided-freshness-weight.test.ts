@@ -8,6 +8,7 @@ import * as daemonModule from "../src/lib/daemon.js";
 import type { DaemonFreshness } from "../src/lib/daemon.js";
 import type { DeployWorthChange } from "../src/lib/deploy-judge.js";
 import { loadPlan, type Plan } from "../src/lib/plan.js";
+import { trackInFlightReview } from "../src/lib/sweep.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import type { RunResult } from "../src/run-task.js";
 
@@ -80,11 +81,12 @@ const staleFreshness = (): DaemonFreshness => ({ stale: true, oldSha: OLD_SHA, n
 
 type Line = { step: string; extra: Record<string, unknown> };
 
-/** A daemon kept busy by a full pass that never finishes on its own, until a restart is decided. */
+/** A daemon kept busy by an in-flight review (work a restart interrupts; W1-T10054) until a restart is decided. */
 async function busyDaemonDecisions(readLedgerLines: () => readonly string[]): Promise<Record<string, unknown>[]> {
   const lines: Line[] = [];
   let releaseSweep: (() => void) | undefined;
-  let passes = 0;
+  const held = new Promise<void>((resolve) => (releaseSweep = resolve));
+  void trackInFlightReview(held, { taskId: "A", prNumber: 1 });
   let waits = 0;
   const done = daemonModule.runDaemon(
     fixturePlan(),
@@ -100,11 +102,7 @@ async function busyDaemonDecisions(readLedgerLines: () => readonly string[]): Pr
         lines.push({ step, extra });
         if (step === "daemon.freshness_decision" && extra.action === "restart") setTimeout(() => releaseSweep?.(), 5);
       },
-      sweep: async () => {
-        passes++;
-        if (passes === 1) await new Promise<void>((resolve) => (releaseSweep = resolve));
-        return {};
-      },
+      sweep: async () => ({}),
       checkFreshness: staleFreshness,
       readLedgerLines,
     },

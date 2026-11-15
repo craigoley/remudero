@@ -44,6 +44,12 @@ export const WORKSTREAMS_VIEW_NAME = "workstreams";
 export const WORKSTREAMS_VIEW_VERSION = 1;
 /** How long a change waits before the body is rebuilt with it and every change after it (design §1.1). */
 export const WORKSTREAMS_DEBOUNCE_MS = 1_000;
+/**
+ * BACKSTOP: how long builds are tallied before one `workstreams.built` row is written. A row per build was 1,029
+ * ledger rows in 13 hours (2026-11-10), each one moving the ledger every reader folds; `read_model.view_builds`
+ * reports on the same 10 minutes.
+ */
+export const WORKSTREAMS_BUILT_ROW_WINDOW_MS = 10 * 60_000;
 
 export interface WorkstreamsData {
   /** One entry per instance the worker projects, in its order: what GET /v1/operator-activity answers for it. */
@@ -61,6 +67,8 @@ export interface WorkstreamsViewOptions<S extends { instance: string; newestTs: 
   /** Times each build's stages for the worker's `read_model.slow_view` row. */
   clock?: Clock;
   log?: (step: string, extra: Record<string, unknown>) => void;
+  /** How long builds are tallied into one `workstreams.built` row; 0 writes a row per build. */
+  builtRowWindowMs?: number;
   /** Seams; production reads the checkout's plan, the persisted GitHub snapshot, the live ledger and git. */
   readPlan?: (instance: NowInstance) => Plan;
   github?: (instance: NowInstance) => Gateway;
@@ -277,6 +285,22 @@ export function createWorkstreamsView<S extends { instance: string; newestTs: st
   const debounceMs = opts.debounceMs ?? WORKSTREAMS_DEBOUNCE_MS;
   const clock = opts.clock ?? systemClock;
   const log = opts.log ?? (() => {});
+  const builtRowWindowMs = opts.builtRowWindowMs ?? WORKSTREAMS_BUILT_ROW_WINDOW_MS;
+  let tally: { since: number; builds: number; instances: number; reused: number; derived: number } | undefined;
+  /** The first build after start is written at once so a cold start stays visible; later ones wait for the window. */
+  const noteBuilt = (now: number, instances: number, reused: number, derived: number): void => {
+    if (tally) tally = { since: tally.since, builds: tally.builds + 1, instances, reused: tally.reused + reused, derived: tally.derived + derived };
+    else {
+      tally = { since: now, builds: 0, instances, reused: 0, derived: 0 };
+      log("workstreams.built", { instances, builds: 1, reused, derived });
+    }
+  };
+  /** Writes the window's row once it has run its length; a window with no build writes none. */
+  const flushBuilt = (now: number): void => {
+    if (!tally || tally.builds === 0 || now - tally.since < builtRowWindowMs) return;
+    log("workstreams.built", { instances: tally.instances, builds: tally.builds, reused: tally.reused, derived: tally.derived });
+    tally = { since: now, builds: 0, instances: tally.instances, reused: 0, derived: 0 };
+  };
   const byName = new Map(opts.instances.map((i) => [i.name, i]));
   const ownerRepo = (instance: NowInstance): [string, string] => {
     const [owner, repo] = (instance.repo ?? "/").split("/");
@@ -442,8 +466,9 @@ export function createWorkstreamsView<S extends { instance: string; newestTs: st
         builtFingerprint = b.fingerprint;
         dirtySince = b.dirtySince;
         pending = undefined;
-        log("workstreams.built", { instances: b.instances.length, reused: b.reused, derived: b.derived });
+        noteBuilt(now, b.instances.length, b.reused, b.derived);
       }
+      flushBuilt(now);
       const sources = slots.flatMap(({ state, instance }) => {
         const gateway = gatewaySources.get(instance.name);
         const started = clock.now();

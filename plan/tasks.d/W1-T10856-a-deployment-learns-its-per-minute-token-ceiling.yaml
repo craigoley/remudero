@@ -16,7 +16,7 @@
     - docs/model-routing.md
     - test/worker/spawn/a-deployment-learns-its-per-minute-token-ceiling.test.ts
     - "src/lib/worker.ts"
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-10-27 against synthwatch-foundry (eastus2). Azure enforces a deployment's tokens-per-minute quota

@@ -19,7 +19,7 @@
     - src/lib/arm-auto-merge.ts
     - src/cli/commands/review.ts
     - test/review/a-plan-pr-its-review-passes-merges-in-the-same-pass.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: A mergeable plan PR GitHub reads blocked, with no checksGreenReviewed, asks the optional readChecksGreenReviewed seam about the head the verdict judged; true takes the existing direct-merge path in the same arm call, and false, a throw or an absent seam holds it as plan-pr-held exactly as today, a throw naming why on the hold

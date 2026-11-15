@@ -1,0 +1,66 @@
+- id: W1-T12261
+  title: "The fleet writes one ledger row for each janitor pass"
+  repo: remudero
+  depends_on:
+    - W1-T12254
+    - W1-T12258
+  priority: 1.2
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the heartbeat script and a gardener that reads every host
+  band_meaning: span
+  origin: operator-session#janitor-disk-waste-2026-11-11
+  plan_refs:
+    - W1-T4804
+    - W1-T5665
+    - W1-T10958
+  files:
+    - scripts/fleet-heartbeat.sh
+    - src/lib/host-resource-gardener.ts
+    - test/gardeners/each-janitor-pass-writes-one-ledger-row.test.ts
+    - test/host-resource-gardener.test.ts
+    - test/fleet-heartbeat.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "The heartbeat carries, for the newest janitor pass, one line for each phase and root that the janitor log names, with the count of entries removed and the bytes freed"
+      proof: "grep: W1-T12261 criterion 1 in test/gardeners/each-janitor-pass-writes-one-ledger-row.test.ts"
+    - claim: "The heartbeat reads both shapes of janitor log: the `reclaim-total` lines of the Azure host janitor and the summary lines of the Mac janitor and of the Mac temp cleaner"
+      proof: "grep: W1-T12261 criterion 2 in test/gardeners/each-janitor-pass-writes-one-ledger-row.test.ts"
+    - claim: "For each new janitor pass of a host, `runHostResourcePassAsync` writes one `host_resource.janitor_pass` row with the host, the time of the pass, the bytes freed, the entries removed and the phases"
+      proof: "grep: W1-T12261 criterion 3 in test/gardeners/each-janitor-pass-writes-one-ledger-row.test.ts"
+    - claim: "A pass that a later heartbeat shows again writes no second row, also after the gardener starts again on the same state directory"
+      proof: "grep: W1-T12261 criterion 4 in test/gardeners/each-janitor-pass-writes-one-ledger-row.test.ts"
+    - claim: "A heartbeat with no janitor result writes no row. A count that the heartbeat could not read is written as unreadable, never as 0"
+      proof: "grep: W1-T12261 criterion 5 in test/gardeners/each-janitor-pass-writes-one-ledger-row.test.ts"
+    - claim: "The pass calls the new function"
+      proof: "grep: janitorPassRow( in src/lib/host-resource-gardener.ts"
+  rationale: |
+    OBSERVED 2026-11-10 and 2026-11-11: what the janitors removed on the two hosts is in three files on two machines, and the ledger has none of it.
+    - Azure host: `~/host-cleanup.log` (64 MB) has lines such as `rmd-host-cleanup: reclaim-total tsx /tmp/tsx-1000: reclaimed 171 MB (179965952 bytes) in 1 entries` and `rmd-host-cleanup: / 77% -> 71% (3784 MB reclaimed this pass)`.
+    - Mac agent account: `~/Library/Logs/remudero/tmp-reclaim.log` has `Deleted: 1441 entries, 29 MB`, and `~/.local/state/remudero/janitor-decisions.tsv` (31 MB) has one row for each decision.
+    - To learn that the Mac janitor removed 0 tsx files at 02:39Z and at 03:17Z on 2026-11-11, a person had to open the file on the Mac.
+    READ at origin/main 3c6e5e476.
+    - scripts/fleet-heartbeat.sh already reads the newest janitor log (`RMD_JANITOR_LOGS`, line 703). It publishes `janitor_last_ts`, `janitor_last_before`, `janitor_last_after` and `janitor_last_freed`.
+    - `sampleFromPayload` (src/lib/host-resource-gardener.ts:184) reads `janitor_last_ts` and `janitor_last_freed`. The gardener writes a row only when a pass freed almost nothing while the disk fell (`host_resource.janitor_ineffective`).
+    - The janitors are shell scripts on hosts where no daemon may run. They cannot write to the ledger. The heartbeat is the path that already carries their result to the daemon.
+    CHECKED for overlap: W1-T10958 (queued) makes a janitor refuse to delete when it cannot write its own decision journal. That journal stays on the host. This task copies the totals of a pass to the ledger.
+  design: |
+    scripts/fleet-heartbeat.sh, where it reads the janitor log:
+    - From the lines of the newest pass, write `janitor_last_removed=<n>` and up to eight lines `janitor_phase_<i>=<phase>|<root>|<entries>|<bytes>`, largest first.
+    - Azure shape: `reclaim-total <phase> <root>: reclaimed <n> MB (<bytes> bytes) in <k> entries`. Mac shape: the summary line of the janitor, and `Deleted: <n> entries, <m> MB` and `tsx files pruned: <n>` of the temp cleaner.
+    - A root is a path of the host. Write it as the janitor log has it. Write no file name below a root.
+    src/lib/host-resource-gardener.ts:
+    - `sampleFromPayload` keeps the new fields in the sample.
+    - New function `janitorPassRow(sample)` returns the fields of the row. The pass writes `host_resource.janitor_pass` when `janitor_last_ts` of a host is newer than the one in the state file, and saves the new time there.
+    The row is the answer to "what did the janitor remove, and how much". The decision receipt on the host stays the record of each single decision.
+    NOT IN SCOPE: a change to a janitor, a view in the console, and the removal of the logs on the hosts.
+  falsifier: |
+    Leave the phases out of the heartbeat and criterion 1 must fail. Write a row for every heartbeat and criterion 4 must fail. Write 0 for a count that was not read and criterion 5 must fail. Restore and require all six to pass.
+  note: |
+    Host and account: the heartbeat part runs on every host that publishes a heartbeat. The gardener part runs inside the daemon of the core instance.
+    It depends on W1-T12254 and W1-T12258 because they change the same two files.
+    The task removes nothing.
+    W1-T12252, W1-T12255, W1-T12256 and W1-T12257 each print one line with the count and the bytes for what they remove. This task carries those lines to the ledger.

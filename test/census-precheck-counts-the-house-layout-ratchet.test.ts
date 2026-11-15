@@ -7,13 +7,13 @@
  * every local gate passed. scripts/census-precheck.mjs now asks the same question through the same
  * module (scripts/house-layout-census.mjs), with no test runner.
  *
- * The pure cases drive `evaluateCensusPrecheck` over in-memory trees; the last goes through a REAL
- * `git push` from a linked worktree so the hook's own path, the one a fleet worker takes, is seen.
+ * The pure cases drive `evaluateCensusPrecheck` over in-memory trees; the script cases run the precheck
+ * in a linked worktree, as the author preflight does (W1-T12510 took it out of hooks/pre-push).
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { spawnSync } from "node:child_process";
-import { lstatSync, chmodSync, copyFileSync, mkdirSync, symlinkSync, writeFileSync } from "node:fs";
+import { lstatSync, copyFileSync, mkdirSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -92,8 +92,7 @@ test("a src file the branch adds that names no literal, and a non-src path that 
   assert.deepEqual(evaluate({ ...base, "scripts/x.mjs": NAMES_PLAN, "test/x.test.ts": NAMES_PLAN }, base), []);
 });
 
-function installHook(dir: string): void {
-  mkdirSync(join(dir, "hooks"), { recursive: true });
+function installPrecheck(dir: string): void {
   mkdirSync(join(dir, "scripts", "lib"), { recursive: true });
   writeFileSync(join(dir, "package.json"), JSON.stringify({ type: "module" }));
   mkdirSync(join(dir, "src", "lib"), { recursive: true });
@@ -104,8 +103,6 @@ function installHook(dir: string): void {
     `import ${JSON.stringify(pathToFileURL(join(REPO_ROOT, "test/setup/tmp-hygiene.ts")).href)};\n`);
   copyFileSync(join(REPO_ROOT, "src", "lib", "rule-suites.ts"), join(dir, "src", "lib", "rule-suites.ts"));
   copyFileSync(join(REPO_ROOT, "src", "lib", "trust-root-text.ts"), join(dir, "src", "lib", "trust-root-text.ts"));
-  copyFileSync(join(REPO_ROOT, "hooks", "pre-push"), join(dir, "hooks", "pre-push"));
-  chmodSync(join(dir, "hooks", "pre-push"), 0o755);
   for (const script of [
     "census-precheck.mjs",
     "clock-signature-ratchet.mjs",
@@ -122,8 +119,7 @@ function installHook(dir: string): void {
   for (const lib of ["argv.mjs", "git.mjs", "author-step-capture.mjs", "json-duplicate-keys.mjs", "instrument-surface-census.mjs", "git-spawn-shapes.mjs", "repo-root.mjs", "retained-fixtures.mjs"]) {
     copyFileSync(join(REPO_ROOT, "scripts", "lib", lib), join(dir, "scripts", "lib", lib));
   }
-  writeFileSync(join(dir, "scripts", "rule15-precheck.mjs"), "process.exit(0)\n");
-  // The synthetic runner triggers the gardener suite; this fixture measures hook/layout wiring.
+  // The synthetic runner triggers the gardener suite; this fixture measures precheck/layout wiring.
   // The real bundled-loader regression runs separately against the complete repository.
   mkdirSync(join(dir, "test", "rules"), { recursive: true });
   writeFileSync(join(dir, "test", "rules", "scout-config-gardener-failed.test.ts"), `
@@ -150,34 +146,29 @@ function pushFixture(seed: Tree, change: Tree) {
       writeFileSync(join(work.dir, path), text);
     }
   };
-  installHook(work.dir);
+  installPrecheck(work.dir);
   write(seed);
-  work.git("config", "core.hooksPath", "hooks");
   work.addRemote("origin", remote.dir);
   work.git("add", "-A");
   work.git("commit", "--quiet", "-m", "the base");
-  const push = (armed: boolean) =>
-    spawnSync("git", ["push", "origin", "HEAD:refs/heads/main"], {
-      cwd: work.dir,
-      encoding: "utf8",
-      env: { ...process.env, RMD_PREPUSH_GATES: armed ? "1" : "0" },
-    });
-  assert.equal(push(false).status, 0, "seeding the base push");
+  work.git("push", "--quiet", "origin", "HEAD:refs/heads/main");
   work.git("fetch", "--quiet", "origin");
   write(change);
   work.git("add", "-A");
   work.git("commit", "--quiet", "-m", "the change being pushed");
-  return () => push(true);
+  return () => spawnSync(process.execPath, ["scripts/census-precheck.mjs", "--base", "origin/main"], {
+    cwd: work.dir,
+    encoding: "utf8",
+  });
 }
 
-test("a real git push that adds a house-layout site is refused by the hook", () => {
+test("a branch that adds a house-layout site is refused by the precheck script", () => {
   const r = pushFixture({ "src/a.ts": NAMES_PLAN }, { "src/b.ts": NAMES_PLAN })();
   assert.notEqual(r.status, 0, r.stderr);
   assert.match(r.stderr, /house-layout: plan\/tasks\.d now in 2 non-test src files, up from 1 at the merge base/);
-  assert.match(r.stderr, /pre-push REFUSED/);
 });
 
-test("a real git push that leaves the house-layout count alone passes the hook", () => {
+test("a branch that leaves the house-layout count alone passes the precheck script", () => {
   const r = pushFixture({ "src/a.ts": NAMES_PLAN }, { "src/b.ts": NAMES_NOTHING })();
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stdout + r.stderr, /census-precheck: OK/);
@@ -284,7 +275,7 @@ test("W1-T9332 proposed layout split: a moved owner already present at merge bas
 });
 
 
-test("W1-T9332 structural split: shared qualifier and real pre-push agree, and added occurrences still refuse", () => {
+test("W1-T9332 structural split: shared qualifier and the precheck script agree, and added occurrences still refuse", () => {
   const f = runTaskLayoutSplitFixture();
   const base = Object.fromEntries(f.base);
   const head = Object.fromEntries(f.current);

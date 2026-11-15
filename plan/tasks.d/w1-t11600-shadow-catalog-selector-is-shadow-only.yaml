@@ -18,7 +18,7 @@
   # refusal-amendment (W1-T11600, run work-fix-dispatch-W1-T11600-1794099216974-a61f@a020a0d2e1390a2a40f3724d2154bf394f20e2ca, 2026-11-08T01:53:30.066Z): the worker refused criterion 4 [contradicts-another-criterion] — proposed re-scope-criteria: reconcile the contradicting criteria — re-scope one so both can hold at once
   #   worker evidence: The review requires production-source telemetry, while the task keeps the comparison opt-in and the source adapter inactive.
   #   this task is held from dispatch until its record changes; an Architect must make the change above
-  status: queued
+  status: merged
   attempts: 0
   files:
     - src/lib/daemon.ts

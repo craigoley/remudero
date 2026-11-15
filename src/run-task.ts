@@ -1,4 +1,7 @@
 import { isImprovementBoundProposal, isReviewedImprovementDraft, runImprovementAction, type ImprovementPlanReceipt } from "./lib/improvement-thread.js";
+import { fileEligibleFollowups, followupFilingPresentation, type FollowupFinalizer } from "./lib/followup-filing.js";
+import { findTaskInCatalogs, catalogTaskContract, type TaskLookupOptions } from "./lib/task-lookup.js";
+import type { OpsCatalogApi } from "./lib/ops-catalog-source.js";
 import { operatorReleaseContractChanged, operatorReleasePin, qualifyReleaseEvidence, readReleaseLedgerLines, releaseContractPins, type ReleaseEvidence } from "./lib/operator-release.js";
 import {
   buildSweepEffects as buildSweepEffectsFromModule,
@@ -50,6 +53,7 @@ import {
   reviewSubjectFallbackAllowed as reviewSubjectFallbackAllowedFromModule,
   planTreeIsBehindMain as planTreeIsBehindMainFromModule,
   reviewCommand as reviewCommandFromModule,
+  REVIEW_EXIT_CAUSE_FLAG,
   whileWorkerRunLive as whileWorkerRunLiveFromModule,
   type ReviewCommandHost,
   type ReviewPostedRecheck,
@@ -133,6 +137,7 @@ import {
   type WorkerEditCommit,
   type RequiredCompanion,
   type PublishAbandonedFixOwnerAheadDeps,
+  type FixRoundYield,
 } from "./cli/commands/run-task-verb.js";
 export { IMPLEMENT_REFUSAL_REPORT_CONTRACT, IMPLEMENT_WAIT_TARGET_CONTRACT, RUN_BRANCH_FILED_FORM, RUN_BRANCH_UNFILED_FORM, WORKER_ACTIVITY_LEDGER_STEP, WORKER_RUNAWAY_TURNS_LEDGER_STEP, FALLBACK_PUSH_EVIDENCE_ABSENT, ALREADY_SATISFIED_VERIFY_ATTEMPTS, ImplementBudgetBreach, PLAN_RECORD_ABSENT, RECON_MAX_TURNS, ManagedCheckoutRefreshRefusedError };
 export type { WorkerStateSensor, SyncedPlan, BoundaryCheckpointRestore, AddedTestsAtHead, PrHeadGateway, OwnershipVerdict, RemotePresenceProbeFailure, FallbackPushCause, PollDeps, PrOpenHandoffDeclineReason, ExternalWaitFreshness, CiGateOutcome, ReviewRunResult, FixRungOutcome, LiveHeadResult, WorktreeSnapshot, FixRebaseMergeFacts, FixRoundCommit, ReadFixRoundCommits, WorkerErrorVerdict, NoPrVerdict, AlreadySatisfiedClaim, AlreadySatisfiedRefusal, AlreadySatisfiedResolution, AlreadySatisfiedVerdict, ReconArtifact, ProbeKeyInputs, ProbeProof, ProbeVerdictCache, RunTaskContext, ManagedCheckoutRefresh, SourceSizeGatePostureResult, RunErrorCause, CensusPushRefusal, CensusChildResult, CensusChildRunner, FixRoundPushReceipt, CoveragePrecheck, CoverageRunResult, CoveragePrecheckPorts, CensusPushRungOutcome, MaterializationErrorClass, MaterializationFailure, WorkerEditCommit, RequiredCompanion, PublishAbandonedFixOwnerAheadDeps };
@@ -196,6 +201,7 @@ import { retryWhileLockBusy } from "./lib/lock-busy-retry.js";
 import { loadProposalRecords } from "./lib/plan-proposals.js";
 import { retryPollRead } from "./lib/poll-read-retry.js";
 import { recyclePauseDetail } from "./lib/recycle-yield.js";
+import { DEFAULT_POLL_INTERVAL_MS } from "./lib/poll-interval.js";
 import { decideFreshnessRestart } from "./lib/deploy-judge.js";
 import {
   appendCaptureSurfaceFireHistory,
@@ -219,6 +225,7 @@ import { realFixRoundReapplyPorts, reapplyFixRoundOnMovedTip, type FixRoundReapp
 import { productionDispatchBreakJudge, productionFixProgressJudge, CHECK_REQUEUE_DEFERRED_STEP, CHECK_REQUEUE_STEP, jobRequeueOutcome, jobRerunRefusal, requeuedCheckKeysFromLedger, withheldReviewRefusalRow,
   type JobRequeueOutcome } from "./lib/sweep.js";
 import { DEFAULT_GH_CALL_TIMEOUT_MS, ghExec, ghJsonAsync, ghLinesAsync, ghTextAsync, setGhReadActorResolver, withDaemonGhTransportFloor, withGhTransportFloor, withGhTransportFloorMode, type GhAsyncExecutor } from "./lib/github-transport.js";
+import { installGithubCredentialMissingSink } from "./lib/github-credential.js";
 import { createHash, randomUUID } from "node:crypto";
 import { createScanner, SyntaxKind } from "typescript/unstable/ast";
 import { extractReviewFindings, recordReviewFindings, type FindingCapture } from "./lib/review-findings.js";
@@ -363,7 +370,7 @@ import { sameHost } from "./lib/host-identity.js";
 import { gitBlobSha, isDuplicateKeyError, repairDuplicateKeyShard } from "./lib/plan-shard-repair.js";
 import { gardenPrState, knowledgeGardenSpec, runGardenPass as runKnowledgeGardenPass, recordSkillUsage, skillUsagePath, type GardenWorkspace } from "./lib/knowledge-gardener.js";
 import { foldNarrativeStore, type NarrativeFoldKind } from "./lib/narrative-fold.js";
-import { GardenMintBudget, GardenMintTimedOutError, GARDEN_FILING_RETRY_BASE_MS, gardenClosePr, gardenPassDue, gardenPendingSignal, isPromiseLike, runStepsEager, runGardenAsync, type GardenAction, type GardenCheckout, type GardenCheckoutAsync, type GardenerDeps, type GardenSpec, type GardenTaskIdRelease, type PrState } from "./lib/gardener.js";
+import { GardenMintBudget, GardenMintTimedOutError, GARDEN_FILING_RETRY_BASE_MS, gardenClosePr, gardenPassDue, gardenPendingSignal, isGardenLandWaiting, isPromiseLike, landedPrUrl, runStepsEager, runGardenAsync, type GardenAction, type GardenLandOpts, type GardenLandResult, type GardenCheckout, type GardenCheckoutAsync, type GardenerDeps, type GardenSpec, type GardenTaskIdRelease, type PrState } from "./lib/gardener.js";
 import { boundedGardenPassSpawn, childGardenPassSpawn, flowGardenPass, issueRevalidationGardenPass, GARDEN_DUE_FAILED_STEP, gardenPacingDueAsync, lowYieldGardenPass, recordGardenPacing, GARDEN_HOURLY_FLAG, isRegisteredGardenName, REGISTERED_GARDEN_NAMES, selectorShadowGardenPass, selectorShadowMainFailures, type GardenPassSpawn, type RegisteredGardenName } from "./lib/garden-registry.js";
 import { flakeJudgeEvidencePort } from "./lib/flake-incident-gardener.js";
 import type { SelectorShadowMainFailures } from "./lib/selector-shadow-gardener.js";
@@ -372,7 +379,7 @@ import { reconcileManagedImprovementEffects } from "./lib/opportunity-outcomes.j
 import { classifyGardenerStep, productionGardenerOverseerPorts, runGardenerOverseer } from "./lib/gardener-overseer.js";
 import { planGardenSpec } from "./lib/plan-gardener.js";
 import { backlogGardenSpec } from "./lib/backlog-gardener.js";
-import { queueJudgeGardenSpec, type QueueJudgeSources } from "./lib/queue-judge-gardener.js";
+import { queueJudgeGardenSpec, queueJudgeRouteWindow, type QueueJudgeSources } from "./lib/queue-judge-gardener.js";
 import { redesignGardenSpec } from "./lib/redesign-gardener.js";
 import { SCOUT_WINDOW_MS, scoutGardenSpec } from "./lib/scout-gardener.js";
 import { gateGardenSpec, loadGateProbes } from "./lib/gate-gardener.js";
@@ -774,12 +781,15 @@ import { applyMergeProbeEvidence, mergedHeadTypechecks, probeMerge, probeOpenPrM
 import { surveyPullRequestBoard, type PullRequestBoard } from "./lib/pr-board.js";
 import {
   captureFeedback,
+  instanceStateDir,
   feedbackCaptured,
   feedbackEntryPath,
   listFeedback,
   parseFeedbackAddArgs,
   proposeFeedbackWithSummary,
   readFeedbackEntry,
+  readLandedFeedbackEntry,
+  feedbackEntryRepoPath,
   realDecisionSummarizer,
   realFeedbackExpander,
   resolveDecisionSummaryMount,
@@ -797,10 +807,13 @@ import {
   ciLearningPendingOrigins,
   findPendingLandingPr,
   landFeedbackStatusContent,
+  planDestinationLandingOpts,
+  queuedFeedbackDir,
   landCiLearningShards,
   landCiLearningShardsAsync,
   feedbackLandingSweepRungs,
   planReconcileLanding,
+  readStandingDecisions,
   recordDecision,
   recordRuling,
   type CiLearningFilingResult,
@@ -810,8 +823,19 @@ import {
   type LandFeedbackResult,
   type PlanReconcileLand,
   type LandFeedbackOpts,
+  type LandFeedbackAsyncOpts,
   type LandingReviewRequest,
+  landTaskFilesAsync,
+  stagedTaskFiles,
+  stagedTaskFileOrigins,
+  taskFileOrigin,
+  taskFilesLandingBranchAsync,
+  type LandTaskFilesOpts,
+  type TaskFileInput,
+  type TaskFilesLandingResult,
 } from "./lib/feedback-landing.js";
+export { readStandingDecisions };
+import { resolvePlanDestination, planDestinationRepository } from "./lib/plan-destination.js";
 import {
   reconcileFeedbackLanding,
   type FeedbackReconcileRoot,
@@ -821,6 +845,7 @@ import {
 // src/lib/report-commands.ts (W1-T2888); ghTraceGateway has a second caller here and stays.
 import { ghTraceGateway } from "./lib/trace.js";
 import { checkCommitMessage, defaultPreflightSpawn, fitConventionalTitle, runPreflight, shapeCommitMessage, wrapBodyLines, type PreflightDeps, type PreflightSpawn } from "./lib/commit-message.js";
+import { planFilingFixRoundRefusal, readPlanFilingFixRoundInput } from "./lib/plan-filing-fix-guard.js";
 import { resolveProjectPreflight, runProjectPreflight } from "./lib/ci-project-preflight.js";
 import { observeSynchronousPreflightPhase, reportPreflightPhase } from "./lib/preflight-phase-progress.js";
 import {
@@ -938,15 +963,16 @@ import { assertProposedPlanLoads,
   commitTriageOrRecordRefusal,
   refusedTriageIds,
   triageCommitMessage,
-  triageDeclaredScope,
-  triageEmptyScopeDisposition,
+  triageFeedbackHome,
   unresolvedCitationReferents,
   worktreeCitationEvidence,
   feedbackEntryBlock,
   triagePrompt,
+  type TriageDecision,
 } from "./lib/triage.js";
 import {
   declaredTaskIds,
+  mentionedTaskIds,
   isAllocatableTaskId,
   mintNextTaskId,
   UNTRUSTED_SOURCE_REASON_PREFIX,
@@ -1003,6 +1029,7 @@ import {
   applyFragmentToPlanYaml,
   approveBatch,
   approveBatchCommitMessage,
+  anchorFingerprint,
   approveCommitMessage,
   approvePrTitle,
   approveProposal,
@@ -1088,6 +1115,7 @@ import { CASH_RESPONSES_DEPLOYMENTS } from "./lib/cash-responses.js";
 import { runSweepBakeoff } from "./lib/sweep.js";
 import { OPENWEIGHT_PRICES, OPENWEIGHT_CONTEXT_WINDOWS, OPENWEIGHT_TEMPERATURE, openWeightDeploymentReady, OpenWeightAllowanceExhaustedError } from "./lib/worker-provider.js";
 import { createDraftStatsSession, type DraftStats } from "./lib/draft-routing.js";
+import { correctionEvidenceOf, parseReplayPackets, type ReplayPacket } from "./lib/console-feedback.js";
 import {
   buildFeedbackDocket,
   feedbackDocketDue,
@@ -1097,7 +1125,7 @@ import {
   writeFeedbackDocketMarker,
   type FeedbackDocket,
 } from "./lib/feedback-docket.js";
-import { parseUsage, usageSnapshotFromSdk, type SdkUsageReading, type UsageSnapshot } from "./lib/headroom.js";
+import { parseUsage, usageOutputShape, usageSnapshotFromSdk, type SdkUsageReading, type UsageSnapshot } from "./lib/headroom.js";
 import {
   aggregateCitationEvidence,
   assertArchitectAboveWorker,
@@ -1205,6 +1233,7 @@ import {
   type PlanPrPreflightResult,
   ensureJudgeableBody,
   filingAcceptanceCriteria,
+  planPrAcceptanceCriteria,
   probeExistingPlanPr,
   ratifyPrCreateRestArgs,
   ratifyPrProbeRestArgs,
@@ -1290,6 +1319,9 @@ import {
   type LedgerGrepFsDeps,
 } from "./lib/ledger-grep.js";
 import { routingAbCommand } from "./lib/routing-experiments.js";
+import { attributeAttemptOutcome } from "./lib/attempt-outcome-attribution.js";
+import { recordRoutingExperimentResults } from "./lib/routing-experiment-result.js";
+import { askDecisionModel, decisionsCommand } from "./lib/decision-model.js";
 import {
   PROGRESS_WATCHDOG_READ_STEPS,
   captureDiagnosticsBundle,
@@ -1334,6 +1366,12 @@ import { captureSelectedRegistryIntent, qualifySelectedRegistryIntent, observeSe
 
 import { parseSelfForecast, SELF_FORECAST_REPORT_CONTRACT } from "./lib/self-forecast.js";
 import { readPrOwnerLedgerProjection, type PrOwnerLedgerProjection } from "./lib/pr-owner-ledger.js";
+import {
+  decideStaleFixDispatchRecovery,
+  staleFixDispatchShadowInputs,
+  withStaleFixDispatchShadow,
+  type StaleFixDispatchShadow,
+} from "./lib/stale-fix-dispatch-recovery.js";
 import { prStateCommand } from "./lib/pr-state.js";
 import { auditLedgerUnion, createIncrementalLedgerUnion, createSizedMemo, readLedgerUnionRawLinesAsync, readLedgerUnionRecordsSync, readValidatedRotationDigest, realLedgerFs, type LedgerUnionRecordRead } from "./lib/ledger-union.js";
 // meaningOfStep: only ledgerGrepCommand read it, and it moved to src/lib/report-commands.ts
@@ -1362,7 +1400,7 @@ import {
 } from "./lib/coverage-improvement.js";
 import { mineVerdictRows, verdictCalibrationReport, type UnmeasurableCause } from "./lib/verdict-calibration.js";
 import { mineAutonomyLedgerLines, parseTrailerMerges, zeroTouchMergeRate } from "./lib/autonomy.js";
-import { decideMeasurementCadence, measurementCadenceCheck, ciLearningCadenceCheck, CI_LEARNING_MINT_CEILING, ciLearningLookbackDays, type CiLearningCadencePolicy, type CiLearningCadenceRunResult, measurementCadenceMarkerPath, ciLearningRecordVerdict, ciLearningShardYaml, fileCiLearningShards, mintCiLearningShards, readMeasurementCadenceMarker, recordCiLearningAttempt, recordCiLearningCadenceFire, recordMeasurementCadenceFire, createWipeTestEvidenceReader, wipeTestSlotDraw, recordWipeTestCadenceFire, scheduleWipeTestAblation, renderVerbCensusDigestLine, priorVerifyHumanAgeBandKeys, runMeasurementCadenceReportAsync, runVerbCensus, verifyHumanCadence, wipeTestCadenceCheck, type MeasurementCadenceDecision, buildPlanReconcileCadenceInput, type PlanReconcileCadenceOpts, type PlanReconcileCadenceInputOptions, type PlanReconcileShardRecord, type MeasurementCadenceReportOpts, type MeasurementCadenceRunResult, type VerifyHumanCadenceResult, type WipeTestCadenceDecision, type WipeTestCadencePolicy, type WipeTestCadenceRunResult } from "./lib/measurement-cadence.js";
+import { decideMeasurementCadence, measurementCadenceCheck, ciLearningCadenceCheck, CI_LEARNING_MINT_CEILING, ciLearningLookbackDays, type CiLearningCadencePolicy, type CiLearningCadenceRunResult, measurementCadenceMarkerPath, ciLearningRecordVerdict, ciLearningShardYaml, fileCiLearningShards, mintCiLearningShards, readMeasurementCadenceMarker, recordCiLearningAttempt, recordCiLearningCadenceFire, recordMeasurementCadenceFire, createWipeTestEvidenceReader, wipeTestSlotDraw, recordWipeTestCadenceFire, scheduleWipeTestAblation, renderVerbCensusDigestLine, priorVerifyHumanAgeBandKeys, runMeasurementCadenceReportAsync, runVerbCensus, verifyHumanCadence, wipeTestCadenceCheck, type MeasurementCadenceDecision, buildPlanReconcileCadenceInput, type PlanReconcileHeld, type PlanReconcileCadenceOpts, type PlanReconcileCadenceInputOptions, type PlanReconcileShardRecord, type MeasurementCadenceReportOpts, type MeasurementCadenceRunResult, type VerifyHumanCadenceResult, type WipeTestCadenceDecision, type WipeTestCadencePolicy, type WipeTestCadenceRunResult } from "./lib/measurement-cadence.js";
 import {
   routedModelIdsFromCheckout,
   watchSuccessorModels,
@@ -1407,6 +1445,7 @@ import {
   parseTasksFromYaml,
   taskRecordPath,
   readBlobsAtRef,
+  readBlobsAtRefAsync,
   mergePlanBlobs,
   loadPlanAtRefAsync,
   TaskAdmissionError,
@@ -1424,16 +1463,20 @@ import type { DuplicateCorpusEntry } from "./lib/knowledge-dedup.js";
 import {
   addedExportsFromPatch,
   assertLintClean,
-  breMetacharsIn,
   changedTaskIds,
   rawChangedTaskIds,
   statusFlipOnlyTaskIds,
+  assertDependenciesKnown,
+  movedTaskIds,
+  planFromFiles,
+  planSourceConflicts,
   criteriaAdded,
   DUPLICATE_SLUG_SHINGLE_K,
   followUpCarriesCriteria,
   formatReadIdentity,
   isPathOutsideRoot,
   lintTask,
+  lintPlan,
   promoteIntroducedPlanOnlyDiagnostics,
   planShardSlugCorpus,
   proofGrepUnmatchableViolations,
@@ -1446,6 +1489,8 @@ import {
   type LintOpts,
   type LintViolation,
   type DuplicateSurfaceCorpusEntry,
+  type PlanFiles,
+  type PlanSourceConflict,
 } from "./lib/task-linter.js";
 import { readPriorRefusal, preDispatchContractRevision, writePriorRefusal, repairRefusedTask, type RefusalViolation } from "./lib/dispatch-repair.js";
 import { REPLAY_CORPUS_BOUND, ReplayDispatch, boundedCorpus, harnessRunnerOver, replayOptIn,
@@ -1573,7 +1618,7 @@ import {
   type SkillWorkerCapabilityContext,
 } from "./lib/skill-workshop.js";
 import { buildBundle, renderBundle, verifyBundlePolicyProposalsPin } from "./lib/bundle.js";
-import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
+import { parse as parseYaml, parseDocument, isSeq, isMap, isScalar, stringify as stringifyYaml } from "yaml";
 import { ContainmentError, probeContainment, type ProbeExecutor } from "./lib/containment.js";
 import { ProviderCapacityBlockedError, assertOpenWeightToolBoundary, providerEligibility, type ProviderCapacity } from "./lib/worker-provider.js";
 import { IsolationError, probeIsolation, type ProbeExecutor as IsolationProbeExecutor } from "./lib/isolation.js";
@@ -1724,6 +1769,9 @@ import { fixRungInputFields, prBodyDigest } from "./lib/sweep.js";
 import { diagnoseBodyDefects } from "./lib/body-repair.js";
 import { criterionFieldTampered, filingSelfCreditCheck, missingReviewReuseFact, priorPostedReviewRow, proofChildEnv, proofSandboxArgv, proofSandboxStatus, ProofSandboxUnavailableError } from "./lib/review.js";
 import { inertAcceptanceProofs, PR_BODY_ACCEPTANCE_GRAMMAR } from "./lib/proof-grammar.js";
+import { diffAnchor, mainRepairAcceptanceFor } from "./lib/main-repair-acceptance.js";
+export { diffAnchor };
+export type { DiffAnchor, DiffAnchorUnavailableReason } from "./lib/main-repair-acceptance.js";
 import { alertFixBodyDeps, judgeOpenedAlertFixBody, type AlertFixAcceptanceCheck, type AlertFixBodyRead } from "./lib/alert-fix-body.js";
 import { baseLacksPrAddedExports } from "./lib/proof-missing-export.js";
 import { planPrPreflightAtCommitAsync } from "./lib/plan-pr-emitter.js";
@@ -1783,7 +1831,7 @@ import {
   type GithubPostureGateway,
 } from "./lib/github-posture.js";
 import { validateWorkerSettingsFile } from "./lib/settings.js";
-import { buildBatchedGithub, defaultCreditStorePath, loadCreditStore, saveCreditStore, buildCommitTrailerIndex, classifyGhFailure, createDispatchBreakerCache, deriveStatus, dispatchesWithoutNewOwnedPr, evaluateDispatchBreakerCorroboratedDetailed, type LedgerSnapshot, readLedgerSnapshot, type DispatchBreakerDetail, ghGateway, ghRequiredStatusCheckContexts, isGhRateLimitError, effectiveLifetimeDispatches, hasRepeatedTaskAttributableLifetimeDispatches, orphanedRunIds, streakRefusal, taskAttributableLifetimeDispatches, type LifetimeDispatchTally, projectPlan, readLedgerLines, type DeriveDeps, type GitHub, type GhFailureReason, preferImplementingPr, type PrRef, type BatchedPr, type OpenSiblingBuild, type StatusProjection, planBranchReap, type BranchFacts, type BranchReapPlan, BRANCH_REAP_REASON_LABEL, readLedgerUnionBounded, taskIdFromRunBranch, taskIdFromSlugBranch, readMergeCreditedTaskIds, isMergeCreditLine, readRequiredStatusCheckContexts, readRequiredStatusCheckContextsAsync, persistVerifiedCredit, type ThrownRunVerdictStage, type RefusedRunVerdictStage } from "./lib/status.js";
+import { readCatalogStatusContext, type CatalogStatusContext, buildBatchedGithub, defaultCreditStorePath, loadCreditStore, saveCreditStore, buildCommitTrailerIndex, classifyGhFailure, createDispatchBreakerCache, deriveStatus, dispatchesWithoutNewOwnedPr, evaluateDispatchBreakerCorroboratedDetailed, type LedgerSnapshot, readLedgerSnapshot, type DispatchBreakerDetail, ghGateway, ghRequiredStatusCheckContexts, isGhRateLimitError, effectiveLifetimeDispatches, hasRepeatedTaskAttributableLifetimeDispatches, orphanedRunIds, streakRefusal, taskAttributableLifetimeDispatches, type LifetimeDispatchTally, projectPlan, readLedgerLines, type DeriveDeps, type GitHub, type GhFailureReason, preferImplementingPr, type PrRef, type BatchedPr, type OpenSiblingBuild, type StatusProjection, planBranchReap, type BranchFacts, type BranchReapPlan, BRANCH_REAP_REASON_LABEL, readLedgerUnionBounded, taskIdFromRunBranch, taskIdFromSlugBranch, readMergeCreditedTaskIds, isMergeCreditLine, readRequiredStatusCheckContexts, readRequiredStatusCheckContextsAsync, persistVerifiedCredit, type ThrownRunVerdictStage, type RefusedRunVerdictStage } from "./lib/status.js";
 import { readyDraftPullRequest, withCodeqlAlertEvidence, CODE_SCANNING_FALSE_POSITIVE_STEP, DEFAULT_SWEEP_POLICY, decideRedBaseRefresh, isCiHarnessPath, prAddedLinesFromPullFiles, failingSourceFilesFromCiFailures, failingTestFilesFromCiFailures, projectMergedTaskCandidates, actionableGateFailuresFromReasons, armOutcomeArmed, dispatchFixSpent, checkCostGovernor, checkMemoryGovernor, installedSlackReclaim, reclaimBeforeHold, type SlackReclaim, checkQueueGovernor, productionFixPressure, deriveQueueGovernorTrailingFlow, isFleetOwnedRunBranch, checksStateFromRollup, checksPendingSinceFromRollup, CI_GATE_CHECK_NAME, supersededRedsNowPassing, dedupeRollupByLatestAttempt, deriveDayCostUsd, deriveDayUnpricedRows, deriveDisposition, diffCoverageReport, fixCeilingInForce, fixDispatchBudget, fixRoundTally, buildFixProgressInput, flakeClaimsForHead, isBlockedCi, listRetirableEscalationIssues, listRetirableEscalationIssuesAsync, createEscalationTriageHistoryReader, ESCALATION_TRIAGE_EVIDENCE_SLICE, indexEscalationTriageHistory, type EscalationTriageHistoryReader, type EscalationTriageSlice, logCostGovernorDeferral, logMemoryObservation, logQueueGovernorDeferral, renderClarificationQuestion, renderSweepSummary, type SweepSummary, REQUIRED_CHECK_FAIL, REQUIRED_CHECK_OK, runCreditBackfill, closedPrFromRef, closedPrLookup, runPrTerminalReconcile, type PrTerminalReconcileSummary, runEscalationReconcile, runStaleEscalationRejudge, buildStaleEscalationRejudgePrompt, type StaleEscalationRejudgeCandidate, runPostFixReverification, runSweep, runSweepLightPass, runLightPassReadyRefresh, runLightPassRefreshAdmission, lightPassHeadContractRefresh, runArmedRatchetRejudge, withFullSweepRepairAdmission, redQualityGateNames, stillRedRequiredNames, terminalStateReason, toQuestionEntry, usableInstrumentEntanglementPaths, type ActionableGateFailure, type ArmedStalledPr, type CiFailure, type ClarificationQuestion, type CostGovernorResult, type EscalationReconcileSummary, type FixClass, type FixDispatchEvidence, type FixOwnerResidue, type FixDispatchSnapshot, type FixSuperseded, type LiveStateResult, type MemoryGovernorResult, type MergeConflictEvidence, type OpenPrView, type PlanScopedFixRoundInput, type ReviewDispatchMode, type ReviewReuseInputs, type RollupCheckEntry, type PostFixReverificationSummary, type ProofDiscriminationEvidence, type QueueGovernorResult, type RedBaseRefreshFacts, type PostReviewStallVerdict, type RepairFilingCapture, type Disposition, type SweepDeps, type SweepPolicy, type UpdateBranchOutcome, type UncreditableHeadReason, ABSENT_REPUSH_CAP, DEFAULT_FIX_CLASSES, buildSweepEffects as buildSweepEffectsFromLib, checkJobId, RATIFIED_BASELINE_RATCHET_REPAIRS, currentPlanIneligibilityReason, defaultSweepGhRun, dispatchFixCatchOutcome, discriminateReviewReuse, discriminateReviewReuseAsync, escalationTaskIdFor, fixDispatchErrorClass, fixDispatchSignalDeath, fixHeadAcceptable, fixRungTaskFor, foreignHeadIsStuck, isDispatchedRunBranch, detectPostReviewStall, isCappedReviewOrphanEscalation, proofDiscriminationEvidenceFromCriteria, type ArmAttemptOutcome, type ArmOutcomeName, type BuildSweepEffectsDeps, type MetadataRepairResult, sweepArmTaskId, uncreditableHeadReason, planOnlyRunBranchReceipts, REGENERABLE_ARTIFACT_GENERATORS, ADDITIVE_REGISTRATION_SURFACES, isAdditiveRegistrationChange, type RegistrationChange, repairLadderCommand, trackRepairLadder, riskJudgeHandedOffHead, handedOffHeadJudgmentPool, type HandedOffHeadJudgmentPool, awaitHandedOffHeadJudgments, riskJudgeCodeScanning, hasCapturedMergeConflictEvidence, clearedConflictEscalationCause, type FixRoundBranchClaim, inFlightReviewCount } from "./lib/sweep.js";
 import { sampleDaemonMemory, workerHeapReadings } from "./lib/daemon-memory-telemetry.js";
 import { currentReviewSignal, headLacksOwnTaskRecord, OWN_TASK_RECORD_MISSING_CAUSE, reviewOnlyStandDownReason } from "./lib/sweep.js";
@@ -1848,6 +1896,7 @@ export { classifyUpdateBranchFailure, detectReviewFalseBlock, detectCiLogVerdict
  * replacement. Extracted so a test can drive it against a counting fake, never a real `gh`/git call.
  */
 export type FreshTreeEntry = { kind: "bundle" | "tsx" | "unknown"; reason: string };
+export type FreshTreeExit = { cause: string; signal?: string; errorClass?: string };
 
 /** W1-T3723 — what {@link buildFreshTreeReviewRunner} needs, all injected so a test drives it
  *  without git, a worktree or a spawn. A `type` whose name does NOT end in `Deps`, deliberately:
@@ -1867,7 +1916,8 @@ export type FreshTreeReviewSeams = {
   /** Run `rmd review <pr> …` with `cwd` at the fresh worktree. Resolves to the exit code; on a
    *  non-zero exit it first hands `onFailure` the child's bounded stderr tail (W1-T4055). */
   spawnReview: (worktree: string, args: string[], onFailure?: (failure: string) => void,
-    parentEnv?: NodeJS.ProcessEnv, onEntry?: (entry: FreshTreeEntry) => void) => Promise<number>;
+    parentEnv?: NodeJS.ProcessEnv, onEntry?: (entry: FreshTreeEntry) => void,
+    store?: { storeRoot?: string }, onExit?: (exit: FreshTreeExit) => void) => Promise<number>;
   /** Tests may replace ownership; production holds the general reaper's real run-lock token. */
   withWorktreeLease?: <T>(worktree: string, action: () => Promise<T>) => Promise<T>;
   /**
@@ -1977,9 +2027,10 @@ export function buildFreshTreeReviewRunner(
   freshness: { originMainSha: string },
   onFailure?: (failure: string) => void,
   onEntry?: (entry: FreshTreeEntry) => void,
+  onExit?: (exit: FreshTreeExit) => void,
 ) => Promise<number | undefined> {
   const prepared = new Map<string, string>();
-  return async (prArg, rest, freshness, onFailure, onEntry) => {
+  return async (prArg, rest, freshness, onFailure, onEntry, onExit) => {
     const sha = freshness.originMainSha;
     try {
       let worktree = prepared.get(sha);
@@ -1998,7 +2049,7 @@ export function buildFreshTreeReviewRunner(
           prepared.delete(sha);
           throw new Error(`cached reviewer worktree at ${reviewerTree} is no longer an exact clean detached checkout of ${sha}`);
         }
-        return deps.spawnReview(reviewerTree, [prArg, ...rest], onFailure, undefined, onEntry);
+        return deps.spawnReview(reviewerTree, [prArg, ...rest], onFailure, undefined, onEntry, undefined, onExit);
       };
       return await (deps.withWorktreeLease ?? withReviewerWorktreeLease)(reviewerTree, run);
     } catch (err) {
@@ -2104,6 +2155,22 @@ export function freshTreeFailureText(text: string): string {
   return `…[${scrubbed.length - kept} earlier chars cut] ${scrubbed.slice(-kept)}`;
 }
 
+/** W1-T12225: the name that the review child wrote for its exit. The form is checked, not the list: the child runs newer code. */
+function readFreshTreeExit(exitFile: string, signal: NodeJS.Signals | null): FreshTreeExit {
+  if (signal) return { cause: "signal", signal };
+  if (!existsSync(exitFile)) return { cause: "not-reported" };
+  let line: string;
+  try {
+    line = readFileSync(exitFile, "utf8").slice(0, 256);
+  } catch (error) {
+    process.stderr.write(`spawnRmdReviewForFreshTree: exit cause unreadable: ${String(error)}\n`);
+    return { cause: "not-reported" };
+  }
+  const [cause = "", errorClass = ""] = line.trim().split("\t");
+  if (!/^[a-z][a-z0-9-]{0,47}$/.test(cause)) return { cause: "not-reported" };
+  return { cause, ...(/^[A-Za-z_$][A-Za-z0-9_$]{0,63}$/.test(errorClass) ? { errorClass } : {}) };
+}
+
 export function spawnRmdReviewForFreshTree(
   worktree: string,
   args: string[],
@@ -2111,14 +2178,17 @@ export function spawnRmdReviewForFreshTree(
   parentEnv: NodeJS.ProcessEnv = process.env,
   onEntry?: (entry: FreshTreeEntry) => void,
   store: { storeRoot?: string } = {},
+  onExit?: (exit: FreshTreeExit) => void,
 ): Promise<number> {
   return new Promise<number>((resolve, reject) => {
     const prepared = materializeMainEntryFromStore(worktree, store.storeRoot);
+    const exitDir = makeTempDir("review-exit");
+    const exitFile = join(exitDir, "cause");
     const sourceArgs = prepared.source ? ["--main-entry-source", JSON.stringify(prepared.source)] : [];
     // A daemon's installation token is copied at spawn and may expire during proof execution.
     // An App-backed child mints its own fresh token in main(); other callers keep their identity.
     const appConfigured = Boolean(parentEnv.GH_APP_ID && parentEnv.GH_APP_INSTALLATION_ID && parentEnv.GH_APP_PRIVATE_KEY_PATH);
-    const child = spawn(join(worktree, "bin", "rmd"), [...sourceArgs, "review", ...args], {
+    const child = spawn(join(worktree, "bin", "rmd"), [...sourceArgs, "review", ...args, REVIEW_EXIT_CAUSE_FLAG, exitFile], {
       cwd: worktree,
       // W1-T4055: stderr is piped only to be TEED — every byte still reaches this process's stderr.
       stdio: ["inherit", "inherit", "pipe", "pipe"],
@@ -2134,7 +2204,7 @@ export function spawnRmdReviewForFreshTree(
       process.stderr.write(chunk);
       held = (held + chunk.toString("utf8")).slice(-FRESH_TREE_STDERR_HOLD_CHARS);
     });
-    child.on("error", reject);
+    child.on("error", (error) => { rmSync(exitDir, { recursive: true, force: true }); reject(error); });
     // `close`, not `exit`: only `close` guarantees the piped stderr has been read to its end.
     child.on("close", (code: number | null, signal: NodeJS.Signals | null) => {
       const [kind, reason] = entryReport.trim().split("\t");
@@ -2144,6 +2214,8 @@ export function spawnRmdReviewForFreshTree(
         reason: `${reason || "launcher-did-not-report"}; ${storeReason}` });
       const exitCode = code ?? 1;
       if (exitCode !== 0) onFailure?.(signal && !held.trim() ? `killed by ${signal}` : freshTreeFailureText(held));
+      if (exitCode !== 0) onExit?.(readFreshTreeExit(exitFile, signal));
+      rmSync(exitDir, { recursive: true, force: true });
       resolve(exitCode);
     });
   });
@@ -2199,6 +2271,7 @@ export function buildReviewerCodeFreshnessGate(
     freshness: Extract<ReviewerCodeFreshness, { status: "stale" }>,
     onFailure?: (failure: string) => void,
     onEntry?: (entry: FreshTreeEntry) => void,
+    onExit?: (exit: FreshTreeExit) => void,
   ) => Promise<number | undefined>,
 ): {
   call: (prArg: string, rest: string[], deps: ReviewCommandDeps) => Promise<number>;
@@ -2226,10 +2299,15 @@ export function buildReviewerCodeFreshnessGate(
           // nothing but an exit code ledgered; the cause is what the next fix needs.
           let failure: string | undefined;
           let entry: FreshTreeEntry = { kind: "unknown", reason: "launcher-did-not-report" };
+          let exit: FreshTreeExit = { cause: "not-reported" };
           const childArgs = [...rest, ...reviewOptionFlags(reviewDeps), JUDGE_AT_OWN_START_FLAG];
-          return reviewFromFreshTree(prArg, childArgs, freshness, (why) => { failure = why; }, (choice) => { entry = choice; }).then((code) => {
+          return reviewFromFreshTree(prArg, childArgs, freshness, (why) => { failure = why; }, (choice) => { entry = choice; }, (ended) => { exit = ended; }).then((code) => {
             if (code !== undefined) {
-              const why = code === 0 ? {} : { failure: failure ?? "no failure reported" };
+              const why = code === 0 ? {} : {
+                failure: failure ?? "no failure reported", exit_cause: exit.cause,
+                ...(exit.signal === undefined ? {} : { exit_signal: exit.signal }),
+                ...(exit.errorClass === undefined ? {} : { exit_error_class: exit.errorClass }),
+              };
               log("review.ran_from_fresh_tree", { ...stale, exit_code: code, entry_kind: entry.kind, entry_reason: entry.reason, ...why });
               return code;
             }
@@ -2836,7 +2914,7 @@ export function handedOffHeadRiskJudge(
 import { readCiGateRequiredChecks } from "./lib/ci-gate-required.js";
 import { dropDerivativeAggregateCiFailure } from "./lib/derivative-ci-failure.js";
 import { applyCorrection } from "./lib/correct.js";
-import { DEFAULT_PRUNE_GRACE_MS, appendQuestion, ghJson, ghRateLimitRefusalUnknown, type GhRateLimitRefusal, parseDecisionRequest, parseFollowups, parseLearningsUsed, parseSkillsUsed, parseQuestion, parseReconReport, parseReport, pruneStaleRuns, reapStaleWorktrees, removeWorktreeBase, removeRunLock, renderWorkerSettings, resolveGenericRouteToolBound, harnessOwnsGitFor, IMPLEMENT_CASH_TOOLS, IMPLEMENT_CLAUDE_TOOLS, WORKER_RULE_TOOL_NAME, implementToolBound, resolveDispatchLaneToolBound, cashDivertSpawnFields, cashFallbackRefusal, runAdhocLaneReapRung, runWorktreeReapRung, spawnWorker, readClaudeProviderCapacity, activeWorkerCount, cacheTokenLedgerFields, capStderrExcerpt, REPORT_EXCERPT_CAP, STDERR_EXCERPT_CAP, noPrReportExcerpt, foreignTreeStandDownReason, listRegisteredWorktrees, readRunLock, runLockPath, workerLedgerFields, workerTranscript, withAssignmentTrailer, resolveCommitAssignment, uniqueRunBranch, excludeNodeModulesFromGit, linkWorktreeNodeModules, resolveNodeModulesSource, worktreeAdd, worktreeAddAsync, worktreeLockIsPidAlive, worktreeRemove, worktreeRemoveAsync, worktreesDir, writeRunLock, WorktreeBaseStaleError, WorktreeNodeModulesRefusedError, detectWorktreeBaseUncheckableStreak, WORKTREE_BASE_UNCHECKABLE_STREAK_BOUND, type RunLockInfo, type SpawnWorkerArgs, buildInboxDraftWorkerArgs, type ForeignTreeStandDown, type RegisteredWorktree, type WorkerResult, type WorktreeReapSummary, openUsageProbeSession, type UsageProbeQueryFn, WorkerStateTracker, DEFAULT_WORKER_QUIET_FLOOR_MS, type WorkerState, type WorkerStreamObserver, type WorkerStreamEvent, type WorkerSelectionAssignment, WorkerAbandonedError, SubscriptionOnlyRefusedError, deliverOperatorAnswerToRunningWorker, sharesHarnessCheckout, unwireCredentialHelperSocket, workerContinuation, workerExecutionForProvider } from "./lib/worker.js";
+import { DEFAULT_PRUNE_GRACE_MS, appendQuestion, ghJson, ghRateLimitRefusalUnknown, type GhRateLimitRefusal, parseDecisionRequest, parseFollowups, parseLearningsUsed, parseSkillsUsed, parseQuestion, parseReconReport, parseReport, pruneStaleRuns, reapStaleWorktrees, removeWorktreeBase, removeRunLock, renderWorkerSettings, resolveGenericRouteToolBound, harnessOwnsGitFor, IMPLEMENT_CASH_TOOLS, IMPLEMENT_CLAUDE_TOOLS, WORKER_RULE_TOOL_NAME, implementToolBound, resolveDispatchLaneToolBound, cashDivertSpawnFields, cashFallbackRefusal, runAdhocLaneReapRung, runWorktreeReapRung, spawnWorker, readClaudeProviderCapacity, activeWorkerCount, cacheTokenLedgerFields, capStderrExcerpt, REPORT_EXCERPT_CAP, STDERR_EXCERPT_CAP, noPrReportExcerpt, foreignTreeStandDownReason, listRegisteredWorktrees, readRunLock, runLockPath, workerLedgerFields, workerTranscript, withAssignmentTrailer, resolveCommitAssignment, uniqueRunBranch, excludeNodeModulesFromGit, linkWorktreeNodeModules, resolveNodeModulesSource, worktreeAdd, worktreeAddAsync, worktreeLockIsPidAlive, worktreeRemove, worktreeRemoveAsync, worktreesDir, writeRunLock, WorktreeBaseStaleError, WorktreeNodeModulesRefusedError, detectWorktreeBaseUncheckableStreak, WORKTREE_BASE_UNCHECKABLE_STREAK_BOUND, type RunLockInfo, type SpawnWorkerArgs, buildInboxDraftWorkerArgs, type ForeignTreeStandDown, type RegisteredWorktree, type WorkerResult, type WorktreeReapSummary, openUsageProbeSession, type UsageProbeQueryFn, WorkerStateTracker, DEFAULT_WORKER_QUIET_FLOOR_MS, type WorkerState, type WorkerStreamObserver, type WorkerStreamEvent, type WorkerSelectionAssignment, WorkerAbandonedError, SubscriptionOnlyRefusedError, deliverOperatorAnswerToRunningWorker, sharesHarnessCheckout, unwireCredentialHelperSocket, wireCredentialHelperSocket, workerContinuation, workerExecutionForProvider } from "./lib/worker.js";
 import {
   QuietRoundEndedError, createQuietBoundHistory, guardSpawnWithQuietWatchdog, productionQuietWorkerJudge, quietHistoryOptions,
   runQuietWorkerWatchdog, type QuietBoundHistory, type QuietWorkerJudge,
@@ -2880,6 +2958,7 @@ import { buildYieldsToRepair } from "./lib/repair-memory-demand.js";
 // `plan/policy.yaml`, so no new policy row is added here).
 import { loadDefaultCostAnomalyPolicy, type CostAnomalyPolicy } from "./lib/cost-anomaly.js";
 import { hostWorktreeGit, hostWorktreeGitAsync, WorktreePointerRefusedError, type HostWorktreeGitOptions } from "./lib/worktree-git.js";
+import { observeComputedPlacement } from "./lib/test-path-resolver.js";
 import {
   defaultGitCapture,
   defaultGitCaptureAsync,
@@ -2929,9 +3008,10 @@ import {
   liveWritesExempt,
   LIVE_WRITE_OVERRIDE_ENV,
 } from "./lib/live-write-guard.js";
-import { checkSharedPause, disposeSharedPauseRefresh, prepareSharedPause, requestKick, consumeStop, isQuietHours, requestFleetPause, requestPause, requestStop, restartInPlaceVerb, resumeFleet, resumeFleetWide, sharedPauseRef, stopDetail, type SharedPauseGitDeps } from "./lib/fleet-control.js";
+import { checkSharedPause, disposeSharedPauseRefresh, prepareSharedPause, requestKick, consumeStop, isQuietHours, pauseHoldSummary, readSharedPause, requestFleetPause, requestPause, requestStop, restartInPlaceVerb, resumeFleet, resumeFleetWide, sharedPauseRef, stopDetail, type SharedPauseGitDeps } from "./lib/fleet-control.js";
 import { resolvePauseTarget, type PauseTarget } from "./lib/pause-target.js";
 import { parseInstanceRegistry } from "./lib/instance-registry.js";
+import { openPlannerGitCredential, plannerHostGitCredential, plannerPrWriteToken } from "./lib/secret-boundary.js";
 import { hasThreadEvent, inboxThreadId, readThread, verifiedInboxInput, type InboxCausalScope, type InboxInputReference } from "./lib/inbox-thread.js";
 import { gatherActorEvidence } from "./lib/actor-evidence.js";
 import { readGithubWebhookSecret, resolveGithubWebhookSecretFilePath } from "./lib/github-event-wake.js";
@@ -2945,7 +3025,7 @@ import { branchCitationPattern, branchNamesFingerprint, decideAutomaticBranchRea
 // were not exported before this move and stay that way, used here under their original names.
 import { repoRoot, resolveOwnerRepo, resolveRepoRoot } from "./lib/repo-location.js";
 import { resolveVerbPlanRoot, type VerbPlanRoot } from "./lib/repo-location.js";
-import { refusalExcerptFromFixReport, taskAwaitsAmendment } from "./lib/refusal-amendment.js";
+import { planAmendmentReceipt, refusalExcerptFromFixReport, taskAwaitsAmendment } from "./lib/refusal-amendment.js";
 import { fetchPrDiff, ghPrDiffAsync, prDiffSourceAsync } from "./lib/pr-diff.js";
 import { boundGitCall, fetchOriginRetryingRefLock, fetchOriginRetryingRefLockAsync, GATEWAY_FETCH_TIMEOUT_MS, GIT_FETCH_KILL_GRACE_MS, killAfterGrace, type AsyncGitRunner } from "./lib/git-fetch-retry.js";
 import { asOwnerRepoUnresolvable, resolveOwnerRepoAt, resolveOwnerRepoAtAsync } from "./lib/owner-repo.js";
@@ -3098,8 +3178,7 @@ export function buildEscalationTriageRuntime(
               { run_id: deps.runId, task_id: e.taskId, step, ...extra }) });
           const [result] = await effects.draftRefusalAmendments!([{ taskId: e.taskId, runId: e.runId ?? deps.runId,
             reportExcerpt: e.detail, refusals: [{ criterion: 1, refusalClass: "proof-unexecutable-at-head", detail: e.summary }] }]);
-          if (result === undefined || !result.prUrl) throw new Error(`amendment not opened: ${result?.outcome ?? "unavailable"}`);
-          return `${result.prUrl} proposes the proof amendment; decline the PR to undo`;
+          return planAmendmentReceipt(e.taskId, result);
         },
         rekick_once: (e) => {
           if (io.kick) io.kick(e);
@@ -3754,6 +3833,8 @@ interface PrOwnerVerdict {
   fix?: PrOwnerFixEvidence;
   sweep?: PrOwnerSweepEvidence;
   claim?: PrOwnerClaim;
+  /** W1-T12113: diagnostic only — never an input to `verdict`. */
+  recoveryShadow?: StaleFixDispatchShadow;
 }
 
 interface PrOwnerClaim {
@@ -3890,11 +3971,26 @@ export function derivePrOwnerVerdict(
   });
 }
 
+type PrOwnerFacts = Pick<PrOwnerLedgerProjection, "corpusNewestTs" | "latestFix" | "latestSweep" | "relatedClaimKeys">;
+
 function prOwnerVerdictFromFacts(
   prNumber: number,
   corpus: Omit<PrOwnerLedgerRead, "rows">,
   claimRead: PrOwnerClaimRead,
-  facts: Pick<PrOwnerLedgerProjection, "corpusNewestTs" | "latestFix" | "latestSweep" | "relatedClaimKeys">,
+  facts: PrOwnerFacts,
+): PrOwnerVerdict {
+  const verdict = prOwnerOwnershipVerdict(prNumber, corpus, claimRead, facts);
+  if (facts.latestFix === undefined) return verdict;
+  // W1-T12113: the recovery decision in SHADOW — computed after, and never fed into, the verdict.
+  const shadow = staleFixDispatchShadowInputs(prNumber, corpus, facts.latestFix);
+  return withStaleFixDispatchShadow(verdict, decideStaleFixDispatchRecovery(shadow.expected, shadow.facts));
+}
+
+function prOwnerOwnershipVerdict(
+  prNumber: number,
+  corpus: Omit<PrOwnerLedgerRead, "rows">,
+  claimRead: PrOwnerClaimRead,
+  facts: PrOwnerFacts,
 ): PrOwnerVerdict {
   const compressedArchiveCount = corpus.archiveFiles.filter((p) => p.endsWith(".ndjson.gz")).length;
   const corpusNewestTs = facts.corpusNewestTs;
@@ -3965,6 +4061,9 @@ function renderPrOwnerVerdict(v: PrOwnerVerdict): string {
     );
   }
   if (v.claim) lines.push(`  fix branch claim: ${v.claim.key}, pid=${v.claim.pid}, run=${v.claim.runId}`);
+  if (v.recoveryShadow) {
+    lines.push(`  recovery_shadow: HOLD reason=${v.recoveryShadow.reason} (shadow only; ownership unchanged, no receipt written)`);
+  }
   if (v.sweep) {
     lines.push(
       `  sweep.disposed: ts=${v.sweep.ts ?? "unknown"}, task=${v.sweep.taskId ?? "unknown"}, run=${v.sweep.runId ?? "unknown"}, ` +
@@ -4788,7 +4887,8 @@ export function runGhPrCreate(
   branch: string,
   log: (step: string, extra?: Record<string, unknown>) => void,
   say: (msg: string) => void,
-  exec: (command: string, args: string[], options: { cwd: string; encoding: "utf8" }) => string = execFileSync,
+  exec: (command: string, args: string[], options: { cwd: string; encoding: "utf8"; env?: NodeJS.ProcessEnv }) => string = execFileSync,
+  readExec: typeof exec = exec,
 ): { prUrl?: string; prNumber?: number } {
   for (const { step, extra } of prCreate.diagnostics ?? []) log(step, extra);
   let out: string;
@@ -4803,7 +4903,7 @@ export function runGhPrCreate(
       );
     }
     if (isGhPrCreateValidationError(e)) {
-      const adopted = adoptExistingPrForHead(prCreate, branch, exec);
+      const adopted = adoptExistingPrForHead(prCreate, branch, readExec);
       if (adopted?.prUrl !== undefined) {
         const ghErr = e as NodeJS.ErrnoException & { stderr?: string | Buffer };
         log("pr_create.adopted_existing", {
@@ -5676,61 +5776,7 @@ function addedTestCriterion(path: string): AcceptanceCriterion {
  * as {@link DIFF_ANCHOR_UNAVAILABLE_STEP} so it stays observable.
  */
 export const DIFF_ANCHOR_UNAVAILABLE_STEP = "acceptance.fallback.diff_anchor_unavailable";
-export type DiffAnchorUnavailableReason = "no-diff" | "unparseable" | "no-safe-candidate";
-export type DiffAnchor = { kind: "anchored"; path: string; line: string; proof: string } | { kind: "unavailable"; reason: DiffAnchorUnavailableReason };
-const DIFF_ANCHOR_MIN_LENGTH = 8;
 const DIFF_ANCHOR_CLAIM_SUFFIX = "; its proof greps a line this PR's own diff adds, not a fixed pre-existing symbol";
-
-function escapeGrepLiteral(line: string): string {
-  let escaped = "";
-  for (const ch of line) {
-    if (ch === "\\") escaped += "\\\\";
-    else if (ch === "?") escaped += "[?]";
-    else if (".[]*^$".includes(ch)) escaped += `\\${ch}`;
-    else escaped += ch;
-  }
-  return escaped;
-}
-
-/** The first ADDED line of a unified diff (`git diff` or `gh pr diff`) that yields a grep proof the reviewer can run
- *  and that cannot already match at the merge base. A line the same diff also REMOVES is a move, so it is skipped. */
-export function diffAnchor(diffText: string | undefined): DiffAnchor {
-  if (diffText === undefined || diffText.trim() === "") return { kind: "unavailable", reason: "no-diff" };
-  const added: Array<{ path: string; line: string }> = [];
-  const removed = new Set<string>();
-  let file: string | undefined;
-  let sawHeader = false;
-  for (const raw of diffText.split("\n").map((l) => l.replace(/\r$/, ""))) {
-    if (raw.startsWith("diff --git ")) {
-      file = undefined;
-      continue;
-    }
-    if (raw.startsWith("+++ ")) {
-      sawHeader = true;
-      const path = raw.slice(4).replace(/^b\//, "").trim();
-      file = path === "/dev/null" ? undefined : path;
-      continue;
-    }
-    if (raw.startsWith("--- ")) continue;
-    if (raw.startsWith("-")) removed.add(raw.slice(1).trim());
-    else if (file && raw.startsWith("+")) added.push({ path: file, line: raw.slice(1).trim() });
-  }
-  if (!sawHeader) return { kind: "unavailable", reason: "unparseable" };
-  for (const { path, line } of added) {
-    if (line.length < DIFF_ANCHOR_MIN_LENGTH || removed.has(line) || /\sin\s/i.test(line)) continue;
-    if (!/\.[^/]+$/.test(path) || /\s/.test(path) || path.includes("..")) continue;
-    const pattern = escapeGrepLiteral(line);
-    const proof = `grep: ${pattern} in ${path}`;
-    if (parseWhitelistedProof(proof) === null || breMetacharsIn(pattern).blocking.length > 0) continue;
-    if (wrappedGrepPattern(proof) !== undefined) continue;
-    // The proof must survive the block it is written into, verbatim.
-    const roundTrip = parseAcceptanceBlock(renderAcceptanceBlock([{ claim: "anchor", proof }]));
-    if (roundTrip.length !== 1 || roundTrip[0].proof !== proof) continue;
-    return { kind: "anchored", path, line, proof };
-  }
-  return { kind: "unavailable", reason: "no-safe-candidate" };
-}
-
 /** W1-T4263's shared helper: a criterion whose proof greps the first safe line `diffText` adds, or `undefined`. */
 export function diffAnchoredAcceptanceCriterion(
   diffText: string,
@@ -6061,6 +6107,9 @@ async function runPlanScopedConflictRound(input: PlanScopedFixRoundInput): Promi
     }
     git(["commit", "-m", `Merge branch 'main' into ${pr.headRefName}`]);
     const sha = git(["rev-parse", "HEAD"]).trim();
+    const filingRefusal = planFilingFixRoundRefusal(await readPlanFilingFixRoundInput(
+      input.task.files, pr.headSha, sha, git));
+    if (filingRefusal) return refuse(filingRefusal);
     const verdict = await preflight(worktreePath, sha, metadata);
     if (!verdict.ok || verdict.unreadable.length || verdict.timedOut) return refuse((verdict.failures[0] ?? verdict.unreadable[0] ?? verdict.timedOut?.[0])!.firstLine, verdict);
     if (metadata.title !== input.title || metadata.body !== input.body) await deps.updateMetadata(metadata);
@@ -6073,6 +6122,12 @@ async function runPlanScopedConflictRound(input: PlanScopedFixRoundInput): Promi
     deps.log("sweep.plan_round.error", { pr_number: pr.prNumber, head_sha: pr.headSha, reason });
     return refuse(reason);
   }
+}
+
+function fixRoundCommitMessage(report: string, subject: string): string {
+  // The subject parser omits continuations; keep task trailers for the before-push filing guard.
+  const trailers = [...report.matchAll(/^Remudero-Task:[ \t]*\S+[ \t]*$/gm)].map(match => match[0]);
+  return [subject, ...trailers].join("\n\n");
 }
 
 export async function runPlanScopedFixRound(input: PlanScopedFixRoundInput): Promise<{ outcome: "pushed" | "refused" | "metadata-repaired"; headSha?: string; reason?: string; preflight?: PlanPrPreflightResult }> {
@@ -6151,13 +6206,17 @@ export async function runPlanScopedFixRound(input: PlanScopedFixRoundInput): Pro
     if (!filingSelfCreditCheck(metadata.body, introduced).ok || !acceptanceAuthorTimeCheck(metadata.body).ok) return refuse("the proposed filing body fails author-time acceptance");
     let sha = pr.headSha;
     if (changed.length) {
-      const message = parseReport(report)?.commitMessage;
-      if (!message || checkCommitMessage(message).length) return refuse("the plan round needs a valid COMMIT_MESSAGE");
+      const subject = parseReport(report)?.commitMessage;
+      if (!subject || checkCommitMessage(subject).length) return refuse("the plan round needs a valid COMMIT_MESSAGE");
+      const message = fixRoundCommitMessage(report, subject);
       git(["add", "-A", "--", ...changed]);
       const filedTask = taskIdFromRunBranch(pr.headRefName) === input.task.id && namesATask(input.task.id);
       git(["commit", "-m", message, ...(filedTask ? ["-m", `Remudero-Task: ${input.task.id}`] : [])]);
       sha = git(["rev-parse", "HEAD"]).trim();
     } else if (metadata.title === input.title && metadata.body === input.body) return refuse("the worker changed nothing");
+    const filingRefusal = planFilingFixRoundRefusal(await readPlanFilingFixRoundInput(
+      files, pr.headSha, sha, git));
+    if (filingRefusal) return refuse(filingRefusal);
     const verdict = await preflight(worktreePath, sha, metadata);
     // A check that ran out of its budget has no verdict, so it holds the push like an unreadable one.
     if (!verdict.ok || verdict.unreadable.length || verdict.timedOut) return refuse((verdict.failures[0] ?? verdict.unreadable[0] ?? verdict.timedOut?.[0])!.firstLine, verdict);
@@ -6528,6 +6587,7 @@ export function fixRungScopeStandDownReason(
   reachableRemedyFiles: readonly ReachableRemedyFileInput[] = [],
   failingChecks: readonly Pick<CiFailure, "name" | "logTail">[] = [],
   registrationChanges: readonly RegistrationChange[] = [],
+  placement?: { root: string; proofs: readonly string[] },
 ):
   | {
       reason: string;
@@ -6536,7 +6596,7 @@ export function fixRungScopeStandDownReason(
       gateRemedyDeadlock?: FixRungGateRemedyScopeDeadlock;
     }
   | undefined {
-  return fixCommandHelpers(fixCommandHost()).fixRungScopeStandDownReason(currentDiffFiles, baselineDiffFiles, declaredFiles, reachableRemedyFiles, failingChecks, registrationChanges);
+  return fixCommandHelpers(fixCommandHost()).fixRungScopeStandDownReason(currentDiffFiles, baselineDiffFiles, declaredFiles, reachableRemedyFiles, failingChecks, registrationChanges, placement);
 }
 
 /**
@@ -7233,7 +7293,7 @@ async function runReview(args: {
   runtimeImageSha?: string | null;
   /** `files` (W1-T322): the task's declared scope — see {@link "./lib/review.js".ReviewEvidence.taskDeclaredFiles}'s
    *  doc. Every real caller already passes the full plan `Task`, so this widens for free. */
-  task: { id: string; acceptance?: AcceptanceCriterion[]; files?: string[]; risk?: TaskRisk; budget_usd?: number; sourcePath?: string } & ReviewTaskNarrativeInput;
+  task: { catalog?: "public" | "ops"; id: string; acceptance?: AcceptanceCriterion[]; files?: string[]; risk?: TaskRisk; budget_usd?: number; sourcePath?: string } & ReviewTaskNarrativeInput;
   /** W1-T3704 (completed here) — injectable producer for the review-reuse pair recorded on this verdict's
    *  `review.posted` line (`own_diff_digest`/`merge_base_sha`). Production omits it and gets one
    *  best-effort REST compare against `main`; a test supplies a stub so it never reaches the
@@ -8286,6 +8346,16 @@ async function spawnFixWorkerBounded(
   // a different population). Every real call site now threads that row explicitly; this default
   // fires only for a caller (test or otherwise) that supplies no `deps.spawnWallClockBoundMs`.
   const boundMs = deps.spawnWallClockBoundMs ?? DEFAULT_FIX_SPAWN_WALL_CLOCK_BOUND_MS;
+  // W1-T8141: a strike's spawn yields to a pending recycle; its work is kept against the head the round started from.
+  const yieldRoot = ctx.fixRound && ctx.snapshot?.headSha ? args.config?.root : undefined;
+  let startSha: string | undefined;
+  if (yieldRoot) {
+    try {
+      startSha = (await hostWorktreeGitAsync(args.cwd, ["rev-parse", "HEAD"])).trim();
+    } catch (error) {
+      deps.log("fix.round_yield_unwatched", { run_id: ctx.runId, task_id: ctx.taskId, reason: String((error as Error)?.message ?? error) });
+    }
+  }
   const startedAt = Date.now();
   const spawnStop = new AbortController();
   const spawnPromise = deps.spawn({ ...args, signal: AbortSignal.any([spawnStop.signal, ...(args.signal ? [args.signal] : [])]) });
@@ -8302,8 +8372,22 @@ async function spawnFixWorkerBounded(
           () => new Promise<never>(() => {}),
         )
       : new Promise<never>(() => {});
+  const recycled = yieldRoot && startSha ? watchFixRoundRecycle(yieldRoot, watchStop.signal) : new Promise<never>(() => {});
+  let pendingRecycle: string | undefined;
   try {
-    const winner = await Promise.race([spawnPromise, bound, superseded]);
+    let winner = await Promise.race([spawnPromise, bound, superseded, recycled]);
+    if (winner !== "abandoned" && "recycle" in winner) {
+      pendingRecycle = winner.recycle;
+      // The worker's own abort path stops it; the wall-clock bound still holds while it stops.
+      spawnStop.abort();
+      const settled = await Promise.race([spawnPromise.then((result) => ({ result }), (error: unknown) => ({ error })), bound]);
+      if (settled !== "abandoned" && ctx.fixRound && ctx.snapshot && startSha) {
+        const costUsd = "result" in settled ? settled.result.costUsd : 0;
+        const yielded = await keepYieldedFixRound(deps.log, args.cwd, ctx.fixRound, ctx.snapshot.headSha, startSha, winner.recycle, costUsd);
+        return { kind: "yielded", elapsedMs: systemClock.now() - startedAt, yielded };
+      }
+      winner = "abandoned";
+    }
     if (winner === "abandoned" || "superseded" in winner) {
       const elapsedMs = Date.now() - startedAt;
       if (winner === "abandoned") {
@@ -8348,6 +8432,12 @@ async function spawnFixWorkerBounded(
           });
         },
       );
+      if (pendingRecycle && ctx.fixRound && ctx.snapshot && startSha) {
+        // An unsettled worker may still write: retain its checkout without snapshotting or resetting it.
+        const yielded = await keepYieldedFixRound(deps.log, args.cwd, ctx.fixRound, ctx.snapshot.headSha, startSha,
+          pendingRecycle, 0, "worker did not stop before the spawn wall-clock bound; worktree retained for recovery");
+        return { kind: "yielded", elapsedMs, yielded };
+      }
       return winner === "abandoned" ? { kind: "abandoned", elapsedMs } : { kind: "superseded", elapsedMs, superseded: winner.superseded };
     }
     return { kind: "spawned", result: winner, elapsedMs: Date.now() - startedAt };
@@ -8355,6 +8445,65 @@ async function spawnFixWorkerBounded(
     if (timer) clearTimeout(timer);
     watchStop.abort();
   }
+}
+
+/** W1-T8141: resolves with the recycle PAUSE detail once one is pending, at the supersession watch's cadence. */
+function watchFixRoundRecycle(root: string, signal: AbortSignal): Promise<{ recycle: string }> {
+  return new Promise((resolve) => {
+    const timer = setInterval(() => {
+      let recycle: string | undefined;
+      try {
+        recycle = recyclePauseDetail(root);
+      } catch {
+        return; // an unreadable PAUSE is no recycle yet; the next poll reads it again
+      }
+      if (!recycle) return;
+      clearInterval(timer);
+      resolve({ recycle });
+    }, DEFAULT_POLL_INTERVAL_MS);
+    signal.addEventListener("abort", () => clearInterval(timer), { once: true });
+  });
+}
+
+/** W1-T8141: keep a yielded fix round's whole worktree in a recovery ref, reset it to the round's start head, and
+ *  write the rows that offer the ref to the next round. Nothing is pushed. A failure resets nothing. */
+async function keepYieldedFixRound(
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  cwd: string,
+  fixRound: { prUrl: string; branch: string },
+  headSha: string,
+  startSha: string,
+  recycle: string,
+  costUsd: number,
+  workerStopError?: string,
+): Promise<FixRoundYield> {
+  const prNumber = prNumberFromRef(fixRound.prUrl);
+  const row = { pr_url: fixRound.prUrl, pr_number: prNumber ?? null, branch: fixRound.branch, trigger: "recycle", detail: recycle,
+    head_sha: headSha, start_sha: startSha, pushed: false, strike_spent: false };
+  if (workerStopError) {
+    log("fix.round_yielded", { ...row, recovery_ref: null, index_recovery_ref: null, paths: [], keep_error: workerStopError,
+      preservation_deferred: true, retain_worktree: true });
+    return { trigger: "recycle", detail: recycle, paths: [], costUsd, keepError: workerStopError };
+  }
+  let kept: { recoveryRef?: string; indexRecoveryRef?: string; paths: string[] };
+  try {
+    kept = await runStepsAsync(keepYieldedFixWorkSteps(hostWorktreeGitAsync, cwd, fixRound.branch, startSha));
+  } catch (error) {
+    const keepError = capStderrExcerpt(String((error as Error)?.message ?? error), STDERR_EXCERPT_CAP);
+    log("fix.round_yielded", { ...row, recovery_ref: null, index_recovery_ref: null, paths: [], keep_error: keepError });
+    return { trigger: "recycle", detail: recycle, paths: [], costUsd, keepError };
+  }
+  log("fix.round_yielded", { ...row, recovery_ref: kept.recoveryRef ?? null, index_recovery_ref: kept.indexRecoveryRef ?? null, paths: kept.paths });
+  // Offer both snapshots when staged bytes differ from the disk; otherwise the only ref suffices.
+  const offered = kept.recoveryRef ?? kept.indexRecoveryRef;
+  if (offered && prNumber !== undefined) {
+    log("sweep.fix.owner_residue_preserved", { pr_number: prNumber, branch: fixRound.branch, head_sha: headSha, worktree_path: cwd,
+      local_sha_prefix: startSha.slice(0, 12), staged_paths: kept.paths.slice(0, FIX_OWNER_RESIDUE_PATH_BOUND),
+      staged_more: Math.max(0, kept.paths.length - FIX_OWNER_RESIDUE_PATH_BOUND), recovery_ref: offered.slice(0, 512),
+      index_recovery_ref: kept.recoveryRef && kept.indexRecoveryRef ? kept.indexRecoveryRef.slice(0, 512) : null,
+      preserved_at: systemClock.iso(), source: "fix.round_yielded" });
+  }
+  return { trigger: "recycle", detail: recycle, costUsd, ...kept };
 }
 
 // W1-T2403 — THE RETRIGGER-SHAPED FIX OUTCOME, ACCOUNTED SEPARATELY FROM A STRIKE
@@ -9304,6 +9453,8 @@ export function harvestFollowupsFromReport(
     runId?: string;
     /** Injectable memo; defaults to this process's own. */
     seen?: Set<string>;
+    readHeadSha?: () => string;
+    worktreePath?: string;
   },
 ): void {
   const followups = parseFollowups(text);
@@ -9332,7 +9483,17 @@ export function harvestFollowupsFromReport(
     return;
   }
   seen.add(digest);
-  ctx.log("report.followups", { ...(ctx.prUrl ? { pr_url: ctx.prUrl } : {}), entries: followups });
+  let headSha: string | undefined;
+  try {
+    const value = ctx.readHeadSha ? ctx.readHeadSha() : ctx.worktreePath || ctx.runId
+      ? hostWorktreeGit(ctx.worktreePath ?? join(worktreesDir(loadConfig()), `run-${ctx.runId}`), ["rev-parse", "--verify", "HEAD^{commit}"]).trim()
+      : undefined;
+    if (value && /^[0-9a-f]{40}$/i.test(value)) headSha = value;
+  } catch (error) {
+    ctx.log("followup.head_unreadable", { reason: String(error) });
+  }
+  ctx.log("report.followups", { ...(ctx.prUrl ? { pr_url: ctx.prUrl } : {}),
+    ...(headSha ? { head_sha: headSha } : {}), entries: followups });
   ctx.say(`${ctx.label} follow-ups declared: ${followups.map((f) => f.type).join(", ")}`);
 }
 
@@ -10959,7 +11120,8 @@ export function fixRoundLandingFields(landing: FixRoundLanding | undefined, work
  *  child is awaited — the sweep and runTaskBody run fix rounds on the daemon's loop. */
 export async function pushFixRound(
   wt: string, branch: string, expectedHeadSha?: string, priorHeadSha?: string,
-  deps: Pick<PushRunBranchAsyncOpts, "capture" | "exec"> & { mergedTypecheck?: MergedTypecheckPorts } = {},
+  deps: Pick<PushRunBranchAsyncOpts, "capture" | "exec"> & { mergedTypecheck?: MergedTypecheckPorts;
+    ownedSessionGuard?: { prHeadSha: string; verifyOwnership: () => Promise<string | undefined> } } = {},
 ): Promise<FixRoundPushReceipt> {
   // W1-T5658: BOTH fix paths (the run loop's and the sweep's) push through here, so this is the one place a head
   // that compiles alone but not merged with main is refused before it leaves the worktree.
@@ -10971,11 +11133,53 @@ export async function pushFixRound(
   }
   const capture = deps.capture ?? worktreeGitCaptureAsync(wt);
   const push = deps.exec ?? worktreePushExecAsync(wt);
+  const ownedSessionGuard = deps.ownedSessionGuard;
+  let sessionGuardRefusal: string | undefined;
   try {
     if (priorHeadSha !== undefined && expectedHeadSha === undefined) throw new Error("refusing a leased fix push without the committed head sha");
+    if (ownedSessionGuard !== undefined && priorHeadSha !== undefined) {
+      sessionGuardRefusal = "refusing a force-with-lease push for an operator-session conflict round";
+      throw new FixRoundPushError("run-error", { text: sessionGuardRefusal, censuses: ["operator-session-push-guard"], offeredBaselines: [] }, sessionGuardRefusal);
+    }
+    if (ownedSessionGuard !== undefined) {
+      if (expectedHeadSha === undefined) {
+        sessionGuardRefusal = "refusing an operator-session conflict push without the committed merge head sha";
+        throw new FixRoundPushError("run-error", { text: sessionGuardRefusal, censuses: ["operator-session-push-guard"], offeredBaselines: [] }, sessionGuardRefusal);
+      }
+      const parents = (await hostWorktreeGitAsync(wt, ["rev-list", "--parents", "-n", "1", expectedHeadSha!])).trim().split(/\s+/);
+      if (parents.length !== 3 || parents[0] !== expectedHeadSha || parents[1] !== ownedSessionGuard.prHeadSha) {
+        sessionGuardRefusal = `operator-session conflict round must push a two-parent merge commit whose first parent is PR head ${ownedSessionGuard.prHeadSha}`;
+        throw new FixRoundPushError("run-error", { text: sessionGuardRefusal, censuses: ["operator-session-push-guard"], offeredBaselines: [] }, sessionGuardRefusal);
+      }
+      const remoteRefs = (await hostWorktreeGitAsync(wt, ["ls-remote", "origin", `refs/heads/${branch}`, "refs/heads/main"]))
+        .trim().split("\n").filter(Boolean).map((line) => line.trim().split(/\s+/));
+      const remote = new Map(remoteRefs.map(([sha, ref]) => [ref, sha]));
+      if (remote.get(`refs/heads/${branch}`) !== ownedSessionGuard.prHeadSha) {
+        sessionGuardRefusal = `operator-session branch moved from PR head ${ownedSessionGuard.prHeadSha} before the push`;
+        throw new FixRoundPushError("run-error", { text: sessionGuardRefusal, censuses: ["operator-session-push-guard"], offeredBaselines: [] }, sessionGuardRefusal);
+      }
+      const main = remote.get("refs/heads/main");
+      if (main === undefined) {
+        sessionGuardRefusal = "operator-session conflict push cannot read origin/main";
+        throw new FixRoundPushError("run-error", { text: sessionGuardRefusal, censuses: ["operator-session-push-guard"], offeredBaselines: [] }, sessionGuardRefusal);
+      }
+      try {
+        await hostWorktreeGitAsync(wt, ["merge-base", "--is-ancestor", main, expectedHeadSha]);
+      } catch {
+        sessionGuardRefusal = `operator-session conflict merge does not contain origin/main ${main}`;
+        throw new FixRoundPushError("run-error", { text: sessionGuardRefusal, censuses: ["operator-session-push-guard"], offeredBaselines: [] }, sessionGuardRefusal);
+      }
+    }
     await gitPushRunBranchAsync(wt, { expectedHeadSha, capture, exec: async (file, args) => {
       const pushArgs = priorHeadSha === undefined ? args : ["-C", wt, "push",
         `--force-with-lease=refs/heads/${branch}:${priorHeadSha}`, "origin", `${expectedHeadSha}:refs/heads/${branch}`];
+      if (ownedSessionGuard !== undefined) {
+        const ownershipFailure = await ownedSessionGuard.verifyOwnership();
+        if (ownershipFailure !== undefined) {
+          sessionGuardRefusal = `operator-session branch ownership changed before push: ${ownershipFailure}`;
+          throw new FixRoundPushError("run-error", { text: sessionGuardRefusal, censuses: ["operator-session-push-guard"], offeredBaselines: [] }, sessionGuardRefusal);
+        }
+      }
       await push(file, pushArgs, { stdio: "ignore" });
       if (priorHeadSha !== undefined) {
         const observed = (await capture("git", ["-C", wt, "ls-remote", "origin", `refs/heads/${branch}`])).split(/\s/)[0];
@@ -10984,6 +11188,9 @@ export async function pushFixRound(
     } });
     return { fixRoundPushedHead: expectedHeadSha };
   } catch (err) {
+    if (sessionGuardRefusal !== undefined) {
+      throw new FixRoundPushError("run-error", { text: sessionGuardRefusal, censuses: ["operator-session-push-guard"], offeredBaselines: [] }, sessionGuardRefusal);
+    }
     if (err instanceof LanePushForeignHeadError && priorHeadSha === undefined) throw err;
     // An unreadable remote simply is not the expected head, so its failure reads as no head at all.
     const remote = await hostWorktreeGitAsync(wt, ["ls-remote", "origin", `refs/heads/${branch}`])
@@ -11193,6 +11400,7 @@ export async function pushFixRoundPrechecked(
   push: (wt: string, branch: string, expectedHeadSha?: string, priorHeadSha?: string) => unknown = pushFixRound,
   priorHeadSha?: string,
   reapply: { ports?: FixRoundReapplyPorts; attempted?: boolean } = {},
+  guard?: { prHeadSha: string; verifyOwnership: () => Promise<string | undefined> },
 ): Promise<unknown> {
   // W1-T5227: a head carrying a conflict marker never leaves the worktree, whoever committed it.
   let markerFiles: string[] = [];
@@ -11211,7 +11419,9 @@ export async function pushFixRoundPrechecked(
   const refusal = coveragePushRefusal(await coveragePrecheck(wt, ports), log, "rung.fix_push");
   if (refusal) throw new FixRoundPushError("run-error", refusal, refusal.text);
   try {
-    return await push(wt, branch, expectedHeadSha, priorHeadSha);
+    return guard !== undefined && push === pushFixRound
+      ? await pushFixRound(wt, branch, expectedHeadSha, priorHeadSha, { ownedSessionGuard: guard })
+      : await push(wt, branch, expectedHeadSha, priorHeadSha);
   } catch (error) {
     // A census refusal is the round's own red; only a leased push the remote outran may be re-applied, once.
     if (!(error instanceof FixRoundPushError) || error.refusal !== undefined || reapply.attempted ||
@@ -11219,7 +11429,7 @@ export async function pushFixRoundPrechecked(
     const result = await reapplyFixRoundOnMovedTip({ wt, branch, leaseBaseSha: priorHeadSha, committedSha: expectedHeadSha },
       reapply.ports ?? realFixRoundReapplyPorts, log);
     if (!result.reapplied) throw error;
-    return await pushFixRoundPrechecked(log, wt, branch, result.mergedHeadSha, ports, push, result.remoteTip, { ...reapply, attempted: true });
+    return await pushFixRoundPrechecked(log, wt, branch, result.mergedHeadSha, ports, push, result.remoteTip, { ...reapply, attempted: true }, guard);
   }
 }
 
@@ -11930,7 +12140,11 @@ export async function resolveFixRungTaskContractAtHeadAsync(
   } catch {
     return undefined; // an unreadable HEAD is unreadable regardless of which read failed first
   }
-  return resolvePlanCriteriaAtHeadAsync(`Remudero-Task: ${taskId}`, repoDir, "plan/tasks.yaml", headSha);
+  const resolved = await resolvePlanCriteriaAtHeadAsync(`Remudero-Task: ${taskId}`, repoDir, "plan/tasks.yaml", headSha);
+  if (resolved.divergence || resolved.criteria.length > 0 || resolved.taskDeclaredFiles !== undefined) return resolved;
+  const found = await findTaskInCatalogs(taskId, { byId: new Map(), stateDir: instanceStateDirIfConfigured() });
+  if (found.outcome === "unreadable") throw new Error(`task catalog unreadable: ${found.reason}`);
+  return found.outcome === "found" ? catalogTaskContract(found) : resolved;
 }
 
 /**
@@ -13054,12 +13268,81 @@ export function remotePlanCeilingOnRef(
  *  silently instead of erroring, which would return a clean, wrong zero here. */
 const REMOTE_PLAN_ID_DECL_PATTERN = '^[[:space:]]*(-[[:space:]]*)?id:[[:space:]]*["\']?W1-T[0-9]+';
 
+/** Host-only reads for the already selected catalog. No second reservation namespace is introduced. */
+export interface TaskIdDestinationChecks {
+  destinationStateDir?: () => string | undefined;
+  destinationGit?: (cwd: string, args: string[], input?: string) => string | Promise<string>;
+  destinationPrFetch?: (args: string[]) => unknown | Promise<unknown>;
+}
+interface TaskIdDestinationSnapshot {
+  planTexts: readonly string[];
+  ids: readonly string[];
+  openPrTexts: readonly string[];
+}
+
+/** A fetched, commit-pinned ID population. Dirty checkout bytes never replace the fetched plan. */
+export async function taskIdDestinationSnapshot(
+  checks: TaskIdDestinationChecks = {}, offline = false,
+): Promise<TaskIdDestinationSnapshot | undefined> {
+  let stage: "switch" | "offline" | "fetch" | "plan" | "pulls" = "switch";
+  try {
+    const destination = planDestinationRepository((checks.destinationStateDir ?? instanceStateDir)());
+    if (destination.outcome === "off") return undefined;
+    if (destination.outcome === "unreadable") throw new Error("unreadable host switch");
+    if (offline) { stage = "offline"; throw new Error("selected catalog requires a fresh read"); }
+    const run = async (cwd: string, args: string[], input?: string): Promise<string> =>
+      checks.destinationGit ? await checks.destinationGit(cwd, args, input) : await hostWorktreeGitAsync(cwd, args, { timeout: DEFAULT_GH_CALL_TIMEOUT_MS, ...(input === undefined ? {} : { input }) });
+    stage = "fetch";
+    await run(destination.checkoutDir, ["fetch", "--no-tags", "origin", "main"]);
+    stage = "plan";
+    const commit = (await run(destination.checkoutDir, ["rev-parse", "--verify", "origin/main^{commit}"])).trim();
+    if (!/^[a-f0-9]{40}$/.test(commit)) throw new Error("invalid commit");
+    const paths = (await run(destination.checkoutDir, ["ls-tree", "-r", "--name-only", commit, "--", "plan/tasks.yaml", "plan/tasks.d/"]))
+      .split("\n").filter(path => path === "plan/tasks.yaml" || /^plan\/tasks\.d\/[^/]+\.ya?ml$/.test(path));
+    if (!paths.includes("plan/tasks.yaml")) throw new Error("missing plan");
+    const texts = await readBlobsAtRefAsync((args, input) => run(destination.checkoutDir, args, input), commit, paths);
+    const tasks = texts.flatMap(text => parseTasksFromYaml(text, "plan destination", undefined, {}, "preserve-external"));
+    const ids = tasks.map(task => task.id);
+    if (new Set(ids).size !== ids.length) throw new Error("duplicate task id");
+    stage = "pulls";
+    const pulls = await fetchBoardPrsRestAsync(destination.owner, destination.repo, async args => checks.destinationPrFetch ? await checks.destinationPrFetch(args) : await ghJsonAsync(args), undefined, "open");
+    if (pulls.truncated || pulls.rows.some(row => !Number.isSafeInteger(row.number) || row.number <= 0 ||
+        row.state !== "OPEN" || row.headRefName === "")) throw new Error("incomplete open PR population");
+    const openPrTexts = pulls.rows.map(row => [row.title, row.body, row.headRefName].join("\n"));
+    return { planTexts: texts, ids, openPrTexts };
+  } catch {
+    // Upstream responses, private repository names and checkout paths are not a safe diagnostic vocabulary.
+    // A selected source that did not answer must refuse, never become an empty catalog or an advisory floor.
+    throw new Error(`plan destination is unreadable at ${stage}`);
+  }
+}
+
+/** Only the snapshot reader's finite stage vocabulary may reach a public-facing failure. */
+function taskIdDestinationFailureReason(error: unknown): string {
+  return error instanceof Error && /^plan destination is unreadable at (switch|offline|fetch|plan|pulls)$/.test(error.message)
+    ? error.message : "plan destination is unreadable at an unknown stage";
+}
+
+/** Prepare private Git/API reads off the caller loop, then use the existing public mint fold. */
+export async function mintNextTaskIdWithHistoryAsync(opts: Parameters<typeof mintNextTaskIdWithHistory>[0]): Promise<MintedTaskIdWithHistory> {
+  const snapshot = opts.destinationSnapshot === undefined ? await taskIdDestinationSnapshot(opts.destination) : opts.destinationSnapshot;
+  return mintNextTaskIdWithHistory({ ...opts, destinationSnapshot: snapshot ?? null });
+}
+
 export function mintNextTaskIdWithHistory(opts: {
   planPath: string;
   repoRoot: string;
   openPrTexts?: () => string[];
   gitRunner?: (args: string[]) => string;
+  destination?: TaskIdDestinationChecks;
+  destinationSnapshot?: TaskIdDestinationSnapshot | null;
 }): MintedTaskIdWithHistory {
+  // This synchronous fold never adds network work to a daemon loop. A selected catalog
+  // requires the awaited snapshot supplied by the async entry or its owning command.
+  if (opts.destinationSnapshot === undefined && planDestinationRepository((opts.destination?.destinationStateDir ?? instanceStateDir)()).outcome !== "off") {
+    throw new Error("plan destination needs an awaited snapshot before minting");
+  }
+  const destination = opts.destinationSnapshot ?? undefined;
   const planRelPathForRemote = relative(opts.repoRoot, dirname(opts.planPath));
   // W1-T2710 — THE WIRING END, and the reason it lives here rather than in `task-id.ts`. That
   // module is deliberately free of child-process access (its three sources are file reads and an
@@ -13079,6 +13362,7 @@ export function mintNextTaskIdWithHistory(opts: {
   const base = mintNextTaskId({
     planPath: opts.planPath,
     openPrTexts: opts.openPrTexts,
+    ...(destination ? { additionalPlanTexts: () => destination.planTexts, additionalOpenPrTexts: () => destination.openPrTexts } : {}),
     remotePlanCeiling:
       !isAbsolute(planRelPathForRemote) && !planRelPathForRemote.startsWith("..")
         ? () => remotePlanCeilingOnRef(opts.repoRoot, planRelPathForRemote === "" ? "." : planRelPathForRemote, opts.gitRunner)
@@ -15326,6 +15610,20 @@ export function callerSweepCommand(
  *  `machineAuthorVerifyViolation` refuses at `verify: auto`. The command stages the linter-checked
  *  bytes outside its checkout and uses the same gated landing bridge as the scheduled rung, so a
  *  manual inspection cannot leave a daemon checkout unable to refresh. */
+/** The production CLI awaits its new source reads; the report/landing API stays synchronous. */
+export async function ciLearningCommandWithDestination(
+  rest: string[], checks: TaskIdDestinationChecks = {}, command: typeof ciLearningCommand = ciLearningCommand,
+): Promise<number> {
+  let destinationSnapshot: TaskIdDestinationSnapshot | null = null;
+  let destinationFailure: string | undefined;
+  try { destinationSnapshot = (await taskIdDestinationSnapshot(checks)) ?? null; }
+  catch (error) {
+    const reason = taskIdDestinationFailureReason(error);
+    destinationFailure = reason; // Report-only/deduplicated paths do not mint; a real mint refuses this cause.
+  }
+  return command(rest, { destinationSnapshot, destinationFailure });
+}
+
 export function ciLearningCommand(
   rest: string[],
   deps: CiFailuresCommandDeps & {
@@ -15339,6 +15637,8 @@ export function ciLearningCommand(
     /** W1-T3542 — the isolated landing bridge. Injected so a test writes nothing; production
      *  stages outside the checkout and lands only through the dedicated gated PR. */
     landShards?: typeof landCiLearningShards;
+    destinationSnapshot?: TaskIdDestinationSnapshot | null;
+    destinationFailure?: string;
   } = {},
 ): number {
   const badArg = unknownArgError("ci-learning", rest, ["--days"], ["--force"]);
@@ -15465,10 +15765,11 @@ export function ciLearningCommand(
     // MEASURED: without this, an unreadable plan under the run's root took the whole verb out with
     // ENOENT, reddening three of W1-T2959's tests, which pass a tmp root with no plan in it.
     try {
+      const destinationSnapshot = deps.destinationSnapshot;
       const filing = land(result.drafts, checkoutRoot, {
         stateRoot: root,
         mintTaskId: ciLearningTaskIdMinter(checkoutRoot, (step, fields) =>
-          appendLedger(join(root, "state", LEDGER_FILENAME), { run_id: `CI-LEARNING-${process.pid}`, task_id: "DAEMON", step, ...fields })),
+          appendLedger(join(root, "state", LEDGER_FILENAME), { run_id: `CI-LEARNING-${process.pid}`, task_id: "DAEMON", step, ...fields }), undefined, { destinationSnapshot, destinationFailure: deps.destinationFailure }),
         planOrigins,
         renderShard: ciLearningShardYaml,
         recordVerdict: ciLearningRecordVerdict,
@@ -15514,7 +15815,7 @@ const gardenMintBudgets = new Map<string, GardenMintBudget>();
 export function ciLearningTaskIdMinter(root: string, log?: (step: string, fields: Record<string, unknown>) => void,
   executeAsync: (file: string, args: string[], options: { maxBuffer: number; timeout: number; killSignal: "SIGKILL" }) => Promise<{ stdout: string; stderr?: string }> = (file, args, options) => execFileLoopBounded(file, args, { ...options, encoding: "utf8" }),
   opts: { budget?: GardenMintBudget; clock?: Pick<Clock, "now">; pollIntervalMs?: () => number;
-    loadPolicy?: () => { values: Pick<Policy["values"], "pollIntervalMs"> } } = {}):
+    loadPolicy?: () => { values: Pick<Policy["values"], "pollIntervalMs"> }; destinationSnapshot?: TaskIdDestinationSnapshot | null; destinationFailure?: string } = {}):
   ((filingBranch?: string) => string) & { async: (filingBranch: string) => Promise<string>; heldSha: (taskId: string) => string | undefined } & GardenTaskIdRelease {
   let budget = opts.budget ?? gardenMintBudgets.get(root);
   if (!budget) {
@@ -15530,6 +15831,7 @@ export function ciLearningTaskIdMinter(root: string, log?: (step: string, fields
   const releaseOpts = (reason: string) => ({ reason, lane: "garden", log });
   const gitAt = (args: string[], timeout: number) => spawnSync("git", args, { cwd: root, encoding: "utf8", timeout, killSignal: "SIGKILL" });
   const mintSync = (filingBranch?: string) => {
+    if (opts.destinationFailure) throw new Error(opts.destinationFailure);
     const started = now();
     const bound = mintBudget.boundMs();
     const runGit = (args: string[]) => {
@@ -15540,6 +15842,7 @@ export function ciLearningTaskIdMinter(root: string, log?: (step: string, fields
       return result;
     };
     const mint = mintNextTaskIdWithHistory({ planPath: join(root, "plan", "tasks.yaml"), repoRoot: root,
+      destinationSnapshot: opts.destinationSnapshot,
       gitRunner: (args) => {
         const result = runGit(args);
         if (result.status !== 0) throw new Error(result.stderr || String(result.error));
@@ -15586,11 +15889,11 @@ export function ciLearningTaskIdMinter(root: string, log?: (step: string, fields
           `import { format } from "node:util";
            const rows = [];
            console.log = (...args) => rows.push({ say: format(...args) });
-           const { ciLearningTaskIdMinter } = await import(${JSON.stringify(import.meta.url)});
+           const { ciLearningTaskIdMinter, taskIdDestinationSnapshot } = await import(${JSON.stringify(import.meta.url)});
            const { GardenMintBudget } = await import(${JSON.stringify(new URL("./lib/gardener.js", import.meta.url).href)});
            try {
              const minter = ciLearningTaskIdMinter(process.argv[1], (step, fields) => rows.push({ step, fields }), undefined,
-               { budget: new GardenMintBudget(() => ${JSON.stringify(bound)}) });
+               { budget: new GardenMintBudget(() => ${JSON.stringify(bound)}), destinationSnapshot: (await taskIdDestinationSnapshot()) ?? null });
              const id = minter(process.argv[2]);
              process.stdout.write(JSON.stringify({ id, sha: minter.heldSha(id), rows }));
            } catch (error) {
@@ -16653,7 +16956,7 @@ export function mergedTriageSubjects(worktreePath: string, limit = 500): string[
 /** Injectable seams for `--reserve` (W1-T1055) — the reserver itself, the git runner behind the
  *  holder read, and the holder classifier. Real callers pass none of them; a test drives every arm
  *  (created / taken-then-created / unreachable) without a git remote. */
-export interface NextTaskIdReserveDeps {
+export interface NextTaskIdReserveDeps extends TaskIdDestinationChecks {
   repoRoot?: string;
   reserver?: RemoteRefReserver;
   runGit?: (args: string[]) => { status: number | null; stdout: string; stderr: string };
@@ -16966,6 +17269,7 @@ function buildReservationAuditReport(opts: {
   self: { owner: string; repo: string };
   deps: NextTaskIdReserveDeps;
   reap?: boolean;
+  destinationSnapshot?: TaskIdDestinationSnapshot;
 }): ReservationAuditReport | "unreadable-reservations" {
   const run = gitRunAdapter(opts.deps.runGit ?? ((args: string[]) => {
     const r = spawnSync("git", args, { cwd: opts.deps.repoRoot ?? repoRoot, encoding: "utf8", maxBuffer: 1 << 26 });
@@ -16976,6 +17280,7 @@ function buildReservationAuditReport(opts: {
   if (refs.status === "unknown") return "unreadable-reservations";
   const reservations = refs.refs.map((r) => ({ ...r, anchor: readReservationAuditAnchor(r.ref, run) }));
   const declaredIds = reservationAuditPlanIds(opts.planPath);
+  for (const id of opts.destinationSnapshot?.ids ?? []) declaredIds.add(id);
   const historicalIds = new Set(opts.deps.auditHistoryIds ? opts.deps.auditHistoryIds().map((n) => `W1-T${n}`) : [...reservationAuditHistoryIds(opts.planPath)]);
   const branches = openRunBranchesByTaskId(run);
   let openPrTrailerIds: Set<string> | "unknown" = "unknown";
@@ -16987,6 +17292,11 @@ function buildReservationAuditReport(opts: {
       openPrTrailerIds = idsFromOpenPrTrailers((opts.deps.openPrTexts ?? (() => openPrMintTexts(opts.self.owner, opts.self.repo)))());
     } catch (err) {
       degraded.push(`open PR read failed: ${String(err)}`);
+    }
+  }
+  if (openPrTrailerIds !== "unknown") {
+    for (const text of opts.destinationSnapshot?.openPrTexts ?? []) {
+      for (const id of mentionedTaskIds(text).filter(isAllocatableTaskId)) openPrTrailerIds.add(`W1-T${id}`);
     }
   }
   if (branches.status === "unknown") degraded.push(branches.reason);
@@ -17007,7 +17317,7 @@ function buildReservationAuditReport(opts: {
 }
 
 function buildReservationReapReport(
-  opts: { planPath: string; self: { owner: string; repo: string }; deps: NextTaskIdReserveDeps },
+  opts: { planPath: string; self: { owner: string; repo: string }; deps: NextTaskIdReserveDeps; destinationSnapshot?: TaskIdDestinationSnapshot },
   run: ReturnType<typeof gitRunAdapter>,
 ): ReservationAuditReport {
   const clock = clockFromMillisFn(opts.deps.auditNowMs);
@@ -17063,6 +17373,7 @@ function buildReservationReapReport(
     return rows;
   }, [] as ReservationAuditPull[]);
   const declaredIds = read("plan read", () => reservationAuditPlanIds(opts.planPath), new Set<string>());
+  for (const id of opts.destinationSnapshot?.ids ?? []) declaredIds.add(id);
   const namespace = `refs/rmd-reap/${randomUUID()}/`;
   let historicalIds = new Set<string>();
   try {
@@ -17093,6 +17404,9 @@ function buildReservationReapReport(
     }, undefined);
   }
   const openPrTrailerIds = idsFromOpenPrTrailers(pulls.filter(p => p.state === "open").map(p => p.body ?? ""));
+  for (const text of opts.destinationSnapshot?.openPrTexts ?? []) {
+    for (const id of mentionedTaskIds(text).filter(isAllocatableTaskId)) openPrTrailerIds.add(`W1-T${id}`);
+  }
   for (const pull of pulls.filter(p => p.state === "open")) {
     const match = RUN_BRANCH_TASK_REF_RE.exec(`refs/heads/${pull.head.ref}`);
     if (match) openPrTrailerIds.add(match[1]);
@@ -17473,8 +17787,15 @@ export async function nextTaskIdCommand(
       return 2;
     }
   }
+  let destinationSnapshot: TaskIdDestinationSnapshot | undefined;
+  try {
+    destinationSnapshot = await taskIdDestinationSnapshot(deps, offline);
+  } catch (error) {
+    console.error(`### rmd next-task-id: ${(error as Error).message}`);
+    return 2;
+  }
   if (rest.includes("--audit")) {
-    const report = buildReservationAuditReport({ planPath, offline, thresholdDays: auditAgeDays, self, deps, reap });
+    const report = buildReservationAuditReport({ planPath, offline, thresholdDays: auditAgeDays, self, deps, reap, destinationSnapshot });
     if (report === "unreadable-reservations") {
       console.error("### rmd next-task-id --audit: cannot read origin refs/rmd-id/*");
       return 2;
@@ -17495,6 +17816,7 @@ export async function nextTaskIdCommand(
       planPath,
       repoRoot: mintRepoRoot,
       openPrTexts: offline ? undefined : (deps.openPrTexts ?? (() => openPrMintTexts(self.owner, self.repo))),
+      destinationSnapshot: destinationSnapshot ?? null,
     });
   } catch (e) {
     console.error(`### rmd next-task-id: ${(e as Error).message}`);
@@ -17591,6 +17913,8 @@ export async function nextTaskIdCommand(
       );
       return 2;
     }
+    // W1-T12453: a degraded source that does not refuse is a note on stderr; stdout keeps the id lines.
+    for (const d of mint.degraded) console.error(`### rmd next-task-id: DEGRADED ${d.source}: ${d.reason}`);
     const contested: string[] = [];
     const run = deps.runGit ?? ((args: string[]) => spawnSync("git", args, { cwd: repoRoot, encoding: "utf8" }));
     // W1-T4414: `--branch` names the holder the filing PR's head must match; absent keeps the current branch.
@@ -17633,7 +17957,7 @@ export async function nextTaskIdCommand(
         contestedAt.push(contested.length);
         return handle;
       });
-      if (held.length) console.log(describeMintWithHistory(mintForReservationAttempt(mint, held[0].id, held[0].taskId)));
+      if (held.length) console.log(describeMintWithHistory({ ...mintForReservationAttempt(mint, held[0].id, held[0].taskId), degraded: [] }));
       held.forEach((handle, i) => {
         for (const line of contested.slice(contestedAt[i - 1] ?? 0, contestedAt[i])) console.log(line);
         // W1-T6026: a takeover rides the RESERVED line itself, and leaves one durable row.
@@ -17649,6 +17973,8 @@ export async function nextTaskIdCommand(
       if (error !== undefined) throw error;
       for (const line of overlapAdvisoryLines(rest, offline, self.owner, self.repo, planPath, overlapDeps))
         (overlapDeps.say ?? console.log)(line);
+      // W1-T12453: the id is held, so the reservation succeeded; the notes above do not undo it.
+      return 0;
     } catch (e) {
       const err = e as TaskIdReservationError;
       console.error(describeReservationRefusal(err.outcome, `${err.message}${requestedMaxScan === undefined ? "" : ` (max-scan: ${requestedMaxScan})`}`));
@@ -18352,6 +18678,7 @@ export function creditProjectionWithReadState(
   checkoutRoot = repoRoot,
   creditBuilder: typeof buildCreditCandidates = buildCreditCandidates,
   github?: GitHub,
+  catalogPlan?: Plan,
 ): { ids: Set<string>; unknownReason?: string; boardFloor?: string; unreadPrIds?: Set<string>; windowShort?: readonly string[] } {
   const config = configOverride ?? loadConfig();
   const ledgerPath = ledgerPathFor(config);
@@ -18359,7 +18686,7 @@ export function creditProjectionWithReadState(
   // reaching for the GitHub gateway from an isolated or not-yet-initialized checkout.
   if (!existsSync(ledgerPath)) return { ids: new Set() };
   const self = resolveOwnerRepo();
-  const plan = loadPlan(join(checkoutRoot, "plan", "tasks.yaml"));
+  const plan = catalogPlan ?? loadPlan(join(checkoutRoot, "plan", "tasks.yaml"));
   const gateway = github ?? buildBatchedGithub(self.owner, self.repo);
   const candidates = creditBuilder(self.owner, self.repo, plan, ledgerPath, undefined, gateway);
   const reconcilable = candidates.filter(creditIsReconcilable);
@@ -18379,21 +18706,38 @@ export function creditProjectionWithReadState(
   return projection;
 }
 
-export function defaultCreditedMergedIds(configOverride?: Config, checkoutRoot = repoRoot, creditBuilder: typeof buildCreditCandidates = buildCreditCandidates): Set<string> {
-  return creditProjectionWithReadState(configOverride, checkoutRoot, creditBuilder).ids;
+export function defaultCreditedMergedIds(configOverride?: Config, checkoutRoot = repoRoot,
+  creditBuilder: typeof buildCreditCandidates = buildCreditCandidates, catalogPlan?: Plan): Set<string> {
+  return creditProjectionWithReadState(configOverride, checkoutRoot, creditBuilder, undefined, catalogPlan).ids;
 }
 
 /** W1-T3970: production's adapter keeps the cadence map testable without running the rest of the
  * report. The real hook supplies the real shard reader and landing bridge; focused tests supply
  * the same seams with a synthetic map and prove both the landed and fail-closed arms. */
-export interface PlanReconcileProductionInputOptions extends Omit<PlanReconcileCadenceInputOptions, "land"> {
+export interface PlanReconcileProductionInputOptions extends Omit<PlanReconcileCadenceInputOptions, "land" | "creditedMergedIds"> {
   land?: PlanReconcileLand;
+  creditedMergedIds: (plan?: Plan) => ReadonlySet<string>;
+}
+export interface CatalogPlanReconcileProductionInputOptions extends PlanReconcileProductionInputOptions {
+  stateDir: string;
+  opsApi?: OpsCatalogApi;
+  log?: NonNullable<LandFeedbackAsyncOpts["log"]>;
 }
 
-/** The cadence input plus `settled` (W1-T9695): the hook awaits the landing the sync cadence started. */
-export type PlanReconcileProductionInput = PlanReconcileCadenceOpts & { settled: () => Promise<void> };
+/** The cadence input plus its awaited landing; only a finite catalog outcome is added. */
+export type PlanReconcileProductionInput = PlanReconcileCadenceOpts & {
+  settled: () => Promise<void>;
+  catalogOutcome?: CatalogStatusContext["outcome"];
+};
 
-export function buildPlanReconcileProductionInput(deps: PlanReconcileProductionInputOptions): PlanReconcileProductionInput | undefined {
+export function buildPlanReconcileProductionInput(deps: CatalogPlanReconcileProductionInputOptions): Promise<PlanReconcileProductionInput | undefined>;
+export function buildPlanReconcileProductionInput(deps: PlanReconcileProductionInputOptions): PlanReconcileProductionInput | undefined;
+export function buildPlanReconcileProductionInput(deps: PlanReconcileProductionInputOptions | CatalogPlanReconcileProductionInputOptions): PlanReconcileProductionInput | undefined | Promise<PlanReconcileProductionInput | undefined> {
+  return "stateDir" in deps ? buildCatalogPlanReconcileInput(deps) : buildPublicPlanReconcileInput(deps);
+}
+
+/** The unconfigured path retains the original calls, bytes, threshold and local lint hold. */
+function buildPublicPlanReconcileInput(deps: PlanReconcileProductionInputOptions): PlanReconcileProductionInput | undefined {
   const landing = planReconcileLanding(deps.checkoutRoot, () => ({ targetRepository: resolveOwnerRepo(), landingOwner: "measurement-cadence" }), deps.land);
   try {
     const cadence = buildPlanReconcileCadenceInput({
@@ -18404,10 +18748,162 @@ export function buildPlanReconcileProductionInput(deps: PlanReconcileProductionI
     });
     return { ...cadence, settled: landing.settled };
   } catch {
-    // An unavailable config, plan, ledger or credit projection must not abort the other
-    // measurement-cadence rungs. Omit this optional rung for the tick and retry next time.
+    // An unreadable public projection still omits this optional rung, never reporting a healthy empty pass.
     return undefined;
   }
+}
+
+/** Flip queued status scalars, preserving the catalog bytes except for a proof marker on ambiguous monolith lines. */
+function mergedCatalogStatusBytes(text: string, taskIds: ReadonlySet<string>, monolithic = false): string {
+  const document = parseDocument(text);
+  if (document.errors.length || !isSeq(document.contents)) throw new Error("ops-status-source-malformed");
+  const sourceLines = monolithic ? new Set(text.split("\n")) : undefined;
+  const edits: Array<{ start: number; end: number; text: string }> = [];
+  const seen = new Set<string>();
+  for (const item of document.contents.items) {
+    if (!isMap<unknown, unknown>(item)) throw new Error("ops-status-source-malformed");
+    const id = item.get("id");
+    if (typeof id !== "string" || !taskIds.has(id)) continue;
+    const status = item.get("status", true);
+    if (item.has("retirement") || !isScalar(status) || !status.range || seen.has(id)) {
+      throw new Error("ops-status-source-changed");
+    }
+    const value: unknown = status.value;
+    if (value !== "queued") throw new Error("ops-status-source-changed");
+    const [start, end] = status.range, old = text.slice(start, end);
+    let replacement = old.startsWith('"') ? '"merged"' : old.startsWith("'") ? "'merged'" : "merged";
+    if (monolithic) {
+      // A proof for `status: merged` is ambiguous when another row already has that value. Add a
+      // YAML comment only in that collision case; it keeps the task value unchanged and gives the
+      // landing PR a line that exists only in its candidate tree.
+      const lineStart = text.lastIndexOf("\n", start - 1) + 1;
+      const newline = text.indexOf("\n", end);
+      const lineEnd = newline < 0 ? text.length : newline;
+      const before = text.slice(lineStart, start), after = text.slice(end, lineEnd);
+      const candidate = before + replacement + after;
+      if (sourceLines?.has(candidate)) replacement += ` # plan-reconcile ${id}`;
+    }
+    edits.push({ start, end, text: replacement }); seen.add(id);
+  }
+  if (seen.size !== taskIds.size) throw new Error("ops-status-source-missing-task");
+  for (const edit of edits.sort((a, b) => b.start - a.start)) text = text.slice(0, edit.start) + edit.text + text.slice(edit.end);
+  return text;
+}
+
+async function buildCatalogPlanReconcileInput(deps: CatalogPlanReconcileProductionInputOptions): Promise<PlanReconcileProductionInput | undefined> {
+  if (planDestinationRepository(deps.stateDir).outcome === "off") return buildPublicPlanReconcileInput(deps);
+  let context: CatalogStatusContext;
+  try { context = await readCatalogStatusContext(loadPlan(join(deps.checkoutRoot, "plan", "tasks.yaml")), deps.stateDir, deps.opsApi); }
+  catch (error) { void error; deps.log?.("plan.reconcile.unknown", { reason: "public-source-unreadable" }); return undefined; }
+  if (context.outcome === "off") return buildPublicPlanReconcileInput(deps);
+  const reportUnknown = (outcome: CatalogStatusContext["outcome"]) => {
+    if (outcome !== "ok" && outcome !== "off") deps.log?.("plan.reconcile.unknown", { reason: `ops-${outcome}` });
+  };
+  reportUnknown(context.outcome);
+  let credited: ReadonlySet<string>;
+  try { credited = deps.creditedMergedIds(context.plan); }
+  catch (error) { void error; deps.log?.("plan.reconcile.unknown", { reason: "credit-projection-unreadable" }); return undefined; }
+  const publicInput = buildPublicPlanReconcileInput({ ...deps, creditedMergedIds: () => credited });
+  if (!publicInput) return undefined;
+  const target = context.destination, pin = context.commit, ops = context.opsPlan;
+  if (context.outcome !== "ok" || !target || !pin || !ops || ops.tasks.length === 0) return { ...publicInput, catalogOutcome: context.outcome };
+  const sources = new Map<string, string>(), taskPaths = new Map<string, string>();
+  try {
+    const head = (await hostWorktreeGitAsync(target.checkoutDir, ["rev-parse", "HEAD"])).trim();
+    if (head !== pin) {
+      // The checkout may lag the API-pinned default branch. Fetch objects and the tracking ref without
+      // switching its branch; only proceed when the fetched main is the same commit as the read snapshot.
+      await hostWorktreeGitAsync(target.checkoutDir, ["fetch", "--quiet", "--no-tags", "origin",
+        "+refs/heads/main:refs/remotes/origin/main"]);
+      if ((await hostWorktreeGitAsync(target.checkoutDir, ["rev-parse", "origin/main"])).trim() !== pin) {
+        throw new Error("ops-status-source-moved");
+      }
+    }
+    for (const task of ops.tasks) {
+      const source = task.sourcePath;
+      if (!source || !/^(?:tasks\.yaml|tasks\.d\/[^/]+\.ya?ml)$/.test(source)) throw new Error("ops-status-source-unbound");
+      const path = `plan/${source}`; taskPaths.set(task.id, path);
+      if (!sources.has(path)) sources.set(path, await hostWorktreeGitAsync(target.checkoutDir, ["show", `${pin}:${path}`]));
+    }
+  } catch (error) {
+    // The public group remains valid; catalogOutcome carries the private failure without adding ops rows.
+    void error; reportUnknown("unreadable"); return { ...publicInput, catalogOutcome: "unreadable" };
+  }
+  const pending: Promise<void>[] = [];
+  // Observe rejection immediately, retaining the original promise for the caller's later settlement.
+  const retainSettlement = (result: Promise<void>): void => {
+    pending.push(result); void result.catch(() => {
+      // The observer result is unused. pending retains the original rejection for settled()'s
+      // allSettled and failure propagation; this callback never replaces that promise.
+    });
+  };
+  const opsLanding = planReconcileLanding(target.checkoutDir, () => ({
+    targetRepository: { owner: target.owner, repo: target.repo }, landingOwner: "measurement-cadence", log: deps.log,
+    planPrPreflight: async (sha, pr) => {
+      // A candidate based on a newer main must never overwrite it with bytes read from our older pin.
+      // Later main changes are left to the ordinary three-way PR merge and its required gates.
+      if ((await hostWorktreeGitAsync(target.checkoutDir, ["rev-parse", `${sha}^`])).trim() !== pin) throw new Error("ops-status-source-moved");
+      return planPrPreflightAtCommitAsync(target.checkoutDir, sha, {
+        ...pr,
+        codeRoot: deps.checkoutRoot,
+        bodyProofRoot: "plan",
+      }, { log: deps.log });
+    },
+  }), deps.land);
+  const opsById = ops.byId;
+  return {
+    ...publicInput,
+    catalogOutcome: "ok",
+    // These are reducer rows, not source files or public serializers. Landing reads pinned source bytes above.
+    shards: [...publicInput.shards, ...ops.tasks.map(task => ({ taskId: task.id,
+      text: `- id: ${task.id}\n  status: ${task.status}\n${task.retirement ? "  retirement: retained\n" : ""}` }))],
+    isCreditedMerged: id => credited.has(id),
+    land: writes => {
+      let landed = 0; const held: PlanReconcileHeld[] = [];
+      const pub = writes.filter(write => !opsById.has(write.taskId)), selected = writes.filter(write => opsById.has(write.taskId));
+      try { if (pub.length) {
+        const result = publicInput.land?.(pub);
+        retainSettlement(publicInput.settled());
+        landed += result?.landed ?? pub.length; held.push(...(result?.held ?? []));
+      } } catch (error) {
+        // Preserve the original failure for settled(); the independent ops group still gets its attempt.
+        retainSettlement(Promise.reject(error));
+      }
+      if (selected.length) {
+        try {
+          const only = new Set(selected.map(write => write.taskId));
+          const lint = deps.lint ?? ((plan: Plan, ids: ReadonlySet<string>, root: string) => lintPlan(plan,
+            () => ({ moduleExists: rel => existsSync(join(root, rel)) }), ids));
+          const before = lint(context.plan, only, deps.checkoutRoot);
+          const changed = context.plan.tasks.map(task => only.has(task.id) ? { ...task, status: "merged" as const } : task);
+          const after = lint({ tasks: changed, byId: new Map(changed.map(task => [task.id, task])) }, only, deps.checkoutRoot);
+          const rules = (results: ReturnType<typeof lint>, id: string) => new Set((results.get(id)?.violations ?? []).filter(v => v.severity === "block").map(v => v.check));
+          const landable = selected.filter(write => {
+            const prior = rules(before, write.taskId), gained = [...rules(after, write.taskId)].filter(rule => !prior.has(rule));
+            for (const rule of gained) held.push({ taskId: write.taskId, rule }); return gained.length === 0;
+          });
+          const batch = takePlanReconcileBatch(landable, write => taskPaths.get(write.taskId)!);
+          const byPath = new Map<string, Set<string>>();
+          for (const write of batch) { const path = taskPaths.get(write.taskId)!; const ids = byPath.get(path) ?? new Set<string>(); ids.add(write.taskId); byPath.set(path, ids); }
+          const inputs = [...byPath].map(([relPath, ids]) => ({ relPath,
+            content: mergedCatalogStatusBytes(sources.get(relPath)!, ids, relPath === "plan/tasks.yaml") }));
+          if (inputs.length) {
+            opsLanding.land(inputs); retainSettlement(opsLanding.settled()); landed += batch.length;
+          }
+        } catch (error) {
+          // Preserve the original failure for settled(); already-started public work is not discarded.
+          retainSettlement(Promise.reject(error));
+        }
+      }
+      // Rejections remain awaited alongside the independent group; neither aborts its opportunity to land.
+      return { landed, held };
+    },
+    settled: async () => {
+      const results = await Promise.allSettled([publicInput.settled(), opsLanding.settled(), ...pending]);
+      const failure = results.find((result): result is PromiseRejectedResult => result.status === "rejected");
+      if (failure) throw failure.reason;
+    },
+  };
 }
 
 /** PRIMARY CONTROL: GitHub rejects pull-request diffs above this file count, so reconciliation
@@ -18726,8 +19222,19 @@ export function planLintOutcomeFromOutput(code: number, lines: string[], mergeBa
   };
 }
 
+/** W1-T12171: the plan monolith at `monolithRel` under `root` and its `tasks.d` shards, keyed by path under `root`. */
+function readPlanFiles(root: string, monolithRel: string): Map<string, string> {
+  const files = new Map([[monolithRel, readFileSync(join(root, monolithRel), "utf8")]]);
+  const shardRel = join(dirname(monolithRel), "tasks.d");
+  const names = existsSync(join(root, shardRel)) ? readdirSync(join(root, shardRel)) : [];
+  for (const name of names.filter((f) => f.endsWith(".yaml") || f.endsWith(".yml")).sort()) {
+    files.set(join(shardRel, name), readFileSync(join(root, shardRel, name), "utf8"));
+  }
+  return files;
+}
+
 export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps = {}): Promise<number> {
-  const badArg = unknownArgError("lint-plan", rest, ["--plan", "--base", "--repo-root"], ["--all", "--merge-base", "--offline"]);
+  const badArg = unknownArgError("lint-plan", rest, ["--plan", "--base", "--repo-root", "--code-root"], ["--all", "--merge-base", "--offline"]);
   if (badArg) {
     console.error(badArg + "\n" + USAGE);
     return 2;
@@ -18737,8 +19244,11 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
   const allFlag = rest.includes("--all");
   const offline = deps.offline === true || rest.includes("--offline");
   const checkoutRoot = deps.repoRoot ?? resolve(flagValue(rest, "--repo-root") ?? repoRoot);
+  // W1-T12171: the checkout that holds the code a task names. Without the option it is the plan's own checkout.
+  const codeRootArg = flagValue(rest, "--code-root");
+  const codeRoot = codeRootArg !== undefined ? resolve(codeRootArg) : checkoutRoot;
   let localRepoName: string | undefined;
-  try { localRepoName = resolveOwnerRepoAt(checkoutRoot).repo; } catch { /* no origin identity: preserve existing lint behavior */ }
+  try { localRepoName = resolveOwnerRepoAt(codeRoot).repo; } catch { /* no origin identity: preserve existing lint behavior */ }
   const planPathArg = flagValue(rest, "--plan");
   const planPath = planPathArg !== undefined ? resolve(planPathArg) : join(checkoutRoot, "plan", "tasks.yaml");
   // W1-T120: an explicit --plan OUTSIDE the root is refused here BY NAME, before --base/git-show
@@ -18758,13 +19268,29 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
   const baseLabel = scopeBase === baseRef ? baseRef : `${baseRef} at merge-base ${scopeBase!.slice(0, 12)}`;
   let plan: Plan;
   let planRaw: string;
+  const planRel = relative(checkoutRoot, planPath);
+  let planApart: { headFiles: PlanFiles; codeFiles: PlanFiles; codePlan: Plan } | undefined;
   try {
     planRaw = readFileSync(planPath, "utf8");
-    plan = loadPlan(planPath);
+    if (codeRootArg === undefined) {
+      plan = loadPlan(planPath);
+    } else {
+      const headFiles = readPlanFiles(checkoutRoot, planRel);
+      const codeFiles = readPlanFiles(codeRoot, planRel);
+      const codePlan = planFromFiles(codeFiles, (rel) => join(codeRoot, rel));
+      plan = planFromFiles(headFiles, (rel) => join(checkoutRoot, rel));
+      assertDependenciesKnown(plan.tasks, new Set([...plan.byId.keys(), ...codePlan.byId.keys()]));
+      planApart = { headFiles, codeFiles, codePlan };
+    }
   } catch (e) {
     console.error(`### rmd lint-plan: ${(e as Error).message}`);
     return 2;
   }
+  // The plan a dependency resolves in: with --code-root, a task the code root's plan holds also counts.
+  const dependencyPlan: Plan = planApart === undefined ? plan : (() => {
+    const tasks = [...plan.tasks, ...planApart.codePlan.tasks.filter((t) => !plan.byId.has(t.id))];
+    return { tasks, byId: new Map(tasks.map((t) => [t.id, t])) };
+  })();
 
   let scope: Set<string> | undefined;
   let oldById: Map<string, Task> | undefined;
@@ -18776,15 +19302,20 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
   // status flip to a closed state (queued -> merged, e.g. `plan-reconcile --write`'s own write) —
   // named here so the summary can report them, never silently drop them (design point (iv)).
   let statusFlipCarvedIds: string[] = [];
+  // W1-T12171: tasks moved unchanged from the code root's plan, and ids both plans hold with different bytes.
+  let movedIds: string[] = [];
+  let movedCandidates = new Set<string>();
+  let sourceConflicts: PlanSourceConflict[] = [];
   if (baseRef) {
-    const relPath = relative(checkoutRoot, planPath);
+    const relPath = planRel;
     const basePathCache = new Map<string, boolean>();
     pathExistsAtBase = (rel: string) => {
       const cached = basePathCache.get(rel);
       if (cached !== undefined) return cached;
       let exists = false;
       try {
-        hostWorktreeGit(checkoutRoot, ["cat-file", "-e", `${scopeBase}:${rel}`], { stdio: "ignore" });
+        // With --code-root, the code of a plan-only change is the code root's commit, unchanged.
+        hostWorktreeGit(codeRoot, ["cat-file", "-e", `${planApart === undefined ? scopeBase : "HEAD"}:${rel}`], { stdio: "ignore" });
         exists = true;
       } catch (e) {
         void e;
@@ -18817,8 +19348,15 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
       // guarded), while `rawChangedTaskIds` needs only the base's raw TEXT, so the changed-tasks
       // scope survives. A broken HEAD plan still fails loudly earlier, at `loadPlan(planPath)`.
       let oldPlan: Plan | undefined;
+      let basePlanFiles: PlanFiles | undefined;
       try {
-        oldPlan = loadPlan(tmpFile);
+        if (planApart === undefined) {
+          oldPlan = loadPlan(tmpFile);
+        } else {
+          const tmpFiles = readPlanFiles(tmpDir, "tasks.yaml");
+          basePlanFiles = new Map([...tmpFiles].map(([rel, text]) => [rel === "tasks.yaml" ? relPath : join(dirname(relPath), rel), text]));
+          oldPlan = planFromFiles(basePlanFiles, (rel) => `${scopeBase}:${rel}`);
+        }
       } catch (e) {
         console.error(
           `### rmd lint-plan: the base plan at ${baseRef} does not itself load ` +
@@ -18829,6 +19367,12 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
       scope = oldPlan ? changedTaskIds(oldPlan.tasks, plan.tasks) : new Set<string>();
       if (oldPlan) {
         oldById = new Map(oldPlan.tasks.map((t) => [t.id, t]));
+        if (planApart !== undefined && basePlanFiles !== undefined) {
+          // The base is the union of both plans; the plan repository's record wins for an id both hold.
+          for (const t of planApart.codePlan.tasks) if (!oldById.has(t.id)) oldById.set(t.id, t);
+          movedCandidates = movedTaskIds(plan.tasks, checkoutRoot, planApart.headFiles, planApart.codeFiles);
+          sourceConflicts = planSourceConflicts(basePlanFiles, planApart.codeFiles).filter((c) => !movedCandidates.has(c.id));
+        }
         // Tasks this PR introduces outright (absent at the base ref) — the only tasks that
         // can possibly BE a post-merge-amendment follow-up (W1-T180).
         newTaskIds = new Set(plan.tasks.filter((t) => !oldById!.has(t.id)).map((t) => t.id));
@@ -18873,6 +19417,7 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
       // it has left the population the open-task rules govern (design point (i)).
       const statusFlipCarve = statusFlipOnlyTaskIds(oldCorpusTexts, newCorpusTexts);
       for (const id of statusFlipCarve) scope.delete(id);
+      movedIds = [...movedCandidates].filter((id) => scope!.delete(id)).sort(); // neither a new filing nor an amendment
       statusFlipCarvedIds = [...statusFlipCarve].sort();
       const diffText = hostWorktreeGit(checkoutRoot, ["diff", "--no-ext-diff", "--unified=0", `${scopeBase}...HEAD`, "--", "src"], {
         maxBuffer: 64 * 1024 * 1024,
@@ -18936,10 +19481,10 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
       const github = (deps.ghGateway ?? ghGateway)(owner, repo);
       const evidenceIds = new Set(scope);
       const pending = [...scope];
-      while (pending.length > 0) for (const id of plan.byId.get(pending.pop()!)?.depends_on ?? []) {
+      while (pending.length > 0) for (const id of dependencyPlan.byId.get(pending.pop()!)?.depends_on ?? []) {
         if (!evidenceIds.has(id)) { evidenceIds.add(id); pending.push(id); }
       }
-      const tasks = plan.tasks.filter(t => evidenceIds.has(t.id));
+      const tasks = dependencyPlan.tasks.filter(t => evidenceIds.has(t.id));
       const scopedPlan: Plan = { tasks, byId: new Map(tasks.map(t => [t.id, t])) };
       dependencyStatusByTaskId = (deps.projectPlan ?? projectPlan)(scopedPlan, {
         ledgerPath: ledgerPathFor(config), github, writeCreditStore: SERVE_KEEPS_CREDITS_IN_MEMORY,
@@ -19036,7 +19581,7 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
       releasedIdsForAdmission = new Set<string>();
     }
   }
-  const knownRepos = knownPlanRepos(checkoutRoot); // W1-T4700: the repo rule's names, read once per pass
+  const knownRepos = knownPlanRepos(codeRoot); // W1-T4700: the repo rule's names, read once per pass
   for (const task of plan.tasks) {
     if (scope && !scope.has(task.id)) continue;
     if (wholePlanScope && !wholePlanScope.has(task.id)) continue;
@@ -19103,11 +19648,14 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
         // in the changed-tasks pass, so a newly filed or edited shard is refused before it
         // repeats the pattern.
         proofSelfPath: "block",
+        // W1-T11746: only this changed-task pass demands INVARIANT/NO-INVARIANTS declarations, so the
+        // whole-plan pass and dispatch leave the historical population valid.
+        requireDesignInvariantDeclaration: true,
       };
     }
     // impl-DO: the CALL-SITE check needs to know whether a module already exists, and the linter
     // is pure — so the predicate is supplied here, the one place holding a real checkout to ask.
-    opts.moduleExists = (rel: string) => existsSync(join(checkoutRoot, rel));
+    opts.moduleExists = (rel: string) => existsSync(join(codeRoot, rel));
     opts.localRepoName = localRepoName;
     opts.knownRepos = knownRepos;
     // W1-T9292: an unminted id BLOCKS only on a task this diff adds; one already on the base, every one in a whole-plan
@@ -19144,9 +19692,9 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
       }
       if (planOnlyFilingDiff !== undefined) opts.planOnlyFiling = planOnlyFilingDiff;
       // #12389: a changed shard's doctrine citations must resolve, or name a page its own files: creates. Read once.
-      doctrineCitations ??= doctrineCitationFactsAt(checkoutRoot);
+      doctrineCitations ??= doctrineCitationFactsAt(codeRoot);
       opts.doctrineCitations = doctrineCitations;
-      opts.resolveNameFilteredCandidates = (rawName: string) => resolveNameFilteredCandidates(checkoutRoot, rawName);
+      opts.resolveNameFilteredCandidates = (rawName: string) => resolveNameFilteredCandidates(codeRoot, rawName);
       // W1-T1225: a `grep:` proof's named file, read ONLY in --base mode (`scope` populated iff
       // `baseRef` was given) — the same changed-tasks scoping W1-T497's resolver above uses, and
       // for the identical reason: a changed task's own grep proofs name a handful of files, so
@@ -19154,7 +19702,7 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
       // 66.4s and this does not reopen it). Absent path (not written yet) ⇒ undefined, exactly
       // the "no predicate ⇒ no opinion" contract `opts.moduleExists` above already uses.
       opts.readGrepProofFile = (rel: string) => {
-        const abs = join(checkoutRoot, rel);
+        const abs = join(codeRoot, rel);
         if (!existsSync(abs)) return undefined;
         try {
           return readFileSync(abs, "utf8");
@@ -19172,7 +19720,7 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
       // file in head or base. This stays scoped: the whole-plan pass must not retroactively refuse
       // the standing population of older machine-authored records.
       opts.machineFilingAdmission = {
-        plan,
+        plan: dependencyPlan,
         releasedIds: releasedIdsForAdmission,
         isMerged: (candidate) => statusByTaskId?.get(candidate.id)?.merged ?? false,
         dependencyEvidence,
@@ -19256,6 +19804,11 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
   // pointed at a fixture tree with no policy.yaml of its own is a no-op here
   // (nothing to check), never a spurious failure over a file that was never
   // meant to exist at that path.
+  for (const c of sourceConflicts) {
+    failing++;
+    console.error(`✗ ${c.id}: the plan repository and the code root hold different bytes for this id: ` +
+      `${scopeBase}:${c.planPath} and ${join(codeRoot, c.codePath)}`);
+  }
   const policyFile = join(dirname(planPath), "policy.yaml");
   if (existsSync(policyFile)) {
     try {
@@ -19320,7 +19873,10 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
       statusFlipCarvedIds.length > 0
         ? ` (${statusFlipCarvedIds.length} status-flip-only, excluded from --base scope: ${statusFlipCarvedIds.join(", ")})`
         : "";
-    summary = `${checked} task(s) checked (${scope.size} new/changed vs ${baseLabel})${carvedNote} — ${failing} failing, ${warned} warning(s)`;
+    const movedNote = movedIds.length > 0
+      ? ` (${movedIds.length} moved unchanged from the code root, not judged: ${movedIds.join(", ")})`
+      : "";
+    summary = `${checked} task(s) checked (${scope.size} new/changed vs ${baseLabel})${carvedNote}${movedNote} — ${failing} failing, ${warned} warning(s)`;
   } else if (wholePlanScope) {
     summary =
       `${checked} task(s) checked (open tasks only) [scoped by ${wholePlanScopeKey}` +
@@ -21277,6 +21833,7 @@ async function triageClaimSweepForPass(
     }
   };
   let reserver = opts.claimReserver;
+  let landedStatus: ((id: string) => string | undefined) | undefined;
   if (reserver === undefined) {
     // The SAME clone the triage lane claims on (`repoDir`): a claim is only visible on its own origin.
     let repoDir: string;
@@ -21288,6 +21845,7 @@ async function triageClaimSweepForPass(
     }
     if (!existsSync(repoDir)) return undefined;
     reserver = triageClaimReserverAsyncFor(repoDir);
+    landedStatus = (id) => readLandedFeedbackEntry(repoDir, id)?.status;
   }
   const readRows =
     opts.readClaimLivenessRows ??
@@ -21295,7 +21853,7 @@ async function triageClaimSweepForPass(
       const read = readLedgerUnionRecordsSync(dirname(ledgerPath), { since: sinceIso, requireArchives: true, refuseIncomplete: true });
       return read.ok ? read.rows : undefined;
     });
-  const result = await sweepTriageClaims(candidates, reserver, { now, readRows, log });
+  const result = await sweepTriageClaims(candidates, reserver, { now, readRows, log, landedStatus });
   return result.held;
 }
 
@@ -21847,6 +22405,7 @@ export function buildMeasurementCadenceDaemonHooks(deps: {
       // hold, so a failure costs one skipped period rather than an unbounded immediate retry.
       if (deps.recordFire !== false) recordMeasurementCadenceFire(measurementCadenceMarkerPath(root), cadenceClock.date(), 24 * 60 * 60 * 1000);
       const coverageRunId = `MEASUREMENT-CADENCE-${cadenceClock.now()}`;
+      await recordRoutingExperimentResults({ stateDir: join(root, "state"), today: cadenceClock.iso().slice(0, 10) });
       const verifyHumanRunId = `VERIFY-HUMAN-CADENCE-${cadenceClock.iso()}`;
       // `repoRoot`, NOT `root` (which is `config.root`, the state volume) — see this function's own
       // parameter doc. The sibling `coverageImprovement` below already passes `repoRoot`.
@@ -21893,13 +22452,14 @@ export function buildMeasurementCadenceDaemonHooks(deps: {
       // cadence fire, and land through the scratch-index bridge rather than dirtying this daemon
       // checkout. A failed landing throws so the cadence records an error and retries later; it
       // must never report a successful reconciliation on an unlanded PR.
-      const planReconcile = buildPlanReconcileProductionInput({
-        checkoutRoot: repoRoot,
+      const planReconcile = await buildPlanReconcileProductionInput({
+        checkoutRoot: repoRoot, stateDir: join(root, "state"),
+        log: (step, extra = {}) => appendLedger(successorLedgerPath, { run_id: coverageRunId, step, ...extra } as LedgerLine),
         readShards: () => readPlanShards(join(resolveRepoLayout(repoRoot).planDir, "tasks.d")),
         // Keep the cadence's explicit config/root boundary. The hook is testable with an
         // injected Config, and an unattended target must never fall back to the operator's HOME
         // config just because the credit projection is evaluated lazily.
-        creditedMergedIds: deps.creditedMergedIds ?? (() => defaultCreditedMergedIds(configFor(), repoRoot)),
+        creditedMergedIds: deps.creditedMergedIds ?? ((catalogPlan?: Plan) => defaultCreditedMergedIds(configFor(), repoRoot, buildCreditCandidates, catalogPlan)),
         land: deps.planReconcileLand,
       });
       const planReconcileOption =
@@ -23328,10 +23888,65 @@ async function retroCommand(
   // W1-T9240: the real attempt owns cancellation; waiting yields to a live async holder.
   // Publication precedes harvest acknowledgements and remains below the dry-run/integrity guards.
   const followupRegistryPath = join(config.root, "state", "inbox-proposals.json");
-  await withRetroPublicationCancellation(signal => publishFollowupHarvestAsync(gather.followups,
+  const followupOutcomes = await withRetroPublicationCancellation(signal => publishFollowupHarvestAsync(gather.followups,
     { registryPath: followupRegistryPath, ledgerPath }, { signal,
       log: (step, detail) => appendLedger(ledgerPath, { run_id: `RETRO-${retroReadStartedMs}`, task_id: "RETRO", step, ...detail }),
     }));
+  if (followupOutcomes.length > 0) {
+    const filingLog = (step: string, extra: Record<string, unknown> = {}) =>
+      appendLedger(ledgerPath, { run_id: `RETRO-${retroReadStartedMs}`, task_id: "RETRO", step, ...extra });
+    try {
+      const planOnMain = await loadPlanAtRefAsync(checkoutRoot, "plan/tasks.yaml", "origin/main");
+      const openPrOrigins = new Set<string>();
+      const openPages = (opts.openPrs ?? ghJson)([...openPrsRestArgs(owner, repo), "--paginate", "--slurp"]) as RestPullRow[][];
+      for (const pr of openPages.flat()) {
+        const pages = ghJson(["api", `repos/${owner}/${repo}/pulls/${pr.number}/files`, "--paginate", "--slurp"]) as Array<Array<{ filename: string; status: string }>>;
+        for (const file of pages.flat()) if (file.status !== "removed" && /^plan\/tasks\.d\/[^/]+\.yaml$/.test(file.filename)) {
+          if (pr.head === undefined) throw new Error(`missing head metadata for open PR ${pr.number}`);
+          const headSha = pr.head.sha;
+          if (typeof headSha !== "string" || !/^[0-9a-f]{40}$/i.test(headSha)) throw new Error(`unreadable head SHA for open PR ${pr.number}`);
+          const blob = ghJson(["api", `repos/${owner}/${repo}/contents/${file.filename}?ref=${headSha}`]) as { content: string };
+          const tasks = parseYaml(Buffer.from(blob.content, "base64").toString("utf8")) as Array<{ origin?: string }>;
+          for (const task of tasks) if (task.origin) openPrOrigins.add(task.origin);
+        }
+      }
+      const receipts = readLedgerLines(ledgerPath);
+      const runStarts = readLedgerUnionRecordsSync(dirname(ledgerPath), {
+        step: "run.start",
+        refuseIncomplete: true,
+      });
+      if (!runStarts.ok) throw new Error(`incomplete run-start ledger union: ${runStarts.unread.join(", ")}`);
+      const ratifiedIds = new Set(followupOutcomes.filter(o => o.routed && isRatifiedInLedger(receipts, o.proposalId))
+        .map(o => o.routed ? o.proposalId : ""));
+      await fileEligibleFollowups(followupOutcomes, {
+        planOnMain: planOnMain.tasks, openPrOrigins, ratifiedIds, log: filingLog,
+        sourceRisk: c => {
+          const row = runStarts.rows.findLast(r => r.step === "run.start" && r.run_id === c.runId);
+          return row?.risk === "low" || row?.risk === "medium" || row?.risk === "high" ? row.risk : undefined;
+        },
+        draft: proposals => draftProposalBatch(proposals, config, owner, repo, `FOLLOWUP-${nextLaneEpochMs()}`, filingLog),
+        fileBatch: async (payloads, onFiled, finalize) => {
+          let receipt: { prUrl: string; proposalIds: string[] } | undefined;
+          try {
+            await approveBatchCommand(payloads.map(p => p.proposalId), { config, automaticFollowups: { payloads, finalize },
+              onFiled: result => {
+                receipt = { prUrl: result.prUrl, proposalIds: result.accepted.map(p => p.proposalId) };
+                onFiled(receipt);
+              },
+            });
+          } catch (error) {
+            if (!receipt) throw error;
+            filingLog("followup.filing_gate_error", { reason: String(error), filing_pr: receipt.prUrl });
+          }
+          return receipt;
+        },
+      });
+    } catch (error) {
+      for (const outcome of followupOutcomes) if (outcome.routed) {
+        filingLog("followup.file_refused", { entry_id: outcome.candidate.entryId, reason: `filing-unreadable: ${String(error)}` });
+      }
+    }
+  }
 
   // W1-T2559: retro ships no code and supervises no worker, so G-17's Tier Invariant — which
   // exists to keep a supervisor strictly above what it reviews — does not bind it to plan
@@ -23989,10 +24604,11 @@ export const defaultAsyncUsageProbeRunner: AsyncUsageProbeRunner = async (bin, a
  * those have three different fixes: an SDK upgrade renamed the method, the session refused, or
  * the credential legitimately has no plan limits.
  */
-export type UsageProbeFailureStage = "spawn" | "parse" | "grant" | "sdk";
+export type UsageProbeFailureStage = "spawn" | "parse" | "grant" | "sdk" | "weekly-only";
 
-/** Injected sink for that failure — the real caller gets {@link ledgerUsageProbeFailure}. */
-export type UsageProbeFailureSink = (stage: UsageProbeFailureStage, reason: string) => void;
+/** Injected sink for that failure — the real caller gets {@link ledgerUsageProbeFailure}.
+ *  `shape` is {@link usageOutputShape} of the CLI output, for the parse and weekly-only stages. */
+export type UsageProbeFailureSink = (stage: UsageProbeFailureStage, reason: string, shape?: string) => void;
 
 /**
  * How much of the failure message reaches the ledger. Generous enough for the whole of a real
@@ -24019,7 +24635,7 @@ const USAGE_PROBE_REASON_MAX = 400;
  * the reason a best-effort read becomes a crash — if the ledger is unwritable, the caller still
  * gets its `undefined` and the drain still continues.
  */
-export function ledgerUsageProbeFailure(config: Config, stage: UsageProbeFailureStage, reason: string): void {
+export function ledgerUsageProbeFailure(config: Config, stage: UsageProbeFailureStage, reason: string, shape?: string): void {
   try {
     appendLedger(ledgerPathFor(config), {
       run_id: "USAGE-PROBE",
@@ -24027,6 +24643,7 @@ export function ledgerUsageProbeFailure(config: Config, stage: UsageProbeFailure
       step: "usage.probe_failed",
       stage,
       reason: reason.slice(0, USAGE_PROBE_REASON_MAX),
+      ...(shape !== undefined ? { shape: shape.slice(0, USAGE_PROBE_REASON_MAX) } : {}),
     });
   } catch {
     // Diagnostics are never worth a throw on this path.
@@ -24169,7 +24786,7 @@ export async function readUsageSnapshotPreferSdk(
     viaCli?: (onUnreadable: UsageProbeFailureSink) => UsageSnapshot | undefined | Promise<UsageSnapshot | undefined>;
   } = {},
 ): Promise<UsageSnapshot | undefined> {
-  const sink: UsageProbeFailureSink = (stage, reason) => ledgerUsageProbeFailure(config, stage, reason);
+  const sink: UsageProbeFailureSink = (stage, reason, shape) => ledgerUsageProbeFailure(config, stage, reason, shape);
   const viaSdk = deps.viaSdk ?? ((s) => readUsageSnapshotViaSdk(undefined, s, { onCredentialSeed: usageCredentialSink(config) }));
   // W1-T5719: the CLI fallback is AWAITED off the loop, never an `execFileSync` on it.
   const viaCli = deps.viaCli ?? ((s) => readUsageSnapshotAsync(config, defaultAsyncUsageProbeRunner, s));
@@ -24227,7 +24844,7 @@ function prepareUsageProbeEnv(config: Config, onUnreadable: UsageProbeFailureSin
 export function readUsageSnapshot(
   config: Config,
   runUsageProbe: UsageProbeRunner = defaultUsageProbeRunner,
-  onUnreadable: UsageProbeFailureSink = (stage, reason) => ledgerUsageProbeFailure(config, stage, reason),
+  onUnreadable: UsageProbeFailureSink = (stage, reason, shape) => ledgerUsageProbeFailure(config, stage, reason, shape),
 ): UsageSnapshot | undefined {
   let out: string;
   // ── SPAWN. Its own try, ending at the probe call — see the two-try note below. ───────────
@@ -24263,12 +24880,18 @@ export function readUsageSnapshot(
 /** The PARSE half, in its own try so a successful read that cannot be understood is `"parse"`,
  *  never `"spawn"`. Shared by the sync and async readers so the two cannot drift. */
 function parseUsageReporting(out: string, onUnreadable: UsageProbeFailureSink): UsageSnapshot | undefined {
+  let snap: UsageSnapshot;
   try {
-    return parseUsage(out);
+    snap = parseUsage(out);
   } catch (e) {
-    onUnreadable("parse", String((e as Error)?.message ?? e));
+    onUnreadable("parse", String((e as Error)?.message ?? e), usageOutputShape(out));
     return undefined;
   }
+  // W1-T12153: a readable snapshot with no session window. The row names the case; the weekly windows bind.
+  if (!snap.session) {
+    onUnreadable("weekly-only", "no 'Current session:' line in /usage output; read the weekly windows only", usageOutputShape(out));
+  }
+  return snap;
 }
 
 /**
@@ -24280,7 +24903,7 @@ function parseUsageReporting(out: string, onUnreadable: UsageProbeFailureSink): 
 export async function readUsageSnapshotAsync(
   config: Config,
   runUsageProbe: AsyncUsageProbeRunner = defaultAsyncUsageProbeRunner,
-  onUnreadable: UsageProbeFailureSink = (stage, reason) => ledgerUsageProbeFailure(config, stage, reason),
+  onUnreadable: UsageProbeFailureSink = (stage, reason, shape) => ledgerUsageProbeFailure(config, stage, reason, shape),
   timeoutMs: number = USAGE_PROBE_TIMEOUT_MS,
 ): Promise<UsageSnapshot | undefined> {
   let out: string;
@@ -24678,10 +25301,64 @@ function lifetimeHistory(
   };
 }
 
+const LIFETIME_HISTORY_STEPS = ["run.start", "daemon.spawn_infra_blocked", "verdict"];
+
+/**
+ * W1-T12235: the lifetime history's slice of each rotated ledger file. A rotated file does not change, so
+ * a start reads only the files that have no kept slice. A kept row holds its step and its whole ledger
+ * line: `replayedLifetimeLedgerLine` compares whole lines, and the live overlay shares that window.
+ */
+const LIFETIME_HISTORY_SLICE: EscalationTriageSlice = {
+  holder: "dispatch.lifetime-history",
+  steps: LIFETIME_HISTORY_STEPS,
+  sharedSnapshot: true,
+  project: (row) => typeof row.lifetime_line === "string" && Object.keys(row).length === 2
+    ? row
+    : { step: row.step, lifetime_line: JSON.stringify(row) },
+};
+
+interface LifetimeSliceRows {
+  rows: Array<{ step: string; raw: string; row: Record<string, unknown> }>;
+  archiveCount: number;
+  read: number;
+  fromSnapshot: number;
+  fromDigest: number;
+}
+
+/** The rows of every rotated file from the kept slices, oldest file first. Any doubt about a slice gives
+ * `fallback`, and the caller reads every rotated file as before W1-T12235. */
+async function lifetimeRowsFromSlices(stateDir: string): Promise<LifetimeSliceRows | { fallback: string }> {
+  try {
+    const reader = createEscalationTriageHistoryReader({ slice: LIFETIME_HISTORY_SLICE, parseAll: true });
+    const sliced = await reader.rotations(stateDir);
+    const load = reader.lastLoad();
+    if (sliced.rotations.length === 0 && sliced.unread.length === 0) return { fallback: "no_rotated_file" };
+    if (!sliced.ok) return { fallback: "rotated_file_not_kept" };
+    if (load.snapshotError !== undefined) return { fallback: `snapshot: ${load.snapshotError}`.slice(0, 200) };
+    const rows: LifetimeSliceRows["rows"] = [];
+    for (const rotation of sliced.rotations) {
+      for (const kept of rotation.rows) {
+        const { step, lifetime_line: raw } = kept;
+        if (typeof step !== "string" || typeof raw !== "string") return { fallback: "slice_row_malformed" };
+        const row: unknown = JSON.parse(raw);
+        if (row === null || typeof row !== "object" || Array.isArray(row) || (row as Record<string, unknown>).step !== step) {
+          return { fallback: "slice_row_malformed" };
+        }
+        rows.push({ step, raw, row: row as Record<string, unknown> });
+      }
+    }
+    return { rows, archiveCount: sliced.rotations.length, read: load.rotationsRead, fromSnapshot: sliced.held, fromDigest: load.digestHits };
+  } catch (error) {
+    const reason = (error instanceof Error ? error.message : String(error)).slice(0, 200);
+    return { fallback: reason };
+  }
+}
+
 /** Archive attribution retains per-task tallies and bounded start identities and pending verdict joins.
  * Per-run attribution is released at its terminal verdict; unknown starts remain charged.
- * `auditLedgerUnion` scans both rotation forms; if any archive is unreadable, this returns
- * `undefined` and the caller deliberately keeps the old live-only lifetime decision. */
+ * The rows come from the kept slices (W1-T12235). With no usable slice, `auditLedgerUnion` scans both
+ * rotation forms; if any archive is unreadable, this returns `undefined` and the caller deliberately
+ * keeps the old live-only lifetime decision. `loaded` is the `dispatch.lifetime_history_loaded` row. */
 export async function auditedLifetimeTalliesFromArchives(
   stateDir: string,
   ledgerPath: string = join(stateDir, LEDGER_FILENAME),
@@ -24693,20 +25370,33 @@ export async function auditedLifetimeTalliesFromArchives(
   archiveCount: number;
   unread: readonly string[];
   records: number;
+  loaded: Record<string, unknown>;
 }> {
   let handedOff = false;
   const accounting = lifetimeAccounting((failure) => { if (handedOff) onIndexUnavailable?.(failure); });
   const recentByStep = new Map<string, LifetimeReplayWindow>();
   try {
-  const scan = await auditLedgerUnion(stateDir, {
-    step: ["run.start", "daemon.spawn_infra_blocked", "verdict"],
-    dedupeWindowPerStep: MAX_RETAINED_LINES_PER_STEP,
-    onRecord: (row, raw) => {
-      const step = typeof row.step === "string" ? row.step : "";
-      if (replayedLifetimeLedgerLine(recentByStep, step, raw)) return;
+  const sliced = await lifetimeRowsFromSlices(stateDir);
+  let scan: { ok: boolean; archiveCount: number; unread: readonly string[]; records: number };
+  if ("rows" in sliced) {
+    let records = 0;
+    for (const { step, raw, row } of sliced.rows) {
+      if (replayedLifetimeLedgerLine(recentByStep, step, raw)) continue;
+      records += 1;
       accounting.record(row);
-    },
-  });
+    }
+    scan = { ok: true, archiveCount: sliced.archiveCount, unread: [], records };
+  } else {
+    scan = await auditLedgerUnion(stateDir, {
+      step: LIFETIME_HISTORY_STEPS,
+      dedupeWindowPerStep: MAX_RETAINED_LINES_PER_STEP,
+      onRecord: (row, raw) => {
+        const step = typeof row.step === "string" ? row.step : "";
+        if (replayedLifetimeLedgerLine(recentByStep, step, raw)) return;
+        accounting.record(row);
+      },
+    });
+  }
   const unavailableReason = !scan.ok ? "archive_unreadable" : accounting.unavailableReason();
   if (unavailableReason !== undefined) accounting.close();
   const history = unavailableReason === undefined ? lifetimeHistory(ledgerPath, accounting, recentByStep) : undefined;
@@ -24718,6 +25408,14 @@ export async function auditedLifetimeTalliesFromArchives(
     archiveCount: scan.archiveCount,
     unread: scan.unread,
     records: scan.records,
+    loaded: {
+      archive_count: scan.archiveCount,
+      records: scan.records,
+      archives_read: "rows" in sliced ? sliced.read : scan.archiveCount,
+      archives_from_snapshot: "rows" in sliced ? sliced.fromSnapshot : 0,
+      archives_from_digest: "rows" in sliced ? sliced.fromDigest : 0,
+      ..."rows" in sliced ? {} : { slice_fallback: sliced.fallback },
+    },
   };
   } finally {
     if (!handedOff) accounting.close();
@@ -25898,10 +26596,7 @@ async function drainCommand(
       ...(archivedLifetime.indexError === undefined ? {} : { detail: archivedLifetime.indexError }),
     });
   } else {
-    log("dispatch.lifetime_history_loaded", {
-      archive_count: archivedLifetime.archiveCount,
-      records: archivedLifetime.records,
-    });
+    log("dispatch.lifetime_history_loaded", archivedLifetime.loaded);
   }
   // W1-T206: see breakerGateFor's doc — ONE cache for this whole `rmd drain` invocation.
   const breakerGate = breakerGateFor(ledgerPath, openHeadBranchesForBreaker, archivedLifetime.history);
@@ -27314,12 +28009,15 @@ export function withShardRepairs(stateDir: string, repairs: () => void | Promise
 /** `opened.json`'s value per blob: the PR url, or — once a closed-unmerged PR was replaced — the fresh PR and the one it replaced. */
 type ShardRepairOpened = string | { pr_url: string; reopened_from: string };
 
-/** What one attempt decided: `done` consumes the request; `retry` keeps it, charged to `blob` when the bytes were read. */
-type ShardRepairOutcome = { done: true } | { retry: true; blob?: string };
+/** What one attempt decided: `done` consumes the request; `retry` keeps it, charged to `blob` when the bytes were read;
+ *  `wait` (W1-T12221) keeps it uncharged while the repair waits for the shared landing PR of task files. */
+type ShardRepairOutcome = { done: true } | { retry: true; blob?: string } | { wait: true };
+
+type ShardRepairLand = (rel: string, text: string, pr: { title: string; body: string }) => GardenLandResult | Promise<GardenLandResult>;
 
 async function repairRequestedShard(
   request: ShardRepairRequest,
-  opts: { stateDir: string; log: ShardRepairLog; readOriginBlob: (rel: string) => string | Promise<string>; land: (rel: string, text: string, pr: { title: string; body: string }) => string | undefined | Promise<string | undefined>; prState: (prUrl: string) => PrState | Promise<PrState> },
+  opts: { stateDir: string; log: ShardRepairLog; readOriginBlob: (rel: string) => string | Promise<string>; land: ShardRepairLand; prState: (prUrl: string) => PrState | Promise<PrState>; landingStateRoot?: string },
 ): Promise<ShardRepairOutcome> {
   const at = { id: request.id, file: request.file };
   const failure = (stage: string, e: unknown) => ({ ...at, stage, reason: String((e as Error)?.message ?? e) });
@@ -27359,6 +28057,19 @@ async function repairRequestedShard(
     }
     reopenedFrom = prior;
   }
+  const recordOpened = (prUrl: string, extra: Record<string, unknown>): ShardRepairOutcome => {
+    const entry: ShardRepairOpened = reopenedFrom === undefined ? prUrl : { pr_url: prUrl, reopened_from: reopenedFrom };
+    writeAtomic(openedPath, `${JSON.stringify({ ...opened, [blob]: entry }, null, 2)}\n`);
+    opts.log("plan.shard_repair_opened", { ...at, blob, pr_url: prUrl, ...extra, ...(reopenedFrom === undefined ? {} : { reopened_from: reopenedFrom }) });
+    return { done: true };
+  };
+  // W1-T12221: a repair that waits is found by its staged file, so it opens no second repair for the same file.
+  const staged = opts.landingStateRoot === undefined ? undefined : stagedTaskFiles(opts.landingStateRoot).find((f) => f.relPath === rel);
+  if (staged?.prUrl !== undefined) return recordOpened(staged.prUrl, { via: "task-files-landing" });
+  if (staged !== undefined) {
+    opts.log("plan.shard_repair_waiting", { ...at, blob, path: rel });
+    return { wait: true };
+  }
   const verdict = repairDuplicateKeyShard(text);
   if ("refused" in verdict) {
     opts.log("plan.shard_repair_refused", { ...at, blob, reason: verdict.reason });
@@ -27373,21 +28084,22 @@ async function repairRequestedShard(
       `the record's risk_ruling pin covers, and drops the other line and any backlog-gardener marker it carried.\n\n` +
       `Opened by the duplicate-key repair lane (W1-T5519).\n\n${SHARD_REPAIR_ACCEPTANCE}`,
   };
-  let prUrl: string | undefined;
+  let prUrl: GardenLandResult;
   try {
     prUrl = await opts.land(rel, verdict.text, pr);
   } catch (e) {
     opts.log("plan.shard_repair_failed", failure("land", e));
     return { retry: true, blob };
   }
+  if (isGardenLandWaiting(prUrl)) {
+    opts.log("plan.shard_repair_waiting", { ...at, blob, path: rel, kept: verdict.kept });
+    return { wait: true };
+  }
   if (prUrl === undefined) {
     opts.log("plan.shard_repair_not_landed", { ...at, blob, reason: "the plan-PR preflight refused the repair; plan_pr.preflight_refused names why" });
     return { retry: true, blob };
   }
-  const entry: ShardRepairOpened = reopenedFrom === undefined ? prUrl : { pr_url: prUrl, reopened_from: reopenedFrom };
-  writeAtomic(openedPath, `${JSON.stringify({ ...opened, [blob]: entry }, null, 2)}\n`);
-  opts.log("plan.shard_repair_opened", { ...at, blob, pr_url: prUrl, kept: verdict.kept, ...(reopenedFrom === undefined ? {} : { reopened_from: reopenedFrom }) });
-  return { done: true };
+  return recordOpened(prUrl, { kept: verdict.kept });
 }
 
 /** W1-T5618 — a retried request is rewritten with its attempt count and backoff, or abandoned at the cap. Bytes
@@ -27423,17 +28135,20 @@ export async function runShardRepairPass(opts: {
   repo: string;
   log: ShardRepairLog;
   readOriginBlob?: (rel: string) => string | Promise<string>;
-  land?: (rel: string, text: string, pr: { title: string; body: string }) => string | undefined | Promise<string | undefined>;
+  land?: ShardRepairLand;
   prState?: (prUrl: string) => PrState | Promise<PrState>;
   openCheckout?: (opts: GardenCheckoutOpts) => Promise<GardenCheckoutAsync>;
   clock?: Clock;
+  /** W1-T12221: the shared landing of task files, as {@link GardenCheckoutOpts.taskFilesLanding}. */
+  taskFilesLanding?: GardenCheckoutOpts["taskFilesLanding"];
 }): Promise<void> {
   const readOriginBlob =
     opts.readOriginBlob ?? (async (rel: string) => (await execFilePromise("git", ["-C", opts.repoDir, "show", `origin/main:${rel}`], { encoding: "utf8", maxBuffer: 1 << 26 })).stdout);
   const land =
     opts.land ??
     (async (rel: string, text: string, pr: { title: string; body: string }) => {
-      const checkout = await (opts.openCheckout ?? gardenCheckoutAsync)({ name: "plan", repoDir: opts.repoDir, worktreesRoot: opts.worktreesRoot, owner: opts.owner, repo: opts.repo, log: opts.log, clock: opts.clock });
+      const checkout = await (opts.openCheckout ?? gardenCheckoutAsync)({ name: "plan", repoDir: opts.repoDir, worktreesRoot: opts.worktreesRoot, owner: opts.owner, repo: opts.repo, log: opts.log, clock: opts.clock,
+        ...(opts.taskFilesLanding ? { taskFilesLanding: opts.taskFilesLanding } : {}) });
       try {
         writeFileSync(join(checkout.root, rel), text);
         return await checkout.land({ paths: [rel], ...pr });
@@ -27453,9 +28168,10 @@ export async function runShardRepairPass(opts: {
       rmSync(path, { force: true });
       continue;
     }
-    const outcome = await repairRequestedShard(request, { stateDir: opts.stateDir, log: opts.log, readOriginBlob, land, prState });
+    const outcome = await repairRequestedShard(request, { stateDir: opts.stateDir, log: opts.log, readOriginBlob, land, prState,
+      ...(opts.taskFilesLanding ? { landingStateRoot: opts.taskFilesLanding.stateRoot } : {}) });
     if ("done" in outcome) rmSync(path, { force: true });
-    else rescheduleShardRepair(path, request, outcome.blob, now, opts.log);
+    else if ("retry" in outcome) rescheduleShardRepair(path, request, outcome.blob, now, opts.log);
   }
 }
 
@@ -27508,6 +28224,7 @@ function* retractGardenBranchSteps(
  *  garden PR opens READY FOR REVIEW — never a draft (operator ruling, 2026-09-24: a draft sits like a
  *  stuck PR) — so the sweep reviews and arms it like any other fleet PR (`GARDEN_BRANCH_RE`). */
 export function gardenCheckout(opts: GardenCheckoutOpts): GardenCheckout {
+  if (opts.taskFilesOnly) throw new Error(`${opts.name} garden: a checkout that files only task files lands through the async checkout`);
   const branch = `${opts.name}-garden-${(opts.clock ?? systemClock).now()}`;
   const root = join(opts.worktreesRoot, branch);
   worktreeAdd(opts.repoDir, root, branch, "origin/main", { log: opts.log });
@@ -27521,24 +28238,31 @@ export function gardenCheckout(opts: GardenCheckoutOpts): GardenCheckout {
   return {
     root,
     branch,
-    land: (landing) => runStepsSync(gardenLandSteps(opts, root, branch, landing, io)),
+    land: (landing) => landedPrUrl(runStepsSync(gardenLandSteps(opts, root, branch, landing, io)), `${opts.name} garden`),
     dispose: () => worktreeRemove(opts.repoDir, root),
   };
 }
 
 export async function gardenCheckoutAsync(opts: GardenCheckoutOpts): Promise<GardenCheckoutAsync> {
+  if (opts.taskFilesOnly && !opts.taskFilesLanding) throw new Error(`${opts.name} garden: a checkout that files only task files needs the task-file landing`);
   const branch = `${opts.name}-garden-${(opts.clock ?? systemClock).now()}`;
   const root = join(opts.worktreesRoot, branch);
+  // W1-T12222: the id holder is the branch that files it, so such a checkout reserves on the landing branch.
+  const reservationBranch = opts.taskFilesOnly ? await taskFilesLandingBranchAsync({ owner: opts.owner, repo: opts.repo }) : branch;
   await worktreeAddAsync(opts.repoDir, root, branch, "origin/main", { log: opts.log });
   const io: GardenLandIo = {
     git: async (...args: string[]) => (await execFilePromise("git", ["-C", root, ...args], { encoding: "utf8" })).stdout,
     fetcher: opts.fetcher ?? ((args) => ghJsonAsync(args)),
     generate: (script) => execFilePromise(process.execPath, [...(script === "generate-capability-snapshot.mjs" ? ["--import", import.meta.resolve("tsx")] : []), join(root, "scripts", script)], { cwd: root }),
     preflight: opts.preflight ?? ((input) => planPrPreflightAsync(input, { log: opts.log })),
+    // W1-T12221: the seal is async only, as the landing of W1-T12199 is.
+    ...(opts.taskFilesLanding ? { landTaskFiles: (inputs: TaskFileInput[]) => landTaskFilesAsync(opts.repoDir, inputs, {
+      ...opts.taskFilesLanding!, targetRepository: { owner: opts.owner, repo: opts.repo }, log: opts.log, lane: opts.name,
+    }) } : {}),
   };
   return {
     root,
-    branch,
+    branch: reservationBranch,
     land: (landing) => runStepsAsync(gardenLandSteps(opts, root, branch, landing, io)),
     dispose: () => worktreeRemoveAsync(opts.repoDir, root),
   };
@@ -27555,6 +28279,12 @@ export interface GardenCheckoutOpts {
   clock?: Clock;
   /** W1-T5348: the plan-PR preflight over the committed tree; injected only by a test. */
   preflight?: (input: { cwd: string; title: string; body: string }) => PlanPrPreflightResult;
+  /** W1-T12221: the shared landing of task files: its state root (`config.root`) and its seams. Absent,
+   *  every land opens its own PR. */
+  taskFilesLanding?: Pick<LandTaskFilesOpts, "stateRoot" | "gh" | "planPrPreflight">;
+  /** W1-T12222: every land is a task file, new or edited, through `taskFilesLanding`; `branch` is the landing
+   *  branch, and a land with any other path is refused. Async checkout only. */
+  taskFilesOnly?: true;
 }
 
 interface GardenLandIo {
@@ -27562,15 +28292,80 @@ interface GardenLandIo {
   fetcher: GhApiFetcher;
   generate: (script: "generate-docs-index.mjs" | "generate-capability-snapshot.mjs") => unknown;
   preflight: (input: { cwd: string; title: string; body: string }) => PlanPrPreflightResult | Promise<PlanPrPreflightResult>;
+  landTaskFiles?: (inputs: TaskFileInput[]) => Promise<TaskFilesLandingResult>;
+}
+
+/** W1-T12221: the landing inputs when every path is an edit of a task file main holds and the body's
+ *  `## Acceptance` gives its criterion; otherwise nothing, and the land opens its own PR. */
+function* sealedTaskFileInputs(root: string, paths: readonly string[], body: string, git: GardenLandIo["git"], newFiles: boolean): Steps<TaskFileInput[] | undefined> {
+  const shardDir = relative(root, join(resolveRepoLayout(root).planDir, "tasks.d"));
+  const criteria = parseAcceptanceBlock(body).filter((c) => c.proof !== "");
+  const inputs: TaskFileInput[] = [];
+  for (const relPath of paths) {
+    if (!relPath.startsWith(`${shardDir}/`) || !/\.ya?ml$/.test(relPath) || !existsSync(join(root, relPath))) return undefined;
+    let newFile = false;
+    try {
+      yield* step(() => git("cat-file", "-e", `HEAD:${relPath}`));
+    } catch {
+      if (!newFiles) return undefined; // not an edit: main does not hold the path, so the land opens its own PR
+      newFile = true;
+    }
+    const criterion = criteria.find((c) => c.proof.endsWith(` in ${relPath}`)) ?? (paths.length === 1 && criteria.length === 1 ? criteria[0] : undefined);
+    if (criterion === undefined) return undefined;
+    inputs.push({ relPath, content: readFileSync(join(root, relPath), "utf8"), claim: criterion.claim, proof: criterion.proof, ...(newFile ? { newFile: true as const } : {}) });
+  }
+  return inputs.length > 0 ? inputs : undefined;
+}
+
+/** W1-T12221: the landing PR when it carries every path, a wait when each path waits, else nothing. */
+function* landSealedTaskFiles(opts: GardenCheckoutOpts, paths: readonly string[], inputs: TaskFileInput[], land: NonNullable<GardenLandIo["landTaskFiles"]>): Steps<GardenLandResult> {
+  // W1-T12222: a waiting file holds its finding. A new file whose origin a file in the queue already records is the
+  // same finding filed twice, so it is not staged; the id it reserved goes back, as for any land that opens nothing.
+  if (opts.taskFilesOnly === true) {
+    const held = stagedTaskFileOrigins(opts.taskFilesLanding!.stateRoot);
+    const twice = inputs.flatMap((i) => {
+      const origin = i.newFile === true ? taskFileOrigin(i.content) : "";
+      const first = origin === "" ? undefined : held.find((h) => h.origin === origin && h.relPath !== i.relPath);
+      return first === undefined ? [] : [{ path: i.relPath, reason: `the finding ${origin} already waits in ${first.relPath}` }];
+    });
+    if (twice.length > 0) {
+      opts.log(`${opts.name}.garden_sealed_landing`, { outcome: "refused", paths, pr_url: null, refused: twice });
+      return undefined;
+    }
+  }
+  const result = yield* step(() => land(inputs));
+  const carried = paths.every((p) => result.landed.includes(p));
+  const queued = paths.every((p) => result.landed.includes(p) || result.waiting.includes(p));
+  // W1-T12222: a file that is in the queue keeps the ids of its land, so a partly refused land of new files waits.
+  const partly = opts.taskFilesOnly === true && paths.some((p) => result.landed.includes(p) || result.waiting.includes(p));
+  const outcome = result.prUrl !== undefined && carried ? "opened" : queued || partly ? "waiting" : "not_landed";
+  const refused = [...result.refused, ...result.setAside].filter((r) => paths.includes(r.path)).map((r) => ({
+    path: r.path, reason: r.reason,
+    ...(r.reserved_id === undefined ? {} : { reserved_id: r.reserved_id }),
+    ...(r.id_release === undefined ? {} : { id_release: r.id_release }),
+  }));
+  opts.log(`${opts.name}.garden_sealed_landing`, { outcome, paths, pr_url: outcome === "opened" ? result.prUrl : null, ...(refused.length ? { refused } : {}), ...(result.error ? { error: result.error } : {}) });
+  if (outcome === "opened") return result.prUrl;
+  if (outcome === "waiting") return { waiting: { paths: paths.filter((p) => result.landed.includes(p) || result.waiting.includes(p)), stateRoot: opts.taskFilesLanding!.stateRoot, ...(opts.taskFilesOnly === true ? { filed: true as const } : {}) } };
+  return undefined;
 }
 
 function* gardenLandSteps(
   opts: GardenCheckoutOpts,
   root: string,
   branch: string,
-  { paths, title, body }: { paths: string[]; title: string; body: string },
+  landing: GardenLandOpts,
   io: GardenLandIo,
-): Steps<string | undefined> {
+): Steps<GardenLandResult> {
+  const { paths, title, body } = landing;
+  // W1-T12221: an edit of task files rides the shared landing PR, unless the caller keeps its own PR.
+  const only = opts.taskFilesOnly === true && io.landTaskFiles !== undefined;
+  const sealed = !only && (landing.sealedLanding === false || io.landTaskFiles === undefined) ? undefined : yield* sealedTaskFileInputs(root, paths, body, io.git, only);
+  if (sealed !== undefined) return yield* landSealedTaskFiles(opts, paths, sealed, io.landTaskFiles!);
+  if (only) {
+    opts.log(`${opts.name}.garden_sealed_landing`, { outcome: "refused", paths, pr_url: null, error: "a checkout that files only task files lands each path under plan/tasks.d with its criterion" });
+    return undefined;
+  }
   yield* step(() => io.git("add", "--", ...paths));
   // A garden log under docs/ changes what docs/docs-index.json must say, and docs-index-check
   // refuses a PR whose index is stale — regenerate it with the checkout's own generator.
@@ -27632,8 +28427,17 @@ function refreshKnowledgeAssertions(root: string): string[] {
 export type { GardenBuildContext } from "./cli/commands/daemon.js";
 
 export function daemonGardenWorkspace(ctx: Pick<GardenBuildContext, "config" | "repoRoot" | "owner" | "repo" | "log">, name: GardenName): () => Promise<GardenCheckoutAsync> {
-  return () => gardenCheckoutAsync({ name, repoDir: ctx.repoRoot, worktreesRoot: worktreesDir(ctx.config), owner: ctx.owner, repo: ctx.repo, log: ctx.log });
+  return () => gardenCheckoutAsync({ name, repoDir: ctx.repoRoot, worktreesRoot: worktreesDir(ctx.config), owner: ctx.owner, repo: ctx.repo, log: ctx.log,
+    taskFilesLanding: { stateRoot: ctx.config.root }, ...(TASK_FILES_ONLY_GARDENS.has(name) ? { taskFilesOnly: true } : {}) });
 }
+
+/** W1-T12222: the gardens whose every land is a new task file under plan/tasks.d, read from the code. The first four
+ *  hold a wait in their state (`runGardenAsync`); the last three read a land through `landedPrUrl`, which returns the
+ *  reference of a waiting filing, and each keeps its own memory of what it filed. The flake-incident gardener runs on
+ *  the selector-shadow checkout. Not listed: `gate` (it also lands .github/workflows/ci-gate.yml), and the gardens that
+ *  edit task files they do not file, reserve no id, or land other files: plan, backlog, redesign, queue-judge, test,
+ *  config, export, knowledge, machine-judge, review-replay, fix-lane. */
+const TASK_FILES_ONLY_GARDENS: ReadonlySet<GardenName> = new Set(["ci-friction", "hot-file", "flow-remedy", "scout", "flow", "selector-shadow", "host-resource"]);
 
 /** One pass of one garden; it logs its own failure under the garden's own step name and never throws. */
 export type RegisteredGardenPass = (() => void | Promise<void>) & { due?: () => boolean | Promise<boolean> };
@@ -27704,11 +28508,19 @@ export function issueRevalidationRunTaskPorts(
 export function queueJudgeRunTaskPorts(
   ctx: { owner: string; repo: string; repoRoot: string; stateDir: string; root: string; log: (step: string, extra?: Record<string, unknown>) => void },
   seams: { spawn?: Parameters<typeof issueRevalidationJudgeText>[0]["spawn"]; openBoard?: typeof readOpenBoardSnapshot } = {},
-): Pick<QueueJudgeSources, "judgeText" | "openPrNumbers"> {
+): Pick<QueueJudgeSources, "judgeText" | "openPrNumbers" | "promptWindow"> {
   const { owner, repo, repoRoot, stateDir, root, log } = ctx;
   const judge = issueRevalidationRunTaskPorts({ owner, repo, repoRoot, stateDir, log }, { spawn: seams.spawn });
   return {
     judgeText: (prompt) => judge.judgeText(prompt, 0),
+    promptWindow: () => {
+      try {
+        const mounts = loadMounts(mountsPath(repoRoot));
+        return queueJudgeRouteWindow(mounts.escalation_judge ?? resolveRiskJudgeMount(mounts), mounts.capabilities);
+      } catch (e) {
+        return { tokens: undefined, reason: `the judge mount could not be loaded or resolved (${String((e as Error)?.message ?? e).slice(0, 120)})` };
+      }
+    },
     openPrNumbers: () => {
       const open = (seams.openBoard ?? readOpenBoardSnapshot)(root, owner, repo);
       if (!open.ok) throw new Error(`queue judge: the open-PR snapshot is unavailable (${open.reason})`);
@@ -27781,7 +28593,7 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
     }
     case "plan": {
       const d = deps("plan");
-      const repairs = { stateDir, repoDir: repoRoot, worktreesRoot: worktreesDir(config), owner, repo, log };
+      const repairs = { stateDir, repoDir: repoRoot, worktreesRoot: worktreesDir(config), owner, repo, log, taskFilesLanding: { stateRoot: config.root } };
       return withShardRepairs(stateDir, () => runShardRepairPass(repairs), gardenPass(planGardenSpec(d), d), log);
     }
     case "backlog": {
@@ -27977,7 +28789,8 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
       const sources: HotFileGardenSources = {
         ledgerRecords: () => readCiFrictionLedgerRecords(stateDir),
         mainHistory: (sinceIso) => readMainHistory(repoRoot, sinceIso),
-        planOrigins: () => loadPlan(resolveRepoLayout(repoRoot).planMonolith).tasks.map((t) => t.origin).filter((o): o is string => typeof o === "string"),
+        // W1-T12222: a file that waits for the landing holds its finding, so its origin counts as filed.
+        planOrigins: () => [...loadPlan(resolveRepoLayout(repoRoot).planMonolith).tasks.map((t) => t.origin).filter((o): o is string => typeof o === "string"), ...stagedTaskFileOrigins(config.root).map((s) => s.origin)],
         mintTaskId: ciLearningTaskIdMinter(repoRoot, log, undefined, mintOptions),
         fileExists: (file) => existsSync(join(repoRoot, file)),
       };
@@ -27988,7 +28801,7 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
     // Paced (gardenPacingDue): a pass that judged nothing new widens the wait, and a changed plan tree or
     // operator release is due at once.
     case "machine-judge": {
-      const ports = productionMachineFilingJudgePorts({ repoRoot, stateDir, worktreesRoot: worktreesDir(config), owner, repo, log });
+      const ports = productionMachineFilingJudgePorts({ repoRoot, stateDir, worktreesRoot: worktreesDir(config), owner, repo, log, taskFilesLanding: { stateRoot: config.root } });
       const inputs = () => machineJudgeInputsAsync(repoRoot, stateDir, "origin/main");
       return withDue(async () => {
         const seen = await inputs();
@@ -28012,7 +28825,7 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
         handoff: (h: { id: string; raw: string; origin: string }) => void stageFeedbackCapture(repoRoot, config.root, { id: h.id, raw: h.raw, origin: h.origin as FeedbackOrigin }),
         openIncidentOrigins: () => openIncidentFeedbackOrigins(repoRoot, config.root),
         escalate: raiseDuplicate,
-        planOrigins: () => loadPlan(resolveRepoLayout(repoRoot).planMonolith).tasks.map((t) => t.origin).filter((o): o is string => typeof o === "string"),
+        planOrigins: () => [...loadPlan(resolveRepoLayout(repoRoot).planMonolith).tasks.map((t) => t.origin).filter((o): o is string => typeof o === "string"), ...stagedTaskFileOrigins(config.root).map((s) => s.origin)],
         fileConsumer: fileConsumerVia(daemonGardenWorkspace(ctx, "host-resource"), mintTaskId, log),
       };
       const paced = lowYieldGardenPass(stateDir, "host-resource", () => runHostResourcePassAsync(ports).then(() => {}), {
@@ -30792,6 +31605,44 @@ function* preserveTrackedDirtyPatchSteps(git: ReviewRecoveryGit, repoDir: string
   return recoveryRef;
 }
 
+/** W1-T8141: the whole worktree against `startSha` (worker commits, index, edits, new files) as one recovery ref, built
+ *  the way the ref's own tree check builds the owner tree; only a verified ref lets the reset run. The worktree
+ *  snapshot reads each file's bytes on disk, so staged content that the disk no longer shows (a file staged as B and
+ *  then edited back to A) is in no worktree tree. When the real index differs from the worktree, the index is kept
+ *  too, in a second recovery ref with its own tree check, before anything is reset. */
+function* keepYieldedFixWorkSteps(git: ReviewRecoveryGit, cwd: string, branch: string, startSha: string): Steps<{ recoveryRef?: string; indexRecoveryRef?: string; paths: string[] }> {
+  let patch = "";
+  let paths: string[] = [];
+  const worktreeTree = yield* temporaryIndexTreeSteps(git, cwd, startSha, function* (env): Steps<void> {
+    const tracked = yield* step(() => git(cwd, ["ls-files", "--cached", "-z"], { maxBuffer: 1 << 26 }));
+    if (tracked.length > 0) yield* step(() => git(cwd, ["--literal-pathspecs", "add", "--force", "--all", "--pathspec-from-file=-", "--pathspec-file-nul"], {
+      env, input: tracked, maxBuffer: 1 << 26 }));
+    yield* step(() => git(cwd, ["add", "-A"], { env }));
+    patch = yield* step(() => git(cwd, ["diff", "--cached", "--binary", "--no-ext-diff", startSha], { env, maxBuffer: 1 << 26 }));
+    paths = nulPaths(yield* step(() => git(cwd, ["diff", "--cached", "--name-only", "-z", startSha], { env })));
+  });
+  // The real index, read and never changed: `write-tree` only writes objects. An index with a conflict fails here,
+  // and a failure resets nothing.
+  const indexTree = (yield* step(() => git(cwd, ["write-tree"]))).trim();
+  let indexRecoveryRef: string | undefined;
+  if (indexTree !== worktreeTree) {
+    // A staged path whose worktree bytes differ from its staged bytes: only the index holds that content.
+    const staged = nulPaths(yield* step(() => git(cwd, ["diff-tree", "-r", "--name-only", "-z", startSha, indexTree], { maxBuffer: 1 << 26 })));
+    const apart = new Set(nulPaths(yield* step(() => git(cwd, ["diff-tree", "-r", "--name-only", "-z", indexTree, worktreeTree], { maxBuffer: 1 << 26 }))));
+    if (staged.some((path) => apart.has(path))) {
+      const indexPatch = yield* step(() => git(cwd, ["diff", "--binary", "--no-ext-diff", startSha, indexTree], { maxBuffer: 1 << 26 }));
+      indexRecoveryRef = yield* preserveTrackedDirtyPatchSteps(git, cwd, cwd, branch, startSha, indexPatch, {}, function* (): Steps<string> {
+        return indexTree;
+      });
+      paths = [...new Set([...paths, ...staged])];
+    }
+  }
+  const recoveryRef = patch.length > 0 ? yield* preserveTrackedDirtyPatchSteps(git, cwd, cwd, branch, startSha, patch, {}) : undefined;
+  yield* step(() => git(cwd, ["reset", "--hard", startSha]));
+  yield* step(() => git(cwd, ["clean", "-fd"]));
+  return { ...(recoveryRef ? { recoveryRef } : {}), ...(indexRecoveryRef ? { indexRecoveryRef } : {}), paths };
+}
+
 // W1-T3822 — the tracked-only diff is durably captured by `preserveTrackedDirtyFixOwner` above,
 // but capture alone does not make the owner reclaimable: `removeAbandonedFixWorktreeOwner` runs a
 // plain `git worktree remove` with no `--force` (by design — a forced removal is exactly the data
@@ -31177,11 +32028,19 @@ export function commitWorkerEdits(
     declaresProofTitle(readFileSync(join(repoDir, path), "utf8"), titles),
   );
   const admittedTests = admittedFixTestPaths(changed, options.admitTests);
+  // W1-T11501: a declared-but-not-yet-created test written at its contents-computed folder is the declared test, not
+  // scope widening — the ONE shared predicate (lib/test-path-resolver.ts) also used by the push, fix and review guards.
+  const computedPlacementTests = observeComputedPlacement({
+    root: repoDir, declaredFiles: declaredPaths, proofs: acceptance.map((criterion) => criterion.proof),
+    candidates: changed.filter((path) => !pathIsUnderDeclaredSurface(path, declaredPaths)),
+    baseTracked: () => runGit(["ls-tree", "-r", "--name-only", "-z", "HEAD", "--", "test/"]).split("\0").filter(Boolean),
+  }).admitted;
   const registrationChanges = declaredPaths.every(isInPlanScope) ? [] :
     readRegistrationChanges(repoDir, changed.filter((path) => !pathIsUnderDeclaredSurface(path, declaredPaths)), undefined, runGit, options.priorHeadSha);
   const admittedRegistrations = registrationChanges.filter(isAdditiveRegistrationChange).map((change) => change.path);
   const declared = changed.filter((path) => pathIsUnderDeclaredSurface(path, declaredPaths) ||
-    regenerable.includes(path) || proofMatchedTests.includes(path) || admittedTests.includes(path) || admittedRegistrations.includes(path));
+    regenerable.includes(path) || proofMatchedTests.includes(path) || admittedTests.includes(path) || computedPlacementTests.has(path) ||
+    admittedRegistrations.includes(path));
   const undeclared = changed.filter((path) => !declared.includes(path));
   // A checkpoint stages the undeclared paths as well; git itself still forces the refusals below.
   const staged = options.checkpoint ? changed : declared;
@@ -31518,7 +32377,8 @@ export function harnessCommitForShellLessWorker(
     return input.commitCount;
   }
   const message = withAssignmentTrailer(
-    asked ?? `${input.derivedCommit!.subject}\n\nHarness-derived subject: ${input.derivedCommit!.reason}`,
+    fixRoundCommitMessage(input.report,
+      asked ?? `${input.derivedCommit!.subject}\n\nHarness-derived subject: ${input.derivedCommit!.reason}`),
     input.assignmentId,
   );
   const subjectSource = asked === undefined ? "harness-derived" : input.subjectSource ?? "worker-authored";
@@ -32534,6 +33394,21 @@ export function readDocketLedgerCorpus(
   return rows;
 }
 
+/** W1-T11104: the curated replay packets the docket attaches to a correction candidate. Unreadable or
+ *  malformed packets are NAMED in the ledger and the candidate reports its packets as unverified. */
+function readConsoleReplayPackets(root: string, log: (step: string, extra?: Record<string, unknown>) => void): ReplayPacket[] | undefined {
+  const path = join(root, "test", "fixtures", "console-feedback-replays.json");
+  if (!existsSync(path)) return undefined;
+  try {
+    const parsed = parseReplayPackets(JSON.parse(readFileSync(path, "utf8")) as unknown);
+    if (parsed.ok) return parsed.packets;
+    log("feedback_docket.replay_packets_unavailable", { reason: parsed.reason });
+  } catch (e) {
+    log("feedback_docket.replay_packets_unavailable", { reason: String((e as Error)?.message ?? e) });
+  }
+  return undefined;
+}
+
 export function runFeedbackDocketRung(
   config: Config,
   ledgerPath: string,
@@ -32553,7 +33428,14 @@ export function runFeedbackDocketRung(
 
     const window = feedbackDocketLookbackWindow(now);
     const ledgerLines = readDocketLedgerCorpus(ledgerPath, log);
-    const rejectedFeedback = listFeedback(root, { status: "rejected" }).map((e) => ({ id: e.id, ts: e.ts, raw: e.raw }));
+    // W1-T11104: carry an explicit console correction through the rung instead of projecting only text.
+    const rejectedFeedback = listFeedback(root, { status: "rejected" }).map((e) => {
+      const correction = correctionEvidenceOf(e);
+      return { id: e.id, ts: e.ts, raw: e.raw, ...(correction ? { correction } : {}) };
+    });
+    const consoleCorrections = listFeedback(root).filter((e) => e.status !== "rejected")
+      .flatMap((e) => { const correction = correctionEvidenceOf(e); return correction ? [correction] : []; });
+    const replayPackets = readConsoleReplayPackets(root, log);
     const questionLines = readQuestionsNdjson(root);
     const noteStore = Object.hasOwn(deps, "noteStore") ? deps.noteStore :
       deps.root && !deps.repository ? root : configuredOperatorNoteStore(config, deps.repository, root);
@@ -32561,12 +33443,13 @@ export function runFeedbackDocketRung(
       .filter((n) => typeof n.note === "string" && typeof n.taskId === "string" && typeof n.ts === "string")
       .map((n) => ({ ts: n.ts as string, taskId: n.taskId as string, note: n.note as string }));
 
-    const docket = buildFeedbackDocket({ ledgerLines, rejectedFeedback, questionLines, operatorNotes, window });
+    const docket = buildFeedbackDocket({ ledgerLines, rejectedFeedback, questionLines, operatorNotes, window,
+      consoleCorrections, ...(replayPackets ? { replayPackets } : {}) });
     if (docket.items.length === 0) {
       // Recorded before returning, deliberately — mirrors auto-triage's "record the fire first"
       // discipline while retaining the per-surface counts doctor judges after ledger rotation.
       writeFeedbackDocketMarker(markerPath, feedbackDocketMarkerWithFire(markerPath, now, "feedback_docket.empty", docket));
-      log("feedback_docket.empty", { window, counts_by_source: docket.countsBySource });
+      log("feedback_docket.empty", { window, counts_by_source: docket.countsBySource, console_correction_unverified: docket.consoleCorrection.unverified });
       return { fired: false };
     }
 
@@ -32596,6 +33479,8 @@ export function runFeedbackDocketRung(
       proposal_id: result.candidate.id,
       referent: result.referent,
       consumed_count: result.consumed.length,
+      console_correction_candidates: docket.consoleCorrection.candidates.length,
+      console_correction_unverified: docket.consoleCorrection.unverified.length,
       window,
     });
     return { fired: filed };
@@ -33298,9 +34183,11 @@ export function lightPassActionable(
   // 3-line shape back, byte-identical (W1-T1211) — this is an ADDITIVE 3rd parameter, not a
   // change to `fixRungAllowed`'s own meaning.
   requeueLaneOnly: boolean = false,
-  // W1-T5922 — TRUE only on `buildSweepLightHook`'s ordinary pass. An arm is one GitHub call behind
-  // the full sweep's own guards (decideSweepArm, the W1-T5403 risk judge, holds, dedups); it spawns
-  // no worker. Default false, so every 2- and 3-argument caller keeps its original shape.
+  // W1-T5922 — TRUE on `buildSweepLightHook`'s ordinary pass and, since W1-T11510, on an interphase-review
+  // pass (`lightPassArmAdmitted`). An arm is one GitHub call behind the full sweep's own guards
+  // (decideSweepArm, the W1-T5403 risk judge, holds, dedups); `deps.arm` spawns no worker, and the
+  // mergeable lane's CodeQL fix route stands down on every review-only scope. Default false, so every
+  // 2- and 3-argument caller keeps its original shape.
   armAllowed: boolean = false,
   // W1-T8086: the ordinary pass's repair lanes use the existing per-claim fix-capacity admission.
   // 2026-10-14: `conflicted` too, so a merge-conflict round no longer waits for the next full sweep.
@@ -33436,10 +34323,12 @@ export function reviewOnlyLightPassDeps(scope?: LightPassScope): Pick<SweepDeps,
 
 
 interface LightPassReadPorts {
-  openPrViews?: () => Promise<OpenPrView[]>;
+  openPrViews?: (scope?: LightPassScope) => Promise<OpenPrView[]> | undefined;
   effects?: (deps: Parameters<typeof buildSweepEffects>[0]) => SweepDeps;
   readCompare?: (args: string[]) => Promise<unknown>;
   clock?: Pick<Clock, "now">;
+  /** W1-T12357: the daemon's sweep tick bound; absent, the default policy's. */
+  sweepWallClockBoundMs?: number;
 }
 
 /** W1-T11293: the light pass reads every READY PR's distance; the reader lives in src/lib/light-pass-compare.ts. */
@@ -33733,7 +34622,7 @@ async function pauseTargetOrRefuse(verb: "pause" | "resume", rest: string[], con
 }
 
 /**
- * `rmd pause [--instance <name>] [--reason <text>]` — drain-and-hold ONE instance (W1-T11).
+ * `rmd pause [--instance <name>] --reason <text>` — drain-and-hold ONE instance (W1-T11).
  * Writes that instance's PAUSE flag under its own state root. No new spawn after the current
  * tick; an in-flight task ALWAYS runs to completion (verdict + merge).
  *
@@ -33743,9 +34632,22 @@ async function pauseTargetOrRefuse(verb: "pause" | "resume", rest: string[], con
  * explicit act, `rmd pause --fleet`, which writes no instance flag.
  */
 async function pauseCommand(rest: string[]): Promise<number> {
+  // W1-T12457: a guessed flag, a bare call or --status never holds anything; a hold needs a reason.
+  const usage = `usage: ${commandSyntax("pause")}`;
+  const badArg = unknownArgError("pause", rest, ["--instance", "--reason"], ["--fleet", "--status"]);
+  if (badArg) {
+    console.error(`${badArg} — nothing was changed.\n${usage}`);
+    return 2;
+  }
   const config = loadConfig();
+  if (rest.length === 0 || rest.includes("--status")) return await pauseStatus(rest, config);
   const runId = `FLEET-${Date.now()}`;
-  const reason = flagValue(rest, "--reason");
+  const given = flagValue(rest, "--reason");
+  const reason = given?.trim() ? given : undefined;
+  if (reason === undefined) {
+    console.error(`### rmd pause — REFUSED: a hold needs --reason <text>; nothing was changed.\n${usage}`);
+    return 2;
+  }
   if (rest.includes("--fleet")) {
     if (flagValue(rest, "--instance") !== undefined) {
       console.error("### rmd pause — REFUSED: --fleet holds every instance; it cannot be combined with --instance — nothing was changed.");
@@ -33758,7 +34660,7 @@ async function pauseCommand(rest: string[]): Promise<number> {
       step: "fleet.pause",
       scope: "fleet",
       pushed: result.pushed,
-      reason: reason ?? null,
+      reason,
       session_id: result.sessionId,
       actor_evidence: result.actor_evidence,
       expires_at: result.expiresAt,
@@ -33787,7 +34689,7 @@ async function pauseCommand(rest: string[]): Promise<number> {
     instance: target.instance,
     root: target.root,
     resolved_by: target.resolvedBy,
-    reason: reason ?? null,
+    reason,
     session_id: info.sessionId ?? null,
     actor_evidence: info.actor_evidence,
     expires_at: info.expiresAt ?? null,
@@ -33797,6 +34699,24 @@ async function pauseCommand(rest: string[]): Promise<number> {
     `### rmd pause — instance '${target.instance}'${selectedInstanceRegistryEnvPath() === undefined ? ` (${target.root})` : ""} is PAUSED (drain-and-hold). Its in-flight task still ` +
       `reaches merge; it spawns nothing new until \`rmd resume --instance ${target.instance}\`. No other instance is held.`,
   );
+  return 0;
+}
+
+/** W1-T12457 — `rmd pause` alone or with --status: print the instance's and the fleet-wide hold state, write nothing. */
+async function pauseStatus(rest: string[], config: Config): Promise<number> {
+  const lines = ["### rmd pause — read only; nothing was changed."];
+  if (!rest.includes("--fleet") || flagValue(rest, "--instance") !== undefined) {
+    const target = await pauseTargetOrRefuse("pause", rest, config);
+    if (!target) return 2;
+    const hold = pauseHoldSummary(target.root);
+    lines.push(hold === undefined
+      ? `instance '${target.instance}': not paused. To hold it: rmd pause --instance ${target.instance} --reason <text>`
+      : `instance '${target.instance}': PAUSED — ${hold}. To clear it: rmd resume --instance ${target.instance}`);
+  }
+  const shared = readSharedPause(realDeps().sharedPauseGit);
+  lines.push(`fleet-wide hold (${sharedPauseRef()}): ${shared === "held" ? "HELD — every instance holds new spawns until `rmd resume --fleet`"
+    : shared === "absent" ? "not held" : "unknown — origin could not be read"}`);
+  console.log(lines.join("\n"));
   return 0;
 }
 
@@ -34441,102 +35361,156 @@ export function triageLockRefusalMessage(pid: number, startedAt: string, lockPat
   );
 }
 
-export interface TriagePrLifecycleIdentity {
-  state: string;
-  headSha: string;
-  baseRef: string;
-  baseSha: string;
+/**
+ * W1-T12198: land a `no_task` or `grill` status change through the shared feedback landing.
+ * The status write reuses `setFeedbackStatus` in the lane worktree, which is never committed; the
+ * landing carries those bytes. A refused landing leaves origin/main at `status: new`, so a later
+ * pass triages the entry again.
+ */
+/** Serialize with the existing queued writer, then land in the entry's home. Neither the public
+ * lane nor the shared private checkout receives a mutable feedback copy. The existing queue keeps
+ * a refused private write recoverable by the normal landing sweep. */
+function landPrivateTriageStatus(root: string, stateRoot: string, feedbackId: string, status: FeedbackEntry["status"],
+  opts: { proposalPr?: string; summary?: FeedbackEntry["summary"]; log: (step: string, extra?: Record<string, unknown>) => void }) {
+  const home = triageFeedbackHome(root, feedbackId);
+  if (home.destination === undefined) throw new Error("private triage status has no destination");
+  const updated = setFeedbackStatus(root, feedbackId, status, { ...opts, land: { stateRoot } });
+  const content = readFileSync(join(queuedFeedbackDir(stateRoot), `${feedbackId}.yaml`), "utf8");
+  if (content !== stringifyYaml(updated)) throw new Error("feedback status queue does not hold the requested edit");
+  return landFeedbackStatusContent(home.root, feedbackEntryRepoPath(feedbackId), content,
+    planDestinationLandingOpts({ log: opts.log }, home.destination));
 }
 
-/** Read the PR fields needed to prove an empty-scope close still targets the classified PR. */
-async function readTriagePrLifecycleIdentity(prUrl: string, owner: string, repo: string): Promise<TriagePrLifecycleIdentity> {
-  const number = prUrl.match(/\/pull\/(\d+)/)?.[1];
-  if (!number) throw new Error(`triage PR identity: cannot resolve a pull number from ${JSON.stringify(prUrl)}`);
-  const row = await ghJsonAsync(["api", `repos/${owner}/${repo}/pulls/${number}`]) as {
-    state?: unknown;
-    head?: { sha?: unknown };
-    base?: { ref?: unknown; sha?: unknown };
-  };
-  const { state, head, base } = row;
-  if (typeof state !== "string" || typeof head?.sha !== "string" || !/^[0-9a-f]{40}$/i.test(head.sha) ||
-      typeof base?.ref !== "string" || !base.ref || typeof base.sha !== "string" || !/^[0-9a-f]{40}$/i.test(base.sha)) {
-    throw new Error(`triage PR identity: ${prUrl} returned incomplete state/head/base evidence`);
-  }
-  return { state, headSha: head.sha, baseRef: base.ref, baseSha: base.sha };
+interface PrivateTriagePublication {
+  version: 1;
+  repository: string;
+  feedbackId: string;
+  feedbackDigest: string;
+  branch: string;
+  worktreePath: string;
+  commit: string;
+  taskPath: string;
+  prUrl?: string;
+  stage: "task_committed" | "feedback_landed";
 }
 
-/** Close an empty-scope triage PR through async GitHub transport so the daemon loop never blocks on gh. */
-async function closeTriagedEmptyScopePr(prUrl: string, comment: string): Promise<void> {
-  await ghTextAsync(["pr", "close", prUrl, "--comment", comment]);
+/** A persistent Git lock protects the receipt's commit and branch from both worktree reapers,
+ * even after the worker's process lock is released. Only the recorded publication can release it. */
+function holdPrivateTriagePublication(publication: PrivateTriagePublication, hold: boolean): void {
+  const { worktreePath, commit } = publication;
+  if (!hold && !existsSync(worktreePath)) return;
+  const reason = `triage-publication:${commit}`;
+  const lockPath = resolve(worktreePath, hostWorktreeGit(worktreePath, ["rev-parse", "--git-path", "locked"]).trim());
+  const current = readFileIfExists(lockPath)?.trim();
+  if (current !== undefined && current !== reason) throw new Error("triage publication worktree lock belongs to another owner");
+  if (hold && current === undefined) hostWorktreeGit(worktreePath, ["worktree", "lock", "--reason", reason, worktreePath]);
+  if (!hold && current === reason) hostWorktreeGit(worktreePath, ["worktree", "unlock", worktreePath]);
 }
 
-export type TriageLiveScopeCheck =
-  | { kind: "empty"; comment: string }
-  | { kind: "nonempty" }
-  | { kind: "unknown"; reason: string };
-
-/** Pure safety decision shared by the live triage path and its admission tests. */
-export function triageLiveScopeDecision(input: {
-  action: string;
-  scopeFiles: readonly string[];
-  liveDiffFiles?: readonly string[];
-  complete: boolean;
-  expectedHeadSha?: string;
-  fetchedBaseSha?: string;
-  before?: TriagePrLifecycleIdentity;
-  after?: TriagePrLifecycleIdentity;
-}): TriageLiveScopeCheck {
-  if (input.action !== "no_task" && input.action !== "grill") return { kind: "nonempty" };
-  if (!input.complete || !input.liveDiffFiles || !input.before || !input.expectedHeadSha || !input.fetchedBaseSha ||
-      input.scopeFiles.length === 0) {
-    return { kind: "unknown", reason: "live scope or PR identity evidence is incomplete" };
+/** The public commit precedes the private status. A host-only atomic receipt retains that exact
+ * commit/branch across either failure, including an unknown push/create result. Retry uses the
+ * same branch (the existing 422 adoption checks its head), never another mint or model proposal. */
+async function finishPrivateTriagePublication(publication: PrivateTriagePublication, receiptPath: string,
+  feedbackId: string, taskId: string, config: Config, summarizeDeps: SummarizeDeps,
+  log: (step: string, extra?: Record<string, unknown>) => void, say: (msg: string) => void): Promise<string> {
+  const { worktreePath, branch } = publication;
+  holdPrivateTriagePublication(publication, true);
+  const [owner, repo] = publication.repository.split("/");
+  const diff = hostWorktreeGit(worktreePath, ["diff", worktreeMergeBase(worktreePath), "HEAD", "--", "plan"]);
+  if (!diffCitesFeedback(diff, feedbackId, publication.taskPath)
+    || hostWorktreeGit(worktreePath, ["diff", "--name-only", worktreeMergeBase(worktreePath), "HEAD"]).trim() !== publication.taskPath) {
+    throw new Error("public task write is not the recorded single new task with feedback origin");
   }
-  const before = input.before;
-  if (before.state !== "open" || before.headSha !== input.expectedHeadSha || before.baseRef !== "main" ||
-      before.baseSha !== input.fetchedBaseSha) {
-    return { kind: "unknown", reason: "PR state, head, or base differs from the fetched classification snapshot" };
-  }
-  const disposition = triageEmptyScopeDisposition(input.liveDiffFiles, input.scopeFiles);
-  if (disposition.action !== "close" || !disposition.comment) return { kind: "nonempty" };
-  const after = input.after;
-  if (!after || after.state !== "open" || after.headSha !== before.headSha || after.baseRef !== before.baseRef ||
-      after.baseSha !== before.baseSha) {
-    return { kind: "unknown", reason: "PR identity changed after empty-scope classification" };
-  }
-  return { kind: "empty", comment: disposition.comment };
-}
-
-/** Classify a declared scope and re-read identity immediately before any empty-scope close. */
-async function checkTriageLiveScope(
-  worktreePath: string,
-  prUrl: string,
-  owner: string,
-  repo: string,
-  action: string,
-  scopeFiles: readonly string[],
-): Promise<TriageLiveScopeCheck> {
   try {
-    await hostWorktreeGitAsync(worktreePath, ["fetch", "origin", "main"], { stdio: "inherit-stdout" });
-    const baseSha = (await hostWorktreeGitAsync(worktreePath, ["rev-parse", "origin/main"])).trim();
-    const headSha = (await hostWorktreeGitAsync(worktreePath, ["rev-parse", "HEAD"])).trim();
-    if (!/^[0-9a-f]{40}$/i.test(baseSha) || !/^[0-9a-f]{40}$/i.test(headSha)) {
-      return { kind: "unknown", reason: "live base/head revision is incomplete" };
+    if (publication.prUrl === undefined) {
+      const entry = readFeedbackEntry(worktreePath, feedbackId);
+      await observeFeedbackPublication(config.contributorAdmission === undefined ? undefined : { mode: "shadow", record: log },
+        entry.contribution ? [entry.contribution] : [], publication.repository, "triage-publication");
+      await gitPushRunBranchAsync(worktreePath);
+      const message = hostWorktreeGit(worktreePath, ["log", "-1", "--format=%B"]);
+      const create = ghPrCreateFillCommand(worktreePath, owner, repo, branch, message.split("\n")[0], undefined, undefined, { log });
+      const prUrl = runGhPrCreate(create, branch, log, say).prUrl;
+      if (!prUrl) throw new Error("no task pull request returned");
+      const target = prUrlTarget(prUrl);
+      if (target?.owner !== owner || target.repo !== repo) throw new Error("public task pull request returned a different repository");
+      const ownership = checkPrOwnership(prUrl, branch, ghPrHeadGateway(), 0);
+      if (ownership) throw new Error("public task pull request is not this branch");
+      ensureTaskTrailer(prUrl, taskId, log);
+      publication.prUrl = prUrl;
+      writeAtomic(receiptPath, JSON.stringify(publication), { mode: 0o600 });
+    } else if (checkPrOwnership(publication.prUrl, branch, ghPrHeadGateway(), 0)) {
+      throw new Error("recorded public task pull request changed ownership");
     }
-    const before = await readTriagePrLifecycleIdentity(prUrl, owner, repo);
-    const liveDiffFiles = (await hostWorktreeGitAsync(worktreePath, ["diff", "--name-only", "origin/main", "HEAD", "--", ...scopeFiles]))
-      .split("\n").map((line) => line.trim()).filter(Boolean);
-    const evidence = {
-      action, scopeFiles, liveDiffFiles, complete: true, expectedHeadSha: headSha,
-      fetchedBaseSha: baseSha, before,
-    };
-    if (triageEmptyScopeDisposition(liveDiffFiles, scopeFiles).action !== "close") {
-      return triageLiveScopeDecision(evidence);
-    }
-    const after = await readTriagePrLifecycleIdentity(prUrl, owner, repo);
-    return triageLiveScopeDecision({ ...evidence, after });
+    if (readHeadShaRest(publication.prUrl) !== publication.commit) throw new Error("the recorded public task head changed or is unreadable");
   } catch (error) {
-    return { kind: "unknown", reason: String((error as Error)?.message ?? error).slice(0, 240) };
+    log("triage.error", { error: "public task write failed or unknown", write: "public_task", feedback_id: feedbackId });
+    throw new Error("public task write failed or is unknown; retained the original task for a later pass", { cause: error });
   }
+  // The public PR already exists even if the private write fails. Existing priced-run and
+  // in-flight consumers read pr.opened; a new unregistered failure step would hide that fact.
+  log("pr.opened", { pr_url: publication.prUrl, plan_only: true, action: "propose", feedback_status: "pending" });
+  try {
+    const stateRoot = join(config.root, "state");
+    await proposeFeedbackWithSummary(worktreePath, feedbackId, summarizeDeps, { proposalPr: publication.prUrl, land: { stateRoot } });
+    const landing = landPrivateTriageStatus(worktreePath, stateRoot, feedbackId, "proposed", { proposalPr: publication.prUrl, log });
+    if (!landing.landed) throw new Error("the private feedback landing refused the write");
+    publication.stage = "feedback_landed";
+    writeAtomic(receiptPath, JSON.stringify(publication), { mode: 0o600 });
+  } catch (error) {
+    log("triage.error", { error: "private feedback status write failed", write: "private_feedback_status", feedback_id: feedbackId });
+    throw new Error("private feedback status write failed; retained the existing public task pull request", { cause: error });
+  }
+  holdPrivateTriagePublication(publication, false);
+  return publication.prUrl;
+}
+
+function landTriageStatusOutcome(i: {
+  worktreePath: string;
+  repoDir: string;
+  feedbackId: string;
+  entry: FeedbackEntry;
+  decision: Extract<TriageDecision, { action: "no_task" | "grill" }>;
+  grillIssueUrl: string | undefined;
+  repository: string;
+  threadStorePath: string;
+  stateRoot: string;
+  log: (step: string, extra?: Record<string, unknown>) => void;
+  say: (msg: string) => void;
+}): number {
+  const { decision, feedbackId, log, say } = i;
+  const home = triageFeedbackHome(i.worktreePath, feedbackId);
+  const landing = home.destination !== undefined
+    ? landPrivateTriageStatus(i.worktreePath, i.stateRoot, feedbackId, decision.status, { log })
+    : (() => {
+      setFeedbackStatus(i.worktreePath, feedbackId, decision.status);
+      const content = readFileSync(feedbackEntryPath(i.worktreePath, feedbackId), "utf8");
+      return landFeedbackStatusContent(i.worktreePath, feedbackEntryRepoPath(feedbackId), content, { log });
+    })();
+  if (!landing.landed) {
+    const cause = landing.error ?? (landing.refused?.length ? `refused: ${JSON.stringify(landing.refused)}` : "nothing was landed");
+    log("triage.error", { error: `feedback landing refused: ${cause}`, action: decision.action, landing_pr: landing.prUrl ?? null });
+    say(`triage ${decision.action}: the feedback landing refused the status change (${cause}); feedback#${feedbackId} stays new`);
+    worktreeRemove(i.repoDir, i.worktreePath);
+    return 1;
+  }
+  // `pr.opened` keyed to TRIAGE-<id>: the daemon's in-flight guard and the failed-fire backoff read it.
+  if (landing.prUrl) log("pr.opened", { pr_url: landing.prUrl, plan_only: true, action: decision.action, landing: true, landing_error: landing.error });
+  say(`triage ${decision.action}: status ${decision.status} landed through the feedback landing${landing.prUrl ? `: ${landing.prUrl}` : " (pull request pending)"}`);
+  try {
+    const prUrl = landing.prUrl;
+    const outcome = prUrl === undefined
+      ? { action: "error" as const, reason: "The landing returned no pull request." }
+      : decision.action === "grill"
+        ? i.grillIssueUrl ? { action: "grill" as const, publicationPr: prUrl, detail: decision.detail, questionIssueUrl: i.grillIssueUrl }
+          : { action: "error" as const, reason: "The intake question has no verified publication." }
+        : { action: decision.action, publicationPr: prUrl, detail: decision.detail };
+    const response = recordEscalationIntakeOutcome(i.entry, outcome, { threadStorePath: i.threadStorePath, repository: i.repository });
+    log("triage.escalation_response", { feedback_id: feedbackId, ...response, work: "pending" });
+  } catch (error) {
+    log("triage.escalation_response", { feedback_id: feedbackId, state: "unknown", reason: String((error as Error)?.message ?? error) });
+  }
+  worktreeRemove(i.repoDir, i.worktreePath);
+  return 0;
 }
 
 async function triageCommandLocked(
@@ -34587,9 +35561,31 @@ async function triageCommandLocked(
     mkdirSync(dirname(repoDir), { recursive: true });
     ghExec(["repo", "clone", `${owner}/${repo}`, repoDir], { stdio: "inherit" });
   }
+  const receiptPath = join(config.root, "state", "triage-publication", createHash("sha256").update(`${owner}/${repo}\0${feedbackId}`).digest("hex") + ".json");
+  const receiptText = readFileIfExists(receiptPath);
+  let publication: PrivateTriagePublication | undefined = receiptText === undefined ? undefined : JSON.parse(receiptText);
+  if (publication !== undefined) {
+    if (publication.version !== 1 || publication.repository !== `${owner}/${repo}` || publication.feedbackId !== feedbackId
+      || typeof publication.branch !== "string" || !publication.branch.startsWith(`run-TRIAGE-${feedbackId}-`)
+      || typeof publication.worktreePath !== "string" || resolve(publication.worktreePath) !== resolve(worktreesDir(config), publication.branch)
+      || !/^[a-f0-9]{40}$/.test(publication.commit) || !/^plan\/tasks\.d\/W[0-9]+-T[0-9]+-[^/]+\.yaml$/.test(publication.taskPath)
+      || !["task_committed", "feedback_landed"].includes(publication.stage)
+      || (publication.prUrl !== undefined && (typeof publication.prUrl !== "string" || prUrlTarget(publication.prUrl)?.owner !== owner || prUrlTarget(publication.prUrl)?.repo !== repo))) throw new Error("triage publication receipt is invalid; refusing a second task");
+    if (publication.stage === "feedback_landed") {
+      holdPrivateTriagePublication(publication, false);
+      say("the previous task and feedback landing are already published; awaiting their normal gates");
+      return 1;
+    }
+    if (hostWorktreeGit(publication.worktreePath, ["rev-parse", "HEAD"]).trim() !== publication.commit
+      || hostWorktreeGit(publication.worktreePath, ["status", "--porcelain", "--untracked-files=normal"]).trim() !== "") {
+      throw new Error("triage publication worktree changed; refusing a second task");
+    }
+    // Adopt receipts written before persistent holds existed BEFORE the stale-run sweep.
+    holdPrivateTriagePublication(publication, true);
+  }
   const pruned = pruneStaleRuns(repoDir, worktreesDir(config), { graceMs: DEFAULT_PRUNE_GRACE_MS });
   if (pruned.worktrees.length || pruned.branches.length || pruned.skipped.length) log("worktree.prune", { ...pruned });
-  const { branch, worktreePath } = await addLaneWorktree(repoDir, worktreesDir(config), runId, log); // W1-T2528
+  const { branch, worktreePath } = publication ?? await addLaneWorktree(repoDir, worktreesDir(config), runId, log); // W1-T2528
 
   // W1-T348: the decision-summary rung, resolved ONCE and reused at both sites this run may
   // reach a human/operator — the GRILL escalation below and the proposal write further down.
@@ -34650,6 +35646,9 @@ async function triageCommandLocked(
       return 1;
     }
     await observeFeedbackInputs(config.contributorAdmission, entry.contribution ? [entry.contribution] : [], "triage-adoption", log);
+    const feedbackHome = triageFeedbackHome(worktreePath, feedbackId);
+
+
 
     // ── THE CROSS-HOST CLAIM (W1-T1132), TAKEN BEFORE THE ARCHITECT CALL ────────────────────
     // HERE, not before the write: the loser's RESEARCH is the actual cost. Everything below this
@@ -34674,11 +35673,25 @@ async function triageCommandLocked(
     claimReserver = triageClaimReserverAsyncFor(repoDir);
     // `mergedSubjects` is read LAZILY — only the LOSING lane ever needs it, so the winner pays
     // nothing for the evidence arm's input.
-    triageClaim = await claimTriageWithLogging(log, feedbackId, claimReserver, { mergedSubjects: () => mergedTriageSubjects(repoDir) });
+    triageClaim = await claimTriageWithLogging(log, feedbackId, claimReserver, { mergedSubjects: () => feedbackHome.destination === undefined ? mergedTriageSubjects(repoDir) : [],
+      landedStatus: (id) => readLandedFeedbackEntry(repoDir, id)?.status });
     if (!triageClaim.proceed) {
       say(`REFUSED — ${triageClaim.reason}`);
       worktreeRemove(repoDir, worktreePath);
       return 2;
+    }
+
+    // Both first publication and recovery converge on the unchanged gate below. Recovery must
+    // not mint again, respawn an Architect or fabricate a WorkerResult to reach that gate.
+    let publicationOutcome: { prUrl: string; decision: Extract<TriageDecision, { action: "propose" }>; proposalTaskPath?: string };
+    triagePublication: {
+    if (publication !== undefined) {
+      if (feedbackHome.destination === undefined || publication.feedbackDigest !== createHash("sha256").update(JSON.stringify(entry)).digest("hex")) {
+        throw new Error("triage publication feedback changed; refusing a second task");
+      }
+      const prUrl = await finishPrivateTriagePublication(publication, receiptPath, feedbackId, taskId, config, summarizeDeps, log, say);
+      publicationOutcome = { prUrl, decision: { action: "propose", status: "proposed", detail: "resume the existing public task", files: [publication.taskPath] }, proposalTaskPath: publication.taskPath };
+      break triagePublication;
     }
 
     // ID MINT (the 2/2 collision evidence: W1-T256->257 #770, W1-T260->261 #775; lineage
@@ -34689,7 +35702,7 @@ async function triageCommandLocked(
     // open plan PRs have already minted, and handed to the worker — which has no Bash tool
     // and so could never have run the grep the prompt used to describe. Ledgered with its
     // provenance so a degraded source is visible, never silent.
-    const mint = mintNextTaskIdWithHistory({
+    const mint = await mintNextTaskIdWithHistoryAsync({
       planPath: join(worktreePath, "plan", "tasks.yaml"),
       repoRoot: worktreePath,
       openPrTexts: () => openPrMintTexts(owner, repo),
@@ -34785,7 +35798,8 @@ async function triageCommandLocked(
     const loop = await runRelintLoop<{ decision: ReturnType<typeof decideTriage>; changedFiles: string[] }>({
       lane: "triage",
       filedIds: reservedIds,
-      initialPrompt: triagePrompt(entry, runId, reservedHeadTaskId, reservedIds.slice(1), triageFeedbackBlock),
+      initialPrompt: triagePrompt(entry, runId, reservedHeadTaskId, reservedIds.slice(1), triageFeedbackBlock)
+        + (feedbackHome.destination === undefined ? "" : "\nThis feedback is host-private. Never create or copy its file in this public worktree. A proposal adds exactly one new public task file, with origin: feedback#" + feedbackId + "."),
       log,
       run: async (prompt, attempt, previous) => {
         worker = await spawn({
@@ -34907,6 +35921,13 @@ async function triageCommandLocked(
       say(`grill opened (needs-human, ${decision.options.length} options + a recommendation): ${grillIssueUrl}`);
     }
 
+    // W1-T12198: an outcome that files no task changes one status line, so it rides the shared
+    // feedback landing pull request and opens no pull request of its own.
+    if (decision.action === "no_task" || decision.action === "grill") {
+      return landTriageStatusOutcome({ worktreePath, repoDir, feedbackId, entry, decision, grillIssueUrl,
+        repository: `${owner}/${repo}`, threadStorePath: inboxThreadStorePath(config.root), stateRoot: join(config.root, "state"), log, say });
+    }
+
     // ID-COLLISION GUARD (W1-T236 triple-mint, 2026-07-22): refuse a proposal whose merged plan
     // (monolith + tasks.d shards) does not load — e.g. a minted id a shard already owns — BEFORE
     // any push, with the duplicate named. See lib/triage.ts's assertProposedPlanLoads.
@@ -34950,6 +35971,28 @@ async function triageCommandLocked(
         source_history: mint.historyMax,
         degraded: mint.degraded.map((d) => d.source),
       });
+    }
+
+    if (feedbackHome.destination !== undefined) {
+      if (changedFiles.length !== 1 || !/^plan\/tasks\.d\/W[0-9]+-T[0-9]+-[^/]+\.yaml$/.test(changedFiles[0])) {
+        throw new Error("private-feedback triage must add only one new public task file");
+      }
+      const taskPath = changedFiles[0];
+      const tasks = parseYaml(readFileSync(join(worktreePath, taskPath), "utf8")) as Array<{ id: string; origin: string }>;
+      if (!Array.isArray(tasks) || tasks.length !== 1 || !reservedIds.includes(tasks[0].id) || tasks[0].origin !== `feedback#${feedbackId}`
+        || hostWorktreeGitResult(worktreePath, ["cat-file", "-e", `origin/main:${taskPath}`]).status === 0) {
+        throw new Error("private-feedback task must be new and bind its reserved id and feedback origin");
+      }
+      const message = triageCommitMessage({ decision, feedbackId, taskId, proposalTaskPath: taskPath, proposalTaskId: tasks[0].id });
+      await applyPlanProposalCommitAsync(worktreePath, message, log);
+      publication = { version: 1, repository: `${owner}/${repo}`, feedbackId, feedbackDigest: createHash("sha256").update(JSON.stringify(entry)).digest("hex"),
+        branch, worktreePath, commit: hostWorktreeGit(worktreePath, ["rev-parse", "HEAD"]).trim(), taskPath, stage: "task_committed" };
+      writeAtomic(receiptPath, JSON.stringify(publication), { mode: 0o600 });
+      triagePushed = pushedBranchIds(worktreePath, log);
+      const prUrl = await finishPrivateTriagePublication(publication, receiptPath, feedbackId, taskId, config, summarizeDeps, log, say);
+      triagePushed = pushedBranchIds(worktreePath, log);
+      publicationOutcome = { prUrl, decision, proposalTaskPath: taskPath };
+      break triagePublication;
     }
 
     // Harness-owned deterministic status write (never LLM-authored) — folded into the SAME diff
@@ -35032,6 +36075,10 @@ async function triageCommandLocked(
       await gitPushRunBranchAsync(worktreePath);
     }
 
+    publicationOutcome = { prUrl, decision };
+    }
+    const { prUrl, decision, proposalTaskPath } = publicationOutcome;
+
     // DETERMINISTIC GUARD: a triage PR is PLAN-ONLY. Fail closed if the diff touches anything
     // outside plan/ (lib/triage.ts's `nonPlanFilesInDiff`, the same shape as retro's guard).
     const diff = ghExec(["pr", "diff", prUrl], { encoding: "utf8", maxBuffer: 1 << 26 });
@@ -35042,76 +36089,29 @@ async function triageCommandLocked(
       worktreeRemove(repoDir, worktreePath);
       return 1;
     }
-    if (decision.action === "propose" && !diffCitesFeedback(diff, feedbackId)) {
+    if (decision.action === "propose" && !diffCitesFeedback(diff, feedbackId, proposalTaskPath)) {
       log("triage.error", { error: "proposed diff missing feedback# provenance" });
       say(`triage PROPOSED but the diff never cites feedback#${feedbackId} — leaving PR OPEN for inspection`);
       worktreeRemove(repoDir, worktreePath);
       return 1;
     }
-    log("pr.opened", { pr_url: prUrl, plan_only: true, action: decision.action });
+    if (proposalTaskPath === undefined) log("pr.opened", { pr_url: prUrl, plan_only: true, action: decision.action });
     say(`triage PR (plan-only, ${decision.action}): ${prUrl}`);
     // Publication ownership, plan-only scope and feedback provenance were verified above.
     // Acknowledging intake ends the ask; it does not claim CI, merge or work completion.
     try {
-      const outcome = decision.action === "grill"
-        ? grillIssueUrl ? { action: "grill" as const, publicationPr: prUrl, detail: decision.detail, questionIssueUrl: grillIssueUrl }
-          : { action: "error" as const, reason: "The intake question has no verified publication." }
-        : { action: decision.action, publicationPr: prUrl, detail: decision.detail };
-      const response = recordEscalationIntakeOutcome(entry, outcome,
+      const response = recordEscalationIntakeOutcome(entry, { action: decision.action, publicationPr: prUrl, detail: decision.detail },
         { threadStorePath: inboxThreadStorePath(config.root), repository: `${owner}/${repo}` });
       log("triage.escalation_response", { feedback_id: feedbackId, ...response, work: "pending" });
     } catch (error) {
       log("triage.escalation_response", { feedback_id: feedbackId, state: "unknown", reason: String((error as Error)?.message ?? error) });
     }
 
-    const declaredScope = decision.action === "no_task" || decision.action === "grill"
-      ? triageDeclaredScope(feedbackId)
-      : undefined;
-    if (declaredScope) {
-      const beforeCi = await checkTriageLiveScope(worktreePath, prUrl, owner, repo, decision.action, declaredScope);
-      if (beforeCi.kind === "empty") {
-        log("triage.already_done", { scope: declaredScope, before_ci: true });
-        say(`triage PR's declared scope (${declaredScope.join(", ")}) is EMPTY against the LIVE origin/main — ` +
-          `a sibling triage PR already landed this change; closing rather than merging: ${prUrl}`);
-        await closeTriagedEmptyScopePr(prUrl, beforeCi.comment);
-        worktreeRemove(repoDir, worktreePath);
-        return 0;
-      }
-      if (beforeCi.kind === "unknown") {
-        // Unknown evidence cannot authorize an early close. Keep the ordinary CI path, then let
-        // the post-CI identity/scope check refuse any later terminalization or merge.
-        log("triage.live_scope_unknown", { scope: declaredScope, phase: "before_ci", reason: beforeCi.reason });
-        say(`triage could not prove the declared scope is empty before CI (${beforeCi.reason}); ` +
-          `retaining the ordinary CI and review gates: ${prUrl}`);
-      }
-    }
-
-    // Confirmed no-op triage PRs terminalize above; every substantive scope still passes CI.
     const ci = ciGateState(await waitForCiGreen(prUrl, (s, extra) => log(s, extra)));
     if (ci !== "green") {
       say(`ci ${ci} — PR left OPEN: ${prUrl}`);
       worktreeRemove(repoDir, worktreePath);
       return 1;
-    }
-
-    // Keep the W1-T963 recheck after CI: a sibling may land the declared feedback update while
-    // checks are running. The same complete-evidence and exact-identity rule applies here.
-    if (declaredScope) {
-      const afterCi = await checkTriageLiveScope(worktreePath, prUrl, owner, repo, decision.action, declaredScope);
-      if (afterCi.kind === "empty") {
-        log("triage.already_done", { scope: declaredScope, after_ci: true });
-        say(`triage PR's declared scope (${declaredScope.join(", ")}) is EMPTY against the LIVE origin/main — ` +
-          `a sibling triage PR already landed this change; closing rather than merging: ${prUrl}`);
-        ghExec(["pr", "close", prUrl, "--comment", afterCi.comment], { stdio: "inherit" });
-        worktreeRemove(repoDir, worktreePath);
-        return 0;
-      }
-      if (afterCi.kind === "unknown") {
-        log("triage.live_scope_unknown", { scope: declaredScope, phase: "after_ci", reason: afterCi.reason });
-        say(`triage PR left OPEN — live empty-scope evidence is unavailable or changed (${afterCi.reason}): ${prUrl}`);
-        worktreeRemove(repoDir, worktreePath);
-        return 1;
-      }
     }
 
     const prNum = prUrl.match(/\/pull\/(\d+)/)?.[1] ?? prUrl;
@@ -35141,7 +36141,7 @@ async function triageCommandLocked(
     log("triage.error", { error: String((e as Error)?.message ?? e) });
     triageEnding = `errored: ${String((e as Error)?.message ?? e).slice(0, 160)}`;
     try {
-      worktreeRemove(repoDir, worktreePath);
+      if (publication === undefined) worktreeRemove(repoDir, worktreePath);
     } catch {
       /* best-effort */
     }
@@ -35211,7 +36211,9 @@ export const PLAN_MAX_NEW_TASKS = 5;
 
 export async function planCommand(
   rest: string[],
-  opts: { spawn?: typeof spawnWorker; config?: Config; overlap?: OverlapWarningDeps; lintPlanForReviewFn?: typeof lintPlanForReview } = {},
+  opts: { spawn?: typeof spawnWorker; config?: Config; overlap?: OverlapWarningDeps; lintPlanForReviewFn?: typeof lintPlanForReview;
+    plannerHostGitCredential?: typeof plannerHostGitCredential; openPlannerGitCredential?: typeof openPlannerGitCredential;
+    prWriteToken?: Parameters<typeof plannerPrWriteToken>[2]; prCreateExec?: Parameters<typeof runGhPrCreate>[4] } = {},
 ): Promise<number> {
   const parsed = parsePlanArgs(rest);
   if ("error" in parsed) {
@@ -35239,6 +36241,16 @@ export async function planCommand(
   log("plan.start", { mode, brief, architect: arch, effort: mountsTable.architect.effort, worker: wrk });
   say(`plan ${runId} — mode=${mode} — architect ${arch} over worker ${wrk}`);
 
+  const credential = await (opts.plannerHostGitCredential ?? plannerHostGitCredential)(`${owner}/${repo}`);
+  if (credential.kind === "app") {
+    const preflight = await plannerPrWriteToken(credential, `${owner}/${repo}`, opts.prWriteToken);
+    if (!preflight.ok) {
+      log("plan.credential_refused", { reason: preflight.reason, missing: preflight.missing, boundary: "pr_create" });
+      say(`plan refused — ${preflight.reason}`);
+      return 1;
+    }
+  }
+
   const settingsFile = renderWorkerSettings({
     templatePath: join(resolveInstallRoot(config), "settings", "worker.json"),
     hooksDir: join(resolveInstallRoot(config), "hooks"),
@@ -35253,15 +36265,32 @@ export async function planCommand(
   }
   const pruned = pruneStaleRuns(repoDir, worktreesDir(config), { graceMs: DEFAULT_PRUNE_GRACE_MS });
   if (pruned.worktrees.length || pruned.branches.length || pruned.skipped.length) log("worktree.prune", { ...pruned });
-  const { branch, worktreePath } = await addLaneWorktree(repoDir, worktreesDir(config), runId, log); // W1-T2528
+  // W1-T11851: this lane's own pushes present the host App identity, minted per request at the git credential-helper
+  // boundary — never a ~/.bashrc token a non-interactive shell cannot see, and never an env var. An unusable source
+  // refuses HERE, before any id is claimed or any worker spawns; only a host with no registry keeps today's helpers.
+  const planCred = await (opts.openPlannerGitCredential ?? openPlannerGitCredential)(credential, {
+    runDir: join(config.root, "tmp", `plan-cred-${runId}`), log, wire: wireCredentialHelperSocket, unwire: unwireCredentialHelperSocket,
+    shared: (cwd) => sharesHarnessCheckout(cwd, repoDir) || sharesHarnessCheckout(cwd, repoRoot),
+  });
+  if (!planCred.ok) { say(`plan refused — no usable git credential: ${planCred.reason}`); return 1; }
+  const credLane = planCred.lane;
+  const { branch, worktreePath } = await addLaneWorktree(repoDir, worktreesDir(config), runId, log).catch(async (err: unknown) => { await credLane.close(); throw err; }); // W1-T2528
 
   let planIdBlock: TaskIdReservationBlock | undefined;
   // W1-T9488: see the triage lane's twin — the remote ids held, what the pushed branch declares, how it ended.
   const planHeld: HeldTaskIdReservation[] = [];
   let planPushed: LanePushedIds;
   let planEnding = "ended before a verdict";
+  const releasePlanHeld = (cwd: string): void => releaseUnfiledReservations(planHeld, planPushed, {
+    run: gitRunAdapter((args) => hostWorktreeGitResult(cwd, args)), lane: "plan", log,
+    reason: laneReleaseReason("plan", planEnding, planPushed),
+  });
+  // The managed clone is never wired, so a wired lane gives its ids back from its own worktree BEFORE removing it.
+  const removePlanWorktree = (): void => { credLane.retire(worktreePath, releasePlanHeld); worktreeRemove(repoDir, worktreePath); };
 
   try {
+    const unwired = credLane.wire(worktreePath);
+    if (unwired !== undefined) { say(`plan refused — ${unwired}`); removePlanWorktree(); return 1; }
     // ID MINT + BLOCK RESERVATION (impl-DV), the SAME ordering triage uses at :10222-:10240: mint
     // from the FRESH worktree's plan, reserve BEFORE spawning, hand the worker ids it cannot
     // collide on. Until now this lane minted NOTHING — `planArchitectPrompt` received no id, so its
@@ -35271,7 +36300,7 @@ export async function planCommand(
     // wording in every mode) and the count is unknowable until the worker has run. Reserving a
     // bounded block up front is the only ordering that both refuses cheaply on collision and leaves
     // no id stranded — every id, used or not, is released in the `finally` below.
-    const mint = mintNextTaskIdWithHistory({
+    const mint = await mintNextTaskIdWithHistoryAsync({
       planPath: join(worktreePath, "plan", "tasks.yaml"),
       repoRoot: worktreePath,
       openPrTexts: () => openPrMintTexts(owner, repo),
@@ -35399,7 +36428,7 @@ export async function planCommand(
         violations: loop.violations.map((v) => v.message),
       });
       say(reason);
-      worktreeRemove(repoDir, worktreePath);
+      removePlanWorktree();
       return 1;
     }
 
@@ -35420,14 +36449,14 @@ export async function planCommand(
     if (decision.action === "error") {
       log("plan.error", { error: decision.reason, changed_files: changedFiles, subtype: worker.subtype });
       say(`plan inconsistent — ${decision.reason}; leaving no PR`);
-      worktreeRemove(repoDir, worktreePath);
+      removePlanWorktree();
       return 1;
     }
 
     if (decision.action === "no_action") {
       log("plan.verdict", { action: "no_action", detail: decision.detail });
       say(formatPlanVerdictLine(mode, decision));
-      worktreeRemove(repoDir, worktreePath);
+      removePlanWorktree();
       return 0;
     }
 
@@ -35465,7 +36494,7 @@ export async function planCommand(
           error: String((err as Error)?.message ?? err),
         });
       }
-      worktreeRemove(repoDir, worktreePath);
+      removePlanWorktree();
       return 0;
     }
 
@@ -35482,12 +36511,23 @@ export async function planCommand(
       .split("\n")
       .map((line) => line.trim())
       .filter(Boolean);
-    const planPrBody = buildPlanPrBody({
-      intro: `rmd plan --mode=${mode} proposed plan-only changes.\n\nOperator brief\n\n${brief || "(none — whole-plan scope)"}`,
-      criteria: filingAcceptanceCriteria(reservedIds, planPrFiles),
-      changedFiles: planPrFiles,
-      proofCwd: worktreePath,
-    });
+    // W1-T11625: an amendment of an EXISTING shard carries a proof of an added line, or no PR opens. Both the
+    // producer's "nothing derivable" throw and buildPlanPrBody's author-time refusal land BEFORE the push.
+    let planPrBody: string;
+    try {
+      planPrBody = buildPlanPrBody({
+        intro: `rmd plan --mode=${mode} proposed plan-only changes.\n\nOperator brief\n\n${brief || "(none — whole-plan scope)"}`,
+        criteria: planPrAcceptanceCriteria(reservedIds, planPrFiles, diffSinceMergeBase(worktreePath), worktreePath),
+        changedFiles: planPrFiles,
+        proofCwd: worktreePath,
+      });
+    } catch (err) {
+      const reason = String((err as Error)?.message ?? err);
+      log("plan.error", { error: reason, changed_files: planPrFiles });
+      say(`plan PR not opened — ${reason}`);
+      removePlanWorktree();
+      return 1;
+    }
     planPushed = "unknown"; // W1-T9488: a push that throws leaves the branch's ids unknowable
     await gitPushRunBranchAsync(worktreePath);
     planPushed = pushedBranchIds(worktreePath, log);
@@ -35495,10 +36535,24 @@ export async function planCommand(
     // The title is the SAME header string that just went into the commit, split off
     // its first line — never a second computation (W1-T327 design point ii).
     const prCreate = ghPrCreateFillCommand(worktreePath, owner, repo, branch, commitMessage.split("\n")[0], planPrBody, undefined, { log });
-    const prUrl = runGhPrCreate(prCreate, branch, log, say).prUrl;
+    let prUrl: string | undefined;
+    if (credential.kind === "app") {
+      const write = await plannerPrWriteToken(credential, `${owner}/${repo}`, opts.prWriteToken);
+      if (!write.ok) {
+        log("plan.pr_write_credential_failed", { branch, reason: write.reason });
+        say(`plan PR not opened — ${write.reason}`);
+        removePlanWorktree();
+        return 1;
+      }
+      const exec: NonNullable<Parameters<typeof runGhPrCreate>[4]> = opts.prCreateExec ?? execFileSync;
+      prUrl = runGhPrCreate(prCreate, branch, log, say,
+        (file, args, options) => exec(file, args, { ...options, env: { ...process.env, GH_TOKEN: write.token } }), exec).prUrl;
+    } else {
+      prUrl = runGhPrCreate(prCreate, branch, log, say, opts.prCreateExec).prUrl;
+    }
     if (!prUrl) {
       log("plan.error", { error: "no PR opened" });
-      worktreeRemove(repoDir, worktreePath);
+      removePlanWorktree();
       return 1;
     }
 
@@ -35508,7 +36562,7 @@ export async function planCommand(
     if (ownership) {
       log("verdict", ownership.ledger);
       say(`verdict: pr_attribution_failed — claimed PR ${prUrl} is not this plan run's own branch (${branch})`);
-      worktreeRemove(repoDir, worktreePath);
+      removePlanWorktree();
       return 1;
     }
     // DETERMINISTIC GUARDS: a plan PR is PLAN-ONLY (plan/** or MASTER-PLAN.md), and an EXPAND
@@ -35519,13 +36573,13 @@ export async function planCommand(
     if (strayFiles.length > 0) {
       log("plan.error", { error: "plan PR is NOT plan-only", stray_files: strayFiles });
       say(`plan PR touched file(s) outside plan scope (${strayFiles.join(", ")}) — leaving PR OPEN for inspection`);
-      worktreeRemove(repoDir, worktreePath);
+      removePlanWorktree();
       return 1;
     }
     if (mode === "expand" && !diffCitesResearchSource(diff)) {
       log("plan.error", { error: "expand diff missing a research-source citation" });
       say(`plan --mode=expand PROPOSED but the diff cites no research source (URL) — leaving PR OPEN for inspection`);
-      worktreeRemove(repoDir, worktreePath);
+      removePlanWorktree();
       return 1;
     }
     log("pr.opened", { pr_url: prUrl, plan_only: true, mode });
@@ -35536,7 +36590,7 @@ export async function planCommand(
     const ci = ciGateState(await waitForCiGreen(prUrl, (s, extra) => log(s, extra)));
     if (ci !== "green") {
       say(`ci ${ci} — PR left OPEN: ${prUrl}`);
-      worktreeRemove(repoDir, worktreePath);
+      removePlanWorktree();
       return 1;
     }
     const prNum = prUrl.match(/\/pull\/(\d+)/)?.[1] ?? prUrl;
@@ -35556,7 +36610,7 @@ export async function planCommand(
       /* best-effort — see the comment above */
     }
     const armOutcome = armAndLogOutcome(prUrl, taskId, log, undefined, undefined, armHeadSha);
-    worktreeRemove(repoDir, worktreePath);
+    removePlanWorktree();
     // W1-T968: the PR — not merely this call — is what the console line answers about; a
     // review-lane arm already ledgered moments earlier on this SAME head must still read as armed.
     const priorArm = priorArmOnHead(readLedgerLines(ledgerPath), prUrl, armHeadSha);
@@ -35566,7 +36620,7 @@ export async function planCommand(
     log("plan.error", { error: String((e as Error)?.message ?? e) });
     planEnding = `errored: ${String((e as Error)?.message ?? e).slice(0, 160)}`;
     try {
-      worktreeRemove(repoDir, worktreePath);
+      removePlanWorktree();
     } catch {
       /* best-effort */
     }
@@ -35574,14 +36628,14 @@ export async function planCommand(
   } finally {
     removeRunLock(worktreePath); // terminal ⇒ drop the liveness token
     // W1-T9488: the REMOTE half is given back too — every reserved id the pushed branch does not declare.
-    releaseUnfiledReservations(planHeld, planPushed, {
-      run: gitRunAdapter((args) => hostWorktreeGitResult(repoDir, args)), lane: "plan", log,
-      reason: laneReleaseReason("plan", planEnding, planPushed),
-    });
+    // W1-T11851 teardown order: release (it needs the credential), unwire, then close the socket.
+    credLane.retire(worktreePath, releasePlanHeld);
+    releasePlanHeld(repoDir); // empty once retired; the ambient path's release, unchanged
       // Release EVERY reserved id — the ones the worker filed AND the ones it declined. Once the
       // PR exists the mint sees those ids via openPrMintTexts, so holding them longer would only
       // punch holes in the id space (the phantom-id trap: W1-T199/224/247/263).
       planIdBlock?.releaseAll();
+    await credLane.close();
   }
 }
 
@@ -36562,6 +37616,7 @@ function loadProposalsForRatify(
   owner: string,
   repo: string,
   config: Config,
+  draftOverrides?: readonly RatificationPayload[],
 ): { found: { id: string; proposal: Proposal; classification: InboxClassification }[]; unknown: string[] } {
   const registryPath = join(config.root, "state", "inbox-proposals.json");
   const proposals: Proposal[] = parseProposalRegistry(readFileIfExists(registryPath));
@@ -36590,7 +37645,12 @@ function loadProposalsForRatify(
       unknown.push(id);
       continue;
     }
-    found.push({ id, proposal, classification: classifyProposal(proposal, drafts[proposal.id], ctx) });
+    const override = draftOverrides?.find(p => p.proposalId === id);
+    const draft = override ? { ...override, anchorFingerprint: anchorFingerprint(proposal.evidenceAnchors) } : drafts[proposal.id];
+    const classification = classifyProposal(proposal, draft, ctx);
+    // Automatic filing already validated the worker's verbatim provenance; do not prepend an operator-approve narrative.
+    if (override) classification.proposal = undefined;
+    found.push({ id, proposal, classification });
   }
   return { found, unknown };
 }
@@ -37112,6 +38172,8 @@ export function productionMachineFilingJudgePorts(opts: {
   clock?: Clock;
   /** Test files main's CI failed at a sha (W1-T9694). Absent: read from GitHub, as the flake-incident gardener does. */
   mainFailures?: SelectorShadowMainFailures;
+  /** W1-T12221: the shared landing of task files, as {@link GardenCheckoutOpts.taskFilesLanding}. */
+  taskFilesLanding?: GardenCheckoutOpts["taskFilesLanding"];
 }): MachineJudgePorts {
   let mount: Mount | undefined;
   const fetcher = opts.fetcher ?? ghJson;
@@ -37205,7 +38267,8 @@ export function productionMachineFilingJudgePorts(opts: {
         return times.sort((a, b) => Date.parse(a) - Date.parse(b)).at(-1);
       };
     },
-    openWorkspace: () => gardenCheckoutAsync({ name: "machine-judge", repoDir: opts.repoRoot, worktreesRoot: opts.worktreesRoot, owner: opts.owner, repo: opts.repo, log: opts.log, fetcher, clock: opts.clock }),
+    openWorkspace: () => gardenCheckoutAsync({ name: "machine-judge", repoDir: opts.repoRoot, worktreesRoot: opts.worktreesRoot, owner: opts.owner, repo: opts.repo, log: opts.log, fetcher, clock: opts.clock,
+      ...(opts.taskFilesLanding ? { taskFilesLanding: opts.taskFilesLanding } : {}) }),
     prState: (prUrl) => gardenPrState(opts.owner, opts.repo, prUrl, fetcher),
     stageProposal: (proposal) => void stageInboxProposalOnce(join(opts.stateDir, "inbox-proposals.json"), proposal),
     log: opts.log,
@@ -37520,38 +38583,6 @@ export async function routeRuling(ruling: AgentRuling, deps: RouteRulingDeps): P
   return { decision: verdict.decision, reason: verdict.reason, proposalId: proposal.id };
 }
 
-/** Everything the decision record currently says, as ONE string for the contradiction check:
- *  `DECISIONS.md` plus every landed `plan/decisions.d/**` shard, since a record that landed
- *  through the bridge but has not been folded into the root file is no less standing. An
- *  unreadable path contributes nothing rather than throwing — and contributing nothing is the
- *  SAFE direction here only because an unresolvable `supersedes` escalates anyway. */
-export function readStandingDecisions(root: string): string {
-  const parts: string[] = [];
-  try {
-    parts.push(readFileSync(join(root, "DECISIONS.md"), "utf8"));
-  } catch {
-    // no root decision file in this checkout — the shards below are still consulted
-  }
-  const dir = join(root, "plan", "decisions.d");
-  let entries: string[] = [];
-  try {
-    entries = readdirSync(dir);
-  } catch {
-    // no plan/decisions.d in this checkout — DECISIONS.md alone is the whole standing record here,
-    // which is a real state (a fresh clone before the first landing), not a read failure to report
-    return parts.join("\n");
-  }
-  for (const name of entries) {
-    if (!name.endsWith(".md")) continue;
-    try {
-      parts.push(readFileSync(join(dir, name), "utf8"));
-    } catch {
-      // one unreadable shard never hides the rest
-    }
-  }
-  return parts.join("\n");
-}
-
 /**
  * `rmd rule` — an agent records a ruling, behind the judge (W1-T3212, operator ruling
  * 2026-09-08). The thin real-world glue around {@link routeRuling}, mirroring
@@ -37599,14 +38630,18 @@ export async function ruleCommand(
   const config = deps.config ?? loadConfig();
   const ledgerPath = ledgerPathFor(config);
   const registryPath = join(config.root, "state", "inbox-proposals.json");
+  const stateDir = join(config.root, "state");
   const result = await route(ruling, {
     judge: realRulingJudge({
       mounts: loadMounts(mountsPath(root)),
       cwd: root,
       settingsFile: join(root, "settings", "worker.json"),
     }),
-    standingDecisions: readStandingDecisions(root),
-    land: (relPath, content) => void recordRuling(root, relPath, content),
+    standingDecisions: readStandingDecisions(root, stateDir),
+    // W1-T12201: the landing reads `root`'s origin as before, so the public owner and name here are not read.
+    land: (relPath, content) => void recordRuling(root, relPath, content, {
+      planDestination: resolvePlanDestination("decision", stateDir, { owner: "", repo: "", checkoutDir: root }),
+    }),
     stageProposal: (proposal) =>
       void updateProposalRegistry(registryPath, (current) =>
         current.some((existing) => existing.id === proposal.id) ? null : [...current, proposal],
@@ -37999,6 +39034,15 @@ export async function approveCommand(
     return code;
   }
 
+  let approveDestinationSnapshot: TaskIdDestinationSnapshot | null = null;
+  let approveDestinationFailure: string | undefined;
+  if (deps.gateway === undefined && classification.state === "ready" && classification.draft) {
+    try { approveDestinationSnapshot = (await taskIdDestinationSnapshot()) ?? null; }
+    catch (error) {
+      const reason = taskIdDestinationFailureReason(error);
+      approveDestinationFailure = reason; // Deferred to the actual mint callback; adoption/skills keep their own flow.
+    }
+  }
   const runId = `APPROVE-${proposalId}-${Date.now()}`;
   const log = (step: string, extra: Record<string, unknown> = {}) => appendLedger(ledgerPath, { run_id: runId, task_id: proposalId, step, lane: "approve", ...extra });
 
@@ -38092,12 +39136,15 @@ export async function approveCommand(
     const materialized = materializeDraftTaskIds(
       { fragmentYaml: payload.fragmentYaml, stampLine: payload.stampLine },
       {
-        mint: () =>
-          mintNextTaskIdWithHistory({
+        mint: () => {
+          if (approveDestinationFailure) throw new Error(approveDestinationFailure);
+          return mintNextTaskIdWithHistory({
             planPath: join(worktreePath, "plan", "tasks.yaml"),
             repoRoot: worktreePath,
+            destinationSnapshot: approveDestinationSnapshot,
             openPrTexts: () => openPrMintTexts(owner, repo),
-          }),
+          });
+        },
         reserveBlock: (startId, count) => {
           idBlock = reserveTaskIdBlock(startId, count, taskIdReservationsDir(config.root), {
             info: { purpose: `rmd approve ${payload.proposalId} (${purposeLabel})` },
@@ -38574,7 +39621,10 @@ export async function approveCommand(
  */
 async function approveBatchCommand(
   rest: string[],
-  deps: { config?: Config; gateway?: RatifyGateway; batchGateway?: RatifyBatchGateway } = {},
+  deps: { config?: Config; gateway?: RatifyGateway; batchGateway?: RatifyBatchGateway;
+    automaticFollowups?: { payloads: RatificationPayload[]; finalize: FollowupFinalizer };
+    onFiled?: (result: Extract<BatchApproveResult, { ok: true }>) => void;
+  } = {},
 ): Promise<number> {
   const proposalIds = rest;
   const config = deps.config ?? loadConfig();
@@ -38585,7 +39635,7 @@ async function approveBatchCommand(
   const registryPath = join(config.root, "state", "inbox-proposals.json");
   const { owner, repo } = instancePlan.target ?? resolveOwnerRepo();
 
-  const { found, unknown } = loadProposalsForRatify(proposalIds, plan, ledgerPath, owner, repo, config);
+  const { found, unknown } = loadProposalsForRatify(proposalIds, plan, ledgerPath, owner, repo, config, deps.automaticFollowups?.payloads);
   if (found.some(row => row.proposal.improvement !== undefined)) {
     console.error("rmd approve: improvement drafts must be reviewed and filed individually through their bound saved conversation");
     return 1;
@@ -38598,6 +39648,15 @@ async function approveBatchCommand(
     return 2;
   }
 
+  let batchDestinationSnapshot: TaskIdDestinationSnapshot | null = null;
+  let batchDestinationFailure: string | undefined;
+  if (deps.batchGateway === undefined) {
+    try { batchDestinationSnapshot = (await taskIdDestinationSnapshot()) ?? null; }
+    catch (error) {
+      const reason = taskIdDestinationFailureReason(error);
+      batchDestinationFailure = reason; // The batch reports this exact cause only if it needs a new id.
+    }
+  }
   const runId = `APPROVE-BATCH-${Date.now()}`;
   const log = (step: string, extra: Record<string, unknown> = {}) =>
     appendLedger(ledgerPath, { run_id: runId, task_id: "BATCH", step, lane: "approve", ...extra });
@@ -38653,12 +39712,15 @@ async function approveBatchCommand(
           const materialized = materializeDraftTaskIds(
             { fragmentYaml: payload.fragmentYaml, stampLine: payload.stampLine },
             {
-              mint: () =>
-                mintNextTaskIdWithHistory({
+              mint: () => {
+                if (batchDestinationFailure) throw new Error(batchDestinationFailure);
+                return mintNextTaskIdWithHistory({
                   planPath: join(batchWorktree, "plan", "tasks.yaml"),
                   repoRoot: batchWorktree,
+                  destinationSnapshot: batchDestinationSnapshot,
                   openPrTexts: () => openPrMintTexts(owner, repo),
-                }),
+                });
+              },
               reserveBlock: (startId, count) => {
                 const block = reserveTaskIdBlock(startId, count, taskIdReservationsDir(config.root), {
                   info: { purpose: `rmd approve ${payload.proposalId} (batch run ${runId})` },
@@ -38687,7 +39749,8 @@ async function approveBatchCommand(
             throw new Error(`rmd approve: refusing to materialize task id(s) for ${payload.proposalId} — ${materialized.reason}`);
           }
           log("approve.id_materialized", { proposal_id: payload.proposalId, ids: materialized.ids });
-          return { proposalId: payload.proposalId, fragmentYaml: materialized.fragmentYaml, stampLine: materialized.stampLine };
+          const filedPayload = { proposalId: payload.proposalId, fragmentYaml: materialized.fragmentYaml, stampLine: materialized.stampLine };
+          return deps.automaticFollowups ? deps.automaticFollowups.finalize(filedPayload) : filedPayload;
         },
         { mkdirSync, writeFileSync, readFileSync },
         join,
@@ -38697,14 +39760,16 @@ async function approveBatchCommand(
       log("approve.shards_written", { proposal_ids: payloads.map((p) => p.proposalId), paths: allWrittenPaths });
 
       execFileSync("git", ["-C", batchWorktree, "add", "--", ...allWrittenPaths], { stdio: "inherit" });
-      execFileSync("git", ["-C", worktreePath, "commit", "-m", approveBatchCommitMessage(payloads)], { stdio: "inherit" });
+      const message = deps.automaticFollowups ? followupFilingPresentation(payloads.map(p => p.proposalId), payloads.map(p => p.stampLine)).commitMessage
+        : approveBatchCommitMessage(payloads);
+      execFileSync("git", ["-C", worktreePath, "commit", "-m", message], { stdio: "inherit" });
       batchPushed = "unknown"; // W1-T9488: a push that throws leaves the branch's ids unknowable
       gitPushRunBranch(worktreePath);
       batchPushed = pushedBranchIds(worktreePath, log);
       return branch;
     },
     openPlanPr(branch, ids) {
-      const intro = [
+      const intro = deps.automaticFollowups ? followupFilingPresentation(ids).intro : [
         `Batch ratification of ${ids.length} explicitly-named proposals: ${ids.join(", ")}.`,
         "",
         "The operator's one-bit approve initiated this PR (MASTER-PLAN P25 ii, W1-T111). The",
@@ -38722,7 +39787,8 @@ async function approveBatchCommand(
       });
       assertLiveWriteAllowed("gh-pr-create", `opening a PR against ${owner}/${repo}`);
       const created = createPlanPrRest(ghJson, owner, repo, {
-        title: `chore(plan): ratify ${ids.length} proposals via rmd approve`,
+        title: deps.automaticFollowups ? followupFilingPresentation(ids).title :
+          `chore(plan): ratify ${ids.length} proposals via rmd approve`,
         body,
         head: branch,
         base: "main",
@@ -38773,6 +39839,7 @@ async function approveBatchCommand(
   idBlocks.forEach((b) => b.releaseAll());
   releaseBatchUnfiled("ratified");
 
+  deps.onFiled?.(result);
   updateProposalRegistry(registryPath, (current) => {
     const acceptedIds = new Set(result.accepted.map((p) => p.proposalId));
     const next = current.filter((p) => !acceptedIds.has(p.id));
@@ -39534,33 +40601,6 @@ function mainRepairBodyFile(config: Config, taskId: string): string {
 /** W1-T8572 — the one inert-proof row: what was inert, how many, and whether the body was rewritten or refused. */
 export const MAIN_REPAIR_ACCEPTANCE_DEFECT_STEP = "main-repair.acceptance_defect";
 
-/** W1-T8572 — a no-test-file worker body, checked BEFORE the dispatcher opens it. A body whose proofs all execute is
- *  returned as written. Otherwise its inert bullets ({@link inertAcceptanceProofs}: undialected, a demonstration, or
- *  unparseable — a prose proof naming a test path counts, though `parseWhitelistedProof` reads it) are dropped and one
- *  `grep:` of a line the pushed fix ADDS ({@link diffAnchor}) takes their place; with no such line the body is
- *  refused. Never trusts `acceptanceAuthorTimeCheck`: its trailer arm returns `ok` before it reads the block. */
-export function checkMainRepairWorkerBody(
-  body: string,
-  diffText: string | undefined,
-): { body: string } | { body: string; defect: "inert-proofs" | "no-proofs"; inert: string[]; resolution: "rewritten" } | { defect: "inert-proofs" | "no-proofs"; inert: string[]; resolution: "refused"; reason: DiffAnchorUnavailableReason } {
-  const criteria = parseAcceptanceBlock(body);
-  const inert = inertAcceptanceProofs(body);
-  if (criteria.length > 0 && inert.length === 0) return { body };
-  const defect = criteria.length === 0 ? "no-proofs" : "inert-proofs";
-  const anchor = diffAnchor(diffText);
-  if (anchor.kind === "unavailable") return { defect, inert, resolution: "refused", reason: anchor.reason };
-  const inertSet = new Set(inert);
-  const kept = criteria.filter((c) => !inertSet.has(c.proof ?? "")) as AcceptanceCriterion[];
-  const block = renderAcceptanceBlock([...kept, { claim: `the pushed repair adds this line to ${anchor.path}`, proof: anchor.proof }]);
-  const region = acceptanceBlockRegion(body);
-  const lines = body.split("\n");
-  const rewritten =
-    region === undefined
-      ? `${body.replace(/\s*$/, "")}\n\n${block}\n`
-      : [...lines.slice(0, region.headerLine), block, ...lines.slice(region.endLine)].join("\n");
-  return { body: rewritten, defect, inert, resolution: "rewritten" };
-}
-
 /** W1-T8572 — the defect row for a no-test-file worker that opened its own PR instead of leaving the open to the
  *  dispatcher: the body was never checked before it opened, so this records the breach and the body file's inert
  *  proofs (`body === undefined` when the worker removed that file). */
@@ -39575,7 +40615,7 @@ const REAL_MAIN_REPAIR_FIX_DEPS: AlertFixDispatchDeps = { ...REAL_ALERT_FIX_DISP
  * W1-T6403 — the priority fix PR for a red main: {@link dispatchAlertFixRun}'s fresh-branch path, one
  * worker on a branch off origin/main that commits and pushes. W1-T8572: the dispatcher writes the PR body first
  * ({@link mainRepairFixBody}). With failing test files known the worker opens the PR with that body; with none the
- * dispatcher checks the worker's bullets ({@link checkMainRepairWorkerBody}), ledgers any inert proof, and opens the
+ * dispatcher checks the worker's bullets ({@link mainRepairAcceptanceFor}), ledgers any inert proof, and opens the
  * PR over REST with the body it checked, so the opening payload carries it. Returns the PR url, or undefined when
  * none was opened.
  */
@@ -39669,7 +40709,7 @@ async function openCheckedMainRepairPr(
   const failing = request.testFiles.join(", ") || request.failingTestTitles.join("; ") || request.failingChecks.join(", ") || "(none named)";
   return openCheckedRepairPr(owner, repo, "main-repair", { branch, base: request.branch, worktreePath, bodyFile, pushedHead,
     prose: `Repairs \`${request.branch}\`, red since \`${request.offendingSha}\` (${pr}) on: ${failing}.`,
-    fallbackTitle: `fix(main): repair ${request.offendingSha.slice(0, 12)}` }, log, deps);
+    fallbackTitle: `fix(main): repair ${request.offendingSha.slice(0, 12)}`, redTestFiles: request.testFiles }, log, deps);
 }
 
 export function workerHarnessCommit(worker: WorkerResult): CodexHarnessCommit | undefined { // W1-T9667: off the result, not the mount
@@ -39726,7 +40766,7 @@ async function openCheckedRepairPr(
   owner: string,
   repo: string,
   lane: "main-repair" | "alert-fix",
-  pr: { branch: string; base: string; worktreePath: string; bodyFile: string; pushedHead?: string; prose: string; fallbackTitle: string },
+  pr: { branch: string; base: string; worktreePath: string; bodyFile: string; pushedHead?: string; prose: string; fallbackTitle: string; redTestFiles?: readonly string[] },
   log: (step: string, extra?: Record<string, unknown>) => void,
   deps: AlertFixDispatchDeps,
 ): Promise<string | undefined> {
@@ -39736,7 +40776,8 @@ async function openCheckedRepairPr(
     log(`${lane}.no_change`, { branch, reason: diffText === undefined ? "diff unreadable" : "the branch adds nothing to origin/main" });
     return undefined;
   }
-  const checked = checkMainRepairWorkerBody(readFileSync(pr.bodyFile, "utf8"), diffText);
+  const readAtHead = (path: string): string | undefined => { const full = join(worktreePath, path); return existsSync(full) ? readFileSync(full, "utf8") : undefined; };
+  const checked = mainRepairAcceptanceFor({ body: readFileSync(pr.bodyFile, "utf8"), diffText, redTestFiles: pr.redTestFiles ?? [], readFile: readAtHead });
   if ("defect" in checked) {
     log(`${lane}.acceptance_defect`, {
       defect: checked.defect,
@@ -41501,6 +42542,7 @@ export function progressWatchdogCommand(
 }
 
 export interface ClaimVerbOpts {
+  taskLookup?: TaskLookupOptions;
   reserver?: DispatchClaimReserver;
   /** W1-T10925: builds the reserver for the resolved plan root (default {@link dispatchClaimReserverFor}). */
   reserverFor?: (repoDir: string) => DispatchClaimReserver;
@@ -41534,7 +42576,43 @@ export function plannedOnOriginMain(taskId: string, dir: string = repoRoot): boo
   return mono.status === 0 && new RegExp(`^\\s*-?\\s*id:\\s*"?${escaped}"?\\s*$`, "m").test(mono.stdout ?? "");
 }
 
-export function claimCommand(rest: string[], opts: ClaimVerbOpts = {}): number {
+async function claimCatalogPlanRoot(taskId: string, opts: ClaimVerbOpts): Promise<string | undefined> {
+  let savedState: { value: string | undefined } | undefined;
+  const stateDir = () => (savedState ??= { value: opts.stateDir ?? instanceStateDirIfConfigured() }).value;
+  const located = resolveVerbPlanRoot(taskId, {
+    cwdRoot: repoRoot, stateDir, holds: (root, id) => (opts.isPlanned ?? plannedOnOriginMain)(id, root),
+  });
+  if (located.ok) return located.root;
+  const destination = planDestinationRepository(stateDir());
+  if (destination.outcome !== "off") {
+    const publicRoot = instanceVerbPlanRoot(stateDir);
+    let publicPlan: Plan;
+    try { publicPlan = await loadPlanAtRefAsync(publicRoot.root, "plan/tasks.yaml", "origin/main"); }
+    catch (error) {
+      // Membership needs a readable plan, not review criteria; keep an unreadable plan distinct from an absent id.
+      console.error(`rmd claim: public plan unreadable (${error instanceof Error ? "plan-error" : "plan-thrown"}) — no private fallback`);
+      return undefined;
+    }
+    const found = await findTaskInCatalogs(taskId, { ...opts.taskLookup, stateDir: stateDir(), byId: publicPlan.byId });
+    if (found.outcome === "unreadable") {
+      console.error(`rmd claim: task catalog unreadable (${found.reason}) — no claim`);
+      return undefined;
+    }
+    if (found.outcome === "found") return publicRoot.root;
+  }
+  console.error(`rmd claim: ${taskId} is not in the plan on origin/main — refusing to claim an unplanned id (${located.error})`);
+  return undefined;
+}
+
+export async function claimCommandWithCatalogs(rest: string[], opts: ClaimVerbOpts = {}): Promise<number> {
+  const taskId = rest[0];
+  if (taskId === undefined || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(taskId) ||
+      unknownArgError("claim", rest.slice(1), [], ["--drop", "--renew"]) !== null) return claimCommand(rest, opts);
+  const root = await claimCatalogPlanRoot(taskId, opts);
+  return root === undefined ? 1 : claimCommand(rest, opts, root);
+}
+
+export function claimCommand(rest: string[], opts: ClaimVerbOpts = {}, preparedRoot?: string): number {
   const taskId = rest[0];
   const badArg = taskId === undefined || taskId.startsWith("-")
     ? "rmd claim: a task id is required"
@@ -41547,7 +42625,7 @@ export function claimCommand(rest: string[], opts: ClaimVerbOpts = {}): number {
     console.error(`rmd claim: '${taskId}' is not a task id`);
     return 2;
   }
-  const planRoot = claimPlanRoot(taskId, opts);
+  const planRoot = preparedRoot ?? claimPlanRoot(taskId, opts);
   if (planRoot === undefined) return 1;
   const reserver = opts.reserver ?? (opts.reserverFor ?? dispatchClaimReserverFor)(planRoot);
   const ref = dispatchClaimRef(taskId);
@@ -41630,7 +42708,7 @@ export async function claimHoldCommand(rest: string[], opts: ClaimHoldOpts = {})
     console.error(`rmd claim: '${taskId}' is not a task id, or --interval-ms is not a positive integer`);
     return 2;
   }
-  const planRoot = claimPlanRoot(taskId, opts);
+  const planRoot = await claimCatalogPlanRoot(taskId, opts);
   if (planRoot === undefined) return 1;
   const reserver = opts.reserver ?? (opts.reserverFor ?? dispatchClaimReserverFor)(planRoot);
   const held = takeOrAdoptClaim(taskId, reserver, opts.localHost ?? hostname());
@@ -41956,6 +43034,12 @@ const COMMANDS: readonly CommandSpec[] = [
     detail: "W1-T2697: the ledger records every rmd verb but never who ran it — a worker subprocess, the daemon's own in-process loop, and an operator's bare `./bin/rmd` are now distinguished by the `actor` field every appendLedger call stamps at write time (a pre-stamp row reads `unknown`, never guessed). This prints the hand-run census: over the archive+live ledger UNION (never the live file alone — W1-T1013), operator rows are grouped into sessions by their writing process and a thirty-minute gap, each session reduced to its ordered step sequence, and any sequence of length >= 2 recurring across at least the policy floor of DISTINCT CALENDAR DAYS (never session count) is printed with its days and session count. The same census, when the daemon's own cadence supplies a run id, additionally proposes each unproposed recurrence as ONE `plan/feedback/` entry (deduped by sequence signature against the ledger union, `hand_run.census_proposed`) — this command never does that itself. READ-ONLY: writes no ledger line, no feedback entry, no state file.",
   },
   {
+    name: "decisions",
+    syntax: "rmd decisions probe --candidate <name> --input-file <file> --questions-file <file> [--role <role>]",
+    summary: "Ask one decision model one question set about one input, and print the row it wrote.",
+    detail: "W1-T12416: sends ONE paid cash request to a candidate named in the decision_models section of .remudero/mounts.yaml. The questions file is a JSON array of yes-no, choice (2 to 255 typed options) and score (2 to 10 ordered levels) questions, each with a name and instructions; a bad set is refused before any reservation. The request reserves on its input size plus a 64-token output margin against the normal daily cash cap, settles from the reply's usage at the candidate's own price row, and writes one decision.answered row: role, input digest, candidate, deployment, served model, latency, reserved and settled dollars, usage, and each question's distribution, abstention or rejection. A candidate whose cashDeploymentEndpoints entry or key is missing is unavailable and sends nothing. Shadow only: no gate, route or judge reads the row. Exit 0 answered, 1 refused, unavailable or failed, 2 bad usage.",
+  },
+  {
     name: "field-trials",
     syntax: "rmd field-trials [--source <label>=<owner/repo>]... [--ledger <label>=<state-dir>]... [--out-dir <dir>] [--consent <file>] [--case-files <file>] [--max-pages <n>] [--offline] [--revoke <release-id>] [--field-note <out> [--site-registry <file>]] [--json] [--refresh-step <name>=<exit-code|skipped>]... [--refresh-script-blob <sha1>] [--refresh-record-only]",
     summary: "Join the ledger union and GitHub history into observational field-trials aggregates.",
@@ -42060,9 +43144,9 @@ const COMMANDS: readonly CommandSpec[] = [
   },
   {
     name: "daemon",
-    syntax: "rmd daemon --repo <name> [--plan <path>] [--max <n>] [--poll-ms <n>] [--dry-run] [--allow-self-target] [--allow-stale]",
+    syntax: "rmd daemon --repo <name> [--plan <path>] [--max <n>] [--poll-ms <n>] [--shadow-ops-catalog <owner>/<name>] [--dry-run] [--allow-self-target] [--allow-stale]",
     summary: "Persistent scheduler loop draining a named repo; refuses self-target unattended.",
-    detail: "persistent scheduler loop; --repo picks the repo to drain + its gateway (e.g. remudero-sandbox for W1-T12d). Refuses to drain its OWN source repo unattended without --allow-self-target. --dry-run previews the target + planned tasks, spawns nothing. Self-hosting reads the plan from origin/main (W1-T60); --allow-stale proceeds on the last-fetched refs if the fetch fails.",
+    detail: "persistent scheduler loop; --repo picks the repo to drain + its gateway (e.g. remudero-sandbox for W1-T12d). Refuses to drain its OWN source repo unattended without --allow-self-target. --dry-run previews the target + planned tasks, spawns nothing. Self-hosting reads the plan from origin/main (W1-T60); --allow-stale proceeds on the last-fetched refs if the fetch fails. --shadow-ops-catalog <owner>/<name> (W1-T11770, off by default) reads that repository's task catalog read-only off the loop and records only an aggregate dispatch.secondary_catalog_shadow row; it never adds work to dispatch.",
   },
   {
     name: "daemon-plist",
@@ -42180,9 +43264,9 @@ const COMMANDS: readonly CommandSpec[] = [
   },
   {
     name: "pause",
-    syntax: "rmd pause [--instance <name>] [--reason <text>] | rmd pause --fleet [--reason <text>]",
-    summary: "Fleet control: drain-and-hold ONE instance until `rmd resume`; --fleet holds every instance.",
-    detail: "fleet control: PERSISTENT drain-and-hold of ONE instance — the one --instance names, else the instance whose registry state_dir is this config.root; an unresolvable target refuses before writing. In-flight completes, no new spawns; survives across runs until `rmd resume`. --fleet is the separate, explicit fleet-wide hold (refs/rmd-pause/hold), cleared only by `rmd resume --fleet`.",
+    syntax: "rmd pause [--instance <name>] [--status] | rmd pause [--instance <name>] --reason <text> | rmd pause --fleet --reason <text>",
+    summary: "Fleet control: show the pause state, or with --reason hold ONE instance until `rmd resume`.",
+    detail: "fleet control: a bare `rmd pause` only reads: it prints the pause state of the instance and of the fleet-wide hold, changes nothing and exits 0 (--status does the same with any other flag). A hold needs --reason <text>; without it --instance or --fleet refuses and changes nothing, and an unknown flag refuses. With --reason: PERSISTENT drain-and-hold of ONE instance — the one --instance names, else the instance whose registry state_dir is this config.root; an unresolvable target refuses before writing. In-flight completes, no new spawns; survives across runs until `rmd resume`. --fleet is the separate, explicit fleet-wide hold (refs/rmd-pause/hold), cleared only by `rmd resume --fleet`.",
   },
   { name: "resume", syntax: "rmd resume [--instance <name>] | rmd resume --fleet", summary: "Fleet control: clear ONE instance's PAUSE (and any STOP); --fleet clears the fleet-wide hold.", detail: "fleet control: clear the targeted instance's PAUSE (and any STOP), resolved as `rmd pause` resolves it; never deletes the fleet-wide hold, which only `rmd resume --fleet` clears" },
   {
@@ -42503,6 +43587,7 @@ function commandSyntax(name: string): string {
 // InstallFreshnessDeps consumers below) keeps its import path unchanged. This is a
 // PURE MOVE — the function body and behaviour are byte-identical to the pre-move version.
 import { reconcilePlan, reconcileShardStatus, type ReconcileSummary } from "./lib/plan-reconcile.js";
+import { takePlanReconcileBatch } from "./lib/plan-reconcile-batch.js";
 import { managedCheckoutInstallEscalation, stagedInstall, type StagedInstallFailure } from "./lib/staged-install.js";
 import { hashInstallInputs, installHashMarkerPath } from "./lib/install-hash.js";
 import { isTaskShardName } from "./lib/task-shard-name.js";
@@ -43093,12 +44178,13 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
     undefined,
     (dir, sinceMs, login) => ghBrokerLoginStatus(dir, sinceMs, { login }),
   )],
-  ["routing-ab", async (rest) => await routingAbCommand(rest)],
+  ["routing-ab", async (rest) => await routingAbCommand(rest, { classifyAttempt: attributeAttemptOutcome })],
+  ["decisions", async (rest) => await decisionsCommand(rest, (config, request) => askDecisionModel(config, request), { repoRoot })],
   ["progress-watchdog", (rest) => progressWatchdogCommand(rest)],
   ["live-edits", async (rest) => await liveEditsCommand(rest)],
   ["host-alert", async (rest) => hostAlertCommand(rest)],
   ["test-place", (rest) => testPlaceCommand(rest)],
-  ["claim", (rest) => rest.includes("--hold") ? claimHoldCommand(rest) : claimCommand(rest)],
+  ["claim", (rest) => rest.includes("--hold") ? claimHoldCommand(rest) : claimCommandWithCatalogs(rest)],
   ["impossible-canary", async (rest) => await impossibleCanaryCommand(rest, (input) => runImpossibleCanary(input))],
   ["benchmark-aa", async (rest) => rest[0] === "balanced" ? await codexBalancedTrialCommand(rest.slice(1), (request, stateDir) =>
     registerCodexBalancedTrial({ request, stateDir, readiness: (registration) =>
@@ -43127,7 +44213,7 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
     },
   ],
   ["caller-sweep", (rest) => callerSweepCommand(rest)],
-  ["ci-learning", (rest) => ciLearningCommand(rest)],
+  ["ci-learning", ciLearningCommandWithDestination],
   ["rule-efficacy", (rest) => ruleEfficacyCommand(rest)],
   ["coverage-improve", (rest) => coverageImproveCommand(rest)],
   ["verdict-calibration", (rest) => verdictCalibrationCommand(rest)],
@@ -43346,6 +44432,7 @@ export async function main(
   // calls this repo's `callMain` tests make do not stack listeners.
   installUnhandledRejectionGuard();
   setGhReadActorResolver((env) => deriveLedgerActor(env));
+  installGithubCredentialMissingSink((row) => appendLedger(ledgerPathFor(loadConfig()), row));
   // W1-T3065 — THE HAND LANE REAPS TOO. Until this line the temp sweep had exactly two callers,
   // both daemon rungs, so a machine running `rmd` by hand and no daemon reclaimed NOTHING: the
   // operator's Mac reached 100% of a 228 GiB volume with 138 stale dirs and 11 GiB of debris, and
@@ -44042,8 +45129,10 @@ function sweepCommandHost(ports: Pick<SweepCommandHost, "freshTreeGit" | "comman
     writeFixCensusSnapshotAsync,
     runPlanScopedFixRound,
     materializePlanRoundWorktree: materializePlanRoundWorktreeAsync,
-    pushSweepFixRound: (deps, wt, branch, sha, prior) =>
-      pushFixRoundPrechecked(deps.log, wt, branch, sha, { repo: deps.repo }, pushFixRound, prior),
+    pushSweepFixRound: (deps, wt, branch, sha, prior, guard) => {
+      if (guard !== undefined) return pushFixRoundPrechecked(deps.log, wt, branch, sha, { repo: deps.repo }, pushFixRound, prior, {}, guard);
+      return pushFixRoundPrechecked(deps.log, wt, branch, sha, { repo: deps.repo }, pushFixRound, prior);
+    },
     buildFixRungDispatchArgs,
     openTaskIdsFromPlan,
     waitForCiGreen,

@@ -9,7 +9,7 @@
   risk: high  # Rule 19: one concern, how the PR-open gate and the strike classifiers read an inconclusive proof run; no conclusive verdict, refusal class or breaker bound changes
   band_meaning: span
   priority: 1
-  status: queued
+  status: merged
   attempts: 0
   origin: "filing agent 2026-10-26: console issue #2147 (CONSOLE-T127 circuit-broken since 2026-10-15T12:17Z) and #2287 (console queue starved)"
   plan_refs: [W1-T227, W1-T3525, W1-T4660, W1-T7742, W1-T8240, W1-T8241, W1-T4691, W1-T6034, CONSOLE-T127]

@@ -16,7 +16,7 @@
   files:
     - test/helpers/compression-pin.ts
     - test/infra/an-untracked-compression-pin-compares-against-head.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: compressionPinBase returns the merge-base source when the diff adds the pin, as today, and also returns HEAD's committed source when the pin file itself is untracked in the working tree (the reviewer's base run copies an added pin into a merge-base checkout), so a pin whose reductions sit behind "before === undefined" fails at the base and passes at the PR head; a tracked pin on a later PR still returns undefined

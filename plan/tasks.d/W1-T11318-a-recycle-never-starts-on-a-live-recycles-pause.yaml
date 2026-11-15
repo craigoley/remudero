@@ -17,7 +17,7 @@
   files:
     - deploy/recycle-container.sh
     - test/deploy/a-recycle-never-starts-on-a-live-recycles-pause.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: When state/PAUSE holds a recycle body whose pid is alive on this host with the recorded writerStart, recycle-container.sh exits non-zero before writing, rewriting or removing PAUSE and before any docker stop, printing that writer's pid and start; a recycle body whose writer is dead or reused, an absent PAUSE, and an operator PAUSE keep today's behaviour

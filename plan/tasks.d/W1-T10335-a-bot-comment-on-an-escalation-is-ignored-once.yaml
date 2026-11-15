@@ -13,7 +13,7 @@
   files:
     - src/lib/escalation-answers.ts
     - test/inbox/a-bot-comment-on-an-escalation-is-ignored-once.test.ts
-  status: queued
+  status: merged
   priority: 3
   attempts: 0
   rationale: |

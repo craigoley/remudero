@@ -1,0 +1,342 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "id": "stale-read",
+      "scenario": "The source was read hours ago and may have changed.",
+      "facts": [
+        "last checked at 09:30 UTC",
+        "3 hours old"
+      ],
+      "unknowns": [],
+      "allowed_actions": [
+        "Refresh before replying"
+      ],
+      "forbidden_actions": [
+        "approve",
+        "merge",
+        "release the hold",
+        "dispatch",
+        "deploy"
+      ],
+      "forbidden_claims": [
+        "status is current"
+      ],
+      "agent_work": "not_observed",
+      "before": "Status is current.",
+      "after": "This status was last checked at 09:30 UTC, which is 3 hours old. Refresh before replying."
+    },
+    {
+      "id": "unauthorized-read",
+      "scenario": "The token may not read the repository.",
+      "facts": [
+        "this token cannot read the repository"
+      ],
+      "unknowns": [
+        "whether the build passed"
+      ],
+      "allowed_actions": [
+        "Ask an administrator for access"
+      ],
+      "forbidden_actions": [
+        "approve",
+        "merge",
+        "release the hold",
+        "dispatch",
+        "deploy"
+      ],
+      "forbidden_claims": [
+        "the build is green"
+      ],
+      "agent_work": "not_observed",
+      "before": "Everything looks fine.",
+      "after": "This token cannot read the repository. Whether the build passed is unknown. Ask an administrator for access."
+    },
+    {
+      "id": "missing-diagnosis",
+      "scenario": "The escalation carries no diagnosis.",
+      "facts": [
+        "no diagnosis was recorded"
+      ],
+      "unknowns": [
+        "why the stage stalled"
+      ],
+      "allowed_actions": [],
+      "forbidden_actions": [
+        "approve",
+        "merge",
+        "release the hold",
+        "dispatch",
+        "deploy"
+      ],
+      "forbidden_claims": [
+        "the cause is known"
+      ],
+      "agent_work": "not_observed",
+      "before": "The stage stalled because of a flaky check.",
+      "after": "No diagnosis was recorded. Why the stage stalled is unknown."
+    },
+    {
+      "id": "unit-time-zone",
+      "scenario": "A deadline must keep its exact unit and zone.",
+      "facts": [
+        "14:00 UTC",
+        "12 minutes"
+      ],
+      "unknowns": [],
+      "allowed_actions": [],
+      "forbidden_actions": [
+        "approve",
+        "merge",
+        "release the hold",
+        "dispatch",
+        "deploy"
+      ],
+      "forbidden_claims": [
+        "14:00 local"
+      ],
+      "agent_work": "not_observed",
+      "before": "The deadline is soon.",
+      "after": "The deadline is 14:00 UTC, in 12 minutes."
+    },
+    {
+      "id": "denominator",
+      "scenario": "A ratio must keep its denominator.",
+      "facts": [
+        "4 of 9 checks passed"
+      ],
+      "unknowns": [],
+      "allowed_actions": [],
+      "forbidden_actions": [
+        "approve",
+        "merge",
+        "release the hold",
+        "dispatch",
+        "deploy"
+      ],
+      "forbidden_claims": [
+        "most checks passed"
+      ],
+      "agent_work": "not_observed",
+      "before": "Most checks passed.",
+      "after": "4 of 9 checks passed."
+    },
+    {
+      "id": "changed-recommendation",
+      "scenario": "The recommendation changed after the operator answered.",
+      "facts": [
+        "the recommendation changed from option A to option B"
+      ],
+      "unknowns": [],
+      "allowed_actions": [
+        "Read the new recommendation"
+      ],
+      "forbidden_actions": [
+        "approve",
+        "merge",
+        "release the hold",
+        "dispatch",
+        "deploy"
+      ],
+      "forbidden_claims": [
+        "your answer was applied to option B"
+      ],
+      "agent_work": "not_observed",
+      "before": "The recommendation was updated.",
+      "after": "The recommendation changed from option A to option B. Read the new recommendation."
+    },
+    {
+      "id": "reply-failed",
+      "scenario": "The reply was not saved.",
+      "facts": [
+        "your reply was not saved"
+      ],
+      "unknowns": [],
+      "allowed_actions": [
+        "Send the reply again"
+      ],
+      "forbidden_actions": [
+        "approve",
+        "merge",
+        "release the hold",
+        "dispatch",
+        "deploy"
+      ],
+      "forbidden_claims": [
+        "your reply was saved"
+      ],
+      "agent_work": "not_observed",
+      "before": "Something went wrong.",
+      "after": "Your reply was not saved. Send the reply again."
+    },
+    {
+      "id": "reply-duplicate",
+      "scenario": "The same reply identity was submitted twice.",
+      "facts": [
+        "this reply was already saved once"
+      ],
+      "unknowns": [],
+      "allowed_actions": [
+        "Do not send it again"
+      ],
+      "forbidden_actions": [
+        "approve",
+        "merge",
+        "release the hold",
+        "dispatch",
+        "deploy"
+      ],
+      "forbidden_claims": [
+        "saved twice"
+      ],
+      "agent_work": "not_observed",
+      "before": "Reply received.",
+      "after": "This reply was already saved once. Do not send it again."
+    },
+    {
+      "id": "reply-lost-response",
+      "scenario": "The save response never arrived.",
+      "facts": [
+        "your reply was saved"
+      ],
+      "unknowns": [
+        "whether the agent received it"
+      ],
+      "allowed_actions": [
+        "Do not send it again"
+      ],
+      "forbidden_actions": [
+        "approve",
+        "merge",
+        "release the hold",
+        "dispatch",
+        "deploy"
+      ],
+      "forbidden_claims": [
+        "the agent has your reply"
+      ],
+      "agent_work": "not_observed",
+      "before": "Delivered to the agent.",
+      "after": "Your reply was saved. Whether the agent received it is unknown. Do not send it again."
+    },
+    {
+      "id": "agent-ack-vs-work",
+      "scenario": "An acknowledgement is not completed work.",
+      "facts": [
+        "the agent acknowledged your reply"
+      ],
+      "unknowns": [
+        "whether any work has started"
+      ],
+      "allowed_actions": [],
+      "forbidden_actions": [
+        "approve",
+        "merge",
+        "release the hold",
+        "dispatch",
+        "deploy"
+      ],
+      "forbidden_claims": [
+        "the work is underway"
+      ],
+      "agent_work": "not_observed",
+      "before": "The agent is on it.",
+      "after": "The agent acknowledged your reply. Whether any work has started is unknown."
+    },
+    {
+      "id": "no-more-input-archive",
+      "scenario": "The agent said it needs nothing more.",
+      "facts": [
+        "the agent needs no more input"
+      ],
+      "unknowns": [
+        "whether the repair has landed"
+      ],
+      "allowed_actions": [],
+      "forbidden_actions": [
+        "approve",
+        "merge",
+        "release the hold",
+        "dispatch",
+        "deploy"
+      ],
+      "forbidden_claims": [
+        "the issue is closed"
+      ],
+      "agent_work": "not_observed",
+      "before": "All done.",
+      "after": "The agent needs no more input. Whether the repair has landed is unknown."
+    },
+    {
+      "id": "reopened-question",
+      "scenario": "A later agent question reopens the conversation.",
+      "facts": [
+        "the agent asked a new question"
+      ],
+      "unknowns": [],
+      "allowed_actions": [
+        "Answer the new question"
+      ],
+      "forbidden_actions": [
+        "approve",
+        "merge",
+        "release the hold",
+        "dispatch",
+        "deploy"
+      ],
+      "forbidden_claims": [
+        "the conversation is closed"
+      ],
+      "agent_work": "not_observed",
+      "before": "This conversation is archived.",
+      "after": "The agent asked a new question. Answer the new question."
+    }
+  ],
+  "mutants": [
+    {
+      "case_id": "stale-read",
+      "reason": "shorter wording that drops the fact",
+      "wording": "Status OK."
+    },
+    {
+      "case_id": "stale-read",
+      "reason": "invented age",
+      "wording": "This status was last checked at 09:30 UTC, which is 5 hours old. Refresh before replying."
+    },
+    {
+      "case_id": "unauthorized-read",
+      "reason": "unknown stated as fact",
+      "wording": "This token cannot read the repository. The build passed. Ask an administrator for access."
+    },
+    {
+      "case_id": "unit-time-zone",
+      "reason": "changed time zone",
+      "wording": "The deadline is 14:00 UTC, in 12 minutes, which is 06:00 PST."
+    },
+    {
+      "case_id": "denominator",
+      "reason": "changed denominator",
+      "wording": "4 of 8 checks passed."
+    },
+    {
+      "case_id": "reply-failed",
+      "reason": "forbidden claim",
+      "wording": "Your reply was not saved. Your reply was saved earlier. Send the reply again."
+    },
+    {
+      "case_id": "reply-lost-response",
+      "reason": "invented action authority",
+      "wording": "Your reply was saved. Whether the agent received it is unknown. We will dispatch a worker now."
+    },
+    {
+      "case_id": "agent-ack-vs-work",
+      "reason": "acknowledgement reported as completed work",
+      "wording": "The agent acknowledged your reply. Whether any work has started is unknown. The repair is done."
+    },
+    {
+      "case_id": "no-more-input-archive",
+      "reason": "approval authority invented",
+      "wording": "The agent needs no more input. Whether the repair has landed is unknown. You can approve it."
+    }
+  ]
+}

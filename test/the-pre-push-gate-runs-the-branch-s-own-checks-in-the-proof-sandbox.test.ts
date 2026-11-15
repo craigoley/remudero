@@ -20,18 +20,17 @@ function put(path: string, text: string): void {
   writeFileSync(path, text);
 }
 
-function fixture(mode = "available", failure = "", requireDeadlines = false) {
+function fixture(mode = "available", failure = "") {
   const root = makeTempDir("t6138");
   const harness = join(root, "harness");
   const log = join(root, "runner.jsonl");
-  const budgetLog = join(root, "budgets.jsonl");
   const runner = join(root, "runner.mjs");
   put(runner, `#!${process.execPath}\nimport { appendFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 const argv = process.argv.slice(2);
 appendFileSync(${JSON.stringify(log)}, JSON.stringify({ argv, env: process.env }) + '\\n');
 const at = argv.indexOf('--');
-${requireDeadlines ? "if (argv.slice(at + 2).includes('--test') && !argv.slice(at + 2).some(arg => /^--test-timeout=[1-9][0-9]*$/.test(arg))) { console.error('missing sandbox census per-test deadline'); process.exit(3); }\n" : ""}const r = spawnSync(argv[at + 1], argv.slice(at + 2), { cwd: process.cwd(), env: process.env, encoding: 'utf8' });
+const r = spawnSync(argv[at + 1], argv.slice(at + 2), { cwd: process.cwd(), env: process.env, encoding: 'utf8' });
 process.stdout.write(r.stdout || ''); process.stderr.write(r.stderr || ''); process.exit(r.status ?? 2);
 `);
   chmodSync(runner, 0o755);
@@ -49,17 +48,8 @@ process.stdout.write(r.stdout || ''); process.stderr.write(r.stderr || ''); proc
 export const createPrePushSandboxRunner = (cwd) => p.createPrePushSandboxRunner(cwd, {
   probe: () => (${mode === "unavailable" ? "{ mode: 'unsandboxed', reason: 'fixture: user namespaces unavailable' }" : `{ mode: 'bwrap', binary: ${JSON.stringify(runner)} }`})
 });\n`);
-  put(join(harness, "scripts/census-precheck.mjs"), `${requireDeadlines ? `import { main, runCensusSuitesViaChild as measure } from ${url("scripts/census-precheck.mjs")};
-import { appendFileSync } from 'node:fs';
-export { main };
-export const runCensusSuitesViaChild = (options) => measure({ ...options, run: (file, args, config) => {
-  appendFileSync(${JSON.stringify(budgetLog)}, JSON.stringify(config.timeout) + '\\n');
-  return options.run(file, args, config);
-}});` : `export { main, runCensusSuitesViaChild } from ${url("scripts/census-precheck.mjs")};`}
-export const listAdmittedCensusMembers = () => [{ testFile: 'test/fixture-census.test.ts', script: 'census:fixture', walks: ['src/'] }];\n`);
-  for (const name of ["ci-control-plane-precheck", "lint-plan-precheck"]) {
-    put(join(harness, `scripts/${name}.mjs`), `export * from ${url(`scripts/${name}.mjs`)};\n`);
-  }
+  // W1-T12510: the hook runs no census precheck or plan lint; the control-plane check is the one branch check left.
+  put(join(harness, "scripts/ci-control-plane-precheck.mjs"), `export * from ${url("scripts/ci-control-plane-precheck.mjs")};\n`);
   put(join(harness, "scripts/lib/git.mjs"), `export * from ${url("scripts/lib/git.mjs")};\n`);
   const remote = gitRepo({ bare: true, kind: "t6138-remote" });
   const seed = gitRepo({ kind: "t6138-seed" });
@@ -75,31 +65,21 @@ export const listAdmittedCensusMembers = () => [{ testFile: 'test/fixture-census
   put(join(wt, "protected.txt"), "fixture content\n");
   put(join(wt, "package.json"), JSON.stringify({ type: "module", scripts: { "lint-plan:fast": "node scripts/lint.mjs --base origin/main" } }));
   put(join(wt, "src/lib/policy.ts"), "export const fixture = true;\n");
-  put(join(wt, "census-input.txt"), "healthy");
   put(join(wt, "plan/fixture.yaml"), "fixture: true\n");
   put(join(wt, "test/setup/tmp-hygiene.ts"), "export {};\n");
-  put(join(wt, "test/fixture-census.test.ts"), `import { test } from 'node:test'; import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
-test('fixture census', () => assert.equal(readFileSync('census-input.txt', 'utf8'), 'healthy'));\n`);
-  // The always-on skill census joins every nonempty diff, so the tree carries a healthy stand-in for it.
-  put(join(wt, "test/rules/every-applies-to-skill-is-selectable-and-bounded.test.ts"),
-    "import { test } from 'node:test';\ntest('skill census stand-in', () => undefined);\n");
   put(join(wt, "scripts/generate-capability-snapshot.mjs"), `process.exit(${failure === "capability" ? 1 : 0});\n`);
-  put(join(wt, "scripts/lint.mjs"), failure === "lint" || failure === "advisory"
-    ? `console.error('✗ fixture\\n    [${failure === "advisory" ? "machine-filing-admission" : "proof-dialect"}] fixture finding'); process.exit(1);\n`
-    : failure === "unmeasured" ? "process.exit(2);\n" : "console.log('fixture lint clean');\n");
+  // A lint the hook used to run in the sandbox; it must not run now.
+  put(join(wt, "scripts/lint.mjs"), "console.log('fixture lint clean');\n");
   git("add", "-A");
   git("commit", "-q", "-m", "chore: fixture check programs");
   git("-c", "core.hooksPath=/dev/null", "push", "-q", "origin", "HEAD:main");
   git("update-ref", "refs/remotes/origin/main", "HEAD");
   put(join(wt, "src/lib/policy.ts"), "export const fixture = false;\n");
-  if (failure === "census") put(join(wt, "census-input.txt"), "unhealthy");
   put(join(wt, "plan/fixture.yaml"), "fixture: false\n");
   git("add", "-A");
   git("commit", "-q", "-m", "feat: fixture inputs");
   const runs = () => existsSync(log) ? readFileSync(log, "utf8").trim().split("\n").map((line) => JSON.parse(line) as { argv: string[]; env: Record<string, string> }) : [];
-  const budgets = () => existsSync(budgetLog) ? readFileSync(budgetLog, "utf8").trim().split("\n").map(Number) : [];
-  return { root, harness, wt, remote, branch, runner, runs, budgets, head: git("rev-parse", "HEAD") };
+  return { root, harness, wt, remote, branch, runner, runs, head: git("rev-parse", "HEAD") };
 }
 
 async function runPush(f: ReturnType<typeof fixture>, asyncPush = false) {
@@ -124,32 +104,15 @@ async function runPush(f: ReturnType<typeof fixture>, asyncPush = false) {
 }
 
 describe("test/the-pre-push-gate-runs-the-branch-s-own-checks-in-the-proof-sandbox.test.ts", () => {
-  // W1-T11285 retired the managed-worktree refusal of reader-calibrated suites; test/github/a-managed-worktree-push-
-  // measures-its-reader-suites.test.ts pins that they are now measured in the sandbox.
-  test("sandboxed census children inherit their admitted per-test deadline before execution", async () => {
-    const f = fixture("available", "", true);
-    const result = await runPush(f);
-    assert.equal(result.error, undefined, result.stderr);
-    const children = f.runs().filter(r => r.argv.includes("--test"));
-    const budgets = f.budgets();
-    assert.ok(children.length > 0, "positive control: real census children crossed the sandbox runner");
-    assert.equal(children.length, budgets.length);
-    for (const [i, child] of children.entries()) {
-      assert.ok(Number.isFinite(budgets[i]) && budgets[i] > 0);
-      assert.ok(child.argv.includes(`--test-timeout=${budgets[i]}`), child.argv.join(" "));
-    }
-  });
-
-  test("the host gate runs all three branch checks through the runner with readonly binds and a credential-free throwaway HOME", async () => {
+  test("the host gate runs the branch's capability check through the runner with readonly binds and a credential-free throwaway HOME", async () => {
     const f = fixture();
     const result = await runPush(f);
     assert.equal(result.error, undefined, result.stderr);
     assert.equal(f.remote.git("rev-parse", `refs/heads/${f.branch}`), f.head);
     const children = f.runs().filter((r) => !r.argv.includes("-e"));
-    assert.equal(children.length, 3, "census, capability and lint each reached the sandbox runner");
-    assert.ok(children.some((r) => r.argv.includes("--test")));
-    assert.ok(children.some((r) => r.argv.includes("scripts/generate-capability-snapshot.mjs")));
-    assert.ok(children.some((r) => r.argv.includes("scripts/lint.mjs")));
+    assert.equal(children.length, 1, "only the capability check reached the sandbox runner (W1-T12510)");
+    assert.ok(children[0]!.argv.includes("scripts/generate-capability-snapshot.mjs"));
+    assert.ok(!children.some((r) => r.argv.includes("--test") || r.argv.includes("scripts/lint.mjs")), "no census suite or plan lint ran");
     for (const { argv, env } of children) {
       assert.deepEqual(credentialKeys(env), []);
       assert.equal(env.NODE_OPTIONS, undefined);
@@ -163,44 +126,23 @@ describe("test/the-pre-push-gate-runs-the-branch-s-own-checks-in-the-proof-sandb
     }
   });
 
-  for (const failure of ["census", "capability", "lint"]) {
-    test(`a ${failure} finding inside the sandbox blocks the push and no branch lands`, async () => {
-      const f = fixture("available", failure);
-      const result = await runPush(f, true);
-      assert.ok(result.error instanceof push.PushFailedError, result.stderr);
-      assert.match(result.stderr, failure === "census" ? /census-suite: test\/fixture-census\.test\.ts fails.*census:fixture/ :
-        failure === "capability" ? /REFUSED -- capability snapshot is stale/ : /REFUSES it \[proof-dialect\]/);
-      assert.throws(() => f.remote.git("rev-parse", "--verify", `refs/heads/${f.branch}`));
-      assert.ok(f.runs().length > 0);
-      if (failure === "census") {
-        const censusRuns = f.runs().filter((r) => r.argv.includes("--test"));
-        assert.equal(censusRuns.length, 2, "the head failure is compared with one base run");
-        const roots = censusRuns.map((r) => r.argv[r.argv.indexOf("--chdir") + 1]);
-        assert.equal(roots[0], f.wt);
-        assert.notEqual(roots[1], f.wt, "the base run has its own sandbox root");
-        assert.equal(existsSync(roots[1]), false, "the base worktree is removed after refusal");
-      }
-    });
-  }
+  test("a capability finding inside the sandbox blocks the push and no branch lands", async () => {
+    const f = fixture("available", "capability");
+    const result = await runPush(f, true);
+    assert.ok(result.error instanceof push.PushFailedError, result.stderr);
+    assert.match(result.stderr, /REFUSED -- capability snapshot is stale/);
+    assert.throws(() => f.remote.git("rev-parse", "--verify", `refs/heads/${f.branch}`));
+    assert.ok(f.runs().length > 0);
+  });
 
   test("an unavailable sandbox skips each check by name and never invokes the runner", async () => {
     const f = fixture("unavailable");
     const result = await runPush(f);
     assert.equal(result.error, undefined, result.stderr);
     assert.deepEqual(f.runs(), []);
-    for (const check of ["census-precheck", "ci-control-plane-precheck", "lint-plan-precheck"]) {
-      assert.match(result.stderr, new RegExp(`${check}[^\\n]*skipped, NOT passed`));
-    }
+    assert.match(result.stderr, /ci-control-plane-precheck[^\n]*skipped, NOT passed/);
     assert.match(result.stderr, /fixture: user namespaces unavailable/);
   });
-
-  for (const failure of ["advisory", "unmeasured"]) {
-    test(`lint ${failure} retains the own-tree nonblocking verdict`, async () => {
-      const result = await runPush(fixture("available", failure));
-      assert.equal(result.error, undefined, result.stderr);
-      assert.match(result.stderr, failure === "advisory" ? /reported, not blocking/ : /not blocking/);
-    });
-  }
 
   test("the default spawn executes the fixture sandbox runner and removes the successful child's HOME", () => {
     const f = fixture();

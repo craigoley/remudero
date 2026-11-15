@@ -53,7 +53,8 @@ real self-sync re-exec sets on its own child, so it skips the whole check, not e
 | `rmd daemon --repo <name> [--max <n>] [--poll-ms <n>]` | Persistent scheduler loop — the same machinery as `drain`, but self-pacing and STOP/PAUSE/headroom-aware, so it keeps running across new plan merges. `--repo` picks the repo to drain (refuses to drain its own source repo unattended without `--allow-self-target`). |
 | `rmd daemon-plist --repo <name> [--poll-ms <n>] [--write]` | Generate the `launchd` unit that execs `rmd daemon --repo <name>`. Loading it live is a separate, operator-run step. |
 | `rmd stop [--reason <text>]` | **One-shot** hard kill: the currently running drain/daemon halts within one tick; auto-clears once that run ends. A no-op-that-warns when nothing is running. |
-| `rmd pause [--instance <name>] [--reason <text>]` | **Persistent** hold of ONE instance (the one `--instance` names, else the instance whose registry `state_dir` is this `config.root`; an unresolvable target refuses before writing): no new spawns, but an in-flight task always finishes (verdict + merge). Cleared only by `resume`. `--fleet` is the separate fleet-wide hold. See control-surface.md. |
+| `rmd pause [--instance <name>] [--status]` | Read only: prints that instance's pause state (reason, who set it, expiry) and the fleet-wide hold state, changes nothing and exits 0. An unknown flag refuses with exit 2. |
+| `rmd pause [--instance <name>] --reason <text>` | **Persistent** hold of ONE instance (the one `--instance` names, else the instance whose registry `state_dir` is this `config.root`; an unresolvable target refuses before writing): no new spawns, but an in-flight task always finishes (verdict + merge). Cleared only by `resume`. Without a non-empty `--reason` it refuses with exit 2 and changes nothing. `--fleet --reason <text>` is the separate fleet-wide hold. See control-surface.md. |
 | `rmd resume [--instance <name>]` | Clears that instance's `stop` and `pause`; never the fleet-wide hold, which only `rmd resume --fleet` clears. |
 | `rmd away [on\|off]` | Set/show operator presence (default `attended`). `away` batches `MANUAL`/`HARD_STOP` escalations into the since-you-last-checked recap for an async verdict instead of a real-time page; `attended` (or no argument to show current mode) delivers exactly as before. Never gates dispatch — presence keys delivery only. |
 | `rmd board [--repo <owner/repo> ...]` | Print what is open, and what is RED, across every configured fleet repository. Read-only: it makes one GitHub list call per repository, names unavailable repositories explicitly, and never gates or mutates work (W1-T3685). |
@@ -119,6 +120,7 @@ real self-sync re-exec sets on its own child, so it skips the whole check, not e
 | `rmd init [--tier <pro\|max5x\|max20x>] [--yes]` | Headless-safe first-run tier wizard. `--tier` wins outright; confident evidence writes with no prompt; a prompt fires **only** with a real TTY; a TTY-absent run never blocks (Standing rule 18). |
 | `rmd project init <repo> [--profile ts-node\|ts-web\|python\|dotnet] --coverage-pct <n> --branches-pct <n> --mutation-pct <n> --dup-pct <n>` | Fleet-inheritance onboarding: generates the target repo's whole gate stack with the given numbers as ratchet floors. Prints next steps; does not push/PR/arm protection itself. |
 | `rmd onboard <target-dir> --phase inventory [--owner <o> --repo <r>]` | Phase 1 of the `rmd onboard` family (brownfield repo onboarding): a deterministic, no-LLM inventory of a target checkout — languages, build/CI systems, docs presence, branch-protection state, issue/milestone counts, test-signal presence. Read-only against the target + `gh api`; writes only `<target-dir>/plan/onboarding/inventory.json`. Phases 2-4 (recon, planning session, synthesis) are future work, not yet built. |
+| `rmd decisions probe --candidate <name> --input-file <file> --questions-file <file> [--role <role>]` | Shadow only (W1-T12416): asks one decision model named in `decision_models` (.remudero/mounts.yaml) one typed question set about one input, in one budgeted cash request, then writes one `decision_answered` ledger row (each answer's probabilities, cost and latency) and prints it. No judge reads these answers yet. See docs/cli-reference.md. |
 | `rmd deploy [--reason <text>]` | Operator trigger for the deploy supervisor (human-gated): requests a fast-forward + daemon restart at the next idle gap, health-checked with rollback on failure. |
 | `rmd deploy-run [--dry-run]` | One deploy-supervisor cycle (what the `launchd` unit runs on its interval): no-op unless a deploy is triggered AND the daemon is idle. |
 | `rmd deploy-plist [--interval <s>] [--write]` | Generate the deploy-supervisor `launchd` unit (default every 120s). Loading it is an operator action. |
@@ -299,11 +301,12 @@ no `prunable` record afterwards.
 
 ## Pausing vs. stopping
 
-Use **`rmd pause`** for planned maintenance (you want in-flight work to land
+Use **`rmd pause --reason <text>`** for planned maintenance (you want in-flight work to land
 cleanly and new work to wait) and **`rmd stop`** to kill a run you believe is
 misbehaving *right now*. Because `stop` is one-shot, you never need to
 remember to clear it before your next `drain`/`daemon` invocation; `pause`
-requires an explicit `rmd resume`. See [control-surface.md](control-surface.md)
+requires an explicit `rmd resume`. A bare `rmd pause` only reads the pause state.
+See [control-surface.md](control-surface.md)
 for the full contract and the regressions each rule fixes.
 
 ## Reviewing a merged (or blocked) task
@@ -1464,7 +1467,7 @@ unless `/mnt/scratch` is mounted. It refuses to install while fstab still mounts
 # 1. Warm copy while everything runs
 sudo nice -n 19 ionice -c3 rsync -aHAX --numeric-ids /mnt/rmd/containerd/ /mnt/scratch/containerd/
 sudo nice -n 19 ionice -c3 rsync -aHAX --numeric-ids /mnt/rmd/docker/ /mnt/scratch/docker/
-# 2. rmd pause in core, console and site; wait for no in-flight run. Stop the three watchdog timers.
+# 2. rmd pause --instance <name> --reason <text> for core, console and site; wait for no in-flight run. Stop the three watchdog timers.
 sudo systemctl stop docker.socket docker.service containerd.service
 # 3. Final delta, then unmount the OLD bind (an already-mounted /var/lib/containerd would satisfy
 #    the new unit and containerd would keep running from /mnt/rmd)

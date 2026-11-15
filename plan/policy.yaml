@@ -638,14 +638,15 @@ sweep:
   # provider_status_age_ms ~500-800 s against the router's 60 s cache bound); `healthy-window`
   # fired twice. MEMORY: mem_available min 4.3 GB / median 6.7 GB on the 16 GB host; one more
   # ~1.33 GiB worker at that minimum leaves ~3 GB, above the 1.5 GiB reserve, and the
-  # memory-pressure and memory-reserve arms still shed admissions below it. Lane five is never
-  # committed: it stays capacity the widener must earn (option B, a separate code PR). Not a
+  # memory-pressure and memory-reserve arms still shed admissions below it. Since W1-T11841 the
+  # ceiling is the host worker budget (reviewCapacity.hostWorkerBudget), and each lane above the
+  # value is capacity the widener must earn. Not a
   # ratified rung: plan/ratifications.yaml pins no `sweep.*` row, so nothing needs re-ratifying.
   reviewLanes:
     value: 4 # operator ruling 2026-10-06: 3 -> 4
     origin: "net-new"
     min: 1
-    max: 5 # operator ruling 2026-10-06: 3 -> 5
+    max: 5 # bounds this row's value only; the width can earn each lane up to the host worker budget
   # W1-T2853: lane three is temporary capacity earned by a sustained healthy window, not a new
   # default. These rows govern review admission only; they never cancel a live worker and never
   # widen dispatchLanes. The 1.5 GiB reserve follows W1-T1049's measured ~1.33 GiB Claude-worker
@@ -1013,15 +1014,17 @@ sweep:
       origin: "proposal"
   # W1-T9097 — ADR 0007 decision C ("Parallelism adapts"): the build lane count follows the memory governor
   # (src/lib/lane-governor.ts `laneTarget`), not the fixed dispatchLanes above. mode accepts shadow or enforce, and an
-  # absent block reads as shadow. "shadow" (shipped) ledgers `dispatch.lane_target` {target, fixed, binding,
+  # absent block reads as shadow. "shadow" ledgers `dispatch.lane_target` {target, fixed, binding,
   # projection_mib, onset_mib} once per reading and changes nothing. "enforce" lets the target cap new admissions (a
-  # tick's dispatch set and each lane refill); a running lane is never stopped by a lower target. Switching to enforce
-  # is an operator ruling made by editing this row. Until dispatchLanes is retired (design step 4, a later change once
-  # enforce has run) it still sizes the pool, so enforce can only lower it. Read by src/lib/policy.ts
-  # (loadLaneGovernorMode), never by validatePolicy.
+  # tick's dispatch set and each lane refill); a running lane is never stopped by a lower target. ENFORCE SINCE
+  # 2026-11-09 (operator ruling, W1-T11884): over 550 shadow readings the target sat below the fixed lane count in 13%
+  # and builds ran at 3 or more in 3%, so this costs almost no throughput and sheds work when memory or CPU is short.
+  # Revert by setting this row back to shadow. Until dispatchLanes is retired (design step 4, a later change) it still
+  # sizes the pool, so enforce can only lower it. Read by src/lib/policy.ts (loadLaneGovernorMode), never by
+  # validatePolicy.
   laneGovernor:
     mode:
-      value: "shadow"
+      value: "enforce"
       origin: "proposal"
 
 drain:
@@ -1833,3 +1836,19 @@ pausePolicy:
   core:
     automationSetters: [daemon, host-recycle]
     origin: "operator ruling 2026-10-11: serve work never pauses core; only the daemon's drain and the host recycle do"
+
+# W1-T12228: the four constants of the daemon's freshness restart, as bounded rows. OPTIONAL: an absent block gives
+# today's four values (src/lib/policy.ts `DEFAULT_FRESHNESS_RESTART`). A running daemon reads them at its start, so an
+# edit applies after the next restart. One row per line, so a later edit of one line can name it. Each `origin` names
+# the constant in src/lib/deploy-judge.ts the row was lifted from. The deployer's recycle score is NOT these rows.
+#   scoreLimit: the pressure a busy daemon must reach before it restarts (the live-edit ladder judges against it too).
+#   stalenessHorizonMs: the time after which staleness alone reaches scoreLimit (min 15 minutes, max 4 hours).
+#   quietWindowMs: the quiet advance window a change-driven restart waits for.
+#   minLifetimeMs: how long a daemon lifetime runs before a freshness restart may take it (operator ruling 2026-10-17).
+# W1-T12552 (operator ruling 2026-11-13): horizon 1 h -> 4 h, lifetime 90 min -> 3 h. In 48 h, 25 restarts (median 2.0 h
+# apart); each boot pass is review-only and closes repair lanes (13.5 PR-hours on 52 PRs), and kills rounds (6 of 6).
+freshnessRestart:
+  scoreLimit: { value: 18, origin: "lifted:src/lib/deploy-judge.ts (DEPLOY_RESTART_SCORE_THRESHOLD)", min: 6, max: 54 }
+  stalenessHorizonMs: { value: 14400000, origin: "lifted:src/lib/deploy-judge.ts (DEPLOY_RESTART_RATE_CEILING_MS)", min: 900000, max: 14400000 }
+  quietWindowMs: { value: 600000, origin: "lifted:src/lib/deploy-judge.ts (FRESHNESS_COALESCE_WINDOW_MS)", min: 0, max: 1800000 }
+  minLifetimeMs: { value: 10800000, origin: "lifted:src/lib/deploy-judge.ts (FRESHNESS_MIN_LIFETIME_MS)", min: 0, max: 21600000 }

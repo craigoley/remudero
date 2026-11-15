@@ -1,0 +1,107 @@
+- id: W1-T12284
+  title: "Retire W1-T10740 unbuilt, because its proof passes on the merge base and the lexer failure it names is already repaired"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: low
+  status: queued
+  attempts: 0
+  files:
+    - plan/tasks.d/W1-T10740-a-generator-with-function-typed-parameters-lexes.yaml
+  acceptance:
+    - claim: "The W1-T10740 shard records a retirement of closed"
+      proof: "grep: retirement: closed in plan/tasks.d/W1-T10740-a-generator-with-function-typed-parameters-lexes.yaml"
+    - claim: "The W1-T10740 shard records why: its proof is executed_stale against bases f5d7c48 and 4d1188d, so it discriminates nothing and the premise rotted"
+      proof: "grep: executed_stale in plan/tasks.d/W1-T10740-a-generator-with-function-typed-parameters-lexes.yaml"
+  origin: "verify-human-automate:W1-T10740"
+  rationale: >-
+    From the 2026-11-11 proposal on verify-human-automate:W1-T10740, ratified via rmd approve:
+  
+    W1-T10740 kept failing to build (3 attempts over 14 days) and a judge reads it as safe to
+    enter the self-improvement flow:
+      W1-T10740's three attributable dispatches all failed on the same defect: the proof in test/ci/suites/a-generator-with-function-typed-parameters-lexes.test.ts passes against both head and base (base ref f5d7c48), so it is executed_stale and discriminates nothing. The dependencies are merged and the ID is not cited in src/, so the existing self-improvement flow can rewrite the proof to fail on base and pass on head without a policy, budget, or merge decision.
+  
+    The changed-symbol lexer reads a generator whose parameters carry function types, so a
+    src/run-task.ts diff stops forcing the full 4069-suite author run
+  
+  
+    Dependencies all merged: yes. Cited in src/: no.
+  
+  
+    Evidence: adaptive lifetime pressure: attributable dispatches=3; capacity refusals=0; open PR
+    evidence=0; merge evidence=0; last terminal verdict=failed; attributable terminal-verdict
+    history=failed: openPullRequestChecked: W1-T10740 proof did not pass against merge base (unit
+    test: test/ci/suites/a-generator-with-function-typed-parameters-lexes.test.ts):
+    proof:      unit test: test/ci/suites/a-generator-with-function-typed-parameters-lexes.test.ts
+  
+    parse:      OK — kind=test
+  
+    argv:       node --test --test-reporter=tap --import tsx --import ./test/setup/tmp-hygiene.ts
+    test/ci/suites/a-generator-with-function-typed-parameters-lexes.test.ts
+  
+    exit:       0
+  
+    hits:       29
+  
+    TAP version 13
+  
+    # Subtest: a generator whose parameters carry function types lexes in conservative mode
+  
+    ok 1 - a generator whose parameters carry function types lexes in conservative mode
+      ---
+      duration_ms: 2.763859
+      type: 'test'
+      ...
+    # Subtest: the current src/run-task.ts lexes end to end in conservative mode
+  
+    ok 2 - the current src/run-task.ts lexes end to end in conservative mode
+      ---
+    verdict:    pass
+  
+    base ref:   f5d7c48a5d9657729211b0eef03da8960afee64b
+  
+    base:       pass
+  
+    discrimination: executed_stale — this proof matches BOTH head and base, so it discriminates
+    NOTHING;
+                    the reviewer downgrades exactly this shape (W1-T273/W1-T362) and this verdict would
+                    count for nothing in review despite reading pass above. | failed: openPullRequestChecked: W1-T10740 proof did not pass against merge base (unit test: test/ci/suites/a-generator-with-function-typed-parameters-lexes.test.ts): proof:      unit test: test/ci/suites/a-generator-with-function-typed-parameters-lexes.test.ts
+    parse:      OK — kind=test
+  
+    argv:       node --test --test-reporter=tap --import tsx --import ./test/setup/tmp-hygiene.ts
+    test/ci/suites/a-generator-with-function-typed-parameters-lexes.test.ts
+  
+    exit:       0
+  
+    hits:       29
+  
+    TAP version 13
+  
+    # Subtest: a generator whose parameters carry function types lexes in conservative mode
+  
+    ok 1 - a generator whose parameters carry function types lexes in conservative mode
+      ---
+      duration_ms: 125.542089
+      type: 'test'
+      ...
+    # Subtest: the current src/run-task.ts lexes end to end in conservative mode
+  
+    ok 2 - the current src/run-task.ts lexes end to end in conservative mode
+      ---
+    verdict:    pass
+  
+    base ref:   4d1188d3d779d64f14971f99aab12f27b44c76bf
+  
+    base:       pass
+  
+    discrimination: executed_stale — this proof matches BOTH head and base, so it discriminates
+    NOTHING;
+                    the reviewer downgrades exactly this shape (W1-T273/W1-T362) and this verdict would
+                    count for nothing in review despite reading pass above.
+    Judge provenance: decision=automate;
+    observed_state=W1-T10740:adaptive-lifetime=3:capacity=0:open=0:merged=0:last=verdict:failed:2.
+  
+  
+    This is an automation candidate only. The existing inbox/draft flow owns the next step; the
+    shard, plan records, release rows, and merge gates remain unchanged.

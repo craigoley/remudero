@@ -14,7 +14,7 @@
   files:
     - scripts/preflight-author.mjs
     - test/ci/gates/the-author-receipt-states-whether-the-run-is-eligible-to-push.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: A receipt whose verdict is passed, or whose verdict is over-capacity with the census, static and affected-subset stages green, zero failing tests and no stage not run, carries pushEligible true and a one-line pushEligibleReason

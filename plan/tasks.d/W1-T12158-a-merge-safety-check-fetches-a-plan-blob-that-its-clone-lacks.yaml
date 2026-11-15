@@ -1,0 +1,48 @@
+- id: W1-T12158
+  title: "A merge-safety check fetches a plan blob that its clone lacks, then reads again"
+  repo: remudero
+  depends_on: []
+  priority: 1.1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the check that decides whether a plan pull request may merge; an unreadable tree must still refuse
+  band_meaning: blast-radius
+  origin: operator-session#follow-ups-2026-11-10
+  plan_refs:
+    - W1-T5748
+    - W1-T9670
+    - W1-T12059
+  files:
+    - src/lib/plan-pr-merge-safety.ts
+    - test/plan/a-merge-safety-check-fetches-a-plan-blob-that-its-clone-lacks.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "When the batch read reports that the clone lacks an object of the merged plan, the check fetches the missing object ids from origin once and reads the merged plan again. The reading loads when the second read succeeds"
+      proof: "grep: W1-T12158 criterion 1 in test/plan/a-merge-safety-check-fetches-a-plan-blob-that-its-clone-lacks.test.ts"
+    - claim: "When the object is still absent after the fetch, the reading is unreadable. Its text names the clone path and the object id, and says that the clone lacks the object"
+      proof: "grep: W1-T12158 criterion 2 in test/plan/a-merge-safety-check-fetches-a-plan-blob-that-its-clone-lacks.test.ts"
+    - claim: "A clone that holds every object of the merged plan makes no fetch"
+      proof: "grep: W1-T12158 criterion 3 in test/plan/a-merge-safety-check-fetches-a-plan-blob-that-its-clone-lacks.test.ts"
+    - claim: "A fetch that fails or is stopped at its time limit gives an unreadable reading that carries git's own words, and no merge follows"
+      proof: "grep: W1-T12158 criterion 4 in test/plan/a-merge-safety-check-fetches-a-plan-blob-that-its-clone-lacks.test.ts"
+  rationale: |
+    OBSERVED 2026-11-10 in the core instance's ledger: three plan pull requests were refused a merge because the check could not read a plan blob.
+    - #17639 (12:36:17Z), #17618 (12:40:37Z) and #17622 (12:46:54Z) were refused with reason plan_merge_unread.
+    - Each row says the merged tree was unreadable: `git cat-file --batch` could not read a task file under plan/tasks.d in the merge tree, and names a blob id as missing.
+    - All three came from reviews run by hand on the Azure host (run ids review-PR17639-…, review-PR17618-…, review-PR17622-…).
+    - The daemon's own reviews merged that day: #17650 and #17652 within a minute of the verdict, #17654 in about three minutes. The blob is present in the daemon's clones.
+    - `planMergeSafetyInClone` in src/lib/arm-auto-merge.ts runs git in `<config root>/repos/<repo>`. A review run by hand has its own config root, so it reads a different clone.
+    - `mergedTreePlanSteps` fetches only when a commit is absent. A clone that holds both commits and lacks a blob is never repaired.
+    - Why that clone lacked the blob is not established. The builder reproduces it on the Azure host and records the cause in the pull request.
+  design: |
+    In `mergedTreePlanSteps` in src/lib/plan-pr-merge-safety.ts, when `git cat-file --batch` names a missing object, collect the missing ids from its output.
+    Fetch those ids from origin in one `git fetch` call, under the time limit the other git calls of this check use. Then run the batch read again, once.
+    Keep every existing outcome: conflict, quarantined, unreadable. A second miss is unreadable, with the clone path in the text.
+    NOT IN SCOPE: which clone a review run by hand uses, the re-read of unknown mergeability (W1-T12059), and any change to what counts as a safe merged plan.
+  falsifier: |
+    Remove the fetch and criterion 1 must fail. Drop the clone path from the text and criterion 2 must fail. Fetch on every read and criterion 3 must fail. Read a failed fetch as a loaded plan and criterion 4 must fail. Restore and require all four to pass.
+  note: |
+    The fetch adds no network call for the daemon when its clone is complete. Criterion 3 keeps that true.

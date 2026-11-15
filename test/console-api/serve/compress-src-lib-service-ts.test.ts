@@ -1,0 +1,60 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
+import { compressionPinBase } from "#test/helpers/compression-pin.js";
+// @source-text-subject: service.ts comment compression against its PR base.
+// @census-reads: src/lib/service.ts
+import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import { test } from "node:test";
+import { parse } from "@babel/parser";
+
+function snapshot(source: string) {
+  const parsed = parse(source, {
+    sourceType: "module", plugins: ["typescript"], tokens: true, attachComment: false,
+  });
+  // Keep literal contents, regexes and nested templates; discard only parser-recognized comments.
+  const tokens = parsed.tokens!.filter((token) => typeof token.type !== "string")
+    .map((token) => [token.type.label, source.slice(token.start, token.end)]);
+  const digest = (text: string) => createHash("sha256").update(text).digest("hex");
+  return {
+    tokenCount: tokens.length,
+    tokenDigest: digest(JSON.stringify(tokens)),
+    // The AST also detects newline-sensitive automatic semicolon insertion.
+    astDigest: digest(JSON.stringify(parsed.program,
+      (key, value) => ["start", "end", "loc", "extra"].includes(key) ? undefined : value)),
+    commentLines: parsed.comments!.reduce((n, c) => n + source.slice(c.start!, c.end!).split("\n").length, 0),
+    commentBytes: parsed.comments!.reduce((n, c) => n + Buffer.byteLength(source.slice(c.start!, c.end!)), 0),
+  };
+}
+
+// Historical fingerprint assertions are retained in the historical suite.
+test("W1-T11273: comment compression preserves executable code", () => {
+  // Pre-compression source: ae8f9cffcc67e3a08da8f1aeb7ba87ebed35a3ab.
+  // These measurements prove this edit's reduction; they introduce no policy ceiling.
+  const actual = snapshot(readFileSync(join(REPO_ROOT, "src/lib/service.ts"), "utf8"));
+  const before = compressionPinBase("src/lib/service.ts", import.meta.url);
+  if (before !== undefined) {
+    // Only on the PR that adds this pin: later feature edits to the module stay free.
+    const base = snapshot(before);
+    assert.deepEqual([actual.tokenCount, actual.tokenDigest, actual.astDigest],
+      [base.tokenCount, base.tokenDigest, base.astDigest], "executable tokens and syntax match the PR base");
+    assert.ok(actual.commentLines < base.commentLines, "comment lines decrease from the PR base");
+  }
+  assert.ok(actual.commentLines < 324,
+    "comment lines must decrease from the measured pre-compression source");
+  assert.ok(actual.commentBytes < 25586,
+    "comment bytes must decrease too; rewrapping alone is insufficient");
+
+  const fixture = 'const re = /https?:\\/\\//; const s = "// kept"; const t = `/* ${`// ${1}`} */`;';
+  const original = snapshot(fixture);
+  const commented = snapshot(`/** extra */\n${fixture}\n// extra`);
+  assert.equal(commented.tokenDigest, original.tokenDigest);
+  assert.equal(commented.astDigest, original.astDigest);
+  for (const changed of [fixture.replace("https?", "http"), fixture.replace("// kept", "// changed"),
+    fixture.replace("${1}", "${2}")]) {
+    assert.notEqual(snapshot(changed).tokenDigest, original.tokenDigest);
+  }
+  assert.notEqual(snapshot("function f() { return 1; }").astDigest,
+    snapshot("function f() { return\n1; }").astDigest);
+});

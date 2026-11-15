@@ -291,3 +291,36 @@ export function registryDrift(repoNames: readonly string[], hostNames: readonly 
   const repoOnly = [...repo].filter((n) => !host.has(n)).sort();
   return hostOnly.length === 0 && repoOnly.length === 0 ? undefined : { hostOnly, repoOnly };
 }
+
+/** W1-T12553: hand `rmd` runs spend from the same installation as the daemons; they take one share. */
+export const HAND_RUN_INSTALLATION_SHARES = 1;
+
+/**
+ * W1-T12553 — the consumers that share one GitHub App installation: each live instance whose
+ * `gh_app_installation_id` is `installationId`, plus {@link HAND_RUN_INSTALLATION_SHARES}.
+ * An omitted ID establishes no installation identity, except with `countOmitted` (W1-T12670: the
+ * checkout copy names no IDs; a larger count only shrinks each share). `undefined` when no live
+ * instance declares the installation: the caller sets no budget.
+ */
+export function installationConsumers(
+  registryText: string, installationId: string, opts: { countOmitted?: boolean } = {},
+): number | undefined {
+  const sharing = scanInstances(registryText).filter((row) => {
+    if (row.fields.get("retired") === "true") return false;
+    const declared = row.fields.get("gh_app_installation_id");
+    if (declared === undefined || declared === "") return opts.countOmitted === true;
+    return declared === installationId;
+  }).length;
+  return sharing === 0 ? undefined : sharing + HAND_RUN_INSTALLATION_SHARES;
+}
+
+/** W1-T12670 — the one live instance whose `github_repo` (else `repo`) is `ownerRepo`, ignoring case. */
+export function registryInstanceForRepo(
+  registryText: string, ownerRepo: string,
+): { name: string } | { reason: "no_registry_match" | "several_registry_matches" } {
+  const want = ownerRepo.toLowerCase();
+  const matches = scanInstances(registryText).filter((row) => row.fields.get("retired") !== "true"
+    && (row.fields.get("github_repo") || row.fields.get("repo"))?.toLowerCase() === want);
+  if (matches.length === 1) return { name: matches[0]!.name };
+  return { reason: matches.length === 0 ? "no_registry_match" : "several_registry_matches" };
+}

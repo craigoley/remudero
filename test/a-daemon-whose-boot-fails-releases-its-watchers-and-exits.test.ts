@@ -138,7 +138,8 @@ function resources(failedRelease?: string) {
   const deps: Deps = {
     wireSweepWake: () => ({ sleep: async () => "timeout", acknowledge: () => {}, close: () => { release("wake"); } }),
     startGitCredentialSocket: async () => ({ socketPath: "/fixture/socket", close: async () => { release("socket"); } }),
-    startReadPlane: () => ({ read: async () => { throw new Error("unexpected read"); }, stop: async () => { release("read"); } }),
+    // W1-T12239: the early first tick read reaches this read and is refused; the first tick would read again.
+    startReadPlane: () => ({ read: async () => { throw new Error("read refused by fixture"); }, stop: async () => { release("read"); } }),
     startLoopTelemetry: () => {
       const telemetry = startReadPlaneTelemetry();
       return { ...telemetry, stop: () => { telemetry.stop(); release("telemetry"); } };
@@ -170,8 +171,9 @@ test("W1-T9909: a normal stop releases each resource once", async () => {
 });
 
 for (const [factory, expected] of [
-  ["startGitCredentialSocket", { wake: 1, socket: 0, read: 0, telemetry: 0, memory: 0 }],
-  ["startReadPlane", { wake: 1, socket: 1, read: 0, telemetry: 0, memory: 0 }],
+  // W1-T12239: the read plane starts before the lock, the wake and the socket.
+  ["startGitCredentialSocket", { wake: 1, socket: 0, read: 1, telemetry: 0, memory: 0 }],
+  ["startReadPlane", { wake: 0, socket: 0, read: 0, telemetry: 0, memory: 0 }],
   ["startLoopTelemetry", { wake: 1, socket: 1, read: 1, telemetry: 0, memory: 0 }],
   ["startMemoryCensus", { wake: 1, socket: 1, read: 1, telemetry: 1, memory: 0 }],
 ] as const) {
@@ -218,7 +220,7 @@ test("a boot failure before watcher acquisition still releases the drain lock", 
   const beforeListeners = listeners();
   try {
     await assert.rejects(f.run({ ...r.deps, wireSweepWake: () => { throw bootError; } }), (error) => error === bootError);
-    assert.deepEqual(r.released, { wake: 0, socket: 0, read: 0, telemetry: 0, memory: 0 });
+    assert.deepEqual(r.released, { wake: 0, socket: 0, read: 1, telemetry: 0, memory: 0 });
     assert.deepEqual(listeners(), beforeListeners);
     assert.equal(existsSync(f.lock), false);
   } finally {

@@ -12,7 +12,7 @@
   files:
     - scripts/mutation-ratchet.mjs
     - test/ci/gates/the-mutation-importer-map-sees-package-import-aliases.test.ts
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

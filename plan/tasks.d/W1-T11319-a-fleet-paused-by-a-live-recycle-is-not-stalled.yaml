@@ -18,7 +18,7 @@
     - src/lib/progress-watchdog.ts
     - src/run-task.ts
     - test/daemon/a-fleet-paused-by-a-live-recycle-is-not-stalled.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: decideProgressWatchdog returns state IN_RECYCLE, action none, when its input reports a recycle PAUSE whose writer is live, even with progress older than STALL_RECYCLE_AFTER_MS; with no PAUSE, an operator PAUSE, or a recycle PAUSE whose writer is gone, the verdict is today's

@@ -1,0 +1,57 @@
+- id: W1-T12555
+  title: "Tick reads in the worker thread and the status walk take their share of the GitHub App installation budget"
+  repo: remudero
+  depends_on:
+    - W1-T12553
+  priority: 1.3
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the daemon's main GitHub reads move under the budget; a wrong relay starves the tick reads, so an unconfigured budget keeps today's pacing
+  origin: "operator-session#installation-budget-follow-up-2026-11-14"
+  plan_refs:
+    - W1-T12553
+    - W1-T9722
+    - W1-T4075
+    - W1-T2440
+    - W1-T12531
+  files:
+    - src/lib/tick-read-worker.ts
+    - src/lib/read-plane.ts
+    - src/lib/read-plane.worker.ts
+    - src/lib/status.ts
+    - src/lib/github-installation-budget.ts
+    - test/github/tick-reads-in-the-worker-thread-take-their-share-of-the-installation-budget.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "A GitHub read that a tick read makes in the read-plane worker thread counts against the same process allowance as a read on the daemon's main thread. After a tick read generation, the main thread's githubInstallationBudget() holds the newest reading the worker saw and counts each read the worker made"
+      proof: "grep: W1-T12555 criterion 1 in test/github/tick-reads-in-the-worker-thread-take-their-share-of-the-installation-budget.test.ts"
+    - claim: "Once the main thread's share is spent, a tick read in a real read-plane worker thread makes no GitHub read before the reset: the async path waits for the reset and the synchronous path raises the pacer's stand-down error. A newer reading with a larger remaining count lets the worker read again"
+      proof: "grep: W1-T12555 criterion 2 in test/github/tick-reads-in-the-worker-thread-take-their-share-of-the-installation-budget.test.ts"
+    - claim: "The status walk (the board prewarm walk in src/lib/status.ts, on its worker thread or on the main-thread fallback) records each rate-limit reading it parses in the main thread's githubInstallationBudget() and counts each of its calls against the allowance. A walk that starts with the share spent makes no GitHub read before the reset"
+      proof: "grep: W1-T12555 criterion 3 in test/github/tick-reads-in-the-worker-thread-take-their-share-of-the-installation-budget.test.ts"
+    - claim: "invariant:every-read-takes-its-share — with a configured budget, no GitHub read path of the daemon process, on any thread, reads without asking the one process allowance. With no budget configured, tick reads and the status walk pace exactly as they do today"
+      kind: guard
+      proof: "grep: W1-T12555 criterion 4 in test/github/tick-reads-in-the-worker-thread-take-their-share-of-the-installation-budget.test.ts"
+    - claim: "The tick-read worker module asks the process installation budget"
+      proof: "grep: githubInstallationBudget( in src/lib/tick-read-worker.ts"
+  rationale: |
+    WHY: W1-T12553 gives each daemon instance a share of the GitHub App installation's hourly limit. It keeps that share in one module-level budget in src/lib/github-transport.ts (`githubInstallationBudget()`), and the daemon sets it at start. Two read paths of the daemon process never see that budget, so their reads take no share, and the instances can still exhaust the installation.
+    READ 2026-11-14 at origin/main and at W1-T12553's branch run-W1-T12553-1794619058000 (head b8484626c, not yet on main):
+    - src/cli/commands/daemon.ts:1353 runs the tick reads in a read-plane worker thread (`spawn: () => startTickReadWorker(readOptions)`). src/lib/tick-read-worker.ts:3211-3220 starts that `Worker` with plain workerData. A worker thread loads its own copy of every module, so its github-transport module holds a second, unconfigured budget (`consumers: undefined`). The pacer at src/lib/tick-read-worker.ts:266 (`createGhCallPacer()`) asks that copy, which never refuses and never records anything the main thread sees.
+    - src/lib/status.ts:4800-4815 (`runPrewarmChannelsSync`), the status walk, builds its own pacer in the prewarm worker thread and parses its own headers (`parseGhRateLimitHeaders`, :4813). The reading goes back to the main thread only as `rateLimit` and `calls` in the response, and :5530-5534 keeps it for the keep-warm pacer. It never reaches `githubInstallationBudget()`.
+    - The read-plane worker already sends rows to the main thread on its port: src/lib/read-plane.worker.ts:9 posts `{ kind: "log" }`, and src/lib/read-plane.ts:449 hands it to the daemon's log. The same port can carry budget readings and read counts.
+  design: |
+    INVARIANT every-read-takes-its-share: with a configured budget, every GitHub read of the daemon process, on any thread, asks the one process allowance before it goes and records its reading after it returns.
+    1. Main thread to worker: each read-plane request carries the main thread's budget state (consumer count, latest reading, reads since that reading). Add a plain-data snapshot of the budget and a way to build a budget from one in src/lib/github-installation-budget.ts if the existing `record`/`noteRead` cannot rebuild it exactly. In the worker, before the tick read runs, configure the worker's process budget from that snapshot (`configureGithubInstallationBudget`), so the pacer at src/lib/tick-read-worker.ts:266 and every pacer in the worker ask it.
+    2. Worker to main thread: after each GitHub read, the worker posts its reading and its read on the read-plane port as a new message kind beside `log`. src/lib/read-plane.ts hands those messages to `githubInstallationBudget()` on the main thread (`record`, `noteRead`). A throttle in the worker posts `noteThrottle` the same way, so the github.budget.throttled row still comes from the daemon's main thread. Keep this inside the read plane so src/cli/commands/daemon.ts does not change.
+    3. Status walk: in src/lib/status.ts, record each reading and count each call in `githubInstallationBudget()` on the main thread. For the prewarm worker, pass the snapshot in its request and record the response's readings and `calls` when it settles; on the main-thread fallback, the walk's pacer already asks the main budget.
+    4. A test drives a real read-plane worker thread through `startTickReadWorker` with a fake gh (test/helpers/gh-shim.ts) and a configured main-thread budget, and nothing injected in place of the relay.
+    NOT IN SCOPE: the budget arithmetic (W1-T12553); moving reads off the gh CLI (W1-T12531); hand runs and `rmd review`; graphql and search limits.
+  falsifier: |
+    Drop the relay of readings from the worker and criterion 1 must fail. Leave the worker's budget unconfigured and criterion 2 must fail. Drop the status walk's record of its reading and calls and criterion 3 must fail. Let a configured worker read skip admit() and criterion 4 must fail. Restore and require all to pass.
+  note: |
+    Id reserved for run-unfiled-1794620875000 with ~/rmd-work/bin/reserve-id.sh. Build it after W1-T12553 merges, off origin/main.
+    src/lib/tick-read-worker.ts and src/lib/status.ts have comment caps (test/infra/compress-src-lib-tick-read-worker-ts.test.ts, test/console-api/board/compress-src-lib-status-ts.test.ts): add as few comments as possible.

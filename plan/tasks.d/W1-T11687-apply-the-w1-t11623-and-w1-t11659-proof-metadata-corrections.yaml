@@ -13,7 +13,7 @@
   files:
     - plan/tasks.d/W1-T11623-the-failed-static-gate-fixture-runs-clear-of-an-inherited-slot-marker.yaml
     - plan/tasks.d/W1-T11659-a-verified-systemd-user-manager-does-not-block-cwd-census.yaml
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     SUCCESSOR TO W1-T11669. Initiative evidence (operator, 2026-11-08): merged PR #17311 (merge 48b17ae) only

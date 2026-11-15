@@ -1,0 +1,37 @@
+- id: W1-T12058
+  title: "A hand-run command waits for its GitHub read turn instead of being refused"
+  repo: remudero
+  depends_on: []
+  priority: 1.3
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: medium # the default of one mode for hand-run commands; an explicit setting still wins
+  band_meaning: blast-radius
+  origin: operator-session#review-flow-2026-11-10
+  plan_refs:
+    - W1-T3297
+    - W1-T10271
+  files:
+    - src/lib/github-transport.ts
+    - test/github/a-hand-run-command-waits-for-its-read-turn.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "A hand-run command whose first read comes inside the cadence window waits for its turn and then runs, when no mode is set"
+      proof: "grep: W1-T12058 criterion 1 in test/github/a-hand-run-command-waits-for-its-read-turn.test.ts"
+    - claim: "RMD_GH_TRANSPORT_FLOOR set to enforce still refuses, and set to advisory still paces, exactly as today"
+      proof: "grep: W1-T12058 criterion 2 in test/github/a-hand-run-command-waits-for-its-read-turn.test.ts"
+    - claim: "The wait is printed once with its length, so the person sees why the command paused"
+      proof: "grep: W1-T12058 criterion 3 in test/github/a-hand-run-command-waits-for-its-read-turn.test.ts"
+  rationale: |
+    OBSERVED 2026-11-10 on the Azure host: `rmd review 17618` and `rmd review 17622` each failed at once with "gh read cadence floor: a read-shaped call 145s after the last one on the core limiter (floor 180s, W1-T3297)". The reviews ran only after the operator session set RMD_GH_TRANSPORT_FLOOR=advisory by hand.
+    - The 180-second window guards against GitHub's secondary rate limit. In the eight days to 2026-11-10 the core daemon's ledger shows no secondary limit applied.
+    - A refusal makes the person rerun the command, and the message says a rerun restarts the window. A wait does the same work without the person.
+    - `rmd next-task-id` already runs in wait mode (src/run-task.ts line 43142); the other hand-run commands default to enforce (src/lib/github-transport.ts line 1017).
+  design: |
+    Change the default mode for a hand-run command from enforce to wait. The window, the burst and the search limiter are unchanged. Print one line when the command waits.
+    NOT IN SCOPE: the daemon's mode, the window's length, and the hook in hooks/deny-floor.sh.
+  falsifier: |
+    Refuse the first read with no mode set and criterion 1 must fail. Ignore an explicit enforce or advisory and criterion 2 must fail. Wait without a line and criterion 3 must fail. Restore and require all three to pass.

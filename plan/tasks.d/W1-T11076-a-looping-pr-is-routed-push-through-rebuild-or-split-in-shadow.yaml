@@ -17,7 +17,7 @@
     - src/lib/loop-decision.ts
     - src/lib/sweep.ts
     - test/sweep/a-looping-pr-is-routed-push-through-rebuild-or-split-in-shadow.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "A pure decideLoopOutcome fires at the first of: a review failing a claim that already failed before a reviewer-unmet fix round; a fix round ending NEEDS_SCOPE or NEEDS_DESIGN while the review fails; six fix rounds; two change-approach judgements on one red class. It routes the PR to push-through only when every unmet criterion is a semantic downgrade over an executed passing proof, at most half the criteria are unmet, required checks are green and the PR merges cleanly, no review flag of test theatre, tampered criteria, entanglement or reward hacking is set, no finding reproduces a defect, the diff touches no protected path (deploy, .github, hooks, the review, merge, risk and gate engines, credentials, the ledger schema) and the task is not itself a push-through follow-up; to split when at least two distinct claims are unmet across at least four criteria and four files; and to close and rebuild otherwise. The sweep ledgers loop.decision with the trigger, route, unmet classes and tokens spent so far, and acts on none of it"

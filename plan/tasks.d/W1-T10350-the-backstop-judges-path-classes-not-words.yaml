@@ -9,7 +9,7 @@
   band_meaning: span
   budget_usd: 8.00
   priority: 2  # requested by the operator session 2026-10-21
-  status: queued
+  status: merged
   attempts: 0
   origin: "operator session 2026-10-21: the backstop escalated W1-T10264 for test/deploy/..., W1-T10188 for plan/deploy-recovery-design.md and W1-T9378 for the word bypass"
   plan_refs: [W1-T9042, W1-T10349, W1-T9874]

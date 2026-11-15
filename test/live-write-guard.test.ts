@@ -485,6 +485,8 @@ function fakeOriginRun(url: string): { run: GitRun; calls: string[][]; pushes: (
   const run: GitRun = (args) => {
     calls.push(args);
     if (args[0] === "remote" && args[1] === "get-url") return { status: 0, stdout: `${url}\n`, stderr: "" };
+    // W1-T12525: the dispatch attempt reads its claim ref first; a free ref lets it reach the push.
+    if (args[0] === "ls-remote" && args[2]?.startsWith("refs/rmd-dispatch/")) return { status: 0, stdout: "", stderr: "" };
     return { status: 0, stdout: "deadbeef\n", stderr: "" };
   };
   return { run, calls, pushes: () => calls.filter((c) => c[0] === "push") };
@@ -569,12 +571,12 @@ test("a claim-ref push is never guarded outside the test runner", () => {
   const child = spawnSync(process.execPath, ["--import", "tsx", "-e",
     `import("./src/lib/dispatch-claim.ts").then(({ gitDispatchClaimReserver }) => {
        const calls = [];
-       const run = (a) => { calls.push(a[0]); return { status: 0, stdout: "x", stderr: "" }; };
+       const run = (a) => { calls.push(a[0]); return { status: 0, stdout: a[0] === "ls-remote" ? "" : "x", stderr: "" }; };
        gitDispatchClaimReserver({ run }).attempt("W1-T9000", "anchor");
        console.log(JSON.stringify(calls));
      });`],
   { cwd: process.cwd(), encoding: "utf8", env: { ...process.env, NODE_TEST_CONTEXT: undefined } });
-  assert.equal(child.stdout.trim(), '["push"]', child.stderr);
+  assert.equal(child.stdout.trim(), '["ls-remote","push"]', child.stderr);
 });
 
 test("isNetworkRemoteUrl separates a network remote from a filesystem one", () => {

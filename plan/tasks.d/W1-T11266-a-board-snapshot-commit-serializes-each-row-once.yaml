@@ -14,7 +14,7 @@
   files:
     - src/lib/board-snapshot-cache.ts
     - test/console-api/read-model/a-board-snapshot-commit-serializes-each-row-once.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: A commit writes bytes identical to today's for the same state, stringifies each record at most once per commit, and a commit after a change to one issue row stringifies only that row and the header and footer; an oversized or invalid row is still refused before any byte is written

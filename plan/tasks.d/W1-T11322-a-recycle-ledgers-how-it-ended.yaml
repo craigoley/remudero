@@ -19,7 +19,7 @@
     - test/deploy/a-recycle-ledgers-how-it-ended.test.ts
     - test/recycle-container.test.ts # two row-list pins gain recycle.ended
     - test/every-recycle-names-who-invoked-it.test.ts # its rows()[1] read gains recycle.ended
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: On every exit after recycle.invoked, recycle-container.sh appends one recycle.ended row with outcome (replaced, refused or aborted), exit status, the last reason line, wait_s, wait_source, waited_s and, for a refusal, the recycle-blockers-json it printed; the row is written for a refusal, a signal before docker stop, and a success

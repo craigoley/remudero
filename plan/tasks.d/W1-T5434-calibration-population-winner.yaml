@@ -11,7 +11,7 @@
   origin: "2026-10-03 approved benchmark follow-ups; measured concurrent population creation after merged readiness driver"
   plan_refs: [W1-T5341, W1-T4647]
   files: [src/lib/benchmark-aa-readiness.ts, test/benchmark-aa-readiness.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED at a92ce44653eb9201ba6a1003c03c6e09a18a61bd: freezePopulation reads

@@ -1053,7 +1053,7 @@ export interface DirectMergePreflightEvidence {
   planTouch?: PlanTouch;
   /** W1-T5472 — why a PR GitHub would merge as-is was updated instead; W1-T5748 — or held, past
    *  the refresh bound. */
-  reason?: "plan_pr_behind" | "plan_pr_refresh_bound" | "plan_pr_mergeability_unknown_bound" | "main_changed_own_files" | "plan_merge_unread" | "ratchet_collision";
+  reason?: "plan_pr_behind" | "plan_pr_refresh_bound" | "plan_pr_mergeability_unknown_bound" | "main_changed_own_files" | "plan_merge_unread" | "ratchet_collision" | "freshness_latch" | "direct_merge_in_flight";
   /** W1-T9962 — the merged-tree ratchet verdict this decision consulted. */
   ratchetJudge?: MergedRatchetJudgement;
   /** W1-T9536 — why main's changes since the merge base refreshed a behind PR, and the files. */
@@ -1188,11 +1188,12 @@ function* directMergePreflightSteps(
   priorHeadSha?: string,
   context: Pick<ArmAttemptResult, "error" | "rateLimit"> = {},
   judged?: MergedRatchetJudgement,
+  rereads = 0,
 ): Steps<DirectMergePreflightDecision> {
   if (!deps.readMergeFacts || !deps.updateBranch) return { proceed: true };
 
   let observedHead = priorHeadSha;
-  if (observedHead === undefined && deps.headSha) {
+  if ((observedHead === undefined || rereads > 0) && deps.headSha) {
     try {
       observedHead = yield* step(() => deps.headSha!(prUrl));
     } catch (e) {
@@ -1208,6 +1209,14 @@ function* directMergePreflightSteps(
           ...context,
           directMergePreflight: { remedy: "retry-later", error: headRead.error },
         },
+      };
+    }
+    if (priorHeadSha !== undefined && observedHead !== priorHeadSha) {
+      const moved = `head moved from ${priorHeadSha} to ${String(observedHead)} before the re-read`;
+      deps.say(`automerge.direct_merge_preflight_refused (W1-T12059): ${moved} — left unmerged for a later pass: ${prUrl}`);
+      return {
+        proceed: false,
+        result: { outcome: "direct-merge-preflight-refused", ...context, directMergePreflight: { priorHeadSha, remedy: "retry-later", error: moved } },
       };
     }
   }
@@ -1228,6 +1237,13 @@ function* directMergePreflightSteps(
   const behindIsConsistent = Number.isInteger(facts.behindBy) && Number(facts.behindBy) >= 0;
 
   if (facts.mergeable !== "MERGEABLE" || !behindIsConsistent) {
+    // W1-T12059: GitHub reads UNKNOWN for seconds after a status change; read again, then judge only the new facts.
+    if (readError === undefined && facts.mergeable === "UNKNOWN" && behindIsConsistent && rereads < PLAN_PR_UNKNOWN_MAX_REREADS) {
+      deps.say(`automerge.direct_merge_preflight_reread (W1-T12059): mergeability=UNKNOWN; re-read ` +
+        `${rereads + 1}/${PLAN_PR_UNKNOWN_MAX_REREADS} in this pass: ${prUrl}`);
+      yield* step(() => (deps.sleep ?? deps.sleepSync)?.(REST_MERGE_UNSETTLED_RETRY_INTERVAL_MS));
+      return yield* directMergePreflightSteps(prUrl, deps, priorHeadSha, context, judged, rereads + 1);
+    }
     const directMergePreflight: DirectMergePreflightEvidence = {
       ...baseEvidence,
       remedy: "retry-later",
@@ -1570,6 +1586,7 @@ function* attemptArmSteps(
   priorHeadSha?: string,
   isDraft?: boolean,
 ): Steps<ArmAttemptResult> {
+  deps = withSubmittedMark(deps);
   // DRAFT (W1-T3551): checked FIRST, before the ledger-hold read, so a draft never depends on
   // ledger I/O to stay unarmed. GitHub refuses `gh pr merge --auto` (and any direct-merge
   // fallback) on a draft PR — this is a GitHub-owned signal, never a ledger row.
@@ -1651,9 +1668,11 @@ function* attemptArmSteps(
     // status"): every SWEEP-armed PR can land in exactly that state, so the fallback below
     // completes the merge outright rather than treating the refusal as a no-op.
     if (armFailureAction(msg) === "direct-merge") {
-      const preflight = yield* directMergePreflightSteps(prUrl, deps, priorHeadSha, {}, judged.judge);
-      if (!preflight.proceed) return preflight.result;
-      return yield* mergeDirectAfterPreflightSteps(prUrl, deps, preflight.evidence);
+      return yield* admittedDirectMergeSteps(prUrl, priorHeadSha, deps, function* () {
+        const preflight = yield* directMergePreflightSteps(prUrl, deps, priorHeadSha, {}, judged.judge);
+        if (!preflight.proceed) return preflight.result;
+        return yield* mergeDirectAfterPreflightSteps(prUrl, deps, preflight.evidence);
+      });
     }
     // W1-T1255: THE QUOTA FALLBACK. `armFailureIsRateLimited` (W1-T1235) is the ONLY trigger for
     // this second attempt — never `armFailureAction`'s wider `"transient"`, which also matches an
@@ -1665,6 +1684,7 @@ function* attemptArmSteps(
         `automerge.rate_limit_refused (W1-T1235): GitHub rate-limit budget exhausted (bucket: ` +
           `${quota.bucket}, resets: ${quota.resetsAt}) — ${msg} — ${prUrl}`,
       );
+      return yield* admittedDirectMergeSteps(prUrl, priorHeadSha, deps, function* () {
       const preflight = yield* directMergePreflightSteps(prUrl, deps, priorHeadSha, { error: msg, rateLimit: quota }, judged.judge);
       if (!preflight.proceed) return preflight.result;
       try {
@@ -1742,17 +1762,169 @@ function* attemptArmSteps(
         deps.say(`automerge.rate_limited_rest_merge_refused (W1-T1255): ${msg3} — ${prUrl}`);
       }
       return { outcome: "arm-error-ignored", error: msg, rateLimit: quota };
+      });
     }
     deps.say(`automerge.arm_error_ignored (W1-T1079, ${armFailureAction(msg)}): ${msg} — ${prUrl}`);
     return { outcome: "arm-error-ignored", error: msg };
   }
 }
 
+/**
+ * W1-T11503 — A DIRECT MERGE IS OWNED BY ITSELF, NOT BY THE SWEEP THAT STARTED IT.
+ *
+ * The daemon bounds a sweep with a learned wall-clock and returns on abandonment, leaving the sweep's own promise alive;
+ * the freshness exit then awaited that bounded wrapper, so a merge still inside its preflight or write was invisible to the
+ * restart drain (PR 16944, 2026-11-05: `freshness_exit` 23:57:03Z, still open at 00:07Z). Every direct merge now registers
+ * here at admission and stays registered until its steps actually settle — merged, refused, errored or thrown — never
+ * until a wrapper around it does. The restart drain reads {@link directMergeOperationsInFlight}.
+ */
+export type DirectMergePhase = "preflight" | "write-submitted";
+
+export interface DirectMergeOperation {
+  prUrl: string;
+  prNumber?: number;
+  headSha?: string;
+  phase: DirectMergePhase;
+  admittedAtMs: number;
+  /** Settles when the operation's own steps end, whatever the outcome; never rejects. */
+  settled: Promise<void>;
+}
+
+interface RegisteredDirectMerge extends DirectMergeOperation {
+  settle: () => void;
+  cancelRequested?: true;
+}
+
+const directMergeOperations = new Map<Promise<void>, RegisteredDirectMerge>();
+let directMergeAdmissionsClosedBy: string | undefined;
+
+/** Close NEW direct-merge admissions (the freshness latch). An operation already admitted is untouched. */
+export function closeDirectMergeAdmissions(reason: string): void {
+  directMergeAdmissionsClosedBy ??= reason;
+}
+
+/** Reopen admissions once a latched restart is no longer pending. */
+export function openDirectMergeAdmissions(): void {
+  directMergeAdmissionsClosedBy = undefined;
+}
+
+export function directMergeOperationsInFlight(): DirectMergeOperation[] {
+  return [...directMergeOperations.values()].map(({ settle: _settle, cancelRequested: _cancel, ...operation }) => operation);
+}
+
+/** Ask every operation that has NOT yet submitted its write to refuse at the write. Returns how many were asked. */
+export function cancelUnsubmittedDirectMerges(): number {
+  let asked = 0;
+  for (const operation of directMergeOperations.values()) {
+    if (operation.phase !== "preflight") continue;
+    operation.cancelRequested = true;
+    asked++;
+  }
+  return asked;
+}
+
+/**
+ * Wait for the direct merges in flight NOW, bounded. Merges admitted after the call are not awaited (admission is
+ * latched closed by then). Returns the operations still unresolved at the bound — a `write-submitted` one is an UNKNOWN
+ * write: the caller reports it so and never calls the drain complete.
+ */
+export async function drainDirectMergeOperations(opts: {
+  boundMs: number; onWait?: (operation: DirectMergeOperation) => void;
+}): Promise<DirectMergeOperation[]> {
+  const running = [...directMergeOperations.keys()];
+  for (const work of running) opts.onWait?.(directMergeView(directMergeOperations.get(work)!));
+  if (running.length === 0) return [];
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const bound = new Promise<void>((resolve) => { timer = setTimeout(resolve, Math.max(0, opts.boundMs)); });
+  try {
+    await Promise.race([Promise.all(running), bound]);
+  } finally {
+    clearTimeout(timer);
+  }
+  return running.filter((work) => directMergeOperations.has(work)).map((work) => directMergeView(directMergeOperations.get(work)!));
+}
+
+function directMergeView({ settle: _settle, cancelRequested: _cancel, ...operation }: RegisteredDirectMerge): DirectMergeOperation {
+  return operation;
+}
+
+/** Admit one direct merge, or name why not: the latch is closed, or this PR already has an unsettled one. */
+function admitDirectMerge(prUrl: string, headSha: string | undefined):
+  { operation: RegisteredDirectMerge } | { refused: "freshness_latch" | "direct_merge_in_flight" } {
+  if (directMergeAdmissionsClosedBy !== undefined) return { refused: "freshness_latch" };
+  for (const operation of directMergeOperations.values()) if (operation.prUrl === prUrl) return { refused: "direct_merge_in_flight" };
+  let settle!: () => void;
+  const settled = new Promise<void>((resolve) => { settle = resolve; });
+  const operation: RegisteredDirectMerge = { prUrl, phase: "preflight", admittedAtMs: systemClock.now(), settled, settle,
+    ...(mergeTargetFromPrUrl(prUrl) ? { prNumber: mergeTargetFromPrUrl(prUrl)!.prNumber } : {}),
+    ...(headSha === undefined ? {} : { headSha }) };
+  directMergeOperations.set(settled, operation);
+  return { operation };
+}
+
+/**
+ * Run `body` as an admitted direct merge. Refused at the latch or for a duplicate; otherwise registered until `body`
+ * ends in ANY way (the `finally` is the settlement), and the settlement is said, so the ledger carries it.
+ */
+function* admittedDirectMergeSteps(
+  prUrl: string,
+  priorHeadSha: string | undefined,
+  deps: Pick<ArmDeps<true>, "say">,
+  body: () => Steps<ArmAttemptResult>,
+): Steps<ArmAttemptResult> {
+  const admission = admitDirectMerge(prUrl, priorHeadSha);
+  if ("refused" in admission) {
+    deps.say(`automerge.direct_merge_admission_refused (W1-T11503): ${admission.refused === "freshness_latch"
+      ? `a freshness restart is latched (${directMergeAdmissionsClosedBy}); no new merge is admitted`
+      : "a direct merge of this pull request is already in flight and unsettled"} — left for a later pass: ${prUrl}`);
+    return { outcome: "direct-merge-preflight-refused",
+      directMergePreflight: { ...(priorHeadSha === undefined ? {} : { priorHeadSha }), remedy: "retry-later", reason: admission.refused } };
+  }
+  const { operation } = admission;
+  let settledAs = "threw";
+  try {
+    const result = yield* body();
+    settledAs = result.outcome;
+    return result;
+  } finally {
+    directMergeOperations.delete(operation.settled);
+    deps.say(`automerge.direct_merge_settled (W1-T11503): phase=${operation.phase} outcome=${settledAs} ` +
+      `head=${operation.headSha ?? "unknown"}: ${prUrl}`);
+    operation.settle();
+  }
+}
+
+/**
+ * `deps` whose `mergeDirect` first marks the PR's operation `write-submitted` — or, when the drain asked it to cancel
+ * and no write has been submitted, refuses AT the write, so a cancelled preflight can never become a late merge.
+ */
+function withSubmittedMark<D extends Pick<ArmDeps<true>, "mergeDirect">>(deps: D): D {
+  return { ...deps, mergeDirect: (prUrl: string) => {
+    for (const operation of directMergeOperations.values()) {
+      if (operation.prUrl !== prUrl) continue;
+      if (operation.cancelRequested && operation.phase === "preflight") {
+        throw new Error("W1-T11503: direct merge cancelled before its write was submitted (restart drain bound)");
+      }
+      operation.phase = "write-submitted";
+    }
+    return deps.mergeDirect(prUrl);
+  } };
+}
+
+/** W1-T11259 — the 405 GitHub returns when the base moved between its mergeability read and the merge. */
+export function mergeDirectRefusalIsBaseModified(stderrText: string): boolean {
+  return /Base branch was modified/.test(stderrText);
+}
+
+/** W1-T11259 — the refusal GitHub returns while a required check has not yet reported on the head. */
+export function mergeDirectRefusalIsCheckExpected(stderrText: string): boolean {
+  return /Required status check ".*" is expected/.test(stderrText);
+}
+
 /** The REST merge once {@link directMergePreflight} has let it through. */
 function* mergeDirectAfterPreflightSteps(
   prUrl: string,
-  deps: Pick<ArmDeps<true>, "mergeDirect" | "isMerged" | "say" | "contributorAdmission"> &
-    Partial<Pick<ArmDeps<true>, "ledgerLines">>,
+  deps: Pick<ArmDeps<true>, "mergeDirect" | "isMerged" | "say" | "contributorAdmission"> & DirectMergePreflightDeps,
   evidence: DirectMergePreflightEvidence | undefined,
 ): Steps<ArmAttemptResult> {
   try {
@@ -1764,15 +1936,70 @@ function* mergeDirectAfterPreflightSteps(
     return { outcome: "direct-merged", directMergePreflight: evidence };
   } catch (e2) {
     if (e2 instanceof OperatorMergeHoldWriteRefused) return { outcome: "hold-refused" };
-    const msg2 = String((e2 as { stderr?: unknown })?.stderr ?? (e2 as Error)?.message ?? e2);
+    let msg2 = String((e2 as { stderr?: unknown })?.stderr ?? (e2 as Error)?.message ?? e2);
     // W1-T1050: a merge that landed must never be reported as a failed one.
     if (yield* step(() => deps.isMerged?.(prUrl))) {
       deps.say(`automerge.clean_status_direct_merge (merge landed; a post-merge step failed: ${msg2}): ${prUrl}`);
       return { outcome: "direct-merged", directMergePreflight: evidence };
     }
+    let finalEvidence = evidence;
+    // W1-T11259: GitHub refused an already-clean PR because the base moved under it. That is W1-T1280's
+    // unsettled refusal, so it gets W1-T1280's bounded loop: re-read, re-run the preflight on MERGEABLE,
+    // and retry the write once. `readMergeFacts` is optional — absent, this block is skipped.
+    if (deps.readMergeFacts && mergeDirectRefusalIsBaseModified(msg2)) {
+      for (let read = 1; read <= REST_MERGE_UNSETTLED_MAX_READS; read++) {
+        const facts = yield* step(() => deps.readMergeFacts!(prUrl));
+        if (facts.mergeable === "CONFLICTING") {
+          deps.say(
+            `automerge.clean_status_direct_merge_conflict (W1-T11259): settled CONFLICTING on read ` +
+              `${read}/${REST_MERGE_UNSETTLED_MAX_READS} — ${prUrl}`,
+          );
+          break;
+        }
+        if (facts.mergeable === "MERGEABLE") {
+          deps.say(
+            `automerge.clean_status_direct_merge_retry (W1-T11259): base branch was modified; settled MERGEABLE ` +
+              `on read ${read}/${REST_MERGE_UNSETTLED_MAX_READS} — retrying: ${prUrl}`,
+          );
+          const retryPreflight = yield* directMergePreflightSteps(prUrl, deps, evidence?.priorHeadSha, { error: msg2 });
+          if (!retryPreflight.proceed) return retryPreflight.result;
+          finalEvidence = retryPreflight.evidence;
+          try {
+            yield* step(() => deps.contributorAdmission?.(prUrl, evidence?.priorHeadSha));
+            const heldBeforeRetry = operatorHoldRefusal(prUrl, deps);
+            if (heldBeforeRetry) return heldBeforeRetry;
+            yield* step(() => deps.mergeDirect(prUrl));
+            deps.say(`automerge.clean_status_direct_merge (W1-T11259; merged on retry ${read}): ${prUrl}`);
+            return { outcome: "direct-merged", directMergePreflight: finalEvidence };
+          } catch (e4) {
+            if (e4 instanceof OperatorMergeHoldWriteRefused) return { outcome: "hold-refused" };
+            msg2 = String((e4 as { stderr?: unknown })?.stderr ?? (e4 as Error)?.message ?? e4);
+            if (yield* step(() => deps.isMerged?.(prUrl))) {
+              deps.say(`automerge.clean_status_direct_merge (merge landed; a post-merge step failed: ${msg2}): ${prUrl}`);
+              return { outcome: "direct-merged", directMergePreflight: finalEvidence };
+            }
+          }
+          break; // ONE retry once settled MERGEABLE, as W1-T1280 — never a second.
+        }
+        if (read < REST_MERGE_UNSETTLED_MAX_READS) {
+          yield* step(() => (deps.sleep ?? deps.sleepSync)?.(REST_MERGE_UNSETTLED_RETRY_INTERVAL_MS));
+        }
+      }
+    }
+    // W1-T11259: "ci-gate is expected" means a required check has not reported on this head yet — not
+    // a failed merge. Hold it (retry-later, mergeable_state blocked) so W1-T9212's checks-green
+    // re-evaluation merges it on the next light pass once the check reports.
+    if (mergeDirectRefusalIsCheckExpected(msg2)) {
+      deps.say(`automerge.clean_status_direct_merge_held (W1-T11259): ${msg2} — held for the next checks-green pass: ${prUrl}`);
+      return {
+        outcome: "plan-pr-held",
+        error: msg2,
+        directMergePreflight: { ...finalEvidence, remedy: "retry-later", mergeableState: "blocked" },
+      };
+    }
     deps.say(`automerge.direct_merge_failed: ${msg2} — ${prUrl}`);
     // W1-T8620: GitHub's refusal text rides the result, so the ledger rows carry the reason.
-    return { outcome: "direct-merge-failed", error: msg2, directMergePreflight: evidence };
+    return { outcome: "direct-merge-failed", error: msg2, directMergePreflight: finalEvidence };
   }
 }
 
@@ -1901,13 +2128,15 @@ function* attemptPlanPrMergeSteps(
   if (error === undefined && !unknown && (facts.mergeableState === "clean" || facts.mergeableState === "behind" ||
     facts.mergeableState === "unstable" || facts.mergeableState === "has_hooks" || greenBlocked)) {
     const fresh = facts;
-    const preflight = yield* directMergePreflightSteps(
-      prUrl,
-      { ...deps, readMergeFacts: () => fresh, readPlanTouch: () => planTouch },
-      priorHeadSha,
-    );
-    if (!preflight.proceed) return preflight.result;
-    return yield* mergeDirectAfterPreflightSteps(prUrl, deps, preflight.evidence);
+    return yield* admittedDirectMergeSteps(prUrl, priorHeadSha, deps, function* () {
+      const preflight = yield* directMergePreflightSteps(
+        prUrl,
+        { ...deps, readMergeFacts: () => fresh, readPlanTouch: () => planTouch },
+        priorHeadSha,
+      );
+      if (!preflight.proceed) return preflight.result;
+      return yield* mergeDirectAfterPreflightSteps(prUrl, deps, preflight.evidence);
+    });
   }
   let head = priorHeadSha;
   let elapsedMs = 0;

@@ -6,7 +6,7 @@
   verify: auto
   risk: low
   priority: 1.19
-  status: queued
+  status: merged
   attempts: 0
   author_class: machine
   origin: "flow-blocker:review-failed:terminal design handoff context unavailable"

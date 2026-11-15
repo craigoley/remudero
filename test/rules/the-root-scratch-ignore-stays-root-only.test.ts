@@ -1,3 +1,4 @@
+// @census-reads: .gitignore scripts/census-precheck.mjs test/rules/the-root-scratch-ignore-stays-root-only.test.ts — the root ignore file, and itself.
 import assert from "node:assert/strict";
 import {spawnSync} from "node:child_process";
 import {mkdirSync, readFileSync, writeFileSync} from "node:fs";

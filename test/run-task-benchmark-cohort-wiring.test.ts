@@ -78,7 +78,7 @@ test("benchmark cohort backlog progresses during supervised idle starvation", as
       ts: "2026-09-26T12:00:00.000Z", step: "worker.assignment",
       worker_assignment: { id: `a${i}`, selected: { provider: "cash", model: "gpt-5-nano" } },
     }) + "\n");
-    const entrypoint = readFileSync(new URL("../deploy/entrypoint.sh", import.meta.url), "utf8");
+    const entrypoint = readFileSync(new URL("../deploy/entrypoint-supervise.sh", import.meta.url), "utf8");
     assert.ok(entrypoint.includes('timeout -k 5s 120s node --import tsx "$TREE/src/lib/benchmark-cohort.ts" "$CONFIG_ROOT/state"'),
       "the supervised idle wait calls the model-free bounded projection");
     assert.ok(entrypoint.includes('remaining=$((300 - ($(date +%s) - pulse_started)))'),
