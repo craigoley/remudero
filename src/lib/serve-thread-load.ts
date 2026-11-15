@@ -142,6 +142,7 @@ export function startServeThreadLoad(opts: ServeThreadLoadOptions): ServeThreadL
       reading.elu = mainElu(elu, main.elu).utilization;
       main = { cpu, elu };
     } catch (e) {
+      // Recorded on main's own line: a counter that threw is named on the row, never read as zero load.
       reading.error = message(e);
     }
     return reading;
