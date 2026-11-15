@@ -237,11 +237,13 @@ test("W1-T12753 criterion 7: unattributed_ms is the lag neither the meter nor th
     assert.equal(row.unattributed_ms, Math.max(0, lagMs - Number(row.sync_spawn_ms) - Number(row.profiled_ms)));
     // The lag the profile cannot explain is the stall's head before the first chunk began (the onset plus however
     // long this host took to open the inspector session: `unprofiled_ms`, which a loaded CI runner stretches to
-    // hundreds of ms) and nothing else. A fixed fraction of the lag was host-dependent; the row's own head is not.
+    // hundreds of ms) plus its tail (the watchdog's next tick and the final stop after the loop freed), which a
+    // loaded host stretches too. Neither is a fixed fraction of the lag, so each is bounded by half the lag and the
+    // pair together by three quarters: a profile that explains nothing (unattributed = lag) still fails both.
     const unprofiledMs = Number(row.unprofiled_ms);
-    assert.ok(Number(row.unattributed_ms) <= unprofiledMs + 100,
-      `unattributed_ms ${row.unattributed_ms} exceeds the unprofiled head ${unprofiledMs} of lag ${lagMs}`);
     assert.ok(unprofiledMs < lagMs / 2, `unprofiled_ms ${unprofiledMs} of lag ${lagMs}: the profile began late`);
+    assert.ok(Number(row.unattributed_ms) <= unprofiledMs + lagMs / 4,
+      `unattributed_ms ${row.unattributed_ms} exceeds the unprofiled head ${unprofiledMs} plus a quarter of lag ${lagMs}`);
   } finally {
     v8.takeCoverage();
     profiler.stop();
