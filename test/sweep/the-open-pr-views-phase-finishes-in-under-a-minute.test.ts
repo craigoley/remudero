@@ -31,6 +31,7 @@ function board(opts: { delayMs?: number } = {}) {
   const runIds = new Map<number, number>();
   let baseTip: string | undefined = "main-a";
   const failing = new Set<string>();
+  const reviews = new Map<number, unknown>();
   const reads: string[] = [];
   const evidenceReads: string[] = [];
   const row = (n: number) => ({
@@ -53,6 +54,8 @@ function board(opts: { delayMs?: number } = {}) {
       return { object: { sha: baseTip } };
     }
     if (path.includes("/files")) return [{ filename: "src/a.ts" }];
+    const review = /\/pulls\/(\d+)\/reviews\?/.exec(path);
+    if (review) return reviews.get(Number(review[1])) ?? [];
     const single = /\/pulls\/(\d+)$/.exec(path);
     if (single) return { ...row(Number(single[1])), mergeable: true, mergeable_state: "clean" };
     return [];
@@ -69,7 +72,7 @@ function board(opts: { delayMs?: number } = {}) {
     return EVIDENCE;
   };
   return {
-    heads, runIds, failing, reads, evidenceReads, fetchAsync, fetchCiFailureEvidenceAsync,
+    heads, runIds, failing, reviews, reads, evidenceReads, fetchAsync, fetchCiFailureEvidenceAsync,
     setBaseTip: (sha: string | undefined) => { baseTip = sha; },
     /** Reads that name one PR, after the list stage: everything but the list, its rollups and the base tip. */
     perPrReads: () => reads.filter((path) => /\/pulls\/\d+/.test(path)),
@@ -259,6 +262,25 @@ test("W1-T12530 criterion 3: a change to the head, base tip or rollup reads agai
     for (let i = 0; i < 2; i++) await pass();
     assert.ok(b.perPrReads().includes("repos/o/r/pulls/12"), "a PR whose rollup is unreadable is read every pass");
     b.failing.clear();
+
+    // The review hydrator used to discard an unreadable listing as undefined, which the stage
+    // cache mistook for a successful empty listing. Recovery must be visible on the next pass.
+    b.heads.set(7, "head-7-c");
+    b.reviews.set(7, { message: "malformed review listing" });
+    const unreadable = await pass();
+    assert.equal(unreadable.find((view) => view.prNumber === 7)?.reviewQueueHold, undefined);
+    assert.ok(b.perPrReads().includes("repos/o/r/pulls/7/reviews?per_page=100"),
+      "positive control: the malformed review listing was read");
+    b.reviews.set(7, [{ id: 707, user: { login: "human", type: "User" }, state: "CHANGES_REQUESTED",
+      commit_id: "head-7-c", submitted_at: "2026-11-14T01:00:00Z" }]);
+    const recovered = await pass();
+    assert.ok(b.perPrReads().includes("repos/o/r/pulls/7/reviews?per_page=100"),
+      "unchanged inputs must retry an unreadable review listing");
+    assert.equal(recovered.find((view) => view.prNumber === 7)?.reviewQueueHold?.kind, "changes-requested");
+    const freshAfterRecovery = setup(b, { reuse: false, cache });
+    try {
+      assert.deepEqual(recovered, await freshAfterRecovery.pass(), "recovered cached view equals a fresh build");
+    } finally { freshAfterRecovery.cleanup(); }
 
     // invariant:no-stale-view — the reused views equal a fresh build for the same inputs.
     await pass();

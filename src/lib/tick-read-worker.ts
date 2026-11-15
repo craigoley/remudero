@@ -25,7 +25,7 @@ import { createBoardSnapshotCache } from "./board-snapshot-cache.js";
 import { createChangedFilesCache } from "./changed-files-cache.js";
 import { readFileIfExists } from "./fs-race-safe.js";
 import { ghIssueGateway, ghIssueGatewayAsync, type AsyncIssueGateway, type IssueGateway, type OpenIssue, prReferentFromIssueText } from "./escalate.js";
-import { checkRunsRestArgs, createGhCallPacer, fetchOpenPrsRest, fetchOpenPrsRestSteps, type OpenPrRest, hydrateMergeConflictEvidenceSteps, hydratePlanFilingFilesSteps, hydrateSupersessionVerdictsSteps, hydrateWorkflowRunsSteps, hydrateMergeStateObservationsSteps, hydrateScannerBlockerObservationsSteps, hydrateCodeqlHeadAlertsSteps, codeqlCheckFailed, securityMergePolicyRefusal, isHumanHoldCandidate, isScannerBlockerCandidate, isReviewQueueHoldCandidate, hydrateReviewQueueHoldsSteps, paceGhEntryAsync, hydrateReviewReuseFactsSteps, type GhApiFetcher, type GhCallPacer, createPlanFilingFileCache, loadPlanFilingFileCache, PLAN_FILING_FILE_MISS_CAP, type PlanFilingFileCache, type PlanFilingFileObservation, combinedStatusRestArgs, openPrsRestArgs, MERGE_STATE_HYDRATION_CAP, SCANNER_BLOCKER_HYDRATION_CAP, REVIEW_QUEUE_HOLD_READ_CAP, CODEQL_HEAD_ALERT_HYDRATION_CAP, WORKFLOW_RUN_HYDRATION_CAP, type MergeStateObservation } from "./open-prs-rest.js";
+import { checkRunsRestArgs, createGhCallPacer, fetchOpenPrsRest, fetchOpenPrsRestSteps, type OpenPrRest, hydrateMergeConflictEvidenceSteps, hydratePlanFilingFilesSteps, hydrateSupersessionVerdictsSteps, hydrateWorkflowRunsSteps, hydrateMergeStateObservationsSteps, hydrateScannerBlockerObservationsSteps, hydrateCodeqlHeadAlertsSteps, codeqlCheckFailed, securityMergePolicyRefusal, isHumanHoldCandidate, isScannerBlockerCandidate, isReviewQueueHoldCandidate, classifyChangesRequested, pullReviewsRestArgs, paceGhEntryAsync, hydrateReviewReuseFactsSteps, type GhApiFetcher, type GhCallPacer, createPlanFilingFileCache, loadPlanFilingFileCache, PLAN_FILING_FILE_MISS_CAP, type PlanFilingFileCache, type PlanFilingFileObservation, combinedStatusRestArgs, openPrsRestArgs, MERGE_STATE_HYDRATION_CAP, SCANNER_BLOCKER_HYDRATION_CAP, REVIEW_QUEUE_HOLD_READ_CAP, CODEQL_HEAD_ALERT_HYDRATION_CAP, WORKFLOW_RUN_HYDRATION_CAP, type MergeStateObservation } from "./open-prs-rest.js";
 import { createHash } from "node:crypto";
 import { codeqlAlertsReadDue } from "./pr-blocker.js";
 import { planFilesIdentity } from "./thread-plan.js";
@@ -2344,8 +2344,20 @@ export function* openPrViewSteps(
     .sort((a, b) => (a.createdAt ?? "").localeCompare(b.createdAt ?? "") || a.number - b.number)
     .map((pr) => ({ number: pr.number, headSha: pr.headRefOid }))
     .slice(0, REVIEW_QUEUE_HOLD_READ_CAP);
-  const reviewQueueHolds = byCandidate(holdCandidates, yield* perPrStageSteps(stageCtx, "review_queue_holds", holdCandidates,
-    function* (c, read) { return (yield* hydrateReviewQueueHoldsSteps(owner, repo, [c], read)).get(c.number); }));
+  // Keep the classified read until reuse is decided. The map-only hydrator drops an unreadable
+  // listing just like a valid empty listing, so caching its undefined result would hide recovery.
+  const holdReads = yield* perPrStageSteps(stageCtx, "review_queue_holds", holdCandidates,
+    function* (c, read) {
+      try {
+        const reviews = yield* step(() => read(pullReviewsRestArgs(owner, repo, c.number)));
+        const observation = classifyChangesRequested(c, reviews);
+        return { hold: observation?.kind === "changes-requested" ? observation : undefined,
+          readable: observation?.kind !== "ambiguous" };
+      } catch {
+        return { hold: undefined, readable: false };
+      }
+    }, (result) => result.readable);
+  const reviewQueueHolds = byCandidate(holdCandidates, holdReads.map((result) => result.hold));
   lap("review_queue_holds");
 
   // W1-T5633: a head whose latest `CodeQL` check failed has its open high alerts read, unless its ledger
