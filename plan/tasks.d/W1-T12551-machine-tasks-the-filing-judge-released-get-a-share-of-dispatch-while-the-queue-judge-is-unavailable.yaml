@@ -20,7 +20,7 @@
     - src/lib/daemon.ts
     - test/dispatch/released-machine-tasks-get-a-share-of-dispatch-while-the-queue-judge-is-unavailable.test.ts
     - "src/lib/ledger.ts"
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "queueJudgeAvailability reads the ledger rows and gives the time since the queue judge's last completed pass. A pass that ended in queue_judge.unavailable does not count as completed"

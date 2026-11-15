@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 
 import { assessGatewayCheckout, gateStaleCodeExit, type StaleCodeExitDeps } from "#src/lib/serve.js";
-import { changedPathsSince, serveRestartRelevant, type ChangedPathsRead } from "#src/lib/serve-restart-relevance.js";
+import { changedPathsSince, serveRestartRelevant, touchesPerRequestPath, type ChangedPathsRead } from "#src/lib/serve-restart-relevance.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
 
 // W1-T4463: serve restarts only when the move from its boot sha touches a path it loads.
@@ -136,4 +136,13 @@ test("a docs-only advance of the gateway checkout is not a restart", async () =>
     });
   assert.equal((await assess("docs/a.md\ntest/b.test.ts\n")).restartDue, false);
   assert.equal((await assess("docs/a.md\nsrc/lib/serve.ts\n")).restartDue, true);
+});
+
+test("a plan/feedback/ path is read per request, so it alone is not a restart", () => {
+  assert.equal(serveRestartRelevant(["plan/feedback/fb-1.yaml", "test/a.test.ts"]), false);
+  assert.equal(touchesPerRequestPath(["docs/a.md", "plan/feedback/fb-1.yaml"]), true);
+  assert.equal(touchesPerRequestPath(["docs/a.md", "plan/policy.yaml"]), false);
+  for (const path of ["src/lib/serve.ts", "plan/policy.yaml", "plan/claims.yaml", "settings/worker.json", " "]) {
+    assert.equal(serveRestartRelevant(["plan/feedback/fb-1.yaml", path]), true, path);
+  }
 });
