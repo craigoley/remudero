@@ -1,0 +1,92 @@
+- id: W1-T12952
+  title: "The filing-history git reads of the lifetime-pressure route are awaited, and no new loop path calls the synchronous worktree git leaf"
+  repo: remudero
+  depends_on:
+    - W1-T11795
+  priority: 1.4
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the lifetime-pressure route reads every candidate task's filing date; a lost or reordered date changes what the judge is asked
+  origin: "operator-session#daemon-loop-lag-2026-11-15"
+  plan_refs:
+    - W1-T11795
+    - W1-T12753
+    - W1-T5689
+    - W1-T7744
+    - W1-T11459
+  files:
+    - src/lib/task-filing-history.ts
+    - src/run-task.ts
+    - test/a-filing-age-that-cannot-be-read-is-unknown-never-zero-days.test.ts
+    - test/daemon/the-filing-history-git-reads-do-not-block-the-daemon-loop.test.ts
+    - test/no-daemon-loop-path-calls-the-synchronous-worktree-git-leaf.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "resolveTaskFilingHistory reads git through hostWorktreeGitAsync: with a git on PATH that sleeps 2 s for each call, a 50 ms timer started before routeAdaptiveLifetimePressure keeps firing at least once in every 500 ms while the route reads the filing dates"
+      proof: "grep: W1-T12952 criterion 1 in test/daemon/the-filing-history-git-reads-do-not-block-the-daemon-loop.test.ts"
+    - claim: "invariant:same-filing-dates — for the same repository and candidates, the async reader returns the same state, committer time and reason for every task as the synchronous reader does today, including every budget-exhausted and unknown case"
+      kind: guard
+      proof: "grep: W1-T12952 criterion 2 in test/daemon/the-filing-history-git-reads-do-not-block-the-daemon-loop.test.ts"
+    - claim: "invariant:same-git-limits — the async reader applies the same FILING_HISTORY_LIMITS, latin1 decoding and hardened git environment (GIT_NO_REPLACE_OBJECTS, GIT_NO_LAZY_FETCH, GIT_OPTIONAL_LOCKS 0, the graft, shallow and replace-ref variables unset)"
+      kind: guard
+      proof: "grep: W1-T12952 criterion 3 in test/daemon/the-filing-history-git-reads-do-not-block-the-daemon-loop.test.ts"
+    - claim: "parkedVerifyHumanShards and the lifetime-pressure route await the filing history, so both still give a filing age that cannot be read as unknown, never 0 days"
+      proof: "grep: W1-T12952 criterion 4 in test/a-filing-age-that-cannot-be-read-is-unknown-never-zero-days.test.ts"
+    - claim: "invariant:census-only-falls — a new census lists every daemon-loop-reachable function (the daemon-loop walk seeded from daemonCommand) whose code calls hostWorktreeGit or hands it over as a value, outside src/lib/worktree-git.ts, with an exact baseline; createTaskFilingHistoryInvocation and resolveTaskFilingHistory have no row, a fixture function that gains a call fails with its name, and a row above or below its count fails"
+      kind: guard
+      proof: "grep: W1-T12952 criterion 5 in test/no-daemon-loop-path-calls-the-synchronous-worktree-git-leaf.test.ts"
+    - claim: "The filing-history reader's default git reader is the async worktree git leaf"
+      proof: "grep: readGit [?][?] hostWorktreeGitAsync in src/lib/task-filing-history.ts"
+  rationale: |
+    WHY: the daemon loop blocks on synchronous worktree git calls. The largest named share in the last 24 h is the
+    filing-history reader of the lifetime-pressure route, which calls hostWorktreeGit through ctx.readGit, so the
+    stall profiler names the caller Object.hostWorktreeGit.
+    MEASURED, core ledger (~/rmd-state2/state, live file and rotations), 2026-11-14 18:15Z to 2026-11-15 18:16Z,
+    90 daemon.loop_stall_profile rows, 14,334 s of loop lag in all. sync_spawn_by_caller, summed:
+    - Object.hostWorktreeGit: 1,368 calls, 276.5 s. vetPinnedConfig (the second spawn of each hostWorktreeGit
+      call): 1,514 calls, 105.1 s. hostWorktreeGit named as a plain caller: 146 calls, 31.7 s.
+    - Every one of the 1,368 Object.hostWorktreeGit calls sits in a row whose top_inclusive frames name
+      routeAdaptiveLifetimePressure (24 rows; 4 of them also name rowsWithArchivedVerifyHumanVerdicts).
+    READ at origin/main 57ca3bba9:
+    - src/lib/task-filing-history.ts:75 sets readGit to options.readGit ?? hostWorktreeGit, and :88 calls
+      ctx.readGit(...), a method call: that is the Object. receiver in the frame name.
+    - Its callers are routeAdaptiveLifetimePressure (src/run-task.ts:38080) and parkedVerifyHumanShards
+      (src/run-task.ts:38641), both through shardAgeDays (src/run-task.ts:38697).
+    - hostWorktreeGitAsync exists (src/lib/worktree-git.ts:475).
+    - A walk of the daemon loop (test/helpers/daemon-loop-walk.ts, seeded from daemonCommand, object literals
+      included) finds 111 reachable functions in 34 files outside worktree-git.ts that name hostWorktreeGit
+      (46 in src/run-task.ts, 10 in src/cli/commands/run-task-verb.ts, 9 in src/lib/worker.ts, 5 in
+      src/lib/sweep.ts). The existing census (test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts)
+      counts the spawn primitives inside hostWorktreeGit, not its callers, so none of them is listed.
+    SCOPE: W1-T12753 (in build) converts the same route's ledger reads; its amendment (#18714) leaves the
+    hostWorktreeGit calls out. This task converts the measured caller and adds the census so the other 110 can only
+    fall, one task each, without a new one.
+    DEPENDS ON W1-T11795: its leaf names make the stall rows name the real callers in the bundle, which the
+    follow-up conversions need.
+    FALSIFIER: if the next 24 h of daemon.loop_stall_profile rows still charge Object.hostWorktreeGit under
+    routeAdaptiveLifetimePressure, another method-style caller exists on that route, and the census must name it.
+  design: |
+    INVARIANT same-filing-dates: the async reader is the same algorithm; only the spawn is awaited.
+    INVARIANT same-git-limits: limits, decoding and environment are unchanged.
+    INVARIANT census-only-falls: the new census is exact, like SYNC_SPAWN_LOOP_BASELINE.
+    1. src/lib/task-filing-history.ts: readGit becomes typeof hostWorktreeGitAsync (default hostWorktreeGitAsync);
+       readHistory, metadata and resolveTaskFilingHistory become async. Keep the one-batch-per-invocation shape
+       (ctx.results and ctx.failure).
+    2. src/run-task.ts: shardAgeDays, parkedVerifyHumanShards and the route await the history. Change nothing
+       else in routeAdaptiveLifetimePressure (W1-T12753 owns its ledger reads); if W1-T12753 has merged, rebase on
+       it.
+    3. New census test/no-daemon-loop-path-calls-the-synchronous-worktree-git-leaf.test.ts on the existing walk
+       helpers, with the baseline recorded at build time.
+    4. Update test/a-filing-age-that-cannot-be-read-is-unknown-never-zero-days.test.ts for the async reader.
+    NOT IN SCOPE: the other 110 callers; vetPinnedConfig's own spawn; the read-plane caller names (W1-T11795).
+  falsifier: |
+    Put the synchronous readGit back: criteria 1 and 6 must fail. Drop the hardened environment from the async
+    read: criterion 3 must fail. Add a hostWorktreeGit call to a loop-reachable fixture: criterion 5 must fail.
+    Restore and require all to pass.
+  note: |
+    Id reserved for run-unfiled-1794767168000 with ~/rmd-work/bin/reserve-id.sh.
+    The 111-function count came from a one-off script over test/helpers/daemon-loop-walk.ts at origin/main
+    57ca3bba9; the census records the exact figure when it is built.

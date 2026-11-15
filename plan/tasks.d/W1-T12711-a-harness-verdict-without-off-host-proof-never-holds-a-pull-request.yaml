@@ -28,7 +28,7 @@
     - test/every-fixed-repair-budget-defers-to-the-progress-judge.test.ts
     - test/sweep/a-fix-progress-verdict-is-not-asked-again-for-an-unchanged-input.test.ts
     - test/the-fix-progress-judge-sees-the-red-it-rules-on.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "The fix progress judge prompt offers the harness verdict only when signals.offHostPass is true; otherwise its schema lists continue, change-approach and escalate, and says why harness is not offered"

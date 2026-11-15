@@ -27,7 +27,7 @@
     - src/lib/ledger.ts
     - test/policy.test.ts
     - test/fix-lane/fix-rounds-with-no-progress-on-one-criterion-get-a-different-remedy.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "sameCriterionStall counts the completed rounds dispatched against one unmet criterion (claim text, or check name for a CI red) after which that criterion was still unmet with the same failure digest, or the round did not land"

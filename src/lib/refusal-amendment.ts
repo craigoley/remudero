@@ -89,6 +89,21 @@ export function refusalExcerptFromFixReport(report: string | undefined): string 
   return lines.slice(start, end).join("\n").slice(0, MAX_FIX_REFUSAL_EXCERPT_CHARS);
 }
 
+/** Bounds the worker's reason inside a categorized line the harness writes for it. */
+const MAX_NEEDS_DESIGN_DETAIL_CHARS = 500;
+
+/**
+ * W1-T12714: the categorized `REFUSED:` block for a NEEDS_DESIGN report the fix lane routes to an amendment when the
+ * worker wrote none, so {@link noPrVerdictRowsFromLedger} nominates it. The criterion is the one the reason names, else 1.
+ */
+export function refusalExcerptForNeedsDesign(reason: string, refusalClass: CriterionRefusalClass): string | undefined {
+  const detail = reason.replace(/\s+/g, " ").trim().slice(0, MAX_NEEDS_DESIGN_DETAIL_CHARS).trim();
+  if (detail === "") return undefined;
+  const criterion = Number(/\bcriteri(?:on|a)\s+(\d+)\b/i.exec(detail)?.[1] ?? 1);
+  const excerpt = `REFUSED:\n${Math.min(Math.max(criterion, 1), MAX_REFUSED_CRITERIA)}. [${refusalClass}] ${detail}`;
+  return extractRefusal(excerpt).length > 0 ? excerpt : undefined;
+}
+
 export type AmendmentKind = "close-unbuilt" | "widen-files" | "add-precondition" | "re-scope-criteria";
 
 /** The change each closed refusal class implies. DATA, so a new class is a row, not a branch. */
@@ -358,7 +373,7 @@ export function insertRefusalAmendment(shardText: string, taskId: string, commen
 export interface RefusalAmendmentIo {
   readonly readShard: (taskId: string) => { relPath: string; text: string } | undefined;
   /** W1-T12199: an amendment that waits for its landing has no pull request yet. */
-  readonly probeExisting: (branch: string) => { prUrl?: string } | undefined;
+  readonly probeExisting: (branch: string) => { prUrl?: string } | undefined | Promise<{ prUrl?: string } | undefined>;
   readonly openAmendmentPr: (input: {
     branch: string;
     shardRelPath: string;
@@ -380,6 +395,7 @@ export type RefusalAmendmentOutcome =
   | "text_drift"
   | "already_flagged"
   | "task_closed"
+  | "lookup_unreadable"
   | "error";
 
 export interface RefusalAmendmentResult {
@@ -389,6 +405,7 @@ export interface RefusalAmendmentResult {
   readonly prUrl?: string;
   readonly classes: readonly CriterionRefusalClass[];
   readonly error?: string;
+  readonly code?: string;
 }
 
 /** The stable per-task branch: a second draft before the first PR lands DEDUPES on it. */
@@ -409,7 +426,7 @@ export async function draftRefusalAmendment(
     if (!shard) return { ...base, outcome: "no_shard" };
     if (shard.text.includes(`refusal-amendment (${taskId}, run ${runId},`)) return { ...base, outcome: "already_flagged" };
     const branch = refusalAmendmentBranch(taskId);
-    const existing = io.probeExisting(branch);
+    const existing = await io.probeExisting(branch);
     if (existing) return { ...base, outcome: "deduped", prUrl: existing.prUrl };
     const amendedText = insertRefusalAmendment(
       shard.text,

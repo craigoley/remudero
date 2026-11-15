@@ -675,6 +675,10 @@ function refusalContradictionsInReport(
   return contradictions;
 }
 
+/** W1-T12146: the reviewer's own verdict on a criterion, as given BEFORE any proof ran — its `REVIEW_VERDICT <n>:`
+ *  PASS (`met`) or FAIL (`unmet`), or `none` when it gave neither (no line, an UNABLE line, or no reviewer at all). */
+export type PreProofVerdict = "met" | "unmet" | "none";
+
 /** One criterion's verdict against its stated proof. */
 export interface CriterionVerdict {
   claim: string;
@@ -701,6 +705,9 @@ export interface CriterionVerdict {
    *  ledger-reconstructed placeholders in run-task.ts/sweep.ts need no update; {@link applyVerdictStability} falls
    *  back to `met`. */
   floorMet?: boolean;
+  /** W1-T12146: what the reviewer said before the proof overrode it; a RECORD only, never read by any verdict. Optional
+   *  so older rows and the ledger-rebuilt criteria in run-task.ts/sweep.ts need no update. */
+  preProofVerdict?: PreProofVerdict;
   /** Copied verbatim from {@link AcceptanceCriterion.holdout} (W1-T166). The verdict folds a holdout criterion in like
    *  any other; this flag exists only so {@link visibleCriteria} keeps its text off worker-facing surfaces. */
   holdout?: boolean;
@@ -853,6 +860,10 @@ export interface ReviewVerdict {
    *  `undefined` rather than `0` when no head checkout was supplied. */
   proofUniqueRuns?: number;
   proofReuses?: number;
+  /** W1-T12146: criteria the reviewer called `met` whose proof executed and FAILED, and criteria it called `unmet`
+   *  whose proof executed and PASSED — the two directions, counted apart. Counts only, over every criterion. */
+  overturnedToUnmet?: number;
+  overturnedToMet?: number;
   /** The rolled-up `state` as if NO semantic verdict had been supplied: every criterion judged on `floorMet`, plus the
    *  same structural rules `state` uses (W1-T178). The deterministic anchor {@link applyVerdictStability} consults,
    *  since a semantic-only downgrade is noise a re-review of an unchanged, previously-passing head may not act on. */
@@ -4398,7 +4409,9 @@ export function judgeCriterion(
   refusal?: CriterionRefusal,
   reviewerUnable?: string,
 ): CriterionVerdict {
-  const base = { claim: criterion.claim, proof: criterion.proof };
+  // W1-T12146: the reviewer's verdict is captured here, before any proof below runs, and nothing reads it back.
+  const preProofVerdict: PreProofVerdict = semantic === undefined ? "none" : semantic ? "met" : "unmet";
+  const base = { claim: criterion.claim, proof: criterion.proof, preProofVerdict };
   const reviewerUnavailable = reviewerUnable !== undefined && semantic !== false
     ? (reviewerUnable || "the reviewer gave no reason") : undefined;
   const unable = (v: CriterionVerdict): CriterionVerdict => reviewerUnavailable === undefined ? v
@@ -6287,6 +6300,9 @@ export function judgeReview(
   // (an aggregate NUMBER, never secret); `unexecutableProofs` is VISIBLE-only text (W1-T166).
   const unexecutableCount = verdicts.filter((v) => v.proof_skip !== undefined).length;
   const unexecutableProofs = visibleVerdicts.filter((v) => v.proof_skip !== undefined).map((v) => v.proof);
+  // W1-T12146: where an executed proof disagreed with the reviewer's pre-proof verdict, in each direction.
+  const overturnedToUnmet = verdicts.filter((v) => v.preProofVerdict === "met" && v.proof_exec === "executed_fail").length;
+  const overturnedToMet = verdicts.filter((v) => v.preProofVerdict === "unmet" && v.proof_exec === "executed_pass").length;
 
   // This verdict never attempted execution for ANY criterion — no `headCheckoutDir` was given (W1-T185, the second
   // W1-T128 gap), today's case when `rmd review`'s worktree materialisation fails or is skipped; the operator's
@@ -6380,6 +6396,8 @@ export function judgeReview(
     rewardHackingGap,
     unexecutableCount,
     unexecutableProofs,
+    overturnedToUnmet,
+    overturnedToMet,
     partiallyExecuted,
     executedProofCount: executedCount,
     executableProofCount: executableCriteria.length,

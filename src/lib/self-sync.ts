@@ -784,7 +784,8 @@ export async function probeReviewerCodeFreshnessAsync(
   return reviewerMainAdvance(reviewerGit(repoDir, deps), loadedCodeSha, originMainSha);
 }
 
-function reviewerGit(repoDir: string, deps: ReviewerCodeFreshnessOptions): GitRunner {
+/** `git -C <repoDir> …` for the reviewer's reads. A later `-C <absolute path>` in `args` addresses another tree. */
+export function reviewerGit(repoDir: string, deps: ReviewerCodeFreshnessOptions = {}): GitRunner {
   const options = { encoding: "utf8", stdio: "pipe", maxBuffer: REVIEWER_GIT_MAX_BUFFER } as const;
   return deps.git ?? ((args) => execFileSync("git", ["-C", repoDir, ...args], options));
 }
@@ -1047,7 +1048,134 @@ function topLevelUnits(source: string): TopLevelUnit[] | undefined {
   return units;
 }
 
+/** W1-T12824: the code tokens of a TypeScript text, each with its line-break flag; comments and whitespace are dropped.
+ *  Strings, templates and regular expressions stay whole tokens. `undefined`: an unterminated literal or comment, a
+ *  backslash outside a literal, or unbalanced brackets. No external parser: this module is in the baked supervisor. */
+function codeTokens(text: string): string[] | undefined {
+  const tokens: string[] = [];
+  const open: string[] = [];
+  let i = 0;
+  let lineBreak = false;
+  let regexAllowed = true;
+  const templateText = (from: number): number => {
+    for (let k = from; k < text.length; k++) {
+      if (text[k] === "\\") k++;
+      else if (text[k] === "`") { regexAllowed = false; return k + 1; }
+      else if (text[k] === "$" && text[k + 1] === "{") { open.push("${"); regexAllowed = true; return k + 2; }
+    }
+    return -1;
+  };
+  while (i < text.length) {
+    const c = text[i];
+    if (c === "\n") { lineBreak = true; i++; continue; }
+    if (c === " " || c === "\t" || c === "\r" || c === "\f" || c === "\v" || c === "﻿") { i++; continue; }
+    if (c === "/" && text[i + 1] === "/") { const nl = text.indexOf("\n", i); i = nl < 0 ? text.length : nl; continue; }
+    if (c === "/" && text[i + 1] === "*") {
+      const close = text.indexOf("*/", i + 2);
+      if (close < 0) return undefined;
+      lineBreak ||= text.slice(i, close).includes("\n");
+      i = close + 2;
+      continue;
+    }
+    let end: number;
+    if (/[\w$]/.test(c)) {
+      WORD_OR_NUMBER.lastIndex = i;
+      const word = WORD_OR_NUMBER.exec(text)![0];
+      end = i + word.length;
+      regexAllowed = REGEX_AFTER_WORD.has(word);
+    } else if (c === "'" || c === '"') {
+      end = skipQuoted(text, i + 1, c);
+      regexAllowed = false;
+    } else if (c === "`" || (c === "}" && open.at(-1) === "${")) {
+      if (c === "}") open.pop();
+      end = templateText(i + 1);
+    } else if (c === "/" && regexAllowed) {
+      end = skipRegex(text, i + 1);
+      while (end > 0 && /[a-z]/i.test(text[end] ?? "")) end++;
+      regexAllowed = false;
+    } else if (c === "\\" || c.charCodeAt(0) > 0x7e) {
+      return undefined;
+    } else {
+      end = i + 1;
+      if ("([{".includes(c)) open.push(c);
+      else if (")]}".includes(c) && open.pop() !== "([{"[")]}".indexOf(c)]) return undefined;
+      regexAllowed = !")]}".includes(c);
+    }
+    if (end < 0) return undefined;
+    tokens.push(`${lineBreak ? "\n" : ""}${text.slice(i, end)}`);
+    lineBreak = false;
+    i = end;
+  }
+  return open.length === 0 ? tokens : undefined;
+}
+
+const WORD_OR_NUMBER = /[\w$]+/y;
+
+/** W1-T12824: true when two TypeScript texts have the same code once comments and whitespace are dropped. A text the scan
+ *  cannot read to its end is never equal, so a change to it stays material. */
+export function tokensEqualWithoutComments(oldText: string, newText: string): boolean {
+  const before = codeTokens(oldText);
+  const after = codeTokens(newText);
+  return before !== undefined && after !== undefined && before.length === after.length && before.every((token, i) => token === after[i]);
+}
+
+/** W1-T12824: the bindings of import statements as `specifier\0local\0imported`; a side-effect import binds the empty local.
+ *  `undefined`: the text is not only import statements this reader knows. */
+function importBindings(text: string): string[] | undefined {
+  const tokens = codeTokens(text)?.map((token) => token.replace(/^\n/, ""));
+  if (!tokens) return undefined;
+  const isWord = (token: string | undefined) => token !== undefined && /^[A-Za-z_$][\w$]*$/.test(token);
+  const isString = (token: string | undefined) => token !== undefined && /^["']/.test(token);
+  const bindings: string[] = [];
+  let k = 0;
+  while (k < tokens.length) {
+    if (tokens[k++] !== "import") return undefined;
+    const bound: Array<[string, string]> = [];
+    if (tokens[k] === "type" && (tokens[k + 1] === "{" || tokens[k + 1] === "*" || (isWord(tokens[k + 1]) && tokens[k + 1] !== "from"))) k++;
+    if (!isString(tokens[k])) {
+      if (tokens[k] !== "{" && tokens[k] !== "*") {
+        if (!isWord(tokens[k])) return undefined;
+        bound.push([tokens[k++], "default"]);
+        if (tokens[k] === ",") k++;
+      }
+      if (tokens[k] === "*") {
+        if (tokens[k + 1] !== "as" || !isWord(tokens[k + 2])) return undefined;
+        bound.push([tokens[k + 2], "*"]);
+        k += 3;
+      } else if (tokens[k] === "{") {
+        for (k++; tokens[k] !== "}"; ) {
+          const words: string[] = [];
+          for (; tokens[k] !== "," && tokens[k] !== "}"; k++) {
+            if (isWord(tokens[k])) words.push(tokens[k]);
+            else if (isString(tokens[k])) words.push(tokens[k].slice(1, -1));
+            else return undefined;
+          }
+          if (words[0] === "type" && (words.length === 2 || words.length === 4)) words.shift();
+          if (words.length === 1) bound.push([words[0], words[0]]);
+          else if (words.length === 3 && words[1] === "as") bound.push([words[2], words[0]]);
+          else return undefined;
+          if (tokens[k] === ",") k++;
+        }
+        k++;
+      }
+      if (tokens[k++] !== "from") return undefined;
+    }
+    if (!isString(tokens[k])) return undefined;
+    const specifier = tokens[k++].slice(1, -1);
+    bindings.push(...(bound.length === 0 ? [`${specifier}\0\0`] : bound.map(([local, imported]) => `${specifier}\0${local}\0${imported}`)));
+    if (tokens[k] === ";") k++;
+  }
+  return bindings;
+}
+
+interface ReviewPathScan { code: Array<[number, number]>; imports: Array<[number, number]>; used: Set<string>; bindings: string[] | undefined }
+
 export function reviewPathSpans(source: string): { spans: Array<[number, number]> } | { unreadable: string } {
+  const scan = scanReviewPath(source);
+  return "unreadable" in scan ? scan : { spans: [...scan.code, ...scan.imports] };
+}
+
+function scanReviewPath(source: string): ReviewPathScan | { unreadable: string } {
   const units = topLevelUnits(source);
   if (!units) return { unreadable: "could not scan it to its end" };
   const unnamed = units.find((unit) => !unit.names);
@@ -1066,16 +1194,29 @@ export function reviewPathSpans(source: string): { spans: Array<[number, number]
   // An import line counts if reached code uses a name it binds, or it binds none (the specifier).
   const used = new Set([...reached].flatMap((unit) => (unit.imports ? [] : [...unit.refs])));
   const lines = source.split("\n");
+  const importLines = [...reached].filter((unit) => unit.imports).flatMap((unit) =>
+    lines.slice(unit.start - 1, unit.end).flatMap((text, k): Array<[number, number]> => {
+      const bound = text.replace(/(["'`]).*?\1/g, "").match(/[A-Za-z_$][\w$]*/g) ?? [];
+      const names = bound.filter((word) => !["import", "type", "as", "from"].includes(word));
+      return names.length === 0 || names.some((name) => used.has(name)) ? [[unit.start + k, unit.start + k]] : [];
+    }));
+  const bindings = units.filter((unit) => unit.imports).map((unit) => importBindings(lines.slice(unit.start - 1, unit.end).join("\n")));
   return {
-    spans: [...reached].flatMap((unit): Array<[number, number]> => {
-      if (!unit.imports) return [[unit.start, unit.end]];
-      return lines.slice(unit.start - 1, unit.end).flatMap((text, k): Array<[number, number]> => {
-        const bound = text.replace(/(["'`]).*?\1/g, "").match(/[A-Za-z_$][\w$]*/g) ?? [];
-        const names = bound.filter((word) => !["import", "type", "as", "from"].includes(word));
-        return names.length === 0 || names.some((name) => used.has(name)) ? [[unit.start + k, unit.start + k]] : [];
-      });
-    }),
+    code: [...reached].filter((unit) => !unit.imports).map((unit): [number, number] => [unit.start, unit.end]),
+    imports: importLines, used, bindings: bindings.some((bound) => bound === undefined) ? undefined : (bindings as string[][]).flat(),
   };
+}
+
+/** W1-T12824: an import change avoids the review path when every binding it adds or removes has a name that reached code on
+ *  neither side uses. A side-effect import, or imports this reader cannot parse, never avoid it. */
+function importChangeAvoidsReviewPath(before: ReviewPathScan, after: ReviewPathScan): boolean {
+  if (!before.bindings || !after.bindings) return false;
+  const [old, current] = [new Set(before.bindings), new Set(after.bindings)];
+  const changed = [...old].filter((binding) => !current.has(binding)).concat([...current].filter((binding) => !old.has(binding)));
+  return changed.every((binding) => {
+    const local = binding.split("\0")[1];
+    return local !== "" && !before.used.has(local) && !after.used.has(local);
+  });
 }
 
 /** True when a hunk's old or new range meets a reached span of that version. STILL FAILS TOWARD
@@ -1086,16 +1227,19 @@ export function runTaskAdvanceTouchesReviewPath(
   originMainSha: string,
 ): { touchesReviewPath: boolean; reason: string } {
   let diff: string;
-  let sides: Array<{ spans: Array<[number, number]> } | { unreadable: string }>;
+  let sides: Array<ReviewPathScan | { unreadable: string }>;
   try {
     diff = git(["diff", "-U0", `${codeSha}..${originMainSha}`, "--", RUN_TASK_PATH]);
-    sides = [codeSha, originMainSha].map((sha) => reviewPathSpans(git(["show", `${sha}:${RUN_TASK_PATH}`])));
+    sides = [codeSha, originMainSha].map((sha) => scanReviewPath(git(["show", `${sha}:${RUN_TASK_PATH}`])));
   } catch (error) {
     return { touchesReviewPath: true, reason: `could not read the ${RUN_TASK_PATH} advance: ${String(error)}` };
   }
   const blind = sides.find((side) => "unreadable" in side) as { unreadable: string } | undefined;
   if (blind) return { touchesReviewPath: true, reason: blind.unreadable };
-  const [oldSpans, newSpans] = sides.map((side) => (side as { spans: Array<[number, number]> }).spans);
+  const [before, after] = sides as ReviewPathScan[];
+  const importsMatter = !importChangeAvoidsReviewPath(before, after);
+  const oldSpans = importsMatter ? [...before.code, ...before.imports] : before.code;
+  const newSpans = importsMatter ? [...after.code, ...after.imports] : after.code;
   const headers = diff.split("\n").filter((line) => line.startsWith("@@"));
   if (headers.length === 0) return { touchesReviewPath: true, reason: `no ${RUN_TASK_PATH} hunks to classify` };
   const meets = (spans: Array<[number, number]>, start: number, count: number) =>
@@ -1118,8 +1262,20 @@ function reviewAdvanceIsMaterialAt(
   originMainSha: string,
 ): boolean {
   if (!reviewAdvanceIsMaterial(changedPaths)) return false;
-  if (changedPaths!.some((path) => path.trim() !== RUN_TASK_PATH && reviewAdvanceIsMaterial([path]))) return true;
+  const counted = changedPaths!.filter((path) => reviewAdvanceIsMaterial([path]) && !commentOnlyChange(git, path.trim(), codeSha, originMainSha));
+  if (changedPaths!.length > 0 && counted.length === 0) return false;
+  if (counted.some((path) => path.trim() !== RUN_TASK_PATH)) return true;
   return runTaskAdvanceTouchesReviewPath(git, codeSha, originMainSha).touchesReviewPath;
+}
+
+/** W1-T12824: a .ts path whose blobs at both shas have equal code tokens. A blob that cannot be read is a code change. */
+function commentOnlyChange(git: GitRunner, path: string, codeSha: string, originMainSha: string): boolean {
+  if (!path.endsWith(".ts")) return false;
+  try {
+    return tokensEqualWithoutComments(git(["show", `${codeSha}:${path}`]), git(["show", `${originMainSha}:${path}`]));
+  } catch {
+    return false; // deliberate, no throw: an unreadable blob keeps the path material, the safe answer
+  }
 }
 
 export function checkReviewerCodeFreshness(
