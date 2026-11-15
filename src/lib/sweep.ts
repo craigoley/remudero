@@ -15411,9 +15411,10 @@ export interface SweepDeps {
   /** W1-T11153: the open-PR reader the light pass started from, re-read when a freed lane refills so a PR that
    *  became eligible after the pass-start snapshot is ordered by its own admission key. Absent: the snapshot. */
   readOpenPrsForRefill?: () => Promise<OpenPrView[]>;
-  /** W1-T5749 — head-only guard fallback when readLiveStateAtAct is omitted. A changed head
-   *  stands down as `sweep.head_moved`; an undefined (unreadable) head leaves the act unchanged. */
+  /** W1-T5749 — head-only guard fallback when readLiveStateAtAct is omitted: a changed head stands down as `sweep.head_moved`, an unreadable one acts. */
   readLiveHeadSha?: (pr: OpenPrView) => string | undefined | Promise<string | undefined>;
+  /** W1-T12755: a light pass on its last good open-PR list reads every lane's head at act time, not only an arm's. */
+  guardEveryHeadAtAct?: boolean;
   /** W1-T7734 — THE SAME-PASS RE-READ. When the act-time guard catches a moved head, this reads THAT ONE
    *  PR again (the PR plus its status rollup, through the caller's `GhCallPacer`) and returns its rebuilt
    *  view; the walk then re-derives and acts on it in this pass instead of standing down for a whole tick.
@@ -23130,10 +23131,9 @@ export async function runSweep(
       } else {
         try {
           // W1-T5749: the snapshot can outlive its head (#9138 armed, #9155 escalated on dead heads).
-          // W1-T5922: a light pass reads the live head for its arm only; its other lanes are unchanged.
+          // W1-T5922: a light pass reads the live head for its arm only (W1-T12755: every lane on a last good list).
           // W1-T7734: a view read during this pass (the re-derive below) needs no second live read.
-          const guardHead = !rederivedIndices.has(prIndex) &&
-            (deps.repairAdmissionSurface !== "light" || disposition === "mergeable");
+          const guardHead = !rederivedIndices.has(prIndex) && (deps.repairAdmissionSurface !== "light" || disposition === "mergeable" || deps.guardEveryHeadAtAct === true);
           const liveAtAct = guardHead ? await deps.readLiveStateAtAct?.(pr) : undefined;
           const liveHead = !guardHead ? undefined : deps.readLiveStateAtAct
             ? liveAtAct?.headSha : await deps.readLiveHeadSha?.(pr);
