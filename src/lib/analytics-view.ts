@@ -157,6 +157,16 @@ export const ANALYTICS_SOURCE_NAMES: readonly string[] = [ANALYTICS_SOURCE_CONSO
 /** A snapshot older than two refresh cycles plus a timed-out scan has missed a refresh (the nav badge's bound). */
 export const ANALYTICS_STALE_AFTER_MS = 2 * ANALYTICS_REFRESH_INTERVAL_MS + ANALYTICS_REFRESH_TIMEOUT_MS;
 
+/** Snapshot metadata and clock comparisons, read through the (instance, name) primary key; never parse bodies. */
+export function snapshotInputs(db: ReadModelDb, instance: string, names: readonly string[], now: number): unknown[] {
+  const read = db.prepare("SELECT as_of, error, error_ms FROM source_snapshot WHERE instance = ? AND name = ?");
+  return names.map(name => {
+    const row = read.get(instance, name);
+    const at = row?.as_of === null || row?.as_of === undefined ? Number.NaN : Date.parse(String(row.as_of));
+    return [name, row ?? null, now < at, now - at > ANALYTICS_STALE_AFTER_MS];
+  });
+}
+
 /** What one instance's `console-v1` row holds: the projection, and the terms a cross-instance merge needs. */
 export interface AnalyticsConsoleSource {
   gardenerSpendSource?: GardenerSpendSource;
@@ -367,16 +377,44 @@ export function createAnalyticsView(opts: { modelApprovalConfig?: HostModelAppro
   name: string;
   version: number;
   snapshotSourced: true;
-  materialize(ctx: { now: number; instances: ReadonlyArray<{ state: { instance: string }; db?: ReadModelDb }> }): Array<{ key: string; data: AnalyticsViewData; sources: ViewSource[] }>;
+  inputsFingerprint(ctx: { now: number; sourceStore?: ReadModelDb; instances: ReadonlyArray<{ state: { instance: string }; db?: ReadModelDb }> }): string | undefined;
+  materialize(ctx: { now: number; sourceStore?: ReadModelDb; instances: ReadonlyArray<{ state: { instance: string }; db?: ReadModelDb }> }): Array<{ key: string; data: AnalyticsViewData; sources: ViewSource[] }>;
 } {
-  const parsed = new WeakMap<ReadModelDb, Map<string, { asOf: string; console: AnalyticsConsoleSource; detailsKey?: string; details?: AnalyticsDetails }>>();
+  const parsed = new WeakMap<ReadModelDb, Map<string, { asOf: string; console: AnalyticsConsoleSource; detailsKey?: string; details?: AnalyticsDetails; flowStable?: true }>>();
+  /**
+   * True when the held snapshot's repository flow renders the same body at any clock: a valid flow is published as
+   * stored, so the console-v1 as-of identifies it. Only the fallback (invalid_source, over_budget, or a stamp ahead of
+   * the clock) stamps materializedAt as of the build, so only that flow makes the body change on every build.
+   * A valid flow stays valid as the clock advances, so a stable verdict is kept with the held snapshot.
+   */
+  const flowStable = (entry: { console: AnalyticsConsoleSource; flowStable?: true }, now: number): boolean => {
+    if (entry.flowStable) return true;
+    const flow = entry.console.repositoryFlow;
+    const repository = repositoryName(entry.console.repository);
+    if (flow === undefined || !repository) { entry.flowStable = true; return true; }
+    const at = (ms: number) => JSON.stringify(publicRepositoryFlow(flow, repository, fixedClock(ms).iso()));
+    if (at(now) !== at(now + 86_400_000)) return false;
+    entry.flowStable = true;
+    return true;
+  };
   const gardenerParsed = new WeakMap<ReadModelDb, Map<string, { asOf: string; repository?: string; source?: GardenerSpendSource; error?: string }>>();
   return {
     name: ANALYTICS_VIEW_NAME,
     version: ANALYTICS_VIEW_VERSION,
     snapshotSourced: true,
-    materialize: ({ now, instances }) => {
-      const db = instances[0]?.db;
+    // Four snapshot states, freshness thresholds and loaded approval config. A valid repositoryFlow rides on the
+    // console-v1 as-of; only a flow that falls back to a clock-stamped empty body (flowStable) is refused.
+    inputsFingerprint: ({ now, sourceStore, instances }) => {
+      const db = sourceStore ?? instances[0]?.db;
+      if (!db) return undefined;
+      const held = parsed.get(db);
+      if (!held || [...held.values()].some(snapshot => !flowStable(snapshot, now))) return undefined;
+      return JSON.stringify([instances.map(({ state }) => [state.instance, snapshotInputs(db, state.instance,
+        [...ANALYTICS_SOURCE_NAMES, GARDENER_SPEND_SOURCE_NAME], now)]), opts.modelApprovalConfig,
+        opts.modelApprovalConfig ? now < Date.parse(opts.modelApprovalConfig.capturedAt ?? "") : false]);
+    },
+    materialize: ({ now, sourceStore, instances }) => {
+      const db = sourceStore ?? instances[0]?.db;
       if (db === undefined) return [];
       const states = sourceSnapshotStates(db, ANALYTICS_SOURCE_CONSOLE_V1);
       const signalStates = sourceSnapshotStates(db, ANALYTICS_SOURCE_SIGNALS);
