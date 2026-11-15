@@ -36455,7 +36455,7 @@ async function publishTriageInPlanDestination(i: {
   const prUrl = openTriageSidePr(lane, message, taskId, log, say);
   if (i.privateFeedback) {
     await proposeFeedbackWithSummary(view.worktreePath, feedbackId, i.summarizeDeps, { proposalPr: prUrl, land: { stateRoot: i.stateRoot } });
-    const landing = landPrivateTriageStatus(view.worktreePath, i.stateRoot, feedbackId, "proposed", { proposalPr: prUrl, log });
+    const landing = await landPrivateTriageStatus(view.worktreePath, i.stateRoot, feedbackId, "proposed", { proposalPr: prUrl, log });
     if (!landing.landed) throw new Error("the private feedback landing refused the status write");
     return { prUrls: [prUrl], taskPath, pushed };
   }
