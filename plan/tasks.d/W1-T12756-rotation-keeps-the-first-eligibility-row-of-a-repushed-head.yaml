@@ -48,3 +48,4 @@
     Id W1-T12756 reserved for run-unfiled-1794699874000 with ~/rmd-work/bin/reserve-id.sh. Filed with the second
     amendment of W1-T12534, which moved this rotation part of its criterion 4 here. depends_on holds it until
     W1-T12534 merges.
+    reservation hand-off: run-unfiled-1794699874000 -> plan-amend-W1-T12534-1794699874000
