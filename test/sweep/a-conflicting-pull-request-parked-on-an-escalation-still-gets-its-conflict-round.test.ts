@@ -594,14 +594,28 @@ test("W1-T12544 criterion 3: the active rung preserves the hold through a confli
   }
 });
 
-test("W1-T12544 criterion 3: the active rung keeps a design question that retention archived", async t => {
-  const r = await activeConflictRung(t, "design", false, undefined, "green", true);
-  assert.equal(readLedgerLines(r.f.deps.ledgerPath).some(row => row.step === "fix.needs_design" && row.task_id === TASK &&
-    row.head_sha === HELD_HEAD), false, "control: the question is only in the archive");
-  assert.equal(r.pushedHead, MERGE_HEAD);
-  assert.equal(r.spawned.length, 1, "no code worker after the conflict worker");
-  assert.equal(r.outcome.outcome, "needs_design");
-  assert.match(String(r.outcome.reason), new RegExp(DESIGN_REASON));
+test("W1-T12544 criterion 3: archived design holds survive green and red CI after a conflict push", async t => {
+  for (const ci of ["green", "red"] as const) {
+    await t.test(ci, async t => {
+      const r = await activeConflictRung(t, "design", false, undefined, ci, true);
+      assert.equal(readLedgerLines(r.f.deps.ledgerPath).some(row => row.step === "fix.needs_design" && row.task_id === TASK &&
+        row.head_sha === HELD_HEAD), false, "control: the question is only in the archive");
+      const union = readLedgerUnionRecordsSync(dirname(r.f.deps.ledgerPath), {
+        step: ["fix.dispatch", "fix.done", "fix.needs_design"], refuseIncomplete: true });
+      assert.equal(union.ok, true, "control: the archive is readable");
+      assert.equal(union.rows.some(row => row.step === "fix.needs_design" && row.task_id === TASK &&
+        row.head_sha === HELD_HEAD && row.reason === DESIGN_REASON), true,
+      "control: recovery sees the archived question");
+      assert.equal(r.pushedHead, MERGE_HEAD);
+      assert.deepEqual(r.rows.filter(row => row.step === "fix.dispatch").map(row => row.mode), ["merge-conflict"],
+        "the unanswered archived question prevents a code fix round");
+      assert.equal(r.outcome.review.headSha, ci === "red" ? HELD_HEAD : MERGE_HEAD,
+        "red CI leaves the review at the held head");
+      assert.equal(r.spawned.length, 1, "no code worker after the conflict worker");
+      assert.equal(r.outcome.outcome, "needs_design");
+      assert.match(String(r.outcome.reason), new RegExp(DESIGN_REASON));
+    });
+  }
 });
 
 test("W1-T12544 criterion 3: the active B→C rung keeps a question introduced after A→B", async t => {

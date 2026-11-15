@@ -4061,7 +4061,9 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
     }
     // W1-T10339: a handoff is reused only while the inputs it read stand — an amended contract or an edited (taskless)
     // PR body at the same head gets a real round. A row from before those fields existed keeps the head-only reuse.
-    const priorDesign = (holdHeadSha === priorHeadSha ? roundLedger : [...holdRows, ...roundLedger]).find((row) =>
+    // The review can still name the held head after a conflict push when CI is red. The
+    // question may have rotated into an archive, so the equal-head case needs the recovered rows too.
+    const priorDesign = [...holdRows, ...roundLedger].find((row) =>
       row.step === "fix.needs_design" && row.task_id === opts.taskId && row.head_sha === holdHeadSha &&
       !(typeof row.contract_revision === "string" && row.contract_revision !== currentContractRevision) &&
       !(typeof row.read_body_sha256 === "string" && opts.prBodySha256 !== undefined && row.read_body_sha256 !== opts.prBodySha256));
