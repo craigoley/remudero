@@ -151,7 +151,7 @@ test("unit test: the changed-task lint refuses an unmapped design and leaves an 
   // The historical task has no design at all and carries a dangling invariant claim: it must stay untouched.
   commitPlan(repo, [invariantRecord("ZZ-Old", "old"), invariantRecord("ZZ-Edit", "before")], "base");
   repo.git("checkout", "-q", "-b", "work");
-  commitPlan(repo, [invariantRecord("ZZ-Old", "old"), invariantRecord("ZZ-Edit", "after")], "edit one record");
+  commitPlan(repo, [invariantRecord("ZZ-Old", "old"), invariantRecord("ZZ-Edit", "after", "prose that declares neither form")], "edit one record");
   const refused = await lint(repo, ["--base", "main"]);
   assert.equal(refused.code, 1, refused.out.join("\n"));
   assert.ok(refused.out.some((l) => l.startsWith("✗ ZZ-Edit:")), refused.out.join("\n"));
