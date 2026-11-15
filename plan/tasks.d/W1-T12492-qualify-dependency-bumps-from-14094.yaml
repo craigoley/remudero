@@ -21,6 +21,9 @@
     - test/semgrep-artifact-audit-ci-contract.test.ts
     - test/semgrep-native-install.test.ts
     - test/review/semgrep-dependency-bumps-14094.test.ts
+  # refusal-amendment (W1-T12492, run work-fix-dispatch-W1-T12492-1794695161204-d52a@fb09eb7b71229dc87628e72a1d00e6e3e5f9ccba, 2026-11-14T23:41:29.348Z): the worker refused criterion 1 [needs-operator-input] — proposed add-precondition: record the operator decision the worker needs as a precondition, then re-dispatch
+  #   worker evidence: Adoption requires the auditor trust update on main first; restoring the old lock would abandon the required adoption.
+  #   this task is held from dispatch until its record changes; an Architect must make the change above
   status: queued
   attempts: 0
   rationale: |
