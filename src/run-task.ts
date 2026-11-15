@@ -1875,29 +1875,6 @@ import {
 export { classifyUpdateBranchFailure, detectReviewFalseBlock, detectCiLogVerdictUnchanged, classifyNoPrShape,
   shouldRecheckAfterNothingChanged, shouldSelfHealNothingChanged };
 
-/**
- * W1-T3618 — reads reviewer-code freshness in FRONT of `next` (production: `reviewCommand`), so a
- * stale reading calls `next` zero times for the PR it guards: no worktree materializes, no proof
- * executes, no reviewer spawns. Previously this read happened LAST, inside `runReview`, after all
- * of that had already run.
- *
- * W1-T3697 — READS ONCE PER `call()`, NOT ONCE PER PASS. The original shape cached the first read
- * for the rest of the pass, on the reasoning that the fact "cannot change mid-pass" — but it can:
- * origin/main advances while a pass is still working through its PR list, and a pass that BEGINS
- * fresh and goes stale mid-flight is exactly the shape W1-T3618's own measurement recorded (four
- * withholds inside one cycle that began fresh at its top). A once-per-pass cache can only ever see
- * a pass that was ALREADY stale before its first PR — structurally rare — so the counter it drives
- * stayed at zero while the late W1-T228 guard kept discarding full-price verdicts underneath it.
- * Re-reading before every PR trades one `git fetch` per PR (cheap; `checkReviewerCodeFreshness`'s
- * own network call) for catching the transition the cache was blind to — the transition is exactly
- * what makes the expensive path (materialize + prove + spawn) worth skipping.
- *
- * `reviewCommand`'s own late guard (W1-T228, `reviewerCodePublicationRefusal`) is UNCHANGED and
- * stays the fail-closed floor for any PR this earlier gate misses; this is additive, not a
- * replacement. Extracted so a test can drive it against a counting fake, never a real `gh`/git call.
- */
-export type FreshTreeEntry = { kind: "bundle" | "tsx" | "unknown"; reason: string };
-export type FreshTreeExit = { cause: string; signal?: string; errorClass?: string };
 
 /** W1-T3723 — what {@link buildFreshTreeReviewRunner} needs, all injected so a test drives it
  *  without git, a worktree or a spawn. A `type` whose name does NOT end in `Deps`, deliberately:
@@ -2258,76 +2235,14 @@ export async function ownStartFreshness(
   return ownStartFreshnessFromModule(read);
 }
 
+/** The sweep's and the run child's start check (reviewerCodeStartGate) with `rmd review`'s own option flags. */
 export function buildReviewerCodeFreshnessGate(
   readFreshness: () => ReviewerCodeFreshness | Promise<ReviewerCodeFreshness>,
   log: (step: string, extra?: Record<string, unknown>) => void,
   next: (prArg: string, rest: string[], deps: ReviewCommandDeps) => Promise<number>,
-  /** W1-T3723 — runs `rmd review` from a fresh worktree instead of skipping a stale-code PR; see
-   *  {@link buildFreshTreeReviewRunner} for why the daemon's own checkout never moves. Returns
-   *  `undefined` when it could not run at all, so the caller falls back to the original skip and
-   *  W1-T3691's recurrence ladder stays the floor. W1-T4055: `onFailure` receives WHY, bounded. */
-  reviewFromFreshTree?: (
-    prArg: string,
-    rest: string[],
-    freshness: Extract<ReviewerCodeFreshness, { status: "stale" }>,
-    onFailure?: (failure: string) => void,
-    onEntry?: (entry: FreshTreeEntry) => void,
-    onExit?: (exit: FreshTreeExit) => void,
-  ) => Promise<number | undefined>,
-): {
-  call: (prArg: string, rest: string[], deps: ReviewCommandDeps) => Promise<number>;
-  /** The sha pair the FIRST time THIS PASS'S freshness reads came back stale (there can be many,
-   *  one per `call()`), or `undefined` when every read so far came back fresh, no PR reached the
-   *  gate this pass, or every stale-looking read was actually unreadable. */
-  staleThisPass: () => { oldSha: string; newSha: string } | undefined;
-} {
-  let firstStale: { oldSha: string; newSha: string } | undefined;
-  return {
-    call: async (prArg, rest, reviewDeps) => {
-      // Read fresh for THIS PR, immediately before the spend it guards — never cached across the
-      // pass (W1-T3697): a reading that changes between two PRs must be observed by the second PR
-      // even though the first already ran under the earlier reading.
-      const freshness = await readFreshness();
-      if (freshness.status === "stale") {
-        firstStale ??= { oldSha: freshness.codeSha, newSha: freshness.originMainSha };
-        const stale = { pr: prArg, code_sha: freshness.codeSha, origin_main_sha: freshness.originMainSha, changed_paths: freshness.changedPaths?.length };
-        // MOVE THE WORK, NOT THE CODE. Six pull requests once sat unreviewed for over an hour
-        // behind a one-commit lag, and the only recovery was a process restart that a
-        // multi-instance host then refused. A review does not need this process's modules — it
-        // needs FRESH ones, and a subprocess out of a worktree at origin/main has them.
-        if (reviewFromFreshTree) {
-          // W1-T4055 — WHY, NOT ONLY WHETHER. 52 of 53 fresh-tree reviews once exited non-zero with
-          // nothing but an exit code ledgered; the cause is what the next fix needs.
-          let failure: string | undefined;
-          let entry: FreshTreeEntry = { kind: "unknown", reason: "launcher-did-not-report" };
-          let exit: FreshTreeExit = { cause: "not-reported" };
-          const childArgs = [...rest, ...reviewOptionFlags(reviewDeps), JUDGE_AT_OWN_START_FLAG];
-          return reviewFromFreshTree(prArg, childArgs, freshness, (why) => { failure = why; }, (choice) => { entry = choice; }, (ended) => { exit = ended; }).then((code) => {
-            if (code !== undefined) {
-              const why = code === 0 ? {} : {
-                failure: failure ?? "no failure reported", exit_cause: exit.cause,
-                ...(exit.signal === undefined ? {} : { exit_signal: exit.signal }),
-                ...(exit.errorClass === undefined ? {} : { exit_error_class: exit.errorClass }),
-              };
-              log("review.ran_from_fresh_tree", { ...stale, exit_code: code, entry_kind: entry.kind, entry_reason: entry.reason, ...why });
-              return code;
-            }
-            // COULD NOT RUN — fall through to the original skip rather than judging with stale
-            // code. W1-T3691's recurrence ladder still sees the skip and still escalates.
-            const reason = failure ?? "no reason reported";
-            log("review.skipped_stale_reviewer_code", { ...stale, fresh_tree: "unavailable", fresh_tree_reason: reason });
-            return 0;
-          });
-        }
-        log("review.skipped_stale_reviewer_code", stale);
-        return 0;
-      }
-      // Operator ruling 2026-10-06: this reading is the review's START reading. The post-time
-      // guard judges against it, so a merge landing mid-review no longer discards the verdict.
-      return next(prArg, rest, { ...reviewDeps, reviewStartFreshness: freshness });
-    },
-    staleThisPass: () => firstStale,
-  };
+  reviewFromFreshTree?: FreshTreeReview,
+): ReviewerCodeStartGate<ReviewCommandDeps> {
+  return reviewerCodeStartGate(readFreshness, log, next, (deps) => [...reviewOptionFlags(deps), JUDGE_AT_OWN_START_FLAG], reviewFromFreshTree);
 }
 
 /** W1-T10269 — the escalation's issue gateway, assigning each issue it files to the repo owner
@@ -2982,7 +2897,7 @@ import {
 import { materializeWorkerHome, perRunWorkerHomeDir, sweepStaleWorkerHomes, sweepStaleWorkerHomesAsync, workerKeychainPaths, type ClaudeCredentialSeedEvent } from "./lib/worker-home.js";
 import { FIX_CASH_TOOLS, FIX_WORKER_TOOLS, FIX_WORKER_TOOLS_HARNESS_COMMITS } from "./lib/fix-fence.js";
 import { acquireDrainLock, defaultIsPidAlive, DrainLockError, readDrainLock, type DrainLockHandle } from "./lib/drain-lock.js";
-import { asyncGit, checkCliFreshness, checkReviewerCodeFreshnessAsync, checkServiceFreshness, checkServiceFreshnessAsync, daemonFreshnessFromService, type ReviewerCodeFreshness, type SelfSyncDeps } from "./lib/self-sync.js";
+import { asyncGit, checkCliFreshness, checkReviewerCodeFreshnessAsync, checkServiceFreshness, checkServiceFreshnessAsync, daemonFreshnessFromService, reviewerGit, type ReviewerCodeFreshness, type SelfSyncDeps } from "./lib/self-sync.js";
 import { daemonClosureGit, daemonProcessClosure, daemonProcessEntry, withDaemonClosure, type ClosureGit } from "./lib/daemon-closure.js";
 import { LIVE_EDIT_TREES, runLiveEditLadder, type LiveEditLadderWiring, type LiveEditTree } from "./lib/live-edit-ladder.js";
 import { recoveryRefMaintainer } from "./lib/recovery-refs.js";
@@ -43795,7 +43710,9 @@ import { buildIntoStore, childEntryStoreRoot, materializeMainEntryFromStore } fr
 // W1-T9738: moved to the engine module, so a suite that drives it never imports this file; re-exported for callers here.
 import { buildEngineAfterStore } from "./lib/engine-tree.js";
 export { buildEngineAfterStore };
-import { RUN_CHILD_FALLBACK_STEP, chainAbortSignal, createDetachedWorkHost, runChildModeIsOn, runDetachedReview, spawnRunChild, type DetachedWorkSpec, type RunChildHandle, type RunChildPending, type SpawnRunChildPorts } from "./lib/run-child.js";
+import { RUN_CHILD_FALLBACK_STEP, chainAbortSignal, createDetachedWorkHost, reviewerCodeStartGate, runChildModeIsOn, runDetachedReview, spawnRunChild, type DetachedReviewCommand, type DetachedWorkSpec,
+  type FreshTreeEntry, type FreshTreeExit, type FreshTreeReview, type ReviewerCodeStartGate, type RunChildHandle, type RunChildPending, type SpawnRunChildPorts } from "./lib/run-child.js";
+export type { FreshTreeEntry, FreshTreeExit } from "./lib/run-child.js";
 import { createSweepFixAdmissionController, productionFixAdmissionResidents, installDetachedWorkHost, readFixDispatchEnvelope, runFixDispatchChild, type FixDispatchChildPorts } from "./lib/sweep.js";
 import { classEstimate, classTypical } from "./lib/host-memory-learning.js";
 import { type RunChildMode } from "./lib/policy.js";
@@ -44870,8 +44787,23 @@ export async function runDetachedWork(work: DetachedWorkSpec, ctx: { runId: stri
   if (work.kind !== "review" || work.prNumber === undefined) {
     throw new Error(`the run child hosts no detached work of kind ${work.kind}${work.kind === "review" ? " without a PR number" : ""}`);
   }
-  return runDetachedReview(work, ctx, ports.reviewCommand ?? reviewCommand);
+  const log = ports.log ?? ((step: string, extra?: Record<string, unknown>) => {
+    appendLedger(ledgerPathFor(ports.config ?? loadConfig()), { run_id: ctx.runId, task_id: ctx.taskId, step, lane: "review", ...extra });
+  });
+  return runDetachedReview(work, ctx, ports.reviewCommand ?? gatedDetachedReviewCommand(repoRoot, log));
 }
+
+/** W1-T12824: the run child's review through the sweep's start check. A fresh start reading goes to publication with the
+ *  verdict; a stale one runs the review from a fresh tree at origin/main, or runs no reviewer. */
+export function gatedDetachedReviewCommand(root: string, log: (step: string, extra?: Record<string, unknown>) => void): DetachedReviewCommand {
+  const seams: FreshTreeReviewSeams = {
+    git: reviewerGit(root), addWorktree: realDeps().reviewWorktree.addWorktree, worktreeRoot: join(root, "..", "worktrees"), spawnReview: spawnRmdReviewForFreshTree,
+  };
+  const gate = buildReviewerCodeFreshnessGate(() => checkReviewerCodeFreshnessAsync(root, process.env), log, reviewCommand,
+    buildFreshTreeReviewRunner(root, seams));
+  return (prArg, rest, opts) => gate.call(prArg, rest, opts);
+}
+
 
 /**
  * W1-T9114: a fix dispatch as a run child's work. The decision envelope comes from the spec; the live dependencies are rebuilt HERE,
