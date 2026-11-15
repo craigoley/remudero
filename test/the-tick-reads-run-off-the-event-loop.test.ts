@@ -71,10 +71,11 @@ function fixtureReader() {
     },
     changedFilesFetch: async (number) => { fileReads.push(number); return changedFiles; },
     commitTrailerIndex: () => new Map(), evidenceRootFor: () => undefined,
+    pacer: { wait: () => {}, waitAsync: async () => {}, recordResult: () => {} },
     issues: { create: () => { throw new Error("write in read plane"); }, listOpen: () => [{
       number: 9, url: "https://github.com/o/r/issues/9", title: "resolved b", body: "**Task:** B",
     }] },
-    viewsDeps: { requiredContexts: () => ["ci-gate"], readCiGateRequired: () => [], fetchCiFailureEvidence: () => [] },
+    viewsDeps: { requiredContexts: () => ["ci-gate"], readRequiredContextsAsync: async () => ({ kind: "contexts", contexts: ["ci-gate"] }), readCiGateRequired: () => [], fetchCiFailureEvidence: () => [] },
   };
   return { plan, options, io, calls, setListed: (next: number[]) => { listed = next; },
     setFiles: (next: string[]) => { changedFiles = next; },
