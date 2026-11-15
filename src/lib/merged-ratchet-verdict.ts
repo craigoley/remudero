@@ -94,6 +94,9 @@ export interface MergedRatchetJudgement {
 /** How many rows a `sweep.ratchet_judge.decided` row lists; `rows_count` carries the rest. */
 export const RATCHET_JUDGE_ROWS_SHOWN = 10;
 
+/** The ledger step of one judgement the arm path or the armed re-judge consulted. */
+export const RATCHET_JUDGE_DECIDED_STEP = "sweep.ratchet_judge.decided";
+
 /** The `sweep.ratchet_judge.decided` fields one judgement contributes, beside the caller's PR identity and remedy. */
 export function ratchetJudgeLedgerFields(j: MergedRatchetJudgement, updateWithheld?: RatchetUpdateWithheld): Record<string, unknown> {
   return {
@@ -137,11 +140,81 @@ export function ratchetUpdateWithheld(j: MergedRatchetJudgement, prNumber: numbe
   if (curable.length === 0) return "pr-diff";
   const answered = new Set<string>();
   for (const l of ledgerLines) {
-    if (l.step !== "sweep.ratchet_judge.decided" || l.remedy !== "update-branch" || l.outcome === "direct-merge-update-failed") continue;
+    if (l.step !== RATCHET_JUDGE_DECIDED_STEP || l.remedy !== "update-branch" || l.outcome === "direct-merge-update-failed") continue;
     if (prNumber === undefined || Number(l.pr_number) !== prNumber || !Array.isArray(l.crossing_keys)) continue;
     for (const k of l.crossing_keys) answered.add(String(k));
   }
   return curable.every((r) => answered.has(crossingKey(r))) ? "repeat" : undefined;
+}
+
+/** W1-T12717 — the field the arm path's hold evidence carries when it withheld the update. */
+export interface RatchetUpdateWithheldEvidence {
+  updateWithheld?: RatchetUpdateWithheld;
+}
+
+/**
+ * The arm path's answer to a held verdict when it must not update the branch, with the line it says: retry-later when
+ * this head was already refreshed for a ratchet collision (W1-T9962), fix-lane when the update is withheld (W1-T12717).
+ * Undefined: update the branch once.
+ */
+export function ratchetUpdateRefusal(j: MergedRatchetJudgement, prUrl: string, head: string | undefined, prNumber: number | undefined,
+  ledgerLines: readonly Record<string, unknown>[]): { say: string; evidence: { remedy: "retry-later" | "fix-lane" } & RatchetUpdateWithheldEvidence } | undefined {
+  if (head !== undefined && ledgerLines.some((l) => l.step === "automerge.direct_merge_updated" &&
+      l.reason === "ratchet_collision" && l.pr_url === prUrl && l.prior_head_sha === head)) {
+    return { say: `automerge.direct_merge_preflight_refused (W1-T9962): head ${head} was already refreshed for a ${j.verdict} — awaiting its new head: ${prUrl}`,
+      evidence: { remedy: "retry-later" } };
+  }
+  const withheld = ratchetUpdateWithheld(j, prNumber, ledgerLines);
+  if (withheld === undefined) return undefined;
+  const why = withheld === "pr-diff" ? "comes from the PR's own diff on a count main already carries over its ceiling" : "was already answered by an update-branch that did not cure it";
+  return { say: `automerge.direct_merge_preflight_refused (W1-T12717): ${j.verdict} ${why}: ${describeRatchetRows(j)} — not updated; handed to the fix lane, neither armed nor merged: ${prUrl}`,
+    evidence: { remedy: "fix-lane", updateWithheld: withheld } };
+}
+
+/**
+ * The armed re-judge's remedy when it does not update the branch: proceed (nothing held), retry-later (this head was
+ * already updated, W1-T9962), unwired, or fix-lane with update_withheld (W1-T12717). Undefined: update the branch once.
+ */
+export function armedRejudgeHold(j: MergedRatchetJudgement, pr: { prNumber: number; headSha: string },
+  ledgerLines: readonly Record<string, unknown>[], wired: boolean): { update_withheld?: RatchetUpdateWithheld; remedy: string } | undefined {
+  if (!ratchetVerdictHolds(j)) return { remedy: "proceed" };
+  if (ledgerLines.some((l) => (l.step === "sweep.update_branch.attempted" || l.step === "sweep.ci_timeout_refresh.attempted") &&
+    l.pr_number === pr.prNumber && l.head_sha === pr.headSha)) return { remedy: "retry-later" };
+  if (!wired) return { remedy: "unwired" };
+  const withheld = ratchetUpdateWithheld(j, pr.prNumber, ledgerLines);
+  return withheld === undefined ? undefined : { update_withheld: withheld, remedy: "fix-lane" };
+}
+
+/** One fix-lane hand-off the sweep's mergeable disposition dispatches: the extra fields of its code_scanning.fix_dispatch
+ *  row (none for a ratchet crossing, whose disposed row carries it), its disposed fields and its evidence. */
+export interface SweepFixRoute {
+  what: string;
+  reason: string;
+  dispatchRow?: Record<string, unknown>;
+  disposed: Record<string, unknown>;
+  ciFailures: { name: string; logTail: string }[];
+}
+
+/** W1-T12717 — the fix worker's finding: each held row with main's count, the PR's merged count and what the PR adds. */
+function ratchetCrossingFixCiFailures(rows: readonly MergedRatchetRow[], withheld: string): SweepFixRoute["ciFailures"] {
+  return [{ name: "ratchet-judge", logTail: [
+    `The merge-time ratchet judge held this pull request (${withheld}): the tree it would land crosses a ceiling CI enforces,`,
+    "and an update-branch cannot cure it, because merging main never removes this pull request's own growth.",
+    ...rows.map((r) => `${r.gate} ${r.path}${r.field ? `#${r.field}` : ""}: main's count ${r.merged - r.prAdds} (ceiling ${r.mainCeiling}), ` +
+      `this pull request's merged count ${r.merged}, prAdds ${r.prAdds}`),
+    "Shrink this pull request's own growth on these paths, or propose the acceptance or scope change it needs. Do not edit a baseline value.",
+  ].join("\n") }];
+}
+
+/** W1-T12717 — the newest judge row at this head that withheld an update hands its crossing to the PR's fix lane, once per head. */
+export function withheldRatchetFixRoute(pr: { prNumber: number; headSha: string }, lines: readonly Record<string, unknown>[]): SweepFixRoute | undefined {
+  const row = lines.findLast((l) => l.step === RATCHET_JUDGE_DECIDED_STEP && Number(l.pr_number) === pr.prNumber && l.head_sha === pr.headSha);
+  if (row === undefined || typeof row.update_withheld !== "string") return undefined;
+  if (lines.some((l) => l.step === "sweep.disposed" && l.pr_number === pr.prNumber && l.head_sha === pr.headSha && l.ratchet_fix_preparing === true)) return undefined;
+  const rows = Array.isArray(row.rows) ? (row.rows as MergedRatchetRow[]) : [];
+  return { what: "the merge-time ratchet judge held a crossing", reason: `update-branch withheld: ${row.update_withheld}`,
+    disposed: { ratchet_fix_preparing: true, ratchet_fix_reason: row.update_withheld, ratchet_crossing_keys: row.crossing_keys },
+    ciFailures: ratchetCrossingFixCiFailures(rows, row.update_withheld) };
 }
 
 /** One line naming each held row, for the `say` beside a refresh. */

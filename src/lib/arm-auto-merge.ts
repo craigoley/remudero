@@ -54,7 +54,7 @@ import {
   type PlanMergeSafetyReadings,
 } from "./plan-pr-merge-safety.js";
 import { readLedgerLines } from "./status.js";
-import { describeRatchetRows, judgeMergedRatchets, ratchetJudgeLedgerFields, ratchetUpdateWithheld, ratchetVerdictHolds, readMergedRatchetInputsSteps, type MergedRatchetJudgement, type RatchetUpdateWithheld } from "./merged-ratchet-verdict.js";
+import { describeRatchetRows, judgeMergedRatchets, ratchetJudgeLedgerFields, ratchetUpdateRefusal, ratchetVerdictHolds, readMergedRatchetInputsSteps, type MergedRatchetJudgement, type RatchetUpdateWithheldEvidence } from "./merged-ratchet-verdict.js";
 import {
   closingReferenceGuardSteps,
   recordClosingReferenceToLedger,
@@ -1043,7 +1043,7 @@ export interface ArmAttemptResult {
   ratchetJudge?: MergedRatchetJudgement;
 }
 
-export interface DirectMergePreflightEvidence {
+export interface DirectMergePreflightEvidence extends RatchetUpdateWithheldEvidence {
   priorHeadSha?: string;
   behindBy?: number;
   mergeable?: string;
@@ -1056,8 +1056,6 @@ export interface DirectMergePreflightEvidence {
   reason?: "plan_pr_behind" | "plan_pr_refresh_bound" | "plan_pr_mergeability_unknown_bound" | "main_changed_own_files" | "plan_merge_unread" | "ratchet_collision" | "freshness_latch" | "direct_merge_in_flight";
   /** W1-T9962 — the merged-tree ratchet verdict this decision consulted. */
   ratchetJudge?: MergedRatchetJudgement;
-  /** W1-T12717 — why that verdict was held without an update-branch. */
-  updateWithheld?: RatchetUpdateWithheld;
   /** W1-T9536 — why main's changes since the merge base refreshed a behind PR, and the files. */
   ownFilesCause?: "overlap" | "baseline" | "unread";
   mainChangedOwnFiles?: string[];
@@ -1446,16 +1444,10 @@ function* ratchetCollisionSteps(
   if (!ratchetVerdictHolds(judge)) return { judge };
   const head = observedHead ?? judge.headSha;
   const evidence = { ...baseEvidence, ...(head !== undefined ? { priorHeadSha: head } : {}), reason: "ratchet_collision" as const, ratchetJudge: judge };
-  if (head !== undefined && (deps.ledgerLines?.() ?? []).some((l) => l.step === "automerge.direct_merge_updated" &&
-      l.reason === "ratchet_collision" && l.pr_url === prUrl && l.prior_head_sha === head)) {
-    deps.say(`automerge.direct_merge_preflight_refused (W1-T9962): head ${head} was already refreshed for a ${judge.verdict} — awaiting its new head: ${prUrl}`);
-    return { hold: { outcome: "direct-merge-preflight-refused", ...context, directMergePreflight: { ...evidence, remedy: "retry-later" } } };
-  }
-  const withheld = ratchetUpdateWithheld(judge, prNumberFromRef(prUrl), deps.ledgerLines?.() ?? []);
-  if (withheld !== undefined) {
-    deps.say(`automerge.direct_merge_preflight_refused (W1-T12717): ${judge.verdict} ${withheld === "pr-diff" ? "comes from the PR's own diff on a count main already carries over its ceiling"
-      : "was already answered by an update-branch that did not cure it"}: ${describeRatchetRows(judge)} — not updated; handed to the fix lane, neither armed nor merged: ${prUrl}`);
-    return { hold: { outcome: "direct-merge-preflight-refused", ...context, directMergePreflight: { ...evidence, remedy: "fix-lane", updateWithheld: withheld } } };
+  const refusal = ratchetUpdateRefusal(judge, prUrl, head, prNumberFromRef(prUrl), deps.ledgerLines?.() ?? []);
+  if (refusal !== undefined) {
+    deps.say(refusal.say);
+    return { hold: { outcome: "direct-merge-preflight-refused", ...context, directMergePreflight: { ...evidence, ...refusal.evidence } } };
   }
   let update: { ok: boolean; error?: string };
   try {

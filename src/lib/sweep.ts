@@ -88,7 +88,7 @@ import {
   type StackPrerequisiteCheck,
 } from "./arm-auto-merge.js";
 import { diagnoseBodyDefects, type BodyRepairDeps } from "./body-repair.js";
-import { judgeMergedRatchets, ratchetJudgeLedgerFields, ratchetUpdateWithheld, ratchetVerdictHolds, type MergedRatchetJudgement, type MergedRatchetRow } from "./merged-ratchet-verdict.js";
+import { RATCHET_JUDGE_DECIDED_STEP, armedRejudgeHold, judgeMergedRatchets, ratchetJudgeLedgerFields, withheldRatchetFixRoute, type MergedRatchetJudgement, type SweepFixRoute } from "./merged-ratchet-verdict.js";
 import { MAX_PLAN_REPAIR_STRIKES, planCappedRepair, judgeCappedRepair } from "./classify.js";
 import { DEFAULT_ESTIMATE_MIB, readMemoryLedger, type HostMemoryReading } from "./host-memory-ledger.js";
 import { classEstimate, classTypical, type LearnedEstimate } from "./host-memory-learning.js";
@@ -23190,13 +23190,9 @@ export async function runSweep(
                 standDownReason = codeScanning.reason;
                 break;
               }
-              // W1-T12717: a crossing an update-branch cannot cure goes to the fix lane, never to the operator.
-              const fixRoute: SweepFixRoute | undefined = codeScanning.kind === "fix"
-                ? { step: CODE_SCANNING_FIX_DISPATCH_STEP, what: "CodeQL reported a new high alert", reason: codeScanning.reason,
-                  row: { alert_numbers: codeScanning.alerts.map((a) => a.alertNumber) },
-                  disposed: { code_scanning_fix_preparing: true, code_scanning_fix_reason: codeScanning.reason },
-                  ciFailures: codeScanningFixCiFailures(codeScanning.alerts, codeScanning.reason) }
-                : withheldRatchetFixRoute(pr, armLines);
+              const fixRoute: SweepFixRoute | undefined = codeScanning.kind !== "fix" ? withheldRatchetFixRoute(pr, armLines) : {
+                what: "CodeQL reported a new high alert", reason: codeScanning.reason, dispatchRow: { alert_numbers: codeScanning.alerts.map((a) => a.alertNumber) },
+                disposed: { code_scanning_fix_preparing: true, code_scanning_fix_reason: codeScanning.reason }, ciFailures: codeScanningFixCiFailures(codeScanning.alerts, codeScanning.reason) };
               if (fixRoute !== undefined) {
                 // W1-T11510: a review-only pass that may arm keeps this fix route closed too. The ruling row
                 // stays, so the next ordinary pass reads it back as `priorFix` and takes the fix.
@@ -23213,7 +23209,7 @@ export async function runSweep(
                 if (unfixable !== undefined) {
                   // A fix that cannot be dispatched must still never sit silent: ask once per head.
                   const reason = `${fixRoute.what} and ${unfixable} (${fixRoute.reason})`;
-                  if (fixRoute.step !== undefined) appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", step: fixRoute.step,
+                  if (fixRoute.dispatchRow !== undefined) appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", step: CODE_SCANNING_FIX_DISPATCH_STEP,
                     pr_number: pr.prNumber, pr_url: pr.prUrl, head_sha: pr.headSha, dispatched: false, escalated: true, reason });
                   await deps.escalate(pr, reason, renderClarificationQuestion(pr, reason, pr.strikeHistory ?? []));
                   acted = false;
@@ -23246,8 +23242,8 @@ export async function runSweep(
                   standDownReason = fixAdmission.reason;
                   break;
                 }
-                if (fixRoute.step !== undefined) appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", step: fixRoute.step,
-                  pr_number: pr.prNumber, pr_url: pr.prUrl, head_sha: pr.headSha, dispatched: false, phase: "preparing", reason: fixRoute.reason, ...fixRoute.row });
+                if (fixRoute.dispatchRow !== undefined) appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", step: CODE_SCANNING_FIX_DISPATCH_STEP,
+                  pr_number: pr.prNumber, pr_url: pr.prUrl, head_sha: pr.headSha, dispatched: false, phase: "preparing", reason: fixRoute.reason, ...fixRoute.dispatchRow });
                 extraDisposedFields = fixRoute.disposed;
                 const fixEvidence = { unmetCriteria: [], ciFailures: fixRoute.ciFailures };
                 if (deps.detachFixWait) {
@@ -25881,40 +25877,6 @@ export async function runLightPassReadyRefresh( // W1-T7214: W1-T6022's ready-ov
   }
 }
 
-export const RATCHET_JUDGE_DECIDED_STEP = "sweep.ratchet_judge.decided";
-
-/** One fix-lane hand-off the mergeable disposition dispatches: its dispatch row (none: the disposed row carries it) and evidence. */
-export interface SweepFixRoute {
-  step?: string;
-  what: string;
-  reason: string;
-  row: Record<string, unknown>;
-  disposed: Record<string, unknown>;
-  ciFailures: CiFailure[];
-}
-
-/** W1-T12717 — the fix worker's finding: each held row with main's count, the PR's merged count and what the PR adds. */
-export function ratchetCrossingFixCiFailures(rows: readonly MergedRatchetRow[], withheld: string): CiFailure[] {
-  return [{ name: "ratchet-judge", logTail: [
-    `The merge-time ratchet judge held this pull request (${withheld}): the tree it would land crosses a ceiling CI enforces,`,
-    "and an update-branch cannot cure it, because merging main never removes this pull request's own growth.",
-    ...rows.map((r) => `${r.gate} ${r.path}${r.field ? `#${r.field}` : ""}: main's count ${r.merged - r.prAdds} (ceiling ${r.mainCeiling}), ` +
-      `this pull request's merged count ${r.merged}, prAdds ${r.prAdds}`),
-    "Shrink this pull request's own growth on these paths, or propose the acceptance or scope change it needs. Do not edit a baseline value.",
-  ].join("\n") }];
-}
-
-/** W1-T12717 — the newest judge row at this head that withheld an update hands its crossing to the PR's fix lane, once per head. */
-export function withheldRatchetFixRoute(pr: Pick<OpenPrView, "prNumber" | "headSha">, lines: readonly Record<string, unknown>[]): SweepFixRoute | undefined {
-  const row = lines.findLast((l) => l.step === RATCHET_JUDGE_DECIDED_STEP && Number(l.pr_number) === pr.prNumber && l.head_sha === pr.headSha);
-  if (row === undefined || typeof row.update_withheld !== "string") return undefined;
-  if (lines.some((l) => l.step === "sweep.disposed" && l.pr_number === pr.prNumber && l.head_sha === pr.headSha && l.ratchet_fix_preparing === true)) return undefined;
-  const rows = Array.isArray(row.rows) ? (row.rows as MergedRatchetRow[]) : [];
-  return { what: "the merge-time ratchet judge held a crossing", reason: `update-branch withheld: ${row.update_withheld}`, row: {},
-    disposed: { ratchet_fix_preparing: true, ratchet_fix_reason: row.update_withheld, ratchet_crossing_keys: row.crossing_keys },
-    ciFailures: ratchetCrossingFixCiFailures(rows, row.update_withheld) };
-}
-
 /** W1-T9962 — each armed, non-draft PR whose (head, main tip) pair has no judge row yet, oldest arm first. */
 export function armedRatchetRejudgeTargets(openPrs: readonly OpenPrView[], ledgerLines: readonly Record<string, unknown>[], mainTip: string): OpenPrView[] {
   const judged = new Set<string>();
@@ -25958,15 +25920,9 @@ export async function runArmedRatchetRejudge(
     const row = { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", step: RATCHET_JUDGE_DECIDED_STEP, pr_number: pr.prNumber,
       lane: "sweep-armed", ...ratchetJudgeLedgerFields(judge), head_sha: pr.headSha, main_sha: mainTip,
       ...(judge.mainSha !== undefined && judge.mainSha !== mainTip ? { merged_main_sha: judge.mainSha } : {}) };
-    const spent = ledgerLines.some((l) => (l.step === "sweep.update_branch.attempted" || l.step === "sweep.ci_timeout_refresh.attempted") &&
-      l.pr_number === pr.prNumber && l.head_sha === pr.headSha);
-    if (!ratchetVerdictHolds(judge) || spent || !deps.updateBranch) {
-      appendLine(deps.ledgerPath, { ...row, remedy: !ratchetVerdictHolds(judge) ? "proceed" : spent ? "retry-later" : "unwired" });
-      continue;
-    }
-    const withheld = ratchetUpdateWithheld(judge, pr.prNumber, ledgerLines);
-    if (withheld !== undefined) {
-      appendLine(deps.ledgerPath, { ...row, update_withheld: withheld, remedy: "fix-lane" });
+    const hold = armedRejudgeHold(judge, pr, ledgerLines, Boolean(deps.updateBranch));
+    if (hold !== undefined || !deps.updateBranch) {
+      appendLine(deps.ledgerPath, { ...row, ...hold });
       continue;
     }
     if (incidentHold === undefined) {
