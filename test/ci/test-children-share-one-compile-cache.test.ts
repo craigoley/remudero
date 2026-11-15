@@ -11,6 +11,7 @@ import { measureSuiteStarts } from "#scripts/list-rule-suites.mjs";
 import { coverageChildEnvironment } from "#scripts/test-with-retry.mjs";
 import { acquireTestSlot, acquireTestSlotAsync, admitStaticWork, type TestSlotLease } from "#src/lib/test-slot.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
+import { makeRuntimeFixture } from "#test/helpers/native-runtime-fixture.js";
 
 function fixture(t: TestContext) {
   const root = mkdtempSync(join(tmpdir(), "rmd-test-compile-cache-"));
@@ -49,6 +50,24 @@ function cacheFiles(dir: string): string[] {
     return entry.isDirectory() ? cacheFiles(path) : [path];
   });
 }
+
+test("native author fixtures stay clean after a slotted child writes its compile cache", t => {
+  const f = makeRuntimeFixture();
+  t.after(() => f.cleanup());
+  const dir = join(f.dir, "slots");
+  const lease = acquireTestSlot("native author fixture compile cache", { dir, slots: 1,
+    load: () => ({ cores: 4, load1: 0 }), log: () => {} });
+  t.after(() => lease.release());
+  assert.equal(lease.outcome, "acquired");
+  assert.equal(runProbe(childEnv(lease)).status, constants.compileCacheStatus.ALREADY_ENABLED);
+  const cache = lease.childEnvironment!.NODE_COMPILE_CACHE!;
+  assert.ok(cacheFiles(cache).length > 0, "the real child must write cache files inside the fixture");
+  lease.release();
+  assert.equal(f.git("status", "--porcelain", "--untracked-files=normal"), "");
+  writeFileSync(join(f.dir, "src/leaf.ts"), "export const changed = 3;\n");
+  assert.match(f.git("status", "--porcelain", "--untracked-files=normal"), /src\/leaf\.ts/,
+    "source edits must still invalidate the author's clean-tree check");
+});
 
 test("W1-T11938 c1 test children get one scratch compile cache", async t => {
   const { dir, options, lease } = fixture(t);

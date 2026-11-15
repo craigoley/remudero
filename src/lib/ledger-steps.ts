@@ -82,6 +82,12 @@ type SeedRow = Omit<LedgerStepRow, "family">;
 // `src/lib/review.ts`, `src/lib/sweep.ts` and `src/lib/panel-actions.ts` at 2026-09-07.
 const SEED_ROWS: readonly SeedRow[] = [
   {
+    step: "sweep_light.views_fallback",
+    meaning: "A light pass could not use a fresh open-PR list: the read failed, was rate-limited or had not settled after 60 s. With a last good list younger than its age limit, the pass decides from that list, reads each head again at act time and stands a moved or unreadable head down. With no such list, the pass decides nothing, as before.",
+    writer: ["createLightPassOpenPrList"],
+    outcomes: ["rate_limited", "read_failed", "slow_read", "no_snapshot", "snapshot_too_old"],
+  },
+  {
     step: "routing.experiment.result",
     meaning: "A daily intention-to-treat routing experiment result, with separate pipeline metrics, task-cluster bootstrap intervals, the decision rule and sample requirement. Missing outcomes remain counted. Terminal results are preserved; the result changes no routing.",
     writer: ["recordRoutingExperimentResults"],
@@ -272,6 +278,28 @@ const SEED_ROWS: readonly SeedRow[] = [
       "true`, logged exactly once per dispatch, before the creditable-head guard is even checked.",
     writer: ["buildSweepEffects"],
     outcomes: ["synthetic"],
+  },
+  {
+    // W1-T12545: a fix round re-enters merge-conflict mode instead of standing down on its own conflict.
+    step: "fix.merge_mode_reentered",
+    meaning:
+      "A fix round outside merge-conflict mode read the PR's merge facts as CONFLICTING. A trial merge " +
+      "of main at the round's head stopped with unmerged paths, and the merge was aborted. The next " +
+      "round runs in merge-conflict mode with those paths (`conflicted_files`). Without unmerged paths " +
+      "the round stands down for the sweep as before.",
+    writer: ["runFixRung"],
+    outcomes: ["reentered"],
+  },
+  {
+    // W1-T12545: a fix child whose decision was a merge-conflict repair takes the moved head.
+    step: "sweep.fix.child_head_adopted",
+    meaning:
+      "A fix child's recheck found that the PR head moved from `from_head` to `to_head` after the " +
+      "sweep decided. The decision carried merge-conflict evidence, and the merge facts still read " +
+      "CONFLICTING at the new head, so the child dispatches at `to_head` in merge-conflict mode. " +
+      "Every other recheck and every write-time fence runs at `to_head`.",
+    writer: ["runFixDispatchChild"],
+    outcomes: ["adopted"],
   },
   {
     // W1-T4460 design note (iv) — the SAME literal `runDaemon`'s own top-of-tick `reloadPlanBinding`
