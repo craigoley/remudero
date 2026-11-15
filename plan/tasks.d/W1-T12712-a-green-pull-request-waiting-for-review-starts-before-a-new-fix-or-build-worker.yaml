@@ -17,7 +17,7 @@
     - W1-T12529
     - W1-T3209
   files:
-    - src/lib/review-capacity.ts
+    - src/lib/review-precedence.ts
     - src/lib/sweep.ts
     - src/lib/daemon.ts
     - src/lib/ledger-steps.ts
@@ -37,6 +37,10 @@
       proof: "grep: W1-T12712 criterion 4 in test/review/a-green-pull-request-waiting-for-review-starts-before-a-new-worker.test.ts"
     - claim: "With no review waiting, every fix and build dispatch decision equals origin/main's"
       proof: "grep: W1-T12712 criterion 5 in test/review/a-green-pull-request-waiting-for-review-starts-before-a-new-worker.test.ts"
+    - claim: "The sweep's light and full fix admissions call the precedence"
+      proof: "grep: yieldingFixClaim( in src/lib/sweep.ts"
+    - claim: "The daemon's worker admission hold calls the precedence for the build dispatch"
+      proof: "grep: reviewPrecedenceHold( in src/lib/daemon.ts"
   rationale: |
     WHY: a green pull request is one review away from merge. Today a fix or build worker that starts first takes the budget
     lane, and the green pull request waits.
@@ -61,14 +65,21 @@
     INVARIANT no-starvation: precedence holds a new fix or build only while a green head waits longer than one cadence.
     INVARIANT in-flight-untouched: running workers are never stopped.
     The budget value does not change. This orders who starts next; it adds no limit.
-    1. src/lib/review-capacity.ts: export pure `reviewPrecedence({ waitingGreenHeads, cadenceMs, nowMs, widthReason })`.
-       It returns yield or proceed.
+    1. src/lib/review-precedence.ts (new): export pure `reviewPrecedence({ waitingGreenHeads, cadenceMs, nowMs, widthReason })`.
+       It returns yield or proceed. reviewPrecedence lives in a new module because review-capacity.ts is over its
+       source-size ceiling and W1-T2989 changes it; the new module leaves that file unchanged.
+       The module also reads the inputs: a waiting green head is a green head whose newest sweep.disposed row has
+       blocker awaiting-review at the same head (its blocker_since is when the wait began), and the width reason is
+       the reason of the newest review.capacity row. The sweep records each pass's reading in the module, and the
+       daemon's build dispatch decides on the newest reading. A reading older than two cadences holds nothing.
     2. src/lib/sweep.ts: before the fix lane admits a new round, read the last width decision and the waiting green heads
        (the review queue the light pass already holds) and call reviewPrecedence. On yield, do not start the round; write
        sweep.budget_yield once per held spell. A fix round for a pull request whose own red blocks its review is not held:
        that pull request is not waiting for review.
     3. src/lib/daemon.ts: the build dispatch makes the same call before it starts a worker. Add no comment lines to
-       daemon.ts (it is at its comment cap); explanations go in the why-file.
+       daemon.ts (it is at its comment cap); explanations go in the why-file. The call sits in the worker admission
+       hold as a REVIEW hold, read only by the dispatch and lane-refill surfaces; intake, retro, triage and the
+       wipe test are never held.
     4. Declare sweep.budget_yield in src/lib/ledger-steps.ts.
     Build after W1-T2989, which changes the same budget arithmetic.
     NOT IN SCOPE: the budget value; review width growth above base; provider-phase counting (W1-T2989).
