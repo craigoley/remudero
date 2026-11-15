@@ -1,0 +1,57 @@
+- id: W1-T12825
+  title: An aged foreign test-slot hold whose owner's kernel start time no host process has is reclaimed on the same boot, even when pid namespace links are unreadable
+  repo: remudero
+  depends_on:
+    - W1-T12822
+  priority: 0.6
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # src/lib/test-slot.ts decides when the host's test slot may be taken from a holder; a wrong ended verdict lets two suite runs share one slot
+  band_meaning: blast-radius
+  origin: operator ruling 2026-11-15 "Move slot-1.json aside" (operator session, wedged test slot)
+  plan_refs:
+    - W1-T12822
+    - W1-T12504
+    - W1-T11809
+    - W1-T9928
+  files:
+    - src/lib/test-slot.ts
+    - test/ci/suites/an-aged-foreign-test-slot-whose-owner-start-time-no-process-has-is-reclaimed.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: In acquireTestSlot's aged-hold path, when the pid namespace probe answers unknown for an aged foreign record on the same boot id with a proc:<n> processStart, a waiter in the initial pid namespace whose complete process start scan (W1-T12822's scanProcessStarts) finds no start equal to n reclaims the slot through the existing quiescent reclaim, with coverage boot-start-scan and one test_slot.reclaimed_quiescent line
+      proof: "grep: W1-T12825 criterion 1 in test/ci/suites/an-aged-foreign-test-slot-whose-owner-start-time-no-process-has-is-reclaimed.test.ts"
+    - claim: "invariant:no-reclaim-without-start-proof — the hold is kept with today's test_slot.owner_aged row when any process has the recorded start, the scan is incomplete or past its bound, the waiter is not in the initial pid namespace, the record lacks processStart, the boot ids differ or are unreadable, or the hold is not aged"
+      proof: "grep: W1-T12825 criterion 2 in test/ci/suites/an-aged-foreign-test-slot-whose-owner-start-time-no-process-has-is-reclaimed.test.ts"
+    - claim: A record whose pid namespace probe already answers ended or live keeps that answer and the start scan is not consulted, and a record that changes between the judgement and the unlink is not reclaimed, as the existing reclaim recheck requires
+      proof: "grep: W1-T12825 criterion 3 in test/ci/suites/an-aged-foreign-test-slot-whose-owner-start-time-no-process-has-is-reclaimed.test.ts"
+  rationale: |
+    OBSERVED 2026-11-15 (Azure host, operator session): /mnt/scratch/rmd/test-slots/slot-1.json, the host's only test slot, was held from 2026-11-13T16:20:23Z by project-preflight pid 18 in remudero-console-daemon (host 0c13bb3dec82).
+    Its pid namespace was pid:[4026532935], and its heartbeat never advanced past 16:20:23.868Z.
+    About 37 h later the writer was provably gone:
+    - pid 18 did not exist in that container.
+    - The container's pid namespace was then pid:[4026532614].
+    - No host process had the recorded start proc:155563263, out of a scan of 310 of 313 /proc/<pid>/stat entries. Positive control: live holders' starts read LIVE.
+    Effect: every author preflight's test phase waited TEST_SLOT_WAIT_BOUND_MS and refused NOT_RUN ("covered work has not been proven ended (wait_bound_exceeded)"). W1-T12531's preflight was refused this way after 2701 s, and so was W1-T12822's filing after 2700 s.
+    The operator approved moving the file aside; it had already been renamed to slot-1.json.stale-20261113T142904Z by another actor when re-checked.
+    READ at origin/main after W1-T12504 (#18554), src/lib/test-slot.ts acquireTestSlot:
+    - A foreign record without a complete dedicated cgroup identity (this one had cgroupScope dedicated false) goes to probeAgedNamespace.
+    - That calls probeRecordedPidNamespace. It answers unknown when any /proc/<pid>/ns/pid link is unreadable, and on this host 229 of 312 are (other-uid processes). The hold is then retained forever.
+    - The kernel start time in /proc/<pid>/stat is readable for every process and shares one clock across pid namespaces on one boot, so its absence from a complete scan proves the owner ended.
+    W1-T12822 adds that scan (scanProcessStarts) for static records. This task uses it for slot records.
+  design: |
+    1. In acquireTestSlot's probeAgedNamespace (src/lib/test-slot.ts), after the pid namespace probe answers unknown, call (opts.processStartScan ?? scanProcessStarts)(), W1-T12822's helper and option. Do so only when the hold is aged, the boot ids match, and held.processStart is proc:<n>.
+       When the scan is complete (initial namespace, every stat read or ENOENT/ESRCH, inside its bound) and no start equals n, set quiescent = { held, evidence: { state: "ended", coverage: "boot-start-scan", reason } } and return true.
+       Otherwise retain with today's owner_aged row, naming the scan's reason beside the probe's.
+    2. Add "boot-start-scan" to the coverage values the reclaimed_quiescent line may carry. Change no other rung.
+    INVARIANT no-reclaim-without-start-proof: every path without a complete scan that lacks the recorded start leaves the hold kept and reported exactly as today; the reclaim keeps reclaimStaleLock's unchanged-record recheck and the slot mutation guard.
+    RESIDUAL RISK, stated: a writer in a separate time namespace would have an offset start time (Docker does not create one by default). Keep the boot-id and aged-hold preconditions, so the rung only acts on holds already judged UNKNOWN.
+    NOT IN SCOPE: static records (W1-T12822), the wait bound, the heartbeat cadence, darwin.
+  falsifier: |
+    Remove the boot-start-scan rung and criterion 1 must fail. Treat an incomplete scan as complete and criterion 2 must fail. Consult the scan before the namespace probe and criterion 3 must fail. Restore and all pass.
+  note: |
+    reservation hand-off: run-unfiled-1794719215383 -> run-unfiled-1794719215383
+    Reserved with rmd next-task-id from the operator checkout. Depends on W1-T12822 for scanProcessStarts and the processStartScan option. Check refs/rmd-dispatch/W1-T12825 and any run branch before building.
