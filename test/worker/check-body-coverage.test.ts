@@ -221,3 +221,10 @@ test("W1-T10661 criterion 1: a recorded body-coverage round repairs the live Acc
   assert.equal(rows.some((row) => row.step === "fix.dispatch"), false);
   assert.equal(rows.some((row) => row.step === "fix.body_coverage_repaired"), true);
 });
+
+test("W1-T10661: renderFixPrompt gives a body-coverage round a paste-ready Acceptance block naming each unmet claim and proof", () => {
+  const prompt = renderFixPrompt({ task: { id: "W1-T10511", title: "login" }, round: 1, branch: "run-W1-T10511-1", evidence });
+  assert.match(prompt, /MODE: body-coverage/);
+  assert.ok(prompt.includes("Paste-ready PR body Acceptance block"), "the prompt carries the paste-ready block");
+  assert.ok(prompt.includes(`- Criterion 1: ${unmet[0].claim} — proven by ${unmet[0].proof}`), "the block names the claim and its proof verbatim");
+});
