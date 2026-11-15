@@ -82,7 +82,13 @@ import {
   type TargetJobRead,
   type TargetJobRecord,
   type TargetJobStatus,
+  machineShareStarts,
+  MACHINE_SHARE_WINDOW_MS,
+  MACHINE_SHARE_STEP,
+  type MachineShareInput,
+  type MachineShareStart,
 } from "./drain.js";
+import { queueJudgeAvailability } from "./queue-judge-gardener.js";
 import { preDispatchContractRevision } from "./dispatch-repair.js";
 // Why: drain.ts already owns the overlap partition, so it is reused rather than re-derived (W1-T343).
 import {
@@ -144,7 +150,8 @@ import {
 } from "./arm-auto-merge.js";
 // Pure shared gate; dispatch-governor.ts explains why drain.ts cannot share it from here (W1-T342).
 import { checkDispatchGovernors, checkNewBuildReservation, governorDeferPayload, newBuildReservationPayload, type DispatchGovernorDeps, type DispatchGovernorVerdict, type MemoryReadTracker, type QuietHoursHoldResult } from "./dispatch-governor.js";
-import { assertRunnable, parseTasksFromYaml, PlanError, TASK_RISKS, TASK_STATUSES, TASK_TYPES, TaskAdmissionError, type MergedResolver, type Plan, type Task } from "./plan.js";
+import { assertRunnable, PlanError, TaskAdmissionError, type MergedResolver, type Plan, type Task } from "./plan.js";
+import { composeSecondaryPlan } from "./task-lookup.js";
 import { resolveReleases, closedUnmergedRunBranchRefs, type DispatchFilterReason, type ReleaseResolution } from "./drain.js";
 import type { StatusProjection } from "./status.js";
 import { ENVIRONMENTAL_BLOCK_COOLDOWN_MS, INDEPENDENT_BLOCK_RELEASED_STEP, isEnvironmentalBlock, PRE_RESTORE_RUN_VERDICT_STAGES, type IndependentBlockRelease } from "./status.js";
@@ -168,7 +175,7 @@ import type { GithubPostureFinding } from "./github-posture.js";
 import { clockFromDateFn, clockFromIsoFn, fixedClock, loopAvailableDeadline, systemClock, type Clock } from "../lib/clock.js";
 import { createNearLimitHeapTelemetry, NEAR_HEAP_FILE, type NearLimitHeapTelemetry, type NearLimitSample } from "./daemon-heap-near-limit.js";
 import { createHeapAdmissionHold, type HeapAdmissionHoldLatch, type HeapAdmissionHoldMode, type HeapHoldTrace } from "./daemon-heap-admission-hold.js";
-import { readLedgerUnionRecordsSync } from "./ledger-union.js";
+import { createLedgerRotationMemo, readLedgerUnionRecordsMemoized, readLedgerUnionRecordsSync } from "./ledger-union.js";
 import { reportRetirableWorktrees, type WorktreeRetireOptions } from "./worktree-retire.js";
 import { createGateObservationState, observeGate } from "./gate-observations.js";
 import { getHeapStatistics } from "node:v8";
@@ -1275,7 +1282,22 @@ export interface BootPhases {
   firstTick(log: (step: string, extra?: Record<string, unknown>) => void): void;
 }
 
+/** Only the command's explicit host selection may make an observed catalog selectable. */
+export type OpsTaskDispatchRead =
+  | { outcome: "off" }
+  | { outcome: "unavailable"; reason: string; source?: OpsCatalogShadowInput }
+  | { outcome: "selected"; source: OpsCatalogShadowInput; publicCommit: string };
+
+interface OpsDispatchContext {
+  publicPlan: Plan;
+  publicCommit: string;
+  source: OpsCatalogShadowInput;
+  opsIds: ReadonlySet<string>;
+}
+
 export interface DaemonDeps {
+  /** Absent by default. This reads completed state only; it never awaits a private source on the tick. */
+  readOpsTaskDispatch?: (publicPlan: Plan) => OpsTaskDispatchRead;
   /** W1-T11600: an optional, already-parsed second catalog used only for shadow comparison. No source
    *  reader is installed here; absence preserves the single-plan path exactly, and this snapshot
    *  can never contribute work to the actual dispatch set. */
@@ -2064,50 +2086,10 @@ export interface SecondaryCatalogShadowResult {
   outcome: "compared" | "unavailable" | "malformed" | "duplicate_task_id" | "invalid_cross_catalog_dependency"
     | "comparison_deferred" | "comparison_failed";
   basis: "cached_projection";
-  primary_candidate_count: number;
+  primary_candidate_count: number | null;
   combined_candidate_count: number | null;
   secondary_candidate_count: number | null;
   displaced_primary_count: number | null;
-}
-
-function isParsedPlanTask(value: unknown): value is Task {
-  if (value === null || typeof value !== "object") return false;
-  const task = value as Task;
-  return typeof task.id === "string" && task.id.length > 0 &&
-    typeof task.title === "string" && task.title.length > 0 &&
-    typeof task.repo === "string" && task.repo.length > 0 &&
-    Array.isArray(task.depends_on) && task.depends_on.every((dependency) => typeof dependency === "string") &&
-    TASK_TYPES.includes(task.type) && TASK_RISKS.includes(task.risk) && TASK_STATUSES.includes(task.status) &&
-    (task.verify === "auto" || task.verify === "human") &&
-    (task.dispatch_hold === undefined || typeof task.dispatch_hold === "boolean") &&
-    (task.priority === undefined || typeof task.priority === "number");
-}
-
-function isParsedPlanSnapshot(value: unknown): value is Plan {
-  try {
-    if (value === null || typeof value !== "object") return false;
-    const plan = value as Plan;
-    if (!Array.isArray(plan.tasks) || !(plan.byId instanceof Map) || plan.byId.size !== plan.tasks.length) return false;
-    // A manually constructed snapshot can bypass parse-time constraints such as not_before and precondition.
-    // Revalidate a detached serialization through the canonical plan parser before trusting any task.
-    const serializedTasks = JSON.stringify(plan.tasks);
-    if (typeof serializedTasks !== "string" || parseTasksFromYaml(serializedTasks, "secondary catalog shadow snapshot").length !== plan.tasks.length) return false;
-    const seen = new Set<string>();
-    for (const value of plan.tasks) {
-      if (!isParsedPlanTask(value)) return false;
-      const task = value;
-      if (seen.has(task.id) || plan.byId.get(task.id) !== task) return false;
-      seen.add(task.id);
-    }
-    for (const [id, task] of plan.byId) {
-      if (typeof id !== "string" || !seen.has(id) || task?.id !== id) return false;
-    }
-    return true;
-  } catch (error: unknown) {
-    // A hostile snapshot getter/proxy is malformed; never expose its value or partially trust it.
-    void error;
-    return false;
-  }
 }
 
 /**
@@ -2118,32 +2100,26 @@ function isParsedPlanSnapshot(value: unknown): value is Plan {
 export function compareSecondaryCatalogShadow(
   primary: Plan,
   secondary: Plan | null | undefined,
-  primaryCandidates: readonly Task[],
+  primaryCandidates: readonly Task[] | undefined,
   isMerged: MergedSet,
   limit: number,
   opts: NextRunnableOpts,
   pushedRunBranchIds?: ReadonlySet<string>,
 ): SecondaryCatalogShadowResult | undefined {
   if (secondary === undefined) return undefined;
-  const result = (outcome: SecondaryCatalogShadowResult["outcome"], combined = primaryCandidates.length,
+  let baseline = primaryCandidates;
+  const result = (outcome: SecondaryCatalogShadowResult["outcome"], combined = baseline?.length ?? null,
     secondaryCount = 0, displaced = 0): SecondaryCatalogShadowResult => ({
-    outcome, basis: "cached_projection", primary_candidate_count: primaryCandidates.length,
-    combined_candidate_count: combined, secondary_candidate_count: secondaryCount, displaced_primary_count: displaced,
+    outcome, basis: "cached_projection", primary_candidate_count: baseline?.length ?? null,
+    combined_candidate_count: baseline === undefined ? null : combined,
+    secondary_candidate_count: baseline === undefined ? null : secondaryCount,
+    displaced_primary_count: baseline === undefined ? null : displaced,
   });
   if (secondary === null) return result("unavailable");
-  if (!isParsedPlanSnapshot(primary) || !isParsedPlanSnapshot(secondary)) return result("malformed");
   try {
-    const primaryIds = new Set(primary.tasks.map((task) => task.id));
-    // An ID alone cannot prove a byte-identical move or select its canonical copy, so reject the
-    // entire secondary snapshot rather than guessing which record should participate.
-    if (secondary.tasks.some((task) => primaryIds.has(task.id))) return result("duplicate_task_id");
-    // W1-T11769: a primary task must not depend on a secondary task. A secondary dependency must name a task in
-    // one of the two catalogs. A secondary task may depend on a primary task. One bad edge refuses the snapshot.
-    const secondaryIds = new Set(secondary.tasks.map((task) => task.id));
-    if (primary.tasks.some((task) => task.depends_on.some((id) => secondaryIds.has(id))) ||
-      secondary.tasks.some((task) => task.depends_on.some((id) => !primaryIds.has(id) && !secondaryIds.has(id)))) {
-      return result("invalid_cross_catalog_dependency");
-    }
+    const composition = composeSecondaryPlan(primary, secondary);
+    if (composition.outcome !== "ok") return result(composition.outcome);
+    const { plan: composed, secondaryIds } = composition;
     // Precondition evaluation may spawn an rmd reader. Do not repeat or add that read in a shadow pass.
     if ([...primary.tasks, ...secondary.tasks].some((task) => task.precondition !== undefined)) return result("comparison_deferred");
     // Breaker-backed predicates can lazily read every open GitHub head when a catalog-only task is tripped.
@@ -2156,10 +2132,6 @@ export function compareSecondaryCatalogShadow(
       const catalogIds = new Set([...primary.tasks, ...secondary.tasks].map((task) => task.id));
       if ([...pushedRunBranchIds].some((id) => catalogIds.has(id))) return result("comparison_deferred");
     }
-    const composed: Plan = {
-      tasks: [...primary.tasks, ...secondary.tasks],
-      byId: new Map([...primary.byId, ...secondary.byId]),
-    };
     // Whitelist only snapshot-backed inputs. Callbacks and live readers are omitted so this observational
     // pass cannot write ledger rows, escalate, or add a remote status read.
     const shadowOpts: NextRunnableOpts = {
@@ -2189,15 +2161,25 @@ export function compareSecondaryCatalogShadow(
       isLiveMergeCredited: opts.isLiveMergeCredited,
       // hasPushedRunBranch is intentionally omitted: it can perform a lazy GitHub read and ledger log.
     };
+    // Live dispatch has a composed frontier. Derive its public-only counterfactual only after
+    // the same no-effect guards above; an unmeasurable baseline remains null, never zero.
+    baseline ??= runnableCandidates(primary, isMerged, limit, {
+      ...shadowOpts,
+      dispatchValueContext: opts.dispatchValueContext === undefined ? undefined : {
+        ...opts.dispatchValueContext,
+        openDependentFanoutByTaskId: openDependentFanout(primary.tasks,
+          new Set(primary.tasks.filter(task => !isMerged(task.id)).map(task => task.id))),
+      },
+    });
     const selected = runnableCandidates(composed, isMerged, limit, shadowOpts);
-    const primarySelected = new Set(primaryCandidates.map((task) => task.id));
+    const primarySelected = new Set(baseline.map((task) => task.id));
     return result("compared", selected.length, selected.filter((task) => secondaryIds.has(task.id)).length,
       [...primarySelected].filter((id) => !selected.some((task) => task.id === id)).length);
   } catch (error: unknown) {
     // Keep comparison failures distinct and aggregate-only; thrown values may contain private task data.
     void error;
     return {
-      outcome: "comparison_failed", basis: "cached_projection", primary_candidate_count: primaryCandidates.length,
+      outcome: "comparison_failed", basis: "cached_projection", primary_candidate_count: baseline?.length ?? null,
       combined_candidate_count: null, secondary_candidate_count: null, displaced_primary_count: null,
     };
   }
@@ -2223,7 +2205,7 @@ export function compositeCatalogRevisionKey(publicCommit: string, opsCommit: str
 function opsCatalogShadowRow(
   readSource: () => OpsCatalogShadowInput | undefined,
   readPrimaryCommit: (() => string | undefined) | undefined,
-  primaryCandidateCount: number,
+  primaryCandidateCount: number | null,
   compare: (secondary: Plan) => SecondaryCatalogShadowResult | undefined,
 ): { row: OpsCatalogShadowRow; signature: string } | undefined {
   const keyed = (row: OpsCatalogShadowRow, key: string | null): { row: OpsCatalogShadowRow; signature: string } => ({
@@ -2352,14 +2334,16 @@ export const INTERPHASE_REVIEW_CLOCK_STOP_BOUND_MS = 1_000;
 
 /** W1-T4053 — what one light pass may act on. The ordinary pass opens its fix rung whenever nothing is in
  * flight (W1-T1211), and a freshness drain has nothing in flight by construction, so a fix admitted there
- * would detach one more action into the very drain it runs beside. `reviewOnly` closes every lane but review;
- * of the review-only scopes, an interphase-review pass may also arm ({@link lightPassArmAdmitted}, W1-T11510). */
+ * would detach one more action into the very drain it runs beside. `reviewOnly` closes every lane but review, and
+ * a boot pass keeps its fix lanes (W1-T12703); an interphase-review pass may also arm ({@link lightPassArmAdmitted}). */
 export interface LightPassScope {
   readonly reviewOnly: boolean;
   /** W1-T9569: WHY the pass is review-only, so its stand-downs name it; an ordinary pass passes none. */
   readonly scope?: LightPassScopeName;
   /** W1-T9808: present only while a restart is latched; the pass asks it before each review or fix it admits. */
   readonly admit?: RestartAdmission;
+  readonly claimSweepPending?: () => boolean;
+  readonly waitForClaimSweep?: () => Promise<void>;
   readonly observeRepairTurn?: (observation: RepairTurnObservation) => void;
 }
 
@@ -2379,9 +2363,10 @@ export type RestartAdmission = ((
   kind: "review" | "plan-review" | "fix-dispatch" | "dispatch-refill", surface?: "light" | "light-refill" | "full-sweep", lengthMs?: number,
 ) => boolean) & { readonly heldBy?: string; readonly recycleWait?: true };
 
-/** W1-T9808: may this light pass open its fix lanes? Never on a review-only pass, nor when the latch refuses a fix. */
+/** W1-T9808: may this light pass open its fix lanes? Not on a review-only pass but boot after the claim sweep, nor when the latch refuses. */
 export function lightPassFixAdmitted(scope?: LightPassScope): boolean {
-  return scope?.reviewOnly !== true && scope?.admit?.("fix-dispatch", "light") !== false;
+  return (scope?.reviewOnly !== true || (scope.scope === "boot" && scope.claimSweepPending?.() !== true)) &&
+    scope?.admit?.("fix-dispatch", "light") !== false;
 }
 
 /** W1-T11510: may this light pass arm a ready PR? The ordinary pass, and of the review-only scopes only an
@@ -5177,6 +5162,101 @@ export async function runDaemon(
   // The last `dispatch.overlap_shadow` hold set, so an unchanged hold is ledgered once, not once per tick.
   let lastOverlapShadowSignature = "[]";
   let lastSecondaryCatalogShadowSignature: string | undefined;
+  let lastMachineShareSignature: string | undefined;
+  const machineShareStateDir = deps.fleetLane?.stateDir ?? deps.plainBackfill?.stateDir;
+  const machineShareRotations = createLedgerRotationMemo((rows) => rows.filter((row) => row.step === "run.start"), { pattern: /run\.start/ });
+  const machineShareRowsFor = async (lines: readonly string[] | undefined): Promise<readonly Record<string, unknown>[] | undefined> => {
+    if (lines === undefined) return undefined;
+    const rows = restartCycleLedgerRows(lines.filter((line) => line.includes("run.start") || line.includes("queue_judge."))).rows;
+    if (machineShareStateDir === undefined) return rows;
+    const read = await readLedgerUnionRecordsMemoized(machineShareStateDir, machineShareRotations, {
+      step: ["run.start"], sinceTs: fixedClock(daemonClock.now() - MACHINE_SHARE_WINDOW_MS).iso(),
+      refuseIncomplete: true, readLiveRecords: () => rows,
+    });
+    if (!read.ok) {
+      log("dispatch.machine_share_unreadable", { unread: read.unread });
+      return undefined;
+    }
+    return [...rows.filter((row) => row.step !== "run.start"), ...read.rows];
+  };
+  const machineShareFor = (plan: Plan, rows: readonly Record<string, unknown>[] | undefined, startedSince: readonly MachineShareStart[] = []): MachineShareInput | undefined => {
+    if (rows === undefined) return undefined;
+    const nowMs = daemonClock.now();
+    const starts = machineShareStarts(rows, plan.byId, nowMs);
+    return {
+      queueJudgeStaleMs: queueJudgeAvailability(rows, nowMs).staleMs,
+      starts: [...starts, ...startedSince.filter((s) => s.atMs !== undefined && s.atMs <= nowMs && nowMs - s.atMs <= MACHINE_SHARE_WINDOW_MS)],
+      onMoved: (task, move) => {
+        const signature = `${task.id}:${move.machine_starts}:${move.starts}`;
+        if (signature === lastMachineShareSignature) return;
+        lastMachineShareSignature = signature;
+        log(MACHINE_SHARE_STEP, { task_id: task.id, ...move });
+      },
+    };
+  };
+  const opsDispatchContexts = new WeakMap<Plan, OpsDispatchContext>();
+  let lastOpsDispatchHold: string | undefined;
+  const holdOpsDispatch = (reason: string, taskId?: string): void => {
+    const safeReason = OPS_CATALOG_OUTCOMES.includes(reason as OpsCatalogOutcome) ||
+      ["selection_unreadable", "selection_changed", "invalid_dispatch_flag", "source_pending", "source_identity_unknown",
+        "primary_revision_unknown", "duplicate_task_id", "invalid_cross_catalog_dependency", "malformed"].includes(reason)
+      ? reason : "selection_unreadable";
+    const signature = JSON.stringify([safeReason, taskId]);
+    if (signature === lastOpsDispatchHold) return;
+    try { log("dispatch.ops_catalog_held", { outcome: safeReason, ...(taskId ? { task_id: taskId } : {}) }); }
+    catch (error) { void error; /* A diagnostic failure cannot authorize ops work or stop public selection. */ }
+    lastOpsDispatchHold = signature;
+  };
+  const readOpsDispatch = (primary: Plan): OpsTaskDispatchRead => {
+    try { return deps.readOpsTaskDispatch?.(primary) ?? { outcome: "off" }; }
+    catch (error) {
+      // No private exception text becomes a row, and a failed selection never becomes permission.
+      void error;
+      return { outcome: "unavailable", reason: "selection_unreadable" };
+    }
+  };
+  const captureOpsDispatchPlan = (primary: Plan): { plan: Plan; observation: OpsTaskDispatchRead } => {
+    const observation = readOpsDispatch(primary);
+    if (observation.outcome === "off") { lastOpsDispatchHold = undefined; return { plan: primary, observation }; }
+    if (observation.outcome === "unavailable") {
+      holdOpsDispatch(observation.reason);
+      return { plan: primary, observation };
+    }
+    const input = observation.source;
+    if (input.outcome !== "ok" || input.plan === undefined) {
+      holdOpsDispatch(input.outcome === "ok" ? "source_identity_unknown" : input.outcome);
+      return { plan: primary, observation };
+    }
+    if (!CATALOG_COMMIT.test(observation.publicCommit)) {
+      holdOpsDispatch("primary_revision_unknown"); return { plan: primary, observation };
+    }
+    if (typeof input.opsCommit !== "string" || !CATALOG_COMMIT.test(input.opsCommit) ||
+      typeof input.identityDigest !== "string" || !/^[a-f0-9]{64}$/.test(input.identityDigest)) {
+      holdOpsDispatch("source_identity_unknown"); return { plan: primary, observation };
+    }
+    const composition = composeSecondaryPlan(primary, input.plan);
+    if (composition.outcome !== "ok") {
+      holdOpsDispatch(composition.outcome, composition.taskId);
+      return { plan: primary, observation };
+    }
+    lastOpsDispatchHold = undefined;
+    opsDispatchContexts.set(composition.plan, { publicPlan: primary, publicCommit: observation.publicCommit,
+      source: input, opsIds: composition.secondaryIds });
+    return { plan: composition.plan, observation };
+  };
+  const opsAdmissionStillCurrent = (task: Task, snapshot: Plan): boolean => {
+    const captured = opsDispatchContexts.get(snapshot);
+    // A plan without a captured ops context is the unchanged public-only selection.
+    // In a captured combined plan, a task outside its ops ID set is still ordinary public work.
+    if (captured === undefined) return true;
+    if (!captured.opsIds.has(task.id)) return true;
+    const latest = readOpsDispatch(captured.publicPlan);
+    if (latest.outcome === "selected" && latest.source.outcome === "ok" &&
+      latest.publicCommit === captured.publicCommit && latest.source.identityDigest === captured.source.identityDigest &&
+      latest.source.opsCommit === captured.source.opsCommit) return true;
+    holdOpsDispatch(latest.outcome === "unavailable" ? latest.reason : "selection_changed");
+    return false;
+  };
   // W1-T11768: the one snapshot of an injected ops target; `null` is any refusal (never a partial Plan).
   let opsCatalogShadowPlan: Plan | null | undefined;
   let bootFirstDispatchWritten = false;
@@ -6857,7 +6937,9 @@ export async function runDaemon(
     // at one lane and stops being invisible the moment a batch holds more than one: a lane's later reasoning would be
     // silently re-judged against a blob it never saw. Reassignment rebinds the name and never mutates the object, so
     // the fix is a value capture, bound once here. Forensics: docs/forensics/daemon.md.
-    const planForBatch = plan;
+    const publicPlanForBatch = plan;
+    let planForBatch = publicPlanForBatch;
+    let opsDispatchObservation: OpsTaskDispatchRead | undefined;
     // Daily cost ceiling freshness, mirroring the plan reload above: same placement, same "a throw is caught and
     // ledgered, never fatal" contract. Unlike the plan reload, a failed read deliberately does not touch the snapshot
     // — leaving it at its last known-good value, rather than resetting it, is the correct degrade (W1-T331).
@@ -6962,6 +7044,12 @@ export async function runDaemon(
     const requestedRestart = takeRestartRequest("cycle_top");
     if (requestedRestart) return stopForFreshness(requestedRestart);
 
+    // STOP, PAUSE and restart holds above win before this optional source is considered.
+    if (deps.readOpsTaskDispatch) {
+      const captured = captureOpsDispatchPlan(publicPlanForBatch);
+      planForBatch = captured.plan;
+      opsDispatchObservation = captured.observation;
+    }
     const isMerged = deps.refreshMergedAsync ? await deps.refreshMergedAsync(planForBatch) : deps.refreshMerged(planForBatch);
     for (const taskId of pendingMergedCredit) {
       if (!isMerged(taskId)) continue;
@@ -7007,9 +7095,15 @@ export async function runDaemon(
     if (bootGateTrigger === undefined && !bootReviewStarted) {
       bootReviewStarted = true;
       bootReviewInFlight = true;
+      let claimSweepPending = deps.claimSweepSettled !== undefined;
+      const claimSweepDone = () => { claimSweepPending = false; };
+      void deps.claimSweepSettled?.then(claimSweepDone, claimSweepDone);
+      const claimSweepWait = deps.claimSweepSettled?.then(claimSweepDone, claimSweepDone);
+      const waitForClaimSweep = async () => { await claimSweepWait; };
       void (async () => {
         try {
-          await deps.sweepLight?.(heapHeldLightPass(deps, log, { reviewOnly: true, scope: "boot" }));
+          await deps.sweepLight?.(heapHeldLightPass(deps, log,
+            { reviewOnly: true, scope: "boot", claimSweepPending: () => claimSweepPending, waitForClaimSweep }));
         } catch (e) {
           log("daemon.sweep_light.failed", { phase: "boot", error: String((e as Error)?.message ?? e) });
         } finally {
@@ -7562,7 +7656,11 @@ export async function runDaemon(
     const mergedTask: MergedResolver = (t) => isMerged(t.id);
     // W1-T10348: the released set, resolved ONCE per tick by the resolver every admission site shares
     // (ledger rows plus operator-releases.json), and handed to the kick, the tick selection and the refill.
-    const tickReleases = resolveReleases(deps, planForBatch);
+    let tickLedgerLines: readonly string[] | undefined;
+    const readTickLedger = deps.readLedgerLines;
+    const tickReleases = resolveReleases({
+      readDurableReleases: deps.readDurableReleases, readLedgerLines: readTickLedger && (() => (tickLedgerLines = readTickLedger())),
+    }, planForBatch);
     if (tickReleases.durableUnreadable !== undefined || tickReleases.ledgerUnreadable !== undefined) {
       log("dispatch.releases_unreadable", {
         ...(tickReleases.ledgerUnreadable !== undefined ? { ledger_error: tickReleases.ledgerUnreadable } : {}),
@@ -7683,12 +7781,14 @@ export async function runDaemon(
         tickRunBranchListing, readRunBranchEvidence(), resumableHandoffs,
         lazyClosedUnmerged(deps.readClosedRunBranchPrs),
       );
+      const tickMachineShareRows = await machineShareRowsFor(tickLedgerLines);
       const dispatchOpts: NextRunnableOpts = {
       onPassedOver: observePassedOver("tick"),
       priorityBackfill,
       onDeferredForPriority: logPriorityDeferral,
       onPriorityReservationReleased: logPriorityRelease,
       dispatchValueContext: deps.buildDispatchValueContext?.(planForBatch, isMerged),
+      machineShare: machineShareFor(planForBatch, tickMachineShareRows),
       beginSelectionPass: deps.beginSelectionPass,
       isOpenPr: deps.isOpenPr,
       // A run the harness yielded before its PR is walked ahead of fresh starts, so a yield never costs its queue place.
@@ -7851,10 +7951,16 @@ export async function runDaemon(
       const candidates = runnableCandidates(planForBatch, isMerged, budget, selection.opts);
       // W1-T11769: the per-tick source is read here, once per tick, after the dispatch candidates are fixed.
       // Its row goes to the ledger only. No secondary task enters `candidates`, a claim, a review or a worker.
-      const shadowSource = deps.secondaryCatalogShadowSource;
+      const shadowSource = opsDispatchObservation && opsDispatchObservation.outcome !== "off"
+        ? () => opsDispatchObservation!.outcome === "selected" ? opsDispatchObservation!.source
+          : opsDispatchObservation!.outcome === "unavailable" ? opsDispatchObservation!.source ?? { outcome: "unreadable" as const } : undefined
+        : deps.secondaryCatalogShadowSource;
+      const composedDispatch = opsDispatchContexts.has(planForBatch);
       if (shadowSource !== undefined && budget > 0) {
-        const sourceShadow = opsCatalogShadowRow(shadowSource, deps.primaryPlanCommit, candidates.length, (secondary) =>
-          compareSecondaryCatalogShadow(planForBatch, secondary, candidates, isMerged, budget, selection.opts,
+        const sourceShadow = opsCatalogShadowRow(shadowSource,
+          composedDispatch ? () => opsDispatchContexts.get(planForBatch)!.publicCommit : deps.primaryPlanCommit,
+          composedDispatch ? null : candidates.length, (secondary) =>
+          compareSecondaryCatalogShadow(publicPlanForBatch, secondary, composedDispatch ? undefined : candidates, isMerged, budget, selection.opts,
             runBranchStateThisTick.ids));
         if (sourceShadow && sourceShadow.signature !== lastSecondaryCatalogShadowSignature) {
           try { log("dispatch.secondary_catalog_shadow", { ...sourceShadow.row }); }
@@ -8228,6 +8334,7 @@ export async function runDaemon(
     // Prepared before admission; not an accepted attempt or an in-flight ownership slot.
     const preparedStartTimes = new Map<string, number>();
     const passIds = new Set<string>();
+    const phaseStarts: MachineShareStart[] = [];
     const inFlightTasks = new Set<Task>();
     const refillAdmissions = new WeakMap<Task, {
       snapshot: { plan: Plan; isMerged: MergedSet }; finishedTaskId: string;
@@ -8386,6 +8493,7 @@ export async function runDaemon(
             ...dispatchOpts,
             ...runBranchDispatchOpts(runBranchState, planOnlyReceiptsThisTick, log, reportedRunBranchReleases),
             dispatchValueContext: deps.buildDispatchValueContext?.(snapshot.plan, snapshot.isMerged),
+            machineShare: machineShareFor(snapshot.plan, tickMachineShareRows, phaseStarts),
             // Re-read at each refill: a lane that settled since the tick began may have written or spent a receipt.
             resumableTaskIds: new Set(resumableHandoffs.keys()),
             excludeIds: new Set([...(dispatchOpts.excludeIds ?? []), ...pendingMergedCredit, ...passIds,
@@ -8446,7 +8554,7 @@ export async function runDaemon(
         };
         const decideFromPlan = (): Task | undefined | Promise<Task | undefined> => {
           try {
-            const refillPlan = plan;
+            const refillPlan = deps.readOpsTaskDispatch ? captureOpsDispatchPlan(plan).plan : plan;
             // W1-T5846: with the async port wired the merged set is read through it, never `refreshMerged`, whose
             // stale-generation fallback (W1-T5762) is a synchronous live read on the event loop. Only a deps
             // object that supplies no async port keeps the synchronous read, and its refill stays synchronous.
@@ -8556,6 +8664,10 @@ export async function runDaemon(
           admission_stage: "contract_reoffer",
         });
       }
+      // Recheck only catalog-owned work against its immutable admission snapshot. Public work
+      // keeps the legacy path; no run identity or claim is fabricated for a held private task.
+      const admissionSnapshot = refill === undefined ? planForBatch : refill.snapshot.plan;
+      if (!opsAdmissionStillCurrent(task, admissionSnapshot)) return false;
       const startedAtMs = daemonClock.now();
       // Last admission read: no await or fallible logging between this decision and runOne.
       const reservation = checkNewBuildReservation(deps, task);
@@ -8582,6 +8694,7 @@ export async function runDaemon(
       laneStartedAtMs.set(task.id, startedAtMs);
       laneCpuTransition(() => laneCpuBuilds.add(task.id), task.id);
       if (poolControl.occupied?.has(task)) return;
+      phaseStarts.push({ taskId: task.id, authorClass: task.author_class, atMs: startedAtMs });
       attempted.push(task.id);
       noteBootFirstDispatch({ startedAtMs: daemonClock.now(), admitted: admitted.length });
       if (forcedKick?.taskId === task.id) {

@@ -363,7 +363,8 @@ test("W1-T9962: a clean merge arms as today, an unreadable merge records unread,
   for (const j of [CLEAN, unread.ratchetJudge!]) {
     assert.ok(j.uncounted.some((g) => g.gate === "coverage" && g.class === "run-derived"));
     assert.ok(j.uncounted.some((g) => g.gate === "mutation" && g.class === "run-derived"));
-    assert.ok(j.uncounted.some((g) => g.gate === "learnings-budget" && g.class === "needs-worktree"));
+    // W1-T12526: learnings-budget is counted on the merged tree, so it is not named uncounted.
+    assert.ok(!j.uncounted.some((g) => g.gate === "learnings-budget"));
   }
   assert.ok((decided?.uncounted_gates as string[]).includes("coverage:run-derived"));
 });

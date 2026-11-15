@@ -368,7 +368,7 @@ test("selected child defaults and recovery preserve shadow effects and owner hol
     launch: (_engine, args) => ({ cwd: REPO_ROOT, engineRoot: engine, kind: "bundle", reason: "real default entry",
       argv: [childBundle, ...args] }),
     env: { PATH: process.env.PATH, HOME: f.root, NODE_TEST_CONTEXT: process.env.NODE_TEST_CONTEXT,
-      RMD_TEST_LIVE_DENY_ROOT: process.env.RMD_TEST_LIVE_DENY_ROOT },
+      RMD_TEST_LIVE_DENY_ROOT: process.env.RMD_TEST_LIVE_DENY_ROOT, TMPDIR: process.env.TMPDIR },
     reserve: async () => ({ id: "fixture", bindRoot() {}, releaseOccupancy() { released++; } }) as never,
     workerAdmissionHold: () => undefined, pollMs: 5, watch: false,
   };

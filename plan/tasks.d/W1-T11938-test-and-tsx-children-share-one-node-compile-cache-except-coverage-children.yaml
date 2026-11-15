@@ -18,7 +18,7 @@
   files:
     - src/lib/test-slot.ts
     - test/ci/test-children-share-one-compile-cache.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: The child environment for test and rule-suite children sets NODE_COMPILE_CACHE to one declared directory on the scratch disk
