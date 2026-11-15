@@ -2165,6 +2165,29 @@ async function capturedScopeMergeConflict(
   return hasCapturedMergeConflictEvidence(evidence) ? evidence : undefined;
 }
 
+/** W1-T12545: a trial merge of main at `headSha`, read from its unmerged index and aborted; never a dirty tree. */
+async function reenteredScopeMergeConflict(
+  git: (args: string[]) => Promise<string>, headSha: string, untrackedAll: string,
+): Promise<{ evidence: MergeConflictEvidence } | { reason: string }> {
+  const clean = async () => !(await git(["status", "--porcelain", "-z", untrackedAll])).trim();
+  if (!(await clean())) return { reason: "the worktree is not clean" };
+  if ((await git(["rev-parse", "HEAD"])).trim() !== headSha) return { reason: `the worktree is not at ${headSha}` };
+  await git(["fetch", "--no-tags", "origin", "main"]);
+  // A merge needs a committer identity even with --no-commit; a runner without one fails before any conflict.
+  const stopped = await git(["-c", "user.name=remudero trial merge", "-c", "user.email=trial-merge@remudero.invalid",
+    "merge", "--no-edit", "--no-commit", "--no-ff", "refs/remotes/origin/main"]).then(() => false, () => true);
+  let evidence: MergeConflictEvidence | undefined;
+  try {
+    evidence = stopped ? await capturedScopeMergeConflict(git) : undefined;
+  } finally {
+    if (await git(["rev-parse", "-q", "--verify", "MERGE_HEAD"]).then(() => true, () => false)) await git(["merge", "--abort"]);
+  }
+  if ((await git(["rev-parse", "HEAD"])).trim() !== headSha || !(await clean())) {
+    throw new Error(`the worktree did not return to ${headSha} after the trial merge`);
+  }
+  return evidence ? { evidence } : { reason: "the trial merge of main left no unmerged paths" };
+}
+
 type InheritedCensusRefreshInput = {
   root: string; worktreePath: string; branch: string; prUrl: string; prNumber: number;
   snapshotPath: string; context: Extract<NonNullable<CensusPushRefusal["inheritedMain"]>, { state: "inherited" }>;
@@ -2798,6 +2821,22 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
     // "prior capture was unreadable" contract {@link unchangedTreeStandDownReason} reads.
     if (deps.captureWorktreeSnapshot) {
       lastGateSnapshot = currentTreeSnapshot ? { gateKey, snapshot: currentTreeSnapshot } : undefined;
+    }
+    if (preStrikeStandDown?.reason === CONFLICT_REPAIR_HANDOFF_REASON && currentMergeConflict === undefined) {
+      const conflictHead = currentPinnedSha ?? review.headSha;
+      const captured = await reenteredScopeMergeConflict((args) => (deps.scopeAmendmentGit ?? hostWorktreeGitAsync)(
+        opts.worktreePath, args, { maxBuffer: 1 << 26 }), conflictHead, host.GIT_UNTRACKED_FILES_ALL)
+        .catch((error: unknown) => {
+          const reason = String((error as Error)?.message ?? error);
+          deps.log("fix.gate_read_error", { site: "rung.strike", strike: strikes + 1, read: "scope_merge_conflict", error: reason });
+          return { reason };
+        });
+      if ("evidence" in captured) {
+        currentMergeConflict = captured.evidence;
+        deps.log("fix.merge_mode_reentered", { site: "rung.strike", strike: strikes + 1, head_sha: conflictHead,
+          conflicted_files: conflictedFilePaths(currentMergeConflict) });
+        continue;
+      }
     }
     // W1-T7096: an unchanged tree is a loop SIGNAL — the progress judge decides whether it stops the rung.
     // A wired judge reads the unchanged tree from its own signals; only the stand-in stands down on it here.

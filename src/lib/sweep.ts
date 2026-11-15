@@ -68,6 +68,7 @@ import {
   disarmAutoMerge,
   logArmAttribution,
   mergeDirectViaRestAsync,
+  mergeTargetFromPrUrl,
   assertOperatorMergeUnheld,
   readHeadShaRest as readArmHeadShaRest,
   readArmTimeline,
@@ -18346,9 +18347,39 @@ export interface FixDispatchChildPorts {
   log: (step: string, extra?: Record<string, unknown>) => void;
   /** The phase sink: the owned run's `status.json`, so a fix's admission, worker and CI wait stay visible to the adopting daemon. */
   onPhase?: (phase: string) => void;
+  /** W1-T12545: merge facts with their response's head SHA. Absent, the child reads fresh REST facts. */
+  readMergeFacts?: (prUrl: string) => Promise<{ mergeable?: string; headSha?: string }>;
 }
 
-export type FixDispatchRecheckPorts = Pick<FixDispatchChildPorts, "readLivePr" | "readTask" | "hold">;
+export type FixDispatchRecheckPorts = Pick<FixDispatchChildPorts, "readLivePr" | "readTask" | "hold" | "readMergeFacts">;
+
+/** W1-T12545: the envelope at the live head, only for a conflicted decision whose PR still reads CONFLICTING there. */
+export async function conflictedChildHeadAdoption(
+  envelope: FixDispatchEnvelope, live: { state: string; merged?: boolean; headSha?: string },
+  readMergeFacts: NonNullable<FixDispatchChildPorts["readMergeFacts"]>,
+): Promise<FixDispatchEnvelope | undefined> {
+  if (envelope.evidence.mergeConflict === undefined || live.merged === true || live.state.toLowerCase() !== "open" ||
+      !live.headSha || live.headSha === envelope.pr.headSha) return undefined;
+  const facts = await readMergeFacts(envelope.pr.prUrl).catch((error: unknown) => ({ mergeable: undefined, headSha: undefined, unreadable: String(error) }));
+  if (facts.mergeable !== "CONFLICTING" || facts.headSha !== live.headSha) return undefined;
+  return { ...envelope, pr: { ...envelope.pr, headSha: live.headSha } };
+}
+
+export async function childMergeFacts(
+  prUrl: string,
+  readJson: typeof ghJsonAsync = ghJsonAsync,
+): Promise<{ mergeable?: string; headSha?: string }> {
+  const target = mergeTargetFromPrUrl(prUrl);
+  if (!target) return {};
+  const pr = await readJson(["api", `repos/${target.owner}/${target.repo}/pulls/${target.prNumber}`], undefined, undefined, { fresh: true }) as {
+    head?: { sha?: unknown }; mergeable?: unknown; mergeable_state?: unknown;
+  } | undefined;
+  return {
+    headSha: typeof pr?.head?.sha === "string" ? pr.head.sha : undefined,
+    mergeable: pr?.mergeable === false || pr?.mergeable_state === "dirty" ? "CONFLICTING" :
+      pr?.mergeable === true ? "MERGEABLE" : "UNKNOWN",
+  };
+}
 
 /**
  * W1-T9114 — THE CHILD'S RECHECK, run before it takes its own claim: the fleet hold, the PR's current state and head, and the
@@ -18357,7 +18388,7 @@ export type FixDispatchRecheckPorts = Pick<FixDispatchChildPorts, "readLivePr" |
  */
 export async function recheckFixDispatch(
   envelope: FixDispatchEnvelope, ports: FixDispatchRecheckPorts,
-): Promise<{ ok: true } | { ok: false; reason: string }> {
+): Promise<{ ok: true; adopted?: FixDispatchEnvelope } | { ok: false; reason: string }> {
   const refuse = (reason: string) => ({ ok: false as const, reason });
   try {
     const hold = ports.hold();
@@ -18365,7 +18396,12 @@ export async function recheckFixDispatch(
     const live = await ports.readLivePr(envelope.pr.prUrl);
     if (live === undefined) return refuse("the PR's live state could not be read");
     if (live.merged === true || live.state.toLowerCase() !== "open") return refuse(`the PR is no longer open (${live.merged === true ? "merged" : live.state})`);
-    if (live.headSha !== envelope.pr.headSha) return refuse(`the PR head moved from ${envelope.pr.headSha} to ${live.headSha ?? "an unreadable head"}`);
+    let adopted: FixDispatchEnvelope | undefined;
+    if (live.headSha !== envelope.pr.headSha) {
+      adopted = await conflictedChildHeadAdoption(envelope, live, ports.readMergeFacts ?? childMergeFacts);
+      if (adopted !== undefined && (await ports.readLivePr(envelope.pr.prUrl))?.headSha !== adopted.pr.headSha) adopted = undefined;
+      if (adopted === undefined) return refuse(`the PR head moved from ${envelope.pr.headSha} to ${live.headSha ?? "an unreadable head"}`);
+    }
     const taskId = envelope.pr.taskId;
     if (taskId !== undefined) {
       const task = ports.readTask(taskId);
@@ -18375,7 +18411,7 @@ export async function recheckFixDispatch(
         return refuse(`task ${taskId}'s canonical context changed since the sweep decided`);
       }
     }
-    return { ok: true };
+    return adopted === undefined ? { ok: true } : { ok: true, adopted };
   } catch (error) {
     const reason = `the recheck could not read its evidence (${String((error as Error)?.message ?? error)})`;
     return refuse(reason);
@@ -18391,12 +18427,16 @@ export async function recheckFixDispatch(
  * lost, never as success), not a quiet return.
  */
 export async function runFixDispatchChild(inputs: Record<string, unknown>, deps: FixDispatchChildPorts): Promise<void> {
-  const envelope = readFixDispatchEnvelope(inputs.envelope);
-  if (envelope === undefined) throw new Error("fix dispatch refused: the spec carries no readable decision envelope");
-  const rechecked = await recheckFixDispatch(envelope, deps);
+  const decided = readFixDispatchEnvelope(inputs.envelope);
+  if (decided === undefined) throw new Error("fix dispatch refused: the spec carries no readable decision envelope");
+  const rechecked = await recheckFixDispatch(decided, deps);
   if (!rechecked.ok) {
-    deps.log("sweep.fix.child_refused", { pr_number: envelope.pr.prNumber, head_sha: envelope.pr.headSha, reason: rechecked.reason });
+    deps.log("sweep.fix.child_refused", { pr_number: decided.pr.prNumber, head_sha: decided.pr.headSha, reason: rechecked.reason });
     throw new Error(`fix dispatch refused: ${rechecked.reason}`);
+  }
+  const envelope = rechecked.adopted ?? decided;
+  if (rechecked.adopted) {
+    deps.log("sweep.fix.child_head_adopted", { pr_number: decided.pr.prNumber, from_head: decided.pr.headSha, to_head: envelope.pr.headSha });
   }
   const refuseOnHold = (step: string): void => {
     let hold: string | undefined;
@@ -26578,6 +26618,7 @@ async function runSweepLightPassCore(
   // ledger-read-intent: live — this fold reads the live file only, never rotations.
   const readLedger = deps.readLedger ?? readLiveLedgerRows;
   const selectionLedgerLines = readLedger(deps.ledgerPath);
+  const repushedQueuedAt = repushedHeadQueuedAt(selectionLedgerLines);
   openPrs = openPrs.map(pr => promiseHarvestRetryView(pr, selectionLedgerLines, deps.sampleLoad));
   const selectionPrior = priorActionsFromLedger(selectionLedgerLines, openPrs, deps.sampleLoad);
   openPrs = openPrs.map(pr => completedRefusalRetryView(pr, selectionPrior));
@@ -26617,10 +26658,11 @@ async function runSweepLightPassCore(
   const policySemanticBound = effectiveReviewWidth(deps, policy, queueDepth, now, selectionLedgerLines, activeWorkers);
   const { bound: semanticBound, inFlight: reviewsInFlight } = reviewAdmissionBound(policySemanticBound);
   const unreserved = openPrs.filter((pr) => !lightPassReservedHeads.has(lightPassHeadKey(pr)));
-  const planBound = planLaneBoundForPass(deps, policy, selectReviewAdmissions(unreserved, policy, now, outcomes, 0, unreserved.length)
-    .planFilings.length, "light");
+  const planBound = planLaneBoundForPass(deps, policy, selectReviewAdmissions(unreserved, policy, now, outcomes, 0, unreserved.length,
+    undefined, repushedQueuedAt).planFilings.length, "light");
   const needsPerson = needsPersonPredicate(selectionLedgerLines);
-  const selected = selectReviewAdmissions(unreserved, policy, now, outcomes, semanticBound, planBound.available, needsPerson);
+  const selected = selectReviewAdmissions(unreserved, policy, now, outcomes, semanticBound, planBound.available, needsPerson,
+    repushedQueuedAt);
   recordReviewOrderShadow(deps, selectionLedgerLines, reviewAdmissionCandidates(unreserved, policy, now, outcomes),
     selected.spawning, now, semanticBound);
   const latchHeld = new Set<number>();
@@ -26639,7 +26681,7 @@ async function runSweepLightPassCore(
   // admits the next of them at once (`refillFreedLanes` below) instead of idling until another pass.
   const refillTail = selectReviewAdmissions(
     openPrs.filter((pr) => !spawningNumbers.has(pr.prNumber) && !lightPassReservedHeads.has(lightPassHeadKey(pr))),
-    policy, now, outcomes, openPrs.length, undefined, needsPerson,
+    policy, now, outcomes, openPrs.length, undefined, needsPerson, repushedQueuedAt,
   ).spawning;
   let refillArmed = false;
   // W1-T2584 parity: provider capacity is account-wide, so a pass whose review met the gh budget
@@ -27000,7 +27042,7 @@ async function runSweepLightPassCore(
     refillTail.splice(0, refillTail.length, ...selectReviewAdmissions(
       freshViews.filter((pr) => !spawningNumbers.has(pr.prNumber) && !refilledHeads.has(lightPassHeadKey(pr)) &&
         !lightPassReservedHeads.has(lightPassHeadKey(pr))),
-      policy, refillViewReadAtMs, outcomes, freshViews.length, undefined, needsPerson,
+      policy, refillViewReadAtMs, outcomes, freshViews.length, undefined, needsPerson, repushedQueuedAt,
     ).spawning);
   };
   let recycleRefillHeld = false;
@@ -27406,6 +27448,7 @@ export function selectReviewAdmissions(
   reviewWidth: number = Math.max(1, policy.reviewLanes),
   planLaneWidth: number = derivePlanLaneBound(undefined, policy, 0).available,
   needsPerson?: (pr: OpenPrView) => boolean,
+  repushedQueuedAt?: ReadonlyMap<string, string>,
 ): { spawning: OpenPrView[]; planFilings: OpenPrView[] } {
   // W1-T2583: selection and execution must agree on outcome-keyed eligibility, so the caller folds
   // both sets once from the same reader `runSweep` uses and filters here before either lane ranks.
@@ -27421,8 +27464,8 @@ export function selectReviewAdmissions(
     const ga = needsPerson?.(a) === true ? 1 : 0;
     const gb = needsPerson?.(b) === true ? 1 : 0;
     if (ga !== gb) return ga - gb;
-    const ka = Date.parse(reviewAdmissionKey(a));
-    const kb = Date.parse(reviewAdmissionKey(b));
+    const ka = Date.parse(repushedQueuedAt?.get(`${a.prNumber}@${a.headSha}`) ?? reviewAdmissionKey(a));
+    const kb = Date.parse(repushedQueuedAt?.get(`${b.prNumber}@${b.headSha}`) ?? reviewAdmissionKey(b));
     const aa = Number.isNaN(ka) ? -Infinity : now - ka;
     const ab = Number.isNaN(kb) ? -Infinity : now - kb;
     return ab !== aa ? ab - aa : a.prNumber - b.prNumber;
@@ -27434,6 +27477,29 @@ export function selectReviewAdmissions(
 
   const spawning = [...rest].sort(oldestFirst).slice(0, Math.max(0, reviewWidth));
   return { spawning, planFilings };
+}
+
+/** W1-T12534: `<pr>@<head>` of a minted head to its first eligible time, else its mint time. */
+function repushedHeadQueuedAt(ledgerLines: ReadonlyArray<Record<string, unknown>>): Map<string, string> {
+  const minted = new Map<string, string>();
+  const eligible = new Map<string, string>();
+  const isTime = (value: unknown): value is string => typeof value === "string" && Number.isFinite(Date.parse(value));
+  const first = (values: Map<string, string>, key: string, ts: string): void => {
+    if (!values.has(key)) values.set(key, ts);
+  };
+  for (const row of ledgerLines) {
+    if (!isTime(row.ts)) continue;
+    const head = row.step === "sweep.absent_repush" ? row.new_head
+      : row.step === "sweep.review_eligible" ? row.head_sha : undefined;
+    if (typeof head !== "string") continue;
+    const key = `${String(row.pr_number)}@${head}`;
+    if (row.step === "sweep.absent_repush") {
+      first(minted, key, row.ts);
+      continue;
+    }
+    first(eligible, key, row.ts);
+  }
+  return new Map([...minted].map(([key, ts]) => [key, eligible.get(key) ?? ts]));
 }
 
 /** Number of spawning review candidates before the adaptive admission cut. */
