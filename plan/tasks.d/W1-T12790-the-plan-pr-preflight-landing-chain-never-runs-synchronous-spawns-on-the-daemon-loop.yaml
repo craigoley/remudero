@@ -1,0 +1,62 @@
+- id: W1-T12790
+  title: "The plan-PR preflight landing chain (runInTree) never runs synchronous spawns on the daemon loop"
+  repo: remudero
+  depends_on: []
+  priority: 1.4
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the triage status landing opens or reuses the shared feedback landing PR; a lost or doubled landing changes what the intake thread reports
+  origin: "operator-session#runintree-loop-lag-2026-11-15"
+  plan_refs:
+    - W1-T12753
+    - W1-T12198
+    - W1-T9735
+    - W1-T9736
+  files:
+    - src/run-task.ts
+    - src/lib/feedback-landing.ts
+    - test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts
+    - test/inbox/a-triage-outcome-that-files-no-task-lands-through-the-feedback-landing.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "A no_task triage outcome, driven through triageCommand on a fixture whose in-tree scripts/task-id-existence-check.mjs sleeps 2 s, lands its status change while a 50 ms timer started before the call fires at least once in every 500 ms of the call"
+      proof: "grep: W1-T12790 criterion 1 in test/inbox/a-triage-outcome-that-files-no-task-lands-through-the-feedback-landing.test.ts"
+    - claim: "The same holds for a grill outcome and for a private-home entry (the landPrivateTriageStatus path): each lands through the async landing, and the 50 ms timer keeps firing"
+      proof: "grep: W1-T12790 criterion 2 in test/inbox/a-triage-outcome-that-files-no-task-lands-through-the-feedback-landing.test.ts"
+    - claim: "invariant:same-landing — for the same entry and decision, the async landing lands the same file content on the same shared feedback landing branch, writes the same pr.opened and triage.escalation_response rows, removes the worktree and returns the same exit code as the synchronous landing does today; a refused landing still writes triage.error and leaves the entry at new"
+      kind: guard
+      proof: "grep: W1-T12790 criterion 3 in test/inbox/a-triage-outcome-that-files-no-task-lands-through-the-feedback-landing.test.ts"
+    - claim: "invariant:census-only-falls — the census walk from landTriageStatusOutcome and from landPrivateTriageStatus reaches neither planPrPreflightAtCommit nor runInTree; a fixture that puts the synchronous landFeedbackStatusContent call back fails with landTriageStatusOutcome's name; no row of SYNC_SPAWN_LOOP_BASELINE rises"
+      kind: guard
+      proof: "grep: W1-T12790 criterion 4 in test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts"
+  rationale: |
+    WHY: the daemon loop stops for minutes while a triage outcome lands its status change. While it is stopped, no tick, light pass, review or merge decision runs.
+    MEASURED on the Azure host core ledger (live ledger plus rotated archives), 48 h to 2026-11-15T02:46Z:
+    - runInTree was the largest synchronous-spawn caller in `daemon.loop_lag` rows: 4,596 s over 132 calls, in 33 lag rows that hold 6,241 s of lag. The next callers were the unnamed `<anonymous>` (1,813 s) and hostWorktreeGit (257 s).
+    - By phase: pulse 4,208 s, interphase 331 s, freshness_drain 57 s. The five longest runInTree stalls were 335 s, 264 s, 248 s, 221 s and 204 s.
+    - In 25 of the 33 rows runInTree was the single longest spawn, and each time it ran scripts/task-id-existence-check.mjs (1,951 s in all).
+    - All 30 `daemon.loop_stall_profile` rows that name runInTree have the same inclusive frames: triageCommandLocked 2,579 s, landTriageStatusOutcome 2,374 s, landContent and driveLanding 2,323 s each, landFeedbackStatusContent 89 s.
+    - W1-T12753 measured 4,833 s over 136 calls in its own 48 h window and put runInTree out of its scope.
+    READ at origin/main 5e3cabf0b:
+    - The call chain: the daemon's idle branch calls runAutoTriage (src/run-task.ts:21678, buildAutoTriageDaemonHooks) -> triageCommand -> triageCommandLocked (:35516) -> landTriageStatusOutcome (:35467, called at :35927 for no_task and grill) -> landFeedbackStatusContent (src/lib/feedback-landing.ts:2018, at :35487 with no stateRoot) or landPrivateTriageStatus (:35373, also landFeedbackStatusContent) -> landContent (feedback-landing.ts:1694) -> driveLanding (:279) -> planPrPreflightAtCommit (src/lib/plan-pr-emitter.ts:1206) -> runInTree (:775), which runs lint-plan, task-id-existence-check and the shard census with spawnSync.
+    - landTriageStatusOutcome came with W1-T12198 (#18063, 2026-11-12). It is a synchronous function, but its caller triageCommandLocked is async.
+    - The async siblings are at hand: landContentAsync (feedback-landing.ts:1709), driveLandingAsync (:305), planPrPreflightAtCommitAsync (plan-pr-emitter.ts:1245) and runInTreeAsync (:803). recordDecisionAsync (:1946) is the model: it calls landContentAsync with the same landing kind steps.
+    - test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts keeps runInTree at 1 and triageCommandLocked at 2. W1-T9734 and W1-T9735 moved the earlier landings off the loop; this path came later.
+    RELATED: W1-T9736 (queued) lets the census delete the runInTree row once only name matches reach it. W1-T12753 (queued) covers hostWorktreeGit and the ledger scans, not this chain.
+  design: |
+    INVARIANT same-landing: the async landing lands the same bytes on the same landing branch and writes the same rows, in the same order, as the synchronous landing it replaces; no landing is dropped, doubled or queued in place of landing.
+    INVARIANT census-only-falls: no row of SYNC_SPAWN_LOOP_BASELINE rises and no new name is added; rows only fall.
+    1. src/lib/feedback-landing.ts: add `landFeedbackStatusContentAsync(root, relPath, content, opts: LandFeedbackAsyncOpts)`, the async sibling of landFeedbackStatusContent. It keeps the stateRoot queue branch, and otherwise calls landContentAsync with the same FEEDBACK_LANDING_KIND steps, as recordDecisionAsync does.
+    2. src/run-task.ts: make landPrivateTriageStatus and landTriageStatusOutcome async and await landFeedbackStatusContentAsync. triageCommandLocked awaits landTriageStatusOutcome at :35927. Keep every log row, message and exit code as today.
+    3. If the synchronous landFeedbackStatusContent has no production caller left, remove it; otherwise keep it for its non-daemon callers and name them in the why-file.
+    4. test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts: add a chain check like SYNC_PREFLIGHT_CHAIN: from landTriageStatusOutcome and landPrivateTriageStatus the walk reaches no planPrPreflightAtCommit and no runInTree, with a positive-control fixture. Lower the triageCommandLocked row if the change removes one of its two calls; do not raise any row.
+    5. After the build, read 24 h of `daemon.loop_lag` rows on the live host and write in the why-file which callers of runInTree remain, if any.
+    NOT IN SCOPE: deleting the runInTree census row (W1-T9736); hostWorktreeGit and the ledger scans (W1-T12753); the triage judge itself.
+  falsifier: |
+    Call the synchronous landFeedbackStatusContent again in landTriageStatusOutcome: criteria 1 and 4 must fail. Do the same in landPrivateTriageStatus only: criteria 2 and 4 must fail. Skip the pr.opened row on the async path: criterion 3 must fail. Restore, and all must pass.
+  note: |
+    Id reserved for run-unfiled-1794710957000 with ~/rmd-work/bin/reserve-id.sh.
+    src/run-task.ts is over 44,000 lines: run npm run census:source-size after the change. Extend the existing triage landing test; a new test file that imports #src/run-task.js raises census:affected-reach.
