@@ -19,7 +19,7 @@
     - scripts/fleet-heartbeat.sh
     - test/gardeners/the-beat-measures-the-tsx-cache-the-temp-leftovers-and-the-hand-worktrees.test.ts
     - test/the-heartbeat-measures-the-real-disk-consumers.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "A walked heartbeat carries `consumer_tsx_cache_kb`: the size of every `tsx-<uid>` folder directly under the temp folder of the account, under `/tmp` and under `/mnt/scratch/tmp`"

@@ -1356,6 +1356,7 @@ export function buildSweepLightHook(
             ? mergeHold : scopeDeps.standDownReasonFor?.(d) } : {}),
           readLiveStateAtAct: onLastGoodList ? headReadOrStandDown(effects.readLiveState) : effects.readLiveState,
           ...(onLastGoodList ? { guardEveryHeadAtAct: true } : {}),
+          snapshotOpenPrs: openPrs,
           // W1-T11153: a refill re-reads the open PRs. One tick's snapshot is split into batches, each with its
           // own light pass, so a batch refills only from its own PRs and PRs the tick's snapshot did not hold.
           readOpenPrsForRefill: async () => {
@@ -1376,6 +1377,7 @@ export function buildSweepLightHook(
         if (requeueOnlyPrs.length > 0) passes.push(runSweepLightPass(requeueOnlyPrs, {
           ...common,
           actionable: (d) => lightPassActionable(d, fixRungAllowed, true),
+          snapshotOpenPrs: openPrs,
           readCiGateRollup: undefined,
           reaggregateCiGate: undefined,
         }, policy));

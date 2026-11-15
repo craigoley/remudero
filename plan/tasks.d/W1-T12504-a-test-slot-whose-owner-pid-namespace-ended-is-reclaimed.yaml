@@ -20,7 +20,7 @@
   files:
     - src/lib/test-slot.ts
     - test/ci/suites/a-test-slot-whose-owner-pid-namespace-ended-is-reclaimed.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "A host waiter in the initial pid namespace reads a record with the same boot id, a foreign host, a heartbeat past its bound, and a pidNs that now belongs to a namespace whose init (innermost NSpid 1) started after the record's processStart. The waiter reclaims the slot and logs one `test_slot.reclaimed_quiescent` row with coverage `pid-namespace-ended` and a reason that names both start ticks. The next waiter acquires the slot"
