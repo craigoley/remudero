@@ -67,12 +67,10 @@ describe("test/a-progress-judge-decides-the-next-fix-round.test.ts", () => {
     assert.equal(f.escalated.length, 1, "an already delivered escalation holds until new evidence");
   });
 
-  test("an absent or malformed verdict holds and re-asks next pass", async () => {
+  test("an absent or malformed verdict is asked again in the same pass (W1-T12711)", async () => {
     const rows = rounds();
     let calls = 0;
     const f = sweepFixture(rows, async () => ++calls === 1 ? undefined : { verdict: "continue", reason: "new evidence" });
-    await runSweep([pr()], f.deps);
-    assert.equal(f.dispatched.length, 0);
     await runSweep([pr()], f.deps);
     assert.equal(calls, 2);
     assert.equal(f.dispatched.length, 1);
@@ -257,7 +255,7 @@ describe("test/a-progress-judge-decides-the-next-fix-round.test.ts", () => {
     const f = sweepFixture(rows, async input => {
       judged++;
       assert.match(input.parkedReason!, /edited-event verdict/);
-      return undefined;
+      throw new Error("progress provider offline");
     });
 
     await runSweep([pr({ priorStrikes: 0, ciFailures: [{ name: "commitlint", logTail: "header invalid" }] })], f.deps);

@@ -267,6 +267,26 @@ keychainProvisionLockWaitMs:
   min: 5000
   max: 900000
 
+# W1-T12710 — FIX ROUNDS THAT DO NOT MOVE ONE CRITERION. Measured 2026-11-11 to 2026-11-14 on the
+# fleet host: 28 pull requests had 4 or more fix rounds against one unmet criterion (150 rounds,
+# 216 PR-hours), and every round asked for the same worker model. After `stallRounds` completed
+# rounds that leave one criterion unmet with the same failure (or do not land), the sweep takes the
+# next remedy it has not tried for that pull request and criterion: a stronger worker (the next
+# mount in `modelOrder`), then an acceptance amendment proposal, then one operator question. The
+# count is a trigger for a different remedy, not a ceiling: it stops no work. 3 is the task's
+# default; min 2 keeps one ordinary retry, max 20 keeps the trigger reachable.
+# `modelOrder` names mounts from .remudero/mounts.yaml, weakest first; `fix` is the ordinary fix
+# mount and `step_up` the mount a failed task already steps up to.
+fix:
+  stallRounds:
+    value: 3
+    origin: "net-new"
+    min: 2
+    max: 20
+  modelOrder:
+    value: [fix, step_up]
+    origin: "net-new"
+
 sweep:
   staleDays:
     value: 14

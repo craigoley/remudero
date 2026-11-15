@@ -399,6 +399,48 @@ const SEED_ROWS: readonly SeedRow[] = [
     outcomes: ["OBSERVED", "UNKNOWN"],
   },
   {
+    // W1-T12710: fix rounds that did not move one criterion get a different remedy.
+    step: "fix.stall_remedy",
+    meaning:
+      "Before a fix round, the sweep found that `rounds` completed rounds left `criterion` unmet with the same " +
+      "failure, or did not land, at or past fix.stallRounds. It took the first remedy not tried for this pull " +
+      "request and criterion: `stronger-worker` (a round on the next mount in fix.modelOrder, named in `mount`, " +
+      "with the earlier approaches listed), `amend-criterion` (an acceptance amendment proposal, `amendment_url`), or " +
+      "`operator-input` (one escalation). \"skipped\" means the remedy could not apply; `reason` says why.",
+    writer: ["takeStallRemedy"],
+    outcomes: ["taken", "skipped"],
+  },
+  {
+    // W1-T12711: a harness answer the code refused twice in one pass.
+    step: "fix.progress_rerun",
+    meaning:
+      "The fix progress judge answered harness twice in one pass, and no off-host proof result supports it. " +
+      "The sweep asked GitHub once to rerun the failed checks at this head. `red` is the red the judge saw. " +
+      "When the rerun ends with the same red, the next judgment carries harnessRefuted and is not offered " +
+      "harness at this head. \"unavailable\" means no failed run could be rerun, and the round runs.",
+    writer: ["rerunChecksForHarness"],
+    outcomes: ["rerun", "head-moved", "unavailable"],
+  },
+  {
+    step: "serve.checkout_advanced",
+    meaning:
+      "Serve moved its own clean checkout forward to origin/main in place, with no write in flight, " +
+      "instead of asking for a handoff. Every changed path was one serve reads per request (plan/feedback/) " +
+      "or never loads, so the running generation and its warm read model stay. The row names the old " +
+      "and new sha and the changed paths.",
+    writer: ["gateStaleCodeExit"],
+    outcomes: ["advanced"],
+  },
+  {
+    step: "serve.checkout_advance_refused",
+    meaning:
+      "Serve tried to move its checkout forward in place and could not: the checkout moved, became " +
+      "dirty, or git refused the checkout. The row names the reason. The next check of the same clean " +
+      "advance asks for a handoff instead, as a code change does.",
+    writer: ["gateStaleCodeExit"],
+    outcomes: ["moved", "dirty", "git_refused"],
+  },
+  {
     // W1-T12712: a green pull request waiting for review starts before a new fix or build worker.
     step: "sweep.budget_yield",
     meaning:

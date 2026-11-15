@@ -245,6 +245,12 @@ def approved_tool_artifact(name: str, version: str, artifact_sha: str) -> bool:
     return name not in APPROVED_TOOLS or (version, artifact_sha) == APPROVED_TOOLS[name]
 
 
+def approved_build_tool_pins(build: dict) -> bool:
+    """Accept only the fixed tool set and its individually reviewed exact artifacts."""
+    return (set(build) == set(APPROVED_TOOLS) and
+            all(approved_tool_artifact(name, *pin) for name, pin in build.items()))
+
+
 def _api_from_imported_pip(provenance: dict) -> SimpleNamespace:
     # check_package_set/PackageDetails 26.2.1 were read by main; remaining metadata
     # adapter APIs were inspected on 26.1.1 only and still require pinned controls.
@@ -616,7 +622,7 @@ def audit_locked_artifacts(build_lock: bytes, runtime_lock: bytes, artifacts: li
         return result
     need(api.pip.__version__ == "26.2.1" and api.provenance["state"] == "PINNED_API_BYTES_VERIFIED", "PINNED_API_REQUIRED", "no host fallback")
     build, runtime = pins(build_lock), pins(runtime_lock)
-    need(build == APPROVED_TOOLS, "BUILD_TOOL_POLICY", "tool pins differ from trusted constants")
+    need(approved_build_tool_pins(build), "BUILD_TOOL_POLICY", "tool pins differ from trusted constants")
     need(runtime.get("peewee") == APPROVED_PEEWEE, "RUNTIME_RECIPE", "Peewee")
     _runtime_recipe(runtime)
     for name in build.keys() & runtime.keys():
@@ -701,7 +707,7 @@ def _locked_inputs(root):
     build = _regular(root / "build-requirements.txt", 131072)
     runtime = _regular(root / "requirements.txt", 131072)
     b, r = _lock_pins(build), _lock_pins(runtime)
-    need(b == APPROVED_TOOLS and r.get("peewee") == APPROVED_PEEWEE,
+    need(approved_build_tool_pins(b) and r.get("peewee") == APPROVED_PEEWEE,
          "RECIPE_POLICY", "fixed original build pins, approved Peewee and Semgrep version required")
     _runtime_recipe(r)
     need(all(b[n] == r[n] for n in b.keys() & r.keys()), "LOCK_OVERLAP", "tool drift")

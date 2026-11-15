@@ -17,7 +17,7 @@
   files:
     - src/lib/sweep.ts
     - test/sweep/a-head-minted-by-absent-repush-is-queued-by-its-ci-green-time.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "With the 20:41 shape (width 3; #18328 created 15:39 and #18343 created 17:23, each with a sweep.absent_repush row whose new_head is its current head and a sweep.review_eligible row for that head after 20:00; #18332 created 15:57 and not re-pushed; three PRs created later whose heads went review-eligible before 20:00), the light pass admits #18332 and the two oldest later PRs, and the refill tail is the third later PR, then #18328, then #18343"
