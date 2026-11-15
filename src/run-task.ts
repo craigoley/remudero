@@ -807,6 +807,7 @@ import {
   ciLearningPendingOrigins,
   findPendingLandingPr,
   landFeedbackStatusContent,
+  landFeedbackStatusContentAsync,
   planDestinationLandingOpts,
   queuedFeedbackDir,
   landCiLearningShards,
@@ -835,7 +836,7 @@ import {
   type TaskFilesLandingResult,
 } from "./lib/feedback-landing.js";
 export { readStandingDecisions };
-import { resolvePlanDestination, planDestinationRepository } from "./lib/plan-destination.js";
+import { PLAN_DESTINATION_KINDS, resolvePlanDestination, planDestinationRepository, type PlanDestinationKind, type PlanDestination, type PlanDestinationRepository } from "./lib/plan-destination.js";
 import {
   reconcileFeedbackLanding,
   type FeedbackReconcileRoot,
@@ -1106,6 +1107,7 @@ import {
   joinedRatificationPrBody,
   knownPlanRepos,
   ratificationPrBody,
+  type ShardWriteFs,
   writeApprovedSkillFile,
 } from "./lib/inbox.js";
 import { declinedWithReceipts } from "./lib/inbox-verdict-receipts.js";
@@ -1832,7 +1834,7 @@ import {
 } from "./lib/github-posture.js";
 import { validateWorkerSettingsFile } from "./lib/settings.js";
 import { readCatalogStatusContext, type CatalogStatusContext, buildBatchedGithub, defaultCreditStorePath, loadCreditStore, saveCreditStore, buildCommitTrailerIndex, classifyGhFailure, createDispatchBreakerCache, deriveStatus, dispatchesWithoutNewOwnedPr, evaluateDispatchBreakerCorroboratedDetailed, type LedgerSnapshot, readLedgerSnapshot, type DispatchBreakerDetail, ghGateway, ghRequiredStatusCheckContexts, isGhRateLimitError, effectiveLifetimeDispatches, hasRepeatedTaskAttributableLifetimeDispatches, orphanedRunIds, streakRefusal, taskAttributableLifetimeDispatches, type LifetimeDispatchTally, projectPlan, readLedgerLines, type DeriveDeps, type GitHub, type GhFailureReason, preferImplementingPr, type PrRef, type BatchedPr, type OpenSiblingBuild, type StatusProjection, planBranchReap, type BranchFacts, type BranchReapPlan, BRANCH_REAP_REASON_LABEL, readLedgerUnionBounded, taskIdFromRunBranch, taskIdFromSlugBranch, readMergeCreditedTaskIds, isMergeCreditLine, readRequiredStatusCheckContexts, readRequiredStatusCheckContextsAsync, persistVerifiedCredit, type ThrownRunVerdictStage, type RefusedRunVerdictStage } from "./lib/status.js";
-import { readyDraftPullRequest, withCodeqlAlertEvidence, CODE_SCANNING_FALSE_POSITIVE_STEP, DEFAULT_SWEEP_POLICY, decideRedBaseRefresh, isCiHarnessPath, prAddedLinesFromPullFiles, failingSourceFilesFromCiFailures, failingTestFilesFromCiFailures, projectMergedTaskCandidates, actionableGateFailuresFromReasons, armOutcomeArmed, dispatchFixSpent, checkCostGovernor, checkMemoryGovernor, installedSlackReclaim, reclaimBeforeHold, type SlackReclaim, checkQueueGovernor, productionFixPressure, deriveQueueGovernorTrailingFlow, isFleetOwnedRunBranch, checksStateFromRollup, checksPendingSinceFromRollup, CI_GATE_CHECK_NAME, supersededRedsNowPassing, dedupeRollupByLatestAttempt, deriveDayCostUsd, deriveDayUnpricedRows, deriveDisposition, diffCoverageReport, fixCeilingInForce, fixDispatchBudget, fixRoundTally, buildFixProgressInput, flakeClaimsForHead, isBlockedCi, listRetirableEscalationIssues, listRetirableEscalationIssuesAsync, createEscalationTriageHistoryReader, ESCALATION_TRIAGE_EVIDENCE_SLICE, indexEscalationTriageHistory, type EscalationTriageHistoryReader, type EscalationTriageSlice, logCostGovernorDeferral, logMemoryObservation, logQueueGovernorDeferral, renderClarificationQuestion, renderSweepSummary, type SweepSummary, REQUIRED_CHECK_FAIL, REQUIRED_CHECK_OK, runCreditBackfill, closedPrFromRef, closedPrLookup, runPrTerminalReconcile, type PrTerminalReconcileSummary, runEscalationReconcile, runStaleEscalationRejudge, buildStaleEscalationRejudgePrompt, type StaleEscalationRejudgeCandidate, runPostFixReverification, runSweep, runSweepLightPass, runLightPassReadyRefresh, runLightPassRefreshAdmission, lightPassHeadContractRefresh, runArmedRatchetRejudge, withFullSweepRepairAdmission, redQualityGateNames, stillRedRequiredNames, terminalStateReason, toQuestionEntry, usableInstrumentEntanglementPaths, type ActionableGateFailure, type ArmedStalledPr, type CiFailure, type ClarificationQuestion, type CostGovernorResult, type EscalationReconcileSummary, type FixClass, type FixDispatchEvidence, type FixOwnerResidue, type FixDispatchSnapshot, type FixSuperseded, type LiveStateResult, type MemoryGovernorResult, type MergeConflictEvidence, type OpenPrView, type PlanScopedFixRoundInput, type ReviewDispatchMode, type ReviewReuseInputs, type RollupCheckEntry, type PostFixReverificationSummary, type ProofDiscriminationEvidence, type QueueGovernorResult, type RedBaseRefreshFacts, type PostReviewStallVerdict, type RepairFilingCapture, type Disposition, type SweepDeps, type SweepPolicy, type UpdateBranchOutcome, type UncreditableHeadReason, ABSENT_REPUSH_CAP, DEFAULT_FIX_CLASSES, buildSweepEffects as buildSweepEffectsFromLib, checkJobId, RATIFIED_BASELINE_RATCHET_REPAIRS, currentPlanIneligibilityReason, defaultSweepGhRun, dispatchFixCatchOutcome, discriminateReviewReuse, discriminateReviewReuseAsync, escalationTaskIdFor, fixDispatchErrorClass, fixDispatchSignalDeath, fixHeadAcceptable, fixRungTaskFor, foreignHeadIsStuck, isDispatchedRunBranch, detectPostReviewStall, isCappedReviewOrphanEscalation, proofDiscriminationEvidenceFromCriteria, type ArmAttemptOutcome, type ArmOutcomeName, type BuildSweepEffectsDeps, type MetadataRepairResult, sweepArmTaskId, uncreditableHeadReason, planOnlyRunBranchReceipts, REGENERABLE_ARTIFACT_GENERATORS, ADDITIVE_REGISTRATION_SURFACES, isAdditiveRegistrationChange, type RegistrationChange, repairLadderCommand, trackRepairLadder, riskJudgeHandedOffHead, handedOffHeadJudgmentPool, type HandedOffHeadJudgmentPool, awaitHandedOffHeadJudgments, riskJudgeCodeScanning, hasCapturedMergeConflictEvidence, clearedConflictEscalationCause, type FixRoundBranchClaim, inFlightReviewCount } from "./lib/sweep.js";
+import { readyDraftPullRequest, readTaskContractAtHeadViaGit, withCodeqlAlertEvidence, CODE_SCANNING_FALSE_POSITIVE_STEP, DEFAULT_SWEEP_POLICY, decideRedBaseRefresh, isCiHarnessPath, prAddedLinesFromPullFiles, failingSourceFilesFromCiFailures, failingTestFilesFromCiFailures, projectMergedTaskCandidates, actionableGateFailuresFromReasons, armOutcomeArmed, dispatchFixSpent, checkCostGovernor, checkMemoryGovernor, installedSlackReclaim, reclaimBeforeHold, type SlackReclaim, checkQueueGovernor, productionFixPressure, deriveQueueGovernorTrailingFlow, isFleetOwnedRunBranch, checksStateFromRollup, checksPendingSinceFromRollup, CI_GATE_CHECK_NAME, supersededRedsNowPassing, dedupeRollupByLatestAttempt, deriveDayCostUsd, deriveDayUnpricedRows, deriveDisposition, diffCoverageReport, fixCeilingInForce, fixDispatchBudget, fixRoundTally, buildFixProgressInput, flakeClaimsForHead, isBlockedCi, listRetirableEscalationIssues, listRetirableEscalationIssuesAsync, createEscalationTriageHistoryReader, ESCALATION_TRIAGE_EVIDENCE_SLICE, indexEscalationTriageHistory, type EscalationTriageHistoryReader, type EscalationTriageSlice, logCostGovernorDeferral, logMemoryObservation, logQueueGovernorDeferral, renderClarificationQuestion, renderSweepSummary, type SweepSummary, REQUIRED_CHECK_FAIL, REQUIRED_CHECK_OK, runCreditBackfill, closedPrFromRef, closedPrLookup, runPrTerminalReconcile, type PrTerminalReconcileSummary, runEscalationReconcile, runStaleEscalationRejudge, buildStaleEscalationRejudgePrompt, type StaleEscalationRejudgeCandidate, runPostFixReverification, runSweep, runSweepLightPass, runLightPassReadyRefresh, runLightPassRefreshAdmission, lightPassHeadContractRefresh, runArmedRatchetRejudge, withFullSweepRepairAdmission, redQualityGateNames, stillRedRequiredNames, terminalStateReason, toQuestionEntry, usableInstrumentEntanglementPaths, type ActionableGateFailure, type ArmedStalledPr, type CiFailure, type ClarificationQuestion, type CostGovernorResult, type EscalationReconcileSummary, type FixClass, type FixDispatchEvidence, type FixOwnerResidue, type FixDispatchSnapshot, type FixSuperseded, type LiveStateResult, type MemoryGovernorResult, type MergeConflictEvidence, type OpenPrView, type PlanScopedFixRoundInput, type ReviewDispatchMode, type ReviewReuseInputs, type RollupCheckEntry, type PostFixReverificationSummary, type ProofDiscriminationEvidence, type QueueGovernorResult, type RedBaseRefreshFacts, type PostReviewStallVerdict, type RepairFilingCapture, type Disposition, type SweepDeps, type SweepPolicy, type UpdateBranchOutcome, type UncreditableHeadReason, ABSENT_REPUSH_CAP, DEFAULT_FIX_CLASSES, buildSweepEffects as buildSweepEffectsFromLib, checkJobId, RATIFIED_BASELINE_RATCHET_REPAIRS, currentPlanIneligibilityReason, defaultSweepGhRun, dispatchFixCatchOutcome, discriminateReviewReuse, discriminateReviewReuseAsync, escalationTaskIdFor, fixDispatchErrorClass, fixDispatchSignalDeath, fixHeadAcceptable, fixRungTaskFor, foreignHeadIsStuck, isDispatchedRunBranch, detectPostReviewStall, isCappedReviewOrphanEscalation, proofDiscriminationEvidenceFromCriteria, type ArmAttemptOutcome, type ArmOutcomeName, type BuildSweepEffectsDeps, type MetadataRepairResult, sweepArmTaskId, uncreditableHeadReason, planOnlyRunBranchReceipts, REGENERABLE_ARTIFACT_GENERATORS, ADDITIVE_REGISTRATION_SURFACES, isAdditiveRegistrationChange, type RegistrationChange, repairLadderCommand, trackRepairLadder, riskJudgeHandedOffHead, handedOffHeadJudgmentPool, type HandedOffHeadJudgmentPool, awaitHandedOffHeadJudgments, riskJudgeCodeScanning, hasCapturedMergeConflictEvidence, clearedConflictEscalationCause, type FixRoundBranchClaim, inFlightReviewCount } from "./lib/sweep.js";
 import { sampleDaemonMemory, workerHeapReadings } from "./lib/daemon-memory-telemetry.js";
 import { currentReviewSignal, headLacksOwnTaskRecord, OWN_TASK_RECORD_MISSING_CAUSE, reviewOnlyStandDownReason } from "./lib/sweep.js";
 import { createFullPreludeTimer, isReviewLaneDisposition, readRuntimeImageSha, REVIEW_REQUEUED_STEP, reviewerImageDecisionDigest,
@@ -1874,29 +1876,6 @@ import {
 export { classifyUpdateBranchFailure, detectReviewFalseBlock, detectCiLogVerdictUnchanged, classifyNoPrShape,
   shouldRecheckAfterNothingChanged, shouldSelfHealNothingChanged };
 
-/**
- * W1-T3618 — reads reviewer-code freshness in FRONT of `next` (production: `reviewCommand`), so a
- * stale reading calls `next` zero times for the PR it guards: no worktree materializes, no proof
- * executes, no reviewer spawns. Previously this read happened LAST, inside `runReview`, after all
- * of that had already run.
- *
- * W1-T3697 — READS ONCE PER `call()`, NOT ONCE PER PASS. The original shape cached the first read
- * for the rest of the pass, on the reasoning that the fact "cannot change mid-pass" — but it can:
- * origin/main advances while a pass is still working through its PR list, and a pass that BEGINS
- * fresh and goes stale mid-flight is exactly the shape W1-T3618's own measurement recorded (four
- * withholds inside one cycle that began fresh at its top). A once-per-pass cache can only ever see
- * a pass that was ALREADY stale before its first PR — structurally rare — so the counter it drives
- * stayed at zero while the late W1-T228 guard kept discarding full-price verdicts underneath it.
- * Re-reading before every PR trades one `git fetch` per PR (cheap; `checkReviewerCodeFreshness`'s
- * own network call) for catching the transition the cache was blind to — the transition is exactly
- * what makes the expensive path (materialize + prove + spawn) worth skipping.
- *
- * `reviewCommand`'s own late guard (W1-T228, `reviewerCodePublicationRefusal`) is UNCHANGED and
- * stays the fail-closed floor for any PR this earlier gate misses; this is additive, not a
- * replacement. Extracted so a test can drive it against a counting fake, never a real `gh`/git call.
- */
-export type FreshTreeEntry = { kind: "bundle" | "tsx" | "unknown"; reason: string };
-export type FreshTreeExit = { cause: string; signal?: string; errorClass?: string };
 
 /** W1-T3723 — what {@link buildFreshTreeReviewRunner} needs, all injected so a test drives it
  *  without git, a worktree or a spawn. A `type` whose name does NOT end in `Deps`, deliberately:
@@ -2257,76 +2236,14 @@ export async function ownStartFreshness(
   return ownStartFreshnessFromModule(read);
 }
 
+/** The sweep's and the run child's start check (reviewerCodeStartGate) with `rmd review`'s own option flags. */
 export function buildReviewerCodeFreshnessGate(
   readFreshness: () => ReviewerCodeFreshness | Promise<ReviewerCodeFreshness>,
   log: (step: string, extra?: Record<string, unknown>) => void,
   next: (prArg: string, rest: string[], deps: ReviewCommandDeps) => Promise<number>,
-  /** W1-T3723 — runs `rmd review` from a fresh worktree instead of skipping a stale-code PR; see
-   *  {@link buildFreshTreeReviewRunner} for why the daemon's own checkout never moves. Returns
-   *  `undefined` when it could not run at all, so the caller falls back to the original skip and
-   *  W1-T3691's recurrence ladder stays the floor. W1-T4055: `onFailure` receives WHY, bounded. */
-  reviewFromFreshTree?: (
-    prArg: string,
-    rest: string[],
-    freshness: Extract<ReviewerCodeFreshness, { status: "stale" }>,
-    onFailure?: (failure: string) => void,
-    onEntry?: (entry: FreshTreeEntry) => void,
-    onExit?: (exit: FreshTreeExit) => void,
-  ) => Promise<number | undefined>,
-): {
-  call: (prArg: string, rest: string[], deps: ReviewCommandDeps) => Promise<number>;
-  /** The sha pair the FIRST time THIS PASS'S freshness reads came back stale (there can be many,
-   *  one per `call()`), or `undefined` when every read so far came back fresh, no PR reached the
-   *  gate this pass, or every stale-looking read was actually unreadable. */
-  staleThisPass: () => { oldSha: string; newSha: string } | undefined;
-} {
-  let firstStale: { oldSha: string; newSha: string } | undefined;
-  return {
-    call: async (prArg, rest, reviewDeps) => {
-      // Read fresh for THIS PR, immediately before the spend it guards — never cached across the
-      // pass (W1-T3697): a reading that changes between two PRs must be observed by the second PR
-      // even though the first already ran under the earlier reading.
-      const freshness = await readFreshness();
-      if (freshness.status === "stale") {
-        firstStale ??= { oldSha: freshness.codeSha, newSha: freshness.originMainSha };
-        const stale = { pr: prArg, code_sha: freshness.codeSha, origin_main_sha: freshness.originMainSha, changed_paths: freshness.changedPaths?.length };
-        // MOVE THE WORK, NOT THE CODE. Six pull requests once sat unreviewed for over an hour
-        // behind a one-commit lag, and the only recovery was a process restart that a
-        // multi-instance host then refused. A review does not need this process's modules — it
-        // needs FRESH ones, and a subprocess out of a worktree at origin/main has them.
-        if (reviewFromFreshTree) {
-          // W1-T4055 — WHY, NOT ONLY WHETHER. 52 of 53 fresh-tree reviews once exited non-zero with
-          // nothing but an exit code ledgered; the cause is what the next fix needs.
-          let failure: string | undefined;
-          let entry: FreshTreeEntry = { kind: "unknown", reason: "launcher-did-not-report" };
-          let exit: FreshTreeExit = { cause: "not-reported" };
-          const childArgs = [...rest, ...reviewOptionFlags(reviewDeps), JUDGE_AT_OWN_START_FLAG];
-          return reviewFromFreshTree(prArg, childArgs, freshness, (why) => { failure = why; }, (choice) => { entry = choice; }, (ended) => { exit = ended; }).then((code) => {
-            if (code !== undefined) {
-              const why = code === 0 ? {} : {
-                failure: failure ?? "no failure reported", exit_cause: exit.cause,
-                ...(exit.signal === undefined ? {} : { exit_signal: exit.signal }),
-                ...(exit.errorClass === undefined ? {} : { exit_error_class: exit.errorClass }),
-              };
-              log("review.ran_from_fresh_tree", { ...stale, exit_code: code, entry_kind: entry.kind, entry_reason: entry.reason, ...why });
-              return code;
-            }
-            // COULD NOT RUN — fall through to the original skip rather than judging with stale
-            // code. W1-T3691's recurrence ladder still sees the skip and still escalates.
-            const reason = failure ?? "no reason reported";
-            log("review.skipped_stale_reviewer_code", { ...stale, fresh_tree: "unavailable", fresh_tree_reason: reason });
-            return 0;
-          });
-        }
-        log("review.skipped_stale_reviewer_code", stale);
-        return 0;
-      }
-      // Operator ruling 2026-10-06: this reading is the review's START reading. The post-time
-      // guard judges against it, so a merge landing mid-review no longer discards the verdict.
-      return next(prArg, rest, { ...reviewDeps, reviewStartFreshness: freshness });
-    },
-    staleThisPass: () => firstStale,
-  };
+  reviewFromFreshTree?: FreshTreeReview,
+): ReviewerCodeStartGate<ReviewCommandDeps> {
+  return reviewerCodeStartGate(readFreshness, log, next, (deps) => [...reviewOptionFlags(deps), JUDGE_AT_OWN_START_FLAG], reviewFromFreshTree);
 }
 
 /** W1-T10269 — the escalation's issue gateway, assigning each issue it files to the repo owner
@@ -2708,6 +2625,7 @@ export function buildSweepEffects(
   | "escalateInfrastructureCheck"
   | "readCiGateRollup"
   | "reaggregateCiGate"
+  | "readTaskContractAtHead"
   | "readMainTip"
   | "readMainRepair"
   | "readStaleRedWorkflowRuns"
@@ -2914,7 +2832,8 @@ export function handedOffHeadRiskJudge(
 import { readCiGateRequiredChecks } from "./lib/ci-gate-required.js";
 import { dropDerivativeAggregateCiFailure } from "./lib/derivative-ci-failure.js";
 import { applyCorrection } from "./lib/correct.js";
-import { DEFAULT_PRUNE_GRACE_MS, appendQuestion, ghJson, ghRateLimitRefusalUnknown, type GhRateLimitRefusal, parseDecisionRequest, parseFollowups, parseLearningsUsed, parseSkillsUsed, parseQuestion, parseReconReport, parseReport, pruneStaleRuns, reapStaleWorktrees, removeWorktreeBase, removeRunLock, renderWorkerSettings, resolveGenericRouteToolBound, harnessOwnsGitFor, IMPLEMENT_CASH_TOOLS, IMPLEMENT_CLAUDE_TOOLS, WORKER_RULE_TOOL_NAME, implementToolBound, resolveDispatchLaneToolBound, cashDivertSpawnFields, cashFallbackRefusal, runAdhocLaneReapRung, runWorktreeReapRung, spawnWorker, readClaudeProviderCapacity, activeWorkerCount, cacheTokenLedgerFields, capStderrExcerpt, REPORT_EXCERPT_CAP, STDERR_EXCERPT_CAP, noPrReportExcerpt, foreignTreeStandDownReason, listRegisteredWorktrees, readRunLock, runLockPath, workerLedgerFields, workerTranscript, withAssignmentTrailer, resolveCommitAssignment, uniqueRunBranch, excludeNodeModulesFromGit, linkWorktreeNodeModules, resolveNodeModulesSource, worktreeAdd, worktreeAddAsync, worktreeLockIsPidAlive, worktreeRemove, worktreeRemoveAsync, worktreeRemoveIfPresent, worktreeRemoveIfPresentAsync, worktreesDir, writeRunLock, WorktreeBaseStaleError, WorktreeNodeModulesRefusedError, detectWorktreeBaseUncheckableStreak, WORKTREE_BASE_UNCHECKABLE_STREAK_BOUND, type RunLockInfo, type SpawnWorkerArgs, buildInboxDraftWorkerArgs, type ForeignTreeStandDown, type RegisteredWorktree, type WorkerResult, type WorktreeReapSummary, openUsageProbeSession, type UsageProbeQueryFn, WorkerStateTracker, DEFAULT_WORKER_QUIET_FLOOR_MS, type WorkerState, type WorkerStreamObserver, type WorkerStreamEvent, type WorkerSelectionAssignment, WorkerAbandonedError, SubscriptionOnlyRefusedError, deliverOperatorAnswerToRunningWorker, sharesHarnessCheckout, unwireCredentialHelperSocket, wireCredentialHelperSocket, workerContinuation, workerExecutionForProvider } from "./lib/worker.js";
+import { projectHeldTaskQuestionGates, renderHeldTaskQuestions } from "./lib/human-gate.js";
+import { DEFAULT_PRUNE_GRACE_MS, appendQuestion, ghJson, ghRateLimitRefusalUnknown, type GhRateLimitRefusal, parseDecisionRequest, parseFollowups, parseLearningsUsed, parseSkillsUsed, parseQuestion, parseReconReport, parseReport, pruneStaleRuns, reapStaleWorktrees, removeWorktreeBase, removeRunLock, renderWorkerSettings, resolveGenericRouteToolBound, harnessOwnsGitFor, IMPLEMENT_CASH_TOOLS, IMPLEMENT_CLAUDE_TOOLS, WORKER_RULE_TOOL_NAME, implementToolBound, resolveDispatchLaneToolBound, cashDivertSpawnFields, cashFallbackRefusal, runAdhocLaneReapRung, runWorktreeReapRung, spawnWorker, readClaudeProviderCapacity, activeWorkerCount, cacheTokenLedgerFields, capStderrExcerpt, REPORT_EXCERPT_CAP, STDERR_EXCERPT_CAP, noPrReportExcerpt, foreignTreeStandDownReason, listRegisteredWorktrees, readRunLock, runLockPath, workerLedgerFields, workerTranscript, withAssignmentTrailer, resolveCommitAssignment, uniqueRunBranch, excludeNodeModulesFromGit, linkWorktreeNodeModules, resolveNodeModulesSource, worktreeAdd, worktreeAddAsync, worktreeLockIsPidAlive, worktreeRemove, worktreeRemoveAsync, worktreeRemoveIfPresent, worktreeRemoveIfPresentAsync, worktreesDir, writeRunLock, WorktreeBaseStaleError, WorktreeNodeModulesRefusedError, detectWorktreeBaseUncheckableStreak, WORKTREE_BASE_UNCHECKABLE_STREAK_BOUND, type RunLockInfo, type SpawnWorkerArgs, buildInboxDraftWorkerArgs, type ForeignTreeStandDown, type RegisteredWorktree, type WorkerResult, type WorktreeReapSummary, openUsageProbeSession, type UsageProbeQueryFn, WorkerStateTracker, DEFAULT_WORKER_QUIET_FLOOR_MS, type WorkerState, type WorkerStreamObserver, type WorkerStreamEvent, type WorkerSelectionAssignment, WorkerAbandonedError, SubscriptionOnlyRefusedError, deliverOperatorAnswerToRunningWorker, sharesHarnessCheckout, unwireCredentialHelperSocket, wireCredentialHelperSocket, workerContinuation, workerExecutionForProvider, taskInputAnswer } from "./lib/worker.js";
 import {
   QuietRoundEndedError, createQuietBoundHistory, guardSpawnWithQuietWatchdog, productionQuietWorkerJudge, quietHistoryOptions,
   runQuietWorkerWatchdog, type QuietBoundHistory, type QuietWorkerJudge,
@@ -2979,7 +2898,7 @@ import {
 import { materializeWorkerHome, perRunWorkerHomeDir, sweepStaleWorkerHomes, sweepStaleWorkerHomesAsync, workerKeychainPaths, type ClaudeCredentialSeedEvent } from "./lib/worker-home.js";
 import { FIX_CASH_TOOLS, FIX_WORKER_TOOLS, FIX_WORKER_TOOLS_HARNESS_COMMITS } from "./lib/fix-fence.js";
 import { acquireDrainLock, defaultIsPidAlive, DrainLockError, readDrainLock, type DrainLockHandle } from "./lib/drain-lock.js";
-import { asyncGit, checkCliFreshness, checkReviewerCodeFreshnessAsync, checkServiceFreshness, checkServiceFreshnessAsync, daemonFreshnessFromService, type ReviewerCodeFreshness, type SelfSyncDeps } from "./lib/self-sync.js";
+import { asyncGit, checkCliFreshness, checkReviewerCodeFreshnessAsync, checkServiceFreshness, checkServiceFreshnessAsync, daemonFreshnessFromService, reviewerGit, type ReviewerCodeFreshness, type SelfSyncDeps } from "./lib/self-sync.js";
 import { daemonClosureGit, daemonProcessClosure, daemonProcessEntry, withDaemonClosure, type ClosureGit } from "./lib/daemon-closure.js";
 import { LIVE_EDIT_TREES, runLiveEditLadder, type LiveEditLadderWiring, type LiveEditTree } from "./lib/live-edit-ladder.js";
 import { recoveryRefMaintainer } from "./lib/recovery-refs.js";
@@ -5586,13 +5505,14 @@ export async function repairPrMetadata(
   checks: readonly string[],
   write: (url: string, fields: { title?: string; body?: string }) => void =
     (url, fields) => { ghExec(prMetadataRestArgs(url, fields), { stdio: "pipe" }); },
-  read: (url: string) => { title?: string; body?: string } = (url) => {
+  read: (url: string) => { title?: string; body?: string; base?: { ref?: string } } = (url) => {
     const target = prUrlTarget(url);
     if (!target) throw new Error(`metadata read: cannot resolve PR URL ${JSON.stringify(url)}`);
-    return ghJson(["api", `repos/${target.owner}/${target.repo}/pulls/${target.number}`]) as { title?: string; body?: string };
+    return ghJson(["api", `repos/${target.owner}/${target.repo}/pulls/${target.number}`]) as { title?: string; body?: string; base?: { ref?: string } };
   },
-  /** W1-T5544: the task criteria the gate itself resolves for this body at the PR head (`[]` = unreadable or untrailered). */
-  planCriteriaAtHead: (body: string, headSha: string) => readonly AcceptanceCriterion[] = planCriteriaAtHeadForRepair,
+  /** W1-T12791: the task criteria the gate resolves for this body, in the merge of the head into `baseRef` (`[]` = no cure). */
+  planCriteriaAtHead: (body: string, headSha: string, baseRef?: string) =>
+    readonly AcceptanceCriterion[] | Promise<readonly AcceptanceCriterion[]> = planCriteriaAtMergeForRepair,
   /** The test files this PR head ADDS against main — absent at base, so a `unit test:` on one cannot pass there. */
   addedTestsAtHead: (headSha: string) => AddedTestsAtHead = addedTestFilesAtHead,
 ): Promise<MetadataRepairResult> {
@@ -5623,7 +5543,7 @@ export async function repairPrMetadata(
     // W1-T5544: the two gate-refusal cures apply ONLY while acceptance-author-gate is itself red — a
     // proof-discrimination-only red is never cured by rewriting a body that gate does not read.
     const gateRed = checks.includes("acceptance-author-gate");
-    const planCriteria = gateRed && pr.headSha ? planCriteriaAtHead(live.body, pr.headSha) : [];
+    const planCriteria = gateRed && pr.headSha ? await planCriteriaAtHead(live.body, pr.headSha, live.base?.ref) : [];
     // Never the generic grep of a function main already has: proof-discrimination reads it executed_stale, so the
     // "repair" was a guaranteed red (#10404, #10413). Only a proof derived from a test the diff ADDS misses at base.
     const added: AddedTestsAtHead = pr.headSha ? addedTestsAtHead(pr.headSha) : { kind: "unreadable", reason: "no PR head sha" };
@@ -5657,25 +5577,65 @@ export async function repairPrMetadata(
 }
 
 /**
- * W1-T5544: the production `planCriteriaAtHead` for {@link repairPrMetadata} reuses the fix rung's head-bound
- * task contract, pinned to the supplied PR head without a REST read. The head commit is fetched
- * once if it is not local; a head that cannot be read yields `[]` (no divergence cure), never a guessed plan.
+ * W1-T12791: the production `planCriteriaAtHead` for {@link repairPrMetadata}. It reads the plan the gate reads: the
+ * tree that merges the PR head into its base, wrapped in a local commit with no ref (the gate checks out that merge).
+ * A base that cannot be fetched, or a conflict, reads the head's plan. An unreadable head yields `[]`, never a guess.
  */
-export function planCriteriaAtHeadForRepair(body: string, headSha: string, cwd: string = process.cwd()): readonly AcceptanceCriterion[] {
+export async function planCriteriaAtMergeForRepair(
+  body: string,
+  headSha: string,
+  baseRef: string | undefined,
+  cwd: string = process.cwd(),
+): Promise<readonly AcceptanceCriterion[]> {
   const taskId = extractTaskTrailerId(body);
   if (taskId === undefined) return [];
+  let top: string;
   try {
-    hostWorktreeGitAtTopLevel(cwd, ["cat-file", "-e", `${headSha}^{commit}`]);
-  } catch {
-    // The head object is not local yet (a branch pushed since the last fetch): ask origin for it once.
+    top = await repairCheckoutTopLevel(cwd);
     try {
-      hostWorktreeGitAtTopLevel(cwd, ["fetch", "--quiet", "origin", headSha], { timeout: 60_000 });
+      await hostWorktreeGitAsync(top, ["cat-file", "-e", `${headSha}^{commit}`]);
     } catch {
-      // Unreadable head means unreadable plan: no divergence cure, and the escalation still carries its reason.
-      return [];
+      // The head object is not local yet (a branch pushed since the last fetch): ask origin for it once.
+      await hostWorktreeGitAsync(top, ["fetch", "--quiet", "--no-tags", "origin", headSha], { timeout: 60_000 });
+    }
+  } catch (error) {
+    void error; // An unreadable head means an unreadable plan: no cure, and the escalation still carries its reason.
+    return [];
+  }
+  const at = (await mergeCommitForRepair(top, headSha, baseRef)) ?? headSha;
+  return (await resolveFixRungTaskContractAtHeadAsync("", taskId, top, () => at))?.criteria ?? [];
+}
+
+/** The local merge commit of `headSha` into origin's `baseRef`, or undefined when the base or the merge is unreadable. */
+async function mergeCommitForRepair(top: string, headSha: string, baseRef: string | undefined): Promise<string | undefined> {
+  if (baseRef === undefined || !/^[A-Za-z0-9._/-]+$/.test(baseRef) || baseRef.includes("..")) return undefined;
+  const tracking = `refs/remotes/origin/${baseRef}`;
+  try {
+    await hostWorktreeGitAsync(top, ["fetch", "--quiet", "--no-tags", "origin", `+refs/heads/${baseRef}:${tracking}`], { timeout: 60_000 });
+    const base = (await hostWorktreeGitAsync(top, ["rev-parse", "--verify", `${tracking}^{commit}`])).trim();
+    const tree = (await hostWorktreeGitAsync(top, ["merge-tree", "--write-tree", "--no-messages", base, headSha])).trim();
+    const message = "rmd: the merge acceptance-author-gate checks out";
+    return (await hostWorktreeGitAsync(top, ["commit-tree", "--no-gpg-sign", tree, "-p", base, "-p", headSha, "-m", message],
+      { env: DIRTY_FIX_OWNER_RECOVERY_IDENTITY })).trim();
+  } catch (error) {
+    void error; // A failed fetch, or a conflict (merge-tree exits 1), reads the head's plan, as before W1-T12791.
+    return undefined;
+  }
+}
+
+/** The pinned top level at or above `dir`, through the async leaf (the walk {@link hostWorktreeGitAtTopLevel} makes). */
+async function repairCheckoutTopLevel(dir: string): Promise<string> {
+  const log = (step: string, extra: Record<string, unknown>) => {
+    if (extra.observed !== "<absent>") console.error(JSON.stringify({ event: step, ...extra }));
+  };
+  for (let at = resolve(dir); ; at = dirname(at)) {
+    try {
+      await hostWorktreeGitAsync(at, ["rev-parse", "--git-dir"], { log });
+      return at;
+    } catch (error) {
+      if (!(error instanceof WorktreePointerRefusedError) || error.observed !== "<absent>" || dirname(at) === at) throw error;
     }
   }
-  return resolveFixRungTaskContractAtHead("", taskId, cwd, () => headSha)!.criteria;
 }
 
 
@@ -17720,6 +17680,43 @@ function openPrSurfaceOutage(degraded: readonly MintDegradation[]): MintDegradat
   return degraded.find((d) => d.source === "open-prs" && !d.reason.startsWith(UNTRUSTED_SOURCE_REASON_PREFIX));
 }
 
+/** W1-T12216: the public checkout this command runs from. A hand session in the plan destination files its code
+ * facts and its id reservations against it. */
+const PUBLIC_CHECKOUT = resolve(fileURLToPath(new URL("../", import.meta.url)));
+
+/** W1-T12216: is `dir` in a checkout of the repository that the host file names (any clone or worktree of it)?
+ * Then the answer is the public checkout. A host file that is absent or unreadable answers `undefined`, as before. */
+function planDestinationWorkingCheckout(dir: string, stateDir: string | undefined): { publicCheckout: string } | undefined {
+  const named = planDestinationRepository(stateDir);
+  if (named.outcome !== "named") return undefined;
+  let at: { owner: string; repo: string };
+  try {
+    at = resolveOwnerRepoAt(dir);
+  } catch (error) {
+    void error; // A directory with no readable origin is not a destination checkout: the old behaviour applies.
+    return undefined;
+  }
+  return at.owner === named.owner && at.repo === named.repo ? { publicCheckout: PUBLIC_CHECKOUT } : undefined;
+}
+
+/** W1-T12216: `rmd plan-destination <kind>` prints where a NEW plan file of this kind goes on this host: the
+ * outcome, the repository and the checkout. An unreadable host file prints its reason and exits 1. */
+export function planDestinationCommand(rest: string[]): number {
+  const [kind, ...extra] = rest;
+  if (kind === undefined || extra.length > 0 || !(PLAN_DESTINATION_KINDS as readonly string[]).includes(kind)) {
+    console.error(`rmd plan-destination: name one kind, one of ${PLAN_DESTINATION_KINDS.join(", ")} — usage: ${commandSyntax("plan-destination")}`);
+    return 2;
+  }
+  const self = resolveOwnerRepoAt(PUBLIC_CHECKOUT);
+  const destination = resolvePlanDestination(kind as PlanDestinationKind, instanceStateDir(), { ...self, checkoutDir: PUBLIC_CHECKOUT });
+  if (destination.outcome === "unreadable") {
+    console.log(`kind: ${kind}\noutcome: unreadable\nreason: ${destination.reason}`);
+    return 1;
+  }
+  console.log(`kind: ${kind}\noutcome: ${destination.outcome}\nrepository: ${destination.owner}/${destination.repo}\ncheckout: ${destination.checkoutDir}`);
+  return 0;
+}
+
 export async function nextTaskIdCommand(
   rest: string[],
   overlapDeps: OverlapWarningDeps = {},
@@ -17776,10 +17773,13 @@ export async function nextTaskIdCommand(
     console.error("### rmd next-task-id: --audit and --reserve are contradictory — the audit is read-only\n" + USAGE);
     return 2;
   }
-  const mintRepoRoot = deps.repoRoot ?? repoRoot;
+  // W1-T12216: a session in the plan destination mints and reserves on the public checkout, for its own branch.
+  const destinationSession = planDestinationWorkingCheckout(process.cwd(), (deps.destinationStateDir ?? instanceStateDir)());
+  const publicRoot = destinationSession?.publicCheckout ?? repoRoot;
+  const mintRepoRoot = deps.repoRoot ?? publicRoot;
   const planPath = flagValue(rest, "--plan") ?? join(mintRepoRoot, "plan", "tasks.yaml");
   const offline = rest.includes("--offline");
-  const self = resolveOwnerRepo();
+  const self = destinationSession === undefined ? resolveOwnerRepo() : resolveOwnerRepoAt(publicRoot);
   if (rest.includes("--reconcile")) {
     try { return reconcileReservationReaps(deps); }
     catch (error) {
@@ -17870,7 +17870,7 @@ export async function nextTaskIdCommand(
       try {
         // `gitRunAdapter` is the SAME normaliser the reserve path below uses — `spawnSync` reports
         // `status: null` for a signalled child, and a raw null would read as success here.
-        const advisoryRun = gitRunAdapter(deps.runGit ?? ((args: string[]) => spawnSync("git", args, { cwd: repoRoot, encoding: "utf8" })));
+        const advisoryRun = gitRunAdapter(deps.runGit ?? ((args: string[]) => spawnSync("git", args, { cwd: publicRoot, encoding: "utf8" })));
         const floor = reservationFloorFrom(remoteReservedTaskIds(advisoryRun));
         if (floor !== "unknown" && floor > mint.n)
           console.log(`(origin's refs/rmd-id/ namespace already holds ids up to W1-T${floor - 1} — the first id no reservation holds is W1-T${floor})`);
@@ -17916,9 +17916,16 @@ export async function nextTaskIdCommand(
     // W1-T12453: a degraded source that does not refuse is a note on stderr; stdout keeps the id lines.
     for (const d of mint.degraded) console.error(`### rmd next-task-id: DEGRADED ${d.source}: ${d.reason}`);
     const contested: string[] = [];
-    const run = deps.runGit ?? ((args: string[]) => spawnSync("git", args, { cwd: repoRoot, encoding: "utf8" }));
+    const run = deps.runGit ?? ((args: string[]) => spawnSync("git", args, { cwd: publicRoot, encoding: "utf8" }));
     // W1-T4414: `--branch` names the holder the filing PR's head must match; absent keeps the current branch.
-    const base = deps.reserver ?? gitRemoteRefReserver({ run: gitRunAdapter(run), filingBranch: flagValue(rest, "--branch"), policyCurrency: deps.policyCurrency ?? reservationPolicyCurrency });
+    // W1-T12216: in the plan destination that is the branch of the destination checkout, not of the public one.
+    const filingBranch = flagValue(rest, "--branch")
+      ?? (destinationSession === undefined ? undefined : (hostWorktreeGit(process.cwd(), ["branch", "--show-current"]).trim() || undefined));
+    if (destinationSession !== undefined && filingBranch === undefined) {
+      console.error("### rmd next-task-id: this checkout of the plan destination is on no branch; name the filing branch with --branch\n" + USAGE);
+      return 2;
+    }
+    const base = deps.reserver ?? gitRemoteRefReserver({ run: gitRunAdapter(run), filingBranch, policyCurrency: deps.policyCurrency ?? reservationPolicyCurrency });
     // Decorate rather than modify: the decorator only OBSERVES each attempt, so a `taken` outcome
     // is reported instead of silently skipped.
     //
@@ -19246,7 +19253,14 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
   const checkoutRoot = deps.repoRoot ?? resolve(flagValue(rest, "--repo-root") ?? repoRoot);
   // W1-T12171: the checkout that holds the code a task names. Without the option it is the plan's own checkout.
   const codeRootArg = flagValue(rest, "--code-root");
-  const codeRoot = codeRootArg !== undefined ? resolve(codeRootArg) : checkoutRoot;
+  // Only a usable configured root can select a destination. The existing dependency-credit guard below
+  // reports an unreadable config as named UNKNOWN evidence instead of this optional lookup throwing first.
+  const destinationRoot = codeRootArg === undefined ? existingCliRootWithoutConfig() : undefined;
+  const destinationStateDir = destinationRoot?.state === "present" && typeof destinationRoot.root === "string" &&
+    destinationRoot.root.trim().length > 0 && isAbsolute(destinationRoot.root) && !destinationRoot.root.includes("\0")
+    ? join(destinationRoot.root, "state") : undefined;
+  const codeRootSelected = codeRootArg ?? planDestinationWorkingCheckout(checkoutRoot, destinationStateDir)?.publicCheckout;
+  const codeRoot = codeRootSelected !== undefined ? resolve(codeRootSelected) : checkoutRoot;
   let localRepoName: string | undefined;
   try { localRepoName = resolveOwnerRepoAt(codeRoot).repo; } catch { /* no origin identity: preserve existing lint behavior */ }
   const planPathArg = flagValue(rest, "--plan");
@@ -19272,7 +19286,7 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
   let planApart: { headFiles: PlanFiles; codeFiles: PlanFiles; codePlan: Plan } | undefined;
   try {
     planRaw = readFileSync(planPath, "utf8");
-    if (codeRootArg === undefined) {
+    if (codeRootSelected === undefined) {
       plan = loadPlan(planPath);
     } else {
       const headFiles = readPlanFiles(checkoutRoot, planRel);
@@ -28250,17 +28264,29 @@ export async function gardenCheckoutAsync(opts: GardenCheckoutOpts): Promise<Gar
   const branch = `${opts.name}-garden-${(opts.clock ?? systemClock).now()}`;
   const root = join(opts.worktreesRoot, branch);
   // W1-T12222: the id holder is the branch that files it, so such a checkout reserves on the landing branch.
-  const reservationBranch = opts.taskFilesOnly ? await taskFilesLandingBranchAsync({ owner: opts.owner, repo: opts.repo }) : branch;
+  // W1-T12212: a new task file of such a checkout lands in the plan destination when the switch names one.
+  const filesTo = opts.taskDestination?.outcome === "destination" ? opts.taskDestination : { owner: opts.owner, repo: opts.repo };
+  const reservationBranch = opts.taskFilesOnly ? await taskFilesLandingBranchAsync({ owner: filesTo.owner, repo: filesTo.repo }) : branch;
   await worktreeAddAsync(opts.repoDir, root, branch, "origin/main", { log: opts.log });
+  const gitAt = (dir: string) => async (...args: string[]) => (await execFilePromise("git", ["-C", dir, ...args], { encoding: "utf8" })).stdout;
   const io: GardenLandIo = {
-    git: async (...args: string[]) => (await execFilePromise("git", ["-C", root, ...args], { encoding: "utf8" })).stdout,
+    git: gitAt(root),
     fetcher: opts.fetcher ?? ((args) => ghJsonAsync(args)),
     generate: (script) => execFilePromise(process.execPath, [...(script === "generate-capability-snapshot.mjs" ? ["--import", import.meta.resolve("tsx")] : []), join(root, "scripts", script)], { cwd: root }),
     preflight: opts.preflight ?? ((input) => planPrPreflightAsync(input, { log: opts.log })),
     // W1-T12221: the seal is async only, as the landing of W1-T12199 is.
-    ...(opts.taskFilesLanding ? { landTaskFiles: (inputs: TaskFileInput[]) => landTaskFilesAsync(opts.repoDir, inputs, {
-      ...opts.taskFilesLanding!, targetRepository: { owner: opts.owner, repo: opts.repo }, log: opts.log, lane: opts.name,
+    ...(opts.taskFilesLanding ? { landTaskFiles: (inputs: TaskFileInput[], at?: PlanDestinationRepository) => landTaskFilesAsync(at?.checkoutDir ?? opts.repoDir, inputs, {
+      ...opts.taskFilesLanding!, targetRepository: at ? { owner: at.owner, repo: at.repo } : { owner: opts.owner, repo: opts.repo }, log: opts.log, lane: opts.name,
     }) } : {}),
+    openDestination: async (at) => {
+      const destRoot = join(opts.worktreesRoot, `${branch}-plan-destination`);
+      await worktreeAddAsync(at.checkoutDir, destRoot, branch, "origin/main", { log: opts.log });
+      return {
+        root: destRoot,
+        git: gitAt(destRoot),
+        dispose: () => worktreeRemoveAsync(at.checkoutDir, destRoot),
+      };
+    },
   };
   return {
     root,
@@ -28282,21 +28308,52 @@ export interface GardenCheckoutOpts {
   fetcher?: GhApiFetcher;
   clock?: Clock;
   /** W1-T5348: the plan-PR preflight over the committed tree; injected only by a test. */
-  preflight?: (input: { cwd: string; title: string; body: string }) => PlanPrPreflightResult;
+  preflight?: (input: { cwd: string; title: string; body: string; codeRoot?: string }) => PlanPrPreflightResult;
   /** W1-T12221: the shared landing of task files: its state root (`config.root`) and its seams. Absent,
    *  every land opens its own PR. */
   taskFilesLanding?: Pick<LandTaskFilesOpts, "stateRoot" | "gh" | "planPrPreflight">;
   /** W1-T12222: every land is a task file, new or edited, through `taskFilesLanding`; `branch` is the landing
    *  branch, and a land with any other path is refused. Async checkout only. */
   taskFilesOnly?: true;
+  /** W1-T12212: `resolvePlanDestination("task")` when the checkout opened; only `destination` and `unreadable` are
+   *  passed. A land whose every path is a new task file goes to the destination; `unreadable` refuses such a land. */
+  taskDestination?: Extract<PlanDestination, { outcome: "destination" | "unreadable" }>;
 }
 
 interface GardenLandIo {
   git: (...args: string[]) => string | Promise<string>;
   fetcher: GhApiFetcher;
   generate: (script: "generate-docs-index.mjs" | "generate-capability-snapshot.mjs") => unknown;
-  preflight: (input: { cwd: string; title: string; body: string }) => PlanPrPreflightResult | Promise<PlanPrPreflightResult>;
-  landTaskFiles?: (inputs: TaskFileInput[]) => Promise<TaskFilesLandingResult>;
+  preflight: (input: { cwd: string; title: string; body: string; codeRoot?: string }) => PlanPrPreflightResult | Promise<PlanPrPreflightResult>;
+  landTaskFiles?: (inputs: TaskFileInput[], at?: PlanDestinationRepository) => Promise<TaskFilesLandingResult>;
+  /** W1-T12212: a worktree of the destination checkout at its origin/main, on the garden branch. Async checkout only. */
+  openDestination?: (at: PlanDestinationRepository) => Promise<{ root: string; git: (...args: string[]) => Promise<string>; dispose: () => Promise<void> }>;
+}
+
+/** W1-T12212: where a land goes. Every path a new task file: the destination. Every path an edit, or any path that is
+ *  not a task file: the checkout's own repository. New and edited task files together: refused. */
+function* gardenLandTarget(opts: GardenCheckoutOpts, root: string, paths: readonly string[], git: GardenLandIo["git"]): Steps<PlanDestinationRepository | "own" | "refused"> {
+  const at = opts.taskDestination;
+  if (at === undefined || paths.length === 0) return "own";
+  const shardDir = relative(root, join(resolveRepoLayout(root).planDir, "tasks.d"));
+  if (!paths.every((p) => p.startsWith(`${shardDir}/`) && /\.ya?ml$/.test(p))) return "own";
+  const fresh: string[] = [];
+  for (const relPath of paths) {
+    try {
+      yield* step(() => git("cat-file", "-e", `HEAD:${relPath}`));
+    } catch {
+      fresh.push(relPath); // main does not hold the path: a new task file
+    }
+  }
+  if (fresh.length === 0) return "own";
+  const refuse = (error: string): "refused" => {
+    opts.log(`${opts.name}.garden_plan_destination`, { outcome: "refused", paths, error });
+    return "refused";
+  };
+  if (fresh.length < paths.length) return refuse("a land that adds a task file and edits another goes to two repositories; land each apart");
+  if (at.outcome === "unreadable") return refuse(`the plan destination is unreadable, so no new task file is filed: ${at.reason}`);
+  opts.log(`${opts.name}.garden_plan_destination`, { outcome: "destination", paths, repository: `${at.owner}/${at.repo}` });
+  return { owner: at.owner, repo: at.repo, checkoutDir: at.checkoutDir };
 }
 
 /** W1-T12221: the landing inputs when every path is an edit of a task file main holds and the body's
@@ -28362,14 +28419,52 @@ function* gardenLandSteps(
   io: GardenLandIo,
 ): Steps<GardenLandResult> {
   const { paths, title, body } = landing;
+  const target = yield* gardenLandTarget(opts, root, paths, io.git);
+  if (target === "refused") return undefined;
   // W1-T12221: an edit of task files rides the shared landing PR, unless the caller keeps its own PR.
   const only = opts.taskFilesOnly === true && io.landTaskFiles !== undefined;
   const sealed = !only && (landing.sealedLanding === false || io.landTaskFiles === undefined) ? undefined : yield* sealedTaskFileInputs(root, paths, body, io.git, only);
-  if (sealed !== undefined) return yield* landSealedTaskFiles(opts, paths, sealed, io.landTaskFiles!);
+  if (sealed !== undefined) {
+    const at = target === "own" ? undefined : target;
+    return yield* landSealedTaskFiles(opts, paths, sealed, (inputs) => io.landTaskFiles!(inputs, at));
+  }
+  if (target !== "own") return yield* gardenLandInDestination(opts, root, branch, landing, io, target);
   if (only) {
     opts.log(`${opts.name}.garden_sealed_landing`, { outcome: "refused", paths, pr_url: null, error: "a checkout that files only task files lands each path under plan/tasks.d with its criterion" });
     return undefined;
   }
+  return yield* gardenCommitAndOpen(opts, root, branch, landing, io, { owner: opts.owner, repo: opts.repo });
+}
+
+/** W1-T12212: new task files that open their own PR: a worktree of the destination, the same commit, preflight, push
+ *  and create there. The preflight reads the public code at the garden checkout. */
+function* gardenLandInDestination(opts: GardenCheckoutOpts, root: string, branch: string, landing: GardenLandOpts, io: GardenLandIo, at: PlanDestinationRepository): Steps<GardenLandResult> {
+  if (io.openDestination === undefined) {
+    opts.log(`${opts.name}.garden_plan_destination`, { outcome: "refused", paths: landing.paths, error: "only the async checkout lands in the plan destination" });
+    return undefined;
+  }
+  const dest = yield* step(() => io.openDestination!(at));
+  try {
+    for (const relPath of landing.paths) {
+      mkdirSync(dirname(join(dest.root, relPath)), { recursive: true });
+      writeFileSync(join(dest.root, relPath), readFileSync(join(root, relPath)));
+    }
+    const destIo: GardenLandIo = { ...io, git: dest.git, preflight: (input) => io.preflight({ ...input, codeRoot: root }) };
+    return yield* gardenCommitAndOpen(opts, dest.root, branch, landing, destIo, { owner: at.owner, repo: at.repo });
+  } finally {
+    yield* step(() => dest.dispose());
+  }
+}
+
+function* gardenCommitAndOpen(
+  opts: GardenCheckoutOpts,
+  root: string,
+  branch: string,
+  landing: GardenLandOpts,
+  io: GardenLandIo,
+  to: { owner: string; repo: string },
+): Steps<GardenLandResult> {
+  const { paths, title, body } = landing;
   yield* step(() => io.git("add", "--", ...paths));
   // A garden log under docs/ changes what docs/docs-index.json must say, and docs-index-check
   // refuses a PR whose index is stale — regenerate it with the checkout's own generator.
@@ -28392,17 +28487,17 @@ function* gardenLandSteps(
   // Both guards run BEFORE the push: a push that lands and a PR that is then refused leaves a
   // branch with no PR — 103 test-run plan-garden-* heads on origin by 2026-09-29.
   assertLiveWriteAllowed("git-push", `pushing the ${opts.name} garden branch ${branch}`);
-  assertLiveWriteAllowed("gh-pr-create", `opening a ${opts.name} garden PR against ${opts.owner}/${opts.repo}`);
+  assertLiveWriteAllowed("gh-pr-create", `opening a ${opts.name} garden PR against ${to.owner}/${to.repo}`);
   // W1-T5348: a tree CI would refuse is never pushed — the lane's not-landed outcome instead of a red PR.
   const verdict = yield* step(() => io.preflight({ cwd: root, title: fitted.header, body: fullTitle + body }));
   if (!planPrPreflightAllows(verdict, { lane: opts.name, branch, log: opts.log })) return undefined;
   yield* step(() => io.git("push", "-q", "origin", `HEAD:refs/heads/${branch}`));
   try {
     const create = { title: fitted.header, body: fullTitle + body, head: branch, base: "main" };
-    const row = yield* step(() => io.fetcher(ratifyPrCreateRestArgs(opts.owner, opts.repo, create)));
-    return createPlanPrRest(() => row, opts.owner, opts.repo, create).prUrl;
+    const row = yield* step(() => io.fetcher(ratifyPrCreateRestArgs(to.owner, to.repo, create)));
+    return createPlanPrRest(() => row, to.owner, to.repo, create).prUrl;
   } catch (e) {
-    yield* retractGardenBranchSteps({ branch, git: io.git, name: opts.name, owner: opts.owner, repo: opts.repo, fetcher: io.fetcher, log: opts.log });
+    yield* retractGardenBranchSteps({ branch, git: io.git, name: opts.name, owner: to.owner, repo: to.repo, fetcher: io.fetcher, log: opts.log });
     throw e;
   }
 }
@@ -28432,7 +28527,15 @@ export type { GardenBuildContext } from "./cli/commands/daemon.js";
 
 export function daemonGardenWorkspace(ctx: Pick<GardenBuildContext, "config" | "repoRoot" | "owner" | "repo" | "log">, name: GardenName): () => Promise<GardenCheckoutAsync> {
   return () => gardenCheckoutAsync({ name, repoDir: ctx.repoRoot, worktreesRoot: worktreesDir(ctx.config), owner: ctx.owner, repo: ctx.repo, log: ctx.log,
-    taskFilesLanding: { stateRoot: ctx.config.root }, ...(TASK_FILES_ONLY_GARDENS.has(name) ? { taskFilesOnly: true } : {}) });
+    taskFilesLanding: { stateRoot: ctx.config.root }, ...(TASK_FILES_ONLY_GARDENS.has(name) ? { taskFilesOnly: true } : {}),
+    ...gardenTaskDestination(ctx.config.root, ctx.repoRoot, ctx.owner, ctx.repo) });
+}
+
+/** W1-T12212: the host switch for a new task file, read each time a checkout opens. Off or not listed: no field, so the
+ *  checkout and its calls are those of today. */
+function gardenTaskDestination(stateRoot: string, repoDir: string, owner: string, repo: string): Pick<GardenCheckoutOpts, "taskDestination"> {
+  const at = resolvePlanDestination("task", join(stateRoot, "state"), { owner, repo, checkoutDir: repoDir });
+  return at.outcome === "destination" || at.outcome === "unreadable" ? { taskDestination: at } : {};
 }
 
 /** W1-T12222: the gardens whose every land is a new task file under plan/tasks.d, read from the code. The first four
@@ -35374,15 +35477,15 @@ export function triageLockRefusalMessage(pid: number, startedAt: string, lockPat
 /** Serialize with the existing queued writer, then land in the entry's home. Neither the public
  * lane nor the shared private checkout receives a mutable feedback copy. The existing queue keeps
  * a refused private write recoverable by the normal landing sweep. */
-function landPrivateTriageStatus(root: string, stateRoot: string, feedbackId: string, status: FeedbackEntry["status"],
-  opts: { proposalPr?: string; summary?: FeedbackEntry["summary"]; log: (step: string, extra?: Record<string, unknown>) => void }) {
+async function landPrivateTriageStatus(root: string, stateRoot: string, feedbackId: string, status: FeedbackEntry["status"],
+  opts: { proposalPr?: string; summary?: FeedbackEntry["summary"]; log: (step: string, extra?: Record<string, unknown>) => void }): Promise<LandFeedbackResult> {
   const home = triageFeedbackHome(root, feedbackId);
   if (home.destination === undefined) throw new Error("private triage status has no destination");
   const updated = setFeedbackStatus(root, feedbackId, status, { ...opts, land: { stateRoot } });
   const content = readFileSync(join(queuedFeedbackDir(stateRoot), `${feedbackId}.yaml`), "utf8");
   if (content !== stringifyYaml(updated)) throw new Error("feedback status queue does not hold the requested edit");
-  return landFeedbackStatusContent(home.root, feedbackEntryRepoPath(feedbackId), content,
-    planDestinationLandingOpts({ log: opts.log }, home.destination));
+  return landFeedbackStatusContentAsync(home.root, feedbackEntryRepoPath(feedbackId), content,
+    planDestinationLandingOpts<LandFeedbackAsyncOpts>({ log: opts.log }, home.destination));
 }
 
 interface PrivateTriagePublication {
@@ -35456,7 +35559,7 @@ async function finishPrivateTriagePublication(publication: PrivateTriagePublicat
   try {
     const stateRoot = join(config.root, "state");
     await proposeFeedbackWithSummary(worktreePath, feedbackId, summarizeDeps, { proposalPr: publication.prUrl, land: { stateRoot } });
-    const landing = landPrivateTriageStatus(worktreePath, stateRoot, feedbackId, "proposed", { proposalPr: publication.prUrl, log });
+    const landing = await landPrivateTriageStatus(worktreePath, stateRoot, feedbackId, "proposed", { proposalPr: publication.prUrl, log });
     if (!landing.landed) throw new Error("the private feedback landing refused the write");
     publication.stage = "feedback_landed";
     writeAtomic(receiptPath, JSON.stringify(publication), { mode: 0o600 });
@@ -35468,7 +35571,7 @@ async function finishPrivateTriagePublication(publication: PrivateTriagePublicat
   return publication.prUrl;
 }
 
-function landTriageStatusOutcome(i: {
+async function landTriageStatusOutcome(i: {
   worktreePath: string;
   repoDir: string;
   feedbackId: string;
@@ -35480,15 +35583,15 @@ function landTriageStatusOutcome(i: {
   stateRoot: string;
   log: (step: string, extra?: Record<string, unknown>) => void;
   say: (msg: string) => void;
-}): number {
+}): Promise<number> {
   const { decision, feedbackId, log, say } = i;
   const home = triageFeedbackHome(i.worktreePath, feedbackId);
   const landing = home.destination !== undefined
-    ? landPrivateTriageStatus(i.worktreePath, i.stateRoot, feedbackId, decision.status, { log })
-    : (() => {
+    ? await landPrivateTriageStatus(i.worktreePath, i.stateRoot, feedbackId, decision.status, { log })
+    : await (() => {
       setFeedbackStatus(i.worktreePath, feedbackId, decision.status);
       const content = readFileSync(feedbackEntryPath(i.worktreePath, feedbackId), "utf8");
-      return landFeedbackStatusContent(i.worktreePath, feedbackEntryRepoPath(feedbackId), content, { log });
+      return landFeedbackStatusContentAsync(i.worktreePath, feedbackEntryRepoPath(feedbackId), content, { log });
     })();
   if (!landing.landed) {
     const cause = landing.error ?? (landing.refused?.length ? `refused: ${JSON.stringify(landing.refused)}` : "nothing was landed");
@@ -35928,7 +36031,7 @@ async function triageCommandLocked(
     // W1-T12198: an outcome that files no task changes one status line, so it rides the shared
     // feedback landing pull request and opens no pull request of its own.
     if (decision.action === "no_task" || decision.action === "grill") {
-      return landTriageStatusOutcome({ worktreePath, repoDir, feedbackId, entry, decision, grillIssueUrl,
+      return await landTriageStatusOutcome({ worktreePath, repoDir, feedbackId, entry, decision, grillIssueUrl,
         repository: `${owner}/${repo}`, threadStorePath: inboxThreadStorePath(config.root), stateRoot: join(config.root, "state"), log, say });
     }
 
@@ -37466,6 +37569,9 @@ export async function inboxCommand(rest: string[], deps: { config?: Config; gith
   const ledgerPath = ledgerPathFor(config);
   const { owner, repo } = instancePlan.target ?? resolveOwnerRepo();
 
+  // W1-T12715: tasks held for an operator answer come first; the console reads the same gates.
+  const held = renderHeldTaskQuestions(projectHeldTaskQuestionGates(plan.tasks, (id) => taskInputAnswer(repoRoot, id), `${owner}/${repo}`));
+  if (held) console.log(held);
   const registryPath = join(config.root, "state", "inbox-proposals.json");
   const proposals: Proposal[] = parseProposalRegistry(readFileIfExists(registryPath));
   if (proposals.length === 0) {
@@ -38272,7 +38378,7 @@ export function productionMachineFilingJudgePorts(opts: {
       };
     },
     openWorkspace: () => gardenCheckoutAsync({ name: "machine-judge", repoDir: opts.repoRoot, worktreesRoot: opts.worktreesRoot, owner: opts.owner, repo: opts.repo, log: opts.log, fetcher, clock: opts.clock,
-      ...(opts.taskFilesLanding ? { taskFilesLanding: opts.taskFilesLanding } : {}) }),
+      ...(opts.taskFilesLanding ? { taskFilesLanding: opts.taskFilesLanding, ...gardenTaskDestination(opts.taskFilesLanding.stateRoot, opts.repoRoot, opts.owner, opts.repo) } : {}) }),
     prState: (prUrl) => gardenPrState(opts.owner, opts.repo, prUrl, fetcher),
     stageProposal: (proposal) => void stageInboxProposalOnce(join(opts.stateDir, "inbox-proposals.json"), proposal),
     log: opts.log,
@@ -39038,6 +39144,14 @@ export async function approveCommand(
     return code;
   }
 
+  // W1-T12214: the repository this approval files its task file in. Skill approvals stay in the public repository.
+  const publicFiling = { owner, repo, checkoutDir: join(config.root, "repos", repo), destination: false };
+  const filing = deps.gateway === undefined && classification.state === "ready" && classification.draft && !classification.skillFile
+    ? await approveFilingRepository([classification.draft.fragmentYaml], plan, join(config.root, "state"), publicFiling) : publicFiling;
+  if ("refused" in filing) {
+    console.error(`rmd approve: refusing ${proposalId} — ${filing.refused}`);
+    return 1;
+  }
   let approveDestinationSnapshot: TaskIdDestinationSnapshot | null = null;
   let approveDestinationFailure: string | undefined;
   if (deps.gateway === undefined && classification.state === "ready" && classification.draft) {
@@ -39082,13 +39196,16 @@ export async function approveCommand(
   // W1-T903: shared by findPushedBranch (resume evidence) and createRatificationBranch (fresh
   // PROCEED) — both need the same clone, and only one of the two ever runs per approve call.
   const ensureRepoDir = (): string => {
-    repoDir = repoDir ?? join(config.root, "repos", repo);
+    repoDir = repoDir ?? filing.checkoutDir;
     if (!existsSync(repoDir)) {
+      if (filing.destination) throw new Error("rmd approve: the plan destination checkout is missing");
       mkdirSync(dirname(repoDir), { recursive: true });
       ghExec(["repo", "clone", `${owner}/${repo}`, repoDir], { stdio: "inherit" });
     }
     return repoDir;
   };
+  // The id mint and the id reservations stay on the public repository.
+  const idRoot = (worktreePath: string): string => filing.destination ? approvePublicClone(config, owner, repo) : worktreePath;
   const addApproveWorktree = (dir: string, path: string, branch: string, base: string): string => {
     addLockedRunWorktree(dir, path, branch, base, runId, log); // W1-T5356: lock before add
     return (addedWorktreePath = path);
@@ -39127,7 +39244,7 @@ export async function approveCommand(
     worktreePath: string, payload: RatificationPayload, purposeLabel: string, filingBranch: string,
   ): void => {
     const subjectId = deriveTaskReferent(payload.proposalId);
-    const subject = subjectId === undefined ? undefined : loadPlan(join(worktreePath, "plan", "tasks.yaml")).byId.get(subjectId);
+    const subject = subjectId === undefined ? undefined : (filing.destination ? plan : loadPlan(join(worktreePath, "plan", "tasks.yaml"))).byId.get(subjectId);
     if (subject?.status === "blocked" && subject.retirement) {
       throw new Error(`rmd approve: refusing to ratify ${payload.proposalId} — task ${subjectId} is ${subject.retirement} in the worktree plan`);
     }
@@ -39143,8 +39260,8 @@ export async function approveCommand(
         mint: () => {
           if (approveDestinationFailure) throw new Error(approveDestinationFailure);
           return mintNextTaskIdWithHistory({
-            planPath: join(worktreePath, "plan", "tasks.yaml"),
-            repoRoot: worktreePath,
+            planPath: join(idRoot(worktreePath), "plan", "tasks.yaml"),
+            repoRoot: idRoot(worktreePath),
             destinationSnapshot: approveDestinationSnapshot,
             openPrTexts: () => openPrMintTexts(owner, repo),
           });
@@ -39163,7 +39280,7 @@ export async function approveCommand(
           // reservation failure into a free-text `reason` string) so a genuine
           // `TaskIdReservationError` still leaves a durable, structured ledger event before
           // `materializeDraftTaskIds` reduces it to prose.
-          const approveRun = (args: string[]) => {
+          const approveRun = filing.destination ? publicCloneRun(approvePublicClone(config, owner, repo)) : (args: string[]) => {
             const r = spawnSync("git", ["-C", worktreePath, ...args], { encoding: "utf8" });
             return { status: r.status ?? 1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
           };
@@ -39191,8 +39308,9 @@ export async function approveCommand(
     shardRelPaths = fileRatificationDraft(
       worktreePath,
       { fragmentYaml: materialized.fragmentYaml, proposalId: payload.proposalId, stampLine: materialized.stampLine },
-      { mkdirSync, writeFileSync, readFileSync },
+      ratificationFs(filing.destination),
       join,
+      filing.destination ? knownPlanRepos(repoRoot) : undefined, filing.destination ? repoRoot : undefined,
     );
     log("approve.shards_written", { proposal_id: payload.proposalId, paths: shardRelPaths });
 
@@ -39221,7 +39339,8 @@ export async function approveCommand(
   // W1-T5348: the committed shards and the title are preflighted before the push. The body is authored later by
   // buildPlanPrBody, which already refuses a proof that does not discriminate, so it is not re-checked here.
   const preflightApprovePush = (path: string, branch: string, id: string): void =>
-    refuseRedPlanPr(planPrPreflight({ cwd: path, title: approvePrTitle(id), body: "" }, { log }), { lane: "approve", branch, log });
+    refuseRedPlanPr(planPrPreflight({ cwd: path, title: approvePrTitle(id), body: "", ...(filing.destination ? { codeRoot: repoRoot } : {}) }, { log }),
+      { lane: "approve", branch, log });
   const branchFiledTaskIds = (path: string): string[] =>
     execFileSync("git", ["-C", path, "diff", "origin/main...HEAD", "--", "plan/tasks.yaml", "plan/tasks.d"], { encoding: "utf8" })
       .split("\n")
@@ -39241,7 +39360,7 @@ export async function approveCommand(
     // W1-T903 design (ii): the SAME REST surface fetchOpenPrsRest (open-prs-rest.ts) reads,
     // never `gh pr list` — a probe issues no GraphQL call at all.
     findExistingPr(branch) {
-      return probeExistingPlanPr(ghJson, owner, repo, branch);
+      return probeExistingPlanPr(ghJson, filing.owner, filing.repo, branch);
     },
     // W1-T4437 design (i)/(ii): the OPEN plan PR of a DIFFERENT approve run of this same pass, if
     // one is safe to join. The ledger names the CANDIDATE (evidence only, cheap, no network);
@@ -39258,7 +39377,7 @@ export async function approveCommand(
         log("approve.join_skipped", { pr_url: candidate.prUrl, branch: candidate.branch, reason: "approving_pid_alive", actor_pid: candidate.actorPid });
         return undefined;
       }
-      const open = probeExistingPlanPr(ghJson, owner, repo, candidate.branch);
+      const open = probeExistingPlanPr(ghJson, filing.owner, filing.repo, candidate.branch);
       if (!open) return undefined;
       let headSha: string | undefined;
       try {
@@ -39343,7 +39462,7 @@ export async function approveCommand(
       log("approve.joined", { proposal_id: payload.proposalId, branch });
       // W1-T4706: the open PR's body is rebuilt over every proposal on the branch, never left as the first approve's.
       try {
-        const live = ghJson(["api", `repos/${owner}/${repo}/pulls/${prUrl.match(/\/pull\/(\d+)/)?.[1]}`]) as { body?: string | null };
+        const live = ghJson(["api", `repos/${filing.owner}/${filing.repo}/pulls/${prUrl.match(/\/pull\/(\d+)/)?.[1]}`]) as { body?: string | null };
         const paths = execFileSync("git", ["-C", worktreePath, "diff", "--name-only", worktreeMergeBase(worktreePath), "HEAD"], { encoding: "utf8" }).split("\n").filter(Boolean);
         const body = joinedRatificationPrBody(live.body ?? "", filedStampLine, branchFiledTaskIds(worktreePath), paths, { proofCwd: worktreePath });
         writePrBodyRest(prUrl, body);
@@ -39383,10 +39502,10 @@ export async function approveCommand(
       // NO Remudero-Task trailer. W1-T4700: Changed files are the paths the commit wrote.
       const ids = filedTaskIds.length > 0 ? filedTaskIds : [id];
       const body = ratificationPrBody(classification.draft?.stampLine ?? "", ids, shardRelPaths, { proofCwd: worktreePath });
-      assertLiveWriteAllowed("gh-pr-create", `opening a PR against ${owner}/${repo}`);
+      assertLiveWriteAllowed("gh-pr-create", `opening a PR against ${filing.owner}/${filing.repo}`);
       // W1-T903 design (i): REST, not `gh pr create` (GraphQL) — a pure transport swap, since
       // title/body are already fully authored above (no `--fill` autofill to replace).
-      const created = createPlanPrRest(ghJson, owner, repo, {
+      const created = createPlanPrRest(ghJson, filing.owner, filing.repo, {
         title: approvePrTitle(id),
         body,
         head: branch,
@@ -39567,7 +39686,7 @@ export async function approveCommand(
     const notGreenExit = approveCiNotGreenExit(ci, result.prUrl, removeApproveWorktree);
     if (notGreenExit !== undefined) return notGreenExit;
     const prNum = result.prUrl.match(/\/pull\/(\d+)/)?.[1] ?? result.prUrl;
-    const reviewCode = await reviewCommand(prNum);
+    const reviewCode = await reviewCommand(filing.destination ? result.prUrl : prNum);
     // W1-T230: a ratification PR carries NO Remudero-Task trailer by design
     // (see the no-trailer comment above) — reviewCommand's own taskId resolve
     // therefore falls back to `PR-${view.number}` and its review.posted ledger
@@ -39605,6 +39724,58 @@ export async function approveCommand(
   } finally {
     if (ownedWorktreePath) removeRunLock(ownedWorktreePath);
   }
+}
+
+/** W1-T12214: the repository and checkout an approval files in. */
+interface ApproveFilingRepository { owner: string; repo: string; checkoutDir: string; destination: boolean }
+
+/** W1-T12214: a fragment that names a task already filed edits that task in the repository that holds it
+ * (the one lookup of W1-T12207). A fragment of new tasks only follows the `task` kind of the host file. */
+async function approveFilingRepository(fragments: readonly string[], plan: Pick<Plan, "byId">, stateDir: string,
+  publicRepository: ApproveFilingRepository): Promise<ApproveFilingRepository | { refused: string }> {
+  const selected = resolvePlanDestination("task", stateDir, publicRepository);
+  if (selected.outcome === "unreadable") return { refused: selected.reason };
+  const named = [...new Set(fragments.flatMap((fragment) => [...fragment.matchAll(/^- id:\s*(\S+)/gm)].map((m) => m[1]!)))].filter(namesATask);
+  const holders = new Set<"public" | "ops">();
+  for (const id of named) {
+    const found = await findTaskInCatalogs(id, { byId: plan.byId, stateDir });
+    if (found.outcome === "unreadable") return { refused: `the catalog that holds ${id} is unreadable (${found.reason})` };
+    if (found.outcome === "found") holders.add(found.catalog);
+  }
+  if (holders.size > 1) return { refused: "the approval changes task files in both repositories" };
+  if (holders.has("ops")) {
+    const ops = planDestinationRepository(stateDir);
+    if (ops.outcome !== "named") return { refused: "the repository that holds the task is not named on this host" };
+    return { owner: ops.owner, repo: ops.repo, checkoutDir: ops.checkoutDir, destination: true };
+  }
+  if (holders.has("public") || selected.outcome !== "destination") return publicRepository;
+  return { owner: selected.owner, repo: selected.repo, checkoutDir: selected.checkoutDir, destination: true };
+}
+
+/** The shard writer's file system. A destination checkout can hold no MASTER-PLAN.md. There, an absent file reads
+ * as empty, so the stamp changes nothing and no MASTER-PLAN.md is written. */
+function ratificationFs(destination: boolean): ShardWriteFs & { readFileSync: (path: string, enc: "utf8") => string } {
+  if (!destination) return { mkdirSync, writeFileSync, readFileSync };
+  return { mkdirSync, writeFileSync,
+    readFileSync: (path, enc) => basename(path) === "MASTER-PLAN.md" && !existsSync(path) ? "" : readFileSync(path, enc) };
+}
+
+/** A git runner over the public clone, through the hardened leaf, for the id reservations of a destination approval. */
+function publicCloneRun(dir: string): (args: string[]) => { status: number; stdout: string; stderr: string } {
+  return (args) => {
+    const r = hostWorktreeGitResult(dir, args);
+    return { status: r.status ?? 1, stdout: r.stdout, stderr: r.stderr };
+  };
+}
+
+/** W1-T12214: the public clone that a destination approval mints and reserves its ids in. */
+function approvePublicClone(config: Config, owner: string, repo: string): string {
+  const dir = join(config.root, "repos", repo);
+  if (!existsSync(dir)) {
+    mkdirSync(dirname(dir), { recursive: true });
+    ghExec(["repo", "clone", `${owner}/${repo}`, dir], { stdio: "inherit" });
+  }
+  return dir;
 }
 
 /**
@@ -39652,6 +39823,15 @@ async function approveBatchCommand(
     return 2;
   }
 
+  // W1-T12214: one batch files in one repository, as the single form decides it.
+  const publicFiling = { owner, repo, checkoutDir: join(config.root, "repos", repo), destination: false };
+  const filing = deps.batchGateway === undefined
+    ? await approveFilingRepository(found.flatMap((row) => row.classification.draft ? [row.classification.draft.fragmentYaml] : []), plan,
+      join(config.root, "state"), publicFiling) : publicFiling;
+  if ("refused" in filing) {
+    console.error(`rmd approve: refusing the batch — ${filing.refused}`);
+    return 1;
+  }
   let batchDestinationSnapshot: TaskIdDestinationSnapshot | null = null;
   let batchDestinationFailure: string | undefined;
   if (deps.batchGateway === undefined) {
@@ -39676,15 +39856,16 @@ async function approveBatchCommand(
   let batchPushed: LanePushedIds;
   const releaseBatchUnfiled = (ending: string): void => {
     if (batchHeld.length === 0 || repoDir === undefined) return;
-    const cloneDir = repoDir;
+    const cloneDir = filing.destination ? approvePublicClone(config, owner, repo) : repoDir;
     releaseUnfiledReservations(batchHeld, batchPushed, {
       run: gitRunAdapter((args) => hostWorktreeGitResult(cloneDir, args)), lane: "approve-batch", log,
       reason: laneReleaseReason(`rmd approve batch ${runId}`, ending, batchPushed),
     });
   };
   const ensureRepoDir = (): string => {
-    repoDir = repoDir ?? join(config.root, "repos", repo);
+    repoDir = repoDir ?? filing.checkoutDir;
     if (!existsSync(repoDir)) {
+      if (filing.destination) throw new Error("rmd approve: the plan destination checkout is missing");
       mkdirSync(dirname(repoDir), { recursive: true });
       ghExec(["repo", "clone", `${owner}/${repo}`, repoDir], { stdio: "inherit" });
     }
@@ -39709,6 +39890,8 @@ async function approveBatchCommand(
       // fileRatificationBatch, so each member gets the single lane's refusal and written-paths list,
       // and every member's stamp folds over this worktree's own MASTER-PLAN.md in order (Q2).
       const batchWorktree = worktreePath;
+      // The id mint and the id reservations stay on the public repository.
+      const batchIdRoot = filing.destination ? approvePublicClone(config, owner, repo) : batchWorktree;
       const filed = fileRatificationBatch(
         batchWorktree,
         payloads,
@@ -39719,8 +39902,8 @@ async function approveBatchCommand(
               mint: () => {
                 if (batchDestinationFailure) throw new Error(batchDestinationFailure);
                 return mintNextTaskIdWithHistory({
-                  planPath: join(batchWorktree, "plan", "tasks.yaml"),
-                  repoRoot: batchWorktree,
+                  planPath: join(batchIdRoot, "plan", "tasks.yaml"),
+                  repoRoot: batchIdRoot,
                   destinationSnapshot: batchDestinationSnapshot,
                   openPrTexts: () => openPrMintTexts(owner, repo),
                 });
@@ -39733,7 +39916,7 @@ async function approveBatchCommand(
                 const reserveFrom = block.ids[0];
                 const batchReserver = gatedRemoteRefReserver({
                   lane: "approve-batch", log,
-                  run: (args) => {
+                  run: filing.destination ? publicCloneRun(batchIdRoot) : (args) => {
                     const r = spawnSync("git", ["-C", batchWorktree, ...args], { encoding: "utf8" });
                     return { status: r.status ?? 1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
                   },
@@ -39756,8 +39939,9 @@ async function approveBatchCommand(
           const filedPayload = { proposalId: payload.proposalId, fragmentYaml: materialized.fragmentYaml, stampLine: materialized.stampLine };
           return deps.automaticFollowups ? deps.automaticFollowups.finalize(filedPayload) : filedPayload;
         },
-        { mkdirSync, writeFileSync, readFileSync },
+        ratificationFs(filing.destination),
         join,
+        filing.destination ? knownPlanRepos(repoRoot) : undefined, filing.destination ? repoRoot : undefined,
       );
       allWrittenPaths = filed.writtenPaths;
       allFiledTaskIds = filed.filedIds;
@@ -39789,8 +39973,8 @@ async function approveBatchCommand(
         changedFiles: filedPaths,
         proofCwd: worktreePath,
       });
-      assertLiveWriteAllowed("gh-pr-create", `opening a PR against ${owner}/${repo}`);
-      const created = createPlanPrRest(ghJson, owner, repo, {
+      assertLiveWriteAllowed("gh-pr-create", `opening a PR against ${filing.owner}/${filing.repo}`);
+      const created = createPlanPrRest(ghJson, filing.owner, filing.repo, {
         title: deps.automaticFollowups ? followupFilingPresentation(ids).title :
           `chore(plan): ratify ${ids.length} proposals via rmd approve`,
         body,
@@ -39872,7 +40056,7 @@ async function approveBatchCommand(
     const notGreenExit = approveCiNotGreenExit(ci, result.prUrl, removeApproveWorktree);
     if (notGreenExit !== undefined) return notGreenExit;
     const prNum = result.prUrl.match(/\/pull\/(\d+)/)?.[1] ?? result.prUrl;
-    const reviewCode = await reviewCommand(prNum);
+    const reviewCode = await reviewCommand(filing.destination ? result.prUrl : prNum);
     let armHeadSha: string | undefined;
     try {
       armHeadSha = readHeadShaRest(result.prUrl);
@@ -42894,6 +43078,12 @@ const COMMANDS: readonly CommandSpec[] = [
     detail: "print the next free W1-T<n>, derived from the max across plan/tasks.yaml, EVERY plan/tasks.d/*.yaml shard, the ids OPEN plan PRs have already minted (the 2/2 collision class: W1-T256->257 #770, W1-T260->261 #775), and every id ever declared in the git history of plan/ (the fold class: an id filed then folded away, W1-T278); --offline skips the open-PR read (the mint is then a FLOOR, and says so; the history scan still runs — it is a local git read, not a network one); prints its provenance, spawns nothing. --audit is a READ-ONLY report over origin's refs/rmd-id/* namespace: every reservation is classified as HELD, CANDIDATE or UNKNOWN by current plan declarations, historical plan declarations, open run-* branches, open PR Remudero-Task trailers and the anchor age. --audit --reap previews only CANDIDATE rows past a freshly measured bar: the largest HELD-anchor-to-first-PR delay, floored at RESERVATION_PUSH_GRACE_MS, with n/max/p50 and population reported. It reads anchors with one private-namespace fetch; any unread surface or empty measured population refuses deletion. --reap alone writes one planned summary; --apply verifies a PENDING intent per id before one batched, guarded, leased push, then verifies confirmed released/skipped outcomes. Missing push results or outcome writes report UNKNOWN and return nonzero with recoverable intents. Unresolved batches block further deletion at that repository/state root. --audit --reap --reconcile reads the complete compressed, rotated-plain and live ledger union and freshly reads each pending exact ref; it records observed_absent with actor UNKNOWN, foreign or unchanged without deleting. Unread or torn history refuses action; reconciliation never retries a deletion. A later deletion requires another complete audit and explicit --reap --apply. Neither apply nor reconciliation runs automatically. --offline refuses --reap; --audit-age-days applies only to audit alone. The report states the candidate age threshold (default 14 days, override with --audit-age-days); failed open-PR or run-branch reads produce UNKNOWN rows, never reclaimable candidates, and --audit alone never pushes or deletes a ref. --max-scan N widens the W1 reservation walk from its default 50 candidates to N (1..200); it requires explicit --reserve and does not apply to --prefix. W1-T1055 --reserve ATOMICALLY CLAIMS the id on origin (refs/rmd-id/<id>) instead of merely printing one, so the push IS the claim and two concurrent minters cannot leave with the same number; it calls the existing reserveTaskIdRemote, which already advances on contention under its own maxScan bound, and PRINTS THE ID IT ACTUALLY HOLDS rather than the one it first tried. Each contested candidate is reported as HELD BY ANOTHER CALLER, naming whether the holder's anchor is the fleet's (`rmd-id reservation <pid>@<container>`) or an operator hand-mint (`reserve W1-T#### <host>-<pid>-<nanotime>`), because silently advancing past a rejection is how two collisions went unnoticed. FAIL-CLOSED: an unreachable origin REFUSES and exits non-zero rather than minting optimistically — the caller has spent nothing yet. RESERVING IS THE DEFAULT (W1-T3091): a bare mint CLAIMS the id, and --no-reserve is the opt-out. The old default printed a number and claimed nothing, so two lanes minting in one window took the same id and one renumbered after its PR was open -- measured five times in one session on 2026-09-07, and again on 2026-09-15 when two shards reached main under one id and loadPlan threw, failing every PR's required ci until a human renumbered the loser. --offline IMPLIES --no-reserve (it declines to read origin, so it cannot push to it); an explicit --reserve beside --offline or --no-reserve is still refused by name. --audit never reserves. The price is that a reserved id nobody files is HELD rather than free -- --audit is the report that finds those, and reclaiming one is an operator decision. --reserve and --offline are contradictory and are refused by argument validation. WRITING AN EXAMPLE ID IN PROSE: use the placeholder form W1-T<n> (or W1-T<id>, W1-TNNNN), never a bare digit form -- the open-PR scan above reads a literal out of any PR body, commit message or comment, and a code span or fenced block does NOT hide it. The placeholders carry no digits, so the extractor cannot see them; `scripts/task-id-existence-check.mjs` enforces this for src/ and deploy/. W1-T4388 --prefix <P> --repo <owner/name> mints a CONSUMER repo's <P>-T<n> id (CONSOLE, PORTAL): the next number above every one that repo's main plan (tasks.yaml plus tasks.d shards), open PR titles, bodies and branches, run-<P>-T* branches and refs/rmd-id/<P>-T* refs hold, reserved by pushing refs/rmd-id/<P>-T<n> to THAT repo's origin. It always reserves, refuses on any unread surface, and refuses --offline, --no-reserve, --audit and --plan. W1-T4414 --branch <name> records <name> as the reservation's holder instead of the current branch, so an id minted from any checkout names the branch its filing PR will be opened from; review refuses a filing whose head is not that holder. W1-T9683 --count <n> reserves n ids from ONE open-PR read and one history scan, each walk starting above the last id held (contention advances and is reported exactly as for one id), all under the same holder; it prints a RESERVED line per id it holds and a final `HELD k of n:` line, and a partial result (k < n) prints only the ids it holds and exits 2. --count is refused beside --offline, --no-reserve, --audit and --prefix.",
   },
   {
+    name: "plan-destination",
+    syntax: "rmd plan-destination <decision|feedback|task>",
+    summary: "Print the repository and checkout that take a new plan file of this kind on this host.",
+    detail: "W1-T12216: reads the host file <state dir>/plan-destination.json, the switch of W1-T12200, and prints three facts for a NEW file of the kind: the outcome (off when there is no host file, not_listed when the file does not list the kind, destination when it does), the repository, and the checkout. off and not_listed name the public repository and this command's own checkout. A file that is present but wrong prints `outcome: unreadable` with its reason and exits 1; it is never read as off. A changed file is edited in the repository that holds it, whatever this command prints. Exits 0 when it names a repository, 1 unreadable, 2 bad usage. READ-ONLY.",
+  },
+  {
     name: "emissions",
     syntax: "rmd emissions [--days N]",
     summary: "Which CLI verbs wrote no ledger line in the window -- dead-capability detection.",
@@ -43599,7 +43789,9 @@ import { buildIntoStore, childEntryStoreRoot, materializeMainEntryFromStore } fr
 // W1-T9738: moved to the engine module, so a suite that drives it never imports this file; re-exported for callers here.
 import { buildEngineAfterStore } from "./lib/engine-tree.js";
 export { buildEngineAfterStore };
-import { RUN_CHILD_FALLBACK_STEP, chainAbortSignal, createDetachedWorkHost, runChildModeIsOn, runDetachedReview, spawnRunChild, type DetachedWorkSpec, type RunChildHandle, type RunChildPending, type SpawnRunChildPorts } from "./lib/run-child.js";
+import { RUN_CHILD_FALLBACK_STEP, chainAbortSignal, createDetachedWorkHost, reviewerCodeStartGate, runChildModeIsOn, runDetachedReview, spawnRunChild, type DetachedReviewCommand, type DetachedWorkSpec,
+  type FreshTreeEntry, type FreshTreeExit, type FreshTreeReview, type ReviewerCodeStartGate, type RunChildHandle, type RunChildPending, type SpawnRunChildPorts } from "./lib/run-child.js";
+export type { FreshTreeEntry, FreshTreeExit } from "./lib/run-child.js";
 import { createSweepFixAdmissionController, productionFixAdmissionResidents, installDetachedWorkHost, readFixDispatchEnvelope, runFixDispatchChild, type FixDispatchChildPorts } from "./lib/sweep.js";
 import { classEstimate, classTypical } from "./lib/host-memory-learning.js";
 import { type RunChildMode } from "./lib/policy.js";
@@ -44228,6 +44420,7 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
   ["procedures", (rest) => proceduresCommand(rest, proceduresProductionInput())],
   ["check-acceptance", (rest) => checkAcceptanceCommand(rest)],
   ["next-task-id", async (rest) => await withGhTransportFloorMode("wait", () => nextTaskIdCommand(rest))],
+  ["plan-destination", (rest) => planDestinationCommand(rest)],
   ["hand-worktree", (rest) => handWorktreeCommand(rest)],
   ["worktree", (rest) => worktreeCommand(rest)],
   ["pr-checks", (rest) => reportPrChecks(rest)],
@@ -44673,8 +44866,23 @@ export async function runDetachedWork(work: DetachedWorkSpec, ctx: { runId: stri
   if (work.kind !== "review" || work.prNumber === undefined) {
     throw new Error(`the run child hosts no detached work of kind ${work.kind}${work.kind === "review" ? " without a PR number" : ""}`);
   }
-  return runDetachedReview(work, ctx, ports.reviewCommand ?? reviewCommand);
+  const log = ports.log ?? ((step: string, extra?: Record<string, unknown>) => {
+    appendLedger(ledgerPathFor(ports.config ?? loadConfig()), { run_id: ctx.runId, task_id: ctx.taskId, step, lane: "review", ...extra });
+  });
+  return runDetachedReview(work, ctx, ports.reviewCommand ?? gatedDetachedReviewCommand(repoRoot, log));
 }
+
+/** W1-T12824: the run child's review through the sweep's start check. A fresh start reading goes to publication with the
+ *  verdict; a stale one runs the review from a fresh tree at origin/main, or runs no reviewer. */
+export function gatedDetachedReviewCommand(root: string, log: (step: string, extra?: Record<string, unknown>) => void): DetachedReviewCommand {
+  const seams: FreshTreeReviewSeams = {
+    git: reviewerGit(root), addWorktree: realDeps().reviewWorktree.addWorktree, worktreeRoot: join(root, "..", "worktrees"), spawnReview: spawnRmdReviewForFreshTree,
+  };
+  const gate = buildReviewerCodeFreshnessGate(() => checkReviewerCodeFreshnessAsync(root, process.env), log, reviewCommand,
+    buildFreshTreeReviewRunner(root, seams));
+  return (prArg, rest, opts) => gate.call(prArg, rest, opts);
+}
+
 
 /**
  * W1-T9114: a fix dispatch as a run child's work. The decision envelope comes from the spec; the live dependencies are rebuilt HERE,
@@ -45128,6 +45336,7 @@ function sweepCommandHost(ports: Pick<SweepCommandHost, "freshTreeGit" | "comman
     dispatchFixPreflightStandDown,
     ghLiveStateAsync,
     resolveFixRungTaskContractAtHeadAsync,
+    taskContractAdvanceAtHead: readTaskContractAtHeadViaGit,
     createFixRungWorktreeWithToolchain,
     captureWorktreeSnapshotViaGit,
     writeFixCensusSnapshotAsync,

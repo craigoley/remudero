@@ -12,7 +12,8 @@
  * house-layout. A gate whose scope and baseline the merge does not land holds the same blobs on both
  * trees, so its two counts are equal and it is counted without a read.
  * {@link readMergedRatchetInputsSteps} is the I/O: merge-tree and blob reads in the managed clone,
- * no worktree, no npm and no CI run.
+ * no worktree, no npm and no CI run. W1-T12717: a gate CI runs as a signal is not counted, and
+ * {@link ratchetUpdateWithheld} names a held verdict an update-branch cannot cure.
  */
 import { step, type Steps } from "./git-push.js";
 import { singlePrRestArgs } from "./open-prs-rest.js";
@@ -22,7 +23,7 @@ import { MEASURED_ROOTS } from "../../scripts/comment-load-ratchet.mjs";
 // @ts-expect-error a plain .mjs script with no declaration file, as src/lib/plan-index.ts imports its sibling.
 import { DEFAULT_BASELINE_RELATIVE_PATH as CLOCK_BASELINE, readBaseline as readClockBaseline, scanClockSignaturesFromText } from "../../scripts/clock-signature-ratchet.mjs";
 // @ts-expect-error a plain .mjs script with no declaration file, as src/lib/plan-index.ts imports its sibling.
-import { DEFAULT_BASELINE_RELATIVE_PATH as SOURCE_SIZE_BASELINE, ceilingFor, countLines, readBaseline as readSourceSizeBaseline } from "../../scripts/source-size-ratchet.mjs";
+import { CI_READS_BASELINE as SOURCE_SIZE_CI_READS_BASELINE, DEFAULT_BASELINE_RELATIVE_PATH as SOURCE_SIZE_BASELINE, ceilingFor, countLines, readBaseline as readSourceSizeBaseline } from "../../scripts/source-size-ratchet.mjs";
 // @ts-expect-error a plain .mjs script with no declaration file, as src/lib/plan-index.ts imports its sibling.
 import { FIXTURE_COPY_CENSUS_FILENAME, FIXTURE_COPY_EXCLUDED_DIR, FIXTURE_COPY_SIGNATURES, countFixtureCopiesInTexts } from "../../scripts/fixture-copy-census.mjs";
 // @ts-expect-error a plain .mjs script with no declaration file, as src/lib/plan-index.ts imports its sibling.
@@ -38,10 +39,20 @@ import { HOUSE_LITERALS, houseLiteralCounts, qualifiedRunTaskLayoutSplit } from 
 
 export type MergedRatchetVerdictName = "clean" | "crossing" | "stale-lowering" | "unread";
 
-export const COUNTED_RATCHET_GATES = ["clock-signature", "source-size", "fixture-copy", "deps-interface", "claude-md-budget",
+/** The gates this judge has a counter for. W1-T12717: it counts only those CI runs against the same baseline. */
+export const RATCHET_COUNTER_GATES = ["clock-signature", "source-size", "fixture-copy", "deps-interface", "claude-md-budget",
   "learnings-budget", "affected-reach", "house-layout"] as const;
 
-export type CountedRatchetGate = (typeof COUNTED_RATCHET_GATES)[number];
+export type CountedRatchetGate = (typeof RATCHET_COUNTER_GATES)[number];
+
+/** W1-T12717 — each gate's own script says whether CI's run of it reads the baseline this judge reads.
+ *  A gate whose script exports CI_READS_BASELINE false is a CI signal: a held merge or an update-branch
+ *  on it can never be cured, because CI never refuses its growth. */
+const CI_READS_BASELINE: Partial<Record<CountedRatchetGate, { readsBaseline: boolean; script: string }>> = {
+  "source-size": { readsBaseline: SOURCE_SIZE_CI_READS_BASELINE as boolean, script: "scripts/source-size-ratchet.mjs" },
+};
+
+export const COUNTED_RATCHET_GATES: readonly CountedRatchetGate[] = RATCHET_COUNTER_GATES.filter((g) => CI_READS_BASELINE[g]?.readsBaseline !== false);
 
 /** One count over its ceiling on the merged tree. `prCeiling` is the row as the merge lands it. */
 export interface MergedRatchetRow {
@@ -54,12 +65,14 @@ export interface MergedRatchetRow {
   prCeiling: number;
   /** stale-lowering: the merged count (what the shrink-record writes there); crossing: the gate's printed record value. */
   rederived: number;
+  /** W1-T12717: the merged count minus main's count, which an update-branch cannot remove. */
+  prAdds: number;
 }
 
 /** A gate this judge does not count, and why: never read as clean. */
 export interface UncountedRatchetGate {
   gate: string;
-  class: "run-derived" | "advisory";
+  class: "run-derived" | "advisory" | "ci-signal";
   reason?: string;
 }
 
@@ -67,6 +80,8 @@ export const UNCOUNTED_RATCHET_GATES: readonly UncountedRatchetGate[] = [
   { gate: "comment-load", class: "advisory" },
   { gate: "coverage", class: "run-derived" },
   { gate: "mutation", class: "run-derived" },
+  ...RATCHET_COUNTER_GATES.filter((g) => !COUNTED_RATCHET_GATES.includes(g)).map((gate): UncountedRatchetGate =>
+    ({ gate, class: "ci-signal", reason: `CI runs it as a signal that never reads its baseline (${CI_READS_BASELINE[gate]!.script} exports CI_READS_BASELINE false)` })),
 ];
 
 export interface MergedRatchetJudgement {
@@ -84,8 +99,11 @@ export interface MergedRatchetJudgement {
 /** How many rows a `sweep.ratchet_judge.decided` row lists; `rows_count` carries the rest. */
 export const RATCHET_JUDGE_ROWS_SHOWN = 10;
 
+/** The ledger step of one judgement the arm path or the armed re-judge consulted. */
+export const RATCHET_JUDGE_DECIDED_STEP = "sweep.ratchet_judge.decided";
+
 /** The `sweep.ratchet_judge.decided` fields one judgement contributes, beside the caller's PR identity and remedy. */
-export function ratchetJudgeLedgerFields(j: MergedRatchetJudgement): Record<string, unknown> {
+export function ratchetJudgeLedgerFields(j: MergedRatchetJudgement, updateWithheld?: RatchetUpdateWithheld): Record<string, unknown> {
   return {
     verdict: j.verdict,
     ...(j.mainSha !== undefined ? { main_sha: j.mainSha } : {}),
@@ -94,9 +112,114 @@ export function ratchetJudgeLedgerFields(j: MergedRatchetJudgement): Record<stri
     uncounted_gates: j.uncounted.map((u) => `${u.gate}:${u.class}`),
     rows: j.rows.slice(0, RATCHET_JUDGE_ROWS_SHOWN),
     rows_count: j.rows.length,
+    ...(j.rows.length > 0 ? { crossing_keys: ratchetCrossingKeys(j) } : {}),
+    ...(updateWithheld !== undefined ? { update_withheld: updateWithheld } : {}),
     ...(j.reason !== undefined ? { reason: j.reason } : {}),
     ...(j.elapsedMs !== undefined ? { elapsed_ms: j.elapsedMs } : {}),
   };
+}
+
+function crossingKey(r: MergedRatchetRow): string {
+  return `${r.verdict}:${r.gate}:${r.path}${r.field ? `#${r.field}` : ""}:+${r.prAdds}`;
+}
+
+/** W1-T12717 — one key per held row: the gate, path, field and the count the pull request adds. */
+export function ratchetCrossingKeys(j: Pick<MergedRatchetJudgement, "rows">): string[] {
+  return j.rows.map(crossingKey);
+}
+
+/** Why an update-branch is not the answer to a held verdict: `pr-diff`, the merge adds to a count main already
+ *  carries over its ceiling; `repeat`, an earlier update already answered the same crossing for this PR. */
+export type RatchetUpdateWithheld = "pr-diff" | "repeat";
+
+/**
+ * W1-T12717 — an update-branch lands the same merged tree, so it cures a held row only by letting CI count
+ * it once. A row whose main is already over its ceiling is the PR's own diff, and a key an earlier update
+ * answered was not cured by it: neither is updated again. Undefined: some held row may still be cured.
+ */
+export function ratchetUpdateWithheld(j: MergedRatchetJudgement, prNumber: number | undefined,
+  ledgerLines: readonly Record<string, unknown>[]): RatchetUpdateWithheld | undefined {
+  if (!ratchetVerdictHolds(j) || j.rows.length === 0) return undefined;
+  const ownDiff = (r: MergedRatchetRow) => r.merged - r.prAdds > r.mainCeiling;
+  const curable = j.rows.filter((r) => !ownDiff(r));
+  if (curable.length === 0) return "pr-diff";
+  const answered = new Set<string>();
+  for (const l of ledgerLines) {
+    if (l.step !== RATCHET_JUDGE_DECIDED_STEP || l.remedy !== "update-branch" || l.outcome === "direct-merge-update-failed") continue;
+    if (prNumber === undefined || Number(l.pr_number) !== prNumber || !Array.isArray(l.crossing_keys)) continue;
+    for (const k of l.crossing_keys) answered.add(String(k));
+  }
+  return curable.every((r) => answered.has(crossingKey(r))) ? "repeat" : undefined;
+}
+
+/** W1-T12717 — the field the arm path's hold evidence carries when it withheld the update. */
+export interface RatchetUpdateWithheldEvidence {
+  updateWithheld?: RatchetUpdateWithheld;
+}
+
+/**
+ * The arm path's answer to a held verdict when it must not update the branch, with the line it says: retry-later when
+ * this head was already refreshed for a ratchet collision (W1-T9962), fix-lane when the update is withheld (W1-T12717).
+ * Undefined: update the branch once.
+ */
+export function ratchetUpdateRefusal(j: MergedRatchetJudgement, prUrl: string, head: string | undefined, prNumber: number | undefined,
+  ledgerLines: readonly Record<string, unknown>[]): { say: string; evidence: { remedy: "retry-later" | "fix-lane" } & RatchetUpdateWithheldEvidence } | undefined {
+  if (head !== undefined && ledgerLines.some((l) => l.step === "automerge.direct_merge_updated" &&
+      l.reason === "ratchet_collision" && l.pr_url === prUrl && l.prior_head_sha === head)) {
+    return { say: `automerge.direct_merge_preflight_refused (W1-T9962): head ${head} was already refreshed for a ${j.verdict} — awaiting its new head: ${prUrl}`,
+      evidence: { remedy: "retry-later" } };
+  }
+  const withheld = ratchetUpdateWithheld(j, prNumber, ledgerLines);
+  if (withheld === undefined) return undefined;
+  const why = withheld === "pr-diff" ? "comes from the PR's own diff on a count main already carries over its ceiling" : "was already answered by an update-branch that did not cure it";
+  return { say: `automerge.direct_merge_preflight_refused (W1-T12717): ${j.verdict} ${why}: ${describeRatchetRows(j)} — not updated; handed to the fix lane, neither armed nor merged: ${prUrl}`,
+    evidence: { remedy: "fix-lane", updateWithheld: withheld } };
+}
+
+/**
+ * The armed re-judge's remedy when it does not update the branch: proceed (nothing held), retry-later (this head was
+ * already updated, W1-T9962), unwired, or fix-lane with update_withheld (W1-T12717). Undefined: update the branch once.
+ */
+export function armedRejudgeHold(j: MergedRatchetJudgement, pr: { prNumber: number; headSha: string },
+  ledgerLines: readonly Record<string, unknown>[], wired: boolean): { update_withheld?: RatchetUpdateWithheld; remedy: string } | undefined {
+  if (!ratchetVerdictHolds(j)) return { remedy: "proceed" };
+  if (ledgerLines.some((l) => (l.step === "sweep.update_branch.attempted" || l.step === "sweep.ci_timeout_refresh.attempted") &&
+    l.pr_number === pr.prNumber && l.head_sha === pr.headSha)) return { remedy: "retry-later" };
+  if (!wired) return { remedy: "unwired" };
+  const withheld = ratchetUpdateWithheld(j, pr.prNumber, ledgerLines);
+  return withheld === undefined ? undefined : { update_withheld: withheld, remedy: "fix-lane" };
+}
+
+/** One fix-lane hand-off the sweep's mergeable disposition dispatches: the extra fields of its code_scanning.fix_dispatch
+ *  row (none for a ratchet crossing, whose disposed row carries it), its disposed fields and its evidence. */
+export interface SweepFixRoute {
+  what: string;
+  reason: string;
+  dispatchRow?: Record<string, unknown>;
+  disposed: Record<string, unknown>;
+  ciFailures: { name: string; logTail: string }[];
+}
+
+/** W1-T12717 — the fix worker's finding: each held row with main's count, the PR's merged count and what the PR adds. */
+function ratchetCrossingFixCiFailures(rows: readonly MergedRatchetRow[], withheld: string): SweepFixRoute["ciFailures"] {
+  return [{ name: "ratchet-judge", logTail: [
+    `The merge-time ratchet judge held this pull request (${withheld}): the tree it would land crosses a ceiling CI enforces,`,
+    "and an update-branch cannot cure it, because merging main never removes this pull request's own growth.",
+    ...rows.map((r) => `${r.gate} ${r.path}${r.field ? `#${r.field}` : ""}: main's count ${r.merged - r.prAdds} (ceiling ${r.mainCeiling}), ` +
+      `this pull request's merged count ${r.merged}, prAdds ${r.prAdds}`),
+    "Shrink this pull request's own growth on these paths, or propose the acceptance or scope change it needs. Do not edit a baseline value.",
+  ].join("\n") }];
+}
+
+/** W1-T12717 — the newest judge row at this head that withheld an update hands its crossing to the PR's fix lane, once per head. */
+export function withheldRatchetFixRoute(pr: { prNumber: number; headSha: string }, lines: readonly Record<string, unknown>[]): SweepFixRoute | undefined {
+  const row = lines.findLast((l) => l.step === RATCHET_JUDGE_DECIDED_STEP && Number(l.pr_number) === pr.prNumber && l.head_sha === pr.headSha);
+  if (row === undefined || typeof row.update_withheld !== "string") return undefined;
+  if (lines.some((l) => l.step === "sweep.disposed" && l.pr_number === pr.prNumber && l.head_sha === pr.headSha && l.ratchet_fix_preparing === true)) return undefined;
+  const rows = Array.isArray(row.rows) ? (row.rows as MergedRatchetRow[]) : [];
+  return { what: "the merge-time ratchet judge held a crossing", reason: `update-branch withheld: ${row.update_withheld}`,
+    disposed: { ratchet_fix_preparing: true, ratchet_fix_reason: row.update_withheld, ratchet_crossing_keys: row.crossing_keys },
+    ciFailures: ratchetCrossingFixCiFailures(rows, row.update_withheld) };
 }
 
 /** One line naming each held row, for the `say` beside a refresh. */
@@ -137,7 +260,8 @@ const CLAUDE_MD_BASELINE = "scripts/claude-md-budget-baseline.json";
 const FIXTURE_COPY_BASELINE = "scripts/fixture-copy-baseline.json";
 const LEARNINGS_BASELINE = "scripts/learnings-budget-baseline.json";
 const PACKAGE_JSON = "package.json";
-/** The most population bytes one judgement reads from main's tip: under the 64 MiB stdout cap of one git call. */
+/** The most listed blob bytes one `git cat-file --batch` call reads: under the 64 MiB stdout cap of one git call.
+ *  W1-T12792: it bounds each call, not the population, which is read in parts. */
 const POPULATION_BYTES_BOUND = 48 * 1024 * 1024;
 
 /** The fixture-copy census's own population: every test/**\/*.test.ts but test/fixtures/** and the census suite. */
@@ -202,7 +326,7 @@ function clockRows(input: TreeInputs): MergedRatchetRow[] {
       const prCeiling = merged[path]?.[field] ?? 0;
       const mainCeiling = main[path]?.[field] ?? 0;
       const verdict = judgeCount(counts[field]!, prCeiling, mainCounts[field]!, mainCeiling);
-      if (verdict) rows.push({ gate: "clock-signature", path, field, verdict, merged: counts[field]!, mainCeiling, prCeiling, rederived: counts[field]! });
+      if (verdict) rows.push({ gate: "clock-signature", path, field, verdict, merged: counts[field]!, mainCeiling, prCeiling, rederived: counts[field]!, prAdds: counts[field]! - mainCounts[field]! });
     }
   }
   return rows;
@@ -226,7 +350,7 @@ function sourceSizeRows(input: TreeInputs): MergedRatchetRow[] {
     const mainLines: number = mainText === null ? 0 : countLines(mainText);
     const mainCeiling = main[path] ?? (ceilingFor(mainLines) as number);
     const verdict = judgeCount(lines, prCeiling, mainLines, mainCeiling);
-    if (verdict) rows.push({ gate: "source-size", path, verdict, merged: lines, mainCeiling, prCeiling, rederived: ceilingFor(lines) as number });
+    if (verdict) rows.push({ gate: "source-size", path, verdict, merged: lines, mainCeiling, prCeiling, rederived: ceilingFor(lines) as number, prAdds: lines - mainLines });
   }
   return rows;
 }
@@ -260,7 +384,7 @@ function recordedFieldRows(gate: CountedRatchetGate, baselinePath: string, input
     if (prCeiling === undefined) continue;
     const mainCeiling = typeof mainBaseline[key] === "number" ? (mainBaseline[key] as number) : Infinity;
     const verdict = judgeCount(merged[count]!, prCeiling, main[count]!, mainCeiling);
-    if (verdict) rows.push({ gate, path: baselinePath, field: key, verdict, merged: merged[count]!, mainCeiling, prCeiling, rederived: merged[count]! });
+    if (verdict) rows.push({ gate, path: baselinePath, field: key, verdict, merged: merged[count]!, mainCeiling, prCeiling, rederived: merged[count]!, prAdds: merged[count]! - main[count]! });
   }
   return rows;
 }
@@ -306,7 +430,7 @@ function claudeMdRows(input: TreeInputs): MergedRatchetRow[] {
   const mainBytes = mainText === null ? 0 : Buffer.byteLength(mainText, "utf8");
   const mainCeiling = claudeMdStopsPast(baselineOf(input.readMain(CLAUDE_MD_BASELINE), parseJson, CLAUDE_MD_BASELINE)) ?? Infinity;
   const verdict = judgeCount(bytes, prCeiling, mainBytes, mainCeiling);
-  return verdict ? [{ gate: "claude-md-budget", path: CLAUDE_MD, verdict, merged: bytes, mainCeiling, prCeiling, rederived: bytes }] : [];
+  return verdict ? [{ gate: "claude-md-budget", path: CLAUDE_MD, verdict, merged: bytes, mainCeiling, prCeiling, rederived: bytes, prAdds: bytes - mainBytes }] : [];
 }
 
 /** The blocking threshold of scripts/learnings-budget-ratchet.mjs: the hard cap. Its own check refuses a cap that is not a number. */
@@ -325,8 +449,9 @@ function learningsRows(input: TreeInputs): GateResult {
   if ("reason" in texts) return texts;
   const chars = (m: Map<string, string>) => (computeActiveChars(corpusFromTexts(m)) as { chars: number }).chars;
   const merged = chars(texts.merged);
-  const verdict = judgeCount(merged, prCeiling, chars(texts.main), mainCeiling);
-  return verdict ? [{ gate: "learnings-budget", path: LEARNINGS_BASELINE, field: "hardCapChars", verdict, merged, mainCeiling, prCeiling, rederived: merged }] : [];
+  const mainChars = chars(texts.main);
+  const verdict = judgeCount(merged, prCeiling, mainChars, mainCeiling);
+  return verdict ? [{ gate: "learnings-budget", path: LEARNINGS_BASELINE, field: "hardCapChars", verdict, merged, mainCeiling, prCeiling, rederived: merged, prAdds: merged - mainChars }] : [];
 }
 
 /** The tree's own package.json `imports` map, which the reach graph resolves `#` specifiers through. */
@@ -364,8 +489,9 @@ function reachRows(input: TreeInputs): GateResult {
     const prCeiling = prBaseline[field] as number;
     const mainCeiling = typeof mainBaseline[field] === "number" ? (mainBaseline[field] as number) : Infinity;
     const count = merged[field]!;
-    const verdict = judgeCount(count, prCeiling, count > prCeiling && count > mainCeiling ? mainCount(field) : count, mainCeiling);
-    if (verdict) rows.push({ gate: "affected-reach", path: REACH_BASELINE, field, verdict, merged: count, mainCeiling, prCeiling, rederived: count });
+    const mainAt = count > prCeiling && count > mainCeiling ? mainCount(field) : count;
+    const verdict = judgeCount(count, prCeiling, mainAt, mainCeiling);
+    if (verdict) rows.push({ gate: "affected-reach", path: REACH_BASELINE, field, verdict, merged: count, mainCeiling, prCeiling, rederived: count, prAdds: count - mainAt });
   }
   return rows;
 }
@@ -383,7 +509,7 @@ function houseLayoutRows(input: TreeInputs): GateResult {
   for (const literal of HOUSE_LITERALS as string[]) {
     const count = merged[literal]! - (split[literal] ?? 0);
     const verdict = judgeCount(count, main[literal]!, main[literal]!, main[literal]!);
-    if (verdict) rows.push({ gate: "house-layout", path: "src", field: literal, verdict, merged: count, mainCeiling: main[literal]!, prCeiling: main[literal]!, rederived: count });
+    if (verdict) rows.push({ gate: "house-layout", path: "src", field: literal, verdict, merged: count, mainCeiling: main[literal]!, prCeiling: main[literal]!, rederived: count, prAdds: count - main[literal]! });
   }
   return rows;
 }
@@ -431,7 +557,7 @@ export function ratchetVerdictHolds(judgement: Pick<MergedRatchetJudgement, "ver
 
 /** The baselines whose rows name paths: when one changes, every path it names is read on both trees.
  *  Clock-signature reads its rows when either side changed it; source-size only when the merge lands it. */
-const PATH_KEYED_BASELINES = [CLOCK_BASELINE, SOURCE_SIZE_BASELINE] as string[];
+const PATH_KEYED_BASELINES = [CLOCK_BASELINE, ...(COUNTED_RATCHET_GATES.includes("source-size") ? [SOURCE_SIZE_BASELINE] : [])] as string[];
 const SINGLE_FILE_READS = [FIXTURE_COPY_BASELINE, DEPS_INTERFACE_BASELINE, CLAUDE_MD, CLAUDE_MD_BASELINE, LEARNINGS_BASELINE, REACH_BASELINE as string, PACKAGE_JSON];
 
 /** The paths the judge will read on either tree, so the I/O reads them in one batch per tree.
@@ -469,9 +595,10 @@ export function parseBlobBatchAllowingMissing(raw: string, paths: readonly strin
 const inPopulation = (path: string): boolean => CLOCK_SCOPE_RE.test(path) || isFixtureCopyPath(path) || isShardPath(path);
 const inReachTree = (path: string): boolean => REACH_CODE_RE.test(path) as boolean;
 
-/** `git ls-tree -r -l -z` rows in one scope: regular blobs only, as the census walks see them. */
-function parsePopulationListing(raw: string, inScope: (path: string) => boolean): { paths: string[]; bytes: number } | { error: string } {
+/** `git ls-tree -r -l -z` rows in one scope: regular blobs only, as the census walks see them, with each one's size. */
+function parsePopulationListing(raw: string, inScope: (path: string) => boolean): { paths: string[]; bytes: number; sizes: Map<string, number> } | { error: string } {
   const paths: string[] = [];
+  const sizes = new Map<string, number>();
   let bytes = 0;
   for (const record of raw.split("\0")) {
     if (record === "") continue;
@@ -480,9 +607,27 @@ function parsePopulationListing(raw: string, inScope: (path: string) => boolean)
     const [, mode, type, size, path] = m as unknown as [string, string, string, string, string];
     if (type !== "blob" || mode === "120000" || !inScope(path)) continue;
     paths.push(path);
+    sizes.set(path, Number(size));
     bytes += Number(size);
   }
-  return { paths, bytes };
+  return { paths, bytes, sizes };
+}
+
+/** W1-T12792 — `paths` in listing order, cut into parts whose listed sizes add up to at most the bound of one call.
+ *  A blob past the bound on its own cannot be read by any call: it is named instead. */
+function populationParts(paths: readonly string[], sizes: ReadonlyMap<string, number>): string[][] | { oversized: string } {
+  const parts: string[][] = [];
+  let part: string[] = [];
+  let bytes = 0;
+  for (const path of paths) {
+    const size = sizes.get(path) ?? 0;
+    if (size > POPULATION_BYTES_BOUND) return { oversized: `${path} is ${size} bytes, past the ${POPULATION_BYTES_BOUND}-byte bound of one read` };
+    if (part.length > 0 && bytes + size > POPULATION_BYTES_BOUND) { parts.push(part); part = []; bytes = 0; }
+    part.push(path);
+    bytes += size;
+  }
+  if (part.length > 0) parts.push(part);
+  return parts;
 }
 
 function* git(run: PlanSafetyGit, args: readonly string[], stdin?: string): Steps<PlanSafetyGitResult> {
@@ -540,6 +685,17 @@ export function* readMergedRatchetInputsSteps(
       if (res.status !== 0) throw new Error(failed("git cat-file --batch", res));
       return parseBlobBatchAllowingMissing(res.stdout, paths);
     };
+    // W1-T12792: one call per part into `into`; a failed part is the reason, and `into` then holds no path of the scope.
+    const readParts = function* (rev: string, parts: readonly string[][], into: Map<string, string | null>, read: Set<string>): Steps<string | undefined> {
+      const got = new Map<string, string | null>();
+      for (const [i, part] of parts.entries()) {
+        const res = yield* git(run, ["cat-file", "--batch"], part.map((p) => `${rev}:${p}`).join("\n") + "\n");
+        if (res.status !== 0) return `part ${i + 1} of ${parts.length}: ${failed("git cat-file --batch", res)}`;
+        for (const [p, text] of parseBlobBatchAllowingMissing(res.stdout, part)) got.set(p, text);
+      }
+      for (const [p, text] of got) { into.set(p, text); read.add(p); }
+      return undefined;
+    };
     const mergedKeyed = yield* readBatch(tree, PATH_KEYED_BASELINES);
     const mainKeyed = yield* readBatch(mainSha, PATH_KEYED_BASELINES);
     const baselines = new Map(PATH_KEYED_BASELINES.map((p) => [p, [mergedKeyed.get(p) ?? null, mainKeyed.get(p) ?? null]] as const));
@@ -547,22 +703,26 @@ export function* readMergedRatchetInputsSteps(
     // The population gates read every file in their scope, but only when the merge lands one: an
     // unchanged file is the same blob on both trees, so it is read once, at main.
     let population: { populationFiles: string[] } | { populationUnread: string } | Record<string, never> = {};
-    let mainOnly: string[] = [];
+    let mainOnly: string[][] = [];
     const roots = populationRoots([...landing]);
+    const scope = `the ${roots.join(" and ")} population`;
     if (roots.length > 0) {
       const sized = yield* git(run, ["ls-tree", "-r", "-l", "-z", tree, "--", ...roots]);
       const parsed = sized.status === 0 ? parsePopulationListing(sized.stdout, inPopulation) : { error: failed("git ls-tree -l", sized) };
+      const parts = "error" in parsed ? undefined : populationParts(parsed.paths, parsed.sizes);
       if ("error" in parsed) population = { populationUnread: parsed.error };
-      else if (parsed.bytes > POPULATION_BYTES_BOUND) population = { populationUnread: `the ${roots.join(" and ")} population is ${parsed.bytes} bytes, past the ${POPULATION_BYTES_BOUND}-byte bound` };
+      else if (!Array.isArray(parts)) population = { populationUnread: `${scope} file ${parts!.oversized}` };
       else {
         population = { populationFiles: parsed.paths };
         const readSet = new Set(paths);
-        mainOnly = parsed.paths.filter((p) => !readSet.has(p));
+        mainOnly = parts.map((part) => part.filter((p) => !readSet.has(p))).filter((part) => part.length > 0);
       }
     }
     const mergedBlobs = yield* readBatch(tree, paths);
-    const mainBlobs = yield* readBatch(mainSha, [...paths, ...mainOnly]);
-    const sameOnBoth = new Set(mainOnly);
+    const mainBlobs = yield* readBatch(mainSha, paths);
+    const sameOnBoth = new Set<string>();
+    const partFailed = yield* readParts(mainSha, mainOnly, mainBlobs, sameOnBoth);
+    if (partFailed !== undefined) population = { populationUnread: `${scope}, ${partFailed}` };
     const reader = (blobs: Map<string, string | null>) => (path: string): string | null => {
       if (blobs.has(path)) return blobs.get(path)!;
       if (sameOnBoth.has(path)) return mainBlobs.get(path)!;
@@ -575,12 +735,13 @@ export function* readMergedRatchetInputsSteps(
     if (reachMoves([...landing], readMerged, readMain)) {
       const sized = yield* git(run, ["ls-tree", "-r", "-l", "-z", tree, "--", "src", "scripts", "bin", "test"]);
       const parsed = sized.status === 0 ? parsePopulationListing(sized.stdout, inReachTree) : { error: failed("git ls-tree -l", sized) };
+      const parts = "error" in parsed ? undefined : populationParts(parsed.paths, parsed.sizes);
       if ("error" in parsed) reach = { reachUnread: parsed.error };
-      else if (parsed.bytes > POPULATION_BYTES_BOUND) reach = { reachUnread: `the code tree is ${parsed.bytes} bytes, past the ${POPULATION_BYTES_BOUND}-byte bound` };
+      else if (!Array.isArray(parts)) reach = { reachUnread: `the code tree file ${parts!.oversized}` };
       else {
-        const extra = parsed.paths.filter((p) => !mainBlobs.has(p));
-        if (extra.length > 0) for (const [p, text] of yield* readBatch(mainSha, extra)) { mainBlobs.set(p, text); sameOnBoth.add(p); }
-        reach = { reachFiles: parsed.paths };
+        const extra = parts.map((part) => part.filter((p) => !mainBlobs.has(p))).filter((part) => part.length > 0);
+        const extraFailed = yield* readParts(mainSha, extra, mainBlobs, sameOnBoth);
+        reach = extraFailed === undefined ? { reachFiles: parsed.paths } : { reachUnread: `the code tree, ${extraFailed}` };
       }
     }
     return { mainSha, headSha, changed: [...changed].sort(), measuredFiles, readMerged, readMain,

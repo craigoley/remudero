@@ -1,0 +1,26 @@
+- id: W1-T12827
+  title: Record how keywordMet is derived in judgeCriterion and whether no verdict can be told apart from unmet
+  repo: remudero
+  depends_on: []
+  type: recon
+  verify: auto
+  risk: low
+  status: queued
+  attempts: 0
+  files:
+    - docs/forensics/review.md
+  acceptance:
+    - claim: docs/forensics/review.md gains a section that names each input to keywordMet in judgeCriterion, citing the assignment at src/lib/review.ts line 4483 and the later use at line 4787
+      proof: "grep: keywordMet derivation in docs/forensics/review.md"
+    - claim: The section states from the code whether a criterion with no verdict at all produces the same keywordMet value as an unmet criterion, naming the branch that decides it
+      proof: "grep: no verdict versus unmet in docs/forensics/review.md"
+    - claim: "The section ends with a one-line recommendation: no change is needed, or one named follow-up is needed to separate the two states. It edits no source file"
+      proof: "grep: keywordMet recommendation in docs/forensics/review.md"
+  origin: followup:W1-T12146-1794745744727:2026-11-15T12:33:16.415Z:1
+  rationale: >-
+    From the 2026-11-15 follow-up on W1-T12146-1794745744727, ratified via rmd approve:
+  
+    follow-up harvest [research]: how `keywordMet` is derived in `judgeCriterion` (lines
+    4483–4830). Criterion 3's "none" value depends on whether "no verdict" can be told apart from
+    "unmet". — from W1-T12146 (run W1-T12146-1794745744727, head
+    8a0cdfbf826314ae36915ad0ecfd537cd5eeb97a)

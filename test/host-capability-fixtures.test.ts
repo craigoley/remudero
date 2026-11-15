@@ -211,6 +211,13 @@ const DECLARED: readonly Declared[] = [
     reason: "The shared-slot fixture must have a public mode bit for the reader to select legacy recovery. This tests explicit mode classification, not an OS access denial, and works at every uid.",
   },
   {
+    kind: "chmod", file: "ci/suites/a-guard-writer-the-probe-cannot-read-is-ruled-out-by-its-name-or-start.test.ts", key: "0o000", count: 3,
+    reason:
+      "W1-T11925: the subject IS a permission denial. The proc-fd probe rules a process out only on EACCES or EPERM from " +
+      "its fd directory, and an EISDIR/ENOTDIR substitute takes the other arm. The denial is staged only after a probe " +
+      "directory proves this uid is refused; under uid 0 the tests skip with that stated reason, never pass unrun.",
+  },
+  {
     kind: "chmod", file: "review/evidence-storage.test.ts", key: "0o644", count: 1,
     reason: "The evidence policy rejects group/world-readable metadata explicitly before parsing; this checks stat mode, not an OS access denial, and is therefore uid-independent.",
   },

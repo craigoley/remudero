@@ -1,0 +1,46 @@
+- id: W1-T12884
+  title: "The adoption scan keeps each symbol's ship date, so a measurement run does not repeat a history search whose answer cannot change"
+  repo: remudero
+  depends_on: []
+  priority: 0.5
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: medium # the adoption scan's ship dates decide how long a symbol has gone unadopted; a wrong kept date would mis-age a finding
+  origin: "operator-session#self-improvement-audit-2026-11-15"
+  plan_refs:
+    - W1-T12843
+  files:
+    - src/lib/measurement-cadence.ts
+    - test/daemon/the-adoption-scan-keeps-each-ship-date-it-has-found.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "A ship date the scan resolved for a file and needle is kept in the state directory, and a later run with the same file and needle reads it from there and starts no git process for it"
+      proof: "grep: W1-T12884 criterion 1 in test/daemon/the-adoption-scan-keeps-each-ship-date-it-has-found.test.ts"
+    - claim: "invariant:a-kept-date-equals-a-fresh-lookup — for every file and needle the report's shippedAt is the value a fresh git lookup returns, an unknown answer is never kept, and a kept entry whose file no longer exists is dropped"
+      proof: "grep: W1-T12884 criterion 2 in test/daemon/the-adoption-scan-keeps-each-ship-date-it-has-found.test.ts"
+    - claim: "A missing, unreadable or corrupt store is treated as empty: the run resolves every date from git as on origin/main and rewrites the store, and a store write failure does not fail the run"
+      proof: "grep: W1-T12884 criterion 3 in test/daemon/the-adoption-scan-keeps-each-ship-date-it-has-found.test.ts"
+    - claim: "The run writes one measurement_cadence.ship_dates row with the counts of kept dates read, dates resolved from git and the time spent in git lookups"
+      proof: "grep: W1-T12884 criterion 4 in test/daemon/the-adoption-scan-keeps-each-ship-date-it-has-found.test.ts"
+  rationale: |
+    MEASURED 2026-11-15 by the operator session, read-only, over the daemon ledger union (~/rmd-state2/state, 2026-11-08T00:00Z to 2026-11-15T15:00Z) and origin/main d5722e1fe.
+
+    - The measurement cadence child runs every 360 minutes. Its last five runs took 46, 50, 58, 62 and 39 minutes (started 2026-11-14T09:11Z, 15:13Z, 21:14Z, 2026-11-15T03:16Z and 09:19Z; measurement_cadence.child started to measurement_cadence.ran).
+    - On 2026-11-15T16:00Z the running child (40 minutes in, 487 MiB resident) was starting one `git log -S <symbol> --format=%aI -- src/lib/sweep.ts` after another at 55 to 74 percent of a core each. The daemon container held 6.4 of the host's 8 cores and the host load was 22 to 26.
+    - An author preflight test with a 20 s child bound (test/the-offline-plan-lint-names-its-omissions.test.ts) failed with spawnSync ETIMEDOUT in that window and passes alone when the host is quiet.
+    - READ src/lib/measurement-cadence.ts: scanUnadoptedSymbols, scanUnadoptedFields and scanUnadoptedScripts call shipDateFor once per finding. defaultAdoptionShipDate runs `git log -S <needle> --format=%aI -- <file>` and takes the oldest hit. Nothing keeps the answer between runs.
+    - The oldest commit that introduced a needle into a file does not change while that history stands, so the same searches are repeated four times a day.
+  design: |
+    1. measurement-cadence.ts: wrap the production shipDateFor and shipDateForAsync with a store keyed by file and needle (a JSON file in the state directory, written atomically once per run). Keep only resolved dates.
+    2. Drop entries whose file is absent from the scanned tree. Keep the injectable seam so tests supply their own resolver.
+    3. Write the measurement_cadence.ship_dates row from the wrapper's counters.
+    INVARIANT a-kept-date-equals-a-fresh-lookup: the store only ever holds what git returned for that exact file and needle, unknown is never stored, and the report is byte-identical to a run with an empty store.
+    NOT IN SCOPE: the adoption rules, the 360-minute interval, the other scans' cost, and history rewrites (the store is rebuilt by deleting its file).
+  falsifier: |
+    Bypass the store and criterion 1 must fail. Keep an unknown answer and criterion 2 must fail. Throw on a corrupt store and criterion 3 must fail. Restore and all pass.
+  note: |
+    reservation hand-off: run-unfiled-1794756420518 -> run-unfiled-1794756420518
+    Reserved with rmd next-task-id from the operator checkout. Check refs/rmd-dispatch/W1-T12884 and any run branch before building. The test folder is the one rmd test-place computed for a stub with this test's imports; confirm it once the file exists.

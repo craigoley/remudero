@@ -365,6 +365,20 @@ const SEED_ROWS: readonly SeedRow[] = [
     outcomes: ["adopted"],
   },
   {
+    // W1-T12714: no needs-design report ends a pass with only a hold.
+    step: "fix.needs_design_routed",
+    meaning:
+      "A fix round answered NEEDS_DESIGN and the fix lane sorted its report into one kind and took that " +
+      "kind's remedy in the same round. environment: the round runs again on a fresh worker, and the first " +
+      "such round in a rung is refunded. capability: the action the round could not take runs through its " +
+      "owner (a body repair, the harness commit, a remote id reservation, or an amendment for a plan edit). contract: an " +
+      "acceptance amendment is proposed and the head waits on it. design: the head is held and a person is " +
+      "asked once. `kind`, `capability` and `remedy` name what happened. `reserved_task_id` records the id " +
+      "passed to the next worker's prompt; a reservation failure records `outcome: refused` and its reason.",
+    writer: ["runFixRung"],
+    outcomes: ["redispatch-fresh-worker", "redispatch", "body-repair", "harness-commit", "id-reservation", "amendment-proposed", "escalate"],
+  },
+  {
     // W1-T12553: the daemon instances and hand runs share one GitHub App installation.
     step: "github.budget.throttled",
     meaning:
@@ -397,6 +411,29 @@ const SEED_ROWS: readonly SeedRow[] = [
       "minutes files one remedy task with origin flow-regression:open-repair-wait.",
     writer: ["runFlowGardener"],
     outcomes: ["OBSERVED", "UNKNOWN"],
+  },
+  {
+    // W1-T12710: fix rounds that did not move one criterion get a different remedy.
+    step: "fix.stall_remedy",
+    meaning:
+      "Before a fix round, the sweep found that `rounds` completed rounds left `criterion` unmet with the same " +
+      "failure, or did not land, at or past fix.stallRounds. It took the first remedy not tried for this pull " +
+      "request and criterion: `stronger-worker` (a round on the next mount in fix.modelOrder, named in `mount`, " +
+      "with the earlier approaches listed), `amend-criterion` (an acceptance amendment proposal, `amendment_url`), or " +
+      "`operator-input` (one escalation). \"skipped\" means the remedy could not apply; `reason` says why.",
+    writer: ["takeStallRemedy"],
+    outcomes: ["taken", "skipped"],
+  },
+  {
+    // W1-T12711: a harness answer the code refused twice in one pass.
+    step: "fix.progress_rerun",
+    meaning:
+      "The fix progress judge answered harness twice in one pass, and no off-host proof result supports it. " +
+      "The sweep asked GitHub once to rerun the failed checks at this head. `red` is the red the judge saw. " +
+      "When the rerun ends with the same red, the next judgment carries harnessRefuted and is not offered " +
+      "harness at this head. \"unavailable\" means no failed run could be rerun, and the round runs.",
+    writer: ["rerunChecksForHarness"],
+    outcomes: ["rerun", "head-moved", "unavailable"],
   },
   {
     step: "serve.checkout_advanced",

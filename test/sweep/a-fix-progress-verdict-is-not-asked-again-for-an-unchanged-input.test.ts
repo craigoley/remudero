@@ -73,7 +73,10 @@ test("W1-T9502: a changed input asks the judge again", async () => {
     assert.equal(f.calls(), 2, `${change.name} is a different question`);
   }
   let answers = 0;
-  const f = fixture(async () => ++answers === 1 ? undefined : { verdict: "continue", reason: "the provider answered this time" });
+  const f = fixture(async () => {
+    if (++answers === 1) throw new Error("progress provider offline");
+    return { verdict: "continue", reason: "the provider answered this time" };
+  });
   await f.pass();
   await f.pass();
   await f.pass();

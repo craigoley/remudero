@@ -110,6 +110,8 @@ export const CLI_ONLY = {
       "proof-queue-audit",
       "preflight",
       "next-task-id",
+      // W1-T12216: reads one host file on the operator's own host and prints where a hand filing goes there.
+      "plan-destination",
       // W1-T5533: runs git worktree add and cp -al on the operator's own host filesystem for a HAND
       // build; the console's remote HTTP client cannot create a local checkout for its caller.
       "hand-worktree",

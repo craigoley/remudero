@@ -17,7 +17,7 @@
     - src/cli/commands/fix.ts
     - src/lib/sweep.ts
     - test/fix-lane/rmd-fix-never-reports-a-round-fixed-when-its-progress-judgment-failed.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "When runFixRung returns handed_off and this dispatch wrote no fix.dispatch or fix.retrigger row, buildSweepEffects' dispatchFix returns a typed no-round result that carries the rung's reason, and dispatchFixSpent reads it as not spent. A handed_off after a round that wrote fix.dispatch still reads as spent"

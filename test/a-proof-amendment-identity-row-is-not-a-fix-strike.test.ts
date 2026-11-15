@@ -132,14 +132,14 @@ test("W1-T5032: real worker dispatches count toward the judge's history while am
     judgments++;
     assert.equal(input.rounds.length, DEFAULT_SWEEP_POLICY.strikeCap);
     assert.equal(input.rounds.some(round => round.id === "k"), false);
-    return undefined;
+    throw new Error("progress provider offline");
   };
   const summary = await runSweep([pr({ priorStrikes: 0 })], deps, DEFAULT_SWEEP_POLICY);
   assert.equal(judgments, 1);
   assert.equal(deps.fixed.length, 0);
   assert.equal(summary.actions[0]!.acted, false);
   const rows = readLedgerLines(lp).filter((l) => l.step === "sweep.disposed" && l.pr_number === 5032);
-  assert.match(String(rows[rows.length - 1]?.stand_down_reason), /absent or unparseable fix progress verdict/);
+  assert.match(String(rows[rows.length - 1]?.stand_down_reason), /fix progress judgment failed/);
   deps.fixProgressJudge = async input => {
     judgments++;
     assert.equal(input.rounds.length, DEFAULT_SWEEP_POLICY.strikeCap);

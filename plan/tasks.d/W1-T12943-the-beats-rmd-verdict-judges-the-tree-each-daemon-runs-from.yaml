@@ -1,0 +1,53 @@
+- id: W1-T12943
+  title: "The heartbeat's rmd verdict judges the tree each daemon container runs from, so a healthy fleet no longer publishes BROKEN because the host install has no dependencies"
+  repo: remudero
+  priority: 0.4
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # an off-host health signal: a false BROKEN teaches readers to ignore it, a false ok hides a dead fleet
+  band_meaning: span
+  origin: "operator-session#host-reboot-2026-11-15"
+  plan_refs:
+    - W1-T2349
+    - W1-T10751
+    - W1-T10756
+  files:
+    - scripts/fleet-heartbeat.sh
+    - test/helpers/fleet-heartbeat-harness.ts
+    - test/daemon/the-beats-rmd-verdict-judges-the-tree-each-daemon-runs-from.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "With daemon containers running, rmd_verdict is derived from the checkout each container mounts at its code path, read from the runtime's mount list, and the payload names each instance's tree with its tsx reading; a host install directory with no node_modules reads ok when every mounted tree has tsx"
+      proof: "grep: W1-T12943 criterion 1 in test/daemon/the-beats-rmd-verdict-judges-the-tree-each-daemon-runs-from.test.ts"
+    - claim: "A mounted tree whose node_modules is empty or whose tsx is missing reads BROKEN and names the instance and the tree"
+      proof: "grep: W1-T12943 criterion 2 in test/daemon/the-beats-rmd-verdict-judges-the-tree-each-daemon-runs-from.test.ts"
+    - claim: "The host install directory is reported on its own lines, its path and whether tsx is present, and its absence of dependencies is never worded as every rmd verb being dead"
+      proof: "grep: W1-T12943 criterion 3 in test/daemon/the-beats-rmd-verdict-judges-the-tree-each-daemon-runs-from.test.ts"
+    - claim: "invariant:no-runtime-unchanged — with no container runtime or no running daemon container the verdict judges the install directory exactly as on origin/main, and a mount list that cannot be read prints unknown for that instance, never ok"
+      proof: "grep: W1-T12943 criterion 4 in test/daemon/the-beats-rmd-verdict-judges-the-tree-each-daemon-runs-from.test.ts"
+  rationale: |
+    OBSERVED 2026-11-15 on the Azure host, read-only, by the operator session.
+
+    - The heartbeat-azure payload of 17:55:01Z reads `rmd_verdict=BROKEN: node_modules is empty — every rmd verb and the launchd supervisor are dead`, `tsx_present=no`, `node_modules_entries=0`, `install_dir=/home/craigoleyagent/rmd-state2/daemon-install`. The same payload reads `daemon_verdict=live` and `supervisor_verdict=live`.
+    - The fleet was healthy. Inside remudero-daemon the code path `/home/node/Remudero/remudero` is a bind of `/mnt/scratch/rmd/rmd-state2/remudero`; its node_modules holds 283 entries and `.bin/tsx` exists. All three daemons were building and merging.
+    - `scripts/fleet-heartbeat.sh` derives the verdict from `INSTALL_DIR`, the directory the running script sits in (READ: the "is the CLI usable at all?" probe). On this host that is the host-side install the cron line runs, whose files date from 2026-11-10 and which has no node_modules directory at all.
+    - The true part: `./bin/rmd` run from that host install does fail, because tsx is missing there. The false part is the sentence: no fleet verb is dead.
+    - The signal has been wrong since at least 2026-11-10 and nothing acted on it, which is the cost: a reader learns that BROKEN means nothing. W1-T10756 names this probe as "NOT THIS TASK, reported separately"; no task was filed for it.
+  design: |
+    MEASURE FIRST, read-only on the host, and put the findings in the PR body: what on the host runs `bin/rmd` from the install directory (cron lines, units). If something does, report it as its own item; this task does not install dependencies there.
+
+    1. Resolve the daemon containers the beat already lists (the memory probe's `docker ps` filter) and read each one's mount source for the code path from one `docker inspect` of Mounts only. No environment or command line is read.
+    2. Judge tsx and the node_modules entry count on each mounted tree. `rmd_verdict` is ok when every tree has tsx; otherwise BROKEN naming the instance and tree. Publish one line per instance.
+    3. Publish the host install's reading as `host_install_dir` and `host_install_tsx`, worded as what it is.
+    4. With no runtime or no running daemon container, keep today's install-directory judgment so the fixtures in fleet-heartbeat-watch.yml and the Mac case hold.
+    INVARIANT no-runtime-unchanged: a beat with no container runtime or no running daemon container prints the same rmd_verdict, tsx_present and node_modules_entries as origin/main for the same install directory, and an unreadable mount list is `unknown`, never ok.
+    NOT IN SCOPE: the gc probe's tree (W1-T10751), which cron line runs the beat (W1-T10756), alerting on the verdict.
+    W1-T10751 (queued) needs the same mounted-tree resolver. Whichever lands second reuses the first one's function.
+  falsifier: |
+    Judge the install directory while containers run and criterion 1 must fail. Report ok for a mounted tree with no tsx and criterion 2 must fail. Keep the "every rmd verb" sentence for the host install and criterion 3 must fail. Print ok for an unreadable mount list, or change the no-runtime answer, and criterion 4 must fail. Restore and all pass.
+  note: |
+    reservation hand-off: run-unfiled-1794763854161 -> run-unfiled-1794763854161
+    Reserved with rmd next-task-id from a worktree at origin/main. Check refs/rmd-dispatch/W1-T12943 and any run branch before building. The test folder is the one rmd test-place computed for a stub importing test/helpers/fleet-heartbeat-harness.ts. The harness has a container-runtime stub seam (RMD_HEARTBEAT_DOCKER); extend it to answer the Mounts read.

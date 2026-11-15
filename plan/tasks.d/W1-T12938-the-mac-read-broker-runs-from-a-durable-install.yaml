@@ -1,0 +1,50 @@
+- id: W1-T12938
+  title: "The Mac read broker runs from a durable install, so retiring a worktree or leaving a checkout behind cannot take every session's GitHub reads back to the shared floor"
+  repo: remudero
+  priority: 0.6
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the installer writes a launch agent and a private copy of code under the account's home; a wrong copy leaves the broker down or serving stale code
+  band_meaning: span
+  origin: "operator-session#pr-queue-root-causes-2026-11-15"
+  plan_refs:
+    - W1-T10279
+    - W1-T10302
+    - W1-T10369
+    - W1-T11944
+    - W1-T12072
+  files:
+    - deploy/mac/install-gh-read-broker.sh
+    - hooks/deny-floor.sh
+    - test/github/the-mac-read-broker-runs-from-a-durable-install.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "The installer's launch agent runs the broker from a private, versioned copy under the account's Application Support folder, not from the checkout or worktree the installer was run in, and removing that checkout afterwards leaves the agent's program path present"
+      proof: "grep: W1-T12938 criterion 1 in test/github/the-mac-read-broker-runs-from-a-durable-install.test.ts"
+    - claim: "A second install replaces the copy and the agent in one step and keeps the previous copy until the new agent has written a heartbeat, and --dry-run prints the copy and the agent and changes nothing"
+      proof: "grep: W1-T12938 criterion 2 in test/github/the-mac-read-broker-runs-from-a-durable-install.test.ts"
+    - claim: "When the account has a broker directory whose heartbeat is stale, the read floor's refusal names the broker as down, the age of its last heartbeat and the installer command that restores it"
+      proof: "grep: W1-T12938 criterion 3 in test/github/the-mac-read-broker-runs-from-a-durable-install.test.ts"
+    - claim: "invariant:floor-and-routing-unchanged — a live broker still routes a raw read to it, an account that never had a broker gets today's floor refusal text, writes are never refused, and the floor's interval is unchanged"
+      proof: "grep: W1-T12938 criterion 4 in test/github/the-mac-read-broker-runs-from-a-durable-install.test.ts"
+  rationale: |
+    OBSERVED 2026-11-15 on the operator Mac, account craigoleyagent.
+
+    - `~/Library/LaunchAgents/com.remudero.gh-read-broker.plist` (written 2026-11-10) runs `<worktree>/bin/rmd gh-broker serve` with ProgramArguments and WorkingDirectory inside `~/Remudero/lanes-wt/luna-mac-read-broker-recovery-20261111`. That worktree no longer exists. `launchctl print` finds no such service, and the broker's heartbeat file was last written 2026-11-11T13:34Z.
+    - For four days every session of that account has been on the shared floor: one read per 180 s across all sessions. On 2026-11-15 a single diagnostic read was refused six times in an hour ("a read-shaped call 35s after the last one") while three sessions shared the stamp. The refusal says to report and stop; it does not say a broker was installed and is down.
+    - READ deploy/mac/install-gh-read-broker.sh: the agent's program is `${REMUDERO_RMD_BIN:-$HOME/Remudero/remudero/bin/rmd}` or the `--rmd` argument, used in place. The default is the operator checkout, which on this Mac sat on a feature branch behind main with uncommitted files, so its `rmd` refuses to self-sync (the broker's own error log shows that refusal). The only working choice was a worktree, and worktrees are retired.
+    - The Mac janitor and the temp reclaimer are installed as copies under `~/Library/Application Support/remudero/` for this reason.
+  design: |
+    1. install-gh-read-broker.sh copies what `rmd gh-broker serve` needs into `~/Library/Application Support/remudero/gh-read-broker/<source sha>/` (the built child entry and its runtime dependencies, resolved the way the dependency seed tool materializes a proof install), points the agent at that copy, and records the source sha beside it. The source is the committed tree at the sha the installer runs from; a dirty tree is refused by name.
+    2. Replacement is two-phase: write the new copy, bootstrap the agent on it, wait for a fresh heartbeat within the broker's own interval, then remove the previous copy. No heartbeat leaves the previous copy and agent in place and exits non-zero naming the log.
+    3. hooks/deny-floor.sh: when the broker directory exists and its heartbeat is stale, the floor's refusal adds one line: the broker is down, the heartbeat's age, and the installer command. No other branch of the hook changes.
+    INVARIANT floor-and-routing-unchanged: routing with a live broker, the floor without one, the write exemption and the interval all behave as on origin/main.
+    NOT IN SCOPE: starting or restarting the agent from the hook; the Linux install (W1-T12072); the narrow bundled entry itself (W1-T10369: use it when it has merged, the built run-task entry until then); the daemon-side stale-heartbeat alert (W1-T11944, which a Mac with no daemon never raises); the shared pace directory (W1-T10302).
+  falsifier: |
+    Point the agent at the invoking checkout again and criterion 1 must fail. Remove the old copy before the heartbeat check and criterion 2 must fail. Drop the stale-heartbeat line and criterion 3 must fail. Change the floor's refusal for an account with no broker directory and criterion 4 must fail. Restore and all pass.
+  note: |
+    reservation hand-off: run-unfiled-1794763854161 -> run-unfiled-1794763854161
+    Reserved with rmd next-task-id from a worktree at origin/main. Check refs/rmd-dispatch/W1-T12938 and any run branch before building. The test folder is where the existing broker suites live (test/github/); confirm it with rmd test-place once the file exists. The hook is bash: the Mac has bash 3.2 and CI has bash 5, so initialise arrays under set -u.

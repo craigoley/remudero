@@ -1,0 +1,72 @@
+- id: W1-T12833
+  title: "Every machine shard generator declares its design invariants, and the shared writer lints with the options the plan PR preflight applies"
+  repo: remudero
+  depends_on: []
+  priority: 0.2
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # src/lib/machine-filing.ts renders every machine-filed plan record; a wrong declaration or lint option stops or corrupts every gardener filing
+  band_meaning: blast-radius
+  origin: "operator-session#self-improvement-audit-2026-11-15"
+  plan_refs:
+    - W1-T11746
+    - W1-T12832
+    - W1-T5454
+  files:
+    - src/lib/machine-filing.ts
+    - src/lib/ci-friction-gardener.ts
+    - src/lib/flake-incident-gardener.ts
+    - src/lib/flow-gardener.ts
+    - src/lib/flow-remedy-gardener.ts
+    - src/lib/gate-gardener.ts
+    - src/lib/host-resource-gardener.ts
+    - src/lib/hot-file-gardener.ts
+    - src/lib/scout-gardener.ts
+    - src/lib/selector-shadow-gardener.ts
+    - src/lib/measurement-cadence.ts
+    - test/a-judge-ruling-that-plan-lint-refuses-escalates-instead-of-relanding.test.ts
+    - test/every-machine-shard-filer-lands-only-what-lint-plan-admits.test.ts
+    - test/the-ci-friction-ladder-drafts-remedies-not-docs.test.ts
+    - test/the-machine-filing-judge-releases-or-escalates.test.ts
+    - test/the-machine-judge-prior-learns-from-operator-rulings.test.ts
+    - test/the-machine-judge-rules-on-the-evidence-a-filing-carries.test.ts
+    - test/the-machine-judge-sees-main-red-evidence-for-a-flake-filing.test.ts
+    - test/triage/operator-releases-pin-the-approved-contract.test.ts
+    - test/triage/the-backstop-judges-path-classes-not-words.test.ts
+    - test/gardeners/every-machine-shard-generator-passes-the-changed-task-plan-lint.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "renderMachineShard lints its record with the changed-task options the plan PR preflight applies (requireDesignInvariantDeclaration true), so a spec whose design declares neither form returns refused naming design-invariant-proof and is never written"
+      proof: "grep: W1-T12833 criterion 1 in test/gardeners/every-machine-shard-generator-passes-the-changed-task-plan-lint.test.ts"
+    - claim: "MachineShardSpec carries a required invariants field: either a list of slug, statement, claim and proof that renders one INVARIANT design line and one invariant:<slug> acceptance claim each, or a NO-INVARIANTS reason; a call site that omits it does not typecheck"
+      proof: "grep: W1-T12833 criterion 2 in test/gardeners/every-machine-shard-generator-passes-the-changed-task-plan-lint.test.ts"
+    - claim: "A census renders one representative record from every machine generator (ci-friction, flake-incident, flow stage, flow follow-up, flow-remedy, the four gate templates, host-resource, hot-file, scout, both selector-shadow templates and the CI-learning draft) and each passes lintTask with the changed-task options with 0 blocking violations; the census names its members and fails when a generator is added without one"
+      proof: "grep: W1-T12833 criterion 3 in test/gardeners/every-machine-shard-generator-passes-the-changed-task-plan-lint.test.ts"
+    - claim: "invariant:a-generator-never-writes-a-refused-record — a record the shared lint refuses is not written to the plan or handed to the landing, and the filer logs the refused checks, as origin/main does for every other blocking check"
+      proof: "grep: W1-T12833 criterion 4 in test/gardeners/every-machine-shard-generator-passes-the-changed-task-plan-lint.test.ts"
+    - claim: "The selector-shadow templates and the CI-learning draft, which assemble their own text, pass through the same shared lint before they are written"
+      proof: "grep: W1-T12833 criterion 5 in test/gardeners/every-machine-shard-generator-passes-the-changed-task-plan-lint.test.ts"
+  rationale: |
+    MEASURED 2026-11-15 by the operator session, read-only, over the daemon ledger union (~/rmd-state2/state, 2026-11-08T00:00Z to 2026-11-15T15:00Z) and origin/main d5722e1fe.
+
+    - 292 scout filings (207 distinct minted ids), 33 selector-shadow, 7 gate, 5 flow and 4 fix-lane filings were refused by [design-invariant-proof] between 2026-11-13T03:19Z and 2026-11-15T15:02Z. These gardens' shards never reach main.
+    - READ src/lib/machine-filing.ts renderMachineShard: it parses its own text and calls lintTask(task) with default options. A record the plan PR preflight refuses (lint-plan --base sets requireDesignInvariantDeclaration) therefore reads clean to its filer.
+    - git grep for NO-INVARIANTS and "INVARIANT " over the generator modules finds one declaration, the gate gardener's fixture-crossing template. The other renderMachineShard call sites declare nothing: ci-friction, flake-incident, flow (2), flow-remedy, gate (3 more), host-resource, hot-file, scout. The same holds for selector-shadow's two hand-assembled templates and the CI-learning draft in measurement-cadence.ts.
+    - Class cause: nothing runs the generators against the lint the gate applies, so a new lint rule breaks machine filing in production with no CI signal. The same thing happened earlier with new-shard-rule-suite (12 scout refusals) and shared-proof (15 selector-shadow, 7 redesign).
+  design: |
+    1. machine-filing.ts: add the required invariants field to MachineShardSpec. Render the declared form into the design text and the acceptance list (one invariant:<slug> claim per slug with its own proof). Lint with the changed-task options that need no checkout (requireDesignInvariantDeclaration true). Export the option set so the census uses the same object.
+    2. Each generator declares truthfully for its own template. Prefer a real INVARIANT with a mapped claim wherever the drafted remedy changes existing behaviour (for example "the gate still refuses the defect it was written for", "the symptom row is still written when its failure occurs"). Use NO-INVARIANTS only with a specific reason (for example a task that only adds a new test or scorecard). Never use a placeholder reason.
+    3. selector-shadow's two templates and the CI-learning draft call the shared lint on their final text before writing.
+    4. The census is the durable guard: it enumerates the generators by name and renders each from a fixture finding.
+    INVARIANT a-generator-never-writes-a-refused-record: a record the shared lint refuses is never written or landed, and the refusal is logged with its checks, so adding a lint option can only stop a filing, never let a refused one through.
+    The nine existing suites in files: build a MachineShardSpec by hand and gain only the required field; one judge suite's expectation gains the invariant claim.
+    KNOWN REMAINING, found while building: a plan-only filing promotes two older warnings to blocks (promoteIntroducedPlanOnlyDiagnostics). The selector-shadow miss template carries shared-proof (its two original claims share one proof) and the CI-learning draft carries proof-scope (its second proof greps a fixture path outside files:). Both predate this task and still refuse those two filers at the preflight; they need their own task.
+    NOT IN SCOPE: the lint's scope for old tasks (W1-T12832), LLM-authored designs (redesign, triage), and the per-garden retry ladder (W1-T12834).
+  falsifier: |
+    Drop the changed-task option from the shared lint and criterion 1 must fail. Remove one generator's declaration and criterion 3 must fail naming it. Write a refused record and criterion 4 must fail. Restore and all pass.
+  note: |
+    reservation hand-off: run-unfiled-1794756420518 -> run-unfiled-1794756420518
+    Reserved with rmd next-task-id from the operator checkout. Check refs/rmd-dispatch/W1-T12833 and any run branch before building. The test folder is the one rmd test-place computed for a stub with this test's imports; confirm it once the file exists.

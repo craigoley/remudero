@@ -1,0 +1,53 @@
+- id: W1-T12940
+  title: "A dependency pull request is judged against its own repository's required checks, so a managed repository's Dependabot bumps stop being held as pending forever"
+  repo: remudero
+  priority: 0.9
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # it decides which checks must be green before the dependency lane arms a bump; a wrong set either arms early or never arms
+  band_meaning: span
+  origin: "operator-session#pr-queue-root-causes-2026-11-15"
+  plan_refs:
+    - W1-T9929
+    - W1-T11606
+    - W1-T11865
+  files:
+    - src/cli/commands/sweep.ts
+    - src/run-task.ts
+    - src/lib/dep-review.ts
+    - test/ci/a-dependency-pull-request-is-judged-by-its-own-repositorys-required-checks.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "For a pull request in a managed repository, the dependency lane's required set is branch protection's contexts united with the REQUIRED list of THAT repository's own ci-gate workflow, read from that repository's checkout, and never the REQUIRED list of the repository the daemon's code runs from"
+      proof: "grep: W1-T12940 criterion 1 in test/ci/a-dependency-pull-request-is-judged-by-its-own-repositorys-required-checks.test.ts"
+    - claim: "A managed-repository bump whose own required checks are all green is decided arm, where origin/main decides hold with selected check evidence pending"
+      proof: "grep: W1-T12940 criterion 2 in test/ci/a-dependency-pull-request-is-judged-by-its-own-repositorys-required-checks.test.ts"
+    - claim: "invariant:self-repository-set-unchanged — for a pull request in the daemon's own repository the required set is byte-identical to origin/main's, and a required check that has not registered on the head still reads pending"
+      proof: "grep: W1-T12940 criterion 3 in test/ci/a-dependency-pull-request-is-judged-by-its-own-repositorys-required-checks.test.ts"
+    - claim: "invariant:unreadable-fails-closed — when the managed repository's checkout or its ci-gate workflow cannot be read, the lane judges every reported check (the existing all-checks fallback, with a fallback reason naming the unreadable path) and never borrows another repository's list"
+      proof: "grep: W1-T12940 criterion 4 in test/ci/a-dependency-pull-request-is-judged-by-its-own-repositorys-required-checks.test.ts"
+  rationale: |
+    OBSERVED 2026-11-15 by the operator session.
+
+    - Nine Dependabot pull requests are open and held: remudero-console #2517 to #2523 and remudero-site #232, #233. GitHub reports every check green on them (read 2026-11-15 for #2523: console-ci, ci-gate and Vercel all SUCCESS; branch protection requires Vercel, ci-gate, console-ci and remudero-review).
+    - The console ledger holds 1,315 `dep-review.decided` rows with decision hold and reason "selected check evidence is pending; no success or arm without current green evidence"; the site ledger holds 208. Site's last `arm` decisions are 2026-11-07T22:37Z and 22:41Z.
+    - READ src/cli/commands/sweep.ts: `depReviewCommandImpl: (pr, rest) => depReviewCommand(pr, rest, { root: repoRoot, ... })`. `repoRoot` (lib/repo-location) is the checkout the daemon's own code runs from, for every instance. READ src/run-task.ts readDepReviewRequiredChecks: it unites protection's contexts with `readCiGateRequiredChecks(root)`, the REQUIRED list of `<root>/.github/workflows/ci-gate.yml`.
+    - So a console or site pull request is judged against remudero's own REQUIRED list ("ci", "lint-plan", "depcruise", "containment-probe", "coverage-ratchet", ...). None of those checks exists in remudero-console, whose own ci-gate declares `REQUIRED: '["console-ci"]'`.
+    - Until 2026-11-08 a required name with no entry on the head was ignored. W1-T11606 (#17434, merged 2026-11-08) made a configured check that has not registered read as pending, which is correct for the self repository and turned every managed-repository bump into a permanent hold. The same file already resolves a managed repository's checkout elsewhere (`deps.repo === local ? repoRoot : join(config.root, "repos", deps.repo)`).
+    - INFERRED, not read off a live row: which names are missing on a given head. The code path admits no other source for the pending verdict once all three protection contexts are green, and the onset matches W1-T11606's merge.
+  design: |
+    1. Resolve the required-checks root per pull request: the daemon's own checkout when the pull request's repository is the one that checkout serves, otherwise the managed repository's checkout under the config root, the resolution sweep.ts already uses for a managed repository's plan and reviews.
+    2. Pass that root to readDepReviewRequiredChecks separately from the proposal root. Proposals, plan feedback and landing state keep using the daemon's own checkout: only the ci-gate REQUIRED read moves.
+    3. An unreadable managed checkout or workflow returns the existing `all-checks` fallback with a reason that names the path, so every reported check is judged. depReviewRequiredSet's existing rule (protection requires ci-gate but REQUIRED is empty) already yields that fallback; keep it and make the reason distinguish "unreadable" from "empty".
+    4. Log the root the set was read from on dep-review.decided (`required_root`), so the first live rows can be audited.
+    INVARIANT self-repository-set-unchanged: the daemon's own repository gets the same required set as origin/main.
+    INVARIANT unreadable-fails-closed: no repository is ever judged against another repository's REQUIRED list, and an unreadable source never narrows the set.
+    NOT IN SCOPE: W1-T11606's rule that an unregistered required check reads pending; the allowlist; the review-context exclusion (W1-T11865).
+  falsifier: |
+    Pass the daemon's own checkout as the required-checks root again and criteria 1 and 2 must fail. Change the self-repository branch to read the managed path and criterion 3 must fail. Return an empty list for an unreadable workflow without the all-checks fallback and criterion 4 must fail. Restore and all pass.
+  note: |
+    reservation hand-off: run-unfiled-1794763854161 -> run-unfiled-1794763854161
+    Reserved with rmd next-task-id from a worktree at origin/main. The operator session is hand-building this task; check refs/rmd-dispatch/W1-T12940 and any run branch before building. The test folder is the one rmd test-place computed for a stub importing dep-review.ts and ci-gate-required.ts. A new test must not import run-task.ts (the reach ratchet): put the root resolution in dep-review.ts and test it there. After it merges, audit the first console and site dep-review.decided rows for required_root and an arm.

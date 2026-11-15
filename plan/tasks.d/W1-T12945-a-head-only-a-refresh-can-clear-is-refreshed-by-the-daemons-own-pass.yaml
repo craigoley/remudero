@@ -1,0 +1,51 @@
+- id: W1-T12945
+  title: "A head that only a branch refresh can clear is refreshed by the daemon's own pass, so a build head missing its task record and a base-red hold after main turns green stop waiting on a person"
+  repo: remudero
+  priority: 0.8
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # it decides when the daemon merges main into an open pull request; a wrong press re-runs CI and voids a review
+  band_meaning: span
+  origin: "operator-session#pr-queue-root-causes-2026-11-15"
+  plan_refs:
+    - W1-T9232
+    - W1-T528
+    - W1-T9595
+  files:
+    - src/lib/sweep.ts
+    - src/cli/commands/sweep.ts
+    - test/sweep/a-head-only-a-refresh-can-clear-is-refreshed-by-the-daemons-own-pass.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "In the daemon's light pass a build head that lacks its own task record, when that record is on main, enters the pass's whole-snapshot refresh selection and is refreshed once; it is not escalated before that refresh has been tried"
+      proof: "grep: W1-T12945 criterion 1 in test/sweep/a-head-only-a-refresh-can-clear-is-refreshed-by-the-daemons-own-pass.test.ts"
+    - claim: "In the light pass a head held as base-red whose failing check is green on main enters the same selection, and its disposition no longer reads that the branch refresh is unwired"
+      proof: "grep: W1-T12945 criterion 2 in test/sweep/a-head-only-a-refresh-can-clear-is-refreshed-by-the-daemons-own-pass.test.ts"
+    - claim: "A refresh that does not take, or the same miss on the head a refresh produced, keeps the escalation with its cause named, and one head and cause is pressed at most once"
+      proof: "grep: W1-T12945 criterion 3 in test/sweep/a-head-only-a-refresh-can-clear-is-refreshed-by-the-daemons-own-pass.test.ts"
+    - claim: "invariant:one-refresh-selection — the light pass's per pull request fan-out still presses no branch update, every press goes through the whole-snapshot selection with its admission and value test, and a dry run presses nothing"
+      proof: "grep: W1-T12945 criterion 4 in test/sweep/a-head-only-a-refresh-can-clear-is-refreshed-by-the-daemons-own-pass.test.ts"
+  rationale: |
+    OBSERVED 2026-11-15 in the core ledger, read-only, by the operator session. Two open pull requests waited on a refresh the daemon named and could not press.
+
+    - #18582 (run-W1-T12705, a hand build): its task record reached main in #18699 after the head's last merge of main (16:54:48Z). `review.reviewer.skipped own-task-record-missing-at-head` at 17:21:44Z, then `sweep.disposed` at 17:45:26Z, 18:00:33Z and 18:04:32Z: "own-task-record-missing-at-head: the branch refresh is unwired — escalating".
+    - #18705 (run-W1-T12257, a fleet build): `sweep.disposed` at 18:12:02Z: "required checks red — ci-log fix, strike 1/2 — NOT DISPATCHED this pass: base red: test-slow-shard (2/4) was held while main was red; main is green, but the branch refresh is unwired on this surface (light pass) — no fix dispatched". Its head had not moved since 16:56:33Z.
+    - Both moved only when the operator session refreshed them by hand (about 18:20Z and 18:27Z).
+    - READ on origin/main 57ca3bba9e. `src/cli/commands/sweep.ts` builds every light-pass batch with `updateBranch: undefined` and the comment "W1-T528: branch updates belong to the whole-snapshot selection, never this per-PR fan-out". In `src/lib/sweep.ts` the W1-T9232 block takes `!deps.updateBranch` and escalates, and the base-red path builds the "unwired on this surface (light pass)" text. The whole-snapshot selection does press refreshes for other causes in the same window (`sweep.refresh.decided`, `sweep.base_fixed.refresh` outcome updated), so the mechanism exists; these two causes never reach it.
+    - W1-T9232 is merged and its refresh works where `updateBranch` is wired. The daemon's regular pass is the light pass, so in production that fix does not run.
+  design: |
+    MEASURE FIRST, in process: build the production light-pass wiring and show, for each of the two causes, the disposition it derives today and whether the whole-snapshot selection sees the head. Report any third cause that ends in the same "unwired" text.
+
+    1. The light pass hands the two causes to the whole-snapshot refresh selection as candidates, each with its cause named, instead of deriving an escalation. The selection's admission and value test decide the press, as for every other refresh.
+    2. The once-per-head record W1-T9232 already writes (the own-task-record refresh step) and the base-red refresh records bound the press to one per head and cause.
+    3. The escalation stays for a refresh that did not take or a miss that survives one.
+    INVARIANT one-refresh-selection: no per pull request code path in the light pass presses a branch update; the whole-snapshot selection is the only presser, and a dry run presses nothing.
+    NOT IN SCOPE: the fix lane's own base refresh; refreshing heads that are green and reviewed; conflict resolution.
+  falsifier: |
+    Leave the own-task-record cause out of the selection and criterion 1 must fail. Leave the base-red cause out and criterion 2 must fail. Press again on the head a refresh produced and criterion 3 must fail. Wire updateBranch into the per pull request fan-out and criterion 4 must fail. Restore and all pass.
+  note: |
+    reservation hand-off: run-unfiled-1794763854161 -> run-unfiled-1794763854161
+    Reserved with rmd next-task-id from a worktree at origin/main. Check refs/rmd-dispatch/W1-T12945 and any run branch before building. The test folder is the one rmd test-place computed for a stub importing src/lib/sweep.ts. Never fan out update-branch across the board: this is one press per head and cause through the existing selection.
