@@ -1,6 +1,8 @@
 import { execFileSync } from "node:child_process";
 import { ghExec, ghExecFile, ghTextAsync } from "./github-transport.js";
-import { DEFAULT_GH_CALL_TIMEOUT_MS, createNonBlockingGhCallPacer, parseGhRateLimitHeaders, splitGhHeaderBlock, type GhRateLimitReading } from "./github-transport.js";
+import { DEFAULT_GH_CALL_TIMEOUT_MS, configureGithubInstallationBudget, createNonBlockingGhCallPacer, githubInstallationBudget, parseGhRateLimitHeaders, splitGhHeaderBlock, type GhRateLimitReading } from "./github-transport.js";
+import { installationBudgetForThread, type InstallationBudgetThreadInput } from "./github-installation-budget.js";
+import { systemClock } from "./clock.js";
 import type { WarmRefreshOutcome, WarmRefreshTelemetry } from "./github-refresh-pacer.js";
 // W1-T2440: runPrewarmWorker loads this module twice; isMainThread/workerData gate off-loop reads.
 import { Worker, isMainThread, parentPort, workerData } from "node:worker_threads";
@@ -4655,6 +4657,8 @@ interface PrewarmWorkerRequest {
   knownIssues?: Map<number, BoardIssueRest>;
   /** Open PRs whose review state the walk refreshes, so a board recompute never shells one per row. */
   reviewRefs?: Array<{ url: string; headRef: string }>;
+  /** W1-T12555: the main thread's budget state, so the walk's reads take their share of it. */
+  budget?: InstallationBudgetThreadInput;
 }
 
 function isPrewarmWorkerRequest(v: unknown): v is PrewarmWorkerRequest {
@@ -4701,6 +4705,7 @@ function prewarmRunChannel<T, R extends { rows: T[]; truncated: boolean; calls: 
  *  branch so it has exactly ONE body: the worker calls it in the spawned thread, and the spawn-failure fallback
  *  calls it on the main thread, which keeps that fallback binary-aware and gives every line real coverage. */
 function runPrewarmChannelsSync(req: PrewarmWorkerRequest): PrewarmWorkerResponse {
+  if (!isMainThread && req.budget !== undefined) configureGithubInstallationBudget(installationBudgetForThread(req.budget, systemClock));
   // Its OWN pacer, not the main thread's module-scoped default — a `Worker` has its own heap, so the two cannot
   // share one gap-tracking object. Priced, not hidden: a narrower rate-limit exposure, worth a follow-up, never
   // a reason to keep the walk on the serving thread.
@@ -5448,6 +5453,7 @@ export function buildBatchedGithub(
       reviewsWarmInFlight.clear();
       fetchInFlight = false;
     };
+    const budget = githubInstallationBudget().threadInput();
     const req: PrewarmWorkerRequest = {
       kind: BOARD_PREWARM_WORKER_KIND,
       owner,
@@ -5459,6 +5465,7 @@ export function buildBatchedGithub(
       knownBoardPrs,
       knownIssues,
       reviewRefs,
+      ...(budget === undefined ? {} : { budget }),
     };
     let worker: Worker;
     try {
