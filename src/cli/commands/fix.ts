@@ -49,7 +49,7 @@ import { recognizeChangesetClaims, acceptanceAuthorTimeCheck, extractTaskTrailer
 import { repairedProofsAreSafeToPush, diagnoseUnrunnableProofs, renderBodyDefects } from "../../lib/body-repair.js";
 import { recordHeadProviderAfterPush } from "../../lib/review-provider-provenance.js";
 import { ghRequiredStatusCheckContexts, readLedgerLines, taskIdFromRunBranch } from "../../lib/status.js";
-import { withCodeqlAlertEvidence, CODE_SCANNING_FALSE_POSITIVE_STEP, DEFAULT_SWEEP_POLICY, decideRedBaseRefresh, isCiHarnessPath, actionableGateFailuresFromReasons, dispatchFixSpent, checksStateFromRollup, earlyRedEvidenceRollup, checksPendingSinceFromRollup, deriveDisposition, fixRoundTally, buildFixProgressInput, flakeClaimsForHead, isBlockedCi, renderClarificationQuestion, redQualityGateNames, stillRedRequiredNames, terminalStateReason, type ActionableGateFailure, type CiFailure, type LiveStateResult, type OpenPrView, type RollupCheckEntry, type ProofDiscriminationEvidence, type SweepDeps, type SweepPolicy, proofDiscriminationEvidenceFromCriteria, ADDITIVE_REGISTRATION_SURFACES, type RegistrationChange, hasCapturedMergeConflictEvidence, clearedConflictEscalationCause } from "../../lib/sweep.js";
+import { withCodeqlAlertEvidence, CODE_SCANNING_FALSE_POSITIVE_STEP, DEFAULT_SWEEP_POLICY, decideRedBaseRefresh, isCiHarnessPath, actionableGateFailuresFromReasons, dispatchFixSpent, fixRoundNotRunReason, checksStateFromRollup, earlyRedEvidenceRollup, checksPendingSinceFromRollup, deriveDisposition, fixRoundTally, buildFixProgressInput, flakeClaimsForHead, isBlockedCi, renderClarificationQuestion, redQualityGateNames, stillRedRequiredNames, terminalStateReason, type ActionableGateFailure, type CiFailure, type LiveStateResult, type OpenPrView, type RollupCheckEntry, type ProofDiscriminationEvidence, type SweepDeps, type SweepPolicy, proofDiscriminationEvidenceFromCriteria, ADDITIVE_REGISTRATION_SURFACES, type RegistrationChange, hasCapturedMergeConflictEvidence, clearedConflictEscalationCause } from "../../lib/sweep.js";
 import { forcedRefreshFields, REFRESH_DECIDED_STEP } from "../../lib/refresh-value.js";
 import { detectReviewFalseBlock, detectCiLogVerdictUnchanged, shouldSelfHealNothingChanged } from "../../lib/fix-rung-classify.js";
 import { readCiGateRequiredChecks } from "../../lib/ci-gate-required.js";
@@ -1948,7 +1948,9 @@ function derivedFixCommit(check: string | undefined, prUrl: string): { subject: 
 
 function fixDispatchResult(result: Awaited<ReturnType<FixDeps["dispatchFix"]>>, reason: string): { outcome: FixOutcome; reason: string } {
   if (dispatchFixSpent(result)) return { outcome: "fixed", reason };
-  return { outcome: "refused", reason: typeof result === "object"
+  const notRun = fixRoundNotRunReason(result);
+  if (notRun !== undefined) return { outcome: "refused", reason: notRun };
+  return { outcome: "refused", reason: typeof result === "object" && "claimDeclined" in result
     ? `fix dispatch declined at the checkout claim (${result.ownerRecoveryReason})`
     : "fix dispatch was not accepted; no worker dispatched" };
 }
@@ -2169,6 +2171,29 @@ async function capturedScopeMergeConflict(
     theirsLog: (await git(["log", "--reverse", "--format=%h %s", `${base}..${mainSha}`, "--"])).trim(),
   };
   return hasCapturedMergeConflictEvidence(evidence) ? evidence : undefined;
+}
+
+/** W1-T12545: a trial merge of main at `headSha`, read from its unmerged index and aborted; never a dirty tree. */
+async function reenteredScopeMergeConflict(
+  git: (args: string[]) => Promise<string>, headSha: string, untrackedAll: string,
+): Promise<{ evidence: MergeConflictEvidence } | { reason: string }> {
+  const clean = async () => !(await git(["status", "--porcelain", "-z", untrackedAll])).trim();
+  if (!(await clean())) return { reason: "the worktree is not clean" };
+  if ((await git(["rev-parse", "HEAD"])).trim() !== headSha) return { reason: `the worktree is not at ${headSha}` };
+  await git(["fetch", "--no-tags", "origin", "main"]);
+  // A merge needs a committer identity even with --no-commit; a runner without one fails before any conflict.
+  const stopped = await git(["-c", "user.name=remudero trial merge", "-c", "user.email=trial-merge@remudero.invalid",
+    "merge", "--no-edit", "--no-commit", "--no-ff", "refs/remotes/origin/main"]).then(() => false, () => true);
+  let evidence: MergeConflictEvidence | undefined;
+  try {
+    evidence = stopped ? await capturedScopeMergeConflict(git) : undefined;
+  } finally {
+    if (await git(["rev-parse", "-q", "--verify", "MERGE_HEAD"]).then(() => true, () => false)) await git(["merge", "--abort"]);
+  }
+  if ((await git(["rev-parse", "HEAD"])).trim() !== headSha || !(await clean())) {
+    throw new Error(`the worktree did not return to ${headSha} after the trial merge`);
+  }
+  return evidence ? { evidence } : { reason: "the trial merge of main left no unmerged paths" };
 }
 
 type InheritedCensusRefreshInput = {
@@ -2781,6 +2806,22 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
     // "prior capture was unreadable" contract {@link unchangedTreeStandDownReason} reads.
     if (deps.captureWorktreeSnapshot) {
       lastGateSnapshot = currentTreeSnapshot ? { gateKey, snapshot: currentTreeSnapshot } : undefined;
+    }
+    if (preStrikeStandDown?.reason === CONFLICT_REPAIR_HANDOFF_REASON && currentMergeConflict === undefined) {
+      const conflictHead = currentPinnedSha ?? review.headSha;
+      const captured = await reenteredScopeMergeConflict((args) => (deps.scopeAmendmentGit ?? hostWorktreeGitAsync)(
+        opts.worktreePath, args, { maxBuffer: 1 << 26 }), conflictHead, host.GIT_UNTRACKED_FILES_ALL)
+        .catch((error: unknown) => {
+          const reason = String((error as Error)?.message ?? error);
+          deps.log("fix.gate_read_error", { site: "rung.strike", strike: strikes + 1, read: "scope_merge_conflict", error: reason });
+          return { reason };
+        });
+      if ("evidence" in captured) {
+        currentMergeConflict = captured.evidence;
+        deps.log("fix.merge_mode_reentered", { site: "rung.strike", strike: strikes + 1, head_sha: conflictHead,
+          conflicted_files: conflictedFilePaths(currentMergeConflict) });
+        continue;
+      }
     }
     // W1-T7096: an unchanged tree is a loop SIGNAL — the progress judge decides whether it stops the rung.
     // A wired judge reads the unchanged tree from its own signals; only the stand-in stands down on it here.
@@ -5802,6 +5843,14 @@ export async function fixCatalogTask(taskId: string, plan: Plan, options: TaskLo
   return findTaskInCatalogs(taskId, { ...options, byId: plan.byId });
 }
 
+/** W1-T12701: the refusal fields of a dispatch that ran no round; empty for every other reason. */
+function noFixRoundFields(reason: string): Record<string, unknown> {
+  const notRun = /^no fix round ran: ([\s\S]*)$/.exec(reason)?.[1];
+  if (notRun === undefined) return {};
+  const judged = /^fix progress (?:judgment failed|judge unavailable): ([\s\S]*)$/.exec(notRun);
+  return judged ? { refusal: "progress_judgment_unavailable", provider_cause: judged[1] } : { refusal: "round_not_run" };
+}
+
 export async function fixCommand(
   rest: string[],
   // Injectable exactly as approveCommand/inboxCommand already are — the seam that lets the
@@ -5989,6 +6038,7 @@ export async function fixCommand(
     task_id: taskId,
     outcome,
     reason,
+    ...(outcome === "refused" ? noFixRoundFields(reason) : {}),
     ...(operatorRequested ? { operator_requested: true } : {}),
   });
   if (outcome === "fixed") {

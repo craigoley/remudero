@@ -82,7 +82,13 @@ import {
   type TargetJobRead,
   type TargetJobRecord,
   type TargetJobStatus,
+  machineShareStarts,
+  MACHINE_SHARE_WINDOW_MS,
+  MACHINE_SHARE_STEP,
+  type MachineShareInput,
+  type MachineShareStart,
 } from "./drain.js";
+import { queueJudgeAvailability } from "./queue-judge-gardener.js";
 import { preDispatchContractRevision } from "./dispatch-repair.js";
 // Why: drain.ts already owns the overlap partition, so it is reused rather than re-derived (W1-T343).
 import {
@@ -169,7 +175,7 @@ import type { GithubPostureFinding } from "./github-posture.js";
 import { clockFromDateFn, clockFromIsoFn, fixedClock, loopAvailableDeadline, systemClock, type Clock } from "../lib/clock.js";
 import { createNearLimitHeapTelemetry, NEAR_HEAP_FILE, type NearLimitHeapTelemetry, type NearLimitSample } from "./daemon-heap-near-limit.js";
 import { createHeapAdmissionHold, type HeapAdmissionHoldLatch, type HeapAdmissionHoldMode, type HeapHoldTrace } from "./daemon-heap-admission-hold.js";
-import { readLedgerUnionRecordsSync } from "./ledger-union.js";
+import { createLedgerRotationMemo, readLedgerUnionRecordsMemoized, readLedgerUnionRecordsSync } from "./ledger-union.js";
 import { reportRetirableWorktrees, type WorktreeRetireOptions } from "./worktree-retire.js";
 import { createGateObservationState, observeGate } from "./gate-observations.js";
 import { getHeapStatistics } from "node:v8";
@@ -191,6 +197,7 @@ import {
   type IdleLaneCause,
   type IdleLaneHold,
 } from "./idle-lane-accounting.js";
+import { reviewPrecedenceHold } from "./review-precedence.js";
 
 /** W1-T3978: the implement producer's exact refusal, carried as runtime metadata without widening
  * the shared RunResult union used by every other dispatch lane. */
@@ -1848,7 +1855,7 @@ export interface FleetControlHold {
 }
 
 /** W1-T11383: a worker-start hold; HEAP composes after the fleet controls and never inside them. */
-export type WorkerAdmissionHold = FleetControlHold | { control: "HEAP"; detail: string };
+export type WorkerAdmissionHold = FleetControlHold | { control: "HEAP" | "REVIEW"; detail: string };
 
 export function resolveFleetControlHold(
   deps: Pick<DaemonDeps, "checkStop" | "checkPause">,
@@ -5158,6 +5165,38 @@ export async function runDaemon(
   // The last `dispatch.overlap_shadow` hold set, so an unchanged hold is ledgered once, not once per tick.
   let lastOverlapShadowSignature = "[]";
   let lastSecondaryCatalogShadowSignature: string | undefined;
+  let lastMachineShareSignature: string | undefined;
+  const machineShareStateDir = deps.fleetLane?.stateDir ?? deps.plainBackfill?.stateDir;
+  const machineShareRotations = createLedgerRotationMemo((rows) => rows.filter((row) => row.step === "run.start"), { pattern: /run\.start/ });
+  const machineShareRowsFor = async (lines: readonly string[] | undefined): Promise<readonly Record<string, unknown>[] | undefined> => {
+    if (lines === undefined) return undefined;
+    const rows = restartCycleLedgerRows(lines.filter((line) => line.includes("run.start") || line.includes("queue_judge."))).rows;
+    if (machineShareStateDir === undefined) return rows;
+    const read = await readLedgerUnionRecordsMemoized(machineShareStateDir, machineShareRotations, {
+      step: ["run.start"], sinceTs: fixedClock(daemonClock.now() - MACHINE_SHARE_WINDOW_MS).iso(),
+      refuseIncomplete: true, readLiveRecords: () => rows,
+    });
+    if (!read.ok) {
+      log("dispatch.machine_share_unreadable", { unread: read.unread });
+      return undefined;
+    }
+    return [...rows.filter((row) => row.step !== "run.start"), ...read.rows];
+  };
+  const machineShareFor = (plan: Plan, rows: readonly Record<string, unknown>[] | undefined, startedSince: readonly MachineShareStart[] = []): MachineShareInput | undefined => {
+    if (rows === undefined) return undefined;
+    const nowMs = daemonClock.now();
+    const starts = machineShareStarts(rows, plan.byId, nowMs);
+    return {
+      queueJudgeStaleMs: queueJudgeAvailability(rows, nowMs).staleMs,
+      starts: [...starts, ...startedSince.filter((s) => s.atMs !== undefined && s.atMs <= nowMs && nowMs - s.atMs <= MACHINE_SHARE_WINDOW_MS)],
+      onMoved: (task, move) => {
+        const signature = `${task.id}:${move.machine_starts}:${move.starts}`;
+        if (signature === lastMachineShareSignature) return;
+        lastMachineShareSignature = signature;
+        log(MACHINE_SHARE_STEP, { task_id: task.id, ...move });
+      },
+    };
+  };
   const opsDispatchContexts = new WeakMap<Plan, OpsDispatchContext>();
   let lastOpsDispatchHold: string | undefined;
   const holdOpsDispatch = (reason: string, taskId?: string): void => {
@@ -5988,7 +6027,7 @@ export async function runDaemon(
   const holdWorkerAdmission = (surface: string): (WorkerAdmissionHold & { reason: string }) | undefined => {
     const sample = recordNearLimitHeapSample(deps, `admission:${surface}`);
     const hold = deps.workerAdmissionHold?.();
-    if (!hold) return heapWorkerAdmissionHold(deps, surface, sample, log);
+    if (!hold) return heapWorkerAdmissionHold(deps, surface, sample, log) ?? reviewPrecedenceHold(surface, () => daemonClock.now(), pollIntervalMs, log);
     const reason = `fleet ${hold.control} hold: ${hold.detail}`;
     log("daemon.admission_held", { surface, control: hold.control, detail: hold.detail, reason });
     return { ...hold, reason };
@@ -7620,7 +7659,11 @@ export async function runDaemon(
     const mergedTask: MergedResolver = (t) => isMerged(t.id);
     // W1-T10348: the released set, resolved ONCE per tick by the resolver every admission site shares
     // (ledger rows plus operator-releases.json), and handed to the kick, the tick selection and the refill.
-    const tickReleases = resolveReleases(deps, planForBatch);
+    let tickLedgerLines: readonly string[] | undefined;
+    const readTickLedger = deps.readLedgerLines;
+    const tickReleases = resolveReleases({
+      readDurableReleases: deps.readDurableReleases, readLedgerLines: readTickLedger && (() => (tickLedgerLines = readTickLedger())),
+    }, planForBatch);
     if (tickReleases.durableUnreadable !== undefined || tickReleases.ledgerUnreadable !== undefined) {
       log("dispatch.releases_unreadable", {
         ...(tickReleases.ledgerUnreadable !== undefined ? { ledger_error: tickReleases.ledgerUnreadable } : {}),
@@ -7741,12 +7784,14 @@ export async function runDaemon(
         tickRunBranchListing, readRunBranchEvidence(), resumableHandoffs,
         lazyClosedUnmerged(deps.readClosedRunBranchPrs),
       );
+      const tickMachineShareRows = await machineShareRowsFor(tickLedgerLines);
       const dispatchOpts: NextRunnableOpts = {
       onPassedOver: observePassedOver("tick"),
       priorityBackfill,
       onDeferredForPriority: logPriorityDeferral,
       onPriorityReservationReleased: logPriorityRelease,
       dispatchValueContext: deps.buildDispatchValueContext?.(planForBatch, isMerged),
+      machineShare: machineShareFor(planForBatch, tickMachineShareRows),
       beginSelectionPass: deps.beginSelectionPass,
       inputAnswer: deps.taskInputAnswer,
       isOpenPr: deps.isOpenPr,
@@ -8150,11 +8195,10 @@ export async function runDaemon(
       continue;
     }
     // W1-T11383: a heap hold starts no batch and exits nothing; it is not a pause, so it writes no daemon.pause row.
-    if (workerHold?.control === "HEAP") {
+    if (workerHold?.control === "HEAP" || workerHold?.control === "REVIEW") {
       await stopInterphaseReviewClock();
       ticks++;
-      idleLaneTickCause = "memory";
-      idleLaneTickHold = { reason: workerHold.reason };
+      [idleLaneTickCause, idleLaneTickHold] = [workerHold.control === "HEAP" ? "memory" : "governor", { reason: workerHold.reason }];
       sampleIdleLane(0, false, dispatchSet.length);
       await sleepUntilSweepWake(pollIntervalMs);
       continue;
@@ -8293,6 +8337,7 @@ export async function runDaemon(
     // Prepared before admission; not an accepted attempt or an in-flight ownership slot.
     const preparedStartTimes = new Map<string, number>();
     const passIds = new Set<string>();
+    const phaseStarts: MachineShareStart[] = [];
     const inFlightTasks = new Set<Task>();
     const refillAdmissions = new WeakMap<Task, {
       snapshot: { plan: Plan; isMerged: MergedSet }; finishedTaskId: string;
@@ -8451,6 +8496,7 @@ export async function runDaemon(
             ...dispatchOpts,
             ...runBranchDispatchOpts(runBranchState, planOnlyReceiptsThisTick, log, reportedRunBranchReleases),
             dispatchValueContext: deps.buildDispatchValueContext?.(snapshot.plan, snapshot.isMerged),
+            machineShare: machineShareFor(snapshot.plan, tickMachineShareRows, phaseStarts),
             // Re-read at each refill: a lane that settled since the tick began may have written or spent a receipt.
             resumableTaskIds: new Set(resumableHandoffs.keys()),
             excludeIds: new Set([...(dispatchOpts.excludeIds ?? []), ...pendingMergedCredit, ...passIds,
@@ -8651,6 +8697,7 @@ export async function runDaemon(
       laneStartedAtMs.set(task.id, startedAtMs);
       laneCpuTransition(() => laneCpuBuilds.add(task.id), task.id);
       if (poolControl.occupied?.has(task)) return;
+      phaseStarts.push({ taskId: task.id, authorClass: task.author_class, atMs: startedAtMs });
       attempted.push(task.id);
       noteBootFirstDispatch({ startedAtMs: daemonClock.now(), admitted: admitted.length });
       if (forcedKick?.taskId === task.id) {

@@ -16,7 +16,7 @@
   files:
     - src/cli/commands/fix.ts
     - test/fix-lane/rmd-fix-resolves-a-prs-task-from-its-run-branch-as-the-sweep-does.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "Through fixCommand, a PR whose body has no Remudero-Task: trailer and whose head ref is run-W1-T<n>-<ms> resolves task W1-T<n>: the view has taskId W1-T<n>, criteriaRecoverable true and the unmet criteria from the ledger, and the verb never refuses it as \"criteria unrecoverable (no Remudero-Task: trailer to resolve them from)\""

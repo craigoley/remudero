@@ -22,7 +22,7 @@
     - test/daemon/repair-lanes-stay-open-while-the-boot-review-pass-runs.test.ts
     - test/daemon/a-due-repair-gets-a-turn-between-overlapping-reviews.test.ts
     - test/a-review-only-light-pass-names-its-scope.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "lightPassFixAdmitted({ reviewOnly: true, scope: \"boot\" }) is true when the restart latch admits fix-dispatch on the light surface, and false when it refuses; pause, drain, idle and interphase-review stay false"
