@@ -26933,7 +26933,7 @@ async function runSweepLightPassCore(
   let boundZeroEpoch = lightPassRefillEpoch;
   const retryOnAnyLane = (): void => {
     boundZeroWaiting = false;
-    if (!lightPassRefillsClosed && boundZeroEpoch === lightPassRefillEpoch) void refillFreedLanes();
+    if (refillTail.length > 0 && !lightPassRefillsClosed && boundZeroEpoch === lightPassRefillEpoch) void refillFreedLanes();
   };
   const holdAtBoundZero = (width: number, inFlight: number, activeWorkers: number): false => {
     if (refillTail.length === 0 || lightPassRefillsClosed) return false;

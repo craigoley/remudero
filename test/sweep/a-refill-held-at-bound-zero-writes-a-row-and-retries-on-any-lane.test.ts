@@ -122,7 +122,7 @@ test("W1-T12535 criterion 2: a tail held at bound 0 retries consecutive releases
   }
 });
 
-test("W1-T12535 criterion 3: a retried refill admits only above bound 0, skips a held head and stops when refills close", async () => {
+test("W1-T12535 criterion 3: a retry respects the bound, held heads, closed refills and an empty tail", async () => {
   const h = harness();
   try {
     h.setWidth(2);
@@ -194,6 +194,50 @@ test("W1-T12535 criterion 3: a retried refill admits only above bound 0, skips a
   } finally {
     readGate.resolve();
     await midRead.finish();
+  }
+  const emptyTail = harness();
+  const releaseLanes = new Map<number, () => void>();
+  let refillView = [pr(3)];
+  let refillReads = 0;
+  try {
+    emptyTail.setWidth(2);
+    await runSweepLightPass([pr(1), pr(2), pr(3)], {
+      ...emptyTail.deps,
+      postReview: (p, mode, attempt, onPhase) => {
+        releaseLanes.set(p.prNumber, () => onPhase?.("posted"));
+        return emptyTail.deps.postReview!(p, mode, attempt, onPhase);
+      },
+      readOpenPrsForRefill: async () => { refillReads++; return refillView; },
+    }, fourLanes);
+    await eventually(() => emptyTail.started.length === 2, "pass A did not admit two reviews");
+    emptyTail.setWidth(4);
+    await runSweepLightPass([pr(4), pr(5)], {
+      ...emptyTail.deps,
+      postReview: (p, mode, attempt, onPhase) => {
+        releaseLanes.set(p.prNumber, () => onPhase?.("posted"));
+        return emptyTail.deps.postReview!(p, mode, attempt, onPhase);
+      },
+    }, fourLanes);
+    await eventually(() => emptyTail.started.includes(5), "pass B did not admit its reviews");
+    emptyTail.setWidth(1);
+    releaseLanes.get(1)!();
+    await eventually(() => emptyTail.boundZero().length === 1, "the tail did not wait at bound 0");
+    await quiet();
+    emptyTail.setWidth(2);
+    releaseLanes.get(2)!();
+    // The wake re-registers at bound 0; the own-lane callback queues another controller turn.
+    emptyTail.setWidth(4);
+    await eventually(() => emptyTail.started.includes(3), "the last tail PR did not refill");
+    await quiet();
+    assert.ok(refillReads > 0, "the refill must have read its live queue");
+    const readsAtEmptyTail = refillReads;
+    refillView = [pr(6)];
+    releaseLanes.get(4)!();
+    await quiet();
+    assert.equal(refillReads, readsAtEmptyTail, "an empty-tail wake must not refresh the queue");
+    assert.equal(emptyTail.started.includes(6), false, "an empty-tail wake must not admit a new PR");
+  } finally {
+    await emptyTail.finish();
   }
 });
 
