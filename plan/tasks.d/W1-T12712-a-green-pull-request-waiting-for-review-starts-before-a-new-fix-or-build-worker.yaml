@@ -22,7 +22,7 @@
     - src/lib/daemon.ts
     - src/lib/ledger-steps.ts
     - test/review/a-green-pull-request-waiting-for-review-starts-before-a-new-worker.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "reviewPrecedence returns yield when a green head has waited for review longer than one sweep cadence and the review width decision's reason is host-worker-budget; it returns proceed otherwise"

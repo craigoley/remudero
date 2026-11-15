@@ -20,7 +20,7 @@
     - src/lib/sweep.ts
     - src/lib/ci-incidents.ts
     - test/ci/a-ci-log-that-cannot-be-fetched-is-retried-or-read-from-the-check-output.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "classifyLogFetchFailure sorts a failed job log fetch into rate-limit (HTTP 403 or 429 naming a rate limit), transient (HTTP 5xx or a timeout) or absent (HTTP 404, or a job with no steps)"

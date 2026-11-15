@@ -10,7 +10,7 @@ import type { RatifyCliGateway } from "../../lib/panel-graph.js";
  */
 import type { tickReadProducer, TickReadFacts, TickReadRequest } from "../../lib/tick-read-worker.js";
 import { registeredGardenEnabled, registeredGardenTargetArgs } from "../../lib/garden-registry.js";
-import { startReadPlane, startReadPlaneTelemetry, onePassPerGeneration, freshReadGeneration, type ReadGeneration } from "../../lib/read-plane.js";
+import { startReadPlane, startReadPlaneTelemetry, onePassPerGeneration, freshReadGeneration, joinableRead, keepLastServe, type ReadGeneration } from "../../lib/read-plane.js";
 import { remeasureSettledGoals, withGoalRemeasurement } from "../../lib/goals.js";
 import { judgeCiEscalation, productionCiJudgePorts, singleFlightCiJudge, withCiJudgeAfterSweep, type CiJudgeIo } from "../../lib/ci-escalation-judge.js";
 import { recyclePauseDetail } from "../../lib/recycle-yield.js";
@@ -21,7 +21,7 @@ import { execFileLoopBounded } from "../../lib/loop-bounded-child.js";
 import { GATEWAY_FETCH_TIMEOUT_MS } from "../../lib/git-fetch-retry.js";
 import { productionDispatchBreakJudge, productionFixProgressJudge } from "../../lib/sweep.js";
 import { configureGithubInstallationBudget, ghExec, ghJsonAsync, ghTextAsync, takeGithubBudgetThrottles } from "../../lib/github-transport.js";
-import { createInstallationBudget, createInstallationBudgetState } from "../../lib/github-installation-budget.js";
+import { createInstallationBudget, createInstallationBudgetState, type InstallationBudgetThreadInput } from "../../lib/github-installation-budget.js";
 import { DEFAULT_HOST_INSTANCE_REGISTRY_PATH, installationConsumers, registryInstanceForRepo } from "../../lib/instance-registry.js";
 import { GH_APP_INSTALLATION_ID_ENV } from "../../lib/github-app.js";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
@@ -1321,7 +1321,7 @@ export async function daemonCommand(
     onMainEntryStep?.(step);
   };
   ledgerSelectedRegistryReadTimeouts(log);
-  startDaemonInstallationBudget(() => daemonInstallationRegistry(repoRoot), process.env, log, systemClock, `${target.owner}/${target.repo}`);
+  startDaemonInstallationBudget(() => daemonInstallationRegistry(repoRoot), process.env, log, systemClock, `${target.owner}/${target.repo}`, opts.pollIntervalMs);
   // bundlemain: which entry this main started from (bin/rmd's choice), and a bundled main's first tick settles it.
   onMainEntryStep = startMainEntryWatch({ log, root: daemonModuleRepoDir });
   // W1-T9065: the lane's approve and the responder's reframe run from a tree at origin/main.
@@ -1628,7 +1628,8 @@ export async function daemonCommand(
   });
   let readPlaneStopped: Promise<void> | undefined;
   const stopReadPlane = (): Promise<void> => (readPlaneStopped ??= readPlane?.stop() ?? Promise.resolve());
-  const readTick = readPlane && planReaders.tickRead(readPlane.read);
+  // W1-T12754: a full pass that misses the published generation joins the tick's read in flight.
+  const readTick = readPlane && joinableRead(planReaders.tickRead(readPlane.read), clockFromMillisFn(deps.now));
   const checkStop = deps.checkStop ?? (() => stopDetail(config.root));
   // A loop that ends before its first read (max 0, or STOP at the start) gets no early read.
   const earlyRead = readTick !== undefined && opts.max !== 0 && !checkStop();
@@ -2760,9 +2761,9 @@ export async function daemonCommand(
           ghEscalationAnswerGateway(target.owner, target.repo, undefined, config.operatorGithubLogins,
             config.contributorAdmission === undefined ? undefined : { settings: config.contributorAdmission }),
           gitCredentialSocket?.socketPath,
-          servedTickRead(onePassPerGeneration(() => tickReadGeneration, readTick,
+          keepLastServe(onePassPerGeneration(() => tickReadGeneration, readTick,
             () => ({ plan: activePlanRef.current, previousProjection: lastProj ? [...lastProj] : undefined }), { log }),
-            () => tickReadGeneration),
+            (fullPass) => servedTickRead(fullPass, () => tickReadGeneration)),
           target.isSelf ? { root: repoRoot, inboxRoot: config.root, feedbackLand: {} } : undefined,
         ),
         // W1-T254 (the #707 fix): the restricted light-sweep ticker — ticks ONLY
@@ -2995,7 +2996,7 @@ export async function daemonCommand(
 
 export const GITHUB_BUDGET_CONFIGURED_STEP = "github.budget.configured";
 
-let daemonInstallationBudgetInput: { state: SharedArrayBuffer; consumers: number; instance: string } | undefined;
+let daemonInstallationBudgetInput: InstallationBudgetThreadInput | undefined;
 
 /** The daemon sends the same atomic budget to its read worker in the existing worker input. */
 export function daemonInstallationBudgetWorkerInput(): typeof daemonInstallationBudgetInput {
@@ -3031,6 +3032,7 @@ export function startDaemonInstallationBudget(
   log: (step: string, extra?: Record<string, unknown>) => void,
   clock: Clock = systemClock,
   targetRepo?: string,
+  maxWaitMs?: number,
 ): void {
   const installationId = env[GH_APP_INSTALLATION_ID_ENV]?.trim();
   const named = env.RMD_INSTANCE_NAME?.trim();
@@ -3060,12 +3062,7 @@ export function startDaemonInstallationBudget(
   if (read === undefined) return unset("registry_unreadable", { installation_id: installationId });
   if (consumers === undefined) return unset("no_instance_on_installation", { installation_id: installationId, source: read.source });
   const state = createInstallationBudgetState();
-  daemonInstallationBudgetInput = { state, consumers, instance };
-  configureGithubInstallationBudget(createInstallationBudget({
-    consumers,
-    instance,
-    clock,
-    sharedState: state,
-  }));
+  daemonInstallationBudgetInput = { state, consumers, instance, ...(maxWaitMs === undefined ? {} : { maxWaitMs }) };
+  configureGithubInstallationBudget(createInstallationBudget({ consumers, instance, clock, sharedState: state, maxWaitMs }));
   log(GITHUB_BUDGET_CONFIGURED_STEP, { outcome: "configured", ...who(), installation_id: installationId, consumers, source: read.source });
 }

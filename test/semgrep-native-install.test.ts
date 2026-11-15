@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { parse as parseYaml } from "yaml";
@@ -112,27 +115,75 @@ test("native Semgrep installs into a fresh environment then verifies offline has
   assert.doesNotMatch(run, /install-semgrep-pro|sudo|docker|uv tool|pipx|curl/);
 });
 
-test("W1-T12492 criterion 2 native install preserves qualification controls", () => {
+test("W1-T12492 criterion 2 native install preserves qualification controls and fails closed on incompatible or unknown closure evidence", () => {
   const build = parseLock(read(buildPath));
   const runtime = parseLock(read(runtimePath));
-  assert.deepEqual(build.get("setuptools"), {
-    version: "84.1.0",
-    sha256: "5231689c6ac8156cd155cfb98c3fd6fb252c3e7e9bd3d78b64d3c55f132624c9",
-  });
-  for (const [name, version] of [
-    ["opentelemetry-api", "1.37.0"],
-    ["opentelemetry-exporter-otlp-proto-common", "1.37.0"],
-    ["opentelemetry-exporter-otlp-proto-http", "1.37.0"],
-    ["opentelemetry-instrumentation", "0.58b0"],
-    ["opentelemetry-instrumentation-requests", "0.58b0"],
-    ["opentelemetry-instrumentation-threading", "0.58b0"],
-    ["opentelemetry-proto", "1.37.0"],
-    ["opentelemetry-sdk", "1.37.0"],
-    ["opentelemetry-semantic-conventions", "0.58b0"],
-    ["opentelemetry-util-http", "0.58b0"],
-  ]) assert.equal(runtime.get(name!)!.version, version);
-  assert.equal(step("Install hash-locked Community Edition")["continue-on-error"], undefined);
-  assert.equal(step("Qualify native engine, baseline and invalid-rule refusal")["continue-on-error"], undefined);
+  assert.deepEqual([...build], [
+    ["packaging", { version: "26.3", sha256: "d7193f7c8e4e93f444fde0262bf90af30e16fa0ad0ad44cb553c87339b23cd1c" }],
+    ["pip", { version: "26.2.1", sha256: "71138adf1f4ca900cdb7d289c21b7494329f2332b6d85f0e1c42108c0384ed3e" }],
+    ["setuptools", { version: "84.1.0", sha256: "5231689c6ac8156cd155cfb98c3fd6fb252c3e7e9bd3d78b64d3c55f132624c9" }],
+    ["wheel", { version: "0.48.0", sha256: "3217dcc807155e45db462d7ef2431f5ddda0d7273b700d05a67b271ceb1287ab" }],
+  ]);
+  const reviewedRuntime = [
+    ["opentelemetry-api", "1.37.0", "accf2024d3e89faec14302213bc39550ec0f4095d1cf5ca688e1bfb1c8612f47"],
+    ["opentelemetry-exporter-otlp-proto-common", "1.37.0", "53038428449c559b0c564b8d718df3314da387109c4d36bd1b94c9a641b0292e"],
+    ["opentelemetry-exporter-otlp-proto-http", "1.37.0", "54c42b39945a6cc9d9a2a33decb876eabb9547e0dcb49df090122773447f1aef"],
+    ["opentelemetry-instrumentation", "0.58b0", "50f97ac03100676c9f7fc28197f8240c7290ca1baa12da8bfbb9a1de4f34cc45"],
+    ["opentelemetry-instrumentation-requests", "0.58b0", "672a0be0bb5b52bea0c11820b35e27edcf4cd22d34abe4afc59a92a80519f8a8"],
+    ["opentelemetry-instrumentation-threading", "0.58b0", "eacc072881006aceb5b9b6831bcdce718c67ef6f31ac0b32bd6a23a94d979b4a"],
+    ["opentelemetry-proto", "1.37.0", "8ed8c066ae8828bbf0c39229979bdf583a126981142378a9cbe9d6fd5701c6e2"],
+    ["opentelemetry-sdk", "1.37.0", "8f3c3c22063e52475c5dbced7209495c2c16723d016d39287dfc215d1771257c"],
+    ["opentelemetry-semantic-conventions", "0.58b0", "5564905ab1458b96684db1340232729fce3b5375a06e140e8904c78e4f815b28"],
+    ["opentelemetry-util-http", "0.58b0", "6c6b86762ed43025fbd593dc5f700ba0aa3e09711aedc36fd48a13b23d8cb1e7"],
+  ] as const;
+  for (const [name, version, sha256] of reviewedRuntime) assert.deepEqual(runtime.get(name), { version, sha256 });
+
+  const auditor = fileURLToPath(new URL(".github/semgrep/runtime-compatibility-audit.py", root));
+  const validateClosure = (buildText: string, runtimeText: string) => {
+    const scratch = mkdtempSync(join(tmpdir(), "rmd-semgrep-native-closure-"));
+    try {
+      writeFileSync(join(scratch, "build-requirements.txt"), buildText);
+      writeFileSync(join(scratch, "requirements.txt"), runtimeText);
+      const code = [
+        "import importlib.util, pathlib, sys",
+        "source, root = sys.argv[1:]",
+        "spec = importlib.util.spec_from_file_location('auditor', source)",
+        "auditor = importlib.util.module_from_spec(spec)",
+        "spec.loader.exec_module(auditor)",
+        "auditor._locked_inputs(pathlib.Path(root))",
+        "print('exact hash-locked closure accepted')",
+      ].join("\n");
+      return spawnSync("python3", ["-I", "-S", "-B", "-c", code, auditor, scratch], { encoding: "utf8" });
+    } finally {
+      rmSync(scratch, { recursive: true, force: true });
+    }
+  };
+  const buildText = read(buildPath);
+  const runtimeText = read(runtimePath);
+  const current = validateClosure(buildText, runtimeText);
+  assert.equal(current.status, 0, `current exact hash locks pass the real closure audit: ${current.stderr}`);
+  const previousSetuptools = buildText.replace(
+    "setuptools==84.1.0 --hash=sha256:5231689c6ac8156cd155cfb98c3fd6fb252c3e7e9bd3d78b64d3c55f132624c9",
+    "setuptools==84.0.0 --hash=sha256:51a52592b3b99e102b609654876bd65f19f999935166d1352678931132b0c670",
+  );
+  assert.notEqual(previousSetuptools, buildText, "the lock pins the reviewed 84.1.0 wheel");
+  assert.equal(validateClosure(previousSetuptools, runtimeText).status, 0, "the previous individually reviewed setuptools wheel remains accepted");
+  const unknownDigest = buildText.replace("5231689c6ac8156cd155cfb98c3fd6fb252c3e7e9bd3d78b64d3c55f132624c9", "0".repeat(64));
+  assert.notEqual(unknownDigest, buildText);
+  assert.notEqual(validateClosure(unknownDigest, runtimeText).status, 0,
+    "an unknown build-tool hash fails closed");
+  assert.notEqual(validateClosure(buildText, runtimeText.replace("peewee==3.18.3", "peewee==3.18.4")).status, 0,
+    "an incompatible runtime closure fails closed");
+
+  const install = step("Install hash-locked Community Edition");
+  const auditorSource = read(".github/semgrep/runtime-compatibility-audit.py");
+  assert.equal(install["continue-on-error"], undefined);
+  assert.match(auditorSource, /"--no-index".*"--only-binary=:all:"[\s\S]*"--require-hashes"/);
+  assert.match(auditorSource, /"pip", "check"/);
+  const qualification = step("Qualify native engine, baseline and invalid-rule refusal");
+  assert.equal(qualification["continue-on-error"], undefined);
+  assert.match(install.run!, /source-runtime-qualification\.py/);
+  assert.match(auditorSource, /approved_build_tool_pins/);
 });
 
 test("native Semgrep preserves Scan permissions, events, bounded execution and advisory findings", () => {

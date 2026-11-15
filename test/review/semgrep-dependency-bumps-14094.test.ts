@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
@@ -21,7 +23,7 @@ test("W1-T12492 admits only reviewed setuptools wheels and refuses the incompati
   const buildPins = [...build.matchAll(/^setuptools==([^\s]+) --hash=sha256:([a-f0-9]+)$/gm)];
   assert.deepEqual(buildPins.map(([, version, digest]) => [version, digest]),
     [["84.1.0", "5231689c6ac8156cd155cfb98c3fd6fb252c3e7e9bd3d78b64d3c55f132624c9"]],
-    "the adopted setuptools move is exactly the reviewed 84.1.0 wheel");
+    "the lock pins exactly one setuptools wheel: the reviewed 84.1.0 exact pair that the auditor admits");
   assert.match(auditor, /"setuptools": frozenset\(\{\s*\("84\.0\.0", "51a52592b3b99e102b609654876bd65f19f999935166d1352678931132b0c670"\),\s*\("84\.1\.0", "5231689c6ac8156cd155cfb98c3fd6fb252c3e7e9bd3d78b64d3c55f132624c9"\),/);
   assert.match(auditor, /APPROVED_SPECIAL_MEMBER_ALIASES = \{[\s\S]*"84\.1\.0", "5231689c6ac8156cd155cfb98c3fd6fb252c3e7e9bd3d78b64d3c55f132624c9"\)[\s\S]*"84\.0\.0", "51a52592b3b99e102b609654876bd65f19f999935166d1352678931132b0c670"\)/);
   assert.match(runtime, /^opentelemetry-api==1\.37\.0 --hash=sha256:accf2024d3e89faec14302213bc39550ec0f4095d1cf5ca688e1bfb1c8612f47$/m);
@@ -66,4 +68,46 @@ test("W1-T12492 admits only reviewed setuptools wheels and refuses the incompati
   assert.ok(workflow.includes(`AUDITOR_SHA256: ${digest}`));
   assert.match(workflow, /AUDIT_PHASE/);
   assert.match(workflow, /pip.*check|check.*pip/s);
+});
+
+test("W1-T12492 lock validator admits the reviewed 84.1.0 wheel and rejects other identities", () => {
+  const source = join(root, ".github/semgrep/runtime-compatibility-audit.py");
+  const runtime = join(root, ".github/semgrep/requirements.txt");
+  const scratch = mkdtempSync(join(tmpdir(), "rmd-semgrep-lock-validator-"));
+  const script = [
+    "import importlib.util, pathlib, sys",
+    "source, root, runtime, version, digest = sys.argv[1:]",
+    "spec = importlib.util.spec_from_file_location('auditor', source)",
+    "auditor = importlib.util.module_from_spec(spec)",
+    "spec.loader.exec_module(auditor)",
+    "root = pathlib.Path(root)",
+    "import re",
+    "text, count = re.subn(r'^setuptools==\\S+ --hash=sha256:[0-9a-f]{64}$', f'setuptools=={version} --hash=sha256:{digest}', pathlib.Path(source).with_name('build-requirements.txt').read_text(), flags=re.M)",
+    "assert count == 1, 'the lock must carry exactly one setuptools pin'",
+    "(root / 'build-requirements.txt').write_text(text)",
+    "(root / 'requirements.txt').write_bytes(pathlib.Path(runtime).read_bytes())",
+    "pins = dict(auditor.APPROVED_TOOLS)",
+    "pins['setuptools'] = (version, digest)",
+    "assert auditor.approved_build_tool_pins(pins)",
+    "print(auditor._locked_inputs(root)[2]['setuptools'])",
+  ].join("\n");
+  const run = (version: string, digest: string) => spawnSync("python3", [
+    "-I", "-S", "-B", "-c", script, source, scratch, runtime, version, digest,
+  ], { encoding: "utf8" });
+
+  try {
+    const old = run("84.0.0", "51a52592b3b99e102b609654876bd65f19f999935166d1352678931132b0c670");
+    assert.equal(old.status, 0, old.stderr);
+    assert.equal(old.stdout.trim(),
+      "('84.0.0', '51a52592b3b99e102b609654876bd65f19f999935166d1352678931132b0c670')",
+      "the previous reviewed wheel stays an admitted exact pair after the lock moves");
+    const reviewed = run("84.1.0", "5231689c6ac8156cd155cfb98c3fd6fb252c3e7e9bd3d78b64d3c55f132624c9");
+    assert.equal(reviewed.status, 0, reviewed.stderr);
+    assert.equal(reviewed.stdout.trim(),
+      "('84.1.0', '5231689c6ac8156cd155cfb98c3fd6fb252c3e7e9bd3d78b64d3c55f132624c9')");
+    assert.notEqual(run("84.1.0", "0".repeat(64)).status, 0);
+    assert.notEqual(run("84.2.0", "0".repeat(64)).status, 0);
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
 });
