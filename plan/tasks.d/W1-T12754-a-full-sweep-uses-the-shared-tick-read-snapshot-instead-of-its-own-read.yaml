@@ -1,0 +1,60 @@
+- id: W1-T12754
+  title: "A full sweep uses the shared tick-read snapshot instead of its own 13-minute read"
+  repo: remudero
+  priority: 1.3
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the full sweep disposes PRs from the facts it is served; a generation served to two passes once disposed merged PRs (DAEMON-1791151532775)
+  origin: "operator-session#full-sweep-own-tick-read-2026-11-14"
+  plan_refs:
+    - W1-T7734
+    - W1-T9704
+    - W1-T5762
+    - W1-T9564
+  files:
+    - src/lib/read-plane.ts
+    - src/cli/commands/daemon.ts
+    - src/cli/commands/sweep.ts
+    - test/a-stale-tick-read-generation-is-never-served.test.ts
+    - test/daemon/a-full-sweep-joins-the-tick-read-already-in-flight.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "Each sweep.full_prelude row whose tick_read_source is not served names why the published generation was not used: tick_read_miss is one of consumed (an earlier full pass used it), stale (older than its age bound), unpublished (no generation yet) or no_plane, and tick_read_wait_ms is the time the pass waited for a read that started before its own"
+      proof: "grep: W1-T12754 criterion 1 in test/daemon/a-full-sweep-joins-the-tick-read-already-in-flight.test.ts"
+    - claim: "When the published generation is consumed or stale and the read plane already has a read in flight, the full pass is served that in-flight read's generation: the worker receives one request, not two, the pass's tick_read stage ends when that read settles, and the row says tick_read_source joined"
+      proof: "grep: W1-T12754 criterion 2 in test/daemon/a-full-sweep-joins-the-tick-read-already-in-flight.test.ts"
+    - claim: "invariant:one-generation-one-pass — a generation answers at most one full pass, joined or published: two full passes with one read in flight get the joined generation once, and the second pass reads its own"
+      kind: guard
+      proof: "grep: W1-T12754 criterion 3 in test/daemon/a-full-sweep-joins-the-tick-read-already-in-flight.test.ts"
+    - claim: "invariant:fresh-or-own — a joined generation whose read was requested more than TICK_READ_MAX_AGE_MS before it settled is not served; the pass reads its own and the row says tick_read_miss stale"
+      kind: guard
+      proof: "grep: W1-T12754 criterion 4 in test/daemon/a-full-sweep-joins-the-tick-read-already-in-flight.test.ts"
+    - claim: "Through the daemon's own wiring (servedTickRead over onePassPerGeneration with a real startReadPlane worker), a full pass that starts while the tick's read is in flight sends no second read request, and its sweep.disposed rows carry snapshot_age_ms measured from that read's publishedAtMs"
+      proof: "grep: W1-T12754 criterion 5 in test/daemon/a-full-sweep-joins-the-tick-read-already-in-flight.test.ts"
+  rationale: |
+    WHY: a full sweep that cannot use the published tick read starts its own read. The read plane runs reads one after another, so that read waits behind the tick's read already in flight and then runs again. The full pass waits 5 to 30 minutes before it disposes any PR.
+    OBSERVED on the Azure host core ledger, window 2026-11-12T22:31Z to 2026-11-14T22:31Z:
+    - 133 `sweep.full_prelude` rows: tick_read_source served 51 (tick_read stage 0 to 2 s), own_read 71, none 11.
+    - The 71 own_read passes spent 29,680 s in tick_read: minimum 86 s, median 319 s, maximum 1,910 s. 52 of them took 200 s or more.
+    - 2026-11-14: 18:50:11Z tick_read 752 s, 21:14:13Z 713 s, 22:22:59Z 768 s (elapsed 1,025 s). In each of these the snapshot the pass was served was published within 1 s of the pass start, so it was the pass's own read, not a shared generation.
+    - 16 of the 71 have a `tick_read.stale_refused` row with consumer full_sweep (age over max_age_ms 300,000). The other 55 have no row that says why the published generation was not used. Across all consumers, stale_refused rows carry read_ms of median 323 s and maximum 1,070 s: the shared read itself takes 5 minutes or more.
+    READ at origin/main 7c409f905:
+    - src/lib/read-plane.ts:398 onePassPerGeneration serves a published generation to one full pass only (consumed), and only while freshReadGeneration (:335) accepts its age; otherwise it calls read() for a new generation.
+    - src/lib/read-plane.ts:479-481 startReadPlane chains every read on `tail`, so a second read starts only after the first settles. A full pass that misses the published generation while the tick's read is running waits for that read and then for its own.
+    - src/cli/commands/daemon.ts:2702 wires the full sweep's tickReadFor as servedTickRead(onePassPerGeneration(...)). src/cli/commands/sweep.ts:1017-1020 writes tick_read_source served when the facts were published before the pass started, else own_read, and records no reason for a miss.
+  design: |
+    INVARIANT one-generation-one-pass: a read generation answers at most one full pass, whether it was published or joined (the rule from DAEMON-1791151532775 stays).
+    INVARIANT fresh-or-own: a pass is never served facts older than TICK_READ_MAX_AGE_MS by the age rule of W1-T9704; a joined read that fails that rule is not served.
+    1. Measure: onePassPerGeneration returns, beside the facts, why the published generation was not used (consumed, stale, unpublished, no_plane) and how long the pass waited for a read that started before its own. sweep.ts adds tick_read_miss and tick_read_wait_ms to sweep.full_prelude, and tick_read_source joined for criterion 2. Read the rows on the live host for 6 hours after deploy and record the counts in the why-file.
+    2. startReadPlane exposes the read in flight (its generation id and its settling promise), read-only. No second queue, no new cap.
+    3. onePassPerGeneration: when the published generation is consumed or stale and a read is in flight whose generation no full pass has consumed, await that read and serve it (mark it consumed). Only when nothing is in flight does it call read() for its own generation.
+    4. servedTickRead stamps a joined generation with that read's publishedAtMs, so sweep.disposed snapshot_age_ms stays true.
+    NOT IN SCOPE: making the shared read itself faster (W1-T12530 for open-PR views, W1-T12531 for the gh transport); the light pass's views (W1-T12755).
+  falsifier: |
+    Drop the join and criterion 2 must fail with two worker requests. Mark a joined generation unconsumed and criterion 3 must fail. Serve a joined read past its age bound and criterion 4 must fail. Stamp a joined read with the pass start and criterion 5 must fail on snapshot_age_ms. Restore and require all to pass.
+  note: |
+    Id reserved for run-unfiled-1794695736000 with ~/rmd-work/bin/reserve-id.sh. Build off origin/main after this filing merges.
+    src/lib/daemon.ts is not in files; if the wiring needs it, amend first (it sits at its comment cap).

@@ -1,0 +1,64 @@
+- id: W1-T12755
+  title: "A light pass keeps reviews and merges moving while the open-PR read is slow or rate-limited"
+  repo: remudero
+  priority: 1.3
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the light pass admits reviews and arms merges; acting on an old list must never merge a moved head
+  origin: "operator-session#light-pass-open-pr-read-2026-11-14"
+  plan_refs:
+    - W1-T12530
+    - W1-T12670
+    - W1-T12555
+    - W1-T7734
+    - W1-T5749
+  files:
+    - src/cli/commands/sweep.ts
+    - src/lib/ledger-steps.ts
+    - test/sweep/a-light-pass-decides-from-its-last-good-open-pr-list-when-the-read-fails.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "After one light pass with a good open-PR list read, a second pass whose pulls?state=open read fails with a rate-limit error still admits the review of an eligible PR from the last good list, and writes sweep_light.views_fallback with reason rate_limited, snapshot_age_ms and pr_count, and no sweep_light.error row"
+      proof: "grep: W1-T12755 criterion 1 in test/sweep/a-light-pass-decides-from-its-last-good-open-pr-list-when-the-read-fails.test.ts"
+    - claim: "When the open-PR list read has not settled after LIGHT_PASS_VIEWS_DEADLINE_MS, the pass goes on from the last good list (reason slow_read); the read keeps running, its result becomes the next pass's list, and no second list read starts while one is in flight"
+      proof: "grep: W1-T12755 criterion 2 in test/sweep/a-light-pass-decides-from-its-last-good-open-pr-list-when-the-read-fails.test.ts"
+    - claim: "invariant:no-act-on-a-moved-head — on a fallback list, a PR whose head the act-time read finds moved stands down as sweep.head_moved, a PR whose act-time head cannot be read stands down (not acted on as today's unreadable-head rule allows), and every direct merge decided from a fallback list passes the list's head SHA to ghMergePrArgv as expectedHead"
+      kind: guard
+      proof: "grep: W1-T12755 criterion 3 in test/sweep/a-light-pass-decides-from-its-last-good-open-pr-list-when-the-read-fails.test.ts"
+    - claim: "invariant:bounded-age — a last good list older than LIGHT_PASS_VIEWS_FALLBACK_MAX_AGE_MS is not used: the pass makes no review or merge decision and writes sweep_light.views_fallback with reason snapshot_too_old"
+      kind: guard
+      proof: "grep: W1-T12755 criterion 4 in test/sweep/a-light-pass-decides-from-its-last-good-open-pr-list-when-the-read-fails.test.ts"
+    - claim: "With no good list yet (first pass after boot) a failed read stands down as today and writes sweep_light.views_fallback with reason no_snapshot; every pass, fallback or not, still writes its sweep_light.pre_review_timing row, with views_source fallback when it used the last good list"
+      proof: "grep: W1-T12755 criterion 5 in test/sweep/a-light-pass-decides-from-its-last-good-open-pr-list-when-the-read-fails.test.ts"
+    - claim: "Through buildSweepLightHook with the real buildOpenPrViewsAsync and a gh shim (test/helpers/gh-shim.ts) that answers pulls?state=open with HTTP 403 rate limit exceeded, nothing injected in place of the fallback, the second pass admits the review"
+      proof: "grep: W1-T12755 criterion 6 in test/sweep/a-light-pass-decides-from-its-last-good-open-pr-list-when-the-read-fails.test.ts"
+  rationale: |
+    WHY: when the light pass cannot read or waits long on the open-PR list, it makes no review or merge decision in that pass. The list read is often slow or rate-limited, so whole hours pass with almost no light-pass decisions.
+    OBSERVED on the Azure host core ledger, window 2026-11-12T22:35Z to 2026-11-14T22:35Z:
+    - 609 `sweep_light.pre_review_timing` rows. 282 spent more than 60 s in open_pr_views: 103,055 s in total, maximum 1,907 s.
+    - 299 `sweep_light.error` rows: 295 are `gh api repos/craigoley/remudero/pulls?state=open&per_page=100 -i` refused with HTTP 403 "API rate limit exceeded" for the installation, 4 are the same read stopped at its 60,000 ms loop-available budget (2026-11-14 12:22Z twice, 12:38Z, 14:19Z).
+    - The errors fall in 20 hours. In those hours 299 of 389 light passes ended at the read. For example 2026-11-14T10: 43 light passes, 38 errors, 8 reviews posted, 1 merge; 2026-11-13T19: 39 passes, 36 errors.
+    - 2026-11-14 22:05:55Z, 22:06:57Z, 22:07:32Z and 22:07:50Z: four rate-limited errors in a row.
+    READ at origin/main 7c409f905:
+    - src/cli/commands/sweep.ts:1264-1279 readViews reads the open-PR list with buildOpenPrViewsAsync on every pass (or the served tick read when io.openPrViews gives one) and keeps no last good list.
+    - :1429-1433 any throw from the read ends the whole pass: the catch writes sweep_light.error and the finally writes the timing row. Reviews and merges wait for the next pass, which reads the same limited list again.
+    - src/lib/sweep.ts:15402-15410 the head-only act-time guard treats an unreadable head as no change; on an old list that is not safe enough, so this task stands such a PR down when it acts from the last good list.
+    - src/lib/arm-auto-merge.ts:426 ghMergePrArgv takes an optional expectedHead; GitHub refuses the merge when the head moved.
+    RELATED (linked, not duplicated): W1-T12530 (#18542) makes the open-PR views phase faster; W1-T12670 (#18523) and W1-T12555 (#18530) set and enforce the installation read budget that runs out. Those reduce how often the read fails; this task keeps decisions moving when it still fails.
+  design: |
+    INVARIANT no-act-on-a-moved-head: a review post or merge decided from a fallback list re-reads that PR's head at act time; a moved or unreadable head stands that PR down for this pass, and a merge always names the list's head SHA as expectedHead.
+    INVARIANT bounded-age: a fallback list is used only while younger than LIGHT_PASS_VIEWS_FALLBACK_MAX_AGE_MS (a named constant; state the value and why in the why-file); older, the pass decides nothing and says so in a row.
+    1. In buildSweepLightHook keep the last good list in process: the views, when they were read, and their source. Replace it after each list read that settles without error.
+    2. readViews: start the list read; if it throws, or has not settled by LIGHT_PASS_VIEWS_DEADLINE_MS (the existing 60 s loop-available budget, not a new number), use the last good list and log sweep_light.views_fallback {reason: rate_limited | read_failed | slow_read | no_snapshot | snapshot_too_old, snapshot_age_ms, pr_count, error}. A read still running keeps running and becomes the next list; no second list read starts while one is in flight.
+    3. Pass a fallback flag in the light pass's effects so the act-time head guard stands an unreadable head down, and so every merge passes expectedHead. A pass on a fresh list behaves exactly as today.
+    4. Declare sweep_light.views_fallback in src/lib/ledger-steps.ts with its meaning.
+    5. Refill reads (W1-T11153's readOpenPrsForRefill) use the same last good list on failure.
+    NOT IN SCOPE: the list read's speed (W1-T12530); the gh transport (W1-T12531); the installation budget (W1-T12670, W1-T12555); the full sweep's tick read (W1-T12754).
+  falsifier: |
+    Remove the fallback and criteria 1 and 6 must fail with sweep_light.error and no review. Start a second list read while one is in flight and criterion 2 must fail. Let an unreadable act-time head pass on a fallback list, or drop expectedHead from a fallback merge, and criterion 3 must fail. Serve a list older than the bound and criterion 4 must fail. Restore and require all to pass.
+  note: |
+    Id reserved for run-unfiled-1794695736000 with ~/rmd-work/bin/reserve-id.sh. Build off origin/main after this filing merges.
+    If the act-time guard change needs src/lib/sweep.ts (it has a comment cap, test/sweep/compress-src-lib-sweep-ts.test.ts) or src/run-task.ts, amend files first.

@@ -19,9 +19,11 @@
  * tick for a PR it cannot dispatch, and two implement call sites read the same `fullText(impl)`.
  */
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { test } from "node:test";
 
 import { followupSetDigest, harvestFollowupsFromReport } from "#src/run-task.js";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 const REPORT = [
   "## Follow-ups",
@@ -104,6 +106,21 @@ test("W1-T3234: a report with no follow-ups section writes nothing at all, as be
   h.run("## Summary\n\nNothing declared here.\n");
   assert.deepEqual(h.rows, [], "the silent no-op case is byte-identical to before");
   assert.deepEqual(h.said, []);
+});
+
+test("the report harvest reads the exact local head and names an unreadable head", () => {
+  const expected = execFileSync("git", ["-C", REPO_ROOT, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+  for (const unreadable of [false, true]) {
+    const rows: Record<string, unknown>[] = [];
+    harvestFollowupsFromReport("REPORT\n## Follow-ups\ntask: preserve the exact source revision", {
+      label: "implement", worktreePath: unreadable ? `${REPO_ROOT}/absent-followup-head` : REPO_ROOT,
+      seen: new Set(), log: (step, extra) => rows.push({ step, ...extra }), say: () => {},
+    });
+    const report = rows.find(r => r.step === "report.followups");
+    assert.ok(report);
+    assert.equal(report.head_sha, unreadable ? undefined : expected);
+    assert.equal(rows.some(r => r.step === "followup.head_unreadable"), unreadable);
+  }
 });
 
 test("W1-T3234: the digest is content identity — not order-insensitive, not time-varying", () => {
