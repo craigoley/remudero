@@ -24095,8 +24095,8 @@ export async function runSweep(
                   break;
                 }
               }
-              const logHolds = ciFailuresForFix.flatMap((f) => f.logUnavailable?.kind === "deferred" && Date.parse(f.logUnavailable.until) > now
-                ? [`${f.name}: ${describeCiLogUnavailable(f.logUnavailable)}`] : []); // W1-T12713: no blind round before the retry time
+              const logHolds = ciFailuresForFix.flatMap((f) => f.logUnavailable?.kind === "deferred" && Date.parse(f.logUnavailable.until) > now // expiring-fixture: exempt -- W1-T12713 runtime retry time, no blind round before it
+                ? [`${f.name}: ${describeCiLogUnavailable(f.logUnavailable)}`] : []);
               if (logHolds.length > 0) { acted = false; standDownReason = `${logHolds.join("; ")} — no fix strike`; break; }
               // W1-T8041: no requeue arm took this pass, so an unavailable rerun stands down exactly as it did before.
               if (unavailableRerunStandDown !== undefined) {
