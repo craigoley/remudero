@@ -105,6 +105,7 @@ test("W1-T12822 criterion 1: an own-namespace record whose pid is gone, or now h
     assert.equal(fixture.scans(), 0, "an own-namespace proof needs no /proc scan");
   });
   await t.test("pid reused with a different kernel start", t => {
+    if (process.platform !== "linux") { t.skip("a kernel start time is read from Linux /proc"); return; }
     const fixture = slots(t);
     const pid = liveChild(t);
     assert.match(testSlotProcessFacts(pid)?.start ?? "", /^proc:[0-9]+$/, "positive control: the live pid has a kernel start");
