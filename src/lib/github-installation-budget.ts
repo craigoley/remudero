@@ -56,6 +56,13 @@ export interface GithubBudgetThrottledRow {
   consumers: number;
 }
 
+/** What a worker thread needs to join a shared budget: plain data that a structured clone keeps shared. */
+export interface InstallationBudgetThreadInput {
+  state: SharedArrayBuffer;
+  consumers: number;
+  instance: string;
+}
+
 export interface InstallationBudget {
   /** The number of consumers that share the installation; undefined means no allowance limit. */
   readonly consumers: number | undefined;
@@ -73,6 +80,8 @@ export interface InstallationBudget {
   allowance(): number | undefined;
   /** Drain throttle evidence recorded by any thread sharing this budget. */
   takeThrottleRows(): GithubBudgetThrottledRow[];
+  /** W1-T12555: the state a worker thread joins; undefined for an unconfigured or unshared budget. */
+  threadInput(): InstallationBudgetThreadInput | undefined;
 }
 
 /** The throttle-row windows kept for de-duplication; older windows are dropped. */
@@ -97,6 +106,11 @@ const MAX_PENDING_ROWS = 1024;
 function withState<T>(state: BigInt64Array, fn: () => T): T {
   while (Atomics.compareExchange(state, Slot.Lock, 0n, 1n) !== 0n) { /* short critical section */ }
   try { return fn(); } finally { Atomics.store(state, Slot.Lock, 0n); }
+}
+
+/** W1-T12555: the budget a worker thread asks, on the same atomic state as the thread that started it. */
+export function installationBudgetForThread(input: InstallationBudgetThreadInput, clock: Clock): InstallationBudget {
+  return createInstallationBudget({ consumers: input.consumers, instance: input.instance, clock, sharedState: input.state });
 }
 
 export function createInstallationBudget(opts: {
@@ -267,6 +281,10 @@ export function createInstallationBudget(opts: {
     allowance() {
       const reading = current();
       return consumers === undefined || reading === undefined ? undefined : allowanceOf(reading, consumers);
+    },
+    threadInput() {
+      return opts.sharedState === undefined || consumers === undefined
+        ? undefined : { state: opts.sharedState, consumers, instance };
     },
     takeThrottleRows() {
       if (shared === undefined) return pending.splice(0);
