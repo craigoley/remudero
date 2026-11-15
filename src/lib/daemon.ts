@@ -7013,7 +7013,8 @@ export async function runDaemon(
       let claimSweepPending = deps.claimSweepSettled !== undefined;
       const claimSweepDone = () => { claimSweepPending = false; };
       void deps.claimSweepSettled?.then(claimSweepDone, claimSweepDone);
-      const waitForClaimSweep = async () => { await deps.claimSweepSettled?.catch(() => undefined); };
+      const claimSweepWait = deps.claimSweepSettled?.then(claimSweepDone, claimSweepDone);
+      const waitForClaimSweep = async () => { await claimSweepWait; };
       void (async () => {
         try {
           await deps.sweepLight?.(heapHeldLightPass(deps, log,
