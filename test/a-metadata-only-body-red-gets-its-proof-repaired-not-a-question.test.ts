@@ -6,7 +6,9 @@ import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { test } from "node:test";
 
-import { gitRepo } from "./helpers/git-repo.js";
+import { gitRepo, type GitRepo } from "./helpers/git-repo.js";
+import { loadPlanAtRef } from "#src/lib/plan.js";
+import { parseAcceptanceBlock } from "#src/lib/review.js";
 import type { AcceptanceCriterion } from "../src/lib/plan.js";
 import {
   proofAmendmentIneligibleReason,
@@ -32,7 +34,7 @@ import {
   acceptanceGateBodyRepair,
   buildFixRungDispatchArgs,
   PROOF_REPAIR_FIX_MODE_RULES,
-  planCriteriaAtHeadForRepair,
+  planCriteriaAtMergeForRepair,
   proofRepairPromptLines,
   proofRepairRefusal,
   proofRepairRoundRefusalInWorktree,
@@ -571,7 +573,7 @@ test("W1-T5544: the repair round stages only test files and pushes only discrimi
   assert.equal(accepted.logs.some((l) => l.step === "fix.commit_refused"), false);
 });
 
-test("W1-T5544: the worktree gate runs check-proof against the merge base, and the body cure reads the plan at head", () => {
+test("W1-T5544: the worktree gate runs check-proof against the merge base, and the body cure reads the plan at head", async () => {
   // A real child process per proof: the stub check-proof entry answers 5 (stale at base) for a proof named `stale`, 0 otherwise. The
   // scratch repo gets this checkout's node_modules linked in AFTER its commits, so `--import tsx` resolves the loader the
   // real child uses without the link ever entering a commit.
@@ -598,16 +600,16 @@ test("W1-T5544: the worktree gate runs check-proof against the merge base, and t
 
     // The body cure's plan read: an unreadable head is no cure (never a guessed plan); a readable head resolves the
     // task's real criteria through the same resolver the gate uses.
-    assert.deepEqual(planCriteriaAtHeadForRepair(`Remudero-Task: ${TASK}`, "0123456789abcdef0123456789abcdef01234567", repo), []);
+    assert.deepEqual(await planCriteriaAtMergeForRepair(`Remudero-Task: ${TASK}`, "0123456789abcdef0123456789abcdef01234567", undefined, repo), []);
     const head = execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim();
-    const real = planCriteriaAtHeadForRepair("Remudero-Task: W1-T5544", head);
+    const real = await planCriteriaAtMergeForRepair("Remudero-Task: W1-T5544", head, undefined);
     assert.ok(real.length > 0 && real.every((c) => c.proof.length > 0), "W1-T5544's own criteria resolve at this checkout's head");
   } finally {
     rmSync(repo, { recursive: true, force: true });
   }
 });
 
-test("W1-T5544: the body repair uses the last anchored trailer and the supplied head contract", () => {
+test("W1-T5544: the body repair uses the last anchored trailer and the supplied head contract", async () => {
   const fixture = gitRepo({ kind: "metadata-repair-contract" });
   const planPath = join(fixture.dir, "plan", "tasks.yaml");
   const writePlan = (acceptance: AcceptanceCriterion[]) => writeFileSync(planPath, JSON.stringify([
@@ -627,11 +629,184 @@ test("W1-T5544: the body repair uses the last anchored trailer and the supplied 
     writePlan([{ claim: "uncommitted contract", proof: "unit test: uncommitted contract" }]);
 
     const body = `Remudero-Task: W1-MISSING\n\n${DIVERGED_BODY}`;
-    assert.deepEqual(planCriteriaAtHeadForRepair(body, originalHead, fixture.dir), PLAN);
-    assert.deepEqual(planCriteriaAtHeadForRepair(body, currentHead, fixture.dir), currentPlan);
-    assert.deepEqual(planCriteriaAtHeadForRepair(`${body}\nRemudero-Task: W1-MISSING`, currentHead, fixture.dir), []);
-    assert.deepEqual(planCriteriaAtHeadForRepair(`prose Remudero-Task: ${TASK}`, currentHead, fixture.dir), []);
+    assert.deepEqual(await planCriteriaAtMergeForRepair(body, originalHead, undefined, fixture.dir), PLAN);
+    assert.deepEqual(await planCriteriaAtMergeForRepair(body, currentHead, undefined, fixture.dir), currentPlan);
+    assert.deepEqual(await planCriteriaAtMergeForRepair(`${body}\nRemudero-Task: W1-MISSING`, currentHead, undefined, fixture.dir), []);
+    assert.deepEqual(await planCriteriaAtMergeForRepair(`prose Remudero-Task: ${TASK}`, currentHead, undefined, fixture.dir), []);
   } finally {
     fixture.cleanup();
+  }
+});
+
+// ── W1-T12791: the cure reads the plan of the merge the gate checks out ─────────────────────────────
+
+const MERGE_TASK = "W1-T12791-FIXTURE";
+const CLAIMS = ["the first claim", "the second claim", "the third claim"] as const;
+const UNIT = CLAIMS.map((c) => `unit test: ${c}`);
+const GREP = ["grep: first in src/a.ts", "grep: second in src/b.ts", "grep: third in src/c.ts"];
+
+/** A multi-line plan, so a head edit and a main edit of different criteria merge without a conflict. */
+function mergePlanYaml(claims: readonly string[], proofs: readonly string[]): string {
+  const rows = claims.map((c, i) => `    - claim: "${c}"\n      proof: "${proofs[i]}"\n`).join("");
+  return `- id: ${MERGE_TASK}\n  title: fixture\n  repo: remudero\n  type: implement\n  acceptance:\n${rows}`;
+}
+
+function bodyFor(claims: readonly string[], proofs: readonly string[], trailer = true): string {
+  const block = claims.map((c, i) => `- claim: ${c}\n  proof: ${proofs[i]}`).join("\n");
+  return `Records the fixture.\n\n## Acceptance\n\n${block}\n${trailer ? `\nRemudero-Task: ${MERGE_TASK}\n` : ""}`;
+}
+
+interface MergeFixture {
+  author: GitRepo;
+  /** The repair's checkout: cloned at the base, so neither the PR head nor the amendment is local. */
+  clone: string;
+  headSha: string;
+  /** The task's criteria in a real `git merge` of the PR head into main: the tree the gate checks out. */
+  mergedPlan: () => AcceptanceCriterion[];
+  cleanup(): void;
+}
+
+/** A base plan, a PR branch (optionally editing the plan), then an amendment merged on main after the PR opened. */
+function amendedAfterPrOpened(headPlan: string | undefined, mainPlan: string): MergeFixture {
+  const origin = gitRepo({ bare: true, kind: "t12791-origin" });
+  const author = gitRepo({ seedCommit: false, kind: "t12791-author" });
+  origin.git("config", "uploadpack.allowAnySHA1InWant", "true");
+  mkdirSync(join(author.dir, "plan"));
+  mkdirSync(join(author.dir, "src"));
+  writeFileSync(join(author.dir, "plan", "tasks.yaml"), mergePlanYaml(CLAIMS, UNIT));
+  author.git("add", "-A");
+  author.git("commit", "-q", "-m", "base");
+  author.addRemote("origin", origin.dir);
+  author.git("push", "-q", "origin", "main");
+  const clone = gitRepo({ cloneFrom: origin.dir, kind: "t12791-clone" });
+  author.git("checkout", "-q", "-b", "pr");
+  if (headPlan === undefined) writeFileSync(join(author.dir, "src", "views.ts"), "export const views = 1;\n");
+  else writeFileSync(join(author.dir, "plan", "tasks.yaml"), headPlan);
+  author.git("add", "-A");
+  author.git("commit", "-q", "-m", "the pr");
+  author.git("push", "-q", "origin", "pr");
+  const headSha = author.git("rev-parse", "HEAD");
+  author.git("checkout", "-q", "main");
+  writeFileSync(join(author.dir, "plan", "tasks.yaml"), mainPlan);
+  author.git("add", "-A");
+  author.git("commit", "-q", "-m", "chore(plan): amend the fixture task");
+  author.git("push", "-q", "origin", "main");
+  return {
+    author,
+    clone: clone.dir,
+    headSha,
+    mergedPlan: () => {
+      author.git("checkout", "-q", "-B", "gate", "main");
+      author.git("merge", "-q", "--no-edit", headSha);
+      return loadPlanAtRef(author.dir, "plan/tasks.yaml", "HEAD").byId.get(MERGE_TASK)!.acceptance!;
+    },
+    cleanup: () => {
+      for (const dir of [origin.dir, author.dir, clone.dir]) rmSync(dir, { recursive: true, force: true });
+    },
+  };
+}
+
+/** repairPrMetadata with only the REST read and write replaced, run from `cwd` so the production readers read it. */
+async function repairFrom(cwd: string, headSha: string, body: string, baseRef: string | undefined = "main") {
+  const writes: Array<{ title?: string; body?: string }> = [];
+  const prior = process.cwd();
+  process.chdir(cwd);
+  try {
+    const result = await repairPrMetadata(
+      { prUrl: PR_URL, headSha },
+      ["acceptance-author-gate"],
+      (_url, fields) => { writes.push(fields); },
+      () => ({ title: "fix(views): record the fixture", body, ...(baseRef === undefined ? {} : { base: { ref: baseRef } }) }),
+    );
+    return { result, writes };
+  } finally {
+    process.chdir(prior);
+  }
+}
+
+const proofsOf = (body: string) => parseAcceptanceBlock(body).map((c) => c.proof);
+const gateRefusal = (body: string, plan: readonly AcceptanceCriterion[]) =>
+  authorGate.trailerBodyProofDivergenceRefusal({ body, taskAcceptanceForId: (id) => (id === MERGE_TASK ? plan : undefined) });
+
+test("W1-T12791 criterion 1: an amendment merged on main after the PR opened is written into the PR body", async () => {
+  const fx = amendedAfterPrOpened(undefined, mergePlanYaml(CLAIMS, GREP));
+  try {
+    const body = bodyFor(CLAIMS, UNIT);
+    const merged = fx.mergedPlan();
+    assert.deepEqual(merged.map((c) => c.proof), GREP, "the merge carries main's amended proofs");
+    assert.ok(gateRefusal(body, merged), "control: the gate refuses the live body against the merged plan");
+
+    const { result, writes } = await repairFrom(fx.clone, fx.headSha, body);
+    assert.equal(result.repaired, true, result.reason);
+    assert.equal(writes.length, 1);
+    assert.equal(writes[0]!.title, undefined);
+    assert.deepEqual(proofsOf(writes[0]!.body!), GREP, "the written proofs are main's amended proofs");
+    assert.match(writes[0]!.body!, /Remudero-Task: W1-T12791-FIXTURE\n$/);
+    assert.equal(gateRefusal(writes[0]!.body!, merged), undefined, "the gate accepts the written body");
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test("W1-T12791 criterion 2: the cure renders the task file of the merge tree, also when the head edits it", async () => {
+  const headClaims = [CLAIMS[0], CLAIMS[1], "the third claim, as the head words it"];
+  const mainProofs = [GREP[0]!, UNIT[1]!, UNIT[2]!];
+  const fx = amendedAfterPrOpened(mergePlanYaml(headClaims, UNIT), mergePlanYaml(CLAIMS, mainProofs));
+  try {
+    const merged = fx.mergedPlan();
+    assert.deepEqual(merged.map((c) => c.claim), headClaims, "the merge keeps the head's claim edit");
+    assert.deepEqual(merged.map((c) => c.proof), mainProofs, "the merge keeps main's proof amendment");
+
+    const body = bodyFor(headClaims, UNIT);
+    assert.deepEqual(await planCriteriaAtMergeForRepair(body, fx.headSha, "main", fx.clone), merged,
+      "the reader resolves the merged task file, not the head's and not main's");
+    const { result, writes } = await repairFrom(fx.clone, fx.headSha, body);
+    assert.equal(result.repaired, true, result.reason);
+    assert.deepEqual(parseAcceptanceBlock(writes[0]!.body!), merged.map((c) => ({ claim: c.claim, proof: c.proof })));
+    assert.equal(gateRefusal(writes[0]!.body!, merged), undefined);
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test("W1-T12791 criterion 3: no base or a conflict reads the head's plan; an unneeded edit leaves the body alone", async () => {
+  const headProofs = ["unit test: the head's own first proof", UNIT[1]!, UNIT[2]!];
+  const fx = amendedAfterPrOpened(mergePlanYaml(CLAIMS, headProofs), mergePlanYaml(CLAIMS, GREP));
+  try {
+    const body = bodyFor(CLAIMS, UNIT);
+    const atHead = (await planCriteriaAtMergeForRepair(body, fx.headSha, undefined, fx.clone)).map((c) => c.proof);
+    assert.deepEqual(atHead, headProofs, "no base ref: the head's plan");
+    assert.deepEqual((await planCriteriaAtMergeForRepair(body, fx.headSha, "no-such-base", fx.clone)).map((c) => c.proof), headProofs,
+      "a base that cannot be fetched: the head's plan");
+    assert.deepEqual((await planCriteriaAtMergeForRepair(body, fx.headSha, "../main", fx.clone)).map((c) => c.proof), headProofs,
+      "a base ref that is not a branch name is never fetched");
+    assert.deepEqual((await planCriteriaAtMergeForRepair(body, fx.headSha, "main", fx.clone)).map((c) => c.proof), headProofs,
+      "a conflict between head and main: the head's plan, never [] and never a guess");
+    assert.deepEqual(await planCriteriaAtMergeForRepair(body, "1279112791127911279112791127911279112791", "main", fx.clone), [],
+      "an unreadable head is no cure");
+
+    const conflicted = await repairFrom(fx.clone, fx.headSha, body);
+    assert.equal(conflicted.result.repaired, true, "on a conflict the cure still follows the head's plan, as before");
+    assert.deepEqual(proofsOf(conflicted.writes[0]!.body!), headProofs);
+
+    for (const [why, unchanged] of [
+      ["no trailer", bodyFor(CLAIMS, UNIT, false)],
+      ["no body block", `Records the fixture.\n\nRemudero-Task: ${MERGE_TASK}\n`],
+      ["a block equal to the plan the reader resolves", bodyFor(CLAIMS, headProofs)],
+    ] as const) {
+      const { result, writes } = await repairFrom(fx.clone, fx.headSha, unchanged);
+      assert.equal(writes.length, 0, `${why}: the body is not changed`);
+      assert.equal(result.repaired, false, why);
+    }
+  } finally {
+    fx.cleanup();
+  }
+
+  const clean = amendedAfterPrOpened(undefined, mergePlanYaml(CLAIMS, GREP));
+  try {
+    const { result, writes } = await repairFrom(clean.clone, clean.headSha, bodyFor(CLAIMS, GREP));
+    assert.deepEqual([result.repaired, writes.length], [false, 0], "a block that already equals the merged plan is not changed");
+  } finally {
+    clean.cleanup();
   }
 });
