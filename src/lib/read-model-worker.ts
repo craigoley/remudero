@@ -1677,7 +1677,8 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
         const fingerprint = declared ? undefined : live.digestReads;
         const digestAsOf = fingerprint ? new Map(scoped.instances.map(({ state, db }) =>
           [`${LEDGER_SOURCE_PREFIX}${state.instance}`, db ? fingerprint(db) : null])) : readAsOf;
-        try { if (unit.builtKeys === undefined || reusable) digest = inputDigest(scoped, digestAsOf, live); }
+        // A declared digest is cheap, so a rebuild forced by an aged source still records it and the next pass can skip.
+        try { if (declared || unit.builtKeys === undefined || reusable) digest = inputDigest(scoped, digestAsOf, live); }
         catch (error) { log("read_model.view_digest_unreadable", { ...named, error: (error as Error).message }); }
         why = unit.skipMismatch ? "mismatch" : notSkippedReason(unit, declared || digestAsOf !== undefined, reusable, digest);
         if (declared && digest === undefined && why === "unreadable") why = "inputs";
