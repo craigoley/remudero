@@ -27,6 +27,7 @@
     - src/lib/deploy-judge.ts
     - src/lib/daemon.ts
     - test/daemon/a-freshness-restart-picks-its-moment-from-the-work-in-flight.test.ts
+    - "src/cli/commands/daemon.ts"
   status: queued
   attempts: 0
   acceptance:
