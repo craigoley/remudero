@@ -1752,6 +1752,20 @@ if [ "$CONSUMER_PROBE" = "walked" ]; then
     "$(live_consumer_path "${RMD_ROOT}/repos/.remudero-coverage" /home/node/Remudero/repos/.remudero-coverage)"
   consumer_kb transcripts "${HOME}/.claude/projects" "${HOME}/.codex"
   consumer_kb npm_cache "${HOME}/.npm"
+  TSX_CACHE_PATHS=()
+  TMP_LEFTOVER_PATHS=()
+  for temp_root in "$CONSUMER_TMP" /tmp /mnt/scratch/tmp; do
+    for temp_path in "$temp_root"/tsx-[0-9]*; do
+      [ -d "$temp_path" ] && TSX_CACHE_PATHS+=("$temp_path")
+    done
+    for temp_path in "$temp_root"/rmd-* "$temp_root"/remudero-*; do
+      case "${temp_path##*/}" in rmd-c-*) continue ;; esac
+      [ -e "$temp_path" ] && TMP_LEFTOVER_PATHS+=("$temp_path")
+    done
+  done
+  consumer_kb tsx_cache ${TSX_CACHE_PATHS[@]+"${TSX_CACHE_PATHS[@]}"}
+  consumer_kb tmp_leftovers ${TMP_LEFTOVER_PATHS[@]+"${TMP_LEFTOVER_PATHS[@]}"}
+  consumer_kb hand_worktrees "${HOME}/rmd-work"
   WALK_USED_KB="$CONSUMER_USED_KB"; WALK_EPOCH="$CONSUMER_NOW_S"
   [ -z "$CONSUMER_WALK_CUT" ] || CONSUMER_PROBE="budget_exhausted"
 fi

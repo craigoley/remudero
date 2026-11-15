@@ -82,6 +82,12 @@ type SeedRow = Omit<LedgerStepRow, "family">;
 // `src/lib/review.ts`, `src/lib/sweep.ts` and `src/lib/panel-actions.ts` at 2026-09-07.
 const SEED_ROWS: readonly SeedRow[] = [
   {
+    step: "sweep_light.views_fallback",
+    meaning: "A light pass could not use a fresh open-PR list: the read failed, was rate-limited or had not settled after 60 s. With a last good list younger than its age limit, the pass decides from that list, reads each head again at act time and stands a moved or unreadable head down. With no such list, the pass decides nothing, as before.",
+    writer: ["createLightPassOpenPrList"],
+    outcomes: ["rate_limited", "read_failed", "slow_read", "no_snapshot", "snapshot_too_old"],
+  },
+  {
     step: "routing.experiment.result",
     meaning: "A daily intention-to-treat routing experiment result, with separate pipeline metrics, task-cluster bootstrap intervals, the decision rule and sample requirement. Missing outcomes remain counted. Terminal results are preserved; the result changes no routing.",
     writer: ["recordRoutingExperimentResults"],
@@ -274,6 +280,28 @@ const SEED_ROWS: readonly SeedRow[] = [
     outcomes: ["synthetic"],
   },
   {
+    // W1-T12545: a fix round re-enters merge-conflict mode instead of standing down on its own conflict.
+    step: "fix.merge_mode_reentered",
+    meaning:
+      "A fix round outside merge-conflict mode read the PR's merge facts as CONFLICTING. A trial merge " +
+      "of main at the round's head stopped with unmerged paths, and the merge was aborted. The next " +
+      "round runs in merge-conflict mode with those paths (`conflicted_files`). Without unmerged paths " +
+      "the round stands down for the sweep as before.",
+    writer: ["runFixRung"],
+    outcomes: ["reentered"],
+  },
+  {
+    // W1-T12545: a fix child whose decision was a merge-conflict repair takes the moved head.
+    step: "sweep.fix.child_head_adopted",
+    meaning:
+      "A fix child's recheck found that the PR head moved from `from_head` to `to_head` after the " +
+      "sweep decided. The decision carried merge-conflict evidence, and the merge facts still read " +
+      "CONFLICTING at the new head, so the child dispatches at `to_head` in merge-conflict mode. " +
+      "Every other recheck and every write-time fence runs at `to_head`.",
+    writer: ["runFixDispatchChild"],
+    outcomes: ["adopted"],
+  },
+  {
     // W1-T4460 design note (iv) — the SAME literal `runDaemon`'s own top-of-tick `reloadPlanBinding`
     // already logs (src/lib/daemon.ts), reused rather than reinvented for `fixRungTaskWithPlanReload`
     // (src/lib/sweep.ts)'s narrower, dispatch-scoped re-read: ONE meaning ("a fresh plan was read
@@ -337,6 +365,20 @@ const SEED_ROWS: readonly SeedRow[] = [
     outcomes: ["adopted"],
   },
   {
+    // W1-T12714: no needs-design report ends a pass with only a hold.
+    step: "fix.needs_design_routed",
+    meaning:
+      "A fix round answered NEEDS_DESIGN and the fix lane sorted its report into one kind and took that " +
+      "kind's remedy in the same round. environment: the round runs again on a fresh worker, and the first " +
+      "such round in a rung is refunded. capability: the action the round could not take runs through its " +
+      "owner (a body repair, the harness commit, a remote id reservation, or an amendment for a plan edit). contract: an " +
+      "acceptance amendment is proposed and the head waits on it. design: the head is held and a person is " +
+      "asked once. `kind`, `capability` and `remedy` name what happened. `reserved_task_id` records the id " +
+      "passed to the next worker's prompt; a reservation failure records `outcome: refused` and its reason.",
+    writer: ["runFixRung"],
+    outcomes: ["redispatch-fresh-worker", "redispatch", "body-repair", "harness-commit", "id-reservation", "amendment-proposed", "escalate"],
+  },
+  {
     // W1-T12553: the daemon instances and hand runs share one GitHub App installation.
     step: "github.budget.throttled",
     meaning:
@@ -351,8 +393,10 @@ const SEED_ROWS: readonly SeedRow[] = [
     step: "github.budget.configured",
     meaning:
       "At start, the daemon set its share of the GitHub App installation from the instance registry: " +
-      "the consumer count and the registry it read. \"unconfigured\" names why there is no share " +
-      "(no installation id, an unreadable registry, no instance on the installation); its reads are then paced as before.",
+      "the consumer count and the registry it read (the host copy, else the checkout's copy when the host file is missing). " +
+      "\"unconfigured\" names why there is no share (no installation id, an unreadable registry, no instance on the " +
+      "installation); its reads are then paced as before. An instance found by neither RMD_INSTANCE_NAME nor the target " +
+      "repo is \"unknown\", with instance_reason. Rotation keeps the row of each surviving boot.",
     writer: ["startDaemonInstallationBudget"],
     outcomes: ["configured", "unconfigured"],
   },
@@ -367,6 +411,59 @@ const SEED_ROWS: readonly SeedRow[] = [
       "minutes files one remedy task with origin flow-regression:open-repair-wait.",
     writer: ["runFlowGardener"],
     outcomes: ["OBSERVED", "UNKNOWN"],
+  },
+  {
+    // W1-T12710: fix rounds that did not move one criterion get a different remedy.
+    step: "fix.stall_remedy",
+    meaning:
+      "Before a fix round, the sweep found that `rounds` completed rounds left `criterion` unmet with the same " +
+      "failure, or did not land, at or past fix.stallRounds. It took the first remedy not tried for this pull " +
+      "request and criterion: `stronger-worker` (a round on the next mount in fix.modelOrder, named in `mount`, " +
+      "with the earlier approaches listed), `amend-criterion` (an acceptance amendment proposal, `amendment_url`), or " +
+      "`operator-input` (one escalation). \"skipped\" means the remedy could not apply; `reason` says why.",
+    writer: ["takeStallRemedy"],
+    outcomes: ["taken", "skipped"],
+  },
+  {
+    // W1-T12711: a harness answer the code refused twice in one pass.
+    step: "fix.progress_rerun",
+    meaning:
+      "The fix progress judge answered harness twice in one pass, and no off-host proof result supports it. " +
+      "The sweep asked GitHub once to rerun the failed checks at this head. `red` is the red the judge saw. " +
+      "When the rerun ends with the same red, the next judgment carries harnessRefuted and is not offered " +
+      "harness at this head. \"unavailable\" means no failed run could be rerun, and the round runs.",
+    writer: ["rerunChecksForHarness"],
+    outcomes: ["rerun", "head-moved", "unavailable"],
+  },
+  {
+    step: "serve.checkout_advanced",
+    meaning:
+      "Serve moved its own clean checkout forward to origin/main in place, with no write in flight, " +
+      "instead of asking for a handoff. Every changed path was one serve reads per request (plan/feedback/) " +
+      "or never loads, so the running generation and its warm read model stay. The row names the old " +
+      "and new sha and the changed paths.",
+    writer: ["gateStaleCodeExit"],
+    outcomes: ["advanced"],
+  },
+  {
+    step: "serve.checkout_advance_refused",
+    meaning:
+      "Serve tried to move its checkout forward in place and could not: the checkout moved, became " +
+      "dirty, or git refused the checkout. The row names the reason. The next check of the same clean " +
+      "advance asks for a handoff instead, as a code change does.",
+    writer: ["gateStaleCodeExit"],
+    outcomes: ["moved", "dirty", "git_refused"],
+  },
+  {
+    // W1-T12712: a green pull request waiting for review starts before a new fix or build worker.
+    step: "sweep.budget_yield",
+    meaning:
+      "A new fix round (lane \"fix\") or build lane (lane \"build\") did not start, because the review width " +
+      "was held at host-worker-budget and a green head had waited for review longer than one sweep cadence. " +
+      "One row per held spell: `waiting_heads` names the heads that waited and `oldest_wait_ms` the longest wait. " +
+      "No running worker is stopped and the budget is unchanged; the held work starts once no such head waits.",
+    writer: ["decideReviewPrecedence"],
+    outcomes: ["fix", "build"],
   },
 ];
 

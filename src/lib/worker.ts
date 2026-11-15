@@ -1,4 +1,6 @@
 import { withWorkspaceCleanup } from "./workspace-cleanup-contract.js";
+import { newestTaskAnswer, type Task } from "./plan.js";
+import { citation } from "./provenance.js";
 import { BoundedOutput, readBoundedFileTail, type FileTail } from "./bounded-file-tail.js";
 import type { CashRequestEffortCount } from "./cash-request-effort.js";
 import { workerExecutionEvidence, sdkRequestedEffort, sdkRequestedModel, type SdkRequestEvidence,
@@ -4943,6 +4945,33 @@ export function appendQuestionAnswer(repoRoot: string, entry: QuestionAnswerEntr
   }
 }
 
+/** W1-T12715: the newest ANSWER text the question store holds for `taskId`, or undefined. An unreadable store
+ * answers nothing, so a task with needs_input stays held. */
+export function taskInputAnswer(repoRoot: string, taskId: string): string | undefined {
+  let text: string;
+  try {
+    text = fs.readFileSync(join(repoRoot, "plan", "questions.ndjson"), "utf8");
+  } catch {
+    return undefined; // deliberate: an absent or unreadable store holds the task, the safe side.
+  }
+  const lines: unknown[] = [];
+  for (const raw of text.split("\n")) {
+    try {
+      lines.push(JSON.parse(raw));
+    } catch {
+      continue; // deliberate: a torn or blank line is skipped, as every other reader of this store does.
+    }
+  }
+  return newestTaskAnswer(lines, taskId);
+}
+
+/** W1-T12715: the answer to a held task's question, as one cited line for the build prompt's operator notes. */
+export function renderTaskInputAnswer(task: Pick<Task, "id" | "needs_input">, answer: string | undefined): string {
+  if (task.needs_input === undefined || answer === undefined || answer.trim() === "") return "";
+  const flat = (text: string): string => text.replace(/\s+/g, " ").trim();
+  return `- Operator answer to "${flat(task.needs_input.question)}": ${flat(answer)} ${citation(`operator#answer@${task.id}`)}`;
+}
+
 // ── Mid-run operator answer delivery (W1-T4673) ─────────────────────────────
 // Before this, an answer for task X reached X only at the start of its NEXT fix round ({@link appendQuestionAnswer}'s
 // store is read at the pre-run boundary, never mid-run). Buzz's "mention it to steer it" reaches a running agent
@@ -6641,6 +6670,39 @@ export async function worktreeRemoveAsync(repoDir: string, worktreePath: string)
   await hostWorktreeGitAsync(repoDir, ["worktree", "remove", "--force", worktreePath], { stdio: "inherit-stdout" });
   removeWorktreeBase(worktreePath);
   sweepStaleWorkerScratch({ maxAgeMs: DEFAULT_TEARDOWN_SCRATCH_SWEEP_MAX_AGE_MS });
+}
+
+/** W1-T12550: only git's complete absence diagnostic qualifies; a lock reason can quote it. */
+function worktreeAlreadyRemoved(error: unknown, worktreePath: string): boolean {
+  const failure = (error ?? {}) as { stderr?: unknown };
+  return String(failure.stderr ?? "").trim() === `fatal: '${worktreePath}' is not a working tree`;
+}
+
+function settleRemovedWorktree(worktreePath: string): "already-removed" {
+  removeWorktreeBase(worktreePath);
+  fs.rmSync(worktreePath, { recursive: true, force: true });
+  return "already-removed";
+}
+
+/** {@link worktreeRemove} that tolerates only an absent tree; every other failure still throws. */
+export function worktreeRemoveIfPresent(repoDir: string, worktreePath: string): "removed" | "already-removed" {
+  try {
+    worktreeRemove(repoDir, worktreePath);
+    return "removed";
+  } catch (error) {
+    if (!worktreeAlreadyRemoved(error, worktreePath)) throw error;
+    return settleRemovedWorktree(worktreePath);
+  }
+}
+
+export async function worktreeRemoveIfPresentAsync(repoDir: string, worktreePath: string): Promise<"removed" | "already-removed"> {
+  try {
+    await worktreeRemoveAsync(repoDir, worktreePath);
+    return "removed";
+  } catch (error) {
+    if (!worktreeAlreadyRemoved(error, worktreePath)) throw error;
+    return settleRemovedWorktree(worktreePath);
+  }
 }
 
 /** Summary of what a start-of-run prune reclaimed (ledgered for provenance). */
