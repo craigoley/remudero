@@ -72,6 +72,6 @@ test("directMergeAdmissionsClosed is not exported from arm-auto-merge", async ()
 });
 
 test("QUEUE_JUDGE_AVAILABILITY_STEPS is not exported from queue-judge-gardener", async () => {
-  const module = await import("../src/lib/queue-judge-gardener.js");
+  const module = await import("#src/lib/queue-judge-gardener.js");
   assert.equal(Object.hasOwn(module, "QUEUE_JUDGE_AVAILABILITY_STEPS"), false);
 });
