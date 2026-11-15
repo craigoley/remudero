@@ -807,6 +807,7 @@ import {
   ciLearningPendingOrigins,
   findPendingLandingPr,
   landFeedbackStatusContent,
+  landFeedbackStatusContentAsync,
   planDestinationLandingOpts,
   queuedFeedbackDir,
   landCiLearningShards,
@@ -35375,15 +35376,15 @@ export function triageLockRefusalMessage(pid: number, startedAt: string, lockPat
 /** Serialize with the existing queued writer, then land in the entry's home. Neither the public
  * lane nor the shared private checkout receives a mutable feedback copy. The existing queue keeps
  * a refused private write recoverable by the normal landing sweep. */
-function landPrivateTriageStatus(root: string, stateRoot: string, feedbackId: string, status: FeedbackEntry["status"],
-  opts: { proposalPr?: string; summary?: FeedbackEntry["summary"]; log: (step: string, extra?: Record<string, unknown>) => void }) {
+async function landPrivateTriageStatus(root: string, stateRoot: string, feedbackId: string, status: FeedbackEntry["status"],
+  opts: { proposalPr?: string; summary?: FeedbackEntry["summary"]; log: (step: string, extra?: Record<string, unknown>) => void }): Promise<LandFeedbackResult> {
   const home = triageFeedbackHome(root, feedbackId);
   if (home.destination === undefined) throw new Error("private triage status has no destination");
   const updated = setFeedbackStatus(root, feedbackId, status, { ...opts, land: { stateRoot } });
   const content = readFileSync(join(queuedFeedbackDir(stateRoot), `${feedbackId}.yaml`), "utf8");
   if (content !== stringifyYaml(updated)) throw new Error("feedback status queue does not hold the requested edit");
-  return landFeedbackStatusContent(home.root, feedbackEntryRepoPath(feedbackId), content,
-    planDestinationLandingOpts({ log: opts.log }, home.destination));
+  return landFeedbackStatusContentAsync(home.root, feedbackEntryRepoPath(feedbackId), content,
+    planDestinationLandingOpts<LandFeedbackAsyncOpts>({ log: opts.log }, home.destination));
 }
 
 interface PrivateTriagePublication {
@@ -35457,7 +35458,7 @@ async function finishPrivateTriagePublication(publication: PrivateTriagePublicat
   try {
     const stateRoot = join(config.root, "state");
     await proposeFeedbackWithSummary(worktreePath, feedbackId, summarizeDeps, { proposalPr: publication.prUrl, land: { stateRoot } });
-    const landing = landPrivateTriageStatus(worktreePath, stateRoot, feedbackId, "proposed", { proposalPr: publication.prUrl, log });
+    const landing = await landPrivateTriageStatus(worktreePath, stateRoot, feedbackId, "proposed", { proposalPr: publication.prUrl, log });
     if (!landing.landed) throw new Error("the private feedback landing refused the write");
     publication.stage = "feedback_landed";
     writeAtomic(receiptPath, JSON.stringify(publication), { mode: 0o600 });
@@ -35469,7 +35470,7 @@ async function finishPrivateTriagePublication(publication: PrivateTriagePublicat
   return publication.prUrl;
 }
 
-function landTriageStatusOutcome(i: {
+async function landTriageStatusOutcome(i: {
   worktreePath: string;
   repoDir: string;
   feedbackId: string;
@@ -35481,15 +35482,15 @@ function landTriageStatusOutcome(i: {
   stateRoot: string;
   log: (step: string, extra?: Record<string, unknown>) => void;
   say: (msg: string) => void;
-}): number {
+}): Promise<number> {
   const { decision, feedbackId, log, say } = i;
   const home = triageFeedbackHome(i.worktreePath, feedbackId);
   const landing = home.destination !== undefined
-    ? landPrivateTriageStatus(i.worktreePath, i.stateRoot, feedbackId, decision.status, { log })
-    : (() => {
+    ? await landPrivateTriageStatus(i.worktreePath, i.stateRoot, feedbackId, decision.status, { log })
+    : await (() => {
       setFeedbackStatus(i.worktreePath, feedbackId, decision.status);
       const content = readFileSync(feedbackEntryPath(i.worktreePath, feedbackId), "utf8");
-      return landFeedbackStatusContent(i.worktreePath, feedbackEntryRepoPath(feedbackId), content, { log });
+      return landFeedbackStatusContentAsync(i.worktreePath, feedbackEntryRepoPath(feedbackId), content, { log });
     })();
   if (!landing.landed) {
     const cause = landing.error ?? (landing.refused?.length ? `refused: ${JSON.stringify(landing.refused)}` : "nothing was landed");
@@ -35929,7 +35930,7 @@ async function triageCommandLocked(
     // W1-T12198: an outcome that files no task changes one status line, so it rides the shared
     // feedback landing pull request and opens no pull request of its own.
     if (decision.action === "no_task" || decision.action === "grill") {
-      return landTriageStatusOutcome({ worktreePath, repoDir, feedbackId, entry, decision, grillIssueUrl,
+      return await landTriageStatusOutcome({ worktreePath, repoDir, feedbackId, entry, decision, grillIssueUrl,
         repository: `${owner}/${repo}`, threadStorePath: inboxThreadStorePath(config.root), stateRoot: join(config.root, "state"), log, say });
     }
 
