@@ -1,0 +1,18 @@
+{
+  "_comment": "W1-T9332 structural split exception read by scripts/house-layout-census.mjs (W1-T12526 moved it here from the module). Application requires an explicit operator ruling. runTaskSplit: the one qualifying pair and its observed tokens. sweepRestoration: the exact post-merge restoration of W1-T9338's approved source comment, bound by the sha256 of the whole module before and after.",
+  "runTaskSplit": {
+    "old": "src/run-task.ts",
+    "moved": "src/cli/commands/run-task-verb.ts",
+    "literals": [
+      "plan/tasks.d",
+      "MASTER-PLAN.md",
+      ".remudero/",
+      "learnings/"
+    ]
+  },
+  "sweepRestoration": {
+    "path": "src/cli/commands/sweep.ts",
+    "before": "9e4c57e7a16a1adca59fde97f35c36baef713655e49c5211dfa6c90f5dbb1b87",
+    "after": "d8d16e2c1376d6080ddf1128c3d3777f63551e8c1fb3b5f266c36b538c90ef3f"
+  }
+}

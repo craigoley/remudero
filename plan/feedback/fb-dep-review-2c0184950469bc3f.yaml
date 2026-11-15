@@ -143,10 +143,24 @@ raw: |-
   </details>
 attachments: []
 origin: repair#dep-review
-status: new
+status: accepted
 reply_to: null
-proposal_pr: null
-summary: null
+proposal_pr: https://github.com/craigoley/remudero/pull/18627
+summary:
+  headline: Approve the major upgrade through an owned migration task
+  what_happened: Dependabot proposed upgrading @stryker-mutator/core from 9.6.1 to
+    10.1.1, and no red checks were observed. Version 10 drops Node.js 20 support
+    and requires Node.js 22 or newer.
+  decision: Migrate the runtime, manifests, source, and tests together on an owned
+    task branch; leave Dependabot’s branch untouched.
+  options:
+    - label: Approve migration
+      consequence: Move to 10.1.1 and update the project for its Node.js 22 requirement.
+      intent: approve
+    - label: Decline upgrade
+      consequence: Keep 9.6.1 and leave the proposed major-version changes unapplied.
+      intent: decline
 expansion: null
 submission_key: dep-review:migration:craigoley/remudero:@stryker-mutator/core@10
 thread_id: null
+answered_by: null
