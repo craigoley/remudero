@@ -338,6 +338,11 @@ test("W1-T12833 criterion 3: one record from every machine generator passes the 
       const blocks = blocking(text, `${task.id}.yaml`);
       if (blocks.length > 0) refused.push(`${member.name} #${index + 1}: ${blocks.join("; ")}`);
       assert.equal(machineShardLintRefusal(text, `${task.id}.yaml`) === undefined, blocks.length === 0, `${member.name}: the shared lint and the census agree`);
+      // An invariant's grep proof names a new test's own line. A bare helper name already matches in a pin test an
+      // earlier task wrote, and a proof that matches at base is refused once the record is released to verify: auto.
+      for (const claim of (task.acceptance ?? []).filter((c) => /^invariant:/.test(c.claim ?? "") && /^grep:/.test(c.proof ?? ""))) {
+        assert.match(claim.proof!, /^grep: test\("/, `${member.name}: an invariant's grep proof anchors on a test( line the build adds`);
+      }
     }
   }
   assert.deepEqual(refused, [], "every generator's record passes the lint the plan PR preflight applies");

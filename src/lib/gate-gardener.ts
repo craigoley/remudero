@@ -926,8 +926,9 @@ export function renderCommentCompressionShard(finding: CommentCompressionFinding
       proof: `unit test: ${taskId}: comment compression preserves executable code` }],
     invariants: { declared: [{ slug: "executable-code-unchanged",
       statement: `${finding.file} runs the same code after the compression; only its comment lines change.`,
-      claim: `The regression compares ${finding.file} with its pre-compression source through the shared comparator, so a changed statement fails it.`,
-      proof: `grep: assertSameTokens in ${testFile}` }] },
+      claim: `A regression named for this task compares ${finding.file} with its pre-compression source through the shared comparator, so a changed statement fails it.`,
+      // Never `grep: assertSameTokens`: a file compressed before already has its pin test, so that pattern matches at base.
+      proof: `grep: test("${taskId}: the compressed file keeps its executable tokens" in ${testFile}` }] },
     rationale: [
       `Observed ${finding.comments} comment lines in ${finding.file}. This is maintenance debt, never a merge ceiling.`,
       "Operator 2026-10-24: excess comments create high-priority follow-up work; they must not block the originating change.",
