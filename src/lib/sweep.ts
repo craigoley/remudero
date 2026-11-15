@@ -242,6 +242,7 @@ import type {
 import { DEP_REVIEW_ENGINE_REVISION, depReviewRowEngineRevision, isDependabotAuthor, dependabotOwnRedSignal, dependabotReviewArgs, dependabotRefreshVerdict, type DependabotOwnRedSignal, type DependabotRefreshVerdict } from "./dep-review.js";
 import { parseLedger } from "./retro.js";
 import { readReviewHostObservation, selectRuntimeReviewWidth } from "./review-capacity.js";
+import { yieldingFixClaim } from "./review-precedence.js";
 import {
   capacityDecisionText,
   publishReviewDemand,
@@ -6896,7 +6897,7 @@ export function prAddedLinesFromPullFiles(pages: unknown): Record<string, number
 }
 
 /** The sources {@link CiFailure.logTail} can come from, in preference order. */
-export type CiTailSource = "log" | "annotations";
+export type CiTailSource = "log" | "annotations" | "check-output";
 
 /** The outcome of the annotation fallback, recorded rather than folded into the log's own cause. */
 export type CiAnnotationFallback =
@@ -6911,22 +6912,17 @@ export type CiAnnotationFallback =
   | { outcome: "skipped-limit" }
   | { outcome: "failed"; detail: string };
 
-/** The closed set of reasons a log tail came back empty — a NAMED outcome, never an absence.
- *  `no-job-id`: no Actions job id, so no read was attempted. `fetch-failed`: a read failed, `detail`
- *  carrying the observed error. `empty-log`: the read SUCCEEDED and the job printed nothing.
- *  MAX_CI_LOG_FAILURE_DETAIL is a BACKSTOP on that `detail`, not a primary control — what the fix
- *  prompt renders is — set far above any observed message, so a truncation is itself evidence. */
+/** Why a log tail came back empty, always named: `no-job-id` (no read attempted), `fetch-failed` (`detail` is the
+ *  error; this BACKSTOP bounds it), `empty-log` (the job printed nothing), `deferred` (W1-T12713: retried at `until`). */
 export const MAX_CI_LOG_FAILURE_DETAIL = 500;
 
 export type CiLogUnavailableCause =
   | { kind: "no-job-id" }
   | { kind: "fetch-failed"; detail: string }
-  | { kind: "empty-log" };
+  | { kind: "empty-log" }
+  | { kind: "deferred"; cause: "rate-limit" | "transient"; until: string; detail: string };
 
-/**
- * One sentence naming why a log tail is missing, for BOTH consumers — run-task.ts's fix prompt and
- * this module's own escalation text — so the two can never describe the same cause differently.
- */
+/** One sentence naming why a log tail is missing, shared by the fix prompt and the escalation text so they agree. */
 export function describeCiLogUnavailable(cause: CiLogUnavailableCause): string {
   switch (cause.kind) {
     case "no-job-id":
@@ -6935,6 +6931,7 @@ export function describeCiLogUnavailable(cause: CiLogUnavailableCause): string {
       return `log NOT read: the log fetch was attempted and FAILED (${cause.detail})`;
     case "empty-log":
       return "log read successfully, but the job printed no failing output";
+    case "deferred": return `log read deferred (${cause.cause}, retry at ${cause.until})`;
   }
 }
 
@@ -15439,9 +15436,10 @@ export interface SweepDeps {
   /** W1-T11153: the open-PR reader the light pass started from, re-read when a freed lane refills so a PR that
    *  became eligible after the pass-start snapshot is ordered by its own admission key. Absent: the snapshot. */
   readOpenPrsForRefill?: () => Promise<OpenPrView[]>;
-  /** W1-T5749 — head-only guard fallback when readLiveStateAtAct is omitted. A changed head
-   *  stands down as `sweep.head_moved`; an undefined (unreadable) head leaves the act unchanged. */
+  /** W1-T5749 — head-only guard fallback when readLiveStateAtAct is omitted: a changed head stands down as `sweep.head_moved`, an unreadable one acts. */
   readLiveHeadSha?: (pr: OpenPrView) => string | undefined | Promise<string | undefined>;
+  /** W1-T12755: a light pass on its last good open-PR list reads every lane's head at act time, not only an arm's. */
+  guardEveryHeadAtAct?: boolean;
   /** W1-T7734 — THE SAME-PASS RE-READ. When the act-time guard catches a moved head, this reads THAT ONE
    *  PR again (the PR plus its status rollup, through the caller's `GhCallPacer`) and returns its rebuilt
    *  view; the walk then re-derives and acts on it in this pass instead of standing down for a whole tick.
@@ -20368,7 +20366,7 @@ export async function runSweep(
           waitSinceMs: (pr) => waitSinceMs(pr, false),
         });
   const fixCapacityReleases = new Map<number, () => void>();
-  const capacityClaim = deps.claimFixAdmission ?? fullRepairAdmission?.claim;
+  const capacityClaim = deps.claimFixAdmission ?? yieldingFixClaim("full", fullRepairAdmission?.claim, ledgerLines, now, log, fullReviewCandidates ?? [], fullReviewQueue);
   const claimFixAdmission = capacityClaim ? (pr: OpenPrView) => {
     const claim = capacityClaim(pr);
     if (claim.admitted && claim.release) fixCapacityReleases.set(pr.prNumber, claim.release);
@@ -23158,10 +23156,9 @@ export async function runSweep(
       } else {
         try {
           // W1-T5749: the snapshot can outlive its head (#9138 armed, #9155 escalated on dead heads).
-          // W1-T5922: a light pass reads the live head for its arm only; its other lanes are unchanged.
+          // W1-T5922: a light pass reads the live head for its arm only (W1-T12755: every lane on a last good list).
           // W1-T7734: a view read during this pass (the re-derive below) needs no second live read.
-          const guardHead = !rederivedIndices.has(prIndex) &&
-            (deps.repairAdmissionSurface !== "light" || disposition === "mergeable");
+          const guardHead = !rederivedIndices.has(prIndex) && (deps.repairAdmissionSurface !== "light" || disposition === "mergeable" || deps.guardEveryHeadAtAct === true);
           const liveAtAct = guardHead ? await deps.readLiveStateAtAct?.(pr) : undefined;
           const liveHead = !guardHead ? undefined : deps.readLiveStateAtAct
             ? liveAtAct?.headSha : await deps.readLiveHeadSha?.(pr);
@@ -24125,6 +24122,9 @@ export async function runSweep(
                   break;
                 }
               }
+              const logHolds = ciFailuresForFix.flatMap((f) => f.logUnavailable?.kind === "deferred" && Date.parse(f.logUnavailable.until) > now // expiring-fixture: exempt -- W1-T12713 runtime retry time, no blind round before it
+                ? [`${f.name}: ${describeCiLogUnavailable(f.logUnavailable)}`] : []);
+              if (logHolds.length > 0) { acted = false; standDownReason = `${logHolds.join("; ")} — no fix strike`; break; }
               // W1-T8041: no requeue arm took this pass, so an unavailable rerun stands down exactly as it did before.
               if (unavailableRerunStandDown !== undefined) {
                 standDownReason = unavailableRerunStandDown;
@@ -26698,11 +26698,10 @@ async function runSweepLightPassCore(
   // pass still reconciles every PR concurrently; only the expensive fix-dispatch spending point
   // claims from this shared pool. `activeWorkerCount` is the same process-wide counter the adaptive
   // review controller reads, and selected spawning reviews reserve their width before fixes race.
-  const hostWorkerBudget = policy.reviewCapacity.hostWorkerBudget;
   const repairAdmission = createSweepFixAdmissionController({
     surface: "light",
     queueDepth,
-    hostWorkerBudget,
+    hostWorkerBudget: policy.reviewCapacity.hostWorkerBudget,
     activeWorkers,
     readActiveWorkers: deps.fixProgressJudge || deps.readFixPressure ? deps.readActiveWorkerCount ?? activeWorkerCount : undefined,
     readPressure: deps.readFixPressure ?? (deps.fixProgressJudge
@@ -26712,7 +26711,7 @@ async function runSweepLightPassCore(
     ...productionFixAdmissionReaders(deps),
     log: deps.log,
   });
-  const claimFixAdmission = deps.claimFixAdmission ?? repairAdmission.claim;
+  const claimFixAdmission = yieldingFixClaim("light", deps.claimFixAdmission ?? repairAdmission.claim, selectionLedgerLines, now, deps.log, refillTail);
   const selectedNumbers = new Set<number>([
     ...spawning.map((p) => p.prNumber),
     ...planFilings.map((p) => p.prNumber),
