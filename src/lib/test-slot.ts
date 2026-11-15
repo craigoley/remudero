@@ -465,6 +465,12 @@ export interface ReservedTreeProbeHost {
 }
 
 const goneProcess = (error: unknown): boolean => ["ENOENT", "ESRCH"].includes(String((error as NodeJS.ErrnoException)?.code));
+const nsPids = (status: string): string[] | undefined => /^NSpid:[ \t]*([0-9]+(?:[ \t]+[0-9]+)*)[ \t]*$/m.exec(status)?.[1]?.split(/[ \t]+/);
+/** Field 22 of a /proc/<pid>/stat line: kernel start ticks since boot, one clock for every pid namespace. */
+const kernelStartOf = (raw: string): string | undefined => {
+  const start = raw.slice(raw.lastIndexOf(")") + 1).trim().split(/\s+/)[19];
+  return raw.includes(")") && /^[0-9]+$/.test(start ?? "") ? start : undefined;
+};
 
 /** Namespace-id reuse or complete absence proves the old namespace's whole tree ended (W1-T12504). */
 export function probeRecordedPidNamespace(held: TestSlotHolder, host: ReservedTreeProbeHost = {}): ReservedTreeEvidence {
@@ -480,15 +486,14 @@ export function probeRecordedPidNamespace(held: TestSlotHolder, host: ReservedTr
   const ownerStart = BigInt(held.processStart!.slice(5));
   const read = host.read ?? ((path: string) => path.endsWith("/ns/pid") ? readlinkSync(path) : readFileSync(path, "utf8"));
   const judgeInit = (pid: string): ReservedTreeEvidence => {
-    const raw = read(`/proc/${pid}/stat`);
-    const start = raw.slice(raw.lastIndexOf(")") + 1).trim().split(/\s+/)[19];
-    if (!raw.includes(")") || !/^[0-9]+$/.test(start ?? "")) return unknown(`namespace init ${pid} has unparseable stat`);
+    const start = kernelStartOf(read(`/proc/${pid}/stat`));
+    if (start === undefined) return unknown(`namespace init ${pid} has unparseable stat`);
     return evidence(BigInt(start!) > ownerStart ? "ended" : "live",
       `namespace init ${pid} start ${start} ${BigInt(start!) > ownerStart ? ">" : "<="} owner start ${ownerStart}`);
   };
   try {
     if (read("/proc/self/ns/pid") === held.pidNs) return judgeInit("1");
-    const nspid = /^NSpid:[ \t]*([0-9]+(?:[ \t]+[0-9]+)*)[ \t]*$/m.exec(read("/proc/self/status"))?.[1]?.split(/[ \t]+/);
+    const nspid = nsPids(read("/proc/self/status"));
     if (nspid?.length !== 1) return unknown("waiter is not an ancestor of the recorded pid namespace");
     const pids = (host.list ?? (() => readdirSync("/proc")))().filter(name => /^[0-9]+$/.test(name));
     const deadline = performance.now() + 2_000;
@@ -499,7 +504,7 @@ export function probeRecordedPidNamespace(held: TestSlotHolder, host: ReservedTr
       try {
         if (read(`/proc/${pid}/ns/pid`) !== held.pidNs) continue;
         member = true;
-        const ids = /^NSpid:[ \t]*([0-9]+(?:[ \t]+[0-9]+)*)[ \t]*$/m.exec(read(`/proc/${pid}/status`))?.[1]?.split(/[ \t]+/);
+        const ids = nsPids(read(`/proc/${pid}/status`));
         if (ids?.at(-1) !== "1") continue;
         const result = judgeInit(pid);
         if (read(`/proc/${pid}/ns/pid`) !== held.pidNs) return unknown(`namespace init ${pid} changed during observation`);
@@ -514,6 +519,39 @@ export function probeRecordedPidNamespace(held: TestSlotHolder, host: ReservedTr
       evidence("ended", "no process member in the recorded pid namespace after a complete scan");
   } catch (error) {
     return unknown(`pid namespace observation unreadable: ${String(error)}`);
+  }
+}
+
+/** Every kernel start on this boot, or why the scan proves nothing (W1-T12822). */
+export type ProcessStartScan = { complete: true; starts: ReadonlySet<string> } | { complete: false; reason: string };
+
+/** Complete only from the initial pid namespace, bounded, and with every listed stat read or gone mid-scan. */
+export function scanProcessStarts(host: ReservedTreeProbeHost = {}): ProcessStartScan {
+  const unknown = (reason: string): ProcessStartScan => ({ complete: false, reason });
+  if ((host.platform ?? process.platform) !== "linux") return unknown("process start scan requires linux");
+  const read = host.read ?? ((path: string) => readFileSync(path, "utf8"));
+  try {
+    if (nsPids(read("/proc/self/status"))?.length !== 1) return unknown("waiter is not in the initial pid namespace");
+    const pids = (host.list ?? (() => readdirSync("/proc")))().filter(name => /^[0-9]+$/.test(name));
+    // A hidepid mount hides other users' processes, pid 1 among them: an absence there proves nothing.
+    if (!pids.includes("1")) return unknown("incomplete: /proc lists no pid 1");
+    const deadline = performance.now() + 2_000;
+    const starts = new Set<string>();
+    for (const pid of pids) {
+      if (performance.now() >= deadline) return unknown("incomplete: process start scan exceeded its bound");
+      let raw: string;
+      try { raw = read(`/proc/${pid}/stat`); }
+      catch (error) {
+        if (goneProcess(error)) continue;
+        return unknown(`incomplete: /proc/${pid}/stat unreadable: ${String(error)}`);
+      }
+      const start = kernelStartOf(raw);
+      if (start === undefined) return unknown(`incomplete: /proc/${pid}/stat unparseable`);
+      starts.add(`proc:${start}`);
+    }
+    return { complete: true, starts };
+  } catch (error) {
+    return unknown(`process start scan unreadable: ${String(error)}`);
   }
 }
 
@@ -955,8 +993,13 @@ export function parseTestSlotHolder(raw: string): TestSlotHolder | null {
   }
 }
 
-/** Open first, refuse links/devices, and read only the bounded original descriptor. */
 function readTestSlotHolder(path: string, expected?: { dev: number; ino: number }): TestSlotHolder | null {
+  const text = readTestSlotRecordText(path, expected);
+  return text === null ? null : parseTestSlotHolder(text);
+}
+
+/** Open first, refuse links/devices, and read only the bounded original descriptor. */
+function readTestSlotRecordText(path: string, expected?: { dev: number; ino: number }): string | null {
   const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK, 0o600);
   try {
     const before = fstatSync(fd);
@@ -972,7 +1015,7 @@ function readTestSlotHolder(path: string, expected?: { dev: number; ino: number 
     const after = fstatSync(fd), current = lstatSync(path);
     if (!current.isFile() || before.dev !== current.dev || before.ino !== current.ino ||
         before.size !== after.size || before.mtimeMs !== after.mtimeMs || before.ctimeMs !== after.ctimeMs) return null;
-    return parseTestSlotHolder(bytes.toString("utf8"));
+    return bytes.toString("utf8");
   } finally { closeSync(fd); }
 }
 
@@ -1165,6 +1208,8 @@ export interface TestSlotOptions {
   /** Exact pinned cgroup evidence for a complete foreign-pid-namespace owner identity. */
   cgroupIdentityProbe?: (held: TestSlotHolder) => ReservedTreeEvidence;
   pidNamespaceProbe?: (held: TestSlotHolder) => ReservedTreeEvidence;
+  /** Every kernel start on this boot, for a static record from another namespace; default {@link scanProcessStarts}. */
+  processStartScan?: () => ProcessStartScan;
   /** This waiter's cgroup namespace, named in an aged hold's diagnostic; default {@link readCgroupNamespace}. */
   cgroupNamespace?: () => string | undefined;
   /** Whether any process holds a mutation guard open; default {@link defaultGuardHolderProbe}. */
@@ -1197,6 +1242,14 @@ function sleepSync(ms: number): void {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
+/** Same host and pid namespace: the holder's pid names a process here. */
+function holderPidProbeable(held: TestSlotHolder, opts: Required<Pick<TestSlotOptions, "hostname" | "pidNamespace">>): boolean {
+  const myNs = opts.pidNamespace();
+  // Same hostname but another pid namespace (two sandboxed workers in one container): the pid probe would read a
+  // live peer as dead, so it is judged like a foreign host's holder — by boot id.
+  return sameHost(held.host, opts.hostname()) && !(held.pidNs !== undefined && myNs !== undefined && held.pidNs !== myNs);
+}
+
 /**
  * Is `held` dead? Same host → the shared pid/start-time predicate. Another host or container →
  * its pid means nothing here, so: a different kernel boot id is dead by construction; an EQUAL boot id
@@ -1205,11 +1258,7 @@ function sleepSync(ms: number): void {
  * container (it assumes an earlier boot of the same cell) — on a shared mount that is a live peer.
  */
 function testSlotHolderStale(held: TestSlotHolder, now: number, opts: Required<Pick<TestSlotOptions, "hostname" | "bootId" | "isPidAlive" | "pidNamespace">>): boolean {
-  const myNs = opts.pidNamespace();
-  const foreignNs = held.pidNs !== undefined && myNs !== undefined && held.pidNs !== myNs;
-  // Same hostname but another pid namespace (two sandboxed workers in one container): the pid probe would read a
-  // live peer as dead, so it is judged like a foreign host's holder — by boot id.
-  if (sameHost(held.host, opts.hostname()) && !foreignNs) return isHolderStale(held, { isPidAlive: opts.isPidAlive, hostname: opts.hostname });
+  if (holderPidProbeable(held, opts)) return isHolderStale(held, { isPidAlive: opts.isPidAlive, hostname: opts.hostname });
   const mine = opts.bootId();
   if (held.bootId !== undefined && mine !== undefined) return held.bootId !== mine;
   // No boot id on one side (macOS, or a legacy record): outside the Linux same-kernel seam, the lease still frees.
@@ -2239,9 +2288,45 @@ export function admitStaticWork(label: string, opts: TestSlotOptions & { memoryB
     // Unrecorded is still judged on memory below; only peers lose sight of this peak, and the note says so.
     unrecorded = `; own peak UNRECORDED (${String((error as Error)?.message ?? error)})`;
   }
+  const linux = (opts.platform ?? process.platform) === "linux";
+  const unremovable = new Set<string>();
+  type StaticRead = { name: string; st: Stats; text: string; held: TestSlotHolder };
+  /** W1-T12822: unlink a record proven dead only while it is exactly what was judged; true means it is not counted. */
+  const removeDead = ({ name, st, text, held }: StaticRead, rung: string, reason: string): boolean => {
+    const path = join(dir, name), gone = (error: unknown) => (error as NodeJS.ErrnoException).code === "ENOENT";
+    try {
+      const now = lstatSync(path);
+      if (now.dev !== st.dev || now.ino !== st.ino || now.size !== st.size || now.mtimeMs !== st.mtimeMs ||
+        readTestSlotRecordText(path, now) !== text) return false;
+    } catch (error) {
+      return gone(error); // Unverifiable keeps today's handling; already gone is not counted.
+    }
+    try { unlinkSync(path); }
+    catch (error) {
+      if (!gone(error)) {
+        // Still proven dead and unchanged, so it is not counted; the failure is said once per admission.
+        if (!unremovable.has(name)) log(JSON.stringify({ step: "test_slot.static_record_remove_failed", name, label: held.label, rung, error: String(error) }));
+        unremovable.add(name);
+        return true;
+      }
+    }
+    log(JSON.stringify({ step: "test_slot.static_record_removed", name, label: held.label, pid: held.pid, pidNs: held.pidNs, host: held.host, rung, reason }));
+    return true;
+  };
+  /** Same host and namespace: the writer's pid is gone, or now names a process with another kernel start. */
+  const ownNamespaceEnded = (held: TestSlotHolder, stale: boolean): string | undefined => {
+    if (stale) return `pid ${held.pid} gone or reused`;
+    const live = /^proc:[0-9]+$/.test(held.processStart ?? "") ? testSlotProcessFacts(held.pid)?.start : undefined;
+    return live?.startsWith("proc:") && live !== held.processStart ? `pid ${held.pid} started at ${live}, not ${held.processStart}` : undefined;
+  };
   /** The live peers' named peaks, or why memory cannot judge them (a private or unreadable slot record). */
   const scan = (): { peaks: number; holders: string[]; inheritedFrom?: string; unjudgeable?: string } => {
     const seen = { peaks: 0, holders: [] as string[] };
+    const count = (held: TestSlotHolder): void => {
+      seen.peaks += held.memoryBytes ?? 0;
+      seen.holders.push(`${held.label} (pid ${held.pid}${held.memoryBytes ? `, ${mib(held.memoryBytes)} MiB` : ""})`);
+    };
+    const foreign: StaticRead[] = [];
     let names: string[] = [];
     try { names = readdirSync(dir); }
     catch (error) {
@@ -2252,22 +2337,36 @@ export function admitStaticWork(label: string, opts: TestSlotOptions & { memoryB
       const slot = SLOT_RECORD.test(name);
       if (name === ownName || (!slot && !STATIC_RECORD.test(name))) continue;
       const path = join(dir, name);
-      let held: (TestSlotHolder & { admittedAt?: string }) | null;
+      let held: (TestSlotHolder & { admittedAt?: string }) | null, st: Stats, text: string | null;
       try {
-        const st = lstatSync(path);
+        st = lstatSync(path);
         if (slot && (!st.isFile() || (st.mode & 0o077) === 0)) return { ...seen, unjudgeable: `${name} needs private coordination` };
-        held = st.isFile() ? readTestSlotHolder(path, st) : null;
+        text = st.isFile() ? readTestSlotRecordText(path, st) : null;
+        held = text === null ? null : parseTestSlotHolder(text);
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
         if (slot) return { ...seen, unjudgeable: `${name} unreadable: ${String(error)}` };
         continue; // An unreadable static record names no peak; static records are advisory, slots are not.
       }
-      if (!held || testSlotHolderStale(held, clock.now(), { hostname: host, bootId, isPidAlive, pidNamespace })) continue;
+      if (!held) continue;
+      const stale = testSlotHolderStale(held, clock.now(), { hostname: host, bootId, isPidAlive, pidNamespace });
+      const record = { name, st, text: text!, held }, ownNs = holderPidProbeable(held, { hostname: host, pidNamespace });
+      const ended = !slot && linux && ownNs ? ownNamespaceEnded(held, stale) : undefined;
+      if (ended && !testSlotHasAncestor(held.pid, pid) && removeDead(record, "own-namespace", ended)) continue;
+      if (stale) continue;
       if (!slot && testSlotHasAncestor(held.pid, pid)) return { ...seen, inheritedFrom: `${name} (${held.label}, pid ${held.pid})` };
       // Static stages go in arrival order: a later one still waiting is not counted against an earlier one.
       if (!slot && !held.admittedAt && (held.startedAt > startedIso || (held.startedAt === startedIso && name > ownName))) continue;
-      seen.peaks += held.memoryBytes ?? 0;
-      seen.holders.push(`${held.label} (pid ${held.pid}${held.memoryBytes ? `, ${mib(held.memoryBytes)} MiB` : ""})`);
+      // Another namespace on this boot: judged after every read, so the scan postdates each record it clears.
+      if (!slot && linux && !ownNs && held.bootId !== undefined && held.bootId === bootId() &&
+        /^proc:[0-9]+$/.test(held.processStart ?? "")) foreign.push(record);
+      else count(held);
+    }
+    const starts = foreign.length > 0 ? (opts.processStartScan ?? scanProcessStarts)() : undefined;
+    for (const record of foreign) {
+      const reason = `no process on boot ${record.held.bootId} started at ${record.held.processStart}`;
+      const proven = starts?.complete === true && !starts.starts.has(record.held.processStart!);
+      if (!proven || !removeDead(record, "boot-start-scan", reason)) count(record.held);
     }
     return seen;
   };
