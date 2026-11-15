@@ -16,7 +16,8 @@ export { createPlanRevisionStore, type PlanRevision, type PlanRevisionStore, typ
 import { readPlaneWorkerInput, readPlaneWorkerLog, runReadPlaneWorker } from "./read-plane.worker.js";
 import { runsBundled, startWorker } from "./child-entry-argv.js";
 import { execFile, execFileSync, spawnSync } from "node:child_process";
-import { ghExec, ghJsonAsync, ghLinesAsync, ghTextAsync } from "./github-transport.js";
+import { ghExec, ghJsonAsync, ghLinesAsync, ghTextAsync, githubInstallationBudget } from "./github-transport.js";
+import type { InstallationBudgetThreadInput } from "./github-installation-budget.js";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { loadConfig, type Config } from "./config.js";
@@ -31,7 +32,8 @@ import { codeqlAlertsReadDue } from "./pr-blocker.js";
 import { planFilesIdentity } from "./thread-plan.js";
 import { isInPlanScope } from "./plan-architect.js";
 import { appendLedger } from "./ledger.js";
-import { systemClock } from "./clock.js";
+import { fixedClock, systemClock } from "./clock.js";
+import { classifyLogFetchFailure, logFetchRetryAtMs, readCheckRunOutputAsync } from "./ci-incidents.js";
 import { createSizedMemo } from "./ledger-union.js";
 import { type BoardItem } from "./board-review.js";
 import { loadPlan, DEFAULT_RISK, readBlobsAtRefAsync, type QuarantinedTask, type MergedResolver, type Plan, type Task } from "./plan.js";
@@ -220,6 +222,8 @@ export interface TickReadOptions {
   config: Config;
   ledgerPath: string;
   checkoutRoot: string;
+  /** W1-T12555: the main thread's budget state, so the worker's reads take their share of it. */
+  githubInstallationBudget?: InstallationBudgetThreadInput;
 }
 
 export function createTickReadProducer(options: TickReadOptions, io: {
@@ -822,7 +826,7 @@ export interface CiFailureFetchOptions {
   annotationReadLimit?: number;
 }
 
-function ciFetchOptions(options: CiAnnotationFetch | CiFailureFetchOptions | undefined): Required<CiFailureFetchOptions> {
+function ciFetchOptions(options: CiAnnotationFetch | CiFailureFetchOptions | undefined): CiFailureReads {
   if (typeof options === "function") {
     return {
       fetchAnnotations: options,
@@ -835,6 +839,62 @@ function ciFetchOptions(options: CiAnnotationFetch | CiFailureFetchOptions | und
     fetchJobLog: options?.fetchJobLog ?? defaultCiJobLogFetch,
     annotationReadLimit: options?.annotationReadLimit ?? DEFAULT_CI_ANNOTATION_READ_LIMIT,
   };
+}
+
+/** W1-T12713: the reads one pass makes for its failing checks. `readCheckOutput` reads the check run's own output. It
+ *  is async only, so the sync path keeps the inline REST output; like `readJobLogRegion`, it is absent when the caller
+ *  injects its own log read, so no real read starts beside it. */
+type CiFailureReads = Required<CiFailureFetchOptionsAsync> & {
+  readCheckOutput?: (owner: string, repo: string, checkRunId: string, tailLines: number) => string | Promise<string>;
+  readJobLogRegion?: (owner: string, repo: string, jobId: string, tailLines: number) => Promise<string>;
+};
+
+/** W1-T12713: per process, each job log whose read failed on a rate limit or a server error: how many
+ *  reads failed in a row, and when the next read is due. A pass before that time does not read the log. */
+const logReadBackoff = new Map<string, { failures: number; untilMs: number; cause: "rate-limit" | "transient"; detail: string }>();
+/** BACKSTOP: entries kept; the oldest goes first. One entry per failing job, cleared when its log reads. */
+const LOG_READ_BACKOFF_ENTRIES = 512;
+/** PRIMARY CONTROL: failed retries before the check run's output stands in for the log. */
+export const LOG_READ_RETRIES_BEFORE_FALLBACK = 2;
+
+/** After a failed log read: defer it to its retry time, or read the check run's output in its place. */
+function logReadAfterFailure(key: string, err: unknown, detail: string, nowMs: number):
+    { deferred?: { cause: "rate-limit" | "transient"; until: string; detail: string }; checkOutput: boolean } {
+  const prior = logReadBackoff.get(key);
+  const defer = (e: { failures: number; untilMs: number; cause: "rate-limit" | "transient"; detail: string }) =>
+    e.failures > LOG_READ_RETRIES_BEFORE_FALLBACK ? { checkOutput: true }
+      : { deferred: { cause: e.cause, until: fixedClock(e.untilMs).iso(), detail: e.detail }, checkOutput: false };
+  if ((err as { logReadWaiting?: true } | null)?.logReadWaiting && prior !== undefined) return defer(prior);
+  const failure = classifyLogFetchFailure(err);
+  if (failure.kind !== "rate-limit" && failure.kind !== "transient") {
+    logReadBackoff.delete(key);
+    return { checkOutput: failure.kind === "absent" };
+  }
+  const failures = (prior?.failures ?? 0) + 1;
+  const entry = { failures, untilMs: logFetchRetryAtMs(failure, failures, nowMs), cause: failure.kind, detail };
+  logReadBackoff.delete(key);
+  logReadBackoff.set(key, entry);
+  if (logReadBackoff.size > LOG_READ_BACKOFF_ENTRIES) logReadBackoff.delete(logReadBackoff.keys().next().value!);
+  return defer(entry);
+}
+
+/** The check run's own output for a check whose log is absent or that has no Actions job id. A commit status has
+ *  none: its description already reaches the fix round as `statusDescription`. The inline REST title and summary
+ *  stand in when no read is made, the read fails, or the budget is spent. */
+function* checkOutputTail(owner: string, repo: string, c: RollupCheck, checkRunId: string | undefined, tailLines: number,
+  fetch: CiFailureReads, budget: { left: number }): Steps<string> {
+  if (c.context) return "";
+  const inline = [c.title, c.outputSummary].filter((p): p is string => typeof p === "string" && p.trim() !== "").join("\n");
+  const read = fetch.readCheckOutput;
+  if (read === undefined || checkRunId === undefined || budget.left <= 0) return inline.split("\n").slice(0, tailLines).join("\n");
+  budget.left -= 1;
+  try {
+    const text = yield* step(() => read(owner, repo, checkRunId, tailLines));
+    return (text.trim() !== "" ? text : inline).split("\n").slice(0, tailLines).join("\n");
+  } catch {
+    // Best-effort: the inline output stands in, and the caller names the log's own failure when it is empty.
+    return inline.split("\n").slice(0, tailLines).join("\n");
+  }
 }
 
 /** The real annotations read: `gh api` against the endpoint that answers, parsed as JSON. Only
@@ -861,9 +921,10 @@ function failureAnnotationLines(out: string): string[] {
 
 /** The real Actions job-log read. This endpoint stayed readable when `gh run view --log` returned zero bytes. */
 export function defaultCiJobLogFetch(owner: string, repo: string, jobId: string): string {
+  // W1-T12713: stderr is kept so a failed read names its HTTP status for classifyLogFetchFailure.
   return ghExec(["api", `repos/${owner}/${repo}/actions/jobs/${jobId}/logs`], {
     encoding: "utf8",
-    stdio: ["ignore", "pipe", "ignore"],
+    stdio: ["ignore", "pipe", "pipe"],
     maxBuffer: 1 << 22,
   });
 }
@@ -1259,6 +1320,8 @@ function annotationLogReducer(annotations: NonNullable<CiFailure["annotations"]>
   };
 }
 
+export { classifyLogFetchFailure };
+
 export function fetchCiFailures(
   owner: string,
   repo: string,
@@ -1288,6 +1351,8 @@ export function fetchCiFailuresAsync(
       fetchJobLog: options.fetchJobLog ?? defaultCiJobLogFetchAsync,
       annotationReadLimit: options.annotationReadLimit ?? DEFAULT_CI_ANNOTATION_READ_LIMIT,
       readJobLogRegion: options.fetchJobLog ? undefined : defaultCiJobLogRegionAsync,
+      readCheckOutput: options.fetchJobLog ? undefined
+        : (owner, repo, checkRunId, tailLines) => readCheckRunOutputAsync(`${owner}/${repo}`, checkRunId, tailLines),
     }),
   );
 }
@@ -1297,11 +1362,10 @@ function* ciFailuresSteps(
   repo: string,
   rollup: RollupCheck[] | undefined,
   tailLines: number,
-  fetch: Required<CiFailureFetchOptionsAsync> & {
-    readJobLogRegion?: (owner: string, repo: string, jobId: string, tailLines: number) => Promise<string>;
-  },
+  fetch: CiFailureReads,
 ): Steps<CiFailure[]> {
   let annotationReads = 0;
+  const checkOutputBudget = { left: fetch.annotationReadLimit };
   const failing = dedupeRollupByLatestAttempt(rollup ?? []).filter((c) => {
     const s = (c.state ?? c.conclusion ?? c.status ?? "").toUpperCase();
     return REQUIRED_CHECK_FAIL.has(s);
@@ -1373,8 +1437,11 @@ function* ciFailuresSteps(
     } else if (jobId) {
       annotationFallback = { outcome: "skipped-limit" };
     }
+    const backoffKey = `${owner}/${repo}#${jobId}`;
     if (jobId) {
       try {
+        const waiting = logReadBackoff.get(backoffKey);
+        if (waiting !== undefined && systemClock.now() < waiting.untilMs) throw Object.assign(new Error(waiting.detail), { logReadWaiting: true });
         const readRegion = fetch.readJobLogRegion;
         if (annotations.length > 0 && runnerTimeoutLines === undefined && finalizeAnnotation === undefined) {
           const reducer = annotationLogReducer(annotations, tailLines);
@@ -1419,6 +1486,7 @@ function* ciFailuresSteps(
           logUnavailable = logTail.trim() === "" ? { kind: "empty-log" } : undefined;
           if (logUnavailable === undefined) tailSource = "log";
         }
+        logReadBackoff.delete(backoffKey);
       } catch (err) {
         let detail = "unknown error";
         try {
@@ -1444,11 +1512,17 @@ function* ciFailuresSteps(
           logUnavailable = undefined;
           tailSource = "annotations";
         } else {
-          logUnavailable = { kind: "fetch-failed", detail };
-          logTail = "";
-          tailSource = undefined;
+          const after = logReadAfterFailure(backoffKey, err, detail, systemClock.now());
+          logUnavailable = after.deferred ? { kind: "deferred", ...after.deferred } : { kind: "fetch-failed", detail };
+          logTail = after.checkOutput ? yield* checkOutputTail(owner, repo, c, c.checkRunId?.toString() ?? jobId, tailLines,
+            fetch, checkOutputBudget) : "";
+          if (logTail.trim() !== "") logUnavailable = undefined;
+          tailSource = logTail.trim() !== "" ? "check-output" : undefined;
         }
       }
+    } else {
+      logTail = yield* checkOutputTail(owner, repo, c, c.checkRunId?.toString(), tailLines, fetch, checkOutputBudget);
+      if (logTail.trim() !== "") [logUnavailable, tailSource] = [undefined, "check-output"];
     }
     failures.push({
       name,
@@ -3319,7 +3393,8 @@ export function tickReadWorkerBoot(entry: string): string {
  */
 export function startTickReadWorker(input: TickReadOptions, opts: { url?: URL; start?: typeof startWorker } = {}): Worker {
   const url = opts.url ?? tickReadWorkerUrl();
-  const workerData = { kind: READ_PLANE_KIND, input, entry: url.href };
+  const budget = input.githubInstallationBudget ?? githubInstallationBudget().threadInput();
+  const workerData = { kind: READ_PLANE_KIND, input: budget === undefined ? input : { ...input, githubInstallationBudget: budget }, entry: url.href };
   // SHARE_ENV: the daemon's hourly GH_TOKEN refresh must reach the worker's reads. startWorker decides the entry
   // and, for a bundle, the execArgv without tsx; the boot imports whichever entry it chose.
   return (opts.start ?? startWorker)(url, { workerData, env: SHARE_ENV }, {

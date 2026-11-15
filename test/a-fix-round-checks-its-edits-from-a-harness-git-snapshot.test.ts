@@ -508,6 +508,8 @@ async function productionCensusCaller(t: TestContext, competingOwner: boolean | 
     }
   };
   copyTrusted(REACH); copyTrusted("test/setup/tmp-hygiene.ts");
+  // The census loads this data file at runtime, outside the static import closure above.
+  copyTrusted("scripts/house-layout-split-table.json");
   repo.git("add", "plan", "package.json", "package-lock.json", "src", "scripts", "test");
   repo.git("commit", "-m", "fixture: runnable caller contract");
   const oldMain = repo.git("rev-parse", "HEAD");

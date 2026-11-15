@@ -241,6 +241,7 @@ import type {
 import { DEP_REVIEW_ENGINE_REVISION, depReviewRowEngineRevision, isDependabotAuthor, dependabotOwnRedSignal, dependabotReviewArgs, dependabotRefreshVerdict, type DependabotOwnRedSignal, type DependabotRefreshVerdict } from "./dep-review.js";
 import { parseLedger } from "./retro.js";
 import { readReviewHostObservation, selectRuntimeReviewWidth } from "./review-capacity.js";
+import { yieldingFixClaim } from "./review-precedence.js";
 import {
   capacityDecisionText,
   publishReviewDemand,
@@ -389,6 +390,8 @@ export interface PriorPartialWork {
   /** Size-capped, secret-scrubbed diff text read from the recovery ref. */
   excerpt: string;
   excerptTruncated: boolean;
+  /** A distinct index snapshot when the worktree no longer holds the staged bytes. */
+  indexPatch?: { recoveryRef: string; excerpt: string; excerptTruncated: boolean };
 }
 // Re-exported so existing `import type { … } from "./sweep.js"` call sites keep working.
 export type { ConflictFileDiff, MergeConflictEvidence, MergeState } from "./merge-state.js";
@@ -3151,6 +3154,8 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         root: config.root,
         queueDepth,
         activeWorkers: activeWorkers ?? activeWorkerCount(),
+        // W1-T2989: reviews waiting on the provider use no local CPU, so the host worker budget does not count them.
+        providerPhaseWorkers: reviewPhaseSplit(policy.reviewLanes).judgePhaseInFlight,
         nowMs,
         ledgerLines,
         policy: policy.reviewCapacity,
@@ -6867,7 +6872,7 @@ export function prAddedLinesFromPullFiles(pages: unknown): Record<string, number
 }
 
 /** The sources {@link CiFailure.logTail} can come from, in preference order. */
-export type CiTailSource = "log" | "annotations";
+export type CiTailSource = "log" | "annotations" | "check-output";
 
 /** The outcome of the annotation fallback, recorded rather than folded into the log's own cause. */
 export type CiAnnotationFallback =
@@ -6882,22 +6887,17 @@ export type CiAnnotationFallback =
   | { outcome: "skipped-limit" }
   | { outcome: "failed"; detail: string };
 
-/** The closed set of reasons a log tail came back empty — a NAMED outcome, never an absence.
- *  `no-job-id`: no Actions job id, so no read was attempted. `fetch-failed`: a read failed, `detail`
- *  carrying the observed error. `empty-log`: the read SUCCEEDED and the job printed nothing.
- *  MAX_CI_LOG_FAILURE_DETAIL is a BACKSTOP on that `detail`, not a primary control — what the fix
- *  prompt renders is — set far above any observed message, so a truncation is itself evidence. */
+/** Why a log tail came back empty, always named: `no-job-id` (no read attempted), `fetch-failed` (`detail` is the
+ *  error; this BACKSTOP bounds it), `empty-log` (the job printed nothing), `deferred` (W1-T12713: retried at `until`). */
 export const MAX_CI_LOG_FAILURE_DETAIL = 500;
 
 export type CiLogUnavailableCause =
   | { kind: "no-job-id" }
   | { kind: "fetch-failed"; detail: string }
-  | { kind: "empty-log" };
+  | { kind: "empty-log" }
+  | { kind: "deferred"; cause: "rate-limit" | "transient"; until: string; detail: string };
 
-/**
- * One sentence naming why a log tail is missing, for BOTH consumers — run-task.ts's fix prompt and
- * this module's own escalation text — so the two can never describe the same cause differently.
- */
+/** One sentence naming why a log tail is missing, shared by the fix prompt and the escalation text so they agree. */
 export function describeCiLogUnavailable(cause: CiLogUnavailableCause): string {
   switch (cause.kind) {
     case "no-job-id":
@@ -6906,6 +6906,7 @@ export function describeCiLogUnavailable(cause: CiLogUnavailableCause): string {
       return `log NOT read: the log fetch was attempted and FAILED (${cause.detail})`;
     case "empty-log":
       return "log read successfully, but the job printed no failing output";
+    case "deferred": return `log read deferred (${cause.cause}, retry at ${cause.until})`;
   }
 }
 
@@ -13746,7 +13747,8 @@ const PRESERVED_PATCH_WITHHELD_PATHSPECS = [
 /**
  * W1-T6434 — the preserved fix-owner patch for THIS PR at THIS head, as bounded prompt evidence.
  * Reads the newest `sweep.fix.owner_residue_preserved` row (W1-T6362) whose `pr_number` and
- * `head_sha` both match, then the recovery ref's own diff against its parent (the owner's HEAD). The
+ * `head_sha` both match, then each recovery ref's diff against its parent (the owner's HEAD), including
+ * the separate index snapshot when staged bytes differ from disk. Both refs must be readable. The
  * excerpt is scrubbed BEFORE it is capped, so a credential cut at the boundary cannot survive as a
  * fragment. No matching row, a ref outside the recovery namespace, or an unreadable ref returns
  * `undefined` (the last reported through `onUnreadable`): the prompt then renders as it always did.
@@ -13764,29 +13766,38 @@ export function readPreservedOwnerPatch(args: {
   );
   if (!row) return undefined;
   const recoveryRef = typeof row.recovery_ref === "string" ? row.recovery_ref : "";
-  if (!recoveryRef.startsWith(PRESERVED_PATCH_REF_PREFIX) || /[\s\0]/.test(recoveryRef)) {
-    args.onUnreadable?.({ reason: "recovery_ref is outside the recovery namespace" });
-    return undefined;
-  }
+  const indexRef = typeof row.index_recovery_ref === "string" ? row.index_recovery_ref : "";
+  const refs = indexRef && indexRef !== recoveryRef ? [recoveryRef, indexRef] : [recoveryRef];
   const git = args.git ?? ((dir: string, argv: string[]) => hostWorktreeGit(dir, argv, { maxBuffer: 1 << 24 }));
-  let diff: string;
+  const patches: NonNullable<PriorPartialWork["indexPatch"]>[] = [];
+  for (const ref of refs) {
+    if (!ref.startsWith(PRESERVED_PATCH_REF_PREFIX) || /[\s\0]/.test(ref)) {
+      args.onUnreadable?.({ reason: "recovery_ref is outside the recovery namespace" });
+      return undefined;
+    }
+  }
   try {
-    git(args.repoDir, ["rev-parse", "--verify", "--quiet", `${recoveryRef}^{commit}`]);
-    diff = git(args.repoDir, [
-      "diff", "--no-ext-diff", "--no-textconv", "--no-color", `${recoveryRef}^`, recoveryRef, "--", ".", ...PRESERVED_PATCH_WITHHELD_PATHSPECS,
-    ]);
+    for (const ref of refs) {
+      git(args.repoDir, ["rev-parse", "--verify", "--quiet", `${ref}^{commit}`]);
+      const diff = git(args.repoDir, [
+        "diff", "--no-ext-diff", "--no-textconv", "--no-color", `${ref}^`, ref, "--", ".", ...PRESERVED_PATCH_WITHHELD_PATHSPECS,
+      ]);
+      const scrubbed = scrubRiskJudgeText(diff).text;
+      patches.push({ recoveryRef: ref, excerpt: scrubbed.slice(0, PRIOR_PARTIAL_WORK_EXCERPT_CAP),
+        excerptTruncated: scrubbed.length > PRIOR_PARTIAL_WORK_EXCERPT_CAP });
+    }
   } catch (e) {
     args.onUnreadable?.({ reason: capStderrExcerpt(String((e as Error)?.message ?? e), STDERR_EXCERPT_CAP) });
     return undefined;
   }
-  const scrubbed = scrubRiskJudgeText(diff).text;
   const stagedPaths = Array.isArray(row.staged_paths) ? row.staged_paths.filter((p): p is string => typeof p === "string") : [];
   return {
     recoveryRef,
     stagedPaths,
     ...(typeof row.staged_more === "number" && row.staged_more > 0 ? { stagedMore: row.staged_more } : {}),
-    excerpt: scrubbed.slice(0, PRIOR_PARTIAL_WORK_EXCERPT_CAP),
-    excerptTruncated: scrubbed.length > PRIOR_PARTIAL_WORK_EXCERPT_CAP,
+    excerpt: patches[0]!.excerpt,
+    excerptTruncated: patches[0]!.excerptTruncated,
+    ...(patches[1] ? { indexPatch: patches[1] } : {}),
   };
 }
 
@@ -15118,6 +15129,7 @@ const LIGHT_PASS_SCOPE_ENDS: Readonly<Record<LightPassScopeName, string>> = {
 
 /** W1-T9569: the stand-down a review-only pass writes for a lane it closed, naming its scope and its end. */
 export function reviewOnlyStandDownReason(scope: LightPassScopeName): string {
+  if (scope === "boot") return `review-only boot pass: arming and closing wait until ${LIGHT_PASS_SCOPE_ENDS.boot}`;
   return `review-only ${scope} pass: repair lanes closed until ${LIGHT_PASS_SCOPE_ENDS[scope]}`;
 }
 
@@ -20328,7 +20340,7 @@ export async function runSweep(
           waitSinceMs: (pr) => waitSinceMs(pr, false),
         });
   const fixCapacityReleases = new Map<number, () => void>();
-  const capacityClaim = deps.claimFixAdmission ?? fullRepairAdmission?.claim;
+  const capacityClaim = deps.claimFixAdmission ?? yieldingFixClaim("full", fullRepairAdmission?.claim, ledgerLines, now, log, fullReviewCandidates ?? [], fullReviewQueue);
   const claimFixAdmission = capacityClaim ? (pr: OpenPrView) => {
     const claim = capacityClaim(pr);
     if (claim.admitted && claim.release) fixCapacityReleases.set(pr.prNumber, claim.release);
@@ -24085,6 +24097,9 @@ export async function runSweep(
                   break;
                 }
               }
+              const logHolds = ciFailuresForFix.flatMap((f) => f.logUnavailable?.kind === "deferred" && Date.parse(f.logUnavailable.until) > now // expiring-fixture: exempt -- W1-T12713 runtime retry time, no blind round before it
+                ? [`${f.name}: ${describeCiLogUnavailable(f.logUnavailable)}`] : []);
+              if (logHolds.length > 0) { acted = false; standDownReason = `${logHolds.join("; ")} — no fix strike`; break; }
               // W1-T8041: no requeue arm took this pass, so an unavailable rerun stands down exactly as it did before.
               if (unavailableRerunStandDown !== undefined) {
                 standDownReason = unavailableRerunStandDown;
@@ -26660,11 +26675,10 @@ async function runSweepLightPassCore(
   // pass still reconciles every PR concurrently; only the expensive fix-dispatch spending point
   // claims from this shared pool. `activeWorkerCount` is the same process-wide counter the adaptive
   // review controller reads, and selected spawning reviews reserve their width before fixes race.
-  const hostWorkerBudget = policy.reviewCapacity.hostWorkerBudget;
   const repairAdmission = createSweepFixAdmissionController({
     surface: "light",
     queueDepth,
-    hostWorkerBudget,
+    hostWorkerBudget: policy.reviewCapacity.hostWorkerBudget,
     activeWorkers,
     readActiveWorkers: deps.fixProgressJudge || deps.readFixPressure ? deps.readActiveWorkerCount ?? activeWorkerCount : undefined,
     readPressure: deps.readFixPressure ?? (deps.fixProgressJudge
@@ -26674,7 +26688,7 @@ async function runSweepLightPassCore(
     ...productionFixAdmissionReaders(deps),
     log: deps.log,
   });
-  const claimFixAdmission = deps.claimFixAdmission ?? repairAdmission.claim;
+  const claimFixAdmission = yieldingFixClaim("light", deps.claimFixAdmission ?? repairAdmission.claim, selectionLedgerLines, now, deps.log, refillTail);
   const selectedNumbers = new Set<number>([
     ...spawning.map((p) => p.prNumber),
     ...planFilings.map((p) => p.prNumber),

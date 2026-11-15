@@ -1302,13 +1302,20 @@ export function buildSweepLightHook(
       // W1-T1211: ONE read per tick. `readLedgerLines` is the same reader every other rung in this
       // file uses, and the in-flight ids come from lock FILENAMES — no pid probe, no lock content.
       // W1-T9808: after a restart latched, a fix that would outlast the drain's time left closes the fix rung.
-      const fixAdmitted = lightPassFixAdmitted(scope);
+      let fixAdmitted = lightPassFixAdmitted(scope);
       // W1-T11510: an interphase-review pass may arm through the ordinary pass's guarded path; no other review-only scope may.
       const armAdmitted = lightPassArmAdmitted(scope);
-      const fixRungAllowed = timing.run(() => fixAdmitted && fixRungAllowedBesideInFlight(
+      let fixRungAllowed = timing.run(() => fixAdmitted && fixRungAllowedBesideInFlight(
         readLedgerLines(ledgerPath),
         inFlightTaskIdsFrom(join(config.root, "state", "inflight")),
       ));
+      const refreshBootFixAdmission = () => {
+        fixAdmitted = lightPassFixAdmitted(scope);
+        fixRungAllowed = fixAdmitted && fixRungAllowedBesideInFlight(
+          readLedgerLines(ledgerPath),
+          inFlightTaskIdsFrom(join(config.root, "state", "inflight")),
+        );
+      };
       // W1-T7214: only ready heads wait for distance and the whole-snapshot refresh selection. W1-T11510: a pass
       // that may arm forms them too, so its ready head takes the same compare read and the same held batches.
       const readyPrs = !armAdmitted ? [] : openPrs.filter((pr) =>
@@ -1381,6 +1388,9 @@ export function buildSweepLightHook(
         orderPendingReviews([{ pr }, { pr: oldestDelayedReview }])[0]!.pr === pr);
       const earlyNumbers = new Set(earlyReviewPrs.map((pr) => pr.prNumber));
       const laterOrdinaryPrs = ordinaryPrs.filter((pr) => !earlyNumbers.has(pr.prNumber));
+      const reviewCandidateNumbers = new Set(reviewCandidates.map((pr) => pr.prNumber));
+      const laterReviewPrs = laterOrdinaryPrs.filter((pr) => reviewCandidateNumbers.has(pr.prNumber));
+      const laterNonReviewPrs = laterOrdinaryPrs.filter((pr) => !reviewCandidateNumbers.has(pr.prNumber));
       const earlyReviews = earlyReviewPrs.length > 0
         ? timing.run(() => runBatches(earlyReviewPrs)) : Promise.resolve();
       const refresh = timing.run(async () => {
@@ -1428,8 +1438,20 @@ export function buildSweepLightHook(
           held.length > 0 ? timing.run(() => runBatches(held, READY_REFRESH_HELD)) : undefined,
         ]);
       });
-      const ordinary = refresh.then(() => laterOrdinaryPrs.length > 0 || readyPrs.length === 0
-        ? timing.run(() => runBatches(laterOrdinaryPrs)) : undefined);
+      const ordinary = refresh.then(async () => {
+        if (scope?.reviewOnly === true && scope.scope === "boot") {
+          // Reviews stay first: do not start a boot repair beside the eligible review batch. That batch
+          // may wait on review-reuse evidence before it can write `sweep.review_admitted`.
+          await earlyReviews;
+          if (laterReviewPrs.length > 0) await timing.run(() => runBatches(laterReviewPrs));
+          await scope.waitForClaimSweep?.();
+          refreshBootFixAdmission();
+          return laterNonReviewPrs.length > 0 || readyPrs.length === 0
+            ? timing.run(() => runBatches(laterNonReviewPrs)) : undefined;
+        }
+        return laterOrdinaryPrs.length > 0 || readyPrs.length === 0
+          ? timing.run(() => runBatches(laterOrdinaryPrs)) : undefined;
+      });
       const results = await Promise.allSettled([earlyReviews, ordinary, ready]);
       for (const result of results) if (result.status === "rejected") throw result.reason;
       });

@@ -351,8 +351,10 @@ const SEED_ROWS: readonly SeedRow[] = [
     step: "github.budget.configured",
     meaning:
       "At start, the daemon set its share of the GitHub App installation from the instance registry: " +
-      "the consumer count and the registry it read. \"unconfigured\" names why there is no share " +
-      "(no installation id, an unreadable registry, no instance on the installation); its reads are then paced as before.",
+      "the consumer count and the registry it read (the host copy, else the checkout's copy when the host file is missing). " +
+      "\"unconfigured\" names why there is no share (no installation id, an unreadable registry, no instance on the " +
+      "installation); its reads are then paced as before. An instance found by neither RMD_INSTANCE_NAME nor the target " +
+      "repo is \"unknown\", with instance_reason. Rotation keeps the row of each surviving boot.",
     writer: ["startDaemonInstallationBudget"],
     outcomes: ["configured", "unconfigured"],
   },
@@ -367,6 +369,17 @@ const SEED_ROWS: readonly SeedRow[] = [
       "minutes files one remedy task with origin flow-regression:open-repair-wait.",
     writer: ["runFlowGardener"],
     outcomes: ["OBSERVED", "UNKNOWN"],
+  },
+  {
+    // W1-T12712: a green pull request waiting for review starts before a new fix or build worker.
+    step: "sweep.budget_yield",
+    meaning:
+      "A new fix round (lane \"fix\") or build lane (lane \"build\") did not start, because the review width " +
+      "was held at host-worker-budget and a green head had waited for review longer than one sweep cadence. " +
+      "One row per held spell: `waiting_heads` names the heads that waited and `oldest_wait_ms` the longest wait. " +
+      "No running worker is stopped and the budget is unchanged; the held work starts once no such head waits.",
+    writer: ["decideReviewPrecedence"],
+    outcomes: ["fix", "build"],
   },
 ];
 
