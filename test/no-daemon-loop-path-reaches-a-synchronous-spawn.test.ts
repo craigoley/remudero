@@ -46,7 +46,6 @@ const SYNC_SPAWN_LOOP_BASELINE: Readonly<Record<string, number>> = {
   checkCliFreshness: 1,
   checkProofAtAuthorTime: 1,
   ciLearningTaskIdMinter: 1,
-  classifyHeadShaAvailability: 1,
   codeScanningJudgeDeps: 1,
   couldBeInterpolatedTitle: 1,
   createGhCallPacer: 1,
@@ -162,7 +161,6 @@ const SYNC_SPAWN_LOOP_BASELINE: Readonly<Record<string, number>> = {
   isPrMergedNow: 1,
   ladderGardenSpec: 1,
   listRegisteredWorktrees: 1,
-  loadPlanAtRef: 1,
   localBranchExists: 1,
   localMergeSpawn: 1,
   main: 5,
@@ -234,7 +232,6 @@ const SYNC_SPAWN_LOOP_BASELINE: Readonly<Record<string, number>> = {
   resolveCommitAssignment: 1,
   resolveMergeLogReadOptions: 1,
   resolveOwnerRepoAt: 1,
-  resolvePlanCriteriaAtHead: 1,
   reviewCommandHost: 2,
   retroShippedGithubGateway: 1,
   reuseDonor: 1,
@@ -337,6 +334,22 @@ function refusals(fns: Fn[], baseline: Readonly<Record<string, number>>): string
         ? `${name} makes 0 synchronous spawn call(s) on the daemon loop < row ${row} — delete the \`${name}\` row from SYNC_SPAWN_LOOP_BASELINE (${BASELINE_FILE}) in this PR`
         : `${name} makes ${count} synchronous spawn call(s) on the daemon loop < row ${row} — lower SYNC_SPAWN_LOOP_BASELINE \`${name}\` to ${count} (${BASELINE_FILE}) in this PR`);
     }
+  }
+  return out;
+}
+
+/** W1-T12791: the functions repairPrMetadata's production plan reader runs, which must await the async git leaf. */
+const MERGE_PLAN_READERS = ["planCriteriaAtMergeForRepair", "mergeCommitForRepair", "repairCheckoutTopLevel"] as const;
+const SYNC_GIT_LEAF_CALL = /\bhostWorktreeGit(?:AtTopLevel|Result)?\(/g;
+
+/** Each merge-plan reader that calls a synchronous spawn or the synchronous git leaf, named under repairPrMetadata. */
+function mergePlanReadRefusals(fns: Fn[]): string[] {
+  const out: string[] = [];
+  for (const name of MERGE_PLAN_READERS) {
+    const fn = fns.find((f) => f.name === name);
+    if (fn === undefined) { out.push(`repairPrMetadata's plan reader ${name} is missing`); continue; }
+    const count = (fn.body.match(SYNC_GIT_LEAF_CALL) ?? []).length + syncSpawnCalls(fn);
+    if (count > 0) out.push(`repairPrMetadata's plan reader ${name} makes ${count} synchronous git call(s) — await hostWorktreeGitAsync instead`);
   }
   return out;
 }
@@ -781,4 +794,23 @@ test("W1-T9737: a data-returning initializer call stays module load", () => {
   const fromSeed = loopReachable(synthetic, "seed");
   assert.ok(!fromSeed.has("captureId") && !fromSeed.has("Thing"), "data-returning calls are not loop reach");
   assert.ok(loopReachable(synthetic, MODULE_LOAD).has("captureId"), "the module-load node holds the call");
+});
+
+test("W1-T12791 criterion 4: repairPrMetadata's merge-plan read awaits the async git leaf and no row rises", () => {
+  const fns = censusFunctions();
+  const reach = loopReachable(fns, "daemonCommand");
+  assert.ok(reach.has("repairPrMetadata"), "the daemon loop reaches repairPrMetadata");
+  for (const name of MERGE_PLAN_READERS) assert.ok(reach.has(name), `the daemon loop reaches ${name} through repairPrMetadata`);
+  assert.ok(SYNC_SPAWN_LOOP_BASELINE.repairPrMetadata! <= 2, "the repairPrMetadata row does not rise");
+  assert.ok((population(fns).get("repairPrMetadata") ?? 0) <= 2, "repairPrMetadata itself makes no new synchronous call");
+  assert.deepEqual(mergePlanReadRefusals(fns), [], "the merge-plan read is awaited");
+  assert.deepEqual(refusals(fns, SYNC_SPAWN_LOOP_BASELINE).filter((r) => /repairPrMetadata|ForRepair|repairCheckoutTopLevel/.test(r)), []);
+
+  // Falsifier on the real source: the merge read moved to the synchronous leaf is named under repairPrMetadata.
+  const synchronous = fns.map((f) =>
+    f.name === "mergeCommitForRepair" ? { ...f, body: f.body.replace(/await hostWorktreeGitAsync\(/g, "hostWorktreeGit(") } : f,
+  );
+  const named = mergePlanReadRefusals(synchronous);
+  assert.equal(named.length, 1);
+  assert.match(named[0]!, /^repairPrMetadata's plan reader mergeCommitForRepair makes 4 synchronous git call\(s\)/);
 });

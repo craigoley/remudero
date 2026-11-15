@@ -836,7 +836,7 @@ import {
   type TaskFilesLandingResult,
 } from "./lib/feedback-landing.js";
 export { readStandingDecisions };
-import { resolvePlanDestination, planDestinationRepository, type PlanDestination, type PlanDestinationRepository } from "./lib/plan-destination.js";
+import { PLAN_DESTINATION_KINDS, resolvePlanDestination, planDestinationRepository, type PlanDestinationKind, type PlanDestination, type PlanDestinationRepository } from "./lib/plan-destination.js";
 import {
   reconcileFeedbackLanding,
   type FeedbackReconcileRoot,
@@ -5589,13 +5589,14 @@ export async function repairPrMetadata(
   checks: readonly string[],
   write: (url: string, fields: { title?: string; body?: string }) => void =
     (url, fields) => { ghExec(prMetadataRestArgs(url, fields), { stdio: "pipe" }); },
-  read: (url: string) => { title?: string; body?: string } = (url) => {
+  read: (url: string) => { title?: string; body?: string; base?: { ref?: string } } = (url) => {
     const target = prUrlTarget(url);
     if (!target) throw new Error(`metadata read: cannot resolve PR URL ${JSON.stringify(url)}`);
-    return ghJson(["api", `repos/${target.owner}/${target.repo}/pulls/${target.number}`]) as { title?: string; body?: string };
+    return ghJson(["api", `repos/${target.owner}/${target.repo}/pulls/${target.number}`]) as { title?: string; body?: string; base?: { ref?: string } };
   },
-  /** W1-T5544: the task criteria the gate itself resolves for this body at the PR head (`[]` = unreadable or untrailered). */
-  planCriteriaAtHead: (body: string, headSha: string) => readonly AcceptanceCriterion[] = planCriteriaAtHeadForRepair,
+  /** W1-T12791: the task criteria the gate resolves for this body, in the merge of the head into `baseRef` (`[]` = no cure). */
+  planCriteriaAtHead: (body: string, headSha: string, baseRef?: string) =>
+    readonly AcceptanceCriterion[] | Promise<readonly AcceptanceCriterion[]> = planCriteriaAtMergeForRepair,
   /** The test files this PR head ADDS against main — absent at base, so a `unit test:` on one cannot pass there. */
   addedTestsAtHead: (headSha: string) => AddedTestsAtHead = addedTestFilesAtHead,
 ): Promise<MetadataRepairResult> {
@@ -5626,7 +5627,7 @@ export async function repairPrMetadata(
     // W1-T5544: the two gate-refusal cures apply ONLY while acceptance-author-gate is itself red — a
     // proof-discrimination-only red is never cured by rewriting a body that gate does not read.
     const gateRed = checks.includes("acceptance-author-gate");
-    const planCriteria = gateRed && pr.headSha ? planCriteriaAtHead(live.body, pr.headSha) : [];
+    const planCriteria = gateRed && pr.headSha ? await planCriteriaAtHead(live.body, pr.headSha, live.base?.ref) : [];
     // Never the generic grep of a function main already has: proof-discrimination reads it executed_stale, so the
     // "repair" was a guaranteed red (#10404, #10413). Only a proof derived from a test the diff ADDS misses at base.
     const added: AddedTestsAtHead = pr.headSha ? addedTestsAtHead(pr.headSha) : { kind: "unreadable", reason: "no PR head sha" };
@@ -5660,25 +5661,65 @@ export async function repairPrMetadata(
 }
 
 /**
- * W1-T5544: the production `planCriteriaAtHead` for {@link repairPrMetadata} reuses the fix rung's head-bound
- * task contract, pinned to the supplied PR head without a REST read. The head commit is fetched
- * once if it is not local; a head that cannot be read yields `[]` (no divergence cure), never a guessed plan.
+ * W1-T12791: the production `planCriteriaAtHead` for {@link repairPrMetadata}. It reads the plan the gate reads: the
+ * tree that merges the PR head into its base, wrapped in a local commit with no ref (the gate checks out that merge).
+ * A base that cannot be fetched, or a conflict, reads the head's plan. An unreadable head yields `[]`, never a guess.
  */
-export function planCriteriaAtHeadForRepair(body: string, headSha: string, cwd: string = process.cwd()): readonly AcceptanceCriterion[] {
+export async function planCriteriaAtMergeForRepair(
+  body: string,
+  headSha: string,
+  baseRef: string | undefined,
+  cwd: string = process.cwd(),
+): Promise<readonly AcceptanceCriterion[]> {
   const taskId = extractTaskTrailerId(body);
   if (taskId === undefined) return [];
+  let top: string;
   try {
-    hostWorktreeGitAtTopLevel(cwd, ["cat-file", "-e", `${headSha}^{commit}`]);
-  } catch {
-    // The head object is not local yet (a branch pushed since the last fetch): ask origin for it once.
+    top = await repairCheckoutTopLevel(cwd);
     try {
-      hostWorktreeGitAtTopLevel(cwd, ["fetch", "--quiet", "origin", headSha], { timeout: 60_000 });
+      await hostWorktreeGitAsync(top, ["cat-file", "-e", `${headSha}^{commit}`]);
     } catch {
-      // Unreadable head means unreadable plan: no divergence cure, and the escalation still carries its reason.
-      return [];
+      // The head object is not local yet (a branch pushed since the last fetch): ask origin for it once.
+      await hostWorktreeGitAsync(top, ["fetch", "--quiet", "--no-tags", "origin", headSha], { timeout: 60_000 });
+    }
+  } catch (error) {
+    void error; // An unreadable head means an unreadable plan: no cure, and the escalation still carries its reason.
+    return [];
+  }
+  const at = (await mergeCommitForRepair(top, headSha, baseRef)) ?? headSha;
+  return (await resolveFixRungTaskContractAtHeadAsync("", taskId, top, () => at))?.criteria ?? [];
+}
+
+/** The local merge commit of `headSha` into origin's `baseRef`, or undefined when the base or the merge is unreadable. */
+async function mergeCommitForRepair(top: string, headSha: string, baseRef: string | undefined): Promise<string | undefined> {
+  if (baseRef === undefined || !/^[A-Za-z0-9._/-]+$/.test(baseRef) || baseRef.includes("..")) return undefined;
+  const tracking = `refs/remotes/origin/${baseRef}`;
+  try {
+    await hostWorktreeGitAsync(top, ["fetch", "--quiet", "--no-tags", "origin", `+refs/heads/${baseRef}:${tracking}`], { timeout: 60_000 });
+    const base = (await hostWorktreeGitAsync(top, ["rev-parse", "--verify", `${tracking}^{commit}`])).trim();
+    const tree = (await hostWorktreeGitAsync(top, ["merge-tree", "--write-tree", "--no-messages", base, headSha])).trim();
+    const message = "rmd: the merge acceptance-author-gate checks out";
+    return (await hostWorktreeGitAsync(top, ["commit-tree", "--no-gpg-sign", tree, "-p", base, "-p", headSha, "-m", message],
+      { env: DIRTY_FIX_OWNER_RECOVERY_IDENTITY })).trim();
+  } catch (error) {
+    void error; // A failed fetch, or a conflict (merge-tree exits 1), reads the head's plan, as before W1-T12791.
+    return undefined;
+  }
+}
+
+/** The pinned top level at or above `dir`, through the async leaf (the walk {@link hostWorktreeGitAtTopLevel} makes). */
+async function repairCheckoutTopLevel(dir: string): Promise<string> {
+  const log = (step: string, extra: Record<string, unknown>) => {
+    if (extra.observed !== "<absent>") console.error(JSON.stringify({ event: step, ...extra }));
+  };
+  for (let at = resolve(dir); ; at = dirname(at)) {
+    try {
+      await hostWorktreeGitAsync(at, ["rev-parse", "--git-dir"], { log });
+      return at;
+    } catch (error) {
+      if (!(error instanceof WorktreePointerRefusedError) || error.observed !== "<absent>" || dirname(at) === at) throw error;
     }
   }
-  return resolveFixRungTaskContractAtHead("", taskId, cwd, () => headSha)!.criteria;
 }
 
 
@@ -17723,6 +17764,43 @@ function openPrSurfaceOutage(degraded: readonly MintDegradation[]): MintDegradat
   return degraded.find((d) => d.source === "open-prs" && !d.reason.startsWith(UNTRUSTED_SOURCE_REASON_PREFIX));
 }
 
+/** W1-T12216: the public checkout this command runs from. A hand session in the plan destination files its code
+ * facts and its id reservations against it. */
+const PUBLIC_CHECKOUT = resolve(fileURLToPath(new URL("../", import.meta.url)));
+
+/** W1-T12216: is `dir` in a checkout of the repository that the host file names (any clone or worktree of it)?
+ * Then the answer is the public checkout. A host file that is absent or unreadable answers `undefined`, as before. */
+function planDestinationWorkingCheckout(dir: string, stateDir: string | undefined): { publicCheckout: string } | undefined {
+  const named = planDestinationRepository(stateDir);
+  if (named.outcome !== "named") return undefined;
+  let at: { owner: string; repo: string };
+  try {
+    at = resolveOwnerRepoAt(dir);
+  } catch (error) {
+    void error; // A directory with no readable origin is not a destination checkout: the old behaviour applies.
+    return undefined;
+  }
+  return at.owner === named.owner && at.repo === named.repo ? { publicCheckout: PUBLIC_CHECKOUT } : undefined;
+}
+
+/** W1-T12216: `rmd plan-destination <kind>` prints where a NEW plan file of this kind goes on this host: the
+ * outcome, the repository and the checkout. An unreadable host file prints its reason and exits 1. */
+export function planDestinationCommand(rest: string[]): number {
+  const [kind, ...extra] = rest;
+  if (kind === undefined || extra.length > 0 || !(PLAN_DESTINATION_KINDS as readonly string[]).includes(kind)) {
+    console.error(`rmd plan-destination: name one kind, one of ${PLAN_DESTINATION_KINDS.join(", ")} — usage: ${commandSyntax("plan-destination")}`);
+    return 2;
+  }
+  const self = resolveOwnerRepoAt(PUBLIC_CHECKOUT);
+  const destination = resolvePlanDestination(kind as PlanDestinationKind, instanceStateDir(), { ...self, checkoutDir: PUBLIC_CHECKOUT });
+  if (destination.outcome === "unreadable") {
+    console.log(`kind: ${kind}\noutcome: unreadable\nreason: ${destination.reason}`);
+    return 1;
+  }
+  console.log(`kind: ${kind}\noutcome: ${destination.outcome}\nrepository: ${destination.owner}/${destination.repo}\ncheckout: ${destination.checkoutDir}`);
+  return 0;
+}
+
 export async function nextTaskIdCommand(
   rest: string[],
   overlapDeps: OverlapWarningDeps = {},
@@ -17779,10 +17857,13 @@ export async function nextTaskIdCommand(
     console.error("### rmd next-task-id: --audit and --reserve are contradictory — the audit is read-only\n" + USAGE);
     return 2;
   }
-  const mintRepoRoot = deps.repoRoot ?? repoRoot;
+  // W1-T12216: a session in the plan destination mints and reserves on the public checkout, for its own branch.
+  const destinationSession = planDestinationWorkingCheckout(process.cwd(), (deps.destinationStateDir ?? instanceStateDir)());
+  const publicRoot = destinationSession?.publicCheckout ?? repoRoot;
+  const mintRepoRoot = deps.repoRoot ?? publicRoot;
   const planPath = flagValue(rest, "--plan") ?? join(mintRepoRoot, "plan", "tasks.yaml");
   const offline = rest.includes("--offline");
-  const self = resolveOwnerRepo();
+  const self = destinationSession === undefined ? resolveOwnerRepo() : resolveOwnerRepoAt(publicRoot);
   if (rest.includes("--reconcile")) {
     try { return reconcileReservationReaps(deps); }
     catch (error) {
@@ -17873,7 +17954,7 @@ export async function nextTaskIdCommand(
       try {
         // `gitRunAdapter` is the SAME normaliser the reserve path below uses — `spawnSync` reports
         // `status: null` for a signalled child, and a raw null would read as success here.
-        const advisoryRun = gitRunAdapter(deps.runGit ?? ((args: string[]) => spawnSync("git", args, { cwd: repoRoot, encoding: "utf8" })));
+        const advisoryRun = gitRunAdapter(deps.runGit ?? ((args: string[]) => spawnSync("git", args, { cwd: publicRoot, encoding: "utf8" })));
         const floor = reservationFloorFrom(remoteReservedTaskIds(advisoryRun));
         if (floor !== "unknown" && floor > mint.n)
           console.log(`(origin's refs/rmd-id/ namespace already holds ids up to W1-T${floor - 1} — the first id no reservation holds is W1-T${floor})`);
@@ -17919,9 +18000,16 @@ export async function nextTaskIdCommand(
     // W1-T12453: a degraded source that does not refuse is a note on stderr; stdout keeps the id lines.
     for (const d of mint.degraded) console.error(`### rmd next-task-id: DEGRADED ${d.source}: ${d.reason}`);
     const contested: string[] = [];
-    const run = deps.runGit ?? ((args: string[]) => spawnSync("git", args, { cwd: repoRoot, encoding: "utf8" }));
+    const run = deps.runGit ?? ((args: string[]) => spawnSync("git", args, { cwd: publicRoot, encoding: "utf8" }));
     // W1-T4414: `--branch` names the holder the filing PR's head must match; absent keeps the current branch.
-    const base = deps.reserver ?? gitRemoteRefReserver({ run: gitRunAdapter(run), filingBranch: flagValue(rest, "--branch"), policyCurrency: deps.policyCurrency ?? reservationPolicyCurrency });
+    // W1-T12216: in the plan destination that is the branch of the destination checkout, not of the public one.
+    const filingBranch = flagValue(rest, "--branch")
+      ?? (destinationSession === undefined ? undefined : (hostWorktreeGit(process.cwd(), ["branch", "--show-current"]).trim() || undefined));
+    if (destinationSession !== undefined && filingBranch === undefined) {
+      console.error("### rmd next-task-id: this checkout of the plan destination is on no branch; name the filing branch with --branch\n" + USAGE);
+      return 2;
+    }
+    const base = deps.reserver ?? gitRemoteRefReserver({ run: gitRunAdapter(run), filingBranch, policyCurrency: deps.policyCurrency ?? reservationPolicyCurrency });
     // Decorate rather than modify: the decorator only OBSERVES each attempt, so a `taken` outcome
     // is reported instead of silently skipped.
     //
@@ -19249,7 +19337,14 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
   const checkoutRoot = deps.repoRoot ?? resolve(flagValue(rest, "--repo-root") ?? repoRoot);
   // W1-T12171: the checkout that holds the code a task names. Without the option it is the plan's own checkout.
   const codeRootArg = flagValue(rest, "--code-root");
-  const codeRoot = codeRootArg !== undefined ? resolve(codeRootArg) : checkoutRoot;
+  // Only a usable configured root can select a destination. The existing dependency-credit guard below
+  // reports an unreadable config as named UNKNOWN evidence instead of this optional lookup throwing first.
+  const destinationRoot = codeRootArg === undefined ? existingCliRootWithoutConfig() : undefined;
+  const destinationStateDir = destinationRoot?.state === "present" && typeof destinationRoot.root === "string" &&
+    destinationRoot.root.trim().length > 0 && isAbsolute(destinationRoot.root) && !destinationRoot.root.includes("\0")
+    ? join(destinationRoot.root, "state") : undefined;
+  const codeRootSelected = codeRootArg ?? planDestinationWorkingCheckout(checkoutRoot, destinationStateDir)?.publicCheckout;
+  const codeRoot = codeRootSelected !== undefined ? resolve(codeRootSelected) : checkoutRoot;
   let localRepoName: string | undefined;
   try { localRepoName = resolveOwnerRepoAt(codeRoot).repo; } catch { /* no origin identity: preserve existing lint behavior */ }
   const planPathArg = flagValue(rest, "--plan");
@@ -19275,7 +19370,7 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
   let planApart: { headFiles: PlanFiles; codeFiles: PlanFiles; codePlan: Plan } | undefined;
   try {
     planRaw = readFileSync(planPath, "utf8");
-    if (codeRootArg === undefined) {
+    if (codeRootSelected === undefined) {
       plan = loadPlan(planPath);
     } else {
       const headFiles = readPlanFiles(checkoutRoot, planRel);
@@ -42989,6 +43084,12 @@ const COMMANDS: readonly CommandSpec[] = [
     detail: "print the next free W1-T<n>, derived from the max across plan/tasks.yaml, EVERY plan/tasks.d/*.yaml shard, the ids OPEN plan PRs have already minted (the 2/2 collision class: W1-T256->257 #770, W1-T260->261 #775), and every id ever declared in the git history of plan/ (the fold class: an id filed then folded away, W1-T278); --offline skips the open-PR read (the mint is then a FLOOR, and says so; the history scan still runs — it is a local git read, not a network one); prints its provenance, spawns nothing. --audit is a READ-ONLY report over origin's refs/rmd-id/* namespace: every reservation is classified as HELD, CANDIDATE or UNKNOWN by current plan declarations, historical plan declarations, open run-* branches, open PR Remudero-Task trailers and the anchor age. --audit --reap previews only CANDIDATE rows past a freshly measured bar: the largest HELD-anchor-to-first-PR delay, floored at RESERVATION_PUSH_GRACE_MS, with n/max/p50 and population reported. It reads anchors with one private-namespace fetch; any unread surface or empty measured population refuses deletion. --reap alone writes one planned summary; --apply verifies a PENDING intent per id before one batched, guarded, leased push, then verifies confirmed released/skipped outcomes. Missing push results or outcome writes report UNKNOWN and return nonzero with recoverable intents. Unresolved batches block further deletion at that repository/state root. --audit --reap --reconcile reads the complete compressed, rotated-plain and live ledger union and freshly reads each pending exact ref; it records observed_absent with actor UNKNOWN, foreign or unchanged without deleting. Unread or torn history refuses action; reconciliation never retries a deletion. A later deletion requires another complete audit and explicit --reap --apply. Neither apply nor reconciliation runs automatically. --offline refuses --reap; --audit-age-days applies only to audit alone. The report states the candidate age threshold (default 14 days, override with --audit-age-days); failed open-PR or run-branch reads produce UNKNOWN rows, never reclaimable candidates, and --audit alone never pushes or deletes a ref. --max-scan N widens the W1 reservation walk from its default 50 candidates to N (1..200); it requires explicit --reserve and does not apply to --prefix. W1-T1055 --reserve ATOMICALLY CLAIMS the id on origin (refs/rmd-id/<id>) instead of merely printing one, so the push IS the claim and two concurrent minters cannot leave with the same number; it calls the existing reserveTaskIdRemote, which already advances on contention under its own maxScan bound, and PRINTS THE ID IT ACTUALLY HOLDS rather than the one it first tried. Each contested candidate is reported as HELD BY ANOTHER CALLER, naming whether the holder's anchor is the fleet's (`rmd-id reservation <pid>@<container>`) or an operator hand-mint (`reserve W1-T#### <host>-<pid>-<nanotime>`), because silently advancing past a rejection is how two collisions went unnoticed. FAIL-CLOSED: an unreachable origin REFUSES and exits non-zero rather than minting optimistically — the caller has spent nothing yet. RESERVING IS THE DEFAULT (W1-T3091): a bare mint CLAIMS the id, and --no-reserve is the opt-out. The old default printed a number and claimed nothing, so two lanes minting in one window took the same id and one renumbered after its PR was open -- measured five times in one session on 2026-09-07, and again on 2026-09-15 when two shards reached main under one id and loadPlan threw, failing every PR's required ci until a human renumbered the loser. --offline IMPLIES --no-reserve (it declines to read origin, so it cannot push to it); an explicit --reserve beside --offline or --no-reserve is still refused by name. --audit never reserves. The price is that a reserved id nobody files is HELD rather than free -- --audit is the report that finds those, and reclaiming one is an operator decision. --reserve and --offline are contradictory and are refused by argument validation. WRITING AN EXAMPLE ID IN PROSE: use the placeholder form W1-T<n> (or W1-T<id>, W1-TNNNN), never a bare digit form -- the open-PR scan above reads a literal out of any PR body, commit message or comment, and a code span or fenced block does NOT hide it. The placeholders carry no digits, so the extractor cannot see them; `scripts/task-id-existence-check.mjs` enforces this for src/ and deploy/. W1-T4388 --prefix <P> --repo <owner/name> mints a CONSUMER repo's <P>-T<n> id (CONSOLE, PORTAL): the next number above every one that repo's main plan (tasks.yaml plus tasks.d shards), open PR titles, bodies and branches, run-<P>-T* branches and refs/rmd-id/<P>-T* refs hold, reserved by pushing refs/rmd-id/<P>-T<n> to THAT repo's origin. It always reserves, refuses on any unread surface, and refuses --offline, --no-reserve, --audit and --plan. W1-T4414 --branch <name> records <name> as the reservation's holder instead of the current branch, so an id minted from any checkout names the branch its filing PR will be opened from; review refuses a filing whose head is not that holder. W1-T9683 --count <n> reserves n ids from ONE open-PR read and one history scan, each walk starting above the last id held (contention advances and is reported exactly as for one id), all under the same holder; it prints a RESERVED line per id it holds and a final `HELD k of n:` line, and a partial result (k < n) prints only the ids it holds and exits 2. --count is refused beside --offline, --no-reserve, --audit and --prefix.",
   },
   {
+    name: "plan-destination",
+    syntax: "rmd plan-destination <decision|feedback|task>",
+    summary: "Print the repository and checkout that take a new plan file of this kind on this host.",
+    detail: "W1-T12216: reads the host file <state dir>/plan-destination.json, the switch of W1-T12200, and prints three facts for a NEW file of the kind: the outcome (off when there is no host file, not_listed when the file does not list the kind, destination when it does), the repository, and the checkout. off and not_listed name the public repository and this command's own checkout. A file that is present but wrong prints `outcome: unreadable` with its reason and exits 1; it is never read as off. A changed file is edited in the repository that holds it, whatever this command prints. Exits 0 when it names a repository, 1 unreadable, 2 bad usage. READ-ONLY.",
+  },
+  {
     name: "emissions",
     syntax: "rmd emissions [--days N]",
     summary: "Which CLI verbs wrote no ledger line in the window -- dead-capability detection.",
@@ -44323,6 +44424,7 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
   ["procedures", (rest) => proceduresCommand(rest, proceduresProductionInput())],
   ["check-acceptance", (rest) => checkAcceptanceCommand(rest)],
   ["next-task-id", async (rest) => await withGhTransportFloorMode("wait", () => nextTaskIdCommand(rest))],
+  ["plan-destination", (rest) => planDestinationCommand(rest)],
   ["hand-worktree", (rest) => handWorktreeCommand(rest)],
   ["worktree", (rest) => worktreeCommand(rest)],
   ["pr-checks", (rest) => reportPrChecks(rest)],
