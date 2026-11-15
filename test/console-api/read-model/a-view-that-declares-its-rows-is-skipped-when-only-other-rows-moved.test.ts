@@ -6,7 +6,7 @@ import { coldAnalyticsSnapshot } from "#src/lib/analytics-route.js";
 import { analyticsSourceBodies, ANALYTICS_STALE_AFTER_MS } from "#src/lib/analytics-view.js";
 import { AGENT_CLOCK_MS } from "#src/lib/agent-view.js";
 import { INSTANCE_LIVENESS_BOUND_MS, type InstancesData } from "#src/lib/instances-view.js";
-import { navBadgeAnalyticsSlice, navBadgeSourcesPath, INBOX_STALE_AFTER_MS } from "#src/lib/nav-badge-view.js";
+import { navBadgeAnalyticsSlice, navBadgeSourcesPath, INBOX_STALE_AFTER_MS, NAV_BADGE_CLOCK_MS } from "#src/lib/nav-badge-view.js";
 import { createDemandBook } from "#src/lib/view-demand.js";
 import {
   createReadModelTicker, readModelLaneViews, readModelSwitchesPath,
@@ -387,6 +387,34 @@ test("W1-T11975 criterion 3: clock buckets and snapshot stale comparisons invali
   f.tick(ANALYTICS_STALE_AFTER_MS);
   assert.notEqual(f.fingerprint("analytics"), analytics);
   f.equalFullBuild("analytics");
+});
+
+test("W1-T11975 criterion 3: a nav-badge proposal expiring with no row moving rebuilds and equals the skip-disabled build", t => {
+  const f = production(t);
+  const agent = () => (f.output.get("nav-badge")![0].data as { agent: { count: number; proposalIds: string[] } }).agent;
+  const id = agent().proposalIds.find(candidate => candidate.includes(":core-"));
+  assert.ok(id, "positive control: the core instance has a candidate proposal");
+  assert.equal(NAV_BADGE_CLOCK_MS, AGENT_CLOCK_MS, "the badge's expiry bucket is the agent view's");
+  const expiresAt = new Date(f.start + AGENT_CLOCK_MS / 2).toISOString();
+  f.append("panel.operator_agent_proposal", { proposal: {
+    proposalId: id, repo: "owner/core", proposalText: "Review token usage", reasoning: "measured usage", category: "optimize",
+    status: "pending", createdAt: f.iso(), expiresAt, confidence: 0.9, evidence: [],
+  } });
+  f.tick();
+  f.build("nav-badge");
+  assert.equal(agent().count, 2, "the proposal is pending before its expiry");
+  const built = f.counts.get("nav-badge");
+  const fingerprint = f.fingerprint("nav-badge");
+  f.build("nav-badge");
+  assert.equal(f.counts.get("nav-badge"), built, "positive control: nothing moved, so the badge is skipped");
+  f.tick(AGENT_CLOCK_MS);
+  assert.ok(Date.parse(expiresAt) <= f.start + AGENT_CLOCK_MS, "the clock is past the proposal's expiresAt");
+  assert.notEqual(f.fingerprint("nav-badge"), fingerprint, "the expiry comparison moves the fingerprint with no row moving");
+  f.build("nav-badge");
+  assert.equal(f.counts.get("nav-badge"), built! + 1, "the expiry forces a build");
+  assert.equal(agent().count, 1, "the expired proposal leaves the count");
+  assert.ok(!agent().proposalIds.includes(id!));
+  f.equalFullBuild("nav-badge");
 });
 
 test("W1-T11975 criterion 8: production lane declarations skip unrelated rows and tally real audits", t => {

@@ -471,6 +471,8 @@ export function navBadgeView(deps: { scopes: () => readonly NavBadgeScope[]; inb
 
 // ---- Phase 1 (P1-07): the same view materialized by the read-model worker ----
 
+/** A proposal's expiry is recomputed at least this often with no new fact; it equals the agent view's AGENT_CLOCK_MS. */
+export const NAV_BADGE_CLOCK_MS = 60_000;
 /** Serve's main thread publishes the badge's non-ledger inputs here; the worker reads them on mtime. */
 export const NAV_BADGE_SOURCES_FILE = "nav-badge-sources.json";
 /** How often serve checks its analytics caches for a newer slice to publish. */
@@ -603,11 +605,14 @@ export function createNavBadgeReadModelView<S extends { instance: string; ticked
   return {
     name: NAV_BADGE_VIEW_NAME,
     version: NAV_BADGE_VIEW_VERSION,
-    // Panel facts/readiness, sidecar and classification identities, and both snapshots' stale comparisons.
+    // Panel facts/readiness, sidecar and classification identities, both snapshots' stale comparisons, and the
+    // proposal-expiry clock: readOperatorAgentHistory marks a proposal expired once expiresAt <= now, which drops
+    // it from the count with no row moving, so the body is rebuilt at least once per NAV_BADGE_CLOCK_MS bucket
+    // (the agent view's own bound for the same expiry comparison).
     inputsFingerprint: ({ now, instances }) => {
       const dbPath = instances.find(slot => slot.db)?.db?.path;
       if (!dbPath) return undefined;
-      return JSON.stringify([fileIdentity(join(readModelSidecarDir(dirname(dbPath)), NAV_BADGE_SOURCES_FILE)),
+      return JSON.stringify([Math.floor(now / NAV_BADGE_CLOCK_MS), fileIdentity(join(readModelSidecarDir(dirname(dbPath)), NAV_BADGE_SOURCES_FILE)),
         observed.published ? fileIdentity(classificationSnapshotPath(observed.published.inboxStateDir)) : null,
         observed.published?.instances.map(i => [i.instanceId, sourceAge(i.analytics?.asOf ?? null, now, ANALYTICS_STALE_AFTER_MS)]),
         sourceAge(observed.classified?.generatedAt ?? null, now, INBOX_STALE_AFTER_MS),
