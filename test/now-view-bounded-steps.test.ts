@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { test } from "node:test";
+import { mock, test } from "node:test";
 import type { Clock } from "#src/lib/clock.js";
 import { createLedgerProjector, openProjectorReadModel } from "#src/lib/ledger-projector.js";
 import { NOW_SLOW_STAGE_MS, createNowView, type NowViewContext, type NowViewOptions } from "#src/lib/now-view.js";
@@ -173,6 +173,8 @@ test("W1-T5066: a failed stage discards its partial build and retries cleanly", 
 /** A ticker over one core instance whose plan read costs 900 ms and GitHub read 1,700 ms: the first call outgrows the pass. */
 function slowFirstCall(t: TestCtx) {
   const root = scratch(t);
+  const cpu = mock.method(process, "threadCpuUsage", () => ({ user: 0, system: 0 }));
+  closeReadModelFixture(t, () => cpu.mock.restore());
   const clock = handClock();
   const ledgerDir = seededDir(root, clock);
   const feedbackRoot = join(root, "checkout");
@@ -200,7 +202,7 @@ function slowFirstCall(t: TestCtx) {
 test("a slow now build's read_model.slow_view row names each stage's ms", (t) => {
   const { posted } = slowFirstCall(t);
   const slow = posted.flatMap((m) => (m.type === "log" && m.step === "read_model.slow_view" ? [m.extra] : []));
-  assert.deepEqual(slow, [{ view: "now", instance: "core", ms: 2_600, passMs: PASS_MS, thread: "projector", stages: { plan: 900, github: 1_700 } }]);
+  assert.deepEqual(slow, [{ view: "now", instance: "core", ms: 2_600, cpuMs: 0, passMs: PASS_MS, thread: "projector", stages: { plan: 900, github: 1_700 } }]);
 });
 
 test("a now body built across bounded steps carries the start of its first step as buildStartedMs", (t) => {

@@ -8,8 +8,9 @@
  * {@link judgeMergedRatchets} is pure over two readers: the merge-tree of (main tip, PR head) and
  * main's tip. It counts with each gate's own counter (the scripts/ modules imported below), never a
  * copy, and names every gate it does not count. W1-T12509: every recorded-count gate whose counter
- * reads text is counted, not only clock-signature. A gate whose scope and baseline the merge does not
- * land holds the same blobs on both trees, so its two counts are equal and it is counted without a read.
+ * reads text is counted, not only clock-signature; W1-T12526 adds learnings-budget, affected-reach and
+ * house-layout. A gate whose scope and baseline the merge does not land holds the same blobs on both
+ * trees, so its two counts are equal and it is counted without a read.
  * {@link readMergedRatchetInputsSteps} is the I/O: merge-tree and blob reads in the managed clone,
  * no worktree, no npm and no CI run. W1-T12717: a gate CI runs as a signal is not counted, and
  * {@link ratchetUpdateWithheld} names a held verdict an update-branch cannot cure.
@@ -29,11 +30,18 @@ import { FIXTURE_COPY_CENSUS_FILENAME, FIXTURE_COPY_EXCLUDED_DIR, FIXTURE_COPY_S
 import { DEPS_INTERFACE_BASELINE, DEPS_INTERFACE_CEILING_KEYS, depsInterfaceCounts } from "../../scripts/deps-interface-census.mjs";
 // @ts-expect-error a plain .mjs script with no declaration file, as src/lib/plan-index.ts imports its sibling.
 import { evaluateRatchet as evaluateClaudeMdCap, foldDebtCeiling } from "../../scripts/claude-md-budget-ratchet.mjs";
+// @ts-expect-error a plain .mjs script with no declaration file, as src/lib/plan-index.ts imports its sibling.
+import { computeActiveChars, corpusFromTexts, evaluateRatchet as evaluateLearningsCap, shardPathsInListing } from "../../scripts/learnings-budget-ratchet.mjs";
+// @ts-expect-error a plain .mjs script with no declaration file, as src/lib/plan-index.ts imports its sibling.
+import { REACH_BASELINE, REACH_CODE_RE, REACH_FIELDS, changesReach, measureReach } from "../../scripts/affected-reach-count.mjs";
+// @ts-expect-error a plain .mjs script with no declaration file, as src/lib/plan-index.ts imports its sibling.
+import { HOUSE_LITERALS, houseLiteralCounts, qualifiedRunTaskLayoutSplit } from "../../scripts/house-layout-census.mjs";
 
 export type MergedRatchetVerdictName = "clean" | "crossing" | "stale-lowering" | "unread";
 
 /** The gates this judge has a counter for. W1-T12717: it counts only those CI runs against the same baseline. */
-export const RATCHET_COUNTER_GATES = ["clock-signature", "source-size", "fixture-copy", "deps-interface", "claude-md-budget"] as const;
+export const RATCHET_COUNTER_GATES = ["clock-signature", "source-size", "fixture-copy", "deps-interface", "claude-md-budget",
+  "learnings-budget", "affected-reach", "house-layout"] as const;
 
 export type CountedRatchetGate = (typeof RATCHET_COUNTER_GATES)[number];
 
@@ -64,7 +72,7 @@ export interface MergedRatchetRow {
 /** A gate this judge does not count, and why: never read as clean. */
 export interface UncountedRatchetGate {
   gate: string;
-  class: "run-derived" | "advisory" | "needs-worktree" | "test-suite-counter" | "import-ring" | "ci-signal";
+  class: "run-derived" | "advisory" | "ci-signal";
   reason?: string;
 }
 
@@ -72,9 +80,6 @@ export const UNCOUNTED_RATCHET_GATES: readonly UncountedRatchetGate[] = [
   { gate: "comment-load", class: "advisory" },
   { gate: "coverage", class: "run-derived" },
   { gate: "mutation", class: "run-derived" },
-  { gate: "learnings-budget", class: "needs-worktree", reason: "its counter (loadCorpus, loadShardEntries) reads shard files from a directory on disk" },
-  { gate: "affected-reach", class: "test-suite-counter", reason: "its counter (measureReach) lives in a test suite, which runs when imported" },
-  { gate: "house-layout", class: "import-ring", reason: "its census module names the run-task and sweep command files as paths, so importing it here closes an import ring through the sweep" },
   ...RATCHET_COUNTER_GATES.filter((g) => !COUNTED_RATCHET_GATES.includes(g)).map((gate): UncountedRatchetGate =>
     ({ gate, class: "ci-signal", reason: `CI runs it as a signal that never reads its baseline (${CI_READS_BASELINE[gate]!.script} exports CI_READS_BASELINE false)` })),
 ];
@@ -237,6 +242,10 @@ export type MergedRatchetInputs =
       populationFiles?: string[];
       /** Why the population could not be read: each population gate the merge touches is then unread. */
       populationUnread?: string;
+      /** The merged tree's code files the affected-reach census reads, listed only when the merge moves its graph. */
+      reachFiles?: string[];
+      /** Why that code tree could not be read: the affected-reach gate is then unread. */
+      reachUnread?: string;
     }
   | { upToDate: true; mainSha: string; headSha: string }
   | { error: string; mainSha?: string; headSha?: string };
@@ -249,6 +258,8 @@ const CLOCK_FIELDS = ["legacy", "dateNow", "newDate"] as const;
 const CLAUDE_MD = "CLAUDE.md";
 const CLAUDE_MD_BASELINE = "scripts/claude-md-budget-baseline.json";
 const FIXTURE_COPY_BASELINE = "scripts/fixture-copy-baseline.json";
+const LEARNINGS_BASELINE = "scripts/learnings-budget-baseline.json";
+const PACKAGE_JSON = "package.json";
 /** The most population bytes one judgement reads from main's tip: under the 64 MiB stdout cap of one git call. */
 const POPULATION_BYTES_BOUND = 48 * 1024 * 1024;
 
@@ -258,12 +269,24 @@ function isFixtureCopyPath(path: string): boolean {
     path.slice(path.lastIndexOf("/") + 1) !== FIXTURE_COPY_CENSUS_FILENAME;
 }
 
-/** The population roots a landing diff makes the judge count: src for deps-interface, test for fixture-copy. */
-function populationRoots(landing: readonly string[]): Array<"src" | "test"> {
-  const roots: Array<"src" | "test"> = [];
+const isShardPath = (path: string): boolean => (shardPathsInListing([path]) as string[]).length === 1;
+const landsLearnings = (landing: readonly string[]): boolean => landing.some(isShardPath) || landing.includes(LEARNINGS_BASELINE);
+type PopulationRoot = "src" | "test" | "learnings";
+
+/** The population roots a landing diff makes the judge count: src for deps-interface and house-layout,
+ *  test for fixture-copy, learnings for learnings-budget. */
+function populationRoots(landing: readonly string[]): PopulationRoot[] {
+  const roots: PopulationRoot[] = [];
   if (landing.some((p) => CLOCK_SCOPE_RE.test(p)) || landing.includes(DEPS_INTERFACE_BASELINE)) roots.push("src");
   if (landing.some(isFixtureCopyPath) || landing.includes(FIXTURE_COPY_BASELINE)) roots.push("test");
+  if (landsLearnings(landing)) roots.push("learnings");
   return roots;
+}
+
+/** Whether the merge can move the affected-reach counts: a landed path changes the import graph
+ *  (scripts/affected-reach-count.mjs's own test), or the merge lands the baseline. Otherwise the merged graph is main's. */
+function reachMoves(landing: readonly string[], readMerged: (p: string) => string | null, readMain: (p: string) => string | null): boolean {
+  return landing.includes(REACH_BASELINE) || landing.some((p) => changesReach(p, readMain(p), readMerged(p)) as boolean);
 }
 
 /** One count's verdict. Over the merged row but within main's: the PR's row was lowered on a stale
@@ -333,7 +356,7 @@ function sourceSizeRows(input: TreeInputs): MergedRatchetRow[] {
 
 /** Both trees' texts over one population scope. Main's set is the merged listing with each landed path read at main instead.
  *  With no population listing, `measuredFiles` (the merged tree's listing of MEASURED_ROOTS) lists a scope under one of those roots. */
-function populationTexts(input: TreeInputs, root: "src" | "test", inScope: (path: string) => boolean): { merged: Map<string, string>; main: Map<string, string> } | { reason: string } {
+function populationTexts(input: TreeInputs, root: PopulationRoot, inScope: (path: string) => boolean): { merged: Map<string, string>; main: Map<string, string> } | { reason: string } {
   if (input.populationUnread !== undefined) return { reason: `the tree could not be read: ${input.populationUnread}` };
   const listing = input.populationFiles ?? ((MEASURED_ROOTS as string[]).includes(root) ? input.measuredFiles : undefined);
   if (listing === undefined) return { reason: `the tree could not be read: no listing of ${root}/ was read` };
@@ -409,12 +432,96 @@ function claudeMdRows(input: TreeInputs): MergedRatchetRow[] {
   return verdict ? [{ gate: "claude-md-budget", path: CLAUDE_MD, verdict, merged: bytes, mainCeiling, prCeiling, rederived: bytes, prAdds: bytes - mainBytes }] : [];
 }
 
+/** The blocking threshold of scripts/learnings-budget-ratchet.mjs: the hard cap. Its own check refuses a cap that is not a number. */
+function learningsStopsPast(baseline: Record<string, unknown>): number | undefined {
+  evaluateLearningsCap(0, baseline);
+  return typeof baseline.hardCapChars === "number" ? baseline.hardCapChars : undefined;
+}
+
+/** The active corpus's injectable chars on each tree, summed by the ratchet's own parse and sum. */
+function learningsRows(input: TreeInputs): GateResult {
+  if (!landsLearnings(landingOf(input))) return [];
+  const prCeiling = learningsStopsPast(baselineOf(input.readMerged(LEARNINGS_BASELINE), parseJson, LEARNINGS_BASELINE));
+  const mainCeiling = learningsStopsPast(baselineOf(input.readMain(LEARNINGS_BASELINE), parseJson, LEARNINGS_BASELINE)) ?? Infinity;
+  if (prCeiling === undefined) return [];
+  const texts = populationTexts(input, "learnings", isShardPath);
+  if ("reason" in texts) return texts;
+  const chars = (m: Map<string, string>) => (computeActiveChars(corpusFromTexts(m)) as { chars: number }).chars;
+  const merged = chars(texts.merged);
+  const mainChars = chars(texts.main);
+  const verdict = judgeCount(merged, prCeiling, mainChars, mainCeiling);
+  return verdict ? [{ gate: "learnings-budget", path: LEARNINGS_BASELINE, field: "hardCapChars", verdict, merged, mainCeiling, prCeiling, rederived: merged, prAdds: merged - mainChars }] : [];
+}
+
+/** The tree's own package.json `imports` map, which the reach graph resolves `#` specifiers through. */
+function packageImportsOf(text: string | null): Record<string, unknown> {
+  const imports = text === null ? undefined : (parseJson(text).imports as Record<string, unknown> | undefined);
+  return imports ?? {};
+}
+
+/** The affected-reach counts (scripts/affected-reach-count.mjs) on the merged tree against its baseline.
+ *  Main's graph is measured only when the merged count is past both ceilings. */
+function reachRows(input: TreeInputs): GateResult {
+  const landing = landingOf(input);
+  if (!reachMoves(landing, input.readMerged, input.readMain)) return [];
+  const prBaseline = baselineOf(input.readMerged(REACH_BASELINE), parseJson, REACH_BASELINE) as Record<string, unknown>;
+  const mainBaseline = baselineOf(input.readMain(REACH_BASELINE), parseJson, REACH_BASELINE) as Record<string, unknown>;
+  const fields = (REACH_FIELDS as string[]).filter((f) => typeof prBaseline[f] === "number");
+  if (fields.length === 0) return [];
+  if (input.reachUnread !== undefined) return { reason: `the code tree could not be read: ${input.reachUnread}` };
+  if (input.reachFiles === undefined) return { reason: "the code tree could not be read: no listing of src/, scripts/, bin/ and test/ was read" };
+  const tree = (read: (p: string) => string | null) => {
+    const files = new Map<string, string>();
+    for (const path of new Set([...input.reachFiles!, ...landing])) {
+      if (!REACH_CODE_RE.test(path)) continue;
+      const text = read(path);
+      if (text !== null) files.set(path, text);
+    }
+    return files;
+  };
+  type Counts = Record<string, number>;
+  const merged = measureReach(tree(input.readMerged), packageImportsOf(input.readMerged(PACKAGE_JSON))) as Counts;
+  let main: Counts | undefined;
+  const mainCount = (f: string) => (main ??= measureReach(tree(input.readMain), packageImportsOf(input.readMain(PACKAGE_JSON))) as Counts)[f]!;
+  const rows: MergedRatchetRow[] = [];
+  for (const field of fields) {
+    const prCeiling = prBaseline[field] as number;
+    const mainCeiling = typeof mainBaseline[field] === "number" ? (mainBaseline[field] as number) : Infinity;
+    const count = merged[field]!;
+    const mainAt = count > prCeiling && count > mainCeiling ? mainCount(field) : count;
+    const verdict = judgeCount(count, prCeiling, mainAt, mainCeiling);
+    if (verdict) rows.push({ gate: "affected-reach", path: REACH_BASELINE, field, verdict, merged: count, mainCeiling, prCeiling, rederived: count, prAdds: count - mainAt });
+  }
+  return rows;
+}
+
+/** scripts/house-layout-census.mjs's literal counts over every src file, the merged tree against main's tip,
+ *  as the gate judges a branch against its merge base. The gate records no number: main's count is the ceiling. */
+function houseLayoutRows(input: TreeInputs): GateResult {
+  if (!landingOf(input).some((p) => CLOCK_SCOPE_RE.test(p))) return [];
+  const texts = populationTexts(input, "src", (p) => CLOCK_SCOPE_RE.test(p));
+  if ("reason" in texts) return texts;
+  const merged = houseLiteralCounts(texts.merged.values()) as Record<string, number>;
+  const main = houseLiteralCounts(texts.main.values()) as Record<string, number>;
+  const split = qualifiedRunTaskLayoutSplit(texts.main, texts.merged) as Record<string, number>;
+  const rows: MergedRatchetRow[] = [];
+  for (const literal of HOUSE_LITERALS as string[]) {
+    const count = merged[literal]! - (split[literal] ?? 0);
+    const verdict = judgeCount(count, main[literal]!, main[literal]!, main[literal]!);
+    if (verdict) rows.push({ gate: "house-layout", path: "src", field: literal, verdict, merged: count, mainCeiling: main[literal]!, prCeiling: main[literal]!, rederived: count, prAdds: count - main[literal]! });
+  }
+  return rows;
+}
+
 const GATE_ROWS: Record<CountedRatchetGate, (input: TreeInputs) => GateResult> = {
   "clock-signature": clockRows,
   "source-size": sourceSizeRows,
   "fixture-copy": fixtureCopyRows,
   "deps-interface": depsInterfaceRows,
   "claude-md-budget": claudeMdRows,
+  "learnings-budget": learningsRows,
+  "affected-reach": reachRows,
+  "house-layout": houseLayoutRows,
 };
 
 /** The ONE verdict the arm, the direct merge and the armed re-judge consult. A read or counter that
@@ -450,7 +557,7 @@ export function ratchetVerdictHolds(judgement: Pick<MergedRatchetJudgement, "ver
 /** The baselines whose rows name paths: when one changes, every path it names is read on both trees.
  *  Clock-signature reads its rows when either side changed it; source-size only when the merge lands it. */
 const PATH_KEYED_BASELINES = [CLOCK_BASELINE, ...(COUNTED_RATCHET_GATES.includes("source-size") ? [SOURCE_SIZE_BASELINE] : [])] as string[];
-const SINGLE_FILE_READS = [FIXTURE_COPY_BASELINE, DEPS_INTERFACE_BASELINE, CLAUDE_MD, CLAUDE_MD_BASELINE];
+const SINGLE_FILE_READS = [FIXTURE_COPY_BASELINE, DEPS_INTERFACE_BASELINE, CLAUDE_MD, CLAUDE_MD_BASELINE, LEARNINGS_BASELINE, REACH_BASELINE as string, PACKAGE_JSON];
 
 /** The paths the judge will read on either tree, so the I/O reads them in one batch per tree.
  *  `baselines` holds each path-keyed baseline's text on the two trees. */
@@ -484,8 +591,11 @@ export function parseBlobBatchAllowingMissing(raw: string, paths: readonly strin
   return out;
 }
 
-/** `git ls-tree -r -l -z` rows in the population scope: regular blobs only, as the census walks see them. */
-function parsePopulationListing(raw: string): { paths: string[]; bytes: number } | { error: string } {
+const inPopulation = (path: string): boolean => CLOCK_SCOPE_RE.test(path) || isFixtureCopyPath(path) || isShardPath(path);
+const inReachTree = (path: string): boolean => REACH_CODE_RE.test(path) as boolean;
+
+/** `git ls-tree -r -l -z` rows in one scope: regular blobs only, as the census walks see them. */
+function parsePopulationListing(raw: string, inScope: (path: string) => boolean): { paths: string[]; bytes: number } | { error: string } {
   const paths: string[] = [];
   let bytes = 0;
   for (const record of raw.split("\0")) {
@@ -493,7 +603,7 @@ function parsePopulationListing(raw: string): { paths: string[]; bytes: number }
     const m = /^(\d+) (\w+) [0-9a-f]+ +(\d+|-)\t(.+)$/s.exec(record);
     if (!m) return { error: `git ls-tree -l printed a row it could not parse: ${record.slice(0, 120)}` };
     const [, mode, type, size, path] = m as unknown as [string, string, string, string, string];
-    if (type !== "blob" || mode === "120000" || !(CLOCK_SCOPE_RE.test(path) || isFixtureCopyPath(path))) continue;
+    if (type !== "blob" || mode === "120000" || !inScope(path)) continue;
     paths.push(path);
     bytes += Number(size);
   }
@@ -566,7 +676,7 @@ export function* readMergedRatchetInputsSteps(
     const roots = populationRoots([...landing]);
     if (roots.length > 0) {
       const sized = yield* git(run, ["ls-tree", "-r", "-l", "-z", tree, "--", ...roots]);
-      const parsed = sized.status === 0 ? parsePopulationListing(sized.stdout) : { error: failed("git ls-tree -l", sized) };
+      const parsed = sized.status === 0 ? parsePopulationListing(sized.stdout, inPopulation) : { error: failed("git ls-tree -l", sized) };
       if ("error" in parsed) population = { populationUnread: parsed.error };
       else if (parsed.bytes > POPULATION_BYTES_BOUND) population = { populationUnread: `the ${roots.join(" and ")} population is ${parsed.bytes} bytes, past the ${POPULATION_BYTES_BOUND}-byte bound` };
       else {
@@ -583,8 +693,23 @@ export function* readMergedRatchetInputsSteps(
       if (sameOnBoth.has(path)) return mainBlobs.get(path)!;
       throw new Error(`${path} was not in the read set`);
     };
-    return { mainSha, headSha, changed: [...changed].sort(), measuredFiles, readMerged: reader(mergedBlobs), readMain: reader(mainBlobs),
-      landing: [...landing].sort(), ...population };
+    const readMerged = reader(mergedBlobs);
+    const readMain = reader(mainBlobs);
+    // The reach graph reads the whole code tree, so it is listed only when the merge moves the graph.
+    let reach: { reachFiles: string[] } | { reachUnread: string } | Record<string, never> = {};
+    if (reachMoves([...landing], readMerged, readMain)) {
+      const sized = yield* git(run, ["ls-tree", "-r", "-l", "-z", tree, "--", "src", "scripts", "bin", "test"]);
+      const parsed = sized.status === 0 ? parsePopulationListing(sized.stdout, inReachTree) : { error: failed("git ls-tree -l", sized) };
+      if ("error" in parsed) reach = { reachUnread: parsed.error };
+      else if (parsed.bytes > POPULATION_BYTES_BOUND) reach = { reachUnread: `the code tree is ${parsed.bytes} bytes, past the ${POPULATION_BYTES_BOUND}-byte bound` };
+      else {
+        const extra = parsed.paths.filter((p) => !mainBlobs.has(p));
+        if (extra.length > 0) for (const [p, text] of yield* readBatch(mainSha, extra)) { mainBlobs.set(p, text); sameOnBoth.add(p); }
+        reach = { reachFiles: parsed.paths };
+      }
+    }
+    return { mainSha, headSha, changed: [...changed].sort(), measuredFiles, readMerged, readMain,
+      landing: [...landing].sort(), ...population, ...reach };
   } catch (e) {
     // the failure is the reading: the judge rules it unread, and the arm proceeds as before with it named.
     return { error: String((e as Error)?.message ?? e) };
