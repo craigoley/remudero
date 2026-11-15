@@ -3,7 +3,7 @@ import { loadConfig } from "./config.js";
 import { systemClock } from "./clock.js";
 import { ledgerPathFor } from "./ledger-path.js";
 import { openLedgerUnion, type OpenLedgerUnionOptions } from "./ledger-union.js";
-import { ghCommand, parseGhBrokerDuration } from "./gh-read-broker.js";
+import { ghCommand, ghCredentialChildEnv, parseGhBrokerDuration } from "./gh-read-broker.js";
 import { ghOptionsWithDefaultTimeout } from "./github-transport.js";
 import { resolveOwnerRepoAt } from "./owner-repo.js";
 import { installPolicyPath, loadPolicy } from "./policy.js";
@@ -116,7 +116,9 @@ function queryArgs(numbers: number[], repository: { owner: string; repo: string 
 async function brokerRead(args: string[], env: NodeJS.ProcessEnv): Promise<unknown> {
   let stdout = "", stderr = "";
   const code = await ghCommand(["--class", "agent", "--fresh", "--", ...args], env, async directArgs => {
-    const result = await execFileRouted("gh", directArgs, ghOptionsWithDefaultTimeout({ encoding: "utf8" as const, env }));
+    // W1-T12075: the credential comes from the one resolver; a missing one rejects with its named sources.
+    const childEnv = ghCredentialChildEnv(directArgs, env);
+    const result = await execFileRouted("gh", directArgs, ghOptionsWithDefaultTimeout({ encoding: "utf8" as const, env: childEnv }));
     stdout += result.stdout;
     stderr += result.stderr;
     return 0;

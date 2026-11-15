@@ -30,8 +30,25 @@ try {
 } catch (err) {
   // The broker went away after the caller saw its heartbeat: the read goes to gh directly instead.
   process.stderr.write(`gh-broker: unreachable (${String((err as Error)?.message ?? err)}); running gh directly\n`);
-  process.exitCode = await new Promise<number>((resolve) => {
-    const child = spawn("gh", args, { stdio: "inherit" });
+  process.exitCode = await runGhDirectly(args);
+}
+
+/**
+ * W1-T12075: the direct read takes its credential from the one resolver, as every other `gh` spawn does.
+ * The broker module is loaded only here, on the fallback path, so a brokered read still loads the client
+ * alone. A missing credential, or a resolver that will not load, is reported on stderr and exits 1.
+ */
+async function runGhDirectly(ghArgs: string[]): Promise<number> {
+  let env: NodeJS.ProcessEnv | undefined;
+  try {
+    const { ghCredentialChildEnv } = await import("./lib/gh-read-broker.js");
+    env = ghCredentialChildEnv(ghArgs, undefined);
+  } catch (err) {
+    process.stderr.write(`gh-broker: ${String((err as Error)?.message ?? err)}\n`);
+    return 1;
+  }
+  return new Promise<number>((resolve) => {
+    const child = spawn("gh", ghArgs, { stdio: "inherit", env });
     child.on("error", () => resolve(1));
     child.on("close", (code) => resolve(code ?? 1));
   });
