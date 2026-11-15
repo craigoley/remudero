@@ -22906,13 +22906,17 @@ export async function runSweep(
             const mainAdoption = mainAdoptionDecision === "due";
             terminalDesignHold = { amended, mainAdoptionDecision, ...(mainAdoption ? { mainAdoption: true as const } : {}),
               revision: standingOn ?? current, observedRevision: current, semantic, roundId: handoff.roundId };
-            disposition = amended || mainAdoption ? "blocked-fixable" : "refused-escalate";
+            // W1-T12714: a report routed to an amendment waits on that amendment, never on a person.
+            const awaitsAmendment = held.needs_design_remedy === "amendment-proposed";
+            disposition = amended || mainAdoption ? "blocked-fixable" : awaitsAmendment ? "wait" : "refused-escalate";
             reason = amended ? "task contract amended under this terminal design handoff — adopting main before any fix admission"
+              : awaitsAmendment ? `fix needs a task contract amendment at this exact head (round ${handoff.roundId}) — the fix ` +
+                `lane proposed it from the worker's ${String(held.needs_design_kind)} report; a changed contract releases this head: ${handoff.reason}`
               : mainAdoption ? `fix needs design at this exact head (round ${handoff.roundId}), which is ${behindBy} commit(s) ` +
                 `behind main — taking main into the branch once before a person is asked: ${handoff.reason}`
               : `fix needs design at this exact head (round ${handoff.roundId}) — ${handoff.reason}`;
             if (mainAdoption) designMainAdoptionSpent = true;
-            if (!amended && !mainAdoption) {
+            if (!amended && !mainAdoption && !awaitsAmendment) {
               ruleBlockerByIndex.set(prIndex, "escalated");
               heldEscalationAt = typeof handoff.producer.ts === "string" ? handoff.producer.ts : undefined;
             }
@@ -22950,7 +22954,7 @@ export async function runSweep(
           `main is now ${mainTipSha!.slice(0, 7)}, so the rung re-reads this head's mergeability (W1-T11173)`;
       }
       if (held?.kind === "held" && held.hold !== undefined && !conflictHandoff && !conflictHoldReleased &&
-          !(designHoldKept && held.hold.site === "rung.needs_design")) {
+          !(designHoldKept && (held.hold.site === "rung.needs_design" || held.hold.site === "rung.needs_design_amendment"))) {
         standDownHold = held.hold;
         heldEscalationAt = held.hold.at;
         disposition = "refused-escalate";
