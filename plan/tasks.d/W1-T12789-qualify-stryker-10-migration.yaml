@@ -54,6 +54,12 @@
     package aliases and the shared repository root helper. Clean its own temp
     artifacts without touching shared dependencies.
 
+    Add three distinct tests with the exact titles named by the acceptance
+    proofs below, one per criterion. These titles are forward references for
+    implementation; the existing v9 suite passing does not satisfy them.
+    Verify each title resolves to its intended test and misses at the build's
+    merge base before claiming the corresponding criterion is met.
+
     Also run the maintained repository mutation command with a fresh incremental
     cache and the unchanged baseline, and run the existing report, ratchet,
     per-file runner and mutation-trigger suites. Record the package identity,
@@ -64,11 +70,11 @@
     amendment; do not silently widen scope, lower a floor or weaken a gate.
   acceptance:
     - claim: Manifest and lock select the qualified Stryker 10 target and the installed CLI runs on the supported repository runtime
-      proof: "unit test: test/mutation-report-validity.test.ts"
+      proof: "unit test: W1-T12789 criterion 1: Stryker 10 manifest lock and CLI agree"
     - claim: An automated isolated-fixture Stryker 10 command-runner execution produces nonzero mutants with at least one detected by a failing test, and its JSON report is accepted by the maintained ratchet consumer
-      proof: "unit test: test/mutation-report-validity.test.ts"
+      proof: "unit test: W1-T12789 criterion 2: real Stryker 10 mutants reach the ratchet"
     - claim: "invariant:mutation-controls — valid v10 reports remain accepted while malformed or unreachable reports remain refused, preserving the mutation validity controls"
-      proof: "unit test: test/mutation-report-validity.test.ts"
+      proof: "unit test: W1-T12789 criterion 3: v10 validity accepts reached and refuses invalid runs"
       kind: guard
   falsifier: |
     Restore the old manifest/lock version and show the version regression fails;
