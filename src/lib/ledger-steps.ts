@@ -370,6 +370,17 @@ const SEED_ROWS: readonly SeedRow[] = [
     writer: ["runFlowGardener"],
     outcomes: ["OBSERVED", "UNKNOWN"],
   },
+  {
+    // W1-T12712: a green pull request waiting for review starts before a new fix or build worker.
+    step: "sweep.budget_yield",
+    meaning:
+      "A new fix round (lane \"fix\") or build lane (lane \"build\") did not start, because the review width " +
+      "was held at host-worker-budget and a green head had waited for review longer than one sweep cadence. " +
+      "One row per held spell: `waiting_heads` names the heads that waited and `oldest_wait_ms` the longest wait. " +
+      "No running worker is stopped and the budget is unchanged; the held work starts once no such head waits.",
+    writer: ["decideReviewPrecedence"],
+    outcomes: ["fix", "build"],
+  },
 ];
 
 /** THE REGISTRY — every step this task has decoded so far, `family` derived from `step` (never
