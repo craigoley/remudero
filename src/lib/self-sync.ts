@@ -784,7 +784,8 @@ export async function probeReviewerCodeFreshnessAsync(
   return reviewerMainAdvance(reviewerGit(repoDir, deps), loadedCodeSha, originMainSha);
 }
 
-function reviewerGit(repoDir: string, deps: ReviewerCodeFreshnessOptions): GitRunner {
+/** `git -C <repoDir> …` for the reviewer's reads. A later `-C <absolute path>` in `args` addresses another tree. */
+export function reviewerGit(repoDir: string, deps: ReviewerCodeFreshnessOptions = {}): GitRunner {
   const options = { encoding: "utf8", stdio: "pipe", maxBuffer: REVIEWER_GIT_MAX_BUFFER } as const;
   return deps.git ?? ((args) => execFileSync("git", ["-C", repoDir, ...args], options));
 }
