@@ -18,7 +18,7 @@
     - src/lib/flow-remedy-gardener.ts
     - test/gardeners/flow-remedy-skips-a-cause-it-cannot-file-and-drafts-the-next-one.test.ts
     - test/deploy/the-nightly-state-backup-keeps-a-copy-of-the-container-config.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "invariant:every-eligible-candidate-is-walked — A garden pass whose eight costliest eligible causes cannot be filed still drafts the ninth eligible cause, and logs one flow-remedy.cause_skipped row for each of the eight"

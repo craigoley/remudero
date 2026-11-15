@@ -17,7 +17,7 @@
   files:
     - src/run-task.ts
     - test/worker/run-task/the-architect-files-a-new-task-in-the-plan-destination.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "With `task` in the kinds of the host file, `rmd plan` makes its lane worktree from the destination checkout, and opens the pull request for its new task files in the destination repository"
