@@ -18,7 +18,7 @@ const probe = `
 function child(environment: NodeJS.ProcessEnv) {
   return JSON.parse(execFileSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", probe], {
     cwd: ROOT, encoding: "utf8", timeout: 15_000,
-    env: { ...process.env, ...environment, NODE_TEST_CONTEXT: undefined, NODE_DISABLE_COMPILE_CACHE: "1" },
+    env: { ...process.env, ...environment, NODE_TEST_CONTEXT: undefined },
   }));
 }
 function owner(t: { after: (fn: () => void) => void }) {
@@ -44,7 +44,7 @@ test("author static admission: real child and grandchild borrow one live owner w
     import { execFileSync } from 'node:child_process';
     process.stdout.write(execFileSync(process.execPath, ${JSON.stringify(["--import", "tsx", "--input-type=module", "-e", probe])}, {encoding:'utf8'}));
   `], { cwd: ROOT, encoding: "utf8", timeout: 15_000,
-    env: { ...process.env, ...lease.childEnvironment, NODE_TEST_CONTEXT: undefined, NODE_DISABLE_COMPILE_CACHE: "1" } });
+    env: { ...process.env, ...lease.childEnvironment, NODE_TEST_CONTEXT: undefined } });
   assert.match(JSON.parse(grandchild).note, /inherited live parent test slot/);
   assert.deepEqual(readdirSync(dir), ["node-compile-cache", "slot-1.json"]);
   assert.equal(readFileSync(claim.path, "utf8"), bytes);
