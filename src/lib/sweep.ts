@@ -26526,6 +26526,7 @@ async function runSweepLightPassCore(
   // ledger-read-intent: live — this fold reads the live file only, never rotations.
   const readLedger = deps.readLedger ?? readLiveLedgerRows;
   const selectionLedgerLines = readLedger(deps.ledgerPath);
+  const repushedQueuedAt = repushedHeadQueuedAt(selectionLedgerLines);
   openPrs = openPrs.map(pr => promiseHarvestRetryView(pr, selectionLedgerLines, deps.sampleLoad));
   const selectionPrior = priorActionsFromLedger(selectionLedgerLines, openPrs, deps.sampleLoad);
   openPrs = openPrs.map(pr => completedRefusalRetryView(pr, selectionPrior));
@@ -26565,10 +26566,11 @@ async function runSweepLightPassCore(
   const policySemanticBound = effectiveReviewWidth(deps, policy, queueDepth, now, selectionLedgerLines, activeWorkers);
   const { bound: semanticBound, inFlight: reviewsInFlight } = reviewAdmissionBound(policySemanticBound);
   const unreserved = openPrs.filter((pr) => !lightPassReservedHeads.has(lightPassHeadKey(pr)));
-  const planBound = planLaneBoundForPass(deps, policy, selectReviewAdmissions(unreserved, policy, now, outcomes, 0, unreserved.length)
-    .planFilings.length, "light");
+  const planBound = planLaneBoundForPass(deps, policy, selectReviewAdmissions(unreserved, policy, now, outcomes, 0, unreserved.length,
+    undefined, repushedQueuedAt).planFilings.length, "light");
   const needsPerson = needsPersonPredicate(selectionLedgerLines);
-  const selected = selectReviewAdmissions(unreserved, policy, now, outcomes, semanticBound, planBound.available, needsPerson);
+  const selected = selectReviewAdmissions(unreserved, policy, now, outcomes, semanticBound, planBound.available, needsPerson,
+    repushedQueuedAt);
   recordReviewOrderShadow(deps, selectionLedgerLines, reviewAdmissionCandidates(unreserved, policy, now, outcomes),
     selected.spawning, now, semanticBound);
   const latchHeld = new Set<number>();
@@ -26587,7 +26589,7 @@ async function runSweepLightPassCore(
   // admits the next of them at once (`refillFreedLanes` below) instead of idling until another pass.
   const refillTail = selectReviewAdmissions(
     openPrs.filter((pr) => !spawningNumbers.has(pr.prNumber) && !lightPassReservedHeads.has(lightPassHeadKey(pr))),
-    policy, now, outcomes, openPrs.length, undefined, needsPerson,
+    policy, now, outcomes, openPrs.length, undefined, needsPerson, repushedQueuedAt,
   ).spawning;
   let refillArmed = false;
   // W1-T2584 parity: provider capacity is account-wide, so a pass whose review met the gh budget
@@ -26948,7 +26950,7 @@ async function runSweepLightPassCore(
     refillTail.splice(0, refillTail.length, ...selectReviewAdmissions(
       freshViews.filter((pr) => !spawningNumbers.has(pr.prNumber) && !refilledHeads.has(lightPassHeadKey(pr)) &&
         !lightPassReservedHeads.has(lightPassHeadKey(pr))),
-      policy, refillViewReadAtMs, outcomes, freshViews.length, undefined, needsPerson,
+      policy, refillViewReadAtMs, outcomes, freshViews.length, undefined, needsPerson, repushedQueuedAt,
     ).spawning);
   };
   let recycleRefillHeld = false;
@@ -27354,6 +27356,7 @@ export function selectReviewAdmissions(
   reviewWidth: number = Math.max(1, policy.reviewLanes),
   planLaneWidth: number = derivePlanLaneBound(undefined, policy, 0).available,
   needsPerson?: (pr: OpenPrView) => boolean,
+  repushedQueuedAt?: ReadonlyMap<string, string>,
 ): { spawning: OpenPrView[]; planFilings: OpenPrView[] } {
   // W1-T2583: selection and execution must agree on outcome-keyed eligibility, so the caller folds
   // both sets once from the same reader `runSweep` uses and filters here before either lane ranks.
@@ -27369,8 +27372,8 @@ export function selectReviewAdmissions(
     const ga = needsPerson?.(a) === true ? 1 : 0;
     const gb = needsPerson?.(b) === true ? 1 : 0;
     if (ga !== gb) return ga - gb;
-    const ka = Date.parse(reviewAdmissionKey(a));
-    const kb = Date.parse(reviewAdmissionKey(b));
+    const ka = Date.parse(repushedQueuedAt?.get(`${a.prNumber}@${a.headSha}`) ?? reviewAdmissionKey(a));
+    const kb = Date.parse(repushedQueuedAt?.get(`${b.prNumber}@${b.headSha}`) ?? reviewAdmissionKey(b));
     const aa = Number.isNaN(ka) ? -Infinity : now - ka;
     const ab = Number.isNaN(kb) ? -Infinity : now - kb;
     return ab !== aa ? ab - aa : a.prNumber - b.prNumber;
@@ -27382,6 +27385,29 @@ export function selectReviewAdmissions(
 
   const spawning = [...rest].sort(oldestFirst).slice(0, Math.max(0, reviewWidth));
   return { spawning, planFilings };
+}
+
+/** W1-T12534: `<pr>@<head>` of a minted head to its first eligible time, else its mint time. */
+function repushedHeadQueuedAt(ledgerLines: ReadonlyArray<Record<string, unknown>>): Map<string, string> {
+  const minted = new Map<string, string>();
+  const eligible = new Map<string, string>();
+  const isTime = (value: unknown): value is string => typeof value === "string" && Number.isFinite(Date.parse(value));
+  const first = (values: Map<string, string>, key: string, ts: string): void => {
+    if (!values.has(key)) values.set(key, ts);
+  };
+  for (const row of ledgerLines) {
+    if (!isTime(row.ts)) continue;
+    const head = row.step === "sweep.absent_repush" ? row.new_head
+      : row.step === "sweep.review_eligible" ? row.head_sha : undefined;
+    if (typeof head !== "string") continue;
+    const key = `${String(row.pr_number)}@${head}`;
+    if (row.step === "sweep.absent_repush") {
+      first(minted, key, row.ts);
+      continue;
+    }
+    first(eligible, key, row.ts);
+  }
+  return new Map([...minted].map(([key, ts]) => [key, eligible.get(key) ?? ts]));
 }
 
 /** Number of spawning review candidates before the adaptive admission cut. */
