@@ -23,7 +23,7 @@
     - test/github/the-fleets-app-installation-stays-under-its-hourly-rate-limit.test.ts
     - test/github/tick-reads-in-the-worker-thread-take-their-share-of-the-installation-budget.test.ts
     - test/github/a-paced-read-stands-down-past-a-short-wait-for-the-installation-reset.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "When a refused core read's reset is more than the budget's wait bound away, admitInstallationReadAsync (ghJsonAsync, ghTextAsync, ghLinesAsync) throws GhPaceFloorStandDownError with the refusing reading and sleeps no timer, and the throttle row is still written. The bound is the daemon's poll interval (policy pollIntervalMs), set by startDaemonInstallationBudget, and a worker thread that joins the budget through threadInput gets the same bound"

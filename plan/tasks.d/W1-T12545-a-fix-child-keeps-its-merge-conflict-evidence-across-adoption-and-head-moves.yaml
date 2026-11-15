@@ -23,7 +23,7 @@
     - src/lib/sweep.ts
     - src/lib/ledger-steps.ts
     - test/sweep/a-fix-child-keeps-its-merge-conflict-evidence-across-head-moves.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "A fix round outside merge-conflict mode whose merge-facts gate reads CONFLICTING, and whose local scope merge captures unmerged paths, runs its next round in merge-conflict mode with that captured evidence. It writes a fix.merge_mode_reentered row and no fix.stood_down row with CONFLICT_REPAIR_HANDOFF_REASON"
