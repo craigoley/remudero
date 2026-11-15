@@ -4,7 +4,7 @@ import { planDestinationRepository } from "../../lib/plan-destination.js";
 import type { RunTaskCommandHost, GitRunner, CiGateOutcome, ReviewRunResult, FixRungOutcome, LiveHeadResult, WorktreeSnapshot, FixRebaseMergeFacts, FixRoundCommit, CensusPushRefusal, FixRoundPushReceipt } from "./run-task-verb.js";
 import { buildBaseProofDir, releaseBaseProofDir, type BaseProofDir } from "../../lib/check-proof.js";
 import { conflictRoundProgressVerdict, judgeFixProgress, resolveFixProgress, type FixProgressJudge, type FixProgressResult, type FixProgressVerdict, type FixProgressWorkerProofResult, reviewerProofFailures, unfiledScopeGrant, UNFILED_SCOPE_GRANT_ANSWER } from "../../lib/fix-progress-judge.js";
-import { buildFixProgressInputWithHostedProofs, readHostedFixProofResults, type HostedFixProofReader } from "../../lib/sweep.js";
+import { buildFixProgressInputWithHostedProofs, conflictRoundHeldHead, readHostedFixProofResults, type HostedFixProofReader } from "../../lib/sweep.js";
 import { parseWhitelistedProof, execWhitelistedProofAsync, proofChildCommand, buildProofEnv, type AsyncProofSpawner } from "../../lib/review.js";
 import { execFileLoopBounded } from "../../lib/loop-bounded-child.js";
 import { BASE_REPRODUCTION_MAX_FILES, boundedBaseProbeReason, baseReproductionFiles, decideBaseReproduction, type BaseProbeResult } from "../../lib/base-reproduction.js";
@@ -26,8 +26,8 @@ import { conflictedFilePaths } from "../../lib/hot-file-gardener.js";
 import { billingMode } from "../../lib/env.js";
 import { FIX_MODE_RULES, deriveFixMode, fixScopeRegime, outOfDeclaredScopeFiles, renderFixPrompt, renderPrerequisitePrPrompt, sameHeadReviewUnmet, type FixEvidence, type FixReviewFinding } from "../../lib/prompt-render.js";
 import { bakedClosureCatalogDetails } from "../../lib/baked-closure-catalog.js";
-import { escalateWithJudge, escalationCause, realEscalationJudge, escalationHeadSha, openEscalationStandDownReason, fixEscalationDedupKey, findDuplicateEscalation, taskContractRevision, taskSemanticRevision, type Escalation, type EscalationDedupKey, type IssueGateway, type OpenIssue } from "../../lib/escalate.js";
-import { fetchSinglePrRest, codeqlCheckFailed, hydrateCodeqlHeadAlertsSteps, CODEQL_CHECK_NAME, type GhApiFetcher } from "../../lib/open-prs-rest.js";
+import { escalateWithJudge, escalationCause, realEscalationJudge, escalationHeadSha, openEscalationStandDownReason, fixEscalationDedupKey, findDuplicateEscalations, taskContractRevision, taskSemanticRevision, type Escalation, type EscalationDedupKey, type IssueGateway, type OpenIssue } from "../../lib/escalate.js";
+import { fetchSinglePrRest, codeqlCheckFailed, hydrateCodeqlHeadAlertsSteps, CODEQL_CHECK_NAME, createPlanFilingFileCache, hydratePlanFilingFilesSteps, type GhApiFetcher } from "../../lib/open-prs-rest.js";
 import { remedyFilesForFailingChecks, type RemedyFileForGate } from "../../lib/ci-parity.js";
 import { isInPlanScope } from "../../lib/plan-architect.js";
 import { planFilingFixRoundRefusal, readPlanFilingFixRoundInput } from "../../lib/plan-filing-fix-guard.js";
@@ -49,7 +49,7 @@ import { recognizeChangesetClaims, acceptanceAuthorTimeCheck, extractTaskTrailer
 import { repairedProofsAreSafeToPush, diagnoseUnrunnableProofs, renderBodyDefects } from "../../lib/body-repair.js";
 import { recordHeadProviderAfterPush } from "../../lib/review-provider-provenance.js";
 import { ghRequiredStatusCheckContexts, readLedgerLines, taskIdFromRunBranch } from "../../lib/status.js";
-import { withCodeqlAlertEvidence, CODE_SCANNING_FALSE_POSITIVE_STEP, DEFAULT_SWEEP_POLICY, decideRedBaseRefresh, isCiHarnessPath, actionableGateFailuresFromReasons, dispatchFixSpent, checksStateFromRollup, earlyRedEvidenceRollup, checksPendingSinceFromRollup, deriveDisposition, fixRoundTally, buildFixProgressInput, flakeClaimsForHead, isBlockedCi, renderClarificationQuestion, redQualityGateNames, stillRedRequiredNames, terminalStateReason, type ActionableGateFailure, type CiFailure, type LiveStateResult, type OpenPrView, type RollupCheckEntry, type ProofDiscriminationEvidence, type SweepDeps, type SweepPolicy, proofDiscriminationEvidenceFromCriteria, ADDITIVE_REGISTRATION_SURFACES, type RegistrationChange, hasCapturedMergeConflictEvidence, clearedConflictEscalationCause } from "../../lib/sweep.js";
+import { withCodeqlAlertEvidence, CODE_SCANNING_FALSE_POSITIVE_STEP, DEFAULT_SWEEP_POLICY, decideRedBaseRefresh, isCiHarnessPath, actionableGateFailuresFromReasons, dispatchFixSpent, fixRoundNotRunReason, checksStateFromRollup, earlyRedEvidenceRollup, checksPendingSinceFromRollup, deriveDisposition, fixRoundTally, buildFixProgressInput, flakeClaimsForHead, isBlockedCi, renderClarificationQuestion, redQualityGateNames, stillRedRequiredNames, terminalStateReason, type ActionableGateFailure, type CiFailure, type LiveStateResult, type OpenPrView, type RollupCheckEntry, type ProofDiscriminationEvidence, type SweepDeps, type SweepPolicy, proofDiscriminationEvidenceFromCriteria, ADDITIVE_REGISTRATION_SURFACES, type RegistrationChange, hasCapturedMergeConflictEvidence, clearedConflictEscalationCause } from "../../lib/sweep.js";
 import { forcedRefreshFields, REFRESH_DECIDED_STEP } from "../../lib/refresh-value.js";
 import { detectReviewFalseBlock, detectCiLogVerdictUnchanged, shouldSelfHealNothingChanged } from "../../lib/fix-rung-classify.js";
 import { readCiGateRequiredChecks } from "../../lib/ci-gate-required.js";
@@ -66,7 +66,7 @@ import { repoRoot, resolveOwnerRepo } from "../../lib/repo-location.js";
 import { refusalExcerptFromFixReport } from "../../lib/refusal-amendment.js";
 import { flagValue, unknownArgError } from "../../lib/cli-args.js";
 import { reviewTaskIdFromBody } from "../../lib/report-commands.js";
-import { type RawOpenPr, type StrikeRegime, currentStrikeRegimeFor, deriveStrikeHistory, fetchCiFailures, priorStrikesFor, remedyGeneratorNamedInLog, reviewStateFromRollup, reviewSummaryFromLedger, reviewVerdictPostedAtFromRollup, unmetFromLedger } from "../../lib/tick-read-worker.js";
+import { type RawOpenPr, type StrikeRegime, classifyPlanFiling, currentStrikeRegimeFor, deriveStrikeHistory, fetchCiFailures, isPlanOnlyFilingPr, priorStrikesFor, remedyGeneratorNamedInLog, resolveReviewTaskId, reviewStateFromRollup, reviewSummaryFromLedger, reviewVerdictPostedAtFromRollup, unmetFromLedger } from "../../lib/tick-read-worker.js";
 
 // Functions kept in the entrypoint arrive through this seam, as in DaemonCommandHost.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -1001,7 +1001,7 @@ async function fixRungStandDownReason(
    * (`key`), the head it would be filed against (`headSha`), and the finder that answers whether
    * such an issue is already open. `find` is INJECTED rather than called here so this function
    * stays free of the issue gateway, the same seam `readRollup`/`readMergeFacts` above already
-   * use; the caller wires it to {@link findDuplicateEscalation} itself, never a second matcher.
+   * use; the caller wires it to {@link findDuplicateEscalations} itself, never a second matcher.
    * Omitted (a gateway with no `listOpen`, or any site other than `rung.strike`) skips this check
    * entirely — fail open, exactly like every other optional reason source here.
    *
@@ -1017,10 +1017,10 @@ async function fixRungStandDownReason(
   openEscalation?: {
     headSha: string;
     key: EscalationDedupKey;
-    find: (key: EscalationDedupKey) => OpenIssue | undefined;
+    find: (key: EscalationDedupKey) => readonly OpenIssue[];
     redCheckNames?: readonly string[];
     pendingAnswer?: { spent?: true };
-    current?: { conflictEvidenceCaptured: boolean; baseSha?: string };
+    current?: { conflictEvidenceCaptured: boolean; baseSha?: string; conflictRound?: true };
     resolve?: (candidate: OpenIssue, clearedCause: string) => void;
   },
 ): Promise<{ reason: string; foreignHead?: { headSha: string; author: string }; foreignTree?: ForeignTreeStandDown; unchangedTree?: true } | undefined> {
@@ -1102,33 +1102,27 @@ async function fixRungStandDownReason(
   if (foreignTree) { const foreign = foreignTreeStandDownReason(foreignTree); if (foreign) return { reason: foreign.reason, foreignTree: foreign }; }
 
   if (openEscalation) {
-    // NO try/catch HERE, DELIBERATELY: the fail-open contract has exactly ONE owner, and it is
-    // `findDuplicateEscalation` itself — "best-effort dedup: a failed read must never block the
-    // escalation itself" is its own doc, and it swallows a throwing `listOpen` into `undefined`
-    // before this ever sees it. A second catch around it would be an arm no production path can
-    // reach (measured: `diff-coverage` flagged it as an added line with zero covering tests) and
-    // a second, silently-drifting statement of the same guarantee.
-    const candidate = openEscalation.find(openEscalation.key);
-    const alreadyAsked = openEscalationStandDownReason(
-      openEscalation.headSha,
-      candidate,
-      // W1-T3579: read straight off the SAME key the probe/producer both build below — never a
-      // second computation — so the comparison and the dedup key can never disagree about which
-      // revision "current" names.
-      openEscalation.key.contractRevision,
-      openEscalation.current,
-      openEscalation.redCheckNames,
-      openEscalation.pendingAnswer,
-    );
-    if (alreadyAsked) {
-      log("fix.contract_hold", { kind: "open-escalation", pr_url: prUrl, head_sha: openEscalation.headSha,
-        contract_revision: openEscalation.key.contractRevision, issue_url: candidate?.url });
-      return alreadyAsked;
+    // The probe owns fail-open issue reads. Evaluate every match: a released question whose
+    // close fails must not hide another unanswered question at the same held head.
+    for (const candidate of openEscalation.find(openEscalation.key)) {
+      const alreadyAsked = openEscalationStandDownReason(
+        openEscalation.headSha,
+        candidate,
+        openEscalation.key.contractRevision,
+        openEscalation.current,
+        openEscalation.redCheckNames,
+        openEscalation.pendingAnswer,
+      );
+      if (alreadyAsked) {
+        log("fix.contract_hold", { kind: "open-escalation", pr_url: prUrl, head_sha: openEscalation.headSha,
+          contract_revision: openEscalation.key.contractRevision, issue_url: candidate.url });
+        return alreadyAsked;
+      }
+      const clearedCause = escalationHeadSha(candidate.body) === openEscalation.headSha && openEscalation.current
+        ? clearedConflictEscalationCause(candidate.body, openEscalation.current)
+        : undefined;
+      if (clearedCause) openEscalation.resolve?.(candidate, clearedCause);
     }
-    const clearedCause = candidate && escalationHeadSha(candidate.body) === openEscalation.headSha && openEscalation.current
-      ? clearedConflictEscalationCause(candidate.body, openEscalation.current)
-      : undefined;
-    if (candidate && clearedCause) openEscalation.resolve?.(candidate, clearedCause);
   }
 
   return undefined;
@@ -1948,7 +1942,9 @@ function derivedFixCommit(check: string | undefined, prUrl: string): { subject: 
 
 function fixDispatchResult(result: Awaited<ReturnType<FixDeps["dispatchFix"]>>, reason: string): { outcome: FixOutcome; reason: string } {
   if (dispatchFixSpent(result)) return { outcome: "fixed", reason };
-  return { outcome: "refused", reason: typeof result === "object"
+  const notRun = fixRoundNotRunReason(result);
+  if (notRun !== undefined) return { outcome: "refused", reason: notRun };
+  return { outcome: "refused", reason: typeof result === "object" && "claimDeclined" in result
     ? `fix dispatch declined at the checkout claim (${result.ownerRecoveryReason})`
     : "fix dispatch was not accepted; no worker dispatched" };
 }
@@ -2171,6 +2167,29 @@ async function capturedScopeMergeConflict(
   return hasCapturedMergeConflictEvidence(evidence) ? evidence : undefined;
 }
 
+/** W1-T12545: a trial merge of main at `headSha`, read from its unmerged index and aborted; never a dirty tree. */
+async function reenteredScopeMergeConflict(
+  git: (args: string[]) => Promise<string>, headSha: string, untrackedAll: string,
+): Promise<{ evidence: MergeConflictEvidence } | { reason: string }> {
+  const clean = async () => !(await git(["status", "--porcelain", "-z", untrackedAll])).trim();
+  if (!(await clean())) return { reason: "the worktree is not clean" };
+  if ((await git(["rev-parse", "HEAD"])).trim() !== headSha) return { reason: `the worktree is not at ${headSha}` };
+  await git(["fetch", "--no-tags", "origin", "main"]);
+  // A merge needs a committer identity even with --no-commit; a runner without one fails before any conflict.
+  const stopped = await git(["-c", "user.name=remudero trial merge", "-c", "user.email=trial-merge@remudero.invalid",
+    "merge", "--no-edit", "--no-commit", "--no-ff", "refs/remotes/origin/main"]).then(() => false, () => true);
+  let evidence: MergeConflictEvidence | undefined;
+  try {
+    evidence = stopped ? await capturedScopeMergeConflict(git) : undefined;
+  } finally {
+    if (await git(["rev-parse", "-q", "--verify", "MERGE_HEAD"]).then(() => true, () => false)) await git(["merge", "--abort"]);
+  }
+  if ((await git(["rev-parse", "HEAD"])).trim() !== headSha || !(await clean())) {
+    throw new Error(`the worktree did not return to ${headSha} after the trial merge`);
+  }
+  return evidence ? { evidence } : { reason: "the trial merge of main left no unmerged paths" };
+}
+
 type InheritedCensusRefreshInput = {
   root: string; worktreePath: string; branch: string; prUrl: string; prNumber: number;
   snapshotPath: string; context: Extract<NonNullable<CensusPushRefusal["inheritedMain"]>, { state: "inherited" }>;
@@ -2265,6 +2284,8 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
   pendingAnswer?: OpenPrView["pendingAnswer"];
   /** W1-T10339: digest of the PR body a TASKLESS PR was dispatched on — an input every stand-down records. */
   prBodySha256?: string;
+  /** W1-T12710: a stronger-worker round's earlier rounds on its stalled criterion: diff summary and outcome each. */
+  failedApproaches?: readonly string[];
 },
   host: FixCommandHost,
 ): ReturnType<RunTaskCommandHost["runFixRung"]> {
@@ -2359,7 +2380,9 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
   let consultedThisRound = false;
   let progressApproach = opts.progressApproach;
   let progressRoundReason: string | undefined;
-  const progressConstraint = () => [opts.constraint, progressApproach && `Progress judge approach: ${progressApproach}`].filter(Boolean).join("\n\n") || undefined;
+  const progressConstraint = () => [opts.constraint, progressApproach && `Progress judge approach: ${progressApproach}`,
+    opts.failedApproaches?.length ? `Approaches that did not work (earlier rounds on this criterion):\n${opts.failedApproaches.map(a => `- ${a}`).join("\n")}` : undefined,
+  ].filter(Boolean).join("\n\n") || undefined;
   // W1-T3579: computed ONCE, from the live task this rung was dispatched against — never
   // recomputed per round (a task's own contract cannot change mid-rung; only a FRESH `runFixRung`
   // built by the next sweep, after a plan amendment, would ever see a different one). Threaded
@@ -2428,6 +2451,7 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
   // sweep's own resolved head so round 1 is pinned too, then re-pinned by every gate read. It is
   // never independently resolved here — a second read is a second chance to skew.
   let currentPinnedSha: string | undefined = opts.ciEvidenceDisagreement?.sha;
+  let currentPrHeadSha = currentPinnedSha ?? review.headSha;
   // W1-T2551: bounds the generator-fix short-circuit (site `rung.generator_fix`, below) to a
   // SMALL number of attempts per invocation — every attempt already re-verifies the regenerated
   // output against its OWN `:check` before committing anything, but this caps how many rounds a
@@ -2735,6 +2759,26 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
           return undefined;
         })
         : undefined;
+    // W1-T12544: red CI can leave review at A after our conflict push to B. Trace the hold from
+    // the current PR head, and compare the carried head to that same head when selecting its cause.
+    const holdLedgerRows = [...(deps.ledgerLines ?? (() => readLedgerLines(deps.ledgerPath)))(), ...roundRows];
+    let holdRows: ReadonlyArray<Record<string, unknown>> = holdLedgerRows;
+    const holdHeadSha = prNumber === undefined ? currentPrHeadSha : conflictRoundHeldHead(
+      { taskId: opts.taskId, prNumber, prUrl: opts.prUrl, headSha: currentPrHeadSha },
+      holdLedgerRows,
+      deps.ledgerPath,
+      undefined,
+      (head, history) => {
+        holdRows = history;
+        if (history.some(row => row.step === "fix.needs_design" && row.task_id === opts.taskId &&
+            row.head_sha === head && !(typeof row.contract_revision === "string" && row.contract_revision !== currentContractRevision))) return true;
+        const key = fixEscalationDedupKey(opts.taskId, opts.prUrl, head, false, noReviewYet, currentContractRevision);
+        return findDuplicateEscalations({ ...key, cause: undefined }, { issues: deps.issues }).some(issue =>
+          openEscalationStandDownReason(head, issue, currentContractRevision,
+            { conflictEvidenceCaptured: hasCapturedMergeConflictEvidence(currentMergeConflict), baseSha: opts.baseSha },
+            noReviewYet ? currentCiFailures?.map(f => f.name) : undefined, opts.pendingAnswer) !== undefined);
+      },
+    );
     let preStrikeStandDown = await fixRungStandDownReason(
       deps.readLiveState,
       opts.prUrl,
@@ -2758,17 +2802,19 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
       // keyed on, so probe and producer can never disagree about which issue is the duplicate.
       // `summary` carries `opts.prUrl` because the dedup key's PR dimension is scraped out of the
       // summary/detail TEXT (`extractPrRef`), never passed as a field. A gateway with no
-      // `listOpen` makes `findDuplicateEscalation` return `undefined` for every key, so this site
+      // `listOpen` makes `findDuplicateEscalations` return an empty list for every key, so this site
       // behaves exactly as it did before this task — every strike still spends.
       deps.issues.listOpen
         ? {
-            headSha: review.headSha,
-            key: fixEscalationDedupKey(opts.taskId, opts.prUrl, review.headSha,
+            headSha: holdHeadSha,
+            key: { ...fixEscalationDedupKey(opts.taskId, opts.prUrl, holdHeadSha,
               currentMergeConflict !== undefined, noReviewYet, currentContractRevision),
-            find: (key: EscalationDedupKey) => findDuplicateEscalation(key, { issues: deps.issues }),
+              ...(holdHeadSha !== currentPrHeadSha ? { cause: undefined } : {}) },
+            find: (key: EscalationDedupKey) => findDuplicateEscalations(key, { issues: deps.issues }),
             pendingAnswer: opts.pendingAnswer ?? (opts.constraint !== undefined ? {} : undefined),
             redCheckNames: noReviewYet ? currentCiFailures?.map(f => f.name) : undefined,
-            current: { conflictEvidenceCaptured: hasCapturedMergeConflictEvidence(currentMergeConflict), baseSha: opts.baseSha },
+            current: { conflictEvidenceCaptured: hasCapturedMergeConflictEvidence(currentMergeConflict), baseSha: opts.baseSha,
+              ...(hasCapturedMergeConflictEvidence(currentMergeConflict) ? { conflictRound: true as const } : {}) },
             resolve: (candidate: OpenIssue, clearedCause: string) =>
               resolveClearedEscalation(deps.issues, deps.log, opts.taskId, candidate.url, clearedCause),
           }
@@ -2781,6 +2827,22 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
     // "prior capture was unreadable" contract {@link unchangedTreeStandDownReason} reads.
     if (deps.captureWorktreeSnapshot) {
       lastGateSnapshot = currentTreeSnapshot ? { gateKey, snapshot: currentTreeSnapshot } : undefined;
+    }
+    if (preStrikeStandDown?.reason === CONFLICT_REPAIR_HANDOFF_REASON && currentMergeConflict === undefined) {
+      const conflictHead = currentPinnedSha ?? review.headSha;
+      const captured = await reenteredScopeMergeConflict((args) => (deps.scopeAmendmentGit ?? hostWorktreeGitAsync)(
+        opts.worktreePath, args, { maxBuffer: 1 << 26 }), conflictHead, host.GIT_UNTRACKED_FILES_ALL)
+        .catch((error: unknown) => {
+          const reason = String((error as Error)?.message ?? error);
+          deps.log("fix.gate_read_error", { site: "rung.strike", strike: strikes + 1, read: "scope_merge_conflict", error: reason });
+          return { reason };
+        });
+      if ("evidence" in captured) {
+        currentMergeConflict = captured.evidence;
+        deps.log("fix.merge_mode_reentered", { site: "rung.strike", strike: strikes + 1, head_sha: conflictHead,
+          conflicted_files: conflictedFilePaths(currentMergeConflict) });
+        continue;
+      }
     }
     // W1-T7096: an unchanged tree is a loop SIGNAL — the progress judge decides whether it stops the rung.
     // A wired judge reads the unchanged tree from its own signals; only the stand-in stands down on it here.
@@ -2860,6 +2922,39 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
       deps.log("fix.stood_down", { site: "rung.strike", strike: strikes + 1, reason: preStrikeStandDown.reason });
       deps.say(`fix rung: standing down before strike ${strikes + 1} — ${preStrikeStandDown.reason}`);
       return { outcome: "stood_down", review, strikes, retriggers, reason: preStrikeStandDown.reason, standDownReason: preStrikeStandDown.reason };
+    }
+
+    // W1-T10339: a handoff is reused only while the inputs it read stand — an amended contract or an edited (taskless)
+    // PR body at the same head gets a real round. A row from before those fields existed keeps the head-only reuse.
+    // The review can still name the held head after a conflict push when CI is red. The
+    // question may have rotated into an archive, so the equal-head case needs the recovered rows too.
+    const priorDesign = holdRows.find((row) =>
+      row.step === "fix.needs_design" && row.task_id === opts.taskId && row.head_sha === holdHeadSha &&
+      !(typeof row.contract_revision === "string" && row.contract_revision !== currentContractRevision) &&
+      !(typeof row.read_body_sha256 === "string" && opts.prBodySha256 !== undefined && row.read_body_sha256 !== opts.prBodySha256));
+    if (priorDesign && !hasCapturedMergeConflictEvidence(currentMergeConflict)) {
+      const priorHeadSha = review.headSha;
+      const roundLedger = holdLedgerRows;
+      const reason = String(priorDesign.reason);
+      const escalated = roundLedger.findLast((row) => row.step === "fix.stood_down" && row.site === "rung.needs_design" &&
+        row.task_id === opts.taskId && row.head_sha === priorHeadSha && typeof row.issue_url === "string");
+      let issueUrl = typeof escalated?.issue_url === "string" ? escalated.issue_url : undefined;
+      let deliveryError: { error: string } | undefined;
+      if (!issueUrl) try {
+        issueUrl = (await escalateForTask({ class: "BLOCKED", taskId: opts.taskId, runId: opts.runId,
+          headSha: priorHeadSha, cause: escalationCause(currentMergeConflict !== undefined, noReviewYet), contractRevision: `needs-design:${prNumber}:${priorHeadSha}`,
+          summary: `PR #${prNumber}'s fix lane handed it back NEEDS_DESIGN and stands down every pass — ${opts.prUrl}`,
+          detail: `${opts.prUrl} at ${priorHeadSha}: a fix worker answered NEEDS_DESIGN, so every later pass stands down ` +
+            `at this head without a round. The worker's diagnosis:\n\n${reason}`,
+          options: [{ label: "repair-cause", detail: "repair what the diagnosis names; a new head resumes the fix lane" },
+            { label: "hand-fix", detail: "push a fix to this PR by hand; a new head resumes the fix lane" }],
+          recommendation: "repair-cause", consequence: "this PR stays red and unmerged at this head" },
+        { issues: deps.escalationIssues ?? deps.issues, ledgerPath: deps.ledgerPath, runId: opts.runId, judge: escalationJudge })) || undefined;
+      } catch (error) {
+        deliveryError = { error: String(error) };
+      }
+      deps.log("fix.stood_down", { head_sha: priorHeadSha, reason, site: "rung.needs_design", issue_url: issueUrl, ...deliveryError });
+      return { outcome: "needs_design", review, strikes, retriggers, reason, issueUrl };
     }
 
     // W1-T10029: revalidate concrete reconstructed failed proofs before the first dispatch on
@@ -3328,6 +3423,7 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
           const handoff = ciHandoff(gated);
           if (handoff) return handoff;
           currentPinnedSha = ciGateSha(gated) ?? currentPinnedSha;
+          currentPrHeadSha = ciGateSha(gated) ?? generatorResult.commitSha;
           if (deps.fetchCiFailures) {
             try {
               currentCiFailures = await deps.fetchCiFailures(opts.prUrl, ciGateSha(gated));
@@ -4041,34 +4137,6 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
         return { outcome: "stood_down", review, strikes, retriggers, reason: "awaiting scope amendment merge" };
       }
     }
-    // W1-T10339: a handoff is reused only while the inputs it read stand — an amended contract or an edited (taskless)
-    // PR body at the same head gets a real round. A row from before those fields existed keeps the head-only reuse.
-    const priorDesign = roundLedger.find((row) =>
-      row.step === "fix.needs_design" && row.task_id === opts.taskId && row.head_sha === priorHeadSha &&
-      !(typeof row.contract_revision === "string" && row.contract_revision !== currentContractRevision) &&
-      !(typeof row.read_body_sha256 === "string" && opts.prBodySha256 !== undefined && row.read_body_sha256 !== opts.prBodySha256));
-    if (priorDesign) {
-      const reason = String(priorDesign.reason);
-      const escalated = roundLedger.findLast((row) => row.step === "fix.stood_down" && row.site === "rung.needs_design" &&
-        row.task_id === opts.taskId && row.head_sha === priorHeadSha && typeof row.issue_url === "string");
-      let issueUrl = typeof escalated?.issue_url === "string" ? escalated.issue_url : undefined;
-      let deliveryError: { error: string } | undefined;
-      if (!issueUrl) try {
-        issueUrl = (await escalateForTask({ class: "BLOCKED", taskId: opts.taskId, runId: opts.runId,
-          headSha: priorHeadSha, cause: escalationCause(currentMergeConflict !== undefined, noReviewYet), contractRevision: `needs-design:${prNumber}:${priorHeadSha}`,
-          summary: `PR #${prNumber}'s fix lane handed it back NEEDS_DESIGN and stands down every pass — ${opts.prUrl}`,
-          detail: `${opts.prUrl} at ${priorHeadSha}: a fix worker answered NEEDS_DESIGN, so every later pass stands down ` +
-            `at this head without a round. The worker's diagnosis:\n\n${reason}`,
-          options: [{ label: "repair-cause", detail: "repair what the diagnosis names; a new head resumes the fix lane" },
-            { label: "hand-fix", detail: "push a fix to this PR by hand; a new head resumes the fix lane" }],
-          recommendation: "repair-cause", consequence: "this PR stays red and unmerged at this head" },
-        { issues: deps.escalationIssues ?? deps.issues, ledgerPath: deps.ledgerPath, runId: opts.runId, judge: escalationJudge })) || undefined;
-      } catch (error) {
-        deliveryError = { error: String(error) };
-      }
-      deps.log("fix.stood_down", { head_sha: priorHeadSha, reason, site: "rung.needs_design", issue_url: issueUrl, ...deliveryError });
-      return { outcome: "needs_design", review, strikes, retriggers, reason, issueUrl };
-    }
     const priorUnmetClaims = new Set(unmet.map((c) => c.claim));
     // W1-T2328: the ci-log evidence THIS round's dispatch (below) is about to target, snapshotted
     // BEFORE the strike runs — mirrors `priorHeadSha`/`priorUnmetClaims` immediately above, for
@@ -4318,6 +4386,7 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
           currentCiFailures = adopted;
           for (const f of adopted) everRedCiCheckNames.add(f.name);
           review = { ...review, headSha: publishedHead };
+          currentPrHeadSha = publishedHead;
           continue;
         }
         const reason = `published branch advanced from ${priorHeadSha} to ${publishedHead} before the worker started; the ordinary sweep must read fresh exact-head failure evidence`;
@@ -4342,12 +4411,30 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
         runId: opts.runId,
         taskId: opts.taskId,
         snapshot: { headSha: priorHeadSha, failingChecks: (priorCiFailures ?? []).map((f) => f.name) },
+        fixRound: { prUrl: opts.prUrl, branch: opts.branch },
       }), deps.log);
       if (spawnOutcome.kind === "superseded") {
         const s = spawnOutcome.superseded;
         const reason = `fix superseded (${s.condition}): ${s.oldHead.slice(0, 12)} -> ${s.newHead.slice(0, 12)}`;
         deps.say(`fix rung: STOPPED strike ${attempt}/${opts.strikeCap} — ${reason}: ${opts.prUrl}`);
         return { outcome: "stood_down", review, strikes, retriggers, reason, standDownReason: reason, superseded: s };
+      }
+      if (spawnOutcome.kind === "yielded") {
+        // W1-T8141: a pending recycle ended the round; spawnFixWorkerBounded kept the work. No fix.dispatch, no strike.
+        const y = spawnOutcome.yielded;
+        deps.log("fix.done", { ...fixReceipt.joinFields(), round_id: roundId, head_sha: priorHeadSha,
+          ...(deps.branchClaim ? { branch_claim_run_id: deps.branchClaim.id() } : {}),
+          strike: attempt, round, subtype: "round_yielded", trigger: y.trigger, recovery_ref: y.recoveryRef ?? null,
+          index_recovery_ref: y.indexRecoveryRef ?? null,
+          cost_usd: y.costUsd, elapsed_ms: spawnOutcome.elapsedMs });
+        deps.branchClaim?.release();
+        const kept = [y.recoveryRef && `work kept at ${y.recoveryRef}`, y.indexRecoveryRef && `staged work kept at ${y.indexRecoveryRef}`]
+          .filter(Boolean).join(", ");
+        const reason = `fix round yielded to a pending ${y.trigger}: ${kept
+          || (y.keepError ? `work left in the worktree (${y.keepError})` : "no work to keep")}`;
+        deps.say(`fix rung: strike ${attempt}/${opts.strikeCap} YIELDED, no strike spent — ${reason}: ${opts.prUrl}`);
+        return { outcome: "stood_down", review, strikes, retriggers, reason, standDownReason: reason,
+          ...(y.keepError ? { retainWorktree: reason } : {}) };
       }
       if (spawnOutcome.kind === "abandoned") {
         deps.say(
@@ -4791,13 +4878,15 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
 
     // The fix rung's own footer carries the same '## Follow-ups' invitation (renderFixPrompt
     // above); PR provenance included (the fix rung always has one).
-    host.harvestFollowupsFromReport(workerTranscript(fixResult), {
+    const harvestContext = {
       label: "fix",
       prUrl: opts.prUrl,
       runId: opts.runId,
+      worktreePath: opts.worktreePath,
       log: deps.log,
       say: deps.say,
-    });
+    };
+    host.harvestFollowupsFromReport(workerTranscript(fixResult), harvestContext);
 
     if (fixAction.kind === "verify-base") {
       const files = baseReproductionFiles(priorCiFailures ?? []);
@@ -5122,6 +5211,7 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
     // W1-T2804: one gate read, one sha, and the miner below is pinned to it — never a second
     // independent head resolution between the two halves of a single decision.
     currentPinnedSha = ciGateSha(ci) ?? currentPinnedSha;
+    currentPrHeadSha = ciGateSha(ci) ?? landing.remoteHead ?? expectedHeadShaForPush ?? currentPrHeadSha;
     if (host.ciGateState(ci) !== "green") {
       deps.log("fix.ci_not_green", { strike: strikes, ci: host.ciGateState(ci), sha: ciGateSha(ci) });
       // W1-T138 (the #303/#305/#292/#315 fix): no review ran for THIS push
@@ -5426,6 +5516,7 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
       openTaskIds: opts.openTaskIds,
     });
     progressReviewInputDigest = reviewInputBody === undefined ? undefined : reviewInputDigest(review.headSha, reviewInputBody);
+    currentPrHeadSha = review.headSha;
     if (review.verdictWithheld) {
       deps.log("fix.stood_down", { site: "rung.reviewer_code_freshness", strikes, reason: review.verdictWithheld });
       return { outcome: "stood_down", review, strikes, retriggers, reason: review.verdictWithheld, standDownReason: review.verdictWithheld };
@@ -5782,6 +5873,14 @@ export async function fixCatalogTask(taskId: string, plan: Plan, options: TaskLo
   return findTaskInCatalogs(taskId, { ...options, byId: plan.byId });
 }
 
+/** W1-T12701: the refusal fields of a dispatch that ran no round; empty for every other reason. */
+function noFixRoundFields(reason: string): Record<string, unknown> {
+  const notRun = /^no fix round ran: ([\s\S]*)$/.exec(reason)?.[1];
+  if (notRun === undefined) return {};
+  const judged = /^fix progress (?:judgment failed|judge unavailable): ([\s\S]*)$/.exec(notRun);
+  return judged ? { refusal: "progress_judgment_unavailable", provider_cause: judged[1] } : { refusal: "round_not_run" };
+}
+
 export async function fixCommand(
   rest: string[],
   // Injectable exactly as approveCommand/inboxCommand already are — the seam that lets the
@@ -5840,7 +5939,17 @@ export async function fixCommand(
   }
 
   const ledger = readLedgerLines(ledgerPath);
-  const taskId = reviewTaskIdFromBody(raw.body ?? "");
+  // W1-T12702: the sweep's resolver. Only a PR whose run branch alone names its task needs the changed-path read.
+  const body = raw.body ?? "";
+  const branchOnly = reviewTaskIdFromBody(body) === undefined && resolveReviewTaskId(body, raw.headRefName, false) !== undefined;
+  const emitterFiling = isPlanOnlyFilingPr(ledger, raw.url);
+  const changedPaths = branchOnly && !emitterFiling
+    ? (await runStepsAsync(hydratePlanFilingFilesSteps(owner, repo, [{ number: raw.number, headRefOid: raw.headRefOid }],
+      deps.fetch ?? ((args, onRateLimit) => ghJsonAsync(args, undefined, onRateLimit)), createPlanFilingFileCache(), { missCap: 1 })))
+      .get(raw.number)
+    : undefined;
+  const planOnlyFiling = branchOnly && classifyPlanFiling(emitterFiling, changedPaths).isPlanFiling;
+  const taskId = resolveReviewTaskId(body, raw.headRefName, planOnlyFiling);
   const reviewState = reviewStateFromRollup(raw.statusCheckRollup);
   // W1-T2299: same producer as buildOpenPrViews above — see OpenPrView.reviewVerdictPostedAt's doc.
   const reviewVerdictPostedAt = reviewVerdictPostedAtFromRollup(raw.statusCheckRollup);
@@ -5959,6 +6068,7 @@ export async function fixCommand(
     task_id: taskId,
     outcome,
     reason,
+    ...(outcome === "refused" ? noFixRoundFields(reason) : {}),
     ...(operatorRequested ? { operator_requested: true } : {}),
   });
   if (outcome === "fixed") {

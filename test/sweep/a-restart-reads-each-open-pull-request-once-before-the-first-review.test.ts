@@ -90,6 +90,18 @@ function fixture() {
   process.env.RMD_GH_SHARED_READ_GAP_MS = "0";
   let gens = 0;
   /** Each hook gets its own `gh` and its own `gh` cache, so only the kept store can save a read. */
+  // A posted review frees a lane, and the refill reads the open pull requests after the hook returns.
+  // Wait until every shim call has ended and none starts for 2 s, so no read reaches the real `gh`.
+  // W1-T12530: 2 s is longer than the pacer's 1.5 s gap, which a paced read waits with no call open.
+  const settle = async () => {
+    for (let quiet = 0, rounds = 0; quiet < 40 && rounds < 600; rounds++) {
+      const before = shims.flatMap((gh) => gh.events());
+      await sleep(50);
+      const after = shims.flatMap((gh) => gh.events());
+      const open = after.filter((e) => e.phase === "start").length - after.filter((e) => e.phase === "end").length;
+      quiet = open === 0 && after.length === before.length ? quiet + 1 : 0;
+    }
+  };
   const useShim = (headSha: string): GhShim => {
     const gh = shimFor(headSha, repo);
     shims.push(gh);
@@ -119,16 +131,9 @@ function fixture() {
   return { root, repo, logs, posted, rows, hook, timing, storePath, useShim, effects,
     livePull: () => pullRow(liveHead!, repo),
     moveLiveHead: (headSha: string) => { liveHead = headSha; },
+    settle,
     cleanup: async () => {
-      // A posted review frees a lane, and the refill reads the open pull requests after the hook returns.
-      // Wait until every shim call has ended and none starts for 250 ms, so no read reaches the real `gh`.
-      for (let quiet = 0, rounds = 0; quiet < 5 && rounds < 200; rounds++) {
-        const before = shims.flatMap((gh) => gh.events());
-        await sleep(50);
-        const after = shims.flatMap((gh) => gh.events());
-        const open = after.filter((e) => e.phase === "start").length - after.filter((e) => e.phase === "end").length;
-        quiet = open === 0 && after.length === before.length ? quiet + 1 : 0;
-      }
+      await settle();
       for (const [key, value] of oldEnv) {
         if (value === undefined) delete process.env[key]; else process.env[key] = value;
       }
@@ -252,6 +257,9 @@ test("W1-T12236 criterion 6: a kept file list for another head, or an unreadable
   try {
     f.useShim("head-a");
     await f.hook()(IDLE);
+    // W1-T12530: the paced refill of the first hook no longer starts in step with the next hook's read, so
+    // the two do not share one `gh` call. Let it end before the head moves.
+    await f.settle();
     f.posted.length = 0;
     const moved = f.useShim("head-b");
     await f.hook()(IDLE);

@@ -19,7 +19,7 @@
     - src/lib/ledger-steps.ts
     - test/github/the-fleets-app-installation-stays-under-its-hourly-rate-limit.test.ts
     - test/github/the-daemon-sets-its-installation-share-from-a-registry-its-container-can-read.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "When there is no selected registry and the host registry file does not exist, daemonInstallationRegistry reads the checkout's .remudero/daemon-instances.yaml under repoRoot, and the github.budget.configured row's source names that path"
