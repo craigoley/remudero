@@ -373,7 +373,7 @@ export function insertRefusalAmendment(shardText: string, taskId: string, commen
 export interface RefusalAmendmentIo {
   readonly readShard: (taskId: string) => { relPath: string; text: string } | undefined;
   /** W1-T12199: an amendment that waits for its landing has no pull request yet. */
-  readonly probeExisting: (branch: string) => { prUrl?: string } | undefined;
+  readonly probeExisting: (branch: string) => { prUrl?: string } | undefined | Promise<{ prUrl?: string } | undefined>;
   readonly openAmendmentPr: (input: {
     branch: string;
     shardRelPath: string;
@@ -395,6 +395,7 @@ export type RefusalAmendmentOutcome =
   | "text_drift"
   | "already_flagged"
   | "task_closed"
+  | "lookup_unreadable"
   | "error";
 
 export interface RefusalAmendmentResult {
@@ -404,6 +405,7 @@ export interface RefusalAmendmentResult {
   readonly prUrl?: string;
   readonly classes: readonly CriterionRefusalClass[];
   readonly error?: string;
+  readonly code?: string;
 }
 
 /** The stable per-task branch: a second draft before the first PR lands DEDUPES on it. */
@@ -424,7 +426,7 @@ export async function draftRefusalAmendment(
     if (!shard) return { ...base, outcome: "no_shard" };
     if (shard.text.includes(`refusal-amendment (${taskId}, run ${runId},`)) return { ...base, outcome: "already_flagged" };
     const branch = refusalAmendmentBranch(taskId);
-    const existing = io.probeExisting(branch);
+    const existing = await io.probeExisting(branch);
     if (existing) return { ...base, outcome: "deduped", prUrl: existing.prUrl };
     const amendedText = insertRefusalAmendment(
       shard.text,

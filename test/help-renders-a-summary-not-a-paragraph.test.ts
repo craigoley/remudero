@@ -176,7 +176,7 @@ const BASELINE_COMMAND_NAMES = [
   "gh-broker",
   "knowledge",
   "learnings", "ledger-compact", "ledger-grep", "lint-plan", "live-edits", "memory-lint", "merge-hold", "mcp", "next-task-id", "note", "notify", "onboard", "ops", "pause",
-  "peek", "plan", "plan-reconcile", `preflight`, "procedures", "progress-watchdog", "project", "proof-queue-audit", "ratify", "reap-branches", "receipt",
+  "peek", "plan", "plan-destination", "plan-reconcile", `preflight`, "procedures", "progress-watchdog", "project", "proof-queue-audit", "ratify", "reap-branches", "receipt",
   "pr-checks",
   "pr-owner",
   "pr-state",

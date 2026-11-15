@@ -20,7 +20,7 @@
     - src/cli/commands/daemon.ts
     - test/helpers/restart-orphan.ts
     - test/dispatch/the-boot-sweep-reads-the-host-through-an-injected-probe.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "The boot sweep (`bootSweepDispatchClaims` and `bootSweepDispatchClaimsAsync`) takes its hostname, namespace boot time and process presence from one host probe in its inputs. With a fixed probe, the same claims give the same release rows on linux, on darwin and on a host with no /proc"

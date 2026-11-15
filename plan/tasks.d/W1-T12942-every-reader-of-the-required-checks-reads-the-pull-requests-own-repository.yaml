@@ -1,0 +1,62 @@
+- id: W1-T12942
+  title: "Every reader of ci-gate's required checks reads the pull request's own repository, so a managed repository's head repair, board view, fix trigger and ci-gate classification stop judging remudero's check names"
+  repo: remudero
+  priority: 0.6
+  depends_on: [W1-T12940]
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the list decides which checks count as red, pending or stale on every managed pull request
+  band_meaning: span # four reader files, one concern: which checkout the required list is read from
+  origin: "operator-session#pr-queue-root-causes-2026-11-15"
+  plan_refs:
+    - W1-T12940
+    - W1-T2599
+    - W1-T5979
+  files:
+    - src/lib/ci-gate-required.ts
+    - src/lib/sweep.ts
+    - src/lib/tick-read-worker.ts
+    - src/cli/commands/fix.ts
+    - src/cli/commands/sweep.ts
+    - test/ci/every-reader-of-the-required-checks-reads-the-pull-requests-own-repository.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "In an instance that manages another repository, the head-identity repair judges a pull request against that repository's own ci-gate list: with the repository's own checks green it is not refused for unfinished checks, and no remudero check name is reported unfinished"
+      proof: "grep: W1-T12942 criterion 1 in test/ci/every-reader-of-the-required-checks-reads-the-pull-requests-own-repository.test.ts"
+    - claim: "The board's open pull request view and the view rmd fix builds name red and pending required checks from the pull request's own repository: a red check of the managed repository is listed red, and no remudero check name is listed pending"
+      proof: "grep: W1-T12942 criterion 2 in test/ci/every-reader-of-the-required-checks-reads-the-pull-requests-own-repository.test.ts"
+    - claim: "The ci-gate timeout report and the merge-refusal classification read the same per-repository list: the managed repository's own unfinished checks are named, and a red ci-gate whose own required checks are all green classifies as stale"
+      proof: "grep: W1-T12942 criterion 3 in test/ci/every-reader-of-the-required-checks-reads-the-pull-requests-own-repository.test.ts"
+    - claim: "invariant:own-repository-unchanged — for the daemon's own repository every reader returns exactly origin/main's list, and an unreadable managed checkout yields a named unreadable result, never another repository's list"
+      proof: "grep: W1-T12942 criterion 4 in test/ci/every-reader-of-the-required-checks-reads-the-pull-requests-own-repository.test.ts"
+    - claim: "The reader takes a typed source naming the repository and its checkout, and a census over src fails on any call that passes a bare checkout path"
+      proof: "grep: W1-T12942 criterion 5 in test/ci/every-reader-of-the-required-checks-reads-the-pull-requests-own-repository.test.ts"
+  rationale: |
+    FOUND 2026-11-15 by the operator session while fixing W1-T12940, READ on origin/main 99a71759f2.
+
+    - W1-T12940 proved one caller wrong on live rows: the dependency lane read ci-gate's REQUIRED list from the checkout the daemon's code runs from, so console and site bumps were judged against remudero's checks (1,315 hold rows on console, 208 on site).
+    - The same reader has four more callers that pass the same root. `src/lib/repo-location.ts` computes one module-level `repoRoot` from the process, with no knowledge of the instance's repository. `daemonTargetCheckoutRoot` in `src/cli/commands/daemon.ts` is the one place that chooses `<config root>/repos/<repo>` for a managed repository, and the daemon's own early-fix reader uses it.
+    - The four callers, each READ and each passing the module root:
+      - `src/lib/sweep.ts` headRehome `requiredChecks` (root arrives from `src/cli/commands/sweep.ts`). `src/lib/head-rehome.ts` adds the list to the required set and reports every missing name as unfinished, so the repair would refuse a managed pull request with "checks unfinished: ci, lint-plan, ...".
+      - `src/lib/sweep.ts` `readCiGateRequired` (W1-T5979). It filters the ci-gate timeout's not-ready list and feeds the merge-refusal classification.
+      - `src/lib/tick-read-worker.ts` `ciGateRequired` (W1-T2599). It feeds the board view's red and pending required checks and the early CI-log read.
+      - `src/cli/commands/fix.ts` `redRequiredChecks` on the view `rmd fix` builds.
+    - `redQualityGateNames` keeps only rollup entries whose name is in the list, with one fallback for remudero's own shard names. Against a managed repository's rollup remudero's list therefore yields an empty red list.
+    - NOT MEASURED LIVE. A scan of the console ledger's retained rows (8,389 rows, 2026-10-29 to 2026-11-15) for remudero's check names found none of these four outcomes. The retained window is short (about 200 rows per step) and the paths are rare, so the scan does not show they are unreachable.
+  design: |
+    MEASURE FIRST, in process: for each of the four callers build the production wiring for an instance whose repository is not the daemon's own and show which checkout is read. A caller that proves already correct is reported as "already correct, test only" and keeps its pinning test.
+
+    1. `ci-gate-required.ts` gains a typed source (repository, checkout root, own-repository flag) and one resolver, generalising the dependency lane's from W1-T12940, which then calls this one. The reader takes the source, not a path.
+    2. The four callers build the source from the instance's target repository, the way `daemonTargetCheckoutRoot` does.
+    3. An unreadable managed checkout returns a named unreadable result. Callers treat it as "list unknown": no red or pending names are invented and the reason is logged once per pass.
+    4. A census test reads src and fails on a reader call whose argument is a bare path.
+    INVARIANT own-repository-unchanged: for the daemon's own repository the list every reader returns is byte-identical to origin/main's, and an unreadable managed checkout never yields another repository's list.
+    NOT IN SCOPE: the dependency lane's decision (W1-T12940); branch protection reads; refreshing the managed checkout.
+  falsifier: |
+    Pass the module root to the head-identity repair and criterion 1 must fail. Do the same in the board view and criterion 2 must fail, and in the timeout filter and criterion 3 must fail. Return the daemon's list for an unreadable managed checkout and criterion 4 must fail. Add a call with a bare path under src and criterion 5 must fail. Restore and all pass.
+  note: |
+    reservation hand-off: run-unfiled-1794763854161 -> run-unfiled-1794763854161
+    Reserved with rmd next-task-id from a worktree at origin/main. Build after W1-T12940 merges: it adds the first per-repository source in src/lib/dep-review.ts. Check refs/rmd-dispatch/W1-T12942 and any run branch before building. The test folder is the one rmd test-place computed for a stub importing ci-gate-required.ts and sweep.ts.
