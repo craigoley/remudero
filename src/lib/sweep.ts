@@ -292,6 +292,7 @@ import {
   buildEscalationJudgePrompt,
   escalationCause,
   escalationHeadSha,
+  escalationIssueCause,
   fixEscalationDedupKey,
   matchDuplicateEscalation,
   openEscalationStandDownReason,
@@ -16999,7 +17000,7 @@ export type TerminalFixDesignHandoff =
 /**
  * W1-T11013 — rotation keeps `fix.needs_design` rows longer than the round's `fix.dispatch`/`fix.done`, so a live-only
  * read of an old round says "unavailable" and the PR holds forever. `archive` supplies the archive∪live rows (or
- * undefined when that corpus is incomplete); it is consulted only after the live read came up unavailable.
+ * undefined when that corpus is incomplete); it also recovers a question that left the live file entirely.
  */
 export function terminalFixDesignHandoff(
   pr: Pick<OpenPrView, "taskId" | "prNumber" | "prUrl" | "headSha">,
@@ -17007,17 +17008,61 @@ export function terminalFixDesignHandoff(
   archive?: () => ReadonlyArray<Record<string, unknown>> | undefined,
 ): TerminalFixDesignHandoff {
   const live = terminalFixDesignHandoffFromLines(pr, lines);
-  if (live.kind !== "unavailable" || archive === undefined) return live;
+  if (live.kind === "handoff" || archive === undefined) return live;
   const union = archive();
   if (union === undefined) return live;
   const resolved = terminalFixDesignHandoffFromLines(pr, [...union, ...lines]);
-  return resolved.kind === "handoff" ? resolved : live;
+  return resolved.kind === "handoff" || live.kind === "none" ? resolved : live;
+}
+
+function conflictRoundOutranksEscalationHold(
+  pr: { disposition: Disposition; mergeConflict?: MergeConflictEvidence },
+  hold: { kind: "design" } | { kind: "escalation"; cause: string | undefined },
+): boolean {
+  return pr.disposition === "conflicted" && hasCapturedMergeConflictEvidence(pr.mergeConflict) &&
+    (hold.kind === "design" || hold.cause !== "conflict");
+}
+
+export function conflictRoundHeldHead(pr: Pick<OpenPrView, "taskId" | "prNumber" | "prUrl" | "headSha">,
+  lines: ReadonlyArray<Record<string, unknown>>, ledgerPath?: string,
+  archive?: () => ReadonlyArray<Record<string, unknown>> | undefined,
+  holdsAtHead?: (headSha: string, history: ReadonlyArray<Record<string, unknown>>) => boolean): string {
+  const key = fixLedgerTaskIdFor(pr);
+  const seen = new Set([pr.headSha]);
+  const readArchive = archive ?? (ledgerPath === undefined ? undefined : () => readFixRoundArchiveRows(ledgerPath));
+  let history = lines, archiveRead = false;
+  for (let head = pr.headSha; ;) {
+    // A new question can arrive after an earlier conflict push. The nearest held head owns the
+    // question carried by the next push; walking unconditionally to the oldest ancestor loses it.
+    if (holdsAtHead?.(head, history)) return head;
+    // Rotation also archives an ancestor's own question, so an ancestor is read with the archive before it is released.
+    if (head !== pr.headSha && !archiveRead && readArchive !== undefined) {
+      archiveRead = true;
+      const archived = readArchive();
+      if (archived !== undefined) { history = [...archived, ...lines]; continue; }
+    }
+    const pushedBy = history.findLast(row => (row.step === "fix.done" && row.task_id === key && row.pushed_head_sha === head &&
+        typeof row.round_id === "string" && history.some(start => (start.step === "fix.dispatch" || start.step === "fix.retrigger") &&
+          start.task_id === key && start.round_id === row.round_id && start.head_sha === row.head_sha && start.mode === "merge-conflict")) ||
+      (row.step === "sweep.conflict_regenerated" && row.pr_number === pr.prNumber && row.new_head_sha === head &&
+        row.outcome === "pushed"));
+    // Rotation caps the push receipts independently of the held question; a live miss is not an outside head.
+    if (pushedBy === undefined && !archiveRead && readArchive !== undefined) {
+      archiveRead = true;
+      const archived = readArchive();
+      if (archived !== undefined) { history = [...archived, ...lines]; continue; }
+    }
+    const from = pushedBy?.head_sha;
+    if (typeof from !== "string" || seen.has(from)) return head;
+    seen.add(from);
+    head = from;
+  }
 }
 
 /** The production `archive` reader: the fix-round rows across rotations and the live file, or undefined if incomplete. */
 function readFixRoundArchiveRows(ledgerPath: string): ReadonlyArray<Record<string, unknown>> | undefined {
   const read = readLedgerUnionRecordsSync(dirname(ledgerPath), {
-    step: ["fix.dispatch", "fix.done", "fix.needs_design"], refuseIncomplete: true });
+    step: ["fix.dispatch", "fix.retrigger", "fix.done", "fix.needs_design", "sweep.conflict_regenerated"], refuseIncomplete: true });
   return read.ok ? read.rows : undefined;
 }
 
@@ -20645,6 +20690,14 @@ export async function runSweep(
   const refreshRecords = refreshRecordsFromLedger(ledgerLines);
   const refusedClearances = refusedRefreshClearancesFromLedger(ledgerLines);
   const refreshSteps = ["fix.base_refreshed", BASE_RED_REFRESH_STEP, BASE_FIXED_REFRESH_STEP, REFRESH_CLEARANCE_STEP];
+  // Hold ancestry and refresh clearance share one archive snapshot for this pass.
+  let repairHistory: LedgerUnionRecordRead | undefined;
+  const readRepairHistory = () => repairHistory ??= readLedgerUnionRecordsSync(dirname(deps.ledgerPath), {
+    step: [...refreshSteps, "fix.dispatch", "fix.retrigger", "fix.done", "fix.needs_design", "sweep.conflict_regenerated"], refuseIncomplete: true });
+  const readRepairArchive = () => {
+    const union = readRepairHistory();
+    return union.ok ? union.rows : undefined;
+  };
   const oldestRefreshRow = new Map<string, number>();
   for (const row of ledgerLines) {
     if (typeof row.step !== "string" || !refreshSteps.includes(row.step)) continue;
@@ -20662,8 +20715,8 @@ export async function runSweep(
       refreshHistory.set(pr.prNumber, history);
       return history;
     }
-    const union = resolveLedgerUnion(dirname(deps.ledgerPath), `"pr_number":${pr.prNumber}[,}]`, undefined, { step: refreshSteps });
-    const rows = parseLedger(union.matches.join("\n"));
+    const union = readRepairHistory();
+    const rows = union.rows.filter(row => row.pr_number === pr.prNumber && refreshSteps.includes(String(row.step)));
     const records = refreshRecordsFromLedger(rows).get(pr.prNumber) ?? [];
     refreshRecords.set(pr.prNumber, [...records, ...(refreshRecords.get(pr.prNumber) ?? [])]);
     for (const [key, evidence] of refusedRefreshClearancesFromLedger(rows)) {
@@ -20671,8 +20724,8 @@ export async function runSweep(
     }
     for (const key of baseRedHistoryFromLedger(rows).refreshed) baseRedHistory.refreshed.add(key);
     const unread = [...union.unread, ...(union.unclassified ?? [])];
-    if (!union.ok && unread.length === 0) unread.push(dirname(deps.ledgerPath));
-    const history = { source: !union.ok || unread.length > 0 ? "unreadable" as const : "union" as const, unread };
+    if ((!union.ok || union.archiveCount === 0) && unread.length === 0) unread.push(dirname(deps.ledgerPath));
+    const history = { source: !union.ok || union.archiveCount === 0 || unread.length > 0 ? "unreadable" as const : "union" as const, unread };
     refreshHistory.set(pr.prNumber, history);
     return history;
   };
@@ -22632,10 +22685,25 @@ export async function runSweep(
     let standDownHold: { site: string; reason: string; at?: string } | undefined;
     let heldEscalationAt: string | undefined;
     let heldEscalationDedup: string | undefined;
+    let designHoldKept = false;
+    let escalationHoldKept: string | undefined;
+    const holdable = disposition === "conflicted" || disposition === "blocked-fixable";
+    const openForHead = holdable && !deps.dryRun ? await readOpenEscalations() : [];
+    const holdHead = holdable ? conflictRoundHeldHead(pr, ledgerLines, deps.ledgerPath, readRepairArchive, (head, history) => {
+      const atHead = head === pr.headSha ? pr : { ...pr, headSha: head };
+      if (terminalFixDesignHandoff(atHead, history, readRepairArchive).kind !== "none") return true;
+      const key = fixEscalationDedupKey(escalationTaskIdFor(pr), pr.prUrl, head,
+        pr.mergeConflict !== undefined, isBlockedCi(pr), undefined);
+      return openForHead.some(issue => matchDuplicateEscalation({ ...key, cause: undefined }, [issue]) !== undefined &&
+        openEscalationStandDownReason(head, issue, undefined,
+          { conflictEvidenceCaptured: hasCapturedMergeConflictEvidence(pr.mergeConflict), baseSha: mainTipSha },
+          isBlockedCi(pr) ? redCheckNames(pr) : undefined, pr.pendingAnswer) !== undefined && escalationIssueCause(issue.body) !== "conflict");
+    }) : pr.headSha;
     if ((disposition === "conflicted" || disposition === "blocked-fixable") &&
         !inFlightFixKeys.has(`${fixLedgerTaskIdFor(pr) ?? ""}@${pr.headSha}`) &&
         !dispatchCauseHolds.get(pr.prNumber)) {
-      const handoff = terminalFixDesignHandoff(pr, ledgerLines, () => readFixRoundArchiveRows(deps.ledgerPath));
+      const handoff = terminalFixDesignHandoff(holdHead === pr.headSha ? pr : { ...pr, headSha: holdHead }, ledgerLines,
+        readRepairArchive);
       if (handoff.kind === "handoff") {
         const held = handoff.producer;
         const recorded = ledgerLines.findLast(row => row.step === "sweep.disposed" && row.pr_number === pr.prNumber &&
@@ -22666,21 +22734,27 @@ export async function runSweep(
             ? { standingOn: semanticStandingOn, observed: semanticCurrent } : undefined;
           const amended = current !== undefined && standingOn !== undefined &&
             (current !== standingOn || semantic !== undefined && semantic.standingOn !== semantic.observed);
-          const behindBy = deps.behindMainByPr?.get(pr.prNumber);
-          const mainAdoptionDecision = amended ? "contract-amended" : designMainAdoptionSpent ? "pass-budget-spent" :
-            designHoldMainAdoptionDecision(pr, ledgerLines, behindBy, mainTipSha, deps.updateBranch !== undefined);
-          const mainAdoption = mainAdoptionDecision === "due";
-          terminalDesignHold = { amended, mainAdoptionDecision, ...(mainAdoption ? { mainAdoption: true as const } : {}),
-            revision: standingOn ?? current, observedRevision: current, semantic, roundId: handoff.roundId };
-          disposition = amended || mainAdoption ? "blocked-fixable" : "refused-escalate";
-          reason = amended ? "task contract amended under this terminal design handoff — adopting main before any fix admission"
-            : mainAdoption ? `fix needs design at this exact head (round ${handoff.roundId}), which is ${behindBy} commit(s) ` +
-              `behind main — taking main into the branch once before a person is asked: ${handoff.reason}`
-            : `fix needs design at this exact head (round ${handoff.roundId}) — ${handoff.reason}`;
-          if (mainAdoption) designMainAdoptionSpent = true;
-          if (!amended && !mainAdoption) {
-            ruleBlockerByIndex.set(prIndex, "escalated");
-            heldEscalationAt = typeof handoff.producer.ts === "string" ? handoff.producer.ts : undefined;
+          if (!amended && conflictRoundOutranksEscalationHold({ disposition, mergeConflict: pr.mergeConflict }, { kind: "design" })) {
+            designHoldKept = true;
+            reason = `fix needs design at ${holdHead.slice(0, 7)} (round ${handoff.roundId}), but the merge conflict is not that ` +
+              `question — the conflict round runs, and the design hold still applies at the head it pushes: ${handoff.reason}`;
+          } else {
+            const behindBy = deps.behindMainByPr?.get(pr.prNumber);
+            const mainAdoptionDecision = amended ? "contract-amended" : designMainAdoptionSpent ? "pass-budget-spent" :
+              designHoldMainAdoptionDecision(pr, ledgerLines, behindBy, mainTipSha, deps.updateBranch !== undefined);
+            const mainAdoption = mainAdoptionDecision === "due";
+            terminalDesignHold = { amended, mainAdoptionDecision, ...(mainAdoption ? { mainAdoption: true as const } : {}),
+              revision: standingOn ?? current, observedRevision: current, semantic, roundId: handoff.roundId };
+            disposition = amended || mainAdoption ? "blocked-fixable" : "refused-escalate";
+            reason = amended ? "task contract amended under this terminal design handoff — adopting main before any fix admission"
+              : mainAdoption ? `fix needs design at this exact head (round ${handoff.roundId}), which is ${behindBy} commit(s) ` +
+                `behind main — taking main into the branch once before a person is asked: ${handoff.reason}`
+              : `fix needs design at this exact head (round ${handoff.roundId}) — ${handoff.reason}`;
+            if (mainAdoption) designMainAdoptionSpent = true;
+            if (!amended && !mainAdoption) {
+              ruleBlockerByIndex.set(prIndex, "escalated");
+              heldEscalationAt = typeof handoff.producer.ts === "string" ? handoff.producer.ts : undefined;
+            }
           }
         }
       } else if (handoff.kind === "unavailable") {
@@ -22714,13 +22788,27 @@ export async function runSweep(
         reason = `${reason} — the rung's conflict hand-off at ${held!.hold!.at} was held under main ${heldUnderMain.slice(0, 7)}, and ` +
           `main is now ${mainTipSha!.slice(0, 7)}, so the rung re-reads this head's mergeability (W1-T11173)`;
       }
-      if (held?.kind === "held" && held.hold !== undefined && !conflictHandoff && !conflictHoldReleased) {
+      if (held?.kind === "held" && held.hold !== undefined && !conflictHandoff && !conflictHoldReleased &&
+          !(designHoldKept && held.hold.site === "rung.needs_design")) {
         standDownHold = held.hold;
         heldEscalationAt = held.hold.at;
         disposition = "refused-escalate";
         reason = `fix stood down at ${held.hold.site} and nothing it read has changed (head ${pr.headSha.slice(0, 7)}, task contract` +
           `${standDownBodySha === undefined ? "" : ", PR body"}) — no worker is dispatched until one does: ${held.hold.reason}`;
         ruleBlockerByIndex.set(prIndex, "escalated");
+      }
+    }
+    if (disposition === "conflicted" && hasCapturedMergeConflictEvidence(pr.mergeConflict) && !deps.dryRun) {
+      const key = fixEscalationDedupKey(escalationTaskIdFor(pr), pr.prUrl, pr.headSha, true, isBlockedCi(pr),
+        deps.readTaskContractRevision?.(escalationTaskIdFor(pr)));
+      const open = matchDuplicateEscalation({ ...key, cause: undefined }, await readOpenEscalations());
+      if (open !== undefined && openEscalationStandDownReason(pr.headSha, open, key.contractRevision,
+        { conflictEvidenceCaptured: true, baseSha: mainTipSha }, undefined, pr.pendingAnswer) !== undefined &&
+        conflictRoundOutranksEscalationHold({ disposition, mergeConflict: pr.mergeConflict },
+          { kind: "escalation", cause: escalationIssueCause(open.body) })) {
+        escalationHoldKept = open.url;
+        reason = `${reason} — the open escalation ${open.url} is not about the merge conflict, so the conflict round runs, ` +
+          "and the escalation still applies at the head it pushes";
       }
     }
     // W1-T10653: an already-open-escalation stand-down is not a hold, so it never reached the SLO below; once it has aged past
@@ -23151,6 +23239,9 @@ export async function runSweep(
     if (standDownHold) extraDisposedFields = { ...extraDisposedFields, stand_down_hold: true, stand_down_site: standDownHold.site,
       ...(standDownHold.site === "rung.strike" && standDownHold.reason === CONFLICT_REPAIR_HANDOFF_REASON && mainTipSha !== undefined
         ? { stand_down_at: standDownHold.at, stand_down_main_sha: mainTipSha } : {}) };
+    if (designHoldKept) extraDisposedFields = { ...extraDisposedFields, design_hold_kept: true };
+    if (escalationHoldKept !== undefined) extraDisposedFields = { ...extraDisposedFields, escalation_hold_kept: escalationHoldKept };
+    if (holdHead !== pr.headSha) extraDisposedFields = { ...extraDisposedFields, hold_head_sha: holdHead };
     if (terminalDesignHold) extraDisposedFields = { ...extraDisposedFields, needs_design_hold: true, needs_design_round_id: terminalDesignHold.roundId,
       design_hold_main_adoption_decision: terminalDesignHold.mainAdoptionDecision,
       ...(terminalDesignHold.revision === undefined ? {} : { progress_contract_revision: terminalDesignHold.revision }),
@@ -23541,12 +23632,13 @@ export async function runSweep(
             case "blocked-fixable": {
               const issues = await readOpenEscalations();
               if (issues.length > 0) {
-                const escalationKey = fixEscalationDedupKey(escalationTaskIdFor(pr), pr.prUrl, pr.headSha,
+                const escalationKey = fixEscalationDedupKey(escalationTaskIdFor(pr), pr.prUrl, holdHead,
                   pr.mergeConflict !== undefined, isBlockedCi(pr), deps.readTaskContractRevision?.(escalationTaskIdFor(pr)));
-                const candidate = matchDuplicateEscalation(escalationKey, issues);
-                const openHold = openEscalationStandDownReason(pr.headSha, candidate, escalationKey.contractRevision,
-                  { conflictEvidenceCaptured: hasCapturedMergeConflictEvidence(pr.mergeConflict), baseSha: mainTipSha },
-                  isBlockedCi(pr) ? redCheckNames(pr) : undefined, pr.pendingAnswer);
+                const holdKey = holdHead === pr.headSha ? escalationKey : { ...escalationKey, cause: undefined };
+                const openHold = issues.filter(issue => matchDuplicateEscalation(holdKey, [issue]) !== undefined)
+                  .map(issue => openEscalationStandDownReason(holdHead, issue, escalationKey.contractRevision,
+                    { conflictEvidenceCaptured: hasCapturedMergeConflictEvidence(pr.mergeConflict), baseSha: mainTipSha },
+                    isBlockedCi(pr) ? redCheckNames(pr) : undefined, pr.pendingAnswer)).find(hold => hold !== undefined);
                 if (openHold) {
                   acted = false;
                   spent = false;
