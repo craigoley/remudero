@@ -8,6 +8,7 @@ import { AGENT_CLOCK_MS } from "#src/lib/agent-view.js";
 import { INSTANCE_LIVENESS_BOUND_MS, type InstancesData } from "#src/lib/instances-view.js";
 import { navBadgeAnalyticsSlice, navBadgeSourcesPath, INBOX_STALE_AFTER_MS, NAV_BADGE_CLOCK_MS } from "#src/lib/nav-badge-view.js";
 import { createDemandBook } from "#src/lib/view-demand.js";
+import type { ViewSource } from "#src/lib/views.js";
 import {
   createReadModelTicker, readModelLaneViews, readModelSwitchesPath,
   type ReadModelView, type ReadModelViewContext, type ReadModelWorkerMessage,
@@ -34,6 +35,7 @@ function fixture(t: TestContext) {
   let value = 1;
   let key = "";
   let fresh = true;
+  let source: Pick<ViewSource, "name" | "budgetMs"> = { name: "file:fixture" };
   let context: ReadModelViewContext;
   const view: ReadModelView & { inputsFingerprint?: (ctx: ReadModelViewContext) => string | undefined } = {
     name: "declared", version: 1,
@@ -41,7 +43,7 @@ function fixture(t: TestContext) {
     materialize: ctx => {
       context = ctx;
       builds++;
-      return [{ key, data: { value }, sources: [{ name: "file:fixture", asOf: iso(), state: fresh ? "fresh" : "stale" }] }];
+      return [{ key, data: { value }, sources: [{ ...source, asOf: iso(), state: fresh ? "fresh" : "stale" }] }];
     },
   };
   const ticker = createReadModelTicker({ stateDir: dir, instances: [{ name: "core", ledgerDir, planPath }],
@@ -59,8 +61,9 @@ function fixture(t: TestContext) {
     return last.entry;
   };
   return { ticker, view, planPath, dir, tick, append, build, body, switches, messages,
-    start, count: () => builds, context: () => context!,
+    start, count: () => builds, context: () => context!, iso,
     value: (n: number) => { value = n; }, key: (s: string) => { key = s; }, fresh: (b: boolean) => { fresh = b; },
+    source: (next: typeof source) => { source = next; },
   };
 }
 
@@ -124,20 +127,86 @@ test("W1-T11975 criterion 4: undeclared views retain the generation and snapshot
   assert.equal(builds, 3, "an undeclared view still rebuilds when its store generation moves");
 });
 
-test("W1-T11975 criterion 6: skip preserves non-ledger stamps and stale sources always rebuild", t => {
+/**
+ * Every reading of source `name` the worker has posted, oldest first. A reading is posted whenever a source's
+ * stamp moves (the clock list and the per-body list), so a skip that restamped a source as of the clock would
+ * add a reading with a newer as-of here, while a faithful republish adds none or repeats the built one.
+ */
+function readingsOf(messages: ReadModelWorkerMessage[], name: string): Array<ViewSource> {
+  return messages.flatMap(m => m.type === "sources" ? [...m.sources, ...(m.bodies ?? []).flatMap(b => b.sources)] : [])
+    .filter(source => source.name === name);
+}
+
+test("W1-T11975 criterion 6: a skip republishes a non-ledger source as its last build stamped it, not as of the clock", t => {
   const f = fixture(t);
-  f.view.ledgerReads = () => null;
-  f.tick(); f.build();
-  const stamped = f.body().body.sources;
-  f.tick(1_000);
-  const sources = f.messages.flatMap(m => m.type === "sources" ? m.bodies ?? [] : []).at(-1);
+  f.tick(); // The first build stamps file:fixture as of t0.
+  const builtAsOf = f.body().body.sources.find(source => source.name === "file:fixture")!.asOf!;
+  f.build(); // The first would-be skip is audited: a build at the same instant.
   assert.equal(f.count(), 2);
-  // A skip may emit no source update at all when every source is unchanged.
-  assert.deepEqual(sources?.sources ?? stamped, stamped);
-  f.view.inputsFingerprint = () => "stale-build";
+  assert.equal(readingsOf(f.messages, "file:fixture").at(-1)?.asOf, builtAsOf,
+    "positive control: the posted readings carry the built stamp");
+  const mark = f.messages.length;
+  const calls = f.count();
+  f.tick(1_000); // Past the unit's rebuild interval (its measured cost is zero), so the unit is due.
+  f.build();
+  assert.ok(Date.parse(f.iso()) > Date.parse(builtAsOf), "the clock is past the build");
+  assert.equal(f.count(), calls, "the build function was not called: both passes skipped");
+  assert.equal(f.messages.filter(m => m.type === "log" && m.step === "read_model.materialize_failed").length, 0);
+  const after = readingsOf(f.messages.slice(mark), "file:fixture");
+  assert.ok(after.every(source => source.asOf === builtAsOf), "no skip posted a reading stamped as of the clock");
+  assert.equal(readingsOf(f.messages, "file:fixture").at(-1)?.asOf, builtAsOf, "the latest reading is still the build's");
+  assert.notEqual(readingsOf(f.messages, "file:fixture").at(-1)?.asOf, f.iso());
+  f.tick(600_000);
+  const tally = f.messages.find(m => m.type === "log" && m.step === "read_model.view_builds");
+  assert.ok(tally?.type === "log");
+  assert.ok(Number(tally.extra.skipped) >= 1, "the tally counts the skips");
+  // Responsiveness: when the unit does build at the later clock, the same channel reports the newer stamp.
+  const beforeMoved = f.count();
+  f.view.inputsFingerprint = () => "moved";
+  f.build();
+  assert.equal(f.count(), beforeMoved + 1, "a moved fingerprint calls the build function");
+  assert.equal(readingsOf(f.messages, "file:fixture").at(-1)?.asOf, f.iso(), "a real build is observable as a newer stamp");
+  assert.notEqual(f.iso(), builtAsOf);
+});
+
+test("W1-T11975 criterion 6: a last body with a source that is not fresh is always rebuilt", t => {
+  const f = fixture(t);
   f.fresh(false);
-  f.build(); f.build(); f.build();
-  assert.equal(f.count(), 5);
+  f.tick();
+  f.tick(1_000);
+  f.build(); f.build();
+  assert.equal(f.count(), 4, "an unchanged fingerprint cannot skip while the last body has a stale source");
+  assert.equal(f.body().body.stale, true);
+  f.tick(600_000);
+  const tally = f.messages.find(m => m.type === "log" && m.step === "read_model.view_builds");
+  assert.ok(tally?.type === "log");
+  assert.equal(tally.extra.skipped, undefined, "nothing was skipped");
+  assert.ok((tally.extra.not_skipped as Record<string, number>).sources >= 3, "each rebuild is counted under sources");
+});
+
+test("W1-T11975 criterion 6: positive control, the same sequence with a fresh source skips", t => {
+  const f = fixture(t);
+  f.tick();
+  f.tick(1_000);
+  f.build(); f.build();
+  assert.equal(f.count(), 2, "only the first build and the audit call the build function");
+});
+
+test("W1-T11975 criterion 6: a fresh source that ages past its budget between builds is rebuilt, not republished", t => {
+  const f = fixture(t);
+  f.source({ name: "github:fixture", budgetMs: 2_000 });
+  f.tick();
+  f.build();
+  const builtAsOf = f.body().body.sources[0].asOf!;
+  assert.equal(f.count(), 2);
+  f.tick(1_000);
+  assert.equal(f.count(), 2, "inside the budget the body is skipped");
+  f.tick(3_000); // The built source is now 4 s old against a 2 s budget: judged stale, though its producer called it fresh.
+  assert.equal(f.count(), 3, "past the budget the body is rebuilt");
+  assert.equal(readingsOf(f.messages, "github:fixture").at(-1)?.asOf, f.iso());
+  assert.notEqual(f.iso(), builtAsOf);
+  f.build();
+  assert.equal(f.count(), 3, "positive control: freshly stamped, the next pass skips again");
 });
 
 test("W1-T11975 criterion 7: first and twentieth skips audit, mismatch disables only that unit", t => {
@@ -436,6 +505,33 @@ test("W1-T11975 criterion 8: production lane declarations skip unrelated rows an
     }
   }
   assert.equal(f.messages.filter(m => m.type === "log" && m.step === "read_model.view_skip_mismatch").length, 0);
+});
+
+test("W1-T11975 criterion 6: a skipped production instances body republishes registry:repo and inbox-capability as built", t => {
+  const f = production(t);
+  const built = f.output.get("instances")![0].sources;
+  const names = ["registry:repo", ...f.instances.map(i => `inbox-capability:${i.name}`)];
+  const stamps = new Map(names.map(name => {
+    const source = built.find(candidate => candidate.name === name);
+    assert.ok(source, `${name} is a source of the built instances body`);
+    assert.equal(source.state, "fresh", `${name} is fresh, so the declared body may be reused`);
+    return [name, source.asOf] as const;
+  }));
+  assert.equal(stamps.get("inbox-capability:core"), f.iso(), "the capability source is stamped as of the build's clock");
+  for (const name of names) {
+    assert.equal(readingsOf(f.messages, name).at(-1)?.asOf, stamps.get(name), `positive control: ${name}'s posted reading is the built stamp`);
+  }
+  const mark = f.messages.length;
+  const calls = f.counts.get("instances");
+  f.tick(1_000); // Inside the capability stamp's bucket and the liveness bound, so only the clock moves.
+  f.build("instances");
+  assert.notEqual(f.iso(), stamps.get("inbox-capability:core"), "the clock is past the build");
+  assert.equal(f.counts.get("instances"), calls, "the instances build function was not called: both passes skipped");
+  for (const name of names) {
+    assert.ok(readingsOf(f.messages.slice(mark), name).every(source => source.asOf === stamps.get(name)),
+      `no skip posted ${name} stamped as of the clock`);
+    assert.equal(readingsOf(f.messages, name).at(-1)?.asOf, stamps.get(name), `${name} is still republished as built`);
+  }
 });
 
 test("W1-T11975 criterion 7: an instance mismatch leaves the other instance's audits and skips enabled", t => {
