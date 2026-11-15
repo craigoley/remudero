@@ -26479,11 +26479,15 @@ async function runSweepLightPassCore(
   // ledger-read-intent: live — this fold reads the live file only, never rotations.
   const readLedger = deps.readLedger ?? readLiveLedgerRows;
   const selectionLedgerLines = readLedger(deps.ledgerPath);
-  openPrs = openPrs.map(pr => promiseHarvestRetryView(pr, selectionLedgerLines, deps.sampleLoad));
-  const selectionPrior = priorActionsFromLedger(selectionLedgerLines, openPrs, deps.sampleLoad);
-  openPrs = openPrs.map(pr => completedRefusalRetryView(pr, selectionPrior));
+  const ownNumbers = new Set(openPrs.map((pr) => pr.prNumber));
+  let queuePrs = deps.snapshotOpenPrs === undefined ? openPrs
+    : [...openPrs, ...deps.snapshotOpenPrs.filter((pr) => !ownNumbers.has(pr.prNumber))];
+  queuePrs = queuePrs.map(pr => promiseHarvestRetryView(pr, selectionLedgerLines, deps.sampleLoad));
+  const selectionPrior = priorActionsFromLedger(selectionLedgerLines, queuePrs, deps.sampleLoad);
+  queuePrs = queuePrs.map(pr => completedRefusalRetryView(pr, selectionPrior));
+  openPrs = queuePrs.filter((pr) => ownNumbers.has(pr.prNumber));
   const freshnessBackoffs = new Set<string>();
-  for (const pr of openPrs) {
+  for (const pr of queuePrs) {
     const key = reviewOutcomeKeyForPr(pr);
     const refusal = selectionPrior.reviewFreshnessRefusals.get(key);
     // A due unreadable-source probe must still reach runSweep's recovery path.
@@ -26505,9 +26509,8 @@ async function runSweepLightPassCore(
   observeReviewEligibility(openPrs, deps, policy, now, selectionLedgerLines, outcomes, "light");
   await resolveUnreadPlanLanes(openPrs.filter((pr) => !reviewAdmissionOutcomeKnown(pr, outcomes, policy, now)), deps, policy, now);
   const ownQueueDepth = reviewAdmissionQueueDepth(openPrs, policy, now, outcomes);
-  const ownNumbers = new Set(openPrs.map((pr) => pr.prNumber));
-  const queueDepth = deps.snapshotOpenPrs === undefined ? ownQueueDepth : reviewAdmissionQueueDepth(
-    [...openPrs, ...deps.snapshotOpenPrs.filter((pr) => !ownNumbers.has(pr.prNumber))], policy, now, outcomes);
+  const queueDepth = deps.snapshotOpenPrs === undefined ? ownQueueDepth
+    : reviewAdmissionQueueDepth(queuePrs, policy, now, outcomes);
   // W1-T11340: free a head whose in-process review outlived its pending ceiling before reading the reservations.
   await reclaimStuckInProcessReviews(openPrs, deps, policy, now);
   // W1-T7095: candidates for the host-memory demand row, read BEFORE this pass reserves its own spawning heads.

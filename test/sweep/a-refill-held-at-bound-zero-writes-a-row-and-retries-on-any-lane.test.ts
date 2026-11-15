@@ -260,3 +260,46 @@ test("W1-T12535 criterion 4: a one-PR pass reports the snapshot's eligible queue
     await h.finish();
   }
 });
+
+for (const freshness of ["stale", "unreadable"] as const) {
+  test(`W1-T12535 criterion 4: snapshot eligibility filters ${freshness} freshness refusals outside the pass`, async () => {
+    const h = harness();
+    const own = pr(1);
+    const refused = pr(2, { reviewInputDigest: "refused-input" });
+    const snapshot = [own, refused, pr(3, { checksState: "red" })];
+    const refusal = {
+      step: "review.post_refused", task_id: refused.taskId, pr_url: refused.prUrl,
+      head_sha: refused.headSha, review_input_digest: refused.reviewInputDigest,
+      reviewer_code_freshness: freshness, ts: new Date(NOW - 60_000).toISOString(),
+    };
+    const deps = { ...h.deps, readLedger: () => [refusal] };
+    try {
+      h.setWidth(1);
+      await runSweepLightPass([own], { ...deps, snapshotOpenPrs: snapshot }, fourLanes);
+      await eventually(() => h.started.includes(1), "the pass did not admit its own eligible PR");
+      assert.equal(h.depths[0], 1, "a current snapshot freshness refusal must not inflate the queue");
+      assert.deepEqual(h.started, [1], "only the pass's own PR may be admitted");
+
+      h.depths.length = 0;
+      await runSweepLightPass([refused], deps, fourLanes);
+      assert.equal(h.depths[0], 0, "the refused PR alone supplies the negative control");
+      assert.deepEqual(h.started, [1], "the freshness refusal must prevent review admission");
+
+      h.depths.length = 0;
+      await runSweepLightPass(snapshot, deps, fourLanes);
+      assert.equal(h.depths[0], 1, "a whole pass and a one-PR pass must count the same eligible snapshot");
+
+      h.depths.length = 0;
+      await runSweepLightPass([own], deps, fourLanes);
+      assert.equal(h.depths[0], 1, "without a snapshot the queue still counts the pass's own PRs");
+
+      refusal.ts = new Date(NOW - (fourLanes.pendingCeilingMinutes + 1) * 60_000).toISOString();
+      h.depths.length = 0;
+      await runSweepLightPass([own], { ...deps, snapshotOpenPrs: snapshot }, fourLanes);
+      assert.equal(h.depths[0], 2, "an expired snapshot freshness refusal becomes eligible again");
+      assert.deepEqual(h.started, [1], "snapshot eligibility must not expand the admission population");
+    } finally {
+      await h.finish();
+    }
+  });
+}
