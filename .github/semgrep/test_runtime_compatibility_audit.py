@@ -32,7 +32,7 @@ import unittest
 import zipfile
 from datetime import datetime, timezone
 
-METADATA_TESTS_SHA256 = "9eb898e30ab9fd3fc0a96eebe626cdba96bcca2512ff27e5b88880da0f3b4737"
+METADATA_TESTS_SHA256 = "9abceb4ec758698bc2e0255b97ad35d0685ee014030fd3f5d4c9cf2ce29eca0d"
 FIXTURES_SHA256 = "66d2d91312ab5006bef72ef6ab2daa2ea8816870e7c6f740ca296d428d58190d"
 APPROVED_PIP_SHA = "71138adf1f4ca900cdb7d289c21b7494329f2332b6d85f0e1c42108c0384ed3e"
 RAW_CONFIGURATION_NAMES = (
@@ -293,22 +293,29 @@ class AuditSyntheticModuleTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, "PACKAGE_BOUND")
 
     def test_exact_setuptools_pth_policy_tuple_positive_is_not_artifact_proof(self):
-        self.assertTrue(self.p.approved_setuptools_pth("setuptools", "84.0.0", self.p.APPROVED_TOOLS["setuptools"][1], "distutils-precedence.pth"))
+        self.assertEqual(self.p.APPROVED_TOOLS["setuptools"], (
+            "84.0.0", "51a52592b3b99e102b609654876bd65f19f999935166d1352678931132b0c670"))
+        self.assertEqual(self.p.APPROVED_TOOL_ARTIFACTS["setuptools"], frozenset({
+            ("84.0.0", "51a52592b3b99e102b609654876bd65f19f999935166d1352678931132b0c670"),
+            ("84.1.0", "5231689c6ac8156cd155cfb98c3fd6fb252c3e7e9bd3d78b64d3c55f132624c9"),
+        }))
+        for version, sha256 in self.p.APPROVED_TOOL_ARTIFACTS["setuptools"]:
+            self.assertTrue(self.p.approved_setuptools_pth("setuptools", version, sha256, "distutils-precedence.pth"))
 
     def test_setuptools_pth_policy_rejects_wrong_owner(self):
-        self.assertFalse(self.p.approved_setuptools_pth("attack", "84.0.0", self.p.APPROVED_TOOLS["setuptools"][1], "distutils-precedence.pth"))
+        self.assertFalse(self.p.approved_setuptools_pth("attack", "84.1.0", "5231689c6ac8156cd155cfb98c3fd6fb252c3e7e9bd3d78b64d3c55f132624c9", "distutils-precedence.pth"))
 
     def test_setuptools_pth_policy_rejects_wrong_version(self):
         self.assertFalse(self.p.approved_setuptools_pth("setuptools", "83.0.0", self.p.APPROVED_TOOLS["setuptools"][1], "distutils-precedence.pth"))
 
     def test_setuptools_pth_policy_rejects_wrong_actual_digest(self):
-        self.assertFalse(self.p.approved_setuptools_pth("setuptools", "84.0.0", "0" * 64, "distutils-precedence.pth"))
+        self.assertFalse(self.p.approved_setuptools_pth("setuptools", "84.1.0", "0" * 64, "distutils-precedence.pth"))
 
     def test_setuptools_pth_policy_rejects_data_path_alias(self):
-        self.assertFalse(self.p.approved_setuptools_pth("setuptools", "84.0.0", self.p.APPROVED_TOOLS["setuptools"][1], "setuptools-84.0.0.data/purelib/distutils-precedence.pth"))
+        self.assertFalse(self.p.approved_setuptools_pth("setuptools", "84.1.0", "5231689c6ac8156cd155cfb98c3fd6fb252c3e7e9bd3d78b64d3c55f132624c9", "setuptools-84.1.0.data/purelib/distutils-precedence.pth"))
 
     def test_synthetic_setuptools_archive_cannot_fake_approved_artifact_digest(self):
-        self.blocked("TOOL_ARTIFACT_NOT_APPROVED", H.wheel("setuptools", "84.0.0", files={"distutils-precedence.pth": H.payload(self.c)}))
+        self.blocked("TOOL_ARTIFACT_NOT_APPROVED", H.wheel("setuptools", "84.1.0", files={"distutils-precedence.pth": H.payload(self.c)}))
 
 
 def additionalCases(H, context):

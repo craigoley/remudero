@@ -101,7 +101,7 @@ test("the real sweep progress judge receives the current semantic refusal, not o
   let captured: unknown, calls = 0, dispatched = 0;
   const deps: SweepDeps = { ledgerPath: "/unused/semantic-progress", runId: "semantic-progress-observation",
     now: () => Date.now(), readLedger: () => rows, appendLine: (_path, row) => { rows.push(row); },
-    fixProgressJudge: async input => { calls++; captured = input; return undefined; },
+    fixProgressJudge: async input => { calls++; captured = input; throw new Error("progress provider offline"); },
     arm: () => {}, close: () => {}, escalate: () => {}, dispatchFix: () => { dispatched++; } };
   await runSweep([{ prNumber: 9297, prUrl: "https://github.com/o/r/pull/9297", taskId,
     headSha: "head-current", checksState: "green", reviewState: "failure", priorStrikes: 1,

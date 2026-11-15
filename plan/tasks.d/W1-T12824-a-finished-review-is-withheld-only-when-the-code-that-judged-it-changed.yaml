@@ -1,0 +1,70 @@
+- id: W1-T12824
+  title: "A finished review is never withheld because the reviewer's code is behind main, unless the code that judged it changed"
+  repo: remudero
+  depends_on: []
+  priority: 1.5
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # which code judges a pull request on the run-child review path, and when a review-path advance counts as material; the stale-code guard must still refuse every verdict judged by changed code
+  origin: "operator-session#withheld-reviews-after-restart-2026-11-15"
+  plan_refs:
+    - W1-T12227
+    - W1-T12552
+    - W1-T9114
+    - W1-T3723
+    - W1-T3735
+    - W1-T4469
+    - W1-T9727
+    - W1-T11847
+  files:
+    - src/lib/run-child.ts
+    - src/run-task.ts
+    - src/lib/self-sync.ts
+    - test/review/a-finished-review-is-withheld-only-when-the-code-that-judged-it-changed.test.ts
+    - test/a-reviewer-verdict-survives-unrelated-main-churn.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "A review that runs as a run child (runDetachedWork, kind review) reads the reviewer code freshness once before any reviewer starts. On a fresh reading the review command gets that reading as its start reading, so a material merge to main that lands while the reviewer runs does not withhold the verdict: it posts"
+      proof: "grep: W1-T12824 criterion 1 in test/review/a-finished-review-is-withheld-only-when-the-code-that-judged-it-changed.test.ts"
+    - claim: "When the run child's start reading is stale, no reviewer starts in the child's own code. The review runs from a fresh tree at origin/main through buildFreshTreeReviewRunner, its verdict posts, and the row review.ran_from_fresh_tree is written"
+      proof: "grep: W1-T12824 criterion 2 in test/review/a-finished-review-is-withheld-only-when-the-code-that-judged-it-changed.test.ts"
+    - claim: "invariant:no-verdict-from-changed-code — when the start reading is stale and the fresh tree cannot run, no reviewer starts and review.skipped_stale_reviewer_code gives the reason; a verdict judged by code that was materially behind at its start still never posts a terminal status"
+      kind: guard
+      proof: "grep: W1-T12824 criterion 3 in test/review/a-finished-review-is-withheld-only-when-the-code-that-judged-it-changed.test.ts"
+    - claim: "A src/run-task.ts advance that only adds or removes names on an import line is immaterial when no added or removed name is used by the review path. The hunk of c79f9fd5b (worktreeRemoveIfPresent added to the worker.js import, garden dispose changed) is immaterial; an added or removed name that the review path uses stays material"
+      proof: "grep: W1-T12824 criterion 4 in test/review/a-finished-review-is-withheld-only-when-the-code-that-judged-it-changed.test.ts"
+    - claim: "A change to a .ts file in REVIEW_MATERIAL_ADVANCE_PATHS whose old and new token streams are equal once comments and whitespace are dropped is immaterial (the comment compression of src/lib/task-linter.ts in 8b221c208). Any token change, a file that cannot be scanned, package.json and package-lock.json stay material"
+      proof: "grep: W1-T12824 criterion 5 in test/review/a-finished-review-is-withheld-only-when-the-code-that-judged-it-changed.test.ts"
+    - claim: "The run child's detached review is wired through the gate in production"
+      proof: "grep: gatedDetachedReviewCommand( in src/run-task.ts"
+    - claim: "The comment-only check is called by the review materiality predicate"
+      proof: "grep: tokensEqualWithoutComments( in src/lib/self-sync.ts"
+  rationale: |
+    WHY: finished reviews are thrown away. Each one cost a reviewer run, and the pull request waits for the next restart or the next pass.
+    OBSERVED in the core ledger on the Azure host, 2026-11-14 06:45Z to 2026-11-15 06:45Z (rows de-duplicated):
+    - review.posted 312. review.post_refused "reviewer code ... is materially behind origin/main" 20, on 12 pull requests, in two episodes. About 90 reviewer minutes were spent on reviews that were then withheld (run start to refusal).
+    - All 20 were written by actor run_child (the run-child review path, W1-T9114). The in-process sweep path posted or ran from the fresh tree.
+    - Episode 1, 2026-11-14 15:07Z to 15:22Z: 8 withheld. Main moved at 15:06:11Z to 8b221c208 (W1-T12300), which only compressed the comments of src/lib/task-linter.ts. 2 of the 8 reviews started before that merge, so a start reading would have posted them. The episode ended at the 15:33Z restart.
+    - Episode 2, from 2026-11-15 06:30Z (still open at 06:45Z): 12 withheld, 1 posted. The daemon restarted at 06:21:44Z. At 06:22:30Z main took c79f9fd5b (W1-T12550, a gardener fix). Its src/run-task.ts hunks change one import line (adds worktreeRemoveIfPresent and its async sibling) and the garden dispose. No review-path code uses the new names, but the import line binds names that the review path uses, so reviewPathSpans counts the whole line. The sweep then asked "one fresh review of this head (W1-T11847)"; each re-run was withheld again (#18490, #18516, #18533, #18643 twice each).
+    - In the same 24 h, main took 116 commits; 7 touched a file in REVIEW_MATERIAL_ADVANCE_PATHS, and only these 2 were judged material.
+    READ at origin/main 952691269:
+    - The refusal: src/lib/review.ts:12116 reviewerCodePublicationRefusal; the outbox drain discards at :12652. Materiality: src/lib/self-sync.ts:901 REVIEW_MATERIAL_ADVANCE_PATHS, :1050 reviewPathSpans (an import line counts when it binds any name the review path uses), reviewMainAdvance at about :826.
+    - The sweep path asks buildReviewerCodeFreshnessGate (src/run-task.ts:2260). It reads at the start, routes a stale reading to the fresh tree, and passes the reading as reviewStartFreshness, so the start reading decides publication (operator ruling 2026-10-06, src/cli/commands/review.ts:150).
+    - The run-child path does not. src/lib/sweep.ts:3440 hands a full review to installedWorkHost.spawnReview (src/lib/run-child.ts:1533). The child calls runDetachedWork (src/run-task.ts:44672) and runDetachedReview (src/lib/run-child.ts:1270), which calls reviewCommand with no start reading. src/cli/commands/review.ts:2480 then has no start reading, and the publication falls back to the just-in-time read.
+    - W1-T12552 set freshnessRestart.minLifetimeMs to 3 hours, so a restart no longer clears the gap soon. Its aim is fewer restarts: each restart closes the repair lanes for the boot review pass and kills fix rounds in flight. This task keeps that policy. It does not restart the daemon, and it does not touch the restart score or any ceiling.
+    W1-T12227 (priority 0.8, depends on W1-T12225 and W1-T12226) asks the same start reading for the run child in its criterion 2, among wider changes. This task does only that path and the two false positives, at priority 1.5, so the evidence above stops now. W1-T12227 keeps its other criteria. The fresh tree ran 2 times in these 24 h, both with exit code 0.
+  design: |
+    1. In src/run-task.ts add gatedDetachedReviewCommand(repoRoot, log). It builds the same gate the sweep builds in src/cli/commands/sweep.ts (about :270-:293): buildReviewerCodeFreshnessGate with checkReviewerCodeFreshnessAsync and buildFreshTreeReviewRunner on the same fresh-tree seams (the review worktree helper and spawnRmdReviewForFreshTree), and returns its call. Share the seam assembly with the sweep instead of copying it, if that keeps both callers simple.
+    2. In runDetachedWork, pass ports.reviewCommand ?? gatedDetachedReviewCommand(...) to runDetachedReview. A run child that reads stale now runs the review from the fresh tree, and one that reads fresh carries the start reading to publication.
+    3. In reviewPathSpans (src/lib/self-sync.ts), compare an import line of the old and new src/run-task.ts by the names it binds. The line meets the review path only when a name added or removed is used by reached code, or the module specifier changed. Keep every other rule.
+    4. Add tokensEqualWithoutComments(oldText, newText) to src/lib/self-sync.ts. Use the TypeScript scanner, skip comment and whitespace tokens, and compare the rest. In the review materiality predicate, a changed .ts path in REVIEW_MATERIAL_ADVANCE_PATHS whose blobs at the merge base and at origin/main are equal by this test is immaterial. A read or scan failure keeps the path material.
+    5. Tests reach the run child through runDetachedReview in src/lib/run-child.ts and the gate with a small host. They must not import #src/run-task.js (census:affected-reach). Add the c79f9fd5b and 8b221c208 shapes to test/a-reviewer-verdict-survives-unrelated-main-churn.test.ts as cases.
+    INVARIANT no-verdict-from-changed-code: a terminal verdict posts only when the code that judged it was materially current at the start of the review, or the review ran from a fresh tree at origin/main.
+    NOT IN SCOPE: the restart policy and score (W1-T12552, W1-T12230), the fresh-tree failure classes (W1-T12226), the fix-pipeline review runner and the stale-at-own-start retry (W1-T12227), and any ceiling.
+  falsifier: |
+    Let runDetachedWork call reviewCommand directly again, and criteria 1 and 2 must fail. Let the fresh-tree runner fall back to an in-process review, and criterion 3 must fail. Count a whole import line again, and criterion 4 must fail. Make tokensEqualWithoutComments keep comment tokens, and criterion 5 must fail. Restore and require all to pass.
+  note: |
+    Id reserved for run-unfiled-1794725198000 with ~/rmd-work/bin/reserve-id.sh. After the merge, read the core ledger for 7 days: review.post_refused "materially behind" rows from actor run_child were 20 in the 24 h before; the target is 0 for reviews whose start reading was fresh.

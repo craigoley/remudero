@@ -17,7 +17,7 @@ import { type FixOutcome as TypedFixOutcome } from "../../lib/fix-outcome.js";
 import { type FixRoundReapplyPorts } from "../../lib/fix-round-reapply.js";
 import { fixRoundBranchClaim, productionFixProgressJudge, type JobRequeueOutcome } from "../../lib/sweep.js";
 import { ghExec, ghJsonAsync, ghTextAsync } from "../../lib/github-transport.js";
-import { findTaskInCatalogs } from "../../lib/task-lookup.js";
+import { composeSecondaryPlan, findTaskInCatalogs, opsPlanForLookup } from "../../lib/task-lookup.js";
 import { renderAcceptanceBlock } from "../../lib/plan-pr-emitter.js";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmdirSync, writeFileSync } from "node:fs";
@@ -113,7 +113,7 @@ import { validateWorkerSettingsFile } from "../../lib/settings.js";
 import { buildBatchedGithub, classifyGhFailure, deriveStatus, dispatchesWithoutNewOwnedPr, ghGateway, ghRequiredStatusCheckContexts, projectPlan, readLedgerLines, type GitHub, type GhFailureReason, preferImplementingPr, type PrRef, type BatchedPr, type StatusProjection, persistVerifiedCredit, type ThrownRunVerdictStage, type RefusedRunVerdictStage } from "../../lib/status.js";
 import { dedupeRollupByLatestAttempt, buildFixProgressInput, terminalStateReason, type ActionableGateFailure, type CiFailure, type FixDispatchSnapshot, type FixSuperseded, type LiveStateResult, type MergeConflictEvidence, type OpenPrView, type RollupCheckEntry, type ProofDiscriminationEvidence, type RedBaseRefreshFacts, type SweepDeps, type RegistrationChange, trackRepairLadder, type FixRoundBranchClaim } from "../../lib/sweep.js";
 import { classifyNoPrShape } from "../../lib/fix-rung-classify.js";
-import { DEFAULT_PRUNE_GRACE_MS, appendQuestion, ghJson, parseDecisionRequest, parseLearningsUsed, parseSkillsUsed, parseQuestion, parseReconReport, parseReport, pruneStaleRuns, reapStaleWorktrees, removeRunLock, renderWorkerSettings, resolveGenericRouteToolBound, harnessOwnsGitFor, IMPLEMENT_CASH_TOOLS, IMPLEMENT_CLAUDE_TOOLS, WORKER_RULE_TOOL_NAME, implementToolBound, resolveDispatchLaneToolBound, cashDivertSpawnFields, cashFallbackRefusal, runAdhocLaneReapRung, runWorktreeReapRung, spawnWorker, cacheTokenLedgerFields, capStderrExcerpt, STDERR_EXCERPT_CAP, noPrReportExcerpt, listRegisteredWorktrees, readRunLock, workerLedgerFields, workerTranscript, resolveCommitAssignment, linkWorktreeNodeModules, reprovisionWorktreeDependencies, worktreeAdd, worktreeAddAsync, worktreeLockIsPidAlive, worktreeRemove, worktreesDir, writeRunLock, WorktreeBaseStaleError, WorktreeNodeModulesRefusedError, detectWorktreeBaseUncheckableStreak, WORKTREE_BASE_UNCHECKABLE_STREAK_BOUND, type RunLockInfo, type SpawnWorkerArgs, type RegisteredWorktree, type WorkerResult, type WorktreeReapSummary, WorkerStateTracker, DEFAULT_WORKER_QUIET_FLOOR_MS, type WorkerState, type WorkerStreamObserver, type WorkerStreamEvent, type WorkerSelectionAssignment, WorkerAbandonedError, deliverOperatorAnswerToRunningWorker, workerContinuation } from "../../lib/worker.js";
+import { DEFAULT_PRUNE_GRACE_MS, appendQuestion, ghJson, parseDecisionRequest, parseLearningsUsed, parseSkillsUsed, parseQuestion, parseReconReport, parseReport, pruneStaleRuns, reapStaleWorktrees, removeRunLock, renderWorkerSettings, resolveGenericRouteToolBound, harnessOwnsGitFor, IMPLEMENT_CASH_TOOLS, IMPLEMENT_CLAUDE_TOOLS, WORKER_RULE_TOOL_NAME, implementToolBound, resolveDispatchLaneToolBound, cashDivertSpawnFields, cashFallbackRefusal, runAdhocLaneReapRung, runWorktreeReapRung, spawnWorker, cacheTokenLedgerFields, capStderrExcerpt, STDERR_EXCERPT_CAP, noPrReportExcerpt, listRegisteredWorktrees, readRunLock, workerLedgerFields, workerTranscript, resolveCommitAssignment, linkWorktreeNodeModules, reprovisionWorktreeDependencies, worktreeAdd, worktreeAddAsync, worktreeLockIsPidAlive, worktreeRemove, worktreesDir, writeRunLock, WorktreeBaseStaleError, WorktreeNodeModulesRefusedError, detectWorktreeBaseUncheckableStreak, WORKTREE_BASE_UNCHECKABLE_STREAK_BOUND, type RunLockInfo, type SpawnWorkerArgs, type RegisteredWorktree, type WorkerResult, type WorktreeReapSummary, WorkerStateTracker, DEFAULT_WORKER_QUIET_FLOOR_MS, type WorkerState, type WorkerStreamObserver, type WorkerStreamEvent, type WorkerSelectionAssignment, WorkerAbandonedError, deliverOperatorAnswerToRunningWorker, workerContinuation, renderTaskInputAnswer, taskInputAnswer } from "../../lib/worker.js";
 import { QuietRoundEndedError, createQuietBoundHistory, guardSpawnWithQuietWatchdog, productionQuietWorkerJudge, quietHistoryOptions, runQuietWorkerWatchdog, type QuietBoundHistory, type QuietWorkerJudge } from "../../lib/quiet-worker-watchdog.js";
 import { isCodexWorkerOutputLimitError } from "../../lib/worker-provider.js";
 import { type AddedTestAliasRewrite, type TestAliasRewriter } from "../../lib/added-test-alias-rewrite.js";
@@ -143,6 +143,19 @@ import { chainAbortSignal } from "../../lib/run-child.js";
 import { type RollupCheck, fetchCiFailures, fetchCiFailuresAsync } from "../../lib/tick-read-worker.js";
 
 export type GitRunner = (args: string[], stdin?: string) => string;
+
+/** W1-T8141: a fix round its spawn ended for a pending recycle. `recoveryRef` holds the whole worktree, and
+ *  `indexRecoveryRef` the staged work when the index differs from the worktree; with `keepError` nothing was reset
+ *  and the worktree is as the worker left it. */
+export interface FixRoundYield {
+  trigger: "recycle";
+  detail: string;
+  recoveryRef?: string;
+  indexRecoveryRef?: string;
+  paths: string[];
+  costUsd: number;
+  keepError?: string;
+}
 
 export interface RunTaskCommandHost {
   readonly syncPlanOrRefuse: (planPath: string, opts: { allowStale: boolean; log: (step: string, extra?: Record<string, unknown>) => void; say: (msg: string) => void; planSnapshot?: (o: { allowStale?: boolean }) => SyncedPlan; quarantine?: (quarantined: QuarantinedTask[]) => void }) => SyncedPlan | { error: string };
@@ -303,10 +316,15 @@ export interface RunTaskCommandHost {
     reclaimWorker?: (info: { runId: string; taskId: string; elapsedMs: number }) => void | Promise<void>;
     watchSuperseded?: (snapshot: FixDispatchSnapshot, signal: AbortSignal) => Promise<FixSuperseded | undefined>;
     log: (step: string, extra?: Record<string, unknown>) => void;
-  }, args: SpawnWorkerArgs, ctx: { runId: string; taskId: string; snapshot?: FixDispatchSnapshot }) => Promise<
+  }, args: SpawnWorkerArgs, ctx: {
+    runId: string; taskId: string; snapshot?: FixDispatchSnapshot;
+    /** W1-T8141: a strike's PR and branch; a spawn given them yields to a pending recycle, its work kept. */
+    fixRound?: { prUrl: string; branch: string };
+  }) => Promise<
   | { kind: "spawned"; result: WorkerResult; elapsedMs: number }
   | { kind: "abandoned"; elapsedMs: number }
   | { kind: "superseded"; elapsedMs: number; superseded: FixSuperseded }
+  | { kind: "yielded"; elapsedMs: number; yielded: FixRoundYield }
 >;
   readonly readFixRoundCommitsViaGit: (worktreePath: string, sinceSha: string) => FixRoundCommit[];
   readonly runNpmScriptViaSpawn: (script: string, cwd: string) => { status: number; stdout: string; stderr: string };
@@ -507,9 +525,8 @@ export interface RunTaskCommandHost {
     prUrl?: string;
     log: (step: string, extra?: Record<string, unknown>) => void;
     say: (msg: string) => void;
-    
     runId?: string;
-    
+    worktreePath?: string;
     seen?: Set<string>;
   }) => void;
   readonly commitsAhead: (worktreePath: string, base: string) => number;
@@ -4901,7 +4918,15 @@ export async function runTask(
     ? bindCanonicalOpsCriteria(task.id, task.title, `${owner}/${task.repo}`, lookup.commit, task.acceptance ?? [])
     : undefined;
   if (task.catalog === "ops" && !plan.byId.has(taskId)) {
-    plan = { ...plan, tasks: [...plan.tasks, task], byId: new Map([...plan.byId, [taskId, task]]) };
+    const privatePlan = opsPlanForLookup(lookup);
+    if (privatePlan === undefined) throw new Error("task catalog unreadable (ops-plan-unavailable)");
+    const composition = composeSecondaryPlan(plan, privatePlan);
+    if (composition.outcome !== "ok") throw new Error(`task catalog unreadable (ops-${composition.outcome})`);
+    // Credit and assertRunnable need the prerequisite records, not just the chosen task.
+    // Their catalog provenance stays private; public source/claim roots are unchanged.
+    const tasks = composition.plan.tasks.map(record => composition.secondaryIds.has(record.id)
+      ? { ...record, catalog: "ops" as const } : record);
+    plan = { ...plan, tasks, byId: new Map(tasks.map(record => [record.id, record])) };
   }
 
   // ── Merge-state is DERIVED FROM GITHUB, never from the yaml `status:` field
@@ -4999,7 +5024,7 @@ export async function runTask(
   // W1-T3216: the released set is passed so an operator-ratified verify:human task runs here too.
   // Read once, at this single-task entry point — there is no pass to amortise it over.
   // W1-T10348: preserve the shared resolver across the extraction.
-  assertRunnable(plan, task, isMerged, resolveReleasedIds(releaseReadersFor(ledgerPath), plan));
+  assertRunnable(plan, task, isMerged, resolveReleasedIds(releaseReadersFor(ledgerPath), plan), (id) => taskInputAnswer(repoRoot, id));
 
   // ── §5C LAYER A: deterministic task linter, FAIL-CLOSED pre-dispatch guard
   // (MASTER-PLAN §5C). Four malformed tasks (W1-T6, W1-T9, W1-T12) reached a
@@ -6339,7 +6364,9 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
     // to THIS task's id (never another task's), and rendered ONCE so the identical block injects
     // into both the recon prompt below and the implement prompt further down.
     const operatorNotes = readNativeOperatorNotes(config, `${owner}/${task.repo}`, repoRoot, task.id);
-    const operatorNotesBlock = renderOperatorNotes(operatorNotes);
+    // W1-T12715: a held task's answer rides with the operator notes into both prompts.
+    const operatorNotesBlock = [renderOperatorNotes(operatorNotes), renderTaskInputAnswer(task, taskInputAnswer(repoRoot, task.id))]
+      .filter((part) => part !== "").join("\n");
     log("operator_notes.injected", { count: operatorNotes.length });
     // W1-T2632: HOISTED from further below (was computed only after recon returned, "since
     // recon already relayed all of this" — a premise `renderReconPrompt`'s own doc disproves).

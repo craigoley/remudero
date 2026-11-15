@@ -20,14 +20,14 @@
     - src/lib/sweep.ts
     - src/lib/ci-incidents.ts
     - test/ci/a-ci-log-that-cannot-be-fetched-is-retried-or-read-from-the-check-output.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "classifyLogFetchFailure sorts a failed job log fetch into rate-limit (HTTP 403 or 429 naming a rate limit), transient (HTTP 5xx or a timeout) or absent (HTTP 404, or a job with no steps)"
       proof: "grep: W1-T12713 criterion 1 in test/ci/a-ci-log-that-cannot-be-fetched-is-retried-or-read-from-the-check-output.test.ts"
     - claim: "A rate-limit or transient failure is retried in a later pass after a back-off (the rate limit's reset time when GitHub gives one, else 60 s doubling to 15 min), and while it waits the disposition says the read is deferred with its retry time, not NOT read"
       proof: "grep: W1-T12713 criterion 2 in test/ci/a-ci-log-that-cannot-be-fetched-is-retried-or-read-from-the-check-output.test.ts"
-    - claim: "An absent log, and a failing check with no Actions job id, are read from the check run's output title, summary and text, or the commit status description, with tail_source check-output"
+    - claim: "An absent log, and a failing check run with no Actions job id, are read from the check run's output title, summary and text, with tail_source check-output; a commit status keeps its description in statusDescription, which the fix round already reads as tail_source status-description"
       proof: "grep: W1-T12713 criterion 3 in test/ci/a-ci-log-that-cannot-be-fetched-is-retried-or-read-from-the-check-output.test.ts"
     - claim: "invariant:never-blind-when-output-exists — a fix round is not dispatched with an empty excerpt for a check whose check run output or annotations have text"
       kind: guard
@@ -62,8 +62,12 @@
        reset time when the error or headers give it), transient, or absent.
     2. Rate-limit and transient: keep the check's other evidence, set `logDeferred: { until }` and retry in a later pass.
        Back-off: the reset time, else 60 s doubling to 15 min. After two failed retries, use step 3's text.
-    3. Absent and no-job-id: read the check run (`check-runs/<id>`: output.title, output.summary, output.text) or the commit
-       status (description, target URL), and use it as the tail with tail_source `check-output`.
+    3. Absent and no-job-id check runs: read the check run (`check-runs/<id>`: output.title, output.summary, output.text)
+       on the async path, and use it as the tail with tail_source `check-output`. The sync path, and a caller that
+       injects its own log read, use the REST rollup's inline title and summary, so no synchronous spawn is added to a
+       daemon-loop path. A commit status keeps its description in `statusDescription`: the fix prompt and the progress
+       judge already read it (tail_source `status-description`), and a tail would print it twice and change the
+       security-merge-policy evidence that test/a-security-policy-block-reaches-a-red-prs-fix-round.test.ts pins.
     4. src/lib/sweep.ts describeCiLogUnavailable: add a deferred case, "log read deferred (<cause>, retry at <time>)". The
        fix dispatch waits for a deferred log only until its retry time, then uses what it has.
     5. src/lib/ci-incidents.ts: the same classification and step 3 fallback.

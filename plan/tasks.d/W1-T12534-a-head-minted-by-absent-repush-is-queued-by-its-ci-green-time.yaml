@@ -17,7 +17,7 @@
   files:
     - src/lib/sweep.ts
     - test/sweep/a-head-minted-by-absent-repush-is-queued-by-its-ci-green-time.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "With the 20:41 shape (width 3; #18328 created 15:39 and #18343 created 17:23, each with a sweep.absent_repush row whose new_head is its current head and a sweep.review_eligible row for that head after 20:00; #18332 created 15:57 and not re-pushed; three PRs created later whose heads went review-eligible before 20:00), the light pass admits #18332 and the two oldest later PRs, and the refill tail is the third later PR, then #18328, then #18343"
@@ -26,7 +26,7 @@
       proof: "grep: W1-T12534 criterion 2 in test/sweep/a-head-minted-by-absent-repush-is-queued-by-its-ci-green-time.test.ts"
     - claim: "A re-pushed head with no sweep.review_eligible row in the pass's ledger lines is keyed by the ts of the sweep.absent_repush row that minted it; with neither row in the lines it keeps the createdAt key"
       proof: "grep: W1-T12534 criterion 3 in test/sweep/a-head-minted-by-absent-repush-is-queued-by-its-ci-green-time.test.ts"
-    - claim: "invariant:key-fixed-per-head — the key of one head does not change when a verdict is posted or the PR is updated without a new head, so the W1-T2426 starvation argument still holds"
+    - claim: "invariant:key-fixed-per-head — the key of one head does not change when a verdict is posted or the PR is updated without a new head, so the W1-T2426 starvation argument still holds, while the head's sweep.absent_repush row and its first sweep.review_eligible row are in the pass's ledger lines; a key that outlives ledger rotation of either row is W1-T12756"
       proof: "grep: W1-T12534 criterion 4 in test/sweep/a-head-minted-by-absent-repush-is-queued-by-its-ci-green-time.test.ts"
   rationale: |
     A PR whose head was reset by an absent-repush keeps the front of the review queue against PRs that went green hours
@@ -68,8 +68,13 @@
     INVARIANT unrepushed-order-unchanged: a head no sweep.absent_repush row names as new_head is keyed by
     reviewAdmissionKey, exactly as on origin/main.
     INVARIANT key-fixed-per-head: the key of a head comes only from ledger rows about that head, which are never rewritten.
+    The fold reads only the live ledger lines (design 3), so the invariant holds while the head's
+    sweep.absent_repush row and its first sweep.review_eligible row are live. Rotation keeps only the newest 200
+    sweep.review_eligible rows, so the first one can leave the live file first; the key then falls back to the
+    mint time. Keeping both rows live through rotation is W1-T12756.
     NOT IN SCOPE: the full pass's order (orderPendingReviews), the shadow rank's wait term (reviewPriority), and keying
-    heads that were not minted by absent-repush. A later task may extend the CI-green key to every new head once these
+    heads that were not minted by absent-repush. Keeping the key after rotation archives the head's first
+    sweep.review_eligible row or its sweep.absent_repush row is W1-T12756 (it changes src/lib/ledger.ts, outside files). A later task may extend the CI-green key to every new head once these
     rows show the effect.
   falsifier: |
     Pass an empty map at :26402 and criterion 1 must fail. Key every PR by its eligibility time and criterion 2 must fail.
@@ -80,3 +85,7 @@
     Amended 2026-11-14: criterion 1 first said #18328 and #18343 lead the refill tail. The third later PR went
     review-eligible before 20:00, so its createdAt key is before the re-pushed heads' keys (after 20:00) and it
     leads the tail. The criterion now names the order the design gives.
+    Amended 2026-11-14 (second): the review of #18533 failed criterion 4 four times on one path. Rotation removed
+    the head's first sweep.review_eligible row, and the key moved to the mint time. Design 3 reads only the live
+    ledger, and criterion 3 requires the createdAt key when neither row is live, so no change inside files can keep
+    the key through rotation. Criterion 4 now names the live-ledger scope, and W1-T12756 holds the rotation part.

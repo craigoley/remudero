@@ -1,0 +1,59 @@
+- id: W1-T12883
+  title: "A retro PR whose trailer names its own run branch gets the generated review defaults"
+  repo: remudero
+  depends_on: []
+  priority: 1.5
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: medium # widens one exact branch-shape match for generated retro PRs; filed task ids keep today's refusal
+  origin: "operator-session#review-head-task-metadata-unavailable-2026-11-15"
+  plan_refs:
+    - W1-T3387
+    - W1-T10346
+    - W1-T11258
+  files:
+    - src/lib/tick-read-worker.ts
+    - test/review/a-retro-pr-whose-trailer-names-its-own-run-branch-gets-generated-review-defaults.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "usesUntaskedReviewMetadata returns true for task id RETRO-1794737755052 on head run-RETRO-1794737755052, the exact shape the retro lane opens (PR #18670)"
+      proof: "grep: W1-T12883 criterion 1 in test/review/a-retro-pr-whose-trailer-names-its-own-run-branch-gets-generated-review-defaults.test.ts"
+    - claim: "invariant:exact-generated-branch — usesUntaskedReviewMetadata stays false for RETRO-1794737755052 on codex/foreign, on run-RETRO-1794737755053, on run-RETRO-1794737755052-other-1794737755099, and for W1-T999999 on run-W1-T999999 and run-W1-T999999-1791211800000"
+      kind: guard
+      proof: "grep: W1-T12883 criterion 2 in test/review/a-retro-pr-whose-trailer-names-its-own-run-branch-gets-generated-review-defaults.test.ts"
+    - claim: "A semantic review of a PR with body trailer Remudero-Task: RETRO-<ms> on head run-RETRO-<ms> and no plan shard writes review.reviewer.untasked_defaults and no review.semantic_setup_refused row"
+      proof: "grep: W1-T12883 criterion 3 in test/review/a-retro-pr-whose-trailer-names-its-own-run-branch-gets-generated-review-defaults.test.ts"
+  rationale: |
+    WHY: the retro lane's PR #18670 (run-RETRO-1794737755052, "chore(plan): regenerate docs/ORIENTATION.md",
+    opened 2026-11-15T11:03Z by the fleet app) has been refused by every semantic review since 11:17Z:
+    32 review.semantic_setup_refused rows with reason head-task-metadata-unavailable, missing [risk, budget_usd],
+    one about every 5 minutes. Its replay_input row says untasked: false, head_task_resolved: false.
+    READ at origin/main 455ed55d9 (2026-11-15):
+    - src/cli/commands/review.ts:2404-2425: semantic review gives bounded defaults only when
+      usesUntaskedReviewMetadata(taskId, headRefName) is true; otherwise a task with no shard is refused.
+    - src/lib/tick-read-worker.ts:1665-1670 usesUntaskedReviewMetadata requires
+      taskIdFromRunBranch(headRefName) === taskId, and its id pattern already admits RETRO(?:-.+)?.
+    - The retro lane writes the body trailer "Remudero-Task: RETRO-<ms>" and the head "run-RETRO-<ms>"
+      (same <ms>). src/lib/status.ts:2019 taskIdFromRunBranch reads run-(.+)-\d+ and so returns "RETRO", not
+      "RETRO-<ms>". The equality fails, and the PR is treated as a filed task with a missing shard.
+    - test/an-untasked-pr-silently-skips-the-semantic-reviewer.test.ts:128 tests RETRO-1 on run-RETRO-1-<ms>,
+      a shape the lane never opens, so the real shape was never covered.
+    The second PR in the same rows, #18582 (run-W1-T12705-1794690664017, a hand PR with no trailer), is a
+    different case: W1-T12705 has no shard on origin/main, in the ops plan, or on its head. Its refusal is the
+    designed W1-T3387 behaviour and is not in scope here.
+  design: |
+    INVARIANT exact-generated-branch: generated defaults apply only when the head is the exact run branch of the
+    generated id; a foreign branch, a different epoch, a stapled suffix, or a W1-T id never qualifies.
+    1. src/lib/tick-read-worker.ts usesUntaskedReviewMetadata: for an id matching ^RETRO-\d+$, also return true
+       when headRefName === `run-${taskId}`. Keep every other branch of the function as it is.
+    2. Add the focused test file for criteria 1 to 3 (criterion 3 through the review command with the same fake
+       host that test/an-untasked-pr-silently-skips-the-semantic-reviewer.test.ts uses). Leave that file as it is.
+    NOT IN SCOPE: PRs whose task id has no shard (W1-T3387); the plan-only path.
+  falsifier: |
+    Remove the new run-${taskId} check: criteria 1 and 3 must fail. Make the check accept any run-RETRO- prefix:
+    criterion 2 must fail on run-RETRO-1794737755053. Restore and require all to pass.
+  note: |
+    Id reserved for run-unfiled-1794758366667 with ~/rmd-work/bin/reserve-id.sh.

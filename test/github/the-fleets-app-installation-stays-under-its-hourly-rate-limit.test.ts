@@ -125,10 +125,11 @@ test("W1-T12553 criterion 2: an instance that spent its share waits for the rese
   h.read(50);
   // One instance never spends the installation: 10 reads of the 40 above the reserve, then it stands down.
   assert.equal(readsUntilStandDown(h), 10);
-  assert.throws(() => h.pacer.wait(), GhPaceFloorStandDownError, "the synchronous path keeps refusing until the reset");
+  assert.throws(() => h.read(undefined), GhPaceFloorStandDownError, "the synchronous path keeps refusing until the reset");
 
+  // W1-T12820: the pacer leaves the budget to the transport's per-read claim; the async wait is the porcelain test below.
   await h.pacer.waitAsync!();
-  assert.deepEqual(h.slept, [RESET_S * 1000 - START_MS], "the async path awaits a timer to the reset");
+  assert.deepEqual(h.slept, [], "the pacer itself never waits on the budget");
 
   assert.equal(h.write(90), true, "a write still runs and its newer headers restore read allowance");
   assert.equal(readsUntilStandDown(h), 20, "a newer reading with a larger remaining count gives a new allowance");
@@ -175,8 +176,8 @@ test("W1-T12553 criterion 4: one throttle row per consumer and reset window, and
   const h = harness();
   h.read(50);
   readsUntilStandDown(h);
-  assert.throws(() => h.pacer.wait(), GhPaceFloorStandDownError);
-  assert.throws(() => h.pacer.wait(), GhPaceFloorStandDownError);
+  assert.throws(() => h.read(undefined), GhPaceFloorStandDownError);
+  assert.throws(() => h.read(undefined), GhPaceFloorStandDownError);
   githubInstallationBudget().noteThrottle("refused");
   const throttled = throttledRows();
   assert.equal(throttled.length, 1, "three refusals in one window write one row");
@@ -235,7 +236,8 @@ test("W1-T12553 criterion 5: with no reading, no headers or no registry the pace
   ghJson(["api", "rate_limit"], undefined, () =>
     `HTTP/2.0 200 OK\r\nX-Ratelimit-Remaining: 14\r\nX-Ratelimit-Limit: 100\r\nX-Ratelimit-Reset: ${RESET_S}\r\nX-Ratelimit-Resource: core\r\n\r\n{}`);
   shared.read(undefined);
-  assert.throws(() => elsewherePacer.wait(), GhPaceFloorStandDownError, "floor((14 - 10) / 4) = 1 read");
+  assert.throws(() => paceGhEntry(elsewherePacer, () => false, () => shared.read(undefined)), GhPaceFloorStandDownError,
+    "floor((14 - 10) / 4) = 1 read");
 });
 
 test("W1-T12553 criterion 5: the production read worker shares the main thread's installation allowance", async () => {

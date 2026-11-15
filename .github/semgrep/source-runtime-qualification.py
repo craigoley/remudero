@@ -23,7 +23,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 PROFILE = {"python": "3.12.15", "platform": "linux", "machine": "x86_64", "zlib": "1.3"}
 AUDIT_SOURCES = {
-    "runtime-compatibility-audit.py": "803a9edd12d2e6fbad45adf6463e72c6d5c62264f6579ec96b956f4fd1f786e3",
+    "runtime-compatibility-audit.py": "5e498553a863e1e131f2e58af2ba5a521b9db8de67e9a6713066eb6b46e8d638",
     "runtime_source_recipe.py": "6d1d2cc20e1a2fe225f913d9df815771b4e047c872bdaabbb59eceea52bcb35d",
     "prepare-source-build.py": "96eb19457f4799979e691459ad19ba761ab498d6576470db7c77eb5708171274",
     "source-build-policy.json": "5cf435e3bb81a52e1583ea00008d0e46a3c0ec64d920fe6720d59f88870bd83a",

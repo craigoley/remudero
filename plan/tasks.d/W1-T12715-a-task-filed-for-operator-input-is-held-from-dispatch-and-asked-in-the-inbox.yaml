@@ -22,7 +22,15 @@
     - src/lib/task-linter.ts
     - src/lib/human-gate.ts
     - src/lib/worker.ts
+    - src/lib/now-view.ts
+    - src/lib/daemon.ts
+    - src/cli/commands/daemon.ts
+    - src/cli/commands/run-task-verb.ts
+    - src/run-task.ts
+    - docs/operator-guide.md
     - test/plan/a-task-filed-for-operator-input-is-held-until-it-is-answered.test.ts
+    - test/daemon/bounded-drain-and-kick-entry-points.test.ts
+    - test/github/tick-reads-in-the-worker-thread-take-their-share-of-the-installation-budget.test.ts
   status: queued
   attempts: 0
   acceptance:
@@ -68,6 +76,11 @@
        task id; reason: the question and the source pull request; url: the task file on main). `rmd inbox` and the console
        read the same gates.
     6. src/lib/task-linter.ts: refuse an empty question, and refuse needs_input on a task whose status is not queued.
+    7. Wiring. plan.ts sits below worker.ts in the import graph, so plan.ts takes the answer through an
+       `inputAnswer` port and never reads the store itself. With no port, a task with needs_input stays held.
+       The daemon command passes taskInputAnswer over its own checkout to the daemon's selector and its kick check.
+       `rmd run-task` passes it to assertRunnable and puts the answer in the build prompt. The now view adds the
+       held-task gates to its task-questions source. `rmd inbox` prints the same gates before its proposals.
     NOT IN SCOPE: who files these tasks (W1-T12709); the console's answer form, which already exists.
   falsifier: |
     Let nextRunnable ignore needs_input and criterion 1 must fail. Drop the answer lookup and criterion 2 must fail. Hold a
