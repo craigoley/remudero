@@ -242,3 +242,24 @@ test("W1-T3734: an absent hardCapChars enforces nothing, and says nothing about 
   assert.deepEqual(evalRatchet2(9_999_999, { capChars: 42_000 }), [], "no declared cliff, no refusal");
   assert.equal(exceedsCurationTarget(9_999_999, { capChars: 42_000 }), true, "the advisory still speaks");
 });
+
+// ── W1-T12526: the parse runs over shard text, so the merge-time verdict counts a tree it read from git ──
+const textMod = await import("#scripts/learnings-budget-ratchet.mjs" as string) as {
+  loadCorpus: (dir: string) => unknown[];
+  corpusFromTexts: (texts: Iterable<[string, string]>) => unknown[];
+  parseShardEntries: (text: string, path: string) => unknown[];
+  shardPathsInListing: (paths: readonly string[]) => string[];
+};
+
+test("W1-T12526: the corpus parsed from shard texts equals the corpus loadCorpus reads from the directory", async () => {
+  const { readFileSync } = await import("node:fs");
+  const dir = join(FIXTURES, "lifecycle-both-active");
+  const fromDisk = textMod.loadCorpus(dir);
+  assert.ok(fromDisk.length > 1, "control: the fixture has entries");
+  const { learningsSourceFiles } = await import("#scripts/lib/learnings-files.mjs" as string) as { learningsSourceFiles: (d: string) => Array<{ filename: string }> };
+  const texts = learningsSourceFiles(dir).map(({ filename }): [string, string] => [join(dir, filename), readFileSync(join(dir, filename), "utf8")]);
+  assert.deepEqual(textMod.corpusFromTexts(texts.reverse()), fromDisk, "path order, whatever order the texts arrive in");
+  assert.throws(() => textMod.parseShardEntries("id: x\n", "learnings/map.yaml"), /learnings\/map\.yaml must be a YAML list of entries/);
+  assert.deepEqual(textMod.shardPathsInListing(["learnings/b.yaml", "learnings/a.d/one.yaml", "learnings/a/deep.yaml", "learnings/c.yml", "other/d.yaml"]),
+    ["learnings/a.d/one.yaml", "learnings/b.yaml"]);
+});

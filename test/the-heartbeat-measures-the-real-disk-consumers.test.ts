@@ -3,9 +3,9 @@ import { spawnSync } from "node:child_process";
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { makeTempDir } from "../src/lib/tmp.js";
-import { REAL_SCRIPT } from "./helpers/fleet-heartbeat-harness.js";
-import { assertWallClockBound } from "./helpers/wall-clock-bound.js";
+import { makeTempDir } from "#src/lib/tmp.js";
+import { REAL_SCRIPT } from "#test/helpers/fleet-heartbeat-harness.js";
+import { assertWallClockBound } from "#test/helpers/wall-clock-bound.js";
 
 // Declare the fixture's topology before host paths: its temporary root may itself
 // live below /mnt/rmd, but that must not move its synthetic root onto /dev/data.
@@ -30,7 +30,7 @@ function measure(
   const dir = makeTempDir("heartbeat-consumers");
   try {
     const bin = join(dir, "bin");
-    for (const path of ["bin", "scripts", "home", "state-root/state", "tmp/rmd-c-one", "tmp/rmd-c-two", "container-tmp/rmd-c-three"])
+    for (const path of ["bin", "scripts", "home/rmd-work", "state-root/state", "tmp/rmd-c-one", "tmp/rmd-c-two", "container-tmp/rmd-c-three", "tmp/tsx-1000", "tmp/rmd-leftover"])
       mkdirSync(join(dir, path), { recursive: true });
     // INSTALL_DIR and dependency probes belong to this fixture, not the host checkout.
     // Copy the actual subject verbatim; do not stub its implementation or change its timeout.
@@ -323,10 +323,10 @@ test("a consumer walk stops at its time budget and publishes the cut consumer an
   assert.equal(beat.consumer_worktrees_kb, "42000", "walks finished inside the budget keep their sizes");
   assert.equal(beat.consumer_docker_kb, "27000000");
   assert.equal(beat.consumer_rmd_kb, "61000000", "a statfs read is not a walk, so a spent budget does not cost it");
-  for (const name of ["rmd_tmp", "scratch", "coverage", "transcripts", "npm_cache"])
+  for (const name of ["rmd_tmp", "scratch", "coverage", "transcripts", "npm_cache", "tsx_cache", "tmp_leftovers", "hand_worktrees"])
     assert.equal(beat[`consumer_${name}_kb`], "unknown", `${name} was reached after the budget was spent`);
   assert.equal(beat.consumer_walk_state, "budget_exhausted", "a bounded walk must not read as a complete one");
-  assert.equal(beat.consumer_walk_budget_exhausted, "containerd,rmd_tmp,scratch,coverage,transcripts,npm_cache");
+  assert.equal(beat.consumer_walk_budget_exhausted, "containerd,rmd_tmp,scratch,coverage,transcripts,npm_cache,tsx_cache,tmp_leftovers,hand_worktrees");
 });
 
 test("a walk that finishes inside its budget is unchanged, and a malformed budget falls back to the default", () => {
