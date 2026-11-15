@@ -20,7 +20,7 @@
     - src/lib/light-pass-open-pr-list.ts
     - src/lib/sweep.ts
     - test/sweep/a-light-pass-decides-from-its-last-good-open-pr-list-when-the-read-fails.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "After one light pass with a good open-PR list read, a second pass whose pulls?state=open read fails with a rate-limit error still admits the review of an eligible PR from the last good list, and writes sweep_light.views_fallback with reason rate_limited, snapshot_age_ms and pr_count, and no sweep_light.error row"
