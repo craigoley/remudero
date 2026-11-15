@@ -188,7 +188,7 @@ test("W1-T9102: unreadable file history uses the named prior and reports the rea
   assert.ok(diagnostics.some((d) => d.op === "read" && d.reason === "fixture history read failure"));
 });
 
-test("W1-T9102: a real test file child's kernel peak is learned through a reservation's default sampler", async (t) => {
+test("W1-T9102: a real child stays live until reservation sampling is bound", async (t) => {
   const fx = fixture(t);
   const file = join(fx.dir, "real.test.mjs");
   const ackFile = join(fx.dir, "reservation-bound");
