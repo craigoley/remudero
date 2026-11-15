@@ -58,14 +58,21 @@ def attach_metadata_cases(case, H):
             path = "setuptools/_vendor/fixture-1.0.dist-info/METADATA"
             identity = ("fixture", "1.0", "a" * 64)
             original = self.p.APPROVED_SPECIAL_MEMBERS
+            original_aliases = self.p.APPROVED_SPECIAL_MEMBER_ALIASES
             try:
                 self.p.APPROVED_SPECIAL_MEMBERS = {identity: {path: (len(data), self.p.digest(data))}}
                 for args in [("other", "1.0", identity[2], path, data), ("fixture", "1.1", identity[2], path, data),
                              ("fixture", "1.0", "b" * 64, path, data), (*identity, path.upper(), data),
                              (*identity, path, data + b"changed")]:
                     self.assertFalse(self.p.approved_special_member(*args, ("site", *path.split("/"))))
+                old = ("setuptools", "84.0.0", "51a52592b3b99e102b609654876bd65f19f999935166d1352678931132b0c670")
+                new = ("setuptools", "84.1.0", "5231689c6ac8156cd155cfb98c3fd6fb252c3e7e9bd3d78b64d3c55f132624c9")
+                self.p.APPROVED_SPECIAL_MEMBERS = {old: {path: (len(data), self.p.digest(data))}}
+                self.p.APPROVED_SPECIAL_MEMBER_ALIASES = {new: old}
+                self.assertTrue(self.p.approved_special_member(*new, path, data, ("site", *path.split("/"))))
             finally:
                 self.p.APPROVED_SPECIAL_MEMBERS = original
+                self.p.APPROVED_SPECIAL_MEMBER_ALIASES = original_aliases
 
         def recipe(self):
             return self.p._source_recipe()

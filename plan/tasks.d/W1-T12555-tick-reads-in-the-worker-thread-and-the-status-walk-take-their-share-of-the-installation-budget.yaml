@@ -23,7 +23,7 @@
     - src/lib/status.ts
     - src/lib/github-installation-budget.ts
     - test/github/tick-reads-in-the-worker-thread-take-their-share-of-the-installation-budget.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "A GitHub read that a tick read makes in the read-plane worker thread counts against the same process allowance as a read on the daemon's main thread. After a tick read generation, the main thread's githubInstallationBudget() holds the newest reading the worker saw and counts each read the worker made"
