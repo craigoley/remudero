@@ -105,6 +105,7 @@ real self-sync re-exec sets on its own child, so it skips the whole check, not e
 | `rmd worktree add <dir> -b <branch> <base> [--donor <abs dir>]` | Create a disposable worktree of `<base>`. On APFS it clones the donor checkout's unchanged tracked files copy-on-write (almost no free space), reconciles to `<base>` with git, and falls back to a plain `git worktree add` off APFS. Prints the method, the cloned/written counts and the measured `df` delta. See [the CLI reference](cli-reference.md#rmd-worktree). |
 | `rmd hand-worktree <taskId> [--parent <abs dir>]` | Create a hand build's `run-<taskId>-<epochMs>` worktree from fresh origin/main with no upstream, at an absolute path, and node_modules hard-linked (`cp -al`) from a worktree on the same filesystem with an identical package-lock.json. With no such donor it prints `npm ci` as the next step and the free space. See [the CLI reference](cli-reference.md#rmd-hand-worktree). |
 | `rmd pr-checks <pr-number> [--repo <name>]` | Print a pull request head's checks — check runs unioned with commit statuses such as `remudero-review`, latest attempt per name — and exit 1 if any is red, 2 on a failed read (never "no red checks"). An outcome the classifier cannot name prints as pending. See [the CLI reference](cli-reference.md#rmd-pr-checks). |
+| `rmd plan-destination <decision\|feedback\|task>` | Print where a new plan file of this kind goes on this host: the outcome, the repository and the checkout. An unreadable host file prints its reason and exits 1 (W1-T12216). See [Filing in the plan destination](#filing-in-the-plan-destination). |
 | `rmd next-task-id --branch <filing-branch>` | Reserve the next free `W1-T<n>` on origin as `refs/rmd-id/<id>` and record the branch that will file it. A normal invocation claims the id; `--offline` and `--no-reserve` do not. An unreadable source refuses the reservation. See [the CLI reference](cli-reference.md#rmd-next-task-id) for all flags and [minting a task id](#minting-a-task-id) for the host procedure. |
 | `rmd note <id> <text...>` | Record an operator guidance note against a task or proposal, into `plan/operator-notes.ndjson` — the weekly feedback docket's fifth capture surface, gathered across **all** tasks (the task scoping applies to prompt injection only). The text is **positional**: `rmd reframe`'s required `--feedback` flag is why that surface reads zero. Also available as `rmd approve <id> --note "<text>"`, which chains this exact write **after** the ratification lands. State-side only: no git, no gh, no PR. |
 | `rmd retro [--dry-run]` | Sync the plan from the ledger (the Architect retro's deterministic gather half). `--dry-run` prints the gather + calibration table only. |
@@ -145,7 +146,7 @@ real self-sync re-exec sets on its own child, so it skips the whole check, not e
 | `rmd triage <feedback-id>` | The Architect intake worker: grounds a feedback entry against the plan/learnings/decisions, researches, and either closes it, grills an ambiguous one via a needs-human issue, or opens a plan-only PR. |
 | `rmd ratify <rung>` | Law 5's signature (W1-T2694): computes a gated rung's live operation hash (its `plan/policy.yaml` block plus its declared contract version) and prints the `plan/ratifications.yaml` row an operator commits to ratify it — writes nothing itself. Absent a committed row every gated rung fires exactly as before; once ratified, a later drift refuses the rung and ledgers the diff (`rung.unratified`), never widening what it may do. |
 | `rmd plan --mode=create\|clarify\|expand [<brief>...]` | The unified Architect PLAN skill: scaffold new tasks, clarify/grill an existing one, or propose gap-filling tasks. Clear/grill touch nothing; a proposal opens a plan-only PR. |
-| `rmd inbox [--dry-run]` | Ratification inbox: tiers pending plan proposals into READY / not-ready / deferred-with-trigger. |
+| `rmd inbox [--dry-run]` | Ratification inbox: tiers pending plan proposals into READY / not-ready / deferred-with-trigger. It also lists queued tasks held for an operator answer; answer them in the Console inbox. |
 | `rmd improvement-action <operationId> --state-dir <dir>` | Daemon-owned saved-action handoff for a sealed draft/file request. Requires the daemon's admitted workflow; the HTTP draft/file routes only persist requests for that workflow. A saved or queued request is not worker admission, a completed draft or a filed task. |
 | `rmd inbox-bakeoff [--sample <n>]` | Replays a fixed, id-ordered sample of open proposals through each production draft candidate (default 8), then reports contract errors, clean drafts, cash cost and subscription notional cost. It is an operator-run, spend-bearing measurement; it never changes routing or the draft cache. |
 | `rmd approve <P##>` | Ratifies a currently-READY proposal, shipping its cached draft into a plan PR gated by the normal checks. |
@@ -711,6 +712,44 @@ The command must print `RESERVED <id> on origin (refs/rmd-id/<id>)`. Use the sam
 `<filing-branch>` as the filing PR's head; a different head fails the reservation check. Remove
 the throwaway worktree only after leaving it, and never delete a contested reservation. For the
 checkout placement and cleanup rules, see [Where to cut a worktree](#where-to-cut-a-worktree-and-why-it-matters).
+
+### Filing in the plan destination
+
+A host can send new plan files to a second repository, the plan destination. One host file is the
+switch: `<state dir>/plan-destination.json`, beside `daemon-target.json`.
+
+```json
+{"repository": "<owner>/<name>", "kinds": ["decision", "feedback", "task"]}
+```
+
+- The checkout of the destination is `<root>/repos/<name>`, beside the state directory.
+- A kind is on when `kinds` lists it. Each writer reads the file on each call, so a change takes
+  effect at the next filing. No restart is needed.
+- With no host file, every kind is off and every writer files in the public repository, as before.
+- A file that is present but wrong is `unreadable`. A writer then refuses. It never reads the file
+  as "off".
+
+Before a hand filing, ask the host where the file goes:
+
+```sh
+./bin/rmd plan-destination task
+```
+
+It prints `outcome`, `repository` and `checkout`. The outcome is `off` (no host file), `not_listed`
+(the file does not list the kind) or `destination`. For `off` and `not_listed` the repository is
+the public one.
+
+**To turn a kind on**, add it to `kinds`. **To turn a kind off**, remove it from `kinds`. New files
+of that kind then go to the public repository again.
+
+**What stays in the ops repository after a kind is turned off.** Every file that is already there
+stays there. A changed file is always edited in the repository that holds it. While the host file
+names the repository, the readers read both catalogs, also when `kinds` is empty. So keep the file
+with an empty `kinds` list to turn every kind off. If you remove the whole file, the readers stop
+reading the ops repository, and its tasks and feedback are no longer seen on this host.
+
+The doctrine page for a hand filing says which commands to run in the destination:
+[file from the operator checkout](../doctrine/plan-and-task-hygiene/file-from-the-operator-checkout.md).
 
 
 ## Operating this host (migrated from CLAUDE.md, W1-T2507)

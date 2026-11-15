@@ -1,0 +1,49 @@
+- id: W1-T12834
+  title: "A plan lint check that refuses filings from several gardens raises one escalation, and a refused draft keeps its minted task id"
+  repo: remudero
+  depends_on: []
+  priority: 0.5
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the overseer and the garden framework gain one escalation class and an id reuse; a wrong join raises noise or hides a per-garden failure
+  band_meaning: blast-radius
+  origin: "operator-session#self-improvement-audit-2026-11-15"
+  plan_refs:
+    - W1-T11746
+    - W1-T12833
+    - W1-T5454
+  files:
+    - src/lib/gardener.ts
+    - src/lib/gardener-overseer.ts
+    - test/gardeners/a-lint-check-that-refuses-several-gardens-raises-one-escalation.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "When plan_pr.preflight_refused rows in the trailing 24 hours name the same failing check (the lint tag in brackets, or the check name when there is none) for 3 or more distinct gardens, the overseer writes one gardener_overseer.filing_class_blocked row and raises one escalation naming the check, the gardens, the refusal count and the first refusal time"
+      proof: "grep: W1-T12834 criterion 1 in test/gardeners/a-lint-check-that-refuses-several-gardens-raises-one-escalation.test.ts"
+    - claim: "invariant:one-escalation-per-blocked-check — later passes with the same check still refusing raise nothing more, and the class clears, with a cleared row, once 24 hours pass with no refusal for that check"
+      proof: "grep: W1-T12834 criterion 2 in test/gardeners/a-lint-check-that-refuses-several-gardens-raises-one-escalation.test.ts"
+    - claim: "A check that refuses one or two gardens keeps today's per-garden notice, heal and escalate ladder with no class row"
+      proof: "grep: W1-T12834 criterion 3 in test/gardeners/a-lint-check-that-refuses-several-gardens-raises-one-escalation.test.ts"
+    - claim: "A garden whose draft the plan PR preflight refused retries the same finding (same origin key) with the task id it already minted and mints no new id for it; the count of ids minted per finding is one however many times the landing is refused"
+      proof: "grep: W1-T12834 criterion 4 in test/gardeners/a-lint-check-that-refuses-several-gardens-raises-one-escalation.test.ts"
+  rationale: |
+    MEASURED 2026-11-15 by the operator session, read-only, over the daemon ledger union (~/rmd-state2/state, 2026-11-08T00:00Z to 2026-11-15T15:00Z) and origin/main d5722e1fe.
+
+    - 568 [design-invariant-proof] refusals across 11 lanes ran for 60 hours (2026-11-13T03:19Z to 2026-11-15T15:02Z). The operator session found the cause by reading rows.
+    - The overseer's ladder is per garden (gardener_overseer.noticed 145, healed 74, escalated 47 in 7 days). READ gardener-overseer.ts: it reads each garden's own failure steps, and no class joins plan_pr.preflight_refused across gardens by failing check.
+    - The scout's 292 refusals carry 207 distinct task_ids, so a retry of a refused finding mints a fresh id. Each mint is a pushed refs/rmd-id reservation, and none of those 207 landed.
+    - READ gardener.ts runGardenAsync: a preflight refusal logs <name>.garden_filing_failed or landing_repeat_skipped with a doubling retry, and records no fingerprint of the finding it minted for.
+  design: |
+    1. gardener-overseer.ts: on each pass, group the trailing 24 hours of plan_pr.preflight_refused rows by failing check. Take the lint tag from failures[].lines when present, else failures[].check. Use the row's gardener_origin.name, else lane, as the garden.
+    2. At 3 or more gardens, write gardener_overseer.filing_class_blocked and escalate once through the existing escalation path, keyed by the check, so the dedup is the check and not the garden.
+    3. gardener.ts: persist the minted id per finding key in the garden's state when a landing is refused, and reuse it on the retry; release it when the finding leaves the inventory.
+    INVARIANT one-escalation-per-blocked-check: one escalation per check per blocked episode, however many gardens and passes repeat it.
+    NOT IN SCOPE: fixing the refused check itself (W1-T12832, W1-T12833), failure steps the overseer does not classify (W1-T12843), and reaping reservations already minted.
+  falsifier: |
+    Remove the cross-garden join and criterion 1 must fail. Raise on every pass and criterion 2 must fail. Lower the garden threshold to 1 and criterion 3 must fail. Mint on every retry and criterion 4 must fail. Restore and all pass.
+  note: |
+    reservation hand-off: run-unfiled-1794756420518 -> run-unfiled-1794756420518
+    Reserved with rmd next-task-id from the operator checkout. Check refs/rmd-dispatch/W1-T12834 and any run branch before building. The test folder is the one rmd test-place computed for a stub with this test's imports; confirm it once the file exists.

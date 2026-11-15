@@ -150,7 +150,7 @@ import {
 } from "./arm-auto-merge.js";
 // Pure shared gate; dispatch-governor.ts explains why drain.ts cannot share it from here (W1-T342).
 import { checkDispatchGovernors, checkNewBuildReservation, governorDeferPayload, newBuildReservationPayload, type DispatchGovernorDeps, type DispatchGovernorVerdict, type MemoryReadTracker, type QuietHoursHoldResult } from "./dispatch-governor.js";
-import { assertRunnable, PlanError, TaskAdmissionError, type MergedResolver, type Plan, type Task } from "./plan.js";
+import { assertRunnable, PlanError, TaskAdmissionError, type MergedResolver, type Plan, type Task, type TaskInputAnswer } from "./plan.js";
 import { composeSecondaryPlan } from "./task-lookup.js";
 import { resolveReleases, closedUnmergedRunBranchRefs, type DispatchFilterReason, type ReleaseResolution } from "./drain.js";
 import type { StatusProjection } from "./status.js";
@@ -1336,6 +1336,8 @@ export interface DaemonDeps {
   /** W1-T10348 — the operator releases kept in state/operator-releases.json, which ledger rotation cannot
    *  shed. Read with `readLedgerLines` once per tick by the shared release resolver. Absent = ledger only. */
   readDurableReleases?: () => ReleaseEvidence;
+  /** W1-T12715: the operator answer for a held task; absent, a task with needs_input is never dispatched. */
+  taskInputAnswer?: TaskInputAnswer;
   /** Complete archive union for the boot-time restart estimates and sweep-bound seed (W1-T9632); unreadable disables holdouts. */
   readRestartHistory?: () => readonly string[];
   bootPhases?: BootPhases;
@@ -7791,7 +7793,7 @@ export async function runDaemon(
         try {
           // W1-T3216: a console kick for an operator-RELEASED verify:human task must be admitted
           // here too, or the release works from the drain and is refused from the console.
-          assertRunnable(planForBatch, task, mergedTask, tickReleases.ids);
+          assertRunnable(planForBatch, task, mergedTask, tickReleases.ids, deps.taskInputAnswer);
         } catch (e) {
           refuse(e instanceof PlanError ? e.message : String((e as Error)?.message ?? e));
           continue;
@@ -7894,6 +7896,7 @@ export async function runDaemon(
       dispatchValueContext: deps.buildDispatchValueContext?.(planForBatch, isMerged),
       machineShare: machineShareFor(planForBatch, tickMachineShareRows),
       beginSelectionPass: deps.beginSelectionPass,
+      inputAnswer: deps.taskInputAnswer,
       isOpenPr: deps.isOpenPr,
       // A run the harness yielded before its PR is walked ahead of fresh starts, so a yield never costs its queue place.
       resumableTaskIds: new Set(resumableHandoffs.keys()),
@@ -8233,7 +8236,7 @@ export async function runDaemon(
               if (deps.isCreditIndeterminate!(task.id)) throw new Error(`credit unreadable: ${task.id}`);
               if (isMerged(task.id)) return false;
               try {
-                assertRunnable(planForBatch, task, (dep) => isMerged(dep.id), released);
+                assertRunnable(planForBatch, task, (dep) => isMerged(dep.id), released, deps.taskInputAnswer);
                 return true;
               } catch (e) {
                 if (e instanceof TaskAdmissionError) return false;

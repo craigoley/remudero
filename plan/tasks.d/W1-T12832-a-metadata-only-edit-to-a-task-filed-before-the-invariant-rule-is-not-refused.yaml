@@ -1,0 +1,56 @@
+- id: W1-T12832
+  title: "The plan lint asks for a design invariant declaration only when a task is new or its design or acceptance changed"
+  repo: remudero
+  depends_on: []
+  priority: 0.2
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # src/run-task.ts lint-plan decides which plan PRs every filer may open; a wrong scope either lets an undeclared contract edit through or keeps refusing every machine edit
+  band_meaning: blast-radius
+  origin: "operator-session#self-improvement-audit-2026-11-15"
+  plan_refs:
+    - W1-T11746
+    - W1-T12551
+  files:
+    - src/run-task.ts
+    - src/lib/task-linter.ts
+    - test/lint-plan-fast-scopes-to-the-merge-base.test.ts
+    - test/plan/a-metadata-only-edit-to-a-task-filed-before-the-invariant-rule-is-not-refused.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "In the changed-task pass of rmd lint-plan --base, a task that exists at the base with byte-identical design text and identical acceptance claims and proofs, and whose design carries no INVARIANT or NO-INVARIANTS line, gets no design-invariant-proof violation when only its priority, verify, risk_ruling, status, attempts, note or depends_on changed"
+      proof: "grep: W1-T12832 criterion 1 in test/plan/a-metadata-only-edit-to-a-task-filed-before-the-invariant-rule-is-not-refused.test.ts"
+    - claim: "invariant:new-and-reauthored-tasks-still-declare — a task absent at the base, and a task whose design text or any acceptance claim or proof differs from the base, is refused by design-invariant-proof without a declaration exactly as on origin/main"
+      proof: "grep: W1-T12832 criterion 2 in test/plan/a-metadata-only-edit-to-a-task-filed-before-the-invariant-rule-is-not-refused.test.ts"
+    - claim: "A task whose design carries any INVARIANT or NO-INVARIANTS line is checked in full on every changed-task pass (orphaned, duplicate and multiply-mapped slugs), even when only its metadata changed"
+      proof: "grep: W1-T12832 criterion 3 in test/plan/a-metadata-only-edit-to-a-task-filed-before-the-invariant-rule-is-not-refused.test.ts"
+    - claim: "The lint-plan command decides the demand from the base record it already resolved"
+      proof: "grep: designContractChanged( in src/run-task.ts"
+  rationale: |
+    MEASURED 2026-11-15 by the operator session, read-only, over the daemon ledger union (~/rmd-state2/state, 2026-11-08T00:00Z to 2026-11-15T15:00Z) and origin/main d5722e1fe.
+
+    - 640 plan_pr.preflight_refused rows in 7 days. 568 name [design-invariant-proof] and every one is dated after W1-T11746 merged (2026-11-13T03:09Z, #18189).
+    - By lane (11 lanes): scout 292 (207 distinct task ids), machine-judge 209 (7 ids: W1-T12443 50, W1-T12468 50, W1-T9411 46, W1-T9474 39, W1-T12431 22), selector-shadow 33, refusal_amendment 10, gate 7, flow 5, fix-lane 4, queue-judge 4, ci-friction 2, backlog 1, redesign 1.
+    - Three refused edits changed no contract text:
+      - 2026-11-15T14:02Z: the queue judge changed only W1-T11196's priority.
+      - 2026-11-15T01:41Z: a refusal amendment touched W1-T11938.
+      - The machine judge's risk_ruling pins on W1-T9411 and W1-T9474, both filed weeks before the rule.
+    - READ src/run-task.ts (lint-plan, the scope branch): the changed-task options set requireDesignInvariantDeclaration: true for every task in the diff. Its comment says the whole-plan pass and dispatch "leave the historical population valid". The base record (oldTask) is resolved in the same block and is not consulted.
+    - Each refusal prints "0 pre-existing on base" because the base comparison lints the base record without the option.
+    - Effect: no machine judge release, queue-judge re-rank, refusal amendment or backlog banding can land for any task filed before 2026-11-13. Since the rule, plan/tasks.d changes on main are almost all hand filings from operator sessions.
+    Operator ruling 2026-11-15: "Narrow to new or re-authored".
+  design: |
+    1. In src/run-task.ts lint-plan (the scope branch that builds the changed-task LintOpts), compute designContractChanged(oldTask, task): true when oldTask is undefined, when the design strings differ, or when the acceptance lists differ in length or in any claim or proof.
+    2. Set requireDesignInvariantDeclaration to designContractChanged(...) OR "the new design carries an INVARIANT or NO-INVARIANTS line". A task that declares is then always checked in full, and a task that never declared is asked only when its contract text is authored in this diff.
+    3. Keep invariantSlugViolations itself unchanged apart from any helper it needs to expose; do not change the whole-plan pass or dispatch.
+    INVARIANT new-and-reauthored-tasks-still-declare: a new task and any task whose design or acceptance text changed in the diff is refused without a declaration exactly as today; the narrowing applies only to a record whose design and acceptance are identical to the base.
+    The existing W1-T11746 fixture in test/lint-plan-fast-scopes-to-the-merge-base.test.ts changes only a note and expects a refusal; its edit must author a design that declares neither form so it keeps proving the refusal.
+    NOT IN SCOPE: making machine generators declare invariants (W1-T12833), backfilling declarations into old shards, and any other lint check's base comparison.
+  falsifier: |
+    Force the option true and criterion 1 must fail. Force it false for a new task or a task with an edited claim and criterion 2 must fail. Skip the full check for a declaring task and criterion 3 must fail. Restore and all pass.
+  note: |
+    reservation hand-off: run-unfiled-1794756420518 -> run-unfiled-1794756420518
+    Reserved with rmd next-task-id from the operator checkout. Check refs/rmd-dispatch/W1-T12832 and any run branch before building. The test folder is the one rmd test-place computed for a stub with this test's imports; confirm it once the file exists.

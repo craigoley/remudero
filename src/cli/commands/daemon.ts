@@ -106,7 +106,7 @@ import { readHeapAdmissionHoldMode } from "../../lib/daemon-heap-admission-hold.
 import { applyDaemonMemoryPolicy, createDaemonMemoryGovernor, createDaemonSlackReclaimer, installDaemonSlackReclaimer, readDaemonMemoryPolicy } from "../../lib/daemon-memory-policy.js";
 import { workerThreads } from "../../lib/worker-heaps.js";
 import { readCiGateRequiredChecks } from "../../lib/ci-gate-required.js";
-import { resolveClaudeExecutable, claudeExecutableCache } from "../../lib/worker.js";
+import { resolveClaudeExecutable, claudeExecutableCache, taskInputAnswer } from "../../lib/worker.js";
 import { defaultInstance, memoryStoreReadFailure, readMemoryLedger, sweepMemoryReservations } from "../../lib/host-memory-ledger.js";
 import { type DispatchGovernorDeps } from "../../lib/dispatch-governor.js";
 import { focusGateFor } from "../../lib/focus-gardener.js";
@@ -2288,6 +2288,7 @@ export async function daemonCommand(
         // W1-T988: the target this daemon already resolved and already ledgers as `daemon.target`'s
         // `repo:` field — the SAME value, never a second resolution that could drift from it.
         targetRepo: target.repo,
+        taskInputAnswer: (taskId) => taskInputAnswer(effectiveRepoRoot, taskId),
         // W1-T9680: a worker push's token — the credential socket's own scoped mint, else the ambient GH_TOKEN.
         probeFleetPushCredential: receivePackCredentialProbe({ originUrl: `https://github.com/${target.owner}/${target.repo}.git`,
           token: daemonPushTokenSource(`${target.owner}/${target.repo}`, gitCredentialSocket ? (deps.gitCredentialMint ?? realScopedMint(log)) : undefined) }),
