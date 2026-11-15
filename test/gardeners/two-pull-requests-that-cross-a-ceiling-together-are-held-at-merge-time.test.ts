@@ -99,7 +99,8 @@ function assertHeldTogether(gate: string, fx: ReturnType<typeof landTwo>, row: {
 }
 
 test("W1-T12509 criterion 1: the judge counts each recorded-count gate on the merge-tree with that gate's own counter", () => {
-  assert.deepEqual([...COUNTED_RATCHET_GATES], ["clock-signature", "source-size", "fixture-copy", "deps-interface", "claude-md-budget"]);
+  assert.deepEqual([...COUNTED_RATCHET_GATES], ["clock-signature", "source-size", "fixture-copy", "deps-interface", "claude-md-budget",
+    "learnings-budget", "affected-reach", "house-layout"]);
   // One merge that lands every gate's scope: each gate is counted on both trees, none is unread.
   const word = ["in", "it"].join("");
   const fx = landTwo(
@@ -112,9 +113,8 @@ test("W1-T12509 criterion 1: the judge counts each recorded-count gate on the me
   assert.equal(j.verdict, "clean", j.reason);
   assert.equal(j.reason, undefined);
   assert.deepEqual(j.counted, [...COUNTED_RATCHET_GATES]);
-  // learnings-budget, affected-reach and house-layout have counters this module cannot run on two trees
-  // (the task's note): they are named, with the reason, never counted as clean.
-  for (const gate of ["learnings-budget", "affected-reach", "house-layout"]) assert.ok(j.uncounted.some((u) => u.gate === gate && u.reason), gate);
+  // W1-T12526 counts learnings-budget, affected-reach and house-layout too, so none of them is named uncounted.
+  for (const gate of ["learnings-budget", "affected-reach", "house-layout"]) assert.ok(!j.uncounted.some((u) => u.gate === gate), gate);
 });
 
 test("W1-T12509 criterion 2: clock-signature — two PRs each inside the row cross it together", () => {
@@ -153,13 +153,10 @@ test("W1-T12509 criterion 2: deps-interface — two PRs each inside the declarat
   ), { path: DEPS, field: "depsInterfaceCount", merged: 3, ceiling: 2 });
 });
 
-test("W1-T12509 criterion 2: house-layout — its counter closes an import ring here, so it is named uncounted, never counted clean", () => {
+test("W1-T12509 criterion 2: house-layout — two PRs that each move a literal cross main's count together (counted since W1-T12526)", () => {
   const literal = `export const dir = ${JSON.stringify("learnings/")};\n`;
-  const fx = landTwo({ "src/one.ts": literal }, { "src/one.ts": "export const dir = 1;\n", "src/two.ts": literal },
-    { "src/one.ts": "export const dir = 1;\n", "src/three.ts": literal });
-  const together = fx.onto(2, fx.m1);
-  assert.ok(!together.counted.includes("house-layout"));
-  assert.match(together.uncounted.find((u) => u.gate === "house-layout")?.reason ?? "", /names the run-task and sweep command files/);
+  assertHeldTogether("house-layout", landTwo({ "src/one.ts": literal }, { "src/one.ts": "export const dir = 1;\n", "src/two.ts": literal },
+    { "src/one.ts": "export const dir = 1;\n", "src/three.ts": literal }), { path: "src", field: "learnings/", merged: 2, ceiling: 1 });
 });
 
 test("W1-T12509 criterion 2: claude-md-budget — two PRs each inside the fold-debt ceiling cross it together", () => {
@@ -190,7 +187,7 @@ test("W1-T12509 criterion 3: a counter that throws, or a tree it cannot read, is
   const unlisted = judgeMergedRatchets(memory({ "src/a.ts": "x\n" }, {}, { populationUnread: "git ls-tree -l exited 128" }));
   assert.equal(unlisted.verdict, "unread");
   assert.match(unlisted.reason ?? "", /deps-interface: the tree could not be read: git ls-tree -l exited 128/);
-  assert.deepEqual(unlisted.counted, ["clock-signature", "source-size", "fixture-copy", "claude-md-budget"]);
+  assert.deepEqual(unlisted.counted, ["clock-signature", "source-size", "fixture-copy", "claude-md-budget", "learnings-budget", "affected-reach"]);
 
   // The same through the production read, when git cannot list the merged tree.
   const fx = landTwo({ "src/one.ts": "export const one = 1;\n" }, { "src/two.ts": "export const two = 2;\n" }, { "src/three.ts": "export const three = 3;\n" },
@@ -206,11 +203,9 @@ test("W1-T12509 criterion 3: a counter that throws, or a tree it cannot read, is
   assert.match(held.reason ?? "", /deps-interface: the tree could not be read: listing failed/);
 });
 
-test("W1-T12509 criterion 4: the uncounted gates are comment-load (advisory), coverage and mutation (run-derived), and three whose counters cannot run here", () => {
-  assert.deepEqual(UNCOUNTED_RATCHET_GATES.map((u) => `${u.gate}:${u.class}`),
-    ["comment-load:advisory", "coverage:run-derived", "mutation:run-derived", "learnings-budget:needs-worktree", "affected-reach:test-suite-counter", "house-layout:import-ring"]);
+test("W1-T12509 criterion 4: the uncounted gates are comment-load (advisory), coverage and mutation (run-derived)", () => {
+  assert.deepEqual(UNCOUNTED_RATCHET_GATES.map((u) => `${u.gate}:${u.class}`), ["comment-load:advisory", "coverage:run-derived", "mutation:run-derived"]);
   for (const gate of COUNTED_RATCHET_GATES) assert.ok(!UNCOUNTED_RATCHET_GATES.some((u) => u.gate === gate), `${gate} is counted, so it is not named uncounted`);
-  for (const u of UNCOUNTED_RATCHET_GATES.filter((g) => g.class !== "advisory" && g.class !== "run-derived")) assert.ok(u.reason, u.gate);
 });
 
 function withoutListing(input: MergedRatchetInputs): MergedRatchetInputs {
