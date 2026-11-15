@@ -1470,7 +1470,7 @@ import {
   movedTaskIds,
   planFromFiles,
   planSourceConflicts,
-  criteriaAdded,
+  criteriaAdded, declaresDesignInvariant, designContractChanged,
   DUPLICATE_SLUG_SHINGLE_K,
   followUpCarriesCriteria,
   formatReadIdentity,
@@ -19650,9 +19650,9 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
         // in the changed-tasks pass, so a newly filed or edited shard is refused before it
         // repeats the pattern.
         proofSelfPath: "block",
-        // W1-T11746: only this changed-task pass demands INVARIANT/NO-INVARIANTS declarations, so the
-        // whole-plan pass and dispatch leave the historical population valid.
-        requireDesignInvariantDeclaration: true,
+        // W1-T11746/W1-T12832: only this pass demands INVARIANT/NO-INVARIANTS, and only of a task that is new, re-authored
+        // against `oldTask` or already declaring; a metadata-only edit, whole-plan and dispatch leave history valid.
+        requireDesignInvariantDeclaration: designContractChanged(oldTask, task) || declaresDesignInvariant(task),
       };
     }
     // impl-DO: the CALL-SITE check needs to know whether a module already exists, and the linter
