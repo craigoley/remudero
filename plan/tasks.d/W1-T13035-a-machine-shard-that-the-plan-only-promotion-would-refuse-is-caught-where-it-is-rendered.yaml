@@ -1,0 +1,53 @@
+- id: W1-T13035
+  title: "A machine shard that the plan-only promotion would refuse is caught where it is rendered, so the selector-shadow and CI-learning filers stop opening plan pull requests the preflight refuses every time"
+  repo: remudero
+  priority: 0.6
+  depends_on: [W1-T12833]
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # it changes which machine-rendered task records are admitted for filing
+  band_meaning: span
+  origin: "operator-session#self-improvement-loop-2026-11-15"
+  plan_refs:
+    - W1-T12833
+    - W1-T3814
+  files:
+    - src/lib/machine-filing.ts
+    - src/lib/selector-shadow-gardener.ts
+    - src/lib/measurement-cadence.ts
+    - test/gardeners/a-machine-shard-the-plan-only-promotion-would-refuse-is-caught-where-it-is-rendered.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "The shared machine-shard lint applies the plan-only promotion a new shard meets at the plan preflight, so a rendered record carrying shared-proof, proof-scope or shard-shape is refused where it is rendered, with the promoted check named"
+      proof: "grep: W1-T13035 criterion 1 in test/gardeners/a-machine-shard-the-plan-only-promotion-would-refuse-is-caught-where-it-is-rendered.test.ts"
+    - claim: "The selector-shadow miss record gives each of its acceptance claims its own proof and passes the shared lint with the promotion applied"
+      proof: "grep: W1-T13035 criterion 2 in test/gardeners/a-machine-shard-the-plan-only-promotion-would-refuse-is-caught-where-it-is-rendered.test.ts"
+    - claim: "The CI-learning draft's proofs read only paths its record declares and it passes the shared lint with the promotion applied"
+      proof: "grep: W1-T13035 criterion 3 in test/gardeners/a-machine-shard-the-plan-only-promotion-would-refuse-is-caught-where-it-is-rendered.test.ts"
+    - claim: "invariant:every-machine-template-is-walked — the census of machine templates renders every template through the shared lint with the promotion applied, and a template that would be refused fails it by name"
+      proof: "grep: W1-T13035 criterion 4 in test/gardeners/a-machine-shard-the-plan-only-promotion-would-refuse-is-caught-where-it-is-rendered.test.ts"
+  rationale: |
+    FOUND 2026-11-15 by the operator session while finishing W1-T12833, on origin/main 455ed55d92 and on the W1-T12833 branch (both give the same answer).
+
+    - A plan-only filing promotes six lint warnings to blocks when its shard is new (`promoteIntroducedPlanOnlyDiagnostics`, W1-T3814, in src/lib/task-linter.ts: shared-proof, call-site, proof-scope, shard-shape, proof-grep-already-true, proof-test-only-discrimination).
+    - Two machine templates render a record that carries one of those warnings every time, so every plan pull request they open is refused at the preflight:
+      - selector-shadow miss (`selectorShadowMissTask`): its two acceptance claims share one proof, so `shared-proof`.
+      - CI-learning draft (`ciLearningShardYaml`): its second proof greps the golden fixture path, which is not in the record's `files:`, so `proof-scope`.
+    - Rendered from the census fixtures and passed through `lintTask` and then the promotion, the output is `selector-shadow miss#0: raw [warn:shared-proof] | promoted [shared-proof]` and `CI-learning draft#0: raw [warn:proof-scope] | promoted [proof-scope]`. Every other pure template promotes nothing.
+    - W1-T12833 adds one shared lint for machine shards (`machineShardLintRefusal`) and a census that walks every template. That lint uses the changed-task option and does not apply the promotion, so the census cannot see this class.
+    - Ledger side, from the 2026-11-15 audit of the self-improvement loop: 15 selector-shadow and 7 redesign filings were refused on `shared-proof` before the invariant lint landed.
+  design: |
+    1. `machineShardLintRefusal` applies `promoteIntroducedPlanOnlyDiagnostics(violations, undefined, true)` for the checks that need no checkout (shared-proof, proof-scope, shard-shape), and names the promoted check in its refusal.
+    2. selector-shadow miss: the second claim gets its own proof (a second named test, or a `grep:` on the regression's `test(` line).
+    3. CI-learning draft: the golden fixture path joins `files:`, or the second proof reads the lessons file the record already declares.
+    4. The W1-T12833 census walks every template through the lint of step 1.
+    INVARIANT every-machine-template-is-walked: no machine template is rendered for filing without passing the shared lint with the plan-only promotion applied, and the census names any template that would not.
+    NOT IN SCOPE: the three promoted checks that need base files (call-site, proof-grep-already-true, proof-test-only-discrimination); the design-invariant declaration (W1-T12833); which warnings the promotion covers.
+  falsifier: |
+    Drop the promotion from the shared lint and criterion 1 must fail. Give the selector-shadow claims one proof again and criterion 2 must fail. Point the CI-learning proof back at the undeclared fixture and criterion 3 must fail. Leave a template out of the census walk and criterion 4 must fail. Restore and all pass.
+  note: |
+    reservation hand-off: run-unfiled-1794777729529 -> run-unfiled-1794777729529
+    Reserved with rmd next-task-id from a worktree at origin/main. Build after W1-T12833 (#18737) merges: it adds the shared lint and the census this task extends. The test folder is the one rmd test-place computed for a stub importing task-linter.ts, selector-shadow-gardener.ts and measurement-cadence.ts. A reproduction script and the full evidence note were kept by the operator session.
