@@ -52,7 +52,6 @@ const ESCALATED_STEP = "queue_judge.escalated";
 const UNAVAILABLE_STEP = "queue_judge.unavailable";
 /** Written only when the judge answered: a pass that ended in {@link UNAVAILABLE_STEP} throws before it. */
 export const QUEUE_JUDGE_SCORECARD_STEP = "queue_judge.scorecard";
-export const QUEUE_JUDGE_AVAILABILITY_STEPS = [QUEUE_JUDGE_SCORECARD_STEP, UNAVAILABLE_STEP] as const;
 
 export interface QueueJudgeAvailability { lastCompletedAt: string | undefined; staleMs: number | undefined }
 
