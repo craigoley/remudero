@@ -18,7 +18,7 @@ import { defaultIsPidAlive } from "./drain-lock.js";
 import { RmdError } from "./errors.js";
 import { brokerGhRead, ghBrokerClientSpawn, ghBrokerRouteFor, type GhBrokerClass, type GhBrokerResult } from "./gh-read-broker-client.js";
 import { refreshInstallationToken } from "./github-app.js";
-import { createInstallationBudget, type InstallationBudget, type GithubBudgetThrottledRow } from "./github-installation-budget.js";
+import { createInstallationBudget, installationBudgetForThread, type InstallationBudget, type InstallationBudgetThreadInput, type GithubBudgetThrottledRow } from "./github-installation-budget.js";
 import { ghArgvNeedsNoCredential, githubRepoOfGhArgv, resolveGithubCredential } from "./github-credential.js";
 import { sameHost } from "./host-identity.js";
 import { LIVE_WRITE_SENTINEL_TOKEN, LiveWriteBlockedError } from "./live-write-guard.js";
@@ -614,13 +614,8 @@ export class GhPaceFloorStandDownError extends Error {
 let processInstallationBudget: InstallationBudget | undefined;
 
 function workerInstallationBudget(): InstallationBudget | undefined {
-  const config = (workerData as { input?: { githubInstallationBudget?: {
-    state: SharedArrayBuffer; consumers: number; instance: string;
-  } } } | undefined)?.input?.githubInstallationBudget;
-  if (config?.state === undefined) return undefined;
-  return createInstallationBudget({
-    consumers: config.consumers, instance: config.instance, clock: systemClock, sharedState: config.state,
-  });
+  const config = (workerData as { input?: { githubInstallationBudget?: InstallationBudgetThreadInput } } | undefined)?.input?.githubInstallationBudget;
+  return config?.state === undefined ? undefined : installationBudgetForThread(config, systemClock);
 }
 
 /** W1-T12553: the one installation budget every pacer in this process reads. */
@@ -652,6 +647,8 @@ function admitInstallationReadSync(args: readonly string[]): void {
   }
 }
 
+const standDownFor = (reading: GhBudgetReading): never => { throw new GhPaceFloorStandDownError(reading); };
+
 async function admitInstallationReadAsync(args: readonly string[]): Promise<void> {
   if (!installationCoreRead(args)) return;
   const budget = githubInstallationBudget();
@@ -659,7 +656,8 @@ async function admitInstallationReadAsync(args: readonly string[]): Promise<void
     const admitted = budget.claimRead();
     if (admitted.ok) return;
     budget.noteThrottle(admitted.reason);
-    await defaultTimerSleep(Math.max(1, admitted.waitUntil * 1000 - systemClock.now()));
+    // W1-T12820: a reset past the bound stands down, so the tick's pass goes on without this read.
+    await defaultTimerSleep(budget.resetWaitMs(admitted) ?? standDownFor(admitted.reading));
   }
 }
 
@@ -715,14 +713,9 @@ export function createGhCallPacer(
     throw new GhPaceFloorStandDownError(reading);
   };
   return {
+    // W1-T12820: the budget is claimed per read, from its argv, by the transport; the pacer keeps only its gap.
     wait() {
       takeStandDown();
-      const budget = githubInstallationBudget();
-      const admit = budget.admit();
-      if (!admit.ok) {
-        budget.noteThrottle(admit.reason);
-        throw new GhPaceFloorStandDownError(admit.reading);
-      }
       if (lastCallAt !== undefined) {
         const remaining = gapMs - (now() - lastCallAt);
         if (remaining > 0) gapSleepSync(remaining);
@@ -731,12 +724,6 @@ export function createGhCallPacer(
     },
     async waitAsync() {
       takeStandDown();
-      const budget = githubInstallationBudget();
-      const admit = budget.admit();
-      if (!admit.ok) {
-        budget.noteThrottle(admit.reason);
-        await sleep(Math.max(0, admit.waitUntil * 1000 - now()));
-      }
       const remaining = lastCallAt === undefined ? 0 : gapMs - (now() - lastCallAt);
       // The slot is claimed before the timer, so a second waiter queues behind it rather than beside it.
       lastCallAt = now() + Math.max(0, remaining);

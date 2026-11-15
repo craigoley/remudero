@@ -46,7 +46,7 @@ test("author static admission: real child and grandchild borrow one live owner w
   `], { cwd: ROOT, encoding: "utf8", timeout: 15_000,
     env: { ...process.env, ...lease.childEnvironment, NODE_TEST_CONTEXT: undefined } });
   assert.match(JSON.parse(grandchild).note, /inherited live parent test slot/);
-  assert.deepEqual(readdirSync(dir), ["slot-1.json"]);
+  assert.deepEqual(readdirSync(dir), ["node-compile-cache", "slot-1.json"]);
   assert.equal(readFileSync(claim.path, "utf8"), bytes);
 });
 
