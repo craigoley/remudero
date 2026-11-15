@@ -19,7 +19,7 @@ import { withMainHealthOnLightPass } from "../../lib/main-health-rung.js";
 import { lightPassArmAdmitted, lightPassFixAdmitted, type LightPassScope, type ReviewAdmissionGate, type SweepCycleOutcome } from "../../lib/daemon.js";
 import type { BoardSnapshotCache } from "../../lib/board-snapshot-cache.js";
 import type { PanelGraphDeps } from "../../lib/panel-graph.js";
-import { createPlanFilingFileCache, loadPlanFilingFileCache, type GhCallPacer } from "../../lib/open-prs-rest.js";
+import { createGhCallPacer, createPlanFilingFileCache, loadPlanFilingFileCache, type GhCallPacer } from "../../lib/open-prs-rest.js";
 import { configureEscalationTriage, ghIssueGateway, tryEscalate } from "../../lib/escalate.js";
 import { escalatePostReviewStall } from "../../lib/escalation-catalogue.js";
 import { ghPrDiffAsync } from "../../lib/pr-diff.js";
@@ -32,7 +32,7 @@ import type { EscalationAnswerGateway } from "../../lib/escalation-answers.js";
 import { readEscalationAnswers } from "../../lib/escalation-answers.js";
 import type { FullPassServe } from "../../lib/read-plane.js";
 import { createLightPassOpenPrList, headReadOrStandDown, LIGHT_PASS_VIEWS_DEADLINE_MS, LIGHT_PASS_VIEWS_FALLBACK_MAX_AGE_MS, mergeAtListHead } from "../../lib/light-pass-open-pr-list.js";
-import { buildBehindMainByPr, buildBehindMainByPrAsync, createDistanceProbeSequence, buildCreditCandidates, buildOpenPrViewsAsync, buildStaleGateWorkflowsByPr, fetchCiFailuresAsync, type TickReadFacts } from "../../lib/tick-read-worker.js";
+import { buildBehindMainByPr, buildBehindMainByPrAsync, createDistanceProbeSequence, buildCreditCandidates, buildOpenPrViewsAsync, buildStaleGateWorkflowsByPr, createOpenPrStageReuse, fetchCiFailuresAsync, type TickReadFacts } from "../../lib/tick-read-worker.js";
 import { DEFAULT_SWEEP_POLICY, REVIEW_STATUS_RESTORED_STEP, restorableDeliveredVerdict, buildSweepEffects as buildSweepEffectsFromLib, dispatchFixCatchOutcome, fixRungTaskFor, discriminateReviewReuseAsync, projectMergedTaskCandidates, runSweep, runSweepLightPass, runCreditBackfill, renderSweepSummary, planOnlyRunBranchReceipts, withFullSweepRepairAdmission, createEscalationTriageHistoryReader, ESCALATION_TRIAGE_EVIDENCE_SLICE, createFullPreludeTimer, LightPassPreReviewTiming, observeLightPassReviewEligibility, runLightPassReadyRefresh, selectLightPassReadyOverlap, refreshAdmissionWaiters, runLightPassRefreshAdmission, lightPassHeadContractRefresh, runArmedRatchetRejudge, isReviewLaneDisposition, deriveDisposition, orderPendingReviews, type BuildSweepEffectsDeps, type ReviewerCodeAdvance, type SweepDeps, type OpenPrView, type ReviewDispatchMode, type ReviewReuseInputs, type BaseChangedFiles, type Disposition } from "../../lib/sweep.js";
 import { missingReviewReuseFact, priorPostedReviewRow, reviewLedgerKeyFor, REVIEW_ENGINE_REVISION, REVIEW_CONTEXT, reviewEvidenceStrength, type ProofExecutor, type ReviewVerdict } from "../../lib/review.js";
 import { resolveReviewProviderProvenance, reviewProviderProvenanceLedgerFields } from "../../lib/review-provider-provenance.js";
@@ -1233,6 +1233,8 @@ export function buildSweepLightHook(
     effects?: (deps: Parameters<SweepCommandHost["buildSweepEffects"]>[0]) => SweepDeps;
     readCompare?: (args: string[]) => Promise<unknown>;
     clock?: Pick<Clock, "now">;
+    /** W1-T12530: the pacer the list reads share; absent, the hook's own. A test gives one whose backoff does not wait. */
+    pacer?: GhCallPacer;
     /** W1-T12357: the daemon's sweep tick bound; absent, the default policy's. */
     sweepWallClockBoundMs?: number;
   } = {},
@@ -1255,6 +1257,9 @@ export function buildSweepLightHook(
     log("plan_filing_files.store_unreadable", { reason: planFilingFileCache.unreadable });
   }
   const reportPlanFilingClassification = createPlanFilingClassificationTelemetry(log);
+  // W1-T12530: per-PR stage answers kept across light passes, and the pacer their concurrent reads share.
+  const stageReuse = createOpenPrStageReuse();
+  const viewsPacer = io.pacer ?? createGhCallPacer();
   const compares = createLightPassCompareReader(owner, repo, io.readCompare ?? ghJsonAsync);
   const policy = io.sweepWallClockBoundMs === undefined ? DEFAULT_SWEEP_POLICY
     : { ...DEFAULT_SWEEP_POLICY, sweepWallClockBoundMs: io.sweepWallClockBoundMs };
@@ -1284,6 +1289,9 @@ export function buildSweepLightHook(
           onPlanFilingClassification: reportPlanFilingClassification,
           isMerged,
           readMainPlan: resolvedReadMainPlan,
+          pacer: viewsPacer,
+          stageReuse,
+          stagesMs: timing.openPrViewStagesMs,
         });
         planFilingFileCache.retain(owner, repo, views.map((pr) => pr.prNumber));
         const saved = planFilingFileCache.save();
