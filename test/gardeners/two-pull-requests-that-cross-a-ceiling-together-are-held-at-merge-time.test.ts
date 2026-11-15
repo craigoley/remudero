@@ -99,7 +99,8 @@ function assertHeldTogether(gate: string, fx: ReturnType<typeof landTwo>, row: {
 }
 
 test("W1-T12509 criterion 1: the judge counts each recorded-count gate on the merge-tree with that gate's own counter", () => {
-  assert.deepEqual([...COUNTED_RATCHET_GATES], ["clock-signature", "source-size", "fixture-copy", "deps-interface", "claude-md-budget",
+  // W1-T12717: source-size is a CI signal that never reads its baseline, so it is not counted.
+  assert.deepEqual([...COUNTED_RATCHET_GATES], ["clock-signature", "fixture-copy", "deps-interface", "claude-md-budget",
     "learnings-budget", "affected-reach", "house-layout"]);
   // One merge that lands every gate's scope: each gate is counted on both trees, none is unread.
   const word = ["in", "it"].join("");
@@ -126,13 +127,17 @@ test("W1-T12509 criterion 2: clock-signature — two PRs each inside the row cro
   ), { path: "src/a.ts", field: "dateNow", merged: 3, ceiling: 2 });
 });
 
-test("W1-T12509 criterion 2: source-size — two PRs each inside a file's line ceiling cross it together", () => {
+test("W1-T12509 criterion 2: source-size — CI runs it as a signal (W1-T12717), so two PRs past its recorded row together are not held", () => {
   const body = numbered("s", 480);
-  assertHeldTogether("source-size", landTwo(
+  const fx = landTwo(
     { [SIZE]: json({ "src/big.ts": 500 }), "src/big.ts": body },
     { "src/big.ts": `${numbered("top", 15)}${body}` },
     { "src/big.ts": `${body}${numbered("end", 15)}` },
-  ), { path: "src/big.ts", merged: 510, ceiling: 500 });
+  );
+  const together = fx.onto(2, fx.m1);
+  assert.equal(together.verdict, "clean", together.reason ?? JSON.stringify(together.rows));
+  assert.ok(!together.counted.includes("source-size"));
+  assert.ok(together.uncounted.some((u) => u.gate === "source-size" && u.class === "ci-signal"));
 });
 
 test("W1-T12509 criterion 2: fixture-copy — two PRs each inside a signature's count cross it together", () => {
@@ -177,17 +182,17 @@ function memory(merged: Files, main: Files, extra: Partial<Extract<MergedRatchet
 }
 
 test("W1-T12509 criterion 3: a counter that throws, or a tree it cannot read, is unread with the gate named, never clean", () => {
-  // The source-size counter refuses a row that is not a whole number.
-  const thrown = judgeMergedRatchets(memory({ [SIZE]: json({ "src/a.ts": "many" }), "src/a.ts": "x\n" }, { [SIZE]: json({ "src/a.ts": 5 }), "src/a.ts": "" }));
+  // The claude-md-budget counter refuses a cap that is not a number.
+  const thrown = judgeMergedRatchets(memory({ [CLAUDE]: json({ capBytes: "many" }), "CLAUDE.md": "x\n" }, { [CLAUDE]: json({ capBytes: 5 }), "CLAUDE.md": "" }));
   assert.equal(thrown.verdict, "unread");
-  assert.match(thrown.reason ?? "", /^source-size: a ratchet counter threw: .*must carry a non-negative integer/);
-  assert.ok(!thrown.counted.includes("source-size"));
+  assert.match(thrown.reason ?? "", /^claude-md-budget: a ratchet counter threw: /);
+  assert.ok(!thrown.counted.includes("claude-md-budget"));
 
   // A population the read could not list: each population gate the merge touches is unread, by name.
   const unlisted = judgeMergedRatchets(memory({ "src/a.ts": "x\n" }, {}, { populationUnread: "git ls-tree -l exited 128" }));
   assert.equal(unlisted.verdict, "unread");
   assert.match(unlisted.reason ?? "", /deps-interface: the tree could not be read: git ls-tree -l exited 128/);
-  assert.deepEqual(unlisted.counted, ["clock-signature", "source-size", "fixture-copy", "claude-md-budget", "learnings-budget", "affected-reach"]);
+  assert.deepEqual(unlisted.counted, ["clock-signature", "fixture-copy", "claude-md-budget", "learnings-budget", "affected-reach"]);
 
   // The same through the production read, when git cannot list the merged tree.
   const fx = landTwo({ "src/one.ts": "export const one = 1;\n" }, { "src/two.ts": "export const two = 2;\n" }, { "src/three.ts": "export const three = 3;\n" },
@@ -197,14 +202,16 @@ test("W1-T12509 criterion 3: a counter that throws, or a tree it cannot read, is
   assert.match(read.reason ?? "", /deps-interface: the tree could not be read: git ls-tree -l exited 128: fatal: not a tree object/);
 
   // A crossing on a counted gate still holds when another gate is unread.
+  const row = json({ "src/a.ts": { legacy: 0, dateNow: 1, newDate: 0 } });
   const held = judgeMergedRatchets(memory(
-    { [SIZE]: json({ "src/a.ts": 1 }), "src/a.ts": "x\ny\n" }, { [SIZE]: json({ "src/a.ts": 1 }), "src/a.ts": "x\n" }, { populationUnread: "listing failed" }));
+    { [CLOCK]: row, "src/a.ts": "Date.now();\nDate.now();\n" }, { [CLOCK]: row, "src/a.ts": "Date.now();\n" }, { populationUnread: "listing failed" }));
   assert.equal(held.verdict, "crossing");
   assert.match(held.reason ?? "", /deps-interface: the tree could not be read: listing failed/);
 });
 
-test("W1-T12509 criterion 4: the uncounted gates are comment-load (advisory), coverage and mutation (run-derived)", () => {
-  assert.deepEqual(UNCOUNTED_RATCHET_GATES.map((u) => `${u.gate}:${u.class}`), ["comment-load:advisory", "coverage:run-derived", "mutation:run-derived"]);
+test("W1-T12509 criterion 4: the uncounted gates are comment-load (advisory), coverage and mutation (run-derived), and source-size (a CI signal)", () => {
+  assert.deepEqual(UNCOUNTED_RATCHET_GATES.map((u) => `${u.gate}:${u.class}`),
+    ["comment-load:advisory", "coverage:run-derived", "mutation:run-derived", "source-size:ci-signal"]);
   for (const gate of COUNTED_RATCHET_GATES) assert.ok(!UNCOUNTED_RATCHET_GATES.some((u) => u.gate === gate), `${gate} is counted, so it is not named uncounted`);
 });
 

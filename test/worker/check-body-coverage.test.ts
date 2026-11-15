@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
-import { test } from "node:test";
-import { runFixRung } from "#test/helpers/run-task-test.js";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { test, type TestContext } from "node:test";
+import { runFixRung, type FixCommandHost } from "#src/cli/commands/fix.js";
 import type { Config } from "#src/lib/config.js";
 import type { ReviewVerdict } from "#src/lib/review.js";
 import type { WorkerResult } from "#src/lib/worker.js";
@@ -15,9 +18,70 @@ const unmet = [{
   proof_exec: "not_executable" as const,
   criterionIndex: 1,
 }];
+const evidence = { review: { unmetCriteria: unmet, summary: "keyword gap" } };
+const initialReview: ReviewVerdict & { headSha: string; reviewerOutcome: string } = {
+  state: "failure", criteria: unmet, summary: "keyword gap", headSha: "deadbeef",
+  reviewerOutcome: "success", testTheater: false, floorDegraded: false, capped: false,
+  keywordOnly: false, planOnly: false,
+};
 
-test("W1-T10661: a recorded body-coverage round is self-healed with a paste-ready Acceptance block", () => {
-  const evidence = { review: { unmetCriteria: unmet, summary: "keyword gap" } };
+async function replay(t: TestContext, failure?: "fetch" | "write" | "review" | "contract", reviewPasses = true) {
+  const scratch = mkdtempSync(join(tmpdir(), "rmd-body-coverage-"));
+  t.after(() => rmSync(scratch, { recursive: true, force: true }));
+  let body = "Original PR explanation.\n";
+  const events: string[] = [];
+  let spawned = 0;
+  let reviewedBody: string | undefined;
+  const host = {
+    workerBoundaryStack: {},
+    prNumberFromRef: () => 13946,
+    fixRoundGitOwnership: () => { throw new Error("ordinary dispatch reached"); },
+  } as unknown as FixCommandHost;
+  const run = () => runFixRung({
+    taskId: "W1-T10511", runId: "W1-T10511-replay", task: { id: "W1-T10511", title: "login" },
+    prUrl: "https://github.com/craigoley/remudero/pull/13946", branch: "run-W1-T10511-1",
+    worktreePath: scratch, initialSessionId: "original", strikeCap: 1,
+    mount: { model: "sonnet", effort: "medium", maxTurns: 400, contextBudget: 120000 },
+    settingsFile: join(scratch, "settings.json"), config: {} as Config, budgetUsd: 1,
+    reviewBase: { owner: "craigoley", repo: "remudero", headCheckoutDir: scratch,
+      reviewerMount: { model: "sonnet", effort: "medium", maxTurns: 400, contextBudget: 120000 } },
+    initialReview,
+    escalationJudge: async () => { throw new Error("unexpected escalation judge"); },
+    deps: {
+      spawn: async () => { spawned++; throw new Error("worker must not spawn"); },
+      fetchPrBody: async () => {
+        if (failure === "fetch") throw new Error("body read unavailable");
+        return body;
+      },
+      updatePrBody: async (_url, updated) => {
+        if (failure === "write") throw new Error("body write unavailable");
+        body = updated;
+        events.push("write");
+      },
+      runReview: async args => {
+        events.push("review");
+        reviewedBody = args.report;
+        assert.equal(args.reportIsSubstitute, false);
+        assert.equal(args.reviewInputBody, body);
+        assert.deepEqual(args.task.acceptance, unmet.map(({ claim, proof }) => ({ claim, proof })));
+        if (failure === "review") throw new Error("review unavailable");
+        return reviewPasses ? { ...initialReview, state: "success", criteria: [{ ...unmet[0], met: true }] } : initialReview;
+      },
+      resolveTaskContractAtHead: async () => failure === "contract" ? undefined : {
+        taskId: "W1-T10511", criteria: unmet.map(({ claim, proof }) => ({ claim, proof })),
+      },
+      waitForCiGreen: async () => { throw new Error("body edits require no new CI run"); },
+      push: () => assert.fail("body edits require no push"),
+      issues: { create: () => { throw new Error("unexpected escalation"); } },
+      ledgerLines: () => [], ledgerPath: join(scratch, "ledger.ndjson"),
+      approvedSkillsDir: join(scratch, "skills"),
+      log: step => events.push(step), say: () => {}, account: r => r,
+    },
+  }, host);
+  return { run, events, body: () => body, spawned: () => spawned, reviewedBody: () => reviewedBody };
+}
+
+test("W1-T10661: a recorded body-coverage round repairs the PR body without dispatching a fix worker", async t => {
   assert.equal(deriveFixMode(evidence), "body-coverage");
   assert.deepEqual(bodyCoverageSelfHealCriteria(evidence, [{ claim: unmet[0].claim, proof: unmet[0].proof }]), [
     { claim: unmet[0].claim, proof: unmet[0].proof },
@@ -27,6 +91,43 @@ test("W1-T10661: a recorded body-coverage round is self-healed with a paste-read
   assert.match(prompt, /Paste-ready PR body Acceptance block/);
   assert.ok(prompt.includes(`- Criterion 1: ${unmet[0].claim} — proven by ${unmet[0].proof}`));
 });
+
+test("body repair is exercised through the real fix rung before worker dispatch", async t => {
+  const fixture = await replay(t);
+  const result = await fixture.run();
+  assert.equal(result.strikes, 0);
+  assert.equal(fixture.spawned(), 0);
+  assert.ok(!fixture.events.includes("fix.dispatch"));
+  assert.ok(fixture.events.indexOf("write") < fixture.events.indexOf("review"));
+  assert.equal(fixture.reviewedBody(), fixture.body());
+  assert.ok(fixture.body().startsWith("Original PR explanation.\n"));
+  assert.ok(fixture.body().includes(unmet[0].claim));
+  assert.ok(fixture.body().includes(unmet[0].proof));
+  assert.equal(result.review.state, "success");
+});
+
+test("body repair preserves a failing or unavailable review without spending a strike", async t => {
+  for (const failure of [undefined, "review"] as const) {
+    const fixture = await replay(t, failure, false);
+    const result = await fixture.run();
+    assert.equal(result.outcome, "stood_down");
+    assert.equal(result.review.state, "failure");
+    assert.equal(result.strikes, 0);
+    assert.equal(fixture.spawned(), 0);
+    if (failure) assert.ok(fixture.events.includes("fix.body_coverage_repair_error"));
+  }
+});
+
+for (const failure of ["fetch", "write"] as const) {
+  test(`body ${failure} failure retains ordinary fix dispatch and records its reason`, async t => {
+    const fixture = await replay(t, failure);
+    await assert.rejects(fixture.run(), /ordinary dispatch reached/);
+    assert.ok(fixture.events.includes("fix.body_coverage_repair_error"));
+    assert.equal(fixture.body(), "Original PR explanation.\n");
+  });
+}
+
+
 
 test("W1-T10661 criterion 1: a recorded body-coverage round repairs the live Acceptance block before any fix worker dispatch", async () => {
   const headSha = "a".repeat(40);
@@ -67,6 +168,12 @@ test("W1-T10661 criterion 1: a recorded body-coverage round repairs the live Acc
     qualitySuspect: false,
   };
 
+  const host = {
+    workerBoundaryStack: {},
+    prNumberFromRef: () => 10511,
+    readRegistrationChanges: () => [],
+    fixRoundGitOwnership: () => { throw new Error("body repair must precede dispatch"); },
+  } as unknown as FixCommandHost;
   const outcome = await runFixRung({
     taskId: "W1-T10511",
     runId: "W1-T10511-test",
@@ -105,7 +212,7 @@ test("W1-T10661 criterion 1: a recorded body-coverage round repairs the live Acc
       say: () => {},
       account: (result) => result,
     },
-  });
+  }, host);
 
   assert.equal(outcome.outcome, "fixed");
   assert.equal(outcome.strikes, 0);

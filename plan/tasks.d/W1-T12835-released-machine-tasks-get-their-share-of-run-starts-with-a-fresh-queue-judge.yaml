@@ -1,0 +1,54 @@
+- id: W1-T12835
+  title: "Released machine tasks get their one-in-four share of run starts whether or not the queue judge is stale"
+  repo: remudero
+  depends_on: []
+  priority: 0.4
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # src/lib/drain.ts orders every dispatch; the share moves one task ahead of the priority order on each qualifying selection
+  band_meaning: blast-radius
+  origin: "operator-session#self-improvement-audit-2026-11-15"
+  plan_refs:
+    - W1-T12551
+    - W1-T9925
+  files:
+    - src/lib/drain.ts
+    - src/lib/daemon.ts
+    - test/dispatch/released-machine-tasks-get-their-share-of-run-starts-with-a-fresh-queue-judge.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "With a fresh queue judge (queueJudgeStaleMs below QUEUE_JUDGE_STALE_MS, or undefined) and complete start evidence, applyMachineShare moves the chosen released machine task ahead of the non-resumable order whenever machine starts are under MACHINE_DISPATCH_SHARE of the starts in the trailing window"
+      proof: "grep: W1-T12835 criterion 1 in test/dispatch/released-machine-tasks-get-their-share-of-run-starts-with-a-fresh-queue-judge.test.ts"
+    - claim: "invariant:the-share-never-grants-eligibility — the function only reorders the already eligible list: a machine task that is not dispatch-eligible is never returned, resumable tasks keep their lead, and with machine starts at or above the share the order is unchanged"
+      proof: "grep: W1-T12835 criterion 2 in test/dispatch/released-machine-tasks-get-their-share-of-run-starts-with-a-fresh-queue-judge.test.ts"
+    - claim: "With incomplete start evidence (starts undefined) the share is not applied, as on origin/main"
+      proof: "grep: W1-T12835 criterion 3 in test/dispatch/released-machine-tasks-get-their-share-of-run-starts-with-a-fresh-queue-judge.test.ts"
+    - claim: "The dispatch.machine_share row carries queue_judge_fresh true or false so the share's use under a healthy judge can be counted"
+      proof: "grep: W1-T12835 criterion 4 in test/dispatch/released-machine-tasks-get-their-share-of-run-starts-with-a-fresh-queue-judge.test.ts"
+  rationale: |
+    MEASURED 2026-11-15 by the operator session, read-only, over the daemon ledger union (~/rmd-state2/state, 2026-11-08T00:00Z to 2026-11-15T15:00Z) and origin/main d5722e1fe.
+
+    - Build rate by filing origin, over all 5,429 shards on origin/main (a merged trailer or status merged counts as built):
+      - operator: 1,374 of 1,539 (89%).
+      - operator-session: 764 of 940 (81%).
+      - ci-friction: 79 of 275 (29%).
+      - selector-shadow-miss: 18 of 101 (18%).
+      - scout: 8 of 63 (13%).
+      - flow-regression: 0 of 16.
+    - 68 ci-friction, 37 scout, 22 selector-shadow-miss and 11 flow-regression tasks are queued.
+    - READ src/lib/drain.ts: compareDispatch orders by priority, lower first, and machine filings are priced into 1 to 4 (costPriority, MACHINE_PRIORITY_BAND) while operator tasks sit below them. applyMachineShare (W1-T12551, merged 2026-11-15) returns the order unchanged unless queueJudgeStaleMs exceeds QUEUE_JUDGE_STALE_MS (6 hours). So with a healthy judge the gardeners' output is built only when nothing operator-filed is runnable.
+    Operator ruling 2026-11-15: "Always reserve 1 in 4".
+  design: |
+    1. drain.ts applyMachineShare: drop the staleness precondition. Apply the share whenever input and input.starts are defined; keep every other rule (window, resumable lead, oldest dated filing first).
+    2. Carry queue_judge_fresh on MachineShareMove and in the daemon's dispatch.machine_share row; keep queue_judge_stale_ms when it is known.
+    3. Update the W1-T12551 comment so it states the standing share and names the ruling.
+    INVARIANT the-share-never-grants-eligibility: ordered is already the eligible set and only its order changes.
+    NOT IN SCOPE: re-measuring a queued machine task before it is picked (W1-T12838), the share's size, and the queue judge.
+  falsifier: |
+    Restore the staleness precondition and criterion 1 must fail. Insert an ineligible machine task and criterion 2 must fail. Apply the share with undefined starts and criterion 3 must fail. Restore and all pass.
+  note: |
+    reservation hand-off: run-unfiled-1794756420518 -> run-unfiled-1794756420518
+    Reserved with rmd next-task-id from the operator checkout. Check refs/rmd-dispatch/W1-T12835 and any run branch before building. The test folder is the one rmd test-place computed for a stub with this test's imports; confirm it once the file exists.
