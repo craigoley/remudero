@@ -282,7 +282,7 @@ test("W1-T11502 criterion 2: overlap stays bounded, wake debt survives and stale
   }
 });
 
-test("W1-T11502 criterion 3: pause, boot, drain, freshness, capacity and worker holds keep the repair held and say why", async (t) => {
+test("W1-T11502 criterion 3: pause, idle, drain, freshness, capacity and worker holds keep the repair held and say why", async (t) => {
   // PAUSE: the due request waits and records the actual hold; lifting it lets the repair take its turn.
   const paused = fixture(t);
   const finish = unrelatedReview(t);
@@ -337,7 +337,23 @@ test("W1-T11502 criterion 3: pause, boot, drain, freshness, capacity and worker 
     }
   }
 
-  // BOOT (and idle): a review-only scope that is not the interphase clock stands the repair down at the pass itself.
+  // IDLE: a review-only scope that is not the interphase clock stands the repair down at the pass itself.
+  const idle = fixture(t);
+  await (async () => {
+    const scope: LightPassScope = { reviewOnly: true, scope: "idle" };
+    await runSweepLightPass([dirty()], {
+      ...idle.deps,
+      actionable: (d) => lightPassActionable(d, false, false, lightPassArmAdmitted(scope), lightPassFixAdmitted(scope)),
+      ...reviewOnlyLightPassDeps(scope),
+    });
+  })();
+  assert.equal(idle.dispatched.length, 0);
+  assert.equal(idle.admitted.length, 0);
+  assert.equal(idle.disposed()[0]!.acted, false);
+  assert.equal(idle.disposed()[0]!.light_pass_scope, "idle");
+  assert.match(String(idle.disposed()[0]!.stand_down_reason), /^review-only idle pass: repair lanes closed/);
+
+  // BOOT (W1-T12703): the boot pass takes the due repair through the fix-capacity admission.
   const boot = fixture(t);
   await (async () => {
     const scope: LightPassScope = { reviewOnly: true, scope: "boot" };
@@ -347,11 +363,11 @@ test("W1-T11502 criterion 3: pause, boot, drain, freshness, capacity and worker 
       ...reviewOnlyLightPassDeps(scope),
     });
   })();
-  assert.equal(boot.dispatched.length, 0);
-  assert.equal(boot.admitted.length, 0);
-  assert.equal(boot.disposed()[0]!.acted, false);
+  await boot.drain();
+  assert.equal(boot.admitted.length, 1);
+  assert.equal(boot.dispatched.length, 1);
   assert.equal(boot.disposed()[0]!.light_pass_scope, "boot");
-  assert.match(String(boot.disposed()[0]!.stand_down_reason), /^review-only boot pass: repair lanes closed/);
+  assert.doesNotMatch(String(boot.disposed()[0]!.stand_down_reason ?? ""), /repair lanes closed/);
 
   // FRESHNESS LATCH: a refusing restart admission holds the handoff (and names the latch); a latch that
   // admits reviews but refuses fixes lets the ordinary pass stand the repair down with its own row.

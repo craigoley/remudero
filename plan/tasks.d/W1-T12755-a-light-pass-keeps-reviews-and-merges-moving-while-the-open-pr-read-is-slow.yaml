@@ -17,8 +17,10 @@
   files:
     - src/cli/commands/sweep.ts
     - src/lib/ledger-steps.ts
+    - src/lib/light-pass-open-pr-list.ts
+    - src/lib/sweep.ts
     - test/sweep/a-light-pass-decides-from-its-last-good-open-pr-list-when-the-read-fails.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "After one light pass with a good open-PR list read, a second pass whose pulls?state=open read fails with a rate-limit error still admits the review of an eligible PR from the last good list, and writes sweep_light.views_fallback with reason rate_limited, snapshot_age_ms and pr_count, and no sweep_light.error row"
@@ -35,6 +37,8 @@
       proof: "grep: W1-T12755 criterion 5 in test/sweep/a-light-pass-decides-from-its-last-good-open-pr-list-when-the-read-fails.test.ts"
     - claim: "Through buildSweepLightHook with the real buildOpenPrViewsAsync and a gh shim (test/helpers/gh-shim.ts) that answers pulls?state=open with HTTP 403 rate limit exceeded, nothing injected in place of the fallback, the second pass admits the review"
       proof: "grep: W1-T12755 criterion 6 in test/sweep/a-light-pass-decides-from-its-last-good-open-pr-list-when-the-read-fails.test.ts"
+    - claim: "The light pass builds its last good open-PR list through the new module: buildSweepLightHook calls createLightPassOpenPrList"
+      proof: "grep: createLightPassOpenPrList( in src/cli/commands/sweep.ts"
   rationale: |
     WHY: when the light pass cannot read or waits long on the open-PR list, it makes no review or merge decision in that pass. The list read is often slow or rate-limited, so whole hours pass with almost no light-pass decisions.
     OBSERVED on the Azure host core ledger, window 2026-11-12T22:35Z to 2026-11-14T22:35Z:
@@ -56,6 +60,7 @@
     3. Pass a fallback flag in the light pass's effects so the act-time head guard stands an unreadable head down, and so every merge passes expectedHead. A pass on a fresh list behaves exactly as today.
     4. Declare sweep_light.views_fallback in src/lib/ledger-steps.ts with its meaning.
     5. Refill reads (W1-T11153's readOpenPrsForRefill) use the same last good list on failure.
+    6. Where the code goes: the last good list, its two named constants, the act-time head read that stands an unreadable head down, and the merge at the list's head live in the new module src/lib/light-pass-open-pr-list.ts, with thin call sites in src/cli/commands/sweep.ts. Today the light pass reads the act-time head only for an arm (src/lib/sweep.ts, guardHead), so a review on a fallback list would post unguarded; one optional SweepDeps flag, guardEveryHeadAtAct, makes the light pass read every lane's head on a fallback list. src/lib/sweep.ts is over its source-size ceiling and at its comment cap, so that change adds zero net lines and zero comment lines.
     NOT IN SCOPE: the list read's speed (W1-T12530); the gh transport (W1-T12531); the installation budget (W1-T12670, W1-T12555); the full sweep's tick read (W1-T12754).
   falsifier: |
     Remove the fallback and criteria 1 and 6 must fail with sweep_light.error and no review. Start a second list read while one is in flight and criterion 2 must fail. Let an unreadable act-time head pass on a fallback list, or drop expectedHead from a fallback merge, and criterion 3 must fail. Serve a list older than the bound and criterion 4 must fail. Restore and require all to pass.
