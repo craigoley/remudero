@@ -2747,7 +2747,7 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
         return findDuplicateEscalations({ ...key, cause: undefined }, { issues: deps.issues }).some(issue =>
           openEscalationStandDownReason(head, issue, currentContractRevision,
             { conflictEvidenceCaptured: hasCapturedMergeConflictEvidence(currentMergeConflict), baseSha: opts.baseSha },
-            undefined, opts.pendingAnswer) !== undefined);
+            noReviewYet ? currentCiFailures?.map(f => f.name) : undefined, opts.pendingAnswer) !== undefined);
       },
     );
     let preStrikeStandDown = await fixRungStandDownReason(
@@ -2877,6 +2877,39 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
       deps.log("fix.stood_down", { site: "rung.strike", strike: strikes + 1, reason: preStrikeStandDown.reason });
       deps.say(`fix rung: standing down before strike ${strikes + 1} — ${preStrikeStandDown.reason}`);
       return { outcome: "stood_down", review, strikes, retriggers, reason: preStrikeStandDown.reason, standDownReason: preStrikeStandDown.reason };
+    }
+
+    // W1-T10339: a handoff is reused only while the inputs it read stand — an amended contract or an edited (taskless)
+    // PR body at the same head gets a real round. A row from before those fields existed keeps the head-only reuse.
+    // The review can still name the held head after a conflict push when CI is red. The
+    // question may have rotated into an archive, so the equal-head case needs the recovered rows too.
+    const priorDesign = holdRows.find((row) =>
+      row.step === "fix.needs_design" && row.task_id === opts.taskId && row.head_sha === holdHeadSha &&
+      !(typeof row.contract_revision === "string" && row.contract_revision !== currentContractRevision) &&
+      !(typeof row.read_body_sha256 === "string" && opts.prBodySha256 !== undefined && row.read_body_sha256 !== opts.prBodySha256));
+    if (priorDesign && !hasCapturedMergeConflictEvidence(currentMergeConflict)) {
+      const priorHeadSha = review.headSha;
+      const roundLedger = holdLedgerRows;
+      const reason = String(priorDesign.reason);
+      const escalated = roundLedger.findLast((row) => row.step === "fix.stood_down" && row.site === "rung.needs_design" &&
+        row.task_id === opts.taskId && row.head_sha === priorHeadSha && typeof row.issue_url === "string");
+      let issueUrl = typeof escalated?.issue_url === "string" ? escalated.issue_url : undefined;
+      let deliveryError: { error: string } | undefined;
+      if (!issueUrl) try {
+        issueUrl = (await escalateForTask({ class: "BLOCKED", taskId: opts.taskId, runId: opts.runId,
+          headSha: priorHeadSha, cause: escalationCause(currentMergeConflict !== undefined, noReviewYet), contractRevision: `needs-design:${prNumber}:${priorHeadSha}`,
+          summary: `PR #${prNumber}'s fix lane handed it back NEEDS_DESIGN and stands down every pass — ${opts.prUrl}`,
+          detail: `${opts.prUrl} at ${priorHeadSha}: a fix worker answered NEEDS_DESIGN, so every later pass stands down ` +
+            `at this head without a round. The worker's diagnosis:\n\n${reason}`,
+          options: [{ label: "repair-cause", detail: "repair what the diagnosis names; a new head resumes the fix lane" },
+            { label: "hand-fix", detail: "push a fix to this PR by hand; a new head resumes the fix lane" }],
+          recommendation: "repair-cause", consequence: "this PR stays red and unmerged at this head" },
+        { issues: deps.escalationIssues ?? deps.issues, ledgerPath: deps.ledgerPath, runId: opts.runId, judge: escalationJudge })) || undefined;
+      } catch (error) {
+        deliveryError = { error: String(error) };
+      }
+      deps.log("fix.stood_down", { head_sha: priorHeadSha, reason, site: "rung.needs_design", issue_url: issueUrl, ...deliveryError });
+      return { outcome: "needs_design", review, strikes, retriggers, reason, issueUrl };
     }
 
     // W1-T10029: revalidate concrete reconstructed failed proofs before the first dispatch on
@@ -4058,36 +4091,6 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
       if (retried.kind !== "refused") {
         return { outcome: "stood_down", review, strikes, retriggers, reason: "awaiting scope amendment merge" };
       }
-    }
-    // W1-T10339: a handoff is reused only while the inputs it read stand — an amended contract or an edited (taskless)
-    // PR body at the same head gets a real round. A row from before those fields existed keeps the head-only reuse.
-    // The review can still name the held head after a conflict push when CI is red. The
-    // question may have rotated into an archive, so the equal-head case needs the recovered rows too.
-    const priorDesign = [...holdRows, ...roundLedger].find((row) =>
-      row.step === "fix.needs_design" && row.task_id === opts.taskId && row.head_sha === holdHeadSha &&
-      !(typeof row.contract_revision === "string" && row.contract_revision !== currentContractRevision) &&
-      !(typeof row.read_body_sha256 === "string" && opts.prBodySha256 !== undefined && row.read_body_sha256 !== opts.prBodySha256));
-    if (priorDesign && !hasCapturedMergeConflictEvidence(currentMergeConflict)) {
-      const reason = String(priorDesign.reason);
-      const escalated = roundLedger.findLast((row) => row.step === "fix.stood_down" && row.site === "rung.needs_design" &&
-        row.task_id === opts.taskId && row.head_sha === priorHeadSha && typeof row.issue_url === "string");
-      let issueUrl = typeof escalated?.issue_url === "string" ? escalated.issue_url : undefined;
-      let deliveryError: { error: string } | undefined;
-      if (!issueUrl) try {
-        issueUrl = (await escalateForTask({ class: "BLOCKED", taskId: opts.taskId, runId: opts.runId,
-          headSha: priorHeadSha, cause: escalationCause(currentMergeConflict !== undefined, noReviewYet), contractRevision: `needs-design:${prNumber}:${priorHeadSha}`,
-          summary: `PR #${prNumber}'s fix lane handed it back NEEDS_DESIGN and stands down every pass — ${opts.prUrl}`,
-          detail: `${opts.prUrl} at ${priorHeadSha}: a fix worker answered NEEDS_DESIGN, so every later pass stands down ` +
-            `at this head without a round. The worker's diagnosis:\n\n${reason}`,
-          options: [{ label: "repair-cause", detail: "repair what the diagnosis names; a new head resumes the fix lane" },
-            { label: "hand-fix", detail: "push a fix to this PR by hand; a new head resumes the fix lane" }],
-          recommendation: "repair-cause", consequence: "this PR stays red and unmerged at this head" },
-        { issues: deps.escalationIssues ?? deps.issues, ledgerPath: deps.ledgerPath, runId: opts.runId, judge: escalationJudge })) || undefined;
-      } catch (error) {
-        deliveryError = { error: String(error) };
-      }
-      deps.log("fix.stood_down", { head_sha: priorHeadSha, reason, site: "rung.needs_design", issue_url: issueUrl, ...deliveryError });
-      return { outcome: "needs_design", review, strikes, retriggers, reason, issueUrl };
     }
     const priorUnmetClaims = new Set(unmet.map((c) => c.claim));
     // W1-T2328: the ci-log evidence THIS round's dispatch (below) is about to target, snapshotted

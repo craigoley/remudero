@@ -8,6 +8,7 @@ import { dirname, join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { systemClock } from "#src/lib/clock.js";
 import { openEscalationStandDownReason, type OpenIssue } from "#src/lib/escalate.js";
+import type { FixProgressJudge } from "#src/lib/fix-progress-judge.js";
 import { MAX_RETAINED_LINES_PER_STEP, rotateLedger } from "#src/lib/ledger.js";
 import { readLedgerUnionRecordsSync } from "#src/lib/ledger-union.js";
 import { readLedgerLines } from "#src/lib/status.js";
@@ -71,6 +72,13 @@ function conflictRoundRows(now: number, mode = "merge-conflict", from = HELD_HEA
 function openIssue(cause?: string, head = HELD_HEAD): OpenIssue {
   return { number: 18100, title: `[BLOCKED] ${TASK}: PR ${PR_URL} needs a clarification`, url: ISSUE_URL,
     body: `**Class:** BLOCKED\n**Task:** ${TASK}\n**Head:** ${head}\n${cause === undefined ? "" : `**Cause:** ${cause}\n`}\nPR ${PR_URL}\n` };
+}
+
+function metadataIssueAtB(): OpenIssue {
+  const issue = openIssue("ci", MERGE_HEAD);
+  const question = "metadata-only required checks proof-discrimination need title/body repair: stale proof";
+  return { ...issue, number: 18102, url: "https://github.com/o/r/issues/18102",
+    body: issue.body + `\nThe CLARIFICATION-QUESTION rung reconciled this PR to BLOCKED-AMBIGUOUS: ${question}\n\n${question}\n` };
 }
 
 function fixture(t: TestContext, rows: Row[], issues: OpenIssue[] = []) {
@@ -398,7 +406,7 @@ test("W1-T12544 criterion 3: a design question that retention archived still hol
 async function activeConflictRung(t: TestContext, hold: "design" | "review" | "ci" | "legacy" | "none", answered = false,
   heads: { from: string; to: string; prior: Row[] } = { from: HELD_HEAD, to: MERGE_HEAD, prior: [] },
   ci: "green" | "red" | "red-unpinned" = "green", archived = false,
-  openEscalations?: { issues: OpenIssue[]; closeFails: boolean; baseSha: string }) {
+  openEscalations?: { issues: OpenIssue[]; closeFails: boolean; baseSha: string; judge?: FixProgressJudge }) {
   const f = fixture(t, [...heads.prior, ...(hold === "design" ? designRows(systemClock.now(), TASK, PR_URL, heads.from) : []),
     ...(archived ? archivingRows(systemClock.now()) : [])]);
   if (archived) assert.equal(rotateLedger(f.deps.ledgerPath, { ceilingBytes: 256_000, smoothingWindowMs: 0 }).rotated, true);
@@ -420,6 +428,7 @@ async function activeConflictRung(t: TestContext, hold: "design" | "review" | "c
   const outcome = await runFixRung({ ...args,
     escalationJudge: async () => ({ decision: "deliver", reason: "fixture" }),
     deps: {
+      ...(openEscalations?.judge ? { fixProgressJudge: openEscalations.judge } : {}),
       spawn: async (workerArgs: SpawnWorkerArgs): Promise<WorkerResult> => {
         spawned.push(workerArgs);
         return { sessionId: "conflict-session", costUsd: 0, numTurns: 1,
@@ -468,6 +477,70 @@ async function activeConflictRung(t: TestContext, hold: "design" | "review" | "c
   } as never);
   return { f, outcome, spawned, rows, pushedHead, reviews, issues, closed, minedHeads, closeAttempts };
 }
+
+test("W1-T12544 criterion 3: a released metadata question at B cannot mask A's unanswered hold at C", async t => {
+  for (const receipt of ["fix.done", "sweep.conflict_regenerated"] as const) {
+    for (const hold of ["design", "review"] as const) {
+      await t.test(`${receipt}: ${hold}`, async t => {
+        const now = systemClock.now();
+        const push = (from: string, to: string): Row[] => receipt === "fix.done"
+          ? conflictRoundRows(now, "merge-conflict", from, to)
+          : [{ step: receipt, pr_number: 18033, head_sha: from, new_head_sha: to, outcome: "pushed" }];
+        const metadata = metadataIssueAtB();
+        const older = hold === "design" ? designRows(now) : [];
+        const issues = hold === "design" ? [metadata] : [metadata, openIssue("review")];
+        const f = fixture(t, [...older, ...push(HELD_HEAD, MERGE_HEAD), ...push(MERGE_HEAD, NEXT_MERGE_HEAD)], issues);
+        const facts = { conflictEvidenceCaptured: false };
+        assert.ok(openEscalationStandDownReason(MERGE_HEAD, metadata, undefined, facts, ["proof-discrimination"]),
+          "control: B's metadata issue holds its original red checks");
+        assert.equal(openEscalationStandDownReason(MERGE_HEAD, metadata, undefined, facts, ["ci-shard (1/8)"]), undefined,
+          "control: the current code red releases B's metadata question");
+        await runSweep([prAt(f.now, NEXT_MERGE_HEAD, false)], f.deps);
+        assert.equal(f.effects.admissions, 0, "A's unanswered hold prevents code admission at C");
+        assert.equal(f.effects.evidence.length, 0);
+        assert.equal(f.disposed().at(-1)!.hold_head_sha, HELD_HEAD);
+
+        const released = fixture(t, [...push(HELD_HEAD, MERGE_HEAD), ...push(MERGE_HEAD, NEXT_MERGE_HEAD)], [metadata]);
+        await runSweep([prAt(released.now, NEXT_MERGE_HEAD, false)], released.deps);
+        assert.equal(released.effects.evidence.length, 1, "control: the released metadata question alone admits code");
+      });
+    }
+  }
+});
+
+test("W1-T12544 criterion 3: the active B→C rung checks A's hold before any code-strike judgment", async t => {
+  for (const hold of ["design", "review"] as const) {
+    await t.test(hold, async t => {
+      const heads = { from: MERGE_HEAD, to: NEXT_MERGE_HEAD,
+        prior: [...(hold === "design" ? designRows(systemClock.now()) : []), ...conflictRoundRows(systemClock.now())] };
+      const judgedHeads: string[] = [];
+      const judge: FixProgressJudge = async input => {
+        judgedHeads.push(input.headSha);
+        return { verdict: "continue", reason: "fixture permits code only after the hold check" };
+      };
+      const metadata = metadataIssueAtB();
+      const issues = hold === "design" ? [metadata] : [metadata, openIssue("review")];
+      const r = await activeConflictRung(t, "none", false, heads, "red", false,
+        { issues, closeFails: false, baseSha: OUTSIDE_HEAD, judge });
+      assert.equal(r.pushedHead, NEXT_MERGE_HEAD, "the conflict round pushes B→C in this invocation");
+      assert.deepEqual(r.minedHeads, [NEXT_MERGE_HEAD], "the admission facts are the actual code reds at C");
+      assert.deepEqual(judgedHeads, [], "the unanswered hold is checked before the code-strike judge");
+      assert.deepEqual(r.rows.filter(row => row.step === "fix.dispatch").map(row => row.mode), ["merge-conflict"]);
+      assert.equal(r.spawned.length, 1);
+      assert.equal(r.outcome.outcome, hold === "design" ? "needs_design" : "stood_down");
+      assert.match(String(r.outcome.reason), hold === "design" ? new RegExp(DESIGN_REASON) : /ALREADY OPEN.*18100/);
+      assert.equal(r.closed, 0, "the original question remains unanswered");
+
+      judgedHeads.length = 0;
+      const released = await activeConflictRung(t, "none", false,
+        { ...heads, prior: conflictRoundRows(systemClock.now()) }, "red", false,
+        { issues: [metadata], closeFails: false, baseSha: OUTSIDE_HEAD, judge });
+      assert.ok(judgedHeads.length > 0, "control: removing A's hold reaches the code-strike judge");
+      assert.deepEqual(released.rows.filter(row => row.step === "fix.dispatch").map(row => row.mode), ["merge-conflict", "ci-log"]);
+      assert.equal(released.outcome.outcome, "fixed");
+    });
+  }
+});
 
 test("W1-T12544 criterion 3: the active rung keeps every unanswered hold when closing a cleared conflict issue fails", async t => {
   for (const heads of [

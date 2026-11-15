@@ -22551,7 +22551,7 @@ export async function runSweep(
       return openForHead.some(issue => matchDuplicateEscalation({ ...key, cause: undefined }, [issue]) !== undefined &&
         openEscalationStandDownReason(head, issue, undefined,
           { conflictEvidenceCaptured: hasCapturedMergeConflictEvidence(pr.mergeConflict), baseSha: mainTipSha },
-          undefined, pr.pendingAnswer) !== undefined && escalationIssueCause(issue.body) !== "conflict");
+          isBlockedCi(pr) ? redCheckNames(pr) : undefined, pr.pendingAnswer) !== undefined && escalationIssueCause(issue.body) !== "conflict");
     }) : pr.headSha;
     if ((disposition === "conflicted" || disposition === "blocked-fixable") &&
         !inFlightFixKeys.has(`${fixLedgerTaskIdFor(pr) ?? ""}@${pr.headSha}`) &&
