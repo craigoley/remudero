@@ -22,10 +22,28 @@ const HOUSE_LAYOUT = resolveRepoLayout("", () => undefined);
  *  baked entrypoint, not the checkout's, and the serve process reads no deploy/ file). */
 export const SERVE_ONLY_RESTART_PATHS: readonly string[] = ["settings/", `${HOUSE_LAYOUT.stateDir}/`, `${HOUSE_LAYOUT.planDir}/`];
 
-/** A plan/ path serve reloads in place is not a reason to restart; every other plan/ path still is. */
+/** W1-T12706: the plan/ paths serve reads from its checkout on disk at each request, never at boot.
+ *  Moving the checkout forward is enough to serve them new, so they are not a reason to restart.
+ *  Add a path here only after naming its readers beside it. */
+export const SERVE_PER_REQUEST_PATHS: readonly string[] = [
+  // readFeedbackEntry and listFeedback (src/lib/feedback.ts), called per read by panel-graph.ts,
+  // now-view.ts (keyed on file identities) and console-projection-worker.ts.
+  `${HOUSE_LAYOUT.planDir}/feedback/`,
+];
+
+/** Does the advance change a path serve reads per request, so moving the checkout brings it to serve? */
+export function touchesPerRequestPath(changedPaths: readonly string[] | undefined): boolean {
+  return (changedPaths ?? []).some(isPerRequestPath);
+}
+
+function isPerRequestPath(raw: string): boolean {
+  return SERVE_PER_REQUEST_PATHS.some((prefix) => raw.trim().startsWith(prefix));
+}
+
+/** A plan/ path serve reloads in place or reads per request is not a reason to restart; every other plan/ path still is. */
 export function serveRestartRelevant(changedPaths: readonly string[] | undefined): boolean {
   if (advanceIsMaterial(changedPaths)) return true;
-  return (changedPaths ?? []).some((raw) => !isReloadablePlanPath(raw) && SERVE_ONLY_RESTART_PATHS.some((prefix) => raw.trim().startsWith(prefix)));
+  return (changedPaths ?? []).some((raw) => !isReloadablePlanPath(raw) && !isPerRequestPath(raw) && SERVE_ONLY_RESTART_PATHS.some((prefix) => raw.trim().startsWith(prefix)));
 }
 
 /** An unreadable diff carries its reason rather than arriving as an empty list. */
