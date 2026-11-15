@@ -61,6 +61,7 @@ import {
   type FeedbackAgeRoot,
   type HumanGateCountSummary,
   type HumanGateObservation,
+  projectHeldTaskQuestionGates,
   type HumanGateProjection,
   type HumanGateSource,
   type OperatorItemProjection,
@@ -81,7 +82,7 @@ import {
 } from "./now-decisions.js";
 import type { BoardIssueRest, BoardPrRest } from "./open-prs-rest.js";
 import { projectReconciledFeedback } from "./panel-graph.js";
-import { unmetDependencies, type Plan, type AcceptanceCriterion } from "./plan.js";
+import { newestTaskAnswer, unmetDependencies, type Plan, type AcceptanceCriterion } from "./plan.js";
 import { loadPolicy, policyPath, type PolicyValues } from "./policy.js";
 import { ratificationsPath, type Ratifications } from "./ratification.js";
 import { parse as parseYaml } from "yaml";
@@ -1104,6 +1105,7 @@ export function createNowView(opts: NowViewOptions): {
     const all = escalationDecisions(instance.name, snapshot.tasks, escalationClasses(rows), instance.name === core);
     const feedbackLap = decisionsLap(instance.name, "feedback");
     let feedbackEntries: FeedbackEntry[] = [];
+    let heldTaskGates: HumanGateObservation[] = [];
     if (instance.name !== core) {
       reasons.grill = "feedback questions live in core only";
       reasons.task_question = "the question store core answers is core's own";
@@ -1136,7 +1138,11 @@ export function createNowView(opts: NowViewOptions): {
       }
       const store = readQuestionStore(instance.feedbackRoot);
       if ("reason" in store) reasons.task_question = store.reason;
-      else all.push(...taskQuestionDecisions(instance.name, store.lines as QuestionStoreLine[], answeredByFact(db), snapshot.tasks));
+      else {
+        all.push(...taskQuestionDecisions(instance.name, store.lines as QuestionStoreLine[], answeredByFact(db), snapshot.tasks));
+        // W1-T12715: a task held for a needs_input answer asks through the same source.
+        heldTaskGates = projectHeldTaskQuestionGates(plan?.tasks ?? [], (taskId) => newestTaskAnswer(store.lines, taskId), instance.repo);
+      }
     }
     lap("feedback");
     const escalationUnknown = snapshot.github_unreachable || !snapshot.prQueue.complete || snapshot.tasks.some((task) => task.escalationUnverified);
@@ -1151,7 +1157,7 @@ export function createNowView(opts: NowViewOptions): {
       // The legacy question reader skips malformed lines without attesting complete coverage.
       sources.push({ name: "task-questions", instance: instance.name, state: reasons.task_question ? "unavailable" : "partial",
         reason: reasons.task_question ?? "the question reader does not report malformed-line completeness",
-        gates: all.filter((decision) => decision.kind === "task_question").map(decisionGate) });
+        gates: [...all.filter((decision) => decision.kind === "task_question").map(decisionGate), ...heldTaskGates] });
     }
     const changeManagementUnknown = snapshot.github_unreachable || !snapshot.prQueue.complete || !!snapshot.blockedPrsUnverifiedReason;
     sources.push(projectChangeManagementGates({

@@ -197,11 +197,11 @@ const KICK: readonly EntryPoint[] = [
       'refuse("already merged — stale kick")',
       "if (deps.isCreditIndeterminate?.(kick.taskId)) {",
       "const openPr = deps.isOpenPr?.(kick.taskId);",
-      "assertRunnable(planForBatch, task, mergedTask, tickReleases.ids);",
+      "assertRunnable(planForBatch, task, mergedTask, tickReleases.ids, deps.taskInputAnswer);",
       'log("console.kick_dispatched"',
       "const drain = deps.consumeDrainNow();",
     ],
-    bounds: "known task, not merged, credit readable (else held), no open PR, assertRunnable",
+    bounds: "known task, not merged, credit readable (else held), no open PR, assertRunnable with the operator answer reader",
   },
 ];
 
