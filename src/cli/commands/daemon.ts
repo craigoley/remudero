@@ -92,7 +92,10 @@ import { loadMounts, mountsPath } from "../../lib/mounts.js";
 import { loadPolicy, policyPath, type FreshnessRestartValues } from "../../lib/policy.js";
 import { refreshReviewPublisherToken as refreshInstallationToken } from "../../lib/review.js";
 import { feedbackStatusOnMain } from "../../lib/auto-triage.js";
-import { bootSweepDispatchClaimsAsync, dispatchClaimRef, releaseLandedDispatchClaims, claimMintedByRerun, type DispatchClaimReserverAsync } from "../../lib/dispatch-claim.js";
+import {
+  bootSweepDispatchClaimsAsync, dispatchClaimRef, realBootSweepHostProbe, releaseLandedDispatchClaims, claimMintedByRerun,
+  type BootSweepInputs, type DispatchClaimReserverAsync,
+} from "../../lib/dispatch-claim.js";
 import { loadCreditStore, saveCreditStore, recordCredit, refusesAsPlanOnly, buildCommitTrailerIndex, projectPlan, independentBlockReleasesFrom, readLedgerLines, readLedgerSnapshot, buildLedgerIndex, createDispatchBreakerCache, evaluateDispatchBreakerCorroboratedDetailed, hasRepeatedTaskAttributableLifetimeDispatches, type LedgerLines, type LedgerSnapshot, type DispatchBreakerDetail, type GitHub, type PrRef, type StatusProjection, taskIdFromRunBranch } from "../../lib/status.js";
 import { DEFAULT_SWEEP_POLICY, productionFixPressure, readIdleLightCadence, readObservedReviewMedianMs, type OpenPrView } from "../../lib/sweep.js";
 import { startMainEntryWatch } from "../../lib/main-entry.js";
@@ -1074,6 +1077,7 @@ export async function daemonCommand(
     /** Best-effort boot projection for provider routing; production writes one bounded state file. */
     writeProviderRoutingStatus?: (root: string, input: ProviderRoutingWriteInput) => void;
     bootClaimReserver?: DispatchClaimReserverAsync;
+    hostProbe?: BootSweepInputs["hostProbe"];
     tickClaimReserver?: DispatchClaimReserverAsync;
     /** Opt-in NEW-build reservation reader; production uses the private-dir environment adapter. */
     checkHeavyNewBuild?: DispatchGovernorDeps["checkHeavyNewBuild"];
@@ -1732,7 +1736,7 @@ export async function daemonCommand(
   // W1-T12238: the boot does not wait for it; the first dispatch selection and the lock release do.
   const claimSweepSettled: Promise<void> = (async () => {
     await bootSweepDispatchClaimsAsync(deps.bootClaimReserver ?? dispatchClaimReserverAsyncFor(join(config.root, "repos", target.repo)), {
-      localHost: hostname(),
+      hostProbe: deps.hostProbe ?? realBootSweepHostProbe,
       lockHeldSinceMs: bootClaimLock.now(),
       lockHeldSinceIso: bootClaimLock.iso(),
       stateDir: dirname(ledgerPath),
