@@ -166,7 +166,7 @@ import { asyncGit, checkServiceFreshness } from "./self-sync.js";
 import { boundGitCall, GATEWAY_FETCH_TIMEOUT_MS } from "./git-fetch-retry.js";
 import { reloadServePlan, touchesReloadablePlan, type PlanSourceHolder } from "./serve-plan-reload.js";
 import { publishThreadPlan } from "./thread-plan.js";
-import { changedPathsSince, serveRestartRelevant, type ChangedPathsRead, type ChangedPathsReader } from "./serve-restart-relevance.js";
+import { changedPathsSince, serveRestartRelevant, touchesPerRequestPath, type ChangedPathsRead, type ChangedPathsReader } from "./serve-restart-relevance.js";
 import { buildAccountUsageRoute, type AccountUsageDeps } from "./account-usage.js";
 import { readProviderRoutingStatus, type ProviderRoutingStatus } from "./provider-routing-status.js";
 import { readRepairLadderState, type RepairLadderState } from "./worker-provider.js";
@@ -1357,6 +1357,31 @@ export interface GatewayCheckoutAssessment {
   reloadPlanAt?: string;
   /** origin/main's sha when the checkout is behind: what a handoff requested now would serve. */
   targetSha?: string;
+  /** W1-T12706: behind, clean, and every changed path is one serve reads per request or never loads. */
+  advanceInPlace?: CheckoutAdvance;
+}
+
+/** A fast-forward of serve's checkout that keeps the running generation and its warm read model. */
+interface CheckoutAdvance {
+  fromSha: string;
+  toSha: string;
+  changedPaths: string[];
+  run: () => Promise<{ advanced: true } | { advanced: false; reason: string }>;
+}
+
+/** The entrypoint's sync_tree step (`git checkout --detach`), only from the sha the diff was read at
+ *  and only on a clean tree. Anything else refuses, and the gate falls back to a handoff. */
+async function advanceCheckout(git: (args: string[]) => string | Promise<string>, fromSha: string, toSha: string): Promise<{ advanced: true } | { advanced: false; reason: string }> {
+  try {
+    const head = (await git(["rev-parse", "HEAD"])).trim();
+    if (head !== fromSha) return { advanced: false, reason: `the checkout moved to ${head}` };
+    if ((await git(["status", "--porcelain", "-uno"])).trim().length > 0) return { advanced: false, reason: "the checkout became dirty" };
+    await git(["checkout", "--quiet", "--detach", toSha]);
+    const landed = (await git(["rev-parse", "HEAD"])).trim();
+    return landed === toSha ? { advanced: true } : { advanced: false, reason: `the checkout is at ${landed} after the move` };
+  } catch (err) {
+    return { advanced: false, reason: err instanceof Error ? err.message : String(err) };
+  }
 }
 
 /** {@link assessGatewayCheckout}'s seams; every git call is injectable so a test stays hermetic. */
@@ -1506,10 +1531,17 @@ export async function assessGatewayCheckout(deps: GatewayCheckoutDeps): Promise<
   // RELOADED EVEN WHEN RELEVANT: a code handoff now waits out SERVE_HANDOFF_COALESCE_MS, and the plan
   // half of a mixed merge must not wait with it. A plan the old code cannot parse keeps the old one.
   const reloadPlanAt = svc.behind !== null && behindBy !== 0 && touchesReloadablePlan(svc.behind.changedPaths) ? svc.behind.newSha : undefined;
+  const fromSha = head.trim();
+  const toSha = svc.behind?.newSha;
+  const advanceInPlace: CheckoutAdvance | undefined =
+    toSha !== undefined && typeof behindBy === "number" && behindBy > 0 && !svc.dirty && !relevant && touchesPerRequestPath(svc.behind?.changedPaths)
+      ? { fromSha, toSha, changedPaths: [...(svc.behind?.changedPaths ?? [])], run: () => advanceCheckout(git, fromSha, toSha) }
+      : undefined;
   return {
     state,
     restartDue: !svc.dirty && relevant,
     ...(reloadPlanAt === undefined ? {} : { reloadPlanAt }),
+    ...(advanceInPlace === undefined ? {} : { advanceInPlace }),
     ...(svc.behind === null ? {} : { targetSha: svc.behind.newSha }),
   };
 }
@@ -1727,6 +1759,8 @@ export function gateStaleCodeExit(deps: StaleCodeExitDeps): StaleCodeExitGate {
   let dirtyReported: string | undefined;
   let windowFrom = deps.bootedAt ?? clock.now();
   let coalescing: { firstSeenSha: string; firstSeenAt: number } | undefined;
+  let advancing = false;
+  let advanceRefused: string | undefined;
   const readChangedPaths = deps.changedPathsSince ?? ((boot, target) => changedPathsSince(boot, target, serveRepoDir()));
   const relevance = new Map<string, boolean | "pending">();
   let headPlanRef: string | undefined;
@@ -1771,6 +1805,21 @@ export function gateStaleCodeExit(deps: StaleCodeExitDeps): StaleCodeExitGate {
     syncPlan();
     // NEVER NEGOTIABLE: an exit mid-write drops the request, and a drain's bound could cut one.
     if (inFlightWrites !== 0) return;
+    const move = checkout?.advanceInPlace;
+    if (move && !advancing && checkout) {
+      advancing = true;
+      checkout = { ...checkout, advanceInPlace: undefined };
+      void move.run().then((landed) => {
+        if (landed.advanced) log("serve.checkout_advanced", { bootSha: deps.bootSha, fromSha: move.fromSha, toSha: move.toSha, changedPaths: move.changedPaths });
+        else {
+          advanceRefused = move.toSha;
+          log("serve.checkout_advance_refused", { fromSha: move.fromSha, toSha: move.toSha, reason: landed.reason });
+        }
+      }).finally(() => {
+        advancing = false;
+        maybeExit();
+      });
+    }
     const currentSha = resolveCurrentSha();
     const codeStale = isConsoleCodeStale(deps.bootSha, currentSha) && movedRelevantly(currentSha);
     const checkoutBehind = checkout?.restartDue === true;
@@ -1844,7 +1893,8 @@ export function gateStaleCodeExit(deps: StaleCodeExitDeps): StaleCodeExitGate {
     return exited;
   };
   const noteCheckout = (next: GatewayCheckoutAssessment): void => {
-    checkout = next;
+    // A move that refused once is not tried again: the clean tree takes the handoff instead.
+    checkout = next.advanceInPlace?.toSha === advanceRefused && next.advanceInPlace ? { ...next, advanceInPlace: undefined, restartDue: true } : next;
     originPlanRef = next.reloadPlanAt;
     syncPlan();
     const { state } = next;
