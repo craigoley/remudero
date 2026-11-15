@@ -16,7 +16,8 @@ export { createPlanRevisionStore, type PlanRevision, type PlanRevisionStore, typ
 import { readPlaneWorkerInput, readPlaneWorkerLog, runReadPlaneWorker } from "./read-plane.worker.js";
 import { runsBundled, startWorker } from "./child-entry-argv.js";
 import { execFile, execFileSync, spawnSync } from "node:child_process";
-import { ghExec, ghJsonAsync, ghLinesAsync, ghTextAsync } from "./github-transport.js";
+import { ghExec, ghJsonAsync, ghLinesAsync, ghTextAsync, githubInstallationBudget } from "./github-transport.js";
+import type { InstallationBudgetThreadInput } from "./github-installation-budget.js";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { loadConfig, type Config } from "./config.js";
@@ -219,6 +220,8 @@ export interface TickReadOptions {
   config: Config;
   ledgerPath: string;
   checkoutRoot: string;
+  /** W1-T12555: the main thread's budget state, so the worker's reads take their share of it. */
+  githubInstallationBudget?: InstallationBudgetThreadInput;
 }
 
 export function createTickReadProducer(options: TickReadOptions, io: {
@@ -3135,7 +3138,8 @@ export function tickReadWorkerBoot(entry: string): string {
  */
 export function startTickReadWorker(input: TickReadOptions, opts: { url?: URL; start?: typeof startWorker } = {}): Worker {
   const url = opts.url ?? tickReadWorkerUrl();
-  const workerData = { kind: READ_PLANE_KIND, input, entry: url.href };
+  const budget = input.githubInstallationBudget ?? githubInstallationBudget().threadInput();
+  const workerData = { kind: READ_PLANE_KIND, input: budget === undefined ? input : { ...input, githubInstallationBudget: budget }, entry: url.href };
   // SHARE_ENV: the daemon's hourly GH_TOKEN refresh must reach the worker's reads. startWorker decides the entry
   // and, for a bundle, the execArgv without tsx; the boot imports whichever entry it chose.
   return (opts.start ?? startWorker)(url, { workerData, env: SHARE_ENV }, {
