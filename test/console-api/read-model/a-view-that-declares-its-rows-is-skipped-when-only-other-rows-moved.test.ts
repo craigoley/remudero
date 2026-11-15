@@ -3,7 +3,9 @@ import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { coldAnalyticsSnapshot } from "#src/lib/analytics-route.js";
-import { analyticsSourceBodies, ANALYTICS_STALE_AFTER_MS } from "#src/lib/analytics-view.js";
+import { analyticsSourceBodies, ANALYTICS_STALE_AFTER_MS, type AnalyticsViewData } from "#src/lib/analytics-view.js";
+import { fixedClock } from "#src/lib/clock.js";
+import { captureRepositoryFlow, type RepositoryFlow } from "#src/lib/repository-flow.js";
 import { AGENT_CLOCK_MS } from "#src/lib/agent-view.js";
 import { INSTANCE_LIVENESS_BOUND_MS, type InstancesData } from "#src/lib/instances-view.js";
 import { navBadgeAnalyticsSlice, navBadgeSourcesPath, INBOX_STALE_AFTER_MS, NAV_BADGE_CLOCK_MS } from "#src/lib/nav-badge-view.js";
@@ -531,6 +533,85 @@ test("W1-T11975 criterion 6: a skipped production instances body republishes reg
     assert.ok(readingsOf(f.messages.slice(mark), name).every(source => source.asOf === stamps.get(name)),
       `no skip posted ${name} stamped as of the clock`);
     assert.equal(readingsOf(f.messages, name).at(-1)?.asOf, stamps.get(name), `${name} is still republished as built`);
+  }
+});
+
+/** Publish each instance's console-v1 snapshot carrying the repositoryFlow the production writer attaches. */
+async function acceptFlowSnapshots(f: ReturnType<typeof production>, mutate: (flow: RepositoryFlow) => unknown = flow => flow) {
+  f.snapshot.asOf = new Date(f.start + 1).toISOString();
+  for (const instance of f.instances) {
+    const flow = await captureRepositoryFlow(f.dir, f.dir, instance.repo, fixedClock(f.start));
+    assert.ok(flow, "the production capture reports a flow for a repository-bearing instance");
+    const bodies = analyticsSourceBodies(f.snapshot, instance.repo);
+    Object.assign(bodies[0].body as object, { repositoryFlow: mutate(flow) });
+    assert.equal(f.ticker.acceptSnapshot({ instance: instance.name, ok: true, asOf: f.snapshot.asOf, bodies }), true);
+  }
+  f.ticker.tick();
+}
+
+test("W1-T11975 criterion 8: analytics with a valid repositoryFlow in every snapshot is fingerprinted and skipped", async t => {
+  const f = production(t);
+  await acceptFlowSnapshots(f);
+  for (let i = 0; i < 3; i++) f.build("analytics");
+  const flowOf = () => (f.output.get("analytics")![0].data as AnalyticsViewData).instances.map(instance => instance.repositoryFlow);
+  assert.ok(flowOf().every(flow => flow?.version === "repository-flow-v1"), "positive control: the body publishes the stored flows");
+  assert.equal(typeof f.fingerprint("analytics"), "string", "a valid flow does not make analytics undeclared");
+  const stamped = flowOf().map(flow => flow!.materializedAt);
+  const calls = f.counts.get("analytics");
+  f.append("read_model.slow_view"); f.tick();
+  f.build("analytics"); f.build("analytics");
+  assert.equal(f.counts.get("analytics"), calls, "an unrelated row does not rebuild analytics with a valid flow");
+  const fingerprint = f.fingerprint("analytics");
+  f.tick(ANALYTICS_STALE_AFTER_MS + 1);
+  assert.notEqual(f.fingerprint("analytics"), fingerprint, "the stale comparison still moves the fingerprint");
+  f.equalFullBuild("analytics");
+  assert.deepEqual(flowOf().map(flow => flow!.materializedAt), stamped, "a valid flow is published as stored, not stamped as of the clock");
+});
+
+test("W1-T11975 criterion 8: a changed repositoryFlow moves the fingerprint and equals the skip-disabled build", async t => {
+  const f = production(t);
+  await acceptFlowSnapshots(f);
+  for (let i = 0; i < 3; i++) f.build("analytics");
+  const before = f.fingerprint("analytics");
+  assert.equal(typeof before, "string");
+  f.snapshot.asOf = new Date(f.start + 2).toISOString();
+  for (const instance of f.instances) {
+    const flow = await captureRepositoryFlow(f.dir, f.dir, instance.repo, fixedClock(f.start));
+    const bodies = analyticsSourceBodies(f.snapshot, instance.repo);
+    Object.assign(bodies[0].body as object, { repositoryFlow: { ...flow!, state: "partial", gaps: ["a new gap"] } });
+    assert.equal(f.ticker.acceptSnapshot({ instance: instance.name, ok: true, asOf: f.snapshot.asOf, bodies }), true);
+  }
+  f.equalFullBuild("analytics");
+  assert.notEqual(f.fingerprint("analytics"), before);
+  const body = f.output.get("analytics")![0].data as AnalyticsViewData;
+  assert.ok(body.instances.every(instance => instance.repositoryFlow?.gaps.includes("a new gap")));
+});
+
+test("W1-T11975 criterion 8: a repositoryFlow the body would restamp as of the clock stays undeclared", async t => {
+  const f = production(t);
+  await acceptFlowSnapshots(f, flow => ({ ...flow, materializedAt: new Date(f.start + 3_600_000).toISOString() }));
+  f.build("analytics");
+  assert.equal(f.fingerprint("analytics"), undefined, "a flow stamped ahead of the clock is replaced by a clock-stamped fallback");
+  const calls = f.counts.get("analytics");
+  f.build("analytics"); f.build("analytics");
+  assert.equal(f.counts.get("analytics"), calls! + 2, "every call builds while the body holds a per-build stamp");
+});
+
+test("W1-T11975 criterion 8: production lane skips analytics when a valid repositoryFlow is in the snapshots", async t => {
+  const f = production(t, true);
+  await acceptFlowSnapshots(f);
+  for (let i = 0; i < 5; i++) {
+    f.append("read_model.slow_view"); f.tick();
+    f.build("analytics");
+  }
+  f.tick(600_000);
+  const rows = f.messages.filter(m => m.type === "log" && m.step === "read_model.view_builds" && m.extra.view === "analytics");
+  assert.ok(rows.length > 0);
+  for (const row of rows) {
+    assert.ok(row.type === "log");
+    assert.ok(Number(row.extra.skipped) > 0, "analytics skips with the production declaration and a valid flow");
+    const reasons = row.extra.not_skipped as Record<string, number>;
+    assert.ok(reasons.audit > 0, "the audit build is counted");
   }
 });
 
