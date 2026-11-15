@@ -24,7 +24,7 @@ import { isPrMergedNow, mergeTargetFromPrUrl } from "../../lib/arm-auto-merge.js
 import { ciFailureLedgerEntry } from "../../lib/ci-friction-gardener.js";
 import { conflictedFilePaths } from "../../lib/hot-file-gardener.js";
 import { billingMode } from "../../lib/env.js";
-import { FIX_MODE_RULES, deriveFixMode, fixScopeRegime, outOfDeclaredScopeFiles, renderFixPrompt, renderPrerequisitePrPrompt, sameHeadReviewUnmet, type FixEvidence, type FixReviewFinding } from "../../lib/prompt-render.js";
+import { FIX_MODE_RULES, deriveFixMode, fixScopeRegime, outOfDeclaredScopeFiles, renderFixPrompt, renderPrerequisitePrPrompt, sameHeadReviewUnmet, selfHealBodyCoverage, type FixEvidence, type FixReviewFinding } from "../../lib/prompt-render.js";
 import { bakedClosureCatalogDetails } from "../../lib/baked-closure-catalog.js";
 import { escalateWithJudge, escalationCause, realEscalationJudge, escalationHeadSha, openEscalationStandDownReason, fixEscalationDedupKey, findDuplicateEscalations, taskContractRevision, taskSemanticRevision, type Escalation, type EscalationDedupKey, type IssueGateway, type OpenIssue } from "../../lib/escalate.js";
 import { fetchSinglePrRest, codeqlCheckFailed, hydrateCodeqlHeadAlertsSteps, CODEQL_CHECK_NAME, createPlanFilingFileCache, hydratePlanFilingFilesSteps, type GhApiFetcher } from "../../lib/open-prs-rest.js";
@@ -4246,6 +4246,42 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
         ? { ...evidenceBase, priorPartialWork: opts.priorPartialWork }
         : evidenceBase;
     const fixMode = deriveFixMode(evidence, PROOF_REPAIR_FIX_MODE_RULES);
+    // A successful body-only repair hands back to sweep without spending a strike.
+    if (fixMode === "body-coverage" && evidence.review !== undefined) {
+      let repairedBody: string | undefined;
+      try {
+        const healed = selfHealBodyCoverage(evidence, await (deps.fetchPrBody ?? host.fetchPrBodyViaGh)(opts.prUrl));
+        if (healed !== undefined) {
+          await (deps.updatePrBody ?? host.updatePrBodyViaGh)(opts.prUrl, healed);
+          deps.log("fix.body_coverage_self_healed", { strike: strikes });
+          repairedBody = healed;
+        }
+      } catch (error) {
+        deps.log("fix.body_coverage_self_heal_error", { strike: strikes, error: String(error) });
+      }
+      if (repairedBody !== undefined) {
+        try {
+          let repairTask = opts.task;
+          if (deps.resolveTaskContractAtHead) {
+            const contract: CatalogTaskContract | undefined = await deps.resolveTaskContractAtHead(opts.prUrl, opts.taskId);
+            if (!contract || contract.divergence) throw new Error("current PR-head task contract unreadable");
+            repairTask = Object.assign({}, opts.task, { acceptance: contract.criteria,
+              files: contract.taskDeclaredFiles, catalog: contract.taskCatalog });
+          }
+          review = await deps.runReview({ ...opts.reviewBase, prUrl: opts.prUrl, task: repairTask,
+            report: repairedBody, reviewInputBody: repairedBody, reportIsSubstitute: false,
+            settingsFile: opts.settingsFile, config: opts.config, budgetUsd: opts.budgetUsd,
+            log: deps.log, say: deps.say, account: deps.account, ledgerPath: deps.ledgerPath,
+            runId: opts.runId, openTaskIds: opts.openTaskIds, workerTelemetry: opts.workerTelemetry,
+            reviewerClockBoundMs: opts.reviewerClockBoundMs, reviewerCodeFreshness: opts.reviewerCodeFreshness });
+        } catch (error) {
+          deps.log("fix.body_coverage_review_error", { error: String(error) });
+        }
+        const reason = "PR body coverage repaired; returning to sweep with the current review verdict";
+        deps.log("fix.stood_down", { site: "rung.body_coverage_self_heal", reason });
+        return { outcome: "stood_down", review, strikes, retriggers, reason, standDownReason: reason };
+      }
+    }
     await observeFeedbackInputs(opts.config.contributorAdmission, opts.feedbackContributions ?? [], "fix-adoption", deps.log);
     // W1-T3727: WHO HOLDS THIS ROUND'S GIT, read once by BOTH the prompt and the tool bound so
     // the contract and the surface cannot disagree. The caller already pushes; only the commit moves.

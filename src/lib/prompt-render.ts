@@ -256,6 +256,17 @@ export function bodyCoverageAcceptanceBlock(unmet: readonly { claim: string; pro
   ];
 }
 
+/** Repair only missing report context; the next review still decides whether the proofs hold. */
+export function selfHealBodyCoverage(evidence: FixEvidence, body: string): string | undefined {
+  if (deriveFixMode(evidence) !== "body-coverage") return undefined;
+  if (!evidence.review!.unmetCriteria.every(c => /^(?:unit test|grep):\s*\S/.test(c.proof))) return undefined;
+  const missing = evidence.review!.unmetCriteria.filter(c => !body.includes(c.claim) || !body.includes(c.proof));
+  if (missing.length === 0) return undefined;
+  return `${body.trimEnd()}\n\n## Acceptance review context\n\n${missing.map(c =>
+    `- Requested claim: ${c.claim}\n  Required proof: ${c.proof}`,
+  ).join("\n")}\n`;
+}
+
 export const FIX_MODE_RULES: readonly FixModeRule[] = [
   {
     mode: "merge-conflict",
