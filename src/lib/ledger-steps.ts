@@ -280,6 +280,28 @@ const SEED_ROWS: readonly SeedRow[] = [
     outcomes: ["synthetic"],
   },
   {
+    // W1-T12545: a fix round re-enters merge-conflict mode instead of standing down on its own conflict.
+    step: "fix.merge_mode_reentered",
+    meaning:
+      "A fix round outside merge-conflict mode read the PR's merge facts as CONFLICTING. A trial merge " +
+      "of main at the round's head stopped with unmerged paths, and the merge was aborted. The next " +
+      "round runs in merge-conflict mode with those paths (`conflicted_files`). Without unmerged paths " +
+      "the round stands down for the sweep as before.",
+    writer: ["runFixRung"],
+    outcomes: ["reentered"],
+  },
+  {
+    // W1-T12545: a fix child whose decision was a merge-conflict repair takes the moved head.
+    step: "sweep.fix.child_head_adopted",
+    meaning:
+      "A fix child's recheck found that the PR head moved from `from_head` to `to_head` after the " +
+      "sweep decided. The decision carried merge-conflict evidence, and the merge facts still read " +
+      "CONFLICTING at the new head, so the child dispatches at `to_head` in merge-conflict mode. " +
+      "Every other recheck and every write-time fence runs at `to_head`.",
+    writer: ["runFixDispatchChild"],
+    outcomes: ["adopted"],
+  },
+  {
     // W1-T4460 design note (iv) — the SAME literal `runDaemon`'s own top-of-tick `reloadPlanBinding`
     // already logs (src/lib/daemon.ts), reused rather than reinvented for `fixRungTaskWithPlanReload`
     // (src/lib/sweep.ts)'s narrower, dispatch-scoped re-read: ONE meaning ("a fresh plan was read
