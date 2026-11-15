@@ -4304,3 +4304,199 @@ test("W1-T11600 criterion 4: secondary catalog shadow cannot alter dispatch", as
   assert.equal(matchingBranch?.outcome, "comparison_deferred", "a catalog task with a run branch is deferred safely");
   assert.equal(branchProbeCalls, 0);
 });
+
+// W1-T11790 — A HUNG RETRO IS LEDGERED, NEVER KILLED. OBSERVED 2026-11-08: one retro ran 87 min holding two container
+// recycles and no row said so. Each tick here advances the injected clock 25 min, so the shadow bound is crossed in
+// fake time; the retro under test settles only when the test releases it.
+const RETRO_STEP_MS = 25 * 60_000;
+const RETRO_T0_MS = Date.parse("2026-11-08T19:00:00.000Z");
+
+/** A clock the stop check advances once per tick, so tick N's loop head reads T0 + (N-1) steps. */
+function retroTickClock(totalTicks: number, onTick: (tick: number, nowMs: number) => void = () => {}) {
+  let nowMs = RETRO_T0_MS;
+  let ticks = 0;
+  return {
+    now: () => new Date(nowMs),
+    checkStop: () => {
+      ticks += 1;
+      nowMs += RETRO_STEP_MS;
+      onTick(ticks, nowMs);
+      return ticks >= totalTicks ? "test done" : undefined;
+    },
+  };
+}
+
+/** A boot-adopted retro child (W1-T9114's adoption) with a pid, which settles only on `release`/`lose`. */
+function adoptedRetroChild(runId: string, pid: number) {
+  let release: () => void = () => {};
+  let lose: (e: Error) => void = () => {};
+  const settled = new Promise<RunResult>((resolve, reject) => {
+    release = () => resolve(okResult("DAEMON"));
+    lose = reject;
+  });
+  let aborts = 0;
+  const child = {
+    started: true as const, runId, dir: "/nonexistent", pid, taskId: "DAEMON", settled,
+    work: { kind: "retro" as const, inputs: {} },
+    abort: async () => { aborts += 1; return { aborted: true } as never; },
+  };
+  return { child, release: () => release(), lose: (e: Error) => lose(e), aborts: () => aborts };
+}
+
+type Row = { step: string; extra: Record<string, unknown> };
+const rowsOf = (rows: Row[], step: string) => rows.filter((r) => r.step === step);
+
+test("W1-T11790 criterion 1: a retro still running past the shadow duration is ledgered exactly once as overrunning with its pid, age and threshold, and keeps running", async () => {
+  const { RETRO_SHADOW_OVERRUN_MS } = await import("#src/lib/daemon.js");
+  const { detachedActionInFlight } = await import("#src/lib/sweep.js");
+  const rows: Row[] = [];
+  const retro = adoptedRetroChild("retro-c1-run", 4242);
+  const clock = retroTickClock(7);
+  await runDaemon(fixturePlan(), {
+    refreshMerged: () => mergedSetOf("A", "B", "C", "D"),
+    runOne: async (id) => okResult(id),
+    sleep: fakeClock().sleep,
+    adoptRunChildren: () => [retro.child as never],
+    now: clock.now,
+    checkStop: clock.checkStop,
+    log: (step, extra = {}) => rows.push({ step, extra }),
+  });
+  const overruns = rowsOf(rows, "retro.overrun");
+  assert.equal(overruns.length, 1, "seven ticks, four of them past the bound, write exactly ONE overrun row");
+  const row = overruns[0]!.extra;
+  assert.equal(row.pid, 4242, "the row names the retro's pid");
+  assert.equal(row.run_id, "retro-c1-run");
+  assert.equal(row.threshold_ms, RETRO_SHADOW_OVERRUN_MS);
+  assert.equal(RETRO_SHADOW_OVERRUN_MS, 60 * 60_000, "the declared shadow duration is 60 minutes");
+  assert.equal(row.age_ms, 3 * RETRO_STEP_MS, "first written at the first tick past 60 min (75 min)");
+  assert.equal(row.detached_since, new Date(RETRO_T0_MS).toISOString());
+  assert.equal(row.basis, "adopted");
+  assert.equal(rowsOf(rows, "retro.duration").length, 0, "it has not ended, so no duration row yet");
+  assert.equal(detachedActionInFlight("retro"), true, "THE RETRO KEEPS RUNNING: still registered in flight");
+  assert.equal(retro.aborts(), 0, "and nothing aborted it");
+  retro.release();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(detachedActionInFlight("retro"), false);
+});
+
+test("W1-T11790 criterion 2: a retro that finishes within the shadow duration produces no overrun row", async () => {
+  const { RETRO_SHADOW_OVERRUN_MS } = await import("#src/lib/daemon.js");
+  const { drainDetachedSweepActions } = await import("#src/lib/sweep.js");
+  const rows: Row[] = [];
+  let releaseRetro: () => void = () => {};
+  const retroBlocked = new Promise<void>((resolve) => { releaseRetro = resolve; });
+  let checks = 0;
+  // Fired on tick 1 at T0+25 min; ticks 2 and 3 observe it at 0 and 25 min; tick 3's stop check (T0+75) ends it at 50.
+  const clock = retroTickClock(7, (tick) => { if (tick === 3) releaseRetro(); });
+  await runDaemon(fixturePlan(), {
+    refreshMerged: () => mergedSetOf("A", "B", "C", "D"),
+    runOne: async (id) => okResult(id),
+    sleep: fakeClock().sleep,
+    now: clock.now,
+    checkStop: clock.checkStop,
+    checkRetroTrigger: () => ({ fire: checks++ === 0, reason: "merges", mergesSinceMarker: 40, daysSinceMarker: 1 }),
+    runRetroTrigger: async () => { await retroBlocked; },
+    log: (step, extra = {}) => rows.push({ step, extra }),
+  });
+  await drainDetachedSweepActions({ boundMs: 5000 });
+  assert.ok(rows.some((r) => r.step === "daemon.retro_trigger.detached"), "the retro really was detached");
+  assert.equal(rowsOf(rows, "retro.overrun").length, 0, "a retro ending inside the bound is never flagged");
+  const durations = rowsOf(rows, "retro.duration");
+  assert.equal(durations.length, 1, "it still ledgers its duration");
+  assert.equal(durations[0]!.extra.overran, false);
+  assert.ok((durations[0]!.extra.age_ms as number) <= RETRO_SHADOW_OVERRUN_MS, `ended within the bound: ${durations[0]!.extra.age_ms}`);
+});
+
+test("W1-T11790 criterion 3: every retro that ends, in time or not, ledgers one retro.duration row with its age in milliseconds and its outcome", async () => {
+  const { RETRO_SHADOW_OVERRUN_MS } = await import("#src/lib/daemon.js");
+  const { drainDetachedSweepActions, installDetachedWorkHost } = await import("#src/lib/sweep.js");
+  const rows: Row[] = [];
+  // Retro 1, a spawned run child, completes in time; retro 2, in process, overruns and then fails.
+  let releaseSpawned: () => void = () => {};
+  const spawnedSettled = new Promise<unknown>((resolve) => { releaseSpawned = () => resolve(undefined); });
+  let failInProcess: (e: Error) => void = () => {};
+  const inProcessBlocked = new Promise<void>((_, reject) => { failInProcess = reject; });
+  let spawns = 0;
+  let tick = 0;
+  const fired = new Set<string>();
+  installDetachedWorkHost({
+    hosts: new Set(["retro"]), mode: () => "on", spawnReview: async () => undefined,
+    spawnRetro: async () => (spawns++ === 0 ? { runId: "retro-c3-spawned", settled: spawnedSettled } : undefined),
+  });
+  try {
+    const clock = retroTickClock(9, (n) => {
+      tick = n;
+      if (n === 2) releaseSpawned();
+      if (n === 8) failInProcess(new Error("retro subprocess exited 1"));
+    });
+    await runDaemon(fixturePlan(), {
+      refreshMerged: () => mergedSetOf("A", "B", "C", "D"),
+      runOne: async (id) => okResult(id),
+      sleep: fakeClock().sleep,
+      now: clock.now,
+      checkStop: clock.checkStop,
+      checkRetroTrigger: () => {
+        // Two distinct crossings, so the second is a new retro rather than `crossing_already_fired`.
+        const reason = tick <= 1 ? "merges" as const : tick >= 3 ? "days" as const : undefined;
+        if (reason === undefined || fired.has(reason)) return { fire: false, mergesSinceMarker: 0, daysSinceMarker: 0 };
+        fired.add(reason);
+        return { fire: true, reason, mergesSinceMarker: 40, daysSinceMarker: 1 };
+      },
+      runRetroTrigger: async () => { await inProcessBlocked; },
+      log: (step, extra = {}) => rows.push({ step, extra }),
+    });
+  } finally {
+    installDetachedWorkHost(undefined);
+  }
+  await drainDetachedSweepActions({ boundMs: 5000 });
+  assert.equal(rowsOf(rows, "retro_triggered").length, 2, "two retros really ran, one after the other");
+  const durations = rowsOf(rows, "retro.duration");
+  assert.equal(durations.length, 2, "ONE duration row per retro that ended");
+  const [inTime, late] = durations.map((r) => r.extra);
+  assert.equal(inTime!.run_id, "retro-c3-spawned");
+  assert.equal(inTime!.outcome, "completed");
+  assert.equal(inTime!.overran, false);
+  assert.equal(inTime!.age_ms, RETRO_STEP_MS, "the in-time retro's age, in milliseconds");
+  assert.equal(late!.outcome, "failed");
+  assert.equal(late!.error, "retro subprocess exited 1", "a failed retro names its reason");
+  assert.equal(late!.overran, true);
+  assert.equal(late!.basis, "spawned");
+  assert.ok((late!.age_ms as number) > RETRO_SHADOW_OVERRUN_MS, `the late retro's age, in milliseconds: ${late!.age_ms}`);
+  assert.equal(late!.pid, null, "an in-process retro's subprocess pid is not known here, so the row says so");
+});
+
+test("W1-T11790 criterion 4: the overrun and duration rows are observation only; no kill, no admission change and no new gate follows", async () => {
+  const { detachedActionInFlight } = await import("#src/lib/sweep.js");
+  const run = async (overrun: boolean) => {
+    const rows: Row[] = [];
+    const retro = adoptedRetroChild(`retro-c4-${overrun}`, 6262);
+    const attempted: string[] = [];
+    const merged = new Set<string>();
+    // The control's retro ends at tick 2 (25 min), the subject's never during the run.
+    const clock = retroTickClock(7, (tick) => { if (!overrun && tick === 1) retro.release(); });
+    const summary = await runDaemon(fixturePlan(), {
+      refreshMerged: () => (id) => merged.has(id),
+      runOne: async (id) => { attempted.push(id); merged.add(id); return okResult(id); },
+      sleep: fakeClock().sleep,
+      adoptRunChildren: () => [retro.child as never],
+      now: clock.now,
+      checkStop: clock.checkStop,
+      log: (step, extra = {}) => rows.push({ step, extra }),
+    });
+    const stillRunning = detachedActionInFlight("retro");
+    retro.release();
+    await new Promise((resolve) => setImmediate(resolve));
+    return { rows, attempted, summary, aborts: retro.aborts(), stillRunning };
+  };
+  const control = await run(false);
+  const subject = await run(true);
+  assert.equal(rowsOf(control.rows, "retro.overrun").length, 0);
+  assert.equal(rowsOf(subject.rows, "retro.overrun").length, 1, "the subject's retro did overrun");
+  assert.equal(subject.aborts, 0, "NO KILL: the overrunning child is never aborted");
+  assert.equal(subject.stillRunning, true, "and it is still in flight when the run ends");
+  assert.deepEqual(subject.attempted, control.attempted, "NO ADMISSION CHANGE: dispatch admits exactly what it admits without the overrun");
+  assert.equal(subject.summary.stopReason, control.summary.stopReason, "and the loop ends for the same reason");
+  const steps = (rows: Row[]) => new Set(rows.map((r) => r.step).filter((s) => !s.startsWith("retro.")));
+  const added = [...steps(subject.rows)].filter((s) => !steps(control.rows).has(s));
+  assert.deepEqual(added, [], "NO NEW GATE: beside the retro.* rows the overrun writes no row the control does not");
+});
