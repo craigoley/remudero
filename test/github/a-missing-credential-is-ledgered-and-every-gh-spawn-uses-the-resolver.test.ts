@@ -10,18 +10,18 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test, type TestContext } from "node:test";
-import { main } from "#src/run-task.js";
 import { fixedClock } from "#src/lib/clock.js";
 import { ghBrokerClientSpawn } from "#src/lib/gh-read-broker-client.js";
 import { defaultGhUpstreamExec, ghCredentialChildEnv, runGhDirect } from "#src/lib/gh-read-broker.js";
 import {
   GITHUB_CREDENTIAL_MISSING_STEP, GITHUB_CREDENTIAL_REFERENCES_FILENAME, GITHUB_CREDENTIAL_SOURCE_ORDER, GithubCredentialMissingError,
-  installGithubCredentialMissingSink, resolveGithubCredential,
+  resolveGithubCredential,
 } from "#src/lib/github-credential.js";
 import { LEDGER_FILENAME } from "#src/lib/ledger-path.js";
 import { prStateCommand } from "#src/lib/pr-state.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import { ghStubPath } from "#test/helpers/gh-stub.js";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 const AMBIENT = "ambient-token-w1-t12075";
 const REFERENCED = "referenced-token-w1-t12075";
@@ -194,29 +194,25 @@ function gh(dump: string[] | undefined, key: string): string | undefined {
   return line === undefined ? undefined : line.slice(key.length + 1);
 }
 
-test("W1-T12075 criterion 1: `rmd gh` installs the ledger writer, and a gh call with no credential writes one github.credential_missing row naming the sources and no value", async (t) => {
+test("W1-T12075 criterion 1: `rmd gh` installs the ledger writer, and a gh call with no credential writes one github.credential_missing row naming the sources and no value", (t) => {
   const f = fixture(t);
   const ledgerRoot = join(f.root, "remudero");
   mkdirSync(join(ledgerRoot, "state"), { recursive: true });
   mkdirSync(join(f.bareHome, ".config", "remudero"), { recursive: true });
   writeFileSync(join(f.bareHome, ".config", "remudero", "config.json"), JSON.stringify({ root: ledgerRoot, claudeBin: "/usr/bin/claude" }));
-  // A previously installed writer must not stand in for the one the command installs.
-  installGithubCredentialMissingSink(undefined);
-  t.after(() => installGithubCredentialMissingSink(undefined));
-  const originalArgv = process.argv;
-  t.after(() => { process.argv = originalArgv; });
-  process.argv = ["node", "rmd", ..."gh -- api repos/acme/widgets-c1/pulls/7".split(" ")];
-  class Exit extends Error {
-    constructor(readonly code: number | undefined) { super(`process.exit(${code})`); }
-  }
-  t.mock.method(process, "exit", ((code?: number): never => { throw new Exit(code); }) as typeof process.exit);
-  const stderr: string[] = [];
-  const caught = await underProcessEnv({
+  // A fresh CLI process must install its own ledger writer, with no sink inherited from this suite.
+  const env = withOverrides(process.env, {
     HOME: f.bareHome, GH_TOKEN: undefined, GITHUB_TOKEN: undefined, GH_CONFIG_DIR: f.loggedOut, XDG_CONFIG_HOME: undefined,
     PATH: f.noGhDir, RMD_GH_CACHE_HOME: f.cache, XDG_CACHE_HOME: undefined, [REFERENCE_VAR]: REFERENCED,
-  }, () => capturingStderr(stderr, () => main().then(() => undefined, (error: unknown) => error)));
-  assert.ok(caught instanceof Exit && caught.code === 1, `expected \`rmd gh\` to exit 1, got ${String(caught)}`);
-  assert.match(stderr.join(""), /no GitHub credential for `gh api repos\/acme\/widgets-c1\/pulls\/7`/, "the caller reads the named error");
+    NODE_OPTIONS: "",
+  });
+  const out = spawnSync(process.execPath, ["--import", "tsx", join(REPO_ROOT, "src/run-task.ts"),
+    ..."gh -- api repos/acme/widgets-c1/pulls/7".split(" ")], {
+    env, cwd: REPO_ROOT, encoding: "utf8", timeout: 60_000,
+  });
+  assert.ifError(out.error);
+  assert.equal(out.status, 1, `expected \`rmd gh\` to exit 1: ${out.stderr}`);
+  assert.match(out.stderr, /no GitHub credential for `gh api repos\/acme\/widgets-c1\/pulls\/7`/, "the caller reads the named error");
   const rows = readFileSync(join(ledgerRoot, "state", LEDGER_FILENAME), "utf8").trim().split("\n")
     .map((line) => JSON.parse(line) as Record<string, unknown>)
     .filter((row) => row.step === GITHUB_CREDENTIAL_MISSING_STEP);
