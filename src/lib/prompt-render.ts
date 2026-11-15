@@ -256,6 +256,24 @@ export function bodyCoverageAcceptanceBlock(unmet: readonly { claim: string; pro
   ];
 }
 
+/** W1-T10661: the body-coverage mode is safe to self-heal only when every unmet row is a
+ *  keyword-only miss and every visible criterion can be rendered back into the PR body. */
+export function bodyCoverageSelfHealCriteria(
+  evidence: FixEvidence,
+  criteria: readonly AcceptanceCriterion[],
+): AcceptanceCriterion[] | undefined {
+  if (deriveFixMode(evidence) !== "body-coverage" || criteria.length === 0) return undefined;
+  const unmet = evidence.review?.unmetCriteria ?? [];
+  if (unmet.length === 0) return undefined;
+  const complete = criteria.every((criterion) =>
+    criterion.claim.trim().length > 0 && typeof criterion.proof === "string" &&
+    /^(?:unit test:|grep:)\s+\S/.test(criterion.proof.trim()));
+  if (!complete) return undefined;
+  const keys = new Set(criteria.map((criterion) => `${criterion.claim}\u0000${criterion.proof}`));
+  if (unmet.some((criterion) => !keys.has(`${criterion.claim}\u0000${criterion.proof}`))) return undefined;
+  return [...criteria];
+}
+
 export const FIX_MODE_RULES: readonly FixModeRule[] = [
   {
     mode: "merge-conflict",

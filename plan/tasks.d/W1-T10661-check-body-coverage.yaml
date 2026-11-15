@@ -3,8 +3,8 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: auto
-  risk: low
+  verify: human
+  risk: high  # Rule 19: one concern, preventing or self-healing body-coverage rounds across prompt rendering and fix dispatch
   priority: 1.3
   # refusal-amendment (W1-T10661, run DAEMON-1793261281327@f4a25ce82040a489db41686f92b9c233cc6eaf94, 2026-10-29T11:03:31.670Z): the worker refused criterion 1 [outside-declared-files] — proposed widen-files: widen `files:` to cover the paths the change needs, or narrow the criteria to the declared files
   #   worker evidence: The declared renderer cannot enforce report publication or prevent fix dispatch when proofs are omitted.
@@ -15,10 +15,14 @@
   origin: "ci-friction:check:body-coverage"
   files:
     - src/lib/prompt-render.ts
+    - src/cli/commands/fix.ts
     - test/worker/check-body-coverage.test.ts
   acceptance:
     - claim: "a recorded check:body-coverage round, replayed through the real code path in src/lib/prompt-render.ts, is prevented or self-healed without dispatching a fix round"
       proof: "unit test: test/worker/check-body-coverage.test.ts"
+  design: |
+    Prior behavior: body-coverage failures continued to fix dispatch without repairing the PR's Acceptance block first. The new path adds a same-head body repair and re-review; incomplete evidence, unavailable reads or writes, and non-body-coverage modes retain the existing dispatch behavior. No prior self-heal receipt or output contract exists to preserve.
+    NO-INVARIANTS: this task introduces the self-heal behavior; it does not replace a prior self-heal contract.
   note: "Filed by the ci-friction gardener (W1-T4435) at rung 1. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. After its build merges, the gardener measures check:body-coverage's share of all fix rounds in equal windows before and after; a share that does not fall reopens the cause at rung 2."
   rationale: |
     MEASURED by the ci-friction gardener: check:body-coverage cost 20.3 PR minute(s) (seven-day half-life) across 10 fix round(s) on 10 pull request(s).
