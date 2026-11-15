@@ -73,6 +73,16 @@ def attach_metadata_cases(case, H):
             finally:
                 self.p.APPROVED_SPECIAL_MEMBERS = original
                 self.p.APPROVED_SPECIAL_MEMBER_ALIASES = original_aliases
+            # Lock policy (W1-T12823): each build pin is one exact approved (version, sha256) pair.
+            tools = dict(self.p.APPROVED_TOOLS)
+            moved = {**tools, "setuptools": new[1:]}
+            self.assertTrue(self.p.approved_build_tools(tools))
+            self.assertTrue(self.p.approved_build_tools(moved))
+            for name, pin in [("setuptools", ("84.1.0", "0" * 64)), ("setuptools", ("84.2.0", new[2])),
+                              ("setuptools", ("84.1.0", old[2])), ("pip", ("26.2.2", tools["pip"][1])),
+                              ("pip", ("26.2.1", "0" * 64)), ("attack", ("1.0", "0" * 64))]:
+                self.assertFalse(self.p.approved_build_tools({**moved, name: pin}), (name, pin))
+            self.assertFalse(self.p.approved_build_tools({k: v for k, v in moved.items() if k != "wheel"}))
 
         def recipe(self):
             return self.p._source_recipe()
